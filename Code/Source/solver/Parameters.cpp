@@ -893,6 +893,8 @@ bool is_oop_boundary_extension_parameter(const std::string& name)
     "SmallCutAggregationMaximumRowL1Norm",
     "Small_cut_aggregation_rootless_fallback",
     "SmallCutAggregationRootlessFallback",
+    "Small_cut_aggregation_nearest_centroid_tie_break",
+    "SmallCutAggregationNearestCentroidTieBreak",
     "Cut_cell_velocity_gradient_penalty",
     "CutCellVelocityGradientPenalty",
     "Velocity_gradient_ghost_penalty",

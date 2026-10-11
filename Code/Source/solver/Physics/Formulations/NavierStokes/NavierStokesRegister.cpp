@@ -4287,6 +4287,15 @@ void append_free_surface_bc(
     aggregation_guard_suboption_present = true;
     fs.small_cut_aggregation_guards.rootless_fallback = *rootless_fallback;
   }
+  if (const auto tie_break = first_defined_bool(
+          bc.params,
+          {"Small_cut_aggregation_nearest_centroid_tie_break",
+           "SmallCutAggregationNearestCentroidTieBreak"})) {
+    // Opt-in mirror-consistent root tie-break
+    // (SmallCutAggregationGuardOptions::nearest_centroid_tie_break, D39).
+    aggregation_guard_suboption_present = true;
+    fs.small_cut_aggregation_guards.nearest_centroid_tie_break = *tie_break;
+  }
   if (fs.small_cut_aggregation_guards.maximum_row_l1_norm <
       fs.small_cut_aggregation_guards.maximum_absolute_coefficient) {
     throw std::runtime_error(

@@ -187,6 +187,8 @@ struct AggregationDeclaration {
     std::vector<GlobalIndex> component_dofs{};
     std::vector<GlobalIndex> root_master_dofs{};
     std::vector<ConstraintLine> lines{};
+    // Set only with the opt-in nearest-centroid tie-break.
+    Real root_centroid_distance_squared{0.0};
 };
 
 [[nodiscard]] detail::SmallCutAggregationPhysicalRootKey physicalRootKey(
@@ -195,6 +197,7 @@ struct AggregationDeclaration {
     return detail::SmallCutAggregationPhysicalRootKey{
         declaration.root_distance,
         declaration.root_cell_gid,
+        declaration.root_centroid_distance_squared,
     };
 }
 
@@ -915,7 +918,8 @@ resolveDistributedAggregationDeclarations(
     const std::set<GlobalIndex>& row_coupled_candidate_dofs,
     bool slave_all_cut,
     bool allow_unaggregated,
-    bool rootless_fallback)
+    bool rootless_fallback,
+    bool nearest_centroid_tie_break)
 {
     DistributedAggregationResult result;
     int initialized = 0;
@@ -1028,6 +1032,11 @@ resolveDistributedAggregationDeclarations(
             declaration->root_master_dofs.size()));
         local_candidate_words.push_back(static_cast<std::int64_t>(
             declaration->lines.size()));
+        if (nearest_centroid_tie_break) {
+            local_candidate_words.push_back(std::bit_cast<std::int64_t>(
+                static_cast<double>(
+                    declaration->root_centroid_distance_squared)));
+        }
         for (const auto component : declaration->component_dofs) {
             local_candidate_words.push_back(
                 static_cast<std::int64_t>(component));
@@ -1125,6 +1134,16 @@ resolveDistributedAggregationDeclarations(
             const auto component_count = gathered_candidates.words[position++];
             const auto master_count = gathered_candidates.words[position++];
             const auto line_count = gathered_candidates.words[position++];
+            double centroid_distance_squared = 0.0;
+            if (nearest_centroid_tie_break) {
+                if (position >= end) {
+                    throw std::runtime_error(
+                        "SmallCutAggregationConstraint: malformed distributed "
+                        "aggregation candidate declaration");
+                }
+                centroid_distance_squared = std::bit_cast<double>(
+                    gathered_candidates.words[position++]);
+            }
             if (raw_state < static_cast<std::int64_t>(
                                 AggregationDeclarationState::Rooted) ||
                 raw_state > static_cast<std::int64_t>(
@@ -1163,6 +1182,8 @@ resolveDistributedAggregationDeclarations(
                     : static_cast<std::size_t>(raw_distance);
             ranked.declaration.root_cell_gid =
                 static_cast<GlobalIndex>(raw_root_cell_gid);
+            ranked.declaration.root_centroid_distance_squared =
+                static_cast<Real>(centroid_distance_squared);
             ranked.declaration.component_dofs.reserve(
                 static_cast<std::size_t>(component_count));
             for (std::int64_t i = 0; i < component_count; ++i) {
@@ -1667,12 +1688,13 @@ resolveDistributedAggregationDeclarations(
         }
 
         std::sort(available_rooted.begin(), available_rooted.end(),
-                  [](const auto* a, const auto* b) {
+                  [&](const auto* a, const auto* b) {
             return detail::smallCutAggregationPhysicalRootLess(
                 physicalRootKey(a->declaration),
                 a->rank,
                 physicalRootKey(b->declaration),
-                b->rank);
+                b->rank,
+                nearest_centroid_tie_break);
         });
         // The (distance, root cell GID) order is partition independent; when
         // the halo hides the preferred root from an assembling rank, the
@@ -1686,7 +1708,8 @@ resolveDistributedAggregationDeclarations(
                                 hidden->rank,
                                 physicalRootKey(
                                     available_rooted.front()->declaration),
-                                available_rooted.front()->rank);
+                                available_rooted.front()->rank,
+                                nearest_centroid_tie_break);
                         })) {
             ++result.canonical_halo_limited_root_choices;
         }
@@ -2074,7 +2097,8 @@ resolveDistributedAggregationDeclarations(
     const std::set<GlobalIndex>&,
     bool slave_all_cut,
     bool allow_unaggregated,
-    bool rootless_fallback)
+    bool rootless_fallback,
+    bool nearest_centroid_tie_break)
 {
     DistributedAggregationResult result;
     const auto& partition = system.dofHandler().getPartition();
@@ -2177,12 +2201,13 @@ resolveDistributedAggregationDeclarations(
             }
         }
         std::sort(valid_declarations.begin(), valid_declarations.end(),
-                  [](const auto& a, const auto& b) {
+                  [&](const auto& a, const auto& b) {
                       return detail::smallCutAggregationPhysicalRootLess(
                           physicalRootKey(a),
                           /*lhs_provider_rank=*/0,
                           physicalRootKey(b),
-                          /*rhs_provider_rank=*/0);
+                          /*rhs_provider_rank=*/0,
+                          nearest_centroid_tie_break);
                   });
         if (!valid_declarations.empty()) {
             const auto& chosen = valid_declarations.front();
@@ -3506,6 +3531,9 @@ computeAggregationReuseInputs(
         guards.maximum_reference_extrapolation_distance));
     inputs.mixReal(static_cast<double>(guards.maximum_absolute_coefficient));
     inputs.mixReal(static_cast<double>(guards.maximum_row_l1_norm));
+    if (guards.nearest_centroid_tie_break) {
+        inputs.mix(0x4e435442u);
+    }
     inputs.mix(runtime_options.slave_all_cut ? 1u : 0u);
     inputs.mix(runtime_options.linear_extension ? 1u : 0u);
 
@@ -6297,6 +6325,26 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                                      : root,
                 .component_dofs = candidate.component_dofs,
                 .root_master_dofs = std::move(declared_root_masters)};
+            if (guards_.nearest_centroid_tie_break) {
+                // Vertex centroid of the root cell from the same coordinates
+                // on every rank (opt-in nearest-centroid tie-break).
+                std::array<Real, 3> centroid{0.0, 0.0, 0.0};
+                for (const auto node : root_check_nodes) {
+                    const auto xyz = mesh.getNodeCoordinates(node);
+                    for (std::size_t d = 0; d < 3u; ++d) {
+                        centroid[d] += static_cast<Real>(xyz[d]);
+                    }
+                }
+                Real distance_squared = 0.0;
+                for (std::size_t d = 0; d < 3u; ++d) {
+                    const Real delta =
+                        centroid[d] /
+                            static_cast<Real>(root_check_nodes.size()) -
+                        static_cast<Real>(candidate.coordinates[d]);
+                    distance_squared += delta * delta;
+                }
+                declaration.root_centroid_distance_squared = distance_squared;
+            }
             bool proposal_valid = true;
             for (std::size_t component = 0;
                  component < candidate.component_dofs.size(); ++component) {
@@ -6581,7 +6629,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             row_coupled_candidate_dofs,
             slave_all_cut,
             allow_unaggregated,
-            guards_.rootless_fallback);
+            guards_.rootless_fallback,
+            guards_.nearest_centroid_tie_break);
         // Communicator-global counts; the run summary reports them even when
         // the per-refresh diagnostic line is not printed.
         diagnostics::recordAggregationHalo(

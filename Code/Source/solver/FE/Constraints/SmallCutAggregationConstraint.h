@@ -150,6 +150,10 @@ struct SmallCutAggregationRetainedMeasures;
 struct SmallCutAggregationPhysicalRootKey {
     std::size_t distance{std::numeric_limits<std::size_t>::max()};
     GlobalIndex cell_gid{INVALID_GLOBAL_INDEX};
+    /// Squared distance from the root cell's vertex centroid to the
+    /// candidate vertex; filled and compared only with the opt-in
+    /// nearest-centroid tie-break (SmallCutAggregationGuardOptions).
+    Real centroid_distance_squared{0.0};
 };
 
 [[nodiscard]] constexpr bool smallCutAggregationPhysicalRootLess(
@@ -165,6 +169,27 @@ struct SmallCutAggregationPhysicalRootKey {
         return lhs.cell_gid < rhs.cell_gid;
     }
     return lhs_provider_rank < rhs_provider_rank;
+}
+
+/// Root order with the opt-in nearest-centroid tie-break: among roots at
+/// the same graph distance the one whose vertex centroid is nearest to the
+/// candidate vertex comes first, then the cell GID.  The squared distance is
+/// evaluated from the same vertex coordinates on every rank, so the order
+/// does not depend on the partition.  Without the tie-break this is the
+/// (distance, cell GID) order above.
+[[nodiscard]] constexpr bool smallCutAggregationPhysicalRootLess(
+    const SmallCutAggregationPhysicalRootKey& lhs,
+    int lhs_provider_rank,
+    const SmallCutAggregationPhysicalRootKey& rhs,
+    int rhs_provider_rank,
+    bool nearest_centroid_tie_break) noexcept
+{
+    if (nearest_centroid_tie_break && lhs.distance == rhs.distance &&
+        lhs.centroid_distance_squared != rhs.centroid_distance_squared) {
+        return lhs.centroid_distance_squared < rhs.centroid_distance_squared;
+    }
+    return smallCutAggregationPhysicalRootLess(
+        lhs, lhs_provider_rank, rhs, rhs_provider_rank);
 }
 
 [[nodiscard]] constexpr bool smallCutAggregationSamePhysicalRoot(
@@ -189,6 +214,14 @@ struct SmallCutAggregationGuardOptions {
     /// inside connected liquid; every case is logged and counted in the
     /// run summary so that such results are flagged.
     bool rootless_fallback{false};
+    /// Opt-in mirror-consistent tie-break (deck key
+    /// Small_cut_aggregation_nearest_centroid_tie_break, default off): among
+    /// roots tied at the smallest graph distance, take the one whose vertex
+    /// centroid is nearest (Euclidean) to the candidate vertex, with the
+    /// cell GID as the last resort.  The default (distance, cell GID) order
+    /// depends on the cell numbering, so mirror-image candidates of a
+    /// mirror-symmetric mesh can take non-mirror roots.
+    bool nearest_centroid_tie_break{false};
 };
 
 enum class SmallCutAggregationActiveFeatureDisposition {

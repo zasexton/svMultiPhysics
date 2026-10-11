@@ -59,8 +59,10 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -1863,6 +1865,100 @@ TEST(SmallCutAggregationConstraint, SubRoundoffCutCellIsClassifiedAsCut)
         [vertex2_dof](const auto& entry) { return entry.first == vertex2_dof; });
     ASSERT_NE(weight_on_vertex2, rounded[1].second.end());
     EXPECT_NEAR(weight_on_vertex2->second, 2.0, 1e-9);
+#endif
+}
+
+TEST(SmallCutAggregationConstraint, NearestCentroidTieBreakIsOptIn)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    // Quad strip with x = 0, 1, 2, 3, 3.8: c0 full, c1 and c2 cut, c3 full.
+    // The candidates at x = 2 (vertices 2 and 7) have two roots at graph
+    // distance 1: c0 (centroid x 0.5, cell GID 0) and the narrower c3
+    // (centroid x 3.4).  The default order takes the smaller GID (c0); the
+    // opt-in tie-break takes the nearer centroid (c3).
+    const auto masters_of_vertex2 = [](bool tie_break) {
+        auto base = std::make_shared<MeshBase>();
+        const std::vector<real_t> xs{0.0, 1.0, 2.0, 3.0, 3.8};
+        std::vector<real_t> x_ref;
+        for (int row = 0; row < 2; ++row) {
+            for (const auto x : xs) {
+                x_ref.push_back(x);
+                x_ref.push_back(static_cast<real_t>(row));
+            }
+        }
+        const int n_cells = 4;
+        std::vector<offset_t> offsets{0};
+        std::vector<index_t> cell2vertex;
+        for (int c = 0; c < n_cells; ++c) {
+            const auto b = static_cast<index_t>(c);
+            const auto t = static_cast<index_t>(n_cells + 1 + c);
+            cell2vertex.insert(cell2vertex.end(),
+                               {b, static_cast<index_t>(b + 1),
+                                static_cast<index_t>(t + 1), t});
+            offsets.push_back(static_cast<offset_t>(cell2vertex.size()));
+        }
+        CellShape shape{};
+        shape.family = CellFamily::Quad;
+        shape.num_corners = 4;
+        shape.order = 1;
+        base->build_from_arrays(2, x_ref, offsets, cell2vertex,
+                                std::vector<CellShape>(4u, shape));
+        base->finalize();
+        auto mesh = create_mesh(std::move(base));
+        auto space =
+            std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+        systems::FESystem system(mesh);
+        const auto pressure = system.addField(
+            systems::FieldSpec{.name = "p", .space = space, .components = 1});
+        system.addOperator("pressure");
+        auto guards = SmallCutAggregationGuardOptions{};
+        guards.nearest_centroid_tie_break = tie_break;
+        system.addSystemConstraint(
+            std::make_unique<SmallCutAggregationConstraint>(
+                pressure,
+                geometry::CutIntegrationSide::Negative,
+                kInterfaceMarker,
+                std::vector<int>{},
+                std::vector<GlobalIndex>{},
+                guards));
+        EXPECT_NO_THROW(system.setup());
+        system.setCutIntegrationContext(makeCutContext({
+            {.cell = 0, .volume_fraction = Real{1.0},
+             .full_cell_equivalent = true},
+            {.cell = 1, .volume_fraction = Real{0.4},
+             .full_cell_equivalent = false},
+            {.cell = 2, .volume_fraction = Real{0.4},
+             .full_cell_equivalent = false},
+            {.cell = 3, .volume_fraction = Real{1.0},
+             .full_cell_equivalent = true},
+        }));
+        EXPECT_NO_THROW(system.rebuildConstraintState());
+        std::set<GlobalIndex> masters;
+        for (const auto& entry :
+             lineEntries(system, vertexDof(system, pressure, 2))) {
+            masters.insert(entry.first);
+        }
+        std::set<GlobalIndex> c0;
+        std::set<GlobalIndex> c3;
+        for (const GlobalIndex v : {0, 1, 5, 6}) {
+            c0.insert(vertexDof(system, pressure, v));
+        }
+        for (const GlobalIndex v : {3, 4, 8, 9}) {
+            c3.insert(vertexDof(system, pressure, v));
+        }
+        return std::make_tuple(masters, c0, c3);
+    };
+
+    const auto [default_masters, c0, c3] = masters_of_vertex2(false);
+    EXPECT_FALSE(default_masters.empty());
+    EXPECT_TRUE(std::includes(c0.begin(), c0.end(), default_masters.begin(),
+                              default_masters.end()));
+    const auto [tie_break_masters, c0_on, c3_on] = masters_of_vertex2(true);
+    EXPECT_FALSE(tie_break_masters.empty());
+    EXPECT_TRUE(std::includes(c3_on.begin(), c3_on.end(),
+                              tie_break_masters.begin(),
+                              tie_break_masters.end()));
 #endif
 }
 

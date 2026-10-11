@@ -8320,6 +8320,9 @@ tangentialPolicyProvenance(
             << ",\"rootless_fallback\":"
             << jsonBool(
                    boundary.small_cut_aggregation_guards.rootless_fallback)
+            << ",\"nearest_centroid_tie_break\":"
+            << jsonBool(boundary.small_cut_aggregation_guards
+                            .nearest_centroid_tie_break)
             << '}';
         out << '}'
             << ",\"pruning\":{\"decision_owner\":\"authoritative_geometry_snapshot\",\"fallback_to_whole_face\":false}"

@@ -2703,7 +2703,7 @@ TEST(NavierStokesLegacyBCs,
             "\"maximum_reference_extrapolation_distance\":2.5,"
             "\"maximum_absolute_coefficient\":7,"
             "\"maximum_row_l1_norm\":9,"
-            "\"rootless_fallback\":true}"),
+            "\"rootless_fallback\":true,\"nearest_centroid_tie_break\":false}"),
         std::string::npos);
 
     auto disabled_input = input;
