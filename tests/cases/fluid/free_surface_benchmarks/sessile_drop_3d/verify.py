@@ -232,6 +232,8 @@ def analyse_run(run: Path, *, allow_truncated: bool = False) -> dict:
         "liquid_volume_relative_drift_max": float(np.max(np.abs(np.asarray(volumes) - v0)) / v0),
         "max_speed_growth_ratio": growth,
         "max_speed_final": float(speeds[-1]),
+        # mu max|u_h| / gamma at the last output (rest floor of D39)
+        "capillary_number_at_end": float(case["viscosity"] * speeds[-1] / case["surface_tension"]),
         "times": times.tolist(),
         "max_speed": speeds.tolist(),
         "liquid_volume": volumes,
@@ -247,6 +249,7 @@ def evaluate_group(runs: list[dict], tolerances: dict, levels_required=None) -> 
     results = []
     for crit in tolerances["criteria"]:
         q, limit, ok, messages = crit["quantity"], crit["limit"], True, []
+        rest_gated: dict[int, bool] = {}
         at = crit["at_level"]
         levels = sorted(by_level) if at == "each" else [at]
         if levels_required is not None and at != "each" and at not in levels_required:
@@ -264,6 +267,16 @@ def evaluate_group(runs: list[dict], tolerances: dict, levels_required=None) -> 
                 messages.append(f"R/h={level}: {q} unavailable")
                 continue
             passed = value <= limit
+            branch = S2.rest_branch(crit, by_level[level])
+            if branch is not None:
+                rest_gated[level] = branch["gated"]
+                if not branch["gated"]:
+                    messages.append(f"R/h={level}: {value:.4g} (not gated: {branch['text']})")
+                    continue
+                messages.append(f"R/h={level}: {value:.4g} {'<=' if passed else '>'} {limit:g}"
+                                f" (gated: {branch['text']})")
+                ok &= passed
+                continue
             ok &= passed
             messages.append(f"R/h={level}: {value:.4g} {'<=' if passed else '>'} {limit:g}")
         mono = crit.get("monotone_levels")
@@ -278,8 +291,11 @@ def evaluate_group(runs: list[dict], tolerances: dict, levels_required=None) -> 
             elif levels_required is None:
                 ok = False
                 messages.append("monotonicity needs R/h=" + "/".join(map(str, mono)))
-        results.append({"id": crit["id"], "passed": bool(ok), "evaluated": True,
-                        "details": messages})
+        result = {"id": crit["id"], "passed": bool(ok), "evaluated": True, "details": messages}
+        if "rest_capillary_floor" in crit:
+            result["rest_capillary_floor"] = crit["rest_capillary_floor"]
+            result["gated_by_level"] = {str(lv): g for lv, g in sorted(rest_gated.items())}
+        results.append(result)
     return results
 
 

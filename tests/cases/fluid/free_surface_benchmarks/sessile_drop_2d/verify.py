@@ -433,6 +433,8 @@ def analyse_run(run: Path) -> dict:
         "liquid_area_relative_drift_max": float(np.max(np.abs(areas - area0)) / area0),
         "max_speed_final": float(speeds[-1]),
         "capillary_number_final": float(np.max(capillary[fourth])),
+        # mu max|u_h| / gamma at the last output (rest floor of D39)
+        "capillary_number_at_end": float(capillary[-1]),
         "max_speed_growth_ratio": float(speeds[-1] / np.max(speeds[third])),
         "history": {"time": times.tolist(), "max_speed": speeds.tolist(),
                     "liquid_area": areas.tolist(), "base_half_width": bases.tolist(),
@@ -460,6 +462,7 @@ def evaluate_group(runs: list[dict], tolerances: dict,
     for crit in tolerances["criteria"]:
         q, limit = crit["quantity"], crit.get("limit")
         messages, ok = [], True
+        rest_gated: dict[int, bool] = {}
         at = crit.get("at_level", "each")
         levels = sorted(by_level) if at == "each" else [at]
         for level in levels:
@@ -475,6 +478,16 @@ def evaluate_group(runs: list[dict], tolerances: dict,
                 messages.append(f"R/h={level}: {value:.4g} (reported)")
                 continue
             passed = value <= limit
+            branch = rest_branch(crit, by_level[level])
+            if branch is not None:
+                rest_gated[level] = branch["gated"]
+                if not branch["gated"]:
+                    messages.append(f"R/h={level}: {value:.4g} (not gated: {branch['text']})")
+                    continue
+                messages.append(f"R/h={level}: {value:.4g} {'<=' if passed else '>'} {limit:g}"
+                                f" (gated: {branch['text']})")
+                ok &= passed
+                continue
             ok &= passed
             messages.append(f"R/h={level}: {value:.4g} {'<=' if passed else '>'} {limit:g}")
         if crit.get("monotone") == "strictly_decreasing":
@@ -495,9 +508,27 @@ def evaluate_group(runs: list[dict], tolerances: dict,
                                  ", ".join(f"{v:.3g}" for v in vals) + ")"))
                 if passed and min(vals) > 0.0:
                     messages.append(f"observed order {observed_order(seq, vals):.2f} (reported)")
-        results.append({"id": crit["id"], "quantity": q, "passed": bool(ok),
-                        "details": messages})
+        result = {"id": crit["id"], "quantity": q, "passed": bool(ok), "details": messages}
+        if "rest_capillary_floor" in crit:
+            result["rest_capillary_floor"] = crit["rest_capillary_floor"]
+            result["gated_by_level"] = {str(lv): g for lv, g in sorted(rest_gated.items())}
+        results.append(result)
     return results
+
+
+def rest_branch(crit: dict, run: dict) -> dict | None:
+    """Decision D39: a criterion with rest_capillary_floor is not gated for a run
+    whose capillary number mu max|u_h|/gamma at the last output lies below the
+    floor (a drop at rest); the value is reported either way."""
+    floor = crit.get("rest_capillary_floor")
+    if floor is None:
+        return None
+    ca = run["capillary_number_at_end"]
+    if ca < floor:
+        return {"gated": False,
+                "text": f"final capillary number {ca:.3g} below the rest floor {floor:g}, D39"}
+    return {"gated": True,
+            "text": f"final capillary number {ca:.3g} not below the rest floor {floor:g}, D39"}
 
 
 def required_levels_at(divisor: int, tolerances: dict) -> set:

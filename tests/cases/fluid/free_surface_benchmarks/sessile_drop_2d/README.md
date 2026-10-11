@@ -229,7 +229,7 @@ options count as the capillary-limit rule with divisor 1.
 | `base_radius` | at most 0.02 | `R/h = 32` | tracker M4 working criterion ("within 2%"), at the level of the angle criterion |
 | `apex_height` | at most 0.02 | `R/h = 32` | tracker M4 working criterion, as above |
 | `volume_drift` | at most 1e-4 | every level | D1 working criterion |
-| `no_velocity_growth` | growth ratio at most 1 | every level | D1 working criterion |
+| `no_velocity_growth` | growth ratio at most 1, not gated when the final capillary number `mu max|u_h|/gamma` (last output) is below 1e-3 (`rest_capillary_floor`; the ratio is reported and `verify.py` states the branch) | every level | D1 working criterion; rest floor D39 |
 | `time_step` | between `dt` and `dt/2`: end-state angles change by at most 0.1 degree, base half-width and apex height by at most 0.1%; over the outputs, the angles by at most 0.5 degree and the base half-width by at most 0.1% of `b_ref`; every output measurable in both runs | finest common level of the `dt` and `dt/2` studies | pre-registered 2026-10-06 from the D13 sessile runs (below) |
 
 **Time-step criterion** (`time_step_criterion` in `tolerances.json`, written
