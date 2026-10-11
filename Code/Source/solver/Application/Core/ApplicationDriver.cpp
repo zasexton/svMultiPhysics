@@ -18703,6 +18703,63 @@ pdeVelocityExtensionFactorizationSetting()
   return setting;
 }
 
+// Inhomogeneous master-bearing velocity lines (the strong contact-point law)
+// are imposed on the solved state but not necessarily on the state from which
+// an outer pass starts.  The extension must see the constrained velocity, so
+// such slave values are recomputed from their lines with the vertex values of
+// their masters.  Homogeneous (aggregation) and Dirichlet lines are already
+// satisfied by every state and are left alone, so without such lines nothing
+// changes.
+void applyInhomogeneousSourceVelocityLines(
+    const svmp::FE::systems::FESystem& system,
+    svmp::FE::FieldId source_field,
+    std::size_t source_components,
+    std::size_t n_vertices,
+    std::vector<double>& source_values)
+{
+  const auto& constraints = system.constraints();
+  if (!constraints.isClosed() || !constraints.hasMasterBearingLines()) {
+    return;
+  }
+  const auto& dofs = system.fieldDofHandler(source_field);
+  const auto* entity_map = dofs.getEntityDofMap();
+  if (entity_map == nullptr) {
+    return;
+  }
+  const auto offset = system.fieldDofOffset(source_field);
+  std::unordered_map<svmp::FE::GlobalIndex, std::size_t> slot_of_dof;
+  std::vector<std::pair<std::size_t, svmp::FE::GlobalIndex>> candidates;
+  for (std::size_t v = 0; v < n_vertices; ++v) {
+    const auto vdofs =
+        entity_map->getVertexDofs(static_cast<svmp::FE::GlobalIndex>(v));
+    for (std::size_t c = 0; c < source_components && c < vdofs.size(); ++c) {
+      const auto dof = offset + vdofs[c];
+      slot_of_dof.emplace(dof, v * source_components + c);
+      const auto view = constraints.getConstraint(dof);
+      if (view.has_value() && !view->entries.empty() &&
+          view->inhomogeneity != 0.0) {
+        candidates.emplace_back(v * source_components + c, dof);
+      }
+    }
+  }
+  for (const auto& [slot, dof] : candidates) {
+    const auto view = constraints.getConstraint(dof);
+    double value = view->inhomogeneity;
+    bool complete = true;
+    for (const auto& entry : view->entries) {
+      const auto found = slot_of_dof.find(entry.master_dof);
+      if (found == slot_of_dof.end()) {
+        complete = false;
+        break;
+      }
+      value += entry.weight * source_values[found->second];
+    }
+    if (complete) {
+      source_values[slot] = value;
+    }
+  }
+}
+
 bool updateLevelSetAdvectionVelocitiesFromState(
     application::core::SimulationComponents& sim,
     const svmp::FE::systems::SystemStateView& state,
@@ -18869,13 +18926,15 @@ bool updateLevelSetAdvectionVelocitiesFromState(
                             state,
                             1u,
                             "updating level-set advection velocity");
-    const auto source_values =
+    auto source_values =
         evaluateVertexField(system,
                             mesh,
                             source_field,
                             state,
                             source_components,
                             "updating level-set advection velocity");
+    applyInhomogeneousSourceVelocityLines(
+        system, source_field, source_components, n_vertices, source_values);
 
     std::vector<std::uint8_t> active(n_vertices, 0u);
     std::vector<std::size_t> active_vertices;

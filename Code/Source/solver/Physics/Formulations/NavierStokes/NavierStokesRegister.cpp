@@ -3568,7 +3568,8 @@ void append_free_surface_contact_line(
       "Contact_line_mobility", "ContactLineMobility", "Mobility",
       "Wall_slip_model", "WallSlipModel",
       "Contact_line_wall_slip_model", "ContactLineWallSlipModel",
-      "Wall_slip_length", "WallSlipLength", "Slip_length", "SlipLength"};
+      "Wall_slip_length", "WallSlipLength", "Slip_length", "SlipLength",
+      "Contact_line_law_enforcement", "ContactLineLawEnforcement"};
 
   const auto is_known_contact_key = [&](std::string_view key) {
     return std::find(std::begin(contact_keys), std::end(contact_keys), key) !=
@@ -3809,6 +3810,17 @@ void append_free_surface_contact_line(
 
   IncompressibleNavierStokesVMSOptions::ScalarValue mobility{
       svmp::FE::Real{0.0}};
+  bool strong_contact_law = false;
+  if (const auto enforcement = first_defined_string(
+          params, {"Contact_line_law_enforcement", "ContactLineLawEnforcement"})) {
+    const auto token = normalized_token(*enforcement);
+    if (token == "strong") {
+      strong_contact_law = true;
+    } else if (token != "weak") {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Contact_line_law_enforcement must be Weak or Strong.");
+    }
+  }
   if (const auto parsed_mobility = first_defined_double(
           params,
           {"Contact_line_mobility", "ContactLineMobility", "Mobility"})) {
@@ -3857,6 +3869,12 @@ void append_free_surface_contact_line(
       wall_normal = {normal[0], normal[1], normal[2]};
     }
 
+    if (strong_contact_law &&
+        parsed_model != ParsedFreeSurfaceContactModel::DynamicRenE) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Contact_line_law_enforcement=Strong requires "
+          "Contact_line_model=DynamicRenE.");
+    }
     switch (parsed_model) {
     case ParsedFreeSurfaceContactModel::None:
       throw std::logic_error("None contact configuration expanded unexpectedly");
@@ -3892,6 +3910,7 @@ void append_free_surface_contact_line(
               .wall_normal = wall_normal,
               .mobility = mobility,
               .slip_length = slip_length,
+              .strong_law = strong_contact_law,
           },
       });
       break;

@@ -15,6 +15,7 @@
 #include "FE/Assembly/GlobalSystemView.h"
 #include "FE/Constraints/LevelSetActiveSideVertexDirichletConstraint.h"
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
+#include "FE/Constraints/ContactPointVelocityConstraint.h"
 #include "FE/Constraints/VertexDirichletConstraint.h"
 #include "FE/Constitutive/MetadataTaggedModel.h"
 #include "FE/Core/Logger.h"
@@ -5992,10 +5993,29 @@ void applyDynamicContactAngleResidual(
                 contact_line,
                 contact_marker);
         }
+        const bool strong_contact_law =
+            std::get<FreeSurfaceContactLine::DynamicRenE>(
+                contact_line.configuration).strong_law;
+        if (!strong_contact_law) {
         momentum_form = momentum_form + dInterfaceBoundary(
             contact_force * contact_test,
             contact_marker);
-        if (conservative_surface_energy_form != nullptr &&
+        }
+        if (strong_contact_law) {
+            if (!usesSurfaceStress(bc)) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: Contact_line_law_enforcement=Strong requires Surface_tension_form=SurfaceStress");
+            }
+            // The Ren-E law is the essential contact-point condition of
+            // ContactPointVelocityConstraint (registered after aggregation);
+            // its reaction replaces the line friction and the Young term.
+            FE_LOG_INFO(
+                std::string("IncompressibleNavierStokesVMSModule: DynamicContactAngle uses the strong contact-point law") +
+                " contact_marker=" + std::to_string(contact_marker) +
+                " Contact_line_law_enforcement=Strong line_friction_and_young_term=replaced_by_constraint_reaction" +
+                " diagnostic=navier_stokes_dynamic_contact_strong_law");
+        }
+        if (!strong_contact_law && conservative_surface_energy_form != nullptr &&
             usesSurfaceStress(bc)) {
             // Only the Young wall-energy variation belongs to the
             // conservative split.  The line-friction and wetted-wall Navier
@@ -10163,6 +10183,48 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                             : "0") +
             " diagnostic=small_cut_aggregation_registration"
             " velocity_ghost_penalty=skipped_by_aggregation");
+    }
+
+    // Strong Ren-E contact-point law (opt-in): registered after every other
+    // velocity constraint so that it can expand aggregated DOFs.
+    for (const auto& fs_bc : options_.free_surface) {
+        for (const auto& contact_line : fs_bc.contact_lines) {
+            const auto* dynamic =
+                std::get_if<FreeSurfaceContactLine::DynamicRenE>(
+                    &contact_line.configuration);
+            if (dynamic == nullptr || !dynamic->strong_law) {
+                continue;
+            }
+            const auto wall_normal = normalizedWallNormal(contact_line);
+            const FE::Real mobility = constantScalarValueOrThrow(
+                contactLineMobility(contact_line),
+                "Strong DynamicContactAngle mobility");
+            const FE::Real gamma = constantScalarValueOrThrow(
+                fs_bc.surface_tension, "Strong DynamicContactAngle surface tension");
+            const FE::Real cos_e = std::cos(constantScalarValueOrThrow(
+                contactLineAngleRadians(contact_line),
+                "Strong DynamicContactAngle equilibrium angle"));
+            FE::constraints::ContactPointVelocityLaw law;
+            law.wall_boundary_markers = {contactLineWallBoundaryMarker(contact_line)};
+            law.wall_normal = {wall_normal[0], wall_normal[1], wall_normal[2]};
+            law.level_set_field_name = fs_bc.level_set_field_name;
+            law.isovalue = fs_bc.level_set_isovalue;
+            law.contact_speed = [mobility, gamma, cos_e](FE::Real cos_d) {
+                return mobility * gamma * (cos_e - cos_d);
+            };
+            law.name = "ren_e_contact_point:" +
+                       std::to_string(contactLineWallBoundaryMarker(contact_line));
+            system.addSystemConstraint(
+                std::make_unique<FE::constraints::ContactPointVelocityConstraint>(
+                    u_id, std::move(law)));
+            FE_LOG_INFO(
+                std::string("IncompressibleNavierStokesVMSModule: registered the strong Ren-E contact-point constraint") +
+                " wall_marker=" + std::to_string(contactLineWallBoundaryMarker(contact_line)) +
+                " mobility=" + std::to_string(mobility) +
+                " registration_order=after_small_cut_aggregation"
+                " value_lag=frozen_per_outer_geometry_pass"
+                " diagnostic=navier_stokes_strong_contact_point_law");
+        }
     }
 
     Factories::VelocityNitscheEnergyForms nitsche_energy_forms;

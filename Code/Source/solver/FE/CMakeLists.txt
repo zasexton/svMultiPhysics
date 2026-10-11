@@ -836,6 +836,7 @@ set(FE_ASSEMBLY_SOURCES
     Assembly/StandardAssembler.cpp
     Assembly/AssemblyThreadPool.cpp
     Constraints/SmallCutAggregationConstraint.cpp
+    Constraints/ContactPointVelocityConstraint.cpp
     Analysis/GeneratedBoundaryAggregateTraceCertificate.cpp
     Assembly/AssemblerFactory.cpp
     Assembly/ParallelAssembler.cpp
