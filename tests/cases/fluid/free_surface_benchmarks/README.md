@@ -89,6 +89,7 @@ change it once, with a one-line justification in the tracker.
     ```
 
     The assembly and geometry threads give bitwise-identical results for any thread count. The multigrid preconditioner is recommended there from R/h = 16 on. The opt-in free-surface partition weighting (`<Partition_weighting>free_surface</Partition_weighting>`) is allowed; it changes the partition and hence the results at round-off, which the run record must state.
+  - **3D production runs from R/h = 16 on (tracker D36)** also factorize the PDE velocity extension with sequential MUMPS: a binary built with `FE_ENABLE_MUMPS=ON` (`-ltopgo-mumps`), run with `export SVMP_PDE_EXTENSION_FACTORIZATION=mumps_serial` and ScaLAPACK and METIS (`/share/software/user/open/{scalapack/2.2.0,metis/5.1.0}/lib`) on `LD_LIBRARY_PATH`. The result is bitwise independent of the rank count; a step takes about 22% less time at R/h = 16. Distributed `mumps` is not reproducible run to run and is not used.
 
 ## Planned benchmarks
 
