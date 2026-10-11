@@ -1391,15 +1391,20 @@ void SimulationBuilder::loadMeshes()
   // every rank owning a row that couples to the slave must carry them too,
   // otherwise its Jacobian rows lose the condensed master columns. Ghost
   // layers are face-adjacent: on triangles the cells touching an owned vertex
-  // reach three layers out, the cut cells around a slave three more, and the
-  // preferred roots lie at most two cells beyond those in practice, so request
-  // eight layers when a 2D deck leaves <Ghost_layers> unset.  A tetrahedral
+  // reach three layers out, and a root may lie up to the root-path guard (8
+  // cells) beyond the cut cells around the slave, so a 2D deck that leaves
+  // <Ghost_layers> unset requests 3 + 8 + 1 = 12 layers (the last for the
+  // face neighbours of owned cells, which also condense the slave).  Eight
+  // layers (roots at most two cells beyond the cut band) failed on the
+  // capillary rise at level 40 on 8 ranks: a slave next to the wall had roots
+  // only 5 and 8 cells along a wall film, and an assembling rank saw neither
+  // (incomplete_distributed_aggregation_halo).  A tetrahedral
   // vertex star spans about five face layers, so 3D decks request 5 + 5 + 2 =
   // 12: with 8 layers the 3D static sphere (R/h = 8) dropped up to 952
   // constraint-fill columns per rebuild on 16 ranks, lost condensed master
   // columns in up to 36 rows and took partition-dependent roots; with 12 none
   // of these occurred at 16 ranks, in about the same time.
-  constexpr int kAggregationGhostLayers2D = 8;
+  constexpr int kAggregationGhostLayers2D = 12;
   constexpr int kAggregationGhostLayers3D = 12;
   const int kAggregationGhostLayers =
       params_.general_simulation_parameters.number_of_spatial_dimensions.value() >= 3
