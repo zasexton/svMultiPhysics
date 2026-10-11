@@ -624,6 +624,13 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   3. **Velocity-growth gate at rest (#23).** In the sessile benchmarks the growth ratio is not gated when the final capillary number is below 1e-3, and it is reported either way. Justification: at rest both speeds are about 1e-4, so the ratio is noise (R/h = 16 120°: 1.005 at Δt, 0.92 at Δt/2). Unrelaxed runs (D29, Ca ≈ 1e-2) are still gated.
   4. **The sessile (2D and 3D, D38 item 4) and capillary-rise protocols enable the interface-preserving redistancing with the one-cell trigger (#24).** The generators turn it on by default, and an option reproduces the earlier decks.
   5. **The capillary-rise level-40 failure (#25)** is diagnosed before any rerun: job `47358321`, 8 ranks, t = 0.048 s, `incomplete_distributed_aggregation_halo`, `canonical_master_not_relevant`.
+     - **Cause and fix (`d61f469d`):** the derived 2D halo of 8 ghost layers was shallower than the aggregation root-path guard, which admits paths of up to 8 cells. The wall film produced such a path: rank 3 assembled a slave whose only roots, 5 and 8 cells away, both lay on rank 2. The derived 2D depth is now 12 (vertex star 3 + guard 8 + 1, as in 3D).
+       - A restart from the last output runs past the failure.
+       - The serial reference set is bitwise unchanged; 2- and 4-rank fields are identical at all 200 outputs; the exhaustive matrix passes.
+       - Cost: +4–5% step time and memory.
+       - The 8-layer R/h = 32 sessile runs had `exact_halo=1` throughout.
+       - The redistancing was checked and is parallel-consistent.
+       - L40 rerun: job `47419528`.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
