@@ -613,6 +613,17 @@ These are proposals. Each lists a recommended option and an alternative. Record 
     - no velocity growth.
   - **Time step:** fixed Δt ≤ 0.02 with the lagged `NormalIncrement` term (Δt = 1.7496e-2, 1,400 steps), as for the 3D sphere. It is validated by the Δt/2 check at R/h = 8, whose limits follow the 2D sessile time-step criterion, including any change under D35 item 4.
   - **Redistancing:** the protocol enables the interface-preserving redistancing once the 2D sessile protocol adopts it; protocol runs wait for its 3D extension.
+- **D39, 2026-10-11 (user): M4 protocol decisions after the redistancing and strong-law results.**
+  1. **Ren–E criteria for an exactly imposed law (#20).** With `Contact_line_law_enforcement=Strong`, the law error is identically zero. The criteria therefore become:
+     - geometric (transported) contact-speed error ≤ 10% at every level;
+     - mean signed geometric error within ±2% and RMS geometric error ≤ 10% at every level, in place of strict decrease;
+     - the Δt, area, sign and completion gates unchanged;
+     - displacement self-convergence reported for both cases but not gated.
+     Justification: the geometric error carries a zero-mean wobble of about 1–3% at wall-vertex crossings at every level, so a strict decrease would test that noise; the mean signed error shows whether the contact line lags the law. The Ren–E protocol uses the strong law.
+  2. **Mirror-consistent aggregation tie-break (#22).** It is to be built as an opt-in and evaluated: among roots tied at the minimum graph distance, take the nearest centroid, with the cell ID only as a last resort. Making it the default would be a separate decision.
+  3. **Velocity-growth gate at rest (#23).** In the sessile benchmarks the growth ratio is not gated when the final capillary number is below 1e-3, and it is reported either way. Justification: at rest both speeds are about 1e-4, so the ratio is noise (R/h = 16 120°: 1.005 at Δt, 0.92 at Δt/2). Unrelaxed runs (D29, Ca ≈ 1e-2) are still gated.
+  4. **The sessile (2D and 3D, D38 item 4) and capillary-rise protocols enable the interface-preserving redistancing with the one-cell trigger (#24).** The generators turn it on by default, and an option reproduces the earlier decks.
+  5. **The capillary-rise level-40 failure (#25)** is diagnosed before any rerun: job `47358321`, 8 ranks, t = 0.048 s, `incomplete_distributed_aggregation_halo`, `canonical_master_not_relevant`.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
