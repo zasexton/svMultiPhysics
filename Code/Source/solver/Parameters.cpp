@@ -977,6 +977,8 @@ bool is_oop_boundary_extension_parameter(const std::string& name)
     "WallNormals",
     "Contact_line_mobility",
     "ContactLineMobility",
+    "Contact_line_law_enforcement",
+    "ContactLineLawEnforcement",
     "Mobility",
     "Wall_slip_model",
     "WallSlipModel",

@@ -180,6 +180,11 @@ struct FreeSurfaceContactLine {
             ScalarValue{0.0}, ScalarValue{0.0}, ScalarValue{0.0}};
         ScalarValue mobility{0.0};
         ScalarValue slip_length{0.0};
+        // Contact_line_law_enforcement=Strong: the Ren-E law is an essential
+        // condition on the contact-point velocity (FE
+        // ContactPointVelocityConstraint) instead of the weak line friction
+        // and Young term.  Default Weak.
+        bool strong_law{false};
     };
 
     using Configuration =
