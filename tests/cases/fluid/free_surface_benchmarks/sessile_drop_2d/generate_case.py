@@ -109,6 +109,13 @@ KINEMATIC_RECONCILIATION = True
 # contact line from crossing the isovalue ("Spurious wall spots" in README.md).
 # "off" reproduces the earlier decks.
 SIGN_DEFINITE_PATCH_BOUNDS = True
+# Triggered interface-preserving redistancing (Enable_interface_preserving_
+# redistancing; FE/LevelSet/LevelSetInterfacePreservingRedistancing.h): after
+# the reconciliation, the level set is replaced by the distance to its own zero
+# polygon, continued across the wall at the contact points, once the interface
+# has moved one cell, and the interface is restored.  Protocol value since
+# decision D39; "off" reproduces the earlier decks byte for byte.
+INTERFACE_PRESERVING_REDISTANCING = True
 # Existing production reinitialization values (D18/D38 and sloshing decks),
 # used only with --reinitialization.
 REINITIALIZATION_CADENCE_STEPS = 10
@@ -404,7 +411,8 @@ def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, ca
                transport: str = "pde_extension",
                kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION,
                sign_definite_patch_bounds: bool = SIGN_DEFINITE_PATCH_BOUNDS,
-               semi_implicit: str = DEFAULT_SEMI_IMPLICIT) -> str:
+               semi_implicit: str = DEFAULT_SEMI_IMPLICIT,
+               redistancing: bool = INTERFACE_PRESERVING_REDISTANCING) -> str:
     if semi_implicit not in SEMI_IMPLICIT_OPTIONS:
         raise ValueError(f"semi_implicit must be one of {SEMI_IMPLICIT_OPTIONS}")
     if semi_implicit != "None" and transport == "wet_extension":
@@ -468,6 +476,9 @@ def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, ca
         maintenance = "\n    <Enable_reinitialization>false</Enable_reinitialization>"
     reconciliation = ("\n    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>"
                       if kinematic_reconciliation else "")
+    if redistancing:
+        reconciliation += ("\n    <Enable_interface_preserving_redistancing>true"
+                           "</Enable_interface_preserving_redistancing>")
     if sign_definite_patch_bounds:
         reconciliation += ("\n    <Enable_sign_definite_patch_bounds>true"
                            "</Enable_sign_definite_patch_bounds>")
@@ -606,7 +617,8 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
              sign_definite_patch_bounds: bool = SIGN_DEFINITE_PATCH_BOUNDS,
              max_steps: int | None = None, force: bool = False,
              dt_rule: str = DEFAULT_DT_RULE, dt_multiple: float = 1.0, dt_divisor: int = 1,
-             semi_implicit: str = DEFAULT_SEMI_IMPLICIT) -> dict:
+             semi_implicit: str = DEFAULT_SEMI_IMPLICIT,
+             redistancing: bool = INTERFACE_PRESERVING_REDISTANCING) -> dict:
     if level not in LEVELS:
         raise ValueError(f"--level must be one of {LEVELS}")
     if equilibrium_deg not in EQUILIBRIUM_ANGLES_DEG:
@@ -670,7 +682,7 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
     (output_dir / "solver.xml").write_text(
         solver_xml(form, equilibrium_deg, schedule, steps, cadence, reinitialization,
                    linear_solver, time_integration, transport, kinematic_reconciliation,
-                   sign_definite_patch_bounds, semi_implicit),
+                   sign_definite_patch_bounds, semi_implicit, redistancing),
         encoding="utf-8")
 
     case = {
@@ -735,6 +747,9 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
         "dry_gap_over_h": float(dry_gap / h),
         "result_prefix": "result",
     }
+    if redistancing:
+        # Decision D39; omitted when off, so earlier cases are reproduced byte for byte.
+        case["interface_preserving_redistancing"] = True
     (output_dir / "case.json").write_text(json.dumps(case, indent=2) + "\n", encoding="utf-8")
     return case
 
@@ -777,6 +792,10 @@ def main(argv=None) -> int:
                         help="accepted-step one-ring bounds of the level set on nodes whose "
                              "patch lies in one phase (protocol: on; off reproduces the "
                              "earlier decks)")
+    parser.add_argument("--interface-preserving-redistancing", choices=("on", "off"),
+                        default="on" if INTERFACE_PRESERVING_REDISTANCING else "off",
+                        help="triggered interface-preserving redistancing (decision D39, "
+                             "protocol: on; off reproduces the earlier decks)")
     parser.add_argument("--dt-rule", choices=DT_RULES, default=DEFAULT_DT_RULE,
                         help="time-step rule: capillary-limit (protocol; the limit of each level) "
                              "or fixed (one step for all levels, the capillary-limit step of "
@@ -808,7 +827,8 @@ def main(argv=None) -> int:
                     sign_definite_patch_bounds=args.sign_definite_patch_bounds == "on",
                     max_steps=args.max_steps, force=args.force, dt_rule=args.dt_rule,
                     dt_multiple=args.dt_multiple, dt_divisor=args.dt_divisor,
-                    semi_implicit=args.surface_tension_semi_implicit)
+                    semi_implicit=args.surface_tension_semi_implicit,
+                    redistancing=args.interface_preserving_redistancing == "on")
     print(f"wrote {args.output_dir}")
     for key in ("level_R_over_h", "equilibrium_angle_degrees", "initial_angle_degrees",
                 "capillary_form", "time_integration_scheme", "linear_solver", "transport",

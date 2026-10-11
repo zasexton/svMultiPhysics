@@ -10,12 +10,13 @@ contact-angle mechanism of decision D4:
   3D is a curve: one segment per cut wall face of a Tet4 cell);
 - Navier slip on the wetted wall, with the slip length as a physical input;
 - a strong no-penetration condition on the contact wall;
-- no reinitialization (as in `sessile_drop_2d`); kinematic reconciliation and
-  the sign-definite patch bounds are on.
+- no reinitialization (as in `sessile_drop_2d`); kinematic reconciliation,
+  the sign-definite patch bounds and, since decision D39, the triggered
+  interface-preserving redistancing (the 3D zero-surface version) are on;
+  `--interface-preserving-redistancing off` writes the decks without it.
 
-**Status: tolerances approved on 2026-10-10 (tracker D38). The protocol runs
-wait for the 3D interface-preserving redistancing, which the 3D protocol
-enables once the 2D protocol adopts it (D38 item 4).**
+**Status: tolerances approved on 2026-10-10 (tracker D38); the protocol
+enables the interface-preserving redistancing since D39 (2026-10-11).**
 
 Files:
 
