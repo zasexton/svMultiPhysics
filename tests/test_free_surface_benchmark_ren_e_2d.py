@@ -74,6 +74,14 @@ def test_generated_deck_is_the_sessile_deck_with_dynamic_ren_e(tmp_path: Path):
     assert bc.findtext("Surface_tension_form") == "SurfaceStress"
     assert bc.findtext("Small_cut_aggregation") == "true"
     assert float(bc.findtext("Contact_angle_degrees")) == generate.EQUILIBRIUM_ANGLE_DEG
+    # Decision D39: the law is imposed exactly by default; Weak writes the
+    # earlier deck, and neither carries the sessile redistancing.
+    assert bc.findtext("Contact_line_law_enforcement") == "Strong"
+    assert level_set.find("Enable_interface_preserving_redistancing") is None
+    generate.generate(16, "advancing", 2, tmp_path / "weak", law_enforcement="Weak")
+    strong_text = (tmp_path / "run" / "solver.xml").read_text()
+    assert (tmp_path / "weak" / "solver.xml").read_text() == strong_text.replace(
+        "\n      <Contact_line_law_enforcement>Strong</Contact_line_law_enforcement>", "")
     walls = {b.attrib["name"]: b for b in root.iter("Add_BC") if b.attrib.get("name", "").startswith("wall_")}
     assert walls["wall_bottom"].findtext("Effective_direction") == "0 1"
     # Equal-area initial caps for the two cases.
@@ -129,10 +137,42 @@ def test_gate_logic():
         for level, error in ((8, 0.3), (16, 0.15), (32, 0.07)):
             results.append(run(case, level, 4, error, error, 0.05))
         results.append(run(case, 32, 2, 0.08, 0.08, 0.0505))
-    report = verify.gate(results, tolerances)
+    report = verify.gate(results, tolerances, "weak")       # superseded weak-law criteria
     assert report["outcome"] == "PASS"
     results[2]["rms_fluid_speed_relative_error"] = 0.2      # finest not below 0.10, not decreasing
-    report = verify.gate(results, tolerances)
+    report = verify.gate(results, tolerances, "weak")
     assert report["gates"]["advancing_finest_accuracy"] is False
     assert report["gates"]["advancing_mesh_convergence"] is False
     assert report["outcome"] == "FAIL"
+
+
+def test_gate_logic_for_the_exactly_imposed_law():
+    # Decision D39: geometric RMS <= 10% and mean signed geometric error within
+    # +/-2% at every level of the dt0/4 study; no strict decrease; the fluid
+    # law error and the displacement self-convergence are reported only.
+    verify = load("verify")
+    tolerances = json.loads((BENCHMARK / "tolerances.json").read_text())
+
+    def run(level, divisor, rms_g, mean_g, disp):
+        return {"case": "advancing", "level": level, "dt_divisor": divisor, "complete": True,
+                "signs_agree": True, "max_area_drift": 1e-6,
+                "rms_fluid_speed_relative_error": 0.0, "rms_geometric_speed_relative_error": rms_g,
+                "mean_signed_fluid_speed_relative_error": 0.0,
+                "mean_signed_geometric_speed_relative_error": mean_g,
+                "final_mean_outward_displacement": disp}
+
+    good = [run(lv, d, 0.02 + 0.01 * (lv == 32), 0.005, 0.03 + 1e-3 / lv)
+            for lv in (8, 16, 32) for d in (2, 4)]
+    report = verify.gate(good, tolerances)
+    assert report["outcome"] == "PASS", report["gates"]
+    assert "advancing_mesh_convergence" not in report["gates"]
+    sc = report["studies"]["advancing"]["displacement_self_convergence"]
+    assert sc["levels"] == [8, 16, 32] and sc["observed_order"] == pytest.approx(1.0)
+    biased = [dict(r, mean_signed_geometric_speed_relative_error=0.03) if r["level"] == 8 else r
+              for r in good]
+    report = verify.gate(biased, tolerances)
+    assert report["gates"]["advancing_geometric_mean_signed_every_level"] is False
+    assert report["gates"]["advancing_geometric_rms_every_level"] is True
+    coarse = [dict(r, rms_geometric_speed_relative_error=0.12) if r["level"] == 8 else r
+              for r in good]
+    assert verify.gate(coarse, tolerances)["gates"]["advancing_geometric_rms_every_level"] is False
