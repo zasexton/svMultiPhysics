@@ -1559,9 +1559,14 @@ resolveDistributedAggregationDeclarations(
         // cannot see: the geometrically preferred root may be among them.
         std::vector<const RankedDeclaration*> halo_eligible_rooted;
         std::string first_unavailable_reason;
+        // Per-proposal reasons, reported only when no proposal is available.
+        std::ostringstream unavailable_proposals;
+        std::size_t unavailable_proposal_count = 0u;
         for (const auto* declaration : rooted) {
             bool available = true;
             bool halo_eligible = false;
+            const auto reason_count_before = first_unavailable_reason.size();
+            std::string proposal_reason;
             for (const auto slave : support.component_dofs) {
                 if (globallyPreconstrained(slave)) {
                     continue;
@@ -1627,6 +1632,9 @@ resolveDistributedAggregationDeclarations(
                     if (!masters_visible) {
                         available = false;
                         halo_eligible = true;
+                        proposal_reason =
+                            "master_not_relevant:rank" +
+                            std::to_string(visibility.rank);
                         if (first_unavailable_reason.empty()) {
                             first_unavailable_reason =
                                 " reason=canonical_master_not_relevant rank=" +
@@ -1643,6 +1651,21 @@ resolveDistributedAggregationDeclarations(
                 available_rooted.push_back(declaration);
             } else if (halo_eligible) {
                 halo_eligible_rooted.push_back(declaration);
+            }
+            if (!available && unavailable_proposal_count < 6u) {
+                ++unavailable_proposal_count;
+                const auto key = physicalRootKey(declaration->declaration);
+                unavailable_proposals
+                    << " [root_cell_gid=" << key.cell_gid
+                    << " distance=" << key.distance
+                    << " provider_rank=" << declaration->rank << " "
+                    << (!proposal_reason.empty()
+                            ? proposal_reason
+                            : first_unavailable_reason.size() >
+                                      reason_count_before
+                                  ? first_unavailable_reason.substr(1)
+                                  : std::string("unavailable"))
+                    << "]";
             }
         }
         if (available_rooted.empty()) {
@@ -1661,7 +1684,11 @@ resolveDistributedAggregationDeclarations(
                          << (first_unavailable_reason.empty()
                                  ? " reason=no_globally_available_root"
                                  : first_unavailable_reason)
-                         << ";";
+                         << " xyz=(" << support.coordinates[0] << ","
+                         << support.coordinates[1] << ","
+                         << support.coordinates[2] << ")"
+                         << " proposals=" << rooted.size()
+                         << unavailable_proposals.str() << ";";
             }
             continue;
         }
