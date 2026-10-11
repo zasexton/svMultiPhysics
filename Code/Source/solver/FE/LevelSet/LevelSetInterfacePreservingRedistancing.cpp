@@ -149,6 +149,7 @@ using Point2 = std::array<Real, 2>;
 struct CellData {
     std::array<std::size_t, 3> dof{};
     std::array<Point2, 3> x{};
+    std::array<GlobalIndex, 3> vertex{};
 };
 
 // The owned affine Triangle3 cells with their DOFs and vertex coordinates.
@@ -183,6 +184,7 @@ struct CellData {
                     "requires exactly one scalar level-set DOF per vertex");
             }
             cell.dof[k] = static_cast<std::size_t>(vdofs.front());
+            cell.vertex[k] = nodes[k];
             const auto c = mesh.getNodeCoordinates(nodes[k]);
             cell.x[k] = {static_cast<Real>(c[0]), static_cast<Real>(c[1])};
         }
@@ -473,6 +475,72 @@ std::vector<std::size_t> levelSetDofCellClosure(const assembly::IMeshAccess& mes
         }
     }
     return closure;
+}
+
+LevelSetInterfaceMotionScale levelSetInterfaceMotionScale(
+    const assembly::IMeshAccess& mesh,
+    const dofs::DofHandler& level_set_dofs,
+    const dofs::DofHandler& velocity_dofs,
+    Real isovalue,
+    std::span<const Real> level_set,
+    std::span<const Real> velocity)
+{
+    LevelSetInterfaceMotionScale scale;
+    const auto context = collectiveFor(level_set_dofs);
+    const auto n = static_cast<std::size_t>(level_set_dofs.getNumDofs());
+    std::string local_failure = validate(isovalue, level_set, n);
+    std::vector<Real> extrema{Real{0.0}, -std::numeric_limits<Real>::infinity()};
+    if (local_failure.empty()) {
+        try {
+            const auto* velocity_map = velocity_dofs.getEntityDofMap();
+            if (velocity_map == nullptr ||
+                velocity.size() != static_cast<std::size_t>(velocity_dofs.getNumDofs())) {
+                throw std::invalid_argument("needs a vertex-nodal velocity layout");
+            }
+            for (const auto& cell : ownedCells(mesh, level_set_dofs, n)) {
+                bool below = false;
+                bool above = false;
+                for (const auto i : cell.dof) {
+                    below = below || level_set[i] < isovalue;
+                    above = above || level_set[i] >= isovalue;
+                }
+                if (!(below && above)) {
+                    continue;
+                }
+                for (std::size_t k = 0; k < 3u; ++k) {
+                    const auto vdofs = velocity_map->getVertexDofs(cell.vertex[k]);
+                    Real speed2 = 0.0;
+                    for (std::size_t c = 0; c < vdofs.size() && c < 2u; ++c) {
+                        const auto d = static_cast<std::size_t>(vdofs[c]);
+                        if (d >= velocity.size()) {
+                            throw std::invalid_argument("velocity DOF outside the coefficient span");
+                        }
+                        speed2 += velocity[d] * velocity[d];
+                    }
+                    extrema[0] = std::max(extrema[0], std::sqrt(speed2));
+                    const auto& a = cell.x[k];
+                    const auto& b = cell.x[(k + 1u) % 3u];
+                    // Stored as a negative value so that one MAX reduction
+                    // yields both the largest speed and the smallest edge.
+                    extrema[1] = std::max(extrema[1], -std::hypot(a[0] - b[0], a[1] - b[1]));
+                }
+            }
+        } catch (const std::exception& error) {
+            local_failure = error.what();
+        }
+    }
+    if (!allTrue(context, local_failure.empty())) {
+        scale.diagnostic = local_failure.empty()
+                               ? "another rank failed level-set motion-scale validation"
+                               : "level-set interface motion scale " + local_failure;
+        return scale;
+    }
+    reduceReals(context, extrema, /*minimum=*/false);
+    scale.max_speed = extrema[0];
+    scale.min_edge = std::isfinite(extrema[1]) ? -extrema[1] : Real{0.0};
+    scale.success = true;
+    scale.diagnostic = "measured";
+    return scale;
 }
 
 LevelSetZeroPolygonChange measureLevelSetZeroPolygonChange(

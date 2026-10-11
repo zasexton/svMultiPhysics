@@ -351,6 +351,37 @@ TEST(LevelSetInterfacePreservingRedistancing, ContactCapKeepsSignsContactPointsA
     }
 }
 
+TEST(LevelSetInterfacePreservingRedistancing, MotionScaleSeesOnlyCutCellVertices)
+{
+    ScalarSystem s(buildStructuredTriangleMesh(10), 2);
+    const auto phi = s.scalar([](const Point& x) { return x[0] - 0.43; });
+    auto velocity_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1, FE::ElementType::Triangle3, /*order=*/1, 2);
+    FE::systems::FESystem vsys(s.mesh);
+    const auto u = vsys.addField(FE::systems::FieldSpec{
+        .name = "u", .space = velocity_space,
+        .components = velocity_space->value_dimension()});
+    vsys.setup();
+    const auto& udofs = vsys.fieldDofHandler(u);
+    const auto* map = udofs.getEntityDofMap();
+    std::vector<FE::Real> w(static_cast<std::size_t>(udofs.getNumDofs()), 0.0);
+    FE::Real expected = 0.0;
+    for (FE::GlobalIndex v = 0; v < map->numVertices(); ++v) {
+        const auto x = s.system.meshAccess().getNodeCoordinates(v);
+        // Large speed far from the interface, a known speed next to it.
+        const FE::Real speed = std::abs(x[0] - 0.43) < 0.11 ? 0.2 + x[1] : 50.0;
+        if (std::abs(x[0] - 0.43) < 0.11) {
+            expected = std::max(expected, speed);
+        }
+        w[static_cast<std::size_t>(map->getVertexDofs(v)[1])] = speed;
+    }
+    const auto scale = level_set::levelSetInterfaceMotionScale(
+        s.system.meshAccess(), s.dofs(), udofs, 0.0, phi, w);
+    ASSERT_TRUE(scale.success) << scale.diagnostic;
+    EXPECT_DOUBLE_EQ(scale.max_speed, expected);
+    EXPECT_NEAR(scale.min_edge, 0.1, 1.0e-12);
+}
+
 TEST(LevelSetInterfacePreservingRedistancing, RejectsTetrahedraOnEveryRank)
 {
     ScalarSystem s(buildStructuredTetraMesh(2), 3);
