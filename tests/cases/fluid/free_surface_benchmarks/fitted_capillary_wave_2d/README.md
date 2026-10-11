@@ -132,13 +132,35 @@ python3 $B/verify.py $OUT/L16 $OUT/L32 $OUT/L64 $OUT/L32_dt2 $OUT/L32_dt4 --json
 
 ## Results
 
-**Status after D35 (2026-10-10): no protocol run at the protocol amplitude
-`a0 = 0.0025 lambda` exists yet.** The runs below are at the earlier
-protocol amplitude (`0.01 lambda`) or are spatial-only diagnostics at
-`0.0025 lambda` (job `46155727`, binary `4a62a971`); the time-step study at
-`0.0025 lambda` (`lambda/h = 32` at `dt/2` and `dt/4`) has never been run, so
-the spatial errors cannot have the time error removed.  The protocol needs
-the five runs of "How to run" at the new default.
+**2026-10-10, protocol amplitude `a0 = 0.0025 lambda` (D35), cases and
+solver binary from `f531567f`, Slurm job `47299149` (one node, the five
+cases side by side, one rank each). Result: FAIL on the frequency
+convergence order only.** Output and `verify.json`:
+`/scratch/users/zsexton/free-surface-benchmarks/fitted_ale/capillary_wave/f531567f/`.
+
+| lambda/h | `omega` | raw error | spatial error | `beta` | raw error | spatial error | RMS `a_h` error | `max dA/A` | wall |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 16 | 15.529342 | +1.3e-4 | +4.4e-5 | 1.25646 | +3.70% | +3.76% | 7.5e-3 | 3.0e-7 | 183 s |
+| 32 | 15.526715 | -3.8e-5 | -1.25e-4 | 1.22121 | +0.79% | +0.85% | 1.4e-3 | 8.6e-8 | 628 s |
+| 64 | 15.527700 | +2.6e-5 | -6.2e-5 | 1.21283 | +0.10% | +0.16% | 5.2e-4 | 2.3e-8 | 2,859 s |
+
+Time-step study (`lambda/h = 32`, `dt/2` 1,197 s, `dt/4` 2,345 s):
+`omega(dt -> 0) = 15.525354` (order 0.91), `beta(dt -> 0) = 1.221900`
+(order 0.59); time errors of the shared step `+8.8e-5` in `omega` and
+`-5.7e-4` in `beta`.
+
+| Criterion | Result |
+|---|---|
+| `frequency` | **FAIL**: 1.25e-4 at `lambda/h = 32` (limit 0.02, passed); observed order -0.25 (pairwise -1.52, 1.02) < 1 |
+| `damping` | PASS: 0.85% at 32 and 0.16% at 64 (limit 5%); observed order 2.28 (pairwise 2.14, 2.41) |
+| `volume` | PASS: at most 3.0e-7 (limit 1e-4) |
+
+At the smaller amplitude the frequency errors fall from 4e-4 to 7e-4 to
+at most 1.25e-4 (160 times below the limit), the size of the time error of
+the shared step and of the remaining finite-amplitude shift
+(`0.10 to 0.16 (a0 k)^2 = 2.5e-5 to 4e-5`); they change sign between the
+levels and do not decrease with h, so the order criterion still fails, now
+at an error floor. The damping and the area converge at second order.
 
 **2026-09-30, cases from `93b1bf06`, solver binary `35a81fd3` (the same
 fitted code), Slurm job `46129890` (one node, all cases side by side, one
