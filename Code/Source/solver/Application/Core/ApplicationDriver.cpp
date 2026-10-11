@@ -3678,6 +3678,10 @@ struct LevelSetMaintenanceRuntimeState {
   svmp::FE::Real volume_correction_reference_minimum_edge_length{0.0};
   svmp::FE::Real cumulative_volume_correction_interface_displacement{0.0};
   svmp::FE::Real cumulative_volume_correction_contact_line_displacement{0.0};
+  // Interface-preserving redistancing trigger: interface displacement bound
+  // accumulated since the last redistancing, and the number of calls.
+  svmp::FE::Real redistancing_accumulated_displacement{0.0};
+  std::size_t redistancing_calls{0};
   bool conservative_phase_initialized{false};
   std::optional<svmp::FE::level_set::LevelSetP1PhaseTransportGraph>
       conservative_phase_graph{};
@@ -15859,141 +15863,187 @@ bool applyLevelSetMaintenance(
       const auto volume_options = levelSetVolumeOptionsForMaintenance(request);
       const auto& mesh_access = sim.fe_system->meshAccess();
       const auto& phi_dofs = sim.fe_system->fieldDofHandler(field);
-      std::vector<svmp::FE::Real> redistanced;
-      const auto redistance =
-          svmp::FE::level_set::redistanceLevelSetToZeroPolygon(
-              mesh_access, phi_dofs, volume_options.isovalue, input,
-              redistanced);
-      if (!redistance.success) {
+      // Displacement trigger: redistance once the interface may have moved
+      // one cell since the last redistancing (accumulated max |w| dt over
+      // the vertices of cut cells against the smallest cut-cell edge).  The
+      // distortion that the redistancing removes builds up with interface
+      // motion, so the call count does not depend on the time step, and an
+      // interface at rest is left alone.  The one-cell threshold is fixed
+      // for every case; SVMP_REDISTANCING_TRIGGER_CELLS (diagnostic only)
+      // changes it to test the sensitivity.
+      const auto transport_velocity = levelSetTransportVelocityCoefficients(
+          *sim.fe_system, velocity_field, fe_solution);
+      const auto motion = svmp::FE::level_set::levelSetInterfaceMotionScale(
+          mesh_access, phi_dofs, sim.fe_system->fieldDofHandler(velocity_field),
+          volume_options.isovalue, input, transport_velocity);
+      if (!motion.success) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Level-set interface-preserving "
-            "redistancing failed for field '" +
+            "redistancing could not measure the interface motion of field '" +
             request.configuration->transport.level_set.field_name + "': " +
-            redistance.diagnostic);
+            motion.diagnostic);
       }
-      const auto change_raw =
-          svmp::FE::level_set::measureLevelSetZeroPolygonChange(
-              mesh_access, phi_dofs, volume_options.isovalue, input,
-              redistanced);
-      std::vector<svmp::FE::Real> restored = redistanced;
-      svmp::FE::level_set::LevelSetKinematicReconciliationResult restoration{};
-      std::size_t restoration_passes = 0u;
-      std::size_t reverted_dofs = 0u;
-      if (redistance.applied) {
-        auto zero_velocity = levelSetTransportVelocityCoefficients(
-            *sim.fe_system, velocity_field, fe_solution);
-        std::fill(zero_velocity.begin(), zero_velocity.end(),
-                  svmp::FE::Real{0.0});
-        // A DOF that the restoration must freeze (its correction would change
-        // the degeneracy class of a cut) would keep an uncorrected share of
-        // the interface motion.  Such DOFs keep their input value instead and
-        // the restoration is repeated; every pass reverts at least one more
-        // DOF, so the loop ends.
-        for (;;) {
-          ++restoration_passes;
-          restoration = svmp::FE::level_set::reconcileLevelSetWithKinematicFlux(
-              mesh_access,
-              phi_dofs,
-              sim.fe_system->fieldDofHandler(velocity_field),
-              volume_options.isovalue,
-              volume_options.tolerance,
-              static_cast<svmp::FE::Real>(history.dt()),
-              input,
-              redistanced,
-              zero_velocity,
-              zero_velocity,
-              restored);
-          if (!restoration.success) {
-            throw std::runtime_error(
-                "[svMultiPhysics::Application] Level-set interface-preserving "
-                "redistancing could not restore the interface of field '" +
-                request.configuration->transport.level_set.field_name + "': " +
-                restoration.diagnostic);
-          }
-          if (!restoration.applied) {
-            restored = redistanced;
-          }
-          bool reverted = false;
-          // Revert the whole cells around a frozen DOF: their other DOFs
-          // would otherwise keep raw redistanced values whose interface
-          // motion the restoration can no longer take back.
-          const auto revert_set =
-              restoration.degeneracy_frozen_dof_indices.empty()
-                  ? std::vector<std::size_t>{}
-                  : svmp::FE::level_set::levelSetDofCellClosure(
-                        mesh_access, phi_dofs,
-                        restoration.degeneracy_frozen_dof_indices);
-          for (const auto i : revert_set) {
-            if (i < redistanced.size() && redistanced[i] != input[i]) {
-              redistanced[i] = input[i];
-              ++reverted_dofs;
-              reverted = true;
+      static const double trigger_cells = [] {
+        const char* text = std::getenv("SVMP_REDISTANCING_TRIGGER_CELLS");
+        if (text == nullptr || text[0] == '\0') {
+          return 1.0;
+        }
+        const double value = std::strtod(text, nullptr);
+        if (!(value > 0.0) || !std::isfinite(value)) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] SVMP_REDISTANCING_TRIGGER_CELLS must be positive.");
+        }
+        return value;
+      }();
+      auto& accumulated = request.runtime.redistancing_accumulated_displacement;
+      accumulated += motion.max_speed * static_cast<svmp::FE::Real>(history.dt());
+      const svmp::FE::Real threshold =
+          static_cast<svmp::FE::Real>(trigger_cells) * motion.min_edge;
+      const bool trigger_fired = motion.min_edge > svmp::FE::Real{0.0} &&
+                                 accumulated >= threshold;
+      if (trigger_fired) {
+        std::vector<svmp::FE::Real> redistanced;
+        const auto redistance =
+            svmp::FE::level_set::redistanceLevelSetToZeroPolygon(
+                mesh_access, phi_dofs, volume_options.isovalue, input,
+                redistanced);
+        if (!redistance.success) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Level-set interface-preserving "
+              "redistancing failed for field '" +
+              request.configuration->transport.level_set.field_name + "': " +
+              redistance.diagnostic);
+        }
+        const auto change_raw =
+            svmp::FE::level_set::measureLevelSetZeroPolygonChange(
+                mesh_access, phi_dofs, volume_options.isovalue, input,
+                redistanced);
+        std::vector<svmp::FE::Real> restored = redistanced;
+        svmp::FE::level_set::LevelSetKinematicReconciliationResult restoration{};
+        std::size_t restoration_passes = 0u;
+        std::size_t reverted_dofs = 0u;
+        if (redistance.applied) {
+          auto zero_velocity = levelSetTransportVelocityCoefficients(
+              *sim.fe_system, velocity_field, fe_solution);
+          std::fill(zero_velocity.begin(), zero_velocity.end(),
+                    svmp::FE::Real{0.0});
+          // A DOF that the restoration must freeze (its correction would change
+          // the degeneracy class of a cut) would keep an uncorrected share of
+          // the interface motion.  Such DOFs keep their input value instead and
+          // the restoration is repeated; every pass reverts at least one more
+          // DOF, so the loop ends.
+          for (;;) {
+            ++restoration_passes;
+            restoration = svmp::FE::level_set::reconcileLevelSetWithKinematicFlux(
+                mesh_access,
+                phi_dofs,
+                sim.fe_system->fieldDofHandler(velocity_field),
+                volume_options.isovalue,
+                volume_options.tolerance,
+                static_cast<svmp::FE::Real>(history.dt()),
+                input,
+                redistanced,
+                zero_velocity,
+                zero_velocity,
+                restored);
+            if (!restoration.success) {
+              throw std::runtime_error(
+                  "[svMultiPhysics::Application] Level-set interface-preserving "
+                  "redistancing could not restore the interface of field '" +
+                  request.configuration->transport.level_set.field_name + "': " +
+                  restoration.diagnostic);
+            }
+            if (!restoration.applied) {
+              restored = redistanced;
+            }
+            bool reverted = false;
+            // Revert the whole cells around a frozen DOF: their other DOFs
+            // would otherwise keep raw redistanced values whose interface
+            // motion the restoration can no longer take back.
+            const auto revert_set =
+                restoration.degeneracy_frozen_dof_indices.empty()
+                    ? std::vector<std::size_t>{}
+                    : svmp::FE::level_set::levelSetDofCellClosure(
+                          mesh_access, phi_dofs,
+                          restoration.degeneracy_frozen_dof_indices);
+            for (const auto i : revert_set) {
+              if (i < redistanced.size() && redistanced[i] != input[i]) {
+                redistanced[i] = input[i];
+                ++reverted_dofs;
+                reverted = true;
+              }
+            }
+            if (!reverted) {
+              break;
             }
           }
-          if (!reverted) {
-            break;
+        }
+        const auto change =
+            svmp::FE::level_set::measureLevelSetZeroPolygonChange(
+                mesh_access, phi_dofs, volume_options.isovalue, input, restored);
+        const auto volume_before = svmp::FE::level_set::computeLevelSetCutCellVolume(
+            mesh_access, phi_dofs, volume_options, input);
+        const auto volume_after = svmp::FE::level_set::computeLevelSetCutCellVolume(
+            mesh_access, phi_dofs, volume_options, restored);
+        if (!change.success || !change_raw.success || !volume_before.success ||
+            !volume_after.success) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Level-set interface-preserving "
+              "redistancing could not measure its interface change for field '" +
+              request.configuration->transport.level_set.field_name + "': " +
+              change.diagnostic + " " + change_raw.diagnostic);
+        }
+        const bool applied = redistance.applied && restored != input;
+        if (applied) {
+          std::copy(restored.begin(), restored.end(),
+                    fe_solution.begin() + static_cast<std::ptrdiff_t>(offset));
+          changed = true;
+          modified_level_set_fields.insert(field);
+          if (observe_stage) {
+            observe_stage(
+                application::core::LevelSetMaintenanceWorkSubstage::
+                    Reinitialization,
+                before_redistancing,
+                fe_solution);
           }
         }
+        std::ostringstream log;
+        log << std::setprecision(17)
+            << "[svMultiPhysics::Application] Level-set interface-preserving redistancing"
+            << " field='" << request.configuration->transport.level_set.field_name
+            << "' step=" << completed_step
+            << " applied=" << (applied ? "true" : "false")
+            << " segments=" << redistance.interface_segments
+            << " open_ends=" << redistance.open_ends
+            << " redistanced_dofs=" << redistance.redistanced_dofs
+            << " max_abs_change=" << redistance.max_abs_change
+            << " raw_max_crossing_shift=" << change_raw.max_crossing_shift
+            << " raw_max_open_end_shift=" << change_raw.max_open_end_shift
+            << " restoration_converged="
+            << (restoration.converged ? "true" : "false")
+            << " restoration_iterations=" << restoration.iterations
+            << " restoration_corrected_dofs=" << restoration.corrected_dofs
+            << " restoration_frozen_dofs=" << restoration.degeneracy_frozen_dofs
+            << " restoration_skipped_dofs="
+            << restoration.sign_preserving_skipped_dofs
+            << " restoration_passes=" << restoration_passes
+            << " reverted_dofs=" << reverted_dofs
+            << " max_crossing_shift=" << change.max_crossing_shift
+            << " max_open_end_shift=" << change.max_open_end_shift
+            << " cells_with_changed_cut=" << change.cells_with_changed_cut
+            << " open_ends_before=" << change.open_ends_first
+            << " open_ends_after=" << change.open_ends_second
+            << " negative_volume_before=" << volume_before.negative_volume
+            << " negative_volume_after=" << volume_after.negative_volume
+            << " trigger_call=" << (request.runtime.redistancing_calls + 1)
+            << " accumulated_displacement_over_h=" << (accumulated / motion.min_edge)
+            << " trigger_cells=" << trigger_cells
+            << " time=" << history.time()
+            << " status='" << redistance.diagnostic << "'";
+        staged_commit_logs.push_back(log.str());
+        accumulated = svmp::FE::Real{0.0};
+        ++request.runtime.redistancing_calls;
       }
-      const auto change =
-          svmp::FE::level_set::measureLevelSetZeroPolygonChange(
-              mesh_access, phi_dofs, volume_options.isovalue, input, restored);
-      const auto volume_before = svmp::FE::level_set::computeLevelSetCutCellVolume(
-          mesh_access, phi_dofs, volume_options, input);
-      const auto volume_after = svmp::FE::level_set::computeLevelSetCutCellVolume(
-          mesh_access, phi_dofs, volume_options, restored);
-      if (!change.success || !change_raw.success || !volume_before.success ||
-          !volume_after.success) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Level-set interface-preserving "
-            "redistancing could not measure its interface change for field '" +
-            request.configuration->transport.level_set.field_name + "': " +
-            change.diagnostic + " " + change_raw.diagnostic);
-      }
-      const bool applied = redistance.applied && restored != input;
-      if (applied) {
-        std::copy(restored.begin(), restored.end(),
-                  fe_solution.begin() + static_cast<std::ptrdiff_t>(offset));
-        changed = true;
-        modified_level_set_fields.insert(field);
-        if (observe_stage) {
-          observe_stage(
-              application::core::LevelSetMaintenanceWorkSubstage::
-                  Reinitialization,
-              before_redistancing,
-              fe_solution);
-        }
-      }
-      std::ostringstream log;
-      log << std::setprecision(17)
-          << "[svMultiPhysics::Application] Level-set interface-preserving redistancing"
-          << " field='" << request.configuration->transport.level_set.field_name
-          << "' step=" << completed_step
-          << " applied=" << (applied ? "true" : "false")
-          << " segments=" << redistance.interface_segments
-          << " open_ends=" << redistance.open_ends
-          << " redistanced_dofs=" << redistance.redistanced_dofs
-          << " max_abs_change=" << redistance.max_abs_change
-          << " raw_max_crossing_shift=" << change_raw.max_crossing_shift
-          << " raw_max_open_end_shift=" << change_raw.max_open_end_shift
-          << " restoration_converged="
-          << (restoration.converged ? "true" : "false")
-          << " restoration_iterations=" << restoration.iterations
-          << " restoration_corrected_dofs=" << restoration.corrected_dofs
-          << " restoration_frozen_dofs=" << restoration.degeneracy_frozen_dofs
-          << " restoration_skipped_dofs="
-          << restoration.sign_preserving_skipped_dofs
-          << " restoration_passes=" << restoration_passes
-          << " reverted_dofs=" << reverted_dofs
-          << " max_crossing_shift=" << change.max_crossing_shift
-          << " max_open_end_shift=" << change.max_open_end_shift
-          << " cells_with_changed_cut=" << change.cells_with_changed_cut
-          << " open_ends_before=" << change.open_ends_first
-          << " open_ends_after=" << change.open_ends_second
-          << " negative_volume_before=" << volume_before.negative_volume
-          << " negative_volume_after=" << volume_after.negative_volume
-          << " status='" << redistance.diagnostic << "'";
-      staged_commit_logs.push_back(log.str());
     }
 
     if (do_reinit) {
