@@ -298,9 +298,25 @@ LevelSetVelocityExtensionConstraintKernel::assemble(
         }
 
         if (request.want_matrix && matrix_out != nullptr &&
-            request.want_vector && vector_out != nullptr) {
+            request.want_vector && vector_out != nullptr &&
+            !request.suppress_constraint_inhomogeneity) {
             distributor.distributeLocalToGlobal(
                 local_matrix, local_vector, dofs, *matrix_out, *vector_out);
+        } else if (request.want_matrix && matrix_out != nullptr &&
+                   request.want_vector && vector_out != nullptr) {
+            // Newton assembly (as in StandardAssembler): the residual is
+            // already evaluated at the constrained state, so the joint
+            // distribution's -K*g lifting of inhomogeneous constrained
+            // columns would count their inhomogeneity twice.  With an
+            // inhomogeneous master-bearing source line (the strong
+            // contact-point law) every Jacobian assembly then carried a
+            // residual of the line value in these rows, so no outer pass
+            // reached a zero update.  Homogeneous columns lift nothing, so
+            // this matches the joint distribution without such lines.
+            distributor.distributeMatrixToGlobal(local_matrix, dofs,
+                                                  *matrix_out);
+            distributor.distributeVectorToGlobal(local_vector, dofs,
+                                                  *vector_out);
         } else if (request.want_matrix && matrix_out != nullptr) {
             distributor.distributeMatrixToGlobal(local_matrix, dofs,
                                                   *matrix_out);

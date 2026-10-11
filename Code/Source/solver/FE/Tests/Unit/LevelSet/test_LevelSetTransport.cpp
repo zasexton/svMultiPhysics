@@ -2,6 +2,9 @@
 #include "LevelSet/LevelSetVelocityExtensionConstraint.h"
 
 #include "Assembly/Assembler.h"
+#include "Assembly/GlobalSystemView.h"
+#include "Constraints/AffineConstraints.h"
+#include "Constraints/SystemConstraint.h"
 #include "Dofs/EntityDofMap.h"
 #include "Forms/FormExpr.h"
 #include "Forms/JIT/JITKernelWrapper.h"
@@ -2373,6 +2376,160 @@ TEST(LevelSetTransport,
     }
     EXPECT_TRUE(pattern.hasEntry(row, vertex_dof(source, 0, 0)));
     EXPECT_FALSE(pattern.hasEntry(row, vertex_dof(source, 1, 0)));
+}
+
+namespace {
+
+// slave = master + inhomogeneity on two DOFs fixed at setup.
+class InhomogeneousSourceLine final
+    : public FE::constraints::ISystemConstraint {
+public:
+    InhomogeneousSourceLine(std::function<FE::GlobalIndex()> slave,
+                            std::function<FE::GlobalIndex()> master,
+                            FE::Real inhomogeneity)
+        : slave_(std::move(slave))
+        , master_(std::move(master))
+        , inhomogeneity_(inhomogeneity)
+    {
+    }
+
+    void apply(const FE::systems::FESystem&,
+               FE::constraints::AffineConstraints& constraints) override
+    {
+        const auto slave = slave_();
+        constraints.addLine(slave);
+        constraints.addEntry(slave, master_(), 1.0);
+        constraints.setInhomogeneity(slave, inhomogeneity_);
+    }
+
+    bool updateValues(const FE::systems::FESystem&,
+                      FE::constraints::AffineConstraints&,
+                      double,
+                      double) override
+    {
+        return false;
+    }
+
+    [[nodiscard]] bool isTimeDependent() const noexcept override
+    {
+        return false;
+    }
+
+    [[nodiscard]] FE::systems::SetupStorageRequirements
+    storageRequirements() const noexcept override
+    {
+        return {};
+    }
+
+private:
+    std::function<FE::GlobalIndex()> slave_;
+    std::function<FE::GlobalIndex()> master_;
+    FE::Real inhomogeneity_{0.0};
+};
+
+} // namespace
+
+TEST(LevelSetTransport,
+     AlgebraicExtensionNewtonAssemblyDoesNotLiftInhomogeneousSourceLines)
+{
+    // E_0 = u_1 with the source line u_1 = u_2 + g.  At a state that
+    // satisfies the line, a Newton residual (AssemblyRequest::
+    // suppress_constraint_inhomogeneity) of the extension row is zero; the
+    // linear-system distribution lifts -K*g into the right-hand side.
+    const auto mesh =
+        std::make_shared<StructuredQuadTransportMeshAccess>(1);
+    auto velocity_space = vectorSpace(mesh);
+    const FE::Real g = 0.25;
+
+    FE::systems::FESystem system(mesh);
+    const auto source = system.addField(FE::systems::FieldSpec{
+        .name = "physical_velocity",
+        .space = velocity_space,
+        .components = velocity_space->value_dimension(),
+    });
+    const auto extension = system.addField(FE::systems::FieldSpec{
+        .name = "extension_velocity",
+        .space = velocity_space,
+        .components = velocity_space->value_dimension(),
+    });
+    const auto vertex_dof = [&](FE::FieldId field,
+                                FE::GlobalIndex vertex,
+                                int component) {
+        const auto* entity_map =
+            system.fieldDofHandler(field).getEntityDofMap();
+        if (entity_map == nullptr) {
+            throw std::runtime_error("test field has no vertex DOF map");
+        }
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        const auto slot = static_cast<std::size_t>(component);
+        if (slot >= dofs.size()) {
+            throw std::runtime_error("test field component is out of range");
+        }
+        return static_cast<FE::GlobalIndex>(system.fieldDofOffset(field) +
+                                            dofs[slot]);
+    };
+    system.addSystemConstraint(std::make_unique<InhomogeneousSourceLine>(
+        [&] { return vertex_dof(source, 1, 0); },
+        [&] { return vertex_dof(source, 2, 0); },
+        g));
+    ASSERT_NO_THROW(
+        system.setup({}, makeStructuredQuadTransportSetupInputs(*mesh)));
+
+    const auto components = velocity_space->value_dimension();
+    level_set::LevelSetVelocityExtensionConstraintKernel kernel({
+        .extension_field = extension,
+        .source_velocity_field = source,
+        .components = components,
+        .operator_tag = "equations",
+    });
+    level_set::VelocityExtensionConstraintRow row;
+    row.vertex = 0;
+    row.component = 0;
+    row.dependencies.push_back(level_set::VelocityExtensionDependency{
+        .field = level_set::VelocityExtensionDependencyField::SourceVelocity,
+        .vertex = 1,
+        .component = 0,
+        .coefficient = 1.0,
+    });
+    kernel.setFrozenRows({row}, /*revision=*/1u);
+
+    const auto n = system.dofHandler().getNumDofs();
+    std::vector<FE::Real> u(static_cast<std::size_t>(n), 0.0);
+    const auto master = vertex_dof(source, 2, 0);
+    const auto slave = vertex_dof(source, 1, 0);
+    const auto row_dof = vertex_dof(extension, 0, 0);
+    u[static_cast<std::size_t>(master)] = 0.5;
+    u[static_cast<std::size_t>(slave)] = 0.5 + g;
+    u[static_cast<std::size_t>(row_dof)] = 0.5 + g;
+    FE::systems::SystemStateView state;
+    state.u = std::span<const FE::Real>(u);
+
+    const auto assemble = [&](bool want_matrix, bool suppress) {
+        FE::assembly::DenseMatrixView jacobian(n);
+        FE::assembly::DenseVectorView residual(n);
+        jacobian.zero();
+        residual.zero();
+        FE::systems::AssemblyRequest request;
+        request.op = "equations";
+        request.want_matrix = want_matrix;
+        request.want_vector = true;
+        request.suppress_constraint_inhomogeneity = suppress;
+        (void)kernel.assemble(system, request, state,
+                              want_matrix ? &jacobian : nullptr, &residual);
+        return std::make_pair(residual.getVectorEntry(row_dof),
+                              want_matrix ? jacobian(row_dof, master)
+                                          : FE::Real{0.0});
+    };
+
+    const auto [newton_residual, newton_master] =
+        assemble(/*want_matrix=*/true, /*suppress=*/true);
+    EXPECT_EQ(newton_residual, 0.0);
+    EXPECT_EQ(newton_master, -1.0);
+    EXPECT_EQ(assemble(/*want_matrix=*/false, /*suppress=*/true).first, 0.0);
+    const auto [linear_rhs, linear_master] =
+        assemble(/*want_matrix=*/true, /*suppress=*/false);
+    EXPECT_DOUBLE_EQ(linear_rhs, g);
+    EXPECT_EQ(linear_master, -1.0);
 }
 
 TEST(LevelSetTransport,
