@@ -79,14 +79,25 @@ pdeVelocityExtensionOperatorFromToken(std::string_view token);
 //     Components with the same unknowns (the same wall masks) have the same
 //     matrix and share one factorization.  Its results differ from LuColamd
 //     at round-off level and may depend on the rank count at round-off
-//     level.  On two or more ranks they are not reproducible bit for bit
-//     either: MUMPS' dynamic scheduling changes the summation order from one
-//     factorization to the next, so a reused factorization matches a fresh
-//     one only to round-off (the self-check then uses a tolerance).
+//     level.  They are not run-to-run reproducible: MUMPS' dynamic
+//     scheduling changes the summation order, so on three or more ranks
+//     separate runs, refactorizations of the same matrix and even repeated
+//     solves differ (2e-16 to 5e-15 relative in the tests; on two ranks
+//     refactorizations within a run can differ too).  A reused factorization
+//     therefore matches a fresh one only to round-off and the self-check uses
+//     a tolerance.  The recommended opt-in is MumpsSerial.
+//   MumpsSerial (opt-in, FE_ENABLE_MUMPS builds): sequential MUMPS LDL^T
+//     (METIS ordering) of each component on the rank that solves it, like
+//     LuColamd (one rank per component with distributed component solves,
+//     otherwise every rank).  Bitwise reproducible and, like LuColamd,
+//     independent of the partition and the rank count (every rank holds the
+//     same replicated matrix); its results differ from LuColamd at round-off
+//     level.  The recommended opt-in factorization.
 enum class PdeVelocityExtensionFactorization : std::uint8_t {
   LuColamd,
   LdltAmd,
   Mumps,
+  MumpsSerial,
 };
 
 [[nodiscard]] std::string_view pdeVelocityExtensionFactorizationName(
@@ -94,7 +105,8 @@ enum class PdeVelocityExtensionFactorization : std::uint8_t {
 
 // Maps a token (case, '_' and '-' insensitive) to a factorization:
 // lu / lu_colamd / default -> LuColamd, ldlt / ldlt_amd -> LdltAmd,
-// mumps / mumps_distributed -> Mumps.  Any other token returns nullopt.
+// mumps / mumps_distributed -> Mumps, mumps_serial / mumps_sequential ->
+// MumpsSerial.  Any other token returns nullopt.
 [[nodiscard]] std::optional<PdeVelocityExtensionFactorization>
 pdeVelocityExtensionFactorizationFromToken(std::string_view token);
 

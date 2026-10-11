@@ -174,7 +174,10 @@ TEST(MumpsDistributedSolverMPI, AnalysisIsKeptWhileThePatternIsUnchanged)
     EXPECT_EQ(solver.statistics().factorizations, 3u);
     EXPECT_GT(solver.statistics().factor_entries, 0);
 
-    // Refactoring the first matrix reproduces the first solution.
+    // Refactoring the first matrix reproduces the first solution to round-off.
+    // Bit for bit only on one rank: MUMPS' dynamic scheduling changes the
+    // summation order, so on more ranks factorizations of the same matrix are
+    // not run-to-run reproducible; the status is printed.
     const auto t0 = gridOperator(rank, size, 4.0, -1.3, -0.7, -1.1, -0.9, false, 1.0);
     ASSERT_TRUE(solver.factorize(n, t0.rows, t0.cols, t0.values));
     ASSERT_TRUE(solver.solveReplicated(rhsFor(4.0, -1.3, -0.7, -1.1, -0.9, 1.0), again));

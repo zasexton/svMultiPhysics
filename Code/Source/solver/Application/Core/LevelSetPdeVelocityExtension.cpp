@@ -677,8 +677,10 @@ public:
 // the full solution.
 class DryRegionMumps final : public DryRegionFactorization {
 public:
-  DryRegionMumps(const svmp::MeshComm& comm, PdeVelocityExtensionOperator op)
-      : solver_(comm.native(),
+  // `log`: this rank prints the factorization diagnostics (when requested).
+  DryRegionMumps(const svmp::MeshComm& comm, PdeVelocityExtensionOperator op,
+                 bool log)
+      : log_(log), solver_(comm.native(),
                 op == PdeVelocityExtensionOperator::Harmonic
                     ? svmp::FE::backends::MumpsDistributedSolver::Symmetry::
                           SymmetricPositiveDefinite
@@ -714,7 +716,7 @@ public:
         static_cast<svmp::FE::GlobalIndex>(A.rows()), rows, cols, values);
     // SVMP_PDE_EXTENSION_MUMPS_DIAGNOSTICS (or the level-set advection trace):
     // rank 0 logs every factorization.
-    if (comm.rank() == 0 &&
+    if (log_ &&
         (environmentFlag("SVMP_PDE_EXTENSION_MUMPS_DIAGNOSTICS") ||
          environmentFlag("SVMP_TRACE_LEVEL_SET_ADVECTION"))) {
       const auto& s = solver_.statistics();
@@ -757,6 +759,7 @@ public:
   }
 
 private:
+  bool log_{false};
   // Solving does not change the factors; MUMPS' C interface is not const.
   mutable svmp::FE::backends::MumpsDistributedSolver solver_;
 };
@@ -777,10 +780,17 @@ private:
     throw std::runtime_error(
         "PDE velocity extension factorization requires an Eigen matrix");
   }
-  if (kind == PdeVelocityExtensionFactorization::Mumps) {
+  if (kind == PdeVelocityExtensionFactorization::Mumps ||
+      kind == PdeVelocityExtensionFactorization::MumpsSerial) {
 #if defined(FE_HAS_MUMPS) && FE_HAS_MUMPS && defined(MESH_HAS_MPI)
-    auto factorization = std::make_unique<DryRegionMumps>(comm, op);
-    if (!factorization->factorize(*A, comm)) {
+    // MumpsSerial: this rank alone (MPI_COMM_SELF) factorizes the whole
+    // replicated matrix.
+    const svmp::MeshComm self = svmp::MeshComm::self();
+    const auto& factor_comm =
+        kind == PdeVelocityExtensionFactorization::Mumps ? comm : self;
+    auto factorization =
+        std::make_unique<DryRegionMumps>(factor_comm, op, comm.rank() == 0);
+    if (!factorization->factorize(*A, factor_comm)) {
       return nullptr;
     }
     return factorization;
@@ -1120,6 +1130,8 @@ std::string_view pdeVelocityExtensionFactorizationName(
     return "ldlt_amd";
   case PdeVelocityExtensionFactorization::Mumps:
     return "mumps";
+  case PdeVelocityExtensionFactorization::MumpsSerial:
+    return "mumps_serial";
   }
   return "unknown";
 }
@@ -1137,6 +1149,9 @@ pdeVelocityExtensionFactorizationFromToken(std::string_view token)
   }
   if (normalized == "mumps" || normalized == "mumpsdistributed") {
     return PdeVelocityExtensionFactorization::Mumps;
+  }
+  if (normalized == "mumpsserial" || normalized == "mumpssequential") {
+    return PdeVelocityExtensionFactorization::MumpsSerial;
   }
   return std::nullopt;
 }
