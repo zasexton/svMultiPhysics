@@ -201,13 +201,17 @@ struct LevelSetSignDefinitePatchBoundsOptions {
 };
 
 /**
- * @brief Accepted-step interface-preserving redistancing (2D, opt-in).
+ * @brief Accepted-step interface-preserving redistancing (opt-in; Triangle3
+ *        and Tetra4).
  *
  * Disabled by default.  When enabled, every accepted step, after the
  * kinematic reconciliation and the sign-definite patch bounds, replaces the
  * level set by the signed distance to its own zero polygon, with the polygon
  * ends on the boundary (contact points) continued by rays
- * (LevelSetInterfacePreservingRedistancing.h), and then restores the lumped
+ * (LevelSetInterfacePreservingRedistancing.h), or on Tetra4 meshes to its own
+ * zero surface, with the open surface edges on the boundary (contact lines)
+ * continued by half-strips in the surface plane
+ * (LevelSetInterfacePreservingRedistancing3D.h), and then restores the lumped
  * interface position node by node with the kinematic reconciliation at zero
  * velocity.  It keeps |grad phi| = 1 next to moving contact lines, where the
  * transport otherwise steepens and flattens the field without bound.  There
