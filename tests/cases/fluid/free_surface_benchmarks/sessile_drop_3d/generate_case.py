@@ -83,6 +83,7 @@ SEMI_IMPLICIT_OPTIONS = ("None", "NormalIncrement")
 SEMI_IMPLICIT_FOR_RULE = {"fixed": "NormalIncrement", "capillary-limit": "None"}
 KINEMATIC_RECONCILIATION = True             # as sessile_drop_2d
 SIGN_DEFINITE_PATCH_BOUNDS = True           # as sessile_drop_2d
+INTERFACE_PRESERVING_REDISTANCING = True    # decisions D38/D39, as sessile_drop_2d
 MIN_PHI_OVER_H_WARNING = 1.0e-6
 LEVEL_SET_FIELD = "phi"
 INTERFACE_DOMAIN_ID = "sessile_drop_3d_surface"
@@ -252,7 +253,8 @@ def solver_xml(equilibrium_deg: float, schedule: dict, steps: int, cadence: int,
                semi_implicit: str, transport: str = "pde_extension",
                kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION,
                sign_definite_patch_bounds: bool = SIGN_DEFINITE_PATCH_BOUNDS,
-               ghost_layers: int | str = "derived") -> str:
+               ghost_layers: int | str = "derived",
+               redistancing: bool = INTERFACE_PRESERVING_REDISTANCING) -> str:
     if semi_implicit not in SEMI_IMPLICIT_OPTIONS:
         raise ValueError(f"semi_implicit must be one of {SEMI_IMPLICIT_OPTIONS}")
     ghost_layers = SPHERE.ghost_layers_value(ghost_layers)
@@ -262,6 +264,9 @@ def solver_xml(equilibrium_deg: float, schedule: dict, steps: int, cadence: int,
                         "</Surface_tension_semi_implicit>")
     maintenance = ("\n    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>"
                    if kinematic_reconciliation else "")
+    if redistancing:
+        maintenance += ("\n    <Enable_interface_preserving_redistancing>true"
+                        "</Enable_interface_preserving_redistancing>")
     if sign_definite_patch_bounds:
         maintenance += ("\n    <Enable_sign_definite_patch_bounds>true"
                         "</Enable_sign_definite_patch_bounds>")
@@ -402,6 +407,7 @@ def generate(level: int, equilibrium_deg: float, output_dir: Path, *,
              kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION,
              sign_definite_patch_bounds: bool = SIGN_DEFINITE_PATCH_BOUNDS,
              ghost_layers: int | str = "derived",
+             redistancing: bool = INTERFACE_PRESERVING_REDISTANCING,
              max_steps: int | None = None, force: bool = False) -> dict:
     if level not in LEVELS:
         raise ValueError(f"--level must be one of {LEVELS}")
@@ -458,7 +464,8 @@ def generate(level: int, equilibrium_deg: float, output_dir: Path, *,
         SPHERE.write_face_vtp(mesh_dir / "mesh-surfaces" / f"{name}.vtp", points, tris, parents)
     (output_dir / "solver.xml").write_text(
         solver_xml(equilibrium_deg, schedule, steps, cadence, planes, semi_implicit, transport,
-                   kinematic_reconciliation, sign_definite_patch_bounds, ghost_layers),
+                   kinematic_reconciliation, sign_definite_patch_bounds, ghost_layers,
+                   redistancing),
         encoding="utf-8")
 
     case = {
@@ -523,6 +530,9 @@ def generate(level: int, equilibrium_deg: float, output_dir: Path, *,
         "dry_gap_over_h": float(dry_gap / h),
         "result_prefix": "result",
     }
+    if redistancing:
+        # Decision D39; omitted when off, so earlier cases are reproduced byte for byte.
+        case["interface_preserving_redistancing"] = True
     (output_dir / "case.json").write_text(json.dumps(case, indent=2) + "\n", encoding="utf-8")
     return case
 
@@ -546,6 +556,10 @@ def main(argv=None) -> int:
     parser.add_argument("--surface-tension-semi-implicit", choices=SEMI_IMPLICIT_OPTIONS,
                         default=None, help="default: NormalIncrement for --dt-rule fixed, "
                                            "None for capillary-limit")
+    parser.add_argument("--interface-preserving-redistancing", choices=("on", "off"),
+                        default="on" if INTERFACE_PRESERVING_REDISTANCING else "off",
+                        help="triggered interface-preserving redistancing (D38/D39, protocol: "
+                             "on; off writes the decks without it)")
     parser.add_argument("--ghost-layers", default="derived",
                         help="<Ghost_layers>: a nonnegative integer, or 'derived' (unset; default)")
     parser.add_argument("--max-steps", type=int, default=None,
@@ -556,7 +570,9 @@ def main(argv=None) -> int:
                     initial_deg=args.initial_angle, viscous_times=args.viscous_times,
                     snapshots=args.snapshots, dt_rule=args.dt_rule, dt_divisor=args.dt_divisor,
                     semi_implicit=args.surface_tension_semi_implicit,
-                    ghost_layers=args.ghost_layers, max_steps=args.max_steps, force=args.force)
+                    ghost_layers=args.ghost_layers,
+                    redistancing=args.interface_preserving_redistancing == "on",
+                    max_steps=args.max_steps, force=args.force)
     print(f"wrote {args.output_dir}")
     for key in ("level_R_over_h", "domain", "equilibrium_angle_degrees", "initial_angle_degrees",
                 "viscosity", "slip_length_over_h", "dt_rule", "dt", "dt_over_dt_B",

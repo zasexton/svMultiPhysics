@@ -426,3 +426,19 @@ def test_every_gate_applies_at_dt_over_2(study, capsys):
     text = capsys.readouterr().out
     assert "missing run at R/h=32" in text
     assert "[PASS] time_step: R/h=16 (finest common level)" in text
+
+
+def test_protocol_decks_enable_the_triggered_redistancing(tmp_path):
+    # Decision D39: on by default, after the reconciliation and before the
+    # patch bounds; off writes the earlier deck and case.json unchanged.
+    on = gen.generate(16, 60, "surface_stress", tmp_path / "on")
+    off = gen.generate(16, 60, "surface_stress", tmp_path / "off", redistancing=False)
+    text_on = (tmp_path / "on" / "solver.xml").read_text()
+    text_off = (tmp_path / "off" / "solver.xml").read_text()
+    key = "<Enable_interface_preserving_redistancing>true</Enable_interface_preserving_redistancing>"
+    assert key in text_on and key not in text_off
+    assert text_on.index("Enable_kinematic_reconciliation") < text_on.index(key) < \
+        text_on.index("Enable_sign_definite_patch_bounds")
+    assert text_on.replace("\n    " + key, "") == text_off
+    assert on["interface_preserving_redistancing"] is True
+    assert "interface_preserving_redistancing" not in off

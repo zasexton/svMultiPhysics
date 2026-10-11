@@ -17,6 +17,13 @@ benchmark for the single contact-angle mechanism of decision D4 in
   (`Physics/Docs/NavierStokesFreeSurface.md`, "Level-set wall maintenance").
   The protocol runs without reinitialization, like `static_drop_2d`;
   `--reinitialization` adds the production maintenance.
+- since decision D39 (2026-10-11), the triggered interface-preserving
+  redistancing (`Enable_interface_preserving_redistancing`): once the
+  interface has moved one cell, the level set becomes the distance to its own
+  zero polygon, continued across the wall at the contact points, and the
+  interface is restored by the zero-velocity reconciliation.
+  `--interface-preserving-redistancing off` writes the earlier decks byte for
+  byte.
 
 The same case serves the M4 part of the capillary-route comparison of
 decision D2, with the three capillary forms of `static_drop_2d`.

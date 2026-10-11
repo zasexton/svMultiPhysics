@@ -559,3 +559,18 @@ def test_candidate_uncertainty_follows_the_declared_rule():
                                3.0 * 0.01 * (1.0 + times), rtol=1.0e-9)
     with pytest.raises(ValueError, match="does not cover"):
         history.numerical_uncertainty([level(0.02)[:100], level(0.01)], protocol)
+
+
+def test_d4_deck_enables_the_triggered_redistancing(tmp_path):
+    # Decision D39: on by default in the d4 profile; off reproduces the
+    # earlier solver.xml and benchmark.json.
+    module = load_module()
+    on = module.write_case(tmp_path / "on", 4, 5.0e-4, 10, output_cadence=2)
+    off = module.write_case(tmp_path / "off", 4, 5.0e-4, 10, output_cadence=2,
+                            redistancing=False)
+    key = "<Enable_interface_preserving_redistancing>true</Enable_interface_preserving_redistancing>"
+    text_on = (tmp_path / "on" / "solver.xml").read_text()
+    text_off = (tmp_path / "off" / "solver.xml").read_text()
+    assert key in text_on and text_on.replace("\n  " + key, "") == text_off
+    assert "interface_preserving_redistancing" in on["d4_configuration"]
+    assert "interface_preserving_redistancing" not in off["d4_configuration"]
