@@ -1,0 +1,81 @@
+{
+  "benchmark": "sessile_drop_3d",
+  "milestone": "M4 (3D sessile at one angle)",
+  "status": "PROPOSED 2026-10-11, not yet approved; no protocol run before approval",
+  "fixed_on": null,
+  "levels": {
+    "R_over_h": [8, 16]
+  },
+  "protocol": {
+    "equilibrium_angles_degrees": [90],
+    "initial_angles_degrees": {"90": 120},
+    "domain": "quarter: x >= 0, z >= 0, drop axis on x = z = 0; the planes x = 0 and z = 0 are free-slip symmetry planes (zero normal velocity only), not contact walls. The full domain (--domain full) is the symmetry check, not part of the protocol.",
+    "configuration": "Decision D4, as sessile_drop_2d: Contact_line_model=PrescribedAngle on the bottom wall, Wall_slip_model=Navier, strong zero normal-only velocity on the contact wall, Surface_tension_form=SurfaceStress, no reinitialization; PDE velocity extension (D9), kinematic reconciliation and sign-definite patch bounds on.",
+    "laplace_number": 12,
+    "slip_length": "R/8, as sessile_drop_2d (l_s/h = 1, 2 at R/h = 8, 16)",
+    "viscous_times": 10,
+    "snapshots": 200,
+    "dt_rule": "fixed",
+    "time_step": "Decision D25: the fixed step dt = 0.02 at La = 12 for both levels, with the lagged normal-increment capillary term (Surface_tension_semi_implicit=NormalIncrement), rounded down to the 200 output intervals of D29 (dt = T/1400 = 1.7496e-2, 1.40 and 3.97 times the capillary limit dt_B of R/h = 8 and 16). --dt-rule capillary-limit is the 2D sessile rule (each level's dt_B, no lagged term).",
+    "reference": "spherical cap on y = 0 with the Young angle and the volume V(0)/f of the sampled initial level set (f = 1/4 for the quarter domain): R_ref = (V/(pi (2 - 3 cos theta_e + cos^3 theta_e)/3))^(1/3), base radius R_ref sin(theta_e), apex height R_ref (1 - cos(theta_e))",
+    "note": "Criteria apply to the quarter-domain study of the protocol dt rule at dt divisor 1 (both levels); the dt/2 study needs R/h = 8 only (time_step_criterion). R/h = 32 is not affordable in 3D (as D25). See README.md for the definitions and the cost."
+  },
+  "time_step_criterion": {
+    "id": "time_step",
+    "source": "Decisions D25 (dt/2 check at R/h = 8 only in 3D) and the sessile_drop_2d time_step_criterion end-state limits (1/20 of the M4 gates)",
+    "definition": "Between the dt divisor 1 and 2 quarter-domain studies at R/h = 8, at the end of the run: the largest change of a sector contact angle, and the relative changes of the base radius and the apex height.",
+    "quantities": [
+      {"id": "contact_angle_change_final", "limit": 0.1, "unit": "degrees"},
+      {"id": "base_radius_change_final", "limit": 0.001},
+      {"id": "apex_height_change_final", "limit": 0.001}
+    ],
+    "dt_divisors": [1, 2],
+    "refined_step_levels": [8],
+    "gates_at_each_step": "every criterion applies to the dt study; at dt/2 the criteria at R/h = 8 or 'each' apply, the others are reported as not evaluated",
+    "when_one_divisor_only": "reported as not evaluated; does not fail"
+  },
+  "criteria": [
+    {
+      "id": "contact_angle",
+      "quantity": "contact_angle_max_error_degrees",
+      "definition": "max over the azimuthal sectors of 30 degrees of the contact line of |theta - theta_e| at the end of the run. theta of a sector is measured through the liquid from a circle fitted to the meridional projection (distance from the drop axis, height) of the interface points (edge zero crossings of phi_h) of the sector with 0 <= y <= 0.25 R_ref, at the circle point at the mean radius of the sector's wall zero crossings. The mean over the sectors and the cell-gradient angles along the line are reported.",
+      "limit": 2.0,
+      "at_level": 16,
+      "monotone": "strictly_decreasing",
+      "monotone_levels": [8, 16],
+      "source": "Tracker section 5, M4 working criterion (angle error <= 2 degrees, decreasing), read as in sessile_drop_2d (the largest error over the contact line; in 2D the two contact points); gating level R/h = 16 with the trend over 8/16, as decision D25 for the 3D static sphere"
+    },
+    {
+      "id": "base_radius",
+      "quantity": "base_radius_relative_error",
+      "definition": "|b - b_ref| / b_ref at the end of the run; b is the mean distance of the wall zero crossings of phi_h from the drop axis",
+      "limit": 0.02,
+      "at_level": 16,
+      "source": "Tracker section 5, M4 working criterion (base radius within 2%), at the level of the angle criterion"
+    },
+    {
+      "id": "apex_height",
+      "quantity": "apex_height_relative_error",
+      "definition": "|H - H_ref| / H_ref at the end of the run; H is the largest height above the wall of the interface points",
+      "limit": 0.02,
+      "at_level": 16,
+      "source": "Tracker section 5, M4 working criterion (apex height within 2%), at the level of the angle criterion"
+    },
+    {
+      "id": "volume_drift",
+      "quantity": "liquid_volume_relative_drift_max",
+      "definition": "max over all outputs of |V(t) - V(0)| / V(0), V the exact volume of {phi_h < 0} and V(0) that of the sampled initial level set",
+      "limit": 0.0001,
+      "at_level": "each",
+      "source": "Decision D1 working criterion (volume drift <= 1e-4), gated on the maximum over the run (D11)"
+    },
+    {
+      "id": "no_velocity_growth",
+      "quantity": "max_speed_growth_ratio",
+      "definition": "max|u_h| (liquid vertices) at the end of the run divided by the largest max|u_h| over the outputs with T/2 <= t <= 3T/4",
+      "limit": 1.0,
+      "at_level": "each",
+      "source": "Decision D1 working criterion (no growth of max|u| in time), as sessile_drop_2d"
+    }
+  ]
+}
