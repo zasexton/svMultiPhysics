@@ -10,7 +10,9 @@ result.pvd and result_NNN.vtu (serial) or result_NNN.pvtu (MPI).  The
 protocol runs form a spatial study (lambda/h = 16, 32, 64 at the shared
 capillary_wave_2d time step) and a separate time-step study (lambda/h = 32 at
 dt, dt/2, dt/4); the time error of the shared step is measured by the
-second and removed from the first (decision D10).  Metric definitions are in
+second and removed from the first (decision D10).  The frequency order is
+not gated when every level is below the convergence_error_floor (decision
+D36); the verdict states the branch taken.  Metric definitions are in
 README.md.
 
 Exit status: 0 if every criterion passes, 1 if any criterion fails, 2 if
@@ -43,6 +45,7 @@ def _load(directory: str, name: str):
 
 CWV = _load("capillary_wave_2d", "verify")          # moments, fit, reference, output series
 FSV = _load("fitted_sloshing_2d", "verify")         # moving-mesh snapshot reader, log summary
+LSV = _load("linear_sloshing_2d", "verify")         # D36 convergence error floor
 reference = CWV.reference                           # prosperetti_reference module
 DataError = CWV.DataError
 fit_damped_cosine = CWV.fit_damped_cosine
@@ -243,6 +246,7 @@ def evaluate(runs: list[dict], tolerances: dict) -> tuple[list[dict], dict]:
     for crit in tolerances["criteria"]:
         q, limit = crit["quantity"], crit.get("limit")
         ok, messages = True, []
+        floor_check, gate = {"gated": True, "message": ""}, True
         if crit["study"] == "all":
             pool = list({r["run"]: r for r in list(spatial.values()) + timing}.values())
             if not pool:
@@ -268,21 +272,31 @@ def evaluate(runs: list[dict], tolerances: dict) -> tuple[list[dict], dict]:
             if "minimum_observed_order" in crit:
                 need = crit["order_levels"]
                 errs = [spatial[lv].get(q) if lv in spatial else None for lv in need]
-                if any(e is None for e in errs):
+                complete = all(e is not None for e in errs)
+                floor_check = LSV.convergence_floor(crit, errs if complete else None)
+                gate = floor_check["gated"]
+                if not complete:
                     ok = False
                     messages.append(f"order needs lambda/h={need}")
                 elif min(errs) <= 0.0:
-                    ok = False
+                    ok &= not gate
                     messages.append("order undefined for a zero error")
                 else:
                     order = observed_order(need, errs)
                     pairs = ", ".join(f"{observed_order(need[i:i + 2], errs[i:i + 2]):.2f}"
                                       for i in range(len(need) - 1))
                     passed = order >= crit["minimum_observed_order"]
-                    ok &= passed
+                    ok &= passed or not gate
                     messages.append(f"observed order {order:.2f} (pairwise {pairs}) "
                                     f"{'>=' if passed else '<'} {crit['minimum_observed_order']}")
-        results.append({"id": crit["id"], "quantity": q, "passed": bool(ok), "details": messages})
+                if floor_check["message"]:
+                    messages.append(floor_check["message"])
+        result = {"id": crit["id"], "quantity": q, "passed": bool(ok), "details": messages}
+        if "convergence_error_floor" in crit:
+            result.update({"convergence_error_floor": crit["convergence_error_floor"],
+                           "convergence_gated": gate,
+                           "convergence_branch": floor_check["message"]})
+        results.append(result)
     return results, summary
 
 

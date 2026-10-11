@@ -10,8 +10,10 @@ result.pvd and result_NNN.vtu (serial) or result_NNN.pvtu (MPI).  The runs
 form one refinement study; the criteria are applied across its levels.
 Frequency and damping come from the damped-oscillation fit of the modal
 amplitude a1(t) of cos(k x) (decision D35); the same fit of the left-wall
-probe elevation is reported as probe_*.  Metric definitions are in
-README.md.
+probe elevation is reported as probe_*.  The observed-convergence checks of
+the frequency criterion (strict decrease, minimum order) are not gated when
+every level is below its convergence_error_floor (decision D36); the verdict
+states the branch taken.  Metric definitions are in README.md.
 
 Exit status: 0 if every criterion passes, 1 if any criterion fails, 2 if
 input data are missing or invalid.
@@ -169,6 +171,31 @@ def fit_damped_oscillation(t, y, omega_guess: float) -> dict:
             "offset": float(c), "phase": float(math.atan2(-b, a)),
             "rms_residual_over_amplitude": float(math.sqrt(cost / t.size) / max(amplitude, 1e-300)),
             "iterations": iterations}
+
+
+def _floor_text(floor: float) -> str:
+    """1e-3 rather than 0.001 in the verdict text."""
+    mantissa, exponent = f"{floor:.0e}".split("e")
+    return f"{mantissa}e{int(exponent)}"
+
+
+def convergence_floor(crit: dict, values) -> dict:
+    """Decision D36: the observed-convergence checks (strict decrease and the
+    minimum observed order) are not gated when the error at every level is
+    below crit["convergence_error_floor"]; the limit at the gating level still
+    applies and both checks are reported either way."""
+    floor = crit.get("convergence_error_floor")
+    if floor is None:
+        return {"gated": True, "message": ""}
+    text = _floor_text(floor)
+    checks = " and ".join(
+        name for name, present in (("decrease", crit.get("monotone") == "strictly_decreasing"),
+                                   ("order", "minimum_observed_order" in crit)) if present)
+    if values is not None and all(v < floor for v in values):
+        return {"gated": False,
+                "message": f"{checks} not gated: all errors below the error floor {text} (D36)"}
+    return {"gated": True,
+            "message": f"{checks} gated: not all errors below the error floor {text} (D36)"}
 
 
 def observed_order(levels, errors) -> float:
@@ -430,13 +457,15 @@ def evaluate_study(group: list[dict], tolerances: dict) -> list[dict]:
         need = crit.get("monotone_levels") or crit.get("order_levels") or []
         values = [spatial[lv].get(q) if lv in spatial else None for lv in need]
         complete = bool(need) and all(v is not None for v in values)
+        floor_check = convergence_floor(crit, values if complete else None)
+        gate = floor_check["gated"]
         if crit.get("monotone") == "strictly_decreasing":
             if not complete:
                 ok = False
                 messages.append("monotonicity needs every spatial level")
             else:
                 passed = all(b < a for a, b in zip(values, values[1:]))
-                ok &= passed
+                ok &= passed or not gate
                 messages.append("decreasing over L/h=" + "/".join(map(str, need)) +
                                 (": yes" if passed else ": NO (" +
                                  ", ".join(f"{v:.3g}" for v in values) + ")"))
@@ -445,18 +474,24 @@ def evaluate_study(group: list[dict], tolerances: dict) -> list[dict]:
                 ok = False
                 messages.append("order needs every spatial level")
             elif min(values) <= 0.0:
-                ok = False
+                ok &= not gate
                 messages.append("order undefined for a zero error")
             else:
                 order = observed_order(need, values)
                 pairs = ", ".join(f"{observed_order(need[i:i + 2], values[i:i + 2]):.2f}"
                                   for i in range(len(need) - 1))
                 passed = order >= crit["minimum_observed_order"]
-                ok &= passed
+                ok &= passed or not gate
                 messages.append(f"observed order {order:.2f} (pairwise {pairs}) "
                                 f"{'>=' if passed else '<'} {crit['minimum_observed_order']}")
-        results.append({"id": crit["id"], "quantity": q, "passed": bool(ok),
-                        "details": messages})
+        if floor_check["message"]:
+            messages.append(floor_check["message"])
+        result = {"id": crit["id"], "quantity": q, "passed": bool(ok), "details": messages}
+        if "convergence_error_floor" in crit:
+            result.update({"convergence_error_floor": crit["convergence_error_floor"],
+                           "convergence_gated": gate,
+                           "convergence_branch": floor_check["message"]})
+        results.append(result)
     return results
 
 

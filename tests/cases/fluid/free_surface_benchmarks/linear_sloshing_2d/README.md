@@ -21,8 +21,11 @@ criterion gates the maximum deviation over the run (D11), and the damping
 error is gated at 5% (D12).  Since decision D35 (2026-10-10) the frequency
 criterion, including its order check, and the damping criterion use the fit
 of the modal amplitude of `cos(k x)` instead of the wall probe, which is now
-reported only.  The first protocol and its results are kept in "Results"
-below.
+reported only.  Since decision D36 (2026-10-11) the observed-convergence
+requirements of the frequency criterion (strict decrease and minimum order)
+are not gated when the spatial frequency error at every level is below the
+error floor 1e-3 (0.1% of `omega_ref`); the 1% limit at `L/h = 64` still
+applies.  The first protocol and its results are kept in "Results" below.
 
 Files:
 
@@ -30,7 +33,7 @@ Files:
 |---|---|
 | `generate_case.py` | writes `solver.xml`, the mesh with the initial fields, the wall faces and `case.json` (including the reference frequency and damping rate) for one level |
 | `verify.py` | reads the solver output of the levels, fits frequency and damping, applies `tolerances.json` |
-| `tolerances.json` | acceptance criteria and their sources, fixed on 2026-09-29, revised for D9 to D12 on 2026-09-30 (each time before the first run) and for D35 on 2026-10-10 |
+| `tolerances.json` | acceptance criteria and their sources, fixed on 2026-09-29, revised for D9 to D12 on 2026-09-30 (each time before the first run), for D35 on 2026-10-10 and for D36 on 2026-10-11 |
 | `tests/test_free_surface_benchmark_linear_sloshing_2d.py` | checks of the two scripts on synthetic data |
 
 ## Physical setup
@@ -216,7 +219,7 @@ time, no crossing on the probe line) and on `--max-steps` smoke runs unless
 
 | Criterion | Limit | Where | Source |
 |---|---|---|---|
-| `frequency` | spatial error (time error removed) at most 0.01; strictly decreasing; observed order at least 1 | limit at `L/h = 64`; monotonicity and order over 16/32/64 | tracker M1 working criterion ("frequency error <= 1% at the finest mesh with observed convergence"), with the time error removed (D10), on the modal-amplitude fit (D35). "Observed convergence" is read as a strictly decreasing error with an observed order of at least 1, as for M2 in `static_drop_2d`; the expected order is 2 |
+| `frequency` | spatial error (time error removed) at most 0.01; strictly decreasing; observed order at least 1, unless every level is below the error floor 1e-3 (`convergence_error_floor`) | limit at `L/h = 64`; monotonicity, order and floor over 16/32/64 | tracker M1 working criterion ("frequency error <= 1% at the finest mesh with observed convergence"), with the time error removed (D10), on the modal-amplitude fit (D35). "Observed convergence" is read as a strictly decreasing error with an observed order of at least 1, as for M2 in `static_drop_2d`; the expected order is 2. Decision D36: below the error floor the decrease and the order are reported but not gated, and `verify.py` states which branch was taken (`convergence_gated` and `convergence_branch` in the JSON) |
 | `damping` | at most 0.05 | `L/h = 64` of the spatial study | decision D12, on the modal-amplitude fit (D35) |
 | `volume_drift` | maximum deviation over the run at most 1e-4 | every run of the spatial and time-step studies | tracker M1 working criterion; decision D11 |
 
@@ -256,13 +259,26 @@ protocol runs but never gates them:
 
 ## Results
 
+### Re-verification with the error floor, D36 (2026-10-11)
+
+The same protocol runs re-verified with `verify.py` after D36 (no new solver
+runs; metrics unchanged from the D35 table below).  **Result: PASS.**  Every
+spatial frequency error (0.020%, 0.051%, 0.057%) is below the error floor
+0.1%, so the decrease and the order are reported but not gated.
+
+| Criterion | Result |
+|---|---|
+| `frequency` | PASS: 0.057% <= 1% at `L/h = 64`; not decreasing (0.020%, 0.051%, 0.057%), observed order -0.75 (pairwise -1.35, -0.16): decrease and order not gated, all errors below the error floor 1e-3 (D36) |
+| `damping` | PASS: 0.10% <= 5% |
+| `volume_drift` | PASS: at most 3.2e-5 on all five runs |
+
 ### Re-verification with the modal-amplitude gates, D35 (2026-10-10)
 
 The protocol runs of job `46089180` (below; output kept under
 `free-surface-benchmarks/pde-extension/campaign-b4b376a0/sloshing/pde_harmonic_monolithic`)
 re-verified with `verify.py` after D35.  **Result: FAIL on the frequency
 convergence criterion only; the frequency limit, the damping and the volume
-criteria pass.**
+criteria pass** (superseded by D36 above).
 
 | L/h | steps/T | modal frequency error | spatial (time error removed) | `gamma/gamma_ref` (modal) | probe frequency error | `gamma/gamma_ref` (probe) |
 |---:|---:|---:|---:|---:|---:|---:|

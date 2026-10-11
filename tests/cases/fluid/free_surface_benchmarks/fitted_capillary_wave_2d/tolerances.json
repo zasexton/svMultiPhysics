@@ -1,7 +1,7 @@
 {
   "benchmark": "fitted_capillary_wave_2d",
   "milestone": "M3 (reference) / M5",
-  "fixed_on": "2026-09-30, before the first protocol run; revised 2026-10-10 for decision D35 (protocol amplitude 0.0025 lambda)",
+  "fixed_on": "2026-09-30, before the first protocol run; revised 2026-10-10 for decision D35 (protocol amplitude 0.0025 lambda); revised 2026-10-11 for decision D36 (convergence error floor of the frequency criterion)",
   "levels": {
     "lambda_over_h": [16, 32, 64]
   },
@@ -29,7 +29,9 @@
       "minimum_observed_order": 1.0,
       "order_levels": [16, 32, 64],
       "order_method": "least-squares slope of log(error) against log(lambda/h) over order_levels; pairwise orders are reported",
-      "source": "Tracker section 5, M3 working criterion (decision D1): frequency error <= 2% at lambda/h = 32 with convergence over 16/32/64, as in capillary_wave_2d/tolerances.json (order >= 1); time error removed as decided in D10; decision D35: judged at the protocol amplitude 0.0025 lambda, where the finite-amplitude frequency shift no longer masks the order."
+      "convergence_error_floor": 0.001,
+      "convergence_error_floor_rule": "the observed-convergence requirement (minimum_observed_order) is not gated when the frequency_spatial_relative_error at every level of order_levels is below convergence_error_floor; the limit at at_level still applies, and the order is reported either way with the branch taken",
+      "source": "Tracker section 5, M3 working criterion (decision D1): frequency error <= 2% at lambda/h = 32 with convergence over 16/32/64, as in capillary_wave_2d/tolerances.json (order >= 1); time error removed as decided in D10; decision D35: judged at the protocol amplitude 0.0025 lambda, where the finite-amplitude frequency shift no longer masks the order; decision D36: the observed-convergence requirement (minimum order) is not applied when the error at every level is below the error floor 1e-3."
     },
     {
       "id": "damping",

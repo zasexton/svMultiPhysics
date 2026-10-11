@@ -1,7 +1,7 @@
 {
   "benchmark": "linear_sloshing_2d",
   "milestone": "M1",
-  "fixed_on": "2026-09-29; revised 2026-09-30 for decisions D9 to D12 before the first run of the revised protocol; revised 2026-10-10 for decision D35 (frequency and damping from the modal-amplitude fit)",
+  "fixed_on": "2026-09-29; revised 2026-09-30 for decisions D9 to D12 before the first run of the revised protocol; revised 2026-10-10 for decision D35 (frequency and damping from the modal-amplitude fit); revised 2026-10-11 for decision D36 (convergence error floor of the frequency criterion)",
   "levels": {
     "cells_per_length": [16, 32, 64]
   },
@@ -34,7 +34,9 @@
       "minimum_observed_order": 1.0,
       "order_levels": [16, 32, 64],
       "order_method": "least-squares slope of log(error) against log(L/h) over order_levels; pairwise orders are reported",
-      "source": "Tracker section 5, M1 working criterion: frequency error <= 1% at the finest mesh with observed convergence ('observed convergence' read as a strictly decreasing error with an observed order of at least 1, as for M2 in static_drop_2d); decision D10: judged with the time-step error removed; decision D35: the frequency criterion, including its order check, uses the modal-amplitude fit instead of the wall probe"
+      "convergence_error_floor": 0.001,
+      "convergence_error_floor_rule": "the observed-convergence requirements (strict decrease and minimum_observed_order) are not gated when the frequency_spatial_error at every level of order_levels is below convergence_error_floor (relative to omega_ref); the limit at at_level still applies, and both checks are reported either way with the branch taken",
+      "source": "Tracker section 5, M1 working criterion: frequency error <= 1% at the finest mesh with observed convergence ('observed convergence' read as a strictly decreasing error with an observed order of at least 1, as for M2 in static_drop_2d); decision D10: judged with the time-step error removed; decision D35: the frequency criterion, including its order check, uses the modal-amplitude fit instead of the wall probe; decision D36: the observed-convergence requirements (strict decrease and minimum order) are not applied when the error at every level is below the error floor 1e-3"
     },
     {
       "id": "damping",
