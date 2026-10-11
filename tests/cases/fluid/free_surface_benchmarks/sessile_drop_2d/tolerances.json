@@ -75,7 +75,9 @@
       "definition": "max|u_h| (liquid vertices) at the end of the run divided by the largest max|u_h| over the outputs in the third quarter of the run (T/2 <= t <= 3T/4). A ratio <= 1 means the final value lies within the envelope of the preceding quarter.",
       "limit": 1.0,
       "at_level": "each",
-      "source": "Decision D1 working criterion (tracker section 5: no growth of max|u| in time)"
+      "rest_capillary_floor": 0.001,
+      "rest_capillary_floor_rule": "the ratio is reported for every run; it is gated only when mu max|u_h|/gamma at the last output is at least rest_capillary_floor, and verify.py states the branch taken",
+      "source": "Decision D1 working criterion (tracker section 5: no growth of max|u| in time); decision D39: not gated for a run whose final capillary number mu max|u_h|/gamma (last output) is below rest_capillary_floor (a drop at rest), reported either way"
     }
   ],
   "time_step_criterion": {

@@ -442,3 +442,28 @@ def test_protocol_decks_enable_the_triggered_redistancing(tmp_path):
     assert text_on.replace("\n    " + key, "") == text_off
     assert on["interface_preserving_redistancing"] is True
     assert "interface_preserving_redistancing" not in off
+
+
+def test_velocity_growth_is_not_gated_for_a_drop_at_rest():
+    # Decision D39: below the rest floor of the final capillary number the
+    # growth ratio is reported only; above it the ratio is gated as before.
+    tol = json.loads((BENCHMARK / "tolerances.json").read_text())
+    growth = next(c for c in tol["criteria"] if c["id"] == "no_velocity_growth")
+    assert growth["rest_capillary_floor"] == 0.001 and "D39" in growth["source"]
+
+    def run(level, ca, ratio):
+        return {"level": level, "contact_angle_error_degrees": 1.0 if level == 32 else 2.0,
+                "base_radius_relative_error": 0.01, "apex_height_relative_error": 0.01,
+                "liquid_area_relative_drift_max": 5e-5, "max_speed_growth_ratio": ratio,
+                "capillary_number_at_end": ca}
+
+    def verdict(runs):
+        return next(v for v in ver.evaluate_group(runs, tol, {16, 32})
+                    if v["id"] == "no_velocity_growth")
+
+    at_rest = verdict([run(16, 2e-4, 1.8), run(32, 5e-4, 1.3)])
+    assert at_rest["passed"] and at_rest["gated_by_level"] == {"16": False, "32": False}
+    assert "not gated: final capillary number" in at_rest["details"][0]
+    moving = verdict([run(16, 2e-4, 0.9), run(32, 2e-3, 1.3)])
+    assert not moving["passed"] and moving["gated_by_level"] == {"16": False, "32": True}
+    assert "1.3 > 1 (gated: final capillary number" in moving["details"][1]

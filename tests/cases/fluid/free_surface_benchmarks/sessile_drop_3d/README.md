@@ -122,7 +122,7 @@ base radius and apex height are within 0.25% at `R/h = 8` and 0.05% at 16.
 | `base_radius` | at most 2% | `R/h = 16` | tracker M4 working criterion |
 | `apex_height` | at most 2% | `R/h = 16` | tracker M4 working criterion |
 | `volume_drift` | at most 1e-4 | every run | D1, D11 |
-| `no_velocity_growth` | ratio at most 1 | every run | D1 |
+| `no_velocity_growth` | ratio at most 1, not gated when the final capillary number `mu max|u_h|/gamma` is below 1e-3 (`rest_capillary_floor`) | every run | D1; rest floor D39 |
 | `time_step` | end-state changes at most 0.1 degree, 0.1%, 0.1% between `dt` and `dt/2` | `R/h = 8` | D25 (dt/2 at the coarse level only) and D38 (it validates the fixed-step rule); the limits follow the 2D sessile time-step decision (D35 item 4) |
 
 ## How to run

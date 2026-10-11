@@ -159,7 +159,8 @@ def test_criteria_gate_r_over_h_16_and_the_angle_trend():
     def run(level, angle, base=0.01, apex=0.01, drift=5e-5, growth=0.9):
         return {"level": level, "contact_angle_max_error_degrees": angle,
                 "base_radius_relative_error": base, "apex_height_relative_error": apex,
-                "liquid_volume_relative_drift_max": drift, "max_speed_growth_ratio": growth}
+                "liquid_volume_relative_drift_max": drift, "max_speed_growth_ratio": growth,
+                "capillary_number_at_end": 1e-2}
 
     ok = ver.evaluate_group([run(8, 3.0), run(16, 1.5)], tol)
     assert all(v["passed"] for v in ok)
@@ -180,3 +181,19 @@ def test_protocol_decks_enable_the_triggered_redistancing(tmp_path):
     assert key in text_on and text_on.replace("\n    " + key, "") == text_off
     assert on["interface_preserving_redistancing"] is True
     assert "interface_preserving_redistancing" not in off
+
+
+def test_velocity_growth_is_not_gated_for_a_drop_at_rest():
+    tol = json.loads((BENCH / "tolerances.json").read_text())
+
+    def run(level, ca, ratio, angle):
+        return {"level": level, "contact_angle_max_error_degrees": angle,
+                "base_radius_relative_error": 0.01, "apex_height_relative_error": 0.01,
+                "liquid_volume_relative_drift_max": 5e-5, "max_speed_growth_ratio": ratio,
+                "capillary_number_at_end": ca}
+
+    verdicts = {v["id"]: v for v in ver.evaluate_group([run(8, 1e-4, 2.0, 3.0),
+                                                         run(16, 3e-3, 0.5, 1.5)], tol)}
+    growth = verdicts["no_velocity_growth"]
+    assert growth["passed"] and growth["gated_by_level"] == {"8": False, "16": True}
+    assert growth["rest_capillary_floor"] == 0.001
