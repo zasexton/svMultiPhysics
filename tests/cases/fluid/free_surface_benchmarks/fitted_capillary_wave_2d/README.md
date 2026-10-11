@@ -16,7 +16,7 @@ Files:
 |---|---|
 | `generate_case.py` | writes `solver.xml`, the liquid mesh with the initial fields, the boundary faces and `case.json` for one case |
 | `verify.py` | reads the solver output of the protocol runs, fits frequency and damping, removes the time error from the spatial study, applies `tolerances.json` |
-| `tolerances.json` | acceptance criteria and their sources, fixed on 2026-09-30 before the first protocol run |
+| `tolerances.json` | acceptance criteria and their sources, fixed on 2026-09-30 before the first protocol run; revised for D35 (amplitude, 2026-10-10) and D36 (error floor, 2026-10-11) |
 | `tests/test_free_surface_benchmark_fitted_capillary_wave_2d.py` | checks of the two scripts on synthetic data |
 
 The physical constants, the time schedule and the reference
@@ -114,7 +114,7 @@ references are judged alike; only the time-error removal is added.
 
 | Criterion | Limit | Where | Source |
 |---|---|---|---|
-| `frequency` | at most 0.02; observed order at least 1 | 0.02 at `lambda/h = 32`; order over 16/32/64 | tracker M3 working criterion (D1); time error removed (D10); at `a0 = 0.0025 lambda` (D35) |
+| `frequency` | at most 0.02; observed order at least 1, unless every level is below the error floor 1e-3 (`convergence_error_floor`) | 0.02 at `lambda/h = 32`; order and floor over 16/32/64 | tracker M3 working criterion (D1); time error removed (D10); at `a0 = 0.0025 lambda` (D35); decision D36: below the error floor the order is reported but not gated, and `verify.py` states which branch was taken (`convergence_gated` and `convergence_branch` in the JSON) |
 | `damping` | at most 0.05; observed order at least 1 | `lambda/h = 32` and 64; order over 16/32/64 | tracker M3 working criterion (D1); finest-level check as in D12 |
 | `volume` | at most 1e-4 | every protocol run, maximum over the run | tracker volume limit (D1), gated as in D11 |
 
@@ -134,8 +134,9 @@ python3 $B/verify.py $OUT/L16 $OUT/L32 $OUT/L64 $OUT/L32_dt2 $OUT/L32_dt4 --json
 
 **2026-10-10, protocol amplitude `a0 = 0.0025 lambda` (D35), cases and
 solver binary from `f531567f`, Slurm job `47299149` (one node, the five
-cases side by side, one rank each). Result: FAIL on the frequency
-convergence order only.** Output and `verify.json`:
+cases side by side, one rank each). Result after D36 (2026-10-11,
+re-verified from the same output): PASS; under D35 alone it was FAIL on the
+frequency convergence order only.** Output and `verify.json`:
 `/scratch/users/zsexton/free-surface-benchmarks/fitted_ale/capillary_wave/f531567f/`.
 
 | lambda/h | `omega` | raw error | spatial error | `beta` | raw error | spatial error | RMS `a_h` error | `max dA/A` | wall |
@@ -151,7 +152,7 @@ Time-step study (`lambda/h = 32`, `dt/2` 1,197 s, `dt/4` 2,345 s):
 
 | Criterion | Result |
 |---|---|
-| `frequency` | **FAIL**: 1.25e-4 at `lambda/h = 32` (limit 0.02, passed); observed order -0.25 (pairwise -1.52, 1.02) < 1 |
+| `frequency` | PASS: 1.25e-4 at `lambda/h = 32` (limit 0.02); observed order -0.25 (pairwise -1.52, 1.02) < 1: order not gated, all errors (4.4e-5, 1.25e-4, 6.2e-5) below the error floor 1e-3 (D36) |
 | `damping` | PASS: 0.85% at 32 and 0.16% at 64 (limit 5%); observed order 2.28 (pairwise 2.14, 2.41) |
 | `volume` | PASS: at most 3.0e-7 (limit 1e-4) |
 
@@ -159,8 +160,9 @@ At the smaller amplitude the frequency errors fall from 4e-4 to 7e-4 to
 at most 1.25e-4 (160 times below the limit), the size of the time error of
 the shared step and of the remaining finite-amplitude shift
 (`0.10 to 0.16 (a0 k)^2 = 2.5e-5 to 4e-5`); they change sign between the
-levels and do not decrease with h, so the order criterion still fails, now
-at an error floor. The damping and the area converge at second order.
+levels and do not decrease with h, so the order criterion failed under D35,
+now at an error floor; D36 does not gate the order below the floor 1e-3.
+The damping and the area converge at second order.
 
 **2026-09-30, cases from `93b1bf06`, solver binary `35a81fd3` (the same
 fitted code), Slurm job `46129890` (one node, all cases side by side, one

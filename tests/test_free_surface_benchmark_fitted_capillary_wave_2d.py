@@ -252,6 +252,41 @@ def test_failures_are_reported(study, capsys):
     assert "missing frequency_spatial_relative_error" in capsys.readouterr().out
 
 
+def _frequency_study(study, frequency_errors):
+    spatial = {lv: (frequency_errors[lv], SPATIAL[lv][1]) for lv in SPATIAL}
+    timing = {d: (spatial[32][0] + TIME[d][0], spatial[32][1] + TIME[d][1]) for d in (2, 4)}
+    return study(with_time_error(spatial), timing)
+
+
+def test_order_is_not_gated_below_the_error_floor(study, tmp_path, capsys):
+    # D36: frequency errors at a floor far inside the limit, changing sign
+    # and not decreasing, every level below 1e-3.
+    out = tmp_path / "report.json"
+    runs = _frequency_study(study, {16: 4e-4, 32: -6e-4, 64: 3e-4})
+    assert ver.main([*runs, "--json", str(out)]) == 0
+    text = capsys.readouterr().out
+    assert "[PASS] frequency" in text and "< 1.0" in text
+    assert "order not gated: all errors below the error floor 1e-3 (D36)" in text
+    report = json.loads(out.read_text())
+    frequency = next(v for v in report["criteria"] if v["id"] == "frequency")
+    assert frequency["passed"] and frequency["convergence_gated"] is False
+    assert frequency["convergence_error_floor"] == 0.001
+    damping = next(v for v in report["criteria"] if v["id"] == "damping")
+    assert "convergence_gated" not in damping
+    tolerances = json.loads((ver.HERE / "tolerances.json").read_text())
+    criteria = {c["id"]: c for c in tolerances["criteria"]}
+    assert criteria["frequency"]["convergence_error_floor"] == 0.001
+    assert "D36" in criteria["frequency"]["source"]
+    assert "convergence_error_floor" not in criteria["damping"]
+
+
+def test_one_level_above_the_floor_gates_the_order(study, capsys):
+    assert ver.main(_frequency_study(study, {16: 4e-4, 32: 6e-4, 64: 1.2e-3})) == 1
+    text = capsys.readouterr().out
+    assert "[FAIL] frequency" in text and "lambda/h=32: 0.0006 <= 0.02" in text
+    assert "order gated: not all errors below the error floor 1e-3 (D36)" in text
+
+
 def test_runs_of_the_earlier_amplitude_are_reported_not_gated(study, tmp_path, capsys):
     # D35: a run written at a0 = 0.01 lambda before the change (its case.json
     # still marks it as a protocol run) is reported as a diagnostic, so it

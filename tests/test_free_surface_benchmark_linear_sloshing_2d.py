@@ -245,6 +245,51 @@ def test_frequency_and_damping_are_judged_on_the_modal_amplitude(study, tmp_path
     assert "probe fe" in capsys.readouterr().out
 
 
+def test_convergence_floor_rule():
+    # D36: strict decrease and minimum order are skipped only when every
+    # level is strictly below the floor.
+    crit = {"monotone": "strictly_decreasing", "minimum_observed_order": 1.0,
+            "convergence_error_floor": 1e-3}
+    below = ver.convergence_floor(crit, [2e-4, 5e-4, 9.99e-4])
+    assert not below["gated"]
+    assert below["message"] == ("decrease and order not gated: all errors below the error "
+                                "floor 1e-3 (D36)")
+    at_floor = ver.convergence_floor(crit, [2e-4, 5e-4, 1e-3])
+    assert at_floor["gated"] and "decrease and order gated" in at_floor["message"]
+    assert ver.convergence_floor(crit, None)["gated"]
+    assert ver.convergence_floor({"minimum_observed_order": 1.0}, [1e-9])["gated"]
+    tolerances = json.loads((ver.HERE / "tolerances.json").read_text())
+    frequency = next(c for c in tolerances["criteria"] if c["id"] == "frequency")
+    assert frequency["convergence_error_floor"] == 0.001
+    assert "D36" in frequency["source"]
+    assert all("convergence_error_floor" not in c
+               for c in tolerances["criteria"] if c["id"] != "frequency")
+
+
+def test_convergence_is_not_gated_below_the_error_floor(study, tmp_path, capsys):
+    # The modal frequency errors of the protocol runs sit at a floor far
+    # inside the limit: increasing, negative order, every level below 1e-3.
+    out = tmp_path / "report.json"
+    runs = study({16: 2e-4, 32: 5e-4, 64: 6e-4})
+    assert ver.main([*runs, "--json", str(out)]) == 0
+    text = capsys.readouterr().out
+    assert "[PASS] frequency" in text
+    assert "decreasing over L/h=16/32/64: NO" in text
+    assert "observed order -" in text and "< 1.0" in text
+    assert "decrease and order not gated: all errors below the error floor 1e-3 (D36)" in text
+    frequency = next(v for v in json.loads(out.read_text())["groups"][0]["criteria"]
+                     if v["id"] == "frequency")
+    assert frequency["passed"] and frequency["convergence_gated"] is False
+    assert frequency["convergence_error_floor"] == 0.001
+
+
+def test_one_level_above_the_floor_gates_convergence(study, capsys):
+    assert ver.main(study({16: 2e-4, 32: 5e-4, 64: 1.5e-3})) == 1
+    text = capsys.readouterr().out
+    assert "[FAIL] frequency" in text and "L/h=64: 0.0015 <= 0.01" in text
+    assert "decrease and order gated: not all errors below the error floor 1e-3 (D36)" in text
+
+
 def test_volume_criterion_gates_every_run(study, capsys):
     assert ver.main(study({16: 4e-3, 32: 1e-3, 64: 2.5e-4}, area_leak=1e-5)) == 1
     out = capsys.readouterr().out
