@@ -36,6 +36,7 @@
 #include "FE/LevelSet/LevelSetReinitialization.h"
 #include "FE/LevelSet/LevelSetSignDefinitePatchBounds.h"
 #include "FE/LevelSet/LevelSetInterfacePreservingRedistancing.h"
+#include "FE/LevelSet/LevelSetInterfacePreservingRedistancing3D.h"
 #include "FE/LevelSet/LevelSetStaticCapillaryEquilibrium.h"
 #include "FE/LevelSet/LevelSetTransport.h"
 #include "FE/LevelSet/LevelSetVelocityExtensionConstraint.h"
@@ -15873,9 +15874,18 @@ bool applyLevelSetMaintenance(
       // changes it to test the sensitivity.
       const auto transport_velocity = levelSetTransportVelocityCoefficients(
           *sim.fe_system, velocity_field, fe_solution);
-      const auto motion = svmp::FE::level_set::levelSetInterfaceMotionScale(
-          mesh_access, phi_dofs, sim.fe_system->fieldDofHandler(velocity_field),
-          volume_options.isovalue, input, transport_velocity);
+      // Tetra4 meshes use the zero-surface variants (exact distance to the
+      // P1 zero surface, continued across the boundary at the open edges);
+      // Triangle3 meshes the zero-polygon ones.
+      const bool three_dimensional = mesh_access.dimension() == 3;
+      const auto motion =
+          three_dimensional
+              ? svmp::FE::level_set::levelSetInterfaceMotionScale3D(
+                    mesh_access, phi_dofs, sim.fe_system->fieldDofHandler(velocity_field),
+                    volume_options.isovalue, input, transport_velocity)
+              : svmp::FE::level_set::levelSetInterfaceMotionScale(
+                    mesh_access, phi_dofs, sim.fe_system->fieldDofHandler(velocity_field),
+                    volume_options.isovalue, input, transport_velocity);
       if (!motion.success) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Level-set interface-preserving "
@@ -15904,9 +15914,13 @@ bool applyLevelSetMaintenance(
       if (trigger_fired) {
         std::vector<svmp::FE::Real> redistanced;
         const auto redistance =
-            svmp::FE::level_set::redistanceLevelSetToZeroPolygon(
-                mesh_access, phi_dofs, volume_options.isovalue, input,
-                redistanced);
+            three_dimensional
+                ? svmp::FE::level_set::redistanceLevelSetToZeroSurface(
+                      mesh_access, phi_dofs, volume_options.isovalue, input,
+                      redistanced)
+                : svmp::FE::level_set::redistanceLevelSetToZeroPolygon(
+                      mesh_access, phi_dofs, volume_options.isovalue, input,
+                      redistanced);
         if (!redistance.success) {
           throw std::runtime_error(
               "[svMultiPhysics::Application] Level-set interface-preserving "
@@ -15915,9 +15929,13 @@ bool applyLevelSetMaintenance(
               redistance.diagnostic);
         }
         const auto change_raw =
-            svmp::FE::level_set::measureLevelSetZeroPolygonChange(
-                mesh_access, phi_dofs, volume_options.isovalue, input,
-                redistanced);
+            three_dimensional
+                ? svmp::FE::level_set::measureLevelSetZeroSurfaceChange(
+                      mesh_access, phi_dofs, volume_options.isovalue, input,
+                      redistanced)
+                : svmp::FE::level_set::measureLevelSetZeroPolygonChange(
+                      mesh_access, phi_dofs, volume_options.isovalue, input,
+                      redistanced);
         std::vector<svmp::FE::Real> restored = redistanced;
         svmp::FE::level_set::LevelSetKinematicReconciliationResult restoration{};
         std::size_t restoration_passes = 0u;
@@ -15963,9 +15981,13 @@ bool applyLevelSetMaintenance(
             const auto revert_set =
                 restoration.degeneracy_frozen_dof_indices.empty()
                     ? std::vector<std::size_t>{}
-                    : svmp::FE::level_set::levelSetDofCellClosure(
-                          mesh_access, phi_dofs,
-                          restoration.degeneracy_frozen_dof_indices);
+                    : three_dimensional
+                          ? svmp::FE::level_set::levelSetDofCellClosure3D(
+                                mesh_access, phi_dofs,
+                                restoration.degeneracy_frozen_dof_indices)
+                          : svmp::FE::level_set::levelSetDofCellClosure(
+                                mesh_access, phi_dofs,
+                                restoration.degeneracy_frozen_dof_indices);
             for (const auto i : revert_set) {
               if (i < redistanced.size() && redistanced[i] != input[i]) {
                 redistanced[i] = input[i];
@@ -15979,8 +16001,11 @@ bool applyLevelSetMaintenance(
           }
         }
         const auto change =
-            svmp::FE::level_set::measureLevelSetZeroPolygonChange(
-                mesh_access, phi_dofs, volume_options.isovalue, input, restored);
+            three_dimensional
+                ? svmp::FE::level_set::measureLevelSetZeroSurfaceChange(
+                      mesh_access, phi_dofs, volume_options.isovalue, input, restored)
+                : svmp::FE::level_set::measureLevelSetZeroPolygonChange(
+                      mesh_access, phi_dofs, volume_options.isovalue, input, restored);
         const auto volume_before = svmp::FE::level_set::computeLevelSetCutCellVolume(
             mesh_access, phi_dofs, volume_options, input);
         const auto volume_after = svmp::FE::level_set::computeLevelSetCutCellVolume(
