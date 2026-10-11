@@ -71,6 +71,15 @@ redistanceLevelSetToZeroPolygon(const assembly::IMeshAccess& mesh,
                                 std::vector<Real>& redistanced_level_set);
 
 /**
+ * @brief All DOFs of the cells that contain at least one of @p dofs
+ *        (ascending, communicator-global, identical on every rank).
+ */
+[[nodiscard]] std::vector<std::size_t> levelSetDofCellClosure(
+    const assembly::IMeshAccess& mesh,
+    const dofs::DofHandler& level_set_dofs,
+    std::span<const std::size_t> dofs);
+
+/**
  * @brief Change of the zero polygon between two P1 fields on the same mesh.
  */
 struct LevelSetZeroPolygonChange {

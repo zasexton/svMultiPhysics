@@ -435,6 +435,46 @@ LevelSetZeroPolygonRedistancingResult redistanceLevelSetToZeroPolygon(
     return result;
 }
 
+std::vector<std::size_t> levelSetDofCellClosure(const assembly::IMeshAccess& mesh,
+                                                const dofs::DofHandler& level_set_dofs,
+                                                std::span<const std::size_t> dofs)
+{
+    const auto context = collectiveFor(level_set_dofs);
+    const auto n = static_cast<std::size_t>(level_set_dofs.getNumDofs());
+    std::vector<Real> marked(n, Real{0.0});
+    std::vector<char> seed(n, 0);
+    for (const auto i : dofs) {
+        if (i < n) {
+            seed[i] = 1;
+        }
+    }
+    std::string local_failure;
+    try {
+        for (const auto& cell : ownedCells(mesh, level_set_dofs, n)) {
+            if (seed[cell.dof[0]] || seed[cell.dof[1]] || seed[cell.dof[2]]) {
+                for (const auto i : cell.dof) {
+                    marked[i] = Real{1.0};
+                }
+            }
+        }
+    } catch (const std::exception& error) {
+        local_failure = error.what();
+    }
+    if (!allTrue(context, local_failure.empty())) {
+        throw std::runtime_error("level-set DOF cell closure " +
+                                 (local_failure.empty() ? std::string("failed on another rank")
+                                                        : local_failure));
+    }
+    reduceReals(context, marked, /*minimum=*/false);
+    std::vector<std::size_t> closure;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (marked[i] > Real{0.0} || seed[i]) {
+            closure.push_back(i);
+        }
+    }
+    return closure;
+}
+
 LevelSetZeroPolygonChange measureLevelSetZeroPolygonChange(
     const assembly::IMeshAccess& mesh,
     const dofs::DofHandler& level_set_dofs,

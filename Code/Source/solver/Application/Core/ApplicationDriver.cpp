@@ -15914,7 +15914,16 @@ bool applyLevelSetMaintenance(
             restored = redistanced;
           }
           bool reverted = false;
-          for (const auto i : restoration.degeneracy_frozen_dof_indices) {
+          // Revert the whole cells around a frozen DOF: their other DOFs
+          // would otherwise keep raw redistanced values whose interface
+          // motion the restoration can no longer take back.
+          const auto revert_set =
+              restoration.degeneracy_frozen_dof_indices.empty()
+                  ? std::vector<std::size_t>{}
+                  : svmp::FE::level_set::levelSetDofCellClosure(
+                        mesh_access, phi_dofs,
+                        restoration.degeneracy_frozen_dof_indices);
+          for (const auto i : revert_set) {
             if (i < redistanced.size() && redistanced[i] != input[i]) {
               redistanced[i] = input[i];
               ++reverted_dofs;
@@ -15972,6 +15981,8 @@ bool applyLevelSetMaintenance(
           << " restoration_iterations=" << restoration.iterations
           << " restoration_corrected_dofs=" << restoration.corrected_dofs
           << " restoration_frozen_dofs=" << restoration.degeneracy_frozen_dofs
+          << " restoration_skipped_dofs="
+          << restoration.sign_preserving_skipped_dofs
           << " restoration_passes=" << restoration_passes
           << " reverted_dofs=" << reverted_dofs
           << " max_crossing_shift=" << change.max_crossing_shift
