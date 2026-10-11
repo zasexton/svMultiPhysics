@@ -575,6 +575,8 @@ These are proposals. Each lists a recommended option and an alternative. Record 
      - **Capillary rise, level 10:** bitwise identical to `f4e6c1ea` up to its known wall-film stop at t = 0.416 s; its nearly-full wall cell has a real dry corner, so it is not this case.
   10. **Aggregation-ledger localization:** deferred until M4 wetting is settled.
   11. **Distributed direct solver (MUMPS 5.9.1, installed in scratch):** continues as an opt-in.
+     - **Done in `621ac379` (opt-in, `FE_ENABLE_MUMPS=ON` builds; default OFF and unchanged).** `SVMP_PDE_EXTENSION_FACTORIZATION=mumps_serial` factorizes each PDE-extension component with sequential MUMPS on the rank that solves it. It is bitwise reproducible and bitwise identical on 2, 3, 4 and 8 ranks. Distributed `mumps` is as fast but not run-to-run reproducible on 3 or more ranks (up to 4.5e-15 relative); MUMPS 5.9.1 has no setting that fixes this.
+     - **D25 R/h = 16, 8 ranks, 2 steps:** time loop 1,280 s → 999 s (−22%); PDE-extension share 23.7% → 2.0%; largest-rank peak memory 9.3 → 6.1 GB; same Newton and linear iteration counts; fields equal to round-off. At R/h = 8 the extension is about 1% of a step, so there is no gain.
   12. **M1 sloshing:** the frequency-order check uses the modal fit, and the damping check uses the modal amplitude.
   13. **Fitted M5 capillary wave:** the protocol amplitude is lowered to 0.0025λ for the frequency-order check.
   14. **Vertex crossings:** no fresh zero-update check before accepting a topology cycle; no re-anchoring of the backward-Euler energy history; the `SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS` environment variable is removed (the deck key replaces it).
