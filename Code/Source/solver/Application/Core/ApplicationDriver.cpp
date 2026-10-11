@@ -15871,40 +15871,61 @@ bool applyLevelSetMaintenance(
             request.configuration->transport.level_set.field_name + "': " +
             redistance.diagnostic);
       }
+      const auto change_raw =
+          svmp::FE::level_set::measureLevelSetZeroPolygonChange(
+              mesh_access, phi_dofs, volume_options.isovalue, input,
+              redistanced);
       std::vector<svmp::FE::Real> restored = redistanced;
       svmp::FE::level_set::LevelSetKinematicReconciliationResult restoration{};
+      std::size_t restoration_passes = 0u;
+      std::size_t reverted_dofs = 0u;
       if (redistance.applied) {
         auto zero_velocity = levelSetTransportVelocityCoefficients(
             *sim.fe_system, velocity_field, fe_solution);
         std::fill(zero_velocity.begin(), zero_velocity.end(),
                   svmp::FE::Real{0.0});
-        restoration = svmp::FE::level_set::reconcileLevelSetWithKinematicFlux(
-            mesh_access,
-            phi_dofs,
-            sim.fe_system->fieldDofHandler(velocity_field),
-            volume_options.isovalue,
-            volume_options.tolerance,
-            static_cast<svmp::FE::Real>(history.dt()),
-            input,
-            redistanced,
-            zero_velocity,
-            zero_velocity,
-            restored);
-        if (!restoration.success) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Level-set interface-preserving "
-              "redistancing could not restore the interface of field '" +
-              request.configuration->transport.level_set.field_name + "': " +
-              restoration.diagnostic);
-        }
-        if (!restoration.applied) {
-          restored = redistanced;
+        // A DOF that the restoration must freeze (its correction would change
+        // the degeneracy class of a cut) would keep an uncorrected share of
+        // the interface motion.  Such DOFs keep their input value instead and
+        // the restoration is repeated; every pass reverts at least one more
+        // DOF, so the loop ends.
+        for (;;) {
+          ++restoration_passes;
+          restoration = svmp::FE::level_set::reconcileLevelSetWithKinematicFlux(
+              mesh_access,
+              phi_dofs,
+              sim.fe_system->fieldDofHandler(velocity_field),
+              volume_options.isovalue,
+              volume_options.tolerance,
+              static_cast<svmp::FE::Real>(history.dt()),
+              input,
+              redistanced,
+              zero_velocity,
+              zero_velocity,
+              restored);
+          if (!restoration.success) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Level-set interface-preserving "
+                "redistancing could not restore the interface of field '" +
+                request.configuration->transport.level_set.field_name + "': " +
+                restoration.diagnostic);
+          }
+          if (!restoration.applied) {
+            restored = redistanced;
+          }
+          bool reverted = false;
+          for (const auto i : restoration.degeneracy_frozen_dof_indices) {
+            if (i < redistanced.size() && redistanced[i] != input[i]) {
+              redistanced[i] = input[i];
+              ++reverted_dofs;
+              reverted = true;
+            }
+          }
+          if (!reverted) {
+            break;
+          }
         }
       }
-      const auto change_raw =
-          svmp::FE::level_set::measureLevelSetZeroPolygonChange(
-              mesh_access, phi_dofs, volume_options.isovalue, input,
-              redistanced);
       const auto change =
           svmp::FE::level_set::measureLevelSetZeroPolygonChange(
               mesh_access, phi_dofs, volume_options.isovalue, input, restored);
@@ -15951,6 +15972,8 @@ bool applyLevelSetMaintenance(
           << " restoration_iterations=" << restoration.iterations
           << " restoration_corrected_dofs=" << restoration.corrected_dofs
           << " restoration_frozen_dofs=" << restoration.degeneracy_frozen_dofs
+          << " restoration_passes=" << restoration_passes
+          << " reverted_dofs=" << reverted_dofs
           << " max_crossing_shift=" << change.max_crossing_shift
           << " max_open_end_shift=" << change.max_open_end_shift
           << " cells_with_changed_cut=" << change.cells_with_changed_cut

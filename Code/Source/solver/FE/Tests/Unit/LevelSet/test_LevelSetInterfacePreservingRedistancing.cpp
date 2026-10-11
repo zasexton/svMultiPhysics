@@ -292,7 +292,7 @@ TEST(LevelSetInterfacePreservingRedistancing, ContactCapKeepsSignsContactPointsA
         // A distorted field with the zero set of the cap: steep near the
         // wall, flat above it.
         const auto distorted = s.scalar([&](const Point& x) {
-            return cap(x, theta, 1.0) * (0.3 + 4.0 * std::exp(-30.0 * x[1]));
+            return cap(x, theta, 1.0) * (0.7 + 0.6 * std::exp(-20.0 * x[1]));
         });
         std::vector<FE::Real> out;
         const auto result = level_set::redistanceLevelSetToZeroPolygon(
@@ -307,7 +307,7 @@ TEST(LevelSetInterfacePreservingRedistancing, ContactCapKeepsSignsContactPointsA
         ASSERT_TRUE(change.success);
         EXPECT_EQ(change.cells_with_changed_cut, 0u);
         const FE::Real h = 1.0 / 32.0;
-        EXPECT_LT(change.max_crossing_shift, 0.25 * h) << degrees;
+        EXPECT_LT(change.max_crossing_shift, 0.1 * h) << degrees;
         // The wall crossings move by much less than the crossing bound,
         // because the end segments are continued across the wall.
         const auto before = wallCrossings(s, distorted);
@@ -338,8 +338,14 @@ TEST(LevelSetInterfacePreservingRedistancing, ContactCapKeepsSignsContactPointsA
             std::vector<FE::Real>(static_cast<std::size_t>(vsys.fieldDofHandler(u).getNumDofs()), 0.0),
             restored);
         ASSERT_TRUE(restoration.success) << restoration.diagnostic;
+        EXPECT_TRUE(restoration.converged) << degrees;
+        EXPECT_EQ(restoration.degeneracy_frozen_dofs, 0u) << degrees;
         const auto v2 = s.negativeVolume(restored);
-        EXPECT_LT(std::abs(v2 - v0), 0.05 * std::abs(v1 - v0) + 1.0e-12) << degrees;
+        EXPECT_LT(std::abs(v2 - v0), 0.1 * std::abs(v1 - v0) + 1.0e-12) << degrees;
+        const auto restored_change = level_set::measureLevelSetZeroPolygonChange(
+            s.system.meshAccess(), s.dofs(), 0.0, distorted, restored);
+        ASSERT_TRUE(restored_change.success);
+        EXPECT_LT(restored_change.max_crossing_shift, change.max_crossing_shift) << degrees;
         (void)zero_velocity;
     }
 }

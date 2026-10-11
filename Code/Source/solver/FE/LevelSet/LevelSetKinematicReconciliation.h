@@ -46,6 +46,9 @@ struct LevelSetKinematicReconciliationResult {
     // root) or regular, or a side's volume rule pruned for a volume fraction
     // below CutIntegrationContext::minGeneratedCutVolumeFraction().
     std::size_t degeneracy_frozen_dofs{0u};
+    // The frozen DOFs themselves (ascending field DOF numbers, identical on
+    // every rank).
+    std::vector<std::size_t> degeneracy_frozen_dof_indices{};
     Real previous_negative_volume{0.0};
     Real transported_negative_volume{0.0};
     Real reconciled_negative_volume{0.0};
