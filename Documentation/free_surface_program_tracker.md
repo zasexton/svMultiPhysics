@@ -623,6 +623,12 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   2. **Mirror-consistent aggregation tie-break (#22).** It is to be built as an opt-in and evaluated: among roots tied at the minimum graph distance, take the nearest centroid, with the cell ID only as a last resort. Making it the default would be a separate decision.
   3. **Velocity-growth gate at rest (#23).** In the sessile benchmarks the growth ratio is not gated when the final capillary number is below 1e-3, and it is reported either way. Justification: at rest both speeds are about 1e-4, so the ratio is noise (R/h = 16 120°: 1.005 at Δt, 0.92 at Δt/2). Unrelaxed runs (D29, Ca ≈ 1e-2) are still gated.
   4. **The sessile (2D and 3D, D38 item 4) and capillary-rise protocols enable the interface-preserving redistancing with the one-cell trigger (#24).** The generators turn it on by default, and an option reproduces the earlier decks.
+  - **Sessile 60° protocol verdict (2026-10-12): PASS.** Redistancing with the trigger (binary `62df122c`), T = 10, R/h = 16/32/64; R/h = 16 and 32 also at Δt/2. Verified with `sessile_drop_2d/verify.py`.
+    - Angle error 0.023° / 0.005° / 0.003°, decreasing, observed order 1.38.
+    - Base 2.6e-4 / 8.4e-5 / 2.2e-5; max dA/A ≤ 7.4e-6.
+    - Time-step criterion at R/h = 32: final angle change 0.0017°.
+    - `exact_halo=1` in every multi-rank run.
+    - 120° waits for R/h = 64 (job `47358320`); R/h = 16 and 32 pass every gate.
   5. **The capillary-rise level-40 failure (#25)** is diagnosed before any rerun: job `47358321`, 8 ranks, t = 0.048 s, `incomplete_distributed_aggregation_halo`, `canonical_master_not_relevant`.
      - **Cause and fix (`d61f469d`):** the derived 2D halo of 8 ghost layers was shallower than the aggregation root-path guard, which admits paths of up to 8 cells. The wall film produced such a path: rank 3 assembled a slave whose only roots, 5 and 8 cells away, both lay on rank 2. The derived 2D depth is now 12 (vertex star 3 + guard 8 + 1, as in 3D).
        - A restart from the last output runs past the failure.
