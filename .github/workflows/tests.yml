@@ -207,6 +207,8 @@ jobs:
           if ($archives.Count -ne 1) { throw 'Expected one solver ZIP' }
           $destination = "$env:RUNNER_TEMP/solver package with spaces"
           Expand-Archive $archives[0].FullName $destination
+          $license = Get-ChildItem $destination -Recurse -Filter LICENSE.txt | Where-Object { $_.Directory.Name -eq 'svMultiPhysics' }
+          if (!$license -or (Get-FileHash $license.FullName).Hash -ne (Get-FileHash LICENSE.txt).Hash) { throw 'Missing or incorrect project license' }
           $env:SVMP_EXECUTABLE = (Get-ChildItem $destination -Recurse -Filter svmultiphysics.exe).FullName
           $library = (Get-ChildItem $destination -Recurse -Filter libsvzero_interface.dll).FullName
           $inputFile = Join-Path $PWD 'tests/cases/fluid/pipe_RCR_sv0D/solver.xml'

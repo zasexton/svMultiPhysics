@@ -78,7 +78,7 @@ if(WIN32)
   ]==])
   string(CONFIGURE "${install_windows_runtime}" install_windows_runtime @ONLY)
   install(CODE "${install_windows_runtime}" COMPONENT CoreExecutables)
-  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/license.txt" "${SV_SOURCE_DIR}/../README.md"
+  install(FILES "${SV_SOURCE_DIR}/../LICENSE.txt" "${SV_SOURCE_DIR}/../README.md"
     DESTINATION share/svMultiPhysics COMPONENT CoreExecutables)
   install(FILES ${SV_PACKAGE_EXTRA_LICENSES}
     DESTINATION share/svMultiPhysics/licenses/extra COMPONENT CoreExecutables)

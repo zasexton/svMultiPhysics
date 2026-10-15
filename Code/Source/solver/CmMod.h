@@ -21,7 +21,7 @@ using MpiCommWorldType = MPI_Comm;
 //using MpiCommWorldType = decltype(MPI_COMM_WORLD);
 
 // Set MPI data type names.
-const decltype(MPI_CXX_BOOL) mplog = MPI_CXX_BOOL;
+const decltype(MPI_C_BOOL) mplog = MPI_C_BOOL;
 //const decltype(MPI_LOGICAL) mplog  = MPI_LOGICAL;
 const decltype(MPI_INTEGER) mpint = MPI_INTEGER;
 const decltype(MPI_UNSIGNED) mpuint = MPI_UNSIGNED;
