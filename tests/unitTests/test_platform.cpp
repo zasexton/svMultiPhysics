@@ -119,6 +119,7 @@ TEST(PlatformSupport, HandlesSymbolsAndMemoryReporting)
   EXPECT_GT(utils::mem_usage(), 0.0);
 }
 
+#ifndef __MACH__ // The existing macOS timer measures wall time.
 TEST(PlatformSupport, CpuTimerExcludesSleepingTime)
 {
   const double before = cput_();
@@ -128,6 +129,7 @@ TEST(PlatformSupport, CpuTimerExcludesSleepingTime)
   EXPECT_GE(after, before);
   EXPECT_LT(after - before, 0.05); // CPU seconds, not elapsed wall time.
 }
+#endif
 
 TEST(Lapack, SolvesAndInvertsWithIntIndices)
 {
