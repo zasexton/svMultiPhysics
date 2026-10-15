@@ -12,6 +12,9 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <thread>
+
+extern "C" double cput_();
 
 TEST(PlatformPaths, PreservesSpacesInStringParameters)
 {
@@ -95,6 +98,16 @@ TEST(PlatformSupport, HandlesSymbolsAndMemoryReporting)
   EXPECT_EQ(svmp::PlatformSupport::demangle_symbol(nullptr), "");
   EXPECT_FALSE(svmp::PlatformSupport::demangle_symbol("solver_symbol").empty());
   EXPECT_GT(utils::mem_usage(), 0.0);
+}
+
+TEST(PlatformSupport, CpuTimerExcludesSleepingTime)
+{
+  const double before = cput_();
+  ASSERT_GE(before, 0.0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  const double after = cput_();
+  EXPECT_GE(after, before);
+  EXPECT_LT(after - before, 0.05); // CPU seconds, not elapsed wall time.
 }
 
 TEST(Lapack, SolvesAndInvertsWithIntIndices)
