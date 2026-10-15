@@ -77,13 +77,11 @@ inline Array<double> create_ones_matrix(const int N) {
  * @param[in] max The maximum value of the range.
  * @return A random double value between min and max.
  */
+inline std::minstd_rand0 material_random_engine(42);
+
 inline double getRandomDouble(const double min, const double max) {
-    // Uncomment to use a random seed
-    //unsigned int seed = std::chrono::system_clock::now().time_since_epoch().count();
-    unsigned int seed = 42;
-    static std::default_random_engine engine(seed);
     std::uniform_real_distribution<double> distribution(min, max);
-    return distribution(engine);
+    return distribution(material_random_engine);
 }
 
 /**
@@ -1292,17 +1290,19 @@ public:
                 std::vector<double> errors;
                 Array<double> dS(N, N), CCdE(N, N);
                 for (int i = 0; i < deltas.size(); i++) {
-                    calcdSFiniteDifference(F, dF, deltas[i], order, dS);
-                    calcCCdEFiniteDifference(F, dF, deltas[i], order, CCdE);
-
-                    // Compute Frobenius norm of error between dS and CC:dE
+                    // Combine both directions to cancel odd truncation-error terms
+                    // in the squared norm, without cancelling a stiffness error.
                     double error = 0.0;
-                    for (int i = 0; i < 3; i++) {
-                        for (int j = 0; j < 3; j++) {
-                            error += pow(dS(i,j) - CCdE(i,j), 2);
+                    for (double sign : {-1.0, 1.0}) {
+                        calcdSFiniteDifference(F, dF, sign * deltas[i], order, dS);
+                        calcCCdEFiniteDifference(F, dF, sign * deltas[i], order, CCdE);
+                        for (int row = 0; row < 3; row++) {
+                            for (int col = 0; col < 3; col++) {
+                                error += pow(dS(row,col) - CCdE(row,col), 2);
+                            }
                         }
                     }
-                    error = sqrt(error);
+                    error = sqrt(error / 2.0);
 
                     // Store error in list
                     errors.push_back(error);
@@ -1791,6 +1791,9 @@ protected:
     std::vector<Array<double>> F_large_list;
 
     void SetUp() override {
+
+        // Keep deformation samples independent of test registration order.
+        material_random_engine.seed(42);
 
         // Create random deformation gradients for small perturbations
         for (int i = 0; i < n_F; i++) {
