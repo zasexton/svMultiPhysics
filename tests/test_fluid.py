@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 import meshio
 import numpy as np
+import pytest
 
 # Common folder for all tests in this file
 base_folder = "fluid"
@@ -41,6 +42,16 @@ def test_pipe_restart_with_spaces(n_proc, tmp_path):
         np.testing.assert_allclose(result.point_data[field], reference.point_data[field],
                                    rtol=RTOL[field], atol=RTOL[field])
     np.testing.assert_allclose(result.field_data["TimeValue"], [0.01], rtol=1e-12, atol=0)
+
+def test_pipe_output_error(n_proc, tmp_path, monkeypatch):
+    case = tmp_path / "unwritable output"
+    shutil.copytree(Path(__file__).parent / "cases/fluid/pipe_RCR_3d", case,
+                    ignore=shutil.ignore_patterns("*-procs", "histor.dat"))
+    (case / f"{n_proc}-procs").write_text("preserve this file")
+    monkeypatch.setenv("SVMP_TEST_TIMEOUT", "30")
+    with pytest.raises(RuntimeError, match="filesystem error"):
+        run_by_name(str(case), "solver.xml", 2, n_proc, clean=False)
+    assert (case / f"{n_proc}-procs").read_text() == "preserve this file"
 
 def test_pipe_RCR_3d_fourier_coeff(n_proc):
     test_folder = "pipe_RCR_3d_fourier_coeff"

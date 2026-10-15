@@ -74,6 +74,9 @@ jobs:
     defaults:
       run:
         shell: msys2 {0}
+    env:
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -115,7 +118,7 @@ jobs:
             -DCMAKE_PROJECT_svZeroDSolver_INCLUDE="$PWD/Code/ThirdParty/eigen/share/eigen3/cmake/Eigen3Config.cmake" \
             -DFETCHCONTENT_SOURCE_DIR_EIGEN="$PWD/Code/ThirdParty/eigen"
           cmake --build svZeroDSolver/build --target svzero_interface --parallel 4
-      - name: Configure, build, and test
+      - name: Configure
         run: |
           export MSMPI_INC="$(cygpath -w "$MINGW_PREFIX/include")"
           export MSMPI_LIB64="$(cygpath -w "$MINGW_PREFIX/lib")"
@@ -127,14 +130,16 @@ jobs:
             -DENABLE_UNIT_TEST=ON -DSV_ENABLE_DISTRIBUTION=ON -DSV_INSTALLER_TYPE=ZIP \
             -DSV_PACKAGE_EXTRA_LIBRARIES="$PWD/svZeroDSolver/build/src/interface/libsvzero_interface.dll" \
             -DSV_PACKAGE_EXTRA_LICENSES="$PWD/svZeroDSolver/LICENSE.txt"
+      - name: Build and run unit tests
+        run: |
           cmake --build build/windows --parallel 4
           ctest --test-dir build/windows/Source/solver --output-on-failure
+      - name: Run numerical tests
+        run: |
           export SVMP_EXECUTABLE="$(cygpath -w "$PWD/build/windows/bin/svmultiphysics.exe")"
           export MPIEXEC_EXECUTABLE='C:\Program Files\Microsoft MPI\Bin\mpiexec.exe'
-          export OPENBLAS_NUM_THREADS=1
-          export OMP_NUM_THREADS=1
           cd tests
-          python -m pytest -v -rf --junitxml=../build/windows/integration.xml
+          python -m pytest -x -v -rf --junitxml=../build/windows/integration.xml
       - name: Package and record dependencies
         run: |
           git rev-parse HEAD > build/windows/source-revision.txt
@@ -144,9 +149,13 @@ jobs:
           gcc --version > build/windows/toolchain.txt
           cmake --version >> build/windows/toolchain.txt
           ninja --version >> build/windows/toolchain.txt
+          printf 'Runner: %s %s %s\n' "$RUNNER_OS" "$RUNNER_ARCH" "$ImageVersion" >> build/windows/toolchain.txt
+          powershell.exe -NoProfile -Command 'Get-CimInstance Win32_Processor | Select-Object Name, AddressWidth; (Get-Item "$env:SystemRoot\System32\msmpi.dll").VersionInfo | Select-Object FileVersion' >> build/windows/toolchain.txt
           pacman -Sw --noconfirm $(pacman -Qq)
           pacman -Sp --print-format '%f' $(pacman -Qq) > build/windows/package-files.txt
           manifest_dir="$PWD/build/windows"
+          (cd /var/cache/pacman/pkg && xargs pacman -Qp < "$manifest_dir/package-files.txt") | sort > build/windows/archived-dependencies.txt
+          diff -u <(sort build/windows/dependencies.txt) build/windows/archived-dependencies.txt
           (cd /var/cache/pacman/pkg && xargs sha256sum < "$manifest_dir/package-files.txt") > build/windows/package-sha256.txt
           tar -cf build/msys2-packages.tar -C /var/cache/pacman/pkg -T "$manifest_dir/package-files.txt"
           cmake --install build/windows --prefix "$PWD/build/windows-stage"
@@ -222,7 +231,7 @@ jobs:
           $env:OPENBLAS_NUM_THREADS = '1'
           $env:OMP_NUM_THREADS = '1'
           Set-Location tests
-          & $python -m pytest -v test_fluid.py::test_pipe_RCR_3d test_fluid.py::test_pipe_RCR_sv0D test_fluid.py::test_pipe_restart_with_spaces --junitxml=package-tests.xml
+          & $python -m pytest -v test_fluid.py::test_pipe_RCR_3d test_fluid.py::test_pipe_RCR_sv0D test_fluid.py::test_pipe_restart_with_spaces test_fluid.py::test_pipe_output_error --junitxml=package-tests.xml
           if ($LASTEXITCODE) { throw 'Extracted package tests failed' }
       - uses: actions/upload-artifact@v4
         if: always()
