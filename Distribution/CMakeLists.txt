@@ -95,6 +95,14 @@ if(WIN32)
   endforeach()
   install(FILES "${SV_SOURCE_DIR}/ThirdParty/tetgen/simvascular_tetgen/LICENSE"
     DESTINATION share/svMultiPhysics/licenses/tetgen COMPONENT CoreExecutables)
+  foreach(notice COPYING.LESSER gkregex.c gkregex.h)
+    install(FILES "${SV_SOURCE_DIR}/ThirdParty/gklib_internal/simvascular_gklib_internal/${notice}"
+      DESTINATION share/svMultiPhysics/licenses/gklib COMPONENT CoreExecutables)
+  endforeach()
+  install(FILES "${SV_SOURCE_DIR}/ThirdParty/eigen/include/eigen3/Eigen/Core"
+    DESTINATION share/svMultiPhysics/licenses/eigen COMPONENT CoreExecutables)
+  install(FILES "${SV_SOURCE_DIR}/ThirdParty/tinyxml/simvascular_tinyxml/tinyxml2.h"
+    DESTINATION share/svMultiPhysics/licenses/tinyxml COMPONENT CoreExecutables)
 
   # Visual studios
   if(MSVC)

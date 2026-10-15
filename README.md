@@ -141,6 +141,8 @@ cpack --config build/windows/CPackConfig.cmake -G ZIP -B build/windows-packages
 
 The executable is `build/windows/bin/svmultiphysics.exe`. CPack installs its transitive DLL dependencies beside it in the ZIP's `bin` directory. Windows system DLLs and the separately installed Microsoft MPI runtime are excluded. Missing or conflicting application DLLs stop packaging. If compatible dependencies are installed elsewhere, pass their DLL directories through the semicolon-separated `SV_PACKAGE_RUNTIME_DIRS` setting.
 
+Project and dependency notices are under `share/svMultiPhysics`; bundled libraries retain their individual license terms. The GKlib regex sources and LGPL text are included. The recorded source revision and dependency snapshot identify the sources and build environment needed to rebuild the solver with modified dependencies.
+
 Extract the ZIP anywhere, then run from your case directory in PowerShell:
 
 ```powershell
