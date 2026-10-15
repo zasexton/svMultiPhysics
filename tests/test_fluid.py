@@ -1,6 +1,11 @@
-from .conftest import run_with_reference, skip_if_no_petsc, skip_if_no_trilinos
+from .conftest import run_by_name, run_with_reference, RTOL, skip_if_no_petsc, skip_if_no_trilinos
 import os
 import subprocess
+import shutil
+import xml.etree.ElementTree as ET
+from pathlib import Path
+import meshio
+import numpy as np
 
 # Common folder for all tests in this file
 base_folder = "fluid"
@@ -13,6 +18,29 @@ def test_pipe_RCR_3d(n_proc):
     test_folder = "pipe_RCR_3d"
     t_max = 2
     run_with_reference(base_folder, test_folder, fields, n_proc, t_max)
+
+def test_pipe_restart_with_spaces(n_proc, tmp_path):
+    case = tmp_path / "pipe with spaces"
+    shutil.copytree(Path(__file__).parent / "cases/fluid/pipe_RCR_3d", case,
+                    ignore=shutil.ignore_patterns("*-procs", "histor.dat"))
+    tree = ET.parse(case / "solver.xml")
+    general = tree.getroot().find("GeneralSimulationParameters")
+    general.find("Number_of_time_steps").text = "1"
+    general.find("Increment_in_saving_VTK_files").text = "1"
+    ET.SubElement(general, "Restart_file_name").text = "restart snapshot"
+    tree.write(case / "first step.xml")
+    run_by_name(str(case), "first step.xml", 1, n_proc)
+    assert (case / f"{n_proc}-procs/restart snapshot_last.bin").is_file()
+
+    general.find("Continue_previous_simulation").text = "true"
+    general.find("Number_of_time_steps").text = "2"
+    tree.write(case / "second step.xml")
+    result = run_by_name(str(case), "second step.xml", 2, n_proc, clean=False)
+    reference = meshio.read(case / "result_002.vtu")
+    for field in fields:
+        np.testing.assert_allclose(result.point_data[field], reference.point_data[field],
+                                   rtol=RTOL[field], atol=RTOL[field])
+    np.testing.assert_allclose(result.field_data["TimeValue"], [0.01], rtol=1e-12, atol=0)
 
 def test_pipe_RCR_3d_fourier_coeff(n_proc):
     test_folder = "pipe_RCR_3d_fourier_coeff"

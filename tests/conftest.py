@@ -10,8 +10,13 @@ import xml.etree.ElementTree as ET
 import meshio
 
 this_file_dir = os.path.abspath(os.path.dirname(__file__))
-cpp_exec = os.path.join(this_file_dir, "..", "build", "svMultiPhysics-build", "bin", "svmultiphysics")
-cpp_exec_p = os.path.join(this_file_dir, "..", "build-petsc", "svMultiPhysics-build", "bin", "svmultiphysics")
+exe_name = "svmultiphysics.exe" if os.name == "nt" else "svmultiphysics"
+cpp_exec = os.path.abspath(os.environ.get("SVMP_EXECUTABLE", os.path.join(
+    this_file_dir, "..", "build", "svMultiPhysics-build", "bin", exe_name)))
+cpp_exec_p = os.path.abspath(os.environ.get("SVMP_PETSC_EXECUTABLE", os.path.join(
+    this_file_dir, "..", "build-petsc", "svMultiPhysics-build", "bin", exe_name)))
+MPIEXEC = os.environ.get("MPIEXEC_EXECUTABLE", "mpiexec" if os.name == "nt" else "mpirun")
+MPIEXEC_NUMPROC_FLAG = os.environ.get("MPIEXEC_NUMPROC_FLAG", "-n" if os.name == "nt" else "-np")
 
 
 def read_cmake_cache_variable(cache_path, key):
@@ -29,8 +34,7 @@ def read_cmake_cache_variable(cache_path, key):
 
 
 def cmake_cache_path_for(exe_path):
-    """CMakeCache.txt of the build that produced `exe_path`, which lives at
-    <build>/svMultiPhysics-build/bin/svmultiphysics."""
+    """CMakeCache.txt beside the executable's bin directory (direct or superbuild)."""
     return os.path.join(os.path.dirname(os.path.dirname(exe_path)), "CMakeCache.txt")
 
 
@@ -61,9 +65,11 @@ def _detect_oversubscribe_flag():
     Open MPI requires ``--oversubscribe``; Intel MPI / MPICH (Hydra) allow
     oversubscription by default and reject the unknown flag, so no flag is used.
     """
+    if os.name == "nt":
+        return ""
     try:
         proc = subprocess.run(
-            ["mpirun", "--version"], capture_output=True, text=True, check=False
+            [MPIEXEC, "--version"], capture_output=True, text=True, check=False
         )
         version = (proc.stdout or "") + (proc.stderr or "")
     except FileNotFoundError:
@@ -109,7 +115,7 @@ RTOL = {
 RTOL_TIME_VALUE = 1.0e-12
 
 # Number of processors to test
-PROCS = [1, 3, 4]
+PROCS = [int(n) for n in os.environ.get("SVMP_TEST_PROCS", "1,3,4").split(",")]
 
 
 def read_time_step_size(name_inp):
@@ -138,7 +144,7 @@ def n_proc(request):
     return request.param
 
 
-def run_by_name(folder, name, t_max, n_proc=1):
+def run_by_name(folder, name, t_max, n_proc=1, clean=True):
     """
     Run a test case and return results
     Args:
@@ -153,26 +159,21 @@ def run_by_name(folder, name, t_max, n_proc=1):
 
     # remove old results folders if they exist
     dir_path = os.path.join(folder, str(n_proc) + "-procs")
-    if os.path.exists(dir_path):
+    if clean and os.path.exists(dir_path):
         shutil.rmtree(dir_path)
 
     # run simulation (PETSc tests use a dedicated build; see cpp_exec_p)
     exe = cpp_exec_p if "petsc" in folder else cpp_exec
-    cmd = " ".join(
-        [
-            "mpirun",
-            OVERSUBSCRIBE_FLAG if n_proc > 1 else "",
-            "-np",
-            str(n_proc),
-            exe,
-            name,
-        ]
-    )
+    cmd = [MPIEXEC]
+    if n_proc > 1 and OVERSUBSCRIBE_FLAG:
+        cmd.append(OVERSUBSCRIBE_FLAG)
+    cmd += [MPIEXEC_NUMPROC_FLAG, str(n_proc), exe, name]
 
     # Run the command while capturing the return code and stderr output. This
     # way, if something goes wrong, we can raise an appropriate error message.
     completed = subprocess.run(
-        cmd, cwd=folder, shell=True, stderr=subprocess.PIPE, text=True
+        cmd, cwd=folder, stderr=subprocess.PIPE, text=True,
+        timeout=int(os.environ.get("SVMP_TEST_TIMEOUT", "600")),
     )
 
     # Print the captured stderr to console, so it is visible. Notice that this
