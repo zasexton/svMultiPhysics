@@ -154,8 +154,8 @@ jobs:
           "$windows_python" --version >> build/windows/toolchain.txt
           "$windows_python" -m pip freeze > build/windows/python-test-dependencies.txt
           printf 'Runner: %s %s %s\n' "$RUNNER_OS" "$RUNNER_ARCH" "$ImageVersion" >> build/windows/toolchain.txt
-          powershell.exe -NoProfile -Command 'Get-CimInstance Win32_Processor | Select-Object Name, AddressWidth; (Get-Item "$env:SystemRoot\System32\msmpi.dll").VersionInfo | Select-Object FileVersion' >> build/windows/toolchain.txt
-          pacman -Sw --noconfirm $(pacman -Qq)
+          powershell.exe -NoProfile -Command 'Get-CimInstance Win32_Processor | Format-List Name, AddressWidth; (Get-Item "$env:SystemRoot\System32\msmpi.dll").VersionInfo | Format-List FileVersion' >> build/windows/toolchain.txt
+          pacman -Sw --noconfirm $(pacman -Qq) || pacman -Sw --noconfirm $(pacman -Qq)
           pacman -Sp --print-format '%f' $(pacman -Qq) > build/windows/package-files.txt
           manifest_dir="$PWD/build/windows"
           (cd /var/cache/pacman/pkg && xargs pacman -Qp < "$manifest_dir/package-files.txt") | sort > build/windows/archived-dependencies.txt
@@ -164,7 +164,7 @@ jobs:
           tar -cf build/msys2-packages.tar -C /var/cache/pacman/pkg -T "$manifest_dir/package-files.txt"
           cmake --install build/windows --prefix "$PWD/build/windows-stage" 2>&1 | tee build/windows/install.log
           cpack --config build/windows/CPackConfig.cmake -G ZIP -B build/windows-packages 2>&1 | tee build/windows/cpack.log
-          sha256sum build/windows-packages/*.zip > build/windows-packages/SHA256SUMS
+          (cd build/windows-packages && sha256sum *.zip > SHA256SUMS)
       - name: Run numerical tests
         run: |
           set -o pipefail
@@ -227,6 +227,8 @@ jobs:
         run: |
           $archives = @(Get-ChildItem package -Recurse -Filter '*.zip')
           if ($archives.Count -ne 1) { throw 'Expected one solver ZIP' }
+          $checksum = (Get-Content (Join-Path $archives[0].DirectoryName 'SHA256SUMS') -Raw).Split(' ')[0]
+          if ((Get-FileHash $archives[0].FullName).Hash -ne $checksum) { throw 'Solver ZIP checksum mismatch' }
           $destination = "$env:RUNNER_TEMP/solver package with spaces"
           Expand-Archive $archives[0].FullName $destination
           $license = Get-ChildItem $destination -Recurse -Filter LICENSE.txt | Where-Object { $_.Directory.Name -eq 'svMultiPhysics' }
