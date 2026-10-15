@@ -4,9 +4,11 @@
 #include "utils.h"
 
 #include <bitset>
+#include <cerrno>
 #include <chrono>
 #include <cmath> 
 #include <limits>
+#include <system_error>
 
 #include <ios>
 #include <iostream>
@@ -15,8 +17,12 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <psapi.h>
+#include <process.h>
 #else
+#include <spawn.h>
 #include <sys/resource.h>
+#include <sys/wait.h>
+extern char** environ;
 #endif
 
 #include "FE/Common/FEException.h"
@@ -27,6 +33,36 @@
 */
 
 namespace utils {
+
+void run_process(std::string executable, std::string input_file)
+{
+#ifdef _WIN32
+  // The CRT joins argv into a command line; quote both filenames for spaces.
+  const auto program = '"' + executable + '"';
+  const auto argument = '"' + input_file + '"';
+  const char* arguments[] = {program.c_str(), argument.c_str(), nullptr};
+  const auto status = _spawnv(_P_WAIT, executable.c_str(), arguments);
+  if (status == -1) {
+    throw std::system_error(errno, std::generic_category(), "Could not start " + executable);
+  }
+#else
+  char* arguments[] = {executable.data(), input_file.data(), nullptr};
+  pid_t process;
+  const int error = posix_spawnp(&process, executable.c_str(), nullptr, nullptr, arguments, environ);
+  if (error) throw std::system_error(error, std::generic_category(), "Could not start " + executable);
+  int status;
+  while (waitpid(process, &status, 0) == -1) {
+    if (errno != EINTR) {
+      throw std::system_error(errno, std::generic_category(), "Could not wait for " + executable);
+    }
+  }
+  if (!WIFEXITED(status)) throw std::runtime_error("Process terminated abnormally: " + executable);
+  status = WEXITSTATUS(status);
+#endif
+  if (status != 0) {
+    throw std::runtime_error("Process exited with status " + std::to_string(status) + ": " + executable);
+  }
+}
 
 void update_restart_link(const std::filesystem::path& source, const std::filesystem::path& destination)
 {

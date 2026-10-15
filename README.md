@@ -168,7 +168,7 @@ cd tests
 
 The coupled tests also need svZeroDSolver built at `svZeroDSolver/build`; the Windows job in [.github/workflows/tests.yml](.github/workflows/tests.yml) records the source revision and build commands. `SVMP_TEST_PROCS` overrides the default `1,3,4` MPI rank counts, `MPIEXEC_NUMPROC_FLAG` overrides the launcher's count flag, and `SVMP_TEST_TIMEOUT` sets the per-run timeout in seconds (default 600). `SVMP_PETSC_EXECUTABLE` selects a separate PETSc build. The ZIP test uses a separate runner with a restricted `PATH` and checks numerical results and restart continuation with one and two ranks.
 
-The Windows build passes 336 unit tests and 224 numerical tests covering fluid, structural, heat, electrophysiology, electromechanics, CMM, Stokes, shell, FSI, and immersed-surface cases, including 0D coupling and genBC. Thirty PETSc/Trilinos cases are skipped. The tested stack uses GCC 16.2.0, CMake 4.4.4, Ninja 1.13.2, VTK 9.6.2, and OpenBLAS 0.3.34; package manifests record the exact revisions.
+The Windows build passes the unit and numerical test suites covering fluid, structural, heat, electrophysiology, electromechanics, CMM, Stokes, shell, FSI, and immersed-surface cases, including 0D coupling and genBC. Thirty PETSc/Trilinos cases are skipped. The tested stack uses GCC 16.2.0, CMake 4.4.4, Ninja 1.13.2, VTK 9.6.2, and OpenBLAS 0.3.34; package manifests record the exact revisions.
 
 Remeshing remains unvalidated: a tetrahedral probe fails boundary-parent lookup with both the previous and current Linux remeshing implementations. Windows 10/11 and older CPUs also need package acceptance runs; automated Windows validation uses Server 2022 and records the runner CPU.
 

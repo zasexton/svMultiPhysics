@@ -304,6 +304,7 @@ simvascular_add_executable(${SV_MULTIPHYSICS_EXE}
 
 target_link_libraries(${SV_MULTIPHYSICS_EXE}
   ${SVMP_ARCHITECTURE_TARGETS}
+  ${CMAKE_DL_LIBS}
   ${GLOBAL_LIBRARIES}
   ${INTELRUNTIME_LIBRARIES}
   ${ZLIB_LIBRARY}
@@ -386,6 +387,25 @@ if(ENABLE_UNIT_TEST)
   add_dependencies(run_all_unit_tests svmp_loader_fixture)
   target_compile_definitions(run_all_unit_tests PRIVATE
     SVMP_LOADER_FIXTURE="$<TARGET_FILE:svmp_loader_fixture>")
+
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/process_fixture.c" [=[
+#include <stdio.h>
+#include <string.h>
+int main(int argc, char** argv) {
+  if (argc != 2 || strcmp(argv[1], "fail") == 0) return 7;
+  FILE* file = fopen(argv[1], "w");
+  if (!file) return 3;
+  fputs("complete", file);
+  return fclose(file) == 0 ? 0 : 4;
+}
+]=])
+  add_executable(svmp_process_fixture "${CMAKE_CURRENT_BINARY_DIR}/process_fixture.c")
+  set_target_properties(svmp_process_fixture PROPERTIES
+    OUTPUT_NAME "coupled solver"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/process fixture")
+  add_dependencies(run_all_unit_tests svmp_process_fixture)
+  target_compile_definitions(run_all_unit_tests PRIVATE
+    SVMP_PROCESS_FIXTURE="$<TARGET_FILE:svmp_process_fixture>")
   
   if(USE_TRILINOS)
     target_link_libraries(run_all_unit_tests ${Trilinos_LIBRARIES} ${Trilinos_TPL_LIBRARIES})
@@ -398,6 +418,7 @@ if(ENABLE_UNIT_TEST)
   # libraries
   target_link_libraries(run_all_unit_tests
     ${SVMP_ARCHITECTURE_TARGETS}
+    ${CMAKE_DL_LIBS}
     ${GLOBAL_LIBRARIES}
     ${INTELRUNTIME_LIBRARIES}
     ${ZLIB_LIBRARY}

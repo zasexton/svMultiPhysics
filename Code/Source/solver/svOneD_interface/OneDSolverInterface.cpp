@@ -6,13 +6,23 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
 #include "Core/Exception.h"
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
 OneDSolverInterface::~OneDSolverInterface()
 {
   if (library_handle_) {
-    vtkDynamicLoader::CloseLibrary(library_handle_);
+#ifdef _WIN32
+    FreeLibrary(static_cast<HMODULE>(library_handle_));
+#else
+    dlclose(library_handle_);
+#endif
     library_handle_ = nullptr;
   }
 }
@@ -20,12 +30,21 @@ OneDSolverInterface::~OneDSolverInterface()
 void OneDSolverInterface::load_library(const std::string& interface_lib)
 {
   if (library_handle_) throw std::runtime_error("The 1D interface library is already loaded");
-  library_handle_ = vtkDynamicLoader::OpenLibrary(interface_lib.c_str());
+#ifdef _WIN32
+  library_handle_ = LoadLibraryA(interface_lib.c_str());
+#else
+  library_handle_ = dlopen(interface_lib.c_str(), RTLD_NOW | RTLD_LOCAL);
+#endif
   if (!library_handle_) {
-    const char* error = vtkDynamicLoader::LastError();
+#ifdef _WIN32
+    const auto error = std::system_category().message(GetLastError());
+#else
+    const char* detail = dlerror();
+    const std::string error = detail ? detail : "unknown error";
+#endif
     throw svmp::CoreException(
         std::string("[OneDSolverInterface] Could not load shared library '") +
-        interface_lib + "': " + (error ? error : "unknown error"),
+        interface_lib + "': " + error,
         svmp::StatusCode::DependencyError,
         __FILE__,
         __LINE__,
@@ -33,7 +52,11 @@ void OneDSolverInterface::load_library(const std::string& interface_lib)
   }
 
   auto load_sym = [&](const char* name) {
-    auto sym = vtkDynamicLoader::GetSymbolAddress(library_handle_, name);
+#ifdef _WIN32
+    auto sym = GetProcAddress(static_cast<HMODULE>(library_handle_), name);
+#else
+    auto sym = dlsym(library_handle_, name);
+#endif
     if (!sym) {
       throw svmp::CoreException(
           std::string("[OneDSolverInterface] Could not find the 1D interface function '") +

@@ -4,7 +4,6 @@
 #ifndef ONEDSOLVER_INTERFACE_H
 #define ONEDSOLVER_INTERFACE_H
 
-#include <vtkDynamicLoader.h>
 #include <string>
 #include <stdexcept>
 
@@ -91,7 +90,7 @@ class OneDSolverInterface {
   /// @brief Total number of DOFs (nodes * 2: flow + area) assigned by the 1D solver during initialization.
   int system_size_ = 0;
 
-  vtkLibHandle library_handle_ = nullptr;
+  void* library_handle_ = nullptr;
 
   // Function pointers to shared-library symbols.
 

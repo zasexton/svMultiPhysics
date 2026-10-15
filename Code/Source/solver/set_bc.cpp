@@ -19,8 +19,6 @@
 #include "utils.h"
 #include <cstdio>
 #include <math.h>
-#include <memory>
-#include <vtksys/Process.h>
 
 namespace set_bc {
 
@@ -454,20 +452,7 @@ void genBC_Integ_X(ComMod& com_mod, const CmMod& cm_mod, const std::string& genF
     genBC_writer.close();
     
     // Call genBC executable which reads the communication file GenBC.int
-    const char* command[] = {cplBC.binPath.c_str(), cplBC.commuName.c_str(), nullptr};
-    std::unique_ptr<vtksysProcess, decltype(&vtksysProcess_Delete)> process(
-        vtksysProcess_New(), vtksysProcess_Delete);
-    if (!process || !vtksysProcess_SetCommand(process.get(), command)) {
-      throw std::runtime_error("Could not prepare genBC process: " + cplBC.binPath);
-    }
-    vtksysProcess_SetPipeShared(process.get(), vtksysProcess_Pipe_STDOUT, 1);
-    vtksysProcess_SetPipeShared(process.get(), vtksysProcess_Pipe_STDERR, 1);
-    vtksysProcess_Execute(process.get());
-    vtksysProcess_WaitForExit(process.get(), nullptr);
-    if (vtksysProcess_GetState(process.get()) != vtksysProcess_State_Exited ||
-        vtksysProcess_GetExitValue(process.get()) != 0) {
-      throw std::runtime_error("genBC process failed: " + cplBC.binPath);
-    }
+    utils::run_process(cplBC.binPath, cplBC.commuName);
 
     // Read outputs from genBC, which are in the same GenBC.int
     std::ifstream genBC_reader(cplBC.commuName, std::ios::out | std::ios::binary);

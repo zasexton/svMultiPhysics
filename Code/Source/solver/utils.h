@@ -50,6 +50,8 @@ double mem_usage(const bool print_usage=false, const std::string& prefix="");
 
 void update_restart_link(const std::filesystem::path& source, const std::filesystem::path& destination);
 std::string resolve_library_path(const std::string& name);
+// Run an executable with one filename argument and wait for successful completion.
+void run_process(std::string executable, std::string input_file);
 
 /**
  * @brief Compute the square of the Euclidean norm of a vector.

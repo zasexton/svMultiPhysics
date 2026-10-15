@@ -93,6 +93,25 @@ TEST_F(PlatformFiles, ResolvesPlatformLibrarySuffixAndPrefersExactPath)
   EXPECT_EQ(utils::resolve_library_path(exact.string()), exact.string());
 }
 
+TEST_F(PlatformFiles, RunsProcessWithLiteralPathsAndWaitsForOutput)
+{
+  const auto output = directory / "input ' with & %PATH%.txt";
+  ASSERT_NO_THROW(utils::run_process(SVMP_PROCESS_FIXTURE, output.string()));
+  std::string contents;
+  std::getline(std::ifstream(output), contents);
+  EXPECT_EQ(contents, "complete");
+}
+
+TEST(PlatformProcess, RejectsMissingExecutable)
+{
+  EXPECT_THROW(utils::run_process("missing program.exe", "input file"), std::system_error);
+}
+
+TEST(PlatformProcess, RejectsNonzeroExit)
+{
+  EXPECT_THROW(utils::run_process(SVMP_PROCESS_FIXTURE, "fail"), std::runtime_error);
+}
+
 TEST(PlatformSupport, HandlesSymbolsAndMemoryReporting)
 {
   EXPECT_EQ(svmp::PlatformSupport::demangle_symbol(nullptr), "");
