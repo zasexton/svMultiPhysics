@@ -95,21 +95,6 @@ static OneDSolverInterface* shared_lib_instance = nullptr;
 static double svOneDTime = 0.0;
 
 // ---------------------------------------------------------------------------
-// Helper: resolve the shared-library path (.so / .dylib / as-is).
-// ---------------------------------------------------------------------------
-static std::string resolve_lib_path(const std::string& lib_base)
-{
-  if (std::filesystem::is_regular_file(lib_base + ".so")) {
-    return lib_base + ".so";
-  }
-
-  if (std::filesystem::is_regular_file(lib_base + ".dylib")) {
-    return lib_base + ".dylib";
-  }
-  return lib_base;  // already has extension, or will fail at dlopen time
-}
-
-// ---------------------------------------------------------------------------
 // init_svOneD
 // ---------------------------------------------------------------------------
 void init_svOneD(ComMod& com_mod, const CmMod& cm_mod)
@@ -184,7 +169,7 @@ void init_svOneD(ComMod& com_mod, const CmMod& cm_mod)
   }
 
   // ----- Load shared library (once per process) -----
-  const std::string lib_path = resolve_lib_path(solver_if.solver_library);
+  const std::string lib_path = utils::resolve_library_path(solver_if.solver_library);
   shared_lib_instance = new OneDSolverInterface();
   shared_lib_instance->load_library(lib_path);
 

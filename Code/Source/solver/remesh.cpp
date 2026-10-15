@@ -77,8 +77,7 @@ void dist_msh_srf(ComMod& com_mod, ChnlMod& chnl_mod, faceType& lFa, mshType& lM
   #endif
 
   std::string sTmp = chnl_mod.appPath + "/" + ".remesh_tmp.dir";
-  auto mkdir_arg = std::string("mkdir -p ") + sTmp;
-  std::system(mkdir_arg.c_str());
+  std::filesystem::create_directories(sTmp);
 
   for (int e = 0; e < lFa.nEl; e++) {
     for (int a = 0; a < lFa.eNoN; a++) {
@@ -1444,11 +1443,11 @@ void remesh_restart(Simulation* simulation)
   dmsg << "rmsh.rTS: " << rmsh.rTS;
   dmsg << "tDof: " << com_mod.tDof;
   #endif
-  std::filesystem::remove(sTmp);
 
   // Create the file.
   //
   if (cm.mas(cm_mod)) {
+    std::filesystem::remove(sTmp);
     std::ofstream restart_file(sTmp, std::ios::out | std::ios::binary);
     restart_file.close();
   }
@@ -1483,9 +1482,9 @@ void remesh_restart(Simulation* simulation)
 
   restart_file.close();
 
+  MPI_Barrier(cm.com()); // Complete every rank's writes before a possible copy.
   if (cm.mas(cm_mod)) {
-    std::string link_cmd = "ln -f " + fTmp + " " + sTmp;
-    std::system(link_cmd.c_str());
+    utils::update_restart_link(fTmp, sTmp);
   }
 
   auto& x = com_mod.x;

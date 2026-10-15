@@ -8,11 +8,16 @@
 #include <cmath> 
 #include <limits>
 
-#include <unistd.h>
 #include <ios>
 #include <iostream>
 #include <fstream>
+#include <vtkDynamicLoader.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <psapi.h>
+#else
 #include <sys/resource.h>
+#endif
 
 #include "FE/Common/FEException.h"
 
@@ -22,6 +27,34 @@
 */
 
 namespace utils {
+
+void update_restart_link(const std::filesystem::path& source, const std::filesystem::path& destination)
+{
+  namespace fs = std::filesystem;
+  if (!fs::is_regular_file(source) || fs::is_directory(destination)) {
+    throw fs::filesystem_error("Invalid restart file", source, destination,
+                               std::make_error_code(std::errc::invalid_argument));
+  }
+  std::error_code error;
+  if (fs::equivalent(source, destination, error)) return;
+  fs::remove(destination);
+  fs::create_hard_link(source, destination, error);
+  if (error) fs::copy_file(source, destination, fs::copy_options::overwrite_existing);
+}
+
+std::string resolve_library_path(const std::string& name)
+{
+  if (std::filesystem::is_regular_file(name)) return name;
+  auto base = std::filesystem::path(name);
+  if (base.extension() == ".so" || base.extension() == ".dylib" || base.extension() == ".dll") {
+    base.replace_extension();
+  }
+  for (const char* extension : {vtkDynamicLoader::LibExtension(), ".so", ".dylib", ".dll"}) {
+    const auto candidate = base.string() + extension;
+    if (std::filesystem::is_regular_file(candidate)) return candidate;
+  }
+  return name; // Let the loader report the missing dependency.
+}
 
 /// @brief Count the number of bits in an int.
 //
@@ -161,11 +194,17 @@ bool is_zero(double value1, double value2)
 
 double mem_usage(const bool print_usage, const std::string& prefix) 
 {
+#ifdef _WIN32
+  PROCESS_MEMORY_COUNTERS usage{};
+  const double resident_set = GetProcessMemoryInfo(GetCurrentProcess(), &usage, sizeof(usage))
+      ? static_cast<double>(usage.PeakWorkingSetSize) : 0.0;
+#else
   int who = RUSAGE_SELF;
   struct rusage usage;
   int ret;
   ret = getrusage(who, &usage);
   double resident_set = usage.ru_maxrss; 
+#endif
 
   std::string pr_prefix = "[cpp] ";
   if (prefix != "") {

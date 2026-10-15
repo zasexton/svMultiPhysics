@@ -358,11 +358,10 @@ void write_restart(Simulation* simulation, std::array<double,3>& timeP, const So
 
   restart_file.close();
 
-  // Create a soft link to the bin file for the last time step.
-  //
-  if (!com_mod.stFileRepl && cm.mas(cm_mod)) {
-    std::string cmd = "ln -f " + fName + " " + tmpS;
-    std::system(cmd.c_str());
+  // Complete every rank's writes before linking or copying the last restart.
+  if (!com_mod.stFileRepl) {
+    MPI_Barrier(cm.com());
+    if (cm.mas(cm_mod)) utils::update_restart_link(fName, tmpS);
   }
 }
 

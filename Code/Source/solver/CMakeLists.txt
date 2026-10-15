@@ -375,6 +375,17 @@ if(ENABLE_UNIT_TEST)
 
   # include source files (same as what svMultiPhysics does except for main.cpp)
   add_executable(run_all_unit_tests ${CSRCS})
+
+  # A valid library without solver entry points exercises loader diagnostics.
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/loader_fixture.c" "void svmp_test_symbol(void) {}\n")
+  add_library(svmp_loader_fixture SHARED "${CMAKE_CURRENT_BINARY_DIR}/loader_fixture.c")
+  set_target_properties(svmp_loader_fixture PROPERTIES
+    WINDOWS_EXPORT_ALL_SYMBOLS ON
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/loader fixture"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/loader fixture")
+  add_dependencies(run_all_unit_tests svmp_loader_fixture)
+  target_compile_definitions(run_all_unit_tests PRIVATE
+    SVMP_LOADER_FIXTURE="$<TARGET_FILE:svmp_loader_fixture>")
   
   if(USE_TRILINOS)
     target_link_libraries(run_all_unit_tests ${Trilinos_LIBRARIES} ${Trilinos_TPL_LIBRARIES})

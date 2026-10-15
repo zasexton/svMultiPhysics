@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) Stanford University, The Regents of the University of California, and others.
 // SPDX-License-Identifier: BSD-3-Clause
 
-#include <dlfcn.h>
+#include <vtkDynamicLoader.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string>
@@ -36,37 +36,37 @@ class LPNSolverInterface
     // Interface functions.
     std::string lpn_initialize_name_;
     void (*lpn_initialize_)(std::string, int&, int&, int&, int&, std::vector<std::string>&, 
-	                    std::vector<std::string>&);
+	                    std::vector<std::string>&) = nullptr;
 
     std::string lpn_increment_time_name_;
-    void (*lpn_increment_time_)(const int, const double, std::vector<double>& solution);
+    void (*lpn_increment_time_)(const int, const double, std::vector<double>& solution) = nullptr;
 
     std::string lpn_run_simulation_name_;
     void (*lpn_run_simulation_)(const int, const double, std::vector<double>& output_times, 
-	                        std::vector<double>& output_solutions, int& error_code);
+	                        std::vector<double>& output_solutions, int& error_code) = nullptr;
     
     std::string lpn_update_block_params_name_;
-    void (*lpn_update_block_params_)(const int, std::string, std::vector<double>& new_params);
+    void (*lpn_update_block_params_)(const int, std::string, std::vector<double>& new_params) = nullptr;
     
     std::string lpn_read_block_params_name_;
-    void (*lpn_read_block_params_)(const int, std::string, std::vector<double>& block_params);
+    void (*lpn_read_block_params_)(const int, std::string, std::vector<double>& block_params) = nullptr;
     
     std::string lpn_get_block_node_IDs_name_;
-    void (*lpn_get_block_node_IDs_)(const int, std::string, std::vector<int>& block_params);
+    void (*lpn_get_block_node_IDs_)(const int, std::string, std::vector<int>& block_params) = nullptr;
     
     std::string lpn_update_state_name_;
-    void (*lpn_update_state_)(const int, std::vector<double>, std::vector<double>);
+    void (*lpn_update_state_)(const int, std::vector<double>, std::vector<double>) = nullptr;
     
     std::string lpn_return_y_name_;
-    void (*lpn_return_y_)(const int, std::vector<double>&);
+    void (*lpn_return_y_)(const int, std::vector<double>&) = nullptr;
     
     std::string lpn_return_ydot_name_;
-    void (*lpn_return_ydot_)(const int, std::vector<double>&);
+    void (*lpn_return_ydot_)(const int, std::vector<double>&) = nullptr;
     
     std::string lpn_set_external_step_size_name_;
-    void (*lpn_set_external_step_size_)(const int, double);
+    void (*lpn_set_external_step_size_)(const int, double) = nullptr;
 
-    void* library_handle_ = nullptr;
+    vtkLibHandle library_handle_ = nullptr;
     int problem_id_ = 0;
     int system_size_ = 0;
     int num_cycles_ = 0;

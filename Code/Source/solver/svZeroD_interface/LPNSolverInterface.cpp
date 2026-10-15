@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "LPNSolverInterface.h"
-#include <dlfcn.h>
+#include <stdexcept>
 #include <iostream>
 #include <string>
 
@@ -27,7 +27,7 @@ LPNSolverInterface::LPNSolverInterface()
 
 LPNSolverInterface::~LPNSolverInterface()
 {
-  dlclose(library_handle_);
+  if (library_handle_) vtkDynamicLoader::CloseLibrary(library_handle_);
 }
 
 //--------------
@@ -37,92 +37,29 @@ LPNSolverInterface::~LPNSolverInterface()
 //
 void LPNSolverInterface::load_library(const std::string& interface_lib)
 {
-  library_handle_ = dlopen(interface_lib.c_str(), RTLD_LAZY);
-
+  if (library_handle_) throw std::runtime_error("The 0D interface library is already loaded");
+  library_handle_ = vtkDynamicLoader::OpenLibrary(interface_lib.c_str());
   if (!library_handle_) {
-    std::cerr << "Error loading shared library '" << interface_lib << "'  with error: " << dlerror() << std::endl;
-    return;
+    const char* error = vtkDynamicLoader::LastError();
+    throw std::runtime_error("Could not load 0D library '" + interface_lib + "': " + (error ? error : "unknown error"));
   }
-
-  // Get a pointer to the svzero 'initialize' function.
-  *(void**)(&lpn_initialize_) = dlsym(library_handle_, "initialize");
-  if (!lpn_initialize_) {
-    std::cerr << "Error loading function 'initialize' with error: " << dlerror() << std::endl;
-    dlclose(library_handle_);
-    return;
-  }
-
-  // Get a pointer to the svzero 'increment_time' function.
-  *(void**)(&lpn_increment_time_) = dlsym(library_handle_, "increment_time");
-  if (!lpn_increment_time_) {
-    std::cerr << "Error loading function 'increment_time' with error: " << dlerror() << std::endl;
-    dlclose(library_handle_);
-    return;
-  }
-  
-  // Get a pointer to the svzero 'run_simulation' function.
-  *(void**)(&lpn_run_simulation_) = dlsym(library_handle_, "run_simulation");
-  if (!lpn_run_simulation_) {
-    std::cerr << "Error loading function 'run_simulation' with error: " << dlerror() << std::endl;
-    dlclose(library_handle_);
-    return;
-  }
-
-  // Get a pointer to the svzero 'update_block_params' function.
-  *(void**)(&lpn_update_block_params_) = dlsym(library_handle_, "update_block_params");
-  if (!lpn_update_block_params_) {
-    std::cerr << "Error loading function 'update_block_params' with error: " << dlerror() << std::endl;
-    dlclose(library_handle_);
-    return;
-  }
-
-  // Get a pointer to the svzero 'read_block_params' function.
-  *(void**)(&lpn_read_block_params_) = dlsym(library_handle_, "read_block_params");
-  if (!lpn_read_block_params_) {
-    std::cerr << "Error loading function 'read_block_params' with error: " << dlerror() << std::endl;
-    dlclose(library_handle_);
-    return;
-  }
-  
-  // Get a pointer to the svzero 'get_block_node_IDs' function.
-  *(void**)(&lpn_get_block_node_IDs_) = dlsym(library_handle_, "get_block_node_IDs");
-  if (!lpn_get_block_node_IDs_) {
-    std::cerr << "Error loading function 'lpn_get_block_node_IDs' with error: " << dlerror() << std::endl;
-    dlclose(library_handle_);
-    return;
-  }
-  
-  // Get a pointer to the svzero 'update_state' function.
-  *(void**)(&lpn_update_state_) = dlsym(library_handle_, "update_state");
-  if (!lpn_update_state_) {
-    std::cerr << "Error loading function 'lpn_update_state' with error: " << dlerror() << std::endl;
-    dlclose(library_handle_);
-    return;
-  }
-  
-  // Get a pointer to the svzero 'return_y' function.
-  *(void**)(&lpn_return_y_) = dlsym(library_handle_, "return_y");
-  if (!lpn_return_y_) {
-    std::cerr << "Error loading function 'lpn_return_y' with error: " << dlerror() << std::endl;
-    dlclose(library_handle_);
-    return;
-  }
-  
-  // Get a pointer to the svzero 'return_ydot' function.
-  *(void**)(&lpn_return_ydot_) = dlsym(library_handle_, "return_ydot");
-  if (!lpn_return_ydot_) {
-    std::cerr << "Error loading function 'lpn_return_ydot' with error: " << dlerror() << std::endl;
-    dlclose(library_handle_);
-    return;
-  }
-  
-  // Get a pointer to the svzero 'set_external_step_size' function.
-  *(void**)(&lpn_set_external_step_size_) = dlsym(library_handle_, "set_external_step_size");
-  if (!lpn_set_external_step_size_) {
-    std::cerr << "Error loading function 'lpn_set_external_step_size' with error: " << dlerror() << std::endl;
-    dlclose(library_handle_);
-    return;
-  }
+  auto load_symbol = [&](const char* name) {
+    auto symbol = vtkDynamicLoader::GetSymbolAddress(library_handle_, name);
+    if (!symbol) {
+      throw std::runtime_error("Missing 0D interface function '" + std::string(name) + "' in '" + interface_lib + "'");
+    }
+    return symbol;
+  };
+  lpn_initialize_ = reinterpret_cast<decltype(lpn_initialize_)>(load_symbol("initialize"));
+  lpn_increment_time_ = reinterpret_cast<decltype(lpn_increment_time_)>(load_symbol("increment_time"));
+  lpn_run_simulation_ = reinterpret_cast<decltype(lpn_run_simulation_)>(load_symbol("run_simulation"));
+  lpn_update_block_params_ = reinterpret_cast<decltype(lpn_update_block_params_)>(load_symbol("update_block_params"));
+  lpn_read_block_params_ = reinterpret_cast<decltype(lpn_read_block_params_)>(load_symbol("read_block_params"));
+  lpn_get_block_node_IDs_ = reinterpret_cast<decltype(lpn_get_block_node_IDs_)>(load_symbol("get_block_node_IDs"));
+  lpn_update_state_ = reinterpret_cast<decltype(lpn_update_state_)>(load_symbol("update_state"));
+  lpn_return_y_ = reinterpret_cast<decltype(lpn_return_y_)>(load_symbol("return_y"));
+  lpn_return_ydot_ = reinterpret_cast<decltype(lpn_return_ydot_)>(load_symbol("return_ydot"));
+  lpn_set_external_step_size_ = reinterpret_cast<decltype(lpn_set_external_step_size_)>(load_symbol("set_external_step_size"));
 }
 
 // Initialze the LPN solver.
@@ -133,6 +70,7 @@ void LPNSolverInterface::load_library(const std::string& interface_lib)
 //
 void LPNSolverInterface::initialize(std::string file_name)
 {
+  if (!lpn_initialize_) throw std::runtime_error("The 0D interface library has not been loaded");
   lpn_initialize_(file_name, problem_id_, pts_per_cycle_, num_cycles_, num_output_steps_, block_names_, variable_names_);
   std::cout << "[LPNSolverInterface::initialize] Problem ID: " << problem_id_ << std::endl;
   system_size_ = variable_names_.size();

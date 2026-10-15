@@ -14,7 +14,7 @@
  *
  * These routines interface the 3D finite-element solver svMultiPhysics with
  * the 1D blood-flow solver svOneDSolver via a dynamically loaded shared
- * library, such as libsvOneDSolver_interface.so or libsvOneDSolver_interface.dylib.
+ * library, such as libsvOneDSolver_interface.so, .dylib, or .dll.
  *
  * @par Coupling overview
  * NEU coupling, where the 1D inlet is driven by the 3D outflow:

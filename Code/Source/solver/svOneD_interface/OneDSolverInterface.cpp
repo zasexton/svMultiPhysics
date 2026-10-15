@@ -12,34 +12,32 @@
 OneDSolverInterface::~OneDSolverInterface()
 {
   if (library_handle_) {
-    dlclose(library_handle_);
+    vtkDynamicLoader::CloseLibrary(library_handle_);
     library_handle_ = nullptr;
   }
 }
 
 void OneDSolverInterface::load_library(const std::string& interface_lib)
 {
-  library_handle_ = dlopen(interface_lib.c_str(), RTLD_LAZY);
+  if (library_handle_) throw std::runtime_error("The 1D interface library is already loaded");
+  library_handle_ = vtkDynamicLoader::OpenLibrary(interface_lib.c_str());
   if (!library_handle_) {
+    const char* error = vtkDynamicLoader::LastError();
     throw svmp::CoreException(
         std::string("[OneDSolverInterface] Could not load shared library '") +
-        interface_lib + "': " + dlerror(),
+        interface_lib + "': " + (error ? error : "unknown error"),
         svmp::StatusCode::DependencyError,
         __FILE__,
         __LINE__,
         __func__);
   }
 
-  // Clear any existing error.
-  dlerror();
-
-  auto load_sym = [&](const char* name) -> void* {
-    void* sym = dlsym(library_handle_, name);
-    const char* err = dlerror();
-    if (err) {
+  auto load_sym = [&](const char* name) {
+    auto sym = vtkDynamicLoader::GetSymbolAddress(library_handle_, name);
+    if (!sym) {
       throw svmp::CoreException(
           std::string("[OneDSolverInterface] Could not find the 1D interface function '") +
-          name + "' in the shared library '" + interface_lib + "': " + err,
+          name + "' in the shared library '" + interface_lib + "'",
           svmp::StatusCode::DependencyError,
           __FILE__,
           __LINE__,
@@ -48,12 +46,12 @@ void OneDSolverInterface::load_library(const std::string& interface_lib)
     return sym;
   };
 
-  *(void**)(&initialize_1d_)              = load_sym("initialize_1d");
-  *(void**)(&set_external_step_size_1d_)  = load_sym("set_external_step_size_1d");
-  *(void**)(&return_1d_solution_)         = load_sym("return_1d_solution");
-  *(void**)(&update_1d_solution_)         = load_sym("update_1d_solution");
-  *(void**)(&run_1d_simulation_step_1d_)  = load_sym("run_1d_simulation_step_1d");
-  *(void**)(&extract_coupled_dof_)        = load_sym("extract_coupled_dof");
+  initialize_1d_ = reinterpret_cast<decltype(initialize_1d_)>(load_sym("initialize_1d"));
+  set_external_step_size_1d_ = reinterpret_cast<decltype(set_external_step_size_1d_)>(load_sym("set_external_step_size_1d"));
+  return_1d_solution_ = reinterpret_cast<decltype(return_1d_solution_)>(load_sym("return_1d_solution"));
+  update_1d_solution_ = reinterpret_cast<decltype(update_1d_solution_)>(load_sym("update_1d_solution"));
+  run_1d_simulation_step_1d_ = reinterpret_cast<decltype(run_1d_simulation_step_1d_)>(load_sym("run_1d_simulation_step_1d"));
+  extract_coupled_dof_ = reinterpret_cast<decltype(extract_coupled_dof_)>(load_sym("extract_coupled_dof"));
 }
 
 void OneDSolverInterface::initialize(const std::string& input_file,
