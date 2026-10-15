@@ -37,22 +37,64 @@ if(WIN32)
   # Package name
    set(CPACK_PACKAGE_FILE_NAME "svMultiPhysics-windows-win-x64-${SV_FULL_VERSION}${INSTALL_TYPE_STR}")
 
-  # MPI dlls
-  find_path(INTEL_REDIST_DIR names fmpich2.dll PATHS $ENV{PATH})
-  file(GLOB INTEL_REDIST_DLLS "${INTEL_REDIST_DIR}/*.dll")
-  set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS} ${INTEL_REDIST_DLLS})
-  set(RM_DLL "fmpich2.dll;fmpich2g.dll;mpich2mpi.dll")
-  set(RM_DLL_FULL)
-  foreach(dll ${RM_DLL})
-  	sv_list_match(tmp ${dll} ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS})
-  	list(APPEND RM_DLL_FULL ${tmp})
-  endforeach()
-  list(REMOVE_ITEM CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS ${RM_DLL_FULL})
+  set(SV_INSTALLER_TYPE ZIP CACHE STRING "Windows package generator")
+  set(CPACK_GENERATOR "${SV_INSTALLER_TYPE}")
+  set(CPACK_PACKAGING_INSTALL_PREFIX "/")
+  set(CPACK_ARCHIVE_COMPONENT_INSTALL ON)
+  set(CPACK_COMPONENTS_GROUPING ALL_COMPONENTS_IN_ONE)
+  set(CPACK_COMPONENT_INCLUDE_TOPLEVEL_DIRECTORY ON)
+  set(CPACK_COMPONENTS_ALL CoreExecutables)
+  set(SV_PACKAGE_EXTRA_LIBRARIES "" CACHE STRING "Additional dynamically loaded DLLs to package")
+  set(SV_PACKAGE_EXTRA_LICENSES "" CACHE STRING "License files for additional packaged libraries")
+  get_filename_component(compiler_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
+  get_filename_component(compiler_prefix "${compiler_bin}" DIRECTORY)
+  set(SV_PACKAGE_RUNTIME_DIRS "${compiler_bin}" CACHE STRING "Additional DLL search directories")
 
-  # Cpack install help
-  set(CPACK_MONOLITHIC_INSTALL 1)
-  set(CPACK_COMPONENTS_IGNORE_GROUPS 1)
-  set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS} ${INTEL_REDIST_DLLS})
+  # Run during both installation and CPack staging, after the binary is built.
+  set(install_windows_runtime [==[
+    if("@MINGW@")
+      set(CMAKE_GET_RUNTIME_DEPENDENCIES_PLATFORM "windows+pe")
+      set(CMAKE_GET_RUNTIME_DEPENDENCIES_TOOL "objdump")
+      set(CMAKE_GET_RUNTIME_DEPENDENCIES_COMMAND "@CMAKE_OBJDUMP@")
+    endif()
+    set(extra_libraries "@SV_PACKAGE_EXTRA_LIBRARIES@")
+    set(runtime_dirs "@SV_PACKAGE_RUNTIME_DIRS@")
+    file(GET_RUNTIME_DEPENDENCIES
+      EXECUTABLES "$<TARGET_FILE:svmultiphysics>"
+      LIBRARIES ${extra_libraries}
+      DIRECTORIES ${runtime_dirs}
+      PRE_EXCLUDE_REGEXES "api-ms-.*" "ext-ms-.*" "[Mm][Ss][Mm][Pp][Ii]\\.[Dd][Ll][Ll]"
+      POST_EXCLUDE_REGEXES [=[[/\\][Ss][Yy][Ss][Tt][Ee][Mm]32[/\\]]=]
+      RESOLVED_DEPENDENCIES_VAR dependencies
+      UNRESOLVED_DEPENDENCIES_VAR unresolved
+      CONFLICTING_DEPENDENCIES_PREFIX conflicts)
+    if(unresolved OR conflicts_FILENAMES)
+      message(FATAL_ERROR "Unresolved DLLs: ${unresolved}; conflicting DLLs: ${conflicts_FILENAMES}")
+    endif()
+    if(dependencies OR extra_libraries)
+      file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/@SV_INSTALL_RUNTIME_DIR@"
+        TYPE SHARED_LIBRARY FILES ${dependencies} ${extra_libraries})
+    endif()
+  ]==])
+  string(CONFIGURE "${install_windows_runtime}" install_windows_runtime @ONLY)
+  install(CODE "${install_windows_runtime}" COMPONENT CoreExecutables)
+  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/license.txt" "${SV_SOURCE_DIR}/../README.md"
+    DESTINATION share/svMultiPhysics COMPONENT CoreExecutables)
+  install(FILES ${SV_PACKAGE_EXTRA_LICENSES}
+    DESTINATION share/svMultiPhysics/licenses/extra COMPONENT CoreExecutables)
+  install(FILES "${SV_BINARY_DIR}/dependencies.txt" "${SV_BINARY_DIR}/toolchain.txt"
+    "${SV_BINARY_DIR}/source-revision.txt" "${SV_BINARY_DIR}/package-sha256.txt"
+    DESTINATION share/svMultiPhysics COMPONENT CoreExecutables OPTIONAL)
+  if(MINGW)
+    install(DIRECTORY "${compiler_prefix}/share/licenses/"
+      DESTINATION share/svMultiPhysics/licenses COMPONENT CoreExecutables)
+  endif()
+  foreach(dependency metis parmetis)
+    install(FILES "${SV_SOURCE_DIR}/ThirdParty/${dependency}_internal/simvascular_${dependency}_internal/LICENSE.txt"
+      DESTINATION "share/svMultiPhysics/licenses/${dependency}" COMPONENT CoreExecutables)
+  endforeach()
+  install(FILES "${SV_SOURCE_DIR}/ThirdParty/tetgen/simvascular_tetgen/LICENSE"
+    DESTINATION share/svMultiPhysics/licenses/tetgen COMPONENT CoreExecutables)
 
   # Visual studios
   if(MSVC)
