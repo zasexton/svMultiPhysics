@@ -12,13 +12,14 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
       "MinSizeRel" "RelWithDebInfo")
 endif()
 
-if(WIN32)
+if(MSVC)
   add_definitions("/Zi")
+endif()
+if(WIN32)
   add_definitions("-DWINDOWS")
 endif()
 
 include_directories(./)
-include_directories(${MPI_C_INCLUDE_PATH})
 
 set(CSRCS b64.c blas.c cache.c csr.c error.c evaluate.c
   fkvkselect.c fs.c getopt.c gk_util.c gkregex.c graph.c
@@ -30,6 +31,10 @@ if(SV_USE_THIRDPARTY_SHARED_LIBRARIES)
   add_library(${GKLIB_INTERNAL_LIBRARY_NAME} SHARED ${CSRCS})
 else()
   add_library(${GKLIB_INTERNAL_LIBRARY_NAME} STATIC ${CSRCS})
+endif()
+
+if(WIN32)
+  target_compile_definitions(${GKLIB_INTERNAL_LIBRARY_NAME} PUBLIC USE_GKREGEX)
 endif()
 
 if(SV_INSTALL_LIBS)

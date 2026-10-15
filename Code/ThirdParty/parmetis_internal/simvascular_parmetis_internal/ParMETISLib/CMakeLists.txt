@@ -23,10 +23,8 @@ set(third_party_dir ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
 target_include_directories(${PARMETIS_INTERNAL_LIBRARY_NAME} PUBLIC ./)
 target_include_directories(${PARMETIS_INTERNAL_LIBRARY_NAME} PUBLIC ${third_party_dir}/gklib_internal/simvascular_gklib_internal)
 target_include_directories(${PARMETIS_INTERNAL_LIBRARY_NAME} PUBLIC ${third_party_dir}/metis_internal/simvascular_metis_internal/METISLib)
-target_include_directories(${PARMETIS_INTERNAL_LIBRARY_NAME} PUBLIC ${MPI_C_INCLUDE_PATH}) 
-
-
-target_link_libraries(${PARMETIS_INTERNAL_LIBRARY_NAME} ${METIS_INTERNAL_LIBRARY_NAME}  ${GKLIB_INTERNAL_LIBRARY_NAME})
+target_link_libraries(${PARMETIS_INTERNAL_LIBRARY_NAME} PUBLIC
+  ${METIS_INTERNAL_LIBRARY_NAME} ${GKLIB_INTERNAL_LIBRARY_NAME} MPI::MPI_C)
 
 if(SV_INSTALL_LIBS)
   install(TARGETS ${PARMETIS_SV_LIBRARY_NAME}

@@ -31,7 +31,6 @@ include_directories(${SV_SOURCE_DIR}/ThirdParty/eigen/include/eigen3)
 include_directories(${SV_SOURCE_DIR}/ThirdParty/parmetis_internal/simvascular_parmetis_internal/ParMETISLib)
 include_directories(${SV_SOURCE_DIR}/ThirdParty/tetgen/simvascular_tetgen)
 include_directories(${SV_SOURCE_DIR}/ThirdParty/tinyxml/simvascular_tinyxml)
-include_directories(${MPI_C_INCLUDE_PATH})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/Core)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/FE)
@@ -135,19 +134,19 @@ if(ENABLE_ARRAY_INDEX_CHECKING)
 endif()
 
 # svMultiPhysics requires LAPACK
+set(BLA_SIZEOF_INTEGER 4)
 find_package(BLAS REQUIRED)
 find_package(LAPACK REQUIRED)
 
 # Include VTK either from a local build using SV_LOCAL_VTK_PATH
 # or from a default installed version.
 #
+set(SV_VTK_COMPONENTS CommonCore CommonDataModel CommonMisc FiltersGeometry IOXML)
 if("${SV_LOCAL_VTK_PATH}" STREQUAL "")
-  find_package(VTK REQUIRED ) 
+  find_package(VTK REQUIRED COMPONENTS ${SV_VTK_COMPONENTS})
 else()
-  find_package(VTK PATHS ${SV_LOCAL_VTK_PATH} NO_DEFAULT_PATH REQUIRED) 
+  find_package(VTK PATHS ${SV_LOCAL_VTK_PATH} NO_DEFAULT_PATH REQUIRED COMPONENTS ${SV_VTK_COMPONENTS})
 endif()
-
-include(${VTK_USE_FILE})
 
 set(lib ${SV_LIB_SVFSI_NAME})
 
@@ -308,8 +307,8 @@ target_link_libraries(${SV_MULTIPHYSICS_EXE}
   ${GLOBAL_LIBRARIES}
   ${INTELRUNTIME_LIBRARIES}
   ${ZLIB_LIBRARY}
-  ${BLAS_LIBRARIES}
-  ${LAPACK_LIBRARIES}
+  BLAS::BLAS
+  LAPACK::LAPACK
   ${METIS_SVFSI_LIBRARY_NAME}
   ${PARMETIS_INTERNAL_LIBRARY_NAME}
   ${TETGEN_LIBRARY_NAME}
@@ -318,9 +317,8 @@ target_link_libraries(${SV_MULTIPHYSICS_EXE}
   ${VTK_LIBRARIES}
   )
 
-# extra MPI libraries only if there are not set to NOT_FOUND or other null
-if(SV_MPI_EXTRA_LIBRARY)
-  target_link_libraries(${SV_MULTIPHYSICS_EXE} ${SV_MPI_EXTRA_LIBRARY})
+if(WIN32)
+  target_link_libraries(${SV_MULTIPHYSICS_EXE} psapi)
 endif()
 
 if(USE_TRILINOS)
@@ -392,8 +390,8 @@ if(ENABLE_UNIT_TEST)
     ${GLOBAL_LIBRARIES}
     ${INTELRUNTIME_LIBRARIES}
     ${ZLIB_LIBRARY}
-    ${BLAS_LIBRARIES}
-    ${LAPACK_LIBRARIES}
+    BLAS::BLAS
+    LAPACK::LAPACK
     ${METIS_SVFSI_LIBRARY_NAME}
     ${PARMETIS_INTERNAL_LIBRARY_NAME}
     ${TETGEN_LIBRARY_NAME}
@@ -407,8 +405,11 @@ if(ENABLE_UNIT_TEST)
     run_all_unit_tests
     gtest
     GTest::gtest_main 
-    pthread   # link pthread on ubuntu20
+    Threads::Threads
   )
+  if(WIN32)
+    target_link_libraries(run_all_unit_tests psapi)
+  endif()
 
   # Define the path to the unit-test reference-data directory as a preprocessor
   # macro.
