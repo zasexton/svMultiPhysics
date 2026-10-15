@@ -167,6 +167,8 @@ python -m pytest -v
 
 The coupled tests also need svZeroDSolver built at `svZeroDSolver/build`; the Windows job in [.github/workflows/tests.yml](.github/workflows/tests.yml) records the source revision and build commands. `SVMP_TEST_PROCS` overrides the default `1,3,4` MPI rank counts, `MPIEXEC_NUMPROC_FLAG` overrides the launcher's count flag, and `SVMP_TEST_TIMEOUT` sets the per-run timeout in seconds (default 600). `SVMP_PETSC_EXECUTABLE` selects a separate PETSc build. The ZIP test uses a separate runner with a restricted `PATH` and checks numerical results and restart continuation with one and two ranks.
 
+Remeshing remains unvalidated: a tetrahedral probe fails boundary-parent lookup with both the previous and current Linux remeshing implementations. Windows 10/11 and older CPUs also need package acceptance runs; automated Windows validation uses Server 2022 and records the runner CPU.
+
 MSYS2 is a rolling distribution. CI records package versions, source revisions, tool versions, and package checksums; its `windows-build-environment` artifact retains the matching package archives and MPI installer. Preserve that artifact with each release. Restore the complete archived package set into an isolated MSYS2 installation using `pacman -U` after verifying `package-sha256.txt`; retain the corresponding MSYS2 installer as well. Do not mix individually pinned old libraries into an upgraded environment. A dependency update requires rerunning the build, numerical tests, and extracted-package tests.
 
 <h2 id="building_vtk"> Building Visualization Toolkit (VTK) Libraries </h2>

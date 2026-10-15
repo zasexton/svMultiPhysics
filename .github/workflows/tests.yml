@@ -132,16 +132,19 @@ jobs:
             -DSV_PACKAGE_EXTRA_LICENSES="$PWD/svZeroDSolver/LICENSE.txt"
       - name: Build and run unit tests
         run: |
-          cmake --build build/windows --parallel 4
-          ctest --test-dir build/windows/Source/solver --output-on-failure
+          set -o pipefail
+          cmake --build build/windows --parallel 4 2>&1 | tee build/windows/build.log
+          ctest --test-dir build/windows/Source/solver --output-on-failure 2>&1 | tee build/windows/unit-tests.log
       - name: Run numerical tests
         run: |
+          set -o pipefail
           export SVMP_EXECUTABLE="$(cygpath -w "$PWD/build/windows/bin/svmultiphysics.exe")"
           export MPIEXEC_EXECUTABLE='C:\Program Files\Microsoft MPI\Bin\mpiexec.exe'
           cd tests
-          python -m pytest -x -v -rf --junitxml=../build/windows/integration.xml
+          python -m pytest -x -v -rf --junitxml=../build/windows/integration.xml 2>&1 | tee ../build/windows/integration.log
       - name: Package and record dependencies
         run: |
+          set -o pipefail
           git rev-parse HEAD > build/windows/source-revision.txt
           git -C svZeroDSolver rev-parse HEAD >> build/windows/source-revision.txt
           git -C build/windows/_deps/googletest-src rev-parse HEAD >> build/windows/source-revision.txt
@@ -158,8 +161,8 @@ jobs:
           diff -u <(sort build/windows/dependencies.txt) build/windows/archived-dependencies.txt
           (cd /var/cache/pacman/pkg && xargs sha256sum < "$manifest_dir/package-files.txt") > build/windows/package-sha256.txt
           tar -cf build/msys2-packages.tar -C /var/cache/pacman/pkg -T "$manifest_dir/package-files.txt"
-          cmake --install build/windows --prefix "$PWD/build/windows-stage"
-          cpack --config build/windows/CPackConfig.cmake -G ZIP -B build/windows-packages
+          cmake --install build/windows --prefix "$PWD/build/windows-stage" 2>&1 | tee build/windows/install.log
+          cpack --config build/windows/CPackConfig.cmake -G ZIP -B build/windows-packages 2>&1 | tee build/windows/cpack.log
           sha256sum build/windows-packages/*.zip > build/windows-packages/SHA256SUMS
       - uses: actions/upload-artifact@v4
         if: always()
@@ -169,6 +172,7 @@ jobs:
             build/windows-packages/*.zip
             build/windows-packages/SHA256SUMS
             build/windows/*.txt
+            build/windows/*.log
             build/windows/*.xml
             build/windows/Testing/Temporary/
             build/windows/Source/solver/Testing/Temporary/
