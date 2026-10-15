@@ -154,15 +154,16 @@ MSYS2 is needed to build, but is not needed to run the packaged executable. Set 
 
 The default Windows configuration uses the built-in FSILS solver. PETSc and Trilinos require separate compatible builds and validation. The 0D/1D interfaces accept full library paths with `.dll`, `.so`, or `.dylib` extensions and resolve the available platform suffix. Build external solver DLLs with the same UCRT64/GCC stack, especially the 0D interface, which exchanges C++ objects. Use `SV_PACKAGE_EXTRA_LIBRARIES` to include dynamically loaded DLLs and `SV_PACKAGE_EXTRA_LICENSES` for their license files. Merely scanning the executable cannot discover libraries loaded at runtime. Windows CI also builds the 0D interface; the external 1D library is not included in the default package. genBC requires a compatible separately built executable.
 
-For tests, install `make`, `mingw-w64-ucrt-x86_64-gcc-fortran` (genBC), and the UCRT64 `python-pytest`, `python-numpy`, `python-meshio`, and `python-pandas` packages. Fetch the test data with `git lfs pull`, configure with `-DENABLE_UNIT_TEST=ON`, rebuild, and run:
+For tests, install `make`, `mingw-w64-ucrt-x86_64-gcc-fortran` (genBC), and standard Windows Python 3.12. meshio 5.3.5's appended VTK reader depends on the older Base64 padding behavior; newer Python versions can reject valid solver output. In UCRT64, set `TEST_PYTHON` to the full path of that Python executable. Fetch the test data with `git lfs pull`, configure with `-DENABLE_UNIT_TEST=ON`, rebuild, and run:
 
 ```bash
+"$TEST_PYTHON" -m pip install pytest numpy meshio==5.3.5 pandas
 ctest --test-dir build/windows/Source/solver --output-on-failure
 export SVMP_EXECUTABLE="$(cygpath -w "$PWD/build/windows/bin/svmultiphysics.exe")"
 export MPIEXEC_EXECUTABLE='C:\Program Files\Microsoft MPI\Bin\mpiexec.exe'
 export OMP_NUM_THREADS=1
 cd tests
-python -m pytest -v
+"$TEST_PYTHON" -m pytest -v
 ```
 
 The coupled tests also need svZeroDSolver built at `svZeroDSolver/build`; the Windows job in [.github/workflows/tests.yml](.github/workflows/tests.yml) records the source revision and build commands. `SVMP_TEST_PROCS` overrides the default `1,3,4` MPI rank counts, `MPIEXEC_NUMPROC_FLAG` overrides the launcher's count flag, and `SVMP_TEST_TIMEOUT` sets the per-run timeout in seconds (default 600). `SVMP_PETSC_EXECUTABLE` selects a separate PETSc build. The ZIP test uses a separate runner with a restricted `PATH` and checks numerical results and restart continuation with one and two ranks.
