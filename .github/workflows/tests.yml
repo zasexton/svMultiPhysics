@@ -99,6 +99,9 @@ jobs:
             mingw-w64-ucrt-x86_64-msmpi
             mingw-w64-ucrt-x86_64-openblas
             mingw-w64-ucrt-x86_64-vtk
+            mingw-w64-ucrt-x86_64-nlohmann-json
+            mingw-w64-ucrt-x86_64-utf8cpp
+            mingw-w64-ucrt-x86_64-exprtk
             mingw-w64-ucrt-x86_64-python-pytest
             mingw-w64-ucrt-x86_64-python-numpy
             mingw-w64-ucrt-x86_64-python-meshio

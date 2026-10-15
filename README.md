@@ -115,7 +115,9 @@ Install the [Microsoft MPI 10.1.3 runtime](https://www.microsoft.com/en-us/downl
 pacman -S --needed git \
   mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake \
   mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-msmpi \
-  mingw-w64-ucrt-x86_64-openblas mingw-w64-ucrt-x86_64-vtk
+  mingw-w64-ucrt-x86_64-openblas mingw-w64-ucrt-x86_64-vtk \
+  mingw-w64-ucrt-x86_64-nlohmann-json mingw-w64-ucrt-x86_64-utf8cpp \
+  mingw-w64-ucrt-x86_64-exprtk
 ```
 
 Use the native UCRT64 CMake and libraries throughout. OpenBLAS must provide LAPACK with **32-bit integer arguments**; the `openblas64` package is not compatible. Configure the solver directly from `Code/`, from the repository root:
