@@ -68,6 +68,8 @@ inline Array<double> create_ones_matrix(const int N) {
     return A;
 }
 
+inline std::minstd_rand0 material_random_engine(42);
+
 /**
  * @brief Generates a random double value.
  *
@@ -77,8 +79,6 @@ inline Array<double> create_ones_matrix(const int N) {
  * @param[in] max The maximum value of the range.
  * @return A random double value between min and max.
  */
-inline std::minstd_rand0 material_random_engine(42);
-
 inline double getRandomDouble(const double min, const double max) {
     std::uniform_real_distribution<double> distribution(min, max);
     return distribution(material_random_engine);
@@ -1288,18 +1288,18 @@ public:
             
                 // Compute dS and CC:dE for each delta and store error in list
                 std::vector<double> errors;
-                Array<double> dS(N, N), CCdE(N, N);
+                Array<double> dS(N, N), CCdE(N, N), dS_minus(N, N), CCdE_minus(N, N);
                 for (int i = 0; i < deltas.size(); i++) {
-                    // Combine both directions to cancel odd truncation-error terms
-                    // in the squared norm, without cancelling a stiffness error.
+                    calcdSFiniteDifference(F, dF, deltas[i], order, dS);
+                    calcCCdEFiniteDifference(F, dF, deltas[i], order, CCdE);
+                    calcdSFiniteDifference(F, dF, -deltas[i], order, dS_minus);
+                    calcCCdEFiniteDifference(F, dF, -deltas[i], order, CCdE_minus);
+
+                    // Compute Frobenius norm of error between dS and CC:dE for +delta and -delta, which cancels odd truncation-error terms
                     double error = 0.0;
-                    for (double sign : {-1.0, 1.0}) {
-                        calcdSFiniteDifference(F, dF, sign * deltas[i], order, dS);
-                        calcCCdEFiniteDifference(F, dF, sign * deltas[i], order, CCdE);
-                        for (int row = 0; row < 3; row++) {
-                            for (int col = 0; col < 3; col++) {
-                                error += pow(dS(row,col) - CCdE(row,col), 2);
-                            }
+                    for (int i = 0; i < 3; i++) {
+                        for (int j = 0; j < 3; j++) {
+                            error += pow(dS(i,j) - CCdE(i,j), 2) + pow(dS_minus(i,j) - CCdE_minus(i,j), 2);
                         }
                     }
                     error = sqrt(error / 2.0);
@@ -1791,9 +1791,7 @@ protected:
     std::vector<Array<double>> F_large_list;
 
     void SetUp() override {
-
-        // Keep deformation samples independent of test registration order.
-        material_random_engine.seed(42);
+        material_random_engine.seed(42); // Keep samples independent of test registration order.
 
         // Create random deformation gradients for small perturbations
         for (int i = 0; i < n_F; i++) {
