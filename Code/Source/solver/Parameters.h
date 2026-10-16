@@ -129,9 +129,8 @@ class Parameter
     void set(const std::string& str_value)
     {
       if constexpr (std::is_same_v<T, std::string>) {
-        const auto first = str_value.find_first_not_of(" \t\r\n");
-        value_ = first == std::string::npos ? "" : str_value.substr(
-            first, str_value.find_last_not_of(" \t\r\n") - first + 1);
+        value_ = str_value.substr(0, str_value.find_last_not_of(" \t\r\n") + 1);
+        value_.erase(0, value_.find_first_not_of(" \t\r\n"));
         value_set_ = true;
         return;
       }

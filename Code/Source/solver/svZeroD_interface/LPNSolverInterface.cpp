@@ -2,11 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "LPNSolverInterface.h"
-#ifdef _WIN32
-#include "utils.h" // Provides dlopen() and related functions on Windows.
-#else
-#include <dlfcn.h>
-#endif
+#include "utils.h"
 #include <iostream>
 #include <string>
 

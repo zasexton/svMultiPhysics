@@ -72,9 +72,7 @@ void run_process(std::string executable, std::string input_file)
   const auto argument = '"' + input_file + '"';
   const char* arguments[] = {program.c_str(), argument.c_str(), nullptr};
   const auto status = _spawnvp(_P_WAIT, executable.c_str(), arguments);
-  if (status == -1) {
-    throw std::system_error(errno, std::generic_category(), "Could not start " + executable);
-  }
+  if (status == -1) throw std::system_error(errno, std::generic_category(), "Could not start " + executable);
 #else
   char* arguments[] = {executable.data(), input_file.data(), nullptr};
   pid_t process;
@@ -82,16 +80,12 @@ void run_process(std::string executable, std::string input_file)
   if (error) throw std::system_error(error, std::generic_category(), "Could not start " + executable);
   int status;
   while (waitpid(process, &status, 0) == -1) {
-    if (errno != EINTR) {
-      throw std::system_error(errno, std::generic_category(), "Could not wait for " + executable);
-    }
+    if (errno != EINTR) throw std::system_error(errno, std::generic_category(), "Could not wait for " + executable);
   }
   if (!WIFEXITED(status)) throw std::runtime_error("Process terminated abnormally: " + executable);
   status = WEXITSTATUS(status);
 #endif
-  if (status != 0) {
-    throw std::runtime_error("Process exited with status " + std::to_string(status) + ": " + executable);
-  }
+  if (status != 0) throw std::runtime_error("Process exited with status " + std::to_string(status) + ": " + executable);
 }
 
 /// @brief Count the number of bits in an int.

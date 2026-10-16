@@ -8,11 +8,7 @@
 #include <string>
 #include <vector>
 #include "Core/Exception.h"
-#ifdef _WIN32
-#include "utils.h" // Provides dlopen() and related functions on Windows.
-#else
-#include <dlfcn.h>
-#endif
+#include "utils.h"
 
 OneDSolverInterface::~OneDSolverInterface()
 {
