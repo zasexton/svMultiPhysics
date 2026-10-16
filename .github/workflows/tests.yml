@@ -170,19 +170,16 @@ jobs:
             -DSV_PACKAGE_EXTRA_LICENSES="$PWD/svZeroDSolver/LICENSE.txt"
       - name: Build and run unit tests
         run: |
-          set -o pipefail
           cmake --build build/windows --parallel 4 -- -k 0 2>&1 | tee build/windows/build.log
           ctest --test-dir build/windows/Source/solver --output-on-failure 2>&1 | tee build/windows/unit-tests.log
       - name: Package
         run: |
-          set -o pipefail
           git rev-parse HEAD > build/windows/source-revision.txt
           ${{ matrix.list-packages }} > build/windows/dependencies.txt
           grep -h 'set(CMAKE_CXX_COMPILER\(_ID\|_VERSION\)\? ' build/windows/CMakeFiles/*/CMakeCXXCompiler.cmake > build/windows/toolchain.txt
           cpack --config build/windows/CPackConfig.cmake -G ZIP -B build/windows-packages 2>&1 | tee build/windows/cpack.log
       - name: Run numerical tests
         run: |
-          set -o pipefail
           export SVMP_EXECUTABLE="$(cygpath -w "$PWD/build/windows/bin/svmultiphysics.exe")"
           export MPIEXEC_EXECUTABLE='C:\Program Files\Microsoft MPI\Bin\mpiexec.exe'
           windows_python="$(cygpath -u "$pythonLocation")/python.exe"
