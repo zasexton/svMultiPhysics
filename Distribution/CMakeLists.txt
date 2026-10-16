@@ -84,8 +84,7 @@ if(WIN32)
     DESTINATION share/svMultiPhysics COMPONENT CoreExecutables)
   install(FILES ${SV_PACKAGE_EXTRA_LICENSES}
     DESTINATION share/svMultiPhysics/licenses/extra COMPONENT CoreExecutables)
-  install(FILES "${SV_BINARY_DIR}/dependencies.txt" "${SV_BINARY_DIR}/toolchain.txt"
-    "${SV_BINARY_DIR}/source-revision.txt"
+  install(FILES "${SV_BINARY_DIR}/dependencies.txt" "${SV_BINARY_DIR}/toolchain.txt" "${SV_BINARY_DIR}/source-revision.txt"
     DESTINATION share/svMultiPhysics COMPONENT CoreExecutables OPTIONAL)
   install(DIRECTORY ${SV_PACKAGE_LICENSE_DIRS}
     DESTINATION share/svMultiPhysics/licenses COMPONENT CoreExecutables)

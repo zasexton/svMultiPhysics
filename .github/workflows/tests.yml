@@ -107,8 +107,7 @@ jobs:
             package="${licenses%/info/licenses}"
             cp -r "$licenses" "build/licenses/${package##*/}"
           done
-      - name: Restore Trilinos
-        id: trilinos
+      - id: trilinos
         uses: actions/cache/restore@v4
         with:
           path: C:/trilinos
@@ -141,8 +140,7 @@ jobs:
         with:
           path: C:/trilinos
           key: ${{ steps.trilinos.outputs.cache-primary-key }}
-      - name: Restore PETSc
-        id: petsc
+      - id: petsc
         uses: actions/cache/restore@v4
         with:
           path: C:/petsc
@@ -159,9 +157,8 @@ jobs:
           export PATH="/usr/bin:$PATH"
           export PATH="$(dirname "$(command -v cl)"):$PATH" # MSVC's link.exe must precede Cygwin's.
           dependencies="$(cygpath -u "$DEPENDENCY_PREFIX")"
-          cd /cygdrive/c
-          curl -fsSL https://web.cels.anl.gov/projects/petsc/download/release-snapshots/petsc-3.26.0.tar.gz | tar xz
-          cd petsc-3.26.0
+          curl -fsSL https://web.cels.anl.gov/projects/petsc/download/release-snapshots/petsc-3.26.0.tar.gz | tar xz -C /cygdrive/c
+          cd /cygdrive/c/petsc-3.26.0
           ./configure --prefix=/cygdrive/c/petsc PETSC_ARCH=arch-mswin-c-opt --with-cc=cl --with-cxx=cl --with-fc=0 \
             --with-shared-libraries=0 --with-debugging=0 --with-strict-petscerrorcode \
             'CFLAGS=-GF -MD -wd4996 -Zc:preprocessor' 'CXXFLAGS=-GF -MD -GR -EHsc -wd4996 -Zc:preprocessor' COPTFLAGS=-O2 CXXOPTFLAGS=-O2 \
@@ -179,8 +176,7 @@ jobs:
         run: |
           git clone https://github.com/SimVascular/svZeroDSolver.git
           git -C svZeroDSolver checkout 62aecfece16302879257dc4b6a8a93ea19ebf19d
-          cmake -S svZeroDSolver -B svZeroDSolver/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl \
+          cmake -S svZeroDSolver -B svZeroDSolver/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl \
             -DCMAKE_PROJECT_svZeroDSolver_INCLUDE="$PWD/Code/ThirdParty/eigen/share/eigen3/cmake/Eigen3Config.cmake" \
             -DFETCHCONTENT_SOURCE_DIR_EIGEN="$PWD/Code/ThirdParty/eigen"
           cmake --build svZeroDSolver/build --target svzero_interface --parallel 4

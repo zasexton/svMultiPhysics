@@ -38,7 +38,7 @@ endmacro()
 #
 macro(simvascular_external _pkg)
   if(NOT MSVC)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu90")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu90")
   endif()
 
   string(TOLOWER "${_pkg}" _lower)
