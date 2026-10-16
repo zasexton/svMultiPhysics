@@ -95,6 +95,13 @@ def test_pipe_RCR_genBC(n_proc, tmp_path):
     tree.write(case / "solver.xml")
     run_with_reference("", str(case), fields, n_proc, 2)
 
+def test_pipe_RCR_genBC_missing_executable(n_proc, tmp_path):
+    case = tmp_path / "missing genBC"
+    shutil.copytree(Path(__file__).parent / "cases/fluid/pipe_RCR_genBC", case,
+                    ignore=shutil.ignore_patterns("*-procs", "genBC"))
+    with pytest.raises(RuntimeError, match="Could not start genBC"):
+        run_by_name(str(case), "solver.xml", 2, n_proc)
+
 def test_pipe_RCR_sv0D(n_proc):
     test_folder = "pipe_RCR_sv0D"
     t_max = 2

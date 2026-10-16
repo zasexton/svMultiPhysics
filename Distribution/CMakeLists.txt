@@ -95,7 +95,8 @@ if(WIN32)
   endforeach()
   install(FILES "${SV_SOURCE_DIR}/ThirdParty/tetgen/simvascular_tetgen/LICENSE"
     DESTINATION share/svMultiPhysics/licenses/tetgen COMPONENT CoreExecutables)
-  foreach(notice COPYING.LESSER gkregex.c gkregex.h)
+  # The LGPL-2.1 text for gkregex is among the toolchain licenses installed above.
+  foreach(notice gkregex.c gkregex.h)
     install(FILES "${SV_SOURCE_DIR}/ThirdParty/gklib_internal/simvascular_gklib_internal/${notice}"
       DESTINATION share/svMultiPhysics/licenses/gklib COMPONENT CoreExecutables)
   endforeach()
