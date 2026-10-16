@@ -49,6 +49,10 @@ if(WIN32)
   get_filename_component(compiler_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
   get_filename_component(compiler_prefix "${compiler_bin}" DIRECTORY)
   set(SV_PACKAGE_RUNTIME_DIRS "${compiler_bin}" CACHE STRING "Additional DLL search directories")
+  if(MINGW)
+    set(toolchain_licenses "${compiler_prefix}/share/licenses/")
+  endif()
+  set(SV_PACKAGE_LICENSE_DIRS "${toolchain_licenses}" CACHE STRING "Directories of dependency license files to package")
 
   # Run during both installation and CPack staging, after the binary is built.
   set(install_windows_runtime [==[
@@ -85,17 +89,15 @@ if(WIN32)
   install(FILES "${SV_BINARY_DIR}/dependencies.txt" "${SV_BINARY_DIR}/toolchain.txt"
     "${SV_BINARY_DIR}/source-revision.txt"
     DESTINATION share/svMultiPhysics COMPONENT CoreExecutables OPTIONAL)
-  if(MINGW)
-    install(DIRECTORY "${compiler_prefix}/share/licenses/"
-      DESTINATION share/svMultiPhysics/licenses COMPONENT CoreExecutables)
-  endif()
+  install(DIRECTORY ${SV_PACKAGE_LICENSE_DIRS}
+    DESTINATION share/svMultiPhysics/licenses COMPONENT CoreExecutables)
   foreach(dependency metis parmetis)
     install(FILES "${SV_SOURCE_DIR}/ThirdParty/${dependency}_internal/simvascular_${dependency}_internal/LICENSE.txt"
       DESTINATION "share/svMultiPhysics/licenses/${dependency}" COMPONENT CoreExecutables)
   endforeach()
   install(FILES "${SV_SOURCE_DIR}/ThirdParty/tetgen/simvascular_tetgen/LICENSE"
     DESTINATION share/svMultiPhysics/licenses/tetgen COMPONENT CoreExecutables)
-  # The LGPL-2.1 text for gkregex is among the toolchain licenses installed above.
+  # SV_PACKAGE_LICENSE_DIRS (MSYS2 includes it) or SV_PACKAGE_EXTRA_LICENSES must provide the LGPL-2.1 text for gkregex.
   foreach(notice gkregex.c gkregex.h)
     install(FILES "${SV_SOURCE_DIR}/ThirdParty/gklib_internal/simvascular_gklib_internal/${notice}"
       DESTINATION share/svMultiPhysics/licenses/gklib COMPONENT CoreExecutables)
