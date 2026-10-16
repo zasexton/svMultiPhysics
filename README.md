@@ -49,7 +49,7 @@ svMultiPhysics can be built on most Unix-like operating systems
 - Ubuntu
 - CentOS
 
-Native Windows x64 builds use [MSYS2 UCRT64 and GCC](#windows-build). [Windows Subsystem for Linux (WSL)](https://ubuntu.com/desktop/wsl) can also run the Linux build.
+Native Windows x64 builds are described in [Windows build](#windows-build). [Windows Subsystem for Linux (WSL)](https://ubuntu.com/desktop/wsl) can also run the Linux build.
 
 ## Software Dependencies
 The following software packages are required to be installed in order to build svMultiPhysics
@@ -107,35 +107,16 @@ To rebuild the program after making code changes
 
 ## Windows build
 
-Use the **UCRT64** shell from [MSYS2](https://www.msys2.org/) on 64-bit Windows 10 or 11. Install the [Microsoft MPI runtime](https://www.microsoft.com/en-us/download/details.aspx?id=105289) (`msmpisetup.exe`), which is separate from the MSYS2 MS-MPI development package. Update MSYS2 with `pacman -Syu`, then install the build dependencies:
+svMultiPhysics builds on 64-bit Windows 10 or 11 with a C++20 compiler such as GCC from the [MSYS2](https://www.msys2.org/) UCRT64 environment or Visual Studio 2022. Use VTK, BLAS, and LAPACK built for the same toolchain, with 32-bit integers for BLAS and LAPACK (OpenBLAS works), install the [Microsoft MPI](https://www.microsoft.com/en-us/download/details.aspx?id=105289) runtime (`msmpisetup.exe`), and set `MSMPI_INC` and `MSMPI_LIB64` to the MS-MPI headers and libraries. The `test-windows` job in [.github/workflows/tests.yml](.github/workflows/tests.yml) shows the complete setup for each toolchain it tests. From the repository root, in a shell with the compiler on `PATH` (the MSYS2 UCRT64 shell or a Visual Studio developer prompt):
 
 ```bash
-pacman -S --needed git \
-  mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake \
-  mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-msmpi \
-  mingw-w64-ucrt-x86_64-openblas mingw-w64-ucrt-x86_64-vtk \
-  mingw-w64-ucrt-x86_64-nlohmann-json mingw-w64-ucrt-x86_64-utf8cpp \
-  mingw-w64-ucrt-x86_64-exprtk
-```
-
-OpenBLAS must use 32-bit integers; the `openblas64` package is not compatible. From the repository root, configure, build, and package the solver:
-
-```bash
-export MSMPI_INC="$(cygpath -w "$MINGW_PREFIX/include")"
-export MSMPI_LIB64="$(cygpath -w "$MINGW_PREFIX/lib")"
-export PATH="/c/Program Files/Microsoft MPI/Bin:$PATH"
-cmake -S Code -B build/windows -G Ninja \
-  -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ \
-  -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
-  -DSV_USE_MSMPI=ON -DSV_USE_TRILINOS=OFF -DBLA_VENDOR=OpenBLAS \
-  -DSV_ENABLE_DISTRIBUTION=ON -DSV_INSTALLER_TYPE=ZIP
+cmake -S Code -B build/windows -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+  -DSV_USE_MSMPI=ON -DSV_USE_TRILINOS=OFF -DBLA_VENDOR=OpenBLAS -DSV_ENABLE_DISTRIBUTION=ON
 cmake --build build/windows --parallel
 cpack --config build/windows/CPackConfig.cmake -G ZIP -B build/windows-packages
 ```
 
-The ZIP contains `bin/svmultiphysics.exe`, the DLLs it needs, and their license notices, so it runs without MSYS2 once the Microsoft MPI runtime is installed. Run it from a case directory, for example `mpiexec -n 4 'C:\solver\bin\svmultiphysics.exe' solver.xml`, and set `OPENBLAS_NUM_THREADS=1` when running several MPI ranks. Build 0D and 1D interface DLLs with the same UCRT64 toolchain and add them to the ZIP with `SV_PACKAGE_EXTRA_LIBRARIES` and `SV_PACKAGE_EXTRA_LICENSES`. PETSc, Trilinos, and remeshing have not been validated on Windows.
-
-The Windows job in [.github/workflows/tests.yml](.github/workflows/tests.yml) shows how to run the unit and integration tests. The integration tests use Python 3.12 with meshio 5.3.5 and need `SVMP_EXECUTABLE` and `MPIEXEC_EXECUTABLE` set to the full paths of `svmultiphysics.exe` and `mpiexec.exe`.
+The ZIP contains `bin/svmultiphysics.exe`, the DLLs it needs, and their license notices, so it runs once the Microsoft MPI runtime is installed, for example `mpiexec -n 4 'C:\solver\bin\svmultiphysics.exe' solver.xml` with `OPENBLAS_NUM_THREADS=1`. `SV_PACKAGE_RUNTIME_DIRS` and `SV_PACKAGE_LICENSE_DIRS` list the folders with dependency DLLs and license files (by default the compiler's `bin` folder and, for MinGW, its `share/licenses` folder), and `SV_PACKAGE_EXTRA_LIBRARIES` and `SV_PACKAGE_EXTRA_LICENSES` add 0D and 1D interface DLLs built with the same compiler and their licenses. The integration tests use Python 3.12 with meshio 5.3.5 and need `SVMP_EXECUTABLE` and `MPIEXEC_EXECUTABLE` set to the full paths of `svmultiphysics.exe` and `mpiexec.exe`. PETSc, Trilinos, and remeshing have not been validated on Windows.
 
 <h2 id="building_vtk"> Building Visualization Toolkit (VTK) Libraries </h2>
 
