@@ -8,14 +8,14 @@
 #include "cmm.h"
 #include "consts.h"
 #include "eq_assem.h"
-#include "fluid.h"
+#include "fluid/fluid.h"
 #include "fs.h"
 #include "lhsa.h"
 #include "mat_fun.h"
 #include "nn.h"
 #include "svOneD_interface.h"
 #include "svZeroD_interface.h"
-#include "ustruct.h"
+#include "solid/ustruct.h"
 #include "utils.h"
 #include <cstdio>
 #include <math.h>
@@ -2127,5 +2127,4 @@ void set_bc_undef_neu_l(ComMod& com_mod, const bcType& lBc, const faceType& lFa)
 }
 
 };
-
 
