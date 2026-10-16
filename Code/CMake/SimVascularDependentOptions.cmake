@@ -35,7 +35,7 @@ if(WIN32)
 
   set (CMAKE_CXX_STANDARD_LIBRARIES "${CMAKE_CXX_STANDARD_LIBRARIES} Shlwapi.lib")
   endif()
-  add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN USE_GKREGEX)
+  add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN USE_GKREGEX "$<$<BOOL:${MSVC}>:__thread=__declspec(thread)>")
 endif()
 
 #-----------------------------------------------------------------------------
