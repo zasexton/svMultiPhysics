@@ -31,6 +31,7 @@ include_directories(${SV_SOURCE_DIR}/ThirdParty/eigen/include/eigen3)
 include_directories(${SV_SOURCE_DIR}/ThirdParty/parmetis_internal/simvascular_parmetis_internal/ParMETISLib)
 include_directories(${SV_SOURCE_DIR}/ThirdParty/tetgen/simvascular_tetgen)
 include_directories(${SV_SOURCE_DIR}/ThirdParty/tinyxml/simvascular_tinyxml)
+include_directories(${MPI_C_INCLUDE_PATH})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/Core)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/FE)
@@ -327,6 +328,11 @@ target_link_libraries(${SV_MULTIPHYSICS_EXE}
   ${SV_LIB_LINEAR_SOLVER_NAME}${SV_MPI_NAME_EXT}
   ${VTK_LIBRARIES}
   )
+
+# extra MPI libraries only if there are not set to NOT_FOUND or other null
+if(SV_MPI_EXTRA_LIBRARY)
+  target_link_libraries(${SV_MULTIPHYSICS_EXE} ${SV_MPI_EXTRA_LIBRARY})
+endif()
 
 if(WIN32)
   target_link_libraries(${SV_MULTIPHYSICS_EXE} psapi)

@@ -2,6 +2,23 @@
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
+include_directories(${MPI_C_INCLUDE_PATH})
+
+if(CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
+  set(CMAKE_Fortran_FLAGS "-cpp -pthread")
+  set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -std=legacy")
+else()
+  # nothing for now
+  # may need to reset for intel compiler or others
+endif()
+
+# Including VTK produces warnings when compiling Fortran code.
+#
+#   -iframe is valid for C/C++/ObjC/ObjC++ but not for Fortran
+#
+#find_package(VTK REQUIRED)
+#include(${VTK_USE_FILE})
+
 set(lib ${SV_LIB_LINEAR_SOLVER_NAME})
 
 set(CSRCS 
@@ -33,7 +50,13 @@ set(CSRCS
 add_library(${lib} ${SV_LIBRARY_TYPE} ${CSRCS})
 target_include_directories(${lib} PRIVATE ${SV_SOURCE_DIR}/ThirdParty/eigen/include/eigen3)
 
-target_link_libraries(${lib} PUBLIC MPI::MPI_CXX)
+target_link_libraries(${lib} ${MPI_LIBRARY} ${MPI_Fortran_LIBRARIES})
+#target_link_libraries(${lib} ${MPI_LIBRARY} ${MPI_Fortran_LIBRARIES} ${VTK_LIBRARIES})
+
+# extra MPI libraries only if there are not set to NOT_FOUND or other null 
+if(SV_MPI_EXTRA_LIBRARY)
+  target_link_libraries(${lib} ${SV_MPI_EXTRA_LIBRARY})
+endif()
 
 if(SV_INSTALL_LIBS)
   install(TARGETS ${lib}

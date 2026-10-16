@@ -1,5 +1,6 @@
 include_directories(./)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../../gklib_internal/simvascular_gklib_internal)
+include_directories(${MPI_C_INCLUDE_PATH})
 
 set(CSRCS auxapi.c balance.c bucketsort.c checkgraph.c coarsen.c
   compress.c contig.c debug.c fm.c fortran.c frename.c gklib.c
@@ -14,8 +15,6 @@ if(SV_USE_THIRDPARTY_SHARED_LIBRARIES)
 else()
   add_library(${METIS_INTERNAL_LIBRARY_NAME} STATIC ${CSRCS})
 endif()
-
-target_link_libraries(${METIS_INTERNAL_LIBRARY_NAME} PUBLIC ${GKLIB_INTERNAL_LIBRARY_NAME})
 
 if(SV_INSTALL_LIBS)
   install(TARGETS ${METIS_INTERNAL_LIBRARY_NAME}

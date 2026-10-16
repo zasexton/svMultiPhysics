@@ -13,7 +13,7 @@ endif()
 # WIN32
 if(WIN32)
   set(GLOBAL_DEFINES "${GLOBAL_DEFINES} -DWINDOWS -DWIN32")
-  add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
+  add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN USE_GKREGEX)
 endif()
 
 #-----------------------------------------------------------------------------
