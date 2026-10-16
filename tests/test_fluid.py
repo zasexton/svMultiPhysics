@@ -49,7 +49,7 @@ def test_pipe_output_error(n_proc, tmp_path, monkeypatch):
                     ignore=shutil.ignore_patterns("*-procs", "histor.dat"))
     (case / f"{n_proc}-procs").write_text("preserve this file")
     monkeypatch.setenv("SVMP_TEST_TIMEOUT", "30")
-    with pytest.raises(RuntimeError, match="filesystem error"):
+    with pytest.raises(RuntimeError, match=f"{n_proc}-procs"):
         run_by_name(str(case), "solver.xml", 2, n_proc, clean=False)
     assert (case / f"{n_proc}-procs").read_text() == "preserve this file"
 
