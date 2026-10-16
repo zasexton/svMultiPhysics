@@ -12,10 +12,8 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
       "MinSizeRel" "RelWithDebInfo")
 endif()
 
-if(MSVC)
-  add_definitions("/Zi")
-endif()
 if(WIN32)
+  add_compile_options($<$<BOOL:${MSVC}>:/Zi>)
   add_definitions("-DWINDOWS")
 endif()
 
