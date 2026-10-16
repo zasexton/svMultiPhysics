@@ -83,7 +83,7 @@ if(WIN32)
   install(FILES ${SV_PACKAGE_EXTRA_LICENSES}
     DESTINATION share/svMultiPhysics/licenses/extra COMPONENT CoreExecutables)
   install(FILES "${SV_BINARY_DIR}/dependencies.txt" "${SV_BINARY_DIR}/toolchain.txt"
-    "${SV_BINARY_DIR}/source-revision.txt" "${SV_BINARY_DIR}/package-sha256.txt"
+    "${SV_BINARY_DIR}/source-revision.txt"
     DESTINATION share/svMultiPhysics COMPONENT CoreExecutables OPTIONAL)
   if(MINGW)
     install(DIRECTORY "${compiler_prefix}/share/licenses/"
@@ -99,6 +99,7 @@ if(WIN32)
     install(FILES "${SV_SOURCE_DIR}/ThirdParty/gklib_internal/simvascular_gklib_internal/${notice}"
       DESTINATION share/svMultiPhysics/licenses/gklib COMPONENT CoreExecutables)
   endforeach()
+  # The bundled Eigen and TinyXML-2 sources have no separate license files; these headers carry the notices.
   install(FILES "${SV_SOURCE_DIR}/ThirdParty/eigen/include/eigen3/Eigen/Core"
     DESTINATION share/svMultiPhysics/licenses/eigen COMPONENT CoreExecutables)
   install(FILES "${SV_SOURCE_DIR}/ThirdParty/tinyxml/simvascular_tinyxml/tinyxml2.h"
