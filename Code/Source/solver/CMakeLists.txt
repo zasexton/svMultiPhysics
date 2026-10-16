@@ -94,9 +94,6 @@ endif()
 # add trilinos flags and defines
 if(USE_TRILINOS)
   ADD_DEFINITIONS(-DWITH_TRILINOS)
-  if(NOT MSVC)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++${CMAKE_CXX_STANDARD}")
-  endif()
 endif()
 
 # Build with the PETSc linear algebra package.
@@ -127,11 +124,8 @@ if(NOT "${SV_PETSC_DIR}" STREQUAL "")
 
   # Set C++ directive to use PETSc.
   ADD_DEFINITIONS(-DUSE_PETSC)
-  if(MSVC)
-    add_compile_options(/Zc:preprocessor) # PETSc headers require the conforming preprocessor.
-  else()
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pedantic -std=c99")
-  endif()
+  add_compile_options($<$<BOOL:${MSVC}>:/Zc:preprocessor>) # PETSc headers require the conforming preprocessor.
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pedantic -std=c99")
 
   set(USE_PETSC 1)
 
