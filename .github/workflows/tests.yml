@@ -171,7 +171,7 @@ jobs:
       - name: Build and run unit tests
         run: |
           set -o pipefail
-          cmake --build build/windows --parallel 4 2>&1 | tee build/windows/build.log
+          cmake --build build/windows --parallel 4 -- -k 0 2>&1 | tee build/windows/build.log
           ctest --test-dir build/windows/Source/solver --output-on-failure 2>&1 | tee build/windows/unit-tests.log
       - name: Package
         run: |
