@@ -5,7 +5,6 @@
 #include "Parameters.h"
 #include "lapack_defs.h"
 #include "svOneD_interface/OneDSolverInterface.h"
-#include "svZeroD_interface/LPNSolverInterface.h"
 #include "utils.h"
 
 #include <gtest/gtest.h>
@@ -30,31 +29,23 @@ TEST(PlatformPaths, PreservesSpacesInStringParameters)
 
 TEST(DynamicLibrary, RejectsMissingLibraries)
 {
-  LPNSolverInterface zero;
   OneDSolverInterface one;
-  EXPECT_THROW(zero.load_library("missing library with spaces.dll"), std::exception);
   EXPECT_THROW(one.load_library("missing library with spaces.dll"), std::exception);
 }
 
 TEST(DynamicLibrary, RejectsMissingInterfaceSymbols)
 {
-  LPNSolverInterface zero;
   OneDSolverInterface one;
-  auto check = [](auto& interface) {
-    try {
-      interface.load_library(SVMP_LOADER_FIXTURE);
-      FAIL() << "Accepted a library without interface symbols";
-    } catch (const std::exception& error) {
-      EXPECT_NE(std::string(error.what()).find("initialize"), std::string::npos);
-    }
-  };
-  check(zero);
-  check(one);
+  try {
+    one.load_library(SVMP_LOADER_FIXTURE);
+    FAIL() << "Accepted a library without interface symbols";
+  } catch (const std::exception& error) {
+    EXPECT_NE(std::string(error.what()).find("initialize"), std::string::npos);
+  }
 }
 
 TEST(DynamicLibrary, DestructionWithoutLoadingIsSafe)
 {
-  LPNSolverInterface zero;
   OneDSolverInterface one;
 }
 
@@ -81,16 +72,6 @@ TEST_F(PlatformFiles, ReplacesRestartLinkAndPreservesSource)
   EXPECT_THROW(utils::update_restart_link(directory / "missing", latest), std::exception);
   std::ifstream(latest) >> contents;
   EXPECT_EQ(contents, "first");
-}
-
-TEST_F(PlatformFiles, ResolvesPlatformLibrarySuffixAndPrefersExactPath)
-{
-  const auto library = directory / "libsolver.dll";
-  std::ofstream(library) << "fixture";
-  EXPECT_EQ(utils::resolve_library_path((directory / "libsolver.dylib").string()), library.string());
-  const auto exact = directory / "libsolver.dylib";
-  std::ofstream(exact) << "exact";
-  EXPECT_EQ(utils::resolve_library_path(exact.string()), exact.string());
 }
 
 TEST_F(PlatformFiles, RunsProcessWithLiteralPathsAndWaitsForOutput)

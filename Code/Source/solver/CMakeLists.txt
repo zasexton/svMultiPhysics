@@ -315,7 +315,6 @@ simvascular_add_executable(${SV_MULTIPHYSICS_EXE}
 
 target_link_libraries(${SV_MULTIPHYSICS_EXE}
   ${SVMP_ARCHITECTURE_TARGETS}
-  ${CMAKE_DL_LIBS}
   ${GLOBAL_LIBRARIES}
   ${INTELRUNTIME_LIBRARIES}
   ${ZLIB_LIBRARY}
@@ -431,7 +430,6 @@ int main(int argc, char** argv) {
   # libraries
   target_link_libraries(run_all_unit_tests
     ${SVMP_ARCHITECTURE_TARGETS}
-    ${CMAKE_DL_LIBS}
     ${GLOBAL_LIBRARIES}
     ${INTELRUNTIME_LIBRARIES}
     ${ZLIB_LIBRARY}

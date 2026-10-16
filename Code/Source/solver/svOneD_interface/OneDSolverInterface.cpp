@@ -6,11 +6,10 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
-#include <system_error>
 #include <vector>
 #include "Core/Exception.h"
 #ifdef _WIN32
-#include <windows.h>
+#include "utils.h" // Provides dlopen() and related functions on Windows.
 #else
 #include <dlfcn.h>
 #endif
@@ -18,49 +17,34 @@
 OneDSolverInterface::~OneDSolverInterface()
 {
   if (library_handle_) {
-#ifdef _WIN32
-    FreeLibrary(static_cast<HMODULE>(library_handle_));
-#else
     dlclose(library_handle_);
-#endif
     library_handle_ = nullptr;
   }
 }
 
 void OneDSolverInterface::load_library(const std::string& interface_lib)
 {
-  if (library_handle_) throw std::runtime_error("The 1D interface library is already loaded");
-#ifdef _WIN32
-  library_handle_ = LoadLibraryA(interface_lib.c_str());
-#else
-  library_handle_ = dlopen(interface_lib.c_str(), RTLD_NOW | RTLD_LOCAL);
-#endif
+  library_handle_ = dlopen(interface_lib.c_str(), RTLD_LAZY);
   if (!library_handle_) {
-#ifdef _WIN32
-    const auto error = std::system_category().message(GetLastError());
-#else
-    const char* detail = dlerror();
-    const std::string error = detail ? detail : "unknown error";
-#endif
     throw svmp::CoreException(
         std::string("[OneDSolverInterface] Could not load shared library '") +
-        interface_lib + "': " + error,
+        interface_lib + "': " + dlerror(),
         svmp::StatusCode::DependencyError,
         __FILE__,
         __LINE__,
         __func__);
   }
 
-  auto load_sym = [&](const char* name) {
-#ifdef _WIN32
-    auto sym = GetProcAddress(static_cast<HMODULE>(library_handle_), name);
-#else
-    auto sym = dlsym(library_handle_, name);
-#endif
-    if (!sym) {
+  // Clear any existing error.
+  dlerror();
+
+  auto load_sym = [&](const char* name) -> void* {
+    void* sym = dlsym(library_handle_, name);
+    const char* err = dlerror();
+    if (err) {
       throw svmp::CoreException(
           std::string("[OneDSolverInterface] Could not find the 1D interface function '") +
-          name + "' in the shared library '" + interface_lib + "'",
+          name + "' in the shared library '" + interface_lib + "': " + err,
           svmp::StatusCode::DependencyError,
           __FILE__,
           __LINE__,
@@ -69,12 +53,12 @@ void OneDSolverInterface::load_library(const std::string& interface_lib)
     return sym;
   };
 
-  initialize_1d_ = reinterpret_cast<decltype(initialize_1d_)>(load_sym("initialize_1d"));
-  set_external_step_size_1d_ = reinterpret_cast<decltype(set_external_step_size_1d_)>(load_sym("set_external_step_size_1d"));
-  return_1d_solution_ = reinterpret_cast<decltype(return_1d_solution_)>(load_sym("return_1d_solution"));
-  update_1d_solution_ = reinterpret_cast<decltype(update_1d_solution_)>(load_sym("update_1d_solution"));
-  run_1d_simulation_step_1d_ = reinterpret_cast<decltype(run_1d_simulation_step_1d_)>(load_sym("run_1d_simulation_step_1d"));
-  extract_coupled_dof_ = reinterpret_cast<decltype(extract_coupled_dof_)>(load_sym("extract_coupled_dof"));
+  *(void**)(&initialize_1d_)              = load_sym("initialize_1d");
+  *(void**)(&set_external_step_size_1d_)  = load_sym("set_external_step_size_1d");
+  *(void**)(&return_1d_solution_)         = load_sym("return_1d_solution");
+  *(void**)(&update_1d_solution_)         = load_sym("update_1d_solution");
+  *(void**)(&run_1d_simulation_step_1d_)  = load_sym("run_1d_simulation_step_1d");
+  *(void**)(&extract_coupled_dof_)        = load_sym("extract_coupled_dof");
 }
 
 void OneDSolverInterface::initialize(const std::string& input_file,

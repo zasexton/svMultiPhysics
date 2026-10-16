@@ -7,6 +7,15 @@
 #include "Array.h"
 #include <filesystem>
 
+#ifdef _WIN32
+// Windows versions of the <dlfcn.h> functions used to load the 0D and 1D interface libraries.
+inline constexpr int RTLD_LAZY = 1;
+void* dlopen(const char* file, int mode);
+void* dlsym(void* handle, const char* name);
+int dlclose(void* handle);
+char* dlerror();
+#endif
+
 namespace utils {
 
 class stackType
@@ -49,7 +58,6 @@ bool is_zero(double value1, double value2=0.0);
 double mem_usage(const bool print_usage=false, const std::string& prefix="");
 
 void update_restart_link(const std::filesystem::path& source, const std::filesystem::path& destination);
-std::string resolve_library_path(const std::string& name);
 // Run an executable with one filename argument and wait for successful completion.
 void run_process(std::string executable, std::string input_file);
 
