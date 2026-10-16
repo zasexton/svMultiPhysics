@@ -142,7 +142,8 @@ jobs:
           echo "CMAKE_PREFIX_PATH=$prefix" >> "$GITHUB_ENV"
           cygpath -w "$prefix/bin" >> "$GITHUB_PATH"
           mkdir -p build/conda-licenses
-          for licenses in "$(cygpath -u "$MAMBA_ROOT_PREFIX")"/pkgs/*/info/licenses; do
+          shopt -s globstar # micromamba nests its package cache by download URL.
+          for licenses in "$(cygpath -u "$MAMBA_ROOT_PREFIX")"/pkgs/**/info/licenses; do
             package="${licenses%/info/licenses}"
             cp -r "$licenses" "build/conda-licenses/${package##*/}"
           done
