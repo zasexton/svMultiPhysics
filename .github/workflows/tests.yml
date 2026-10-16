@@ -187,7 +187,7 @@ jobs:
           export MPIEXEC_EXECUTABLE='C:\Program Files\Microsoft MPI\Bin\mpiexec.exe'
           windows_python="$(cygpath -u "$pythonLocation")/python.exe"
           cd tests
-          "$windows_python" -m pytest -x -v -rf --junitxml=../build/windows/integration.xml 2>&1 | tee ../build/windows/integration.log
+          "$windows_python" -m pytest -v -rf --junitxml=../build/windows/integration.xml 2>&1 | tee ../build/windows/integration.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
