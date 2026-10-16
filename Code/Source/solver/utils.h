@@ -5,7 +5,6 @@
 #define UTILS_H 
 
 #include "Array.h"
-#include <filesystem>
 
 #ifdef _WIN32
 // Windows versions of the <dlfcn.h> functions used to load the 0D and 1D interface libraries.
@@ -57,7 +56,6 @@ bool is_zero(double value1, double value2=0.0);
 
 double mem_usage(const bool print_usage=false, const std::string& prefix="");
 
-void update_restart_link(const std::filesystem::path& source, const std::filesystem::path& destination);
 // Run an executable with one filename argument and wait for successful completion.
 void run_process(std::string executable, std::string input_file);
 

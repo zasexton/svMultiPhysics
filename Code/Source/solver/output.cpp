@@ -8,6 +8,7 @@
 #include "utils.h"
 
 #include <cstdio>
+#include <filesystem>
 #include <iomanip>
 #include <limits>
 #include <math.h>
@@ -358,10 +359,13 @@ void write_restart(Simulation* simulation, std::array<double,3>& timeP, const So
 
   restart_file.close();
 
-  // Complete every rank's writes before linking or copying the last restart.
-  if (!com_mod.stFileRepl) {
-    MPI_Barrier(cm.com());
-    if (cm.mas(cm_mod)) utils::update_restart_link(fName, tmpS);
+  // Create a soft link to the bin file for the last time step.
+  //
+  if (!com_mod.stFileRepl && cm.mas(cm_mod)) {
+    std::error_code error;
+    std::filesystem::remove(tmpS, error);
+    std::filesystem::create_hard_link(fName, tmpS, error);
+    if (error) std::cerr << "Could not link " << tmpS << " to " << fName << ": " << error.message() << std::endl;
   }
 }
 

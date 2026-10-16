@@ -1482,9 +1482,11 @@ void remesh_restart(Simulation* simulation)
 
   restart_file.close();
 
-  MPI_Barrier(cm.com()); // Complete every rank's writes before a possible copy.
   if (cm.mas(cm_mod)) {
-    utils::update_restart_link(fTmp, sTmp);
+    std::error_code error;
+    std::filesystem::remove(sTmp, error);
+    std::filesystem::create_hard_link(fTmp, sTmp, error);
+    if (error) std::cerr << "Could not link " << sTmp << " to " << fTmp << ": " << error.message() << std::endl;
   }
 
   auto& x = com_mod.x;

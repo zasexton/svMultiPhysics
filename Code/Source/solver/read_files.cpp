@@ -22,6 +22,7 @@
 #include "fsils_api.hpp"
 #include "fils_struct.hpp"
 
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <math.h>

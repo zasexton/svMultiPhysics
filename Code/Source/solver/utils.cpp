@@ -94,20 +94,6 @@ void run_process(std::string executable, std::string input_file)
   }
 }
 
-void update_restart_link(const std::filesystem::path& source, const std::filesystem::path& destination)
-{
-  namespace fs = std::filesystem;
-  if (!fs::is_regular_file(source) || fs::is_directory(destination)) {
-    throw fs::filesystem_error("Invalid restart file", source, destination,
-                               std::make_error_code(std::errc::invalid_argument));
-  }
-  std::error_code error;
-  if (fs::equivalent(source, destination, error)) return;
-  fs::remove(destination);
-  fs::create_hard_link(source, destination, error);
-  if (error) fs::copy_file(source, destination, fs::copy_options::overwrite_existing);
-}
-
 /// @brief Count the number of bits in an int.
 //
 int CountBits(int n)

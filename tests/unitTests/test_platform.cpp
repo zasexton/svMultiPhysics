@@ -57,23 +57,6 @@ protected:
   void TearDown() override { std::filesystem::remove_all(directory); }
 };
 
-TEST_F(PlatformFiles, ReplacesRestartLinkAndPreservesSource)
-{
-  const auto source = directory / "restart 001.bin";
-  const auto latest = directory / "restart last.bin";
-  std::ofstream(source) << "first";
-  std::ofstream(latest) << "old";
-  utils::update_restart_link(source, latest);
-  std::string contents;
-  std::ifstream(latest) >> contents;
-  EXPECT_EQ(contents, "first");
-  EXPECT_NO_THROW(utils::update_restart_link(source, latest));
-  EXPECT_TRUE(std::filesystem::is_regular_file(source));
-  EXPECT_THROW(utils::update_restart_link(directory / "missing", latest), std::exception);
-  std::ifstream(latest) >> contents;
-  EXPECT_EQ(contents, "first");
-}
-
 TEST_F(PlatformFiles, RunsProcessWithLiteralPathsAndWaitsForOutput)
 {
   const auto output = directory / "input ' with & %PATH%.txt";
