@@ -10,7 +10,6 @@
 #include <limits>
 #include <system_error>
 
-#include <unistd.h>
 #include <ios>
 #include <iostream>
 #include <fstream>
