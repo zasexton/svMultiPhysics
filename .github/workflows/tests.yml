@@ -64,11 +64,32 @@ jobs:
         uses: ./.github/actions/test-macos
 
   test-windows:
-    name: Test Windows (UCRT64)
+    name: Test Windows (${{ matrix.toolchain }})
     runs-on: windows-2022
     timeout-minutes: 120
     needs: check-for-changes
     if: ${{ needs.check-for-changes.outputs.run_full_tests == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - toolchain: ucrt64
+            compilers: -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+            packages: >-
+              mingw-w64-ucrt-x86_64-cmake
+              mingw-w64-ucrt-x86_64-ninja
+              mingw-w64-ucrt-x86_64-msmpi
+              mingw-w64-ucrt-x86_64-openblas
+              mingw-w64-ucrt-x86_64-vtk
+              mingw-w64-ucrt-x86_64-nlohmann-json
+              mingw-w64-ucrt-x86_64-utf8cpp
+              mingw-w64-ucrt-x86_64-exprtk
+            list-packages: pacman -Q
+          - toolchain: msvc
+            compilers: -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
+            package-dirs: -DSV_PACKAGE_RUNTIME_DIRS="$DEPENDENCY_PREFIX/bin" -DSV_PACKAGE_LICENSE_DIRS="$PWD/build/conda-licenses/"
+            list-packages: '"$(cygpath -u "$MAMBA_EXE")" list -n svmp'
+            path-type: inherit # MSYS2 provides only make and gfortran for the genBC test.
     defaults:
       run:
         shell: msys2 {0}
@@ -95,38 +116,52 @@ jobs:
           if ((Get-FileHash $installer).Hash -ne '47443829114d8d8670f77af98939fe876d33eceb35d0ce4e0e85efeec4d87213') { throw 'MPI installer checksum mismatch' }
           $result = Start-Process $installer -ArgumentList '-unattend' -Wait -PassThru
           if ($result.ExitCode -notin 0,3010) { throw "MPI installation failed: $($result.ExitCode)" }
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        if: matrix.toolchain == 'msvc'
+      - uses: mamba-org/setup-micromamba@f457c30a868e4760d3a6fcea5f25dc655b8edf39 # v3.2.1
+        if: matrix.toolchain == 'msvc'
+        with:
+          environment-name: svmp
+          create-args: -c conda-forge vtk-base=9.7.0 vtk-io-ffmpeg=9.7.0 tbb-devel openblas libblas=*=*openblas msmpi
+          init-shell: none
       - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
         with:
           msystem: UCRT64
           update: true
+          path-type: ${{ matrix.path-type || 'minimal' }}
           install: >-
             git make
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-gcc-fortran
-            mingw-w64-ucrt-x86_64-cmake
-            mingw-w64-ucrt-x86_64-ninja
-            mingw-w64-ucrt-x86_64-msmpi
-            mingw-w64-ucrt-x86_64-openblas
-            mingw-w64-ucrt-x86_64-vtk
-            mingw-w64-ucrt-x86_64-nlohmann-json
-            mingw-w64-ucrt-x86_64-utf8cpp
-            mingw-w64-ucrt-x86_64-exprtk
+            ${{ matrix.packages }}
+      - name: Use the conda-forge dependencies
+        if: matrix.toolchain == 'msvc'
+        run: |
+          prefix="$(cygpath -m "$MAMBA_ROOT_PREFIX")/envs/svmp/Library"
+          echo "DEPENDENCY_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=$prefix" >> "$GITHUB_ENV"
+          cygpath -w "$prefix/bin" >> "$GITHUB_PATH"
+          mkdir -p build/conda-licenses
+          for licenses in "$(cygpath -u "$MAMBA_ROOT_PREFIX")"/pkgs/*/info/licenses; do
+            package="${licenses%/info/licenses}"
+            cp -r "$licenses" "build/conda-licenses/${package##*/}"
+          done
       - name: Build the 0D interface
         run: |
           git clone https://github.com/SimVascular/svZeroDSolver.git
           git -C svZeroDSolver checkout 62aecfece16302879257dc4b6a8a93ea19ebf19d
           cmake -S svZeroDSolver -B svZeroDSolver/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ \
+            ${{ matrix.compilers }} \
             -DCMAKE_PROJECT_svZeroDSolver_INCLUDE="$PWD/Code/ThirdParty/eigen/share/eigen3/cmake/Eigen3Config.cmake" \
             -DFETCHCONTENT_SOURCE_DIR_EIGEN="$PWD/Code/ThirdParty/eigen"
           cmake --build svZeroDSolver/build --target svzero_interface --parallel 4
       - name: Configure
         run: |
-          export MSMPI_INC="$(cygpath -w "$MINGW_PREFIX/include")"
-          export MSMPI_LIB64="$(cygpath -w "$MINGW_PREFIX/lib")"
+          export MSMPI_INC="$(cygpath -w "${DEPENDENCY_PREFIX:-$MINGW_PREFIX}/include")"
+          export MSMPI_LIB64="$(cygpath -w "${DEPENDENCY_PREFIX:-$MINGW_PREFIX}/lib")"
           export PATH="/c/Program Files/Microsoft MPI/Bin:$PATH"
           cmake -S Code -B build/windows -G Ninja \
-            -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ \
+            ${{ matrix.compilers }} ${{ matrix.package-dirs }} \
             -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
             -DSV_USE_MSMPI=ON -DSV_USE_TRILINOS=OFF -DBLA_VENDOR=OpenBLAS \
             -DENABLE_UNIT_TEST=ON -DSV_ENABLE_DISTRIBUTION=ON -DSV_INSTALLER_TYPE=ZIP \
@@ -141,8 +176,8 @@ jobs:
         run: |
           set -o pipefail
           git rev-parse HEAD > build/windows/source-revision.txt
-          pacman -Q > build/windows/dependencies.txt
-          gcc --version > build/windows/toolchain.txt
+          ${{ matrix.list-packages }} > build/windows/dependencies.txt
+          grep -h 'set(CMAKE_CXX_COMPILER\(_ID\|_VERSION\)\? ' build/windows/CMakeFiles/*/CMakeCXXCompiler.cmake > build/windows/toolchain.txt
           cpack --config build/windows/CPackConfig.cmake -G ZIP -B build/windows-packages 2>&1 | tee build/windows/cpack.log
       - name: Run numerical tests
         run: |
@@ -155,7 +190,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-ucrt64
+          name: windows-${{ matrix.toolchain }}
           path: |
             build/windows-packages/*.zip
             build/windows/*.txt
@@ -163,15 +198,19 @@ jobs:
             build/windows/*.xml
 
   test-windows-package:
-    name: Test Windows ZIP
+    name: Test Windows ZIP (${{ matrix.toolchain }})
     runs-on: windows-2022
     timeout-minutes: 15
     needs: test-windows
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [ucrt64, msvc]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: windows-ucrt64
+          name: windows-${{ matrix.toolchain }}
           path: package
       - uses: actions/setup-python@v5
         with:
@@ -214,7 +253,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-package-tests
+          name: windows-${{ matrix.toolchain }}-package-tests
           path: tests/package-tests.xml
 
   # Single coordinating job for branch protection rules
