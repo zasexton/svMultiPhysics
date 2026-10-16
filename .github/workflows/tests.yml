@@ -155,7 +155,6 @@ jobs:
         run: |
           export MSMPI_INC="$(cygpath -w "${DEPENDENCY_PREFIX:-$MINGW_PREFIX}/include")"
           export MSMPI_LIB64="$(cygpath -w "${DEPENDENCY_PREFIX:-$MINGW_PREFIX}/lib")"
-          export PATH="/c/Program Files/Microsoft MPI/Bin:$PATH"
           cmake -S Code -B build/windows -G Ninja \
             ${{ matrix.compilers }} ${{ matrix.cmake-args }} \
             -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
