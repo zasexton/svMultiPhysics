@@ -165,7 +165,7 @@ jobs:
       - name: Build and run unit tests
         run: |
           cmake --build build/windows --parallel 4 -- -k 0 2>&1 | tee build/windows/build.log
-          ctest --test-dir build/windows/Source/solver --output-on-failure 2>&1 | tee build/windows/unit-tests.log
+          ctest --test-dir build/windows/Source/solver --verbose 2>&1 | tee build/windows/unit-tests.log
       - name: Package
         run: |
           git rev-parse HEAD > build/windows/source-revision.txt
