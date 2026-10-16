@@ -111,7 +111,7 @@ svMultiPhysics builds on 64-bit Windows 10 or 11 with Visual Studio 2022. Use VT
 
 ```bash
 cmake -S Code -B build/windows -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
-  -DSV_USE_MSMPI=ON -DSV_USE_TRILINOS=OFF -DBLA_VENDOR=OpenBLAS -DSV_ENABLE_DISTRIBUTION=ON
+  -DSV_USE_TRILINOS=OFF -DBLA_VENDOR=OpenBLAS -DSV_ENABLE_DISTRIBUTION=ON
 cmake --build build/windows --parallel
 cpack --config build/windows/CPackConfig.cmake -G ZIP -B build/windows-packages
 ```
