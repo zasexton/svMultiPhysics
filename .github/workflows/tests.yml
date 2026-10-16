@@ -116,14 +116,6 @@ jobs:
           if ((Get-FileHash $installer).Hash -ne '47443829114d8d8670f77af98939fe876d33eceb35d0ce4e0e85efeec4d87213') { throw 'MPI installer checksum mismatch' }
           $result = Start-Process $installer -ArgumentList '-unattend' -Wait -PassThru
           if ($result.ExitCode -notin 0,3010) { throw "MPI installation failed: $($result.ExitCode)" }
-      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
-        if: matrix.toolchain == 'msvc'
-      - uses: mamba-org/setup-micromamba@f457c30a868e4760d3a6fcea5f25dc655b8edf39 # v3.2.1
-        if: matrix.toolchain == 'msvc'
-        with:
-          environment-name: svmp
-          create-args: -c conda-forge vtk-base=9.7.0 vtk-io-ffmpeg=9.7.0 tbb-devel openblas libblas=*=*openblas msmpi
-          init-shell: none
       - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
         with:
           msystem: UCRT64
@@ -134,6 +126,14 @@ jobs:
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-gcc-fortran
             ${{ matrix.packages }}
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        if: matrix.toolchain == 'msvc'
+      - uses: mamba-org/setup-micromamba@f457c30a868e4760d3a6fcea5f25dc655b8edf39 # v3.2.1
+        if: matrix.toolchain == 'msvc'
+        with:
+          environment-name: svmp
+          create-args: -c conda-forge vtk-base=9.7.0 vtk-io-ffmpeg=9.7.0 tbb-devel openblas libblas=*=*openblas msmpi
+          init-shell: none
       - name: Use the conda-forge dependencies
         if: matrix.toolchain == 'msvc'
         run: |
