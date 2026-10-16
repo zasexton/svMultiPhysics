@@ -39,11 +39,6 @@ if(WIN32)
 
   set(SV_INSTALLER_TYPE ZIP CACHE STRING "Windows package generator")
   set(CPACK_GENERATOR "${SV_INSTALLER_TYPE}")
-  set(CPACK_PACKAGING_INSTALL_PREFIX "/")
-  set(CPACK_ARCHIVE_COMPONENT_INSTALL ON)
-  set(CPACK_COMPONENTS_GROUPING ALL_COMPONENTS_IN_ONE)
-  set(CPACK_COMPONENT_INCLUDE_TOPLEVEL_DIRECTORY ON)
-  set(CPACK_COMPONENTS_ALL CoreExecutables)
   set(SV_PACKAGE_EXTRA_LIBRARIES "" CACHE STRING "Additional dynamically loaded DLLs to package")
   set(SV_PACKAGE_EXTRA_LICENSES "" CACHE STRING "License files for additional packaged libraries")
   get_filename_component(compiler_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
@@ -53,6 +48,11 @@ if(WIN32)
     set(toolchain_licenses "${compiler_prefix}/share/licenses/")
   endif()
   set(SV_PACKAGE_LICENSE_DIRS "${toolchain_licenses}" CACHE STRING "Directories of dependency license files to package")
+
+  # Cpack install help
+  set(CPACK_MONOLITHIC_INSTALL 1)
+  set(CPACK_COMPONENTS_IGNORE_GROUPS 1)
+  set(CPACK_INSTALL_CMAKE_PROJECTS "${CMAKE_BINARY_DIR};svMultiPhysics;CoreExecutables;/")
 
   # Run during both installation and CPack staging, after the binary is built.
   set(install_windows_runtime [==[
@@ -75,10 +75,8 @@ if(WIN32)
     if(unresolved OR conflicts_FILENAMES)
       message(FATAL_ERROR "Unresolved DLLs: ${unresolved}; conflicting DLLs: ${conflicts_FILENAMES}")
     endif()
-    if(dependencies OR extra_libraries)
-      file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/@SV_INSTALL_RUNTIME_DIR@"
-        TYPE SHARED_LIBRARY FILES ${dependencies} ${extra_libraries})
-    endif()
+    file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/@SV_INSTALL_RUNTIME_DIR@"
+      TYPE SHARED_LIBRARY FILES ${dependencies} ${extra_libraries})
   ]==])
   string(CONFIGURE "${install_windows_runtime}" install_windows_runtime @ONLY)
   install(CODE "${install_windows_runtime}" COMPONENT CoreExecutables)
@@ -91,22 +89,15 @@ if(WIN32)
     DESTINATION share/svMultiPhysics COMPONENT CoreExecutables OPTIONAL)
   install(DIRECTORY ${SV_PACKAGE_LICENSE_DIRS}
     DESTINATION share/svMultiPhysics/licenses COMPONENT CoreExecutables)
-  foreach(dependency metis parmetis)
-    install(FILES "${SV_SOURCE_DIR}/ThirdParty/${dependency}_internal/simvascular_${dependency}_internal/LICENSE.txt"
+  # SV_PACKAGE_LICENSE_DIRS or SV_PACKAGE_EXTRA_LICENSES must provide the LGPL-2.1 text for gkregex. The bundled
+  # Eigen and TinyXML-2 sources have no separate license files; these headers carry the notices.
+  foreach(notice metis_internal/simvascular_metis_internal/LICENSE.txt parmetis_internal/simvascular_parmetis_internal/LICENSE.txt
+      tetgen/simvascular_tetgen/LICENSE gklib_internal/simvascular_gklib_internal/gkregex.c
+      gklib_internal/simvascular_gklib_internal/gkregex.h eigen/include/eigen3/Eigen/Core tinyxml/simvascular_tinyxml/tinyxml2.h)
+    string(REGEX MATCH "^[a-z]+" dependency "${notice}")
+    install(FILES "${SV_SOURCE_DIR}/ThirdParty/${notice}"
       DESTINATION "share/svMultiPhysics/licenses/${dependency}" COMPONENT CoreExecutables)
   endforeach()
-  install(FILES "${SV_SOURCE_DIR}/ThirdParty/tetgen/simvascular_tetgen/LICENSE"
-    DESTINATION share/svMultiPhysics/licenses/tetgen COMPONENT CoreExecutables)
-  # SV_PACKAGE_LICENSE_DIRS (MSYS2 includes it) or SV_PACKAGE_EXTRA_LICENSES must provide the LGPL-2.1 text for gkregex.
-  foreach(notice gkregex.c gkregex.h)
-    install(FILES "${SV_SOURCE_DIR}/ThirdParty/gklib_internal/simvascular_gklib_internal/${notice}"
-      DESTINATION share/svMultiPhysics/licenses/gklib COMPONENT CoreExecutables)
-  endforeach()
-  # The bundled Eigen and TinyXML-2 sources have no separate license files; these headers carry the notices.
-  install(FILES "${SV_SOURCE_DIR}/ThirdParty/eigen/include/eigen3/Eigen/Core"
-    DESTINATION share/svMultiPhysics/licenses/eigen COMPONENT CoreExecutables)
-  install(FILES "${SV_SOURCE_DIR}/ThirdParty/tinyxml/simvascular_tinyxml/tinyxml2.h"
-    DESTINATION share/svMultiPhysics/licenses/tinyxml COMPONENT CoreExecutables)
 
   # Visual studios
   if(MSVC)
