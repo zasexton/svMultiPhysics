@@ -110,7 +110,6 @@ if(WIN32)
 
   # Visual studios
   if(MSVC)
-    set(CPACK_GENERATOR "WIX")
     set(CPACK_WIX_EXTENSIONS WixUtilExtension)
     set(CPACK_WIX_UI_BANNER ${CMAKE_CURRENT_SOURCE_DIR}/windows/msi-banner.jpg)
     set(CPACK_WIX_UI_DIALOG ${CMAKE_CURRENT_SOURCE_DIR}/windows/msi-dialog.jpg)
