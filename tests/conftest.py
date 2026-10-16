@@ -139,7 +139,7 @@ def n_proc(request):
     return request.param
 
 
-def run_by_name(folder, name, t_max, n_proc=1, clean=True):
+def run_by_name(folder, name, t_max, n_proc=1, clean=True, timeout=None):
     """
     Run a test case and return results
     Args:
@@ -159,16 +159,21 @@ def run_by_name(folder, name, t_max, n_proc=1, clean=True):
 
     # run simulation (PETSc tests use a dedicated build; see cpp_exec_p)
     exe = cpp_exec_p if "petsc" in folder else cpp_exec
-    cmd = [MPIEXEC]
-    if n_proc > 1 and OVERSUBSCRIBE_FLAG:
-        cmd.append(OVERSUBSCRIBE_FLAG)
-    cmd += ["-np", str(n_proc), exe, name]
+    cmd = list(filter(None,
+        [
+            MPIEXEC,
+            OVERSUBSCRIBE_FLAG if n_proc > 1 else "",
+            "-np",
+            str(n_proc),
+            exe,
+            name,
+        ]
+    ))
 
     # Run the command while capturing the return code and stderr output. This
     # way, if something goes wrong, we can raise an appropriate error message.
-    timeout = os.environ.get("SVMP_TEST_TIMEOUT")
     completed = subprocess.run(
-        cmd, cwd=folder, stderr=subprocess.PIPE, text=True, timeout=float(timeout) if timeout else None
+        cmd, cwd=folder, stderr=subprocess.PIPE, text=True, timeout=timeout
     )
 
     # Print the captured stderr to console, so it is visible. Notice that this
@@ -202,6 +207,7 @@ def run_with_reference(
     name_ref=None,
     name_inp="solver.xml",
     check_time_value=True,
+    clean=True,
 ):
     """
     Run a test case and compare it to a stored reference solution
@@ -221,7 +227,7 @@ def run_with_reference(
 
     # run simulation
     folder = os.path.join("cases", base_folder, test_folder)
-    res = run_by_name(folder, name_inp, t_max, n_proc)
+    res = run_by_name(folder, name_inp, t_max, n_proc, clean)
 
     # read reference
     fname = os.path.join(folder, name_ref)

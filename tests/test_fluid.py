@@ -1,11 +1,9 @@
-from .conftest import run_by_name, run_with_reference, RTOL, skip_if_no_petsc, skip_if_no_trilinos
+from .conftest import run_by_name, run_with_reference, skip_if_no_petsc, skip_if_no_trilinos
 import os
 import subprocess
 import shutil
 import xml.etree.ElementTree as ET
 from pathlib import Path
-import meshio
-import numpy as np
 import pytest
 
 # Common folder for all tests in this file
@@ -36,21 +34,15 @@ def test_pipe_restart_with_spaces(n_proc, tmp_path):
     general.find("Continue_previous_simulation").text = "true"
     general.find("Number_of_time_steps").text = "2"
     tree.write(case / "second step.xml")
-    result = run_by_name(str(case), "second step.xml", 2, n_proc, clean=False)
-    reference = meshio.read(case / "result_002.vtu")
-    for field in fields:
-        np.testing.assert_allclose(result.point_data[field], reference.point_data[field],
-                                   rtol=RTOL[field], atol=RTOL[field])
-    np.testing.assert_allclose(result.field_data["TimeValue"], [0.01], rtol=1e-12, atol=0)
+    run_with_reference("", str(case), fields, n_proc, 2, name_inp="second step.xml", clean=False)
 
-def test_pipe_output_error(n_proc, tmp_path, monkeypatch):
+def test_pipe_output_error(n_proc, tmp_path):
     case = tmp_path / "unwritable output"
     shutil.copytree(Path(__file__).parent / "cases/fluid/pipe_RCR_3d", case,
                     ignore=shutil.ignore_patterns("*-procs", "histor.dat"))
     (case / f"{n_proc}-procs").write_text("preserve this file")
-    monkeypatch.setenv("SVMP_TEST_TIMEOUT", "30")
     with pytest.raises(RuntimeError, match=f"{n_proc}-procs"):
-        run_by_name(str(case), "solver.xml", 2, n_proc, clean=False)
+        run_by_name(str(case), "solver.xml", 2, n_proc, clean=False, timeout=30)
     assert (case / f"{n_proc}-procs").read_text() == "preserve this file"
 
 def test_pipe_RCR_3d_fourier_coeff(n_proc):
@@ -84,9 +76,7 @@ def test_pipe_RCR_weak_dir_3d(n_proc):
 def test_pipe_RCR_genBC(n_proc, tmp_path):
     case = tmp_path / "genBC with spaces"
     shutil.copytree(Path(__file__).parent / "cases/fluid/pipe_RCR_genBC", case,
-                    ignore=shutil.ignore_patterns("*-procs", "obj", "genBC.exe"))
-    for name in ["AllData", "InitialData", "GenBC.int"]:
-        (case / name).unlink(missing_ok=True)
+                    ignore=shutil.ignore_patterns("*-procs", "obj", "genBC.exe", "AllData", "InitialData", "GenBC.int"))
     subprocess.run(["make"], cwd=case / "genBC", check=True)
     executable = case / "genBC/coupled solver.exe"
     (case / "genBC/genBC.exe").rename(executable)
