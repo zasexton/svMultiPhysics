@@ -456,6 +456,8 @@ mat_inv_lp_eigen(const Array<double>& A, const int nd)
 
   return Ainv;
 
+#else
+  throw std::runtime_error("mat_inv_lp_eigen requires use_eigen");
 #endif
 }
 
