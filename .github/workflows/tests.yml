@@ -78,7 +78,6 @@ jobs:
             packages: >-
               mingw-w64-ucrt-x86_64-cmake
               mingw-w64-ucrt-x86_64-ninja
-              mingw-w64-ucrt-x86_64-msmpi
               mingw-w64-ucrt-x86_64-openblas
               mingw-w64-ucrt-x86_64-vtk
               mingw-w64-ucrt-x86_64-nlohmann-json
@@ -87,9 +86,9 @@ jobs:
             list-packages: pacman -Q
           - toolchain: msvc
             compilers: -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
-            package-dirs: -DSV_PACKAGE_RUNTIME_DIRS="$DEPENDENCY_PREFIX/bin" -DSV_PACKAGE_LICENSE_DIRS="$PWD/build/conda-licenses/"
+            cmake-args: -DMPI_GUESS_LIBRARY_NAME=MSMPI -DSV_PACKAGE_RUNTIME_DIRS="$DEPENDENCY_PREFIX/bin" -DSV_PACKAGE_LICENSE_DIRS="$PWD/build/conda-licenses/"
             list-packages: '"$(cygpath -u "$MAMBA_EXE")" list -n svmp'
-            path-type: inherit # MSYS2 provides only make and gfortran for the genBC test.
+            path-type: inherit # MSYS2 provides only make, gfortran, and mpif90 for the genBC tests.
     defaults:
       run:
         shell: msys2 {0}
@@ -125,6 +124,7 @@ jobs:
             git make
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-gcc-fortran
+            mingw-w64-ucrt-x86_64-msmpi
             ${{ matrix.packages }}
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         if: matrix.toolchain == 'msvc'
@@ -162,7 +162,7 @@ jobs:
           export MSMPI_LIB64="$(cygpath -w "${DEPENDENCY_PREFIX:-$MINGW_PREFIX}/lib")"
           export PATH="/c/Program Files/Microsoft MPI/Bin:$PATH"
           cmake -S Code -B build/windows -G Ninja \
-            ${{ matrix.compilers }} ${{ matrix.package-dirs }} \
+            ${{ matrix.compilers }} ${{ matrix.cmake-args }} \
             -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
             -DSV_USE_MSMPI=ON -DSV_USE_TRILINOS=OFF -DBLA_VENDOR=OpenBLAS \
             -DENABLE_UNIT_TEST=ON -DSV_ENABLE_DISTRIBUTION=ON -DSV_INSTALLER_TYPE=ZIP \
