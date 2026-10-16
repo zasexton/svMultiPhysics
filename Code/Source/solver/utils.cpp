@@ -71,7 +71,7 @@ void run_process(std::string executable, std::string input_file)
   const auto program = '"' + executable + '"';
   const auto argument = '"' + input_file + '"';
   const char* arguments[] = {program.c_str(), argument.c_str(), nullptr};
-  const auto status = _spawnv(_P_WAIT, executable.c_str(), arguments);
+  const auto status = _spawnvp(_P_WAIT, executable.c_str(), arguments);
   if (status == -1) {
     throw std::system_error(errno, std::generic_category(), "Could not start " + executable);
   }
