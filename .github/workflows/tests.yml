@@ -66,7 +66,7 @@ jobs:
   test-windows:
     name: Test Windows
     runs-on: windows-2022
-    timeout-minutes: 120
+    timeout-minutes: 360 # Building Trilinos and PETSc takes hours when they are not cached.
     needs: check-for-changes
     if: ${{ needs.check-for-changes.outputs.run_full_tests == 'true' }}
     defaults:
@@ -112,12 +112,84 @@ jobs:
           echo "DEPENDENCY_PREFIX=$prefix" >> "$GITHUB_ENV"
           echo "CMAKE_PREFIX_PATH=$prefix" >> "$GITHUB_ENV"
           cygpath -w "$prefix/bin" >> "$GITHUB_PATH"
-          mkdir -p build/conda-licenses
+          mkdir -p build/licenses
           shopt -s globstar # micromamba nests its package cache by download URL.
           for licenses in "$(cygpath -u "$MAMBA_ROOT_PREFIX")"/pkgs/**/info/licenses; do
             package="${licenses%/info/licenses}"
-            cp -r "$licenses" "build/conda-licenses/${package##*/}"
+            cp -r "$licenses" "build/licenses/${package##*/}"
           done
+      - name: Restore Trilinos
+        id: trilinos
+        uses: actions/cache/restore@v4
+        with:
+          path: C:/trilinos
+          key: windows-trilinos-16.2.2
+      - name: Build Trilinos
+        if: steps.trilinos.outputs.cache-hit != 'true'
+        run: |
+          git -c core.symlinks=false -c core.autocrlf=false clone -q --depth 1 --branch trilinos-release-16-2-2 https://github.com/trilinos/Trilinos.git /c/t/s
+          cd /c/t/s
+          cp COPYRIGHT Copyright.txt # TriBITS reads this file, which is a symbolic link in the repository.
+          # Add the type qualifications that MSVC requires.
+          sed -i 's/^\( *\)MultiVecAdapter<Kokkos::View\(.*::node_t>\)/\1typename MultiVecAdapter<Kokkos::View\2/' packages/amesos2/src/Amesos2_KokkosMultiVecAdapter_def.hpp
+          sed -i 's/^typename Xpetra::CrsMatrix<\(.*getLocalMatrixHost() const\)/typename BlockedCrsMatrix<\1/' packages/xpetra/src/BlockedCrsMatrix/Xpetra_BlockedCrsMatrix_def.hpp
+          export MSMPI_INC="$(cygpath -w "$DEPENDENCY_PREFIX/include")"
+          export MSMPI_LIB64="$(cygpath -w "$DEPENDENCY_PREFIX/lib")"
+          cmake -S . -B /c/t/b -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=C:/trilinos \
+            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DCMAKE_CXX_FLAGS="-EHsc -bigobj -permissive- -DNOMINMAX" \
+            -DTrilinos_ENABLE_{Teuchos,Kokkos,KokkosKernels,Tpetra,Belos,Ifpack2,Amesos2,Xpetra,MueLu,EXPLICIT_INSTANTIATION}=ON \
+            -DTrilinos_ENABLE_{Fortran,TESTS,EXAMPLES,ALL_OPTIONAL_PACKAGES}=OFF -DTpetra_INST_INT_INT=ON -DTpetra_INST_INT_LONG_LONG=OFF \
+            -DTPL_ENABLE_MPI=ON -DMPI_GUESS_LIBRARY_NAME=MSMPI -DMPI_USE_COMPILER_WRAPPERS=OFF -DMPI_EXEC="$DEPENDENCY_PREFIX/bin/mpiexec.exe" \
+            -DTPL_ENABLE_DLlib=OFF -DTPL_{BLAS,LAPACK}_LIBRARIES="$DEPENDENCY_PREFIX/lib/openblas.lib"
+          cmake --build /c/t/b --target install --parallel 4
+          mkdir /c/trilinos/licenses
+          cp --parents LICENSE COPYRIGHT packages/{amesos2,belos,ifpack2,muelu,teuchos,tpetra,xpetra}/{LICENSE,COPYRIGHT} \
+            packages/{kokkos,kokkos-kernels}/{LICENSE,Copyright.txt} packages/amesos2/src/{KLU2,basker}/{LICENSE,COPYRIGHT} \
+            packages/amesos2/src/KLU2/Doc/KLU_README.txt /c/trilinos/licenses
+          curl -fsSL https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt -o /c/trilinos/licenses/LGPL-2.1.txt # Amesos2's KLU2
+          echo "svmultiphysics.exe links these Trilinos 16.2.2 packages statically. Their source is at" \
+            "https://github.com/trilinos/Trilinos/tree/trilinos-release-16-2-2, and .github/workflows/tests.yml in" \
+            "https://github.com/SimVascular/svMultiPhysics shows how to build them and relink the solver." > /c/trilinos/licenses/SOURCE.txt
+      - uses: actions/cache/save@v4
+        if: steps.trilinos.outputs.cache-hit != 'true'
+        with:
+          path: C:/trilinos
+          key: ${{ steps.trilinos.outputs.cache-primary-key }}
+      - name: Restore PETSc
+        id: petsc
+        uses: actions/cache/restore@v4
+        with:
+          path: C:/petsc
+          key: windows-petsc-3.26.0
+      - uses: cygwin/cygwin-install-action@3f0a3f9f988f7e96b8c18098ae05eaec175f5b52 # v6
+        if: steps.petsc.outputs.cache-hit != 'true'
+        with:
+          packages: make python3 # PETSc configures MSVC builds only in Cygwin.
+          add-to-path: false
+      - name: Build PETSc
+        if: steps.petsc.outputs.cache-hit != 'true'
+        shell: D:\cygwin\bin\bash.exe --noprofile --norc -eo pipefail -o igncr '{0}'
+        run: |
+          export PATH="/usr/bin:$PATH"
+          export PATH="$(dirname "$(command -v cl)"):$PATH" # MSVC's link.exe must precede Cygwin's.
+          dependencies="$(cygpath -u "$DEPENDENCY_PREFIX")"
+          cd /cygdrive/c
+          curl -fsSL https://web.cels.anl.gov/projects/petsc/download/release-snapshots/petsc-3.26.0.tar.gz | tar xz
+          cd petsc-3.26.0
+          ./configure --prefix=/cygdrive/c/petsc PETSC_ARCH=arch-mswin-c-opt --with-cc=cl --with-cxx=cl --with-fc=0 \
+            --with-shared-libraries=0 --with-debugging=0 --with-strict-petscerrorcode \
+            'CFLAGS=-GF -MD -wd4996 -Zc:preprocessor' 'CXXFLAGS=-GF -MD -GR -EHsc -wd4996 -Zc:preprocessor' COPTFLAGS=-O2 CXXOPTFLAGS=-O2 \
+            --with-mpi-include="$dependencies/include" --with-mpi-lib="$dependencies/lib/msmpi.lib" \
+            --with-mpiexec="$dependencies/bin/mpiexec" --with-blaslapack-lib="$dependencies/lib/openblas.lib"
+          make PETSC_DIR="$PWD" PETSC_ARCH=arch-mswin-c-opt all
+          make PETSC_DIR="$PWD" PETSC_ARCH=arch-mswin-c-opt install
+          mkdir /cygdrive/c/petsc/licenses
+          cp LICENSE /cygdrive/c/petsc/licenses
+      - uses: actions/cache/save@v4
+        if: steps.petsc.outputs.cache-hit != 'true'
+        with:
+          path: C:/petsc
+          key: ${{ steps.petsc.outputs.cache-primary-key }}
       - name: Build the 0D interface
         run: |
           git clone https://github.com/SimVascular/svZeroDSolver.git
@@ -131,11 +203,13 @@ jobs:
         run: |
           export MSMPI_INC="$(cygpath -w "$DEPENDENCY_PREFIX/include")"
           export MSMPI_LIB64="$(cygpath -w "$DEPENDENCY_PREFIX/lib")"
+          cp -r /c/trilinos/licenses build/licenses/trilinos
+          cp -r /c/petsc/licenses build/licenses/petsc
           cmake -S Code -B build/windows -G Ninja \
             -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DMPI_GUESS_LIBRARY_NAME=MSMPI \
-            -DSV_PACKAGE_RUNTIME_DIRS="$DEPENDENCY_PREFIX/bin" -DSV_PACKAGE_LICENSE_DIRS="$PWD/build/conda-licenses/" \
+            -DSV_PACKAGE_RUNTIME_DIRS="$DEPENDENCY_PREFIX/bin" -DSV_PACKAGE_LICENSE_DIRS="$PWD/build/licenses/" \
             -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
-            -DSV_USE_MSMPI=ON -DSV_USE_TRILINOS=OFF -DBLA_VENDOR=OpenBLAS \
+            -DSV_USE_MSMPI=ON -DSV_USE_TRILINOS=ON -DTrilinos_DIR=C:/trilinos/lib/cmake/Trilinos -DSV_PETSC_DIR=C:/petsc -DBLA_VENDOR=OpenBLAS \
             -DENABLE_UNIT_TEST=ON -DSV_ENABLE_DISTRIBUTION=ON -DSV_INSTALLER_TYPE=ZIP \
             -DSV_PACKAGE_EXTRA_LIBRARIES="$PWD/svZeroDSolver/build/src/interface/libsvzero_interface.dll" \
             -DSV_PACKAGE_EXTRA_LICENSES="$PWD/svZeroDSolver/LICENSE.txt"
@@ -152,6 +226,7 @@ jobs:
       - name: Run numerical tests
         run: |
           export SVMP_EXECUTABLE="$(cygpath -w "$PWD/build/windows/bin/svmultiphysics.exe")"
+          export SVMP_EXECUTABLE_PETSC="$SVMP_EXECUTABLE"
           export MPIEXEC_EXECUTABLE='C:\Program Files\Microsoft MPI\Bin\mpiexec.exe'
           windows_python="$(cygpath -u "$pythonLocation")/python.exe"
           "$windows_python" -m pip install pytest numpy meshio==5.3.5 pandas
