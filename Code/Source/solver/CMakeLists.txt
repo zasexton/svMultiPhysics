@@ -154,6 +154,8 @@ else()
   find_package(VTK PATHS ${SV_LOCAL_VTK_PATH} NO_DEFAULT_PATH REQUIRED COMPONENTS ${SV_VTK_COMPONENTS})
 endif()
 
+include(${VTK_USE_FILE})
+
 set(lib ${SV_LIB_SVFSI_NAME})
 
 # coverage
@@ -319,8 +321,8 @@ target_link_libraries(${SV_MULTIPHYSICS_EXE}
   ${GLOBAL_LIBRARIES}
   ${INTELRUNTIME_LIBRARIES}
   ${ZLIB_LIBRARY}
-  BLAS::BLAS
-  LAPACK::LAPACK
+  ${BLAS_LIBRARIES}
+  ${LAPACK_LIBRARIES}
   ${METIS_SVFSI_LIBRARY_NAME}
   ${PARMETIS_INTERNAL_LIBRARY_NAME}
   ${TETGEN_LIBRARY_NAME}
@@ -332,10 +334,6 @@ target_link_libraries(${SV_MULTIPHYSICS_EXE}
 # extra MPI libraries only if there are not set to NOT_FOUND or other null
 if(SV_MPI_EXTRA_LIBRARY)
   target_link_libraries(${SV_MULTIPHYSICS_EXE} ${SV_MPI_EXTRA_LIBRARY})
-endif()
-
-if(WIN32)
-  target_link_libraries(${SV_MULTIPHYSICS_EXE} psapi)
 endif()
 
 if(USE_TRILINOS)
@@ -439,8 +437,8 @@ int main(int argc, char** argv) {
     ${GLOBAL_LIBRARIES}
     ${INTELRUNTIME_LIBRARIES}
     ${ZLIB_LIBRARY}
-    BLAS::BLAS
-    LAPACK::LAPACK
+    ${BLAS_LIBRARIES}
+    ${LAPACK_LIBRARIES}
     ${METIS_SVFSI_LIBRARY_NAME}
     ${PARMETIS_INTERNAL_LIBRARY_NAME}
     ${TETGEN_LIBRARY_NAME}
@@ -454,11 +452,8 @@ int main(int argc, char** argv) {
     run_all_unit_tests
     gtest
     GTest::gtest_main 
-    Threads::Threads
+    pthread   # link pthread on ubuntu20
   )
-  if(WIN32)
-    target_link_libraries(run_all_unit_tests psapi)
-  endif()
 
   # Define the path to the unit-test reference-data directory as a preprocessor
   # macro.

@@ -449,9 +449,20 @@ endmacro()
 
 #-----------------------------------------------------------------------------
 macro(simvascular_today YEAR MONTH DAY)
-  string(TIMESTAMP ${YEAR} "%Y")
-  string(TIMESTAMP ${MONTH} "%m")
-  string(TIMESTAMP ${DAY} "%d")
+  if(WIN32)
+    string(TIMESTAMP RESULT "%Y;%m;%d")
+  elseif(UNIX)
+    execute_process(COMMAND "date" "+%d/%m/%Y" OUTPUT_VARIABLE RESULT)
+    string(REGEX REPLACE "(..)/(..)/(....).*" "\\3;\\2;\\1" RESULT ${RESULT})
+  else(WIN32)
+    message(SEND_ERROR "date not implemented")
+    set(YEAR 0000)
+    set(MONTH 00)
+    set(DAY 00)
+  endif (WIN32)
+  list(GET RESULT 0 YEAR)
+  list(GET RESULT 1 MONTH)
+  list(GET RESULT 2 DAY)
 endmacro()
 #-----------------------------------------------------------------------------
 
