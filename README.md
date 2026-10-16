@@ -56,11 +56,11 @@ The following software packages are required to be installed in order to build s
 
 - [git](https://git-scm.com/) - Distributed version control system used to interact with GitHub repositories
 - [CMake](https://cmake.org/) - Used to the build the binary executable **svmultiphysics**
-- C++20 compiler - C++ compiler, linker and libraries
+- C++17 compiler - C++ compiler, linker and libraries 
 - [Visualization Toolkit (VTK)](https://vtk.org/) - Used for reading and writing VTK-format VTP and VTU files 
 - An MPI implementation - Used for parallel processing. svMultiPhysics has been successfully tested with [Open MPI](https://www.open-mpi.org/) and [Intel MPI](https://www.intel.com/content/www/us/en/developer/tools/oneapi/mpi-library.html)
-- [BLAS](https://www.netlib.org/blas/) - Used for performing basic vector and matrix operations
-- [LAPACK](https://www.netlib.org/lapack/) - Used for solving systems of simultaneous linear equations
+- [BLAS](https://www.netlib.org/blas/) - Used for performing basic vector and matrix operations (optional but may be needed for external linear algebra packages)
+- [LAPACK](https://www.netlib.org/lapack/) - Used for solving systems of simultaneous linear equations (optional but may be needed for external linear algebra packages)
 
 
 These software packages are installed using a package-management system
@@ -107,9 +107,7 @@ To rebuild the program after making code changes
 
 ## Windows build
 
-Use the **UCRT64** shell from [MSYS2](https://www.msys2.org/) on Windows 10/11 x64. The installer requires Windows 10 version 1809 or newer; see [MSYS2's OS and hardware requirements](https://www.msys2.org/docs/windows_support/). Windows CI uses Windows Server 2022 x64. The solver uses GCC's default x64 instruction baseline, with OpenBLAS selecting CPU kernels at runtime; ARM64 and older Windows versions are not validated.
-
-Install the [Microsoft MPI 10.1.3 runtime](https://www.microsoft.com/en-us/download/details.aspx?id=105289) (`msmpisetup.exe`). Its runtime is required separately from the MSYS2 development package. In UCRT64, update the complete environment with `pacman -Syu`, reopening the shell and repeating the update if requested, then install:
+Use the **UCRT64** shell from [MSYS2](https://www.msys2.org/) on 64-bit Windows 10 or 11. Install the [Microsoft MPI runtime](https://www.microsoft.com/en-us/download/details.aspx?id=105289) (`msmpisetup.exe`), which is separate from the MSYS2 MS-MPI development package. Update MSYS2 with `pacman -Syu`, then install the build dependencies:
 
 ```bash
 pacman -S --needed git \
@@ -120,7 +118,7 @@ pacman -S --needed git \
   mingw-w64-ucrt-x86_64-exprtk
 ```
 
-Use the native UCRT64 CMake and libraries throughout. OpenBLAS must provide LAPACK with **32-bit integer arguments**; the `openblas64` package is not compatible. Configure the solver directly from `Code/`, from the repository root:
+OpenBLAS must use 32-bit integers; the `openblas64` package is not compatible. From the repository root, configure, build, and package the solver:
 
 ```bash
 export MSMPI_INC="$(cygpath -w "$MINGW_PREFIX/include")"
@@ -132,47 +130,12 @@ cmake -S Code -B build/windows -G Ninja \
   -DSV_USE_MSMPI=ON -DSV_USE_TRILINOS=OFF -DBLA_VENDOR=OpenBLAS \
   -DSV_ENABLE_DISTRIBUTION=ON -DSV_INSTALLER_TYPE=ZIP
 cmake --build build/windows --parallel
-pacman -Q > build/windows/dependencies.txt
-gcc --version > build/windows/toolchain.txt
-git rev-parse HEAD > build/windows/source-revision.txt
-cmake --install build/windows --prefix "$PWD/build/windows-stage"
 cpack --config build/windows/CPackConfig.cmake -G ZIP -B build/windows-packages
 ```
 
-The executable is `build/windows/bin/svmultiphysics.exe`. CPack installs its transitive DLL dependencies beside it in the ZIP's `bin` directory. Windows system DLLs and the separately installed Microsoft MPI runtime are excluded. Missing or conflicting application DLLs stop packaging. If compatible dependencies are installed elsewhere, pass their DLL directories through the semicolon-separated `SV_PACKAGE_RUNTIME_DIRS` setting.
+The ZIP contains `bin/svmultiphysics.exe`, the DLLs it needs, and their license notices, so it runs without MSYS2 once the Microsoft MPI runtime is installed. Run it from a case directory, for example `mpiexec -n 4 'C:\solver\bin\svmultiphysics.exe' solver.xml`, and set `OPENBLAS_NUM_THREADS=1` when running several MPI ranks. Build 0D and 1D interface DLLs with the same UCRT64 toolchain and add them to the ZIP with `SV_PACKAGE_EXTRA_LIBRARIES` and `SV_PACKAGE_EXTRA_LICENSES`. PETSc, Trilinos, and remeshing have not been validated on Windows.
 
-Project and dependency notices are under `share/svMultiPhysics`; bundled libraries retain their individual license terms. The GKlib regex sources and LGPL text are included. The recorded source revision and dependency snapshot identify the sources and build environment needed to rebuild the solver with modified dependencies.
-
-Extract the ZIP anywhere, then run from your case directory in PowerShell:
-
-```powershell
-& 'C:\solver package\bin\svmultiphysics.exe' 'solver.xml'
-& 'C:\Program Files\Microsoft MPI\Bin\mpiexec.exe' -n 4 'C:\solver package\bin\svmultiphysics.exe' 'solver.xml'
-```
-
-MSYS2 is needed to build, but is not needed to run the packaged executable. Set `OMP_NUM_THREADS=1` when running several MPI ranks to avoid giving each rank a separate full set of OpenBLAS threads; adjust this deliberately when measuring performance.
-
-The default Windows configuration uses the built-in FSILS solver. PETSc and Trilinos require separate compatible builds and validation. The 0D/1D interfaces accept full library paths with `.dll`, `.so`, or `.dylib` extensions and resolve the available platform suffix. Build external solver DLLs with the same UCRT64/GCC stack, especially the 0D interface, which exchanges C++ objects. Use `SV_PACKAGE_EXTRA_LIBRARIES` to include dynamically loaded DLLs and `SV_PACKAGE_EXTRA_LICENSES` for their license files. Merely scanning the executable cannot discover libraries loaded at runtime. Windows CI also builds the 0D interface; the external 1D library is not included in the default package. genBC requires a compatible separately built executable.
-
-For tests, install `make`, `mingw-w64-ucrt-x86_64-gcc-fortran` (genBC), and standard Windows Python 3.12. meshio 5.3.5's appended VTK reader depends on the older Base64 padding behavior; newer Python versions can reject valid solver output. In UCRT64, set `TEST_PYTHON` to the full path of that Python executable. Fetch the test data with `git lfs pull`, configure with `-DENABLE_UNIT_TEST=ON`, rebuild, and run:
-
-```bash
-"$TEST_PYTHON" -m pip install pytest numpy meshio==5.3.5 pandas
-ctest --test-dir build/windows/Source/solver --output-on-failure
-export SVMP_EXECUTABLE="$(cygpath -w "$PWD/build/windows/bin/svmultiphysics.exe")"
-export MPIEXEC_EXECUTABLE='C:\Program Files\Microsoft MPI\Bin\mpiexec.exe'
-export OMP_NUM_THREADS=1
-cd tests
-"$TEST_PYTHON" -m pytest -v
-```
-
-The coupled tests also need svZeroDSolver built at `svZeroDSolver/build`; the Windows job in [.github/workflows/tests.yml](.github/workflows/tests.yml) records the source revision and build commands. `SVMP_TEST_PROCS` overrides the default `1,3,4` MPI rank counts, `MPIEXEC_NUMPROC_FLAG` overrides the launcher's count flag, and `SVMP_TEST_TIMEOUT` sets the per-run timeout in seconds (default 600). `SVMP_PETSC_EXECUTABLE` selects a separate PETSc build. The ZIP test uses a separate runner with a restricted `PATH` and checks numerical results and restart continuation with one and two ranks.
-
-The Windows build passes the unit and numerical test suites covering fluid, structural, heat, electrophysiology, electromechanics, CMM, Stokes, shell, FSI, and immersed-surface cases, including 0D coupling and genBC. Thirty PETSc/Trilinos cases are skipped. The tested stack uses GCC 16.2.0, CMake 4.4.4, Ninja 1.13.2, VTK 9.6.2, and OpenBLAS 0.3.34; package manifests record the exact revisions.
-
-Remeshing remains unvalidated: a tetrahedral probe fails boundary-parent lookup with both the previous and current Linux remeshing implementations. Windows 10/11 and older CPUs also need package acceptance runs; automated Windows validation uses Server 2022 and records the runner CPU.
-
-MSYS2 is a rolling distribution. CI records package versions, source revisions, tool versions, and package checksums; its `windows-build-environment` artifact retains the matching package archives and MPI installer. Preserve that artifact with each release. Restore the complete archived package set into an isolated MSYS2 installation using `pacman -U` after verifying `package-sha256.txt`; retain the corresponding MSYS2 installer as well. Do not mix individually pinned old libraries into an upgraded environment. A dependency update requires rerunning the build, numerical tests, and extracted-package tests.
+The Windows job in [.github/workflows/tests.yml](.github/workflows/tests.yml) shows how to run the unit and integration tests. The integration tests use Python 3.12 with meshio 5.3.5 and need `SVMP_EXECUTABLE` and `MPIEXEC_EXECUTABLE` set to the full paths of `svmultiphysics.exe` and `mpiexec.exe`.
 
 <h2 id="building_vtk"> Building Visualization Toolkit (VTK) Libraries </h2>
 
