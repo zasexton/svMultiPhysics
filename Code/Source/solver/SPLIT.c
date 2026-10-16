@@ -127,27 +127,14 @@ int split_(int *nElptr, int *eNoNptr, int *eNoNbptr, int *IEN,
 #include <stdlib.h>
 #include <time.h>
 
-#ifdef _WIN32
-#include <windows.h>
-#endif
-
 #ifdef __MACH__
 #include <mach/clock.h>
 #include <mach/mach.h>
 #endif
 
+#ifndef _WIN32 // Nothing calls cput_, and MSVC has no clock_gettime.
 double cput_()
 {
-#ifdef _WIN32
-   FILETIME creation, exit_time, kernel, user;
-   ULARGE_INTEGER kernel_ticks, user_ticks;
-   if (!GetThreadTimes(GetCurrentThread(), &creation, &exit_time, &kernel, &user)) return 0.0;
-   kernel_ticks.LowPart = kernel.dwLowDateTime;
-   kernel_ticks.HighPart = kernel.dwHighDateTime;
-   user_ticks.LowPart = user.dwLowDateTime;
-   user_ticks.HighPart = user.dwHighDateTime;
-   return (kernel_ticks.QuadPart + user_ticks.QuadPart) / 10000000.0;
-#else
    struct timespec time;
    double res;
 
@@ -166,6 +153,6 @@ double cput_()
    res = ((double)time.tv_nsec)/1000000000.0 + (double)(time.tv_sec%1000000);
 
    return res;
-#endif
 }
+#endif
 
