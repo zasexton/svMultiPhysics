@@ -11,7 +11,7 @@ import meshio
 
 this_file_dir = os.path.abspath(os.path.dirname(__file__))
 cpp_exec = os.environ.get("SVMP_EXECUTABLE", os.path.join(this_file_dir, "..", "build", "svMultiPhysics-build", "bin", "svmultiphysics"))
-cpp_exec_p = os.path.join(this_file_dir, "..", "build-petsc", "svMultiPhysics-build", "bin", "svmultiphysics")
+cpp_exec_p = os.environ.get("SVMP_EXECUTABLE_PETSC", os.path.join(this_file_dir, "..", "build-petsc", "svMultiPhysics-build", "bin", "svmultiphysics"))
 MPIEXEC = os.environ.get("MPIEXEC_EXECUTABLE", "mpirun")
 
 
