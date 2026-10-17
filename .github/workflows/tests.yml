@@ -132,9 +132,6 @@ jobs:
           cp --parents LICENSE COPYRIGHT packages/{amesos2,belos,ifpack2,muelu,teuchos,tpetra,xpetra}/{LICENSE,COPYRIGHT} \
             packages/{kokkos,kokkos-kernels}/{LICENSE,Copyright.txt} packages/amesos2/src/{KLU2,basker}/{LICENSE,COPYRIGHT} \
             packages/amesos2/src/KLU2/Doc/KLU_README.txt /c/trilinos/licenses
-          echo "svmultiphysics.exe links these Trilinos 16.2.2 packages statically. Their source is at" \
-            "https://github.com/trilinos/Trilinos/tree/trilinos-release-16-2-2, and .github/workflows/tests.yml in" \
-            "https://github.com/SimVascular/svMultiPhysics shows how to build them and relink the solver." > /c/trilinos/licenses/SOURCE.txt
       - uses: actions/cache/save@v4
         if: steps.trilinos.outputs.cache-hit != 'true'
         with:
@@ -199,7 +196,37 @@ jobs:
           git rev-parse HEAD > build/windows/source-revision.txt
           "$(cygpath -u "$MAMBA_EXE")" list -n svmp > build/windows/dependencies.txt
           grep -h 'set(CMAKE_CXX_COMPILER\(_ID\|_VERSION\)\? ' build/windows/CMakeFiles/*/CMakeCXXCompiler.cmake > build/windows/toolchain.txt
-          cpack --config build/windows/CPackConfig.cmake -G ZIP -B build/windows-packages 2>&1 | tee build/windows/cpack.log
+          echo "svmultiphysics.exe links these Trilinos 16.2.2 packages statically. Their source is at" \
+            "https://github.com/trilinos/Trilinos/tree/trilinos-release-16-2-2, and .github/workflows/tests.yml in" \
+            "${{ github.server_url }}/${{ github.repository }}/tree/${{ github.sha }} shows how to build them and relink the solver." > build/licenses/trilinos/SOURCE.txt
+          stage=build/windows-installer
+          cmake --install build/windows --prefix "$stage" --component CoreExecutables 2>&1 | tee build/windows/install.log
+          cp "$DEPENDENCY_PREFIX"/bin/{mpiexec.exe,smpd.exe,msmpi.dll} "$stage/bin" # Users need no separate MS-MPI installation.
+          curl -fsSL --create-dirs https://raw.githubusercontent.com/microsoft/Microsoft-MPI/master/LICENSE.txt -o "$stage/share/svMultiPhysics/licenses/msmpi/LICENSE.txt"
+          # The Start menu prompt finds the solver and mpiexec and keeps OpenBLAS from competing with the MPI ranks for cores.
+          printf '@echo off\r\nset "PATH=%%~dp0;%%PATH%%"\r\nset OPENBLAS_NUM_THREADS=1\r\necho Run a case with: mpiexec -n 4 svmultiphysics solver.xml\r\n' > "$stage/bin/svmultiphysics-env.cmd"
+          name="$(sed -n 's/^set(CPACK_PACKAGE_FILE_NAME "\(.*\)")$/\1/p' build/windows/CPackConfig.cmake)"
+          cat > build/windows/installer.iss <<EOF
+          [Setup]
+          AppName=svMultiPhysics
+          AppVersion=${name##*-}
+          DefaultDirName={autopf}\svMultiPhysics
+          DefaultGroupName=svMultiPhysics
+          DisableProgramGroupPage=yes
+          ArchitecturesAllowed=x64compatible
+          ArchitecturesInstallIn64BitMode=x64compatible
+          LicenseFile=$(cygpath -w "$PWD/LICENSE.txt")
+          OutputDir=$(cygpath -w "$PWD/build/windows-packages")
+          OutputBaseFilename=$name-setup
+          WizardStyle=modern
+          [Files]
+          Source: "$(cygpath -w "$PWD/$stage")\*"; DestDir: "{app}"; Flags: recursesubdirs
+          [Icons]
+          Name: "{group}\svMultiPhysics Command Prompt"; Filename: "{cmd}"; Parameters: "/k ""{app}\bin\svmultiphysics-env.cmd"""; WorkingDir: "{userdocs}"
+          [Run]
+          Filename: "{cmd}"; Parameters: "/k ""{app}\bin\svmultiphysics-env.cmd"""; WorkingDir: "{userdocs}"; Description: "Open the svMultiPhysics Command Prompt"; Flags: postinstall nowait skipifsilent
+          EOF
+          "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" build/windows/installer.iss 2>&1 | tee build/windows/installer.log
       - name: Run numerical tests
         run: |
           export SVMP_EXECUTABLE="$(cygpath -w "$PWD/build/windows/bin/svmultiphysics.exe")"
@@ -210,17 +237,20 @@ jobs:
           cd tests
           "$windows_python" -m pytest -v -rf --junitxml=../build/windows/integration.xml 2>&1 | tee ../build/windows/integration.log
       - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: build/windows-packages/*.exe
+      - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: windows
           path: |
-            build/windows-packages/*.zip
             build/windows/*.txt
             build/windows/*.log
             build/windows/*.xml
 
   test-windows-package:
-    name: Test Windows ZIP
+    name: Test Windows installer
     runs-on: windows-2022
     timeout-minutes: 15
     needs: test-windows
@@ -228,45 +258,40 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: windows
+          name: windows-installer
           path: package
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install test tools and MPI runtime
+      - name: Install test tools and the solver
         shell: pwsh
         run: |
           python -m pip install pytest numpy meshio==5.3.5
           if ($LASTEXITCODE) { throw 'Test dependency installation failed' }
           git lfs pull --include='tests/cases/fluid/pipe_RCR_3d/**,tests/cases/fluid/pipe_RCR_sv0D/**'
           if ($LASTEXITCODE) { throw 'Test data download failed' }
-          $installer = "$env:RUNNER_TEMP/msmpisetup.exe"
-          Invoke-WebRequest https://download.microsoft.com/download/7/2/7/72731ebb-b63c-4170-ade7-836966263a8f/msmpisetup.exe -OutFile $installer
-          if ((Get-FileHash $installer).Hash -ne '47443829114d8d8670f77af98939fe876d33eceb35d0ce4e0e85efeec4d87213') { throw 'MPI installer checksum mismatch' }
-          $result = Start-Process $installer -ArgumentList '-unattend' -Wait -PassThru
-          if ($result.ExitCode -notin 0,3010) { throw "MPI installation failed: $($result.ExitCode)" }
-      - name: Run the extracted package without development tools on PATH
-        shell: pwsh
-        run: |
-          $archives = @(Get-ChildItem package -Recurse -Filter '*.zip')
-          if ($archives.Count -ne 1) { throw 'Expected one solver ZIP' }
-          $destination = "$env:RUNNER_TEMP/solver package with spaces"
-          Expand-Archive $archives[0].FullName $destination
+          $installers = @(Get-ChildItem package -Recurse -Filter '*-setup.exe')
+          if ($installers.Count -ne 1) { throw 'Expected one solver installer' }
+          $destination = "$env:RUNNER_TEMP\solver install with spaces"
+          $result = Start-Process $installers[0].FullName -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', "/DIR=`"$destination`"" -Wait -PassThru
+          if ($result.ExitCode) { throw "Solver installation failed: $($result.ExitCode)" }
           $license = Get-ChildItem $destination -Recurse -Filter LICENSE.txt | Where-Object { $_.Directory.Name -eq 'svMultiPhysics' }
           if (!$license -or (Get-FileHash $license.FullName).Hash -ne (Get-FileHash LICENSE.txt).Hash) { throw 'Missing or incorrect project license' }
-          $env:SVMP_EXECUTABLE = (Get-ChildItem $destination -Recurse -Filter svmultiphysics.exe).FullName
           $library = (Get-ChildItem $destination -Recurse -Filter libsvzero_interface.dll).FullName
           $inputFile = Join-Path $PWD 'tests/cases/fluid/pipe_RCR_sv0D/solver.xml'
           [xml]$inputXml = Get-Content $inputFile
           $inputXml.SelectSingleNode('//Shared_library').InnerText = $library
           $inputXml.Save($inputFile)
-          $python = (Get-Command python).Source
-          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;C:\Program Files\Microsoft MPI\Bin"
-          $env:MPIEXEC_EXECUTABLE = 'C:\Program Files\Microsoft MPI\Bin\mpiexec.exe'
-          $env:OPENBLAS_NUM_THREADS = '1'
-          $env:OMP_NUM_THREADS = '1'
-          Set-Location tests
-          & $python -m pytest -v test_fluid.py::test_pipe_RCR_3d test_fluid.py::test_pipe_RCR_sv0D test_fluid.py::test_pipe_restart_with_spaces test_fluid.py::test_pipe_output_error --junitxml=package-tests.xml
+      - name: Run the installed solver from its command prompt without development tools on PATH
+        shell: cmd
+        run: |
+          set "PATH=%SystemRoot%\System32;%SystemRoot%"
+          call "%RUNNER_TEMP%\solver install with spaces\bin\svmultiphysics-env.cmd"
+          if not "%OPENBLAS_NUM_THREADS%"=="1" exit /b 1
+          set "SVMP_EXECUTABLE=%RUNNER_TEMP%\solver install with spaces\bin\svmultiphysics.exe"
+          set MPIEXEC_EXECUTABLE=mpiexec
+          cd tests
+          "%pythonLocation%\python.exe" -m pytest -v test_fluid.py::test_pipe_RCR_3d test_fluid.py::test_pipe_RCR_sv0D test_fluid.py::test_pipe_restart_with_spaces test_fluid.py::test_pipe_output_error --junitxml=package-tests.xml
       - uses: actions/upload-artifact@v4
         if: always()
         with:
