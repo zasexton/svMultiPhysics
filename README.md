@@ -107,11 +107,10 @@ To rebuild the program after making code changes
 
 ## Windows build
 
-svMultiPhysics builds on 64-bit Windows 10 or 11 with Visual Studio 2022. Use VTK, BLAS, and LAPACK built for the same toolchain, with 32-bit integers for BLAS and LAPACK (OpenBLAS works), install the [Microsoft MPI](https://www.microsoft.com/en-us/download/details.aspx?id=105289) runtime (`msmpisetup.exe`), and set `MSMPI_INC` and `MSMPI_LIB64` to the MS-MPI headers and libraries. The Windows jobs in [.github/workflows/tests.yml](.github/workflows/tests.yml) show the complete setup, including Trilinos and PETSc (configured in Cygwin). From the repository root, in a Bash shell started from a Visual Studio developer prompt:
+svMultiPhysics builds on 64-bit Windows 10 or 11 with Visual Studio 2022. Use VTK, BLAS, and LAPACK built for the same toolchain, with 32-bit integers for BLAS and LAPACK (OpenBLAS works), install the [Microsoft MPI](https://www.microsoft.com/en-us/download/details.aspx?id=105289) runtime (`msmpisetup.exe`), and set `MSMPI_INC` and `MSMPI_LIB64` to the headers and libraries of the MS-MPI SDK or the conda-forge `msmpi` package. The Windows jobs in [.github/workflows/tests.yml](.github/workflows/tests.yml) show the complete setup, including Trilinos and PETSc (configured in Cygwin). From the repository root, in a Bash shell started from a Visual Studio developer prompt:
 
 ```bash
-cmake -S Code -B build/windows -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
-  -DSV_USE_TRILINOS=OFF -DBLA_VENDOR=OpenBLAS -DSV_ENABLE_DISTRIBUTION=ON
+cmake -S Code -B build/windows -G Ninja -DCMAKE_BUILD_TYPE=Release -DBLA_VENDOR=OpenBLAS -DSV_ENABLE_DISTRIBUTION=ON
 cmake --build build/windows --parallel
 cpack --config build/windows/CPackConfig.cmake -G ZIP -B build/windows-packages
 ```

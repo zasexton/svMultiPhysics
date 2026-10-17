@@ -184,12 +184,10 @@ jobs:
         run: |
           cp -r /c/trilinos/licenses build/licenses/trilinos
           cp -r /c/petsc/licenses build/licenses/petsc
-          cmake -S Code -B build/windows -G Ninja \
-            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DMPI_GUESS_LIBRARY_NAME=MSMPI \
+          cmake -S Code -B build/windows -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DMPI_GUESS_LIBRARY_NAME=MSMPI -DENABLE_UNIT_TEST=ON -DSV_ENABLE_DISTRIBUTION=ON \
             -DSV_PACKAGE_RUNTIME_DIRS="$DEPENDENCY_PREFIX/bin" -DSV_PACKAGE_LICENSE_DIRS="$PWD/build/licenses/" \
-            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
             -DSV_USE_TRILINOS=ON -DTrilinos_DIR=C:/trilinos/lib/cmake/Trilinos -DSV_PETSC_DIR=C:/petsc -DBLA_VENDOR=OpenBLAS \
-            -DENABLE_UNIT_TEST=ON -DSV_ENABLE_DISTRIBUTION=ON -DSV_INSTALLER_TYPE=ZIP \
             -DSV_PACKAGE_EXTRA_LIBRARIES="$PWD/svZeroDSolver/build/src/interface/libsvzero_interface.dll" \
             -DSV_PACKAGE_EXTRA_LICENSES="$PWD/svZeroDSolver/LICENSE.txt"
       - name: Build and run unit tests
