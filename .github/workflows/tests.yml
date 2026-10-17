@@ -68,6 +68,10 @@ jobs:
     runs-on: windows-2022
     needs: check-for-changes
     if: ${{ needs.check-for-changes.outputs.run_full_tests == 'true' }}
+    permissions:
+      contents: read
+      id-token: write # Signs the installer's build attestation.
+      attestations: write
     defaults:
       run:
         shell: msys2 {0}
@@ -274,6 +278,10 @@ jobs:
           "$windows_python" -m pip install pytest numpy meshio==5.3.5 pandas
           cd tests
           "$windows_python" -m pytest -v -rf --junitxml=../build/windows/integration.xml 2>&1 | tee ../build/windows/integration.log
+      - uses: actions/attest@v4
+        if: github.event_name == 'push' # Pull requests from forks cannot request the signing token.
+        with:
+          subject-path: build/windows-packages/*.exe
       - uses: actions/upload-artifact@v4
         with:
           name: windows-installer
