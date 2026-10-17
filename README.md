@@ -107,7 +107,7 @@ To rebuild the program after making code changes
 
 ## Windows build
 
-svMultiPhysics builds on 64-bit Windows 10 or 11 with Visual Studio 2022. Use VTK, BLAS, and LAPACK built for the same toolchain, with 32-bit integers for BLAS and LAPACK (OpenBLAS works), install the [Microsoft MPI](https://www.microsoft.com/en-us/download/details.aspx?id=105289) runtime (`msmpisetup.exe`), and set `MSMPI_INC` and `MSMPI_LIB64` to the MS-MPI headers and libraries. The `test-windows` job in [.github/workflows/tests.yml](.github/workflows/tests.yml) shows the complete setup. From the repository root, in a Bash shell started from a Visual Studio developer prompt:
+svMultiPhysics builds on 64-bit Windows 10 or 11 with Visual Studio 2022. Use VTK, BLAS, and LAPACK built for the same toolchain, with 32-bit integers for BLAS and LAPACK (OpenBLAS works), install the [Microsoft MPI](https://www.microsoft.com/en-us/download/details.aspx?id=105289) runtime (`msmpisetup.exe`), and set `MSMPI_INC` and `MSMPI_LIB64` to the MS-MPI headers and libraries. The Windows jobs in [.github/workflows/tests.yml](.github/workflows/tests.yml) show the complete setup, including Trilinos and PETSc (configured in Cygwin). From the repository root, in a Bash shell started from a Visual Studio developer prompt:
 
 ```bash
 cmake -S Code -B build/windows -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
@@ -116,7 +116,7 @@ cmake --build build/windows --parallel
 cpack --config build/windows/CPackConfig.cmake -G ZIP -B build/windows-packages
 ```
 
-The ZIP contains `bin/svmultiphysics.exe`, the DLLs it needs, and their license notices, so it runs once the Microsoft MPI runtime is installed, for example `mpiexec -n 4 'C:\solver\bin\svmultiphysics.exe' solver.xml` with `OPENBLAS_NUM_THREADS=1`. `SV_PACKAGE_RUNTIME_DIRS` and `SV_PACKAGE_LICENSE_DIRS` list the folders with dependency DLLs and license files (by default the compiler's `bin` folder), and `SV_PACKAGE_EXTRA_LIBRARIES` and `SV_PACKAGE_EXTRA_LICENSES` add 0D and 1D interface DLLs built with the same compiler and their licenses. The integration tests use Python 3.12 with meshio 5.3.5 and need `SVMP_EXECUTABLE` and `MPIEXEC_EXECUTABLE` set to the full paths of `svmultiphysics.exe` and `mpiexec.exe`. PETSc, Trilinos, and remeshing have not been validated on Windows.
+The ZIP contains `bin/svmultiphysics.exe`, the DLLs it needs, and their license notices, so it runs once the Microsoft MPI runtime is installed, for example `mpiexec -n 4 'C:\solver\bin\svmultiphysics.exe' solver.xml` with `OPENBLAS_NUM_THREADS=1`. `SV_PACKAGE_RUNTIME_DIRS` and `SV_PACKAGE_LICENSE_DIRS` list the folders with dependency DLLs and license files (by default the compiler's `bin` folder), and `SV_PACKAGE_EXTRA_LIBRARIES` and `SV_PACKAGE_EXTRA_LICENSES` add 0D and 1D interface DLLs built with the same compiler and their licenses. The integration tests use Python 3.12 with meshio 5.3.5 and need `SVMP_EXECUTABLE` and `MPIEXEC_EXECUTABLE` set to the full paths of `svmultiphysics.exe` and `mpiexec.exe`, and `SVMP_EXECUTABLE_PETSC` for the PETSc tests. Remeshing has not been validated on Windows.
 
 <h2 id="building_vtk"> Building Visualization Toolkit (VTK) Libraries </h2>
 
