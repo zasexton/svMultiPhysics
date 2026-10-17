@@ -221,6 +221,15 @@ jobs:
           Source: "$(cygpath -w "$PWD/$stage")\*"; DestDir: "{app}"; Flags: recursesubdirs
           [Registry]
           Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}\bin"; Check: not InPath
+          ; Blocking connections from other computers keeps Windows from asking to open the firewall. Runs on one
+          ; computer still work because the firewall does not filter traffic that stays on the computer.
+          [Run]
+          Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=svMultiPhysics"; Flags: runhidden
+          Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=svMultiPhysics dir=in action=block program=""{app}\bin\svmultiphysics.exe"""; Flags: runhidden
+          Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=svMultiPhysics dir=in action=block program=""{app}\bin\mpiexec.exe"""; Flags: runhidden
+          Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=svMultiPhysics dir=in action=block program=""{app}\bin\smpd.exe"""; Flags: runhidden
+          [UninstallRun]
+          Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=svMultiPhysics"; Flags: runhidden; RunOnceId: "RemoveFirewallRules"
           [Code]
           const EnvironmentKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment';
           function InPath: Boolean;
@@ -313,17 +322,25 @@ jobs:
           $inputXml.Save($inputFile)
           $bin = [Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';' | Where-Object { $_ -eq "$destination\bin" }
           if (!$bin) { throw 'The installer did not add the solver to PATH' }
+          if (@(Get-NetFirewallRule -DisplayName svMultiPhysics).Count -ne 3) { throw 'The installer did not add the firewall rules' }
+          Get-NetFirewallProfile | Format-Table Name, Enabled
           $python = (Get-Command python).Source
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$bin"
           $env:SVMP_EXECUTABLE = "$bin\svmultiphysics.exe"
           $env:MPIEXEC_EXECUTABLE = 'mpiexec'
           Set-Location tests
+          # Show which bundled programs listen for connections during a run on one computer.
+          $run = Start-Process mpiexec -ArgumentList '-n', '4', "`"$bin\svmultiphysics.exe`"", 'solver.xml' -WorkingDirectory cases\fluid\pipe_RCR_3d -NoNewWindow -PassThru
+          Start-Sleep 5
+          Get-NetTCPConnection -State Listen | Select-Object @{n = 'Program'; e = { (Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).Name } }, LocalAddress, LocalPort | Where-Object Program -in svmultiphysics, smpd, mpiexec | Format-Table
+          $run.WaitForExit()
           & $python -m pytest -v test_fluid.py::test_pipe_RCR_3d test_fluid.py::test_pipe_RCR_sv0D test_fluid.py::test_pipe_restart_with_spaces test_fluid.py::test_pipe_output_error --junitxml=package-tests.xml
           if ($LASTEXITCODE) { throw 'Installed solver tests failed' }
           $result = Start-Process "$destination\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES' -Wait -PassThru
           if ($result.ExitCode) { throw "Solver uninstallation failed: $($result.ExitCode)" }
           for ($i = 0; $i -lt 60 -and (Test-Path "$bin\svmultiphysics.exe"); $i++) { Start-Sleep 1 } # The uninstaller finishes from a temporary copy.
           if ((Test-Path "$bin\svmultiphysics.exe") -or ([Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';' -contains $bin)) { throw 'Uninstallation left the solver or its PATH entry' }
+          if (Get-NetFirewallRule -DisplayName svMultiPhysics -ErrorAction SilentlyContinue) { throw 'Uninstallation left the firewall rules' }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
