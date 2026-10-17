@@ -203,16 +203,14 @@ jobs:
           cmake --install build/windows --prefix "$stage" --component CoreExecutables 2>&1 | tee build/windows/install.log
           cp "$DEPENDENCY_PREFIX"/bin/{mpiexec.exe,smpd.exe,msmpi.dll} "$stage/bin" # Users need no separate MS-MPI installation.
           curl -fsSL --create-dirs https://raw.githubusercontent.com/microsoft/Microsoft-MPI/master/LICENSE.txt -o "$stage/share/svMultiPhysics/licenses/msmpi/LICENSE.txt"
-          # The Start menu prompt finds the solver and mpiexec and keeps OpenBLAS from competing with the MPI ranks for cores.
-          printf '@echo off\r\nset "PATH=%%~dp0;%%PATH%%"\r\nset OPENBLAS_NUM_THREADS=1\r\necho Run a case with: mpiexec -n 4 svmultiphysics solver.xml\r\n' > "$stage/bin/svmultiphysics-env.cmd"
           name="$(sed -n 's/^set(CPACK_PACKAGE_FILE_NAME "\(.*\)")$/\1/p' build/windows/CPackConfig.cmake)"
           cat > build/windows/installer.iss <<EOF
           [Setup]
           AppName=svMultiPhysics
           AppVersion=${name##*-}
           DefaultDirName={autopf}\svMultiPhysics
-          DefaultGroupName=svMultiPhysics
           DisableProgramGroupPage=yes
+          ChangesEnvironment=yes
           ArchitecturesAllowed=x64compatible
           ArchitecturesInstallIn64BitMode=x64compatible
           LicenseFile=$(cygpath -w "$PWD/LICENSE.txt")
@@ -221,10 +219,41 @@ jobs:
           WizardStyle=modern
           [Files]
           Source: "$(cygpath -w "$PWD/$stage")\*"; DestDir: "{app}"; Flags: recursesubdirs
-          [Icons]
-          Name: "{group}\svMultiPhysics Command Prompt"; Filename: "{cmd}"; Parameters: "/k ""{app}\bin\svmultiphysics-env.cmd"""; WorkingDir: "{userdocs}"
-          [Run]
-          Filename: "{cmd}"; Parameters: "/k ""{app}\bin\svmultiphysics-env.cmd"""; WorkingDir: "{userdocs}"; Description: "Open the svMultiPhysics Command Prompt"; Flags: postinstall nowait skipifsilent
+          [Registry]
+          Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}\bin"; Check: not InPath
+          [Code]
+          const EnvironmentKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment';
+          function InPath: Boolean;
+          var Paths: String;
+          begin
+            Result := RegQueryStringValue(HKLM, EnvironmentKey, 'Path', Paths) and
+              (Pos(';' + Uppercase(ExpandConstant('{app}\bin')) + ';', ';' + Uppercase(Paths) + ';') > 0);
+          end;
+          // Running setup again offers to uninstall the installed solver.
+          function InitializeSetup: Boolean;
+          var Uninstaller: String; ResultCode: Integer;
+          begin
+            Result := True;
+            if not WizardSilent and RegQueryStringValue(HKLM, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\svMultiPhysics_is1', 'UninstallString', Uninstaller) then
+              case MsgBox('svMultiPhysics is already installed. Click Yes to uninstall it, or No to install this version.', mbConfirmation, MB_YESNOCANCEL) of
+                IDYES: begin Exec(RemoveQuotes(Uninstaller), '', '', SW_SHOW, ewWaitUntilTerminated, ResultCode); Result := False; end;
+                IDCANCEL: Result := False;
+              end;
+          end;
+          // Uninstalling removes only the PATH entry that setup added.
+          procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+          var Dir, Paths: String; P: Integer;
+          begin
+            Dir := ExpandConstant('{app}\bin');
+            if (CurUninstallStep = usPostUninstall) and RegQueryStringValue(HKLM, EnvironmentKey, 'Path', Paths) then begin
+              Paths := ';' + Paths + ';';
+              P := Pos(';' + Uppercase(Dir) + ';', Uppercase(Paths));
+              if P > 0 then begin
+                Paths := Copy(Paths, 1, P) + Copy(Paths, P + Length(Dir) + 2, Length(Paths));
+                RegWriteExpandStringValue(HKLM, EnvironmentKey, 'Path', Copy(Paths, 2, Length(Paths) - 2));
+              end;
+            end;
+          end;
           EOF
           "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" build/windows/installer.iss 2>&1 | tee build/windows/installer.log
       - name: Run numerical tests
@@ -263,7 +292,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install test tools and the solver
+      - name: Install the solver, run it from PATH without development tools, and uninstall it
         shell: pwsh
         run: |
           python -m pip install pytest numpy meshio==5.3.5
@@ -282,16 +311,19 @@ jobs:
           [xml]$inputXml = Get-Content $inputFile
           $inputXml.SelectSingleNode('//Shared_library').InnerText = $library
           $inputXml.Save($inputFile)
-      - name: Run the installed solver from its command prompt without development tools on PATH
-        shell: cmd
-        run: |
-          set "PATH=%SystemRoot%\System32;%SystemRoot%"
-          call "%RUNNER_TEMP%\solver install with spaces\bin\svmultiphysics-env.cmd"
-          if not "%OPENBLAS_NUM_THREADS%"=="1" exit /b 1
-          set "SVMP_EXECUTABLE=%RUNNER_TEMP%\solver install with spaces\bin\svmultiphysics.exe"
-          set MPIEXEC_EXECUTABLE=mpiexec
-          cd tests
-          "%pythonLocation%\python.exe" -m pytest -v test_fluid.py::test_pipe_RCR_3d test_fluid.py::test_pipe_RCR_sv0D test_fluid.py::test_pipe_restart_with_spaces test_fluid.py::test_pipe_output_error --junitxml=package-tests.xml
+          $bin = [Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';' | Where-Object { $_ -eq "$destination\bin" }
+          if (!$bin) { throw 'The installer did not add the solver to PATH' }
+          $python = (Get-Command python).Source
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$bin"
+          $env:SVMP_EXECUTABLE = "$bin\svmultiphysics.exe"
+          $env:MPIEXEC_EXECUTABLE = 'mpiexec'
+          Set-Location tests
+          & $python -m pytest -v test_fluid.py::test_pipe_RCR_3d test_fluid.py::test_pipe_RCR_sv0D test_fluid.py::test_pipe_restart_with_spaces test_fluid.py::test_pipe_output_error --junitxml=package-tests.xml
+          if ($LASTEXITCODE) { throw 'Installed solver tests failed' }
+          $result = Start-Process "$destination\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES' -Wait -PassThru
+          if ($result.ExitCode) { throw "Solver uninstallation failed: $($result.ExitCode)" }
+          for ($i = 0; $i -lt 60 -and (Test-Path "$bin\svmultiphysics.exe"); $i++) { Start-Sleep 1 } # The uninstaller finishes from a temporary copy.
+          if ((Test-Path "$bin\svmultiphysics.exe") -or ([Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';' -contains $bin)) { throw 'Uninstallation left the solver or its PATH entry' }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
