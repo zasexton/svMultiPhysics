@@ -339,9 +339,8 @@ jobs:
           Set-Location tests
           # Show which bundled programs listen for connections during a run on one computer.
           $run = Start-Process mpiexec -ArgumentList '-n', '4', "`"$bin\svmultiphysics.exe`"", 'solver.xml' -WorkingDirectory cases\fluid\pipe_RCR_3d -NoNewWindow -PassThru
-          Start-Sleep 5
-          Get-NetTCPConnection -State Listen | Select-Object @{n = 'Program'; e = { (Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).Name } }, LocalAddress, LocalPort | Where-Object Program -in svmultiphysics, smpd, mpiexec | Format-Table
-          $run.WaitForExit()
+          $listeners = while (!$run.HasExited) { Get-NetTCPConnection -State Listen | Select-Object @{n = 'Program'; e = { (Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).Name } }, LocalAddress | Where-Object Program -in svmultiphysics, smpd, mpiexec }
+          $listeners | Sort-Object Program, LocalAddress -Unique | Format-Table
           & $python -m pytest -v test_fluid.py::test_pipe_RCR_3d test_fluid.py::test_pipe_RCR_sv0D test_fluid.py::test_pipe_restart_with_spaces test_fluid.py::test_pipe_output_error --junitxml=package-tests.xml
           if ($LASTEXITCODE) { throw 'Installed solver tests failed' }
           $result = Start-Process "$destination\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES' -Wait -PassThru
