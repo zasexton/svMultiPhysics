@@ -1,7 +1,9 @@
 #include "LevelSet/LevelSetKinematicReconciliation.h"
 
+#include "Basis/NodeOrderingConventions.h"
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
+#include "Interfaces/LevelSetInterfaceBuilder.h"
 #include "LevelSet/LevelSetVolume.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/SpaceFactory.h"
@@ -234,6 +236,58 @@ FE::Real ellipse(const Point& x)
     return 0.25 * (std::sqrt(dx * dx + dy * dy) - 1.0);
 }
 
+// Cut class of every owned cell as the generated-interface builder sees it:
+// kind, degeneracy and vertex count of each fragment, then side, full-cell
+// flag and pruning (volume fraction below 1e-8) of each volume region.  The
+// builder cuts the cell on its reference element, as the generated-interface
+// lifecycle does.
+std::vector<std::vector<long>> builderCutClasses(const SimplexSystem& s,
+                                                 const std::vector<FE::Real>& phi_values)
+{
+    namespace interfaces = svmp::FE::interfaces;
+    interfaces::CutInterfaceDomainRequest request;
+    request.source = interfaces::LevelSetInterfaceSource::fromEvaluator(
+        "kinematic-reconciliation-test", 1u, 1u);
+    request.interface_marker = 1;
+    request.isovalue = 0.0;
+    request.tolerance = 1.0e-12;
+    request.quadrature_order = 1;
+    const auto type = s.dimension == 2 ? FE::ElementType::Triangle3 : FE::ElementType::Tetra4;
+    const auto corners = static_cast<std::size_t>(s.dimension + 1);
+    const auto* map = s.phiDofs().getEntityDofMap();
+    const auto& mesh = s.system.meshAccess();
+    std::vector<std::vector<long>> classes;
+    std::vector<FE::GlobalIndex> nodes;
+    mesh.forEachOwnedCell([&](FE::GlobalIndex cell) {
+        mesh.getCellNodes(cell, nodes);
+        interfaces::LevelSetCellCutInput input;
+        input.parent_cell = static_cast<decltype(input.parent_cell)>(cell);
+        input.element_type = type;
+        for (std::size_t i = 0; i < corners; ++i) {
+            const auto xi = FE::basis::ReferenceNodeLayout::get_node_coords(type, i);
+            input.node_coordinates.push_back({{xi[0], xi[1], xi[2]}});
+            input.level_set_values.push_back(phi_values[static_cast<std::size_t>(
+                map->getVertexDofs(nodes[i]).front())]);
+        }
+        const auto cut = s.dimension == 2 ? interfaces::cutLinearLevelSetCell2D(request, input)
+                                          : interfaces::cutLinearLevelSetCell3D(request, input);
+        std::vector<long> c;
+        for (const auto& fragment : cut.fragments) {
+            c.push_back(static_cast<long>(fragment.kind));
+            c.push_back(static_cast<long>(fragment.degeneracy));
+            c.push_back(static_cast<long>(fragment.vertices.size()));
+        }
+        c.push_back(-1);
+        for (const auto& region : cut.volume_regions) {
+            c.push_back(static_cast<long>(region.side));
+            c.push_back(region.full_cell_equivalent ? 1 : 0);
+            c.push_back(region.volume_fraction > 0.0 && region.volume_fraction < 1.0e-8 ? 1 : 0);
+        }
+        classes.push_back(std::move(c));
+    });
+    return classes;
+}
+
 } // namespace
 
 TEST(LevelSetKinematicReconciliation, LeavesAConsistentTranslationUnchanged)
@@ -378,14 +432,16 @@ TEST(LevelSetKinematicReconciliation, KeepsTheDegeneracyClassOfEveryCut)
 {
     SimplexSystem s(buildStructuredTriangleMesh(8), 2);
     const FE::Real dt = 1.0;
-    // The transported interface passes 1.8e-6 from the column x = 0.5.  The
-    // correction toward the previous state would cross the column, so its
-    // nodes may move only halfway.  Where a column vertex is the lone positive
-    // corner of a triangle (every other row, by the alternating diagonals),
-    // its cut segment has length 1.8e-6 > sqrt(1e-12); halving would make it
-    // nearly tangent, so those vertices keep their value.  The others move
-    // halfway.
-    const FE::Real gap = 1.8e-6;
+    // The transported interface passes 1.5e-7 (1.2e-6 cell widths) from the
+    // column x = 0.5.  The correction toward the previous state would cross
+    // the column, so its nodes may move only halfway.  Where a column vertex
+    // is the lone positive corner of a triangle (every other row, by the
+    // alternating diagonals), its cut segment has length 1.2e-6 or 1.7e-6 on
+    // the reference triangle, where the generated-interface builder measures
+    // it, so it is regular (> sqrt(1e-12)); halving would make it nearly
+    // tangent, so those vertices keep their value.  The others move halfway.
+    // (The physical length, 1.5e-7, is nearly tangent before and after.)
+    const FE::Real gap = 1.5e-7;
     const auto previous = s.scalar([](const Point& x) { return x[0] - 0.51; });
     const auto transported = s.scalar([&](const Point& x) { return x[0] - 0.5 + gap; });
     const auto zero = s.vector([](const Point&) { return Point{0.0, 0.0, 0.0}; });
@@ -405,6 +461,12 @@ TEST(LevelSetKinematicReconciliation, KeepsTheDegeneracyClassOfEveryCut)
                 EXPECT_NEAR(reconciled[dof], 0.5 * transported[dof], 1.0e-18) << "row " << row;
             }
         }
+    }
+    const auto before = builderCutClasses(s, transported);
+    const auto after = builderCutClasses(s, reconciled);
+    ASSERT_EQ(before.size(), after.size());
+    for (std::size_t c = 0; c < before.size(); ++c) {
+        EXPECT_EQ(before[c], after[c]) << "cell " << c;
     }
 }
 
@@ -451,6 +513,42 @@ TEST(LevelSetKinematicReconciliation, ReconcilesTetrahedralCuts)
         EXPECT_GT(std::abs(result.transported_volume_error), 1.0e-6);
         EXPECT_LT(std::abs(result.reconciled_volume_error),
                   1.0e-3 * std::abs(result.transported_volume_error));
+    }
+}
+
+TEST(LevelSetKinematicReconciliation, KeepsTheBuilderCutClassOfTetrahedra)
+{
+    SimplexSystem s(buildStructuredTetraMesh(6), 3);
+    const FE::Real h = 1.0 / 6.0;
+    // The transported plane passes gap = 1.6e-3 h from the vertex plane
+    // x = 0.5 and the correction moves it to 0.6 gap.  A tetrahedron whose
+    // only positive corner lies on x = 0.5 has a corner fragment of reference
+    // area 0.5 t^2 or 0.87 t^2 (t = gap / h): 1.3e-6 or 2.2e-6, regular,
+    // before, and 4.6e-7 or 8.0e-7, nearly tangent (<= sqrt(1e-12)), after.
+    // Its physical area, about 5e-8, is nearly tangent in both states, so a
+    // guard on physical measures would let the builder's class change.
+    const FE::Real gap = 1.6e-3 * h;
+    const auto previous = s.scalar([&](const Point& x) { return x[0] - 0.5 + 0.6 * gap; });
+    const auto transported = s.scalar([&](const Point& x) { return x[0] - 0.5 + gap; });
+    const auto zero = s.vector([](const Point&) { return Point{0.0, 0.0, 0.0}; });
+    const auto before = builderCutClasses(s, transported);
+    // The unguarded correction (the previous state itself) changes classes.
+    const auto unguarded = builderCutClasses(s, previous);
+    ASSERT_EQ(before.size(), unguarded.size());
+    std::size_t changed = 0u;
+    for (std::size_t c = 0; c < before.size(); ++c) {
+        changed += before[c] != unguarded[c] ? 1u : 0u;
+    }
+    ASSERT_GT(changed, 0u);
+
+    std::vector<FE::Real> reconciled;
+    const auto result = s.reconcile(1.0, previous, transported, zero, zero, reconciled);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_GT(result.degeneracy_frozen_dofs, 0u);
+    const auto after = builderCutClasses(s, reconciled);
+    ASSERT_EQ(before.size(), after.size());
+    for (std::size_t c = 0; c < before.size(); ++c) {
+        EXPECT_EQ(before[c], after[c]) << "cell " << c;
     }
 }
 

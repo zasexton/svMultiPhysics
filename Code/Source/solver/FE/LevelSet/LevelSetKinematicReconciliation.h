@@ -43,8 +43,10 @@ struct LevelSetKinematicReconciliationResult {
     // Nodes left at their transported value because the correction would
     // have changed the class of an adjacent cut: its fragment collapsed
     // (measure at most the tolerance), nearly tangent (at most its square
-    // root) or regular, or a side's volume rule pruned for a volume fraction
-    // below CutIntegrationContext::minGeneratedCutVolumeFraction().
+    // root) or regular, with the measure taken on the cell's reference
+    // element as the generated-interface builder takes it, or a side's
+    // volume rule pruned for a volume fraction below
+    // CutIntegrationContext::minGeneratedCutVolumeFraction().
     std::size_t degeneracy_frozen_dofs{0u};
     // The frozen DOFs themselves (ascending field DOF numbers, identical on
     // every rank).

@@ -1,6 +1,7 @@
 #include "LevelSet/LevelSetKinematicReconciliation.h"
 
 #include "Assembly/CutIntegrationContext.h"
+#include "Basis/NodeOrderingConventions.h"
 #include "Dofs/EntityDofMap.h"
 #include "LevelSet/LevelSetVolume.h"
 
@@ -145,9 +146,12 @@ void sumInPlace(const Collective& context, std::vector<Real>& values)
 }
 
 // One owned affine simplex with its level-set DOFs and nodal velocities.
+// x holds the physical corner coordinates; xi the reference-element corner
+// coordinates, in which the generated-interface builder cuts the cell.
 struct SimplexCell {
     int corners{0};
     std::array<Point, 4> x{};
+    std::array<Point, 4> xi{};
     std::array<std::size_t, 4> dof{};
     std::array<Point, 4> previous_velocity{};
     std::array<Point, 4> transported_velocity{};
@@ -368,7 +372,13 @@ bool accumulateCell(const SimplexCell& cell,
 // fragment is collapsed (measure <= tolerance), nearly tangent
 // (<= sqrt(tolerance)) or regular, and each side's volume rule is pruned when
 // its volume fraction is positive but below the minimum retained fraction.
-// The measure is the segment length in 2D and the polygon area in 3D.
+// The measure is the segment length in 2D and the polygon area in 3D, taken
+// in the reference-element coordinates of the cell: the builder cuts every
+// cell on its reference element (LevelSetInterfaceLifecycle), so its measure
+// thresholds are reference measures.  A physical measure differs from it by
+// the cell Jacobian (about h^2 for a 3D polygon), so it would guard thresholds
+// the builder does not have and miss the ones it has.  The volume fractions
+// are ratios and do not depend on the frame.
 [[nodiscard]] int cutClass(const SimplexCell& cell,
                            std::span<const Real> phi,
                            Real isovalue,
@@ -400,8 +410,8 @@ bool accumulateCell(const SimplexCell& cell,
         const Real t = fraction(a, b);
         Point p{};
         for (std::size_t k = 0; k < 3u; ++k) {
-            p[k] = (Real{1.0} - t) * cell.x[static_cast<std::size_t>(a)][k] +
-                   t * cell.x[static_cast<std::size_t>(b)][k];
+            p[k] = (Real{1.0} - t) * cell.xi[static_cast<std::size_t>(a)][k] +
+                   t * cell.xi[static_cast<std::size_t>(b)][k];
         }
         return p;
     };
@@ -445,9 +455,9 @@ bool accumulateCell(const SimplexCell& cell,
         const auto bp = point(neg[1], pos[0]);
         measure = triangleArea(ap, aq, bq) + triangleArea(ap, bq, bp);
         // The negative region is the prism (a, ap, aq) -> (b, bp, bq).
-        const auto& a = cell.x[static_cast<std::size_t>(neg[0])];
-        const auto& b = cell.x[static_cast<std::size_t>(neg[1])];
-        const Real volume = tetVolume(cell.x[0], cell.x[1], cell.x[2], cell.x[3]);
+        const auto& a = cell.xi[static_cast<std::size_t>(neg[0])];
+        const auto& b = cell.xi[static_cast<std::size_t>(neg[1])];
+        const Real volume = tetVolume(cell.xi[0], cell.xi[1], cell.xi[2], cell.xi[3]);
         const Real negative = tetVolume(a, ap, aq, b) + tetVolume(ap, aq, b, bp) +
                               tetVolume(aq, b, bp, bq);
         negative_fraction = volume > Real{0.0} ? negative / volume : Real{0.0};
@@ -567,6 +577,9 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
                 for (int i = 0; i < corners; ++i) {
                     const auto ii = static_cast<std::size_t>(i);
                     cell.x[ii] = coordinates[ii];
+                    const auto reference =
+                        basis::ReferenceNodeLayout::get_node_coords(expected, ii);
+                    cell.xi[ii] = {{reference[0], reference[1], reference[2]}};
                     const auto phi_dofs = phi_map->getVertexDofs(nodes[ii]);
                     if (phi_dofs.size() != 1u || phi_dofs.front() < 0 ||
                         static_cast<std::size_t>(phi_dofs.front()) >= n) {
