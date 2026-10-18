@@ -611,6 +611,10 @@ TEST(IncompressibleTwoFluidInterface,
   auto context = std::make_shared<FE::assembly::CutIntegrationContext>();
   context->addFreeSurfaceGeometrySnapshot(
       makeTwoFluidDiagnosticSnapshot(*fixture.mesh, 71));
+  FE::assembly::CutFacetSetHandle facet_set;
+  facet_set.marker = 71;
+  facet_set.name = "generated-cut-adjacent-facets";
+  context->addFacetSetHandle(std::move(facet_set));
   fixture.system.setCutIntegrationContext(context);
   fixture.system.setup({});
 
