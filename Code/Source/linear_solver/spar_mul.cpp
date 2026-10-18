@@ -167,7 +167,11 @@ void fsils_spar_mul_vv(FSILS_lhsType& lhs, const Array<int>& rowPtr, const Vecto
     const int dof, const Array<double>& K, const Array<double>& U, Array<double>& KU)
 {
   int nNo = lhs.nNo;
-  KU = 0.0;
+  const bool fully_overwritten = dof >= 1 && dof <= 4 &&
+      KU.nrows() == dof && KU.ncols() == nNo;
+  if (!fully_overwritten) {
+    KU = 0.0;
+  }
 
   switch (dof) {
 
@@ -253,4 +257,3 @@ void fsils_spar_mul_vv(FSILS_lhsType& lhs, const Array<int>& rowPtr, const Vecto
 }
 
 };
-
