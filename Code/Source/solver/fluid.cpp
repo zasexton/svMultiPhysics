@@ -473,6 +473,57 @@ void bw_fluid_3d(ComMod& com_mod, const int eNoNw, const int eNoNq, const double
   }
 }
 
+namespace {
+
+struct Fluid3DKernelContext
+{
+  const dmnType* dmn;
+  double rho;
+  std::array<double,3> body_force;
+  double dt;
+  double time_scale;
+  double acceleration_scale;
+};
+
+Fluid3DKernelContext make_fluid_3d_kernel_context(const ComMod& com_mod,
+    const eqType& eq, dmnType& dmn)
+{
+  const double time_scale = eq.af * eq.gam * com_mod.dt;
+  return Fluid3DKernelContext{
+      &dmn,
+      dmn.prop[consts::PhysicalProperyType::fluid_density],
+      {dmn.prop[consts::PhysicalProperyType::f_x],
+       dmn.prop[consts::PhysicalProperyType::f_y],
+       dmn.prop[consts::PhysicalProperyType::f_z]},
+      com_mod.dt,
+      time_scale,
+      eq.am / time_scale};
+}
+
+} // namespace
+
+static void fluid_3d_c_cached(ComMod& com_mod, const int vmsFlag,
+    const int eNoNw, const int eNoNq, const double w,
+    const Array<double>& Kxi, const Vector<double>& Nw,
+    const Vector<double>& Nq, const Array<double>& Nwx,
+    const Array<double>& Nqx, const Array<double>& Nwxx,
+    const Array<double>& al, const Array<double>& yl,
+    const Array<double>& bfl, Array<double>& lR, Array3<double>& lK,
+    double K_inverse_darcy_permeability, const double urisFactorTotal,
+    const Vector<double>& urisValveVelTermTotal,
+    const Fluid3DKernelContext& context);
+
+static void fluid_3d_m_cached(ComMod& com_mod, const int vmsFlag,
+    const int eNoNw, const int eNoNq, const double w,
+    const Array<double>& Kxi, const Vector<double>& Nw,
+    const Vector<double>& Nq, const Array<double>& Nwx,
+    const Array<double>& Nqx, const Array<double>& Nwxx,
+    const Array<double>& al, const Array<double>& yl,
+    const Array<double>& bfl, Array<double>& lR, Array3<double>& lK,
+    double K_inverse_darcy_permeability, const double urisFactorTotal,
+    const Vector<double>& urisValveVelTermTotal,
+    const Fluid3DKernelContext& context);
+
 /// @brief This is for solving fluid transport equation solving Navier-Stokes
 /// equations. Dirichlet boundary conditions are either treated
 /// strongly or weakly.
@@ -505,7 +556,7 @@ void construct_fluid(ComMod& com_mod, const mshType& lM, const SolutionStates& s
   const int tDof = com_mod.tDof;
   const int dof = com_mod.dof;
   const int cEq = com_mod.cEq;
-  const auto& eq = com_mod.eq[cEq];
+  auto& eq = com_mod.eq[cEq];
   auto& cDmn = com_mod.cDmn;
 
   #ifdef debug_construct_fluid
@@ -547,13 +598,17 @@ void construct_fluid(ComMod& com_mod, const mshType& lM, const SolutionStates& s
     dmsg << "---------- e: " << e+1;
     #endif
     cDmn = all_fun::domain(com_mod, lM, cEq, e);
-    auto cPhys = eq.dmn[cDmn].phys;
+    auto& dmn = eq.dmn[cDmn];
+    auto cPhys = dmn.phys;
 
     if (cPhys != EquationType::phys_fluid) {
       continue;
     }
     
-    double K_inverse_darcy_permeability = eq.dmn[cDmn].prop.at(PhysicalProperyType::inverse_darcy_permeability);
+    double K_inverse_darcy_permeability = dmn.prop.at(PhysicalProperyType::inverse_darcy_permeability);
+    const auto kernel_context = nsd == 3
+        ? make_fluid_3d_kernel_context(com_mod, eq, dmn)
+        : Fluid3DKernelContext{&dmn, 0.0, {}, 0.0, 0.0, 0.0};
 
     //  Update shape functions for NURBS
     if (lM.eType == ElementType::NRB) {
@@ -667,9 +722,9 @@ void construct_fluid(ComMod& com_mod, const mshType& lM, const SolutionStates& s
           urisFactorTotal = urisFactorTotalEl(g);
           urisValveVelTermTotal = urisValveVelTermTotalEl.rcol(g);
         }
-        fluid_3d_m(com_mod, vmsStab, fs[0].eNoN, fs[1].eNoN, w, ksix, N0, N1, 
+        fluid_3d_m_cached(com_mod, vmsStab, fs[0].eNoN, fs[1].eNoN, w, ksix, N0, N1,
             Nwx, Nqx, Nwxx, al, yl, bfl, lR, lK, K_inverse_darcy_permeability, 
-            urisFactorTotal, urisValveVelTermTotal);
+            urisFactorTotal, urisValveVelTermTotal, kernel_context);
 
       } else if (nsd == 2) {
         auto N0 = fs[0].N.rcol(g); 
@@ -733,9 +788,9 @@ void construct_fluid(ComMod& com_mod, const mshType& lM, const SolutionStates& s
           urisFactorTotal = urisFactorTotalEl(g);
           urisValveVelTermTotal = urisValveVelTermTotalEl.rcol(g);
         }
-        fluid_3d_c(com_mod, vmsStab, fs[0].eNoN, fs[1].eNoN, w, ksix, N0, N1, 
+        fluid_3d_c_cached(com_mod, vmsStab, fs[0].eNoN, fs[1].eNoN, w, ksix, N0, N1,
               Nwx, Nqx, Nwxx, al, yl, bfl, lR, lK, K_inverse_darcy_permeability, 
-              urisFactorTotal, urisValveVelTermTotal);
+              urisFactorTotal, urisValveVelTermTotal, kernel_context);
 
       } else if (nsd == 2) {
         auto N0 = fs[0].N.rcol(g); 
@@ -1464,11 +1519,12 @@ void fluid_2d_m(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int e
 
 /// @brief Element continuity residual.
 //
-void fluid_3d_c(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int eNoNq, const double w, 
+static void fluid_3d_c_cached(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int eNoNq, const double w,
     const Array<double>& Kxi, const Vector<double>& Nw, const Vector<double>& Nq, const Array<double>& Nwx, 
     const Array<double>& Nqx, const Array<double>& Nwxx, const Array<double>& al, const Array<double>& yl, 
     const Array<double>& bfl, Array<double>& lR, Array3<double>& lK, double K_inverse_darcy_permeability, 
-    const double urisFactorTotal, const Vector<double>& urisValveVelTermTotal)
+    const double urisFactorTotal, const Vector<double>& urisValveVelTermTotal,
+    const Fluid3DKernelContext& context)
 {
   #define n_debug_fluid3d_c
   #ifdef debug_fluid3d_c
@@ -1485,23 +1541,17 @@ void fluid_3d_c(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int e
 
   using namespace consts;
 
-  int cEq = com_mod.cEq;
-  auto& eq = com_mod.eq[cEq];
-  int cDmn = com_mod.cDmn;
-  auto& dmn = eq.dmn[cDmn];
-  const double dt = com_mod.dt;
+  const auto& dmn = *context.dmn;
+  const double dt = context.dt;
 
   const double ctM  = 1.0;
   const double ctC  = 36.0;
 
-  double rho = dmn.prop[PhysicalProperyType::fluid_density];
-  double f[3];
-  f[0] = dmn.prop[PhysicalProperyType::f_x];
-  f[1] = dmn.prop[PhysicalProperyType::f_y];
-  f[2] = dmn.prop[PhysicalProperyType::f_z];
+  const double rho = context.rho;
+  const auto& f = context.body_force;
 
-  double T1 = eq.af * eq.gam * dt;
-  double amd = eq.am / T1;
+  double T1 = context.time_scale;
+  const double amd = context.acceleration_scale;
   double wl = w*T1;
   double wr = w*rho;
 
@@ -1783,17 +1833,37 @@ void fluid_3d_c(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int e
   }
 }
 
+void fluid_3d_c(ComMod& com_mod, const int vmsFlag, const int eNoNw,
+    const int eNoNq, const double w, const Array<double>& Kxi,
+    const Vector<double>& Nw, const Vector<double>& Nq,
+    const Array<double>& Nwx, const Array<double>& Nqx,
+    const Array<double>& Nwxx, const Array<double>& al,
+    const Array<double>& yl, const Array<double>& bfl, Array<double>& lR,
+    Array3<double>& lK, double K_inverse_darcy_permeability,
+    const double urisFactorTotal,
+    const Vector<double>& urisValveVelTermTotal)
+{
+  auto& eq = com_mod.eq[com_mod.cEq];
+  auto& dmn = eq.dmn[com_mod.cDmn];
+  const auto context = make_fluid_3d_kernel_context(com_mod, eq, dmn);
+  fluid_3d_c_cached(com_mod, vmsFlag, eNoNw, eNoNq, w, Kxi, Nw, Nq,
+      Nwx, Nqx, Nwxx, al, yl, bfl, lR, lK,
+      K_inverse_darcy_permeability, urisFactorTotal,
+      urisValveVelTermTotal, context);
+}
+
 /// @brief Element momentum residual.
 ///
 ///  Modifies:
 ///    lR(dof,eNoN)  - Residual
 ///    lK(dof*dof,eNoN,eNoN) - Stiffness matrix
 //
-void fluid_3d_m(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int eNoNq, const double w,
+static void fluid_3d_m_cached(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int eNoNq, const double w,
     const Array<double>& Kxi, const Vector<double>& Nw, const Vector<double>& Nq, const Array<double>& Nwx,
     const Array<double>& Nqx, const Array<double>& Nwxx, const Array<double>& al, const Array<double>& yl,
     const Array<double>& bfl, Array<double>& lR, Array3<double>& lK, double K_inverse_darcy_permeability, 
-    const double urisFactorTotal, const Vector<double>& urisValveVelTermTotal)
+    const double urisFactorTotal, const Vector<double>& urisValveVelTermTotal,
+    const Fluid3DKernelContext& context)
 {
   #define n_debug_fluid_3d_m
   #ifdef debug_fluid_3d_m
@@ -1811,23 +1881,17 @@ void fluid_3d_m(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int e
 
   using namespace consts;
 
-  int cEq = com_mod.cEq;
-  auto& eq = com_mod.eq[cEq];
-  int cDmn = com_mod.cDmn;
-  auto& dmn = eq.dmn[cDmn];
-  const double dt = com_mod.dt;
+  const auto& dmn = *context.dmn;
+  const double dt = context.dt;
 
   double ctM  = 1.0;
   double ctC  = 36.0;
 
-  double rho = dmn.prop[PhysicalProperyType::fluid_density];
-  std::array<double,3> f;
-  f[0] = dmn.prop[PhysicalProperyType::f_x];
-  f[1] = dmn.prop[PhysicalProperyType::f_y];
-  f[2] = dmn.prop[PhysicalProperyType::f_z];
+  const double rho = context.rho;
+  const auto& f = context.body_force;
 
-  double T1 = eq.af * eq.gam * dt;
-  double amd = eq.am / T1;
+  double T1 = context.time_scale;
+  const double amd = context.acceleration_scale;
   double wl = w*T1;
   double wr = w*rho;
 
@@ -2258,6 +2322,25 @@ void fluid_3d_m(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int e
                         + w*Nw(a)*(urisFactorTotal*u[2] - urisValveVelTermTotal[2]);
   }
 
+}
+
+void fluid_3d_m(ComMod& com_mod, const int vmsFlag, const int eNoNw,
+    const int eNoNq, const double w, const Array<double>& Kxi,
+    const Vector<double>& Nw, const Vector<double>& Nq,
+    const Array<double>& Nwx, const Array<double>& Nqx,
+    const Array<double>& Nwxx, const Array<double>& al,
+    const Array<double>& yl, const Array<double>& bfl, Array<double>& lR,
+    Array3<double>& lK, double K_inverse_darcy_permeability,
+    const double urisFactorTotal,
+    const Vector<double>& urisValveVelTermTotal)
+{
+  auto& eq = com_mod.eq[com_mod.cEq];
+  auto& dmn = eq.dmn[com_mod.cDmn];
+  const auto context = make_fluid_3d_kernel_context(com_mod, eq, dmn);
+  fluid_3d_m_cached(com_mod, vmsFlag, eNoNw, eNoNq, w, Kxi, Nw, Nq,
+      Nwx, Nqx, Nwxx, al, yl, bfl, lR, lK,
+      K_inverse_darcy_permeability, urisFactorTotal,
+      urisValveVelTermTotal, context);
 }
 
 
