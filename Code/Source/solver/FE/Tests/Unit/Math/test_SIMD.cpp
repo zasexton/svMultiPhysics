@@ -7,11 +7,11 @@
 #include "FE/Math/SIMD.h"
 #include "FE/Math/Vector.h"
 #include "FE/Math/Matrix.h"
-#include <immintrin.h>
 #include <array>
 #include <cstdint>
 #include <cmath>
 #include <chrono>
+#include <new>
 #include <vector>
 #include <random>
 
@@ -32,12 +32,12 @@ protected:
     // Helper to generate aligned data
     template<typename T>
     T* allocate_aligned(size_t count) {
-        return static_cast<T*>(_mm_malloc(count * sizeof(T), 32));
+        return static_cast<T*>(::operator new[](count * sizeof(T), std::align_val_t{32}));
     }
 
     template<typename T>
     void free_aligned(T* ptr) {
-        _mm_free(ptr);
+        ::operator delete[](ptr, std::align_val_t{32});
     }
 };
 
