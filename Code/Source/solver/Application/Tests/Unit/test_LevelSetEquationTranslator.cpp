@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "Application/Translators/EquationTranslator.h"
 #include "Application/Translators/LevelSetEquationTranslator.h"
 #include "FE/Backends/Interfaces/BackendFactory.h"
 #include "FE/Dofs/EntityDofMap.h"
@@ -17,6 +18,7 @@
 #include "Mesh/Topology/CellShape.h"
 #include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Core/EquationModuleRegistry.h"
+#include "Parameters.h"
 
 #include <algorithm>
 #include <array>
@@ -27,6 +29,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -217,6 +220,40 @@ std::shared_ptr<svmp::Mesh> makeRegistryTriangleMesh()
   return svmp::create_mesh(std::move(base));
 }
 
+svmp::Physics::EquationModuleInput
+makeMaintenanceCompatibilityInput(const std::shared_ptr<svmp::Mesh>& mesh)
+{
+  svmp::Physics::EquationModuleInput input{};
+  input.equation_type = "level_set";
+  input.mesh_name = "triangle";
+  input.mesh = mesh->local_mesh_ptr();
+  input.equation_params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "phi"};
+  input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{true, "constant"};
+  input.equation_params["Constant_velocity"] =
+      svmp::Physics::ParameterValue{true, "0.0 0.0 0.0"};
+  return input;
+}
+
+template <typename ExpectedException, typename Action>
+std::string maintenanceCompatibilityExceptionMessage(Action&& action)
+{
+  try {
+    std::forward<Action>(action)();
+  } catch (const ExpectedException& error) {
+    return error.what();
+  } catch (const std::exception& error) {
+    ADD_FAILURE() << "Unexpected exception category: " << error.what();
+    return {};
+  } catch (...) {
+    ADD_FAILURE() << "Unexpected non-standard exception category.";
+    return {};
+  }
+  ADD_FAILURE() << "Expected an exception.";
+  return {};
+}
+
 std::shared_ptr<svmp::Mesh> makeRegistryBiquadraticQuadMesh()
 {
   auto base = std::make_shared<svmp::MeshBase>();
@@ -260,6 +297,293 @@ TEST(LevelSetEquationTranslator, RecognizesLegacyEquationTypes)
   EXPECT_TRUE(application::translators::level_set::isEquationType("levelSet"));
   EXPECT_TRUE(application::translators::level_set::isEquationType("level_set_transport"));
   EXPECT_FALSE(application::translators::level_set::isEquationType("fluid"));
+}
+
+TEST(LevelSetEquationTranslator,
+     MaintenanceCompatibilitySnapshotsTypedPrecisionAndDefinedMetadata)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryTriangleMesh();
+  EquationParameters equation;
+  equation.type.set("level_set");
+  Parameter<double> precise_tolerance("Conservative_phase_invariant_tolerance",
+                                      1.2345678901234567, false);
+  precise_tolerance.set_raw_value(1.2345678901234567);
+  Parameter<std::string> undefined_velocity_source("Velocity_source",
+                                                   "constant", false);
+  equation.params_map[precise_tolerance.name()] = &precise_tolerance;
+  equation.params_map[undefined_velocity_source.name()] =
+      &undefined_velocity_source;
+
+  const auto legacy_text = equation.get_parameter_list();
+  const std::map<std::string, std::shared_ptr<svmp::Mesh>> meshes{
+      {"triangle", mesh}};
+  const auto input = application::translators::EquationTranslator::buildInput(
+      equation, meshes);
+
+  ASSERT_EQ(legacy_text.at("Conservative_phase_invariant_tolerance"),
+            "1.23457");
+  ASSERT_EQ(
+      input.equation_params.at("Conservative_phase_invariant_tolerance").value,
+      "1.2345678901234567");
+  EXPECT_TRUE(input.equation_params.at("Conservative_phase_invariant_tolerance")
+                  .defined);
+  EXPECT_EQ(legacy_text.at("Velocity_source"), "constant");
+  EXPECT_FALSE(input.equation_params.at("Velocity_source").defined);
+  EXPECT_EQ(input.equation_params.at("Velocity_source").value, "constant");
+
+  const auto resolved =
+      application::translators::level_set::resolveConfiguration(input);
+  ASSERT_TRUE(resolved);
+  EXPECT_EQ(resolved->options.velocity.source,
+            svmp::FE::level_set::LevelSetVelocitySource::CoupledField);
+#endif
+}
+
+TEST(LevelSetEquationTranslator,
+     MaintenanceCompatibilityInstallationAppliesAllParameterLayersInOrder)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryTriangleMesh();
+  auto input = makeMaintenanceCompatibilityInput(mesh);
+  input.equation_params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "phi_equation"};
+  input.equation_params["Operator_tag"] =
+      svmp::Physics::ParameterValue{true, "equation_transport"};
+  input.equation_params["Reinitialization_cadence_steps"] =
+      svmp::Physics::ParameterValue{true, "2"};
+  input.equation_params["Projected_curvature_field"] =
+      svmp::Physics::ParameterValue{true, "k_equation"};
+  input.default_domain.params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "phi_default"};
+  input.default_domain.params["Transport_form"] =
+      svmp::Physics::ParameterValue{true, "conservative_divergence"};
+  input.default_domain.params["Projected_curvature_field"] =
+      svmp::Physics::ParameterValue{true, "k_default"};
+  svmp::Physics::DomainInput domain{};
+  domain.id = "liquid";
+  domain.params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "phi_domain"};
+  domain.params["Operator_tag"] =
+      svmp::Physics::ParameterValue{true, "domain_transport"};
+  domain.params["Reinitialization_cadence_steps"] =
+      svmp::Physics::ParameterValue{true, "7"};
+  domain.params["Projected_curvature_field"] =
+      svmp::Physics::ParameterValue{true, "k_domain"};
+  input.domains.push_back(std::move(domain));
+
+  const auto resolved =
+      application::translators::level_set::resolveConfiguration(input);
+
+  ASSERT_TRUE(resolved);
+  EXPECT_EQ(resolved->options.level_set.field_name, "phi_domain");
+  EXPECT_EQ(resolved->options.operator_tag, "domain_transport");
+  EXPECT_EQ(resolved->options.transport_form,
+            svmp::FE::level_set::LevelSetTransportForm::ConservativeDivergence);
+  EXPECT_EQ(resolved->options.reinitialization.cadence_steps, 7);
+  EXPECT_EQ(resolved->projected_curvature_fields,
+            (std::vector<std::string>{"k_equation", "k_default", "k_domain"}));
+#endif
+}
+
+TEST(LevelSetEquationTranslator,
+     MaintenanceCompatibilityInstallationRetainsStrictLexicalPolicy)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryTriangleMesh();
+  auto input = makeMaintenanceCompatibilityInput(mesh);
+  input.equation_params["Constant_velocity"] =
+      svmp::Physics::ParameterValue{true, "1.25 -0.5 3.0"};
+  auto resolved =
+      application::translators::level_set::resolveConfiguration(input);
+  ASSERT_TRUE(resolved);
+  EXPECT_EQ(resolved->options.velocity.constant_value,
+            (std::array<svmp::FE::Real, 3>{1.25, -0.5, 3.0}));
+
+  const auto expect_vector_error = [&](std::string value) {
+    auto invalid = makeMaintenanceCompatibilityInput(mesh);
+    invalid.equation_params["Constant_velocity"] =
+        svmp::Physics::ParameterValue{true, std::move(value)};
+    EXPECT_EQ(
+        (maintenanceCompatibilityExceptionMessage<std::runtime_error>([&] {
+          (void)application::translators::level_set::resolveConfiguration(
+              invalid);
+        })),
+        "[svMultiPhysics::Application] Failed to parse three numeric "
+        "components for Constant_velocity.");
+  };
+  expect_vector_error("1.0, 2.0, 3.0");
+  expect_vector_error("1.0 2.0");
+  expect_vector_error("1.0 2.0 3.0 4.0");
+  expect_vector_error("1.0 nan 3.0");
+
+  const auto expect_real_error = [&](std::string value) {
+    auto invalid = makeMaintenanceCompatibilityInput(mesh);
+    invalid.equation_params["Reinitialization_signed_distance_tolerance"] =
+        svmp::Physics::ParameterValue{true, value};
+    EXPECT_EQ(
+        (maintenanceCompatibilityExceptionMessage<std::runtime_error>([&] {
+          (void)application::translators::level_set::resolveConfiguration(
+              invalid);
+        })),
+        "[svMultiPhysics::Application] Failed to parse numeric value '" +
+            value + "' for Reinitialization_signed_distance_tolerance.");
+  };
+  expect_real_error("1.25tail");
+  expect_real_error("nan");
+  expect_real_error("1e9999");
+
+  const auto expect_count_error = [&](std::string value) {
+    auto invalid = makeMaintenanceCompatibilityInput(mesh);
+    invalid.equation_params["Reinitialization_cadence_steps"] =
+        svmp::Physics::ParameterValue{true, value};
+    EXPECT_EQ(
+        (maintenanceCompatibilityExceptionMessage<std::runtime_error>([&] {
+          (void)application::translators::level_set::resolveConfiguration(
+              invalid);
+        })),
+        "[svMultiPhysics::Application] Failed to parse positive integer "
+        "value '" +
+            value + "' for Reinitialization_cadence_steps.");
+  };
+  expect_count_error("-1");
+  expect_count_error("0");
+  expect_count_error("2tail");
+  expect_count_error("999999999999999999999");
+
+  input = makeMaintenanceCompatibilityInput(mesh);
+  input.equation_params["Enable_reinitialization"] =
+      svmp::Physics::ParameterValue{true, "unrecognized"};
+  input.equation_params["Reinitialization_cadence_steps"] =
+      svmp::Physics::ParameterValue{true, "   "};
+  input.equation_params["ReinitializationCadenceSteps"] =
+      svmp::Physics::ParameterValue{true, "8"};
+  resolved = application::translators::level_set::resolveConfiguration(input);
+  ASSERT_TRUE(resolved);
+  EXPECT_FALSE(resolved->options.reinitialization.enabled);
+  EXPECT_EQ(resolved->options.reinitialization.cadence_steps, 8);
+  input.equation_params["Reinitialization_cadence_steps"] =
+      svmp::Physics::ParameterValue{true, "3"};
+  resolved = application::translators::level_set::resolveConfiguration(input);
+  ASSERT_TRUE(resolved);
+  EXPECT_EQ(resolved->options.reinitialization.cadence_steps, 3);
+#endif
+}
+
+TEST(LevelSetEquationTranslator,
+     MaintenanceCompatibilityInstallationAcceptsNavierStokesVelocityToken)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryTriangleMesh();
+  auto input = makeMaintenanceCompatibilityInput(mesh);
+  input.equation_params.erase("Constant_velocity");
+  input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{true, "navier_stokes"};
+
+  const auto resolved =
+      application::translators::level_set::resolveConfiguration(input);
+
+  ASSERT_TRUE(resolved);
+  EXPECT_EQ(resolved->options.velocity.source,
+            svmp::FE::level_set::LevelSetVelocitySource::CoupledField);
+#endif
+}
+
+TEST(LevelSetEquationTranslator,
+     MaintenanceCompatibilityInstallationValidatesPhaseBeforeVelocity)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryTriangleMesh();
+  auto input = makeMaintenanceCompatibilityInput(mesh);
+  input.equation_params.erase("Constant_velocity");
+  input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{true, "invalid_velocity"};
+  input.equation_params["Conservative_phase_liquid_side"] =
+      svmp::Physics::ParameterValue{true, "invalid_phase"};
+
+  EXPECT_EQ(
+      (maintenanceCompatibilityExceptionMessage<std::runtime_error>([&] {
+        (void)application::translators::level_set::resolveConfiguration(input);
+      })),
+      "[svMultiPhysics::Application] Conservative_phase_liquid_side must be "
+      "'negative' or 'positive'.");
+#endif
+}
+
+TEST(LevelSetEquationTranslator,
+     MaintenanceCompatibilityInstallationValidatesReinitializationBeforeBoundary)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryTriangleMesh();
+  auto input = makeMaintenanceCompatibilityInput(mesh);
+  input.equation_params["Reinitialization_method"] =
+      svmp::Physics::ParameterValue{true, "FastMarching"};
+  svmp::Physics::BoundaryConditionInput inflow{};
+  inflow.name = "inlet";
+  inflow.boundary_marker = 3;
+  inflow.params["Type"] = svmp::Physics::ParameterValue{true, "LevelSetInflow"};
+  inflow.params["Value"] = svmp::Physics::ParameterValue{true, "invalid"};
+  input.boundary_conditions.push_back(std::move(inflow));
+
+  EXPECT_EQ((maintenanceCompatibilityExceptionMessage<std::runtime_error>([&] {
+              (void)application::translators::level_set::resolveConfiguration(
+                  input);
+            })),
+            "[svMultiPhysics::Application] "
+            "Reinitialization_method=FastMarching is reserved until runtime "
+            "fast-marching reinitialization is implemented; use 'Projection'.");
+#endif
+}
+
+TEST(LevelSetEquationTranslator,
+     MaintenanceCompatibilityInstallationPromotesWetExtensionAfterValidation)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryTriangleMesh();
+  auto input = makeMaintenanceCompatibilityInput(mesh);
+  input.equation_params.erase("Constant_velocity");
+  input.equation_params["Velocity_field_name"] =
+      svmp::Physics::ParameterValue{true, "extended_velocity"};
+  input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{true, "prescribed_data"};
+  input.equation_params["Advection_velocity_from_field"] =
+      svmp::Physics::ParameterValue{true, "physical_velocity"};
+
+  const auto resolved =
+      application::translators::level_set::resolveConfiguration(input);
+  ASSERT_TRUE(resolved);
+  EXPECT_EQ(resolved->options.velocity.source,
+            svmp::FE::level_set::LevelSetVelocitySource::CoupledField);
+  EXPECT_TRUE(resolved->options.velocity.auto_register_field);
+  EXPECT_EQ(resolved->options.velocity.algebraic_extension_source_field_name,
+            "physical_velocity");
+  EXPECT_NE(resolved->options.velocity.space, nullptr);
+
+  input.equation_params["Constant_velocity"] =
+      svmp::Physics::ParameterValue{true, "1.0 2.0 3.0"};
+  EXPECT_EQ((maintenanceCompatibilityExceptionMessage<std::runtime_error>([&] {
+              (void)application::translators::level_set::resolveConfiguration(
+                  input);
+            })),
+            "[svMultiPhysics::Application] Wet-extension input must declare "
+            "Velocity_source=prescribed_data; the translator promotes that "
+            "state-dependent coefficient to an algebraic coupled unknown so "
+            "its monolithic velocity tangent is retained.");
+#endif
 }
 
 TEST(LevelSetEquationTranslator,
