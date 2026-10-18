@@ -294,8 +294,16 @@ TEST(JITCompilerStokesVMS, Triangle3_CellAssembly_JITMatchesInterpreter_ForAllBl
     const forms::JITOptions jit_opts = [] {
         forms::JITOptions opt;
         opt.enable = true;
-        opt.optimization_level = 2;
+        opt.cache_kernels = false;
+        opt.optimization_level = 3;
         opt.vectorize = true;
+        opt.specialization.enable = true;
+        opt.specialization.specialize_n_qpts = true;
+        opt.specialization.specialize_dofs = true;
+        opt.specialization.max_unroll_trip_count = 64u;
+        opt.specialization.text_budget_bytes = 4u * 1024u * 1024u;
+        opt.specialization.helper_text_budget_bytes = 4u * 1024u * 1024u;
+        opt.basis_baking.enable = false;
         return opt;
     }();
 
@@ -494,7 +502,16 @@ TEST(JITCompilerStokesVMS,
         std::move(jit_ir), NonlinearKernelOutput::Both);
     auto jit_options = makeUnitTestJITOptions();
     jit_options.enable = true;
-    jit_options.optimization_level = 2;
+    jit_options.cache_kernels = false;
+    jit_options.optimization_level = 3;
+    jit_options.specialization.enable = true;
+    jit_options.specialization.specialize_n_qpts = true;
+    jit_options.specialization.specialize_dofs = true;
+    jit_options.specialization.max_unroll_trip_count = 64u;
+    jit_options.specialization.text_budget_bytes = 48u * 1024u;
+    jit_options.specialization.helper_text_budget_bytes = 24u * 1024u;
+    jit_options.specialization.bytes_per_op_estimate = 92u;
+    jit_options.basis_baking.enable = false;
     forms::jit::JITKernelWrapper jit_kernel(jit_fallback, jit_options);
     jit_kernel.resolveInlinableConstitutives();
     jit_kernel.ensureCompiled();
@@ -513,10 +530,20 @@ TEST(JITCompilerStokesVMS,
     rule.frame = geometry::CutGeometryFrame::Reference;
     rule.provenance.parent_entity = 0;
     rule.provenance.marker = marker;
-    rule.points.push_back(geometry::CutQuadraturePoint{
-        .point = {{Real{1.0 / 6.0}, Real{1.0 / 6.0}, Real{0.0}}},
-        .weight = rule.measure,
-    });
+    constexpr std::array<std::array<Real, 3>, 6> cut_points = {{
+        {{Real{0.1}, Real{0.1}, Real{0.0}}},
+        {{Real{0.2}, Real{0.1}, Real{0.0}}},
+        {{Real{0.1}, Real{0.2}, Real{0.0}}},
+        {{Real{0.3}, Real{0.1}, Real{0.0}}},
+        {{Real{0.1}, Real{0.3}, Real{0.0}}},
+        {{Real{0.2}, Real{0.2}, Real{0.0}}},
+    }};
+    for (const auto& point : cut_points) {
+        rule.points.push_back(geometry::CutQuadraturePoint{
+            .point = point,
+            .weight = rule.measure / Real{cut_points.size()},
+        });
+    }
     assembly::CutCellAssemblyMetadata metadata;
     metadata.parent_entity = 0;
     metadata.side = geometry::CutIntegrationSide::Negative;
@@ -605,6 +632,187 @@ TEST(JITCompilerStokesVMS,
         }
         EXPECT_GT(max_interpreter_magnitude, Real{1.0e-10})
             << "selective branch was not exercised by a nonzero operator";
+        expectDenseNear(jit_vector, interpreter_vector, Real{1.0e-12});
+        expectDenseNear(jit_matrix, interpreter_matrix, Real{1.0e-12});
+    };
+
+    compare(Real{0.0}, Real{1.0});
+    compare(Real{1.0}, Real{0.0});
+}
+
+TEST(JITCompilerStokesVMS,
+     Triangle3_CutVolumeContinuitySelectiveWeights_JITMatchInterpreter)
+{
+    requireLLVMJITOrSkip();
+
+    constexpr int dim = 2;
+    constexpr int marker = 91;
+    constexpr Real dt = Real{0.05};
+    const StokesVMSParams params{};
+    SingleTriangleMeshAccess mesh;
+
+    auto base =
+        std::make_shared<spaces::H1Space>(ElementType::Triangle3, /*order=*/1);
+    spaces::ProductSpace velocity_space(base, dim);
+    spaces::H1Space pressure_space(ElementType::Triangle3, /*order=*/1);
+
+    dofs::DofMap velocity_map(
+        /*n_cells=*/1, /*n_dofs_total=*/6, /*dofs_per_cell=*/6);
+    const std::array<GlobalIndex, 6> velocity_dofs = {0, 1, 2, 3, 4, 5};
+    velocity_map.setCellDofs(0, velocity_dofs);
+    velocity_map.setNumDofs(6);
+    velocity_map.setNumLocalDofs(6);
+    velocity_map.finalize();
+    auto pressure_map = createSingleTriangleDofMap();
+
+    const FieldId velocity_id = static_cast<FieldId>(0);
+    const auto velocity =
+        FormExpr::discreteField(velocity_id, velocity_space, "u");
+    const auto pressure = TrialFunction(pressure_space, "p");
+    const auto residual = makeStokesVMSContinuityForm(
+        velocity_space, pressure_space, velocity, pressure, dim, params,
+        marker);
+
+    FormCompiler compiler;
+    auto interpreter_ir = compiler.compileResidual(residual);
+    auto jit_ir = compiler.compileResidual(residual);
+    SymbolicNonlinearFormKernel interpreter_kernel(
+        std::move(interpreter_ir), NonlinearKernelOutput::Both);
+    interpreter_kernel.resolveInlinableConstitutives();
+
+    auto jit_fallback = std::make_shared<SymbolicNonlinearFormKernel>(
+        std::move(jit_ir), NonlinearKernelOutput::Both);
+    auto jit_options = makeUnitTestJITOptions();
+    jit_options.enable = true;
+    jit_options.cache_kernels = false;
+    jit_options.optimization_level = 3;
+    jit_options.specialization.enable = true;
+    jit_options.specialization.specialize_n_qpts = true;
+    jit_options.specialization.specialize_dofs = true;
+    jit_options.specialization.max_unroll_trip_count = 64u;
+    jit_options.specialization.text_budget_bytes = 96u * 1024u;
+    jit_options.specialization.helper_text_budget_bytes = 24u * 1024u;
+    jit_options.specialization.bytes_per_op_estimate = 92u;
+    jit_options.basis_baking.enable = false;
+    forms::jit::JITKernelWrapper jit_kernel(jit_fallback, jit_options);
+    jit_kernel.resolveInlinableConstitutives();
+    jit_kernel.ensureCompiled();
+    ASSERT_TRUE(jit_kernel.isJITReady())
+        << "CutVolume continuity parity must exercise LLVM";
+    ASSERT_TRUE(jit_kernel.hasCompiledTangentDispatch(
+        IntegralDomain::CutVolume, marker))
+        << "CutVolume continuity tangent did not receive a compiled marker dispatch";
+
+    geometry::CutQuadratureRule rule;
+    rule.kind = geometry::CutQuadratureKind::Volume;
+    rule.side = geometry::CutIntegrationSide::Negative;
+    rule.parent_measure = Real{0.5};
+    rule.measure = Real{0.25};
+    rule.volume_fraction = Real{0.5};
+    rule.frame = geometry::CutGeometryFrame::Reference;
+    rule.provenance.parent_entity = 0;
+    rule.provenance.marker = marker;
+    constexpr std::array<std::array<Real, 3>, 6> cut_points = {{
+        {{Real{0.1}, Real{0.1}, Real{0.0}}},
+        {{Real{0.2}, Real{0.1}, Real{0.0}}},
+        {{Real{0.1}, Real{0.2}, Real{0.0}}},
+        {{Real{0.3}, Real{0.1}, Real{0.0}}},
+        {{Real{0.1}, Real{0.3}, Real{0.0}}},
+        {{Real{0.2}, Real{0.2}, Real{0.0}}},
+    }};
+    for (const auto& point : cut_points) {
+        rule.points.push_back(geometry::CutQuadraturePoint{
+            .point = point,
+            .weight = rule.measure / Real{cut_points.size()},
+        });
+    }
+    assembly::CutCellAssemblyMetadata metadata;
+    metadata.parent_entity = 0;
+    metadata.side = geometry::CutIntegrationSide::Negative;
+    metadata.volume_fraction = rule.volume_fraction;
+    assembly::CutIntegrationContext cut_context;
+    cut_context.addGeneratedVolumeRule(marker, metadata, rule);
+
+    assembly::TimeIntegrationContext time_context;
+    time_context.integrator_name = "unit";
+    time_context.dt1 = assembly::TimeDerivativeStencil{
+        .order = 1,
+        .a = {Real{1.0} / dt, -Real{1.0} / dt},
+    };
+
+    const std::vector<Real> pressure_coefficients = {
+        Real{0.2}, Real{-0.1}, Real{0.05}};
+    const std::vector<Real> velocity_coefficients = {
+        Real{0.1}, Real{-0.2}, Real{0.3},
+        Real{-0.1}, Real{0.05}, Real{-0.03}};
+    std::vector<Real> current(9, Real{0.0});
+    std::copy(pressure_coefficients.begin(), pressure_coefficients.end(),
+              current.begin());
+    std::copy(velocity_coefficients.begin(), velocity_coefficients.end(),
+              current.begin() + 3);
+    const std::vector<Real> previous(9, Real{0.0});
+    const std::array<assembly::FieldSolutionAccess, 1> field_access = {{
+        {.field = velocity_id,
+         .space = &velocity_space,
+         .dof_map = &velocity_map,
+         .dof_offset = 3},
+    }};
+
+    assembly::StandardAssembler assembler;
+    assembler.setRowDofMap(pressure_map);
+    assembler.setColDofMap(pressure_map);
+    assembler.setTimeIntegrationContext(&time_context);
+    assembler.setTime(0.0);
+    assembler.setTimeStep(dt);
+    assembler.setCurrentSolution(current);
+    assembler.setPreviousSolution(previous);
+    assembler.setFieldSolutionAccess(field_access);
+
+    const auto assemble = [&](assembly::AssemblyKernel& kernel,
+                              assembly::DenseMatrixView& matrix,
+                              assembly::DenseVectorView& vector) {
+        matrix.zero();
+        vector.zero();
+        const auto result = assembler.assembleCutVolumes(
+            mesh, cut_context, marker, geometry::CutIntegrationSide::Negative,
+            pressure_space, pressure_space, kernel, &matrix, &vector,
+            /*assemble_matrix=*/true, /*assemble_vector=*/true);
+        ASSERT_TRUE(result.success) << result.error_message;
+        ASSERT_EQ(result.elements_assembled, 1);
+    };
+
+    const auto compare = [&](Real time_weight, Real non_time_weight) {
+        SCOPED_TRACE("time_weight=" + std::to_string(time_weight) +
+                     " non_time_weight=" + std::to_string(non_time_weight));
+        time_context.time_derivative_term_weight = time_weight;
+        time_context.non_time_derivative_term_weight = non_time_weight;
+
+        assembly::DenseMatrixView interpreter_matrix(3, 3);
+        assembly::DenseVectorView interpreter_vector(3);
+        assemble(interpreter_kernel, interpreter_matrix, interpreter_vector);
+
+        assembly::DenseMatrixView jit_matrix(3, 3);
+        assembly::DenseVectorView jit_vector(3);
+        assemble(jit_kernel, jit_matrix, jit_vector);
+
+        Real max_interpreter_magnitude = Real{0.0};
+        for (GlobalIndex row = 0; row < 3; ++row) {
+            EXPECT_TRUE(std::isfinite(interpreter_vector.getVectorEntry(row)));
+            EXPECT_TRUE(std::isfinite(jit_vector.getVectorEntry(row)));
+            max_interpreter_magnitude = std::max(
+                max_interpreter_magnitude,
+                std::abs(interpreter_vector.getVectorEntry(row)));
+            for (GlobalIndex column = 0; column < 3; ++column) {
+                EXPECT_TRUE(std::isfinite(
+                    interpreter_matrix.getMatrixEntry(row, column)));
+                EXPECT_TRUE(std::isfinite(jit_matrix.getMatrixEntry(row, column)));
+                max_interpreter_magnitude = std::max(
+                    max_interpreter_magnitude,
+                    std::abs(interpreter_matrix.getMatrixEntry(row, column)));
+            }
+        }
+        EXPECT_GT(max_interpreter_magnitude, Real{1.0e-10})
+            << "continuity branch was not exercised by a nonzero operator";
         expectDenseNear(jit_vector, interpreter_vector, Real{1.0e-12});
         expectDenseNear(jit_matrix, interpreter_matrix, Real{1.0e-12});
     };

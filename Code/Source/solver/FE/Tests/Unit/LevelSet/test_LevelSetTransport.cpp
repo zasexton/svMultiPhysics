@@ -1842,6 +1842,189 @@ TEST(LevelSetTransport,
 }
 
 TEST(LevelSetTransport,
+     DiscontinuityCapturingPrescribedVelocityCompiledGeneralizedAlphaMatchesSeparateResidual)
+{
+    ScopedEnvironmentVariable enable_compiled(
+        "SVMP_FE_ENABLE_MONOLITHIC_COMPILED_DISPATCH", "1");
+    ScopedEnvironmentVariable allow_compiled(
+        "SVMP_FE_DISABLE_MONOLITHIC_COMPILED_DISPATCH", "0");
+    ScopedEnvironmentVariable disable_compare(
+        "SVMP_FE_COMPARE_MONOLITHIC_COMPILED", "0");
+
+    const auto mesh = std::make_shared<SingleTriangleMeshAccess>();
+    auto phi_space = scalarSpace(mesh);
+    auto velocity_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1,
+        mesh,
+        /*order=*/1,
+        /*components=*/2);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi", .space = phi_space, .components = 1});
+    const auto velocity = system.addField(FE::systems::FieldSpec{
+        .name = "advecting_velocity",
+        .space = velocity_space,
+        .components = velocity_space->value_dimension(),
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    level_set::LevelSetTransportOptions options{};
+    options.level_set.field_name = "phi";
+    options.level_set.auto_register_field = false;
+    options.velocity.field_name = "advecting_velocity";
+    options.velocity.source =
+        level_set::LevelSetVelocitySource::PrescribedData;
+    options.supg.enabled = true;
+    options.supg.discontinuity_capturing_enabled = true;
+    options.supg.tau_scale = 0.5;
+    options.supg.transient_scale = 2.0;
+    options.supg.discontinuity_capturing_scale = 0.1;
+    options.supg.gradient_epsilon = 1.0e-12;
+    options.supg.discontinuity_capturing_residual_epsilon = 1.0e-12;
+    options.supg.discontinuity_capturing_max_courant = 0.5;
+
+    FE::systems::FormInstallOptions install_options{};
+    install_options.compiler_options.jit.enable = true;
+    install_options.compiler_options.jit.cache_kernels = false;
+    install_options.compiler_options.jit.optimization_level = 3;
+    install_options.compiler_options.jit.specialization.enable = true;
+    install_options.compiler_options.jit.specialization.specialize_n_qpts = true;
+    install_options.compiler_options.jit.specialization.specialize_dofs = true;
+    install_options.compiler_options.jit.specialization.text_budget_bytes =
+        4u * 1024u * 1024u;
+    install_options.compiler_options.jit.specialization
+        .helper_text_budget_bytes = 1u;
+    install_options.compiler_options.jit.basis_baking.enable = true;
+    install_options.compiler_options.jit.basis_baking.force_dof_specialization =
+        true;
+    const auto kernels = level_set::installLevelSetTransport(
+        system, phi_space, options, install_options);
+    ASSERT_EQ(kernels.residual.size(), 1u);
+    const auto* compiled_kernel =
+        dynamic_cast<const FE::forms::jit::JITKernelWrapper*>(
+            kernels.residual.front().get());
+    ASSERT_NE(compiled_kernel, nullptr);
+    EXPECT_TRUE(compiled_kernel->jitOptions().specialization.enable);
+    EXPECT_TRUE(compiled_kernel->wantsBasisBakingHints());
+    ASSERT_NO_THROW(system.setup({}, makeSingleTriangleSetupInputs()));
+
+    std::vector<FE::Real> prescribed_velocity(6u, 0.0);
+    for (std::size_t node = 0; node < 3u; ++node) {
+        prescribed_velocity[node] = 0.70 - 0.08 * static_cast<FE::Real>(node);
+        prescribed_velocity[3u + node] =
+            -0.25 + 0.06 * static_cast<FE::Real>(node);
+    }
+    system.setPrescribedFieldCoefficients(velocity, prescribed_velocity);
+
+    const auto n = system.dofHandler().getNumDofs();
+    std::vector<FE::Real> solution(static_cast<std::size_t>(n), 0.0);
+    std::vector<FE::Real> previous(solution.size(), 0.0);
+    std::vector<FE::Real> injected_rate(solution.size(), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 3; ++vertex) {
+        const auto index = static_cast<FE::Real>(vertex);
+        setFieldComponentValue(
+            solution, system, phi, vertex, 0, -0.012 + 0.021 * index);
+        setFieldComponentValue(
+            previous, system, phi, vertex, 0, -0.011 + 0.020 * index);
+        setFieldComponentValue(
+            injected_rate,
+            system,
+            phi,
+            vertex,
+            0,
+            -900.0 + 850.0 * index);
+    }
+
+    constexpr double dt = 5.0e-4;
+    constexpr double dt_prev = 5.0e-4;
+    const std::vector<std::span<const FE::Real>> history = {
+        std::span<const FE::Real>(previous),
+        std::span<const FE::Real>(injected_rate),
+    };
+    const std::array<double, 2> dt_history = {dt_prev, dt_prev};
+    FE::systems::SystemStateView state;
+    state.time = dt;
+    state.dt = dt;
+    state.effective_dt = dt;
+    state.dt_prev = dt_prev;
+    state.u = solution;
+    state.u_prev = previous;
+    state.u_prev2 = injected_rate;
+    state.u_history = history;
+    state.dt_history = dt_history;
+
+    const auto ga = FE::timestepping::utils::
+        generalizedAlphaFirstOrderFromRhoInf(0.5);
+    const FE::timestepping::GeneralizedAlphaFirstOrderIntegrator integrator({
+        .alpha_m = ga.alpha_m,
+        .alpha_f = ga.alpha_f,
+        .gamma = ga.gamma,
+        .history_rate_order = 0,
+    });
+    const auto time_context =
+        integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+
+    FE::assembly::DenseMatrixView jacobian(n);
+    FE::assembly::DenseVectorView combined_residual(n);
+    FE::systems::AssemblyRequest combined_request;
+    combined_request.op = "level_set";
+    combined_request.want_matrix = true;
+    combined_request.want_vector = true;
+    const auto combined = system.assemble(
+        combined_request, state, &jacobian, &combined_residual);
+    ASSERT_TRUE(combined.success) << combined.error_message;
+    EXPECT_TRUE(compiled_kernel->isJITReady());
+
+    FE::assembly::DenseVectorView separate_residual(n);
+    FE::systems::AssemblyRequest residual_request;
+    residual_request.op = "level_set";
+    residual_request.want_vector = true;
+    const auto separate = system.assemble(
+        residual_request, state, nullptr, &separate_residual);
+    ASSERT_TRUE(separate.success) << separate.error_message;
+
+    FE::systems::FESystem interpreter_system(mesh);
+    (void)interpreter_system.addField(FE::systems::FieldSpec{
+        .name = "phi", .space = phi_space, .components = 1});
+    const auto interpreter_velocity =
+        interpreter_system.addField(FE::systems::FieldSpec{
+            .name = "advecting_velocity",
+            .space = velocity_space,
+            .components = velocity_space->value_dimension(),
+            .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+        });
+    auto interpreter_install_options = install_options;
+    interpreter_install_options.compiler_options.jit.enable = false;
+    (void)level_set::installLevelSetTransport(
+        interpreter_system,
+        phi_space,
+        options,
+        interpreter_install_options);
+    ASSERT_NO_THROW(
+        interpreter_system.setup({}, makeSingleTriangleSetupInputs()));
+    interpreter_system.setPrescribedFieldCoefficients(
+        interpreter_velocity, prescribed_velocity);
+    ASSERT_EQ(interpreter_system.dofHandler().getNumDofs(), n);
+
+    FE::assembly::DenseVectorView interpreter_residual(n);
+    const auto interpreted = interpreter_system.assemble(
+        residual_request, state, nullptr, &interpreter_residual);
+    ASSERT_TRUE(interpreted.success) << interpreted.error_message;
+
+    for (FE::GlobalIndex row = 0; row < n; ++row) {
+        ASSERT_TRUE(std::isfinite(combined_residual[row]));
+        ASSERT_TRUE(std::isfinite(separate_residual[row]));
+        ASSERT_TRUE(std::isfinite(interpreter_residual[row]));
+        EXPECT_NEAR(combined_residual[row], separate_residual[row], 1.0e-11)
+            << "separate residual row=" << row;
+        EXPECT_NEAR(combined_residual[row], interpreter_residual[row], 1.0e-11)
+            << "interpreter residual row=" << row;
+    }
+}
+
+TEST(LevelSetTransport,
      AlgebraicVelocityExtensionJitRequestUsesCompiledPath)
 {
     const auto mesh = std::make_shared<SingleTetraMeshAccess>();

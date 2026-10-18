@@ -2898,6 +2898,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             (options_.specialization.text_budget_bytes > 0u)
                 ? options_.specialization.text_budget_bytes
                 : hw.textBudgetBytes();
+        const std::uint32_t effective_helper_text_budget =
+            (options_.specialization.helper_text_budget_bytes > 0u)
+                ? options_.specialization.helper_text_budget_bytes
+                : hw.helperTextBudgetBytes();
+        const std::uint32_t effective_helper_noinline_threshold =
+            effective_helper_text_budget / 4u;
         {
             const auto bpo = bytesPerOpCalibration().calibratedBytesPerOp(
                 options_.specialization.bytes_per_op_estimate);
@@ -9747,11 +9753,14 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             return h;
         };
 
-        auto makeDep0XBlockKey = [](int trial_group, std::uint64_t op_hash,
+        auto makeDep0XBlockKey = [](int trial_group,
+                                     int time_derivative_order,
+                                     std::uint64_t op_hash,
                                      const Shape& shape) -> std::uint64_t {
             std::uint64_t h = 0xcbf29ce484222325ULL;
             auto mix = [&h](std::uint64_t v) { h ^= v; h *= 0x100000001b3ULL; };
             mix(static_cast<std::uint64_t>(trial_group));
+            mix(static_cast<std::uint64_t>(time_derivative_order));
             mix(op_hash);
             mix(static_cast<std::uint64_t>(shape.kind));
             mix(static_cast<std::uint64_t>(shape.dims[0]));
@@ -9910,8 +9919,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 // computed by a previous coupled block with the same structural hash.
                 if (dep0_xblock_active && !term.op_hashes.empty()) {
                     const auto op_hash = term.op_hashes[op_idx];
-                    const auto xblock_key =
-                        makeDep0XBlockKey(qp_cache_trial_group, op_hash, term.shapes[op_idx]);
+                    const auto xblock_key = makeDep0XBlockKey(
+                        qp_cache_trial_group, term.time_derivative_order,
+                        op_hash, term.shapes[op_idx]);
                     auto it = dep0_xblock_cache.find(xblock_key);
                     if (it != dep0_xblock_cache.end()) {
                         // In buffer mode, re-derive data pointer for current function.
@@ -12268,8 +12278,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     if (!costs.empty() && op_idx < costs.size() &&
                         costs[op_idx] >= xblock_cost_threshold) {
                         const auto op_hash = term.op_hashes[op_idx];
-                        const auto xblock_key =
-                            makeDep0XBlockKey(qp_cache_trial_group, op_hash, values[op_idx].shape);
+                        const auto xblock_key = makeDep0XBlockKey(
+                            qp_cache_trial_group, term.time_derivative_order,
+                            op_hash, values[op_idx].shape);
                         if (dep0_xblock_cache.find(xblock_key) == dep0_xblock_cache.end()) {
                             const auto n_elems = static_cast<std::uint32_t>(elemCount(values[op_idx].shape));
                             auto* xb_elem_ty = simd_active ? vf64 : f64;
@@ -14639,7 +14650,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             // Each helper is module-private and NoInline, keeping .text
             // within L1i budget.  The main kernel calls helpers sequentially.
             // ============================================================
-            const auto nc_helper_budget = hw.helperTextBudgetBytes();
+            const auto nc_helper_budget = effective_helper_text_budget;
             const auto nc_bpo = bytesPerOpCalibration().calibratedBytesPerOp(
                 options_.specialization.bytes_per_op_estimate);
             const std::size_t nc_qp_factor = (!suppress_qp_unroll && fixed_n_qpts_minus.has_value())
@@ -15188,6 +15199,32 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             default:
                                 break;
                         }
+                    }
+                }
+
+                // Compact helpers normally consume physical derivative tables.
+                // Baked affine derivatives reconstruct those values from the
+                // reference tables and therefore also need the inverse map.
+                if (baked_basis != nullptr && baked_basis->geometry_affine) {
+                    const auto baked_derivative_needs_geometry = [](
+                        const JITBakedBasisSide& side,
+                        bool needs_gradients,
+                        bool needs_hessians) {
+                        return side.enabled &&
+                               ((needs_gradients &&
+                                 !side.ref_gradients_qmajor.empty()) ||
+                                (needs_hessians &&
+                                 !side.ref_hessians_qmajor.empty()));
+                    };
+                    if (baked_derivative_needs_geometry(
+                            baked_basis->test,
+                            req.need_test_phys_grads_xyz,
+                            req.need_test_phys_hessians) ||
+                        baked_derivative_needs_geometry(
+                            baked_basis->trial,
+                            req.need_trial_phys_grads_xyz,
+                            req.need_trial_phys_hessians)) {
+                        req.need_inverse_jacobians = true;
                     }
                 }
 
@@ -15777,7 +15814,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         nc_helper_type, llvm::Function::InternalLinkage, hname, module);
                     hfn->addFnAttr(llvm::Attribute::NoUnwind);
                     hfn->addFnAttr(llvm::Attribute::WillReturn);
-                    if (group.estimated_text_bytes > hw.noInlineThresholdBytes()) {
+                    if (group.estimated_text_bytes >
+                        effective_helper_noinline_threshold) {
                         hfn->addFnAttr(llvm::Attribute::NoInline);
                     }
                     hfn->addParamAttr(0, llvm::Attribute::NoAlias);
@@ -16888,7 +16926,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 // ============================================================
                 // Plan term-group splits for oversized blocks
                 // ============================================================
-                const auto helper_budget = hw.helperTextBudgetBytes();
+                const auto helper_budget = effective_helper_text_budget;
                 const auto bpo = bytesPerOpCalibration().calibratedBytesPerOp();
 
                 // QP unrolling multiplier: when QP loops are unrolled, LLVM
@@ -17029,7 +17067,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 helper_fn_type, llvm::Function::InternalLinkage, hname, module);
                             hfn->addFnAttr(llvm::Attribute::NoUnwind);
                             hfn->addFnAttr(llvm::Attribute::WillReturn);
-                            if (group.estimated_text_bytes > hw.noInlineThresholdBytes()) {
+                            if (group.estimated_text_bytes >
+                                effective_helper_noinline_threshold) {
                                 hfn->addFnAttr(llvm::Attribute::NoInline);
                             }
                             hfn->addParamAttr(3, llvm::Attribute::NoAlias);
