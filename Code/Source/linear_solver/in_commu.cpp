@@ -95,10 +95,15 @@ void fsils_commuv(const FSILS_lhsType& lhs, int dof, Array<double>& R)
   int nmax = std::max_element(lhs.cS.begin(), lhs.cS.end(), 
       [](const FSILS_cSType& a, const FSILS_cSType& b){return a.n < b.n;})->n; 
 
-  Array3<double> sB(dof,nmax,nReq); 
-  Array3<double> rB(dof,nmax,nReq); 
-  std::vector<MPI_Request> rReq(nReq); 
-  std::vector<MPI_Request> sReq(nReq);
+  const auto buffer_size = static_cast<std::size_t>(dof) * nmax * nReq;
+  thread_local std::vector<double> sB;
+  thread_local std::vector<double> rB;
+  thread_local std::vector<MPI_Request> rReq;
+  thread_local std::vector<MPI_Request> sReq;
+  sB.resize(buffer_size);
+  rB.resize(buffer_size);
+  rReq.resize(nReq);
+  sReq.resize(nReq);
 
   int n = 1;
 
@@ -106,7 +111,7 @@ void fsils_commuv(const FSILS_lhsType& lhs, int dof, Array<double>& R)
     for (int j = 0; j < lhs.cS[i].n; j++) { 
       int k = lhs.cS[i].ptr(j);
       for (int l = 0; l < dof; l++) { 
-        sB(l,j,i) = R(l,k);
+        sB[l + dof*(j + nmax*i)] = R(l,k);
       }
     }
   }
@@ -114,8 +119,9 @@ void fsils_commuv(const FSILS_lhsType& lhs, int dof, Array<double>& R)
   int mpi_tag = 1;
 
   for (int i = 0; i < nReq; i++) {
-    auto rec_err = MPI_Irecv(rB.slice_data(i), lhs.cS[i].n*dof, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &rReq[i]);
-    auto send_err = MPI_Isend(sB.slice_data(i), lhs.cS[i].n*dof, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &sReq[i]);
+    const auto offset = static_cast<std::size_t>(i) * nmax * dof;
+    auto rec_err = MPI_Irecv(rB.data() + offset, lhs.cS[i].n*dof, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &rReq[i]);
+    auto send_err = MPI_Isend(sB.data() + offset, lhs.cS[i].n*dof, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &sReq[i]);
   }
 
   // Wait for the MPI receive to complete.
@@ -129,7 +135,7 @@ void fsils_commuv(const FSILS_lhsType& lhs, int dof, Array<double>& R)
     for (int j = 0; j < lhs.cS[i].n; j++) { 
       int k = lhs.cS[i].ptr(j);
       for (int l = 0; l < dof; l++) { 
-        R(l,k) = R(l,k) + rB(l,j,i);
+        R(l,k) = R(l,k) + rB[l + dof*(j + nmax*i)];
       }
     }
   }
@@ -143,5 +149,4 @@ void fsils_commuv(const FSILS_lhsType& lhs, int dof, Array<double>& R)
 }
 
 };
-
 
