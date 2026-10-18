@@ -13,22 +13,119 @@
 #include "uris.h"
 
 #include <array>
+#include <cstdio>
+#include <cstring>
 #include <iomanip>
 #include <math.h>
 
 namespace fluid {
 
+namespace {
+
+struct Fluid3dVmsState
+{
+  double divU;
+  double up[3];
+  double tauM;
+  double updu[3][3][4];
+};
+
+struct FluidStateVerificationCounts
+{
+  unsigned long long eligible_elements = 0;
+  unsigned long long compared_points = 0;
+  unsigned long long compared_values = 0;
+  unsigned long long legacy_tet10_elements = 0;
+  unsigned long long legacy_wdg_elements = 0;
+  unsigned long long legacy_hex_elements = 0;
+  unsigned long long legacy_2d_elements = 0;
+  unsigned long long public_momentum_calls = 0;
+  unsigned long long public_continuity_calls = 0;
+
+  ~FluidStateVerificationCounts()
+  {
+    std::fprintf(stderr,
+        "FLUID_STATE_VERIFY_SUMMARY eligible_elements=%llu compared_points=%llu "
+        "compared_values=%llu legacy_tet10_elements=%llu legacy_wdg_elements=%llu "
+        "legacy_hex_elements=%llu legacy_2d_elements=%llu public_momentum_calls=%llu "
+        "public_continuity_calls=%llu\n",
+        eligible_elements, compared_points, compared_values, legacy_tet10_elements,
+        legacy_wdg_elements, legacy_hex_elements, legacy_2d_elements,
+        public_momentum_calls, public_continuity_calls);
+  }
+};
+
+FluidStateVerificationCounts fluid_state_verification_counts;
+
+static bool same_bits(const double left, const double right)
+{
+  return std::memcmp(&left, &right, sizeof(double)) == 0;
+}
+
+static void poison_state(Fluid3dVmsState& state)
+{
+  std::memset(&state, 0xa5, sizeof(state));
+}
+
+static bool state_was_fully_written(const Fluid3dVmsState& state)
+{
+  double poison;
+  std::memset(&poison, 0xa5, sizeof(poison));
+  if (same_bits(state.divU, poison) || same_bits(state.tauM, poison)) {
+    return false;
+  }
+  for (int i = 0; i < 3; ++i) {
+    if (same_bits(state.up[i], poison)) {
+      return false;
+    }
+    for (int j = 0; j < 3; ++j) {
+      for (int a = 0; a < 4; ++a) {
+        if (same_bits(state.updu[i][j][a], poison)) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
+static bool same_state(const Fluid3dVmsState& left, const Fluid3dVmsState& right)
+{
+  if (!same_bits(left.divU, right.divU) || !same_bits(left.tauM, right.tauM)) {
+    return false;
+  }
+  for (int i = 0; i < 3; ++i) {
+    if (!same_bits(left.up[i], right.up[i])) {
+      return false;
+    }
+    for (int j = 0; j < 3; ++j) {
+      for (int a = 0; a < 4; ++a) {
+        if (!same_bits(left.updu[i][j][a], right.updu[i][j][a])) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
+} // namespace
+
 static void fluid_3d_c_impl(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int eNoNq, const double w,
     const Array<double>& Kxi, const Vector<double>& Nw, const Vector<double>& Nq, const Array<double>& Nwx,
     const Array<double>& Nqx, const Array<double>& Nwxx, const Array<double>& al, const Array<double>& yl,
     const Array<double>& bfl, Array<double>& lR, Array3<double>& lK, double K_inverse_darcy_permeability,
-    const double urisFactorTotal, const double* urisValveVelTermTotal);
+    const double urisFactorTotal, const double* urisValveVelTermTotal, Fluid3dVmsState* state_out);
+
+static void fluid_3d_c_cached_impl(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int eNoNq,
+    const double w, const Vector<double>& Nw, const Vector<double>& Nq, const Array<double>& Nwx,
+    const Array<double>& Nqx, Array<double>& lR, Array3<double>& lK, const Fluid3dVmsState& state);
 
 static void fluid_3d_m_impl(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int eNoNq, const double w,
     const Array<double>& Kxi, const Vector<double>& Nw, const Vector<double>& Nq, const Array<double>& Nwx,
     const Array<double>& Nqx, const Array<double>& Nwxx, const Array<double>& al, const Array<double>& yl,
     const Array<double>& bfl, Array<double>& lR, Array3<double>& lK, double K_inverse_darcy_permeability,
-    const double urisFactorTotal, const double* urisValveVelTermTotal);
+    const double urisFactorTotal, const double* urisValveVelTermTotal, Fluid3dVmsState* state_out);
 
 void b_fluid(ComMod& com_mod, const int eNoN, const double w, const Vector<double>& N, const Vector<double>& y, 
     const double h, const Vector<double>& nV, Array<double>& lR, Array3<double>& lK)
@@ -556,6 +653,14 @@ void construct_fluid(ComMod& com_mod, const mshType& lM, const SolutionStates& s
   std::array<fsType,2> continuity_fs;
   fs::get_thood_fs(com_mod, momentum_fs, lM, vmsStab, 1);
   fs::get_thood_fs(com_mod, continuity_fs, lM, vmsStab, 2);
+
+  const bool reuse_vms_state = nsd == 3 && vmsStab &&
+      lM.eType == ElementType::TET4 && eNoN == 4 &&
+      momentum_fs[0].eNoN == 4 && momentum_fs[1].eNoN == 4 &&
+      continuity_fs[0].eNoN == 4 && continuity_fs[1].eNoN == 4 &&
+      momentum_fs[0].nG == 4 && momentum_fs[1].nG == 4 &&
+      continuity_fs[0].nG == 4 && continuity_fs[1].nG == 4;
+  std::array<Fluid3dVmsState,4> vms_states{};
   
   // Loop over all elements of mesh
   //
@@ -570,6 +675,20 @@ void construct_fluid(ComMod& com_mod, const mshType& lM, const SolutionStates& s
 
     if (cPhys != EquationType::phys_fluid) {
       continue;
+    }
+
+    if (reuse_vms_state) {
+      ++fluid_state_verification_counts.eligible_elements;
+    } else if (nsd == 2) {
+      ++fluid_state_verification_counts.legacy_2d_elements;
+    } else if (lM.eType == ElementType::TET10) {
+      ++fluid_state_verification_counts.legacy_tet10_elements;
+    } else if (lM.eType == ElementType::WDG) {
+      ++fluid_state_verification_counts.legacy_wdg_elements;
+    } else if (lM.eType == ElementType::HEX8 ||
+               lM.eType == ElementType::HEX20 ||
+               lM.eType == ElementType::HEX27) {
+      ++fluid_state_verification_counts.legacy_hex_elements;
     }
     
     double K_inverse_darcy_permeability = eq.dmn[cDmn].prop.at(PhysicalProperyType::inverse_darcy_permeability);
@@ -682,9 +801,16 @@ void construct_fluid(ComMod& com_mod, const mshType& lM, const SolutionStates& s
           urisFactorTotal = urisFactorTotalEl(g);
           urisValveVelTermTotalPtr = urisValveVelTermTotalEl.col_data(g);
         }
+        if (reuse_vms_state) {
+          poison_state(vms_states[g]);
+        }
+        Fluid3dVmsState* state_out = reuse_vms_state ? &vms_states[g] : nullptr;
         fluid_3d_m_impl(com_mod, vmsStab, momentum_fs[0].eNoN, momentum_fs[1].eNoN, w, ksix, N0, N1,
             Nwx, Nqx, Nwxx, al, yl, bfl, lR, lK, K_inverse_darcy_permeability, 
-            urisFactorTotal, urisValveVelTermTotalPtr);
+            urisFactorTotal, urisValveVelTermTotalPtr, state_out);
+        if (reuse_vms_state && !state_was_fully_written(vms_states[g])) {
+          throw std::runtime_error("[construct_fluid] Momentum left a cached state value unwritten.");
+        }
 
       } else if (nsd == 2) {
         auto N0 = momentum_fs[0].N.rcol(g);
@@ -744,9 +870,29 @@ void construct_fluid(ComMod& com_mod, const mshType& lM, const SolutionStates& s
           urisFactorTotal = urisFactorTotalEl(g);
           urisValveVelTermTotalPtr = urisValveVelTermTotalEl.col_data(g);
         }
-        fluid_3d_c_impl(com_mod, vmsStab, continuity_fs[0].eNoN, continuity_fs[1].eNoN, w, ksix, N0, N1,
-              Nwx, Nqx, Nwxx, al, yl, bfl, lR, lK, K_inverse_darcy_permeability, 
-              urisFactorTotal, urisValveVelTermTotalPtr);
+        if (reuse_vms_state) {
+          Array<double> legacy_lR(lR);
+          Array3<double> legacy_lK(lK);
+          Fluid3dVmsState legacy_state{};
+          fluid_3d_c_cached_impl(com_mod, vmsStab, continuity_fs[0].eNoN,
+              continuity_fs[1].eNoN, w, N0, N1, Nwx, Nqx, lR, lK, vms_states[g]);
+          fluid_3d_c_impl(com_mod, vmsStab, continuity_fs[0].eNoN, continuity_fs[1].eNoN, w, ksix, N0, N1,
+                Nwx, Nqx, Nwxx, al, yl, bfl, legacy_lR, legacy_lK, K_inverse_darcy_permeability,
+                urisFactorTotal, urisValveVelTermTotalPtr, &legacy_state);
+          if (!same_state(vms_states[g], legacy_state)) {
+            throw std::runtime_error("[construct_fluid] Cached TET4 state differs from independently recomputed state.");
+          }
+          if (std::memcmp(lR.data(), legacy_lR.data(), lR.size()*sizeof(double)) != 0 ||
+              std::memcmp(lK.data(), legacy_lK.data(), lK.size()*sizeof(double)) != 0) {
+            throw std::runtime_error("[construct_fluid] Cached TET4 state differs from legacy continuity.");
+          }
+          ++fluid_state_verification_counts.compared_points;
+          fluid_state_verification_counts.compared_values += 41;
+        } else {
+          fluid_3d_c_impl(com_mod, vmsStab, continuity_fs[0].eNoN, continuity_fs[1].eNoN, w, ksix, N0, N1,
+                Nwx, Nqx, Nwxx, al, yl, bfl, lR, lK, K_inverse_darcy_permeability,
+                urisFactorTotal, urisValveVelTermTotalPtr, nullptr);
+        }
 
       } else if (nsd == 2) {
         auto N0 = continuity_fs[0].N.rcol(g);
@@ -1481,19 +1627,20 @@ void fluid_3d_c(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int e
     const Array<double>& bfl, Array<double>& lR, Array3<double>& lK, double K_inverse_darcy_permeability, 
     const double urisFactorTotal, const Vector<double>& urisValveVelTermTotal)
 {
+  ++fluid_state_verification_counts.public_continuity_calls;
   #ifdef Vector_check_enabled
   (void)urisValveVelTermTotal[2];
   #endif
   fluid_3d_c_impl(com_mod, vmsFlag, eNoNw, eNoNq, w, Kxi, Nw, Nq, Nwx, Nqx,
       Nwxx, al, yl, bfl, lR, lK, K_inverse_darcy_permeability, urisFactorTotal,
-      urisValveVelTermTotal.data());
+      urisValveVelTermTotal.data(), nullptr);
 }
 
 static void fluid_3d_c_impl(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int eNoNq, const double w,
     const Array<double>& Kxi, const Vector<double>& Nw, const Vector<double>& Nq, const Array<double>& Nwx,
     const Array<double>& Nqx, const Array<double>& Nwxx, const Array<double>& al, const Array<double>& yl,
     const Array<double>& bfl, Array<double>& lR, Array3<double>& lK, double K_inverse_darcy_permeability,
-    const double urisFactorTotal, const double* urisValveVelTermTotal)
+    const double urisFactorTotal, const double* urisValveVelTermTotal, Fluid3dVmsState* state_out)
 {
   #define n_debug_fluid3d_c
   #ifdef debug_fluid3d_c
@@ -1770,6 +1917,79 @@ static void fluid_3d_c_impl(ComMod& com_mod, const int vmsFlag, const int eNoNw,
     std::memset(updu, 0, sizeof updu);
   }
 
+  if (state_out != nullptr) {
+    state_out->divU = divU;
+    state_out->tauM = tauM;
+    for (int i = 0; i < 3; ++i) {
+      state_out->up[i] = up[i];
+      for (int j = 0; j < 3; ++j) {
+        for (int a = 0; a < 4; ++a) {
+          state_out->updu[i][j][a] = updu[i][j][a];
+        }
+      }
+    }
+  }
+
+  //  Local residual
+  //
+  for (int a = 0; a < eNoNq; a++) {
+    double upNx = up[0]*Nqx(0,a) + up[1]*Nqx(1,a) + up[2]*Nqx(2,a);
+    lR(3,a) = lR(3,a) + w*(Nq(a)*divU - upNx);
+  }
+
+  // Tangent (stiffness) matrices
+  //
+  for (int b = 0; b < eNoNw; b++) {
+    T1 = rho*amd*Nw(b);
+
+    for (int a = 0; a < eNoNq; a++) {
+      // dRc_a/dU_b1
+      double T2 = Nqx(0,a)*(updu[0][0][b] - T1) + Nqx(1,a)*updu[0][1][b] + Nqx(2,a)*updu[0][2][b];
+      lK(12,a,b) = lK(12,a,b) + wl*(Nq(a)*Nwx(0,b) - tauM*T2);
+
+      // dRc_a/dU_b2
+      T2 = Nqx(0,a)*updu[1][0][b] + Nqx(1,a)*(updu[1][1][b] - T1) + Nqx(2,a)*updu[1][2][b];
+      lK(13,a,b) = lK(13,a,b) + wl*(Nq(a)*Nwx(1,b) - tauM*T2);
+
+      // dRc_a/dU_b3
+      T2 = Nqx(0,a)*updu[2][0][b] + Nqx(1,a)*updu[2][1][b] + Nqx(2,a)*(updu[2][2][b] - T1);
+      lK(14,a,b) = lK(14,a,b) + wl*(Nq(a)*Nwx(2,b) - tauM*T2);
+    }
+  }
+
+  if (vmsFlag) {
+    for (int b = 0; b < eNoNq; b++) {
+      for (int a = 0; a < eNoNq; a++) {
+        // dC/dP
+        double NxNx = Nqx(0,a)*Nqx(0,b) + Nqx(1,a)*Nqx(1,b) + Nqx(2,a)*Nqx(2,b);
+        lK(15,a,b) = lK(15,a,b) + wl*tauM*NxNx;
+      }
+    }
+  }
+}
+
+static void fluid_3d_c_cached_impl(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int eNoNq,
+    const double w, const Vector<double>& Nw, const Vector<double>& Nq, const Array<double>& Nwx,
+    const Array<double>& Nqx, Array<double>& lR, Array3<double>& lK, const Fluid3dVmsState& state)
+{
+  using namespace consts;
+
+  int cEq = com_mod.cEq;
+  auto& eq = com_mod.eq[cEq];
+  int cDmn = com_mod.cDmn;
+  auto& dmn = eq.dmn[cDmn];
+  const double dt = com_mod.dt;
+
+  double rho = dmn.prop[PhysicalProperyType::fluid_density];
+  double T1 = eq.af * eq.gam * dt;
+  double amd = eq.am / T1;
+  double wl = w*T1;
+
+  const double divU = state.divU;
+  const auto& up = state.up;
+  const double tauM = state.tauM;
+  const auto& updu = state.updu;
+
   //  Local residual
   //
   for (int a = 0; a < eNoNq; a++) {
@@ -1820,19 +2040,20 @@ void fluid_3d_m(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int e
     const Array<double>& bfl, Array<double>& lR, Array3<double>& lK, double K_inverse_darcy_permeability, 
     const double urisFactorTotal, const Vector<double>& urisValveVelTermTotal)
 {
+  ++fluid_state_verification_counts.public_momentum_calls;
   #ifdef Vector_check_enabled
   (void)urisValveVelTermTotal[2];
   #endif
   fluid_3d_m_impl(com_mod, vmsFlag, eNoNw, eNoNq, w, Kxi, Nw, Nq, Nwx, Nqx,
       Nwxx, al, yl, bfl, lR, lK, K_inverse_darcy_permeability, urisFactorTotal,
-      urisValveVelTermTotal.data());
+      urisValveVelTermTotal.data(), nullptr);
 }
 
 static void fluid_3d_m_impl(ComMod& com_mod, const int vmsFlag, const int eNoNw, const int eNoNq, const double w,
     const Array<double>& Kxi, const Vector<double>& Nw, const Vector<double>& Nq, const Array<double>& Nwx,
     const Array<double>& Nqx, const Array<double>& Nwxx, const Array<double>& al, const Array<double>& yl,
     const Array<double>& bfl, Array<double>& lR, Array3<double>& lK, double K_inverse_darcy_permeability,
-    const double urisFactorTotal, const double* urisValveVelTermTotal)
+    const double urisFactorTotal, const double* urisValveVelTermTotal, Fluid3dVmsState* state_out)
 {
   #define n_debug_fluid_3d_m
   #ifdef debug_fluid_3d_m
@@ -2202,6 +2423,19 @@ static void fluid_3d_m_impl(ComMod& com_mod, const int vmsFlag, const int eNoNw,
     updu[0][2][a] = mu_x[0]*Nwx(2,a) + d2u2[0]*mu_g*esNx[2][a];
     updu[1][2][a] = mu_x[1]*Nwx(2,a) + d2u2[1]*mu_g*esNx[2][a];
     updu[2][2][a] = mu_x[2]*Nwx(2,a) + d2u2[2]*mu_g*esNx[2][a] + T1;
+  }
+
+  if (state_out != nullptr) {
+    state_out->divU = divU;
+    state_out->tauM = tauM;
+    for (int i = 0; i < 3; i++) {
+      state_out->up[i] = up[i];
+      for (int j = 0; j < 3; j++) {
+        for (int a = 0; a < 4; a++) {
+          state_out->updu[i][j][a] = updu[i][j][a];
+        }
+      }
+    }
   }
 
   // Tangent (stiffness) matrices
