@@ -52,6 +52,7 @@
 #include <stdexcept>
 #include <cmath>
 #include <limits>
+#include <numeric>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -11883,22 +11884,50 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
             context_.markEmbeddedBoundaryFace(cell_id, LocalIndex{0}, active_marker);
 
             BackgroundEntityMeasures parent_measures;
-            if (hasFlag(required_data, RequiredData::EntityMeasures) &&
-                rule.provenance.parent_boundary_entity >= 0) {
-                const auto& measure_test_element =
-                    getElement(test_space, cell_id, cell_type);
-                const auto& measure_trial_element =
-                    getElement(trial_space, cell_id, cell_type);
-                parent_measures = computeBackgroundEntityMeasures(
-                    mesh,
-                    cell_id,
-                    static_cast<GlobalIndex>(
-                        rule.provenance.parent_boundary_entity),
-                    measure_test_element.polynomial_order(),
-                    measure_trial_element.polynomial_order());
-                context_.setEntityMeasures(parent_measures.cell_diameter,
-                                           parent_measures.physical_cell_measure,
-                                           parent_measures.physical_parent_face_measure);
+            if (hasFlag(required_data, RequiredData::EntityMeasures)) {
+                if (rule.provenance.parent_boundary_entity >= 0) {
+                    const auto& measure_test_element =
+                        getElement(test_space, cell_id, cell_type);
+                    const auto& measure_trial_element =
+                        getElement(trial_space, cell_id, cell_type);
+                    parent_measures = computeBackgroundEntityMeasures(
+                        mesh,
+                        cell_id,
+                        static_cast<GlobalIndex>(
+                            rule.provenance.parent_boundary_entity),
+                        measure_test_element.polynomial_order(),
+                        measure_trial_element.polynomial_order());
+                } else {
+                    parent_measures.cell_diameter = context_.cellDiameter();
+                    parent_measures.physical_cell_measure =
+                        context_.associatedCellVolume();
+                    parent_measures.physical_parent_face_measure =
+                        std::accumulate(
+                            context_.integrationWeights().begin(),
+                            context_.integrationWeights().end(),
+                            Real{0.0});
+                    FE_THROW_IF(
+                        !std::isfinite(parent_measures.cell_diameter) ||
+                            !(parent_measures.cell_diameter > Real{0.0}) ||
+                            !std::isfinite(
+                                parent_measures.physical_cell_measure) ||
+                            !(parent_measures.physical_cell_measure >
+                              Real{0.0}) ||
+                            !std::isfinite(
+                                parent_measures
+                                    .physical_parent_face_measure) ||
+                            !(parent_measures
+                                  .physical_parent_face_measure >
+                              Real{0.0}),
+                        FEException,
+                        "StandardAssembler::assembleCutInterfaces: "
+                        "generated internal interface has invalid parent-cell "
+                        "or interface measure");
+                }
+                context_.setEntityMeasures(
+                    parent_measures.cell_diameter,
+                    parent_measures.physical_cell_measure,
+                    parent_measures.physical_parent_face_measure);
             }
 
             if (use_two_sided_kernel) {

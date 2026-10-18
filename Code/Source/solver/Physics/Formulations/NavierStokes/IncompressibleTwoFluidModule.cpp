@@ -346,6 +346,13 @@ void addSharedGaugeEvidence(FE::systems::FESystem& system,
         << ",\"geometry_tangent_policy\":"
         << jsonString(options.geometry_tangent_policy)
         << ",\"surface_tension\":" << jsonReal(options.surface_tension)
+        << ",\"prescribed_pressure_jump_applicable\":"
+        << jsonBool(options.prescribed_pressure_jump.has_value());
+    if (options.prescribed_pressure_jump.has_value()) {
+        out << ",\"prescribed_pressure_jump\":"
+            << jsonReal(*options.prescribed_pressure_jump);
+    }
+    out
         << ",\"nitsche_gamma\":"
         << jsonReal(options.interface_nitsche_gamma)
         << ",\"transient_penalty\":"
@@ -443,9 +450,11 @@ void IncompressibleTwoFluidModule::registerOn(
     }
     if (!std::isfinite(options_.level_set_isovalue) ||
         !std::isfinite(options_.surface_tension) ||
-        options_.surface_tension < FE::Real{0.0}) {
+        options_.surface_tension < FE::Real{0.0} ||
+        (options_.prescribed_pressure_jump.has_value() &&
+         !std::isfinite(*options_.prescribed_pressure_jump))) {
         throw std::invalid_argument(
-            "IncompressibleTwoFluidModule: level-set isovalue and nonnegative surface tension must be finite");
+            "IncompressibleTwoFluidModule: level-set isovalue, nonnegative surface tension, and optional pressure-jump target must be finite");
     }
     if (!options_.enable_vms) {
         throw std::invalid_argument(
@@ -643,6 +652,35 @@ void IncompressibleTwoFluidModule::registerOn(
         std::make_unique<FE::constraints::CoupledFieldGaugeConstraint>(
             p_negative, p_positive));
     addSharedGaugeEvidence(system, p_negative, p_positive);
+
+    system.declareTwoFluidAcceptedStageDiagnostics(
+        FE::systems::TwoFluidAcceptedStageDiagnosticDeclaration{
+            .interface_marker = interface_marker,
+            .level_set_field = level_set,
+            .negative_velocity_field = u_negative,
+            .negative_pressure_field = p_negative,
+            .positive_velocity_field = u_positive,
+            .positive_pressure_field = p_positive,
+            .operator_tag = options_.operator_tag,
+            .geometry_domain_id = options_.generated_interface_domain_id,
+            .level_set_isovalue = options_.level_set_isovalue,
+            .parameters =
+                FE::interfaces::IncompressibleTwoFluidDiagnosticParameters{
+                    .dimension = dimension,
+                    .interface_marker = interface_marker,
+                    .negative_density = options_.negative_phase.density,
+                    .positive_density = options_.positive_phase.density,
+                    .negative_viscosity = options_.negative_phase.viscosity,
+                    .positive_viscosity = options_.positive_phase.viscosity,
+                    .nitsche_gamma = options_.interface_nitsche_gamma,
+                    .surface_tension = options_.surface_tension,
+                    .include_transient_penalty =
+                        options_.include_transient_interface_penalty,
+                    .prescribed_pressure_jump =
+                        options_.prescribed_pressure_jump,
+                },
+            .owner_component = "incompressible_two_fluid",
+        });
 
     effective_configuration_artifact_ = makeArtifact(
         options_, dimension, interface_marker, interface_weights);
