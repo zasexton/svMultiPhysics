@@ -441,6 +441,8 @@ const char* level_set_velocity_source_name(
     case ls::LevelSetVelocitySource::CoupledField: return "CoupledField";
     case ls::LevelSetVelocitySource::PrescribedData: return "PrescribedData";
     case ls::LevelSetVelocitySource::ConstantVector: return "ConstantVector";
+    case ls::LevelSetVelocitySource::MaterialInterfacePhasePair:
+      return "MaterialInterfacePhasePair";
   }
   return "Unknown";
 }
@@ -485,11 +487,14 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
 
   std::ostringstream out;
   out.imbue(std::locale::classic());
-  out << "{\"artifact_schema_version\":2"
+  out << "{\"artifact_schema_version\":3"
       << ",\"component\":\"level_set_transport\""
       << ",\"capability_label\":"
       << json_string(
-             options.conservative_phase.enabled
+             options.velocity.source ==
+                     ls::LevelSetVelocitySource::MaterialInterfacePhasePair
+                 ? "two_phase_material_interface_transport"
+             : options.conservative_phase.enabled
                  ? "one_phase_locally_conservative_p1_indicator_transport"
                  : "one_phase_interface_transport_nonlocal_conservation")
       << ",\"units\":{\"system\":\"consistent_solver_units\",\"length\":\"solver_length\",\"time\":\"solver_time\",\"volume\":\"solver_volume\"}"
@@ -530,6 +535,9 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
       << ",\"require_constant_preservation\":"
       << json_bool(
              options.conservative_phase.require_constant_preservation)
+      << ",\"momentum_relative_tolerance\":"
+      << json_real(options.conservative_phase.momentum_relative_tolerance)
+      << ",\"momentum_reconciliation_policy\":\"phasewise_fail_closed_no_hidden_velocity_update\""
       << ",\"write_flux_artifacts\":"
       << json_bool(options.conservative_phase.write_flux_artifacts)
       << ",\"flux_artifact_cadence_steps\":"
@@ -564,6 +572,8 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
       << json_string(options.velocity.field_name)
       << ",\"source\":"
       << json_string(level_set_velocity_source_name(options.velocity.source))
+      << ",\"material_interface_marker\":"
+      << options.velocity.material_interface_marker
       << ",\"auto_register\":"
       << json_bool(options.velocity.auto_register_field)
       << ",\"constant_value\":["
@@ -1178,8 +1188,11 @@ ls::LevelSetVelocitySource parse_velocity_source(std::string_view raw)
   if (value == "constant" || value == "constantvector") {
     return ls::LevelSetVelocitySource::ConstantVector;
   }
+  if (value == "materialinterfacephasepair") {
+    return ls::LevelSetVelocitySource::MaterialInterfacePhasePair;
+  }
   throw std::runtime_error(
-      "[svMultiPhysics::Application] Velocity_source must be one of 'coupled_field', 'prescribed_data', or 'constant'.");
+      "[svMultiPhysics::Application] Velocity_source must be one of 'coupled_field', 'prescribed_data', 'constant', or 'material_interface_phase_pair'.");
 }
 
 ls::LevelSetTransportForm parse_transport_form(std::string_view raw)
@@ -1326,6 +1339,13 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
            "ConservativePhaseRequireConstantPreservation"})) {
     options.conservative_phase.require_constant_preservation = *value;
   }
+  if (const auto value = get_defined_real(
+          params,
+          {"Conservative_phase_momentum_relative_tolerance",
+           "ConservativePhaseMomentumRelativeTolerance"},
+          "Conservative_phase_momentum_relative_tolerance")) {
+    options.conservative_phase.momentum_relative_tolerance = *value;
+  }
   if (const auto value = get_defined_bool(
           params,
           {"Conservative_phase_write_flux_artifacts",
@@ -1401,7 +1421,16 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
       options.velocity.auto_register_field = true;
     } else if (options.velocity.source == ls::LevelSetVelocitySource::ConstantVector) {
       options.velocity.auto_register_field = false;
+    } else if (options.velocity.source ==
+               ls::LevelSetVelocitySource::MaterialInterfacePhasePair) {
+      options.velocity.auto_register_field = false;
     }
+  }
+  if (const auto value = get_defined_int(
+          params,
+          {"Material_interface_marker", "MaterialInterfaceMarker"},
+          "Material_interface_marker")) {
+    options.velocity.material_interface_marker = *value;
   }
   if (const auto value = get_defined_bool(
           params,
@@ -1830,9 +1859,16 @@ void apply_level_set_bcs(const svmp::Physics::EquationModuleInput& input,
   }
 }
 
-std::unique_ptr<svmp::Physics::PhysicsModule>
-create_level_set_transport_from_input(const svmp::Physics::EquationModuleInput& input,
-                                      svmp::FE::systems::FESystem& system)
+struct TranslatedLevelSetTransportInput {
+  std::shared_ptr<const svmp::FE::spaces::FunctionSpace> level_set_space{};
+  ls::LevelSetTransportOptions options{};
+  svmp::FE::systems::FormInstallOptions install_options{};
+  std::vector<std::string> projected_curvature_fields{};
+};
+
+TranslatedLevelSetTransportInput
+translate_level_set_transport_input(
+    const svmp::Physics::EquationModuleInput& input)
 {
   if (!input.mesh) {
     throw std::runtime_error("[svMultiPhysics::Application] Level-set transport module factory received null mesh.");
@@ -1868,6 +1904,52 @@ create_level_set_transport_from_input(const svmp::Physics::EquationModuleInput& 
     apply_level_set_params(input.domains.front().params, options);
   }
   apply_level_set_bcs(input, options);
+
+  const bool material_interface_velocity =
+      options.velocity.source ==
+      ls::LevelSetVelocitySource::MaterialInterfacePhasePair;
+  if (material_interface_velocity) {
+    if (options.velocity.material_interface_marker < 0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Material_interface_marker is required for material-interface phase-pair velocity.");
+    }
+    const auto reject_explicitly_disabled_kinematic = [](const auto& params) {
+      const auto enabled = get_defined_bool(
+          params,
+          {"Enable_interface_kinematic", "EnableInterfaceKinematic",
+           "Enable_free_surface_kinematic_interface",
+           "EnableFreeSurfaceKinematicInterface"});
+      if (enabled.has_value() && !*enabled) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Material-interface phase-pair velocity requires interface kinematic enforcement.");
+      }
+    };
+    reject_explicitly_disabled_kinematic(input.equation_params);
+    reject_explicitly_disabled_kinematic(input.default_domain.params);
+    for (const auto& domain : input.domains) {
+      reject_explicitly_disabled_kinematic(domain.params);
+    }
+    if (options.interface_kinematic.interface_marker >= 0 &&
+        options.interface_kinematic.interface_marker !=
+            options.velocity.material_interface_marker) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Material-interface velocity and kinematic markers must match.");
+    }
+    options.interface_kinematic.enabled = true;
+    options.interface_kinematic.interface_marker =
+        options.velocity.material_interface_marker;
+    if (!options.conservative_phase.enabled ||
+        !options.conservative_phase.reconcile_geometry ||
+        options.transport_form != ls::LevelSetTransportForm::Advective ||
+        options.bound_preserving.enabled ||
+        options.velocity.auto_register_field ||
+        !options.velocity.algebraic_extension_source_field_name.empty() ||
+        !options.boundaries.inflow.empty() ||
+        !options.boundaries.outflow.empty()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Material-interface phase-pair velocity requires advective-form conservative phase transport with geometry reconciliation, interface kinematic enforcement, no legacy bound projection, no separate velocity registration or extension, and a closed physical boundary.");
+    }
+  }
 
   if (options.conservative_phase.enabled &&
       options.conservative_phase
@@ -1923,31 +2005,128 @@ create_level_set_transport_from_input(const svmp::Physics::EquationModuleInput& 
     options.velocity.auto_register_field = true;
   }
 
-  options.velocity.space = velocity_space;
+  if (!material_interface_velocity) {
+    options.velocity.space = velocity_space;
+  }
   const auto projected_curvature_fields =
       projected_curvature_fields_from_input(input);
+  return TranslatedLevelSetTransportInput{
+      .level_set_space = std::move(level_set_space),
+      .options = std::move(options),
+      .install_options = install_options,
+      .projected_curvature_fields = projected_curvature_fields,
+  };
+}
+
+std::unique_ptr<svmp::Physics::PhysicsModule>
+create_level_set_transport_from_input(
+    const svmp::Physics::EquationModuleInput& input,
+    svmp::FE::systems::FESystem& system)
+{
+  auto translated = translate_level_set_transport_input(input);
   preflight_projected_curvature_fields(
       system,
-      projected_curvature_fields,
-      level_set_space,
-      options.level_set.field_name,
-      options.velocity.source == ls::LevelSetVelocitySource::ConstantVector
+      translated.projected_curvature_fields,
+      translated.level_set_space,
+      translated.options.level_set.field_name,
+      translated.options.velocity.source ==
+                  ls::LevelSetVelocitySource::ConstantVector ||
+              translated.options.velocity.source ==
+                  ls::LevelSetVelocitySource::MaterialInterfacePhasePair
           ? std::string_view{}
-          : std::string_view{options.velocity.field_name},
-      options.conservative_phase.enabled
+          : std::string_view{translated.options.velocity.field_name},
+      translated.options.conservative_phase.enabled
           ? std::string_view{
-                options.conservative_phase.liquid_indicator.field_name}
+                translated.options.conservative_phase.liquid_indicator
+                    .field_name}
           : std::string_view{});
-  const auto projected_curvature_space = level_set_space;
+  const auto projected_curvature_space = translated.level_set_space;
 
   auto module = std::make_unique<LevelSetTransportInputAdapter>(
-      std::move(level_set_space),
-      std::move(options),
-      install_options);
+      std::move(translated.level_set_space),
+      std::move(translated.options),
+      translated.install_options);
   module->registerOn(system);
   register_projected_curvature_fields(
-      system, projected_curvature_fields, projected_curvature_space);
+      system,
+      translated.projected_curvature_fields,
+      projected_curvature_space);
   return module;
+}
+
+[[nodiscard]] svmp::FE::systems::FieldSourceKind
+translatedFieldSource(ls::LevelSetFieldSource source) noexcept
+{
+  return source == ls::LevelSetFieldSource::Unknown
+             ? svmp::FE::systems::FieldSourceKind::Unknown
+             : svmp::FE::systems::FieldSourceKind::PrescribedData;
+}
+
+[[nodiscard]] bool compatibleScalarTransportSpace(
+    const svmp::FE::spaces::FunctionSpace& lhs,
+    const svmp::FE::spaces::FunctionSpace& rhs) noexcept
+{
+  return lhs.space_type() == rhs.space_type() &&
+         lhs.field_type() == rhs.field_type() &&
+         lhs.value_dimension() == rhs.value_dimension() &&
+         lhs.topological_dimension() == rhs.topological_dimension() &&
+         lhs.polynomial_order() == rhs.polynomial_order() &&
+         lhs.element_type() == rhs.element_type();
+}
+
+void preflightScalarTransportField(
+    const svmp::FE::systems::FESystem& system,
+    const ls::LevelSetFieldOptions& requested,
+    const std::shared_ptr<const svmp::FE::spaces::FunctionSpace>& space,
+    std::string_view role)
+{
+  if (requested.field_name.empty() || !space ||
+      space->value_dimension() != 1) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Application] material-interface " +
+        std::string(role) + " field requires a named scalar space");
+  }
+  if (requested.source != ls::LevelSetFieldSource::Unknown) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Application] material-interface " +
+        std::string(role) + " field must be an unknown");
+  }
+  const auto existing = system.findFieldByName(requested.field_name);
+  if (existing == svmp::FE::INVALID_FIELD_ID) {
+    if (!requested.auto_register_field) {
+      throw std::invalid_argument(
+          "[svMultiPhysics::Application] material-interface " +
+          std::string(role) + " field '" + requested.field_name +
+          "' is missing and auto-registration is disabled");
+    }
+    return;
+  }
+  const auto& record = system.fieldRecord(existing);
+  if (record.source_kind != translatedFieldSource(requested.source) ||
+      record.components != 1 || !record.space ||
+      !compatibleScalarTransportSpace(*record.space, *space)) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Application] material-interface " +
+        std::string(role) + " field '" + requested.field_name +
+        "' is incompatible with the requested scalar unknown");
+  }
+}
+
+[[nodiscard]] svmp::FE::FieldId ensureScalarTransportField(
+    svmp::FE::systems::FESystem& system,
+    const ls::LevelSetFieldOptions& requested,
+    const std::shared_ptr<const svmp::FE::spaces::FunctionSpace>& space)
+{
+  const auto existing = system.findFieldByName(requested.field_name);
+  if (existing != svmp::FE::INVALID_FIELD_ID) {
+    return existing;
+  }
+  return system.addField(svmp::FE::systems::FieldSpec{
+      .name = requested.field_name,
+      .space = space,
+      .components = 1,
+      .source_kind = translatedFieldSource(requested.source),
+  });
 }
 
 } // namespace
@@ -1966,6 +2145,77 @@ bool isEquationType(std::string_view type)
 std::vector<std::string> equationTypes()
 {
   return {"level_set", "levelSet", "level_set_transport"};
+}
+
+std::optional<MaterialInterfaceTransportDependency>
+materialInterfaceTransportDependency(
+    const svmp::Physics::EquationModuleInput& input)
+{
+  auto translated = translate_level_set_transport_input(input);
+  const auto& options = translated.options;
+  if (options.velocity.source !=
+      ls::LevelSetVelocitySource::MaterialInterfacePhasePair) {
+    return std::nullopt;
+  }
+  if (!input.mesh || options.operator_tag.empty() ||
+      options.level_set.field_name.empty() ||
+      options.conservative_phase.liquid_indicator.field_name.empty()) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Application] incomplete material-interface transport dependency");
+  }
+  return MaterialInterfaceTransportDependency{
+      .mesh = input.mesh.get(),
+      .mesh_name = input.mesh_name,
+      .dimension = input.mesh->dim(),
+      .interface_marker = options.velocity.material_interface_marker,
+      .level_set_field_name = options.level_set.field_name,
+      .conservative_phase_field_name =
+          options.conservative_phase.liquid_indicator.field_name,
+      .operator_tag = options.operator_tag,
+  };
+}
+
+void preRegisterMaterialInterfaceTransportFields(
+    const svmp::Physics::EquationModuleInput& input,
+    svmp::FE::systems::FESystem& system)
+{
+  auto translated = translate_level_set_transport_input(input);
+  auto& options = translated.options;
+  if (options.velocity.source !=
+      ls::LevelSetVelocitySource::MaterialInterfacePhasePair) {
+    throw std::invalid_argument(
+        "preRegisterMaterialInterfaceTransportFields requires material-interface phase-pair velocity");
+  }
+  if (options.level_set.field_name ==
+      options.conservative_phase.liquid_indicator.field_name) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Application] material-interface level-set and phase field names must be distinct");
+  }
+
+  preflight_projected_curvature_fields(
+      system,
+      translated.projected_curvature_fields,
+      translated.level_set_space,
+      options.level_set.field_name,
+      std::string_view{},
+      options.conservative_phase.liquid_indicator.field_name);
+  preflightScalarTransportField(
+      system,
+      options.level_set,
+      translated.level_set_space,
+      "level-set");
+  preflightScalarTransportField(
+      system,
+      options.conservative_phase.liquid_indicator,
+      translated.level_set_space,
+      "conservative-phase");
+
+  (void)ensureScalarTransportField(
+      system, options.level_set, translated.level_set_space);
+  (void)ensureScalarTransportField(
+      system,
+      options.conservative_phase.liquid_indicator,
+      translated.level_set_space);
 }
 
 std::unique_ptr<svmp::Physics::PhysicsModule>

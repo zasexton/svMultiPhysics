@@ -23,6 +23,7 @@ class FreeSurfaceGeometrySnapshotCache;
 namespace backends {
 class BackendFactory;
 class LinearSolver;
+struct BlockLayout;
 } // namespace backends
 
 namespace timestepping {
@@ -75,6 +76,15 @@ namespace detail {
 void preflightAndPreRegisterPhysicsModuleDependencies(
     const Parameters& params,
     SimulationComponents& components);
+
+/**
+ * Form the exact two-block FSILS partition for the monolithic material-
+ * interface/two-fluid unknown layout.  Returns false without mutation when
+ * the declarations or field layout do not match the qualified contract.
+ */
+bool groupTwoFluidMaterialInterfaceFsilsLayout(
+    const svmp::FE::systems::FESystem& system,
+    svmp::FE::backends::BlockLayout& layout);
 
 } // namespace detail
 

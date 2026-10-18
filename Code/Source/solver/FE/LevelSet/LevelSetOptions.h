@@ -28,7 +28,8 @@ enum class LevelSetFieldSource {
 enum class LevelSetVelocitySource {
     CoupledField,
     PrescribedData,
-    ConstantVector
+    ConstantVector,
+    MaterialInterfacePhasePair
 };
 
 enum class LevelSetTransportForm {
@@ -53,6 +54,9 @@ struct LevelSetVelocityOptions {
     bool auto_register_field{false};
     std::shared_ptr<const spaces::FunctionSpace> space{};
     std::array<Real, 3> constant_value{0.0, 0.0, 0.0};
+    // Required only for MaterialInterfacePhasePair. The matching declaration
+    // owns both phase fields, the level-set source, and the trace weights.
+    int material_interface_marker{-1};
     // Non-empty only for the monolithic wet-side extension path.  field_name
     // is then an algebraic extension unknown E, while this names the physical
     // velocity u used by the frozen sparse extension constraints E=P(phi)u.
@@ -204,6 +208,9 @@ struct LevelSetConservativePhaseOptions {
     Real maximum_courant{1.0};
     bool enforce_courant_limit{true};
     bool require_constant_preservation{true};
+    // Relative phasewise momentum gate applied after geometry reconciliation.
+    // The current policy is fail-closed and never changes velocity implicitly.
+    Real momentum_relative_tolerance{1.0e-10};
     bool write_flux_artifacts{false};
     int flux_artifact_cadence_steps{1};
     bool classify_nonprimary_components_as_satellites{false};

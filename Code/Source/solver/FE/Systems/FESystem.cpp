@@ -2016,6 +2016,11 @@ void appendTwoFluidDiagnosticDeclaration(
     appendMeshBoundaryToken(
         tokens,
         generatedBoundaryTraceRealBits(declaration.level_set_isovalue));
+    appendMeshBoundaryToken(
+        tokens,
+        declaration.require_conservative_phase_momentum_reconciliation
+            ? 1u
+            : 0u);
     appendTwoFluidDiagnosticParameters(tokens, declaration.parameters);
     appendMeshBoundaryString(tokens, declaration.owner_component);
 }
@@ -2132,6 +2137,55 @@ void appendTwoFluidDiagnosticState(
     appendTwoFluidPhaseDiagnosticState(tokens, state.positive_phase);
 }
 
+void appendTwoFluidPhaseMomentumReconciliation(
+    MeshBoundaryConsensusTokens& tokens,
+    const interfaces::IncompressibleTwoFluidPhaseMomentumReconciliation& phase)
+{
+    appendMeshBoundaryIntegral(tokens, phase.side);
+    const std::array<Real, 7> scalars{
+        phase.density,
+        phase.raw_volume,
+        phase.corrected_volume,
+        phase.raw_mass,
+        phase.corrected_mass,
+        phase.momentum_delta_norm,
+        phase.momentum_reference_norm};
+    for (const auto value : scalars) {
+        appendMeshBoundaryToken(
+            tokens, generatedBoundaryTraceRealBits(value));
+    }
+    appendMeshBoundaryToken(
+        tokens, generatedBoundaryTraceRealBits(phase.allowed_momentum_delta));
+    for (const auto& vector : {phase.raw_momentum,
+                               phase.corrected_momentum,
+                               phase.momentum_delta}) {
+        for (const auto value : vector) {
+            appendMeshBoundaryToken(
+                tokens, generatedBoundaryTraceRealBits(value));
+        }
+    }
+    appendMeshBoundaryToken(tokens, phase.satisfied ? 1u : 0u);
+}
+
+void appendTwoFluidMomentumReconciliation(
+    MeshBoundaryConsensusTokens& tokens,
+    const interfaces::IncompressibleTwoFluidMomentumReconciliation& record)
+{
+    appendMeshBoundaryIntegral(tokens, record.interface_marker);
+    appendTwoFluidGeometryRevision(tokens, record.raw_geometry_revision);
+    appendTwoFluidGeometryRevision(tokens, record.corrected_geometry_revision);
+    appendMeshBoundaryToken(tokens, record.raw_algebraic_revision);
+    appendMeshBoundaryToken(tokens, record.corrected_algebraic_revision);
+    appendMeshBoundaryToken(
+        tokens, generatedBoundaryTraceRealBits(record.relative_tolerance));
+    appendMeshBoundaryToken(tokens, record.velocity_update_applied ? 1u : 0u);
+    appendMeshBoundaryToken(tokens, record.satisfied ? 1u : 0u);
+    appendTwoFluidPhaseMomentumReconciliation(
+        tokens, record.negative_phase);
+    appendTwoFluidPhaseMomentumReconciliation(
+        tokens, record.positive_phase);
+}
+
 void appendTwoFluidAcceptedStageRecord(
     MeshBoundaryConsensusTokens& tokens,
     const TwoFluidAcceptedStageDiagnosticHistoryRecord& record)
@@ -2141,6 +2195,12 @@ void appendTwoFluidAcceptedStageRecord(
     appendMeshBoundaryIntegral(tokens, record.state.interface_marker);
     appendTwoFluidGeometryRevision(tokens, record.state.geometry_revision);
     appendTwoFluidDiagnosticState(tokens, record.state.diagnostics);
+    appendMeshBoundaryToken(
+        tokens, record.momentum_reconciliation.has_value() ? 1u : 0u);
+    if (record.momentum_reconciliation.has_value()) {
+        appendTwoFluidMomentumReconciliation(
+            tokens, *record.momentum_reconciliation);
+    }
 }
 
 struct MeshBoundaryCollectiveContext {
@@ -11585,6 +11645,9 @@ void FESystem::declareTwoFluidAcceptedStageDiagnostics(
         field_registry_.get(declaration.positive_pressure_field);
     FE_THROW_IF(
         level_set.components != 1 || level_set.space == nullptr ||
+            level_set.space->value_dimension() != 1 ||
+            level_set.space->topological_dimension() !=
+                parameters.dimension ||
             negative_velocity.source_kind != FieldSourceKind::Unknown ||
             positive_velocity.source_kind != FieldSourceKind::Unknown ||
             negative_pressure.source_kind != FieldSourceKind::Unknown ||
@@ -11620,6 +11683,85 @@ void FESystem::declareTwoFluidAcceptedStageDiagnostics(
     std::sort(
         two_fluid_accepted_stage_declarations_.begin(),
         two_fluid_accepted_stage_declarations_.end(),
+        [](const auto& lhs, const auto& rhs) {
+            return lhs.interface_marker < rhs.interface_marker;
+        });
+}
+
+void FESystem::declareMaterialInterfaceTransportVelocity(
+    interfaces::MaterialInterfaceTransportVelocityDeclaration declaration)
+{
+    FE_THROW_IF(
+        is_setup_,
+        InvalidArgumentException,
+        "FESystem::declareMaterialInterfaceTransportVelocity: declarations must be complete before setup");
+    try {
+        interfaces::validateMaterialInterfaceTransportVelocityDeclaration(
+            declaration);
+    } catch (const std::invalid_argument& error) {
+        throw InvalidArgumentException(
+            std::string(
+                "FESystem::declareMaterialInterfaceTransportVelocity: ") +
+            error.what());
+    }
+    const std::array<FieldId, 3> fields{
+        declaration.level_set_field,
+        declaration.negative_velocity_field,
+        declaration.positive_velocity_field};
+    for (const auto field : fields) {
+        FE_THROW_IF(
+            !field_registry_.has(field),
+            InvalidArgumentException,
+            "FESystem::declareMaterialInterfaceTransportVelocity: every declared field must already exist");
+    }
+    const auto& level_set = field_registry_.get(declaration.level_set_field);
+    const auto& negative_velocity =
+        field_registry_.get(declaration.negative_velocity_field);
+    const auto& positive_velocity =
+        field_registry_.get(declaration.positive_velocity_field);
+    FE_THROW_IF(
+        level_set.components != 1 || level_set.space == nullptr ||
+            level_set.space->value_dimension() != 1 ||
+            level_set.space->topological_dimension() !=
+                declaration.dimension ||
+            negative_velocity.source_kind != FieldSourceKind::Unknown ||
+            positive_velocity.source_kind != FieldSourceKind::Unknown ||
+            negative_velocity.components != declaration.dimension ||
+            positive_velocity.components != declaration.dimension ||
+            negative_velocity.space == nullptr ||
+            positive_velocity.space == nullptr ||
+            negative_velocity.space->value_dimension() !=
+                declaration.dimension ||
+            positive_velocity.space->value_dimension() !=
+                declaration.dimension ||
+            negative_velocity.space->topological_dimension() !=
+                declaration.dimension ||
+            positive_velocity.space->topological_dimension() !=
+                declaration.dimension,
+        InvalidArgumentException,
+        "FESystem::declareMaterialInterfaceTransportVelocity: field roles and dimensions are incompatible with a phase-pair velocity");
+
+    const auto existing = std::find_if(
+        material_interface_transport_velocity_declarations_.begin(),
+        material_interface_transport_velocity_declarations_.end(),
+        [&](const auto& candidate) {
+            return candidate.interface_marker ==
+                       declaration.interface_marker ||
+                   candidate.level_set_field == declaration.level_set_field;
+        });
+    if (existing !=
+        material_interface_transport_velocity_declarations_.end()) {
+        FE_THROW_IF(
+            *existing != declaration,
+            InvalidArgumentException,
+            "FESystem::declareMaterialInterfaceTransportVelocity: interface marker or level-set field already has a conflicting owner");
+        return;
+    }
+    material_interface_transport_velocity_declarations_.push_back(
+        std::move(declaration));
+    std::sort(
+        material_interface_transport_velocity_declarations_.begin(),
+        material_interface_transport_velocity_declarations_.end(),
         [](const auto& lhs, const auto& rhs) {
             return lhs.interface_marker < rhs.interface_marker;
         });
@@ -12029,6 +12171,143 @@ void FESystem::stageTwoFluidAcceptedStageDiagnostics(
     two_fluid_accepted_stage_transaction_active_ = false;
 }
 
+void FESystem::bindPendingTwoFluidMomentumReconciliations(
+    std::span<const interfaces::IncompressibleTwoFluidMomentumReconciliation>
+        reconciliations)
+{
+    const auto collective = meshBoundaryCollectiveContext(*this);
+    MeshBoundaryConsensusTokens local_tokens;
+    MeshBoundaryConsensusTokens minimum_tokens;
+    MeshBoundaryConsensusTokens maximum_tokens;
+    std::exception_ptr local_exception;
+    std::vector<interfaces::IncompressibleTwoFluidMomentumReconciliation>
+        staged;
+
+    try {
+        const auto required_count = static_cast<std::size_t>(std::count_if(
+            two_fluid_accepted_stage_declarations_.begin(),
+            two_fluid_accepted_stage_declarations_.end(),
+            [](const auto& declaration) {
+                return declaration
+                    .require_conservative_phase_momentum_reconciliation;
+            }));
+        FE_THROW_IF(
+            !is_setup_ || two_fluid_accepted_stage_transaction_active_ ||
+                pending_two_fluid_accepted_stage_diagnostics_.size() !=
+                    two_fluid_accepted_stage_declarations_.size() ||
+                reconciliations.size() != required_count,
+            InvalidArgumentException,
+            "FESystem::bindPendingTwoFluidMomentumReconciliations: pending group or required reconciliation coverage is invalid");
+
+        staged.assign(reconciliations.begin(), reconciliations.end());
+        std::size_t reconciliation_index = 0u;
+        for (std::size_t index = 0u;
+             index < pending_two_fluid_accepted_stage_diagnostics_.size();
+             ++index) {
+            const auto& pending =
+                pending_two_fluid_accepted_stage_diagnostics_[index];
+            const bool required = pending.declaration
+                                      .require_conservative_phase_momentum_reconciliation;
+            FE_THROW_IF(
+                pending.momentum_reconciliation.has_value(),
+                InvalidArgumentException,
+                "FESystem::bindPendingTwoFluidMomentumReconciliations: pending group is already bound");
+            if (!required) {
+                continue;
+            }
+
+            auto& reconciliation = staged[reconciliation_index++];
+            try {
+                interfaces::validateIncompressibleTwoFluidMomentumReconciliation(
+                    reconciliation);
+            } catch (const std::invalid_argument& error) {
+                throw InvalidArgumentException(
+                    std::string(
+                        "FESystem::bindPendingTwoFluidMomentumReconciliations: ") +
+                    error.what());
+            }
+            const auto& raw = pending.state.diagnostics;
+            const auto& raw_revision = pending.state.geometry_revision;
+            const auto& negative = reconciliation.negative_phase;
+            const auto& positive = reconciliation.positive_phase;
+            const bool raw_revision_matches =
+                reconciliation.raw_geometry_revision.sameSourceState(
+                    raw_revision) &&
+                reconciliation.raw_geometry_revision.snapshot_revision_key ==
+                    raw_revision.snapshot_revision_key;
+            const bool negative_matches =
+                negative.side == raw.negative_phase.side &&
+                negative.density == raw.negative_phase.density &&
+                negative.raw_volume == raw.negative_phase.volume &&
+                negative.raw_mass == raw.negative_phase.mass &&
+                negative.raw_momentum == raw.negative_phase.momentum;
+            const bool positive_matches =
+                positive.side == raw.positive_phase.side &&
+                positive.density == raw.positive_phase.density &&
+                positive.raw_volume == raw.positive_phase.volume &&
+                positive.raw_mass == raw.positive_phase.mass &&
+                positive.raw_momentum == raw.positive_phase.momentum;
+            FE_THROW_IF(
+                !reconciliation.satisfied ||
+                    reconciliation.interface_marker !=
+                        pending.declaration.interface_marker ||
+                    !raw_revision_matches ||
+                    reconciliation.raw_algebraic_revision !=
+                        pending.stage.state_revision ||
+                    !negative_matches || !positive_matches,
+                InvalidArgumentException,
+                "FESystem::bindPendingTwoFluidMomentumReconciliations: reconciliation does not match the pending raw stage or failed its phasewise gate");
+        }
+
+        appendMeshBoundaryToken(
+            local_tokens,
+            static_cast<std::uint64_t>(reconciliations.size()));
+        for (const auto& reconciliation : staged) {
+            appendTwoFluidMomentumReconciliation(
+                local_tokens, reconciliation);
+        }
+        FE_THROW_IF(
+            local_tokens.size() >
+                static_cast<std::size_t>(std::numeric_limits<int>::max()),
+            InvalidArgumentException,
+            "FESystem::bindPendingTwoFluidMomentumReconciliations: consensus token sequence exceeds the MPI count range");
+        minimum_tokens = local_tokens;
+        maximum_tokens = local_tokens;
+    } catch (...) {
+        local_exception = std::current_exception();
+    }
+
+    if (coordinateMeshBoundaryLocalFailure(
+            collective,
+            local_exception != nullptr,
+            "FESystem::bindPendingTwoFluidMomentumReconciliations/preflight")) {
+        if (local_exception != nullptr) {
+            std::rethrow_exception(local_exception);
+        }
+        throw InvalidArgumentException(
+            "FESystem::bindPendingTwoFluidMomentumReconciliations: another active communicator rank rejected the binding");
+    }
+    requireMeshBoundaryTokenConsensus(
+        collective,
+        local_tokens,
+        minimum_tokens,
+        maximum_tokens,
+        "FESystem::bindPendingTwoFluidMomentumReconciliations/consensus");
+
+    static_assert(std::is_nothrow_move_constructible_v<
+                  interfaces::IncompressibleTwoFluidMomentumReconciliation>);
+    two_fluid_accepted_stage_transaction_active_ = true;
+    std::size_t reconciliation_index = 0u;
+    for (auto& pending : pending_two_fluid_accepted_stage_diagnostics_) {
+        if (pending.declaration
+                .require_conservative_phase_momentum_reconciliation) {
+            pending.momentum_reconciliation.emplace(
+                std::move(staged[reconciliation_index++]));
+        }
+    }
+    two_fluid_accepted_stage_transaction_active_ = false;
+}
+
 void FESystem::discardPendingTwoFluidAcceptedStageDiagnostics() noexcept
 {
     pending_two_fluid_accepted_stage_diagnostics_.clear();
@@ -12090,11 +12369,35 @@ void FESystem::commitPendingTwoFluidAcceptedStageDiagnostics(
                             two_fluid_accepted_stage_declarations_[index] ||
                         pending.stage != pending_stage ||
                         pending.state.interface_marker !=
-                            pending.declaration.interface_marker,
+                            pending.declaration.interface_marker ||
+                        pending.declaration
+                                .require_conservative_phase_momentum_reconciliation !=
+                            pending.momentum_reconciliation.has_value(),
                     InvalidArgumentException,
                     "FESystem::commitPendingTwoFluidAcceptedStageDiagnostics: "
                     "pending group no longer matches its declaration or "
-                    "shared stage");
+                    "shared stage, or a required momentum reconciliation is missing");
+                if (pending.momentum_reconciliation.has_value()) {
+                    try {
+                        interfaces::validateIncompressibleTwoFluidMomentumReconciliation(
+                            *pending.momentum_reconciliation);
+                    } catch (const std::invalid_argument& error) {
+                        throw InvalidArgumentException(
+                            std::string(
+                                "FESystem::commitPendingTwoFluidAcceptedStageDiagnostics: ") +
+                            error.what());
+                    }
+                    FE_THROW_IF(
+                        !pending.momentum_reconciliation->satisfied ||
+                            pending.momentum_reconciliation
+                                    ->interface_marker !=
+                                pending.declaration.interface_marker ||
+                            pending.momentum_reconciliation
+                                    ->raw_algebraic_revision !=
+                                pending.stage.state_revision,
+                        InvalidArgumentException,
+                        "FESystem::commitPendingTwoFluidAcceptedStageDiagnostics: momentum reconciliation does not certify the pending raw stage");
+                }
                 appendTwoFluidAcceptedStageRecord(local_tokens, pending);
             }
             appendMeshBoundaryToken(local_tokens, accepted_step);
@@ -12367,6 +12670,36 @@ void FESystem::commitPendingTwoFluidAcceptedStageDiagnostics(
                     << *state.prescribed_pressure_jump_error_squared
                     << " prescribed_stress_jump_residual_sq="
                     << *state.prescribed_stress_jump_residual_squared;
+            }
+            message << " momentum_reconciliation_applicable="
+                    << (record.momentum_reconciliation.has_value()
+                            ? "true"
+                            : "false");
+            if (record.momentum_reconciliation.has_value()) {
+                const auto& reconciliation =
+                    *record.momentum_reconciliation;
+                message
+                    << " corrected_snapshot_revision="
+                    << reconciliation.corrected_geometry_revision
+                           .snapshot_revision_key
+                    << " raw_algebraic_revision="
+                    << reconciliation.raw_algebraic_revision
+                    << " corrected_algebraic_revision="
+                    << reconciliation.corrected_algebraic_revision
+                    << " momentum_relative_tolerance="
+                    << reconciliation.relative_tolerance
+                    << " velocity_update_applied=false"
+                    << " negative_momentum_delta_norm="
+                    << reconciliation.negative_phase.momentum_delta_norm
+                    << " negative_allowed_momentum_delta="
+                    << reconciliation.negative_phase
+                           .allowed_momentum_delta
+                    << " positive_momentum_delta_norm="
+                    << reconciliation.positive_phase.momentum_delta_norm
+                    << " positive_allowed_momentum_delta="
+                    << reconciliation.positive_phase
+                           .allowed_momentum_delta
+                    << " momentum_reconciliation_satisfied=true";
             }
             FE_LOG_INFO(message.str());
         }

@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "Application/Translators/EquationTranslator.h"
+#include "FE/Spaces/SpaceFactory.h"
 #include "FE/Systems/FESystem.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
@@ -41,6 +42,30 @@ std::shared_ptr<svmp::Mesh> buildTranslatorMesh()
   base->set_vertex_gids({10, 20, 30, 40});
   base->finalize();
 
+  return svmp::create_mesh(std::move(base));
+}
+
+std::shared_ptr<svmp::Mesh> buildTranslatorTriangleMesh()
+{
+  auto base = std::make_shared<svmp::MeshBase>();
+  const std::vector<svmp::real_t> x_ref = {
+      0.0, 0.0,
+      1.0, 0.0,
+      0.0, 1.0,
+  };
+  const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 3};
+  const std::vector<svmp::index_t> cell2vertex = {0, 1, 2};
+  svmp::CellShape shape{};
+  shape.family = svmp::CellFamily::Triangle;
+  shape.num_corners = 3;
+  shape.order = 1;
+  base->build_from_arrays(
+      /*spatial_dim=*/2,
+      x_ref,
+      cell2vertex_offsets,
+      cell2vertex,
+      {shape});
+  base->finalize();
   return svmp::create_mesh(std::move(base));
 }
 
@@ -955,7 +980,7 @@ TEST(EquationTranslatorFreeSurface,
     ASSERT_TRUE(artifact.has_value());
     EXPECT_NE(
         artifact->json.find(
-            "\"artifact_schema_version\":3"),
+            "\"artifact_schema_version\":4"),
         std::string::npos);
     EXPECT_NE(
         artifact->json.find(
@@ -1071,6 +1096,155 @@ TEST(EquationTranslatorFreeSurface,
 </Add_equation>
 )xml",
       "Unknown Add_equation XML element");
+}
+
+TEST(EquationTranslatorFreeSurface,
+     XmlIncompressibleTwoFluidSelectsDedicatedModule)
+{
+  svmp::Physics::formulations::navier_stokes::
+      forceLink_NavierStokesRegister();
+  auto mesh = buildTranslatorTriangleMesh();
+  const auto meshes = singleMeshMap(mesh);
+  auto params = parseEquationXml(R"xml(
+<Add_equation type="fluid">
+  <Free_surface_physical_model>IncompressibleTwoFluid</Free_surface_physical_model>
+  <Level_set_field_name>level_set</Level_set_field_name>
+  <Generated_interface_domain_id>material_interface</Generated_interface_domain_id>
+  <Material_interface_marker>71</Material_interface_marker>
+  <Negative_phase_density>1000.0</Negative_phase_density>
+  <Negative_phase_dynamic_viscosity>0.01</Negative_phase_dynamic_viscosity>
+  <Positive_phase_density>1.0</Positive_phase_density>
+  <Positive_phase_dynamic_viscosity>0.001</Positive_phase_dynamic_viscosity>
+  <Two_fluid_surface_tension>0.072</Two_fluid_surface_tension>
+  <Two_fluid_interface_nitsche_gamma>24.0</Two_fluid_interface_nitsche_gamma>
+</Add_equation>
+)xml");
+
+  const auto input =
+      application::translators::EquationTranslator::buildInput(
+          *params, meshes);
+  EXPECT_EQ(
+      input.equation_params.at("Free_surface_physical_model").value,
+      "IncompressibleTwoFluid");
+  EXPECT_EQ(
+      input.equation_params.at("Material_interface_marker").value,
+      "71");
+
+  svmp::FE::systems::FESystem system(mesh);
+  const auto scalar_space =
+      svmp::FE::spaces::SpaceFactory::create_h1(
+          svmp::FE::ElementType::Triangle3, 1);
+  (void)system.addField(svmp::FE::systems::FieldSpec{
+      .name = "level_set",
+      .space = scalar_space,
+      .components = 1,
+  });
+  auto module =
+      application::translators::EquationTranslator::createModule(
+          *params, system, meshes);
+
+  ASSERT_TRUE(module);
+  const auto artifact = module->effectiveConfigurationArtifact();
+  ASSERT_TRUE(artifact.has_value());
+  EXPECT_EQ(artifact->component, "incompressible_two_fluid");
+  EXPECT_NE(
+      artifact->json.find("\"negative_density\":1000"),
+      std::string::npos);
+  EXPECT_NE(
+      artifact->json.find("\"positive_density\":1"),
+      std::string::npos);
+  EXPECT_NE(
+      artifact->json.find("\"surface_tension\":0.071999999999999995"),
+      std::string::npos);
+  EXPECT_NE(
+      artifact->json.find(
+          "\"momentum_flux_reconciliation_qualified\":true"),
+      std::string::npos);
+  EXPECT_NE(
+      system.findFieldByName("u_negative"),
+      svmp::FE::INVALID_FIELD_ID);
+  EXPECT_NE(
+      system.findFieldByName("p_negative"),
+      svmp::FE::INVALID_FIELD_ID);
+  EXPECT_NE(
+      system.findFieldByName("u_positive"),
+      svmp::FE::INVALID_FIELD_ID);
+  EXPECT_NE(
+      system.findFieldByName("p_positive"),
+      svmp::FE::INVALID_FIELD_ID);
+  ASSERT_EQ(
+      system.materialInterfaceTransportVelocityDeclarations().size(),
+      1u);
+  EXPECT_EQ(
+      system.materialInterfaceTransportVelocityDeclarations()
+          .front()
+          .interface_marker,
+      71);
+  ASSERT_EQ(system.twoFluidAcceptedStageDiagnosticDeclarations().size(),
+            1u);
+  EXPECT_TRUE(system.twoFluidAcceptedStageDiagnosticDeclarations()
+                  .front()
+                  .require_conservative_phase_momentum_reconciliation);
+}
+
+TEST(EquationTranslatorFreeSurface,
+     XmlIncompressibleTwoFluidRequiresEveryMaterialCoefficientBeforeMutation)
+{
+  svmp::Physics::formulations::navier_stokes::
+      forceLink_NavierStokesRegister();
+  auto mesh = buildTranslatorTriangleMesh();
+  const auto meshes = singleMeshMap(mesh);
+  auto params = parseEquationXml(R"xml(
+<Add_equation type="fluid">
+  <Free_surface_physical_model>IncompressibleTwoFluid</Free_surface_physical_model>
+  <Level_set_field_name>level_set</Level_set_field_name>
+  <Generated_interface_domain_id>material_interface</Generated_interface_domain_id>
+  <Material_interface_marker>71</Material_interface_marker>
+  <Negative_phase_density>1000.0</Negative_phase_density>
+  <Negative_phase_dynamic_viscosity>0.01</Negative_phase_dynamic_viscosity>
+  <Positive_phase_density>1.0</Positive_phase_density>
+  <Two_fluid_surface_tension>0.072</Two_fluid_surface_tension>
+  <Two_fluid_interface_nitsche_gamma>24.0</Two_fluid_interface_nitsche_gamma>
+</Add_equation>
+)xml");
+
+  svmp::FE::systems::FESystem system(mesh);
+  const auto scalar_space =
+      svmp::FE::spaces::SpaceFactory::create_h1(
+          svmp::FE::ElementType::Triangle3, 1);
+  (void)system.addField(svmp::FE::systems::FieldSpec{
+      .name = "level_set",
+      .space = scalar_space,
+      .components = 1,
+  });
+  try {
+    (void)application::translators::EquationTranslator::createModule(
+        *params, system, meshes);
+    FAIL() << "incomplete two-fluid material input was accepted";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(
+        std::string_view(error.what()).find(
+            "missing_two_fluid_parameter:Positive_phase_dynamic_viscosity"),
+        std::string_view::npos);
+  }
+  EXPECT_NE(
+      system.findFieldByName("level_set"),
+      svmp::FE::INVALID_FIELD_ID);
+  EXPECT_EQ(
+      system.findFieldByName("u_negative"),
+      svmp::FE::INVALID_FIELD_ID);
+  EXPECT_EQ(
+      system.findFieldByName("p_negative"),
+      svmp::FE::INVALID_FIELD_ID);
+  EXPECT_EQ(
+      system.findFieldByName("u_positive"),
+      svmp::FE::INVALID_FIELD_ID);
+  EXPECT_EQ(
+      system.findFieldByName("p_positive"),
+      svmp::FE::INVALID_FIELD_ID);
+  EXPECT_TRUE(system.formulationRecords().empty());
+  EXPECT_TRUE(
+      system.materialInterfaceTransportVelocityDeclarations().empty());
 }
 
 TEST(EquationTranslatorNodePressureConstraints, BuildInputRejectsUnsupportedIdType)

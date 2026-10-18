@@ -18,7 +18,9 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -153,6 +155,30 @@ std::shared_ptr<svmp::Mesh> makeTranslatorQuadMesh(
   return svmp::create_mesh(std::move(base));
 }
 
+std::shared_ptr<svmp::Mesh> makeTranslatorTriangleMesh()
+{
+  auto base = std::make_shared<svmp::MeshBase>();
+  const std::vector<svmp::real_t> x_ref = {
+      0.0, 0.0,
+      1.0, 0.0,
+      0.0, 1.0,
+  };
+  const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 3};
+  const std::vector<svmp::index_t> cell2vertex = {0, 1, 2};
+  svmp::CellShape shape{};
+  shape.family = svmp::CellFamily::Triangle;
+  shape.num_corners = 3;
+  shape.order = 1;
+  base->build_from_arrays(
+      /*spatial_dim=*/2,
+      x_ref,
+      cell2vertex_offsets,
+      cell2vertex,
+      {shape});
+  base->finalize();
+  return svmp::create_mesh(std::move(base));
+}
+
 void loadXml(const fs::path& path, tinyxml2::XMLDocument& doc)
 {
   const auto status = doc.LoadFile(path.string().c_str());
@@ -236,6 +262,78 @@ std::unique_ptr<EquationParameters> equationParametersFromElement(
   params->type.set(std::string(type));
   params->set_values(&element);
   return params;
+}
+
+std::unique_ptr<EquationParameters> equationParametersFromText(
+    const char* xml)
+{
+  tinyxml2::XMLDocument document;
+  if (document.Parse(xml) != tinyxml2::XML_SUCCESS) {
+    throw std::runtime_error(
+        std::string("failed to parse equation fixture: ") +
+        document.ErrorStr());
+  }
+  auto* equation = document.FirstChildElement("Add_equation");
+  if (equation == nullptr) {
+    throw std::runtime_error("equation fixture has no Add_equation root");
+  }
+  return equationParametersFromElement(*equation);
+}
+
+std::unique_ptr<EquationParameters> materialInterfaceLevelSetEquation()
+{
+  return equationParametersFromText(R"xml(
+<Add_equation type="level_set">
+  <Coupled>true</Coupled>
+  <Level_set_field_name>level_set</Level_set_field_name>
+  <Level_set_source>unknown</Level_set_source>
+  <Auto_register_level_set_field>true</Auto_register_level_set_field>
+  <Velocity_source>material_interface_phase_pair</Velocity_source>
+  <Material_interface_marker>71</Material_interface_marker>
+  <Transport_form>advective</Transport_form>
+  <Enable_conservative_phase_transport>true</Enable_conservative_phase_transport>
+  <Conservative_phase_field_name>phase</Conservative_phase_field_name>
+  <Auto_register_conservative_phase_field>true</Auto_register_conservative_phase_field>
+  <Enable_interface_kinematic>true</Enable_interface_kinematic>
+  <Interface_kinematic_marker>71</Interface_kinematic_marker>
+  <Operator_tag>equations</Operator_tag>
+</Add_equation>
+)xml");
+}
+
+std::unique_ptr<EquationParameters> incompressibleTwoFluidEquation()
+{
+  return equationParametersFromText(R"xml(
+<Add_equation type="fluid">
+  <Coupled>true</Coupled>
+  <Free_surface_physical_model>IncompressibleTwoFluid</Free_surface_physical_model>
+  <Level_set_field_name>level_set</Level_set_field_name>
+  <Generated_interface_domain_id>material_interface</Generated_interface_domain_id>
+  <Material_interface_marker>71</Material_interface_marker>
+  <Negative_phase_density>1000.0</Negative_phase_density>
+  <Negative_phase_dynamic_viscosity>0.01</Negative_phase_dynamic_viscosity>
+  <Positive_phase_density>1.0</Positive_phase_density>
+  <Positive_phase_dynamic_viscosity>0.001</Positive_phase_dynamic_viscosity>
+  <Two_fluid_surface_tension>0.072</Two_fluid_surface_tension>
+  <Two_fluid_interface_nitsche_gamma>24.0</Two_fluid_interface_nitsche_gamma>
+  <Operator_tag>equations</Operator_tag>
+</Add_equation>
+)xml");
+}
+
+void appendTwoFluidMaterialInterfaceEquations(
+    Parameters& parameters,
+    bool level_set_first)
+{
+  auto level_set = materialInterfaceLevelSetEquation();
+  auto fluid = incompressibleTwoFluidEquation();
+  if (level_set_first) {
+    parameters.equation_parameters.push_back(level_set.release());
+    parameters.equation_parameters.push_back(fluid.release());
+  } else {
+    parameters.equation_parameters.push_back(fluid.release());
+    parameters.equation_parameters.push_back(level_set.release());
+  }
 }
 
 std::string text(const tinyxml2::XMLElement& parent, const char* name)
@@ -1015,6 +1113,207 @@ TEST(OpenVesselExamples,
 
   std::error_code ec;
   fs::remove(xml_path, ec);
+#endif
+}
+
+TEST(OpenVesselExamples,
+     SimulationDependencyPreflightResolvesTwoFluidMaterialInterfaceInEitherOrder)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  ensure_mpi_initialized_for_open_vessel_builder();
+
+  for (const bool level_set_first : {true, false}) {
+    SCOPED_TRACE(level_set_first ? "level_set_then_fluid"
+                                 : "fluid_then_level_set");
+    Parameters parameters;
+    appendTwoFluidMaterialInterfaceEquations(
+        parameters, level_set_first);
+
+    auto mesh = makeTranslatorTriangleMesh();
+    application::core::SimulationComponents components;
+    components.primary_mesh_name = "triangle";
+    components.primary_mesh = mesh;
+    components.meshes.emplace("triangle", mesh);
+    components.fe_system =
+        std::make_unique<svmp::FE::systems::FESystem>(mesh);
+
+    ASSERT_NO_THROW(
+        application::core::detail::
+            preflightAndPreRegisterPhysicsModuleDependencies(
+                parameters, components));
+    for (const auto* equation : parameters.equation_parameters) {
+      ASSERT_NE(equation, nullptr);
+      ASSERT_NO_THROW(components.physics_modules.push_back(
+          application::translators::EquationTranslator::createModule(
+              *equation,
+              *components.fe_system,
+              components.meshes)));
+    }
+
+    ASSERT_EQ(components.physics_modules.size(), 2u);
+    EXPECT_TRUE(components.fe_system->hasOperator("equations"));
+    const std::array<std::string_view, 6> expected_field_order{
+        "level_set",
+        "phase",
+        "u_negative",
+        "u_positive",
+        "p_negative",
+        "p_positive",
+    };
+    for (std::size_t index = 0u;
+         index < expected_field_order.size(); ++index) {
+      const auto name = expected_field_order[index];
+      const auto field = components.fe_system->findFieldByName(name);
+      ASSERT_NE(field, svmp::FE::INVALID_FIELD_ID) << name;
+      EXPECT_EQ(field, static_cast<svmp::FE::FieldId>(index)) << name;
+      EXPECT_EQ(components.fe_system->fieldRecord(field).name, name);
+      EXPECT_TRUE(components.fe_system->fieldParticipatesInUnknownVector(
+          field));
+    }
+    ASSERT_EQ(
+        components.fe_system
+            ->materialInterfaceTransportVelocityDeclarations()
+            .size(),
+        1u);
+    EXPECT_EQ(
+        components.fe_system
+            ->materialInterfaceTransportVelocityDeclarations()
+            .front()
+            .interface_marker,
+        71);
+    ASSERT_EQ(
+        components.fe_system
+            ->twoFluidAcceptedStageDiagnosticDeclarations()
+            .size(),
+        1u);
+
+    svmp::FE::backends::BlockLayout layout{};
+    int component_offset = 0;
+    for (const auto name : expected_field_order) {
+      const auto field = components.fe_system->findFieldByName(name);
+      ASSERT_NE(field, svmp::FE::INVALID_FIELD_ID) << name;
+      const int components_count =
+          components.fe_system->fieldRecord(field).components;
+      layout.blocks.push_back(
+          {std::string(name), component_offset, components_count});
+      component_offset += components_count;
+    }
+    ASSERT_TRUE(
+        application::core::detail::
+            groupTwoFluidMaterialInterfaceFsilsLayout(
+                *components.fe_system, layout));
+    ASSERT_EQ(layout.blocks.size(), 2u);
+    EXPECT_EQ(layout.blocks[0].name,
+              "TwoFluidMaterialInterfaceComputationalPrimary");
+    EXPECT_EQ(layout.blocks[0].start_component, 0);
+    EXPECT_EQ(layout.blocks[0].n_components, 6);
+    EXPECT_EQ(layout.blocks[0].role,
+              svmp::FE::backends::BlockRole::PrimaryField);
+    EXPECT_EQ(layout.blocks[1].name, "TwoFluidPressureConstraints");
+    EXPECT_EQ(layout.blocks[1].start_component, 6);
+    EXPECT_EQ(layout.blocks[1].n_components, 2);
+    EXPECT_EQ(layout.blocks[1].role,
+              svmp::FE::backends::BlockRole::ConstraintField);
+    ASSERT_TRUE(layout.momentum_block.has_value());
+    ASSERT_TRUE(layout.constraint_block.has_value());
+    EXPECT_EQ(*layout.momentum_block, 0);
+    EXPECT_EQ(*layout.constraint_block, 1);
+  }
+#endif
+}
+
+void expectMaterialInterfaceDependencyPreflightRejectedWithoutMutation(
+    Parameters& parameters,
+    std::string_view expected_diagnostic)
+{
+  auto mesh = makeTranslatorTriangleMesh();
+  application::core::SimulationComponents components;
+  components.primary_mesh_name = "triangle";
+  components.primary_mesh = mesh;
+  components.meshes.emplace("triangle", mesh);
+  components.fe_system =
+      std::make_unique<svmp::FE::systems::FESystem>(mesh);
+
+  try {
+    application::core::detail::
+        preflightAndPreRegisterPhysicsModuleDependencies(
+            parameters, components);
+    FAIL() << "Expected material-interface dependency preflight rejection";
+  } catch (const std::exception& error) {
+    EXPECT_NE(
+        std::string_view(error.what()).find(expected_diagnostic),
+        std::string_view::npos)
+        << error.what();
+  }
+  ASSERT_TRUE(components.fe_system);
+  EXPECT_EQ(components.fe_system->fieldMap().numFields(), 0u);
+  EXPECT_TRUE(
+      components.fe_system
+          ->materialInterfaceTransportVelocityDeclarations()
+          .empty());
+  EXPECT_TRUE(
+      components.fe_system
+          ->twoFluidAcceptedStageDiagnosticDeclarations()
+          .empty());
+  EXPECT_FALSE(components.fe_system->hasOperator("equations"));
+  EXPECT_TRUE(components.physics_modules.empty());
+}
+
+TEST(OpenVesselExamples,
+     MaterialInterfaceDependencyPreflightRejectsMissingOwnersBeforeMutation)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  ensure_mpi_initialized_for_open_vessel_builder();
+
+  Parameters missing_fluid;
+  missing_fluid.equation_parameters.push_back(
+      materialInterfaceLevelSetEquation().release());
+  expectMaterialInterfaceDependencyPreflightRejectedWithoutMutation(
+      missing_fluid,
+      "material_interface_dependency_missing_two_fluid_owner");
+
+  Parameters missing_transport;
+  missing_transport.equation_parameters.push_back(
+      incompressibleTwoFluidEquation().release());
+  expectMaterialInterfaceDependencyPreflightRejectedWithoutMutation(
+      missing_transport,
+      "two_fluid_dependency_missing_material_interface_transport");
+#endif
+}
+
+TEST(OpenVesselExamples,
+     MaterialInterfaceDependencyPreflightRejectsMismatchAndAmbiguityBeforeMutation)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  ensure_mpi_initialized_for_open_vessel_builder();
+
+  Parameters marker_mismatch;
+  appendTwoFluidMaterialInterfaceEquations(
+      marker_mismatch, /*level_set_first=*/true);
+  marker_mismatch.equation_parameters.front()->set_extra_parameter_value(
+      "Material_interface_marker", "72");
+  marker_mismatch.equation_parameters.front()->set_extra_parameter_value(
+      "Interface_kinematic_marker", "72");
+  expectMaterialInterfaceDependencyPreflightRejectedWithoutMutation(
+      marker_mismatch,
+      "material_interface_dependency_marker_mismatch");
+
+  Parameters ambiguous_owner;
+  ambiguous_owner.equation_parameters.push_back(
+      materialInterfaceLevelSetEquation().release());
+  ambiguous_owner.equation_parameters.push_back(
+      incompressibleTwoFluidEquation().release());
+  ambiguous_owner.equation_parameters.push_back(
+      incompressibleTwoFluidEquation().release());
+  expectMaterialInterfaceDependencyPreflightRejectedWithoutMutation(
+      ambiguous_owner,
+      "ambiguous_material_interface_dependency_pair");
 #endif
 }
 

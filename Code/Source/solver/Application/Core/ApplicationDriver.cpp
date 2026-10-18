@@ -37,6 +37,7 @@
 #include "FE/Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "FE/Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "FE/Interfaces/IncompressibleTwoFluidDiagnostics.h"
+#include "FE/Interfaces/MaterialInterfaceTransportVelocity.h"
 #include "FE/Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "FE/PostProcessing/DerivedResultTypes.h"
 #include "FE/PostProcessing/DerivedResultEvaluator.h"
@@ -3953,7 +3954,7 @@ canonicalLevelSetMaintenanceRequestSchedule(
   CanonicalLevelSetMaintenanceSchedule schedule;
   auto& words = schedule.words;
   words.reserve(32u + 224u * requests.size());
-  appendMaintenanceScheduleWord(words, 3u);
+  appendMaintenanceScheduleWord(words, 4u);
   appendMaintenanceScheduleEnum(words, stage);
   appendMaintenanceScheduleSigned(words, completed_step);
   appendMaintenanceScheduleWord(
@@ -3993,6 +3994,8 @@ canonicalLevelSetMaintenanceRequestSchedule(
         words,
         request.velocity
             .algebraic_extension_source_field_name);
+    appendMaintenanceScheduleSigned(
+        words, request.velocity.material_interface_marker);
 
     appendMaintenanceScheduleBool(
         words, request.bound_preserving.enabled);
@@ -4043,6 +4046,9 @@ canonicalLevelSetMaintenanceRequestSchedule(
     appendMaintenanceScheduleBool(
         words,
         request.conservative_phase.require_constant_preservation);
+    appendMaintenanceScheduleReal(
+        words,
+        request.conservative_phase.momentum_relative_tolerance);
     appendMaintenanceScheduleBool(
         words, request.conservative_phase.write_flux_artifacts);
     appendMaintenanceScheduleSigned(
@@ -7127,6 +7133,13 @@ std::vector<LevelSetMaintenanceRequest> levelSetMaintenanceRequests(const Parame
              "ConservativePhaseRequireConstantPreservation"})) {
       request.conservative_phase.require_constant_preservation = *preserve;
     }
+    if (const auto tolerance = first_defined_double_parameter(
+            eq_params,
+            {"Conservative_phase_momentum_relative_tolerance",
+             "ConservativePhaseMomentumRelativeTolerance"})) {
+      request.conservative_phase.momentum_relative_tolerance =
+          static_cast<svmp::FE::Real>(*tolerance);
+    }
     if (const auto write = first_defined_bool_parameter(
             eq_params,
             {"Conservative_phase_write_flux_artifacts",
@@ -9781,6 +9794,130 @@ evaluateCurrentTwoFluidStageDiagnostics(
         });
   }
   return states;
+}
+
+struct TwoFluidMomentumReconciliationBatch {
+  std::vector<svmp::FE::interfaces::
+                  IncompressibleTwoFluidMomentumReconciliation>
+      records{};
+  bool satisfied{true};
+};
+
+TwoFluidMomentumReconciliationBatch
+buildCurrentTwoFluidMomentumReconciliations(
+    application::core::SimulationComponents& sim,
+    std::span<const LevelSetMaintenanceRequest> maintenance_requests,
+    std::span<const svmp::FE::Real> corrected_solution,
+    std::uint64_t corrected_algebraic_revision,
+    svmp::FE::Real effective_dt,
+    const svmp::MeshComm& comm)
+{
+  const auto declarations =
+      sim.fe_system->twoFluidAcceptedStageDiagnosticDeclarations();
+  const auto pending =
+      sim.fe_system->pendingTwoFluidAcceptedStageDiagnostics();
+  TwoFluidMomentumReconciliationBatch batch;
+  std::vector<svmp::FE::systems::
+                  TwoFluidAcceptedStageDiagnosticDeclaration>
+      required_declarations;
+  std::vector<std::size_t> required_indices;
+  std::vector<svmp::FE::Real> tolerances;
+  std::exception_ptr local_preparation_failure;
+  try {
+    if (pending.size() != declarations.size() ||
+        corrected_algebraic_revision == 0u ||
+        !std::isfinite(effective_dt) ||
+        !(effective_dt > svmp::FE::Real{0.0})) {
+      throw std::runtime_error(
+          "Two-fluid momentum reconciliation requires one complete pending diagnostic group and a valid corrected endpoint revision.");
+    }
+    for (std::size_t index = 0u; index < declarations.size(); ++index) {
+      const auto& declaration = declarations[index];
+      if (!declaration
+               .require_conservative_phase_momentum_reconciliation) {
+        continue;
+      }
+      const auto& level_set_name =
+          sim.fe_system->fieldRecord(declaration.level_set_field).name;
+      const auto matches = [&](const auto& request) {
+        return request.conservative_phase.enabled &&
+               request.conservative_phase.reconcile_geometry &&
+               request.level_set_field_name == level_set_name &&
+               request.isovalue == declaration.level_set_isovalue &&
+               request.velocity.source ==
+                   svmp::FE::level_set::LevelSetVelocitySource::
+                       MaterialInterfacePhasePair &&
+               request.velocity.material_interface_marker ==
+                   declaration.interface_marker;
+      };
+      const auto count = static_cast<std::size_t>(std::count_if(
+          maintenance_requests.begin(),
+          maintenance_requests.end(),
+          matches));
+      if (count != 1u ||
+          pending[index].declaration != declaration) {
+        throw std::runtime_error(
+            "Two-fluid momentum reconciliation requires exactly one matching conservative material-interface maintenance request.");
+      }
+      const auto request = std::find_if(
+          maintenance_requests.begin(), maintenance_requests.end(), matches);
+      const auto tolerance =
+          request->conservative_phase.momentum_relative_tolerance;
+      if (!std::isfinite(tolerance) ||
+          !(tolerance > svmp::FE::Real{0.0})) {
+        throw std::runtime_error(
+            "Two-fluid momentum reconciliation tolerance must be positive and finite.");
+      }
+      required_declarations.push_back(declaration);
+      required_indices.push_back(index);
+      tolerances.push_back(tolerance);
+    }
+  } catch (...) {
+    local_preparation_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_preparation_failure,
+      comm,
+      "two_fluid_momentum_reconciliation_preparation");
+  if (required_declarations.empty()) {
+    return batch;
+  }
+
+  auto corrected_states = evaluateCurrentTwoFluidStageDiagnostics(
+      sim,
+      required_declarations,
+      corrected_solution,
+      effective_dt,
+      comm);
+  local_preparation_failure = nullptr;
+  try {
+    batch.records.reserve(required_declarations.size());
+    for (std::size_t required = 0u;
+         required < required_declarations.size();
+         ++required) {
+      const auto& raw = pending[required_indices[required]];
+      const auto& corrected = corrected_states[required];
+      auto reconciliation = svmp::FE::interfaces::
+          buildIncompressibleTwoFluidMomentumReconciliation(
+              raw.declaration.interface_marker,
+              raw.state.geometry_revision,
+              raw.state.diagnostics,
+              raw.stage.state_revision,
+              corrected.geometry_revision,
+              corrected.diagnostics,
+              corrected_algebraic_revision,
+              tolerances[required]);
+      batch.satisfied = batch.satisfied && reconciliation.satisfied;
+      batch.records.push_back(std::move(reconciliation));
+    }
+  } catch (...) {
+    local_preparation_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(
+      local_preparation_failure,
+      comm,
+      "two_fluid_momentum_reconciliation_evaluation");
+  return batch;
 }
 
 std::vector<svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
@@ -22472,17 +22609,9 @@ sampleConservativePhaseVelocity(
         graph.nodes * 4u, svmp::FE::Real{0.0});
     const auto phase_field = system.findFieldByName(
         request.conservative_phase.liquid_indicator.field_name);
-    const auto velocity_field = system.findFieldByName(
-        request.velocity.field_name);
-    if (phase_field == svmp::FE::INVALID_FIELD_ID ||
-        velocity_field == svmp::FE::INVALID_FIELD_ID) {
+    if (phase_field == svmp::FE::INVALID_FIELD_ID) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Conservative phase velocity sampling could not resolve its phase or velocity field.");
-    }
-    const auto& velocity_record = system.fieldRecord(velocity_field);
-    if (velocity_record.components != graph.dimension) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Conservative phase velocity dimension does not match the phase graph.");
+          "[svMultiPhysics::Application] Conservative phase velocity sampling could not resolve its phase field.");
     }
     const auto* entity_map =
         system.fieldDofHandler(phase_field).getEntityDofMap();
@@ -22490,13 +22619,85 @@ sampleConservativePhaseVelocity(
       throw std::runtime_error(
           "[svMultiPhysics::Application] Conservative phase velocity sampling requires a vertex-nodal phase field.");
     }
-    const auto vertex_velocity = evaluateVertexField(
-        system,
-        *sim.primary_mesh,
-        velocity_field,
-        state,
-        static_cast<std::size_t>(graph.dimension),
-        "sampling conservative phase velocity");
+
+    const bool material_interface_velocity =
+        request.velocity.source ==
+        svmp::FE::level_set::LevelSetVelocitySource::
+            MaterialInterfacePhasePair;
+    std::vector<double> vertex_velocity;
+    std::vector<double> negative_vertex_velocity;
+    std::vector<double> positive_vertex_velocity;
+    std::vector<double> vertex_level_set;
+    const svmp::FE::interfaces::
+        MaterialInterfaceTransportVelocityDeclaration*
+        material_declaration = nullptr;
+    if (material_interface_velocity) {
+      const auto level_set_field = system.findFieldByName(
+          request.level_set_field_name);
+      if (level_set_field == svmp::FE::INVALID_FIELD_ID ||
+          request.velocity.material_interface_marker < 0) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase material-interface velocity sampling requires a level-set field and interface marker.");
+      }
+      for (const auto& declaration :
+           system.materialInterfaceTransportVelocityDeclarations()) {
+        if (declaration.level_set_field != level_set_field ||
+            declaration.interface_marker !=
+                request.velocity.material_interface_marker) {
+          continue;
+        }
+        if (material_declaration != nullptr) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Conservative phase material-interface velocity has multiple matching declarations.");
+        }
+        material_declaration = &declaration;
+      }
+      if (material_declaration == nullptr ||
+          material_declaration->dimension != graph.dimension) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase material-interface velocity declaration is missing or dimensionally incompatible.");
+      }
+      negative_vertex_velocity = evaluateVertexField(
+          system,
+          *sim.primary_mesh,
+          material_declaration->negative_velocity_field,
+          state,
+          static_cast<std::size_t>(graph.dimension),
+          "sampling conservative negative-phase velocity");
+      positive_vertex_velocity = evaluateVertexField(
+          system,
+          *sim.primary_mesh,
+          material_declaration->positive_velocity_field,
+          state,
+          static_cast<std::size_t>(graph.dimension),
+          "sampling conservative positive-phase velocity");
+      vertex_level_set = evaluateVertexField(
+          system,
+          *sim.primary_mesh,
+          level_set_field,
+          state,
+          1u,
+          "sampling conservative material-interface level set");
+    } else {
+      const auto velocity_field = system.findFieldByName(
+          request.velocity.field_name);
+      if (velocity_field == svmp::FE::INVALID_FIELD_ID) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase velocity sampling could not resolve its velocity field.");
+      }
+      const auto& velocity_record = system.fieldRecord(velocity_field);
+      if (velocity_record.components != graph.dimension) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Conservative phase velocity dimension does not match the phase graph.");
+      }
+      vertex_velocity = evaluateVertexField(
+          system,
+          *sim.primary_mesh,
+          velocity_field,
+          state,
+          static_cast<std::size_t>(graph.dimension),
+          "sampling conservative phase velocity");
+    }
     for (std::size_t vertex = 0;
          vertex < sim.primary_mesh->n_vertices(); ++vertex) {
       const auto dofs = entity_map->getVertexDofs(
@@ -22507,12 +22708,40 @@ sampleConservativePhaseVelocity(
             "[svMultiPhysics::Application] Conservative phase field does not have exactly one in-range DOF per mesh vertex.");
       }
       const auto node = static_cast<std::size_t>(dofs.front());
+      std::array<svmp::FE::Real, 3> sampled_velocity{};
+      if (material_interface_velocity) {
+        std::array<svmp::FE::Real, 3> negative{};
+        std::array<svmp::FE::Real, 3> positive{};
+        for (int d = 0; d < graph.dimension; ++d) {
+          const auto component = static_cast<std::size_t>(d);
+          negative[component] = static_cast<svmp::FE::Real>(
+              negative_vertex_velocity[
+                  vertex * static_cast<std::size_t>(graph.dimension) +
+                  component]);
+          positive[component] = static_cast<svmp::FE::Real>(
+              positive_vertex_velocity[
+                  vertex * static_cast<std::size_t>(graph.dimension) +
+                  component]);
+        }
+        sampled_velocity = svmp::FE::interfaces::
+            selectMaterialInterfaceTransportVelocity(
+                *material_declaration,
+                static_cast<svmp::FE::Real>(vertex_level_set[vertex]),
+                negative,
+                positive)
+                .value;
+      } else {
+        for (int d = 0; d < graph.dimension; ++d) {
+          sampled_velocity[static_cast<std::size_t>(d)] =
+              static_cast<svmp::FE::Real>(
+                  vertex_velocity[
+                      vertex * static_cast<std::size_t>(graph.dimension) +
+                      static_cast<std::size_t>(d)]);
+        }
+      }
       for (int d = 0; d < graph.dimension; ++d) {
         accumulated[4u * node + static_cast<std::size_t>(d)] +=
-            static_cast<svmp::FE::Real>(
-                vertex_velocity[
-                    vertex * static_cast<std::size_t>(graph.dimension) +
-                    static_cast<std::size_t>(d)]);
+            sampled_velocity[static_cast<std::size_t>(d)];
       }
       accumulated[4u * node + 3u] += svmp::FE::Real{1.0};
     }
@@ -23123,6 +23352,7 @@ struct ConservativePhaseCandidateStageRequest {
   std::string velocity_field_name{};
   svmp::FE::level_set::LevelSetVelocitySource velocity_source{
       svmp::FE::level_set::LevelSetVelocitySource::ConstantVector};
+  int material_interface_marker{-1};
   svmp::FE::level_set::LevelSetP1PhaseGraphIdentity graph_identity{};
   std::uint64_t graph_geometry_revision{0u};
   std::uint64_t graph_topology_revision{0u};
@@ -23239,6 +23469,8 @@ void appendConservativePhaseCandidateStageWords(
     appendMaintenanceScheduleString(words, request.phase_field_name);
     appendMaintenanceScheduleString(words, request.velocity_field_name);
     appendMaintenanceScheduleEnum(words, request.velocity_source);
+    appendMaintenanceScheduleSigned(
+        words, request.material_interface_marker);
     if (!request.enabled) {
       continue;
     }
@@ -23676,6 +23908,8 @@ buildConservativePhaseCandidateStageSnapshot(
           request.conservative_phase.liquid_indicator.field_name;
       staged_request.velocity_field_name = request.velocity.field_name;
       staged_request.velocity_source = request.velocity.source;
+      staged_request.material_interface_marker =
+          request.velocity.material_interface_marker;
       if (staged_request.enabled) {
         if (!request.conservative_phase_graph.has_value()) {
           throw std::runtime_error(
@@ -24986,7 +25220,9 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           staged_request.phase_field_name !=
               request.conservative_phase.liquid_indicator.field_name ||
           staged_request.velocity_field_name != request.velocity.field_name ||
-          staged_request.velocity_source != request.velocity.source) {
+          staged_request.velocity_source != request.velocity.source ||
+          staged_request.material_interface_marker !=
+              request.velocity.material_interface_marker) {
         local_stage_matches = false;
         break;
       }
@@ -28888,6 +29124,13 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   }
   const bool evaluate_two_fluid_stage =
       maximum_two_fluid_stage_count != 0u;
+  const bool reconcile_two_fluid_momentum = std::any_of(
+      two_fluid_stage_declarations.begin(),
+      two_fluid_stage_declarations.end(),
+      [](const auto& declaration) {
+        return declaration
+            .require_conservative_phase_momentum_reconciliation;
+      });
   const auto two_fluid_stage_state_size =
       sim.fe_system->dofHandler().getNumDofs();
   const auto free_surface_declarations =
@@ -30555,6 +30798,59 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             rollback_and_reject_pending_phase(
                 h, "bound_preserving_rejection");
             return false;
+          }
+          if (reconcile_two_fluid_momentum) {
+            const auto corrected_solution = gatherFeOrderedSolution(
+                h.u(), velocity_extension_artifact_comm);
+            const auto corrected_algebraic_revision =
+                collectiveMeshBoundaryStateFingerprint(
+                    h.u(), velocity_extension_artifact_comm);
+            auto reconciliation =
+                buildCurrentTwoFluidMomentumReconciliations(
+                    sim,
+                    level_set_maintenance,
+                    corrected_solution,
+                    corrected_algebraic_revision,
+                    static_cast<svmp::FE::Real>(h.dt()),
+                    velocity_extension_artifact_comm);
+            for (const auto& record : reconciliation.records) {
+              oopCout()
+                  << std::setprecision(17)
+                  << "[svMultiPhysics::Application] Two-fluid momentum reconciliation"
+                  << " marker=" << record.interface_marker
+                  << " raw_snapshot="
+                  << record.raw_geometry_revision.snapshot_revision_key
+                  << " corrected_snapshot="
+                  << record.corrected_geometry_revision
+                         .snapshot_revision_key
+                  << " raw_algebraic_revision="
+                  << record.raw_algebraic_revision
+                  << " corrected_algebraic_revision="
+                  << record.corrected_algebraic_revision
+                  << " tolerance=" << record.relative_tolerance
+                  << " negative_delta_norm="
+                  << record.negative_phase.momentum_delta_norm
+                  << " negative_allowed_delta="
+                  << record.negative_phase.allowed_momentum_delta
+                  << " positive_delta_norm="
+                  << record.positive_phase.momentum_delta_norm
+                  << " positive_allowed_delta="
+                  << record.positive_phase.allowed_momentum_delta
+                  << " velocity_update_applied=false"
+                  << " status="
+                  << (record.satisfied ? "satisfied" : "rejected")
+                  << std::endl;
+            }
+            if (!reconciliation.satisfied) {
+              clear_pending_contact_provenance();
+              pending_dynamic_contact_generalized_alpha_observation.reset();
+              rollback_and_reject_pending_phase(
+                  h, "momentum_reconciliation_rejection");
+              return false;
+            }
+            sim.fe_system
+                ->bindPendingTwoFluidMomentumReconciliations(
+                    reconciliation.records);
           }
           return true;
         } catch (...) {

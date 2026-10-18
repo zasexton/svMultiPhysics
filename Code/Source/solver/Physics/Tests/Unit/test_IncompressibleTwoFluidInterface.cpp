@@ -597,6 +597,129 @@ TEST(IncompressibleTwoFluidDiagnostics,
               tolerance);
 }
 
+TEST(IncompressibleTwoFluidDiagnostics,
+     MomentumReconciliationAcceptsMeasurePreservingConstantVelocity) {
+  FE::interfaces::IncompressibleTwoFluidDiagnosticState raw;
+  raw.snapshot_revision_key = 101u;
+  raw.negative_phase.side = FE::geometry::CutIntegrationSide::Negative;
+  raw.negative_phase.density = FE::Real{1000.0};
+  raw.negative_phase.volume = FE::Real{0.2};
+  raw.negative_phase.mass = FE::Real{200.0};
+  raw.negative_phase.momentum = {{100.0, -50.0, 0.0}};
+  raw.negative_phase.kinetic_energy = FE::Real{31.25};
+  raw.positive_phase.side = FE::geometry::CutIntegrationSide::Positive;
+  raw.positive_phase.density = FE::Real{1.0};
+  raw.positive_phase.volume = FE::Real{0.8};
+  raw.positive_phase.mass = FE::Real{0.8};
+  raw.positive_phase.momentum = {{0.4, -0.2, 0.0}};
+  raw.positive_phase.kinetic_energy = FE::Real{0.125};
+  auto corrected = raw;
+  corrected.snapshot_revision_key = 102u;
+
+  FE::interfaces::FreeSurfaceGeometryRevision raw_geometry;
+  raw_geometry.source_id = "field:0";
+  raw_geometry.domain_id = "material_interface";
+  raw_geometry.interface_marker = 71;
+  raw_geometry.source_value_revision = 11u;
+  raw_geometry.snapshot_revision_key = 101u;
+  auto corrected_geometry = raw_geometry;
+  corrected_geometry.source_value_revision = 12u;
+  corrected_geometry.snapshot_revision_key = 102u;
+
+  const auto record = FE::interfaces::
+      buildIncompressibleTwoFluidMomentumReconciliation(
+          71,
+          raw_geometry,
+          raw,
+          /*raw_algebraic_revision=*/201u,
+          corrected_geometry,
+          corrected,
+          /*corrected_algebraic_revision=*/202u,
+          FE::Real{1.0e-12});
+  EXPECT_TRUE(record.satisfied);
+  EXPECT_FALSE(record.velocity_update_applied);
+  EXPECT_EQ(record.raw_algebraic_revision, 201u);
+  EXPECT_EQ(record.corrected_algebraic_revision, 202u);
+  EXPECT_EQ(record.raw_geometry_revision.snapshot_revision_key, 101u);
+  EXPECT_EQ(record.corrected_geometry_revision.snapshot_revision_key, 102u);
+  EXPECT_DOUBLE_EQ(record.negative_phase.momentum_delta_norm, 0.0);
+  EXPECT_DOUBLE_EQ(record.positive_phase.momentum_delta_norm, 0.0);
+  EXPECT_TRUE(record.negative_phase.satisfied);
+  EXPECT_TRUE(record.positive_phase.satisfied);
+  EXPECT_NO_THROW(
+      FE::interfaces::validateIncompressibleTwoFluidMomentumReconciliation(
+          record));
+}
+
+TEST(IncompressibleTwoFluidDiagnostics,
+     MomentumReconciliationRejectsUntrackedPhaseMomentumChange) {
+  FE::interfaces::IncompressibleTwoFluidDiagnosticState raw;
+  raw.snapshot_revision_key = 301u;
+  raw.negative_phase.side = FE::geometry::CutIntegrationSide::Negative;
+  raw.negative_phase.density = FE::Real{1000.0};
+  raw.negative_phase.volume = FE::Real{0.2};
+  raw.negative_phase.mass = FE::Real{200.0};
+  raw.negative_phase.momentum = {{100.0, 0.0, 0.0}};
+  raw.negative_phase.kinetic_energy = FE::Real{25.0};
+  raw.positive_phase.side = FE::geometry::CutIntegrationSide::Positive;
+  raw.positive_phase.density = FE::Real{1.0};
+  raw.positive_phase.volume = FE::Real{0.8};
+  raw.positive_phase.mass = FE::Real{0.8};
+  raw.positive_phase.momentum = {{0.4, 0.0, 0.0}};
+  raw.positive_phase.kinetic_energy = FE::Real{0.1};
+  auto corrected = raw;
+  corrected.snapshot_revision_key = 302u;
+  corrected.negative_phase.momentum[0] += FE::Real{0.1};
+  corrected.negative_phase.kinetic_energy = FE::Real{25.1};
+
+  FE::interfaces::FreeSurfaceGeometryRevision raw_geometry;
+  raw_geometry.source_id = "field:0";
+  raw_geometry.domain_id = "material_interface";
+  raw_geometry.interface_marker = 71;
+  raw_geometry.source_value_revision = 21u;
+  raw_geometry.snapshot_revision_key = 301u;
+  auto corrected_geometry = raw_geometry;
+  corrected_geometry.source_value_revision = 22u;
+  corrected_geometry.snapshot_revision_key = 302u;
+
+  const auto record = FE::interfaces::
+      buildIncompressibleTwoFluidMomentumReconciliation(
+          71,
+          raw_geometry,
+          raw,
+          /*raw_algebraic_revision=*/401u,
+          corrected_geometry,
+          corrected,
+          /*corrected_algebraic_revision=*/402u,
+          FE::Real{1.0e-6});
+  EXPECT_FALSE(record.satisfied);
+  EXPECT_FALSE(record.negative_phase.satisfied);
+  EXPECT_TRUE(record.positive_phase.satisfied);
+  EXPECT_GT(record.negative_phase.momentum_delta_norm,
+            record.negative_phase.allowed_momentum_delta);
+  EXPECT_NO_THROW(
+      FE::interfaces::validateIncompressibleTwoFluidMomentumReconciliation(
+          record));
+
+  auto malformed = record;
+  malformed.negative_phase.momentum_delta[0] = FE::Real{0.0};
+  EXPECT_THROW(
+      FE::interfaces::validateIncompressibleTwoFluidMomentumReconciliation(
+          malformed),
+      std::invalid_argument);
+  EXPECT_THROW(
+      FE::interfaces::buildIncompressibleTwoFluidMomentumReconciliation(
+          71,
+          raw_geometry,
+          raw,
+          401u,
+          corrected_geometry,
+          corrected,
+          402u,
+          FE::Real{0.0}),
+      std::invalid_argument);
+}
+
 TEST(IncompressibleTwoFluidInterface,
      InternalInterfacePenaltyAssemblesWithTheCutInterfaceMeasure) {
   TwoFluidRegistrationFixture fixture;
@@ -611,6 +734,10 @@ TEST(IncompressibleTwoFluidInterface,
   auto context = std::make_shared<FE::assembly::CutIntegrationContext>();
   context->addFreeSurfaceGeometrySnapshot(
       makeTwoFluidDiagnosticSnapshot(*fixture.mesh, 71));
+  FE::assembly::CutFacetSetHandle facet_set;
+  facet_set.marker = 71;
+  facet_set.name = "generated-cut-adjacent-facets";
+  context->addFacetSetHandle(std::move(facet_set));
   fixture.system.setCutIntegrationContext(context);
   fixture.system.setup({});
 
@@ -711,6 +838,23 @@ TEST(IncompressibleTwoFluidModule,
       FE::Real{1.0});
   EXPECT_FALSE(diagnostic_declarations.front()
                    .parameters.prescribed_pressure_jump.has_value());
+  const auto transport_velocity_declarations =
+      fixture.system.materialInterfaceTransportVelocityDeclarations();
+  ASSERT_EQ(transport_velocity_declarations.size(), 1u);
+  const auto& transport_velocity =
+      transport_velocity_declarations.front();
+  EXPECT_EQ(transport_velocity.interface_marker, interface_marker);
+  EXPECT_EQ(transport_velocity.level_set_field, level_set);
+  EXPECT_EQ(transport_velocity.negative_velocity_field, u_negative);
+  EXPECT_EQ(transport_velocity.positive_velocity_field, u_positive);
+  EXPECT_NEAR(
+      transport_velocity.negative_trace_weight,
+      FE::Real{0.001} / FE::Real{0.00101},
+      FE::Real{1.0e-15});
+  EXPECT_NEAR(
+      transport_velocity.positive_trace_weight,
+      FE::Real{0.00001} / FE::Real{0.00101},
+      FE::Real{1.0e-15});
 
   const auto shared_gauge_evidence = static_cast<std::size_t>(std::count_if(
       fixture.system.gaugeRegistry().anchoring().begin(),
@@ -901,6 +1045,100 @@ TEST(IncompressibleTwoFluidModule,
   fixture.system.discardPendingTwoFluidAcceptedStageDiagnostics();
   EXPECT_EQ(fixture.system.twoFluidAcceptedStageDiagnosticHistory().size(),
             1u);
+}
+
+TEST(IncompressibleTwoFluidModule,
+     RequiredMomentumReconciliationBindsBeforeAcceptedHistoryCommit) {
+  TwoFluidRegistrationFixture fixture;
+  ns::IncompressibleTwoFluidOptions options;
+  options.require_conservative_phase_momentum_reconciliation = true;
+  auto module = fixture.makeModule(std::move(options));
+  module.registerOn(fixture.system);
+  fixture.system.setup({});
+
+  const auto declarations =
+      fixture.system.twoFluidAcceptedStageDiagnosticDeclarations();
+  ASSERT_EQ(declarations.size(), 1u);
+  EXPECT_TRUE(declarations.front()
+                  .require_conservative_phase_momentum_reconciliation);
+  const auto raw = makeAcceptedTwoFluidDiagnosticState(declarations.front());
+  const std::array raw_states{raw};
+  ASSERT_NO_THROW(fixture.system.stageTwoFluidAcceptedStageDiagnostics(
+      makeTwoFluidStageMetadata(), raw_states));
+  EXPECT_THROW(fixture.system.commitPendingTwoFluidAcceptedStageDiagnostics(
+                   1u, FE::Real{0.1}, FE::Real{0.1}),
+               FE::InvalidArgumentException);
+
+  auto corrected = raw;
+  corrected.geometry_revision.source_value_revision = 8u;
+  corrected.geometry_revision.snapshot_revision_key = 92u;
+  corrected.diagnostics.snapshot_revision_key = 92u;
+  const auto valid = FE::interfaces::
+      buildIncompressibleTwoFluidMomentumReconciliation(
+          declarations.front().interface_marker,
+          raw.geometry_revision,
+          raw.diagnostics,
+          /*raw_algebraic_revision=*/41u,
+          corrected.geometry_revision,
+          corrected.diagnostics,
+          /*corrected_algebraic_revision=*/43u,
+          FE::Real{1.0e-10});
+
+  auto wrong_revision = valid;
+  wrong_revision.raw_algebraic_revision = 99u;
+  const std::array wrong_revision_records{wrong_revision};
+  EXPECT_THROW(
+      fixture.system.bindPendingTwoFluidMomentumReconciliations(
+          wrong_revision_records),
+      FE::InvalidArgumentException);
+  ASSERT_EQ(
+      fixture.system.pendingTwoFluidAcceptedStageDiagnostics().size(), 1u);
+  EXPECT_FALSE(fixture.system.pendingTwoFluidAcceptedStageDiagnostics()
+                   .front()
+                   .momentum_reconciliation.has_value());
+
+  auto changed = corrected;
+  changed.diagnostics.negative_phase.momentum[0] = FE::Real{1.0};
+  changed.diagnostics.negative_phase.kinetic_energy = FE::Real{1.0};
+  const auto failed = FE::interfaces::
+      buildIncompressibleTwoFluidMomentumReconciliation(
+          declarations.front().interface_marker,
+          raw.geometry_revision,
+          raw.diagnostics,
+          41u,
+          changed.geometry_revision,
+          changed.diagnostics,
+          43u,
+          FE::Real{1.0e-10});
+  ASSERT_FALSE(failed.satisfied);
+  const std::array failed_records{failed};
+  EXPECT_THROW(
+      fixture.system.bindPendingTwoFluidMomentumReconciliations(
+          failed_records),
+      FE::InvalidArgumentException);
+
+  const std::array valid_records{valid};
+  ASSERT_NO_THROW(
+      fixture.system.bindPendingTwoFluidMomentumReconciliations(
+          valid_records));
+  ASSERT_TRUE(fixture.system.pendingTwoFluidAcceptedStageDiagnostics()
+                  .front()
+                  .momentum_reconciliation.has_value());
+  ASSERT_NO_THROW(fixture.system.commitPendingTwoFluidAcceptedStageDiagnostics(
+      1u, FE::Real{0.1}, FE::Real{0.1}));
+  const auto history =
+      fixture.system.twoFluidAcceptedStageDiagnosticHistory();
+  ASSERT_EQ(history.size(), 1u);
+  ASSERT_TRUE(history.front().momentum_reconciliation.has_value());
+  const auto& accepted = *history.front().momentum_reconciliation;
+  EXPECT_EQ(accepted.interface_marker, valid.interface_marker);
+  EXPECT_EQ(accepted.raw_algebraic_revision,
+            valid.raw_algebraic_revision);
+  EXPECT_EQ(accepted.corrected_algebraic_revision,
+            valid.corrected_algebraic_revision);
+  EXPECT_EQ(accepted.relative_tolerance, valid.relative_tolerance);
+  EXPECT_EQ(accepted.negative_phase, valid.negative_phase);
+  EXPECT_EQ(accepted.positive_phase, valid.positive_phase);
 }
 
 TEST(IncompressibleTwoFluidModule,

@@ -372,7 +372,10 @@ void addSharedGaugeEvidence(FE::systems::FESystem& system,
         << ",\"pressure_gradient_penalty\":"
         << jsonReal(options.pressure_gradient_penalty) << '}'
         << ",\"pressure_space\":{\"representation\":\"separate_phase_fields\",\"shared_gauge_count\":1}"
-        << ",\"phase_transport_coupling\":{\"owner\":\"external_level_set_transport\",\"momentum_flux_reconciliation_qualified\":false}"
+        << ",\"phase_transport_coupling\":{\"owner\":\"declared_material_interface_phase_pair\",\"bulk_selection\":\"sharp_phase_local\",\"interface_trace\":\"complementary_weighted\",\"momentum_flux_reconciliation_qualified\":"
+        << jsonBool(
+               options.require_conservative_phase_momentum_reconciliation)
+        << ",\"momentum_reconciliation_policy\":\"phasewise_fail_closed_no_hidden_velocity_update\"}"
         << ",\"exclusions\":[\"compressible_gas\",\"trapped_gas_pressure\",\"air_cushioning\",\"phase_change\",\"contact\",\"moving_mesh\",\"variable_material_laws\",\"turbulence\"]}";
     return EffectiveConfigurationArtifact{
         .component = "incompressible_two_fluid",
@@ -653,6 +656,22 @@ void IncompressibleTwoFluidModule::registerOn(
             p_negative, p_positive));
     addSharedGaugeEvidence(system, p_negative, p_positive);
 
+    system.declareMaterialInterfaceTransportVelocity(
+        FE::interfaces::MaterialInterfaceTransportVelocityDeclaration{
+            .dimension = dimension,
+            .interface_marker = interface_marker,
+            .level_set_field = level_set,
+            .negative_velocity_field = u_negative,
+            .positive_velocity_field = u_positive,
+            .level_set_isovalue = options_.level_set_isovalue,
+            .negative_trace_weight =
+                interface_weights.negative_complement,
+            .positive_trace_weight =
+                interface_weights.positive_complement,
+            .geometry_domain_id = options_.generated_interface_domain_id,
+            .owner_component = "incompressible_two_fluid",
+        });
+
     system.declareTwoFluidAcceptedStageDiagnostics(
         FE::systems::TwoFluidAcceptedStageDiagnosticDeclaration{
             .interface_marker = interface_marker,
@@ -664,6 +683,9 @@ void IncompressibleTwoFluidModule::registerOn(
             .operator_tag = options_.operator_tag,
             .geometry_domain_id = options_.generated_interface_domain_id,
             .level_set_isovalue = options_.level_set_isovalue,
+            .require_conservative_phase_momentum_reconciliation =
+                options_
+                    .require_conservative_phase_momentum_reconciliation,
             .parameters =
                 FE::interfaces::IncompressibleTwoFluidDiagnosticParameters{
                     .dimension = dimension,

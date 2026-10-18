@@ -13291,20 +13291,21 @@ TEST(FreeSurfaceCutStabilityMPI,
         FE::ElementType::Tetra4, /*order=*/1, /*components=*/3);
     FE::systems::FESystem system(mesh);
     (void)system.addField(FE::systems::FieldSpec{
-        .name = "phi_history",
+        .name = "phi",
         .space = pressure_space,
         .components = 1,
         .source_kind = FE::systems::FieldSourceKind::Unknown,
     });
 
     ns::IncompressibleTwoFluidOptions options;
-    options.level_set_field_name = "phi_history";
+    options.level_set_field_name = "phi";
     options.generated_interface_domain_id =
         "distributed_two_fluid_history";
     options.interface_marker = 27411;
     options.surface_tension = FE::Real{0.0};
     options.include_transient_interface_penalty = false;
     options.enable_convection = false;
+    options.require_conservative_phase_momentum_reconciliation = true;
     ns::IncompressibleTwoFluidModule module(
         velocity_space,
         pressure_space,
@@ -13393,9 +13394,56 @@ TEST(FreeSurfaceCutStabilityMPI,
     const std::array accepted_states{state};
     ASSERT_NO_THROW(system.stageTwoFluidAcceptedStageDiagnostics(
         metadata(1u, FE::Real{0.0}, FE::Real{0.1}), accepted_states));
+    auto corrected_state = state;
+    corrected_state.geometry_revision.source_value_revision = 8u;
+    corrected_state.geometry_revision.snapshot_revision_key = 92u;
+    corrected_state.diagnostics.snapshot_revision_key = 92u;
+    const auto accepted_reconciliation = FE::interfaces::
+        buildIncompressibleTwoFluidMomentumReconciliation(
+            declaration.interface_marker,
+            state.geometry_revision,
+            state.diagnostics,
+            /*raw_algebraic_revision=*/42u,
+            corrected_state.geometry_revision,
+            corrected_state.diagnostics,
+            /*corrected_algebraic_revision=*/62u,
+            FE::Real{1.0e-10});
+    const std::array accepted_reconciliations{accepted_reconciliation};
+    ASSERT_NO_THROW(system.bindPendingTwoFluidMomentumReconciliations(
+        accepted_reconciliations));
     ASSERT_NO_THROW(system.commitPendingTwoFluidAcceptedStageDiagnostics(
         1u, FE::Real{0.1}, FE::Real{0.1}));
     ASSERT_EQ(system.twoFluidAcceptedStageDiagnosticHistory().size(), 1u);
+
+    ASSERT_NO_THROW(system.stageTwoFluidAcceptedStageDiagnostics(
+        metadata(2u, FE::Real{0.1}, FE::Real{0.2}), accepted_states));
+    auto rank_divergent_corrected = corrected_state;
+    rank_divergent_corrected.geometry_revision.source_value_revision =
+        9u + static_cast<std::uint64_t>(rank);
+    rank_divergent_corrected.geometry_revision.snapshot_revision_key =
+        93u + static_cast<std::uint64_t>(rank);
+    rank_divergent_corrected.diagnostics.snapshot_revision_key =
+        93u + static_cast<std::uint64_t>(rank);
+    const auto rank_divergent_reconciliation = FE::interfaces::
+        buildIncompressibleTwoFluidMomentumReconciliation(
+            declaration.interface_marker,
+            state.geometry_revision,
+            state.diagnostics,
+            /*raw_algebraic_revision=*/43u,
+            rank_divergent_corrected.geometry_revision,
+            rank_divergent_corrected.diagnostics,
+            /*corrected_algebraic_revision=*/63u +
+                static_cast<std::uint64_t>(rank),
+            FE::Real{1.0e-10});
+    const std::array rank_divergent_reconciliations{
+        rank_divergent_reconciliation};
+    EXPECT_THROW(system.bindPendingTwoFluidMomentumReconciliations(
+                     rank_divergent_reconciliations),
+                 FE::InvalidArgumentException);
+    EXPECT_FALSE(system.pendingTwoFluidAcceptedStageDiagnostics()
+                     .front()
+                     .momentum_reconciliation.has_value());
+    system.discardPendingTwoFluidAcceptedStageDiagnostics();
 
     auto divergent_state = state;
     if (rank == 1) {

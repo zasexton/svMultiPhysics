@@ -73,6 +73,7 @@ struct IncompressibleTwoFluidOptions {
     std::optional<FE::Real> prescribed_pressure_jump{};
     FE::Real interface_nitsche_gamma{20.0};
     bool include_transient_interface_penalty{true};
+    bool require_conservative_phase_momentum_reconciliation{false};
 
     std::array<FE::Real, 3> body_force{0.0, 0.0, 0.0};
     bool enable_convection{true};

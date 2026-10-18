@@ -34,6 +34,7 @@
 #include "PostProcessing/DerivedResultRegistry.h"
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "Interfaces/IncompressibleTwoFluidDiagnostics.h"
+#include "Interfaces/MaterialInterfaceTransportVelocity.h"
 
 #include "Assembly/Assembler.h"
 
@@ -357,6 +358,7 @@ struct TwoFluidAcceptedStageDiagnosticDeclaration {
     OperatorTag operator_tag{};
     std::string geometry_domain_id{};
     Real level_set_isovalue{0.0};
+    bool require_conservative_phase_momentum_reconciliation{false};
     interfaces::IncompressibleTwoFluidDiagnosticParameters parameters{};
     std::string owner_component{};
 
@@ -377,6 +379,8 @@ struct TwoFluidAcceptedStageDiagnosticHistoryRecord {
     TwoFluidAcceptedStageDiagnosticDeclaration declaration{};
     OperatorStageMeasurementMetadata stage{};
     AcceptedTwoFluidStageDiagnosticState state{};
+    std::optional<interfaces::IncompressibleTwoFluidMomentumReconciliation>
+        momentum_reconciliation{};
 };
 
 enum class MeshTangentialBoundaryPolicy : std::uint8_t {
@@ -1001,6 +1005,9 @@ public:
                                         std::shared_ptr<const spaces::FunctionSpace> space,
                                         FieldId mesh_displacement_field,
                                         int components = 0);
+    [[nodiscard]] std::size_t registeredFieldCount() const noexcept {
+        return field_registry_.size();
+    }
     [[nodiscard]] FieldId findFieldByName(std::string_view name) const noexcept;
     [[nodiscard]] bool hasField(std::string_view name) const noexcept;
     [[nodiscard]] bool fieldParticipatesInUnknownVector(FieldId field) const;
@@ -1090,6 +1097,10 @@ public:
     void stageTwoFluidAcceptedStageDiagnostics(
         OperatorStageMeasurementMetadata metadata,
         std::span<const AcceptedTwoFluidStageDiagnosticState> states);
+    /** Bind required post-maintenance momentum records to the pending group. */
+    void bindPendingTwoFluidMomentumReconciliations(
+        std::span<const interfaces::IncompressibleTwoFluidMomentumReconciliation>
+            reconciliations);
     /** Discard a rejected candidate without publishing accepted history. */
     void discardPendingTwoFluidAcceptedStageDiagnostics() noexcept;
     /** Publish the complete pending group after irreversible step acceptance. */
@@ -1106,6 +1117,15 @@ public:
         const TwoFluidAcceptedStageDiagnosticHistoryRecord>
     twoFluidAcceptedStageDiagnosticHistory() const noexcept {
         return two_fluid_accepted_stage_diagnostic_history_;
+    }
+    /** Declare one phase-pair source for sharp material-interface transport. */
+    void declareMaterialInterfaceTransportVelocity(
+        interfaces::MaterialInterfaceTransportVelocityDeclaration
+            declaration);
+    [[nodiscard]] std::span<const interfaces::
+                                MaterialInterfaceTransportVelocityDeclaration>
+    materialInterfaceTransportVelocityDeclarations() const noexcept {
+        return material_interface_transport_velocity_declarations_;
     }
     [[nodiscard]] std::span<
         const MeshNormalBoundaryConstraintDeclaration>
@@ -2770,6 +2790,8 @@ private:
         two_fluid_accepted_stage_diagnostic_history_{};
     bool two_fluid_accepted_stage_declarations_frozen_{false};
     bool two_fluid_accepted_stage_transaction_active_{false};
+    std::vector<interfaces::MaterialInterfaceTransportVelocityDeclaration>
+        material_interface_transport_velocity_declarations_{};
     std::vector<MeshTangentialBoundaryPolicyDeclaration>
         mesh_tangential_boundary_policies_{};
     std::vector<MeshTangentialBoundaryPolicyHistoryRecord>
