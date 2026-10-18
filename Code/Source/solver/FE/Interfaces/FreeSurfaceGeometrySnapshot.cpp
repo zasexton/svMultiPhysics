@@ -8,10 +8,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <iomanip>
 #include <limits>
 #include <map>
 #include <numbers>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <tuple>
 #include <unordered_set>
@@ -1764,17 +1766,62 @@ makeMomentCertificateFromSamples(
             break;
         }
         if (!found) {
-            throw std::invalid_argument(
-                "volume quadrature point lies outside its authoritative "
-                "source decomposition for parent " +
-                std::to_string(rule.provenance.parent_entity) +
-                " on side " +
-                (rule.side == geometry::CutIntegrationSide::Negative
-                     ? "negative"
-                     : "positive") +
-                " at (" + std::to_string(coordinate[0]) + ", " +
-                std::to_string(coordinate[1]) + ", " +
-                std::to_string(coordinate[2]) + ")");
+            std::ostringstream message;
+            message << std::scientific << std::setprecision(17)
+                    << "volume quadrature point lies outside its authoritative "
+                       "source decomposition for parent "
+                    << rule.provenance.parent_entity << " on side "
+                    << (rule.side == geometry::CutIntegrationSide::Negative
+                            ? "negative"
+                            : "positive")
+                    << " at (" << coordinate[0] << ", " << coordinate[1]
+                    << ", " << coordinate[2] << ")"
+                    << "; tolerance=" << tolerance
+                    << "; subcells=" << subcells.size();
+            for (std::size_t subcell_index = 0u;
+                 subcell_index < subcells.size();
+                 ++subcell_index) {
+                const auto& subcell = subcells[subcell_index];
+                std::array<Real, 4> barycentric{};
+                const bool contains = representedSimplexCoordinates(
+                    subcell,
+                    coordinate,
+                    ambient_dimension,
+                    Real{64.0} * tolerance,
+                    barycentric);
+                message << "; simplex[" << subcell_index << "]={contains="
+                        << (contains ? 1 : 0) << ",vertices=";
+                for (std::size_t vertex = 0u;
+                     vertex < subcell.vertex_count;
+                     ++vertex) {
+                    if (vertex != 0u) {
+                        message << '|';
+                    }
+                    message << '(' << subcell.vertices[vertex][0] << ','
+                            << subcell.vertices[vertex][1] << ','
+                            << subcell.vertices[vertex][2] << ')';
+                }
+                message << ",signed_values=";
+                for (std::size_t vertex = 0u;
+                     vertex < subcell.vertex_count;
+                     ++vertex) {
+                    if (vertex != 0u) {
+                        message << '|';
+                    }
+                    message << subcell.represented_signed_values[vertex];
+                }
+                message << ",barycentric=";
+                for (std::size_t vertex = 0u;
+                     vertex < subcell.vertex_count;
+                     ++vertex) {
+                    if (vertex != 0u) {
+                        message << '|';
+                    }
+                    message << barycentric[vertex];
+                }
+                message << '}';
+            }
+            throw std::invalid_argument(message.str());
         }
         const bool wrong_side =
             (rule.side == geometry::CutIntegrationSide::Negative &&
