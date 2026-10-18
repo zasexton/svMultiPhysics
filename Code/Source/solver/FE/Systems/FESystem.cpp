@@ -8828,6 +8828,7 @@ bool sameFreeSurfaceFunctionalParameters(
         if (left.boundary_marker != right.boundary_marker ||
             left.equilibrium_contact_angle_radians !=
                 right.equilibrium_contact_angle_radians ||
+            left.law != right.law ||
             left.mobility != right.mobility ||
             left.slip_length != right.slip_length ||
             left.dynamic_viscosity != right.dynamic_viscosity) {
@@ -9071,6 +9072,7 @@ bool sameFreeSurfaceDynamicContactWallState(
     return lhs.boundary_marker == rhs.boundary_marker &&
            lhs.equilibrium_contact_angle_radians ==
                rhs.equilibrium_contact_angle_radians &&
+           lhs.law == rhs.law &&
            lhs.mobility == rhs.mobility &&
            lhs.slip_length == rhs.slip_length &&
            lhs.dynamic_viscosity == rhs.dynamic_viscosity &&
@@ -12432,6 +12434,12 @@ void FESystem::declareFreeSurfaceDiscreteFunctional(
          i < parameters.dynamic_contact_coefficients.size(); ++i) {
         const auto& coefficient =
             parameters.dynamic_contact_coefficients[i];
+        const bool prescribed_angle =
+            coefficient.law ==
+            interfaces::FreeSurfaceContactLaw::PrescribedAngle;
+        const bool dynamic_ren_e =
+            coefficient.law ==
+            interfaces::FreeSurfaceContactLaw::DynamicRenE;
         FE_THROW_IF(
             coefficient.boundary_marker < 0 ||
                 !std::isfinite(
@@ -12440,23 +12448,28 @@ void FESystem::declareFreeSurfaceDiscreteFunctional(
                   Real{0.0}) ||
                 !(coefficient.equilibrium_contact_angle_radians < pi) ||
                 !std::isfinite(coefficient.mobility) ||
-                !(coefficient.mobility > Real{0.0}) ||
+                (!prescribed_angle && !dynamic_ren_e) ||
+                (dynamic_ren_e &&
+                 !(coefficient.mobility > Real{0.0})) ||
+                (prescribed_angle &&
+                 coefficient.mobility != Real{0.0}) ||
                 !std::isfinite(coefficient.slip_length) ||
                 !(coefficient.slip_length > Real{0.0}) ||
                 !std::isfinite(coefficient.dynamic_viscosity) ||
                 !(coefficient.dynamic_viscosity > Real{0.0}),
             InvalidArgumentException,
-            "FESystem::declareFreeSurfaceDiscreteFunctional: every dynamic "
-            "contact coefficient requires a nonnegative marker, a finite "
-            "angle strictly in (0, pi), finite positive mobility, finite "
-            "positive slip length, and finite positive dynamic viscosity");
+            "FESystem::declareFreeSurfaceDiscreteFunctional: every contact "
+            "coefficient requires a supported law, a nonnegative marker, a "
+            "finite angle strictly in (0, pi), law-consistent mobility, "
+            "finite positive slip length, and finite positive dynamic "
+            "viscosity");
         FE_THROW_IF(
             i != 0u &&
                 parameters.dynamic_contact_coefficients[i - 1u]
                         .boundary_marker == coefficient.boundary_marker,
             InvalidArgumentException,
             "FESystem::declareFreeSurfaceDiscreteFunctional: duplicate "
-            "dynamic contact coefficient marker");
+            "contact-stage coefficient marker");
         const auto young = std::lower_bound(
             parameters.young_wall_coefficients.begin(),
             parameters.young_wall_coefficients.end(),
@@ -12470,8 +12483,8 @@ void FESystem::declareFreeSurfaceDiscreteFunctional(
                 young->equilibrium_contact_angle_radians !=
                     coefficient.equilibrium_contact_angle_radians,
             InvalidArgumentException,
-            "FESystem::declareFreeSurfaceDiscreteFunctional: dynamic "
-            "contact coefficients require matching Young wall coefficients");
+            "FESystem::declareFreeSurfaceDiscreteFunctional: contact-stage "
+            "coefficients require matching Young wall coefficients");
     }
     if (declaration.active_volume_energy_parameters.has_value() ||
         declaration.active_volume_dissipation_parameters.has_value() ||
@@ -12572,7 +12585,7 @@ void FESystem::declareFreeSurfaceDiscreteFunctional(
             << " volume_multiplier=" << stored.parameters.volume_multiplier
             << " young_wall_count="
             << stored.parameters.young_wall_coefficients.size()
-            << " dynamic_contact_count="
+            << " contact_stage_count="
             << stored.parameters.dynamic_contact_coefficients.size()
             << " active_volume_energy="
             << (stored.active_volume_energy_parameters.has_value()
@@ -12633,12 +12646,17 @@ void FESystem::declareFreeSurfaceDiscreteFunctional(
     }
     for (const auto& contact :
          stored.parameters.dynamic_contact_coefficients) {
-        message << " dynamic_contact_marker=" << contact.boundary_marker
-                << " dynamic_contact_equilibrium_angle_radians="
+        message << " contact_stage_marker=" << contact.boundary_marker
+                << " contact_stage_law="
+                << (contact.law ==
+                            interfaces::FreeSurfaceContactLaw::DynamicRenE
+                        ? "DynamicRenE"
+                        : "PrescribedAngle")
+                << " contact_stage_equilibrium_angle_radians="
                 << contact.equilibrium_contact_angle_radians
-                << " dynamic_contact_mobility=" << contact.mobility
-                << " dynamic_contact_slip_length=" << contact.slip_length
-                << " dynamic_contact_viscosity="
+                << " contact_stage_mobility=" << contact.mobility
+                << " contact_stage_slip_length=" << contact.slip_length
+                << " contact_stage_viscosity="
                 << contact.dynamic_viscosity;
     }
     FE_LOG_INFO(message.str());
@@ -13143,11 +13161,11 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
             }
         }
 
-        const bool dynamic_contact_declared =
+        const bool contact_stage_declared =
             !declaration.parameters.dynamic_contact_coefficients.empty();
         FE_THROW_IF(
             accepted.contact_stage.has_value() !=
-                dynamic_contact_declared,
+                contact_stage_declared,
             InvalidArgumentException,
             "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
             "contact-stage state presence does not match the declaration");
@@ -13263,6 +13281,7 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                         wall.equilibrium_contact_angle_radians !=
                             coefficient
                                 .equilibrium_contact_angle_radians ||
+                        wall.law != coefficient.law ||
                         wall.mobility != coefficient.mobility ||
                         wall.slip_length != coefficient.slip_length ||
                         wall.dynamic_viscosity !=
@@ -13397,18 +13416,27 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                     InvalidArgumentException,
                     "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
                     "contact-stage integral bounds are inconsistent");
+                const bool dynamic_ren_e =
+                    wall.law ==
+                    interfaces::FreeSurfaceContactLaw::DynamicRenE;
+                const Real line_friction_residual = dynamic_ren_e
+                    ? wall.contact_speed_integral / wall.mobility
+                    : Real{0.0};
+                const Real expected_line_dissipation = dynamic_ren_e
+                    ? wall.contact_speed_squared_integral / wall.mobility
+                    : Real{0.0};
                 require_near(
                     wall.constitutive_residual_integral,
-                    wall.contact_speed_integral / wall.mobility -
+                    line_friction_residual -
                         contact_state.surface_tension *
                             (std::cos(
                                  wall.equilibrium_contact_angle_radians) *
                                  wall.owned_contact_measure -
                              wall.dynamic_cosine_integral),
-                    "contact-stage Ren--E residual integral");
+                    "contact-stage law residual integral");
                 require_near(
                     wall.line_friction_dissipation,
-                    wall.contact_speed_squared_integral / wall.mobility,
+                    expected_line_dissipation,
                     "contact-stage line-friction dissipation identity");
                 require_near(
                     wall.wall_slip_dissipation,
@@ -14194,6 +14222,11 @@ void FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals(
                 }
                 message
                     << " contact_wall_marker=" << contact.boundary_marker
+                    << " contact_law="
+                    << (contact.law ==
+                                interfaces::FreeSurfaceContactLaw::DynamicRenE
+                            ? "DynamicRenE"
+                            : "PrescribedAngle")
                     << " contact_equilibrium_angle_radians="
                     << contact.equilibrium_contact_angle_radians
                     << " contact_mobility=" << contact.mobility

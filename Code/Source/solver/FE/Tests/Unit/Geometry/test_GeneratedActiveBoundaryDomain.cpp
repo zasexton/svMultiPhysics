@@ -2724,6 +2724,35 @@ TEST(FreeSurfaceGeometrySnapshot,
                 contact.line_friction_dissipation +
                     contact.wall_slip_dissipation,
                 1.0e-14);
+
+    auto prescribed_slip_parameters = functional_parameters;
+    auto& prescribed_slip_coefficient =
+        prescribed_slip_parameters.dynamic_contact_coefficients.front();
+    prescribed_slip_coefficient.law =
+        interfaces::FreeSurfaceContactLaw::PrescribedAngle;
+    prescribed_slip_coefficient.mobility = 0.0;
+    const auto prescribed_slip =
+        interfaces::evaluateFreeSurfaceDynamicContactState(
+            *snapshot, prescribed_slip_parameters, velocity);
+    ASSERT_EQ(prescribed_slip.walls.size(), 1u);
+    const auto& prescribed_wall = prescribed_slip.walls.front();
+    EXPECT_EQ(prescribed_wall.law,
+              interfaces::FreeSurfaceContactLaw::PrescribedAngle);
+    EXPECT_DOUBLE_EQ(prescribed_wall.mobility, 0.0);
+    EXPECT_NEAR(prescribed_wall.wall_slip_dissipation,
+                contact.wall_slip_dissipation,
+                1.0e-14);
+    EXPECT_DOUBLE_EQ(prescribed_wall.line_friction_dissipation, 0.0);
+    EXPECT_DOUBLE_EQ(prescribed_slip.line_friction_dissipation, 0.0);
+    ASSERT_TRUE(
+        prescribed_wall.mean_constitutive_residual.has_value());
+    EXPECT_NEAR(*prescribed_wall.mean_constitutive_residual,
+                -functional_parameters.surface_tension * 0.5,
+                1.0e-14);
+    EXPECT_NEAR(prescribed_slip.total_dissipation,
+                prescribed_wall.wall_slip_dissipation,
+                1.0e-14);
+
     EXPECT_THROW(
         (void)interfaces::evaluateFreeSurfaceDynamicContactState(
             *snapshot, functional_parameters, {}),
@@ -2738,6 +2767,13 @@ TEST(FreeSurfaceGeometrySnapshot,
     invalid_contact_parameters = functional_parameters;
     invalid_contact_parameters.dynamic_contact_coefficients.front()
         .dynamic_viscosity = 0.0;
+    EXPECT_THROW(
+        (void)interfaces::evaluateFreeSurfaceDynamicContactState(
+            *snapshot, invalid_contact_parameters, velocity),
+        std::invalid_argument);
+    invalid_contact_parameters = prescribed_slip_parameters;
+    invalid_contact_parameters.dynamic_contact_coefficients.front()
+        .mobility = 0.5;
     EXPECT_THROW(
         (void)interfaces::evaluateFreeSurfaceDynamicContactState(
             *snapshot, invalid_contact_parameters, velocity),

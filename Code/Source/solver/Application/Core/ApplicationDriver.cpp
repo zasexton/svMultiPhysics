@@ -8633,6 +8633,7 @@ evaluateAcceptedFreeSurfaceContactStages(
       const double equilibrium_angle =
           static_cast<double>(
               coefficient.equilibrium_contact_angle_radians);
+      const double contact_law = static_cast<double>(coefficient.law);
       const double mobility = static_cast<double>(coefficient.mobility);
       const double slip_length =
           static_cast<double>(coefficient.slip_length);
@@ -8642,6 +8643,8 @@ evaluateAcceptedFreeSurfaceContactStages(
               globalMaxDouble(boundary_marker, comm) ||
           globalMinDouble(equilibrium_angle, comm) !=
               globalMaxDouble(equilibrium_angle, comm) ||
+          globalMinDouble(contact_law, comm) !=
+              globalMaxDouble(contact_law, comm) ||
           globalMinDouble(mobility, comm) !=
               globalMaxDouble(mobility, comm) ||
           globalMinDouble(slip_length, comm) !=
@@ -8860,6 +8863,7 @@ std::uint64_t freeSurfaceDiscreteFunctionalDeclarationContentKey(
        declaration.parameters.dynamic_contact_coefficients) {
     mix_signed(coefficient.boundary_marker);
     mix_real(coefficient.equilibrium_contact_angle_radians);
+    mix_signed(coefficient.law);
     mix_real(coefficient.mobility);
     mix_real(coefficient.slip_length);
     mix_real(coefficient.dynamic_viscosity);
@@ -12455,7 +12459,14 @@ captureAcceptedContactStageWallConstraints(
   }
 
   for (const auto& declaration : declarations) {
-    if (declaration.parameters.dynamic_contact_coefficients.empty()) {
+    const bool has_dynamic_contact_law = std::any_of(
+        declaration.parameters.dynamic_contact_coefficients.begin(),
+        declaration.parameters.dynamic_contact_coefficients.end(),
+        [](const auto& coefficient) {
+          return coefficient.law ==
+                 svmp::FE::interfaces::FreeSurfaceContactLaw::DynamicRenE;
+        });
+    if (!has_dynamic_contact_law) {
       continue;
     }
     const auto stage_it = stage_by_interface.find(declaration.interface_marker);
@@ -12493,14 +12504,11 @@ captureAcceptedContactStageWallConstraints(
     std::map<int, svmp::FE::level_set::LevelSetWallContactConstraintKind>
         contact_law_by_wall;
     for (const auto& coefficient :
-         declaration.parameters.young_wall_coefficients) {
-      contact_law_by_wall.emplace(
-          coefficient.boundary_marker,
-          svmp::FE::level_set::LevelSetWallContactConstraintKind::
-              PrescribedAngle);
-    }
-    for (const auto& coefficient :
          declaration.parameters.dynamic_contact_coefficients) {
+      if (coefficient.law !=
+          svmp::FE::interfaces::FreeSurfaceContactLaw::DynamicRenE) {
+        continue;
+      }
       contact_law_by_wall[coefficient.boundary_marker] =
           svmp::FE::level_set::LevelSetWallContactConstraintKind::
               AcceptedDynamicAngle;
@@ -12641,6 +12649,7 @@ resolveLevelSetWallAwareMaintenanceContext(
           static_cast<std::int64_t>(coefficient.boundary_marker)));
       mix_declaration_real(
           coefficient.equilibrium_contact_angle_radians);
+      mix_declaration_value(static_cast<std::uint64_t>(coefficient.law));
       mix_declaration_real(coefficient.mobility);
       mix_declaration_real(coefficient.slip_length);
       mix_declaration_real(coefficient.dynamic_viscosity);
@@ -12712,6 +12721,10 @@ resolveLevelSetWallAwareMaintenanceContext(
     }
     for (const auto& coefficient :
          declaration.parameters.dynamic_contact_coefficients) {
+      if (coefficient.law !=
+          svmp::FE::interfaces::FreeSurfaceContactLaw::DynamicRenE) {
+        continue;
+      }
       // A dynamic law supersedes the equilibrium Young datum on the same
       // wall.  The latter remains the momentum-side energy coefficient; the
       // accepted stage owns the redistancing geometry.
@@ -12723,7 +12736,14 @@ resolveLevelSetWallAwareMaintenanceContext(
       continue;
     }
 
-    if (!declaration.parameters.dynamic_contact_coefficients.empty()) {
+    const bool has_dynamic_contact_law = std::any_of(
+        declaration.parameters.dynamic_contact_coefficients.begin(),
+        declaration.parameters.dynamic_contact_coefficients.end(),
+        [](const auto& coefficient) {
+          return coefficient.law ==
+                 svmp::FE::interfaces::FreeSurfaceContactLaw::DynamicRenE;
+        });
+    if (has_dynamic_contact_law) {
       const auto stage_it =
           stage_by_interface.find(declaration.interface_marker);
       const auto* accepted_dynamic_stage =
@@ -12918,15 +12938,14 @@ resolveLevelSetWallAwareMaintenanceContext(
         ++local_rule_count_by_wall[constraint.boundary_marker];
       }
       for (const auto& [boundary_marker, kind] : contact_law_by_wall) {
+        if (kind == svmp::FE::level_set::
+                        LevelSetWallContactConstraintKind::PrescribedAngle) {
+          continue;
+        }
         const auto global_rule_count = globalSumSize(
             local_rule_count_by_wall[boundary_marker], comm);
         resolved.has_global_contact_constraints =
             resolved.has_global_contact_constraints || global_rule_count > 0u;
-        if (kind == svmp::FE::level_set::
-                        LevelSetWallContactConstraintKind::PrescribedAngle) {
-          resolved.global_prescribed_contact_rules += global_rule_count;
-          continue;
-        }
         resolved.global_dynamic_contact_rules += global_rule_count;
         const int dynamic_boundary_marker = boundary_marker;
         const auto wall_count = static_cast<std::size_t>(std::count_if(
@@ -12961,7 +12980,6 @@ resolveLevelSetWallAwareMaintenanceContext(
               std::to_string(boundary_marker) + ".");
         }
       }
-      continue;
     }
 
     const bool local_marker_available =
@@ -13019,6 +13037,10 @@ resolveLevelSetWallAwareMaintenanceContext(
           std::to_string(declaration.interface_marker) + ".");
     }
     for (const auto& [boundary_marker, kind] : contact_law_by_wall) {
+      if (kind != svmp::FE::level_set::
+                      LevelSetWallContactConstraintKind::PrescribedAngle) {
+        continue;
+      }
       std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
           wall_constraints;
       bool local_parent_ids_valid = true;

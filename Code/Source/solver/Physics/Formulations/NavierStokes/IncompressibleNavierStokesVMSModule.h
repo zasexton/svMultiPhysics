@@ -286,6 +286,10 @@ struct IncompressibleNavierStokesVMSOptions {
             ScalarValue contact_angle_radians{1.57079632679489661923};
             std::array<ScalarValue, 3> wall_normal{
                 ScalarValue{0.0}, ScalarValue{0.0}, ScalarValue{0.0}};
+
+            // Optional sharp Navier slip on the wetted portion of this wall.
+            // Omitting the value retains the no-slip prescribed-angle model.
+            std::optional<ScalarValue> slip_length{};
         };
 
         struct DynamicRenE {

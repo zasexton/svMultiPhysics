@@ -103,7 +103,7 @@ concept HasContactAnglePenalty = requires(Configuration value) {
 };
 
 static_assert(!HasContactMobility<FreeSurfaceContactLine::PrescribedAngle>);
-static_assert(!HasContactSlipLength<FreeSurfaceContactLine::PrescribedAngle>);
+static_assert(HasContactSlipLength<FreeSurfaceContactLine::PrescribedAngle>);
 static_assert(!HasContactAnglePenalty<FreeSurfaceContactLine::PrescribedAngle>);
 static_assert(!HasContactAnglePenalty<FreeSurfaceContactLine::DynamicRenE>);
 
@@ -122,7 +122,8 @@ FreeSurfaceContactLine prescribedContactLine(
     int wall_marker,
     FE::Real angle,
     std::array<FE::Real, 3> wall_normal,
-    int contact_marker = -1)
+    int contact_marker = -1,
+    std::optional<FE::Real> slip_length = std::nullopt)
 {
     return FreeSurfaceContactLine{
         .configuration = FreeSurfaceContactLine::PrescribedAngle{
@@ -130,6 +131,7 @@ FreeSurfaceContactLine prescribedContactLine(
             .contact_line_marker = contact_marker,
             .contact_angle_radians = angle,
             .wall_normal = {wall_normal[0], wall_normal[1], wall_normal[2]},
+            .slip_length = slip_length,
         },
     };
 }
@@ -15033,7 +15035,7 @@ TEST(MovingDomainPhysics, FreeSurfaceContactAlternativesExcludeCrossModelState)
 {
     EXPECT_FALSE(
         (HasContactMobility<FreeSurfaceContactLine::PrescribedAngle>));
-    EXPECT_FALSE(
+    EXPECT_TRUE(
         (HasContactSlipLength<FreeSurfaceContactLine::PrescribedAngle>));
     EXPECT_FALSE(
         (HasContactAnglePenalty<FreeSurfaceContactLine::DynamicRenE>));

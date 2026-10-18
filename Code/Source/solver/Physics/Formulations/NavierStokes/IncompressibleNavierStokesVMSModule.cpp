@@ -2041,13 +2041,46 @@ contactLineMobility(const FreeSurfaceContactLine& contact_line)
 [[nodiscard]] const IncompressibleNavierStokesVMSOptions::ScalarValue&
 contactLineSlipLength(const FreeSurfaceContactLine& contact_line)
 {
-    const auto* configuration =
-        std::get_if<FreeSurfaceContactLine::DynamicRenE>(
-            &contact_line.configuration);
-    if (configuration == nullptr) {
-        throw std::logic_error("contactLineSlipLength requires DynamicRenE");
-    }
-    return configuration->slip_length;
+    return std::visit(
+        [](const auto& configuration)
+            -> const IncompressibleNavierStokesVMSOptions::ScalarValue& {
+            using Configuration = std::decay_t<decltype(configuration)>;
+            if constexpr (std::is_same_v<
+                              Configuration,
+                              FreeSurfaceContactLine::PrescribedAngle>) {
+                if (!configuration.slip_length.has_value()) {
+                    throw std::logic_error(
+                        "contactLineSlipLength requires configured Navier slip");
+                }
+                return *configuration.slip_length;
+            } else if constexpr (std::is_same_v<
+                                     Configuration,
+                                     FreeSurfaceContactLine::DynamicRenE>) {
+                return configuration.slip_length;
+            } else {
+                throw std::logic_error(
+                    "contactLineSlipLength requires configured Navier slip");
+            }
+        },
+        contact_line.configuration);
+}
+
+[[nodiscard]] bool contactLineHasNavierSlip(
+    const FreeSurfaceContactLine& contact_line) noexcept
+{
+    return std::visit(
+        [](const auto& configuration) noexcept {
+            using Configuration = std::decay_t<decltype(configuration)>;
+            if constexpr (std::is_same_v<
+                              Configuration,
+                              FreeSurfaceContactLine::PrescribedAngle>) {
+                return configuration.slip_length.has_value();
+            } else {
+                return std::is_same_v<Configuration,
+                                      FreeSurfaceContactLine::DynamicRenE>;
+            }
+        },
+        contact_line.configuration);
 }
 
 [[nodiscard]] int contactLineConstraintMarker(
@@ -2392,7 +2425,10 @@ void declareFreeSurfaceDiscreteFunctionals(
                             "free-surface discrete-functional equilibrium "
                             "contact angle"),
                 });
-            if (kind == ContactLineKind::DynamicRenE) {
+            if (kind == ContactLineKind::DynamicRenE ||
+                contactLineHasNavierSlip(contact_line)) {
+                const bool dynamic_law =
+                    kind == ContactLineKind::DynamicRenE;
                 parameters.dynamic_contact_coefficients.push_back(
                     FE::interfaces::FreeSurfaceDynamicContactCoefficient{
                         .boundary_marker =
@@ -2402,10 +2438,17 @@ void declareFreeSurfaceDiscreteFunctionals(
                                 contactLineAngleRadians(contact_line),
                                 "free-surface discrete-functional dynamic "
                                 "contact equilibrium angle"),
-                        .mobility = constantScalarValueOrThrow(
-                            contactLineMobility(contact_line),
-                            "free-surface discrete-functional dynamic "
-                            "contact mobility"),
+                        .law = dynamic_law
+                            ? FE::interfaces::FreeSurfaceContactLaw::
+                                  DynamicRenE
+                            : FE::interfaces::FreeSurfaceContactLaw::
+                                  PrescribedAngle,
+                        .mobility = dynamic_law
+                            ? constantScalarValueOrThrow(
+                                  contactLineMobility(contact_line),
+                                  "free-surface discrete-functional dynamic "
+                                  "contact mobility")
+                            : FE::Real{0.0},
                         .slip_length = constantScalarValueOrThrow(
                             contactLineSlipLength(contact_line),
                             "free-surface discrete-functional Navier slip "
@@ -4397,6 +4440,27 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                 throw std::invalid_argument(
                     "IncompressibleNavierStokesVMSModule: contact-line contact_angle_radians must be finite and strictly in (0, pi); complete-wetting endpoints are not a transverse codimension-two contact configuration");
             }
+            if (contactLineHasNavierSlip(contact_line)) {
+                if (options.viscosity_model) {
+                    throw std::invalid_argument(
+                        "IncompressibleNavierStokesVMSModule: prescribed-angle Navier slip requires literal Newtonian viscosity so accepted sharp-wall dissipation can be evaluated from the identical operator stage");
+                }
+                if (bc.active_domain_method !=
+                    FreeSurfaceActiveDomainMethod::CutVolume) {
+                    throw std::invalid_argument(
+                        "IncompressibleNavierStokesVMSModule: prescribed-angle Navier slip requires Active_domain_method=CutVolume for a sharp wetted-wall domain");
+                }
+                if (bc.active_domain_smoothing_width != FE::Real{0.0}) {
+                    throw std::invalid_argument(
+                        "IncompressibleNavierStokesVMSModule: prescribed-angle Navier slip requires active_domain_smoothing_width=0 because the sharp wall operator has no smoothing-width parameter");
+                }
+                (void)constantScalarValueOrThrow(
+                    contactLineSlipLength(contact_line),
+                    "PrescribedContactAngle Navier slip_length");
+                validatePositiveConstantScalar(
+                    contactLineSlipLength(contact_line),
+                    "PrescribedContactAngle Navier slip_length");
+            }
             if (isUnfittedLevelSet(bc)) {
                 if (bc.active_domain == FreeSurfaceActiveDomain::None) {
                     throw std::invalid_argument(
@@ -4446,6 +4510,12 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                     contact_line,
                     dim,
                     "prescribed contact angle");
+                if (contactLineHasNavierSlip(contact_line)) {
+                    validateDynamicContactWallEssentialBC(
+                        options, contact_line, dim);
+                    validateDynamicContactPlanarWallMarker(
+                        system, contact_line);
+                }
             } else {
                 throw std::invalid_argument(
                     "IncompressibleNavierStokesVMSModule: prescribed fitted contact angles are unsupported until a true fitted contact-line (codimension-two) integration entity is available; the condition must not be integrated over the complete free-surface boundary");
@@ -4613,8 +4683,7 @@ void validateNavierStokesBoundaryConfiguration(
                 free_surface.contact_lines.begin(),
                 free_surface.contact_lines.end(),
                 [](const auto& contact_line) {
-                    return contactLineKind(contact_line) ==
-                           ContactLineKind::DynamicRenE;
+                    return contactLineHasNavierSlip(contact_line);
                 });
     }
     if (uses_sharp_active_boundary_form) {
@@ -5422,6 +5491,30 @@ void applyDynamicContactAngleResidual(
 {
     using namespace FE::forms;
 
+    const auto install_navier_wall_slip =
+        [&](const FreeSurfaceContactLine& contact_line) {
+            const auto wall_n = wallNormalExpression(contact_line, dim);
+            const auto slip_length = FE::forms::bc::toScalarExpr(
+                contactLineSlipLength(contact_line),
+                freeSurfaceValueName(
+                    "ns_contact_wall_slip_length", bc));
+            const auto u_tangent = u - dot(u, wall_n) * wall_n;
+            const auto v_tangent = v - dot(v, wall_n) * wall_n;
+            const int active_wall_marker = generatedActiveBoundaryMarker(
+                bc, contactLineWallBoundaryMarker(contact_line), system);
+            system.registerGeneratedEmbeddedInterfaceMarker(
+                active_wall_marker);
+            momentum_form = momentum_form +
+                (mu / slip_length * dot(u_tangent, v_tangent))
+                    .dExteriorBoundary(
+                        FE::forms::ExteriorBoundaryMeasure::
+                            generatedActiveSubset(
+                                contactLineWallBoundaryMarker(
+                                    contact_line),
+                                active_wall_marker));
+            return active_wall_marker;
+        };
+
     for (const auto& contact_line : bc.contact_lines) {
         if (contactLineKind(contact_line) ==
                 ContactLineKind::PrescribedAngle &&
@@ -5441,6 +5534,9 @@ void applyDynamicContactAngleResidual(
                     " surface_tension_form=KinematicAreaGradientTraction" +
                     " separate_equilibrium_line_force=omitted" +
                     " diagnostic=navier_stokes_total_energy_traction_wall_ownership");
+                if (contactLineHasNavierSlip(contact_line)) {
+                    (void)install_navier_wall_slip(contact_line);
+                }
                 continue;
             }
             // Accepted-state wall-aware repair enforces the geometric angle,
@@ -5500,6 +5596,29 @@ void applyDynamicContactAngleResidual(
                      ? "surface_conormal_plus_equilibrium_wall_energy"
                      : "explicit_dynamic_angle_gap") +
                 " diagnostic=navier_stokes_prescribed_contact_wall_energy");
+            if (contactLineHasNavierSlip(contact_line)) {
+                const int active_wall_marker =
+                    install_navier_wall_slip(contact_line);
+                FE_LOG_INFO(
+                    std::string("IncompressibleNavierStokesVMSModule: installed prescribed-angle sharp Navier wall slip") +
+                    " interface_marker=" +
+                    std::to_string(bc.interface_marker) +
+                    " wall_marker=" +
+                    std::to_string(
+                        contactLineWallBoundaryMarker(contact_line)) +
+                    " active_wall_marker=" +
+                    std::to_string(active_wall_marker) +
+                    " wetted_wall_domain=sharp_generated_active_boundary" +
+                    " line_friction=absent" +
+                    " diagnostic=navier_stokes_prescribed_contact_navier_slip");
+            }
+            continue;
+        }
+        if (contactLineKind(contact_line) ==
+            ContactLineKind::PrescribedAngle) {
+            if (contactLineHasNavierSlip(contact_line)) {
+                (void)install_navier_wall_slip(contact_line);
+            }
             continue;
         }
         if (contactLineKind(contact_line) !=
@@ -5619,23 +5738,8 @@ void applyDynamicContactAngleResidual(
                     : wall_energy_form;
         }
 
-        const auto slip_length = FE::forms::bc::toScalarExpr(
-            contactLineSlipLength(contact_line),
-            freeSurfaceValueName(
-                "ns_dynamic_contact_angle_slip_length", bc));
-        const auto u_tangent = u - dot(u, wall_n) * wall_n;
-        const auto v_tangent = v - dot(v, wall_n) * wall_n;
-        const int active_wall_marker = generatedActiveBoundaryMarker(
-            bc, contactLineWallBoundaryMarker(contact_line), system);
-        system.registerGeneratedEmbeddedInterfaceMarker(active_wall_marker);
-        momentum_form = momentum_form +
-            (mu / slip_length * dot(u_tangent, v_tangent))
-                .dExteriorBoundary(
-                    FE::forms::ExteriorBoundaryMeasure::
-                        generatedActiveSubset(
-                            contactLineWallBoundaryMarker(
-                                contact_line),
-                            active_wall_marker));
+        const int active_wall_marker =
+            install_navier_wall_slip(contact_line);
 
         FE_LOG_INFO(
             std::string("IncompressibleNavierStokesVMSModule: installed coupled dissipative Ren--E DynamicContactAngle") +
@@ -7279,6 +7383,13 @@ void installFittedFreeSurfaceMeshKinematics(
         out << ",\"level_set_geometry_owner\":"
             << "\"accepted_state_wall_aware_repair\""
             << ",\"prescribed_angle_operator\":\"wall_aware_geometry_only\"";
+        if (contactLineHasNavierSlip(contact_line)) {
+            out << ",\"wall_slip_model\":\"Navier\""
+                << ",\"slip_length\":"
+                << jsonScalarValue(contactLineSlipLength(contact_line))
+                << ",\"slip_length_unit\":\"length\""
+                << ",\"line_friction\":\"absent\"";
+        }
     }
     if (kind == ContactLineKind::DynamicRenE) {
         const auto mobility = constantScalarValueOrThrow(
