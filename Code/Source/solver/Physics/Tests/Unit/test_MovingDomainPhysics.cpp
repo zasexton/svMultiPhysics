@@ -4930,6 +4930,9 @@ TEST(MovingDomainPhysics,
         EXPECT_EQ(measurements.front().key.boundary_marker, marker);
         EXPECT_EQ(measurements.front().related_velocity_field, velocity);
         EXPECT_EQ(
+            measurements.front().tangential_policy,
+            expected_policy);
+        EXPECT_EQ(
             measurements.front().normal_constraint.target_expression.node(),
             normal_declarations.front().target_expression.node());
         EXPECT_FALSE(
@@ -4948,6 +4951,31 @@ TEST(MovingDomainPhysics,
         EXPECT_FALSE(
             measurements.front()
                 .mesh_tangential_squared_integral_functional.empty());
+        if (policy ==
+            ns::FreeSurfaceTangentialMeshPolicy::Prescribed) {
+            ASSERT_TRUE(
+                measurements.front()
+                    .prescribed_tangential_mesh_velocity.has_value());
+            EXPECT_EQ(
+                *measurements.front()
+                     .prescribed_tangential_mesh_velocity,
+                (std::array<FE::Real, 3>{
+                    FE::Real{0.25},
+                    FE::Real{-0.10},
+                    FE::Real{0.05}}));
+            EXPECT_FALSE(
+                measurements.front()
+                    .tangential_target_gap_squared_integral_functional
+                    .empty());
+        } else {
+            EXPECT_FALSE(
+                measurements.front()
+                    .prescribed_tangential_mesh_velocity.has_value());
+            EXPECT_TRUE(
+                measurements.front()
+                    .tangential_target_gap_squared_integral_functional
+                    .empty());
+        }
         for (const auto& functional_name : {
                  measurements.front()
                      .normal_gap_squared_integral_functional,
@@ -16892,6 +16920,14 @@ TEST(MovingDomainPhysics, CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup)
     EXPECT_GE(
         pending_measurements.front().raw.mesh_tangential_sq,
         FE::Real{0.0});
+    ASSERT_TRUE(
+        pending_measurements.front().raw.tangential_target_gap_sq
+            .has_value());
+    EXPECT_GT(
+        *pending_measurements.front().raw.tangential_target_gap_sq,
+        FE::Real{0.0});
+    const auto tangential_target_gap_sq =
+        *pending_measurements.front().raw.tangential_target_gap_sq;
     EXPECT_NEAR(
         pending_measurements.front().raw.mesh_velocity_sq,
         pending_measurements.front().raw.mesh_normal_sq +
@@ -16908,6 +16944,15 @@ TEST(MovingDomainPhysics, CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup)
     ASSERT_EQ(
         system.fittedALENormalOperatorStageMeasurementHistory().size(),
         1u);
+    ASSERT_TRUE(
+        system.fittedALENormalOperatorStageMeasurementHistory()
+            .front()
+            .raw.tangential_target_gap_sq.has_value());
+    EXPECT_DOUBLE_EQ(
+        *system.fittedALENormalOperatorStageMeasurementHistory()
+             .front()
+             .raw.tangential_target_gap_sq,
+        tangential_target_gap_sq);
     ASSERT_NO_THROW(
         system.stageFittedALENormalOperatorStageMeasurements(
             state, stage_metadata));

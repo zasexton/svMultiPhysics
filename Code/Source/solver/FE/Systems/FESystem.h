@@ -345,6 +345,12 @@ struct OperatorStageMeasurementMetadata {
         const OperatorStageMeasurementMetadata&) = default;
 };
 
+enum class MeshTangentialBoundaryPolicy : std::uint8_t {
+    Free,
+    SmoothingOnly,
+    Prescribed
+};
+
 /**
  * @brief Registered fitted-ALE normal measurement and its reduction names.
  *
@@ -356,12 +362,19 @@ struct FittedALENormalMeasurementDeclaration {
     FittedALENormalMeasurementKey key{};
     FieldId related_velocity_field{INVALID_FIELD_ID};
     MeshNormalBoundaryConstraintDeclaration normal_constraint{};
+    MeshTangentialBoundaryPolicy tangential_policy{
+        MeshTangentialBoundaryPolicy::SmoothingOnly};
+    /** Present only for a prescribed tangential mesh-velocity policy. */
+    std::optional<std::array<Real, 3>>
+        prescribed_tangential_mesh_velocity{};
     std::string mesh_normal_integral_functional{};
     std::string fluid_normal_integral_functional{};
     std::string normal_gap_squared_integral_functional{};
     std::string mesh_velocity_squared_integral_functional{};
     std::string mesh_normal_squared_integral_functional{};
     std::string mesh_tangential_squared_integral_functional{};
+    /** Empty when the selected tangential policy has no prescribed target. */
+    std::string tangential_target_gap_squared_integral_functional{};
 };
 
 /**
@@ -372,7 +385,9 @@ struct FittedALENormalMeasurementDeclaration {
  * squared difference.  The remaining squared integrals retain the complete
  * mesh velocity and its orthogonal normal/tangential projections.  These are
  * raw operator-stage moments: they are not endpoint values and must not be
- * reported as work or dissipation.
+ * reported as work or dissipation.  `tangential_target_gap_sq` is present
+ * only for a prescribed tangential target; absence is distinct from zero
+ * error for policies without a target.
  */
 struct FittedALENormalOperatorStageRawValue {
     FittedALENormalMeasurementKey key{};
@@ -383,6 +398,7 @@ struct FittedALENormalOperatorStageRawValue {
     Real mesh_velocity_sq{0.0};
     Real mesh_normal_sq{0.0};
     Real mesh_tangential_sq{0.0};
+    std::optional<Real> tangential_target_gap_sq{};
     /** Complete rank-local live stamp; deliberately excluded from consensus. */
     OperatorStageGeometryMetadata stage_mesh_revision{};
 };
@@ -398,12 +414,6 @@ struct FittedALENormalOperatorStageHistoryRecord {
     FittedALENormalMeasurementDeclaration declaration{};
     OperatorStageMeasurementMetadata stage{};
     FittedALENormalOperatorStageRawValue raw{};
-};
-
-enum class MeshTangentialBoundaryPolicy : std::uint8_t {
-    Free,
-    SmoothingOnly,
-    Prescribed
 };
 
 struct MeshTangentialBoundaryPolicyDeclaration {
@@ -989,7 +999,9 @@ public:
      */
     void registerFittedALENormalOperatorStageMeasurement(
         FieldId mesh_displacement_field,
-        int boundary_marker);
+        int boundary_marker,
+        std::optional<std::array<Real, 3>>
+            prescribed_tangential_mesh_velocity = std::nullopt);
     [[nodiscard]] std::span<
         const FittedALENormalMeasurementDeclaration>
     fittedALENormalOperatorStageMeasurementDeclarations() const noexcept {
