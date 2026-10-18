@@ -541,6 +541,8 @@ void construct_fluid(ComMod& com_mod, const mshType& lM, const SolutionStates& s
   // Loop over all elements of mesh
   //
   int num_c = lM.nEl / 10;
+  const bool zero_reference_hessian =
+      lM.eType == ElementType::TRI3 || lM.eType == ElementType::TET4;
 
   for (int e = 0; e < lM.nEl; e++) {
     #ifdef debug_construct_fluid
@@ -587,6 +589,9 @@ void construct_fluid(ComMod& com_mod, const mshType& lM, const SolutionStates& s
     Array<double> xwl(nsd,fs[0].eNoN); 
     Array<double> Nwx(nsd,fs[0].eNoN); 
     Array<double> Nwxx(l,fs[0].eNoN);
+    if (zero_reference_hessian) {
+      Nwxx = 0.0;
+    }
 
     Array<double> xql(nsd,fs[1].eNoN); 
     Array<double> Nqx(nsd,fs[1].eNoN);
@@ -646,8 +651,10 @@ void construct_fluid(ComMod& com_mod, const mshType& lM, const SolutionStates& s
            throw std::runtime_error("[construct_fluid] Jacobian for element " + std::to_string(e) + " is < 0.");
         }
 
-        auto Nxx = fs[0].Nxx.rslice(g);
-        nn::gn_nxx(l, fs[0].eNoN, nsd, nsd, Nx, Nxx, xwl, Nwx, Nwxx); 
+        if (!zero_reference_hessian) {
+          auto Nxx = fs[0].Nxx.rslice(g);
+          nn::gn_nxx(l, fs[0].eNoN, nsd, nsd, Nx, Nxx, xwl, Nwx, Nwxx);
+        }
       }
 
       double w = fs[0].w(g) * Jac;
