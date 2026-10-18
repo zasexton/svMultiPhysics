@@ -1807,7 +1807,9 @@ resolveDistributedAggregationDeclarations(
             std::string(field_name) + "' candidates=" +
             std::to_string(guard_failure_count) + guard_failures.str() +
             " Every root proposal of these globally rooted candidates fails "
-            "the aggregation guards: " + kGuardRootlessOptInHint + ".");
+            "the aggregation guards or the reference-coordinate inversion "
+            "(the aggregation_root_proposal_outcomes lines name each "
+            "proposal and why it failed): " + kGuardRootlessOptInHint + ".");
     }
 
     // Every rank now knows the same canonical lines.  Before installing them,
@@ -6187,6 +6189,16 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     std::vector<GlobalIndex> current_slaves;
     std::vector<GlobalIndex> root_check_nodes;
     LocalAggregationDeclarationMap local_aggregation_declarations;
+    // Outcome of every local root proposal, reported only if the resolver
+    // finds a globally rooted candidate without a valid proposal.
+    struct RootProposalOutcome {
+        GlobalIndex candidate_dof{INVALID_GLOBAL_INDEX};
+        GlobalIndex root_cell_gid{INVALID_GLOBAL_INDEX};
+        std::size_t distance{0u};
+        Real extrapolation{std::numeric_limits<Real>::quiet_NaN()};
+        const char* outcome{"unknown"};
+    };
+    std::vector<RootProposalOutcome> root_proposal_outcomes;
     const bool allow_unaggregated = runtime_options.allow_unaggregated;
     const std::size_t max_lines = runtime_options.max_lines;
     std::exception_ptr local_proposal_exception;
@@ -6281,6 +6293,14 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             Real traced_extrapolation =
                 std::numeric_limits<Real>::quiet_NaN();
             auto trace_proposal = [&](const char* outcome) {
+                root_proposal_outcomes.push_back(RootProposalOutcome{
+                    .candidate_dof = declaration_dof,
+                    .root_cell_gid = mesh_global_entity_ids_available
+                                         ? mesh.getCellGlobalId(root)
+                                         : root,
+                    .distance = root_candidate.distance,
+                    .extrapolation = traced_extrapolation,
+                    .outcome = outcome});
                 if (!aggregationProposalTraceEnabled()) {
                     return;
                 }
@@ -6657,17 +6677,77 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 }
             }
         }
-        distributed_result = resolveDistributedAggregationDeclarations(
-            system,
-            constraints,
-            rec.name,
-            global_candidates,
-            local_aggregation_declarations,
-            assembled_candidate_dofs,
-            row_coupled_candidate_dofs,
-            slave_all_cut,
-            allow_unaggregated,
-            guards_.rootless_fallback);
+        try {
+            distributed_result = resolveDistributedAggregationDeclarations(
+                system,
+                constraints,
+                rec.name,
+                global_candidates,
+                local_aggregation_declarations,
+                assembled_candidate_dofs,
+                row_coupled_candidate_dofs,
+                slave_all_cut,
+                allow_unaggregated,
+                guards_.rootless_fallback);
+        } catch (const std::exception& failure) {
+            // Name every root of a candidate without a valid proposal and,
+            // per rank, the outcome of each proposal that rank built, so the
+            // log says whether a guard or the inversion rejected it.
+            const std::string message = failure.what();
+            if (message.find("aggregation_no_root_inside_guards") !=
+                std::string::npos) {
+                int outcome_rank = 0;
+#if FE_HAS_MPI
+                if (mpi_initialized != 0) {
+                    MPI_Comm_rank(system.dofHandler().mpiComm(),
+                                  &outcome_rank);
+                }
+#endif
+                for (const auto& [dof, candidate] : global_candidates) {
+                    if (message.find(" dof=" + std::to_string(dof) + " ") ==
+                        std::string::npos) {
+                        continue;
+                    }
+                    std::ostringstream detail;
+                    detail << std::setprecision(10)
+                           << "SmallCutAggregationConstraint: diagnostic="
+                              "aggregation_root_proposal_outcomes rank="
+                           << outcome_rank << " field='" << rec.name
+                           << "' candidate_dof=" << dof << " xyz=("
+                           << candidate.coordinates[0] << ","
+                           << candidate.coordinates[1] << ","
+                           << candidate.coordinates[2] << ") roots=";
+                    const auto roots = global_roots_by_candidate.find(dof);
+                    if (roots != global_roots_by_candidate.end()) {
+                        for (const auto& root : roots->second) {
+                            detail << "[gid="
+                                   << global_physical_cell_gid_of[root.cell]
+                                   << " distance=" << root.distance
+                                   << " owner="
+                                   << global_cell_owner_rank_of[root.cell]
+                                   << "]";
+                        }
+                    }
+                    detail << " local_proposals=";
+                    bool any_local = false;
+                    for (const auto& note : root_proposal_outcomes) {
+                        if (note.candidate_dof != dof) {
+                            continue;
+                        }
+                        any_local = true;
+                        detail << "[gid=" << note.root_cell_gid
+                               << " distance=" << note.distance
+                               << " extrapolation=" << note.extrapolation
+                               << " outcome=" << note.outcome << "]";
+                    }
+                    if (!any_local) {
+                        detail << "none";
+                    }
+                    FE_LOG_WARNING(detail.str());
+                }
+            }
+            throw;
+        }
         // Communicator-global counts; the run summary reports them even when
         // the per-refresh diagnostic line is not printed.
         diagnostics::recordAggregationHalo(

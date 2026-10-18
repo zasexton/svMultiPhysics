@@ -2301,13 +2301,25 @@ TEST(SmallCutAggregationConstraint,
         guards.maximum_reference_extrapolation_distance = 2.9;
         systems::FESystem system(buildTriangleColumn(4));
         static_cast<void>(build(guards, system));
+        testing::internal::CaptureStdout();
+        testing::internal::CaptureStderr();
         try {
             system.rebuildConstraintState();
-            FAIL() << "a root beyond the invariant extrapolation guard must fail closed";
+            ADD_FAILURE() << "a root beyond the invariant extrapolation guard must fail closed";
         } catch (const std::runtime_error& error) {
             EXPECT_NE(std::string(error.what()).find("no_valid_root_proposal"),
                       std::string::npos);
         }
+        auto log_output = testing::internal::GetCapturedStdout();
+        log_output += testing::internal::GetCapturedStderr();
+        // The failure names the root of each such candidate and why its
+        // proposal failed: vertex (1,4) at 3.0 from cell 0.
+        const auto outcomes = log_output.find(
+            "diagnostic=aggregation_root_proposal_outcomes");
+        ASSERT_NE(outcomes, std::string::npos) << log_output;
+        EXPECT_NE(log_output.find("outcome=extrapolation_guard", outcomes),
+                  std::string::npos)
+            << log_output;
     }
     {
         // With the opt-in fallback the top vertices (3.16 and 3.0) get the
