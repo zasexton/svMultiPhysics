@@ -1889,14 +1889,7 @@ void apply_level_set_bcs(const svmp::Physics::EquationModuleInput& input,
   }
 }
 
-struct TranslatedLevelSetTransportInput {
-  std::shared_ptr<const svmp::FE::spaces::FunctionSpace> level_set_space{};
-  ls::LevelSetTransportOptions options{};
-  svmp::FE::systems::FormInstallOptions install_options{};
-  std::vector<std::string> projected_curvature_fields{};
-};
-
-TranslatedLevelSetTransportInput
+application::core::ResolvedLevelSetEquationConfiguration
 translate_level_set_transport_input(
     const svmp::Physics::EquationModuleInput& input)
 {
@@ -2040,7 +2033,9 @@ translate_level_set_transport_input(
   }
   const auto projected_curvature_fields =
       projected_curvature_fields_from_input(input);
-  return TranslatedLevelSetTransportInput{
+  return application::core::ResolvedLevelSetEquationConfiguration{
+      .source_mesh = input.mesh,
+      .source_mesh_name = input.mesh_name,
       .level_set_space = std::move(level_set_space),
       .options = std::move(options),
       .install_options = install_options,
@@ -2049,37 +2044,37 @@ translate_level_set_transport_input(
 }
 
 std::unique_ptr<svmp::Physics::PhysicsModule>
-create_level_set_transport_from_input(
-    const svmp::Physics::EquationModuleInput& input,
+create_level_set_transport_from_configuration(
+    const application::core::ResolvedLevelSetEquationConfiguration&
+        configuration,
     svmp::FE::systems::FESystem& system)
 {
-  auto translated = translate_level_set_transport_input(input);
   preflight_projected_curvature_fields(
       system,
-      translated.projected_curvature_fields,
-      translated.level_set_space,
-      translated.options.level_set.field_name,
-      translated.options.velocity.source ==
+      configuration.projected_curvature_fields,
+      configuration.level_set_space,
+      configuration.options.level_set.field_name,
+      configuration.options.velocity.source ==
                   ls::LevelSetVelocitySource::ConstantVector ||
-              translated.options.velocity.source ==
+              configuration.options.velocity.source ==
                   ls::LevelSetVelocitySource::MaterialInterfacePhasePair
           ? std::string_view{}
-          : std::string_view{translated.options.velocity.field_name},
-      translated.options.conservative_phase.enabled
+          : std::string_view{configuration.options.velocity.field_name},
+      configuration.options.conservative_phase.enabled
           ? std::string_view{
-                translated.options.conservative_phase.liquid_indicator
+                configuration.options.conservative_phase.liquid_indicator
                     .field_name}
           : std::string_view{});
-  const auto projected_curvature_space = translated.level_set_space;
+  const auto projected_curvature_space = configuration.level_set_space;
 
   auto module = std::make_unique<LevelSetTransportInputAdapter>(
-      std::move(translated.level_set_space),
-      std::move(translated.options),
-      translated.install_options);
+      configuration.level_set_space,
+      configuration.options,
+      configuration.install_options);
   module->registerOn(system);
   register_projected_curvature_fields(
       system,
-      translated.projected_curvature_fields,
+      configuration.projected_curvature_fields,
       projected_curvature_space);
   return module;
 }
@@ -2177,26 +2172,35 @@ std::vector<std::string> equationTypes()
   return {"level_set", "levelSet", "level_set_transport"};
 }
 
+std::shared_ptr<
+    const application::core::ResolvedLevelSetEquationConfiguration>
+resolveConfiguration(const svmp::Physics::EquationModuleInput& input)
+{
+  return std::make_shared<
+      application::core::ResolvedLevelSetEquationConfiguration>(
+      translate_level_set_transport_input(input));
+}
+
 std::optional<MaterialInterfaceTransportDependency>
 materialInterfaceTransportDependency(
-    const svmp::Physics::EquationModuleInput& input)
+    const application::core::ResolvedLevelSetEquationConfiguration&
+        configuration)
 {
-  auto translated = translate_level_set_transport_input(input);
-  const auto& options = translated.options;
+  const auto& options = configuration.options;
   if (options.velocity.source !=
       ls::LevelSetVelocitySource::MaterialInterfacePhasePair) {
     return std::nullopt;
   }
-  if (!input.mesh || options.operator_tag.empty() ||
+  if (!configuration.source_mesh || options.operator_tag.empty() ||
       options.level_set.field_name.empty() ||
       options.conservative_phase.liquid_indicator.field_name.empty()) {
     throw std::invalid_argument(
         "[svMultiPhysics::Application] incomplete material-interface transport dependency");
   }
   return MaterialInterfaceTransportDependency{
-      .mesh = input.mesh.get(),
-      .mesh_name = input.mesh_name,
-      .dimension = input.mesh->dim(),
+      .mesh = configuration.source_mesh.get(),
+      .mesh_name = configuration.source_mesh_name,
+      .dimension = configuration.source_mesh->dim(),
       .interface_marker = options.velocity.material_interface_marker,
       .level_set_field_name = options.level_set.field_name,
       .conservative_phase_field_name =
@@ -2206,11 +2210,11 @@ materialInterfaceTransportDependency(
 }
 
 void preRegisterMaterialInterfaceTransportFields(
-    const svmp::Physics::EquationModuleInput& input,
+    const application::core::ResolvedLevelSetEquationConfiguration&
+        configuration,
     svmp::FE::systems::FESystem& system)
 {
-  auto translated = translate_level_set_transport_input(input);
-  auto& options = translated.options;
+  const auto& options = configuration.options;
   if (options.velocity.source !=
       ls::LevelSetVelocitySource::MaterialInterfacePhasePair) {
     throw std::invalid_argument(
@@ -2224,35 +2228,62 @@ void preRegisterMaterialInterfaceTransportFields(
 
   preflight_projected_curvature_fields(
       system,
-      translated.projected_curvature_fields,
-      translated.level_set_space,
+      configuration.projected_curvature_fields,
+      configuration.level_set_space,
       options.level_set.field_name,
       std::string_view{},
       options.conservative_phase.liquid_indicator.field_name);
   preflightScalarTransportField(
       system,
       options.level_set,
-      translated.level_set_space,
+      configuration.level_set_space,
       "level-set");
   preflightScalarTransportField(
       system,
       options.conservative_phase.liquid_indicator,
-      translated.level_set_space,
+      configuration.level_set_space,
       "conservative-phase");
 
   (void)ensureScalarTransportField(
-      system, options.level_set, translated.level_set_space);
+      system, options.level_set, configuration.level_set_space);
   (void)ensureScalarTransportField(
       system,
       options.conservative_phase.liquid_indicator,
-      translated.level_set_space);
+      configuration.level_set_space);
+}
+
+std::unique_ptr<svmp::Physics::PhysicsModule>
+createModule(
+    const application::core::ResolvedLevelSetEquationConfiguration&
+        configuration,
+    svmp::FE::systems::FESystem& system)
+{
+  return create_level_set_transport_from_configuration(
+      configuration, system);
+}
+
+std::optional<MaterialInterfaceTransportDependency>
+materialInterfaceTransportDependency(
+    const svmp::Physics::EquationModuleInput& input)
+{
+  const auto configuration = resolveConfiguration(input);
+  return materialInterfaceTransportDependency(*configuration);
+}
+
+void preRegisterMaterialInterfaceTransportFields(
+    const svmp::Physics::EquationModuleInput& input,
+    svmp::FE::systems::FESystem& system)
+{
+  const auto configuration = resolveConfiguration(input);
+  preRegisterMaterialInterfaceTransportFields(*configuration, system);
 }
 
 std::unique_ptr<svmp::Physics::PhysicsModule>
 createModule(const svmp::Physics::EquationModuleInput& input,
              svmp::FE::systems::FESystem& system)
 {
-  return create_level_set_transport_from_input(input, system);
+  const auto configuration = resolveConfiguration(input);
+  return createModule(*configuration, system);
 }
 
 } // namespace level_set
