@@ -662,7 +662,8 @@ void construct_fluid(ComMod& com_mod, const mshType& lM, const SolutionStates& s
         auto N0 = fs[0].N.rcol(g); 
         auto N1 = fs[1].N.rcol(g); 
         double urisFactorTotal = 0.0;
-        Vector<double> urisValveVelTermTotal(nsd);
+        std::array<double,3> urisValveVelTermTotalData{};
+        Vector<double> urisValveVelTermTotal(nsd, urisValveVelTermTotalData.data());
         if (com_mod.urisFlag) {
           urisFactorTotal = urisFactorTotalEl(g);
           urisValveVelTermTotal = urisValveVelTermTotalEl.rcol(g);
@@ -728,7 +729,8 @@ void construct_fluid(ComMod& com_mod, const mshType& lM, const SolutionStates& s
         auto N0 = fs[0].N.rcol(g); 
         auto N1 = fs[1].N.rcol(g); 
         double urisFactorTotal = 0.0;
-        Vector<double> urisValveVelTermTotal(nsd);
+        std::array<double,3> urisValveVelTermTotalData{};
+        Vector<double> urisValveVelTermTotal(nsd, urisValveVelTermTotalData.data());
         if (com_mod.urisFlag) {
           urisFactorTotal = urisFactorTotalEl(g);
           urisValveVelTermTotal = urisValveVelTermTotalEl.rcol(g);
