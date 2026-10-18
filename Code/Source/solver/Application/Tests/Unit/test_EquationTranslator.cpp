@@ -955,7 +955,7 @@ TEST(EquationTranslatorFreeSurface,
     ASSERT_TRUE(artifact.has_value());
     EXPECT_NE(
         artifact->json.find(
-            "\"artifact_schema_version\":3"),
+            "\"artifact_schema_version\":4"),
         std::string::npos);
     EXPECT_NE(
         artifact->json.find(
