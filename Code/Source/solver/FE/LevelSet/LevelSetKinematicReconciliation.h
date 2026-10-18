@@ -46,7 +46,10 @@ struct LevelSetKinematicReconciliationResult {
     // root) or regular, with the measure taken on the cell's reference
     // element as the generated-interface builder takes it, or a side's
     // volume rule pruned for a volume fraction below
-    // CutIntegrationContext::minGeneratedCutVolumeFraction().
+    // CutIntegrationContext::minGeneratedCutVolumeFraction().  The volume
+    // they would have moved goes to the eligible nodes of their cells like
+    // the limited part of a share (counted as redistributed or skipped),
+    // except where that would change the class of a cell.
     std::size_t degeneracy_frozen_dofs{0u};
     // The frozen DOFs themselves (ascending field DOF numbers, identical on
     // every rank).
@@ -102,9 +105,12 @@ struct LevelSetKinematicReconciliationResult {
  * limited part of a node's share of the volume change is moved to the other
  * nodes of its cells, weighted so that the same lumped volume moves.  Nodes of
  * a cell whose cut would change its class (the fragment degeneracy of the
- * generated-interface builder, or the pruning of a side's volume rule by the
- * geometry snapshot) keep their transported value.  The cut topology of the
- * accepted state is therefore preserved.
+ * generated-interface builder, measured on the reference element, or the
+ * pruning of a side's volume rule by the geometry snapshot) keep their
+ * transported value; the volume they would have moved goes to the eligible
+ * nodes of their cells in the same way, except into a cell whose class that
+ * would change.  The cut topology of the accepted state is therefore
+ * preserved.
  *
  * Supported cells are affine Triangle3 (2D) and Tetra4 (3D) with one scalar
  * level-set DOF per vertex.  The velocity field must provide at least one DOF

@@ -349,3 +349,58 @@ TEST(LevelSetKinematicReconciliationMPI, BlockedNodeRedistributionMatchesSerialR
         EXPECT_NEAR(pv[v], sv[v], 1.0e-14) << "vertex " << v;
     }
 }
+
+TEST(LevelSetKinematicReconciliationMPI, FrozenShareRedistributionMatchesSerialReference)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    constexpr int n = 12;
+    const FE::Real h = 1.0 / n;
+    const Layout parallel(n, MPI_COMM_WORLD, rank, size);
+    const Layout serial(n, MPI_COMM_SELF, 0, 1);
+    const auto zero = [](const std::array<FE::Real, 3>&) {
+        return std::array<FE::Real, 2>{0.0, 0.0};
+    };
+    // A line 0.3 h from the column x = 0.5, except that the vertex (0.5, 0.5)
+    // lies 8.4e-5 h from the interface; the previous state is lower by a
+    // quarter of that.  Lowering the vertex would prune the positive corner
+    // of the triangles it carries (fraction 1.4e-8 -> 8.1e-9), so they are
+    // frozen and their volume is placed on neighbours across the partition.
+    const FE::Real near = 8.4e-5 * h;
+    const auto transported_field = [&](const std::array<FE::Real, 3>& x) {
+        return std::abs(x[0] - 0.5) + std::abs(x[1] - 0.5) < 1.0e-9 ? near
+                                                                     : x[0] - 0.5 + 0.3 * h;
+    };
+    const auto run = [&](const Layout& layout, std::vector<FE::Real>& reconciled) {
+        const auto transported = layout.scalar(transported_field);
+        std::vector<FE::Real> previous = transported;
+        for (auto& value : previous) {
+            value -= 0.25 * near;
+        }
+        return level_set::reconcileLevelSetWithKinematicFlux(
+            layout.mesh, layout.phi, layout.velocity, 0.0, 1.0e-12, 1.0,
+            previous, transported, layout.vector(zero), layout.vector(zero), reconciled);
+    };
+    std::vector<FE::Real> parallel_values;
+    std::vector<FE::Real> serial_values;
+    const auto p = run(parallel, parallel_values);
+    const auto s = run(serial, serial_values);
+    ASSERT_TRUE(p.success) << p.diagnostic;
+    ASSERT_TRUE(s.success) << s.diagnostic;
+    EXPECT_GT(s.degeneracy_frozen_dofs, 0u);
+    EXPECT_EQ(p.degeneracy_frozen_dofs, s.degeneracy_frozen_dofs);
+    EXPECT_EQ(p.sign_preserving_redistributed_dofs, s.sign_preserving_redistributed_dofs);
+    EXPECT_EQ(p.sign_preserving_skipped_dofs, s.sign_preserving_skipped_dofs);
+    EXPECT_EQ(p.iterations, s.iterations);
+    EXPECT_LT(std::abs(s.reconciled_volume_error),
+              1.0e-6 * std::abs(s.transported_volume_error));
+    EXPECT_NEAR(p.reconciled_negative_volume, s.reconciled_negative_volume, 1.0e-14);
+    const auto pv = parallel.byVertex(parallel_values);
+    const auto sv = serial.byVertex(serial_values);
+    for (std::size_t v = 0; v < pv.size(); ++v) {
+        EXPECT_NEAR(pv[v], sv[v], 1.0e-14) << "vertex " << v;
+    }
+}

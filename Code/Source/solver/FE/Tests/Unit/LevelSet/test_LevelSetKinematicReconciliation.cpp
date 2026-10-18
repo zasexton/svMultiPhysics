@@ -552,6 +552,81 @@ TEST(LevelSetKinematicReconciliation, KeepsTheBuilderCutClassOfTetrahedra)
     }
 }
 
+TEST(LevelSetKinematicReconciliation, RedistributesTheShareOfFrozenNodes)
+{
+    SimplexSystem s(buildStructuredTetraMesh(6), 3);
+    const FE::Real h = 1.0 / 6.0;
+    // A plane 0.3 h from the vertex plane x = 0.5, except that the vertex
+    // (0.5, 0.5, 0.5) lies only 1.6e-3 h from the interface.  The previous
+    // state is lower by a quarter of that distance.  Lowering the vertex
+    // changes the class of the corner fragments it carries (positive volume
+    // fraction below 1e-8), so it and the other nodes of those cells are
+    // frozen.  The volume they would have moved goes to the other nodes of
+    // their cells, so the measure is restored as if nothing were frozen.
+    const FE::Real near = 1.6e-3 * h;
+    const auto centre = [](const Point& x) {
+        return std::abs(x[0] - 0.5) + std::abs(x[1] - 0.5) + std::abs(x[2] - 0.5) < 1.0e-9;
+    };
+    const auto transported = s.scalar([&](const Point& x) {
+        return centre(x) ? near : x[0] - 0.5 + 0.3 * h;
+    });
+    std::vector<FE::Real> previous = transported;
+    for (auto& value : previous) {
+        value -= 0.25 * near;
+    }
+    const auto zero = s.vector([](const Point&) { return Point{0.0, 0.0, 0.0}; });
+    std::vector<FE::Real> reconciled;
+    const auto result = s.reconcile(1.0, previous, transported, zero, zero, reconciled);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_TRUE(result.converged);
+    EXPECT_GT(result.degeneracy_frozen_dofs, 0u);
+    EXPECT_GE(result.sign_preserving_redistributed_dofs, result.degeneracy_frozen_dofs);
+    EXPECT_GT(std::abs(result.transported_volume_error), 1.0e-5);
+    // Dropping the frozen share would leave about 5% of the error.
+    EXPECT_LT(std::abs(result.reconciled_volume_error),
+              1.0e-6 * std::abs(result.transported_volume_error));
+    for (const auto dof : result.degeneracy_frozen_dof_indices) {
+        EXPECT_EQ(reconciled[dof], transported[dof]) << "dof " << dof;
+    }
+    const auto before = builderCutClasses(s, transported);
+    const auto after = builderCutClasses(s, reconciled);
+    ASSERT_EQ(before.size(), after.size());
+    for (std::size_t c = 0; c < before.size(); ++c) {
+        EXPECT_EQ(before[c], after[c]) << "cell " << c;
+    }
+}
+
+TEST(LevelSetKinematicReconciliation, FreezingDoesNotSpreadThroughRedistribution)
+{
+    SimplexSystem s(buildStructuredTetraMesh(6), 3);
+    const FE::Real h = 1.0 / 6.0;
+    // Every vertex of the plane x = 0.5 lies close to the interface: the row
+    // y = 0.5 at 1.6e-3 h, the others at 3e-3 h, and the correction lowers
+    // each to 3/4 of its distance.  Only cells at the near row change class,
+    // but moving their volume into the other rows would push those below the
+    // pruning threshold too.  The addition is withheld there, so exactly the
+    // nodes that freezing alone would freeze stay frozen and every other node
+    // keeps its own correction.
+    const auto gap = [&](const Point& x) {
+        return (std::abs(x[1] - 0.5) < 1.0e-9 ? 1.6e-3 : 3.0e-3) * h;
+    };
+    const auto previous = s.scalar([&](const Point& x) { return x[0] - 0.5 + 0.75 * gap(x); });
+    const auto transported = s.scalar([&](const Point& x) { return x[0] - 0.5 + gap(x); });
+    const auto zero = s.vector([](const Point&) { return Point{0.0, 0.0, 0.0}; });
+    std::vector<FE::Real> reconciled;
+    const auto result = s.reconcile(1.0, previous, transported, zero, zero, reconciled);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.degeneracy_frozen_dofs, 20u);
+    EXPECT_LT(std::abs(result.reconciled_volume_error),
+              0.12 * std::abs(result.transported_volume_error));
+    const auto before = builderCutClasses(s, transported);
+    const auto after = builderCutClasses(s, reconciled);
+    ASSERT_EQ(before.size(), after.size());
+    for (std::size_t c = 0; c < before.size(); ++c) {
+        EXPECT_EQ(before[c], after[c]) << "cell " << c;
+    }
+}
+
 TEST(LevelSetKinematicReconciliation, RejectsNonSimplexCellsAndBadInput)
 {
     // Quadrilateral background mesh.

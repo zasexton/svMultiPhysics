@@ -800,10 +800,13 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
             }
         }
         // Keep the degeneracy class of every cut: nodes of a cell whose class
-        // would change keep their transported value (their share is dropped).
+        // would change keep their transported value.  The lumped volume they
+        // would have moved is recorded and placed below.
         frozen = 0u;
         std::vector<Real> trial(n, 0.0);
         std::vector<Real> frozen_flag(n, 0.0);
+        std::vector<Real> dropped(n, 0.0);
+        bool any_frozen = false;
         for (;;) {
             for (std::size_t i = 0; i < n; ++i) {
                 trial[i] = transported_level_set[i] + delta[i];
@@ -831,6 +834,7 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
             bool any_new = false;
             for (std::size_t i = 0; i < n; ++i) {
                 if (newly[i] > Real{0.0}) {
+                    dropped[i] += gbar[i] * delta[i];
                     delta[i] = Real{0.0};
                     frozen_flag[i] = Real{1.0};
                     any_new = true;
@@ -838,6 +842,108 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
             }
             if (!any_new) {
                 break;
+            }
+            any_frozen = true;
+        }
+        // Move the volume a frozen node would have moved to the eligible,
+        // unfrozen nodes of its cells, with the rule used for limited shares
+        // above (each receives c * dropped_i / S_i, S_i the sum of their gbar
+        // over i's cells).  A cell whose class this addition would change
+        // gets none: the additions of its nodes are removed again (skipped),
+        // while every node keeps its own correction, so freezing never
+        // spreads.  Without a frozen node nothing here runs.  The flags derive
+        // from replicated data, so this branch is identical on every rank.
+        if (any_frozen) {
+            std::vector<Real> patch(n, 0.0);
+            for (const auto& cell : cells) {
+                for (int a = 0; a < cell.corners; ++a) {
+                    const auto i = cell.dof[static_cast<std::size_t>(a)];
+                    if (dropped[i] == Real{0.0}) {
+                        continue;
+                    }
+                    for (int b = 0; b < cell.corners; ++b) {
+                        const auto j = cell.dof[static_cast<std::size_t>(b)];
+                        if (j != i && eligible[j] != 0 && frozen_flag[j] == Real{0.0}) {
+                            patch[i] += gbar[j];
+                        }
+                    }
+                }
+            }
+            sumInPlace(context, patch);
+            std::vector<Real> added(n, 0.0);
+            for (const auto& cell : cells) {
+                for (int a = 0; a < cell.corners; ++a) {
+                    const auto i = cell.dof[static_cast<std::size_t>(a)];
+                    if (dropped[i] == Real{0.0} || !(patch[i] > Real{0.0})) {
+                        continue;
+                    }
+                    for (int b = 0; b < cell.corners; ++b) {
+                        const auto j = cell.dof[static_cast<std::size_t>(b)];
+                        if (j != i && eligible[j] != 0 && frozen_flag[j] == Real{0.0}) {
+                            added[j] += dropped[i] / patch[i];
+                        }
+                    }
+                }
+            }
+            sumInPlace(context, added);
+            std::vector<Real> addition(n, 0.0);
+            for (std::size_t i = 0; i < n; ++i) {
+                if (dropped[i] != Real{0.0}) {
+                    if (patch[i] > Real{0.0}) {
+                        ++redistributed;
+                    } else {
+                        ++skipped;
+                    }
+                }
+                if (added[i] == Real{0.0}) {
+                    continue;
+                }
+                const Real proposed = delta[i] + added[i];
+                const Real accepted = admissible(i, proposed);
+                if (accepted != proposed) {
+                    ++skipped;
+                }
+                addition[i] = accepted - delta[i];
+            }
+            for (;;) {
+                for (std::size_t i = 0; i < n; ++i) {
+                    trial[i] = transported_level_set[i] + delta[i] + addition[i];
+                }
+                std::vector<Real> strip(n, 0.0);
+                for (std::size_t c = 0; c < cells.size(); ++c) {
+                    const auto& cell = cells[c];
+                    bool receives = false;
+                    for (int a = 0; a < cell.corners; ++a) {
+                        receives = receives ||
+                                   addition[cell.dof[static_cast<std::size_t>(a)]] != Real{0.0};
+                    }
+                    if (!receives ||
+                        cutClass(cell, trial, isovalue, tolerance, minimum_fraction) ==
+                            transported_cut_class[c]) {
+                        continue;
+                    }
+                    for (int a = 0; a < cell.corners; ++a) {
+                        const auto i = cell.dof[static_cast<std::size_t>(a)];
+                        if (addition[i] != Real{0.0}) {
+                            strip[i] = Real{1.0};
+                        }
+                    }
+                }
+                maxInPlace(context, strip);
+                bool any_strip = false;
+                for (std::size_t i = 0; i < n; ++i) {
+                    if (strip[i] > Real{0.0}) {
+                        addition[i] = Real{0.0};
+                        ++skipped;
+                        any_strip = true;
+                    }
+                }
+                if (!any_strip) {
+                    break;
+                }
+            }
+            for (std::size_t i = 0; i < n; ++i) {
+                delta[i] += addition[i];
             }
         }
         result.degeneracy_frozen_dof_indices.clear();
