@@ -8812,24 +8812,8 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                     .side = aggregation_side,
                     .interface_marker =
                         active_pressure_domain->boundary->interface_marker,
-                    .guards = {
-                        .maximum_root_path_length =
-                            active_pressure_domain->boundary
-                                ->small_cut_aggregation_guards
-                                .maximum_root_path_length,
-                        .maximum_reference_extrapolation_distance =
-                            active_pressure_domain->boundary
-                                ->small_cut_aggregation_guards
-                                .maximum_reference_extrapolation_distance,
-                        .maximum_absolute_coefficient =
-                            active_pressure_domain->boundary
-                                ->small_cut_aggregation_guards
-                                .maximum_absolute_coefficient,
-                        .maximum_row_l1_norm =
-                            active_pressure_domain->boundary
-                                ->small_cut_aggregation_guards
-                                .maximum_row_l1_norm,
-                    },
+                    .guards = active_pressure_domain->boundary
+                                  ->small_cut_aggregation_guards,
                 };
             }
         }
