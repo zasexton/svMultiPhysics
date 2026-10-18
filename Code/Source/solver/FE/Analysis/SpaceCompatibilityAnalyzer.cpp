@@ -407,6 +407,9 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
     // =====================================================================
 
     auto saddle_claims = report.claimsOfKind(PropertyKind::MixedSaddlePoint);
+    // saddle_claims points into report.claims: append new claims only after
+    // the loop so a reallocation cannot leave those pointers dangling.
+    std::vector<PropertyClaim> space_claims;
     for (const auto* sc : saddle_claims) {
         // Treat the variable order as pair metadata only when the upstream claim
         // provided an ordered pair. Do not infer primal/multiplier roles from
@@ -438,7 +441,7 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
             claim.addEvidence("SpaceCompatibilityAnalyzer",
                 "MixedSaddlePoint claim did not provide an ordered field pair",
                 AnalysisConfidence::Low);
-            report.claims.push_back(std::move(claim));
+            space_claims.push_back(std::move(claim));
             continue;
         }
 
@@ -518,7 +521,7 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
                     "H1/H1 mixed compatibility requires a known stable order pair, stabilization, or numeric inf-sup evidence",
                     AnalysisConfidence::Medium);
             }
-            report.claims.push_back(std::move(claim));
+            space_claims.push_back(std::move(claim));
             continue;
         }
 
@@ -561,7 +564,7 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
                     "Standard divergence-compatible mixed pairs require explicit HDiv/L2-style or theorem-backed compatibility evidence",
                     AnalysisConfidence::Medium);
             }
-            report.claims.push_back(std::move(claim));
+            space_claims.push_back(std::move(claim));
             continue;
         }
 
@@ -609,7 +612,7 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
                     "L2 multiplier compatibility requires theorem-backed stable-pair, Fortin, or compatible-complex evidence",
                     AnalysisConfidence::Medium);
             }
-            report.claims.push_back(std::move(claim));
+            space_claims.push_back(std::move(claim));
             continue;
         }
 
@@ -632,6 +635,9 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
         claim.addEvidence("SpaceCompatibilityAnalyzer",
             "Unrecognized space family combination",
             AnalysisConfidence::Low);
+        space_claims.push_back(std::move(claim));
+    }
+    for (auto& claim : space_claims) {
         report.claims.push_back(std::move(claim));
     }
 }

@@ -381,10 +381,12 @@ void mixRuleContent(std::uint64_t& hash,
     std::map<OwnershipRuleIdentity, std::uint64_t> globally_owned_by_identity;
     for (std::size_t offset = 0; offset < global_owned_values.size();
          offset += width) {
+        // Each record is the identity followed by its content digest; copy
+        // only the identity words into the identity array.
         OwnershipRuleIdentity identity{};
         std::copy_n(global_owned_values.begin() +
                         static_cast<std::ptrdiff_t>(offset),
-                    static_cast<std::ptrdiff_t>(width),
+                    static_cast<std::ptrdiff_t>(identity_width),
                     identity.begin());
         const auto content_digest =
             global_owned_values[offset + identity_width];

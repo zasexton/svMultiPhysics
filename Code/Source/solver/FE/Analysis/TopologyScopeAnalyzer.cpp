@@ -125,6 +125,9 @@ void TopologyScopeAnalyzer::run(const ProblemAnalysisContext& context,
     // constraint summary, which are the authoritative sources for
     // per-marker anchoring information.
 
+    // nullspace_claims points into report.claims: append new claims only
+    // after the loop so a reallocation cannot leave those pointers dangling.
+    std::vector<PropertyClaim> region_claims;
     for (const auto* ns_claim : nullspace_claims) {
         if (ns_claim->region >= 0) continue;  // already region-scoped
 
@@ -220,9 +223,12 @@ void TopologyScopeAnalyzer::run(const ProblemAnalysisContext& context,
                     ", rotation=" +
                     std::string(anchoring.rotation_anchored ? "true" : "false"),
                     claim.confidence);
-                report.claims.push_back(std::move(claim));
+                region_claims.push_back(std::move(claim));
             }
         }
+    }
+    for (auto& claim : region_claims) {
+        report.claims.push_back(std::move(claim));
     }
 }
 

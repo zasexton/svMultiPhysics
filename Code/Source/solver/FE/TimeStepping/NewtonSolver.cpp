@@ -14889,6 +14889,47 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                     *workspace.pressure_representability_load);
                 workspace.pressure_representability_load->updateGhosts();
 
+                // DIAGNOSTIC ONLY (not for commit): dump the pair operator.
+                static int diag_pair_dump_counter = 0;
+                const bool diag_pair_dump =
+                    std::getenv("SVMP_DIAG_PAIR_DUMP") != nullptr;
+                const int diag_pair_dump_id = diag_pair_dump_counter++;
+                if (diag_pair_dump) {
+                    const auto n_rows = pair_matrix.numRows();
+                    const auto n_cols = pair_matrix.numCols();
+                    std::fprintf(stderr, "PAIRDUMP %d begin rows=%lld cols=%lld constrained=%zu phase=%s\n",
+                                 diag_pair_dump_id,
+                                 static_cast<long long>(n_rows),
+                                 static_cast<long long>(n_cols),
+                                 constrained_dofs.size(),
+                                 phase != nullptr ? phase : "unknown");
+                    for (const auto dof : constrained_dofs) {
+                        std::fprintf(stderr, "PAIRDUMP %d C %lld\n", diag_pair_dump_id,
+                                     static_cast<long long>(dof));
+                    }
+                    for (GlobalIndex r = 0; r < n_rows; ++r) {
+                        for (GlobalIndex c = 0; c < n_cols; ++c) {
+                            const Real v = pair_matrix.getEntry(r, c);
+                            if (v != Real{0.0}) {
+                                std::fprintf(stderr, "PAIRDUMP %d M %lld %lld %.17g\n",
+                                             diag_pair_dump_id,
+                                             static_cast<long long>(r),
+                                             static_cast<long long>(c),
+                                             static_cast<double>(v));
+                            }
+                        }
+                    }
+                    const auto load_values =
+                        workspace.pressure_representability_load->localSpan();
+                    for (std::size_t i = 0; i < load_values.size(); ++i) {
+                        if (load_values[i] != Real{0.0}) {
+                            std::fprintf(stderr, "PAIRDUMP %d F %zu %.17g\n",
+                                         diag_pair_dump_id, i,
+                                         static_cast<double>(load_values[i]));
+                        }
+                    }
+                }
+
                 pressure_representability =
                     solvePressureRepresentabilityLsqr(
                         pair_matrix,
@@ -14905,6 +14946,13 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                         options_
                             .accepted_static_pressure_representability_max_relative_distance,
                         allRanks);
+                if (diag_pair_dump) {
+                    std::fprintf(stderr, "PAIRDUMP %d result residual=%.17g iterations=%d converged=%d\n",
+                                 diag_pair_dump_id,
+                                 pressure_representability.residual_norm,
+                                 pressure_representability.iterations,
+                                 pressure_representability.converged ? 1 : 0);
+                }
                 pressure_representability_available = true;
                 if (geometry_key.revision_tracking_available &&
                     pressure_pair_matrix_state_independent) {
