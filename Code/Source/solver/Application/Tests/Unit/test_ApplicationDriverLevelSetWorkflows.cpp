@@ -2287,6 +2287,68 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
+     GeneralizedAlphaMaintenanceComposesACommonPostrepairShift)
+{
+  const auto scheme =
+      makeFirstOrderGeneralizedAlphaMaintenanceScheme(
+          svmp::FE::Real{0.75},
+          svmp::FE::Real{0.75},
+          svmp::FE::Real{0.5},
+          svmp::FE::Real{0.2});
+  const std::vector<svmp::FE::Real> endpoint_delta{0.4, -0.8};
+  const std::vector<svmp::FE::Real> stage_delta{0.3, -0.6};
+  const auto plan =
+      planFirstOrderGeneralizedAlphaMaintenancePublication(
+          scheme,
+          FirstOrderGeneralizedAlphaMaintenanceClosure::
+              PreservePriorStateAndRate,
+          stage_delta,
+          endpoint_delta);
+  ASSERT_EQ(
+      plan.status,
+      FirstOrderGeneralizedAlphaMaintenancePlanStatus::
+          AlgebraicallyComplete);
+  ASSERT_TRUE(plan.post_accept.has_value());
+  const auto rate_before = plan.post_accept->u_dot_delta;
+  const auto stage_rate_before =
+      plan.post_accept->accepted_stage_rate_delta;
+  const std::vector<svmp::FE::Real> common_delta{0.1, 0.2};
+
+  const auto combined =
+      combineFirstOrderGeneralizedAlphaPublicationWithCommonDelta(
+          plan, common_delta);
+
+  const std::vector<svmp::FE::Real> expected_endpoint{0.5, -0.6};
+  ASSERT_EQ(combined.u_delta.size(), expected_endpoint.size());
+  ASSERT_EQ(combined.u_prev_delta.size(), expected_endpoint.size());
+  for (std::size_t i = 0u; i < expected_endpoint.size(); ++i) {
+    EXPECT_NEAR(combined.u_delta[i], expected_endpoint[i], 1.0e-15);
+    EXPECT_NEAR(combined.u_prev_delta[i], expected_endpoint[i], 1.0e-15);
+  }
+  EXPECT_EQ(combined.u_prev2_and_deeper_delta, common_delta);
+  EXPECT_EQ(combined.prior_rate_delta,
+            std::vector<svmp::FE::Real>({0.0, 0.0}));
+  EXPECT_EQ(combined.u_dot_delta, rate_before);
+  EXPECT_EQ(combined.accepted_stage_rate_delta, stage_rate_before);
+  EXPECT_EQ(plan.post_accept->u_delta, endpoint_delta);
+  EXPECT_EQ(
+      plan.post_accept->u_prev2_and_deeper_delta,
+      std::vector<svmp::FE::Real>({0.0, 0.0}));
+
+  const std::vector<svmp::FE::Real> wrong_layout{0.1};
+  EXPECT_THROW(
+      (void)combineFirstOrderGeneralizedAlphaPublicationWithCommonDelta(
+          plan, wrong_layout),
+      std::invalid_argument);
+  const std::vector<svmp::FE::Real> nonfinite{
+      0.0, std::numeric_limits<svmp::FE::Real>::infinity()};
+  EXPECT_THROW(
+      (void)combineFirstOrderGeneralizedAlphaPublicationWithCommonDelta(
+          plan, nonfinite),
+      std::invalid_argument);
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
      GeneralizedAlphaMaintenancePlannerRejectsInvalidInputs)
 {
   EXPECT_THROW(
@@ -8224,32 +8286,47 @@ TEST(ApplicationDriverLevelSetWorkflows,
       mesh_phi_before_nonendpoint_rejection,
       mesh_phi_before_nonendpoint_rejection + rejection_mesh_phi_count);
 
-  auto rejected_candidate_solution = endpoint_solution;
-  std::string direct_nonendpoint_failure;
-  try {
-    (void)stageLevelSetProjectionReinitialization(
-        sim,
-        time_history,
-        maintenance_request,
-        phi,
-        svmp::FE::Real{0.10},
-        rejected_candidate_solution,
-        contact_stages,
-        contact_stage_constraints,
-        contact_stage_candidate.stage_solution);
-  } catch (const std::runtime_error& error) {
-    direct_nonendpoint_failure = error.what();
+  auto nonendpoint_candidate_solution = endpoint_solution;
+  const auto direct_nonendpoint =
+      stageLevelSetProjectionReinitialization(
+          sim,
+          time_history,
+          maintenance_request,
+          phi,
+          svmp::FE::Real{0.10},
+          nonendpoint_candidate_solution,
+          contact_stages,
+          contact_stage_constraints,
+          contact_stage_candidate.stage_solution);
+  ASSERT_TRUE(direct_nonendpoint.applied);
+  ASSERT_TRUE(direct_nonendpoint.repair.converged);
+  ASSERT_TRUE(
+      direct_nonendpoint.generalized_alpha_publication.has_value());
+  const auto& direct_nonendpoint_plan =
+      *direct_nonendpoint.generalized_alpha_publication;
+  ASSERT_EQ(
+      direct_nonendpoint_plan.status,
+      FirstOrderGeneralizedAlphaMaintenancePlanStatus::
+          AlgebraicallyComplete);
+  ASSERT_TRUE(direct_nonendpoint_plan.post_accept.has_value());
+  ASSERT_EQ(
+      direct_nonendpoint_plan.requested_stage_state_delta.size(),
+      phi_dof_count);
+  ASSERT_EQ(
+      direct_nonendpoint_plan.requested_endpoint_state_delta.size(),
+      phi_dof_count);
+  for (std::size_t i = 0u; i < phi_dof_count; ++i) {
+    EXPECT_NEAR(
+        direct_nonendpoint_plan.requested_stage_state_delta[i],
+        generalized_alpha_provenance.alpha_f *
+            direct_nonendpoint_plan.requested_endpoint_state_delta[i],
+        1.0e-12);
+    EXPECT_NEAR(
+        nonendpoint_candidate_solution[phi_offset + i] -
+            endpoint_solution[phi_offset + i],
+        direct_nonendpoint_plan.requested_endpoint_state_delta[i],
+        1.0e-12);
   }
-  EXPECT_NE(
-      direct_nonendpoint_failure.find(
-          "cannot apply a non-endpoint generalized-alpha stage repair"),
-      std::string::npos)
-      << direct_nonendpoint_failure;
-  EXPECT_NE(
-      direct_nonendpoint_failure.find("history/rate publication"),
-      std::string::npos)
-      << direct_nonendpoint_failure;
-  EXPECT_EQ(rejected_candidate_solution, endpoint_solution);
 
   auto missing_stage_requests = maintenance_requests;
   EXPECT_THROW(
@@ -8274,7 +8351,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   }
   EXPECT_NE(
       nonendpoint_stage_failure.find(
-          "cannot apply a non-endpoint generalized-alpha stage repair"),
+          "requires an endpoint maintenance-work observer"),
       std::string::npos)
       << nonendpoint_stage_failure;
   EXPECT_EQ(gatherFeOrderedSolution(time_history.u()), endpoint_solution);
@@ -8327,6 +8404,193 @@ TEST(ApplicationDriverLevelSetWorkflows,
           mesh_phi_after_nonendpoint_rejection,
           mesh_phi_after_nonendpoint_rejection + rejection_mesh_phi_count),
       mesh_phi_values_before_nonendpoint_rejection);
+
+  auto mismatched_nonendpoint_history =
+      svmp::FE::timestepping::TimeHistory::allocate(
+          *factory,
+          sim.fe_system->dofHandler().getNumDofs(),
+          /*history_depth=*/2,
+          /*allocate_second_order_state=*/true);
+  mismatched_nonendpoint_history.setTime(0.10);
+  mismatched_nonendpoint_history.setDt(0.05);
+  mismatched_nonendpoint_history.setPrevDt(0.05);
+  mismatched_nonendpoint_history.setStepIndex(2);
+  scatterFeOrderedSolution(
+      mismatched_nonendpoint_history.u(), endpoint_solution);
+  auto mismatched_endpoint_copy = endpoint_solution;
+  mismatched_endpoint_copy[phi_offset] += svmp::FE::Real{0.25};
+  scatterFeOrderedSolution(
+      mismatched_nonendpoint_history.uPrev(), mismatched_endpoint_copy);
+  scatterFeOrderedSolution(
+      mismatched_nonendpoint_history.uPrev2(), previous_solution);
+  scatterFeOrderedSolution(
+      mismatched_nonendpoint_history.uDot(), contact_rate);
+  scatterFeOrderedSolution(
+      mismatched_nonendpoint_history.uDDot(), contact_acceleration);
+  const LevelSetMaintenanceCandidateValidator inert_candidate_validator =
+      [](std::span<const svmp::FE::Real>,
+         std::span<const LevelSetVolumeCorrectionMaintenanceEvent>) {};
+  const LevelSetMaintenanceStageObserver inert_work_observer =
+      [](application::core::LevelSetMaintenanceWorkSubstage,
+         std::span<const svmp::FE::Real>,
+         std::span<const svmp::FE::Real>) {};
+  auto mismatched_nonendpoint_requests = maintenance_requests;
+  bool mismatched_rate_publication_started = true;
+  std::string mismatched_endpoint_copy_failure;
+  try {
+    (void)applyLevelSetMaintenance(
+        sim,
+        mismatched_nonendpoint_history,
+        mismatched_nonendpoint_requests,
+        contact_stages,
+        contact_stage_constraints,
+        contact_stage_candidate.stage_solution,
+        nullptr,
+        inert_candidate_validator,
+        inert_work_observer,
+        nullptr,
+        &mismatched_rate_publication_started);
+  } catch (const std::runtime_error& error) {
+    mismatched_endpoint_copy_failure = error.what();
+  }
+  EXPECT_NE(
+      mismatched_endpoint_copy_failure.find(
+          "requires identical finite u and uPrevK(1)"),
+      std::string::npos)
+      << mismatched_endpoint_copy_failure;
+  EXPECT_FALSE(mismatched_rate_publication_started);
+  EXPECT_EQ(
+      gatherFeOrderedSolution(mismatched_nonendpoint_history.u()),
+      endpoint_solution);
+  EXPECT_EQ(
+      gatherFeOrderedSolution(mismatched_nonendpoint_history.uPrev()),
+      mismatched_endpoint_copy);
+  EXPECT_EQ(
+      gatherFeOrderedSolution(mismatched_nonendpoint_history.uPrev2()),
+      previous_solution);
+  EXPECT_EQ(
+      gatherFeOrderedSolution(mismatched_nonendpoint_history.uDot()),
+      contact_rate);
+  EXPECT_EQ(
+      gatherFeOrderedSolution(mismatched_nonendpoint_history.uDDot()),
+      contact_acceleration);
+
+  auto published_nonendpoint_history =
+      svmp::FE::timestepping::TimeHistory::allocate(
+          *factory,
+          sim.fe_system->dofHandler().getNumDofs(),
+          /*history_depth=*/2,
+          /*allocate_second_order_state=*/true);
+  published_nonendpoint_history.setTime(0.10);
+  published_nonendpoint_history.setDt(0.05);
+  published_nonendpoint_history.setPrevDt(0.05);
+  published_nonendpoint_history.setStepIndex(2);
+  scatterFeOrderedSolution(
+      published_nonendpoint_history.u(), endpoint_solution);
+  // After acceptStep(), u and uPrevK(1) are endpoint copies while uPrevK(2)
+  // retains the prior accepted state.
+  scatterFeOrderedSolution(
+      published_nonendpoint_history.uPrev(), endpoint_solution);
+  scatterFeOrderedSolution(
+      published_nonendpoint_history.uPrev2(), previous_solution);
+  scatterFeOrderedSolution(
+      published_nonendpoint_history.uDot(), contact_rate);
+  scatterFeOrderedSolution(
+      published_nonendpoint_history.uDDot(), contact_acceleration);
+  const auto nonendpoint_rate_revision_before =
+      published_nonendpoint_history.uDot().valueRevision();
+  const auto nonendpoint_acceleration_revision_before =
+      published_nonendpoint_history.uDDot().valueRevision();
+  std::size_t nonendpoint_work_observations = 0u;
+  std::size_t nonendpoint_candidate_validations = 0u;
+  std::vector<svmp::FE::Real> observed_nonendpoint_before;
+  std::vector<svmp::FE::Real> observed_nonendpoint_after;
+  const LevelSetMaintenanceStageObserver nonendpoint_work_observer =
+      [&](application::core::LevelSetMaintenanceWorkSubstage substage,
+          std::span<const svmp::FE::Real> before,
+          std::span<const svmp::FE::Real> after) {
+        EXPECT_EQ(
+            substage,
+            application::core::LevelSetMaintenanceWorkSubstage::
+                Reinitialization);
+        ++nonendpoint_work_observations;
+        observed_nonendpoint_before.assign(before.begin(), before.end());
+        observed_nonendpoint_after.assign(after.begin(), after.end());
+      };
+  const LevelSetMaintenanceCandidateValidator nonendpoint_candidate_validator =
+      [&](std::span<const svmp::FE::Real> candidate,
+          std::span<const LevelSetVolumeCorrectionMaintenanceEvent>
+              staged_volume_corrections) {
+        ++nonendpoint_candidate_validations;
+        EXPECT_TRUE(staged_volume_corrections.empty());
+        EXPECT_EQ(
+            std::vector<svmp::FE::Real>(candidate.begin(), candidate.end()),
+            nonendpoint_candidate_solution);
+      };
+  auto published_nonendpoint_requests = maintenance_requests;
+  bool nonendpoint_rate_publication_started = false;
+  testing::internal::CaptureStdout();
+  const bool nonendpoint_changed = applyLevelSetMaintenance(
+      sim,
+      published_nonendpoint_history,
+      published_nonendpoint_requests,
+      contact_stages,
+      contact_stage_constraints,
+      contact_stage_candidate.stage_solution,
+      nullptr,
+      nonendpoint_candidate_validator,
+      nonendpoint_work_observer,
+      nullptr,
+      &nonendpoint_rate_publication_started);
+  const auto nonendpoint_output =
+      testing::internal::GetCapturedStdout();
+  ASSERT_TRUE(nonendpoint_changed);
+  EXPECT_EQ(nonendpoint_work_observations, 1u);
+  EXPECT_EQ(nonendpoint_candidate_validations, 1u);
+  EXPECT_TRUE(nonendpoint_rate_publication_started);
+  EXPECT_EQ(observed_nonendpoint_before, endpoint_solution);
+  EXPECT_EQ(observed_nonendpoint_after, nonendpoint_candidate_solution);
+  EXPECT_NE(
+      nonendpoint_output.find(
+          "generalized_alpha_history_policy=preserve_prior_state_and_rate"),
+      std::string::npos);
+  EXPECT_NE(
+      nonendpoint_output.find(
+          "rate_state=maintained_field_endpoint_rate_updated"),
+      std::string::npos);
+
+  const auto published_endpoint =
+      gatherFeOrderedSolution(published_nonendpoint_history.u());
+  const auto published_endpoint_copy =
+      gatherFeOrderedSolution(published_nonendpoint_history.uPrev());
+  const auto published_prior =
+      gatherFeOrderedSolution(published_nonendpoint_history.uPrev2());
+  const auto published_rate =
+      gatherFeOrderedSolution(published_nonendpoint_history.uDot());
+  EXPECT_EQ(published_endpoint, nonendpoint_candidate_solution);
+  EXPECT_EQ(published_endpoint_copy, nonendpoint_candidate_solution);
+  EXPECT_EQ(published_prior, previous_solution);
+  ASSERT_EQ(published_rate.size(), contact_rate.size());
+  for (std::size_t i = 0u; i < published_rate.size(); ++i) {
+    auto expected_rate = contact_rate[i];
+    if (i >= phi_offset && i < phi_offset + phi_dof_count) {
+      expected_rate +=
+          direct_nonendpoint_plan.requested_endpoint_state_delta[
+              i - phi_offset] /
+          (generalized_alpha_provenance.gamma *
+           generalized_alpha_provenance.dt);
+    }
+    EXPECT_NEAR(published_rate[i], expected_rate, 1.0e-11);
+  }
+  EXPECT_NE(
+      published_nonendpoint_history.uDot().valueRevision(),
+      nonendpoint_rate_revision_before);
+  EXPECT_EQ(
+      gatherFeOrderedSolution(published_nonendpoint_history.uDDot()),
+      contact_acceleration);
+  EXPECT_EQ(
+      published_nonendpoint_history.uDDot().valueRevision(),
+      nonendpoint_acceleration_revision_before);
 
   auto endpoint_maintenance_stage_candidate =
       buildAcceptedFreeSurfaceContactStageCandidate(
