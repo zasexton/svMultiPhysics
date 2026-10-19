@@ -965,6 +965,7 @@ set(FE_LEVELSET_HEADERS
     LevelSet/LevelSetInterfacePreservingRedistancing3D.h
     LevelSet/LevelSetReinitialization.h
     LevelSet/LevelSetDiagnostics.h
+    LevelSet/LevelSetGeometry.h
     LevelSet/LevelSetRestart.h
 )
 
@@ -988,6 +989,7 @@ set(FE_LEVELSET_SOURCES
     LevelSet/LevelSetInterfacePreservingRedistancing3D.cpp
     LevelSet/LevelSetReinitialization.cpp
     LevelSet/LevelSetDiagnostics.cpp
+    LevelSet/LevelSetGeometry.cpp
     LevelSet/LevelSetRestart.cpp
 )
 

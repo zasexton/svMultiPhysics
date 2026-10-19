@@ -4,6 +4,7 @@
 #include "LevelSet/LevelSetCurvatureProjection.h"
 #include "LevelSet/LevelSetCurvatureSamples.h"
 #include "LevelSet/LevelSetDiagnostics.h"
+#include "LevelSet/LevelSetGeometry.h"
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
 #include "LevelSet/LevelSetMaintenanceSubstage.h"
 #include "LevelSet/LevelSetOptions.h"

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "FE/LevelSet/LevelSetGeometry.h"
 #include "FE/LevelSet/LevelSetInterfaceLifecycle.h"
 #include "FE/LevelSet/LevelSetVolume.h"
 
@@ -14,65 +15,18 @@ class EquationParameters;
 namespace application {
 namespace core {
 
-enum class LevelSetActiveSide {
-  Negative,
-  Positive,
-};
-
-enum class ActiveCutVolumeRequestOrigin {
-  Equation,
-  FreeSurfaceBoundary,
-  MaterialInterface,
-};
-
-enum class ActiveCutVolumeRetention {
-  ActiveOnly,
-  ActiveAndInactive,
-};
-
-struct ActiveCutVolumeRequest {
-  std::string level_set_field_name{"level_set"};
-  std::string domain_id{"free_surface"};
-  std::string equation_type{};
-  ActiveCutVolumeRequestOrigin origin{ActiveCutVolumeRequestOrigin::Equation};
-  int requested_interface_marker{-1};
-  double isovalue{0.0};
-  std::optional<int> quadrature_order{};
-  std::optional<int> interface_quadrature_order{};
-  std::optional<int> volume_quadrature_order{};
-  svmp::FE::level_set::GeneratedInterfaceGeometryMode geometry_mode{
-      svmp::FE::level_set::GeneratedInterfaceGeometryMode::LinearCorner};
-  svmp::FE::level_set::ImplicitCutQuadratureBackend implicit_cut_backend{
-      svmp::FE::level_set::ImplicitCutQuadratureBackend::LinearCorner};
-  svmp::FE::level_set::ImplicitCutFallbackPolicy implicit_cut_fallback_policy{
-      svmp::FE::level_set::ImplicitCutFallbackPolicy::Fail};
-  svmp::FE::level_set::GeometryTangentPolicy geometry_tangent_policy{
-      svmp::FE::level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature};
-  // Parsing provenance, used only to resolve or reject two declarations of
-  // the same generated domain. It is deliberately not part of the generated
-  // cut policy key: equal resolved policies have equal numerical semantics.
-  bool geometry_tangent_policy_explicit{false};
-  double implicit_cut_root_tolerance{1.0e-10};
-  double implicit_cut_root_coordinate_tolerance{1.0e-12};
-  int implicit_cut_root_max_iterations{48};
-  int implicit_cut_max_subdivision_depth{16};
-  int affected_cell_neighborhood_layers{0};
-  LevelSetActiveSide active_side{LevelSetActiveSide::Negative};
-  ActiveCutVolumeRetention volume_retention{
-      ActiveCutVolumeRetention::ActiveOnly};
-  bool allow_corner_linearized_geometry{false};
-  bool require_production_qualified_implicit_cut_backend{false};
-};
-
-[[nodiscard]] svmp::FE::level_set::LevelSetGeneratedInterfaceOptions
-generatedInterfaceOptionsForActiveCut(
-    const ActiveCutVolumeRequest& request, int mesh_dimension);
-
-[[nodiscard]] svmp::FE::level_set::LevelSetVolumeOptions
-volumeOptionsForCutMaintenance(
-    const std::optional<ActiveCutVolumeRequest>& request,
-    const std::string& maintenance_field_name,
-    double maintenance_isovalue);
+// The cut-volume request and its pure functions live in
+// FE/LevelSet/LevelSetGeometry.h; the Application keeps the XML parsing.
+using LevelSetActiveSide = svmp::FE::level_set::LevelSetActiveSide;
+using ActiveCutVolumeRequestOrigin =
+    svmp::FE::level_set::ActiveCutVolumeRequestOrigin;
+using ActiveCutVolumeRetention = svmp::FE::level_set::ActiveCutVolumeRetention;
+using ActiveCutVolumeRequest = svmp::FE::level_set::ActiveCutVolumeRequest;
+using svmp::FE::level_set::generatedInterfaceOptionsForActiveCut;
+using svmp::FE::level_set::volumeOptionsForCutMaintenance;
+using svmp::FE::level_set::hasHighOrderGeneratedInterfaceGeometry;
+using svmp::FE::level_set::activeCutVolumeRequestPolicyKey;
+using svmp::FE::level_set::resolvedActiveCutVolumeInterfaceMarker;
 
 [[nodiscard]] svmp::FE::level_set::GeneratedInterfaceGeometryMode
 parseGeneratedInterfaceGeometryMode(const std::string& raw);
@@ -91,16 +45,6 @@ activeCutVolumeRequests(const Parameters& params);
 
 [[nodiscard]] std::vector<ActiveCutVolumeRequest>
 activeCutVolumeRequests(const EquationParameters& equation);
-
-[[nodiscard]] bool hasHighOrderGeneratedInterfaceGeometry(
-    const std::vector<ActiveCutVolumeRequest>& requests) noexcept;
-
-[[nodiscard]] std::uint64_t activeCutVolumeRequestPolicyKey(
-    const std::vector<ActiveCutVolumeRequest>& requests) noexcept;
-
-[[nodiscard]] std::optional<int> resolvedActiveCutVolumeInterfaceMarker(
-    const svmp::FE::systems::FESystem& system,
-    const ActiveCutVolumeRequest& request);
 
 [[nodiscard]] int requireResolvedActiveCutVolumeInterfaceMarker(
     const svmp::FE::systems::FESystem& system,
