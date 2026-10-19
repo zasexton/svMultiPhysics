@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <charconv>
 #include <cmath>
 #include <cstdint>
@@ -597,12 +598,304 @@ struct GatheredInt64Words {
     std::vector<int> displacements{};
 };
 
+// ---------------------------------------------------------------------------
+// Diagnostic profile of one refresh (SVMP_AGGREGATION_PROFILE=1).  It times
+// the phases of apply() and counts the words each distributed exchange sends
+// and receives, and prints one communicator-reduced line per refresh from
+// rank 0.  It changes no constraint.  The environment variable must have the
+// same value on every rank, because the reduction is collective.
+
+enum class AggregationProfilePhase : std::size_t {
+    Preflight,
+    ReuseKey,
+    ReusePublication,
+    Classification,
+    CellClassExchange,
+    CellOwnerExchange,
+    FaceGraph,
+    Features,
+    CandidateSupport,
+    RootTraversal,
+    RootProposals,
+    Resolution,
+    Publication,
+    Count,
+};
+
+enum class AggregationProfileExchange : std::size_t {
+    CandidateSupport,
+    RootProposals,
+    ProposalVisibility,
+    LineVisibility,
+    ReusedMeasures,
+    CellClasses,
+    CellOwners,
+    Faces,
+    OwnerRows,
+    Count,
+};
+
+enum class AggregationProfileCount : std::size_t {
+    LocalCells,
+    OwnedCells,
+    LocalClassifiedCells,
+    CommunicatorClassifiedCells,
+    LocalCandidateSupports,
+    CommunicatorCandidates,
+    LocalRootProposals,
+    Count,
+};
+
+constexpr std::array<const char*,
+                     static_cast<std::size_t>(AggregationProfilePhase::Count)>
+    kAggregationProfilePhaseNames{{
+        "preflight",
+        "reuse_key",
+        "reuse_publication",
+        "classification",
+        "cell_class_exchange",
+        "cell_owner_exchange",
+        "face_graph",
+        "features",
+        "candidate_support",
+        "root_traversal",
+        "root_proposals",
+        "resolution",
+        "publication",
+    }};
+
+constexpr std::array<const char*,
+                     static_cast<std::size_t>(AggregationProfileExchange::Count)>
+    kAggregationProfileExchangeNames{{
+        "candidate_support",
+        "root_proposals",
+        "proposal_visibility",
+        "line_visibility",
+        "reused_measures",
+        "cell_classes",
+        "cell_owners",
+        "faces",
+        "owner_rows",
+    }};
+
+constexpr std::array<const char*,
+                     static_cast<std::size_t>(AggregationProfileCount::Count)>
+    kAggregationProfileCountNames{{
+        "local_cells",
+        "owned_cells",
+        "local_classified_cells",
+        "communicator_classified_cells",
+        "local_candidate_supports",
+        "communicator_candidates",
+        "local_root_proposals",
+    }};
+
+[[nodiscard]] bool aggregationProfileEnabled() noexcept
+{
+    static const bool enabled = [] {
+        const char* value = std::getenv("SVMP_AGGREGATION_PROFILE");
+        return value != nullptr && std::string_view(value) == "1";
+    }();
+    return enabled;
+}
+
+class AggregationRefreshProfile {
+public:
+    using Clock = std::chrono::steady_clock;
+
+    void begin() noexcept
+    {
+        phase_ms_.fill(0.0);
+        exchange_ms_.fill(0.0);
+        sent_words_.fill(0u);
+        received_words_.fill(0u);
+        exchange_partners_.fill(0u);
+        counts_.fill(0u);
+        start_ = Clock::now();
+        last_ = start_;
+        active_ = aggregationProfileEnabled();
+    }
+
+    [[nodiscard]] bool active() const noexcept { return active_; }
+
+    void mark(AggregationProfilePhase phase) noexcept
+    {
+        if (!active_) {
+            return;
+        }
+        const auto now = Clock::now();
+        phase_ms_[static_cast<std::size_t>(phase)] +=
+            std::chrono::duration<double, std::milli>(now - last_).count();
+        last_ = now;
+    }
+
+    void recordExchange(AggregationProfileExchange exchange,
+                        std::uint64_t sent,
+                        std::uint64_t received,
+                        std::uint64_t partners,
+                        double milliseconds) noexcept
+    {
+        if (!active_) {
+            return;
+        }
+        const auto index = static_cast<std::size_t>(exchange);
+        sent_words_[index] += sent;
+        received_words_[index] += received;
+        exchange_partners_[index] =
+            std::max(exchange_partners_[index], partners);
+        exchange_ms_[index] += milliseconds;
+    }
+
+    void setCount(AggregationProfileCount count, std::uint64_t value) noexcept
+    {
+        if (active_) {
+            counts_[static_cast<std::size_t>(count)] = value;
+        }
+    }
+
+    // Collective when active on a distributed communicator.
+    void report(const systems::FESystem& system,
+                std::string_view field_name,
+                std::string_view kind);
+
+private:
+    bool active_{false};
+    Clock::time_point start_{};
+    Clock::time_point last_{};
+    std::array<double, static_cast<std::size_t>(AggregationProfilePhase::Count)>
+        phase_ms_{};
+    std::array<double,
+               static_cast<std::size_t>(AggregationProfileExchange::Count)>
+        exchange_ms_{};
+    std::array<std::uint64_t,
+               static_cast<std::size_t>(AggregationProfileExchange::Count)>
+        sent_words_{};
+    std::array<std::uint64_t,
+               static_cast<std::size_t>(AggregationProfileExchange::Count)>
+        received_words_{};
+    std::array<std::uint64_t,
+               static_cast<std::size_t>(AggregationProfileExchange::Count)>
+        exchange_partners_{};
+    std::array<std::uint64_t,
+               static_cast<std::size_t>(AggregationProfileCount::Count)>
+        counts_{};
+};
+
+AggregationRefreshProfile& aggregationRefreshProfile()
+{
+    static AggregationRefreshProfile profile;
+    return profile;
+}
+
+void AggregationRefreshProfile::report(const systems::FESystem& system,
+                                       std::string_view field_name,
+                                       std::string_view kind)
+{
+    if (!active_) {
+        return;
+    }
+    active_ = false;
+    const double total_ms =
+        std::chrono::duration<double, std::milli>(Clock::now() - start_)
+            .count();
+    constexpr auto n_phases =
+        static_cast<std::size_t>(AggregationProfilePhase::Count);
+    constexpr auto n_exchanges =
+        static_cast<std::size_t>(AggregationProfileExchange::Count);
+    constexpr auto n_counts =
+        static_cast<std::size_t>(AggregationProfileCount::Count);
+    // [total, phases..., exchange times...] reduced by MAX and SUM;
+    // [sent..., received..., partners..., counts...] reduced by MAX and SUM.
+    std::vector<double> times;
+    times.reserve(1u + n_phases + n_exchanges);
+    times.push_back(total_ms);
+    times.insert(times.end(), phase_ms_.begin(), phase_ms_.end());
+    times.insert(times.end(), exchange_ms_.begin(), exchange_ms_.end());
+    std::vector<std::uint64_t> words;
+    words.reserve(3u * n_exchanges + n_counts);
+    words.insert(words.end(), sent_words_.begin(), sent_words_.end());
+    words.insert(words.end(), received_words_.begin(), received_words_.end());
+    words.insert(words.end(), exchange_partners_.begin(),
+                 exchange_partners_.end());
+    words.insert(words.end(), counts_.begin(), counts_.end());
+    auto times_max = times;
+    auto times_sum = times;
+    auto words_max = words;
+    auto words_sum = words;
+    int rank = 0;
+    int world_size = 1;
+#if FE_HAS_MPI
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized != 0) {
+        const auto comm = system.dofHandler().mpiComm();
+        MPI_Comm_rank(comm, &rank);
+        MPI_Comm_size(comm, &world_size);
+        if (world_size > 1) {
+            MPI_Allreduce(times.data(), times_max.data(),
+                          static_cast<int>(times.size()), MPI_DOUBLE,
+                          MPI_MAX, comm);
+            MPI_Allreduce(times.data(), times_sum.data(),
+                          static_cast<int>(times.size()), MPI_DOUBLE,
+                          MPI_SUM, comm);
+            MPI_Allreduce(words.data(), words_max.data(),
+                          static_cast<int>(words.size()), MPI_UINT64_T,
+                          MPI_MAX, comm);
+            MPI_Allreduce(words.data(), words_sum.data(),
+                          static_cast<int>(words.size()), MPI_UINT64_T,
+                          MPI_SUM, comm);
+        }
+    }
+#else
+    static_cast<void>(system);
+#endif
+    if (rank != 0) {
+        return;
+    }
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(3)
+        << "SmallCutAggregationConstraint: diagnostic=aggregation_profile"
+        << " field='" << field_name << "' kind=" << kind
+        << " ranks=" << world_size << " total_ms_max=" << times_max[0]
+        << " total_ms_mean=" << times_sum[0] / world_size;
+    for (std::size_t i = 0; i < n_phases; ++i) {
+        if (times_max[1u + i] == 0.0) {
+            continue;
+        }
+        out << " phase." << kAggregationProfilePhaseNames[i]
+            << "_ms_max=" << times_max[1u + i];
+    }
+    for (std::size_t i = 0; i < n_exchanges; ++i) {
+        if (words_sum[i] == 0u && words_sum[n_exchanges + i] == 0u &&
+            times_max[1u + n_phases + i] == 0.0) {
+            continue;
+        }
+        const char* name = kAggregationProfileExchangeNames[i];
+        out << " exchange." << name << "_ms_max="
+            << times_max[1u + n_phases + i] << " exchange." << name
+            << "_sent_words_sum=" << words_sum[i] << " exchange." << name
+            << "_sent_words_max=" << words_max[i] << " exchange." << name
+            << "_received_words_max=" << words_max[n_exchanges + i]
+            << " exchange." << name << "_partners_max="
+            << words_max[2u * n_exchanges + i];
+    }
+    for (std::size_t i = 0; i < n_counts; ++i) {
+        out << " count." << kAggregationProfileCountNames[i]
+            << "_max=" << words_max[3u * n_exchanges + i] << " count."
+            << kAggregationProfileCountNames[i]
+            << "_sum=" << words_sum[3u * n_exchanges + i];
+    }
+    FE_LOG_INFO(out.str());
+}
+
 #if FE_HAS_MPI
 
 [[nodiscard]] GatheredInt64Words allGatherInt64Words(
     MPI_Comm comm,
-    std::span<const std::int64_t> local_words)
+    std::span<const std::int64_t> local_words,
+    AggregationProfileExchange exchange)
 {
+    const auto profile_start = AggregationRefreshProfile::Clock::now();
     const bool local_count_overflows =
         local_words.size() >
         static_cast<std::size_t>(std::numeric_limits<int>::max());
@@ -683,6 +976,14 @@ struct GatheredInt64Words {
                    gathered.displacements.data(),
                    MPI_INT64_T,
                    comm);
+    aggregationRefreshProfile().recordExchange(
+        exchange,
+        static_cast<std::uint64_t>(local_count),
+        static_cast<std::uint64_t>(total),
+        static_cast<std::uint64_t>(world_size - 1),
+        std::chrono::duration<double, std::milli>(
+            AggregationRefreshProfile::Clock::now() - profile_start)
+            .count());
     return gathered;
 }
 
@@ -807,7 +1108,8 @@ using GlobalCandidateMap =
                 local_serialization_exception,
                 "candidate_support_serialization");
             const auto gathered = allGatherInt64Words(
-                comm, std::span<const std::int64_t>(local_words));
+                comm, std::span<const std::int64_t>(local_words),
+                AggregationProfileExchange::CandidateSupport);
             std::exception_ptr local_decode_exception;
             try {
             for (int rank = 0; rank < world_size; ++rank) {
@@ -1080,7 +1382,8 @@ resolveDistributedAggregationDeclarations(
                 "aggregation weight on at least one communicator rank");
         }
         gathered_candidates = allGatherInt64Words(
-            comm, std::span<const std::int64_t>(local_candidate_words));
+            comm, std::span<const std::int64_t>(local_candidate_words),
+            AggregationProfileExchange::RootProposals);
     } else {
         if (!local_candidate_payload_valid) {
             if (local_candidate_serialization_exception != nullptr) {
@@ -1296,7 +1599,8 @@ resolveDistributedAggregationDeclarations(
     if (initialized != 0 && world_size > 1) {
         gathered_proposal_visibility = allGatherInt64Words(
             comm,
-            std::span<const std::int64_t>(local_proposal_visibility_words));
+            std::span<const std::int64_t>(local_proposal_visibility_words),
+            AggregationProfileExchange::ProposalVisibility);
     } else {
         gathered_proposal_visibility.words =
             local_proposal_visibility_words;
@@ -1855,7 +2159,8 @@ resolveDistributedAggregationDeclarations(
     GatheredInt64Words gathered_visibility;
     if (initialized != 0 && world_size > 1) {
         gathered_visibility = allGatherInt64Words(
-            comm, std::span<const std::int64_t>(local_visibility_words));
+            comm, std::span<const std::int64_t>(local_visibility_words),
+            AggregationProfileExchange::LineVisibility);
     } else {
         gathered_visibility.words = local_visibility_words;
         gathered_visibility.counts = {
@@ -3887,7 +4192,8 @@ refreshRetainedActiveCellMeasures(
         MPI_Comm_size(comm, &world_size);
         if (world_size > 1) {
             gathered = allGatherInt64Words(
-                comm, std::span<const std::int64_t>(local_words));
+                comm, std::span<const std::int64_t>(local_words),
+                AggregationProfileExchange::ReusedMeasures);
         }
     }
 #endif
@@ -4109,6 +4415,8 @@ SmallCutAggregationConstraint::SmallCutAggregationConstraint(
 void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                                           AffineConstraints& constraints)
 {
+    auto& profile = aggregationRefreshProfile();
+    profile.begin();
     // Moving the prior report is allocation-free. This occurs before any
     // communicator collective below, so enabling transition telemetry cannot
     // introduce a rank-asymmetric allocation failure ahead of a collective.
@@ -4512,6 +4820,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     // either every rank publishes its recorded refresh with recomputed
     // retained volumes and rule identities, or every rank recomputes. A key
     // failure only disables reuse.
+    profile.mark(AggregationProfilePhase::Preflight);
     std::optional<detail::SmallCutAggregationReuseInputs> reuse_inputs;
     try {
         reuse_inputs = computeAggregationReuseInputs(
@@ -4545,6 +4854,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         const auto [reuse_record, reuse_shared_measures] =
             agreeOnAggregationReuse(
                 system, local_record_matches, shared_measures.has_value());
+        profile.mark(AggregationProfilePhase::ReuseKey);
         if (reuse_record) {
             detail::SmallCutAggregationRetainedMeasures measures;
             if (reuse_shared_measures) {
@@ -4571,6 +4881,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                                  std::move(previous_completed_refresh_report),
                                  measures,
                                  reuse_shared_measures);
+            profile.mark(AggregationProfilePhase::ReusePublication);
+            profile.report(system, rec.name, "reused");
             return;
         }
         // Detailed diagnostic, printed (at INFO) only when FE_LOG_LEVEL=DEBUG.
@@ -4859,6 +5171,13 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     }
     coordinateLocalPhaseFailure(local_cell_declaration_exception,
                                 "cell_class_and_key_serialization");
+    profile.setCount(AggregationProfileCount::LocalCells,
+                     static_cast<std::uint64_t>(mesh.numCells()));
+    profile.setCount(AggregationProfileCount::OwnedCells,
+                     static_cast<std::uint64_t>(mesh.numOwnedCells()));
+    profile.setCount(AggregationProfileCount::LocalClassifiedCells,
+                     ordered_cell_classes.size());
+    profile.mark(AggregationProfilePhase::Classification);
 
     GatheredInt64Words gathered_cell_classes;
     int aggregation_world_size = 1;
@@ -4869,7 +5188,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         if (aggregation_world_size > 1) {
             gathered_cell_classes = allGatherInt64Words(
                 comm,
-                std::span<const std::int64_t>(local_cell_class_words));
+                std::span<const std::int64_t>(local_cell_class_words),
+                AggregationProfileExchange::CellClasses);
         }
     }
 #endif
@@ -5167,6 +5487,9 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             std::to_string(communicator_owned_mesh_cells));
     }
 
+    profile.setCount(AggregationProfileCount::CommunicatorClassifiedCells,
+                     classified_cells.size());
+    profile.mark(AggregationProfilePhase::CellClassExchange);
     // Prove that every classified global cell has exactly one owner. This is
     // necessary for accepting owner-sourced topology. A separate all-owned
     // cell-count equality above proves that flags=0 inactive-full declarations
@@ -5199,7 +5522,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     if (mpi_initialized != 0 && aggregation_world_size > 1) {
         gathered_cell_visibility = allGatherInt64Words(
             system.dofHandler().mpiComm(),
-            std::span<const std::int64_t>(local_cell_visibility_words));
+            std::span<const std::int64_t>(local_cell_visibility_words),
+            AggregationProfileExchange::CellOwners);
     }
 #endif
     if (aggregation_world_size == 1) {
@@ -5208,6 +5532,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             static_cast<int>(local_cell_visibility_words.size())};
         gathered_cell_visibility.displacements = {0};
     }
+    profile.mark(AggregationProfilePhase::CellOwnerExchange);
     std::vector<std::size_t> global_cell_owner_count_of;
     std::vector<int> global_cell_owner_rank_of;
     const bool slave_all_cut = runtime_options.slave_all_cut;
@@ -5386,7 +5711,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     if (mpi_initialized != 0 && aggregation_world_size > 1) {
         gathered_faces = allGatherInt64Words(
             system.dofHandler().mpiComm(),
-            std::span<const std::int64_t>(local_face_words));
+            std::span<const std::int64_t>(local_face_words),
+            AggregationProfileExchange::Faces);
     }
 #endif
     if (aggregation_world_size == 1) {
@@ -5539,6 +5865,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     }
     coordinateLocalPhaseFailure(local_face_decode_exception,
                                 "face_ledger_decode_and_graph_construction");
+    profile.mark(AggregationProfilePhase::FaceGraph);
 
     // 2b. Canonical retained active features. The graph and per-cell measure
     // declarations are communicator-global on every rank, so component
@@ -5804,6 +6131,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     }
     coordinateLocalPhaseFailure(local_feature_exception,
                                 "active_feature_ledger_construction");
+    profile.mark(AggregationProfilePhase::Features);
 
     // 3. Vertices of cut cells + their incident band cells.
     std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> vertex_cells;
@@ -5962,6 +6290,11 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         rec.name,
         std::span<const LocalCandidateSupport>(local_candidate_support),
         slave_all_cut);
+    profile.setCount(AggregationProfileCount::LocalCandidateSupports,
+                     local_candidate_support.size());
+    profile.setCount(AggregationProfileCount::CommunicatorCandidates,
+                     global_candidates.size());
+    profile.mark(AggregationProfilePhase::CandidateSupport);
 
     std::set<GlobalIndex> all_candidate_component_dofs;
     std::map<GlobalIndex, std::vector<GlobalRootCandidate>>
@@ -6166,6 +6499,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     }
     coordinateLocalPhaseFailure(local_global_graph_exception,
                                 "global_candidate_root_traversal");
+    profile.mark(AggregationProfilePhase::RootTraversal);
 
     std::size_t constrained_vertex_count = 0u;
     std::size_t aggregated = 0u;
@@ -6548,6 +6882,17 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     }
 #endif
 
+    if (profile.active()) {
+        std::uint64_t local_root_proposals = 0u;
+        for (const auto& [dof, declarations] :
+             local_aggregation_declarations) {
+            static_cast<void>(dof);
+            local_root_proposals += declarations.size();
+        }
+        profile.setCount(AggregationProfileCount::LocalRootProposals,
+                         local_root_proposals);
+    }
+    profile.mark(AggregationProfilePhase::RootProposals);
     DistributedAggregationResult distributed_result;
     if (max_lines == std::numeric_limits<std::size_t>::max()) {
         // Candidate DOFs this rank condenses: DOFs of its owned cells
@@ -6766,6 +7111,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             DistributedAggregationValidation::DebugBypass;
     }
 
+    profile.mark(AggregationProfilePhase::Resolution);
     const auto distributed_validation = distributed_result.validation;
     std::vector<SmallCutAggregationProlongationPatch>
         canonical_prolongation_patches;
@@ -7401,6 +7747,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             next_successful_publication_ordinal;
         reuse_record_ = std::move(next_reuse_record);
     }
+    profile.mark(AggregationProfilePhase::Publication);
+    profile.report(system, rec.name, "full");
 }
 
 std::shared_ptr<const SmallCutAggregationProlongationReport>
@@ -7408,6 +7756,8 @@ SmallCutAggregationConstraint::finalizeProlongationReport(
     const systems::FESystem& system,
     const AffineConstraints& closed_constraints) const
 {
+    auto& profile = aggregationRefreshProfile();
+    profile.begin();
     int rank = 0;
     int world_size = 1;
 #if FE_HAS_MPI
@@ -7604,7 +7954,8 @@ SmallCutAggregationConstraint::finalizeProlongationReport(
     if (world_size > 1) {
         gathered_owner_rows = allGatherInt64Words(
             system.dofHandler().mpiComm(),
-            std::span<const std::int64_t>(local_owner_words));
+            std::span<const std::int64_t>(local_owner_words),
+            AggregationProfileExchange::OwnerRows);
     }
 #endif
     if (world_size == 1) {
@@ -8297,6 +8648,10 @@ SmallCutAggregationConstraint::finalizeProlongationReport(
         }
     }
 #endif
+    profile.mark(AggregationProfilePhase::Publication);
+    profile.report(system,
+                   system.fieldRecord(pending.field).name,
+                   "finalize");
     return report;
 }
 
