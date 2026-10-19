@@ -14,8 +14,6 @@
 #include <iostream>
 #include <fstream>
 #ifdef _WIN32
-#include <windows.h>
-#include <psapi.h>
 #include <process.h>
 #else
 #include <spawn.h>
@@ -32,6 +30,8 @@ extern char** environ;
 */
 
 #ifdef _WIN32
+#include <windows.h>
+#include <psapi.h>
 static std::string dl_error;
 
 void* dlopen(const char* file, int)
