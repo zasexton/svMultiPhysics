@@ -933,6 +933,14 @@ struct CertifiedRegularGraph {
     // transform and two-axis restriction while remaining far below Real root
     // tolerances at unit scale.
     constexpr long double operation_roundoff_factor = 16384.0L;
+    // The unit roundoff is at least that of x87 extended precision, the long
+    // double of x86-64, so the zero band does not shrink with a wider long
+    // double: with the IEEE binary128 long double of AArch64 Linux it would
+    // shrink by 2^49 and stop absorbing the binary64 rounding of the nodal
+    // coefficients (2^-54 at a represented tangency, for example).  The band
+    // still exceeds the outward-rounding error of the wider format.
+    constexpr long double unit_roundoff =
+        std::max(std::numeric_limits<long double>::epsilon(), 0x1p-63L);
     long double control_scale = 1.0L;
     for (const auto& value : control) {
         control_scale = std::max(
@@ -941,7 +949,7 @@ struct CertifiedRegularGraph {
     }
     return roundUp(
         operation_roundoff_factor *
-        std::numeric_limits<long double>::epsilon() *
+        unit_roundoff *
         control_scale);
 }
 
