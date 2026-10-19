@@ -51,7 +51,4 @@ resolveLevelSetMaintenanceConfigurations(
     std::span<const ResolvedLevelSetEquationHandle> equations_by_input_index,
     std::span<const ActiveCutVolumeRequest> active_requests);
 
-[[nodiscard]] std::string serializeLevelSetMaintenanceCompatibility(
-    const ResolvedLevelSetMaintenanceCompatibilityConfiguration &configuration);
-
 } // namespace application::core

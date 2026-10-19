@@ -81,14 +81,92 @@ LevelSetMaintenanceRequest withMaintenanceConfiguration(
 }
 
 
+void expectMaintenanceCompatibilityFieldsEqual(
+    const MaintenanceConfiguration& actual,
+    const MaintenanceConfiguration& expected)
+{
+  EXPECT_EQ(actual.installation.get(), expected.installation.get());
+  const auto& actual_transport = actual.transport;
+  const auto& expected_transport = expected.transport;
+  EXPECT_EQ(actual_transport.level_set.field_name,
+            expected_transport.level_set.field_name);
+  EXPECT_EQ(actual_transport.transport_form, expected_transport.transport_form);
+  EXPECT_EQ(actual_transport.velocity.source, expected_transport.velocity.source);
+  EXPECT_EQ(actual_transport.velocity.auto_register_field,
+            expected_transport.velocity.auto_register_field);
+  EXPECT_EQ(actual_transport.velocity.algebraic_extension_source_field_name,
+            expected_transport.velocity.algebraic_extension_source_field_name);
+  EXPECT_EQ(actual_transport.velocity.space.get(),
+            expected_transport.velocity.space.get());
+  EXPECT_EQ(actual_transport.velocity.constant_value,
+            expected_transport.velocity.constant_value);
+  EXPECT_EQ(actual_transport.conservative_phase.enabled,
+            expected_transport.conservative_phase.enabled);
+  EXPECT_EQ(actual_transport.conservative_phase.liquid_side,
+            expected_transport.conservative_phase.liquid_side);
+  EXPECT_EQ(actual_transport.reinitialization.enabled,
+            expected_transport.reinitialization.enabled);
+  EXPECT_EQ(actual_transport.reinitialization.method,
+            expected_transport.reinitialization.method);
+  EXPECT_EQ(actual_transport.reinitialization.cadence_steps,
+            expected_transport.reinitialization.cadence_steps);
+  EXPECT_EQ(actual_transport.volume_correction.enabled,
+            expected_transport.volume_correction.enabled);
+  EXPECT_EQ(actual_transport.volume_correction.volume_tolerance,
+            expected_transport.volume_correction.volume_tolerance);
+  EXPECT_EQ(actual.isovalue, expected.isovalue);
+  ASSERT_EQ(actual.open_boundaries.size(), expected.open_boundaries.size());
+  for (std::size_t index = 0u; index < expected.open_boundaries.size(); ++index) {
+    const auto& actual_boundary = actual.open_boundaries[index];
+    const auto& expected_boundary = expected.open_boundaries[index];
+    EXPECT_EQ(actual_boundary.face_name, expected_boundary.face_name);
+    EXPECT_EQ(actual_boundary.inflow, expected_boundary.inflow);
+    ASSERT_EQ(actual_boundary.literal_inflow_value.has_value(),
+              expected_boundary.literal_inflow_value.has_value());
+    if (expected_boundary.literal_inflow_value) {
+      EXPECT_EQ(*actual_boundary.literal_inflow_value,
+                *expected_boundary.literal_inflow_value);
+    }
+  }
+  ASSERT_EQ(actual.volume_cut_request.has_value(),
+            expected.volume_cut_request.has_value());
+  if (expected.volume_cut_request) {
+    EXPECT_EQ(actual.volume_cut_request->level_set_field_name,
+              expected.volume_cut_request->level_set_field_name);
+    EXPECT_EQ(actual.volume_cut_request->domain_id,
+              expected.volume_cut_request->domain_id);
+    EXPECT_EQ(actual.volume_cut_request->isovalue,
+              expected.volume_cut_request->isovalue);
+  }
+  EXPECT_EQ(actual.static_capillary_equilibrium_enabled,
+            expected.static_capillary_equilibrium_enabled);
+  EXPECT_EQ(actual.curvature_projection_enabled,
+            expected.curvature_projection_enabled);
+  EXPECT_EQ(actual.curvature_field_name, expected.curvature_field_name);
+  ASSERT_EQ(actual.input_observations.size(), expected.input_observations.size());
+  for (std::size_t index = 0u; index < expected.input_observations.size();
+       ++index) {
+    const auto& actual_observation = actual.input_observations[index];
+    const auto& expected_observation = expected.input_observations[index];
+    EXPECT_EQ(actual_observation.canonical_key, expected_observation.canonical_key);
+    EXPECT_EQ(actual_observation.selected_spelling,
+              expected_observation.selected_spelling);
+    EXPECT_EQ(actual_observation.source_layer, expected_observation.source_layer);
+    EXPECT_EQ(actual_observation.supplied, expected_observation.supplied);
+    EXPECT_EQ(actual_observation.representation,
+              expected_observation.representation);
+    EXPECT_EQ(actual_observation.compatibility_fallback,
+              expected_observation.compatibility_fallback);
+    EXPECT_EQ(actual_observation.ordered_overrides,
+              expected_observation.ordered_overrides);
+  }
+}
+
 void expectMaintenanceConfigurationUnchanged(
     const LevelSetMaintenanceRequest& request,
-    const MaintenanceConfiguration& before,
-    const std::string& serialized_before)
+    const MaintenanceConfiguration& before)
 {
-  EXPECT_EQ(application::core::serializeLevelSetMaintenanceCompatibility(
-                *request.configuration),
-            serialized_before);
+  expectMaintenanceCompatibilityFieldsEqual(*request.configuration, before);
   const auto& actual = request.configuration->curvature_projection;
   const auto& expected = before.curvature_projection;
   EXPECT_EQ(actual.isovalue, expected.isovalue);
@@ -6988,23 +7066,16 @@ TEST(ApplicationDriverLevelSetWorkflows,
   auto request = freezeMaintenanceConfiguration(
       std::move(request_configuration));
   const auto configured_before_binding = *request.configuration;
-  const auto serialized_before_binding =
-      application::core::serializeLevelSetMaintenanceCompatibility(
-          configured_before_binding);
   const auto bind_one = [&system](
                             std::vector<LevelSetMaintenanceRequest>& candidates) {
     const auto before = *candidates.front().configuration;
-    const auto serialized_before =
-        application::core::serializeLevelSetMaintenanceCompatibility(before);
     try {
       bindKinematicAreaGradientTractionMaintenance(system, candidates);
     } catch (...) {
-      expectMaintenanceConfigurationUnchanged(
-          candidates.front(), before, serialized_before);
+      expectMaintenanceConfigurationUnchanged(candidates.front(), before);
       throw;
     }
-    expectMaintenanceConfigurationUnchanged(
-        candidates.front(), before, serialized_before);
+    expectMaintenanceConfigurationUnchanged(candidates.front(), before);
   };
   auto default_order = request;
   default_order = withMaintenanceConfiguration(
@@ -7087,7 +7158,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       system, requests));
   ASSERT_EQ(requests.size(), 1u);
   expectMaintenanceConfigurationUnchanged(
-      requests.front(), configured_before_binding, serialized_before_binding);
+      requests.front(), configured_before_binding);
   const auto& options = effectiveCurvatureProjectionOptions(requests.front());
   EXPECT_FALSE(options.kinematic_area_gradient_negative_liquid_side);
   ASSERT_EQ(options.kinematic_area_gradient_young_walls.size(), 2u);
@@ -7124,9 +7195,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
   std::vector<LevelSetMaintenanceRequest> negative_side_requests{
       negative_side_request};
   const auto configured_negative_side = *negative_side_request.configuration;
-  const auto serialized_negative_side =
-      application::core::serializeLevelSetMaintenanceCompatibility(
-          configured_negative_side);
   const auto negative_side_before =
       canonicalLevelSetMaintenanceRequestSchedule(
           negative_side_requests,
@@ -7135,8 +7203,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   ASSERT_NO_THROW(bindKinematicAreaGradientTractionMaintenance(
       system, negative_side_requests));
   expectMaintenanceConfigurationUnchanged(
-      negative_side_requests.front(), configured_negative_side,
-      serialized_negative_side);
+      negative_side_requests.front(), configured_negative_side);
   EXPECT_FALSE(
       effectiveCurvatureProjectionOptions(negative_side_requests.front())
           .kinematic_area_gradient_negative_liquid_side);
@@ -7160,7 +7227,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           /*completed_step=*/0);
   EXPECT_EQ(repeated_binding.words, canonical.words);
   expectMaintenanceConfigurationUnchanged(
-      requests.front(), configured_before_binding, serialized_before_binding);
+      requests.front(), configured_before_binding);
   recordMaintenanceSchedule(
       "r1_kinematic_bind_repeated", repeated_binding);
   auto changed = requests;
@@ -7259,7 +7326,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           /*completed_step=*/0);
   EXPECT_EQ(changed_declaration_failure.words, canonical.words);
   expectMaintenanceConfigurationUnchanged(
-      requests.front(), configured_before_binding, serialized_before_binding);
+      requests.front(), configured_before_binding);
   recordMaintenanceSchedule(
       "r1_kinematic_bind_changed_declaration_failure",
       changed_declaration_failure);
@@ -9836,9 +9903,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
   auto requests = legacyMaintenanceRequestsForTest(*params);
   ASSERT_EQ(requests.size(), 1u);
   const auto configured_before_initialization = *requests.front().configuration;
-  const auto serialized_before_initialization =
-      application::core::serializeLevelSetMaintenanceCompatibility(
-          configured_before_initialization);
   EXPECT_FALSE(requests.front().runtime.measured_static_capillary_target.has_value());
   ASSERT_TRUE(
       requests.front().configuration->static_capillary_equilibrium_enabled);
@@ -10039,8 +10103,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
                               .target_liquid_volume),
       requests.front().runtime.static_capillary_equilibrium_initialized);
   expectMaintenanceConfigurationUnchanged(
-      requests.front(), configured_before_initialization,
-      serialized_before_initialization);
+      requests.front(), configured_before_initialization);
   ASSERT_TRUE(requests.front().runtime.measured_static_capillary_target.has_value());
   EXPECT_EQ(effectiveStaticCapillaryEquilibriumOptions(requests.front())
                 .target_liquid_volume,
@@ -10312,9 +10375,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
   auto requests = legacyMaintenanceRequestsForTest(*params);
   ASSERT_EQ(requests.size(), 1u);
   const auto configured_before_initialization = *requests.front().configuration;
-  const auto serialized_before_initialization =
-      application::core::serializeLevelSetMaintenanceCompatibility(
-          configured_before_initialization);
   EXPECT_FALSE(requests.front().runtime.measured_static_capillary_target.has_value());
 
   svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle
@@ -10476,8 +10536,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
                               .target_liquid_volume),
       requests.front().runtime.static_capillary_equilibrium_initialized);
   expectMaintenanceConfigurationUnchanged(
-      requests.front(), configured_before_initialization,
-      serialized_before_initialization);
+      requests.front(), configured_before_initialization);
   ASSERT_TRUE(requests.front().runtime.measured_static_capillary_target.has_value());
   EXPECT_EQ(effectiveStaticCapillaryEquilibriumOptions(requests.front())
                 .target_liquid_volume,

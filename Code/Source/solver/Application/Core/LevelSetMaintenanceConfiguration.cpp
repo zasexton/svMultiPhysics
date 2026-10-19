@@ -5,10 +5,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <iomanip>
-#include <limits>
-#include <locale>
-#include <sstream>
 #include <stdexcept>
 #include <string_view>
 #include <type_traits>
@@ -26,104 +22,6 @@ using Selection = parsing::LevelSetSelectedParameter;
 
 constexpr auto kInstallationPolicy = parsing::LevelSetInputPolicy::Installation;
 constexpr auto kLegacyPolicy = parsing::LevelSetInputPolicy::LegacyMaintenance;
-
-std::string jsonString(std::string_view value) {
-  static constexpr char hex[] = "0123456789abcdef";
-  std::string result;
-  result.reserve(value.size() + 2u);
-  result.push_back('"');
-  for (const unsigned char c : value) {
-    switch (c) {
-    case '"':
-      result += "\\\"";
-      break;
-    case '\\':
-      result += "\\\\";
-      break;
-    case '\b':
-      result += "\\b";
-      break;
-    case '\f':
-      result += "\\f";
-      break;
-    case '\n':
-      result += "\\n";
-      break;
-    case '\r':
-      result += "\\r";
-      break;
-    case '\t':
-      result += "\\t";
-      break;
-    default:
-      if (c < 0x20u) {
-        result += "\\u00";
-        result.push_back(hex[(c >> 4u) & 0x0fu]);
-        result.push_back(hex[c & 0x0fu]);
-      } else {
-        result.push_back(static_cast<char>(c));
-      }
-      break;
-    }
-  }
-  result.push_back('"');
-  return result;
-}
-
-std::string jsonReal(svmp::FE::Real value) {
-  if (std::isnan(value)) {
-    return "\"nan\"";
-  }
-  if (std::isinf(value)) {
-    return value < 0.0 ? "\"-inf\"" : "\"inf\"";
-  }
-  std::ostringstream out;
-  out.imbue(std::locale::classic());
-  out << std::setprecision(std::numeric_limits<svmp::FE::Real>::max_digits10)
-      << value;
-  return out.str();
-}
-
-constexpr const char *jsonBool(bool value) noexcept {
-  return value ? "true" : "false";
-}
-
-const char *transportFormName(ls::LevelSetTransportForm value) noexcept {
-  return value == ls::LevelSetTransportForm::Advective
-             ? "advective"
-             : "conservative_divergence";
-}
-
-const char *velocitySourceName(ls::LevelSetVelocitySource value) noexcept {
-  switch (value) {
-  case ls::LevelSetVelocitySource::CoupledField:
-    return "coupled_field";
-  case ls::LevelSetVelocitySource::PrescribedData:
-    return "prescribed_data";
-  case ls::LevelSetVelocitySource::ConstantVector:
-    return "constant_vector";
-  case ls::LevelSetVelocitySource::MaterialInterfacePhasePair:
-    return "material_interface_phase_pair";
-  }
-  return "unknown";
-}
-
-const char *phaseSideName(ls::LevelSetPhaseSide value) noexcept {
-  return value == ls::LevelSetPhaseSide::Negative ? "negative" : "positive";
-}
-
-const char *
-reinitializationMethodName(ls::LevelSetReinitializationMethod value) noexcept {
-  switch (value) {
-  case ls::LevelSetReinitializationMethod::HamiltonJacobiPDE:
-    return "hamilton_jacobi_pde";
-  case ls::LevelSetReinitializationMethod::FastMarching:
-    return "fast_marching";
-  case ls::LevelSetReinitializationMethod::Projection:
-    return "projection";
-  }
-  return "unknown";
-}
 
 void appendSelections(const Reader &reader, std::size_t &cursor,
                       std::vector<LevelSetInputObservation> &observations,
@@ -360,14 +258,6 @@ void appendLegacyDefaults(std::vector<LevelSetInputObservation> &observations) {
   }
 }
 
-bool isInstallationObservation(
-    const LevelSetInputObservation &observation) noexcept {
-  return observation.representation == "installation_snapshot" ||
-         observation.representation == "installation_derived" ||
-         observation.representation == "installation_default" ||
-         observation.representation == "unavailable";
-}
-
 std::optional<ActiveCutVolumeRequest> matchingActiveCutVolumeRequest(
     std::span<const ActiveCutVolumeRequest> active_requests,
     const std::string &level_set_field_name, double isovalue) {
@@ -384,25 +274,6 @@ std::optional<ActiveCutVolumeRequest> matchingActiveCutVolumeRequest(
     }
   }
   return std::nullopt;
-}
-
-void appendObservationJson(std::ostringstream &out,
-                           const LevelSetInputObservation &observation) {
-  out << "{\"canonical_key\":" << jsonString(observation.canonical_key)
-      << ",\"selected_spelling\":" << jsonString(observation.selected_spelling)
-      << ",\"source_layer\":" << jsonString(observation.source_layer)
-      << ",\"supplied\":" << jsonBool(observation.supplied)
-      << ",\"representation\":" << jsonString(observation.representation)
-      << ",\"compatibility_fallback\":"
-      << jsonBool(observation.compatibility_fallback)
-      << ",\"ordered_overrides\":[";
-  for (std::size_t i = 0; i < observation.ordered_overrides.size(); ++i) {
-    if (i != 0u) {
-      out << ',';
-    }
-    out << jsonString(observation.ordered_overrides[i]);
-  }
-  out << "]}";
 }
 
 } // namespace
@@ -1102,158 +973,6 @@ resolveLevelSetMaintenanceConfigurations(
     }
   }
   return configurations;
-}
-
-std::string serializeLevelSetMaintenanceCompatibility(
-    const ResolvedLevelSetMaintenanceCompatibilityConfiguration
-        &configuration) {
-  std::ostringstream out;
-  out.imbue(std::locale::classic());
-  out << "{\"installation\":{";
-  if (!configuration.installation) {
-    out << "\"availability\":\"unavailable\",\"policy\":\"installation\"}";
-  } else {
-    const auto &installation = *configuration.installation;
-    out << "\"availability\":\"available\",\"policy\":\"installation\""
-        << ",\"level_set_field_name\":"
-        << jsonString(installation.options.level_set.field_name)
-        << ",\"transport_form\":"
-        << jsonString(transportFormName(installation.options.transport_form))
-        << ",\"velocity\":{\"source\":"
-        << jsonString(velocitySourceName(installation.options.velocity.source))
-        << ",\"auto_register_field\":"
-        << jsonBool(installation.options.velocity.auto_register_field)
-        << ",\"source_field_name\":"
-        << jsonString(installation.options.velocity
-                          .algebraic_extension_source_field_name)
-        << ",\"space_present\":"
-        << jsonBool(static_cast<bool>(installation.options.velocity.space))
-        << "},\"conservative_phase\":{\"enabled\":"
-        << jsonBool(installation.options.conservative_phase.enabled)
-        << ",\"liquid_side\":"
-        << jsonString(phaseSideName(
-               installation.options.conservative_phase.liquid_side))
-        << "},\"reinitialization\":{\"enabled\":"
-        << jsonBool(installation.options.reinitialization.enabled)
-        << ",\"method\":" << jsonString(reinitializationMethodName(
-                                 installation.options.reinitialization.method))
-        << ",\"cadence_steps\":"
-        << installation.options.reinitialization.cadence_steps
-        << "},\"volume_correction\":{\"enabled\":"
-        << jsonBool(installation.options.volume_correction.enabled);
-    if (installation.options.volume_correction.enabled) {
-      out << ",\"volume_tolerance\":"
-          << jsonReal(installation.options.volume_correction.volume_tolerance);
-    }
-    out << "},\"curvature_targets\":[";
-    for (std::size_t i = 0; i < installation.projected_curvature_fields.size();
-         ++i) {
-      if (i != 0u) {
-        out << ',';
-      }
-      out << jsonString(installation.projected_curvature_fields[i]);
-    }
-    out << "],\"unobserved\":[]}";
-  }
-
-  const auto &transport = configuration.transport;
-  out << ",\"legacy_equation_maintenance\":{\"availability\":\"available\""
-      << ",\"policy\":\"legacy_maintenance\""
-      << ",\"level_set_field_name\":"
-      << jsonString(transport.level_set.field_name) << ",\"transport_form\":"
-      << jsonString(transportFormName(transport.transport_form))
-      << ",\"velocity\":{\"source\":"
-      << jsonString(velocitySourceName(transport.velocity.source))
-      << ",\"auto_register_field\":"
-      << jsonBool(transport.velocity.auto_register_field)
-      << ",\"source_field_name\":"
-      << jsonString(transport.velocity.algebraic_extension_source_field_name)
-      << ",\"space_present\":"
-      << jsonBool(static_cast<bool>(transport.velocity.space));
-  if (transport.velocity.source == ls::LevelSetVelocitySource::ConstantVector) {
-    out << ",\"constant_value\":["
-        << jsonReal(transport.velocity.constant_value[0]) << ','
-        << jsonReal(transport.velocity.constant_value[1]) << ','
-        << jsonReal(transport.velocity.constant_value[2]) << ']';
-  }
-  out << "},\"conservative_phase\":{\"enabled\":"
-      << jsonBool(transport.conservative_phase.enabled) << ",\"liquid_side\":"
-      << jsonString(phaseSideName(transport.conservative_phase.liquid_side))
-      << "},\"reinitialization\":{\"enabled\":"
-      << jsonBool(transport.reinitialization.enabled)
-      << ",\"method\":" << jsonString(reinitializationMethodName(
-                               transport.reinitialization.method))
-      << ",\"cadence_steps\":" << transport.reinitialization.cadence_steps
-      << "},\"volume_correction\":{\"enabled\":"
-      << jsonBool(transport.volume_correction.enabled);
-  if (transport.volume_correction.enabled) {
-    out << ",\"volume_tolerance\":"
-        << jsonReal(transport.volume_correction.volume_tolerance);
-  }
-  out << "},\"maintenance_only\":{\"isovalue\":"
-      << jsonReal(static_cast<svmp::FE::Real>(configuration.isovalue))
-      << ",\"open_boundaries\":[";
-  for (std::size_t i = 0; i < configuration.open_boundaries.size(); ++i) {
-    if (i != 0u) {
-      out << ',';
-    }
-    const auto &boundary = configuration.open_boundaries[i];
-    out << "{\"face_name\":" << jsonString(boundary.face_name)
-        << ",\"inflow\":" << jsonBool(boundary.inflow)
-        << ",\"literal_inflow_value\":";
-    if (boundary.literal_inflow_value) {
-      out << jsonReal(*boundary.literal_inflow_value);
-    } else {
-      out << "null";
-    }
-    out << '}';
-  }
-  out << "],\"active_cut_volume_request\":";
-  if (!configuration.volume_cut_request) {
-    out << "null";
-  } else {
-    const auto &request = *configuration.volume_cut_request;
-    out << "{\"level_set_field_name\":"
-        << jsonString(request.level_set_field_name)
-        << ",\"domain_id\":" << jsonString(request.domain_id)
-        << ",\"isovalue\":"
-        << jsonReal(static_cast<svmp::FE::Real>(request.isovalue)) << '}';
-  }
-  out << ",\"static_capillary_equilibrium_enabled\":"
-      << jsonBool(configuration.static_capillary_equilibrium_enabled)
-      << ",\"curvature_projection_enabled\":"
-      << jsonBool(configuration.curvature_projection_enabled)
-      << ",\"curvature_target\":"
-      << jsonString(configuration.curvature_field_name)
-      << "},\"unobserved\":[\"operator_tag\",\"supg\","
-         "\"interface_kinematic\"]}";
-
-  out << ",\"observations\":{\"installation\":[";
-  bool first = true;
-  for (const auto &observation : configuration.input_observations) {
-    if (!isInstallationObservation(observation)) {
-      continue;
-    }
-    if (!first) {
-      out << ',';
-    }
-    first = false;
-    appendObservationJson(out, observation);
-  }
-  out << "],\"legacy_equation_maintenance\":[";
-  first = true;
-  for (const auto &observation : configuration.input_observations) {
-    if (isInstallationObservation(observation)) {
-      continue;
-    }
-    if (!first) {
-      out << ',';
-    }
-    first = false;
-    appendObservationJson(out, observation);
-  }
-  out << "]}}";
-  return out.str();
 }
 
 } // namespace application::core

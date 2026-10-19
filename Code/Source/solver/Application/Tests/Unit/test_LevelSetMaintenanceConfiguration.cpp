@@ -700,23 +700,14 @@ TEST(LevelSetMaintenanceConfiguration,
   EXPECT_EQ(derived_curvature_enable->source_layer,
             "derived:curvature_field_name");
 
-  const auto serialized =
-      application::core::serializeLevelSetMaintenanceCompatibility(**resolved);
-  RecordProperty("level_set_maintenance_compatibility", serialized);
-  EXPECT_NE(serialized.find(
-                R"json("constant_value":[1,2,3])json"),
-            std::string::npos);
-  EXPECT_NE(
-      serialized.find(
-          R"json("ordered_overrides":["equation","default_domain","domain:liquid"])json"),
-      std::string::npos);
-  EXPECT_NE(serialized.find(
-                R"json("representation":"unavailable")json"),
-            std::string::npos);
+  EXPECT_EQ((*resolved)->transport.velocity.source,
+            svmp::FE::level_set::LevelSetVelocitySource::ConstantVector);
+  EXPECT_EQ((*resolved)->transport.velocity.constant_value,
+            (std::array<svmp::FE::Real, 3>{1.0, 2.0, 3.0}));
 }
 
 TEST(LevelSetMaintenanceConfiguration,
-     SerializesUnavailableInstallationAndNonfiniteLegacyRealAsString) {
+     ResolvesUnavailableInstallationAndNonfiniteLegacyTolerance) {
   auto input = makeLegacyInput();
   put(input.equation_parameters, "Enable_volume_correction", "true");
   put(input.equation_parameters, "Volume_correction_tolerance", "nan");
@@ -725,6 +716,7 @@ TEST(LevelSetMaintenanceConfiguration,
       application::core::resolveLegacyLevelSetMaintenanceConfiguration(
           input, std::span<const ActiveCutVolumeRequest>{});
   ASSERT_TRUE(resolved.has_value());
+  EXPECT_EQ((*resolved)->installation, nullptr);
   ASSERT_TRUE(
       std::isnan((*resolved)->transport.volume_correction.volume_tolerance));
   const auto *enabled =
@@ -746,19 +738,6 @@ TEST(LevelSetMaintenanceConfiguration,
   ASSERT_NE(default_field, nullptr);
   EXPECT_TRUE(default_field->selected_spelling.empty());
   EXPECT_EQ(default_field->source_layer, "fe_default");
-
-  const auto serialized =
-      application::core::serializeLevelSetMaintenanceCompatibility(**resolved);
-  RecordProperty("level_set_maintenance_compatibility", serialized);
-  EXPECT_NE(serialized.find(
-                R"json("installation":{"availability":"unavailable")json"),
-            std::string::npos);
-  EXPECT_NE(serialized.find(
-                R"json("volume_tolerance":"nan")json"),
-            std::string::npos);
-  EXPECT_NE(serialized.find(
-                R"json("selected_spelling":"Enable_volume_correction")json"),
-            std::string::npos);
 }
 
 TEST(LevelSetMaintenanceConfiguration,
@@ -850,14 +829,6 @@ TEST(LevelSetMaintenanceConfiguration,
     EXPECT_TRUE(tolerance->selected_spelling.empty());
     EXPECT_EQ(tolerance->source_layer, "fe_default");
   }
-
-  const auto serialized =
-      application::core::serializeLevelSetMaintenanceCompatibility(**resolved);
-  EXPECT_NE(serialized.find(R"json("volume_tolerance":1e-10)json"),
-            std::string::npos);
-  EXPECT_NE(serialized.find(
-                R"json("canonical_key":"volume_correction_tolerance")json"),
-            std::string::npos);
 }
 
 TEST(LevelSetMaintenanceConfiguration,
@@ -883,15 +854,6 @@ TEST(LevelSetMaintenanceConfiguration,
                 .algebraic_extension_source_field_name,
             "physical_velocity");
   EXPECT_EQ((*resolved)->installation->options.velocity.space, nullptr);
-  const auto serialized =
-      application::core::serializeLevelSetMaintenanceCompatibility(**resolved);
-  EXPECT_NE(serialized.find(R"json("auto_register_field":true)json"),
-            std::string::npos);
-  EXPECT_NE(serialized.find(
-                R"json("source_field_name":"physical_velocity")json"),
-            std::string::npos);
-  EXPECT_NE(serialized.find(R"json("space_present":false)json"),
-            std::string::npos);
   for (const std::string_view canonical :
        {"velocity_auto_register_field", "velocity_source_field_name",
         "velocity_space_present"}) {

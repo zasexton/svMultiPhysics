@@ -651,15 +651,6 @@ TEST(LevelSetEquationTranslator,
                 wet_observations, "velocity_source", "installation_derived",
                 "derived:wet_extension"),
             nullptr);
-  const auto wet_serialized =
-      application::core::serializeLevelSetMaintenanceCompatibility(
-          **wet_maintenance);
-  EXPECT_NE(wet_serialized.find(
-                R"json("canonical_key":"advection_velocity_from_field")json"),
-            std::string::npos);
-  EXPECT_NE(wet_serialized.find(
-                R"json("representation":"installation_derived")json"),
-            std::string::npos);
 
   auto constant_input = makeMaintenanceCompatibilityInput(mesh);
   constant_input.equation_params["Velocity_source"] =
@@ -684,15 +675,6 @@ TEST(LevelSetEquationTranslator,
                 constant_observations, "velocity_source",
                 "installation_derived", "derived:constant_velocity"),
             nullptr);
-  const auto constant_serialized =
-      application::core::serializeLevelSetMaintenanceCompatibility(
-          **constant_maintenance);
-  EXPECT_NE(constant_serialized.find(
-                R"json("canonical_key":"constant_velocity")json"),
-            std::string::npos);
-  EXPECT_NE(constant_serialized.find(
-                R"json("source_layer":"derived:constant_velocity")json"),
-            std::string::npos);
 #endif
 }
 
