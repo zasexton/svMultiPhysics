@@ -1077,6 +1077,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/StateAdmissibility.h
     Systems/SurfaceContactKernel.h
     Systems/SystemAssembly.h
+    Systems/SystemCollectives.h
     Systems/SystemSetup.h
     Systems/SystemState.h
     Systems/TimeIntegrator.h
@@ -1108,6 +1109,7 @@ set(FE_SYSTEMS_SOURCES
     Systems/StateAdmissibility.cpp
     Systems/SurfaceContactKernel.cpp
     Systems/SystemAssembly.cpp
+    Systems/SystemCollectives.cpp
     Systems/SystemSetup.cpp
     Systems/TimeIntegrator.cpp
     Systems/BoundaryReductionService.cpp
@@ -3206,6 +3208,33 @@ if(FE_BUILD_TESTS)
             # Add MPI test with different processor counts
             add_fe_mpi_test(test_fe_mpi 2)
             add_fe_mpi_test(test_fe_mpi 4)
+        endif()
+
+        if(FE_ENABLE_ASSEMBLY)
+            file(GLOB FE_SYSTEMS_MPI_TEST_SOURCES
+                Tests/Unit/Systems/test_*MPI*.cpp
+            )
+            if(FE_SYSTEMS_MPI_TEST_SOURCES)
+                add_executable(test_fe_systems_mpi ${FE_SYSTEMS_MPI_TEST_SOURCES})
+                _svmp_fe_target_enable_warnings(test_fe_systems_mpi)
+                # MPI tests provide their own main() to call MPI_Init/MPI_Finalize,
+                # so do not link gtest_main here.
+                if(TARGET GTest::gtest)
+                    target_link_libraries(test_fe_systems_mpi PRIVATE svfe GTest::gtest)
+                else()
+                    set(_fe_systems_mpi_gtest_libs ${GTEST_LIBRARIES})
+                    list(REMOVE_ITEM _fe_systems_mpi_gtest_libs gtest_main GTest::gtest_main)
+                    target_link_libraries(test_fe_systems_mpi PRIVATE svfe ${_fe_systems_mpi_gtest_libs})
+                endif()
+                # Avoid leaking environment-specific RUNPATHs into test executables.
+                set_target_properties(test_fe_systems_mpi PROPERTIES
+                    SKIP_BUILD_RPATH TRUE
+                    BUILD_RPATH ""
+                    INSTALL_RPATH ""
+                )
+                add_fe_mpi_test(test_fe_systems_mpi 2)
+                add_fe_mpi_test(test_fe_systems_mpi 4)
+            endif()
         endif()
 
         file(GLOB FE_CONSTRAINTS_MPI_TEST_SOURCES
