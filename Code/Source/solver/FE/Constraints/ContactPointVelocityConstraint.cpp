@@ -24,6 +24,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
@@ -466,6 +467,32 @@ ContactPointVelocityConstraint::storageRequirements() const noexcept
     req.cell_topology = true;
     req.boundary_face_topology = true;
     return req;
+}
+
+std::string ContactPointVelocityConstraint::manifestDescription() const
+{
+    std::ostringstream oss;
+    oss << std::hexfloat << "field=" << velocity_field_ << " name='" << law_.name << "' walls=";
+    for (std::size_t i = 0; i < law_.wall_boundary_markers.size(); ++i) {
+        oss << (i == 0u ? "" : ",") << law_.wall_boundary_markers[i];
+    }
+    oss << " wall_normal=" << law_.wall_normal[0] << "," << law_.wall_normal[1] << ","
+        << law_.wall_normal[2]
+        << " level_set='" << law_.level_set_field_name << "'"
+        << " isovalue=" << law_.isovalue
+        << " vertex_value_source=" << (law_.level_set_vertex_value ? "callback" : "mesh_field");
+    // The contact-speed law is a closure; sample it so that the manifest
+    // compares its values exactly.
+    oss << " speed(cos)=";
+    if (law_.contact_speed) {
+        constexpr std::array<Real, 5> samples{{-1.0, -0.5, 0.0, 0.5, 1.0}};
+        for (std::size_t i = 0; i < samples.size(); ++i) {
+            oss << (i == 0u ? "" : ",") << law_.contact_speed(samples[i]);
+        }
+    } else {
+        oss << "none";
+    }
+    return oss.str();
 }
 
 } // namespace constraints

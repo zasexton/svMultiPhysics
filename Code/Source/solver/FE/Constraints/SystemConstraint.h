@@ -17,6 +17,8 @@
 #include "Constraints/ConstraintDependency.h"
 #include "Systems/SetupStoragePlan.h"
 
+#include <string>
+
 namespace svmp {
 namespace FE {
 
@@ -75,6 +77,18 @@ public:
      * deterministically when a constraint needs unavailable metadata.
      */
     [[nodiscard]] virtual systems::SetupStorageRequirements storageRequirements() const noexcept = 0;
+
+    /**
+     * @brief Parameters of this constraint for the ordered constraint manifest
+     *
+     * One line of space-separated key=value pairs naming what the constraint
+     * acts on (field, marker, side, values), used by
+     * FESystem::constraintManifestLines() to compare the registered
+     * constraint set before and after a refactoring.  It must depend only on
+     * definition-time data (no mesh, DOF or rank state).  The default is
+     * empty: the manifest then shows the type alone.
+     */
+    [[nodiscard]] virtual std::string manifestDescription() const { return {}; }
 };
 
 } // namespace constraints

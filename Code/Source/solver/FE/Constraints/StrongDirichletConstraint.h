@@ -11,6 +11,7 @@
 #include "Forms/FormExpr.h"
 
 #include <array>
+#include <string>
 #include <vector>
 
 namespace svmp {
@@ -33,6 +34,8 @@ public:
     [[nodiscard]] ConstraintDependencyDeclaration dependencyDeclaration() const override;
 
     [[nodiscard]] systems::SetupStorageRequirements storageRequirements() const noexcept override;
+
+    [[nodiscard]] std::string manifestDescription() const override;
 
 private:
     FieldId field_{INVALID_FIELD_ID};

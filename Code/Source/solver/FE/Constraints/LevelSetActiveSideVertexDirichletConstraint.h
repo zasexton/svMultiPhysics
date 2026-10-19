@@ -49,6 +49,8 @@ public:
 
     [[nodiscard]] systems::SetupStorageRequirements storageRequirements() const noexcept override;
 
+    [[nodiscard]] std::string manifestDescription() const override;
+
 private:
     FieldId field_{INVALID_FIELD_ID};
     std::string level_set_field_name_{};

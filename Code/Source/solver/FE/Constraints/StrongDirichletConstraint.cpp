@@ -449,6 +449,15 @@ systems::SetupStorageRequirements StrongDirichletConstraint::storageRequirements
     return req;
 }
 
+std::string StrongDirichletConstraint::manifestDescription() const
+{
+    std::ostringstream oss;
+    oss << "field=" << field_ << " marker=" << boundary_marker_ << " component=" << component_
+        << " time_dependent=" << (is_time_dependent_ ? 1 : 0)
+        << " value=" << (value_.isValid() ? value_.toString() : std::string("<none>"));
+    return oss.str();
+}
+
 } // namespace constraints
 } // namespace FE
 } // namespace svmp

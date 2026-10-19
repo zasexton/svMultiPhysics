@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <typeinfo>
 #include <unordered_map>
 #include <sstream>
 #include <utility>
@@ -59,6 +60,24 @@ public:
     [[nodiscard]] SetupStorageRequirements storageRequirements() const noexcept override
     {
         return {};
+    }
+
+    [[nodiscard]] std::string manifestDescription() const override
+    {
+        std::string out = "field=" + std::to_string(field_id_) + " bcs=";
+        for (std::size_t i = 0; i < bcs_.size(); ++i) {
+            if (i != 0u) {
+                out += ";";
+            }
+            if (!bcs_[i]) {
+                out += "<null>";
+                continue;
+            }
+            const auto& bc = *bcs_[i];
+            out += typeid(bc).name();
+            out += "@" + bc.targetDescription();
+        }
+        return out;
     }
 
 private:

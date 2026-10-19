@@ -914,6 +914,20 @@ LevelSetActiveSideVertexDirichletConstraint::storageRequirements() const noexcep
     return req;
 }
 
+std::string LevelSetActiveSideVertexDirichletConstraint::manifestDescription() const
+{
+    std::ostringstream oss;
+    oss << std::hexfloat
+        << "field=" << field_
+        << " level_set='" << level_set_field_name_ << "'"
+        << " active_side="
+        << (active_side_ == LevelSetConstraintSide::Positive ? "Positive" : "Negative")
+        << " isovalue=" << isovalue_
+        << " inactive_value=" << inactive_value_
+        << " interface_marker=" << interface_marker_;
+    return oss.str();
+}
+
 } // namespace constraints
 } // namespace FE
 } // namespace svmp

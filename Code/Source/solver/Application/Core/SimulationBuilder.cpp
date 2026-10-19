@@ -17,6 +17,7 @@
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "FE/Systems/FESystem.h"
+#include "FE/Systems/SystemManifest.h"
 #include "FE/TimeStepping/TimeHistory.h"
 #include "Mesh/Mesh.h"
 #include "Physics/Core/PhysicsModule.h"
@@ -1735,6 +1736,19 @@ void SimulationBuilder::setupSystem()
 #endif
   oopCout() << "[svMultiPhysics::Application] SimulationBuilder: FE storage plan "
             << components_.fe_system->setupStoragePlan().summary() << std::endl;
+  // Ordered kernel and constraint manifests at the debug log level
+  // (FE_LOG_LEVEL=DEBUG): they show that a refactoring of a formulation leaves
+  // the installed system unchanged.  Rank-local output of definition-time
+  // data; no collective operation.
+  if (oopDiagnosticsEnabled(svmp::FE::LogLevel::DEBUG)) {
+    for (const auto& line : svmp::FE::systems::kernelManifestLines(*components_.fe_system)) {
+      std::cout << "[svMultiPhysics::Application] manifest " << line << '\n';
+    }
+    for (const auto& line : svmp::FE::systems::constraintManifestLines(*components_.fe_system)) {
+      std::cout << "[svMultiPhysics::Application] manifest " << line << '\n';
+    }
+    std::cout << std::flush;
+  }
   if (components_.primary_mesh) {
     const auto& base = components_.primary_mesh->base();
     oopCout() << "[svMultiPhysics::Application] SimulationBuilder: mesh storage materialized codim1="

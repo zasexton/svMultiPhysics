@@ -90,6 +90,8 @@ public:
 
     [[nodiscard]] systems::SetupStorageRequirements storageRequirements() const noexcept override;
 
+    [[nodiscard]] std::string manifestDescription() const override;
+
     /// Contact points of the most recent apply() (communicator-global, sorted by slave).
     [[nodiscard]] const std::vector<ContactPointVelocitySample>& samples() const noexcept
     {

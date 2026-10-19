@@ -2698,6 +2698,24 @@ public:
         return operator_registry_.has(op);
     }
 
+    /// Registered operator tags, sorted.
+    [[nodiscard]] std::vector<OperatorTag> operatorTags() const {
+        return operator_registry_.list();
+    }
+
+    /**
+     * @brief Ordered registration manifest of the constraint-side state
+     *
+     * One line per registered algebraic constraint and system constraint (in
+     * registration order, with type and parameters), per gauge anchoring
+     * record and per cut-integration-context update callback, plus the set of
+     * registered generated embedded-interface markers.  Used together with
+     * systems::kernelManifestLines() (Systems/SystemManifest.h) to show that
+     * a refactoring leaves the installed system unchanged.  Reads only
+     * definition-time data; defined in SystemManifest.cpp.
+     */
+    [[nodiscard]] std::vector<std::string> constraintManifestLines() const;
+
     [[nodiscard]] std::size_t cutVolumeKernelCount(
         int interface_marker,
         geometry::CutIntegrationSide side) const;

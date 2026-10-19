@@ -1070,6 +1070,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/MixedKernelPlan.h
     Systems/OperatorBackends.h
     Systems/OperatorRegistry.h
+    Systems/SystemManifest.h
     Systems/PairedExchange.h
     Systems/ParameterRegistry.h
     Systems/SearchAccess.h
@@ -1104,6 +1105,7 @@ set(FE_SYSTEMS_SOURCES
     Systems/MeshSearchAccess.cpp
     Systems/OperatorBackends.cpp
     Systems/OperatorRegistry.cpp
+    Systems/SystemManifest.cpp
     Systems/PairedExchange.cpp
     Systems/ParameterRegistry.cpp
     Systems/StateAdmissibility.cpp
@@ -3063,6 +3065,7 @@ if(FE_BUILD_TESTS)
                 Tests/Unit/Systems/test_VectorBasisConstraints.cpp
                 Tests/Unit/Systems/test_StrongDirichletConstraint.cpp
                 Tests/Unit/Systems/test_FormsInstaller.cpp
+                Tests/Unit/Systems/test_SystemManifest.cpp
                 Tests/Unit/Systems/test_MixedManualParity.cpp
                 Tests/Unit/Systems/test_MixedFormPerformance.cpp
                 Tests/Unit/Systems/test_MortarHybridInterface.cpp

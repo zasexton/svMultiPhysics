@@ -9,6 +9,7 @@
 #include "Constraints/SystemConstraint.h"
 #include "Core/Types.h"
 
+#include <string>
 #include <vector>
 
 namespace svmp {
@@ -51,6 +52,8 @@ public:
     }
 
     [[nodiscard]] systems::SetupStorageRequirements storageRequirements() const noexcept override;
+
+    [[nodiscard]] std::string manifestDescription() const override;
 
 private:
     FieldId field_{INVALID_FIELD_ID};

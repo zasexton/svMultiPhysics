@@ -11,6 +11,9 @@
 #include "Spaces/FunctionSpace.h"
 #include "Systems/FESystem.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -200,6 +203,40 @@ systems::SetupStorageRequirements VertexDirichletConstraint::storageRequirements
     req.vertex_gids = (mode_ == VertexIdMode::GlobalVertexGid);
     req.global_vertex_lookup = (mode_ == VertexIdMode::GlobalVertexGid);
     return req;
+}
+
+std::string VertexDirichletConstraint::manifestDescription() const
+{
+    std::ostringstream oss;
+    oss << std::hexfloat << "field=" << field_ << " mode="
+        << (mode_ == VertexIdMode::LocalVertexId ? "LocalVertexId" : "GlobalVertexGid")
+        << " count=" << values_.size();
+    // Long lists are summarized by an order-sensitive digest of the exact
+    // (vertex, value) pairs.
+    std::uint64_t digest = 14695981039346656037ULL;
+    const auto mix = [&digest](std::uint64_t v) {
+        for (int byte = 0; byte < 8; ++byte) {
+            digest ^= (v >> (8 * byte)) & 0xffu;
+            digest *= 1099511628211ULL;
+        }
+    };
+    for (const auto& entry : values_) {
+        mix(static_cast<std::uint64_t>(entry.vertex_id));
+        std::uint64_t bits = 0u;
+        static_assert(sizeof(bits) == sizeof(entry.value));
+        std::memcpy(&bits, &entry.value, sizeof(bits));
+        mix(bits);
+    }
+    oss << " digest=" << std::hex << digest << std::hexfloat << " values=";
+    const std::size_t shown = std::min<std::size_t>(values_.size(), 8u);
+    for (std::size_t i = 0; i < shown; ++i) {
+        oss << (i == 0u ? "" : ",") << std::dec << values_[i].vertex_id << ":" << std::hexfloat
+            << values_[i].value;
+    }
+    if (shown < values_.size()) {
+        oss << ",...";
+    }
+    return oss.str();
 }
 
 } // namespace constraints
