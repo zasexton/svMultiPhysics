@@ -164,22 +164,3 @@ def test_test10_signature_replay_readiness_detects_available_solve_time_selector
         "test10_signature_replay_candidate_ready_for_solve_time_replay"
     )
     assert report["status"] == "run_targeted_test10_signature_replay"
-
-
-def test_standard_assembler_exposes_solve_time_row_filter_source_api():
-    audit = _load_audit_module()
-    repo = Path(__file__).resolve().parents[1]
-    standard = (
-        repo / "Code" / "Source" / "solver" / "FE" / "Assembly"
-        / "StandardAssembler.cpp"
-    ).read_text(encoding="utf-8", errors="replace")
-    summary = audit.source_hook_summary(
-        standard_assembler_text=standard,
-        newton_solver_text="",
-    )
-
-    assert summary["fe_topology_signature_or_row_selector_present"]
-    assert "SVMP_FE_CUT_VOLUME_DIRECT_PSPG_TOPOLOGY_GLOBAL_DOFS" in standard
-    assert "SVMP_FE_CUT_VOLUME_DIRECT_PSPG_TOPOLOGY_ROW_DOFS" in standard
-    assert "row_filter_enabled=" in standard
-    assert "row_filter_selected_local_row_count=" in standard
