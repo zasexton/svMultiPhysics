@@ -298,16 +298,20 @@ std::shared_ptr<Mesh> buildQuadStrip(int n_cells,
 /// vertex is not the right-angle vertex, so its first-vertex chart is
 /// sheared) and cell 2j+1 = {v(0,j), v(1,j+1), v(0,j+1)}.  With
 /// root_starts_at_right_angle, cell 0 lists the same vertices from its
-/// right-angle vertex, {v(1,0), v(1,1), v(0,0)}.
+/// right-angle vertex, {v(1,0), v(1,1), v(0,0)}.  Explicit column abscissae
+/// xs and row ordinates ys (rows + 1 of them) replace the unit coordinates.
 std::shared_ptr<Mesh> buildTriangleColumn(int rows,
-                                          bool root_starts_at_right_angle = false)
+                                          bool root_starts_at_right_angle = false,
+                                          std::array<real_t, 2> xs = {0, 1},
+                                          std::vector<real_t> ys = {})
 {
     auto base = std::make_shared<MeshBase>();
     std::vector<real_t> x_ref;
     for (int j = 0; j <= rows; ++j) {
         for (int i = 0; i < 2; ++i) {
-            x_ref.push_back(static_cast<real_t>(i));
-            x_ref.push_back(static_cast<real_t>(j));
+            x_ref.push_back(xs[static_cast<std::size_t>(i)]);
+            x_ref.push_back(ys.empty() ? static_cast<real_t>(j)
+                                       : ys.at(static_cast<std::size_t>(j)));
         }
     }
     const auto v = [](int i, int j) { return static_cast<index_t>(2 * j + i); };
@@ -2321,6 +2325,71 @@ TEST(SmallCutAggregationConstraint,
                       {{vertexDof(system, pressure, 1), -2.0},
                        {vertexDof(system, pressure, 3), 3.0}});
     }
+#endif
+}
+
+TEST(SmallCutAggregationConstraint,
+     RootInversionStallingAtRoundOffKeepsTheExtension)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    // The wetting-wedge column of the previous test at the coordinates of
+    // the capillary-rise level-40 mesh next to its wall (h = 0.125 mm,
+    // y = 22.4-22.9 mm).  The coordinates are about 180 h from the origin, so
+    // their round-off maps to reference corrections of about eps |x| / h, more
+    // than the 64 eps |xi| the Newton inversion of the root asked for: on
+    // this column the inversion for vertex (1,4) cycles between round-off
+    // neighbours of xi = (-3, 4), with and without fused multiply-add, and
+    // the vertex lost its only root (aggregation_no_root_inside_guards).  It
+    // must keep the exact P1 extension weights instead.
+    const std::array<real_t, 2> xs{0.004875, 0.005};
+    const std::vector<real_t> ys{0.022375, 0.0225, 0.022625, 0.02275,
+                                 0.022875};
+    systems::FESystem system(buildTriangleColumn(4, false, xs, ys));
+    const auto pressure = system.addField(systems::FieldSpec{
+        .name = "p",
+        .space = std::make_shared<spaces::H1Space>(ElementType::Triangle3,
+                                                   /*order=*/1),
+        .components = 1});
+    system.addOperator("pressure");
+    system.addSystemConstraint(std::make_unique<SmallCutAggregationConstraint>(
+        pressure,
+        geometry::CutIntegrationSide::Negative,
+        kInterfaceMarker));
+    ASSERT_NO_THROW(system.setup());
+    std::vector<CellRuleSpec> rules{
+        {.cell = 0, .volume_fraction = Real{1.0}, .full_cell_equivalent = true}};
+    for (GlobalIndex cell = 1; cell < 8; ++cell) {
+        rules.push_back({.cell = cell,
+                         .volume_fraction = Real{0.5},
+                         .full_cell_equivalent = false});
+    }
+    system.setCutIntegrationContext(makeCutContext(rules));
+
+    const ScopedLogLevel detailed_diagnostics(LogLevel::DEBUG);
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    std::string failure;
+    try {
+        system.rebuildConstraintState();
+    } catch (const std::exception& error) {
+        failure = error.what();
+    }
+    auto log_output = testing::internal::GetCapturedStdout();
+    log_output += testing::internal::GetCapturedStderr();
+    ASSERT_TRUE(failure.empty()) << "the vertex lost its only root: " << failure;
+
+    // Root {v0, v1, v3}: (x1, y4) = -3 v1 + 4 v3 exactly; the accepted
+    // iterate is as accurate as the coordinates allow.
+    expectEntries(lineEntries(system, vertexDof(system, pressure, 9)),
+                  {{vertexDof(system, pressure, 1), -3.0},
+                   {vertexDof(system, pressure, 3), 4.0}},
+                  1.0e-10);
+    EXPECT_NE(log_output.find("local_root_proposal_inversion_failures=0 "),
+              std::string::npos);
+    EXPECT_EQ(log_output.find(
+                  "local_root_proposal_inversion_round_off_acceptances=0 "),
+              std::string::npos);
 #endif
 }
 

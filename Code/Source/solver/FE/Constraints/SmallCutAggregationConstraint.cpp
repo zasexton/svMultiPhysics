@@ -2423,11 +2423,32 @@ resolveDistributedAggregationDeclarations(
 
 /// Newton inversion of the cell geometry mapping. Extrapolation (reference
 /// coordinates outside the unit cell) is expected and valid for aggregation.
+///
+/// When the physical tolerance is the machine floor (64 eps times the
+/// coordinate magnitude), the iteration stops once the residual is at that
+/// floor and the last correction is below 64 eps max(1, |xi|).  The second
+/// test assumes that xi can be resolved to relative round-off, but the
+/// coordinates carry an absolute round-off of eps |x|, whose image in
+/// reference space is about eps |x| ||J^{-1}|| ~ eps |x| / h.  On fine meshes
+/// far from the origin (|x| / h above about 64 |xi|) the corrections then stall
+/// at that image: Newton cycles between round-off neighbours of the solution
+/// and never meets the test.  On the capillary-rise level-40 mesh this
+/// rejected 15% of the root/vertex pairs within 4.5 cells at y = 20-24 mm
+/// (8% with fused multiply-add), and the run stopped at a wall vertex whose
+/// only root failed this way.  If the iteration budget
+/// ends with the residual at the physical tolerance and a last correction
+/// within ||J^{-1}|| times that tolerance, the iterate is as accurate as the
+/// coordinates allow and is accepted; every inversion that converged before
+/// is unchanged.  stalled_at_round_off reports such an acceptance.
 [[nodiscard]] bool invertMapping(const geometry::GeometryMapping& mapping,
                                  const std::array<Real, 3>& physical,
                                  int dimension,
-                                 Vector<Real, 3>& xi)
+                                 Vector<Real, 3>& xi,
+                                 bool* stalled_at_round_off = nullptr)
 {
+    if (stalled_at_round_off != nullptr) {
+        *stalled_at_round_off = false;
+    }
     const auto& nodes = mapping.nodes();
     if (nodes.empty() || dimension < 1 || dimension > 3) {
         return false;
@@ -2475,6 +2496,8 @@ resolveDistributedAggregationDeclarations(
     }
     bool have_update = false;
     Real last_update_norm = std::numeric_limits<Real>::infinity();
+    // Frobenius norm of the active block of J^{-1} at the last correction.
+    Real last_inverse_norm = std::numeric_limits<Real>::infinity();
     for (int iteration = 0; iteration < 25; ++iteration) {
         const auto mapped = mapping.map_to_physical(xi);
         Vector<Real, 3> residual{};
@@ -2514,6 +2537,15 @@ resolveDistributedAggregationDeclarations(
         }
         const auto inverse =
             geometry::scaleConditionedJacobianInverse(j_inv);
+        {
+            Real inverse_norm_sq = Real(0);
+            for (std::size_t r = 0; r < dimension_size; ++r) {
+                for (std::size_t c = 0; c < dimension_size; ++c) {
+                    inverse_norm_sq += inverse(r, c) * inverse(r, c);
+                }
+            }
+            last_inverse_norm = std::sqrt(inverse_norm_sq);
+        }
         Vector<Real, 3> reference_update{};
         for (std::size_t r = 0; r < 3u; ++r) {
             Real update = Real(0);
@@ -2534,6 +2566,26 @@ resolveDistributedAggregationDeclarations(
             !std::isfinite(xi[2])) {
             return false;
         }
+    }
+    // Iteration budget exhausted: accept the iterate only if it reproduces the
+    // point to the physical tolerance and the last correction lies within the
+    // reference-space image of that tolerance (see the function comment).
+    const auto mapped = mapping.map_to_physical(xi);
+    Vector<Real, 3> residual{};
+    for (std::size_t d = 0; d < 3u; ++d) {
+        residual[d] = physical[d] - mapped[d];
+    }
+    const Real residual_norm = geometry::detail::stable_vector_norm(residual);
+    const Real attainable_reference_accuracy =
+        last_inverse_norm * physical_tolerance;
+    if (have_update && std::isfinite(residual_norm) &&
+        std::isfinite(attainable_reference_accuracy) &&
+        residual_norm <= physical_tolerance &&
+        last_update_norm <= attainable_reference_accuracy) {
+        if (stalled_at_round_off != nullptr) {
+            *stalled_at_round_off = true;
+        }
+        return true;
     }
     return false;
 }
@@ -6118,6 +6170,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     std::size_t no_root = 0u;
     std::size_t island_pinned_dofs = 0u;
     std::size_t inversion_failed = 0u;
+    // Inversions accepted at the round-off floor (see invertMapping).
+    std::size_t inversion_round_off_acceptances = 0u;
     std::size_t non_field_nodes = 0u;
     std::size_t empty_lines = 0u;
     std::size_t extrapolation_guard_rejections = 0u;
@@ -6273,13 +6327,18 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             }
             const auto& mapping = mapping_it->second;
             Vector<Real, 3> xi{};
+            bool inversion_stalled_at_round_off = false;
             if (mapping == nullptr ||
                 !invertMapping(*mapping, candidate.coordinates,
-                               mesh.dimension(), xi)) {
+                               mesh.dimension(), xi,
+                               &inversion_stalled_at_round_off)) {
                 ++inversion_failed;
                 traced_xi = xi;
                 trace_proposal("inversion_failed");
                 continue;
+            }
+            if (inversion_stalled_at_round_off) {
+                ++inversion_round_off_acceptances;
             }
             const Real reference_extrapolation =
                 normalizedReferenceExtrapolationDistance(
@@ -6913,6 +6972,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         << " communicator_rootless_candidates=" << no_root
         << " local_island_pinned_dofs=" << island_pinned_dofs
         << " local_root_proposal_inversion_failures=" << inversion_failed
+        << " local_root_proposal_inversion_round_off_acceptances="
+        << inversion_round_off_acceptances
         << " non_field_nodes=" << non_field_nodes
         << " local_root_proposal_line_failures=" << empty_lines
         << " communicator_root_proposal_failures="
