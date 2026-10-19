@@ -2,11 +2,10 @@
 
 /**
  * @file
- * @ingroup fe_level_set
  * @brief Transactional fixed-volume minimization for a discrete static cap.
  */
 
-#include "Core/Types.h"
+#include "FE/Core/Types.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -16,7 +15,9 @@
 #include <string>
 #include <vector>
 
-namespace svmp::FE::level_set {
+namespace svmp::Physics::formulations::navier_stokes::static_capillary {
+
+using svmp::FE::Real;
 
 /**
  * Options for piecewise-smooth minimization of the snapshot-owned surface,
@@ -306,4 +307,4 @@ minimizeLevelSetStaticCapillaryEquilibrium(
     const LevelSetStaticCapillaryEquilibriumEvaluator& evaluator,
     std::vector<Real>& accepted_coefficients);
 
-} // namespace svmp::FE::level_set
+} // namespace svmp::Physics::formulations::navier_stokes::static_capillary

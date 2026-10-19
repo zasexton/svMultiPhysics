@@ -328,13 +328,13 @@ svmp::FE::Real parseDiagnosticReal(const std::string& text)
   return value;
 }
 
-svmp::FE::level_set::LevelSetStaticCapillaryFailureState
+svmp::Physics::formulations::navier_stokes::static_capillary::LevelSetStaticCapillaryFailureState
 availableStaticCapillaryFailureState()
 {
   using State =
-      svmp::FE::level_set::LevelSetStaticCapillaryFailureState;
+      svmp::Physics::formulations::navier_stokes::static_capillary::LevelSetStaticCapillaryFailureState;
   using Status =
-      svmp::FE::level_set::LevelSetStaticCapillaryFailureStateStatus;
+      svmp::Physics::formulations::navier_stokes::static_capillary::LevelSetStaticCapillaryFailureStateStatus;
   State state;
   state.status = Status::Available;
   state.coefficient_count = 5u;
@@ -394,7 +394,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_EQ(parseDiagnosticUnsigned(summary.at("active_count")), 2u);
   EXPECT_EQ(
       parseDiagnosticUnsigned(summary.at("capacity")),
-      svmp::FE::level_set::
+      svmp::Physics::formulations::navier_stokes::static_capillary::
           kLevelSetStaticCapillaryFailureStateCoefficientCapacity);
   EXPECT_EQ(
       parseDiagnosticUnsigned(summary.at("accepted_iteration_index")), 7u);
@@ -449,9 +449,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
      StaticCapillaryFailureStateDiagnosticRejectsMalformedOrOversizedRecords)
 {
   using Status =
-      svmp::FE::level_set::LevelSetStaticCapillaryFailureStateStatus;
+      svmp::Physics::formulations::navier_stokes::static_capillary::LevelSetStaticCapillaryFailureStateStatus;
   std::vector<std::pair<std::string,
-                        svmp::FE::level_set::
+                        svmp::Physics::formulations::navier_stokes::static_capillary::
                             LevelSetStaticCapillaryFailureState>>
       invalid;
 
@@ -477,7 +477,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   invalid.emplace_back("nonfinite vector", nonfinite_vector);
   auto oversized_count = availableStaticCapillaryFailureState();
   oversized_count.coefficient_count =
-      svmp::FE::level_set::
+      svmp::Physics::formulations::navier_stokes::static_capillary::
           kLevelSetStaticCapillaryFailureStateCoefficientCapacity +
       1u;
   invalid.emplace_back("oversized count", oversized_count);
@@ -505,7 +505,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       {Status::RecordingFailed, "recording_failed"},
   }};
   for (const auto& [status, spelling] : unavailable) {
-    svmp::FE::level_set::LevelSetStaticCapillaryFailureState state;
+    svmp::Physics::formulations::navier_stokes::static_capillary::LevelSetStaticCapillaryFailureState state;
     state.status = status;
     std::ostringstream stream;
     appendStaticCapillaryFailureState(stream, state);
@@ -2943,7 +2943,7 @@ void expectProductionCapillaryFunctionalDerivatives(bool sessile)
           baseline,
           transaction,
           values,
-          svmp::FE::level_set::
+          svmp::Physics::formulations::navier_stokes::static_capillary::
               LevelSetStaticCapillaryEvaluationPurpose::FunctionalTrial,
           true);
     };

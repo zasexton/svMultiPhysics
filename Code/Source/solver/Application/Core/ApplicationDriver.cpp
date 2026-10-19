@@ -36,7 +36,6 @@
 #include "FE/LevelSet/LevelSetSignDefinitePatchBounds.h"
 #include "FE/LevelSet/LevelSetInterfacePreservingRedistancing.h"
 #include "FE/LevelSet/LevelSetInterfacePreservingRedistancing3D.h"
-#include "FE/LevelSet/LevelSetStaticCapillaryEquilibrium.h"
 #include "FE/LevelSet/LevelSetTransport.h"
 #include "FE/LevelSet/LevelSetVelocityExtensionConstraint.h"
 #include "FE/LevelSet/LevelSetVolume.h"
@@ -68,6 +67,7 @@
 #include "Mesh/Topology/CellTopology.h"
 #include "Mesh/Topology/DistributedTopology.h"
 #include "Physics/Core/PhysicsModule.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/StaticCapillaryEquilibrium.h"
 #include "Parameters.h"
 #include "tinyxml2.h"
 
@@ -2358,6 +2358,9 @@ LevelSetMaintenanceWorkLedger::rejectedAttempts() const noexcept
 
 namespace {
 
+namespace static_capillary =
+    svmp::Physics::formulations::navier_stokes::static_capillary;
+
 using Clock = std::chrono::steady_clock;
 using application::core::ActiveCutVolumeRequest;
 using application::core::LevelSetMaintenanceConfigurationHandle;
@@ -3748,7 +3751,7 @@ effectiveCurvatureProjectionOptions(const LevelSetMaintenanceRequest& request)
   return options;
 }
 
-svmp::FE::level_set::LevelSetStaticCapillaryEquilibriumOptions
+static_capillary::LevelSetStaticCapillaryEquilibriumOptions
 effectiveStaticCapillaryEquilibriumOptions(
     const LevelSetMaintenanceRequest& request)
 {
@@ -27600,7 +27603,7 @@ StaticCapillaryPressureCertificate
 evaluateStaticCapillaryPressureCertificate(
     application::core::SimulationComponents& sim,
     std::span<const svmp::FE::Real> candidate,
-    const svmp::FE::level_set::
+    const static_capillary::
         LevelSetStaticCapillaryEquilibriumOptions& certificate_options,
     bool initialize_compatible_pressure)
 {
@@ -27880,7 +27883,7 @@ void stageStaticCapillaryHistoryForPublication(
 }
 
 struct StaticCapillaryFunctionalCandidate {
-  svmp::FE::level_set::LevelSetStaticCapillaryEquilibriumEvaluation
+  static_capillary::LevelSetStaticCapillaryEquilibriumEvaluation
       evaluation;
   std::vector<svmp::FE::Real> candidate;
 };
@@ -27895,7 +27898,7 @@ evaluateStaticCapillaryFunctionalCandidate(
     std::span<const svmp::FE::Real> baseline,
     LevelSetMaintenanceGeometryTransaction& transaction,
     std::span<const svmp::FE::Real> coefficients,
-    svmp::FE::level_set::LevelSetStaticCapillaryEvaluationPurpose purpose,
+    static_capillary::LevelSetStaticCapillaryEvaluationPurpose purpose,
     bool exact_functional_derivatives_requested)
 {
   StaticCapillaryFunctionalCandidate result;
@@ -27943,7 +27946,7 @@ evaluateStaticCapillaryFunctionalCandidate(
         params,
         candidate,
         purpose ==
-                    svmp::FE::level_set::
+                    static_capillary::
                         LevelSetStaticCapillaryEvaluationPurpose::
                             AcceptanceCertificate &&
                 pass == 0);
@@ -28138,7 +28141,7 @@ evaluateStaticCapillaryFunctionalCandidate(
   }
 
   if (purpose ==
-          svmp::FE::level_set::LevelSetStaticCapillaryEvaluationPurpose::
+          static_capillary::LevelSetStaticCapillaryEvaluationPurpose::
               AcceptanceCertificate &&
       uses_kinematic_area_gradient_traction) {
     svmp::FE::systems::SystemStateView candidate_state;
@@ -28231,12 +28234,12 @@ evaluateStaticCapillaryFunctionalCandidate(
 
 void appendStaticCapillaryFailureState(
     std::ostream& stream,
-    const svmp::FE::level_set::LevelSetStaticCapillaryFailureState& state)
+    const static_capillary::LevelSetStaticCapillaryFailureState& state)
 {
   using Status =
-      svmp::FE::level_set::LevelSetStaticCapillaryFailureStateStatus;
+      static_capillary::LevelSetStaticCapillaryFailureStateStatus;
   constexpr auto capacity =
-      svmp::FE::level_set::
+      static_capillary::
           kLevelSetStaticCapillaryFailureStateCoefficientCapacity;
 
   bool recognized_status = true;
@@ -28734,7 +28737,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
   bool certified_constant_pressure_multiplier_comparison_available = false;
   const auto evaluator =
       [&](std::span<const svmp::FE::Real> coefficients,
-          svmp::FE::level_set::
+          static_capillary::
               LevelSetStaticCapillaryEvaluationPurpose purpose) {
         auto functional = evaluateStaticCapillaryFunctionalCandidate(
             sim,
@@ -28755,7 +28758,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
             evaluation.constraint_semantics_key;
 
         if (purpose ==
-            svmp::FE::level_set::
+            static_capillary::
                 LevelSetStaticCapillaryEvaluationPurpose::
                     AcceptanceCertificate) {
           auto certificate =
@@ -29050,10 +29053,10 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       };
 
   std::vector<svmp::FE::Real> accepted_parameters;
-  svmp::FE::level_set::LevelSetStaticCapillaryEquilibriumResult result;
+  static_capillary::LevelSetStaticCapillaryEquilibriumResult result;
   try {
     result =
-        svmp::FE::level_set::
+        static_capillary::
             minimizeLevelSetStaticCapillaryEquilibrium(
                 minimization_options,
                 parameters,
@@ -29081,9 +29084,9 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
           !local_prepublication_result_valid, comm)) {
     transaction.rollback();
     const auto line_search_phase_name =
-        [](svmp::FE::level_set::LevelSetStaticCapillaryLineSearchPhase
+        [](static_capillary::LevelSetStaticCapillaryLineSearchPhase
                phase) {
-          using Phase = svmp::FE::level_set::
+          using Phase = static_capillary::
               LevelSetStaticCapillaryLineSearchPhase;
           switch (phase) {
           case Phase::Trial:
@@ -29094,9 +29097,9 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
           return "unknown";
         };
     const auto line_search_disposition_name =
-        [](svmp::FE::level_set::
+        [](static_capillary::
                LevelSetStaticCapillaryLineSearchDisposition disposition) {
-          using Disposition = svmp::FE::level_set::
+          using Disposition = static_capillary::
               LevelSetStaticCapillaryLineSearchDisposition;
           switch (disposition) {
           case Disposition::UnavailableOrForbidden:

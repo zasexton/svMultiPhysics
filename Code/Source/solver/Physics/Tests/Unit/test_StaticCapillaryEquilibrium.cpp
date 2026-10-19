@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "LevelSet/LevelSetStaticCapillaryEquilibrium.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/StaticCapillaryEquilibrium.h"
 
 #include <algorithm>
 #include <array>
@@ -16,9 +16,9 @@
 namespace {
 
 namespace FE = svmp::FE;
-namespace level_set = svmp::FE::level_set;
+namespace static_capillary = svmp::Physics::formulations::navier_stokes::static_capillary;
 using EvaluationPurpose =
-    level_set::LevelSetStaticCapillaryEvaluationPurpose;
+    static_capillary::LevelSetStaticCapillaryEvaluationPurpose;
 
 std::uint64_t coefficientRevision(std::span<const FE::Real> coefficients)
 {
@@ -31,7 +31,7 @@ std::uint64_t coefficientRevision(std::span<const FE::Real> coefficients)
     return revision == 0u ? 1u : revision;
 }
 
-level_set::LevelSetStaticCapillaryEquilibriumEvaluation
+static_capillary::LevelSetStaticCapillaryEquilibriumEvaluation
 quadraticCapillaryEvaluation(
     std::span<const FE::Real> coefficients,
     EvaluationPurpose purpose,
@@ -39,7 +39,7 @@ quadraticCapillaryEvaluation(
     bool constraint_barrier = false,
     bool provide_functional_derivatives = false)
 {
-    level_set::LevelSetStaticCapillaryEquilibriumEvaluation evaluation;
+    static_capillary::LevelSetStaticCapillaryEquilibriumEvaluation evaluation;
     if (coefficients.size() != 2u) {
         evaluation.diagnostic = "unexpected_coefficient_count";
         return evaluation;
@@ -113,10 +113,10 @@ quadraticCapillaryEvaluation(
     return evaluation;
 }
 
-level_set::LevelSetStaticCapillaryEquilibriumOptions
+static_capillary::LevelSetStaticCapillaryEquilibriumOptions
 quadraticOptions()
 {
-    level_set::LevelSetStaticCapillaryEquilibriumOptions options;
+    static_capillary::LevelSetStaticCapillaryEquilibriumOptions options;
     options.target_liquid_volume = 3.0;
     options.volume_tolerance = 1.0e-10;
     options.projected_gradient_tolerance = 1.0e-7;
@@ -142,12 +142,12 @@ quadraticOptions()
     return options;
 }
 
-level_set::LevelSetStaticCapillaryEquilibriumEvaluation
+static_capillary::LevelSetStaticCapillaryEquilibriumEvaluation
 piecewiseTransitionEvaluation(
     std::span<const FE::Real> coefficients,
     FE::Real positive_energy_slope)
 {
-    level_set::LevelSetStaticCapillaryEquilibriumEvaluation evaluation;
+    static_capillary::LevelSetStaticCapillaryEquilibriumEvaluation evaluation;
     if (coefficients.size() != 2u) {
         evaluation.diagnostic = "unexpected_coefficient_count";
         return evaluation;
@@ -176,7 +176,7 @@ piecewiseTransitionEvaluation(
     return evaluation;
 }
 
-level_set::LevelSetStaticCapillaryEquilibriumOptions
+static_capillary::LevelSetStaticCapillaryEquilibriumOptions
 piecewiseTransitionOptions(int line_search_trials, FE::Real shrink = 0.5)
 {
     auto options = quadraticOptions();
@@ -221,7 +221,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     };
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             piecewiseTransitionOptions(4),
             input,
             active,
@@ -241,7 +241,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     const auto& state = result.line_search_failure_state;
     EXPECT_EQ(
         state.status,
-        level_set::LevelSetStaticCapillaryFailureStateStatus::Available);
+        static_capillary::LevelSetStaticCapillaryFailureStateStatus::Available);
     EXPECT_EQ(state.coefficient_count, input.size());
     EXPECT_EQ(state.active_coefficient_count, active.size());
     EXPECT_EQ(state.accepted_iteration_index, 0u);
@@ -285,7 +285,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
      FailureStateCapacityDoesNotChangeTheNumericalOutcome)
 {
     std::vector<FE::Real> input(
-        level_set::kLevelSetStaticCapillaryFailureStateCoefficientCapacity +
+        static_capillary::kLevelSetStaticCapillaryFailureStateCoefficientCapacity +
             1u,
         FE::Real{17.0});
     input[1] = FE::Real{0.0};
@@ -310,7 +310,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     };
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             piecewiseTransitionOptions(4),
             input,
             active,
@@ -330,7 +330,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     const auto& state = result.line_search_failure_state;
     EXPECT_EQ(
         state.status,
-        level_set::LevelSetStaticCapillaryFailureStateStatus::CapacityExceeded);
+        static_capillary::LevelSetStaticCapillaryFailureStateStatus::CapacityExceeded);
     EXPECT_EQ(state.coefficient_count, input.size());
     EXPECT_EQ(state.active_coefficient_count, active.size());
     EXPECT_TRUE(state.coefficients.empty());
@@ -343,10 +343,10 @@ TEST(LevelSetStaticCapillaryEquilibrium,
 TEST(LevelSetStaticCapillaryEquilibrium,
      DoesNotRecordFailureStateForSuccessOrPreSearchExit)
 {
-    level_set::LevelSetStaticCapillaryFailureState manual;
+    static_capillary::LevelSetStaticCapillaryFailureState manual;
     EXPECT_EQ(
         manual.status,
-        level_set::LevelSetStaticCapillaryFailureStateStatus::NotApplicable);
+        static_capillary::LevelSetStaticCapillaryFailureStateStatus::NotApplicable);
     EXPECT_TRUE(manual.coefficients.empty());
     EXPECT_TRUE(manual.active_coefficient_indices.empty());
     EXPECT_TRUE(manual.energy_gradient.empty());
@@ -368,7 +368,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     };
 
     const auto success =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             quadraticOptions(),
             input,
             active,
@@ -378,7 +378,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     EXPECT_TRUE(success.accepted_coefficients_assigned);
     EXPECT_EQ(
         success.line_search_failure_state.status,
-        level_set::LevelSetStaticCapillaryFailureStateStatus::NotApplicable);
+        static_capillary::LevelSetStaticCapillaryFailureStateStatus::NotApplicable);
     EXPECT_TRUE(success.line_search_failure_state.coefficients.empty());
     EXPECT_TRUE(
         success.line_search_failure_state.active_coefficient_indices.empty());
@@ -393,7 +393,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     const std::vector<FE::Real> sentinel{106.0, 107.0, 108.0};
     accepted = sentinel;
     const auto pre_search_exit =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             limited_options,
             input,
             active,
@@ -407,7 +407,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     EXPECT_EQ(accepted, sentinel);
     EXPECT_EQ(
         pre_search_exit.line_search_failure_state.status,
-        level_set::LevelSetStaticCapillaryFailureStateStatus::NotApplicable);
+        static_capillary::LevelSetStaticCapillaryFailureStateStatus::NotApplicable);
     EXPECT_TRUE(pre_search_exit.line_search_failure_state.coefficients.empty());
     EXPECT_TRUE(
         pre_search_exit.line_search_failure_state
@@ -428,7 +428,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             piecewiseTransitionOptions(4),
             input,
             active,
@@ -455,10 +455,10 @@ TEST(LevelSetStaticCapillaryEquilibrium,
         EXPECT_EQ(record.line_search_trial_index, i);
         EXPECT_EQ(
             record.phase,
-            level_set::LevelSetStaticCapillaryLineSearchPhase::Trial);
+            static_capillary::LevelSetStaticCapillaryLineSearchPhase::Trial);
         EXPECT_EQ(
             record.disposition,
-            level_set::LevelSetStaticCapillaryLineSearchDisposition::
+            static_capillary::LevelSetStaticCapillaryLineSearchDisposition::
                 TopologyRejected);
         EXPECT_TRUE(record.evaluation_available);
         EXPECT_FALSE(record.used_limited_memory_direction);
@@ -486,7 +486,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             piecewiseTransitionOptions(4),
             input,
             active,
@@ -506,7 +506,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     for (const auto& record : result.line_search_trace) {
         EXPECT_EQ(
             record.disposition,
-            level_set::LevelSetStaticCapillaryLineSearchDisposition::
+            static_capillary::LevelSetStaticCapillaryLineSearchDisposition::
                 TopologyRejected);
         EXPECT_TRUE(record.evaluation_available);
         EXPECT_GT(record.trial_merit, record.current_merit);
@@ -522,7 +522,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     std::vector<FE::Real> accepted{86.0};
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             piecewiseTransitionOptions(70, FE::Real{0.99}),
             input,
             active,
@@ -539,7 +539,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     EXPECT_EQ(result.line_search_trace_omitted_count, 6u);
     ASSERT_EQ(
         result.line_search_trace.size(),
-        level_set::kLevelSetStaticCapillaryLineSearchTraceCapacity);
+        static_capillary::kLevelSetStaticCapillaryLineSearchTraceCapacity);
     EXPECT_EQ(result.line_search_trace.front().line_search_trial_index, 6u);
     EXPECT_EQ(result.line_search_trace.back().line_search_trial_index, 69u);
     for (std::size_t i = 1u; i < result.line_search_trace.size(); ++i) {
@@ -553,7 +553,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
         1.0e-15);
     EXPECT_EQ(
         result.line_search_trace.back().disposition,
-        level_set::LevelSetStaticCapillaryLineSearchDisposition::
+        static_capillary::LevelSetStaticCapillaryLineSearchDisposition::
             TopologyRejected);
 }
 
@@ -565,14 +565,14 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     std::vector<FE::Real> accepted{87.0};
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             piecewiseTransitionOptions(1),
             input,
             active,
             [](std::span<const FE::Real> coefficients,
                EvaluationPurpose) {
                 if (coefficients[0] > FE::Real{0.0}) {
-                    level_set::LevelSetStaticCapillaryEquilibriumEvaluation
+                    static_capillary::LevelSetStaticCapillaryEquilibriumEvaluation
                         unavailable;
                     unavailable.diagnostic = "synthetic_trial_unavailable";
                     return unavailable;
@@ -588,7 +588,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     const auto& record = result.line_search_trace.front();
     EXPECT_EQ(
         record.disposition,
-        level_set::LevelSetStaticCapillaryLineSearchDisposition::
+        static_capillary::LevelSetStaticCapillaryLineSearchDisposition::
             UnavailableOrForbidden);
     EXPECT_FALSE(record.evaluation_available);
     EXPECT_EQ(record.current_cut_topology_key, 101u);
@@ -611,7 +611,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     std::size_t positive_candidate_evaluations = 0u;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             piecewiseTransitionOptions(4),
             input,
             active,
@@ -638,14 +638,14 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     const auto& reproduced = result.line_search_trace[1];
     EXPECT_EQ(
         deferred.disposition,
-        level_set::LevelSetStaticCapillaryLineSearchDisposition::Deferred);
+        static_capillary::LevelSetStaticCapillaryLineSearchDisposition::Deferred);
     EXPECT_EQ(
         reproduced.phase,
-        level_set::LevelSetStaticCapillaryLineSearchPhase::
+        static_capillary::LevelSetStaticCapillaryLineSearchPhase::
             DeferredReproduction);
     EXPECT_EQ(
         reproduced.disposition,
-        level_set::LevelSetStaticCapillaryLineSearchDisposition::
+        static_capillary::LevelSetStaticCapillaryLineSearchDisposition::
             ReproductionRejected);
     EXPECT_TRUE(reproduced.evaluation_available);
     EXPECT_DOUBLE_EQ(deferred.trial_merit, 0.5);
@@ -667,7 +667,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     options.max_line_search_iterations = 2;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             options,
             input,
             active,
@@ -679,7 +679,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
                     coefficients[1] == input[1];
                 if (purpose == EvaluationPurpose::FunctionalTrial &&
                     !initial_candidate && first_trial_returned) {
-                    level_set::LevelSetStaticCapillaryEquilibriumEvaluation
+                    static_capillary::LevelSetStaticCapillaryEquilibriumEvaluation
                         unavailable;
                     unavailable.diagnostic =
                         "synthetic_trial_unavailable";
@@ -713,7 +713,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
         EXPECT_TRUE(record.used_projected_gradient_fallback_direction);
         EXPECT_EQ(
             record.disposition,
-            level_set::LevelSetStaticCapillaryLineSearchDisposition::
+            static_capillary::LevelSetStaticCapillaryLineSearchDisposition::
                 UnavailableOrForbidden);
     }
 }
@@ -732,13 +732,13 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     options.limited_memory_history_size = 0;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             options,
             input,
             active,
             [](std::span<const FE::Real> coefficients,
                EvaluationPurpose) {
-                level_set::LevelSetStaticCapillaryEquilibriumEvaluation
+                static_capillary::LevelSetStaticCapillaryEquilibriumEvaluation
                     evaluation;
                 const bool initial =
                     coefficients[0] == FE::Real{0.0};
@@ -782,7 +782,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     std::vector<FE::Real> accepted{91.0, 92.0, 93.0};
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             quadraticOptions(),
             input,
             active,
@@ -830,7 +830,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     std::vector<FE::Real> accepted;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             quadraticOptions(),
             input,
             active,
@@ -872,7 +872,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     options.limited_memory_history_size = 0;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             options,
             input,
             active,
@@ -907,7 +907,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     options.limited_memory_history_size = 0;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             options,
             input,
             active,
@@ -943,7 +943,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     options.max_iterations = 4;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             options,
             input,
             active,
@@ -998,7 +998,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             quadraticOptions(),
             input,
             active,
@@ -1031,7 +1031,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     std::vector<FE::Real> accepted{71.0, 72.0, 73.0};
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             quadraticOptions(),
             input,
             active,
@@ -1079,7 +1079,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     options.maximum_coefficient_update_linf = 4.0;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             options,
             input,
             active,
@@ -1114,7 +1114,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     options.max_iterations = 120;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             options,
             input,
             active,
@@ -1153,7 +1153,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     options.max_iterations = 120;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             options,
             input,
             active,
@@ -1190,7 +1190,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     options.maximum_coefficient_update_linf = 4.0;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             options,
             input,
             active,
@@ -1223,7 +1223,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             quadraticOptions(),
             input,
             active,
@@ -1258,7 +1258,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             quadraticOptions(),
             input,
             active,
@@ -1293,7 +1293,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             quadraticOptions(),
             input,
             active,
@@ -1326,7 +1326,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             quadraticOptions(),
             input,
             active,
@@ -1359,7 +1359,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             quadraticOptions(),
             input,
             active,
@@ -1393,7 +1393,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             quadraticOptions(),
             input,
             active,
@@ -1427,7 +1427,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             quadraticOptions(),
             input,
             active,
@@ -1461,7 +1461,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             quadraticOptions(),
             input,
             active,
@@ -1492,7 +1492,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             quadraticOptions(),
             input,
             active,
@@ -1525,7 +1525,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             quadraticOptions(),
             input,
             active,
@@ -1534,7 +1534,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
                 if (coefficients.size() != input.size() ||
                     coefficients[0] != input[0] ||
                     coefficients[1] != input[1]) {
-                    level_set::LevelSetStaticCapillaryEquilibriumEvaluation
+                    static_capillary::LevelSetStaticCapillaryEquilibriumEvaluation
                         rejected;
                     rejected.diagnostic =
                         "synthetic_candidate_rejection";
@@ -1566,7 +1566,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             quadraticOptions(),
             input,
             active,
@@ -1596,7 +1596,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     std::vector<FE::Real> accepted = sentinel;
 
     EXPECT_THROW(
-        (void)level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        (void)static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             quadraticOptions(),
             input,
             duplicated_active,
@@ -1613,7 +1613,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     zero_volume_options.target_liquid_volume = 0.0;
     const std::array<std::size_t, 2> valid_active{0u, 1u};
     EXPECT_THROW(
-        (void)level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        (void)static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             zero_volume_options,
             input,
             valid_active,
@@ -1629,7 +1629,7 @@ TEST(LevelSetStaticCapillaryEquilibrium,
     auto invalid_epoch_options = quadraticOptions();
     invalid_epoch_options.max_topology_epoch_transitions = -1;
     EXPECT_THROW(
-        (void)level_set::minimizeLevelSetStaticCapillaryEquilibrium(
+        (void)static_capillary::minimizeLevelSetStaticCapillaryEquilibrium(
             invalid_epoch_options,
             input,
             valid_active,

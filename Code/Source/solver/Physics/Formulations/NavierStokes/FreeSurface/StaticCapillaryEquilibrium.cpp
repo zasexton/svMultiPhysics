@@ -1,4 +1,4 @@
-#include "LevelSet/LevelSetStaticCapillaryEquilibrium.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/StaticCapillaryEquilibrium.h"
 
 #include <algorithm>
 #include <array>
@@ -9,7 +9,7 @@
 #include <stdexcept>
 #include <utility>
 
-namespace svmp::FE::level_set {
+namespace svmp::Physics::formulations::navier_stokes::static_capillary {
 namespace {
 
 [[nodiscard]] bool finiteNonnegative(Real value) noexcept
@@ -1428,4 +1428,4 @@ minimizeLevelSetStaticCapillaryEquilibrium(
     }
 }
 
-} // namespace svmp::FE::level_set
+} // namespace svmp::Physics::formulations::navier_stokes::static_capillary

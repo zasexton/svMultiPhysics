@@ -4,7 +4,7 @@
 #include "Application/Core/ResolvedMovingDomainConfiguration.h"
 #include "FE/LevelSet/LevelSetCurvatureProjection.h"
 #include "FE/LevelSet/LevelSetOptions.h"
-#include "FE/LevelSet/LevelSetStaticCapillaryEquilibrium.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/StaticCapillaryEquilibrium.h"
 
 #include <memory>
 #include <optional>
@@ -27,7 +27,7 @@ struct ResolvedLevelSetMaintenanceCompatibilityConfiguration {
   std::vector<OpenBoundary> open_boundaries{};
   std::optional<ActiveCutVolumeRequest> volume_cut_request{};
   bool static_capillary_equilibrium_enabled{false};
-  svmp::FE::level_set::LevelSetStaticCapillaryEquilibriumOptions
+  svmp::Physics::formulations::navier_stokes::static_capillary::LevelSetStaticCapillaryEquilibriumOptions
       static_capillary_equilibrium{};
   bool curvature_projection_enabled{false};
   std::string curvature_field_name{};
