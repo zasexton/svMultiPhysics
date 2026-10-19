@@ -1,4 +1,4 @@
-#include "Application/Core/LevelSetCurvatureSamples.h"
+#include "FE/LevelSet/LevelSetCurvatureSamples.h"
 
 #include "FE/Assembly/Assembler.h"
 #include "FE/Assembly/CutIntegrationContext.h"
@@ -109,8 +109,9 @@ referenceCellInteriorPoint(svmp::FE::ElementType type, int order)
 
 } // namespace
 
-namespace application {
-namespace core {
+namespace svmp {
+namespace FE {
+namespace level_set {
 
 std::optional<std::array<svmp::FE::Real, 3>>
 mapLevelSetCurvatureReferenceSampleToPhysical(
@@ -624,5 +625,6 @@ LevelSetCurvatureSampleDuplicateFilter::appendUnlessDuplicate(
   return nullptr;
 }
 
-} // namespace core
-} // namespace application
+} // namespace level_set
+} // namespace FE
+} // namespace svmp

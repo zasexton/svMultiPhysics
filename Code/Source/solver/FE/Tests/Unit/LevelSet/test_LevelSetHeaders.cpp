@@ -2,6 +2,7 @@
 #include "LevelSet/LevelSetConservativePhaseOperator.h"
 #include "LevelSet/LevelSetConservativePhaseTransport.h"
 #include "LevelSet/LevelSetCurvatureProjection.h"
+#include "LevelSet/LevelSetCurvatureSamples.h"
 #include "LevelSet/LevelSetDiagnostics.h"
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
 #include "LevelSet/LevelSetOptions.h"

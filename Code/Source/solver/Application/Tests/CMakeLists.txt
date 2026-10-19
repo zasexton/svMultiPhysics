@@ -13,11 +13,9 @@ add_executable(test_application
   Unit/test_ActiveDomainOutput.cpp
   Unit/test_EquationTranslator.cpp
   Unit/test_FreeSurfaceEnergyLedger.cpp
-  Unit/test_LevelSetCurvatureSamples.cpp
   Unit/test_LevelSetCutConfiguration.cpp
   Unit/test_LevelSetEquationTranslator.cpp
   Unit/test_LevelSetMaintenanceConfiguration.cpp
-  Unit/test_LevelSetMaintenanceHistory.cpp
   Unit/test_LevelSetPdeVelocityExtension.cpp
   Unit/test_LegacyParameterStubs.cpp
   Unit/test_MeshCollection.cpp
@@ -30,7 +28,6 @@ add_executable(test_application
   ../Core/FreeSurfaceSemiImplicitReference.cpp
   ../Core/LevelSetCutConfiguration.cpp
   ../Core/LevelSetMaintenanceConfiguration.cpp
-  ../Core/LevelSetCurvatureSamples.cpp
   ../Core/LevelSetMaintenanceTransactionConsensus.cpp
   ../Core/LevelSetPdeVelocityExtension.cpp
   ../Core/LevelSetVelocityExtensionMap.cpp
@@ -84,7 +81,6 @@ if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
     ../Core/FreeSurfaceSemiImplicitReference.cpp
     ../Core/LevelSetCutConfiguration.cpp
     ../Core/LevelSetMaintenanceConfiguration.cpp
-    ../Core/LevelSetCurvatureSamples.cpp
     ../Core/LevelSetMaintenanceTransactionConsensus.cpp
     ../Core/LevelSetPdeVelocityExtension.cpp
     ../Core/LevelSetVelocityExtensionMap.cpp

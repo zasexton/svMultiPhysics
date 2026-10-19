@@ -11,7 +11,6 @@ add_library(svapplication STATIC
   Core/FreeSurfaceSemiImplicitReference.cpp
   Core/LevelSetCutConfiguration.cpp
   Core/LevelSetMaintenanceConfiguration.cpp
-  Core/LevelSetCurvatureSamples.cpp
   Core/LevelSetMaintenanceTransactionConsensus.cpp
   Core/LevelSetPdeVelocityExtension.cpp
   Core/LevelSetVelocityExtensionMap.cpp

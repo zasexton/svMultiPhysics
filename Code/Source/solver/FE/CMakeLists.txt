@@ -952,6 +952,7 @@ set(FE_LEVELSET_HEADERS
     LevelSet/LevelSetVelocityExtensionConstraint.h
     LevelSet/LevelSetCellEvaluator.h
     LevelSet/LevelSetCurvatureProjection.h
+    LevelSet/LevelSetCurvatureSamples.h
     LevelSet/LevelSetInterfaceLifecycle.h
     LevelSet/LevelSetImplicitCutQuadratureBackend.h
     LevelSet/LevelSetStaticCapillaryEquilibrium.h
@@ -975,6 +976,7 @@ set(FE_LEVELSET_SOURCES
     LevelSet/LevelSetVelocityExtensionConstraint.cpp
     LevelSet/LevelSetCellEvaluator.cpp
     LevelSet/LevelSetCurvatureProjection.cpp
+    LevelSet/LevelSetCurvatureSamples.cpp
     LevelSet/LevelSetInterfaceLifecycle.cpp
     LevelSet/LevelSetImplicitCutQuadratureBackend.cpp
     LevelSet/LevelSetStaticCapillaryEquilibrium.cpp
@@ -2495,6 +2497,7 @@ if(FE_BUILD_TESTS)
             Tests/Unit/LevelSet/test_FreeSurfaceSnapshotCompactRecords.cpp
             Tests/Unit/LevelSet/test_FreeSurfaceSnapshotReuse.cpp
             Tests/Unit/LevelSet/test_LevelSetCurvatureProjection.cpp
+            Tests/Unit/LevelSet/test_LevelSetCurvatureSamples.cpp
             Tests/Unit/LevelSet/test_LevelSetHeaders.cpp
             Tests/Unit/LevelSet/test_LevelSetInterfaceLifecycle.cpp
             Tests/Unit/LevelSet/test_LevelSetKinematicReconciliation.cpp
