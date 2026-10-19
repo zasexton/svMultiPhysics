@@ -905,6 +905,7 @@ set(FE_GEOMETRY_HEADERS
     Geometry/InverseMapping.h
     Geometry/GeometryValidator.h
     Geometry/MappingFactory.h
+    Geometry/NearestPointIndex.h
     Geometry/PushForward.h
     Geometry/GeometryQuadrature.h
 )
@@ -2465,6 +2466,7 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Geometry/test_ElementTypeCoverage.cpp
         Tests/Unit/Geometry/test_Pyramid14Mapping.cpp
         Tests/Unit/Geometry/test_InverseMapping.cpp
+        Tests/Unit/Geometry/test_NearestPointIndex.cpp
         Tests/Unit/Geometry/test_main.cpp
     )
     add_executable(test_fe_geometry ${FE_GEOMETRY_TEST_SOURCES})

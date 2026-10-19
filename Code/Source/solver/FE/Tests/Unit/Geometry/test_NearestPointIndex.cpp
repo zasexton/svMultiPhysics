@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "Application/Core/NearestPointIndex.h"
+#include "Geometry/NearestPointIndex.h"
 
 #include <array>
 #include <cmath>
@@ -10,9 +10,9 @@
 
 namespace {
 
-using application::core::NearestPointIndex;
-using application::core::NearestPointQueryResult;
-using application::core::NearestPointRecord;
+using svmp::FE::geometry::NearestPointIndex;
+using svmp::FE::geometry::NearestPointQueryResult;
+using svmp::FE::geometry::NearestPointRecord;
 
 NearestPointQueryResult bruteForceNearest(
     int dimension,
