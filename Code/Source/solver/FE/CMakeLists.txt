@@ -2504,6 +2504,7 @@ if(FE_BUILD_TESTS)
             Tests/Unit/LevelSet/test_LevelSetConservativePhaseState.cpp
             Tests/Unit/LevelSet/test_LevelSetConservativePhaseTransport.cpp
             Tests/Unit/LevelSet/test_LevelSetDiagnostics.cpp
+            Tests/Unit/LevelSet/test_LevelSetGeometry.cpp
             Tests/Unit/LevelSet/test_FreeSurfaceSnapshotCompactRecords.cpp
             Tests/Unit/LevelSet/test_FreeSurfaceSnapshotReuse.cpp
             Tests/Unit/LevelSet/test_LevelSetCurvatureProjection.cpp
@@ -2805,6 +2806,7 @@ if(FE_BUILD_TESTS)
 			            set(FE_FORMS_TEST_SOURCES
 			                Tests/Unit/Forms/test_FormExpr.cpp
                             Tests/Unit/Forms/test_CutCellForms.cpp
+                            Tests/Unit/Forms/test_IntegrationDomainLowering.cpp
                             Tests/Unit/Forms/test_FiniteDeformationForms.cpp
                             Tests/Unit/Forms/test_MovingFrameForms.cpp
 			                    Tests/Unit/Forms/test_CoupledTerminals.cpp

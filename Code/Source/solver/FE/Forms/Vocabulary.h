@@ -11,6 +11,7 @@
  */
 
 #include "Forms/FormExpr.h"
+#include "Forms/IntegrationDomain.h"
 #include "Spaces/MixedSpace.h"
 
 #include <cstdint>
@@ -89,6 +90,14 @@ inline ConstitutiveCall constitutive(std::shared_ptr<const ConstitutiveModel> mo
                                                  int intersection_marker)
 {
     return integrand.dI(intersection_marker);
+}
+
+/// Typed form of dInterfaceBoundary(): integrand.dL(contact_line), which is
+/// integrand.dI(contact_line.marker()).
+[[nodiscard]] inline FormExpr dInterfaceBoundary(const FormExpr& integrand,
+                                                 const ContactLineDomain& contact_line)
+{
+    return integrand.dL(contact_line);
 }
 
 inline ConstitutiveCall constitutive(std::shared_ptr<const ConstitutiveModel> model, std::initializer_list<FormExpr> inputs)
@@ -432,6 +441,32 @@ inline FormExpr unitNormalFromLevelSet(const FormExpr& phi, Real eps = Real(1e-1
 inline FormExpr meanCurvatureFromLevelSet(const FormExpr& phi, Real eps = Real(1e-12))
 {
     return div(unitNormalFromLevelSet(phi, eps));
+}
+
+/**
+ * @brief Tangential projector I - n (x) n onto the plane normal to n
+ *
+ * The tree is FormExpr::identity(dim) - outer(n, n), the form used by the
+ * variational surface-stress term gamma (I - n (x) n) : grad(v).  It is not
+ * the same tree as surfaceDivergence(), which is algebraically equal on unit
+ * n but compiles to a different kernel.
+ */
+inline FormExpr tangentialProjector(const FormExpr& n, int dim)
+{
+    return FormExpr::identity(dim) - outer(n, n);
+}
+
+/**
+ * @brief Unit conormal of a contact line
+ *
+ * The direction of n in the plane of a wall with unit normal n_w:
+ * safeNormalize(n - (n . n_w) n_w).  With n the outward normal of the liquid
+ * and n_w pointing from the fluid into the wall, it points out of the wetted
+ * footprint, along the wall.
+ */
+inline FormExpr conormal(const FormExpr& n, const FormExpr& wall_normal, Real eps = Real(1e-12))
+{
+    return safeNormalize(n - dot(n, wall_normal) * wall_normal, eps);
 }
 
 inline FormExpr surfaceGradient(const FormExpr& f, const FormExpr& n)

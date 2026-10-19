@@ -9,6 +9,7 @@
 
 #include "Forms/ConstitutiveModel.h"
 #include "Forms/Index.h"
+#include "Forms/IntegrationDomain.h"
 #include "Forms/Tensor/TensorIndex.h"
 #include "Spaces/FunctionSpace.h"
 
@@ -3365,6 +3366,37 @@ FormExpr FormExpr::dCutVolume(int interface_marker, CutVolumeSide side) const
 {
     if (!node_) return {};
     return FormExpr(std::make_shared<CutVolumeIntegralNode>(node_, interface_marker, side));
+}
+
+FormExpr FormExpr::dx(const VolumeIntegrationDomain& domain) const
+{
+    if (domain.scope() == VolumeIntegrationScope::FullVolume) {
+        return dx();
+    }
+    return dCutVolume(*domain.interfaceMarker(), *domain.side());
+}
+
+FormExpr FormExpr::dI(const InterfaceDomain& domain) const
+{
+    return dI(domain.marker());
+}
+
+FormExpr FormExpr::dL(const ContactLineDomain& domain) const
+{
+    return dI(domain.marker());
+}
+
+FormExpr FormExpr::ds(const ExteriorBoundaryMeasure& domain) const
+{
+    return dExteriorBoundary(domain);
+}
+
+FormExpr FormExpr::dS(const FacetDomain& domain) const
+{
+    if (domain.side().has_value()) {
+        return dS(domain.marker(), *domain.side());
+    }
+    return dS(domain.marker());
 }
 
 namespace {

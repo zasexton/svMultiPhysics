@@ -194,6 +194,12 @@ private:
     int generated_active_boundary_marker_{-1};
 };
 
+// Typed integration domains (Forms/IntegrationDomain.h).
+class VolumeIntegrationDomain;
+class InterfaceDomain;
+class ContactLineDomain;
+class FacetDomain;
+
 struct SpaceSignature {
     spaces::SpaceType space_type{};
     FieldType field_type{FieldType::Scalar};
@@ -884,6 +890,20 @@ public:
             const ExteriorBoundaryMeasure& measure) const;
         [[nodiscard]] FormExpr dCutVolume(int interface_marker,
                                           CutVolumeSide side) const;
+
+    // ---- Typed measures (Forms/IntegrationDomain.h) ----
+    // Sugar only: each lowers to the untyped measure above, so the IR and the
+    // JIT kernels are those of the untyped call.
+    /// dx() for VolumeDomain::full(), dCutVolume(m, side) for VolumeDomain::cut(m, side).
+    [[nodiscard]] FormExpr dx(const VolumeIntegrationDomain& domain) const;
+    /// dI(domain.marker()).
+    [[nodiscard]] FormExpr dI(const InterfaceDomain& domain) const;
+    /// Codimension-two contact line: dI(domain.marker()).
+    [[nodiscard]] FormExpr dL(const ContactLineDomain& domain) const;
+    /// dExteriorBoundary(domain).
+    [[nodiscard]] FormExpr ds(const ExteriorBoundaryMeasure& domain) const;
+    /// dS(domain.marker()) or dS(domain.marker(), *domain.side()).
+    [[nodiscard]] FormExpr dS(const FacetDomain& domain) const;
 
     // ---- Query ----
     [[nodiscard]] bool isValid() const noexcept { return node_ != nullptr; }

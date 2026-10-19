@@ -22,11 +22,13 @@
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/Elements/ReferenceElement.h"
 #include "FE/Forms/CutCellForms.h"
+#include "FE/Forms/IntegrationDomain.h"
 #include "FE/Forms/SymbolicDifferentiation.h"
 #include "FE/Forms/Vocabulary.h"
 #include "FE/Geometry/FrameGeometry.h"
 #include "FE/Geometry/MappingFactory.h"
 #include "FE/LevelSet/LevelSetCellEvaluator.h"
+#include "FE/LevelSet/LevelSetGeometry.h"
 #include "FE/Backends/Interfaces/GenericVector.h"
 #include "FE/Systems/BoundaryConditionManager.h"
 #include "FE/Systems/ALEBinding.h"
@@ -1936,15 +1938,17 @@ namespace {
  * directed outward-liquid normal is required; the surface projector itself
  * is orientation independent.
  */
+[[nodiscard]] FE::forms::CutVolumeSide activeDomainSide(
+    FreeSurfaceActiveDomain domain) noexcept;
+
 [[nodiscard]] FE::forms::FormExpr generatedInterfaceOutwardNormal(
     const FreeSurfaceBoundary& bc)
 {
-    auto n = FE::forms::FormExpr::normal();
-    if (isUnfittedLevelSet(bc) &&
-        bc.active_domain == FreeSurfaceActiveDomain::LevelSetPositive) {
-        n = -n;
+    if (isUnfittedLevelSet(bc)) {
+        return FE::level_set::outwardInterfaceNormal(
+            activeDomainSide(bc.active_domain));
     }
-    return n;
+    return FE::forms::FormExpr::normal();
 }
 
 [[nodiscard]] int freeSurfaceMarker(const FreeSurfaceBoundary& bc)
@@ -2163,6 +2167,20 @@ contactLineSlipLength(const FreeSurfaceContactLine& contact_line)
     return phi_id;
 }
 
+/// The level-set geometry of an unfitted free surface: its field, generated
+/// domain id, isovalue and (resolved or requested) interface marker.
+[[nodiscard]] FE::level_set::LevelSetGeometry freeSurfaceLevelSetGeometry(
+    const FreeSurfaceBoundary& bc,
+    const FE::systems::FESystem& system)
+{
+    return FE::level_set::LevelSetGeometry::bind(
+        system,
+        {.level_set_field = resolveLevelSetFieldId(bc, system),
+         .domain_id = bc.generated_interface_domain_id,
+         .isovalue = bc.level_set_isovalue,
+         .interface_marker = bc.interface_marker});
+}
+
 [[nodiscard]] int generatedInterfaceMarkerFor(
     const FreeSurfaceBoundary& bc,
     const FE::systems::FESystem& system)
@@ -2175,13 +2193,7 @@ contactLineSlipLength(const FreeSurfaceContactLine& contact_line)
             "IncompressibleNavierStokesVMSModule: generated unfitted free surface requires a non-empty generated_interface_domain_id");
     }
 
-    const auto phi_id = resolveLevelSetFieldId(bc, system);
-    FE::interfaces::GeneratedInterfaceMarkerKey key{};
-    key.source = FE::interfaces::LevelSetInterfaceSource::fromField(phi_id);
-    key.domain_id = bc.generated_interface_domain_id;
-    key.isovalue = bc.level_set_isovalue;
-    key.requested_marker = bc.interface_marker;
-    return FE::interfaces::stableGeneratedInterfaceMarker(key);
+    return freeSurfaceLevelSetGeometry(bc, system).interfaceMarker();
 }
 
 [[nodiscard]] FE::interfaces::GeneratedInterfaceBoundaryIntersectionMarkerKey
@@ -2208,15 +2220,9 @@ generatedUnfittedContactLineMarkerKey(
             "IncompressibleNavierStokesVMSModule: prescribed unfitted contact angle requires Contact_line_wall_marker or Contact_line_wall_face");
     }
 
-    const auto phi_id = resolveLevelSetFieldId(bc, system);
-    FE::interfaces::GeneratedInterfaceBoundaryIntersectionMarkerKey key{};
-    key.source = FE::interfaces::LevelSetInterfaceSource::fromField(phi_id);
-    key.domain_id = bc.generated_interface_domain_id;
-    key.isovalue = bc.level_set_isovalue;
-    key.interface_marker = bc.interface_marker;
-    key.boundary_marker = contactLineWallBoundaryMarker(contact_line);
-    key.requested_marker = contactLineMarker(contact_line);
-    return key;
+    return freeSurfaceLevelSetGeometry(bc, system).contactLineKey(
+        contactLineWallBoundaryMarker(contact_line),
+        contactLineMarker(contact_line));
 }
 
 [[nodiscard]] int generatedUnfittedContactLineMarker(
@@ -2244,15 +2250,9 @@ generatedActiveBoundaryMarkerKey(
         throw std::invalid_argument(
             "IncompressibleNavierStokesVMSModule: sharp active-boundary marker requires a resolved unfitted active domain and physical boundary marker");
     }
-    FE::interfaces::GeneratedActiveBoundaryMarkerKey key;
-    key.source = FE::interfaces::LevelSetInterfaceSource::fromField(
-        resolveLevelSetFieldId(bc, system));
-    key.domain_id = bc.generated_interface_domain_id;
-    key.isovalue = bc.level_set_isovalue;
-    key.interface_marker = bc.interface_marker;
-    key.boundary_marker = physical_boundary_marker;
-    key.side = activeDomainIntegrationSide(bc.active_domain);
-    return key;
+    return freeSurfaceLevelSetGeometry(bc, system)
+        .side(activeDomainSide(bc.active_domain))
+        .boundaryKey(physical_boundary_marker);
 }
 
 [[nodiscard]] int generatedActiveBoundaryMarker(
@@ -5444,12 +5444,10 @@ void applyFreeSurfaceCutCellStabilization(
     const auto integrate_cut_adjacent =
         [&](const FE::forms::FormExpr& integrand) {
             return facet_domain_side.has_value()
-                       ? FE::forms::cutAdjacentFacetIntegral(
-                             integrand,
-                             bc.interface_marker,
-                             *facet_domain_side)
-                       : FE::forms::cutAdjacentFacetIntegral(
-                             integrand, bc.interface_marker);
+                       ? integrand.dS(FE::forms::FacetDomain::cutAdjacent(
+                             bc.interface_marker, *facet_domain_side))
+                       : integrand.dS(FE::forms::FacetDomain::cutAdjacent(
+                             bc.interface_marker));
         };
 
     std::ostringstream oss;
@@ -5559,7 +5557,7 @@ void applyFreeSurfaceCutCellStabilization(
     bool ale_enabled)
 {
     if (isUnfittedLevelSet(bc)) {
-        return integrand.dI(bc.interface_marker);
+        return integrand.dI(FE::forms::InterfaceDomain(bc.interface_marker));
     }
     // Fitted boundaries integrate over the assembly (active) frame.  The
     // boundary quadrature weights already carry the active surface measure,
@@ -5570,9 +5568,8 @@ void applyFreeSurfaceCutCellStabilization(
     // MeshNitsche require that coupling.  The current normal used by the
     // fitted terms is then the normal of the integration frame as well.
     (void)ale_enabled;
-    return integrand.dExteriorBoundary(
-        FE::forms::ExteriorBoundaryMeasure::fullPhysical(
-            bc.boundary_marker));
+    return integrand.ds(
+        FE::forms::BoundaryDomain::fullPhysical(bc.boundary_marker));
 }
 
 struct ActiveVolumeDomain {
@@ -5770,20 +5767,18 @@ void applyDynamicContactAngleResidual(
                 contactLineSlipLength(contact_line),
                 freeSurfaceValueName(
                     "ns_contact_wall_slip_length", bc));
-            const auto u_tangent = u - dot(u, wall_n) * wall_n;
-            const auto v_tangent = v - dot(v, wall_n) * wall_n;
+            const auto u_tangent = tangentialProjection(u, wall_n);
+            const auto v_tangent = tangentialProjection(v, wall_n);
             const int active_wall_marker = generatedActiveBoundaryMarker(
                 bc, contactLineWallBoundaryMarker(contact_line), system);
             system.registerGeneratedEmbeddedInterfaceMarker(
                 active_wall_marker);
+            // The wetted part of the wall on the liquid side.
             momentum_form = momentum_form +
                 (mu / slip_length * dot(u_tangent, v_tangent))
-                    .dExteriorBoundary(
-                        FE::forms::ExteriorBoundaryMeasure::
-                            generatedActiveSubset(
-                                contactLineWallBoundaryMarker(
-                                    contact_line),
-                                active_wall_marker));
+                    .ds(FE::forms::BoundaryDomain::generatedActiveSubset(
+                        contactLineWallBoundaryMarker(contact_line),
+                        active_wall_marker));
             return active_wall_marker;
         };
 
@@ -5830,8 +5825,7 @@ void applyDynamicContactAngleResidual(
                                ? generatedInterfaceOutwardNormal(bc)
                                : unfittedInterfaceNormal(bc, phi);
             const auto wall_n = wallNormalExpression(contact_line, dim);
-            const auto footprint_direction =
-                safeNormalize(n - dot(n, wall_n) * wall_n);
+            const auto footprint_direction = conormal(n, wall_n);
             const auto contact_test = dot(v, footprint_direction);
             const auto gamma = FE::forms::bc::toScalarExpr(
                 bc.surface_tension,
@@ -5850,7 +5844,9 @@ void applyDynamicContactAngleResidual(
                 : -gamma * (equilibrium_cosine + dot(n, wall_n));
             const auto wall_energy_form = dInterfaceBoundary(
                 wall_energy_force * contact_test,
-                contact_marker);
+                ContactLineDomain(
+                    contact_marker,
+                    contactLineWallBoundaryMarker(contact_line)));
             momentum_form = momentum_form + wall_energy_form;
             if (conservative_surface_energy_form != nullptr &&
                 usesSurfaceStress(bc)) {
@@ -5914,8 +5910,7 @@ void applyDynamicContactAngleResidual(
         const auto wall_n = wallNormalExpression(contact_line, dim);
         // n is the outward liquid normal.  Its wall-tangential projection
         // points out of the wetted footprint for either contact orientation.
-        const auto footprint_direction =
-            safeNormalize(n - dot(n, wall_n) * wall_n);
+        const auto footprint_direction = conormal(n, wall_n);
         const auto contact_velocity = dot(u, footprint_direction);
         const auto contact_test = dot(v, footprint_direction);
 
@@ -5999,7 +5994,9 @@ void applyDynamicContactAngleResidual(
         if (!strong_contact_law) {
         momentum_form = momentum_form + dInterfaceBoundary(
             contact_force * contact_test,
-            contact_marker);
+            ContactLineDomain(
+                contact_marker,
+                contactLineWallBoundaryMarker(contact_line)));
         }
         if (strong_contact_law) {
             if (!usesSurfaceStress(bc)) {
@@ -6023,7 +6020,9 @@ void applyDynamicContactAngleResidual(
             // diagnostic even away from equilibrium.
             const auto wall_energy_form = dInterfaceBoundary(
                 (-gamma * equilibrium_cosine) * contact_test,
-                contact_marker);
+                ContactLineDomain(
+                    contact_marker,
+                    contactLineWallBoundaryMarker(contact_line)));
             *conservative_surface_energy_form =
                 conservative_surface_energy_form->isValid()
                     ? (*conservative_surface_energy_form + wall_energy_form)
@@ -6111,14 +6110,13 @@ void applyDynamicContactAngleResidual(
     const std::optional<ActiveVolumeDomain>& active_domain)
 {
     if (!active_domain.has_value()) {
-        return integrand.dx();
+        return integrand.dx(FE::forms::VolumeDomain::full());
     }
     if (active_domain->method == FreeSurfaceActiveDomainMethod::SmoothedIndicator) {
         return (active_domain->indicator * integrand).dx();
     }
-    auto out = integrand.dCutVolume(active_domain->interface_marker,
-                                    active_domain->side);
-    return out;
+    return integrand.dx(FE::forms::VolumeDomain::cut(
+        active_domain->interface_marker, active_domain->side));
 }
 
 void appendCutVolumeShapeTangentForm(
@@ -6997,7 +6995,7 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
                 // independently evaluated Q1-gradient normal.  The positive
                 // sign follows div_Gamma(I-n*n)=-kappa*n for the
                 // outward-liquid convention.
-                const auto projector = FormExpr::identity(dim) - outer(n, n);
+                const auto projector = tangentialProjector(n, dim);
                 const auto surface_energy_integrand =
                     gamma * inner(projector, grad(v));
                 const auto interface_surface_energy_form =
@@ -7486,8 +7484,7 @@ void installFittedFreeSurfaceMeshKinematics(
     }
 
     if (install_tangential_smoothing) {
-        const auto projector =
-            FormExpr::identity(rec.components) - outer(n, n);
+        const auto projector = tangentialProjector(n, rec.components);
         const auto tangential_gradient =
             projector * grad(d_mesh) * projector;
         const auto tangential_test_gradient =
@@ -9066,16 +9063,13 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                                          int physical_boundary_marker) {
             const auto marker = generated_active_boundary_for(
                 physical_boundary_marker);
-            const auto measure =
+            const auto domain =
                 marker.has_value()
-                    ? FE::forms::ExteriorBoundaryMeasure::
-                          generatedActiveSubset(
-                              physical_boundary_marker,
-                              *marker)
-                    : FE::forms::ExteriorBoundaryMeasure::
-                          fullPhysical(
-                              physical_boundary_marker);
-            return integrand.dExteriorBoundary(measure);
+                    ? FE::forms::BoundaryDomain::generatedActiveSubset(
+                          physical_boundary_marker, *marker)
+                    : FE::forms::BoundaryDomain::fullPhysical(
+                          physical_boundary_marker);
+            return integrand.ds(domain);
         };
     struct PendingSmallCutAggregation {
         FE::geometry::CutIntegrationSide side{

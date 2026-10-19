@@ -7,12 +7,16 @@
 
 #include "LevelSet/LevelSetGeometry.h"
 
+#include "Spaces/FunctionSpace.h"
 #include "Systems/FESystem.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <utility>
 
 namespace svmp {
 namespace FE {
@@ -81,6 +85,12 @@ void projectCommonCutOptions(
       request.allow_corner_linearized_geometry;
   options.require_production_qualified_implicit_cut_backend =
       request.require_production_qualified_implicit_cut_backend;
+}
+
+[[nodiscard]] geometry::CutIntegrationSide cutIntegrationSideOf(forms::CutVolumeSide side) noexcept
+{
+    return side == forms::CutVolumeSide::Negative ? geometry::CutIntegrationSide::Negative
+                                                  : geometry::CutIntegrationSide::Positive;
 }
 
 } // namespace
@@ -247,6 +257,121 @@ std::optional<int> resolvedActiveCutVolumeInterfaceMarker(
   key.isovalue = static_cast<svmp::FE::Real>(request.isovalue);
   key.requested_marker = request.requested_interface_marker;
   return svmp::FE::interfaces::stableGeneratedInterfaceMarker(key);
+}
+
+// ---------------------------------------------------------------------------
+// Typed domains of a level-set geometry
+// ---------------------------------------------------------------------------
+
+forms::FormExpr outwardInterfaceNormal(forms::CutVolumeSide side)
+{
+    auto n = forms::FormExpr::normal();
+    if (side == forms::CutVolumeSide::Positive) {
+        n = -n;
+    }
+    return n;
+}
+
+LevelSetGeometry LevelSetGeometry::bind(const systems::FESystem& system,
+                                        LevelSetGeometryDeclaration declaration)
+{
+    FieldId field = declaration.level_set_field;
+    if (field == INVALID_FIELD_ID) {
+        field = system.findFieldByName(declaration.level_set_field_name);
+        if (field == INVALID_FIELD_ID) {
+            throw std::invalid_argument(
+                "LevelSetGeometry::bind: unknown level-set field '" +
+                declaration.level_set_field_name + "'");
+        }
+    }
+    const auto& record = system.fieldRecord(field);
+    if (record.components != 1 || !record.space || record.space->value_dimension() != 1) {
+        throw std::invalid_argument(
+            "LevelSetGeometry::bind: level-set field '" + record.name + "' must be scalar");
+    }
+
+    int marker = declaration.interface_marker;
+    if (marker < 0) {
+        if (declaration.domain_id.empty()) {
+            throw std::invalid_argument(
+                "LevelSetGeometry::bind: a generated interface marker for level-set field '" +
+                record.name + "' requires a non-empty domain_id");
+        }
+        interfaces::GeneratedInterfaceMarkerKey key{};
+        key.source = interfaces::LevelSetInterfaceSource::fromField(field);
+        key.domain_id = declaration.domain_id;
+        key.isovalue = declaration.isovalue;
+        key.requested_marker = declaration.interface_marker;
+        marker = interfaces::stableGeneratedInterfaceMarker(key);
+    }
+    return LevelSetGeometry(field, std::move(declaration.domain_id), declaration.isovalue, marker);
+}
+
+forms::InterfaceDomain LevelSetGeometry::interface() const
+{
+    return forms::InterfaceDomain(interface_marker_);
+}
+
+CutSide LevelSetGeometry::side(forms::CutVolumeSide side) const
+{
+    return CutSide(*this, side);
+}
+
+interfaces::GeneratedInterfaceBoundaryIntersectionMarkerKey LevelSetGeometry::contactLineKey(
+    int wall_boundary_marker,
+    int requested_marker) const
+{
+    interfaces::GeneratedInterfaceBoundaryIntersectionMarkerKey key{};
+    key.source = interfaces::LevelSetInterfaceSource::fromField(level_set_field_);
+    key.domain_id = domain_id_;
+    key.isovalue = isovalue_;
+    key.interface_marker = interface_marker_;
+    key.boundary_marker = wall_boundary_marker;
+    key.requested_marker = requested_marker;
+    return key;
+}
+
+forms::ContactLineDomain LevelSetGeometry::contactLine(int wall_boundary_marker,
+                                                       int requested_marker) const
+{
+    return forms::ContactLineDomain(
+        interfaces::stableGeneratedInterfaceBoundaryIntersectionMarker(
+            contactLineKey(wall_boundary_marker, requested_marker)),
+        wall_boundary_marker);
+}
+
+forms::VolumeDomain CutSide::volume() const
+{
+    return forms::VolumeDomain::cut(geometry_.interfaceMarker(), side_);
+}
+
+forms::FormExpr CutSide::outwardNormal() const
+{
+    return outwardInterfaceNormal(side_);
+}
+
+interfaces::GeneratedActiveBoundaryMarkerKey CutSide::boundaryKey(int physical_boundary_marker) const
+{
+    interfaces::GeneratedActiveBoundaryMarkerKey key;
+    key.source = interfaces::LevelSetInterfaceSource::fromField(geometry_.levelSetField());
+    key.domain_id = geometry_.domainId();
+    key.isovalue = geometry_.isovalue();
+    key.interface_marker = geometry_.interfaceMarker();
+    key.boundary_marker = physical_boundary_marker;
+    key.side = cutIntegrationSideOf(side_);
+    return key;
+}
+
+forms::BoundaryDomain CutSide::boundary(int physical_boundary_marker) const
+{
+    return forms::BoundaryDomain::generatedActiveSubset(
+        physical_boundary_marker,
+        interfaces::stableGeneratedActiveBoundaryMarker(boundaryKey(physical_boundary_marker)));
+}
+
+forms::FacetDomain CutSide::cutFacets() const
+{
+    return forms::FacetDomain::cutAdjacent(geometry_.interfaceMarker(), side_);
 }
 
 } // namespace level_set
