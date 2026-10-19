@@ -15,8 +15,14 @@ production runs add LTO and PGO on top of it (decision D16, see
 [Production LTO + PGO Binaries](#production-lto--pgo-binaries)).  Some FE
 translation units add `-ftree-vectorize -funroll-loops` (FSILS, assembly,
 basis), and `Interfaces/detail/ProducerArithmeticAssessment.cpp` is pinned to
-`-ffp-contract=off -fno-lto -msse2`.  GCC's default `-ffp-contract=fast` has
-no effect for the generic target, which has no FMA instructions.  LLVM 17 is
+`-ffp-contract=off -fno-lto -msse2`.  Every GCC build compiles with
+`-ffp-contract=off` (`Code/CMake/SimVascularBuildOptimization.cmake`): GCC's
+default `-ffp-contract=fast` fuses multiply-adds wherever the target has FMA
+instructions (arm64, or x86 with `-march`), so results would depend at
+round-off on inlining and LTO/PGO builds would no longer be bitwise identical
+to plain builds.  The generic x86-64 target has no FMA instructions, so the
+flag changes nothing there.  On arm64 (Apple M5 Pro VM, 2026-10-18) it costs
+no measurable time.  LLVM 17 is
 linked statically; its own code generation speed is not affected by these
 options.
 

@@ -11,6 +11,12 @@
 #
 # Both keep the results bitwise identical to the default build.
 #
+# Floating-point contraction is always off for GCC (-ffp-contract=off).  GCC's
+# default (-ffp-contract=fast) fuses multiply-adds wherever the target has FMA
+# instructions (arm64, or x86 with -march), so results would depend at
+# round-off on inlining and differ between LTO/PGO and plain builds.  The
+# generic x86-64 target has no FMA, so nothing changes there.
+#
 # These options must be set before the first target is created; they apply to
 # every C and C++ target of the build, third-party libraries included.
 #-----------------------------------------------------------------------------
@@ -25,6 +31,12 @@ set(SV_PGO_PROFILE_DIR "" CACHE PATH
   "PGO profile data directory (empty: <build>/pgo-profile)")
 
 set(_sv_opt_summary "")
+
+#-----------------------------------------------------------------------------
+# Floating-point contraction
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-ffp-contract=off>)
+endif()
 
 #-----------------------------------------------------------------------------
 # Link-time optimization
