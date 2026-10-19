@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <iostream>
 #include <iterator>
@@ -36,7 +37,9 @@ constexpr std::string_view kLocalPreparationFailure{
 constexpr std::string_view kRecoveryPhaseFailure{
     "failed postaccept maintenance recovery phase"};
 
-// 64-bit FNV-1a, as used for the cut-context keys.
+// FNV-1a-style 64-bit mixing with the cut-context key constants of the
+// application driver; the offset constant is not the standard FNV basis, and
+// keys must stay equal to the driver's.
 constexpr std::uint64_t kFnv1aOffset = 1469598103934665603ull;
 constexpr std::uint64_t kFnv1aPrime = 1099511628211ull;
 

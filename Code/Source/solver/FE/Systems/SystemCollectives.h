@@ -211,8 +211,9 @@ void scatterFeOrderedSolution(
 /**
  * @brief Communicator-wide key of the system's constraint semantics.
  *
- * 64-bit FNV-1a of the rank count and every rank's constraint semantic
- * fingerprint, in rank order; never zero.
+ * FNV-1a-style 64-bit mixing (with the driver's cut-context constants) of
+ * the rank count and every rank's constraint semantic fingerprint, in rank
+ * order; never zero.
  */
 [[nodiscard]] std::uint64_t collectiveConstraintSemanticsKey(
     const FESystem& system,
