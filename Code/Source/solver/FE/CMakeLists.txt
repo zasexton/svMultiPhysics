@@ -326,6 +326,7 @@ set(FE_CORE_HEADERS
     Core/DeterministicParallel.h
     Core/HaloDiagnostics.h
     Core/AggregationGuardDiagnostics.h
+    Core/RankLog.h
 )
 
 set(FE_CORE_SOURCES
