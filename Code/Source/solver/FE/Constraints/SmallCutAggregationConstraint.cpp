@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <chrono>
 #include <charconv>
@@ -42,6 +43,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <optional>
 #include <set>
 #include <span>
@@ -151,6 +153,42 @@ struct SmallCutAggregationReuseRecord {
     std::vector<GlobalIndex> canonical_slaves{};
 };
 
+namespace {
+std::atomic<bool> owner_sourced_refresh_enabled{true};
+std::atomic<std::uint64_t> owner_sourced_refreshes_completed{0u};
+std::atomic<std::uint64_t> owner_sourced_refreshes_returned{0u};
+} // namespace
+
+void setSmallCutAggregationOwnerSourcedRefresh(bool enabled) noexcept
+{
+    owner_sourced_refresh_enabled.store(enabled, std::memory_order_relaxed);
+}
+
+bool smallCutAggregationOwnerSourcedRefreshEnabled() noexcept
+{
+    return owner_sourced_refresh_enabled.load(std::memory_order_relaxed);
+}
+
+SmallCutAggregationOwnerSourcedCounters
+smallCutAggregationOwnerSourcedCounters() noexcept
+{
+    return SmallCutAggregationOwnerSourcedCounters{
+        .completed =
+            owner_sourced_refreshes_completed.load(std::memory_order_relaxed),
+        .returned_to_global =
+            owner_sourced_refreshes_returned.load(std::memory_order_relaxed),
+    };
+}
+
+namespace {
+void noteSmallCutAggregationOwnerSourcedRefresh(bool completed) noexcept
+{
+    (completed ? owner_sourced_refreshes_completed
+               : owner_sourced_refreshes_returned)
+        .fetch_add(1u, std::memory_order_relaxed);
+}
+} // namespace
+
 } // namespace detail
 
 static_assert(std::is_nothrow_move_assignable_v<
@@ -221,6 +259,12 @@ struct GlobalCandidateSupport {
     // (diagnostics of the guard-rootless policy).
     std::size_t feature_cells{0u};
 };
+
+// (reason, candidate DOF, candidate, detail) of a guard-rootless candidate.
+using GuardRootlessLogger = std::function<void(std::string_view,
+                                               GlobalIndex,
+                                               const GlobalCandidateSupport&,
+                                               const std::string&)>;
 
 using CellKey = std::vector<GlobalIndex>;
 
@@ -632,6 +676,15 @@ enum class AggregationProfileExchange : std::size_t {
     CellOwners,
     Faces,
     OwnerRows,
+    CellCensus,
+    CellCensusReplies,
+    FaceCensus,
+    ActiveCellLedger,
+    CandidateCensus,
+    MergedCandidates,
+    ProposalOutcomes,
+    PreferredProposals,
+    ResolutionVisibility,
     Count,
 };
 
@@ -643,6 +696,7 @@ enum class AggregationProfileCount : std::size_t {
     LocalCandidateSupports,
     CommunicatorCandidates,
     LocalRootProposals,
+    OwnerSourcedRefresh,
     Count,
 };
 
@@ -676,6 +730,15 @@ constexpr std::array<const char*,
         "cell_owners",
         "faces",
         "owner_rows",
+        "cell_census",
+        "cell_census_replies",
+        "face_census",
+        "active_cell_ledger",
+        "candidate_census",
+        "merged_candidates",
+        "proposal_outcomes",
+        "preferred_proposals",
+        "resolution_visibility",
     }};
 
 constexpr std::array<const char*,
@@ -688,6 +751,7 @@ constexpr std::array<const char*,
         "local_candidate_supports",
         "communicator_candidates",
         "local_root_proposals",
+        "owner_sourced_refresh",
     }};
 
 [[nodiscard]] bool aggregationProfileEnabled() noexcept
@@ -987,6 +1051,129 @@ void AggregationRefreshProfile::report(const systems::FESystem& system,
     return gathered;
 }
 
+/**
+ * Sparse exchange: `outgoing[d]` is sent to rank d.  The result holds the
+ * received words grouped by source rank in ascending order, laid out like an
+ * all-gather (`counts` and `displacements` per source rank).  Collective;
+ * allocation failures are coordinated like allGatherInt64Words.
+ */
+[[nodiscard]] GatheredInt64Words exchangeInt64Words(
+    MPI_Comm comm,
+    const std::vector<std::vector<std::int64_t>>& outgoing,
+    AggregationProfileExchange exchange)
+{
+    const auto profile_start = AggregationRefreshProfile::Clock::now();
+    int world_size = 1;
+    MPI_Comm_size(comm, &world_size);
+    const auto n_ranks = static_cast<std::size_t>(world_size);
+    int local_overflow = outgoing.size() != n_ranks ? 1 : 0;
+    std::uint64_t sent_total = 0u;
+    std::uint64_t partners = 0u;
+    for (const auto& words : outgoing) {
+        sent_total += words.size();
+        partners += words.empty() ? 0u : 1u;
+        if (words.size() >
+            static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+            local_overflow = 1;
+        }
+    }
+    if (sent_total >
+        static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+        local_overflow = 1;
+    }
+    int global_overflow = 0;
+    MPI_Allreduce(&local_overflow, &global_overflow, 1, MPI_INT, MPI_MAX, comm);
+    if (global_overflow != 0) {
+        throw std::runtime_error(
+            "SmallCutAggregationConstraint: distributed aggregation exchange "
+            "exceeds the MPI count range");
+    }
+    auto coordinate_allocation = [&](const std::exception_ptr& exception,
+                                     const char* phase) {
+        const int local_ok = exception == nullptr ? 1 : 0;
+        int all_ok = 0;
+        MPI_Allreduce(&local_ok, &all_ok, 1, MPI_INT, MPI_MIN, comm);
+        if (all_ok != 0) {
+            return;
+        }
+        if (exception != nullptr) {
+            std::rethrow_exception(exception);
+        }
+        throw std::runtime_error(
+            std::string("SmallCutAggregationConstraint: distributed exchange ") +
+            phase + " failed on another communicator rank");
+    };
+    std::vector<int> send_counts;
+    std::vector<int> send_displacements;
+    std::vector<std::int64_t> send_words;
+    GatheredInt64Words received;
+    std::exception_ptr send_exception;
+    try {
+        send_counts.assign(n_ranks, 0);
+        send_displacements.assign(n_ranks, 0);
+        send_words.reserve(static_cast<std::size_t>(sent_total));
+        for (std::size_t rank = 0u; rank < n_ranks; ++rank) {
+            send_counts[rank] = static_cast<int>(outgoing[rank].size());
+            send_displacements[rank] = static_cast<int>(send_words.size());
+            send_words.insert(send_words.end(),
+                              outgoing[rank].begin(),
+                              outgoing[rank].end());
+        }
+        received.counts.assign(n_ranks, 0);
+        received.displacements.assign(n_ranks, 0);
+    } catch (...) {
+        send_exception = std::current_exception();
+    }
+    coordinate_allocation(send_exception, "send-layout allocation");
+    MPI_Alltoall(send_counts.data(),
+                 1,
+                 MPI_INT,
+                 received.counts.data(),
+                 1,
+                 MPI_INT,
+                 comm);
+    std::int64_t total = 0;
+    std::exception_ptr receive_exception;
+    try {
+        for (std::size_t rank = 0u; rank < n_ranks; ++rank) {
+            if (total > std::numeric_limits<int>::max()) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: received distributed "
+                    "aggregation exchange exceeds the MPI displacement range");
+            }
+            received.displacements[rank] = static_cast<int>(total);
+            total += received.counts[rank];
+        }
+        if (total > std::numeric_limits<int>::max()) {
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: received distributed "
+                "aggregation exchange exceeds the MPI displacement range");
+        }
+        received.words.resize(static_cast<std::size_t>(total));
+    } catch (...) {
+        receive_exception = std::current_exception();
+    }
+    coordinate_allocation(receive_exception, "receive-layout allocation");
+    MPI_Alltoallv(send_words.data(),
+                  send_counts.data(),
+                  send_displacements.data(),
+                  MPI_INT64_T,
+                  received.words.data(),
+                  received.counts.data(),
+                  received.displacements.data(),
+                  MPI_INT64_T,
+                  comm);
+    aggregationRefreshProfile().recordExchange(
+        exchange,
+        sent_total,
+        static_cast<std::uint64_t>(total),
+        partners,
+        std::chrono::duration<double, std::milli>(
+            AggregationRefreshProfile::Clock::now() - profile_start)
+            .count());
+    return received;
+}
+
 using GlobalCandidateMap =
     std::map<GlobalIndex, GlobalCandidateSupport>;
 
@@ -1206,46 +1393,48 @@ using GlobalCandidateMap =
     return true;
 }
 
-[[nodiscard]] DistributedAggregationResult
-resolveDistributedAggregationDeclarations(
-    const systems::FESystem& system,
-    const AffineConstraints& existing_constraints,
-    std::string_view field_name,
-    const GlobalCandidateMap& global_candidates,
-    const LocalAggregationDeclarationMap& local_candidates,
-    const std::set<GlobalIndex>& assembled_candidate_dofs,
-    const std::set<GlobalIndex>& row_coupled_candidate_dofs,
-    bool slave_all_cut,
-    bool allow_unaggregated,
-    bool rootless_fallback)
+// Merges the line entries of a rooted proposal and validates it: a nonnegative
+// root cell, one valid partition-of-unity line per component DOF.
+[[nodiscard]] bool normalizeRootProposal(AggregationDeclaration& normalized)
 {
-    DistributedAggregationResult result;
-    int initialized = 0;
-    MPI_Initialized(&initialized);
-    const auto comm = system.dofHandler().mpiComm();
-    int world_size = 1;
-    if (initialized != 0) {
-        MPI_Comm_size(comm, &world_size);
+    bool valid = true;
+    if (normalized.state == AggregationDeclarationState::Rooted) {
+        std::set<GlobalIndex> line_slaves;
+        valid = normalized.root_cell_gid >= 0 &&
+                !normalized.component_dofs.empty() &&
+                !normalized.root_master_dofs.empty() &&
+                normalized.lines.size() ==
+                    normalized.component_dofs.size();
+        for (auto& line : normalized.lines) {
+            const auto line_validation =
+                normalizeAndValidateRootedLine(line);
+            valid = valid && line_validation.valid &&
+                    std::find(normalized.component_dofs.begin(),
+                              normalized.component_dofs.end(),
+                              line.slave_dof) !=
+                        normalized.component_dofs.end() &&
+                    line_slaves.insert(line.slave_dof).second;
+        }
+        valid = valid &&
+                line_slaves.size() == normalized.component_dofs.size();
     }
-    result.validation =
-        initialized != 0 && world_size > 1
-            ? DistributedAggregationValidation::Passed
-            : DistributedAggregationValidation::NotParallel;
-    result.canonical_candidate_vertices = global_candidates.size();
-    result.canonical_rooted_candidate_vertices =
-        static_cast<std::size_t>(std::count_if(
-            global_candidates.begin(), global_candidates.end(),
-            [](const auto& entry) { return entry.second.globally_rooted; }));
-    result.canonical_rootless_candidate_vertices =
-        global_candidates.size() - result.canonical_rooted_candidate_vertices;
+    return valid;
+}
 
+// Normalizes the local root proposals of communicator candidates (dropping
+// invalid ones: another root or provider may still furnish the candidate)
+// and serializes them in (candidate, distance, root cell) order:
+// [base, state, distance, root_cell_gid, n_components, n_roots, n_lines,
+//  components..., roots..., {slave,n_entries,{master,weight_bits}...}...]
+// `payload_valid` turns false on a non-finite weight.
+void serializeRootProposals(const LocalAggregationDeclarationMap& local_candidates,
+                            const GlobalCandidateMap& global_candidates,
+                            std::vector<std::int64_t>& local_candidate_words,
+                            bool& local_candidate_payload_valid)
+{
     std::size_t local_declaration_count = 0u;
     std::vector<AggregationDeclaration> normalized_local_declarations;
     std::vector<std::pair<GlobalIndex, const AggregationDeclaration*>> ordered;
-    std::vector<std::int64_t> local_candidate_words;
-    bool local_candidate_payload_valid = true;
-    std::exception_ptr local_candidate_serialization_exception;
-    try {
     for (const auto& [dof, declarations] : local_candidates) {
         if (global_candidates.count(dof) != 0u) {
             local_declaration_count += declarations.size();
@@ -1259,27 +1448,7 @@ resolveDistributedAggregationDeclarations(
         }
         for (const auto& declaration : declarations) {
             auto normalized = declaration;
-            bool valid = true;
-            if (normalized.state == AggregationDeclarationState::Rooted) {
-                std::set<GlobalIndex> line_slaves;
-                valid = normalized.root_cell_gid >= 0 &&
-                        !normalized.component_dofs.empty() &&
-                        !normalized.root_master_dofs.empty() &&
-                        normalized.lines.size() ==
-                            normalized.component_dofs.size();
-                for (auto& line : normalized.lines) {
-                    const auto line_validation =
-                        normalizeAndValidateRootedLine(line);
-                    valid = valid && line_validation.valid &&
-                            std::find(normalized.component_dofs.begin(),
-                                      normalized.component_dofs.end(),
-                                      line.slave_dof) !=
-                                normalized.component_dofs.end() &&
-                            line_slaves.insert(line.slave_dof).second;
-                }
-                valid = valid &&
-                        line_slaves.size() == normalized.component_dofs.size();
-            }
+            const bool valid = normalizeRootProposal(normalized);
             // A bad root proposal is not a communicator failure if another
             // root/provider can furnish a valid extension for the candidate.
             if (!valid) {
@@ -1358,56 +1527,25 @@ resolveDistributedAggregationDeclarations(
             }
         }
     }
-    } catch (...) {
-        local_candidate_payload_valid = false;
-        local_candidate_serialization_exception = std::current_exception();
-    }
-    GatheredInt64Words gathered_candidates;
-    if (initialized != 0 && world_size > 1) {
-        const int local_valid = local_candidate_payload_valid ? 1 : 0;
-        int all_valid = 0;
-        MPI_Allreduce(&local_valid,
-                      &all_valid,
-                      1,
-                      MPI_INT,
-                      MPI_MIN,
-                      comm);
-        if (all_valid == 0) {
-            if (local_candidate_serialization_exception != nullptr) {
-                std::rethrow_exception(
-                    local_candidate_serialization_exception);
-            }
-            throw std::runtime_error(
-                "SmallCutAggregationConstraint: non-finite local "
-                "aggregation weight on at least one communicator rank");
-        }
-        gathered_candidates = allGatherInt64Words(
-            comm, std::span<const std::int64_t>(local_candidate_words),
-            AggregationProfileExchange::RootProposals);
-    } else {
-        if (!local_candidate_payload_valid) {
-            if (local_candidate_serialization_exception != nullptr) {
-                std::rethrow_exception(
-                    local_candidate_serialization_exception);
-            }
-            throw std::runtime_error(
-                "SmallCutAggregationConstraint: non-finite local "
-                "aggregation weight");
-        }
-        gathered_candidates.words = local_candidate_words;
-        gathered_candidates.counts = {
-            static_cast<int>(local_candidate_words.size())};
-        gathered_candidates.displacements = {0};
-        world_size = 1;
-    }
+}
 
-    struct RankedDeclaration {
-        int rank{-1};
-        AggregationDeclaration declaration{};
-    };
-    std::map<GlobalIndex, std::vector<RankedDeclaration>> declarations_by_dof;
-    std::exception_ptr local_declaration_decode_exception;
-    try {
+struct RankedDeclaration {
+    int rank{-1};
+    AggregationDeclaration declaration{};
+};
+using RankedDeclarationMap =
+    std::map<GlobalIndex, std::vector<RankedDeclaration>>;
+
+// Decodes serialized root proposals (serializeRootProposals) of every source
+// rank, in source-rank order, revalidating each one; valid ones are appended
+// to their candidate.  `provider_rank_of(source rank, root cell ID)` names
+// the provider rank recorded with the proposal.
+template <class ProviderRankOf>
+void decodeRootProposals(const GatheredInt64Words& gathered_candidates,
+                         int world_size,
+                         const ProviderRankOf& provider_rank_of,
+                         RankedDeclarationMap& declarations_by_dof)
+{
     for (int rank = 0; rank < world_size; ++rank) {
         std::size_t position = static_cast<std::size_t>(
             gathered_candidates.displacements[static_cast<std::size_t>(rank)]);
@@ -1457,7 +1595,6 @@ resolveDistributedAggregationDeclarations(
                     "aggregation candidate counts");
             }
             RankedDeclaration ranked;
-            ranked.rank = rank;
             ranked.declaration.state =
                 static_cast<AggregationDeclarationState>(raw_state);
             ranked.declaration.root_distance =
@@ -1466,6 +1603,8 @@ resolveDistributedAggregationDeclarations(
                     : static_cast<std::size_t>(raw_distance);
             ranked.declaration.root_cell_gid =
                 static_cast<GlobalIndex>(raw_root_cell_gid);
+            ranked.rank = provider_rank_of(
+                rank, ranked.declaration.root_cell_gid);
             ranked.declaration.component_dofs.reserve(
                 static_cast<std::size_t>(component_count));
             for (std::int64_t i = 0; i < component_count; ++i) {
@@ -1535,156 +1674,68 @@ resolveDistributedAggregationDeclarations(
             }
         }
     }
-    } catch (...) {
-        local_declaration_decode_exception = std::current_exception();
-    }
-    coordinateDistributedLocalFailure(system,
-                                      local_declaration_decode_exception,
-                                      "root_proposal_decode");
+}
 
-    // Gather ownership, relevance and pre-existing constraints for every DOF
-    // mentioned by any proposal. The root itself is chosen by the
-    // partition-independent (distance, physical root cell GID) ordering
-    // alone; choosing among roots by which ranks can see their masters would
-    // change the discretization with the partition. Algebraic master DOFs are
-    // deliberately excluded from the ordering because owner-contiguous
-    // numbering changes when the physical mesh is repartitioned.
-    const auto& partition = system.dofHandler().getPartition();
-    std::set<GlobalIndex> proposal_dofs;
-    std::vector<std::int64_t> local_proposal_visibility_words;
-    std::exception_ptr local_proposal_visibility_exception;
-    try {
-    for (const auto& [dof, support] : global_candidates) {
-        (void)dof;
-        proposal_dofs.insert(support.component_dofs.begin(),
-                             support.component_dofs.end());
-    }
-    for (const auto& [dof, declarations] : declarations_by_dof) {
-        (void)dof;
-        for (const auto& ranked : declarations) {
-            for (const auto& line : ranked.declaration.lines) {
-                proposal_dofs.insert(line.slave_dof);
-                for (const auto& entry : line.entries) {
-                    proposal_dofs.insert(entry.master_dof);
-                }
-            }
-        }
+struct ProposalDofVisibility {
+    int rank{-1};
+    bool owned{false};
+    bool preconstrained{false};
+    bool needed{false};
+};
+
+/**
+ * Visibility of proposal DOFs gathered from every rank on which they are
+ * locally relevant: (rank, owned, preconstrained, assembled-with) per rank,
+ * in rank order.
+ */
+class GatheredProposalVisibility {
+public:
+    explicit GatheredProposalVisibility(
+        const std::map<GlobalIndex, std::vector<ProposalDofVisibility>>&
+            by_dof)
+        : by_dof_(by_dof)
+    {
     }
 
-    // [dof, owned, preconstrained, assembled] for locally relevant proposal
-    // DOFs; `assembled` marks candidate DOFs this rank assembles with.
-    for (const auto dof : proposal_dofs) {
-        if (!partition.isRelevant(dof)) {
-            continue;
-        }
-        local_proposal_visibility_words.push_back(
-            static_cast<std::int64_t>(dof));
-        local_proposal_visibility_words.push_back(
-            partition.isOwned(dof) ? 1 : 0);
-        local_proposal_visibility_words.push_back(
-            existing_constraints.isConstrained(dof) ? 1 : 0);
-        local_proposal_visibility_words.push_back(
-            (partition.isOwned(dof) ||
-             assembled_candidate_dofs.count(dof) != 0u)
-                ? 1
-                : 0);
-    }
-    } catch (...) {
-        local_proposal_visibility_exception = std::current_exception();
-    }
-    coordinateDistributedLocalFailure(system,
-                                      local_proposal_visibility_exception,
-                                      "proposal_visibility_serialization");
-    GatheredInt64Words gathered_proposal_visibility;
-    if (initialized != 0 && world_size > 1) {
-        gathered_proposal_visibility = allGatherInt64Words(
-            comm,
-            std::span<const std::int64_t>(local_proposal_visibility_words),
-            AggregationProfileExchange::ProposalVisibility);
-    } else {
-        gathered_proposal_visibility.words =
-            local_proposal_visibility_words;
-        gathered_proposal_visibility.counts = {
-            static_cast<int>(local_proposal_visibility_words.size())};
-        gathered_proposal_visibility.displacements = {0};
-    }
-
-    struct ProposalDofVisibility {
-        int rank{-1};
-        bool owned{false};
-        bool preconstrained{false};
-        bool needed{false};
-    };
-    std::map<GlobalIndex, std::vector<ProposalDofVisibility>>
-        proposal_visibility_by_dof;
-    std::exception_ptr local_proposal_visibility_decode_exception;
-    try {
-    for (int rank = 0; rank < world_size; ++rank) {
-        std::size_t position = static_cast<std::size_t>(
-            gathered_proposal_visibility
-                .displacements[static_cast<std::size_t>(rank)]);
-        const auto end = position + static_cast<std::size_t>(
-            gathered_proposal_visibility
-                .counts[static_cast<std::size_t>(rank)]);
-        while (position < end) {
-            if (end - position < 4u) {
-                throw std::runtime_error(
-                    "SmallCutAggregationConstraint: malformed proposal-DOF "
-                    "visibility declaration");
-            }
-            const auto dof = static_cast<GlobalIndex>(
-                gathered_proposal_visibility.words[position++]);
-            ProposalDofVisibility visibility;
-            visibility.rank = rank;
-            visibility.owned =
-                gathered_proposal_visibility.words[position++] != 0;
-            visibility.preconstrained =
-                gathered_proposal_visibility.words[position++] != 0;
-            visibility.needed =
-                gathered_proposal_visibility.words[position++] != 0;
-            proposal_visibility_by_dof[dof].push_back(visibility);
-        }
-    }
-    } catch (...) {
-        local_proposal_visibility_decode_exception =
-            std::current_exception();
-    }
-    coordinateDistributedLocalFailure(
-        system,
-        local_proposal_visibility_decode_exception,
-        "proposal_visibility_decode");
-
-    auto globallyPreconstrained = [&](GlobalIndex dof) {
-        const auto found = proposal_visibility_by_dof.find(dof);
-        return found != proposal_visibility_by_dof.end() &&
+    // A strong constraint on any relevant copy.
+    [[nodiscard]] bool preconstrained(GlobalIndex dof) const
+    {
+        const auto found = by_dof_.find(dof);
+        return found != by_dof_.end() &&
                std::any_of(
                    found->second.begin(), found->second.end(),
                    [](const ProposalDofVisibility& visibility) {
                        return visibility.preconstrained;
                    });
-    };
-    auto relevantOnRank = [&](GlobalIndex dof, int rank) {
-        const auto found = proposal_visibility_by_dof.find(dof);
-        return found != proposal_visibility_by_dof.end() &&
+    }
+
+    [[nodiscard]] bool relevantOnRank(GlobalIndex dof, int rank) const
+    {
+        const auto found = by_dof_.find(dof);
+        return found != by_dof_.end() &&
                std::any_of(
                    found->second.begin(), found->second.end(),
                    [&](const ProposalDofVisibility& visibility) {
                        return visibility.rank == rank;
                    });
-    };
-    auto ownerCount = [&](GlobalIndex dof) {
-        const auto found = proposal_visibility_by_dof.find(dof);
-        return found == proposal_visibility_by_dof.end()
+    }
+
+    [[nodiscard]] std::size_t ownerCount(GlobalIndex dof) const
+    {
+        const auto found = by_dof_.find(dof);
+        return found == by_dof_.end()
                    ? std::size_t{0}
                    : static_cast<std::size_t>(std::count_if(
                          found->second.begin(), found->second.end(),
                          [](const ProposalDofVisibility& visibility) {
                              return visibility.owned;
                          }));
-    };
-    auto ownerRank = [&](GlobalIndex dof) {
-        const auto found = proposal_visibility_by_dof.find(dof);
-        if (found == proposal_visibility_by_dof.end()) {
+    }
+
+    [[nodiscard]] int ownerRank(GlobalIndex dof) const
+    {
+        const auto found = by_dof_.find(dof);
+        if (found == by_dof_.end()) {
             return -1;
         }
         int owner = -1;
@@ -1698,22 +1749,64 @@ resolveDistributedAggregationDeclarations(
             owner = visibility.rank;
         }
         return owner;
-    };
+    }
 
-    std::map<GlobalIndex, ConstraintLine> canonical_lines;
+    // Ranks on which the slave is relevant, in rank order; null when none.
+    [[nodiscard]] const std::vector<ProposalDofVisibility>* slaveVisibility(
+        GlobalIndex dof) const
+    {
+        const auto found = by_dof_.find(dof);
+        return found == by_dof_.end() ? nullptr : &found->second;
+    }
+
+private:
+    const std::map<GlobalIndex, std::vector<ProposalDofVisibility>>& by_dof_;
+};
+
+struct CanonicalSelection {
+    std::map<GlobalIndex, ConstraintLine> canonical_lines{};
     std::map<GlobalIndex, SmallCutAggregationProlongationRow>
-        canonical_row_metadata;
-    std::set<GlobalIndex> expected_slaves;
-    std::ostringstream failures;
-    std::size_t failure_count = 0u;
+        canonical_row_metadata{};
+    std::set<GlobalIndex> expected_slaves{};
+    std::ostringstream failures{};
+    std::size_t failure_count{0u};
     // Globally rooted candidates without any proposal inside the guards
     // (fail closed unless rootless_fallback): not a halo defect.
-    std::ostringstream guard_failures;
-    std::size_t guard_failure_count = 0u;
-    std::vector<std::int64_t> local_visibility_words;
-    std::exception_ptr local_canonical_selection_exception;
+    std::ostringstream guard_failures{};
+    std::size_t guard_failure_count{0u};
+    std::size_t halo_limited_root_choices{0u};
+    std::size_t guard_rootless_candidate_vertices{0u};
+};
+
+/**
+ * Canonical root choice of every communicator candidate from its root
+ * proposals and the proposal-DOF visibility `oracle` (see
+ * GatheredProposalVisibility for the queries).  The choice depends only on
+ * the partition-independent (distance, physical root cell ID) order and on
+ * which assembling ranks carry the masters; failures are counted in the
+ * selection (throwCanonicalSelectionFailures reports them).
+ */
+template <class Oracle>
+void selectCanonicalAggregationLines(
+    std::string_view field_name,
+    const GlobalCandidateMap& global_candidates,
+    const RankedDeclarationMap& declarations_by_dof,
+    const Oracle& oracle,
+    bool slave_all_cut,
+    bool allow_unaggregated,
+    bool rootless_fallback,
+    const GuardRootlessLogger& log_guard_rootless,
+    CanonicalSelection& selection)
+{
+    static_cast<void>(field_name);
+    auto& canonical_lines = selection.canonical_lines;
+    auto& canonical_row_metadata = selection.canonical_row_metadata;
+    auto& expected_slaves = selection.expected_slaves;
+    auto& failures = selection.failures;
+    auto& failure_count = selection.failure_count;
+    auto& guard_failures = selection.guard_failures;
+    auto& guard_failure_count = selection.guard_failure_count;
     constexpr double line_tolerance = 1.0e-12;
-    try {
     for (const auto& [dof, support] : global_candidates) {
         const auto candidate_dof = dof;
         const auto* candidate_components =
@@ -1755,7 +1848,7 @@ resolveDistributedAggregationDeclarations(
         const bool all_components_preconstrained = std::all_of(
             support.component_dofs.begin(), support.component_dofs.end(),
             [&](GlobalIndex slave) {
-                return globallyPreconstrained(slave);
+                return oracle.preconstrained(slave);
             });
         if (all_components_preconstrained) {
             expected_slaves.insert(support.component_dofs.begin(),
@@ -1816,14 +1909,11 @@ resolveDistributedAggregationDeclarations(
                     continue;
                 }
                 // Opt-in fallback: rootless-island policy below (D33).
-                ++result.canonical_guard_rootless_candidate_vertices;
-                logGuardRootlessCandidate(
-                    system,
-                    field_name,
+                ++selection.guard_rootless_candidate_vertices;
+                log_guard_rootless(
                     "proposal_guard",
                     dof,
-                    support.coordinates,
-                    support.feature_cells,
+                    support,
                     "detail=no_root_proposal_inside_guards");
             }
             if (slave_all_cut && support.has_full_support) {
@@ -1872,7 +1962,7 @@ resolveDistributedAggregationDeclarations(
             const auto reason_count_before = first_unavailable_reason.size();
             std::string proposal_reason;
             for (const auto slave : support.component_dofs) {
-                if (globallyPreconstrained(slave)) {
+                if (oracle.preconstrained(slave)) {
                     continue;
                 }
                 const auto line_it = std::find_if(
@@ -1891,7 +1981,7 @@ resolveDistributedAggregationDeclarations(
                 }
                 for (const auto& entry : line_it->entries) {
                     const auto master_owner_count =
-                        ownerCount(entry.master_dof);
+                        oracle.ownerCount(entry.master_dof);
                     if (master_owner_count == 1u) {
                         continue;
                     }
@@ -1908,9 +1998,9 @@ resolveDistributedAggregationDeclarations(
                 if (!available) {
                     break;
                 }
-                const auto slave_visibility =
-                    proposal_visibility_by_dof.find(slave);
-                if (slave_visibility == proposal_visibility_by_dof.end()) {
+                const auto* slave_visibility =
+                    oracle.slaveVisibility(slave);
+                if (slave_visibility == nullptr) {
                     available = false;
                     if (first_unavailable_reason.empty()) {
                         first_unavailable_reason =
@@ -1923,14 +2013,14 @@ resolveDistributedAggregationDeclarations(
                 // halo carry no line and impose nothing. (The legacy
                 // fail-open debug mode keeps its stricter all-relevant-ranks
                 // rule.)
-                for (const auto& visibility : slave_visibility->second) {
+                for (const auto& visibility : *slave_visibility) {
                     if (!allow_unaggregated && !visibility.needed) {
                         continue;
                     }
                     const bool masters_visible = std::all_of(
                         line_it->entries.begin(), line_it->entries.end(),
                         [&](const auto& entry) {
-                            return relevantOnRank(entry.master_dof,
+                            return oracle.relevantOnRank(entry.master_dof,
                                                   visibility.rank);
                         });
                     if (!masters_visible) {
@@ -2019,7 +2109,7 @@ resolveDistributedAggregationDeclarations(
                                     available_rooted.front()->declaration),
                                 available_rooted.front()->rank);
                         })) {
-            ++result.canonical_halo_limited_root_choices;
+            ++selection.halo_limited_root_choices;
         }
         const auto* chosen_provider = available_rooted.front();
         const auto& chosen = chosen_provider->declaration;
@@ -2088,33 +2178,1144 @@ resolveDistributedAggregationDeclarations(
         }
     }
 
+}
+
+void throwCanonicalSelectionFailures(std::string_view field_name,
+                                     const CanonicalSelection& selection)
+{
+    if (selection.failure_count > 0u) {
+        throw InsufficientGhostHaloError(
+            "SmallCutAggregationConstraint: diagnostic="
+            "incomplete_distributed_aggregation_halo field='" +
+            std::string(field_name) + "' inconsistent_candidate_dofs=" +
+            std::to_string(selection.failure_count) + selection.failures.str() +
+            " Communicator-global candidate/root construction produced "
+            "inconsistent component/weight data or no proposed root whose "
+            "masters are relevant on every slave-relevant rank; refusing "
+            "owner-wins constraint resolution." +
+            (selection.guard_failure_count > 0u
+                 ? " Also " + std::to_string(selection.guard_failure_count) +
+                       " candidate(s) without a root proposal inside the "
+                       "guards:" + selection.guard_failures.str()
+                 : std::string{}));
+    }
+    if (selection.guard_failure_count > 0u) {
+        throw std::runtime_error(
+            "SmallCutAggregationConstraint: diagnostic="
+            "aggregation_no_root_inside_guards field='" +
+            std::string(field_name) + "' candidates=" +
+            std::to_string(selection.guard_failure_count) + selection.guard_failures.str() +
+            " Every root proposal of these globally rooted candidates fails "
+            "the aggregation guards or the reference-coordinate inversion "
+            "(the aggregation_root_proposal_outcomes lines name each "
+            "proposal and why it failed): " + kGuardRootlessOptInHint + ".");
+    }
+}
+
+struct CanonicalLineVisibility {
+    int rank{-1};
+    bool owned{false};
+    bool preconstrained{false};
+    bool needed{false};
+    std::vector<GlobalIndex> missing_masters{};
+};
+
+/**
+ * Visibility of the canonical slaves gathered from every rank on which they
+ * are locally relevant, with the masters of the canonical line that rank
+ * lacks.
+ */
+class GatheredLineVisibility {
+public:
+    explicit GatheredLineVisibility(
+        const std::map<GlobalIndex, std::vector<CanonicalLineVisibility>>&
+            by_slave)
+        : by_slave_(by_slave)
+    {
+    }
+
+    [[nodiscard]] bool anyPreconstrained(GlobalIndex slave) const
+    {
+        const auto found = by_slave_.find(slave);
+        return found != by_slave_.end() &&
+               std::any_of(found->second.begin(), found->second.end(),
+                           [](const CanonicalLineVisibility& visibility) {
+                               return visibility.preconstrained;
+                           });
+    }
+
+    // The first rank (in rank order) that assembles with the slave and lacks
+    // a master of its canonical line.
+    [[nodiscard]] std::optional<CanonicalLineVisibility>
+    firstNeededMissingMasters(GlobalIndex slave, const ConstraintLine&) const
+    {
+        const auto found = by_slave_.find(slave);
+        if (found == by_slave_.end()) {
+            return std::nullopt;
+        }
+        for (const auto& visibility : found->second) {
+            if (visibility.needed && !visibility.missing_masters.empty()) {
+                return visibility;
+            }
+        }
+        return std::nullopt;
+    }
+
+private:
+    const std::map<GlobalIndex, std::vector<CanonicalLineVisibility>>&
+        by_slave_;
+};
+
+/**
+ * Final validation of the canonical lines before installation: every slave
+ * has exactly one owner, every non-suppressed slave has its line, every
+ * master has exactly one owner, and every rank that assembles with a slave
+ * carries all of its masters.  Returns the failure count (with the first
+ * four reasons in `failures`); when it is zero, fills the canonical rows,
+ * slaves, counts and the locally relevant lines of `result`.
+ */
+template <class Partition, class Oracle, class LineOracle>
+[[nodiscard]] std::size_t validateCanonicalAggregationLines(
+    const Partition& partition,
+    const Oracle& oracle,
+    const LineOracle& line_visibility,
+    CanonicalSelection& selection,
+    DistributedAggregationResult& result,
+    std::ostringstream& failures)
+{
+    auto& canonical_lines = selection.canonical_lines;
+    auto& canonical_row_metadata = selection.canonical_row_metadata;
+    const auto& expected_slaves = selection.expected_slaves;
+    std::size_t failure_count = 0u;
+    std::set<GlobalIndex> globally_preconstrained;
+    for (const auto& [slave, row] : canonical_row_metadata) {
+        static_cast<void>(row);
+        const auto owner_count = oracle.ownerCount(slave);
+        if (owner_count != 1u) {
+            ++failure_count;
+            if (failure_count <= 4u) {
+                failures << " dof=" << slave
+                         << " reason=canonical_slave_owner_count:"
+                         << owner_count << ";";
+            }
+        }
+    }
+    for (const auto slave : expected_slaves) {
+        const bool any_preconstrained =
+            line_visibility.anyPreconstrained(slave);
+        if (any_preconstrained) {
+            globally_preconstrained.insert(slave);
+            continue;
+        }
+        const auto line_it = canonical_lines.find(slave);
+        if (line_it == canonical_lines.end()) {
+            ++failure_count;
+            if (failure_count <= 4u) {
+                failures << " dof=" << slave
+                         << " reason=no_communicator_global_root_line;";
+            }
+            continue;
+        }
+        bool master_owner_failure = false;
+        for (const auto& entry : line_it->second.entries) {
+            const auto master_owner_count = oracle.ownerCount(entry.master_dof);
+            if (master_owner_count == 1u) {
+                continue;
+            }
+            ++failure_count;
+            master_owner_failure = true;
+            if (failure_count <= 4u) {
+                failures << " dof=" << slave
+                         << " reason=canonical_master_owner_count:"
+                         << master_owner_count
+                         << " master=" << entry.master_dof << ";";
+            }
+            break;
+        }
+        if (master_owner_failure) {
+            continue;
+        }
+        // A rank that assembles with the line must carry every master.
+        if (const auto visibility = line_visibility.firstNeededMissingMasters(
+                slave, line_it->second)) {
+            ++failure_count;
+            if (failure_count <= 4u) {
+                failures << " dof=" << slave
+                         << " reason=canonical_master_not_relevant rank="
+                         << visibility->rank << " masters=";
+                for (const auto master : visibility->missing_masters) {
+                    failures << master << ",";
+                }
+                failures << ";";
+            }
+        }
+    }
+    if (failure_count > 0u) {
+        return failure_count;
+    }
+
+    result.canonical_strong_suppressed_dofs =
+        globally_preconstrained.size();
+    result.canonical_rows.reserve(canonical_row_metadata.size());
+    for (auto& [slave, row] : canonical_row_metadata) {
+        row.slave_owner_rank = oracle.ownerRank(slave);
+        if (globally_preconstrained.count(slave) != 0u) {
+            row.preconstrained_at_apply = true;
+        }
+        result.canonical_rows.push_back(std::move(row));
+    }
+    for (const auto& [slave, line] : canonical_lines) {
+        if (globally_preconstrained.count(slave) != 0u) {
+            continue;
+        }
+        result.canonical_slaves.push_back(slave);
+        if (line.entries.empty()) {
+            ++result.canonical_owned_pinned_dofs;
+        } else {
+            ++result.canonical_owned_aggregate_dofs;
+        }
+        // Install where the slave is relevant and every master is present;
+        // the validation above proved that no rank assembling with the line
+        // lacks a master.
+        if (partition.isRelevant(slave) &&
+            std::all_of(line.entries.begin(), line.entries.end(),
+                        [&](const auto& entry) {
+                            return partition.isRelevant(entry.master_dof);
+                        })) {
+            result.relevant_lines.push_back(line);
+        }
+    }
+    return 0u;
+}
+
+void throwCanonicalValidationFailures(std::string_view field_name,
+                                      std::size_t failure_count,
+                                      const std::ostringstream& failures)
+{
     if (failure_count > 0u) {
         throw InsufficientGhostHaloError(
             "SmallCutAggregationConstraint: diagnostic="
             "incomplete_distributed_aggregation_halo field='" +
             std::string(field_name) + "' inconsistent_candidate_dofs=" +
             std::to_string(failure_count) + failures.str() +
-            " Communicator-global candidate/root construction produced "
-            "inconsistent component/weight data or no proposed root whose "
-            "masters are relevant on every slave-relevant rank; refusing "
-            "owner-wins constraint resolution." +
-            (guard_failure_count > 0u
-                 ? " Also " + std::to_string(guard_failure_count) +
-                       " candidate(s) without a root proposal inside the "
-                       "guards:" + guard_failures.str()
-                 : std::string{}));
+            " Increase mesh/DOF overlap (<Ghost_layers>) until every rank "
+            "that assembles with a canonical slave carries all of its "
+            "nonzero aggregate masters; refusing owner-wins constraint "
+            "resolution.");
     }
-    if (guard_failure_count > 0u) {
-        throw std::runtime_error(
-            "SmallCutAggregationConstraint: diagnostic="
-            "aggregation_no_root_inside_guards field='" +
-            std::string(field_name) + "' candidates=" +
-            std::to_string(guard_failure_count) + guard_failures.str() +
-            " Every root proposal of these globally rooted candidates fails "
-            "the aggregation guards or the reference-coordinate inversion "
-            "(the aggregation_root_proposal_outcomes lines name each "
-            "proposal and why it failed): " + kGuardRootlessOptInHint + ".");
+}
+
+// Slaves that share a cell with an owned row but whose masters lie outside
+// this rank's halo: the assembling ranks condense them correctly (the
+// residual is unaffected), but the owned rows cannot store the condensed
+// master columns, so the Jacobian loses those entries.  Communicator sum
+// (collective unless `comm` is MPI_COMM_NULL).
+template <class Partition>
+[[nodiscard]] std::size_t countRowCoupledSlavesBeyondHalo(
+    const std::set<GlobalIndex>& row_coupled_candidate_dofs,
+    const std::map<GlobalIndex, ConstraintLine>& canonical_lines,
+    const Partition& partition,
+    MPI_Comm comm)
+{
+    long long local_row_coupled_beyond_halo = 0;
+    for (const auto dof : row_coupled_candidate_dofs) {
+        const auto line_it = canonical_lines.find(dof);
+        if (line_it == canonical_lines.end()) {
+            continue;
+        }
+        if (!std::all_of(line_it->second.entries.begin(),
+                         line_it->second.entries.end(),
+                         [&](const ConstraintEntry& entry) {
+                             return partition.isRelevant(entry.master_dof);
+                         })) {
+            ++local_row_coupled_beyond_halo;
+        }
     }
+    long long row_coupled_beyond_halo = local_row_coupled_beyond_halo;
+    if (comm != MPI_COMM_NULL) {
+        MPI_Allreduce(&local_row_coupled_beyond_halo,
+                      &row_coupled_beyond_halo,
+                      1,
+                      MPI_LONG_LONG,
+                      MPI_SUM,
+                      comm);
+    }
+    return static_cast<std::size_t>(row_coupled_beyond_halo);
+}
+
+// ---------------------------------------------------------------------------
+// Owner-sourced refresh (see SmallCutAggregationConstraint::apply).
+//
+// The communicator-global refresh gathers every classified cell from every
+// rank that stores it, every owned cell's face signatures, and every root
+// proposal from every rank that stores the root, so each rank receives data
+// that grows with the mesh and with the rank count.  The owner-sourced
+// refresh computes the same canonical ledger from one record per entity:
+//  - a census routed to a home rank per cell (cell ID modulo the rank count)
+//    proves that every stored cell has exactly one owner, that its owner
+//    classified it and that every rank classifying it agrees on whether it
+//    is active; it also yields the canonical measure provider (lowest
+//    classifying rank) and the holders (ranks storing the cell) of every
+//    active cell;
+//  - each owner matches the faces of its cells against its local cells; a
+//    census of the faces without a local neighbor and of the faces shared
+//    with another rank's cell proves that no owner misses a neighbor;
+//  - the owners of the active cells all-gather one record per active cell
+//    (class, measure, field DOFs in node order, a digest of the node
+//    coordinates and the face-neighbor IDs); every rank checks its own
+//    classification, DOFs and coordinates of every stored active cell
+//    against it, which makes every copy of a cell interchangeable;
+//  - candidate facts are merged at a home rank per candidate DOF in source
+//    rank order, as the global merge does, and the merged candidates are
+//    all-gathered;
+//  - each root cell's proposals are built once, by the owner, and stand for
+//    the identical proposals of every holder: the provider rank is the
+//    lowest holder rank and the communicator counters are weighted by the
+//    holder count; only each candidate's preferred valid proposal is
+//    all-gathered with its lines;
+//  - the visibility queries of the canonical selection are answered from
+//    owner, preconstrained, assembling-rank and missing-master reports.
+// Any inconsistency, failure or debug option returns to the global refresh,
+// which then reports exactly what it always reported.
+
+[[nodiscard]] std::uint64_t ownerSourcedMix(std::uint64_t digest,
+                                            std::uint64_t word) noexcept
+{
+    word += 0x9e3779b97f4a7c15ull;
+    word = (word ^ (word >> 30)) * 0xbf58476d1ce4e5b9ull;
+    word = (word ^ (word >> 27)) * 0x94d049bb133111ebull;
+    word ^= word >> 31;
+    digest ^= word;
+    digest = std::rotl(digest, 23) * 0x9e3779b185ebca87ull;
+    return digest;
+}
+
+[[nodiscard]] std::uint64_t ownerSourcedKeyHash(
+    std::span<const GlobalIndex> key) noexcept
+{
+    std::uint64_t digest = 0x5356534b45594831ull;
+    digest = ownerSourcedMix(digest, static_cast<std::uint64_t>(key.size()));
+    for (const auto word : key) {
+        digest = ownerSourcedMix(digest, static_cast<std::uint64_t>(word));
+    }
+    return digest;
+}
+
+[[nodiscard]] int ownerSourcedHome(std::uint64_t key, int world_size) noexcept
+{
+    return static_cast<int>(key % static_cast<std::uint64_t>(world_size));
+}
+
+// Cell census flags.
+constexpr std::int64_t kCellCensusOwned = 1;
+constexpr std::int64_t kCellCensusClassified = 2;
+constexpr std::int64_t kCellCensusActive = 4;
+
+struct CellCensusReply {
+    int provider_rank{-1};
+    int holder_count{0};
+    int min_holder_rank{-1};
+};
+
+/**
+ * Home side of the cell census.  `received` holds [cell ID, flags] pairs per
+ * source rank.  Returns false when a stored cell does not have exactly one
+ * owner, when its owner did not classify it, or when the classifying ranks
+ * disagree on whether it is active.  For every active cell, appends
+ * [cell ID, provider rank, holder count, lowest holder rank] to the reply
+ * for its owner.
+ */
+[[nodiscard]] bool resolveCellCensus(
+    const GatheredInt64Words& received,
+    int world_size,
+    std::vector<std::vector<std::int64_t>>& replies)
+{
+    struct Entry {
+        GlobalIndex gid{INVALID_GLOBAL_INDEX};
+        int source{-1};
+        std::int64_t flags{0};
+    };
+    std::vector<Entry> entries;
+    entries.reserve(received.words.size() / 2u);
+    for (int rank = 0; rank < world_size; ++rank) {
+        const auto begin = static_cast<std::size_t>(
+            received.displacements[static_cast<std::size_t>(rank)]);
+        const auto count = static_cast<std::size_t>(
+            received.counts[static_cast<std::size_t>(rank)]);
+        if (count % 2u != 0u) {
+            return false;
+        }
+        for (std::size_t i = 0u; i < count; i += 2u) {
+            entries.push_back(Entry{
+                .gid = static_cast<GlobalIndex>(received.words[begin + i]),
+                .source = rank,
+                .flags = received.words[begin + i + 1u]});
+        }
+    }
+    std::stable_sort(entries.begin(), entries.end(),
+                     [](const Entry& lhs, const Entry& rhs) {
+                         return lhs.gid < rhs.gid;
+                     });
+    replies.assign(static_cast<std::size_t>(world_size), {});
+    for (std::size_t first = 0u; first < entries.size();) {
+        std::size_t last = first + 1u;
+        while (last < entries.size() && entries[last].gid == entries[first].gid) {
+            ++last;
+        }
+        int owner = -1;
+        std::size_t owners = 0u;
+        bool owner_classified = false;
+        int provider = -1;
+        int classified_active = -1;
+        for (std::size_t k = first; k < last; ++k) {
+            const auto& entry = entries[k];
+            if (entry.gid < 0 || entry.flags < 0 || entry.flags > 7 ||
+                (k > first && entry.source == entries[k - 1u].source)) {
+                return false;
+            }
+            const bool classified = (entry.flags & kCellCensusClassified) != 0;
+            const int active = (entry.flags & kCellCensusActive) != 0 ? 1 : 0;
+            if ((entry.flags & kCellCensusOwned) != 0) {
+                ++owners;
+                owner = entry.source;
+                owner_classified = classified;
+            }
+            if (classified) {
+                if (provider < 0) {
+                    provider = entry.source;
+                }
+                if (classified_active < 0) {
+                    classified_active = active;
+                } else if (classified_active != active) {
+                    return false;
+                }
+            } else if (active != 0) {
+                return false;
+            }
+        }
+        if (owners != 1u || !owner_classified) {
+            return false;
+        }
+        if (classified_active == 1) {
+            auto& reply = replies[static_cast<std::size_t>(owner)];
+            reply.push_back(static_cast<std::int64_t>(entries[first].gid));
+            reply.push_back(provider);
+            reply.push_back(static_cast<std::int64_t>(last - first));
+            reply.push_back(entries[first].source);
+        }
+        first = last;
+    }
+    return true;
+}
+
+// Face census kinds.
+constexpr std::int64_t kFaceCensusOpen = 1;
+constexpr std::int64_t kFaceCensusShared = 2;
+
+/**
+ * Home side of the face census.  `received` holds [face hash, kind] pairs:
+ * an owner reports each face of an owned cell that has no local neighbor
+ * (open) and each face it shares with a local cell owned by another rank
+ * (shared).  A domain-boundary face is reported once as open; a face
+ * between two owners twice as shared, by both owners.  Anything else means
+ * that an owner misses a neighbor (or a face is non-manifold, or two
+ * signatures collide) and returns false.
+ */
+[[nodiscard]] bool resolveFaceCensus(const GatheredInt64Words& received,
+                                     int world_size)
+{
+    struct Entry {
+        std::uint64_t hash{0u};
+        int source{-1};
+        std::int64_t kind{0};
+    };
+    std::vector<Entry> entries;
+    entries.reserve(received.words.size() / 2u);
+    for (int rank = 0; rank < world_size; ++rank) {
+        const auto begin = static_cast<std::size_t>(
+            received.displacements[static_cast<std::size_t>(rank)]);
+        const auto count = static_cast<std::size_t>(
+            received.counts[static_cast<std::size_t>(rank)]);
+        if (count % 2u != 0u) {
+            return false;
+        }
+        for (std::size_t i = 0u; i < count; i += 2u) {
+            entries.push_back(Entry{
+                .hash = static_cast<std::uint64_t>(received.words[begin + i]),
+                .source = rank,
+                .kind = received.words[begin + i + 1u]});
+        }
+    }
+    std::stable_sort(entries.begin(), entries.end(),
+                     [](const Entry& lhs, const Entry& rhs) {
+                         return lhs.hash < rhs.hash;
+                     });
+    for (std::size_t first = 0u; first < entries.size();) {
+        std::size_t last = first + 1u;
+        while (last < entries.size() &&
+               entries[last].hash == entries[first].hash) {
+            ++last;
+        }
+        const auto count = last - first;
+        const bool single_open =
+            count == 1u && entries[first].kind == kFaceCensusOpen;
+        const bool shared_pair =
+            count == 2u && entries[first].kind == kFaceCensusShared &&
+            entries[first + 1u].kind == kFaceCensusShared &&
+            entries[first].source != entries[first + 1u].source;
+        if (!single_open && !shared_pair) {
+            return false;
+        }
+        first = last;
+    }
+    return true;
+}
+
+/**
+ * One owner-sourced active cell: its class and measure as its owner
+ * classified it, its field DOFs in node order (node-major over the field
+ * nodes), a digest of its cell type and node coordinates, and the IDs of all
+ * its face neighbors (active or not).
+ */
+struct OwnerSourcedActiveCell {
+    GlobalIndex gid{INVALID_GLOBAL_INDEX};
+    int owner_rank{-1};
+    CellClass klass{};
+    int provider_rank{-1};
+    int holder_count{0};
+    int min_holder_rank{-1};
+    std::size_t rule_count{0u};
+    Real volume{0.0};
+    std::vector<std::uint64_t> rule_ids{};
+    std::vector<GlobalIndex> node_dofs{};
+    std::uint64_t geometry_digest{0u};
+    std::vector<GlobalIndex> neighbor_gids{};
+    CellKey key{};
+};
+
+// [gid, flags, provider, holders, lowest holder, rule count, volume bits,
+//  rule IDs..., n node DOFs, node DOFs..., geometry digest, n neighbors,
+//  neighbor IDs...]
+void appendOwnerSourcedActiveCell(std::vector<std::int64_t>& words,
+                                  const OwnerSourcedActiveCell& cell)
+{
+    words.push_back(static_cast<std::int64_t>(cell.gid));
+    words.push_back((cell.klass.full_active ? 1 : 0) |
+                    (cell.klass.cut ? 2 : 0));
+    words.push_back(cell.provider_rank);
+    words.push_back(cell.holder_count);
+    words.push_back(cell.min_holder_rank);
+    words.push_back(static_cast<std::int64_t>(cell.rule_count));
+    words.push_back(std::bit_cast<std::int64_t>(
+        static_cast<double>(cell.volume)));
+    for (const auto id : cell.rule_ids) {
+        words.push_back(std::bit_cast<std::int64_t>(id));
+    }
+    words.push_back(static_cast<std::int64_t>(cell.node_dofs.size()));
+    for (const auto dof : cell.node_dofs) {
+        words.push_back(static_cast<std::int64_t>(dof));
+    }
+    words.push_back(std::bit_cast<std::int64_t>(cell.geometry_digest));
+    words.push_back(static_cast<std::int64_t>(cell.neighbor_gids.size()));
+    for (const auto gid : cell.neighbor_gids) {
+        words.push_back(static_cast<std::int64_t>(gid));
+    }
+}
+
+/**
+ * Decodes the all-gathered owner-sourced active cells, sorted by cell ID.
+ * Returns false on a malformed record or a cell declared by two owners.
+ */
+[[nodiscard]] bool decodeOwnerSourcedActiveCells(
+    const GatheredInt64Words& gathered,
+    int world_size,
+    std::vector<OwnerSourcedActiveCell>& cells)
+{
+    cells.clear();
+    for (int rank = 0; rank < world_size; ++rank) {
+        std::size_t position = static_cast<std::size_t>(
+            gathered.displacements[static_cast<std::size_t>(rank)]);
+        const auto end = position + static_cast<std::size_t>(
+            gathered.counts[static_cast<std::size_t>(rank)]);
+        const auto take = [&](std::int64_t& word) {
+            if (position >= end) {
+                return false;
+            }
+            word = gathered.words[position++];
+            return true;
+        };
+        while (position < end) {
+            OwnerSourcedActiveCell cell;
+            cell.owner_rank = rank;
+            std::int64_t gid = 0, flags = 0, provider = 0, holders = 0,
+                         min_holder = 0, rule_count = 0, volume_bits = 0;
+            if (!take(gid) || !take(flags) || !take(provider) ||
+                !take(holders) || !take(min_holder) || !take(rule_count) ||
+                !take(volume_bits)) {
+                return false;
+            }
+            if (gid < 0 || (flags != 1 && flags != 2) || provider < 0 ||
+                provider >= world_size || holders <= 0 ||
+                holders > world_size || min_holder < 0 ||
+                min_holder >= world_size || rule_count <= 0 ||
+                static_cast<std::uint64_t>(rule_count) >
+                    static_cast<std::uint64_t>(end - position)) {
+                return false;
+            }
+            cell.gid = static_cast<GlobalIndex>(gid);
+            cell.klass.full_active = flags == 1;
+            cell.klass.cut = flags == 2;
+            cell.provider_rank = static_cast<int>(provider);
+            cell.holder_count = static_cast<int>(holders);
+            cell.min_holder_rank = static_cast<int>(min_holder);
+            cell.rule_count = static_cast<std::size_t>(rule_count);
+            cell.volume = static_cast<Real>(std::bit_cast<double>(volume_bits));
+            cell.rule_ids.reserve(cell.rule_count);
+            for (std::int64_t i = 0; i < rule_count; ++i) {
+                cell.rule_ids.push_back(
+                    std::bit_cast<std::uint64_t>(gathered.words[position++]));
+            }
+            std::int64_t n_dofs = 0;
+            if (!take(n_dofs) || n_dofs <= 0 ||
+                static_cast<std::uint64_t>(n_dofs) >
+                    static_cast<std::uint64_t>(end - position)) {
+                return false;
+            }
+            cell.node_dofs.reserve(static_cast<std::size_t>(n_dofs));
+            for (std::int64_t i = 0; i < n_dofs; ++i) {
+                cell.node_dofs.push_back(
+                    static_cast<GlobalIndex>(gathered.words[position++]));
+            }
+            std::int64_t digest = 0, n_neighbors = 0;
+            if (!take(digest) || !take(n_neighbors) || n_neighbors < 0 ||
+                static_cast<std::uint64_t>(n_neighbors) >
+                    static_cast<std::uint64_t>(end - position)) {
+                return false;
+            }
+            cell.geometry_digest = std::bit_cast<std::uint64_t>(digest);
+            cell.neighbor_gids.reserve(static_cast<std::size_t>(n_neighbors));
+            for (std::int64_t i = 0; i < n_neighbors; ++i) {
+                cell.neighbor_gids.push_back(
+                    static_cast<GlobalIndex>(gathered.words[position++]));
+            }
+            cell.key = cell.node_dofs;
+            std::sort(cell.key.begin(), cell.key.end());
+            cells.push_back(std::move(cell));
+        }
+    }
+    std::sort(cells.begin(), cells.end(),
+              [](const OwnerSourcedActiveCell& lhs,
+                 const OwnerSourcedActiveCell& rhs) {
+                  return lhs.gid < rhs.gid;
+              });
+    return std::adjacent_find(cells.begin(), cells.end(),
+                              [](const OwnerSourcedActiveCell& lhs,
+                                 const OwnerSourcedActiveCell& rhs) {
+                                  return lhs.gid == rhs.gid;
+                              }) == cells.end();
+}
+
+[[nodiscard]] const OwnerSourcedActiveCell* findOwnerSourcedActiveCell(
+    const std::vector<OwnerSourcedActiveCell>& cells,
+    GlobalIndex gid)
+{
+    const auto it = std::lower_bound(
+        cells.begin(), cells.end(), gid,
+        [](const OwnerSourcedActiveCell& cell, GlobalIndex key) {
+            return cell.gid < key;
+        });
+    return it != cells.end() && it->gid == gid ? &*it : nullptr;
+}
+
+// Candidate census flags (LocalCandidateSupport facts).
+constexpr std::int64_t kCandidateCensusCut = 1;
+constexpr std::int64_t kCandidateCensusFull = 2;
+constexpr std::int64_t kCandidateCensusExcluded = 4;
+// The record carries only the flags: the vertex touches a full-active cell
+// or is excluded on its source rank, so it is no candidate.
+constexpr std::int64_t kCandidateCensusMarker = 8;
+
+/**
+ * Home side of the candidate census: merges the facts of every candidate
+ * DOF in source-rank order exactly like resolveGlobalCandidateSupport
+ * (coordinates and component DOFs from the lowest rank, flags OR-combined)
+ * and appends [DOF, n components, x, y, z, components...] for every
+ * candidate to `merged`.  Returns false when two full records disagree or a
+ * record is malformed.
+ */
+[[nodiscard]] bool mergeCandidateCensus(const GatheredInt64Words& received,
+                                        int world_size,
+                                        std::vector<std::int64_t>& merged)
+{
+    struct Entry {
+        GlobalIndex dof{INVALID_GLOBAL_INDEX};
+        std::int64_t flags{0};
+        std::size_t position{0u};
+        std::size_t component_count{0u};
+    };
+    std::vector<Entry> entries;
+    for (int rank = 0; rank < world_size; ++rank) {
+        std::size_t position = static_cast<std::size_t>(
+            received.displacements[static_cast<std::size_t>(rank)]);
+        const auto end = position + static_cast<std::size_t>(
+            received.counts[static_cast<std::size_t>(rank)]);
+        while (position < end) {
+            if (end - position < 2u) {
+                return false;
+            }
+            Entry entry;
+            entry.dof = static_cast<GlobalIndex>(received.words[position++]);
+            entry.flags = received.words[position++];
+            if (entry.dof < 0 || entry.flags < 0 || entry.flags > 15) {
+                return false;
+            }
+            if ((entry.flags & kCandidateCensusMarker) == 0) {
+                if (end - position < 4u) {
+                    return false;
+                }
+                const auto count = received.words[position++];
+                if (count <= 0 ||
+                    static_cast<std::uint64_t>(count) + 3u >
+                        static_cast<std::uint64_t>(end - position)) {
+                    return false;
+                }
+                entry.component_count = static_cast<std::size_t>(count);
+                entry.position = position;
+                position += 3u + entry.component_count;
+            }
+            entries.push_back(entry);
+        }
+    }
+    std::stable_sort(entries.begin(), entries.end(),
+                     [](const Entry& lhs, const Entry& rhs) {
+                         return lhs.dof < rhs.dof;
+                     });
+    for (std::size_t first = 0u; first < entries.size();) {
+        std::size_t last = first + 1u;
+        while (last < entries.size() && entries[last].dof == entries[first].dof) {
+            ++last;
+        }
+        std::int64_t flags = 0;
+        const Entry* canonical = nullptr;
+        for (std::size_t k = first; k < last; ++k) {
+            const auto& entry = entries[k];
+            flags |= entry.flags & (kCandidateCensusCut | kCandidateCensusFull |
+                                    kCandidateCensusExcluded);
+            if ((entry.flags & kCandidateCensusMarker) != 0) {
+                continue;
+            }
+            if (canonical == nullptr) {
+                canonical = &entry;
+                continue;
+            }
+            if (entry.component_count != canonical->component_count ||
+                !std::equal(
+                    received.words.begin() +
+                        static_cast<std::ptrdiff_t>(entry.position + 3u),
+                    received.words.begin() +
+                        static_cast<std::ptrdiff_t>(entry.position + 3u +
+                                                    entry.component_count),
+                    received.words.begin() +
+                        static_cast<std::ptrdiff_t>(canonical->position + 3u))) {
+                return false;
+            }
+            for (std::size_t d = 0u; d < 3u; ++d) {
+                const auto lhs = static_cast<Real>(std::bit_cast<double>(
+                    received.words[canonical->position + d]));
+                const auto rhs = static_cast<Real>(std::bit_cast<double>(
+                    received.words[entry.position + d]));
+                const auto scale =
+                    std::max({Real{1}, std::abs(lhs), std::abs(rhs)});
+                if (std::abs(lhs - rhs) > Real{1e-12} * scale) {
+                    return false;
+                }
+            }
+        }
+        const bool candidate = (flags & kCandidateCensusCut) != 0 &&
+                               (flags & kCandidateCensusExcluded) == 0 &&
+                               (flags & kCandidateCensusFull) == 0;
+        if (candidate) {
+            if (canonical == nullptr) {
+                return false;
+            }
+            merged.push_back(static_cast<std::int64_t>(entries[first].dof));
+            merged.push_back(
+                static_cast<std::int64_t>(canonical->component_count));
+            for (std::size_t w = 0u; w < 3u + canonical->component_count; ++w) {
+                merged.push_back(received.words[canonical->position + w]);
+            }
+        }
+        first = last;
+    }
+    return true;
+}
+
+/**
+ * Decodes the all-gathered merged candidates (mergeCandidateCensus) into the
+ * communicator candidate map.  Returns false on a malformed or repeated
+ * record.
+ */
+[[nodiscard]] bool decodeMergedCandidates(const GatheredInt64Words& gathered,
+                                          GlobalCandidateMap& candidates)
+{
+    candidates.clear();
+    std::size_t position = 0u;
+    const auto end = gathered.words.size();
+    while (position < end) {
+        if (end - position < 5u) {
+            return false;
+        }
+        const auto dof = static_cast<GlobalIndex>(gathered.words[position++]);
+        const auto count = gathered.words[position++];
+        if (dof < 0 || count <= 0 ||
+            static_cast<std::uint64_t>(count) + 3u >
+                static_cast<std::uint64_t>(end - position)) {
+            return false;
+        }
+        GlobalCandidateSupport support;
+        for (auto& coordinate : support.coordinates) {
+            coordinate = static_cast<Real>(
+                std::bit_cast<double>(gathered.words[position++]));
+        }
+        support.component_dofs.reserve(static_cast<std::size_t>(count));
+        for (std::int64_t i = 0; i < count; ++i) {
+            support.component_dofs.push_back(
+                static_cast<GlobalIndex>(gathered.words[position++]));
+        }
+        if (support.component_dofs.front() != dof ||
+            !candidates.emplace(dof, std::move(support)).second) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Root proposal outcome flags (one record per owner-built attempt).
+constexpr std::int64_t kProposalEmitted = 1;
+constexpr std::int64_t kProposalDropped = 2;
+constexpr std::int64_t kProposalInversionFailed = 4;
+constexpr std::int64_t kProposalRoundOff = 8;
+constexpr std::int64_t kProposalExtrapolationRejected = 16;
+constexpr std::int64_t kProposalEmptyLine = 32;
+constexpr std::int64_t kProposalLineGuardRejected = 64;
+
+/**
+ * Proposal-DOF visibility of the owner-sourced refresh, built from reports
+ * of the ranks that own a DOF, that hold it strongly constrained, that
+ * assemble with a candidate DOF, and of the preferred-proposal masters that
+ * such an assembling rank lacks.  The canonical selection asks only for the
+ * assembling ranks of a slave and for masters of the preferred proposal on
+ * those ranks, which these reports answer exactly.
+ */
+class OwnerSourcedVisibility {
+public:
+    std::map<GlobalIndex, std::vector<int>> owners{};
+    std::set<GlobalIndex> preconstrained_dofs{};
+    std::map<GlobalIndex, std::vector<ProposalDofVisibility>> assembling{};
+    std::map<int, std::set<GlobalIndex>> missing_masters{};
+
+    [[nodiscard]] bool preconstrained(GlobalIndex dof) const
+    {
+        return preconstrained_dofs.count(dof) != 0u;
+    }
+
+    [[nodiscard]] bool relevantOnRank(GlobalIndex dof, int rank) const
+    {
+        const auto missing = missing_masters.find(rank);
+        return missing == missing_masters.end() ||
+               missing->second.count(dof) == 0u;
+    }
+
+    [[nodiscard]] std::size_t ownerCount(GlobalIndex dof) const
+    {
+        const auto found = owners.find(dof);
+        return found == owners.end() ? 0u : found->second.size();
+    }
+
+    [[nodiscard]] int ownerRank(GlobalIndex dof) const
+    {
+        const auto found = owners.find(dof);
+        return found == owners.end() || found->second.size() != 1u
+                   ? -1
+                   : found->second.front();
+    }
+
+    [[nodiscard]] const std::vector<ProposalDofVisibility>* slaveVisibility(
+        GlobalIndex dof) const
+    {
+        const auto found = assembling.find(dof);
+        return found == assembling.end() ? nullptr : &found->second;
+    }
+
+    [[nodiscard]] bool anyPreconstrained(GlobalIndex slave) const
+    {
+        return preconstrained(slave);
+    }
+
+    [[nodiscard]] std::optional<CanonicalLineVisibility>
+    firstNeededMissingMasters(GlobalIndex slave,
+                              const ConstraintLine& line) const
+    {
+        const auto found = assembling.find(slave);
+        if (found == assembling.end()) {
+            return std::nullopt;
+        }
+        for (const auto& visibility : found->second) {
+            CanonicalLineVisibility result;
+            result.rank = visibility.rank;
+            result.needed = true;
+            for (const auto& entry : line.entries) {
+                if (!relevantOnRank(entry.master_dof, visibility.rank)) {
+                    result.missing_masters.push_back(entry.master_dof);
+                }
+            }
+            if (!result.missing_masters.empty()) {
+                return result;
+            }
+        }
+        return std::nullopt;
+    }
+};
+
+[[nodiscard]] DistributedAggregationResult
+resolveDistributedAggregationDeclarations(
+    const systems::FESystem& system,
+    const AffineConstraints& existing_constraints,
+    std::string_view field_name,
+    const GlobalCandidateMap& global_candidates,
+    const LocalAggregationDeclarationMap& local_candidates,
+    const std::set<GlobalIndex>& assembled_candidate_dofs,
+    const std::set<GlobalIndex>& row_coupled_candidate_dofs,
+    bool slave_all_cut,
+    bool allow_unaggregated,
+    bool rootless_fallback)
+{
+    DistributedAggregationResult result;
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    const auto comm = system.dofHandler().mpiComm();
+    int world_size = 1;
+    if (initialized != 0) {
+        MPI_Comm_size(comm, &world_size);
+    }
+    result.validation =
+        initialized != 0 && world_size > 1
+            ? DistributedAggregationValidation::Passed
+            : DistributedAggregationValidation::NotParallel;
+    result.canonical_candidate_vertices = global_candidates.size();
+    result.canonical_rooted_candidate_vertices =
+        static_cast<std::size_t>(std::count_if(
+            global_candidates.begin(), global_candidates.end(),
+            [](const auto& entry) { return entry.second.globally_rooted; }));
+    result.canonical_rootless_candidate_vertices =
+        global_candidates.size() - result.canonical_rooted_candidate_vertices;
+
+    std::vector<std::int64_t> local_candidate_words;
+    bool local_candidate_payload_valid = true;
+    std::exception_ptr local_candidate_serialization_exception;
+    try {
+    serializeRootProposals(local_candidates,
+                           global_candidates,
+                           local_candidate_words,
+                           local_candidate_payload_valid);
+    } catch (...) {
+        local_candidate_payload_valid = false;
+        local_candidate_serialization_exception = std::current_exception();
+    }
+    GatheredInt64Words gathered_candidates;
+    if (initialized != 0 && world_size > 1) {
+        const int local_valid = local_candidate_payload_valid ? 1 : 0;
+        int all_valid = 0;
+        MPI_Allreduce(&local_valid,
+                      &all_valid,
+                      1,
+                      MPI_INT,
+                      MPI_MIN,
+                      comm);
+        if (all_valid == 0) {
+            if (local_candidate_serialization_exception != nullptr) {
+                std::rethrow_exception(
+                    local_candidate_serialization_exception);
+            }
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: non-finite local "
+                "aggregation weight on at least one communicator rank");
+        }
+        gathered_candidates = allGatherInt64Words(
+            comm, std::span<const std::int64_t>(local_candidate_words),
+            AggregationProfileExchange::RootProposals);
+    } else {
+        if (!local_candidate_payload_valid) {
+            if (local_candidate_serialization_exception != nullptr) {
+                std::rethrow_exception(
+                    local_candidate_serialization_exception);
+            }
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: non-finite local "
+                "aggregation weight");
+        }
+        gathered_candidates.words = local_candidate_words;
+        gathered_candidates.counts = {
+            static_cast<int>(local_candidate_words.size())};
+        gathered_candidates.displacements = {0};
+        world_size = 1;
+    }
+
+    RankedDeclarationMap declarations_by_dof;
+    std::exception_ptr local_declaration_decode_exception;
+    try {
+    decodeRootProposals(gathered_candidates,
+                        world_size,
+                        [](int source_rank, GlobalIndex) { return source_rank; },
+                        declarations_by_dof);
+    } catch (...) {
+        local_declaration_decode_exception = std::current_exception();
+    }
+    coordinateDistributedLocalFailure(system,
+                                      local_declaration_decode_exception,
+                                      "root_proposal_decode");
+
+    // Gather ownership, relevance and pre-existing constraints for every DOF
+    // mentioned by any proposal. The root itself is chosen by the
+    // partition-independent (distance, physical root cell GID) ordering
+    // alone; choosing among roots by which ranks can see their masters would
+    // change the discretization with the partition. Algebraic master DOFs are
+    // deliberately excluded from the ordering because owner-contiguous
+    // numbering changes when the physical mesh is repartitioned.
+    const auto& partition = system.dofHandler().getPartition();
+    std::set<GlobalIndex> proposal_dofs;
+    std::vector<std::int64_t> local_proposal_visibility_words;
+    std::exception_ptr local_proposal_visibility_exception;
+    try {
+    for (const auto& [dof, support] : global_candidates) {
+        (void)dof;
+        proposal_dofs.insert(support.component_dofs.begin(),
+                             support.component_dofs.end());
+    }
+    for (const auto& [dof, declarations] : declarations_by_dof) {
+        (void)dof;
+        for (const auto& ranked : declarations) {
+            for (const auto& line : ranked.declaration.lines) {
+                proposal_dofs.insert(line.slave_dof);
+                for (const auto& entry : line.entries) {
+                    proposal_dofs.insert(entry.master_dof);
+                }
+            }
+        }
+    }
+
+    // [dof, owned, preconstrained, assembled] for locally relevant proposal
+    // DOFs; `assembled` marks candidate DOFs this rank assembles with.
+    for (const auto dof : proposal_dofs) {
+        if (!partition.isRelevant(dof)) {
+            continue;
+        }
+        local_proposal_visibility_words.push_back(
+            static_cast<std::int64_t>(dof));
+        local_proposal_visibility_words.push_back(
+            partition.isOwned(dof) ? 1 : 0);
+        local_proposal_visibility_words.push_back(
+            existing_constraints.isConstrained(dof) ? 1 : 0);
+        local_proposal_visibility_words.push_back(
+            (partition.isOwned(dof) ||
+             assembled_candidate_dofs.count(dof) != 0u)
+                ? 1
+                : 0);
+    }
+    } catch (...) {
+        local_proposal_visibility_exception = std::current_exception();
+    }
+    coordinateDistributedLocalFailure(system,
+                                      local_proposal_visibility_exception,
+                                      "proposal_visibility_serialization");
+    GatheredInt64Words gathered_proposal_visibility;
+    if (initialized != 0 && world_size > 1) {
+        gathered_proposal_visibility = allGatherInt64Words(
+            comm,
+            std::span<const std::int64_t>(local_proposal_visibility_words),
+            AggregationProfileExchange::ProposalVisibility);
+    } else {
+        gathered_proposal_visibility.words =
+            local_proposal_visibility_words;
+        gathered_proposal_visibility.counts = {
+            static_cast<int>(local_proposal_visibility_words.size())};
+        gathered_proposal_visibility.displacements = {0};
+    }
+
+    std::map<GlobalIndex, std::vector<ProposalDofVisibility>>
+        proposal_visibility_by_dof;
+    std::exception_ptr local_proposal_visibility_decode_exception;
+    try {
+    for (int rank = 0; rank < world_size; ++rank) {
+        std::size_t position = static_cast<std::size_t>(
+            gathered_proposal_visibility
+                .displacements[static_cast<std::size_t>(rank)]);
+        const auto end = position + static_cast<std::size_t>(
+            gathered_proposal_visibility
+                .counts[static_cast<std::size_t>(rank)]);
+        while (position < end) {
+            if (end - position < 4u) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: malformed proposal-DOF "
+                    "visibility declaration");
+            }
+            const auto dof = static_cast<GlobalIndex>(
+                gathered_proposal_visibility.words[position++]);
+            ProposalDofVisibility visibility;
+            visibility.rank = rank;
+            visibility.owned =
+                gathered_proposal_visibility.words[position++] != 0;
+            visibility.preconstrained =
+                gathered_proposal_visibility.words[position++] != 0;
+            visibility.needed =
+                gathered_proposal_visibility.words[position++] != 0;
+            proposal_visibility_by_dof[dof].push_back(visibility);
+        }
+    }
+    } catch (...) {
+        local_proposal_visibility_decode_exception =
+            std::current_exception();
+    }
+    coordinateDistributedLocalFailure(
+        system,
+        local_proposal_visibility_decode_exception,
+        "proposal_visibility_decode");
+
+    const GatheredProposalVisibility proposal_visibility(
+        proposal_visibility_by_dof);
+    CanonicalSelection selection;
+    auto& canonical_lines = selection.canonical_lines;
+    auto& canonical_row_metadata = selection.canonical_row_metadata;
+    auto& expected_slaves = selection.expected_slaves;
+    std::vector<std::int64_t> local_visibility_words;
+    std::exception_ptr local_canonical_selection_exception;
+    try {
+    selectCanonicalAggregationLines(
+        field_name,
+        global_candidates,
+        declarations_by_dof,
+        proposal_visibility,
+        slave_all_cut,
+        allow_unaggregated,
+        rootless_fallback,
+        [&](std::string_view reason,
+            GlobalIndex dof,
+            const GlobalCandidateSupport& support,
+            const std::string& detail) {
+            logGuardRootlessCandidate(system,
+                                      field_name,
+                                      reason,
+                                      dof,
+                                      support.coordinates,
+                                      support.feature_cells,
+                                      detail);
+        },
+        selection);
+    result.canonical_halo_limited_root_choices =
+        selection.halo_limited_root_choices;
+    result.canonical_guard_rootless_candidate_vertices =
+        selection.guard_rootless_candidate_vertices;
+    throwCanonicalSelectionFailures(field_name, selection);
 
     // Every rank now knows the same canonical lines.  Before installing them,
     // prove that each slave has exactly one owner and that every rank on which
@@ -2170,14 +3371,8 @@ resolveDistributedAggregationDeclarations(
 
     std::exception_ptr local_final_validation_exception;
     try {
-    struct Visibility {
-        int rank{-1};
-        bool owned{false};
-        bool preconstrained{false};
-        bool needed{false};
-        std::vector<GlobalIndex> missing_masters{};
-    };
-    std::map<GlobalIndex, std::vector<Visibility>> visibility_by_slave;
+    std::map<GlobalIndex, std::vector<CanonicalLineVisibility>>
+        visibility_by_slave;
     for (int rank = 0; rank < world_size; ++rank) {
         std::size_t position = static_cast<std::size_t>(
             gathered_visibility.displacements[static_cast<std::size_t>(rank)]);
@@ -2191,7 +3386,7 @@ resolveDistributedAggregationDeclarations(
             }
             const auto slave = static_cast<GlobalIndex>(
                 gathered_visibility.words[position++]);
-            Visibility visibility;
+            CanonicalLineVisibility visibility;
             visibility.rank = rank;
             visibility.owned = gathered_visibility.words[position++] != 0;
             visibility.preconstrained =
@@ -2216,122 +3411,17 @@ resolveDistributedAggregationDeclarations(
         }
     }
 
-    std::set<GlobalIndex> globally_preconstrained;
-    failures.str({});
-    failures.clear();
-    failure_count = 0u;
-    for (const auto& [slave, row] : canonical_row_metadata) {
-        static_cast<void>(row);
-        const auto owner_count = ownerCount(slave);
-        if (owner_count != 1u) {
-            ++failure_count;
-            if (failure_count <= 4u) {
-                failures << " dof=" << slave
-                         << " reason=canonical_slave_owner_count:"
-                         << owner_count << ";";
-            }
-        }
-    }
-    for (const auto slave : expected_slaves) {
-        const auto found = visibility_by_slave.find(slave);
-        const bool any_preconstrained =
-            found != visibility_by_slave.end() &&
-            std::any_of(found->second.begin(), found->second.end(),
-                        [](const Visibility& visibility) {
-                            return visibility.preconstrained;
-                        });
-        if (any_preconstrained) {
-            globally_preconstrained.insert(slave);
-            continue;
-        }
-        const auto line_it = canonical_lines.find(slave);
-        if (line_it == canonical_lines.end()) {
-            ++failure_count;
-            if (failure_count <= 4u) {
-                failures << " dof=" << slave
-                         << " reason=no_communicator_global_root_line;";
-            }
-            continue;
-        }
-        bool master_owner_failure = false;
-        for (const auto& entry : line_it->second.entries) {
-            const auto master_owner_count = ownerCount(entry.master_dof);
-            if (master_owner_count == 1u) {
-                continue;
-            }
-            ++failure_count;
-            master_owner_failure = true;
-            if (failure_count <= 4u) {
-                failures << " dof=" << slave
-                         << " reason=canonical_master_owner_count:"
-                         << master_owner_count
-                         << " master=" << entry.master_dof << ";";
-            }
-            break;
-        }
-        if (master_owner_failure) {
-            continue;
-        }
-        for (const auto& visibility : found->second) {
-            // A rank that assembles with the line must carry every master.
-            if (visibility.needed && !visibility.missing_masters.empty()) {
-                ++failure_count;
-                if (failure_count <= 4u) {
-                    failures << " dof=" << slave
-                             << " reason=canonical_master_not_relevant rank="
-                             << visibility.rank << " masters=";
-                    for (const auto master : visibility.missing_masters) {
-                        failures << master << ",";
-                    }
-                    failures << ";";
-                }
-                break;
-            }
-        }
-    }
-    if (failure_count > 0u) {
-        throw InsufficientGhostHaloError(
-            "SmallCutAggregationConstraint: diagnostic="
-            "incomplete_distributed_aggregation_halo field='" +
-            std::string(field_name) + "' inconsistent_candidate_dofs=" +
-            std::to_string(failure_count) + failures.str() +
-            " Increase mesh/DOF overlap (<Ghost_layers>) until every rank "
-            "that assembles with a canonical slave carries all of its "
-            "nonzero aggregate masters; refusing owner-wins constraint "
-            "resolution.");
-    }
-
-    result.canonical_strong_suppressed_dofs =
-        globally_preconstrained.size();
-    result.canonical_rows.reserve(canonical_row_metadata.size());
-    for (auto& [slave, row] : canonical_row_metadata) {
-        row.slave_owner_rank = ownerRank(slave);
-        if (globally_preconstrained.count(slave) != 0u) {
-            row.preconstrained_at_apply = true;
-        }
-        result.canonical_rows.push_back(std::move(row));
-    }
-    for (const auto& [slave, line] : canonical_lines) {
-        if (globally_preconstrained.count(slave) != 0u) {
-            continue;
-        }
-        result.canonical_slaves.push_back(slave);
-        if (line.entries.empty()) {
-            ++result.canonical_owned_pinned_dofs;
-        } else {
-            ++result.canonical_owned_aggregate_dofs;
-        }
-        // Install where the slave is relevant and every master is present;
-        // the validation above proved that no rank assembling with the line
-        // lacks a master.
-        if (partition.isRelevant(slave) &&
-            std::all_of(line.entries.begin(), line.entries.end(),
-                        [&](const auto& entry) {
-                            return partition.isRelevant(entry.master_dof);
-                        })) {
-            result.relevant_lines.push_back(line);
-        }
-    }
+    const GatheredLineVisibility line_visibility(visibility_by_slave);
+    std::ostringstream validation_failures;
+    const auto validation_failure_count = validateCanonicalAggregationLines(
+        partition,
+        proposal_visibility,
+        line_visibility,
+        selection,
+        result,
+        validation_failures);
+    throwCanonicalValidationFailures(
+        field_name, validation_failure_count, validation_failures);
     } catch (...) {
         local_final_validation_exception = std::current_exception();
     }
@@ -2339,35 +3429,12 @@ resolveDistributedAggregationDeclarations(
                                       local_final_validation_exception,
                                       "canonical_line_final_validation");
 
-    // Slaves that share a cell with an owned row but whose masters lie
-    // outside this rank's halo: the assembling ranks condense them correctly
-    // (the residual is unaffected), but the owned rows cannot store the
-    // condensed master columns, so the Jacobian loses those entries.
-    long long local_row_coupled_beyond_halo = 0;
-    for (const auto dof : row_coupled_candidate_dofs) {
-        const auto line_it = canonical_lines.find(dof);
-        if (line_it == canonical_lines.end()) {
-            continue;
-        }
-        if (!std::all_of(line_it->second.entries.begin(),
-                         line_it->second.entries.end(),
-                         [&](const ConstraintEntry& entry) {
-                             return partition.isRelevant(entry.master_dof);
-                         })) {
-            ++local_row_coupled_beyond_halo;
-        }
-    }
-    long long row_coupled_beyond_halo = local_row_coupled_beyond_halo;
-    if (initialized != 0 && world_size > 1) {
-        MPI_Allreduce(&local_row_coupled_beyond_halo,
-                      &row_coupled_beyond_halo,
-                      1,
-                      MPI_LONG_LONG,
-                      MPI_SUM,
-                      comm);
-    }
     result.canonical_row_coupled_slaves_beyond_halo =
-        static_cast<std::size_t>(row_coupled_beyond_halo);
+        countRowCoupledSlavesBeyondHalo(
+            row_coupled_candidate_dofs,
+            canonical_lines,
+            partition,
+            initialized != 0 && world_size > 1 ? comm : MPI_COMM_NULL);
     return result;
 }
 
@@ -4323,6 +5390,521 @@ refreshRetainedActiveCellMeasures(
     return measures;
 }
 
+// Per-cell view of communicator-classified cells in ascending key order (the
+// index of a cell in every array).  The communicator-global path fills it
+// with every classified cell; the owner-sourced path with the active cells
+// and their inactive face neighbors (see ownerSourcedActiveCellGraph).
+struct AggregationCellGraph {
+    const ClassifiedCellIndex& cells;
+    const std::vector<CellClass>& klass;
+    const std::vector<GlobalIndex>& physical_gid;
+    const std::vector<Real>& volume;
+    const std::vector<std::vector<std::uint64_t>>& rule_ids;
+    const std::vector<int>& provider_rank;
+    const std::vector<int>& owner_rank;
+    const std::vector<std::vector<std::size_t>>& neighbors;
+};
+
+struct ActiveFeatureLedger {
+    std::vector<SmallCutAggregationActiveFeatureReport> features{};
+    // Canonical feature ID per graph cell (INVALID for inactive cells).
+    std::vector<GlobalIndex> feature_of{};
+    std::vector<SmallCutAggregationProlongationCell> cells{};
+    std::size_t rooted{0u};
+    std::size_t rootless{0u};
+    Real rootless_volume{0.0};
+};
+
+// Canonical retained active features: face-connected components of the
+// active cells of the graph, with their digests, counts and volumes, and the
+// canonical active-cell records.  Only active cells and their active
+// neighbors are read.
+void buildActiveFeatureLedger(const AggregationCellGraph& graph,
+                              ActiveFeatureLedger& ledger)
+{
+    const auto& classified_cells = graph.cells;
+    const auto& global_cell_class_of = graph.klass;
+    const auto& global_physical_cell_gid_of = graph.physical_gid;
+    const auto& global_active_cell_physical_volume_of = graph.volume;
+    const auto& global_active_cell_rule_ids_of = graph.rule_ids;
+    const auto& global_active_cell_measure_provider_rank_of =
+        graph.provider_rank;
+    const auto& global_cell_owner_rank_of = graph.owner_rank;
+    const auto& global_neighbors = graph.neighbors;
+    auto& canonical_active_features = ledger.features;
+    auto& active_feature_of = ledger.feature_of;
+    auto& canonical_active_cells = ledger.cells;
+    auto& canonical_rooted_active_feature_count = ledger.rooted;
+    auto& canonical_rootless_active_feature_count = ledger.rootless;
+    auto& canonical_rootless_active_physical_volume = ledger.rootless_volume;
+    const auto n_classified = classified_cells.size();
+    const auto is_active_cell = [&](std::size_t cell) {
+        return global_cell_class_of[cell].full_active ||
+               global_cell_class_of[cell].cut;
+    };
+    std::set<GlobalIndex> active_physical_cell_gids;
+    for (std::size_t cell = 0u; cell < n_classified; ++cell) {
+        if (!is_active_cell(cell)) {
+            continue;
+        }
+        const auto gid = global_physical_cell_gid_of[cell];
+        if (gid < 0 || !active_physical_cell_gids.insert(gid).second) {
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: diagnostic="
+                "invalid_active_feature_volume communicator active cells "
+                "have missing or duplicate physical cell IDs");
+        }
+    }
+    active_feature_of.assign(n_classified, INVALID_GLOBAL_INDEX);
+    std::vector<char> visited_active_cells(n_classified, 0);
+    std::vector<std::size_t> queue;
+    std::vector<std::size_t> component_cells;
+    std::vector<std::pair<GlobalIndex, std::size_t>> component_order;
+    for (std::size_t seed = 0u; seed < n_classified; ++seed) {
+        if (!is_active_cell(seed) || visited_active_cells[seed] != 0) {
+            continue;
+        }
+
+        queue.clear();
+        component_cells.clear();
+        queue.push_back(seed);
+        visited_active_cells[seed] = 1;
+        for (std::size_t head = 0u; head < queue.size(); ++head) {
+            const auto cell = queue[head];
+            component_cells.push_back(cell);
+            for (const auto neighbor : global_neighbors[cell]) {
+                if (!is_active_cell(neighbor)) {
+                    continue;
+                }
+                if (visited_active_cells[neighbor] == 0) {
+                    visited_active_cells[neighbor] = 1;
+                    queue.push_back(neighbor);
+                }
+            }
+        }
+
+        // Order by (physical cell GID, key); index order is key order and
+        // the pairs are unique, so the order is the same for any sort.
+        component_order.clear();
+        for (const auto cell : component_cells) {
+            component_order.emplace_back(global_physical_cell_gid_of[cell],
+                                         cell);
+        }
+        std::sort(component_order.begin(), component_order.end());
+        for (std::size_t i = 0u; i < component_order.size(); ++i) {
+            component_cells[i] = component_order[i].second;
+        }
+        if (component_cells.empty()) {
+            throw std::logic_error(
+                "SmallCutAggregationConstraint: active feature traversal "
+                "produced an empty component");
+        }
+
+        SmallCutAggregationActiveFeatureReport feature;
+        feature.stable_feature_id =
+            global_physical_cell_gid_of[component_cells.front()];
+        for (const auto cell : component_cells) {
+            if (active_feature_of[cell] != INVALID_GLOBAL_INDEX) {
+                throw std::logic_error(
+                    "SmallCutAggregationConstraint: active cell was assigned "
+                    "to more than one canonical feature");
+            }
+            active_feature_of[cell] = feature.stable_feature_id;
+        }
+        feature.canonical_cell_count = component_cells.size();
+        feature.canonical_cell_gid_digest = 14695981039346656037ull;
+        feature.canonical_full_active_cell_gid_digest =
+            14695981039346656037ull;
+        feature.canonical_cut_cell_gid_digest =
+            14695981039346656037ull;
+        aggregationDigestMix(
+            feature.canonical_full_active_cell_gid_digest,
+            0x46554c4c41435449ull);
+        aggregationDigestMix(
+            feature.canonical_cut_cell_gid_digest,
+            0x43555443454c4c53ull);
+        long double physical_volume = 0.0L;
+        GlobalIndex previous_gid = INVALID_GLOBAL_INDEX;
+        for (const auto cell : component_cells) {
+            const auto physical_gid = global_physical_cell_gid_of[cell];
+            if (physical_gid < 0 || physical_gid == previous_gid) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: diagnostic="
+                    "invalid_active_feature_volume active component has "
+                    "missing or duplicate physical cell IDs");
+            }
+            previous_gid = physical_gid;
+            feature.canonical_cell_gid_digest ^=
+                static_cast<std::uint64_t>(physical_gid);
+            feature.canonical_cell_gid_digest *= 1099511628211ull;
+            const auto& klass = global_cell_class_of[cell];
+            if (klass.full_active) {
+                aggregationDigestMix(
+                    feature.canonical_full_active_cell_gid_digest,
+                    static_cast<std::uint64_t>(physical_gid));
+            }
+            if (klass.cut) {
+                aggregationDigestMix(
+                    feature.canonical_cut_cell_gid_digest,
+                    static_cast<std::uint64_t>(physical_gid));
+            }
+            feature.canonical_full_active_cell_count +=
+                klass.full_active ? 1u : 0u;
+            feature.canonical_cut_cell_count += klass.cut ? 1u : 0u;
+            physical_volume += static_cast<long double>(
+                global_active_cell_physical_volume_of[cell]);
+        }
+        if (feature.canonical_cell_count !=
+            feature.canonical_full_active_cell_count +
+                feature.canonical_cut_cell_count) {
+            throw std::logic_error(
+                "SmallCutAggregationConstraint: active feature class "
+                "accounting is inconsistent");
+        }
+        aggregationDigestMix(
+            feature.canonical_full_active_cell_gid_digest,
+            static_cast<std::uint64_t>(
+                feature.canonical_full_active_cell_count));
+        aggregationDigestMix(
+            feature.canonical_cut_cell_gid_digest,
+            static_cast<std::uint64_t>(
+                feature.canonical_cut_cell_count));
+        feature.canonical_retained_physical_volume =
+            static_cast<Real>(physical_volume);
+        if (!(feature.canonical_retained_physical_volume > Real{0.0}) ||
+            !std::isfinite(
+                feature.canonical_retained_physical_volume)) {
+            throw std::runtime_error(
+                "SmallCutAggregationConstraint: diagnostic="
+                "invalid_active_feature_volume active component has no "
+                "finite positive retained physical volume");
+        }
+        if (feature.canonical_full_active_cell_count > 0u) {
+            feature.disposition =
+                SmallCutAggregationActiveFeatureDisposition::Rooted;
+            ++canonical_rooted_active_feature_count;
+        } else {
+            feature.disposition =
+                SmallCutAggregationActiveFeatureDisposition::Rootless;
+            ++canonical_rootless_active_feature_count;
+        }
+        canonical_active_features.push_back(std::move(feature));
+    }
+    std::sort(
+        canonical_active_features.begin(),
+        canonical_active_features.end(),
+        [](const auto& lhs, const auto& rhs) {
+            return lhs.stable_feature_id < rhs.stable_feature_id;
+        });
+    if (std::adjacent_find(
+            canonical_active_features.begin(),
+            canonical_active_features.end(),
+            [](const auto& lhs, const auto& rhs) {
+                return lhs.stable_feature_id == rhs.stable_feature_id;
+            }) != canonical_active_features.end()) {
+        throw std::runtime_error(
+            "SmallCutAggregationConstraint: diagnostic="
+            "invalid_active_feature_volume active features have duplicate "
+            "stable IDs");
+    }
+    long double rootless_physical_volume = 0.0L;
+    for (const auto& feature : canonical_active_features) {
+        if (feature.disposition ==
+            SmallCutAggregationActiveFeatureDisposition::Rootless) {
+            rootless_physical_volume += static_cast<long double>(
+                feature.canonical_retained_physical_volume);
+        }
+    }
+    canonical_rootless_active_physical_volume =
+        static_cast<Real>(rootless_physical_volume);
+    if (canonical_active_features.size() !=
+            canonical_rooted_active_feature_count +
+                canonical_rootless_active_feature_count ||
+        !std::isfinite(
+            canonical_rootless_active_physical_volume) ||
+        canonical_rootless_active_physical_volume < Real{0.0}) {
+        throw std::logic_error(
+            "SmallCutAggregationConstraint: active feature totals are "
+            "inconsistent");
+    }
+
+    std::size_t active_cell_count = 0u;
+    for (const auto feature_id : active_feature_of) {
+        active_cell_count += feature_id != INVALID_GLOBAL_INDEX ? 1u : 0u;
+    }
+    canonical_active_cells.reserve(active_cell_count);
+    for (std::size_t cell = 0u; cell < n_classified; ++cell) {
+        const auto feature_id = active_feature_of[cell];
+        if (feature_id == INVALID_GLOBAL_INDEX) {
+            continue;
+        }
+        const auto& klass = global_cell_class_of[cell];
+        if (klass.full_active == klass.cut) {
+            throw std::logic_error(
+                "SmallCutAggregationConstraint: canonical active cell does "
+                "not have exactly one active class");
+        }
+        SmallCutAggregationProlongationCell record;
+        record.cell_gid = global_physical_cell_gid_of[cell];
+        record.owner_rank = global_cell_owner_rank_of[cell];
+        record.retained_measure_provider_rank =
+            global_active_cell_measure_provider_rank_of[cell];
+        record.kind =
+            klass.full_active
+                ? SmallCutAggregationActiveCellKind::FullActive
+                : SmallCutAggregationActiveCellKind::Cut;
+        record.active_feature_id = feature_id;
+        record.retained_physical_volume =
+            global_active_cell_physical_volume_of[cell];
+        record.retained_rule_stable_ids =
+            global_active_cell_rule_ids_of[cell];
+        record.field_dofs = classified_cells.key(cell);
+        for (const auto neighbor : global_neighbors[cell]) {
+            if (!is_active_cell(neighbor)) {
+                continue;
+            }
+            record.active_face_neighbor_cell_gids.push_back(
+                global_physical_cell_gid_of[neighbor]);
+        }
+        std::sort(record.active_face_neighbor_cell_gids.begin(),
+                  record.active_face_neighbor_cell_gids.end());
+        record.active_face_neighbor_cell_gids.erase(
+            std::unique(
+                record.active_face_neighbor_cell_gids.begin(),
+                record.active_face_neighbor_cell_gids.end()),
+            record.active_face_neighbor_cell_gids.end());
+        canonical_active_cells.push_back(std::move(record));
+    }
+    std::sort(
+        canonical_active_cells.begin(),
+        canonical_active_cells.end(),
+        [](const auto& lhs, const auto& rhs) {
+            return lhs.cell_gid < rhs.cell_gid;
+        });
+}
+
+struct CandidateRootTraversal {
+    std::map<GlobalIndex, std::vector<GlobalRootCandidate>>
+        roots_by_candidate{};
+    std::size_t maximum_observed_root_path{0u};
+    std::size_t root_path_guard_rejections{0u};
+    std::size_t root_path_search_cell_visits{0u};
+    std::size_t root_path_seed_index_entries{0u};
+};
+
+// Bounded breadth-first root search of every candidate over the graph: the
+// full-active cells reachable through cut cells within the root-path guard,
+// sorted by (distance, cell index).  Sets each candidate's globally_rooted
+// and feature_cells.  Throws when a candidate has no cut seed, or when its
+// feature holds full cells only beyond the guard and the rootless fallback
+// is off.
+void traverseCandidateRoots(const AggregationCellGraph& graph,
+                            const std::vector<GlobalIndex>& active_feature_of,
+                            GlobalCandidateMap& global_candidates,
+                            const SmallCutAggregationGuardOptions& guards,
+                            bool slave_all_cut,
+                            const GuardRootlessLogger& log_guard_rootless,
+                            CandidateRootTraversal& traversal)
+{
+    const auto& classified_cells = graph.cells;
+    const auto& global_cell_class_of = graph.klass;
+    const auto& global_neighbors = graph.neighbors;
+    const auto& guards_ = guards;
+    auto& global_roots_by_candidate = traversal.roots_by_candidate;
+    auto& maximum_observed_root_path = traversal.maximum_observed_root_path;
+    auto& root_path_guard_rejections = traversal.root_path_guard_rejections;
+    auto& root_path_search_cell_visits =
+        traversal.root_path_search_cell_visits;
+    auto& root_path_seed_index_entries =
+        traversal.root_path_seed_index_entries;
+    std::set<GlobalIndex> all_candidate_component_dofs;
+    for (const auto& [dof, support] : global_candidates) {
+        static_cast<void>(dof);
+        all_candidate_component_dofs.insert(support.component_dofs.begin(),
+                                            support.component_dofs.end());
+    }
+
+    // Index cut-cell seeds once. The former traversal searched every
+    // classified cell for every candidate and then walked the complete
+    // connected cut band even though roots beyond the configured path guard
+    // can never contribute an admissible row. On a closed three-dimensional
+    // interface that work grows with candidate_count * cut_band_size and can
+    // dominate every geometry refresh. The index and bounded traversal below
+    // retain exactly the roots that can pass the path guard.
+    // Seeds are classified-cell indices, ascending like the keys they name.
+    const auto n_classified = classified_cells.size();
+    std::map<GlobalIndex, std::vector<std::size_t>>
+        cut_seed_cells_by_dof;
+    for (std::size_t cell = 0u; cell < n_classified; ++cell) {
+        if (!global_cell_class_of[cell].cut) {
+            continue;
+        }
+        for (const auto dof : classified_cells.key(cell)) {
+            cut_seed_cells_by_dof[dof].push_back(cell);
+            ++root_path_seed_index_entries;
+        }
+    }
+    for (auto& [dof, seeds] : cut_seed_cells_by_dof) {
+        static_cast<void>(dof);
+        std::sort(seeds.begin(), seeds.end());
+        seeds.erase(std::unique(seeds.begin(), seeds.end()), seeds.end());
+    }
+
+    // A feature is root-eligible when it owns at least one full-active cell
+    // that satisfies the selected aggregation policy. For the strong
+    // all-cut experiment, a full cell containing any candidate DOF is not a
+    // valid root for any candidate because it would introduce slave/master
+    // cycles. This policy is cell-global, so it can be classified once.
+    std::set<GlobalIndex> root_eligible_feature_ids;
+    for (std::size_t cell = 0u; cell < n_classified; ++cell) {
+        if (!global_cell_class_of[cell].full_active) {
+            continue;
+        }
+        bool eligible = true;
+        if (slave_all_cut) {
+            const auto& key = classified_cells.key(cell);
+            eligible = std::none_of(
+                key.begin(), key.end(), [&](GlobalIndex root_dof) {
+                    return all_candidate_component_dofs.count(root_dof) > 0u;
+                });
+        }
+        if (eligible) {
+            if (active_feature_of[cell] == INVALID_GLOBAL_INDEX) {
+                throw std::logic_error(
+                    "SmallCutAggregationConstraint: full-active root cell "
+                    "is missing its canonical active feature");
+            }
+            root_eligible_feature_ids.insert(active_feature_of[cell]);
+        }
+    }
+
+    // Canonical active feature sizes, for the guard-rootless diagnostics.
+    std::map<GlobalIndex, std::size_t> feature_cell_counts;
+    for (const auto feature_id : active_feature_of) {
+        if (feature_id != INVALID_GLOBAL_INDEX) {
+            ++feature_cell_counts[feature_id];
+        }
+    }
+
+    // Breadth-first search per candidate; a per-candidate stamp marks the
+    // visited cells without clearing a set for every candidate.
+    std::vector<std::size_t> visit_stamp(n_classified, 0u);
+    std::size_t current_stamp = 0u;
+    std::vector<std::pair<std::size_t, std::size_t>> queue;
+    for (auto& [dof, support] : global_candidates) {
+        ++current_stamp;
+        queue.clear();
+        const auto seed_it = cut_seed_cells_by_dof.find(dof);
+        if (seed_it != cut_seed_cells_by_dof.end()) {
+            for (const auto seed : seed_it->second) {
+                queue.emplace_back(seed, 0u);
+                visit_stamp[seed] = current_stamp;
+            }
+        }
+        if (queue.empty()) {
+            throw InsufficientGhostHaloError(
+                "SmallCutAggregationConstraint: diagnostic="
+                "incomplete_distributed_aggregation_halo reason="
+                "global_candidate_has_no_cut_seed dof=" +
+                std::to_string(dof));
+        }
+
+        bool feature_has_eligible_root = false;
+        for (const auto seed : seed_it->second) {
+            if (active_feature_of[seed] == INVALID_GLOBAL_INDEX) {
+                throw std::logic_error(
+                    "SmallCutAggregationConstraint: candidate cut seed is "
+                    "missing its canonical active feature");
+            }
+            feature_has_eligible_root =
+                feature_has_eligible_root ||
+                root_eligible_feature_ids.count(active_feature_of[seed]) > 0u;
+            support.feature_cells = std::max(
+                support.feature_cells,
+                feature_cell_counts[active_feature_of[seed]]);
+        }
+
+        auto& roots = global_roots_by_candidate[dof];
+        for (std::size_t head = 0u; head < queue.size(); ++head) {
+            const auto [cell, distance] = queue[head];
+            ++root_path_search_cell_visits;
+            const auto& klass = global_cell_class_of[cell];
+            bool acceptable_root = klass.full_active;
+            if (acceptable_root && slave_all_cut) {
+                const auto& key = classified_cells.key(cell);
+                acceptable_root = std::none_of(
+                    key.begin(), key.end(), [&](GlobalIndex root_dof) {
+                        return all_candidate_component_dofs.count(root_dof) >
+                               0u;
+                    });
+            }
+            if (acceptable_root) {
+                roots.push_back(GlobalRootCandidate{cell, distance});
+                continue;
+            }
+            if (!klass.cut && !(slave_all_cut && klass.full_active)) {
+                continue;
+            }
+            if (distance >= guards_.maximum_root_path_length) {
+                continue;
+            }
+            for (const auto next : global_neighbors[cell]) {
+                if (visit_stamp[next] != current_stamp) {
+                    visit_stamp[next] = current_stamp;
+                    queue.emplace_back(next, distance + 1u);
+                }
+            }
+        }
+        std::sort(roots.begin(), roots.end(),
+                  [](const GlobalRootCandidate& a,
+                     const GlobalRootCandidate& b) {
+                      return std::tie(a.distance, a.cell) <
+                             std::tie(b.distance, b.cell);
+                  });
+        roots.erase(std::unique(
+                        roots.begin(), roots.end(),
+                        [](const GlobalRootCandidate& a,
+                           const GlobalRootCandidate& b) {
+                            return a.cell == b.cell;
+                        }),
+                    roots.end());
+        for (const auto& root : roots) {
+            maximum_observed_root_path =
+                std::max(maximum_observed_root_path, root.distance);
+        }
+        if (feature_has_eligible_root && roots.empty()) {
+            // The feature holds full cells, but none within the root-path
+            // guard: no admissible extension.  Fail closed unless the
+            // opt-in fallback gives the candidate the rootless-island
+            // policy (D33).
+            ++root_path_guard_rejections;
+            maximum_observed_root_path = std::max(
+                maximum_observed_root_path,
+                guards_.maximum_root_path_length ==
+                        std::numeric_limits<std::size_t>::max()
+                    ? guards_.maximum_root_path_length
+                    : guards_.maximum_root_path_length + 1u);
+            if (!guards_.rootless_fallback) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: diagnostic="
+                    "root_path_guard_rejection candidate_dof=" +
+                    std::to_string(dof) + " maximum_observed_path=" +
+                    std::to_string(maximum_observed_root_path) +
+                    " maximum_allowed_path=" +
+                    std::to_string(guards_.maximum_root_path_length) +
+                    ": " + kGuardRootlessOptInHint + ".");
+            }
+            log_guard_rootless(
+                "root_path_guard",
+                dof,
+                support,
+                "maximum_allowed_path=" +
+                    std::to_string(guards_.maximum_root_path_length));
+        }
+        support.globally_rooted = !roots.empty();
+    }
+}
+
 [[nodiscard]] std::shared_ptr<const detail::SmallCutAggregationReuseRecord>
 makeAggregationReuseRecord(
     const detail::SmallCutAggregationReuseKey& key,
@@ -4906,6 +6488,21 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         }
     }
 
+    // The owner-sourced refresh (see ownerSourcedMix above) replaces the
+    // communicator-global exchanges on distributed communicators; debug and
+    // experiment options keep the communicator-global refresh, which also
+    // remains the fallback whenever the owner-sourced checks fail.
+    bool owner_sourced_eligible = false;
+#if FE_HAS_MPI
+    if (mpi_initialized != 0 && distributed_aggregation &&
+        detail::smallCutAggregationOwnerSourcedRefreshEnabled() &&
+        !runtime_options.slave_all_cut && !runtime_options.allow_unaggregated &&
+        runtime_options.max_lines == std::numeric_limits<std::size_t>::max() &&
+        !aggregationProposalTraceEnabled() && mesh_global_entity_ids_available) {
+        owner_sourced_eligible = true;
+    }
+#endif
+
     // 1. Classify cells from this marker's retained volume rules.
     std::unordered_map<GlobalIndex, CellClass> cell_class;
     struct LocalActiveCellMeasure {
@@ -4937,6 +6534,100 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     };
     std::vector<OrderedCellClass> ordered_cell_classes;
     std::vector<std::int64_t> local_cell_class_words;
+    // The owner-sourced refresh does not all-gather the classified cells;
+    // it checks them (the same checks) and serializes them only if it
+    // returns to the communicator-global refresh.
+    bool serialize_cell_classes = !owner_sourced_eligible;
+    const auto push_cell_class_word = [&](std::int64_t word) {
+        if (serialize_cell_classes) {
+            local_cell_class_words.push_back(word);
+        }
+    };
+    const auto declare_ordered_cell_classes = [&]() {
+        for (const auto& ordered : ordered_cell_classes) {
+            const auto& key = *ordered.key;
+            const auto& klass = ordered.klass;
+            const std::int64_t flags =
+                (klass.full_active ? 1 : 0) | (klass.cut ? 2 : 0);
+            push_cell_class_word(flags);
+            push_cell_class_word(
+                static_cast<std::int64_t>(key.size()));
+            for (const auto dof : key) {
+                push_cell_class_word(static_cast<std::int64_t>(dof));
+            }
+            const auto cell = ordered.cell;
+            const auto measure = local_active_cell_measures.find(cell);
+            const bool active = klass.full_active || klass.cut;
+            if (active &&
+                (measure == local_active_cell_measures.end() ||
+                 measure->second.rule_count == 0u ||
+                 !(measure->second.physical_volume > Real{0.0}) ||
+                 !std::isfinite(measure->second.physical_volume))) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: diagnostic="
+                    "invalid_active_feature_volume active cell has no complete "
+                    "physical measure declaration");
+            }
+            if (!active && measure != local_active_cell_measures.end()) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: diagnostic="
+                    "inconsistent_retained_volume_fraction inactive cell has an "
+                    "active physical measure declaration");
+            }
+            const auto physical_cell_gid =
+                mesh_global_entity_ids_available
+                    ? mesh.getCellGlobalId(cell)
+                    : cell;
+            if (physical_cell_gid < 0) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: diagnostic="
+                    "invalid_active_feature_volume physical cell ID is "
+                    "unavailable");
+            }
+            const auto rule_count =
+                measure == local_active_cell_measures.end()
+                    ? std::size_t{0u}
+                    : measure->second.rule_count;
+            if (rule_count >
+                static_cast<std::size_t>(
+                    std::numeric_limits<std::int64_t>::max())) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: diagnostic="
+                    "invalid_active_feature_volume rule count exceeds the "
+                    "distributed wire range");
+            }
+            const auto physical_volume =
+                measure == local_active_cell_measures.end()
+                    ? Real{0.0}
+                    : measure->second.physical_volume;
+            push_cell_class_word(
+                static_cast<std::int64_t>(physical_cell_gid));
+            push_cell_class_word(
+                static_cast<std::int64_t>(rule_count));
+            push_cell_class_word(
+                std::bit_cast<std::int64_t>(
+                    static_cast<double>(physical_volume)));
+            if (measure != local_active_cell_measures.end()) {
+                if (measure->second.stable_rule_ids.size() +
+                        measure->second.missing_stable_rule_ids !=
+                    rule_count) {
+                    throw std::logic_error(
+                        "SmallCutAggregationConstraint: retained rule identity "
+                        "count does not match the cell measure count");
+                }
+                for (std::size_t missing = 0u;
+                     missing < measure->second.missing_stable_rule_ids;
+                     ++missing) {
+                    push_cell_class_word(0);
+                }
+                for (const auto stable_id :
+                     measure->second.stable_rule_ids) {
+                    push_cell_class_word(
+                        std::bit_cast<std::int64_t>(stable_id));
+                }
+            }
+        }
+    };
     std::exception_ptr local_cell_declaration_exception;
     try {
     {
@@ -5083,89 +6774,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             "local cell-key resolution");
     }
 
-    for (const auto& ordered : ordered_cell_classes) {
-        const auto& key = *ordered.key;
-        const auto& klass = ordered.klass;
-        const std::int64_t flags =
-            (klass.full_active ? 1 : 0) | (klass.cut ? 2 : 0);
-        local_cell_class_words.push_back(flags);
-        local_cell_class_words.push_back(
-            static_cast<std::int64_t>(key.size()));
-        for (const auto dof : key) {
-            local_cell_class_words.push_back(static_cast<std::int64_t>(dof));
-        }
-        const auto cell = ordered.cell;
-        const auto measure = local_active_cell_measures.find(cell);
-        const bool active = klass.full_active || klass.cut;
-        if (active &&
-            (measure == local_active_cell_measures.end() ||
-             measure->second.rule_count == 0u ||
-             !(measure->second.physical_volume > Real{0.0}) ||
-             !std::isfinite(measure->second.physical_volume))) {
-            throw std::runtime_error(
-                "SmallCutAggregationConstraint: diagnostic="
-                "invalid_active_feature_volume active cell has no complete "
-                "physical measure declaration");
-        }
-        if (!active && measure != local_active_cell_measures.end()) {
-            throw std::runtime_error(
-                "SmallCutAggregationConstraint: diagnostic="
-                "inconsistent_retained_volume_fraction inactive cell has an "
-                "active physical measure declaration");
-        }
-        const auto physical_cell_gid =
-            mesh_global_entity_ids_available
-                ? mesh.getCellGlobalId(cell)
-                : cell;
-        if (physical_cell_gid < 0) {
-            throw std::runtime_error(
-                "SmallCutAggregationConstraint: diagnostic="
-                "invalid_active_feature_volume physical cell ID is "
-                "unavailable");
-        }
-        const auto rule_count =
-            measure == local_active_cell_measures.end()
-                ? std::size_t{0u}
-                : measure->second.rule_count;
-        if (rule_count >
-            static_cast<std::size_t>(
-                std::numeric_limits<std::int64_t>::max())) {
-            throw std::runtime_error(
-                "SmallCutAggregationConstraint: diagnostic="
-                "invalid_active_feature_volume rule count exceeds the "
-                "distributed wire range");
-        }
-        const auto physical_volume =
-            measure == local_active_cell_measures.end()
-                ? Real{0.0}
-                : measure->second.physical_volume;
-        local_cell_class_words.push_back(
-            static_cast<std::int64_t>(physical_cell_gid));
-        local_cell_class_words.push_back(
-            static_cast<std::int64_t>(rule_count));
-        local_cell_class_words.push_back(
-            std::bit_cast<std::int64_t>(
-                static_cast<double>(physical_volume)));
-        if (measure != local_active_cell_measures.end()) {
-            if (measure->second.stable_rule_ids.size() +
-                    measure->second.missing_stable_rule_ids !=
-                rule_count) {
-                throw std::logic_error(
-                    "SmallCutAggregationConstraint: retained rule identity "
-                    "count does not match the cell measure count");
-            }
-            for (std::size_t missing = 0u;
-                 missing < measure->second.missing_stable_rule_ids;
-                 ++missing) {
-                local_cell_class_words.push_back(0);
-            }
-            for (const auto stable_id :
-                 measure->second.stable_rule_ids) {
-                local_cell_class_words.push_back(
-                    std::bit_cast<std::int64_t>(stable_id));
-            }
-        }
-    }
+    declare_ordered_cell_classes();
     } catch (...) {
         local_cell_declaration_exception = std::current_exception();
     }
@@ -5178,6 +6787,1952 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     profile.setCount(AggregationProfileCount::LocalClassifiedCells,
                      ordered_cell_classes.size());
     profile.mark(AggregationProfilePhase::Classification);
+
+    // Outputs of the refresh consumed by the publication below; filled by
+    // the owner-sourced refresh or by the communicator-global refresh.
+    const bool slave_all_cut = runtime_options.slave_all_cut;
+    const bool allow_unaggregated = runtime_options.allow_unaggregated;
+    const std::size_t max_lines = runtime_options.max_lines;
+    std::vector<SmallCutAggregationActiveFeatureReport>
+        canonical_active_features;
+    std::vector<SmallCutAggregationProlongationCell>
+        canonical_active_cells;
+    std::size_t canonical_rooted_active_feature_count = 0u;
+    std::size_t canonical_rootless_active_feature_count = 0u;
+    Real canonical_rootless_active_physical_volume = 0.0;
+    std::size_t maximum_observed_root_path = 0u;
+    std::size_t root_path_guard_rejections = 0u;
+    std::size_t root_path_search_cell_visits = 0u;
+    std::size_t root_path_seed_index_entries = 0u;
+    std::size_t constrained_vertex_count = 0u;
+    std::size_t aggregated = 0u;
+    std::size_t no_root = 0u;
+    std::size_t island_pinned_dofs = 0u;
+    std::size_t inversion_failed = 0u;
+    // Inversions accepted at the round-off floor (see invertMapping).
+    std::size_t inversion_round_off_acceptances = 0u;
+    std::size_t non_field_nodes = 0u;
+    std::size_t empty_lines = 0u;
+    std::size_t extrapolation_guard_rejections = 0u;
+    std::size_t line_guard_rejections = 0u;
+    Real maximum_attempted_reference_extrapolation = 0.0;
+    Real maximum_observed_reference_extrapolation = 0.0;
+    Real maximum_attempted_absolute_coefficient = 0.0;
+    Real maximum_observed_absolute_coefficient = 0.0;
+    Real maximum_attempted_row_l1_norm = 0.0;
+    Real maximum_observed_row_l1_norm = 0.0;
+    std::size_t communicator_root_proposal_failures = 0u;
+    std::size_t communicator_extrapolation_guard_rejections = 0u;
+    std::size_t communicator_line_guard_rejections = 0u;
+    std::vector<GlobalIndex> current_slaves;
+    LocalAggregationDeclarationMap local_aggregation_declarations;
+    DistributedAggregationResult distributed_result;
+
+    // 3. Vertices of cut cells + their incident band cells.
+    std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> vertex_cells;
+    std::vector<GlobalIndex> cell_nodes;
+    std::unordered_set<GlobalIndex> excluded_vertices;
+    std::vector<LocalCandidateSupport> local_candidate_support;
+    // Local candidate facts of every vertex of a locally stored active cell.
+    // Collective (coordinated local failure).
+    const auto build_local_candidate_support = [&]() {
+        vertex_cells.clear();
+        excluded_vertices.clear();
+        local_candidate_support.clear();
+        std::exception_ptr local_support_exception;
+        try {
+            for (const auto& [cell, klass] : cell_class) {
+                if (!klass.cut && !klass.full_active) {
+                    continue;
+                }
+                mesh.getCellNodes(cell, cell_nodes);
+                for (const auto node : cell_nodes) {
+                    if (node >= 0 && node < n_vertices) {
+                        vertex_cells[node].push_back(cell);
+                    }
+                }
+            }
+
+            // 3b. Vertices carrying strong Dirichlet data keep their BC: collect the
+            //     face vertices of every excluded boundary marker. Explicitly pinned
+            //     vertices (e.g. pressure gauge nodes) are excluded for the same
+            //     reason — their pin must win over aggregation.
+            excluded_vertices.insert(excluded_vertices_.begin(),
+                                     excluded_vertices_.end());
+            if (!excluded_boundary_markers_.empty()) {
+                std::vector<GlobalIndex> face_cell_nodes;
+                for (const auto marker : excluded_boundary_markers_) {
+                    mesh.forEachBoundaryFace(
+                        marker,
+                        [&](GlobalIndex face, GlobalIndex cell) {
+                            const auto local_face = mesh.getLocalFaceIndex(face, cell);
+                            if (local_face < 0) {
+                                return;
+                            }
+                            const auto cell_type = mesh.getCellType(cell);
+                            const auto& ref = elements::ReferenceElement::shared(cell_type);
+                            const auto& face_nodes =
+                                ref.face_nodes(static_cast<std::size_t>(local_face));
+                            mesh.getCellNodes(cell, face_cell_nodes);
+                            for (const auto local_node : face_nodes) {
+                                if (local_node >= 0 &&
+                                    static_cast<std::size_t>(local_node) <
+                                        face_cell_nodes.size()) {
+                                    excluded_vertices.insert(
+                                        face_cell_nodes[static_cast<std::size_t>(local_node)]);
+                                }
+                            }
+                            // ReferenceElement canonicalizes to the linear topology,
+                            // so face_nodes lists corners only. Higher-order cells
+                            // carry midside/face-interior nodes whose strong BC must
+                            // equally win over aggregation. Classify every public
+                            // mesh slot against the generic affine hull of the face
+                            // corners; this covers non-axis-aligned wedge and pyramid
+                            // faces as well as tensor/simplex faces.
+                            if (face_cell_nodes.size() > face_nodes.size()) {
+                                for (std::size_t local = 0;
+                                     local < face_cell_nodes.size(); ++local) {
+                                    if (referenceNodeOnFaceAffineHull(
+                                            cell_type,
+                                            std::span<const LocalIndex>(face_nodes),
+                                            local,
+                                            mesh.dimension())) {
+                                        excluded_vertices.insert(face_cell_nodes[local]);
+                                    }
+                                }
+                            }
+                        });
+                }
+            }
+
+            // 4. Constrained vertices: vertices of cut cells with no full-active
+            //    incident cell. SVMP_AGGREGATION_SLAVE_ALL_CUT=1 is a mitigation
+            //    experiment knob that ALSO slaves the supported band vertices
+            //    (every cut-cell vertex), constraining them to the extension of the
+            //    nearest full-active cell carrying NO candidate vertex — the
+            //    strong-AgFEM analogue of the band smoothing the deleted velocity
+            //    ghost penalty used to provide. Roots whose own nodes are candidates
+            //    would make slaves of each other's masters (constraint cycles), so
+            //    the experiment requires retained layer-2 classification
+            //    (Generated_interface_affected_cell_neighborhood_layers >= 1).
+            // Resolve each locally classified mesh node to communicator-global field
+            // DOFs before deciding whether it is a candidate.  Candidate status is an
+            // OR-reduction of cut/full support and boundary exclusion facts keyed by
+            // that global DOF, not a rank-local interpretation of owned cut rules.
+              local_candidate_support.reserve(vertex_cells.size());
+              for (const auto& [vertex, cells] : vertex_cells) {
+                bool touches_cut = false;
+                bool touches_full_active = false;
+                for (const auto cell : cells) {
+                    const auto it = cell_class.find(cell);
+                    if (it == cell_class.end()) {
+                        continue;
+                    }
+                    touches_cut = touches_cut || it->second.cut;
+                    touches_full_active = touches_full_active || it->second.full_active;
+                }
+
+                std::vector<GlobalIndex> component_dofs;
+                for (const auto cell : cells) {
+                    mesh.getCellNodes(cell, cell_nodes);
+                    if (layout == CellDofLayout::Unknown && components > 1) {
+                        detect_layout(cell, cell_nodes);
+                    }
+                    const auto limit = std::min(cell_nodes.size(), n_field_basis);
+                    for (std::size_t i = 0; i < limit; ++i) {
+                        if (cell_nodes[i] != vertex) {
+                            continue;
+                        }
+                        check_cell_pairable(cell);
+                        const auto found = cell_node_dofs(cell, i);
+                        component_dofs.reserve(found.size());
+                        for (const auto dof : found) {
+                            component_dofs.push_back(offset + dof);
+                        }
+                        break;
+                    }
+                    if (!component_dofs.empty()) {
+                        break;
+                    }
+                }
+                if (component_dofs.empty()) {
+                    continue;
+                }
+                const auto vertex_dofs = entity_map->getVertexDofs(vertex);
+                if (vertex_dofs.size() >= components) {
+                    for (std::size_t c = 0; c < components; ++c) {
+                        if (offset + vertex_dofs[c] != component_dofs[c]) {
+                            throw std::logic_error(
+                                "SmallCutAggregationConstraint: cell-local dof "
+                                "resolution disagrees with EntityDofMap for field '" +
+                                rec.name + "' (vertex " +
+                                std::to_string(vertex) + ")");
+                        }
+                    }
+                }
+                  local_candidate_support.push_back(LocalCandidateSupport{
+                      .vertex = vertex,
+                      .declaration_dof = component_dofs.front(),
+                      .component_dofs = std::move(component_dofs),
+                      .coordinates = mesh.getNodeCoordinates(vertex),
+                      .touches_cut = touches_cut,
+                      .touches_full_active = touches_full_active,
+                      .excluded = excluded_vertices.count(vertex) > 0u,
+                  });
+              }
+        } catch (...) {
+            local_support_exception = std::current_exception();
+        }
+        coordinateLocalPhaseFailure(local_support_exception,
+                                    "candidate_support_construction");
+    };
+
+    // The root provider needs the field's complete nodal support. Reject a
+    // sub-parametric cell before proposal generation instead of emitting a
+    // partial polynomial extension.  Throws.
+    const auto check_subparametric_active_cells = [&]() {
+        for (const auto& [cell, klass] : cell_class) {
+            if (!klass.cut && !klass.full_active) {
+                continue;
+            }
+            mesh.getCellNodes(cell, cell_nodes);
+            if (cell_nodes.size() < n_field_basis) {
+                throw std::invalid_argument(
+                    "SmallCutAggregationConstraint: field '" + rec.name +
+                    "' has sub-vertex dofs that are not mesh nodes (cell " +
+                    std::to_string(cell) + " carries " +
+                    std::to_string(cell_nodes.size()) + " mesh nodes < " +
+                    std::to_string(n_field_basis) +
+                    " field basis functions); sub-parametric fields are not "
+                    "supported — use an iso-parametric mesh for higher-order "
+                    "aggregation");
+            }
+        }
+    };
+
+    std::vector<Real> values;
+    std::vector<GlobalIndex> root_check_nodes;
+    // Outcome of every local root proposal, reported only if the resolver
+    // finds a globally rooted candidate without a valid proposal.
+    struct RootProposalOutcome {
+        GlobalIndex candidate_dof{INVALID_GLOBAL_INDEX};
+        GlobalIndex root_cell_gid{INVALID_GLOBAL_INDEX};
+        std::size_t distance{0u};
+        Real extrapolation{std::numeric_limits<Real>::quiet_NaN()};
+        const char* outcome{"unknown"};
+    };
+    std::vector<RootProposalOutcome> root_proposal_outcomes;
+    std::unordered_map<GlobalIndex,
+                       std::shared_ptr<const geometry::GeometryMapping>> mappings;
+    // Read per apply() call (not a cached static): constraint refreshes are
+    // infrequent, and in-process A/B tests must be able to flip the knob.
+    const bool use_linear_extension = runtime_options.linear_extension;
+    auto extension_element_type = rec.space->element_type();
+    std::unique_ptr<basis::LagrangeBasis> linear_extension_basis;
+    if (use_linear_extension) {
+        // element_type() reports the cell TOPOLOGY type, which is already the
+        // corner type for sub-parametric layouts (a Q2 field on Quad4
+        // topology), so the A/B gate must compare basis sizes, not topology
+        // names: engage whenever a strictly smaller corner sub-basis exists.
+        const auto corner_type = linearElementType(extension_element_type);
+        auto corner_basis = std::make_unique<basis::LagrangeBasis>(corner_type, 1);
+        if (static_cast<std::size_t>(corner_basis->size()) < n_field_basis) {
+            extension_element_type = corner_type;
+            linear_extension_basis = std::move(corner_basis);
+        }
+    }
+    const basis::BasisFunction& extension_basis =
+        linear_extension_basis ? static_cast<const basis::BasisFunction&>(*linear_extension_basis)
+                               : field_basis;
+    const auto n_extension = static_cast<std::size_t>(extension_basis.size());
+    const auto& field_mesh_to_basis =
+        basis::ReferenceNodeLayout::mesh_to_basis_ordering(extension_element_type);
+
+    // One root proposal: the polynomial extension of local root cell `root`
+    // to the candidate vertex, or the guard or inversion that rejected it.
+    // The counters and maxima of the refresh diagnostic are applied by the
+    // caller from the returned flags.
+    struct RootProposalAttempt {
+        bool emitted{false};
+        // Inversion or basis-size failure.
+        bool inversion_failed{false};
+        bool round_off_acceptance{false};
+        bool extrapolation_rejected{false};
+        bool empty_line{false};
+        bool line_guard_rejected{false};
+        Real attempted_reference_extrapolation{0.0};
+        Real observed_reference_extrapolation{0.0};
+        Real attempted_absolute_coefficient{0.0};
+        Real observed_absolute_coefficient{0.0};
+        Real attempted_row_l1_norm{0.0};
+        Real observed_row_l1_norm{0.0};
+        AggregationDeclaration declaration{};
+    };
+    auto build_root_proposal =
+        [&](GlobalIndex declaration_dof,
+            const GlobalCandidateSupport& candidate,
+            std::size_t root_distance,
+            GlobalIndex root) {
+        RootProposalAttempt attempt;
+        Vector<Real, 3> traced_xi{};
+        Real traced_extrapolation =
+            std::numeric_limits<Real>::quiet_NaN();
+        auto trace_proposal = [&](const char* outcome) {
+            root_proposal_outcomes.push_back(RootProposalOutcome{
+                .candidate_dof = declaration_dof,
+                .root_cell_gid = mesh_global_entity_ids_available
+                                     ? mesh.getCellGlobalId(root)
+                                     : root,
+                .distance = root_distance,
+                .extrapolation = traced_extrapolation,
+                .outcome = outcome});
+            if (!aggregationProposalTraceEnabled()) {
+                return;
+            }
+            std::ostringstream trace;
+            trace << std::setprecision(17)
+                  << "SmallCutAggregationConstraint: diagnostic="
+                     "aggregation_proposal_trace stage=construction"
+                  << " field='" << rec.name << "'"
+                  << " candidate_dof=" << declaration_dof
+                  << " xyz=(" << candidate.coordinates[0] << ","
+                  << candidate.coordinates[1] << ","
+                  << candidate.coordinates[2] << ")"
+                  << " root_cell=" << root
+                  << " root_distance=" << root_distance
+                  << " xi=(" << traced_xi[0] << "," << traced_xi[1]
+                  << "," << traced_xi[2] << ")"
+                  << " extrapolation=" << traced_extrapolation
+                  << " outcome=" << outcome;
+            FE_LOG_INFO(trace.str());
+        };
+        mesh.getCellNodes(root, root_check_nodes);
+        check_cell_pairable(root);
+        const auto n_declared_root_nodes = std::min(
+            {root_check_nodes.size(), n_field_basis, n_extension});
+        std::vector<GlobalIndex> declared_root_masters;
+        declared_root_masters.reserve(n_declared_root_nodes);
+        for (std::size_t node = 0; node < n_declared_root_nodes; ++node) {
+            const auto master_dofs = cell_node_dofs(root, node);
+            if (!master_dofs.empty()) {
+                declared_root_masters.push_back(offset + master_dofs.front());
+            }
+        }
+        std::sort(declared_root_masters.begin(),
+                  declared_root_masters.end());
+        declared_root_masters.erase(
+            std::unique(declared_root_masters.begin(),
+                        declared_root_masters.end()),
+            declared_root_masters.end());
+
+        auto mapping_it = mappings.find(root);
+        if (mapping_it == mappings.end()) {
+            mapping_it =
+                mappings.emplace(root, makeMapping(mesh, root)).first;
+        }
+        const auto& mapping = mapping_it->second;
+        Vector<Real, 3> xi{};
+        bool inversion_stalled_at_round_off = false;
+        if (mapping == nullptr ||
+            !invertMapping(*mapping, candidate.coordinates,
+                           mesh.dimension(), xi,
+                           &inversion_stalled_at_round_off)) {
+            attempt.inversion_failed = true;
+            traced_xi = xi;
+            trace_proposal("inversion_failed");
+            return attempt;
+        }
+        if (inversion_stalled_at_round_off) {
+            attempt.round_off_acceptance = true;
+        }
+        const Real reference_extrapolation =
+            normalizedReferenceExtrapolationDistance(
+                mesh.getCellType(root), xi);
+        traced_xi = xi;
+        traced_extrapolation = reference_extrapolation;
+        attempt.attempted_reference_extrapolation = std::max(
+            attempt.attempted_reference_extrapolation,
+            reference_extrapolation);
+        if (!std::isfinite(reference_extrapolation) ||
+            reference_extrapolation >
+                guards_.maximum_reference_extrapolation_distance +
+                    Real{128.0} * std::numeric_limits<Real>::epsilon() *
+                        std::max(
+                            Real{1.0},
+                            guards_
+                                .maximum_reference_extrapolation_distance)) {
+            attempt.extrapolation_rejected = true;
+            trace_proposal("extrapolation_guard");
+            return attempt;
+        }
+        attempt.observed_reference_extrapolation = std::max(
+            attempt.observed_reference_extrapolation,
+            reference_extrapolation);
+        extension_basis.evaluate_values(xi, values);
+        mesh.getCellNodes(root, cell_nodes);
+        const auto n_root_field_nodes = std::min(
+            {cell_nodes.size(), n_field_basis, n_extension});
+        if (values.size() < n_root_field_nodes ||
+            (!field_mesh_to_basis.empty() &&
+             field_mesh_to_basis.size() < n_root_field_nodes)) {
+            attempt.inversion_failed = true;
+            trace_proposal("basis_size");
+            return attempt;
+        }
+
+        auto& declaration = attempt.declaration;
+        declaration = AggregationDeclaration{
+            .state = AggregationDeclarationState::Rooted,
+            .root_distance = root_distance,
+            .root_cell_gid = mesh_global_entity_ids_available
+                                 ? mesh.getCellGlobalId(root)
+                                 : root,
+            .component_dofs = candidate.component_dofs,
+            .root_master_dofs = std::move(declared_root_masters)};
+        bool proposal_valid = true;
+        for (std::size_t component = 0;
+             component < candidate.component_dofs.size(); ++component) {
+            const auto slave = candidate.component_dofs[component];
+            ConstraintLine line;
+            line.slave_dof = slave;
+            for (std::size_t m = 0; m < n_root_field_nodes; ++m) {
+                const auto master_dofs = cell_node_dofs(root, m);
+                const auto basis_index = field_mesh_to_basis.empty()
+                                             ? m
+                                             : field_mesh_to_basis[m];
+                if (component >= master_dofs.size() ||
+                    basis_index >= values.size()) {
+                    continue;
+                }
+                const auto master = offset + master_dofs[component];
+                const auto weight =
+                    static_cast<double>(values[basis_index]);
+                if (master != slave && std::isfinite(weight) &&
+                    std::abs(weight) >= 1e-12) {
+                    line.entries.push_back({master, weight});
+                } else if (!std::isfinite(weight)) {
+                    proposal_valid = false;
+                }
+            }
+            const auto line_validation =
+                normalizeAndValidateRootedLine(line);
+            if (!line_validation.valid) {
+                proposal_valid = false;
+                break;
+            }
+            const auto line_guard =
+                validateAggregationLineGuards(line, guards_);
+            attempt.attempted_absolute_coefficient = std::max(
+                attempt.attempted_absolute_coefficient,
+                line_guard.maximum_absolute_coefficient);
+            attempt.attempted_row_l1_norm = std::max(
+                attempt.attempted_row_l1_norm,
+                line_guard.row_l1_norm);
+            if (!line_guard.valid) {
+                attempt.line_guard_rejected = true;
+                proposal_valid = false;
+                break;
+            }
+            attempt.observed_absolute_coefficient = std::max(
+                attempt.observed_absolute_coefficient,
+                line_guard.maximum_absolute_coefficient);
+            attempt.observed_row_l1_norm = std::max(
+                attempt.observed_row_l1_norm,
+                line_guard.row_l1_norm);
+            declaration.lines.push_back(std::move(line));
+        }
+        if (!proposal_valid ||
+            declaration.lines.size() != candidate.component_dofs.size()) {
+            attempt.empty_line = true;
+            trace_proposal(proposal_valid ? "line_count" : "line_invalid");
+            return attempt;
+        }
+        trace_proposal("emitted");
+        attempt.emitted = true;
+        return attempt;
+    };
+    auto apply_attempt_counters = [&](const RootProposalAttempt& attempt) {
+        inversion_failed += attempt.inversion_failed ? 1u : 0u;
+        inversion_round_off_acceptances +=
+            attempt.round_off_acceptance ? 1u : 0u;
+        extrapolation_guard_rejections +=
+            attempt.extrapolation_rejected ? 1u : 0u;
+        empty_lines += attempt.empty_line ? 1u : 0u;
+        line_guard_rejections += attempt.line_guard_rejected ? 1u : 0u;
+        maximum_attempted_reference_extrapolation = std::max(
+            maximum_attempted_reference_extrapolation,
+            attempt.attempted_reference_extrapolation);
+        maximum_observed_reference_extrapolation = std::max(
+            maximum_observed_reference_extrapolation,
+            attempt.observed_reference_extrapolation);
+        maximum_attempted_absolute_coefficient = std::max(
+            maximum_attempted_absolute_coefficient,
+            attempt.attempted_absolute_coefficient);
+        maximum_observed_absolute_coefficient = std::max(
+            maximum_observed_absolute_coefficient,
+            attempt.observed_absolute_coefficient);
+        maximum_attempted_row_l1_norm = std::max(
+            maximum_attempted_row_l1_norm, attempt.attempted_row_l1_norm);
+        maximum_observed_row_l1_norm = std::max(
+            maximum_observed_row_l1_norm, attempt.observed_row_l1_norm);
+    };
+
+    // Candidate DOFs this rank condenses: DOFs of its owned cells (assembled
+    // here under reverse scatter) and of their face neighbors (reached by
+    // facet terms). Such a rank needs the canonical line and all masters, or
+    // the discretization would change. Under reverse scatter, candidate DOFs
+    // of other local cells holding an owned DOF only couple to owned rows;
+    // missing masters there cost Jacobian entries, not correctness.
+    const auto compute_assembled_candidate_dofs =
+        [&](const GlobalCandidateMap& global_candidates,
+            std::set<GlobalIndex>& assembled_candidate_dofs,
+            std::set<GlobalIndex>& row_coupled_candidate_dofs) {
+            // Candidate component DOFs, sorted and distinct, with dense
+            // per-DOF marks over their range: one array read per cell DOF
+            // instead of a set probe, and one ordered insertion per marked
+            // candidate instead of one per incident cell.
+            std::vector<GlobalIndex> candidate_component_dofs;
+            for (const auto& [dof, candidate] : global_candidates) {
+                static_cast<void>(dof);
+                candidate_component_dofs.insert(
+                    candidate_component_dofs.end(),
+                    candidate.component_dofs.begin(),
+                    candidate.component_dofs.end());
+            }
+            std::sort(candidate_component_dofs.begin(),
+                      candidate_component_dofs.end());
+            candidate_component_dofs.erase(
+                std::unique(candidate_component_dofs.begin(),
+                            candidate_component_dofs.end()),
+                candidate_component_dofs.end());
+            const GlobalIndex candidate_dof_base =
+                candidate_component_dofs.empty()
+                    ? GlobalIndex{0}
+                    : candidate_component_dofs.front();
+            const std::size_t candidate_dof_span =
+                candidate_component_dofs.empty()
+                    ? std::size_t{0}
+                    : static_cast<std::size_t>(
+                          candidate_component_dofs.back() -
+                          candidate_dof_base) + 1u;
+            constexpr unsigned char candidate_bit = 1u;
+            constexpr unsigned char assembled_bit = 2u;
+            constexpr unsigned char row_coupled_bit = 4u;
+            std::vector<unsigned char> candidate_marks(candidate_dof_span, 0u);
+            for (const auto dof : candidate_component_dofs) {
+                candidate_marks[static_cast<std::size_t>(
+                    dof - candidate_dof_base)] = candidate_bit;
+            }
+            auto candidate_mark = [&](GlobalIndex dof) -> unsigned char* {
+                if (dof < candidate_dof_base ||
+                    static_cast<std::size_t>(dof - candidate_dof_base) >=
+                        candidate_dof_span) {
+                    return nullptr;
+                }
+                auto* mark = &candidate_marks[static_cast<std::size_t>(
+                    dof - candidate_dof_base)];
+                return (*mark & candidate_bit) != 0u ? mark : nullptr;
+            };
+            const auto& assembly_partition =
+                system.dofHandler().getPartition();
+            const auto n_local_cells = mesh.numCells();
+            std::vector<unsigned char> assembled_cell(
+                static_cast<std::size_t>(std::max<GlobalIndex>(0, n_local_cells)),
+                static_cast<unsigned char>(0));
+            auto mark_cell = [&](GlobalIndex cell) {
+                if (cell >= 0 && cell < n_local_cells) {
+                    assembled_cell[static_cast<std::size_t>(cell)] = 1u;
+                }
+            };
+            for (GlobalIndex cell = 0; cell < n_local_cells; ++cell) {
+                if (mesh.isOwnedCell(cell)) {
+                    mark_cell(cell);
+                }
+            }
+            mesh.forEachInteriorFace(
+                [&](GlobalIndex, GlobalIndex first, GlobalIndex second) {
+                    if (first >= 0 && first < n_local_cells &&
+                        mesh.isOwnedCell(first)) {
+                        mark_cell(second);
+                    }
+                    if (second >= 0 && second < n_local_cells &&
+                        mesh.isOwnedCell(second)) {
+                        mark_cell(first);
+                    }
+                });
+            // Owned-row assembly (any policy but reverse scatter) condenses
+            // every local cell that holds an owned row as well.
+            const bool owned_cells_only =
+                system.assemblyGhostPolicy() ==
+                assembly::GhostPolicy::ReverseScatter;
+            for (GlobalIndex cell = 0; cell < n_local_cells; ++cell) {
+                const auto cell_dofs = dh.getCellDofs(cell);
+                const bool row_coupled =
+                    std::any_of(cell_dofs.begin(), cell_dofs.end(),
+                                [&](GlobalIndex dof) {
+                                    return assembly_partition.isOwned(offset + dof);
+                                });
+                const bool assembled =
+                    assembled_cell[static_cast<std::size_t>(cell)] != 0u ||
+                    (!owned_cells_only && row_coupled);
+                if (!assembled && !row_coupled) {
+                    continue;
+                }
+                for (const auto dof : cell_dofs) {
+                    auto* mark = candidate_mark(offset + dof);
+                    if (mark == nullptr) {
+                        continue;
+                    }
+                    if (assembled) {
+                        *mark |= assembled_bit;
+                    }
+                    if (row_coupled) {
+                        *mark |= row_coupled_bit;
+                    }
+                }
+            }
+            for (const auto dof : candidate_component_dofs) {
+                const auto mark = candidate_marks[static_cast<std::size_t>(
+                    dof - candidate_dof_base)];
+                if ((mark & assembled_bit) != 0u) {
+                    assembled_candidate_dofs.insert(
+                        assembled_candidate_dofs.end(), dof);
+                }
+                if ((mark & row_coupled_bit) != 0u) {
+                    row_coupled_candidate_dofs.insert(
+                        row_coupled_candidate_dofs.end(), dof);
+                }
+            }
+    };
+
+#if FE_HAS_MPI
+    // Owner-sourced refresh (see the description above resolveCellCensus).
+    // It fills the outputs above exactly as the communicator-global refresh
+    // below does and returns true, or returns false, with no output changed,
+    // when any rank finds an inconsistency, a failure or a debug condition;
+    // the communicator-global refresh then runs and reports what it always
+    // reported.  Collective: every rank takes the same branch at every
+    // all_ok() checkpoint, and no collective call is skipped by a local
+    // exception.
+    const auto run_owner_sourced_refresh = [&]() -> bool {
+        const auto comm = system.dofHandler().mpiComm();
+        int my_rank = 0;
+        int world_size = 1;
+        MPI_Comm_rank(comm, &my_rank);
+        MPI_Comm_size(comm, &world_size);
+        const auto n_ranks = static_cast<std::size_t>(world_size);
+        const auto all_ok = [&](bool ok) {
+            const int local = ok ? 1 : 0;
+            int global = 0;
+            MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_MIN, comm);
+            return global != 0;
+        };
+        const auto& partition = system.dofHandler().getPartition();
+        bool ok = true;
+
+        // Every stored cell with field DOFs, by physical cell ID.  Every
+        // owned one must carry this rank's own classification (its rules).
+        std::vector<std::pair<GlobalIndex, GlobalIndex>> local_cells_by_gid;
+        try {
+            local_cells_by_gid.reserve(local_cell_by_key.size());
+            for (const auto& [key, cell] : local_cell_by_key) {
+                static_cast<void>(key);
+                const auto gid = mesh.getCellGlobalId(cell);
+                if (gid < 0 ||
+                    (mesh.isOwnedCell(cell) && cell_class.count(cell) == 0u)) {
+                    ok = false;
+                    break;
+                }
+                local_cells_by_gid.emplace_back(gid, cell);
+            }
+            std::sort(local_cells_by_gid.begin(), local_cells_by_gid.end());
+            ok = ok &&
+                 std::adjacent_find(local_cells_by_gid.begin(),
+                                    local_cells_by_gid.end(),
+                                    [](const auto& lhs, const auto& rhs) {
+                                        return lhs.first == rhs.first;
+                                    }) == local_cells_by_gid.end();
+        } catch (...) {
+            ok = false;
+        }
+        if (!all_ok(ok)) {
+            return false;
+        }
+        const auto local_cell_of = [&](GlobalIndex gid) -> GlobalIndex {
+            const auto it = std::lower_bound(
+                local_cells_by_gid.begin(), local_cells_by_gid.end(), gid,
+                [](const auto& entry, GlobalIndex key) {
+                    return entry.first < key;
+                });
+            return it != local_cells_by_gid.end() && it->first == gid
+                       ? it->second
+                       : INVALID_GLOBAL_INDEX;
+        };
+        const auto class_of = [&](GlobalIndex cell) -> const CellClass* {
+            const auto it = cell_class.find(cell);
+            return it == cell_class.end() ? nullptr : &it->second;
+        };
+
+        // ---- Cell census: ownership, classification, provider, holders ----
+        std::vector<std::vector<std::int64_t>> outgoing(n_ranks);
+        try {
+            for (const auto& [gid, cell] : local_cells_by_gid) {
+                std::int64_t flags =
+                    mesh.isOwnedCell(cell) ? kCellCensusOwned : 0;
+                if (const auto* klass = class_of(cell)) {
+                    flags |= kCellCensusClassified;
+                    if (klass->full_active || klass->cut) {
+                        flags |= kCellCensusActive;
+                    }
+                }
+                auto& words = outgoing[static_cast<std::size_t>(
+                    ownerSourcedHome(static_cast<std::uint64_t>(gid),
+                                     world_size))];
+                words.push_back(static_cast<std::int64_t>(gid));
+                words.push_back(flags);
+            }
+        } catch (...) {
+            ok = false;
+        }
+        if (!all_ok(ok)) {
+            return false;
+        }
+        GatheredInt64Words census;
+        try {
+            census = exchangeInt64Words(
+                comm, outgoing, AggregationProfileExchange::CellCensus);
+        } catch (...) {
+            return false;
+        }
+        std::vector<std::vector<std::int64_t>> census_replies;
+        try {
+            ok = resolveCellCensus(census, world_size, census_replies);
+        } catch (...) {
+            ok = false;
+        }
+        census = GatheredInt64Words{};
+        if (!all_ok(ok)) {
+            return false;
+        }
+        GatheredInt64Words replies;
+        try {
+            replies = exchangeInt64Words(
+                comm,
+                census_replies,
+                AggregationProfileExchange::CellCensusReplies);
+        } catch (...) {
+            return false;
+        }
+        std::unordered_map<GlobalIndex, CellCensusReply> owned_active_census;
+        try {
+            if (replies.words.size() % 4u != 0u) {
+                ok = false;
+            }
+            for (std::size_t i = 0u; ok && i < replies.words.size(); i += 4u) {
+                const auto gid = static_cast<GlobalIndex>(replies.words[i]);
+                const CellCensusReply reply{
+                    .provider_rank = static_cast<int>(replies.words[i + 1u]),
+                    .holder_count = static_cast<int>(replies.words[i + 2u]),
+                    .min_holder_rank =
+                        static_cast<int>(replies.words[i + 3u])};
+                const auto cell = local_cell_of(gid);
+                const auto* klass = cell == INVALID_GLOBAL_INDEX
+                                        ? nullptr
+                                        : class_of(cell);
+                if (klass == nullptr || !mesh.isOwnedCell(cell) ||
+                    !(klass->full_active || klass->cut) ||
+                    !owned_active_census.emplace(gid, reply).second) {
+                    ok = false;
+                }
+            }
+            std::size_t owned_active = 0u;
+            for (const auto& [gid, cell] : local_cells_by_gid) {
+                static_cast<void>(gid);
+                const auto* klass = class_of(cell);
+                if (mesh.isOwnedCell(cell) && klass != nullptr &&
+                    (klass->full_active || klass->cut)) {
+                    ++owned_active;
+                }
+            }
+            ok = ok && owned_active == owned_active_census.size();
+        } catch (...) {
+            ok = false;
+        }
+        replies = GatheredInt64Words{};
+        if (!all_ok(ok)) {
+            return false;
+        }
+        profile.mark(AggregationProfilePhase::CellClassExchange);
+
+        // ---- Faces: owners match the faces of their cells locally ----
+        using FaceKey = std::vector<GlobalIndex>;
+        std::vector<GlobalIndex> face_cell_nodes;
+        // Sorted face-DOF signatures of a cell, as the communicator-global
+        // owner face signatures; throws when they cannot be formed.
+        const auto cell_face_keys = [&](GlobalIndex cell,
+                                        std::vector<FaceKey>& keys) {
+            mesh.getCellNodes(cell, face_cell_nodes);
+            if (layout == CellDofLayout::Unknown && components > 1) {
+                detect_layout(cell, face_cell_nodes);
+            }
+            if (layout == CellDofLayout::Unknown && components > 1) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: cannot determine "
+                    "product-field cell DOF ordering for face signatures");
+            }
+            check_cell_pairable(cell);
+            const auto& ref =
+                elements::ReferenceElement::shared(mesh.getCellType(cell));
+            const auto n_cell_faces = static_cast<std::size_t>(ref.num_faces());
+            keys.assign(n_cell_faces, FaceKey{});
+            for (std::size_t face = 0; face < n_cell_faces; ++face) {
+                auto& face_key = keys[face];
+                const auto& face_nodes = ref.face_nodes(face);
+                face_key.reserve(face_nodes.size() * components);
+                for (const auto local_node : face_nodes) {
+                    if (local_node < 0 ||
+                        static_cast<std::size_t>(local_node) >=
+                            face_cell_nodes.size() ||
+                        static_cast<std::size_t>(local_node) >=
+                            n_field_basis) {
+                        throw std::runtime_error(
+                            "SmallCutAggregationConstraint: incomplete "
+                            "face-DOF signature");
+                    }
+                    const auto node_dofs = cell_node_dofs(
+                        cell, static_cast<std::size_t>(local_node));
+                    if (node_dofs.size() != components) {
+                        throw std::runtime_error(
+                            "SmallCutAggregationConstraint: incomplete nodal "
+                            "DOFs in a face signature");
+                    }
+                    for (const auto dof : node_dofs) {
+                        face_key.push_back(offset + dof);
+                    }
+                }
+                std::sort(face_key.begin(), face_key.end());
+                if (face_key.empty() ||
+                    std::adjacent_find(face_key.begin(), face_key.end()) !=
+                        face_key.end()) {
+                    throw std::runtime_error(
+                        "SmallCutAggregationConstraint: invalid face-DOF "
+                        "signature");
+                }
+            }
+            std::sort(keys.begin(), keys.end());
+            if (std::adjacent_find(keys.begin(), keys.end()) != keys.end()) {
+                throw std::runtime_error(
+                    "SmallCutAggregationConstraint: cell has duplicate "
+                    "face-DOF signatures");
+            }
+        };
+        // Face neighbors (physical IDs) of every owned cell.
+        std::unordered_map<GlobalIndex, std::vector<GlobalIndex>>
+            owned_neighbor_gids;
+        std::vector<std::vector<std::int64_t>> face_outgoing(n_ranks);
+        try {
+            struct FaceIncidence {
+                FaceKey key{};
+                GlobalIndex cell{INVALID_GLOBAL_INDEX};
+                GlobalIndex gid{INVALID_GLOBAL_INDEX};
+                bool owned{false};
+            };
+            std::vector<FaceIncidence> incidences;
+            std::unordered_set<GlobalIndex> owned_nodes;
+            std::vector<GlobalIndex> nodes;
+            for (const auto& [gid, cell] : local_cells_by_gid) {
+                static_cast<void>(gid);
+                if (!mesh.isOwnedCell(cell)) {
+                    continue;
+                }
+                mesh.getCellNodes(cell, nodes);
+                owned_nodes.insert(nodes.begin(), nodes.end());
+            }
+            std::vector<FaceKey> keys;
+            for (const auto& [gid, cell] : local_cells_by_gid) {
+                const bool owned = mesh.isOwnedCell(cell);
+                if (!owned) {
+                    mesh.getCellNodes(cell, nodes);
+                    if (std::none_of(nodes.begin(), nodes.end(),
+                                     [&](GlobalIndex node) {
+                                         return owned_nodes.count(node) != 0u;
+                                     })) {
+                        continue;
+                    }
+                }
+                cell_face_keys(cell, keys);
+                for (auto& key : keys) {
+                    incidences.push_back(FaceIncidence{
+                        .key = std::move(key),
+                        .cell = cell,
+                        .gid = gid,
+                        .owned = owned});
+                }
+            }
+            std::sort(incidences.begin(), incidences.end(),
+                      [](const FaceIncidence& lhs, const FaceIncidence& rhs) {
+                          if (lhs.key != rhs.key) {
+                              return lhs.key < rhs.key;
+                          }
+                          return lhs.cell < rhs.cell;
+                      });
+            for (const auto& [gid, cell] : local_cells_by_gid) {
+                if (mesh.isOwnedCell(cell)) {
+                    owned_neighbor_gids.try_emplace(gid);
+                }
+            }
+            for (std::size_t first = 0u; ok && first < incidences.size();) {
+                std::size_t last = first + 1u;
+                while (last < incidences.size() &&
+                       incidences[last].key == incidences[first].key) {
+                    ++last;
+                }
+                const auto count = last - first;
+                const bool any_owned = std::any_of(
+                    incidences.begin() + static_cast<std::ptrdiff_t>(first),
+                    incidences.begin() + static_cast<std::ptrdiff_t>(last),
+                    [](const FaceIncidence& incidence) {
+                        return incidence.owned;
+                    });
+                if (any_owned) {
+                    if (count > 2u) {
+                        ok = false;
+                    } else {
+                        const auto hash = static_cast<std::int64_t>(
+                            ownerSourcedKeyHash(incidences[first].key));
+                        auto& words = face_outgoing[static_cast<std::size_t>(
+                            ownerSourcedHome(static_cast<std::uint64_t>(hash),
+                                             world_size))];
+                        if (count == 1u) {
+                            words.push_back(hash);
+                            words.push_back(kFaceCensusOpen);
+                        } else {
+                            const auto& a = incidences[first];
+                            const auto& b = incidences[first + 1u];
+                            if (a.owned) {
+                                owned_neighbor_gids[a.gid].push_back(b.gid);
+                            }
+                            if (b.owned) {
+                                owned_neighbor_gids[b.gid].push_back(a.gid);
+                            }
+                            if (a.owned != b.owned) {
+                                words.push_back(hash);
+                                words.push_back(kFaceCensusShared);
+                            }
+                        }
+                    }
+                }
+                first = last;
+            }
+            for (auto& [gid, neighbors] : owned_neighbor_gids) {
+                static_cast<void>(gid);
+                std::sort(neighbors.begin(), neighbors.end());
+                if (std::adjacent_find(neighbors.begin(), neighbors.end()) !=
+                    neighbors.end()) {
+                    ok = false;
+                }
+            }
+        } catch (...) {
+            ok = false;
+        }
+        if (!all_ok(ok)) {
+            return false;
+        }
+        GatheredInt64Words face_census;
+        try {
+            face_census = exchangeInt64Words(
+                comm, face_outgoing, AggregationProfileExchange::FaceCensus);
+        } catch (...) {
+            return false;
+        }
+        try {
+            ok = resolveFaceCensus(face_census, world_size);
+        } catch (...) {
+            ok = false;
+        }
+        face_census = GatheredInt64Words{};
+        if (!all_ok(ok)) {
+            return false;
+        }
+        profile.mark(AggregationProfilePhase::FaceGraph);
+
+        // ---- Active-cell ledger: one record per active cell, by its owner ----
+        std::vector<std::array<Real, 3>> geometry_coordinates;
+        const auto geometry_digest = [&](GlobalIndex cell) {
+            mesh.getCellCoordinates(cell, geometry_coordinates);
+            std::uint64_t digest = 0x534f475f47454f4dull;
+            digest = ownerSourcedMix(
+                digest, static_cast<std::uint64_t>(mesh.getCellType(cell)));
+            digest = ownerSourcedMix(
+                digest,
+                static_cast<std::uint64_t>(geometry_coordinates.size()));
+            for (const auto& point : geometry_coordinates) {
+                for (const auto coordinate : point) {
+                    digest = ownerSourcedMix(
+                        digest, std::bit_cast<std::uint64_t>(
+                                    static_cast<double>(coordinate)));
+                }
+            }
+            return digest;
+        };
+        // Field DOFs over the field nodes in node order (node-major).
+        const auto node_ordered_dofs = [&](GlobalIndex cell) {
+            check_cell_pairable(cell);
+            std::vector<GlobalIndex> dofs;
+            dofs.reserve(n_field_basis * components);
+            for (std::size_t node = 0u; node < n_field_basis; ++node) {
+                const auto node_dofs = cell_node_dofs(cell, node);
+                if (node_dofs.size() != components) {
+                    throw std::runtime_error(
+                        "SmallCutAggregationConstraint: incomplete nodal "
+                        "DOFs");
+                }
+                for (const auto dof : node_dofs) {
+                    dofs.push_back(offset + dof);
+                }
+            }
+            return dofs;
+        };
+        // Measure of a locally classified active cell as the classification
+        // declares it: rule count, volume and identities (unavailable first).
+        const auto local_measure =
+            [&](GlobalIndex cell, std::size_t& rule_count, Real& volume,
+                std::vector<std::uint64_t>& rule_ids) {
+                const auto& measure = local_active_cell_measures.at(cell);
+                rule_count = measure.rule_count;
+                volume = measure.physical_volume;
+                rule_ids.assign(measure.missing_stable_rule_ids,
+                                std::uint64_t{0});
+                rule_ids.insert(rule_ids.end(),
+                                measure.stable_rule_ids.begin(),
+                                measure.stable_rule_ids.end());
+            };
+        std::vector<std::int64_t> ledger_words;
+        try {
+            for (const auto& [gid, cell] : local_cells_by_gid) {
+                if (!mesh.isOwnedCell(cell)) {
+                    continue;
+                }
+                const auto* klass = class_of(cell);
+                if (klass == nullptr || !(klass->full_active || klass->cut)) {
+                    continue;
+                }
+                if (klass->full_active && klass->cut) {
+                    ok = false;
+                    break;
+                }
+                OwnerSourcedActiveCell record;
+                record.gid = gid;
+                record.klass = *klass;
+                const auto& census_reply = owned_active_census.at(gid);
+                record.provider_rank = census_reply.provider_rank;
+                record.holder_count = census_reply.holder_count;
+                record.min_holder_rank = census_reply.min_holder_rank;
+                local_measure(cell, record.rule_count, record.volume,
+                              record.rule_ids);
+                if (record.rule_count != record.rule_ids.size()) {
+                    ok = false;
+                    break;
+                }
+                record.node_dofs = node_ordered_dofs(cell);
+                record.geometry_digest = geometry_digest(cell);
+                record.neighbor_gids = owned_neighbor_gids.at(gid);
+                appendOwnerSourcedActiveCell(ledger_words, record);
+            }
+        } catch (...) {
+            ok = false;
+        }
+        if (!all_ok(ok)) {
+            return false;
+        }
+        GatheredInt64Words ledger_gathered;
+        try {
+            ledger_gathered = allGatherInt64Words(
+                comm,
+                std::span<const std::int64_t>(ledger_words),
+                AggregationProfileExchange::ActiveCellLedger);
+        } catch (...) {
+            return false;
+        }
+        std::vector<OwnerSourcedActiveCell> ledger;
+        try {
+            ok = decodeOwnerSourcedActiveCells(
+                ledger_gathered, world_size, ledger);
+        } catch (...) {
+            ok = false;
+        }
+        ledger_gathered = GatheredInt64Words{};
+        if (!all_ok(ok)) {
+            return false;
+        }
+
+        // Every stored copy of an active cell must be the owner's: the same
+        // classification and measure where this rank classified it, and the
+        // same field DOFs and node coordinates.  A classified cell absent
+        // from the ledger must be inactive here too.
+        try {
+            std::size_t rule_count = 0u;
+            Real volume = 0.0;
+            std::vector<std::uint64_t> rule_ids;
+            for (const auto& [gid, cell] : local_cells_by_gid) {
+                const auto* canonical = findOwnerSourcedActiveCell(ledger, gid);
+                const auto* klass = class_of(cell);
+                const bool active =
+                    klass != nullptr && (klass->full_active || klass->cut);
+                if (canonical == nullptr) {
+                    if (active) {
+                        ok = false;
+                        break;
+                    }
+                    continue;
+                }
+                if (klass != nullptr) {
+                    if (klass->full_active != canonical->klass.full_active ||
+                        klass->cut != canonical->klass.cut) {
+                        ok = false;
+                        break;
+                    }
+                    local_measure(cell, rule_count, volume, rule_ids);
+                    if (rule_count != canonical->rule_count ||
+                        volume != canonical->volume ||
+                        rule_ids != canonical->rule_ids) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (node_ordered_dofs(cell) != canonical->node_dofs ||
+                    geometry_digest(cell) != canonical->geometry_digest) {
+                    ok = false;
+                    break;
+                }
+            }
+        } catch (...) {
+            ok = false;
+        }
+        if (!all_ok(ok)) {
+            return false;
+        }
+        // Communicator classes of every stored cell, as the global refresh
+        // copies them onto ghosts whose rules were owner-filtered.
+        for (const auto& [gid, cell] : local_cells_by_gid) {
+            const auto* canonical = findOwnerSourcedActiveCell(ledger, gid);
+            cell_class[cell] =
+                canonical == nullptr ? CellClass{} : canonical->klass;
+        }
+
+        // ---- Graph of the active cells and their face neighbors ----
+        // Active cells in key order (the order of the classified cells),
+        // then their inactive neighbors, which only count traversal visits.
+        std::vector<std::size_t> active_order(ledger.size());
+        std::iota(active_order.begin(), active_order.end(), std::size_t{0});
+        std::vector<GlobalIndex> inactive_neighbors;
+        std::vector<CellKey> graph_keys;
+        std::vector<CellClass> graph_class;
+        std::vector<GlobalIndex> graph_gid;
+        std::vector<Real> graph_volume;
+        std::vector<std::vector<std::uint64_t>> graph_rule_ids;
+        std::vector<int> graph_provider;
+        std::vector<int> graph_owner;
+        std::vector<std::vector<std::size_t>> graph_neighbors;
+        std::vector<std::size_t> graph_index_of_ledger(ledger.size());
+        ActiveFeatureLedger feature_ledger;
+        std::optional<ClassifiedCellIndex> graph_cells;
+        try {
+            std::sort(active_order.begin(), active_order.end(),
+                      [&](std::size_t lhs, std::size_t rhs) {
+                          return ledger[lhs].key < ledger[rhs].key;
+                      });
+            for (std::size_t i = 1u; i < active_order.size(); ++i) {
+                if (ledger[active_order[i - 1u]].key ==
+                    ledger[active_order[i]].key) {
+                    ok = false;
+                }
+            }
+            for (const auto& cell : ledger) {
+                for (const auto neighbor : cell.neighbor_gids) {
+                    if (findOwnerSourcedActiveCell(ledger, neighbor) ==
+                        nullptr) {
+                        inactive_neighbors.push_back(neighbor);
+                    }
+                }
+            }
+            std::sort(inactive_neighbors.begin(), inactive_neighbors.end());
+            inactive_neighbors.erase(
+                std::unique(inactive_neighbors.begin(),
+                            inactive_neighbors.end()),
+                inactive_neighbors.end());
+            const auto n_active = ledger.size();
+            const auto n_graph = n_active + inactive_neighbors.size();
+            graph_keys.reserve(n_graph);
+            graph_class.reserve(n_graph);
+            graph_gid.reserve(n_graph);
+            graph_volume.reserve(n_graph);
+            graph_rule_ids.reserve(n_graph);
+            graph_provider.reserve(n_graph);
+            graph_owner.reserve(n_graph);
+            for (std::size_t g = 0u; g < n_active; ++g) {
+                const auto& cell = ledger[active_order[g]];
+                graph_index_of_ledger[active_order[g]] = g;
+                graph_keys.push_back(cell.key);
+                graph_class.push_back(cell.klass);
+                graph_gid.push_back(cell.gid);
+                graph_volume.push_back(cell.volume);
+                graph_rule_ids.push_back(cell.rule_ids);
+                graph_provider.push_back(cell.provider_rank);
+                graph_owner.push_back(cell.owner_rank);
+            }
+            for (const auto gid : inactive_neighbors) {
+                // Sorts after every field-DOF key and is unique per cell.
+                graph_keys.push_back(
+                    CellKey{std::numeric_limits<GlobalIndex>::max(), gid});
+                graph_class.push_back(CellClass{});
+                graph_gid.push_back(gid);
+                graph_volume.push_back(Real{0.0});
+                graph_rule_ids.emplace_back();
+                graph_provider.push_back(-1);
+                graph_owner.push_back(-1);
+            }
+            const auto graph_index_of = [&](GlobalIndex gid) {
+                const auto it = std::lower_bound(
+                    ledger.begin(), ledger.end(), gid,
+                    [](const OwnerSourcedActiveCell& cell, GlobalIndex key) {
+                        return cell.gid < key;
+                    });
+                if (it != ledger.end() && it->gid == gid) {
+                    return graph_index_of_ledger[static_cast<std::size_t>(
+                        it - ledger.begin())];
+                }
+                const auto inactive = std::lower_bound(
+                    inactive_neighbors.begin(), inactive_neighbors.end(), gid);
+                return n_active + static_cast<std::size_t>(
+                                      inactive - inactive_neighbors.begin());
+            };
+            graph_neighbors.assign(n_graph, {});
+            for (std::size_t g = 0u; g < n_active; ++g) {
+                auto& neighbors = graph_neighbors[g];
+                for (const auto neighbor :
+                     ledger[active_order[g]].neighbor_gids) {
+                    neighbors.push_back(graph_index_of(neighbor));
+                }
+                std::sort(neighbors.begin(), neighbors.end());
+                neighbors.erase(std::unique(neighbors.begin(), neighbors.end()),
+                                neighbors.end());
+            }
+            // Face adjacency between active cells is symmetric.
+            for (std::size_t g = 0u; ok && g < n_active; ++g) {
+                for (const auto neighbor : graph_neighbors[g]) {
+                    if (neighbor < n_active &&
+                        !std::binary_search(graph_neighbors[neighbor].begin(),
+                                            graph_neighbors[neighbor].end(),
+                                            g)) {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            graph_cells.emplace(std::move(graph_keys));
+            if (ok) {
+                buildActiveFeatureLedger(
+                    AggregationCellGraph{
+                        .cells = *graph_cells,
+                        .klass = graph_class,
+                        .physical_gid = graph_gid,
+                        .volume = graph_volume,
+                        .rule_ids = graph_rule_ids,
+                        .provider_rank = graph_provider,
+                        .owner_rank = graph_owner,
+                        .neighbors = graph_neighbors,
+                    },
+                    feature_ledger);
+            }
+        } catch (...) {
+            ok = false;
+        }
+        if (!all_ok(ok)) {
+            return false;
+        }
+        const AggregationCellGraph graph{
+            .cells = *graph_cells,
+            .klass = graph_class,
+            .physical_gid = graph_gid,
+            .volume = graph_volume,
+            .rule_ids = graph_rule_ids,
+            .provider_rank = graph_provider,
+            .owner_rank = graph_owner,
+            .neighbors = graph_neighbors,
+        };
+        const auto ledger_cell_of_graph =
+            [&](std::size_t graph_cell) -> const OwnerSourcedActiveCell& {
+            return *findOwnerSourcedActiveCell(ledger, graph_gid[graph_cell]);
+        };
+        profile.mark(AggregationProfilePhase::Features);
+
+        // ---- Candidates: merged at a home rank per DOF ----
+        build_local_candidate_support();
+        std::vector<std::vector<std::int64_t>> candidate_outgoing(n_ranks);
+        try {
+            for (const auto& support : local_candidate_support) {
+                if (support.declaration_dof < 0 ||
+                    support.component_dofs.empty() ||
+                    support.component_dofs.front() != support.declaration_dof ||
+                    !std::all_of(support.coordinates.begin(),
+                                 support.coordinates.end(),
+                                 [](Real value) {
+                                     return std::isfinite(value);
+                                 })) {
+                    ok = false;
+                    break;
+                }
+                const std::int64_t flags =
+                    (support.touches_cut ? kCandidateCensusCut : 0) |
+                    (support.touches_full_active ? kCandidateCensusFull : 0) |
+                    (support.excluded ? kCandidateCensusExcluded : 0);
+                auto& words = candidate_outgoing[static_cast<std::size_t>(
+                    ownerSourcedHome(
+                        static_cast<std::uint64_t>(support.declaration_dof),
+                        world_size))];
+                words.push_back(
+                    static_cast<std::int64_t>(support.declaration_dof));
+                if (!support.touches_cut || support.touches_full_active ||
+                    support.excluded) {
+                    words.push_back(flags | kCandidateCensusMarker);
+                    continue;
+                }
+                words.push_back(flags);
+                words.push_back(
+                    static_cast<std::int64_t>(support.component_dofs.size()));
+                for (const auto coordinate : support.coordinates) {
+                    words.push_back(std::bit_cast<std::int64_t>(
+                        static_cast<double>(coordinate)));
+                }
+                for (const auto dof : support.component_dofs) {
+                    words.push_back(static_cast<std::int64_t>(dof));
+                }
+            }
+        } catch (...) {
+            ok = false;
+        }
+        if (!all_ok(ok)) {
+            return false;
+        }
+        GatheredInt64Words candidate_census;
+        try {
+            candidate_census = exchangeInt64Words(
+                comm,
+                candidate_outgoing,
+                AggregationProfileExchange::CandidateCensus);
+        } catch (...) {
+            return false;
+        }
+        std::vector<std::int64_t> merged_words;
+        try {
+            ok = mergeCandidateCensus(candidate_census, world_size, merged_words);
+        } catch (...) {
+            ok = false;
+        }
+        candidate_census = GatheredInt64Words{};
+        if (!all_ok(ok)) {
+            return false;
+        }
+        GatheredInt64Words merged_gathered;
+        try {
+            merged_gathered = allGatherInt64Words(
+                comm,
+                std::span<const std::int64_t>(merged_words),
+                AggregationProfileExchange::MergedCandidates);
+        } catch (...) {
+            return false;
+        }
+        GlobalCandidateMap candidates;
+        try {
+            ok = decodeMergedCandidates(merged_gathered, candidates);
+        } catch (...) {
+            ok = false;
+        }
+        merged_gathered = GatheredInt64Words{};
+        if (!all_ok(ok)) {
+            return false;
+        }
+        profile.setCount(AggregationProfileCount::LocalCandidateSupports,
+                         local_candidate_support.size());
+        profile.setCount(AggregationProfileCount::CommunicatorCandidates,
+                         candidates.size());
+        profile.mark(AggregationProfilePhase::CandidateSupport);
+
+        // ---- Bounded root search (replicated, as the global refresh) ----
+        struct DeferredGuardRootlessLog {
+            std::string reason{};
+            GlobalIndex dof{INVALID_GLOBAL_INDEX};
+            GlobalCandidateSupport support{};
+            std::string detail{};
+        };
+        std::vector<DeferredGuardRootlessLog> deferred_logs;
+        const GuardRootlessLogger defer_log =
+            [&](std::string_view reason,
+                GlobalIndex dof,
+                const GlobalCandidateSupport& support,
+                const std::string& detail) {
+                deferred_logs.push_back(DeferredGuardRootlessLog{
+                    .reason = std::string(reason),
+                    .dof = dof,
+                    .support = support,
+                    .detail = detail});
+            };
+        CandidateRootTraversal traversal;
+        try {
+            traverseCandidateRoots(graph,
+                                   feature_ledger.feature_of,
+                                   candidates,
+                                   guards_,
+                                   /*slave_all_cut=*/false,
+                                   defer_log,
+                                   traversal);
+            check_subparametric_active_cells();
+        } catch (...) {
+            ok = false;
+        }
+        if (!all_ok(ok)) {
+            return false;
+        }
+        profile.mark(AggregationProfilePhase::RootTraversal);
+
+        // ---- Root proposals: built once, by the root's owner ----
+        std::uint64_t weighted_failures = 0u;
+        std::uint64_t weighted_extrapolation_rejections = 0u;
+        std::uint64_t weighted_line_rejections = 0u;
+        std::array<double, 6> owner_maxima{};
+        std::vector<std::int64_t> outcome_words;
+        std::map<std::pair<GlobalIndex, GlobalIndex>, AggregationDeclaration>
+            owned_proposals;
+        std::uint64_t owner_attempts = 0u;
+        try {
+            for (const auto& [dof, candidate] : candidates) {
+                if (!candidate.globally_rooted) {
+                    continue;
+                }
+                const auto roots = traversal.roots_by_candidate.find(dof);
+                if (roots == traversal.roots_by_candidate.end()) {
+                    continue;
+                }
+                for (const auto& root : roots->second) {
+                    const auto& root_cell = ledger_cell_of_graph(root.cell);
+                    if (root_cell.owner_rank != my_rank) {
+                        continue;
+                    }
+                    const auto local_root = local_cell_of(root_cell.gid);
+                    if (local_root == INVALID_GLOBAL_INDEX) {
+                        ok = false;
+                        break;
+                    }
+                    auto attempt = build_root_proposal(
+                        dof, candidate, root.distance, local_root);
+                    ++owner_attempts;
+                    std::int64_t code =
+                        (attempt.emitted ? kProposalEmitted : 0) |
+                        (attempt.inversion_failed ? kProposalInversionFailed
+                                                  : 0) |
+                        (attempt.round_off_acceptance ? kProposalRoundOff : 0) |
+                        (attempt.extrapolation_rejected
+                             ? kProposalExtrapolationRejected
+                             : 0) |
+                        (attempt.empty_line ? kProposalEmptyLine : 0) |
+                        (attempt.line_guard_rejected
+                             ? kProposalLineGuardRejected
+                             : 0);
+                    if (attempt.emitted) {
+                        if (normalizeRootProposal(attempt.declaration)) {
+                            owned_proposals.emplace(
+                                std::make_pair(dof, root_cell.gid),
+                                std::move(attempt.declaration));
+                        } else {
+                            code |= kProposalDropped;
+                        }
+                    }
+                    const auto weight =
+                        static_cast<std::uint64_t>(root_cell.holder_count);
+                    weighted_failures +=
+                        weight *
+                        ((attempt.inversion_failed ? 1u : 0u) +
+                         (attempt.empty_line ? 1u : 0u) +
+                         (attempt.extrapolation_rejected ? 1u : 0u) +
+                         (attempt.line_guard_rejected ? 1u : 0u));
+                    weighted_extrapolation_rejections +=
+                        weight * (attempt.extrapolation_rejected ? 1u : 0u);
+                    weighted_line_rejections +=
+                        weight * (attempt.line_guard_rejected ? 1u : 0u);
+                    owner_maxima[0] = std::max(
+                        owner_maxima[0],
+                        static_cast<double>(
+                            attempt.attempted_reference_extrapolation));
+                    owner_maxima[1] = std::max(
+                        owner_maxima[1],
+                        static_cast<double>(
+                            attempt.observed_reference_extrapolation));
+                    owner_maxima[2] = std::max(
+                        owner_maxima[2],
+                        static_cast<double>(
+                            attempt.attempted_absolute_coefficient));
+                    owner_maxima[3] = std::max(
+                        owner_maxima[3],
+                        static_cast<double>(
+                            attempt.observed_absolute_coefficient));
+                    owner_maxima[4] = std::max(
+                        owner_maxima[4],
+                        static_cast<double>(attempt.attempted_row_l1_norm));
+                    owner_maxima[5] = std::max(
+                        owner_maxima[5],
+                        static_cast<double>(attempt.observed_row_l1_norm));
+                    outcome_words.push_back(static_cast<std::int64_t>(dof));
+                    outcome_words.push_back(
+                        static_cast<std::int64_t>(root_cell.gid));
+                    outcome_words.push_back(code);
+                }
+                if (!ok) {
+                    break;
+                }
+            }
+        } catch (...) {
+            ok = false;
+        }
+        if (!all_ok(ok)) {
+            return false;
+        }
+        GatheredInt64Words outcomes;
+        try {
+            outcomes = allGatherInt64Words(
+                comm,
+                std::span<const std::int64_t>(outcome_words),
+                AggregationProfileExchange::ProposalOutcomes);
+        } catch (...) {
+            return false;
+        }
+        // Rank-local diagnostic counters (each holder of a root counts the
+        // attempt, as when every holder built it), the preferred valid
+        // proposal of every candidate, and its owner.
+        std::size_t local_inversion_failed = 0u;
+        std::size_t local_round_off = 0u;
+        std::size_t local_extrapolation_rejections = 0u;
+        std::size_t local_empty_lines = 0u;
+        std::size_t local_line_rejections = 0u;
+        std::size_t local_aggregated = 0u;
+        struct PreferredProposal {
+            std::size_t distance{std::numeric_limits<std::size_t>::max()};
+            GlobalIndex root_gid{INVALID_GLOBAL_INDEX};
+        };
+        std::map<GlobalIndex, PreferredProposal> preferred;
+        try {
+            if (outcomes.words.size() % 3u != 0u) {
+                ok = false;
+            }
+            std::set<GlobalIndex> locally_emitted_candidates;
+            std::map<GlobalIndex, std::map<GlobalIndex, std::size_t>>
+                root_distances;
+            for (std::size_t i = 0u; ok && i < outcomes.words.size(); i += 3u) {
+                const auto dof = static_cast<GlobalIndex>(outcomes.words[i]);
+                const auto root_gid =
+                    static_cast<GlobalIndex>(outcomes.words[i + 1u]);
+                const auto code = outcomes.words[i + 2u];
+                if (local_cell_of(root_gid) != INVALID_GLOBAL_INDEX) {
+                    local_inversion_failed +=
+                        (code & kProposalInversionFailed) != 0 ? 1u : 0u;
+                    local_round_off += (code & kProposalRoundOff) != 0 ? 1u : 0u;
+                    local_extrapolation_rejections +=
+                        (code & kProposalExtrapolationRejected) != 0 ? 1u : 0u;
+                    local_empty_lines +=
+                        (code & kProposalEmptyLine) != 0 ? 1u : 0u;
+                    local_line_rejections +=
+                        (code & kProposalLineGuardRejected) != 0 ? 1u : 0u;
+                    if ((code & kProposalEmitted) != 0) {
+                        locally_emitted_candidates.insert(dof);
+                    }
+                }
+                if ((code & kProposalEmitted) == 0 ||
+                    (code & kProposalDropped) != 0) {
+                    continue;
+                }
+                auto distances = root_distances.find(dof);
+                if (distances == root_distances.end()) {
+                    auto& by_root = root_distances[dof];
+                    const auto roots = traversal.roots_by_candidate.find(dof);
+                    if (roots != traversal.roots_by_candidate.end()) {
+                        for (const auto& root : roots->second) {
+                            by_root.emplace(graph_gid[root.cell], root.distance);
+                        }
+                    }
+                    distances = root_distances.find(dof);
+                }
+                const auto distance = distances->second.find(root_gid);
+                if (distance == distances->second.end()) {
+                    ok = false;
+                    break;
+                }
+                auto& best = preferred[dof];
+                if (std::tie(distance->second, root_gid) <
+                    std::tie(best.distance, best.root_gid)) {
+                    best.distance = distance->second;
+                    best.root_gid = root_gid;
+                }
+            }
+            local_aggregated = locally_emitted_candidates.size();
+        } catch (...) {
+            ok = false;
+        }
+        outcomes = GatheredInt64Words{};
+        if (!all_ok(ok)) {
+            return false;
+        }
+        std::vector<std::int64_t> preferred_words;
+        bool preferred_payload_valid = true;
+        try {
+            LocalAggregationDeclarationMap preferred_owned;
+            for (const auto& [dof, best] : preferred) {
+                const auto owned =
+                    owned_proposals.find(std::make_pair(dof, best.root_gid));
+                if (owned != owned_proposals.end()) {
+                    preferred_owned[dof].push_back(owned->second);
+                }
+            }
+            serializeRootProposals(preferred_owned,
+                                   candidates,
+                                   preferred_words,
+                                   preferred_payload_valid);
+            ok = preferred_payload_valid;
+        } catch (...) {
+            ok = false;
+        }
+        if (!all_ok(ok)) {
+            return false;
+        }
+        GatheredInt64Words preferred_gathered;
+        try {
+            preferred_gathered = allGatherInt64Words(
+                comm,
+                std::span<const std::int64_t>(preferred_words),
+                AggregationProfileExchange::PreferredProposals);
+        } catch (...) {
+            return false;
+        }
+        RankedDeclarationMap declarations_by_dof;
+        try {
+            decodeRootProposals(
+                preferred_gathered,
+                world_size,
+                [&](int, GlobalIndex root_gid) {
+                    const auto* cell =
+                        findOwnerSourcedActiveCell(ledger, root_gid);
+                    return cell == nullptr ? -1 : cell->min_holder_rank;
+                },
+                declarations_by_dof);
+            for (const auto& [dof, best] : preferred) {
+                const auto found = declarations_by_dof.find(dof);
+                if (found == declarations_by_dof.end() ||
+                    found->second.size() != 1u ||
+                    found->second.front().rank < 0 ||
+                    found->second.front().declaration.root_cell_gid !=
+                        best.root_gid) {
+                    ok = false;
+                    break;
+                }
+            }
+            ok = ok && declarations_by_dof.size() == preferred.size();
+        } catch (...) {
+            ok = false;
+        }
+        preferred_gathered = GatheredInt64Words{};
+        if (!all_ok(ok)) {
+            return false;
+        }
+        const std::array<std::uint64_t, 3> local_weighted{{
+            weighted_failures,
+            weighted_extrapolation_rejections,
+            weighted_line_rejections}};
+        std::array<std::uint64_t, 3> summed_weighted{};
+        MPI_Allreduce(local_weighted.data(),
+                      summed_weighted.data(),
+                      static_cast<int>(summed_weighted.size()),
+                      MPI_UINT64_T,
+                      MPI_SUM,
+                      comm);
+        std::array<double, 6> global_maxima{};
+        MPI_Allreduce(owner_maxima.data(),
+                      global_maxima.data(),
+                      static_cast<int>(global_maxima.size()),
+                      MPI_DOUBLE,
+                      MPI_MAX,
+                      comm);
+        profile.setCount(AggregationProfileCount::LocalRootProposals,
+                         owner_attempts);
+        profile.mark(AggregationProfilePhase::RootProposals);
+
+        // ---- Visibility reports and the canonical selection ----
+        std::set<GlobalIndex> assembled_candidate_dofs;
+        std::set<GlobalIndex> row_coupled_candidate_dofs;
+        compute_assembled_candidate_dofs(candidates,
+                                         assembled_candidate_dofs,
+                                         row_coupled_candidate_dofs);
+        // [tag, DOF] pairs: 1 owned, 2 strongly constrained, 3 assembled
+        // with (a candidate DOF), 4 preferred master this rank lacks while it
+        // assembles with that master's slave.
+        std::vector<std::int64_t> visibility_words;
+        try {
+            std::set<GlobalIndex> owned_dofs;
+            std::set<GlobalIndex> missing_masters;
+            for (const auto& [dof, candidate] : candidates) {
+                const GlobalIndex candidate_dof = dof;
+                const auto preferred_line =
+                    [&](GlobalIndex slave) -> const ConstraintLine* {
+                    const auto found = declarations_by_dof.find(candidate_dof);
+                    if (found == declarations_by_dof.end()) {
+                        return nullptr;
+                    }
+                    for (const auto& line :
+                         found->second.front().declaration.lines) {
+                        if (line.slave_dof == slave) {
+                            return &line;
+                        }
+                    }
+                    return nullptr;
+                };
+                for (const auto slave : candidate.component_dofs) {
+                    if (partition.isOwned(slave)) {
+                        owned_dofs.insert(slave);
+                    }
+                    if (const auto* line = preferred_line(slave)) {
+                        for (const auto& entry : line->entries) {
+                            if (partition.isOwned(entry.master_dof)) {
+                                owned_dofs.insert(entry.master_dof);
+                            }
+                        }
+                    }
+                    if (!partition.isRelevant(slave)) {
+                        continue;
+                    }
+                    if (constraints.isConstrained(slave)) {
+                        visibility_words.push_back(2);
+                        visibility_words.push_back(
+                            static_cast<std::int64_t>(slave));
+                    }
+                    if (!partition.isOwned(slave) &&
+                        assembled_candidate_dofs.count(slave) == 0u) {
+                        continue;
+                    }
+                    visibility_words.push_back(3);
+                    visibility_words.push_back(
+                        static_cast<std::int64_t>(slave));
+                    if (const auto* line = preferred_line(slave)) {
+                        for (const auto& entry : line->entries) {
+                            if (!partition.isRelevant(entry.master_dof)) {
+                                missing_masters.insert(entry.master_dof);
+                            }
+                        }
+                    }
+                }
+            }
+            for (const auto dof : owned_dofs) {
+                visibility_words.push_back(1);
+                visibility_words.push_back(static_cast<std::int64_t>(dof));
+            }
+            for (const auto dof : missing_masters) {
+                visibility_words.push_back(4);
+                visibility_words.push_back(static_cast<std::int64_t>(dof));
+            }
+        } catch (...) {
+            ok = false;
+        }
+        if (!all_ok(ok)) {
+            return false;
+        }
+        GatheredInt64Words visibility_gathered;
+        try {
+            visibility_gathered = allGatherInt64Words(
+                comm,
+                std::span<const std::int64_t>(visibility_words),
+                AggregationProfileExchange::ResolutionVisibility);
+        } catch (...) {
+            return false;
+        }
+        OwnerSourcedVisibility visibility;
+        DistributedAggregationResult result;
+        CanonicalSelection selection;
+        try {
+            for (int rank = 0; ok && rank < world_size; ++rank) {
+                const auto begin = static_cast<std::size_t>(
+                    visibility_gathered
+                        .displacements[static_cast<std::size_t>(rank)]);
+                const auto count = static_cast<std::size_t>(
+                    visibility_gathered
+                        .counts[static_cast<std::size_t>(rank)]);
+                if (count % 2u != 0u) {
+                    ok = false;
+                    break;
+                }
+                for (std::size_t i = 0u; i < count; i += 2u) {
+                    const auto tag = visibility_gathered.words[begin + i];
+                    const auto dof = static_cast<GlobalIndex>(
+                        visibility_gathered.words[begin + i + 1u]);
+                    switch (tag) {
+                    case 1:
+                        visibility.owners[dof].push_back(rank);
+                        break;
+                    case 2:
+                        visibility.preconstrained_dofs.insert(dof);
+                        break;
+                    case 3:
+                        visibility.assembling[dof].push_back(
+                            ProposalDofVisibility{
+                                .rank = rank, .needed = true});
+                        break;
+                    case 4:
+                        visibility.missing_masters[rank].insert(dof);
+                        break;
+                    default:
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if (ok) {
+                selectCanonicalAggregationLines(rec.name,
+                                                candidates,
+                                                declarations_by_dof,
+                                                visibility,
+                                                /*slave_all_cut=*/false,
+                                                /*allow_unaggregated=*/false,
+                                                guards_.rootless_fallback,
+                                                defer_log,
+                                                selection);
+                ok = selection.failure_count == 0u &&
+                     selection.guard_failure_count == 0u;
+            }
+            if (ok) {
+                result.validation = DistributedAggregationValidation::Passed;
+                result.canonical_candidate_vertices = candidates.size();
+                result.canonical_rooted_candidate_vertices =
+                    static_cast<std::size_t>(std::count_if(
+                        candidates.begin(), candidates.end(),
+                        [](const auto& entry) {
+                            return entry.second.globally_rooted;
+                        }));
+                result.canonical_rootless_candidate_vertices =
+                    candidates.size() -
+                    result.canonical_rooted_candidate_vertices;
+                result.canonical_halo_limited_root_choices =
+                    selection.halo_limited_root_choices;
+                result.canonical_guard_rootless_candidate_vertices =
+                    selection.guard_rootless_candidate_vertices;
+                std::ostringstream validation_failures;
+                ok = validateCanonicalAggregationLines(partition,
+                                                       visibility,
+                                                       visibility,
+                                                       selection,
+                                                       result,
+                                                       validation_failures) ==
+                     0u;
+            }
+        } catch (...) {
+            ok = false;
+        }
+        visibility_gathered = GatheredInt64Words{};
+        if (!all_ok(ok)) {
+            return false;
+        }
+        result.canonical_row_coupled_slaves_beyond_halo =
+            countRowCoupledSlavesBeyondHalo(row_coupled_candidate_dofs,
+                                            selection.canonical_lines,
+                                            partition,
+                                            comm);
+
+        // ---- Commit: the refresh is the communicator-global one ----
+        for (const auto& log : deferred_logs) {
+            logGuardRootlessCandidate(system,
+                                      rec.name,
+                                      log.reason,
+                                      log.dof,
+                                      log.support.coordinates,
+                                      log.support.feature_cells,
+                                      log.detail);
+        }
+        canonical_active_features = std::move(feature_ledger.features);
+        canonical_active_cells = std::move(feature_ledger.cells);
+        canonical_rooted_active_feature_count = feature_ledger.rooted;
+        canonical_rootless_active_feature_count = feature_ledger.rootless;
+        canonical_rootless_active_physical_volume =
+            feature_ledger.rootless_volume;
+        maximum_observed_root_path = traversal.maximum_observed_root_path;
+        root_path_guard_rejections = traversal.root_path_guard_rejections;
+        root_path_search_cell_visits = traversal.root_path_search_cell_visits;
+        root_path_seed_index_entries = traversal.root_path_seed_index_entries;
+        constrained_vertex_count = 0u;
+        for (const auto& support : local_candidate_support) {
+            if (candidates.count(support.declaration_dof) != 0u &&
+                support.touches_cut) {
+                ++constrained_vertex_count;
+            }
+        }
+        no_root = static_cast<std::size_t>(std::count_if(
+            candidates.begin(), candidates.end(),
+            [](const auto& entry) { return !entry.second.globally_rooted; }));
+        aggregated = local_aggregated;
+        inversion_failed = local_inversion_failed;
+        inversion_round_off_acceptances = local_round_off;
+        empty_lines = local_empty_lines;
+        extrapolation_guard_rejections = local_extrapolation_rejections;
+        line_guard_rejections = local_line_rejections;
+        communicator_root_proposal_failures =
+            static_cast<std::size_t>(summed_weighted[0]);
+        communicator_extrapolation_guard_rejections =
+            static_cast<std::size_t>(summed_weighted[1]);
+        communicator_line_guard_rejections =
+            static_cast<std::size_t>(summed_weighted[2]);
+        maximum_attempted_reference_extrapolation =
+            static_cast<Real>(global_maxima[0]);
+        maximum_observed_reference_extrapolation =
+            static_cast<Real>(global_maxima[1]);
+        maximum_attempted_absolute_coefficient =
+            static_cast<Real>(global_maxima[2]);
+        maximum_observed_absolute_coefficient =
+            static_cast<Real>(global_maxima[3]);
+        maximum_attempted_row_l1_norm = static_cast<Real>(global_maxima[4]);
+        maximum_observed_row_l1_norm = static_cast<Real>(global_maxima[5]);
+        distributed_result = std::move(result);
+        // Communicator-global counts, as the global refresh records them.
+        diagnostics::recordAggregationHalo(
+            distributed_result.canonical_halo_limited_root_choices,
+            distributed_result.canonical_row_coupled_slaves_beyond_halo);
+        if (guards_.rootless_fallback) {
+            diagnostics::noteAggregationGuardRootlessFallbackEnabled();
+        }
+        diagnostics::recordAggregationGuardRootless(
+            root_path_guard_rejections,
+            distributed_result.canonical_guard_rootless_candidate_vertices);
+        return true;
+    };
+#endif
+
+    bool owner_sourced_committed = false;
+#if FE_HAS_MPI
+    if (owner_sourced_eligible) {
+        owner_sourced_committed = run_owner_sourced_refresh();
+        detail::noteSmallCutAggregationOwnerSourcedRefresh(
+            owner_sourced_committed);
+    }
+    profile.setCount(AggregationProfileCount::OwnerSourcedRefresh,
+                     owner_sourced_committed ? 1u : 0u);
+#endif
+    if (!owner_sourced_committed) {
+    if (!serialize_cell_classes) {
+        // Returning from the owner-sourced refresh: serialize the classified
+        // cells it checked.
+        serialize_cell_classes = true;
+        std::exception_ptr local_serialization_exception;
+        try {
+            declare_ordered_cell_classes();
+        } catch (...) {
+            local_serialization_exception = std::current_exception();
+        }
+        coordinateLocalPhaseFailure(local_serialization_exception,
+                                    "cell_class_and_key_serialization");
+    }
 
     GatheredInt64Words gathered_cell_classes;
     int aggregation_world_size = 1;
@@ -5535,7 +9090,6 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     profile.mark(AggregationProfilePhase::CellOwnerExchange);
     std::vector<std::size_t> global_cell_owner_count_of;
     std::vector<int> global_cell_owner_rank_of;
-    const bool slave_all_cut = runtime_options.slave_all_cut;
     using FaceKey = std::vector<GlobalIndex>;
     std::vector<FaceKey> cell_face_keys;
     std::vector<GlobalIndex> graph_cell_nodes;
@@ -5871,261 +9425,29 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     // declarations are communicator-global on every rank, so component
     // construction and sorted-GID accumulation require no replicated MPI
     // reduction.
-    std::vector<SmallCutAggregationActiveFeatureReport>
-        canonical_active_features;
     // Canonical feature ID per classified cell (INVALID for inactive cells).
     std::vector<GlobalIndex> active_feature_of;
-    std::vector<SmallCutAggregationProlongationCell>
-        canonical_active_cells;
-    std::size_t canonical_rooted_active_feature_count = 0u;
-    std::size_t canonical_rootless_active_feature_count = 0u;
-    Real canonical_rootless_active_physical_volume = 0.0;
     std::exception_ptr local_feature_exception;
     try {
-    const auto n_classified = classified_cells.size();
-    const auto is_active_cell = [&](std::size_t cell) {
-        return global_cell_class_of[cell].full_active ||
-               global_cell_class_of[cell].cut;
-    };
-    std::set<GlobalIndex> active_physical_cell_gids;
-    for (std::size_t cell = 0u; cell < n_classified; ++cell) {
-        if (!is_active_cell(cell)) {
-            continue;
-        }
-        const auto gid = global_physical_cell_gid_of[cell];
-        if (gid < 0 || !active_physical_cell_gids.insert(gid).second) {
-            throw std::runtime_error(
-                "SmallCutAggregationConstraint: diagnostic="
-                "invalid_active_feature_volume communicator active cells "
-                "have missing or duplicate physical cell IDs");
-        }
-    }
-    active_feature_of.assign(n_classified, INVALID_GLOBAL_INDEX);
-    std::vector<char> visited_active_cells(n_classified, 0);
-    std::vector<std::size_t> queue;
-    std::vector<std::size_t> component_cells;
-    std::vector<std::pair<GlobalIndex, std::size_t>> component_order;
-    for (std::size_t seed = 0u; seed < n_classified; ++seed) {
-        if (!is_active_cell(seed) || visited_active_cells[seed] != 0) {
-            continue;
-        }
-
-        queue.clear();
-        component_cells.clear();
-        queue.push_back(seed);
-        visited_active_cells[seed] = 1;
-        for (std::size_t head = 0u; head < queue.size(); ++head) {
-            const auto cell = queue[head];
-            component_cells.push_back(cell);
-            for (const auto neighbor : global_neighbors[cell]) {
-                if (!is_active_cell(neighbor)) {
-                    continue;
-                }
-                if (visited_active_cells[neighbor] == 0) {
-                    visited_active_cells[neighbor] = 1;
-                    queue.push_back(neighbor);
-                }
-            }
-        }
-
-        // Order by (physical cell GID, key); index order is key order and
-        // the pairs are unique, so the order is the same for any sort.
-        component_order.clear();
-        for (const auto cell : component_cells) {
-            component_order.emplace_back(global_physical_cell_gid_of[cell],
-                                         cell);
-        }
-        std::sort(component_order.begin(), component_order.end());
-        for (std::size_t i = 0u; i < component_order.size(); ++i) {
-            component_cells[i] = component_order[i].second;
-        }
-        if (component_cells.empty()) {
-            throw std::logic_error(
-                "SmallCutAggregationConstraint: active feature traversal "
-                "produced an empty component");
-        }
-
-        SmallCutAggregationActiveFeatureReport feature;
-        feature.stable_feature_id =
-            global_physical_cell_gid_of[component_cells.front()];
-        for (const auto cell : component_cells) {
-            if (active_feature_of[cell] != INVALID_GLOBAL_INDEX) {
-                throw std::logic_error(
-                    "SmallCutAggregationConstraint: active cell was assigned "
-                    "to more than one canonical feature");
-            }
-            active_feature_of[cell] = feature.stable_feature_id;
-        }
-        feature.canonical_cell_count = component_cells.size();
-        feature.canonical_cell_gid_digest = 14695981039346656037ull;
-        feature.canonical_full_active_cell_gid_digest =
-            14695981039346656037ull;
-        feature.canonical_cut_cell_gid_digest =
-            14695981039346656037ull;
-        aggregationDigestMix(
-            feature.canonical_full_active_cell_gid_digest,
-            0x46554c4c41435449ull);
-        aggregationDigestMix(
-            feature.canonical_cut_cell_gid_digest,
-            0x43555443454c4c53ull);
-        long double physical_volume = 0.0L;
-        GlobalIndex previous_gid = INVALID_GLOBAL_INDEX;
-        for (const auto cell : component_cells) {
-            const auto physical_gid = global_physical_cell_gid_of[cell];
-            if (physical_gid < 0 || physical_gid == previous_gid) {
-                throw std::runtime_error(
-                    "SmallCutAggregationConstraint: diagnostic="
-                    "invalid_active_feature_volume active component has "
-                    "missing or duplicate physical cell IDs");
-            }
-            previous_gid = physical_gid;
-            feature.canonical_cell_gid_digest ^=
-                static_cast<std::uint64_t>(physical_gid);
-            feature.canonical_cell_gid_digest *= 1099511628211ull;
-            const auto& klass = global_cell_class_of[cell];
-            if (klass.full_active) {
-                aggregationDigestMix(
-                    feature.canonical_full_active_cell_gid_digest,
-                    static_cast<std::uint64_t>(physical_gid));
-            }
-            if (klass.cut) {
-                aggregationDigestMix(
-                    feature.canonical_cut_cell_gid_digest,
-                    static_cast<std::uint64_t>(physical_gid));
-            }
-            feature.canonical_full_active_cell_count +=
-                klass.full_active ? 1u : 0u;
-            feature.canonical_cut_cell_count += klass.cut ? 1u : 0u;
-            physical_volume += static_cast<long double>(
-                global_active_cell_physical_volume_of[cell]);
-        }
-        if (feature.canonical_cell_count !=
-            feature.canonical_full_active_cell_count +
-                feature.canonical_cut_cell_count) {
-            throw std::logic_error(
-                "SmallCutAggregationConstraint: active feature class "
-                "accounting is inconsistent");
-        }
-        aggregationDigestMix(
-            feature.canonical_full_active_cell_gid_digest,
-            static_cast<std::uint64_t>(
-                feature.canonical_full_active_cell_count));
-        aggregationDigestMix(
-            feature.canonical_cut_cell_gid_digest,
-            static_cast<std::uint64_t>(
-                feature.canonical_cut_cell_count));
-        feature.canonical_retained_physical_volume =
-            static_cast<Real>(physical_volume);
-        if (!(feature.canonical_retained_physical_volume > Real{0.0}) ||
-            !std::isfinite(
-                feature.canonical_retained_physical_volume)) {
-            throw std::runtime_error(
-                "SmallCutAggregationConstraint: diagnostic="
-                "invalid_active_feature_volume active component has no "
-                "finite positive retained physical volume");
-        }
-        if (feature.canonical_full_active_cell_count > 0u) {
-            feature.disposition =
-                SmallCutAggregationActiveFeatureDisposition::Rooted;
-            ++canonical_rooted_active_feature_count;
-        } else {
-            feature.disposition =
-                SmallCutAggregationActiveFeatureDisposition::Rootless;
-            ++canonical_rootless_active_feature_count;
-        }
-        canonical_active_features.push_back(std::move(feature));
-    }
-    std::sort(
-        canonical_active_features.begin(),
-        canonical_active_features.end(),
-        [](const auto& lhs, const auto& rhs) {
-            return lhs.stable_feature_id < rhs.stable_feature_id;
-        });
-    if (std::adjacent_find(
-            canonical_active_features.begin(),
-            canonical_active_features.end(),
-            [](const auto& lhs, const auto& rhs) {
-                return lhs.stable_feature_id == rhs.stable_feature_id;
-            }) != canonical_active_features.end()) {
-        throw std::runtime_error(
-            "SmallCutAggregationConstraint: diagnostic="
-            "invalid_active_feature_volume active features have duplicate "
-            "stable IDs");
-    }
-    long double rootless_physical_volume = 0.0L;
-    for (const auto& feature : canonical_active_features) {
-        if (feature.disposition ==
-            SmallCutAggregationActiveFeatureDisposition::Rootless) {
-            rootless_physical_volume += static_cast<long double>(
-                feature.canonical_retained_physical_volume);
-        }
-    }
-    canonical_rootless_active_physical_volume =
-        static_cast<Real>(rootless_physical_volume);
-    if (canonical_active_features.size() !=
-            canonical_rooted_active_feature_count +
-                canonical_rootless_active_feature_count ||
-        !std::isfinite(
-            canonical_rootless_active_physical_volume) ||
-        canonical_rootless_active_physical_volume < Real{0.0}) {
-        throw std::logic_error(
-            "SmallCutAggregationConstraint: active feature totals are "
-            "inconsistent");
-    }
-
-    std::size_t active_cell_count = 0u;
-    for (const auto feature_id : active_feature_of) {
-        active_cell_count += feature_id != INVALID_GLOBAL_INDEX ? 1u : 0u;
-    }
-    canonical_active_cells.reserve(active_cell_count);
-    for (std::size_t cell = 0u; cell < n_classified; ++cell) {
-        const auto feature_id = active_feature_of[cell];
-        if (feature_id == INVALID_GLOBAL_INDEX) {
-            continue;
-        }
-        const auto& klass = global_cell_class_of[cell];
-        if (klass.full_active == klass.cut) {
-            throw std::logic_error(
-                "SmallCutAggregationConstraint: canonical active cell does "
-                "not have exactly one active class");
-        }
-        SmallCutAggregationProlongationCell record;
-        record.cell_gid = global_physical_cell_gid_of[cell];
-        record.owner_rank = global_cell_owner_rank_of[cell];
-        record.retained_measure_provider_rank =
-            global_active_cell_measure_provider_rank_of[cell];
-        record.kind =
-            klass.full_active
-                ? SmallCutAggregationActiveCellKind::FullActive
-                : SmallCutAggregationActiveCellKind::Cut;
-        record.active_feature_id = feature_id;
-        record.retained_physical_volume =
-            global_active_cell_physical_volume_of[cell];
-        record.retained_rule_stable_ids =
-            global_active_cell_rule_ids_of[cell];
-        record.field_dofs = classified_cells.key(cell);
-        for (const auto neighbor : global_neighbors[cell]) {
-            if (!is_active_cell(neighbor)) {
-                continue;
-            }
-            record.active_face_neighbor_cell_gids.push_back(
-                global_physical_cell_gid_of[neighbor]);
-        }
-        std::sort(record.active_face_neighbor_cell_gids.begin(),
-                  record.active_face_neighbor_cell_gids.end());
-        record.active_face_neighbor_cell_gids.erase(
-            std::unique(
-                record.active_face_neighbor_cell_gids.begin(),
-                record.active_face_neighbor_cell_gids.end()),
-            record.active_face_neighbor_cell_gids.end());
-        canonical_active_cells.push_back(std::move(record));
-    }
-    std::sort(
-        canonical_active_cells.begin(),
-        canonical_active_cells.end(),
-        [](const auto& lhs, const auto& rhs) {
-            return lhs.cell_gid < rhs.cell_gid;
-        });
+    ActiveFeatureLedger feature_ledger;
+    buildActiveFeatureLedger(
+        AggregationCellGraph{
+            .cells = classified_cells,
+            .klass = global_cell_class_of,
+            .physical_gid = global_physical_cell_gid_of,
+            .volume = global_active_cell_physical_volume_of,
+            .rule_ids = global_active_cell_rule_ids_of,
+            .provider_rank = global_active_cell_measure_provider_rank_of,
+            .owner_rank = global_cell_owner_rank_of,
+            .neighbors = global_neighbors,
+        },
+        feature_ledger);
+    canonical_active_features = std::move(feature_ledger.features);
+    active_feature_of = std::move(feature_ledger.feature_of);
+    canonical_active_cells = std::move(feature_ledger.cells);
+    canonical_rooted_active_feature_count = feature_ledger.rooted;
+    canonical_rootless_active_feature_count = feature_ledger.rootless;
+    canonical_rootless_active_physical_volume = feature_ledger.rootless_volume;
     } catch (...) {
         local_feature_exception = std::current_exception();
     }
@@ -6133,157 +9455,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                                 "active_feature_ledger_construction");
     profile.mark(AggregationProfilePhase::Features);
 
-    // 3. Vertices of cut cells + their incident band cells.
-    std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> vertex_cells;
-    std::vector<GlobalIndex> cell_nodes;
-    std::unordered_set<GlobalIndex> excluded_vertices;
-    std::vector<LocalCandidateSupport> local_candidate_support;
-    std::exception_ptr local_support_exception;
-    try {
-    for (const auto& [cell, klass] : cell_class) {
-        if (!klass.cut && !klass.full_active) {
-            continue;
-        }
-        mesh.getCellNodes(cell, cell_nodes);
-        for (const auto node : cell_nodes) {
-            if (node >= 0 && node < n_vertices) {
-                vertex_cells[node].push_back(cell);
-            }
-        }
-    }
-
-    // 3b. Vertices carrying strong Dirichlet data keep their BC: collect the
-    //     face vertices of every excluded boundary marker. Explicitly pinned
-    //     vertices (e.g. pressure gauge nodes) are excluded for the same
-    //     reason — their pin must win over aggregation.
-    excluded_vertices.insert(excluded_vertices_.begin(),
-                             excluded_vertices_.end());
-    if (!excluded_boundary_markers_.empty()) {
-        std::vector<GlobalIndex> face_cell_nodes;
-        for (const auto marker : excluded_boundary_markers_) {
-            mesh.forEachBoundaryFace(
-                marker,
-                [&](GlobalIndex face, GlobalIndex cell) {
-                    const auto local_face = mesh.getLocalFaceIndex(face, cell);
-                    if (local_face < 0) {
-                        return;
-                    }
-                    const auto cell_type = mesh.getCellType(cell);
-                    const auto& ref = elements::ReferenceElement::shared(cell_type);
-                    const auto& face_nodes =
-                        ref.face_nodes(static_cast<std::size_t>(local_face));
-                    mesh.getCellNodes(cell, face_cell_nodes);
-                    for (const auto local_node : face_nodes) {
-                        if (local_node >= 0 &&
-                            static_cast<std::size_t>(local_node) <
-                                face_cell_nodes.size()) {
-                            excluded_vertices.insert(
-                                face_cell_nodes[static_cast<std::size_t>(local_node)]);
-                        }
-                    }
-                    // ReferenceElement canonicalizes to the linear topology,
-                    // so face_nodes lists corners only. Higher-order cells
-                    // carry midside/face-interior nodes whose strong BC must
-                    // equally win over aggregation. Classify every public
-                    // mesh slot against the generic affine hull of the face
-                    // corners; this covers non-axis-aligned wedge and pyramid
-                    // faces as well as tensor/simplex faces.
-                    if (face_cell_nodes.size() > face_nodes.size()) {
-                        for (std::size_t local = 0;
-                             local < face_cell_nodes.size(); ++local) {
-                            if (referenceNodeOnFaceAffineHull(
-                                    cell_type,
-                                    std::span<const LocalIndex>(face_nodes),
-                                    local,
-                                    mesh.dimension())) {
-                                excluded_vertices.insert(face_cell_nodes[local]);
-                            }
-                        }
-                    }
-                });
-        }
-    }
-
-    // 4. Constrained vertices: vertices of cut cells with no full-active
-    //    incident cell. SVMP_AGGREGATION_SLAVE_ALL_CUT=1 is a mitigation
-    //    experiment knob that ALSO slaves the supported band vertices
-    //    (every cut-cell vertex), constraining them to the extension of the
-    //    nearest full-active cell carrying NO candidate vertex — the
-    //    strong-AgFEM analogue of the band smoothing the deleted velocity
-    //    ghost penalty used to provide. Roots whose own nodes are candidates
-    //    would make slaves of each other's masters (constraint cycles), so
-    //    the experiment requires retained layer-2 classification
-    //    (Generated_interface_affected_cell_neighborhood_layers >= 1).
-    // Resolve each locally classified mesh node to communicator-global field
-    // DOFs before deciding whether it is a candidate.  Candidate status is an
-    // OR-reduction of cut/full support and boundary exclusion facts keyed by
-    // that global DOF, not a rank-local interpretation of owned cut rules.
-      local_candidate_support.reserve(vertex_cells.size());
-      for (const auto& [vertex, cells] : vertex_cells) {
-        bool touches_cut = false;
-        bool touches_full_active = false;
-        for (const auto cell : cells) {
-            const auto it = cell_class.find(cell);
-            if (it == cell_class.end()) {
-                continue;
-            }
-            touches_cut = touches_cut || it->second.cut;
-            touches_full_active = touches_full_active || it->second.full_active;
-        }
-
-        std::vector<GlobalIndex> component_dofs;
-        for (const auto cell : cells) {
-            mesh.getCellNodes(cell, cell_nodes);
-            if (layout == CellDofLayout::Unknown && components > 1) {
-                detect_layout(cell, cell_nodes);
-            }
-            const auto limit = std::min(cell_nodes.size(), n_field_basis);
-            for (std::size_t i = 0; i < limit; ++i) {
-                if (cell_nodes[i] != vertex) {
-                    continue;
-                }
-                check_cell_pairable(cell);
-                const auto found = cell_node_dofs(cell, i);
-                component_dofs.reserve(found.size());
-                for (const auto dof : found) {
-                    component_dofs.push_back(offset + dof);
-                }
-                break;
-            }
-            if (!component_dofs.empty()) {
-                break;
-            }
-        }
-        if (component_dofs.empty()) {
-            continue;
-        }
-        const auto vertex_dofs = entity_map->getVertexDofs(vertex);
-        if (vertex_dofs.size() >= components) {
-            for (std::size_t c = 0; c < components; ++c) {
-                if (offset + vertex_dofs[c] != component_dofs[c]) {
-                    throw std::logic_error(
-                        "SmallCutAggregationConstraint: cell-local dof "
-                        "resolution disagrees with EntityDofMap for field '" +
-                        rec.name + "' (vertex " +
-                        std::to_string(vertex) + ")");
-                }
-            }
-        }
-          local_candidate_support.push_back(LocalCandidateSupport{
-              .vertex = vertex,
-              .declaration_dof = component_dofs.front(),
-              .component_dofs = std::move(component_dofs),
-              .coordinates = mesh.getNodeCoordinates(vertex),
-              .touches_cut = touches_cut,
-              .touches_full_active = touches_full_active,
-              .excluded = excluded_vertices.count(vertex) > 0u,
-          });
-      }
-    } catch (...) {
-        local_support_exception = std::current_exception();
-    }
-    coordinateLocalPhaseFailure(local_support_exception,
-                                "candidate_support_construction");
+    build_local_candidate_support();
 
     auto global_candidates = resolveGlobalCandidateSupport(
         system,
@@ -6296,204 +9468,44 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                      global_candidates.size());
     profile.mark(AggregationProfilePhase::CandidateSupport);
 
-    std::set<GlobalIndex> all_candidate_component_dofs;
     std::map<GlobalIndex, std::vector<GlobalRootCandidate>>
         global_roots_by_candidate;
-    std::size_t maximum_observed_root_path = 0u;
-    std::size_t root_path_guard_rejections = 0u;
-    std::size_t root_path_search_cell_visits = 0u;
-    std::size_t root_path_seed_index_entries = 0u;
     std::exception_ptr local_global_graph_exception;
     try {
-    for (const auto& [dof, support] : global_candidates) {
-        static_cast<void>(dof);
-        all_candidate_component_dofs.insert(support.component_dofs.begin(),
-                                            support.component_dofs.end());
-    }
-
-    // Index cut-cell seeds once. The former traversal searched every
-    // classified cell for every candidate and then walked the complete
-    // connected cut band even though roots beyond the configured path guard
-    // can never contribute an admissible row. On a closed three-dimensional
-    // interface that work grows with candidate_count * cut_band_size and can
-    // dominate every geometry refresh. The index and bounded traversal below
-    // retain exactly the roots that can pass the path guard.
-    // Seeds are classified-cell indices, ascending like the keys they name.
-    const auto n_classified = classified_cells.size();
-    std::map<GlobalIndex, std::vector<std::size_t>>
-        cut_seed_cells_by_dof;
-    for (std::size_t cell = 0u; cell < n_classified; ++cell) {
-        if (!global_cell_class_of[cell].cut) {
-            continue;
-        }
-        for (const auto dof : classified_cells.key(cell)) {
-            cut_seed_cells_by_dof[dof].push_back(cell);
-            ++root_path_seed_index_entries;
-        }
-    }
-    for (auto& [dof, seeds] : cut_seed_cells_by_dof) {
-        static_cast<void>(dof);
-        std::sort(seeds.begin(), seeds.end());
-        seeds.erase(std::unique(seeds.begin(), seeds.end()), seeds.end());
-    }
-
-    // A feature is root-eligible when it owns at least one full-active cell
-    // that satisfies the selected aggregation policy. For the strong
-    // all-cut experiment, a full cell containing any candidate DOF is not a
-    // valid root for any candidate because it would introduce slave/master
-    // cycles. This policy is cell-global, so it can be classified once.
-    std::set<GlobalIndex> root_eligible_feature_ids;
-    for (std::size_t cell = 0u; cell < n_classified; ++cell) {
-        if (!global_cell_class_of[cell].full_active) {
-            continue;
-        }
-        bool eligible = true;
-        if (slave_all_cut) {
-            const auto& key = classified_cells.key(cell);
-            eligible = std::none_of(
-                key.begin(), key.end(), [&](GlobalIndex root_dof) {
-                    return all_candidate_component_dofs.count(root_dof) > 0u;
-                });
-        }
-        if (eligible) {
-            if (active_feature_of[cell] == INVALID_GLOBAL_INDEX) {
-                throw std::logic_error(
-                    "SmallCutAggregationConstraint: full-active root cell "
-                    "is missing its canonical active feature");
-            }
-            root_eligible_feature_ids.insert(active_feature_of[cell]);
-        }
-    }
-
-    // Canonical active feature sizes, for the guard-rootless diagnostics.
-    std::map<GlobalIndex, std::size_t> feature_cell_counts;
-    for (const auto feature_id : active_feature_of) {
-        if (feature_id != INVALID_GLOBAL_INDEX) {
-            ++feature_cell_counts[feature_id];
-        }
-    }
-
-    // Breadth-first search per candidate; a per-candidate stamp marks the
-    // visited cells without clearing a set for every candidate.
-    std::vector<std::size_t> visit_stamp(n_classified, 0u);
-    std::size_t current_stamp = 0u;
-    std::vector<std::pair<std::size_t, std::size_t>> queue;
-    for (auto& [dof, support] : global_candidates) {
-        ++current_stamp;
-        queue.clear();
-        const auto seed_it = cut_seed_cells_by_dof.find(dof);
-        if (seed_it != cut_seed_cells_by_dof.end()) {
-            for (const auto seed : seed_it->second) {
-                queue.emplace_back(seed, 0u);
-                visit_stamp[seed] = current_stamp;
-            }
-        }
-        if (queue.empty()) {
-            throw InsufficientGhostHaloError(
-                "SmallCutAggregationConstraint: diagnostic="
-                "incomplete_distributed_aggregation_halo reason="
-                "global_candidate_has_no_cut_seed dof=" +
-                std::to_string(dof));
-        }
-
-        bool feature_has_eligible_root = false;
-        for (const auto seed : seed_it->second) {
-            if (active_feature_of[seed] == INVALID_GLOBAL_INDEX) {
-                throw std::logic_error(
-                    "SmallCutAggregationConstraint: candidate cut seed is "
-                    "missing its canonical active feature");
-            }
-            feature_has_eligible_root =
-                feature_has_eligible_root ||
-                root_eligible_feature_ids.count(active_feature_of[seed]) > 0u;
-            support.feature_cells = std::max(
-                support.feature_cells,
-                feature_cell_counts[active_feature_of[seed]]);
-        }
-
-        auto& roots = global_roots_by_candidate[dof];
-        for (std::size_t head = 0u; head < queue.size(); ++head) {
-            const auto [cell, distance] = queue[head];
-            ++root_path_search_cell_visits;
-            const auto& klass = global_cell_class_of[cell];
-            bool acceptable_root = klass.full_active;
-            if (acceptable_root && slave_all_cut) {
-                const auto& key = classified_cells.key(cell);
-                acceptable_root = std::none_of(
-                    key.begin(), key.end(), [&](GlobalIndex root_dof) {
-                        return all_candidate_component_dofs.count(root_dof) >
-                               0u;
-                    });
-            }
-            if (acceptable_root) {
-                roots.push_back(GlobalRootCandidate{cell, distance});
-                continue;
-            }
-            if (!klass.cut && !(slave_all_cut && klass.full_active)) {
-                continue;
-            }
-            if (distance >= guards_.maximum_root_path_length) {
-                continue;
-            }
-            for (const auto next : global_neighbors[cell]) {
-                if (visit_stamp[next] != current_stamp) {
-                    visit_stamp[next] = current_stamp;
-                    queue.emplace_back(next, distance + 1u);
-                }
-            }
-        }
-        std::sort(roots.begin(), roots.end(),
-                  [](const GlobalRootCandidate& a,
-                     const GlobalRootCandidate& b) {
-                      return std::tie(a.distance, a.cell) <
-                             std::tie(b.distance, b.cell);
-                  });
-        roots.erase(std::unique(
-                        roots.begin(), roots.end(),
-                        [](const GlobalRootCandidate& a,
-                           const GlobalRootCandidate& b) {
-                            return a.cell == b.cell;
-                        }),
-                    roots.end());
-        for (const auto& root : roots) {
-            maximum_observed_root_path =
-                std::max(maximum_observed_root_path, root.distance);
-        }
-        if (feature_has_eligible_root && roots.empty()) {
-            // The feature holds full cells, but none within the root-path
-            // guard: no admissible extension.  Fail closed unless the
-            // opt-in fallback gives the candidate the rootless-island
-            // policy (D33).
-            ++root_path_guard_rejections;
-            maximum_observed_root_path = std::max(
-                maximum_observed_root_path,
-                guards_.maximum_root_path_length ==
-                        std::numeric_limits<std::size_t>::max()
-                    ? guards_.maximum_root_path_length
-                    : guards_.maximum_root_path_length + 1u);
-            if (!guards_.rootless_fallback) {
-                throw std::runtime_error(
-                    "SmallCutAggregationConstraint: diagnostic="
-                    "root_path_guard_rejection candidate_dof=" +
-                    std::to_string(dof) + " maximum_observed_path=" +
-                    std::to_string(maximum_observed_root_path) +
-                    " maximum_allowed_path=" +
-                    std::to_string(guards_.maximum_root_path_length) +
-                    ": " + kGuardRootlessOptInHint + ".");
-            }
-            logGuardRootlessCandidate(
-                system,
-                rec.name,
-                "root_path_guard",
-                dof,
-                support.coordinates,
-                support.feature_cells,
-                "maximum_allowed_path=" +
-                    std::to_string(guards_.maximum_root_path_length));
-        }
-        support.globally_rooted = !roots.empty();
-    }
-
+    CandidateRootTraversal traversal;
+    traverseCandidateRoots(
+        AggregationCellGraph{
+            .cells = classified_cells,
+            .klass = global_cell_class_of,
+            .physical_gid = global_physical_cell_gid_of,
+            .volume = global_active_cell_physical_volume_of,
+            .rule_ids = global_active_cell_rule_ids_of,
+            .provider_rank = global_active_cell_measure_provider_rank_of,
+            .owner_rank = global_cell_owner_rank_of,
+            .neighbors = global_neighbors,
+        },
+        active_feature_of,
+        global_candidates,
+        guards_,
+        slave_all_cut,
+        [&](std::string_view reason,
+            GlobalIndex dof,
+            const GlobalCandidateSupport& support,
+            const std::string& detail) {
+            logGuardRootlessCandidate(system,
+                                      rec.name,
+                                      reason,
+                                      dof,
+                                      support.coordinates,
+                                      support.feature_cells,
+                                      detail);
+        },
+        traversal);
+    global_roots_by_candidate = std::move(traversal.roots_by_candidate);
+    maximum_observed_root_path = traversal.maximum_observed_root_path;
+    root_path_guard_rejections = traversal.root_path_guard_rejections;
+    root_path_search_cell_visits = traversal.root_path_search_cell_visits;
+    root_path_seed_index_entries = traversal.root_path_seed_index_entries;
     } catch (...) {
         local_global_graph_exception = std::current_exception();
     }
@@ -6501,40 +9513,6 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                                 "global_candidate_root_traversal");
     profile.mark(AggregationProfilePhase::RootTraversal);
 
-    std::size_t constrained_vertex_count = 0u;
-    std::size_t aggregated = 0u;
-    std::size_t no_root = 0u;
-    std::size_t island_pinned_dofs = 0u;
-    std::size_t inversion_failed = 0u;
-    // Inversions accepted at the round-off floor (see invertMapping).
-    std::size_t inversion_round_off_acceptances = 0u;
-    std::size_t non_field_nodes = 0u;
-    std::size_t empty_lines = 0u;
-    std::size_t extrapolation_guard_rejections = 0u;
-    std::size_t line_guard_rejections = 0u;
-    Real maximum_attempted_reference_extrapolation = 0.0;
-    Real maximum_observed_reference_extrapolation = 0.0;
-    Real maximum_attempted_absolute_coefficient = 0.0;
-    Real maximum_observed_absolute_coefficient = 0.0;
-    Real maximum_attempted_row_l1_norm = 0.0;
-    Real maximum_observed_row_l1_norm = 0.0;
-    std::vector<Real> values;
-    std::vector<std::pair<GlobalIndex, double>> pending_entries;
-    std::vector<GlobalIndex> current_slaves;
-    std::vector<GlobalIndex> root_check_nodes;
-    LocalAggregationDeclarationMap local_aggregation_declarations;
-    // Outcome of every local root proposal, reported only if the resolver
-    // finds a globally rooted candidate without a valid proposal.
-    struct RootProposalOutcome {
-        GlobalIndex candidate_dof{INVALID_GLOBAL_INDEX};
-        GlobalIndex root_cell_gid{INVALID_GLOBAL_INDEX};
-        std::size_t distance{0u};
-        Real extrapolation{std::numeric_limits<Real>::quiet_NaN()};
-        const char* outcome{"unknown"};
-    };
-    std::vector<RootProposalOutcome> root_proposal_outcomes;
-    const bool allow_unaggregated = runtime_options.allow_unaggregated;
-    const std::size_t max_lines = runtime_options.max_lines;
     std::exception_ptr local_proposal_exception;
     try {
 
@@ -6545,52 +9523,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         }
     }
 
-    // The root provider needs the field's complete nodal support. Reject a
-    // sub-parametric cell before proposal generation instead of emitting a
-    // partial polynomial extension.
-    for (const auto& [cell, klass] : cell_class) {
-        if (!klass.cut && !klass.full_active) {
-            continue;
-        }
-        mesh.getCellNodes(cell, cell_nodes);
-        if (cell_nodes.size() < n_field_basis) {
-            throw std::invalid_argument(
-                "SmallCutAggregationConstraint: field '" + rec.name +
-                "' has sub-vertex dofs that are not mesh nodes (cell " +
-                std::to_string(cell) + " carries " +
-                std::to_string(cell_nodes.size()) + " mesh nodes < " +
-                std::to_string(n_field_basis) +
-                " field basis functions); sub-parametric fields are not "
-                "supported — use an iso-parametric mesh for higher-order "
-                "aggregation");
-        }
-    }
-
-    std::unordered_map<GlobalIndex,
-                       std::shared_ptr<const geometry::GeometryMapping>> mappings;
-    // Read per apply() call (not a cached static): constraint refreshes are
-    // infrequent, and in-process A/B tests must be able to flip the knob.
-    const bool use_linear_extension = runtime_options.linear_extension;
-    auto extension_element_type = rec.space->element_type();
-    std::unique_ptr<basis::LagrangeBasis> linear_extension_basis;
-    if (use_linear_extension) {
-        // element_type() reports the cell TOPOLOGY type, which is already the
-        // corner type for sub-parametric layouts (a Q2 field on Quad4
-        // topology), so the A/B gate must compare basis sizes, not topology
-        // names: engage whenever a strictly smaller corner sub-basis exists.
-        const auto corner_type = linearElementType(extension_element_type);
-        auto corner_basis = std::make_unique<basis::LagrangeBasis>(corner_type, 1);
-        if (static_cast<std::size_t>(corner_basis->size()) < n_field_basis) {
-            extension_element_type = corner_type;
-            linear_extension_basis = std::move(corner_basis);
-        }
-    }
-    const basis::BasisFunction& extension_basis =
-        linear_extension_basis ? static_cast<const basis::BasisFunction&>(*linear_extension_basis)
-                               : field_basis;
-    const auto n_extension = static_cast<std::size_t>(extension_basis.size());
-    const auto& field_mesh_to_basis =
-        basis::ReferenceNodeLayout::mesh_to_basis_ordering(extension_element_type);
+    check_subparametric_active_cells();
 
     no_root = static_cast<std::size_t>(std::count_if(
         global_candidates.begin(), global_candidates.end(),
@@ -6604,6 +9537,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     // interpolation weights. Mapping/line failure invalidates that proposal,
     // not the candidate; the global resolver fails closed only when no valid,
     // globally available proposal remains for a globally rooted candidate.
+    root_proposal_outcomes.clear();
     for (const auto& [declaration_dof, candidate] : global_candidates) {
         if (aggregated >= max_lines) {
             break;
@@ -6622,182 +9556,16 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             if (local_root == local_cell_by_key.end()) {
                 continue;
             }
-            const auto root = local_root->second;
-            Vector<Real, 3> traced_xi{};
-            Real traced_extrapolation =
-                std::numeric_limits<Real>::quiet_NaN();
-            auto trace_proposal = [&](const char* outcome) {
-                root_proposal_outcomes.push_back(RootProposalOutcome{
-                    .candidate_dof = declaration_dof,
-                    .root_cell_gid = mesh_global_entity_ids_available
-                                         ? mesh.getCellGlobalId(root)
-                                         : root,
-                    .distance = root_candidate.distance,
-                    .extrapolation = traced_extrapolation,
-                    .outcome = outcome});
-                if (!aggregationProposalTraceEnabled()) {
-                    return;
-                }
-                std::ostringstream trace;
-                trace << std::setprecision(17)
-                      << "SmallCutAggregationConstraint: diagnostic="
-                         "aggregation_proposal_trace stage=construction"
-                      << " field='" << rec.name << "'"
-                      << " candidate_dof=" << declaration_dof
-                      << " xyz=(" << candidate.coordinates[0] << ","
-                      << candidate.coordinates[1] << ","
-                      << candidate.coordinates[2] << ")"
-                      << " root_cell=" << root
-                      << " root_distance=" << root_candidate.distance
-                      << " xi=(" << traced_xi[0] << "," << traced_xi[1]
-                      << "," << traced_xi[2] << ")"
-                      << " extrapolation=" << traced_extrapolation
-                      << " outcome=" << outcome;
-                FE_LOG_INFO(trace.str());
-            };
-            mesh.getCellNodes(root, root_check_nodes);
-            check_cell_pairable(root);
-            const auto n_declared_root_nodes = std::min(
-                {root_check_nodes.size(), n_field_basis, n_extension});
-            std::vector<GlobalIndex> declared_root_masters;
-            declared_root_masters.reserve(n_declared_root_nodes);
-            for (std::size_t node = 0; node < n_declared_root_nodes; ++node) {
-                const auto master_dofs = cell_node_dofs(root, node);
-                if (!master_dofs.empty()) {
-                    declared_root_masters.push_back(offset + master_dofs.front());
-                }
-            }
-            std::sort(declared_root_masters.begin(),
-                      declared_root_masters.end());
-            declared_root_masters.erase(
-                std::unique(declared_root_masters.begin(),
-                            declared_root_masters.end()),
-                declared_root_masters.end());
-
-            auto mapping_it = mappings.find(root);
-            if (mapping_it == mappings.end()) {
-                mapping_it =
-                    mappings.emplace(root, makeMapping(mesh, root)).first;
-            }
-            const auto& mapping = mapping_it->second;
-            Vector<Real, 3> xi{};
-            bool inversion_stalled_at_round_off = false;
-            if (mapping == nullptr ||
-                !invertMapping(*mapping, candidate.coordinates,
-                               mesh.dimension(), xi,
-                               &inversion_stalled_at_round_off)) {
-                ++inversion_failed;
-                traced_xi = xi;
-                trace_proposal("inversion_failed");
+            auto attempt = build_root_proposal(declaration_dof,
+                                               candidate,
+                                               root_candidate.distance,
+                                               local_root->second);
+            apply_attempt_counters(attempt);
+            if (!attempt.emitted) {
                 continue;
             }
-            if (inversion_stalled_at_round_off) {
-                ++inversion_round_off_acceptances;
-            }
-            const Real reference_extrapolation =
-                normalizedReferenceExtrapolationDistance(
-                    mesh.getCellType(root), xi);
-            traced_xi = xi;
-            traced_extrapolation = reference_extrapolation;
-            maximum_attempted_reference_extrapolation = std::max(
-                maximum_attempted_reference_extrapolation,
-                reference_extrapolation);
-            if (!std::isfinite(reference_extrapolation) ||
-                reference_extrapolation >
-                    guards_.maximum_reference_extrapolation_distance +
-                        Real{128.0} * std::numeric_limits<Real>::epsilon() *
-                            std::max(
-                                Real{1.0},
-                                guards_
-                                    .maximum_reference_extrapolation_distance)) {
-                ++extrapolation_guard_rejections;
-                trace_proposal("extrapolation_guard");
-                continue;
-            }
-            maximum_observed_reference_extrapolation = std::max(
-                maximum_observed_reference_extrapolation,
-                reference_extrapolation);
-            extension_basis.evaluate_values(xi, values);
-            mesh.getCellNodes(root, cell_nodes);
-            const auto n_root_field_nodes = std::min(
-                {cell_nodes.size(), n_field_basis, n_extension});
-            if (values.size() < n_root_field_nodes ||
-                (!field_mesh_to_basis.empty() &&
-                 field_mesh_to_basis.size() < n_root_field_nodes)) {
-                ++inversion_failed;
-                trace_proposal("basis_size");
-                continue;
-            }
-
-            AggregationDeclaration declaration{
-                .state = AggregationDeclarationState::Rooted,
-                .root_distance = root_candidate.distance,
-                .root_cell_gid = mesh_global_entity_ids_available
-                                     ? mesh.getCellGlobalId(root)
-                                     : root,
-                .component_dofs = candidate.component_dofs,
-                .root_master_dofs = std::move(declared_root_masters)};
-            bool proposal_valid = true;
-            for (std::size_t component = 0;
-                 component < candidate.component_dofs.size(); ++component) {
-                const auto slave = candidate.component_dofs[component];
-                ConstraintLine line;
-                line.slave_dof = slave;
-                for (std::size_t m = 0; m < n_root_field_nodes; ++m) {
-                    const auto master_dofs = cell_node_dofs(root, m);
-                    const auto basis_index = field_mesh_to_basis.empty()
-                                                 ? m
-                                                 : field_mesh_to_basis[m];
-                    if (component >= master_dofs.size() ||
-                        basis_index >= values.size()) {
-                        continue;
-                    }
-                    const auto master = offset + master_dofs[component];
-                    const auto weight =
-                        static_cast<double>(values[basis_index]);
-                    if (master != slave && std::isfinite(weight) &&
-                        std::abs(weight) >= 1e-12) {
-                        line.entries.push_back({master, weight});
-                    } else if (!std::isfinite(weight)) {
-                        proposal_valid = false;
-                    }
-                }
-                const auto line_validation =
-                    normalizeAndValidateRootedLine(line);
-                if (!line_validation.valid) {
-                    proposal_valid = false;
-                    break;
-                }
-                const auto line_guard =
-                    validateAggregationLineGuards(line, guards_);
-                maximum_attempted_absolute_coefficient = std::max(
-                    maximum_attempted_absolute_coefficient,
-                    line_guard.maximum_absolute_coefficient);
-                maximum_attempted_row_l1_norm = std::max(
-                    maximum_attempted_row_l1_norm,
-                    line_guard.row_l1_norm);
-                if (!line_guard.valid) {
-                    ++line_guard_rejections;
-                    proposal_valid = false;
-                    break;
-                }
-                maximum_observed_absolute_coefficient = std::max(
-                    maximum_observed_absolute_coefficient,
-                    line_guard.maximum_absolute_coefficient);
-                maximum_observed_row_l1_norm = std::max(
-                    maximum_observed_row_l1_norm,
-                    line_guard.row_l1_norm);
-                declaration.lines.push_back(std::move(line));
-            }
-            if (!proposal_valid ||
-                declaration.lines.size() != candidate.component_dofs.size()) {
-                ++empty_lines;
-                trace_proposal(proposal_valid ? "line_count" : "line_invalid");
-                continue;
-            }
-            trace_proposal("emitted");
             local_aggregation_declarations[declaration_dof].push_back(
-                std::move(declaration));
+                std::move(attempt.declaration));
             candidate_emitted = true;
         }
         if (candidate_emitted) {
@@ -6810,12 +9578,12 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     coordinateLocalPhaseFailure(local_proposal_exception,
                                 "root_proposal_construction");
 
-    std::size_t communicator_root_proposal_failures =
+    communicator_root_proposal_failures =
         inversion_failed + empty_lines + extrapolation_guard_rejections +
         line_guard_rejections;
-    std::size_t communicator_extrapolation_guard_rejections =
+    communicator_extrapolation_guard_rejections =
         extrapolation_guard_rejections;
-    std::size_t communicator_line_guard_rejections = line_guard_rejections;
+    communicator_line_guard_rejections = line_guard_rejections;
 #if FE_HAS_MPI
     if (mpi_initialized != 0) {
         const auto comm = system.dofHandler().mpiComm();
@@ -6893,7 +9661,6 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                          local_root_proposals);
     }
     profile.mark(AggregationProfilePhase::RootProposals);
-    DistributedAggregationResult distributed_result;
     if (max_lines == std::numeric_limits<std::size_t>::max()) {
         // Candidate DOFs this rank condenses: DOFs of its owned cells
         // (assembled here under reverse scatter) and of their face neighbors
@@ -6904,124 +9671,9 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         // entries, not correctness.
         std::set<GlobalIndex> assembled_candidate_dofs;
         std::set<GlobalIndex> row_coupled_candidate_dofs;
-        {
-            // Candidate component DOFs, sorted and distinct, with dense
-            // per-DOF marks over their range: one array read per cell DOF
-            // instead of a set probe, and one ordered insertion per marked
-            // candidate instead of one per incident cell.
-            std::vector<GlobalIndex> candidate_component_dofs;
-            for (const auto& [dof, candidate] : global_candidates) {
-                static_cast<void>(dof);
-                candidate_component_dofs.insert(
-                    candidate_component_dofs.end(),
-                    candidate.component_dofs.begin(),
-                    candidate.component_dofs.end());
-            }
-            std::sort(candidate_component_dofs.begin(),
-                      candidate_component_dofs.end());
-            candidate_component_dofs.erase(
-                std::unique(candidate_component_dofs.begin(),
-                            candidate_component_dofs.end()),
-                candidate_component_dofs.end());
-            const GlobalIndex candidate_dof_base =
-                candidate_component_dofs.empty()
-                    ? GlobalIndex{0}
-                    : candidate_component_dofs.front();
-            const std::size_t candidate_dof_span =
-                candidate_component_dofs.empty()
-                    ? std::size_t{0}
-                    : static_cast<std::size_t>(
-                          candidate_component_dofs.back() -
-                          candidate_dof_base) + 1u;
-            constexpr unsigned char candidate_bit = 1u;
-            constexpr unsigned char assembled_bit = 2u;
-            constexpr unsigned char row_coupled_bit = 4u;
-            std::vector<unsigned char> candidate_marks(candidate_dof_span, 0u);
-            for (const auto dof : candidate_component_dofs) {
-                candidate_marks[static_cast<std::size_t>(
-                    dof - candidate_dof_base)] = candidate_bit;
-            }
-            auto candidate_mark = [&](GlobalIndex dof) -> unsigned char* {
-                if (dof < candidate_dof_base ||
-                    static_cast<std::size_t>(dof - candidate_dof_base) >=
-                        candidate_dof_span) {
-                    return nullptr;
-                }
-                auto* mark = &candidate_marks[static_cast<std::size_t>(
-                    dof - candidate_dof_base)];
-                return (*mark & candidate_bit) != 0u ? mark : nullptr;
-            };
-            const auto& assembly_partition =
-                system.dofHandler().getPartition();
-            const auto n_local_cells = mesh.numCells();
-            std::vector<unsigned char> assembled_cell(
-                static_cast<std::size_t>(std::max<GlobalIndex>(0, n_local_cells)),
-                static_cast<unsigned char>(0));
-            auto mark_cell = [&](GlobalIndex cell) {
-                if (cell >= 0 && cell < n_local_cells) {
-                    assembled_cell[static_cast<std::size_t>(cell)] = 1u;
-                }
-            };
-            for (GlobalIndex cell = 0; cell < n_local_cells; ++cell) {
-                if (mesh.isOwnedCell(cell)) {
-                    mark_cell(cell);
-                }
-            }
-            mesh.forEachInteriorFace(
-                [&](GlobalIndex, GlobalIndex first, GlobalIndex second) {
-                    if (first >= 0 && first < n_local_cells &&
-                        mesh.isOwnedCell(first)) {
-                        mark_cell(second);
-                    }
-                    if (second >= 0 && second < n_local_cells &&
-                        mesh.isOwnedCell(second)) {
-                        mark_cell(first);
-                    }
-                });
-            // Owned-row assembly (any policy but reverse scatter) condenses
-            // every local cell that holds an owned row as well.
-            const bool owned_cells_only =
-                system.assemblyGhostPolicy() ==
-                assembly::GhostPolicy::ReverseScatter;
-            for (GlobalIndex cell = 0; cell < n_local_cells; ++cell) {
-                const auto cell_dofs = dh.getCellDofs(cell);
-                const bool row_coupled =
-                    std::any_of(cell_dofs.begin(), cell_dofs.end(),
-                                [&](GlobalIndex dof) {
-                                    return assembly_partition.isOwned(offset + dof);
-                                });
-                const bool assembled =
-                    assembled_cell[static_cast<std::size_t>(cell)] != 0u ||
-                    (!owned_cells_only && row_coupled);
-                if (!assembled && !row_coupled) {
-                    continue;
-                }
-                for (const auto dof : cell_dofs) {
-                    auto* mark = candidate_mark(offset + dof);
-                    if (mark == nullptr) {
-                        continue;
-                    }
-                    if (assembled) {
-                        *mark |= assembled_bit;
-                    }
-                    if (row_coupled) {
-                        *mark |= row_coupled_bit;
-                    }
-                }
-            }
-            for (const auto dof : candidate_component_dofs) {
-                const auto mark = candidate_marks[static_cast<std::size_t>(
-                    dof - candidate_dof_base)];
-                if ((mark & assembled_bit) != 0u) {
-                    assembled_candidate_dofs.insert(
-                        assembled_candidate_dofs.end(), dof);
-                }
-                if ((mark & row_coupled_bit) != 0u) {
-                    row_coupled_candidate_dofs.insert(
-                        row_coupled_candidate_dofs.end(), dof);
-                }
-            }
-        }
+        compute_assembled_candidate_dofs(global_candidates,
+                                         assembled_candidate_dofs,
+                                         row_coupled_candidate_dofs);
         try {
             distributed_result = resolveDistributedAggregationDeclarations(
                 system,
@@ -7109,6 +9761,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     } else {
         distributed_result.validation =
             DistributedAggregationValidation::DebugBypass;
+    }
+
     }
 
     profile.mark(AggregationProfilePhase::Resolution);

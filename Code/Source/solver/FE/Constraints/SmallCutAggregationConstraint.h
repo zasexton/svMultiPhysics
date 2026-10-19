@@ -93,6 +93,16 @@
  * installed where the slave is relevant and all masters are present, after
  * proving that the slave has exactly one owner; ranks that see the slave only
  * deeper in the halo carry no line (their ghost value follows the owner).
+ * On a distributed communicator the refresh is built from owner-sourced
+ * records: one record per active cell from its owner, one proposal per root
+ * cell from its owner, and candidate facts merged at a home rank per DOF.
+ * Each rank therefore receives the active-cell ledger and the interface
+ * band once, instead of every stored copy of every classified cell, face
+ * and proposal.  A census of cell owners, classifications and face
+ * neighbors, and checks of every stored copy against its owner's record,
+ * prove that the result is the communicator-global one; whenever a check
+ * fails, or a debug option is set, the communicator-global refresh runs
+ * instead and reports exactly what it always reported.
  * Distributed mesh adapters must expose globally unique cell IDs; missing
  * IDs, masters absent on a condensing rank, or
  * inconsistent component/weight data fails closed before the generic
@@ -173,6 +183,25 @@ struct SmallCutAggregationPhysicalRootKey {
 {
     return lhs.distance == rhs.distance && lhs.cell_gid == rhs.cell_gid;
 }
+
+/**
+ * Whether distributed refreshes use the owner-sourced exchange (default
+ * true).  The owner-sourced and the communicator-global refreshes produce
+ * identical constraints and ledgers; the setter exists so that tests can
+ * compare them in one process.  Must be set alike on every rank.
+ */
+void setSmallCutAggregationOwnerSourcedRefresh(bool enabled) noexcept;
+[[nodiscard]] bool smallCutAggregationOwnerSourcedRefreshEnabled() noexcept;
+
+/// Number of distributed refreshes that the owner-sourced exchange
+/// completed, and of those it returned to the communicator-global refresh
+/// (rank-local counters for tests and diagnostics).
+struct SmallCutAggregationOwnerSourcedCounters {
+    std::uint64_t completed{0u};
+    std::uint64_t returned_to_global{0u};
+};
+[[nodiscard]] SmallCutAggregationOwnerSourcedCounters
+smallCutAggregationOwnerSourcedCounters() noexcept;
 
 } // namespace detail
 
