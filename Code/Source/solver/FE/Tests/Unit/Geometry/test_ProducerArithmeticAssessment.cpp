@@ -91,10 +91,14 @@ void expectSqrtInequality(Real input,
     EXPECT_GE(upper_magnitude * upper_magnitude, exact);
 }
 
+// The floating-point control and status registers: MXCSR and the x87
+// control and status words on x86-64, FPCR and FPSR on AArch64.
 struct HardwareState {
     std::uint32_t mxcsr{0u};
     std::uint16_t x87_control{0u};
     std::uint16_t x87_status{0u};
+    std::uint64_t fpcr{0u};
+    std::uint64_t fpsr{0u};
 };
 
 HardwareState readHardwareState()
@@ -104,32 +108,66 @@ HardwareState readHardwareState()
     asm volatile("stmxcsr %0" : "=m"(state.mxcsr));
     asm volatile("fnstcw %0" : "=m"(state.x87_control));
     asm volatile("fnstsw %0" : "=am"(state.x87_status));
+#elif defined(__aarch64__)
+    asm volatile("mrs %0, fpcr" : "=r"(state.fpcr) : : "memory");
+    asm volatile("mrs %0, fpsr" : "=r"(state.fpsr) : : "memory");
 #endif
     return state;
 }
 
+#if defined(__x86_64__)
 void writeMxcsr(std::uint32_t value)
 {
-#if defined(__x86_64__)
     asm volatile("ldmxcsr %0" : : "m"(value));
-#else
-    static_cast<void>(value);
-#endif
 }
 
 void writeX87Control(std::uint16_t value)
 {
-#if defined(__x86_64__)
     asm volatile("fldcw %0" : : "m"(value));
-#else
-    static_cast<void>(value);
-#endif
 }
+#elif defined(__aarch64__)
+void writeFpcr(std::uint64_t value)
+{
+    asm volatile("msr fpcr, %0" : : "r"(value) : "memory");
+}
+#endif
 
 void clearX87Status()
 {
 #if defined(__x86_64__)
     asm volatile("fnclex");
+#endif
+}
+
+// Flush-to-zero and denormals-are-zero: MXCSR FTZ (bit 15) and DAZ (bit 6)
+// on x86-64, FPCR FZ (bit 24), which flushes inputs and outputs, on AArch64.
+void enableFlushToZero()
+{
+#if defined(__x86_64__)
+    writeMxcsr(readHardwareState().mxcsr | UINT32_C(0x8040));
+#elif defined(__aarch64__)
+    writeFpcr(readHardwareState().fpcr | (UINT64_C(1) << 24u));
+#endif
+}
+
+// Unmask every floating-point exception: clear the MXCSR masks (bits 7-12)
+// and flags (0-5) and the x87 masks on x86-64; set the FPCR trap enables
+// (IOE to IXE, bits 8-12, and IDE, 15) on AArch64.  An AArch64
+// implementation without trapped exceptions reads its enables back as zero.
+void unmaskAllExceptions()
+{
+#if defined(__x86_64__)
+    clearX87Status();
+    auto unmasked = readHardwareState();
+    unmasked.mxcsr &= ~UINT32_C(0x00001f80);
+    unmasked.mxcsr &= ~UINT32_C(0x0000003f);
+    unmasked.x87_control =
+        static_cast<std::uint16_t>(unmasked.x87_control &
+                                   static_cast<std::uint16_t>(~UINT16_C(0x003f)));
+    writeMxcsr(unmasked.mxcsr);
+    writeX87Control(unmasked.x87_control);
+#elif defined(__aarch64__)
+    writeFpcr(readHardwareState().fpcr | UINT64_C(0x9f00));
 #endif
 }
 
@@ -139,6 +177,8 @@ void expectHardwareStateEqual(const HardwareState& actual,
     EXPECT_EQ(actual.mxcsr, expected.mxcsr);
     EXPECT_EQ(actual.x87_control, expected.x87_control);
     EXPECT_EQ(actual.x87_status, expected.x87_status);
+    EXPECT_EQ(actual.fpcr, expected.fpcr);
+    EXPECT_EQ(actual.fpsr, expected.fpsr);
 }
 
 void expectBits(const ArithmeticInterval& interval,
@@ -1360,8 +1400,7 @@ TEST(ProducerArithmeticAssessment,
     fenv_t saved_environment;
     ASSERT_EQ(fegetenv(&saved_environment), 0);
     const int saved_errno = errno;
-    auto ftz_daz = readHardwareState().mxcsr | UINT32_C(0x8040);
-    writeMxcsr(ftz_daz);
+    enableFlushToZero();
     errno = EILSEQ;
     const auto before = readHardwareState();
     const auto result = assessIntervalSqrt({2.0, 2.0});
@@ -1385,15 +1424,7 @@ TEST(ProducerArithmeticAssessment,
     ASSERT_EQ(fegetenv(&saved_environment), 0);
     const int saved_errno = errno;
     ASSERT_EQ(feclearexcept(FE_ALL_EXCEPT), 0);
-    clearX87Status();
-    auto unmasked = readHardwareState();
-    unmasked.mxcsr &= ~UINT32_C(0x00001f80);
-    unmasked.mxcsr &= ~UINT32_C(0x0000003f);
-    unmasked.x87_control =
-        static_cast<std::uint16_t>(unmasked.x87_control &
-                                   static_cast<std::uint16_t>(~UINT16_C(0x003f)));
-    writeMxcsr(unmasked.mxcsr);
-    writeX87Control(unmasked.x87_control);
+    unmaskAllExceptions();
     errno = ENOENT;
     const auto before = readHardwareState();
     const auto result = assessIntervalOperation(

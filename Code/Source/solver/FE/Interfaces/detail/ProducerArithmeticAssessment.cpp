@@ -106,9 +106,13 @@ template <typename T>
     }
 }
 
+// The integer kernel needs only binary64 Real and unsigned __int128.  The
+// fast path below reads the floating-point control register of the target:
+// MXCSR on x86-64, FPCR and FPSR on AArch64.
 [[nodiscard]] bool supportedRepresentation() noexcept
 {
-#if defined(__GNUC__) && !defined(__clang__) && defined(__x86_64__) && \
+#if defined(__GNUC__) && !defined(__clang__) && \
+    (defined(__x86_64__) || defined(__aarch64__)) && \
     defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
     __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ && __GNUC__ == 12 && \
     __GNUC_MINOR__ == 4
@@ -800,8 +804,9 @@ void normalize(UInt4352& value) noexcept
 // x - r > 0 gives [r, next(r)], x - r < 0 gives [prev(r), r], x = r gives
 // [r, r].  The fast path is taken only when every operand and the rounded
 // result are zero or have a magnitude in [2^-500, 2^500] (no overflow, no
-// underflow in the transformations) and the SSE control register selects
-// round-to-nearest without flush-to-zero or denormals-are-zero; otherwise the
+// underflow in the transformations) and the floating-point control register
+// selects round-to-nearest without flush-to-zero, denormals-are-zero or
+// trapped exceptions (MXCSR on x86-64, FPCR on AArch64); otherwise the
 // exact computation runs.  Results are therefore identical bit for bit.
 // SVMP_PRODUCER_ARITHMETIC_EXACT=1 disables the fast path;
 // SVMP_PRODUCER_ARITHMETIC_SELF_CHECK=1 runs both and aborts on a difference.
@@ -831,34 +836,68 @@ std::atomic<int> g_arithmetic_path{kPathUnset};
     return static_cast<ProducerArithmeticPath>(path);
 }
 
-[[nodiscard]] std::uint32_t readControlStatus() noexcept
+#if defined(__aarch64__)
+// FPCR (control) in the upper and FPSR (cumulative status flags) in the lower
+// 32 bits; both registers are 64 bits wide with the upper halves reserved.
+using ControlStatusWord = std::uint64_t;
+#else
+// MXCSR holds the SSE control and status bits in one register.
+using ControlStatusWord = std::uint32_t;
+#endif
+
+[[nodiscard]] ControlStatusWord readControlStatus() noexcept
 {
 #if defined(__x86_64__) || defined(_M_X64)
     return _mm_getcsr();
+#elif defined(__aarch64__)
+    std::uint64_t control = 0u;
+    std::uint64_t status = 0u;
+    asm volatile("mrs %0, fpcr" : "=r"(control) : : "memory");
+    asm volatile("mrs %0, fpsr" : "=r"(status) : : "memory");
+    return (control << 32u) | (status & UINT64_C(0xffffffff));
 #else
     return 0u;
 #endif
 }
 
-void writeControlStatus(std::uint32_t value) noexcept
+void writeControlStatus(ControlStatusWord value) noexcept
 {
 #if defined(__x86_64__) || defined(_M_X64)
     _mm_setcsr(value);
+#elif defined(__aarch64__)
+    // The fast path changes only status flags; the control register is
+    // rewritten only if it differs, since an FPCR write can be expensive.
+    std::uint64_t control = 0u;
+    asm volatile("mrs %0, fpcr" : "=r"(control) : : "memory");
+    const std::uint64_t restored_control = value >> 32u;
+    if ((control & UINT64_C(0xffffffff)) != restored_control) {
+        asm volatile("msr fpcr, %0" : : "r"(restored_control) : "memory");
+    }
+    const std::uint64_t restored_status = value & UINT64_C(0xffffffff);
+    asm volatile("msr fpsr, %0" : : "r"(restored_status) : "memory");
 #else
     static_cast<void>(value);
 #endif
 }
 
-// Round to nearest (bits 13-14 clear), no flush-to-zero (15) or
-// denormals-are-zero (6), every exception masked (7-12): floating-point
-// operations then round as assumed and cannot trap.  The fast path restores
-// the status flags and errno it may change, so the caller's environment is
-// left exactly as the integer arithmetic leaves it.
-[[nodiscard]] bool fastEnvironment(std::uint32_t control_status) noexcept
+// x86-64 MXCSR: round to nearest (bits 13-14 clear), no flush-to-zero (15)
+// or denormals-are-zero (6), every exception masked (7-12).
+// AArch64 FPCR: round to nearest (RMode, bits 22-23, clear), no
+// flush-to-zero (FZ, 24), no input flush or alternate handling (FIZ, 0, and
+// AH, 1, of FEAT_AFP; reserved zero without it), and no exception trap
+// enabled (IOE, DZE, OFE, UFE, IXE, 8-12, and IDE, 15).  DN, FZ16, AHP and
+// NEP do not affect finite binary64 scalar results.
+// Floating-point operations then round as assumed and cannot trap.  The fast
+// path restores the status flags and errno it may change, so the caller's
+// environment is left exactly as the integer arithmetic leaves it.
+[[nodiscard]] bool fastEnvironment(ControlStatusWord control_status) noexcept
 {
 #if defined(__x86_64__) || defined(_M_X64)
     return (control_status & 0xE040u) == 0u &&
            (control_status & 0x1F80u) == 0x1F80u;
+#elif defined(__aarch64__)
+    constexpr std::uint64_t kFpcrRoundingFlushAndTraps = UINT64_C(0x01C09F03);
+    return ((control_status >> 32u) & kFpcrRoundingFlushAndTraps) == 0u;
 #else
     static_cast<void>(control_status);
     return false;
