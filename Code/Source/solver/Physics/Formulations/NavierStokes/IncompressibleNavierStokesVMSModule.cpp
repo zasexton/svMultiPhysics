@@ -13,6 +13,7 @@
 #include "FE/Assembly/Assembler.h"
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Assembly/GlobalSystemView.h"
+#include "FE/Constraints/ConstraintPlan.h"
 #include "FE/Constraints/LevelSetActiveSideVertexDirichletConstraint.h"
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
 #include "FE/Constraints/ContactPointVelocityConstraint.h"
@@ -6668,7 +6669,7 @@ void appendUnfittedFreeSurfaceCurvatureTrialFields(
 }
 
 void applyFreeSurfaceContactLineConstraints(
-    FE::systems::FESystem& system,
+    FE::constraints::ConstraintPlan& constraint_plan,
     const FreeSurfaceBoundary& bc,
     const FE::systems::ALEBinding& ale_binding,
     int dim)
@@ -6700,7 +6701,9 @@ void applyFreeSurfaceContactLineConstraints(
                 .symbol = "mesh_displacement",
             });
         }
-        FE::systems::installStrongDirichlet(system, constraints);
+        constraint_plan.essentials([&constraints](FE::systems::FESystem& system) {
+            FE::systems::installStrongDirichlet(system, constraints);
+        });
     }
 }
 
@@ -9071,6 +9074,10 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                           physical_boundary_marker);
             return integrand.ds(domain);
         };
+    // Every system constraint of this module is registered through the plan,
+    // in the order VertexValues < Essential < InactiveSupport < Aggregation <
+    // PointLaw (see FE/Constraints/ConstraintPlan.h).
+    FE::constraints::ConstraintPlan constraint_plan(system);
     struct PendingSmallCutAggregation {
         FE::geometry::CutIntegrationSide side{
             FE::geometry::CutIntegrationSide::Negative};
@@ -9191,6 +9198,19 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                     .constrain_inactive_velocity =
                         constrain_inactive_velocity,
                 };
+            // Physical essential data owns the exterior trace: the plan
+            // registers the artificial inactive-side extension after every
+            // strong velocity and pressure condition, so its per-DOF
+            // precedence rule fills only otherwise unconstrained support.
+            const auto active_side =
+                freeSurfaceLevelSetGeometry(
+                    *active_pressure_domain->boundary, system)
+                    .side(activeDomainSide(
+                        active_pressure_domain->active_domain));
+            if (constrain_inactive_velocity) {
+                constraint_plan.inactiveSide({u_id}, active_side);
+            }
+            constraint_plan.inactiveSide({p_id}, active_side);
             if (!constrain_inactive_velocity) {
                 FE_LOG_INFO(
                     std::string("IncompressibleNavierStokesVMSModule: inactive active-domain velocity constraints disabled") +
@@ -9221,6 +9241,13 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                     .guards = active_pressure_domain->boundary
                                   ->small_cut_aggregation_guards,
                 };
+                // Mixed problems aggregate both spaces (see the
+                // registration log below).
+                constraint_plan.aggregate(
+                    {u_id, p_id},
+                    active_side,
+                    active_pressure_domain->boundary
+                        ->small_cut_aggregation_guards);
             }
         }
     }
@@ -9242,9 +9269,10 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             break;
         }
 
-        system.addSystemConstraint(
-            std::make_unique<FE::constraints::VertexDirichletConstraint>(p_id, std::move(values), mode));
+        constraint_plan.vertexValues(p_id, std::move(values), mode);
     }
+    constraint_plan.commitThrough(
+        FE::constraints::ConstraintPhase::VertexValues);
 
     using namespace svmp::FE::forms;
 
@@ -9970,7 +9998,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     for (const auto& effective_bc : effective_free_surfaces) {
         if (isExteriorOnePhaseBoundary(effective_bc)) {
             applyFreeSurfaceContactLineConstraints(
-                system, effective_bc, ale_binding, dim);
+                constraint_plan, effective_bc, ale_binding, dim);
             registerFreeSurfacePrescribedAngleGeometry(
                 system, effective_bc);
             applyDynamicContactAngleResidual(
@@ -10081,40 +10109,24 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         return Factories::toVelocityEssentialBC(bc, dim, options_.velocity_field_name);
     });
 
-    bc_manager.applyAll(system, momentum_form, u, v, u_id);
+    constraint_plan.essentials([&](FE::systems::FESystem& target) {
+        bc_manager.applyAll(target, momentum_form, u, v, u_id);
+    });
 
     FE::systems::BoundaryConditionManager p_bc_manager;
     p_bc_manager.install(options_.pressure_dirichlet,
                          [&](const auto& bc) { return Factories::toPressureEssentialBC(bc, options_.pressure_field_name); });
-    p_bc_manager.applyAll(system, p_id);
+    constraint_plan.essentials([&](FE::systems::FESystem& target) {
+        p_bc_manager.applyAll(target, p_id);
+    });
 
     if (pending_active_domain_constraints.has_value()) {
         // Physical essential data owns the exterior trace.  The artificial
-        // inactive-side extension is registered afterward so its existing
-        // per-DOF precedence rule fills only otherwise unconstrained support.
-        // Aggregation remains last and therefore sees the complete physical
-        // and inactive constraint set.
+        // inactive-side extension (declared above) is registered afterward
+        // so its existing per-DOF precedence rule fills only otherwise
+        // unconstrained support.  Aggregation remains last and therefore
+        // sees the complete physical and inactive constraint set.
         const auto& pending = *pending_active_domain_constraints;
-        if (pending.constrain_inactive_velocity) {
-            system.addSystemConstraint(
-                std::make_unique<
-                    FE::constraints::LevelSetActiveSideVertexDirichletConstraint>(
-                    u_id,
-                    pending.level_set_field_name,
-                    pending.side,
-                    pending.level_set_isovalue,
-                    FE::Real{0.0},
-                    pending.interface_marker));
-        }
-        system.addSystemConstraint(
-            std::make_unique<
-                FE::constraints::LevelSetActiveSideVertexDirichletConstraint>(
-                p_id,
-                pending.level_set_field_name,
-                pending.side,
-                pending.level_set_isovalue,
-                FE::Real{0.0},
-                pending.interface_marker));
         FE_LOG_INFO(
             std::string("IncompressibleNavierStokesVMSModule: active-domain inactive constraints enabled") +
             " marker=" + std::to_string(pending.interface_marker) +
@@ -10130,22 +10142,6 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         // preconstrained component facts communicator-wide before installing
         // canonical lines, so even owner/non-owner boundary visibility cannot
         // turn a partial strong condition into an owner-wins aggregation line.
-        system.addSystemConstraint(
-            std::make_unique<FE::constraints::SmallCutAggregationConstraint>(
-                u_id,
-                pending_small_cut_aggregation->side,
-                pending_small_cut_aggregation->interface_marker,
-                std::vector<int>{},
-                std::vector<FE::GlobalIndex>{},
-                pending_small_cut_aggregation->guards));
-        system.addSystemConstraint(
-            std::make_unique<FE::constraints::SmallCutAggregationConstraint>(
-                p_id,
-                pending_small_cut_aggregation->side,
-                pending_small_cut_aggregation->interface_marker,
-                std::vector<int>{},
-                std::vector<FE::GlobalIndex>{},
-                pending_small_cut_aggregation->guards));
         FE_LOG_INFO(
             std::string("IncompressibleNavierStokesVMSModule: small-cut "
                         "aggregation enabled for unfitted free surface") +
@@ -10208,9 +10204,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             };
             law.name = "ren_e_contact_point:" +
                        std::to_string(contactLineWallBoundaryMarker(contact_line));
-            system.addSystemConstraint(
-                std::make_unique<FE::constraints::ContactPointVelocityConstraint>(
-                    u_id, std::move(law)));
+            constraint_plan.contactPointVelocity(u_id, std::move(law));
             FE_LOG_INFO(
                 std::string("IncompressibleNavierStokesVMSModule: registered the strong Ren-E contact-point constraint") +
                 " wall_marker=" + std::to_string(contactLineWallBoundaryMarker(contact_line)) +
@@ -10220,6 +10214,10 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                 " diagnostic=navier_stokes_strong_contact_point_law");
         }
     }
+
+    // Registers the inactive-side, aggregation and point-law constraints, in
+    // that order, after the essential conditions above.
+    constraint_plan.commit();
 
     Factories::VelocityNitscheEnergyForms nitsche_energy_forms;
     std::vector<

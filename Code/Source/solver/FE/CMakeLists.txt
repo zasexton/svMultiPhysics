@@ -658,6 +658,7 @@ set(FE_CONSTRAINTS_HEADERS
     Constraints/CoupledFieldGaugeConstraint.h
     Constraints/SystemConstraint.h
     Constraints/SystemConstraints.h
+    Constraints/ConstraintPlan.h
     Constraints/StrongDirichletConstraint.h
     Constraints/VertexDirichletConstraint.h
     Constraints/LevelSetActiveSideVertexDirichletConstraint.h
@@ -839,6 +840,7 @@ set(FE_ASSEMBLY_SOURCES
     Assembly/AssemblyThreadPool.cpp
     Constraints/SmallCutAggregationConstraint.cpp
     Constraints/ContactPointVelocityConstraint.cpp
+    Constraints/ConstraintPlan.cpp
     Analysis/GeneratedBoundaryAggregateTraceCertificate.cpp
     Assembly/AssemblerFactory.cpp
     Assembly/ParallelAssembler.cpp
@@ -2657,6 +2659,7 @@ if(FE_BUILD_TESTS)
             Tests/Unit/Constraints/test_LevelSetActiveSideVertexDirichletConstraint.cpp
             Tests/Unit/Constraints/test_SmallCutAggregationConstraint.cpp
             Tests/Unit/Constraints/test_ContactPointVelocityConstraint.cpp
+            Tests/Unit/Constraints/test_ConstraintPlan.cpp
         )
     endif()
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Constraints/test_main.cpp)
