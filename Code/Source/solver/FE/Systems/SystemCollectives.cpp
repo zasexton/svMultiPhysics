@@ -9,6 +9,9 @@
 
 #include "Assembly/GlobalSystemView.h"
 #include "Backends/Interfaces/GenericVector.h"
+#include "Constraints/AffineConstraints.h"
+#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Systems/FESystem.h"
 
 #include <algorithm>
 #include <array>
@@ -16,6 +19,7 @@
 #include <cstddef>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -31,6 +35,34 @@ constexpr std::string_view kLocalPreparationFailure{
     "failed local preparation for collective phase"};
 constexpr std::string_view kRecoveryPhaseFailure{
     "failed postaccept maintenance recovery phase"};
+
+// 64-bit FNV-1a, as used for the cut-context keys.
+constexpr std::uint64_t kFnv1aOffset = 1469598103934665603ull;
+constexpr std::uint64_t kFnv1aPrime = 1099511628211ull;
+
+void mixFnv1a(std::uint64_t& h, std::uint64_t value) noexcept
+{
+  h ^= value;
+  h *= kFnv1aPrime;
+}
+
+double maxAbsDifference(std::span<const svmp::FE::Real> left,
+                        std::span<const svmp::FE::Real> right)
+{
+  if (left.size() != right.size()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Cannot compare solution history vectors with mismatched sizes.");
+  }
+
+  double local = 0.0;
+  for (std::size_t i = 0; i < left.size(); ++i) {
+    local = std::max(
+        local,
+        static_cast<double>(std::abs(left[i] - right[i])));
+  }
+
+  return local;
+}
 
 } // namespace
 
@@ -73,6 +105,23 @@ double collectiveMinDouble(double local, const CollectiveCommunicator& comm)
   if (initialized && comm.size() > 1) {
     double global = 0.0;
     MPI_Allreduce(&local, &global, 1, MPI_DOUBLE, MPI_MIN, comm.native());
+    return global;
+  }
+#else
+  (void)comm;
+#endif
+
+  return local;
+}
+
+double collectiveMaxDouble(double local, const CollectiveCommunicator& comm)
+{
+#if FE_HAS_MPI
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (initialized && comm.size() > 1) {
+    double global = 0.0;
+    MPI_Allreduce(&local, &global, 1, MPI_DOUBLE, MPI_MAX, comm.native());
     return global;
   }
 #else
@@ -576,6 +625,286 @@ void assignFeOrderedVectorCollectively(
       comm,
       kRecoveryPhaseFailure,
       "restore_vector_ghost_update_complete");
+}
+
+double collectiveMaxAbsDifference(std::span<const Real> left,
+                                  std::span<const Real> right,
+                                  const CollectiveCommunicator& comm)
+{
+  const double local = maxAbsDifference(left, right);
+
+#if FE_HAS_MPI
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (initialized && comm.size() > 1) {
+    double global = 0.0;
+    MPI_Allreduce(&local, &global, 1, MPI_DOUBLE, MPI_MAX, comm.native());
+    return global;
+  }
+#else
+  (void)comm;
+#endif
+
+  return local;
+}
+
+std::vector<std::size_t> collectiveIndexUnion(
+    std::vector<std::size_t> local_indices,
+    std::size_t upper_bound,
+    const CollectiveCommunicator& comm,
+    std::string_view purpose)
+{
+  std::sort(local_indices.begin(), local_indices.end());
+  local_indices.erase(
+      std::unique(local_indices.begin(), local_indices.end()),
+      local_indices.end());
+  bool index_out_of_range =
+      !local_indices.empty() && local_indices.back() >= upper_bound;
+#if FE_HAS_MPI
+  if (comm.isParallel()) {
+    const int local_invalid = index_out_of_range ? 1 : 0;
+    int any_invalid = 0;
+    MPI_Allreduce(&local_invalid,
+                  &any_invalid,
+                  1,
+                  MPI_INT,
+                  MPI_MAX,
+                  comm.native());
+    index_out_of_range = any_invalid != 0;
+  }
+#endif
+  if (index_out_of_range) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] " + std::string(purpose) +
+        " contains an out-of-range local index.");
+  }
+
+#if FE_HAS_MPI
+  if (comm.isParallel()) {
+    const int local_count_overflow =
+        local_indices.size() >
+                static_cast<std::size_t>(std::numeric_limits<int>::max())
+            ? 1
+            : 0;
+    int any_count_overflow = 0;
+    MPI_Allreduce(&local_count_overflow,
+                  &any_count_overflow,
+                  1,
+                  MPI_INT,
+                  MPI_MAX,
+                  comm.native());
+    if (any_count_overflow != 0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] " + std::string(purpose) +
+          " exceeds MPI local-count limits.");
+    }
+
+    std::vector<std::uint64_t> local_values;
+    local_values.reserve(local_indices.size());
+    for (const auto index : local_indices) {
+      local_values.push_back(static_cast<std::uint64_t>(index));
+    }
+
+    const int local_count = static_cast<int>(local_values.size());
+    std::vector<int> counts(static_cast<std::size_t>(comm.size()), 0);
+    MPI_Allgather(&local_count,
+                  1,
+                  MPI_INT,
+                  counts.data(),
+                  1,
+                  MPI_INT,
+                  comm.native());
+
+    std::vector<int> displacements(counts.size(), 0);
+    int total_count = 0;
+    for (std::size_t rank = 0u; rank < counts.size(); ++rank) {
+      if (counts[rank] < 0 ||
+          counts[rank] > std::numeric_limits<int>::max() - total_count) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] " + std::string(purpose) +
+            " exceeds MPI aggregate-count limits.");
+      }
+      displacements[rank] = total_count;
+      total_count += counts[rank];
+    }
+
+    std::vector<std::uint64_t> gathered(
+        static_cast<std::size_t>(total_count), 0u);
+#ifdef MPI_UINT64_T
+    const MPI_Datatype index_type = MPI_UINT64_T;
+#else
+    const MPI_Datatype index_type = MPI_UNSIGNED_LONG_LONG;
+#endif
+    MPI_Allgatherv(local_values.empty() ? nullptr : local_values.data(),
+                   local_count,
+                   index_type,
+                   gathered.empty() ? nullptr : gathered.data(),
+                   counts.data(),
+                   displacements.data(),
+                   index_type,
+                   comm.native());
+
+    local_indices.clear();
+    local_indices.reserve(gathered.size());
+    for (const auto value : gathered) {
+      if (value >= static_cast<std::uint64_t>(upper_bound) ||
+          value >
+              static_cast<std::uint64_t>(
+                  std::numeric_limits<std::size_t>::max())) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] " + std::string(purpose) +
+            " contains an out-of-range communicator index.");
+      }
+      local_indices.push_back(static_cast<std::size_t>(value));
+    }
+    std::sort(local_indices.begin(), local_indices.end());
+    local_indices.erase(
+        std::unique(local_indices.begin(), local_indices.end()),
+        local_indices.end());
+  }
+#else
+  (void)comm;
+#endif
+  return local_indices;
+}
+
+void scatterFeOrderedSolution(
+    backends::GenericVector& solution,
+    std::span<const Real> values)
+{
+  if (static_cast<std::size_t>(solution.size()) != values.size()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Cannot scatter FE-ordered solution values with mismatched size.");
+  }
+
+  auto view = solution.createAssemblyView();
+  if (!view) {
+    auto span = solution.localSpan();
+    if (span.size() != values.size()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Could not scatter FE-ordered solution values.");
+    }
+    std::copy(values.begin(), values.end(), span.begin());
+    solution.updateGhosts();
+    return;
+  }
+
+  constexpr svmp::FE::GlobalIndex chunk_size = 4096;
+  std::vector<svmp::FE::GlobalIndex> dofs;
+  dofs.reserve(static_cast<std::size_t>(std::min(solution.size(), chunk_size)));
+  view->beginAssemblyPhase();
+  for (svmp::FE::GlobalIndex offset = 0; offset < solution.size();
+       offset += chunk_size) {
+    const auto chunk =
+        std::min<svmp::FE::GlobalIndex>(chunk_size, solution.size() - offset);
+    dofs.resize(static_cast<std::size_t>(chunk));
+    for (svmp::FE::GlobalIndex i = 0; i < chunk; ++i) {
+      dofs[static_cast<std::size_t>(i)] = offset + i;
+    }
+    view->setVectorEntries(
+        std::span<const svmp::FE::GlobalIndex>(dofs.data(), dofs.size()),
+        values.subspan(static_cast<std::size_t>(offset),
+                       static_cast<std::size_t>(chunk)));
+  }
+  view->endAssemblyPhase();
+  view->finalizeAssembly();
+  solution.updateGhosts();
+}
+
+interfaces::FreeSurfaceGeometryOwnershipCollective ownershipCollective(
+    const CollectiveCommunicator& comm)
+{
+  svmp::FE::interfaces::FreeSurfaceGeometryOwnershipCollective collective;
+  collective.rank = comm.rank();
+  collective.size = comm.size();
+  collective.all_gather_owned_rule_identity_values =
+      [comm](std::span<const std::uint64_t> local_values) {
+        std::vector<std::uint64_t> gathered(local_values.begin(),
+                                            local_values.end());
+#if FE_HAS_MPI
+        if (!comm.isParallel()) {
+          return gathered;
+        }
+        if (local_values.size() >
+            static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+          throw std::runtime_error(
+              "Free-surface snapshot ownership stream exceeds MPI limits.");
+        }
+        const int local_count = static_cast<int>(local_values.size());
+        std::vector<int> counts(static_cast<std::size_t>(comm.size()), 0);
+        MPI_Allgather(&local_count,
+                      1,
+                      MPI_INT,
+                      counts.data(),
+                      1,
+                      MPI_INT,
+                      comm.native());
+        std::vector<int> displacements(counts.size(), 0);
+        int total_values = 0;
+        for (std::size_t rank = 0; rank < counts.size(); ++rank) {
+          if (counts[rank] < 0 ||
+              counts[rank] >
+                  std::numeric_limits<int>::max() - total_values) {
+            throw std::runtime_error(
+                "Free-surface snapshot ownership gather exceeds MPI limits.");
+          }
+          displacements[rank] = total_values;
+          total_values += counts[rank];
+        }
+        gathered.assign(static_cast<std::size_t>(total_values), 0u);
+#ifdef MPI_UINT64_T
+        const MPI_Datatype identity_type = MPI_UINT64_T;
+#else
+        const MPI_Datatype identity_type = MPI_UNSIGNED_LONG_LONG;
+#endif
+        MPI_Allgatherv(local_values.empty() ? nullptr : local_values.data(),
+                       local_count,
+                       identity_type,
+                       gathered.empty() ? nullptr : gathered.data(),
+                       counts.data(),
+                       displacements.data(),
+                       identity_type,
+                       comm.native());
+#else
+        if (comm.isParallel()) {
+          throw std::runtime_error(
+              "Free-surface snapshot ownership validation requires MPI in a parallel run.");
+        }
+#endif
+        return gathered;
+      };
+  collective.all_gather_revision_values =
+      collective.all_gather_owned_rule_identity_values;
+  return collective;
+}
+
+std::uint64_t collectiveConstraintSemanticsKey(
+    const svmp::FE::systems::FESystem& system,
+    const CollectiveCommunicator& comm)
+{
+  const auto local =
+      svmp::FE::constraints::constraintSemanticFingerprint(
+          system.constraints());
+  const std::array<std::uint64_t, 4> local_words{
+      local.hash_a,
+      local.hash_b,
+      local.line_count,
+      local.entry_count,
+  };
+  const auto collective = ownershipCollective(comm);
+  const auto global_words = collective.all_gather_revision_values(
+      std::span<const std::uint64_t>(
+          local_words.data(), local_words.size()));
+
+  std::uint64_t key = kFnv1aOffset;
+  mixFnv1a(
+      key, static_cast<std::uint64_t>(comm.size()));
+  mixFnv1a(
+      key, static_cast<std::uint64_t>(global_words.size()));
+  for (const auto word : global_words) {
+    mixFnv1a(key, word);
+  }
+  return key == 0u ? 1u : key;
 }
 
 } // namespace systems

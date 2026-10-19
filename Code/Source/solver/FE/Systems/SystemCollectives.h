@@ -20,6 +20,7 @@
 #include "Core/FEConfig.h"
 #include "Core/Types.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <span>
@@ -37,7 +38,13 @@ namespace backends {
 class GenericVector;
 } // namespace backends
 
+namespace interfaces {
+struct FreeSurfaceGeometryOwnershipCollective;
+} // namespace interfaces
+
 namespace systems {
+
+class FESystem;
 
 /**
  * @brief Communicator of the collectives below.
@@ -82,6 +89,15 @@ private:
 
 /// Minimum of @p local over all ranks.
 [[nodiscard]] double collectiveMinDouble(double local, const CollectiveCommunicator& comm);
+
+/// Maximum of @p local over all ranks.
+[[nodiscard]] double collectiveMaxDouble(double local, const CollectiveCommunicator& comm);
+
+/// Largest |left[i] - right[i]| over all ranks; the local sizes must match.
+[[nodiscard]] double collectiveMaxAbsDifference(
+    std::span<const Real> left,
+    std::span<const Real> right,
+    const CollectiveCommunicator& comm);
 
 /// Minimum and maximum of @p local over all ranks.
 [[nodiscard]] std::pair<std::uint64_t, std::uint64_t> collectiveMinMaxUint64(
@@ -160,6 +176,46 @@ struct CanonicalWordsDisagreementReport {
 void assignFeOrderedVectorCollectively(
     backends::GenericVector& solution,
     std::span<const Real> values,
+    const CollectiveCommunicator& comm);
+
+/**
+ * @brief Sorted, duplicate-free union over all ranks of local indices.
+ *
+ * Every index must be below @p upper_bound on every rank; otherwise every
+ * rank throws.  @p purpose names the index set in error messages.
+ */
+[[nodiscard]] std::vector<std::size_t> collectiveIndexUnion(
+    std::vector<std::size_t> local_indices,
+    std::size_t upper_bound,
+    const CollectiveCommunicator& comm,
+    std::string_view purpose);
+
+/**
+ * @brief Write a complete FE-ordered vector into @p solution and update ghosts.
+ *
+ * Every rank passes the same values for all global rows.
+ */
+void scatterFeOrderedSolution(
+    backends::GenericVector& solution,
+    std::span<const Real> values);
+
+/**
+ * @brief Ownership collective for generated-geometry snapshot validation.
+ *
+ * Its gathers concatenate every rank's 64-bit words in rank order.  The
+ * returned functions keep a copy of @p comm.
+ */
+[[nodiscard]] interfaces::FreeSurfaceGeometryOwnershipCollective ownershipCollective(
+    const CollectiveCommunicator& comm);
+
+/**
+ * @brief Communicator-wide key of the system's constraint semantics.
+ *
+ * 64-bit FNV-1a of the rank count and every rank's constraint semantic
+ * fingerprint, in rank order; never zero.
+ */
+[[nodiscard]] std::uint64_t collectiveConstraintSemanticsKey(
+    const FESystem& system,
     const CollectiveCommunicator& comm);
 
 } // namespace systems

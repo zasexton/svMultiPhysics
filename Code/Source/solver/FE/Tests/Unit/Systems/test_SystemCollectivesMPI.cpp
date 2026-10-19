@@ -7,6 +7,8 @@
 
 #include "Systems/SystemCollectives.h"
 
+#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+
 #include <gtest/gtest.h>
 
 #include <mpi.h>
@@ -160,4 +162,56 @@ TEST(SystemCollectivesMPI, PhaseFailureOnOneRankThrowsOnEveryRank)
                       "failed unit phase 'p1'.");
         }
     }
+}
+
+TEST(SystemCollectivesMPI, MaximaAndIndexUnionCoverEveryRank)
+{
+    const auto comm = world();
+    const int rank = worldRank();
+    const int size = worldSize();
+    EXPECT_EQ(systems::collectiveMaxDouble(0.5 + rank, comm), 0.5 + (size - 1));
+
+    const std::vector<svmp::FE::Real> left = {1.0, 2.0, 3.0};
+    std::vector<svmp::FE::Real> right = left;
+    right[1] += 0.25 * (rank + 1);
+    EXPECT_EQ(systems::collectiveMaxAbsDifference(left, right, comm), 0.25 * size);
+    EXPECT_THROW((void)systems::collectiveMaxAbsDifference(
+                     left, std::vector<svmp::FE::Real>(2, 0.0), comm),
+                 std::runtime_error);
+
+    // Rank r holds {r, r + 1, r}; the union is {0, ..., size}.
+    const auto r = static_cast<std::size_t>(rank);
+    const auto indices = systems::collectiveIndexUnion(
+        {r, r + 1u, r}, static_cast<std::size_t>(size) + 1u, comm, "unit indices");
+    ASSERT_EQ(indices.size(), static_cast<std::size_t>(size) + 1u);
+    for (std::size_t i = 0; i < indices.size(); ++i) {
+        EXPECT_EQ(indices[i], i);
+    }
+    // One out-of-range index on the last rank throws on every rank.
+    std::vector<std::size_t> bad = {0u};
+    if (rank == size - 1) {
+        bad.push_back(static_cast<std::size_t>(size));
+    }
+    EXPECT_THROW((void)systems::collectiveIndexUnion(
+                     bad, static_cast<std::size_t>(size), comm, "unit indices"),
+                 std::runtime_error);
+}
+
+TEST(SystemCollectivesMPI, OwnershipCollectiveGathersWordsInRankOrder)
+{
+    const auto collective = systems::ownershipCollective(world());
+    EXPECT_EQ(collective.rank, worldRank());
+    EXPECT_EQ(collective.size, worldSize());
+    // Rank r contributes r + 1 words, each equal to r.
+    const std::vector<std::uint64_t> local(
+        static_cast<std::size_t>(worldRank()) + 1u,
+        static_cast<std::uint64_t>(worldRank()));
+    const auto gathered = collective.all_gather_revision_values(local);
+    std::vector<std::uint64_t> expected;
+    for (int r = 0; r < worldSize(); ++r) {
+        expected.insert(expected.end(), static_cast<std::size_t>(r) + 1u,
+                        static_cast<std::uint64_t>(r));
+    }
+    EXPECT_EQ(gathered, expected);
+    EXPECT_EQ(collective.all_gather_owned_rule_identity_values(local), expected);
 }

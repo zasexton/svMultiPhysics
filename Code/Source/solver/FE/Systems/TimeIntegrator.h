@@ -131,6 +131,43 @@ private:
     int order_{1};
 };
 
+/**
+ * @brief Integrator whose time-derivative stencils are identically zero.
+ *
+ * Assembling with it evaluates the steady residual of a transient system
+ * (every dt(u) and dt(u,2) term vanishes); used to certify static states.
+ */
+class ZeroTimeDerivativeIntegrator final : public svmp::FE::systems::TimeIntegrator {
+public:
+  [[nodiscard]] std::string name() const override { return "ZeroTimeDerivative"; }
+  [[nodiscard]] int maxSupportedDerivativeOrder() const noexcept override { return 2; }
+
+  [[nodiscard]] svmp::FE::assembly::TimeIntegrationContext buildContext(
+      int max_time_derivative_order, const svmp::FE::systems::SystemStateView& /*state*/) const override
+  {
+    svmp::FE::assembly::TimeIntegrationContext ctx;
+    ctx.integrator_name = name();
+    if (max_time_derivative_order <= 0) {
+      return ctx;
+    }
+
+    if (max_time_derivative_order >= 1) {
+      svmp::FE::assembly::TimeDerivativeStencil s;
+      s.order = 1;
+      s.a.assign(1, static_cast<svmp::FE::Real>(0.0));
+      ctx.dt1 = std::move(s);
+    }
+    if (max_time_derivative_order >= 2) {
+      svmp::FE::assembly::TimeDerivativeStencil s;
+      s.order = 2;
+      s.a.assign(1, static_cast<svmp::FE::Real>(0.0));
+      ctx.dt2 = std::move(s);
+    }
+
+    return ctx;
+  }
+};
+
 } // namespace systems
 } // namespace FE
 } // namespace svmp
