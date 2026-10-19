@@ -20,6 +20,13 @@ struct CoefficientPair {
 };
 
 // Commit only an exact representation in the supported binary formats.
+//
+// The work format is the target's long double: x87 extended precision (64
+// digits) on x86-64, IEEE binary128 (113 digits) on AArch64 Linux.  With at
+// most twice the digits of Real, every value in range has a Real tail and is
+// encodable.  With more, a value is encodable only when its tail is a Real,
+// and the exactness checks below reject the others, so a pair is accepted on
+// either target exactly when it is the canonical split of a long double.
 [[nodiscard]] inline bool encodeCoefficientPair(
     long double value, CoefficientPair& output) noexcept
 {
@@ -29,7 +36,6 @@ struct CoefficientPair {
                   !std::numeric_limits<Real>::is_iec559 ||
                   !std::numeric_limits<Work>::is_iec559 ||
                   std::numeric_limits<Work>::digits < std::numeric_limits<Real>::digits ||
-                  std::numeric_limits<Work>::digits > 2 * std::numeric_limits<Real>::digits ||
                   std::numeric_limits<Work>::max_exponent < std::numeric_limits<Real>::max_exponent ||
                   std::numeric_limits<Work>::min_exponent > std::numeric_limits<Real>::min_exponent) {
         return false;
