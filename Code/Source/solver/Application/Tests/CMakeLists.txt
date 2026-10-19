@@ -31,7 +31,6 @@ add_executable(test_application
   ../Core/LevelSetCutConfiguration.cpp
   ../Core/LevelSetMaintenanceConfiguration.cpp
   ../Core/LevelSetCurvatureSamples.cpp
-  ../Core/LevelSetMaintenanceHistory.cpp
   ../Core/LevelSetMaintenanceTransactionConsensus.cpp
   ../Core/LevelSetPdeVelocityExtension.cpp
   ../Core/LevelSetVelocityExtensionMap.cpp
@@ -86,7 +85,6 @@ if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
     ../Core/LevelSetCutConfiguration.cpp
     ../Core/LevelSetMaintenanceConfiguration.cpp
     ../Core/LevelSetCurvatureSamples.cpp
-    ../Core/LevelSetMaintenanceHistory.cpp
     ../Core/LevelSetMaintenanceTransactionConsensus.cpp
     ../Core/LevelSetPdeVelocityExtension.cpp
     ../Core/LevelSetVelocityExtensionMap.cpp

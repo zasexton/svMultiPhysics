@@ -6,7 +6,6 @@
 #include "Application/Core/LevelSetCutConfiguration.h"
 #include "Application/Core/LevelSetCurvatureSamples.h"
 #include "Application/Core/LevelSetMaintenanceConfiguration.h"
-#include "Application/Core/LevelSetMaintenanceHistory.h"
 #include "Application/Core/LevelSetMaintenanceTransactionConsensus.h"
 #include "Application/Core/LevelSetPdeVelocityExtension.h"
 #include "Application/Core/LevelSetVelocityExtensionMap.h"
