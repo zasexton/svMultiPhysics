@@ -1,5 +1,7 @@
 #pragma once
 
+#include "FE/LevelSet/LevelSetMaintenanceSubstage.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -21,13 +23,7 @@ enum class LevelSetMaintenanceWorkStatus : std::uint8_t {
   Rejected
 };
 
-enum class LevelSetMaintenanceWorkSubstage : std::uint8_t {
-  Transport,
-  Limiting,
-  Reinitialization,
-  GeometryReconciliation,
-  GlobalCorrection
-};
+using LevelSetMaintenanceWorkSubstage = svmp::FE::level_set::MaintenanceSubstage;
 
 enum class LevelSetMaintenanceDeclaredStage : std::uint8_t {
   ProspectiveAcceptedEndpoint,

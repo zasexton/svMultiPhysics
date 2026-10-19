@@ -5,6 +5,7 @@
 #include "LevelSet/LevelSetCurvatureSamples.h"
 #include "LevelSet/LevelSetDiagnostics.h"
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
+#include "LevelSet/LevelSetMaintenanceSubstage.h"
 #include "LevelSet/LevelSetOptions.h"
 #include "LevelSet/LevelSetReinitialization.h"
 #include "LevelSet/LevelSetRestart.h"

@@ -20,6 +20,7 @@
 #include "LevelSet/LevelSetCurvatureProjection.h"
 #include "LevelSet/LevelSetCurvatureSamples.h"
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
+#include "LevelSet/LevelSetMaintenanceSubstage.h"
 #include "LevelSet/LevelSetKinematicReconciliation.h"
 #include "LevelSet/LevelSetOptions.h"
 #include "LevelSet/LevelSetReinitialization.h"

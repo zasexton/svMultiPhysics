@@ -956,6 +956,7 @@ set(FE_LEVELSET_HEADERS
     LevelSet/LevelSetCurvatureProjection.h
     LevelSet/LevelSetCurvatureSamples.h
     LevelSet/LevelSetInterfaceLifecycle.h
+    LevelSet/LevelSetMaintenanceSubstage.h
     LevelSet/LevelSetImplicitCutQuadratureBackend.h
     LevelSet/LevelSetStaticCapillaryEquilibrium.h
     LevelSet/LevelSetVolume.h
