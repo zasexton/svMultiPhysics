@@ -1309,6 +1309,7 @@ set(FE_FORMS_SOURCES
 # TimeStepping sources (requires FE/Systems + FE/Assembly + FE/Backends)
 	set(FE_TIMESTEPPING_HEADERS
 	    TimeStepping/CollocationMethods.h
+	    TimeStepping/FieldRepairPublication.h
 	    TimeStepping/MovingMeshTimeIntegration.h
 	    TimeStepping/TimeHistory.h
 	    TimeStepping/MultiStageScheme.h
@@ -1323,6 +1324,7 @@ set(FE_FORMS_SOURCES
 
 	set(FE_TIMESTEPPING_SOURCES
 	    TimeStepping/CollocationMethods.cpp
+	    TimeStepping/FieldRepairPublication.cpp
 	    TimeStepping/MovingMeshTimeIntegration.cpp
 	    TimeStepping/TimeHistory.cpp
 	    TimeStepping/MultiStageScheme.cpp
@@ -3127,6 +3129,7 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/TimeStepping/test_TimeHistory.cpp
 		                Tests/Unit/TimeStepping/test_TimeIntegrators.cpp
 		                Tests/Unit/TimeStepping/test_CollocationMethods.cpp
+		                Tests/Unit/TimeStepping/test_FieldRepairPublication.cpp
 		                Tests/Unit/TimeStepping/test_TimeLoopStability.cpp
 		                Tests/Unit/TimeStepping/test_MovingMeshTimeIntegration.cpp
 		                Tests/Unit/TimeStepping/test_TimeSteppingUtils.cpp

@@ -11,11 +11,21 @@
 /**
  * @file SystemCollectives.h
  * @brief Collective operations shared by distributed system services.
+ *
+ * Every routine here is collective over the communicator it receives: all
+ * ranks call it in the same order, and a rank-local failure is agreed on
+ * before any rank acts on it, so no rank is left inside a reduction.
  */
 
+#include "Core/FEConfig.h"
+#include "Core/Types.h"
+
 #include <cstdint>
+#include <exception>
 #include <span>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #if FE_HAS_MPI
 #include <mpi.h>
@@ -23,7 +33,74 @@
 
 namespace svmp {
 namespace FE {
+namespace backends {
+class GenericVector;
+} // namespace backends
+
 namespace systems {
+
+/**
+ * @brief Communicator of the collectives below.
+ *
+ * Wraps an MPI communicator when FE is built with MPI and is a single rank
+ * otherwise.  Rank and size are read once, at construction, and only when
+ * MPI is initialized; a communicator built before MPI_Init therefore stays
+ * a single rank.
+ */
+class CollectiveCommunicator {
+public:
+    /// A single rank (MPI_COMM_SELF when FE is built with MPI).
+    CollectiveCommunicator() = default;
+
+#if FE_HAS_MPI
+    /// Reads rank and size from @p comm if MPI is initialized.
+    explicit CollectiveCommunicator(MPI_Comm comm);
+
+    /// Uses the given rank and size, for callers that already hold them.
+    CollectiveCommunicator(MPI_Comm comm, int rank, int size) noexcept
+        : comm_(comm), rank_(rank), size_(size)
+    {
+    }
+
+    [[nodiscard]] MPI_Comm native() const noexcept { return comm_; }
+#endif
+
+    [[nodiscard]] int rank() const noexcept { return rank_; }
+    [[nodiscard]] int size() const noexcept { return size_; }
+    [[nodiscard]] bool isParallel() const noexcept { return size_ > 1; }
+
+private:
+#if FE_HAS_MPI
+    MPI_Comm comm_{MPI_COMM_SELF};
+#endif
+    int rank_{0};
+    int size_{1};
+};
+
+/// True on every rank when @p local is true on at least one rank.
+[[nodiscard]] bool collectiveAnyTrue(bool local, const CollectiveCommunicator& comm);
+
+/// Minimum of @p local over all ranks.
+[[nodiscard]] double collectiveMinDouble(double local, const CollectiveCommunicator& comm);
+
+/// Minimum and maximum of @p local over all ranks.
+[[nodiscard]] std::pair<std::uint64_t, std::uint64_t> collectiveMinMaxUint64(
+    std::uint64_t local,
+    const CollectiveCommunicator& comm);
+
+/**
+ * @brief Agree on a rank-local failure of one collective phase.
+ *
+ * Returns when no rank failed.  Otherwise a failing rank rethrows its own
+ * exception and every other rank throws std::runtime_error with the text
+ * "[svMultiPhysics::Application] Another active FE communicator rank
+ * <failure> '<phase>'.".
+ */
+void requireCollectivePhase(
+    const std::exception_ptr& local_failure,
+    const CollectiveCommunicator& comm,
+    std::string_view failure,
+    std::string_view phase);
 
 /**
  * @brief Text of the rank-local report written when canonical words disagree.
@@ -39,7 +116,6 @@ struct CanonicalWordsDisagreementReport {
     std::string_view diagnostic{"canonical_words_disagreement"};
 };
 
-#if FE_HAS_MPI
 /**
  * @brief Exact all-rank agreement for a canonical sequence of 64-bit words.
  *
@@ -49,19 +125,42 @@ struct CanonicalWordsDisagreementReport {
  * when their local sequence lengths differ, and the comparison scratch is
  * bounded and allocated before the first value reduction.  On disagreement
  * each rank writes one report line to std::cerr before returning false.
- * Returns true without communicating on a single-rank communicator.
+ * Returns true without communicating on a single rank.
  *
  * @param local_words this rank's canonical words
- * @param comm communicator of an initialized MPI; collective over it
+ * @param comm communicator; collective over it
  * @param context free text copied into the report
  * @param report text of the report line
  */
 [[nodiscard]] bool collectiveCanonicalWordsAgree(
     std::span<const std::uint64_t> local_words,
-    MPI_Comm comm,
+    const CollectiveCommunicator& comm,
     std::string_view context,
     const CanonicalWordsDisagreementReport& report = {});
-#endif
+
+/**
+ * @brief Replicate a distributed vector on every rank, in FE (global row) order.
+ *
+ * Every rank reads its backend-owned rows; the rows are combined exactly
+ * (bit patterns, one owner per row, checked) in bounded chunks.  Throws on
+ * every rank when sizes differ, ownership is not a partition of the rows,
+ * or any rank fails to read.
+ */
+[[nodiscard]] std::vector<Real> captureFeOrderedVectorCollectively(
+    backends::GenericVector& solution,
+    const CollectiveCommunicator& comm);
+
+/**
+ * @brief Assign a replicated FE-ordered vector to a distributed vector.
+ *
+ * Each rank sets its owned rows from @p values (all ranks pass the same
+ * values), finalizes the assembly view and updates ghosts.  A failure on
+ * any rank is agreed on between the phases, so ranks leave together.
+ */
+void assignFeOrderedVectorCollectively(
+    backends::GenericVector& solution,
+    std::span<const Real> values,
+    const CollectiveCommunicator& comm);
 
 } // namespace systems
 } // namespace FE

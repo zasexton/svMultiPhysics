@@ -12,6 +12,8 @@
 #include <mpi.h>
 
 #include <cstdint>
+#include <exception>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -33,6 +35,11 @@ int worldSize()
     return size;
 }
 
+systems::CollectiveCommunicator world()
+{
+    return systems::CollectiveCommunicator(MPI_COMM_WORLD);
+}
+
 std::vector<std::uint64_t> sequence(std::size_t count)
 {
     std::vector<std::uint64_t> words(count);
@@ -46,10 +53,10 @@ std::vector<std::uint64_t> sequence(std::size_t count)
 
 TEST(SystemCollectivesMPI, IdenticalSequencesAgreeOnEveryRank)
 {
-    EXPECT_TRUE(systems::collectiveCanonicalWordsAgree(sequence(0), MPI_COMM_WORLD, "empty"));
-    EXPECT_TRUE(systems::collectiveCanonicalWordsAgree(sequence(5), MPI_COMM_WORLD, "short"));
+    EXPECT_TRUE(systems::collectiveCanonicalWordsAgree(sequence(0), world(), "empty"));
+    EXPECT_TRUE(systems::collectiveCanonicalWordsAgree(sequence(5), world(), "short"));
     // Longer than one 4096-word comparison chunk.
-    EXPECT_TRUE(systems::collectiveCanonicalWordsAgree(sequence(9000), MPI_COMM_WORLD, "long"));
+    EXPECT_TRUE(systems::collectiveCanonicalWordsAgree(sequence(9000), world(), "long"));
 }
 
 TEST(SystemCollectivesMPI, OneDifferingWordFailsOnEveryRank)
@@ -63,7 +70,7 @@ TEST(SystemCollectivesMPI, OneDifferingWordFailsOnEveryRank)
     }
     testing::internal::CaptureStderr();
     const bool agree = systems::collectiveCanonicalWordsAgree(
-        words, MPI_COMM_WORLD, "unit context",
+        words, world(), "unit context",
         systems::CanonicalWordsDisagreementReport{"[prefix]", "Words disagree", "unit_disagreement"});
     const std::string report = testing::internal::GetCapturedStderr();
     EXPECT_FALSE(agree);
@@ -85,7 +92,7 @@ TEST(SystemCollectivesMPI, DifferingLengthsFailOnEveryRank)
         words.resize(11);
     }
     testing::internal::CaptureStderr();
-    const bool agree = systems::collectiveCanonicalWordsAgree(words, MPI_COMM_WORLD, "lengths");
+    const bool agree = systems::collectiveCanonicalWordsAgree(words, world(), "lengths");
     const std::string report = testing::internal::GetCapturedStderr();
     EXPECT_FALSE(agree);
     EXPECT_NE(report.find("diagnostic=canonical_words_disagreement context='lengths'"),
@@ -99,5 +106,58 @@ TEST(SystemCollectivesMPI, SingleRankCommunicatorAgreesWithoutCommunicating)
 {
     auto words = sequence(3);
     words[0] += static_cast<std::uint64_t>(worldRank());
-    EXPECT_TRUE(systems::collectiveCanonicalWordsAgree(words, MPI_COMM_SELF, "self"));
+    EXPECT_TRUE(systems::collectiveCanonicalWordsAgree(
+        words, systems::CollectiveCommunicator(MPI_COMM_SELF), "self"));
+    EXPECT_TRUE(systems::collectiveCanonicalWordsAgree(words, systems::CollectiveCommunicator{}, "default"));
+}
+
+TEST(SystemCollectivesMPI, CommunicatorReadsRankAndSize)
+{
+    const auto comm = world();
+    EXPECT_EQ(comm.rank(), worldRank());
+    EXPECT_EQ(comm.size(), worldSize());
+    EXPECT_EQ(comm.isParallel(), worldSize() > 1);
+    const systems::CollectiveCommunicator self{};
+    EXPECT_EQ(self.size(), 1);
+    EXPECT_FALSE(self.isParallel());
+}
+
+TEST(SystemCollectivesMPI, ReductionsAgreeOnEveryRank)
+{
+    const auto comm = world();
+    const int rank = worldRank();
+    const int size = worldSize();
+    EXPECT_EQ(systems::collectiveAnyTrue(rank == size - 1, comm), true);
+    EXPECT_EQ(systems::collectiveAnyTrue(false, comm), false);
+    EXPECT_EQ(systems::collectiveMinDouble(1.5 + rank, comm), 1.5);
+    const auto [minimum, maximum] =
+        systems::collectiveMinMaxUint64(static_cast<std::uint64_t>(10 + rank), comm);
+    EXPECT_EQ(minimum, 10u);
+    EXPECT_EQ(maximum, static_cast<std::uint64_t>(10 + size - 1));
+}
+
+TEST(SystemCollectivesMPI, PhaseFailureOnOneRankThrowsOnEveryRank)
+{
+    const auto comm = world();
+    EXPECT_NO_THROW(systems::requireCollectivePhase(nullptr, comm, "failed unit phase", "ok"));
+    if (worldSize() < 2) {
+        GTEST_SKIP() << "needs at least two ranks";
+    }
+    std::exception_ptr local_failure;
+    if (worldRank() == 0) {
+        local_failure = std::make_exception_ptr(std::invalid_argument("local"));
+    }
+    if (worldRank() == 0) {
+        EXPECT_THROW(systems::requireCollectivePhase(local_failure, comm, "failed unit phase", "p1"),
+                     std::invalid_argument);
+    } else {
+        try {
+            systems::requireCollectivePhase(local_failure, comm, "failed unit phase", "p1");
+            ADD_FAILURE() << "expected a remote-failure exception";
+        } catch (const std::runtime_error& error) {
+            EXPECT_EQ(std::string(error.what()),
+                      "[svMultiPhysics::Application] Another active FE communicator rank "
+                      "failed unit phase 'p1'.");
+        }
+    }
 }

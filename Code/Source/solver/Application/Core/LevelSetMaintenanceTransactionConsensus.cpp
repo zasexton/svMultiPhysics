@@ -193,7 +193,11 @@ bool canonicalWordsAgree(
 
 #ifdef MESH_HAS_MPI
   return svmp::FE::systems::collectiveCanonicalWordsAgree(
-      local_words, comm.native(), context, kMaintenanceCanonicalWordsReport);
+      local_words,
+      svmp::FE::systems::CollectiveCommunicator(
+          comm.native(), static_cast<int>(comm.rank()), comm.size()),
+      context,
+      kMaintenanceCanonicalWordsReport);
 #else
   (void)local_words;
   (void)context;
