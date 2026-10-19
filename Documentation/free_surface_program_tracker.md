@@ -656,6 +656,24 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   - **Results behind these decisions:**
     - Capillary rise L40 (#27): `invertMapping()` dropped roots whose Newton inversion stalled at coordinate round-off far from the origin. The fix `c705ee79` accepts such iterates; parent vs fix is bitwise on L10 and sessile. In the old x86 L40 run, 15 of 5972 candidate states lost their preferred root, from y = 15.9 mm. L20 is possibly affected above 24 mm.
     - 3D sessile volume (#26): the reconciliation cut-class guard measured interface fragments in physical coordinates, while the builder classifies them on the reference element. Fixes `986c5b17` and `c54ddc69`. Full L8 max dV/V: 1.20e-4 → 6.35e-5 (arm64).
+- **D42, 2026-10-19 (user): the refactor resumes (D7 lifted), following `Documentation/free_surface_refactor_20261019/`.**
+  - **Goal:** the Navier–Stokes formulation states the governing equations in about 500 lines or fewer of form language, with the free-surface terms as concise as §6.1. The physics-agnostic machinery moves into FE services that other physics can reuse.
+  - **Where the code is today:** the NS VMS module is 11,030 lines, of which about 3% is the governing equations. ApplicationDriver is 37,439 lines, about 19k of them FE capability and 9k free-surface physics. About 8k of NewtonSolver's lines are NS/free-surface specific. There are 491 `SVMP_*` environment names.
+  - **Start now with the steps that do not collide with the outer-pass and MPI-scaling branches:**
+    - S0: extended reference decks covering reconciliation, redistancing, the strong Ren–E law, NormalIncrement, conservative phase and fitted ALE, plus ordered kernel and constraint manifests and a 2/4-rank parity runner;
+    - S1: domain handles;
+    - S2: ConstraintPlan;
+    - S3: Newton hooks;
+    - S4: assembler hooks;
+    - S5 / C3g: static capillary to Physics;
+    - the pure level-set file moves C1a, C1c, C1d and C2a, C2d, C2e, and C3a (FieldRepairPublication).
+    - The cut-geometry, extension and curvature steps wait for the outer-pass branch.
+  - **Every step is bitwise identical on the default path,** except one final, separate expression-tree cleanup, validated against tolerances with a cold JIT cache.
+  - **Experiments that no accepted benchmark uses are retired, not moved** (about 7,000 lines). These are the Newton active-pressure clamp and graph completion, the assembler's direct-PSPG experiments, the NS probes, and the failed or experimental capillary routes. Anything used by an accepted benchmark, the fitted ALE path or a test of record stays.
+  - **Smaller decisions:**
+    - Option schemas: the generic `OptionSchema<T>` lives in FE/Core, the physics schemas in Physics/Core, and legacy XML spellings stay an Application-registered alias overlay.
+    - Dead code (`LevelSetMaintenanceHistory`, a test-only serializer) is deleted.
+    - The free-boundary workflow lives in FE/LevelSet; FE/FreeBoundary is added only if it also composes fitted ALE.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
@@ -680,7 +698,7 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   - Retired: the frozen/immutable campaign process (FROZEN_BEFORE_EXECUTION matrices, reciprocal hashes, no-rerun rules, a new version per harness failure), source, index and cache guards, hash-only protected files, multi-worker packet rules, and checkpoint prose in audit documents.
   - Kept: the author/committer identity (Zachary Sexton), the commit-message vocabulary scan, and the begin/end/fail job-mail settings.
   - Existing frozen matrices, runners and qualification records are left unchanged as history.
-- **D7, 2026-09-29: the refactor is paused.**
+- **D7, 2026-09-29: the refactor is paused.** *(Lifted by D42, 2026-10-19.)*
   - Packages R3–R12 of `free_surface_architecture_refactoring_plan_20260904.md` are not scheduled.
   - Code is extracted only when a milestone already touches it, using that plan's target architecture as guidance.
   - Revisit once tiers T1–T3 are working.
