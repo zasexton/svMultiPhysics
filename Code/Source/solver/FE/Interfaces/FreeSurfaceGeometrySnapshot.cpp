@@ -8,6 +8,7 @@
 #include "Quadrature/ReferenceMonomialIntegrals.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <exception>
@@ -3319,6 +3320,50 @@ void forEachLedgerField(Ledger& ledger,
 using snapshot_reuse_detail::FullCellValidationContribution;
 using snapshot_reuse_detail::FullCellRecordReplay;
 
+// Field classes of the ledger in forEachLedgerField() order: whether a rule
+// validation may change each count (isRuleValidationCount) and each value
+// (isRuleValidationMaximum).  The visiting order and the names are fixed, so
+// the classes are computed once and the merges below test a field by its
+// index instead of comparing its name, and collect a ledger into fixed
+// arrays instead of growing vectors (the merges run once per rule record of
+// every geometry rebuild).
+constexpr std::size_t kMaxLedgerFieldsPerKind = 64u;
+
+struct LedgerFieldClasses {
+    std::size_t count_fields{0u};
+    std::size_t real_fields{0u};
+    std::array<bool, kMaxLedgerFieldsPerKind> rule_validation_count{};
+    std::array<bool, kMaxLedgerFieldsPerKind> rule_validation_maximum{};
+};
+
+[[nodiscard]] const LedgerFieldClasses& ledgerFieldClasses()
+{
+    static const LedgerFieldClasses classes = [] {
+        LedgerFieldClasses result;
+        const FreeSurfaceGeometryValidationLedger probe{};
+        forEachLedgerField(
+            probe,
+            [&result](const char* name, std::size_t) {
+                if (result.count_fields >= kMaxLedgerFieldsPerKind) {
+                    throw std::logic_error(
+                        "free-surface validation ledger has more count fields than the merge tables hold");
+                }
+                result.rule_validation_count[result.count_fields++] =
+                    isRuleValidationCount(name);
+            },
+            [&result](const char* name, Real) {
+                if (result.real_fields >= kMaxLedgerFieldsPerKind) {
+                    throw std::logic_error(
+                        "free-surface validation ledger has more value fields than the merge tables hold");
+                }
+                result.rule_validation_maximum[result.real_fields++] =
+                    isRuleValidationMaximum(name);
+            });
+        return result;
+    }();
+    return classes;
+}
+
 // Merges a scratch ledger (zero-initialized, then filled by the validation
 // of one rule) into the build ledger.  Counts add and maxima combine with
 // std::max; the maxima are nonnegative magnitudes that start at zero, so the
@@ -3327,39 +3372,42 @@ using snapshot_reuse_detail::FullCellRecordReplay;
 void mergeRuleValidationLedger(FreeSurfaceGeometryValidationLedger& into,
                                const FreeSurfaceGeometryValidationLedger& from)
 {
-    std::vector<std::size_t> counts;
-    std::vector<Real> reals;
+    const auto& classes = ledgerFieldClasses();
+    std::array<std::size_t, kMaxLedgerFieldsPerKind> counts{};
+    std::array<Real, kMaxLedgerFieldsPerKind> reals{};
+    std::size_t count_index = 0;
+    std::size_t real_index = 0;
     forEachLedgerField(
         from,
-        [&counts](const char* name, std::size_t value) {
-            if (!isRuleValidationCount(name) && value != 0u) {
+        [&](const char* name, std::size_t value) {
+            if (!classes.rule_validation_count[count_index] && value != 0u) {
                 throw std::logic_error(
                     std::string("free-surface rule validation changed an unexpected ledger count: ") +
                     name);
             }
-            counts.push_back(value);
+            counts[count_index++] = value;
         },
-        [&reals](const char* name, Real value) {
-            if (!isRuleValidationMaximum(name) &&
+        [&](const char* name, Real value) {
+            if (!classes.rule_validation_maximum[real_index] &&
                 !sameRealBits(value, Real{0.0})) {
                 throw std::logic_error(
                     std::string("free-surface rule validation changed an unexpected ledger value: ") +
                     name);
             }
-            reals.push_back(value);
+            reals[real_index++] = value;
         });
-    std::size_t count_index = 0;
-    std::size_t real_index = 0;
+    count_index = 0;
+    real_index = 0;
     forEachLedgerField(
         into,
-        [&](const char* name, std::size_t& value) {
-            if (isRuleValidationCount(name)) {
+        [&](const char*, std::size_t& value) {
+            if (classes.rule_validation_count[count_index]) {
                 value += counts[count_index];
             }
             ++count_index;
         },
-        [&](const char* name, Real& value) {
-            if (isRuleValidationMaximum(name)) {
+        [&](const char*, Real& value) {
+            if (classes.rule_validation_maximum[real_index]) {
                 value = std::max(value, reals[real_index]);
             }
             ++real_index;
@@ -3373,29 +3421,32 @@ void mergeRuleValidationLedger(FreeSurfaceGeometryValidationLedger& into,
 void mergeScratchLedger(FreeSurfaceGeometryValidationLedger& into,
                         const FreeSurfaceGeometryValidationLedger& from)
 {
-    std::vector<std::size_t> counts;
-    std::vector<Real> reals;
+    const auto& classes = ledgerFieldClasses();
+    std::array<std::size_t, kMaxLedgerFieldsPerKind> counts{};
+    std::array<Real, kMaxLedgerFieldsPerKind> reals{};
+    std::size_t count_index = 0;
+    std::size_t real_index = 0;
     forEachLedgerField(
         from,
-        [&counts](const char*, std::size_t value) { counts.push_back(value); },
-        [&reals](const char* name, Real value) {
-            if (!isRuleValidationMaximum(name) &&
+        [&](const char*, std::size_t value) { counts[count_index++] = value; },
+        [&](const char* name, Real value) {
+            if (!classes.rule_validation_maximum[real_index] &&
                 !sameRealBits(value, Real{0.0})) {
                 throw std::logic_error(
                     std::string("free-surface rule construction changed an unexpected ledger value: ") +
                     name);
             }
-            reals.push_back(value);
+            reals[real_index++] = value;
         });
-    std::size_t count_index = 0;
-    std::size_t real_index = 0;
+    count_index = 0;
+    real_index = 0;
     forEachLedgerField(
         into,
         [&](const char*, std::size_t& value) {
             value += counts[count_index++];
         },
-        [&](const char* name, Real& value) {
-            if (isRuleValidationMaximum(name)) {
+        [&](const char*, Real& value) {
+            if (classes.rule_validation_maximum[real_index]) {
                 value = std::max(value, reals[real_index]);
             }
             ++real_index;
