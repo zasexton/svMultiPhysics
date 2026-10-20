@@ -1604,15 +1604,10 @@ struct MomentCertificateSample {
     Real weight{0.0};
 };
 
-[[nodiscard]] std::vector<std::array<int, 3>> monomialExponents(
+[[nodiscard]] std::vector<std::array<int, 3>> buildMonomialExponents(
     int ambient_dimension,
     int polynomial_order)
 {
-    if (ambient_dimension < 1 || ambient_dimension > 3 ||
-        polynomial_order < 0) {
-        throw std::invalid_argument(
-            "free-surface moment certificate has an invalid dimension or order");
-    }
     std::vector<std::array<int, 3>> exponents;
     for (int total_order = 0; total_order <= polynomial_order;
          ++total_order) {
@@ -1638,6 +1633,46 @@ struct MomentCertificateSample {
     return exponents;
 }
 
+// The monomial exponents of total order <= polynomial_order in a fixed order.
+// Every moment certificate and its validation ask for them (several times per
+// rule of every geometry rebuild), so the lists of the orders used in
+// practice are built once; a higher order is built on each call.  The lists
+// are immutable, so concurrent geometry threads may share them.
+constexpr int kTabulatedMonomialOrders = 16;
+
+[[nodiscard]] const std::vector<std::array<int, 3>>& monomialExponents(
+    int ambient_dimension,
+    int polynomial_order,
+    std::vector<std::array<int, 3>>& untabulated_storage)
+{
+    if (ambient_dimension < 1 || ambient_dimension > 3 ||
+        polynomial_order < 0) {
+        throw std::invalid_argument(
+            "free-surface moment certificate has an invalid dimension or order");
+    }
+    if (polynomial_order >= kTabulatedMonomialOrders) {
+        untabulated_storage =
+            buildMonomialExponents(ambient_dimension, polynomial_order);
+        return untabulated_storage;
+    }
+    static const auto table = [] {
+        std::array<std::array<std::vector<std::array<int, 3>>,
+                              kTabulatedMonomialOrders>,
+                   3>
+            exponents;
+        for (int dimension = 1; dimension <= 3; ++dimension) {
+            for (int order = 0; order < kTabulatedMonomialOrders; ++order) {
+                exponents[static_cast<std::size_t>(dimension - 1)]
+                         [static_cast<std::size_t>(order)] =
+                             buildMonomialExponents(dimension, order);
+            }
+        }
+        return exponents;
+    }();
+    return table[static_cast<std::size_t>(ambient_dimension - 1)]
+                [static_cast<std::size_t>(polynomial_order)];
+}
+
 [[nodiscard]] Real evaluateMonomial(const std::array<Real, 3>& point,
                                     const std::array<int, 3>& exponents)
     noexcept
@@ -1658,8 +1693,11 @@ makeMomentCertificateFromSamples(
     certificate.polynomial_order = polynomial_order;
     certificate.ambient_dimension = ambient_dimension;
     certificate.source = source;
-    for (const auto& exponents :
-         monomialExponents(ambient_dimension, polynomial_order)) {
+    std::vector<std::array<int, 3>> untabulated_exponents;
+    const auto& all_exponents = monomialExponents(
+        ambient_dimension, polynomial_order, untabulated_exponents);
+    certificate.moments.reserve(all_exponents.size());
+    for (const auto& exponents : all_exponents) {
         Real value{0.0};
         for (const auto& sample : samples) {
             value += sample.weight *
@@ -2651,8 +2689,9 @@ void validateRuleMomentCertificate(
 {
     const auto& rule = record.reference_rule;
     const auto& certificate = record.moment_certificate;
-    const auto expected_exponents = monomialExponents(
-        mesh.dimension(), rule.exact_polynomial_order);
+    std::vector<std::array<int, 3>> untabulated_exponents;
+    const auto& expected_exponents = monomialExponents(
+        mesh.dimension(), rule.exact_polynomial_order, untabulated_exponents);
     if (certificate.polynomial_order != rule.exact_polynomial_order ||
         certificate.ambient_dimension != mesh.dimension() ||
         certificate.moments.size() != expected_exponents.size()) {
