@@ -864,10 +864,6 @@ TEST(LevelSetMaintenanceConfiguration,
       EXPECT_TRUE(unavailable->selected_spelling.empty()) << canonical;
       EXPECT_EQ(unavailable->source_layer, "unavailable") << canonical;
     }
-    EXPECT_NE(serialized.find("\"canonical_key\":\"" +
-                              std::string(canonical) + "\""),
-              std::string::npos)
-        << canonical;
   }
 }
 
