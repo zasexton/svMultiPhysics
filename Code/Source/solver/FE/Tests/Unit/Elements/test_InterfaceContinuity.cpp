@@ -19,11 +19,15 @@
 #include "FE/Elements/ReferenceElement.h"
 #include "FE/Basis/VectorBasis.h"
 #include "FE/Basis/LagrangeBasis.h"
+#include "FE/Basis/NodeOrderingConventions.h"
 #include "FE/Geometry/IsoparametricMapping.h"
 #include "FE/Spaces/OrientationManager.h"
 
 #include <cmath>
 #include <random>
+#include <thread>
+#include <utility>
+#include <vector>
 
 using namespace svmp::FE;
 using namespace svmp::FE::elements;
@@ -574,6 +578,75 @@ TEST_F(InterfaceContinuityTest, FacetVerticesTriangle) {
         EXPECT_NEAR(coords[0][1], Real(1), kTolerance);
         EXPECT_NEAR(coords[1][0], Real(0), kTolerance);
         EXPECT_NEAR(coords[1][1], Real(0), kTolerance);
+    }
+}
+
+// The facet vertex data are built once per element type and shared: every
+// facet of every element type must still match its definition (the reference
+// element's face nodes and their reference coordinates), repeated and
+// concurrent first requests must agree, and an out-of-range facet has none.
+TEST_F(InterfaceContinuityTest, FacetVerticesMatchTheirDefinitionForEveryType) {
+    const ElementType types[] = {
+        ElementType::Triangle3, ElementType::Quad4,    ElementType::Tetra4,
+        ElementType::Hex8,      ElementType::Wedge6,   ElementType::Pyramid5,
+        ElementType::Triangle6, ElementType::Quad9,    ElementType::Quad8,
+        ElementType::Tetra10,   ElementType::Hex27,    ElementType::Hex20,
+        ElementType::Wedge15,   ElementType::Wedge18,  ElementType::Pyramid13,
+        ElementType::Pyramid14, ElementType::Line2};
+    for (const auto type : types) {
+        // Concurrent first requests publish one table.
+        std::vector<std::pair<std::vector<LocalIndex>, std::vector<math::Vector<Real, 3>>>>
+            concurrent(4);
+        {
+            std::vector<std::thread> threads;
+            for (std::size_t t = 0; t < concurrent.size(); ++t) {
+                threads.emplace_back([&, t] {
+                    concurrent[t] = ElementTransform::facet_vertices(type, 0);
+                });
+            }
+            for (auto& thread : threads) {
+                thread.join();
+            }
+        }
+        for (std::size_t t = 1; t < concurrent.size(); ++t) {
+            EXPECT_EQ(concurrent[t].first, concurrent[0].first);
+            ASSERT_EQ(concurrent[t].second.size(), concurrent[0].second.size());
+        }
+
+        const ReferenceElement& ref = ReferenceElement::shared(type);
+        const int dim = element_dimension(type);
+        const std::size_t facet_count =
+            (dim == 2 || dim == 3) ? ref.num_faces() : 0u;
+        const std::size_t num_nodes = basis::ReferenceNodeLayout::num_nodes(type);
+        for (int facet = -1; facet <= static_cast<int>(facet_count); ++facet) {
+            const auto [ids, coords] = ElementTransform::facet_vertices(type, facet);
+            const auto again = ElementTransform::facet_vertices(type, facet);
+            EXPECT_EQ(again.first, ids);
+            ASSERT_EQ(again.second.size(), coords.size());
+            if (facet < 0 || static_cast<std::size_t>(facet) >= facet_count) {
+                EXPECT_TRUE(ids.empty());
+                EXPECT_TRUE(coords.empty());
+                continue;
+            }
+            const auto& nodes = ref.face_nodes(static_cast<std::size_t>(facet));
+            ASSERT_EQ(ids.size(), nodes.size());
+            std::size_t coordinate = 0;
+            for (std::size_t i = 0; i < nodes.size(); ++i) {
+                EXPECT_EQ(ids[i], nodes[i]);
+                if (nodes[i] >= num_nodes) {
+                    continue;
+                }
+                ASSERT_LT(coordinate, coords.size());
+                const auto expected =
+                    basis::ReferenceNodeLayout::get_node_coords(type, nodes[i]);
+                for (std::size_t k = 0; k < 3; ++k) {
+                    EXPECT_EQ(coords[coordinate][k], expected[k]);
+                    EXPECT_EQ(again.second[coordinate][k], expected[k]);
+                }
+                ++coordinate;
+            }
+            EXPECT_EQ(coordinate, coords.size());
+        }
     }
 }
 

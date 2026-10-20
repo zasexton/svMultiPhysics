@@ -10,14 +10,88 @@
 #include "Elements/ReferenceElement.h"
 #include "Basis/NodeOrderingConventions.h"
 
+#include <array>
+#include <atomic>
 #include <cmath>
+#include <limits>
+#include <memory>
 #include <stdexcept>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 namespace svmp {
 namespace FE {
 namespace elements {
 
 using svmp::FE::geometry::PushForward;
+
+namespace {
+
+using FacetVertexData =
+    std::pair<std::vector<LocalIndex>, std::vector<math::Vector<Real, 3>>>;
+
+// facet_vertices() of every facet of one element type, in facet order: the
+// facets of a 2D element are its edges, those of a 3D element its faces;
+// other elements have none.
+std::vector<FacetVertexData> buildFacetVertexData(ElementType element_type) {
+    const ReferenceElement& ref = ReferenceElement::shared(element_type);
+    const int dim = element_dimension(element_type);
+    std::vector<FacetVertexData> facets;
+    if (dim == 2 || dim == 3) {
+        if (ref.num_faces() == 0u) {
+            return facets;
+        }
+        facets.resize(ref.num_faces());
+    }
+    const std::size_t num_nodes = basis::ReferenceNodeLayout::num_nodes(element_type);
+    for (std::size_t facet = 0; facet < facets.size(); ++facet) {
+        auto& [vertex_indices, coords] = facets[facet];
+        const auto& nodes = ref.face_nodes(facet);
+        vertex_indices.assign(nodes.begin(), nodes.end());
+        for (LocalIndex vi : vertex_indices) {
+            if (vi < num_nodes) {
+                coords.push_back(basis::ReferenceNodeLayout::get_node_coords(element_type, vi));
+            }
+        }
+    }
+    return facets;
+}
+
+// The facet vertex data of an element type depend only on the type, and face
+// frames and trace mappings ask for them at every face quadrature point, so
+// they are built once per type and published through a lock-free slot (the
+// pattern of ReferenceElement::shared()).  Published tables are immutable and
+// live for the rest of the process; a construction failure is not cached and
+// keeps throwing.  An out-of-range facet has no vertices.
+const FacetVertexData& sharedFacetVertexData(ElementType element_type, int facet_id) {
+    using Underlying = std::underlying_type_t<ElementType>;
+    constexpr std::size_t slot_count =
+        static_cast<std::size_t>(std::numeric_limits<Underlying>::max()) + 1u;
+    static std::array<std::atomic<const std::vector<FacetVertexData>*>, slot_count> slots{};
+    static const FacetVertexData no_facet{};
+
+    auto& slot = slots[static_cast<std::size_t>(static_cast<Underlying>(element_type))];
+    const std::vector<FacetVertexData>* facets = slot.load(std::memory_order_acquire);
+    if (facets == nullptr) {
+        auto built = std::make_unique<const std::vector<FacetVertexData>>(
+            buildFacetVertexData(element_type));
+        const std::vector<FacetVertexData>* expected = nullptr;
+        if (slot.compare_exchange_strong(expected, built.get(),
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_acquire)) {
+            facets = built.release();
+        } else {
+            facets = expected;
+        }
+    }
+    if (facet_id < 0 || static_cast<std::size_t>(facet_id) >= facets->size()) {
+        return no_facet;
+    }
+    return (*facets)[static_cast<std::size_t>(facet_id)];
+}
+
+} // namespace
 
 void ElementTransform::gradients_to_physical(const geometry::GeometryMapping& mapping,
                                              const math::Vector<Real, 3>& xi,
@@ -185,7 +259,7 @@ FacetFrame ElementTransform::compute_facet_frame(const geometry::GeometryMapping
     } else if (dim == 3) {
         // For 3D elements, facet is a face
         // Get two tangent directions on the face (from reference face parameterization)
-        auto [vertices, coords] = facet_vertices(element_type, facet_id);
+        const auto& coords = sharedFacetVertexData(element_type, facet_id).second;
 
         if (coords.size() < 3) {
             // Degenerate case - shouldn't happen for valid 3D elements
@@ -281,37 +355,7 @@ std::vector<Real> ElementTransform::hcurl_tangential_trace_2d(
 
 std::pair<std::vector<LocalIndex>, std::vector<math::Vector<Real, 3>>>
 ElementTransform::facet_vertices(ElementType element_type, int facet_id) {
-    const ReferenceElement& ref = ReferenceElement::shared(element_type);
-    const int dim = element_dimension(element_type);
-
-    std::vector<LocalIndex> vertex_indices;
-    std::vector<math::Vector<Real, 3>> coords;
-
-    if (dim == 2) {
-        // Facets are edges
-        if (static_cast<std::size_t>(facet_id) >= ref.num_faces()) {
-            return {vertex_indices, coords};
-        }
-        const auto& edge_nodes = ref.face_nodes(static_cast<std::size_t>(facet_id));
-        vertex_indices.assign(edge_nodes.begin(), edge_nodes.end());
-    } else if (dim == 3) {
-        // Facets are faces
-        if (static_cast<std::size_t>(facet_id) >= ref.num_faces()) {
-            return {vertex_indices, coords};
-        }
-        const auto& face_nodes = ref.face_nodes(static_cast<std::size_t>(facet_id));
-        vertex_indices.assign(face_nodes.begin(), face_nodes.end());
-    }
-
-    // Get reference coordinates for each vertex
-    const std::size_t num_nodes = basis::ReferenceNodeLayout::num_nodes(element_type);
-    for (LocalIndex vi : vertex_indices) {
-        if (vi < num_nodes) {
-            coords.push_back(basis::ReferenceNodeLayout::get_node_coords(element_type, vi));
-        }
-    }
-
-    return {vertex_indices, coords};
+    return sharedFacetVertexData(element_type, facet_id);
 }
 
 math::Vector<Real, 3> ElementTransform::facet_to_reference(
@@ -319,7 +363,7 @@ math::Vector<Real, 3> ElementTransform::facet_to_reference(
     int facet_id,
     const math::Vector<Real, 3>& facet_coords) {
 
-    auto [vertices, coords] = facet_vertices(element_type, facet_id);
+    const auto& coords = sharedFacetVertexData(element_type, facet_id).second;
     const int dim = element_dimension(element_type);
 
     if (coords.empty()) {
