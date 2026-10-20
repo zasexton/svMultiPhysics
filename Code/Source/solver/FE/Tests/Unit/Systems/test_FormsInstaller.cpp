@@ -2469,6 +2469,61 @@ TEST(FormsInstaller, TimeDerivativeFieldsIncludeTransientFieldInsideFusedCoupled
     EXPECT_EQ(all_fields.front(), phi_field);
 }
 
+// timeDerivativeFields() keeps its last result per operator (and for all
+// operators) while the integrands it searched are unchanged.  A kernel added to
+// an operator after a query, and an operator added after a query, must be
+// seen by the next query.
+TEST(FormsInstaller, TimeDerivativeFieldsFollowKernelsAndOperatorsAddedAfterAQuery)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    // `donor` has the same fields as `sys` and provides a transient kernel
+    // that is added to `sys` after `sys` has answered queries.
+    svmp::FE::systems::FESystem sys(mesh);
+    svmp::FE::systems::FESystem donor(mesh);
+    FieldId u_field = INVALID_FIELD_ID;
+    FieldId w_field = INVALID_FIELD_ID;
+    for (auto* system : {&sys, &donor}) {
+        u_field = system->addField(svmp::FE::systems::FieldSpec{
+            .name = "u", .space = space, .components = 1});
+        w_field = system->addField(svmp::FE::systems::FieldSpec{
+            .name = "w", .space = space, .components = 1});
+        system->addOperator("op");
+    }
+    const auto u = svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
+    const auto w = svmp::FE::forms::FormExpr::stateField(w_field, *space, "w");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+
+    (void)svmp::FE::systems::installFormulation(sys, "op", {u_field}, (u * v).dx());
+    EXPECT_TRUE(sys.timeDerivativeFields("op").empty());
+    EXPECT_TRUE(sys.timeDerivativeFields().empty());
+    EXPECT_TRUE(sys.timeDerivativeFields("op").empty());
+    EXPECT_TRUE(sys.timeDerivativeFields().empty());
+
+    (void)svmp::FE::systems::installFormulation(
+        donor, "op", {w_field}, (w.dt(1) * v).dx());
+    const auto& donor_definition = donor.operatorDefinition("op");
+    ASSERT_FALSE(donor_definition.cells.empty());
+    for (const auto& term : donor_definition.cells) {
+        sys.addCellKernel("op", term.test_field, term.trial_field, term.kernel);
+    }
+    EXPECT_EQ(sys.timeDerivativeFields("op"), std::vector<FieldId>{w_field});
+    EXPECT_EQ(sys.timeDerivativeFields(), std::vector<FieldId>{w_field});
+    EXPECT_EQ(sys.timeDerivativeFields("op"), std::vector<FieldId>{w_field});
+
+    sys.addOperator("op2");
+    EXPECT_TRUE(sys.timeDerivativeFields("op2").empty());
+    (void)svmp::FE::systems::installFormulation(
+        sys, "op2", {u_field}, (u.dt(1) * v).dx());
+    EXPECT_EQ(sys.timeDerivativeFields("op"), std::vector<FieldId>{w_field});
+    EXPECT_EQ(sys.timeDerivativeFields("op2"), std::vector<FieldId>{u_field});
+    std::vector<FieldId> both{u_field, w_field};
+    std::sort(both.begin(), both.end());
+    EXPECT_EQ(sys.timeDerivativeFields(), both);
+}
+
 TEST(FormsInstaller, FormsInstaller_AssemblesCutVolumeKernelThroughSystem)
 {
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();

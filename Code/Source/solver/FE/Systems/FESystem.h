@@ -3470,6 +3470,20 @@ private:
     mutable std::uint64_t analysis_inputs_version_{0};
     mutable std::uint64_t analysis_report_version_{std::numeric_limits<std::uint64_t>::max()};
 
+    // Memo of timeDerivativeFields() (FESystem.cpp): the fields found in the
+    // integrand expressions listed in `inputs` (each with the trial field it
+    // is read with), in the order the search reads them.  Form expressions
+    // are immutable, so equal inputs give the same fields; the roots are held
+    // so that no other expression can take their addresses while memoized.
+    struct TimeDerivativeFieldsMemo {
+        std::vector<std::pair<const forms::FormExprNode*, FieldId>> inputs{};
+        std::vector<std::shared_ptr<const forms::FormExprNode>> held_roots{};
+        std::vector<FieldId> fields{};
+    };
+    mutable std::unordered_map<OperatorTag, TimeDerivativeFieldsMemo>
+        time_derivative_fields_by_operator_memo_{};
+    mutable std::optional<TimeDerivativeFieldsMemo> time_derivative_fields_memo_{};
+
 	    bool is_setup_{false};
 	    Real last_auxiliary_advance_time_{0.0};
         bool partitioned_auxiliary_advance_valid_{false};

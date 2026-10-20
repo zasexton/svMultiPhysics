@@ -22711,29 +22711,35 @@ void gatherTimeDerivativeFieldsFromNode(const forms::FormExprNode& node,
     }
 }
 
-void gatherTimeDerivativeFieldsFromIR(const forms::FormIR& ir,
-                                      FieldId kernel_trial_field,
-                                      std::unordered_set<FieldId>& out)
+// One integrand the time-derivative search reads: the root expression of a
+// term of a kernel's form IR, with the trial field the kernel reads it with.
+struct TimeDerivativeSearchInput {
+    const forms::FormExpr* integrand{nullptr};
+    FieldId kernel_trial_field{INVALID_FIELD_ID};
+};
+
+void collectTimeDerivativeInputsFromIR(const forms::FormIR& ir,
+                                       FieldId kernel_trial_field,
+                                       std::vector<TimeDerivativeSearchInput>& out)
 {
     for (const auto& term : ir.terms()) {
-        const auto* root = term.integrand.node();
-        if (!root) {
+        if (!term.integrand.node()) {
             continue;
         }
-        gatherTimeDerivativeFieldsFromNode(*root, kernel_trial_field, out);
+        out.push_back(TimeDerivativeSearchInput{&term.integrand, kernel_trial_field});
     }
 }
 
-void gatherTimeDerivativeFieldsFromKernel(const assembly::AssemblyKernel* kernel,
-                                          FieldId kernel_trial_field,
-                                          std::unordered_set<FieldId>& out)
+void collectTimeDerivativeInputsFromKernel(const assembly::AssemblyKernel* kernel,
+                                           FieldId kernel_trial_field,
+                                           std::vector<TimeDerivativeSearchInput>& out)
 {
     if (!kernel) {
         return;
     }
 
     if (const auto* k = dynamic_cast<const forms::jit::JITKernelWrapper*>(kernel)) {
-        gatherTimeDerivativeFieldsFromKernel(&k->fallbackKernel(), kernel_trial_field, out);
+        collectTimeDerivativeInputsFromKernel(&k->fallbackKernel(), kernel_trial_field, out);
         return;
     }
 
@@ -22747,7 +22753,7 @@ void gatherTimeDerivativeFieldsFromKernel(const assembly::AssemblyKernel* kernel
     if (const auto* k = dynamic_cast<const forms::MonolithicCellKernel*>(kernel)) {
         for (std::size_t i = 0; i < k->numBlocks(); ++i) {
             const auto& block = k->blockSpec(i);
-            gatherTimeDerivativeFieldsFromKernel(
+            collectTimeDerivativeInputsFromKernel(
                 block.fallback_kernel.get(), block.trial_field, out);
         }
         return;
@@ -22756,34 +22762,54 @@ void gatherTimeDerivativeFieldsFromKernel(const assembly::AssemblyKernel* kernel
     if (const auto* k = dynamic_cast<const forms::MixedBlockKernelSet*>(kernel)) {
         for (std::size_t i = 0; i < k->numBlocks(); ++i) {
             const auto& block = k->blockSpec(i);
-            gatherTimeDerivativeFieldsFromKernel(
+            collectTimeDerivativeInputsFromKernel(
                 block.fallback_kernel.get(), block.trial_field, out);
         }
         return;
     }
 
     if (const auto* k = dynamic_cast<const forms::SymbolicNonlinearFormKernel*>(kernel)) {
-        gatherTimeDerivativeFieldsFromIR(k->residualIR(), kernel_trial_field, out);
-        gatherTimeDerivativeFieldsFromIR(k->tangentIR(), kernel_trial_field, out);
+        collectTimeDerivativeInputsFromIR(k->residualIR(), kernel_trial_field, out);
+        collectTimeDerivativeInputsFromIR(k->tangentIR(), kernel_trial_field, out);
         return;
     }
 
     if (const auto* k = dynamic_cast<const forms::NonlinearFormKernel*>(kernel)) {
-        gatherTimeDerivativeFieldsFromIR(k->residualIR(), kernel_trial_field, out);
+        collectTimeDerivativeInputsFromIR(k->residualIR(), kernel_trial_field, out);
         return;
     }
 
     if (const auto* k = dynamic_cast<const forms::FormKernel*>(kernel)) {
-        gatherTimeDerivativeFieldsFromIR(k->ir(), kernel_trial_field, out);
+        collectTimeDerivativeInputsFromIR(k->ir(), kernel_trial_field, out);
         return;
     }
 
     if (const auto* k = dynamic_cast<const forms::LinearFormKernel*>(kernel)) {
-        gatherTimeDerivativeFieldsFromIR(k->bilinearIR(), kernel_trial_field, out);
+        collectTimeDerivativeInputsFromIR(k->bilinearIR(), kernel_trial_field, out);
         if (k->linearIR().has_value()) {
-            gatherTimeDerivativeFieldsFromIR(*k->linearIR(), kernel_trial_field, out);
+            collectTimeDerivativeInputsFromIR(*k->linearIR(), kernel_trial_field, out);
         }
         return;
+    }
+}
+
+void collectTimeDerivativeInputsFromOperator(const OperatorDefinition& def,
+                                             std::vector<TimeDerivativeSearchInput>& out)
+{
+    for (const auto& term : def.cells) {
+        collectTimeDerivativeInputsFromKernel(term.kernel.get(), term.trial_field, out);
+    }
+    for (const auto& term : def.boundary) {
+        collectTimeDerivativeInputsFromKernel(term.kernel.get(), term.trial_field, out);
+    }
+    for (const auto& term : def.interior) {
+        collectTimeDerivativeInputsFromKernel(term.kernel.get(), term.trial_field, out);
+    }
+    for (const auto& term : def.interface_faces) {
+        collectTimeDerivativeInputsFromKernel(term.kernel.get(), term.trial_field, out);
+    }
+    for (const auto& term : def.cut_volumes) {
+        collectTimeDerivativeInputsFromKernel(term.kernel.get(), term.trial_field, out);
     }
 }
 
@@ -22799,54 +22825,66 @@ std::vector<FieldId> sortedUnique(std::unordered_set<FieldId> ids)
     return out;
 }
 
+// The time-derivative fields of the listed integrands.  The search walks every
+// node of every integrand (a shared subexpression once per path), so its cost
+// grows with the size of the expression trees; it runs at least once per
+// Newton solve.  Form expressions are immutable, so the result depends only on
+// the integrand roots and their trial fields: `memo` keeps the result for the
+// inputs it was computed from, and holds those roots so that no other
+// expression can take one of their addresses while they are memoized.  Any
+// change of a kernel, a term, a trial field or an IR (constitutive inlining and
+// parameter-slot resolution replace the integrands) changes the inputs.
+template <typename Memo>
+std::vector<FieldId> memoizedTimeDerivativeFields(
+    Memo& memo,
+    const std::vector<TimeDerivativeSearchInput>& inputs)
+{
+    bool matches = memo.inputs.size() == inputs.size();
+    for (std::size_t i = 0; matches && i < inputs.size(); ++i) {
+        matches = memo.inputs[i].first == inputs[i].integrand->node() &&
+                  memo.inputs[i].second == inputs[i].kernel_trial_field;
+    }
+    if (matches) {
+        return memo.fields;
+    }
+    std::unordered_set<FieldId> fields;
+    for (const auto& input : inputs) {
+        gatherTimeDerivativeFieldsFromNode(
+            *input.integrand->node(), input.kernel_trial_field, fields);
+    }
+    memo.fields = sortedUnique(std::move(fields));
+    memo.inputs.clear();
+    memo.held_roots.clear();
+    memo.inputs.reserve(inputs.size());
+    memo.held_roots.reserve(inputs.size());
+    for (const auto& input : inputs) {
+        memo.inputs.emplace_back(input.integrand->node(), input.kernel_trial_field);
+        memo.held_roots.push_back(input.integrand->nodeShared());
+    }
+    return memo.fields;
+}
+
 } // namespace
 
 std::vector<FieldId> FESystem::timeDerivativeFields(const OperatorTag& op) const
 {
-    std::unordered_set<FieldId> fields;
     const auto& def = operator_registry_.get(op);
-
-    for (const auto& term : def.cells) {
-        gatherTimeDerivativeFieldsFromKernel(term.kernel.get(), term.trial_field, fields);
-    }
-    for (const auto& term : def.boundary) {
-        gatherTimeDerivativeFieldsFromKernel(term.kernel.get(), term.trial_field, fields);
-    }
-    for (const auto& term : def.interior) {
-        gatherTimeDerivativeFieldsFromKernel(term.kernel.get(), term.trial_field, fields);
-    }
-    for (const auto& term : def.interface_faces) {
-        gatherTimeDerivativeFieldsFromKernel(term.kernel.get(), term.trial_field, fields);
-    }
-    for (const auto& term : def.cut_volumes) {
-        gatherTimeDerivativeFieldsFromKernel(term.kernel.get(), term.trial_field, fields);
-    }
-
-    return sortedUnique(std::move(fields));
+    std::vector<TimeDerivativeSearchInput> inputs;
+    collectTimeDerivativeInputsFromOperator(def, inputs);
+    return memoizedTimeDerivativeFields(
+        time_derivative_fields_by_operator_memo_[op], inputs);
 }
 
 std::vector<FieldId> FESystem::timeDerivativeFields() const
 {
-    std::unordered_set<FieldId> fields;
+    std::vector<TimeDerivativeSearchInput> inputs;
     for (const auto& op : operator_registry_.list()) {
-        const auto& def = operator_registry_.get(op);
-        for (const auto& term : def.cells) {
-            gatherTimeDerivativeFieldsFromKernel(term.kernel.get(), term.trial_field, fields);
-        }
-        for (const auto& term : def.boundary) {
-            gatherTimeDerivativeFieldsFromKernel(term.kernel.get(), term.trial_field, fields);
-        }
-        for (const auto& term : def.interior) {
-            gatherTimeDerivativeFieldsFromKernel(term.kernel.get(), term.trial_field, fields);
-        }
-        for (const auto& term : def.interface_faces) {
-            gatherTimeDerivativeFieldsFromKernel(term.kernel.get(), term.trial_field, fields);
-        }
-        for (const auto& term : def.cut_volumes) {
-            gatherTimeDerivativeFieldsFromKernel(term.kernel.get(), term.trial_field, fields);
-        }
+        collectTimeDerivativeInputsFromOperator(operator_registry_.get(op), inputs);
     }
-    return sortedUnique(std::move(fields));
+    if (!time_derivative_fields_memo_.has_value()) {
+        time_derivative_fields_memo_.emplace();
+    }
+    return memoizedTimeDerivativeFields(*time_derivative_fields_memo_, inputs);
 }
 
 const dofs::DofHandler& FESystem::fieldDofHandler(FieldId field) const
