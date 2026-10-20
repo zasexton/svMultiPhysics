@@ -28,11 +28,14 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -703,5 +706,241 @@ TEST(FreeSurfaceSnapshotReuse, GeneratedGeometryIsIndependentOfTheThreadCount)
 }
 
 #endif
+
+// ---------------------------------------------------------------------------
+// The double-precision rejection pre-check of the represented-phase
+// containment certificate (FreeSurfaceGeometrySnapshot.cpp) must never change
+// a certificate.  Adversarial tetrahedra (reference, skewed, inverted, sliver,
+// near-flat, flat, tiny, large) and points (vertices, edge midpoints, face
+// points and points within rounding distance of a face on either side, far
+// points, non-finite points) are tested with every tolerance class.
+// ---------------------------------------------------------------------------
+
+using Tetrahedron = std::array<std::array<FE::Real, 3>, 4>;
+
+std::vector<Tetrahedron> adversarialTetrahedra()
+{
+    using R = FE::Real;
+    return {
+        Tetrahedron{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}}},
+        Tetrahedron{{{1, 0, 0}, {0, 0, 0}, {0, 1, 0}, {0, 0, 1}}},
+        Tetrahedron{{{R{0.1}, R{0.2}, R{0.05}},
+                     {R{0.9}, R{0.15}, R{0.1}},
+                     {R{0.3}, R{0.8}, R{0.2}},
+                     {R{0.25}, R{0.3}, R{0.95}}}},
+        Tetrahedron{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {R{0.3}, R{0.3}, R{1.0e-9}}}},
+        Tetrahedron{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {R{0.3}, R{0.3}, R{1.0e-15}}}},
+        Tetrahedron{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {R{0.3}, R{0.3}, R{0.0}}}},
+        Tetrahedron{{{0, 0, 0}, {1, 0, 0}, {2, 0, 0}, {0, 1, 0}}},
+        Tetrahedron{{{R{0.5}, R{0.5}, R{0.5}},
+                     {R{0.5} + R{1.0e-9}, R{0.5}, R{0.5}},
+                     {R{0.5}, R{0.5} + R{1.0e-9}, R{0.5}},
+                     {R{0.5}, R{0.5}, R{0.5} + R{1.0e-9}}}},
+        Tetrahedron{{{-100, -50, 10}, {300, 20, -40}, {-20, 250, 30}, {40, 60, 500}}},
+    };
+}
+
+std::vector<std::array<FE::Real, 3>> adversarialPoints(const Tetrahedron& tet,
+                                                       std::uint64_t seed)
+{
+    using R = FE::Real;
+    std::vector<std::array<R, 3>> points;
+    const auto add = [&](std::array<R, 3> p) { points.push_back(p); };
+    const auto combine = [&](const std::array<R, 4>& weights) {
+        std::array<R, 3> p{{0, 0, 0}};
+        for (std::size_t v = 0; v < 4; ++v) {
+            for (std::size_t k = 0; k < 3; ++k) {
+                p[k] += weights[v] * tet[v][k];
+            }
+        }
+        return p;
+    };
+    for (const auto& v : tet) {
+        add(v);
+    }
+    for (std::size_t i = 0; i < 4; ++i) {
+        for (std::size_t j = i + 1; j < 4; ++j) {
+            std::array<R, 4> w{{0, 0, 0, 0}};
+            w[i] = R{0.5};
+            w[j] = R{0.5};
+            add(combine(w));
+        }
+    }
+    add(combine({{R{0.25}, R{0.25}, R{0.25}, R{0.25}}}));
+    const R offsets[] = {R{0},       R{1.0e-17}, R{1.0e-16}, R{1.0e-15},
+                         R{1.0e-14}, R{1.0e-13}, R{1.0e-12}, R{1.0e-10},
+                         R{1.0e-8},  R{1.0e-6},  R{1.0e-3},  R{0.1},
+                         R{1.0}};
+    for (std::size_t opposite = 0; opposite < 4; ++opposite) {
+        std::array<R, 4> w{{0, 0, 0, 0}};
+        for (std::size_t v = 0; v < 4; ++v) {
+            w[v] = v == opposite ? R{0} : R{1.0} / R{3.0};
+        }
+        const auto centroid = combine(w);
+        std::array<R, 3> inward{};
+        for (std::size_t k = 0; k < 3; ++k) {
+            inward[k] = tet[opposite][k] - centroid[k];
+        }
+        const R length = std::sqrt(inward[0] * inward[0] + inward[1] * inward[1] +
+                                   inward[2] * inward[2]);
+        for (const R offset : offsets) {
+            for (const R sign : {R{1.0}, R{-1.0}}) {
+                std::array<R, 3> p = centroid;
+                for (std::size_t k = 0; k < 3; ++k) {
+                    const R scale = length > R{0} ? sign * offset / length : R{0};
+                    p[k] += scale * inward[k];
+                }
+                add(p);
+            }
+        }
+    }
+    std::array<R, 3> lo = tet[0];
+    std::array<R, 3> hi = tet[0];
+    for (const auto& v : tet) {
+        for (std::size_t k = 0; k < 3; ++k) {
+            lo[k] = std::min(lo[k], v[k]);
+            hi[k] = std::max(hi[k], v[k]);
+        }
+    }
+    std::uint64_t state = seed;
+    const auto next_unit = [&state]() {
+        state = state * 6364136223846793005ull + 1442695040888963407ull;
+        return static_cast<R>(state >> 11) * (R{1.0} / R{9007199254740992.0});
+    };
+    for (int i = 0; i < 400; ++i) {
+        std::array<R, 3> p{};
+        for (std::size_t k = 0; k < 3; ++k) {
+            const R span = std::max(hi[k] - lo[k], R{1.0e-12});
+            p[k] = lo[k] - span + R{3.0} * span * next_unit();
+        }
+        add(p);
+    }
+    const R nan = std::numeric_limits<R>::quiet_NaN();
+    const R inf = std::numeric_limits<R>::infinity();
+    add({{nan, R{0.1}, R{0.1}}});
+    add({{R{0.1}, inf, R{0.1}}});
+    add({{-inf, R{0.1}, R{0.1}}});
+    return points;
+}
+
+bool sameCoordinateBits(const std::array<FE::Real, 4>& a,
+                        const std::array<FE::Real, 4>& b)
+{
+    return std::memcmp(a.data(), b.data(), sizeof(a)) == 0;
+}
+
+TEST(FreeSurfaceSnapshotContainmentPreCheck, KeepsEveryTetrahedronCertificate)
+{
+    const FE::Real tolerances[] = {FE::Real{0.0}, FE::Real{1.0e-14},
+                                   FE::Real{1.0e-10}, FE::Real{1.0e-6},
+                                   FE::Real{0.25}};
+    std::size_t accepted = 0;
+    std::size_t prechecked_rejections = 0;
+    std::uint64_t seed = 12345u;
+    for (const auto& tet : adversarialTetrahedra()) {
+        interfaces::CutInterfaceReferenceSimplex simplex;
+        simplex.vertex_count = 4u;
+        simplex.vertices = tet;
+        for (const auto& point : adversarialPoints(tet, ++seed)) {
+            for (const FE::Real tolerance : tolerances) {
+                std::array<FE::Real, 4> with{};
+                std::array<FE::Real, 4> without{};
+                const bool accepted_with =
+                    interfaces::snapshot_detail::representedSimplexCoordinates(
+                        simplex, point, 3, tolerance, with, true);
+                const bool accepted_without =
+                    interfaces::snapshot_detail::representedSimplexCoordinates(
+                        simplex, point, 3, tolerance, without, false);
+                ASSERT_EQ(accepted_with, accepted_without)
+                    << "point (" << point[0] << ", " << point[1] << ", "
+                    << point[2] << ") tolerance " << tolerance;
+                if (accepted_without) {
+                    ++accepted;
+                    EXPECT_TRUE(sameCoordinateBits(with, without));
+                }
+                const FE::Real coordinate_tolerance = std::max(
+                    tolerance,
+                    FE::Real{128.0} * std::numeric_limits<FE::Real>::epsilon());
+                if (interfaces::snapshot_detail::tetrahedronCertainlyRejectsPoint(
+                        tet, point, coordinate_tolerance)) {
+                    ++prechecked_rejections;
+                    EXPECT_FALSE(accepted_without)
+                        << "pre-check rejected a point the solve accepts";
+                }
+            }
+        }
+    }
+    // Both branches are exercised.
+    EXPECT_GT(accepted, 1000u);
+    EXPECT_GT(prechecked_rejections, 5000u);
+}
+
+// The containment search of the represented-phase check takes the first
+// subcell, in order, that contains the point.  With and without the pre-check
+// it must match the same subcell with the same coordinates, including points
+// on faces shared by two subcells (Kuhn decomposition of a box).
+TEST(FreeSurfaceSnapshotContainmentPreCheck, KeepsTheMatchedSubcellOfASearch)
+{
+    using R = FE::Real;
+    std::vector<interfaces::CutInterfaceReferenceSimplex> subcells;
+    const int permutations[6][3] = {{0, 1, 2}, {0, 2, 1}, {1, 0, 2},
+                                    {1, 2, 0}, {2, 0, 1}, {2, 1, 0}};
+    const std::array<R, 3> size{{R{1.0}, R{0.7}, R{1.3}}};
+    for (const auto& permutation : permutations) {
+        interfaces::CutInterfaceReferenceSimplex simplex;
+        simplex.vertex_count = 4u;
+        std::array<R, 3> corner{{0, 0, 0}};
+        simplex.vertices[0] = corner;
+        for (int step = 0; step < 3; ++step) {
+            const auto axis = static_cast<std::size_t>(permutation[step]);
+            corner[axis] = size[axis];
+            simplex.vertices[static_cast<std::size_t>(step + 1)] = corner;
+        }
+        subcells.push_back(simplex);
+    }
+    const auto search = [&](const std::array<R, 3>& point,
+                            R tolerance,
+                            bool allow_double_rejection,
+                            std::array<R, 4>& coordinates) {
+        for (std::size_t s = 0; s < subcells.size(); ++s) {
+            std::array<R, 4> candidate{};
+            if (interfaces::snapshot_detail::representedSimplexCoordinates(
+                    subcells[s], point, 3, tolerance, candidate,
+                    allow_double_rejection)) {
+                coordinates = candidate;
+                return static_cast<int>(s);
+            }
+        }
+        return -1;
+    };
+    std::size_t matched = 0;
+    const R perturbations[] = {R{0.0}, R{1.0e-16}, R{-1.0e-16}, R{1.0e-13},
+                               R{-1.0e-13}, R{1.0e-9}, R{-1.0e-9}};
+    for (int i = 0; i <= 8; ++i) {
+        for (int j = 0; j <= 8; ++j) {
+            for (int k = 0; k <= 8; ++k) {
+                for (const R perturbation : perturbations) {
+                    const std::array<R, 3> point{
+                        {size[0] * static_cast<R>(i) / R{8} + perturbation,
+                         size[1] * static_cast<R>(j) / R{8} - perturbation,
+                         size[2] * static_cast<R>(k) / R{8} + perturbation}};
+                    for (const R tolerance : {R{0.0}, R{1.0e-12}}) {
+                        std::array<R, 4> with{};
+                        std::array<R, 4> without{};
+                        const int match_with = search(point, tolerance, true, with);
+                        const int match_without =
+                            search(point, tolerance, false, without);
+                        ASSERT_EQ(match_with, match_without);
+                        if (match_without >= 0) {
+                            ++matched;
+                            EXPECT_TRUE(sameCoordinateBits(with, without));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    EXPECT_GT(matched, 1000u);
+}
 
 } // namespace

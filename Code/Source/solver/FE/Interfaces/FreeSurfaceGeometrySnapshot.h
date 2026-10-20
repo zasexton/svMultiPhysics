@@ -873,6 +873,33 @@ private:
     FreeSurfaceGeometrySnapshotCacheStatistics statistics_{};
 };
 
+/// Test access to internals of the snapshot validation.
+namespace snapshot_detail {
+
+/// The containment certificate of the represented-phase check: true, with
+/// the barycentric coordinates of `point`, when `point` lies in `simplex`
+/// (every coordinate within [-t, 1 + t], t = max(tolerance, 128 eps)).
+/// The snapshot always lets a double-precision pre-check reject points that
+/// the extended-precision solve certainly rejects;
+/// `allow_double_rejection` = false disables it, so that a test can show the
+/// certificate is the same either way.
+[[nodiscard]] bool representedSimplexCoordinates(
+    const CutInterfaceReferenceSimplex& simplex,
+    const std::array<Real, 3>& point,
+    int ambient_dimension,
+    Real tolerance,
+    std::array<Real, 4>& coordinates,
+    bool allow_double_rejection) noexcept;
+
+/// The pre-check itself, for a tetrahedron: true only when the
+/// extended-precision solve rejects `point` for `coordinate_tolerance`.
+[[nodiscard]] bool tetrahedronCertainlyRejectsPoint(
+    const std::array<std::array<Real, 3>, 4>& vertices,
+    const std::array<Real, 3>& point,
+    Real coordinate_tolerance) noexcept;
+
+} // namespace snapshot_detail
+
 } // namespace interfaces
 } // namespace svmp::FE
 

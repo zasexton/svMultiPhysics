@@ -1911,15 +1911,161 @@ makeMomentCertificateFromSamples(
     return hash == 0u ? 1u : hash;
 }
 
+// Double-precision rejection pre-check for the tetrahedron branch of
+// representedSimplexCoordinates().  Returns true only when that branch
+// (computed in long double) certainly returns false for `point`, so that the
+// caller may return false without it; any doubt returns false ("no skip").
+//
+// Both computations evaluate, from the same double inputs, the determinant
+// D = ab.(ac x ad) and the numerators N_b = ap.(ac x ad), N_c = ab.(ap x ad),
+// N_d = ab.(ac x ap) (differences of the vertices and the point), then the
+// barycentric coordinates b = N_b/D, c = N_c/D, d = N_d/D, a = 1 - b - c - d,
+// and reject when D is zero or non-finite or a coordinate lies outside
+// [-t, 1 + t] (t = coordinate_tolerance).
+//
+// Bound.  Let u_D = 2^-53 (double) and u_W the unit roundoff of long double:
+// 2^-113 (binary128, arm64), 2^-64 (x87, x86-64) or 2^-53 (long double ==
+// double); in every case u_W <= u_D.  A triple product x.(y x z) evaluated
+// in floating point, including the rounding of the three input differences,
+// accumulates at most 8 roundings per term, so (standard dot-product bound)
+//   |T_computed - T_exact| <= gamma_8 * A,  A = sum over the six terms of
+//   |x_i y_j z_k| (the triple product of the absolute values),
+// with gamma_8 = 8u/(1 - 8u).  Hence the double and long-double values of D
+// and of each N differ by at most 9 (u_D + u_W) A <= 18 u_D A; A computed in
+// double from the rounded differences is within a factor 1 + 9u_D of the
+// exact one.  E = 32 u_D A + 64 denorm_min bounds that difference; the
+// absolute term covers gradual underflow, and every nonzero difference
+// component is required to lie in [2^-300, 2^300], so no product of three
+// overflows or underflows below the normal range.  If |D_double| >= 4 E_D,
+// both D values have the same sign, |D_long| >= 0.75 |D_double| > 0 and the
+// long-double branch passes its determinant check; then, with w = N/D,
+//   |w_long - w_double| <= (4/3)(E_N + |w| E_D)/|D_double| + (u_D + u_W)|w|
+//                       <= r = 2 (E_N + |w| E_D)/|D_double| + 4 u_D |w|,
+// and for a = 1 - b - c - d, r_a = r_b + r_c + r_d + 8 u_D (1 + |b| + |c| + |d|)
+// (both evaluations of a round three times).  A coordinate is certainly out
+// of range in long double when w + 4r < -(t + 4u_D) or w - 4r > 1 + t + 8u_D:
+// the doubled margins absorb the rounding of these comparisons (r >= 4u_D|w|).
+[[nodiscard]] bool tetrahedronCertainlyRejectsPoint(
+    const std::array<std::array<Real, 3>, 4>& vertices,
+    const std::array<Real, 3>& point,
+    Real coordinate_tolerance) noexcept
+{
+    using Vec = std::array<Real, 3>;
+    constexpr Real u = std::numeric_limits<Real>::epsilon() / Real{2};
+    constexpr Real tiny = std::numeric_limits<Real>::denorm_min();
+    const Real lower_component = std::ldexp(Real{1.0}, -300);
+    const Real upper_component = std::ldexp(Real{1.0}, 300);
+    if (!std::isfinite(coordinate_tolerance) ||
+        !(coordinate_tolerance >= Real{0.0})) {
+        return false;
+    }
+    const auto subtract = [](const Vec& lhs, const Vec& rhs) {
+        return Vec{{lhs[0] - rhs[0], lhs[1] - rhs[1], lhs[2] - rhs[2]}};
+    };
+    const auto& a = vertices[0];
+    const std::array<Vec, 4> differences{{subtract(vertices[1], a),
+                                          subtract(vertices[2], a),
+                                          subtract(vertices[3], a),
+                                          subtract(point, a)}};
+    for (const auto& difference : differences) {
+        for (const auto component : difference) {
+            const Real magnitude = std::abs(component);
+            if (!std::isfinite(component) ||
+                (magnitude != Real{0.0} &&
+                 (magnitude < lower_component ||
+                  magnitude > upper_component))) {
+                return false;
+            }
+        }
+    }
+    const auto& ab = differences[0];
+    const auto& ac = differences[1];
+    const auto& ad = differences[2];
+    const auto& ap = differences[3];
+    const auto triple = [](const Vec& x, const Vec& y, const Vec& z) {
+        const Real c0 = y[1] * z[2] - y[2] * z[1];
+        const Real c1 = y[2] * z[0] - y[0] * z[2];
+        const Real c2 = y[0] * z[1] - y[1] * z[0];
+        return x[0] * c0 + x[1] * c1 + x[2] * c2;
+    };
+    const auto bound = [u, tiny](const Vec& x, const Vec& y, const Vec& z) {
+        const Real absolute_triple =
+            std::abs(x[0]) * (std::abs(y[1]) * std::abs(z[2]) +
+                              std::abs(y[2]) * std::abs(z[1])) +
+            std::abs(x[1]) * (std::abs(y[2]) * std::abs(z[0]) +
+                              std::abs(y[0]) * std::abs(z[2])) +
+            std::abs(x[2]) * (std::abs(y[0]) * std::abs(z[1]) +
+                              std::abs(y[1]) * std::abs(z[0]));
+        return Real{32.0} * u * absolute_triple + Real{64.0} * tiny;
+    };
+    const Real determinant = triple(ab, ac, ad);
+    const Real determinant_bound = bound(ab, ac, ad);
+    if (!std::isfinite(determinant) || !std::isfinite(determinant_bound) ||
+        !(std::abs(determinant) >= Real{4.0} * determinant_bound)) {
+        return false;
+    }
+    const std::array<Real, 3> numerators{{triple(ap, ac, ad),
+                                          triple(ab, ap, ad),
+                                          triple(ab, ac, ap)}};
+    const std::array<Real, 3> numerator_bounds{{bound(ap, ac, ad),
+                                                bound(ab, ap, ad),
+                                                bound(ab, ac, ap)}};
+    std::array<Real, 4> coordinate{};
+    std::array<Real, 4> radius{};
+    for (std::size_t i = 0u; i < 3u; ++i) {
+        coordinate[i + 1u] = numerators[i] / determinant;
+        radius[i + 1u] =
+            Real{2.0} *
+                (numerator_bounds[i] +
+                 std::abs(coordinate[i + 1u]) * determinant_bound) /
+                std::abs(determinant) +
+            Real{4.0} * u * std::abs(coordinate[i + 1u]);
+    }
+    coordinate[0] =
+        Real{1.0} - coordinate[1] - coordinate[2] - coordinate[3];
+    radius[0] = radius[1] + radius[2] + radius[3] +
+                Real{8.0} * u *
+                    (Real{1.0} + std::abs(coordinate[1]) +
+                     std::abs(coordinate[2]) + std::abs(coordinate[3]));
+    const Real below = -(coordinate_tolerance + Real{4.0} * u);
+    const Real above = Real{1.0} + coordinate_tolerance + Real{8.0} * u;
+    for (std::size_t i = 0u; i < 4u; ++i) {
+        if (!std::isfinite(coordinate[i]) || !std::isfinite(radius[i])) {
+            return false;
+        }
+    }
+    for (std::size_t i = 0u; i < 4u; ++i) {
+        if (coordinate[i] + Real{4.0} * radius[i] < below ||
+            coordinate[i] - Real{4.0} * radius[i] > above) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// `allow_double_rejection` = false is for tests only: it disables the
+// pre-check so that a test can show the certificate is the same with it.
 [[nodiscard]] bool representedSimplexCoordinates(
     const CutInterfaceReferenceSimplex& simplex,
     const std::array<Real, 3>& point,
     int ambient_dimension,
     Real tolerance,
-    std::array<Real, 4>& coordinates) noexcept
+    std::array<Real, 4>& coordinates,
+    bool allow_double_rejection = true) noexcept
 {
     if (simplex.vertex_count !=
         static_cast<std::uint8_t>(ambient_dimension + 1)) {
+        return false;
+    }
+    // Most (point, subcell) pairs of a 3D containment search are far from
+    // containment; reject those without the extended-precision solve (on
+    // arm64 long double is software binary128).
+    if (allow_double_rejection && ambient_dimension == 3 &&
+        tetrahedronCertainlyRejectsPoint(
+            simplex.vertices,
+            point,
+            std::max(tolerance,
+                     Real{128.0} * std::numeric_limits<Real>::epsilon()))) {
         return false;
     }
     // A source quadrature point is formed from these same vertices.  Recover
@@ -3686,6 +3832,35 @@ private:
 };
 
 } // namespace
+
+namespace snapshot_detail {
+
+bool representedSimplexCoordinates(
+    const CutInterfaceReferenceSimplex& simplex,
+    const std::array<Real, 3>& point,
+    int ambient_dimension,
+    Real tolerance,
+    std::array<Real, 4>& coordinates,
+    bool allow_double_rejection) noexcept
+{
+    return interfaces::representedSimplexCoordinates(simplex,
+                                                     point,
+                                                     ambient_dimension,
+                                                     tolerance,
+                                                     coordinates,
+                                                     allow_double_rejection);
+}
+
+bool tetrahedronCertainlyRejectsPoint(
+    const std::array<std::array<Real, 3>, 4>& vertices,
+    const std::array<Real, 3>& point,
+    Real coordinate_tolerance) noexcept
+{
+    return interfaces::tetrahedronCertainlyRejectsPoint(
+        vertices, point, coordinate_tolerance);
+}
+
+} // namespace snapshot_detail
 
 struct FreeSurfaceGeometrySnapshotReuseCache::State {
     bool valid{false};
