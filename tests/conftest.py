@@ -10,8 +10,9 @@ import xml.etree.ElementTree as ET
 import meshio
 
 this_file_dir = os.path.abspath(os.path.dirname(__file__))
-cpp_exec = os.path.join(this_file_dir, "..", "build", "svMultiPhysics-build", "bin", "svmultiphysics")
-cpp_exec_p = os.path.join(this_file_dir, "..", "build-petsc", "svMultiPhysics-build", "bin", "svmultiphysics")
+cpp_exec = os.environ.get("SVMP_EXECUTABLE", os.path.join(this_file_dir, "..", "build", "svMultiPhysics-build", "bin", "svmultiphysics"))
+cpp_exec_p = os.environ.get("SVMP_EXECUTABLE_PETSC", os.path.join(this_file_dir, "..", "build-petsc", "svMultiPhysics-build", "bin", "svmultiphysics"))
+MPIEXEC = os.environ.get("MPIEXEC_EXECUTABLE", "mpirun")
 
 
 def read_cmake_cache_variable(cache_path, key):
@@ -160,7 +161,7 @@ def run_by_name(folder, name, t_max, n_proc=1):
     exe = cpp_exec_p if "petsc" in folder else cpp_exec
     cmd = " ".join(
         [
-            "mpirun",
+            MPIEXEC,
             OVERSUBSCRIBE_FLAG if n_proc > 1 else "",
             "-np",
             str(n_proc),
