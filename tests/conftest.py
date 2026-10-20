@@ -10,9 +10,10 @@ import xml.etree.ElementTree as ET
 import meshio
 
 this_file_dir = os.path.abspath(os.path.dirname(__file__))
-cpp_exec = os.environ.get("SVMP_EXECUTABLE", os.path.join(this_file_dir, "..", "build", "svMultiPhysics-build", "bin", "svmultiphysics"))
-cpp_exec_p = os.environ.get("SVMP_EXECUTABLE_PETSC", os.path.join(this_file_dir, "..", "build-petsc", "svMultiPhysics-build", "bin", "svmultiphysics"))
-MPIEXEC = os.environ.get("MPIEXEC_EXECUTABLE", "mpirun")
+# Test the build in this worktree unless SVMP_BUILD_DIR names another build folder.
+build_dir = os.environ.get("SVMP_BUILD_DIR", os.path.join(this_file_dir, "..", "build", "svMultiPhysics-build"))
+cpp_exec = os.path.join(build_dir, "bin", "svmultiphysics")
+cpp_exec_p = os.path.join(this_file_dir, "..", "build-petsc", "svMultiPhysics-build", "bin", "svmultiphysics")
 
 
 def read_cmake_cache_variable(cache_path, key):
@@ -34,6 +35,12 @@ def cmake_cache_path_for(exe_path):
     <build>/svMultiPhysics-build/bin/svmultiphysics."""
     return os.path.join(os.path.dirname(os.path.dirname(exe_path)), "CMakeCache.txt")
 
+
+# A build with PETSc also runs the PETSc tests, and the tests use the MPI
+# launcher that CMake found for the build unless MPIEXEC_EXECUTABLE names another.
+if read_cmake_cache_variable(cmake_cache_path_for(cpp_exec), "SV_PETSC_DIR"):
+    cpp_exec_p = cpp_exec
+MPIEXEC = os.environ.get("MPIEXEC_EXECUTABLE") or read_cmake_cache_variable(cmake_cache_path_for(cpp_exec), "MPIEXEC_EXECUTABLE") or "mpirun"
 
 # Whether svMultiPhysics was built with PETSc / Trilinos, read from the
 # CMakeCache.txt of the corresponding build (PETSc tests use the separate build
@@ -64,7 +71,7 @@ def _detect_oversubscribe_flag():
     """
     try:
         proc = subprocess.run(
-            ["mpirun", "--version"], capture_output=True, text=True, check=False
+            [MPIEXEC, "--version"], capture_output=True, text=True, check=False
         )
         version = (proc.stdout or "") + (proc.stderr or "")
     except FileNotFoundError:
