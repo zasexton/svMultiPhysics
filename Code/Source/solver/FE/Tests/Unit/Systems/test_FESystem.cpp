@@ -1371,6 +1371,90 @@ TEST(FESystem, MeshVertexProjectionInterpolatesP2EdgeDofsOnLinearTetraMesh)
     }
 }
 
+// A P1 field has no edge or cell-interior DOFs, so its mesh-vertex binding
+// skips the edge and cell-interior geometry walk; a P2 field of the same
+// system still binds its edge DOFs.  Projections in either order give the
+// same coefficients.
+TEST(FESystem, MeshVertexProjectionOfP1AndP2FieldsOnOneSystem)
+{
+    auto mesh = build_single_tetra_mesh();
+    ASSERT_EQ(mesh->local_mesh().n_edges(), 6u);
+
+    auto p1_space = std::make_shared<H1Space>(ElementType::Tetra4, /*order=*/1);
+    auto p2_space = std::make_shared<H1Space>(ElementType::Tetra4, /*order=*/2);
+
+    FESystem sys(mesh);
+    const auto p1 = sys.addField(FieldSpec{
+        .name = "LinearScalar",
+        .space = p1_space,
+        .components = 1,
+        .source_kind = FieldSourceKind::Unknown});
+    const auto p2 = sys.addField(FieldSpec{
+        .name = "QuadraticScalar",
+        .space = p2_space,
+        .components = 1,
+        .source_kind = FieldSourceKind::Unknown});
+    ASSERT_NO_THROW(sys.setup());
+
+    std::vector<Real> mesh_values(mesh->n_vertices(), Real{0});
+    for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+        mesh_values[vertex] = Real{1.5} + Real{0.75} * static_cast<Real>(vertex);
+    }
+    const auto project = [&](svmp::FE::FieldId field) {
+        std::vector<Real> coefficients(
+            static_cast<std::size_t>(sys.fieldDofHandler(field).getNumDofs()),
+            Real{-1});
+        std::vector<std::uint8_t> assigned(coefficients.size(), 0u);
+        const auto projection = sys.projectMeshVertexValuesToFieldCoefficients(
+            field,
+            std::span<const Real>(mesh_values.data(), mesh_values.size()),
+            /*mesh_components=*/1,
+            std::span<Real>(coefficients.data(), coefficients.size()),
+            std::span<std::uint8_t>(assigned.data(), assigned.size()),
+            "FESystem P1/P2 projection test");
+        EXPECT_EQ(projection.unassigned_dofs, 0u);
+        EXPECT_EQ(projection.values_written, coefficients.size());
+        EXPECT_EQ(std::count(assigned.begin(), assigned.end(), std::uint8_t{1}),
+                  static_cast<std::ptrdiff_t>(coefficients.size()));
+        return coefficients;
+    };
+
+    const auto p1_first = project(p1);
+    const auto p2_coefficients = project(p2);
+    const auto p1_again = project(p1);
+    EXPECT_EQ(p1_first, p1_again);
+
+    const auto* p1_map = sys.fieldDofHandler(p1).getEntityDofMap();
+    const auto* p2_map = sys.fieldDofHandler(p2).getEntityDofMap();
+    ASSERT_NE(p1_map, nullptr);
+    ASSERT_NE(p2_map, nullptr);
+    ASSERT_EQ(p1_first.size(), mesh->n_vertices());
+    for (GlobalIndex vertex = 0;
+         vertex < static_cast<GlobalIndex>(mesh->n_vertices());
+         ++vertex) {
+        const auto value = mesh_values[static_cast<std::size_t>(vertex)];
+        EXPECT_EQ(p1_first[static_cast<std::size_t>(p1_map->getVertexDofs(vertex)[0])],
+                  value);
+        EXPECT_EQ(p2_coefficients[static_cast<std::size_t>(p2_map->getVertexDofs(vertex)[0])],
+                  value);
+    }
+    for (GlobalIndex edge = 0;
+         edge < static_cast<GlobalIndex>(mesh->local_mesh().n_edges());
+         ++edge) {
+        EXPECT_TRUE(p1_map->getEdgeDofs(edge).empty());
+        const auto edge_dofs = p2_map->getEdgeDofs(edge);
+        ASSERT_EQ(edge_dofs.size(), 1u);
+        const auto endpoints = mesh->local_mesh().edge_vertices(edge);
+        const auto expected =
+            Real{0.5} *
+            (mesh_values[static_cast<std::size_t>(endpoints[0])] +
+             mesh_values[static_cast<std::size_t>(endpoints[1])]);
+        EXPECT_DOUBLE_EQ(p2_coefficients[static_cast<std::size_t>(edge_dofs[0])],
+                         expected)
+            << "edge=" << edge;
+    }
+}
+
 TEST(FESystem, PrescribedVertexFieldSyncsCubicMeshPointData)
 {
     auto mesh = build_single_cubic_quad_mesh();

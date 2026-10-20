@@ -18808,8 +18808,18 @@ FESystem::MeshVertexFieldProjectionResult enumerateMeshVertexDofBindings(
     };
     const auto n_edge_entities =
         use_2d_faces_as_edges ? mesh.n_faces() : mesh.n_edges();
+    // An edge entity without DOFs binds nothing, so a field without any edge
+    // DOF (every P1 field) needs neither the endpoint table nor the geometry
+    // nodes of the cell edges.  The bindings are the same either way.
+    bool any_edge_dofs = false;
     for (svmp::index_t edge = 0;
-         edge < static_cast<svmp::index_t>(n_edge_entities);
+         edge < static_cast<svmp::index_t>(n_edge_entities) && !any_edge_dofs;
+         ++edge) {
+        any_edge_dofs =
+            !entity_map.getEdgeDofs(static_cast<GlobalIndex>(edge)).empty();
+    }
+    for (svmp::index_t edge = 0;
+         any_edge_dofs && edge < static_cast<svmp::index_t>(n_edge_entities);
          ++edge) {
         const auto endpoints = edge_entity_endpoints(edge);
         if (!endpoints.has_value()) {
@@ -18834,12 +18844,12 @@ FESystem::MeshVertexFieldProjectionResult enumerateMeshVertexDofBindings(
         }
 
         const auto edge = edge_it->second;
-        const auto edge_geometry = mesh.cell_edge_geometry_dofs(cell, local_edge);
         const auto edge_dofs =
             entity_map.getEdgeDofs(static_cast<GlobalIndex>(edge));
         if (edge_dofs.empty()) {
             return;
         }
+        const auto edge_geometry = mesh.cell_edge_geometry_dofs(cell, local_edge);
         if (edge_geometry.size() <= 2u) {
             const auto canonical = edge_entity_endpoints(edge);
             if (!canonical.has_value()) {
@@ -19072,10 +19082,10 @@ FESystem::MeshVertexFieldProjectionResult enumerateMeshVertexDofBindings(
             }
         }
 
-        const auto cell_geometry = mesh.cell_interior_geometry_dofs(cell);
         const auto cell_dofs =
             entity_map.getCellInteriorDofs(static_cast<GlobalIndex>(cell));
         if (!cell_dofs.empty()) {
+            const auto cell_geometry = mesh.cell_interior_geometry_dofs(cell);
             mark_expected(cell_dofs, cell_geometry.size(), "cell-interior");
             for (std::size_t c = 0; c < components; ++c) {
                 for (std::size_t j = 0; j < cell_geometry.size(); ++j) {
