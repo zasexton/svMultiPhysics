@@ -643,11 +643,12 @@ struct GatheredInt64Words {
 };
 
 // ---------------------------------------------------------------------------
-// Diagnostic profile of one refresh (SVMP_AGGREGATION_PROFILE=1).  It times
-// the phases of apply() and counts the words each distributed exchange sends
-// and receives, and prints one communicator-reduced line per refresh from
-// rank 0.  It changes no constraint.  The environment variable must have the
-// same value on every rank, because the reduction is collective.
+// Diagnostic profile of one refresh, active when the FE log level is DEBUG
+// (FE_LOG_LEVEL=DEBUG), like the other detailed aggregation diagnostics.  It
+// times the phases of apply() and counts the words each distributed exchange
+// sends and receives, and every rank prints one line per refresh with its own
+// values and a refresh sequence number shared by all ranks.  It makes no
+// communicator call and changes no constraint.
 
 enum class AggregationProfilePhase : std::size_t {
     Preflight,
@@ -754,15 +755,6 @@ constexpr std::array<const char*,
         "owner_sourced_refresh",
     }};
 
-[[nodiscard]] bool aggregationProfileEnabled() noexcept
-{
-    static const bool enabled = [] {
-        const char* value = std::getenv("SVMP_AGGREGATION_PROFILE");
-        return value != nullptr && std::string_view(value) == "1";
-    }();
-    return enabled;
-}
-
 class AggregationRefreshProfile {
 public:
     using Clock = std::chrono::steady_clock;
@@ -777,7 +769,7 @@ public:
         counts_.fill(0u);
         start_ = Clock::now();
         last_ = start_;
-        active_ = aggregationProfileEnabled();
+        active_ = Logger::instance().get_level() <= LogLevel::DEBUG;
     }
 
     [[nodiscard]] bool active() const noexcept { return active_; }
@@ -817,13 +809,16 @@ public:
         }
     }
 
-    // Collective when active on a distributed communicator.
+    // Rank-local; prints when active.
     void report(const systems::FESystem& system,
                 std::string_view field_name,
                 std::string_view kind);
 
 private:
     bool active_{false};
+    // Refreshes and finalizations profiled by this process, in call order;
+    // every rank of a communicator calls them in the same order.
+    std::uint64_t sequence_{0u};
     Clock::time_point start_{};
     Clock::time_point last_{};
     std::array<double, static_cast<std::size_t>(AggregationProfilePhase::Count)>
@@ -859,33 +854,10 @@ void AggregationRefreshProfile::report(const systems::FESystem& system,
         return;
     }
     active_ = false;
+    ++sequence_;
     const double total_ms =
         std::chrono::duration<double, std::milli>(Clock::now() - start_)
             .count();
-    constexpr auto n_phases =
-        static_cast<std::size_t>(AggregationProfilePhase::Count);
-    constexpr auto n_exchanges =
-        static_cast<std::size_t>(AggregationProfileExchange::Count);
-    constexpr auto n_counts =
-        static_cast<std::size_t>(AggregationProfileCount::Count);
-    // [total, phases..., exchange times...] reduced by MAX and SUM;
-    // [sent..., received..., partners..., counts...] reduced by MAX and SUM.
-    std::vector<double> times;
-    times.reserve(1u + n_phases + n_exchanges);
-    times.push_back(total_ms);
-    times.insert(times.end(), phase_ms_.begin(), phase_ms_.end());
-    times.insert(times.end(), exchange_ms_.begin(), exchange_ms_.end());
-    std::vector<std::uint64_t> words;
-    words.reserve(3u * n_exchanges + n_counts);
-    words.insert(words.end(), sent_words_.begin(), sent_words_.end());
-    words.insert(words.end(), received_words_.begin(), received_words_.end());
-    words.insert(words.end(), exchange_partners_.begin(),
-                 exchange_partners_.end());
-    words.insert(words.end(), counts_.begin(), counts_.end());
-    auto times_max = times;
-    auto times_sum = times;
-    auto words_max = words;
-    auto words_sum = words;
     int rank = 0;
     int world_size = 1;
 #if FE_HAS_MPI
@@ -895,59 +867,37 @@ void AggregationRefreshProfile::report(const systems::FESystem& system,
         const auto comm = system.dofHandler().mpiComm();
         MPI_Comm_rank(comm, &rank);
         MPI_Comm_size(comm, &world_size);
-        if (world_size > 1) {
-            MPI_Allreduce(times.data(), times_max.data(),
-                          static_cast<int>(times.size()), MPI_DOUBLE,
-                          MPI_MAX, comm);
-            MPI_Allreduce(times.data(), times_sum.data(),
-                          static_cast<int>(times.size()), MPI_DOUBLE,
-                          MPI_SUM, comm);
-            MPI_Allreduce(words.data(), words_max.data(),
-                          static_cast<int>(words.size()), MPI_UINT64_T,
-                          MPI_MAX, comm);
-            MPI_Allreduce(words.data(), words_sum.data(),
-                          static_cast<int>(words.size()), MPI_UINT64_T,
-                          MPI_SUM, comm);
-        }
     }
 #else
     static_cast<void>(system);
 #endif
-    if (rank != 0) {
-        return;
-    }
     std::ostringstream out;
     out << std::fixed << std::setprecision(3)
         << "SmallCutAggregationConstraint: diagnostic=aggregation_profile"
-        << " field='" << field_name << "' kind=" << kind
-        << " ranks=" << world_size << " total_ms_max=" << times_max[0]
-        << " total_ms_mean=" << times_sum[0] / world_size;
-    for (std::size_t i = 0; i < n_phases; ++i) {
-        if (times_max[1u + i] == 0.0) {
-            continue;
+        << " seq=" << sequence_ << " rank=" << rank
+        << " ranks=" << world_size << " field='" << field_name
+        << "' kind=" << kind << " total_ms=" << total_ms;
+    for (std::size_t i = 0; i < phase_ms_.size(); ++i) {
+        if (phase_ms_[i] != 0.0) {
+            out << " phase." << kAggregationProfilePhaseNames[i]
+                << "_ms=" << phase_ms_[i];
         }
-        out << " phase." << kAggregationProfilePhaseNames[i]
-            << "_ms_max=" << times_max[1u + i];
     }
-    for (std::size_t i = 0; i < n_exchanges; ++i) {
-        if (words_sum[i] == 0u && words_sum[n_exchanges + i] == 0u &&
-            times_max[1u + n_phases + i] == 0.0) {
+    for (std::size_t i = 0; i < exchange_ms_.size(); ++i) {
+        if (sent_words_[i] == 0u && received_words_[i] == 0u &&
+            exchange_ms_[i] == 0.0) {
             continue;
         }
         const char* name = kAggregationProfileExchangeNames[i];
-        out << " exchange." << name << "_ms_max="
-            << times_max[1u + n_phases + i] << " exchange." << name
-            << "_sent_words_sum=" << words_sum[i] << " exchange." << name
-            << "_sent_words_max=" << words_max[i] << " exchange." << name
-            << "_received_words_max=" << words_max[n_exchanges + i]
-            << " exchange." << name << "_partners_max="
-            << words_max[2u * n_exchanges + i];
+        out << " exchange." << name << "_ms=" << exchange_ms_[i]
+            << " exchange." << name << "_sent_words=" << sent_words_[i]
+            << " exchange." << name << "_received_words="
+            << received_words_[i] << " exchange." << name
+            << "_partners=" << exchange_partners_[i];
     }
-    for (std::size_t i = 0; i < n_counts; ++i) {
-        out << " count." << kAggregationProfileCountNames[i]
-            << "_max=" << words_max[3u * n_exchanges + i] << " count."
-            << kAggregationProfileCountNames[i]
-            << "_sum=" << words_sum[3u * n_exchanges + i];
+    for (std::size_t i = 0; i < counts_.size(); ++i) {
+        out << " count." << kAggregationProfileCountNames[i] << "="
+            << counts_[i];
     }
     FE_LOG_INFO(out.str());
 }
