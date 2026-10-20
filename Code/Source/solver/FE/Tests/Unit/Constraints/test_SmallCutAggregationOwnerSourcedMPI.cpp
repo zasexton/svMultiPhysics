@@ -271,24 +271,33 @@ public:
             topology.vertex_coords.push_back(node_xyz_[node][0]);
             topology.vertex_coords.push_back(node_xyz_[node][1]);
         }
-        std::set<int> neighbors;
         for (GlobalIndex cell = 0; cell < numCells(); ++cell) {
             topology.cell_gids.push_back(getCellGlobalId(cell));
             topology.cell_owner_ranks.push_back(getCellOwnerRank(cell));
-            if (!isOwnedCell(cell)) {
-                neighbors.insert(getCellOwnerRank(cell));
-            }
         }
-        // Ranks that store one of this rank's columns.
+        // The DofHandler assigns vertex owners and IDs by exchanges with
+        // these ranks only.  The owner of a stored vertex owns an incident
+        // cell, which lies in a column next to a stored column even when it
+        // is not stored here (at the edge of the halo), and every rank that
+        // stores the vertex stores such a column too.  So every rank whose
+        // stored columns come within one column of this rank's stored
+        // columns is a neighbour; the owners of the ghost cells alone are
+        // not enough.
+        std::set<int> neighbors;
         for (int other = 0; other < parallelSize(); ++other) {
             if (other == rank_) {
                 continue;
             }
-            for (int column = 0; column < layout_.nx; ++column) {
-                if (layout_.column_owner[static_cast<std::size_t>(column)] ==
-                        rank_ &&
-                    layout_.storedColumn(column, other)) {
-                    neighbors.insert(other);
+            for (int mine = 0; mine < layout_.nx; ++mine) {
+                if (!layout_.storedColumn(mine, rank_)) {
+                    continue;
+                }
+                for (int theirs = std::max(0, mine - 1);
+                     theirs <= std::min(layout_.nx - 1, mine + 1);
+                     ++theirs) {
+                    if (layout_.storedColumn(theirs, other)) {
+                        neighbors.insert(other);
+                    }
                 }
             }
         }
@@ -509,20 +518,28 @@ RefreshSnapshot runScenario(const Scenario& scenario, bool owner_sourced)
 
     systems::SetupInputs inputs;
     inputs.topology_override = mesh->topology();
-    int local_threw = 0;
-    try {
-        system.setup(gridSetupOptions(rank, world_size), inputs);
-        system.setCutIntegrationContext(
-            gridCutContext(*mesh, scenario.phi, scenario.owned_rules_only));
-        system.rebuildConstraintState();
-    } catch (const std::exception& error) {
-        local_threw = 1;
-        snapshot.message = error.what();
-    }
-    int any_threw = 0;
-    MPI_Allreduce(&local_threw, &any_threw, 1, MPI_INT, MPI_MAX,
-                  MPI_COMM_WORLD);
-    snapshot.threw = any_threw != 0;
+    // Setup and rebuild are separate collective phases: a rank whose setup
+    // failed must not leave the others alone in the rebuild's collectives.
+    const auto collective_phase = [&](const auto& phase) {
+        int local_threw = 0;
+        try {
+            phase();
+        } catch (const std::exception& error) {
+            local_threw = 1;
+            snapshot.message = error.what();
+        }
+        int any_threw = 0;
+        MPI_Allreduce(&local_threw, &any_threw, 1, MPI_INT, MPI_MAX,
+                      MPI_COMM_WORLD);
+        return any_threw == 0;
+    };
+    snapshot.threw =
+        !collective_phase([&] {
+            system.setup(gridSetupOptions(rank, world_size), inputs);
+            system.setCutIntegrationContext(gridCutContext(
+                *mesh, scenario.phi, scenario.owned_rules_only));
+        }) ||
+        !collective_phase([&] { system.rebuildConstraintState(); });
     const auto counters_after =
         detail::smallCutAggregationOwnerSourcedCounters();
     snapshot.owner_sourced_completed =
