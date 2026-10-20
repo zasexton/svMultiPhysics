@@ -674,6 +674,22 @@ These are proposals. Each lists a recommended option and an alternative. Record 
     - Option schemas: the generic `OptionSchema<T>` lives in FE/Core, the physics schemas in Physics/Core, and legacy XML spellings stay an Application-registered alias overlay.
     - Dead code (`LevelSetMaintenanceHistory`, a test-only serializer) is deleted.
     - The free-boundary workflow lives in FE/LevelSet; FE/FreeBoundary is added only if it also composes fitted ALE.
+  - **Refactor scoping, 2026-10-19:**
+    - The observation-only diagnostics are retired with the experiments (user): the Newton active-pressure support-rank and update-support logs, and the assembler's `SVMP_FE_CUT_VOLUME_LOCAL_MATRIX_*` provenance diagnostics.
+    - S5c (the driver's static-capillary initializer) and S3 (Newton hooks) wait for S2 and S7 and land together. Moving them now would need a callback interface over driver functions the outer-pass branch may change, and no reference deck covers static capillary.
+- **D43, 2026-10-19 (user): 3D sessile protocol on arm64; the Δt/2 angle check moves to R/h = 16, with a boundary-averaged sector angle.**
+  - **Runs:** production binary `e7080344-ltopgo-mumps`, quarter domain, 8 ranks (job 51, `/scratch/users/zsexton/svmp-dev-outer/runs/51-planB1_3d`).
+    - The refinement study passes every D38 criterion. Largest sector angle error: 1.016° at R/h = 8, 0.099° at R/h = 16 (decreasing). Base error 1.5e-3 and 3.6e-4, apex 3.1e-3 and 8.4e-4, max dV/V 6.4e-5 and 1.1e-5 (the D40 #26 volume failure is fixed). Velocity growth not gated (final capillary numbers 3.8e-4 and 1.8e-4, D39).
+    - **The Δt/2 check at R/h = 8 fails as defined:** the largest final sector angle change is 0.644° (limit 0.1°); base and apex change 5.7e-5 and 9.9e-6 (limit 1e-3). The x86 pair (`6e21160c`) changed 0.103°.
+  - **Diagnosis** (analysis of the outputs only; `sessile_3d/dtcheck-e7080344/`):
+    - About 0.52° is the measurement. Two wall contact points lie on the 30° and 60° sector boundaries (azimuth within 1e-4°), and a phi change of about 1e-5 moves each into the neighbouring sector. The Δt run flips one at t = 10.3, the Δt/2 run the other at t = 20.0. The solver logs show no event at either time.
+    - The remaining difference, about 0.10–0.15°, is set during the spreading phase and does not grow at rest.
+    - At R/h = 8 the sector angle varies by 0.07–0.15° under ±5° boundary shifts and cannot resolve 0.1°. At R/h = 16 the spread is 0.03–0.05° and a boundary flip costs about 0.014°.
+  - **Decision, pre-registered before any further run:**
+    1. The R/h = 8 result is recorded as a FAIL under the D38 definition, with this diagnosis, and stays reported.
+    2. The time-step criterion is judged at R/h = 16 (Δt against Δt/2), as in 2D, with the limits unchanged: 0.1° for the angle, 0.1% for base radius and apex height. The R/h = 8 pair is reported, not gated.
+    3. The sector contact angle used by every angle criterion, at every level, is the mean over 21 rotations of the 30° sector partition spaced uniformly over ±5°. The single-partition value is reported alongside. `tolerances.json` and `verify.py` change before the R/h = 16 Δt/2 run is submitted; on the existing outputs this measure gives a change of 0.144° at R/h = 8 (still a fail) and a largest error of about 0.106° at R/h = 16.
+    4. The R/h = 16 Δt/2 run (about 11 h on 8 CPUs) is submitted when the VM is free again.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
