@@ -21,6 +21,32 @@ bool is_simplex(ElementType type) {
     return type == ElementType::Line2 || type == ElementType::Triangle3 || type == ElementType::Tetra4;
 }
 
+// The linear Lagrange basis of an affine simplex depends only on its type.
+// Cut-cell measures, face frames and the free-surface snapshot construct a
+// LinearMapping for every cell they evaluate (about 0.2 million per 3D sessile
+// step at R/h = 8), so one immutable basis per type is built on first use
+// (thread-safe initialization of a function-local static) and shared.  It is
+// only evaluated through const member functions, which keep their scratch per
+// thread, so concurrent mappings may share it.
+std::shared_ptr<const basis::LagrangeBasis> sharedLinearBasis(ElementType type) {
+    switch (type) {
+    case ElementType::Line2: {
+        static const auto shared = std::make_shared<const basis::LagrangeBasis>(ElementType::Line2, 1);
+        return shared;
+    }
+    case ElementType::Triangle3: {
+        static const auto shared = std::make_shared<const basis::LagrangeBasis>(ElementType::Triangle3, 1);
+        return shared;
+    }
+    case ElementType::Tetra4: {
+        static const auto shared = std::make_shared<const basis::LagrangeBasis>(ElementType::Tetra4, 1);
+        return shared;
+    }
+    default:
+        return std::make_shared<const basis::LagrangeBasis>(type, 1);
+    }
+}
+
 }
 
 LinearMapping::LinearMapping(ElementType type,
@@ -34,7 +60,7 @@ LinearMapping::LinearMapping(ElementType type,
         throw FEException("LinearMapping requires nodal coordinates",
                           __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
     }
-    basis_ = std::make_shared<basis::LagrangeBasis>(type, 1);
+    basis_ = sharedLinearBasis(type);
     if (basis_->size() != nodes_.size()) {
         throw FEException("LinearMapping node count does not match basis size",
                           __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);

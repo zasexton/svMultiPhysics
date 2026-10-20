@@ -44,7 +44,9 @@ private:
     ElementType element_type_;
     int dimension_;
     std::vector<math::Vector<Real, 3>> nodes_;
-    std::shared_ptr<basis::LagrangeBasis> basis_; // order 1
+    // Order 1, shared by every LinearMapping of the element type and never
+    // modified (only const evaluations, which keep their scratch per thread).
+    std::shared_ptr<const basis::LagrangeBasis> basis_;
 };
 
 } // namespace geometry
