@@ -11,9 +11,14 @@ criteria are applied across its levels.  The contact angle is measured along
 the whole contact line: the line is divided into azimuthal sectors of
 SECTOR_DEGREES around the drop axis, and in each sector a circle is fitted to
 the meridional projection (r, y) of the interface points near the wall, as
-the 2D benchmark fits each side (README.md).  --symmetry-check compares a
-quarter-domain run with a full-domain run of the same level on the shared
-quarter.
+the 2D benchmark fits each side (README.md).  The sector angle of the
+criteria is the mean over the rotations SECTOR_ROTATION_OFFSETS of the sector
+partition (decision D43); the single-partition value is reported alongside.
+The time-step criterion is judged at the levels in
+time_step_criterion.refined_step_levels (R/h = 16, D43); the changes at the
+other levels run at both divisors are reported, not gated.
+--symmetry-check compares a quarter-domain run with a full-domain run of the
+same level on the shared quarter.
 
 Exit status: 0 if every criterion passes, 1 if any criterion fails, 2 if
 input data are missing or invalid.
@@ -51,6 +56,12 @@ observed_order = SV.observed_order
 output_series = SV.output_series
 
 SECTOR_DEGREES = 30.0              # azimuthal width of one contact-angle sector
+# Decision D43: the sector angle is the mean over 21 rotations of the sector
+# partition, offsets -5, -4.5, ..., +5 degrees (offset 0 is the single partition).
+SECTOR_ROTATION_HALF_WIDTH = 5.0
+SECTOR_ROTATION_COUNT = 21
+SECTOR_ROTATION_OFFSETS = tuple(float(v) for v in np.linspace(
+    -SECTOR_ROTATION_HALF_WIDTH, SECTOR_ROTATION_HALF_WIDTH, SECTOR_ROTATION_COUNT))
 ANGLE_FIT_HEIGHT = S2.ANGLE_FIT_HEIGHT   # fit window 0 <= y <= 0.25 R_ref, as in 2D
 WALL_TOLERANCE = 1.0e-9
 POINT_MERGE_DIGITS = 12
@@ -112,7 +123,50 @@ def fit_axis(contact: np.ndarray) -> np.ndarray:
     return np.array([xc, zc])
 
 
+def sector_masks(azimuth: np.ndarray, domain: str, offset: float = 0.0) -> list[np.ndarray]:
+    """Membership of each nominal sector for the partition rotated by offset (degrees).
+
+    Sectors are identified by their nominal centre azimuth (the centre at
+    offset 0) and keep that identity in every rotation.  Quarter domain
+    (azimuth 0 to 90): the outer edges stay on the symmetry planes, so a
+    rotation moves only the interior boundaries (sectors [0, 30 + s),
+    [30 + s, 60 + s), [60 + s, 90]).  Full domain: the partition rotates
+    periodically (sector k is [-180 + 30 k + s, -150 + 30 k + s) modulo 360).
+    At offset 0 both are the unrotated partition of the D38 definition.
+    """
+    a = np.asarray(azimuth, dtype=float)
+    if domain == "quarter":
+        span, shift = (0.0, 90.0), offset
+    else:
+        span, shift = (-180.0, 180.0), 0.0
+        a = a - offset
+        a = np.where(a < -180.0, a + 360.0, np.where(a > 180.0, a - 360.0, a))
+    edges = np.arange(span[0], span[1] + 0.5 * SECTOR_DEGREES, SECTOR_DEGREES)
+    n = len(edges) - 1
+    masks = []
+    for k in range(n):
+        lo = edges[k] + (shift if k > 0 else 0.0)
+        hi = edges[k + 1] + (shift if k + 1 < n else 0.0)
+        masks.append((a >= lo) & (a < hi) if k + 1 < n else (a >= lo))
+    return masks
+
+
+def nominal_sectors(domain: str) -> list[tuple[float, float]]:
+    """Azimuth ranges (degrees) of the unrotated sectors, in sector order."""
+    span = (0.0, 90.0) if domain == "quarter" else (-180.0, 180.0)
+    edges = np.arange(span[0], span[1] + 0.5 * SECTOR_DEGREES, SECTOR_DEGREES)
+    return [(float(lo), float(hi)) for lo, hi in zip(edges[:-1], edges[1:])]
+
+
 def drop_geometry(snap: dict, case: dict, reference_radius: float, theta_e: float) -> dict:
+    """Contact line, base radius, apex height and sector contact angles.
+
+    Each sector's "angle" is the mean over SECTOR_ROTATION_OFFSETS of the
+    single-partition circle-fit angle of that sector (decision D43); the
+    offset-0 value, the spread over the rotations and the offset-0 fit data
+    are reported with it.  The max deviation is formed from the averaged
+    sector angles: max over the nominal sectors of |angle - theta_e|.
+    """
     wall_y = case["contact_wall_y"]
     points, tets, phi = snap["points"], snap["tets"], snap["phi"]
     segments, parents = wall_contact_segments(points, tets, phi, wall_y)
@@ -126,24 +180,39 @@ def drop_geometry(snap: dict, case: dict, reference_radius: float, theta_e: floa
     # Sector angles: azimuth about the axis; quarter domain covers [0, 90] degrees.
     def azimuth(q):
         return np.degrees(np.arctan2(q[:, 2] - axis[1], q[:, 0] - axis[0]))
-    span = (0.0, 90.0) if case["domain"] == "quarter" else (-180.0, 180.0)
-    edges = np.arange(span[0], span[1] + 0.5 * SECTOR_DEGREES, SECTOR_DEGREES)
     az_iface, az_contact = azimuth(iface), azimuth(contact)
+    meridional = np.column_stack([np.hypot(iface[:, 0] - axis[0], iface[:, 2] - axis[1]),
+                                  iface[:, 1]])
     window = ANGLE_FIT_HEIGHT * reference_radius
+    nominal = nominal_sectors(case["domain"])
+    by_offset = {}
+    for offset in SECTOR_ROTATION_OFFSETS:
+        rows = []
+        for (lo, hi), in_c, in_i in zip(nominal, sector_masks(az_contact, case["domain"], offset),
+                                        sector_masks(az_iface, case["domain"], offset)):
+            if not np.any(in_c):
+                raise DataError(f"no contact point in the sector [{lo:g}, {hi:g}) degrees "
+                                f"rotated by {offset:g} degrees")
+            r_contact = float(np.mean(radial[in_c]))
+            angle, n_fit = S2.local_contact_angle(meridional[in_i], r_contact, 0.0, +1,
+                                                  wall_y, window)
+            rows.append((angle, n_fit, r_contact))
+        by_offset[offset] = rows
     sectors = []
-    for lo, hi in zip(edges[:-1], edges[1:]):
-        in_c = (az_contact >= lo) & (az_contact < hi) if hi < span[1] else (az_contact >= lo)
-        in_i = (az_iface >= lo) & (az_iface < hi) if hi < span[1] else (az_iface >= lo)
-        if not np.any(in_c):
-            raise DataError(f"no contact point in the sector [{lo:g}, {hi:g}) degrees")
-        q = iface[in_i]
-        meridional = np.column_stack([np.hypot(q[:, 0] - axis[0], q[:, 2] - axis[1]),
-                                      q[:, 1]])
-        r_contact = float(np.mean(radial[in_c]))
-        angle, n_fit = S2.local_contact_angle(meridional, r_contact, 0.0, +1, wall_y, window)
-        sectors.append({"azimuth_degrees": [float(lo), float(hi)], "angle": angle,
+    for k, (lo, hi) in enumerate(nominal):
+        rotated = np.array([by_offset[o][k][0] for o in SECTOR_ROTATION_OFFSETS])
+        single, n_fit, r_contact = by_offset[0.0][k]
+        sectors.append({"azimuth_degrees": [lo, hi],
+                        "nominal_centre_azimuth_degrees": 0.5 * (lo + hi),
+                        "angle": float(np.mean(rotated)),
+                        "angle_single_partition": single,
+                        "angle_rotation_min": float(np.min(rotated)),
+                        "angle_rotation_max": float(np.max(rotated)),
+                        "angle_rotation_spread": float(np.max(rotated) - np.min(rotated)),
+                        "angle_rotation_std": float(np.std(rotated)),
                         "fit_points": n_fit, "contact_radius": r_contact})
     angles = np.array([s["angle"] for s in sectors])
+    single = np.array([s["angle_single_partition"] for s in sectors])
     lengths = np.linalg.norm(segments[:, 1] - segments[:, 0], axis=1)
     cell = np.array([cell_angle(points, tets[t], phi) for t in parents])
     return {
@@ -152,9 +221,14 @@ def drop_geometry(snap: dict, case: dict, reference_radius: float, theta_e: floa
         "base_radius_spread": float(np.max(radial) - np.min(radial)),
         "apex_height": apex,
         "contact_points": int(len(contact)),
+        "sector_rotation_offsets_degrees": list(SECTOR_ROTATION_OFFSETS),
         "sectors": sectors,
         "contact_angle_mean": float(np.mean(angles)),
         "contact_angle_max_deviation": float(np.max(np.abs(angles - theta_e))),
+        "contact_angle_mean_single_partition": float(np.mean(single)),
+        "contact_angle_max_deviation_single_partition": float(np.max(np.abs(single - theta_e))),
+        "contact_angle_rotation_spread_max": float(max(s["angle_rotation_spread"]
+                                                       for s in sectors)),
         "cell_angle_mean": float(np.sum(lengths * cell) / np.sum(lengths)),
         "cell_angle_max_deviation": float(np.max(np.abs(cell - theta_e))),
         "contact_line_length": float(np.sum(lengths)),
@@ -205,7 +279,9 @@ def analyse_run(run: Path, *, allow_truncated: bool = False) -> dict:
         g = drop_geometry(snap, case, reference["radius"], theta_e)
         history.append({"time": t, "base_radius": g["base_radius"],
                         "contact_angle_mean": g["contact_angle_mean"],
-                        "contact_angle_max_deviation": g["contact_angle_max_deviation"]})
+                        "contact_angle_max_deviation": g["contact_angle_max_deviation"],
+                        "contact_angle_max_deviation_single_partition":
+                            g["contact_angle_max_deviation_single_partition"]})
     final = drop_geometry(snap, case, reference["radius"], theta_e)
     times, speeds = np.asarray(times), np.asarray(speeds)
     t_end = times[-1]
@@ -225,6 +301,9 @@ def analyse_run(run: Path, *, allow_truncated: bool = False) -> dict:
         "final": final,
         "contact_angle_mean_error_degrees": abs(final["contact_angle_mean"] - theta_e),
         "contact_angle_max_error_degrees": final["contact_angle_max_deviation"],
+        "contact_angle_max_error_degrees_single_partition":
+            final["contact_angle_max_deviation_single_partition"],
+        "contact_angle_rotation_spread_max_degrees": final["contact_angle_rotation_spread_max"],
         "base_radius_relative_error": abs(final["base_radius"] - reference["base_radius"])
         / reference["base_radius"],
         "apex_height_relative_error": abs(final["apex_height"] - reference["apex_height"])
@@ -255,6 +334,11 @@ def evaluate_group(runs: list[dict], tolerances: dict, levels_required=None) -> 
         if levels_required is not None and at != "each" and at not in levels_required:
             results.append({"id": crit["id"], "passed": True, "evaluated": False,
                             "details": [f"not evaluated (needs R/h = {at})"]})
+            continue
+        if levels_required is not None and at != "each" and at not in by_level:
+            # A refined-step (dt/2) study without its gating level: not evaluated.
+            results.append({"id": crit["id"], "passed": True, "evaluated": False,
+                            "details": [f"not evaluated (no run at R/h = {at} in this study)"]})
             continue
         for level in levels:
             if level not in by_level:
@@ -300,17 +384,44 @@ def evaluate_group(runs: list[dict], tolerances: dict, levels_required=None) -> 
 
 
 def time_step_changes(coarse: dict, fine: dict) -> dict:
+    """End-state changes between the dt and dt/2 runs of one level.
+
+    Sectors are matched by their nominal centre azimuth.  The angle change is
+    max over the sectors of |angle(dt) - angle(dt/2)| of the rotation-averaged
+    sector angles (decision D43); the same with the single-partition angles is
+    reported.
+    """
     a, b = coarse["final"], fine["final"]
+    sb = {s["nominal_centre_azimuth_degrees"]: s for s in b["sectors"]}
+    if set(sb) != {s["nominal_centre_azimuth_degrees"] for s in a["sectors"]}:
+        raise DataError("the dt and dt/2 runs have different sector partitions")
+    by_sector = []
+    for s in a["sectors"]:
+        t = sb[s["nominal_centre_azimuth_degrees"]]
+        by_sector.append({"nominal_centre_azimuth_degrees": s["nominal_centre_azimuth_degrees"],
+                          "angle_change": s["angle"] - t["angle"],
+                          "angle_change_single_partition":
+                              s["angle_single_partition"] - t["angle_single_partition"]})
     return {
-        "contact_angle_change_final": max(
-            abs(sa["angle"] - sb["angle"]) for sa, sb in zip(a["sectors"], b["sectors"])),
+        "contact_angle_change_final": max(abs(c["angle_change"]) for c in by_sector),
         "base_radius_change_final": abs(a["base_radius"] - b["base_radius"]) / b["base_radius"],
         "apex_height_change_final": abs(a["apex_height"] - b["apex_height"]) / b["apex_height"],
+        "contact_angle_change_final_single_partition": max(
+            abs(c["angle_change_single_partition"]) for c in by_sector),
+        "contact_angle_change_by_sector": by_sector,
     }
 
 
 def evaluate_time_step(groups: dict, tolerances: dict) -> list[dict]:
+    """Time-step criterion (dt against dt/2) for each (domain, dt rule) study.
+
+    Gated at the levels in time_step_criterion.refined_step_levels (R/h = 16
+    since decision D43); a gated level without runs at both divisors is not
+    evaluated and does not fail.  The changes at every other level run at both
+    divisors (R/h = 8) are reported, not gated.
+    """
     crit = tolerances["time_step_criterion"]
+    gated_levels = set(crit["refined_step_levels"])
     out = []
     for key, runs in groups.items():
         domain, rule, divisor = key
@@ -318,19 +429,27 @@ def evaluate_time_step(groups: dict, tolerances: dict) -> list[dict]:
             continue
         coarse = {r["level"]: r for r in runs}
         fine = {r["level"]: r for r in groups[(domain, rule, 2)]}
-        common = sorted(set(coarse) & set(fine))
-        if not common:
-            continue
-        level = common[-1]
-        changes = time_step_changes(coarse[level], fine[level])
-        details, ok = [], True
-        for q in crit["quantities"]:
-            value = changes[q["id"]]
-            passed = value <= q["limit"]
-            ok &= passed
-            details.append(f"{q['id']}: {value:.3g} {'<=' if passed else '>'} {q['limit']:g}")
-        out.append({"id": "time_step", "group": list(key), "level": level, "passed": bool(ok),
-                    "changes": changes, "details": details})
+        common = set(coarse) & set(fine)
+        for level in sorted(common | gated_levels):
+            gated = level in gated_levels
+            if level not in common:
+                out.append({"id": "time_step", "group": list(key), "level": level,
+                            "gated": True, "evaluated": False, "passed": True,
+                            "details": [f"not evaluated (needs dt and dt/2 runs at R/h = {level})"]})
+                continue
+            changes = time_step_changes(coarse[level], fine[level])
+            details, ok = [], True
+            for q in crit["quantities"]:
+                value = changes[q["id"]]
+                passed = value <= q["limit"]
+                ok &= passed
+                details.append(f"{q['id']}: {value:.3g} {'<=' if passed else '>'} {q['limit']:g}")
+            details.append("single-partition angle change "
+                           f"{changes['contact_angle_change_final_single_partition']:.3g}")
+            out.append({"id": "time_step", "group": list(key), "level": level, "gated": gated,
+                        "evaluated": True, "within_limits": bool(ok),
+                        "passed": bool(ok) if gated else None,
+                        "changes": changes, "details": details})
     return out
 
 
@@ -379,9 +498,15 @@ def symmetry_check(quarter_run: Path, full_run: Path) -> dict:
             "contact_angle_sector_max_difference": float(np.max(np.abs(
                 np.array([s["angle"] for s in ga["sectors"]]) -
                 np.array([s["angle"] for s in gb["sectors"]])))),
+            "contact_angle_sector_max_difference_single_partition": float(np.max(np.abs(
+                np.array([s["angle_single_partition"] for s in ga["sectors"]]) -
+                np.array([s["angle_single_partition"] for s in gb["sectors"]])))),
             "full_domain_axis_offset": float(np.hypot(*gfull["axis"])),
             "full_domain_angle_spread_over_sectors": float(
                 max(s["angle"] for s in gfull["sectors"]) - min(s["angle"] for s in gfull["sectors"])),
+            "full_domain_angle_spread_over_sectors_single_partition": float(
+                max(s["angle_single_partition"] for s in gfull["sectors"])
+                - min(s["angle_single_partition"] for s in gfull["sectors"])),
         })
     if not rows:
         raise DataError("the quarter and full runs share no output time")
@@ -424,13 +549,18 @@ def main(argv=None) -> int:
     groups: dict[tuple, list] = {}
     for r in runs:
         groups.setdefault((r["domain"], r["dt_rule"], r["dt_divisor"]), []).append(r)
+    # angle mean / max dev: rotation-averaged sector angles (D43, gated);
+    # 1-part dev: single partition; rot sprd: largest spread over the rotations.
     print(f"{'R/h':>4} {'domain':>7} {'rule':>15} {'dt/d':>4} {'angle mean':>10} {'max dev':>8} "
+          f"{'1-part dev':>10} {'rot sprd':>8} "
           f"{'cell mean':>9} {'base err':>9} {'apex err':>9} {'dV/V max':>9} {'growth':>7}")
     for r in sorted(runs, key=lambda r: (r["domain"], r["dt_rule"], r["dt_divisor"], r["level"])):
         f = r["final"]
         growth = "-" if r["max_speed_growth_ratio"] is None else f"{r['max_speed_growth_ratio']:.3f}"
         print(f"{r['level']:>4} {r['domain']:>7} {r['dt_rule']:>15} {r['dt_divisor']:>4} "
               f"{f['contact_angle_mean']:>10.3f} {f['contact_angle_max_deviation']:>8.3f} "
+              f"{f['contact_angle_max_deviation_single_partition']:>10.3f} "
+              f"{f['contact_angle_rotation_spread_max']:>8.3f} "
               f"{f['cell_angle_mean']:>9.3f} {r['base_radius_relative_error']:>9.2e} "
               f"{r['apex_height_relative_error']:>9.2e} {r['liquid_volume_relative_drift_max']:>9.2e} "
               f"{growth:>7}" + ("  [truncated, not acceptance evidence]" if r["truncated"] else ""))
@@ -442,16 +572,24 @@ def main(argv=None) -> int:
                      if fine_key in groups else [])
     steps = evaluate_time_step(groups, tolerances)
     any_truncated = any(r["truncated"] for r in runs)
-    all_pass = bool(verdicts) and all(v["passed"] for v in verdicts + fine_verdicts + steps) \
+    gated_steps = [v for v in steps if v["gated"] and v["evaluated"]]
+    all_pass = bool(verdicts) and all(v["passed"] for v in verdicts + fine_verdicts + gated_steps) \
         and not any_truncated
     print(f"\nprotocol study {protocol_key}:")
     for v in verdicts:
         print(f"  [{'PASS' if v['passed'] else 'FAIL'}] {v['id']}: " + "; ".join(v["details"]))
     for v in fine_verdicts:
-        print(f"  [dt/2 {'PASS' if v['passed'] else 'FAIL'}] {v['id']}: " + "; ".join(v["details"]))
+        tag = ("NOT EVALUATED" if not v["evaluated"] else "PASS" if v["passed"] else "FAIL")
+        print(f"  [dt/2 {tag}] {v['id']}: " + "; ".join(v["details"]))
     for v in steps:
-        print(f"  [{'PASS' if v['passed'] else 'FAIL'}] time_step at R/h={v['level']}: "
-              + "; ".join(v["details"]))
+        if not v["evaluated"]:
+            tag = "NOT EVALUATED"
+        elif v["gated"]:
+            tag = "PASS" if v["passed"] else "FAIL"
+        else:
+            tag = "REPORTED, not gated (D43): " + ("within" if v["within_limits"] else "outside") \
+                + " the limits"
+        print(f"  [{tag}] time_step at R/h={v['level']}: " + "; ".join(v["details"]))
     if not steps:
         print("  time_step: not evaluated (needs dt and dt/2 runs)")
     if args.json:

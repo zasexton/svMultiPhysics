@@ -126,6 +126,10 @@ def test_metrics_on_sampled_caps(tmp_path):
     assert r["contact_angle_max_error_degrees"] < 0.7
     assert abs(f["contact_angle_mean"] - 90.0) < 0.7
     assert len(f["sectors"]) == 3 and all(s["fit_points"] >= 20 for s in f["sectors"])
+    # Decision D43: the gated angle is the mean over the partition rotations.
+    assert r["contact_angle_max_error_degrees_single_partition"] < 0.7
+    assert all(s["angle_rotation_min"] <= s["angle"] <= s["angle_rotation_max"] for s in f["sectors"])
+    assert [s["nominal_centre_azimuth_degrees"] for s in f["sectors"]] == [15.0, 45.0, 75.0]
     assert r["base_radius_relative_error"] < 5e-3 and r["apex_height_relative_error"] < 5e-3
     assert f["axis"] == [0.0, 0.0]
     assert r["max_speed_growth_ratio"] < 1.0
@@ -197,3 +201,83 @@ def test_velocity_growth_is_not_gated_for_a_drop_at_rest():
     growth = verdicts["no_velocity_growth"]
     assert growth["passed"] and growth["gated_by_level"] == {"8": False, "16": True}
     assert growth["rest_capillary_floor"] == 0.001
+
+
+def test_sector_rotations_follow_the_tolerances():
+    tol = json.loads((BENCH / "tolerances.json").read_text())
+    rot = next(c for c in tol["criteria"] if c["id"] == "contact_angle")["sector_rotations"]
+    offsets = np.asarray(ver.SECTOR_ROTATION_OFFSETS)
+    assert len(offsets) == rot["count"] == 21
+    assert offsets[0] == rot["offset_min_degrees"] and offsets[-1] == rot["offset_max_degrees"]
+    assert np.allclose(np.diff(offsets), 0.5) and 0.0 in ver.SECTOR_ROTATION_OFFSETS
+    assert tol["time_step_criterion"]["refined_step_levels"] == [16]
+
+
+def test_rotated_sector_partitions():
+    rng = np.random.default_rng(3)
+    quarter = np.concatenate([rng.uniform(0.0, 90.0, 2000), [0.0, 30.0, 60.0, 90.0]])
+    full = np.concatenate([rng.uniform(-180.0, 180.0, 4000), [-180.0, -150.0, 0.0, 180.0]])
+    for domain, az in (("quarter", quarter), ("full", full)):
+        nominal = ver.nominal_sectors(domain)
+        assert len(nominal) == (3 if domain == "quarter" else 12)
+        for offset in ver.SECTOR_ROTATION_OFFSETS:
+            masks = np.array(ver.sector_masks(az, domain, offset))
+            assert np.all(masks.sum(axis=0) == 1)          # a partition of the points
+        # Offset 0 is the unrotated D38 partition.
+        for (lo, hi), m in zip(nominal, ver.sector_masks(az, domain, 0.0)):
+            last = hi == nominal[-1][1]
+            assert np.array_equal(m, (az >= lo) & ((az < hi) | last))
+    # Quarter: the outer edges stay on the symmetry planes, the interior ones move.
+    m = ver.sector_masks(np.array([0.0, 34.0, 36.0, 64.0, 66.0, 90.0]), "quarter", 5.0)
+    assert [list(np.nonzero(x)[0]) for x in m] == [[0, 1], [2, 3], [4, 5]]
+    m = ver.sector_masks(np.array([0.0, 26.0, 34.0, 56.0, 90.0]), "quarter", -5.0)
+    assert [list(np.nonzero(x)[0]) for x in m] == [[0], [1, 2], [3, 4]]
+    # Full: periodic; with offset -5 the sector of nominal centre -165 is [175, 180] U [-180, -155).
+    m = ver.sector_masks(np.array([178.0, -170.0, 172.0]), "full", -5.0)
+    assert list(np.nonzero(m[0])[0]) == [0, 1] and list(np.nonzero(m[11])[0]) == [2]
+
+
+def _final(angles, single=None, base=1.0, apex=1.0):
+    single = angles if single is None else single
+    sectors = [{"nominal_centre_azimuth_degrees": c, "angle": a, "angle_single_partition": s}
+               for c, a, s in zip((15.0, 45.0, 75.0), angles, single)]
+    return {"final": {"sectors": sectors, "base_radius": base, "apex_height": apex}}
+
+
+def test_time_step_is_gated_at_r_over_h_16_only():
+    tol = json.loads((BENCH / "tolerances.json").read_text())
+
+    def run(level, divisor, angles, single=None):
+        return dict(_final(angles, single), level=level, domain="quarter", dt_rule="fixed",
+                    dt_divisor=divisor)
+
+    key1, key2 = ("quarter", "fixed", 1), ("quarter", "fixed", 2)
+    coarse8 = run(8, 1, [89.04, 90.07, 89.04], [89.01, 90.49, 88.98])
+    fine8 = run(8, 2, [89.10, 89.93, 89.10], [89.15, 89.85, 89.12])
+    # Only the R/h = 8 pair: reported, not gated; R/h = 16 not evaluated; nothing fails.
+    steps = ver.evaluate_time_step({key1: [coarse8, run(16, 1, [90.0, 90.1, 89.9])],
+                                    key2: [fine8]}, tol)
+    by_level = {s["level"]: s for s in steps}
+    assert by_level[8]["gated"] is False and by_level[8]["passed"] is None
+    assert by_level[8]["changes"]["contact_angle_change_final"] == pytest.approx(0.14)
+    assert by_level[8]["changes"]["contact_angle_change_final_single_partition"] == pytest.approx(0.64)
+    assert by_level[16]["evaluated"] is False and by_level[16]["passed"] is True
+    # The R/h = 16 pair is gated on the averaged angles; sectors matched by centre.
+    good = ver.evaluate_time_step({key1: [run(16, 1, [90.0, 90.10, 89.9], [90.0, 90.5, 89.9])],
+                                   key2: [run(16, 2, [90.0, 90.05, 89.9], [90.0, 90.1, 89.9])]}, tol)
+    assert good[0]["gated"] and good[0]["passed"] is True
+    bad = ver.evaluate_time_step({key1: [run(16, 1, [90.0, 90.25, 89.9])],
+                                  key2: [run(16, 2, [90.0, 90.05, 89.9])]}, tol)
+    assert bad[0]["passed"] is False
+
+
+def test_dt2_study_without_r_over_h_16_is_not_evaluated():
+    tol = json.loads((BENCH / "tolerances.json").read_text())
+    run8 = {"level": 8, "contact_angle_max_error_degrees": 0.9, "base_radius_relative_error": 0.01,
+            "apex_height_relative_error": 0.01, "liquid_volume_relative_drift_max": 5e-5,
+            "max_speed_growth_ratio": 0.9, "capillary_number_at_end": 1e-4}
+    refined = set(tol["time_step_criterion"]["refined_step_levels"])
+    verdicts = {v["id"]: v for v in ver.evaluate_group([run8], tol, levels_required=refined)}
+    for cid in ("contact_angle", "base_radius", "apex_height"):
+        assert verdicts[cid]["evaluated"] is False and verdicts[cid]["passed"]
+    assert verdicts["volume_drift"]["evaluated"] and verdicts["volume_drift"]["passed"]

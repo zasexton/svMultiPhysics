@@ -16,7 +16,10 @@ contact-angle mechanism of decision D4:
   `--interface-preserving-redistancing off` writes the decks without it.
 
 **Status: tolerances approved on 2026-10-10 (tracker D38); the protocol
-enables the interface-preserving redistancing since D39 (2026-10-11).**
+enables the interface-preserving redistancing since D39 (2026-10-11). Decision
+D43 (2026-10-19, before the `R/h = 16` `dt/2` run) averages the sector angle
+over rotations of the sector partition and judges the time-step check at
+`R/h = 16`.**
 
 Files:
 
@@ -88,8 +91,10 @@ equilibrium cap, zero gravity, void exterior with `p_ext = 0`, liquid
   run lasts 10 viscous times with 200 outputs (D29), so `dt = T/1400 =
   1.7496e-2`, 1.40 and 3.97 times the capillary limit `dt_B` of `R/h = 8` and
   16.
-- `--dt-divisor 2` halves the step with unchanged output times (time-step
-  check at `R/h = 8` only, as D25).
+- `--dt-divisor 2` halves the step with unchanged output times. The
+  time-step check is judged at `R/h = 16` (decision D43, as in 2D); the
+  `R/h = 8` pair is reported, not gated. Before D43 it was judged at
+  `R/h = 8` only (D25).
 - `--dt-rule capillary-limit` uses each level's `dt_B` without the lagged
   term (the 2D sessile rule; 2,000 and 5,600 steps).
 
@@ -98,8 +103,9 @@ equilibrium cap, zero gravity, void exterior with `p_ext = 0`, liquid
 | Metric | Definition |
 |---|---|
 | contact line | zero segments of `phi_h` on the wall faces of the tetrahedra (`y = 0`) |
-| sector contact angle | the line is divided into azimuthal sectors of 30 degrees about the drop axis (3 in the quarter domain, 12 in the full domain); in each sector a circle is fitted to the meridional projection (distance from the axis, height) of the interface points with `0 <= y <= 0.25 R_ref`, and the angle is read at the circle point at the mean radius of the sector's wall crossings, as `sessile_drop_2d` does for each side |
-| `contact_angle_max_error_degrees` (gated) | largest `abs(theta_sector - theta_e)` at the end of the run; the mean over the sectors is reported |
+| single-partition sector angle | the line is divided into azimuthal sectors of 30 degrees about the drop axis (3 in the quarter domain, 12 in the full domain); in each sector a circle is fitted to the meridional projection (distance from the axis, height) of the interface points with `0 <= y <= 0.25 R_ref`, and the angle is read at the circle point at the mean radius of the sector's wall crossings, as `sessile_drop_2d` does for each side |
+| sector contact angle (D43) | the mean of the single-partition angle over 21 rotations of the partition by -5, -4.5, ..., +5 degrees. A sector keeps its identity (its nominal centre azimuth: 15, 45, 75 degrees in the quarter domain) in every rotation. In the quarter domain the outer edges stay on the symmetry planes, so a rotation moves only the interior boundaries (`[0, 30+s)`, `[30+s, 60+s)`, `[60+s, 90]`); in the full domain the partition rotates periodically. The single-partition angles and the spread over the rotations are reported |
+| `contact_angle_max_error_degrees` (gated) | largest `abs(theta_sector - theta_e)` of the rotation-averaged sector angles at the end of the run; the mean over the sectors and the single-partition value (`contact_angle_max_error_degrees_single_partition`) are reported |
 | cell angles (reported) | the angle of the P1 interface in each contact tetrahedron, length-weighted mean and largest deviation |
 | `base_radius_relative_error` | mean distance of the wall crossings from the drop axis against `R_ref sin(theta_e)`; the spread along the line is reported |
 | `apex_height_relative_error` | largest height of the interface points against `R_ref (1 - cos(theta_e))` |
@@ -109,12 +115,14 @@ equilibrium cap, zero gravity, void exterior with `p_ext = 0`, liquid
 The reference cap has the volume of the sampled initial level set (divided by
 1/4 in the quarter domain). The drop axis is `x = z = 0` in the quarter
 domain and the centre of the circle fitted to the wall crossings in the full
-domain. On sampled exact caps the sector angle is within 0.63 degrees of the
-exact angle at `R/h = 8` and 0.09 degrees at `R/h = 16` (the cell-gradient
-angles are off by up to 7 and 3.3 degrees, so they are reported only); the
-base radius and apex height are within 0.25% at `R/h = 8` and 0.05% at 16.
+domain. On sampled exact caps (90 and 120 degrees) the rotation-averaged
+sector angle is within 0.68 degrees of the exact angle at `R/h = 8` and 0.08
+degrees at `R/h = 16`, the single-partition angle within 0.63 and 0.09
+degrees (the cell-gradient angles are off by up to 7 and 3.3 degrees, so
+they are reported only); the base radius and apex height are within 0.25% at
+`R/h = 8` and 0.05% at 16.
 
-## Tolerances (D38)
+## Tolerances (D38, amended by D43)
 
 | Criterion | Limit | Where | Source |
 |---|---|---|---|
@@ -123,20 +131,45 @@ base radius and apex height are within 0.25% at `R/h = 8` and 0.05% at 16.
 | `apex_height` | at most 2% | `R/h = 16` | tracker M4 working criterion |
 | `volume_drift` | at most 1e-4 | every run | D1, D11 |
 | `no_velocity_growth` | ratio at most 1, not gated when the final capillary number `mu max|u_h|/gamma` is below 1e-3 (`rest_capillary_floor`) | every run | D1; rest floor D39 |
-| `time_step` | end-state changes at most 0.1 degree, 0.1%, 0.1% between `dt` and `dt/2` | `R/h = 8` | D25 (dt/2 at the coarse level only) and D38 (it validates the fixed-step rule); the limits follow the 2D sessile time-step decision (D35 item 4) |
+| `time_step` | end-state changes at most 0.1 degree, 0.1%, 0.1% between `dt` and `dt/2`; the angle change is the largest change of a rotation-averaged sector angle, sectors matched by their nominal centre | `R/h = 16`; the `R/h = 8` pair is reported, not gated | D25 (one dt/2 level in 3D), D38 (it validates the fixed-step rule) and D43 (judged at `R/h = 16`); the limits follow the 2D sessile time-step decision (D35 item 4) |
+
+### Time-step check and the sector angle (D43)
+
+The D38 check at `R/h = 8` failed on the protocol runs of job 51 (arm64,
+`e7080344-ltopgo-mumps`): the largest sector angle change was 0.644 degree,
+while the base radius and apex height changed by 5.7e-5 and 9.9e-6. About
+0.52 degree of it is the measurement. On the symmetric mesh two wall
+crossings lie on the 30- and 60-degree sector boundaries (azimuth within
+1e-4 degree); a `phi` change of about 1e-5 moves each into the neighbouring
+sector, and the angle of the sector it leaves jumps by 0.2-0.3 degree. The
+`dt` run moved one at `t = 10.3`, the `dt/2` run the other at `t = 20.0`,
+with no solver event at either time. At `R/h = 8` the single-partition angle
+varies by 0.07-0.15 degree (standard deviation) under rotations of the
+partition by up to 5 degrees, so it cannot resolve the 0.1-degree limit; at
+`R/h = 16` the variation is 0.03-0.05 degree and such a jump costs about
+0.014 degree. Decision D43 therefore averages the sector angle over the
+rotations at every level and judges the time-step check at `R/h = 16` with
+unchanged limits. The `R/h = 8` result stays recorded as a fail under the
+D38 definition (analysis: `sessile_3d/dtcheck-e7080344/`).
+
+On the job 51 outputs the averaged angle gives a largest sector error of
+0.964 degree at `R/h = 8` and 0.106 degree at `R/h = 16` (single partition:
+1.016 and 0.099), and a `dt`/`dt/2` change of 0.144 degree at `R/h = 8`
+(single partition: 0.644), still outside the limit and reported.
 
 ## How to run
 
 ```bash
 B=tests/cases/fluid/free_surface_benchmarks/sessile_drop_3d
 for L in 8 16; do python3 $B/generate_case.py --level $L --output-dir $OUT/L$L; done
-python3 $B/generate_case.py --level 8 --dt-divisor 2 --output-dir $OUT/L8_dt2
+python3 $B/generate_case.py --level 16 --dt-divisor 2 --output-dir $OUT/L16_dt2   # time-step check (D43)
+python3 $B/generate_case.py --level 8 --dt-divisor 2 --output-dir $OUT/L8_dt2     # reported, not gated
 # 3D production configuration (free_surface_benchmarks/README.md, "Run configurations"):
 #   #SBATCH --nodes=1 --ntasks=8 --cpus-per-task=3
 #   export OMP_NUM_THREADS=1 SVMP_ASSEMBLY_THREADS=$SLURM_CPUS_PER_TASK
 #   export SVMP_PDE_EXTENSION_FACTORIZATION=mumps_serial   # with ScaLAPACK and METIS on LD_LIBRARY_PATH
 #   mpiexec -n 8 --map-by slot:PE=3 --bind-to core svmultiphysics solver.xml 2>&1 | gzip -1 > solver_run.log.gz
-python3 $B/verify.py $OUT/L8 $OUT/L16 $OUT/L8_dt2 --json $OUT/verify.json
+python3 $B/verify.py $OUT/L8 $OUT/L16 $OUT/L16_dt2 $OUT/L8_dt2 --json $OUT/verify.json
 ```
 
 ## Diagnostic smoke run (2026-10-11, not protocol evidence)

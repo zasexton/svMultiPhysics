@@ -1,7 +1,7 @@
 {
   "benchmark": "sessile_drop_3d",
   "milestone": "M4 (3D sessile at one angle)",
-  "status": "APPROVED (tracker D38, 2026-10-10); the protocol runs wait for the 3D interface-preserving redistancing (D38 item 4)",
+  "status": "APPROVED (tracker D38, 2026-10-10); the protocol runs wait for the 3D interface-preserving redistancing (D38 item 4). Amended by decision D43 (2026-10-19, before the R/h = 16 dt/2 run): the sector angle is averaged over 21 rotations of the sector partition, and the time-step criterion is judged at R/h = 16",
   "fixed_on": "2026-10-10, decision D38, before the first protocol run",
   "levels": {
     "R_over_h": [8, 16]
@@ -18,28 +18,30 @@
     "dt_rule": "fixed",
     "time_step": "Decisions D25 and D38: the fixed step dt = 0.02 at La = 12 for both levels, with the lagged normal-increment capillary term (Surface_tension_semi_implicit=NormalIncrement), rounded down to the 200 output intervals of D29 (dt = T/1400 = 1.7496e-2, 1.40 and 3.97 times the capillary limit dt_B of R/h = 8 and 16). --dt-rule capillary-limit is the 2D sessile rule (each level's dt_B, no lagged term).",
     "reference": "spherical cap on y = 0 with the Young angle and the volume V(0)/f of the sampled initial level set (f = 1/4 for the quarter domain): R_ref = (V/(pi (2 - 3 cos theta_e + cos^3 theta_e)/3))^(1/3), base radius R_ref sin(theta_e), apex height R_ref (1 - cos(theta_e))",
-    "note": "Criteria apply to the quarter-domain study of the protocol dt rule at dt divisor 1 (both levels); the dt/2 study needs R/h = 8 only (time_step_criterion). R/h = 32 is not affordable in 3D (as D25). See README.md for the definitions and the cost."
+    "note": "Criteria apply to the quarter-domain study of the protocol dt rule at dt divisor 1 (both levels); the dt/2 study needs R/h = 16 only (time_step_criterion, decision D43; before D43 it was R/h = 8, whose pair is now reported, not gated). R/h = 32 is not affordable in 3D (as D25). See README.md for the definitions and the cost."
   },
   "time_step_criterion": {
     "id": "time_step",
-    "source": "Decisions D25 (dt/2 check at R/h = 8 only in 3D) and D38 (the dt/2 check validates the fixed-step NormalIncrement rule), with the sessile_drop_2d time_step_criterion end-state limits (1/20 of the M4 gates)",
+    "source": "Decisions D25 (one dt/2 check level in 3D), D38 (the dt/2 check validates the fixed-step NormalIncrement rule) and D43 (the check is judged at R/h = 16, as in 2D: at R/h = 8 the sector angle varies by 0.07-0.15 degrees under 5-degree rotations of the sector partition and cannot resolve 0.1 degree), with the sessile_drop_2d time_step_criterion end-state limits (1/20 of the M4 gates)",
     "tracks": "Decision D38 item 3: the limits follow the 2D sessile time-step decision (D35 item 4); 0.1 degree and 0.1% until then, and they change with the 2D limits if those change",
-    "definition": "Between the dt divisor 1 and 2 quarter-domain studies at R/h = 8, at the end of the run: the largest change of a sector contact angle, and the relative changes of the base radius and the apex height.",
+    "definition": "Between the dt divisor 1 and 2 quarter-domain studies at R/h = 16 (decision D43), at the end of the run: the largest change of a sector contact angle, max over the sectors of |theta(dt) - theta(dt/2)| with theta the rotation-averaged sector angle of the contact_angle criterion and the sectors matched by their nominal centre azimuth, and the relative changes of the base radius and the apex height. The single-partition angle change is reported alongside. The same changes at every other level run at both divisors (R/h = 8) are reported, not gated (D43 item 2; the R/h = 8 pair of job 51 is recorded as a FAIL under the D38 definition, D43 item 1).",
     "quantities": [
       {"id": "contact_angle_change_final", "limit": 0.1, "unit": "degrees"},
       {"id": "base_radius_change_final", "limit": 0.001},
       {"id": "apex_height_change_final", "limit": 0.001}
     ],
     "dt_divisors": [1, 2],
-    "refined_step_levels": [8],
-    "gates_at_each_step": "every criterion applies to the dt study; at dt/2 the criteria at R/h = 8 or 'each' apply, the others are reported as not evaluated",
-    "when_one_divisor_only": "reported as not evaluated; does not fail"
+    "refined_step_levels": [16],
+    "reported_step_levels": "every level other than refined_step_levels run at both divisors (R/h = 8): changes reported, not gated (D43)",
+    "gates_at_each_step": "every criterion applies to the dt study; at dt/2 the criteria at R/h = 16 or 'each' apply ('each': every dt/2 run verified), the others are reported as not evaluated, and so is a criterion at R/h = 16 when no R/h = 16 dt/2 run is verified; the angle trend over 8/16 is evaluated at dt/2 only when both levels are verified at dt/2",
+    "when_one_divisor_only": "reported as not evaluated; does not fail. The same holds when R/h = 16 lacks one of the two divisors, whatever the other levels"
   },
   "criteria": [
     {
       "id": "contact_angle",
       "quantity": "contact_angle_max_error_degrees",
-      "definition": "max over the azimuthal sectors of 30 degrees of the contact line of |theta - theta_e| at the end of the run. theta of a sector is measured through the liquid from a circle fitted to the meridional projection (distance from the drop axis, height) of the interface points (edge zero crossings of phi_h) of the sector with 0 <= y <= 0.25 R_ref, at the circle point at the mean radius of the sector's wall zero crossings. The mean over the sectors and the cell-gradient angles along the line are reported.",
+      "definition": "max over the azimuthal sectors of 30 degrees of the contact line of |theta - theta_e| at the end of the run. theta of a sector is measured through the liquid from a circle fitted to the meridional projection (distance from the drop axis, height) of the interface points (edge zero crossings of phi_h) of the sector with 0 <= y <= 0.25 R_ref, at the circle point at the mean radius of the sector's wall zero crossings. Decision D43: theta of a sector is the mean of this single-partition angle over 21 rotations of the sector partition by the offsets -5, -4.5, ..., +5 degrees (sector_rotations). A sector keeps its identity, its nominal centre azimuth, in every rotation; in the quarter domain the outer edges of the partition stay on the symmetry planes (azimuth 0 and 90 degrees), so a rotation moves only the interior boundaries, and in the full domain the partition rotates periodically. The max deviation is formed from the averaged angles. The single-partition (offset 0) angles, their max deviation and the spread over the rotations are reported. The mean over the sectors and the cell-gradient angles along the line are reported.",
+      "sector_rotations": {"offset_min_degrees": -5.0, "offset_max_degrees": 5.0, "count": 21, "source": "decision D43 item 3: the single-partition angle at R/h = 8 jumps by up to 0.3 degree when a wall crossing on a sector boundary changes sector"},
       "limit": 2.0,
       "at_level": 16,
       "monotone": "strictly_decreasing",
