@@ -12,7 +12,7 @@ All the integration testing steps described below are automatically performed up
 # Build svMultiPhysics
 svMultiPhysics can be built following these [instructions](../README.md).
 
-To automatically run test cases using `pytest` you must build svMultiPhysics in a folder named `build` located at the svMultiPhysics repository  root directory (i.e. the svMultiPhysics directory created when doing a git clone of the svMultiPhysics repository).
+To automatically run test cases using `pytest` you must build svMultiPhysics in a folder named `build` located at the svMultiPhysics repository  root directory (i.e. the svMultiPhysics directory created when doing a git clone of the svMultiPhysics repository), or set `SVMP_BUILD_DIR` to another build folder. The tests use the MPI launcher that CMake found for that build unless `MPIEXEC_EXECUTABLE` names another one.
 
 # Install Git LFS
 The svMultiPhysics tests require finite element mesh data stored in VTK-format VTP and VTU files. These large files are managed using the [Git Large File Storage (LFS)](https://git-lfs.com/) extension. *Git LFS* stores files as text pointers inside git until the file contents are explicitly pulled from a remote server.  

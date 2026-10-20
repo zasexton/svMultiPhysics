@@ -271,9 +271,7 @@ jobs:
           "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" build/windows/installer.iss 2>&1 | tee build/windows/installer.log
       - name: Run numerical tests
         run: |
-          export SVMP_EXECUTABLE="$(cygpath -w "$PWD/build/windows/bin/svmultiphysics.exe")"
-          export SVMP_EXECUTABLE_PETSC="$SVMP_EXECUTABLE"
-          export MPIEXEC_EXECUTABLE="$(cygpath -w "$DEPENDENCY_PREFIX/bin/mpiexec.exe")"
+          export SVMP_BUILD_DIR="$(cygpath -w "$PWD/build/windows")"
           windows_python="$(cygpath -u "$pythonLocation")/python.exe"
           "$windows_python" -m pip install pytest numpy meshio==5.3.5 pandas
           cd tests
@@ -334,7 +332,7 @@ jobs:
           Get-NetFirewallProfile | Format-Table Name, Enabled
           $python = (Get-Command python).Source
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$bin"
-          $env:SVMP_EXECUTABLE = "$bin\svmultiphysics.exe"
+          $env:SVMP_BUILD_DIR = $destination
           $env:MPIEXEC_EXECUTABLE = 'mpiexec'
           Set-Location tests
           & $python -m pytest -v test_fluid.py::test_pipe_RCR_3d test_fluid.py::test_pipe_RCR_sv0D test_fluid.py::test_pipe_restart_with_spaces test_fluid.py::test_pipe_output_error --junitxml=package-tests.xml

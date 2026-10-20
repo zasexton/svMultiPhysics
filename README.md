@@ -115,7 +115,7 @@ cmake --build build/windows --parallel
 cpack --config build/windows/CPackConfig.cmake -G ZIP -B build/windows-packages
 ```
 
-The ZIP contains `bin/svmultiphysics.exe`, the DLLs it needs, and their license notices, so it runs once the Microsoft MPI runtime is installed, for example `mpiexec -n 4 'C:\solver\bin\svmultiphysics.exe' solver.xml` with `OPENBLAS_NUM_THREADS=1`. `SV_PACKAGE_RUNTIME_DIRS` and `SV_PACKAGE_LICENSE_DIRS` list the folders with dependency DLLs and license files (by default the compiler's `bin` folder), and `SV_PACKAGE_EXTRA_LIBRARIES` and `SV_PACKAGE_EXTRA_LICENSES` add 0D and 1D interface DLLs built with the same compiler and their licenses. The integration tests use Python 3.12 with meshio 5.3.5 and need `SVMP_EXECUTABLE` and `MPIEXEC_EXECUTABLE` set to the full paths of `svmultiphysics.exe` and `mpiexec.exe`, and `SVMP_EXECUTABLE_PETSC` for the PETSc tests. Remeshing has not been validated on Windows.
+The ZIP contains `bin/svmultiphysics.exe`, the DLLs it needs, and their license notices, so it runs once the Microsoft MPI runtime is installed, for example `mpiexec -n 4 'C:\solver\bin\svmultiphysics.exe' solver.xml` with `OPENBLAS_NUM_THREADS=1`. `SV_PACKAGE_RUNTIME_DIRS` and `SV_PACKAGE_LICENSE_DIRS` list the folders with dependency DLLs and license files (by default the compiler's `bin` folder), and `SV_PACKAGE_EXTRA_LIBRARIES` and `SV_PACKAGE_EXTRA_LICENSES` add 0D and 1D interface DLLs built with the same compiler and their licenses. The integration tests use Python 3.12 with meshio 5.3.5 and need `SVMP_BUILD_DIR` set to the build folder, such as `build/windows`. Remeshing has not been validated on Windows.
 
 <h2 id="building_vtk"> Building Visualization Toolkit (VTK) Libraries </h2>
 
