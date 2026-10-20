@@ -427,40 +427,6 @@ mat_inv_lp(const Array<double>& A, const int nd)
   return Ainv;
 }
 
-/// @brief not used, just a test.
-//
-Array<double> 
-mat_inv_lp_eigen(const Array<double>& A, const int nd)
-{
-#ifdef use_eigen
-  typedef Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic> MatrixType;
-
-  MatrixType Ad(nd, nd);
-
-  for (int i = 0; i < nd; i++) { 
-    for (int j = 0; j < nd; j++) { 
-      Ad(i,j) = A(i,j);
-    }
-  }
-
-  Eigen::FullPivLU<MatrixType> lu(Ad);
-
-  lu.inverse();
-  Array<double> Ainv(nd,nd);
-
-  for (int i = 0; i < nd; i++) { 
-    for (int j = 0; j < nd; j++) { 
-      //Ainv(i,j) = Ad_inverse(i,j);
-    }
-  }
-
-  return Ainv;
-
-#else
-  throw std::runtime_error("mat_inv_lp_eigen requires use_eigen");
-#endif
-}
-
 /// @brief Multiply a matrix by a vector.
 //
 Vector<double> 
