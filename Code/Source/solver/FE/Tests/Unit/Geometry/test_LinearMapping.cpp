@@ -5,8 +5,11 @@
 
 #include <gtest/gtest.h>
 #include "FE/Geometry/LinearMapping.h"
+#include "FE/Geometry/GeometryFrameUtils.h"
 #include "FE/Quadrature/GaussQuadrature.h"
 
+#include <cstdint>
+#include <cstring>
 #include <thread>
 #include <vector>
 
@@ -165,6 +168,110 @@ TEST(LinearMapping, SharedBasisEvaluatesAsAnOwnBasis) {
                 for (std::size_t j = 0; j < 3; ++j) {
                     EXPECT_EQ(jacobian(i, j), reference_jacobian(i, j));
                 }
+            }
+        }
+    }
+}
+
+namespace {
+
+[[nodiscard]] std::uint64_t realBits(Real value) {
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+// LinearMapping::jacobian() as it was before the per-type gradient table: the
+// gradients of an order-1 basis evaluated at the safe interior point on every
+// call, then the same accumulation and frame completion.
+math::Matrix<Real, 3, 3> perCallJacobian(ElementType type,
+                                         const std::vector<math::Vector<Real, 3>>& nodes) {
+    const basis::LagrangeBasis own(type, 1);
+    const int dimension = element_dimension(type);
+    math::Vector<Real, 3> safe_xi{};
+    if (dimension == 2) {
+        safe_xi = math::Vector<Real, 3>{Real(1.0/3.0), Real(1.0/3.0), Real(0)};
+    } else if (dimension == 3) {
+        safe_xi = math::Vector<Real, 3>{Real(0.25), Real(0.25), Real(0.25)};
+    }
+    std::vector<basis::Gradient> grads;
+    own.evaluate_gradients(safe_xi, grads);
+    math::Matrix<Real, 3, 3> J{};
+    for (std::size_t a = 0; a < grads.size(); ++a) {
+        for (int j = 0; j < dimension; ++j) {
+            const std::size_t sj = static_cast<std::size_t>(j);
+            for (std::size_t i = 0; i < 3; ++i) {
+                J(i, sj) += nodes[a][i] * grads[a][sj];
+            }
+        }
+    }
+    if (dimension == 1) {
+        const math::Vector<Real, 3> t{J(0, 0), J(1, 0), J(2, 0)};
+        math::Vector<Real, 3> n1{};
+        math::Vector<Real, 3> n2{};
+        svmp::FE::geometry::detail::complete_curve_frame(t, n1, n2);
+        J(0, 1) = n1[0]; J(1, 1) = n1[1]; J(2, 1) = n1[2];
+        J(0, 2) = n2[0]; J(1, 2) = n2[1]; J(2, 2) = n2[2];
+    } else if (dimension == 2) {
+        const math::Vector<Real, 3> tu{J(0, 0), J(1, 0), J(2, 0)};
+        const math::Vector<Real, 3> tv{J(0, 1), J(1, 1), J(2, 1)};
+        math::Vector<Real, 3> n_unit{};
+        if (!svmp::FE::geometry::detail::complete_surface_frame(tu, tv, n_unit)) {
+            J(0, 2) = Real(0); J(1, 2) = Real(0); J(2, 2) = Real(0);
+        } else {
+            J(0, 2) = n_unit[0]; J(1, 2) = n_unit[1]; J(2, 2) = n_unit[2];
+        }
+    }
+    return J;
+}
+
+} // namespace
+
+TEST(LinearMapping, ConstantGradientTableAndValueBufferMatchPerCallEvaluationBitwise) {
+    struct Case {
+        ElementType type;
+        std::vector<math::Vector<Real, 3>> nodes;
+    };
+    const std::vector<Case> cases = {
+        {ElementType::Line2,
+         {{Real(0.3), Real(-0.2), Real(0.1)}, {Real(-1.7), Real(0.4), Real(-0.6)}}},
+        {ElementType::Triangle3,
+         {{Real(0.1), Real(-0.2), Real(0)}, {Real(-1.3), Real(0.1), Real(0)}, {Real(0.4), Real(0.9), Real(0)}}},
+        {ElementType::Triangle3,  // embedded in 3D
+         {{Real(0.1), Real(0.2), Real(0.3)}, {Real(1.3), Real(-0.1), Real(0.7)}, {Real(-0.4), Real(0.9), Real(-0.2)}}},
+        {ElementType::Tetra4,
+         {{Real(0.1), Real(0.2), Real(-0.05)}, {Real(-0.9), Real(0.15), Real(0.1)},
+          {Real(0.3), Real(-0.8), Real(0.2)}, {Real(0.25), Real(0.3), Real(0.95)}}},
+    };
+    const std::vector<math::Vector<Real, 3>> points = {
+        {Real(0.2), Real(0.3), Real(0.1)},
+        {Real(-0.0), Real(0.0), Real(0.0)},
+        {Real(0.61), Real(0.07), Real(0.29)},
+        {Real(1.0), Real(0.0), Real(0.0)},
+    };
+    for (const auto& c : cases) {
+        const LinearMapping mapping(c.type, c.nodes);
+        const auto expected_jacobian = perCallJacobian(c.type, c.nodes);
+        const basis::LagrangeBasis own(c.type, 1);
+        for (const auto& xi : points) {
+            const auto J = mapping.jacobian(xi);
+            for (std::size_t i = 0; i < 3; ++i) {
+                for (std::size_t j = 0; j < 3; ++j) {
+                    EXPECT_EQ(realBits(J(i, j)), realBits(expected_jacobian(i, j)))
+                        << "type " << static_cast<int>(c.type) << " J(" << i << "," << j << ")";
+                }
+            }
+
+            std::vector<Real> values;
+            own.evaluate_values(xi, values);
+            math::Vector<Real, 3> expected{};
+            for (std::size_t n = 0; n < values.size(); ++n) {
+                expected += c.nodes[n] * values[n];
+            }
+            const auto mapped = mapping.map_to_physical(xi);
+            for (std::size_t k = 0; k < 3; ++k) {
+                EXPECT_EQ(realBits(mapped[k]), realBits(expected[k]))
+                    << "type " << static_cast<int>(c.type) << " x[" << k << "]";
             }
         }
     }

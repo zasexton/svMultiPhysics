@@ -47,6 +47,9 @@ private:
     // Order 1, shared by every LinearMapping of the element type and never
     // modified (only const evaluations, which keep their scratch per thread).
     std::shared_ptr<const basis::LagrangeBasis> basis_;
+    // Its gradients at the interior point jacobian() uses: one immutable table
+    // per element type.
+    const std::vector<basis::Gradient>* safe_gradients_{nullptr};
 };
 
 } // namespace geometry
