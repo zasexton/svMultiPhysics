@@ -87,6 +87,13 @@ public:
 
     [[nodiscard]] bool hasFrozenMap() const noexcept { return map_is_valid_; }
 
+    /** The installed rows, as setFrozenRows() normalized them. */
+    [[nodiscard]] const std::vector<VelocityExtensionConstraintRow>&
+    frozenRows() const noexcept
+    {
+        return rows_;
+    }
+
     /** Replace the rank-local owned rows for the next nonlinear solve. */
     void setFrozenRows(std::vector<VelocityExtensionConstraintRow> rows,
                        std::uint64_t revision);

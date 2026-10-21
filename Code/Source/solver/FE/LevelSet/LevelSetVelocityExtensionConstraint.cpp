@@ -18,6 +18,7 @@
 #include <set>
 #include <span>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 
 namespace svmp::FE::level_set {
@@ -49,6 +50,34 @@ namespace {
     return out;
 }
 
+// vertexDofs(system, field, vertex, components).at(component), with the same
+// checks and exceptions, without building the vector.
+[[nodiscard]] GlobalIndex vertexDof(
+    const systems::FESystem& system,
+    FieldId field,
+    GlobalIndex vertex,
+    int component,
+    int components)
+{
+    const auto& handler = system.fieldDofHandler(field);
+    const auto* entity_map = handler.getEntityDofMap();
+    if (entity_map == nullptr) {
+        throw std::runtime_error(
+            "LevelSetVelocityExtensionConstraintKernel requires nodal vertex DOFs");
+    }
+    const auto local = entity_map->getVertexDofs(vertex);
+    if (local.size() < static_cast<std::size_t>(components)) {
+        throw std::runtime_error(
+            "LevelSetVelocityExtensionConstraintKernel found too few vertex components");
+    }
+    if (component < 0 || component >= components) {
+        throw std::out_of_range(
+            "LevelSetVelocityExtensionConstraintKernel vertex component is out of range");
+    }
+    const auto offset = system.fieldDofOffset(field);
+    return offset + local[static_cast<std::size_t>(component)];
+}
+
 [[nodiscard]] GlobalIndex dependencyDof(
     const systems::FESystem& system,
     const LevelSetVelocityExtensionConstraintConfig& config,
@@ -58,8 +87,8 @@ namespace {
         dependency.field == VelocityExtensionDependencyField::SourceVelocity
             ? config.source_velocity_field
             : config.extension_field;
-    return vertexDofs(system, field, dependency.vertex, config.components)
-        .at(static_cast<std::size_t>(dependency.component));
+    return vertexDof(system, field, dependency.vertex, dependency.component,
+                     config.components);
 }
 
 } // namespace
@@ -89,15 +118,22 @@ void LevelSetVelocityExtensionConstraintKernel::setFrozenRows(
     std::vector<VelocityExtensionConstraintRow> rows,
     std::uint64_t revision)
 {
+    // Dependencies on the same (field, vertex, component) are combined and
+    // listed in key order.  A stable sort by key keeps equal keys in their
+    // input order, so each key's sum starts at 0.0 and adds its coefficients
+    // in input order, as a key-ordered map's operator[] += did.
+    const auto key_less = [](const VelocityExtensionDependency& lhs,
+                             const VelocityExtensionDependency& rhs) {
+        return std::tie(lhs.field, lhs.vertex, lhs.component) <
+               std::tie(rhs.field, rhs.vertex, rhs.component);
+    };
+    std::vector<VelocityExtensionDependency> sorted;
     for (auto& row : rows) {
         if (row.vertex == INVALID_GLOBAL_INDEX || row.component < 0 ||
             row.component >= config_.components) {
             throw std::invalid_argument(
                 "LevelSetVelocityExtensionConstraintKernel received an invalid row");
         }
-        std::map<std::tuple<VelocityExtensionDependencyField, GlobalIndex, int>,
-                 Real>
-            combined;
         for (const auto& dependency : row.dependencies) {
             if (dependency.vertex == INVALID_GLOBAL_INDEX ||
                 dependency.component < 0 ||
@@ -106,22 +142,28 @@ void LevelSetVelocityExtensionConstraintKernel::setFrozenRows(
                 throw std::invalid_argument(
                     "LevelSetVelocityExtensionConstraintKernel received an invalid dependency");
             }
-            combined[{dependency.field,
-                      dependency.vertex,
-                      dependency.component}] += dependency.coefficient;
         }
+        sorted.assign(row.dependencies.begin(), row.dependencies.end());
+        std::stable_sort(sorted.begin(), sorted.end(), key_less);
         row.dependencies.clear();
-        row.dependencies.reserve(combined.size());
-        for (const auto& [key, coefficient] : combined) {
-            if (std::abs(coefficient) <= Real{1.0e-15}) {
-                continue;
+        for (std::size_t begin = 0; begin < sorted.size();) {
+            std::size_t end = begin + 1;
+            while (end < sorted.size() && !key_less(sorted[begin], sorted[end])) {
+                ++end;
             }
-            row.dependencies.push_back(VelocityExtensionDependency{
-                .field = std::get<0>(key),
-                .vertex = std::get<1>(key),
-                .component = std::get<2>(key),
-                .coefficient = coefficient,
-            });
+            Real coefficient{};
+            for (std::size_t i = begin; i < end; ++i) {
+                coefficient += sorted[i].coefficient;
+            }
+            if (!(std::abs(coefficient) <= Real{1.0e-15})) {
+                row.dependencies.push_back(VelocityExtensionDependency{
+                    .field = sorted[begin].field,
+                    .vertex = sorted[begin].vertex,
+                    .component = sorted[begin].component,
+                    .coefficient = coefficient,
+                });
+            }
+            begin = end;
         }
     }
     std::sort(rows.begin(), rows.end(), [](const auto& lhs, const auto& rhs) {
@@ -263,19 +305,22 @@ LevelSetVelocityExtensionConstraintKernel::assemble(
     };
 
     assembly::AssemblyConstraintDistributor distributor(system.constraints());
+    // Row scratch, reused across rows: every row rewrites the entries it uses.
+    std::vector<GlobalIndex> dofs;
+    std::vector<Real> local_vector;
+    std::vector<Real> local_matrix;
     for (const auto& row : rows_) {
         const auto row_dof =
-            vertexDofs(system, config_.extension_field, row.vertex,
-                       config_.components)
-                .at(static_cast<std::size_t>(row.component));
+            vertexDof(system, config_.extension_field, row.vertex,
+                      row.component, config_.components);
 
-        std::vector<GlobalIndex> dofs{row_dof};
-        dofs.reserve(1u + row.dependencies.size());
+        dofs.clear();
+        dofs.push_back(row_dof);
         for (const auto& dependency : row.dependencies) {
             dofs.push_back(dependencyDof(system, config_, dependency));
         }
 
-        std::vector<Real> local_vector(dofs.size(), Real{0.0});
+        local_vector.assign(dofs.size(), Real{0.0});
         if (request.want_vector && vector_out != nullptr) {
             Real residual = read(row_dof);
             for (std::size_t dependency = 0;
@@ -286,7 +331,7 @@ LevelSetVelocityExtensionConstraintKernel::assemble(
             local_vector.front() = residual;
         }
 
-        std::vector<Real> local_matrix;
+        local_matrix.clear();
         if (request.want_matrix && matrix_out != nullptr) {
             local_matrix.assign(dofs.size() * dofs.size(), Real{0.0});
             local_matrix.front() = Real{1.0};

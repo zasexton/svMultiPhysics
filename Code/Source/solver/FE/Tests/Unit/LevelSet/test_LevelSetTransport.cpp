@@ -28,13 +28,17 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include <cstring>
+#include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -2530,6 +2534,132 @@ TEST(LevelSetTransport,
         assemble(/*want_matrix=*/true, /*suppress=*/false);
     EXPECT_DOUBLE_EQ(linear_rhs, g);
     EXPECT_EQ(linear_master, -1.0);
+}
+
+TEST(LevelSetTransport,
+     AlgebraicExtensionFrozenRowsCombineRepeatedKeysAsAKeyOrderedMap)
+{
+    using Field = level_set::VelocityExtensionDependencyField;
+    using Key = std::tuple<Field, FE::GlobalIndex, int>;
+    const auto mesh =
+        std::make_shared<StructuredQuadTransportMeshAccess>(1);
+    auto velocity_space = vectorSpace(mesh);
+    FE::systems::FESystem system(mesh);
+    const auto source = system.addField(FE::systems::FieldSpec{
+        .name = "physical_velocity",
+        .space = velocity_space,
+        .components = velocity_space->value_dimension(),
+    });
+    const auto extension = system.addField(FE::systems::FieldSpec{
+        .name = "extension_velocity",
+        .space = velocity_space,
+        .components = velocity_space->value_dimension(),
+    });
+    level_set::LevelSetVelocityExtensionConstraintKernel kernel({
+        .extension_field = extension,
+        .source_velocity_field = source,
+        .components = 3,
+        .operator_tag = "equations",
+    });
+
+    const auto dep = [](Field field, FE::GlobalIndex vertex, int component,
+                        FE::Real coefficient) {
+        return level_set::VelocityExtensionDependency{
+            .field = field,
+            .vertex = vertex,
+            .component = component,
+            .coefficient = coefficient,
+        };
+    };
+    // Repeated keys out of order, sums that cancel below 1e-15, a lone
+    // signed zero, rounding-order-sensitive sums, both fields.
+    std::vector<level_set::VelocityExtensionConstraintRow> rows(3);
+    rows[0].vertex = 3;
+    rows[0].component = 1;
+    rows[0].dependencies = {
+        dep(Field::ExtensionVelocity, 2, 0, 0.1),
+        dep(Field::SourceVelocity, 3, 1, 1.0),
+        dep(Field::ExtensionVelocity, 2, 0, 0.2),
+        dep(Field::ExtensionVelocity, 1, 2, 1.0e20),
+        dep(Field::ExtensionVelocity, 2, 0, 0.3),
+        dep(Field::ExtensionVelocity, 1, 2, 1.0),
+        dep(Field::ExtensionVelocity, 1, 2, -1.0e20),
+        dep(Field::SourceVelocity, 0, 0, 0.25),
+        dep(Field::SourceVelocity, 0, 0, -0.25),
+        dep(Field::ExtensionVelocity, 0, 1, -0.0),
+        dep(Field::SourceVelocity, 3, 1, 1.0e-16),
+        dep(Field::ExtensionVelocity, 2, 1, -0.7),
+        dep(Field::ExtensionVelocity, 2, 0, -0.6),
+    };
+    rows[1].vertex = 1;
+    rows[1].component = 0;
+    rows[1].dependencies = {
+        dep(Field::SourceVelocity, 1, 0, 1.0),
+        dep(Field::ExtensionVelocity, 0, 0, -1.0 / 3.0),
+        dep(Field::ExtensionVelocity, 0, 0, -1.0 / 3.0),
+        dep(Field::ExtensionVelocity, 0, 0, -1.0 / 3.0),
+        dep(Field::ExtensionVelocity, 2, 2, 5.0e-16),
+        dep(Field::ExtensionVelocity, 2, 2, 5.0e-16),
+    };
+    rows[2].vertex = 0;
+    rows[2].component = 2;  // no dependencies
+
+    // The previous normalization: a key-ordered map, += in input order,
+    // entries with |sum| <= 1e-15 dropped; rows ordered by (vertex, component).
+    auto expected = rows;
+    for (auto& row : expected) {
+        std::map<Key, FE::Real> combined;
+        for (const auto& d : row.dependencies) {
+            combined[{d.field, d.vertex, d.component}] += d.coefficient;
+        }
+        row.dependencies.clear();
+        for (const auto& [key, coefficient] : combined) {
+            if (std::abs(coefficient) <= FE::Real{1.0e-15}) {
+                continue;
+            }
+            row.dependencies.push_back(dep(std::get<0>(key), std::get<1>(key),
+                                           std::get<2>(key), coefficient));
+        }
+    }
+    std::sort(expected.begin(), expected.end(), [](const auto& a, const auto& b) {
+        return std::tie(a.vertex, a.component) < std::tie(b.vertex, b.component);
+    });
+
+    kernel.setFrozenRows(rows, /*revision=*/7u);
+    ASSERT_TRUE(kernel.hasFrozenMap());
+    EXPECT_EQ(kernel.frozenMapRevision(), 7u);
+    const auto& actual = kernel.frozenRows();
+    ASSERT_EQ(actual.size(), expected.size());
+    const auto bits = [](FE::Real value) {
+        std::uint64_t b = 0;
+        std::memcpy(&b, &value, sizeof(b));
+        return b;
+    };
+    for (std::size_t r = 0; r < expected.size(); ++r) {
+        SCOPED_TRACE(r);
+        EXPECT_EQ(actual[r].vertex, expected[r].vertex);
+        EXPECT_EQ(actual[r].component, expected[r].component);
+        ASSERT_EQ(actual[r].dependencies.size(), expected[r].dependencies.size());
+        for (std::size_t i = 0; i < expected[r].dependencies.size(); ++i) {
+            const auto& a = actual[r].dependencies[i];
+            const auto& e = expected[r].dependencies[i];
+            EXPECT_EQ(a.field, e.field);
+            EXPECT_EQ(a.vertex, e.vertex);
+            EXPECT_EQ(a.component, e.component);
+            EXPECT_EQ(bits(a.coefficient), bits(e.coefficient)) << i;
+        }
+    }
+    // The example exercises merging, cancellation and dropping: the vertex-3
+    // row keeps only (source, 3, 1) and (extension, 2, 1).
+    EXPECT_TRUE(expected[0].dependencies.empty());
+    EXPECT_GE(expected[1].dependencies.size(), 2u);
+    EXPECT_EQ(expected[2].dependencies.size(), 2u);
+
+    // Validation is unchanged: an invalid dependency rejects the whole map.
+    auto invalid = rows;
+    invalid[1].dependencies.push_back(dep(Field::SourceVelocity, 2, 3, 1.0));
+    EXPECT_THROW(kernel.setFrozenRows(invalid, 8u), std::invalid_argument);
+    EXPECT_EQ(kernel.frozenMapRevision(), 7u);
 }
 
 TEST(LevelSetTransport,
