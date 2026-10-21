@@ -2993,62 +2993,96 @@ void validateVolumePartition(
     const FreeSurfaceGeometrySnapshotPolicy& policy,
     FreeSurfaceGeometryValidationLedger& ledger)
 {
-    struct Measures {
-        Real negative{0.0};
-        Real positive{0.0};
-        Real parent{0.0};
-        GlobalIndex local_parent{INVALID_GLOBAL_INDEX};
-        int common_exact_order{std::numeric_limits<int>::max()};
-        std::vector<const FreeSurfaceGeometryRuleRecord*> rules{};
-    };
-    std::map<GlobalIndex, Measures> by_cell;
-    for (const auto& record : records) {
+    // The volume records grouped by global parent cell, cells in ascending
+    // global id and each cell's records in record order (a stable sort): the
+    // visiting order of a std::map keyed by global id filled in record order.
+    std::vector<std::pair<GlobalIndex, std::size_t>> by_cell;
+    by_cell.reserve(records.size());
+    for (std::size_t i = 0; i < records.size(); ++i) {
+        const auto& record = records[i];
         if (!volumeRole(record.role)) {
             continue;
         }
-        auto& measures =
-            by_cell[record.reference_rule.provenance.parent_entity_global_id];
-        const auto local_parent = static_cast<GlobalIndex>(
-            record.reference_rule.provenance.parent_entity);
-        if (measures.local_parent != INVALID_GLOBAL_INDEX &&
-            measures.local_parent != local_parent) {
-            throw std::invalid_argument(
-                "free-surface volume partition aliases one global cell to multiple local parents");
-        }
-        measures.local_parent = local_parent;
-        measures.common_exact_order = std::min(
-            measures.common_exact_order,
-            record.reference_rule.exact_polynomial_order);
-        measures.rules.push_back(&record);
-        if (record.role == FreeSurfaceGeometryRuleRole::NegativeVolume) {
-            measures.negative += record.reference_rule.measure;
-        } else {
-            measures.positive += record.reference_rule.measure;
-        }
-        measures.parent =
-            std::max(measures.parent, record.reference_rule.parent_measure);
+        const GlobalIndex cell =
+            record.reference_rule.provenance.parent_entity_global_id;
+        by_cell.emplace_back(cell, i);
     }
-    for (const auto& [cell, measures] : by_cell) {
-        (void)cell;
-        const Real error =
-            std::abs(measures.negative + measures.positive - measures.parent);
+    std::stable_sort(by_cell.begin(), by_cell.end(),
+                     [](const auto& lhs, const auto& rhs) {
+                         return lhs.first < rhs.first;
+                     });
+    const auto group_end = [&](std::size_t begin) {
+        std::size_t end = begin + 1;
+        while (end < by_cell.size() && by_cell[end].first == by_cell[begin].first) {
+            ++end;
+        }
+        return end;
+    };
+
+    // A cell's local parent: the last one its records name.  A record naming
+    // another parent than an earlier valid one aliases the cell; that check
+    // runs for every cell before any partition check, as the record loop
+    // that filled the map did.
+    const auto cell_local_parent = [&](std::size_t begin, std::size_t end) {
+        GlobalIndex local_parent = INVALID_GLOBAL_INDEX;
+        for (std::size_t k = begin; k < end; ++k) {
+            const auto parent = static_cast<GlobalIndex>(
+                records[by_cell[k].second].reference_rule.provenance.parent_entity);
+            if (local_parent != INVALID_GLOBAL_INDEX && local_parent != parent) {
+                throw std::invalid_argument(
+                    "free-surface volume partition aliases one global cell to multiple local parents");
+            }
+            local_parent = parent;
+        }
+        return local_parent;
+    };
+    for (std::size_t begin = 0; begin < by_cell.size();) {
+        const std::size_t end = group_end(begin);
+        (void)cell_local_parent(begin, end);
+        begin = end;
+    }
+
+    std::vector<const FreeSurfaceGeometryRuleRecord*> rules;
+    for (std::size_t begin = 0; begin < by_cell.size();) {
+        const std::size_t end = group_end(begin);
+        Real negative{0.0};
+        Real positive{0.0};
+        Real parent{0.0};
+        int common_exact_order{std::numeric_limits<int>::max()};
+        rules.clear();
+        for (std::size_t k = begin; k < end; ++k) {
+            const auto& record = records[by_cell[k].second];
+            common_exact_order = std::min(
+                common_exact_order,
+                record.reference_rule.exact_polynomial_order);
+            rules.push_back(&record);
+            if (record.role == FreeSurfaceGeometryRuleRole::NegativeVolume) {
+                negative += record.reference_rule.measure;
+            } else {
+                positive += record.reference_rule.measure;
+            }
+            parent = std::max(parent, record.reference_rule.parent_measure);
+        }
+        const auto local_parent = cell_local_parent(begin, end);
+        begin = end;
+
+        const Real error = std::abs(negative + positive - parent);
         ledger.maximum_volume_partition_error =
             std::max(ledger.maximum_volume_partition_error, error);
         const Real tolerance = Real{512.0} *
                                std::numeric_limits<Real>::epsilon() *
-                               std::max(Real{1.0}, measures.parent) +
+                               std::max(Real{1.0}, parent) +
                                policy.tolerance;
         if (error > tolerance) {
             throw std::invalid_argument(
                 "positive and negative cut volumes do not partition their parent cell");
         }
-        if (measures.rules.size() == 1u &&
-            measures.rules.front()->classification_only) {
+        if (rules.size() == 1u && rules.front()->classification_only) {
             continue;
         }
-        validateCellPolynomialMoments(measures.rules,
-                                      measures.local_parent,
-                                      measures.common_exact_order,
+        validateCellPolynomialMoments(rules,
+                                      local_parent,
+                                      common_exact_order,
                                       mesh,
                                       policy,
                                       ledger);
@@ -3858,6 +3892,15 @@ bool tetrahedronCertainlyRejectsPoint(
 {
     return interfaces::tetrahedronCertainlyRejectsPoint(
         vertices, point, coordinate_tolerance);
+}
+
+void validateVolumePartition(
+    const std::vector<FreeSurfaceGeometryRuleRecord>& records,
+    const assembly::IMeshAccess& mesh,
+    const FreeSurfaceGeometrySnapshotPolicy& policy,
+    FreeSurfaceGeometryValidationLedger& ledger)
+{
+    interfaces::validateVolumePartition(records, mesh, policy, ledger);
 }
 
 } // namespace snapshot_detail

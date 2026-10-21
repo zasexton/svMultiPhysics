@@ -898,6 +898,17 @@ namespace snapshot_detail {
     const std::array<Real, 3>& point,
     Real coordinate_tolerance) noexcept;
 
+/// The volume-partition check of the snapshot validation: every global cell
+/// has one local parent, its negative and positive volume measures sum to its
+/// parent measure (the maximum error goes to `ledger`), and the polynomial
+/// moments of every cell with more than one rule (or a materialized one) are
+/// validated, cells in ascending global id.
+void validateVolumePartition(
+    const std::vector<FreeSurfaceGeometryRuleRecord>& records,
+    const assembly::IMeshAccess& mesh,
+    const FreeSurfaceGeometrySnapshotPolicy& policy,
+    FreeSurfaceGeometryValidationLedger& ledger);
+
 } // namespace snapshot_detail
 
 } // namespace interfaces

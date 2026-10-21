@@ -38,6 +38,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -944,3 +945,90 @@ TEST(FreeSurfaceSnapshotContainmentPreCheck, KeepsTheMatchedSubcellOfASearch)
 }
 
 } // namespace
+
+namespace {
+
+interfaces::FreeSurfaceGeometryRuleRecord partitionRecord(
+    interfaces::FreeSurfaceGeometryRuleRole role,
+    FE::GlobalIndex global_cell,
+    FE::GlobalIndex local_parent,
+    FE::Real measure,
+    FE::Real parent_measure)
+{
+    interfaces::FreeSurfaceGeometryRuleRecord record;
+    record.role = role;
+    record.reference_rule.provenance.parent_entity_global_id = global_cell;
+    record.reference_rule.provenance.parent_entity = local_parent;
+    record.reference_rule.measure = measure;
+    record.reference_rule.parent_measure = parent_measure;
+    record.reference_rule.exact_polynomial_order = 1;
+    record.classification_only = true;
+    return record;
+}
+
+} // namespace
+
+// validateVolumePartition() groups the volume records by global cell through
+// a stable sort instead of a std::map.  The alias rule and its precedence over
+// the partition check, the partition check and the ledger maximum are
+// unchanged.
+TEST(FreeSurfaceSnapshotValidation, VolumePartitionGroupsCellsAsTheKeyOrderedMap)
+{
+    using Role = interfaces::FreeSurfaceGeometryRuleRole;
+    ReuseFixture fixture(3);
+    const auto& mesh = fixture.system.meshAccess();
+    const interfaces::FreeSurfaceGeometrySnapshotPolicy policy{};
+
+    // Single classification-only full cells (no moment check), out of order,
+    // with interface records interleaved; the partition errors differ in the
+    // last bits so the maximum is order sensitive only through its value.
+    std::vector<interfaces::FreeSurfaceGeometryRuleRecord> records;
+    records.push_back(partitionRecord(Role::NegativeVolume, 40, 3, 0.125, 0.125));
+    records.push_back(partitionRecord(Role::Interface, 40, 3, 0.5, 0.125));
+    records.push_back(partitionRecord(Role::PositiveVolume, 7, 1, 0.3, 0.1 + 0.2));
+    records.push_back(partitionRecord(Role::NegativeVolume, 12, 5, 1.0 / 3.0, 1.0 / 3.0));
+    records.push_back(partitionRecord(Role::PositiveVolume, -3, 0, 0.7, 0.7));
+    FE::Real expected_maximum = 0.0;
+    for (const auto& record : records) {
+        if (record.role == Role::Interface) {
+            continue;
+        }
+        expected_maximum = std::max(
+            expected_maximum,
+            std::abs(record.reference_rule.measure - record.reference_rule.parent_measure));
+    }
+    interfaces::FreeSurfaceGeometryValidationLedger ledger;
+    ASSERT_NO_THROW(interfaces::snapshot_detail::validateVolumePartition(
+        records, mesh, policy, ledger));
+    EXPECT_EQ(ledger.maximum_volume_partition_error, expected_maximum);
+
+    // Cell 12 named by a second record with another local parent.
+    auto aliased = records;
+    aliased.push_back(partitionRecord(Role::NegativeVolume, 12, 6, 0.0, 1.0 / 3.0));
+
+    // An alias is reported before a partition error of a lower cell.
+    auto aliased_and_unbalanced = aliased;
+    aliased_and_unbalanced.push_back(partitionRecord(Role::PositiveVolume, -9, 2, 0.5, 1.0));
+    try {
+        interfaces::FreeSurfaceGeometryValidationLedger alias_ledger;
+        interfaces::snapshot_detail::validateVolumePartition(
+            aliased_and_unbalanced, mesh, policy, alias_ledger);
+        ADD_FAILURE() << "an aliased cell must be rejected";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string(error.what()).find("aliases one global cell"),
+                  std::string::npos)
+            << error.what();
+    }
+
+    auto unbalanced = records;
+    unbalanced.push_back(partitionRecord(Role::PositiveVolume, -9, 2, 0.5, 1.0));
+    try {
+        interfaces::FreeSurfaceGeometryValidationLedger unbalanced_ledger;
+        interfaces::snapshot_detail::validateVolumePartition(
+            unbalanced, mesh, policy, unbalanced_ledger);
+        ADD_FAILURE() << "an unbalanced cell must be rejected";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string(error.what()).find("do not partition"), std::string::npos)
+            << error.what();
+    }
+}
