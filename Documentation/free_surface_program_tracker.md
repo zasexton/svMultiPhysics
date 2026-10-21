@@ -713,6 +713,20 @@ These are proposals. Each lists a recommended option and an alternative. Record 
     - The outer-pass speed-ups, 7 commits. All are bitwise identical by construction and on the reference sets: a stateless skip of the edge walk for P1 fields, memoized time-derivative fields, ledger merges, a double-precision rejection pre-check of the containment certificate, the monomial table, the facet table and a shared linear basis. Serial time per step: 2D sessile −11.4%, capillary wave −10.9%, 3D sessile R/h = 8 −15.6%.
     - The owner-sourced aggregation refresh (MPI scaling, 4 commits). Bitwise identical at 2 and 4 ranks. Words received per rank fall 11–15× (sphere R/h = 8 at 4 ranks: 204.5M → 14.1M), and aggregation time falls from 13.9 to 10.4 s. `SVMP_AGGREGATION_PROFILE` became a DEBUG-level log.
     - Evidence: integration CTest, the exhaustive two-rank matrix, and the nine-case and extended reference sets at 1, 2 and 4 ranks, all bitwise against `e7080344`.
+- **D45, 2026-10-21 (user): scaling and solver-speed follow-ups.**
+  - **Scaling run (4/8/16 ranks, 3 steps):** with the owner-sourced refresh, the aggregation time no longer grows with the rank count.
+    - Sphere R/h = 8 at 4/8/16 ranks: 13.6/16.3/28.2 → 8.8/8.2/10.8 s. 3D sessile R/h = 16 quarter: 12.9/15.1/23.9 → 8.8/8.7/10.3 s.
+    - At 16 ranks the data received per rank falls 16–20×, and peak memory is 2.3–2.5 GiB lower.
+    - Wall time at 16 ranks is no better than at 8 (sphere 72 s and 84 s). Three causes:
+      - cut-volume assembly imbalance: the partition balances all cells, not liquid cells, and the busiest rank reaches 2.7× the mean;
+      - cut-context regeneration over all stored cells, including 12 ghost layers;
+      - a per-core slowdown with 16 busy cores.
+  - **Decisions:**
+    1. The aggregation prolongation report is built lazily, only when a consumer reads it (step L), keeping the eager owner-row agreement check at each closure. Bitwise identical at every rank count. The rank-local report (step R) is not pursued now.
+    2. The rooted-line validation gets a double-precision pre-check with a rigorous error bound, falling back to the long-double path near the tolerance, so decisions stay identical (coordinator).
+    3. A study of limiting cut-context regeneration and classification to the ghost depth aggregation needs; adopted only if bitwise identical.
+    4. An opt-in, cost-weighted mesh partition from the initial level set, off by default. It changes the partition and therefore round-off at a given rank count, so its result differences are measured against the existing spread between rank counts before any default is considered.
+    5. A bitwise-only optimization of the FSILS sparse matrix-vector product and dot products, which are now the largest cost (SpMV about 25% of 3D and 45% of 2D instructions on the integrated binary). Every sum keeps its order of operations.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
