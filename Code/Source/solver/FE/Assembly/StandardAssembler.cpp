@@ -6776,7 +6776,7 @@ std::shared_ptr<const quadrature::QuadratureRule> StandardAssembler::resolveQuad
     const int basis_order = test_element.polynomial_order();
     if (basis_order <= 1 && cell_type == ElementType::Tetra4) {
         const auto default_mod = quadrature::QuadratureFactory::default_legacy_modifier(cell_type);
-        return quadrature::QuadratureFactory::create_legacy_compatible(
+        return quadrature::QuadratureFactory::create_legacy_compatible_pinned(
             cell_type, default_mod);
     }
 
@@ -6784,7 +6784,7 @@ std::shared_ptr<const quadrature::QuadratureRule> StandardAssembler::resolveQuad
     if (!quad_rule) {
         const int quad_order = quadrature::QuadratureFactory::recommended_order(
             basis_order, false);
-        quad_rule = quadrature::QuadratureFactory::create(cell_type, quad_order);
+        quad_rule = quadrature::QuadratureFactory::create_pinned(cell_type, quad_order);
     }
     return quad_rule;
 }
@@ -16802,7 +16802,7 @@ void StandardAssembler::prepareContextFace(
     // 4. Create a face quadrature rule
     const int quad_order = quadrature::QuadratureFactory::recommended_order(
         std::max(test_element.polynomial_order(), trial_element.polynomial_order()), false);
-    auto quad_rule = quadrature::QuadratureFactory::create(face_type, quad_order);
+    auto quad_rule = quadrature::QuadratureFactory::create_pinned(face_type, quad_order);
 
     const auto n_qpts = static_cast<LocalIndex>(quad_rule->num_points());
     const auto n_test_dofs = static_cast<LocalIndex>(test_space.dofs_per_element());

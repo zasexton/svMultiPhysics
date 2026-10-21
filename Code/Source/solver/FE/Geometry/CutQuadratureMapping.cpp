@@ -182,7 +182,7 @@ Real physicalCellMeasureFromMapping(const assembly::IMeshAccess& mesh,
     const int resolved_order = quadrature_order >= 0
                                    ? quadrature_order
                                    : std::max(2, 2 * geometry_order);
-    const auto quadrature = quadrature::QuadratureFactory::create(
+    const auto quadrature = quadrature::QuadratureFactory::create_pinned(
         mesh.getCellType(cell_id), resolved_order);
     Real measure{0.0};
     for (std::size_t q = 0; q < quadrature->num_points(); ++q) {

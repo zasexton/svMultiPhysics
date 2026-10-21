@@ -930,7 +930,7 @@ void materializeAuthoritativeFullCellPoints(
     const int materialization_order = std::max(
         rule.exact_polynomial_order,
         mesh.dimension() * geometry_order);
-    const auto full_rule = quadrature::QuadratureFactory::create(
+    const auto full_rule = quadrature::QuadratureFactory::create_pinned(
         mesh.getCellType(parent), materialization_order);
     rule.points.clear();
     rule.points.reserve(full_rule->num_points());
@@ -2295,7 +2295,7 @@ piecewiseAffineMomentSamples(
             throw std::invalid_argument(
                 "line moment certificate requires authoritative endpoints");
         }
-        const auto quadrature = quadrature::QuadratureFactory::create(
+        const auto quadrature = quadrature::QuadratureFactory::create_pinned(
             ElementType::Line2, polynomial_order);
         samples.reserve((vertices.size() - 1u) * quadrature->num_points());
         for (std::size_t segment = 0; segment + 1u < vertices.size();
@@ -2326,7 +2326,7 @@ piecewiseAffineMomentSamples(
             throw std::invalid_argument(
                 "surface moment certificate requires an authoritative polygon");
         }
-        const auto quadrature = quadrature::QuadratureFactory::create(
+        const auto quadrature = quadrature::QuadratureFactory::create_pinned(
             ElementType::Triangle3, polynomial_order);
         samples.reserve((vertices.size() - 2u) * quadrature->num_points());
         const auto& a = vertices.front();
@@ -2408,7 +2408,7 @@ referenceSubcellMomentSamples(
                 ? ElementType::Line2
                 : (ambient_dimension == 2 ? ElementType::Triangle3
                                           : ElementType::Tetra4);
-        const auto quadrature = quadrature::QuadratureFactory::create(
+        const auto quadrature = quadrature::QuadratureFactory::create_pinned(
             element_type, polynomial_order);
         const auto& a = subcell.vertices[0];
         const auto ab = subtractPoint(subcell.vertices[1], a);
@@ -2512,7 +2512,7 @@ makeParentCellMomentCertificate(const assembly::IMeshAccess& mesh,
         throw std::invalid_argument(
             "parent-cell moment certificate has an invalid local cell");
     }
-    const auto quadrature = quadrature::QuadratureFactory::create(
+    const auto quadrature = quadrature::QuadratureFactory::create_pinned(
         mesh.getCellType(parent), rule.exact_polynomial_order);
     std::vector<MomentCertificateSample> samples;
     samples.reserve(quadrature->num_points());
@@ -3845,7 +3845,7 @@ public:
                 return entry.points;
             }
         }
-        const auto quadrature = quadrature::QuadratureFactory::create(type, order);
+        const auto quadrature = quadrature::QuadratureFactory::create_pinned(type, order);
         Entry entry{type, order, {}};
         entry.points.reserve(quadrature->num_points());
         for (std::size_t q = 0; q < quadrature->num_points(); ++q) {

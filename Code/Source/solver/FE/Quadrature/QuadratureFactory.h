@@ -36,6 +36,7 @@
 #include "PositionBasedTriangleQuadrature.h"
 #include "PositionBasedTetrahedronQuadrature.h"
 #include "QuadratureCache.h"
+#include <cstddef>
 #include <memory>
 
 namespace svmp {
@@ -69,6 +70,25 @@ public:
         int order,
         QuadratureType type = QuadratureType::GaussLegendre,
         bool use_cache = true);
+
+    /// Distinct rules a thread keeps alive through create_pinned() and
+    /// create_legacy_compatible_pinned().
+    static constexpr std::size_t kMaxPinnedRulesPerThread = 64;
+
+    /**
+     * @brief create(element_type, order, type) kept alive for the calling thread
+     *
+     * The QuadratureCache holds rules weakly, so a caller that drops its rule
+     * makes the next create() rebuild it.  The first kMaxPinnedRulesPerThread
+     * distinct keys a thread requests here are held by a thread_local table and
+     * returned again without a cache lookup; beyond the cap the create() result
+     * is returned unpinned.  Every result is a rule create() returned, and rule
+     * construction is deterministic, so a pinned rule equals a fresh one.
+     */
+    static std::shared_ptr<const QuadratureRule> create_pinned(
+        ElementType element_type,
+        int order,
+        QuadratureType type = QuadratureType::GaussLegendre);
 
     /**
      * @brief Get recommended quadrature order for a given basis order
@@ -125,6 +145,12 @@ public:
         ElementType element_type,
         Real legacy_modifier,
         bool use_cache = true);
+
+    /// create_legacy_compatible(element_type, legacy_modifier) kept alive for
+    /// the calling thread, as create_pinned() (the same per-thread table and cap).
+    static std::shared_ptr<const QuadratureRule> create_legacy_compatible_pinned(
+        ElementType element_type,
+        Real legacy_modifier);
 
     // =========================================================================
     // Convenience methods for common position-based configurations

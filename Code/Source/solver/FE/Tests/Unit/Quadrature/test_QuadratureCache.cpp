@@ -7,6 +7,8 @@
 #include "FE/Quadrature/QuadratureFactory.h"
 #include "FE/Quadrature/QuadratureCache.h"
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 #include <thread>
 #include <utility>
@@ -165,4 +167,108 @@ TEST(QuadratureRuleIdentity, BinaryIdentityDistinguishesFactoryRules) {
     expectSameIdentityVerdict(*tet2, *tet3, tet2->cache_identity() == tet3->cache_identity(),
                               "tetrahedron orders 2 and 3");
     expectSameIdentityVerdict(*tet2, *tri2, false, "tetrahedron and triangle");
+}
+
+namespace {
+
+[[nodiscard]] std::uint64_t ruleRealBits(Real value) {
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+void expectSameRuleBits(const QuadratureRule& actual, const QuadratureRule& expected,
+                        const char* label) {
+    ASSERT_EQ(actual.num_points(), expected.num_points()) << label;
+    for (std::size_t q = 0; q < expected.num_points(); ++q) {
+        for (std::size_t d = 0; d < 3; ++d) {
+            EXPECT_EQ(ruleRealBits(actual.point(q)[d]), ruleRealBits(expected.point(q)[d]))
+                << label << " point " << q << " component " << d;
+        }
+        EXPECT_EQ(ruleRealBits(actual.weight(q)), ruleRealBits(expected.weight(q)))
+            << label << " weight " << q;
+    }
+}
+
+} // namespace
+
+// Pinned rules are rules create() returned, kept alive per thread: they equal a
+// freshly built rule bit for bit and are returned again as the same object.
+// (Each test pins in its own thread, so the thread_local table starts empty and
+// is released when the thread ends.)
+TEST(QuadratureFactoryPinned, PinnedRulesEqualFreshRulesBitwise) {
+    std::thread worker([] {
+        struct Key {
+            ElementType type;
+            int order;
+            QuadratureType rule_type;
+        };
+        const std::vector<Key> keys{
+            {ElementType::Line2, 3, QuadratureType::GaussLegendre},
+            {ElementType::Line2, 3, QuadratureType::GaussLobatto},
+            {ElementType::Triangle3, 2, QuadratureType::GaussLegendre},
+            {ElementType::Triangle3, 5, QuadratureType::GaussLegendre},
+            {ElementType::Quad4, 3, QuadratureType::GaussLegendre},
+            {ElementType::Tetra4, 4, QuadratureType::GaussLegendre},
+            {ElementType::Hex8, 2, QuadratureType::GaussLegendre},
+        };
+        for (const auto& key : keys) {
+            const auto pinned = QuadratureFactory::create_pinned(key.type, key.order, key.rule_type);
+            const auto fresh = QuadratureFactory::create(key.type, key.order, key.rule_type,
+                                                         /*use_cache=*/false);
+            ASSERT_TRUE(pinned);
+            ASSERT_TRUE(fresh);
+            expectSameRuleBits(*pinned, *fresh, "pinned vs fresh");
+            EXPECT_EQ(QuadratureFactory::create_pinned(key.type, key.order, key.rule_type).get(),
+                      pinned.get());
+        }
+        // Gauss-Legendre and Gauss-Lobatto rules of one order are different keys.
+        EXPECT_NE(QuadratureFactory::create_pinned(ElementType::Line2, 3,
+                                                   QuadratureType::GaussLegendre).get(),
+                  QuadratureFactory::create_pinned(ElementType::Line2, 3,
+                                                   QuadratureType::GaussLobatto).get());
+
+        const Real modifier = QuadratureFactory::default_legacy_modifier(ElementType::Tetra4);
+        const auto legacy = QuadratureFactory::create_legacy_compatible_pinned(
+            ElementType::Tetra4, modifier);
+        const auto legacy_fresh = QuadratureFactory::create_legacy_compatible(
+            ElementType::Tetra4, modifier, /*use_cache=*/false);
+        expectSameRuleBits(*legacy, *legacy_fresh, "legacy pinned vs fresh");
+        EXPECT_EQ(QuadratureFactory::create_legacy_compatible_pinned(ElementType::Tetra4, modifier).get(),
+                  legacy.get());
+        // A different modifier is a different key.
+        const auto other = QuadratureFactory::create_legacy_compatible_pinned(
+            ElementType::Tetra4, Real(0.25));
+        EXPECT_NE(other.get(), legacy.get());
+    });
+    worker.join();
+}
+
+TEST(QuadratureFactoryPinned, KeysBeyondTheCapAreReturnedUnpinned) {
+    std::thread worker([] {
+        const int cap = static_cast<int>(QuadratureFactory::kMaxPinnedRulesPerThread);
+        std::vector<std::weak_ptr<const QuadratureRule>> pinned;
+        for (int order = 1; order <= cap; ++order) {
+            pinned.push_back(QuadratureFactory::create_pinned(ElementType::Line2, order));
+        }
+        // The thread's table holds the first `cap` keys although no caller does.
+        for (const auto& rule : pinned) {
+            EXPECT_FALSE(rule.expired());
+        }
+        // The next key is created but not pinned: dropping it releases it.
+        std::weak_ptr<const QuadratureRule> beyond =
+            QuadratureFactory::create_pinned(ElementType::Line2, cap + 1);
+        EXPECT_TRUE(beyond.expired());
+        const auto again = QuadratureFactory::create_pinned(ElementType::Line2, cap + 1);
+        ASSERT_TRUE(again);
+        expectSameRuleBits(*again,
+                           *QuadratureFactory::create(ElementType::Line2, cap + 1,
+                                                      QuadratureType::GaussLegendre,
+                                                      /*use_cache=*/false),
+                           "unpinned beyond the cap");
+        // Pinned keys keep returning the pinned object.
+        EXPECT_EQ(QuadratureFactory::create_pinned(ElementType::Line2, 1).get(),
+                  pinned.front().lock().get());
+    });
+    worker.join();
 }

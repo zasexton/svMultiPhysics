@@ -8,6 +8,9 @@
 #include "QuadratureFactory.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <vector>
 
 namespace svmp {
 namespace FE {
@@ -234,6 +237,71 @@ std::shared_ptr<const QuadratureRule> QuadratureFactory::create_legacy_compatibl
     // as our PositionBasedParams, so we can pass through directly
     PositionBasedParams params{legacy_modifier};
     return create_position_based(element_type, params, use_cache);
+}
+
+namespace {
+
+// One thread's pinned rules (QuadratureFactory::create_pinned).  The key holds
+// what selects the rule: the element type, the order and rule type of create(),
+// or the bit pattern of the legacy modifier of create_legacy_compatible().
+struct PinnedRuleEntry {
+    ElementType element_type{ElementType::Unknown};
+    int order{0};
+    QuadratureType type{QuadratureType::GaussLegendre};
+    bool legacy_compatible{false};
+    std::uint64_t legacy_modifier_bits{0};
+    std::shared_ptr<const QuadratureRule> rule{};
+};
+
+[[nodiscard]] std::uint64_t realBits(Real value) noexcept {
+    std::uint64_t bits = 0;
+    static_assert(sizeof(bits) == sizeof(value));
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+template <typename Make>
+std::shared_ptr<const QuadratureRule> pinnedRule(const PinnedRuleEntry& key, Make&& make) {
+    thread_local std::vector<PinnedRuleEntry> table;
+    for (const auto& entry : table) {
+        if (entry.element_type == key.element_type && entry.order == key.order &&
+            entry.type == key.type && entry.legacy_compatible == key.legacy_compatible &&
+            entry.legacy_modifier_bits == key.legacy_modifier_bits) {
+            return entry.rule;
+        }
+    }
+    auto rule = make();
+    if (table.size() < QuadratureFactory::kMaxPinnedRulesPerThread) {
+        auto pinned = key;
+        pinned.rule = rule;
+        table.push_back(std::move(pinned));
+    }
+    return rule;
+}
+
+} // namespace
+
+std::shared_ptr<const QuadratureRule> QuadratureFactory::create_pinned(
+    ElementType element_type,
+    int order,
+    QuadratureType type) {
+    PinnedRuleEntry key;
+    key.element_type = element_type;
+    key.order = order;
+    key.type = type;
+    return pinnedRule(key, [&] { return create(element_type, order, type, /*use_cache=*/true); });
+}
+
+std::shared_ptr<const QuadratureRule> QuadratureFactory::create_legacy_compatible_pinned(
+    ElementType element_type,
+    Real legacy_modifier) {
+    PinnedRuleEntry key;
+    key.element_type = element_type;
+    key.legacy_compatible = true;
+    key.legacy_modifier_bits = realBits(legacy_modifier);
+    return pinnedRule(key, [&] {
+        return create_legacy_compatible(element_type, legacy_modifier, /*use_cache=*/true);
+    });
 }
 
 // =============================================================================
