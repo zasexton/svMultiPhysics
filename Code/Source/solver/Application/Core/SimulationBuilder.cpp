@@ -1430,43 +1430,27 @@ void SimulationBuilder::loadMeshes()
 
   // Opt-in <Partition_weighting>free_surface</Partition_weighting>: weight
   // the startup partition by the sign of the free surface's initial level
-  // set (active, inactive and cut cells).  Active and cut cells carry the
-  // flow terms and the cut quadrature, so a cell-count partition leaves the
-  // ranks that hold the liquid and the interface with most of the work.
+  // set.  Only full active and cut cells carry the cut-volume (flow) terms,
+  // so a cell-count partition leaves the ranks that hold the liquid with
+  // most of that work; ParMETIS then balances the cell count and the
+  // cut-volume work (MeshParameters in Parameters.h).
   const auto partition_weights_for =
       [&](const MeshParameters& mesh_params) -> application::translators::MeshPartitionWeights {
-    application::translators::MeshPartitionWeights weights;
-    std::string mode = mesh_params.partition_weighting.value();
-    std::transform(mode.begin(), mode.end(), mode.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (mode.empty() || mode == "none") {
-      return weights;
-    }
-    if (mode != "free_surface") {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] <Partition_weighting> inside <Add_mesh name=\"" +
-          mesh_params.name.value() + "\"> must be 'none' or 'free_surface', got '" +
-          mesh_params.partition_weighting.value() + "'.");
-    }
-    if (svmp::MeshComm::world().size() <= 1) {
-      return weights;
+    using application::translators::MeshTranslator;
+    if (!MeshTranslator::freeSurfacePartitionWeightingRequested(mesh_params) ||
+        svmp::MeshComm::world().size() <= 1) {
+      return {};
     }
     if (!free_surface_request) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] <Partition_weighting>free_surface</Partition_weighting> "
           "requires an unfitted level-set free-surface boundary condition.");
     }
-    const double active = mesh_params.partition_weight_active.value();
-    const double inactive = mesh_params.partition_weight_inactive.value();
-    const double cut = mesh_params.partition_weight_cut.value();
-    weights.vertex_field = free_surface_request->level_set_field_name;
-    weights.isovalue = free_surface_request->isovalue;
-    const bool negative_active =
-        free_surface_request->active_side == application::core::LevelSetActiveSide::Negative;
-    weights.negative = negative_active ? active : inactive;
-    weights.positive = negative_active ? inactive : active;
-    weights.cut = cut;
-    return weights;
+    return MeshTranslator::freeSurfacePartitionWeights(
+        mesh_params,
+        free_surface_request->level_set_field_name,
+        free_surface_request->isovalue,
+        free_surface_request->active_side == application::core::LevelSetActiveSide::Negative);
   };
 
   for (const auto* mesh_params : params_.mesh_parameters) {

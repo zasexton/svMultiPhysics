@@ -29,6 +29,7 @@
  */
 
 #include "DistributedMesh.h"
+#include "StartupPartitionWeights.h"
 #include "../IO/MeshIO.h"
 #include <array>
 #include <algorithm>
@@ -158,103 +159,64 @@ namespace {
 
     // Startup partition weights from the sign of a vertex scalar field (for
     // example the initial level set of a free-surface deck), requested by
-    // the MeshIOOptions keys
-    //   partition_weight_vertex_field  name of a scalar vertex field
-    //   partition_weight_isovalue      (default 0)
-    //   partition_weight_negative      weight of cells whose vertex values
-    //                                  all lie below the isovalue (default 1)
-    //   partition_weight_positive      ... all above it (default 1)
-    //   partition_weight_cut           ... straddling or touching it (default 1)
-    // Weights are scaled by 10 and rounded to integers >= 1.  The integer
-    // cell field kPartitionWeightField is attached to every local cell and
-    // the field name is returned; an empty name means no weighting.
-    constexpr const char* kPartitionWeightField = "svmp_startup_partition_weight";
-
-    double partition_weight_option(const std::unordered_map<std::string, std::string>& options,
-                                   const char* key,
-                                   double default_value) {
-        const auto it = options.find(key);
-        if (it == options.end() || it->second.empty()) {
-            return default_value;
-        }
-        std::size_t used = 0;
-        double value = 0.0;
-        try {
-            value = std::stod(it->second, &used);
-        } catch (...) {
-            used = 0;
-        }
-        if (used != it->second.size() || !std::isfinite(value) || value < 0.0) {
-            throw std::invalid_argument(std::string("DistributedMesh: invalid ") + key + "='" +
-                                        it->second + "' (expected a finite nonnegative number)");
-        }
-        return value;
-    }
-
+    // the MeshIOOptions keys partition_weight_* (StartupPartitionWeights.h).
+    // The integer cell field kStartupPartitionWeightField is attached to
+    // every local cell and its name is returned; an empty name means no
+    // weighting, and then nothing is attached.  The global weight sum is
+    // checked against the 32-bit ParMETIS weight range on every rank.
+    // Collective over `comm` whenever weights are requested (`mesh` may be
+    // null on a rank, which then contributes no cells).
     std::string attach_sign_based_partition_weights(
-        svmp::MeshBase& mesh,
-        const std::unordered_map<std::string, std::string>& options) {
-        const auto field_it = options.find("partition_weight_vertex_field");
-        if (field_it == options.end() || field_it->second.empty()) {
+        svmp::MeshBase* mesh,
+        const std::unordered_map<std::string, std::string>& options,
+        MPI_Comm comm) {
+        const auto requested = svmp::startup_partition_sign_weights(options);
+        if (!requested) {
             return {};
         }
-        const std::string& field = field_it->second;
-        const double isovalue = partition_weight_option(options, "partition_weight_isovalue", 0.0);
-        const double w_negative = partition_weight_option(options, "partition_weight_negative", 1.0);
-        const double w_positive = partition_weight_option(options, "partition_weight_positive", 1.0);
-        const double w_cut = partition_weight_option(options, "partition_weight_cut", 1.0);
-        const auto scaled = [](double w) {
-            return static_cast<std::int32_t>(std::max<long long>(1, std::llround(10.0 * w)));
-        };
+        // A missing or unsuitable field fails on every rank together.
+        std::vector<std::int32_t> cell_weights;
+        std::string error;
+        try {
+            if (mesh) {
+                cell_weights = svmp::startup_partition_cell_weights(*mesh, *requested);
+            }
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
+        std::uint64_t local[2] = {0u, error.empty() ? 0u : 1u};
+        for (const auto w : cell_weights) {
+            local[0] += static_cast<std::uint64_t>(w);
+        }
+        std::uint64_t global[2] = {0u, 0u};
+        MPI_Allreduce(local, global, 2, MPI_UINT64_T, MPI_SUM, comm);
+        if (global[1] != 0u) {
+            throw std::runtime_error(error.empty()
+                                         ? "DistributedMesh: startup partition weights failed on another rank"
+                                         : error);
+        }
+        // Half the idx_t range leaves room for the sums ParMETIS forms while coarsening.
+        constexpr std::uint64_t kMaxWeightSum =
+            static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max()) / 2u;
+        if (global[0] > kMaxWeightSum) {
+            throw std::runtime_error(
+                "DistributedMesh: startup partition weights sum to " + std::to_string(global[0]) +
+                " units, beyond the 32-bit ParMETIS range; lower the partition weights");
+        }
 
-        if (mesh.n_cells() > 0 && !mesh.has_field(svmp::EntityKind::Vertex, field)) {
-            throw std::runtime_error("DistributedMesh: partition_weight_vertex_field '" + field +
-                                     "' is not a vertex field of the mesh");
-        }
-        const auto handle = mesh.n_cells() > 0 ? mesh.field_handle(svmp::EntityKind::Vertex, field)
-                                               : svmp::FieldHandle{};
-        const void* raw = handle.id != 0 ? mesh.field_data(handle) : nullptr;
-        svmp::FieldScalarType type = svmp::FieldScalarType::Custom;
-        if (handle.id != 0) {
-            if (mesh.field_components(handle) != 1) {
-                throw std::runtime_error("DistributedMesh: partition_weight_vertex_field '" + field +
-                                         "' must be a scalar field");
+        const char* name = svmp::kStartupPartitionWeightField;
+        if (mesh) {
+            if (mesh->has_field(svmp::EntityKind::Volume, name)) {
+                mesh->remove_field(mesh->field_handle(svmp::EntityKind::Volume, name));
             }
-            type = mesh.field_type(handle);
-            if ((type != svmp::FieldScalarType::Float64 && type != svmp::FieldScalarType::Float32) ||
-                raw == nullptr) {
-                throw std::runtime_error("DistributedMesh: partition_weight_vertex_field '" + field +
-                                         "' must hold Float32 or Float64 data");
-            }
+            const auto weights_handle = mesh->attach_field(svmp::EntityKind::Volume,
+                                                           name,
+                                                           svmp::FieldScalarType::Int32,
+                                                           1);
+            auto* weights = mesh->field_data_as<std::int32_t>(weights_handle);
+            std::copy(cell_weights.begin(), cell_weights.end(), weights);
         }
-        const auto value_at = [&](svmp::index_t v) -> double {
-            if (type == svmp::FieldScalarType::Float64) {
-                return static_cast<const double*>(raw)[static_cast<std::size_t>(v)];
-            }
-            return static_cast<double>(static_cast<const float*>(raw)[static_cast<std::size_t>(v)]);
-        };
-
-        if (mesh.has_field(svmp::EntityKind::Volume, kPartitionWeightField)) {
-            mesh.remove_field(mesh.field_handle(svmp::EntityKind::Volume, kPartitionWeightField));
-        }
-        const auto weights_handle = mesh.attach_field(svmp::EntityKind::Volume,
-                                                      kPartitionWeightField,
-                                                      svmp::FieldScalarType::Int32,
-                                                      1);
-        auto* weights = mesh.field_data_as<std::int32_t>(weights_handle);
-        for (svmp::index_t c = 0; c < static_cast<svmp::index_t>(mesh.n_cells()); ++c) {
-            auto [vptr, nv] = mesh.cell_vertices_span(c);
-            bool below = nv > 0;
-            bool above = nv > 0;
-            for (std::size_t k = 0; k < nv; ++k) {
-                const double value = value_at(vptr[k]);
-                below = below && value < isovalue;
-                above = above && value > isovalue;
-            }
-            const double w = below ? w_negative : (above ? w_positive : w_cut);
-            weights[static_cast<std::size_t>(c)] = scaled(w);
-        }
-        return kPartitionWeightField;
+        return name;
     }
 
     // Helper structures and functions for MPI operations
@@ -8489,10 +8451,8 @@ DistributedMesh DistributedMesh::load_parallel(const MeshIOOptions& opts, MPI_Co
         // constraints) unless cell_weight_constraints says otherwise.  The
         // temporary weight field is removed after the migration.
         auto rebalance_options = opts.kv;
-        std::string weight_field;
-        if (dmesh.local_mesh_) {
-            weight_field = attach_sign_based_partition_weights(*dmesh.local_mesh_, opts.kv);
-        }
+        const std::string weight_field =
+            attach_sign_based_partition_weights(dmesh.local_mesh_.get(), opts.kv, comm);
         if (!weight_field.empty()) {
             rebalance_options["cell_weight_field"] = weight_field;
             if (rebalance_options.find("cell_weight_constraints") == rebalance_options.end()) {
@@ -8523,7 +8483,8 @@ DistributedMesh DistributedMesh::load_parallel(const MeshIOOptions& opts, MPI_Co
                 const double ranks = static_cast<double>(std::max(size, 1));
                 std::cout << "[svMultiPhysics::Mesh] weighted startup partition: cells min/mean/max "
                           << min_stats[0] << "/" << static_cast<double>(sum_stats[0]) / ranks << "/"
-                          << max_stats[0] << " weighted load (x10) min/mean/max " << min_stats[1] << "/"
+                          << max_stats[0] << " weighted load (x" << kStartupPartitionWeightScale
+                          << ") min/mean/max " << min_stats[1] << "/"
                           << static_cast<double>(sum_stats[1]) / ranks << "/" << max_stats[1]
                           << " diagnostic=weighted_startup_partition" << std::endl;
             }
@@ -8543,6 +8504,21 @@ DistributedMesh DistributedMesh::load_parallel(const MeshIOOptions& opts, MPI_Co
         }
     }
 #endif
+    {
+        // Partition weights act only on the startup ParMETIS repartition of
+        // a serial input file; say so when they were requested elsewhere.
+        bool weights_applied = false;
+#if defined(SVMP_HAS_PARMETIS)
+        weights_applied = used_serial_distribution && requested_partition_method == "parmetis";
+#endif
+        if (!weights_applied && rank == 0 && size > 1 && startup_partition_sign_weights(opts.kv)) {
+            std::cout << "[svMultiPhysics::Mesh] startup partition weights requested but not applied:"
+                      << " partition_method='" << requested_partition_method << "'"
+                      << " serial_input=" << (used_serial_distribution ? 1 : 0)
+                      << " (weights act on the startup ParMETIS repartition of a serial input file)"
+                      << " diagnostic=weighted_startup_partition_skipped" << std::endl;
+        }
+    }
 
     // =====================================================
     // Step 5: Interpret VTK ghost metadata (if present)

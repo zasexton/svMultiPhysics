@@ -73,6 +73,7 @@ if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
   add_executable(test_application_mpi
     Unit/test_ApplicationDriverLevelSetWorkflowsMPI.cpp
     Unit/test_LevelSetMaintenanceTransactionConsensusMPI.cpp
+    Unit/test_MeshPartitionWeightingMPI.cpp
     Unit/test_LevelSetPdeVelocityExtensionMPI.cpp
     Unit/test_LegacyParameterStubs.cpp
     ../Core/ActiveDomainOutput.cpp
@@ -175,6 +176,16 @@ if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
     MPI_RANKS 4
     FILTER "LevelSetMaintenanceTransactionConsensusMPI.FourRankCommitRejectAndContentRevisionAgreement"
     TIMEOUT 1200
+    ENVIRONMENT ${_application_mpi_env}
+  )
+
+  # Startup partition weighting on four ranks (the two-rank run is part of
+  # Application_MPI_2).
+  svmp_add_gtest(Application_PartitionWeighting_MPI_4
+    TARGET test_application_mpi
+    MPI_RANKS 4
+    FILTER "MeshPartitionWeightingMPI.*"
+    TIMEOUT 600
     ENVIRONMENT ${_application_mpi_env}
   )
 

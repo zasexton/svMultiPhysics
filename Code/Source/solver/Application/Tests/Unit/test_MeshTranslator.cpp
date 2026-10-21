@@ -2,6 +2,7 @@
 
 #include "Application/Translators/MeshTranslator.h"
 #include "Mesh/Mesh.h"
+#include "Mesh/Core/StartupPartitionWeights.h"
 #include "Parameters.h"
 #include "tinyxml2.h"
 
@@ -644,4 +645,220 @@ TEST(MeshTranslatorFaceLabels, DisjointFaceFilesDoNotWarn)
   ASSERT_NE(mesh, nullptr);
   EXPECT_EQ(warnings.find("are also listed in face file"), std::string::npos) << warnings;
 #endif
+}
+
+// ---- Startup partition weighting (<Partition_weighting>free_surface) ----
+
+namespace {
+
+// Five separate tetrahedra (four vertices each) whose vertex values put
+// cell 0 below the isovalue 0, cell 1 above it, cell 2 across it, and
+// cells 3 and 4 on it at one vertex (from above and from below).
+svmp::MeshBase make_sign_test_mesh(svmp::FieldScalarType type)
+{
+  svmp::MeshBase base;
+  std::vector<svmp::real_t> x;
+  std::vector<svmp::offset_t> offsets = {0};
+  std::vector<svmp::index_t> conn;
+  for (int c = 0; c < 5; ++c) {
+    const svmp::real_t x0 = static_cast<svmp::real_t>(2 * c);
+    const svmp::real_t corners[4][3] = {{x0, 0, 0}, {x0 + 1, 0, 0}, {x0, 1, 0}, {x0, 0, 1}};
+    for (const auto& p : corners) {
+      x.insert(x.end(), {p[0], p[1], p[2]});
+    }
+    for (int k = 0; k < 4; ++k) {
+      conn.push_back(static_cast<svmp::index_t>(4 * c + k));
+    }
+    offsets.push_back(static_cast<svmp::offset_t>(conn.size()));
+  }
+  std::vector<svmp::CellShape> shapes(5, make_shape(svmp::CellFamily::Tetra, 4));
+  base.build_from_arrays(3, x, offsets, conn, shapes);
+  const double values[5][4] = {
+      {-1.0, -2.0, -0.5, -1.0},  // below
+      {1.0, 2.0, 0.5, 1.0},      // above
+      {-1.0, 2.0, 0.5, 1.0},     // across
+      {0.0, 2.0, 0.5, 1.0},      // on it, otherwise above
+      {-1.0, -2.0, -0.5, 0.0},   // on it, otherwise below
+  };
+  const auto h = base.attach_field(svmp::EntityKind::Vertex, "phi", type, 1);
+  for (int c = 0; c < 5; ++c) {
+    for (int k = 0; k < 4; ++k) {
+      if (type == svmp::FieldScalarType::Float64) {
+        base.field_data_as<double>(h)[4 * c + k] = values[c][k];
+      } else {
+        base.field_data_as<float>(h)[4 * c + k] = static_cast<float>(values[c][k]);
+      }
+    }
+  }
+  return base;
+}
+
+// MeshParameters is neither copyable nor movable: parse into the caller's.
+void parse_add_mesh(const char* xml, MeshParameters& parsed)
+{
+  tinyxml2::XMLDocument document;
+  EXPECT_EQ(document.Parse(xml), tinyxml2::XML_SUCCESS) << document.ErrorStr();
+  auto* element = document.FirstChildElement("Add_mesh");
+  EXPECT_NE(element, nullptr);
+  if (element != nullptr) {
+    parsed.set_values(element);
+  }
+}
+
+} // namespace
+
+TEST(MeshPartitionWeighting, DefaultsAreOffWithCutVolumeWorkWeights)
+{
+  MeshParameters defaults;
+  EXPECT_EQ(defaults.partition_weighting.value(), "none");
+  EXPECT_FALSE(application::translators::MeshTranslator::freeSurfacePartitionWeightingRequested(defaults));
+  // Relative cut-volume work of a full active, a cut and an inactive cell.
+  EXPECT_EQ(defaults.partition_weight_active.value(), 1.0);
+  EXPECT_EQ(defaults.partition_weight_cut.value(), 2.0);
+  EXPECT_EQ(defaults.partition_weight_inactive.value(), 0.0);
+}
+
+TEST(MeshPartitionWeighting, ParsesTheModeAndRejectsUnknownValues)
+{
+  using application::translators::MeshTranslator;
+  MeshParameters none;
+  parse_add_mesh(R"xml(
+<Add_mesh name="box">
+  <Mesh_file_path>mesh.vtu</Mesh_file_path>
+  <Partition_weighting>none</Partition_weighting>
+</Add_mesh>
+)xml", none);
+  EXPECT_FALSE(MeshTranslator::freeSurfacePartitionWeightingRequested(none));
+
+  MeshParameters on;
+  parse_add_mesh(R"xml(
+<Add_mesh name="box">
+  <Mesh_file_path>mesh.vtu</Mesh_file_path>
+  <Partition_weighting>Free_Surface</Partition_weighting>
+  <Partition_weight_active>2</Partition_weight_active>
+  <Partition_weight_inactive>0.25</Partition_weight_inactive>
+  <Partition_weight_cut>3.5</Partition_weight_cut>
+</Add_mesh>
+)xml", on);
+  EXPECT_TRUE(MeshTranslator::freeSurfacePartitionWeightingRequested(on));
+  EXPECT_EQ(on.partition_weight_active.value(), 2.0);
+  EXPECT_EQ(on.partition_weight_inactive.value(), 0.25);
+  EXPECT_EQ(on.partition_weight_cut.value(), 3.5);
+
+  MeshParameters bogus;
+  bogus.name.set("box");
+  bogus.partition_weighting.set("cut_cells");
+  EXPECT_THROW((void)MeshTranslator::freeSurfacePartitionWeightingRequested(bogus), std::runtime_error);
+}
+
+TEST(MeshPartitionWeighting, MapsClassWeightsOntoTheActiveSide)
+{
+  using application::translators::MeshTranslator;
+  MeshParameters params;
+  params.name.set("box");
+  params.partition_weighting.set("free_surface");
+
+  // Liquid on the negative side (LevelSetNegative): negative cells are active.
+  const auto negative = MeshTranslator::freeSurfacePartitionWeights(params, "phi", 0.25, true);
+  EXPECT_EQ(negative.vertex_field, "phi");
+  EXPECT_EQ(negative.isovalue, 0.25);
+  EXPECT_EQ(negative.negative, 1.0);
+  EXPECT_EQ(negative.positive, 0.0);
+  EXPECT_EQ(negative.cut, 2.0);
+
+  // Liquid on the positive side.
+  const auto positive = MeshTranslator::freeSurfacePartitionWeights(params, "phi", 0.0, false);
+  EXPECT_EQ(positive.negative, 0.0);
+  EXPECT_EQ(positive.positive, 1.0);
+  EXPECT_EQ(positive.cut, 2.0);
+
+  EXPECT_THROW((void)MeshTranslator::freeSurfacePartitionWeights(params, "", 0.0, true), std::runtime_error);
+  params.partition_weight_cut.set("-1");
+  EXPECT_THROW((void)MeshTranslator::freeSurfacePartitionWeights(params, "phi", 0.0, true), std::runtime_error);
+  params.partition_weight_cut.set("2e4");
+  EXPECT_THROW((void)MeshTranslator::freeSurfacePartitionWeights(params, "phi", 0.0, true), std::runtime_error);
+}
+
+TEST(MeshPartitionWeighting, MeshOptionsRequestWeightsOnlyWithAVertexField)
+{
+  std::unordered_map<std::string, std::string> kv;
+  EXPECT_FALSE(svmp::startup_partition_sign_weights(kv).has_value());
+  kv["partition_weight_cut"] = "2";
+  EXPECT_FALSE(svmp::startup_partition_sign_weights(kv).has_value());
+  kv["partition_weight_vertex_field"] = "";
+  EXPECT_FALSE(svmp::startup_partition_sign_weights(kv).has_value());
+
+  kv["partition_weight_vertex_field"] = "phi";
+  kv["partition_weight_isovalue"] = "-0.125";
+  kv["partition_weight_negative"] = "1";
+  kv["partition_weight_positive"] = "0";
+  const auto parsed = svmp::startup_partition_sign_weights(kv);
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_EQ(parsed->vertex_field, "phi");
+  EXPECT_EQ(parsed->isovalue, -0.125);
+  EXPECT_EQ(parsed->negative, 1.0);
+  EXPECT_EQ(parsed->positive, 0.0);
+  EXPECT_EQ(parsed->cut, 2.0);
+
+  for (const char* bad : {"-1", "nan", "1e5", "2x", "inf"}) {
+    auto copy = kv;
+    copy["partition_weight_cut"] = bad;
+    EXPECT_THROW((void)svmp::startup_partition_sign_weights(copy), std::invalid_argument) << bad;
+  }
+  auto bad_iso = kv;
+  bad_iso["partition_weight_isovalue"] = "zero";
+  EXPECT_THROW((void)svmp::startup_partition_sign_weights(bad_iso), std::invalid_argument);
+}
+
+TEST(MeshPartitionWeighting, CellWeightsFollowTheVertexSigns)
+{
+  // Integer units: 100 per unit weight, at least one.
+  EXPECT_EQ(svmp::startup_partition_weight_units(1.0), 100);
+  EXPECT_EQ(svmp::startup_partition_weight_units(1.5), 150);
+  EXPECT_EQ(svmp::startup_partition_weight_units(0.0), 1);
+  EXPECT_EQ(svmp::startup_partition_weight_units(0.004), 1);
+  EXPECT_EQ(svmp::startup_partition_weight_units(0.026), 3);
+
+  svmp::StartupPartitionSignWeights weights;
+  weights.vertex_field = "phi";
+  weights.isovalue = 0.0;
+  weights.negative = 1.0;
+  weights.positive = 0.0;
+  weights.cut = 2.0;
+  for (const auto type : {svmp::FieldScalarType::Float64, svmp::FieldScalarType::Float32}) {
+    const auto mesh = make_sign_test_mesh(type);
+    const auto w = svmp::startup_partition_cell_weights(mesh, weights);
+    ASSERT_EQ(w.size(), 5u);
+    EXPECT_EQ(w[0], 100);  // below: active
+    EXPECT_EQ(w[1], 1);    // above: inactive (zero weight, one unit)
+    EXPECT_EQ(w[2], 200);  // across: cut
+    EXPECT_EQ(w[3], 200);  // a vertex on the isovalue counts as cut
+    EXPECT_EQ(w[4], 200);
+  }
+
+  // A shifted isovalue moves the classes: at -3 every cell lies above it.
+  weights.isovalue = -3.0;
+  const auto shifted = svmp::startup_partition_cell_weights(make_sign_test_mesh(svmp::FieldScalarType::Float64), weights);
+  for (const auto w : shifted) {
+    EXPECT_EQ(w, 1);
+  }
+}
+
+TEST(MeshPartitionWeighting, CellWeightsRejectMissingOrNonScalarFields)
+{
+  svmp::StartupPartitionSignWeights weights;
+  weights.vertex_field = "level_set";
+  auto mesh = make_sign_test_mesh(svmp::FieldScalarType::Float64);
+  EXPECT_THROW((void)svmp::startup_partition_cell_weights(mesh, weights), std::runtime_error);
+
+  (void)mesh.attach_field(svmp::EntityKind::Vertex, "level_set", svmp::FieldScalarType::Float64, 3);
+  EXPECT_THROW((void)svmp::startup_partition_cell_weights(mesh, weights), std::runtime_error);
+
+  (void)mesh.attach_field(svmp::EntityKind::Vertex, "flag", svmp::FieldScalarType::Int32, 1);
+  weights.vertex_field = "flag";
+  EXPECT_THROW((void)svmp::startup_partition_cell_weights(mesh, weights), std::runtime_error);
+
+  // A mesh without cells needs no field.
+  svmp::MeshBase empty;
+  EXPECT_TRUE(svmp::startup_partition_cell_weights(empty, weights).empty());
 }

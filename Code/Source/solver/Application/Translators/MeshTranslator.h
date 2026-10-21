@@ -33,6 +33,21 @@ public:
                                               int minimum_ghost_layers = 0,
                                               const MeshPartitionWeights& partition_weights = {});
 
+  // True for <Partition_weighting>free_surface</Partition_weighting>, false
+  // for 'none' or an absent key; throws for any other value.
+  static bool freeSurfacePartitionWeightingRequested(const MeshParameters& params);
+
+  // The startup partition weights of <Partition_weighting>free_surface:
+  // <Partition_weight_active>, <_inactive> and <_cut> mapped onto the
+  // negative, positive and cut cells of the level-set vertex field
+  // `level_set_field` at `isovalue`; the active (liquid) side is the
+  // negative one when `negative_side_active`.  Throws for a weight that is
+  // negative, non-finite or above 1e4.
+  static MeshPartitionWeights freeSurfacePartitionWeights(const MeshParameters& params,
+                                                          const std::string& level_set_field,
+                                                          double isovalue,
+                                                          bool negative_side_active);
+
 private:
   static std::string detectFormat(const std::string& file_path);
 

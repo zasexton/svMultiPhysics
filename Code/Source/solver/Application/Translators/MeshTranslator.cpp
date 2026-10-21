@@ -526,6 +526,54 @@ void check_overlapping_face_files(const std::vector<std::vector<std::string>>& n
 namespace application {
 namespace translators {
 
+bool MeshTranslator::freeSurfacePartitionWeightingRequested(const MeshParameters& params)
+{
+  std::string mode = params.partition_weighting.value();
+  std::transform(mode.begin(), mode.end(), mode.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (mode.empty() || mode == "none") {
+    return false;
+  }
+  if (mode != "free_surface") {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] <Partition_weighting> inside <Add_mesh name=\"" +
+        params.name.value() + "\"> must be 'none' or 'free_surface', got '" +
+        params.partition_weighting.value() + "'.");
+  }
+  return true;
+}
+
+MeshPartitionWeights MeshTranslator::freeSurfacePartitionWeights(const MeshParameters& params,
+                                                                 const std::string& level_set_field,
+                                                                 double isovalue,
+                                                                 bool negative_side_active)
+{
+  const auto checked = [&](const char* key, double value) {
+    if (!std::isfinite(value) || value < 0.0 || value > 1.0e4) {
+      std::ostringstream os;
+      os << "[svMultiPhysics::Application] <" << key << "> inside <Add_mesh name=\""
+         << params.name.value() << "\"> must be a finite weight in [0, 1e4], got " << value << ".";
+      throw std::runtime_error(os.str());
+    }
+    return value;
+  };
+  const double active = checked("Partition_weight_active", params.partition_weight_active.value());
+  const double inactive = checked("Partition_weight_inactive", params.partition_weight_inactive.value());
+  const double cut = checked("Partition_weight_cut", params.partition_weight_cut.value());
+  if (level_set_field.empty()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] <Partition_weighting>free_surface</Partition_weighting> inside "
+        "<Add_mesh name=\"" + params.name.value() + "\"> needs the free surface's level-set field name.");
+  }
+  MeshPartitionWeights weights;
+  weights.vertex_field = level_set_field;
+  weights.isovalue = isovalue;
+  weights.negative = negative_side_active ? active : inactive;
+  weights.positive = negative_side_active ? inactive : active;
+  weights.cut = cut;
+  return weights;
+}
+
 std::shared_ptr<svmp::Mesh> MeshTranslator::loadMesh(const MeshParameters& params,
                                                      int minimum_ghost_layers,
                                                      const MeshPartitionWeights& partition_weights)

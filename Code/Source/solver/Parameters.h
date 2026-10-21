@@ -1685,10 +1685,26 @@ class MeshParameters : public ParameterLists
     Parameter<bool> allow_overlapping_face_files;
 
     // Opt-in startup partition weighting for multi-rank runs:
-    // "none" (default, cell-count balance) or "free_surface", which weights
-    // cells by the sign of the free surface's initial level set in the mesh
-    // file (active, inactive and cut cells) and balances both the cell count
-    // and the weighted work.  Changes the partition, hence round-off.
+    // "none" (default, cell-count balance; the partition is unchanged) or
+    // "free_surface".  "free_surface" classifies each cell by the sign of
+    // the free surface's initial level set at its vertices (the level-set
+    // vertex field of the mesh file): full active (liquid), inactive (dry)
+    // or cut.  ParMETIS then balances two constraints per rank, the cell
+    // count (memory, the all-cell terms, the linear solve) and the summed
+    // class weights.  The weights are the relative cut-volume assembly work
+    // of a cell, which only active and cut cells carry:
+    //   <Partition_weight_active>    full active cell (default 1)
+    //   <Partition_weight_cut>       cut cell (default 2: measured cut-volume
+    //                                assembly time of a cut cell 1.93 times
+    //                                that of a full cell, 1.85-2.01, in the
+    //                                3D sphere and sessile decks on 4-16 ranks)
+    //   <Partition_weight_inactive>  inactive cell (default 0)
+    // Each weight w counts max(1, round(100 w)) integer units, so a zero
+    // weight is 1% of an active cell.  The defaults were 3 / 4 / 1 until
+    // 2026-10 (units of 10); no recorded run used the key.  A weighted
+    // partition changes the partition and hence the results at round-off,
+    // as a different rank count does.  The weights come from the initial
+    // level set only (no repartitioning while the interface moves).
     Parameter<std::string> partition_weighting;
     Parameter<double> partition_weight_active;
     Parameter<double> partition_weight_inactive;
