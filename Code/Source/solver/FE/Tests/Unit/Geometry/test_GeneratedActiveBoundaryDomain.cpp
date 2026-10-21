@@ -27,6 +27,7 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -7736,6 +7737,96 @@ TEST(CutQuadratureMapping, AffineRuleReusesTheJacobianOfEveryPoint)
             }
         }
     }
+}
+
+TEST(CutQuadratureMapping, AffineMeasureWithoutAMappingMatchesTheMappedRuleBitwise)
+{
+    // physicalCutQuadratureMeasure() takes the LinearMapping Jacobian of an
+    // affine simplex cell without building the mapping. The measure must equal
+    // the mapped rule's, which builds the mapping, bit for bit; other cells
+    // keep the mapping, and the cell and node checks throw as before.
+    const auto same_bits = [](FE::Real a, FE::Real b) {
+        return std::bit_cast<std::uint64_t>(a) ==
+               std::bit_cast<std::uint64_t>(b);
+    };
+    const auto volume_rule = [](const std::vector<std::array<FE::Real, 3>>& points,
+                                FE::GlobalIndex parent) {
+        FE::geometry::CutQuadratureRule rule;
+        rule.kind = FE::geometry::CutQuadratureKind::Volume;
+        rule.side = FE::geometry::CutIntegrationSide::Negative;
+        rule.frame = FE::geometry::CutGeometryFrame::Reference;
+        rule.provenance.parent_entity = parent;
+        rule.measure = FE::Real{0.1};
+        for (std::size_t q = 0; q < points.size(); ++q) {
+            FE::geometry::CutQuadraturePoint point;
+            point.point = points[q];
+            point.parent_coordinate = points[q];
+            point.weight = FE::Real{0.013} * static_cast<FE::Real>(q + 1u) + FE::Real{0.001};
+            point.normal = {{0.3, 0.4, 0.5}};
+            rule.points.push_back(point);
+        }
+        return rule;
+    };
+
+    const SingleTetraBoundaryMesh tet(
+        17,
+        {{{0.1, -0.2, 0.05}},
+         {{1.3, 0.1, -0.1}},
+         {{0.2, 0.9, 0.3}},
+         {{-0.1, 0.25, 1.1}}});
+    const auto tet_rule = volume_rule(
+        {{{0.1, 0.2, 0.3}}, {{0.6, 0.1, 0.05}}, {{0.05, 0.05, 0.8}}, {{0.25, 0.25, 0.25}}}, 0);
+    EXPECT_TRUE(same_bits(
+        FE::geometry::physicalCutQuadratureMeasure(tet, tet_rule),
+        FE::geometry::mapCutQuadratureRuleToPhysical(tet, tet_rule).physical_measure));
+
+    // The point-span overload (classification-only rules) on a subset.
+    const std::vector<FE::geometry::CutQuadraturePoint> subset(
+        tet_rule.points.begin() + 1, tet_rule.points.end());
+    auto subset_rule = tet_rule;
+    subset_rule.points = subset;
+    EXPECT_TRUE(same_bits(
+        FE::geometry::physicalCutQuadratureMeasure(
+            tet, tet_rule,
+            std::span<const FE::geometry::CutQuadraturePoint>(subset.data(), subset.size())),
+        FE::geometry::mapCutQuadratureRuleToPhysical(tet, subset_rule).physical_measure));
+
+    const SingleQuadBoundaryMesh triangle(
+        7, 0, 1, 0, true, FE::ElementType::Triangle3,
+        {{{0.1, 0.2, 0.0}}, {{1.4, -0.1, 0.0}}, {{0.3, 0.9, 0.0}}});
+    const auto triangle_rule = volume_rule(
+        {{{0.1, 0.2, 0.0}}, {{0.6, 0.1, 0.0}}, {{0.3, 0.3, 0.0}}}, 0);
+    EXPECT_TRUE(same_bits(
+        FE::geometry::physicalCutQuadratureMeasure(triangle, triangle_rule),
+        FE::geometry::mapCutQuadratureRuleToPhysical(triangle, triangle_rule).physical_measure));
+
+    // A bilinear quadrilateral keeps its mapping and per-point Jacobians.
+    const SingleQuadBoundaryMesh quad(
+        7, 0, 1, 0, true, FE::ElementType::Quad4,
+        {{{0.0, 0.0, 0.0}}, {{1.2, 0.1, 0.0}}, {{1.4, 1.1, 0.0}}, {{-0.1, 0.9, 0.0}}});
+    const auto quad_rule = volume_rule(
+        {{{-0.5, -0.3, 0.0}}, {{0.2, 0.6, 0.0}}, {{0.7, -0.8, 0.0}}}, 0);
+    EXPECT_TRUE(same_bits(
+        FE::geometry::physicalCutQuadratureMeasure(quad, quad_rule),
+        FE::geometry::mapCutQuadratureRuleToPhysical(quad, quad_rule).physical_measure));
+
+    // Cell and node checks.
+    const SingleTetraBoundaryMesh non_finite(
+        17,
+        {{{0.1, -0.2, 0.05}},
+         {{std::numeric_limits<FE::Real>::quiet_NaN(), 0.1, -0.1}},
+         {{0.2, 0.9, 0.3}},
+         {{-0.1, 0.25, 1.1}}});
+    EXPECT_THROW((void)FE::geometry::physicalCutQuadratureMeasure(non_finite, tet_rule),
+                 std::invalid_argument);
+    EXPECT_THROW((void)FE::geometry::mapCutQuadratureRuleToPhysical(non_finite, tet_rule),
+                 std::invalid_argument);
+    auto outside = tet_rule;
+    outside.provenance.parent_entity = 3;
+    EXPECT_THROW((void)FE::geometry::physicalCutQuadratureMeasure(tet, outside),
+                 std::out_of_range);
+    EXPECT_THROW((void)FE::geometry::mapCutQuadratureRuleToPhysical(tet, outside),
+                 std::out_of_range);
 }
 
 TEST(GeneratedActiveBoundaryDomain, FragmentsAreIndependentOfTheThreadCount)

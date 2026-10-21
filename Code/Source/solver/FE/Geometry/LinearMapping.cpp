@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <span>
 
 namespace svmp {
 namespace FE {
@@ -88,6 +89,44 @@ const std::vector<basis::Gradient>* sharedSafeGradients(ElementType type) {
     }
 }
 
+// The affine Jacobian of an element of `dimension` from its constant basis
+// gradients and nodes (one node per gradient), completed to a 3x3 frame for
+// embedded curves and surfaces.  Shared by jacobian() and affineJacobian().
+math::Matrix<Real, 3, 3> jacobianFromConstantGradients(
+    int dimension,
+    const math::Vector<Real, 3>* nodes,
+    const std::vector<basis::Gradient>& grads) {
+    math::Matrix<Real, 3, 3> J{};
+    for (std::size_t a = 0; a < grads.size(); ++a) {
+        for (int j = 0; j < dimension; ++j) {
+            const std::size_t sj = static_cast<std::size_t>(j);
+            for (std::size_t i = 0; i < 3; ++i) {
+                J(i, sj) += nodes[a][i] * grads[a][sj];
+            }
+        }
+    }
+
+    // Complete a 3x3 frame Jacobian for embedded curves/surfaces.
+    if (dimension == 1) {
+        const math::Vector<Real, 3> t{J(0, 0), J(1, 0), J(2, 0)};
+        math::Vector<Real, 3> n1{};
+        math::Vector<Real, 3> n2{};
+        detail::complete_curve_frame(t, n1, n2);
+        J(0, 1) = n1[0]; J(1, 1) = n1[1]; J(2, 1) = n1[2];
+        J(0, 2) = n2[0]; J(1, 2) = n2[1]; J(2, 2) = n2[2];
+    } else if (dimension == 2) {
+        const math::Vector<Real, 3> tu{J(0, 0), J(1, 0), J(2, 0)};
+        const math::Vector<Real, 3> tv{J(0, 1), J(1, 1), J(2, 1)};
+        math::Vector<Real, 3> n_unit{};
+        if (!detail::complete_surface_frame(tu, tv, n_unit)) {
+            J(0, 2) = Real(0); J(1, 2) = Real(0); J(2, 2) = Real(0);
+        } else {
+            J(0, 2) = n_unit[0]; J(1, 2) = n_unit[1]; J(2, 2) = n_unit[2];
+        }
+    }
+    return J;
+}
+
 }
 
 LinearMapping::LinearMapping(ElementType type,
@@ -131,37 +170,22 @@ math::Matrix<Real, 3, 3> LinearMapping::jacobian(const math::Vector<Real, 3>&) c
     // For affine simplex elements gradients are constant; they were evaluated
     // once, at a safe interior point (no division by zero in barycentric
     // derivatives), by sharedSafeGradients().
-    const auto& grads = *safe_gradients_;
+    return jacobianFromConstantGradients(dimension_, nodes_.data(), *safe_gradients_);
+}
 
-    math::Matrix<Real, 3, 3> J{};
-    for (std::size_t a = 0; a < grads.size(); ++a) {
-        for (int j = 0; j < dimension_; ++j) {
-            const std::size_t sj = static_cast<std::size_t>(j);
-            for (std::size_t i = 0; i < 3; ++i) {
-                J(i, sj) += nodes_[a][i] * grads[a][sj];
-            }
-        }
+math::Matrix<Real, 3, 3> LinearMapping::affineJacobian(
+    ElementType type,
+    std::span<const math::Vector<Real, 3>> nodes) {
+    const auto* gradients = sharedSafeGradients(type);
+    if (gradients == nullptr) {
+        throw FEException("LinearMapping supports affine simplex elements (Line2, Triangle3, Tetra4)",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidElement);
     }
-
-    // Complete a 3x3 frame Jacobian for embedded curves/surfaces.
-    if (dimension_ == 1) {
-        const math::Vector<Real, 3> t{J(0, 0), J(1, 0), J(2, 0)};
-        math::Vector<Real, 3> n1{};
-        math::Vector<Real, 3> n2{};
-        detail::complete_curve_frame(t, n1, n2);
-        J(0, 1) = n1[0]; J(1, 1) = n1[1]; J(2, 1) = n1[2];
-        J(0, 2) = n2[0]; J(1, 2) = n2[1]; J(2, 2) = n2[2];
-    } else if (dimension_ == 2) {
-        const math::Vector<Real, 3> tu{J(0, 0), J(1, 0), J(2, 0)};
-        const math::Vector<Real, 3> tv{J(0, 1), J(1, 1), J(2, 1)};
-        math::Vector<Real, 3> n_unit{};
-        if (!detail::complete_surface_frame(tu, tv, n_unit)) {
-            J(0, 2) = Real(0); J(1, 2) = Real(0); J(2, 2) = Real(0);
-        } else {
-            J(0, 2) = n_unit[0]; J(1, 2) = n_unit[1]; J(2, 2) = n_unit[2];
-        }
+    if (nodes.size() != gradients->size()) {
+        throw FEException("LinearMapping node count does not match basis size",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
     }
-    return J;
+    return jacobianFromConstantGradients(element_dimension(type), nodes.data(), *gradients);
 }
 
 math::Vector<Real, 3> LinearMapping::map_to_reference(const math::Vector<Real, 3>& x_phys,

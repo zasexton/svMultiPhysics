@@ -6,10 +6,14 @@
 #include "Quadrature/QuadratureFactory.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
+#include <optional>
+#include <span>
 #include <stdexcept>
 #include <typeinfo>
+#include <vector>
 
 namespace svmp::FE::geometry {
 namespace {
@@ -90,6 +94,54 @@ void requireFinitePoint(const Point& point, const char* label)
         throw std::invalid_argument(std::string("non-finite ") + label +
                                     " in retained cut quadrature");
     }
+}
+
+// The Jacobian makeCutCellGeometryMapping(mesh, cell_id)->jacobian() returns
+// when that mapping is a LinearMapping (MappingFactory with no user basis, an
+// affine request, i.e. geometry order <= 1, and a Line2, Triangle3 or Tetra4
+// cell), computed by the same LinearMapping code without building the mapping.
+// The cell and node checks of makeCutCellGeometryMapping() come first, with
+// the same exceptions; std::nullopt for any other mapping, or for a node
+// count the LinearMapping constructor would reject, so that the caller builds
+// the mapping (which then throws as before).
+[[nodiscard]] std::optional<math::Matrix<Real, 3, 3>> affineCutCellJacobian(
+    const assembly::IMeshAccess& mesh,
+    GlobalIndex cell_id)
+{
+    if (cell_id < 0 || cell_id >= mesh.numCells()) {
+        throw std::out_of_range(
+            "retained cut quadrature parent cell is outside the local mesh");
+    }
+    thread_local std::vector<Point> coordinates;
+    coordinates.clear();
+    mesh.getCellCoordinates(cell_id, coordinates);
+    if (coordinates.empty()) {
+        throw std::invalid_argument(
+            "retained cut quadrature parent cell has no geometry nodes");
+    }
+    for (const auto& coordinate : coordinates) {
+        requireFinitePoint(coordinate, "geometry node");
+    }
+    const auto type = mesh.getCellType(cell_id);
+    const auto geometry_order = mesh.getCellGeometryOrder(cell_id);
+    std::size_t expected_nodes = 0;
+    if (type == ElementType::Line2) {
+        expected_nodes = 2;
+    } else if (type == ElementType::Triangle3) {
+        expected_nodes = 3;
+    } else if (type == ElementType::Tetra4) {
+        expected_nodes = 4;
+    }
+    if (geometry_order > 1 || expected_nodes == 0 ||
+        coordinates.size() != expected_nodes) {
+        return std::nullopt;
+    }
+    std::array<math::Vector<Real, 3>, 4> nodes{};
+    for (std::size_t i = 0; i < expected_nodes; ++i) {
+        nodes[i] = toVector(coordinates[i]);
+    }
+    return LinearMapping::affineJacobian(
+        type, std::span<const math::Vector<Real, 3>>(nodes.data(), expected_nodes));
 }
 
 } // namespace
@@ -313,12 +365,19 @@ Real physicalCutQuadratureMeasure(const assembly::IMeshAccess& mesh,
             parent_dimension) {
             const auto cell =
                 static_cast<GlobalIndex>(rule.provenance.parent_entity);
-            const auto mapping = makeCutCellGeometryMapping(mesh, cell);
+            // An affine simplex cell gets the LinearMapping Jacobian without
+            // a mapping object; any other cell builds its mapping.
+            const auto affine_jacobian = affineCutCellJacobian(mesh, cell);
+            std::shared_ptr<GeometryMapping> mapping;
+            if (!affine_jacobian) {
+                mapping = makeCutCellGeometryMapping(mesh, cell);
+            }
             // LinearMapping::jacobian() ignores xi (it evaluates the constant
             // gradients at a fixed interior point), so its Jacobian and the
             // checks on it are evaluated once, at the first point; every
             // other mapping is evaluated at each point.
             const bool point_independent_jacobian =
+                affine_jacobian.has_value() ||
                 dynamic_cast<const LinearMapping*>(mapping.get()) != nullptr;
             bool have_determinant = false;
             Real determinant{0.0};
@@ -332,7 +391,9 @@ Real physicalCutQuadratureMeasure(const assembly::IMeshAccess& mesh,
                 const Point& reference = point.point;
                 requireFinitePoint(reference, "reference point");
                 if (!point_independent_jacobian || !have_determinant) {
-                    const auto jacobian = mapping->jacobian(toVector(reference));
+                    const auto jacobian = affine_jacobian
+                                              ? *affine_jacobian
+                                              : mapping->jacobian(toVector(reference));
                     determinant = jacobian.determinant();
                     if (!std::isfinite(determinant) ||
                         !(std::abs(determinant) >

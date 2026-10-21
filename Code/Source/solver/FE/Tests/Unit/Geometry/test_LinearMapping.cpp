@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <span>
 #include <thread>
 #include <vector>
 
@@ -275,4 +276,39 @@ TEST(LinearMapping, ConstantGradientTableAndValueBufferMatchPerCallEvaluationBit
             }
         }
     }
+}
+
+TEST(LinearMapping, AffineJacobianWithoutAMappingMatchesTheMappingBitwise) {
+    struct Case {
+        ElementType type;
+        std::vector<math::Vector<Real, 3>> nodes;
+    };
+    const std::vector<Case> cases = {
+        {ElementType::Line2,
+         {{Real(0.3), Real(-0.2), Real(0.1)}, {Real(-1.7), Real(0.4), Real(-0.6)}}},
+        {ElementType::Triangle3,
+         {{Real(0.1), Real(0.2), Real(0.3)}, {Real(1.3), Real(-0.1), Real(0.7)}, {Real(-0.4), Real(0.9), Real(-0.2)}}},
+        {ElementType::Tetra4,
+         {{Real(0.1), Real(0.2), Real(-0.05)}, {Real(-0.9), Real(0.15), Real(0.1)},
+          {Real(0.3), Real(-0.8), Real(0.2)}, {Real(0.25), Real(0.3), Real(0.95)}}},
+    };
+    for (const auto& c : cases) {
+        const LinearMapping mapping(c.type, c.nodes);
+        const auto expected = mapping.jacobian({Real(0.2), Real(0.1), Real(0.3)});
+        const auto actual = LinearMapping::affineJacobian(
+            c.type, std::span<const math::Vector<Real, 3>>(c.nodes.data(), c.nodes.size()));
+        for (std::size_t i = 0; i < 3; ++i) {
+            for (std::size_t j = 0; j < 3; ++j) {
+                EXPECT_EQ(realBits(actual(i, j)), realBits(expected(i, j)))
+                    << "type " << static_cast<int>(c.type) << " J(" << i << "," << j << ")";
+            }
+        }
+        const std::span<const math::Vector<Real, 3>> short_nodes(c.nodes.data(), c.nodes.size() - 1);
+        EXPECT_THROW((void)LinearMapping::affineJacobian(c.type, short_nodes), FEException);
+    }
+    const std::vector<math::Vector<Real, 3>> quad_nodes(4);
+    EXPECT_THROW((void)LinearMapping::affineJacobian(
+                     ElementType::Quad4,
+                     std::span<const math::Vector<Real, 3>>(quad_nodes.data(), quad_nodes.size())),
+                 FEException);
 }

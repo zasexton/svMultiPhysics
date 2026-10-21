@@ -16,6 +16,8 @@
 #include "GeometryMapping.h"
 #include "FE/Basis/LagrangeBasis.h"
 #include <memory>
+#include <span>
+#include <vector>
 
 namespace svmp {
 namespace FE {
@@ -39,6 +41,16 @@ public:
 
     void resetNodes(const std::vector<math::Vector<Real, 3>>& nodes) override { nodes_ = nodes; }
     const basis::BasisFunction& geometryBasis() const override { return *basis_; }
+
+    /**
+     * @brief The Jacobian jacobian() returns for a LinearMapping of `type` with
+     *        `nodes`, computed by the same code without constructing one.
+     *
+     * Throws as the constructor does for an unsupported type or a node count
+     * that does not match the order-1 basis.
+     */
+    static math::Matrix<Real, 3, 3> affineJacobian(ElementType type,
+                                                   std::span<const math::Vector<Real, 3>> nodes);
 
 private:
     ElementType element_type_;
