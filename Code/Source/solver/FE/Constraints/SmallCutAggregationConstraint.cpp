@@ -255,6 +255,11 @@ struct AggregationDeclaration {
     std::vector<GlobalIndex> component_dofs{};
     std::vector<GlobalIndex> root_master_dofs{};
     std::vector<ConstraintLine> lines{};
+    // Every line was merged and passed normalizeAndValidateRootedLine when
+    // the root proposal was built, and no line has changed since.  Checks of
+    // copies skip that validation: on these lines it changes nothing and
+    // passes again.  Decoded proposals do not carry it.
+    bool lines_validated{false};
 };
 
 [[nodiscard]] detail::SmallCutAggregationPhysicalRootKey physicalRootKey(
@@ -1385,9 +1390,10 @@ using GlobalCandidateMap =
                 normalized.lines.size() ==
                     normalized.component_dofs.size();
         for (auto& line : normalized.lines) {
-            const auto line_validation =
-                normalizeAndValidateRootedLine(line);
-            valid = valid && line_validation.valid &&
+            const bool line_valid =
+                normalized.lines_validated ||
+                normalizeAndValidateRootedLine(line).valid;
+            valid = valid && line_valid &&
                     std::find(normalized.component_dofs.begin(),
                               normalized.component_dofs.end(),
                               line.slave_dof) !=
@@ -1485,12 +1491,21 @@ void serializeRootProposals(const LocalAggregationDeclarationMap& local_candidat
         for (const auto master : declaration->root_master_dofs) {
             local_candidate_words.push_back(static_cast<std::int64_t>(master));
         }
-        for (auto line : declaration->lines) {
-            const auto line_validation =
-                normalizeAndValidateRootedLine(line);
-            if (!line_validation.valid) {
-                local_candidate_payload_valid = false;
+        // normalizeRootProposal above validated every line of a rooted
+        // proposal (or found it validated when the proposal was built), and
+        // the lines are unchanged since; lines of other states are checked
+        // here.
+        const bool lines_checked =
+            declaration->state == AggregationDeclarationState::Rooted;
+        for (const auto& source_line : declaration->lines) {
+            ConstraintLine checked_line;
+            if (!lines_checked) {
+                checked_line = source_line;
+                if (!normalizeAndValidateRootedLine(checked_line).valid) {
+                    local_candidate_payload_valid = false;
+                }
             }
+            const auto& line = lines_checked ? source_line : checked_line;
             local_candidate_words.push_back(
                 static_cast<std::int64_t>(line.slave_dof));
             local_candidate_words.push_back(static_cast<std::int64_t>(
@@ -3540,9 +3555,10 @@ resolveDistributedAggregationDeclarations(
                              normalized.lines.size() ==
                                  support.component_dofs.size();
                 for (auto& line : normalized.lines) {
-                    const auto line_validation =
-                        normalizeAndValidateRootedLine(line);
-                    valid = valid && line_validation.valid &&
+                    const bool line_valid =
+                        normalized.lines_validated ||
+                        normalizeAndValidateRootedLine(line).valid;
+                    valid = valid && line_valid &&
                         std::find(support.component_dofs.begin(),
                                   support.component_dofs.end(),
                                   line.slave_dof) !=
@@ -7227,6 +7243,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             return attempt;
         }
         trace_proposal("emitted");
+        declaration.lines_validated = true;
         attempt.emitted = true;
         return attempt;
     };
