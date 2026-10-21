@@ -28,6 +28,7 @@
 #include "Geometry/PushForward.h"
 #include "Basis/BasisFunction.h"
 #include "Basis/BasisCache.h"
+#include "Basis/LagrangeBasis.h"
 #include "Basis/NodeOrderingConventions.h"
 #include "Basis/VectorBasis.h"
 #include "Assembly/JIT/KernelArgs.h"
@@ -1767,7 +1768,81 @@ decltype(auto) withDevirtualizedKernel(AssemblyKernel& kernel, F&& fn)
     return std::forward<F>(fn)(kernel);
 }
 
+// Test switch for the per-cell P1 field derivative path in
+// populateFieldSolutionData() (see detail::setP1FieldDerivativeShortcutForTesting).
+std::atomic<bool> g_p1_field_derivative_shortcut_enabled{true};
+
+/// A Lagrange basis of order 1 on Line2, Triangle3 or Tetra4.  Its
+/// evaluate_gradients() returns the same constants at every reference point
+/// and its evaluate_hessians() returns zeros (LagrangeLineFast<1>,
+/// LagrangeTriFast<1>, LagrangeTetFast<1>; the LagrangeBasis evaluators are
+/// final and dispatch order 1 on these topologies to those tables).
+[[nodiscard]] bool hasPointIndependentLagrangeP1Derivatives(
+    const basis::BasisFunction& basis) noexcept
+{
+    const auto* lagrange = dynamic_cast<const basis::LagrangeBasis*>(&basis);
+    if (lagrange == nullptr || lagrange->order() != 1) {
+        return false;
+    }
+    const auto type = lagrange->element_type();
+    return type == ElementType::Line2 || type == ElementType::Triangle3 ||
+           type == ElementType::Tetra4;
+}
+
+[[nodiscard]] bool allFinite(std::span<const Real> values) noexcept
+{
+    for (const Real value : values) {
+        if (!std::isfinite(value)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool allFinite(const AssemblyContext::Matrix3x3& matrix) noexcept
+{
+    for (const auto& row : matrix) {
+        for (const Real value : row) {
+            if (!std::isfinite(value)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/// Whether populateFieldSolutionData() may evaluate the gradient and Hessian
+/// sums of a field once per cell on its per-point path (no tabulated basis).
+/// It requires a basis with point-independent derivatives, an affine mapping
+/// (the per-point loop then reads the inverse Jacobian at index 0 for every
+/// point) and finite coefficients and inverse Jacobian.  Every point then
+/// repeats the same operations on the same operands, so the point-0 gradient
+/// is the gradient at every point, and each Hessian sum is +0.0 (finite
+/// coefficients times +0.0 Hessians added to +0.0, then finite inverse-Jacobian
+/// products added to +0.0), which is the zero written instead.
+[[nodiscard]] bool p1FieldDerivativesArePointIndependent(
+    const basis::BasisFunction& basis,
+    bool mapping_affine,
+    LocalIndex n_qpts,
+    std::span<const Real> coefficients,
+    std::span<const AssemblyContext::Matrix3x3> inverse_jacobians) noexcept
+{
+    return g_p1_field_derivative_shortcut_enabled.load(std::memory_order_relaxed) &&
+           mapping_affine && n_qpts > 0 && !inverse_jacobians.empty() &&
+           hasPointIndependentLagrangeP1Derivatives(basis) &&
+           allFinite(coefficients) && allFinite(inverse_jacobians.front());
+}
+
 } // namespace
+
+namespace detail {
+
+void setP1FieldDerivativeShortcutForTesting(bool enabled) noexcept
+{
+    g_p1_field_derivative_shortcut_enabled.store(enabled, std::memory_order_relaxed);
+}
+
+} // namespace detail
 
 // ============================================================================
 // Construction
@@ -18608,6 +18683,17 @@ void StandardAssembler::populateFieldSolutionData(
                                             }
                                             return true;
                                         }();
+            // The per-point path (no tabulated basis) of a P1 field: same
+            // point-0 gradient and zero Hessians, bit for bit (see
+            // p1FieldDerivativesArePointIndependent()).
+            const bool p1_point_independent =
+                !field_bcache &&
+                p1FieldDerivativesArePointIndependent(
+                    basis, cached_mapping_affine_, n_qpts,
+                    std::span<const Real>(local_coeffs.data(),
+                                          static_cast<std::size_t>(n_dofs)),
+                    ctx_inv_jacs_span);
+            const bool p1_shortcut = p1_affine_grad || p1_point_independent;
 
             AssemblyContext::Vector3D p1_const_grad{};
             bool p1_grad_ready = false;
@@ -18618,10 +18704,10 @@ void StandardAssembler::populateFieldSolutionData(
                                                    qpts[static_cast<std::size_t>(q)][1],
                                                    qpts[static_cast<std::size_t>(q)][2]};
                     basis.evaluate_values(xi, values_at_pt);
-                    if (need_gradients && !(p1_affine_grad && p1_grad_ready)) {
+                    if (need_gradients && !(p1_shortcut && p1_grad_ready)) {
                         basis.evaluate_gradients(xi, gradients_at_pt);
                     }
-                    if (need_hessians && !p1_affine_grad) {
+                    if (need_hessians && !p1_shortcut) {
                         basis.evaluate_hessians(xi, hessians_at_pt);
                     }
                 }
@@ -18639,8 +18725,8 @@ void StandardAssembler::populateFieldSolutionData(
                 AssemblyContext::Vector3D gref_sum = {0.0, 0.0, 0.0};
                 AssemblyContext::Matrix3x3 H_ref_sum{};
 
-                const bool do_grad_accum = need_gradients && !(p1_affine_grad && p1_grad_ready);
-                const bool do_hess_accum = need_hessians && !p1_affine_grad;
+                const bool do_grad_accum = need_gradients && !(p1_shortcut && p1_grad_ready);
+                const bool do_hess_accum = need_hessians && !p1_shortcut;
 
                 for (LocalIndex j = 0; j < n_dofs; ++j) {
                     const Real coef = local_coeffs[static_cast<std::size_t>(j)];
@@ -18681,7 +18767,7 @@ void StandardAssembler::populateFieldSolutionData(
                 scalar_values[static_cast<std::size_t>(q)] = val;
 
                 if (need_gradients) {
-                    if (p1_affine_grad && p1_grad_ready) {
+                    if (p1_shortcut && p1_grad_ready) {
                         // Reuse constant gradient from QP 0
                         scalar_gradients[static_cast<std::size_t>(q)] = p1_const_grad;
                     } else {
@@ -18694,7 +18780,7 @@ void StandardAssembler::populateFieldSolutionData(
                             }
                         }
                         scalar_gradients[static_cast<std::size_t>(q)] = grad;
-                        if (p1_affine_grad) {
+                        if (p1_shortcut) {
                             p1_const_grad = grad;
                             p1_grad_ready = true;
                         }
@@ -18702,7 +18788,7 @@ void StandardAssembler::populateFieldSolutionData(
                 }
 
                 if (need_hessians) {
-                    if (p1_affine_grad) {
+                    if (p1_shortcut) {
                         // P1 affine: hessians are zero (constant gradient)
                         scalar_hessians[static_cast<std::size_t>(q)] = AssemblyContext::Matrix3x3{};
                         if (want_laplacians) {
@@ -18766,7 +18852,20 @@ void StandardAssembler::populateFieldSolutionData(
 	                    } else {
 	                        scalar_gradients.clear();
 	                    }
+	                    // Same per-cell P1 gradient as the current-state loop,
+	                    // checked against the history coefficients.
+	                    const bool history_p1_point_independent =
+	                        !field_bcache && need_gradients &&
+	                        p1FieldDerivativesArePointIndependent(
+	                            basis, cached_mapping_affine_, n_qpts,
+	                            std::span<const Real>(local_coeffs.data(),
+	                                                  static_cast<std::size_t>(n_dofs)),
+	                            ctx_inv_jacs_span);
+	                    AssemblyContext::Vector3D history_p1_grad{};
+	                    bool history_p1_grad_ready = false;
 	                    for (LocalIndex q = 0; q < n_qpts; ++q) {
+	                        const bool history_reuse_grad =
+	                            history_p1_point_independent && history_p1_grad_ready;
 	                        if (field_bcache) {
 	                            values_at_pt.resize(static_cast<std::size_t>(n_scalar_dofs));
 	                            for (LocalIndex j = 0; j < n_scalar_dofs; ++j) {
@@ -18779,7 +18878,7 @@ void StandardAssembler::populateFieldSolutionData(
 	                                                           qpts[static_cast<std::size_t>(q)][1],
 	                                                           qpts[static_cast<std::size_t>(q)][2]};
 	                            basis.evaluate_values(xi, values_at_pt);
-	                            if (need_gradients) {
+	                            if (need_gradients && !history_reuse_grad) {
 	                                basis.evaluate_gradients(xi, gradients_at_pt);
 	                            }
 	                        }
@@ -18788,7 +18887,7 @@ void StandardAssembler::populateFieldSolutionData(
 	                        for (LocalIndex j = 0; j < n_dofs; ++j) {
 	                            const Real coef = local_coeffs[static_cast<std::size_t>(j)];
 	                            val += coef * values_at_pt[static_cast<std::size_t>(j)];
-	                            if (need_gradients) {
+	                            if (need_gradients && !history_reuse_grad) {
 	                                for (int d = 0; d < dim; ++d) {
 	                                    const auto sd = static_cast<std::size_t>(d);
 	                                    const Real gref = field_bcache
@@ -18801,7 +18900,9 @@ void StandardAssembler::populateFieldSolutionData(
 	                            }
 	                        }
 	                        scalar_values[static_cast<std::size_t>(q)] = val;
-	                        if (need_gradients) {
+	                        if (need_gradients && history_reuse_grad) {
+	                            scalar_gradients[static_cast<std::size_t>(q)] = history_p1_grad;
+	                        } else if (need_gradients) {
 	                            const auto& J_inv =
 	                                ctx_inv_jacs_span[cached_mapping_affine_
 	                                                      ? 0
@@ -18814,6 +18915,10 @@ void StandardAssembler::populateFieldSolutionData(
 	                                             [static_cast<std::size_t>(d1)] *
 	                                        gref_sum[d2];
 	                                }
+	                            }
+	                            if (history_p1_point_independent) {
+	                                history_p1_grad = grad;
+	                                history_p1_grad_ready = true;
 	                            }
 	                            scalar_gradients[static_cast<std::size_t>(q)] = grad;
 	                        }
@@ -19112,16 +19217,33 @@ void StandardAssembler::populateFieldSolutionData(
             // Get inverse Jacobians span once (avoid per-QP accessor overhead).
             const auto ctx_inv_jacs_ps = context.inverseJacobians();
 
+            // The per-point path (no tabulated basis) of a P1 field: the
+            // point-0 Jacobian at every point and zero component Hessians, bit
+            // for bit (see p1FieldDerivativesArePointIndependent()).
+            const bool p1_point_independent_ps =
+                !field_bcache_ps &&
+                p1FieldDerivativesArePointIndependent(
+                    basis, cached_mapping_affine_, n_qpts,
+                    std::span<const Real>(local_coeffs.data(),
+                                          static_cast<std::size_t>(n_dofs)),
+                    ctx_inv_jacs_ps);
+            AssemblyContext::Matrix3x3 p1_jacobian_ps{};
+            bool p1_jacobian_ps_ready = false;
+
             for (LocalIndex q = 0; q < n_qpts; ++q) {
+                const bool reuse_jacobian_ps =
+                    p1_point_independent_ps && p1_jacobian_ps_ready;
+                const bool accumulate_gradients = need_gradients && !reuse_jacobian_ps;
+                const bool accumulate_hessians = need_hessians && !p1_point_independent_ps;
                 if (!field_bcache_ps) {
                     const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
                                                    qpts[static_cast<std::size_t>(q)][1],
                                                    qpts[static_cast<std::size_t>(q)][2]};
                     basis.evaluate_values(xi, values_at_pt);
-                    if (need_gradients) {
+                    if (accumulate_gradients) {
                         basis.evaluate_gradients(xi, gradients_at_pt);
                     }
-                    if (need_hessians) {
+                    if (accumulate_hessians) {
                         basis.evaluate_hessians(xi, hessians_at_pt);
                     }
                 }
@@ -19146,7 +19268,7 @@ void StandardAssembler::populateFieldSolutionData(
                             : values_at_pt[static_cast<std::size_t>(sj)];
                         val_c += coef * basis_val;
 
-                        if (need_gradients) {
+                        if (accumulate_gradients) {
                             for (int d = 0; d < dim; ++d) {
                                 const auto sd = static_cast<std::size_t>(d);
                                 const Real gref = field_bcache_ps
@@ -19158,7 +19280,7 @@ void StandardAssembler::populateFieldSolutionData(
                             }
                         }
 
-                        if (need_hessians) {
+                        if (accumulate_hessians) {
                             for (int r = 0; r < dim; ++r) {
                                 for (int c = 0; c < dim; ++c) {
                                     const auto sr = static_cast<std::size_t>(r);
@@ -19176,7 +19298,7 @@ void StandardAssembler::populateFieldSolutionData(
 
                     vector_values[static_cast<std::size_t>(q)][static_cast<std::size_t>(comp)] = val_c;
 
-                    if (need_gradients) {
+                    if (accumulate_gradients) {
                         // Single J_inv^T * gref_sum transform per component
                         for (int d1 = 0; d1 < dim; ++d1) {
                             Real sum = 0.0;
@@ -19188,7 +19310,14 @@ void StandardAssembler::populateFieldSolutionData(
                         }
                     }
 
-                    if (need_hessians) {
+                    if (need_hessians && p1_point_independent_ps) {
+                        // P1 affine: component Hessians are zero.
+                        const auto idx = q_base + static_cast<std::size_t>(comp);
+                        vector_component_hessians[idx] = AssemblyContext::Matrix3x3{};
+                        if (want_laplacians) {
+                            vector_component_laplacians[idx] = 0.0;
+                        }
+                    } else if (need_hessians) {
                         AssemblyContext::Matrix3x3 H{};
                         for (int r = 0; r < dim; ++r) {
                             for (int c = 0; c < dim; ++c) {
@@ -19216,6 +19345,12 @@ void StandardAssembler::populateFieldSolutionData(
                 }
 
                 if (need_gradients) {
+                    if (reuse_jacobian_ps) {
+                        J = p1_jacobian_ps;
+                    } else if (p1_point_independent_ps) {
+                        p1_jacobian_ps = J;
+                        p1_jacobian_ps_ready = true;
+                    }
                     vector_jacobians[static_cast<std::size_t>(q)] = J;
                 }
             }

@@ -56,6 +56,7 @@
 #include <numeric>
 #include <limits>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 
@@ -7081,6 +7082,403 @@ TEST(StandardAssemblerCaches, FieldFastPathFallsBackForHessianAndLaplacianRequir
     expectDenseSystemNear(
         actual, reference, Real(1.0e-12),
         "Field fast-path Hessian/Laplacian fallback");
+}
+
+// ============================================================================
+// Per-cell P1 field derivatives on rules without a tabulated basis
+// ============================================================================
+
+namespace {
+
+// Records, point by point, every field output populateFieldSolutionData()
+// hands a kernel: current values, gradients, Hessians and Laplacians of a
+// scalar and a ProductSpace field, and the history values (and scalar history
+// gradients) of both.
+class FieldOutputRecordingKernel final : public AssemblyKernel {
+public:
+    FieldOutputRecordingKernel(FieldId scalar_field,
+                               FieldId vector_field,
+                               int vector_components,
+                               int history_states)
+        : scalar_field_(scalar_field)
+        , vector_field_(vector_field)
+        , vector_components_(vector_components)
+        , history_states_(history_states)
+    {
+    }
+
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(),
+                       /*need_matrix=*/true, /*need_vector=*/true);
+        const auto push3 = [&](const AssemblyContext::Vector3D& v) {
+            recorded.insert(recorded.end(), v.begin(), v.end());
+        };
+        const auto push33 = [&](const AssemblyContext::Matrix3x3& m) {
+            for (const auto& row : m) {
+                push3(row);
+            }
+        };
+        for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+            recorded.push_back(ctx.fieldValue(scalar_field_, q));
+            push3(ctx.fieldGradient(scalar_field_, q));
+            push33(ctx.fieldHessian(scalar_field_, q));
+            recorded.push_back(ctx.fieldLaplacian(scalar_field_, q));
+            push3(ctx.fieldVectorValue(vector_field_, q));
+            push33(ctx.fieldJacobian(vector_field_, q));
+            for (int c = 0; c < vector_components_; ++c) {
+                push33(ctx.fieldComponentHessian(vector_field_, q, c));
+                recorded.push_back(ctx.fieldComponentLaplacian(vector_field_, q, c));
+            }
+            for (int k = 1; k <= history_states_; ++k) {
+                recorded.push_back(ctx.fieldPreviousValue(scalar_field_, q, k));
+                push3(ctx.fieldPreviousGradient(scalar_field_, q, k));
+                push3(ctx.fieldPreviousVectorValue(vector_field_, q, k));
+            }
+        }
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return RequiredData::BasisValues | RequiredData::IntegrationWeights;
+    }
+
+    [[nodiscard]] std::vector<FieldRequirement> fieldRequirements() const override
+    {
+        const auto all_derivatives =
+            RequiredData::SolutionValues |
+            RequiredData::SolutionGradients |
+            RequiredData::SolutionHessians |
+            RequiredData::SolutionLaplacians;
+        return {
+            FieldRequirement{scalar_field_, all_derivatives},
+            FieldRequirement{vector_field_, all_derivatives},
+        };
+    }
+
+    std::vector<Real> recorded;
+
+private:
+    FieldId scalar_field_{INVALID_FIELD_ID};
+    FieldId vector_field_{INVALID_FIELD_ID};
+    int vector_components_{0};
+    int history_states_{0};
+};
+
+// Restores the per-cell P1 path when a test leaves early.
+struct P1FieldShortcutGuard {
+    explicit P1FieldShortcutGuard(bool enabled)
+    {
+        detail::setP1FieldDerivativeShortcutForTesting(enabled);
+    }
+    ~P1FieldShortcutGuard() { detail::setP1FieldDerivativeShortcutForTesting(true); }
+    P1FieldShortcutGuard(const P1FieldShortcutGuard&) = delete;
+    P1FieldShortcutGuard& operator=(const P1FieldShortcutGuard&) = delete;
+};
+
+// One cut-volume rule on cell 0 with the given reference points, so the
+// field population takes its per-point path (a transient rule has no
+// tabulated basis).
+CutIntegrationContext makeSingleCellMultiPointCutVolumeContext(
+    int marker,
+    Real parent_measure,
+    const std::vector<std::array<Real, 3>>& points)
+{
+    geometry::CutQuadratureRule rule;
+    rule.kind = geometry::CutQuadratureKind::Volume;
+    rule.side = geometry::CutIntegrationSide::Negative;
+    Real measure{0.0};
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        geometry::CutQuadraturePoint qp;
+        qp.point = points[i];
+        qp.parent_coordinate = points[i];
+        qp.normal = {{Real{1.0}, Real{0.0}, Real{0.0}}};
+        qp.weight = Real{0.01} + Real{0.002} * static_cast<Real>(i);
+        measure += qp.weight;
+        rule.points.push_back(qp);
+    }
+    rule.measure = measure;
+    rule.parent_measure = parent_measure;
+    rule.volume_fraction = rule.measure / rule.parent_measure;
+    rule.exact_polynomial_order = 1;
+    rule.provenance.parent_entity = 0;
+    rule.provenance.marker = marker;
+    rule.provenance.cut_topology_revision = 51u;
+    rule.provenance.predicate_policy_key = 53u;
+    rule.provenance.source_value_revision = 57u;
+
+    CutCellAssemblyMetadata metadata;
+    metadata.cell = 0;
+    metadata.parent_entity = 0;
+    metadata.volume_fraction = rule.volume_fraction;
+    metadata.side = rule.side;
+    metadata.provenance_id = "unit-p1-field-derivatives";
+    metadata.cut_topology_id = "unit-p1-field-derivatives";
+    metadata.revision_key = rule.provenance.cut_topology_revision;
+    metadata.cut_topology_revision = rule.provenance.cut_topology_revision;
+    metadata.quadrature_policy_key = rule.provenance.predicate_policy_key;
+    metadata.source_value_revision = rule.provenance.source_value_revision;
+
+    CutIntegrationContext context;
+    context.addGeneratedVolumeRule(marker, std::move(metadata), std::move(rule));
+    return context;
+}
+
+struct FieldDerivativeCase {
+    const IMeshAccess* mesh{nullptr};
+    const CutIntegrationContext* cut_context{nullptr};
+    int marker{0};
+    const spaces::FunctionSpace* state_space{nullptr};
+    const dofs::DofMap* state_map{nullptr};
+    GlobalIndex n_state{0};
+    std::span<const FieldSolutionAccess> fields{};
+    std::span<const Real> current{};
+    std::span<const Real> previous1{};
+    std::span<const Real> previous2{};
+    const TimeIntegrationContext* time_ctx{nullptr};
+};
+
+std::vector<Real> recordFieldOutputs(const FieldDerivativeCase& c,
+                                     FieldOutputRecordingKernel& kernel,
+                                     bool per_cell_p1_path)
+{
+    P1FieldShortcutGuard guard(per_cell_p1_path);
+    StandardAssembler assembler;
+    assembler.setDofMap(*c.state_map);
+    assembler.initialize();
+    assembler.setFieldSolutionAccess(c.fields);
+    assembler.setCurrentSolution(c.current);
+    assembler.setPreviousSolution(c.previous1);
+    assembler.setPreviousSolution2(c.previous2);
+    assembler.setTimeIntegrationContext(c.time_ctx);
+
+    kernel.recorded.clear();
+    TestDenseSystemView system(c.n_state);
+    const auto result = assembler.assembleCutVolumes(
+        *c.mesh, *c.cut_context, c.marker, geometry::CutIntegrationSide::Negative,
+        *c.state_space, *c.state_space, kernel, &system, &system,
+        /*assemble_matrix=*/true, /*assemble_vector=*/true);
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(result.elements_assembled, 1);
+    return kernel.recorded;
+}
+
+void expectBitwiseEqualOutputs(const std::vector<Real>& actual,
+                               const std::vector<Real>& expected,
+                               const std::string& label)
+{
+    ASSERT_FALSE(expected.empty()) << label;
+    ASSERT_EQ(actual.size(), expected.size()) << label;
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        std::uint64_t a = 0;
+        std::uint64_t b = 0;
+        std::memcpy(&a, &actual[i], sizeof(a));
+        std::memcpy(&b, &expected[i], sizeof(b));
+        EXPECT_EQ(a, b) << label << " entry " << i << ": " << actual[i]
+                        << " vs " << expected[i];
+    }
+}
+
+// Mixed-sign coefficients with a signed zero.
+std::vector<Real> mixedSignCoefficients(std::size_t n, Real scale, Real shift)
+{
+    std::vector<Real> values(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const Real sign = (i % 3u == 1u) ? Real{-1.0} : Real{1.0};
+        values[i] = sign * (scale * static_cast<Real>(i + 1) + shift);
+    }
+    if (n > 2u) {
+        values[2] = Real{-0.0};
+    }
+    return values;
+}
+
+} // namespace
+
+TEST(StandardAssemblerFieldDerivatives, PerCellP1PathMatchesPerPointPathBitwiseOnTetra4)
+{
+    constexpr int marker = 431;
+    constexpr FieldId kScalarField = 501;
+    constexpr FieldId kVectorField = 502;
+    ConfigurableSingleTetraMeshAccess mesh(
+        std::array<std::array<Real, 3>, 4>{
+            std::array<Real, 3>{0.1, -0.2, 0.05},
+            std::array<Real, 3>{2.0, 0.3, -0.1},
+            std::array<Real, 3>{0.3, 3.0, 0.2},
+            std::array<Real, 3>{-0.2, 0.4, 4.0},
+        },
+        std::array<GlobalIndex, 4>{0, 1, 2, 3});
+    const std::vector<std::array<Real, 3>> points{
+        {{0.10, 0.10, 0.10}}, {{0.20, 0.15, 0.05}}, {{0.05, 0.30, 0.12}},
+        {{0.25, 0.25, 0.25}}, {{0.40, 0.10, 0.20}}, {{0.12, 0.07, 0.61}},
+    };
+    const auto cut_context =
+        makeSingleCellMultiPointCutVolumeContext(marker, Real{1.0} / Real{6.0}, points);
+
+    auto scalar_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+    spaces::ProductSpace vector_space(scalar_space, /*components=*/3);
+    auto state_map = createSingleCellDofMap(4);
+    auto scalar_map = createSingleCellDofMap(4);
+    auto vector_map = createSingleCellDofMap(12);
+    std::array<FieldSolutionAccess, 2> fields = {{
+        FieldSolutionAccess{.field = kScalarField, .space = scalar_space.get(),
+                            .dof_map = &scalar_map, .dof_offset = 0},
+        FieldSolutionAccess{.field = kVectorField, .space = &vector_space,
+                            .dof_map = &vector_map, .dof_offset = 4},
+    }};
+
+    TimeIntegrationContext time_ctx;
+    time_ctx.integrator_name = "test-p1-field-history";
+    time_ctx.dt1 = TimeDerivativeStencil{
+        .order = 1,
+        .a = {Real(1.0), Real(-1.0), Real(0.25)},
+    };
+
+    const auto current = mixedSignCoefficients(16, Real{0.37}, Real{-0.11});
+    const auto previous1 = mixedSignCoefficients(16, Real{-0.23}, Real{0.07});
+    const auto previous2 = mixedSignCoefficients(16, Real{0.19}, Real{0.31});
+
+    FieldDerivativeCase c;
+    c.mesh = &mesh;
+    c.cut_context = &cut_context;
+    c.marker = marker;
+    c.state_space = scalar_space.get();
+    c.state_map = &state_map;
+    c.n_state = 4;
+    c.fields = fields;
+    c.current = current;
+    c.previous1 = previous1;
+    c.previous2 = previous2;
+    c.time_ctx = &time_ctx;
+
+    FieldOutputRecordingKernel kernel(kScalarField, kVectorField, 3, 2);
+    const auto reference = recordFieldOutputs(c, kernel, /*per_cell_p1_path=*/false);
+    const auto per_cell = recordFieldOutputs(c, kernel, /*per_cell_p1_path=*/true);
+    expectBitwiseEqualOutputs(per_cell, reference, "Tetra4 P1 fields");
+    // Per point: 1+3+9+1 scalar, 3+9 vector, 3*(9+1) component and
+    // 2*(1+3+3) history entries.
+    EXPECT_EQ(reference.size(), points.size() * (14u + 12u + 30u + 14u));
+
+    // Non-finite coefficients keep the per-point loop; NaN and Inf propagate
+    // exactly as there.
+    auto current_nonfinite = current;
+    current_nonfinite[1] = std::numeric_limits<Real>::quiet_NaN();
+    current_nonfinite[9] = std::numeric_limits<Real>::infinity();
+    auto previous1_nonfinite = previous1;
+    previous1_nonfinite[0] = -std::numeric_limits<Real>::infinity();
+    previous1_nonfinite[7] = std::numeric_limits<Real>::quiet_NaN();
+    c.current = current_nonfinite;
+    c.previous1 = previous1_nonfinite;
+    const auto reference_nonfinite = recordFieldOutputs(c, kernel, false);
+    const auto per_cell_nonfinite = recordFieldOutputs(c, kernel, true);
+    expectBitwiseEqualOutputs(per_cell_nonfinite, reference_nonfinite,
+                              "Tetra4 P1 fields with NaN/Inf coefficients");
+}
+
+TEST(StandardAssemblerFieldDerivatives, PerCellP1PathMatchesPerPointPathBitwiseOnTriangle3)
+{
+    constexpr int marker = 432;
+    constexpr FieldId kScalarField = 511;
+    constexpr FieldId kVectorField = 512;
+    SingleTriangleBoundaryMeshAccess mesh(/*local_face_id=*/0);
+    const std::vector<std::array<Real, 3>> points{
+        {{0.10, 0.10, 0.0}}, {{0.30, 0.15, 0.0}}, {{0.05, 0.60, 0.0}},
+        {{0.33, 0.33, 0.0}}, {{0.70, 0.12, 0.0}},
+    };
+    const auto cut_context =
+        makeSingleCellMultiPointCutVolumeContext(marker, Real{0.5}, points);
+
+    auto scalar_space = std::make_shared<spaces::H1Space>(ElementType::Triangle3, /*order=*/1);
+    spaces::ProductSpace vector_space(scalar_space, /*components=*/2);
+    auto state_map = createSingleCellDofMap(3);
+    auto scalar_map = createSingleCellDofMap(3);
+    auto vector_map = createSingleCellDofMap(6);
+    std::array<FieldSolutionAccess, 2> fields = {{
+        FieldSolutionAccess{.field = kScalarField, .space = scalar_space.get(),
+                            .dof_map = &scalar_map, .dof_offset = 0},
+        FieldSolutionAccess{.field = kVectorField, .space = &vector_space,
+                            .dof_map = &vector_map, .dof_offset = 3},
+    }};
+
+    TimeIntegrationContext time_ctx;
+    time_ctx.integrator_name = "test-p1-field-history-2d";
+    time_ctx.dt1 = TimeDerivativeStencil{
+        .order = 1,
+        .a = {Real(1.0), Real(-1.0), Real(0.25)},
+    };
+
+    const auto current = mixedSignCoefficients(9, Real{-0.41}, Real{0.13});
+    const auto previous1 = mixedSignCoefficients(9, Real{0.29}, Real{-0.05});
+    const auto previous2 = mixedSignCoefficients(9, Real{-0.17}, Real{0.23});
+
+    FieldDerivativeCase c;
+    c.mesh = &mesh;
+    c.cut_context = &cut_context;
+    c.marker = marker;
+    c.state_space = scalar_space.get();
+    c.state_map = &state_map;
+    c.n_state = 3;
+    c.fields = fields;
+    c.current = current;
+    c.previous1 = previous1;
+    c.previous2 = previous2;
+    c.time_ctx = &time_ctx;
+
+    FieldOutputRecordingKernel kernel(kScalarField, kVectorField, 2, 2);
+    const auto reference = recordFieldOutputs(c, kernel, false);
+    const auto per_cell = recordFieldOutputs(c, kernel, true);
+    expectBitwiseEqualOutputs(per_cell, reference, "Triangle3 P1 fields");
+}
+
+TEST(StandardAssemblerFieldDerivatives, QuadraticFieldsKeepThePerPointPath)
+{
+    constexpr int marker = 433;
+    constexpr FieldId kScalarField = 521;
+    constexpr FieldId kVectorField = 522;
+    ConfigurableSingleTetraMeshAccess mesh(
+        std::array<std::array<Real, 3>, 4>{
+            std::array<Real, 3>{0.0, 0.0, 0.0},
+            std::array<Real, 3>{1.5, 0.2, 0.0},
+            std::array<Real, 3>{0.1, 1.7, 0.3},
+            std::array<Real, 3>{0.2, -0.1, 2.2},
+        },
+        std::array<GlobalIndex, 4>{0, 1, 2, 3});
+    const std::vector<std::array<Real, 3>> points{
+        {{0.10, 0.20, 0.30}}, {{0.30, 0.10, 0.20}}, {{0.20, 0.30, 0.10}},
+    };
+    const auto cut_context =
+        makeSingleCellMultiPointCutVolumeContext(marker, Real{1.0} / Real{6.0}, points);
+
+    auto state_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+    auto p2_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/2);
+    spaces::ProductSpace vector_space(p2_space, /*components=*/3);
+    const auto n_p2 = static_cast<GlobalIndex>(p2_space->dofs_per_element());
+    auto state_map = createSingleCellDofMap(4);
+    auto scalar_map = createSingleCellDofMap(n_p2);
+    auto vector_map = createSingleCellDofMap(3 * n_p2);
+    std::array<FieldSolutionAccess, 2> fields = {{
+        FieldSolutionAccess{.field = kScalarField, .space = p2_space.get(),
+                            .dof_map = &scalar_map, .dof_offset = 0},
+        FieldSolutionAccess{.field = kVectorField, .space = &vector_space,
+                            .dof_map = &vector_map, .dof_offset = n_p2},
+    }};
+    const auto current =
+        mixedSignCoefficients(static_cast<std::size_t>(4 * n_p2), Real{0.21}, Real{-0.4});
+
+    FieldDerivativeCase c;
+    c.mesh = &mesh;
+    c.cut_context = &cut_context;
+    c.marker = marker;
+    c.state_space = state_space.get();
+    c.state_map = &state_map;
+    c.n_state = 4;
+    c.fields = fields;
+    c.current = current;
+
+    FieldOutputRecordingKernel kernel(kScalarField, kVectorField, 3, 0);
+    const auto reference = recordFieldOutputs(c, kernel, false);
+    const auto per_cell = recordFieldOutputs(c, kernel, true);
+    expectBitwiseEqualOutputs(per_cell, reference, "Tetra4 P2 fields");
 }
 
 // ============================================================================

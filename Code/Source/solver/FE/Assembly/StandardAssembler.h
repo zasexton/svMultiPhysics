@@ -1819,6 +1819,20 @@ std::unique_ptr<Assembler> createStandardAssembler();
  */
 std::unique_ptr<Assembler> createStandardAssembler(const AssemblyOptions& options);
 
+namespace detail {
+
+/**
+ * @brief Test-only switch for the per-cell P1 field derivative path.
+ *
+ * With `false`, StandardAssembler::populateFieldSolutionData() evaluates the
+ * gradients and Hessians of Lagrange P1 fields at every point of a rule
+ * without a tabulated basis (the reference path the per-cell path must
+ * reproduce bit for bit).  The default is `true`.  Process-wide; tests only.
+ */
+void setP1FieldDerivativeShortcutForTesting(bool enabled) noexcept;
+
+} // namespace detail
+
 } // namespace assembly
 } // namespace FE
 } // namespace svmp
