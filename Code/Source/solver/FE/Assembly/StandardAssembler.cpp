@@ -1835,6 +1835,14 @@ std::atomic<bool> g_p1_field_derivative_shortcut_enabled{true};
 
 } // namespace
 
+namespace {
+
+// Test switch for the storage reuse of the per-cell field caches (see
+// detail::setPerCellCacheStorageReuseForTesting).
+std::atomic<bool> g_per_cell_cache_storage_reuse_enabled{true};
+
+} // namespace
+
 namespace detail {
 
 void setP1FieldDerivativeShortcutForTesting(bool enabled) noexcept
@@ -1842,7 +1850,17 @@ void setP1FieldDerivativeShortcutForTesting(bool enabled) noexcept
     g_p1_field_derivative_shortcut_enabled.store(enabled, std::memory_order_relaxed);
 }
 
+void setPerCellCacheStorageReuseForTesting(bool enabled) noexcept
+{
+    g_per_cell_cache_storage_reuse_enabled.store(enabled, std::memory_order_relaxed);
+}
+
 } // namespace detail
+
+bool StandardAssembler::perCellCacheStorageReuseEnabled() noexcept
+{
+    return g_per_cell_cache_storage_reuse_enabled.load(std::memory_order_relaxed);
+}
 
 // ============================================================================
 // Construction
@@ -3813,7 +3831,7 @@ void StandardAssembler::gatherCellVectorCoefficients(
 }
 
 std::span<const Real> StandardAssembler::gatherCachedCellVectorCoefficients(
-    std::deque<CellCoefficientCacheEntry>& cache,
+    CellCoefficientCache& cache,
     const IMeshAccess& mesh,
     GlobalIndex cell_id,
     const dofs::DofMap* dof_map,
@@ -3898,7 +3916,7 @@ std::span<const Real> StandardAssembler::gatherCachedCellVectorCoefficients(
 }
 
 std::span<const Real> StandardAssembler::gatherCachedCellFieldCoefficients(
-    std::deque<CellCoefficientCacheEntry>& cache,
+    CellCoefficientCache& cache,
     const IMeshAccess& mesh,
     GlobalIndex cell_id,
     const FieldAccessPlan& access,
@@ -11618,8 +11636,8 @@ struct alignas(64) StandardAssembler::MonolithicBatchThreadState {
         std::span<const GlobalIndex> col_dofs{};
     };
 
-    std::vector<std::deque<CellCoefficientCacheEntry>> slot_coefficient_caches{};
-    std::vector<std::deque<CellFieldEvaluationCacheEntry>> slot_field_eval_caches{};
+    std::vector<CellCoefficientCache> slot_coefficient_caches{};
+    std::vector<CellFieldEvaluationCache> slot_field_eval_caches{};
     std::vector<BatchBlockWorkspace> batch_block_workspaces{};
     std::vector<CompiledBlockWorkspace> compiled_workspaces{};
     std::vector<assembly::jit::CoupledBlockView> compiled_block_views{};
@@ -11819,8 +11837,8 @@ void StandardAssembler::assembleMonolithicCellBatch(const MonolithicBatchLoop& l
             const AssemblyContext& shared,
             std::size_t bi,
             GlobalIndex cell_id,
-            std::deque<CellCoefficientCacheEntry>* coefficient_cache,
-            std::deque<CellFieldEvaluationCacheEntry>* field_eval_cache) {
+            CellCoefficientCache* coefficient_cache,
+            CellFieldEvaluationCache* field_eval_cache) {
             const auto& field_ids = monolithic_block_field_ids[bi];
             if (field_ids.empty()) {
                 dst.clearFieldSolutionData();
@@ -11893,9 +11911,7 @@ void StandardAssembler::assembleMonolithicCellBatch(const MonolithicBatchLoop& l
     }
     for (std::size_t slot = 0; slot < active; ++slot) {
         slot_coefficient_caches[slot].clear();
-        slot_coefficient_caches[slot].resize(0);
         slot_field_eval_caches[slot].clear();
-        slot_field_eval_caches[slot].resize(0);
     }
 
     if (use_fused_insert) {
@@ -12561,8 +12577,8 @@ struct StandardAssembler::MonolithicVectorLoop {
 struct alignas(64) StandardAssembler::MonolithicVectorThreadState {
     AssemblyContext fallback_ctx{};
     KernelOutput fallback_output{};
-    std::deque<CellCoefficientCacheEntry> fallback_coefficient_cache{};
-    std::deque<CellFieldEvaluationCacheEntry> fallback_field_eval_cache{};
+    CellCoefficientCache fallback_coefficient_cache{};
+    CellFieldEvaluationCache fallback_field_eval_cache{};
 };
 
 void StandardAssembler::assembleMonolithicVectorCell(const MonolithicVectorLoop& loop,
@@ -13243,8 +13259,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
 
         AssemblyContext shared_ctx;
         shared_ctx.reserve(max_dofs, max_qpts, mesh.dimension());
-        std::deque<CellCoefficientCacheEntry> cell_coefficient_cache;
-        std::deque<CellFieldEvaluationCacheEntry> cell_field_eval_cache;
+        CellCoefficientCache cell_coefficient_cache;
+        CellFieldEvaluationCache cell_field_eval_cache;
         int compared_monolithic_cells = 0;
         double tp_m_geom = 0.0, tp_m_shared_field = 0.0, tp_m_basis = 0.0;
         double tp_m_block_field = 0.0, tp_m_dof = 0.0, tp_m_sol = 0.0;
@@ -13327,8 +13343,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 const AssemblyContext& shared,
                 std::size_t bi,
                 GlobalIndex cell_id,
-                std::deque<CellCoefficientCacheEntry>* coefficient_cache,
-                std::deque<CellFieldEvaluationCacheEntry>* field_eval_cache) {
+                CellCoefficientCache* coefficient_cache,
+                CellFieldEvaluationCache* field_eval_cache) {
                 const auto& field_ids = monolithic_block_field_ids[bi];
                 if (field_ids.empty()) {
                     dst.clearFieldSolutionData();
@@ -18586,7 +18602,7 @@ void StandardAssembler::populateFieldSolutionData(
                                              access->prescribed_coefficients, local_coeffs,
                                              "StandardAssembler::populateFieldSolutionData", false);
             } else if (access->coefficient_source == FieldSolutionAccess::CoefficientSource::DerivedFromUnknown) {
-                std::deque<CellCoefficientCacheEntry> derived_cache;
+                CellCoefficientCache derived_cache;
                 const auto coeffs =
                     gatherCachedCellFieldCoefficients(derived_cache,
                                                        mesh,
@@ -19623,7 +19639,7 @@ void StandardAssembler::populateFieldSolutionData(
                                              access->prescribed_coefficients, local_coeffs,
                                              "StandardAssembler::populateFieldSolutionData", false);
             } else if (access->coefficient_source == FieldSolutionAccess::CoefficientSource::DerivedFromUnknown) {
-                std::deque<CellCoefficientCacheEntry> derived_cache;
+                CellCoefficientCache derived_cache;
                 const auto coeffs =
                     gatherCachedCellFieldCoefficients(derived_cache,
                                                        mesh,
@@ -20828,8 +20844,8 @@ void StandardAssembler::populateFieldSolutionDataFast(
     const IMeshAccess& mesh,
     GlobalIndex cell_id,
     const std::vector<FieldRequirement>& requirements,
-    std::deque<CellCoefficientCacheEntry>* coefficient_cache,
-    std::deque<CellFieldEvaluationCacheEntry>* field_eval_cache)
+    CellCoefficientCache* coefficient_cache,
+    CellFieldEvaluationCache* field_eval_cache)
 {
     // Use cached recipes to skip per-field lookups.
     // Falls back to the original path if recipes aren't valid.
@@ -20841,8 +20857,8 @@ void StandardAssembler::populateFieldSolutionDataFast(
     context.clearFieldSolutionData();
     if (requirements.empty()) return;
 
-    std::vector<const CachedFieldRecipe*> matched_recipes;
-    matched_recipes.reserve(requirements.size());
+    auto& matched_recipes = scratch_matched_field_recipes_;
+    matched_recipes.clear();
     for (const auto& req : requirements) {
         const auto it = std::find_if(
             cached_field_recipes_.begin(), cached_field_recipes_.end(),
@@ -21035,7 +21051,7 @@ void StandardAssembler::populateFieldSolutionDataFast(
                               "populateFieldSolutionDataFast", false);
                       } else if (recipe.access->coefficient_source ==
                                  FieldSolutionAccess::CoefficientSource::DerivedFromUnknown) {
-                          std::deque<CellCoefficientCacheEntry> derived_cache;
+                          CellCoefficientCache derived_cache;
                           const auto coeffs =
                               gatherCachedCellFieldCoefficients(
                                   derived_cache,

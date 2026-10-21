@@ -7482,6 +7482,251 @@ TEST(StandardAssemblerFieldDerivatives, QuadraticFieldsKeepThePerPointPath)
 }
 
 // ============================================================================
+// Per-cell field caches: reused storage reproduces released storage
+// ============================================================================
+
+namespace {
+
+// Records the current values and gradients and the history values of a
+// scalar and a vector field (the requirements the cached fast field path
+// serves) and adds them into the block output.
+class CachedFieldRecordingKernel final : public AssemblyKernel {
+public:
+    CachedFieldRecordingKernel(FieldId scalar_field, FieldId vector_field)
+        : scalar_field_(scalar_field)
+        , vector_field_(vector_field)
+    {
+    }
+
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        const auto n_test = ctx.numTestDofs();
+        const auto n_trial = ctx.numTrialDofs();
+        output.reserve(n_test, n_trial, /*need_matrix=*/true, /*need_vector=*/true);
+        const auto push3 = [&](const AssemblyContext::Vector3D& v) {
+            recorded.insert(recorded.end(), v.begin(), v.end());
+        };
+        for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+            const Real s = ctx.fieldValue(scalar_field_, q);
+            const auto gs = ctx.fieldGradient(scalar_field_, q);
+            const auto v = ctx.fieldVectorValue(vector_field_, q);
+            const auto jv = ctx.fieldJacobian(vector_field_, q);
+            recorded.push_back(s);
+            push3(gs);
+            push3(v);
+            for (const auto& row : jv) {
+                push3(row);
+            }
+            Real history = 0.0;
+            for (int k = 1; k <= 2; ++k) {
+                const Real sk = ctx.fieldPreviousValue(scalar_field_, q, k);
+                const auto vk = ctx.fieldPreviousVectorValue(vector_field_, q, k);
+                recorded.push_back(sk);
+                push3(vk);
+                history += sk + vk[0];
+            }
+            const Real w = ctx.integrationWeight(q);
+            const Real coeff = s + gs[0] - Real(0.5) * v[1] + jv[0][1] + Real(0.25) * history;
+            for (LocalIndex i = 0; i < n_test; ++i) {
+                const Real phi_i = ctx.basisValue(i, q);
+                output.local_vector[static_cast<std::size_t>(i)] += w * phi_i * coeff;
+                for (LocalIndex j = 0; j < n_trial; ++j) {
+                    output.local_matrix[static_cast<std::size_t>(i * n_trial + j)] +=
+                        w * phi_i * ctx.trialBasisValue(j, q) * (Real(1.0) + coeff);
+                }
+            }
+        }
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return RequiredData::BasisValues | RequiredData::IntegrationWeights;
+    }
+
+    [[nodiscard]] std::vector<FieldRequirement> fieldRequirements() const override
+    {
+        return {
+            FieldRequirement{scalar_field_,
+                             RequiredData::SolutionValues | RequiredData::SolutionGradients},
+            FieldRequirement{vector_field_,
+                             RequiredData::SolutionValues | RequiredData::SolutionGradients},
+        };
+    }
+
+    std::vector<Real> recorded;
+
+private:
+    FieldId scalar_field_{INVALID_FIELD_ID};
+    FieldId vector_field_{INVALID_FIELD_ID};
+};
+
+struct PerCellCacheReuseGuard {
+    explicit PerCellCacheReuseGuard(bool enabled)
+    {
+        detail::setPerCellCacheStorageReuseForTesting(enabled);
+    }
+    ~PerCellCacheReuseGuard() { detail::setPerCellCacheStorageReuseForTesting(true); }
+    PerCellCacheReuseGuard(const PerCellCacheReuseGuard&) = delete;
+    PerCellCacheReuseGuard& operator=(const PerCellCacheReuseGuard&) = delete;
+};
+
+std::vector<std::uint64_t> realBitsOf(const std::vector<Real>& values)
+{
+    std::vector<std::uint64_t> bits(values.size());
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        std::memcpy(&bits[i], &values[i], sizeof(std::uint64_t));
+    }
+    return bits;
+}
+
+} // namespace
+
+TEST(StandardAssemblerCaches, PerCellFieldCacheStorageReuseMatchesReleasedStorageBitwise)
+{
+    // Two tetrahedra with different geometry and coefficients; fields of
+    // orders 1 and 2, scalar and vector, current and two history states; two
+    // blocks whose kernels request different field pairs, in both block
+    // orders and for matrix+vector and vector-only assembly.  Every recorded
+    // field output and the assembled system must not depend on whether the
+    // per-cell caches keep their entry storage from cell to cell.
+    MockMeshAccess mesh;
+    auto state_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+    auto scalar_p1 = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+    auto scalar_p2 = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/2);
+    auto vector_p1 = std::make_shared<spaces::ProductSpace>(scalar_p1, /*components=*/3);
+    const auto n_p2 = static_cast<GlobalIndex>(scalar_p2->dofs_per_element());
+    auto state_map = createTestDofMap();
+    auto scalar_p1_map = createTestDofMap();
+    auto scalar_p2_map = createTwoCellDisjointDofMap(n_p2);
+    auto vector_map = createTwoCellDisjointDofMap(12);
+
+    constexpr FieldId kScalarP1 = 601;
+    constexpr FieldId kScalarP2 = 602;
+    constexpr FieldId kVectorP1 = 603;
+    const GlobalIndex p2_offset = 5;
+    const GlobalIndex vector_offset = p2_offset + 2 * n_p2;
+    const auto n_total = static_cast<std::size_t>(vector_offset + 24);
+    std::array<FieldSolutionAccess, 3> fields = {{
+        FieldSolutionAccess{.field = kScalarP1, .space = scalar_p1.get(),
+                            .dof_map = &scalar_p1_map, .dof_offset = 0},
+        FieldSolutionAccess{.field = kScalarP2, .space = scalar_p2.get(),
+                            .dof_map = &scalar_p2_map, .dof_offset = p2_offset},
+        FieldSolutionAccess{.field = kVectorP1, .space = vector_p1.get(),
+                            .dof_map = &vector_map, .dof_offset = vector_offset},
+    }};
+
+    std::vector<Real> current(n_total);
+    std::vector<Real> previous1(n_total);
+    std::vector<Real> previous2(n_total);
+    for (std::size_t i = 0; i < n_total; ++i) {
+        const Real sign = (i % 3u == 1u) ? Real{-1.0} : Real{1.0};
+        current[i] = sign * (Real(0.07) * Real(i + 1) + Real(0.013));
+        previous1[i] = -sign * (Real(0.03) * Real(i + 2) - Real(0.21));
+        previous2[i] = sign * (Real(0.02) * Real(i + 3) + Real(0.005));
+    }
+    TimeIntegrationContext time_ctx;
+    time_ctx.integrator_name = "test-per-cell-cache";
+    time_ctx.dt1 = TimeDerivativeStencil{
+        .order = 1,
+        .a = {Real(1.0), Real(-1.0), Real(0.25)},
+    };
+
+    struct Run {
+        std::vector<std::uint64_t> recorded_a;
+        std::vector<std::uint64_t> recorded_b;
+        std::vector<std::uint64_t> matrix;
+        std::vector<std::uint64_t> vector;
+    };
+    const auto run = [&](bool reuse_storage, bool swap_blocks, bool vector_only) {
+        PerCellCacheReuseGuard guard(reuse_storage);
+        auto kernel_a = std::make_shared<CachedFieldRecordingKernel>(kScalarP1, kVectorP1);
+        auto kernel_b = std::make_shared<CachedFieldRecordingKernel>(kScalarP2, kVectorP1);
+        StandardAssembler assembler;
+        assembler.setDofMap(state_map);
+        assembler.initialize();
+        assembler.setFieldSolutionAccess(fields);
+        assembler.setCurrentSolution(current);
+        assembler.setPreviousSolution(previous1);
+        assembler.setPreviousSolution2(previous2);
+        assembler.setTimeIntegrationContext(&time_ctx);
+
+        std::vector<std::shared_ptr<AssemblyKernel>> kernels;
+        if (swap_blocks) {
+            kernels = {kernel_b, kernel_a};
+        } else {
+            kernels = {kernel_a, kernel_b};
+        }
+        TestDenseSystemView output(10);
+        output.zero();
+        if (!vector_only) {
+            const auto result = assembleDiagonalMonolithic(
+                assembler, mesh, *state_space, state_map, kernels, output);
+            EXPECT_TRUE(result.success);
+        } else {
+            std::vector<forms::MonolithicCellKernel::BlockSpec> blocks;
+            for (std::size_t bi = 0; bi < kernels.size(); ++bi) {
+                const auto offset = static_cast<GlobalIndex>(4 * bi);
+                blocks.push_back(forms::MonolithicCellKernel::BlockSpec{
+                    .test_field = static_cast<FieldId>(2100 + static_cast<int>(bi)),
+                    .trial_field = static_cast<FieldId>(2100 + static_cast<int>(bi)),
+                    .want_matrix = false,
+                    .want_vector = true,
+                    .fallback_kernel = kernels[bi],
+                    .test_space = state_space.get(),
+                    .trial_space = state_space.get(),
+                    .row_dof_map = &state_map,
+                    .col_dof_map = &state_map,
+                    .row_dof_offset = offset,
+                    .col_dof_offset = offset,
+                });
+            }
+            forms::MonolithicCellKernel monolithic_kernel(
+                std::move(blocks),
+                std::shared_ptr<forms::jit::JITCompiler>{},
+                forms::JITOptions{});
+            monolithic_kernel.setResolved();
+            const FusedCellTerm parent_term{
+                .test_space = state_space.get(),
+                .trial_space = state_space.get(),
+                .kernel = &monolithic_kernel,
+                .row_dof_map = &state_map,
+                .col_dof_map = &state_map,
+                .row_dof_offset = 0,
+                .col_dof_offset = 0,
+                .matrix_view = nullptr,
+                .vector_view = &output,
+                .assemble_matrix = false,
+                .assemble_vector = true,
+            };
+            const auto result = assembler.assembleCellsFused(
+                mesh, std::span<const FusedCellTerm>(&parent_term, 1));
+            EXPECT_TRUE(result.success);
+        }
+        return Run{
+            .recorded_a = realBitsOf(kernel_a->recorded),
+            .recorded_b = realBitsOf(kernel_b->recorded),
+            .matrix = realBitsOf(output.matrix()),
+            .vector = realBitsOf(output.vectorData()),
+        };
+    };
+
+    for (const bool swap_blocks : {false, true}) {
+        for (const bool vector_only : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "swap_blocks=" << swap_blocks
+                                              << " vector_only=" << vector_only);
+            const auto released = run(/*reuse_storage=*/false, swap_blocks, vector_only);
+            const auto reused = run(/*reuse_storage=*/true, swap_blocks, vector_only);
+            ASSERT_FALSE(released.recorded_a.empty());
+            ASSERT_FALSE(released.recorded_b.empty());
+            EXPECT_EQ(reused.recorded_a, released.recorded_a);
+            EXPECT_EQ(reused.recorded_b, released.recorded_b);
+            EXPECT_EQ(reused.matrix, released.matrix);
+            EXPECT_EQ(reused.vector, released.vector);
+        }
+    }
+}
+
+// ============================================================================
 // Factory Function Tests
 // ============================================================================
 

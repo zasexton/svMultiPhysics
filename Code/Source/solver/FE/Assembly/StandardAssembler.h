@@ -80,6 +80,7 @@
 #include <span>
 #include <string>
 #include <unordered_map>
+#include <cstddef>
 #include <utility>
 #include <vector>
 
@@ -1760,6 +1761,15 @@ private:
         int history_index{0}; // 0=current, k>0 previous solution state
         bool localized_vector_basis{false};
         std::vector<Real> coeffs{};
+
+        /// The default-constructed state, keeping the (emptied) vector storage.
+        void resetKeepingStorage() noexcept
+        {
+            auto coeffs_storage = std::move(coeffs);
+            coeffs_storage.clear();
+            *this = CellCoefficientCacheEntry{};
+            coeffs = std::move(coeffs_storage);
+        }
     };
     struct CellFieldEvaluationCacheEntry {
         FieldId field_id{INVALID_FIELD_ID};
@@ -1773,9 +1783,79 @@ private:
         std::vector<AssemblyContext::Vector3D> scalar_gradients{};
         std::vector<AssemblyContext::Vector3D> vector_values{};
         std::vector<AssemblyContext::Matrix3x3> vector_jacobians{};
+
+        /// The default-constructed state, keeping the (emptied) vector storage.
+        void resetKeepingStorage() noexcept
+        {
+            auto scalar_values_storage = std::move(scalar_values);
+            auto scalar_gradients_storage = std::move(scalar_gradients);
+            auto vector_values_storage = std::move(vector_values);
+            auto vector_jacobians_storage = std::move(vector_jacobians);
+            scalar_values_storage.clear();
+            scalar_gradients_storage.clear();
+            vector_values_storage.clear();
+            vector_jacobians_storage.clear();
+            *this = CellFieldEvaluationCacheEntry{};
+            scalar_values = std::move(scalar_values_storage);
+            scalar_gradients = std::move(scalar_gradients_storage);
+            vector_values = std::move(vector_values_storage);
+            vector_jacobians = std::move(vector_jacobians_storage);
+        }
     };
+
+    /**
+     * @brief The entries of one cell, with storage kept across cells.
+     *
+     * Behaves as the std::deque it replaces for the operations the per-cell
+     * caches use: iteration visits the entries added since the last clear(),
+     * in insertion order; emplace_back() appends an entry in the
+     * default-constructed state (a recycled slot is reset by
+     * resetKeepingStorage(), so only vector capacity carries over) and never
+     * moves or invalidates the other entries; clear() ends the cell.  Entries
+     * beyond the live ones are never visible.
+     */
+    template <typename Entry>
+    class PerCellCache {
+    public:
+        using iterator = typename std::deque<Entry>::iterator;
+
+        [[nodiscard]] iterator begin() noexcept { return entries_.begin(); }
+        [[nodiscard]] iterator end() noexcept
+        {
+            return entries_.begin() + static_cast<std::ptrdiff_t>(live_);
+        }
+        [[nodiscard]] bool empty() const noexcept { return live_ == 0u; }
+        [[nodiscard]] std::size_t size() const noexcept { return live_; }
+        [[nodiscard]] Entry& back() noexcept { return entries_[live_ - 1u]; }
+
+        Entry& emplace_back()
+        {
+            if (live_ < entries_.size()) {
+                entries_[live_].resetKeepingStorage();
+            } else {
+                entries_.emplace_back();
+            }
+            return entries_[live_++];
+        }
+
+        void clear() noexcept
+        {
+            live_ = 0u;
+            if (!perCellCacheStorageReuseEnabled()) {
+                entries_.clear();
+            }
+        }
+
+    private:
+        std::deque<Entry> entries_{};
+        std::size_t live_{0};
+    };
+    using CellCoefficientCache = PerCellCache<CellCoefficientCacheEntry>;
+    using CellFieldEvaluationCache = PerCellCache<CellFieldEvaluationCacheEntry>;
+    [[nodiscard]] static bool perCellCacheStorageReuseEnabled() noexcept;
+
     [[nodiscard]] std::span<const Real> gatherCachedCellVectorCoefficients(
-        std::deque<CellCoefficientCacheEntry>& cache,
+        CellCoefficientCache& cache,
         const IMeshAccess& mesh,
         GlobalIndex cell_id,
         const dofs::DofMap* dof_map,
@@ -1786,7 +1866,7 @@ private:
         bool localized_vector_basis,
         const char* error_prefix);
     [[nodiscard]] std::span<const Real> gatherCachedCellFieldCoefficients(
-        std::deque<CellCoefficientCacheEntry>& cache,
+        CellCoefficientCache& cache,
         const IMeshAccess& mesh,
         GlobalIndex cell_id,
         const FieldAccessPlan& access,
@@ -1801,8 +1881,11 @@ private:
         const IMeshAccess& mesh,
         GlobalIndex cell_id,
         const std::vector<FieldRequirement>& requirements,
-        std::deque<CellCoefficientCacheEntry>* coefficient_cache = nullptr,
-        std::deque<CellFieldEvaluationCacheEntry>* field_eval_cache = nullptr);
+        CellCoefficientCache* coefficient_cache = nullptr,
+        CellFieldEvaluationCache* field_eval_cache = nullptr);
+
+    // populateFieldSolutionDataFast() scratch (serial callers only).
+    std::vector<const CachedFieldRecipe*> scratch_matched_field_recipes_;
 };
 
 // ============================================================================
@@ -1830,6 +1913,16 @@ namespace detail {
  * reproduce bit for bit).  The default is `true`.  Process-wide; tests only.
  */
 void setP1FieldDerivativeShortcutForTesting(bool enabled) noexcept;
+
+/**
+ * @brief Test-only switch for the storage reuse of the per-cell field caches.
+ *
+ * With `false`, every per-cell coefficient and field-evaluation cache releases
+ * its entries at the end of a cell (the storage behaviour of the std::deque it
+ * replaced), the reference the reused storage must reproduce bit for bit.  The
+ * default is `true`.  Process-wide; tests only.
+ */
+void setPerCellCacheStorageReuseForTesting(bool enabled) noexcept;
 
 } // namespace detail
 
