@@ -690,6 +690,29 @@ These are proposals. Each lists a recommended option and an alternative. Record 
     2. The time-step criterion is judged at R/h = 16 (Δt against Δt/2), as in 2D, with the limits unchanged: 0.1° for the angle, 0.1% for base radius and apex height. The R/h = 8 pair is reported, not gated.
     3. The sector contact angle used by every angle criterion, at every level, is the mean over 21 rotations of the 30° sector partition spaced uniformly over ±5°. The single-partition value is reported alongside. `tolerances.json` and `verify.py` change before the R/h = 16 Δt/2 run is submitted; on the existing outputs this measure gives a change of 0.144° at R/h = 8 (still a fail) and a largest error of about 0.106° at R/h = 16.
     4. The R/h = 16 Δt/2 run (about 11 h on 8 CPUs) is submitted when the VM is free again.
+  - **Outcome (2026-10-21, job 74): the 3D sessile protocol passes.** Verified with the D43 `verify.py` (`46d6d321`) on the four runs.
+    - Time step at R/h = 16: largest sector angle change 0.065° (single partition 0.052°), base 7.8e-6, apex 4.6e-6, all within the limits.
+    - The Δt/2 study also passes the refinement criteria: largest sector error 0.902° and 0.092° at R/h = 8 and 16, max dV/V 1.9e-5 and 1.1e-5.
+    - The R/h = 8 pair stays reported at 0.144° (single partition 0.644°).
+- **D44, 2026-10-21: arm64 campaign results and the first refactor and speed-up integration.** All campaign runs used the production binary `e7080344-ltopgo-mumps` (8 ranks for 3D and capillary rise, 2 and 4 ranks for 2D sessile).
+  - **2D sessile rerun (D41 item 4), R/h = 16/32 at Δt and Δt/2, 60° and 120°: every measured criterion passes.**
+    - Angle error 0.0225° / 0.0047° (60°) and 0.110° / 0.0154° (120°), orders 2.27 and 2.83. Base ≤ 3.1e-4, max dA/A ≤ 7.5e-6. The Δt criterion at R/h = 32 passes: final angle change 0.0017° and 0.0016°.
+    - `verify.py` reports FAIL only because the R/h = 64 outputs are not on the VM (they are on Oak). With the x86 R/h = 64 values, which stand (0.003°), the error decreases at both angles; the 32 → 64 margin at 60° (0.0017°) is within the fit accuracy of 0.05°.
+    - The results match the x86 D39 runs to 2–3 digits; the reconciliation fix has no visible effect in 2D.
+  - **Capillary rise L10, L20, L40 (8 ranks, with the inversion fix `c705ee79`): all three reach t = 0.69 s.** L40 is the first complete run at that level (32.5 h).
+    - Frozen comparison `gruending_2020_omega1_intercode_envelope_v1`, three-level candidate: PASS, 0 of 691 points outside, largest normalized error 0.41, RMS 0.043 mm against the 0.214 mm half-width, observed order 1.93. Evaluated over the full 0–0.69 s grid; the 0–0.416 s window gives the same verdict.
+    - Apex RMS against the reference centre 0.017 / 0.037 / 0.043 mm (x86 L10 and L20: 0.017 / 0.037). The levels converge (L20 − L10 0.024 mm, L40 − L20 0.006 mm RMS) to a curve slightly above the inter-code median, well inside twice the reference uncertainty.
+    - Contact motion per step passes at every level (0.030 / 0.023 / 0.016 cells). The feature gates (peak, timing, end height, damping) stay open pending a pre-declared feature uncertainty.
+    - Outputs and tables: `/scratch/users/zsexton/campaign-e7080344/verify-2d-cr/`.
+  - **Integrated on the main line (cherry-picked, each branch verified on its own first):**
+    - The arm64 test port (D41 item 3): FE CTest 58/58, Physics 25/25, Application 12/12, with no arm64-only failures left. Outputs are bitwise unchanged on the reference sets.
+    - The refactor moves and retirements (D42), 18 commits.
+      - FieldRepairPublication moves to FE/TimeStepping. The generic collectives, ZeroTimeDerivativeIntegrator and the constraint-semantics key move to FE/Systems. The curvature samples and the substage enum move to FE/LevelSet, the nearest-point index to FE/Geometry, and the rank log to FE/Core. The static-capillary minimizer moves to Physics.
+      - Retired: the direct-PSPG and active-pressure experiments, the observation-only diagnostics, and their audit scripts and tests.
+      - ApplicationDriver.cpp goes from 37,439 to 36,030 lines, NewtonSolver.cpp from 20,473 to 15,780, and StandardAssembler.cpp from 24,099 to 21,369. About 31,700 lines of audit scripts and tests are retired.
+    - The outer-pass speed-ups, 7 commits. All are bitwise identical by construction and on the reference sets: a stateless skip of the edge walk for P1 fields, memoized time-derivative fields, ledger merges, a double-precision rejection pre-check of the containment certificate, the monomial table, the facet table and a shared linear basis. Serial time per step: 2D sessile −11.4%, capillary wave −10.9%, 3D sessile R/h = 8 −15.6%.
+    - The owner-sourced aggregation refresh (MPI scaling, 4 commits). Bitwise identical at 2 and 4 ranks. Words received per rank fall 11–15× (sphere R/h = 8 at 4 ranks: 204.5M → 14.1M), and aggregation time falls from 13.9 to 10.4 s. `SVMP_AGGREGATION_PROFILE` became a DEBUG-level log.
+    - Evidence: integration CTest, the exhaustive two-rank matrix, and the nine-case and extended reference sets at 1, 2 and 4 ranks, all bitwise against `e7080344`.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
@@ -1132,9 +1155,9 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - scale-only wall maintenance (`PreserveAcceptedAngle`), as on the dynamic-contact path;
   - no repair-to-target.
 - [x] **2D sessile relaxation: PASS at 60° and 120° (2026-10-13)** with the D39 protocol (triggered redistancing). Angle errors at R/h = 64 are 0.003° for both angles; see the D35 item 1 results in §4. 90° was not part of the D29 resolution study. **Protocol since 2026-10-06:** PDE transport (D15), reconciliation (D14) and patch bounds (D21). R/h = 16 passes every single-level check at 60° and 120° (D21 validation). The resolution study at R/h = 16, 32, 64 (60° and 120°; 4 ranks at 32, 8 at 64) runs on one binary that includes the FSILS layout-stamp fix (stale assembly slots after a layout rebuild, found by the uninitialized-read work), because sessile runs rebuild layouts at every topology change. Estimated from the R/h = 16 serial times (29 and 74 min on Milan): about 8 and 21 h serial at R/h = 32 and 6 and 15 days serial at R/h = 64. Benchmark scripts merged 2026-09-30: `tests/cases/fluid/free_surface_benchmarks/sessile_drop_2d/` (angles by local circle fit, within 0.13° at R/h = 16 on exact caps; slip length R/8; La = 12). Unblocked by the vertex-crossing fix. Generalized-α + FSILS is the single default configuration; `--transport coupled|wet_extension|pde_extension` selects the transport (`pde_extension` refused until D9 lands). The first 300 steps (above) show 60° at 59.5/59.3° with base error 2.8% and apex error 4.8%, still slowing down, and 120° at 115.3/118.6°, still receding (base error 13%). `verify.py` requires the last output at the end time. Start from a *non-equilibrium* shape (for example a 90° cap for a 60° target) and relax to equilibrium at R/h = 16, 32, 64. Proposal: angle error ≤ 2° at R/h = 32 and decreasing; base radius and apex height within 2%.
-- [ ] **Capillary rise** against the prepared Gründing et al. envelope, using `free_surface_wp5_capillary_rise_reference.json` and the comparison runner.
+- [x] **Capillary rise** against the prepared Gründing et al. envelope, using `free_surface_wp5_capillary_rise_reference.json` and the comparison runner: L10/L20/L40 PASS on the frozen comparison (D44, 2026-10-21); the feature gates are still open.
 - [ ] **Ren–E** advancing and receding: refine the 08-30 pilot at 3 meshes and 3 time steps, with slip length ratio ℓ_s/h = 2, 4, 8.
-- [ ] **3D sessile** at one angle, then extend.
+- [x] **3D sessile** at one angle (90°, quarter domain, R/h = 8/16 at Δt and Δt/2): PASS (D38, D43, 2026-10-21). Extending to other angles is open.
 
 ### M5 — Fitted ALE reference path
 
