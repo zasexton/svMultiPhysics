@@ -41,7 +41,9 @@
 #include "fsils_api.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -50,11 +52,25 @@
 #include <omp.h>
 #endif
 
+#if defined(__GNUC__) || defined(__clang__)
+#define FSILS_SPMV_VV_LANES 1
+#endif
+
 namespace spar_mul {
 
 using fe_fsi_linear_solver::fsils_int;
 
 namespace {
+
+// Test-only switch (spar_mul::test::set_vv_dynamic_kernel_forced): route the
+// dof 5-8 VectorToVector products through fsils_spar_mul_vv_dyn, the
+// reference of the dof 5-8 kernel.
+std::atomic<bool> g_vv_dynamic_kernel_forced{false};
+
+[[nodiscard]] bool vv_dynamic_kernel_forced() noexcept
+{
+  return g_vv_dynamic_kernel_forced.load(std::memory_order_relaxed);
+}
 
 [[nodiscard]] bool use_serial_hot_path() noexcept
 {
@@ -427,6 +443,163 @@ static void fsils_spar_mul_vv_dyn(fsils_int iStart, fsils_int iEnd, int dof,
   }
 }
 
+#ifdef FSILS_SPMV_VV_LANES
+//====================================================================
+// VV for dof 5-8: two rows of a block per two-lane register.
+//
+// Every output value is computed with the operations of
+// fsils_spar_mul_vv_dyn, in the same order:
+//   sums[l] = 0.0;
+//   for each entry j of row i, in storage order:
+//     s = 0.0; s += K(l*dof+0,j)*U(0,col); ... ; s += K(l*dof+dof-1,j)*U(dof-1,col);
+//     sums[l] += s;
+// Lanes 0 and 1 of a register hold rows 2p and 2p+1 of the block row.  The
+// entries of a 2x2 sub-block are paired across the two rows in registers
+// (no change to the storage layout).  Vector multiplies and adds are
+// lane-wise IEEE operations, never contracted (-ffp-contract=off) and never
+// reduced across lanes, so each lane repeats the scalar sequence of its row,
+// operand order included.  An odd dof keeps its last row scalar.  Rows are
+// independent, so the OpenMP branch gives the same bits at any thread count.
+//====================================================================
+
+namespace vv_lanes {
+
+typedef double v2d __attribute__((vector_size(16)));
+typedef long long v2i __attribute__((vector_size(16)));
+
+inline v2d load2(const double* p) noexcept
+{
+  v2d r;
+  std::memcpy(&r, p, sizeof(r));
+  return r;
+}
+
+inline void store2(double* p, const v2d v) noexcept
+{
+  std::memcpy(p, &v, sizeof(v));
+}
+
+inline v2d splat(const double x) noexcept
+{
+  return v2d{x, x};
+}
+
+/// {a[0], b[0]}
+inline v2d first_lanes(const v2d a, const v2d b) noexcept
+{
+#if defined(__clang__)
+  return __builtin_shufflevector(a, b, 0, 2);
+#else
+  return __builtin_shuffle(a, b, v2i{0, 2});
+#endif
+}
+
+/// {a[1], b[1]}
+inline v2d second_lanes(const v2d a, const v2d b) noexcept
+{
+#if defined(__clang__)
+  return __builtin_shufflevector(a, b, 1, 3);
+#else
+  return __builtin_shuffle(a, b, v2i{1, 3});
+#endif
+}
+
+template <int DOF>
+inline void row(const fsils_int i,
+                const fsils_int* __restrict__ rp,
+                const fsils_int* __restrict__ cp,
+                const double* __restrict__ k_data,
+                const double* __restrict__ u_data,
+                double* __restrict__ ku_data) noexcept
+{
+  constexpr int DOF2 = DOF * DOF;
+  constexpr int P = DOF / 2;            // row pairs and column pairs
+  constexpr bool kOdd = (DOF % 2) != 0; // last row and column unpaired
+  const v2d zero = splat(0.0);
+
+  v2d sums[P];
+  for (int p = 0; p < P; p++) {
+    sums[p] = zero;
+  }
+  double tail_sum = 0.0;
+
+  const fsils_int j_start = rp[2*i];
+  const fsils_int j_end   = rp[2*i + 1];
+  for (fsils_int j = j_start; j <= j_end; j++) {
+    const double* __restrict__ kj = k_data + static_cast<size_t>(j) * DOF2;
+    const double* __restrict__ uc = u_data + static_cast<size_t>(cp[j]) * DOF;
+
+    v2d s[P];
+    for (int p = 0; p < P; p++) {
+      s[p] = zero;
+    }
+    for (int q = 0; q < P; q++) {
+      const v2d u0 = splat(uc[2*q]);
+      const v2d u1 = splat(uc[2*q + 1]);
+      for (int p = 0; p < P; p++) {
+        const v2d a = load2(kj + (2*p) * DOF + 2*q);      // K(2p,  2q), K(2p,  2q+1)
+        const v2d b = load2(kj + (2*p + 1) * DOF + 2*q);  // K(2p+1,2q), K(2p+1,2q+1)
+        s[p] = s[p] + first_lanes(a, b) * u0;
+        s[p] = s[p] + second_lanes(a, b) * u1;
+      }
+    }
+    if constexpr (kOdd) {
+      const v2d ul = splat(uc[DOF - 1]);
+      for (int p = 0; p < P; p++) {
+        const v2d c = v2d{kj[(2*p) * DOF + DOF - 1], kj[(2*p + 1) * DOF + DOF - 1]};
+        s[p] = s[p] + c * ul;
+      }
+    }
+    for (int p = 0; p < P; p++) {
+      sums[p] = sums[p] + s[p];
+    }
+    if constexpr (kOdd) {
+      const double* __restrict__ kl = kj + (DOF - 1) * DOF;
+      double s_tail = 0.0;
+      for (int k = 0; k < DOF; k++) {
+        s_tail += kl[k] * uc[k];
+      }
+      tail_sum += s_tail;
+    }
+  }
+
+  double* __restrict__ kui = ku_data + static_cast<size_t>(i) * DOF;
+  for (int p = 0; p < P; p++) {
+    store2(kui + 2*p, sums[p]);
+  }
+  if constexpr (kOdd) {
+    kui[DOF - 1] = tail_sum;
+  }
+}
+
+} // namespace vv_lanes
+
+template <int DOF>
+static void fsils_spar_mul_vv_lanes_impl(fsils_int iStart, fsils_int iEnd,
+    const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
+    const Array<double>& K, const Array<double>& U, Array<double>& KU)
+{
+  static_assert(DOF >= 5 && DOF <= 8, "dof 5-8 kernel");
+  const fsils_int* __restrict__ rp = rowPtr.data();   // column-major: rowPtr(r,c) = rp[r + c*2]
+  const fsils_int* __restrict__ cp = colPtr.data();
+  const double* __restrict__ k_data = K.data();
+  const double* __restrict__ u_data = U.data();
+  double* __restrict__ ku_data = KU.data();
+
+  if (use_serial_hot_path()) {
+    for (fsils_int i = iStart; i < iEnd; i++) {
+      vv_lanes::row<DOF>(i, rp, cp, k_data, u_data, ku_data);
+    }
+    return;
+  }
+
+  #pragma omp parallel for schedule(static)
+  for (fsils_int i = iStart; i < iEnd; i++) {
+    vv_lanes::row<DOF>(i, rp, cp, k_data, u_data, ku_data);
+  }
+}
+#endif // FSILS_SPMV_VV_LANES
+
 //====================================================================
 // Fused local kernels used by the distributed sparse-operator layer.
 //====================================================================
@@ -758,6 +931,17 @@ void apply_vv_range(fsils_int i_start,
                     const Array<double>& input,
                     Array<double>& output)
 {
+#ifdef FSILS_SPMV_VV_LANES
+  if (dof >= 5 && dof <= 8 && !spar_mul::vv_dynamic_kernel_forced()) {
+    switch (dof) {
+      case 5: spar_mul::fsils_spar_mul_vv_lanes_impl<5>(i_start, i_end, row_ptr, col_ptr, values, input, output); return;
+      case 6: spar_mul::fsils_spar_mul_vv_lanes_impl<6>(i_start, i_end, row_ptr, col_ptr, values, input, output); return;
+      case 7: spar_mul::fsils_spar_mul_vv_lanes_impl<7>(i_start, i_end, row_ptr, col_ptr, values, input, output); return;
+      case 8: spar_mul::fsils_spar_mul_vv_lanes_impl<8>(i_start, i_end, row_ptr, col_ptr, values, input, output); return;
+      default: break;
+    }
+  }
+#endif
   switch (dof) {
     case 1: spar_mul::fsils_spar_mul_vv_impl<1>(i_start, i_end, row_ptr, col_ptr, diag_ptr, values, input, output); break;
     case 2: spar_mul::fsils_spar_mul_vv_impl<2>(i_start, i_end, row_ptr, col_ptr, diag_ptr, values, input, output); break;
@@ -1200,5 +1384,14 @@ void fsils_spar_mul_rect_vv_fused(FSILS_lhsType& lhs, const Array<fsils_int>& ro
       fe_fsi_linear_solver::distributed_sparse_operator::owned_only_output(mom_ncomp, GP),
       fe_fsi_linear_solver::distributed_sparse_operator::owned_only_output(con_ncomp, SP));
 }
+
+namespace test {
+
+void set_vv_dynamic_kernel_forced(const bool forced) noexcept
+{
+  g_vv_dynamic_kernel_forced.store(forced, std::memory_order_relaxed);
+}
+
+}  // namespace test
 
 }  // namespace spar_mul

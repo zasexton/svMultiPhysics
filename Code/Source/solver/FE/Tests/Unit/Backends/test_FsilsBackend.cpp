@@ -47,6 +47,10 @@
 #include <string>
 #include <vector>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 namespace svmp::FE::backends {
 
 namespace {
@@ -568,6 +572,119 @@ void fillGmresBasis(Array3<Real>& basis, int dof, int n_nodes, int n_slices)
         }
     }
 }
+
+// Sparse FSILS CSR with rows of different lengths (diagonal included,
+// columns sorted); owned_nodes < n_nodes leaves ghost rows.
+DenseFsilsCsrFixture makeSparseFsilsCsr(int n_nodes, int owned_nodes, unsigned seed)
+{
+    using fe_fsi_linear_solver::fsils_int;
+    std::mt19937 rng(seed);
+    std::vector<std::vector<fsils_int>> row_cols(static_cast<std::size_t>(n_nodes));
+    fsils_int total = 0;
+    for (int row = 0; row < n_nodes; ++row) {
+        auto& cols = row_cols[static_cast<std::size_t>(row)];
+        cols.push_back(row);
+        const unsigned density = 2u + static_cast<unsigned>(row % 4);
+        for (int col = 0; col < n_nodes; ++col) {
+            if (col != row && rng() % density == 0) {
+                cols.push_back(col);
+            }
+        }
+        std::sort(cols.begin(), cols.end());
+        total += static_cast<fsils_int>(cols.size());
+    }
+
+    DenseFsilsCsrFixture fixture{
+        .row_ptr = Array<fsils_int>(2, n_nodes),
+        .col_ptr = Vector<fsils_int>(static_cast<int>(total)),
+        .diag_ptr = Vector<fsils_int>(n_nodes),
+        .entry_row = std::vector<fsils_int>(static_cast<std::size_t>(total), 0),
+    };
+    fixture.lhs.gnNo = n_nodes;
+    fixture.lhs.nNo = n_nodes;
+    fixture.lhs.mynNo = owned_nodes;
+    fixture.lhs.nnz = total;
+    fixture.lhs.nFaces = 0;
+    fixture.lhs.commu.task = 0;
+    fixture.lhs.commu.master = 0;
+    fixture.lhs.commu.masF = 1;
+    fixture.lhs.commu.nTasks = 1;
+    fixture.lhs.commu.comm = MPI_COMM_SELF;
+
+    fsils_int entry = 0;
+    for (int row = 0; row < n_nodes; ++row) {
+        fixture.row_ptr(0, row) = entry;
+        for (const fsils_int col : row_cols[static_cast<std::size_t>(row)]) {
+            fixture.col_ptr(static_cast<int>(entry)) = col;
+            fixture.entry_row[static_cast<std::size_t>(entry)] = row;
+            if (col == row) {
+                fixture.diag_ptr(row) = entry;
+            }
+            ++entry;
+        }
+        fixture.row_ptr(1, row) = entry - 1;
+    }
+    return fixture;
+}
+
+// Finite values with signed zeros and subnormals mixed in, over several
+// decades (IEEE corner cases for the bit-for-bit kernel tests).
+Real cornerCaseValue(std::mt19937_64& rng)
+{
+    std::normal_distribution<Real> normal(0.0, 1.0);
+    switch (rng() % 10) {
+        case 0: return Real(-0.0);
+        case 1: return Real(0.0);
+        case 2: return std::numeric_limits<Real>::denorm_min() * Real(1 + rng() % 5);
+        case 3: return -std::numeric_limits<Real>::denorm_min() * Real(1 + rng() % 3);
+        default: return normal(rng) * std::pow(Real(10.0), Real(static_cast<int>(rng() % 9) - 4));
+    }
+}
+
+void expectSameBits(const Real* actual, const Real* expected, std::size_t n, const std::string& what)
+{
+    int reported = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (std::memcmp(actual + i, expected + i, sizeof(Real)) != 0 && reported++ < 5) {
+            ADD_FAILURE() << what << ": bits differ at flat index " << i << ": " << std::hexfloat
+                          << actual[i] << " vs " << expected[i] << std::defaultfloat;
+        }
+    }
+}
+
+void expectSameBits(const Array<Real>& actual, const Array<Real>& expected, const std::string& what)
+{
+    ASSERT_EQ(actual.size(), expected.size()) << what;
+    expectSameBits(actual.data(), expected.data(), static_cast<std::size_t>(actual.size()), what);
+}
+
+// Restores the OpenMP thread count of the test process.
+class OmpThreadCountGuard {
+public:
+    OmpThreadCountGuard()
+    {
+#ifdef _OPENMP
+        saved_ = omp_get_max_threads();
+#endif
+    }
+    ~OmpThreadCountGuard()
+    {
+#ifdef _OPENMP
+        omp_set_num_threads(saved_);
+#endif
+    }
+    static void set(int threads)
+    {
+#ifdef _OPENMP
+        omp_set_num_threads(threads);
+#else
+        (void)threads;
+#endif
+    }
+
+private:
+    int saved_{1};
+};
 
 TEST(FsilsBackendLegacyKernels, EffectiveTimeStepStoresPositiveFiniteValuesAndFallsBack)
 {
@@ -1171,6 +1288,61 @@ TEST(FsilsBackendLegacyKernels, SparseMulVectorVectorDynamicDofMatchesReference)
     spar_mul::fsils_spar_mul_vv(fixture.lhs, fixture.row_ptr, fixture.col_ptr,
                                 dof, values, input, output);
     expectArrayMatchesFlat(output, denseVvReference(fixture, dof, values, input), 1e-14);
+}
+
+// The dof 5-8 kernel (two rows per two-lane register) must give the bits of
+// the generic fsils_spar_mul_vv_dyn kernel, serially and with 2 and 4 OpenMP
+// threads, on rows of different lengths with ghost rows, signed zeros,
+// subnormals and infinities.
+TEST(FsilsBackendLegacyKernels, SparseMulVectorVectorDof5To8MatchesDynamicKernelBitwise)
+{
+    struct ForcedDynamicReset {
+        ~ForcedDynamicReset() { spar_mul::test::set_vv_dynamic_kernel_forced(false); }
+    } reset_switch;
+    OmpThreadCountGuard thread_guard;
+
+    for (const int dof : {5, 6, 7, 8}) {
+        SCOPED_TRACE(::testing::Message() << "dof=" << dof);
+        auto fixture = makeSparseFsilsCsr(/*n_nodes=*/23, /*owned_nodes=*/19, /*seed=*/100u + static_cast<unsigned>(dof));
+        const int nnz = static_cast<int>(fixture.lhs.nnz);
+        const int n_nodes = static_cast<int>(fixture.lhs.nNo);
+        std::mt19937_64 rng(7u * static_cast<unsigned>(dof));
+
+        Array<Real> values(dof * dof, nnz);
+        for (int e = 0; e < values.size(); ++e) {
+            values(e) = cornerCaseValue(rng);
+        }
+
+        for (int variant = 0; variant < 3; ++variant) {
+            SCOPED_TRACE(::testing::Message() << "input variant " << variant);
+            Array<Real> input(dof, n_nodes);
+            for (int e = 0; e < input.size(); ++e) {
+                input(e) = cornerCaseValue(rng);
+            }
+            if (variant == 2) {
+                input(0, 3) = std::numeric_limits<Real>::infinity();
+                input(dof - 1, 11) = -std::numeric_limits<Real>::infinity();
+            }
+
+            Array<Real> reference(dof, n_nodes);
+            reference = 77.0;
+            OmpThreadCountGuard::set(1);
+            spar_mul::test::set_vv_dynamic_kernel_forced(true);
+            spar_mul::fsils_spar_mul_vv(fixture.lhs, fixture.row_ptr, fixture.col_ptr,
+                                        dof, values, input, reference);
+            spar_mul::test::set_vv_dynamic_kernel_forced(false);
+
+            for (const int threads : {1, 2, 4}) {
+                Array<Real> output(dof, n_nodes);
+                output = -55.0;
+                OmpThreadCountGuard::set(threads);
+                spar_mul::fsils_spar_mul_vv(fixture.lhs, fixture.row_ptr, fixture.col_ptr,
+                                            dof, values, input, output);
+                expectSameBits(output, reference,
+                               "dof " + std::to_string(dof) + " threads " + std::to_string(threads));
+            }
+        }
+    }
 }
 
 

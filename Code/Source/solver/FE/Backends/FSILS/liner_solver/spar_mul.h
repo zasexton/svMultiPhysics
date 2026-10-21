@@ -68,4 +68,13 @@ void fsils_spar_mul_rect_vv_fused(FSILS_lhsType& lhs, const Array<fsils_int>& ro
     const Array<double>& G, const Array<double>& L,
     const Array<double>& P, Array<double>& GP, Array<double>& SP);
 
+namespace test {
+
+/// Test-only: when true, VectorToVector products with 5-8 components use the
+/// generic fsils_spar_mul_vv_dyn kernel (the reference of the dof 5-8 kernel)
+/// instead of the two-lane kernel.  Default false.
+void set_vv_dynamic_kernel_forced(bool forced) noexcept;
+
+}  // namespace test
+
 };
