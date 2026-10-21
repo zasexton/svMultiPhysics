@@ -10,11 +10,15 @@
 #include "FE/Basis/LagrangeBasis.h"
 #include "FE/Geometry/FrameGeometry.h"
 #include "FE/Geometry/IsoparametricMapping.h"
+#include "FE/Geometry/LinearMapping.h"
 #include "FE/Quadrature/QuadratureFactory.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <vector>
 
 using namespace svmp::FE;
 using namespace svmp::FE::geometry;
@@ -788,4 +792,80 @@ TEST(FrameGeometry, MeanCurvatureFailsClosedForDegenerateFaceParametrization)
                                 *quad,
                                 invalid_alignment),
         FEException);
+}
+
+namespace {
+
+template <typename T>
+void expectSameBytes(const std::vector<T>& actual, const std::vector<T>& expected,
+                     const char* label)
+{
+    ASSERT_EQ(actual.size(), expected.size()) << label;
+    if (!expected.empty()) {
+        EXPECT_EQ(std::memcmp(actual.data(), expected.data(), sizeof(T) * expected.size()), 0)
+            << label;
+    }
+}
+
+void expectSameFaceGeometry(const FaceGeometryData& actual, const FaceGeometryData& expected)
+{
+    expectSameBytes(actual.cell_geometry.points, expected.cell_geometry.points, "points");
+    expectSameBytes(actual.cell_geometry.jacobians, expected.cell_geometry.jacobians, "jacobians");
+    expectSameBytes(actual.cell_geometry.inverse_jacobians, expected.cell_geometry.inverse_jacobians,
+                    "inverse_jacobians");
+    expectSameBytes(actual.cell_geometry.jacobian_determinants,
+                    expected.cell_geometry.jacobian_determinants, "jacobian_determinants");
+    expectSameBytes(actual.cell_geometry.measures, expected.cell_geometry.measures, "measures");
+    expectSameBytes(actual.cell_reference_points, expected.cell_reference_points,
+                    "cell_reference_points");
+    expectSameBytes(actual.face_reference_points, expected.face_reference_points,
+                    "face_reference_points");
+    expectSameBytes(actual.canonical_to_reference_measures, expected.canonical_to_reference_measures,
+                    "canonical_to_reference_measures");
+    expectSameBytes(actual.normals, expected.normals, "normals");
+    expectSameBytes(actual.surface_measures, expected.surface_measures, "surface_measures");
+    expectSameBytes(actual.surface_jacobians, expected.surface_jacobians, "surface_jacobians");
+    expectSameBytes(actual.mean_curvatures, expected.mean_curvatures, "mean_curvatures");
+}
+
+} // namespace
+
+TEST(FrameGeometry, FaceFrameIntoReusedStorageMatchesAFreshEvaluationBitwise)
+{
+    // One FaceGeometryData reused across faces, rules of different sizes and
+    // different optional outputs must end equal to a fresh evaluation.
+    const std::vector<math::Vector<Real, 3>> nodes{
+        {Real(0.1), Real(-0.2), Real(0.05)},
+        {Real(1.3), Real(0.1), Real(-0.1)},
+        {Real(0.2), Real(0.9), Real(0.3)},
+        {Real(-0.1), Real(0.25), Real(1.1)},
+    };
+    const LinearMapping mapping(ElementType::Tetra4, nodes);
+    const auto rich = quadrature::QuadratureFactory::create(ElementType::Triangle3, 4);
+    const auto sparse = quadrature::QuadratureFactory::create(ElementType::Triangle3, 1);
+    struct Step {
+        LocalIndex face;
+        const quadrature::QuadratureRule* rule;
+        bool surface_jacobians;
+        bool mean_curvatures;
+    };
+    const std::vector<Step> steps{
+        {2, rich.get(), true, true},
+        {0, sparse.get(), false, false},
+        {3, rich.get(), true, false},
+        {1, rich.get(), false, false},
+        {1, sparse.get(), true, true},
+    };
+    FaceGeometryData reused;
+    for (const auto& step : steps) {
+        SCOPED_TRACE(::testing::Message() << "face " << step.face << " points "
+                                          << step.rule->num_points());
+        evaluateFaceFrameInto(reused, mapping, ElementType::Tetra4, step.face,
+                              ElementType::Triangle3, *step.rule, {},
+                              step.surface_jacobians, step.mean_curvatures);
+        const auto fresh = evaluateFaceFrame(mapping, ElementType::Tetra4, step.face,
+                                             ElementType::Triangle3, *step.rule, {},
+                                             step.surface_jacobians, step.mean_curvatures);
+        expectSameFaceGeometry(reused, fresh);
+    }
 }

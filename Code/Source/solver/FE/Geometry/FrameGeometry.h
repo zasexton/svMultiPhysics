@@ -144,6 +144,20 @@ toGeometryNodes(std::span<const Point3D> coordinates);
     bool compute_surface_jacobians = true,
     bool compute_mean_curvatures = true);
 
+/// evaluateFaceFrame(mapping, ...) written into `data`, reusing its vector
+/// storage.  Every array is reassigned for the rule, so `data` ends equal to
+/// the value evaluateFaceFrame() returns.
+void evaluateFaceFrameInto(
+    FaceGeometryData& data,
+    const GeometryMapping& mapping,
+    ElementType cell_type,
+    LocalIndex local_face_id,
+    ElementType face_type,
+    const quadrature::QuadratureRule& quad_rule,
+    std::span<const LocalIndex> align_facet_to_reference = {},
+    bool compute_surface_jacobians = true,
+    bool compute_mean_curvatures = true);
+
 [[nodiscard]] Matrix3x3 configurationTransform(
     const Matrix3x3& current_jacobian,
     const Matrix3x3& reference_inverse_jacobian);

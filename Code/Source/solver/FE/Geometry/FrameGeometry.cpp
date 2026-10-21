@@ -945,7 +945,12 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
     return curvature;
 }
 
-[[nodiscard]] FaceGeometryData evaluateFaceFrameImpl(
+// Fills `data` as a freshly value-initialized FaceGeometryData would be
+// filled: every array is assigned n_qpts value-initialized elements first (the
+// surface Jacobians and mean curvatures stay so unless requested), so reused
+// storage holds nothing from an earlier face.
+void evaluateFaceFrameImpl(
+    FaceGeometryData& data,
     const GeometryMapping& mapping,
     ElementType cell_type,
     LocalIndex local_face_id,
@@ -955,20 +960,20 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
     bool compute_surface_jacobians,
     bool compute_mean_curvatures)
 {
-    FaceGeometryData data;
     const auto n_qpts = static_cast<LocalIndex>(quad_rule.num_points());
-    data.cell_geometry.points.resize(static_cast<std::size_t>(n_qpts));
-    data.cell_geometry.jacobians.resize(static_cast<std::size_t>(n_qpts));
-    data.cell_geometry.inverse_jacobians.resize(static_cast<std::size_t>(n_qpts));
-    data.cell_geometry.jacobian_determinants.resize(static_cast<std::size_t>(n_qpts));
-    data.cell_geometry.measures.resize(static_cast<std::size_t>(n_qpts));
-    data.cell_reference_points.resize(static_cast<std::size_t>(n_qpts));
-    data.face_reference_points.resize(static_cast<std::size_t>(n_qpts));
-    data.canonical_to_reference_measures.resize(static_cast<std::size_t>(n_qpts));
-    data.normals.resize(static_cast<std::size_t>(n_qpts));
-    data.surface_measures.resize(static_cast<std::size_t>(n_qpts));
-    data.surface_jacobians.resize(static_cast<std::size_t>(n_qpts));
-    data.mean_curvatures.resize(static_cast<std::size_t>(n_qpts));
+    const auto n = static_cast<std::size_t>(n_qpts);
+    data.cell_geometry.points.assign(n, Point3D{});
+    data.cell_geometry.jacobians.assign(n, Matrix3x3{});
+    data.cell_geometry.inverse_jacobians.assign(n, Matrix3x3{});
+    data.cell_geometry.jacobian_determinants.assign(n, Real{});
+    data.cell_geometry.measures.assign(n, Real{});
+    data.cell_reference_points.assign(n, Point3D{});
+    data.face_reference_points.assign(n, Point3D{});
+    data.canonical_to_reference_measures.assign(n, Real{});
+    data.normals.assign(n, Vector3D{});
+    data.surface_measures.assign(n, Real{});
+    data.surface_jacobians.assign(n, Matrix3x3{});
+    data.mean_curvatures.assign(n, Real{});
 
     const auto [unused_vertices, ref_face_coords] =
         elements::ElementTransform::facet_vertices(cell_type, static_cast<int>(local_face_id));
@@ -1059,8 +1064,6 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
                                                                        align_facet_to_reference);
         }
     }
-
-    return data;
 }
 
 } // namespace
@@ -1166,14 +1169,38 @@ FaceGeometryData evaluateFaceFrame(const GeometryMapping& mapping,
                                    bool compute_surface_jacobians,
                                    bool compute_mean_curvatures)
 {
-    return evaluateFaceFrameImpl(mapping,
-                                 cell_type,
-                                 local_face_id,
-                                 face_type,
-                                 quad_rule,
-                                 align_facet_to_reference,
-                                 compute_surface_jacobians,
-                                 compute_mean_curvatures);
+    FaceGeometryData data;
+    evaluateFaceFrameImpl(data,
+                          mapping,
+                          cell_type,
+                          local_face_id,
+                          face_type,
+                          quad_rule,
+                          align_facet_to_reference,
+                          compute_surface_jacobians,
+                          compute_mean_curvatures);
+    return data;
+}
+
+void evaluateFaceFrameInto(FaceGeometryData& data,
+                           const GeometryMapping& mapping,
+                           ElementType cell_type,
+                           LocalIndex local_face_id,
+                           ElementType face_type,
+                           const quadrature::QuadratureRule& quad_rule,
+                           std::span<const LocalIndex> align_facet_to_reference,
+                           bool compute_surface_jacobians,
+                           bool compute_mean_curvatures)
+{
+    evaluateFaceFrameImpl(data,
+                          mapping,
+                          cell_type,
+                          local_face_id,
+                          face_type,
+                          quad_rule,
+                          align_facet_to_reference,
+                          compute_surface_jacobians,
+                          compute_mean_curvatures);
 }
 
 FaceGeometryData evaluateFaceFrame(ElementType cell_type,

@@ -9334,14 +9334,19 @@ void StandardAssembler::computeFaceFrameGeometry(
     bool compute_surface_jacobians,
     bool compute_mean_curvatures)
 {
-    const auto data = geometry::evaluateFaceFrame(mapping,
-                                                  cell_type,
-                                                  local_face_id,
-                                                  face_type,
-                                                  quad_rule,
-                                                  align_facet_to_reference,
-                                                  compute_surface_jacobians,
-                                                  compute_mean_curvatures);
+    // Reused per thread: evaluateFaceFrameInto() reassigns every array, and
+    // the copies below reuse the scratch capacity: no per-face array storage.
+    thread_local geometry::FaceGeometryData face_frame_data;
+    geometry::evaluateFaceFrameInto(face_frame_data,
+                                    mapping,
+                                    cell_type,
+                                    local_face_id,
+                                    face_type,
+                                    quad_rule,
+                                    align_facet_to_reference,
+                                    compute_surface_jacobians,
+                                    compute_mean_curvatures);
+    const auto& data = face_frame_data;
     scratch.cell.points = data.cell_geometry.points;
     scratch.cell.jacobians = data.cell_geometry.jacobians;
     scratch.cell.inverse_jacobians = data.cell_geometry.inverse_jacobians;
