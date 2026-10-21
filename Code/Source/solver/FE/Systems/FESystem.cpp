@@ -8292,9 +8292,9 @@ FESystem::refreshConstraintStateForCurrentRevisions(double time,
     // communicator-canonical snapshot on every caller rank before invoking
     // callbacks, irrespective of each rank's local update count.
     const bool republish_aggregation_prolongations =
-        !finalized_small_cut_aggregation_prolongations_.empty();
+        !closed_small_cut_aggregation_prolongations_.empty();
     invalidateGeneratedBoundaryNitscheTraceCertificates();
-    finalized_small_cut_aggregation_prolongations_.clear();
+    closed_small_cut_aggregation_prolongations_.clear();
     bool any_update = false;
     try {
         std::size_t k = 1u;
@@ -8312,7 +8312,7 @@ FESystem::refreshConstraintStateForCurrentRevisions(double time,
         }
     } catch (...) {
         invalidateGeneratedBoundaryNitscheTraceCertificates();
-        finalized_small_cut_aggregation_prolongations_.clear();
+        closed_small_cut_aggregation_prolongations_.clear();
         throw;
     }
     ++constraint_time_epoch_;
@@ -8493,7 +8493,7 @@ void FESystem::invalidateSetup() noexcept
     generated_boundary_nitsche_trace_policy_shape_validated_ =
         false;
     generated_boundary_nitsche_trace_policy_signature_ = 0u;
-    finalized_small_cut_aggregation_prolongations_.clear();
+    closed_small_cut_aggregation_prolongations_.clear();
     monolithic_aux_committed_rates_.clear();
     monolithic_aux_committed_rates_valid_.clear();
 
@@ -18564,7 +18564,7 @@ void FESystem::setCutIntegrationContext(
     // including null-to-null invalidation, as a new revision boundary.
     bumpConstraintLayoutRevision();
     invalidateGeneratedBoundaryNitscheTraceCertificates();
-    finalized_small_cut_aggregation_prolongations_.clear();
+    closed_small_cut_aggregation_prolongations_.clear();
     generated_active_boundary_owner_bindings_.swap(
         candidate_owner_bindings);
     cut_integration_context_ = std::move(context);
@@ -20116,7 +20116,76 @@ std::vector<std::shared_ptr<
 FESystem::finalizedSmallCutAggregationProlongations() const
 {
     requireSetup();
-    return finalized_small_cut_aggregation_prolongations_;
+    using constraints::SmallCutAggregationConstraint;
+    std::vector<std::shared_ptr<
+        const constraints::SmallCutAggregationProlongationReport>>
+        reports;
+    // Every rank holds the same closure records, and a report is only ever
+    // built by a collective request, so whether one is still to be built is
+    // the same on every rank: built reports are returned without
+    // communication.
+    const bool all_built = std::all_of(
+        closed_small_cut_aggregation_prolongations_.begin(),
+        closed_small_cut_aggregation_prolongations_.end(),
+        [](const auto& closed) {
+            return closed != nullptr &&
+                   SmallCutAggregationConstraint::builtProlongationReport(
+                       *closed) != nullptr;
+        });
+    if (all_built) {
+        reports.reserve(closed_small_cut_aggregation_prolongations_.size());
+        for (const auto& closed :
+             closed_small_cut_aggregation_prolongations_) {
+            reports.push_back(
+                SmallCutAggregationConstraint::builtProlongationReport(
+                    *closed));
+        }
+        return reports;
+    }
+    std::exception_ptr local_storage_exception;
+    try {
+        reports.reserve(closed_small_cut_aggregation_prolongations_.size());
+    } catch (...) {
+        local_storage_exception = std::current_exception();
+    }
+    coordinateFinalizedReportLocalFailure(
+        *this,
+        local_storage_exception,
+        "prolongation_report_request_reserve");
+    for (const auto& closed : closed_small_cut_aggregation_prolongations_) {
+        auto report =
+            SmallCutAggregationConstraint::materializeProlongationReport(
+                *this, *closed);
+        local_storage_exception = nullptr;
+        try {
+            reports.push_back(std::move(report));
+        } catch (...) {
+            local_storage_exception = std::current_exception();
+        }
+        coordinateFinalizedReportLocalFailure(
+            *this,
+            local_storage_exception,
+            "prolongation_report_request_append");
+    }
+    return reports;
+}
+
+std::vector<std::shared_ptr<
+    const constraints::SmallCutAggregationProlongationReport>>
+FESystem::builtSmallCutAggregationProlongations() const
+{
+    std::vector<std::shared_ptr<
+        const constraints::SmallCutAggregationProlongationReport>>
+        reports;
+    reports.reserve(closed_small_cut_aggregation_prolongations_.size());
+    for (const auto& closed : closed_small_cut_aggregation_prolongations_) {
+        reports.push_back(
+            closed != nullptr
+                ? constraints::SmallCutAggregationConstraint::
+                      builtProlongationReport(*closed)
+                : nullptr);
+    }
+    return reports;
 }
 
 void FESystem::validateExteriorBoundaryMeasurePoliciesAgainstCutContext(
@@ -20892,10 +20961,14 @@ void FESystem::refreshGeneratedBoundaryNitscheTraceCertificates(
         return;
     }
 
+    // Collective, like this refresh: the certificates read the reports of
+    // the current closure.
+    const auto aggregation_reports =
+        finalizedSmallCutAggregationProlongations();
     const bool local_missing_cut_context =
         cut_integration_context_ == nullptr;
     const bool local_missing_aggregation_reports =
-        finalized_small_cut_aggregation_prolongations_.empty();
+        aggregation_reports.empty();
     std::exception_ptr local_context_exception;
     try {
         if (local_missing_cut_context &&
@@ -20992,8 +21065,7 @@ void FESystem::refreshGeneratedBoundaryNitscheTraceCertificates(
             std::shared_ptr<const constraints::
                 SmallCutAggregationProlongationReport>
                 source_report;
-            for (const auto& report :
-                 finalized_small_cut_aggregation_prolongations_) {
+            for (const auto& report : aggregation_reports) {
                 if (!report ||
                     report->field != policy->velocity_field ||
                     report->interface_marker !=
@@ -21308,15 +21380,13 @@ void FESystem::requireCurrentGeneratedBoundaryNitscheTraceCertificates(
                     "FESystem: generated-boundary Nitsche trace "
                     "certificate cache has stale revision metadata");
             }
+            const auto built_reports =
+                builtSmallCutAggregationProlongations();
             const auto current_report = std::find(
-                finalized_small_cut_aggregation_prolongations_
-                    .begin(),
-                finalized_small_cut_aggregation_prolongations_
-                    .end(),
+                built_reports.begin(),
+                built_reports.end(),
                 record->aggregation_report);
-            if (current_report ==
-                finalized_small_cut_aggregation_prolongations_
-                    .end()) {
+            if (current_report == built_reports.end()) {
                 throw std::runtime_error(
                     "FESystem: generated-boundary Nitsche trace "
                     "certificate does not own the current aggregation "
@@ -21527,8 +21597,10 @@ void FESystem::requireCurrentGeneratedBoundaryNitscheTraceCertificates(
 void FESystem::publishFinalizedSmallCutAggregationProlongations()
 {
     invalidateGeneratedBoundaryNitscheTraceCertificates();
+    // Each closure validates the closed rows against their owners now; the
+    // reports themselves are built on request.
     std::vector<std::shared_ptr<
-        const constraints::SmallCutAggregationProlongationReport>>
+        const constraints::detail::SmallCutAggregationClosedProlongation>>
         finalized;
     std::exception_ptr local_storage_exception;
     try {
@@ -21548,12 +21620,12 @@ void FESystem::publishFinalizedSmallCutAggregationProlongations()
         if (aggregation == nullptr) {
             continue;
         }
-        auto report = aggregation->finalizeProlongationReport(
+        auto closed = aggregation->closeProlongation(
             *this, affine_constraints_);
         local_storage_exception = nullptr;
         try {
-            if (report) {
-                finalized.push_back(std::move(report));
+            if (closed) {
+                finalized.push_back(std::move(closed));
             }
         } catch (...) {
             local_storage_exception = std::current_exception();
@@ -21563,7 +21635,7 @@ void FESystem::publishFinalizedSmallCutAggregationProlongations()
             local_storage_exception,
             "prolongation_report_storage_append");
     }
-    finalized_small_cut_aggregation_prolongations_.swap(finalized);
+    closed_small_cut_aggregation_prolongations_.swap(finalized);
 }
 
 void FESystem::addOperator(OperatorTag name)
@@ -32919,9 +32991,9 @@ void FESystem::updateConstraints(double time, double dt)
     // partitioned storage. All ranks conservatively discard the finalized
     // communicator snapshot before any callback can mutate a closed row.
     const bool republish_aggregation_prolongations =
-        !finalized_small_cut_aggregation_prolongations_.empty();
+        !closed_small_cut_aggregation_prolongations_.empty();
     invalidateGeneratedBoundaryNitscheTraceCertificates();
-    finalized_small_cut_aggregation_prolongations_.clear();
+    closed_small_cut_aggregation_prolongations_.clear();
     bool any_updated = false;
 
     try {
@@ -32940,7 +33012,7 @@ void FESystem::updateConstraints(double time, double dt)
         }
     } catch (...) {
         invalidateGeneratedBoundaryNitscheTraceCertificates();
-        finalized_small_cut_aggregation_prolongations_.clear();
+        closed_small_cut_aggregation_prolongations_.clear();
         throw;
     }
 

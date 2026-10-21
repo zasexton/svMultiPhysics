@@ -145,6 +145,7 @@ namespace constraints {
 namespace detail {
 
 struct SmallCutAggregationPendingProlongation;
+struct SmallCutAggregationClosedProlongation;
 struct SmallCutAggregationReuseRecord;
 struct SmallCutAggregationReuseInputs;
 struct SmallCutAggregationRetainedMeasures;
@@ -636,6 +637,37 @@ struct SmallCutAggregationProlongationReport {
     std::vector<SmallCutAggregationProlongationPatch> patches{};
 };
 
+/**
+ * True when two reports hold the same contents bit for bit: every member,
+ * floating-point values compared by their IEEE bit patterns, the revision
+ * stamps and the canonical digest.
+ */
+[[nodiscard]] bool smallCutAggregationProlongationReportsBitwiseEqual(
+    const SmallCutAggregationProlongationReport& lhs,
+    const SmallCutAggregationProlongationReport& rhs) noexcept;
+
+/**
+ * Verification aid for tests, off by default. When on, every constraint
+ * closure also builds its prolongation report at once (as the system did
+ * before reports were built on request), and the report later built on
+ * request must equal it bit for bit; a difference fails the request on every
+ * rank. The extra build is collective, so every rank of a communicator must
+ * use the same setting.
+ */
+void setSmallCutAggregationLazyReportVerificationForTesting(
+    bool enabled) noexcept;
+[[nodiscard]] bool
+smallCutAggregationLazyReportVerificationForTesting() noexcept;
+
+/**
+ * Fault injection for tests: the next prolongation report build on the
+ * given rank of its communicator throws once (negative: none). The build
+ * coordinates the failure, so every rank's request fails and the closure
+ * record stays usable for a later request.
+ */
+void injectSmallCutAggregationReportBuildFailureForTesting(
+    int rank) noexcept;
+
 class SmallCutAggregationConstraint final : public ISystemConstraint {
 public:
     class LifecycleCheckpoint {
@@ -701,15 +733,42 @@ private:
     friend class systems::FESystem;
 
     /**
-     * Materialize the immutable prolongation report from a fully closed
-     * system constraint set. Returns null when the most recent apply pass was
-     * context-free, failed, or used the debug line-cap bypass.
+     * Collective over the system communicator. Validates a fully closed
+     * system constraint set against the most recent apply pass: the owners
+     * of the candidate slaves exchange their closed rows, and every rank
+     * checks its own relevant rows against them. Returns the record from
+     * which the prolongation report is built on request, or null when the
+     * most recent apply pass was context-free, failed, or used the debug
+     * line-cap bypass. The record keeps the closed rows and the revision
+     * stamps of this closure, so the report does not depend on when it is
+     * built.
      */
     [[nodiscard]] std::shared_ptr<
-        const SmallCutAggregationProlongationReport>
-    finalizeProlongationReport(
+        const detail::SmallCutAggregationClosedProlongation>
+    closeProlongation(
         const systems::FESystem& system,
         const AffineConstraints& closed_constraints) const;
+
+    /**
+     * The immutable prolongation report of a closure record, built on the
+     * first request and kept in the record. Collective over the system
+     * communicator while the report is not yet built (failure coordination
+     * and the cross-rank digest check); every rank of the communicator must
+     * request the reports of the same records in the same order.
+     */
+    [[nodiscard]] static std::shared_ptr<
+        const SmallCutAggregationProlongationReport>
+    materializeProlongationReport(
+        const systems::FESystem& system,
+        const detail::SmallCutAggregationClosedProlongation& closed);
+
+    /// The report of a closure record if it has been built, else null.
+    /// Rank-local.
+    [[nodiscard]] static std::shared_ptr<
+        const SmallCutAggregationProlongationReport>
+    builtProlongationReport(
+        const detail::SmallCutAggregationClosedProlongation&
+            closed) noexcept;
 
     /**
      * Internal transaction support for refresh/churn and pending metadata.

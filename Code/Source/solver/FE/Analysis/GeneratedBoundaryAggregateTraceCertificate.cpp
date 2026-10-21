@@ -878,7 +878,10 @@ struct SelectedState {
 [[nodiscard]] SelectedState selectAndValidateState(
     const systems::FESystem& system,
     const GeneratedBoundaryAggregateTraceCertificationOptions& options,
-    const CollectiveContext& collective)
+    const CollectiveContext& collective,
+    const std::vector<std::shared_ptr<
+        const constraints::SmallCutAggregationProlongationReport>>&
+        reports)
 {
     if (options.field == INVALID_FIELD_ID) {
         reject("field is invalid");
@@ -951,8 +954,6 @@ struct SelectedState {
         reject("affine constraints are not closed");
     }
 
-    const auto reports =
-        system.finalizedSmallCutAggregationProlongations();
     for (const auto& candidate : reports) {
         if (candidate &&
             candidate->field == options.field &&
@@ -4919,12 +4920,18 @@ certifyGeneratedBoundaryAggregateTrace(
     const auto collective =
         collectiveContext(system);
 
+    // Collective (a report may be built on this request), so it is
+    // requested on every rank before the rank-local preflight, whose
+    // failures are coordinated after it.
+    const auto reports =
+        system.finalizedSmallCutAggregationProlongations();
+
     SelectedState selected;
     std::exception_ptr local_exception;
     try {
         selected =
             selectAndValidateState(
-                system, options, collective);
+                system, options, collective, reports);
     } catch (...) {
         local_exception = std::current_exception();
     }

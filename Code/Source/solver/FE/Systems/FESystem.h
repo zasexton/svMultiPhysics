@@ -1501,6 +1501,19 @@ public:
     [[nodiscard]] std::vector<
         constraints::SmallCutAggregationRefreshReport>
     completedSmallCutAggregationRefreshReports() const;
+    /**
+     * Prolongation reports of the current constraint closure, one per
+     * small-cut aggregation constraint that has one, in constraint order.
+     *
+     * Collective over the system communicator: each closure records what
+     * its reports need, and a report is built on the first request after
+     * the closure (with communicator-wide failure coordination and a
+     * cross-rank digest check). Every rank of the communicator must
+     * therefore call this at the same point of its control flow. Later
+     * calls for the same closure return the built reports without
+     * communication. A report is the same, bit for bit and revision stamps
+     * included, as if it had been built at the closure.
+     */
     [[nodiscard]] std::vector<std::shared_ptr<
         const constraints::SmallCutAggregationProlongationReport>>
     finalizedSmallCutAggregationProlongations() const;
@@ -2979,6 +2992,11 @@ private:
             GeneratedBoundaryNitscheTracePolicy> policies) noexcept;
     void invalidateSetup() noexcept;
     void publishFinalizedSmallCutAggregationProlongations();
+    // Rank-local: the reports of the current closure built so far (null
+    // where a report has not been requested yet).
+    [[nodiscard]] std::vector<std::shared_ptr<
+        const constraints::SmallCutAggregationProlongationReport>>
+    builtSmallCutAggregationProlongations() const;
     void invalidateGeneratedBoundaryNitscheTraceCertificates() noexcept;
     void refreshGeneratedBoundaryNitscheTraceCertificates(
         bool allow_missing_cut_context);
@@ -3051,8 +3069,9 @@ private:
         std::uint64_t analysis_inputs_version{0};
         std::uint64_t analysis_report_version{0};
         std::vector<std::shared_ptr<
-            const constraints::SmallCutAggregationProlongationReport>>
-            finalized_small_cut_aggregation_prolongations{};
+            const constraints::detail::
+                SmallCutAggregationClosedProlongation>>
+            closed_small_cut_aggregation_prolongations{};
         std::vector<GeneratedBoundaryNitscheTraceCertificateRecord>
             generated_boundary_nitsche_trace_certificates{};
         std::vector<std::shared_ptr<
@@ -3612,9 +3631,12 @@ public:
 
 private:
     BorderedCouplingData bordered_coupling_{};
+    // Closure records of the small-cut aggregation constraints; their
+    // prolongation reports are built on request
+    // (finalizedSmallCutAggregationProlongations).
     std::vector<std::shared_ptr<
-        const constraints::SmallCutAggregationProlongationReport>>
-        finalized_small_cut_aggregation_prolongations_{};
+        const constraints::detail::SmallCutAggregationClosedProlongation>>
+        closed_small_cut_aggregation_prolongations_{};
     std::vector<ExteriorBoundaryMeasurePolicy>
         exterior_boundary_measure_policies_{};
     ExteriorBoundaryMeasurePolicyId

@@ -7095,8 +7095,8 @@ void FESystem::beginCutIntegrationContextTransaction()
             analysis_inputs_version_;
         candidate_backup->analysis_report_version =
             analysis_report_version_;
-        candidate_backup->finalized_small_cut_aggregation_prolongations =
-            finalized_small_cut_aggregation_prolongations_;
+        candidate_backup->closed_small_cut_aggregation_prolongations =
+            closed_small_cut_aggregation_prolongations_;
         candidate_backup->generated_boundary_nitsche_trace_certificates =
             generated_boundary_nitsche_trace_certificates_;
         candidate_backup->constraint_rebuild_incomplete =
@@ -7212,8 +7212,8 @@ void FESystem::rollbackCutIntegrationContextTransaction()
         analysis_report_cache_ = backup.analysis_report_cache;
         analysis_inputs_version_ = backup.analysis_inputs_version;
         analysis_report_version_ = backup.analysis_report_version;
-        finalized_small_cut_aggregation_prolongations_ =
-            backup.finalized_small_cut_aggregation_prolongations;
+        closed_small_cut_aggregation_prolongations_ =
+            backup.closed_small_cut_aggregation_prolongations;
         generated_boundary_nitsche_trace_certificates_ =
             backup.generated_boundary_nitsche_trace_certificates;
         constraint_rebuild_incomplete_ =
@@ -7284,7 +7284,7 @@ void FESystem::rebuildConstraintState()
             0x504c41494e434f4eull),
         "rebuild_constraint_callback_preflight");
     invalidateGeneratedBoundaryNitscheTraceCertificates();
-    finalized_small_cut_aggregation_prolongations_.clear();
+    closed_small_cut_aggregation_prolongations_.clear();
     affine_constraints_.clear();
     for (auto& c : system_constraint_defs_) {
         runCoordinatedConstraintPhase(

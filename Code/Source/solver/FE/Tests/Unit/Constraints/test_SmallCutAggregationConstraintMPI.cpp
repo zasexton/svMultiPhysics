@@ -40,6 +40,19 @@
 #include <utility>
 #include <vector>
 
+namespace {
+// Every small-cut aggregation prolongation report requested in this test
+// binary is also built at its closure and compared bit for bit with the
+// report built on request.
+[[maybe_unused]] const bool small_cut_aggregation_lazy_report_verification =
+    [] {
+        svmp::FE::constraints::
+            setSmallCutAggregationLazyReportVerificationForTesting(true);
+        return true;
+    }();
+} // namespace
+
+
 namespace svmp {
 namespace FE {
 namespace constraints {
@@ -2180,6 +2193,108 @@ TEST(SmallCutAggregationConstraintMPI,
                 "phase='rebuild_constraint_close'"),
             std::string::npos);
     }
+#endif
+}
+
+TEST(SmallCutAggregationConstraintMPI,
+     ReportsAreBuiltOnRequestOnceAndCoordinateBuildFailures)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    int rank = 0;
+    int world_size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    if (world_size != 2) {
+        GTEST_SKIP() << "Run with exactly two MPI ranks";
+    }
+    EXPECT_TRUE(smallCutAggregationLazyReportVerificationForTesting());
+
+    auto mesh = std::make_shared<TwoQuadAggregationMeshAccess>(
+        rank, /*full_view=*/true, /*expose_left_wall=*/false);
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    system.addSystemConstraint(std::make_unique<SmallCutAggregationConstraint>(
+        pressure, geometry::CutIntegrationSide::Negative, kInterfaceMarker));
+
+    systems::SetupInputs inputs;
+    inputs.topology_override = fullTopology();
+    const auto setup_outcome = invokeCollectively(MPI_COMM_WORLD, [&] {
+        system.setup(setupOptions(rank, world_size), inputs);
+    });
+    ASSERT_TRUE(setup_outcome.allSucceeded())
+        << setup_outcome.local_message;
+    system.setCutIntegrationContext(
+        rank == 0
+            ? cutContext({{1, Real{1}, true}})
+            : cutContext({{0, Real{0.25}, false}, {1, Real{1}, true}}));
+
+    using Reports = std::vector<
+        std::shared_ptr<const SmallCutAggregationProlongationReport>>;
+    const auto rebuild = [&] {
+        return invokeCollectively(
+            MPI_COMM_WORLD, [&] { system.rebuildConstraintState(); });
+    };
+    const auto request = [&](Reports& reports) {
+        return invokeCollectively(MPI_COMM_WORLD, [&] {
+            reports = system.finalizedSmallCutAggregationProlongations();
+        });
+    };
+
+    const auto first_rebuild = rebuild();
+    ASSERT_TRUE(first_rebuild.allSucceeded())
+        << first_rebuild.local_message;
+    // The first request builds the report (and the verification aid checks
+    // it against the report built at the closure); a second request
+    // returns the same object, stamped with the closure's revisions.
+    Reports first;
+    Reports second;
+    const auto first_request = request(first);
+    const auto second_request = request(second);
+    ASSERT_TRUE(first_request.allSucceeded())
+        << first_request.local_message;
+    ASSERT_TRUE(second_request.allSucceeded())
+        << second_request.local_message;
+    ASSERT_EQ(first.size(), 1u);
+    ASSERT_EQ(second.size(), 1u);
+    ASSERT_TRUE(first.front() != nullptr);
+    EXPECT_EQ(first.front().get(), second.front().get());
+    EXPECT_TRUE(first.front()->revision.constraint ==
+                system.constraintRevisionSnapshot());
+    EXPECT_EQ(first.front()->revision.affine_constraint_layout_revision,
+              system.constraints().constraintLayoutRevision());
+    EXPECT_NE(first.front()->canonical_content_digest, 0u);
+
+    // A failure on one rank while a report is built fails the request on
+    // every rank and leaves the closure usable for a later request.
+    const auto second_rebuild = rebuild();
+    ASSERT_TRUE(second_rebuild.allSucceeded())
+        << second_rebuild.local_message;
+    injectSmallCutAggregationReportBuildFailureForTesting(
+        rank == 0 ? 0 : -1);
+    Reports failed_reports;
+    const auto failed = request(failed_reports);
+    injectSmallCutAggregationReportBuildFailureForTesting(-1);
+    EXPECT_TRUE(failed.allThrew()) << failed.local_message;
+    EXPECT_TRUE(anyMessageContains(
+        MPI_COMM_WORLD,
+        failed,
+        "injected prolongation report build failure"));
+    Reports recovered;
+    const auto recovered_request = request(recovered);
+    ASSERT_TRUE(recovered_request.allSucceeded())
+        << recovered_request.local_message;
+    ASSERT_EQ(recovered.size(), 1u);
+    ASSERT_TRUE(recovered.front() != nullptr);
+    EXPECT_NE(recovered.front().get(), first.front().get());
+    EXPECT_EQ(recovered.front()->canonical_content_digest,
+              first.front()->canonical_content_digest);
+    EXPECT_TRUE(recovered.front()->revision.constraint ==
+                system.constraintRevisionSnapshot());
 #endif
 }
 

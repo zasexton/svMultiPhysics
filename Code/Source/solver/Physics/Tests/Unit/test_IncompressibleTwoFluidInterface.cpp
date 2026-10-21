@@ -42,6 +42,20 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "FE/Constraints/SmallCutAggregationConstraint.h"
+
+namespace {
+// Every small-cut aggregation prolongation report requested in this test
+// binary is also built at its closure and compared bit for bit with the
+// report built on request.
+[[maybe_unused]] const bool small_cut_aggregation_lazy_report_verification =
+    [] {
+        svmp::FE::constraints::
+            setSmallCutAggregationLazyReportVerificationForTesting(true);
+        return true;
+    }();
+} // namespace
+
 
 namespace {
 

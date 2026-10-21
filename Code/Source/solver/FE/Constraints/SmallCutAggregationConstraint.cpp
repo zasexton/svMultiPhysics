@@ -84,8 +84,8 @@ struct SmallCutAggregationPendingProlongation {
     std::vector<SmallCutAggregationProlongationPatch> patches{};
 
     // Sorted (DOF, active cell GID) incidences and (cell GID, feature) pairs
-    // of `active_cells`, built by the first finalizeProlongationReport() of
-    // a refresh.  They depend only on the cell GIDs, field DOFs and feature
+    // of `active_cells`, built by the first prolongation report of a
+    // refresh.  They depend only on the cell GIDs, field DOFs and feature
     // IDs, which a reuse copies unchanged (it refreshes volumes and rule
     // identities only), so reused pendings share the index.
     struct ActiveCellIndex {
@@ -94,6 +94,35 @@ struct SmallCutAggregationPendingProlongation {
         std::vector<std::pair<GlobalIndex, GlobalIndex>> feature_by_cell_gid{};
     };
     mutable std::shared_ptr<const ActiveCellIndex> active_cell_index{};
+};
+
+// The closed row of one canonical candidate slave, as its owner extracted it
+// from the closed AffineConstraints.
+struct SmallCutAggregationClosedRow {
+    bool constrained{false};
+    std::vector<ConstraintEntry> entries{};
+    Real inhomogeneity{0.0};
+};
+
+// What one constraint closure contributes to the prolongation report: the
+// pending prolongation of the apply pass, the canonical closed rows every
+// rank received from the slave owners (and checked its relevant rows
+// against), and the revision stamps of the closure.  The report is a pure
+// function of this record; it is built on the first request and kept here.
+struct SmallCutAggregationClosedProlongation {
+    std::shared_ptr<const SmallCutAggregationPendingProlongation> pending{};
+    std::map<GlobalIndex, SmallCutAggregationClosedRow>
+        canonical_closed_rows{};
+    int local_rank{0};
+    int communicator_size{1};
+    ConstraintRevisionSnapshot constraint{};
+    std::uint64_t affine_constraint_layout_revision{0u};
+    std::string field_name{};
+    mutable std::shared_ptr<const SmallCutAggregationProlongationReport>
+        report{};
+    // Built at closure when the lazy-report verification aid is on.
+    std::shared_ptr<const SmallCutAggregationProlongationReport>
+        report_built_at_closure{};
 };
 
 /**
@@ -10355,8 +10384,18 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     profile.report(system, rec.name, "full");
 }
 
-std::shared_ptr<const SmallCutAggregationProlongationReport>
-SmallCutAggregationConstraint::finalizeProlongationReport(
+namespace {
+std::atomic<bool> lazy_report_verification_for_testing{false};
+std::atomic<int> report_build_failure_rank_for_testing{-1};
+
+[[nodiscard]] std::shared_ptr<const SmallCutAggregationProlongationReport>
+buildProlongationReport(
+    const systems::FESystem& system,
+    const detail::SmallCutAggregationClosedProlongation& closed);
+} // namespace
+
+std::shared_ptr<const detail::SmallCutAggregationClosedProlongation>
+SmallCutAggregationConstraint::closeProlongation(
     const systems::FESystem& system,
     const AffineConstraints& closed_constraints) const
 {
@@ -10454,11 +10493,7 @@ SmallCutAggregationConstraint::finalizeProlongationReport(
         local_validation_exception,
         "prolongation_revision_validation");
 
-    struct ClosedRow {
-        bool constrained{false};
-        std::vector<ConstraintEntry> entries{};
-        Real inhomogeneity{0.0};
-    };
+    using ClosedRow = detail::SmallCutAggregationClosedRow;
     const auto global_dofs = system.dofHandler().getNumDofs();
     const auto& partition = system.dofHandler().getPartition();
     auto extract_closed_row = [&](GlobalIndex slave) {
@@ -10777,9 +10812,67 @@ SmallCutAggregationConstraint::finalizeProlongationReport(
         local_consistency_exception,
         "prolongation_relevant_row_validation");
 
+    // The report is built from this record on request
+    // (materializeProlongationReport), with the revision stamps of this
+    // closure.
+    std::shared_ptr<detail::SmallCutAggregationClosedProlongation> closed;
+    std::exception_ptr local_record_exception;
+    try {
+        closed = std::make_shared<
+            detail::SmallCutAggregationClosedProlongation>();
+        closed->pending = pending_prolongation_;
+        closed->canonical_closed_rows = std::move(canonical_closed_rows);
+        closed->local_rank = rank;
+        closed->communicator_size = world_size;
+        closed->constraint = system.constraintRevisionSnapshot();
+        closed->affine_constraint_layout_revision =
+            closed_constraints.constraintLayoutRevision();
+        closed->field_name = system.fieldRecord(pending.field).name;
+    } catch (...) {
+        local_record_exception = std::current_exception();
+    }
+    coordinateDistributedLocalFailure(
+        system,
+        local_record_exception,
+        "prolongation_closure_record");
+    profile.mark(AggregationProfilePhase::Publication);
+    profile.report(system, closed->field_name, "finalize");
+    if (smallCutAggregationLazyReportVerificationForTesting()) {
+        closed->report_built_at_closure =
+            buildProlongationReport(system, *closed);
+    }
+    return closed;
+}
+
+namespace {
+
+// The prolongation report of a closure record: a pure function of the
+// record (pending prolongation, canonical closed rows, closure revisions).
+// Collective over the system communicator (failure coordination and the
+// cross-rank digest check).
+std::shared_ptr<const SmallCutAggregationProlongationReport>
+buildProlongationReport(
+    const systems::FESystem& system,
+    const detail::SmallCutAggregationClosedProlongation& closed)
+{
+    auto& profile = aggregationRefreshProfile();
+    profile.begin();
+    const auto& pending = *closed.pending;
+    const int rank = closed.local_rank;
+    const int world_size = closed.communicator_size;
+    const auto& canonical_closed_rows = closed.canonical_closed_rows;
+
     std::shared_ptr<SmallCutAggregationProlongationReport> report;
     std::exception_ptr local_report_exception;
     try {
+    if (report_build_failure_rank_for_testing.load(
+            std::memory_order_relaxed) == rank) {
+        report_build_failure_rank_for_testing.store(
+            -1, std::memory_order_relaxed);
+        throw std::runtime_error(
+            "SmallCutAggregationConstraint: injected prolongation report "
+            "build failure");
+    }
     report =
         std::make_shared<SmallCutAggregationProlongationReport>();
     report->field = pending.field;
@@ -10792,10 +10885,9 @@ SmallCutAggregationConstraint::finalizeProlongationReport(
     report->guards = pending.guards;
     report->revision.local_rank = rank;
     report->revision.communicator_size = world_size;
-    report->revision.constraint =
-        system.constraintRevisionSnapshot();
+    report->revision.constraint = closed.constraint;
     report->revision.affine_constraint_layout_revision =
-        closed_constraints.constraintLayoutRevision();
+        closed.affine_constraint_layout_revision;
     report->revision.cut_context_content_revision =
         pending.cut_context_content_revision;
     report->revision.has_free_surface_snapshot_revision =
@@ -11253,10 +11345,194 @@ SmallCutAggregationConstraint::finalizeProlongationReport(
     }
 #endif
     profile.mark(AggregationProfilePhase::Publication);
-    profile.report(system,
-                   system.fieldRecord(pending.field).name,
-                   "finalize");
+    profile.report(system, closed.field_name, "materialize");
     return report;
+}
+
+} // namespace
+
+std::shared_ptr<const SmallCutAggregationProlongationReport>
+SmallCutAggregationConstraint::materializeProlongationReport(
+    const systems::FESystem& system,
+    const detail::SmallCutAggregationClosedProlongation& closed)
+{
+    if (closed.report) {
+        return closed.report;
+    }
+    auto report = buildProlongationReport(system, closed);
+    if (smallCutAggregationLazyReportVerificationForTesting()) {
+        std::exception_ptr local_verification_exception;
+        try {
+            if (closed.report_built_at_closure &&
+                !smallCutAggregationProlongationReportsBitwiseEqual(
+                    *report, *closed.report_built_at_closure)) {
+                throw std::logic_error(
+                    "SmallCutAggregationConstraint: the prolongation "
+                    "report built on request differs from the report "
+                    "built at closure");
+            }
+        } catch (...) {
+            local_verification_exception = std::current_exception();
+        }
+        coordinateDistributedLocalFailure(
+            system,
+            local_verification_exception,
+            "prolongation_report_request_verification");
+    }
+    closed.report = report;
+    return report;
+}
+
+std::shared_ptr<const SmallCutAggregationProlongationReport>
+SmallCutAggregationConstraint::builtProlongationReport(
+    const detail::SmallCutAggregationClosedProlongation& closed) noexcept
+{
+    return closed.report;
+}
+
+namespace {
+
+template <class T>
+[[nodiscard]] bool sameFloatBits(T lhs, T rhs) noexcept
+{
+    if constexpr (sizeof(T) == sizeof(std::uint64_t)) {
+        return std::bit_cast<std::uint64_t>(lhs) ==
+               std::bit_cast<std::uint64_t>(rhs);
+    } else if constexpr (sizeof(T) == sizeof(std::uint32_t)) {
+        return std::bit_cast<std::uint32_t>(lhs) ==
+               std::bit_cast<std::uint32_t>(rhs);
+    } else {
+        // Wider formats may carry padding bytes; compare the values, with
+        // NaN equal to NaN.
+        return lhs == rhs || (lhs != lhs && rhs != rhs);
+    }
+}
+
+[[nodiscard]] bool sameEntryBits(
+    const std::vector<ConstraintEntry>& lhs,
+    const std::vector<ConstraintEntry>& rhs) noexcept
+{
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+    for (std::size_t i = 0u; i < lhs.size(); ++i) {
+        if (lhs[i].master_dof != rhs[i].master_dof ||
+            !sameFloatBits(lhs[i].weight, rhs[i].weight)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+// Every member of the report and its parts; update with the structs.
+bool smallCutAggregationProlongationReportsBitwiseEqual(
+    const SmallCutAggregationProlongationReport& lhs,
+    const SmallCutAggregationProlongationReport& rhs) noexcept
+{
+    const auto& lg = lhs.guards;
+    const auto& rg = rhs.guards;
+    const auto& lr = lhs.revision;
+    const auto& rr = rhs.revision;
+    if (lhs.field != rhs.field || lhs.active_side != rhs.active_side ||
+        lhs.interface_marker != rhs.interface_marker ||
+        lhs.slave_all_cut != rhs.slave_all_cut ||
+        lhs.linear_extension != rhs.linear_extension ||
+        lhs.allow_unaggregated != rhs.allow_unaggregated ||
+        lhs.trace_bound_eligible != rhs.trace_bound_eligible ||
+        lg.maximum_root_path_length != rg.maximum_root_path_length ||
+        !sameFloatBits(lg.maximum_reference_extrapolation_distance,
+                       rg.maximum_reference_extrapolation_distance) ||
+        !sameFloatBits(lg.maximum_absolute_coefficient,
+                       rg.maximum_absolute_coefficient) ||
+        !sameFloatBits(lg.maximum_row_l1_norm, rg.maximum_row_l1_norm) ||
+        lg.rootless_fallback != rg.rootless_fallback ||
+        lr.local_rank != rr.local_rank ||
+        lr.communicator_size != rr.communicator_size ||
+        !(lr.constraint == rr.constraint) ||
+        lr.affine_constraint_layout_revision !=
+            rr.affine_constraint_layout_revision ||
+        lr.cut_context_content_revision != rr.cut_context_content_revision ||
+        lr.has_free_surface_snapshot_revision !=
+            rr.has_free_surface_snapshot_revision ||
+        lr.free_surface_snapshot_revision !=
+            rr.free_surface_snapshot_revision ||
+        lr.has_source_value_revision != rr.has_source_value_revision ||
+        lr.source_value_revision != rr.source_value_revision ||
+        lhs.canonical_content_digest != rhs.canonical_content_digest ||
+        lhs.rows.size() != rhs.rows.size() ||
+        lhs.active_cells.size() != rhs.active_cells.size() ||
+        lhs.patches.size() != rhs.patches.size()) {
+        return false;
+    }
+    for (std::size_t i = 0u; i < lhs.rows.size(); ++i) {
+        const auto& a = lhs.rows[i];
+        const auto& b = rhs.rows[i];
+        if (a.candidate_dof != b.candidate_dof ||
+            a.component != b.component || a.slave_dof != b.slave_dof ||
+            a.slave_owner_rank != b.slave_owner_rank ||
+            a.provisional_kind != b.provisional_kind ||
+            a.final_kind != b.final_kind ||
+            a.preconstrained_at_apply != b.preconstrained_at_apply ||
+            a.root_cell_gid != b.root_cell_gid ||
+            a.root_cell_owner_rank != b.root_cell_owner_rank ||
+            a.root_provider_rank != b.root_provider_rank ||
+            a.root_distance != b.root_distance ||
+            !sameEntryBits(a.provisional_entries, b.provisional_entries) ||
+            !sameEntryBits(a.final_entries, b.final_entries) ||
+            !sameFloatBits(a.final_inhomogeneity, b.final_inhomogeneity)) {
+            return false;
+        }
+    }
+    for (std::size_t i = 0u; i < lhs.active_cells.size(); ++i) {
+        const auto& a = lhs.active_cells[i];
+        const auto& b = rhs.active_cells[i];
+        if (a.cell_gid != b.cell_gid || a.owner_rank != b.owner_rank ||
+            a.retained_measure_provider_rank !=
+                b.retained_measure_provider_rank ||
+            a.kind != b.kind || a.active_feature_id != b.active_feature_id ||
+            !sameFloatBits(a.retained_physical_volume,
+                           b.retained_physical_volume) ||
+            a.retained_rule_stable_ids != b.retained_rule_stable_ids ||
+            a.field_dofs != b.field_dofs ||
+            a.active_face_neighbor_cell_gids !=
+                b.active_face_neighbor_cell_gids) {
+            return false;
+        }
+    }
+    for (std::size_t i = 0u; i < lhs.patches.size(); ++i) {
+        const auto& a = lhs.patches[i];
+        const auto& b = rhs.patches[i];
+        if (a.kind != b.kind || a.root_cell_gid != b.root_cell_gid ||
+            a.root_cell_owner_rank != b.root_cell_owner_rank ||
+            a.active_feature_ids != b.active_feature_ids ||
+            a.member_cell_gids != b.member_cell_gids ||
+            a.support_cell_gids != b.support_cell_gids ||
+            a.slave_dofs != b.slave_dofs) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void setSmallCutAggregationLazyReportVerificationForTesting(
+    bool enabled) noexcept
+{
+    lazy_report_verification_for_testing.store(enabled,
+                                                std::memory_order_relaxed);
+}
+
+bool smallCutAggregationLazyReportVerificationForTesting() noexcept
+{
+    return lazy_report_verification_for_testing.load(
+        std::memory_order_relaxed);
+}
+
+void injectSmallCutAggregationReportBuildFailureForTesting(int rank) noexcept
+{
+    report_build_failure_rank_for_testing.store(rank < 0 ? -1 : rank,
+                                                std::memory_order_relaxed);
 }
 
 std::shared_ptr<
