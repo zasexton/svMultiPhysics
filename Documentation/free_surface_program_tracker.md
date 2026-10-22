@@ -760,6 +760,11 @@ These are proposals. Each lists a recommended option and an alternative. Record 
     - The NS module is split: the formulation stays in `IncompressibleNavierStokesVMSModule.cpp` (704 lines), and the free-surface support moved to its own files.
     - Outer-pass round 3 (bitwise): −2.0% / −2.3% / −4.9% per step (2D sessile, capillary wave, 3D sessile), then a further −0.6% / −0.7% / −2.0%.
     - Evidence: CTest FE 58/58, Physics 25/25, Application 13/13; exhaustive two-rank matrix passed; reference sets identical serially (vs `e7080344`) and at 2 and 4 ranks (vs `pwd-92f1a2fc`).
+  - **Progress 2026-10-22 (`6f23eb08`):**
+    - P0.4: a deck with `Enable_static_capillary_equilibrium_initialization` now installs the conservative-balance operators the startup certificate needs, without the environment switch. The operators are observation-only; runs without static-capillary initialization do not change. The certificate still fails on its evidence deck, because its probe Newton assembles before the extension map is frozen; the fix waits for the S6 extension participant.
+    - Step P1 has started: `OptionSchema<T>` (FE/Core) declares each key of an option struct once (spellings, codec, documentation, cross-key rules). Nothing parses through it yet; `describe()` records where each key of an already resolved struct came from.
+    - The Navier-Stokes effective-configuration artifact ends with a "resolved" section: every free-surface boundary and contact-line key with its value and source (explicit, deprecated spelling, derived, default). The keys before it are unchanged.
+    - Evidence: CTest FE 58/58, Physics 25/25, Application 13/13; exhaustive two-rank matrix passed (job 155); reference sets identical serially (vs `e7080344`) and at 2 and 4 ranks (vs `pwd-92f1a2fc`) (job 156).
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
