@@ -529,10 +529,7 @@ def write_solver_xml(args: argparse.Namespace) -> None:
     p1_transport_safety_block = ""
     if args.enable_p1_transport_safety:
         p1_transport_safety_block = """  <SUPG_transient_scale>2.0</SUPG_transient_scale>
-  <Enable_discontinuity_capturing>true</Enable_discontinuity_capturing>
-  <Discontinuity_capturing_scale>0.1</Discontinuity_capturing_scale>
-  <Discontinuity_capturing_gradient_epsilon>1.0e-12</Discontinuity_capturing_gradient_epsilon>
-  <Discontinuity_capturing_max_courant>0.5</Discontinuity_capturing_max_courant>
+  <Enable_discontinuity_capturing>false</Enable_discontinuity_capturing>
   <Enable_bound_preserving_limiter>true</Enable_bound_preserving_limiter>
   <Bound_preserving_maximum_courant>1.0</Bound_preserving_maximum_courant>
   <Bound_preserving_enforce_courant_limit>true</Bound_preserving_enforce_courant_limit>
@@ -1216,7 +1213,7 @@ def parse_args() -> argparse.Namespace:
         "--enable-p1-transport-safety",
         action="store_true",
         help=(
-            "enable the P1 SUPG transient, discontinuity-capturing, bound, "
+            "enable the P1 SUPG transient, bound, "
             "Courant, and impermeable-wall candidate gates; intended for "
             "explicit production-path transport qualifications"
         ),

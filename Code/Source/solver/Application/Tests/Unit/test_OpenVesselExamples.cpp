@@ -390,10 +390,15 @@ void expectReviewedP1LevelSetTransportControls(
   expectText(level_set, "Enable_SUPG", "true");
   expectText(level_set, "SUPG_tau_scale", "0.5");
   expectText(level_set, "SUPG_transient_scale", "2.0");
-  expectText(level_set, "Enable_discontinuity_capturing", "true");
-  expectText(level_set, "Discontinuity_capturing_scale", "0.1");
-  expectText(level_set, "Discontinuity_capturing_gradient_epsilon", "1.0e-12");
-  expectText(level_set, "Discontinuity_capturing_max_courant", "0.5");
+  // Level-set discontinuity capturing was retired (decision D47).
+  expectText(level_set, "Enable_discontinuity_capturing", "false");
+  EXPECT_EQ(level_set.FirstChildElement("Discontinuity_capturing_scale"),
+            nullptr);
+  EXPECT_EQ(level_set.FirstChildElement(
+                "Discontinuity_capturing_gradient_epsilon"),
+            nullptr);
+  EXPECT_EQ(level_set.FirstChildElement("Discontinuity_capturing_max_courant"),
+            nullptr);
   expectText(level_set, "Enable_bound_preserving_limiter", "true");
   expectText(level_set, "Bound_preserving_maximum_courant", "1.0");
   expectText(level_set, "Bound_preserving_enforce_courant_limit", "true");

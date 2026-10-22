@@ -1693,10 +1693,7 @@ def test_fs16_p1_decks_retain_transport_safety_controls():
     runner = _load_runner()
     expected = {
         "SUPG_transient_scale": "2.0",
-        "Enable_discontinuity_capturing": "true",
-        "Discontinuity_capturing_scale": "0.1",
-        "Discontinuity_capturing_gradient_epsilon": "1.0e-12",
-        "Discontinuity_capturing_max_courant": "0.5",
+        "Enable_discontinuity_capturing": "false",
         "Enable_bound_preserving_limiter": "true",
         "Bound_preserving_bound_tolerance": (
             f"{runner.DEFAULT_BOUND_REPRESENTABILITY_SLACK:.16g}"
@@ -1730,6 +1727,11 @@ def test_fs16_p1_decks_retain_transport_safety_controls():
                 name: level_set.findtext(name)
                 for name in expected
             } == expected
+            # Level-set discontinuity capturing was retired (decision D47).
+            for name in ("Discontinuity_capturing_scale",
+                         "Discontinuity_capturing_gradient_epsilon",
+                         "Discontinuity_capturing_max_courant"):
+                assert level_set.find(name) is None
         assert (
             runner.DEFAULT_BOUND_REPRESENTABILITY_SLACK /
             runner.LEVEL_SET_CHARACTERISTIC_LENGTH

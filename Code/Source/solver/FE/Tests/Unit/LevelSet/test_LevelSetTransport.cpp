@@ -1689,7 +1689,7 @@ TEST(LevelSetTransport, ConservativeDivergenceTransportUsesDivergenceResidual)
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Divergence));
 }
 
-TEST(LevelSetTransport, SUPGUsesTransientDirectionalMetricAndControlledCapturing)
+TEST(LevelSetTransport, SUPGUsesTransientDirectionalMetric)
 {
     const auto mesh = std::make_shared<SingleTetraMeshAccess>();
     auto phi_space = scalarSpace(mesh);
@@ -1704,20 +1704,20 @@ TEST(LevelSetTransport, SUPGUsesTransientDirectionalMetricAndControlledCapturing
     options.velocity.field_name = "advecting_velocity";
     options.velocity.source = level_set::LevelSetVelocitySource::PrescribedData;
     options.supg.enabled = true;
-    options.supg.discontinuity_capturing_enabled = true;
 
     (void)level_set::installLevelSetTransport(system, phi_space, options);
 
-    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellDiameter));
+    // The directional metric J^{-T} J^{-1} sets the SUPG scale; no cell
+    // diameter enters (the retired discontinuity capturing was its only
+    // user on this path).
+    EXPECT_FALSE(formulationRecordsContain(system, FormExprType::CellDiameter));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::TimeDerivative));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::EffectiveTimeStep));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::JacobianInverse));
-    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::SmoothAbsoluteValue));
-    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Minimum));
 }
 
-TEST(LevelSetTransport, DiscontinuityCapturingJitRequestUsesCompiledPath)
+TEST(LevelSetTransport, SUPGJitRequestUsesCompiledPath)
 {
     const auto mesh = std::make_shared<SingleTetraMeshAccess>();
     auto phi_space = scalarSpace(mesh);
@@ -1730,39 +1730,17 @@ TEST(LevelSetTransport, DiscontinuityCapturingJitRequestUsesCompiledPath)
     options.velocity.field_name = "advecting_velocity";
     options.velocity.source = level_set::LevelSetVelocitySource::CoupledField;
     options.supg.enabled = true;
-    options.supg.discontinuity_capturing_enabled = true;
 
     FE::systems::FormInstallOptions install_options{};
     install_options.compiler_options.jit.enable = true;
 
-    FE::systems::FESystem dc_system(mesh);
-    addScalarAndVelocityFields(
-        dc_system,
-        phi_space,
-        velocity_space,
-        FE::systems::FieldSourceKind::Unknown);
-    const auto dc_kernels = level_set::installLevelSetTransport(
-        dc_system, phi_space, options, install_options);
-
-    ASSERT_EQ(dc_kernels.residual.size(), 1u);
-    ASSERT_TRUE(dc_kernels.residual.front());
-    EXPECT_NE(
-        dynamic_cast<const FE::forms::jit::JITKernelWrapper*>(
-            dc_kernels.residual.front().get()),
-        nullptr);
-    ASSERT_TRUE(dc_kernels.mixed_plan);
-    EXPECT_TRUE(dc_kernels.mixed_plan->jit_requested);
-    EXPECT_TRUE(dc_kernels.mixed_plan->monolithic_cell_requested);
-
-    // Ordinary SUPG and residual-based discontinuity capturing must both
-    // remain eligible for the compiled mixed-cell path.
+    // Ordinary SUPG remains eligible for the compiled mixed-cell path.
     FE::systems::FESystem supg_system(mesh);
     addScalarAndVelocityFields(
         supg_system,
         phi_space,
         velocity_space,
         FE::systems::FieldSourceKind::Unknown);
-    options.supg.discontinuity_capturing_enabled = false;
     const auto supg_kernels = level_set::installLevelSetTransport(
         supg_system, phi_space, options, install_options);
 
@@ -1777,7 +1755,7 @@ TEST(LevelSetTransport, DiscontinuityCapturingJitRequestUsesCompiledPath)
 }
 
 TEST(LevelSetTransport,
-     DiscontinuityCapturingJitCombinedAndVectorOnlyResidualsMatch)
+     SUPGJitCombinedAndVectorOnlyResidualsMatch)
 {
     const auto mesh = std::make_shared<SingleTetraMeshAccess>();
     auto phi_space = scalarSpace(mesh);
@@ -1798,7 +1776,6 @@ TEST(LevelSetTransport,
     options.velocity.field_name = "advecting_velocity";
     options.velocity.source = level_set::LevelSetVelocitySource::CoupledField;
     options.supg.enabled = true;
-    options.supg.discontinuity_capturing_enabled = true;
 
     FE::systems::FormInstallOptions install_options{};
     install_options.compiler_options.jit.enable = true;
@@ -1882,7 +1859,7 @@ TEST(LevelSetTransport,
 }
 
 TEST(LevelSetTransport,
-     DiscontinuityCapturingCompiledGeneralizedAlphaMatchesInterpreterOnTriangle)
+     SUPGCompiledGeneralizedAlphaMatchesInterpreterOnTriangle)
 {
     ScopedEnvironmentVariable enable_compiled(
         "SVMP_FE_ENABLE_MONOLITHIC_COMPILED_DISPATCH", "1");
@@ -1915,7 +1892,6 @@ TEST(LevelSetTransport,
     options.velocity.source =
         level_set::LevelSetVelocitySource::CoupledField;
     options.supg.enabled = true;
-    options.supg.discontinuity_capturing_enabled = true;
 
     FE::systems::FormInstallOptions install_options{};
     install_options.compiler_options.jit.enable = true;
@@ -2053,7 +2029,7 @@ TEST(LevelSetTransport,
 }
 
 TEST(LevelSetTransport,
-     DiscontinuityCapturingPrescribedVelocityCompiledGeneralizedAlphaMatchesSeparateResidual)
+     SUPGPrescribedVelocityCompiledGeneralizedAlphaMatchesSeparateResidual)
 {
     ScopedEnvironmentVariable enable_compiled(
         "SVMP_FE_ENABLE_MONOLITHIC_COMPILED_DISPATCH", "1");
@@ -2087,13 +2063,8 @@ TEST(LevelSetTransport,
     options.velocity.source =
         level_set::LevelSetVelocitySource::PrescribedData;
     options.supg.enabled = true;
-    options.supg.discontinuity_capturing_enabled = true;
     options.supg.tau_scale = 0.5;
     options.supg.transient_scale = 2.0;
-    options.supg.discontinuity_capturing_scale = 0.1;
-    options.supg.gradient_epsilon = 1.0e-12;
-    options.supg.discontinuity_capturing_residual_epsilon = 1.0e-12;
-    options.supg.discontinuity_capturing_max_courant = 0.5;
 
     FE::systems::FormInstallOptions install_options{};
     install_options.compiler_options.jit.enable = true;
@@ -2704,7 +2675,7 @@ TEST(LevelSetTransport,
     EXPECT_EQ(system.formulationRecords().size(), record_count);
 }
 
-TEST(LevelSetTransport, SUPGRejectsInvalidTransientAndCapturingControls)
+TEST(LevelSetTransport, SUPGRejectsInvalidTransientControls)
 {
     const auto mesh = std::make_shared<SingleTetraMeshAccess>();
     auto phi_space = scalarSpace(mesh);
@@ -2717,7 +2688,6 @@ TEST(LevelSetTransport, SUPGRejectsInvalidTransientAndCapturingControls)
         options.velocity.field_name = "advecting_velocity";
         options.velocity.source = level_set::LevelSetVelocitySource::PrescribedData;
         options.supg.enabled = true;
-        options.supg.discontinuity_capturing_enabled = true;
         return options;
     };
 
@@ -2729,47 +2699,6 @@ TEST(LevelSetTransport, SUPGRejectsInvalidTransientAndCapturingControls)
         EXPECT_THROW((void)level_set::installLevelSetTransport(system, phi_space, options),
                      std::invalid_argument);
     }
-    {
-        FE::systems::FESystem system(mesh);
-        addScalarAndVelocityFields(system, phi_space, velocity_space);
-        auto options = make_options();
-        options.supg.discontinuity_capturing_scale = -1.0;
-        EXPECT_THROW((void)level_set::installLevelSetTransport(system, phi_space, options),
-                     std::invalid_argument);
-    }
-    {
-        FE::systems::FESystem system(mesh);
-        addScalarAndVelocityFields(system, phi_space, velocity_space);
-        auto options = make_options();
-        options.supg.gradient_epsilon = 0.0;
-        EXPECT_THROW((void)level_set::installLevelSetTransport(system, phi_space, options),
-                     std::invalid_argument);
-    }
-    {
-        FE::systems::FESystem system(mesh);
-        addScalarAndVelocityFields(system, phi_space, velocity_space);
-        auto options = make_options();
-        options.supg.discontinuity_capturing_residual_epsilon = 0.0;
-        EXPECT_THROW((void)level_set::installLevelSetTransport(
-                         system, phi_space, options),
-                     std::invalid_argument);
-    }
-    {
-        FE::systems::FESystem system(mesh);
-        addScalarAndVelocityFields(system, phi_space, velocity_space);
-        auto options = make_options();
-        options.supg.discontinuity_capturing_max_courant = 0.0;
-        EXPECT_THROW((void)level_set::installLevelSetTransport(system, phi_space, options),
-                     std::invalid_argument);
-    }
-    {
-        FE::systems::FESystem system(mesh);
-        addScalarAndVelocityFields(system, phi_space, velocity_space);
-        auto options = make_options();
-        options.supg.enabled = false;
-        EXPECT_THROW((void)level_set::installLevelSetTransport(system, phi_space, options),
-                     std::invalid_argument);
-    }
 }
 
 TEST(LevelSetTransport, Quad9FlatHorizontalNullModeHasZeroSpatialResidual)
@@ -2778,8 +2707,7 @@ TEST(LevelSetTransport, Quad9FlatHorizontalNullModeHasZeroSpatialResidual)
         [](const std::shared_ptr<FE::assembly::IMeshAccess>& mesh,
            const FE::systems::SetupInputs& setup) {
           for (const bool stabilized : {false, true}) {
-            SCOPED_TRACE(stabilized ? "SUPG and discontinuity capturing"
-                                    : "unstabilized Galerkin");
+            SCOPED_TRACE(stabilized ? "SUPG" : "unstabilized Galerkin");
             auto phi_space = scalarSpace(mesh, /*order=*/2);
 
             FE::systems::FESystem system(mesh);
@@ -2862,7 +2790,6 @@ TEST(LevelSetTransport, Quad9TravelingLinearModeHasZeroStabilizedResidual)
           options.velocity.source = level_set::LevelSetVelocitySource::ConstantVector;
           options.velocity.constant_value = {speed, 0.0, 0.0};
           options.supg.enabled = true;
-          options.supg.discontinuity_capturing_enabled = true;
 
           (void)level_set::installLevelSetTransport(system, phi_space, options);
           ASSERT_NO_THROW(system.setup({}, setup));
@@ -2931,7 +2858,6 @@ TEST(LevelSetTransport,
     options.velocity.source = level_set::LevelSetVelocitySource::ConstantVector;
     options.velocity.constant_value = {speed_x, speed_y, 0.0};
     options.supg.enabled = true;
-    options.supg.discontinuity_capturing_enabled = true;
 
     (void)level_set::installLevelSetTransport(system, phi_space, options);
     ASSERT_NO_THROW(system.setup({}, makeQuad9Patch2x2SetupInputs()));
@@ -3324,7 +3250,6 @@ TEST(LevelSetTransport,
             level_set::LevelSetVelocitySource::ConstantVector;
         options.velocity.constant_value = {speed, 0.0, 0.0};
         options.supg.enabled = true;
-        options.supg.discontinuity_capturing_enabled = false;
         options.boundaries.inflow.push_back(
             level_set::LevelSetInflowBoundary{
                 .boundary_marker =
@@ -3948,62 +3873,6 @@ TEST(LevelSetTransport, CoupledVelocityJacobianMatchesFiniteDifference)
         1.0e-6,
         5.0e-5,
         1.0e-8);
-}
-
-TEST(LevelSetTransport,
-     DiscontinuityCapturingZeroStrongResidualJacobianMatchesCentralDifference)
-{
-    constexpr FE::Real speed = 0.35;
-    constexpr FE::Real dt = 0.1;
-    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
-    auto phi_space = scalarSpace(mesh);
-
-    FE::systems::FESystem system(mesh);
-    const auto phi = system.addField(FE::systems::FieldSpec{
-        .name = "phi", .space = phi_space, .components = 1});
-
-    level_set::LevelSetTransportOptions options{};
-    options.level_set.field_name = "phi";
-    options.level_set.auto_register_field = false;
-    options.velocity.source =
-        level_set::LevelSetVelocitySource::ConstantVector;
-    options.velocity.constant_value = {0.0, speed, 0.0};
-    options.supg.enabled = true;
-    options.supg.discontinuity_capturing_enabled = true;
-
-    FE::systems::FormInstallOptions install_options{};
-    install_options.compiler_options.jit.enable = true;
-    (void)level_set::installLevelSetTransport(
-        system, phi_space, options, install_options);
-    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
-
-    std::vector<FE::Real> solution(
-        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
-    std::vector<FE::Real> previous = solution;
-    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
-        const FE::Real y = mesh->getNodeCoordinates(vertex)[1];
-        // phi(y,t_n)=y and phi(y,t_{n-1})=y+u_y*dt gives
-        // dt(phi)+u.grad(phi)=0 pointwise on this affine P1 cell.
-        setFieldComponentValue(solution, system, phi, vertex, 0, y);
-        setFieldComponentValue(
-            previous, system, phi, vertex, 0, y + speed * dt);
-    }
-
-    FE::systems::SystemStateView state;
-    state.dt = dt;
-    state.u = solution;
-    state.u_prev = previous;
-    const FE::systems::BackwardDifferenceIntegrator integrator;
-    const auto time_context =
-        integrator.buildContext(/*max_time_derivative_order=*/1, state);
-    state.time_integration = &time_context;
-
-    expectOperatorJacobianMatchesCentralFD(
-        system,
-        state,
-        /*eps=*/1.0e-7,
-        /*rtol=*/2.0e-5,
-        /*atol=*/2.0e-8);
 }
 
 TEST(LevelSetTransport,

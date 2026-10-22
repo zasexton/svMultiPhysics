@@ -1646,10 +1646,7 @@ def write_mini_solver_xml(case_dir: Path,
   <Enable_SUPG>true</Enable_SUPG>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
   <SUPG_transient_scale>2.0</SUPG_transient_scale>
-  <Enable_discontinuity_capturing>true</Enable_discontinuity_capturing>
-  <Discontinuity_capturing_scale>0.1</Discontinuity_capturing_scale>
-  <Discontinuity_capturing_gradient_epsilon>1.0e-12</Discontinuity_capturing_gradient_epsilon>
-  <Discontinuity_capturing_max_courant>0.5</Discontinuity_capturing_max_courant>
+  <Enable_discontinuity_capturing>false</Enable_discontinuity_capturing>
   <Enable_bound_preserving_limiter>true</Enable_bound_preserving_limiter>
   <Bound_preserving_bound_tolerance>{DEFAULT_BOUND_REPRESENTABILITY_SLACK:.16g}</Bound_preserving_bound_tolerance>
   <Bound_preserving_sign_tolerance>{BOUND_SIGN_TOLERANCE:.16g}</Bound_preserving_sign_tolerance>

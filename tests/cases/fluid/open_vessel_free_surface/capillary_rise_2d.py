@@ -34,8 +34,9 @@ Two deck profiles are written (``write_case(..., profile=...)``):
   aggregation candidates beyond the guards, and the run stops there; the
   comparison window is [0, 0.416] s (candidate protocol revision 3).
 * ``"legacy"``: the 2026-08-30 deck (PrescribedContactAngle, wet-extension
-  transport, projection reinitialization every step, discontinuity capturing,
-  corner-linearized cut geometry, tolerances 1e-6), reproduced byte for byte;
+  transport, projection reinitialization every step, corner-linearized cut
+  geometry, tolerances 1e-6), reproduced byte for byte except that the
+  level-set discontinuity capturing retired by decision D47 is off;
   run_test05_velocity_growth_smoke.py keeps writing it.
 
 Run as a script, the module writes one comparison level (``--half-gap-cells``
@@ -328,10 +329,7 @@ def _legacy_solver_xml(steps: int, time_step_size: float) -> str:
   <Enable_SUPG>true</Enable_SUPG>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
   <SUPG_transient_scale>2.0</SUPG_transient_scale>
-  <Enable_discontinuity_capturing>true</Enable_discontinuity_capturing>
-  <Discontinuity_capturing_scale>0.1</Discontinuity_capturing_scale>
-  <Discontinuity_capturing_gradient_epsilon>1.0e-12</Discontinuity_capturing_gradient_epsilon>
-  <Discontinuity_capturing_max_courant>0.5</Discontinuity_capturing_max_courant>
+  <Enable_discontinuity_capturing>false</Enable_discontinuity_capturing>
   <Enable_bound_preserving_limiter>false</Enable_bound_preserving_limiter>
   <Enable_reinitialization>true</Enable_reinitialization>
   <Reinitialization_method>projection</Reinitialization_method>

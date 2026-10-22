@@ -465,7 +465,7 @@ def deck_contract(
         "Auto_register_velocity_field": "true",
         "Enable_SUPG": "true",
         "SUPG_transient_scale": "2.0",
-        "Enable_discontinuity_capturing": "true",
+        "Enable_discontinuity_capturing": "false",
         "Enable_bound_preserving_limiter": "true",
         "Bound_preserving_bound_tolerance":
             xml_real(bound_representability_slack),
