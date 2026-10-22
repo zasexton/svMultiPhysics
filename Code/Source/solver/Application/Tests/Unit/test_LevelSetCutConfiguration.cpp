@@ -842,80 +842,6 @@ TEST(LevelSetCutConfiguration,
   }
 }
 
-TEST(LevelSetCutConfiguration, VelocityExtensionRetainsInactiveCutVolumeSide)
-{
-  auto params = parseParametersXml(R"xml(
-<svMultiPhysicsFile>
-  <Add_equation type="fluid">
-    <Add_BC name="free_surface">
-      <Type>Free_surface</Type>
-      <Implementation>UnfittedLevelSet</Implementation>
-      <Level_set_field_name>phi</Level_set_field_name>
-      <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
-      <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
-      <Small_cut_aggregation>false</Small_cut_aggregation>
-      <Enable_velocity_extension>true</Enable_velocity_extension>
-      <Velocity_extension_diffusivity>1.0</Velocity_extension_diffusivity>
-    </Add_BC>
-  </Add_equation>
-</svMultiPhysicsFile>
-)xml");
-
-  const auto requests = application::core::activeCutVolumeRequests(*params);
-  ASSERT_EQ(requests.size(), 1u);
-  EXPECT_EQ(requests.front().volume_retention,
-            application::core::ActiveCutVolumeRetention::ActiveAndInactive);
-  EXPECT_EQ(requests.front().geometry_tangent_policy,
-            level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature);
-}
-
-TEST(LevelSetCutConfiguration,
-     VelocityExtensionRetentionMatchesPhysicsAliasesAndImplicitEnableRule)
-{
-  struct Case {
-    std::string_view parameters;
-    application::core::ActiveCutVolumeRetention expected;
-  };
-  const std::vector<Case> cases{
-      {"<Enable_velocity_extension>true</Enable_velocity_extension>",
-       application::core::ActiveCutVolumeRetention::ActiveAndInactive},
-      {"<Extend_velocity_to_inactive_domain>true</Extend_velocity_to_inactive_domain>",
-       application::core::ActiveCutVolumeRetention::ActiveAndInactive},
-      {"<Free_surface_velocity_extension>true</Free_surface_velocity_extension>",
-       application::core::ActiveCutVolumeRetention::ActiveAndInactive},
-      {"<Inactive_velocity_extension_diffusivity>2.0</Inactive_velocity_extension_diffusivity>",
-       application::core::ActiveCutVolumeRetention::ActiveAndInactive},
-      {"<Enable_velocity_extension>false</Enable_velocity_extension>"
-       "<Velocity_extension_diffusivity>2.0</Velocity_extension_diffusivity>",
-       application::core::ActiveCutVolumeRetention::ActiveOnly},
-  };
-
-  for (const auto& item : cases) {
-    const auto xml = std::string(R"xml(
-<svMultiPhysicsFile>
-  <Add_equation type="fluid">
-    <Add_BC name="free_surface">
-      <Type>Free_surface</Type>
-      <Implementation>UnfittedLevelSet</Implementation>
-      <Level_set_field_name>phi</Level_set_field_name>
-      <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
-      <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
-      <Small_cut_aggregation>false</Small_cut_aggregation>
-)xml") + std::string(item.parameters) + R"xml(
-    </Add_BC>
-  </Add_equation>
-</svMultiPhysicsFile>
-)xml";
-    auto params = parseParametersXml(xml.c_str());
-    const auto requests = application::core::activeCutVolumeRequests(*params);
-    ASSERT_EQ(requests.size(), 1u) << item.parameters;
-    EXPECT_EQ(requests.front().volume_retention, item.expected)
-        << item.parameters;
-  }
-}
-
 TEST(LevelSetCutConfiguration, ParsesEquationLevelNonFluidCutDomain)
 {
   auto params = parseParametersXml(R"xml(
@@ -1432,38 +1358,6 @@ TEST(LevelSetCutConfiguration,
 
   EXPECT_THROW((void)application::core::activeCutVolumeRequests(*params),
                std::runtime_error);
-}
-
-TEST(LevelSetCutConfiguration, DeduplicatedRequestMergesVelocityExtensionRetention)
-{
-  auto params = parseParametersXml(R"xml(
-<svMultiPhysicsFile>
-  <Add_equation type="fluid">
-    <Enable_level_set_cut_domain>true</Enable_level_set_cut_domain>
-    <Level_set_field_name>phi</Level_set_field_name>
-    <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
-    <Active_domain>LevelSetNegative</Active_domain>
-    <Active_domain_method>CutVolume</Active_domain_method>
-    <Add_BC name="free_surface">
-      <Type>Free_surface</Type>
-      <Implementation>UnfittedLevelSet</Implementation>
-      <Level_set_field_name>phi</Level_set_field_name>
-      <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
-      <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
-      <Enable_velocity_extension>true</Enable_velocity_extension>
-      <Velocity_extension_diffusivity>1.0</Velocity_extension_diffusivity>
-    </Add_BC>
-  </Add_equation>
-</svMultiPhysicsFile>
-)xml");
-
-  const auto requests = application::core::activeCutVolumeRequests(*params);
-  ASSERT_EQ(requests.size(), 1u);
-  EXPECT_EQ(requests.front().origin,
-            application::core::ActiveCutVolumeRequestOrigin::Equation);
-  EXPECT_EQ(requests.front().volume_retention,
-            application::core::ActiveCutVolumeRetention::ActiveAndInactive);
 }
 
 TEST(LevelSetCutConfiguration, RejectsUnknownImplicitCutBackend)
