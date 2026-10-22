@@ -47,4 +47,12 @@ void precond_rcs(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fe_fsi_li
 void pre_mul(const Array<fe_fsi_linear_solver::fsils_int>& rowPtr, const fe_fsi_linear_solver::fsils_int nNo,
     const fe_fsi_linear_solver::fsils_int nnz, const int dof, Array<double>& Val, const Array<double>& W);
 
+namespace test {
+
+/// Test-only: when true, precond_rcs runs its generic (dof > 4) code for
+/// dof 5-8 (the reference of the compile-time dof version).  Default false.
+void set_rcs_generic_kernel_forced(bool forced) noexcept;
+
+}  // namespace test
+
 };

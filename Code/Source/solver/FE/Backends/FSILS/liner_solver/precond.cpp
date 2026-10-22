@@ -308,7 +308,237 @@ void dump_precond_reduced_state(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
   }
 }
 
+// Test-only switch (precond::test::set_rcs_generic_kernel_forced): run
+// precond_rcs for dof 5-8 with its generic (dof > 4) code, the reference of
+// precond_rcs_fixed.
+bool g_rcs_generic_kernel_forced = false;
+
+//--------------------------------------------------------------------
+// precond_rcs for a compile-time dof (5-8).
+//
+// Same results, bit for bit, as the generic branches of precond_rcs:
+//  - Row and column maxima of |Val| are exact and do not depend on the
+//    order in which the entries are visited (a comparison `>` against a
+//    running maximum, starting from 0.0, never takes a NaN); one pass over
+//    each block updates both instead of separate strided row and column
+//    passes.
+//  - pre_mul followed by pos_mul multiplies every entry by its row factor,
+//    then by its column factor: v = (v * Wr(l,row)) * Wc(k,col).  One pass
+//    does both products in that order.
+//  - The vector updates (R = Wr*R, W1 = W1*Wr, W = 1/sqrt(W), the
+//    tolerance test as max over |1 - W| starting from entry 0) are the same
+//    element-wise operations as the Array expressions, without temporaries.
+//--------------------------------------------------------------------
+
+template <int DOF>
+void scale_rows_cols_fixed(const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr, const fsils_int nNo,
+                           Array<double>& Val, const Array<double>& Wrow, const Array<double>& Wcol)
+{
+  constexpr int DOF2 = DOF * DOF;
+  double* __restrict__ val = Val.data();
+  const double* __restrict__ wr = Wrow.data();
+  const double* __restrict__ wc = Wcol.data();
+  const fsils_int* __restrict__ cp = colPtr.data();
+  for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+    const double* __restrict__ wr_row = wr + static_cast<size_t>(Ac) * DOF;
+    for (fsils_int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
+      const double* __restrict__ wc_col = wc + static_cast<size_t>(cp[j]) * DOF;
+      double* __restrict__ vj = val + static_cast<size_t>(j) * DOF2;
+      for (int l = 0; l < DOF; l++) {
+        for (int k = 0; k < DOF; k++) {
+          vj[l*DOF + k] = (vj[l*DOF + k] * wr_row[l]) * wc_col[k];
+        }
+      }
+    }
+  }
+}
+
+template <int DOF>
+void row_col_max_fixed(const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr, const fsils_int scale_rows,
+                       const Array<double>& Val, Array<double>& Wr, Array<double>& Wc)
+{
+  constexpr int DOF2 = DOF * DOF;
+  const double* __restrict__ val = Val.data();
+  const fsils_int* __restrict__ cp = colPtr.data();
+  double* __restrict__ wr = Wr.data();
+  double* __restrict__ wc = Wc.data();
+  for (fsils_int Ac = 0; Ac < scale_rows; Ac++) {
+    double mx_row[DOF];
+    for (int l = 0; l < DOF; l++) {
+      mx_row[l] = 0.0;
+    }
+    for (fsils_int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
+      const double* __restrict__ vj = val + static_cast<size_t>(j) * DOF2;
+      double mx_col[DOF];
+      for (int k = 0; k < DOF; k++) {
+        mx_col[k] = 0.0;
+      }
+      for (int l = 0; l < DOF; l++) {
+        for (int k = 0; k < DOF; k++) {
+          const double av = fabs(vj[l*DOF + k]);
+          if (av > mx_row[l]) mx_row[l] = av;
+          if (av > mx_col[k]) mx_col[k] = av;
+        }
+      }
+      double* __restrict__ wc_col = wc + static_cast<size_t>(cp[j]) * DOF;
+      for (int k = 0; k < DOF; k++) {
+        if (mx_col[k] > wc_col[k]) wc_col[k] = mx_col[k];
+      }
+    }
+    double* __restrict__ wr_row = wr + static_cast<size_t>(Ac) * DOF;
+    for (int l = 0; l < DOF; l++) {
+      wr_row[l] = mx_row[l];
+    }
+  }
+}
+
+/// max(abs(1.0 - W)) of Array, without the temporaries.
+double max_abs_one_minus(const Array<double>& W)
+{
+  const double* w = W.data();
+  const int n = W.size();
+  double max_v = fabs(1.0 - w[0]);
+  for (int i = 1; i < n; i++) {
+    const double t = fabs(1.0 - w[i]);
+    if (t > max_v) {
+      max_v = t;
+    }
+  }
+  return max_v;
+}
+
+template <int DOF>
+void precond_rcs_fixed(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
+    const Vector<fsils_int>& colPtr, const Vector<fsils_int>& diagPtr,
+    Array<double>& Val, Array<double>& R, Array<double>& W1, Array<double>& W2)
+{
+  constexpr int dof = DOF;
+  const fsils_int nNo = lhs.nNo;
+  int maxiter = 10;
+  double tol = 2.0;
+  int iter = 0;
+  bool flag = true;
+  W1 = 1.0;
+  W2 = 1.0;
+
+  // Dirichlet BC mask, as in precond_rcs.
+  Array<double> Wr(dof,nNo), Wc(dof,nNo);
+  Wr = 1.0;
+
+  for (int faIn = 0; faIn < lhs.nFaces; faIn++) {
+    auto& face = lhs.face[faIn];
+    if (!face.incFlag) {
+      continue;
+    }
+
+    int n = std::min(face.dof,dof);
+
+    if (face.bGrp == fe_fsi_linear_solver::BcType::BC_TYPE_Dir) {
+      for (int a = 0; a < face.nNo; a++) {
+        int Ac = face.glob(a);
+        for (int i = 0; i < n; i++) {
+          Wr(i,Ac) = Wr(i,Ac) * face.val(i,a);
+        }
+      }
+    }
+  }
+
+  fsils_syncv_owned_to_ghost(lhs, dof, Wr);
+
+  for (fsils_int i = 0; i < Wr.size(); i++) {
+    Wr(i) = (Wr(i) > 0.5) ? 1.0 : 0.0;
+  }
+
+  // pre_mul(Wr), R = Wr*R, pos_mul(Wr).
+  scale_rows_cols_fixed<DOF>(rowPtr, colPtr, nNo, Val, Wr, Wr);
+  {
+    double* __restrict__ r = R.data();
+    const double* __restrict__ w = Wr.data();
+    const int n = R.size();
+    for (int e = 0; e < n; e++) {
+      r[e] = w[e] * r[e];
+    }
+  }
+
+  // Set diagonal term to one.
+  for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+    fsils_int d = diagPtr(Ac);
+    for (int i = 0; i < dof; i++) {
+      Val(i*dof+i,d) = Wr(i,Ac)*(Val(i*dof+i,d) - 1.0) + 1.0;
+    }
+  }
+
+  // Row and column scaling.
+  const fsils_int scale_rows = lhs.owned_row_operator ? lhs.mynNo : nNo;
+  while (flag) {
+    Wr = 0.0;
+    Wc = 0.0;
+    iter = iter + 1;
+
+    if (iter >= maxiter) {
+      std::cout << "[precond_rcs] Warning: maximum iteration number reached";
+      flag = false;
+    }
+
+    row_col_max_fixed<DOF>(rowPtr, colPtr, scale_rows, Val, Wr, Wc);
+
+    fsils_syncv_owned_to_ghost(lhs, dof, Wr);
+    fsils_reverse_scatterv_max_buffer(lhs, dof, Wc);
+    fsils_syncv_owned_to_ghost(lhs, dof, Wc);
+
+    if ((max_abs_one_minus(Wr) < tol) && (max_abs_one_minus(Wc) < tol)) {
+      flag = false;
+    }
+
+    {
+      double* __restrict__ wr = Wr.data();
+      double* __restrict__ wc = Wc.data();
+      double* __restrict__ w1 = W1.data();
+      double* __restrict__ w2 = W2.data();
+      const int n = Wr.size();
+      for (int e = 0; e < n; e++) {
+        wr[e] = 1.0 / sqrt(wr[e]);
+        wc[e] = 1.0 / sqrt(wc[e]);
+      }
+
+      // pre_mul(Wr), pos_mul(Wc).
+      scale_rows_cols_fixed<DOF>(rowPtr, colPtr, nNo, Val, Wr, Wc);
+
+      for (int e = 0; e < n; e++) {
+        w1[e] = w1[e] * wr[e];
+        w2[e] = w2[e] * wc[e];
+      }
+    }
+
+    if (lhs.commu.nTasks > 1) {
+      int local_continue = flag ? 1 : 0;
+      int any_continue = 0;
+      MPI_Allreduce(&local_continue, &any_continue, 1, MPI_INT, MPI_MAX, lhs.commu.comm);
+      flag = any_continue != 0;
+    }
+  } // while
+
+  // R = W1*R
+  {
+    double* __restrict__ r = R.data();
+    const double* __restrict__ w1 = W1.data();
+    const int n = R.size();
+    for (int e = 0; e < n; e++) {
+      r[e] = w1[e] * r[e];
+    }
+  }
+}
+
 } // namespace
+
+namespace test {
+
+void set_rcs_generic_kernel_forced(const bool forced) noexcept
+{
+  g_rcs_generic_kernel_forced = forced;
+}
+
+} // namespace test
 
 /// @brief Post-multipling Val by W: Val = Val*W
 ///
@@ -711,6 +941,16 @@ void precond_diag(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_in
 void precond_rcs(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
     const Vector<fsils_int>& diagPtr, const int dof, Array<double>& Val, Array<double>& R, Array<double>& W1, Array<double>& W2)
 {
+  if (dof >= 5 && dof <= 8 && !g_rcs_generic_kernel_forced) {
+    switch (dof) {
+      case 5: precond_rcs_fixed<5>(lhs, rowPtr, colPtr, diagPtr, Val, R, W1, W2); return;
+      case 6: precond_rcs_fixed<6>(lhs, rowPtr, colPtr, diagPtr, Val, R, W1, W2); return;
+      case 7: precond_rcs_fixed<7>(lhs, rowPtr, colPtr, diagPtr, Val, R, W1, W2); return;
+      case 8: precond_rcs_fixed<8>(lhs, rowPtr, colPtr, diagPtr, Val, R, W1, W2); return;
+      default: break;
+    }
+  }
+
   const fsils_int nNo = lhs.nNo;
   int maxiter = 10;
   double tol = 2.0;

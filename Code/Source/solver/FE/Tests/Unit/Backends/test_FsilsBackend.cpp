@@ -20,6 +20,7 @@
 #include "Backends/FSILS/FsilsDirectSolver.h"
 #include "Backends/FSILS/FsilsFactory.h"
 #include "Backends/FSILS/FsilsLinearSolver.h"
+#include "Backends/FSILS/FsilsSystemDump.h"
 #include "FsilsDirectSolveTestUtils.h"
 #include "Backends/FSILS/liner_solver/bcast.h"
 #include "Backends/FSILS/liner_solver/block_schur_strategy_selector.h"
@@ -1067,6 +1068,266 @@ TEST(FsilsBackendLegacyKernels, FusedGmresUpdateDofAbove4MatchesDynamicKernelBit
             }
         }
     }
+}
+
+// Adds a Dirichlet face: val = 0 on the listed (node, component) pairs and 1
+// on the other components of the listed nodes.
+void addDirichletFace(fe_fsi_linear_solver::FSILS_lhsType& lhs, int dof,
+                      const std::vector<std::pair<int, int>>& node_components)
+{
+    std::vector<int> nodes;
+    for (const auto& [node, comp] : node_components) {
+        (void)comp;
+        if (std::find(nodes.begin(), nodes.end(), node) == nodes.end()) {
+            nodes.push_back(node);
+        }
+    }
+    lhs.face.emplace_back();
+    lhs.nFaces = static_cast<int>(lhs.face.size());
+    auto& face = lhs.face.back();
+    face.incFlag = true;
+    face.dof = dof;
+    face.bGrp = fe_fsi_linear_solver::BcType::BC_TYPE_Dir;
+    face.nNo = static_cast<int>(nodes.size());
+    face.glob = Vector<int>(face.nNo);
+    face.val = Array<double>(dof, face.nNo);
+    face.val = 1.0;
+    for (int a = 0; a < face.nNo; ++a) {
+        face.glob(a) = nodes[static_cast<std::size_t>(a)];
+        for (const auto& [node, comp] : node_components) {
+            if (node == nodes[static_cast<std::size_t>(a)]) {
+                face.val(comp, a) = 0.0;
+            }
+        }
+    }
+}
+
+struct RcsOutputs {
+    Array<Real> values;
+    Array<Real> rhs;
+    Array<Real> row_weights;
+    Array<Real> col_weights;
+};
+
+RcsOutputs runPrecondRcs(DenseFsilsCsrFixture& fixture, int dof, const Array<Real>& values,
+                         const Array<Real>& rhs, bool generic_code)
+{
+    const int n_nodes = static_cast<int>(fixture.lhs.nNo);
+    RcsOutputs out{values, rhs, Array<Real>(dof, n_nodes), Array<Real>(dof, n_nodes)};
+    precond::test::set_rcs_generic_kernel_forced(generic_code);
+    precond::precond_rcs(fixture.lhs, fixture.row_ptr, fixture.col_ptr, fixture.diag_ptr, dof,
+                         out.values, out.rhs, out.row_weights, out.col_weights);
+    precond::test::set_rcs_generic_kernel_forced(false);
+    return out;
+}
+
+void expectSameRcsOutputs(const RcsOutputs& actual, const RcsOutputs& expected, const std::string& what)
+{
+    expectSameBits(actual.values, expected.values, what + " scaled matrix");
+    expectSameBits(actual.rhs, expected.rhs, what + " scaled rhs");
+    expectSameBits(actual.row_weights, expected.row_weights, what + " row weights Wr");
+    expectSameBits(actual.col_weights, expected.col_weights, what + " column weights Wc");
+}
+
+// precond_rcs for dof 5-8 (one pass for row and column maxima, one fused
+// row-then-column scaling pass) must give the bits of its generic dof > 4
+// code: scaled matrix, scaled rhs and both weight vectors, with Dirichlet
+// rows and columns, ghost rows, owned-row scaling, entries over twelve
+// decades with signed zeros and subnormals (several scaling sweeps).
+TEST(FsilsBackendLegacyKernels, PrecondRcsDof5To8MatchesGenericCodeBitwise)
+{
+    struct GenericReset {
+        ~GenericReset() { precond::test::set_rcs_generic_kernel_forced(false); }
+    } reset_switch;
+
+    for (const int dof : {5, 6, 7, 8}) {
+        for (const bool owned_rows : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "dof=" << dof << " owned_row_operator=" << owned_rows);
+            auto fixture = makeSparseFsilsCsr(/*n_nodes=*/29, /*owned_nodes=*/owned_rows ? 25 : 29,
+                                              /*seed=*/200u + static_cast<unsigned>(dof));
+            fixture.lhs.owned_row_operator = owned_rows;
+            addDirichletFace(fixture.lhs, dof, {{0, 0}, {0, 1}, {7, dof - 1}, {12, 2}, {28, 0}});
+            const int nnz = static_cast<int>(fixture.lhs.nnz);
+            const int n_nodes = static_cast<int>(fixture.lhs.nNo);
+            std::mt19937_64 rng(97u * static_cast<unsigned>(dof) + (owned_rows ? 1u : 0u));
+            std::normal_distribution<Real> normal(0.0, 1.0);
+
+            Array<Real> values(dof * dof, nnz);
+            for (int e = 0; e < values.size(); ++e) {
+                const int kind = static_cast<int>(rng() % 12);
+                values(e) = kind == 0 ? Real(-0.0)
+                          : kind == 1 ? std::numeric_limits<Real>::denorm_min() * Real(1 + rng() % 9)
+                          : normal(rng) * std::pow(Real(10.0), Real(static_cast<int>(rng() % 13) - 6));
+            }
+            for (int node = 0; node < n_nodes; ++node) {
+                const int d = static_cast<int>(fixture.diag_ptr(node));
+                for (int c = 0; c < dof; ++c) {
+                    values(c * dof + c, d) = Real(1.0 + rng() % 1000) * std::pow(Real(10.0), Real(node % 7 - 3));
+                }
+            }
+            Array<Real> rhs(dof, n_nodes);
+            for (int e = 0; e < rhs.size(); ++e) {
+                rhs(e) = cornerCaseValue(rng);
+            }
+
+            const auto expected = runPrecondRcs(fixture, dof, values, rhs, /*generic_code=*/true);
+            const auto actual = runPrecondRcs(fixture, dof, values, rhs, /*generic_code=*/false);
+            expectSameRcsOutputs(actual, expected, "dof " + std::to_string(dof));
+        }
+    }
+}
+
+std::vector<std::string> splitFileList(const char* text)
+{
+    std::vector<std::string> out;
+    std::string cur;
+    for (const char* p = text ? text : ""; *p != '\0'; ++p) {
+        if (*p == ',' || *p == ' ' || *p == '\n' || *p == '\t' || *p == ';') {
+            if (!cur.empty()) {
+                out.push_back(cur);
+                cur.clear();
+            }
+        } else {
+            cur.push_back(*p);
+        }
+    }
+    if (!cur.empty()) {
+        out.push_back(cur);
+    }
+    return out;
+}
+
+// The dof 5-8 kernels against their references on recorded FSILS systems
+// (snapshots written with SVMP_FSILS_DUMP_SYSTEM_PREFIX, listed in
+// SVMP_LINEAR_REPLAY_FILES as for LinearSolverReplay; skipped otherwise):
+// precond_rcs (scaled matrix, rhs, Wr, Wc), then on the scaled matrix the
+// block product, the Gram-Schmidt dot and the Gram-Schmidt update.
+TEST(FsilsBackendLegacyKernels, RecordedSystemsMatchGenericKernelsBitwise)
+{
+    const auto files = splitFileList(std::getenv("SVMP_LINEAR_REPLAY_FILES"));
+    if (files.empty()) {
+        GTEST_SKIP() << "SVMP_LINEAR_REPLAY_FILES not set";
+    }
+    struct SwitchReset {
+        ~SwitchReset()
+        {
+            precond::test::set_rcs_generic_kernel_forced(false);
+            spar_mul::test::set_vv_dynamic_kernel_forced(false);
+            gmres::test::set_dot_dynamic_kernel_forced(false);
+            gmres::test::set_update_dynamic_kernel_forced(false);
+        }
+    } reset_switches;
+    OmpThreadCountGuard thread_guard;
+    OmpThreadCountGuard::set(1);
+    auto commu = makeSelfCommu();
+
+    int checked = 0;
+    for (const auto& file : files) {
+        SCOPED_TRACE(file);
+        const auto snap = readFsilsSystemSnapshot(file);
+        const int dof = snap.dof;
+        if (dof < 5 || dof > 8) {
+            continue;
+        }
+        const int n_nodes = snap.n_nodes;
+        const int nnz = static_cast<int>(snap.cols.size());
+
+        DenseFsilsCsrFixture fixture{
+            .row_ptr = Array<fe_fsi_linear_solver::fsils_int>(2, n_nodes),
+            .col_ptr = Vector<fe_fsi_linear_solver::fsils_int>(nnz),
+            .diag_ptr = Vector<fe_fsi_linear_solver::fsils_int>(n_nodes),
+            .entry_row = {},
+        };
+        fixture.lhs.gnNo = n_nodes;
+        fixture.lhs.nNo = n_nodes;
+        fixture.lhs.mynNo = n_nodes;
+        fixture.lhs.nnz = nnz;
+        fixture.lhs.nFaces = 0;
+        fixture.lhs.commu = makeSelfCommu();
+        for (int row = 0; row < n_nodes; ++row) {
+            fixture.row_ptr(0, row) = snap.row_ptr[static_cast<std::size_t>(row)];
+            fixture.row_ptr(1, row) = snap.row_ptr[static_cast<std::size_t>(row) + 1] - 1;
+            fixture.diag_ptr(row) = -1;
+            for (auto e = snap.row_ptr[static_cast<std::size_t>(row)];
+                 e < snap.row_ptr[static_cast<std::size_t>(row) + 1]; ++e) {
+                fixture.col_ptr(static_cast<int>(e)) = snap.cols[static_cast<std::size_t>(e)];
+                if (snap.cols[static_cast<std::size_t>(e)] == row) {
+                    fixture.diag_ptr(row) = e;
+                }
+            }
+            ASSERT_GE(fixture.diag_ptr(row), 0) << "row " << row << " has no diagonal block";
+        }
+        std::vector<std::pair<int, int>> dirichlet;
+        for (const auto id : snap.dirichlet_dofs) {
+            dirichlet.emplace_back(static_cast<int>(id / dof), static_cast<int>(id % dof));
+        }
+        if (!dirichlet.empty()) {
+            addDirichletFace(fixture.lhs, dof, dirichlet);
+        }
+
+        Array<Real> values(dof * dof, nnz);
+        std::copy(snap.values.begin(), snap.values.end(), values.data());
+        Array<Real> rhs(dof, n_nodes);
+        std::copy(snap.rhs.begin(), snap.rhs.end(), rhs.data());
+
+        const auto expected = runPrecondRcs(fixture, dof, values, rhs, /*generic_code=*/true);
+        const auto actual = runPrecondRcs(fixture, dof, values, rhs, /*generic_code=*/false);
+        expectSameRcsOutputs(actual, expected, file);
+
+        // Krylov-like basis from repeated products with the scaled matrix.
+        constexpr int n_slices = 12;
+        Array3<Real> basis(dof, n_nodes, n_slices);
+        Array<Real> x(dof, n_nodes);
+        std::copy(snap.solution.begin(), snap.solution.end(), x.data());
+        for (int s = 0; s < n_slices; ++s) {
+            Array<Real> y_ref(dof, n_nodes);
+            Array<Real> y_new(dof, n_nodes);
+            spar_mul::test::set_vv_dynamic_kernel_forced(true);
+            spar_mul::fsils_spar_mul_vv(fixture.lhs, fixture.row_ptr, fixture.col_ptr, dof,
+                                        expected.values, x, y_ref);
+            spar_mul::test::set_vv_dynamic_kernel_forced(false);
+            spar_mul::fsils_spar_mul_vv(fixture.lhs, fixture.row_ptr, fixture.col_ptr, dof,
+                                        expected.values, x, y_new);
+            expectSameBits(y_new, y_ref, "block product " + std::to_string(s));
+            const Real scale = Real(1.0) / std::max(Real(1e-300), referenceNormOwned(y_ref, dof, n_nodes));
+            for (int e = 0; e < x.size(); ++e) {
+                x(e) = y_ref(e) * scale;
+                basis(e % dof, e / dof, s) = x(e);
+            }
+        }
+
+        Array<Real> w(dof, n_nodes);
+        std::copy(snap.rhs.begin(), snap.rhs.end(), w.data());
+        for (int last_i = 0; last_i < n_slices - 1; ++last_i) {
+            if (dof == 6 || dof == 8) {
+                std::vector<Real> h_ref(static_cast<std::size_t>(n_slices + 1), 0.0);
+                std::vector<Real> h_new(static_cast<std::size_t>(n_slices + 1), 0.0);
+                gmres::test::set_dot_dynamic_kernel_forced(true);
+                const Real zz_ref = gmres::test::fused_dot_zz_v_for_test(dof, n_nodes, basis, last_i, w, h_ref, 1);
+                gmres::test::set_dot_dynamic_kernel_forced(false);
+                const Real zz_new = gmres::test::fused_dot_zz_v_for_test(dof, n_nodes, basis, last_i, w, h_new, 1);
+                expectSameBits(h_new.data(), h_ref.data(), h_ref.size(), "dot h_col " + std::to_string(last_i));
+                expectSameBits(&zz_new, &zz_ref, 1, "dot zz " + std::to_string(last_i));
+            }
+            std::vector<Real> h(static_cast<std::size_t>(last_i + 1));
+            for (int j = 0; j <= last_i; ++j) {
+                h[static_cast<std::size_t>(j)] = (j % 4 == 3) ? Real(0.0) : Real(0.1) * Real(j + 1);
+            }
+            Array<Real> v_ref(w);
+            Array<Real> v_new(w);
+            gmres::test::set_update_dynamic_kernel_forced(true);
+            const Real norm_ref = gmres::test::fused_update_norm_v_for_test(dof, n_nodes, n_nodes, commu, basis,
+                                                                            last_i, v_ref, h);
+            gmres::test::set_update_dynamic_kernel_forced(false);
+            const Real norm_new = gmres::test::fused_update_norm_v_for_test(dof, n_nodes, n_nodes, commu, basis,
+                                                                            last_i, v_new, h);
+            expectSameBits(v_new, v_ref, "update " + std::to_string(last_i));
+            expectSameBits(&norm_new, &norm_ref, 1, "update norm " + std::to_string(last_i));
+        }
+        ++checked;
+    }
+    std::printf("[RecordedSystemsMatchGenericKernelsBitwise] checked %d of %zu snapshots\n", checked, files.size());
+    EXPECT_GT(checked, 0);
 }
 
 TEST(FsilsBackendLegacyKernels, GivensRotationAndHessenbergBacksolveMatchReferences)
