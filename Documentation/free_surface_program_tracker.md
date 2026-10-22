@@ -727,6 +727,33 @@ These are proposals. Each lists a recommended option and an alternative. Record 
     3. A study of limiting cut-context regeneration and classification to the ghost depth aggregation needs; adopted only if bitwise identical.
     4. An opt-in, cost-weighted mesh partition from the initial level set, off by default. It changes the partition and therefore round-off at a given rank count, so its result differences are measured against the existing spread between rank counts before any default is considered.
     5. A bitwise-only optimization of the FSILS sparse matrix-vector product and dot products, which are now the largest cost (SpMV about 25% of 3D and 45% of 2D instructions on the integrated binary). Every sum keeps its order of operations.
+- **D46, 2026-10-21 (user): the cost-weighted startup partition is the default for unfitted free-surface runs; results of the D45 follow-ups.**
+  - **Partition:** `<Partition_weighting>` defaults to `auto`. On 2 or more ranks, an unfitted level-set free-surface deck balances cut-volume work (full liquid cell 1, cut cell 2, dry cell 0, a fit of ρ = 1.93 to per-rank timings) next to the cell count. Fitted ALE, two-fluid, decks without a free surface, and serial runs are unchanged; `none` gives the previous partition bitwise; a missing φ falls back to the cell-count partition on every rank with one diagnostic line.
+    - Gain (3 steps): sphere R/h = 8 −19% at 8 ranks and −29% at 16; 3D sessile R/h = 16 −26% and −32%. 16 ranks is now faster than 8.
+    - Results change at round-off at 2 and 4 ranks: every field differs from the old partition by 0.73–1.52 times the existing spread between rank counts, with identical outer, Newton and inner iteration sequences. Serial results are bitwise unchanged. New 2/4-rank reference baselines: tag `pwd-92f1a2fc`.
+    - The earlier reading that ranks assemble ghost-cell volume rules was wrong: the fused cut-volume path assembles owned cells only, and the gain comes from balancing owned liquid work.
+  - **FSILS (bitwise):** block products, the Gram-Schmidt dot and update, and the row/column scaling for 5–8 unknowns per node. The FSILS solve is about 2× faster; per step, 2D sessile −12.4%, capillary wave −18.1%, 3D sessile −2.8%. The transposed-matrix variant and the insertion memo were measured and not taken.
+  - **Outer-pass round 2 (bitwise):** per step −3.7% (2D), −3.0% (capillary wave), −5.1% (3D) on an exclusive node.
+  - **Aggregation:** the prolongation report is built on request (116 → 6 builds per run), each rooted line is validated once; the double-precision pre-check of the validation was measured at 0.25% and dropped.
+  - **Ghost-depth audit:** withholding cut data beyond 1, 2 or 4 ghost layers is bitwise identical on every reference deck and rank count, except decks with rank-local curvature recovery. Generated cut data is now kept on the owned cells plus 2 face layers (`<Generated_cut_ghost_layers>`, −1 keeps all), with the full halo for rank-local curvature modes; 4–11% per step and 9–17% less peak memory at 4–16 ranks, bitwise. (In integration.)
+  - **Refactor:** the NS-module diagnostics and experiments are retired (D42), together with GeneratedCurvatureTraction, SmoothedIndicator, the velocity-extension option, fitted pointwise curvature and the symmetric-Nitsche energy diagnostic (user). IncompressibleNavierStokesVMSModule.cpp is 8,636 lines (11,030 before); the conservative-phase workflow moved to FE/LevelSet (S11), and ApplicationDriver.cpp is 32,478 lines (37,439 before the refactor).
+- **D47, 2026-10-21 (user): reduce the free-surface configuration to a small typed schema** (`Documentation/free_surface_configuration_20261021/`: inventory, reduction proposal, implementation plan).
+  - **Inventory:** about 208 free-surface XML items under 689 accepted spellings (396 of 721 spellings used nowhere), 46 internal option fields, and 213 environment names on the free-surface path, 68 of which change results with no deck key. Reference decks state 15–43 free-surface keys, because the code defaults differ from the protocols.
+  - **Decisions (all as recommended):**
+    1. Versioned method profiles (Capillary, Wetting, Gravity_wave, Fitted_ALE; None = today's defaults); a deck names one and explicit keys override it. Deriving the profile from the physics and changing code defaults come later as a separate, result-changing step.
+    2. Retire the CurvatureTraction route and its least-squares curvature recovery; SurfaceStress becomes the fitted default, provided the fitted γ = 0 sloshing manifest is unchanged.
+    3. `Implementation` becomes required; `Active_domain` defaults to LevelSetNegative.
+    4. Ghost penalty, SUPG constants and the two-fluid interface γ are fixed by the profile.
+    5. Retire PDE/projection reinitialization, global volume correction, algebraic wet extension and discontinuity capturing; keep the bound-preserving limiter as one advanced switch until SPHERIC is re-run.
+    6. The Wetting profile sets the strong Ren–E law; the code default stays weak.
+    7. Profiles set cut quadrature order 2; the 3D code default changes with step 1's later default change.
+    8. HighOrderImplicit geometry and the implicit cut backends leave the free-surface schema and stay in FE.
+    9. Retire the fitted Penalty and Nitsche kinematic enforcements.
+    10. The redistancing trigger is fixed at one cell; its environment override becomes a registry entry that marks the run non-reference.
+    11. Keep only `Outer_fixed_point_max_passes` (applied to steady solves too); add `Generalized_alpha_initial_rate`.
+    12. No environment variable changes a production result: result-changing names become keys, constants or test hooks; diagnostic and performance switches go behind one registry.
+    13. Delete the unused and CamelCase spellings; legacy spellings still in use warn for one release.
+  - **Target:** about 23 user-facing keys, 17 advanced and 10 for two-fluid; 4–10 free-surface keys per reference deck (2D sessile: 8, from 42). Every step is proved by a resolve-only comparison of the effective configuration, the S0 manifests and the reference sets.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
