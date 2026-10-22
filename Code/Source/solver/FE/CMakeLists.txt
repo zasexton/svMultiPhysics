@@ -327,6 +327,7 @@ set(FE_CORE_HEADERS
     Core/HaloDiagnostics.h
     Core/AggregationGuardDiagnostics.h
     Core/RankLog.h
+    Core/OptionSchema.h
 )
 
 set(FE_CORE_SOURCES
