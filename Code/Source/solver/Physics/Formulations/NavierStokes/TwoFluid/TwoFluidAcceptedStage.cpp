@@ -16,6 +16,7 @@
 #include "FE/Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "FE/Interfaces/LevelSetInterfaceDomain.h"
 #include "FE/LevelSet/LevelSetOptions.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
 
 #include <algorithm>
 #include <cmath>
@@ -274,9 +275,9 @@ buildCurrentTwoFluidMomentumReconciliations(
     const svmp::MeshComm& comm)
 {
   const auto declarations =
-      sim.fe_system->twoFluidAcceptedStageDiagnosticDeclarations();
+      two_fluid::records(*sim.fe_system).twoFluidAcceptedStageDiagnosticDeclarations();
   const auto pending =
-      sim.fe_system->pendingTwoFluidAcceptedStageDiagnostics();
+      two_fluid::records(*sim.fe_system).pendingTwoFluidAcceptedStageDiagnostics();
   TwoFluidMomentumReconciliationBatch batch;
   std::vector<svmp::FE::systems::
                   TwoFluidAcceptedStageDiagnosticDeclaration>

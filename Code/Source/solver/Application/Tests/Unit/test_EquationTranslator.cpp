@@ -10,6 +10,7 @@
 #include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesRegister.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
 
 #include <algorithm>
 #include <array>
@@ -23,6 +24,7 @@
 #include <vector>
 
 namespace free_surface = svmp::Physics::formulations::navier_stokes::free_surface;
+namespace two_fluid = svmp::Physics::formulations::navier_stokes::two_fluid;
 
 namespace {
 
@@ -1287,15 +1289,15 @@ TEST(EquationTranslatorFreeSurface,
           .front()
           .interface_marker,
       71);
-  ASSERT_EQ(system.twoFluidAcceptedStageDiagnosticDeclarations().size(),
+  ASSERT_EQ(two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations().size(),
             1u);
-  EXPECT_TRUE(system.twoFluidAcceptedStageDiagnosticDeclarations()
+  EXPECT_TRUE(two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations()
                   .front()
                   .require_conservative_phase_momentum_reconciliation);
-  ASSERT_TRUE(system.twoFluidAcceptedStageDiagnosticDeclarations()
+  ASSERT_TRUE(two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations()
                   .front()
                   .parameters.prescribed_viscous_traction_jump.has_value());
-  EXPECT_EQ(*system.twoFluidAcceptedStageDiagnosticDeclarations()
+  EXPECT_EQ(*two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations()
                  .front()
                  .parameters.prescribed_viscous_traction_jump,
             (std::array<svmp::FE::Real, 3>{{6.0, 7.0, 0.0}}));
@@ -1503,7 +1505,7 @@ TEST(EquationTranslatorFreeSurface,
   EXPECT_TRUE(
       system.materialInterfaceTransportVelocityDeclarations().empty());
   EXPECT_TRUE(
-      system.twoFluidAcceptedStageDiagnosticDeclarations().empty());
+      two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
 }
 
 TEST(EquationTranslatorFreeSurface,
@@ -1582,7 +1584,7 @@ TEST(EquationTranslatorFreeSurface,
     EXPECT_TRUE(
         system.materialInterfaceTransportVelocityDeclarations().empty());
     EXPECT_TRUE(
-        system.twoFluidAcceptedStageDiagnosticDeclarations().empty());
+        two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
   }
 }
 
@@ -1642,7 +1644,7 @@ TEST(EquationTranslatorFreeSurface,
   EXPECT_TRUE(
       system.materialInterfaceTransportVelocityDeclarations().empty());
   EXPECT_TRUE(
-      system.twoFluidAcceptedStageDiagnosticDeclarations().empty());
+      two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
 }
 
 TEST(EquationTranslatorFreeSurface,
@@ -1718,7 +1720,7 @@ TEST(EquationTranslatorFreeSurface,
     EXPECT_TRUE(
         system.materialInterfaceTransportVelocityDeclarations().empty());
     EXPECT_TRUE(
-        system.twoFluidAcceptedStageDiagnosticDeclarations().empty());
+        two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
   }
 }
 
@@ -1778,7 +1780,7 @@ TEST(EquationTranslatorFreeSurface,
   EXPECT_TRUE(
       system.materialInterfaceTransportVelocityDeclarations().empty());
   EXPECT_TRUE(
-      system.twoFluidAcceptedStageDiagnosticDeclarations().empty());
+      two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
 }
 
 TEST(EquationTranslatorFreeSurface,
@@ -1883,7 +1885,7 @@ TEST(EquationTranslatorFreeSurface,
     EXPECT_TRUE(
         system.materialInterfaceTransportVelocityDeclarations().empty());
     EXPECT_TRUE(
-        system.twoFluidAcceptedStageDiagnosticDeclarations().empty());
+        two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
   }
 }
 
@@ -1985,7 +1987,7 @@ TEST(EquationTranslatorFreeSurface,
     EXPECT_TRUE(
         system.materialInterfaceTransportVelocityDeclarations().empty());
     EXPECT_TRUE(
-        system.twoFluidAcceptedStageDiagnosticDeclarations().empty());
+        two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
   }
 }
 
@@ -2084,7 +2086,7 @@ TEST(EquationTranslatorFreeSurface,
     EXPECT_TRUE(
         system.materialInterfaceTransportVelocityDeclarations().empty());
     EXPECT_TRUE(
-        system.twoFluidAcceptedStageDiagnosticDeclarations().empty());
+        two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
   }
 }
 
@@ -2147,7 +2149,7 @@ TEST(EquationTranslatorFreeSurface,
   EXPECT_TRUE(
       system.materialInterfaceTransportVelocityDeclarations().empty());
   EXPECT_TRUE(
-      system.twoFluidAcceptedStageDiagnosticDeclarations().empty());
+      two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
 }
 
 TEST(EquationTranslatorNodePressureConstraints, BuildInputRejectsUnsupportedIdType)

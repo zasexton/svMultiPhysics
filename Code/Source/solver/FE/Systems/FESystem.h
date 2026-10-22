@@ -758,44 +758,6 @@ public:
     fittedALENormalOperatorStageMeasurementHistory() const noexcept {
         return fitted_ale_normal_measurement_history_;
     }
-    /** Register one deterministic two-fluid accepted-stage diagnostic owner. */
-    void declareTwoFluidAcceptedStageDiagnostics(
-        TwoFluidAcceptedStageDiagnosticDeclaration declaration);
-    [[nodiscard]] std::span<
-        const TwoFluidAcceptedStageDiagnosticDeclaration>
-    twoFluidAcceptedStageDiagnosticDeclarations() const noexcept {
-        return two_fluid_accepted_stage_declarations_;
-    }
-    /** Stage communicator-global diagnostics for a prospective accepted step. */
-    void stageTwoFluidAcceptedStageDiagnostics(
-        OperatorStageMeasurementMetadata metadata,
-        std::span<const AcceptedTwoFluidStageDiagnosticState> states);
-    /** Bind required post-maintenance momentum records to the pending group. */
-    void bindPendingTwoFluidMomentumReconciliations(
-        std::span<const interfaces::IncompressibleTwoFluidMomentumReconciliation>
-            reconciliations);
-    /** Bind solver and canonical phase-stability evidence to the pending group. */
-    void bindPendingTwoFluidAcceptedStageNumerics(
-        TwoFluidAcceptedStageSolveTelemetry solve,
-        std::span<const constraints::SmallCutAggregationRefreshReport>
-            aggregation_reports);
-    /** Discard a rejected candidate without publishing accepted history. */
-    void discardPendingTwoFluidAcceptedStageDiagnostics() noexcept;
-    /** Publish the complete pending group after irreversible step acceptance. */
-    void commitPendingTwoFluidAcceptedStageDiagnostics(
-        std::uint64_t accepted_step,
-        Real accepted_time,
-        Real dt);
-    [[nodiscard]] std::span<
-        const TwoFluidAcceptedStageDiagnosticHistoryRecord>
-    pendingTwoFluidAcceptedStageDiagnostics() const noexcept {
-        return pending_two_fluid_accepted_stage_diagnostics_;
-    }
-    [[nodiscard]] std::span<
-        const TwoFluidAcceptedStageDiagnosticHistoryRecord>
-    twoFluidAcceptedStageDiagnosticHistory() const noexcept {
-        return two_fluid_accepted_stage_diagnostic_history_;
-    }
     /** Declare one phase-pair source for sharp material-interface transport. */
     void declareMaterialInterfaceTransportVelocity(
         interfaces::MaterialInterfaceTransportVelocityDeclaration
@@ -2553,14 +2515,6 @@ private:
         fitted_ale_normal_measurement_history_{};
     bool fitted_ale_normal_measurement_declarations_frozen_{false};
     bool fitted_ale_normal_measurement_transaction_active_{false};
-    std::vector<TwoFluidAcceptedStageDiagnosticDeclaration>
-        two_fluid_accepted_stage_declarations_{};
-    std::vector<TwoFluidAcceptedStageDiagnosticHistoryRecord>
-        pending_two_fluid_accepted_stage_diagnostics_{};
-    std::vector<TwoFluidAcceptedStageDiagnosticHistoryRecord>
-        two_fluid_accepted_stage_diagnostic_history_{};
-    bool two_fluid_accepted_stage_declarations_frozen_{false};
-    bool two_fluid_accepted_stage_transaction_active_{false};
     std::vector<interfaces::MaterialInterfaceTransportVelocityDeclaration>
         material_interface_transport_velocity_declarations_{};
     std::vector<MeshTangentialBoundaryPolicyDeclaration>

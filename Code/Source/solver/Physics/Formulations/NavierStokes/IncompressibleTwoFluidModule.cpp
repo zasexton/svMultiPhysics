@@ -18,6 +18,7 @@
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormsInstaller.h"
 #include "FE/Forms/Vocabulary.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
 
 #include <algorithm>
 #include <cmath>
@@ -948,7 +949,7 @@ void IncompressibleTwoFluidModule::registerOn(
             .owner_component = "incompressible_two_fluid",
         });
 
-    system.declareTwoFluidAcceptedStageDiagnostics(
+    two_fluid::records(system).declareTwoFluidAcceptedStageDiagnostics(
         FE::systems::TwoFluidAcceptedStageDiagnosticDeclaration{
             .interface_marker = interface_marker,
             .level_set_field = level_set,

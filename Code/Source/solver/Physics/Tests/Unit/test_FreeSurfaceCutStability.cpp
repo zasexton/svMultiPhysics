@@ -87,6 +87,9 @@
 #include <utility>
 #include <vector>
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
+
+namespace two_fluid = svmp::Physics::formulations::navier_stokes::two_fluid;
 
 namespace {
 // Every small-cut aggregation prolongation report requested in this test
@@ -13289,7 +13292,7 @@ TEST(FreeSurfaceCutStabilityMPI,
     system.setup(setup);
 
     const auto declarations =
-        system.twoFluidAcceptedStageDiagnosticDeclarations();
+        two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations();
     ASSERT_EQ(declarations.size(), 1u);
     const auto& declaration = declarations.front();
     FE::interfaces::IncompressibleTwoFluidDiagnosticAccumulator accumulator;
@@ -13481,7 +13484,7 @@ TEST(FreeSurfaceCutStabilityMPI,
     }();
 
     const std::array accepted_states{state};
-    ASSERT_NO_THROW(system.stageTwoFluidAcceptedStageDiagnostics(
+    ASSERT_NO_THROW(two_fluid::records(system).stageTwoFluidAcceptedStageDiagnostics(
         metadata(1u, FE::Real{0.0}, FE::Real{0.1}), accepted_states));
     auto corrected_state = state;
     corrected_state.geometry_revision.source_value_revision = 8u;
@@ -13498,15 +13501,15 @@ TEST(FreeSurfaceCutStabilityMPI,
             /*corrected_algebraic_revision=*/62u,
             FE::Real{1.0e-10});
     const std::array accepted_reconciliations{accepted_reconciliation};
-    ASSERT_NO_THROW(system.bindPendingTwoFluidMomentumReconciliations(
+    ASSERT_NO_THROW(two_fluid::records(system).bindPendingTwoFluidMomentumReconciliations(
         accepted_reconciliations));
-    ASSERT_NO_THROW(system.bindPendingTwoFluidAcceptedStageNumerics(
+    ASSERT_NO_THROW(two_fluid::records(system).bindPendingTwoFluidAcceptedStageNumerics(
         solve_telemetry, aggregation_reports));
-    ASSERT_NO_THROW(system.commitPendingTwoFluidAcceptedStageDiagnostics(
+    ASSERT_NO_THROW(two_fluid::records(system).commitPendingTwoFluidAcceptedStageDiagnostics(
         1u, FE::Real{0.1}, FE::Real{0.1}));
-    ASSERT_EQ(system.twoFluidAcceptedStageDiagnosticHistory().size(), 1u);
+    ASSERT_EQ(two_fluid::records(system).twoFluidAcceptedStageDiagnosticHistory().size(), 1u);
 
-    ASSERT_NO_THROW(system.stageTwoFluidAcceptedStageDiagnostics(
+    ASSERT_NO_THROW(two_fluid::records(system).stageTwoFluidAcceptedStageDiagnostics(
         metadata(2u, FE::Real{0.1}, FE::Real{0.2}), accepted_states));
     auto rank_divergent_corrected = corrected_state;
     rank_divergent_corrected.geometry_revision.source_value_revision =
@@ -13528,15 +13531,15 @@ TEST(FreeSurfaceCutStabilityMPI,
             FE::Real{1.0e-10});
     const std::array rank_divergent_reconciliations{
         rank_divergent_reconciliation};
-    EXPECT_THROW(system.bindPendingTwoFluidMomentumReconciliations(
+    EXPECT_THROW(two_fluid::records(system).bindPendingTwoFluidMomentumReconciliations(
                      rank_divergent_reconciliations),
                  FE::InvalidArgumentException);
-    EXPECT_FALSE(system.pendingTwoFluidAcceptedStageDiagnostics()
+    EXPECT_FALSE(two_fluid::records(system).pendingTwoFluidAcceptedStageDiagnostics()
                      .front()
                      .momentum_reconciliation.has_value());
-    system.discardPendingTwoFluidAcceptedStageDiagnostics();
+    two_fluid::records(system).discardPendingTwoFluidAcceptedStageDiagnostics();
 
-    ASSERT_NO_THROW(system.stageTwoFluidAcceptedStageDiagnostics(
+    ASSERT_NO_THROW(two_fluid::records(system).stageTwoFluidAcceptedStageDiagnostics(
         metadata(2u, FE::Real{0.1}, FE::Real{0.2}), accepted_states));
     auto rank_divergent_aggregation = aggregation_reports;
     if (rank == 1) {
@@ -13545,13 +13548,13 @@ TEST(FreeSurfaceCutStabilityMPI,
         ++rank_divergent_aggregation.front()
               .canonical_rooted_candidate_vertices;
     }
-    EXPECT_THROW(system.bindPendingTwoFluidAcceptedStageNumerics(
+    EXPECT_THROW(two_fluid::records(system).bindPendingTwoFluidAcceptedStageNumerics(
                      solve_telemetry, rank_divergent_aggregation),
                  FE::InvalidArgumentException);
-    EXPECT_FALSE(system.pendingTwoFluidAcceptedStageDiagnostics()
+    EXPECT_FALSE(two_fluid::records(system).pendingTwoFluidAcceptedStageDiagnostics()
                      .front()
                      .numerics.has_value());
-    system.discardPendingTwoFluidAcceptedStageDiagnostics();
+    two_fluid::records(system).discardPendingTwoFluidAcceptedStageDiagnostics();
 
     auto divergent_state = state;
     if (rank == 1) {
@@ -13559,11 +13562,11 @@ TEST(FreeSurfaceCutStabilityMPI,
     }
     const std::array divergent_states{divergent_state};
     EXPECT_THROW(
-        system.stageTwoFluidAcceptedStageDiagnostics(
+        two_fluid::records(system).stageTwoFluidAcceptedStageDiagnostics(
             metadata(2u, FE::Real{0.1}, FE::Real{0.2}), divergent_states),
         FE::InvalidArgumentException);
-    EXPECT_TRUE(system.pendingTwoFluidAcceptedStageDiagnostics().empty());
-    EXPECT_EQ(system.twoFluidAcceptedStageDiagnosticHistory().size(), 1u);
+    EXPECT_TRUE(two_fluid::records(system).pendingTwoFluidAcceptedStageDiagnostics().empty());
+    EXPECT_EQ(two_fluid::records(system).twoFluidAcceptedStageDiagnosticHistory().size(), 1u);
     MPI_Barrier(comm);
 #endif
 }

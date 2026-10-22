@@ -43,6 +43,9 @@
 #include <utility>
 #include <vector>
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
+
+namespace two_fluid = svmp::Physics::formulations::navier_stokes::two_fluid;
 
 namespace {
 // Every small-cut aggregation prolongation report requested in this test
@@ -1648,8 +1651,8 @@ TEST(OpenVesselExamples,
             .size(),
         1u);
     ASSERT_TRUE(
-        components.fe_system
-            ->twoFluidAcceptedStageDiagnosticDeclarations()
+        two_fluid::records(*components.fe_system)
+            .twoFluidAcceptedStageDiagnosticDeclarations()
             .empty());
     svmp::FE::backends::BlockLayout incomplete_owner_layout{};
     incomplete_owner_layout.blocks.push_back({"sentinel", 0, 1});
@@ -1715,8 +1718,8 @@ TEST(OpenVesselExamples,
             .interface_marker,
         71);
     ASSERT_EQ(
-        components.fe_system
-            ->twoFluidAcceptedStageDiagnosticDeclarations()
+        two_fluid::records(*components.fe_system)
+            .twoFluidAcceptedStageDiagnosticDeclarations()
             .size(),
         1u);
 
@@ -2009,8 +2012,8 @@ TEST(OpenVesselExamples,
           .size(),
       1u);
   EXPECT_EQ(
-      components.fe_system
-          ->twoFluidAcceptedStageDiagnosticDeclarations()
+      two_fluid::records(*components.fe_system)
+          .twoFluidAcceptedStageDiagnosticDeclarations()
           .size(),
       1u);
 
@@ -2286,8 +2289,8 @@ void expectMaterialInterfaceDependencyPreflightRejectedWithoutMutation(
           ->materialInterfaceTransportVelocityDeclarations()
           .empty());
   EXPECT_TRUE(
-      components.fe_system
-          ->twoFluidAcceptedStageDiagnosticDeclarations()
+      two_fluid::records(*components.fe_system)
+          .twoFluidAcceptedStageDiagnosticDeclarations()
           .empty());
   EXPECT_FALSE(components.fe_system->hasOperator("equations"));
   EXPECT_TRUE(components.physics_modules.empty());
@@ -2535,8 +2538,8 @@ TEST(OpenVesselExamples,
           ->materialInterfaceTransportVelocityDeclarations()
           .empty());
   EXPECT_TRUE(
-      components.fe_system
-          ->twoFluidAcceptedStageDiagnosticDeclarations()
+      two_fluid::records(*components.fe_system)
+          .twoFluidAcceptedStageDiagnosticDeclarations()
           .empty());
   EXPECT_FALSE(components.fe_system->hasOperator("equations"));
   EXPECT_TRUE(components.physics_modules.empty());

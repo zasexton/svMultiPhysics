@@ -83,6 +83,7 @@
 #include "Parameters.h"
 #include "tinyxml2.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
 
 #include <algorithm>
 #include <array>
@@ -158,6 +159,7 @@ namespace {
 namespace static_capillary =
     svmp::Physics::formulations::navier_stokes::static_capillary;
 namespace free_surface = svmp::Physics::formulations::navier_stokes::free_surface;
+namespace two_fluid = svmp::Physics::formulations::navier_stokes::two_fluid;
 
 using Clock = std::chrono::steady_clock;
 using application::core::ActiveCutVolumeRequest;
@@ -12198,8 +12200,9 @@ bool snapshotMayStoreFullCellsClassificationOnly(
     const char* value = std::getenv("SVMP_KEEP_DRY_CELL_POINTS");
     return value != nullptr && value[0] != '\0' && value[0] != '0';
   }();
-  return !keep_points &&
-         system.twoFluidAcceptedStageDiagnosticDeclarations().empty();
+  return !keep_points && two_fluid::records(system)
+                             .twoFluidAcceptedStageDiagnosticDeclarations()
+                             .empty();
 }
 
 // Incremental cut-geometry rebuilds reuse, from one rebuild to the next,
@@ -20825,8 +20828,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   h, "momentum_reconciliation_rejection");
               return false;
             }
-            sim.fe_system
-                ->bindPendingTwoFluidMomentumReconciliations(
+            two_fluid::records(*sim.fe_system)
+                .bindPendingTwoFluidMomentumReconciliations(
                     reconciliation.records);
           }
           return true;
