@@ -72,6 +72,29 @@ void declareFittedNormalKinematics(
         normal_declarations,
     const std::vector<FreeSurfaceBoundary>& effective_free_surfaces);
 
+/// The mesh-displacement field record (throws without a coupled displacement
+/// unknown with a function space).
+[[nodiscard]] const FE::systems::FieldRecord& fittedMeshDisplacementRecord(
+    const FE::systems::FESystem& system,
+    const FE::systems::ALEBinding& ale_binding);
+
+/// Declares the boundary's tangential mesh policy (and logs it).
+void declareFittedTangentialMeshPolicy(
+    FE::systems::FESystem& system,
+    const FE::systems::ALEBinding& ale_binding,
+    const FreeSurfaceBoundary& bc);
+
+/// Problem-analysis descriptors of the mesh rows of a fitted free surface (the
+/// normal relation, the tangential policy) and the binding of the
+/// tangential-policy consumer to @p operator_tag.
+void declareFittedMeshRowDescriptors(
+    FE::systems::FESystem& system,
+    const std::string& operator_tag,
+    const FE::systems::ALEBinding& ale_binding,
+    const FreeSurfaceBoundary& bc,
+    FE::FieldId velocity_field,
+    bool rows_installed);
+
 } // namespace navier_stokes
 } // namespace formulations
 } // namespace Physics

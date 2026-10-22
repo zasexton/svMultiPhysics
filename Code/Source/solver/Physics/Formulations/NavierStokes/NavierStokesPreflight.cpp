@@ -614,6 +614,23 @@ NavierStokesPreflight preflightNavierStokes(
     };
 }
 
+bool hasNativeMeshOrWarn(const FE::systems::FESystem& system)
+{
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    const bool native_mesh_available = system.mesh() != nullptr;
+#else
+    (void)system;
+    const bool native_mesh_available = false;
+#endif
+    if (!native_mesh_available) {
+        FE_LOG_WARNING(
+            "IncompressibleNavierStokesVMSModule: skipping active-domain "
+            "inactive velocity/pressure constraints because native mesh support "
+            "is unavailable in this FESystem");
+    }
+    return native_mesh_available;
+}
+
 } // namespace navier_stokes
 } // namespace formulations
 } // namespace Physics

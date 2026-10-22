@@ -237,6 +237,173 @@ void declareFittedNormalKinematics(
     }
 }
 
+const FE::systems::FieldRecord& fittedMeshDisplacementRecord(
+    const FE::systems::FESystem& system,
+    const FE::systems::ALEBinding& ale_binding)
+{
+    if (ale_binding.mesh_displacement_field == FE::INVALID_FIELD_ID) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: fitted free-surface mesh kinematics require a coupled mesh displacement unknown");
+    }
+
+    const auto& rec = system.fieldRecord(ale_binding.mesh_displacement_field);
+    if (!rec.space) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: fitted free-surface mesh displacement field has no function space");
+    }
+    return rec;
+}
+
+void declareFittedTangentialMeshPolicy(
+    FE::systems::FESystem& system,
+    const FE::systems::ALEBinding& ale_binding,
+    const FreeSurfaceBoundary& bc)
+{
+    const bool install_tangential_smoothing =
+        bc.tangential_mesh_policy ==
+        FreeSurfaceTangentialMeshPolicy::SmoothingOnly;
+    const bool install_tangential_prescription =
+        bc.tangential_mesh_policy ==
+        FreeSurfaceTangentialMeshPolicy::Prescribed;
+
+    system.declareMeshTangentialBoundaryPolicy(
+        FE::systems::MeshTangentialBoundaryPolicyDeclaration{
+            .mesh_displacement_field = ale_binding.mesh_displacement_field,
+            .boundary_marker = bc.boundary_marker,
+            .policy =
+                systemTangentialMeshPolicy(bc.tangential_mesh_policy),
+            .owner_component =
+                "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary",
+        });
+
+    FE_LOG_INFO(
+        std::string("IncompressibleNavierStokesVMSModule: fitted "
+                    "free-surface mesh policy") +
+        " marker=" + std::to_string(bc.boundary_marker) +
+        " tangential_policy=" +
+        tangentialMeshPolicyName(bc.tangential_mesh_policy) +
+        " tangential_owner=free_surface_boundary" +
+        " tangential_enforcement=" +
+        (install_tangential_prescription
+             ? "weak_velocity_penalty"
+             : install_tangential_smoothing
+                   ? "surface_smoothing_functional"
+                   : "natural_no_tangential_constraint") +
+        " diagnostic=fitted_free_surface_mesh_policy");
+}
+
+void declareFittedMeshRowDescriptors(
+    FE::systems::FESystem& system,
+    const std::string& operator_tag,
+    const FE::systems::ALEBinding& ale_binding,
+    const FreeSurfaceBoundary& bc,
+    FE::FieldId velocity_field,
+    bool rows_installed)
+{
+    const bool install_normal_relation =
+        bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None &&
+        bc.normal_kinematic_policy ==
+            FreeSurfaceNormalKinematicPolicy::MatchFluidNormalVelocity;
+    const bool install_tangential_prescription =
+        bc.tangential_mesh_policy ==
+        FreeSurfaceTangentialMeshPolicy::Prescribed;
+
+    if (!rows_installed) {
+        FE::analysis::BoundaryConditionDescriptor descriptor;
+        descriptor.primary_variable =
+            FE::analysis::VariableKey::field(
+                ale_binding.mesh_displacement_field);
+        descriptor.boundary_marker = bc.boundary_marker;
+        descriptor.trace_kind =
+            FE::analysis::TraceKind::TangentialComponent;
+        descriptor.enforcement_kind =
+            FE::analysis::EnforcementKind::WeakConsistent;
+        const auto consumer_source = fittedTangentialOperatorSource(
+            bc.boundary_marker, bc.tangential_mesh_policy);
+        descriptor.source = consumer_source;
+        system.addBoundaryConditionDescriptor(
+            std::move(descriptor), operator_tag);
+        system.bindMeshTangentialBoundaryPolicyConsumer(
+            ale_binding.mesh_displacement_field,
+            bc.boundary_marker,
+            systemTangentialMeshPolicy(bc.tangential_mesh_policy),
+            operator_tag,
+            consumer_source);
+        return;
+    }
+
+    if (install_normal_relation) {
+        if (velocity_field == FE::INVALID_FIELD_ID) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: fitted normal "
+                "kinematics require a related fluid velocity field");
+        }
+        const auto mesh_source =
+            "Fitted free-surface mesh normal kinematic row on marker " +
+            std::to_string(bc.boundary_marker);
+        FE::analysis::BoundaryConditionDescriptor mesh_descriptor;
+        mesh_descriptor.primary_variable =
+            FE::analysis::VariableKey::field(
+                ale_binding.mesh_displacement_field);
+        mesh_descriptor.related_variables.push_back(
+            FE::analysis::VariableKey::field(velocity_field));
+        mesh_descriptor.boundary_marker = bc.boundary_marker;
+        mesh_descriptor.trace_kind =
+            FE::analysis::TraceKind::NormalComponent;
+        mesh_descriptor.enforcement_kind =
+            FE::analysis::EnforcementKind::WeakPenalty;
+        mesh_descriptor.source = mesh_source;
+        system.addBoundaryConditionDescriptor(
+            std::move(mesh_descriptor), operator_tag);
+
+        const auto fluid_source =
+            fittedFluidNormalDescriptorSource(bc);
+        FE::analysis::BoundaryConditionDescriptor fluid_descriptor;
+        fluid_descriptor.primary_variable =
+            FE::analysis::VariableKey::field(velocity_field);
+        fluid_descriptor.related_variables.push_back(
+            FE::analysis::VariableKey::field(
+                ale_binding.mesh_displacement_field));
+        fluid_descriptor.boundary_marker = bc.boundary_marker;
+        fluid_descriptor.trace_kind =
+            FE::analysis::TraceKind::NormalComponent;
+        fluid_descriptor.enforcement_kind =
+            bc.kinematic_enforcement ==
+                    FreeSurfaceKinematicEnforcement::Nitsche
+                ? FE::analysis::EnforcementKind::WeakNitsche
+                : bc.kinematic_enforcement ==
+                          FreeSurfaceKinematicEnforcement::MeshNitsche
+                      ? FE::analysis::EnforcementKind::WeakConsistent
+                      : FE::analysis::EnforcementKind::WeakPenalty;
+        fluid_descriptor.source = fluid_source;
+        system.addBoundaryConditionDescriptor(
+            std::move(fluid_descriptor), operator_tag);
+    }
+
+    FE::analysis::BoundaryConditionDescriptor descriptor;
+    descriptor.primary_variable =
+        FE::analysis::VariableKey::field(
+            ale_binding.mesh_displacement_field);
+    descriptor.boundary_marker = bc.boundary_marker;
+    descriptor.trace_kind =
+        FE::analysis::TraceKind::TangentialComponent;
+    descriptor.enforcement_kind =
+        install_tangential_prescription
+            ? FE::analysis::EnforcementKind::WeakPenalty
+            : FE::analysis::EnforcementKind::WeakConsistent;
+    const auto consumer_source = fittedTangentialOperatorSource(
+        bc.boundary_marker, bc.tangential_mesh_policy);
+    descriptor.source = consumer_source;
+    system.addBoundaryConditionDescriptor(
+        std::move(descriptor), operator_tag);
+    system.bindMeshTangentialBoundaryPolicyConsumer(
+        ale_binding.mesh_displacement_field,
+        bc.boundary_marker,
+        systemTangentialMeshPolicy(bc.tangential_mesh_policy),
+        operator_tag,
+        consumer_source);
+}
+
 } // namespace navier_stokes
 } // namespace formulations
 } // namespace Physics

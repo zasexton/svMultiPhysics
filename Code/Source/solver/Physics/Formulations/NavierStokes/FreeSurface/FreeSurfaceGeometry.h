@@ -147,6 +147,11 @@ void appendUnfittedFreeSurfaceCurvatureTrialFields(
     const FE::systems::FESystem& system,
     FE::systems::FormInstallOptions& install);
 
+/// The level set as a state field (the contact-line terms read its gradient).
+[[nodiscard]] FE::forms::FormExpr levelSetStateField(
+    const FreeSurfaceBoundary& bc,
+    const FE::systems::FESystem& system);
+
 } // namespace navier_stokes
 } // namespace formulations
 } // namespace Physics

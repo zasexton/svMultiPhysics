@@ -293,6 +293,32 @@ void installFreeSurfaceResidualWork(
         "IncompressibleNavierStokesVMSModule: diagnostic=free_surface_residual_work_operators status=declared channels=convection|pressure_continuity|nonconservative_body_force|weak_boundary|vms_pspg|cut_stabilization|ghost_penalty contract=negative_dt_times_constrained_operator_stage_pairing");
 }
 
+FreeSurfaceResidualWorkForms bulkResidualWork(
+    const NavierStokesVMSIntegrands& integrands,
+    const FE::forms::FormExpr& momentum_form,
+    const FE::forms::FormExpr& continuity_form,
+    const FE::forms::FormExpr& vms_pspg_pressure_gradient_form,
+    const FE::forms::FormExpr& conservative_body_force_residual,
+    bool has_nonconservative_body_force,
+    bool enable_vms,
+    const FE::forms::VolumeDomain& liquid)
+{
+    FreeSurfaceResidualWorkForms work;
+    work.convection = integrands.convection.dx(liquid);
+    work.pressure = integrands.pressure.dx(liquid);
+    work.continuity = integrands.galerkin_continuity.dx(liquid);
+    if (has_nonconservative_body_force) {
+        work.nonconservative_body_force =
+            (integrands.forcing - conservative_body_force_residual).dx(liquid);
+    }
+    if (enable_vms) {
+        work.vms_momentum = momentum_form - integrands.galerkin_momentum.dx(liquid);
+        work.vms_continuity = continuity_form - work.continuity;
+        work.vms_pspg_pressure_gradient = vms_pspg_pressure_gradient_form;
+    }
+    return work;
+}
+
 } // namespace navier_stokes
 } // namespace formulations
 } // namespace Physics

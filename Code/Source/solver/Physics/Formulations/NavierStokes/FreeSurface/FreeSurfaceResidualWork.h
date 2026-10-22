@@ -20,6 +20,7 @@
  */
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
+#include "Physics/Formulations/NavierStokes/NavierStokesVMSFormulation.h"
 
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Constraints/ConstraintPlan.h"
@@ -82,6 +83,19 @@ void installFreeSurfaceResidualWork(
     const FE::systems::FormInstallOptions& install,
     const FreeSurfaceResidualWorkForms& work,
     const FreeSurfaceResidualWorkApplicability& applicability);
+
+/// The bulk channels from the integrands and the volume forms M, C on @p liquid
+/// (before any boundary term is added); @p conservative_body_force_residual is
+/// the constant-gravity part -rho g.v of the forcing.
+[[nodiscard]] FreeSurfaceResidualWorkForms bulkResidualWork(
+    const NavierStokesVMSIntegrands& integrands,
+    const FE::forms::FormExpr& momentum_form,
+    const FE::forms::FormExpr& continuity_form,
+    const FE::forms::FormExpr& vms_pspg_pressure_gradient_form,
+    const FE::forms::FormExpr& conservative_body_force_residual,
+    bool has_nonconservative_body_force,
+    bool enable_vms,
+    const FE::forms::VolumeDomain& liquid);
 
 } // namespace navier_stokes
 } // namespace formulations

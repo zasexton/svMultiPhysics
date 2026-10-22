@@ -601,6 +601,18 @@ void appendUnfittedFreeSurfaceCurvatureTrialFields(
     }
 }
 
+FE::forms::FormExpr levelSetStateField(
+    const FreeSurfaceBoundary& bc,
+    const FE::systems::FESystem& system)
+{
+    const auto phi_id = resolveLevelSetFieldId(bc, system);
+    const auto& phi_record = system.fieldRecord(phi_id);
+    return FE::forms::StateField(
+        phi_id,
+        *phi_record.space,
+        bc.level_set_field_name);
+}
+
 } // namespace navier_stokes
 } // namespace formulations
 } // namespace Physics

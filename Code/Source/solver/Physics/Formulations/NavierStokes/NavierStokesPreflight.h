@@ -84,6 +84,10 @@ struct NavierStokesPreflight {
     const std::shared_ptr<const FE::spaces::FunctionSpace>& velocity_space,
     const std::shared_ptr<const FE::spaces::FunctionSpace>& pressure_space);
 
+/// The system has a native mesh, which the active-side constraints need;
+/// warns (and the constraints are skipped) otherwise.
+[[nodiscard]] bool hasNativeMeshOrWarn(const FE::systems::FESystem& system);
+
 } // namespace navier_stokes
 } // namespace formulations
 } // namespace Physics

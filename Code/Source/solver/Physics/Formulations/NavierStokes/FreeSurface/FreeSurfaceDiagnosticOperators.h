@@ -55,6 +55,31 @@ bool pressureRowContributionDiagnosticEnabled();
 
 bool freeSurfaceConservativeBalanceDiagnosticEnabled();
 
+/// The forms of the conservative split, collected where the formulation states
+/// them (only when the diagnostic is requested and supported).
+struct ConservativeBalanceForms {
+    FE::forms::FormExpr pressure;                 // -p div v on the liquid, + p_ext n.v on Gamma
+    FE::forms::FormExpr external_pressure;        // p_ext n.v on Gamma
+    FE::forms::FormExpr surface_energy;           // gamma P:grad v, the KAG traction, Young wall energy
+    FE::forms::FormExpr gravitational_potential;  // -rho g.v on the liquid
+};
+
+/// Adds a free-surface part to the split (@p balance may be null).
+inline void addExteriorPressure(ConservativeBalanceForms* balance, const FE::forms::FormExpr& form)
+{
+    if (balance != nullptr) {
+        balance->pressure = balance->pressure.isValid() ? balance->pressure + form : form;
+        balance->external_pressure =
+            balance->external_pressure.isValid() ? balance->external_pressure + form : form;
+    }
+}
+inline void addSurfaceEnergy(ConservativeBalanceForms* balance, const FE::forms::FormExpr& form)
+{
+    if (balance != nullptr) {
+        balance->surface_energy = balance->surface_energy.isValid() ? balance->surface_energy + form : form;
+    }
+}
+
 /// The conservative-balance diagnostic is requested and every free surface
 /// has a discrete-energy traction with a constant nonzero gamma (warns when
 /// it is requested but not supported).
