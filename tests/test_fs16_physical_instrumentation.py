@@ -1908,66 +1908,6 @@ def test_surface_stress_droplet_omits_curvature_traction_state_by_default():
         assert free_surface.find("Curvature_field") is None
 
 
-def test_generated_curvature_traction_configuration_is_explicit():
-    runner = _load_runner()
-    with tempfile.TemporaryDirectory() as temp_dir:
-        case_dir = Path(temp_dir) / "droplet2d"
-        runner.write_capillary_droplet2d_case(
-            case_dir,
-            steps=1,
-            pressure_jump=2.0,
-            nx=8,
-            ny=8,
-        )
-        solver = case_dir / "solver.xml"
-        runner.configure_solver(
-            solver,
-            steps=1,
-            surface_tension=0.5,
-            capillary_force_form="generated_curvature_traction",
-            prescribed_capillary_curvature=4.0,
-        )
-        root = runner.ET.parse(solver).getroot()
-        free_surface = runner.free_surface_bc(root)
-        assert free_surface.findtext(
-            "Surface_tension_form") == "GeneratedCurvatureTraction"
-        assert free_surface.findtext("Curvature") == "4"
-        assert free_surface.findtext("Use_level_set_curvature") == "false"
-        assert free_surface.find("Curvature_field") is None
-
-
-def test_projected_curvature_configuration_exposes_recovery_controls():
-    runner = _load_runner()
-    with tempfile.TemporaryDirectory() as temp_dir:
-        case_dir = Path(temp_dir) / "droplet2d"
-        runner.write_capillary_droplet2d_case(
-            case_dir,
-            steps=1,
-            pressure_jump=2.0,
-            nx=8,
-            ny=8,
-        )
-        solver = case_dir / "solver.xml"
-        runner.configure_solver(
-            solver,
-            steps=1,
-            surface_tension=0.5,
-            capillary_force_form="generated_curvature_traction",
-            projected_curvature_field="kappa_projected",
-            curvature_projection_supplemental_sample_weight=0.125,
-            curvature_projection_recovery_mode="generated_interface_patch",
-        )
-
-        root = runner.ET.parse(solver).getroot()
-        level_set = runner.level_set_equation(root)
-        free_surface = runner.free_surface_bc(root)
-        assert level_set.findtext(
-            "Curvature_projection_supplemental_sample_weight") == "0.125"
-        assert level_set.findtext(
-            "Curvature_projection_recovery_mode") == "generated_interface_patch"
-        assert free_surface.findtext("Curvature_field") == "kappa_projected"
-
-
 def test_kinematic_area_gradient_traction_configuration_is_explicit_and_unfiltered():
     runner = _load_runner()
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -2330,36 +2270,6 @@ def test_projected_curvature_recovery_diagnostics_are_aggregated_and_gated():
     assert any("fitted vertices 7 is below 8" in error for error in errors)
 
 
-def test_generated_curvature_traction_requires_one_curvature_source():
-    runner = _load_runner()
-    with tempfile.TemporaryDirectory() as temp_dir:
-        case_dir = Path(temp_dir) / "droplet2d"
-        runner.write_capillary_droplet2d_case(
-            case_dir,
-            steps=1,
-            pressure_jump=2.0,
-            nx=8,
-            ny=8,
-        )
-        solver = case_dir / "solver.xml"
-        with pytest.raises(ValueError, match="requires either"):
-            runner.configure_solver(
-                solver,
-                steps=1,
-                surface_tension=0.5,
-                capillary_force_form="generated_curvature_traction",
-            )
-        with pytest.raises(ValueError, match="exactly one curvature source"):
-            runner.configure_solver(
-                solver,
-                steps=1,
-                surface_tension=0.5,
-                capillary_force_form="generated_curvature_traction",
-                prescribed_capillary_curvature=4.0,
-                projected_curvature_field="kappa_projected",
-            )
-
-
 def test_sessile_case_uses_monolithic_fsils_gmres_linear_budget():
     runner = _load_runner()
     args = runner.argparse.Namespace(
@@ -2465,41 +2375,6 @@ def test_sessile_case_uses_monolithic_fsils_gmres_linear_budget():
     with pytest.raises(ValueError, match="affine P1 simplex mesh"):
         runner.case_args_for_run(
             "droplet2d", high_order_area_gradient_args)
-
-    candidate_args = runner.argparse.Namespace(**vars(args))
-    candidate_args.capillary_force_form = "generated_curvature_traction"
-    candidate_args.prescribed_capillary_curvature = 1.0 / 0.3
-    candidate_args.initialize_discrete_static_capillary_equilibrium = None
-    candidate = runner.case_args_for_run("sessile2d", candidate_args)
-    assert candidate.require_free_surface_conservative_balance is False
-    assert (
-        candidate.require_free_surface_pressure_representability_diagnostic
-        is False
-    )
-    assert candidate.initialize_static_compatible_pressure is False
-    assert (
-        candidate.max_free_surface_pressure_representability_relative_distance
-        is None
-    )
-
-    candidate_args.initialize_discrete_static_capillary_equilibrium = True
-    with pytest.raises(ValueError, match="surface-energy initialization"):
-        runner.case_args_for_run("sessile2d", candidate_args)
-
-    candidate_args.initialize_discrete_static_capillary_equilibrium = None
-    candidate_args.require_free_surface_conservative_balance = True
-    with pytest.raises(ValueError, match="conservative-balance controls"):
-        runner.case_args_for_run("sessile2d", candidate_args)
-
-    candidate_args.require_free_surface_conservative_balance = False
-    candidate_args.max_free_surface_pressure_representability_relative_distance = 0.1
-    with pytest.raises(ValueError, match="pressure-representability controls"):
-        runner.case_args_for_run("sessile2d", candidate_args)
-
-    candidate_args.max_free_surface_pressure_representability_relative_distance = None
-    candidate_args.initialize_discrete_static_contact_geometry = True
-    with pytest.raises(ValueError, match="stationary two-dimensional sessile"):
-        runner.case_args_for_run("sphere3d", candidate_args)
 
     # These controls are defaults, not a hard gate: diagnostic runs may
     # still request the legacy BlockSchur route explicitly.

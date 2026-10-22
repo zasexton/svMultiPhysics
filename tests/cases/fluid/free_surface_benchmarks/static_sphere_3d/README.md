@@ -334,9 +334,9 @@ are wall time from one step start to the next, so they include output.
 **Earlier measurement**, 2026-09-30, with the same binary (SKX nodes, serial; profiling
 data under `$SCRATCH/free-surface-benchmarks/profiling-3d/`). Because of the
 check above, the sphere's time steps were measured with a profiling proxy
-(`GeneratedCurvatureTraction` fed with the lumped KAG curvature), which runs
-the same geometry, constraint, assembly and solver path without the
-functional record.
+(`GeneratedCurvatureTraction`, since retired by D42, fed with the lumped KAG
+curvature), which runs the same geometry, constraint, assembly and solver path
+without the functional record.
 
 | R/h | vertices / cells | steps at La = 12 | measured with this binary | estimate |
 |---:|---|---:|---|---|

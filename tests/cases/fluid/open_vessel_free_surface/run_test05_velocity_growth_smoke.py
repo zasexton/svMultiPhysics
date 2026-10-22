@@ -683,7 +683,6 @@ def configure_solver(solver_xml: Path,
                      active_domain: str = "LevelSetNegative",
                      surface_tension: float | None = None,
                      capillary_force_form: str = "surface_stress",
-                     prescribed_capillary_curvature: float | None = None,
                      wet_extension_advection_velocity_method: str | None = None,
                      projected_curvature_field: str | None = None,
                      curvature_projection_cadence_steps: int | None = None,
@@ -925,23 +924,12 @@ def configure_solver(solver_xml: Path,
         )
     capillary_force_form_names = {
         "surface_stress": "SurfaceStress",
-        "generated_curvature_traction": "GeneratedCurvatureTraction",
         "kinematic_area_gradient_traction": "KinematicAreaGradientTraction",
     }
     if capillary_force_form not in capillary_force_form_names:
         raise ValueError(
-            "capillary force form must be surface_stress, "
-            "generated_curvature_traction, or "
+            "capillary force form must be surface_stress or "
             "kinematic_area_gradient_traction")
-    if prescribed_capillary_curvature is not None:
-        if (not math.isfinite(prescribed_capillary_curvature) or
-                prescribed_capillary_curvature <= 0.0):
-            raise ValueError(
-                "prescribed capillary curvature must be positive and finite")
-        if capillary_force_form != "generated_curvature_traction":
-            raise ValueError(
-                "prescribed capillary curvature requires "
-                "generated_curvature_traction")
     if surface_tension is not None:
         set_text(free_surface, "Surface_tension", f"{surface_tension:.16g}")
         if surface_tension > 0.0:
@@ -965,13 +953,6 @@ def configure_solver(solver_xml: Path,
             "Wet_extension_advection_velocity_method",
             wet_extension_advection_velocity_method,
         )
-    if (capillary_force_form == "generated_curvature_traction" and
-            surface_tension is not None and surface_tension > 0.0 and
-            projected_curvature_field and
-            prescribed_capillary_curvature is not None):
-        raise ValueError(
-            "generated curvature traction requires exactly one curvature "
-            "source, not both a field and a prescribed scalar")
     if (capillary_force_form == "kinematic_area_gradient_traction" and
             surface_tension is not None and surface_tension > 0.0):
         if not projected_curvature_field:
@@ -994,10 +975,7 @@ def configure_solver(solver_xml: Path,
         level_set = level_set_equation(root)
         set_text(level_set, "Enable_curvature_projection", "true")
         set_text(level_set, "Projected_curvature_field", projected_curvature_field)
-        if (capillary_force_form in {
-                "generated_curvature_traction",
-                "kinematic_area_gradient_traction",
-        } or
+        if (capillary_force_form == "kinematic_area_gradient_traction" or
                 not (surface_tension is not None and surface_tension > 0.0)):
             set_text(free_surface, "Curvature_field", projected_curvature_field)
             set_text(free_surface, "Use_level_set_curvature", "false")
@@ -1072,23 +1050,6 @@ def configure_solver(solver_xml: Path,
                 "Curvature_projection_smoothing_mode",
                 curvature_projection_smoothing_mode,
             )
-    if (capillary_force_form == "generated_curvature_traction" and
-            surface_tension is not None and surface_tension > 0.0):
-        if prescribed_capillary_curvature is not None:
-            curvature_field = free_surface.find("Curvature_field")
-            if curvature_field is not None:
-                free_surface.remove(curvature_field)
-            set_text(
-                free_surface,
-                "Curvature",
-                f"{prescribed_capillary_curvature:.16g}",
-            )
-            set_text(free_surface, "Use_level_set_curvature", "false")
-        elif not projected_curvature_field:
-            raise ValueError(
-                "generated curvature traction requires either "
-                "--prescribed-capillary-curvature or "
-                "--projected-curvature-field")
     if enable_static_capillary_equilibrium_initialization is not None:
         level_set = level_set_equation(root)
         set_text(
@@ -8032,7 +7993,6 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "level_set_active_domain",
         "capillary_force_form",
         "cut_cell_pressure_stabilization_policy",
-        "prescribed_capillary_curvature",
         "wet_extension_advection_velocity_method",
         "projected_curvature_field",
         "curvature_projection_cadence_steps",
@@ -12751,78 +12711,31 @@ def case_args_for_run(case_name: str,
         # below the 1e-6 nonlinear absolute tolerance.
         set_default(case_args, "max_fsils_accepted_true_residual_norm", 1.0e-9)
         if case_name in {"sessile2d", "sessile3d", "sphere3d"}:
-            generated_curvature_traction = (
-                getattr(case_args, "capillary_force_form", "surface_stress") ==
-                "generated_curvature_traction"
+            # Require production evidence for the instantaneous
+            # conservative pressure/surface-energy split.  The
+            # quantitative threshold is a separate opt-in until the
+            # refinement matrix calibrates one a priori.
+            case_args.require_free_surface_conservative_balance = True
+            # Static qualification also requires the accepted Newton
+            # state to lie within a fixed distance of the constrained
+            # pressure-gradient range.
+            case_args.require_free_surface_pressure_representability_diagnostic = True
+            set_default(
+                case_args,
+                "max_free_surface_pressure_representability_relative_distance",
+                STATIC_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE,
             )
-            if generated_curvature_traction:
-                if getattr(
-                        case_args,
-                        "initialize_discrete_static_capillary_equilibrium",
-                        False):
-                    raise ValueError(
-                        "discrete surface-energy initialization is not "
-                        "available for generated curvature traction")
-                if (getattr(
-                        case_args,
-                        "enable_free_surface_conservative_balance_diagnostic",
-                        False) or
-                        getattr(
-                            case_args,
-                            "require_free_surface_conservative_balance",
-                            False) or
-                        getattr(
-                            case_args,
-                            "max_free_surface_conservative_balance_normalized_imbalance",
-                            None) is not None):
-                    raise ValueError(
-                        "surface-energy conservative-balance controls are "
-                        "not available for generated curvature traction")
-                if (getattr(
-                        case_args,
-                        "require_free_surface_pressure_representability_diagnostic",
-                        False) or
-                        getattr(
-                            case_args,
-                            "max_free_surface_pressure_representability_relative_distance",
-                            None) is not None or
-                        getattr(
-                            case_args,
-                            "initialize_static_compatible_pressure",
-                            False)):
-                    raise ValueError(
-                        "surface-energy pressure-representability controls "
-                        "are not available for generated curvature traction")
-                case_args.require_free_surface_conservative_balance = False
-                case_args.require_free_surface_pressure_representability_diagnostic = False
-                case_args.max_free_surface_pressure_representability_relative_distance = None
-                case_args.initialize_static_compatible_pressure = False
-            else:
-                # Require production evidence for the instantaneous
-                # conservative pressure/surface-energy split.  The
-                # quantitative threshold is a separate opt-in until the
-                # refinement matrix calibrates one a priori.
-                case_args.require_free_surface_conservative_balance = True
-                # Static qualification also requires the accepted Newton
-                # state to lie within a fixed distance of the constrained
-                # pressure-gradient range.
-                case_args.require_free_surface_pressure_representability_diagnostic = True
-                set_default(
+            # Seed the first static solve from the same constrained
+            # pressure/surface-energy pair used by the distance gate.
+            set_default(
+                case_args,
+                "initialize_static_compatible_pressure",
+                not bool(getattr(
                     case_args,
-                    "max_free_surface_pressure_representability_relative_distance",
-                    STATIC_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE,
-                )
-                # Seed the first static solve from the same constrained
-                # pressure/surface-energy pair used by the distance gate.
-                set_default(
-                    case_args,
-                    "initialize_static_compatible_pressure",
-                    not bool(getattr(
-                        case_args,
-                        "initialize_discrete_static_capillary_equilibrium",
-                        False,
-                    )),
-                )
+                    "initialize_discrete_static_capillary_equilibrium",
+                    False,
+                )),
+            )
             defer_physical_gates = bool(getattr(
                 case_args, "defer_static_physical_gates_to_matrix", False))
             physical_gate_names = (
@@ -13023,8 +12936,6 @@ def configure_case_solver_xml(run_dir: Path, args: argparse.Namespace) -> None:
         surface_tension=args.surface_tension,
         capillary_force_form=getattr(
             args, "capillary_force_form", "surface_stress"),
-        prescribed_capillary_curvature=getattr(
-            args, "prescribed_capillary_curvature", None),
         wet_extension_advection_velocity_method=(
             args.wet_extension_advection_velocity_method),
         projected_curvature_field=args.projected_curvature_field,
@@ -15658,19 +15569,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
         "--capillary-force-form",
         choices=(
             "surface_stress",
-            "generated_curvature_traction",
             "kinematic_area_gradient_traction",
         ),
         default="surface_stress",
-        help=("surface force discretization; generated curvature traction "
-              "and kinematic area-gradient traction are explicit unfitted "
-              "candidates"),
-    )
-    parser.add_argument(
-        "--prescribed-capillary-curvature",
-        type=float,
-        help=("positive scalar curvature for generated curvature traction; "
-              "mutually exclusive with a projected curvature field"),
+        help=("surface force discretization; kinematic area-gradient "
+              "traction is an explicit unfitted candidate"),
     )
     parser.add_argument("--projected-curvature-field")
     parser.add_argument("--curvature-projection-cadence-steps", type=int)
