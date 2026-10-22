@@ -703,61 +703,6 @@ public:
         std::string mesh_descriptor_source,
         std::optional<std::string> related_fluid_descriptor_source =
             std::nullopt);
-    /**
-     * @brief Register raw operator-stage moments for one bound fitted-ALE
-     * fluid-normal constraint.
-     *
-     * Registration is deterministic and an exact duplicate is a no-op.  It
-     * must occur after the constraint's reciprocal consumer binding is
-     * complete and before a measurement stage or accepted history exists.
-     */
-    void registerFittedALENormalOperatorStageMeasurement(
-        FieldId mesh_displacement_field,
-        int boundary_marker,
-        std::optional<std::array<Real, 3>>
-            prescribed_tangential_mesh_velocity = std::nullopt);
-    [[nodiscard]] std::span<
-        const FittedALENormalMeasurementDeclaration>
-    fittedALENormalOperatorStageMeasurementDeclarations() const noexcept {
-        return fitted_ale_normal_measurement_declarations_;
-    }
-    /**
-     * @brief Evaluate every registered fitted-ALE normal declaration at the
-     * supplied converged operator stage.
-     *
-     * `state.u`/`state.u_vector` supplies the current stage and
-     * `state.u_prev`/`state.u_prev_vector` supplies an exact first-rate alias.
-     * Only fields named by `metadata.derivative_fields` are advertised as
-     * derivatives.  Results remain pending until explicit accepted-step
-     * publication.
-     */
-    void stageFittedALENormalOperatorStageMeasurements(
-        const SystemStateView& state,
-        OperatorStageMeasurementMetadata metadata);
-    /** Discard a rejected candidate without throwing or publishing history. */
-    void discardPendingFittedALENormalOperatorStageMeasurements() noexcept;
-    /**
-     * @brief Collectively publish the pending group after irreversible step
-     * acceptance.
-     *
-     * The accepted step/time/dt must exactly match the prospective metadata
-     * captured at staging.  This API is intended for the accepted-step hook,
-     * not a commit-ready hook.
-     */
-    void commitPendingFittedALENormalOperatorStageMeasurements(
-        std::uint64_t accepted_step,
-        Real accepted_time,
-        Real dt);
-    [[nodiscard]] std::span<
-        const FittedALENormalOperatorStageHistoryRecord>
-    pendingFittedALENormalOperatorStageMeasurements() const noexcept {
-        return pending_fitted_ale_normal_measurements_;
-    }
-    [[nodiscard]] std::span<
-        const FittedALENormalOperatorStageHistoryRecord>
-    fittedALENormalOperatorStageMeasurementHistory() const noexcept {
-        return fitted_ale_normal_measurement_history_;
-    }
     /** Declare one phase-pair source for sharp material-interface transport. */
     void declareMaterialInterfaceTransportVelocity(
         interfaces::MaterialInterfaceTransportVelocityDeclaration
@@ -2549,14 +2494,6 @@ private:
         mesh_normal_boundary_constraints_{};
     std::vector<MeshNormalBoundaryConstraintHistoryRecord>
         mesh_normal_boundary_constraint_history_{};
-    std::vector<FittedALENormalMeasurementDeclaration>
-        fitted_ale_normal_measurement_declarations_{};
-    std::vector<FittedALENormalOperatorStageHistoryRecord>
-        pending_fitted_ale_normal_measurements_{};
-    std::vector<FittedALENormalOperatorStageHistoryRecord>
-        fitted_ale_normal_measurement_history_{};
-    bool fitted_ale_normal_measurement_declarations_frozen_{false};
-    bool fitted_ale_normal_measurement_transaction_active_{false};
     std::vector<interfaces::MaterialInterfaceTransportVelocityDeclaration>
         material_interface_transport_velocity_declarations_{};
     std::vector<MeshTangentialBoundaryPolicyDeclaration>

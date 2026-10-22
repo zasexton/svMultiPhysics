@@ -9,6 +9,7 @@
 #include "Physics/Formulations/NavierStokes/FreeSurface/FittedALEOperatorStage.h"
 
 #include "FE/Systems/FESystem.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FittedALEStageRecords.h"
 
 #include <exception>
 #include <optional>
@@ -46,8 +47,8 @@ FittedALEStageParticipant::FittedALEStageParticipant(
     : FreeSurfaceStepContext(context)
 {
   const auto fitted_ale_operator_stage_declarations =
-      sim.fe_system
-          ->fittedALENormalOperatorStageMeasurementDeclarations();
+      free_surface::fittedALERecords(*sim.fe_system)
+          .fittedALENormalOperatorStageMeasurementDeclarations();
   const auto [minimum_fitted_ale_measurement_count,
               maximum_fitted_ale_measurement_count] =
       globalMinMaxUint64(
@@ -244,23 +245,23 @@ void FittedALEStageParticipant::onCandidateStage(
         "communicator rank could not construct fitted-ALE "
         "operator-stage measurement metadata.");
   }
-  sim.fe_system
-      ->stageFittedALENormalOperatorStageMeasurements(
+  free_surface::fittedALERecords(*sim.fe_system)
+      .stageFittedALENormalOperatorStageMeasurements(
           *stage_state, std::move(*stage_metadata));
 }
 
 void FittedALEStageParticipant::discardCandidate() noexcept
 {
-  sim.fe_system
-      ->discardPendingFittedALENormalOperatorStageMeasurements();
+  free_surface::fittedALERecords(*sim.fe_system)
+      .discardPendingFittedALENormalOperatorStageMeasurements();
 }
 
 void FittedALEStageParticipant::commitAccepted(
     const svmp::FE::timestepping::TimeHistory& h)
 {
   if (evaluate_fitted_ale_operator_stage) {
-    sim.fe_system
-        ->commitPendingFittedALENormalOperatorStageMeasurements(
+    free_surface::fittedALERecords(*sim.fe_system)
+        .commitPendingFittedALENormalOperatorStageMeasurements(
             static_cast<std::uint64_t>(h.stepIndex()),
             static_cast<svmp::FE::Real>(h.time()),
             static_cast<svmp::FE::Real>(h.dt()));

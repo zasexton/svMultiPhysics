@@ -7,6 +7,7 @@
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceFittedALE.h"
 
+#include "Physics/Formulations/NavierStokes/FreeSurface/FittedALEStageRecords.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceQueries.h"
 
@@ -182,10 +183,11 @@ void declareFittedNormalKinematics(
             "Fitted free-surface mesh normal kinematic row on marker " +
                 std::to_string(marker),
             fittedFluidNormalDescriptorSource(*fitted_boundary));
-        system.registerFittedALENormalOperatorStageMeasurement(
-            displacement_field,
-            marker,
-            prescribed_tangential_mesh_velocity);
+        free_surface::fittedALERecords(system)
+            .registerFittedALENormalOperatorStageMeasurement(
+                displacement_field,
+                marker,
+                prescribed_tangential_mesh_velocity);
     }
 }
 
