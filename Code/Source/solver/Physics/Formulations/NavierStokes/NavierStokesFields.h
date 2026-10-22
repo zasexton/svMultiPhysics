@@ -22,6 +22,8 @@
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesPreflight.h"
 
+#include "FE/Systems/FieldBinding.h"
+
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Constraints/ConstraintPlan.h"
 #include "FE/Core/Types.h"
@@ -53,33 +55,13 @@ namespace Physics {
 namespace formulations {
 namespace navier_stokes {
 
-[[nodiscard]] bool spacesCompatible(const FE::spaces::FunctionSpace& lhs,
-                                    const FE::spaces::FunctionSpace& rhs) noexcept;
+/// Field compatibility and registration are FE::systems::FieldBinding.
+using FE::systems::spacesCompatible;
 
 [[nodiscard]] bool
 isSupportedGeneratedBoundaryTraceSpace(
     const FE::spaces::FunctionSpace& space,
     int dimension) noexcept;
-
-void validateCompatibleField(const FE::systems::FESystem& system,
-                             const FE::systems::FieldSpec& spec,
-                             FE::systems::FieldSourceKind expected_source,
-                             bool allow_missing,
-                             const char* context);
-
-[[nodiscard]] FE::FieldId ensureCompatibleUnknownField(
-    FE::systems::FESystem& system,
-    FE::systems::FieldSpec spec,
-    const char* context);
-
-[[nodiscard]] FE::FieldId ensureCompatiblePrescribedField(
-    FE::systems::FESystem& system,
-    FE::systems::FieldSpec spec,
-    bool auto_register,
-    const char* context);
-
-void requireDistinctFieldNames(
-    std::initializer_list<std::pair<std::string_view, std::string_view>> fields);
 
 /// The node pressure constraints of the options as vertex values, and their id mode.
 [[nodiscard]] std::vector<FE::constraints::VertexDirichletValue> nodePressureValues(

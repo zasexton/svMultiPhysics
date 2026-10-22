@@ -7,6 +7,7 @@
 
 #include "Systems/ALEBinding.h"
 #include "Systems/FESystem.h"
+#include "Systems/FieldBinding.h"
 #include "Systems/FormsInstaller.h"
 #include "Systems/MeshDisplacementBinding.h"
 #include "Systems/OperatorBackends.h"
@@ -33,6 +34,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <numeric>
 #include <span>
@@ -65,6 +67,7 @@ using svmp::FE::systems::ALEMeshVelocitySource;
 using svmp::FE::systems::AssemblyRequest;
 using svmp::FE::systems::DerivedFieldRole;
 using svmp::FE::systems::FESystem;
+using svmp::FE::systems::FieldBinding;
 using svmp::FE::systems::FieldSpec;
 using svmp::FE::systems::FieldSourceKind;
 using svmp::FE::systems::MeshDisplacementBindingOptions;
@@ -1057,6 +1060,66 @@ TEST(FESystem, ALEBindingCoupledDisplacementPreservesTangentPathOverride)
               svmp::FE::forms::GeometrySensitivityMode::MeshMotionUnknowns);
     ASSERT_EQ(install.extra_trial_fields.size(), 1u);
     EXPECT_EQ(install.extra_trial_fields.front(), displacement);
+}
+
+namespace {
+
+std::string invalidArgumentText(const std::function<void()>& call)
+{
+    try {
+        call();
+    } catch (const std::invalid_argument& error) {
+        return error.what();
+    }
+    return "no exception";
+}
+
+} // namespace
+
+TEST(FESystem, FieldBindingRegistersAndReusesCompatibleFields)
+{
+    auto mesh = build_single_quad_mesh();
+    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    auto quadratic_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/2);
+    auto vector_space = std::make_shared<ProductSpace>(scalar_space, /*components=*/2);
+    EXPECT_TRUE(svmp::FE::systems::spacesCompatible(*scalar_space, *scalar_space));
+    EXPECT_FALSE(svmp::FE::systems::spacesCompatible(*scalar_space, *quadratic_space));
+
+    FESystem sys(mesh);
+    FieldBinding fields(sys, "Owner::registerOn");
+    const auto u = fields.unknown(FieldSpec{.name = "u", .space = vector_space, .components = 2}, "velocity");
+    ASSERT_NE(u, svmp::FE::INVALID_FIELD_ID);
+    EXPECT_EQ(fields.unknown(FieldSpec{.name = "u", .space = vector_space, .components = 2}, "velocity"), u);
+    const auto f = fields.prescribed(
+        FieldSpec{.name = "f", .space = vector_space, .components = 2,
+                  .source_kind = FieldSourceKind::PrescribedData},
+        /*auto_register=*/true, "momentum source");
+    EXPECT_EQ(sys.fieldRecord(f).source_kind, FieldSourceKind::PrescribedData);
+
+    EXPECT_EQ(invalidArgumentText([&] {
+                  (void)fields.unknown(FieldSpec{.name = "u", .space = scalar_space, .components = 1}, "velocity");
+              }),
+              "Owner::registerOn velocity: existing field 'u' has component count 2, expected 1");
+    EXPECT_EQ(invalidArgumentText([&] {
+                  (void)fields.prescribed(FieldSpec{.name = "u", .space = vector_space, .components = 2},
+                                          /*auto_register=*/true, "data");
+              }),
+              "Owner::registerOn data: existing field 'u' must be a prescribed data field");
+    EXPECT_EQ(invalidArgumentText([&] {
+                  (void)fields.prescribed(FieldSpec{.name = "g", .space = scalar_space, .components = 1},
+                                          /*auto_register=*/false, "data");
+              }),
+              "Owner::registerOn data: prescribed field 'g' was requested but is not registered");
+    EXPECT_EQ(invalidArgumentText([&] {
+                  FieldBinding::check(sys, FieldSpec{.name = "", .space = scalar_space}, FieldSourceKind::Unknown,
+                                      /*allow_missing=*/true, "Owner::preflight");
+              }),
+              "Owner::preflight: field name must be non-empty");
+    EXPECT_EQ(invalidArgumentText([&] {
+                  FieldBinding::requireDistinctNames("Owner", {{"velocity", "u"}, {"pressure", ""}, {"data", "u"}});
+              }),
+              "Owner: field name 'u' is assigned to both velocity and data");
+    EXPECT_NO_THROW(FieldBinding::requireDistinctNames("Owner", {{"velocity", "u"}, {"pressure", "p"}}));
 }
 
 TEST(FESystem, MeshDisplacementBindingRegistersUnknownAndBindsRole)

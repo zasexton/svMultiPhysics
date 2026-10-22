@@ -80,17 +80,6 @@ namespace Physics {
 namespace formulations {
 namespace navier_stokes {
 
-[[nodiscard]] bool spacesCompatible(const FE::spaces::FunctionSpace& lhs,
-                                    const FE::spaces::FunctionSpace& rhs) noexcept
-{
-    return lhs.space_type() == rhs.space_type() &&
-           lhs.field_type() == rhs.field_type() &&
-           lhs.value_dimension() == rhs.value_dimension() &&
-           lhs.topological_dimension() == rhs.topological_dimension() &&
-           lhs.polynomial_order() == rhs.polynomial_order() &&
-           lhs.element_type() == rhs.element_type();
-}
-
 [[nodiscard]] bool
 isSupportedGeneratedBoundaryTraceSpace(
     const FE::spaces::FunctionSpace& space,
@@ -109,107 +98,6 @@ isSupportedGeneratedBoundaryTraceSpace(
              element_type == FE::ElementType::Triangle3) ||
             (dimension == 3 &&
              element_type == FE::ElementType::Tetra4));
-}
-
-void validateCompatibleField(const FE::systems::FESystem& system,
-                             const FE::systems::FieldSpec& spec,
-                             FE::systems::FieldSourceKind expected_source,
-                             bool allow_missing,
-                             const char* context)
-{
-    if (spec.name.empty()) {
-        throw std::invalid_argument(
-            std::string(context) + ": field name must be non-empty");
-    }
-    if (!spec.space) {
-        throw std::invalid_argument(
-            std::string(context) + ": field '" + spec.name +
-            "' requires a function space");
-    }
-    const auto existing = system.findFieldByName(spec.name);
-    if (existing == FE::INVALID_FIELD_ID) {
-        if (!allow_missing) {
-            throw std::invalid_argument(
-                std::string(context) + ": prescribed field '" + spec.name +
-                "' was requested but is not registered");
-        }
-        return;
-    }
-
-    const auto& rec = system.fieldRecord(existing);
-    if (rec.source_kind != expected_source) {
-        throw std::invalid_argument(
-            std::string(context) + ": existing field '" + rec.name +
-            (expected_source == FE::systems::FieldSourceKind::Unknown
-                 ? "' must be an unknown field"
-                 : "' must be a prescribed data field"));
-    }
-    if (rec.components != spec.components) {
-        throw std::invalid_argument(
-            std::string(context) + ": existing field '" + rec.name +
-            "' has component count " + std::to_string(rec.components) +
-            ", expected " + std::to_string(spec.components));
-    }
-    if (!rec.space || !spacesCompatible(*rec.space, *spec.space)) {
-        throw std::invalid_argument(
-            std::string(context) + ": existing field '" + rec.name +
-            "' uses an incompatible function space");
-    }
-}
-
-[[nodiscard]] FE::FieldId ensureCompatibleUnknownField(
-    FE::systems::FESystem& system,
-    FE::systems::FieldSpec spec,
-    const char* context)
-{
-    validateCompatibleField(
-        system,
-        spec,
-        FE::systems::FieldSourceKind::Unknown,
-        /*allow_missing=*/true,
-        context);
-    const auto existing = system.findFieldByName(spec.name);
-    if (existing == FE::INVALID_FIELD_ID) {
-        return system.addField(std::move(spec));
-    }
-    return existing;
-}
-
-[[nodiscard]] FE::FieldId ensureCompatiblePrescribedField(
-    FE::systems::FESystem& system,
-    FE::systems::FieldSpec spec,
-    bool auto_register,
-    const char* context)
-{
-    validateCompatibleField(
-        system,
-        spec,
-        FE::systems::FieldSourceKind::PrescribedData,
-        /*allow_missing=*/auto_register,
-        context);
-    const auto existing = system.findFieldByName(spec.name);
-    if (existing == FE::INVALID_FIELD_ID) {
-        return system.addField(std::move(spec));
-    }
-    return existing;
-}
-
-void requireDistinctFieldNames(
-    std::initializer_list<std::pair<std::string_view, std::string_view>> fields)
-{
-    std::unordered_map<std::string_view, std::string_view> roles;
-    for (const auto& [role, name] : fields) {
-        if (name.empty()) {
-            continue;
-        }
-        const auto [existing, inserted] = roles.emplace(name, role);
-        if (!inserted) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule::registerOn: field name '" +
-                std::string(name) + "' is assigned to both " +
-                std::string(existing->second) + " and " + std::string(role));
-        }
-    }
 }
 
 std::vector<FE::constraints::VertexDirichletValue> nodePressureValues(
@@ -248,30 +136,23 @@ NavierStokesFieldIds registerNavierStokesFields(
     auto& body_force_spec = preflight.body_force_spec;
     auto& semi_implicit_reference_spec = preflight.semi_implicit_reference_spec;
 
-    const FE::FieldId u_id = ensureCompatibleUnknownField(
-        system,
-        std::move(u_spec),
-        "IncompressibleNavierStokesVMSModule::registerOn velocity");
-
-    const FE::FieldId p_id = ensureCompatibleUnknownField(
-        system,
-        std::move(p_spec),
-        "IncompressibleNavierStokesVMSModule::registerOn pressure");
+    FE::systems::FieldBinding fields(
+        system, "IncompressibleNavierStokesVMSModule::registerOn");
+    const FE::FieldId u_id = fields.unknown(std::move(u_spec), "velocity");
+    const FE::FieldId p_id = fields.unknown(std::move(p_spec), "pressure");
 
     FE::FieldId body_force_field_id = FE::INVALID_FIELD_ID;
     if (body_force_spec.has_value()) {
-        body_force_field_id = ensureCompatiblePrescribedField(
-            system,
+        body_force_field_id = fields.prescribed(
             std::move(*body_force_spec),
             options.auto_register_body_force_field,
-            "IncompressibleNavierStokesVMSModule::registerOn momentum source");
+            "momentum source");
     }
     if (semi_implicit_reference_spec.has_value()) {
-        (void)ensureCompatiblePrescribedField(
-            system,
+        (void)fields.prescribed(
             std::move(*semi_implicit_reference_spec),
             /*auto_register=*/true,
-            "IncompressibleNavierStokesVMSModule::registerOn semi-implicit reference velocity");
+            "semi-implicit reference velocity");
     }
 
     return NavierStokesFieldIds{

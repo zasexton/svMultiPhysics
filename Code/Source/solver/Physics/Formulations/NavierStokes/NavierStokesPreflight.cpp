@@ -411,7 +411,7 @@ NavierStokesPreflight preflightNavierStokes(
         reference_spec.components = dim;
         reference_spec.source_kind =
             FE::systems::FieldSourceKind::PrescribedData;
-        validateCompatibleField(
+        FE::systems::FieldBinding::check(
             system,
             reference_spec,
             FE::systems::FieldSourceKind::PrescribedData,
@@ -477,7 +477,8 @@ NavierStokesPreflight preflightNavierStokes(
                     .has_value();
             });
 
-    requireDistinctFieldNames({
+    FE::systems::FieldBinding::requireDistinctNames(
+        "IncompressibleNavierStokesVMSModule::registerOn", {
         {"velocity", u_spec.name},
         {"pressure", p_spec.name},
         {"body-force data",
@@ -498,20 +499,20 @@ NavierStokesPreflight preflightNavierStokes(
              ? std::string_view(semi_implicit_reference_spec->name)
              : std::string_view{}},
     });
-    validateCompatibleField(
+    FE::systems::FieldBinding::check(
         system,
         u_spec,
         FE::systems::FieldSourceKind::Unknown,
         /*allow_missing=*/true,
         "IncompressibleNavierStokesVMSModule::registerOn velocity");
-    validateCompatibleField(
+    FE::systems::FieldBinding::check(
         system,
         p_spec,
         FE::systems::FieldSourceKind::Unknown,
         /*allow_missing=*/true,
         "IncompressibleNavierStokesVMSModule::registerOn pressure");
     if (body_force_spec.has_value()) {
-        validateCompatibleField(
+        FE::systems::FieldBinding::check(
             system,
             *body_force_spec,
             FE::systems::FieldSourceKind::PrescribedData,
