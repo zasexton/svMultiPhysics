@@ -461,20 +461,6 @@ std::optional<DiagnosticBooleanOverride> readDiagnosticBooleanOverride(
     return DiagnosticBooleanOverride{value, name, env};
 }
 
-std::optional<DiagnosticBooleanOverride> navierStokesVmsDiagnosticOverride()
-{
-    if (auto enable = readDiagnosticBooleanOverride("SVMP_NS_ENABLE_VMS")) {
-        return enable;
-    }
-    if (auto disable = readDiagnosticBooleanOverride("SVMP_NS_DISABLE_VMS")) {
-        if (disable->value) {
-            disable->value = false;
-            return disable;
-        }
-    }
-    return std::nullopt;
-}
-
 bool pressureRowContributionDiagnosticEnabled()
 {
     if (auto value =
@@ -8427,9 +8413,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         throw std::invalid_argument(
             "IncompressibleNavierStokesVMSModule::registerOn: symmetric Nitsche energy diagnostic requires constant viscosity; viscosity_model is unsupported");
     }
-    const auto vms_override = navierStokesVmsDiagnosticOverride();
-    const bool enable_vms =
-        vms_override.has_value() ? vms_override->value : options_.enable_vms;
+    const bool enable_vms = options_.enable_vms;
     const auto pspg_pressure_gradient_scale_override =
         navierStokesPspgPressureGradientScale();
     const FE::Real pspg_pressure_gradient_scale =
@@ -8490,14 +8474,6 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         pspg_boundary_tangential_momentum_residual_scale_override.has_value()
             ? pspg_boundary_tangential_momentum_residual_scale_override->value
             : FE::Real{0.0};
-    if (vms_override.has_value()) {
-        FE_LOG_INFO(
-            std::string("IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_vms_override") +
-            " env=" + vms_override->name +
-            " raw='" + vms_override->raw + "'" +
-            " option_enable_vms=" + (options_.enable_vms ? "1" : "0") +
-            " effective_enable_vms=" + (enable_vms ? "1" : "0"));
-    }
     if (pspg_pressure_gradient_scale_override.has_value()) {
         FE_LOG_INFO(
             std::string("IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pspg_pressure_gradient_scale") +
