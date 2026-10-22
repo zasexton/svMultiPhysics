@@ -615,6 +615,68 @@ private:
   std::optional<std::uint64_t> last_logged_topology_key_{};
 };
 
+/**
+ * @brief The cut geometry of a solve as a generated-state participant.
+ *
+ * The Geometry role of the GeneratedStateRegistry of the Application's
+ * steady and transient solves: prepare() resets the refresh cache at restore
+ * points (and, transient, opens the reinstall window for the endpoint of a
+ * dynamic-contact stage), synchronize() refreshes or reinstalls the cut
+ * context and publishes its source value revisions, and invalidate() drops
+ * the generated state after a rejected topology change.  A transient
+ * participant that tracks the cut topology provides the outer fixed point's
+ * epoch hooks from the attempt tracker.
+ */
+class LevelSetGeometryParticipant final
+    : public svmp::FE::timestepping::IGeneratedStateParticipant {
+public:
+  struct Options {
+    svmp::FE::timestepping::GeneratedStateSolve solve{
+        svmp::FE::timestepping::GeneratedStateSolve::Transient};
+    /// Transient: the attempt tracker provides the epoch hooks.
+    bool track_topology{false};
+    /// Transient: keep the context replaced at the endpoint candidate so
+    /// the final candidate gate of a dynamic-contact stage can reinstall it.
+    bool reinstall_after_contact_stage_endpoint{false};
+    /// Transient: the request policy key every refresh must report.
+    std::uint64_t expected_request_policy_key{0u};
+  };
+
+  LevelSetGeometryParticipant(std::shared_ptr<LevelSetGeometryService> service,
+                              Options options);
+
+  [[nodiscard]] std::string_view name() const noexcept override
+  {
+    return "level_set_geometry";
+  }
+  [[nodiscard]] svmp::FE::timestepping::GeneratedStateRole role()
+      const noexcept override
+  {
+    return svmp::FE::timestepping::GeneratedStateRole::Geometry;
+  }
+
+  void prepare(const svmp::FE::timestepping::GeneratedStateSync& sync) override;
+  void synchronize(const svmp::FE::systems::SystemStateView& state,
+                   svmp::FE::timestepping::GeneratedStateSync& sync) override;
+  void invalidate() override;
+
+  [[nodiscard]] bool providesEpochs() const noexcept override;
+  [[nodiscard]] bool epochDiscontinuity(
+      svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint point)
+      const override;
+  void acknowledgeEpochDiscontinuity(
+      svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint point)
+      override;
+  [[nodiscard]] bool epochRevisited(
+      svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint point)
+      const override;
+  void acknowledgeFrozenEpoch() override;
+
+private:
+  std::shared_ptr<LevelSetGeometryService> service_;
+  Options options_;
+};
+
 } // namespace level_set
 } // namespace FE
 } // namespace svmp

@@ -15,6 +15,7 @@
 #include "LevelSet/LevelSetGeometryService.h"
 #include "Systems/SystemCollectives.h"
 #include "Systems/SystemState.h"
+#include "TimeStepping/GeneratedState.h"
 
 #include <map>
 #include <optional>
@@ -157,6 +158,130 @@ TEST(LevelSetGeometryService, ServiceKeepsTheRunRequestsAndTracksTopology)
   EXPECT_EQ(service.topologyTracker().acceptedTopologyKey(),
             std::optional<std::uint64_t>(5u));
   EXPECT_FALSE(service.lastLoggedTopologyKey().has_value());
+}
+
+TEST(LevelSetGeometryService, ParticipantPreparesTheCacheAsEachSolveDid)
+{
+  namespace ts = svmp::FE::timestepping;
+  using Point = ts::NewtonOptions::StateSynchronizationPoint;
+  HostStorage storage;
+  auto service = std::make_shared<ls::LevelSetGeometryService>(
+      storage.host(), std::vector<ls::ActiveCutVolumeRequest>{});
+  auto& cache = service->refreshCache();
+  const auto fill = [&cache] {
+    cache.last_signature = ls::ActiveCutContextRefreshSignature{};
+    cache.last_vector_signature = ls::ActiveCutContextRefreshSignature{};
+    cache.reinstall_window_open = true;
+    cache.reinstall_candidate.reset();
+  };
+  const auto sync_at = [](Point point) {
+    ts::GeneratedStateSync sync;
+    sync.point = point;
+    sync.restoring_generated_state =
+        point == Point::RestoredOuterFixedPointState ||
+        point == Point::RestoredTimeStepState;
+    sync.restoring_time_step_state =
+        ts::restoresAcceptedTimeStepGeneratedState(point);
+    return sync;
+  };
+
+  // Steady: both signatures are reset at a restored outer fixed point only.
+  ls::LevelSetGeometryParticipant steady(
+      service, {.solve = ts::GeneratedStateSolve::Steady});
+  EXPECT_EQ(steady.role(), ts::GeneratedStateRole::Geometry);
+  EXPECT_EQ(steady.name(), "level_set_geometry");
+  EXPECT_FALSE(steady.providesEpochs());
+  fill();
+  steady.prepare(sync_at(Point::RestoredTimeStepState));
+  EXPECT_TRUE(cache.last_signature.has_value());
+  EXPECT_TRUE(cache.last_vector_signature.has_value());
+  steady.prepare(sync_at(Point::RestoredOuterFixedPointState));
+  EXPECT_FALSE(cache.last_signature.has_value());
+  EXPECT_FALSE(cache.last_vector_signature.has_value());
+  EXPECT_TRUE(cache.reinstall_window_open);
+
+  // Transient: a restore resets the vector signature and closes the
+  // reinstall window; the endpoint opens it when configured.
+  ls::LevelSetGeometryParticipant transient(
+      service, {.solve = ts::GeneratedStateSolve::Transient});
+  fill();
+  transient.prepare(sync_at(Point::RestoredTimeStepState));
+  EXPECT_TRUE(cache.last_signature.has_value());
+  EXPECT_FALSE(cache.last_vector_signature.has_value());
+  EXPECT_FALSE(cache.reinstall_window_open);
+  transient.prepare(sync_at(Point::EndpointCandidateState));
+  EXPECT_FALSE(cache.reinstall_window_open);
+  ls::LevelSetGeometryParticipant contact(
+      service,
+      {.solve = ts::GeneratedStateSolve::Transient,
+       .reinstall_after_contact_stage_endpoint = true});
+  contact.prepare(sync_at(Point::ProjectedEndpointCandidateState));
+  EXPECT_FALSE(cache.reinstall_window_open);
+  contact.prepare(sync_at(Point::EndpointCandidateState));
+  EXPECT_TRUE(cache.reinstall_window_open);
+
+  // invalidate() drops the generated state of the cache.
+  cache.topology_key = 3u;
+  transient.invalidate();
+  EXPECT_FALSE(cache.topology_key.has_value());
+  EXPECT_FALSE(cache.reinstall_window_open);
+
+  // Without an FE system a synchronization publishes no revisions.
+  auto sync = sync_at(Point::OuterFixedPointState);
+  sync.evaluated_state_source_revisions[1] = 2u;
+  transient.synchronize(svmp::FE::systems::SystemStateView{}, sync);
+  EXPECT_TRUE(sync.evaluated_state_source_revisions.empty());
+  sync.evaluated_state_source_revisions[1] = 2u;
+  steady.synchronize(svmp::FE::systems::SystemStateView{}, sync);
+  EXPECT_TRUE(sync.evaluated_state_source_revisions.empty());
+
+  EXPECT_THROW((void)ls::LevelSetGeometryParticipant(nullptr, {}),
+               std::invalid_argument);
+}
+
+TEST(LevelSetGeometryService, ParticipantEpochsFollowTheAttemptTracker)
+{
+  namespace ts = svmp::FE::timestepping;
+  using Point = ts::NewtonOptions::StateSynchronizationPoint;
+  HostStorage storage;
+  auto service = std::make_shared<ls::LevelSetGeometryService>(
+      storage.host(), std::vector<ls::ActiveCutVolumeRequest>{});
+  ls::LevelSetGeometryParticipant untracked(
+      service, {.solve = ts::GeneratedStateSolve::Transient});
+  EXPECT_FALSE(untracked.providesEpochs());
+  ls::LevelSetGeometryParticipant tracked(
+      service,
+      {.solve = ts::GeneratedStateSolve::Transient, .track_topology = true});
+  EXPECT_TRUE(tracked.providesEpochs());
+  ls::LevelSetGeometryParticipant steady(
+      service,
+      {.solve = ts::GeneratedStateSolve::Steady, .track_topology = true});
+  EXPECT_FALSE(steady.providesEpochs());
+
+  // A fresh tracker has no tainted attempt and no pending revisit.
+  EXPECT_FALSE(tracked.epochDiscontinuity(Point::OuterFixedPointState));
+  EXPECT_FALSE(tracked.epochRevisited(Point::OuterFixedPointState));
+  EXPECT_FALSE(tracked.epochDiscontinuity(Point::EndpointCandidateState));
+  EXPECT_THROW(tracked.acknowledgeEpochDiscontinuity(
+                   Point::EndpointCandidateState),
+               std::logic_error);
+
+  // The registry installs the participant's hooks for a transient outer
+  // fixed point.
+  auto registry = std::make_shared<ts::GeneratedStateRegistry>(
+      ts::GeneratedStatePolicy{.solve = ts::GeneratedStateSolve::Transient,
+                               .outer_fixed_point = true});
+  registry->add(std::make_shared<ls::LevelSetGeometryParticipant>(
+      service,
+      ls::LevelSetGeometryParticipant::Options{
+          .solve = ts::GeneratedStateSolve::Transient,
+          .track_topology = true}));
+  ts::NewtonOptions options;
+  registry->bind(options);
+  ASSERT_TRUE(static_cast<bool>(options.external_state_discontinuity));
+  EXPECT_FALSE(options.external_state_discontinuity(Point::OuterFixedPointState));
+  ASSERT_TRUE(static_cast<bool>(options.external_state_epoch_revisited));
+  EXPECT_FALSE(options.external_state_epoch_revisited(Point::OuterFixedPointState));
 }
 
 #endif // SVMP_FE_WITH_MESH

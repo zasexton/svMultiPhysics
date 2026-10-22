@@ -13855,8 +13855,6 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       !use_steady_external_state_fixed_point;
   auto curvature_projection_cache =
       std::make_shared<CurvatureProjectionCache>();
-  auto cut_topology_key = std::shared_ptr<std::optional<std::uint64_t>>(
-      cut_geometry, &cut_geometry->lastLoggedTopologyKey());
   applyJacobianCheckGeometryProvenance(
       newton_opts,
       steady_active_cut_requests,
@@ -13867,52 +13865,63 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
           use_steady_external_state_fixed_point);
   using StateSyncPoint =
       svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
-  newton_opts.synchronize_state =
-      [&, cut_geometry, cut_refresh_cache, cut_topology_key,
-       curvature_projection_cache](
-          const svmp::FE::systems::SystemStateView& state,
-          StateSyncPoint point) {
-        if (use_steady_external_state_fixed_point &&
-            point != StateSyncPoint::OuterFixedPointState &&
-            point != StateSyncPoint::ProjectedOuterFixedPointState &&
-            point != StateSyncPoint::RestoredOuterFixedPointState &&
-            point !=
-                StateSyncPoint::RestoredProjectedOuterFixedPointState) {
-          return;
-        }
-        if (point == StateSyncPoint::RestoredOuterFixedPointState) {
-          cut_refresh_cache->last_signature.reset();
-          cut_refresh_cache->last_vector_signature.reset();
-          curvature_projection_cache->entries.clear();
-        }
-        const auto report =
-            cut_geometry->refreshCached(state, stateSyncPointName(point));
-        logCutTopologyChange(report, point, *cut_topology_key, "steady");
-        const bool outer_constraint_construction_pass =
-            use_steady_external_state_fixed_point &&
-            (point == StateSyncPoint::OuterFixedPointState ||
-             point == StateSyncPoint::RestoredOuterFixedPointState);
-        if (outer_constraint_construction_pass) {
-          return;
-        }
-        (void)projectLevelSetCurvatureFieldsFromState(
-            sim,
-            state,
-            report.evaluated_state_source_revisions,
-            level_set_maintenance,
-            -1,
-            stateSyncPointName(point),
-            /*honor_cadence=*/false,
-            curvature_projection_cache.get(),
-            /*reuse_cached_on_projection_failure=*/
-            allowCachedCurvatureAfterProjectionFailure(point));
-        (void)updateLevelSetAdvectionVelocitiesFromState(
-            sim,
-            state,
-            steady_level_set_advection_velocity,
-            /*refresh_frozen_algebraic_map=*/
-                use_steady_external_state_fixed_point);
-      };
+  // The generated state of the solve, synchronized by the registry: the cut
+  // geometry, then the curvature projected from it and the advection
+  // velocity extended from it.
+  using svmp::FE::timestepping::FunctionGeneratedStateParticipant;
+  using svmp::FE::timestepping::GeneratedStateRole;
+  using svmp::FE::timestepping::GeneratedStateSync;
+  const auto generated_state =
+      std::make_shared<svmp::FE::timestepping::GeneratedStateRegistry>(
+          svmp::FE::timestepping::GeneratedStatePolicy{
+              .solve = svmp::FE::timestepping::GeneratedStateSolve::Steady,
+              .outer_fixed_point = use_steady_external_state_fixed_point});
+  generated_state->add(
+      std::make_shared<svmp::FE::level_set::LevelSetGeometryParticipant>(
+          cut_geometry,
+          svmp::FE::level_set::LevelSetGeometryParticipant::Options{
+              .solve = svmp::FE::timestepping::GeneratedStateSolve::Steady}));
+  generated_state->add(std::make_shared<FunctionGeneratedStateParticipant>(
+      "level_set_curvature",
+      GeneratedStateRole::DerivedField,
+      FunctionGeneratedStateParticipant::Callbacks{
+          .prepare =
+              [curvature_projection_cache](const GeneratedStateSync& sync) {
+                if (sync.point == StateSyncPoint::RestoredOuterFixedPointState) {
+                  curvature_projection_cache->entries.clear();
+                }
+              },
+          .synchronize =
+              [&, curvature_projection_cache](
+                  const svmp::FE::systems::SystemStateView& state,
+                  GeneratedStateSync& sync) {
+                (void)projectLevelSetCurvatureFieldsFromState(
+                    sim,
+                    state,
+                    sync.evaluated_state_source_revisions,
+                    level_set_maintenance,
+                    -1,
+                    stateSyncPointName(sync.point),
+                    /*honor_cadence=*/false,
+                    curvature_projection_cache.get(),
+                    /*reuse_cached_on_projection_failure=*/
+                    allowCachedCurvatureAfterProjectionFailure(sync.point));
+              }}));
+  generated_state->add(std::make_shared<FunctionGeneratedStateParticipant>(
+      "level_set_advection_velocity",
+      GeneratedStateRole::Extension,
+      FunctionGeneratedStateParticipant::Callbacks{
+          .synchronize =
+              [&](const svmp::FE::systems::SystemStateView& state,
+                  GeneratedStateSync&) {
+                (void)updateLevelSetAdvectionVelocitiesFromState(
+                    sim,
+                    state,
+                    steady_level_set_advection_velocity,
+                    /*refresh_frozen_algebraic_map=*/
+                        use_steady_external_state_fixed_point);
+              }}));
+  generated_state->bind(newton_opts);
 
   const auto integrator = std::make_shared<const ZeroTimeDerivativeIntegrator>();
   svmp::FE::systems::TransientSystem transient(*sim.fe_system, integrator);
@@ -14797,31 +14806,19 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   if (track_transient_cut_topology) {
     cut_geometry->trackTopology();
   }
+  // The generated state of the transient solve, synchronized by the
+  // registry; its participants are registered and bound to the Newton
+  // options with the synchronization hook below.
+  const auto generated_state =
+      std::make_shared<svmp::FE::timestepping::GeneratedStateRegistry>(
+          svmp::FE::timestepping::GeneratedStatePolicy{
+              .solve = svmp::FE::timestepping::GeneratedStateSolve::Transient,
+              .outer_fixed_point = use_transient_external_state_fixed_point,
+              .refresh_within_solve = refresh_generated_geometry_within_solve,
+              .synchronize_line_search_trials = synchronize_line_search_trials,
+              .per_step_only = per_step_only_generated_state});
   const auto invalidate_transient_cut_topology_dependent_state = [&] {
-    cut_refresh_cache->invalidateGeneratedState();
-    curvature_projection_cache->entries.clear();
-    for (const auto& request : level_set_advection_velocity) {
-      const auto target = sim.fe_system->findFieldByName(
-          request.target_velocity_field_name);
-      if (target == svmp::FE::INVALID_FIELD_ID) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Cut-topology rejection could not invalidate a level-set velocity extension target field.");
-      }
-      auto extension_constraint =
-          svmp::FE::level_set::
-              findLevelSetVelocityExtensionConstraintKernel(
-                  *sim.fe_system, request.operator_tag, target);
-      const bool algebraic_extension =
-          sim.fe_system->fieldRecord(target).source_kind ==
-          svmp::FE::systems::FieldSourceKind::Unknown;
-      if (algebraic_extension && !extension_constraint) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Cut-topology rejection could not resolve a frozen level-set velocity extension kernel.");
-      }
-      if (extension_constraint) {
-        extension_constraint->invalidateFrozenMap();
-      }
-    }
+    generated_state->invalidate();
   };
   // Accepted states that the kinematic reconciliation and the sign-definite
   // patch bounds of the next step compare against: captured before the first
@@ -14894,8 +14891,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               << " time=" << h.time() << " dt=" << h.dt() << std::endl;
     logCutGeometryMemory("step_start");
   };
-  auto cut_topology_key = std::shared_ptr<std::optional<std::uint64_t>>(
-      cut_geometry, &cut_geometry->lastLoggedTopologyKey());
   applyJacobianCheckGeometryProvenance(
       opts.newton,
       transient_active_cut_requests,
@@ -14904,196 +14899,109 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       use_transient_external_state_fixed_point);
   const auto expected_cut_request_policy_key =
       activeCutVolumeRequestPolicyKey(transient_active_cut_requests);
-  using TransientStateSyncPoint =
-      svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
-  opts.newton.synchronize_state =
-      [&, cut_geometry, cut_refresh_cache, cut_topology_key,
-       curvature_projection_cache](
-          const svmp::FE::systems::SystemStateView& state,
-          TransientStateSyncPoint point) {
-        const bool restoring_time_step_state =
-            restoresAcceptedTimeStepGeneratedState(point);
-        if (use_transient_external_state_fixed_point &&
-            point != TransientStateSyncPoint::OuterFixedPointState &&
-            point !=
-                TransientStateSyncPoint::ProjectedOuterFixedPointState &&
-            point != TransientStateSyncPoint::EndpointCandidateState &&
-            point !=
-                TransientStateSyncPoint::ProjectedEndpointCandidateState &&
-            point != TransientStateSyncPoint::RestoredOuterFixedPointState &&
-            point != TransientStateSyncPoint::
-                         RestoredProjectedOuterFixedPointState &&
-            point != TransientStateSyncPoint::RestoredTimeStepState &&
-            point != TransientStateSyncPoint::
-                         RestoredProjectedTimeStepState) {
-          return;
-        }
-        const bool restoring_generated_state =
-            point ==
-                TransientStateSyncPoint::RestoredOuterFixedPointState ||
-            point == TransientStateSyncPoint::RestoredTimeStepState;
-        if (restoring_generated_state) {
-          // A restore changes the source vector. Value-revision counters are
-          // per vector, so only a content signature may prove that the
-          // installed (or the retained entry) geometry is still current.
-          cut_refresh_cache->last_vector_signature.reset();
-          curvature_projection_cache->entries.clear();
-          cut_refresh_cache->closeReinstallWindow();
-        }
-        if (point == TransientStateSyncPoint::EndpointCandidateState &&
-            has_dynamic_contact_stage &&
-            !parseBoolEnv("SVMP_DISABLE_CUT_CONTEXT_REINSTALL", false)) {
-          // The final candidate gate reconstructs the dynamic-contact stage:
-          // it refreshes the stage geometry, which the last outer pass
-          // generated from the same level set, and then the endpoint again.
-          // Keep the context replaced by the endpoint rebuild so that both
-          // refreshes can reinstall geometry instead of rebuilding it.
-          cut_refresh_cache->reinstall_candidate.reset();
-          cut_refresh_cache->reinstall_window_open = true;
-        }
-        // The Jacobian may remain a refreshed-frozen/quasi-Newton tangent, but
-        // line search globalizes the actual residual R(u,G(u)).  An explicit
-        // environment override can freeze trials for a controlled legacy
-        // comparison; it is not the production default when G changes the
-        // residual.
-        if (!use_transient_external_state_fixed_point &&
-            point == TransientStateSyncPoint::LineSearchTrialResidual &&
-            !synchronize_line_search_trials) {
-          return;
-        }
-        if (!restoring_time_step_state &&
-            !use_transient_external_state_fixed_point &&
-            !refresh_generated_geometry_within_solve) {
-          return;
-        }
-        // Refresh-cadence experiment knob: freeze the cut geometry (and the
-        // φ-derived curvature/advection data) across ALL within-solve sync
-        // points, so the integration domains move once per accepted STEP
-        // (before_physics_solve + accepted_step callbacks) instead of after
-        // every accepted Newton iterate. CAUTION: this changes Newton's
-        // fixed point — the converged quadrature lags the converged φ by
-        // one solve.
-        if (!restoring_time_step_state &&
-            !use_transient_external_state_fixed_point &&
-            per_step_only_generated_state) {
-          return;
-        }
-        std::optional<ActiveCutContextRefreshReport> restored_report;
-        if (restoring_generated_state) {
-          restored_report = cut_geometry->reinstallForRestoredState(
-              state, stateSyncPointName(point));
-        }
-        const auto report =
-            restored_report.has_value()
-                ? *restored_report
-                : cut_geometry->refreshCached(
-                      state, stateSyncPointName(point));
-        cut_geometry->retainAtAttemptEntry(
-            point == TransientStateSyncPoint::OuterFixedPointState,
-            point ==
-                TransientStateSyncPoint::ProjectedOuterFixedPointState);
-        if (report.refreshed &&
-            report.request_policy_key != expected_cut_request_policy_key) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Active cut request policy changed during transient Newton synchronization.");
-        }
-        logCutTopologyChange(report, point, *cut_topology_key, "transient");
-        const bool outer_constraint_construction_pass =
-            (use_transient_external_state_fixed_point &&
-             (point == TransientStateSyncPoint::OuterFixedPointState ||
-              point ==
-                  TransientStateSyncPoint::RestoredOuterFixedPointState)) ||
-            point == TransientStateSyncPoint::EndpointCandidateState ||
-            point == TransientStateSyncPoint::RestoredTimeStepState;
-        if (outer_constraint_construction_pass) {
-          return;
-        }
-        (void)projectLevelSetCurvatureFieldsFromState(
-            sim,
-            state,
-            report.evaluated_state_source_revisions,
-            level_set_maintenance,
-            -1,
-            stateSyncPointName(point),
-            /*honor_cadence=*/false,
-            curvature_projection_cache.get(),
-            /*reuse_cached_on_projection_failure=*/
-            allowCachedCurvatureAfterProjectionFailure(point));
-        (void)updateLevelSetAdvectionVelocitiesFromState(
-            sim,
-            state,
-            level_set_advection_velocity,
-            /*refresh_frozen_algebraic_map=*/
-                refreshesFrozenLevelSetExtensionAtStateSync(
-                    point,
-                    use_transient_external_state_fixed_point));
-        if (semi_implicit_reference) {
-          // u_ref := the projected iterate that generated this geometry, so
-          // the semi-implicit capillary term vanishes in the fresh residual.
-          refreshFreeSurfaceSemiImplicitReference(
-              *sim.fe_system, *semi_implicit_reference, state);
-        }
-      };
-  if (track_transient_cut_topology &&
-      use_transient_external_state_fixed_point) {
-    opts.newton.external_state_discontinuity =
-        [cut_topology_attempt_tracker](TransientStateSyncPoint point) {
-          return point ==
-                     TransientStateSyncPoint::OuterFixedPointState &&
-                 cut_topology_attempt_tracker->attemptActive() &&
-                 cut_topology_attempt_tracker->attemptTainted();
-        };
-    opts.newton.acknowledge_external_state_discontinuity =
-        [cut_topology_attempt_tracker](TransientStateSyncPoint point) {
-          if (point !=
-              TransientStateSyncPoint::OuterFixedPointState) {
-            throw std::logic_error(
-                "[svMultiPhysics::Application] A transient cut-topology restart was acknowledged outside an outer fixed-point refresh.");
-          }
-          const auto previous_attempt_key =
-              cut_topology_attempt_tracker->attemptTopologyKey()
-                  .value_or(0u);
-          cut_topology_attempt_tracker->acknowledgeNonlinearRestart();
-          oopCout()
-              << "[svMultiPhysics::Application] Transient cut-topology "
-                 "nonlinear restart"
-              << " diagnostic=cut_topology_nonlinear_restart"
-              << " committed_topology_key="
-              << cut_topology_attempt_tracker->acceptedTopologyKey()
-                     .value_or(0u)
-              << " previous_attempt_topology_key="
-              << previous_attempt_key
-              << " restarted_attempt_topology_key="
-              << cut_topology_attempt_tracker->attemptTopologyKey()
-                     .value_or(0u)
-              << " first_mismatched_topology_key="
-              << cut_topology_attempt_tracker
-                     ->firstMismatchedTopologyKey()
-                     .value_or(0u)
-              << " action=continue_on_refreshed_epoch"
-              << std::endl;
-        };
-    opts.newton.external_state_epoch_revisited =
-        [cut_topology_attempt_tracker](TransientStateSyncPoint point) {
-          return point ==
-                     TransientStateSyncPoint::OuterFixedPointState &&
-                 cut_topology_attempt_tracker->revisitPending();
-        };
-    opts.newton.acknowledge_external_state_frozen_epoch =
-        [cut_topology_attempt_tracker]() {
-          cut_topology_attempt_tracker->acknowledgeFrozenEpoch();
-          oopCout()
-              << "[svMultiPhysics::Application] Transient cut-topology cycle"
-              << " diagnostic=cut_topology_cycle"
-              << " committed_topology_key="
-              << cut_topology_attempt_tracker->acceptedTopologyKey()
-                     .value_or(0u)
-              << " frozen_attempt_topology_key="
-              << cut_topology_attempt_tracker->attemptTopologyKey()
-                     .value_or(0u)
-              << " action=accept_on_frozen_epoch" << std::endl;
-        };
+  using svmp::FE::timestepping::FunctionGeneratedStateParticipant;
+  using svmp::FE::timestepping::GeneratedStateRole;
+  using svmp::FE::timestepping::GeneratedStateSync;
+  // The cut geometry first (it provides the cut-topology epochs of the outer
+  // fixed point), then the curvature projected from it, the advection
+  // velocity extended from it and the semi-implicit reference state.
+  generated_state->add(
+      std::make_shared<svmp::FE::level_set::LevelSetGeometryParticipant>(
+          cut_geometry,
+          svmp::FE::level_set::LevelSetGeometryParticipant::Options{
+              .solve = svmp::FE::timestepping::GeneratedStateSolve::Transient,
+              .track_topology = track_transient_cut_topology,
+              .reinstall_after_contact_stage_endpoint =
+                  has_dynamic_contact_stage &&
+                  !parseBoolEnv("SVMP_DISABLE_CUT_CONTEXT_REINSTALL", false),
+              .expected_request_policy_key = expected_cut_request_policy_key}));
+  generated_state->add(std::make_shared<FunctionGeneratedStateParticipant>(
+      "level_set_curvature",
+      GeneratedStateRole::DerivedField,
+      FunctionGeneratedStateParticipant::Callbacks{
+          .prepare =
+              [curvature_projection_cache](const GeneratedStateSync& sync) {
+                if (sync.restoring_generated_state) {
+                  curvature_projection_cache->entries.clear();
+                }
+              },
+          .synchronize =
+              [&, curvature_projection_cache](
+                  const svmp::FE::systems::SystemStateView& state,
+                  GeneratedStateSync& sync) {
+                (void)projectLevelSetCurvatureFieldsFromState(
+                    sim,
+                    state,
+                    sync.evaluated_state_source_revisions,
+                    level_set_maintenance,
+                    -1,
+                    stateSyncPointName(sync.point),
+                    /*honor_cadence=*/false,
+                    curvature_projection_cache.get(),
+                    /*reuse_cached_on_projection_failure=*/
+                    allowCachedCurvatureAfterProjectionFailure(sync.point));
+              },
+          .invalidate =
+              [curvature_projection_cache] {
+                curvature_projection_cache->entries.clear();
+              }}));
+  generated_state->add(std::make_shared<FunctionGeneratedStateParticipant>(
+      "level_set_advection_velocity",
+      GeneratedStateRole::Extension,
+      FunctionGeneratedStateParticipant::Callbacks{
+          .synchronize =
+              [&](const svmp::FE::systems::SystemStateView& state,
+                  GeneratedStateSync& sync) {
+                (void)updateLevelSetAdvectionVelocitiesFromState(
+                    sim,
+                    state,
+                    level_set_advection_velocity,
+                    /*refresh_frozen_algebraic_map=*/
+                        refreshesFrozenLevelSetExtensionAtStateSync(
+                            sync.point,
+                            use_transient_external_state_fixed_point));
+              },
+          .invalidate =
+              [&] {
+                for (const auto& request : level_set_advection_velocity) {
+                  const auto target = sim.fe_system->findFieldByName(
+                      request.target_velocity_field_name);
+                  if (target == svmp::FE::INVALID_FIELD_ID) {
+                    throw std::runtime_error(
+                        "[svMultiPhysics::Application] Cut-topology rejection could not invalidate a level-set velocity extension target field.");
+                  }
+                  auto extension_constraint =
+                      svmp::FE::level_set::
+                          findLevelSetVelocityExtensionConstraintKernel(
+                              *sim.fe_system, request.operator_tag, target);
+                  const bool algebraic_extension =
+                      sim.fe_system->fieldRecord(target).source_kind ==
+                      svmp::FE::systems::FieldSourceKind::Unknown;
+                  if (algebraic_extension && !extension_constraint) {
+                    throw std::runtime_error(
+                        "[svMultiPhysics::Application] Cut-topology rejection could not resolve a frozen level-set velocity extension kernel.");
+                  }
+                  if (extension_constraint) {
+                    extension_constraint->invalidateFrozenMap();
+                  }
+                }
+              }}));
+  if (semi_implicit_reference) {
+    generated_state->add(std::make_shared<FunctionGeneratedStateParticipant>(
+        "free_surface_semi_implicit_reference",
+        GeneratedStateRole::Reference,
+        FunctionGeneratedStateParticipant::Callbacks{
+            .synchronize =
+                [&](const svmp::FE::systems::SystemStateView& state,
+                    GeneratedStateSync&) {
+                  // u_ref := the projected iterate that generated this
+                  // geometry, so the semi-implicit capillary term vanishes
+                  // in the fresh residual.
+                  refreshFreeSurfaceSemiImplicitReference(
+                      *sim.fe_system, *semi_implicit_reference, state);
+                }}));
   }
+  generated_state->bind(opts.newton);
   callbacks.on_before_physics_solve =
       [&](svmp::FE::timestepping::TimeHistory& h, double /*solve_time*/, double /*dt*/) {
         armActiveCutRestoreRetention(*cut_refresh_cache);

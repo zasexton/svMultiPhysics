@@ -4799,6 +4799,184 @@ LevelSetGeometryService::beginTransaction(
       host_, lifecycle_, refresh_cache_, requests_, prescribed_fields);
 }
 
+// ---------------------------------------------------------------------------
+// LevelSetGeometryParticipant
+// ---------------------------------------------------------------------------
+//
+// The bodies are the cut-context part of the generated-state synchronization
+// and the cut-topology epoch hooks of ApplicationDriver's runSteadyState and
+// runTransient, moved with the statements and log text unchanged.
+
+LevelSetGeometryParticipant::LevelSetGeometryParticipant(
+    std::shared_ptr<LevelSetGeometryService> service,
+    Options options)
+    : service_(std::move(service)), options_(options)
+{
+  if (!service_) {
+    throw std::invalid_argument(
+        "LevelSetGeometryParticipant: null geometry service");
+  }
+}
+
+void LevelSetGeometryParticipant::prepare(
+    const svmp::FE::timestepping::GeneratedStateSync& sync)
+{
+  using StateSyncPoint =
+      svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+  auto& cache = service_->refreshCache();
+  if (options_.solve == svmp::FE::timestepping::GeneratedStateSolve::Steady) {
+    if (sync.point == StateSyncPoint::RestoredOuterFixedPointState) {
+      cache.last_signature.reset();
+      cache.last_vector_signature.reset();
+    }
+    return;
+  }
+  if (sync.restoring_generated_state) {
+    // A restore changes the source vector. Value-revision counters are
+    // per vector, so only a content signature may prove that the
+    // installed (or the retained entry) geometry is still current.
+    cache.last_vector_signature.reset();
+    cache.closeReinstallWindow();
+  }
+  if (sync.point == StateSyncPoint::EndpointCandidateState &&
+      options_.reinstall_after_contact_stage_endpoint) {
+    // The final candidate gate reconstructs the dynamic-contact stage:
+    // it refreshes the stage geometry, which the last outer pass
+    // generated from the same level set, and then the endpoint again.
+    // Keep the context replaced by the endpoint rebuild so that both
+    // refreshes can reinstall geometry instead of rebuilding it.
+    cache.reinstall_candidate.reset();
+    cache.reinstall_window_open = true;
+  }
+}
+
+void LevelSetGeometryParticipant::synchronize(
+    const svmp::FE::systems::SystemStateView& state,
+    svmp::FE::timestepping::GeneratedStateSync& sync)
+{
+  using StateSyncPoint =
+      svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+  const auto point = sync.point;
+  const char* const point_name =
+      svmp::FE::timestepping::generatedStateSyncPointName(point);
+  if (options_.solve == svmp::FE::timestepping::GeneratedStateSolve::Steady) {
+    const auto report = service_->refreshCached(state, point_name);
+    logCutTopologyChange(
+        report, point, service_->lastLoggedTopologyKey(), "steady");
+    sync.evaluated_state_source_revisions =
+        report.evaluated_state_source_revisions;
+    return;
+  }
+  std::optional<ActiveCutContextRefreshReport> restored_report;
+  if (sync.restoring_generated_state) {
+    restored_report = service_->reinstallForRestoredState(state, point_name);
+  }
+  const auto report =
+      restored_report.has_value()
+          ? *restored_report
+          : service_->refreshCached(state, point_name);
+  service_->retainAtAttemptEntry(
+      point == StateSyncPoint::OuterFixedPointState,
+      point == StateSyncPoint::ProjectedOuterFixedPointState);
+  if (report.refreshed &&
+      report.request_policy_key != options_.expected_request_policy_key) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Active cut request policy changed during transient Newton synchronization.");
+  }
+  logCutTopologyChange(
+      report, point, service_->lastLoggedTopologyKey(), "transient");
+  sync.evaluated_state_source_revisions =
+      report.evaluated_state_source_revisions;
+}
+
+void LevelSetGeometryParticipant::invalidate()
+{
+  service_->refreshCache().invalidateGeneratedState();
+}
+
+bool LevelSetGeometryParticipant::providesEpochs() const noexcept
+{
+  return options_.solve ==
+             svmp::FE::timestepping::GeneratedStateSolve::Transient &&
+         options_.track_topology;
+}
+
+bool LevelSetGeometryParticipant::epochDiscontinuity(
+    svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint point)
+    const
+{
+  using TransientStateSyncPoint =
+      svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+  const auto* cut_topology_attempt_tracker = &service_->topologyTracker();
+  return point ==
+             TransientStateSyncPoint::OuterFixedPointState &&
+         cut_topology_attempt_tracker->attemptActive() &&
+         cut_topology_attempt_tracker->attemptTainted();
+}
+
+void LevelSetGeometryParticipant::acknowledgeEpochDiscontinuity(
+    svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint point)
+{
+  using TransientStateSyncPoint =
+      svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+  auto* cut_topology_attempt_tracker = &service_->topologyTracker();
+  if (point !=
+      TransientStateSyncPoint::OuterFixedPointState) {
+    throw std::logic_error(
+        "[svMultiPhysics::Application] A transient cut-topology restart was acknowledged outside an outer fixed-point refresh.");
+  }
+  const auto previous_attempt_key =
+      cut_topology_attempt_tracker->attemptTopologyKey()
+          .value_or(0u);
+  cut_topology_attempt_tracker->acknowledgeNonlinearRestart();
+  svmp::FE::rank_log::oopCout()
+      << "[svMultiPhysics::Application] Transient cut-topology "
+         "nonlinear restart"
+      << " diagnostic=cut_topology_nonlinear_restart"
+      << " committed_topology_key="
+      << cut_topology_attempt_tracker->acceptedTopologyKey()
+             .value_or(0u)
+      << " previous_attempt_topology_key="
+      << previous_attempt_key
+      << " restarted_attempt_topology_key="
+      << cut_topology_attempt_tracker->attemptTopologyKey()
+             .value_or(0u)
+      << " first_mismatched_topology_key="
+      << cut_topology_attempt_tracker
+             ->firstMismatchedTopologyKey()
+             .value_or(0u)
+      << " action=continue_on_refreshed_epoch"
+      << std::endl;
+}
+
+bool LevelSetGeometryParticipant::epochRevisited(
+    svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint point)
+    const
+{
+  using TransientStateSyncPoint =
+      svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+  const auto* cut_topology_attempt_tracker = &service_->topologyTracker();
+  return point ==
+             TransientStateSyncPoint::OuterFixedPointState &&
+         cut_topology_attempt_tracker->revisitPending();
+}
+
+void LevelSetGeometryParticipant::acknowledgeFrozenEpoch()
+{
+  auto* cut_topology_attempt_tracker = &service_->topologyTracker();
+  cut_topology_attempt_tracker->acknowledgeFrozenEpoch();
+  svmp::FE::rank_log::oopCout()
+      << "[svMultiPhysics::Application] Transient cut-topology cycle"
+      << " diagnostic=cut_topology_cycle"
+      << " committed_topology_key="
+      << cut_topology_attempt_tracker->acceptedTopologyKey()
+             .value_or(0u)
+      << " frozen_attempt_topology_key="
+      << cut_topology_attempt_tracker->attemptTopologyKey()
+             .value_or(0u)
+      << " action=accept_on_frozen_epoch" << std::endl;
+}
+
 } // namespace level_set
 } // namespace FE
 } // namespace svmp

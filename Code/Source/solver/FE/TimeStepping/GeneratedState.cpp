@@ -253,6 +253,11 @@ void GeneratedStateRegistry::synchronize(
   // 3. solve gates of a transient solve without the outer fixed point
   if (policy_.solve == GeneratedStateSolve::Transient &&
       !policy_.outer_fixed_point) {
+    // The Jacobian may remain a refreshed-frozen/quasi-Newton tangent, but
+    // line search globalizes the actual residual R(u,G(u)).  An explicit
+    // environment override can freeze trials for a controlled legacy
+    // comparison; it is not the production default when G changes the
+    // residual.
     if (point == Point::LineSearchTrialResidual &&
         !policy_.synchronize_line_search_trials) {
       return;
@@ -260,6 +265,13 @@ void GeneratedStateRegistry::synchronize(
     if (!sync.restoring_time_step_state && !policy_.refresh_within_solve) {
       return;
     }
+    // Refresh-cadence experiment knob: freeze the cut geometry (and the
+    // φ-derived curvature/advection data) across ALL within-solve sync
+    // points, so the integration domains move once per accepted STEP
+    // (before_physics_solve + accepted_step callbacks) instead of after
+    // every accepted Newton iterate. CAUTION: this changes Newton's
+    // fixed point — the converged quadrature lags the converged φ by
+    // one solve.
     if (!sync.restoring_time_step_state && policy_.per_step_only) {
       return;
     }
