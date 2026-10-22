@@ -546,6 +546,14 @@ def main(argv=None) -> int:
     except (DataError, OSError, KeyError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
+    angles = sorted({r["equilibrium_angle_degrees"] for r in runs})
+    if len(angles) > 1:
+        # The studies below are keyed by domain, dt rule and dt divisor only, so
+        # each equilibrium angle is verified on its own (tolerances.json, protocol).
+        print("ERROR: runs at several equilibrium angles ("
+              + ", ".join(f"{a:g}" for a in angles)
+              + " degrees); verify the runs of one angle at a time", file=sys.stderr)
+        return 2
     groups: dict[tuple, list] = {}
     for r in runs:
         groups.setdefault((r["domain"], r["dt_rule"], r["dt_divisor"]), []).append(r)
@@ -575,7 +583,7 @@ def main(argv=None) -> int:
     gated_steps = [v for v in steps if v["gated"] and v["evaluated"]]
     all_pass = bool(verdicts) and all(v["passed"] for v in verdicts + fine_verdicts + gated_steps) \
         and not any_truncated
-    print(f"\nprotocol study {protocol_key}:")
+    print(f"\nprotocol study {protocol_key}, theta_e = {angles[0]:g} degrees:")
     for v in verdicts:
         print(f"  [{'PASS' if v['passed'] else 'FAIL'}] {v['id']}: " + "; ".join(v["details"]))
     for v in fine_verdicts:

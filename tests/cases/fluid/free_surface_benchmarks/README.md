@@ -107,5 +107,5 @@ change it once, with a one-line justification in the tracker.
 | `static_drop_2d` | M2 | Laplace pressure and spurious currents. Capillary-route comparison (D2). |
 | `capillary_wave_2d` | M3 | Frequency and damping against Prosperetti |
 | `sessile_drop_2d` | M4 | Relaxation to the Young angle with Navier slip (D4) |
-| `sessile_drop_3d` | M4 | 3D sessile drop at 90 degrees (quarter domain with symmetry planes; tolerances approved under D38, amended by D43) |
+| `sessile_drop_3d` | M4 | 3D sessile drop at 90 degrees (quarter domain with symmetry planes; tolerances approved under D38, amended by D43); 60 and 120 degrees added on 2026-10-22 with the same criteria, approved under D48 before their first run |
 | `ren_e_2d` | M4 | Ren–E moving contact line (DynamicRenE), advancing and receding: law consistency on 3 meshes (l_s/h = 2, 4, 8) and 3 time steps |

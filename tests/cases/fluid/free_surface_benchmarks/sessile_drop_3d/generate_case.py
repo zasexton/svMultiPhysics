@@ -8,7 +8,9 @@ spherical cap with the Young angle theta_e.  The contact angle is imposed only
 by the variational Young term in the momentum equation (decision D4):
 PrescribedAngle contact line on the bottom wall, Navier slip on the wetted
 wall, and a strong normal-only zero velocity on that wall, as in
-sessile_drop_2d.  In 3D the contact line is a curve.
+sessile_drop_2d.  In 3D the contact line is a curve.  The equilibrium angles
+are 60, 90 and 120 degrees (--contact-angle), each started 30 degrees away
+as in sessile_drop_2d: from 90 degrees for 60 and 120, from 120 for 90.
 
 Domain: by default one quarter of the drop, x >= 0 and z >= 0, with the drop
 axis on the line x = z = 0.  The planes x = 0 and z = 0 are symmetry planes:
@@ -24,7 +26,7 @@ capillary term, at both levels; the run lasts 10 viscous times with 200
 outputs (D29).  --dt-rule capillary-limit uses the capillary limit of each
 level instead (the 2D sessile protocol rule, without the lagged term).
 --dt-divisor 2 halves the step with unchanged output times (time-step check
-at R/h = 8).
+at R/h = 16, decision D43).
 
 The case is written for the new OOP solver: solver.xml, an affine Tetra4
 background mesh with the initial fields, the wall face files, and case.json
@@ -60,8 +62,8 @@ SPHERE = _load("static_sphere_3d", "generate_case")
 # Protocol constants (principle P1); README.md gives the source of each one.
 # ---------------------------------------------------------------------------
 LEVELS = (8, 16)                            # R/h; R/h = 16 gates (as D25)
-EQUILIBRIUM_ANGLES_DEG = (90,)              # first angle (M4 "3D sessile at one angle")
-INITIAL_ANGLE_DEG = {90: 120.0}             # advancing by 30 degrees, as sessile_drop_2d
+EQUILIBRIUM_ANGLES_DEG = (60, 90, 120)      # theta_e; 90 first (D38), 60 and 120 added 2026-10-22
+INITIAL_ANGLE_DEG = {60: 90.0, 90: 120.0, 120: 90.0}  # 30 degrees from theta_e, the sessile_drop_2d pairs
 DOMAINS = ("quarter", "full")
 DEFAULT_DOMAIN = "quarter"
 DENSITY = 1.0

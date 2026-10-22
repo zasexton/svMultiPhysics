@@ -93,9 +93,9 @@ def _write_relaxing_run(run, case, frames):
     points, cells, _, _ = gen.structured_tetra_mesh(case["box"], case["level_R_over_h"],
                                                     gen.QUARTER_PLANES if case["domain"] == "quarter"
                                                     else gen.FULL_PLANES)
-    init = case["initial_cap"]
+    init, eq = case["initial_cap"], case["equilibrium_cap_nominal"]
     phi0 = np.linalg.norm(points - np.array([0.0, init["centre_y"], 0.0]), axis=1) - init["radius"]
-    phi1 = np.linalg.norm(points, axis=1) - 1.0
+    phi1 = np.linalg.norm(points - np.array([0.0, eq["centre_y"], 0.0]), axis=1) - eq["radius"]
     entries = []
     for i in range(1, frames + 1):
         t = case["end_time"] * i / frames
@@ -138,6 +138,59 @@ def test_metrics_on_sampled_caps(tmp_path):
     out = tmp_path / "report.json"
     assert ver.main([str(run), "--allow-truncated", "--json", str(out)]) == 1
     assert json.loads(out.read_text())["passed"] is False
+
+
+@pytest.mark.parametrize("angle, initial, box, tets", [
+    (60, 90.0, [0.0, 1.125, 0.0, 1.0, 0.0, 1.125], 3888),
+    (120, 90.0, [0.0, 1.5, 0.0, 1.75, 0.0, 1.5], 12096),
+])
+def test_generated_decks_at_the_added_angles(tmp_path, angle, initial, box, tets):
+    tol = json.loads((BENCH / "tolerances.json").read_text())["protocol"]
+    assert tol["equilibrium_angles_degrees"] == list(gen.EQUILIBRIUM_ANGLES_DEG)
+    assert {int(k): v for k, v in tol["initial_angles_degrees"].items()} == gen.INITIAL_ANGLE_DEG
+    case = gen.generate(8, angle, tmp_path / f"a{angle}")
+    assert case["equilibrium_angle_degrees"] == angle and case["initial_angle_degrees"] == initial
+    assert case["box"] == pytest.approx(box) and case["n_tetrahedra"] == tets
+    eq, init = case["equilibrium_cap_nominal"], case["initial_cap"]
+    assert eq["radius"] == pytest.approx(1.0)
+    assert init["volume"] == pytest.approx(eq["volume"])
+    assert eq["base_radius"] == pytest.approx(math.sin(math.radians(angle)))
+    assert case["min_abs_phi_over_h"] > gen.MIN_PHI_OVER_H_WARNING
+    assert case["initial_contact_vertex_gap_over_h"] > gen.MIN_PHI_OVER_H_WARNING
+    assert case["dry_gap_over_h"] >= 2.0 - 1e-9
+    root = ET.parse(tmp_path / f"a{angle}" / "solver.xml").getroot()
+    fs = next(b for b in root.iter("Add_BC") if b.get("name") == "free_surface")
+    assert float(fs.findtext("Contact_angle_degrees")) == angle
+    assert fs.findtext("Contact_line_model") == "PrescribedAngle"
+    assert case["steps"] == 1400 and case["interface_preserving_redistancing"] is True
+
+
+@pytest.mark.parametrize("angle", [60, 120])
+def test_metrics_on_sampled_caps_at_the_added_angles(tmp_path, angle):
+    pytest.importorskip("pyvista")
+    run = tmp_path / f"a{angle}"
+    case = gen.generate(8, angle, run, max_steps=4)
+    _write_relaxing_run(run, case, 8)
+    r = ver.analyse_run(run, allow_truncated=True)
+    f = r["final"]
+    # Sampled equilibrium caps at R/h = 8: 0.25 (60) and 0.39 (120) degrees (README.md).
+    assert r["contact_angle_max_error_degrees"] < 0.5
+    assert abs(f["contact_angle_mean"] - angle) < 0.5
+    assert len(f["sectors"]) == 3 and all(s["fit_points"] >= 20 for s in f["sectors"])
+    assert r["base_radius_relative_error"] < 8e-3 and r["apex_height_relative_error"] < 8e-3
+    assert r["max_speed_growth_ratio"] < 1.0
+
+
+def test_verify_takes_one_angle_at_a_time(tmp_path, capsys):
+    pytest.importorskip("pyvista")
+    runs = []
+    for angle in (60, 90):
+        run = tmp_path / f"a{angle}"
+        case = gen.generate(8, angle, run, max_steps=2)
+        _write_relaxing_run(run, case, 2)
+        runs.append(str(run))
+    assert ver.main(runs + ["--allow-truncated"]) == 2
+    assert "one angle at a time" in capsys.readouterr().err
 
 
 def test_symmetry_check_of_identical_fields(tmp_path, capsys):

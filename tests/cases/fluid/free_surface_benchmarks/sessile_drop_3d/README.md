@@ -1,9 +1,10 @@
 # sessile_drop_3d
 
 A 3D liquid spherical cap on a flat wall relaxes from a non-equilibrium shape
-to the spherical cap with the Young angle (tracker M4, "3D sessile at one
-angle"). It is the 3D counterpart of `sessile_drop_2d`, with the same single
-contact-angle mechanism of decision D4:
+to the spherical cap with the Young angle (tracker M4, "3D sessile"; 90
+degrees first, 60 and 120 degrees since 2026-10-22). It is the 3D counterpart
+of `sessile_drop_2d`, with the same single contact-angle mechanism of
+decision D4:
 
 - the angle is imposed only by the variational Young term in the momentum
   equation (the `SurfaceStress` line term along the contact line, which in
@@ -19,7 +20,11 @@ contact-angle mechanism of decision D4:
 enables the interface-preserving redistancing since D39 (2026-10-11). Decision
 D43 (2026-10-19, before the `R/h = 16` `dt/2` run) averages the sector angle
 over rotations of the sector partition and judges the time-step check at
-`R/h = 16`.**
+`R/h = 16`. The equilibrium angles 60 and 120 degrees were added on
+2026-10-22, before any run at them, with every criterion unchanged; decision
+D48 (2026-10-22) approved the extension as written, before its first run. At
+90 degrees the Young line term (`-gamma cos(theta_e)` times the line integral
+of `v.m`) vanishes, so only the new angles exercise it in 3D.**
 
 Files:
 
@@ -27,7 +32,7 @@ Files:
 |---|---|
 | `generate_case.py` | writes `solver.xml`, the Tet4 mesh with the initial fields, the boundary face files and `case.json` for one level |
 | `verify.py` | reads the solver output, computes the metrics, applies `tolerances.json`; `--symmetry-check` compares a quarter-domain and a full-domain run |
-| `tolerances.json` | acceptance criteria and their sources (approved, D38) |
+| `tolerances.json` | acceptance criteria and their sources (approved, D38; amended by D43; extended to 60 and 120 degrees by D48) |
 | `tests/test_free_surface_benchmark_sessile_drop_3d.py` | checks of the two scripts on synthetic data |
 
 The Tet4 writers, the Kuhn split and the FSILS and transport input blocks are
@@ -44,21 +49,31 @@ equilibrium cap, zero gravity, void exterior with `p_ext = 0`, liquid
 
 - **Equilibrium.** A cap of radius `r` and angle `theta` has volume
   `pi r^3 (2 - 3 cos(theta) + cos^3(theta))/3`, base radius `r sin(theta)`
-  and apex height `r (1 - cos(theta))`. At `theta_e = 90` degrees it is the
-  hemisphere: volume `2 pi/3`, base radius and apex height 1.
-- **Initial state** (sampled analytic shape): the cap with
-  `theta_0 = 120` degrees and the same volume, `r_0 = 0.8399`, base radius
-  0.7274, apex height 1.2599 (advancing by 30 degrees, as the 90-degree case
-  of `sessile_drop_2d`); `phi = |x - c_0| - r_0` at the vertices, `u = 0`,
-  `p = 2 gamma/r_0` everywhere.
+  and apex height `r (1 - cos(theta))`. The equilibrium cap has `R = 1` at
+  every angle. At `theta_e = 90` degrees it is the hemisphere: volume
+  `2 pi/3`, base radius and apex height 1. At 60 degrees: volume 0.6545,
+  base radius 0.8660, apex height 0.5. At 120 degrees: volume 3.5343, base
+  radius 0.8660, apex height 1.5.
+- **Initial state** (sampled analytic shape): the cap of the same volume
+  30 degrees away from `theta_e`, the angle pairs of `sessile_drop_2d`;
+  `phi = |x - c_0| - r_0` at the vertices, `u = 0`, `p = 2 gamma/r_0`
+  everywhere.
+
+  | `theta_e` | `theta_0` | motion | `r_0` | base radius | apex height |
+  |---:|---:|---|---:|---:|---:|
+  | 60 | 90 | advancing (spreading) | 0.6786 | 0.6786 | 0.6786 |
+  | 90 | 120 | advancing (spreading) | 0.8399 | 0.7274 | 1.2599 |
+  | 120 | 90 | receding | 1.1906 | 1.1906 | 1.1906 |
 - **Viscosity and slip.** `La = rho gamma (2R)/mu^2 = 12` (`mu = 0.4082`,
   viscous time 2.449) and `l_s = R/8`, as in 2D (`l_s/h = 1` and 2 at
   `R/h = 8` and 16).
 
 ## Domain, mesh and symmetry
 
-- **Quarter domain (protocol):** `[0, 1.25] x [0, 1.625] x [0, 1.25]`, the drop
-  axis on the line `x = z = 0`. The planes `x = 0` (`sym_x`) and `z = 0`
+- **Quarter domain (protocol):** `[0, 1.25] x [0, 1.625] x [0, 1.25]` at 90
+  degrees, `[0, 1.125] x [0, 1] x [0, 1.125]` at 60 and `[0, 1.5] x [0, 1.75]
+  x [0, 1.5]` at 120 (both caps plus a 0.25 R margin, rounded to the coarse
+  grid), the drop axis on the line `x = z = 0`. The planes `x = 0` (`sym_x`) and `z = 0`
   (`sym_z`) are symmetry planes: `Dir 0` with `Effective_direction` on the
   normal component only (free slip). They are **not** contact walls (not in
   the contact-line wall list): the contact rules apply to `wall_bottom` only,
@@ -75,13 +90,19 @@ equilibrium cap, zero gravity, void exterior with `p_ext = 0`, liquid
   the parity of the global cube index as in `static_sphere_3d`, so the mesh is
   symmetric about every grid plane and the full mesh restricted to
   `x, z >= 0` is the quarter mesh (checked by the tests). `R/h = 8`: 7,800
-  tetrahedra (quarter), 31,200 (full); `R/h = 16`: 62,400 (quarter). Face
+  tetrahedra (quarter), 31,200 (full); `R/h = 16`: 62,400 (quarter). At 60
+  degrees 3,888 and 31,104, at 120 degrees 12,096 and 96,768 (quarter,
+  `R/h = 8` and 16). Face
   files are disjoint (each boundary triangle has all its vertices on one
   plane).
 - The drop axis lies on the symmetry line, so the transcendental centre
   offset of the 2D case is not available; the sampled initial cap passes no
   closer than `0.0017 h` to a vertex and the initial contact line `0.012 h`
-  to a wall vertex at `R/h = 8` (reported in `case.json`).
+  to a wall vertex at `R/h = 8` (reported in `case.json`). At 60 degrees the
+  smallest gaps are `0.044 h` and `0.044 h` at `R/h = 8` and `0.0051 h` and
+  `0.041 h` at 16; at 120 degrees `0.015 h` and `0.038 h`, and `0.0037 h`
+  and `0.023 h`. The dry outer walls stay at least two cells away (exactly
+  2.0 at 120 degrees and `R/h = 8`).
 
 ## Time step and run length
 
@@ -120,9 +141,17 @@ sector angle is within 0.68 degrees of the exact angle at `R/h = 8` and 0.08
 degrees at `R/h = 16`, the single-partition angle within 0.63 and 0.09
 degrees (the cell-gradient angles are off by up to 7 and 3.3 degrees, so
 they are reported only); the base radius and apex height are within 0.25% at
-`R/h = 8` and 0.05% at 16.
+`R/h = 8` and 0.05% at 16. On the sampled equilibrium caps of the new angles
+(2026-10-22) the rotation-averaged sector angle is within 0.25 degree (60)
+and 0.39 degree (120) at `R/h = 8` and within 0.064 and 0.044 degree at 16;
+the base radius and apex height are within 0.41% and 0.53% (60) and 0.06%
+and 0.18% (120) at `R/h = 8`, and within 0.14% at 16.
 
 ## Tolerances (D38, amended by D43)
+
+The criteria apply to each equilibrium angle (60, 90, 120 degrees) as a
+separate study, with the same limits; `verify.py` takes the runs of one angle
+at a time and stops with an error when given several.
 
 | Criterion | Limit | Where | Source |
 |---|---|---|---|
@@ -161,9 +190,10 @@ On the job 51 outputs the averaged angle gives a largest sector error of
 
 ```bash
 B=tests/cases/fluid/free_surface_benchmarks/sessile_drop_3d
-for L in 8 16; do python3 $B/generate_case.py --level $L --output-dir $OUT/L$L; done
-python3 $B/generate_case.py --level 16 --dt-divisor 2 --output-dir $OUT/L16_dt2   # time-step check (D43)
-python3 $B/generate_case.py --level 8 --dt-divisor 2 --output-dir $OUT/L8_dt2     # reported, not gated
+A=90   # equilibrium angle: 60, 90 or 120 (--contact-angle); one angle per verify.py call
+for L in 8 16; do python3 $B/generate_case.py --level $L --contact-angle $A --output-dir $OUT/L$L; done
+python3 $B/generate_case.py --level 16 --contact-angle $A --dt-divisor 2 --output-dir $OUT/L16_dt2   # time-step check (D43)
+python3 $B/generate_case.py --level 8 --contact-angle $A --dt-divisor 2 --output-dir $OUT/L8_dt2     # reported, not gated
 # 3D production configuration (free_surface_benchmarks/README.md, "Run configurations"):
 #   #SBATCH --nodes=1 --ntasks=8 --cpus-per-task=3
 #   export OMP_NUM_THREADS=1 SVMP_ASSEMBLY_THREADS=$SLURM_CPUS_PER_TASK
@@ -202,3 +232,18 @@ layers unset (job `47334236`; output
 - Estimated cost of the protocol on one node (8 x 3): `R/h = 8`, 1,400 steps,
   about 3.4 h; `R/h = 8` at `dt/2`, about 6.7 h; `R/h = 16` (eight times the
   cells), about 45-50 s per step, about 19 h; about 29 h in total.
+
+## Cost of the added angles (estimate, 2026-10-22)
+
+Scaled from the measured 90-degree protocol runs on `e7080344-ltopgo-mumps`,
+8 ranks (jobs 51 and 74: `R/h = 8` 1.14 h, `R/h = 16` 5.44 h, `R/h = 16`
+`dt/2` 7.73 h; batch peak memory 11.4-11.6 GB at `R/h = 16`), by the cell and
+interface size (60 degrees about 0.5 times, 120 degrees about 1.5 times),
+an allowance of 1.0-1.3 (60) and 1.0-1.5 (120) for the dynamics, and a factor
+0.60-0.75 for the speed-ups merged since `e7080344`. With a main-line
+production binary built with MUMPS and `mumps_serial`, 8 ranks:
+
+| `theta_e` | `R/h = 8` | `R/h = 16` | `R/h = 16`, `dt/2` | memory at `R/h = 16` |
+|---:|---:|---:|---:|---:|
+| 60 | 0.3-0.6 h | 1.6-2.7 h | 2.3-3.8 h | about 6 GB |
+| 120 | 1.0-1.9 h | 4.9-9.2 h | 7.0-13.0 h | about 18 GB |
