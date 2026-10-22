@@ -25,7 +25,6 @@
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesVMSFormulation.h"
 
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceCollectives.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceConfigurationArtifact.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactCertificate.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceDiagnosticOperators.h"

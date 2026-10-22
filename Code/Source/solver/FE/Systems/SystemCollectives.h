@@ -137,6 +137,51 @@ void requireCollectivePhasePreparation(
     std::string_view phase);
 
 /**
+ * @brief Log "<owner>: diagnostic=rank_local_collective_failure phase='<phase>'
+ * reason='<what>'" for a rank-local failure (nothing for a null @p failure).
+ *
+ * Called before the collective that propagates the failure, so that the
+ * failing rank's reason reaches the log even when the job is aborted from
+ * another rank first.
+ */
+void logRankLocalPhaseFailure(
+    std::string_view owner,
+    std::string_view phase,
+    const std::exception_ptr& failure);
+
+/**
+ * @brief Agree on the outcome of a rank-local phase.
+ *
+ * Each rank reports whether its local phase failed (@p local_failure) or
+ * succeeded with (@p local_available) or without the data the next phase
+ * needs.  The ranks take the minimum of failed (0), unavailable (1) and
+ * available (2); before it, a failing rank logs
+ * "<owner>: diagnostic=rank_local_collective_failure phase='<phase>'
+ * reason='<what>'".  When any rank failed, a failing rank rethrows its own
+ * exception and every other rank throws std::runtime_error with the text
+ * "<owner>: another communicator rank rejected cut-context callback phase
+ * '<phase>'".  Otherwise returns whether every rank has the data.  On a
+ * single rank nothing is communicated or logged.
+ */
+[[nodiscard]] bool agreeOnLocalPhase(
+    const std::exception_ptr& local_failure,
+    bool local_available,
+    const CollectiveCommunicator& comm,
+    std::string_view phase,
+    std::string_view owner);
+
+/**
+ * @brief agreeOnLocalPhase on the system's active communicator, when MPI is
+ * initialized and not finalized (otherwise on a single rank).
+ */
+[[nodiscard]] bool agreeOnLocalPhase(
+    const FESystem& system,
+    const std::exception_ptr& local_failure,
+    bool local_available,
+    std::string_view phase,
+    std::string_view owner);
+
+/**
  * @brief Text of the rank-local report written when canonical words disagree.
  *
  * The report line is

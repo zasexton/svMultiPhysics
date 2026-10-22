@@ -10,6 +10,7 @@
 #include "Assembly/GlobalSystemView.h"
 #include "Backends/Interfaces/GenericVector.h"
 #include "Constraints/AffineConstraints.h"
+#include "Core/Logger.h"
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "Systems/FESystem.h"
 
@@ -209,6 +210,92 @@ void requireCollectivePhasePreparation(
       comm,
       "failed local preparation for collective phase",
       phase);
+}
+
+void logRankLocalPhaseFailure(
+    std::string_view owner,
+    std::string_view phase,
+    const std::exception_ptr& failure)
+{
+  if (failure == nullptr) {
+    return;
+  }
+  std::string reason = "unknown exception";
+  try {
+    std::rethrow_exception(failure);
+  } catch (const std::exception& error) {
+    reason = error.what();
+  } catch (...) {
+  }
+  FE_LOG_ERROR(std::string(owner) +
+               ": diagnostic=rank_local_collective_failure phase='" +
+               std::string(phase) + "' reason='" + reason + "'");
+}
+
+bool agreeOnLocalPhase(
+    const std::exception_ptr& local_failure,
+    bool local_available,
+    const CollectiveCommunicator& comm,
+    std::string_view phase,
+    std::string_view owner)
+{
+  bool any_failed = local_failure != nullptr;
+  bool all_available = local_available && !any_failed;
+#if FE_HAS_MPI
+  if (comm.isParallel()) {
+    logRankLocalPhaseFailure(owner, phase, local_failure);
+    // 0 = failed, 1 = unavailable, 2 = available. MPI_MIN makes every rank
+    // take the same route after this local phase.
+    const int local_state = any_failed ? 0 : (local_available ? 2 : 1);
+    int global_state = 0;
+    MPI_Allreduce(
+        &local_state, &global_state, 1, MPI_INT, MPI_MIN, comm.native());
+    any_failed = global_state == 0;
+    all_available = global_state == 2;
+  }
+#else
+  (void)comm;
+  (void)owner;
+#endif
+  if (any_failed) {
+    if (local_failure != nullptr) {
+      std::rethrow_exception(local_failure);
+    }
+    throw std::runtime_error(
+        std::string(owner) +
+        ": another communicator rank rejected cut-context callback phase '" +
+        std::string(phase) + "'");
+  }
+  return all_available;
+}
+
+bool agreeOnLocalPhase(
+    const FESystem& system,
+    const std::exception_ptr& local_failure,
+    bool local_available,
+    std::string_view phase,
+    std::string_view owner)
+{
+#if FE_HAS_MPI
+  int mpi_initialized = 0;
+  int mpi_finalized = 0;
+  MPI_Initialized(&mpi_initialized);
+  if (mpi_initialized != 0) {
+    MPI_Finalized(&mpi_finalized);
+  }
+  if (mpi_initialized != 0 && mpi_finalized == 0) {
+    const auto communicator = system.activeMpiCommunicator();
+    if (communicator != MPI_COMM_NULL) {
+      return agreeOnLocalPhase(
+          local_failure, local_available,
+          CollectiveCommunicator(communicator), phase, owner);
+    }
+  }
+#else
+  (void)system;
+#endif
+  return agreeOnLocalPhase(
+      local_failure, local_available, CollectiveCommunicator{}, phase, owner);
 }
 
 #if FE_HAS_MPI

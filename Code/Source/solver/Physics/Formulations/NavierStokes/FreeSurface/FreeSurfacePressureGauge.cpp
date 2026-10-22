@@ -7,7 +7,6 @@
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfacePressureGauge.h"
 
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceCollectives.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactCertificate.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceQueries.h"
@@ -39,6 +38,7 @@
 #include "FE/Systems/ALEBinding.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormsInstaller.h"
+#include "FE/Systems/SystemCollectives.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
@@ -146,7 +146,8 @@ embeddedFreeSurfaceMeasureEvidence(
         int communicator_size = 1;
         MPI_Comm_size(communicator, &communicator_size);
         if (communicator_size > 1) {
-            logRankLocalCollectiveFailure(
+            FE::systems::logRankLocalPhaseFailure(
+                "IncompressibleNavierStokesVMSModule",
                 "embedded_free_surface_measure_preflight",
                 local_preflight_exception);
             const int local_ok =
@@ -364,11 +365,12 @@ void anchorPressureOnFreeSurface(
             .callback =
                 [&system, pressure_anchor_measure_guard](
                     const FE::assembly::CutIntegrationContext* context) {
-                    if (!coordinateCutContextCallbackLocalPhase(
+                    if (!FE::systems::agreeOnLocalPhase(
                             system,
                             std::exception_ptr{},
                             context != nullptr,
-                            "cut_volume_pressure_anchor_context")) {
+                            "cut_volume_pressure_anchor_context",
+                            "IncompressibleNavierStokesVMSModule")) {
                         // Use the same null-candidate diagnostic on every
                         // rank without letting a rank-local non-null
                         // candidate enter the measure reductions.

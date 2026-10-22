@@ -7,7 +7,6 @@
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceDiagnosticOperators.h"
 
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceCollectives.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactCertificate.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergy.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceFittedALE.h"

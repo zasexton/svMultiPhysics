@@ -7,7 +7,6 @@
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactCertificate.h"
 
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceCollectives.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceQueries.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceSemiImplicitSurfaceTension.h"
@@ -38,6 +37,7 @@
 #include "FE/Systems/ALEBinding.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormsInstaller.h"
+#include "FE/Systems/SystemCollectives.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
@@ -534,11 +534,12 @@ void validateUnfittedContactWallNormal(
     } catch (...) {
         local_exception = std::current_exception();
     }
-    return coordinateCutContextCallbackLocalPhase(
+    return FE::systems::agreeOnLocalPhase(
         system,
         local_exception,
         local_followup_available,
-        phase);
+        phase,
+        "IncompressibleNavierStokesVMSModule");
 }
 
 [[nodiscard]] int axisAlignedWallNormalAxis(

@@ -17,6 +17,7 @@
 #include <exception>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -193,6 +194,41 @@ TEST(SystemCollectivesMPI, SizeSumAndPreparationPhaseAgreeOnEveryRank)
             EXPECT_EQ(std::string(error.what()),
                       "[svMultiPhysics::Application] Another active FE communicator rank "
                       "failed local preparation for collective phase 'p2'.");
+        }
+    }
+}
+
+TEST(SystemCollectivesMPI, LocalPhaseOutcomeIsAgreedOnEveryRank)
+{
+    const auto comm = world();
+    const int rank = worldRank();
+    const int size = worldSize();
+    const std::string_view owner = "UnitOwner";
+
+    EXPECT_TRUE(systems::agreeOnLocalPhase(nullptr, true, comm, "all", owner));
+    EXPECT_FALSE(systems::agreeOnLocalPhase(nullptr, rank != size - 1, comm, "one_unavailable", owner));
+    EXPECT_FALSE(systems::agreeOnLocalPhase(nullptr, false, systems::CollectiveCommunicator{}, "single", owner));
+    EXPECT_THROW((void)systems::agreeOnLocalPhase(
+                     std::make_exception_ptr(std::invalid_argument("local")), true,
+                     systems::CollectiveCommunicator{}, "single", owner),
+                 std::invalid_argument);
+    if (size < 2) {
+        GTEST_SKIP() << "needs at least two ranks";
+    }
+    std::exception_ptr local_failure;
+    if (rank == 0) {
+        local_failure = std::make_exception_ptr(std::invalid_argument("local"));
+    }
+    if (rank == 0) {
+        EXPECT_THROW((void)systems::agreeOnLocalPhase(local_failure, true, comm, "p3", owner),
+                     std::invalid_argument);
+    } else {
+        try {
+            (void)systems::agreeOnLocalPhase(local_failure, true, comm, "p3", owner);
+            ADD_FAILURE() << "expected a remote-failure exception";
+        } catch (const std::runtime_error& error) {
+            EXPECT_EQ(std::string(error.what()),
+                      "UnitOwner: another communicator rank rejected cut-context callback phase 'p3'");
         }
     }
 }
