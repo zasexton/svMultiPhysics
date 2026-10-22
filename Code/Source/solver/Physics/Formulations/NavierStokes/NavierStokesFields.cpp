@@ -239,6 +239,49 @@ FE::constraints::VertexIdMode nodePressureIdMode(
     return mode;
 }
 
+NavierStokesFieldIds registerNavierStokesFields(
+    FE::systems::FESystem& system,
+    const IncompressibleNavierStokesVMSOptions& options,
+    NavierStokesPreflight& preflight)
+{
+    auto& u_spec = preflight.u_spec;
+    auto& p_spec = preflight.p_spec;
+    auto& body_force_spec = preflight.body_force_spec;
+    auto& semi_implicit_reference_spec = preflight.semi_implicit_reference_spec;
+
+    const FE::FieldId u_id = ensureCompatibleUnknownField(
+        system,
+        std::move(u_spec),
+        "IncompressibleNavierStokesVMSModule::registerOn velocity");
+
+    const FE::FieldId p_id = ensureCompatibleUnknownField(
+        system,
+        std::move(p_spec),
+        "IncompressibleNavierStokesVMSModule::registerOn pressure");
+
+    FE::FieldId body_force_field_id = FE::INVALID_FIELD_ID;
+    if (body_force_spec.has_value()) {
+        body_force_field_id = ensureCompatiblePrescribedField(
+            system,
+            std::move(*body_force_spec),
+            options.auto_register_body_force_field,
+            "IncompressibleNavierStokesVMSModule::registerOn momentum source");
+    }
+    if (semi_implicit_reference_spec.has_value()) {
+        (void)ensureCompatiblePrescribedField(
+            system,
+            std::move(*semi_implicit_reference_spec),
+            /*auto_register=*/true,
+            "IncompressibleNavierStokesVMSModule::registerOn semi-implicit reference velocity");
+    }
+
+    return NavierStokesFieldIds{
+        .velocity = u_id,
+        .pressure = p_id,
+        .body_force = body_force_field_id,
+    };
+}
+
 } // namespace navier_stokes
 } // namespace formulations
 } // namespace Physics

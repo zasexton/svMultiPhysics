@@ -20,6 +20,7 @@
  */
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
+#include "Physics/Formulations/NavierStokes/NavierStokesPreflight.h"
 
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Constraints/ConstraintPlan.h"
@@ -85,6 +86,20 @@ void requireDistinctFieldNames(
     const IncompressibleNavierStokesVMSOptions& options);
 [[nodiscard]] FE::constraints::VertexIdMode nodePressureIdMode(
     const IncompressibleNavierStokesVMSOptions& options);
+
+struct NavierStokesFieldIds {
+    FE::FieldId velocity{FE::INVALID_FIELD_ID};
+    FE::FieldId pressure{FE::INVALID_FIELD_ID};
+    FE::FieldId body_force{FE::INVALID_FIELD_ID};
+};
+
+/// Registers (or reuses) u and p, then the body-force data and the
+/// semi-implicit reference velocity when requested: this order is part of
+/// the DOF layout.
+[[nodiscard]] NavierStokesFieldIds registerNavierStokesFields(
+    FE::systems::FESystem& system,
+    const IncompressibleNavierStokesVMSOptions& options,
+    NavierStokesPreflight& preflight);
 
 } // namespace navier_stokes
 } // namespace formulations
