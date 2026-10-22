@@ -23,6 +23,7 @@
 #include "LevelSet/LevelSetCutVolumeMeasures.h"
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
 #include "LevelSet/LevelSetMaintenanceSubstage.h"
+#include "LevelSet/Maintenance/LevelSetMaintenanceConfiguration.h"
 #include "LevelSet/LevelSetKinematicReconciliation.h"
 #include "LevelSet/LevelSetOptions.h"
 #include "LevelSet/LevelSetRestart.h"

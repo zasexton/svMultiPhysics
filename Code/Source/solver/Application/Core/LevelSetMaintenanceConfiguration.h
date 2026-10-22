@@ -4,6 +4,7 @@
 #include "Application/Core/ResolvedMovingDomainConfiguration.h"
 #include "FE/LevelSet/LevelSetCurvatureProjection.h"
 #include "FE/LevelSet/LevelSetOptions.h"
+#include "FE/LevelSet/Maintenance/LevelSetMaintenanceConfiguration.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/StaticCapillaryEquilibrium.h"
 
 #include <memory>
@@ -14,26 +15,17 @@
 
 namespace application::core {
 
-struct ResolvedLevelSetMaintenanceCompatibilityConfiguration {
-  struct OpenBoundary {
-    std::string face_name{};
-    bool inflow{false};
-    std::optional<svmp::FE::Real> literal_inflow_value{};
-  };
-
+// The FE configuration of a maintained level-set field
+// (FE/LevelSet/Maintenance/LevelSetMaintenanceConfiguration.h), resolved from
+// the legacy equation input, with the resolved installation it came from,
+// the static-capillary initialization (a Navier-Stokes free-surface option)
+// and the input provenance.
+struct ResolvedLevelSetMaintenanceCompatibilityConfiguration
+    : svmp::FE::level_set::LevelSetMaintenanceConfiguration {
   ResolvedLevelSetEquationHandle installation{};
-  svmp::FE::level_set::LevelSetTransportOptions transport{};
-  double isovalue{0.0};
-  std::vector<OpenBoundary> open_boundaries{};
-  std::optional<ActiveCutVolumeRequest> volume_cut_request{};
   bool static_capillary_equilibrium_enabled{false};
   svmp::Physics::formulations::navier_stokes::static_capillary::LevelSetStaticCapillaryEquilibriumOptions
       static_capillary_equilibrium{};
-  bool curvature_projection_enabled{false};
-  std::string curvature_field_name{};
-  int curvature_projection_cadence_steps{1};
-  svmp::FE::level_set::LevelSetCurvatureProjectionOptions
-      curvature_projection{};
   std::vector<LevelSetInputObservation> input_observations{};
 };
 

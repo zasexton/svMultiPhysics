@@ -966,6 +966,7 @@ set(FE_LEVELSET_HEADERS
     LevelSet/LevelSetInterfaceLifecycle.h
     LevelSet/LevelSetMaintenanceSchedule.h
     LevelSet/LevelSetMaintenanceSubstage.h
+    LevelSet/Maintenance/LevelSetMaintenanceConfiguration.h
     LevelSet/LevelSetImplicitCutQuadratureBackend.h
     LevelSet/LevelSetVolume.h
     LevelSet/LevelSetKinematicReconciliation.h

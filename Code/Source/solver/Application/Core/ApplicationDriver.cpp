@@ -33,6 +33,7 @@
 #include "FE/LevelSet/LevelSetConservativePhaseState.h"
 #include "FE/LevelSet/LevelSetConservativePhaseWorkflow.h"
 #include "FE/LevelSet/LevelSetMaintenanceSchedule.h"
+#include "FE/LevelSet/Maintenance/LevelSetMaintenanceConfiguration.h"
 #include "FE/LevelSet/LevelSetImplicitCutQuadratureBackend.h"
 #include "FE/LevelSet/LevelSetInterfaceLifecycle.h"
 #include "FE/LevelSet/LevelSetKinematicReconciliation.h"
@@ -1283,23 +1284,18 @@ void applyMonolithicEquationNewtonControls(
   }
 }
 
-struct LevelSetMaintenanceRuntimeState {
+// The FE run state of the field (the redistancing trigger), with the
+// static-capillary initialization state and the conservative-phase graph.
+struct LevelSetMaintenanceRuntimeState
+    : svmp::FE::level_set::LevelSetMaintenanceRuntime {
   bool static_capillary_equilibrium_initialized{false};
   std::optional<svmp::FE::Real> measured_static_capillary_target{};
-  // Interface-preserving redistancing trigger: interface displacement bound
-  // accumulated since the last redistancing, and the number of calls.
-  svmp::FE::Real redistancing_accumulated_displacement{0.0};
-  std::size_t redistancing_calls{0};
   bool conservative_phase_initialized{false};
   std::optional<svmp::FE::level_set::LevelSetP1PhaseTransportGraph>
       conservative_phase_graph{};
 };
 
-struct LevelSetMaintenanceDeclarationBindings {
-  std::optional<bool> negative_liquid_side{};
-  std::optional<std::vector<
-      svmp::FE::level_set::LevelSetKinematicAreaGradientYoungWall>> young_walls{};
-};
+using svmp::FE::level_set::LevelSetMaintenanceDeclarationBindings;
 
 struct LevelSetMaintenanceRequest {
   explicit LevelSetMaintenanceRequest(
