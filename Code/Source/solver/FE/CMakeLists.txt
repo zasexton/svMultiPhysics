@@ -1071,6 +1071,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/FormsInstaller.h
     Systems/FormulationBuilder.h
     Systems/FreeSurfaceFunctionalRounding.h
+    Systems/FreeSurfaceRecordTypes.h
     Systems/BoundedUpdatePolicy.h
     Systems/BoundaryDistanceService.h
     Interfaces/ContactLineGeometryCertificate.h
