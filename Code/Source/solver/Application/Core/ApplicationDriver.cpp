@@ -10725,6 +10725,7 @@ reinstallRetainedActiveCutContextForRestoredState(
 // The geometry transaction of the driver: the FE transaction with the
 // driver's constructor and its refresh and producer-linkage spellings, which
 // parse the cut-volume requests from the parameters at every call as before.
+// It is also the geometry transaction of the conservative-phase workflow.
 class LevelSetMaintenanceGeometryTransaction final
     : public svmp::FE::level_set::LevelSetGeometryTransaction {
 public:
@@ -11251,66 +11252,6 @@ buildCurrentTwoFluidMomentumReconciliations(
       comm);
 }
 
-/// LevelSetMaintenanceGeometryTransaction behind the workflow's transaction
-/// interface.  refresh() passes the run's parameters, as every caller of
-/// LevelSetMaintenanceGeometryTransaction::refresh did.
-class ConservativePhaseDriverGeometryTransaction final
-    : public svmp::FE::level_set::ConservativePhaseGeometryTransaction {
-public:
-  /// Begins a transaction and owns it.
-  ConservativePhaseDriverGeometryTransaction(
-      application::core::SimulationComponents& sim,
-      const Parameters& params,
-      svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle,
-      ActiveCutContextRefreshCache& refresh_cache,
-      const std::vector<ActiveCutVolumeRequest>& requests)
-      : params_(params),
-        owned_(std::in_place, sim, lifecycle, refresh_cache, requests),
-        transaction_(&*owned_)
-  {
-  }
-
-  /// Refers to a transaction that the caller owns.
-  ConservativePhaseDriverGeometryTransaction(
-      const Parameters& params,
-      LevelSetMaintenanceGeometryTransaction& transaction) noexcept
-      : params_(params), transaction_(&transaction)
-  {
-  }
-
-  [[nodiscard]] svmp::FE::level_set::ConservativePhaseGeometryRefresh refresh(
-      std::span<const svmp::FE::Real> candidate) override
-  {
-    return svmp::FE::level_set::ConservativePhaseGeometryRefresh{
-        .refreshed = transaction_->refresh(params_, candidate).refreshed,
-    };
-  }
-
-  [[nodiscard]] bool active() const noexcept override
-  {
-    return transaction_->active();
-  }
-
-  [[nodiscard]] bool publicationStarted() const noexcept override
-  {
-    return transaction_->publicationStarted();
-  }
-
-  void commit() override { transaction_->commit(); }
-
-  void rollback() override { transaction_->rollback(); }
-
-  [[nodiscard]] LevelSetMaintenanceGeometryTransaction& transaction() noexcept
-  {
-    return *transaction_;
-  }
-
-private:
-  const Parameters& params_;
-  std::optional<LevelSetMaintenanceGeometryTransaction> owned_{};
-  LevelSetMaintenanceGeometryTransaction* transaction_{nullptr};
-};
-
 /// The driver transaction behind a workflow transaction (null for null).
 LevelSetMaintenanceGeometryTransaction* driverGeometryTransaction(
     svmp::FE::level_set::ConservativePhaseGeometryTransaction* transaction)
@@ -11319,12 +11260,12 @@ LevelSetMaintenanceGeometryTransaction* driverGeometryTransaction(
     return nullptr;
   }
   auto* const driver_transaction =
-      dynamic_cast<ConservativePhaseDriverGeometryTransaction*>(transaction);
+      dynamic_cast<LevelSetMaintenanceGeometryTransaction*>(transaction);
   if (driver_transaction == nullptr) {
     throw std::logic_error(
         "[svMultiPhysics::Application] Conservative phase geometry transaction was not created by the Application driver.");
   }
-  return &driver_transaction->transaction();
+  return driver_transaction;
 }
 
 /// The workflow host of @p sim: system, history, vertex-field evaluation on
@@ -11583,14 +11524,15 @@ reconcileConservativePhaseGeometry(
 {
   ConservativePhaseRequestViews views(
       std::span<const LevelSetMaintenanceRequest>(&request, 1u));
-  ConservativePhaseDriverGeometryTransaction geometry_transaction(
-      params, transaction);
+  // The transaction refreshes with the cut-volume requests of its begin,
+  // which every caller parses from these parameters.
+  (void)params;
   return svmp::FE::level_set::reconcileConservativePhaseGeometry(
       conservativePhaseWorkflowHost(sim),
       views.front(),
       target_liquid_phase_mass,
       candidate,
-      geometry_transaction,
+      transaction,
       contact_protected_nodes);
 }
 
@@ -11614,8 +11556,8 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
   host.begin_geometry_transaction =
       [&]() -> std::unique_ptr<
                 svmp::FE::level_set::ConservativePhaseGeometryTransaction> {
-    return std::make_unique<ConservativePhaseDriverGeometryTransaction>(
-        sim, params, lifecycle, refresh_cache, active_cut_requests);
+    return std::make_unique<LevelSetMaintenanceGeometryTransaction>(
+        sim, lifecycle, refresh_cache, active_cut_requests);
   };
   svmp::FE::level_set::ConservativePhaseContactStageCallback
       contact_stage_callback;
@@ -13854,10 +13796,15 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
     newton_opts.jacobian_rebuild_period = std::atoi(jrp);
   }
 
+  // The cut geometry of the solve; the aliases keep its members' names.
+  auto cut_geometry =
+      std::make_shared<svmp::FE::level_set::LevelSetGeometryService>(
+          levelSetGeometryHost(sim), steady_active_cut_requests);
   auto cut_lifecycle =
-      std::make_shared<svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle>();
-  auto cut_refresh_cache =
-      std::make_shared<ActiveCutContextRefreshCache>();
+      std::shared_ptr<svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle>(
+          cut_geometry, &cut_geometry->lifecycle());
+  auto cut_refresh_cache = std::shared_ptr<ActiveCutContextRefreshCache>(
+      cut_geometry, &cut_geometry->refreshCache());
   const auto maintenance_active_requests = activeCutVolumeRequests(params);
   const auto maintenance_configurations = resolveLevelSetMaintenanceConfigurations(
       sim.resolved_level_set_equations_by_input_index,
@@ -13908,7 +13855,8 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       !use_steady_external_state_fixed_point;
   auto curvature_projection_cache =
       std::make_shared<CurvatureProjectionCache>();
-  auto cut_topology_key = std::make_shared<std::optional<std::uint64_t>>();
+  auto cut_topology_key = std::shared_ptr<std::optional<std::uint64_t>>(
+      cut_geometry, &cut_geometry->lastLoggedTopologyKey());
   applyJacobianCheckGeometryProvenance(
       newton_opts,
       steady_active_cut_requests,
@@ -13920,7 +13868,7 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   using StateSyncPoint =
       svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
   newton_opts.synchronize_state =
-      [&, cut_lifecycle, cut_refresh_cache, cut_topology_key,
+      [&, cut_geometry, cut_refresh_cache, cut_topology_key,
        curvature_projection_cache](
           const svmp::FE::systems::SystemStateView& state,
           StateSyncPoint point) {
@@ -13937,9 +13885,8 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
           cut_refresh_cache->last_vector_signature.reset();
           curvature_projection_cache->entries.clear();
         }
-        const auto report = refreshActiveCutIntegrationContextCached(
-            sim, params, state, *cut_lifecycle, *cut_refresh_cache,
-            stateSyncPointName(point));
+        const auto report =
+            cut_geometry->refreshCached(state, stateSyncPointName(point));
         logCutTopologyChange(report, point, *cut_topology_key, "steady");
         const bool outer_constraint_construction_pass =
             use_steady_external_state_fixed_point &&
@@ -13984,13 +13931,7 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
 
   initializeLevelSetMaintenanceTargets(sim, level_set_maintenance);
   auto steady_initial_cut_report =
-      refreshActiveCutIntegrationContextCached(
-          sim,
-          params,
-          sim.time_history->u(),
-          *cut_lifecycle,
-          *cut_refresh_cache,
-          "steady_initial");
+      cut_geometry->refreshCached(sim.time_history->u(), "steady_initial");
   if (initializeDiscreteStaticCapillaryEquilibrium(
           sim,
           params,
@@ -13998,13 +13939,7 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
           *cut_lifecycle,
           *cut_refresh_cache)) {
     steady_initial_cut_report =
-        refreshActiveCutIntegrationContextCached(
-            sim,
-            params,
-            sim.time_history->u(),
-            *cut_lifecycle,
-            *cut_refresh_cache,
-            "steady_static_capillary_accepted");
+        cut_geometry->refreshCached(sim.time_history->u(), "steady_static_capillary_accepted");
   }
   initializeConservativePhaseStates(sim, level_set_maintenance);
   (void)projectLevelSetCurvatureFieldsFromState(
@@ -14060,13 +13995,7 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
 
   sim.fe_system->commitTimeStep();
   const auto steady_accepted_cut_report =
-      refreshActiveCutIntegrationContextCached(
-          sim,
-          params,
-          sim.time_history->u(),
-          *cut_lifecycle,
-          *cut_refresh_cache,
-          "steady_accepted");
+      cut_geometry->refreshCached(sim.time_history->u(), "steady_accepted");
   (void)projectLevelSetCurvatureFieldsFromState(
       sim,
       stateViewForHistory(*sim.time_history),
@@ -14642,31 +14571,30 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           opts.newton.accepted_state_sync_invalidates_residual);
   auto curvature_projection_cache =
       std::make_shared<CurvatureProjectionCache>();
+  // The cut geometry of the run; the aliases keep its members' names.
+  auto cut_geometry =
+      std::make_shared<svmp::FE::level_set::LevelSetGeometryService>(
+          levelSetGeometryHost(sim), transient_active_cut_requests);
   auto cut_lifecycle =
-      std::make_shared<svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle>();
-  auto cut_refresh_cache =
-      std::make_shared<ActiveCutContextRefreshCache>();
+      std::shared_ptr<svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle>(
+          cut_geometry, &cut_geometry->lifecycle());
+  auto cut_refresh_cache = std::shared_ptr<ActiveCutContextRefreshCache>(
+      cut_geometry, &cut_geometry->refreshCache());
   // Seed wet-volume drift diagnostics from the actual initialized level-set
   // state.  Waiting until the first accepted step silently made that state
   // the reference and hid all first-step volume loss.
   std::map<std::string, svmp::FE::Real> initial_wet_volume_by_key;
   initializeLevelSetMaintenanceTargets(sim, level_set_maintenance);
-  auto initial_cut_report = refreshActiveCutIntegrationContextCached(
-      sim, params, sim.time_history->u(), *cut_lifecycle, *cut_refresh_cache,
-      "initial");
+  auto initial_cut_report =
+      cut_geometry->refreshCached(sim.time_history->u(), "initial");
   if (initializeDiscreteStaticCapillaryEquilibrium(
           sim,
           params,
           level_set_maintenance,
           *cut_lifecycle,
           *cut_refresh_cache)) {
-    initial_cut_report = refreshActiveCutIntegrationContextCached(
-        sim,
-        params,
-        sim.time_history->u(),
-        *cut_lifecycle,
-        *cut_refresh_cache,
-        "static_capillary_accepted");
+    initial_cut_report = cut_geometry->refreshCached(
+        sim.time_history->u(), "static_capillary_accepted");
   }
   initializeConservativePhaseStates(sim, level_set_maintenance);
   if (parseBoolEnv("SVMP_CUT_RULE_DUMP", false)) {
@@ -14864,14 +14792,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   const bool track_transient_cut_topology =
       !transient_active_cut_requests.empty();
   auto cut_topology_attempt_tracker =
-      std::make_shared<TransientCutTopologyAttemptTracker>();
+      std::shared_ptr<TransientCutTopologyAttemptTracker>(
+          cut_geometry, &cut_geometry->topologyTracker());
   if (track_transient_cut_topology) {
-    cut_refresh_cache->observer =
-        [cut_topology_attempt_tracker](
-            const ActiveCutContextRefreshReport& report,
-            std::string_view provenance) {
-          cut_topology_attempt_tracker->observe(report, provenance);
-        };
+    cut_geometry->trackTopology();
   }
   const auto invalidate_transient_cut_topology_dependent_state = [&] {
     cut_refresh_cache->invalidateGeneratedState();
@@ -14970,7 +14894,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               << " time=" << h.time() << " dt=" << h.dt() << std::endl;
     logCutGeometryMemory("step_start");
   };
-  auto cut_topology_key = std::make_shared<std::optional<std::uint64_t>>();
+  auto cut_topology_key = std::shared_ptr<std::optional<std::uint64_t>>(
+      cut_geometry, &cut_geometry->lastLoggedTopologyKey());
   applyJacobianCheckGeometryProvenance(
       opts.newton,
       transient_active_cut_requests,
@@ -14982,7 +14907,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   using TransientStateSyncPoint =
       svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
   opts.newton.synchronize_state =
-      [&, cut_lifecycle, cut_refresh_cache, cut_topology_key,
+      [&, cut_geometry, cut_refresh_cache, cut_topology_key,
        curvature_projection_cache](
           const svmp::FE::systems::SystemStateView& state,
           TransientStateSyncPoint point) {
@@ -15055,20 +14980,15 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         }
         std::optional<ActiveCutContextRefreshReport> restored_report;
         if (restoring_generated_state) {
-          restored_report =
-              reinstallRetainedActiveCutContextForRestoredState(
-                  sim, params, state, *cut_refresh_cache,
-                  stateSyncPointName(point));
+          restored_report = cut_geometry->reinstallForRestoredState(
+              state, stateSyncPointName(point));
         }
         const auto report =
             restored_report.has_value()
                 ? *restored_report
-                : refreshActiveCutIntegrationContextCached(
-                      sim, params, state, *cut_lifecycle,
-                      *cut_refresh_cache, stateSyncPointName(point));
-        retainActiveCutContextAtAttemptEntry(
-            sim,
-            *cut_refresh_cache,
+                : cut_geometry->refreshCached(
+                      state, stateSyncPointName(point));
+        cut_geometry->retainAtAttemptEntry(
             point == TransientStateSyncPoint::OuterFixedPointState,
             point ==
                 TransientStateSyncPoint::ProjectedOuterFixedPointState);
@@ -15178,13 +15098,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       [&](svmp::FE::timestepping::TimeHistory& h, double /*solve_time*/, double /*dt*/) {
         armActiveCutRestoreRetention(*cut_refresh_cache);
         const auto before_solve_cut_report =
-            refreshActiveCutIntegrationContextCached(
-                sim,
-                params,
-                h.u(),
-                *cut_lifecycle,
-                *cut_refresh_cache,
-                "before_physics_solve");
+            cut_geometry->refreshCached(h.u(), "before_physics_solve");
         if (track_transient_cut_topology) {
           cut_topology_attempt_tracker->requireAcceptedBaseline();
         }
@@ -15686,9 +15600,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                 if (!pending_phase_candidate.geometry_transaction) {
                   pending_phase_candidate.geometry_transaction =
                       std::make_unique<
-                          ConservativePhaseDriverGeometryTransaction>(
+                          LevelSetMaintenanceGeometryTransaction>(
                           sim,
-                          params,
                           *cut_lifecycle,
                           *cut_refresh_cache,
                           transient_active_cut_requests);
@@ -15896,14 +15809,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           // per-step-only generated state can skip every within-solve endpoint
           // synchronization, so the authoritative gate must observe h.u()
           // itself immediately before deciding.
-          const auto final_cut_report =
-              refreshActiveCutIntegrationContextCached(
-                  sim,
-                  params,
-                  h.u(),
-                  *cut_lifecycle,
-                  *cut_refresh_cache,
-                  "final_candidate_topology_gate");
+          const auto final_cut_report = cut_geometry->refreshCached(
+              h.u(), "final_candidate_topology_gate");
           two_fluid_stage.bindCandidateNumerics(newton_report);
           if (!track_transient_cut_topology) {
             return std::nullopt;

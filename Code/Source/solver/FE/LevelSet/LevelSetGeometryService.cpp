@@ -4337,7 +4337,8 @@ LevelSetGeometryTransaction::LevelSetGeometryTransaction(
     std::span<const svmp::FE::FieldId> prescribed_fields)
     : sim_(sim),
       lifecycle_(lifecycle),
-      refresh_cache_(refresh_cache)
+      refresh_cache_(refresh_cache),
+      requests_(requests)
 {
   if (!sim_.fe_system) {
     throw std::runtime_error(
@@ -4480,6 +4481,27 @@ ActiveCutContextRefreshReport LevelSetGeometryTransaction::refresh(
       refresh_cache_,
       "accepted_step_maintenance_candidate",
       "staged_fe_solution");
+}
+
+ActiveCutContextRefreshReport LevelSetGeometryTransaction::refreshCandidate(
+    std::span<const svmp::FE::Real> candidate,
+    bool force_rebuild)
+{
+  return refresh(requests_, candidate, force_rebuild);
+}
+
+ConservativePhaseGeometryRefresh LevelSetGeometryTransaction::refresh(
+    std::span<const svmp::FE::Real> candidate)
+{
+  return ConservativePhaseGeometryRefresh{
+      .refreshed = refreshCandidate(candidate).refreshed,
+  };
+}
+
+const std::vector<ActiveCutVolumeRequest>&
+LevelSetGeometryTransaction::requests() const noexcept
+{
+  return requests_;
 }
 
 bool LevelSetGeometryTransaction::active() const noexcept
@@ -4710,6 +4732,71 @@ void LevelSetGeometryTransaction::rollback()
   if (first_failure) {
     std::rethrow_exception(first_failure);
   }
+}
+
+// ---------------------------------------------------------------------------
+// LevelSetGeometryService
+// ---------------------------------------------------------------------------
+
+LevelSetGeometryService::LevelSetGeometryService(
+    LevelSetGeometryHost host,
+    std::vector<ActiveCutVolumeRequest> requests)
+    : host_(host),
+      requests_(std::move(requests))
+{
+}
+
+void LevelSetGeometryService::trackTopology()
+{
+  refresh_cache_.observer =
+      [this](const ActiveCutContextRefreshReport& report,
+             std::string_view provenance) {
+        topology_tracker_.observe(report, provenance);
+      };
+}
+
+ActiveCutContextRefreshReport LevelSetGeometryService::refreshCached(
+    svmp::FE::backends::GenericVector& solution,
+    const char* provenance)
+{
+  return refreshActiveCutIntegrationContextCached(
+      host_, requests_, solution, lifecycle_, refresh_cache_, provenance);
+}
+
+ActiveCutContextRefreshReport LevelSetGeometryService::refreshCached(
+    const svmp::FE::systems::SystemStateView& state,
+    const char* provenance)
+{
+  return refreshActiveCutIntegrationContextCached(
+      host_, requests_, state, lifecycle_, refresh_cache_, provenance);
+}
+
+std::optional<ActiveCutContextRefreshReport>
+LevelSetGeometryService::reinstallForRestoredState(
+    const svmp::FE::systems::SystemStateView& state,
+    const char* provenance)
+{
+  return reinstallRetainedActiveCutContextForRestoredState(
+      host_, requests_, state, refresh_cache_, provenance);
+}
+
+void LevelSetGeometryService::retainAtAttemptEntry(
+    bool outer_fixed_point_state,
+    bool projected_outer_fixed_point_state)
+{
+  retainActiveCutContextAtAttemptEntry(
+      host_,
+      refresh_cache_,
+      outer_fixed_point_state,
+      projected_outer_fixed_point_state);
+}
+
+std::unique_ptr<LevelSetGeometryTransaction>
+LevelSetGeometryService::beginTransaction(
+    std::span<const svmp::FE::FieldId> prescribed_fields)
+{
+  return std::make_unique<LevelSetGeometryTransaction>(
+      host_, lifecycle_, refresh_cache_, requests_, prescribed_fields);
 }
 
 } // namespace level_set

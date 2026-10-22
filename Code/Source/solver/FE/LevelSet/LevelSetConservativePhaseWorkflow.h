@@ -126,9 +126,8 @@ struct ConservativePhaseGeometryRefresh {
  * candidate FE-ordered solution; rollback() restores the geometry, the
  * level-set mesh fields and the refresh cache of the begin; commit()
  * publishes the current geometry.  Destroying an active transaction rolls it
- * back.  The host supplies it; today it is the Application's level-set
- * maintenance geometry transaction (replaced by LevelSetGeometryService
- * transactions, S8).
+ * back.  The host supplies it: LevelSetGeometryTransaction
+ * (LevelSetGeometryService.h) implements it.
  */
 class ConservativePhaseGeometryTransaction {
 public:
@@ -174,8 +173,9 @@ struct ConservativePhaseWorkflowHost {
     /// The solution history of the run, for initializeConservativePhaseStates.
     timestepping::TimeHistory* time_history{nullptr};
 
-    /// Begins a transaction over the cut geometry (S8:
-    /// LevelSetGeometryService transactions).
+    /// Begins a transaction over the cut geometry
+    /// (LevelSetGeometryTransaction, for example from
+    /// LevelSetGeometryService::beginTransaction).
     std::function<std::unique_ptr<ConservativePhaseGeometryTransaction>()>
         begin_geometry_transaction{};
 

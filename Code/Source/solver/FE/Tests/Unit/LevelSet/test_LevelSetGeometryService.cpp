@@ -14,8 +14,10 @@
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "LevelSet/LevelSetGeometryService.h"
 #include "Systems/SystemCollectives.h"
+#include "Systems/SystemState.h"
 
 #include <map>
+#include <optional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -126,6 +128,35 @@ TEST(LevelSetGeometryService, ActiveSideNames)
                "LevelSetNegative");
   EXPECT_STREQ(ls::activeSideName(ls::LevelSetActiveSide::Positive),
                "LevelSetPositive");
+}
+
+TEST(LevelSetGeometryService, ServiceKeepsTheRunRequestsAndTracksTopology)
+{
+  HostStorage storage;
+  std::vector<ls::ActiveCutVolumeRequest> requests(1u);
+  requests.front().domain_id = "service_test";
+  ls::LevelSetGeometryService service(storage.host(), requests);
+  ASSERT_EQ(service.requests().size(), 1u);
+  EXPECT_EQ(service.requests().front().domain_id, "service_test");
+  EXPECT_EQ(service.host().fe_system, nullptr);
+
+  // Without an FE system a state-view refresh does nothing and a
+  // transaction cannot begin.
+  svmp::FE::systems::SystemStateView state;
+  EXPECT_FALSE(service.refreshCached(state, "test").refreshed);
+  EXPECT_THROW((void)service.beginTransaction(), std::runtime_error);
+
+  // The attempt tracker observes every refresh reported through the cache.
+  service.trackTopology();
+  service.topologyTracker().beginAttempt();
+  ls::ActiveCutContextRefreshReport report;
+  report.refreshed = true;
+  report.topology_key = 5u;
+  ls::observeActiveCutContextRefresh(
+      service.refreshCache(), report, "before_physics_solve");
+  EXPECT_EQ(service.topologyTracker().acceptedTopologyKey(),
+            std::optional<std::uint64_t>(5u));
+  EXPECT_FALSE(service.lastLoggedTopologyKey().has_value());
 }
 
 #endif // SVMP_FE_WITH_MESH

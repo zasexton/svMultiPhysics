@@ -20,7 +20,10 @@
  * or reinstalls an installed context when the generating input is provably
  * unchanged; the restore retention reinstalls the geometry of an attempt's
  * entry state; LevelSetGeometryTransaction checkpoints and rolls back the
- * geometry, the level-set mesh fields and the cache.
+ * geometry, the level-set mesh fields and the cache.  LevelSetGeometryService
+ * holds these pieces for one run: the resolved requests, the generated
+ * interface lifecycle, the refresh cache and the cut-topology attempt
+ * protocol.
  *
  * Moved from Application/Core/ApplicationDriver.cpp with bodies, messages,
  * environment names and collective order unchanged.  The Application
@@ -31,6 +34,7 @@
  */
 
 #include "Core/Types.h"
+#include "LevelSet/LevelSetConservativePhaseWorkflow.h"
 #include "LevelSet/LevelSetCutTopology.h"
 #include "LevelSet/LevelSetGeometry.h"
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
@@ -455,9 +459,13 @@ reinstallRetainedActiveCutContextForRestoredState(
  * transactions.  While active, refresh() regenerates the geometry of a
  * candidate solution through the cache; rollback() restores everything of
  * the begin; commit() publishes the current geometry.  Destroying an active
- * transaction rolls it back.  Every step is collective.
+ * transaction rolls it back.  Every step is collective.  It is the geometry
+ * transaction of the conservative-phase workflow
+ * (ConservativePhaseGeometryTransaction); its one-argument refresh uses the
+ * requests of the begin.
  */
-class LevelSetGeometryTransaction {
+class LevelSetGeometryTransaction
+    : public ConservativePhaseGeometryTransaction {
 public:
   LevelSetGeometryTransaction(
       LevelSetGeometryHost sim,
@@ -469,7 +477,7 @@ public:
   LevelSetGeometryTransaction(const LevelSetGeometryTransaction&) = delete;
   LevelSetGeometryTransaction& operator=(const LevelSetGeometryTransaction&) = delete;
 
-  ~LevelSetGeometryTransaction();
+  ~LevelSetGeometryTransaction() override;
 
   /// Refreshes the cut geometry from @p candidate; @p force_rebuild drops
   /// the cached signatures first.
@@ -478,9 +486,22 @@ public:
       std::span<const svmp::FE::Real> candidate,
       bool force_rebuild = false);
 
-  [[nodiscard]] bool active() const noexcept;
+  /// refresh() with the requests of the begin.
+  [[nodiscard]] ActiveCutContextRefreshReport refreshCandidate(
+      std::span<const svmp::FE::Real> candidate,
+      bool force_rebuild = false);
 
-  [[nodiscard]] bool publicationStarted() const noexcept;
+  /// The conservative-phase workflow's refresh: refreshCandidate(candidate).
+  [[nodiscard]] ConservativePhaseGeometryRefresh refresh(
+      std::span<const svmp::FE::Real> candidate) override;
+
+  /// The requests of the begin.
+  [[nodiscard]] const std::vector<ActiveCutVolumeRequest>& requests()
+      const noexcept;
+
+  [[nodiscard]] bool active() const noexcept override;
+
+  [[nodiscard]] bool publicationStarted() const noexcept override;
 
   /// Whether the installed geometry was generated from @p candidate by the
   /// refresh that produced @p refresh_report.
@@ -489,13 +510,14 @@ public:
       std::span<const svmp::FE::Real> candidate,
       const ActiveCutContextRefreshReport& refresh_report) const;
 
-  void commit();
-  void rollback();
+  void commit() override;
+  void rollback() override;
 
 private:
   LevelSetGeometryHost sim_;
   svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle_;
   ActiveCutContextRefreshCache& refresh_cache_;
+  std::vector<ActiveCutVolumeRequest> requests_{};
   ActiveCutContextRefreshCache refresh_cache_backup_{};
   ActiveLevelSetMeshFieldCheckpoint mesh_field_checkpoint_{};
   PrescribedFieldCoefficientCheckpoint prescribed_field_checkpoint_{};
@@ -503,6 +525,94 @@ private:
   bool system_transaction_active_{false};
   bool publication_started_{false};
   bool active_{false};
+};
+
+// ---------------------------------------------------------------------------
+// The cut geometry of one run
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief The generated cut geometry of one run.
+ *
+ * Holds the host, the resolved cut-volume requests of the run (parsed once),
+ * the generated interface lifecycle, the refresh cache and the cut-topology
+ * attempt tracker, and refreshes, restores and checkpoints the geometry
+ * through the functions above with them.  Not copyable: the cache observer
+ * refers to the tracker.
+ */
+class LevelSetGeometryService {
+public:
+  LevelSetGeometryService(LevelSetGeometryHost host,
+                          std::vector<ActiveCutVolumeRequest> requests);
+
+  LevelSetGeometryService(const LevelSetGeometryService&) = delete;
+  LevelSetGeometryService& operator=(const LevelSetGeometryService&) = delete;
+
+  [[nodiscard]] const LevelSetGeometryHost& host() const noexcept
+  {
+    return host_;
+  }
+
+  [[nodiscard]] const std::vector<ActiveCutVolumeRequest>& requests()
+      const noexcept
+  {
+    return requests_;
+  }
+
+  [[nodiscard]] svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle&
+  lifecycle() noexcept
+  {
+    return lifecycle_;
+  }
+
+  [[nodiscard]] ActiveCutContextRefreshCache& refreshCache() noexcept
+  {
+    return refresh_cache_;
+  }
+
+  [[nodiscard]] TransientCutTopologyAttemptTracker& topologyTracker() noexcept
+  {
+    return topology_tracker_;
+  }
+
+  /// The topology key of the last logCutTopologyChange.
+  [[nodiscard]] std::optional<std::uint64_t>& lastLoggedTopologyKey() noexcept
+  {
+    return last_logged_topology_key_;
+  }
+
+  /// Every refresh through the cache is observed by the attempt tracker.
+  void trackTopology();
+
+  /// refreshActiveCutIntegrationContextCached with the run's requests.
+  ActiveCutContextRefreshReport refreshCached(
+      svmp::FE::backends::GenericVector& solution,
+      const char* provenance);
+  ActiveCutContextRefreshReport refreshCached(
+      const svmp::FE::systems::SystemStateView& state,
+      const char* provenance);
+
+  /// reinstallRetainedActiveCutContextForRestoredState with the run's
+  /// requests.
+  std::optional<ActiveCutContextRefreshReport> reinstallForRestoredState(
+      const svmp::FE::systems::SystemStateView& state,
+      const char* provenance);
+
+  /// retainActiveCutContextAtAttemptEntry.
+  void retainAtAttemptEntry(bool outer_fixed_point_state,
+                            bool projected_outer_fixed_point_state);
+
+  /// A geometry transaction over the run's requests.
+  [[nodiscard]] std::unique_ptr<LevelSetGeometryTransaction> beginTransaction(
+      std::span<const svmp::FE::FieldId> prescribed_fields = {});
+
+private:
+  LevelSetGeometryHost host_;
+  std::vector<ActiveCutVolumeRequest> requests_;
+  svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle_{};
+  ActiveCutContextRefreshCache refresh_cache_{};
+  TransientCutTopologyAttemptTracker topology_tracker_{};
+  std::optional<std::uint64_t> last_logged_topology_key_{};
 };
 
 } // namespace level_set

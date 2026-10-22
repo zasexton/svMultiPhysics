@@ -72,7 +72,7 @@ def test_application_driver_seeds_wet_volume_before_time_loop_callbacks():
         transient_setup,
     )
     initial_refresh = source.index(
-        "refreshActiveCutIntegrationContextCached(", baseline)
+        "cut_geometry->refreshCached(", baseline)
     initial_projection = source.index(
         "projectLevelSetCurvatureFieldsFromState(", initial_refresh)
     initial_diagnostic = source.index(
