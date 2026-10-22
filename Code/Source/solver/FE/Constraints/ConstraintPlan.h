@@ -56,6 +56,7 @@
 #include <functional>
 #include <initializer_list>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace svmp {
@@ -67,6 +68,7 @@ class FESystem;
 
 namespace level_set {
 class CutSide;
+class LevelSetGeometry;
 }
 
 namespace constraints {
@@ -128,6 +130,20 @@ public:
 
     /// PointLaw: ContactPointVelocityConstraint(velocity, law).
     ConstraintPlan& contactPointVelocity(FieldId velocity, ContactPointVelocityLaw law);
+
+    /**
+     * PointLaw: the contact-point velocity law where the interface of
+     * @p geometry meets the wall @p wall_marker (unit @p wall_normal out of
+     * the fluid): the law reads the level set of the geometry at its
+     * isovalue, and @p contact_speed maps cos(theta) of a contact cell to
+     * the outward wall-tangential contact-point speed.
+     */
+    ConstraintPlan& contactPointVelocity(FieldId velocity,
+                                         const level_set::LevelSetGeometry& geometry,
+                                         int wall_marker,
+                                         const std::array<Real, 3>& wall_normal,
+                                         std::function<Real(Real)> contact_speed,
+                                         std::string name);
 
     /// Registers the held declarations of every phase up to @p through, in
     /// phase and declaration order, and moves the plan to @p through.

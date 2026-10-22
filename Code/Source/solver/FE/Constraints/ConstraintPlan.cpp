@@ -148,6 +148,23 @@ ConstraintPlan& ConstraintPlan::contactPointVelocity(FieldId velocity, ContactPo
                    std::make_unique<ContactPointVelocityConstraint>(velocity, std::move(law)));
 }
 
+ConstraintPlan& ConstraintPlan::contactPointVelocity(FieldId velocity,
+                                                     const level_set::LevelSetGeometry& geometry,
+                                                     int wall_marker,
+                                                     const std::array<Real, 3>& wall_normal,
+                                                     std::function<Real(Real)> contact_speed,
+                                                     std::string name)
+{
+    ContactPointVelocityLaw law;
+    law.wall_boundary_markers = {wall_marker};
+    law.wall_normal = wall_normal;
+    law.level_set_field_name = system_->fieldRecord(geometry.levelSetField()).name;
+    law.isovalue = geometry.isovalue();
+    law.contact_speed = std::move(contact_speed);
+    law.name = std::move(name);
+    return contactPointVelocity(velocity, std::move(law));
+}
+
 ConstraintPlan& ConstraintPlan::commitThrough(ConstraintPhase through)
 {
     requireNotPassed(through, "commitThrough");

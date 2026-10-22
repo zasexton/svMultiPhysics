@@ -1497,6 +1497,15 @@ TEST(FormulationBuilder, ComposesOptionsInCallOrderAndInstallsGroups)
     EXPECT_TRUE(F.options().source_component_tag.empty());
     EXPECT_TRUE(F.options().extra_trial_fields.empty());
 
+    const auto line = F.registered(svmp::FE::forms::ContactLineDomain(41, 3));
+    EXPECT_EQ(line.marker(), 41);
+    EXPECT_TRUE(sys.isGeneratedEmbeddedInterfaceMarkerRegistered(41));
+    const auto wetted = F.registered(svmp::FE::forms::BoundaryDomain::generatedActiveSubset(3, 42));
+    EXPECT_EQ(wetted.generatedActiveBoundaryMarker(), 42);
+    EXPECT_TRUE(sys.isGeneratedEmbeddedInterfaceMarkerRegistered(42));
+    (void)F.registered(svmp::FE::forms::BoundaryDomain::fullPhysical(3));
+    EXPECT_FALSE(sys.isGeneratedEmbeddedInterfaceMarkerRegistered(3));
+
     const auto u = svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
     const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
     const auto residual = F.install({u_field}, (u * v).dx());

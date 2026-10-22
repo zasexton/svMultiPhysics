@@ -66,6 +66,18 @@ FormulationBuilder& FormulationBuilder::certifyGeneratedBoundaryNitscheTraces(
     return *this;
 }
 
+forms::ContactLineDomain FormulationBuilder::registered(forms::ContactLineDomain domain)
+{
+    system_->registerGeneratedEmbeddedInterfaceMarker(domain.marker());
+    return domain;
+}
+
+forms::BoundaryDomain FormulationBuilder::registered(forms::BoundaryDomain domain)
+{
+    system_->registerGeneratedEmbeddedInterfaceMarker(domain.generatedActiveBoundaryMarker());
+    return domain;
+}
+
 FormInstallOptions FormulationBuilder::groupOptions(const FormulationGroup& group) const
 {
     FormInstallOptions group_options = options_;

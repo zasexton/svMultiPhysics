@@ -203,5 +203,30 @@ TEST(ConstraintPlan, LevelSetDeclarationsBuildTheExistingConstraints)
     EXPECT_NE(lines[4].find("name='contact'"), std::string::npos);
 }
 
+TEST(ConstraintPlan, ContactPointVelocityFromAGeometryBuildsTheSameLaw)
+{
+    const auto speed = [](Real cos_d) { return Real{0.5} * (Real{0.25} - cos_d); };
+
+    PlanSystem explicit_law;
+    ContactPointVelocityLaw law;
+    law.wall_boundary_markers = {2};
+    law.wall_normal = {0.0, -1.0, 0.0};
+    law.level_set_field_name = "phi";
+    law.isovalue = 0.5;
+    law.contact_speed = speed;
+    law.name = "ren_e_contact_point:2";
+    ConstraintPlan(*explicit_law.system).contactPointVelocity(explicit_law.u, law).commit();
+
+    PlanSystem from_geometry;
+    const auto G = level_set::LevelSetGeometry::bind(
+        *from_geometry.system, {.level_set_field = from_geometry.phi, .domain_id = "drop", .isovalue = 0.5});
+    ConstraintPlan(*from_geometry.system)
+        .contactPointVelocity(from_geometry.u, G, 2, {0.0, -1.0, 0.0}, speed, "ren_e_contact_point:2")
+        .commit();
+
+    ASSERT_EQ(explicit_law.registered().size(), 1u);
+    EXPECT_EQ(from_geometry.registered(), explicit_law.registered());
+}
+
 } // namespace
 } // namespace svmp::FE::constraints::test

@@ -29,6 +29,7 @@
  */
 
 #include "Core/Types.h"
+#include "Forms/IntegrationDomain.h"
 #include "Systems/FormsInstaller.h"
 #include "Systems/OperatorRegistry.h"
 
@@ -38,10 +39,6 @@
 
 namespace svmp {
 namespace FE {
-namespace forms {
-class FormExpr;
-} // namespace forms
-
 namespace systems {
 
 class FESystem;
@@ -69,6 +66,12 @@ public:
         std::vector<forms::bc::GeneratedBoundaryNitscheTraceFormBinding>& bindings,
         int volume_interface_marker,
         Real minimum_symmetric_energy_ratio);
+
+    /// Registers the generated marker of a contact line or of the generated
+    /// part of a boundary with the system (nothing for a marker < 0) and
+    /// returns the domain.
+    forms::ContactLineDomain registered(forms::ContactLineDomain domain);
+    forms::BoundaryDomain registered(forms::BoundaryDomain domain);
 
     [[nodiscard]] FormInstallOptions& options() noexcept { return options_; }
     [[nodiscard]] const FormInstallOptions& options() const noexcept { return options_; }

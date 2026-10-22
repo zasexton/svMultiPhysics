@@ -201,18 +201,6 @@ namespace {
     return f;
 }
 
-/// Registers the generated marker of a contact line or wetted wall and returns its domain.
-ContactLineDomain registered(fs::FESystem& system, ContactLineDomain d)
-{
-    system.registerGeneratedEmbeddedInterfaceMarker(d.marker());
-    return d;
-}
-BoundaryDomain registered(fs::FESystem& system, BoundaryDomain d)
-{
-    system.registerGeneratedEmbeddedInterfaceMarker(d.generatedActiveBoundaryMarker());
-    return d;
-}
-
 /// A free-surface value as a form (a constant, or a coefficient named for the surface).
 [[nodiscard]] FormExpr freeSurfaceScalar(const bc::ScalarValue& value, std::string_view name,
                                          const FreeSurfaceBoundary& b)
@@ -223,7 +211,8 @@ BoundaryDomain registered(fs::FESystem& system, BoundaryDomain d)
 // ---------------------------------------------------------------------------
 // Unfitted free surface Gamma_h = {phi_h = c} bounding the liquid side L
 // ---------------------------------------------------------------------------
-//   int_CL (xi (u.m) - gamma cos(theta_e)) (v.m)       Young wall energy, Ren-E friction xi = 1/M (weak law)
+//   int_CL (xi (u.m) - gamma cos(theta_e)) (v.m)       Young wall energy, Ren-E friction xi = 1/M (weak law),
+//     or u.t_w = M gamma (cos(theta_e) - cos(theta_d)) at the contact point (strong law, constraint plan)
 //   int_W (mu/l_s) u_t . v_t                           Navier slip on the wetted wall W_h
 //   int_Gamma p_ext n.v + gamma (I - n x n) : grad v    SurfaceStress (default), or
 //   int_Gamma p_ext n.v + gamma kappa_h n.v             KinematicAreaGradientTraction
@@ -231,8 +220,9 @@ BoundaryDomain registered(fs::FESystem& system, BoundaryDomain d)
 // with u.n_w = 0 strong on the walls, the dry side pinned and small cuts
 // aggregated (constraint plan), and phi transported by the level-set equation
 // (the kinematic condition).  gamma is a literal (validated).
-void addUnfittedFreeSurface(FormExpr& M, fs::FESystem& system, const Options& o, const FreeSurfaceBoundary& b,
-                            const NavierStokesTerms& t, ConservativeBalanceForms* balance)
+void addUnfittedFreeSurface(FormExpr& M, fs::FESystem& system, cs::ConstraintPlan& plan, fs::FormulationBuilder& F,
+                            const Options& o, const FreeSurfaceBoundary& b, const NavierStokesTerms& t, FieldId u_id,
+                            ConservativeBalanceForms* balance)
 {
     const auto& [u, p, v, q, rho, mu, f, dim] = t;
     const auto L = freeSurfaceLevelSetGeometry(b, system).side(activeDomainSide(b.active_domain));
@@ -246,10 +236,12 @@ void addUnfittedFreeSurface(FormExpr& M, fs::FESystem& system, const Options& o,
             continue;
         }
         const int wall = contactLineWallBoundaryMarker(c);
-        const auto CL = registered(system, L.contactLine(wall, contactLineMarker(c)));   // Gamma_h on the wall
+        const auto CL = F.registered(L.contactLine(wall, contactLineMarker(c)));   // Gamma_h on the wall
+        const bool strong =
+            kind == ContactLineKind::DynamicRenE && std::get<FreeSurfaceContactLine::DynamicRenE>(c.configuration).strong_law;
         if (kind == ContactLineKind::DynamicRenE) {
             registerDynamicContactWallNormalCheck(system, c, CL.marker());
-            if (std::get<FreeSurfaceContactLine::DynamicRenE>(c.configuration).strong_law && !usesSurfaceStress(b)) {
+            if (strong && !usesSurfaceStress(b)) {
                 throw std::invalid_argument(
                     "IncompressibleNavierStokesVMSModule: Contact_line_law_enforcement=Strong requires Surface_tension_form=SurfaceStress");
             }
@@ -268,8 +260,7 @@ void addUnfittedFreeSurface(FormExpr& M, fs::FESystem& system, const Options& o,
             M = M + young;
             addSurfaceEnergy(usesSurfaceStress(b) ? balance : nullptr, young);
         }
-        if (kind == ContactLineKind::DynamicRenE &&
-            !std::get<FreeSurfaceContactLine::DynamicRenE>(c.configuration).strong_law) {
+        if (kind == ContactLineKind::DynamicRenE && !strong) {
             const auto mobility = freeSurfaceScalar(contactLineMobility(c), "ns_dynamic_contact_angle_mobility", b);
             const auto friction = FormExpr::constant(1.0) / mobility * dot(u, m);   // xi (u.m), xi = 1/M
             M = M + ((kag ? friction : friction - gamma * wall_cos) * dot(v, m)).dL(CL);
@@ -277,12 +268,25 @@ void addUnfittedFreeSurface(FormExpr& M, fs::FESystem& system, const Options& o,
         }
         int wetted_marker = -1;
         if (contactLineHasNavierSlip(c)) {
-            const auto W = registered(system, L.wetted(wall));
+            const auto W = F.registered(L.wetted(wall));
             const auto l_s = freeSurfaceScalar(contactLineSlipLength(c), "ns_contact_wall_slip_length", b);
             M = M + (mu / l_s * dot(tangentialProjection(u, n_w), tangentialProjection(v, n_w))).ds(W);
             wetted_marker = W.generatedActiveBoundaryMarker();
         }
         logContactLineTerms(b, c, CL.marker(), wetted_marker);
+        if (strong) {   // registered after the aggregation (PointLaw phase), so it can expand aggregated DOFs
+            const auto wall_normal = normalizedWallNormal(c);
+            const Real mobility = constantScalarValueOrThrow(contactLineMobility(c), "Strong DynamicContactAngle mobility");
+            const Real gamma_value =
+                constantScalarValueOrThrow(b.surface_tension, "Strong DynamicContactAngle surface tension");
+            const Real cos_e_value = std::cos(constantScalarValueOrThrow(
+                contactLineAngleRadians(c), "Strong DynamicContactAngle equilibrium angle"));
+            plan.contactPointVelocity(
+                u_id, L.geometry(), wall, wall_normal,
+                [mobility, gamma_value, cos_e_value](Real cos_d) { return mobility * gamma_value * (cos_e_value - cos_d); },
+                "ren_e_contact_point:" + std::to_string(wall));
+            logStrongContactPointLaw(c);
+        }
     }
 
     validateFreeSurfaceBoundary(b, o, o.enable_ale, system, dim);
@@ -451,25 +455,6 @@ void addFittedFreeSurface(FormExpr& M, FormExpr& C, fs::FESystem& system, cs::Co
     return J;
 }
 
-/// Ren-E contact-point law u.t_w = M gamma (cos(theta_e) - cos(theta_d)), imposed strongly.
-[[nodiscard]] cs::ContactPointVelocityLaw renEContactPointLaw(const FreeSurfaceBoundary& b,
-                                                              const FreeSurfaceContactLine& c)
-{
-    const auto wall_normal = normalizedWallNormal(c);
-    const Real mobility = constantScalarValueOrThrow(contactLineMobility(c), "Strong DynamicContactAngle mobility");
-    const Real gamma = constantScalarValueOrThrow(b.surface_tension, "Strong DynamicContactAngle surface tension");
-    const Real cos_e = std::cos(constantScalarValueOrThrow(contactLineAngleRadians(c),
-                                                           "Strong DynamicContactAngle equilibrium angle"));
-    cs::ContactPointVelocityLaw law;
-    law.wall_boundary_markers = {contactLineWallBoundaryMarker(c)};
-    law.wall_normal = {wall_normal[0], wall_normal[1], wall_normal[2]};
-    law.level_set_field_name = b.level_set_field_name;
-    law.isovalue = b.level_set_isovalue;
-    law.contact_speed = [mobility, gamma, cos_e](Real cos_d) { return mobility * gamma * (cos_e - cos_d); };
-    law.name = "ren_e_contact_point:" + std::to_string(contactLineWallBoundaryMarker(c));
-    return law;
-}
-
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -578,7 +563,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     const auto w = o.enable_ale ? meshVelocity() : zeroVector(dim);
     for (const auto& b : free_surfaces) {
         if (isExteriorOnePhaseBoundary(b) && isUnfittedLevelSet(b)) {
-            addUnfittedFreeSurface(M, system, o, b, t, balance ? &*balance : nullptr);
+            addUnfittedFreeSurface(M, system, plan, F, o, b, t, u_id, balance ? &*balance : nullptr);
         } else if (isExteriorOnePhaseBoundary(b)) {
             addFittedFreeSurface(M, C, system, plan, bcs, o, b, ale, t, w, u_id, F, work,
                                  balance ? &*balance : nullptr);
@@ -605,15 +590,6 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
                          [&](const auto& bc) { return Factories::toPressureEssentialBC(bc, o.pressure_field_name); });
     plan.essentials([&](fs::FESystem& target) { pressure_bcs.applyAll(target, p_id); });
     logActiveDomainConstraints(liquid_constraints ? liquid->boundary : nullptr, aggregated);
-    for (const auto& b : o.free_surface) {
-        for (const auto& c : b.contact_lines) {
-            const auto* dynamic = std::get_if<FreeSurfaceContactLine::DynamicRenE>(&c.configuration);
-            if (dynamic != nullptr && dynamic->strong_law) {
-                plan.contactPointVelocity(u_id, renEContactPointLaw(b, c));   // expands aggregated DOFs: last
-                logStrongContactPointLaw(c);
-            }
-        }
-    }
     plan.commit();
 
     // Weak velocity Dirichlet (Nitsche), certified on generated wetted boundaries.
