@@ -24,7 +24,6 @@ the exterior-pressure load `p_ext * dot(n_h, v)` on the interface.
 | `Automatic` (default) | `SurfaceStress` on unfitted level-set interfaces; `CurvatureTraction` on fitted ALE boundaries | — |
 | `SurfaceStress` (also `SurfaceEnergy`, `LaplaceBeltrami`, `Variational`) | `gamma * (I - n_h ⊗ n_h) : grad(v)` integrated over the generated interface rule (unfitted) or over the current fitted boundary. This is the Laplace–Beltrami form and the first variation of the discrete interface area. | Unfitted; fitted ALE only with `Allow_fitted_surface_stress=true` (below) |
 | `CurvatureTraction` | `(p_ext + gamma*kappa) * dot(n, v)` with a supplied or projected curvature. Unfitted interfaces use `n = grad(phi)/abs(grad(phi))`; fitted boundaries use the current-geometry normal and pointwise curvature, which is zero on affine faces. | Legacy and verification; on fitted P1 boundaries it applies no capillary load (withdrawn from use, see below) |
-| `GeneratedCurvatureTraction` | Same integrand, with the normal carried by the generated interface rule | Unfitted; experimental |
 | `KinematicAreaGradientTraction` | `gamma * kappa_h * dot(n_h, v)`, where `kappa_h` is recovered by `KinematicAreaGradient` curvature projection (FE `LevelSet.md`). It includes the declared Young wall energies, so no separate line force is assembled. | Unfitted; see its requirements below |
 
 The unfitted forms require `Geometry_tangent_policy=RefreshedFrozenQuadrature`.
@@ -312,7 +311,7 @@ integral, so its separate line term carries only the equilibrium part. With
 | Form | `PrescribedAngle` | `DynamicRenE` |
 |---|---|---|
 | `SurfaceStress` | `-gamma*cos(theta_e) * dot(v, m)` | `xi*dot(u,m)*dot(v,m) - gamma*cos(theta_e)*dot(v,m)` |
-| `CurvatureTraction`, `GeneratedCurvatureTraction` | `-gamma*(cos(theta_e) + dot(n,n_wall)) * dot(v, m)` | `xi*dot(u,m)*dot(v,m) - gamma*(cos(theta_e) + dot(n,n_wall))*dot(v,m)` |
+| `CurvatureTraction` | `-gamma*(cos(theta_e) + dot(n,n_wall)) * dot(v, m)` | `xi*dot(u,m)*dot(v,m) - gamma*(cos(theta_e) + dot(n,n_wall))*dot(v,m)` |
 | `KinematicAreaGradientTraction` | none; the Young energy is inside `kappa_h` | `xi*dot(u,m)*dot(v,m)` |
 
 For `DynamicRenE` this is the weak form of the Ren–E law

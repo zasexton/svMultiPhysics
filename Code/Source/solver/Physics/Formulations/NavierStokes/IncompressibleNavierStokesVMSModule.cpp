@@ -1623,20 +1623,12 @@ namespace {
         return isUnfittedLevelSet(bc);
     case FreeSurfaceSurfaceTensionForm::CurvatureTraction:
         return false;
-    case FreeSurfaceSurfaceTensionForm::GeneratedCurvatureTraction:
     case FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction:
         return false;
     case FreeSurfaceSurfaceTensionForm::SurfaceStress:
         return true;
     }
     return false;
-}
-
-[[nodiscard]] bool usesGeneratedCurvatureTraction(
-    const FreeSurfaceBoundary& bc) noexcept
-{
-    return bc.surface_tension_form ==
-           FreeSurfaceSurfaceTensionForm::GeneratedCurvatureTraction;
 }
 
 [[nodiscard]] bool usesKinematicAreaGradientTraction(
@@ -1649,8 +1641,7 @@ namespace {
 [[nodiscard]] bool usesGeneratedInterfaceNormal(
     const FreeSurfaceBoundary& bc) noexcept
 {
-    return usesSurfaceStress(bc) || usesGeneratedCurvatureTraction(bc) ||
-           usesKinematicAreaGradientTraction(bc);
+    return usesSurfaceStress(bc) || usesKinematicAreaGradientTraction(bc);
 }
 
 [[nodiscard]] const char* surfaceTensionFormName(
@@ -1662,8 +1653,6 @@ namespace {
                                       : "CurvatureTraction";
     case FreeSurfaceSurfaceTensionForm::CurvatureTraction:
         return "CurvatureTraction";
-    case FreeSurfaceSurfaceTensionForm::GeneratedCurvatureTraction:
-        return "GeneratedCurvatureTraction";
     case FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction:
         return "KinematicAreaGradientTraction";
     case FreeSurfaceSurfaceTensionForm::SurfaceStress:
@@ -3262,15 +3251,6 @@ void validateDynamicContactWallEssentialBC(
     if (usesKinematicAreaGradientTraction(bc)) {
         return "kinematic_area_gradient_total_surface_young_energy_field";
     }
-    if (usesGeneratedCurvatureTraction(bc)) {
-        if (!bc.curvature_field_name.empty()) {
-            return "curvature_field_generated_interface_normal_signed";
-        }
-        if (bc.use_level_set_curvature) {
-            return "raw_level_set_curvature_generated_interface_normal_guarded";
-        }
-        return "supplied_scalar_generated_interface_normal_signed";
-    }
     if (isUnfittedLevelSet(bc)) {
         if (!bc.curvature_field_name.empty()) {
             return "curvature_field_level_set_normal_signed";
@@ -3303,18 +3283,6 @@ void validateDynamicContactWallEssentialBC(
     }
     if (usesKinematicAreaGradientTraction(bc)) {
         return "kinematic_area_gradient_field_picard_generated_geometry_frozen";
-    }
-    if (usesGeneratedCurvatureTraction(bc)) {
-        if (!bc.curvature_field_name.empty()) {
-            const auto kappa_id = system.findFieldByName(
-                bc.curvature_field_name);
-            if (kappa_id != FE::INVALID_FIELD_ID &&
-                system.fieldParticipatesInUnknownVector(kappa_id)) {
-                return "curvature_field_trial_coupled_generated_geometry_frozen";
-            }
-            return "curvature_field_picard_generated_geometry_frozen";
-        }
-        return "generated_geometry_refreshed_frozen_curvature_picard";
     }
     if (!bc.curvature_field_name.empty()) {
         const auto kappa_id = system.findFieldByName(bc.curvature_field_name);
@@ -3454,8 +3422,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
              FreeSurfaceSurfaceTensionForm::Automatic ||
          bc.surface_tension_form ==
              FreeSurfaceSurfaceTensionForm::CurvatureTraction ||
-         bc.surface_tension_form ==
-             FreeSurfaceSurfaceTensionForm::GeneratedCurvatureTraction ||
          bc.surface_tension_form ==
              FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction ||
          bc.surface_tension_form ==
@@ -3682,17 +3648,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: SurfaceStress currently requires Geometry_tangent_policy=RefreshedFrozenQuadrature; DifferentiatedQuadrature does not yet contain the complete projector-normal, point-location, and measure derivative");
         }
-        const bool has_generated_curvature_traction_residual =
-            usesGeneratedCurvatureTraction(bc) &&
-            (!FE::forms::bc::isZeroConstantScalarValue(
-                 bc.external_pressure) ||
-             !FE::forms::bc::isZeroConstantScalarValue(
-                 bc.surface_tension));
-        if (has_generated_curvature_traction_residual &&
-            !isRefreshedFrozenGeometryTangent(bc)) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: GeneratedCurvatureTraction currently requires Geometry_tangent_policy=RefreshedFrozenQuadrature because generated-normal and point-location derivatives are not installed");
-        }
         if (!usesSurfaceStress(bc) &&
             !FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension) &&
             bc.use_level_set_curvature &&
@@ -3752,10 +3707,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                     }
                 }
             }
-        }
-        if (usesGeneratedCurvatureTraction(bc)) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: GeneratedCurvatureTraction is available only for unfitted level-set free surfaces; use Automatic/CurvatureTraction for fitted boundaries");
         }
         if (usesKinematicAreaGradientTraction(bc)) {
             throw std::invalid_argument(
@@ -5651,18 +5602,6 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
                 inner(traction, v);
             momentum_form = momentum_form + integrateOnFreeSurface(
                 residual_integrand, bc, ale_enabled);
-            if (usesGeneratedCurvatureTraction(bc)) {
-                FE_LOG_INFO(
-                    std::string("IncompressibleNavierStokesVMSModule: installed generated-geometry curvature traction") +
-                    " marker=" + std::to_string(freeSurfaceMarker(bc)) +
-                    " surface_tension_form=GeneratedCurvatureTraction" +
-                    " normal_source=integration_rule_geometry" +
-                    " curvature_source=" +
-                    freeSurfaceCurvaturePolicyName(bc) +
-                    " force_projection_applied=0" +
-                    " qualification=Experimental" +
-                    " diagnostic=free_surface_generated_curvature_traction");
-            }
         }
     }
 
@@ -6636,9 +6575,6 @@ tangentialPolicyProvenance(
         case FreeSurfaceSurfaceTensionForm::CurvatureTraction:
             out << "\"CurvatureTraction\"";
             break;
-        case FreeSurfaceSurfaceTensionForm::GeneratedCurvatureTraction:
-            out << "\"GeneratedCurvatureTraction\"";
-            break;
         case FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction:
             out << "\"KinematicAreaGradientTraction\"";
             break;
@@ -6658,13 +6594,6 @@ tangentialPolicyProvenance(
                 << ",\"surface_tension_semi_implicit_reference_velocity\":"
                 << jsonString(std::string(
                        kFreeSurfaceSemiImplicitReferenceVelocityFieldName));
-        }
-        if (isExteriorOnePhaseBoundary(boundary) &&
-            usesGeneratedCurvatureTraction(boundary)) {
-            out << ",\"surface_tension_form_qualification\":"
-                << "\"experimental_candidate\""
-                << ",\"surface_tension_normal_source\":"
-                << "\"generated_interface_rule_geometry\"";
         }
         if (isExteriorOnePhaseBoundary(boundary) &&
             usesKinematicAreaGradientTraction(boundary)) {
@@ -6710,10 +6639,6 @@ tangentialPolicyProvenance(
                     << "},{";
             }
             out << "\"feature\":\"surface_tension_form\","
-                << "\"value\":\"GeneratedCurvatureTraction\","
-                << "\"reason_code\":"
-                << "\"generated_curvature_traction_unfitted_only\""
-                << "},{\"feature\":\"surface_tension_form\","
                 << "\"value\":\"KinematicAreaGradientTraction\","
                 << "\"reason_code\":"
                 << "\"kinematic_area_gradient_traction_unfitted_only\""

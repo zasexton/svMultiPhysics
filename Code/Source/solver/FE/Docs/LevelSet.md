@@ -468,7 +468,7 @@ with `supports_refreshed_frozen_quadrature` and
 `supports_differentiated_quadrature`; unsupported families advertise neither.
 
 The Navier-Stokes unfitted surface-tension forms (`SurfaceStress`,
-`GeneratedCurvatureTraction`, `KinematicAreaGradientTraction`) do not yet have
+`KinematicAreaGradientTraction`) do not yet have
 complete normal, point-location, and recovered-curvature derivatives. They
 therefore require `RefreshedFrozenQuadrature`. Cases with surface tension must
 set `Geometry_tangent_policy=RefreshedFrozenQuadrature` explicitly, even on the
@@ -521,8 +521,7 @@ the first variation of the generated-interface measure, uses the generated
 normal, and needs no curvature field. The curvature-based forms need a named
 scalar curvature field:
 
-- `CurvatureTraction` and `GeneratedCurvatureTraction` use a supplied or
-  projected curvature field;
+- `CurvatureTraction` uses a supplied or projected curvature field;
 - `KinematicAreaGradientTraction` uses a field recovered in
   `KinematicAreaGradient` mode (see below).
 
