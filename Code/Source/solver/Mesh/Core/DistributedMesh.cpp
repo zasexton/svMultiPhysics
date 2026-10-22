@@ -8483,8 +8483,8 @@ DistributedMesh DistributedMesh::load_parallel(const MeshIOOptions& opts, MPI_Co
                 const double ranks = static_cast<double>(std::max(size, 1));
                 std::cout << "[svMultiPhysics::Mesh] weighted startup partition: cells min/mean/max "
                           << min_stats[0] << "/" << static_cast<double>(sum_stats[0]) / ranks << "/"
-                          << max_stats[0] << " weighted load (x" << kStartupPartitionWeightScale
-                          << ") min/mean/max " << min_stats[1] << "/"
+                          << max_stats[0] << " weighted load (x"
+                          << static_cast<int>(kStartupPartitionWeightScale) << ") min/mean/max " << min_stats[1] << "/"
                           << static_cast<double>(sum_stats[1]) / ranks << "/" << max_stats[1]
                           << " diagnostic=weighted_startup_partition" << std::endl;
             }
