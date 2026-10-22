@@ -68,6 +68,23 @@ double fused_dot_zz_v_for_test(const int dof,
 /// Default false.
 void set_dot_dynamic_kernel_forced(bool forced) noexcept;
 
+/// Test-only: when true, the serial Gram-Schmidt update for dof > 4 uses the
+/// loop of fused_update_norm_v_dyn (the reference of the register-blocked
+/// kernel).  Default false.
+void set_update_dynamic_kernel_forced(bool forced) noexcept;
+
+/// The Gram-Schmidt update and norm of the GMRES iteration:
+/// u_next -= sum_j h_factors[j] * u(:,:,j) for j = 0..i, then the norm of the
+/// owned entries.
+double fused_update_norm_v_for_test(const int dof,
+    const fe_fsi_linear_solver::fsils_int nNo,
+    const fe_fsi_linear_solver::fsils_int mynNo,
+    fe_fsi_linear_solver::FSILS_commuType& commu,
+    Array3<double>& u,
+    const int i,
+    Array<double>& u_next,
+    const std::vector<double>& h_factors);
+
 void fused_update_v_inplace_for_test(const int dof,
     const fe_fsi_linear_solver::fsils_int nNo,
     Array3<double>& u,

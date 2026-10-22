@@ -117,6 +117,16 @@ std::atomic<bool> g_dot_dynamic_kernel_forced{false};
   return g_dot_dynamic_kernel_forced.load(std::memory_order_relaxed);
 }
 
+// Test-only switch (gmres::test::set_update_dynamic_kernel_forced): run the
+// serial dof > 4 Gram-Schmidt update with the loop of
+// fused_update_norm_v_dyn, the reference of fused_update_v_serial_regblock.
+std::atomic<bool> g_update_dynamic_kernel_forced{false};
+
+[[nodiscard]] bool update_dynamic_kernel_forced() noexcept
+{
+  return g_update_dynamic_kernel_forced.load(std::memory_order_relaxed);
+}
+
 void apply_givens_rotation(Array<double>& h, Vector<double>& c, Vector<double>& s, Vector<double>& err, const int i)
 {
   for (int j = 0; j <= i - 1; j++) {
@@ -1096,11 +1106,86 @@ double fused_update_norm_v_impl(const fsils_int nNo, const fsils_int mynNo, fe_f
   return std::sqrt(global_sq);
 }
 
+#ifdef FSILS_HAVE_TWO_LANE
+// Serial Gram-Schmidt update for dof > 4: v(e) -= h_j * u_j(e) over the
+// nonzero factors in ascending j, eight entries kept in registers across j.
+//
+// Each entry gets the operations of the loop of fused_update_norm_v_dyn in
+// the same order: v(e) = v(e) - h_j * u_j(e) for j = 0..i, skipping
+// h_j == 0.0 (the skip is kept: it leaves a -0.0 entry, or an entry against
+// an infinite u_j, unchanged).  That loop applies the factors tile by tile
+// (256 nodes), j ascending, to every entry of the tile; keeping an entry in
+// a register across j does not change its sequence.  Lane-wise IEEE
+// operations, no contraction.
+void fused_update_v_serial_regblock(const int dof, const fsils_int nNo, Array3<double>& u, const int i,
+                                    Array<double>& u_next, const std::vector<double>& h_factors)
+{
+  using namespace fe_fsi_linear_solver::two_lane;
+  const int num_vecs = i + 1;
+
+  thread_local std::vector<const double*> slices;
+  thread_local std::vector<double> factors;
+  slices.clear();
+  factors.clear();
+  for (int j = 0; j < num_vecs; ++j) {
+    const double hj = h_factors[static_cast<size_t>(j)];
+    if (hj == 0.0) {
+      continue;
+    }
+    slices.push_back(u.slice_data(j));
+    factors.push_back(hj);
+  }
+  const size_t n_terms = factors.size();
+  if (n_terms == 0) {
+    return;
+  }
+
+  double* __restrict__ v = u_next.data();
+  const double* const* __restrict__ us = slices.data();
+  const double* __restrict__ hs = factors.data();
+  const size_t n = static_cast<size_t>(nNo) * static_cast<size_t>(dof);
+
+  size_t e = 0;
+  for (; e + 8 <= n; e += 8) {
+    v2d x0 = load2(v + e);
+    v2d x1 = load2(v + e + 2);
+    v2d x2 = load2(v + e + 4);
+    v2d x3 = load2(v + e + 6);
+    for (size_t t = 0; t < n_terms; ++t) {
+      const v2d h = splat(hs[t]);
+      const double* __restrict__ ut = us[t] + e;
+      x0 = x0 - h * load2(ut);
+      x1 = x1 - h * load2(ut + 2);
+      x2 = x2 - h * load2(ut + 4);
+      x3 = x3 - h * load2(ut + 6);
+    }
+    store2(v + e, x0);
+    store2(v + e + 2, x1);
+    store2(v + e + 4, x2);
+    store2(v + e + 6, x3);
+  }
+  for (; e < n; ++e) {
+    double x = v[e];
+    for (size_t t = 0; t < n_terms; ++t) {
+      x -= hs[t] * us[t][e];
+    }
+    v[e] = x;
+  }
+}
+#endif // FSILS_HAVE_TWO_LANE
+
 double fused_update_norm_v_dyn(const int dof, const fsils_int nNo, const fsils_int mynNo, fe_fsi_linear_solver::FSILS_commuType& commu,
                                Array3<double>& u, const int i, Array<double>& u_next, const std::vector<double>& h_factors)
 {
   const int num_vecs = i + 1;
   double* v = u_next.data();
+
+#ifdef FSILS_HAVE_TWO_LANE
+  if (use_serial_hot_path(max_omp_threads()) && !update_dynamic_kernel_forced()) {
+    fused_update_v_serial_regblock(dof, nNo, u, i, u_next, h_factors);
+    return norm::fsi_ls_normv(dof, mynNo, commu, u_next);
+  }
+#endif
 
   #pragma omp parallel for schedule(static)
   for (fsils_int k_start = 0; k_start < nNo; k_start += BLOCK_SIZE) {
@@ -1995,6 +2080,23 @@ double fused_dot_zz_v_for_test(const int dof,
 void set_dot_dynamic_kernel_forced(const bool forced) noexcept
 {
   g_dot_dynamic_kernel_forced.store(forced, std::memory_order_relaxed);
+}
+
+void set_update_dynamic_kernel_forced(const bool forced) noexcept
+{
+  g_update_dynamic_kernel_forced.store(forced, std::memory_order_relaxed);
+}
+
+double fused_update_norm_v_for_test(const int dof,
+                                    const fe_fsi_linear_solver::fsils_int nNo,
+                                    const fe_fsi_linear_solver::fsils_int mynNo,
+                                    fe_fsi_linear_solver::FSILS_commuType& commu,
+                                    Array3<double>& u,
+                                    const int i,
+                                    Array<double>& u_next,
+                                    const std::vector<double>& h_factors)
+{
+  return fused_update_norm_v(dof, nNo, mynNo, commu, u, i, u_next, h_factors);
 }
 
 void fused_update_v_inplace_for_test(const int dof,

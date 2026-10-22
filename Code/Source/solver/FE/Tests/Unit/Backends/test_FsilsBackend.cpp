@@ -993,6 +993,82 @@ TEST(FsilsBackendLegacyKernels, FusedGmresDotDof6And8MatchesDynamicKernelBitwise
     }
 }
 
+// The serial Gram-Schmidt update for dof > 4 (entries kept in registers
+// across the basis vectors) must give the bits of the loop of
+// fused_update_norm_v_dyn, and keep its h_j == 0 skip.  Factors are nonzero
+// for j % 3 == 0 and +-0.0 otherwise.  Probe entry (0, 9) starts at -0.0;
+// its basis entries are +0.0 where the factor is nonzero (the sign
+// survives: -0.0 - h * 0.0 = -0.0) and -2.5 where it is zero, so applying a
+// zero factor instead of skipping it would give +0.0.  An infinite basis
+// entry under a zero factor must leave its entry finite.
+TEST(FsilsBackendLegacyKernels, FusedGmresUpdateDofAbove4MatchesDynamicKernelBitwise)
+{
+    struct ForcedDynamicReset {
+        ~ForcedDynamicReset() { gmres::test::set_update_dynamic_kernel_forced(false); }
+    } reset_switch;
+    OmpThreadCountGuard thread_guard;
+    OmpThreadCountGuard::set(1);
+
+    constexpr int n_nodes = 517;
+    constexpr int owned_nodes = 503;
+    constexpr int n_slices = 12;
+    auto commu = makeSelfCommu();
+    for (const int dof : {5, 6, 7, 8}) {
+        SCOPED_TRACE(::testing::Message() << "dof=" << dof);
+        std::mt19937_64 rng(53u * static_cast<unsigned>(dof));
+        Array3<Real> basis(dof, n_nodes, n_slices);
+        Array<Real> start(dof, n_nodes);
+        for (int s = 0; s < n_slices; ++s) {
+            for (int node = 0; node < n_nodes; ++node) {
+                for (int comp = 0; comp < dof; ++comp) {
+                    basis(comp, node, s) = cornerCaseValue(rng);
+                }
+            }
+        }
+        for (int node = 0; node < n_nodes; ++node) {
+            for (int comp = 0; comp < dof; ++comp) {
+                start(comp, node) = cornerCaseValue(rng);
+            }
+        }
+        const auto factor = [&rng](int j) {
+            if (j % 3 != 0) {
+                return (j % 2 == 0) ? Real(0.0) : Real(-0.0);
+            }
+            return Real(0.75) + Real(0.5) * std::abs(cornerCaseValue(rng));
+        };
+        start(0, 9) = Real(-0.0);
+        for (int s = 0; s < n_slices; ++s) {
+            basis(0, 9, s) = (s % 3 == 0) ? Real(0.0) : Real(-2.5);
+        }
+        basis(dof - 1, 300, 4) = std::numeric_limits<Real>::infinity();
+
+        for (int last_i = 0; last_i < n_slices; ++last_i) {
+            SCOPED_TRACE(::testing::Message() << "last_i=" << last_i);
+            std::vector<Real> h(static_cast<std::size_t>(last_i + 1));
+            for (int j = 0; j <= last_i; ++j) {
+                h[static_cast<std::size_t>(j)] = factor(j);
+            }
+
+            for (const bool owned_only : {false, true}) {
+                const int update_nodes = owned_only ? owned_nodes : n_nodes;
+                Array<Real> v_ref(start);
+                Array<Real> v_new(start);
+                gmres::test::set_update_dynamic_kernel_forced(true);
+                const Real norm_ref = gmres::test::fused_update_norm_v_for_test(
+                    dof, update_nodes, owned_nodes, commu, basis, last_i, v_ref, h);
+                gmres::test::set_update_dynamic_kernel_forced(false);
+                const Real norm_new = gmres::test::fused_update_norm_v_for_test(
+                    dof, update_nodes, owned_nodes, commu, basis, last_i, v_new, h);
+                expectSameBits(v_new, v_ref, owned_only ? "owned-only update" : "full update");
+                expectSameBits(&norm_new, &norm_ref, 1, "norm");
+                EXPECT_TRUE(std::signbit(v_new(0, 9)) && v_new(0, 9) == Real(0.0))
+                    << "the -0.0 probe entry became " << v_new(0, 9);
+                EXPECT_TRUE(std::isfinite(v_new(dof - 1, 300)));
+            }
+        }
+    }
+}
+
 TEST(FsilsBackendLegacyKernels, GivensRotationAndHessenbergBacksolveMatchReferences)
 {
     Array<Real> h(4, 4);
