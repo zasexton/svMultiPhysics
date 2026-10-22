@@ -7,11 +7,14 @@
 
 #include <gtest/gtest.h>
 
+#include "Core/FEException.h"
 #include "Systems/FESystem.h"
 
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -56,6 +59,17 @@ struct DestructionOrder {
 
 struct FirstOrderProbe : DestructionOrder {};
 struct SecondOrderProbe : DestructionOrder {};
+
+/// The message of the InvalidArgumentException that @p call throws.
+std::string invalidArgumentMessage(const std::function<void()>& call)
+{
+    try {
+        call();
+    } catch (const svmp::FE::InvalidArgumentException& error) {
+        return error.what();
+    }
+    return {};
+}
 
 } // namespace
 
@@ -143,4 +157,38 @@ TEST(FESystemAttachments, HasFieldByIdentifier)
     FESystem system(tetraMesh());
     EXPECT_FALSE(system.hasField(svmp::FE::FieldId{0}));
     EXPECT_FALSE(system.hasField(svmp::FE::INVALID_FIELD_ID));
+}
+
+TEST(FESystemAttachments, FrozenMeshNormalDeclarationsRejectChanges)
+{
+    using svmp::FE::systems::MeshNormalBoundaryConstraintDeclaration;
+    FESystem system(tetraMesh());
+    const auto declare = [&] {
+        system.declareMeshNormalBoundaryConstraint(
+            MeshNormalBoundaryConstraintDeclaration{});
+    };
+    const auto bind = [&] {
+        system.bindMeshNormalBoundaryConstraintConsumer(
+            svmp::FE::INVALID_FIELD_ID, 1, "op", "mesh row", std::nullopt);
+    };
+    const std::string frozen_declaration =
+        "declarations cannot change after mesh-boundary history";
+    const std::string frozen_binding =
+        "consumer provenance cannot change after mesh-boundary history";
+
+    // Before the freeze, the declaration checks themselves reject these.
+    const auto declare_before = invalidArgumentMessage(declare);
+    const auto bind_before = invalidArgumentMessage(bind);
+    ASSERT_FALSE(declare_before.empty());
+    ASSERT_FALSE(bind_before.empty());
+    EXPECT_EQ(declare_before.find(frozen_declaration), std::string::npos);
+    EXPECT_EQ(bind_before.find(frozen_binding), std::string::npos);
+
+    system.freezeMeshNormalBoundaryConstraintDeclarations();
+    EXPECT_NE(invalidArgumentMessage(declare).find(frozen_declaration),
+              std::string::npos);
+    EXPECT_NE(invalidArgumentMessage(bind).find(frozen_binding),
+              std::string::npos);
+    EXPECT_TRUE(system.meshNormalBoundaryConstraints().empty());
+    EXPECT_FALSE(system.meshBoundaryHistoryTransactionActive());
 }

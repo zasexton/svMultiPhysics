@@ -773,6 +773,33 @@ public:
         return mesh_normal_boundary_constraints_;
     }
     /**
+     * @brief The mesh-normal constraint on (@p mesh_displacement_field,
+     * @p boundary_marker) that a fitted-ALE normal measurement observes.
+     *
+     * Throws unless it is an exact fluid-normal velocity constraint between
+     * distinct mesh-dimensional volume unknowns (target: the related
+     * velocity trace on the current normal) with the reciprocal consumer
+     * binding of an installed boundary operator, which has exactly one
+     * matching mesh descriptor and one reciprocal fluid descriptor.
+     */
+    [[nodiscard]] const MeshNormalBoundaryConstraintDeclaration&
+    validatedFittedALENormalConstraint(
+        FieldId mesh_displacement_field,
+        int boundary_marker) const;
+    /**
+     * @brief Fix the mesh-normal constraint declarations and their consumer
+     * bindings.
+     *
+     * For a component whose records depend on the declarations (the
+     * fitted-ALE operator-stage measurements of the free-surface physics):
+     * it calls this when its first collective stage begins.  Afterwards
+     * declareMeshNormalBoundaryConstraint and
+     * bindMeshNormalBoundaryConstraintConsumer throw.  It cannot be undone.
+     */
+    void freezeMeshNormalBoundaryConstraintDeclarations() noexcept {
+        mesh_normal_boundary_constraint_declarations_frozen_ = true;
+    }
+    /**
      * @brief Publish normal history in a serial/rank-local workflow.
      *
      * A distributed system must use @ref
@@ -838,6 +865,10 @@ public:
         Real accepted_time,
         Real dt,
         std::uint64_t state_revision);
+    /// True while accepted mesh-boundary provenance is being published.
+    [[nodiscard]] bool meshBoundaryHistoryTransactionActive() const noexcept {
+        return mesh_boundary_history_transaction_active_;
+    }
     void setGeometricNonlinearityPolicy(GeometricNonlinearityPolicy policy);
     [[nodiscard]] const GeometricNonlinearityPolicy& geometricNonlinearityPolicy() const noexcept;
     [[nodiscard]] bool geometricNonlinearityEnabled() const noexcept;
@@ -1003,6 +1034,17 @@ public:
         auto it = boundary_reduction_services_.find(primary_field);
         return it != boundary_reduction_services_.end() ? it->second.get() : nullptr;
     }
+    /**
+     * @brief Bind secondary fields and set dof_per_node on a
+     * BoundaryReductionService for multi-field integrand evaluation.
+     *
+     * For components that register boundary functionals of their own on
+     * the service (the fitted-ALE operator-stage measurements of the
+     * free-surface physics).
+     */
+    void bindSecondaryFields(BoundaryReductionService& svc,
+                              FieldId primary_fid,
+                              const std::vector<FieldId>& referenced_fields);
 
     /**
      * @brief Access the generalized auxiliary state manager.
@@ -2523,6 +2565,8 @@ private:
         mesh_tangential_boundary_policy_history_{};
     bool mesh_boundary_history_transaction_active_{false};
     bool mesh_boundary_history_collective_call_active_{false};
+    // Set by freezeMeshNormalBoundaryConstraintDeclarations().
+    bool mesh_normal_boundary_constraint_declarations_frozen_{false};
     bool mesh_boundary_history_defer_logging_{false};
     GeometricNonlinearityPolicy geometric_nonlinearity_policy_{};
 
@@ -2708,15 +2752,6 @@ private:
     [[nodiscard]] bool hasDeployedInstanceName_(std::string_view instance_name) const;
     std::size_t generated_boundary_input_counter_{0};
 
-    /// Bind secondary fields and set dof_per_node on a BoundaryReductionService
-    /// for multi-field integrand evaluation.
-    void bindSecondaryFields(BoundaryReductionService& svc,
-                              FieldId primary_fid,
-                              const std::vector<FieldId>& referenced_fields);
-    [[nodiscard]] const MeshNormalBoundaryConstraintDeclaration&
-    validatedFittedALENormalConstraint_(
-        FieldId mesh_displacement_field,
-        int boundary_marker) const;
     std::unique_ptr<AuxiliaryMultirateScheduler> aux_scheduler_{};
 
 public:

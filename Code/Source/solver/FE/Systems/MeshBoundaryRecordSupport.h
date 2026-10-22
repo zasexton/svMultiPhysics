@@ -24,7 +24,11 @@
 #include "Systems/FESystem.h"
 
 #include <bit>
+#include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <span>
+#include <string>
 #include <string_view>
 #include <type_traits>
 #include <vector>
@@ -115,6 +119,35 @@ void requireMeshBoundaryTokenConsensus(
     MeshBoundaryConsensusTokens& minimum_tokens,
     MeshBoundaryConsensusTokens& maximum_tokens,
     const char* phase);
+
+/**
+ * @brief The number of installed boundary-condition descriptors of
+ * @p operator_tag that satisfy @p matches.
+ *
+ * @p descriptors and @p operator_tags are the system's parallel tables
+ * (FESystem::boundaryConditionDescriptors() and
+ * boundaryConditionDescriptorOperatorTags()); the largest size_t when their
+ * lengths differ.
+ */
+template <typename Matches>
+[[nodiscard]] std::size_t countOperatorBoundBoundaryDescriptors(
+    std::span<const analysis::BoundaryConditionDescriptor> descriptors,
+    std::span<const std::string> operator_tags,
+    std::string_view operator_tag,
+    Matches&& matches)
+{
+    if (descriptors.size() != operator_tags.size()) {
+        return std::numeric_limits<std::size_t>::max();
+    }
+    std::size_t count = 0u;
+    for (std::size_t index = 0u; index < descriptors.size(); ++index) {
+        if (operator_tags[index] == operator_tag &&
+            matches(descriptors[index])) {
+            ++count;
+        }
+    }
+    return count;
+}
 
 } // namespace record_support
 } // namespace systems

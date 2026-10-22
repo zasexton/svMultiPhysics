@@ -1476,6 +1476,7 @@ using record_support::captureOperatorStageGeometry;
 using record_support::operatorStageTimesMatch;
 using record_support::coordinateMeshBoundaryLocalFailure;
 using record_support::requireMeshBoundaryTokenConsensus;
+using record_support::countOperatorBoundBoundaryDescriptors;
 
 [[nodiscard]] bool generatedBoundaryNitscheTraceSpaceMatches(
     const spaces::FunctionSpace& space,
@@ -1552,26 +1553,6 @@ using record_support::requireMeshBoundaryTokenConsensus;
            isFittedRelatedFluidEnforcement(descriptor.enforcement_kind) &&
            descriptor.related_variables == expected_related &&
            descriptor.source == source;
-}
-
-template <typename Matches>
-[[nodiscard]] std::size_t countOperatorBoundBoundaryDescriptors(
-    const std::vector<analysis::BoundaryConditionDescriptor>& descriptors,
-    const std::vector<std::string>& operator_tags,
-    std::string_view operator_tag,
-    Matches&& matches)
-{
-    if (descriptors.size() != operator_tags.size()) {
-        return std::numeric_limits<std::size_t>::max();
-    }
-    std::size_t count = 0u;
-    for (std::size_t index = 0u; index < descriptors.size(); ++index) {
-        if (operator_tags[index] == operator_tag &&
-            matches(descriptors[index])) {
-            ++count;
-        }
-    }
-    return count;
 }
 
 template <typename T, typename Append>
@@ -8739,10 +8720,7 @@ void FESystem::declareMeshNormalBoundaryConstraint(
     FE_THROW_IF(
         mesh_boundary_history_transaction_active_ ||
             !mesh_normal_boundary_constraint_history_.empty() ||
-            fitted_ale_normal_measurement_declarations_frozen_ ||
-            fitted_ale_normal_measurement_transaction_active_ ||
-            !pending_fitted_ale_normal_measurements_.empty() ||
-            !fitted_ale_normal_measurement_history_.empty(),
+            mesh_normal_boundary_constraint_declarations_frozen_,
         InvalidArgumentException,
         "FESystem::declareMeshNormalBoundaryConstraint: declarations "
         "cannot change after mesh-boundary history or a fitted-ALE "
@@ -8962,10 +8940,7 @@ void FESystem::bindMeshNormalBoundaryConstraintConsumer(
     FE_THROW_IF(
         mesh_boundary_history_transaction_active_ ||
             !mesh_normal_boundary_constraint_history_.empty() ||
-            fitted_ale_normal_measurement_declarations_frozen_ ||
-            fitted_ale_normal_measurement_transaction_active_ ||
-            !pending_fitted_ale_normal_measurements_.empty() ||
-            !fitted_ale_normal_measurement_history_.empty(),
+            mesh_normal_boundary_constraint_declarations_frozen_,
         InvalidArgumentException,
         "FESystem::bindMeshNormalBoundaryConstraintConsumer: consumer "
         "provenance cannot change after mesh-boundary history or a fitted-"
@@ -9102,7 +9077,7 @@ void FESystem::bindMeshNormalBoundaryConstraintConsumer(
 }
 
 const MeshNormalBoundaryConstraintDeclaration&
-FESystem::validatedFittedALENormalConstraint_(
+FESystem::validatedFittedALENormalConstraint(
     FieldId mesh_displacement_field,
     int boundary_marker) const
 {
@@ -9284,7 +9259,7 @@ void FESystem::registerFittedALENormalOperatorStageMeasurement(
 
     // Complete all declaration/consumer validation before mutating either
     // the reduction service or the measurement declaration table.
-    const auto& constraint = validatedFittedALENormalConstraint_(
+    const auto& constraint = validatedFittedALENormalConstraint(
         mesh_displacement_field, boundary_marker);
     const auto tangential_declaration = std::find_if(
         mesh_tangential_boundary_policies_.begin(),
@@ -9725,7 +9700,7 @@ void FESystem::stageFittedALENormalOperatorStageMeasurements(
                     "measurement declarations are not in canonical key order");
             }
             const auto& constraint =
-                validatedFittedALENormalConstraint_(
+                validatedFittedALENormalConstraint(
                     declaration.key.mesh_displacement_field,
                     declaration.key.boundary_marker);
             const auto tangential = std::find_if(
@@ -9871,6 +9846,7 @@ void FESystem::stageFittedALENormalOperatorStageMeasurements(
     // Once a collective stage transaction begins, its declaration schedule
     // remains fixed even if the candidate is later discarded.
     fitted_ale_normal_measurement_declarations_frozen_ = true;
+    freezeMeshNormalBoundaryConstraintDeclarations();
 
     OperatorStageGeometryMetadata stage_mesh_revision{};
     local_exception = nullptr;
