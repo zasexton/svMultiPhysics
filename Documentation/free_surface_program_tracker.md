@@ -754,6 +754,11 @@ These are proposals. Each lists a recommended option and an alternative. Record 
     12. No environment variable changes a production result: result-changing names become keys, constants or test hooks; diagnostic and performance switches go behind one registry.
     13. Delete the unused and CamelCase spellings; legacy spellings still in use warn for one release.
   - **Target:** about 23 user-facing keys, 17 advanced and 10 for two-fluid; 4–10 free-surface keys per reference deck (2D sessile: 8, from 42). Every step is proved by a resolve-only comparison of the effective configuration, the S0 manifests and the reference sets.
+  - **Progress 2026-10-22 (`0369fcef`):**
+    - Step P0 is done: 448 unused or CamelCase spellings are deleted (721 → 273 accepted), the 11 legacy spellings still in use warn, `--resolve-only` writes the effective configuration without solving, and `Generalized_alpha_initial_rate` replaces the capillary-rise environment variable.
+    - The NS module is split: the formulation stays in `IncompressibleNavierStokesVMSModule.cpp` (704 lines), and the free-surface support moved to its own files.
+    - Outer-pass round 3 (bitwise): −2.0% / −2.3% / −4.9% per step (2D sessile, capillary wave, 3D sessile), then a further −0.6% / −0.7% / −2.0%.
+    - Evidence: CTest FE 58/58, Physics 25/25, Application 13/13; exhaustive two-rank matrix passed; reference sets identical serially (vs `e7080344`) and at 2 and 4 ranks (vs `pwd-92f1a2fc`).
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
@@ -842,7 +847,8 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - Free-slip walls (strong zero normal velocity through `Effective_direction`). The fill height is off vertex rows.
   - max|u|/√(gH) ≤ 3.4e-13; pressure, interface and volume errors 0 to 5e-17. The gate is 1e-8 for this exactly representable state.
   - Newton makes no updates, so this checks balance, not the solve. A perturbed-start variant would exercise the solve.
-- [ ] **Tank at rest (original plan item).** Take a small subset of the existing hydrostatic matrix into CTest. The full 960-case matrix does not need to run routinely.
+- [x] **Tank at rest (original plan item).** Take a small subset of the existing hydrostatic matrix into CTest. The full 960-case matrix does not need to run routinely.
+  - Closed 2026-10-22: done in `d8fb159f` (2026-10-07). The serial 60-case hydrostatic matrix runs in `Application_Tests`, the two-rank covering design (four `HydrostaticFixedGaugeCoveringMatrix*` tests) in `Application_MPI_2`; the full 960-case test is opt-in and passes in every integration check (e.g. job 129, 543 s).
 - [ ] **2D linear sloshing: with the PDE extension, only the convergence-order part of the frequency criterion still fails (2026-09-30).** First run: job `46023412`. Benchmark `tests/cases/fluid/free_surface_benchmarks/linear_sloshing_2d/` (merged 2026-09-30).
   - Setup: free-slip walls; a reference from the exact viscous linear dispersion relation (ω = 1.7006, damping 9.52e-3); Δt = T0/(2L/h).
   - Frequency error −0.32% / +0.28% / +1.43% at L/h = 16/32/64 (limit 1% with convergence). Max area oscillation 5.5e-5 / 5.4e-5 / 6.5e-4 (limit 1e-4). Damping error 1.7% / 2.1% / 7.6%.
@@ -965,13 +971,15 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - **Open:**
     - fully dry ranks with small-cut aggregation turned off (the wet-volume diagnostic marker lookup);
     - `verify.py` `shape_rms_radial_deviation` reads partitioned output about 0.6% differently.
-- [ ] **Protocol.**
+- [x] **Protocol.**
+  - Closed 2026-10-22: as run in the La = 12 study (2026-10-01) and the D19 studies (2026-10-06): R/h = 8/16/32, La = 12 and 120, 5 viscous times, sampled analytic start; acceptance at R/h = 32 (`tolerances.json`). R/h = 64 and La ≥ 1,200 were not run and are not part of acceptance.
   - Static drop in a box, fluid initially at rest. The Laplace number La = ργD/μ² is swept over 12 and 120; 1,200 and above are deferred until the per-step cost is reduced.
   - Start from the sampled analytic shape. No minimizer is required (D3).
   - R/h = 8, 16, 32, 64 in 2D.
   - Run to at least 5–10 viscous times `ρR²/μ` and report `max|u|(t)`.
   - At the end state report the pressure jump (mean interior minus exterior), volume and shape.
-- [ ] **Candidates** (all without tunable parameters, per P1):
+- [x] **Candidates** (all without tunable parameters, per P1):
+  - Closed 2026-10-22: compared in the La = 12 study (2026-10-01). Only `surface_stress` passes; `kag_lumped` does not converge (order 0.17) and its velocity grows; `kag_consistent` stops at R/h = 16 and 32 on the outer loop. The default route is recorded under Selection (user decision pending).
   - (a) **`SurfaceStress`** (the current default).
   - (b) **KAG with a lumped trace mass.** Set `κ_i = −g_i / m_i`, where `g` is the φ-gradient of the surface-plus-Young energy and `m_i` is the row sum of `M`.
     - The code already computes `m_i` as `lumped_kinematic_mass`, and it equals ± the discrete liquid-volume derivative (`FE/LevelSet/LevelSetCurvatureProjection.cpp` about L3321–3330).
@@ -991,7 +999,8 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
       - The M2 static drop will show whether the lumped noise shows up as spurious currents.
   - (c) **Unfiltered consistent-mass KAG**, for reference only.
   - **Fallback only if (a) and (b) both fail the D1 criteria:** KAG with the Helmholtz filter or a normal-gradient-stabilized mass. Its coefficient must be fixed once from dimensional scaling (P1), never tuned.
-- [ ] **Time step.** Check Δt against the capillary constraint (§3.6). If needed, add a semi-implicit surface-tension term (Bänsch/Hysing) or use Δt below the limit.
+- [x] **Time step.** Check Δt against the capillary constraint (§3.6). If needed, add a semi-implicit surface-tension term (Bänsch/Hysing) or use Δt below the limit.
+  - Closed 2026-10-22: resolved by D13 (lagged normal-increment term) and the D19 fixed-Δt protocols.
   - Design note (2026-09-30): `Documentation/free_surface_semi_implicit_surface_tension_design.md`. It corrects §3.6: the outer geometry fixed point already makes accepted steps implicit in geometry. The capillary limit therefore appears as slow or divergent outer-loop convergence, contracting by about x/(1+b) per pass with x = Δt²ω² and b = 2νk²Δt, not as an unstable step.
   - At La = 12, viscosity may already permit 3–7 × the benchmark Δt.
   - Proposed, pending approval: a default-off lagged normal-increment term, `γ Δt_eff ∫ ∇_Γ((u − u_ref)·n_h)·∇_Γ(v·n_h)`. It is zero at convergence, so the accepted solution and the energy balance are unchanged, and it has no tunable parameter. The literal Bänsch/Hysing term is not recommended here, because it would double-count the step displacement. KAG stays explicit in geometry.
@@ -1010,7 +1019,8 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
 - [ ] **Selection.** After the M2 static drop, the M3 capillary wave, and the M4 sessile and Ren–E comparisons, record the chosen default route and the reason in §4.
   - Among candidates meeting the D1 criteria, prefer the one without tunable parameters (P1).
   - Then run the 3D sphere at R/h = 8, 16, 32.
-- [ ] **3D readiness (2026-09-30; benchmark merged as `e687c6bd`, `12f30793`, `6350285e`).**
+- [x] **3D readiness (2026-09-30; benchmark merged as `e687c6bd`, `12f30793`, `6350285e`).**
+  - Closed 2026-10-22: the four open questions were answered by D25 items 1–4; the sphere passes at R/h = 8/16 (D25, 2026-10-10); R/h = 32 is not affordable (D25 item 1).
   - **Benchmark.** `tests/cases/fluid/free_surface_benchmarks/static_sphere_3d/` (16 Python tests), ready but unrun.
     - A sphere in the cube [0,3R]³, on an affine Tetra4 Kuhn mesh that is conforming and symmetric.
     - An irrational centre offset (min |φ|/h of 1.2e-3, 2.9e-4 and 6.5e-5 at R/h = 8, 16, 32).
@@ -1221,7 +1231,8 @@ Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch t
   - With a direct solver the 3D tank "at rest" accelerated at about g/2 at the surface; that spurious growth was the historical failure.
   - After the frame, measure and face-sampling fixes the deck stays at rest to 1e-12 m/s.
   - Its legacy `Nitsche` mode replaces the normal dynamic condition and needs a pressure gauge, so it is not a free-surface model.
-- [ ] **Open questions (for the user):**
+- [x] **Open questions (for the user):**
+  - Closed 2026-10-22: answered by D35 item 15 (current-frame assembly confirmed; `MeshNitsche` is the qualified default) and D47 item 9 (fitted `Penalty` and `Nitsche` kinematics retired).
   1. Confirm current-frame assembly for coupled ALE.
   2. Retire the legacy fitted `Penalty`/`Nitsche` kinematics for free surfaces, or keep them as legacy only, and make `MeshNitsche` the qualified default.
 - [x] **Fitted 3D contact-line leak: root cause found and fixed (2026-09-30, merged `7698d5b7`).**
@@ -1237,6 +1248,7 @@ Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch t
     - It ends when the run-up at the left wall shears the wall cells (minimum angle 0.6° at 1.51 s) and Newton fails. The mesh-velocity operator has no restoring term, so this needs a mesh-quality policy.
   - Performance side fix (`d92af1cd`, Physics `NavierStokesRegister.cpp`): spacetime forcing tables now use a bucket grid and bisection, 16 → 2.0 s per step, bitwise identical.
 - [ ] **Unfitted SPHERIC 02, 05 and 10 decks also have overlapping face sets.** In Test 05, for example, bottom faces get the free-slip front/back label. This may have affected the June results. Regenerate those decks; they have pinned tests.
+  - Update 2026-10-22: since `363f1264` overlapping face files fail closed; the legacy decks declare `Allow_overlapping_face_files` and keep their labeling. Regenerating them with disjoint faces is needed before any SPHERIC qualification run (M1, M6).
 - [ ] A mesh-quality policy for long or violent fitted runs: the mesh-velocity operator has no restoring term back to the reference mesh.
 - [x] **Fitted capillary wave** (`fitted_capillary_wave_2d`, job `46129890`; same setup, reference and gates as `capillary_wave_2d`).
 
@@ -1250,7 +1262,8 @@ Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch t
   - The plateau is a finite-amplitude effect: at a0 = 0.0025λ the errors are +1.3e-4, −3.8e-5 and +2.6e-5.
   - Runs at 3.6–7.2× the capillary time-step limit are stable, because the geometry is solved inside Newton.
   - The Δt study converges at first order (error ≤ 1e-4), which is unexplained.
-- [ ] **Open questions (for the user):**
+- [x] **Open questions (for the user):**
+  - Closed 2026-10-22: answered by D35 item 13 (amplitude 0.0025λ; the fitted capillary wave passes under D36), item 16 (overlapping face files fail closed, `363f1264`) and item 17 (no 2D Coriolis term for now).
   1. Capillary-wave frequency-order gate: lower the protocol amplitude to 0.0025λ, or use an amplitude-corrected reference. This affects unfitted M3 too.
   2. Overlapping face files: keep them as a warning or fail closed?
   3. Extend the Coriolis term to 2D, or run the forced SPHERIC case in 3D.
