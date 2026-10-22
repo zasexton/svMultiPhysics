@@ -82,13 +82,13 @@ The target cases come from `moving_free_surface_validation_cases.md` and the aud
 | Sharp exterior boundary conditions | Unfitted, P1 `LinearCorner` | **Qualified** (WP-3 v6) | `..._wp3_sharp_boundary_v6_20260826_a73c77f4` | Higher order fails closed |
 | Configuration containment | Both | **Qualified** (WP-0) | `..._wp0_configuration_20260720_ffef62d3` | — |
 | Hydrostatics, flat interface, `γ` on, 90° walls | Unfitted | **Works**: exact to about 1e-11 over 960 2D/3D, 2-rank, layout and numbering cases | Audit WP-4 entries dated 08-25 to 08-27 | None. This is effectively done and does not need to grow further. |
-| 2D linear sloshing | Unfitted | Worked on 2026-05-17 (interface L2 8.9e-5) | `linear_sloshing_2d/README.md` | Not re-run since the June stabilization change |
+| 2D linear sloshing | Unfitted | **PASS** (arm64 job 138, with reconciliation): spatial frequency error 0.003% at L/h = 64, damping 0.63%, dA/A ≤ 2.3e-8; x86 D36 pass also stands | `linear_sloshing_2d/README.md`; M1 | — |
 | SPHERIC 05 dam break | Unfitted | Early profile passes at t = 0.156 s (RMSE about 0.02 m) | 06-02 and 06-10 logs | D18 false wetting after 0.22 s; never run to full horizon |
 | SPHERIC 10 sloshing and 02 dam break | Unfitted | **Fail.** Test 10 dies near 0.9 s of 8.35 s; Test 02 has MPa pressure spikes | 06-05/06-07 root-cause reports | Never re-run after the 06-10 to 06-12 aggregation and sparsity fixes |
 | Static drop / Laplace pressure | Unfitted | **Physically reasonable but not accepted.** SurfaceStress closed drop (07-17): pressure error 3.15% → 0.32% → 0.0067% at n = 8/16/32; speed/γ about 1–2.6e-5. KAG sampled circle (09-04): after one step, 27% → 13% → 6.2% | `free_surface_level_set_review_20260713.md` L238; audit 09-04 entry | Gates demand algebraic equilibrium (§3.1) |
 | Capillary wave | Unfitted | One scoped pass (n = 16: frequency error 1.2%, volume drift 9.3e-7) | Level-set review | No refinement study; raw data not archived |
 | Static contact angle (sessile) | Unfitted | Partial. 07-17: all n = 32 rows pass per-mesh gates; the n = 16 90° and 120° rows fail the angle gate; refinement rates fail | Level-set review L16, L170 | Two owners of the angle (§3.5); P1 repair targets not representable |
-| Dynamic contact line (Ren–E) | Unfitted | Pilot only. KAG has the correct sign with relative error 0.25–0.44. SurfaceStress fails advancing cases (error 128.66, and 17.38 with the wrong sign) | Audit L1819 (job 41286834) | No refined campaign |
+| Dynamic contact line (Ren–E) | Unfitted | **PASS** under D39 (strong law), x86 and arm64: geometric RMS ≤ 2.8%, mean signed within ±1.1% | `ren_e_2d/README.md`; M4 | — |
 | Capillary rise | Unfitted | Reference envelope and runner prepared; never run | `free_surface_wp5_capillary_rise_reference.json` | — |
 | Conservative phase transport | Unfitted | Implemented; the 18-point matrix is frozen but not run | `level_set_conservative_phase_transport.md` | — |
 | Cut stability (aggregation, pressure facet jump) | Unfitted | Implemented. Node-crossing slice passes; no uniform bound | `free_surface_wp7_combined_p1_method.md` | — |
@@ -849,7 +849,12 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - Newton makes no updates, so this checks balance, not the solve. A perturbed-start variant would exercise the solve.
 - [x] **Tank at rest (original plan item).** Take a small subset of the existing hydrostatic matrix into CTest. The full 960-case matrix does not need to run routinely.
   - Closed 2026-10-22: done in `d8fb159f` (2026-10-07). The serial 60-case hydrostatic matrix runs in `Application_Tests`, the two-rank covering design (four `HydrostaticFixedGaugeCoveringMatrix*` tests) in `Application_MPI_2`; the full 960-case test is opt-in and passes in every integration check (e.g. job 129, 543 s).
-- [ ] **2D linear sloshing: with the PDE extension, only the convergence-order part of the frequency criterion still fails (2026-09-30).** First run: job `46023412`. Benchmark `tests/cases/fluid/free_surface_benchmarks/linear_sloshing_2d/` (merged 2026-09-30).
+- [x] **2D linear sloshing: PASS (arm64, job 138, 2026-10-22, binary b74ea15c, current generator with kinematic reconciliation; `verify.py` with the D35/D36 tolerances).**
+  - Spatial frequency error (modal fit, time error removed): −0.020% / −0.005% / −0.003% at L/h = 16/32/64. It decreases, with observed order 1.46; this is below the D36 floor, so it is reported, not gated.
+  - Damping error 0.63% at L/h = 64 (γ/γ_ref 1.032 / 1.013 / 1.006). Max dA/A ≤ 2.3e-8. The Δt study at L/h = 32 has order 2.10.
+  - The x86 runs of job `46089180` (2026-09-30, before D14) also passed under D36: +0.020 / +0.051 / +0.057%, damping 0.10%, dA/A ≤ 3.2e-5.
+  - The open questions below are answered by D35 item 12 and D36 item 1.
+  - Outputs: `/scratch/users/zsexton/svmp-dev-outer/runs/138-plan_wp4c1/slosh_*`.
   - Setup: free-slip walls; a reference from the exact viscous linear dispersion relation (ω = 1.7006, damping 9.52e-3); Δt = T0/(2L/h).
   - Frequency error −0.32% / +0.28% / +1.43% at L/h = 16/32/64 (limit 1% with convergence). Max area oscillation 5.5e-5 / 5.4e-5 / 6.5e-4 (limit 1e-4). Damping error 1.7% / 2.1% / 7.6%.
   - Diagnosed cause: with φ advected by the coupled fluid velocity and no velocity extension, dry vertices one row above the cut cells keep zero velocity and their φ lags. That lag grows with refinement (8% → 17% at half period) and drives a spurious cos(2kx) mode of 9.5% of the amplitude at L/h = 64.
@@ -873,7 +878,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
     - **Open questions (for the user):**
       1. Frequency convergence: add an error floor below which the order test is skipped, gate on the modal fit, or accept the failure.
       2. Whether the damping gate should use the modal amplitude instead of the probe.
-- [ ] **2D linear sloshing (original plan item)** at 3 meshes and 3 time steps. Compare frequency and damping with linear theory. Proposal: frequency error ≤ 1% at the finest mesh with observed convergence; volume drift ≤ 1e-4 over the run.
+- [x] **2D linear sloshing (original plan item):** covered by the item above (three meshes; 64/128/256 steps per period at L/h = 32).
 - [ ] **SPHERIC 05 D18/D38** to t = 0.3 s and then further. Compare profiles with experiment. Proposal: no regression from the June RMSE of about 0.02 m, and no false wetting.
 - [ ] **Re-run SPHERIC 10 and 02** on the current tip. They were never re-run after the aggregation, sparsity and penalty fixes. Record whether the June pressure-spike and sliver-cut failures persist.
 - [ ] **MMS traveling interface** refinement (the June matrix) as a regression.
@@ -1207,7 +1212,12 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - no repair-to-target.
 - [x] **2D sessile relaxation: PASS at 60° and 120° (2026-10-13)** with the D39 protocol (triggered redistancing). Angle errors at R/h = 64 are 0.003° for both angles; see the D35 item 1 results in §4. 90° was not part of the D29 resolution study. **Protocol since 2026-10-06:** PDE transport (D15), reconciliation (D14) and patch bounds (D21). R/h = 16 passes every single-level check at 60° and 120° (D21 validation). The resolution study at R/h = 16, 32, 64 (60° and 120°; 4 ranks at 32, 8 at 64) runs on one binary that includes the FSILS layout-stamp fix (stale assembly slots after a layout rebuild, found by the uninitialized-read work), because sessile runs rebuild layouts at every topology change. Estimated from the R/h = 16 serial times (29 and 74 min on Milan): about 8 and 21 h serial at R/h = 32 and 6 and 15 days serial at R/h = 64. Benchmark scripts merged 2026-09-30: `tests/cases/fluid/free_surface_benchmarks/sessile_drop_2d/` (angles by local circle fit, within 0.13° at R/h = 16 on exact caps; slip length R/8; La = 12). Unblocked by the vertex-crossing fix. Generalized-α + FSILS is the single default configuration; `--transport coupled|wet_extension|pde_extension` selects the transport (`pde_extension` refused until D9 lands). The first 300 steps (above) show 60° at 59.5/59.3° with base error 2.8% and apex error 4.8%, still slowing down, and 120° at 115.3/118.6°, still receding (base error 13%). `verify.py` requires the last output at the end time. Start from a *non-equilibrium* shape (for example a 90° cap for a 60° target) and relax to equilibrium at R/h = 16, 32, 64. Proposal: angle error ≤ 2° at R/h = 32 and decreasing; base radius and apex height within 2%.
 - [x] **Capillary rise** against the prepared Gründing et al. envelope, using `free_surface_wp5_capillary_rise_reference.json` and the comparison runner: L10/L20/L40 PASS on the frozen comparison (D44, 2026-10-21); the feature gates are still open.
-- [ ] **Ren–E** advancing and receding: refine the 08-30 pilot at 3 meshes and 3 time steps, with slip length ratio ℓ_s/h = 2, 4, 8.
+- [x] **Ren–E advancing and receding: PASS under D39 (strong law), on x86 and on arm64.**
+  - arm64 confirmation: job 138, 2026-10-22, binary b74ea15c, 18 serial runs (R/h = 8/16/32 with ℓ_s/h = 2/4/8; dt0, dt0/2, dt0/4).
+  - Geometric RMS error at dt0/4: 2.34 / 1.26 / 1.41% (advancing) and 1.16 / 1.04 / 2.83% (receding). Mean signed error: +0.74 / −0.23 / +0.67% and −1.02 / −0.63 / −1.03%.
+  - Displacement change from dt0/2 to dt0/4 at R/h = 32: 0.29% and 0.06%. Max area drift 3.0e-5. Signs agree in every sample; every run completed. The fluid law error is ≤ 2e-15 (imposed).
+  - These match the x86 protocol set (job `47330724`, binary `62df122c`, re-verified 2026-10-11) to the digits reported there; the final displacements agree to 4–5 digits. The advancing displacement does not converge monotonically (0.03313 / 0.03319 / 0.03109; reported only).
+  - Outputs: `/scratch/users/zsexton/svmp-dev-outer/runs/138-plan_wp4c1/rene_*`.
 - [x] **3D sessile** at one angle (90°, quarter domain, R/h = 8/16 at Δt and Δt/2): PASS (D38, D43, 2026-10-21). Extending to other angles is open.
 
 ### M5 — Fitted ALE reference path
