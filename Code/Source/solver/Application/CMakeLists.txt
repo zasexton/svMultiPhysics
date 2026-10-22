@@ -7,7 +7,6 @@ cmake_minimum_required(VERSION 3.12)
 add_library(svapplication STATIC
   Core/ActiveDomainOutput.cpp
   Core/ApplicationDriver.cpp
-  Core/FreeSurfaceEnergyLedger.cpp
   Core/FreeSurfaceSemiImplicitReference.cpp
   Core/LevelSetCutConfiguration.cpp
   Core/LevelSetMaintenanceConfiguration.cpp

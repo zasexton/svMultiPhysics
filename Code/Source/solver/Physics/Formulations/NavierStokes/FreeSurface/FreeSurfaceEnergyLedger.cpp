@@ -6,7 +6,7 @@
  * See License file.
  */
 
-#include "Application/Core/FreeSurfaceEnergyLedger.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyLedger.h"
 
 #include <algorithm>
 #include <array>
@@ -17,7 +17,7 @@
 #include <type_traits>
 #include <utility>
 
-namespace application::core {
+namespace svmp::Physics::formulations::navier_stokes::free_surface {
 namespace {
 
 static_assert(
@@ -880,4 +880,4 @@ FreeSurfaceEnergyLedger::rejectedAttempts() const noexcept
   return rejected_attempts_;
 }
 
-} // namespace application::core
+} // namespace svmp::Physics::formulations::navier_stokes::free_surface

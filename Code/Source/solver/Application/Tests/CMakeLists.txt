@@ -23,7 +23,6 @@ add_executable(test_application
   Unit/test_OpenVesselExamples.cpp
   Unit/test_OpenVesselStabilizationMetadata.cpp
   ../Core/ActiveDomainOutput.cpp
-  ../Core/FreeSurfaceEnergyLedger.cpp
   ../Core/FreeSurfaceSemiImplicitReference.cpp
   ../Core/LevelSetCutConfiguration.cpp
   ../Core/LevelSetMaintenanceConfiguration.cpp
@@ -77,7 +76,6 @@ if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
     Unit/test_LevelSetPdeVelocityExtensionMPI.cpp
     Unit/test_LegacyParameterStubs.cpp
     ../Core/ActiveDomainOutput.cpp
-    ../Core/FreeSurfaceEnergyLedger.cpp
     ../Core/FreeSurfaceSemiImplicitReference.cpp
     ../Core/LevelSetCutConfiguration.cpp
     ../Core/LevelSetMaintenanceConfiguration.cpp
