@@ -22,6 +22,7 @@
  */
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
+#include "Physics/Formulations/NavierStokes/NavierStokesVMSFormulation.h"
 
 #include "FE/Core/Types.h"
 #include "FE/Forms/FormExpr.h"
@@ -114,6 +115,23 @@ void installPressureRowContributionDiagnosticOperators(
     const FE::forms::FormExpr& vms_pspg_pressure_gradient_integrand,
     const FE::forms::FormExpr& vms_pspg_nonpressure_integrand,
     const FE::forms::FormExpr& pressure_ghost_penalty_form,
+    const std::optional<ActiveVolumeDomain>& active_volume_domain);
+
+/// The opt-in diagnostic operators, after the production operators: the
+/// conservative split when @p balance is set, and the pressure-row parts
+/// when their set is switched on.
+void installNavierStokesDiagnosticOperators(
+    FE::systems::DiagnosticRegistry& registry,
+    FE::systems::FESystem& system,
+    FE::FieldId u_id,
+    FE::FieldId p_id,
+    const FE::systems::FormInstallOptions& install,
+    const NavierStokesVMSIntegrands& integrands,
+    const ConservativeBalanceForms* balance,
+    const FE::forms::FormExpr& active_continuity,
+    const FE::forms::FormExpr& pressure_ghost_penalty_form,
+    const FE::forms::FormExpr& u,
+    const FE::forms::FormExpr& q,
     const std::optional<ActiveVolumeDomain>& active_volume_domain);
 
 } // namespace navier_stokes

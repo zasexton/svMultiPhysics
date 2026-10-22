@@ -23,6 +23,7 @@
 #include "FE/Constraints/ConstraintPlan.h"
 #include "FE/Core/Types.h"
 #include "FE/Forms/FormExpr.h"
+#include "FE/Forms/IntegrationDomain.h"
 #include "FE/LevelSet/LevelSetGeometry.h"
 #include "FE/Systems/ALEBinding.h"
 #include "FE/Systems/FESystem.h"
@@ -82,6 +83,22 @@ void declareFittedMeshRowDescriptors(
     const FreeSurfaceBoundary& bc,
     FE::FieldId velocity_field,
     bool rows_installed);
+
+/**
+ * @brief The tangential mesh-policy rows of a fitted free surface on @p psi
+ * (empty for Free): SmoothingOnly
+ *   weight int_Gamma (P grad d P) : (P grad psi P),   P = I - n x n,
+ * or Prescribed
+ *   penalty int_Gamma (dt d - w_t) . psi - ((dt d - w_t).n)(psi.n),
+ * with the coefficients named for the surface.
+ */
+[[nodiscard]] FE::forms::FormExpr tangentialMeshPolicyResidual(
+    const FreeSurfaceBoundary& bc,
+    const FE::forms::FormExpr& d_mesh,
+    const FE::forms::FormExpr& psi,
+    const FE::forms::FormExpr& n,
+    int components,
+    const FE::forms::BoundaryDomain& gamma);
 
 } // namespace navier_stokes
 } // namespace formulations

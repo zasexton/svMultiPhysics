@@ -7,6 +7,7 @@
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceFittedALE.h"
 
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceQueries.h"
 
 #include "FE/Constraints/ConstraintPlan.h"
@@ -353,6 +354,33 @@ void declareFittedMeshRowDescriptors(
         systemTangentialMeshPolicy(bc.tangential_mesh_policy),
         operator_tag,
         consumer_source);
+}
+
+FE::forms::FormExpr tangentialMeshPolicyResidual(
+    const FreeSurfaceBoundary& b,
+    const FE::forms::FormExpr& d_mesh,
+    const FE::forms::FormExpr& psi,
+    const FE::forms::FormExpr& n,
+    int components,
+    const FE::forms::BoundaryDomain& gamma)
+{
+    using namespace FE::forms;
+    if (b.tangential_mesh_policy == FreeSurfaceTangentialMeshPolicy::SmoothingOnly) {
+        const auto P = tangentialProjector(n, components);
+        const auto weight =
+            freeSurfaceScalar(b.tangential_mesh_penalty, "ns_free_surface_tangential_mesh_smoothing_weight", b);
+        return (weight * inner(P * grad(d_mesh) * P, P * grad(psi) * P)).ds(gamma);
+    }
+    if (b.tangential_mesh_policy == FreeSurfaceTangentialMeshPolicy::Prescribed) {
+        const auto target = FormExpr::asVector(bc::toVectorExpr(
+            b.prescribed_tangential_mesh_velocity, components, "ns_free_surface_tangential_mesh_velocity",
+            b.boundary_marker, bc::ComponentValueNameStyle::Component));
+        const auto gap = dt(d_mesh) - target;
+        const auto penalty =
+            freeSurfaceScalar(b.tangential_mesh_penalty, "ns_free_surface_tangential_mesh_penalty", b);
+        return (penalty * (inner(gap, psi) - normalTrace(gap, n) * normalTrace(psi, n))).ds(gamma);
+    }
+    return {};
 }
 
 } // namespace navier_stokes

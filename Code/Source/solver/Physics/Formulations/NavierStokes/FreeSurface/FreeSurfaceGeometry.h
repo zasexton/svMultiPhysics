@@ -33,9 +33,11 @@
 #include "FE/Systems/FormsInstaller.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace svmp {
@@ -142,6 +144,20 @@ void appendUnfittedFreeSurfaceCurvatureTrialFields(
 [[nodiscard]] FE::forms::FormExpr levelSetStateField(
     const FreeSurfaceBoundary& bc,
     const FE::systems::FESystem& system);
+
+/// A free-surface value as a form: a constant, or the coefficient named
+/// freeSurfaceValueName(@p name, @p bc).
+[[nodiscard]] FE::forms::FormExpr freeSurfaceScalar(
+    const FE::forms::bc::ScalarValue& value,
+    std::string_view name,
+    const FreeSurfaceBoundary& bc);
+
+/// The generated marker of the wetted part of a physical boundary
+/// (sharpActiveBoundaryMarkerFor), registered with @p system when it exists.
+/// The resolver refers to @p system and @p free_surfaces, which must outlive it.
+[[nodiscard]] std::function<std::optional<int>(int)> wettedBoundaryResolver(
+    FE::systems::FESystem& system,
+    const std::vector<FreeSurfaceBoundary>& free_surfaces);
 
 } // namespace navier_stokes
 } // namespace formulations

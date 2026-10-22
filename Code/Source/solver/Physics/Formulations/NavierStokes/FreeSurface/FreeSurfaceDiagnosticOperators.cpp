@@ -284,6 +284,37 @@ void installPressureRowContributionDiagnosticOperators(
     }
 }
 
+void installNavierStokesDiagnosticOperators(
+    FE::systems::DiagnosticRegistry& registry,
+    FE::systems::FESystem& system,
+    FE::FieldId u_id,
+    FE::FieldId p_id,
+    const FE::systems::FormInstallOptions& install,
+    const NavierStokesVMSIntegrands& integrands,
+    const ConservativeBalanceForms* balance,
+    const FE::forms::FormExpr& active_continuity,
+    const FE::forms::FormExpr& pressure_ghost_penalty_form,
+    const FE::forms::FormExpr& u,
+    const FE::forms::FormExpr& q,
+    const std::optional<ActiveVolumeDomain>& active_volume_domain)
+{
+    const auto& r = integrands;
+    if (balance != nullptr) {
+        installConservativeBalanceDiagnosticOperators(
+            registry, system, u_id, p_id, install, balance->pressure, balance->external_pressure,
+            balance->surface_energy, balance->gravitational_potential, r.pressure, u, q, active_volume_domain);
+    }
+    if (registry.enabled(kPressureRowContributionDiagnostics)) {
+        const auto vms_pspg = r.pspg_pressure_gradient.isValid()
+                                  ? r.pspg_pressure_gradient + r.pspg_without_pressure_gradient
+                                  : FE::forms::FormExpr{};
+        installPressureRowContributionDiagnosticOperators(
+            registry, system, u_id, p_id, install, r.galerkin_continuity, active_continuity, vms_pspg,
+            r.pspg_pressure_gradient, r.pspg_without_pressure_gradient, pressure_ghost_penalty_form,
+            active_volume_domain);
+    }
+}
+
 } // namespace navier_stokes
 } // namespace formulations
 } // namespace Physics

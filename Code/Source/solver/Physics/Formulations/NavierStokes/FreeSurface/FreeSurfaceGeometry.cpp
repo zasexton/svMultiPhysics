@@ -28,6 +28,7 @@
 #endif
 
 #include <algorithm>
+#include <functional>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -574,6 +575,27 @@ FE::forms::FormExpr levelSetStateField(
         phi_id,
         *phi_record.space,
         bc.level_set_field_name);
+}
+
+FE::forms::FormExpr freeSurfaceScalar(
+    const FE::forms::bc::ScalarValue& value,
+    std::string_view name,
+    const FreeSurfaceBoundary& bc)
+{
+    return FE::forms::bc::toScalarExpr(value, freeSurfaceValueName(name, bc));
+}
+
+std::function<std::optional<int>(int)> wettedBoundaryResolver(
+    FE::systems::FESystem& system,
+    const std::vector<FreeSurfaceBoundary>& free_surfaces)
+{
+    return [&system, &free_surfaces](int marker) -> std::optional<int> {
+        const auto generated = sharpActiveBoundaryMarkerFor(marker, free_surfaces, system);
+        if (generated.has_value()) {
+            system.registerGeneratedEmbeddedInterfaceMarker(*generated);
+        }
+        return generated;
+    };
 }
 
 } // namespace navier_stokes
