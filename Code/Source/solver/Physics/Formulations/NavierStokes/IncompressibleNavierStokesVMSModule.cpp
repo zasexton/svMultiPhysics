@@ -3254,9 +3254,6 @@ void validateDynamicContactWallEssentialBC(
         }
         return "supplied_scalar_level_set_normal_signed";
     }
-    if (bc.use_current_geometry_curvature) {
-        return "current_geometry_curvature";
-    }
     if (!bc.curvature_field_name.empty()) {
         return "curvature_field";
     }
@@ -3289,9 +3286,7 @@ void validateDynamicContactWallEssentialBC(
     if (isUnfittedLevelSet(bc)) {
         return "picard_frozen_or_guarded";
     }
-    return bc.use_current_geometry_curvature
-               ? "geometry_curvature_from_active_geometry_path"
-               : "supplied_scalar_frozen";
+    return "supplied_scalar_frozen";
 }
 
 // The lagged normal-increment term is qualified only where its derivation
@@ -3509,7 +3504,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             bc.surface_tension_form !=
                 FreeSurfaceSurfaceTensionForm::Automatic ||
             !bc.curvature_field_name.empty() ||
-            bc.use_current_geometry_curvature ||
             bc.use_level_set_curvature) {
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: an internal material-interface volume cannot own exterior pressure, surface tension, curvature, or an interface-traction representation");
@@ -5440,15 +5434,6 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
         }
         if (isUnfittedLevelSet(bc)) {
             return unfittedTractionCurvature(bc, system, phi);
-        }
-        if (!isUnfittedLevelSet(bc) && bc.use_current_geometry_curvature) {
-            FE_LOG_WARNING(
-                std::string("IncompressibleNavierStokesVMSModule: fitted CurvatureTraction with pointwise current-geometry curvature marker=") +
-                std::to_string(bc.boundary_marker) +
-                " is identically zero on affine (P1) faces and applies no capillary load there;"
-                " use Surface_tension_form=SurfaceStress with Allow_fitted_surface_stress=true"
-                " diagnostic=fitted_pointwise_curvature_zero_on_affine_faces");
-            return currentMeanCurvature();
         }
         return bc::toScalarExpr(
             bc.curvature,

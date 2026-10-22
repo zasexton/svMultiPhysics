@@ -280,12 +280,11 @@ struct FreeSurfaceBoundary {
     // current configuration) or a static mesh.
     bool allow_fitted_surface_stress{false};
 
-    // Fitted ALE can use current mesh geometry or a supplied curvature
-    // expression/value.  Unfitted level-set surface tension requires a
-    // supplied curvature until projected/smoothed curvature is validated.
+    // Supplied curvature expression/value or curvature field.  Unfitted
+    // level-set surface tension requires a supplied curvature until
+    // projected/smoothed curvature is validated.
     ScalarValue curvature{0.0};
     std::string curvature_field_name{};
-    bool use_current_geometry_curvature{false};
     bool use_level_set_curvature{true};
 
     // Fitted ALE kinematic relation: (u - meshVelocity()) · n = 0.

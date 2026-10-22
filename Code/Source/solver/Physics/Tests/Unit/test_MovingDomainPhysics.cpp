@@ -13,6 +13,7 @@
 #include "Physics/Formulations/MeshMotion/PseudoElasticMeshMotionModule.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
+#include "Physics/Formulations/NavierStokes/NavierStokesRegister.h"
 #include "Physics/Materials/Fluid/CarreauYasudaViscosity.h"
 #include "Physics/Tests/Unit/PhysicsTestHelpers.h"
 
@@ -4148,28 +4149,50 @@ TEST(MovingDomainPhysics, CurrentFaceGeometryMeanCurvatureTracksCurvedHexFace)
 
 TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceCanUseCurrentGeometryCurvature)
 {
-    constexpr int marker = 35;
-    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
-    auto u_space = makeVelocitySpace(mesh);
-    auto p_space = makePressureSpace(mesh);
-    auto opts = baseNavierStokesOptions();
-    opts.input_configuration_schema_version = 1;
-    opts.explicit_legacy_configuration = true;
-    opts.enable_ale = true;
-    opts.enable_convection = false;
+    // Fitted pointwise current-geometry curvature (identically zero on
+    // affine faces, withdrawn by D5) was retired by D42.  The name is kept
+    // because the frozen WP-9 matrix lists it; a deck that still requests
+    // the curvature now fails closed while its condition is read.
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    ns::forceLink_NavierStokesRegister();
+    auto mesh = makeRegistryQuadMesh();
 
-    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
-        .implementation = ns::FreeSurfaceImplementation::FittedALE,
-        .boundary_marker = marker,
-        .surface_tension = 0.5,
-        .use_current_geometry_curvature = true,
-    });
+    EquationModuleInput input{};
+    input.equation_type = "fluid";
+    input.mesh_name = "quad";
+    input.mesh = mesh->local_mesh_ptr();
+    input.default_domain.params["Density"] = ParameterValue{true, "1.0"};
+    input.default_domain.params["Viscosity.model"] =
+        ParameterValue{true, "Constant"};
+    input.default_domain.params["Viscosity.Value"] =
+        ParameterValue{true, "0.01"};
+
+    BoundaryConditionInput free_surface{};
+    free_surface.name = "free_surface";
+    free_surface.boundary_marker = 4;
+    free_surface.params["Type"] = ParameterValue{true, "Free_surface"};
+    free_surface.params["Implementation"] = ParameterValue{true, "FittedALE"};
+    free_surface.params["Surface_tension"] = ParameterValue{true, "0.5"};
+    free_surface.params["Use_current_geometry_curvature"] =
+        ParameterValue{true, "true"};
+    input.boundary_conditions.push_back(std::move(free_surface));
 
     FE::systems::FESystem system(mesh);
-    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
-    module.registerOn(system);
-
-    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CurrentMeanCurvature));
+    try {
+        (void)EquationModuleRegistry::instance().create("fluid", input, system);
+        FAIL() << "retired fitted pointwise curvature was accepted";
+    } catch (const std::invalid_argument& error) {
+        const std::string message(error.what());
+        EXPECT_NE(message.find("Use_current_geometry_curvature"),
+                  std::string::npos)
+            << message;
+        EXPECT_NE(message.find("retired"), std::string::npos) << message;
+    }
+    EXPECT_EQ(system.findFieldByName("Velocity"), FE::INVALID_FIELD_ID);
+    EXPECT_TRUE(system.formulationRecords().empty());
+#endif
 }
 
 TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfacePenaltyKinematicsAddsBoundaryResidual)

@@ -4075,11 +4075,21 @@ void append_free_surface_bc(
           {"Use_level_set_curvature", "UseLevelSetCurvature"})) {
     fs.use_level_set_curvature = *use_level_set_curvature;
   }
-  if (const auto use_current_geometry_curvature = first_defined_bool(
+  // Fitted CurvatureTraction with pointwise current-geometry curvature was
+  // withdrawn by D5 (identically zero on affine faces) and retired by D42.
+  if (first_defined_bool(
           bc.params,
           {"Use_current_geometry_curvature", "UseCurrentGeometryCurvature",
-           "Use_fitted_current_geometry_curvature", "UseFittedCurrentGeometryCurvature"})) {
-    fs.use_current_geometry_curvature = *use_current_geometry_curvature;
+           "Use_fitted_current_geometry_curvature",
+           "UseFittedCurrentGeometryCurvature"})
+          .value_or(false)) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Physics] Free_surface BC '" + bc.name +
+        "': Use_current_geometry_curvature=true (pointwise current-geometry "
+        "curvature of the fitted CurvatureTraction) was retired (decision "
+        "D42); it is identically zero on affine faces.  Use "
+        "Surface_tension_form=SurfaceStress with "
+        "Allow_fitted_surface_stress=true, or a supplied Curvature.");
   }
 
   if (const auto normal_policy = first_defined_string(

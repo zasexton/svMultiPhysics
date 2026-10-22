@@ -23,7 +23,7 @@ the exterior-pressure load `p_ext * dot(n_h, v)` on the interface.
 |---|---|---|
 | `Automatic` (default) | `SurfaceStress` on unfitted level-set interfaces; `CurvatureTraction` on fitted ALE boundaries | — |
 | `SurfaceStress` (also `SurfaceEnergy`, `LaplaceBeltrami`, `Variational`) | `gamma * (I - n_h ⊗ n_h) : grad(v)` integrated over the generated interface rule (unfitted) or over the current fitted boundary. This is the Laplace–Beltrami form and the first variation of the discrete interface area. | Unfitted; fitted ALE only with `Allow_fitted_surface_stress=true` (below) |
-| `CurvatureTraction` | `(p_ext + gamma*kappa) * dot(n, v)` with a supplied or projected curvature. Unfitted interfaces use `n = grad(phi)/abs(grad(phi))`; fitted boundaries use the current-geometry normal and pointwise curvature, which is zero on affine faces. | Legacy and verification; on fitted P1 boundaries it applies no capillary load (withdrawn from use, see below) |
+| `CurvatureTraction` | `(p_ext + gamma*kappa) * dot(n, v)` with a supplied or projected curvature. Unfitted interfaces use `n = grad(phi)/abs(grad(phi))`; fitted boundaries use the current-geometry normal. | Legacy and verification |
 | `KinematicAreaGradientTraction` | `gamma * kappa_h * dot(n_h, v)`, where `kappa_h` is recovered by `KinematicAreaGradient` curvature projection (FE `LevelSet.md`). It includes the declared Young wall energies, so no separate line force is assembled. | Unfitted; see its requirements below |
 
 The unfitted forms require `Geometry_tangent_policy=RefreshedFrozenQuadrature`.
@@ -215,12 +215,11 @@ legacy deck can keep the last-listed labeling with
 `<Add_mesh>`; the overlaps are then reported as warnings. The committed
 legacy SPHERIC decks written by `generate_validation_meshes.py` declare it.
 
-**Capillarity.** Fitted `CurvatureTraction` with
-`Use_current_geometry_curvature=true` uses the pointwise curvature of the
-boundary facets, which is identically zero on affine faces; it applies no
-capillary load on P1 meshes and logs a warning. It is kept for curved
-geometry but withdrawn from use in the fitted benchmarks. The fitted
-Laplace–Beltrami form is enabled explicitly:
+**Capillarity.** Fitted `CurvatureTraction` takes a supplied curvature.
+Its former `Use_current_geometry_curvature=true` (the pointwise curvature of
+the boundary facets, identically zero on affine faces) was retired by D42;
+a deck that still sets it fails while its boundary condition is read. The
+fitted Laplace–Beltrami form is enabled explicitly:
 
 ```xml
 <Surface_tension_form>SurfaceStress</Surface_tension_form>
