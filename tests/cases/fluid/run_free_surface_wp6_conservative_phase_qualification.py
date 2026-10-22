@@ -365,7 +365,7 @@ def validate_wp6_production_source_contract(
         source,
         (
             "auto level_set_maintenance = "
-            "levelSetMaintenanceRequests(params);",
+            "makeLevelSetMaintenanceRequests(",
             "requireCollectiveLevelSetMaintenanceRequestSchedule(",
             "LevelSetMaintenanceScheduleStage::SteadyInitialization",
             "bindKinematicAreaGradientTractionMaintenance(",
@@ -376,7 +376,7 @@ def validate_wp6_production_source_contract(
     )
     steady_request = source.find(
         "auto level_set_maintenance = "
-        "levelSetMaintenanceRequests(params);"
+        "makeLevelSetMaintenanceRequests("
     )
     steady_gate = source.find(
         "LevelSetMaintenanceScheduleStage::SteadyInitialization",
@@ -397,7 +397,7 @@ def validate_wp6_production_source_contract(
         ],
         (
             "auto level_set_maintenance = "
-            "levelSetMaintenanceRequests(params);",
+            "makeLevelSetMaintenanceRequests(",
             "requireCollectiveLevelSetMaintenanceRequestSchedule(",
             "LevelSetMaintenanceScheduleStage::TransientInitialization",
             "bindKinematicAreaGradientTractionMaintenance(",
@@ -434,7 +434,18 @@ def validate_wp6_production_source_contract(
         "on_step_accepted",
         "callbacks.on_step_rejected =",
     )
-    if not accepted.lstrip().startswith(before_gate):
+    # The callback may first release the rank-local cut-context restore
+    # retention (noexcept, no communication); the schedule consensus must be
+    # the first operation after it.
+    accepted_head = accepted.lstrip()
+    accepted_rank_local_release = (
+        "releaseActiveCutRestoreRetention(*cut_refresh_cache);"
+    )
+    if accepted_head.startswith(accepted_rank_local_release):
+        accepted_head = accepted_head[
+            len(accepted_rank_local_release) :
+        ].lstrip()
+    if not accepted_head.startswith(before_gate):
         raise ValueError(
             "WP-6 production source contract requires schedule consensus as "
             "the first on_step_accepted operation"
@@ -559,11 +570,38 @@ def validate_wp6_production_source_contract(
             "section at each publication consensus site"
         )
 
+    # The successful recovery restores the accepted generated state and then
+    # rethrows the commit failure; restoreAcceptedGeneratedStateAndRethrow
+    # does both, in that order.
+    restore_and_rethrow_start = time_loop_source.find(
+        "auto restoreAcceptedGeneratedStateAndRethrow ="
+    )
+    restore_and_rethrow_end = time_loop_source.find(
+        "std::rethrow_exception(failure);",
+        restore_and_rethrow_start,
+    )
+    if restore_and_rethrow_start < 0 or restore_and_rethrow_end < 0:
+        raise ValueError(
+            "WP-6 production source contract cannot isolate the TimeLoop "
+            "restore-and-rethrow recovery"
+        )
+    _require_tokens_in_order(
+        time_loop_source[
+            restore_and_rethrow_start:restore_and_rethrow_end
+            + len("std::rethrow_exception(failure);")
+        ],
+        (
+            "auto restoreAcceptedGeneratedStateAndRethrow =",
+            "restoreAcceptedGeneratedState();",
+            "std::rethrow_exception(failure);",
+        ),
+        "TimeLoop publication fail-stop disarms attempt rollback",
+    )
     commit_failure_start = time_loop_source.find(
         "const auto commit_failure = std::current_exception();"
     )
     successful_recovery_end = time_loop_source.find(
-        "std::rethrow_exception(commit_failure);",
+        "restoreAcceptedGeneratedStateAndRethrow(commit_failure);",
         commit_failure_start,
     )
     if commit_failure_start < 0 or successful_recovery_end < 0:
@@ -573,7 +611,7 @@ def validate_wp6_production_source_contract(
         )
     commit_failure_branch = time_loop_source[
         commit_failure_start:successful_recovery_end
-        + len("std::rethrow_exception(commit_failure);")
+        + len("restoreAcceptedGeneratedStateAndRethrow(commit_failure);")
     ]
     _require_tokens_in_order(
         commit_failure_branch,
@@ -583,8 +621,7 @@ def validate_wp6_production_source_contract(
             "catch (...)",
             "attempt_state.commit();",
             "throw;",
-            "restoreAcceptedGeneratedState();",
-            "std::rethrow_exception(commit_failure);",
+            "restoreAcceptedGeneratedStateAndRethrow(commit_failure);",
         ),
         "TimeLoop publication fail-stop disarms attempt rollback",
     )

@@ -257,9 +257,11 @@ def test_wp6_consensus_filters_are_exact_and_new_tu_is_rank_generic():
         "LevelSetMaintenanceTransactionConsensusMPI."
         "FourRankCommitRejectAndContentRevisionAgreement",
     }
+    # The MPI tests are registered with svmp_add_gtest(... FILTER "<filter>"
+    # ...); the earlier add_test form passed --gtest_filter=<filter>.
     parsed_filters = re.findall(
         r"--gtest_filter=([^\s)]+)", cmake_text
-    )
+    ) + re.findall(r'\bFILTER\s+"([^"]+)"', cmake_text)
     transaction_filters = [
         token
         for token in parsed_filters
@@ -318,6 +320,7 @@ def test_wp6_production_source_contract_is_fail_closed(tmp_path):
     accepted_callback_start = (
         "callbacks.on_step_accepted = "
         "[&](svmp::FE::timestepping::TimeHistory& h) {\n"
+        "    releaseActiveCutRestoreRetention(*cut_refresh_cache);\n"
         "    requireCollectiveLevelSetMaintenanceRequestSchedule("
     )
     assert source.count(accepted_callback_start) == 1
@@ -328,8 +331,8 @@ def test_wp6_production_source_contract_is_fail_closed(tmp_path):
         source.replace(
             accepted_callback_start,
             accepted_callback_start.replace(
-                " {\n    requireCollective",
-                " {\n    (void)h;\n    requireCollective",
+                "\n    requireCollective",
+                "\n    (void)h;\n    requireCollective",
             ),
             1,
         ),
