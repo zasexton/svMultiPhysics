@@ -10508,45 +10508,6 @@ TEST(MovingDomainPhysics, NavierStokesActiveDomainPositiveUsesPositiveCutVolumeS
     }
 }
 
-TEST(MovingDomainPhysics, NavierStokesSmoothedIndicatorActiveDomainUsesWeightedCellKernels)
-{
-    constexpr int interface_marker = 50;
-    const auto mesh = makeMesh();
-    auto u_space = makeVelocitySpace(mesh);
-    auto p_space = makePressureSpace(mesh);
-    auto opts = baseNavierStokesOptions();
-    opts.enable_vms = true;
-    opts.input_configuration_schema_version = 1;
-    opts.explicit_legacy_configuration = true;
-
-    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
-        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
-        .interface_marker = interface_marker,
-        .level_set_field_name = "phi",
-        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
-        .active_domain_method = ns::FreeSurfaceActiveDomainMethod::SmoothedIndicator,
-        .active_domain_smoothing_width = 0.125,
-    });
-
-    FE::systems::FESystem system(mesh);
-    system.addField(FE::systems::FieldSpec{
-        .name = "phi",
-        .space = p_space,
-        .components = 1,
-        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
-    });
-
-    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
-    module.registerOn(system);
-
-    const auto& equations = system.operatorDefinition("equations");
-    EXPECT_FALSE(equations.cells.empty());
-    EXPECT_TRUE(equations.cut_volumes.empty());
-    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellIntegral));
-    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::SmoothHeaviside));
-    EXPECT_FALSE(formulationRecordsContain(system, FormExprType::CutVolumeIntegral));
-}
-
 TEST(MovingDomainPhysics, NavierStokesRejectsCutCellStabilizationOnFittedSurface)
 {
     constexpr int marker = 45;
@@ -11558,9 +11519,6 @@ TEST(MovingDomainPhysics,
             .level_set_field_name = "phi_legacy_schema",
             .active_domain =
                 ns::FreeSurfaceActiveDomain::LevelSetNegative,
-            .active_domain_method =
-                ns::FreeSurfaceActiveDomainMethod::SmoothedIndicator,
-            .active_domain_smoothing_width = 0.125,
         });
 
     FE::systems::FESystem system(mesh);
@@ -11590,7 +11548,7 @@ TEST(MovingDomainPhysics,
         artifact->json.find(
             "one_phase_liquid_prescribed_exterior_pressure"),
         std::string::npos);
-    EXPECT_NE(artifact->json.find("\"active_domain_method\":\"SmoothedIndicator\""),
+    EXPECT_NE(artifact->json.find("\"active_domain_method\":\"CutVolume\""),
               std::string::npos);
 }
 
@@ -14301,10 +14259,6 @@ TEST(MovingDomainPhysics,
     expect_rejected([](auto& opts) {
         opts.free_surface.front().generated_interface_geometry =
             "HighOrderImplicit";
-    });
-    expect_rejected([](auto& opts) {
-        opts.free_surface.front().active_domain_method =
-            ns::FreeSurfaceActiveDomainMethod::SmoothedIndicator;
     });
     expect_rejected([](auto& opts) {
         opts.free_surface.front().active_domain_smoothing_width = 0.25;
