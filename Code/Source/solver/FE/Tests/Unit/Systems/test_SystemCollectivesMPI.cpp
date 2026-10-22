@@ -164,6 +164,39 @@ TEST(SystemCollectivesMPI, PhaseFailureOnOneRankThrowsOnEveryRank)
     }
 }
 
+TEST(SystemCollectivesMPI, SizeSumAndPreparationPhaseAgreeOnEveryRank)
+{
+    const auto comm = world();
+    const int rank = worldRank();
+    const int size = worldSize();
+    // Rank r contributes r + 1.
+    EXPECT_EQ(systems::collectiveSumSize(static_cast<std::size_t>(rank + 1), comm),
+              static_cast<std::size_t>(size * (size + 1) / 2));
+    EXPECT_EQ(systems::collectiveSumSize(7u, systems::CollectiveCommunicator{}), 7u);
+
+    EXPECT_NO_THROW(systems::requireCollectivePhasePreparation(nullptr, comm, "ok"));
+    if (size < 2) {
+        GTEST_SKIP() << "needs at least two ranks";
+    }
+    std::exception_ptr local_failure;
+    if (rank == size - 1) {
+        local_failure = std::make_exception_ptr(std::invalid_argument("local"));
+    }
+    if (rank == size - 1) {
+        EXPECT_THROW(systems::requireCollectivePhasePreparation(local_failure, comm, "p2"),
+                     std::invalid_argument);
+    } else {
+        try {
+            systems::requireCollectivePhasePreparation(local_failure, comm, "p2");
+            ADD_FAILURE() << "expected a remote-failure exception";
+        } catch (const std::runtime_error& error) {
+            EXPECT_EQ(std::string(error.what()),
+                      "[svMultiPhysics::Application] Another active FE communicator rank "
+                      "failed local preparation for collective phase 'p2'.");
+        }
+    }
+}
+
 TEST(SystemCollectivesMPI, MaximaAndIndexUnionCoverEveryRank)
 {
     const auto comm = world();

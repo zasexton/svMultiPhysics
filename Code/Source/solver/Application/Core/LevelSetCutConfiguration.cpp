@@ -68,13 +68,7 @@ const char* activeSideName(LevelSetActiveSide side) noexcept
              : "LevelSetPositive";
 }
 
-svmp::FE::geometry::CutIntegrationSide cutIntegrationSide(
-    LevelSetActiveSide side) noexcept
-{
-  return side == LevelSetActiveSide::Negative
-             ? svmp::FE::geometry::CutIntegrationSide::Negative
-             : svmp::FE::geometry::CutIntegrationSide::Positive;
-}
+using svmp::FE::level_set::cutIntegrationSide;
 
 const char* fieldSourceKindName(
     svmp::FE::systems::FieldSourceKind kind) noexcept

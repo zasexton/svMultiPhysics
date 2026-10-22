@@ -1,6 +1,7 @@
 #include "Application/Core/LevelSetMaintenanceTransactionConsensus.h"
 
 #include "Application/Core/ApplicationDriver.h"
+#include "FE/LevelSet/LevelSetMaintenanceSchedule.h"
 #include "FE/Systems/SystemCollectives.h"
 #include "Mesh/Core/MeshComm.h"
 
@@ -174,34 +175,22 @@ CanonicalWords canonicalActiveTransaction(
 
 namespace {
 
-// Report text of a failed agreement; FE writes the line rank-locally before
-// the caller acts on the collective result.
-constexpr svmp::FE::systems::CanonicalWordsDisagreementReport
-    kMaintenanceCanonicalWordsReport{
-        "[svMultiPhysics::Application]",
-        "Level-set maintenance canonical words disagree",
-        "maintenance_consensus_word_disagreement"};
-
+// The agreement and its report text are in
+// FE/LevelSet/LevelSetMaintenanceSchedule.
 bool canonicalWordsAgree(
     std::span<const std::uint64_t> local_words,
     const svmp::MeshComm& comm,
     std::string_view context)
 {
-  if (!comm.is_parallel()) {
-    return true;
-  }
-
 #ifdef MESH_HAS_MPI
-  return svmp::FE::systems::collectiveCanonicalWordsAgree(
+  return svmp::FE::level_set::collectiveLevelSetMaintenanceCanonicalWordsAgree(
       local_words,
       svmp::FE::systems::CollectiveCommunicator(
           comm.native(), static_cast<int>(comm.rank()), comm.size()),
-      context,
-      kMaintenanceCanonicalWordsReport);
+      context);
 #else
-  (void)local_words;
-  (void)context;
-  return true;
+  return svmp::FE::level_set::collectiveLevelSetMaintenanceCanonicalWordsAgree(
+      local_words, svmp::FE::systems::CollectiveCommunicator{}, context);
 #endif
 }
 

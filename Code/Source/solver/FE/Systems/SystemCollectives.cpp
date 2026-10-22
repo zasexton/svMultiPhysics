@@ -160,6 +160,28 @@ std::pair<std::uint64_t, std::uint64_t> collectiveMinMaxUint64(
   return {local, local};
 }
 
+// Moved from Application/Core/ApplicationDriver.cpp (globalSumSize, lines
+// 7676-7692 at 7d9ddc8a) with the body unchanged.
+std::size_t collectiveSumSize(
+    std::size_t local,
+    const CollectiveCommunicator& comm)
+{
+  auto local_count = static_cast<long long>(local);
+#if FE_HAS_MPI
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (initialized && comm.size() > 1) {
+    long long global_count = 0;
+    MPI_Allreduce(&local_count, &global_count, 1, MPI_LONG_LONG, MPI_SUM, comm.native());
+    return static_cast<std::size_t>(std::max<long long>(0, global_count));
+  }
+#else
+  (void)comm;
+#endif
+
+  return static_cast<std::size_t>(std::max<long long>(0, local_count));
+}
+
 void requireCollectivePhase(
     const std::exception_ptr& local_failure,
     const CollectiveCommunicator& comm,
@@ -175,6 +197,18 @@ void requireCollectivePhase(
   throw std::runtime_error(
       "[svMultiPhysics::Application] Another active FE communicator rank " +
       std::string(failure) + " '" + std::string(phase) + "'.");
+}
+
+void requireCollectivePhasePreparation(
+    const std::exception_ptr& local_failure,
+    const CollectiveCommunicator& comm,
+    std::string_view phase)
+{
+  requireCollectivePhase(
+      local_failure,
+      comm,
+      "failed local preparation for collective phase",
+      phase);
 }
 
 #if FE_HAS_MPI

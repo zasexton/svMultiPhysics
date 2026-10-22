@@ -66,6 +66,15 @@ CONSERVATIVE_PHASE_OPERATOR_SOURCE_PATH = (
     / "LevelSet"
     / "LevelSetConservativePhaseOperator.cpp"
 )
+CONSERVATIVE_PHASE_WORKFLOW_SOURCE_PATH = (
+    ROOT
+    / "Code"
+    / "Source"
+    / "solver"
+    / "FE"
+    / "LevelSet"
+    / "LevelSetConservativePhaseWorkflow.cpp"
+)
 
 
 def load_runner():
@@ -343,16 +352,19 @@ def test_wp6_production_source_contract_is_fail_closed(tmp_path):
             delayed_accepted_preflight
         )
 
+    workflow_source = CONSERVATIVE_PHASE_WORKFLOW_SOURCE_PATH.read_text(
+        encoding="utf-8"
+    )
     collective_graph_staleness_gate = (
         "  const bool graph_rebuild_required =\n"
         "      globalAnyBool(!local_graph_is_current, comm);"
     )
-    assert source.count(collective_graph_staleness_gate) == 1
+    assert workflow_source.count(collective_graph_staleness_gate) == 1
     local_graph_staleness_source = (
-        tmp_path / "ApplicationDriver-local-graph-staleness.cpp"
+        tmp_path / "LevelSetConservativePhaseWorkflow-local-graph-staleness.cpp"
     )
     local_graph_staleness_source.write_text(
-        source.replace(
+        workflow_source.replace(
             collective_graph_staleness_gate,
             "  const bool graph_rebuild_required = "
             "!local_graph_is_current;",
@@ -364,7 +376,32 @@ def test_wp6_production_source_contract_is_fail_closed(tmp_path):
         ValueError, match="collective conservative graph staleness gate"
     ):
         runner.validate_wp6_production_source_contract(
-            local_graph_staleness_source
+            APPLICATION_DRIVER_SOURCE_PATH,
+            TIME_LOOP_SOURCE_PATH,
+            CONSERVATIVE_PHASE_OPERATOR_SOURCE_PATH,
+            local_graph_staleness_source,
+        )
+
+    driver_graph_forward = (
+        "return svmp::FE::level_set::requireCurrentConservativePhaseGraph("
+    )
+    assert source.count(driver_graph_forward) == 1
+    driver_own_graph_source = (
+        tmp_path / "ApplicationDriver-own-graph-currentness.cpp"
+    )
+    driver_own_graph_source.write_text(
+        source.replace(
+            driver_graph_forward,
+            "return requireDriverConservativePhaseGraph(",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        ValueError, match="FE conservative graph currentness"
+    ):
+        runner.validate_wp6_production_source_contract(
+            driver_own_graph_source
         )
 
     local_graph_stamp = (

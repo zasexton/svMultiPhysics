@@ -124,6 +124,10 @@ struct ActiveCutVolumeRequest {
   bool require_production_qualified_implicit_cut_backend{false};
 };
 
+/// The cut-integration side of an active side.
+[[nodiscard]] geometry::CutIntegrationSide cutIntegrationSide(
+    LevelSetActiveSide side) noexcept;
+
 [[nodiscard]] LevelSetGeneratedInterfaceOptions
 generatedInterfaceOptionsForActiveCut(
     const ActiveCutVolumeRequest& request, int mesh_dimension);
@@ -143,6 +147,12 @@ volumeOptionsForCutMaintenance(
 [[nodiscard]] std::optional<int> resolvedActiveCutVolumeInterfaceMarker(
     const systems::FESystem& system,
     const ActiveCutVolumeRequest& request);
+
+/// The generated interface marker of an optional cut-volume request: none
+/// without a request, otherwise resolvedActiveCutVolumeInterfaceMarker.
+[[nodiscard]] std::optional<int> generatedCutContextMarkerForMaintenance(
+    const systems::FESystem& system,
+    const std::optional<ActiveCutVolumeRequest>& volume_cut_request);
 
 // ---------------------------------------------------------------------------
 // Typed domains of a level-set geometry

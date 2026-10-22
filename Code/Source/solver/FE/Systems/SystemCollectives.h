@@ -104,6 +104,12 @@ private:
     std::uint64_t local,
     const CollectiveCommunicator& comm);
 
+/// Sum of @p local over all ranks, reduced as long long and clamped below at
+/// zero.
+[[nodiscard]] std::size_t collectiveSumSize(
+    std::size_t local,
+    const CollectiveCommunicator& comm);
+
 /**
  * @brief Agree on a rank-local failure of one collective phase.
  *
@@ -116,6 +122,18 @@ void requireCollectivePhase(
     const std::exception_ptr& local_failure,
     const CollectiveCommunicator& comm,
     std::string_view failure,
+    std::string_view phase);
+
+/**
+ * @brief requireCollectivePhase for a failed local preparation.
+ *
+ * The other ranks throw "[svMultiPhysics::Application] Another active FE
+ * communicator rank failed local preparation for collective phase
+ * '<phase>'.".
+ */
+void requireCollectivePhasePreparation(
+    const std::exception_ptr& local_failure,
+    const CollectiveCommunicator& comm,
     std::string_view phase);
 
 /**

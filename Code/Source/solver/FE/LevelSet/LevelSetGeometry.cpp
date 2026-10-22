@@ -21,7 +21,6 @@
 namespace svmp {
 namespace FE {
 namespace level_set {
-namespace {
 
 // The cut-volume request functions below were moved verbatim from
 // Application/Core/LevelSetCutConfiguration.cpp (free-surface refactor, C2a).
@@ -33,6 +32,8 @@ svmp::FE::geometry::CutIntegrationSide cutIntegrationSide(
              ? svmp::FE::geometry::CutIntegrationSide::Negative
              : svmp::FE::geometry::CutIntegrationSide::Positive;
 }
+
+namespace {
 
 void mixRequestPolicyHash(std::uint64_t& h, std::uint64_t value) noexcept
 {
@@ -257,6 +258,21 @@ std::optional<int> resolvedActiveCutVolumeInterfaceMarker(
   key.isovalue = static_cast<svmp::FE::Real>(request.isovalue);
   key.requested_marker = request.requested_interface_marker;
   return svmp::FE::interfaces::stableGeneratedInterfaceMarker(key);
+}
+
+// Moved from Application/Core/ApplicationDriver.cpp (lines 16390-16400 at
+// 7d9ddc8a); the driver passed its maintenance request, whose cut-volume
+// request is now the argument.
+std::optional<int> generatedCutContextMarkerForMaintenance(
+    const svmp::FE::systems::FESystem& system,
+    const std::optional<ActiveCutVolumeRequest>& volume_cut_request)
+{
+  if (!volume_cut_request.has_value()) {
+    return std::nullopt;
+  }
+  const auto& cut_request = *volume_cut_request;
+  return resolvedActiveCutVolumeInterfaceMarker(
+      system, cut_request);
 }
 
 // ---------------------------------------------------------------------------

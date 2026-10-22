@@ -71,6 +71,15 @@ CONSERVATIVE_PHASE_OPERATOR_SOURCE = (
     / "LevelSet"
     / "LevelSetConservativePhaseOperator.cpp"
 )
+CONSERVATIVE_PHASE_WORKFLOW_SOURCE = (
+    REPOSITORY_ROOT
+    / "Code"
+    / "Source"
+    / "solver"
+    / "FE"
+    / "LevelSet"
+    / "LevelSetConservativePhaseWorkflow.cpp"
+)
 DEFAULT_REGISTRY = SCRIPT_PATH.with_name(
     "free_surface_wp6_conservative_phase_qualification_matrix.json"
 )
@@ -246,18 +255,34 @@ def validate_wp6_production_source_contract(
     conservative_phase_operator_source_path: Path = (
         CONSERVATIVE_PHASE_OPERATOR_SOURCE
     ),
+    conservative_phase_workflow_source_path: Path = (
+        CONSERVATIVE_PHASE_WORKFLOW_SOURCE
+    ),
 ) -> dict[str, Any]:
     source = source_path.read_text(encoding="utf-8")
     time_loop_source = time_loop_source_path.read_text(encoding="utf-8")
     conservative_phase_operator_source = (
         conservative_phase_operator_source_path.read_text(encoding="utf-8")
     )
+    conservative_phase_workflow_source = (
+        conservative_phase_workflow_source_path.read_text(encoding="utf-8")
+    )
 
-    current_graph_start = source.find(
+    # The conservative-phase graph helpers live in the FE workflow; the
+    # driver's helper of the same name forwards to it.
+    if (
+        "return svmp::FE::level_set::requireCurrentConservativePhaseGraph("
+        not in source
+    ):
+        raise ValueError(
+            "WP-6 production source contract requires the driver to use "
+            "the FE conservative graph currentness handling"
+        )
+    current_graph_start = conservative_phase_workflow_source.find(
         "svmp::FE::level_set::LevelSetP1PhaseTransportGraph&\n"
         "requireCurrentConservativePhaseGraph("
     )
-    current_graph_end = source.find(
+    current_graph_end = conservative_phase_workflow_source.find(
         "svmp::FE::level_set::LevelSetP1PhaseProjectionOptions\n"
         "conservativePhaseProjectionOptions(",
         current_graph_start,
@@ -267,7 +292,9 @@ def validate_wp6_production_source_contract(
             "WP-6 production source contract cannot isolate conservative "
             "graph currentness handling"
         )
-    current_graph_helper = source[current_graph_start:current_graph_end]
+    current_graph_helper = conservative_phase_workflow_source[
+        current_graph_start:current_graph_end
+    ]
     _require_tokens_in_order(
         current_graph_helper,
         (

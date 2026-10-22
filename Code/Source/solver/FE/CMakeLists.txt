@@ -951,6 +951,7 @@ set(FE_LEVELSET_HEADERS
     LevelSet/LevelSetConservativePhaseState.h
     LevelSet/LevelSetConservativePhaseTransport.h
     LevelSet/LevelSetConservativePhaseRegions.h
+    LevelSet/LevelSetConservativePhaseWorkflow.h
     LevelSet/LevelSetOptions.h
     LevelSet/LevelSetTransport.h
     LevelSet/LevelSetVelocityExtensionConstraint.h
@@ -958,10 +959,12 @@ set(FE_LEVELSET_HEADERS
     LevelSet/LevelSetCurvatureProjection.h
     LevelSet/LevelSetCurvatureSamples.h
     LevelSet/LevelSetInterfaceLifecycle.h
+    LevelSet/LevelSetMaintenanceSchedule.h
     LevelSet/LevelSetMaintenanceSubstage.h
     LevelSet/LevelSetImplicitCutQuadratureBackend.h
     LevelSet/LevelSetVolume.h
     LevelSet/LevelSetKinematicReconciliation.h
+    LevelSet/LevelSetPhaseGeometryReconciliation.h
     LevelSet/LevelSetSignDefinitePatchBounds.h
     LevelSet/LevelSetInterfacePreservingRedistancing.h
     LevelSet/LevelSetInterfacePreservingRedistancing3D.h
@@ -977,6 +980,7 @@ set(FE_LEVELSET_SOURCES
     LevelSet/LevelSetConservativePhaseState.cpp
     LevelSet/LevelSetConservativePhaseTransport.cpp
     LevelSet/LevelSetConservativePhaseRegions.cpp
+    LevelSet/LevelSetConservativePhaseWorkflow.cpp
     LevelSet/LevelSetTransport.cpp
     LevelSet/LevelSetVelocityExtensionConstraint.cpp
     LevelSet/LevelSetCellEvaluator.cpp
@@ -984,8 +988,10 @@ set(FE_LEVELSET_SOURCES
     LevelSet/LevelSetCurvatureSamples.cpp
     LevelSet/LevelSetInterfaceLifecycle.cpp
     LevelSet/LevelSetImplicitCutQuadratureBackend.cpp
+    LevelSet/LevelSetMaintenanceSchedule.cpp
     LevelSet/LevelSetVolume.cpp
     LevelSet/LevelSetKinematicReconciliation.cpp
+    LevelSet/LevelSetPhaseGeometryReconciliation.cpp
     LevelSet/LevelSetSignDefinitePatchBounds.cpp
     LevelSet/LevelSetInterfacePreservingRedistancing.cpp
     LevelSet/LevelSetInterfacePreservingRedistancing3D.cpp
@@ -2505,6 +2511,7 @@ if(FE_BUILD_TESTS)
             Tests/Unit/LevelSet/test_LevelSetConservativePhaseRegions.cpp
             Tests/Unit/LevelSet/test_LevelSetConservativePhaseState.cpp
             Tests/Unit/LevelSet/test_LevelSetConservativePhaseTransport.cpp
+            Tests/Unit/LevelSet/test_LevelSetConservativePhaseWorkflow.cpp
             Tests/Unit/LevelSet/test_LevelSetDiagnostics.cpp
             Tests/Unit/LevelSet/test_LevelSetGeometry.cpp
             Tests/Unit/LevelSet/test_FreeSurfaceSnapshotCompactRecords.cpp
