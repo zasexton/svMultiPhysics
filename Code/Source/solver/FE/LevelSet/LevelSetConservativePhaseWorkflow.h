@@ -21,8 +21,7 @@
  *   sampled at the graph nodes, with exact collective provenance checks;
  * - applies a candidate: advances q on the fixed graph, stages the
  *   transported and limited solutions, refreshes the cut geometry inside a
- *   transaction, reinitializes the level set where due, reconciles the
- *   geometry with the transported nodal moments
+ *   transaction, reconciles the geometry with the transported nodal moments
  *   (LevelSetPhaseGeometryReconciliation), validates and logs the result;
  * - rolls a candidate back, and publishes the flux artifacts of an accepted
  *   step.
@@ -44,7 +43,7 @@
 #include "LevelSet/LevelSetMaintenanceSubstage.h"
 #include "LevelSet/LevelSetOptions.h"
 #include "LevelSet/LevelSetPhaseGeometryReconciliation.h"
-#include "LevelSet/LevelSetReinitialization.h"
+#include "LevelSet/LevelSetWallContactConstraint.h"
 #include "Systems/FESystem.h"
 #include "Systems/SystemCollectives.h"
 
@@ -146,12 +145,6 @@ public:
     virtual void rollback() = 0;
 };
 
-/// What a projection reinitialization staged for one request.
-struct ConservativePhaseReinitializationResult {
-    bool applied{false};
-    LevelSetSignedDistanceRepairResult repair{};
-};
-
 /// Observer of each staged maintenance substage, with the FE-ordered solution
 /// before and after it (for example a maintenance energy ledger).
 using ConservativePhaseStageObserver = std::function<void(
@@ -199,23 +192,6 @@ struct ConservativePhaseWorkflowHost {
             accepted_contact_stage_constraints)>
         wall_contact_constraints{};
 
-    /// Stages the projection reinitialization of the level set of request
-    /// @p request_index into @p candidate, when that request reinitializes
-    /// by projection (S9: reinitialization stage of the maintenance
-    /// pipeline).
-    std::function<ConservativePhaseReinitializationResult(
-        timestepping::TimeHistory& history,
-        std::size_t request_index,
-        FieldId level_set_field,
-        Real endpoint_time,
-        std::vector<Real>& candidate,
-        std::span<const systems::FreeSurfaceAcceptedContactStageState>
-            accepted_contact_stages,
-        std::span<const LevelSetWallContactConstraint>
-            accepted_contact_stage_constraints,
-        std::span<const Real> accepted_contact_stage_solution)>
-        stage_projection_reinitialization{};
-
     /// Values of @p field at the vertices of the primary mesh, vertex-major
     /// with @p components values per vertex; @p action names the caller in
     /// errors.  Rank-local (C3b: vertex-field evaluation of the level-set
@@ -255,7 +231,8 @@ struct ConservativePhaseContactStageCandidate {
 
 /// Builds the contact stages of a staged candidate solution, refreshing the
 /// geometry through the given transaction (Physics: the free-surface contact
-/// stage).  Called once per candidate, before reinitialization.
+/// stage).  Called once per candidate, before the post-transport geometry
+/// refresh.
 using ConservativePhaseContactStageCallback =
     std::function<ConservativePhaseContactStageCandidate(
         std::span<const Real>, ConservativePhaseGeometryTransaction*)>;
@@ -306,9 +283,10 @@ struct ConservativePhaseCandidateStageSnapshot {
   std::vector<ConservativePhaseCandidateStageRequest> requests{};
 };
 
+// The post_reinitialization_* measures are taken after the geometry refresh
+// that follows the transport, before the local reconciliation; they keep
+// their names, which the log and the accepted-step readers use.
 struct ConservativePhaseMaintenanceStageLedger {
-  bool reinitialization_due{false};
-  bool reinitialization_applied{false};
   svmp::FE::Real raw_post_transport_phase_measure{0.0};
   svmp::FE::Real post_limit_phase_measure{0.0};
   svmp::FE::Real raw_post_transport_geometry_measure{0.0};
@@ -327,8 +305,6 @@ struct ConservativePhaseMaintenanceStageLedger {
   svmp::FE::level_set::LevelSetP1PhaseTransportStageResult
       transport_stage{};
   svmp::FE::level_set::LevelSetPhaseRegionLedgerResult region_ledger{};
-  svmp::FE::level_set::LevelSetSignedDistanceRepairResult
-      reinitialization{};
   ConservativePhaseGeometryReconciliationResult reconciliation{};
   std::optional<svmp::FE::level_set::LevelSetP1PhaseSplitStageProvenance>
       split_stage_provenance{};
@@ -536,11 +512,10 @@ void writeAcceptedConservativePhaseArtifacts(
  *        in @p temporal_stage to history.u().
  *
  * On success the result keeps the active geometry transaction for the
- * caller's commit or rollback.  A Courant, reinitialization or
- * reconciliation rejection returns accept_step = false with the transaction
- * rolled back.  Uses host.fe_system, host.begin_geometry_transaction,
- * host.prospective_request_schedule, host.wall_contact_constraints and
- * host.stage_projection_reinitialization.
+ * caller's commit or rollback.  A Courant or reconciliation rejection
+ * returns accept_step = false with the transaction rolled back.  Uses
+ * host.fe_system, host.begin_geometry_transaction,
+ * host.prospective_request_schedule and host.wall_contact_constraints.
  */
 [[nodiscard]] ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     const ConservativePhaseWorkflowHost& host,

@@ -13,7 +13,7 @@
 #include "LevelSet/LevelSetMaintenanceSubstage.h"
 #include "LevelSet/LevelSetOptions.h"
 #include "LevelSet/LevelSetPhaseGeometryReconciliation.h"
-#include "LevelSet/LevelSetReinitialization.h"
+#include "LevelSet/LevelSetWallContactConstraint.h"
 #include "LevelSet/LevelSetRestart.h"
 #include "LevelSet/LevelSetTransport.h"
 #include "LevelSet/LevelSetVolume.h"

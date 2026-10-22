@@ -25,7 +25,7 @@
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceStepContext.h"
 
 #include "FE/Core/Types.h"
-#include "FE/LevelSet/LevelSetReinitialization.h"
+#include "FE/LevelSet/LevelSetWallContactConstraint.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/TimeStepping/StepParticipants.h"
 #include "FE/TimeStepping/TimeHistory.h"

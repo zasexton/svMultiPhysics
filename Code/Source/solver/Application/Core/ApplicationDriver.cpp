@@ -36,13 +36,13 @@
 #include "FE/LevelSet/LevelSetImplicitCutQuadratureBackend.h"
 #include "FE/LevelSet/LevelSetInterfaceLifecycle.h"
 #include "FE/LevelSet/LevelSetKinematicReconciliation.h"
-#include "FE/LevelSet/LevelSetReinitialization.h"
 #include "FE/LevelSet/LevelSetSignDefinitePatchBounds.h"
 #include "FE/LevelSet/LevelSetInterfacePreservingRedistancing.h"
 #include "FE/LevelSet/LevelSetInterfacePreservingRedistancing3D.h"
 #include "FE/LevelSet/LevelSetTransport.h"
 #include "FE/LevelSet/LevelSetVelocityExtensionConstraint.h"
 #include "FE/LevelSet/LevelSetVolume.h"
+#include "FE/LevelSet/LevelSetWallContactConstraint.h"
 #include "FE/Geometry/MappingFactory.h"
 #include "FE/Geometry/CutQuadratureMapping.h"
 #include "FE/Interfaces/GeneratedActiveBoundaryDomain.h"
@@ -1518,14 +1518,6 @@ std::uint64_t levelSetMaintenanceRequestActionBits(
     const LevelSetMaintenanceRequest& request,
     int completed_step)
 {
-  const bool conservative_reinitialization_due =
-      request.configuration->transport.conservative_phase.enabled &&
-      svmp::FE::level_set::shouldReinitializeLevelSet(
-          request.configuration->transport.reinitialization, completed_step);
-  const bool accepted_reinitialization_due =
-      !request.configuration->transport.conservative_phase.enabled &&
-      svmp::FE::level_set::shouldReinitializeLevelSet(
-          request.configuration->transport.reinitialization, completed_step);
   const bool accepted_kinematic_due =
       !request.configuration->transport.conservative_phase.enabled &&
       svmp::FE::level_set::shouldApplyLevelSetKinematicReconciliation(
@@ -1554,22 +1546,21 @@ std::uint64_t levelSetMaintenanceRequestActionBits(
   const bool functional_due =
       request.configuration->transport.conservative_phase.enabled ||
       request.configuration->transport.bound_preserving.enabled ||
-      accepted_reinitialization_due ||
       accepted_kinematic_due ||
       accepted_patch_bounds_due ||
       accepted_redistancing_due;
   std::uint64_t bits = 0u;
   bits |= request.configuration->transport.conservative_phase.enabled ? (1ull << 0u) : 0u;
   bits |= request.configuration->transport.bound_preserving.enabled ? (1ull << 1u) : 0u;
-  bits |= conservative_reinitialization_due ? (1ull << 2u) : 0u;
+  // Bit 2 described the retired conservative-phase reinitialization.
   bits |=
       request.configuration->transport.velocity.source ==
               svmp::FE::level_set::LevelSetVelocitySource::
                   ConstantVector
           ? (1ull << 3u)
           : (1ull << 4u);
-  bits |= accepted_reinitialization_due ? (1ull << 5u) : 0u;
-  // Bits 6 and 7 described the retired global volume correction.
+  // Bit 5 described the retired projection reinitialization and bits 6 and
+  // 7 the retired global volume correction.
   bits |= functional_due ? (1ull << 8u) : 0u;
   bits |= artifact_due ? (1ull << 9u) : 0u;
   bits |= request.configuration->transport.conservative_phase.reconcile_geometry
@@ -1751,28 +1742,6 @@ canonicalLevelSetMaintenanceRequestSchedule(
       appendMaintenanceScheduleOptionalReal(
           words, boundary.literal_inflow_value);
     }
-
-    appendMaintenanceScheduleBool(
-        words, request.configuration->transport.reinitialization.enabled);
-    appendMaintenanceScheduleEnum(
-        words, request.configuration->transport.reinitialization.method);
-    appendMaintenanceScheduleSigned(
-        words, request.configuration->transport.reinitialization.cadence_steps);
-    appendMaintenanceScheduleSigned(
-        words, request.configuration->transport.reinitialization.max_iterations);
-    appendMaintenanceScheduleReal(
-        words,
-        request.configuration->transport.reinitialization.pseudo_time_step_scale);
-    appendMaintenanceScheduleReal(
-        words, request.configuration->transport.reinitialization.interface_band_width);
-    appendMaintenanceScheduleReal(
-        words,
-        request.configuration->transport.reinitialization.signed_distance_tolerance);
-    appendMaintenanceScheduleReal(
-        words, request.configuration->transport.reinitialization.preserve_band_width);
-    appendMaintenanceScheduleReal(
-        words,
-        request.configuration->transport.reinitialization.max_zero_set_displacement);
 
     appendMaintenanceScheduleBool(
         words,
@@ -3659,8 +3628,7 @@ void logLevelSetMaintenanceCoverageDiagnostics(
 
   std::set<std::string> transport_maintained_fields;
   for (const auto& request : maintenance_requests) {
-    if (request.configuration->transport.reinitialization.enabled ||
-        request.configuration->transport.kinematic_reconciliation.enabled ||
+    if (request.configuration->transport.kinematic_reconciliation.enabled ||
         request.configuration->transport.sign_definite_patch_bounds.enabled ||
         request.configuration->transport.interface_preserving_redistancing.enabled) {
       transport_maintained_fields.insert(request.configuration->transport.level_set.field_name);
@@ -3668,8 +3636,6 @@ void logLevelSetMaintenanceCoverageDiagnostics(
     application::core::oopCout()
         << "[svMultiPhysics::Application] Level-set maintenance diagnostic"
         << " field='" << request.configuration->transport.level_set.field_name << "'"
-        << " reinitialization="
-        << (request.configuration->transport.reinitialization.enabled ? "enabled" : "disabled")
         << " bound_preserving="
         << (request.configuration->transport.bound_preserving.enabled ? "enabled" : "disabled")
         << " kinematic_reconciliation="
@@ -3685,10 +3651,7 @@ void logLevelSetMaintenanceCoverageDiagnostics(
         << " conservation_diagnostic="
         << svmp::FE::level_set::levelSetConservationDiagnosticName(
                svmp::FE::level_set::levelSetConservationDiagnostic(
-                   request.configuration->transport.transport_form,
-                   request.configuration->transport.reinitialization))
-        << " reinitialization_cadence="
-        << request.configuration->transport.reinitialization.cadence_steps
+                   request.configuration->transport.transport_form))
         << " curvature_projection_cadence="
         << request.configuration->curvature_projection_cadence_steps
         << " curvature_projection_recovery_mode="
@@ -3712,7 +3675,7 @@ void logLevelSetMaintenanceCoverageDiagnostics(
     }
     application::core::oopCout()
         << "[svMultiPhysics::Application] WARNING unfitted free-surface "
-        << "level-set has no enabled reinitialization or volume-correction request"
+        << "level-set has no enabled accepted-step maintenance request"
         << " field='" << request.level_set_field_name << "'"
         << " domain_id='" << request.domain_id << "'"
         << " active_side=" << activeSideName(request.active_side)
@@ -4151,7 +4114,6 @@ using svmp::Physics::formulations::navier_stokes::free_surface::resolveFreeSurfa
 using svmp::Physics::formulations::navier_stokes::free_surface::acceptedContactStageRevision;
 using svmp::Physics::formulations::navier_stokes::free_surface::evaluateAcceptedFreeSurfaceContactStages;
 using svmp::Physics::formulations::navier_stokes::free_surface::makeAcceptedSnapshotWallConstraint;
-using svmp::Physics::formulations::navier_stokes::free_surface::acceptedWallConstraintFrameIsComplete;
 using svmp::Physics::formulations::navier_stokes::free_surface::canonicalizeAcceptedWallConstraints;
 using svmp::Physics::formulations::navier_stokes::free_surface::captureAcceptedContactStageWallConstraints;
 using svmp::Physics::formulations::navier_stokes::free_surface::bindAcceptedFreeSurfaceContactStagesToEndpointRevision;
@@ -4785,40 +4747,12 @@ applyLevelSetBoundPreservingCandidates(
   return application_result;
 }
 
-// Decision D4 gives the contact angle one owner, the momentum-side Young
-// term.  Production redistancing may therefore only rescale accepted contact
-// cells.  The retired repair-to-target kind would reset them to the declared
-// angle and so combine a second, geometric angle mechanism with the Young
-// term; it fails closed on every rank.
-void requireAnglePreservingWallMaintenance(
-    std::span<const svmp::FE::level_set::LevelSetWallContactConstraint>
-        constraints,
-    const svmp::MeshComm& comm,
-    std::string_view field_name)
-{
-  const bool local_angle_preserving = std::all_of(
-      constraints.begin(), constraints.end(), [](const auto& constraint) {
-        return constraint.kind ==
-               svmp::FE::level_set::LevelSetWallContactConstraintKind::
-                   PreserveAcceptedAngle;
-      });
-  if (globalMinDouble(local_angle_preserving ? 1.0 : 0.0, comm) != 1.0) {
-    throw std::logic_error(
-        "[svMultiPhysics::Application] Wall-aware level-set maintenance for field '" +
-        std::string(field_name) +
-        "' received a repair-to-target wall-contact constraint.  Production "
-        "maintenance only rescales accepted contact cells; the momentum "
-        "Young term is the sole contact-angle mechanism (decision D4).");
-  }
-}
-
+// The accepted wall-contact cells of one maintained level-set field (the
+// conservative-phase reconciliation leaves them unchanged), and the accepted
+// dynamic contact stage they were taken from, if any.
 struct LevelSetWallAwareMaintenanceContext {
   std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
       local_constraints{};
-  bool requires_accepted_dynamic_stage{false};
-  bool has_global_contact_constraints{false};
-  std::size_t global_prescribed_contact_rules{0u};
-  std::size_t global_dynamic_contact_rules{0u};
   svmp::FE::Real stage_time{0.0};
   svmp::FE::Real stage_alpha_f{1.0};
   std::optional<svmp::FE::systems::
@@ -4944,17 +4878,13 @@ resolveLevelSetWallAwareMaintenanceContext(
   }
 
   // Decision D4: the momentum-side Young term is the only owner of the
-  // contact angle.  Every contact wall, prescribed or dynamic, is therefore
-  // maintained by PreserveAcceptedAngle, which only rescales the accepted
-  // contact cells.  Walls differ only in which accepted state supplies their
-  // contact rules.
+  // contact angle, so a constraint carries only the identity of an accepted
+  // contact cell, on a prescribed or a dynamic wall alike.  Walls differ only
+  // in which accepted state supplies their contact rules.
   enum class WallContactRuleSource : std::uint8_t {
     EndpointSnapshot,
     AcceptedDynamicStage
   };
-  constexpr auto preserve_accepted_angle =
-      svmp::FE::level_set::LevelSetWallContactConstraintKind::
-          PreserveAcceptedAngle;
   bool dynamic_stage_initialized = false;
   for (const auto& declaration : declarations) {
     if (declaration.level_set_field != level_set_field) {
@@ -5132,7 +5062,6 @@ resolveLevelSetWallAwareMaintenanceContext(
               "[svMultiPhysics::Application] One maintained level-set field cannot use multiple accepted dynamic contact stages.");
         }
       }
-      resolved.requires_accepted_dynamic_stage = true;
       std::map<int, std::size_t> local_rule_count_by_wall;
       std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
           declaration_constraints;
@@ -5145,8 +5074,7 @@ resolveLevelSetWallAwareMaintenanceContext(
             contact_source_by_wall.find(constraint.boundary_marker);
         const bool accepted_stage_wall =
             source != contact_source_by_wall.end() &&
-            source->second == WallContactRuleSource::AcceptedDynamicStage &&
-            constraint.kind == preserve_accepted_angle;
+            source->second == WallContactRuleSource::AcceptedDynamicStage;
         local_constraints_valid =
             accepted_stage_wall &&
             constraint.parent_cell_global_id !=
@@ -5154,21 +5082,13 @@ resolveLevelSetWallAwareMaintenanceContext(
             constraint.geometry_revision ==
                 accepted_dynamic_stage->geometry_revision
                     .snapshot_revision_key &&
-            acceptedWallConstraintFrameIsComplete(
-                constraint,
-                declaration.parameters,
-                sim.fe_system->meshAccess().dimension()) &&
             local_constraints_valid;
         if (!accepted_stage_wall ||
             constraint.parent_cell_global_id ==
                 svmp::FE::INVALID_GLOBAL_INDEX ||
             constraint.geometry_revision !=
                 accepted_dynamic_stage->geometry_revision
-                    .snapshot_revision_key ||
-            !acceptedWallConstraintFrameIsComplete(
-                constraint,
-                declaration.parameters,
-                sim.fe_system->meshAccess().dimension())) {
+                    .snapshot_revision_key) {
           continue;
         }
         declaration_constraints.push_back(constraint);
@@ -5192,9 +5112,6 @@ resolveLevelSetWallAwareMaintenanceContext(
         }
         const auto global_rule_count = globalSumSize(
             local_rule_count_by_wall[boundary_marker], comm);
-        resolved.has_global_contact_constraints =
-            resolved.has_global_contact_constraints || global_rule_count > 0u;
-        resolved.global_dynamic_contact_rules += global_rule_count;
         const int dynamic_boundary_marker = boundary_marker;
         const auto wall_count = static_cast<std::size_t>(std::count_if(
             accepted_dynamic_stage->state.walls.begin(),
@@ -5291,8 +5208,8 @@ resolveLevelSetWallAwareMaintenanceContext(
       std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
           wall_constraints;
       bool local_parent_ids_valid = true;
-      bool local_frames_valid = true;
-      std::string local_frame_diagnostic;
+      bool local_rules_valid = true;
+      std::string local_rule_diagnostic;
       for (const auto& record : snapshot.rules()) {
         if (record.role != svmp::FE::interfaces::
                                FreeSurfaceGeometryRuleRole::Contact ||
@@ -5313,40 +5230,32 @@ resolveLevelSetWallAwareMaintenanceContext(
         try {
           wall_constraints.push_back(makeAcceptedSnapshotWallConstraint(
               record,
-              preserve_accepted_angle,
               declaration.interface_marker,
-              snapshot_revision,
-              declaration.parameters,
-              sim.fe_system->meshAccess().dimension()));
+              snapshot_revision));
         } catch (const std::exception& error) {
-          local_frames_valid = false;
-          local_frame_diagnostic = error.what();
+          local_rules_valid = false;
+          local_rule_diagnostic = error.what();
         }
       }
       if (globalMinDouble(local_parent_ids_valid ? 1.0 : 0.0, comm) != 1.0) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Wall-aware level-set maintenance found a contact rule without a partition-independent parent identity.");
       }
-      if (globalMinDouble(local_frames_valid ? 1.0 : 0.0, comm) != 1.0) {
+      if (globalMinDouble(local_rules_valid ? 1.0 : 0.0, comm) != 1.0) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Wall-aware level-set maintenance rejected a prescribed-angle contact rule with incomplete or stale provenance" +
-            (local_frame_diagnostic.empty()
+            (local_rule_diagnostic.empty()
                  ? std::string{"."}
-                 : std::string{": "} + local_frame_diagnostic));
+                 : std::string{": "} + local_rule_diagnostic));
       }
       wall_constraints = canonicalizeAcceptedWallConstraints(
           std::move(wall_constraints),
           comm,
           "Prescribed wall-aware level-set maintenance");
-      const auto local_rule_count = wall_constraints.size();
       resolved.local_constraints.insert(
           resolved.local_constraints.end(),
           wall_constraints.begin(),
           wall_constraints.end());
-      const auto global_rule_count = globalSumSize(local_rule_count, comm);
-      resolved.has_global_contact_constraints =
-          resolved.has_global_contact_constraints || global_rule_count > 0u;
-      resolved.global_prescribed_contact_rules += global_rule_count;
     }
   }
   resolved.local_constraints = canonicalizeAcceptedWallConstraints(
@@ -5354,54 +5263,6 @@ resolveLevelSetWallAwareMaintenanceContext(
       comm,
       "Wall-aware level-set maintenance");
   return resolved;
-}
-
-void assertCollectiveWallAwareRepairResult(
-    const svmp::FE::level_set::LevelSetSignedDistanceRepairResult& result,
-    const svmp::MeshComm& comm,
-    std::string_view field_name)
-{
-  const auto require_consistent_count = [&](std::size_t value) {
-    const auto [minimum, maximum] = globalMinMaxUint64(
-        static_cast<std::uint64_t>(value), comm);
-    return minimum == maximum;
-  };
-  bool metadata_consistent =
-      require_consistent_count(result.success ? 1u : 0u) &&
-      require_consistent_count(result.converged ? 1u : 0u) &&
-      require_consistent_count(
-          result.wall_contact_constraints_satisfied ? 1u : 0u) &&
-      require_consistent_count(result.wall_contact_constraints) &&
-      require_consistent_count(result.wall_contact_cells) &&
-      require_consistent_count(result.wall_contact_dofs);
-  const std::array<svmp::FE::Real, 8> metrics{
-      result.max_wall_contact_scale_residual,
-      result.max_prescribed_contact_value_residual,
-      result.max_prescribed_contact_angle_error_radians,
-      result.max_contact_line_displacement,
-      result.max_contact_angle_change_radians,
-      result.max_unconstrained_signed_distance_error,
-      result.max_wall_constrained_signed_distance_error,
-      result.max_iteration_residual};
-  for (const auto metric : metrics) {
-    const bool local_finite = std::isfinite(metric);
-    if (globalMinDouble(local_finite ? 1.0 : 0.0, comm) != 1.0) {
-      metadata_consistent = false;
-      continue;
-    }
-    const auto minimum = globalMinDouble(static_cast<double>(metric), comm);
-    const auto maximum = globalMaxDouble(static_cast<double>(metric), comm);
-    const auto tolerance =
-        4096.0 * std::numeric_limits<double>::epsilon() *
-        std::max({1.0, std::abs(minimum), std::abs(maximum)});
-    metadata_consistent =
-        std::abs(maximum - minimum) <= tolerance && metadata_consistent;
-  }
-  if (!metadata_consistent) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Wall-aware level-set reinitialization produced rank-dependent convergence or contact-geometry results for field '" +
-        std::string(field_name) + "'.");
-  }
 }
 
 void assignPostacceptMaintenanceVectorCollectively(
@@ -5419,22 +5280,13 @@ capturePostacceptMaintenanceVectorCollectively(
     svmp::FE::backends::GenericVector& solution,
     const svmp::MeshComm& comm);
 
-// First-order generalized-alpha publication of maintained-field repairs:
+// Publication of maintained-field repairs:
 // FE/TimeStepping/FieldRepairPublication.
-using svmp::FE::timestepping::FirstOrderGeneralizedAlphaMaintenanceClosure;
-using svmp::FE::timestepping::FirstOrderGeneralizedAlphaMaintenancePlanStatus;
-using svmp::FE::timestepping::FirstOrderGeneralizedAlphaMaintenanceScheme;
-using svmp::FE::timestepping::FirstOrderGeneralizedAlphaPostAcceptPublication;
-using svmp::FE::timestepping::FirstOrderGeneralizedAlphaMaintenancePublicationPlan;
 using svmp::FE::timestepping::MaintainedFieldPostAcceptPublicationView;
 using svmp::FE::timestepping::MaintainedFieldPostAcceptPublicationScheduleEntry;
 using svmp::FE::timestepping::StagedPostacceptMaintenanceHistoryPublication;
-using svmp::FE::timestepping::combineFirstOrderGeneralizedAlphaPublicationWithCommonDelta;
 using svmp::FE::timestepping::makeCommonRepresentationMaintainedFieldPublication;
-using svmp::FE::timestepping::makeFirstOrderGeneralizedAlphaMaintainedFieldPublication;
-using svmp::FE::timestepping::makeFirstOrderGeneralizedAlphaMaintenanceScheme;
 using svmp::FE::timestepping::makeStagedPostacceptMaintenanceHistoryPublication;
-using svmp::FE::timestepping::planFirstOrderGeneralizedAlphaMaintenancePublication;
 using svmp::FE::timestepping::stageMaintainedFieldPostAcceptPublication;
 
 void publishStagedPostacceptMaintenanceHistoryCollectively(
@@ -5445,221 +5297,6 @@ void publishStagedPostacceptMaintenanceHistoryCollectively(
 {
   svmp::FE::timestepping::publishStagedPostacceptMaintenanceHistoryCollectively(
       history, staged, feCollectiveCommunicator(comm), rate_publication_started);
-}
-
-struct LevelSetProjectionReinitializationCandidate {
-  bool applied{false};
-  svmp::FE::level_set::LevelSetSignedDistanceRepairResult repair{};
-  LevelSetWallAwareMaintenanceContext wall_context{};
-  std::optional<FirstOrderGeneralizedAlphaMaintenancePublicationPlan>
-      generalized_alpha_publication{};
-};
-
-LevelSetProjectionReinitializationCandidate
-stageLevelSetProjectionReinitialization(
-    application::core::SimulationComponents& sim,
-    svmp::FE::timestepping::TimeHistory& history,
-    const LevelSetMaintenanceRequest& request,
-    svmp::FE::FieldId field,
-    svmp::FE::Real endpoint_time,
-    std::vector<svmp::FE::Real>& candidate,
-    std::span<const svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
-        accepted_contact_stages,
-    std::span<const svmp::FE::level_set::LevelSetWallContactConstraint>
-        accepted_contact_stage_constraints,
-    std::span<const svmp::FE::Real> accepted_contact_stage_solution)
-{
-  if (request.configuration->transport.reinitialization.method !=
-      svmp::FE::level_set::LevelSetReinitializationMethod::Projection) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Runtime level-set reinitialization currently supports Projection only.");
-  }
-
-  LevelSetProjectionReinitializationCandidate staged;
-  staged.wall_context = resolveLevelSetWallAwareMaintenanceContext(
-      sim,
-      history,
-      field,
-      endpoint_time,
-      accepted_contact_stages,
-      accepted_contact_stage_constraints);
-  const auto comm = activeFESystemCommunicator(*sim.fe_system);
-  svmp::FE::GlobalIndex raw_field_offset{-1};
-  svmp::FE::GlobalIndex raw_field_dof_count{-1};
-  bool local_field_layout_query_valid = true;
-  try {
-    raw_field_offset = sim.fe_system->fieldDofOffset(field);
-    raw_field_dof_count =
-        sim.fe_system->fieldDofHandler(field).getNumDofs();
-  } catch (...) {
-    local_field_layout_query_valid = false;
-  }
-  if (globalMinDouble(
-          local_field_layout_query_valid ? 1.0 : 0.0, comm) != 1.0) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Wall-aware level-set reinitialization could not resolve a finalized field layout on every rank.");
-  }
-  const bool local_field_layout_valid =
-      raw_field_offset >= 0 && raw_field_dof_count > 0;
-  if (globalMinDouble(local_field_layout_valid ? 1.0 : 0.0, comm) !=
-      1.0) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Wall-aware level-set reinitialization returned an invalid field layout.");
-  }
-  const auto [minimum_field_offset, maximum_field_offset] =
-      globalMinMaxUint64(
-          static_cast<std::uint64_t>(raw_field_offset), comm);
-  const auto [minimum_field_dof_count, maximum_field_dof_count] =
-      globalMinMaxUint64(
-          static_cast<std::uint64_t>(raw_field_dof_count), comm);
-  if (minimum_field_offset != maximum_field_offset ||
-      minimum_field_dof_count != maximum_field_dof_count) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Wall-aware level-set reinitialization field layout differs across the FE communicator.");
-  }
-  const auto field_offset = static_cast<std::size_t>(raw_field_offset);
-  const auto field_dof_count =
-      static_cast<std::size_t>(raw_field_dof_count);
-  const auto slice_fits = [&](std::size_t extent) {
-    return field_offset <= extent &&
-           field_dof_count <= extent - field_offset;
-  };
-  if (globalMinDouble(slice_fits(candidate.size()) ? 1.0 : 0.0, comm) !=
-      1.0) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Wall-aware level-set reinitialization candidate does not contain the complete maintained field slice.");
-  }
-
-  std::span<const svmp::FE::Real> reinitialization_input(candidate);
-  if (staged.wall_context.requires_accepted_dynamic_stage) {
-    const bool local_stage_layout_valid =
-        accepted_contact_stage_solution.size() == candidate.size();
-    if (globalMinDouble(local_stage_layout_valid ? 1.0 : 0.0, comm) !=
-        1.0) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Dynamic wall-aware level-set maintenance requires the exact accepted contact-stage solution on every rank.");
-    }
-    const double local_stage_solution_size =
-        static_cast<double>(accepted_contact_stage_solution.size());
-    if (globalMinDouble(local_stage_solution_size, comm) !=
-        globalMaxDouble(local_stage_solution_size, comm)) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Dynamic wall-aware level-set maintenance received inconsistent contact-stage solution layouts.");
-    }
-    const bool local_stage_slice_valid =
-        slice_fits(accepted_contact_stage_solution.size());
-    if (globalMinDouble(local_stage_slice_valid ? 1.0 : 0.0, comm) !=
-        1.0) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Dynamic wall-aware level-set maintenance contact-stage solution does not contain the complete maintained field slice.");
-    }
-    bool local_stage_endpoint_slice_finite = true;
-    for (std::size_t i = 0u; i < field_dof_count; ++i) {
-      const auto index = field_offset + i;
-      const auto stage_value = accepted_contact_stage_solution[index];
-      const auto endpoint_value = candidate[index];
-      local_stage_endpoint_slice_finite =
-          std::isfinite(stage_value) && std::isfinite(endpoint_value) &&
-          local_stage_endpoint_slice_finite;
-    }
-    if (globalMinDouble(
-            local_stage_endpoint_slice_finite ? 1.0 : 0.0, comm) != 1.0) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Dynamic wall-aware level-set maintenance requires finite stage and endpoint level-set coefficients.");
-    }
-    reinitialization_input = accepted_contact_stage_solution;
-  }
-
-  requireAnglePreservingWallMaintenance(
-      staged.wall_context.local_constraints,
-      comm,
-      request.configuration->transport.level_set.field_name);
-  std::vector<svmp::FE::Real> repaired;
-  staged.repair =
-      svmp::FE::level_set::repairLevelSetSignedDistanceByProjection(
-          *sim.fe_system,
-          field,
-          request.configuration->transport.reinitialization,
-          reinitialization_input,
-          repaired,
-          staged.wall_context.local_constraints);
-  assertCollectiveWallAwareRepairResult(
-      staged.repair, comm, request.configuration->transport.level_set.field_name);
-  if ((staged.repair.wall_contact_constraints > 0u) !=
-      staged.wall_context.has_global_contact_constraints) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Wall-aware level-set reinitialization did not retain the complete accepted contact constraint set for field '" +
-        request.configuration->transport.level_set.field_name + "'.");
-  }
-  if (!staged.repair.success) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Level-set reinitialization failed for field '" +
-        request.configuration->transport.level_set.field_name + "': " + staged.repair.diagnostic);
-  }
-  if (!staged.repair.converged) {
-    return staged;
-  }
-
-  const bool local_repaired_slices_valid =
-      slice_fits(repaired.size()) &&
-      slice_fits(reinitialization_input.size());
-  if (globalMinDouble(local_repaired_slices_valid ? 1.0 : 0.0, comm) !=
-      1.0) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Wall-aware level-set reinitialization returned an incompatible field slice.");
-  }
-  std::vector<svmp::FE::Real> stage_delta(field_dof_count);
-  for (std::size_t i = 0u; i < field_dof_count; ++i) {
-    const auto index = field_offset + i;
-    stage_delta[i] = repaired[index] - reinitialization_input[index];
-  }
-  if (staged.wall_context.requires_accepted_dynamic_stage &&
-      staged.wall_context.stage_alpha_f != svmp::FE::Real{1.0}) {
-    if (!staged.wall_context.first_order_generalized_alpha.has_value()) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Non-endpoint dynamic wall-aware level-set maintenance requires complete first-order generalized-alpha provenance.");
-    }
-    const auto& provenance =
-        *staged.wall_context.first_order_generalized_alpha;
-    const auto scheme = makeFirstOrderGeneralizedAlphaMaintenanceScheme(
-        provenance.alpha_m,
-        provenance.alpha_f,
-        provenance.gamma,
-        provenance.dt);
-    std::vector<svmp::FE::Real> endpoint_delta(field_dof_count);
-    for (std::size_t i = 0u; i < field_dof_count; ++i) {
-      endpoint_delta[i] = stage_delta[i] / scheme.alpha_f;
-      if (!std::isfinite(endpoint_delta[i])) {
-        throw std::overflow_error(
-            "[svMultiPhysics::Application] Non-endpoint dynamic wall-aware level-set maintenance endpoint repair overflowed.");
-      }
-    }
-    auto publication =
-        planFirstOrderGeneralizedAlphaMaintenancePublication(
-            scheme,
-            FirstOrderGeneralizedAlphaMaintenanceClosure::
-                PreservePriorStateAndRate,
-            stage_delta,
-            endpoint_delta);
-    if (publication.status !=
-            FirstOrderGeneralizedAlphaMaintenancePlanStatus::
-                AlgebraicallyComplete ||
-        !publication.post_accept.has_value()) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Non-endpoint dynamic wall-aware level-set maintenance could not construct a complete state/rate publication: " +
-          publication.diagnostic);
-    }
-    for (std::size_t i = 0u; i < field_dof_count; ++i) {
-      candidate[field_offset + i] += endpoint_delta[i];
-    }
-    staged.generalized_alpha_publication = std::move(publication);
-  } else {
-    for (std::size_t i = 0u; i < field_dof_count; ++i) {
-      candidate[field_offset + i] += stage_delta[i];
-    }
-  }
-  staged.applied = true;
-  return staged;
 }
 
 using LevelSetMaintenanceCandidateValidator =
@@ -5773,11 +5410,14 @@ bool applyLevelSetMaintenance(
     application::core::SimulationComponents& sim,
     svmp::FE::timestepping::TimeHistory& history,
     std::vector<LevelSetMaintenanceRequest>& requests,
+    // The accepted contact-stage inputs fed the retired projection
+    // reinitialization (decision D47); the slots stay until the pipeline
+    // moves to FE.
     std::span<const svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
-        accepted_contact_stages = {},
+        /*accepted_contact_stages*/ = {},
     std::span<const svmp::FE::level_set::LevelSetWallContactConstraint>
-        accepted_contact_stage_constraints = {},
-    std::span<const svmp::FE::Real> accepted_contact_stage_solution = {},
+        /*accepted_contact_stage_constraints*/ = {},
+    std::span<const svmp::FE::Real> /*accepted_contact_stage_solution*/ = {},
     const LevelSetMaintenanceCandidateValidator& validate_candidate = {},
     const LevelSetMaintenanceStageObserver& observe_stage = {},
     std::vector<std::string>* deferred_commit_logs = nullptr,
@@ -5802,23 +5442,15 @@ bool applyLevelSetMaintenance(
   auto fe_solution = gatherFeOrderedSolution(history.u(), comm);
   const auto accepted_solution_before_maintenance = fe_solution;
   std::set<svmp::FE::FieldId> modified_level_set_fields;
-  std::map<
-      svmp::FE::FieldId,
-      FirstOrderGeneralizedAlphaMaintenancePublicationPlan>
-      generalized_alpha_publications;
   for (auto& request : staged_requests) {
-    // Conservative requests own reinitialization inside their prospective
-    // step transaction.  Repeating it here after acceptance would expose an
-    // intermediate geometry and apply a second representation change outside
-    // the phase-mass reconciliation contract.
+    // Conservative requests are maintained inside their prospective step
+    // transaction.  Maintaining them again here after acceptance would expose
+    // an intermediate geometry and apply a second representation change
+    // outside the phase-mass reconciliation contract.
     if (request.configuration->transport.conservative_phase.enabled) {
       continue;
     }
     const int completed_step = history.stepIndex();
-    const bool do_reinit =
-        svmp::FE::level_set::shouldReinitializeLevelSet(
-            request.configuration->transport.reinitialization,
-            completed_step);
     const bool do_kinematic =
         svmp::FE::level_set::shouldApplyLevelSetKinematicReconciliation(
             request.configuration->transport.kinematic_reconciliation,
@@ -5831,7 +5463,7 @@ bool applyLevelSetMaintenance(
         svmp::FE::level_set::shouldApplyLevelSetInterfacePreservingRedistancing(
             request.configuration->transport.interface_preserving_redistancing,
             completed_step);
-    if (!do_reinit && !do_kinematic && !do_patch_bounds && !do_redistancing) {
+    if (!do_kinematic && !do_patch_bounds && !do_redistancing) {
       continue;
     }
 
@@ -6275,165 +5907,6 @@ bool applyLevelSetMaintenance(
       }
     }
 
-    if (do_reinit) {
-      const auto before_reinitialization = fe_solution;
-      const auto staged_reinitialization =
-          stageLevelSetProjectionReinitialization(
-              sim,
-              history,
-              request,
-              field,
-              static_cast<svmp::FE::Real>(history.time()),
-              fe_solution,
-              accepted_contact_stages,
-              accepted_contact_stage_constraints,
-              accepted_contact_stage_solution);
-      const auto& result = staged_reinitialization.repair;
-      const auto& wall_context = staged_reinitialization.wall_context;
-      if (!result.converged) {
-        // A geometrically bounded partial candidate is useful diagnostics, but
-        // applying it would silently turn max_iterations into an uncontrolled
-        // change of the production interface.  Retain the accepted solution
-        // and make the skipped repair explicit.
-        std::ostringstream log;
-        log
-            << "[svMultiPhysics::Application] Level-set reinitialization skipped field='"
-            << request.configuration->transport.level_set.field_name << "' step=" << completed_step
-            << " reason=nonconverged"
-            << " iterations=" << result.iterations
-            << " max_iteration_residual="
-            << result.max_iteration_residual
-            << " max_signed_distance_error="
-            << result.max_signed_distance_error
-            << " max_unconstrained_signed_distance_error="
-            << result.max_unconstrained_signed_distance_error
-            << " max_wall_constrained_signed_distance_error="
-            << result.max_wall_constrained_signed_distance_error
-            << " wall_contact_constraints="
-            << result.wall_contact_constraints
-            << " wall_contact_cells=" << result.wall_contact_cells
-            << " wall_contact_dofs=" << result.wall_contact_dofs
-            << " wall_contact_constraints_satisfied="
-            << (result.wall_contact_constraints_satisfied ? "true" : "false")
-            << " max_wall_contact_scale_residual="
-            << result.max_wall_contact_scale_residual
-            << " max_prescribed_contact_value_residual="
-            << result.max_prescribed_contact_value_residual
-            << " max_prescribed_contact_angle_error_radians="
-            << result.max_prescribed_contact_angle_error_radians
-            << " max_contact_line_displacement="
-            << result.max_contact_line_displacement
-            << " max_contact_angle_change_radians="
-            << result.max_contact_angle_change_radians
-            << " max_interface_displacement="
-            << result.max_interface_displacement
-            << " diagnostic='" << result.diagnostic << "'";
-        staged_commit_logs.push_back(log.str());
-      } else {
-        // For a dynamic contact law, repaired is the accepted operator-stage
-        // representation.  Endpoint stages retain the common representation
-        // policy.  Non-endpoint first-order stages carry an explicit
-        // endpoint/history/rate publication plan into the transaction below.
-        if (!staged_reinitialization.applied) {
-          throw std::logic_error(
-              "[svMultiPhysics::Application] A converged level-set reinitialization was not applied to its staged candidate.");
-        }
-        if (staged_reinitialization.generalized_alpha_publication.has_value()) {
-          if (!observe_stage || !validate_candidate) {
-            throw std::runtime_error(
-                "[svMultiPhysics::Application] Non-endpoint generalized-alpha level-set maintenance requires an endpoint maintenance-work observer and final candidate validator before state/rate publication.");
-          }
-          if (!generalized_alpha_publications
-                   .emplace(
-                       field,
-                       *staged_reinitialization
-                            .generalized_alpha_publication)
-                   .second) {
-            throw std::runtime_error(
-                "[svMultiPhysics::Application] One maintenance transaction cannot publish multiple non-endpoint generalized-alpha repairs for the same level-set field.");
-          }
-        }
-        changed = true;
-        modified_level_set_fields.insert(field);
-        if (observe_stage) {
-          observe_stage(
-              application::core::LevelSetMaintenanceWorkSubstage::
-                  Reinitialization,
-              before_reinitialization,
-              fe_solution);
-        }
-        std::ostringstream log;
-        log
-          << "[svMultiPhysics::Application] Level-set reinitialized field='"
-          << request.configuration->transport.level_set.field_name << "' step=" << completed_step
-          << " repaired_dofs=" << result.repaired_dofs
-          << " preserved_dofs=" << result.preserved_dofs
-          << " preserve_band_width=" << result.preserve_band_width
-          << " interface_fragments=" << result.interface_fragments
-          << " interface_displacement_samples="
-          << result.interface_displacement_samples
-          << " max_interface_displacement="
-          << result.max_interface_displacement
-          << " l2_interface_displacement="
-          << result.l2_interface_displacement
-          << " zero_set_bound_satisfied="
-          << (result.zero_set_bound_satisfied ? "true" : "false")
-          << " iterations=" << result.iterations
-          << " converged=" << (result.converged ? "true" : "false")
-          << " max_iteration_residual="
-          << result.max_iteration_residual
-          << " max_signed_distance_error="
-          << result.max_signed_distance_error
-          << " max_unconstrained_signed_distance_error="
-          << result.max_unconstrained_signed_distance_error
-          << " max_wall_constrained_signed_distance_error="
-          << result.max_wall_constrained_signed_distance_error
-          << " wall_contact_model="
-          << (wall_context.requires_accepted_dynamic_stage
-                  ? "accepted_dynamic_stage"
-                  : (wall_context.has_global_contact_constraints
-                         ? "prescribed_angle"
-                         : "none"))
-          << " wall_contact_maintenance="
-          << (wall_context.has_global_contact_constraints
-                  ? "preserve_accepted_angle"
-                  : "none")
-          << " accepted_contact_stage_alpha_f="
-          << (wall_context.requires_accepted_dynamic_stage
-                  ? wall_context.stage_alpha_f
-                  : svmp::FE::Real{1.0})
-          << " accepted_contact_stage_revision="
-          << wall_context.stage_state_revision
-          << " generalized_alpha_history_policy="
-          << (staged_reinitialization.generalized_alpha_publication
-                      .has_value()
-                  ? "preserve_prior_state_and_rate"
-                  : "common_representation_delta")
-          << " prescribed_contact_rules="
-          << wall_context.global_prescribed_contact_rules
-          << " dynamic_contact_rules="
-          << wall_context.global_dynamic_contact_rules
-          << " wall_contact_constraints="
-          << result.wall_contact_constraints
-          << " wall_contact_cells=" << result.wall_contact_cells
-          << " wall_contact_dofs=" << result.wall_contact_dofs
-          << " wall_contact_constraints_satisfied="
-          << (result.wall_contact_constraints_satisfied ? "true" : "false")
-          << " max_wall_contact_scale_residual="
-          << result.max_wall_contact_scale_residual
-          << " max_prescribed_contact_value_residual="
-          << result.max_prescribed_contact_value_residual
-          << " max_prescribed_contact_angle_error_radians="
-          << result.max_prescribed_contact_angle_error_radians
-          << " max_contact_line_displacement="
-          << result.max_contact_line_displacement
-          << " max_contact_angle_change_radians="
-          << result.max_contact_angle_change_radians
-          << " max_abs_update=" << result.max_abs_update;
-        staged_commit_logs.push_back(log.str());
-      }
-    }
-
   }
 
   if (changed && validate_candidate) {
@@ -6441,12 +5914,8 @@ bool applyLevelSetMaintenance(
   }
 
   if (changed) {
-    // Publish each representation change through one explicit field mapping.
-    // Endpoint-stage and global-shift changes use a common delta on every
-    // stored state.  A non-endpoint first-order generalized-alpha repair keeps
-    // the prior accepted state/rate fixed and publishes the corresponding
-    // endpoint rate; any subsequent global shift is then composed into all
-    // state levels without changing that rate correction.
+    // Publish each representation change through one explicit field mapping:
+    // a common delta on every stored state, with the rate unchanged.
     const auto comm = activeFESystemCommunicator(*sim.fe_system);
     std::optional<StagedPostacceptMaintenanceHistoryPublication>
         staged_history_publication;
@@ -6465,31 +5934,8 @@ bool applyLevelSetMaintenance(
           "[svMultiPhysics::Application] Postaccept maintenance history "
           "depth differs across the FE communicator.");
     }
-    const auto [minimum_rate_publication_count,
-                maximum_rate_publication_count] =
-        globalMinMaxUint64(
-            static_cast<std::uint64_t>(
-                generalized_alpha_publications.size()),
-            comm);
-    if (minimum_rate_publication_count !=
-        maximum_rate_publication_count) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Postaccept generalized-alpha "
-          "maintenance field coverage differs across the FE communicator.");
-    }
-    const bool publishes_rate = maximum_rate_publication_count != 0u;
-    const auto [minimum_rate_target_present,
-                maximum_rate_target_present] =
-        globalMinMaxUint64(history.hasUDotState() ? 1u : 0u, comm);
-    if (minimum_rate_target_present != maximum_rate_target_present ||
-        (publishes_rate && minimum_rate_target_present == 0u)) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Non-endpoint generalized-alpha "
-          "maintenance requires a communicator-complete uDot target.");
-    }
     std::vector<svmp::FE::backends::GenericVector*> publication_targets;
     std::vector<std::vector<svmp::FE::Real>> synchronized_history;
-    std::optional<std::vector<svmp::FE::Real>> synchronized_u_dot;
     std::exception_ptr local_staging_failure;
     try {
       publication_targets.resize(
@@ -6517,19 +5963,13 @@ bool applyLevelSetMaintenance(
           *publication_targets[static_cast<std::size_t>(k)], comm);
       synchronized_history[static_cast<std::size_t>(k - 1)].swap(captured);
     }
-    if (publishes_rate) {
-      synchronized_u_dot =
-          capturePostacceptMaintenanceVectorCollectively(
-              history.uDot(), comm);
-    }
 
     local_staging_failure = nullptr;
     try {
       staged_history_publication.emplace(
           makeStagedPostacceptMaintenanceHistoryPublication(
               std::move(current_solution),
-              std::move(synchronized_history),
-              std::move(synchronized_u_dot)));
+              std::move(synchronized_history)));
 
       for (const auto field : modified_level_set_fields) {
         const auto raw_offset = sim.fe_system->fieldDofOffset(field);
@@ -6557,58 +5997,10 @@ bool applyLevelSetMaintenance(
               fe_solution[index] -
               accepted_solution_before_maintenance[index];
         }
-        const auto generalized_alpha =
-            generalized_alpha_publications.find(field);
-        if (generalized_alpha ==
-            generalized_alpha_publications.end()) {
-          stageMaintainedFieldPostAcceptPublication(
-              makeCommonRepresentationMaintainedFieldPublication(
-                  field, offset, representation_delta),
-              *staged_history_publication);
-        } else {
-          const auto& plan = generalized_alpha->second;
-          if (!plan.post_accept.has_value() ||
-              plan.post_accept->u_delta.size() != count) {
-            throw std::runtime_error(
-                "[svMultiPhysics::Application] Generalized-alpha "
-                "maintenance publication does not match its maintained "
-                "field layout.");
-          }
-          bool endpoint_copies_match = true;
-          for (std::size_t i = 0u; i < count; ++i) {
-            const auto index = offset + i;
-            const auto endpoint_value =
-                staged_history_publication->current[index];
-            const auto endpoint_copy_value =
-                staged_history_publication->history.front()[index];
-            endpoint_copies_match =
-                std::isfinite(endpoint_value) &&
-                std::isfinite(endpoint_copy_value) &&
-                endpoint_value == endpoint_copy_value &&
-                endpoint_copies_match;
-          }
-          if (!endpoint_copies_match) {
-            throw std::runtime_error(
-                "[svMultiPhysics::Application] Non-endpoint generalized-alpha maintenance publication requires identical finite u and uPrevK(1) accepted-endpoint field slices.");
-          }
-          std::vector<svmp::FE::Real> common_delta(count);
-          for (std::size_t i = 0u; i < count; ++i) {
-            common_delta[i] =
-                representation_delta[i] -
-                plan.post_accept->u_delta[i];
-          }
-          const auto combined =
-              combineFirstOrderGeneralizedAlphaPublicationWithCommonDelta(
-                  plan, common_delta);
-          stageMaintainedFieldPostAcceptPublication(
-              makeFirstOrderGeneralizedAlphaMaintainedFieldPublication(
-                  field,
-                  offset,
-                  combined,
-                  /*publish_u_dot=*/true,
-                  history.hasUDotState()),
-              *staged_history_publication);
-        }
+        stageMaintainedFieldPostAcceptPublication(
+            makeCommonRepresentationMaintainedFieldPublication(
+                field, offset, representation_delta),
+            *staged_history_publication);
         synchronized_dofs += count;
       }
     } catch (...) {
@@ -6636,20 +6028,10 @@ bool applyLevelSetMaintenance(
     log
         << "[svMultiPhysics::Application] Level-set maintenance synchronized"
         << " step=" << history.stepIndex()
-        << " representation_delta="
-        << (publishes_rate
-                ? "field_specific_generalized_alpha_closure"
-                : "all_history_levels")
-        << " temporal_increments="
-        << (publishes_rate
-                ? "generalized_alpha_identities_preserved"
-                : "preserved")
-        << " rate_state="
-        << (publishes_rate
-                ? "maintained_field_endpoint_rate_updated"
-                : "unchanged_consistently")
-        << " rate_synchronized_fields="
-        << generalized_alpha_publications.size()
+        << " representation_delta=all_history_levels"
+        << " temporal_increments=preserved"
+        << " rate_state=unchanged_consistently"
+        << " rate_synchronized_fields=0"
         << " synchronized_fields=" << modified_level_set_fields.size()
         << " synchronized_dofs=" << synchronized_dofs
         << " current_previous_max_abs_delta=" << current_previous_delta
@@ -6664,9 +6046,8 @@ bool applyLevelSetMaintenance(
         *staged_history_publication,
         comm,
         rate_publication_started);
-    // uDDot is never a publication target for a maintained first-order field.
-    // If every field used a common representation delta, uDot was not staged
-    // and therefore retains both its values and backend content revision.
+    // uDot and uDDot are not staged, so they retain both their values and
+    // their backend content revisions.
   }
   requests = std::move(staged_requests);
   if (deferred_commit_logs != nullptr) {
@@ -10586,12 +9967,10 @@ conservativePhaseWorkflowHost(application::core::SimulationComponents& sim)
 }
 
 /// Adds to @p host the request schedule
-/// (canonicalLevelSetMaintenanceRequestSchedule) and the projection
-/// reinitialization (stageLevelSetProjectionReinitialization) of the
-/// driver's @p requests.
+/// (canonicalLevelSetMaintenanceRequestSchedule) of the driver's
+/// @p requests.
 void bindConservativePhaseMaintenance(
     svmp::FE::level_set::ConservativePhaseWorkflowHost& host,
-    application::core::SimulationComponents& sim,
     std::vector<LevelSetMaintenanceRequest>& requests)
 {
   host.prospective_request_schedule = [&requests](int completed_step) {
@@ -10600,34 +9979,6 @@ void bindConservativePhaseMaintenance(
         LevelSetMaintenanceScheduleStage::ProspectiveAcceptedEndpoint,
         completed_step);
   };
-  host.stage_projection_reinitialization =
-      [&sim, &requests](
-          svmp::FE::timestepping::TimeHistory& history,
-          std::size_t request_index,
-          svmp::FE::FieldId level_set_field,
-          svmp::FE::Real endpoint_time,
-          std::vector<svmp::FE::Real>& candidate,
-          std::span<const svmp::FE::systems::
-                        FreeSurfaceAcceptedContactStageState>
-              accepted_contact_stages,
-          std::span<const svmp::FE::level_set::LevelSetWallContactConstraint>
-              accepted_contact_stage_constraints,
-          std::span<const svmp::FE::Real> accepted_contact_stage_solution) {
-        auto staged = stageLevelSetProjectionReinitialization(
-            sim,
-            history,
-            requests[request_index],
-            level_set_field,
-            endpoint_time,
-            candidate,
-            accepted_contact_stages,
-            accepted_contact_stage_constraints,
-            accepted_contact_stage_solution);
-        return svmp::FE::level_set::ConservativePhaseReinitializationResult{
-            .applied = staged.applied,
-            .repair = std::move(staged.repair),
-        };
-      };
 }
 
 svmp::FE::level_set::LevelSetP1PhaseTransportGraph&
@@ -10739,7 +10090,7 @@ buildConservativePhaseCandidateStageSnapshot(
     const svmp::MeshComm& comm)
 {
   auto host = conservativePhaseWorkflowHost(sim);
-  bindConservativePhaseMaintenance(host, sim, requests);
+  bindConservativePhaseMaintenance(host, requests);
   host.operator_state_fingerprint =
       [&comm](const svmp::FE::backends::GenericVector& state) {
         return collectiveMeshBoundaryStateFingerprint(state, comm);
@@ -10821,7 +10172,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     const LevelSetMaintenanceStageObserver& observe_stage = {})
 {
   auto host = conservativePhaseWorkflowHost(sim);
-  bindConservativePhaseMaintenance(host, sim, requests);
+  bindConservativePhaseMaintenance(host, requests);
   host.begin_geometry_transaction =
       [&]() -> std::unique_ptr<
                 svmp::FE::level_set::ConservativePhaseGeometryTransaction> {
@@ -15448,9 +14799,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         level_set_maintenance.end(),
         [&](const auto& request) {
           return !request.configuration->transport.conservative_phase.enabled &&
-                 (svmp::FE::level_set::shouldReinitializeLevelSet(
-                      request.configuration->transport.reinitialization, h.stepIndex()) ||
-                  svmp::FE::level_set::
+                 (svmp::FE::level_set::
                       shouldApplyLevelSetKinematicReconciliation(
                           request.configuration->transport
                               .kinematic_reconciliation,

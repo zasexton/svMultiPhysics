@@ -860,7 +860,7 @@ TEST(LevelSetEquationTranslator,
 }
 
 TEST(LevelSetEquationTranslator,
-     MaintenanceCompatibilityInstallationValidatesReinitializationBeforeBoundary)
+     MaintenanceCompatibilityInstallationRejectsRetiredReinitializationBeforeBoundary)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
@@ -876,13 +876,14 @@ TEST(LevelSetEquationTranslator,
   inflow.params["Value"] = svmp::Physics::ParameterValue{true, "invalid"};
   input.boundary_conditions.push_back(std::move(inflow));
 
-  EXPECT_EQ((maintenanceCompatibilityExceptionMessage<std::runtime_error>([&] {
-              (void)application::translators::level_set::resolveConfiguration(
-                  input);
-            })),
-            "[svMultiPhysics::Application] "
-            "Reinitialization_method=FastMarching is reserved until runtime "
-            "fast-marching reinitialization is implemented; use 'Projection'.");
+  // The retired projection reinitialization (decision D47) is rejected
+  // while the equation parameters are read, before the boundaries.
+  const auto message =
+      maintenanceCompatibilityExceptionMessage<std::invalid_argument>([&] {
+        (void)application::translators::level_set::resolveConfiguration(input);
+      });
+  EXPECT_NE(message.find("retired (decision D47)"), std::string::npos)
+      << message;
 #endif
 }
 
@@ -1419,12 +1420,27 @@ TEST(LevelSetEquationTranslator,
 #endif
 }
 
-TEST(LevelSetEquationTranslator, RejectsUnsupportedRuntimeReinitializationMethods)
+TEST(LevelSetEquationTranslator, RejectsRetiredReinitializationSettings)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
 #else
-  for (const std::string method : {"HamiltonJacobiPDE", "FastMarching"}) {
+  // Decision D47 retired the projection reinitialization.  The disabled
+  // switch is accepted; enabling it or naming one of its settings fails.
+  const std::vector<std::pair<std::string, std::string>> cases{
+      {"Enable_reinitialization", "false"},
+      {"Enable_reinitialization", "true"},
+      {"Reinitialization_method", "HamiltonJacobiPDE"},
+      {"Reinitialization_method", "FastMarching"},
+      {"Reinitialization_method", "projection"},
+      {"Reinitialization_cadence_steps", "4"},
+      {"Reinitialization_max_iterations", "8"},
+      {"Reinitialization_pseudo_time_step_scale", "0.125"},
+      {"Reinitialization_interface_band_width", "2.75"},
+      {"Reinitialization_signed_distance_tolerance", "1.0e-4"},
+      {"Reinitialization_max_zero_set_displacement", "2.0e-8"},
+  };
+  for (const auto& [key, value] : cases) {
     auto mesh = makeRegistryQuadMesh();
     svmp::Physics::EquationModuleInput input{};
     input.equation_type = "level_set";
@@ -1436,19 +1452,27 @@ TEST(LevelSetEquationTranslator, RejectsUnsupportedRuntimeReinitializationMethod
         svmp::Physics::ParameterValue{true, "advecting_velocity"};
     input.equation_params["Velocity_source"] =
         svmp::Physics::ParameterValue{true, "prescribed_data"};
-    input.equation_params["Enable_reinitialization"] =
-        svmp::Physics::ParameterValue{true, "true"};
-    input.equation_params["Reinitialization_method"] =
-        svmp::Physics::ParameterValue{true, method};
+    input.equation_params[key] = svmp::Physics::ParameterValue{true, value};
 
     svmp::FE::systems::FESystem system(mesh);
-    EXPECT_THROW(
-        (void)application::translators::level_set::createModule(input, system),
-        std::runtime_error)
-        << "method=" << method;
+    if (value == "false") {
+      EXPECT_TRUE(
+          application::translators::level_set::createModule(input, system))
+          << key;
+      continue;
+    }
+    try {
+      (void)application::translators::level_set::createModule(input, system);
+      ADD_FAILURE() << key << '=' << value << " was accepted";
+    } catch (const std::exception& error) {
+      EXPECT_NE(std::string(error.what()).find("retired (decision D47)"),
+                std::string::npos)
+          << key << '=' << value << ": " << error.what();
+    }
   }
 #endif
 }
+
 
 TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
 {
@@ -1517,7 +1541,7 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
   ASSERT_TRUE(artifact.has_value());
   EXPECT_EQ(artifact->component, "level_set_transport");
   constexpr std::string_view expected_without_phase =
-      R"json({"artifact_schema_version":1,"component":"level_set_transport","capability_label":"one_phase_interface_transport_nonlocal_conservation","units":{"system":"consistent_solver_units","length":"solver_length","time":"solver_time","volume":"solver_volume"},"operator":"transport","transport_form":"ConservativeDivergence","conservation_diagnostic":"conservative_divergence_level_set_advection_not_locally_conservative","level_set":{"field":"phi","source":"Unknown","auto_register":true},"advection_velocity":{"field":"advecting_velocity","source":"PrescribedData","auto_register":true,"constant_value":[0,0,0],"algebraic_extension_source_field":"","dependency_direction":"physical_velocity_to_extension_to_level_set","physical_momentum_coupling_allowed":false,"map_guard_policy":"fixed_bounded_application_policy"},"supg":{"enabled":true,"tau_scale":0.25,"velocity_epsilon":9.9999999999999998e-13,"transient_scale":1.5},"bound_preserving":{"enabled":false,"method":"nodal_rejection_projection_nonconservative","bound_tolerance":9.9999999999999998e-13,"sign_tolerance":9.9999999999999998e-13,"maximum_courant":1,"courant_tolerance":9.9999999999999998e-13,"enforce_courant_limit":true,"enforce_impermeable_boundaries":true,"impermeable_normal_velocity_tolerance":1e-10},"interface_kinematic":{"enabled":true,"interface_marker":77,"weight_scale":1.5},"maintenance_transaction":{"ordering":"transport_then_reinitialization_then_geometry_refresh","reinitialization":{"enabled":false,"method":"Projection","cadence_steps":1,"max_iterations":10,"pseudo_time_step_scale":0.29999999999999999,"interface_band_width":3,"signed_distance_tolerance":9.9999999999999995e-07,"preserve_band_width":0,"maximum_zero_set_displacement":1e-10}},"boundaries":{"inflow":[{"marker":4,"value":0.5,"penalty_scale":2}],"outflow":[{"marker":5}]}})json";
+      R"json({"artifact_schema_version":1,"component":"level_set_transport","capability_label":"one_phase_interface_transport_nonlocal_conservation","units":{"system":"consistent_solver_units","length":"solver_length","time":"solver_time","volume":"solver_volume"},"operator":"transport","transport_form":"ConservativeDivergence","conservation_diagnostic":"conservative_divergence_level_set_advection_not_locally_conservative","level_set":{"field":"phi","source":"Unknown","auto_register":true},"advection_velocity":{"field":"advecting_velocity","source":"PrescribedData","auto_register":true,"constant_value":[0,0,0],"algebraic_extension_source_field":"","dependency_direction":"physical_velocity_to_extension_to_level_set","physical_momentum_coupling_allowed":false,"map_guard_policy":"fixed_bounded_application_policy"},"supg":{"enabled":true,"tau_scale":0.25,"velocity_epsilon":9.9999999999999998e-13,"transient_scale":1.5},"bound_preserving":{"enabled":false,"method":"nodal_rejection_projection_nonconservative","bound_tolerance":9.9999999999999998e-13,"sign_tolerance":9.9999999999999998e-13,"maximum_courant":1,"courant_tolerance":9.9999999999999998e-13,"enforce_courant_limit":true,"enforce_impermeable_boundaries":true,"impermeable_normal_velocity_tolerance":1e-10},"interface_kinematic":{"enabled":true,"interface_marker":77,"weight_scale":1.5},"maintenance_transaction":{"ordering":"transport_then_geometry_refresh"},"boundaries":{"inflow":[{"marker":4,"value":0.5,"penalty_scale":2}],"outflow":[{"marker":5}]}})json";
   std::string expected{expected_without_phase};
   const auto schema_version = expected.find("\"artifact_schema_version\":1");
   ASSERT_NE(schema_version, std::string::npos);
@@ -1865,7 +1889,7 @@ TEST(LevelSetEquationTranslator, TranslatesConservativePhaseControls)
                 "\"boundary_flux_policy\":\"globally_balanced_discrete_q_flux\""),
             std::string::npos);
   EXPECT_NE(artifact->json.find(
-                "\"ordering\":\"conservative_phase_transport_then_raw_geometry_rebuild_then_wall_aware_reinitialization_then_local_geometry_reconciliation_then_validation_then_commit\""),
+                "\"ordering\":\"conservative_phase_transport_then_raw_geometry_rebuild_then_local_geometry_reconciliation_then_validation_then_commit\""),
             std::string::npos);
 #endif
 }

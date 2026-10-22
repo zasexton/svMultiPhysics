@@ -150,15 +150,6 @@ void appendInstallationObservations(
                                   aliases::conservative_phase_side,
                                   "conservative_phase_liquid_side");
     appendInstallationObservation(observations, input,
-                                  aliases::reinitialization_enable,
-                                  "enable_reinitialization");
-    appendInstallationObservation(observations, input,
-                                  aliases::reinitialization_method,
-                                  "reinitialization_method");
-    appendInstallationObservation(observations, input,
-                                  aliases::reinitialization_cadence,
-                                  "reinitialization_cadence_steps");
-    appendInstallationObservation(observations, input,
                                   aliases::curvature_field,
                                   "curvature_field_name");
   }
@@ -168,7 +159,7 @@ void appendInstallationObservations(
                       installation->input_observations.end());
 
   const bool source_backed = !installation->input_observations.empty();
-  constexpr std::array<std::string_view, 12> covered_keys{
+  constexpr std::array<std::string_view, 9> covered_keys{
       "level_set_field_name",
       "transport_form",
       "velocity_source",
@@ -177,9 +168,6 @@ void appendInstallationObservations(
       "velocity_space_present",
       "enable_conservative_phase_transport",
       "conservative_phase_liquid_side",
-      "enable_reinitialization",
-      "reinitialization_method",
-      "reinitialization_cadence_steps",
       "curvature_field_name",
   };
   for (const auto key : covered_keys) {
@@ -208,7 +196,7 @@ void appendInstallationObservations(
 }
 
 void appendLegacyDefaults(std::vector<LevelSetInputObservation> &observations) {
-  constexpr std::array<std::string_view, 15> keys{
+  constexpr std::array<std::string_view, 12> keys{
       "level_set_field_name",
       "level_set_isovalue",
       "transport_form",
@@ -218,9 +206,6 @@ void appendLegacyDefaults(std::vector<LevelSetInputObservation> &observations) {
       "velocity_space_present",
       "enable_conservative_phase_transport",
       "conservative_phase_liquid_side",
-      "enable_reinitialization",
-      "reinitialization_method",
-      "reinitialization_cadence_steps",
       "enable_static_capillary_equilibrium_initialization",
       "enable_curvature_projection",
       "curvature_field_name",
@@ -540,33 +525,6 @@ resolveLegacyLevelSetMaintenanceConfiguration(
     result->open_boundaries.push_back(std::move(open));
   }
 
-  apply_boolean(aliases::reinitialization_enable, "enable_reinitialization",
-                result->transport.reinitialization.enabled);
-  if (const auto method = reader.string(aliases::reinitialization_method,
-                                        "reinitialization_method")) {
-    result->transport.reinitialization.method =
-        parsing::parseReinitializationMethod(method->text, kLegacyPolicy);
-  }
-  apply_integer(aliases::reinitialization_cadence,
-                "reinitialization_cadence_steps",
-                result->transport.reinitialization.cadence_steps);
-  apply_integer(aliases::reinitialization_iterations,
-                "reinitialization_max_iterations",
-                result->transport.reinitialization.max_iterations);
-  apply_real(aliases::reinitialization_pseudo_time_step,
-             "reinitialization_pseudo_time_step_scale",
-             result->transport.reinitialization.pseudo_time_step_scale);
-  apply_real(aliases::reinitialization_interface_band,
-             "reinitialization_interface_band_width",
-             result->transport.reinitialization.interface_band_width);
-  apply_real(aliases::reinitialization_signed_distance_tolerance,
-             "reinitialization_signed_distance_tolerance",
-             result->transport.reinitialization.signed_distance_tolerance);
-  apply_real(aliases::reinitialization_max_zero_set_displacement,
-             "reinitialization_max_zero_set_displacement",
-             result->transport.reinitialization.max_zero_set_displacement);
-  append_equation_observations();
-
   apply_boolean_list(
       {"Enable_kinematic_reconciliation"},
       "enable_kinematic_reconciliation",
@@ -781,7 +739,6 @@ resolveLegacyLevelSetMaintenanceConfiguration(
 
   const bool enabled = result->transport.bound_preserving.enabled ||
                        result->transport.conservative_phase.enabled ||
-                       result->transport.reinitialization.enabled ||
                        result->transport.kinematic_reconciliation.enabled ||
                        result->transport.sign_definite_patch_bounds.enabled ||
                        result->transport.interface_preserving_redistancing.enabled ||

@@ -710,7 +710,6 @@ std::string conservativeMaintenanceLedgerJson(const Ledger &ledger) {
     });
   };
   const auto &transport = ledger.transport_stage;
-  const auto &repair = ledger.reinitialization;
   const auto &reconciliation = ledger.reconciliation;
   const auto stage_options = [](const auto &options) {
     return jsonObject({
@@ -762,8 +761,6 @@ std::string conservativeMaintenanceLedgerJson(const Ledger &ledger) {
     });
   }
   return jsonObject({
-      {"reinitialization_due", jsonBool(ledger.reinitialization_due)},
-      {"reinitialization_applied", jsonBool(ledger.reinitialization_applied)},
       {"inventory",
        jsonObject({
            {"raw_post_transport_phase_measure",
@@ -827,22 +824,6 @@ std::string conservativeMaintenanceLedgerJson(const Ledger &ledger) {
                 ledger.region_ledger.maximum_flux_reconstruction_residual)},
            {"region_count", jsonInteger(ledger.region_ledger.regions.size())},
            {"diagnostic", jsonString(ledger.region_ledger.diagnostic)},
-       })},
-      {"reinitialization",
-       jsonObject({
-           {"success", jsonBool(repair.success)},
-           {"converged", jsonBool(repair.converged)},
-           {"iterations", jsonInteger(repair.iterations)},
-           {"repaired_dofs", jsonInteger(repair.repaired_dofs)},
-           {"preserved_dofs", jsonInteger(repair.preserved_dofs)},
-           {"max_abs_update", jsonReal(repair.max_abs_update)},
-           {"max_distance", jsonReal(repair.max_distance)},
-           {"max_interface_displacement",
-            jsonReal(repair.max_interface_displacement)},
-           {"max_iteration_residual", jsonReal(repair.max_iteration_residual)},
-           {"max_signed_distance_error",
-            jsonReal(repair.max_signed_distance_error)},
-           {"diagnostic", jsonString(repair.diagnostic)},
        })},
       {"reconciliation",
        jsonObject({

@@ -973,7 +973,7 @@ set(FE_LEVELSET_HEADERS
     LevelSet/LevelSetSignDefinitePatchBounds.h
     LevelSet/LevelSetInterfacePreservingRedistancing.h
     LevelSet/LevelSetInterfacePreservingRedistancing3D.h
-    LevelSet/LevelSetReinitialization.h
+    LevelSet/LevelSetWallContactConstraint.h
     LevelSet/LevelSetDiagnostics.h
     LevelSet/LevelSetGeometry.h
     LevelSet/LevelSetRestart.h
@@ -1002,7 +1002,6 @@ set(FE_LEVELSET_SOURCES
     LevelSet/LevelSetSignDefinitePatchBounds.cpp
     LevelSet/LevelSetInterfacePreservingRedistancing.cpp
     LevelSet/LevelSetInterfacePreservingRedistancing3D.cpp
-    LevelSet/LevelSetReinitialization.cpp
     LevelSet/LevelSetDiagnostics.cpp
     LevelSet/LevelSetGeometry.cpp
     LevelSet/LevelSetRestart.cpp

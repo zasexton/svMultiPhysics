@@ -197,7 +197,6 @@ TEST(LevelSetDiagnostics, ReportsVolumeAndReferenceVolumeLoss)
     const auto distorted = distortedPlaneCoefficients(fixture);
 
     level_set::LevelSetOutputDiagnosticsOptions options{};
-    options.compute_signed_distance_error = false;
     options.has_reference_negative_volume = true;
     options.reference_negative_volume = 0.125;
 
@@ -236,7 +235,6 @@ TEST(LevelSetDiagnostics, FESystemOverloadReportsTheFieldSliceVolume)
               solution.begin() + static_cast<std::ptrdiff_t>(offset));
 
     level_set::LevelSetOutputDiagnosticsOptions options{};
-    options.compute_signed_distance_error = false;
 
     const auto result = level_set::computeLevelSetOutputDiagnostics(
         fixture.system,
@@ -293,7 +291,6 @@ TEST(LevelSetDiagnostics, PureTangentialAdvectionPreservesVolumeDiagnostics)
     ASSERT_TRUE(initial_volume.success) << initial_volume.diagnostic;
 
     level_set::LevelSetOutputDiagnosticsOptions options{};
-    options.compute_signed_distance_error = false;
     options.has_reference_negative_volume = true;
     options.reference_negative_volume = initial_volume.negative_volume;
 

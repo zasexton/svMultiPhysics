@@ -2500,11 +2500,11 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   }
 }
 
-// The prescribed physical frame built below is read only by the retired
-// repair-to-target kind (decision D4); production harvests
-// PreserveAcceptedAngle constraints without it.
+// Decision D4: the accepted wall-contact constraint is the identity of the
+// accepted contact cell.  Its canonical form is the same on every rank, and
+// two identities for one parent cell on one rank fail closed on every rank.
 TEST(ApplicationDriverLevelSetWorkflowsMPI,
-     AcceptedSnapshotPrescribedFrameIsPartitionInvariantAndConflictsFailClosed)
+     AcceptedSnapshotWallConstraintsArePartitionInvariantAndConflictsFailClosed)
 {
   int rank = 0;
   int size = 1;
@@ -2517,8 +2517,6 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   constexpr int wall_marker = 151;
   constexpr std::uint64_t revision = 73u;
   constexpr svmp::FE::GlobalIndex parent = 23;
-  const auto pi = std::acos(svmp::FE::Real{-1.0});
-  const auto target_angle = pi / svmp::FE::Real{3.0};
 
   svmp::FE::interfaces::FreeSurfaceGeometryRuleRecord record;
   record.role =
@@ -2535,49 +2533,19 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   record.physical_rule.geometric_dimension = 0;
   record.physical_rule.free_surface_snapshot_revision_key = revision;
   record.physical_rule.physical_measure = 1.0;
-  record.physical_rule.points.push_back(
-      svmp::FE::geometry::MappedCutQuadraturePoint{
-          .physical_point = {{0.5, 0.0, 0.0}},
-          .physical_weight = 1.0,
-          .normal = {{std::sin(target_angle),
-                      std::cos(target_angle),
-                      0.0}},
-          .boundary_normal = {{0.0, -1.0, 0.0}},
-      });
-  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
-  parameters.liquid_side =
-      svmp::FE::geometry::CutIntegrationSide::Negative;
-  parameters.young_wall_coefficients.push_back(
-      svmp::FE::interfaces::FreeSurfaceYoungWallCoefficient{
-          .boundary_marker = wall_marker,
-          .equilibrium_contact_angle_radians = target_angle,
-      });
-  const auto constraint = makeAcceptedSnapshotWallConstraint(
-      record,
-      svmp::FE::level_set::LevelSetWallContactConstraintKind::
-          RepairToPrescribedAngle,
-      interface_marker,
-      revision,
-      parameters,
-      /*dimension=*/2);
-  EXPECT_NEAR(constraint.target_angle_radians, target_angle, 1.0e-15);
-  EXPECT_EQ(constraint.accepted_contact_line_tangent,
-            (std::array<svmp::FE::Real, 3>{{0.0, 0.0, 1.0}}));
+  const auto constraint =
+      makeAcceptedSnapshotWallConstraint(record, interface_marker, revision);
 
   const auto canonical = canonicalizeAcceptedWallConstraints(
       std::vector{constraint, constraint},
       svmp::MeshComm(MPI_COMM_WORLD),
-      "MPI prescribed-frame duplicate test");
+      "MPI wall-constraint duplicate test");
   ASSERT_EQ(canonical.size(), 1u);
-  std::array<double, 8> payload{{
-      canonical.front().target_angle_radians,
-      canonical.front().physical_wall_normal[0],
-      canonical.front().physical_wall_normal[1],
-      canonical.front().physical_wall_normal[2],
-      canonical.front().accepted_contact_point[0],
-      canonical.front().accepted_contact_line_tangent[0],
-      canonical.front().accepted_contact_line_tangent[1],
-      canonical.front().accepted_contact_line_tangent[2],
+  const std::array<double, 4> payload{{
+      static_cast<double>(canonical.front().interface_marker),
+      static_cast<double>(canonical.front().boundary_marker),
+      static_cast<double>(canonical.front().parent_cell_global_id),
+      static_cast<double>(canonical.front().geometry_revision),
   }};
   double local_max_difference = 0.0;
   for (const auto value : payload) {
@@ -2601,12 +2569,12 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   EXPECT_DOUBLE_EQ(local_max_difference, 0.0);
   if (rank == 0) {
     ::testing::Test::RecordProperty(
-        "application_prescribed_frame_mpi_max_difference",
+        "application_wall_constraint_mpi_max_difference",
         local_max_difference);
   }
 
   auto conflict = constraint;
-  conflict.accepted_contact_point[0] += svmp::FE::Real{0.25};
+  conflict.boundary_marker += 1;
   std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
       rank_local_constraints{constraint};
   if (rank == 0) {
@@ -2616,24 +2584,10 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       (void)canonicalizeAcceptedWallConstraints(
           std::move(rank_local_constraints),
           svmp::MeshComm(MPI_COMM_WORLD),
-          "MPI prescribed-frame conflict test"),
+          "MPI wall-constraint conflict test"),
       std::runtime_error);
-
-  auto positive_parameters = parameters;
-  positive_parameters.liquid_side =
-      svmp::FE::geometry::CutIntegrationSide::Positive;
-  const auto positive_constraint = makeAcceptedSnapshotWallConstraint(
-      record,
-      svmp::FE::level_set::LevelSetWallContactConstraintKind::
-          RepairToPrescribedAngle,
-      interface_marker,
-      revision,
-      positive_parameters,
-      /*dimension=*/2);
-  EXPECT_NEAR(positive_constraint.target_angle_radians,
-              pi - target_angle,
-              1.0e-15);
 }
+
 
 TEST(ApplicationDriverLevelSetWorkflowsMPI,
      StaticCapillaryPublicationIsCollectiveWithExactSyntheticCertificate)

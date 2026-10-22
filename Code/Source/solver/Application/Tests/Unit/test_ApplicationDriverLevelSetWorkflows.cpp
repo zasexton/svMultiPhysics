@@ -120,12 +120,6 @@ void expectMaintenanceCompatibilityFieldsEqual(
             expected_transport.conservative_phase.enabled);
   EXPECT_EQ(actual_transport.conservative_phase.liquid_side,
             expected_transport.conservative_phase.liquid_side);
-  EXPECT_EQ(actual_transport.reinitialization.enabled,
-            expected_transport.reinitialization.enabled);
-  EXPECT_EQ(actual_transport.reinitialization.method,
-            expected_transport.reinitialization.method);
-  EXPECT_EQ(actual_transport.reinitialization.cadence_steps,
-            expected_transport.reinitialization.cadence_steps);
   EXPECT_EQ(actual.isovalue, expected.isovalue);
   ASSERT_EQ(actual.open_boundaries.size(), expected.open_boundaries.size());
   for (std::size_t index = 0u; index < expected.open_boundaries.size(); ++index) {
@@ -13775,19 +13769,17 @@ TEST(ApplicationDriverLevelSetWorkflows,
 #endif
 }
 
-// The prescribed physical frame is read only by the retired repair-to-target
-// kind (decision D4).  It stays tested until that kind is removed after M4.
+// Decision D4: an accepted wall-contact constraint is the identity of the
+// accepted contact cell, with no angle or physical frame.  It fails closed
+// on incomplete or stale provenance, and two identities for one parent cell
+// conflict.
 TEST(ApplicationDriverLevelSetWorkflows,
-     AcceptedSnapshotPrescribedFrameIsCompleteAndFailsClosed)
+     AcceptedSnapshotWallConstraintIsAnIdentityAndFailsClosed)
 {
   constexpr int interface_marker = 1706;
   constexpr int wall_marker = 129;
   constexpr std::uint64_t revision = 41u;
   constexpr svmp::FE::GlobalIndex parent = 17;
-  constexpr svmp::FE::Real half_pi =
-      svmp::FE::Real{1.57079632679489661923132169163975144};
-  constexpr svmp::FE::Real inv_sqrt_two =
-      svmp::FE::Real{0.70710678118654752440084436210484904};
 
   svmp::FE::interfaces::FreeSurfaceGeometryRuleRecord record;
   record.role =
@@ -13804,113 +13796,48 @@ TEST(ApplicationDriverLevelSetWorkflows,
   record.physical_rule.geometric_dimension = 0;
   record.physical_rule.free_surface_snapshot_revision_key = revision;
   record.physical_rule.physical_measure = 1.0;
-  record.physical_rule.points.push_back(
-      svmp::FE::geometry::MappedCutQuadraturePoint{
-          .physical_point = {{0.25, 0.0, 0.0}},
-          .physical_weight = 1.0,
-          .normal = {{inv_sqrt_two, inv_sqrt_two, 0.0}},
-          .boundary_normal = {{0.0, -1.0, 0.0}},
-      });
 
-  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
-  parameters.liquid_side =
-      svmp::FE::geometry::CutIntegrationSide::Negative;
-  parameters.young_wall_coefficients.push_back(
-      svmp::FE::interfaces::FreeSurfaceYoungWallCoefficient{
-          .boundary_marker = wall_marker,
-          .equilibrium_contact_angle_radians = half_pi,
-      });
-  const auto constraint = makeAcceptedSnapshotWallConstraint(
-      record,
-      svmp::FE::level_set::LevelSetWallContactConstraintKind::
-          RepairToPrescribedAngle,
-      interface_marker,
-      revision,
-      parameters,
-      /*dimension=*/2);
+  const auto constraint =
+      makeAcceptedSnapshotWallConstraint(record, interface_marker, revision);
+  EXPECT_EQ(constraint.interface_marker, interface_marker);
+  EXPECT_EQ(constraint.boundary_marker, wall_marker);
   EXPECT_EQ(constraint.parent_cell_global_id, parent);
-  EXPECT_DOUBLE_EQ(constraint.target_angle_radians, half_pi);
-  EXPECT_EQ(constraint.physical_wall_normal,
-            (std::array<svmp::FE::Real, 3>{{0.0, -1.0, 0.0}}));
-  EXPECT_EQ(constraint.accepted_contact_point,
-            (std::array<svmp::FE::Real, 3>{{0.25, 0.0, 0.0}}));
-  EXPECT_EQ(constraint.accepted_contact_line_tangent,
-            (std::array<svmp::FE::Real, 3>{{0.0, 0.0, 1.0}}));
+  EXPECT_EQ(constraint.geometry_revision, revision);
 
   const std::vector duplicates{constraint, constraint};
   const auto canonical = canonicalizeAcceptedWallConstraints(
       duplicates,
       svmp::MeshComm::world(),
-      "Application prescribed-frame test");
+      "Application wall-constraint test");
   ASSERT_EQ(canonical.size(), 1u);
   auto conflict = constraint;
-  conflict.accepted_contact_point[0] += svmp::FE::Real{0.125};
+  conflict.boundary_marker += 1;
   EXPECT_THROW(
       (void)canonicalizeAcceptedWallConstraints(
           std::vector{constraint, conflict},
           svmp::MeshComm::world(),
-          "Application prescribed-frame conflict test"),
+          "Application wall-constraint conflict test"),
       std::runtime_error);
 
-  auto missing = record;
-  missing.physical_rule.points.clear();
-  EXPECT_THROW(
-      (void)makeAcceptedSnapshotWallConstraint(
-          missing,
-          svmp::FE::level_set::LevelSetWallContactConstraintKind::
-              RepairToPrescribedAngle,
-          interface_marker,
-          revision,
-          parameters,
-          /*dimension=*/2),
-      std::runtime_error);
   auto stale = record;
   stale.physical_rule.free_surface_snapshot_revision_key = revision + 1u;
   EXPECT_THROW(
       (void)makeAcceptedSnapshotWallConstraint(
-          stale,
-          svmp::FE::level_set::LevelSetWallContactConstraintKind::
-              RepairToPrescribedAngle,
-          interface_marker,
-          revision,
-          parameters,
-          /*dimension=*/2),
+          stale, interface_marker, revision),
       std::runtime_error);
-
-  // Production (decision D4) harvests PreserveAcceptedAngle constraints.
-  // They carry only the accepted identity: no target angle or frame is read,
-  // so a missing Young datum or a degenerate rule does not matter.
-  const auto preserved = makeAcceptedSnapshotWallConstraint(
-      missing,
-      svmp::FE::level_set::LevelSetWallContactConstraintKind::
-          PreserveAcceptedAngle,
-      interface_marker,
-      revision,
-      svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters{},
-      /*dimension=*/2);
-  EXPECT_EQ(preserved.kind,
-            svmp::FE::level_set::LevelSetWallContactConstraintKind::
-                PreserveAcceptedAngle);
-  EXPECT_EQ(preserved.parent_cell_global_id, parent);
-  EXPECT_EQ(preserved.geometry_revision, revision);
-  EXPECT_DOUBLE_EQ(preserved.target_angle_radians, 0.0);
-  EXPECT_EQ(preserved.physical_wall_normal,
-            (std::array<svmp::FE::Real, 3>{{0.0, 0.0, 0.0}}));
-  EXPECT_TRUE(acceptedWallConstraintFrameIsComplete(
-      preserved,
-      svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters{},
-      /*dimension=*/2));
+  auto without_parent = record;
+  without_parent.reference_rule.provenance.parent_entity_global_id =
+      svmp::FE::INVALID_GLOBAL_INDEX;
   EXPECT_THROW(
       (void)makeAcceptedSnapshotWallConstraint(
-          stale,
-          svmp::FE::level_set::LevelSetWallContactConstraintKind::
-              PreserveAcceptedAngle,
-          interface_marker,
-          revision,
-          parameters,
-          /*dimension=*/2),
+          without_parent, interface_marker, revision),
+      std::runtime_error);
+  EXPECT_THROW(
+      (void)makeAcceptedSnapshotWallConstraint(
+          record, interface_marker, /*snapshot_revision=*/0u),
       std::runtime_error);
 }
+
 
 TEST(ApplicationDriverLevelSetWorkflows,
      PrescribedWallSnapshotDrivesEndpointReinitialization)
@@ -20540,7 +20467,7 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
       std::istreambuf_iterator<char>{input},
       std::istreambuf_iterator<char>{}};
   EXPECT_NE(contents.find(
-                "\"maintenance_ordering\":\"conservative_phase_transport_then_raw_geometry_rebuild_then_wall_aware_reinitialization_then_local_geometry_reconciliation_then_validation_then_commit\""),
+                "\"maintenance_ordering\":\"conservative_phase_transport_then_raw_geometry_rebuild_then_local_geometry_reconciliation_then_validation_then_commit\""),
             std::string::npos);
   EXPECT_NE(contents.find("\"raw_post_transport_phase_measure\":"),
             std::string::npos);
@@ -20607,41 +20534,60 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
 TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
        NonconvergedReinitializationRejectsAndRestoresGeometry)
 {
-  auto raw_candidate = initialized_solution_;
-  const auto phi_offset = fieldOffset(phi_);
-  for (std::size_t i = 0u; i < fieldCount(phi_); ++i) {
-    raw_candidate[phi_offset + i] *= svmp::FE::Real{4.0};
-  }
-  scatterFeOrderedSolution(history().u(), raw_candidate);
-  refreshCurrentCandidate(
-      "application-driver-conservative-phase-reinitialization-reject-raw");
-  const auto* raw_context = sim_.fe_system->cutIntegrationContext();
-  ASSERT_NE(raw_context, nullptr);
+  // The frozen WP-6 matrix records this name.  Decision D47 retired the
+  // projection reinitialization whose nonconverged candidate the test
+  // rejected.  A level-set equation that enables it, or names one of its
+  // settings, now fails while it is translated, before any field,
+  // candidate or geometry exists; the disabled switch is still accepted.
+  const auto before = gatherFeOrderedSolution(history().u());
+  const auto* context = sim_.fe_system->cutIntegrationContext();
   const auto lifecycle_revision = lifecycle_.valueRevision();
+  const std::vector<std::pair<std::string, std::string>> cases{
+      {"Enable_reinitialization", "false"},
+      {"Enable_reinitialization", "true"},
+      {"Reinitialization_method", "projection"},
+      {"Reinitialization_cadence_steps", "1"},
+      {"Reinitialization_max_iterations", "1"},
+      {"Reinitialization_pseudo_time_step_scale", "1.0e-3"},
+      {"Reinitialization_interface_band_width", "3.0"},
+      {"Reinitialization_signed_distance_tolerance", "1.0e-14"},
+      {"Reinitialization_max_zero_set_displacement", "1.0e-10"},
+  };
+  for (const auto& [key, value] : cases) {
+    auto mesh = makeWorkflowTriangleMesh();
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "level_set";
+    input.mesh_name = "triangle";
+    input.mesh = mesh->local_mesh_ptr();
+    input.equation_params["Level_set_field_name"] =
+        svmp::Physics::ParameterValue{true, "phi"};
+    input.equation_params["Velocity_source"] =
+        svmp::Physics::ParameterValue{true, "constant"};
+    input.equation_params["Constant_velocity"] =
+        svmp::Physics::ParameterValue{true, "0.0 0.0 0.0"};
+    input.equation_params[key] = svmp::Physics::ParameterValue{true, value};
 
-  requests_.front() = withMaintenanceConfiguration(
-      requests_.front(), [&](auto& configured) {
-        configured.transport.reinitialization.enabled = true;
-        configured.transport.reinitialization.cadence_steps = 1;
-        configured.transport.reinitialization.max_iterations = 1;
-        configured.transport.reinitialization.pseudo_time_step_scale = 1.0e-3;
-        configured.transport.reinitialization.signed_distance_tolerance = 1.0e-14;
-      });
-
-  const auto result = applyPreparedConservativePhaseCandidate();
-  EXPECT_FALSE(result.accept_step);
-  EXPECT_FALSE(result.changed);
-  EXPECT_EQ(result.geometry_transaction, nullptr);
-  ASSERT_EQ(result.maintenance_ledgers.size(), requests_.size());
-  EXPECT_TRUE(result.maintenance_ledgers.front().reinitialization_due);
-  EXPECT_TRUE(result.maintenance_ledgers.front().reinitialization.success);
-  EXPECT_FALSE(result.maintenance_ledgers.front().reinitialization.converged);
-  EXPECT_EQ(gatherFeOrderedSolution(history().u()), raw_candidate);
-  EXPECT_EQ(sim_.fe_system->cutIntegrationContext(), raw_context);
+    svmp::FE::systems::FESystem system(mesh);
+    if (value == "false") {
+      EXPECT_TRUE(
+          application::translators::level_set::createModule(input, system))
+          << key;
+      continue;
+    }
+    try {
+      (void)application::translators::level_set::createModule(input, system);
+      ADD_FAILURE() << key << '=' << value << " was accepted";
+    } catch (const std::exception& error) {
+      EXPECT_NE(std::string(error.what()).find("retired (decision D47)"),
+                std::string::npos)
+          << key << ": " << error.what();
+    }
+  }
+  EXPECT_EQ(gatherFeOrderedSolution(history().u()), before);
+  EXPECT_EQ(sim_.fe_system->cutIntegrationContext(), context);
   EXPECT_EQ(lifecycle_.valueRevision(), lifecycle_revision);
-  EXPECT_FALSE(sim_.fe_system->cutIntegrationContextTransactionActive());
-  EXPECT_FALSE(lifecycle_.transactionActive());
 }
+
 
 TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
        PostAcceptanceMaintenanceDoesNotRepeatCandidateOwnedRepair)

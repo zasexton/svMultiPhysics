@@ -10,7 +10,6 @@
 #include "LevelSet/LevelSetConservativePhaseOperator.h"
 #include "LevelSet/LevelSetConservativePhaseRegions.h"
 #include "LevelSet/LevelSetOptions.h"
-#include "LevelSet/LevelSetReinitialization.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -95,9 +94,6 @@ struct LevelSetConservativePhaseArtifactContext {
             ClosedDomainDiscreteQFluxOnly};
     std::string boundary_flux_scope{};
     bool geometry_validated_before_commit{false};
-    bool reinitialization_due{false};
-    bool reinitialization_applied{false};
-    LevelSetSignedDistanceRepairResult reinitialization{};
     LevelSetConservativePhaseReconciliationArtifact reconciliation{};
     Real raw_post_transport_phase_measure{0.0};
     Real post_limit_phase_measure{0.0};

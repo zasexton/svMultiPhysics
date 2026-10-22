@@ -107,9 +107,6 @@ parsePhaseSide(std::string_view raw);
 [[nodiscard]] svmp::FE::level_set::LevelSetConservativePhaseBoundaryFluxPolicy
 parseConservativePhaseBoundaryFluxPolicy(std::string_view raw);
 
-[[nodiscard]] svmp::FE::level_set::LevelSetReinitializationMethod
-parseReinitializationMethod(std::string_view raw, LevelSetInputPolicy policy);
-
 namespace aliases {
 
 inline constexpr std::array<std::string_view, 1> transport_form{
@@ -149,24 +146,6 @@ inline constexpr std::array<std::string_view, 1>
     conservative_phase_auto_register{"Auto_register_conservative_phase_field"};
 inline constexpr std::array<std::string_view, 1> conservative_phase_side{
     "Conservative_phase_liquid_side"};
-inline constexpr std::array<std::string_view, 1> reinitialization_enable{
-    "Enable_reinitialization"};
-inline constexpr std::array<std::string_view, 1> reinitialization_method{
-    "Reinitialization_method"};
-inline constexpr std::array<std::string_view, 1> reinitialization_cadence{
-    "Reinitialization_cadence_steps"};
-inline constexpr std::array<std::string_view, 1> reinitialization_iterations{
-    "Reinitialization_max_iterations"};
-inline constexpr std::array<std::string_view, 1>
-    reinitialization_pseudo_time_step{"Reinitialization_pseudo_time_step_scale"};
-inline constexpr std::array<std::string_view, 1>
-    reinitialization_interface_band{"Reinitialization_interface_band_width"};
-inline constexpr std::array<std::string_view, 1>
-    reinitialization_signed_distance_tolerance{
-        "Reinitialization_signed_distance_tolerance"};
-inline constexpr std::array<std::string_view, 1>
-    reinitialization_max_zero_set_displacement{
-        "Reinitialization_max_zero_set_displacement"};
 inline constexpr std::array<std::string_view, 8> curvature_field{
     "Curvature_field_name",
     "CurvatureFieldName",

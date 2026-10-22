@@ -108,31 +108,6 @@ struct LevelSetInterfaceKinematicOptions {
     Real weight_scale{1.0};
 };
 
-enum class LevelSetReinitializationMethod {
-    HamiltonJacobiPDE,
-    FastMarching,
-    Projection
-};
-
-struct LevelSetReinitializationOptions {
-    bool enabled{false};
-    LevelSetReinitializationMethod method{LevelSetReinitializationMethod::Projection};
-    int cadence_steps{1};
-    int max_iterations{10};
-    Real pseudo_time_step_scale{0.3};
-    Real interface_band_width{3.0};
-    Real signed_distance_tolerance{1.0e-6};
-    // Deprecated compatibility knob.  The interface-preserving projection no
-    // longer freezes a near-interface band.  Zero and negative values select
-    // the topology-preserving algorithm; positive values are rejected so a
-    // configuration cannot silently request the old freeze behavior.
-    Real preserve_band_width{0.0};
-    // Maximum allowed geometric motion of an original edge/interface
-    // crossing.  The projection line-search enforces this fail-closed guard;
-    // it is not a target displacement.
-    Real max_zero_set_displacement{1.0e-10};
-};
-
 /**
  * @brief Accepted-step reconciliation of the transported P1 level set with
  * the kinematic interface flux of its own transport velocity.
@@ -315,7 +290,6 @@ struct LevelSetTransportOptions {
     LevelSetSUPGOptions supg{};
     LevelSetBoundPreservingOptions bound_preserving{};
     LevelSetInterfaceKinematicOptions interface_kinematic{};
-    LevelSetReinitializationOptions reinitialization{};
     LevelSetBoundaryOptions boundaries{};
     LevelSetConservativePhaseOptions conservative_phase{};
     LevelSetKinematicReconciliationOptions kinematic_reconciliation{};
@@ -326,23 +300,17 @@ struct LevelSetTransportOptions {
 enum class LevelSetConservationDiagnostic {
     PlainAdvectionNotConservative,
     ConservativeDivergenceAdvectionNotLocallyConservative,
-    ReinitializedAdvectionNotConservative,
     ConservativePhaseIndicatorLocallyConservative
 };
 
 [[nodiscard]] LevelSetConservationDiagnostic levelSetConservationDiagnostic(
-    LevelSetTransportForm transport_form,
-    const LevelSetReinitializationOptions& reinitialization) noexcept;
+    LevelSetTransportForm transport_form) noexcept;
 
 [[nodiscard]] LevelSetConservationDiagnostic levelSetConservationDiagnostic(
     const LevelSetTransportOptions& options) noexcept;
 
 [[nodiscard]] const char* levelSetConservationDiagnosticName(
     LevelSetConservationDiagnostic diagnostic) noexcept;
-
-[[nodiscard]] bool shouldReinitializeLevelSet(
-    const LevelSetReinitializationOptions& options,
-    int completed_step_index) noexcept;
 
 [[nodiscard]] bool shouldApplyLevelSetKinematicReconciliation(
     const LevelSetKinematicReconciliationOptions& options,

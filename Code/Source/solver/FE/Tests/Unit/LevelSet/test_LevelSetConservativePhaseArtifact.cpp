@@ -138,12 +138,7 @@ TEST(LevelSetConservativePhaseArtifact,
                 level_set::levelSetP1PhaseFluxLedgerDigest(stage),
             .stage_options = stage.executed_options,
         };
-    context.reinitialization.diagnostic = "not due \"quoted\"";
-    context.reinitialization.max_prescribed_contact_value_residual =
-        0.0123;
-    context.reinitialization
-        .max_prescribed_contact_angle_error_radians = 0.0456;
-    context.reconciliation.diagnostic = "no correction required";
+    context.reconciliation.diagnostic = "no correction \"quoted\"";
     const std::vector<level_set::LevelSetPhaseRegionDefinition> regions{
         level_set::LevelSetPhaseRegionDefinition{
             .name = "film",
@@ -234,14 +229,13 @@ TEST(LevelSetConservativePhaseArtifact,
                   "\"low_order_mass_transfer_into_region\":"),
               std::string::npos);
     EXPECT_NE(contents.find(
-                  "\"reinitialization_diagnostic\":\"not due \\\"quoted\\\"\""),
+                  "\"maintenance_summary\":{\"reconciliation_success\":"),
               std::string::npos);
     EXPECT_NE(contents.find(
-                  "\"reinitialization_max_prescribed_contact_value_residual\":"),
+                  "\"reconciliation_diagnostic\":\"no correction \\\"quoted\\\"\""),
               std::string::npos);
-    EXPECT_NE(contents.find(
-                  "\"reinitialization_max_prescribed_contact_angle_error_radians\":"),
-              std::string::npos);
+    // The projection reinitialization was retired (decision D47).
+    EXPECT_EQ(contents.find("\"reinitialization_"), std::string::npos);
 
     const std::array<FE::Real, 2> balanced_boundary_transfer{
         0.01, -0.01};
@@ -405,8 +399,8 @@ TEST(LevelSetConservativePhaseArtifact,
     nonfinite_contact_history_context.accepted_step = 16u;
     nonfinite_contact_history_context.split_stage_provenance
         ->prospective_step = 16u;
-    nonfinite_contact_history_context.reinitialization
-        .max_prescribed_contact_angle_error_radians =
+    nonfinite_contact_history_context.reconciliation
+        .maximum_removed_contact_increment =
         std::numeric_limits<FE::Real>::infinity();
     const auto nonfinite_contact_history =
         level_set::writeLevelSetConservativePhaseArtifact(

@@ -811,51 +811,6 @@ void validateBoundPreservingOptions(
     }
 }
 
-void validateReinitializationOptions(const LevelSetReinitializationOptions& options)
-{
-    if (!options.enabled) {
-        return;
-    }
-    if (options.cadence_steps <= 0) {
-        throw std::invalid_argument(
-            "installLevelSetTransport: reinitialization cadence_steps must be positive");
-    }
-    if (options.method != LevelSetReinitializationMethod::Projection) {
-        throw std::invalid_argument(
-            "installLevelSetTransport: runtime reinitialization currently supports Projection only");
-    }
-    if (options.max_iterations <= 0) {
-        throw std::invalid_argument(
-            "installLevelSetTransport: reinitialization max_iterations must be positive");
-    }
-    if (!(options.pseudo_time_step_scale > 0.0) ||
-        !(options.pseudo_time_step_scale <= 1.0) ||
-        !std::isfinite(options.pseudo_time_step_scale)) {
-        throw std::invalid_argument(
-            "installLevelSetTransport: reinitialization pseudo_time_step_scale must be in (0, 1]");
-    }
-    if (!(options.interface_band_width > 0.0) ||
-        !std::isfinite(options.interface_band_width)) {
-        throw std::invalid_argument(
-            "installLevelSetTransport: reinitialization interface_band_width must be positive");
-    }
-    if (!(options.signed_distance_tolerance > 0.0) ||
-        !std::isfinite(options.signed_distance_tolerance)) {
-        throw std::invalid_argument(
-            "installLevelSetTransport: reinitialization signed_distance_tolerance must be positive");
-    }
-    if (options.preserve_band_width > 0.0) {
-        throw std::invalid_argument(
-            "installLevelSetTransport: reinitialization preserve_band_width is no longer supported; "
-            "the projection method now preserves the zero set while repairing its neighborhood");
-    }
-    if (!(options.max_zero_set_displacement >= 0.0) ||
-        !std::isfinite(options.max_zero_set_displacement)) {
-        throw std::invalid_argument(
-            "installLevelSetTransport: reinitialization max_zero_set_displacement must be finite and nonnegative");
-    }
-}
-
 void validateInterfaceKinematicOptions(const LevelSetInterfaceKinematicOptions& options)
 {
     if (!options.enabled) {
@@ -1424,23 +1379,9 @@ LevelSetBoundPreservingResult applyLevelSetBoundPreservingLimiter(
     return result;
 }
 
-bool shouldReinitializeLevelSet(
-    const LevelSetReinitializationOptions& options,
-    int completed_step_index) noexcept
-{
-    return options.enabled &&
-           options.cadence_steps > 0 &&
-           completed_step_index > 0 &&
-           completed_step_index % options.cadence_steps == 0;
-}
-
 LevelSetConservationDiagnostic levelSetConservationDiagnostic(
-    LevelSetTransportForm transport_form,
-    const LevelSetReinitializationOptions& reinitialization) noexcept
+    LevelSetTransportForm transport_form) noexcept
 {
-    if (reinitialization.enabled) {
-        return LevelSetConservationDiagnostic::ReinitializedAdvectionNotConservative;
-    }
     if (transport_form == LevelSetTransportForm::ConservativeDivergence) {
         return LevelSetConservationDiagnostic::ConservativeDivergenceAdvectionNotLocallyConservative;
     }
@@ -1454,9 +1395,7 @@ LevelSetConservationDiagnostic levelSetConservationDiagnostic(
         return LevelSetConservationDiagnostic::
             ConservativePhaseIndicatorLocallyConservative;
     }
-    return levelSetConservationDiagnostic(
-        options.transport_form,
-        options.reinitialization);
+    return levelSetConservationDiagnostic(options.transport_form);
 }
 
 const char* levelSetConservationDiagnosticName(
@@ -1467,8 +1406,6 @@ const char* levelSetConservationDiagnosticName(
         return "plain_level_set_advection_not_conservative";
     case LevelSetConservationDiagnostic::ConservativeDivergenceAdvectionNotLocallyConservative:
         return "conservative_divergence_level_set_advection_not_locally_conservative";
-    case LevelSetConservationDiagnostic::ReinitializedAdvectionNotConservative:
-        return "reinitialized_level_set_advection_not_conservative";
     case LevelSetConservationDiagnostic::ConservativePhaseIndicatorLocallyConservative:
         return "conservative_p1_phase_indicator_locally_conservative";
     }
@@ -1537,7 +1474,6 @@ systems::CoupledResidualKernels installLevelSetTransport(
         throw std::invalid_argument(
             "installLevelSetTransport: SUPG transient_scale must be positive");
     }
-    validateReinitializationOptions(options.reinitialization);
     validateInterfaceKinematicOptions(options.interface_kinematic);
     validateBoundaryOptions(options.boundaries);
     validateBoundPreservingOptions(options.bound_preserving);

@@ -352,31 +352,4 @@ parseConservativePhaseBoundaryFluxPolicy(std::string_view raw) {
       "'globally_balanced_discrete_q_flux'.");
 }
 
-svmp::FE::level_set::LevelSetReinitializationMethod
-parseReinitializationMethod(std::string_view raw, LevelSetInputPolicy) {
-  const auto value = normalizedToken(std::string(raw));
-  using Method = svmp::FE::level_set::LevelSetReinitializationMethod;
-  if (value == "projection" || value == "signeddistanceprojection" ||
-      value == "repairprojection") {
-    return Method::Projection;
-  }
-  if (value == "hamiltonjacobi" || value == "hamiltonjacobipde" ||
-      value == "pde") {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] "
-        "Reinitialization_method=HamiltonJacobiPDE is reserved until runtime "
-        "Hamilton-Jacobi reinitialization is implemented; use 'Projection'.");
-  }
-  if (value == "fastmarching" || value == "fastmarchingmethod" ||
-      value == "fmm") {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] "
-        "Reinitialization_method=FastMarching is reserved until runtime "
-        "fast-marching reinitialization is implemented; use 'Projection'.");
-  }
-  throw std::runtime_error(
-      "[svMultiPhysics::Application] Reinitialization_method currently "
-      "supports 'Projection' only.");
-}
-
 } // namespace application::translators::level_set::configuration

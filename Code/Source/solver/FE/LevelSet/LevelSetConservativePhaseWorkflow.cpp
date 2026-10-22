@@ -1519,66 +1519,6 @@ std::uint64_t conservativePhaseArtifactFingerprint(
         fingerprint,
         provenance.stage_options.require_constant_preservation);
   }
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, ledger.reinitialization_due);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, ledger.reinitialization_applied);
-  const auto& repair = ledger.reinitialization;
-  mixConservativePhaseArtifactFingerprint(fingerprint, repair.success);
-  mixConservativePhaseArtifactFingerprint(fingerprint, repair.method);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, repair.repaired_dofs);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, repair.preserved_dofs);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, repair.interface_fragments);
-  mixConservativePhaseArtifactFingerprint(fingerprint, repair.cut_cells);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, repair.interface_displacement_samples);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, repair.max_abs_update);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, repair.max_distance);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, repair.max_interface_displacement);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, repair.l2_interface_displacement);
-  mixConservativePhaseArtifactFingerprint(fingerprint, repair.iterations);
-  mixConservativePhaseArtifactFingerprint(fingerprint, repair.converged);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, repair.zero_set_bound_satisfied);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, repair.max_iteration_residual);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, repair.max_signed_distance_error);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, repair.max_unconstrained_signed_distance_error);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, repair.max_wall_constrained_signed_distance_error);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, repair.wall_contact_constraints);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, repair.wall_contact_cells);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, repair.wall_contact_dofs);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, repair.wall_contact_constraints_satisfied);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, repair.max_wall_contact_scale_residual);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, repair.max_prescribed_contact_value_residual);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint,
-      repair.max_prescribed_contact_angle_error_radians);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, repair.max_contact_line_displacement);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, repair.max_contact_angle_change_radians);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, repair.preserve_band_width);
-  mixConservativePhaseArtifactFingerprint(
-      fingerprint, repair.diagnostic);
-
   const auto& reconciliation = ledger.reconciliation;
   mixConservativePhaseArtifactFingerprint(
       fingerprint, reconciliation.success);
@@ -2028,7 +1968,6 @@ void writeAcceptedConservativePhaseArtifacts(
     }
     const auto& ledger = candidate.maintenance_ledgers[index];
     const auto& graph = *request.runtime.conservative_phase_graph;
-    const auto& repair = ledger.reinitialization;
     const auto& reconciliation = ledger.reconciliation;
     svmp::FE::level_set::LevelSetConservativePhaseArtifactResult artifact;
     std::exception_ptr local_publication_failure;
@@ -2069,10 +2008,6 @@ void writeAcceptedConservativePhaseArtifacts(
                 levelSetConservativePhaseBoundaryFluxScope(
                     ledger.boundary_flux_policy);
         context.geometry_validated_before_commit = true;
-        context.reinitialization_due = ledger.reinitialization_due;
-        context.reinitialization_applied =
-            ledger.reinitialization_applied;
-        context.reinitialization = repair;
         context.reconciliation.success = reconciliation.success;
         context.reconciliation.target_reached =
             reconciliation.target_reached;
@@ -2866,20 +2801,12 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           contact_stage_builder(candidate, transaction.get());
     }
 
-    const auto before_reinitialization_candidate = candidate;
-    bool any_reinitialization_applied = false;
     for (std::size_t request_index = 0u;
          request_index < requests.size(); ++request_index) {
       auto& request = requests[request_index];
       if (!request.configuration->transport.conservative_phase.enabled) {
         continue;
       }
-      auto& maintenance_ledger =
-          result.maintenance_ledgers[request_index];
-      maintenance_ledger.reinitialization_due =
-          svmp::FE::level_set::shouldReinitializeLevelSet(
-              request.configuration->transport.reinitialization,
-              history.stepIndex() + 1);
       const auto field =
           system.findFieldByName(request.configuration->transport.level_set.field_name);
       if (field == svmp::FE::INVALID_FIELD_ID) {
@@ -2901,66 +2828,13 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
               request,
               graph,
               wall_contact_constraints);
-      if (!maintenance_ledger.reinitialization_due) {
-        continue;
-      }
-      const auto staged_reinitialization =
-          host.stage_projection_reinitialization(
-              history,
-              request_index,
-              field,
-              static_cast<svmp::FE::Real>(history.time() + history.dt()),
-              candidate,
-              result.contact_stage.stages,
-              result.contact_stage.constraints,
-              result.contact_stage.stage_solution);
-      maintenance_ledger.reinitialization =
-          staged_reinitialization.repair;
-      maintenance_ledger.reinitialization_applied =
-          staged_reinitialization.applied;
-      any_reinitialization_applied =
-          any_reinitialization_applied ||
-          staged_reinitialization.applied;
-      if (!staged_reinitialization.repair.converged) {
-        svmp::FE::rank_log::oopCout()
-            << "[svMultiPhysics::Application] Conservative phase candidate rejected"
-            << " field='"
-            << request.configuration->transport.conservative_phase.liquid_indicator.field_name
-            << "' reason=reinitialization_nonconverged"
-            << " iterations="
-            << staged_reinitialization.repair.iterations
-            << " max_iteration_residual="
-            << staged_reinitialization.repair.max_iteration_residual
-            << " max_signed_distance_error="
-            << staged_reinitialization.repair.max_signed_distance_error
-            << " max_wall_constrained_signed_distance_error="
-            << staged_reinitialization.repair
-                   .max_wall_constrained_signed_distance_error
-            << " max_interface_displacement="
-            << staged_reinitialization.repair.max_interface_displacement
-            << " max_contact_line_displacement="
-            << staged_reinitialization.repair.max_contact_line_displacement
-            << " max_contact_angle_change_radians="
-            << staged_reinitialization.repair
-                   .max_contact_angle_change_radians
-            << " diagnostic='"
-            << staged_reinitialization.repair.diagnostic << "'"
-            << " dt=" << history.dt() << std::endl;
-        transaction->rollback();
-        result.accept_step = false;
-        return result;
-      }
     }
 
+    // The projection reinitialization that ran here was retired (decision
+    // D47); the refresh and the post_reinitialization_* measures below keep
+    // their place in front of the local reconciliation.
     const auto post_reinitialization_refresh_report =
         transaction->refresh(candidate);
-    if (observe_stage && any_reinitialization_applied) {
-      observe_stage(
-          svmp::FE::level_set::MaintenanceSubstage::
-              Reinitialization,
-          before_reinitialization_candidate,
-          candidate);
-    }
     const auto before_reconciliation_candidate = candidate;
     bool any_reconciliation = false;
     for (std::size_t request_index = 0u;
@@ -3255,7 +3129,6 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
                   ? "true"
                   : "false")
           << std::endl;
-      const auto& repair = maintenance_ledger.reinitialization;
       const auto& transport = maintenance_ledger.transport_stage;
       if (!maintenance_ledger.split_stage_provenance.has_value()) {
         throw std::logic_error(
@@ -3382,24 +3255,6 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           << " transport_limited_component_transfer_closure_residual="
           << transport.correction
                  .limited_component_transfer_closure_residual
-          << " reinitialization_due="
-          << (maintenance_ledger.reinitialization_due ? "true" : "false")
-          << " reinitialization_applied="
-          << (maintenance_ledger.reinitialization_applied ? "true"
-                                                           : "false")
-          << " reinitialization_converged="
-          << (repair.converged ? "true" : "false")
-          << " reinitialization_iterations=" << repair.iterations
-          << " reinitialization_max_abs_update="
-          << repair.max_abs_update
-          << " reinitialization_max_interface_displacement="
-          << repair.max_interface_displacement
-          << " reinitialization_wall_contact_constraints="
-          << repair.wall_contact_constraints
-          << " reinitialization_max_contact_line_displacement="
-          << repair.max_contact_line_displacement
-          << " reinitialization_max_contact_angle_change_radians="
-          << repair.max_contact_angle_change_radians
           << " reconciliation_iterations="
           << reconciliation.iterations
           << " reconciliation_interface_displacement_bound="

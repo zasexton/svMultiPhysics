@@ -464,20 +464,6 @@ const char* level_set_phase_side_name(ls::LevelSetPhaseSide side) noexcept
   return side == ls::LevelSetPhaseSide::Negative ? "Negative" : "Positive";
 }
 
-const char* reinitialization_method_name(
-    ls::LevelSetReinitializationMethod method) noexcept
-{
-  switch (method) {
-    case ls::LevelSetReinitializationMethod::HamiltonJacobiPDE:
-      return "HamiltonJacobiPDE";
-    case ls::LevelSetReinitializationMethod::FastMarching:
-      return "FastMarching";
-    case ls::LevelSetReinitializationMethod::Projection:
-      return "Projection";
-  }
-  return "Unknown";
-}
-
 svmp::Physics::EffectiveConfigurationArtifact
 make_level_set_effective_configuration(const ls::LevelSetTransportOptions& options)
 {
@@ -627,25 +613,8 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
       << ",\"maintenance_transaction\":{\"ordering\":"
       << json_string(
              options.conservative_phase.enabled
-                 ? "conservative_phase_transport_then_raw_geometry_rebuild_then_wall_aware_reinitialization_then_local_geometry_reconciliation_then_validation_then_commit"
-                 : "transport_then_reinitialization_then_geometry_refresh")
-      << ",\"reinitialization\":{\"enabled\":"
-      << json_bool(options.reinitialization.enabled)
-      << ",\"method\":"
-      << json_string(reinitialization_method_name(
-             options.reinitialization.method))
-      << ",\"cadence_steps\":" << options.reinitialization.cadence_steps
-      << ",\"max_iterations\":" << options.reinitialization.max_iterations
-      << ",\"pseudo_time_step_scale\":"
-      << json_real(options.reinitialization.pseudo_time_step_scale)
-      << ",\"interface_band_width\":"
-      << json_real(options.reinitialization.interface_band_width)
-      << ",\"signed_distance_tolerance\":"
-      << json_real(options.reinitialization.signed_distance_tolerance)
-      << ",\"preserve_band_width\":"
-      << json_real(options.reinitialization.preserve_band_width)
-      << ",\"maximum_zero_set_displacement\":"
-      << json_real(options.reinitialization.max_zero_set_displacement) << '}';
+                 ? "conservative_phase_transport_then_raw_geometry_rebuild_then_local_geometry_reconciliation_then_validation_then_commit"
+                 : "transport_then_geometry_refresh");
   // Present only when enabled, so existing configurations keep their
   // artifact unchanged.
   if (options.kinematic_reconciliation.enabled) {
@@ -1123,12 +1092,6 @@ parse_conservative_phase_boundary_flux_policy(std::string_view raw)
       parseConservativePhaseBoundaryFluxPolicy(raw);
 }
 
-ls::LevelSetReinitializationMethod parse_reinitialization_method(std::string_view raw)
-{
-  using namespace application::translators::level_set::configuration;
-  return parseReinitializationMethod(raw, LevelSetInputPolicy::Installation);
-}
-
 void append_installation_selection(
     std::vector<application::core::LevelSetInputObservation>& observations,
     const parsing::LevelSetSelectedParameter& selection,
@@ -1488,43 +1451,26 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
     options.interface_kinematic.weight_scale = *value;
   }
 
-  if (const auto value = get_defined_bool(
-          params, level_set_aliases::reinitialization_enable)) {
-    options.reinitialization.enabled = *value;
-  }
-  if (const auto value = get_defined_string(
-          params, level_set_aliases::reinitialization_method)) {
-    options.reinitialization.method = parse_reinitialization_method(*value);
-  }
-  if (const auto value = get_defined_positive_int(
-          params, level_set_aliases::reinitialization_cadence,
-          "Reinitialization_cadence_steps")) {
-    options.reinitialization.cadence_steps = *value;
-  }
-  if (const auto value = get_defined_positive_int(
-          params, level_set_aliases::reinitialization_iterations,
-          "Reinitialization_max_iterations")) {
-    options.reinitialization.max_iterations = *value;
-  }
-  if (const auto value = get_defined_real(
-          params, level_set_aliases::reinitialization_pseudo_time_step,
-          "Reinitialization_pseudo_time_step_scale")) {
-    options.reinitialization.pseudo_time_step_scale = *value;
-  }
-  if (const auto value = get_defined_real(
-          params, level_set_aliases::reinitialization_interface_band,
-          "Reinitialization_interface_band_width")) {
-    options.reinitialization.interface_band_width = *value;
-  }
-  if (const auto value = get_defined_real(
-          params, level_set_aliases::reinitialization_signed_distance_tolerance,
-          "Reinitialization_signed_distance_tolerance")) {
-    options.reinitialization.signed_distance_tolerance = *value;
-  }
-  if (const auto value = get_defined_real(
-          params, level_set_aliases::reinitialization_max_zero_set_displacement,
-          "Reinitialization_max_zero_set_displacement")) {
-    options.reinitialization.max_zero_set_displacement = *value;
+  // Projection reinitialization was retired (decision D47).  Decks may
+  // still state it as disabled.
+  if (get_defined_bool(params, {"Enable_reinitialization"}).value_or(false) ||
+      get_defined_string(
+          params,
+          {"Reinitialization_method",
+           "Reinitialization_cadence_steps",
+           "Reinitialization_max_iterations",
+           "Reinitialization_pseudo_time_step_scale",
+           "Reinitialization_interface_band_width",
+           "Reinitialization_signed_distance_tolerance",
+           "Reinitialization_max_zero_set_displacement"})
+          .has_value()) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Application] Level-set projection "
+        "reinitialization (Enable_reinitialization and the "
+        "Reinitialization_* settings) was retired (decision D47); no "
+        "accepted benchmark used it, and the interface-preserving "
+        "redistancing is the accepted-step redistancing.  Remove these keys "
+        "or set Enable_reinitialization=false.");
   }
 
   // The global level-set volume correction was retired (decision D47).

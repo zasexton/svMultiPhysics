@@ -26,8 +26,8 @@ Use specific headers when compile time or dependency clarity matters:
 | `FE/LevelSet/LevelSetTransport.h` | `installLevelSetTransport()` |
 | `FE/LevelSet/LevelSetInterfaceLifecycle.h` | generated interface domain creation and update lifecycle |
 | `FE/LevelSet/LevelSetVolume.h` | cut-cell volume measurement |
-| `FE/LevelSet/LevelSetReinitialization.h` | signed-distance repair from generated interface geometry |
-| `FE/LevelSet/LevelSetDiagnostics.h` | scalar diagnostics for volume and signed-distance quality |
+| `FE/LevelSet/LevelSetWallContactConstraint.h` | identity of an accepted wall-contact cell |
+| `FE/LevelSet/LevelSetDiagnostics.h` | scalar diagnostics for the cut-cell volume |
 | `FE/LevelSet/LevelSetRestart.h` | restart records for level-set fields and generated interfaces |
 
 APIs in `FE/LevelSet` are public FE APIs unless they are in an anonymous
@@ -54,7 +54,7 @@ change the FE cut-rule contract.
 The application level-set equation translator is an input adapter. It preserves
 legacy XML names, builds FE options, and calls
 `FE::level_set::installLevelSetTransport()`. It must not contain reusable
-transport, volume, reinitialization, diagnostics, or restart algorithms.
+transport, volume, maintenance, diagnostics, or restart algorithms.
 The application also owns the optional nearest-active-vertex velocity extension
 for prescribed-data level-set advection; reusable PDE-based velocity-extension
 algorithms should be added to `FE::level_set` before being exposed as general

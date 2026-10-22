@@ -23,7 +23,7 @@
 #include "FE/Backends/Interfaces/GenericVector.h"
 #include "FE/Core/Types.h"
 #include "FE/Interfaces/FreeSurfaceGeometrySnapshot.h"
-#include "FE/LevelSet/LevelSetReinitialization.h"
+#include "FE/LevelSet/LevelSetWallContactConstraint.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/TimeStepping/TimeHistory.h"
 #include "FE/TimeStepping/TimeLoop.h"
@@ -153,18 +153,8 @@ evaluateAcceptedFreeSurfaceContactStages(
 svmp::FE::level_set::LevelSetWallContactConstraint
 makeAcceptedSnapshotWallConstraint(
     const svmp::FE::interfaces::FreeSurfaceGeometryRuleRecord& record,
-    svmp::FE::level_set::LevelSetWallContactConstraintKind kind,
     int interface_marker,
-    std::uint64_t snapshot_revision,
-    const svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters&
-        parameters,
-    int dimension);
-
-[[nodiscard]] bool acceptedWallConstraintFrameIsComplete(
-    const svmp::FE::level_set::LevelSetWallContactConstraint& constraint,
-    const svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters&
-        parameters,
-    int dimension) noexcept;
+    std::uint64_t snapshot_revision);
 
 [[nodiscard]] std::vector<
     svmp::FE::level_set::LevelSetWallContactConstraint>

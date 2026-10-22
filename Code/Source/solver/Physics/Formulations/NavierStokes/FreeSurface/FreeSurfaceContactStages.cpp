@@ -1169,27 +1169,11 @@ evaluateAcceptedFreeSurfaceContactStages(
 svmp::FE::level_set::LevelSetWallContactConstraint
 makeAcceptedSnapshotWallConstraint(
     const svmp::FE::interfaces::FreeSurfaceGeometryRuleRecord& record,
-    svmp::FE::level_set::LevelSetWallContactConstraintKind kind,
     int interface_marker,
-    std::uint64_t snapshot_revision,
-    const svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters&
-        parameters,
-    int dimension)
+    std::uint64_t snapshot_revision)
 {
-  using Constraint =
-      svmp::FE::level_set::LevelSetWallContactConstraint;
-  using Kind =
-      svmp::FE::level_set::LevelSetWallContactConstraintKind;
-  using Point = std::array<svmp::FE::Real, 3>;
-
-  const auto fail = [&](std::string_view reason) -> Constraint {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Accepted contact geometry cannot "
-        "provide a prescribed level-set frame for interface marker " +
-        std::to_string(interface_marker) + ", boundary marker " +
-        std::to_string(record.physical_boundary_marker) + ": " +
-        std::string(reason) + ".");
-  };
+  // Decision D4: the constraint names the accepted contact cell; no angle or
+  // physical frame is read.
   const auto parent =
       record.reference_rule.provenance.parent_entity_global_id;
   if (record.role !=
@@ -1201,235 +1185,19 @@ makeAcceptedSnapshotWallConstraint(
           snapshot_revision ||
       record.physical_rule.free_surface_snapshot_revision_key !=
           snapshot_revision) {
-    return fail("the retained rule has incomplete or stale provenance");
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted contact geometry cannot "
+        "provide a wall-contact constraint for interface marker " +
+        std::to_string(interface_marker) + ", boundary marker " +
+        std::to_string(record.physical_boundary_marker) +
+        ": the retained rule has incomplete or stale provenance.");
   }
-
-  Constraint constraint{
-      .kind = kind,
+  return svmp::FE::level_set::LevelSetWallContactConstraint{
       .interface_marker = interface_marker,
       .boundary_marker = record.physical_boundary_marker,
       .parent_cell_global_id = parent,
       .geometry_revision = snapshot_revision,
   };
-  // Production maintenance uses PreserveAcceptedAngle for every contact law
-  // (decision D4): it needs only the accepted identity above.  The physical
-  // frame below serves the retired repair-to-target kind, which production
-  // redistancing rejects (requireAnglePreservingWallMaintenance); it is
-  // removed together with that kind after milestone M4.
-  if (kind != Kind::RepairToPrescribedAngle) {
-    return constraint;
-  }
-  if (dimension != 2 && dimension != 3) {
-    return fail("the mesh dimension is not two or three");
-  }
-
-  const auto coefficient = std::find_if(
-      parameters.young_wall_coefficients.begin(),
-      parameters.young_wall_coefficients.end(),
-      [&](const auto& candidate) {
-        return candidate.boundary_marker ==
-               record.physical_boundary_marker;
-      });
-  if (coefficient == parameters.young_wall_coefficients.end()) {
-    return fail("the prescribed Young datum is unavailable");
-  }
-  const auto pi = std::acos(svmp::FE::Real{-1.0});
-  const auto physical_angle =
-      coefficient->equilibrium_contact_angle_radians;
-  if (!std::isfinite(physical_angle) ||
-      !(physical_angle > svmp::FE::Real{0.0}) ||
-      !(physical_angle < pi)) {
-    return fail("the prescribed Young angle is invalid");
-  }
-  if (parameters.liquid_side ==
-      svmp::FE::geometry::CutIntegrationSide::Negative) {
-    constraint.target_angle_radians = physical_angle;
-  } else if (parameters.liquid_side ==
-             svmp::FE::geometry::CutIntegrationSide::Positive) {
-    // The snapshot normal is grad(phi)/|grad(phi)|.  The positive-side
-    // liquid normal reverses it, so the equivalent level-set angle is the
-    // supplement of the through-liquid Young angle.
-    constraint.target_angle_radians = pi - physical_angle;
-  } else {
-    return fail("the declaration has no physical liquid side");
-  }
-
-  if (record.physical_rule.geometric_dimension != dimension - 2 ||
-      record.physical_rule.points.empty() ||
-      record.physical_rule.points.size() !=
-          record.reference_rule.points.size() ||
-      !std::isfinite(record.physical_rule.physical_measure) ||
-      !(record.physical_rule.physical_measure > svmp::FE::Real{0.0})) {
-    return fail("the accepted codimension-two rule is unavailable");
-  }
-  const auto finite = [](const Point& value) noexcept {
-    return std::all_of(value.begin(), value.end(), [](const auto component) {
-      return std::isfinite(component);
-    });
-  };
-  const auto dot = [](const Point& left, const Point& right) noexcept {
-    return left[0] * right[0] + left[1] * right[1] +
-           left[2] * right[2];
-  };
-  const auto norm = [&](const Point& value) noexcept {
-    return std::sqrt(dot(value, value));
-  };
-  const auto cross = [](const Point& left, const Point& right) noexcept {
-    return Point{{left[1] * right[2] - left[2] * right[1],
-                  left[2] * right[0] - left[0] * right[2],
-                  left[0] * right[1] - left[1] * right[0]}};
-  };
-  const auto normalized = [&](Point value) -> std::optional<Point> {
-    const auto magnitude = norm(value);
-    if (!finite(value) || !std::isfinite(magnitude) ||
-        !(magnitude > svmp::FE::Real{1.0e-14})) {
-      return std::nullopt;
-    }
-    for (auto& component : value) {
-      component /= magnitude;
-    }
-    return value;
-  };
-
-  struct FrameSample {
-    Point point{};
-    Point wall_normal{};
-    Point phi_wall_conormal{};
-    Point line_tangent{};
-  };
-  std::vector<FrameSample> samples;
-  samples.reserve(record.physical_rule.points.size());
-  Point point_integral{};
-  Point wall_normal_integral{};
-  Point line_tangent_integral{};
-  svmp::FE::Real measure = 0.0;
-  for (const auto& point : record.physical_rule.points) {
-    if (!finite(point.physical_point) ||
-        !std::isfinite(point.physical_weight) ||
-        !(point.physical_weight > svmp::FE::Real{0.0})) {
-      return fail("a physical contact point or weight is invalid");
-    }
-    const auto phi_normal = normalized(point.normal);
-    const auto wall_normal = normalized(point.boundary_normal);
-    if (!phi_normal || !wall_normal) {
-      return fail("an accepted interface or wall normal is unavailable");
-    }
-    Point phi_wall_conormal{};
-    const auto normal_component = dot(*phi_normal, *wall_normal);
-    for (std::size_t component = 0u; component < 3u; ++component) {
-      phi_wall_conormal[component] =
-          (*phi_normal)[component] -
-          normal_component * (*wall_normal)[component];
-    }
-    const auto unit_phi_wall_conormal = normalized(phi_wall_conormal);
-    if (!unit_phi_wall_conormal) {
-      return fail("the accepted contact is not transverse to the wall");
-    }
-    const auto line_tangent =
-        normalized(cross(*wall_normal, *unit_phi_wall_conormal));
-    if (!line_tangent) {
-      return fail("the oriented contact-line direction is unavailable");
-    }
-    if (dimension == 3) {
-      const auto recorded_tangent = normalized(point.tangent);
-      if (!recorded_tangent ||
-          std::abs(dot(*recorded_tangent, *line_tangent)) <
-              svmp::FE::Real{1.0} - svmp::FE::Real{1.0e-8}) {
-        return fail("the accepted contact-line tangent is inconsistent");
-      }
-    }
-    samples.push_back(FrameSample{
-        .point = point.physical_point,
-        .wall_normal = *wall_normal,
-        .phi_wall_conormal = *unit_phi_wall_conormal,
-        .line_tangent = *line_tangent,
-    });
-    measure += point.physical_weight;
-    for (std::size_t component = 0u; component < 3u; ++component) {
-      point_integral[component] +=
-          point.physical_point[component] * point.physical_weight;
-      wall_normal_integral[component] +=
-          (*wall_normal)[component] * point.physical_weight;
-      line_tangent_integral[component] +=
-          (*line_tangent)[component] * point.physical_weight;
-    }
-  }
-  if (!std::isfinite(measure) || !(measure > svmp::FE::Real{0.0})) {
-    return fail("the accepted contact measure is invalid");
-  }
-  const auto measure_tolerance =
-      svmp::FE::Real{4096.0} *
-      std::numeric_limits<svmp::FE::Real>::epsilon() *
-      std::max({svmp::FE::Real{1.0},
-                measure,
-                record.physical_rule.physical_measure});
-  if (std::abs(measure - record.physical_rule.physical_measure) >
-      measure_tolerance) {
-    return fail("the accepted physical contact measure is inconsistent");
-  }
-  for (auto& component : point_integral) {
-    component /= measure;
-  }
-  const auto wall_normal = normalized(wall_normal_integral);
-  if (!wall_normal) {
-    return fail("the accepted wall-normal frame cancels");
-  }
-  const auto tangent_wall_component =
-      dot(line_tangent_integral, *wall_normal);
-  for (std::size_t component = 0u; component < 3u; ++component) {
-    line_tangent_integral[component] -=
-        tangent_wall_component * (*wall_normal)[component];
-  }
-  const auto line_tangent = normalized(line_tangent_integral);
-  if (!line_tangent) {
-    return fail("the accepted contact-line frame cancels");
-  }
-  const auto phi_wall_conormal =
-      normalized(cross(*line_tangent, *wall_normal));
-  if (!phi_wall_conormal) {
-    return fail("the accepted contact-line frame is degenerate");
-  }
-
-  const auto direction_tolerance = svmp::FE::Real{1.0e-8};
-  const auto point_scale =
-      std::max({svmp::FE::Real{1.0}, norm(point_integral), measure});
-  const auto point_tolerance =
-      svmp::FE::Real{1.0e-9} * point_scale;
-  for (const auto& sample : samples) {
-    if (dot(sample.wall_normal, *wall_normal) <
-            svmp::FE::Real{1.0} - direction_tolerance ||
-        dot(sample.line_tangent, *line_tangent) <
-            svmp::FE::Real{1.0} - direction_tolerance ||
-        dot(sample.phi_wall_conormal, *phi_wall_conormal) <
-            svmp::FE::Real{1.0} - direction_tolerance) {
-      return fail(
-          "one affine prescribed frame cannot represent the accepted rule");
-    }
-    Point from_centroid{};
-    for (std::size_t component = 0u; component < 3u; ++component) {
-      from_centroid[component] =
-          sample.point[component] - point_integral[component];
-    }
-    const auto along_line = dot(from_centroid, *line_tangent);
-    for (std::size_t component = 0u; component < 3u; ++component) {
-      from_centroid[component] -=
-          along_line * (*line_tangent)[component];
-    }
-    if (norm(from_centroid) > point_tolerance) {
-      return fail("the accepted contact points do not form one affine line");
-    }
-  }
-  if (dimension == 2 &&
-      (std::abs((*wall_normal)[2]) > direction_tolerance ||
-       std::hypot((*line_tangent)[0], (*line_tangent)[1]) >
-           direction_tolerance)) {
-    return fail("the accepted two-dimensional frame is not planar");
-  }
-
-  constraint.physical_wall_normal = *wall_normal;
-  constraint.accepted_contact_point = point_integral;
-  constraint.accepted_contact_line_tangent = *line_tangent;
-  return constraint;
 }
 
 namespace {
@@ -1438,93 +1206,13 @@ namespace {
     const svmp::FE::level_set::LevelSetWallContactConstraint& left,
     const svmp::FE::level_set::LevelSetWallContactConstraint& right) noexcept
 {
-  return left.kind == right.kind &&
-         left.interface_marker == right.interface_marker &&
+  return left.interface_marker == right.interface_marker &&
          left.boundary_marker == right.boundary_marker &&
          left.parent_cell_global_id == right.parent_cell_global_id &&
-         left.geometry_revision == right.geometry_revision &&
-         left.target_angle_radians == right.target_angle_radians &&
-         left.physical_wall_normal == right.physical_wall_normal &&
-         left.accepted_contact_point == right.accepted_contact_point &&
-         left.accepted_contact_line_tangent ==
-             right.accepted_contact_line_tangent;
+         left.geometry_revision == right.geometry_revision;
 }
 
 } // namespace
-
-[[nodiscard]] bool acceptedWallConstraintFrameIsComplete(
-    const svmp::FE::level_set::LevelSetWallContactConstraint& constraint,
-    const svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters&
-        parameters,
-    int dimension) noexcept
-{
-  using Kind =
-      svmp::FE::level_set::LevelSetWallContactConstraintKind;
-  if (constraint.kind != Kind::RepairToPrescribedAngle) {
-    return true;
-  }
-  const auto coefficient = std::find_if(
-      parameters.young_wall_coefficients.begin(),
-      parameters.young_wall_coefficients.end(),
-      [&](const auto& candidate) {
-        return candidate.boundary_marker == constraint.boundary_marker;
-      });
-  if (coefficient == parameters.young_wall_coefficients.end() ||
-      (dimension != 2 && dimension != 3)) {
-    return false;
-  }
-  const auto pi = std::acos(svmp::FE::Real{-1.0});
-  svmp::FE::Real expected_angle = 0.0;
-  if (parameters.liquid_side ==
-      svmp::FE::geometry::CutIntegrationSide::Negative) {
-    expected_angle = coefficient->equilibrium_contact_angle_radians;
-  } else if (parameters.liquid_side ==
-             svmp::FE::geometry::CutIntegrationSide::Positive) {
-    expected_angle =
-        pi - coefficient->equilibrium_contact_angle_radians;
-  } else {
-    return false;
-  }
-  const auto finite = [](const auto& value) noexcept {
-    return std::all_of(value.begin(), value.end(), [](const auto component) {
-      return std::isfinite(component);
-    });
-  };
-  const auto dot = [](const auto& left, const auto& right) noexcept {
-    return left[0] * right[0] + left[1] * right[1] +
-           left[2] * right[2];
-  };
-  const auto wall_norm =
-      std::sqrt(dot(constraint.physical_wall_normal,
-                    constraint.physical_wall_normal));
-  const auto tangent_norm =
-      std::sqrt(dot(constraint.accepted_contact_line_tangent,
-                    constraint.accepted_contact_line_tangent));
-  const auto relative_alignment =
-      wall_norm > svmp::FE::Real{0.0} &&
-              tangent_norm > svmp::FE::Real{0.0}
-          ? std::abs(dot(constraint.physical_wall_normal,
-                         constraint.accepted_contact_line_tangent)) /
-                (wall_norm * tangent_norm)
-          : std::numeric_limits<svmp::FE::Real>::infinity();
-  const auto frame_tolerance = svmp::FE::Real{1.0e-10};
-  return std::isfinite(expected_angle) &&
-         constraint.target_angle_radians == expected_angle &&
-         finite(constraint.physical_wall_normal) &&
-         finite(constraint.accepted_contact_point) &&
-         finite(constraint.accepted_contact_line_tangent) &&
-         std::isfinite(wall_norm) &&
-         wall_norm > svmp::FE::Real{0.0} &&
-         std::isfinite(tangent_norm) &&
-         tangent_norm > svmp::FE::Real{0.0} &&
-         relative_alignment <= frame_tolerance &&
-         (dimension != 2 ||
-          (std::abs(constraint.physical_wall_normal[2]) <=
-               frame_tolerance * wall_norm &&
-           std::hypot(constraint.accepted_contact_line_tangent[0],
-                      constraint.accepted_contact_line_tangent[1]) <=
-               frame_tolerance * tangent_norm));
-}
 
 [[nodiscard]] std::vector<
     svmp::FE::level_set::LevelSetWallContactConstraint>
@@ -1538,21 +1226,11 @@ canonicalizeAcceptedWallConstraints(
     return std::tie(left.parent_cell_global_id,
                     left.interface_marker,
                     left.boundary_marker,
-                    left.kind,
-                    left.geometry_revision,
-                    left.target_angle_radians,
-                    left.physical_wall_normal,
-                    left.accepted_contact_point,
-                    left.accepted_contact_line_tangent) <
+                    left.geometry_revision) <
            std::tie(right.parent_cell_global_id,
                     right.interface_marker,
                     right.boundary_marker,
-                    right.kind,
-                    right.geometry_revision,
-                    right.target_angle_radians,
-                    right.physical_wall_normal,
-                    right.accepted_contact_point,
-                    right.accepted_contact_line_tangent);
+                    right.geometry_revision);
   };
   std::sort(constraints.begin(), constraints.end(), order);
   std::vector<svmp::FE::level_set::LevelSetWallContactConstraint> unique;
@@ -1573,8 +1251,8 @@ canonicalizeAcceptedWallConstraints(
   if (globalMinDouble(local_conflict ? 0.0 : 1.0, comm) != 1.0) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] " + std::string(source) +
-        " assigns distinct accepted wall-contact frames to one parent cell; "
-        "the projection supports exactly one physical frame per parent.");
+        " assigns distinct accepted wall-contact constraints to one parent "
+        "cell.");
   }
   return unique;
 }
@@ -1664,21 +1342,18 @@ captureAcceptedContactStageWallConstraints(
           "[svMultiPhysics::Application] Accepted contact-stage constraint capture found mismatched stage geometry provenance.");
     }
 
-    std::map<int, svmp::FE::level_set::LevelSetWallContactConstraintKind>
-        contact_law_by_wall;
+    std::set<int> dynamic_contact_walls;
     for (const auto& coefficient :
          declaration.parameters.dynamic_contact_coefficients) {
       if (coefficient.law !=
           svmp::FE::interfaces::FreeSurfaceContactLaw::DynamicRenE) {
         continue;
       }
-      contact_law_by_wall[coefficient.boundary_marker] =
-          svmp::FE::level_set::LevelSetWallContactConstraintKind::
-              PreserveAcceptedAngle;
+      dynamic_contact_walls.insert(coefficient.boundary_marker);
     }
     bool local_parent_ids_valid = true;
-    bool local_frames_valid = true;
-    std::string local_frame_diagnostic;
+    bool local_rules_valid = true;
+    std::string local_rule_diagnostic;
     std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
         declaration_constraints;
     for (const auto& record : snapshot.rules()) {
@@ -1689,9 +1364,8 @@ captureAcceptedContactStageWallConstraints(
           !record.locally_owned) {
         continue;
       }
-      const auto law =
-          contact_law_by_wall.find(record.physical_boundary_marker);
-      if (law == contact_law_by_wall.end()) {
+      if (dynamic_contact_walls.find(record.physical_boundary_marker) ==
+          dynamic_contact_walls.end()) {
         continue;
       }
       const auto parent =
@@ -1705,26 +1379,23 @@ captureAcceptedContactStageWallConstraints(
       try {
         declaration_constraints.push_back(makeAcceptedSnapshotWallConstraint(
             record,
-            law->second,
             declaration.interface_marker,
-            stage.geometry_revision.snapshot_revision_key,
-            declaration.parameters,
-            sim.fe_system->meshAccess().dimension()));
+            stage.geometry_revision.snapshot_revision_key));
       } catch (const std::exception& error) {
-        local_frames_valid = false;
-        local_frame_diagnostic = error.what();
+        local_rules_valid = false;
+        local_rule_diagnostic = error.what();
       }
     }
     if (globalMinDouble(local_parent_ids_valid ? 1.0 : 0.0, comm) != 1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Accepted contact-stage constraint capture found a rule without a partition-independent parent identity.");
     }
-    if (globalMinDouble(local_frames_valid ? 1.0 : 0.0, comm) != 1.0) {
+    if (globalMinDouble(local_rules_valid ? 1.0 : 0.0, comm) != 1.0) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Accepted contact-stage constraint capture rejected an unavailable, degenerate, or stale physical contact frame" +
-          (local_frame_diagnostic.empty()
+          "[svMultiPhysics::Application] Accepted contact-stage constraint capture rejected a contact rule with incomplete or stale provenance" +
+          (local_rule_diagnostic.empty()
                ? std::string{"."}
-               : std::string{": "} + local_frame_diagnostic));
+               : std::string{": "} + local_rule_diagnostic));
     }
     declaration_constraints = canonicalizeAcceptedWallConstraints(
         std::move(declaration_constraints),

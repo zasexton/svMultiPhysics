@@ -133,26 +133,6 @@ template <typename... Values>
         reconciliation.maximum_removed_contact_increment);
 }
 
-[[nodiscard]] bool finiteReinitialization(
-    const LevelSetSignedDistanceRepairResult& reinitialization) noexcept
-{
-    return finiteValues(
-        reinitialization.max_abs_update,
-        reinitialization.max_distance,
-        reinitialization.max_interface_displacement,
-        reinitialization.l2_interface_displacement,
-        reinitialization.max_iteration_residual,
-        reinitialization.max_signed_distance_error,
-        reinitialization.max_unconstrained_signed_distance_error,
-        reinitialization.max_wall_constrained_signed_distance_error,
-        reinitialization.max_wall_contact_scale_residual,
-        reinitialization.max_prescribed_contact_value_residual,
-        reinitialization.max_prescribed_contact_angle_error_radians,
-        reinitialization.max_contact_line_displacement,
-        reinitialization.max_contact_angle_change_radians,
-        reinitialization.preserve_band_width);
-}
-
 [[nodiscard]] bool finiteRegionLedgerResult(
     const LevelSetPhaseRegionLedgerResult& result) noexcept
 {
@@ -207,7 +187,6 @@ template <typename... Values>
            context.time_step > Real{0.0} &&
            context.maximum_nodal_boundary_mass_transfer >= Real{0.0} &&
            context.boundary_mass_tolerance >= Real{0.0} &&
-           finiteReinitialization(context.reinitialization) &&
            finiteReconciliation(context.reconciliation) &&
            finiteMismatch(context.post_reinitialization_mismatch) &&
            finiteMismatch(context.post_correction_mismatch) &&
@@ -632,20 +611,6 @@ template <typename... Values>
     return true;
 }
 
-[[nodiscard]] const char* reinitializationMethodName(
-    LevelSetReinitializationMethod method) noexcept
-{
-    switch (method) {
-    case LevelSetReinitializationMethod::HamiltonJacobiPDE:
-        return "HamiltonJacobiPDE";
-    case LevelSetReinitializationMethod::FastMarching:
-        return "FastMarching";
-    case LevelSetReinitializationMethod::Projection:
-        return "Projection";
-    }
-    return "Unknown";
-}
-
 void writeComponent(std::ostream& output,
                     const LevelSetPhaseFluxComponentLedger& component,
                     std::string_view classification)
@@ -866,7 +831,7 @@ void writeArtifact(
            << ",\"dof_layout\":"
            << context.graph_dof_layout_revision
            << ",\"content\":" << context.graph_content_revision << '}'
-           << ",\"maintenance_ordering\":\"conservative_phase_transport_then_raw_geometry_rebuild_then_wall_aware_reinitialization_then_local_geometry_reconciliation_then_validation_then_commit\""
+           << ",\"maintenance_ordering\":\"conservative_phase_transport_then_raw_geometry_rebuild_then_local_geometry_reconciliation_then_validation_then_commit\""
            << ",\"geometry_validated_before_commit\":";
     writeBool(output, context.geometry_validated_before_commit);
     output << ",\"transport_summary\":{\"success\":";
@@ -1002,72 +967,8 @@ void writeArtifact(
                    ? context.region_ledger
                          ->maximum_flux_reconstruction_residual
                    : Real{0.0});
-    output << "},\"maintenance_summary\":{\"reinitialization_due\":";
-    writeBool(output, context.reinitialization_due);
-    output << ",\"reinitialization_applied\":";
-    writeBool(output, context.reinitialization_applied);
-    const auto& reinitialization = context.reinitialization;
     const auto& reconciliation = context.reconciliation;
-    output << ",\"reinitialization_success\":";
-    writeBool(output, reinitialization.success);
-    output << ",\"reinitialization_method\":";
-    writeJsonString(
-        output, reinitializationMethodName(reinitialization.method));
-    output << ",\"reinitialization_converged\":";
-    writeBool(output, reinitialization.converged);
-    output << ",\"reinitialization_iterations\":"
-           << reinitialization.iterations
-           << ",\"reinitialization_repaired_dofs\":"
-           << reinitialization.repaired_dofs
-           << ",\"reinitialization_preserved_dofs\":"
-           << reinitialization.preserved_dofs
-           << ",\"reinitialization_interface_fragments\":"
-           << reinitialization.interface_fragments
-           << ",\"reinitialization_cut_cells\":"
-           << reinitialization.cut_cells
-           << ",\"reinitialization_interface_displacement_samples\":"
-           << reinitialization.interface_displacement_samples
-           << ",\"reinitialization_max_abs_update\":"
-           << reinitialization.max_abs_update
-           << ",\"reinitialization_max_distance\":"
-           << reinitialization.max_distance
-           << ",\"reinitialization_max_interface_displacement\":"
-           << reinitialization.max_interface_displacement
-           << ",\"reinitialization_l2_interface_displacement\":"
-           << reinitialization.l2_interface_displacement
-           << ",\"reinitialization_zero_set_bound_satisfied\":";
-    writeBool(output, reinitialization.zero_set_bound_satisfied);
-    output << ",\"reinitialization_max_iteration_residual\":"
-           << reinitialization.max_iteration_residual
-           << ",\"reinitialization_max_signed_distance_error\":"
-           << reinitialization.max_signed_distance_error
-           << ",\"reinitialization_max_unconstrained_signed_distance_error\":"
-           << reinitialization.max_unconstrained_signed_distance_error
-           << ",\"reinitialization_max_wall_constrained_signed_distance_error\":"
-           << reinitialization.max_wall_constrained_signed_distance_error
-           << ",\"reinitialization_wall_contact_constraints\":"
-           << reinitialization.wall_contact_constraints
-           << ",\"reinitialization_wall_contact_cells\":"
-           << reinitialization.wall_contact_cells
-           << ",\"reinitialization_wall_contact_dofs\":"
-           << reinitialization.wall_contact_dofs
-           << ",\"reinitialization_wall_contact_constraints_satisfied\":";
-    writeBool(output, reinitialization.wall_contact_constraints_satisfied);
-    output << ",\"reinitialization_max_wall_contact_scale_residual\":"
-           << reinitialization.max_wall_contact_scale_residual
-           << ",\"reinitialization_max_prescribed_contact_value_residual\":"
-           << reinitialization.max_prescribed_contact_value_residual
-           << ",\"reinitialization_max_prescribed_contact_angle_error_radians\":"
-           << reinitialization.max_prescribed_contact_angle_error_radians
-           << ",\"reinitialization_max_contact_line_displacement\":"
-           << reinitialization.max_contact_line_displacement
-           << ",\"reinitialization_max_contact_angle_change_radians\":"
-           << reinitialization.max_contact_angle_change_radians
-           << ",\"reinitialization_preserve_band_width\":"
-           << reinitialization.preserve_band_width
-           << ",\"reinitialization_diagnostic\":";
-    writeJsonString(output, reinitialization.diagnostic);
-    output << ",\"reconciliation_success\":";
+    output << "},\"maintenance_summary\":{\"reconciliation_success\":";
     writeBool(output, reconciliation.success);
     output << ",\"reconciliation_target_reached\":";
     writeBool(output, reconciliation.target_reached);
@@ -1294,10 +1195,7 @@ writeLevelSetConservativePhaseArtifact(
             !context.geometry_validated_before_commit || !stage.success ||
             !stage.correction.success ||
             stage.correction.node_component_ids.size() !=
-                stage.correction.nodes.size() ||
-            (context.reinitialization_applied &&
-             (!context.reinitialization.success ||
-              !context.reinitialization.converged))) {
+                stage.correction.nodes.size()) {
             result.diagnostic =
                 "conservative phase artifact requires one finite validated accepted stage with complete transport and maintenance ledgers";
             return result;

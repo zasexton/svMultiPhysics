@@ -351,42 +351,34 @@ penalty `penalty*(dot(n,n_wall) + cos(theta))*eta` has been removed.
 
 Decision D4 in the program tracker gives the contact angle one owner: the
 Young term in the momentum equation (table above). Level-set maintenance
-therefore never imposes an angle. When reinitialization is enabled, the
-wall-aware projection redistancing at accepted endpoints
-(`FE/LevelSet/LevelSetReinitialization.h`) treats both contact laws the same
-way:
+therefore never imposes an angle. The projection reinitialization was retired
+by decision D47; the accepted-step maintenance consists of three optional,
+parameter-free operations (`FE/Docs/LevelSet.md`):
 
-- The parent cells of every retained contact rule on a `PrescribedAngle` or
-  `DynamicRenE` wall form contact patches, connected through shared
-  level-set coefficients. Each patch is rescaled by one common positive
-  factor, fitted to the signed distance
-  (`LevelSetWallContactConstraintKind::PreserveAcceptedAngle`). The accepted
-  contact point and interface normal in those cells, and so the contact
-  angle, are unchanged. The declared angle is not read.
-- Cells away from the contact patches relax toward signed distance as usual,
-  with the zero set held within `max_zero_set_displacement`.
-- `PrescribedAngle` walls take their contact rules from the accepted endpoint
-  geometry snapshot. `DynamicRenE` walls take them from the accepted dynamic
-  contact stage, which also supplies the redistancing input.
-- The maintenance log line reports `wall_contact_maintenance=preserve_accepted_angle`
-  (or `none` when no contact rule exists) and the number of contact rules per
-  law (`prescribed_contact_rules`, `dynamic_contact_rules`).
+- The kinematic reconciliation (`Enable_kinematic_reconciliation`) moves the
+  discrete interface, contact cells included, so that each step's change of
+  the liquid area equals the interface flux of the transport velocity. It
+  does not read the angle.
+- The sign-definite patch bounds (`Enable_sign_definite_patch_bounds`) change
+  only nodes away from the interface: no cut cell, contact cell or angle is
+  touched.
+- The interface-preserving redistancing
+  (`Enable_interface_preserving_redistancing`) replaces the level set by the
+  distance to its own zero polygon, continued across the wall by rays at the
+  contact points, which keeps the discrete contact angle, and restores the
+  interface with the zero-velocity reconciliation.
 
-With reinitialization disabled, only the optional kinematic reconciliation
-(`Enable_kinematic_reconciliation`, `FE/Docs/LevelSet.md`) changes the
-transported level set between steps. It does not read the angle: it moves the
-discrete interface, contact cells included, so that each step's change of the
-liquid area equals the interface flux of the transport velocity. The optional
-sign-definite patch bounds (`Enable_sign_definite_patch_bounds`) change only
-nodes away from the interface: no cut cell, contact cell or angle is touched.
-
-The former reset of `PrescribedAngle` contact cells to a unit-gradient affine
-target with the declared angle (`RepairToPrescribedAngle`) is retired as a
-production path. It combined a second, geometric angle mechanism with the
-Young term, and the two disagree on the discrete angle. The FE implementation
-stays, for verification only, until milestone M4 has validated the single
-mechanism. The application rejects that kind on every rank before production
-redistancing.
+The conservative-phase geometry reconciliation leaves the parent cells of
+every retained contact rule on a `PrescribedAngle` or `DynamicRenE` wall
+unchanged (`FE/LevelSet/LevelSetWallContactConstraint.h`): the accepted contact
+point and interface normal in those cells, and so the contact angle, stay as
+accepted. `PrescribedAngle` walls take their contact rules from the accepted
+endpoint geometry snapshot, `DynamicRenE` walls from the accepted dynamic
+contact stage. The constraint carries only the identity of the accepted cell;
+the declared angle is not read. The former reset of `PrescribedAngle` contact
+cells to a unit-gradient affine target with the declared angle
+(`RepairToPrescribedAngle`) was removed (decision D4): it combined a second,
+geometric angle mechanism with the Young term.
 
 ### Requirements and rejected combinations
 

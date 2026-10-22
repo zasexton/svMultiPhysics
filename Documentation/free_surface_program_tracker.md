@@ -746,6 +746,7 @@ These are proposals. Each lists a recommended option and an alternative. Record 
     3. `Implementation` becomes required; `Active_domain` defaults to LevelSetNegative.
     4. Ghost penalty, SUPG constants and the two-fluid interface γ are fixed by the profile.
     5. Retire PDE/projection reinitialization, global volume correction, algebraic wet extension and discontinuity capturing; keep the bound-preserving limiter as one advanced switch until SPHERIC is re-run.
+       Discontinuity capturing, the global volume correction and the projection reinitialization (with the D4 repair-to-target wall constraint) are retired on `dev/maintenance-extension`. Converted with the retired switches off and **not re-validated**: the unfitted decks `solver.xml`, SPHERIC 02, 05 d18, 05 d38 and 10, `square_tank_tilt_settling`, `linear_sloshing_2d`, `mms_traveling_interface_2d` and its four refinement decks, and the generators that write them (validation meshes, static and rising capillary, `sessile_drop_2d`, the MMS case, sloshing, square tank).
     6. The Wetting profile sets the strong Ren–E law; the code default stays weak.
     7. Profiles set cut quadrature order 2; the 3D code default changes with step 1's later default change.
     8. HighOrderImplicit geometry and the implicit cut backends leave the free-surface schema and stay in FE.
