@@ -1743,6 +1743,9 @@ TEST(NavierStokesLegacyBCs, FreeSurfaceContactAliasesFailClosedWhenIncomplete)
     auto mesh = buildSingleTetraBoundaryMesh(marker);
     ASSERT_TRUE(mesh);
 
+    // Each key alone must fail closed.  The canonical keys fail as incomplete
+    // contact configurations; the other spellings, removed with decision
+    // D47, fail as unknown contact keys.
     const std::vector<std::pair<std::string, std::string>> incomplete = {
         {"Contact_line_model", "PrescribedContactAngle"},
         {"ContactLineModel", "PrescribedContactAngle"},
@@ -1853,12 +1856,14 @@ TEST(NavierStokesLegacyBCs,
     };
     const std::vector<FailureCase> failure_cases = {
         {
-            "duplicate model aliases",
+            // ContactLineModel was removed (decision D47): a second
+            // spelling of the model is now an unknown contact key.
+            "removed model alias",
             {
                 {"Contact_line_model", "None"},
                 {"ContactLineModel", "None"},
             },
-            "multiple aliases for contact-line model",
+            "Unknown free-surface contact key 'ContactLineModel'",
         },
         {
             "mixed angle units",
@@ -1976,7 +1981,7 @@ TEST(NavierStokesLegacyBCs,
             {
                 {"Contact_line_model", "PrescribedAngle"},
                 {"Contact_line_wall_markers", "80;81"},
-                {"Contact_line_wall_normals", "1 0 0;0 1 0;0 0 1"},
+                {"Contact_line_wall_normal", "1 0 0;0 1 0;0 0 1"},
                 {"Contact_angle_radians", "1.0"},
             },
             "one vector or one vector per wall marker",
@@ -2243,7 +2248,7 @@ TEST(NavierStokesLegacyBCs,
     bc.params["Contact_line_wall_markers"] =
         defined(std::to_string(first_wall_marker) + "; " +
                 std::to_string(second_wall_marker));
-    bc.params["Contact_line_wall_normals"] =
+    bc.params["Contact_line_wall_normal"] =
         defined("-1.0 0.0 0.0; 0.0 -1.0 0.0");
     bc.params["Contact_angle_degrees"] = defined("90.0");
     bc.params["Wall_slip_model"] = defined("Navier");
@@ -3146,7 +3151,7 @@ TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceLegacyVelocityExtensionFailsClose
     bc.params["Level_set_field_name"] = defined("phi");
     bc.params["Active_domain"] = defined("LevelSetNegative");
     bc.params["Active_domain_method"] = defined("CutVolume");
-    bc.params["Free_surface_velocity_extension"] = defined("true");
+    bc.params["Enable_velocity_extension"] = defined("true");
     input.boundary_conditions.push_back(std::move(bc));
 
     svmp::FE::systems::FESystem system(mesh);

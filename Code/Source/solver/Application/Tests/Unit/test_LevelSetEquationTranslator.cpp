@@ -537,14 +537,13 @@ TEST(LevelSetEquationTranslator,
   input = makeMaintenanceCompatibilityInput(mesh);
   input.equation_params["Enable_reinitialization"] =
       svmp::Physics::ParameterValue{true, "unrecognized"};
+  // A whitespace-only value counts as absent: the default cadence applies.
   input.equation_params["Reinitialization_cadence_steps"] =
       svmp::Physics::ParameterValue{true, "   "};
-  input.equation_params["ReinitializationCadenceSteps"] =
-      svmp::Physics::ParameterValue{true, "8"};
   resolved = application::translators::level_set::resolveConfiguration(input);
   ASSERT_TRUE(resolved);
   EXPECT_FALSE(resolved->options.reinitialization.enabled);
-  EXPECT_EQ(resolved->options.reinitialization.cadence_steps, 8);
+  EXPECT_EQ(resolved->options.reinitialization.cadence_steps, 1);
   input.equation_params["Reinitialization_cadence_steps"] =
       svmp::Physics::ParameterValue{true, "3"};
   resolved = application::translators::level_set::resolveConfiguration(input);

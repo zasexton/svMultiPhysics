@@ -3472,7 +3472,7 @@ runMpiBalancedCapillaryCase(bool sessile,
       <Contact_angle_degrees>90.0</Contact_angle_degrees>
       <Contact_line_wall_markers>)xml"
         << wall_marker << R"xml(</Contact_line_wall_markers>
-      <Contact_line_wall_normals>0.0 -1.0 0.0</Contact_line_wall_normals>
+      <Contact_line_wall_normal>0.0 -1.0 0.0</Contact_line_wall_normal>
       <Contact_line_mobility>1.0</Contact_line_mobility>
       <Wall_slip_model>Navier</Wall_slip_model>
       <Wall_slip_length>1.0</Wall_slip_length>)xml";
@@ -4687,8 +4687,8 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       <Contact_line_model>DynamicContactAngle</Contact_line_model>
       <Contact_angle_degrees>90.0</Contact_angle_degrees>
       <Contact_line_wall_markers>7241;7242</Contact_line_wall_markers>
-      <Contact_line_wall_normals>)xml" + contact_wall_normals +
-            R"xml(</Contact_line_wall_normals>
+      <Contact_line_wall_normal>)xml" + contact_wall_normals +
+            R"xml(</Contact_line_wall_normal>
       <Contact_line_mobility>1.0</Contact_line_mobility>
       <Wall_slip_model>Navier</Wall_slip_model>
       <Wall_slip_length>1.0</Wall_slip_length>
@@ -6118,9 +6118,9 @@ void runHydrostaticFixedGaugeMpiCase(
       <Contact_line_wall_markers>)xml"
                 << contact_wall_markers_xml.str()
                 << R"xml(</Contact_line_wall_markers>
-      <Contact_line_wall_normals>)xml"
+      <Contact_line_wall_normal>)xml"
                 << contact_wall_normals_xml.str()
-                << R"xml(</Contact_line_wall_normals>
+                << R"xml(</Contact_line_wall_normal>
       <Contact_line_mobility>1.0</Contact_line_mobility>
       <Wall_slip_model>Navier</Wall_slip_model>
       <Wall_slip_length>1.0</Wall_slip_length>

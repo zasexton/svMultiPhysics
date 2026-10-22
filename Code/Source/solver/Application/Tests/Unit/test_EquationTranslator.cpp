@@ -539,11 +539,10 @@ TEST(EquationTranslatorFreeSurface,
   auto mesh = buildTranslatorMesh();
   mesh->base().register_label("free_surface", 81);
   const auto meshes = singleMeshMap(mesh);
-  constexpr std::array<std::string_view, 4> penalty_aliases{
+  // The other spellings of the penalty were removed (decision D47); the
+  // test keeps its name because the frozen WP-9 runner selects it.
+  constexpr std::array<std::string_view, 1> penalty_aliases{
       "Tangential_mesh_penalty",
-      "TangentialMeshPenalty",
-      "Prescribed_tangential_mesh_penalty",
-      "PrescribedTangentialMeshPenalty",
   };
 
   for (const auto alias : penalty_aliases) {
@@ -945,8 +944,8 @@ TEST(EquationTranslatorFreeSurface, BuildInputResolvesUnfittedContactLineWallFac
     <Active_domain_method>CutVolume</Active_domain_method>
     <Contact_line_model>PrescribedContactAngle</Contact_line_model>
     <Contact_angle_degrees>90.0</Contact_angle_degrees>
-    <Contact_line_wall_faces>wall_left; wall_right</Contact_line_wall_faces>
-    <Contact_line_wall_normals>-1.0 0.0 0.0; 1.0 0.0 0.0</Contact_line_wall_normals>
+    <Contact_line_wall_face>wall_left; wall_right</Contact_line_wall_face>
+    <Contact_line_wall_normal>-1.0 0.0 0.0; 1.0 0.0 0.0</Contact_line_wall_normal>
   </Add_BC>
 </Add_equation>
 )xml");
@@ -957,15 +956,9 @@ TEST(EquationTranslatorFreeSurface, BuildInputResolvesUnfittedContactLineWallFac
   const auto& bc = input.boundary_conditions.front();
   ASSERT_TRUE(bc.params.at("Contact_line_wall_markers").defined);
   EXPECT_EQ(bc.params.at("Contact_line_wall_markers").value, "11;12");
-  EXPECT_EQ(bc.params.at("Contact_line_wall_normals").value,
+  EXPECT_EQ(bc.params.at("Contact_line_wall_normal").value,
             "-1.0 0.0 0.0; 1.0 0.0 0.0");
-  for (const std::string_view key : {
-           "Contact_line_wall_faces", "ContactLineWallFaces",
-           "Contact_line_wall_face", "ContactLineWallFace",
-           "Wall_boundary_faces", "WallBoundaryFaces",
-           "Wall_boundary_face", "WallBoundaryFace"}) {
-    EXPECT_EQ(bc.params.count(std::string(key)), 0u);
-  }
+  EXPECT_EQ(bc.params.count("Contact_line_wall_face"), 0u);
 }
 
 TEST(EquationTranslatorFreeSurface, BuildInputRejectsContactLineFacesAndMarkersTogether)
@@ -983,9 +976,9 @@ TEST(EquationTranslatorFreeSurface, BuildInputRejectsContactLineFacesAndMarkersT
     <Active_domain_method>CutVolume</Active_domain_method>
     <Contact_line_model>PrescribedContactAngle</Contact_line_model>
     <Contact_angle_degrees>90.0</Contact_angle_degrees>
-    <Contact_line_wall_faces>wall_left</Contact_line_wall_faces>
+    <Contact_line_wall_face>wall_left</Contact_line_wall_face>
     <Contact_line_wall_markers>11</Contact_line_wall_markers>
-    <Contact_line_wall_normals>-1.0 0.0 0.0</Contact_line_wall_normals>
+    <Contact_line_wall_normal>-1.0 0.0 0.0</Contact_line_wall_normal>
   </Add_BC>
 </Add_equation>
 )xml");
@@ -1429,7 +1422,21 @@ TEST(EquationTranslatorFreeSurface,
       forceLink_NavierStokesRegister();
   auto mesh = buildTranslatorTriangleMesh();
   const auto meshes = singleMeshMap(mesh);
-  auto params = parseEquationXml(R"xml(
+
+  svmp::FE::systems::FESystem system(mesh);
+  const auto scalar_space =
+      svmp::FE::spaces::SpaceFactory::create_h1(
+          svmp::FE::ElementType::Triangle3, 1);
+  (void)system.addField(svmp::FE::systems::FieldSpec{
+      .name = "level_set",
+      .space = scalar_space,
+      .components = 1,
+  });
+  // The second spelling PrescribedPressureJump was removed (decision D47):
+  // the XML reader now rejects it before anything is translated.  The test
+  // keeps its name because the frozen WP-10 runner selects it.
+  try {
+    auto params = parseEquationXml(R"xml(
 <Add_equation type="fluid">
   <Free_surface_physical_model>IncompressibleTwoFluid</Free_surface_physical_model>
   <Level_set_field_name>level_set</Level_set_field_name>
@@ -1445,25 +1452,12 @@ TEST(EquationTranslatorFreeSurface,
   <PrescribedPressureJump>4.0</PrescribedPressureJump>
 </Add_equation>
 )xml");
-
-  svmp::FE::systems::FESystem system(mesh);
-  const auto scalar_space =
-      svmp::FE::spaces::SpaceFactory::create_h1(
-          svmp::FE::ElementType::Triangle3, 1);
-  (void)system.addField(svmp::FE::systems::FieldSpec{
-      .name = "level_set",
-      .space = scalar_space,
-      .components = 1,
-  });
-  try {
     (void)application::translators::EquationTranslator::createModule(
         *params, system, meshes);
-    FAIL() << "duplicate pressure-jump aliases were accepted";
+    FAIL() << "the removed PrescribedPressureJump spelling was accepted";
   } catch (const std::runtime_error& error) {
-    EXPECT_NE(
-        std::string_view(error.what()).find(
-            "ambiguous_two_fluid_parameter:Prescribed_pressure_jump"),
-        std::string_view::npos)
+    EXPECT_NE(std::string_view(error.what()).find("PrescribedPressureJump"),
+              std::string_view::npos)
         << error.what();
   }
   EXPECT_EQ(system.findFieldByName("u_negative"),
@@ -1498,14 +1492,6 @@ TEST(EquationTranslatorFreeSurface,
               "<Prescribed_viscous_traction_jump_x>1.0</Prescribed_viscous_traction_jump_x>",
           .expected_diagnostic =
               "missing_two_fluid_parameter:Prescribed_viscous_traction_jump_y",
-      },
-      Case{
-          .target_elements =
-              "<Prescribed_viscous_traction_jump_x>1.0</Prescribed_viscous_traction_jump_x>"
-              "<PrescribedViscousTractionJumpX>2.0</PrescribedViscousTractionJumpX>"
-              "<Prescribed_viscous_traction_jump_y>3.0</Prescribed_viscous_traction_jump_y>",
-          .expected_diagnostic =
-              "ambiguous_two_fluid_parameter:Prescribed_viscous_traction_jump_x",
       },
       Case{
           .target_elements =

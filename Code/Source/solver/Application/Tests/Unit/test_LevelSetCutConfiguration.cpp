@@ -719,9 +719,9 @@ TEST(LevelSetCutConfiguration,
 <svMultiPhysicsFile>
   <Add_equation type="stokes">
     <FreeSurfacePhysicalModel>IncompressibleTwoFluid</FreeSurfacePhysicalModel>
-    <LevelSetFieldName>phi</LevelSetFieldName>
-    <GeneratedInterfaceDomainId>material_interface</GeneratedInterfaceDomainId>
-    <MaterialInterfaceMarker>71</MaterialInterfaceMarker>
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Generated_interface_domain_id>material_interface</Generated_interface_domain_id>
+    <Material_interface_marker>71</Material_interface_marker>
   </Add_equation>
 </svMultiPhysicsFile>
 )xml"},
@@ -782,11 +782,9 @@ TEST(LevelSetCutConfiguration,
 TEST(LevelSetCutConfiguration,
      EverySmallCutAggregationDisableAliasPermitsActiveOnlyRetention)
 {
+  // The other spellings of the switch were removed (decision D47).
   for (const std::string_view parameter :
-       {"<Small_cut_aggregation>false</Small_cut_aggregation>",
-        "<SmallCutAggregation>false</SmallCutAggregation>",
-        "<Enable_small_cut_aggregation>false</Enable_small_cut_aggregation>",
-        "<EnableSmallCutAggregation>false</EnableSmallCutAggregation>"}) {
+       {"<Small_cut_aggregation>false</Small_cut_aggregation>"}) {
     const auto xml = std::string(R"xml(
 <svMultiPhysicsFile>
   <Add_equation type="fluid">
@@ -1047,32 +1045,33 @@ TEST(LevelSetCutConfiguration, ParsesCanonicalImplicitCutOptions)
 
 TEST(LevelSetCutConfiguration, ParsesImplicitCutOptionSynonyms)
 {
+  // The key synonyms were removed (decision D47); the value synonyms remain.
   auto params = parseParametersXml(R"xml(
 <svMultiPhysicsFile>
   <Add_equation type="fluid">
     <Add_BC name="free_surface">
       <Type>Free_surface</Type>
       <Implementation>UnfittedLevelSet</Implementation>
-      <LevelSetField>phi</LevelSetField>
-      <InterfaceDomainId>water_air</InterfaceDomainId>
-      <InterfaceMarker>81</InterfaceMarker>
-      <InterfaceIsovalue>-0.125</InterfaceIsovalue>
-      <GeneratedInterfaceGeometryMode>curved implicit</GeneratedInterfaceGeometryMode>
-      <GeneratedInterfaceQuadratureBackend>hyperrectangle</GeneratedInterfaceQuadratureBackend>
-      <ImplicitCutQuadratureFallback>legacy</ImplicitCutQuadratureFallback>
-      <GeneratedInterfaceGeometryTangentPolicy>quasi Newton geometry</GeneratedInterfaceGeometryTangentPolicy>
-      <ImplicitGeometryRootTolerance>3.0e-9</ImplicitGeometryRootTolerance>
-      <ImplicitGeometryRootCoordinateTolerance>7.0e-10</ImplicitGeometryRootCoordinateTolerance>
-      <ImplicitGeometryRootMaxIterations>29</ImplicitGeometryRootMaxIterations>
-      <ImplicitCutSubdivisionDepth>9</ImplicitCutSubdivisionDepth>
-      <GeneratedCutRefreshNeighborhoodLayers>2</GeneratedCutRefreshNeighborhoodLayers>
-      <CutQuadratureOrder>7</CutQuadratureOrder>
-      <CutInterfaceQuadratureOrder>3</CutInterfaceQuadratureOrder>
-      <CutVolumeQuadratureOrder>8</CutVolumeQuadratureOrder>
-      <AllowCornerLinearizedGeometry>yes</AllowCornerLinearizedGeometry>
-      <RequireProductionQualifiedImplicitCutBackend>yes</RequireProductionQualifiedImplicitCutBackend>
-      <ActiveDomain>phiPositive</ActiveDomain>
-      <ActiveDomainMethod>CutVolume</ActiveDomainMethod>
+      <Level_set_field_name>phi</Level_set_field_name>
+      <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
+      <Interface_marker>81</Interface_marker>
+      <Level_set_isovalue>-0.125</Level_set_isovalue>
+      <Generated_interface_geometry>curved implicit</Generated_interface_geometry>
+      <Implicit_cut_quadrature_backend>hyperrectangle</Implicit_cut_quadrature_backend>
+      <Implicit_cut_fallback_policy>legacy</Implicit_cut_fallback_policy>
+      <Geometry_tangent_policy>quasi Newton geometry</Geometry_tangent_policy>
+      <Implicit_cut_root_tolerance>3.0e-9</Implicit_cut_root_tolerance>
+      <Implicit_cut_root_coordinate_tolerance>7.0e-10</Implicit_cut_root_coordinate_tolerance>
+      <Implicit_cut_root_max_iterations>29</Implicit_cut_root_max_iterations>
+      <Implicit_cut_max_subdivision_depth>9</Implicit_cut_max_subdivision_depth>
+      <Affected_cell_neighborhood_layers>2</Affected_cell_neighborhood_layers>
+      <Cut_quadrature_order>7</Cut_quadrature_order>
+      <Interface_quadrature_order>3</Interface_quadrature_order>
+      <Volume_quadrature_order>8</Volume_quadrature_order>
+      <Allow_corner_linearized_cut_geometry>yes</Allow_corner_linearized_cut_geometry>
+      <Required_implicit_cut_backend_qualification>yes</Required_implicit_cut_backend_qualification>
+      <Active_domain>phiPositive</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>

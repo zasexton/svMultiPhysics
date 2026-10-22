@@ -126,7 +126,6 @@ TEST(LevelSetMaintenanceConfiguration,
   put(legacy.equation_parameters, "Transport_form", "advective");
   put(legacy.equation_parameters, "Enable_reinitialization", "true");
   put(legacy.equation_parameters, "Reinitialization_cadence_steps", "2", false);
-  put(legacy.equation_parameters, "ReinitializationCadenceSteps", "9");
   put(legacy.equation_parameters, "Reinitialization_signed_distance_tolerance",
       "1.23457", false);
   put(legacy.equation_parameters, "Projected_curvature_field", " k_equation ");
@@ -202,16 +201,19 @@ TEST(LevelSetMaintenanceConfiguration,
 
 TEST(LevelSetMaintenanceConfiguration,
      RetainsLegacyNumericVectorBooleanAndAliasPolicies) {
+  // A whitespace-only value counts as absent (the default cadence 1).  The
+  // second spelling of the cadence that the fallback once reached was
+  // removed with the unused alias spellings (decision D47).
   struct AcceptedCase {
     std::string vector;
-    std::string first_cadence;
-    std::string second_cadence;
+    std::string cadence;
     int expected_cadence;
+    std::array<svmp::FE::Real, 3> expected_vector;
   };
   const std::array<AcceptedCase, 3> cases{{
-      {"1.25, -0.5, 3.0", "-1", "8", -1},
-      {"4.0 5.0 6.0", "   ", "8", 8},
-      {"7.0,8.0,9.0", "3", "8", 3},
+      {"1.25, -0.5, 3.0", "-1", -1, {1.25, -0.5, 3.0}},
+      {"4.0 5.0 6.0", "   ", 1, {4.0, 5.0, 6.0}},
+      {"7.0,8.0,9.0", "3", 3, {7.0, 8.0, 9.0}},
   }};
 
   for (const auto &test_case : cases) {
@@ -220,9 +222,7 @@ TEST(LevelSetMaintenanceConfiguration,
     put(input.equation_parameters, "Constant_velocity", test_case.vector);
     put(input.equation_parameters, "Enable_reinitialization", "true");
     put(input.equation_parameters, "Reinitialization_cadence_steps",
-        test_case.first_cadence);
-    put(input.equation_parameters, "ReinitializationCadenceSteps",
-        test_case.second_cadence);
+        test_case.cadence);
     put(input.equation_parameters, "Reinitialization_max_iterations", "2tail");
     put(input.equation_parameters, "Reinitialization_signed_distance_tolerance",
         "1.25tail");
@@ -238,16 +238,7 @@ TEST(LevelSetMaintenanceConfiguration,
     const auto &transport = (*resolved)->transport;
     EXPECT_EQ(transport.velocity.source,
               svmp::FE::level_set::LevelSetVelocitySource::ConstantVector);
-    if (test_case.expected_cadence == -1) {
-      EXPECT_EQ(transport.velocity.constant_value,
-                (std::array<svmp::FE::Real, 3>{1.25, -0.5, 3.0}));
-    } else if (test_case.expected_cadence == 8) {
-      EXPECT_EQ(transport.velocity.constant_value,
-                (std::array<svmp::FE::Real, 3>{4.0, 5.0, 6.0}));
-    } else {
-      EXPECT_EQ(transport.velocity.constant_value,
-                (std::array<svmp::FE::Real, 3>{7.0, 8.0, 9.0}));
-    }
+    EXPECT_EQ(transport.velocity.constant_value, test_case.expected_vector);
     EXPECT_EQ(transport.reinitialization.cadence_steps,
               test_case.expected_cadence);
     EXPECT_EQ(transport.reinitialization.max_iterations, 2);
@@ -620,7 +611,6 @@ TEST(LevelSetMaintenanceConfiguration,
   put(legacy.equation_parameters, "Constant_velocity", "1.0, 2.0, 3.0");
   put(legacy.equation_parameters, "Enable_reinitialization", "true");
   put(legacy.equation_parameters, "Reinitialization_cadence_steps", "2", false);
-  put(legacy.equation_parameters, "ReinitializationCadenceSteps", "9", true);
   put(legacy.equation_parameters, "Projected_curvature_field", "k_equation");
 
   auto installation = makeInstallation(legacy, "phi_domain");
@@ -917,9 +907,9 @@ TEST(LevelSetMaintenanceConfiguration,
   EXPECT_EQ(derived->source_layer,
             "derived:curvature_projection_kinematic_area_gradient_mass");
 
-  // An explicit zero, under any spelling, is accepted and recorded as input.
+  // An explicit zero is accepted and recorded as input.
   put(input.equation_parameters,
-      "ProjectedCurvatureKinematicAreaGradientFilterCoefficient", "0");
+      "Curvature_projection_kinematic_area_gradient_filter_coefficient", "0");
   const auto explicit_zero =
       application::core::resolveLegacyLevelSetMaintenanceConfiguration(
           input, std::span<const ActiveCutVolumeRequest>{});
@@ -935,7 +925,7 @@ TEST(LevelSetMaintenanceConfiguration,
                                          kFilterKey, "legacy_getter");
   ASSERT_NE(selected, nullptr);
   EXPECT_EQ(selected->selected_spelling,
-            "ProjectedCurvatureKinematicAreaGradientFilterCoefficient");
+            "Curvature_projection_kinematic_area_gradient_filter_coefficient");
 }
 
 TEST(LevelSetMaintenanceConfiguration,
@@ -953,15 +943,16 @@ TEST(LevelSetMaintenanceConfiguration,
             kLumpedNonzeroFilterDiagnostic);
 
   // An explicit coefficient equal to the consistent default is still an
-  // explicit nonzero filter, whichever spellings select the two controls.
+  // explicit nonzero filter, also when the lumped mass is selected by its
+  // value alias.
   input.equation_parameters.erase(
       "Curvature_projection_kinematic_area_gradient_mass");
   input.equation_parameters.erase(
       "Curvature_projection_kinematic_area_gradient_filter_coefficient");
-  put(input.equation_parameters, "ProjectedCurvatureKinematicAreaGradientMass",
-      "row_sum");
   put(input.equation_parameters,
-      "Projected_curvature_kinematic_area_gradient_filter_coefficient", "1.0");
+      "Curvature_projection_kinematic_area_gradient_mass", "row_sum");
+  put(input.equation_parameters,
+      "Curvature_projection_kinematic_area_gradient_filter_coefficient", "1.0");
   EXPECT_EQ((exceptionMessage<std::invalid_argument>([&] { (void)resolve(); })),
             kLumpedNonzeroFilterDiagnostic);
 }
@@ -988,8 +979,7 @@ TEST(LevelSetMaintenanceConfiguration,
             nullptr);
 
   for (const std::string spelling :
-       {"Curvature_projection_kinematic_area_gradient_finite_difference_check",
-        "ProjectedCurvatureKinematicAreaGradientFiniteDifferenceCheck"}) {
+       {"Curvature_projection_kinematic_area_gradient_finite_difference_check"}) {
     auto enabled_input = makeKinematicAreaGradientInput();
     put(enabled_input.equation_parameters, spelling, "true");
     const auto enabled = resolve(enabled_input);

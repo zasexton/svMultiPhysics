@@ -878,24 +878,6 @@ TEST(EquationParameters,
             "true"},
            {"Conservative_phase_fixed_flux_regions",
             "film|wall_film|0|1|0|0.1|*|*"}}},
-      Fixture{
-          "compact",
-          R"xml(
-<Add_equation type="level_set">
-  <ConservativePhaseComponentActivityTolerance>8e-8</ConservativePhaseComponentActivityTolerance>
-  <ConservativePhaseWriteFluxArtifacts>false</ConservativePhaseWriteFluxArtifacts>
-  <ConservativePhaseFluxArtifactCadenceSteps>4</ConservativePhaseFluxArtifactCadenceSteps>
-  <ConservativePhaseClassifyNonprimaryComponentsAsSatellites>false</ConservativePhaseClassifyNonprimaryComponentsAsSatellites>
-  <ConservativePhaseFixedFluxRegions>rim|edge|0.8|1|0.5|1|*|*</ConservativePhaseFixedFluxRegions>
-</Add_equation>
-)xml",
-          {{"ConservativePhaseComponentActivityTolerance", "8e-8"},
-           {"ConservativePhaseWriteFluxArtifacts", "false"},
-           {"ConservativePhaseFluxArtifactCadenceSteps", "4"},
-           {"ConservativePhaseClassifyNonprimaryComponentsAsSatellites",
-            "false"},
-           {"ConservativePhaseFixedFluxRegions",
-            "rim|edge|0.8|1|0.5|1|*|*"}}},
   };
 
   for (const auto& fixture : fixtures) {
@@ -910,6 +892,15 @@ TEST(EquationParameters,
       EXPECT_EQ(entry->second, value) << name;
     }
   }
+
+  // The compact (CamelCase) spellings were removed (decision D47): the XML
+  // reader rejects them.
+  EXPECT_THROW((void)equationParametersFromText(R"xml(
+<Add_equation type="level_set">
+  <ConservativePhaseComponentActivityTolerance>8e-8</ConservativePhaseComponentActivityTolerance>
+</Add_equation>
+)xml"),
+               std::runtime_error);
 }
 
 TEST(GeneralSimulationParameters, ParsesOptionalStartTime)

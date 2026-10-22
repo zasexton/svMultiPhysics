@@ -141,23 +141,9 @@ bool activeCutDomainIsExplicitlyEnabled(
            "GeneratedLevelSetCutDomain",
            "Cut_domain",
            "CutDomain"});
-  if (enabled.has_value()) {
-    return *enabled;
-  }
-
-  const auto kind =
-      firstDefinedParameter(
-          params,
-          {"Cut_domain_type",
-           "CutDomainType",
-           "Generated_cut_domain_type",
-           "GeneratedCutDomainType"});
-  if (!kind.has_value()) {
-    return false;
-  }
-  const auto token = normalizedToken(*kind);
-  return token == "levelset" || token == "generatedlevelset" ||
-         token == "implicitcut" || token == "generatedinterface";
+  // Cut_domain_type, an unused second way to enable the same domain, was
+  // removed (decision D47).
+  return enabled.value_or(false);
 }
 
 bool requestMatchesExceptGeometryTangentPolicy(
@@ -292,10 +278,7 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
 {
   const auto active_domain =
       firstDefinedParameter(cut_params,
-                            {"Active_domain",
-                             "ActiveDomain",
-                             "Free_surface_active_domain",
-                             "FreeSurfaceActiveDomain"});
+                            {"Active_domain"});
   if (!active_domain.has_value()) {
     if (require_active_domain) {
       throw std::runtime_error(
@@ -312,10 +295,7 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
 
   const auto method =
       firstDefinedParameter(cut_params,
-                            {"Active_domain_method",
-                             "ActiveDomainMethod",
-                             "Free_surface_active_domain_method",
-                             "FreeSurfaceActiveDomainMethod"});
+                            {"Active_domain_method"});
   if (method.has_value()) {
     const auto method_token = normalizedToken(*method);
     if (method_token == "smoothedindicator" ||
@@ -353,105 +333,65 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
         "'. Supported values: None, LevelSetNegative, or LevelSetPositive.");
   }
   if (const auto field =
-          firstDefinedParameter(cut_params, {"Level_set_field_name",
-                                            "Level_set_field",
-                                            "LevelSetFieldName",
-                                            "LevelSetField"})) {
+          firstDefinedParameter(cut_params, {"Level_set_field_name"})) {
     request.level_set_field_name = trimCopy(*field);
   }
   if (const auto domain =
-          firstDefinedParameter(cut_params, {"Generated_interface_domain_id",
-                                            "GeneratedInterfaceDomainId",
-                                            "Interface_domain_id",
-                                            "InterfaceDomainId"})) {
+          firstDefinedParameter(cut_params, {"Generated_interface_domain_id"})) {
     request.domain_id = trimCopy(*domain);
   }
   if (const auto marker =
-          firstDefinedIntParameter(cut_params, {"Interface_marker",
-                                               "InterfaceMarker"})) {
+          firstDefinedIntParameter(cut_params, {"Interface_marker"})) {
     request.requested_interface_marker = *marker;
   }
   if (const auto isovalue =
-          firstDefinedDoubleParameter(cut_params, {"Level_set_isovalue",
-                                                  "LevelSetIsovalue",
-                                                  "Interface_isovalue",
-                                                  "InterfaceIsovalue"})) {
+          firstDefinedDoubleParameter(cut_params, {"Level_set_isovalue"})) {
     request.isovalue = *isovalue;
   }
   if (const auto quadrature_order =
           firstDefinedIntParameter(
               cut_params,
               {"Generated_interface_quadrature_order",
-               "GeneratedInterfaceQuadratureOrder",
-               "Cut_quadrature_order",
-               "CutQuadratureOrder",
-               "Level_set_cut_quadrature_order",
-               "LevelSetCutQuadratureOrder"})) {
+               "Cut_quadrature_order"})) {
     request.quadrature_order = *quadrature_order;
   }
   if (const auto interface_quadrature_order =
           firstDefinedIntParameter(
               cut_params,
-              {"Interface_quadrature_order",
-               "InterfaceQuadratureOrder",
-               "Generated_interface_surface_quadrature_order",
-               "GeneratedInterfaceSurfaceQuadratureOrder",
-               "Cut_interface_quadrature_order",
-               "CutInterfaceQuadratureOrder"})) {
+              {"Interface_quadrature_order"})) {
     request.interface_quadrature_order = *interface_quadrature_order;
   }
   if (const auto volume_quadrature_order =
           firstDefinedIntParameter(
               cut_params,
-              {"Volume_quadrature_order",
-               "VolumeQuadratureOrder",
-               "Generated_cut_volume_quadrature_order",
-               "GeneratedCutVolumeQuadratureOrder",
-               "Cut_volume_quadrature_order",
-               "CutVolumeQuadratureOrder"})) {
+              {"Volume_quadrature_order"})) {
     request.volume_quadrature_order = *volume_quadrature_order;
   }
   if (const auto geometry_mode =
           firstDefinedParameter(
               cut_params,
-              {"Generated_interface_geometry",
-               "GeneratedInterfaceGeometry",
-               "Implicit_geometry_mode",
-               "ImplicitGeometryMode",
-               "Generated_interface_geometry_mode",
-               "GeneratedInterfaceGeometryMode"})) {
+              {"Generated_interface_geometry"})) {
     request.geometry_mode =
         parseGeneratedInterfaceGeometryMode(*geometry_mode);
   }
   if (const auto backend =
           firstDefinedParameter(
               cut_params,
-              {"Implicit_cut_quadrature_backend",
-               "ImplicitCutQuadratureBackend",
-               "Generated_interface_quadrature_backend",
-               "GeneratedInterfaceQuadratureBackend"})) {
+              {"Implicit_cut_quadrature_backend"})) {
     request.implicit_cut_backend =
         parseImplicitCutQuadratureBackend(*backend);
   }
   if (const auto fallback_policy =
           firstDefinedParameter(
               cut_params,
-              {"Implicit_cut_fallback_policy",
-               "ImplicitCutFallbackPolicy",
-               "Implicit_cut_quadrature_fallback",
-               "ImplicitCutQuadratureFallback"})) {
+              {"Implicit_cut_fallback_policy"})) {
     request.implicit_cut_fallback_policy =
         parseImplicitCutFallbackPolicy(*fallback_policy);
   }
   const auto tangent_policy =
       firstDefinedParameter(
           cut_params,
-          {"Geometry_tangent_policy",
-           "GeometryTangentPolicy",
-           "Generated_interface_geometry_tangent_policy",
-           "GeneratedInterfaceGeometryTangentPolicy",
-           "Implicit_geometry_tangent_policy",
-           "ImplicitGeometryTangentPolicy"});
+          {"Geometry_tangent_policy"});
   if (tangent_policy.has_value()) {
     request.geometry_tangent_policy =
         parseGeometryTangentPolicy(*tangent_policy);
@@ -460,48 +400,31 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
   if (const auto root_tolerance =
           firstDefinedDoubleParameter(
               cut_params,
-              {"Implicit_cut_root_tolerance",
-               "ImplicitCutRootTolerance",
-               "Implicit_geometry_root_tolerance",
-               "ImplicitGeometryRootTolerance"})) {
+              {"Implicit_cut_root_tolerance"})) {
     request.implicit_cut_root_tolerance = *root_tolerance;
   }
   if (const auto coordinate_tolerance =
           firstDefinedDoubleParameter(
               cut_params,
-              {"Implicit_cut_root_coordinate_tolerance",
-               "ImplicitCutRootCoordinateTolerance",
-               "Implicit_geometry_root_coordinate_tolerance",
-               "ImplicitGeometryRootCoordinateTolerance"})) {
+              {"Implicit_cut_root_coordinate_tolerance"})) {
     request.implicit_cut_root_coordinate_tolerance = *coordinate_tolerance;
   }
   if (const auto max_root_iterations =
           firstDefinedIntParameter(
               cut_params,
-              {"Implicit_cut_root_max_iterations",
-               "ImplicitCutRootMaxIterations",
-               "Implicit_geometry_root_max_iterations",
-               "ImplicitGeometryRootMaxIterations"})) {
+              {"Implicit_cut_root_max_iterations"})) {
     request.implicit_cut_root_max_iterations = *max_root_iterations;
   }
   if (const auto max_subdivision_depth =
           firstDefinedIntParameter(
               cut_params,
-              {"Implicit_cut_max_subdivision_depth",
-               "ImplicitCutMaxSubdivisionDepth",
-               "Implicit_cut_subdivision_depth",
-               "ImplicitCutSubdivisionDepth"})) {
+              {"Implicit_cut_max_subdivision_depth"})) {
     request.implicit_cut_max_subdivision_depth = *max_subdivision_depth;
   }
   if (const auto affected_neighborhood_layers =
           firstDefinedIntParameter(
               cut_params,
-              {"Affected_cell_neighborhood_layers",
-               "AffectedCellNeighborhoodLayers",
-               "Generated_interface_affected_cell_neighborhood_layers",
-               "GeneratedInterfaceAffectedCellNeighborhoodLayers",
-               "Generated_cut_refresh_neighborhood_layers",
-               "GeneratedCutRefreshNeighborhoodLayers"})) {
+              {"Affected_cell_neighborhood_layers"})) {
     if (*affected_neighborhood_layers < 0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Generated interface affected-cell "
@@ -514,9 +437,7 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
           firstDefinedBoolParameter(
               cut_params,
               {"Allow_corner_linearized_cut_geometry",
-               "AllowCornerLinearizedCutGeometry",
-               "Allow_corner_linearized_geometry",
-               "AllowCornerLinearizedGeometry"})) {
+               "Allow_corner_linearized_geometry"})) {
     request.allow_corner_linearized_geometry = *allow_corner_linearized;
   }
   // Retention A/B experiment knob: request the retained generated-volume
@@ -536,12 +457,7 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
   if (const auto required_qualification =
           firstDefinedParameter(
               cut_params,
-              {"Required_implicit_cut_backend_qualification",
-               "RequiredImplicitCutBackendQualification",
-               "Require_implicit_cut_backend_qualification",
-               "RequireImplicitCutBackendQualification",
-               "Require_production_qualified_implicit_cut_backend",
-               "RequireProductionQualifiedImplicitCutBackend"})) {
+              {"Required_implicit_cut_backend_qualification"})) {
     const auto token = normalizedToken(*required_qualification);
     if (token == "productionqualified" || token == "production" ||
         token == "required" || token == "true" || token == "yes" ||
@@ -704,13 +620,13 @@ activeCutVolumeRequests(const EquationParameters& equation)
       trimCopy(*physical_model) == "IncompressibleTwoFluid") {
     const auto level_set_field = firstDefinedParameter(
         eq_params,
-        {"Level_set_field_name", "LevelSetFieldName"});
+        {"Level_set_field_name"});
     const auto generated_domain = firstDefinedParameter(
         eq_params,
-        {"Generated_interface_domain_id", "GeneratedInterfaceDomainId"});
+        {"Generated_interface_domain_id"});
     const auto interface_marker = firstDefinedIntParameter(
         eq_params,
-        {"Material_interface_marker", "MaterialInterfaceMarker"});
+        {"Material_interface_marker"});
     if (!level_set_field.has_value() || !generated_domain.has_value() ||
         !interface_marker.has_value() || *interface_marker < 0) {
       throw std::runtime_error(
@@ -766,9 +682,7 @@ activeCutVolumeRequests(const EquationParameters& equation)
       continue;
     }
     const auto implementation =
-        firstDefinedParameter(bc_params, {"Implementation",
-                                         "Free_surface_implementation",
-                                         "FreeSurfaceImplementation"});
+        firstDefinedParameter(bc_params, {"Implementation"});
     const auto implementation_token =
         implementation.has_value() ? normalizedToken(*implementation)
                                    : std::string{};
@@ -805,8 +719,7 @@ activeCutVolumeRequests(const EquationParameters& equation)
       const bool small_cut_aggregation =
           firstDefinedBoolParameter(
               bc_params,
-              {"Small_cut_aggregation", "SmallCutAggregation",
-               "Enable_small_cut_aggregation", "EnableSmallCutAggregation"})
+              {"Small_cut_aggregation"})
               .value_or(true);
       if (small_cut_aggregation) {
         if (const char* force = std::getenv("SVMP_CUT_RETENTION_FORCE");

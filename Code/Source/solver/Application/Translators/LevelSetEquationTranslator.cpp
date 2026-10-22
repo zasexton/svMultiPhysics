@@ -1253,12 +1253,12 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
           params, level_set_aliases::level_set_field_name)) {
     options.level_set.field_name = *value;
   }
-  if (const auto value = get_defined_string(params, {"Level_set_source", "LevelSetSource"})) {
+  if (const auto value = get_defined_string(params, {"Level_set_source"})) {
     options.level_set.source = parse_level_set_source(*value);
   }
   if (const auto value = get_defined_bool(
           params,
-          {"Auto_register_level_set_field", "AutoRegisterLevelSetField"})) {
+          {"Auto_register_level_set_field"})) {
     options.level_set.auto_register_field = *value;
   }
 
@@ -1280,82 +1280,70 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
   }
   if (const auto value = get_defined_real(
           params,
-          {"Conservative_phase_invariant_tolerance",
-           "ConservativePhaseInvariantTolerance"},
+          {"Conservative_phase_invariant_tolerance"},
           "Conservative_phase_invariant_tolerance")) {
     options.conservative_phase.invariant_tolerance = *value;
   }
   if (const auto value = get_defined_real(
           params,
-          {"Conservative_phase_component_activity_tolerance",
-           "ConservativePhaseComponentActivityTolerance"},
+          {"Conservative_phase_component_activity_tolerance"},
           "Conservative_phase_component_activity_tolerance")) {
     options.conservative_phase.component_activity_tolerance = *value;
   }
   if (const auto value = get_defined_real(
           params,
-          {"Conservative_phase_maximum_courant",
-           "ConservativePhaseMaximumCourant"},
+          {"Conservative_phase_maximum_courant"},
           "Conservative_phase_maximum_courant")) {
     options.conservative_phase.maximum_courant = *value;
   }
   if (const auto value = get_defined_bool(
           params,
-          {"Conservative_phase_enforce_courant_limit",
-           "ConservativePhaseEnforceCourantLimit"})) {
+          {"Conservative_phase_enforce_courant_limit"})) {
     options.conservative_phase.enforce_courant_limit = *value;
   }
   if (const auto value = get_defined_bool(
           params,
-          {"Conservative_phase_require_constant_preservation",
-           "ConservativePhaseRequireConstantPreservation"})) {
+          {"Conservative_phase_require_constant_preservation"})) {
     options.conservative_phase.require_constant_preservation = *value;
   }
   if (const auto value = get_defined_real(
           params,
-          {"Conservative_phase_momentum_relative_tolerance",
-           "ConservativePhaseMomentumRelativeTolerance"},
+          {"Conservative_phase_momentum_relative_tolerance"},
           "Conservative_phase_momentum_relative_tolerance")) {
     options.conservative_phase.momentum_relative_tolerance = *value;
   }
   if (const auto value = get_defined_bool(
           params,
-          {"Conservative_phase_write_flux_artifacts",
-           "ConservativePhaseWriteFluxArtifacts"})) {
+          {"Conservative_phase_write_flux_artifacts"})) {
     options.conservative_phase.write_flux_artifacts = *value;
   }
   if (const auto value = get_defined_int(
           params,
-          {"Conservative_phase_flux_artifact_cadence_steps",
-           "ConservativePhaseFluxArtifactCadenceSteps"},
+          {"Conservative_phase_flux_artifact_cadence_steps"},
           "Conservative_phase_flux_artifact_cadence_steps")) {
     options.conservative_phase.flux_artifact_cadence_steps = *value;
   }
   if (const auto value = get_defined_bool(
           params,
-          {"Conservative_phase_classify_nonprimary_components_as_satellites",
-           "ConservativePhaseClassifyNonprimaryComponentsAsSatellites"})) {
+          {"Conservative_phase_classify_nonprimary_components_as_satellites"})) {
     options.conservative_phase
         .classify_nonprimary_components_as_satellites = *value;
   }
   if (const auto value = get_defined_string(
           params,
-          {"Conservative_phase_boundary_flux_policy",
-           "ConservativePhaseBoundaryFluxPolicy"})) {
+          {"Conservative_phase_boundary_flux_policy"})) {
     options.conservative_phase.boundary_flux_policy =
         parse_conservative_phase_boundary_flux_policy(*value);
   }
   if (const auto value = get_defined_string(
           params,
-          {"Conservative_phase_fixed_flux_regions",
-           "ConservativePhaseFixedFluxRegions"})) {
+          {"Conservative_phase_fixed_flux_regions"})) {
     options.conservative_phase.fixed_flux_regions =
         ls::parseLevelSetPhaseRegionBoxes(*value);
   }
   if (const auto value = get_defined_real(
           params,
-          {"Conservative_phase_impermeable_normal_velocity_tolerance",
-           "ConservativePhaseImpermeableNormalVelocityTolerance"},
+          {"Conservative_phase_impermeable_normal_velocity_tolerance"},
           "Conservative_phase_impermeable_normal_velocity_tolerance")) {
     options.conservative_phase.impermeable_normal_velocity_tolerance = *value;
     options.conservative_phase
@@ -1363,28 +1351,24 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
   }
   if (const auto value = get_defined_bool(
           params,
-          {"Conservative_phase_reconcile_geometry",
-           "ConservativePhaseReconcileGeometry"})) {
+          {"Conservative_phase_reconcile_geometry"})) {
     options.conservative_phase.reconcile_geometry = *value;
   }
   if (const auto value = get_defined_real(
           params,
-          {"Conservative_phase_geometry_measure_tolerance",
-           "ConservativePhaseGeometryMeasureTolerance"},
+          {"Conservative_phase_geometry_measure_tolerance"},
           "Conservative_phase_geometry_measure_tolerance")) {
     options.conservative_phase.geometry_measure_tolerance = *value;
   }
   if (const auto value = get_defined_positive_int(
           params,
-          {"Conservative_phase_geometry_correction_max_iterations",
-           "ConservativePhaseGeometryCorrectionMaxIterations"},
+          {"Conservative_phase_geometry_correction_max_iterations"},
           "Conservative_phase_geometry_correction_max_iterations")) {
     options.conservative_phase.geometry_correction_max_iterations = *value;
   }
   if (const auto value = get_defined_real(
           params,
-          {"Conservative_phase_maximum_geometry_displacement_fraction",
-           "ConservativePhaseMaximumGeometryDisplacementFraction"},
+          {"Conservative_phase_maximum_geometry_displacement_fraction"},
           "Conservative_phase_maximum_geometry_displacement_fraction")) {
     options.conservative_phase.maximum_geometry_displacement_fraction = *value;
   }
@@ -1449,41 +1433,32 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
                                 "derived:constant_velocity", source_layer);
   }
 
-  if (const auto value = get_defined_bool(params, {"Enable_SUPG", "SUPG", "SUPG_enabled"})) {
+  if (const auto value = get_defined_bool(params, {"Enable_SUPG"})) {
     options.supg.enabled = *value;
   }
-  if (const auto value = get_defined_real(params, {"SUPG_tau_scale", "SUPGScale"}, "SUPG_tau_scale")) {
+  if (const auto value = get_defined_real(params, {"SUPG_tau_scale"}, "SUPG_tau_scale")) {
     options.supg.tau_scale = *value;
   }
   if (const auto value = get_defined_real(
           params,
-          {"SUPG_velocity_epsilon", "SUPGVelocityEpsilon"},
-          "SUPG_velocity_epsilon")) {
-    options.supg.velocity_epsilon = *value;
-  }
-  if (const auto value = get_defined_real(
-          params,
-          {"SUPG_transient_scale", "SUPGTransientScale"},
+          {"SUPG_transient_scale"},
           "SUPG_transient_scale")) {
     options.supg.transient_scale = *value;
   }
   if (const auto value = get_defined_bool(
           params,
-          {"Enable_discontinuity_capturing", "EnableDiscontinuityCapturing",
-           "SUPG_discontinuity_capturing", "SUPGDiscontinuityCapturing"})) {
+          {"Enable_discontinuity_capturing"})) {
     options.supg.discontinuity_capturing_enabled = *value;
   }
   if (const auto value = get_defined_real(
           params,
-          {"Discontinuity_capturing_scale", "DiscontinuityCapturingScale",
-           "SUPG_discontinuity_capturing_scale"},
+          {"Discontinuity_capturing_scale"},
           "Discontinuity_capturing_scale")) {
     options.supg.discontinuity_capturing_scale = *value;
   }
   if (const auto value = get_defined_real(
           params,
-          {"Discontinuity_capturing_gradient_epsilon",
-           "DiscontinuityCapturingGradientEpsilon"},
+          {"Discontinuity_capturing_gradient_epsilon"},
           "Discontinuity_capturing_gradient_epsilon")) {
     options.supg.gradient_epsilon = *value;
   }
@@ -1496,80 +1471,65 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
   }
   if (const auto value = get_defined_real(
           params,
-          {"Discontinuity_capturing_max_courant",
-           "DiscontinuityCapturingMaxCourant"},
+          {"Discontinuity_capturing_max_courant"},
           "Discontinuity_capturing_max_courant")) {
     options.supg.discontinuity_capturing_max_courant = *value;
   }
   if (const auto value = get_defined_bool(
           params,
-          {"Enable_bound_preserving_limiter", "EnableBoundPreservingLimiter",
-           "Bound_preserving_limiter", "BoundPreservingLimiter"})) {
+          {"Enable_bound_preserving_limiter"})) {
     options.bound_preserving.enabled = *value;
   }
   if (const auto value = get_defined_real(
           params,
-          {"Bound_preserving_bound_tolerance", "BoundPreservingBoundTolerance"},
+          {"Bound_preserving_bound_tolerance"},
           "Bound_preserving_bound_tolerance")) {
     options.bound_preserving.bound_tolerance = *value;
   }
   if (const auto value = get_defined_real(
           params,
-          {"Bound_preserving_sign_tolerance", "BoundPreservingSignTolerance"},
+          {"Bound_preserving_sign_tolerance"},
           "Bound_preserving_sign_tolerance")) {
     options.bound_preserving.sign_tolerance = *value;
   }
   if (const auto value = get_defined_real(
           params,
-          {"Bound_preserving_courant_tolerance",
-           "BoundPreservingCourantTolerance"},
-          "Bound_preserving_courant_tolerance")) {
-    options.bound_preserving.courant_tolerance = *value;
-  }
-  if (const auto value = get_defined_real(
-          params,
-          {"Bound_preserving_maximum_courant", "BoundPreservingMaximumCourant"},
+          {"Bound_preserving_maximum_courant"},
           "Bound_preserving_maximum_courant")) {
     options.bound_preserving.maximum_courant = *value;
   }
   if (const auto value = get_defined_bool(
           params,
-          {"Bound_preserving_enforce_courant_limit",
-           "BoundPreservingEnforceCourantLimit"})) {
+          {"Bound_preserving_enforce_courant_limit"})) {
     options.bound_preserving.enforce_courant_limit = *value;
   }
   if (const auto value = get_defined_bool(
           params,
-          {"Bound_preserving_enforce_impermeable_boundaries",
-           "BoundPreservingEnforceImpermeableBoundaries"})) {
+          {"Bound_preserving_enforce_impermeable_boundaries"})) {
     options.bound_preserving.enforce_impermeable_boundaries = *value;
   }
   if (const auto value = get_defined_real(
           params,
-          {"Bound_preserving_impermeable_normal_velocity_tolerance",
-           "BoundPreservingImpermeableNormalVelocityTolerance"},
+          {"Bound_preserving_impermeable_normal_velocity_tolerance"},
           "Bound_preserving_impermeable_normal_velocity_tolerance")) {
     options.bound_preserving.impermeable_normal_velocity_tolerance = *value;
   }
 
   if (const auto value = get_defined_bool(
           params,
-          {"Enable_interface_kinematic", "EnableInterfaceKinematic",
-           "Enable_free_surface_kinematic_interface", "EnableFreeSurfaceKinematicInterface"})) {
+          {"Enable_interface_kinematic"})) {
     options.interface_kinematic.enabled = *value;
   }
   if (const auto value = get_defined_int(
           params,
-          {"Interface_kinematic_marker", "InterfaceKinematicMarker",
-           "Level_set_interface_marker", "LevelSetInterfaceMarker"},
+          {"Interface_kinematic_marker"},
           "Interface_kinematic_marker")) {
     options.interface_kinematic.enabled = true;
     options.interface_kinematic.interface_marker = *value;
   }
   if (const auto value = get_defined_real(
           params,
-          {"Interface_kinematic_weight_scale", "InterfaceKinematicWeightScale",
-           "Free_surface_kinematic_weight_scale", "FreeSurfaceKinematicWeightScale"},
+          {"Interface_kinematic_weight_scale"},
           "Interface_kinematic_weight_scale")) {
     options.interface_kinematic.weight_scale = *value;
   }
@@ -1644,40 +1604,36 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
   }
   if (const auto value = get_defined_real(
           params,
-          {"Volume_correction_minimum_relative_error",
-           "VolumeCorrectionMinimumRelativeError"},
+          {"Volume_correction_minimum_relative_error"},
           "Volume_correction_minimum_relative_error")) {
     options.volume_correction.minimum_relative_volume_error = *value;
   }
   if (const auto value = get_defined_real(
           params,
-          {"Volume_correction_maximum_interface_displacement_fraction",
-           "VolumeCorrectionMaximumInterfaceDisplacementFraction"},
+          {"Volume_correction_maximum_interface_displacement_fraction"},
           "Volume_correction_maximum_interface_displacement_fraction")) {
     options.volume_correction.maximum_interface_displacement_fraction = *value;
   }
   if (const auto value = get_defined_real(
           params,
-          {"Volume_correction_maximum_cumulative_interface_displacement_fraction",
-           "VolumeCorrectionMaximumCumulativeInterfaceDisplacementFraction"},
+          {"Volume_correction_maximum_cumulative_interface_displacement_fraction"},
           "Volume_correction_maximum_cumulative_interface_displacement_fraction")) {
     options.volume_correction
         .maximum_cumulative_interface_displacement_fraction = *value;
   }
   if (const auto value = get_defined_bool(
           params,
-          {"Enable_kinematic_reconciliation", "EnableKinematicReconciliation"})) {
+          {"Enable_kinematic_reconciliation"})) {
     options.kinematic_reconciliation.enabled = *value;
   }
   if (const auto value = get_defined_bool(
           params,
-          {"Enable_sign_definite_patch_bounds", "EnableSignDefinitePatchBounds"})) {
+          {"Enable_sign_definite_patch_bounds"})) {
     options.sign_definite_patch_bounds.enabled = *value;
   }
   if (const auto value = get_defined_bool(
           params,
-          {"Enable_interface_preserving_redistancing",
-           "EnableInterfacePreservingRedistancing"})) {
+          {"Enable_interface_preserving_redistancing"})) {
     options.interface_preserving_redistancing.enabled = *value;
   }
 }
@@ -1826,7 +1782,7 @@ void apply_level_set_bcs(const svmp::Physics::EquationModuleInput& input,
       }
       if (const auto penalty = get_defined_real(
               bc.params,
-              {"Penalty_scale", "Penalty", "Inflow_penalty_scale"},
+              {"Penalty_scale", "Penalty"},
               "Add_BC/Penalty_scale")) {
         inflow.penalty_scale = *penalty;
       }
@@ -1901,9 +1857,7 @@ translate_level_set_transport_input(
     const auto reject_explicitly_disabled_kinematic = [](const auto& params) {
       const auto enabled = get_defined_bool(
           params,
-          {"Enable_interface_kinematic", "EnableInterfaceKinematic",
-           "Enable_free_surface_kinematic_interface",
-           "EnableFreeSurfaceKinematicInterface"});
+          {"Enable_interface_kinematic"});
       if (enabled.has_value() && !*enabled) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Material-interface phase-pair velocity requires interface kinematic enforcement.");

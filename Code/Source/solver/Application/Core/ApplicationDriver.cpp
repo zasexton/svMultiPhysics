@@ -5015,25 +5015,16 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
     const bool enabled =
         first_defined_bool_parameter(
             eq_params,
-            {"Use_wet_extension_advection_velocity",
-             "UseWetExtensionAdvectionVelocity",
-             "Update_advection_velocity_from_wet_region",
-             "UpdateAdvectionVelocityFromWetRegion"})
+            {"Use_wet_extension_advection_velocity"})
             .value_or(false);
     const auto source_field =
         first_defined_parameter(
             eq_params,
             {"Advection_velocity_from_field",
-             "AdvectionVelocityFromField",
-             "Source_velocity_field_name",
-             "SourceVelocityFieldName",
-             "Physical_velocity_field_name",
-             "PhysicalVelocityFieldName"});
+             "Source_velocity_field_name"});
     const auto method_parameter =
         first_defined_parameter(eq_params, {"Wet_extension_advection_velocity_method",
-                                           "WetExtensionAdvectionVelocityMethod",
-                                           "Advection_velocity_extension_method",
-                                           "AdvectionVelocityExtensionMethod"});
+                                           "Advection_velocity_extension_method"});
     const auto pde_operator =
         method_parameter.has_value()
             ? application::core::pdeVelocityExtensionOperatorFromToken(
@@ -5054,9 +5045,6 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
     LevelSetAdvectionVelocityRequest request{};
     if (const auto field =
             first_defined_parameter(eq_params, {"Level_set_field_name",
-                                               "LevelSetFieldName",
-                                               "Level_set_field",
-                                               "LevelSetField",
                                                "Field_name"})) {
       request.level_set_field_name = trim_copy(*field);
     }
@@ -5064,10 +5052,7 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
       request.source_velocity_field_name = trim_copy(*source_field);
     }
     if (const auto target =
-            first_defined_parameter(eq_params, {"Velocity_field_name",
-                                               "VelocityFieldName",
-                                               "Advection_velocity_field",
-                                               "AdvectionVelocityField"})) {
+            first_defined_parameter(eq_params, {"Velocity_field_name"})) {
       request.target_velocity_field_name = trim_copy(*target);
     }
     if (request.target_velocity_field_name.empty()) {
@@ -5091,7 +5076,7 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
     }
 
     const auto velocity_source =
-        first_defined_parameter(eq_params, {"Velocity_source", "VelocitySource"});
+        first_defined_parameter(eq_params, {"Velocity_source"});
     if (!velocity_source.has_value() ||
         normalized_token(*velocity_source) != "prescribeddata") {
       throw std::runtime_error(
@@ -5123,36 +5108,19 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
       }
       request.extension_method = "wall_compatible_normal";
     }
-    if (const auto band_layers = first_defined_int_parameter(
-            eq_params,
-            {"Wet_extension_band_layers", "WetExtensionBandLayers",
-             "Advection_velocity_extension_band_layers",
-             "AdvectionVelocityExtensionBandLayers"})) {
-      if (*band_layers <= 0) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Wet-extension band layers must be positive.");
-      }
-      request.extension_band_layers = *band_layers;
-      request.extension_band_layers_explicit = true;
-    }
-    if (const auto wall_compatible = first_defined_bool_parameter(
-            eq_params,
-            {"Wet_extension_enforce_wall_impermeability",
-             "WetExtensionEnforceWallImpermeability"})) {
-      request.enforce_wall_impermeability = *wall_compatible;
-    }
+    // Wet_extension_band_layers and Wet_extension_enforce_wall_impermeability,
+    // which no deck, runner or test set, were removed (decision D47): the
+    // algebraic wet extension keeps its derived band and enforces wall
+    // impermeability.
     if (const auto write_maps = first_defined_bool_parameter(
             eq_params,
-            {"Write_velocity_extension_maps",
-             "WriteVelocityExtensionMaps"})) {
+            {"Write_velocity_extension_maps"})) {
       request.write_velocity_extension_maps = *write_maps;
     }
     bool explicit_wall_faces = false;
     if (const auto wall_faces = first_defined_parameter(
             eq_params,
-            {"Wet_extension_wall_faces", "WetExtensionWallFaces",
-             "Advection_velocity_extension_wall_faces",
-             "AdvectionVelocityExtensionWallFaces"})) {
+            {"Wet_extension_wall_faces"})) {
       request.wall_face_names = splitFaceNameList(*wall_faces);
       explicit_wall_faces = true;
       if (request.enforce_wall_impermeability &&
@@ -5238,15 +5206,9 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
             !incompatibility(*boundary).has_value()) {
             append_wall_faces(boundary->name.value());
         }
-        if (!explicit_wall_faces) {
-          const auto boundary_params = boundary->get_parameter_list();
-          if (const auto contact_walls = first_defined_parameter(
-                  boundary_params,
-                  {"Contact_line_wall_faces", "ContactLineWallFaces",
-                   "Wall_boundary_faces", "WallBoundaryFaces"})) {
-            append_wall_faces(*contact_walls);
-          }
-        }
+        // The plural contact-wall face spellings read here were removed
+        // (decision D47); the singular Contact_line_wall_face was never read
+        // by this discovery, so no accepted deck changes.
       }
 
       for (const auto& wall_face_name : request.wall_face_names) {
@@ -5293,10 +5255,7 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
     }
 
     if (const auto isovalue =
-            first_defined_double_parameter(eq_params, {"Level_set_isovalue",
-                                                      "LevelSetIsovalue",
-                                                      "Interface_isovalue",
-                                                      "InterfaceIsovalue"})) {
+            first_defined_double_parameter(eq_params, {"Level_set_isovalue"})) {
       request.isovalue = *isovalue;
     }
 
@@ -7041,8 +7000,8 @@ void applyCoupledLevelSetFieldResidualCriteria(
     const auto equation_parameters = equation->get_parameter_list();
     if (const auto configured_name = first_defined_parameter(
             equation_parameters,
-            {"Level_set_field_name", "LevelSetFieldName",
-             "Level_set_field", "LevelSetField", "Field_name"})) {
+            {"Level_set_field_name",
+             "Field_name"})) {
       field_name = trim_copy(*configured_name);
     }
 

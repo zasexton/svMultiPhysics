@@ -520,9 +520,7 @@ bool hasUnfittedLevelSetFreeSurface(const EquationParameters& eq)
     if (lower_copy(bc->type.value()) != "free_surface") {
       continue;
     }
-    if (implementation_matches(*bc, "Implementation") ||
-        implementation_matches(*bc, "Free_surface_implementation") ||
-        implementation_matches(*bc, "FreeSurfaceImplementation")) {
+    if (implementation_matches(*bc, "Implementation")) {
       return true;
     }
   }
@@ -1159,14 +1157,13 @@ bool inputRequestsCoupledDisplacementALE(const Parameters& params)
     // The same keys and tokens as the Navier-Stokes translator; the last
     // defined key wins there as well.
     std::optional<std::string> enable;
-    for (const auto* key : {"Enable_ALE", "Use_ALE", "Moving_mesh", "Use_moving_mesh"}) {
+    for (const auto* key : {"Enable_ALE"}) {
       if (auto value = definedParameterValue(*equation, key)) {
         enable = std::move(value);
       }
     }
     std::optional<std::string> source;
-    for (const auto* key : {"Mesh_velocity_source", "MeshVelocitySource",
-                            "ALE_mesh_velocity_source", "ALEMeshVelocitySource"}) {
+    for (const auto* key : {"Mesh_velocity_source"}) {
       if (auto value = definedParameterValue(*equation, key)) {
         source = std::move(value);
       }

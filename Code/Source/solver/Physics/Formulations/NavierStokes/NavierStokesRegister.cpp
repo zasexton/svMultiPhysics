@@ -162,29 +162,18 @@ enum class NavierStokesPhysicalModel {
 [[nodiscard]] bool is_two_fluid_configuration_key(
     std::string_view key)
 {
-  static constexpr std::array<std::string_view, 22> keys = {
+  static constexpr std::array<std::string_view, 11> keys = {
       "Material_interface_marker",
-      "MaterialInterfaceMarker",
       "Negative_phase_density",
-      "NegativePhaseDensity",
       "Negative_phase_dynamic_viscosity",
-      "NegativePhaseDynamicViscosity",
       "Positive_phase_density",
-      "PositivePhaseDensity",
       "Positive_phase_dynamic_viscosity",
-      "PositivePhaseDynamicViscosity",
       "Two_fluid_surface_tension",
-      "TwoFluidSurfaceTension",
       "Two_fluid_interface_nitsche_gamma",
-      "TwoFluidInterfaceNitscheGamma",
       "Prescribed_pressure_jump",
-      "PrescribedPressureJump",
       "Prescribed_viscous_traction_jump_x",
-      "PrescribedViscousTractionJumpX",
       "Prescribed_viscous_traction_jump_y",
-      "PrescribedViscousTractionJumpY",
       "Prescribed_viscous_traction_jump_z",
-      "PrescribedViscousTractionJumpZ",
   };
   return std::find(keys.begin(), keys.end(), key) != keys.end();
 }
@@ -205,9 +194,7 @@ enum class FreeSurfaceScopeLocation {
 [[nodiscard]] bool is_canonical_free_surface_implementation_key(
     std::string_view key)
 {
-  return key == "Implementation" ||
-         key == "Free_surface_implementation" ||
-         key == "FreeSurfaceImplementation";
+  return key == "Implementation";
 }
 
 void validate_free_surface_scope_map(
@@ -301,8 +288,6 @@ void validate_free_surface_boundary_scope(
   std::size_t implementation_count = 0;
   for (const auto key : {
            "Implementation",
-           "Free_surface_implementation",
-           "FreeSurfaceImplementation",
        }) {
     const auto it = params.find(key);
     if (it == params.end() || !it->second.defined) {
@@ -1950,12 +1935,8 @@ void apply_fluid_moving_domain_params(
 {
   namespace ns = svmp::Physics::formulations::navier_stokes;
 
-  constexpr std::array<std::string_view, 5> kAleKeys = {
-      "ALE",
+  constexpr std::array<std::string_view, 1> kAleKeys = {
       "Enable_ALE",
-      "Use_ALE",
-      "Moving_mesh",
-      "Use_moving_mesh",
   };
   for (const auto key : kAleKeys) {
     if (const auto value = get_defined_bool(params, key)) {
@@ -1963,21 +1944,8 @@ void apply_fluid_moving_domain_params(
     }
   }
 
-  constexpr std::array<std::string_view, 3> kMovingVolumeKeys = {
-      "Moving_control_volume_transient",
-      "Include_moving_control_volume_transient",
-      "ALE_moving_control_volume_transient",
-  };
-  for (const auto key : kMovingVolumeKeys) {
-    if (const auto value = get_defined_bool(params, key)) {
-      options.include_moving_control_volume_transient = *value;
-    }
-  }
-
-  constexpr std::array<std::string_view, 3> kMeshVelocityFieldKeys = {
+  constexpr std::array<std::string_view, 1> kMeshVelocityFieldKeys = {
       "Mesh_velocity_field",
-      "MeshVelocityField",
-      "Mesh_motion_velocity_field",
   };
   for (const auto key : kMeshVelocityFieldKeys) {
     if (const auto value = get_defined_string(params, key)) {
@@ -1985,11 +1953,8 @@ void apply_fluid_moving_domain_params(
     }
   }
 
-  constexpr std::array<std::string_view, 4> kMeshVelocitySourceKeys = {
+  constexpr std::array<std::string_view, 1> kMeshVelocitySourceKeys = {
       "Mesh_velocity_source",
-      "MeshVelocitySource",
-      "ALE_mesh_velocity_source",
-      "ALEMeshVelocitySource",
   };
   for (const auto key : kMeshVelocitySourceKeys) {
     if (const auto value = get_defined_string(params, key)) {
@@ -2009,10 +1974,9 @@ void apply_fluid_moving_domain_params(
     }
   }
 
-  constexpr std::array<std::string_view, 3> kMeshDisplacementFieldKeys = {
+  constexpr std::array<std::string_view, 2> kMeshDisplacementFieldKeys = {
       "Mesh_displacement_field",
       "MeshDisplacementField",
-      "Mesh_motion_displacement_field",
   };
   for (const auto key : kMeshDisplacementFieldKeys) {
     if (const auto value = get_defined_string(params, key)) {
@@ -2020,10 +1984,8 @@ void apply_fluid_moving_domain_params(
     }
   }
 
-  constexpr std::array<std::string_view, 3> kAutoRegisterMeshDisplacementKeys = {
+  constexpr std::array<std::string_view, 1> kAutoRegisterMeshDisplacementKeys = {
       "Auto_register_mesh_displacement_field",
-      "AutoRegisterMeshDisplacementField",
-      "ALE_auto_register_mesh_displacement_field",
   };
   for (const auto key : kAutoRegisterMeshDisplacementKeys) {
     if (const auto value = get_defined_bool(params, key)) {
@@ -2031,11 +1993,9 @@ void apply_fluid_moving_domain_params(
     }
   }
 
-  constexpr std::array<std::string_view, 4> kMovingMeshTangentPathKeys = {
+  constexpr std::array<std::string_view, 2> kMovingMeshTangentPathKeys = {
       "MovingMeshTangentPath",
       "Moving_mesh_tangent_path",
-      "Moving_mesh_geometry_tangent_path",
-      "ALE_moving_mesh_tangent_path",
   };
   for (const auto key : kMovingMeshTangentPathKeys) {
     if (const auto value = get_defined_string(params, key)) {
@@ -3230,7 +3190,7 @@ void reject_unsupported_two_fluid_default_domain_parameters(
 void reject_unsupported_two_fluid_equation_parameters(
     const svmp::Physics::ParameterMap& params)
 {
-  static constexpr std::array<std::string_view, 26> supported{
+  static constexpr std::array<std::string_view, 24> supported{
       "Coupled",
       "Max_iterations",
       "Min_iterations",
@@ -3245,9 +3205,7 @@ void reject_unsupported_two_fluid_equation_parameters(
       "EnableExplicitLegacyFreeSurfaceConfiguration",
       "Free_surface_legacy_behavior",
       "Level_set_field_name",
-      "LevelSetFieldName",
       "Generated_interface_domain_id",
-      "GeneratedInterfaceDomainId",
       "Operator_tag",
       "OperatorTag",
       "Element_order",
@@ -3539,7 +3497,7 @@ free_surface_implementation_from_params(const svmp::Physics::ParameterMap& param
 {
   const auto raw = first_defined_string(
       params,
-      {"Implementation", "Free_surface_implementation", "FreeSurfaceImplementation"});
+      {"Implementation"});
   return parse_free_surface_implementation(raw.value_or("FittedALE"), "Free-surface Implementation");
 }
 
@@ -3551,32 +3509,18 @@ void append_free_surface_contact_line(
   using ContactLine = IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine;
 
   constexpr std::string_view contact_keys[]{
-      "Contact_line_model", "ContactLineModel",
-      "Free_surface_contact_line_model", "FreeSurfaceContactLineModel",
-      "Contact_angle_radians", "ContactAngleRadians",
-      "Prescribed_contact_angle_radians", "PrescribedContactAngleRadians",
-      "Contact_angle_degrees", "ContactAngleDegrees",
-      "Prescribed_contact_angle_degrees", "PrescribedContactAngleDegrees",
-      "Contact_line_wall_markers", "ContactLineWallMarkers",
-      "Wall_boundary_markers", "WallBoundaryMarkers",
-      "Contact_line_wall_marker", "ContactLineWallMarker",
-      "Wall_boundary_marker", "WallBoundaryMarker",
-      "Contact_line_wall_faces", "ContactLineWallFaces",
-      "Wall_boundary_faces", "WallBoundaryFaces",
-      "Contact_line_wall_face", "ContactLineWallFace",
-      "Wall_boundary_face", "WallBoundaryFace",
-      "Contact_line_marker", "ContactLineMarker",
-      "Contact_line_wall_normals", "ContactLineWallNormals",
-      "Contact_angle_wall_normals", "ContactAngleWallNormals",
-      "Wall_normals", "WallNormals",
-      "Contact_line_wall_normal", "ContactLineWallNormal",
-      "Contact_angle_wall_normal", "ContactAngleWallNormal",
-      "Wall_normal", "WallNormal",
-      "Contact_line_mobility", "ContactLineMobility", "Mobility",
-      "Wall_slip_model", "WallSlipModel",
-      "Contact_line_wall_slip_model", "ContactLineWallSlipModel",
-      "Wall_slip_length", "WallSlipLength", "Slip_length", "SlipLength",
-      "Contact_line_law_enforcement", "ContactLineLawEnforcement"};
+      "Contact_line_model",
+      "Contact_angle_radians",
+      "Contact_angle_degrees",
+      "Contact_line_wall_markers",
+      "Contact_line_wall_marker",
+      "Contact_line_wall_face",
+      "Contact_line_marker",
+      "Contact_line_wall_normal",
+      "Contact_line_mobility",
+      "Wall_slip_model",
+      "Wall_slip_length",
+      "Contact_line_law_enforcement"};
 
   const auto is_known_contact_key = [&](std::string_view key) {
     return std::find(std::begin(contact_keys), std::end(contact_keys), key) !=
@@ -3614,82 +3558,62 @@ void append_free_surface_contact_line(
 
   reject_duplicate_aliases(
       params,
-      {"Contact_line_model", "ContactLineModel",
-       "Free_surface_contact_line_model", "FreeSurfaceContactLineModel"},
+      {"Contact_line_model"},
       "contact-line model");
   reject_duplicate_aliases(
       params,
-      {"Contact_angle_radians", "ContactAngleRadians",
-       "Prescribed_contact_angle_radians", "PrescribedContactAngleRadians"},
+      {"Contact_angle_radians"},
       "contact angle in radians");
   reject_duplicate_aliases(
       params,
-      {"Contact_angle_degrees", "ContactAngleDegrees",
-       "Prescribed_contact_angle_degrees", "PrescribedContactAngleDegrees"},
+      {"Contact_angle_degrees"},
       "contact angle in degrees");
   reject_duplicate_aliases(
       params,
-      {"Contact_line_wall_markers", "ContactLineWallMarkers",
-       "Wall_boundary_markers", "WallBoundaryMarkers",
-       "Contact_line_wall_marker", "ContactLineWallMarker",
-       "Wall_boundary_marker", "WallBoundaryMarker"},
+      {"Contact_line_wall_markers",
+       "Contact_line_wall_marker"},
       "contact wall marker(s)");
   reject_duplicate_aliases(
       params,
-      {"Contact_line_wall_faces", "ContactLineWallFaces",
-       "Wall_boundary_faces", "WallBoundaryFaces",
-       "Contact_line_wall_face", "ContactLineWallFace",
-       "Wall_boundary_face", "WallBoundaryFace"},
+      {"Contact_line_wall_face"},
       "contact wall face name(s)");
   reject_duplicate_aliases(
       params,
-      {"Contact_line_marker", "ContactLineMarker"},
+      {"Contact_line_marker"},
       "contact-line marker");
   reject_duplicate_aliases(
       params,
-      {"Contact_line_wall_normals", "ContactLineWallNormals",
-       "Contact_angle_wall_normals", "ContactAngleWallNormals",
-       "Wall_normals", "WallNormals",
-       "Contact_line_wall_normal", "ContactLineWallNormal",
-       "Contact_angle_wall_normal", "ContactAngleWallNormal",
-       "Wall_normal", "WallNormal"},
+      {"Contact_line_wall_normal"},
       "contact wall normal(s)");
   reject_duplicate_aliases(
       params,
-      {"Contact_line_mobility", "ContactLineMobility", "Mobility"},
+      {"Contact_line_mobility"},
       "contact-line mobility");
   reject_duplicate_aliases(
       params,
-      {"Wall_slip_model", "WallSlipModel",
-       "Contact_line_wall_slip_model", "ContactLineWallSlipModel"},
+      {"Wall_slip_model"},
       "contact wall-slip model");
   reject_duplicate_aliases(
       params,
-      {"Wall_slip_length", "WallSlipLength", "Slip_length", "SlipLength"},
+      {"Wall_slip_length"},
       "contact wall-slip length");
 
   if (any_parameter_defined(
           params,
-          {"Contact_line_wall_faces", "ContactLineWallFaces",
-           "Wall_boundary_faces", "WallBoundaryFaces",
-           "Contact_line_wall_face", "ContactLineWallFace",
-           "Wall_boundary_face", "WallBoundaryFace"})) {
+          {"Contact_line_wall_face"})) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] Contact wall face names are not supported by the typed free-surface contact configuration; provide explicit wall marker ids.");
   }
 
   const auto model = first_defined_string(
       params,
-      {"Contact_line_model", "ContactLineModel",
-       "Free_surface_contact_line_model", "FreeSurfaceContactLineModel"});
+      {"Contact_line_model"});
   const auto angle_radians = first_defined_double(
       params,
-      {"Contact_angle_radians", "ContactAngleRadians",
-       "Prescribed_contact_angle_radians", "PrescribedContactAngleRadians"});
+      {"Contact_angle_radians"});
   const auto angle_degrees = first_defined_double(
       params,
-      {"Contact_angle_degrees", "ContactAngleDegrees",
-       "Prescribed_contact_angle_degrees", "PrescribedContactAngleDegrees"});
+      {"Contact_angle_degrees"});
 
   if (!model.has_value()) {
     throw std::runtime_error(
@@ -3706,34 +3630,25 @@ void append_free_surface_contact_line(
   const bool has_angle = angle_radians.has_value() || angle_degrees.has_value();
   const bool has_wall_marker = any_parameter_defined(
       params,
-      {"Contact_line_wall_markers", "ContactLineWallMarkers",
-       "Wall_boundary_markers", "WallBoundaryMarkers",
-       "Contact_line_wall_marker", "ContactLineWallMarker",
-       "Wall_boundary_marker", "WallBoundaryMarker"});
+      {"Contact_line_wall_markers",
+       "Contact_line_wall_marker"});
   const bool has_wall_normal = any_parameter_defined(
       params,
-      {"Contact_line_wall_normals", "ContactLineWallNormals",
-       "Contact_angle_wall_normals", "ContactAngleWallNormals",
-       "Wall_normals", "WallNormals",
-       "Contact_line_wall_normal", "ContactLineWallNormal",
-       "Contact_angle_wall_normal", "ContactAngleWallNormal",
-       "Wall_normal", "WallNormal"});
+      {"Contact_line_wall_normal"});
   const bool has_mobility = any_parameter_defined(
       params,
-      {"Contact_line_mobility", "ContactLineMobility", "Mobility"});
+      {"Contact_line_mobility"});
   const bool has_slip_model = any_parameter_defined(
       params,
-      {"Wall_slip_model", "WallSlipModel",
-       "Contact_line_wall_slip_model", "ContactLineWallSlipModel"});
+      {"Wall_slip_model"});
   const bool has_slip_length = any_parameter_defined(
       params,
-      {"Wall_slip_length", "WallSlipLength", "Slip_length", "SlipLength"});
+      {"Wall_slip_length"});
   const bool has_contact_marker = any_parameter_defined(
-      params, {"Contact_line_marker", "ContactLineMarker"});
+      params, {"Contact_line_marker"});
   const auto slip_model = first_defined_string(
       params,
-      {"Wall_slip_model", "WallSlipModel",
-       "Contact_line_wall_slip_model", "ContactLineWallSlipModel"});
+      {"Wall_slip_model"});
 
   if (parsed_model == ParsedFreeSurfaceContactModel::None) {
     if (has_angle || has_wall_marker || has_wall_normal || has_mobility ||
@@ -3786,13 +3701,11 @@ void append_free_surface_contact_line(
 
   const auto wall_markers = first_defined_int_entries(
       params,
-      {"Contact_line_wall_markers", "ContactLineWallMarkers",
-       "Wall_boundary_markers", "WallBoundaryMarkers",
-       "Contact_line_wall_marker", "ContactLineWallMarker",
-       "Wall_boundary_marker", "WallBoundaryMarker"},
+      {"Contact_line_wall_markers",
+       "Contact_line_wall_marker"},
       "Free-surface Contact_line_wall_marker");
   const int contact_marker = first_defined_int(
-      params, {"Contact_line_marker", "ContactLineMarker"})
+      params, {"Contact_line_marker"})
                                  .value_or(-1);
 
   IncompressibleNavierStokesVMSOptions::ScalarValue contact_angle{
@@ -3807,19 +3720,14 @@ void append_free_surface_contact_line(
 
   const auto wall_normals = first_defined_vector3_entries(
       params,
-      {"Contact_line_wall_normals", "ContactLineWallNormals",
-       "Contact_angle_wall_normals", "ContactAngleWallNormals",
-       "Wall_normals", "WallNormals",
-       "Contact_line_wall_normal", "ContactLineWallNormal",
-       "Contact_angle_wall_normal", "ContactAngleWallNormal",
-       "Wall_normal", "WallNormal"},
+      {"Contact_line_wall_normal"},
       "Free-surface Contact_line_wall_normal");
 
   IncompressibleNavierStokesVMSOptions::ScalarValue mobility{
       svmp::FE::Real{0.0}};
   bool strong_contact_law = false;
   if (const auto enforcement = first_defined_string(
-          params, {"Contact_line_law_enforcement", "ContactLineLawEnforcement"})) {
+          params, {"Contact_line_law_enforcement"})) {
     const auto token = normalized_token(*enforcement);
     if (token == "strong") {
       strong_contact_law = true;
@@ -3830,7 +3738,7 @@ void append_free_surface_contact_line(
   }
   if (const auto parsed_mobility = first_defined_double(
           params,
-          {"Contact_line_mobility", "ContactLineMobility", "Mobility"})) {
+          {"Contact_line_mobility"})) {
     mobility = static_cast<svmp::FE::Real>(*parsed_mobility);
   }
 
@@ -3847,7 +3755,7 @@ void append_free_surface_contact_line(
       svmp::FE::Real{0.0}};
   if (const auto parsed_slip_length = first_defined_double(
           params,
-          {"Wall_slip_length", "WallSlipLength", "Slip_length", "SlipLength"})) {
+          {"Wall_slip_length"})) {
     slip_length = static_cast<svmp::FE::Real>(*parsed_slip_length);
   }
 
@@ -3955,23 +3863,19 @@ void append_free_surface_bc(
   fs.implementation = free_surface_implementation_from_params(bc.params);
   if (const auto active_domain = first_defined_string(
           bc.params,
-          {"Active_domain", "ActiveDomain",
-           "Free_surface_active_domain", "FreeSurfaceActiveDomain"})) {
+          {"Active_domain"})) {
     fs.active_domain =
         parse_free_surface_active_domain(*active_domain, "Free-surface Active_domain");
   }
   if (const auto active_domain_method = first_defined_string(
           bc.params,
-          {"Active_domain_method", "ActiveDomainMethod",
-           "Free_surface_active_domain_method", "FreeSurfaceActiveDomainMethod"})) {
+          {"Active_domain_method"})) {
     fs.active_domain_method = parse_free_surface_active_domain_method(
         *active_domain_method, "Free-surface Active_domain_method");
   }
   if (const auto active_domain_smoothing_width = first_defined_double(
           bc.params,
-          {"Active_domain_smoothing_width", "ActiveDomainSmoothingWidth",
-           "Free_surface_active_domain_smoothing_width",
-           "FreeSurfaceActiveDomainSmoothingWidth"})) {
+          {"Active_domain_smoothing_width"})) {
     if (*active_domain_smoothing_width < 0.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Physics] Free_surface Active_domain_smoothing_width must be nonnegative.");
@@ -3981,85 +3885,71 @@ void append_free_surface_bc(
   }
   if (const auto allow_full_domain = first_defined_bool(
           bc.params,
-          {"Allow_full_domain_unfitted_free_surface",
-           "AllowFullDomainUnfittedFreeSurface",
-           "Allow_full_domain_free_surface",
-           "AllowFullDomainFreeSurface"})) {
+          {"Allow_full_domain_unfitted_free_surface"})) {
     fs.allow_full_domain_unfitted_free_surface = *allow_full_domain;
   }
   if (fs.implementation == FreeSurfaceImplementation::FittedALE) {
     fs.boundary_marker = bc.boundary_marker;
   } else {
-    const auto marker = first_defined_int(bc.params, {"Interface_marker", "InterfaceMarker"});
+    const auto marker = first_defined_int(bc.params, {"Interface_marker"});
     if (marker.has_value()) {
       fs.interface_marker = *marker;
     }
     if (const auto field_name = first_defined_string(
             bc.params,
-            {"Level_set_field_name", "Level_set_field", "LevelSetFieldName", "LevelSetField"})) {
+            {"Level_set_field_name"})) {
       fs.level_set_field_name = *field_name;
     }
     if (const auto domain_id = first_defined_string(
             bc.params,
-            {"Generated_interface_domain_id", "GeneratedInterfaceDomainId",
-             "Interface_domain_id", "InterfaceDomainId"})) {
+            {"Generated_interface_domain_id"})) {
       fs.generated_interface_domain_id = *domain_id;
     }
     if (const auto geometry = first_defined_string(
             bc.params,
-            {"Generated_interface_geometry", "GeneratedInterfaceGeometry",
-             "Implicit_geometry_mode", "ImplicitGeometryMode",
-             "Generated_interface_geometry_mode",
-             "GeneratedInterfaceGeometryMode"})) {
+            {"Generated_interface_geometry"})) {
       fs.generated_interface_geometry = *geometry;
     }
     if (const auto tangent_policy = first_defined_string(
             bc.params,
-            {"Geometry_tangent_policy", "GeometryTangentPolicy",
-             "Generated_interface_geometry_tangent_policy",
-             "GeneratedInterfaceGeometryTangentPolicy",
-             "Implicit_geometry_tangent_policy",
-             "ImplicitGeometryTangentPolicy"})) {
+            {"Geometry_tangent_policy"})) {
       fs.geometry_tangent_policy = *tangent_policy;
     }
     if (const auto isovalue = first_defined_double(
             bc.params,
-            {"Level_set_isovalue", "LevelSetIsovalue", "Interface_isovalue", "InterfaceIsovalue"})) {
+            {"Level_set_isovalue"})) {
       fs.level_set_isovalue = static_cast<svmp::FE::Real>(*isovalue);
     }
   }
 
   if (const auto pressure = first_defined_double(
           bc.params,
-          {"External_pressure", "ExternalPressure", "Pressure", "Value"})) {
+          {"External_pressure"})) {
     fs.external_pressure = IncompressibleNavierStokesVMSOptions::ScalarValue{
         static_cast<svmp::FE::Real>(*pressure)};
   }
   if (const auto surface_tension = first_defined_double(
           bc.params,
-          {"Surface_tension", "SurfaceTension"})) {
+          {"Surface_tension"})) {
     fs.surface_tension = IncompressibleNavierStokesVMSOptions::ScalarValue{
         static_cast<svmp::FE::Real>(*surface_tension)};
   }
   if (const auto surface_tension_form = first_defined_string(
           bc.params,
-          {"Surface_tension_form", "SurfaceTensionForm",
-           "Free_surface_surface_tension_form",
-           "FreeSurfaceSurfaceTensionForm",
-           "Capillary_force_form", "CapillaryForceForm"})) {
+          {"Surface_tension_form"})) {
     fs.surface_tension_form = parse_free_surface_surface_tension_form(
         *surface_tension_form, "Free-surface Surface_tension_form");
   }
   if (const auto semi_implicit = first_defined_string(
           bc.params,
-          {"Surface_tension_semi_implicit", "SurfaceTensionSemiImplicit"})) {
+          {"Surface_tension_semi_implicit"})) {
     fs.surface_tension_semi_implicit =
         parse_free_surface_surface_tension_semi_implicit(
             *semi_implicit, "Free-surface Surface_tension_semi_implicit");
   }
   if (const auto allow_fitted_surface_stress = first_defined_bool(
           bc.params,
-          {"Allow_fitted_surface_stress", "AllowFittedSurfaceStress"})) {
+          {"Allow_fitted_surface_stress"})) {
     fs.allow_fitted_surface_stress = *allow_fitted_surface_stress;
   }
   if (const auto curvature = first_defined_double(bc.params, {"Curvature"})) {
@@ -4075,16 +3965,14 @@ void append_free_surface_bc(
   }
   if (const auto use_level_set_curvature = first_defined_bool(
           bc.params,
-          {"Use_level_set_curvature", "UseLevelSetCurvature"})) {
+          {"Use_level_set_curvature"})) {
     fs.use_level_set_curvature = *use_level_set_curvature;
   }
   // Fitted CurvatureTraction with pointwise current-geometry curvature was
   // withdrawn by D5 (identically zero on affine faces) and retired by D42.
   if (first_defined_bool(
           bc.params,
-          {"Use_current_geometry_curvature", "UseCurrentGeometryCurvature",
-           "Use_fitted_current_geometry_curvature",
-           "UseFittedCurrentGeometryCurvature"})
+          {"Use_current_geometry_curvature"})
           .value_or(false)) {
     throw std::invalid_argument(
         "[svMultiPhysics::Physics] Free_surface BC '" + bc.name +
@@ -4097,23 +3985,20 @@ void append_free_surface_bc(
 
   if (const auto normal_policy = first_defined_string(
           bc.params,
-          {"Normal_kinematic_policy", "NormalKinematicPolicy",
-           "Free_surface_normal_kinematic_policy", "FreeSurfaceNormalKinematicPolicy"})) {
+          {"Normal_kinematic_policy"})) {
     fs.normal_kinematic_policy = parse_free_surface_normal_kinematic_policy(
         *normal_policy, "Free-surface Normal_kinematic_policy");
   }
   const auto tangential_policy = first_defined_string(
           bc.params,
-          {"Tangential_mesh_policy", "TangentialMeshPolicy",
-           "Free_surface_tangential_mesh_policy", "FreeSurfaceTangentialMeshPolicy"});
+          {"Tangential_mesh_policy"});
   if (tangential_policy.has_value()) {
     fs.tangential_mesh_policy = parse_free_surface_tangential_mesh_policy(
         *tangential_policy, "Free-surface Tangential_mesh_policy");
   }
   const auto tangential_velocity = first_defined_string(
           bc.params,
-          {"Prescribed_tangential_mesh_velocity", "PrescribedTangentialMeshVelocity",
-           "Tangential_mesh_velocity", "TangentialMeshVelocity"});
+          {"Prescribed_tangential_mesh_velocity"});
   if (tangential_velocity.has_value()) {
     const auto v = parse_real_vector3(
         *tangential_velocity, "Free-surface Prescribed_tangential_mesh_velocity");
@@ -4132,9 +4017,7 @@ void append_free_surface_bc(
   }
   const auto tangential_mesh_penalty = first_defined_double(
       bc.params,
-      {"Tangential_mesh_penalty", "TangentialMeshPenalty",
-       "Prescribed_tangential_mesh_penalty",
-       "PrescribedTangentialMeshPenalty"});
+      {"Tangential_mesh_penalty"});
   if (tangential_mesh_penalty.has_value()) {
     if (!std::isfinite(*tangential_mesh_penalty) ||
         !(*tangential_mesh_penalty > 0.0)) {
@@ -4161,7 +4044,7 @@ void append_free_surface_bc(
 
   const auto enforcement = first_defined_string(
       bc.params,
-      {"Kinematic_enforcement", "KinematicEnforcement"});
+      {"Kinematic_enforcement"});
   if (enforcement.has_value()) {
     fs.kinematic_enforcement =
         parse_free_surface_kinematic_enforcement(
@@ -4177,7 +4060,7 @@ void append_free_surface_bc(
   }
   const auto penalty = first_defined_double(
       bc.params,
-      {"Kinematic_penalty", "KinematicPenalty"});
+      {"Kinematic_penalty"});
   if (penalty.has_value()) {
     fs.kinematic_penalty = IncompressibleNavierStokesVMSOptions::ScalarValue{
         static_cast<svmp::FE::Real>(*penalty)};
@@ -4197,34 +4080,17 @@ void append_free_surface_bc(
   }
   const auto kinematic_nitsche_gamma = first_defined_double(
           bc.params,
-          {"Kinematic_nitsche_gamma", "KinematicNitscheGamma",
-           "Free_surface_nitsche_gamma", "FreeSurfaceNitscheGamma",
-           "Nitsche_gamma", "NitscheGamma"});
+          {"Kinematic_nitsche_gamma"});
   if (kinematic_nitsche_gamma.has_value()) {
     fs.kinematic_nitsche_gamma =
         static_cast<svmp::FE::Real>(*kinematic_nitsche_gamma);
   }
-  const auto kinematic_nitsche_symmetric = first_defined_bool(
-          bc.params,
-          {"Kinematic_nitsche_symmetric", "KinematicNitscheSymmetric",
-           "Nitsche_symmetric", "NitscheSymmetric"});
-  if (kinematic_nitsche_symmetric.has_value()) {
-    fs.kinematic_nitsche_symmetric = *kinematic_nitsche_symmetric;
-  }
-  const auto kinematic_nitsche_scale_with_p = first_defined_bool(
-          bc.params,
-          {"Kinematic_nitsche_scale_with_p", "KinematicNitscheScaleWithP",
-           "Nitsche_scale_with_p", "NitscheScaleWithP"});
-  if (kinematic_nitsche_scale_with_p.has_value()) {
-    fs.kinematic_nitsche_scale_with_p = *kinematic_nitsche_scale_with_p;
-  }
-  if ((kinematic_nitsche_gamma.has_value() ||
-       kinematic_nitsche_symmetric.has_value() ||
-       kinematic_nitsche_scale_with_p.has_value()) &&
+  // Kinematic_nitsche_symmetric and Kinematic_nitsche_scale_with_p, which
+  // no deck, runner or test set, were removed (decision D47); the legacy
+  // Nitsche enforcement keeps its symmetric, order-scaled defaults.
+  if (kinematic_nitsche_gamma.has_value() &&
       fs.kinematic_enforcement != FreeSurfaceKinematicEnforcement::Nitsche &&
-      !(fs.kinematic_enforcement == FreeSurfaceKinematicEnforcement::MeshNitsche &&
-        !kinematic_nitsche_symmetric.has_value() &&
-        !kinematic_nitsche_scale_with_p.has_value()) &&
+      fs.kinematic_enforcement != FreeSurfaceKinematicEnforcement::MeshNitsche &&
       !explicit_legacy_configuration) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] Boundary-local free-surface Nitsche settings require Kinematic_enforcement=Nitsche (MeshNitsche accepts Kinematic_nitsche_gamma only); unused Nitsche settings are accepted only by the explicit schema-1 legacy mode.");
@@ -4232,8 +4098,7 @@ void append_free_surface_bc(
 
   const auto small_cut_aggregation = first_defined_bool(
           bc.params,
-          {"Small_cut_aggregation", "SmallCutAggregation",
-           "Enable_small_cut_aggregation", "EnableSmallCutAggregation"});
+          {"Small_cut_aggregation"});
   if (small_cut_aggregation.has_value()) {
     fs.small_cut_aggregation = *small_cut_aggregation;
   }
@@ -4241,8 +4106,7 @@ void append_free_surface_bc(
   bool aggregation_guard_suboption_present = false;
   if (const auto maximum_root_path = first_defined_int(
           bc.params,
-          {"Small_cut_aggregation_maximum_root_path_length",
-           "SmallCutAggregationMaximumRootPathLength"})) {
+          {"Small_cut_aggregation_maximum_root_path_length"})) {
     aggregation_guard_suboption_present = true;
     if (*maximum_root_path <= 0) {
       throw std::runtime_error(
@@ -4254,8 +4118,7 @@ void append_free_surface_bc(
   }
   if (const auto maximum_extrapolation = first_defined_double(
           bc.params,
-          {"Small_cut_aggregation_maximum_reference_extrapolation_distance",
-           "SmallCutAggregationMaximumReferenceExtrapolationDistance"})) {
+          {"Small_cut_aggregation_maximum_reference_extrapolation_distance"})) {
     aggregation_guard_suboption_present = true;
     if (!std::isfinite(*maximum_extrapolation) ||
         *maximum_extrapolation < 0.0) {
@@ -4270,8 +4133,7 @@ void append_free_surface_bc(
   }
   if (const auto maximum_coefficient = first_defined_double(
           bc.params,
-          {"Small_cut_aggregation_maximum_absolute_coefficient",
-           "SmallCutAggregationMaximumAbsoluteCoefficient"})) {
+          {"Small_cut_aggregation_maximum_absolute_coefficient"})) {
     aggregation_guard_suboption_present = true;
     if (!std::isfinite(*maximum_coefficient) ||
         *maximum_coefficient < 1.0) {
@@ -4284,8 +4146,7 @@ void append_free_surface_bc(
   }
   if (const auto maximum_row_norm = first_defined_double(
           bc.params,
-          {"Small_cut_aggregation_maximum_row_l1_norm",
-           "SmallCutAggregationMaximumRowL1Norm"})) {
+          {"Small_cut_aggregation_maximum_row_l1_norm"})) {
     aggregation_guard_suboption_present = true;
     if (!std::isfinite(*maximum_row_norm) || *maximum_row_norm < 1.0) {
       throw std::runtime_error(
@@ -4297,8 +4158,7 @@ void append_free_surface_bc(
   }
   if (const auto rootless_fallback = first_defined_bool(
           bc.params,
-          {"Small_cut_aggregation_rootless_fallback",
-           "SmallCutAggregationRootlessFallback"})) {
+          {"Small_cut_aggregation_rootless_fallback"})) {
     // Opt-in fail-safe for candidates without a root inside the guards
     // (SmallCutAggregationGuardOptions::rootless_fallback, D33).
     aggregation_guard_suboption_present = true;
@@ -4321,8 +4181,7 @@ void append_free_surface_bc(
 
   const auto cut_cell_stabilization_enabled = first_defined_bool(
           bc.params,
-          {"Enable_cut_cell_stabilization", "EnableCutCellStabilization",
-           "Cut_cell_stabilization", "CutCellStabilization"});
+          {"Enable_cut_cell_stabilization"});
   const bool cut_cell_stabilization_explicitly_disabled =
       cut_cell_stabilization_enabled.has_value() &&
       !*cut_cell_stabilization_enabled;
@@ -4332,8 +4191,7 @@ void append_free_surface_bc(
   }
   if (first_defined_double(
           bc.params,
-          {"Cut_cell_velocity_gradient_penalty", "CutCellVelocityGradientPenalty",
-           "Velocity_gradient_ghost_penalty", "VelocityGradientGhostPenalty"})) {
+          {"Cut_cell_velocity_gradient_penalty"})) {
     if (!explicit_legacy_configuration) {
       throw std::runtime_error(
           "[svMultiPhysics::Physics] Cut-cell velocity ghost-penalty settings are retired; small-cut aggregation replaces them. Only explicit schema-1 legacy input may retain an ignored archived value.");
@@ -4345,8 +4203,7 @@ void append_free_surface_bc(
   }
   if (const auto pressure_penalty = first_defined_double(
           bc.params,
-          {"Cut_cell_pressure_gradient_penalty", "CutCellPressureGradientPenalty",
-           "Pressure_gradient_ghost_penalty", "PressureGradientGhostPenalty"})) {
+          {"Cut_cell_pressure_gradient_penalty"})) {
     cut_cell_suboption_present = true;
     fs.cut_cell_stabilization.pressure_gradient_penalty =
         IncompressibleNavierStokesVMSOptions::ScalarValue{
@@ -4357,10 +4214,7 @@ void append_free_surface_bc(
   }
   if (const auto pressure_policy = first_defined_string(
           bc.params,
-          {"Cut_cell_pressure_stabilization_policy",
-           "CutCellPressureStabilizationPolicy",
-           "Pressure_ghost_penalty_policy",
-           "PressureGhostPenaltyPolicy"})) {
+          {"Cut_cell_pressure_stabilization_policy"})) {
     cut_cell_suboption_present = true;
     fs.cut_cell_stabilization.pressure_policy =
         parse_free_surface_pressure_stabilization_policy(
@@ -4369,16 +4223,13 @@ void append_free_surface_bc(
   }
   if (const auto use_cut_scale = first_defined_bool(
           bc.params,
-          {"Use_cut_metadata_scale", "UseCutMetadataScale",
-           "Use_cut_stabilization_scale", "UseCutStabilizationScale"})) {
+          {"Use_cut_metadata_scale"})) {
     cut_cell_suboption_present = true;
     fs.cut_cell_stabilization.use_cut_metadata_scale = *use_cut_scale;
   }
   if (const auto cut_scale_cap = first_defined_double(
           bc.params,
-          {"Cut_cell_metadata_scale_cap", "CutCellMetadataScaleCap",
-           "Cut_cell_stabilization_scale_cap", "CutCellStabilizationScaleCap",
-           "Cut_metadata_scale_cap", "CutMetadataScaleCap"})) {
+          {"Cut_cell_metadata_scale_cap"})) {
     cut_cell_suboption_present = true;
     if (!std::isfinite(*cut_scale_cap) || *cut_scale_cap < 1.0) {
       throw std::runtime_error(
@@ -4399,12 +4250,7 @@ void append_free_surface_bc(
   }
   if (first_defined_int(
           bc.params,
-          {"Cut_cell_velocity_max_derivative_order",
-           "CutCellVelocityMaxDerivativeOrder",
-           "Velocity_ghost_penalty_max_derivative_order",
-           "VelocityGhostPenaltyMaxDerivativeOrder",
-           "Velocity_gradient_ghost_penalty_max_derivative_order",
-           "VelocityGradientGhostPenaltyMaxDerivativeOrder"})) {
+          {"Cut_cell_velocity_max_derivative_order"})) {
     if (!explicit_legacy_configuration) {
       throw std::runtime_error(
           "[svMultiPhysics::Physics] Cut-cell velocity derivative-order settings are retired with the velocity ghost penalty. Only explicit schema-1 legacy input may retain an ignored archived value.");
@@ -4420,21 +4266,14 @@ void append_free_surface_bc(
   // may also keep an ignored archived diffusivity next to that.
   const auto velocity_extension_enabled = first_defined_bool(
       bc.params,
-      {"Enable_velocity_extension", "EnableVelocityExtension",
-       "Velocity_extension", "VelocityExtension",
-       "Extend_velocity_to_inactive_domain",
-       "ExtendVelocityToInactiveDomain",
-       "Free_surface_velocity_extension",
-       "FreeSurfaceVelocityExtension"});
+      {"Enable_velocity_extension"});
   const bool velocity_extension_explicitly_disabled =
       velocity_extension_enabled.has_value() &&
       !*velocity_extension_enabled;
   const bool velocity_extension_diffusivity_present =
       first_defined_double(
           bc.params,
-          {"Velocity_extension_diffusivity", "VelocityExtensionDiffusivity",
-           "Inactive_velocity_extension_diffusivity",
-           "InactiveVelocityExtensionDiffusivity"})
+          {"Velocity_extension_diffusivity"})
           .has_value();
   if (velocity_extension_enabled.value_or(false) ||
       (velocity_extension_diffusivity_present &&
@@ -5237,64 +5076,57 @@ translate_incompressible_two_fluid_input(
   }
   options.level_set_field_name = require_two_fluid_string(
       input.equation_params,
-      {"Level_set_field_name", "LevelSetFieldName"},
+      {"Level_set_field_name"},
       "Level_set_field_name");
   options.generated_interface_domain_id = require_two_fluid_string(
       input.equation_params,
-      {"Generated_interface_domain_id", "GeneratedInterfaceDomainId"},
+      {"Generated_interface_domain_id"},
       "Generated_interface_domain_id");
   options.interface_marker = require_two_fluid_int(
       input.equation_params,
-      {"Material_interface_marker", "MaterialInterfaceMarker"},
+      {"Material_interface_marker"},
       "Material_interface_marker");
   options.negative_phase.density = require_two_fluid_real(
       input.equation_params,
-      {"Negative_phase_density", "NegativePhaseDensity"},
+      {"Negative_phase_density"},
       "Negative_phase_density");
   options.negative_phase.viscosity = require_two_fluid_real(
       input.equation_params,
-      {"Negative_phase_dynamic_viscosity",
-       "NegativePhaseDynamicViscosity"},
+      {"Negative_phase_dynamic_viscosity"},
       "Negative_phase_dynamic_viscosity");
   options.positive_phase.density = require_two_fluid_real(
       input.equation_params,
-      {"Positive_phase_density", "PositivePhaseDensity"},
+      {"Positive_phase_density"},
       "Positive_phase_density");
   options.positive_phase.viscosity = require_two_fluid_real(
       input.equation_params,
-      {"Positive_phase_dynamic_viscosity",
-       "PositivePhaseDynamicViscosity"},
+      {"Positive_phase_dynamic_viscosity"},
       "Positive_phase_dynamic_viscosity");
   options.surface_tension = require_two_fluid_real(
       input.equation_params,
-      {"Two_fluid_surface_tension", "TwoFluidSurfaceTension"},
+      {"Two_fluid_surface_tension"},
       "Two_fluid_surface_tension");
   options.interface_nitsche_gamma = require_two_fluid_real(
       input.equation_params,
-      {"Two_fluid_interface_nitsche_gamma",
-       "TwoFluidInterfaceNitscheGamma"},
+      {"Two_fluid_interface_nitsche_gamma"},
       "Two_fluid_interface_nitsche_gamma");
   if (any_parameter_defined(
           input.equation_params,
-          {"Prescribed_pressure_jump", "PrescribedPressureJump"})) {
+          {"Prescribed_pressure_jump"})) {
     options.prescribed_pressure_jump = require_two_fluid_real(
         input.equation_params,
-        {"Prescribed_pressure_jump", "PrescribedPressureJump"},
+        {"Prescribed_pressure_jump"},
         "Prescribed_pressure_jump");
   }
   if (any_parameter_defined(
           input.equation_params,
           {"Prescribed_viscous_traction_jump_x",
-           "PrescribedViscousTractionJumpX",
            "Prescribed_viscous_traction_jump_y",
-           "PrescribedViscousTractionJumpY",
-           "Prescribed_viscous_traction_jump_z",
-           "PrescribedViscousTractionJumpZ"})) {
+           "Prescribed_viscous_traction_jump_z"})) {
     if (dimension == 2 &&
         any_parameter_defined(
             input.equation_params,
-            {"Prescribed_viscous_traction_jump_z",
-             "PrescribedViscousTractionJumpZ"})) {
+            {"Prescribed_viscous_traction_jump_z"})) {
       throw std::runtime_error(
           "[svMultiPhysics::Physics] "
           "unsupported_two_fluid_out_of_plane_prescribed_viscous_traction_jump");
@@ -5302,19 +5134,16 @@ translate_incompressible_two_fluid_input(
     std::array<svmp::FE::Real, 3> target{};
     target[0] = require_two_fluid_real(
         input.equation_params,
-        {"Prescribed_viscous_traction_jump_x",
-         "PrescribedViscousTractionJumpX"},
+        {"Prescribed_viscous_traction_jump_x"},
         "Prescribed_viscous_traction_jump_x");
     target[1] = require_two_fluid_real(
         input.equation_params,
-        {"Prescribed_viscous_traction_jump_y",
-         "PrescribedViscousTractionJumpY"},
+        {"Prescribed_viscous_traction_jump_y"},
         "Prescribed_viscous_traction_jump_y");
     if (dimension == 3) {
       target[2] = require_two_fluid_real(
           input.equation_params,
-          {"Prescribed_viscous_traction_jump_z",
-           "PrescribedViscousTractionJumpZ"},
+          {"Prescribed_viscous_traction_jump_z"},
           "Prescribed_viscous_traction_jump_z");
     }
     options.prescribed_viscous_traction_jump = target;

@@ -167,19 +167,14 @@ void resolve_contact_line_wall_faces(svmp::Physics::ParameterMap& params,
 {
   const auto* faces = first_defined_param(
       params,
-      {"Contact_line_wall_faces", "ContactLineWallFaces",
-       "Contact_line_wall_face", "ContactLineWallFace",
-       "Wall_boundary_faces", "WallBoundaryFaces",
-       "Wall_boundary_face", "WallBoundaryFace"});
+      {"Contact_line_wall_face"});
   if (faces == nullptr) {
     return;
   }
   if (first_defined_param(
           params,
-          {"Contact_line_wall_markers", "ContactLineWallMarkers",
-           "Contact_line_wall_marker", "ContactLineWallMarker",
-           "Wall_boundary_markers", "WallBoundaryMarkers",
-           "Wall_boundary_marker", "WallBoundaryMarker"}) != nullptr) {
+          {"Contact_line_wall_markers",
+           "Contact_line_wall_marker"}) != nullptr) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Free-surface contact-line wall input must use either wall face names or wall markers, not both.");
   }
@@ -211,10 +206,7 @@ void resolve_contact_line_wall_faces(svmp::Physics::ParameterMap& params,
   // intentionally accepts only resolved marker ids, so remove every face
   // alias after translating it instead of forwarding both representations.
   for (const std::string_view key : {
-           "Contact_line_wall_faces", "ContactLineWallFaces",
-           "Contact_line_wall_face", "ContactLineWallFace",
-           "Wall_boundary_faces", "WallBoundaryFaces",
-           "Wall_boundary_face", "WallBoundaryFace"}) {
+           "Contact_line_wall_face"}) {
     params.erase(std::string(key));
   }
 }

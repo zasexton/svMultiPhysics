@@ -2396,11 +2396,11 @@ makeWorkflowBalancedCapillaryFixture(
         << contact_angle_degrees << R"xml(</Contact_angle_degrees>
       <Contact_line_wall_markers>)xml"
         << wall_marker << R"xml(</Contact_line_wall_markers>
-      <Contact_line_wall_normals>)xml"
+      <Contact_line_wall_normal>)xml"
         << fixture->geometry.wall_normal[0] << " "
         << fixture->geometry.wall_normal[1] << " "
         << fixture->geometry.wall_normal[2]
-        << R"xml(</Contact_line_wall_normals>
+        << R"xml(</Contact_line_wall_normal>
       <Contact_line_mobility>1.0</Contact_line_mobility>
       <Wall_slip_model>Navier</Wall_slip_model>
       <Wall_slip_length>1.0</Wall_slip_length>)xml";
@@ -6282,13 +6282,12 @@ TEST(ApplicationDriverLevelSetWorkflows,
     <Velocity_source>constant</Velocity_source>
     <Constant_velocity>4.0 5.0 6.0</Constant_velocity>
     <Enable_reinitialization>true</Enable_reinitialization>
-    <ReinitializationCadenceSteps>8</ReinitializationCadenceSteps>
   </Add_equation>
 </svMultiPhysicsFile>
 )xml");
 
-  // Set the whitespace-only first alias at the direct parameter boundary;
-  // the XML reader rejects whitespace-only elements.
+  // Set a whitespace-only value at the direct parameter boundary (the XML
+  // reader rejects whitespace-only elements): it counts as absent.
   params->equation_parameters[1]->set_extra_parameter_value(
       "Reinitialization_cadence_steps", "   ");
 
@@ -6305,7 +6304,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_TRUE(std::isnan(requests[0].configuration->transport.volume_correction.volume_tolerance));
   EXPECT_EQ(requests[1].configuration->transport.velocity.constant_value,
             (std::array<svmp::FE::Real, 3>{4.0, 5.0, 6.0}));
-  EXPECT_EQ(requests[1].configuration->transport.reinitialization.cadence_steps, 8);
+  EXPECT_EQ(requests[1].configuration->transport.reinitialization.cadence_steps, 1);
 
   params->equation_parameters[1]->set_extra_parameter_value(
       "Reinitialization_cadence_steps", "3");
@@ -6971,7 +6970,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
     <Level_set_field_name>phi</Level_set_field_name>
     <Enable_curvature_projection>true</Enable_curvature_projection>
     <Curvature_field_name>kappa_projected</Curvature_field_name>
-    <ProjectedCurvatureKinematicAreaGradientMass>row_sum</ProjectedCurvatureKinematicAreaGradientMass>
+    <Curvature_projection_kinematic_area_gradient_mass>row_sum</Curvature_projection_kinematic_area_gradient_mass>
   </Add_equation>
 </svMultiPhysicsFile>
 )xml");
@@ -10955,8 +10954,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
       <Contact_line_model>DynamicContactAngle</Contact_line_model>
       <Contact_angle_degrees>90.0</Contact_angle_degrees>
       <Contact_line_wall_markers>7101;7102</Contact_line_wall_markers>
-      <Contact_line_wall_normals>)xml" + contact_wall_normals +
-                                          R"xml(</Contact_line_wall_normals>
+      <Contact_line_wall_normal>)xml" + contact_wall_normals +
+                                          R"xml(</Contact_line_wall_normal>
       <Contact_line_mobility>1.0</Contact_line_mobility>
       <Wall_slip_model>Navier</Wall_slip_model>
       <Wall_slip_length>1.0</Wall_slip_length>
@@ -11380,7 +11379,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       <Contact_line_model>DynamicContactAngle</Contact_line_model>
       <Contact_angle_degrees>90.0</Contact_angle_degrees>
       <Contact_line_wall_markers>7351;7352</Contact_line_wall_markers>
-      <Contact_line_wall_normals>0.0 -1.0 0.0; 0.0 1.0 0.0</Contact_line_wall_normals>
+      <Contact_line_wall_normal>0.0 -1.0 0.0; 0.0 1.0 0.0</Contact_line_wall_normal>
       <Contact_line_mobility>1.0</Contact_line_mobility>
       <Wall_slip_model>Navier</Wall_slip_model>
       <Wall_slip_length>1.0</Wall_slip_length>
@@ -13207,9 +13206,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
       <Contact_line_wall_markers>)xml"
                   << contact_wall_markers.str()
                   << R"xml(</Contact_line_wall_markers>
-      <Contact_line_wall_normals>)xml"
+      <Contact_line_wall_normal>)xml"
                   << contact_wall_normals.str()
-                  << R"xml(</Contact_line_wall_normals>
+                  << R"xml(</Contact_line_wall_normal>
       <Contact_line_mobility>1.0</Contact_line_mobility>
       <Wall_slip_model>Navier</Wall_slip_model>
       <Wall_slip_length>1.0</Wall_slip_length>
@@ -17302,8 +17301,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
     ASSERT_EQ(requests.size(), 1u);
     EXPECT_FALSE(requests.front().write_velocity_extension_maps);
   }
-  for (const std::string key :
-       {"Write_velocity_extension_maps", "WriteVelocityExtensionMaps"}) {
+  for (const std::string key : {"Write_velocity_extension_maps"}) {
     auto params = parseWorkflowParametersXml(
         request_xml("<" + key + ">true</" + key + ">").c_str());
     const auto requests = levelSetAdvectionVelocityRequests(*params);

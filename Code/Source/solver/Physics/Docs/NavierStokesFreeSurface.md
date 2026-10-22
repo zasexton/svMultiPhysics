@@ -186,8 +186,9 @@ state them explicitly. `Kinematic_penalty` still requires an explicit
   boundary whose normal relation declares it. The fluid equation must
   therefore precede the `mesh_motion` equation in the input; the reverse
   order and the pseudo-elastic mesh model fail closed.
-- `Kinematic_nitsche_symmetric` and `Kinematic_nitsche_scale_with_p` do not
-  apply and are rejected with `MeshNitsche`.
+- `MeshNitsche` accepts only `Kinematic_nitsche_gamma`. The symmetry and
+  order-scaling switches of the legacy Nitsche enforcement were removed
+  (decision D47), so it always uses its symmetric, order-scaled form.
 
 The tangential mesh policy `Free` adds no tangential row, so free-surface
 nodes slide tangentially with the harmonic extension (principle P1).
@@ -249,19 +250,19 @@ intersection measure; Navier-Stokes decides when and how to use it.
 - `PrescribedAngle` (also `PrescribedContactAngle`, `ContactAngle`);
 - `DynamicRenE` (also `DynamicContactAngle`, `DynamicAngle`, `RenE`).
 
-The angle is given with `Contact_angle_degrees` or `Contact_angle_radians`
-(or the `Prescribed_contact_angle_*` aliases), measured through the liquid,
+The angle is given with `Contact_angle_degrees` or `Contact_angle_radians`,
+measured through the liquid,
 and must satisfy `0 < theta < pi`. Unknown keys fail closed. That includes the
 removed `Contact_angle_penalty`.
 
-Each contact line needs a wall boundary marker. New inputs should use
-`Contact_line_wall_marker` for one wall or `Contact_line_wall_markers` for a
-semicolon-separated list. Mesh face-name inputs may use
-`Contact_line_wall_face` or `Contact_line_wall_faces`; the application
-translator resolves those names to wall markers before Physics receives the
-boundary condition. Wall normals are supplied with `Contact_line_wall_normal`
-or `Contact_line_wall_normals`. A plural normal list must contain either one
-normal reused for every wall marker, or one normal per wall marker.
+Each contact line needs a wall. Inputs give the mesh faces with
+`Contact_line_wall_face` (one name or a semicolon-separated list); the
+application translator resolves them to wall markers
+(`Contact_line_wall_markers`) before Physics receives the boundary condition,
+and `Contact_line_wall_marker` or `Contact_line_wall_markers` give markers
+directly. Wall normals are supplied with `Contact_line_wall_normal`, one
+normal reused for every wall or a semicolon-separated list with one normal per
+wall. The other spellings of these keys were removed (decision D47).
 
 The configured normal is not trusted as geometry metadata. Whenever a
 generated contact rule is refreshed, Physics maps every rule-carried boundary

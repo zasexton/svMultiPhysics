@@ -411,74 +411,62 @@ resolveLegacyLevelSetMaintenanceConfiguration(
         parsing::parsePhaseSide(side->text);
   }
   apply_real(
-      std::array<std::string_view, 2>{"Conservative_phase_invariant_tolerance",
-                                      "ConservativePhaseInvariantTolerance"},
+      std::array<std::string_view, 1>{"Conservative_phase_invariant_tolerance"},
       "conservative_phase_invariant_tolerance",
       result->transport.conservative_phase.invariant_tolerance);
   apply_real(
-      std::array<std::string_view, 2>{
-          "Conservative_phase_component_activity_tolerance",
-          "ConservativePhaseComponentActivityTolerance"},
+      std::array<std::string_view, 1>{
+          "Conservative_phase_component_activity_tolerance"},
       "conservative_phase_component_activity_tolerance",
       result->transport.conservative_phase.component_activity_tolerance);
   apply_real(
-      std::array<std::string_view, 2>{"Conservative_phase_maximum_courant",
-                                      "ConservativePhaseMaximumCourant"},
+      std::array<std::string_view, 1>{"Conservative_phase_maximum_courant"},
       "conservative_phase_maximum_courant",
       result->transport.conservative_phase.maximum_courant);
   apply_boolean(
-      std::array<std::string_view, 2>{
-          "Conservative_phase_enforce_courant_limit",
-          "ConservativePhaseEnforceCourantLimit"},
+      std::array<std::string_view, 1>{
+          "Conservative_phase_enforce_courant_limit"},
       "conservative_phase_enforce_courant_limit",
       result->transport.conservative_phase.enforce_courant_limit);
   apply_boolean(
-      std::array<std::string_view, 2>{
-          "Conservative_phase_require_constant_preservation",
-          "ConservativePhaseRequireConstantPreservation"},
+      std::array<std::string_view, 1>{
+          "Conservative_phase_require_constant_preservation"},
       "conservative_phase_require_constant_preservation",
       result->transport.conservative_phase.require_constant_preservation);
   apply_real(
-      std::array<std::string_view, 2>{
-          "Conservative_phase_momentum_relative_tolerance",
-          "ConservativePhaseMomentumRelativeTolerance"},
+      std::array<std::string_view, 1>{
+          "Conservative_phase_momentum_relative_tolerance"},
       "conservative_phase_momentum_relative_tolerance",
       result->transport.conservative_phase.momentum_relative_tolerance);
   apply_boolean(
-      std::array<std::string_view, 2>{"Conservative_phase_write_flux_artifacts",
-                                      "ConservativePhaseWriteFluxArtifacts"},
+      std::array<std::string_view, 1>{"Conservative_phase_write_flux_artifacts"},
       "conservative_phase_write_flux_artifacts",
       result->transport.conservative_phase.write_flux_artifacts);
   apply_integer(
-      std::array<std::string_view, 2>{
-          "Conservative_phase_flux_artifact_cadence_steps",
-          "ConservativePhaseFluxArtifactCadenceSteps"},
+      std::array<std::string_view, 1>{
+          "Conservative_phase_flux_artifact_cadence_steps"},
       "conservative_phase_flux_artifact_cadence_steps",
       result->transport.conservative_phase.flux_artifact_cadence_steps);
   apply_boolean(
-      std::array<std::string_view, 2>{
-          "Conservative_phase_classify_nonprimary_components_as_satellites",
-          "ConservativePhaseClassifyNonprimaryComponentsAsSatellites"},
+      std::array<std::string_view, 1>{
+          "Conservative_phase_classify_nonprimary_components_as_satellites"},
       "conservative_phase_classify_nonprimary_components_as_satellites",
       result->transport.conservative_phase
           .classify_nonprimary_components_as_satellites);
   if (const auto policy =
-          reader.string({"Conservative_phase_boundary_flux_policy",
-                         "ConservativePhaseBoundaryFluxPolicy"},
+          reader.string({"Conservative_phase_boundary_flux_policy"},
                         "conservative_phase_boundary_flux_policy")) {
     result->transport.conservative_phase.boundary_flux_policy =
         parsing::parseConservativePhaseBoundaryFluxPolicy(policy->text);
   }
   if (const auto regions =
-          reader.string({"Conservative_phase_fixed_flux_regions",
-                         "ConservativePhaseFixedFluxRegions"},
+          reader.string({"Conservative_phase_fixed_flux_regions"},
                         "conservative_phase_fixed_flux_regions")) {
     result->transport.conservative_phase.fixed_flux_regions =
         ls::parseLevelSetPhaseRegionBoxes(regions->text);
   }
   if (const auto tolerance = reader.real(
-          {"Conservative_phase_impermeable_normal_velocity_tolerance",
-           "ConservativePhaseImpermeableNormalVelocityTolerance"},
+          {"Conservative_phase_impermeable_normal_velocity_tolerance"},
           "conservative_phase_impermeable_normal_velocity_tolerance")) {
     result->transport.conservative_phase.impermeable_normal_velocity_tolerance =
         *tolerance;
@@ -486,63 +474,50 @@ resolveLegacyLevelSetMaintenanceConfiguration(
         .pointwise_impermeable_velocity_tolerance_explicitly_requested = true;
   }
   apply_boolean(
-      std::array<std::string_view, 2>{"Conservative_phase_reconcile_geometry",
-                                      "ConservativePhaseReconcileGeometry"},
+      std::array<std::string_view, 1>{"Conservative_phase_reconcile_geometry"},
       "conservative_phase_reconcile_geometry",
       result->transport.conservative_phase.reconcile_geometry);
   apply_real(
-      std::array<std::string_view, 2>{
-          "Conservative_phase_geometry_measure_tolerance",
-          "ConservativePhaseGeometryMeasureTolerance"},
+      std::array<std::string_view, 1>{
+          "Conservative_phase_geometry_measure_tolerance"},
       "conservative_phase_geometry_measure_tolerance",
       result->transport.conservative_phase.geometry_measure_tolerance);
   apply_integer(
-      std::array<std::string_view, 2>{
-          "Conservative_phase_geometry_correction_max_iterations",
-          "ConservativePhaseGeometryCorrectionMaxIterations"},
+      std::array<std::string_view, 1>{
+          "Conservative_phase_geometry_correction_max_iterations"},
       "conservative_phase_geometry_correction_max_iterations",
       result->transport.conservative_phase.geometry_correction_max_iterations);
   apply_real(
-      std::array<std::string_view, 2>{
-          "Conservative_phase_maximum_geometry_displacement_fraction",
-          "ConservativePhaseMaximumGeometryDisplacementFraction"},
+      std::array<std::string_view, 1>{
+          "Conservative_phase_maximum_geometry_displacement_fraction"},
       "conservative_phase_maximum_geometry_displacement_fraction",
       result->transport.conservative_phase
           .maximum_geometry_displacement_fraction);
 
-  apply_boolean_list({"Enable_bound_preserving_limiter",
-                      "EnableBoundPreservingLimiter",
-                      "Bound_preserving_limiter", "BoundPreservingLimiter"},
+  apply_boolean_list({"Enable_bound_preserving_limiter"},
                      "enable_bound_preserving_limiter",
                      result->transport.bound_preserving.enabled);
   apply_real_list(
-      {"Bound_preserving_bound_tolerance", "BoundPreservingBoundTolerance"},
+      {"Bound_preserving_bound_tolerance"},
       "bound_preserving_bound_tolerance",
       result->transport.bound_preserving.bound_tolerance);
   apply_real_list(
-      {"Bound_preserving_sign_tolerance", "BoundPreservingSignTolerance"},
+      {"Bound_preserving_sign_tolerance"},
       "bound_preserving_sign_tolerance",
       result->transport.bound_preserving.sign_tolerance);
   apply_real_list(
-      {"Bound_preserving_courant_tolerance", "BoundPreservingCourantTolerance"},
-      "bound_preserving_courant_tolerance",
-      result->transport.bound_preserving.courant_tolerance);
-  apply_real_list(
-      {"Bound_preserving_maximum_courant", "BoundPreservingMaximumCourant"},
+      {"Bound_preserving_maximum_courant"},
       "bound_preserving_maximum_courant",
       result->transport.bound_preserving.maximum_courant);
-  apply_boolean_list({"Bound_preserving_enforce_courant_limit",
-                      "BoundPreservingEnforceCourantLimit"},
+  apply_boolean_list({"Bound_preserving_enforce_courant_limit"},
                      "bound_preserving_enforce_courant_limit",
                      result->transport.bound_preserving.enforce_courant_limit);
   apply_boolean_list(
-      {"Bound_preserving_enforce_impermeable_boundaries",
-       "BoundPreservingEnforceImpermeableBoundaries"},
+      {"Bound_preserving_enforce_impermeable_boundaries"},
       "bound_preserving_enforce_impermeable_boundaries",
       result->transport.bound_preserving.enforce_impermeable_boundaries);
   apply_real_list(
-      {"Bound_preserving_impermeable_normal_velocity_tolerance",
-       "BoundPreservingImpermeableNormalVelocityTolerance"},
+      {"Bound_preserving_impermeable_normal_velocity_tolerance"},
       "bound_preserving_impermeable_normal_velocity_tolerance",
       result->transport.bound_preserving.impermeable_normal_velocity_tolerance);
   append_equation_observations();
@@ -625,157 +600,129 @@ resolveLegacyLevelSetMaintenanceConfiguration(
                 "volume_correction_max_iterations",
                 result->transport.volume_correction.max_iterations);
   apply_real_list(
-      {"Volume_correction_minimum_relative_error",
-       "VolumeCorrectionMinimumRelativeError"},
+      {"Volume_correction_minimum_relative_error"},
       "volume_correction_minimum_relative_error",
       result->transport.volume_correction.minimum_relative_volume_error);
-  apply_real_list({"Volume_correction_maximum_interface_displacement_fraction",
-                   "VolumeCorrectionMaximumInterfaceDisplacementFraction"},
+  apply_real_list({"Volume_correction_maximum_interface_displacement_fraction"},
                   "volume_correction_maximum_interface_displacement_fraction",
                   result->transport.volume_correction
                       .maximum_interface_displacement_fraction);
   apply_real_list(
-      {"Volume_correction_maximum_cumulative_interface_displacement_fraction",
-       "VolumeCorrectionMaximumCumulativeInterfaceDisplacementFraction"},
+      {"Volume_correction_maximum_cumulative_interface_displacement_fraction"},
       "volume_correction_maximum_cumulative_interface_displacement_fraction",
       result->transport.volume_correction
           .maximum_cumulative_interface_displacement_fraction);
   apply_boolean_list(
-      {"Enable_kinematic_reconciliation", "EnableKinematicReconciliation"},
+      {"Enable_kinematic_reconciliation"},
       "enable_kinematic_reconciliation",
       result->transport.kinematic_reconciliation.enabled);
   apply_boolean_list(
-      {"Enable_sign_definite_patch_bounds", "EnableSignDefinitePatchBounds"},
+      {"Enable_sign_definite_patch_bounds"},
       "enable_sign_definite_patch_bounds",
       result->transport.sign_definite_patch_bounds.enabled);
   apply_boolean_list(
-      {"Enable_interface_preserving_redistancing",
-       "EnableInterfacePreservingRedistancing"},
+      {"Enable_interface_preserving_redistancing"},
       "enable_interface_preserving_redistancing",
       result->transport.interface_preserving_redistancing.enabled);
   append_equation_observations();
 
-  apply_boolean_list({"Enable_static_capillary_equilibrium_initialization",
-                      "EnableStaticCapillaryEquilibriumInitialization",
-                      "Initialize_discrete_static_capillary_equilibrium",
-                      "InitializeDiscreteStaticCapillaryEquilibrium"},
+  apply_boolean_list({"Enable_static_capillary_equilibrium_initialization"},
                      "enable_static_capillary_equilibrium_initialization",
                      result->static_capillary_equilibrium_enabled);
   apply_real_list(
-      {"Static_capillary_volume_tolerance", "StaticCapillaryVolumeTolerance"},
+      {"Static_capillary_volume_tolerance"},
       "static_capillary_volume_tolerance",
       result->static_capillary_equilibrium.volume_tolerance);
   apply_real_list(
-      {"Static_capillary_projected_gradient_tolerance",
-       "StaticCapillaryProjectedGradientTolerance"},
+      {"Static_capillary_projected_gradient_tolerance"},
       "static_capillary_projected_gradient_tolerance",
       result->static_capillary_equilibrium.projected_gradient_tolerance);
   apply_real_list(
-      {"Static_capillary_pressure_representability_max_residual_norm",
-       "StaticCapillaryPressureRepresentabilityMaxResidualNorm"},
+      {"Static_capillary_pressure_representability_max_residual_norm"},
       "static_capillary_pressure_representability_max_residual_norm",
       result->static_capillary_equilibrium
           .pressure_representability_max_residual_norm);
   apply_real_list(
-      {"Static_capillary_pressure_representability_max_relative_distance",
-       "StaticCapillaryPressureRepresentabilityMaxRelativeDistance"},
+      {"Static_capillary_pressure_representability_max_relative_distance"},
       "static_capillary_pressure_representability_max_relative_distance",
       result->static_capillary_equilibrium
           .pressure_representability_max_relative_distance);
-  apply_real_list({"Static_capillary_physical_equilibrium_max_residual_norm",
-                   "StaticCapillaryPhysicalEquilibriumMaxResidualNorm"},
+  apply_real_list({"Static_capillary_physical_equilibrium_max_residual_norm"},
                   "static_capillary_physical_equilibrium_max_residual_norm",
                   result->static_capillary_equilibrium
                       .physical_equilibrium_max_residual_norm);
-  apply_real_list({"Static_capillary_constant_pressure_kkt_max_residual_norm",
-                   "StaticCapillaryConstantPressureKktMaxResidualNorm"},
+  apply_real_list({"Static_capillary_constant_pressure_kkt_max_residual_norm"},
                   "static_capillary_constant_pressure_kkt_max_residual_norm",
                   result->static_capillary_equilibrium
                       .constant_pressure_kkt_max_residual_norm);
   apply_real_list(
-      {"Static_capillary_constant_pressure_kkt_max_relative_distance",
-       "StaticCapillaryConstantPressureKktMaxRelativeDistance"},
+      {"Static_capillary_constant_pressure_kkt_max_relative_distance"},
       "static_capillary_constant_pressure_kkt_max_relative_distance",
       result->static_capillary_equilibrium
           .constant_pressure_kkt_max_relative_distance);
   apply_real_list(
-      {"Static_capillary_finite_difference_reference_coefficient_scale",
-       "StaticCapillaryFiniteDifferenceReferenceCoefficientScale"},
+      {"Static_capillary_finite_difference_reference_coefficient_scale"},
       "static_capillary_finite_difference_reference_coefficient_scale",
       result->static_capillary_equilibrium
           .finite_difference_reference_coefficient_scale);
   apply_real_list(
-      {"Static_capillary_finite_difference_relative_step",
-       "StaticCapillaryFiniteDifferenceRelativeStep"},
+      {"Static_capillary_finite_difference_relative_step"},
       "static_capillary_finite_difference_relative_step",
       result->static_capillary_equilibrium.finite_difference_relative_step);
   apply_real_list(
-      {"Static_capillary_minimum_finite_difference_step",
-       "StaticCapillaryMinimumFiniteDifferenceStep"},
+      {"Static_capillary_minimum_finite_difference_step"},
       "static_capillary_minimum_finite_difference_step",
       result->static_capillary_equilibrium.minimum_finite_difference_step);
   apply_integer_list(
-      {"Static_capillary_finite_difference_max_shrinks",
-       "StaticCapillaryFiniteDifferenceMaxShrinks"},
+      {"Static_capillary_finite_difference_max_shrinks"},
       "static_capillary_finite_difference_max_shrinks",
       result->static_capillary_equilibrium.finite_difference_max_shrinks);
   apply_integer_list(
-      {"Static_capillary_max_iterations", "StaticCapillaryMaxIterations"},
+      {"Static_capillary_max_iterations"},
       "static_capillary_max_iterations",
       result->static_capillary_equilibrium.max_iterations);
   apply_integer_list(
-      {"Static_capillary_max_line_search_iterations",
-       "StaticCapillaryMaxLineSearchIterations"},
+      {"Static_capillary_max_line_search_iterations"},
       "static_capillary_max_line_search_iterations",
       result->static_capillary_equilibrium.max_line_search_iterations);
   apply_integer_list(
-      {"Static_capillary_max_topology_epoch_transitions",
-       "StaticCapillaryMaxTopologyEpochTransitions"},
+      {"Static_capillary_max_topology_epoch_transitions"},
       "static_capillary_max_topology_epoch_transitions",
       result->static_capillary_equilibrium.max_topology_epoch_transitions);
-  apply_real_list({"Static_capillary_projected_gradient_inverse_stiffness",
-                   "StaticCapillaryProjectedGradientInverseStiffness"},
+  apply_real_list({"Static_capillary_projected_gradient_inverse_stiffness"},
                   "static_capillary_projected_gradient_inverse_stiffness",
                   result->static_capillary_equilibrium
                       .projected_gradient_inverse_stiffness);
-  apply_real_list({"Static_capillary_tangent_trust_radius",
-                   "StaticCapillaryTangentTrustRadius"},
+  apply_real_list({"Static_capillary_tangent_trust_radius"},
                   "static_capillary_tangent_trust_radius",
                   result->static_capillary_equilibrium.tangent_trust_radius);
   apply_real_list(
-      {"Static_capillary_maximum_coefficient_update_linf",
-       "StaticCapillaryMaximumCoefficientUpdateLinf"},
+      {"Static_capillary_maximum_coefficient_update_linf"},
       "static_capillary_maximum_coefficient_update_linf",
       result->static_capillary_equilibrium.maximum_coefficient_update_linf);
-  apply_real_list({"Static_capillary_line_search_shrink",
-                   "StaticCapillaryLineSearchShrink"},
+  apply_real_list({"Static_capillary_line_search_shrink"},
                   "static_capillary_line_search_shrink",
                   result->static_capillary_equilibrium.line_search_shrink);
   apply_real_list(
-      {"Static_capillary_armijo_fraction", "StaticCapillaryArmijoFraction"},
+      {"Static_capillary_armijo_fraction"},
       "static_capillary_armijo_fraction",
       result->static_capillary_equilibrium.armijo_fraction);
   apply_integer_list(
-      {"Static_capillary_limited_memory_history_size",
-       "StaticCapillaryLimitedMemoryHistorySize"},
+      {"Static_capillary_limited_memory_history_size"},
       "static_capillary_limited_memory_history_size",
       result->static_capillary_equilibrium.limited_memory_history_size);
   apply_real_list(
-      {"Static_capillary_limited_memory_curvature_tolerance",
-       "StaticCapillaryLimitedMemoryCurvatureTolerance"},
+      {"Static_capillary_limited_memory_curvature_tolerance"},
       "static_capillary_limited_memory_curvature_tolerance",
       result->static_capillary_equilibrium.limited_memory_curvature_tolerance);
   apply_real_list(
-      {"Static_capillary_minimum_volume_merit_penalty",
-       "StaticCapillaryMinimumVolumeMeritPenalty"},
+      {"Static_capillary_minimum_volume_merit_penalty"},
       "static_capillary_minimum_volume_merit_penalty",
       result->static_capillary_equilibrium.minimum_volume_merit_penalty);
   append_equation_observations();
 
   apply_boolean_list(
-      {"Enable_curvature_projection", "Enable_projected_curvature",
-       "Project_level_set_curvature", "Maintain_projected_curvature",
-       "Curvature_projection"},
+      {"Enable_curvature_projection"},
       "enable_curvature_projection", result->curvature_projection_enabled);
   if (const auto field =
           reader.string(aliases::curvature_field, "curvature_field_name")) {
@@ -787,55 +734,23 @@ resolveLegacyLevelSetMaintenanceConfiguration(
                              "derived:curvature_field_name");
   }
   apply_integer_list(
-      {"Curvature_projection_cadence_steps", "CurvatureProjectionCadenceSteps",
-       "Projected_curvature_cadence_steps", "ProjectedCurvatureCadenceSteps"},
+      {"Curvature_projection_cadence_steps"},
       "curvature_projection_cadence_steps",
       result->curvature_projection_cadence_steps);
-  apply_real_list({"Curvature_projection_gradient_tolerance",
-                   "CurvatureProjectionGradientTolerance"},
-                  "curvature_projection_gradient_tolerance",
-                  result->curvature_projection.gradient_tolerance);
-  apply_real_list({"Curvature_projection_least_squares_rank_tolerance",
-                   "CurvatureProjectionLeastSquaresRankTolerance",
-                   "Curvature_projection_normal_equation_tolerance",
-                   "CurvatureProjectionNormalEquationTolerance"},
-                  "curvature_projection_least_squares_rank_tolerance",
-                  result->curvature_projection.normal_equation_tolerance);
-  apply_real_list({"Curvature_projection_max_normalized_fit_residual",
-                   "CurvatureProjectionMaxNormalizedFitResidual",
-                   "Projected_curvature_max_normalized_fit_residual",
-                   "ProjectedCurvatureMaxNormalizedFitResidual"},
+  apply_real_list({"Curvature_projection_max_normalized_fit_residual"},
                   "curvature_projection_max_normalized_fit_residual",
                   result->curvature_projection.max_normalized_fit_residual);
-  apply_integer_list({"Curvature_projection_neighbor_rings",
-                      "CurvatureProjectionNeighborRings"},
-                     "curvature_projection_neighbor_rings",
-                     result->curvature_projection.max_neighbor_rings);
   apply_integer_list(
-      {"Curvature_projection_max_neighbor_fallback_vertices",
-       "CurvatureProjectionMaxNeighborFallbackVertices",
-       "Projected_curvature_max_neighbor_fallback_vertices",
-       "ProjectedCurvatureMaxNeighborFallbackVertices"},
+      {"Curvature_projection_max_neighbor_fallback_vertices"},
       "curvature_projection_max_neighbor_fallback_vertices",
       result->curvature_projection.max_neighbor_fallback_vertices);
-  apply_integer_list({"Curvature_projection_max_zero_fallback_vertices",
-                      "CurvatureProjectionMaxZeroFallbackVertices",
-                      "Projected_curvature_max_zero_fallback_vertices",
-                      "ProjectedCurvatureMaxZeroFallbackVertices"},
+  apply_integer_list({"Curvature_projection_max_zero_fallback_vertices"},
                      "curvature_projection_max_zero_fallback_vertices",
                      result->curvature_projection.max_zero_fallback_vertices);
-  apply_real_list({"Curvature_projection_supplemental_sample_weight",
-                   "CurvatureProjectionSupplementalSampleWeight",
-                   "Projected_curvature_supplemental_sample_weight",
-                   "ProjectedCurvatureSupplementalSampleWeight",
-                   "Curvature_projection_interface_sample_weight",
-                   "CurvatureProjectionInterfaceSampleWeight"},
+  apply_real_list({"Curvature_projection_supplemental_sample_weight"},
                   "curvature_projection_supplemental_sample_weight",
                   result->curvature_projection.supplemental_sample_weight);
-  if (const auto mode = reader.string({"Curvature_projection_recovery_mode",
-                                       "CurvatureProjectionRecoveryMode",
-                                       "Projected_curvature_recovery_mode",
-                                       "ProjectedCurvatureRecoveryMode"},
+  if (const auto mode = reader.string({"Curvature_projection_recovery_mode"},
                                       "curvature_projection_recovery_mode")) {
     result->curvature_projection.recovery_mode =
         ls::parseLevelSetCurvatureRecoveryMode(mode->text);
@@ -845,16 +760,10 @@ resolveLegacyLevelSetMaintenanceConfiguration(
   // nonzero coefficient with Lumped is rejected here instead of at the first
   // projection.
   const auto filter_coefficient = reader.real(
-      {"Curvature_projection_kinematic_area_gradient_filter_coefficient",
-       "CurvatureProjectionKinematicAreaGradientFilterCoefficient",
-       "Projected_curvature_kinematic_area_gradient_filter_coefficient",
-       "ProjectedCurvatureKinematicAreaGradientFilterCoefficient"},
+      {"Curvature_projection_kinematic_area_gradient_filter_coefficient"},
       "curvature_projection_kinematic_area_gradient_filter_coefficient");
   if (const auto mass = reader.string(
-          {"Curvature_projection_kinematic_area_gradient_mass",
-           "CurvatureProjectionKinematicAreaGradientMass",
-           "Projected_curvature_kinematic_area_gradient_mass",
-           "ProjectedCurvatureKinematicAreaGradientMass"},
+          {"Curvature_projection_kinematic_area_gradient_mass"},
           "curvature_projection_kinematic_area_gradient_mass")) {
     result->curvature_projection.kinematic_area_gradient_mass =
         ls::parseLevelSetKinematicAreaGradientMass(mass->text);
@@ -888,39 +797,20 @@ resolveLegacyLevelSetMaintenanceConfiguration(
     }
   }
   apply_boolean_list(
-      {"Curvature_projection_kinematic_area_gradient_finite_difference_check",
-       "CurvatureProjectionKinematicAreaGradientFiniteDifferenceCheck",
-       "Projected_curvature_kinematic_area_gradient_finite_difference_check",
-       "ProjectedCurvatureKinematicAreaGradientFiniteDifferenceCheck"},
+      {"Curvature_projection_kinematic_area_gradient_finite_difference_check"},
       "curvature_projection_kinematic_area_gradient_finite_difference_check",
       result->curvature_projection
           .kinematic_area_gradient_finite_difference_check);
-  apply_real_list({"Curvature_projection_narrow_band_width",
-                   "CurvatureProjectionNarrowBandWidth",
-                   "Projected_curvature_narrow_band_width",
-                   "ProjectedCurvatureNarrowBandWidth",
-                   "Curvature_projection_interface_band_width",
-                   "CurvatureProjectionInterfaceBandWidth"},
+  apply_real_list({"Curvature_projection_narrow_band_width"},
                   "curvature_projection_narrow_band_width",
                   result->curvature_projection.narrow_band_width);
-  apply_integer_list({"Curvature_projection_smoothing_iterations",
-                      "CurvatureProjectionSmoothingIterations",
-                      "Projected_curvature_smoothing_iterations",
-                      "ProjectedCurvatureSmoothingIterations"},
+  apply_integer_list({"Curvature_projection_smoothing_iterations"},
                      "curvature_projection_smoothing_iterations",
                      result->curvature_projection.smoothing_iterations);
-  apply_real_list({"Curvature_projection_smoothing_relaxation",
-                   "CurvatureProjectionSmoothingRelaxation",
-                   "Projected_curvature_smoothing_relaxation",
-                   "ProjectedCurvatureSmoothingRelaxation"},
+  apply_real_list({"Curvature_projection_smoothing_relaxation"},
                   "curvature_projection_smoothing_relaxation",
                   result->curvature_projection.smoothing_relaxation);
-  if (const auto mode = reader.string({"Curvature_projection_smoothing_mode",
-                                       "CurvatureProjectionSmoothingMode",
-                                       "Projected_curvature_smoothing_mode",
-                                       "ProjectedCurvatureSmoothingMode",
-                                       "Curvature_projection_regularization",
-                                       "CurvatureProjectionRegularization"},
+  if (const auto mode = reader.string({"Curvature_projection_smoothing_mode"},
                                       "curvature_projection_smoothing_mode")) {
     result->curvature_projection.smoothing_mode =
         ls::parseLevelSetCurvatureSmoothingMode(mode->text);
