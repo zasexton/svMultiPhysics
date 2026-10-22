@@ -91,6 +91,23 @@ struct LevelSetKinematicBaseline {
     std::vector<Real> velocity{};
 };
 
+/**
+ * @brief When the triggered interface-preserving redistancing of a field
+ *        runs: once the interface displacement bound accumulated since the
+ *        last redistancing (max |w| dt over the vertices of cut cells)
+ *        reaches interface_motion_cells times the smallest cut-cell edge.
+ */
+struct LevelSetRedistancingTrigger {
+    double interface_motion_cells{1.0};
+};
+
+/**
+ * @brief The redistancing trigger: one cell for every case.  The diagnostic
+ *        environment override SVMP_REDISTANCING_TRIGGER_CELLS (positive)
+ *        changes it to test the sensitivity; an invalid override throws.
+ */
+[[nodiscard]] LevelSetRedistancingTrigger resolveLevelSetRedistancingTrigger();
+
 struct LevelSetBoundPreservingApplicationResult {
     bool accept_step{true};
     bool changed{false};
@@ -138,12 +155,12 @@ applyLevelSetBoundPreservingCandidates(
  * @brief Accepted-step maintenance of every non-conservative request, as
  *        one transaction.
  *
- * For each request, in this order and when due: the kinematic
+ * The stages, in this order: for each request when due, the kinematic
  * reconciliation against @p kinematic_baselines, the sign-definite patch
- * bounds, and the triggered interface-preserving redistancing.  The changed
- * candidate is passed to @p validate_candidate, then the change of every
- * maintained field is published as one common delta on every stored state
- * of @p history.  The requests' run state is updated only when everything
+ * bounds, and the interface-preserving redistancing when its trigger
+ * (resolveLevelSetRedistancingTrigger) fires; then the changed candidate is
+ * passed to @p validate_candidate, and the change of every maintained field
+ * is published as one common delta on every stored state of @p history.  The requests' run state is updated only when everything
  * succeeds.  Returns whether a field changed.  The commit logs go to
  * @p deferred_commit_logs when given, else to the log.
  */
