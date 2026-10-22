@@ -100,6 +100,19 @@ void appendOperatorStageMeasurementMetadata(
     MeshBoundaryConsensusTokens& tokens,
     const OperatorStageMeasurementMetadata& metadata);
 
+/**
+ * @brief Append the canonical tokens of a mesh-normal constraint
+ * declaration, its symbolic target expression and consumer binding
+ * included.
+ *
+ * Sets @p contains_opaque_callable when the target expression holds a
+ * coefficient or model callable, which has no cross-rank identity.
+ */
+void appendMeshNormalDeclaration(
+    MeshBoundaryConsensusTokens& tokens,
+    const MeshNormalBoundaryConstraintDeclaration& declaration,
+    bool& contains_opaque_callable);
+
 [[nodiscard]] MeshBoundaryCollectiveContext
 meshBoundaryCollectiveContext(const FESystem& system) noexcept;
 
