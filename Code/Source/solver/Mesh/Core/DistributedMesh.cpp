@@ -191,17 +191,32 @@ namespace {
         std::uint64_t global[2] = {0u, 0u};
         MPI_Allreduce(local, global, 2, MPI_UINT64_T, MPI_SUM, comm);
         if (global[1] != 0u) {
-            throw std::runtime_error(error.empty()
-                                         ? "DistributedMesh: startup partition weights failed on another rank"
-                                         : error);
+            error = error.empty() ? "DistributedMesh: startup partition weights failed on another rank"
+                                  : error;
+        } else {
+            // Half the idx_t range leaves room for the sums ParMETIS forms while coarsening.
+            constexpr std::uint64_t kMaxWeightSum =
+                static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max()) / 2u;
+            if (global[0] > kMaxWeightSum) {
+                error = "DistributedMesh: startup partition weights sum to " +
+                        std::to_string(global[0]) +
+                        " units, beyond the 32-bit ParMETIS range; lower the partition weights";
+            }
         }
-        // Half the idx_t range leaves room for the sums ParMETIS forms while coarsening.
-        constexpr std::uint64_t kMaxWeightSum =
-            static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max()) / 2u;
-        if (global[0] > kMaxWeightSum) {
-            throw std::runtime_error(
-                "DistributedMesh: startup partition weights sum to " + std::to_string(global[0]) +
-                " units, beyond the 32-bit ParMETIS range; lower the partition weights");
+        if (!error.empty()) {
+            // Every rank gets here together: `error` is set on every rank
+            // when any rank failed, and otherwise only from reduced values.
+            if (!requested->fallback_to_unweighted) {
+                throw std::runtime_error(error);
+            }
+            int rank = 0;
+            MPI_Comm_rank(comm, &rank);
+            if (rank == 0) {
+                std::cout << "[svMultiPhysics::Mesh] startup partition weights not available ("
+                          << error << "); using the unweighted startup partition"
+                          << " diagnostic=weighted_startup_partition_fallback" << std::endl;
+            }
+            return {};
         }
 
         const char* name = svmp::kStartupPartitionWeightField;

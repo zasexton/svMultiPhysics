@@ -1632,7 +1632,7 @@ class FaceParameters : public ParameterLists
 /// <Add_mesh name="lumen" >
 ///   <Mesh_file_path> mesh/lumen/mesh-complete.mesh.vtu  </Mesh_file_path>
 ///   <Ghost_layers> 0 </Ghost_layers>
-///   <Partition_weighting> none </Partition_weighting>
+///   <Partition_weighting> auto </Partition_weighting>
 ///
 ///   <Add_face name="lumen_inlet">
 ///       <Face_file_path> mesh/lumen/mesh-surfaces/lumen_inlet.vtp </Face_file_path>
@@ -1684,15 +1684,25 @@ class MeshParameters : public ParameterLists
     // warning) for decks written with overlapping face files.
     Parameter<bool> allow_overlapping_face_files;
 
-    // Opt-in startup partition weighting for multi-rank runs:
-    // "none" (default, cell-count balance; the partition is unchanged) or
-    // "free_surface".  "free_surface" classifies each cell by the sign of
-    // the free surface's initial level set at its vertices (the level-set
-    // vertex field of the mesh file): full active (liquid), inactive (dry)
-    // or cut.  ParMETIS then balances two constraints per rank, the cell
-    // count (memory, the all-cell terms, the linear solve) and the summed
-    // class weights.  The weights are the relative cut-volume assembly work
-    // of a cell, which only active and cut cells carry:
+    // Startup partition weighting for multi-rank runs:
+    //   "auto" (default, also when the key is absent): "free_surface" for a
+    //       run with an unfitted level-set free surface, "none" otherwise
+    //       (fitted ALE free surfaces, two-fluid material interfaces, no free
+    //       surface).  When the level-set field is not a vertex field of the
+    //       mesh file, the run falls back to the cell-count partition with
+    //       one rank-0 line instead of failing.
+    //   "none": the cell-count partition (bitwise the partition of runs
+    //       before the weighting existed).
+    //   "free_surface": the weighting below, required (a missing level-set
+    //       field is an error).
+    // Serial runs are not partitioned, so the key does not affect them.
+    // The weighting classifies each cell by the sign of the free surface's
+    // initial level set at its vertices (the level-set vertex field of the
+    // mesh file): full active (liquid), inactive (dry) or cut.  ParMETIS then
+    // balances two constraints per rank, the cell count (memory, the
+    // all-cell terms, the linear solve) and the summed class weights.  The
+    // weights are the relative cut-volume assembly work of a cell, which only
+    // active and cut cells carry:
     //   <Partition_weight_active>    full active cell (default 1)
     //   <Partition_weight_cut>       cut cell (default 2: measured cut-volume
     //                                assembly time of a cut cell 1.93 times
@@ -1700,11 +1710,12 @@ class MeshParameters : public ParameterLists
     //                                3D sphere and sessile decks on 4-16 ranks)
     //   <Partition_weight_inactive>  inactive cell (default 0)
     // Each weight w counts max(1, round(100 w)) integer units, so a zero
-    // weight is 1% of an active cell.  The defaults were 3 / 4 / 1 until
-    // 2026-10 (units of 10); no recorded run used the key.  A weighted
-    // partition changes the partition and hence the results at round-off,
-    // as a different rank count does.  The weights come from the initial
-    // level set only (no repartitioning while the interface moves).
+    // weight is 1% of an active cell.  The weighting changes the partition
+    // and hence the results at round-off, as a different rank count does
+    // (tracker D45).  The weights come from the initial level set only (no
+    // repartitioning while the interface moves).  Until 2026-10-22 the
+    // default was "none", and before 2026-10-21 the class weights were
+    // 3 / 4 / 1 (units of 10); no recorded run used the key before then.
     Parameter<std::string> partition_weighting;
     Parameter<double> partition_weight_active;
     Parameter<double> partition_weight_inactive;

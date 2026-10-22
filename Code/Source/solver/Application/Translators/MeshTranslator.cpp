@@ -1,6 +1,7 @@
 #include "Application/Translators/MeshTranslator.h"
 
 #include "Application/Core/OopMpiLog.h"
+#include "FE/LevelSet/LevelSetGeometry.h"
 #include "Parameters.h"
 
 #include "Mesh/Mesh.h"
@@ -526,21 +527,65 @@ void check_overlapping_face_files(const std::vector<std::vector<std::string>>& n
 namespace application {
 namespace translators {
 
-bool MeshTranslator::freeSurfacePartitionWeightingRequested(const MeshParameters& params)
+PartitionWeightingMode MeshTranslator::partitionWeightingMode(const MeshParameters& params)
 {
   std::string mode = params.partition_weighting.value();
   std::transform(mode.begin(), mode.end(), mode.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  if (mode.empty() || mode == "none") {
-    return false;
+  if (mode.empty() || mode == "auto") {
+    return PartitionWeightingMode::Auto;
   }
-  if (mode != "free_surface") {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] <Partition_weighting> inside <Add_mesh name=\"" +
-        params.name.value() + "\"> must be 'none' or 'free_surface', got '" +
-        params.partition_weighting.value() + "'.");
+  if (mode == "none") {
+    return PartitionWeightingMode::None;
   }
-  return true;
+  if (mode == "free_surface") {
+    return PartitionWeightingMode::FreeSurface;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Application] <Partition_weighting> inside <Add_mesh name=\"" +
+      params.name.value() + "\"> must be 'auto', 'none' or 'free_surface', got '" +
+      params.partition_weighting.value() + "'.");
+}
+
+std::optional<FreeSurfaceLevelSet> MeshTranslator::unfittedFreeSurfaceLevelSet(
+    const std::vector<svmp::FE::level_set::ActiveCutVolumeRequest>& requests)
+{
+  for (const auto& request : requests) {
+    if (request.origin == svmp::FE::level_set::ActiveCutVolumeRequestOrigin::FreeSurfaceBoundary) {
+      FreeSurfaceLevelSet free_surface;
+      free_surface.level_set_field = request.level_set_field_name;
+      free_surface.isovalue = request.isovalue;
+      free_surface.negative_side_active =
+          request.active_side == svmp::FE::level_set::LevelSetActiveSide::Negative;
+      return free_surface;
+    }
+  }
+  return std::nullopt;
+}
+
+MeshPartitionWeights MeshTranslator::startupPartitionWeights(
+    const MeshParameters& params,
+    const std::optional<FreeSurfaceLevelSet>& free_surface,
+    int world_size)
+{
+  const auto mode = partitionWeightingMode(params);
+  if (mode == PartitionWeightingMode::None || world_size <= 1) {
+    return {};
+  }
+  if (!free_surface) {
+    if (mode == PartitionWeightingMode::FreeSurface) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] <Partition_weighting>free_surface</Partition_weighting> "
+          "requires an unfitted level-set free-surface boundary condition.");
+    }
+    return {};
+  }
+  auto weights = freeSurfacePartitionWeights(params,
+                                             free_surface->level_set_field,
+                                             free_surface->isovalue,
+                                             free_surface->negative_side_active);
+  weights.fallback_to_unweighted = mode == PartitionWeightingMode::Auto;
+  return weights;
 }
 
 MeshPartitionWeights MeshTranslator::freeSurfacePartitionWeights(const MeshParameters& params,
@@ -625,13 +670,20 @@ std::shared_ptr<svmp::Mesh> MeshTranslator::loadMesh(const MeshParameters& param
     io_opts.kv["partition_weight_negative"] = real_text(partition_weights.negative);
     io_opts.kv["partition_weight_positive"] = real_text(partition_weights.positive);
     io_opts.kv["partition_weight_cut"] = real_text(partition_weights.cut);
+    if (partition_weights.fallback_to_unweighted) {
+      io_opts.kv["partition_weight_fallback"] = "unweighted";
+    }
     application::core::oopCout()
         << "[svMultiPhysics::Application] MeshTranslator: startup partition weights from vertex field '"
         << partition_weights.vertex_field << "' isovalue=" << partition_weights.isovalue
         << " negative=" << partition_weights.negative << " positive=" << partition_weights.positive
         << " cut=" << partition_weights.cut
-        << " (ParMETIS balances cell count and weighted work) diagnostic=partition_weighting"
-        << std::endl;
+        << " (ParMETIS balances cell count and weighted work"
+        << (partition_weights.fallback_to_unweighted
+                ? "; default for unfitted free-surface runs, <Partition_weighting>none</Partition_weighting> "
+                  "keeps the cell-count partition"
+                : "")
+        << ") diagnostic=partition_weighting" << std::endl;
   }
 
   application::core::oopCout()

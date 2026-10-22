@@ -3538,7 +3538,7 @@ MeshParameters::MeshParameters()
   set_parameter("Domain_file_path", "", !required, domain_file_path);
   set_parameter("Ghost_layers", 0, !required, ghost_layers);
   set_parameter("Allow_overlapping_face_files", false, !required, allow_overlapping_face_files);
-  set_parameter("Partition_weighting", "none", !required, partition_weighting);
+  set_parameter("Partition_weighting", "auto", !required, partition_weighting);
   // Relative cut-volume assembly work of a full active, an inactive and a
   // cut cell (see MeshParameters in Parameters.h).
   set_parameter("Partition_weight_active", 1.0, !required, partition_weight_active);

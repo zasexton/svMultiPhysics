@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "Application/Core/LevelSetCutConfiguration.h"
 #include "Application/Translators/MeshTranslator.h"
 #include "Mesh/Mesh.h"
 #include "Mesh/Core/StartupPartitionWeights.h"
@@ -707,11 +708,13 @@ void parse_add_mesh(const char* xml, MeshParameters& parsed)
 
 } // namespace
 
-TEST(MeshPartitionWeighting, DefaultsAreOffWithCutVolumeWorkWeights)
+TEST(MeshPartitionWeighting, DefaultsAreAutomaticWithCutVolumeWorkWeights)
 {
+  using application::translators::MeshTranslator;
+  using application::translators::PartitionWeightingMode;
   MeshParameters defaults;
-  EXPECT_EQ(defaults.partition_weighting.value(), "none");
-  EXPECT_FALSE(application::translators::MeshTranslator::freeSurfacePartitionWeightingRequested(defaults));
+  EXPECT_EQ(defaults.partition_weighting.value(), "auto");
+  EXPECT_EQ(MeshTranslator::partitionWeightingMode(defaults), PartitionWeightingMode::Auto);
   // Relative cut-volume work of a full active, a cut and an inactive cell.
   EXPECT_EQ(defaults.partition_weight_active.value(), 1.0);
   EXPECT_EQ(defaults.partition_weight_cut.value(), 2.0);
@@ -721,6 +724,15 @@ TEST(MeshPartitionWeighting, DefaultsAreOffWithCutVolumeWorkWeights)
 TEST(MeshPartitionWeighting, ParsesTheModeAndRejectsUnknownValues)
 {
   using application::translators::MeshTranslator;
+  using application::translators::PartitionWeightingMode;
+  MeshParameters absent;
+  parse_add_mesh(R"xml(
+<Add_mesh name="box">
+  <Mesh_file_path>mesh.vtu</Mesh_file_path>
+</Add_mesh>
+)xml", absent);
+  EXPECT_EQ(MeshTranslator::partitionWeightingMode(absent), PartitionWeightingMode::Auto);
+
   MeshParameters none;
   parse_add_mesh(R"xml(
 <Add_mesh name="box">
@@ -728,7 +740,16 @@ TEST(MeshPartitionWeighting, ParsesTheModeAndRejectsUnknownValues)
   <Partition_weighting>none</Partition_weighting>
 </Add_mesh>
 )xml", none);
-  EXPECT_FALSE(MeshTranslator::freeSurfacePartitionWeightingRequested(none));
+  EXPECT_EQ(MeshTranslator::partitionWeightingMode(none), PartitionWeightingMode::None);
+
+  MeshParameters automatic;
+  parse_add_mesh(R"xml(
+<Add_mesh name="box">
+  <Mesh_file_path>mesh.vtu</Mesh_file_path>
+  <Partition_weighting>AUTO</Partition_weighting>
+</Add_mesh>
+)xml", automatic);
+  EXPECT_EQ(MeshTranslator::partitionWeightingMode(automatic), PartitionWeightingMode::Auto);
 
   MeshParameters on;
   parse_add_mesh(R"xml(
@@ -740,7 +761,7 @@ TEST(MeshPartitionWeighting, ParsesTheModeAndRejectsUnknownValues)
   <Partition_weight_cut>3.5</Partition_weight_cut>
 </Add_mesh>
 )xml", on);
-  EXPECT_TRUE(MeshTranslator::freeSurfacePartitionWeightingRequested(on));
+  EXPECT_EQ(MeshTranslator::partitionWeightingMode(on), PartitionWeightingMode::FreeSurface);
   EXPECT_EQ(on.partition_weight_active.value(), 2.0);
   EXPECT_EQ(on.partition_weight_inactive.value(), 0.25);
   EXPECT_EQ(on.partition_weight_cut.value(), 3.5);
@@ -748,7 +769,7 @@ TEST(MeshPartitionWeighting, ParsesTheModeAndRejectsUnknownValues)
   MeshParameters bogus;
   bogus.name.set("box");
   bogus.partition_weighting.set("cut_cells");
-  EXPECT_THROW((void)MeshTranslator::freeSurfacePartitionWeightingRequested(bogus), std::runtime_error);
+  EXPECT_THROW((void)MeshTranslator::partitionWeightingMode(bogus), std::runtime_error);
 }
 
 TEST(MeshPartitionWeighting, MapsClassWeightsOntoTheActiveSide)
@@ -765,6 +786,7 @@ TEST(MeshPartitionWeighting, MapsClassWeightsOntoTheActiveSide)
   EXPECT_EQ(negative.negative, 1.0);
   EXPECT_EQ(negative.positive, 0.0);
   EXPECT_EQ(negative.cut, 2.0);
+  EXPECT_FALSE(negative.fallback_to_unweighted);
 
   // Liquid on the positive side.
   const auto positive = MeshTranslator::freeSurfacePartitionWeights(params, "phi", 0.0, false);
@@ -777,6 +799,134 @@ TEST(MeshPartitionWeighting, MapsClassWeightsOntoTheActiveSide)
   EXPECT_THROW((void)MeshTranslator::freeSurfacePartitionWeights(params, "phi", 0.0, true), std::runtime_error);
   params.partition_weight_cut.set("2e4");
   EXPECT_THROW((void)MeshTranslator::freeSurfacePartitionWeights(params, "phi", 0.0, true), std::runtime_error);
+}
+
+TEST(MeshPartitionWeighting, ResolvesTheStartupWeightsFromModeRunAndFreeSurface)
+{
+  using application::translators::FreeSurfaceLevelSet;
+  using application::translators::MeshTranslator;
+  FreeSurfaceLevelSet free_surface;
+  free_surface.level_set_field = "phi";
+  free_surface.isovalue = 0.0;
+  free_surface.negative_side_active = true;
+  const std::optional<FreeSurfaceLevelSet> none_found;
+
+  MeshParameters automatic;
+  automatic.name.set("box");
+  // Default (auto), several ranks, unfitted free surface: weighted, with the
+  // fallback to the unweighted partition when phi is not available.
+  const auto weighted = MeshTranslator::startupPartitionWeights(automatic, free_surface, 4);
+  EXPECT_EQ(weighted.vertex_field, "phi");
+  EXPECT_EQ(weighted.negative, 1.0);
+  EXPECT_EQ(weighted.positive, 0.0);
+  EXPECT_EQ(weighted.cut, 2.0);
+  EXPECT_TRUE(weighted.fallback_to_unweighted);
+  // Serial runs are not partitioned; runs without an unfitted free surface
+  // keep the cell-count partition.
+  EXPECT_TRUE(MeshTranslator::startupPartitionWeights(automatic, free_surface, 1).vertex_field.empty());
+  EXPECT_TRUE(MeshTranslator::startupPartitionWeights(automatic, none_found, 4).vertex_field.empty());
+
+  MeshParameters none;
+  none.name.set("box");
+  none.partition_weighting.set("none");
+  EXPECT_TRUE(MeshTranslator::startupPartitionWeights(none, free_surface, 4).vertex_field.empty());
+  EXPECT_TRUE(MeshTranslator::startupPartitionWeights(none, none_found, 4).vertex_field.empty());
+
+  MeshParameters explicit_on;
+  explicit_on.name.set("box");
+  explicit_on.partition_weighting.set("free_surface");
+  const auto required = MeshTranslator::startupPartitionWeights(explicit_on, free_surface, 2);
+  EXPECT_EQ(required.vertex_field, "phi");
+  EXPECT_FALSE(required.fallback_to_unweighted);
+  EXPECT_TRUE(MeshTranslator::startupPartitionWeights(explicit_on, none_found, 1).vertex_field.empty());
+  EXPECT_THROW((void)MeshTranslator::startupPartitionWeights(explicit_on, none_found, 2), std::runtime_error);
+}
+
+TEST(MeshPartitionWeighting, OnlyUnfittedFreeSurfaceDecksResolveToWeights)
+{
+  using application::translators::MeshTranslator;
+  const auto resolve = [](const char* xml) {
+    tinyxml2::XMLDocument doc;
+    EXPECT_EQ(doc.Parse(xml), tinyxml2::XML_SUCCESS) << doc.ErrorStr();
+    auto* root = doc.FirstChildElement(Parameters::FSI_FILE.c_str());
+    EXPECT_NE(root, nullptr);
+    auto params = std::make_unique<Parameters>();
+    if (root != nullptr) {
+      params->set_equation_values(root);
+    }
+    const auto free_surface =
+        MeshTranslator::unfittedFreeSurfaceLevelSet(application::core::activeCutVolumeRequests(*params));
+    MeshParameters mesh;
+    mesh.name.set("box");
+    return std::make_pair(free_surface, MeshTranslator::startupPartitionWeights(mesh, free_surface, 4));
+  };
+
+  // Unfitted level-set free surface, liquid on the positive side.
+  const auto [unfitted, unfitted_weights] = resolve(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Add_BC name="free_surface">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Level_set_field_name>psi</Level_set_field_name>
+      <Level_set_isovalue>0.25</Level_set_isovalue>
+      <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
+      <Active_domain>LevelSetPositive</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  ASSERT_TRUE(unfitted.has_value());
+  EXPECT_EQ(unfitted->level_set_field, "psi");
+  EXPECT_EQ(unfitted->isovalue, 0.25);
+  EXPECT_FALSE(unfitted->negative_side_active);
+  EXPECT_EQ(unfitted_weights.vertex_field, "psi");
+  EXPECT_EQ(unfitted_weights.positive, 1.0);
+  EXPECT_EQ(unfitted_weights.negative, 0.0);
+  EXPECT_TRUE(unfitted_weights.fallback_to_unweighted);
+
+  // Fitted (ALE) free surface: no unfitted free surface, cell-count partition.
+  const auto [fitted, fitted_weights] = resolve(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Add_BC name="free_surface">
+      <Type>Free_surface</Type>
+      <Implementation>FittedALE</Implementation>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  EXPECT_FALSE(fitted.has_value());
+  EXPECT_TRUE(fitted_weights.vertex_field.empty());
+
+  // Two-fluid material interface (both phases active): cell-count partition.
+  const auto [two_fluid, two_fluid_weights] = resolve(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Free_surface_physical_model>IncompressibleTwoFluid</Free_surface_physical_model>
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Generated_interface_domain_id>material_interface</Generated_interface_domain_id>
+    <Material_interface_marker>71</Material_interface_marker>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  EXPECT_FALSE(two_fluid.has_value());
+  EXPECT_TRUE(two_fluid_weights.vertex_field.empty());
+
+  // No free surface at all.
+  const auto [plain, plain_weights] = resolve(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Add_BC name="wall">
+      <Type>Dir</Type>
+      <Value>0.0</Value>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  EXPECT_FALSE(plain.has_value());
+  EXPECT_TRUE(plain_weights.vertex_field.empty());
 }
 
 TEST(MeshPartitionWeighting, MeshOptionsRequestWeightsOnlyWithAVertexField)
@@ -808,6 +958,13 @@ TEST(MeshPartitionWeighting, MeshOptionsRequestWeightsOnlyWithAVertexField)
   auto bad_iso = kv;
   bad_iso["partition_weight_isovalue"] = "zero";
   EXPECT_THROW((void)svmp::startup_partition_sign_weights(bad_iso), std::invalid_argument);
+
+  EXPECT_FALSE(parsed->fallback_to_unweighted);
+  auto fallback = kv;
+  fallback["partition_weight_fallback"] = "unweighted";
+  EXPECT_TRUE(svmp::startup_partition_sign_weights(fallback)->fallback_to_unweighted);
+  fallback["partition_weight_fallback"] = "ignore";
+  EXPECT_THROW((void)svmp::startup_partition_sign_weights(fallback), std::invalid_argument);
 }
 
 TEST(MeshPartitionWeighting, CellWeightsFollowTheVertexSigns)

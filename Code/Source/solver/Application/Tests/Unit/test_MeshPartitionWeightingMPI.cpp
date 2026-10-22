@@ -1,8 +1,9 @@
-// Startup partition weighting (<Partition_weighting>free_surface</Partition_weighting>)
-// on 2+ ranks: without weights the partition is the plain one, weighted
-// loads are deterministic and leave no field behind, and the weights balance
-// the cut-volume work of a liquid region that the unweighted partition puts
-// on one rank.
+// Startup partition weighting (<Partition_weighting>, default 'auto') on 2+
+// ranks: 'none' keeps the plain partition, the default weights an unfitted
+// free-surface run and falls back to the plain partition without the level
+// set field, weighted loads are deterministic and leave no field behind, and
+// the weights balance the cut-volume work of a liquid region that the
+// unweighted partition puts on one rank.
 
 #include <gtest/gtest.h>
 
@@ -24,6 +25,7 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -283,6 +285,15 @@ protected:
     return application::translators::MeshTranslator::freeSurfacePartitionWeights(params, "phi", 0.0, true);
   }
 
+  static application::translators::FreeSurfaceLevelSet freeSurface(const std::string& field)
+  {
+    application::translators::FreeSurfaceLevelSet free_surface;
+    free_surface.level_set_field = field;
+    free_surface.isovalue = 0.0;
+    free_surface.negative_side_active = true;
+    return free_surface;
+  }
+
   static std::shared_ptr<svmp::Mesh> load(const application::translators::MeshPartitionWeights& weights)
   {
     MeshParameters params;
@@ -294,16 +305,22 @@ protected:
   static inline bool written_{false};
 };
 
-TEST_F(MeshPartitionWeightingMPI, WithoutWeightsThePartitionIsThePlainStartupPartition)
+TEST_F(MeshPartitionWeightingMPI, ExplicitNoneKeepsThePlainStartupPartition)
 {
-  // Key absent (default parameters), key 'none', and a direct load with the
-  // translator's options and no partition keys give the same owned cells.
-  const auto absent = load({});
+  // Explicit 'none' (even with an unfitted free surface), no weights, and a
+  // direct load with the translator's options and no partition keys give
+  // the same owned cells.
+  using application::translators::MeshTranslator;
   MeshParameters none_params;
   configure(none_params);
   none_params.partition_weighting.set("none");
-  ASSERT_FALSE(application::translators::MeshTranslator::freeSurfacePartitionWeightingRequested(none_params));
-  const auto none = application::translators::MeshTranslator::loadMesh(none_params);
+  ASSERT_EQ(MeshTranslator::partitionWeightingMode(none_params),
+            application::translators::PartitionWeightingMode::None);
+  const auto none_weights =
+      MeshTranslator::startupPartitionWeights(none_params, freeSurface("phi"), worldSize());
+  ASSERT_TRUE(none_weights.vertex_field.empty());
+  const auto none = MeshTranslator::loadMesh(none_params, 0, none_weights);
+  const auto absent = load({});
 
   svmp::MeshIOOptions options{};
   options.path = path_.string();
@@ -319,6 +336,50 @@ TEST_F(MeshPartitionWeightingMPI, WithoutWeightsThePartitionIsThePlainStartupPar
   EXPECT_TRUE(allRanks(ownedCellGids(*absent) == reference));
   EXPECT_TRUE(allRanks(ownedCellGids(*none) == reference));
   EXPECT_FALSE(absent->local_mesh().has_field(svmp::EntityKind::Volume, svmp::kStartupPartitionWeightField));
+}
+
+TEST_F(MeshPartitionWeightingMPI, TheDefaultWeightsUnfittedFreeSurfaceRuns)
+{
+  // With the key absent, a multi-rank run with an unfitted free surface on
+  // 'phi' gets the free-surface weighting.
+  using application::translators::MeshTranslator;
+  MeshParameters defaults;
+  configure(defaults);
+  const auto weights = MeshTranslator::startupPartitionWeights(defaults, freeSurface("phi"), worldSize());
+  ASSERT_EQ(weights.vertex_field, "phi");
+  ASSERT_TRUE(weights.fallback_to_unweighted);
+  const auto by_default = MeshTranslator::loadMesh(defaults, 0, weights);
+  const auto explicit_weights = load(defaultWeights());
+  const auto plain = load({});
+  ASSERT_NE(by_default, nullptr);
+  EXPECT_TRUE(allRanks(ownedCellGids(*by_default) == ownedCellGids(*explicit_weights)));
+  EXPECT_TRUE(anyRank(ownedCellGids(*by_default) != ownedCellGids(*plain)));
+  // Without an unfitted free surface the default keeps the plain partition.
+  EXPECT_TRUE(MeshTranslator::startupPartitionWeights(defaults, std::nullopt, worldSize()).vertex_field.empty());
+}
+
+TEST_F(MeshPartitionWeightingMPI, TheDefaultFallsBackToThePlainPartitionWithoutTheLevelSetField)
+{
+  // The default weighting of a run whose level-set field is not in the mesh
+  // file does not fail: it gives the plain partition on every rank.
+  using application::translators::MeshTranslator;
+  MeshParameters defaults;
+  configure(defaults);
+  const auto weights =
+      MeshTranslator::startupPartitionWeights(defaults, freeSurface("level_set_not_in_file"), worldSize());
+  ASSERT_TRUE(weights.fallback_to_unweighted);
+  bool threw = false;
+  std::shared_ptr<svmp::Mesh> fallback;
+  try {
+    fallback = MeshTranslator::loadMesh(defaults, 0, weights);
+  } catch (const std::exception&) {
+    threw = true;
+  }
+  ASSERT_TRUE(allRanks(!threw));
+  const auto plain = load({});
+  EXPECT_TRUE(allRanks(ownedCellGids(*fallback) == ownedCellGids(*plain)));
+  EXPECT_TRUE(allRanks(!fallback->local_mesh().has_field(svmp::EntityKind::Volume,
+                                                         svmp::kStartupPartitionWeightField)));
 }
 
 TEST_F(MeshPartitionWeightingMPI, WeightedLoadsAreDeterministicAndRemoveTheWeightField)

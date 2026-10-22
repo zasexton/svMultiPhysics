@@ -88,12 +88,15 @@ change it once, with a one-line justification in the tracker.
     mpiexec -n $SLURM_NTASKS --map-by slot:PE=$SLURM_CPUS_PER_TASK --bind-to core svmultiphysics solver.xml
     ```
 
-    The assembly and geometry threads give bitwise-identical results for any thread count. The multigrid preconditioner is recommended there from R/h = 16 on. The opt-in free-surface partition weighting (`<Partition_weighting>free_surface</Partition_weighting>` in `<Add_mesh>`) is allowed; it changes the partition and hence the results at round-off, which the run record must state.
-    - It weights each cell by the sign of the initial level set at its vertices, and ParMETIS balances two things per rank: the cell count and the cut-volume work.
-    - Weights (tracker D45): `<Partition_weight_active>` 1 for a full liquid cell, `<Partition_weight_cut>` 2 for a cut cell (its measured cut-volume assembly time is 1.93 times that of a full cell, 1.85–2.01, in the 3D sphere and sessile decks on 4–16 ranks), `<Partition_weight_inactive>` 0 for a dry cell.
-    - The defaults were 3, 4 and 1 before 2026-10-21; no recorded run used the key.
-    - The weights come from the initial level set only, so they go stale as the interface moves. In the 3D sessile drop at R/h = 16, once the drop has spread, the busiest rank's liquid work is 1.4–2.0 times the mean on 4–16 ranks, against 2.7–3.8 without weighting (offline METIS estimate).
+    The assembly and geometry threads give bitwise-identical results for any thread count. The multigrid preconditioner is recommended there from R/h = 16 on.
   - **3D production runs from R/h = 16 on (tracker D36)** also factorize the PDE velocity extension with sequential MUMPS: a binary built with `FE_ENABLE_MUMPS=ON` (`-ltopgo-mumps`), run with `export SVMP_PDE_EXTENSION_FACTORIZATION=mumps_serial` and ScaLAPACK and METIS (`/share/software/user/open/{scalapack/2.2.0,metis/5.1.0}/lib`) on `LD_LIBRARY_PATH`. The result is bitwise independent of the rank count; a step takes about 22% less time at R/h = 16. Distributed `mumps` is not reproducible run to run and is not used.
+  - **Startup partition (tracker D45).** Multi-rank runs with an unfitted level-set free surface use the cost-weighted startup partition by default (`<Partition_weighting>` in `<Add_mesh>`, default `auto`). It changes the partition and hence the results at round-off, within the spread between rank counts, which the run record must state. Serial runs are not partitioned and are unaffected.
+    - The partition weights each cell by the sign of the initial level set at its vertices, and ParMETIS balances two things per rank: the cell count and the cut-volume work.
+    - Weights: `<Partition_weight_active>` 1 for a full liquid cell, `<Partition_weight_cut>` 2 for a cut cell (its measured cut-volume assembly time is 1.93 times that of a full cell, 1.85–2.01, in the 3D sphere and sessile decks on 4–16 ranks), `<Partition_weight_inactive>` 0 for a dry cell.
+    - `<Partition_weighting>none</Partition_weighting>` restores the cell-count partition bitwise. Fitted (ALE) free surfaces, two-fluid material interfaces and decks without a free surface keep the cell-count partition. When the level-set field is not a vertex field of the mesh file, the run falls back to the cell-count partition with one log line (`diagnostic=weighted_startup_partition_fallback`); `free_surface` requires the field.
+    - The 3D sphere (R/h = 8) and sessile drop (R/h = 16 quarter) run 19–32% faster on 8 and 16 ranks.
+    - The weights come from the initial level set only, so they go stale as the interface moves. In the 3D sessile drop at R/h = 16, once the drop has spread, the busiest rank's liquid work is 1.4–2.0 times the mean on 4–16 ranks, against 2.7–3.8 without weighting (offline METIS estimate).
+    - History: opt-in before 2026-10-22; class weights 3, 4 and 1 before 2026-10-21. No recorded run used the key before then.
 
 ## Planned benchmarks
 

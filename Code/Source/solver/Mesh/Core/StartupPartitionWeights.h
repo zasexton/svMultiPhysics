@@ -42,6 +42,10 @@
 //                                  lie below the isovalue (default 1)
 //   partition_weight_positive      ... all above it (default 1)
 //   partition_weight_cut           ... straddling or touching it (default 1)
+//   partition_weight_fallback      "unweighted": when the weights cannot be
+//                                  computed (for example the field is
+//                                  missing), use the unweighted partition
+//                                  instead of failing (default: fail)
 // Without partition_weight_vertex_field (or with an empty name) nothing is
 // weighted and the partition is the unweighted one.
 
@@ -63,6 +67,7 @@ struct StartupPartitionSignWeights {
   double negative{1.0};
   double positive{1.0};
   double cut{1.0};
+  bool fallback_to_unweighted{false};
 };
 
 // Name of the temporary cell field that carries the weights through the
@@ -129,6 +134,13 @@ inline std::optional<StartupPartitionSignWeights> startup_partition_sign_weights
   weights.negative = startup_partition_weight_option(kv, "partition_weight_negative", 1.0);
   weights.positive = startup_partition_weight_option(kv, "partition_weight_positive", 1.0);
   weights.cut = startup_partition_weight_option(kv, "partition_weight_cut", 1.0);
+  if (const auto it = kv.find("partition_weight_fallback"); it != kv.end() && !it->second.empty()) {
+    if (it->second != "unweighted") {
+      throw std::invalid_argument("DistributedMesh: invalid partition_weight_fallback='" + it->second +
+                                  "' (expected 'unweighted')");
+    }
+    weights.fallback_to_unweighted = true;
+  }
   return weights;
 }
 

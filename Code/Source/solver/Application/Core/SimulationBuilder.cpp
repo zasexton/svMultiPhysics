@@ -1412,45 +1412,33 @@ void SimulationBuilder::loadMeshes()
           ? kAggregationGhostLayers3D
           : kAggregationGhostLayers2D;
   int minimum_ghost_layers = 0;
-  std::optional<application::core::ActiveCutVolumeRequest> free_surface_request;
+  std::vector<application::core::ActiveCutVolumeRequest> cut_volume_requests;
   if (svmp::MeshComm::world().size() > 1) {
-    for (const auto& request : application::core::activeCutVolumeRequests(params_)) {
+    cut_volume_requests = application::core::activeCutVolumeRequests(params_);
+    for (const auto& request : cut_volume_requests) {
       if (request.origin ==
-          application::core::ActiveCutVolumeRequestOrigin::FreeSurfaceBoundary) {
-        if (!free_surface_request) {
-          free_surface_request = request;
-        }
-        if (request.volume_retention ==
-            application::core::ActiveCutVolumeRetention::ActiveAndInactive) {
-          minimum_ghost_layers = kAggregationGhostLayers;
-        }
+              application::core::ActiveCutVolumeRequestOrigin::FreeSurfaceBoundary &&
+          request.volume_retention ==
+              application::core::ActiveCutVolumeRetention::ActiveAndInactive) {
+        minimum_ghost_layers = kAggregationGhostLayers;
+        break;
       }
     }
   }
 
-  // Opt-in <Partition_weighting>free_surface</Partition_weighting>: weight
-  // the startup partition by the sign of the free surface's initial level
-  // set.  Only full active and cut cells carry the cut-volume (flow) terms,
-  // so a cell-count partition leaves the ranks that hold the liquid with
-  // most of that work; ParMETIS then balances the cell count and the
-  // cut-volume work (MeshParameters in Parameters.h).
+  // Startup partition weighting (<Partition_weighting>, MeshParameters in
+  // Parameters.h): by default a multi-rank run with an unfitted level-set
+  // free surface weights the partition by the sign of the initial level set.
+  // Only full active and cut cells carry the cut-volume (flow) terms, so a
+  // cell-count partition leaves the ranks that own the liquid with most of
+  // that work; ParMETIS then balances the cell count and the cut-volume
+  // work.  'none' keeps the cell-count partition.
+  const auto unfitted_free_surface =
+      application::translators::MeshTranslator::unfittedFreeSurfaceLevelSet(cut_volume_requests);
   const auto partition_weights_for =
       [&](const MeshParameters& mesh_params) -> application::translators::MeshPartitionWeights {
-    using application::translators::MeshTranslator;
-    if (!MeshTranslator::freeSurfacePartitionWeightingRequested(mesh_params) ||
-        svmp::MeshComm::world().size() <= 1) {
-      return {};
-    }
-    if (!free_surface_request) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] <Partition_weighting>free_surface</Partition_weighting> "
-          "requires an unfitted level-set free-surface boundary condition.");
-    }
-    return MeshTranslator::freeSurfacePartitionWeights(
-        mesh_params,
-        free_surface_request->level_set_field_name,
-        free_surface_request->isovalue,
-        free_surface_request->active_side == application::core::LevelSetActiveSide::Negative);
+    return application::translators::MeshTranslator::startupPartitionWeights(
+        mesh_params, unfitted_free_surface, svmp::MeshComm::world().size());
   };
 
   for (const auto* mesh_params : params_.mesh_parameters) {

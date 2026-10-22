@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -9,6 +10,10 @@
 class MeshParameters;
 class FaceParameters;
 
+namespace svmp::FE::level_set {
+struct ActiveCutVolumeRequest;
+}
+
 namespace application {
 namespace translators {
 
@@ -16,13 +21,29 @@ namespace translators {
 // mesh file (the initial level set of a free surface): cells whose vertex
 // values all lie below the isovalue weigh `negative`, all above `positive`,
 // otherwise `cut`.  ParMETIS then balances the cell count and the weighted
-// work per rank.  Empty `vertex_field` disables the weighting.
+// work per rank.  Empty `vertex_field` disables the weighting.  With
+// `fallback_to_unweighted` a vertex field that is missing or unusable at
+// startup gives the unweighted partition (and one rank-0 line) instead of an
+// error; the default weighting of unfitted free-surface runs sets it.
 struct MeshPartitionWeights {
   std::string vertex_field{};
   double isovalue{0.0};
   double negative{1.0};
   double positive{1.0};
   double cut{1.0};
+  bool fallback_to_unweighted{false};
+};
+
+// <Partition_weighting>: 'none', 'free_surface', or 'auto' (the default when
+// the key is absent): free-surface weighting for a multi-rank run with an
+// unfitted level-set free surface, none otherwise.
+enum class PartitionWeightingMode { None, FreeSurface, Auto };
+
+// The level set of a run's unfitted level-set free surface.
+struct FreeSurfaceLevelSet {
+  std::string level_set_field{};
+  double isovalue{0.0};
+  bool negative_side_active{true};
 };
 
 class MeshTranslator {
@@ -33,9 +54,29 @@ public:
                                               int minimum_ghost_layers = 0,
                                               const MeshPartitionWeights& partition_weights = {});
 
-  // True for <Partition_weighting>free_surface</Partition_weighting>, false
-  // for 'none' or an absent key; throws for any other value.
-  static bool freeSurfacePartitionWeightingRequested(const MeshParameters& params);
+  // The <Partition_weighting> mode of `params` ('auto' when the key is
+  // absent); throws for an unknown value.
+  static PartitionWeightingMode partitionWeightingMode(const MeshParameters& params);
+
+  // The unfitted level-set free surface among a run's cut-volume requests:
+  // the first free-surface boundary request.  Fitted (ALE) free surfaces,
+  // two-fluid material interfaces and equation-level cut domains make no
+  // such request, so they give std::nullopt.
+  static std::optional<FreeSurfaceLevelSet> unfittedFreeSurfaceLevelSet(
+      const std::vector<svmp::FE::level_set::ActiveCutVolumeRequest>& requests);
+
+  // The startup partition weights of a mesh of a run on `world_size` ranks
+  // whose unfitted free surface is `free_surface`:
+  //   - none on one rank (nothing is partitioned) and for 'none';
+  //   - 'free_surface': the free-surface weights; throws without an
+  //     unfitted free surface, and a missing level-set field is an error;
+  //   - 'auto': the free-surface weights when the run has an unfitted free
+  //     surface, falling back to the unweighted partition when the
+  //     level-set field is not available at startup; none otherwise.
+  static MeshPartitionWeights startupPartitionWeights(
+      const MeshParameters& params,
+      const std::optional<FreeSurfaceLevelSet>& free_surface,
+      int world_size);
 
   // The startup partition weights of <Partition_weighting>free_surface:
   // <Partition_weight_active>, <_inactive> and <_cut> mapped onto the
