@@ -24,27 +24,11 @@
 
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Constraints/ConstraintPlan.h"
-#include "FE/Core/Types.h"
-#include "FE/Forms/BoundaryConditions.h"
 #include "FE/Forms/FormExpr.h"
-#include "FE/Forms/IntegrationDomain.h"
 #include "FE/LevelSet/LevelSetGeometry.h"
 #include "FE/Systems/ALEBinding.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormsInstaller.h"
-#include "Interfaces/GeneratedActiveBoundaryDomain.h"
-#include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
-
-#include <array>
-#include <cstddef>
-#include <cstdint>
-#include <initializer_list>
-#include <optional>
-#include <span>
-#include <string>
-#include <string_view>
-#include <utility>
-#include <vector>
 
 namespace svmp {
 namespace Physics {
