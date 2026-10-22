@@ -13,6 +13,7 @@
 #include <array>
 #include <cmath>
 #include <functional>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -490,6 +491,76 @@ TEST(OptionSchema, SerializationAndDocumentationFollowDeclarationOrder)
     const auto spellings = schema.spellings();
     EXPECT_NE(std::find(spellings.begin(), spellings.end(), "Old_tension"), spellings.end());
     EXPECT_EQ(std::find(spellings.begin(), spellings.end(), "Velocity_extension"), spellings.end());
+}
+
+TEST(OptionSchema, DescribeRecordsTheProvenanceOfValuesResolvedElsewhere)
+{
+    const auto schema = exampleSchema();
+    // Another parser read this input, normalized the tension text and set
+    // the markers from somewhere else.
+    const auto in = input({{"Enabled", "yes"},
+                           {"Old_tension", "0.50"},
+                           {"Active_domain", "LevelSetPositive"},
+                           {"Wall_normal", " "},
+                           {"Some_other_key", "1"}});
+    Example value;
+    value.enabled = true;
+    value.tension = 0.5;
+    value.side = Side::Positive;
+    value.markers = {7, 8};
+    const auto described = schema.describe(in, value, Example{});
+
+    EXPECT_EQ(described.value.markers, (std::vector<int>{7, 8}));
+    ASSERT_EQ(described.provenance.size(), schema.size());
+    const auto* enabled = described.find("Enabled");
+    EXPECT_EQ(enabled->source, OptionSource::Explicit);
+    EXPECT_EQ(enabled->spelling, "Enabled");
+    EXPECT_EQ(enabled->input, "yes");   // canonical text is "true"
+    const auto* tension = described.find("Surface_tension");
+    EXPECT_EQ(tension->source, OptionSource::DeprecatedSpelling);
+    EXPECT_EQ(tension->input, "0.50");
+    ASSERT_EQ(described.deprecations.size(), 1u);
+    EXPECT_EQ(described.deprecations.front().spelling, "Old_tension");
+    const auto* side = described.find("Active_domain");
+    EXPECT_EQ(side->source, OptionSource::Explicit);
+    EXPECT_TRUE(side->input.empty());   // the input is the canonical text
+    // An empty vector text counts as absent; the value equals the default.
+    EXPECT_EQ(described.find("Wall_normal")->source, OptionSource::Default);
+    const auto* markers = described.find("Wall_markers");
+    EXPECT_EQ(markers->source, OptionSource::Derived);
+    EXPECT_EQ(markers->origin, "resolution");
+    EXPECT_EQ(described.find("Layers")->source, OptionSource::Default);
+
+    const auto json = schema.toJson(described);
+    EXPECT_NE(json.find("\"Enabled\":{\"value\":\"true\",\"source\":\"explicit\",\"spelling\":\"Enabled\","
+                        "\"input\":\"yes\"}"),
+              std::string::npos)
+        << json;
+    EXPECT_NE(json.find("\"Wall_markers\":{\"value\":\"7; 8\",\"source\":\"derived\",\"origin\":\"resolution\"}"),
+              std::string::npos)
+        << json;
+    EXPECT_NE(json.find("\"Active_domain\":{\"value\":\"LevelSetPositive\",\"source\":\"explicit\","
+                        "\"spelling\":\"Active_domain\"}"),
+              std::string::npos)
+        << json;
+}
+
+TEST(OptionSchema, OptionalValuesFormatAsNoneWhenUnset)
+{
+    struct Capped {
+        std::optional<Real> cap{};
+    };
+    OptionSchema<Capped> schema("Capped");
+    schema.key("Cap", &Capped::cap, OptionalCodec<RealCodec>{RealCodec{.minimum = 1.0}});
+    EXPECT_FALSE(schema.resolve(OptionInput{}).value.cap.has_value());
+    EXPECT_EQ(schema.serialize(Capped{}).front().second, "none");
+    const auto capped = schema.resolve(input({{"Cap", "4"}}));
+    ASSERT_TRUE(capped.value.cap.has_value());
+    EXPECT_EQ(*capped.value.cap, 4.0);
+    EXPECT_EQ(schema.serialize(capped.value).front().second, "4");
+    EXPECT_FALSE(schema.resolve(input({{"Cap", "None"}})).value.cap.has_value());
+    EXPECT_THROW((void)schema.resolve(input({{"Cap", "0.5"}})), OptionError);
+    EXPECT_EQ(schema.documentation().front().type, "optional real in [1, inf]");
 }
 
 TEST(OptionSchema, JsonEscapesControlCharactersAndQuotes)

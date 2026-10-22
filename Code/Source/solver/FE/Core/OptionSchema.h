@@ -23,6 +23,8 @@
  *                       every key (default, explicit, deprecated spelling,
  *                       implied by another key, derived after resolution)
  *                       and the deprecated input that was accepted;
+ *   - describe():       the provenance of options that another parser
+ *                       resolved from the same input;
  *   - serialize():      typed options -> canonical text, in declaration order;
  *   - toJson():         the resolved options with provenance, for
  *                       effective-configuration artifacts;
@@ -501,6 +503,27 @@ struct ListCodec {
     [[nodiscard]] std::string describe() const { return "list of " + element.describe(); }
 };
 
+/// An optional value of another codec: "none" (any case) is std::nullopt.
+template <class InnerCodec>
+struct OptionalCodec {
+    using value_type = std::optional<typename InnerCodec::value_type>;
+    static constexpr EmptyPolicy empty_policy = EmptyPolicy::Absent;
+    InnerCodec inner{};
+
+    [[nodiscard]] value_type parse(std::string_view text, std::string& error) const
+    {
+        if (detail::normalizedToken(text) == "none") {
+            return std::nullopt;
+        }
+        return inner.parse(text, error);
+    }
+    [[nodiscard]] std::string format(const value_type& value) const
+    {
+        return value ? inner.format(*value) : std::string("none");
+    }
+    [[nodiscard]] std::string describe() const { return "optional " + inner.describe(); }
+};
+
 /// One value of an enumeration: the value, its canonical token and the
 /// synonyms an input may use.  Tokens compare after normalization (case,
 /// '_', '-' and white space ignored).
@@ -673,6 +696,9 @@ struct OptionProvenance {
     std::string spelling{};
     /// The implying key (Implied) or the reason given to derive() (Derived).
     std::string origin{};
+    /// The supplied text, when it differs from the canonical text of the
+    /// value (describe() only).
+    std::string input{};
 };
 
 /// A deprecated input that was accepted: a deprecated spelling, or a retired
@@ -960,6 +986,59 @@ public:
         return out;
     }
 
+    /// The provenance of options that another parser resolved from `input`
+    /// (for a configuration artifact while the hand-written parsers remain).
+    /// A key whose spelling the input supplies is explicit, or a deprecated
+    /// spelling; its text is kept when it differs from the canonical text of
+    /// the value.  A key the input leaves alone is derived (origin
+    /// "resolution") when its value differs from `defaults`, and default
+    /// otherwise.  Nothing is parsed or validated: the value is `value`.
+    [[nodiscard]] ResolvedOptions<T> describe(const OptionInput& input, T value,
+                                              const T& defaults) const
+    {
+        ResolvedOptions<T> out;
+        out.value = std::move(value);
+        out.provenance.reserve(keys_.size());
+        for (const auto& key_entry : keys_) {
+            OptionProvenance provenance{};
+            provenance.key = key_entry.canonical;
+            const OptionSpelling* chosen = nullptr;
+            std::string chosen_text;
+            for (const auto& spelling : key_entry.spellings) {
+                const auto* entry = input.find(spelling.name);
+                if (entry == nullptr) {
+                    continue;
+                }
+                auto text = detail::trimmed(entry->text);
+                if (text.empty() && key_entry.empty == EmptyPolicy::Absent) {
+                    continue;
+                }
+                chosen = &spelling;
+                chosen_text = std::move(text);
+                break;
+            }
+            const auto value_text = key_entry.format(out.value);
+            if (chosen != nullptr) {
+                provenance.source =
+                    chosen->deprecated ? OptionSource::DeprecatedSpelling : OptionSource::Explicit;
+                provenance.spelling = chosen->name;
+                if (chosen_text != value_text) {
+                    provenance.input = std::move(chosen_text);
+                }
+                if (chosen->deprecated) {
+                    out.deprecations.push_back(
+                        OptionDeprecation{chosen->name, key_entry.canonical,
+                                          "deprecated spelling; use '" + key_entry.canonical + "'"});
+                }
+            } else if (value_text != key_entry.format(defaults)) {
+                provenance.source = OptionSource::Derived;
+                provenance.origin = "resolution";
+            }
+            out.provenance.push_back(std::move(provenance));
+        }
+        return out;
+    }
+
     /// Canonical text of every key, in declaration order.
     [[nodiscard]] std::vector<std::pair<std::string, std::string>> serialize(const T& options) const
     {
@@ -973,7 +1052,8 @@ public:
 
     /// A JSON object, in declaration order:
     ///   {"<artifact key>":{"value":"<text>","source":"<source>"
-    ///                      [,"spelling":"<input spelling>"][,"origin":"<origin>"]},...}
+    ///                      [,"spelling":"<input spelling>"][,"origin":"<origin>"]
+    ///                      [,"input":"<supplied text>"]},...}
     [[nodiscard]] std::string toJson(const ResolvedOptions<T>& resolved) const
     {
         std::string out = "{";
@@ -996,6 +1076,10 @@ public:
             if (provenance != nullptr && !provenance->origin.empty()) {
                 out += ",\"origin\":";
                 out += detail::jsonQuoted(provenance->origin);
+            }
+            if (provenance != nullptr && !provenance->input.empty()) {
+                out += ",\"input\":";
+                out += detail::jsonQuoted(provenance->input);
             }
             out += '}';
         }
@@ -1114,7 +1198,8 @@ private:
     OptionProvenance readKey(const Key& key_entry, const OptionInput& input,
                              ResolvedOptions<T>& out) const
     {
-        OptionProvenance provenance{key_entry.canonical, OptionSource::Default, {}, {}};
+        OptionProvenance provenance{};
+        provenance.key = key_entry.canonical;
         const OptionSpelling* chosen = nullptr;
         const OptionSpelling* first_supplied = nullptr;
         std::string chosen_text;
