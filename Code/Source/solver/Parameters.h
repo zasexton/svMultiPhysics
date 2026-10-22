@@ -39,7 +39,9 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <tuple>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -301,6 +303,14 @@ struct CANNRow {
 
 /// @brief Defines parameter name and value, and stores them in
 /// maps for settng values from XML.
+/// @brief Replacement of a deprecated extension spelling, or an empty view.
+///
+/// Spellings that frozen decks and qualification runners still use are
+/// accepted for one release with a warning (decision D47); the replacement
+/// can depend on the XML element (Add_equation, or a boundary condition).
+std::string_view deprecated_extension_parameter_replacement(
+    const std::string& xml_element_name, const std::string& name);
+
 class ParameterLists
 {
   public:
@@ -410,6 +420,11 @@ class ParameterLists
       if (inserted) {
         it->second.set(name, false, std::string{});
         params_map[name] = &it->second;
+        const auto replacement =
+            deprecated_extension_parameter_replacement(xml_element_name, name);
+        if (!replacement.empty()) {
+          deprecated_spellings.emplace_back(name, std::string(replacement));
+        }
       }
       it->second.set_raw_value(value);
     }
@@ -460,6 +475,10 @@ class ParameterLists
         VectorParameter<std::string>* >> params_map;
 
     std::map<std::string, Parameter<std::string>> extra_string_params;
+
+    /// @brief Deprecated extension spellings this element accepted, as
+    /// (spelling, replacement) pairs in input order.
+    std::vector<std::pair<std::string, std::string>> deprecated_spellings;
 
     std::string xml_element_name = "";
 };

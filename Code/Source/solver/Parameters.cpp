@@ -105,6 +105,37 @@ void xml_util_set_parameters( std::function<void(const std::string&, const std::
   }
 }
 
+std::string_view deprecated_extension_parameter_replacement(
+    const std::string& xml_element_name, const std::string& name)
+{
+  // Decision D47: one spelling per free-surface key.  These eleven
+  // spellings are still used by frozen decks, generators and qualification
+  // runners; they are accepted for one release with a warning and then
+  // removed.  A curvature-field spelling is replaced by Curvature_field_name
+  // on an equation and by Curvature_field on a boundary condition.
+  static const std::map<std::string, std::string_view> replacements = {
+      {"Generated_interface_quadrature_order", "Cut_quadrature_order"},
+      {"Allow_corner_linearized_geometry", "Allow_corner_linearized_cut_geometry"},
+      {"Advection_velocity_from_field", "Source_velocity_field_name"},
+      {"Wet_extension_advection_velocity_method", "Advection_velocity_extension_method"},
+      {"FreeSurfacePhysicalModel", "Free_surface_physical_model"},
+  };
+  static const std::set<std::string> curvature_field_spellings = {
+      "Projected_curvature_field", "ProjectedCurvatureField",
+      "Free_surface_curvature_field", "FreeSurfaceCurvatureField",
+      "CurvatureFieldName", "CurvatureField",
+  };
+  if (const auto it = replacements.find(name); it != replacements.end()) {
+    return it->second;
+  }
+  if (curvature_field_spellings.count(name) != 0) {
+    return xml_element_name == "Add_equation"
+               ? std::string_view{"Curvature_field_name"}
+               : std::string_view{"Curvature_field"};
+  }
+  return {};
+}
+
 namespace {
 
 bool is_free_surface_physical_model_parameter(const std::string& name)

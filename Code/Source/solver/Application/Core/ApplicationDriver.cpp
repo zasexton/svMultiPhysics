@@ -2381,6 +2381,69 @@ double secondsSince(Clock::time_point start)
   return std::chrono::duration<double>(Clock::now() - start).count();
 }
 
+// A deprecated input that the run accepted (decision D47): a legacy
+// spelling of an XML key that frozen decks still use, or a legacy
+// environment variable that a key replaced.
+struct InputDeprecation {
+  std::string input;
+  std::string replacement;
+  std::string location;
+};
+
+std::vector<InputDeprecation> collectInputDeprecations(const Parameters& params)
+{
+  std::vector<InputDeprecation> deprecations;
+  for (const auto* equation : params.equation_parameters) {
+    if (equation == nullptr) {
+      continue;
+    }
+    const std::string equation_location =
+        "Add_equation type=" +
+        (equation->type.defined() ? equation->type.value() : std::string{});
+    for (const auto& [spelling, replacement] : equation->deprecated_spellings) {
+      deprecations.push_back({spelling, replacement, equation_location});
+    }
+    for (const auto* bc : equation->boundary_conditions) {
+      if (bc == nullptr) {
+        continue;
+      }
+      const std::string bc_location =
+          equation_location + " Add_BC name=" +
+          (bc->name.defined() ? bc->name.value() : std::string{});
+      for (const auto& [spelling, replacement] : bc->deprecated_spellings) {
+        deprecations.push_back({spelling, replacement, bc_location});
+      }
+    }
+  }
+  return deprecations;
+}
+
+void warnInputDeprecations(const std::vector<InputDeprecation>& deprecations)
+{
+  for (const auto& deprecation : deprecations) {
+    application::core::oopCout()
+        << "[svMultiPhysics::Application] WARNING: '" << deprecation.input
+        << "' (" << deprecation.location
+        << ") is deprecated (decision D47) and will be removed; use '"
+        << deprecation.replacement << "'." << std::endl;
+  }
+}
+
+std::string jsonQuoted(std::string_view text)
+{
+  std::string quoted;
+  quoted.reserve(text.size() + 2u);
+  quoted.push_back('"');
+  for (const char ch : text) {
+    if (ch == '"' || ch == '\\') {
+      quoted.push_back('\\');
+    }
+    quoted.push_back(ch);
+  }
+  quoted.push_back('"');
+  return quoted;
+}
+
 void writeEffectiveConfigurationArtifact(
     const application::core::SimulationComponents& sim,
     const Parameters& params,
@@ -2437,7 +2500,25 @@ void writeEffectiveConfigurationArtifact(
       }
       output << artifacts[i].json;
     }
-    output << "]}\n";
+    output << "]";
+    // Written only when the run accepted a deprecated input, so the
+    // artifact of every other run is unchanged.
+    const auto deprecations = collectInputDeprecations(params);
+    if (!deprecations.empty()) {
+      output << ",\"input_deprecations\":[";
+      for (std::size_t i = 0; i < deprecations.size(); ++i) {
+        if (i != 0u) {
+          output << ',';
+        }
+        output << "{\"input\":" << jsonQuoted(deprecations[i].input)
+               << ",\"replacement\":"
+               << jsonQuoted(deprecations[i].replacement)
+               << ",\"location\":" << jsonQuoted(deprecations[i].location)
+               << ",\"decision\":\"D47\"}";
+      }
+      output << "]";
+    }
+    output << "}\n";
     output.flush();
     if (!output.good()) {
       throw std::runtime_error(
@@ -25712,6 +25793,7 @@ void ApplicationDriver::runWithParameters(const Parameters& params, RunMode mode
                                      [](const auto* p) { return p != nullptr; }));
   oopCout() << "[svMultiPhysics::Application] Input summary: meshes=" << mesh_blocks
             << " equations=" << equation_blocks << std::endl;
+  warnInputDeprecations(collectInputDeprecations(params));
 
   SimulationBuilder builder(params);
   auto sim = builder.build();

@@ -928,6 +928,34 @@ TEST(EquationTranslatorFreeSurface,
       definition_plan_before.summary());
 }
 
+TEST(EquationTranslatorFreeSurface, XmlRecordsDeprecatedSpellingsWithReplacements)
+{
+  // Decision D47: spellings that frozen decks still use are accepted for one
+  // release and recorded with their replacement; canonical spellings record
+  // nothing.
+  auto params = parseEquationXml(R"xml(
+<Add_equation type="level_set">
+  <Generated_interface_quadrature_order>2</Generated_interface_quadrature_order>
+  <Projected_curvature_field>kappa</Projected_curvature_field>
+  <Source_velocity_field_name>Velocity</Source_velocity_field_name>
+  <Add_BC name="free_surface">
+    <Type>Free_surface</Type>
+    <ProjectedCurvatureField>kappa</ProjectedCurvatureField>
+    <Level_set_isovalue>0.0</Level_set_isovalue>
+  </Add_BC>
+</Add_equation>
+)xml");
+
+  using Entry = std::pair<std::string, std::string>;
+  EXPECT_EQ(params->deprecated_spellings,
+            (std::vector<Entry>{
+                {"Generated_interface_quadrature_order", "Cut_quadrature_order"},
+                {"Projected_curvature_field", "Curvature_field_name"}}));
+  ASSERT_EQ(params->boundary_conditions.size(), 1u);
+  EXPECT_EQ(params->boundary_conditions.front()->deprecated_spellings,
+            (std::vector<Entry>{{"ProjectedCurvatureField", "Curvature_field"}}));
+}
+
 TEST(EquationTranslatorFreeSurface, BuildInputResolvesUnfittedContactLineWallFaces)
 {
   auto mesh = buildTranslatorMesh();
