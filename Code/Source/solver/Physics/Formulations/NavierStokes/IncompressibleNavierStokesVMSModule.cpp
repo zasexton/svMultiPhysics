@@ -410,12 +410,6 @@ struct DiagnosticBooleanOverride {
     std::string raw{};
 };
 
-struct DiagnosticScalarOverride {
-    FE::Real value{0.0};
-    std::string name{};
-    std::string raw{};
-};
-
 enum class PspgPressureGradientForm {
     Absolute,
     Incremental,
@@ -500,43 +494,6 @@ bool symmetricNitscheEnergyDiagnosticEnabled()
         return value->value;
     }
     return false;
-}
-
-std::optional<DiagnosticScalarOverride> readPositiveDiagnosticScalarOverride(
-    const char* name)
-{
-    const char* env = std::getenv(name);
-    if (env == nullptr || env[0] == '\0') {
-        return std::nullopt;
-    }
-    try {
-        const FE::Real parsed = static_cast<FE::Real>(std::stod(env));
-        if (parsed > FE::Real{0.0} && std::isfinite(parsed)) {
-            return DiagnosticScalarOverride{parsed, name, env};
-        }
-    } catch (const std::exception&) {
-    }
-    return std::nullopt;
-}
-
-std::optional<DiagnosticScalarOverride> freeSurfacePressureReferenceProbe()
-{
-    if (auto value = readPositiveDiagnosticScalarOverride(
-            "SVMP_NS_FREE_SURFACE_PRESSURE_REFERENCE_PROBE_PENALTY")) {
-        return value;
-    }
-    return readPositiveDiagnosticScalarOverride(
-        "SVMP_FREE_SURFACE_PRESSURE_REFERENCE_PROBE_PENALTY");
-}
-
-std::optional<DiagnosticScalarOverride> freeSurfaceTangentialPressureGradientProbe()
-{
-    if (auto value = readPositiveDiagnosticScalarOverride(
-            "SVMP_NS_FREE_SURFACE_TANGENTIAL_PRESSURE_GRADIENT_SCALE")) {
-        return value;
-    }
-    return readPositiveDiagnosticScalarOverride(
-        "SVMP_FREE_SURFACE_TANGENTIAL_PRESSURE_GRADIENT_SCALE");
 }
 
 bool constrainInactiveActiveDomainVelocity()
@@ -6636,8 +6593,6 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
                               const IncompressibleNavierStokesVMSOptions& options,
                               bool ale_enabled,
                               int dim,
-                              FE::forms::FormExpr* pressure_reference_probe_form = nullptr,
-                              FE::forms::FormExpr* tangential_pressure_gradient_probe_form = nullptr,
                               FE::forms::FormExpr* conservative_pressure_form = nullptr,
                               FE::forms::FormExpr* conservative_external_pressure_form = nullptr,
                               FE::forms::FormExpr* conservative_surface_energy_form = nullptr,
@@ -6660,16 +6615,12 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
     validateFreeSurfaceBoundary(bc, options, ale_enabled, system, dim);
     warnUnfittedRawCurvatureIfNeeded(bc);
 
-    const auto pressure_reference_probe = freeSurfacePressureReferenceProbe();
-    const auto tangential_pressure_gradient_probe =
-        freeSurfaceTangentialPressureGradientProbe();
     const bool has_dynamic_stress =
         !bc::isZeroConstantScalarValue(bc.external_pressure) ||
         !bc::isZeroConstantScalarValue(bc.surface_tension);
     const bool needs_surface_normal =
         has_dynamic_stress ||
-        bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None ||
-        tangential_pressure_gradient_probe.has_value();
+        bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None;
     if (isUnfittedLevelSet(bc)) {
         FE_LOG_INFO(
             std::string("IncompressibleNavierStokesVMSModule: unfitted free-surface boundary mode marker=") +
@@ -6700,34 +6651,6 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
     const auto p_ext = bc::toScalarExpr(
         bc.external_pressure,
         freeSurfaceValueName("ns_free_surface_external_pressure", bc));
-    if (pressure_reference_probe.has_value()) {
-        const auto pressure_reference_form =
-            integrateOnFreeSurface(
-                FormExpr::constant(pressure_reference_probe->value) *
-                    (p - p_ext) * q,
-                bc,
-                ale_enabled);
-        continuity_form = continuity_form + pressure_reference_form;
-        if (pressure_reference_probe_form != nullptr) {
-            *pressure_reference_probe_form =
-                pressure_reference_probe_form->isValid()
-                    ? (*pressure_reference_probe_form +
-                       pressure_reference_form)
-                    : pressure_reference_form;
-        }
-        FE_LOG_INFO(
-            std::string("IncompressibleNavierStokesVMSModule: diagnostic=free_surface_pressure_reference_probe") +
-            " marker=" +
-            std::to_string(isUnfittedLevelSet(bc) ? bc.interface_marker
-                                                  : bc.boundary_marker) +
-            " domain=" + (isUnfittedLevelSet(bc) ? "generated_interface"
-                                                  : "boundary") +
-            " env=" + pressure_reference_probe->name +
-            " raw='" + pressure_reference_probe->raw + "'" +
-            " penalty=" + std::to_string(pressure_reference_probe->value) +
-            " form=continuity_pressure_trace_reference"
-            " reference=free_surface_external_pressure");
-    }
     if (!needs_surface_normal) {
         if (isUnfittedLevelSet(bc)) {
             FE_LOG_WARNING(
@@ -6963,37 +6886,6 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
             (usesKinematicAreaGradientTraction(bc) ? "Experimental"
                                                    : "Candidate") +
             " diagnostic=free_surface_semi_implicit_normal_increment");
-    }
-
-    if (tangential_pressure_gradient_probe.has_value()) {
-        const auto grad_q_tangent = grad(q) - dot(grad(q), n) * n;
-        const auto grad_p_tangent = grad(p) - dot(grad(p), n) * n;
-        const auto pressure_gradient_integrand =
-            FormExpr::constant(tangential_pressure_gradient_probe->value) *
-            inner(grad_q_tangent, grad_p_tangent);
-        const auto pressure_gradient_form =
-            integrateOnFreeSurface(pressure_gradient_integrand, bc, ale_enabled);
-        continuity_form = continuity_form + pressure_gradient_form;
-        if (tangential_pressure_gradient_probe_form != nullptr) {
-            *tangential_pressure_gradient_probe_form =
-                tangential_pressure_gradient_probe_form->isValid()
-                    ? (*tangential_pressure_gradient_probe_form +
-                       pressure_gradient_form)
-                    : pressure_gradient_form;
-        }
-        FE_LOG_INFO(
-            std::string("IncompressibleNavierStokesVMSModule: diagnostic=free_surface_tangential_pressure_gradient_probe") +
-            " marker=" +
-            std::to_string(isUnfittedLevelSet(bc) ? bc.interface_marker
-                                                  : bc.boundary_marker) +
-            " domain=" + (isUnfittedLevelSet(bc) ? "generated_interface"
-                                                  : "boundary") +
-            " env=" + tangential_pressure_gradient_probe->name +
-            " raw='" + tangential_pressure_gradient_probe->raw + "'" +
-            " scale=" +
-            std::to_string(tangential_pressure_gradient_probe->value) +
-            " form=continuity_free_surface_tangential_pressure_gradient"
-            " reference=free_surface_external_pressure");
     }
 
     switch (bc.kinematic_enforcement) {
@@ -9239,8 +9131,6 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     FormExpr pressure_ghost_penalty_form;
     FormExpr weak_boundary_momentum_work_form;
     FormExpr weak_boundary_continuity_work_form;
-    FormExpr free_surface_pressure_reference_probe_form;
-    FormExpr free_surface_tangential_pressure_gradient_probe_form;
     FormExpr free_surface_conservative_pressure_form;
     FormExpr free_surface_conservative_external_pressure_form;
     FormExpr free_surface_conservative_surface_energy_form;
@@ -9364,12 +9254,6 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                 options_,
                 options_.enable_ale,
                 dim,
-                pressureRowContributionDiagnosticEnabled()
-                    ? &free_surface_pressure_reference_probe_form
-                    : nullptr,
-                pressureRowContributionDiagnosticEnabled()
-                    ? &free_surface_tangential_pressure_gradient_probe_form
-                    : nullptr,
                 conservative_balance_diagnostic_supported
                     ? &free_surface_conservative_pressure_form
                     : nullptr,
@@ -10146,7 +10030,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         FE_LOG_INFO(
             "IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pressure_row_contribution_operators"
             " installing=1"
-            " ops=equations_diagnostic_ns_galerkin_continuity|equations_diagnostic_ns_active_continuity|equations_diagnostic_ns_vms_pspg|equations_diagnostic_ns_vms_pspg_pressure_gradient|equations_diagnostic_ns_vms_pspg_nonpressure|equations_diagnostic_ns_pressure_ghost_penalty|equations_diagnostic_ns_free_surface_pressure_reference_probe|equations_diagnostic_ns_free_surface_tangential_pressure_gradient_probe");
+            " ops=equations_diagnostic_ns_galerkin_continuity|equations_diagnostic_ns_active_continuity|equations_diagnostic_ns_vms_pspg|equations_diagnostic_ns_vms_pspg_pressure_gradient|equations_diagnostic_ns_vms_pspg_nonpressure|equations_diagnostic_ns_pressure_ghost_penalty");
         (void)FE::systems::installFormulation(
             system,
             "equations_diagnostic_ns_galerkin_continuity",
@@ -10197,22 +10081,6 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                 "equations_diagnostic_ns_pressure_ghost_penalty",
                 {p_id},
                 pressure_ghost_penalty_form,
-                diagnostic_install);
-        }
-        if (free_surface_pressure_reference_probe_form.isValid()) {
-            (void)FE::systems::installFormulation(
-                system,
-                "equations_diagnostic_ns_free_surface_pressure_reference_probe",
-                {p_id},
-                free_surface_pressure_reference_probe_form,
-                diagnostic_install);
-        }
-        if (free_surface_tangential_pressure_gradient_probe_form.isValid()) {
-            (void)FE::systems::installFormulation(
-                system,
-                "equations_diagnostic_ns_free_surface_tangential_pressure_gradient_probe",
-                {p_id},
-                free_surface_tangential_pressure_gradient_probe_form,
                 diagnostic_install);
         }
     }

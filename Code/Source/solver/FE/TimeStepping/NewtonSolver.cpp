@@ -9860,8 +9860,6 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 "equations_diagnostic_ns_vms_pspg_pressure_gradient",
                 "equations_diagnostic_ns_vms_pspg_nonpressure",
                 "equations_diagnostic_ns_pressure_ghost_penalty",
-                "equations_diagnostic_ns_free_surface_pressure_reference_probe",
-                "equations_diagnostic_ns_free_surface_tangential_pressure_gradient_probe",
             };
             for (const char* op : ops) {
                 if (!transient.system().hasOperator(op)) {
