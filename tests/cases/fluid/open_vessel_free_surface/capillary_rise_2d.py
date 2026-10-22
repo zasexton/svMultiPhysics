@@ -20,8 +20,10 @@ Two deck profiles are written (``write_case(..., profile=...)``):
   level-set inflow condition: the D21 bounds reject level-set inflow faces
   (the bottom stays deep in the liquid; its nodes keep a negative value
   within their one-ring bounds).  The run starts from rest with a zero
-  initial rate (REQUIRED_ENVIRONMENT, recorded in benchmark.json): the
-  PDE-consistent rate solve holds the closed-inlet preload pressure fixed,
+  initial rate (``<Generalized_alpha_initial_rate>Zero``; before decision
+  D47 the environment variable SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT=0 did
+  the same): the PDE-consistent rate solve holds the closed-inlet preload
+  pressure fixed,
   so at the opened inlet it returns a non-solenoidal impulsive rate whose
   predictor the first steps cannot absorb.
   The coupled system is solved with the gathered sparse direct solve
@@ -67,8 +69,9 @@ SLIP_LENGTH_M = 0.001
 # Deck profiles (module docstring).  "legacy" reproduces the 2026-08-30 decks.
 PROFILES = ("d4", "legacy")
 DEFAULT_PROFILE = "d4"
-# Process environment a d4 run needs (module docstring); run scripts export it.
-REQUIRED_ENVIRONMENT = {"SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT": "0"}
+# Process environment a d4 run needs (module docstring).  Empty since decision
+# D47: the zero initial rate is the deck key <Generalized_alpha_initial_rate>.
+REQUIRED_ENVIRONMENT: dict[str, str] = {}
 INTERFACE_DOMAIN_ID = "capillary_rise_surface"
 COMPARISON_CONTRACT = (
     Path(__file__).resolve().parents[1]
@@ -447,7 +450,8 @@ def _d4_solver_xml(steps: int,
 
     redistancing (decision D39, default on) writes the triggered
     interface-preserving redistancing; off writes the earlier deck byte for
-    byte."""
+    byte, apart from the <Generalized_alpha_initial_rate>Zero line that
+    replaced the required environment (decision D47)."""
     redistancing_xml = ("\n  <Enable_interface_preserving_redistancing>true"
                         "</Enable_interface_preserving_redistancing>" if redistancing else "")
     return f"""<?xml version="1.0" encoding="UTF-8" ?>
@@ -461,6 +465,7 @@ def _d4_solver_xml(steps: int,
   <Number_of_time_steps>{steps}</Number_of_time_steps>
   <Time_step_size>{time_step_size:.17g}</Time_step_size>
   <Spectral_radius_of_infinite_time_step>0.50</Spectral_radius_of_infinite_time_step>
+  <Generalized_alpha_initial_rate>Zero</Generalized_alpha_initial_rate>
   <Searched_file_name_to_trigger_stop>STOP_SIM</Searched_file_name_to_trigger_stop>
   <Save_results_to_VTK_format>true</Save_results_to_VTK_format>
   <Name_prefix_of_saved_VTK_files>result</Name_prefix_of_saved_VTK_files>
@@ -788,7 +793,7 @@ def write_case(case_dir: Path,
             "nonlinear_tolerance": 1.0e-4,
             "level_set_bottom_boundary": "none (D21 bounds reject level-set inflow faces)",
             "fluid_linear_solver": "gathered sparse direct (FSILS Direct, opt-in D23)",
-            "initial_rate": "zero (PDE rate solve disabled by the required environment)",
+            "initial_rate": "zero (<Generalized_alpha_initial_rate>Zero)",
         }
         if redistancing:
             # Decision D39; omitted when off, so the earlier benchmark.json is

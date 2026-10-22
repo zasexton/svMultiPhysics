@@ -391,8 +391,10 @@ def test_d4_profile_is_the_default_wetting_deck(tmp_path: Path):
     # D21 bounds reject level-set inflow faces: the bottom has no level-set BC.
     assert [bc.attrib["name"] for bc in level_set.findall("Add_BC")] == ["wall_top"]
     assert boundary_by_name(level_set, "wall_top").findtext("Type") == "LevelSetOutflow"
-    assert benchmark["required_environment"] == {
-        "SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT": "0"}
+    # Decision D47: the zero initial rate is a deck key, not an environment
+    # variable.
+    assert general.findtext("Generalized_alpha_initial_rate") == "Zero"
+    assert benchmark["required_environment"] == {}
 
     fluid = equation_by_type(root, "fluid")
     assert fluid.findtext("Tolerance") == "1.0e-4"
