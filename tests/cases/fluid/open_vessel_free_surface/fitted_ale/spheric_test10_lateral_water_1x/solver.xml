@@ -128,7 +128,6 @@
     <Implementation>FittedALE</Implementation>
     <External_pressure>0.0</External_pressure>
     <Surface_tension>0.0728</Surface_tension>
-    <Use_current_geometry_curvature>true</Use_current_geometry_curvature>
     <Kinematic_enforcement>Nitsche</Kinematic_enforcement>
     <Normal_kinematic_policy>MatchFluidNormalVelocity</Normal_kinematic_policy>
     <Tangential_mesh_policy>SmoothingOnly</Tangential_mesh_policy>

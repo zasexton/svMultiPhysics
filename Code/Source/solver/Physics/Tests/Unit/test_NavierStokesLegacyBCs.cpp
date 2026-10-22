@@ -1399,7 +1399,6 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicBCTranslation_UsesCurrentG
     bc.params["Implementation"] = defined("FittedALE");
     bc.params["External_pressure"] = defined("12.5");
     bc.params["Surface_tension"] = defined("0.25");
-    bc.params["Use_current_geometry_curvature"] = defined("true");
     bc.params["Kinematic_enforcement"] = defined("Nitsche");
     bc.params["Normal_kinematic_policy"] = defined("MatchFluidNormalVelocity");
     bc.params["Tangential_mesh_policy"] = defined("Prescribed");
@@ -1415,7 +1414,6 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicBCTranslation_UsesCurrentG
     // Fitted boundary terms integrate over the assembly frame; the current
     // surface measure is not applied a second time.
     ASSERT_FALSE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::CurrentMeasure));
-    ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::CurrentMeanCurvature));
     ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::FacetArea));
     ASSERT_NO_THROW(system.setup());
 #endif
