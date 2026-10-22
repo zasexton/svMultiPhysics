@@ -28,6 +28,7 @@ Use specific headers when compile time or dependency clarity matters:
 | `FE/LevelSet/LevelSetVolume.h` | cut-cell volume measurement |
 | `FE/LevelSet/LevelSetWallContactConstraint.h` | identity of an accepted wall-contact cell |
 | `FE/LevelSet/Maintenance/LevelSetMaintenanceConfiguration.h` | configuration, run state and declaration bindings of a maintained level-set field |
+| `FE/LevelSet/Maintenance/LevelSetMaintenancePipeline.h` | accepted-step maintenance pipeline and the bound-preserving candidate gate |
 | `FE/LevelSet/LevelSetDiagnostics.h` | scalar diagnostics for the cut-cell volume |
 | `FE/LevelSet/LevelSetRestart.h` | restart records for level-set fields and generated interfaces |
 

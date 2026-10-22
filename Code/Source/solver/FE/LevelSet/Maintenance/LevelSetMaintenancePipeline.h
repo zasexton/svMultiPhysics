@@ -1,0 +1,162 @@
+/* Copyright (c) Stanford University, The Regents of the University of California, and others.
+ *
+ * All Rights Reserved.
+ *
+ * See Copyright-SimVascular.txt for additional details.
+ */
+
+#pragma once
+
+/**
+ * @file LevelSetMaintenancePipeline.h
+ * @ingroup fe_level_set
+ * @brief The maintenance of level-set fields between and inside steps: the
+ *        accepted-step pipeline (kinematic reconciliation, sign-definite
+ *        patch bounds, triggered interface-preserving redistancing and the
+ *        publication of the change into the accepted history) and the
+ *        bound-preserving gate of a step candidate.
+ *
+ * The functions were moved from Application/Core/ApplicationDriver.cpp with
+ * bodies, messages and collective order unchanged.  Every function is
+ * collective over the FE system's active communicator, and a rank-local
+ * failure is agreed on before any rank acts on it.
+ */
+
+#include "Core/Types.h"
+#include "LevelSet/LevelSetMaintenanceSubstage.h"
+#include "LevelSet/LevelSetOptions.h"
+#include "LevelSet/LevelSetVolume.h"
+#include "LevelSet/Maintenance/LevelSetMaintenanceConfiguration.h"
+
+#include <functional>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace svmp {
+namespace FE {
+namespace systems {
+class FESystem;
+} // namespace systems
+namespace timestepping {
+class TimeHistory;
+} // namespace timestepping
+
+namespace level_set {
+
+/// A maintained level-set field: its immutable configuration and its run
+/// state.
+struct LevelSetMaintenanceRequest {
+    std::shared_ptr<const LevelSetMaintenanceConfiguration> configuration{};
+    LevelSetMaintenanceRuntime runtime{};
+};
+
+/// Services of the caller that the pipeline uses.
+struct LevelSetMaintenanceHost {
+    /// The FE system; the functions do nothing without one.
+    systems::FESystem* fe_system{nullptr};
+
+    /// Boundary marker of the mesh face named @p face_name, nullopt for an
+    /// unknown face; empty when the caller has no mesh.  Rank-local.
+    std::function<std::optional<int>(std::string_view face_name)>
+        boundary_marker{};
+};
+
+/// Validates the final candidate of an accepted-step maintenance transaction
+/// before it is published (throws to reject it).
+using LevelSetMaintenanceCandidateValidator =
+    std::function<void(std::span<const Real>)>;
+
+/// Observer of each maintenance substage that changed the level set, with
+/// the FE-ordered solution before and after it.
+using LevelSetMaintenanceStageObserver = std::function<void(
+    MaintenanceSubstage, std::span<const Real>, std::span<const Real>)>;
+
+/**
+ * @brief Accepted state from which the next transport step starts.
+ *
+ * The kinematic reconciliation of that step compares the transported
+ * endpoint with it, and the sign-definite patch bounds take their one-ring
+ * ranges from it.  The transport velocity is captured only for the
+ * reconciliation.
+ */
+struct LevelSetKinematicBaseline {
+    FieldId level_set_field{INVALID_FIELD_ID};
+    FieldId velocity_field{INVALID_FIELD_ID};
+    int step{-1};
+    std::vector<Real> level_set{};
+    std::vector<Real> velocity{};
+};
+
+struct LevelSetBoundPreservingApplicationResult {
+    bool accept_step{true};
+    bool changed{false};
+};
+
+/// Volume options of the field's active cut-volume request.
+[[nodiscard]] LevelSetVolumeOptions levelSetVolumeOptionsForMaintenance(
+    const LevelSetMaintenanceConfiguration& configuration);
+
+/// The field's open boundaries with their mesh markers (rank-local).
+[[nodiscard]] LevelSetBoundaryOptions resolveLevelSetOpenBoundaries(
+    const LevelSetMaintenanceHost& host,
+    const LevelSetMaintenanceConfiguration& configuration);
+
+/**
+ * @brief Bound-preserving gate of the step candidate in history.u().
+ *
+ * For every request with the limiter enabled: rejects an impermeable-wall
+ * velocity, rejects the candidate (accept_step = false) above the Courant
+ * limit, and rejects it (changed = true) when the limiter would change it,
+ * so that the step is solved again.  history is not changed.
+ */
+[[nodiscard]] LevelSetBoundPreservingApplicationResult
+applyLevelSetBoundPreservingCandidates(
+    const LevelSetMaintenanceHost& host,
+    timestepping::TimeHistory& history,
+    std::span<const LevelSetMaintenanceRequest> requests,
+    const LevelSetMaintenanceStageObserver& observe_stage = {});
+
+/// Transport-velocity coefficients in the velocity field's DOF numbering,
+/// from the unknown vector or from prescribed-data storage.
+[[nodiscard]] std::vector<Real> levelSetTransportVelocityCoefficients(
+    const systems::FESystem& system,
+    FieldId velocity_field,
+    std::span<const Real> fe_solution);
+
+/// The kinematic baseline of @p configuration's field at @p fe_solution.
+[[nodiscard]] LevelSetKinematicBaseline makeLevelSetKinematicBaseline(
+    const systems::FESystem& system,
+    const LevelSetMaintenanceConfiguration& configuration,
+    std::span<const Real> fe_solution,
+    int step);
+
+/**
+ * @brief Accepted-step maintenance of every non-conservative request, as
+ *        one transaction.
+ *
+ * For each request, in this order and when due: the kinematic
+ * reconciliation against @p kinematic_baselines, the sign-definite patch
+ * bounds, and the triggered interface-preserving redistancing.  The changed
+ * candidate is passed to @p validate_candidate, then the change of every
+ * maintained field is published as one common delta on every stored state
+ * of @p history.  The requests' run state is updated only when everything
+ * succeeds.  Returns whether a field changed.  The commit logs go to
+ * @p deferred_commit_logs when given, else to the log.
+ */
+bool applyLevelSetMaintenance(
+    const LevelSetMaintenanceHost& host,
+    timestepping::TimeHistory& history,
+    std::vector<LevelSetMaintenanceRequest>& requests,
+    const LevelSetMaintenanceCandidateValidator& validate_candidate = {},
+    const LevelSetMaintenanceStageObserver& observe_stage = {},
+    std::vector<std::string>* deferred_commit_logs = nullptr,
+    bool* rate_publication_started = nullptr,
+    std::span<const LevelSetKinematicBaseline> kinematic_baselines = {});
+
+} // namespace level_set
+} // namespace FE
+} // namespace svmp

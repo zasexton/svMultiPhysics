@@ -34,6 +34,7 @@
 #include "FE/LevelSet/LevelSetConservativePhaseWorkflow.h"
 #include "FE/LevelSet/LevelSetMaintenanceSchedule.h"
 #include "FE/LevelSet/Maintenance/LevelSetMaintenanceConfiguration.h"
+#include "FE/LevelSet/Maintenance/LevelSetMaintenancePipeline.h"
 #include "FE/LevelSet/LevelSetImplicitCutQuadratureBackend.h"
 #include "FE/LevelSet/LevelSetInterfaceLifecycle.h"
 #include "FE/LevelSet/LevelSetKinematicReconciliation.h"
@@ -4518,66 +4519,48 @@ void reimposeAcceptedMasterBearingState(
 
 using svmp::Physics::formulations::navier_stokes::free_surface::recordInitialFreeSurfaceDiscreteFunctionalBaseline;
 
-svmp::FE::level_set::LevelSetVolumeOptions levelSetVolumeOptionsForMaintenance(
-    const LevelSetMaintenanceRequest& request)
+// The accepted-step maintenance pipeline and the bound-preserving gate are
+// in FE/LevelSet/Maintenance/LevelSetMaintenancePipeline.h.  The driver
+// passes the FE part of its requests (the configuration handle and a copy
+// of the FE run state) and copies the run state back.
+using svmp::FE::level_set::LevelSetBoundPreservingApplicationResult;
+using svmp::FE::level_set::LevelSetMaintenanceStageObserver;
+
+std::vector<svmp::FE::level_set::LevelSetMaintenanceRequest>
+feLevelSetMaintenanceRequests(
+    std::span<const LevelSetMaintenanceRequest> requests)
 {
-  return application::core::volumeOptionsForCutMaintenance(
-      request.configuration->volume_cut_request,
-      request.configuration->transport.level_set.field_name,
-      request.configuration->isovalue);
+  std::vector<svmp::FE::level_set::LevelSetMaintenanceRequest> fe_requests;
+  fe_requests.reserve(requests.size());
+  for (const auto& request : requests) {
+    fe_requests.push_back(svmp::FE::level_set::LevelSetMaintenanceRequest{
+        .configuration = request.configuration,
+        .runtime = static_cast<
+            const svmp::FE::level_set::LevelSetMaintenanceRuntime&>(
+            request.runtime),
+    });
+  }
+  return fe_requests;
 }
 
-svmp::FE::level_set::LevelSetBoundaryOptions
-resolveLevelSetOpenBoundaries(
-    const application::core::SimulationComponents& sim,
-    const LevelSetMaintenanceRequest& request)
+svmp::FE::level_set::LevelSetMaintenanceHost levelSetMaintenanceHost(
+    const application::core::SimulationComponents& sim)
 {
-  svmp::FE::level_set::LevelSetBoundaryOptions boundaries;
-  if (request.configuration->open_boundaries.empty()) {
-    return boundaries;
-  }
-  if (!sim.primary_mesh) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Bound-preserving level-set transport "
-        "cannot resolve open boundary names without the active mesh.");
-  }
-  for (const auto& open : request.configuration->open_boundaries) {
-    const auto marker = sim.primary_mesh->label_from_name(open.face_name);
-    if (marker == svmp::INVALID_LABEL) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Bound-preserving level-set transport "
-          "could not resolve open boundary face '" + open.face_name + "'.");
-    }
-    if (open.inflow) {
-      if (!open.literal_inflow_value.has_value() ||
-          !std::isfinite(*open.literal_inflow_value)) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Bound-preserving level-set transport "
-            "currently supports finite literal LevelSetInflow data only; face='" +
-            open.face_name + "'.");
+  svmp::FE::level_set::LevelSetMaintenanceHost host;
+  host.fe_system = sim.fe_system.get();
+  if (sim.primary_mesh) {
+    host.boundary_marker =
+        [&sim](std::string_view face_name) -> std::optional<int> {
+      const auto marker =
+          sim.primary_mesh->label_from_name(std::string(face_name));
+      if (marker == svmp::INVALID_LABEL) {
+        return std::nullopt;
       }
-      boundaries.inflow.push_back(
-          svmp::FE::level_set::LevelSetInflowBoundary{
-              .boundary_marker = marker,
-              .value = *open.literal_inflow_value});
-    } else {
-      boundaries.outflow.push_back(
-          svmp::FE::level_set::LevelSetOutflowBoundary{
-              .boundary_marker = marker});
-    }
+      return static_cast<int>(marker);
+    };
   }
-  return boundaries;
+  return host;
 }
-
-struct LevelSetBoundPreservingApplicationResult {
-  bool accept_step{true};
-  bool changed{false};
-};
-
-using LevelSetMaintenanceStageObserver = std::function<void(
-    application::core::LevelSetMaintenanceWorkSubstage,
-    std::span<const svmp::FE::Real>,
-    std::span<const svmp::FE::Real>)>;
 
 LevelSetBoundPreservingApplicationResult
 applyLevelSetBoundPreservingCandidates(
@@ -4586,161 +4569,9 @@ applyLevelSetBoundPreservingCandidates(
     const std::vector<LevelSetMaintenanceRequest>& requests,
     const LevelSetMaintenanceStageObserver& observe_stage = {})
 {
-  LevelSetBoundPreservingApplicationResult application_result;
-  if (!sim.fe_system || requests.empty()) {
-    return application_result;
-  }
-
-  const bool any_enabled = std::any_of(
-      requests.begin(), requests.end(), [](const auto& request) {
-        return request.configuration->transport.bound_preserving.enabled;
-      });
-  if (!any_enabled) {
-    return application_result;
-  }
-  if (!(history.dt() > 0.0) || !std::isfinite(history.dt())) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Bound-preserving level-set transport "
-        "requires a positive finite candidate time step.");
-  }
-
-  const auto comm = activeFESystemCommunicator(*sim.fe_system);
-  const auto previous_solution =
-      gatherFeOrderedSolution(history.uPrev(), comm);
-  const auto raw_candidate =
-      gatherFeOrderedSolution(history.u(), comm);
-  auto candidate = raw_candidate;
-
-  for (const auto& request : requests) {
-    if (!request.configuration->transport.bound_preserving.enabled) {
-      continue;
-    }
-    const auto field =
-        sim.fe_system->findFieldByName(request.configuration->transport.level_set.field_name);
-    if (field == svmp::FE::INVALID_FIELD_ID) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Bound-preserving level-set transport "
-          "could not find field '" + request.configuration->transport.level_set.field_name + "'.");
-    }
-    const auto boundaries = resolveLevelSetOpenBoundaries(sim, request);
-    svmp::FE::systems::SystemStateView state;
-    state.time = history.time() + history.dt();
-    state.dt = history.dt();
-    state.dt_prev = history.dtPrev();
-    state.u = std::span<const svmp::FE::Real>(candidate);
-    state.u_prev = std::span<const svmp::FE::Real>(previous_solution);
-
-    const auto safety =
-        svmp::FE::level_set::evaluateLevelSetTransportSafety(
-            *sim.fe_system,
-            request.configuration->transport.velocity,
-            boundaries,
-            request.configuration->transport.bound_preserving,
-            state,
-            static_cast<svmp::FE::Real>(history.dt()));
-    const bool wall_violation =
-        request.configuration->transport.bound_preserving.enforce_impermeable_boundaries &&
-        safety.maximum_boundary_normal_velocity_ratio >
-            request.configuration->transport.bound_preserving.impermeable_normal_velocity_tolerance;
-    const bool courant_violation =
-        request.configuration->transport.bound_preserving.enforce_courant_limit &&
-        safety.maximum_courant >
-            request.configuration->transport.bound_preserving.maximum_courant +
-                request.configuration->transport.bound_preserving.courant_tolerance;
-    if (wall_violation) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Bound-preserving level-set transport "
-          "rejected an incompatible impermeable-wall velocity for field '" +
-          request.configuration->transport.level_set.field_name + "': marker=" +
-          std::to_string(safety.worst_boundary_marker) +
-          " normal_velocity=" +
-          std::to_string(safety.maximum_boundary_normal_velocity) +
-          " normalized_flux=" +
-          std::to_string(safety.maximum_boundary_normal_velocity_ratio) +
-          ". " + safety.diagnostic);
-    }
-    if (courant_violation) {
-      application::core::oopCout()
-          << "[svMultiPhysics::Application] Level-set candidate rejected"
-          << " field='" << request.configuration->transport.level_set.field_name << "'"
-          << " reason=bound_preserving_courant_contract"
-          << " courant=" << safety.maximum_courant
-          << " maximum_courant="
-          << request.configuration->transport.bound_preserving.maximum_courant
-          << " minimum_cell_length=" << safety.minimum_cell_length
-          << " maximum_speed=" << safety.maximum_speed
-          << " dt=" << history.dt() << std::endl;
-      application_result.accept_step = false;
-      return application_result;
-    }
-    if (!safety.success) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Level-set transport safety check "
-          "failed for field '" + request.configuration->transport.level_set.field_name + "': " +
-          safety.diagnostic);
-    }
-
-    std::vector<svmp::FE::Real> limited;
-    const auto limiter =
-        svmp::FE::level_set::applyLevelSetBoundPreservingLimiter(
-            *sim.fe_system,
-            field,
-            boundaries,
-            request.configuration->transport.bound_preserving,
-            std::span<const svmp::FE::Real>(previous_solution),
-            std::span<const svmp::FE::Real>(candidate),
-            safety.maximum_courant,
-            limited);
-    if (!limiter.success) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Bound-preserving level-set limiter "
-          "failed for field '" + request.configuration->transport.level_set.field_name + "': " +
-          limiter.diagnostic);
-    }
-    application::core::oopCout()
-        << "[svMultiPhysics::Application] Level-set bound-preserving gate"
-        << " field='" << request.configuration->transport.level_set.field_name << "'"
-        << " step=" << history.stepIndex() + 1
-        << " courant=" << safety.maximum_courant
-        << " wall_normal_ratio="
-        << safety.maximum_boundary_normal_velocity_ratio
-        << " limited_dofs=" << limiter.limited_dofs
-        << " max_unrelaxed_violation="
-        << limiter.maximum_unrelaxed_bound_violation
-        << " max_correction=" << limiter.maximum_correction
-        << " positive_sign_flips_prevented="
-        << limiter.positive_patch_sign_flips_prevented
-        << " negative_sign_flips_prevented="
-        << limiter.negative_patch_sign_flips_prevented
-        << " conservative=false" << std::endl;
-    if (limiter.applied) {
-      if (observe_stage) {
-        observe_stage(
-            application::core::LevelSetMaintenanceWorkSubstage::
-                Limiting,
-            candidate,
-            limited);
-      }
-      // Mutating a converged Newton candidate after its final residual check
-      // would accept a state that was never a solution of the coupled
-      // transport/capillary operator.  Reject without touching history so an
-      // adaptive TimeLoop can reduce dt and solve again.  Fixed-step runs fail
-      // closed if they cannot produce an in-bounds nonlinear solution.
-      application::core::oopCout()
-          << "[svMultiPhysics::Application] Level-set candidate rejected"
-          << " field='" << request.configuration->transport.level_set.field_name << "'"
-          << " reason=bound_preserving_limiter_requires_nonlinear_retry"
-          << " limited_dofs=" << limiter.limited_dofs
-          << " max_unrelaxed_violation="
-          << limiter.maximum_unrelaxed_bound_violation
-          << " max_correction=" << limiter.maximum_correction
-          << " dt=" << history.dt() << std::endl;
-      application_result.accept_step = false;
-      application_result.changed = true;
-      return application_result;
-    }
-  }
-  return application_result;
+  const auto fe_requests = feLevelSetMaintenanceRequests(requests);
+  return svmp::FE::level_set::applyLevelSetBoundPreservingCandidates(
+      levelSetMaintenanceHost(sim), history, fe_requests, observe_stage);
 }
 
 // The accepted wall-contact cells of one maintained level-set field (the
@@ -5276,76 +5107,8 @@ capturePostacceptMaintenanceVectorCollectively(
     svmp::FE::backends::GenericVector& solution,
     const svmp::MeshComm& comm);
 
-// Publication of maintained-field repairs:
-// FE/TimeStepping/FieldRepairPublication.
-using svmp::FE::timestepping::MaintainedFieldPostAcceptPublicationView;
-using svmp::FE::timestepping::MaintainedFieldPostAcceptPublicationScheduleEntry;
-using svmp::FE::timestepping::StagedPostacceptMaintenanceHistoryPublication;
-using svmp::FE::timestepping::makeCommonRepresentationMaintainedFieldPublication;
-using svmp::FE::timestepping::makeStagedPostacceptMaintenanceHistoryPublication;
-using svmp::FE::timestepping::stageMaintainedFieldPostAcceptPublication;
-
-void publishStagedPostacceptMaintenanceHistoryCollectively(
-    svmp::FE::timestepping::TimeHistory& history,
-    const StagedPostacceptMaintenanceHistoryPublication& staged,
-    const svmp::MeshComm& comm,
-    bool* rate_publication_started = nullptr)
-{
-  svmp::FE::timestepping::publishStagedPostacceptMaintenanceHistoryCollectively(
-      history, staged, feCollectiveCommunicator(comm), rate_publication_started);
-}
-
-using LevelSetMaintenanceCandidateValidator =
-    std::function<void(std::span<const svmp::FE::Real>)>;
-
-// Accepted state from which the next transport step starts.  The kinematic
-// reconciliation of that step compares the transported endpoint with it, and
-// the sign-definite patch bounds take their one-ring ranges from it.  The
-// transport velocity is captured only for the reconciliation.
-struct LevelSetKinematicBaseline {
-  svmp::FE::FieldId level_set_field{svmp::FE::INVALID_FIELD_ID};
-  svmp::FE::FieldId velocity_field{svmp::FE::INVALID_FIELD_ID};
-  int step{-1};
-  std::vector<svmp::FE::Real> level_set{};
-  std::vector<svmp::FE::Real> velocity{};
-};
-
-// Transport-velocity coefficients in the velocity field's DOF numbering,
-// from the unknown vector or from prescribed-data storage.
-std::vector<svmp::FE::Real> levelSetTransportVelocityCoefficients(
-    const svmp::FE::systems::FESystem& system,
-    svmp::FE::FieldId velocity_field,
-    std::span<const svmp::FE::Real> fe_solution)
-{
-  const auto count = static_cast<std::size_t>(
-      system.fieldDofHandler(velocity_field).getNumDofs());
-  const auto& record = system.fieldRecord(velocity_field);
-  if (record.source_kind ==
-      svmp::FE::systems::FieldSourceKind::PrescribedData) {
-    const auto coefficients =
-        system.prescribedFieldCoefficients(velocity_field);
-    if (coefficients.size() != count) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Level-set kinematic reconciliation "
-          "found no complete coefficients for prescribed transport velocity '" +
-          record.name + "'.");
-    }
-    return {coefficients.begin(), coefficients.end()};
-  }
-  const auto raw_offset = system.fieldDofOffset(velocity_field);
-  if (!system.fieldParticipatesInUnknownVector(velocity_field) ||
-      raw_offset < 0 ||
-      static_cast<std::size_t>(raw_offset) > fe_solution.size() ||
-      count > fe_solution.size() - static_cast<std::size_t>(raw_offset)) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Level-set kinematic reconciliation "
-        "could not read transport velocity '" + record.name +
-        "' from the solution vector.");
-  }
-  const auto begin =
-      fe_solution.begin() + static_cast<std::ptrdiff_t>(raw_offset);
-  return {begin, begin + static_cast<std::ptrdiff_t>(count)};
-}
+using svmp::FE::level_set::LevelSetKinematicBaseline;
+using svmp::FE::level_set::LevelSetMaintenanceCandidateValidator;
 
 LevelSetKinematicBaseline makeLevelSetKinematicBaseline(
     const svmp::FE::systems::FESystem& system,
@@ -5353,53 +5116,8 @@ LevelSetKinematicBaseline makeLevelSetKinematicBaseline(
     std::span<const svmp::FE::Real> fe_solution,
     int step)
 {
-  const auto& transport = request.configuration->transport;
-  const bool with_velocity = transport.kinematic_reconciliation.enabled;
-  if (transport.conservative_phase.enabled ||
-      (with_velocity &&
-       (transport.velocity.source ==
-            svmp::FE::level_set::LevelSetVelocitySource::ConstantVector ||
-        transport.velocity.source ==
-            svmp::FE::level_set::LevelSetVelocitySource::
-                MaterialInterfacePhasePair))) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Level-set kinematic reconciliation "
-        "for field '" + transport.level_set.field_name +
-        "' requires a nodal transport-velocity field and no conservative "
-        "phase transport.");
-  }
-  LevelSetKinematicBaseline baseline;
-  baseline.level_set_field =
-      system.findFieldByName(transport.level_set.field_name);
-  baseline.velocity_field =
-      with_velocity ? system.findFieldByName(transport.velocity.field_name)
-                    : svmp::FE::INVALID_FIELD_ID;
-  if (baseline.level_set_field == svmp::FE::INVALID_FIELD_ID ||
-      (with_velocity &&
-       baseline.velocity_field == svmp::FE::INVALID_FIELD_ID)) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Level-set kinematic reconciliation "
-        "could not find field '" + transport.level_set.field_name +
-        "' or its transport velocity '" + transport.velocity.field_name +
-        "'.");
-  }
-  const auto offset = static_cast<std::size_t>(
-      system.fieldDofOffset(baseline.level_set_field));
-  const auto count = static_cast<std::size_t>(
-      system.fieldDofHandler(baseline.level_set_field).getNumDofs());
-  if (offset > fe_solution.size() || count > fe_solution.size() - offset) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Level-set kinematic reconciliation "
-        "field slice exceeds the solution vector.");
-  }
-  const auto begin = fe_solution.begin() + static_cast<std::ptrdiff_t>(offset);
-  baseline.level_set.assign(begin, begin + static_cast<std::ptrdiff_t>(count));
-  if (with_velocity) {
-    baseline.velocity = levelSetTransportVelocityCoefficients(
-        system, baseline.velocity_field, fe_solution);
-  }
-  baseline.step = step;
-  return baseline;
+  return svmp::FE::level_set::makeLevelSetKinematicBaseline(
+      system, *request.configuration, fe_solution, step);
 }
 
 bool applyLevelSetMaintenance(
@@ -5407,8 +5125,8 @@ bool applyLevelSetMaintenance(
     svmp::FE::timestepping::TimeHistory& history,
     std::vector<LevelSetMaintenanceRequest>& requests,
     // The accepted contact-stage inputs fed the retired projection
-    // reinitialization (decision D47); the slots stay until the pipeline
-    // moves to FE.
+    // reinitialization (decision D47); the slots stay while the driver keeps
+    // its call sites.
     std::span<const svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
         /*accepted_contact_stages*/ = {},
     std::span<const svmp::FE::level_set::LevelSetWallContactConstraint>
@@ -5420,638 +5138,20 @@ bool applyLevelSetMaintenance(
     bool* rate_publication_started = nullptr,
     std::span<const LevelSetKinematicBaseline> kinematic_baselines = {})
 {
-  if (rate_publication_started != nullptr) {
-    *rate_publication_started = false;
-  }
-  if (!sim.fe_system || requests.empty()) {
-    return false;
-  }
-
-  // Treat maintenance across every configured level-set field as one
-  // transaction.  A later request can fail after an earlier correction has
-  // been computed, but no accounting/target state may advance unless every
-  // request succeeds and the common FE history update is complete.
-  auto staged_requests = requests;
-  std::vector<std::string> staged_commit_logs;
-  bool changed = false;
-  const auto comm = activeFESystemCommunicator(*sim.fe_system);
-  auto fe_solution = gatherFeOrderedSolution(history.u(), comm);
-  const auto accepted_solution_before_maintenance = fe_solution;
-  std::set<svmp::FE::FieldId> modified_level_set_fields;
-  for (auto& request : staged_requests) {
-    // Conservative requests are maintained inside their prospective step
-    // transaction.  Maintaining them again here after acceptance would expose
-    // an intermediate geometry and apply a second representation change
-    // outside the phase-mass reconciliation contract.
-    if (request.configuration->transport.conservative_phase.enabled) {
-      continue;
-    }
-    const int completed_step = history.stepIndex();
-    const bool do_kinematic =
-        svmp::FE::level_set::shouldApplyLevelSetKinematicReconciliation(
-            request.configuration->transport.kinematic_reconciliation,
-            completed_step);
-    const bool do_patch_bounds =
-        svmp::FE::level_set::shouldApplyLevelSetSignDefinitePatchBounds(
-            request.configuration->transport.sign_definite_patch_bounds,
-            completed_step);
-    const bool do_redistancing =
-        svmp::FE::level_set::shouldApplyLevelSetInterfacePreservingRedistancing(
-            request.configuration->transport.interface_preserving_redistancing,
-            completed_step);
-    if (!do_kinematic && !do_patch_bounds && !do_redistancing) {
-      continue;
-    }
-
-    const auto field =
-        sim.fe_system->findFieldByName(request.configuration->transport.level_set.field_name);
-    if (globalMinDouble(
-            field != svmp::FE::INVALID_FIELD_ID ? 1.0 : 0.0,
-            activeFESystemCommunicator(*sim.fe_system)) != 1.0) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Level-set maintenance could not find field '" +
-          request.configuration->transport.level_set.field_name + "'.");
-    }
-
-    if (do_kinematic) {
-      // Reconcile the transport step before any representation change: the
-      // baseline is the accepted state the transport started from.
-      const auto baseline = std::find_if(
-          kinematic_baselines.begin(),
-          kinematic_baselines.end(),
-          [field](const auto& candidate) {
-            return candidate.level_set_field == field;
-          });
-      if (baseline == kinematic_baselines.end() ||
-          baseline->step != completed_step - 1) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Level-set kinematic reconciliation "
-            "for field '" +
-            request.configuration->transport.level_set.field_name +
-            "' has no accepted baseline from the previous step.");
-      }
-      const auto before_reconciliation = fe_solution;
-      const auto offset =
-          static_cast<std::size_t>(sim.fe_system->fieldDofOffset(field));
-      const auto count = static_cast<std::size_t>(
-          sim.fe_system->fieldDofHandler(field).getNumDofs());
-      if (offset > fe_solution.size() || count > fe_solution.size() - offset) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Level-set kinematic reconciliation "
-            "field slice exceeds the solution vector.");
-      }
-      const std::span<const svmp::FE::Real> transported(
-          fe_solution.data() + offset, count);
-      const auto transported_velocity =
-          levelSetTransportVelocityCoefficients(
-              *sim.fe_system, baseline->velocity_field, fe_solution);
-      const auto volume_options = levelSetVolumeOptionsForMaintenance(request);
-      std::vector<svmp::FE::Real> reconciled;
-      const auto result =
-          svmp::FE::level_set::reconcileLevelSetWithKinematicFlux(
-              sim.fe_system->meshAccess(),
-              sim.fe_system->fieldDofHandler(field),
-              sim.fe_system->fieldDofHandler(baseline->velocity_field),
-              volume_options.isovalue,
-              volume_options.tolerance,
-              static_cast<svmp::FE::Real>(history.dt()),
-              baseline->level_set,
-              transported,
-              baseline->velocity,
-              transported_velocity,
-              reconciled);
-      if (!result.success) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Level-set kinematic reconciliation "
-            "failed for field '" +
-            request.configuration->transport.level_set.field_name + "': " +
-            result.diagnostic);
-      }
-      if (result.applied) {
-        std::copy(reconciled.begin(), reconciled.end(),
-                  fe_solution.begin() + static_cast<std::ptrdiff_t>(offset));
-        changed = true;
-        modified_level_set_fields.insert(field);
-        if (observe_stage) {
-          observe_stage(
-              application::core::LevelSetMaintenanceWorkSubstage::
-                  GeometryReconciliation,
-              before_reconciliation,
-              fe_solution);
-        }
-      }
-      std::ostringstream log;
-      log << std::setprecision(17)
-          << "[svMultiPhysics::Application] Level-set kinematic reconciliation"
-          << " field='" << request.configuration->transport.level_set.field_name
-          << "' step=" << completed_step
-          << " dt=" << history.dt()
-          << " applied=" << (result.applied ? "true" : "false")
-          << " converged=" << (result.converged ? "true" : "false")
-          << " iterations=" << result.iterations
-          << " previous_interface_cells=" << result.previous_interface_cells
-          << " current_interface_cells=" << result.current_interface_cells
-          << " corrected_dofs=" << result.corrected_dofs
-          << " sign_preserving_redistributed_dofs="
-          << result.sign_preserving_redistributed_dofs
-          << " sign_preserving_skipped_dofs="
-          << result.sign_preserving_skipped_dofs
-          << " degeneracy_frozen_dofs=" << result.degeneracy_frozen_dofs
-          << " previous_negative_volume=" << result.previous_negative_volume
-          << " transported_negative_volume="
-          << result.transported_negative_volume
-          << " reconciled_negative_volume="
-          << result.reconciled_negative_volume
-          << " previous_interface_flux=" << result.previous_interface_flux
-          << " current_interface_flux=" << result.current_interface_flux
-          << " kinematic_volume_change=" << result.kinematic_volume_change
-          << " transported_volume_error=" << result.transported_volume_error
-          << " reconciled_volume_error=" << result.reconciled_volume_error
-          << " max_abs_correction=" << result.max_abs_correction
-          << " status='" << result.diagnostic << "'";
-      staged_commit_logs.push_back(log.str());
-    }
-
-    if (do_patch_bounds) {
-      // Restore the one-ring maximum principle of exact transport on nodes
-      // whose patch lies in one phase.  It changes no cut cell, so it does
-      // not interact with the reconciliation above, which only moves nodes
-      // of cut cells.
-      const auto baseline = std::find_if(
-          kinematic_baselines.begin(),
-          kinematic_baselines.end(),
-          [field](const auto& candidate) {
-            return candidate.level_set_field == field;
-          });
-      if (baseline == kinematic_baselines.end() ||
-          baseline->step != completed_step - 1) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Level-set sign-definite patch "
-            "bounds for field '" +
-            request.configuration->transport.level_set.field_name +
-            "' have no accepted baseline from the previous step.");
-      }
-      // Where characteristics enter through an inflow boundary the value of
-      // a boundary node comes from outside its patch.
-      for (const auto& open : request.configuration->open_boundaries) {
-        if (open.inflow) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Level-set sign-definite patch "
-              "bounds for field '" +
-              request.configuration->transport.level_set.field_name +
-              "' require impermeable or outflow boundaries; face '" +
-              open.face_name + "' is a level-set inflow boundary.");
-        }
-      }
-      const auto before_bounds = fe_solution;
-      const auto offset =
-          static_cast<std::size_t>(sim.fe_system->fieldDofOffset(field));
-      const auto count = static_cast<std::size_t>(
-          sim.fe_system->fieldDofHandler(field).getNumDofs());
-      if (offset > fe_solution.size() || count > fe_solution.size() - offset) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Level-set sign-definite patch "
-            "bounds field slice exceeds the solution vector.");
-      }
-      const std::span<const svmp::FE::Real> candidate(
-          fe_solution.data() + offset, count);
-      const auto volume_options = levelSetVolumeOptionsForMaintenance(request);
-      std::vector<svmp::FE::Real> bounded;
-      const auto result =
-          svmp::FE::level_set::boundLevelSetOnSignDefinitePatches(
-              sim.fe_system->meshAccess(),
-              sim.fe_system->fieldDofHandler(field),
-              volume_options.isovalue,
-              volume_options.tolerance,
-              baseline->level_set,
-              candidate,
-              bounded);
-      if (!result.success) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Level-set sign-definite patch "
-            "bounds failed for field '" +
-            request.configuration->transport.level_set.field_name + "': " +
-            result.diagnostic);
-      }
-      if (result.applied) {
-        std::copy(bounded.begin(), bounded.end(),
-                  fe_solution.begin() + static_cast<std::ptrdiff_t>(offset));
-        changed = true;
-        modified_level_set_fields.insert(field);
-        if (observe_stage) {
-          observe_stage(
-              application::core::LevelSetMaintenanceWorkSubstage::Limiting,
-              before_bounds,
-              fe_solution);
-        }
-      }
-      std::ostringstream log;
-      log << std::setprecision(17)
-          << "[svMultiPhysics::Application] Level-set sign-definite patch bounds"
-          << " field='" << request.configuration->transport.level_set.field_name
-          << "' step=" << completed_step
-          << " applied=" << (result.applied ? "true" : "false")
-          << " sign_definite_dofs=" << result.sign_definite_dofs
-          << " bounded_dofs=" << result.bounded_dofs
-          << " sign_changes_prevented=" << result.sign_changes_prevented
-          << " max_abs_correction=" << result.max_abs_correction
-          << " status='" << result.diagnostic << "'";
-      staged_commit_logs.push_back(log.str());
-    }
-
-    if (do_redistancing) {
-      // Interface-preserving redistancing (opt-in): after the transport has
-      // been reconciled and bounded, replace the level set by the signed
-      // distance to its own zero polygon (polygon ends on the boundary are
-      // continued by rays, which keeps the discrete contact angle), then
-      // restore the lumped interface position node by node with the
-      // kinematic reconciliation at zero velocity.  It runs after the patch
-      // bounds because they clamp sign-definite nodes into the previous
-      // (distorted) patch ranges and would undo the new values.
-      const auto offset =
-          static_cast<std::size_t>(sim.fe_system->fieldDofOffset(field));
-      const auto count = static_cast<std::size_t>(
-          sim.fe_system->fieldDofHandler(field).getNumDofs());
-      if (offset > fe_solution.size() || count > fe_solution.size() - offset) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Level-set interface-preserving "
-            "redistancing field slice exceeds the solution vector.");
-      }
-      const auto velocity_field = sim.fe_system->findFieldByName(
-          request.configuration->transport.velocity.field_name);
-      if (request.configuration->transport.velocity.source ==
-              svmp::FE::level_set::LevelSetVelocitySource::ConstantVector ||
-          velocity_field == svmp::FE::INVALID_FIELD_ID) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Level-set interface-preserving "
-            "redistancing for field '" +
-            request.configuration->transport.level_set.field_name +
-            "' requires a nodal transport-velocity field (its layout carries "
-            "the zero-velocity interface restoration).");
-      }
-      const auto before_redistancing = fe_solution;
-      const std::vector<svmp::FE::Real> input(
-          fe_solution.begin() + static_cast<std::ptrdiff_t>(offset),
-          fe_solution.begin() + static_cast<std::ptrdiff_t>(offset + count));
-      const auto volume_options = levelSetVolumeOptionsForMaintenance(request);
-      const auto& mesh_access = sim.fe_system->meshAccess();
-      const auto& phi_dofs = sim.fe_system->fieldDofHandler(field);
-      // Displacement trigger: redistance once the interface may have moved
-      // one cell since the last redistancing (accumulated max |w| dt over
-      // the vertices of cut cells against the smallest cut-cell edge).  The
-      // distortion that the redistancing removes builds up with interface
-      // motion, so the call count does not depend on the time step, and an
-      // interface at rest is left alone.  The one-cell threshold is fixed
-      // for every case; SVMP_REDISTANCING_TRIGGER_CELLS (diagnostic only)
-      // changes it to test the sensitivity.
-      const auto transport_velocity = levelSetTransportVelocityCoefficients(
-          *sim.fe_system, velocity_field, fe_solution);
-      // Tetra4 meshes use the zero-surface variants (exact distance to the
-      // P1 zero surface, continued across the boundary at the open edges);
-      // Triangle3 meshes the zero-polygon ones.
-      const bool three_dimensional = mesh_access.dimension() == 3;
-      const auto motion =
-          three_dimensional
-              ? svmp::FE::level_set::levelSetInterfaceMotionScale3D(
-                    mesh_access, phi_dofs, sim.fe_system->fieldDofHandler(velocity_field),
-                    volume_options.isovalue, input, transport_velocity)
-              : svmp::FE::level_set::levelSetInterfaceMotionScale(
-                    mesh_access, phi_dofs, sim.fe_system->fieldDofHandler(velocity_field),
-                    volume_options.isovalue, input, transport_velocity);
-      if (!motion.success) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Level-set interface-preserving "
-            "redistancing could not measure the interface motion of field '" +
-            request.configuration->transport.level_set.field_name + "': " +
-            motion.diagnostic);
-      }
-      static const double trigger_cells = [] {
-        const char* text = std::getenv("SVMP_REDISTANCING_TRIGGER_CELLS");
-        if (text == nullptr || text[0] == '\0') {
-          return 1.0;
-        }
-        const double value = std::strtod(text, nullptr);
-        if (!(value > 0.0) || !std::isfinite(value)) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] SVMP_REDISTANCING_TRIGGER_CELLS must be positive.");
-        }
-        return value;
-      }();
-      auto& accumulated = request.runtime.redistancing_accumulated_displacement;
-      accumulated += motion.max_speed * static_cast<svmp::FE::Real>(history.dt());
-      const svmp::FE::Real threshold =
-          static_cast<svmp::FE::Real>(trigger_cells) * motion.min_edge;
-      const bool trigger_fired = motion.min_edge > svmp::FE::Real{0.0} &&
-                                 accumulated >= threshold;
-      if (trigger_fired) {
-        std::vector<svmp::FE::Real> redistanced;
-        const auto redistance =
-            three_dimensional
-                ? svmp::FE::level_set::redistanceLevelSetToZeroSurface(
-                      mesh_access, phi_dofs, volume_options.isovalue, input,
-                      redistanced)
-                : svmp::FE::level_set::redistanceLevelSetToZeroPolygon(
-                      mesh_access, phi_dofs, volume_options.isovalue, input,
-                      redistanced);
-        if (!redistance.success) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Level-set interface-preserving "
-              "redistancing failed for field '" +
-              request.configuration->transport.level_set.field_name + "': " +
-              redistance.diagnostic);
-        }
-        const auto change_raw =
-            three_dimensional
-                ? svmp::FE::level_set::measureLevelSetZeroSurfaceChange(
-                      mesh_access, phi_dofs, volume_options.isovalue, input,
-                      redistanced)
-                : svmp::FE::level_set::measureLevelSetZeroPolygonChange(
-                      mesh_access, phi_dofs, volume_options.isovalue, input,
-                      redistanced);
-        std::vector<svmp::FE::Real> restored = redistanced;
-        svmp::FE::level_set::LevelSetKinematicReconciliationResult restoration{};
-        std::size_t restoration_passes = 0u;
-        std::size_t reverted_dofs = 0u;
-        if (redistance.applied) {
-          auto zero_velocity = levelSetTransportVelocityCoefficients(
-              *sim.fe_system, velocity_field, fe_solution);
-          std::fill(zero_velocity.begin(), zero_velocity.end(),
-                    svmp::FE::Real{0.0});
-          // A DOF that the restoration must freeze (its correction would change
-          // the degeneracy class of a cut) would keep an uncorrected share of
-          // the interface motion.  Such DOFs keep their input value instead and
-          // the restoration is repeated; every pass reverts at least one more
-          // DOF, so the loop ends.
-          for (;;) {
-            ++restoration_passes;
-            restoration = svmp::FE::level_set::reconcileLevelSetWithKinematicFlux(
-                mesh_access,
-                phi_dofs,
-                sim.fe_system->fieldDofHandler(velocity_field),
-                volume_options.isovalue,
-                volume_options.tolerance,
-                static_cast<svmp::FE::Real>(history.dt()),
-                input,
-                redistanced,
-                zero_velocity,
-                zero_velocity,
-                restored);
-            if (!restoration.success) {
-              throw std::runtime_error(
-                  "[svMultiPhysics::Application] Level-set interface-preserving "
-                  "redistancing could not restore the interface of field '" +
-                  request.configuration->transport.level_set.field_name + "': " +
-                  restoration.diagnostic);
-            }
-            if (!restoration.applied) {
-              restored = redistanced;
-            }
-            bool reverted = false;
-            // Revert the whole cells around a frozen DOF: their other DOFs
-            // would otherwise keep raw redistanced values whose interface
-            // motion the restoration can no longer take back.
-            const auto revert_set =
-                restoration.degeneracy_frozen_dof_indices.empty()
-                    ? std::vector<std::size_t>{}
-                    : three_dimensional
-                          ? svmp::FE::level_set::levelSetDofCellClosure3D(
-                                mesh_access, phi_dofs,
-                                restoration.degeneracy_frozen_dof_indices)
-                          : svmp::FE::level_set::levelSetDofCellClosure(
-                                mesh_access, phi_dofs,
-                                restoration.degeneracy_frozen_dof_indices);
-            for (const auto i : revert_set) {
-              if (i < redistanced.size() && redistanced[i] != input[i]) {
-                redistanced[i] = input[i];
-                ++reverted_dofs;
-                reverted = true;
-              }
-            }
-            if (!reverted) {
-              break;
-            }
-          }
-        }
-        const auto change =
-            three_dimensional
-                ? svmp::FE::level_set::measureLevelSetZeroSurfaceChange(
-                      mesh_access, phi_dofs, volume_options.isovalue, input, restored)
-                : svmp::FE::level_set::measureLevelSetZeroPolygonChange(
-                      mesh_access, phi_dofs, volume_options.isovalue, input, restored);
-        const auto volume_before = svmp::FE::level_set::computeLevelSetCutCellVolume(
-            mesh_access, phi_dofs, volume_options, input);
-        const auto volume_after = svmp::FE::level_set::computeLevelSetCutCellVolume(
-            mesh_access, phi_dofs, volume_options, restored);
-        if (!change.success || !change_raw.success || !volume_before.success ||
-            !volume_after.success) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Level-set interface-preserving "
-              "redistancing could not measure its interface change for field '" +
-              request.configuration->transport.level_set.field_name + "': " +
-              change.diagnostic + " " + change_raw.diagnostic);
-        }
-        const bool applied = redistance.applied && restored != input;
-        if (applied) {
-          std::copy(restored.begin(), restored.end(),
-                    fe_solution.begin() + static_cast<std::ptrdiff_t>(offset));
-          changed = true;
-          modified_level_set_fields.insert(field);
-          if (observe_stage) {
-            observe_stage(
-                application::core::LevelSetMaintenanceWorkSubstage::
-                    Reinitialization,
-                before_redistancing,
-                fe_solution);
-          }
-        }
-        std::ostringstream log;
-        log << std::setprecision(17)
-            << "[svMultiPhysics::Application] Level-set interface-preserving redistancing"
-            << " field='" << request.configuration->transport.level_set.field_name
-            << "' step=" << completed_step
-            << " applied=" << (applied ? "true" : "false")
-            << " segments=" << redistance.interface_segments
-            << " open_ends=" << redistance.open_ends
-            << " redistanced_dofs=" << redistance.redistanced_dofs
-            << " max_abs_change=" << redistance.max_abs_change
-            << " raw_max_crossing_shift=" << change_raw.max_crossing_shift
-            << " raw_max_open_end_shift=" << change_raw.max_open_end_shift
-            << " restoration_converged="
-            << (restoration.converged ? "true" : "false")
-            << " restoration_iterations=" << restoration.iterations
-            << " restoration_corrected_dofs=" << restoration.corrected_dofs
-            << " restoration_frozen_dofs=" << restoration.degeneracy_frozen_dofs
-            << " restoration_skipped_dofs="
-            << restoration.sign_preserving_skipped_dofs
-            << " restoration_passes=" << restoration_passes
-            << " reverted_dofs=" << reverted_dofs
-            << " max_crossing_shift=" << change.max_crossing_shift
-            << " max_open_end_shift=" << change.max_open_end_shift
-            << " cells_with_changed_cut=" << change.cells_with_changed_cut
-            << " open_ends_before=" << change.open_ends_first
-            << " open_ends_after=" << change.open_ends_second
-            << " negative_volume_before=" << volume_before.negative_volume
-            << " negative_volume_after=" << volume_after.negative_volume
-            << " trigger_call=" << (request.runtime.redistancing_calls + 1)
-            << " accumulated_displacement_over_h=" << (accumulated / motion.min_edge)
-            << " trigger_cells=" << trigger_cells
-            << " time=" << history.time()
-            << " status='" << redistance.diagnostic << "'";
-        staged_commit_logs.push_back(log.str());
-        accumulated = svmp::FE::Real{0.0};
-        ++request.runtime.redistancing_calls;
-      }
-    }
-
-  }
-
-  if (changed && validate_candidate) {
-    validate_candidate(fe_solution);
-  }
-
-  if (changed) {
-    // Publish each representation change through one explicit field mapping:
-    // a common delta on every stored state, with the rate unchanged.
-    const auto comm = activeFESystemCommunicator(*sim.fe_system);
-    std::optional<StagedPostacceptMaintenanceHistoryPublication>
-        staged_history_publication;
-    std::size_t synchronized_dofs = 0u;
-    const auto local_history_depth = history.historyDepth();
-    if (globalAnyBool(local_history_depth <= 0, comm)) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Postaccept maintenance publication "
-          "requires a positive history depth on every FE communicator rank.");
-    }
-    const auto [minimum_history_depth, maximum_history_depth] =
-        globalMinMaxUint64(
-            static_cast<std::uint64_t>(local_history_depth), comm);
-    if (minimum_history_depth != maximum_history_depth) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Postaccept maintenance history "
-          "depth differs across the FE communicator.");
-    }
-    std::vector<svmp::FE::backends::GenericVector*> publication_targets;
-    std::vector<std::vector<svmp::FE::Real>> synchronized_history;
-    std::exception_ptr local_staging_failure;
-    try {
-      publication_targets.resize(
-          static_cast<std::size_t>(local_history_depth) + 1u);
-      publication_targets.front() = &history.u();
-      synchronized_history.resize(
-          static_cast<std::size_t>(local_history_depth));
-      for (int k = 1; k <= local_history_depth; ++k) {
-        publication_targets[static_cast<std::size_t>(k)] =
-            &history.uPrevK(k);
-      }
-    } catch (...) {
-      local_staging_failure = std::current_exception();
-    }
-    requireCollectivePhasePreparation(
-        local_staging_failure,
-        comm,
-        "postaccept_maintenance_history_capture_schedule");
-
-    std::vector<svmp::FE::Real> current_solution =
-        capturePostacceptMaintenanceVectorCollectively(
-            *publication_targets.front(), comm);
-    for (int k = 1; k <= local_history_depth; ++k) {
-      auto captured = capturePostacceptMaintenanceVectorCollectively(
-          *publication_targets[static_cast<std::size_t>(k)], comm);
-      synchronized_history[static_cast<std::size_t>(k - 1)].swap(captured);
-    }
-
-    local_staging_failure = nullptr;
-    try {
-      staged_history_publication.emplace(
-          makeStagedPostacceptMaintenanceHistoryPublication(
-              std::move(current_solution),
-              std::move(synchronized_history)));
-
-      for (const auto field : modified_level_set_fields) {
-        const auto raw_offset = sim.fe_system->fieldDofOffset(field);
-        const auto raw_count =
-            sim.fe_system->fieldDofHandler(field).getNumDofs();
-        if (raw_offset < 0 || raw_count <= 0) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Level-set maintenance found an "
-              "invalid maintained-field history layout.");
-        }
-        const auto offset = static_cast<std::size_t>(raw_offset);
-        const auto count = static_cast<std::size_t>(raw_count);
-        if (offset > fe_solution.size() ||
-            count > fe_solution.size() - offset ||
-            accepted_solution_before_maintenance.size() !=
-                fe_solution.size()) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Level-set maintenance field "
-              "slice exceeds the FE history vector.");
-        }
-        std::vector<svmp::FE::Real> representation_delta(count);
-        for (std::size_t i = 0u; i < count; ++i) {
-          const auto index = offset + i;
-          representation_delta[i] =
-              fe_solution[index] -
-              accepted_solution_before_maintenance[index];
-        }
-        stageMaintainedFieldPostAcceptPublication(
-            makeCommonRepresentationMaintainedFieldPublication(
-                field, offset, representation_delta),
-            *staged_history_publication);
-        synchronized_dofs += count;
-      }
-    } catch (...) {
-      local_staging_failure = std::current_exception();
-    }
-    requireCollectivePhasePreparation(
-        local_staging_failure,
-        comm,
-        "postaccept_maintenance_history_publication_staging");
-    if (!staged_history_publication.has_value()) {
-      throw std::logic_error(
-          "[svMultiPhysics::Application] Postaccept maintenance history "
-          "publication staging remained unavailable after collective "
-          "preparation.");
-    }
-    const auto current_previous_delta = globalMaxAbsDifference(
-        std::span<const svmp::FE::Real>(
-            staged_history_publication->current.data(),
-            staged_history_publication->current.size()),
-        std::span<const svmp::FE::Real>(
-            staged_history_publication->history.front().data(),
-            staged_history_publication->history.front().size()),
-        comm);
-    std::ostringstream log;
-    log
-        << "[svMultiPhysics::Application] Level-set maintenance synchronized"
-        << " step=" << history.stepIndex()
-        << " representation_delta=all_history_levels"
-        << " temporal_increments=preserved"
-        << " rate_state=unchanged_consistently"
-        << " rate_synchronized_fields=0"
-        << " synchronized_fields=" << modified_level_set_fields.size()
-        << " synchronized_dofs=" << synchronized_dofs
-        << " current_previous_max_abs_delta=" << current_previous_delta
-        << " history_depth=" << history.historyDepth();
-    staged_commit_logs.push_back(log.str());
-
-    // Every size, field-slice, collective, and diagnostic invariant has now
-    // passed.  Publish the staged coefficient arrays only after those checks
-    // so a rejected candidate leaves every accepted history vector untouched.
-    publishStagedPostacceptMaintenanceHistoryCollectively(
-        history,
-        *staged_history_publication,
-        comm,
-        rate_publication_started);
-    // uDot and uDDot are not staged, so they retain both their values and
-    // their backend content revisions.
-  }
-  requests = std::move(staged_requests);
-  if (deferred_commit_logs != nullptr) {
-    *deferred_commit_logs = std::move(staged_commit_logs);
-  } else {
-    for (const auto& log : staged_commit_logs) {
-      application::core::oopCout() << log << std::endl;
-    }
+  auto fe_requests = feLevelSetMaintenanceRequests(requests);
+  const bool changed = svmp::FE::level_set::applyLevelSetMaintenance(
+      levelSetMaintenanceHost(sim),
+      history,
+      fe_requests,
+      validate_candidate,
+      observe_stage,
+      deferred_commit_logs,
+      rate_publication_started,
+      kinematic_baselines);
+  // The FE pipeline updates the run state only when it succeeds.
+  for (std::size_t index = 0u; index < requests.size(); ++index) {
+    static_cast<svmp::FE::level_set::LevelSetMaintenanceRuntime&>(
+        requests[index].runtime) = fe_requests[index].runtime;
   }
   return changed;
 }
