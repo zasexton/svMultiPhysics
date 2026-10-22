@@ -22,6 +22,7 @@
 
 #include "FE/Core/Types.h"
 #include "FE/Systems/SystemCollectives.h"
+#include "FE/TimeStepping/StepController.h"
 #include "Mesh/Core/MeshComm.h"
 
 #include <array>
@@ -193,6 +194,8 @@ std::vector<svmp::FE::Real> gatherFeOrderedSolution(
 std::vector<svmp::FE::Real> gatherFeOrderedSolution(
     const svmp::FE::systems::SystemStateView& state,
     const svmp::MeshComm& comm);
+
+std::string step_reject_reason_to_string(svmp::FE::timestepping::StepRejectReason r);
 
 } // namespace detail
 

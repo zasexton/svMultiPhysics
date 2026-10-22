@@ -238,4 +238,18 @@ std::vector<svmp::FE::Real> gatherFeOrderedSolution(
       "[svMultiPhysics::Application] Could not collectively gather FE-ordered state values.");
 }
 
+std::string step_reject_reason_to_string(svmp::FE::timestepping::StepRejectReason r)
+{
+  using svmp::FE::timestepping::StepRejectReason;
+  switch (r) {
+    case StepRejectReason::NonlinearSolveFailed:
+      return "NonlinearSolveFailed";
+    case StepRejectReason::ErrorTooLarge:
+      return "ErrorTooLarge";
+    case StepRejectReason::CutTopologyChanged:
+      return "CutTopologyChanged";
+  }
+  return std::to_string(static_cast<int>(r));
+}
+
 } // namespace svmp::Physics::formulations::navier_stokes::free_surface::detail
