@@ -961,6 +961,7 @@ set(FE_LEVELSET_HEADERS
     LevelSet/LevelSetCellEvaluator.h
     LevelSet/LevelSetCurvatureProjection.h
     LevelSet/LevelSetCurvatureSamples.h
+    LevelSet/LevelSetCutVolumeMeasures.h
     LevelSet/LevelSetInterfaceLifecycle.h
     LevelSet/LevelSetMaintenanceSchedule.h
     LevelSet/LevelSetMaintenanceSubstage.h
@@ -989,6 +990,7 @@ set(FE_LEVELSET_SOURCES
     LevelSet/LevelSetCellEvaluator.cpp
     LevelSet/LevelSetCurvatureProjection.cpp
     LevelSet/LevelSetCurvatureSamples.cpp
+    LevelSet/LevelSetCutVolumeMeasures.cpp
     LevelSet/LevelSetInterfaceLifecycle.cpp
     LevelSet/LevelSetImplicitCutQuadratureBackend.cpp
     LevelSet/LevelSetMaintenanceSchedule.cpp

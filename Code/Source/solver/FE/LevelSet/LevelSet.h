@@ -19,6 +19,7 @@
 #include "LevelSet/LevelSetConservativePhaseTransport.h"
 #include "LevelSet/LevelSetCurvatureProjection.h"
 #include "LevelSet/LevelSetCurvatureSamples.h"
+#include "LevelSet/LevelSetCutVolumeMeasures.h"
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
 #include "LevelSet/LevelSetMaintenanceSubstage.h"
 #include "LevelSet/LevelSetKinematicReconciliation.h"

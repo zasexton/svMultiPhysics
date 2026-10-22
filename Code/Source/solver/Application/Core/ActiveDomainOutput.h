@@ -1,6 +1,7 @@
 #pragma once
 
 #include "FE/Geometry/CutQuadrature.h"
+#include "FE/LevelSet/LevelSetCutVolumeMeasures.h"
 #include "Mesh/Mesh.h"
 
 #include <cstddef>
@@ -21,37 +22,18 @@ class IMeshAccess;
 namespace application {
 namespace core {
 
+// The owned cut-volume measures live in FE/LevelSet/LevelSetCutVolumeMeasures.h.
+using svmp::FE::level_set::CutVolumeMeasureSummary;
+using svmp::FE::level_set::collectCutVolumeMeasures;
+
 std::vector<double> collectWetVolumeFractions(
     std::size_t n_cells,
     const std::vector<const svmp::FE::geometry::CutQuadratureRule*>& rules);
-
-struct CutVolumeMeasureSummary {
-  // Counts and measures include locally owned parent cells only.  Generated
-  // rules on ghost cells remain available in the cut context for assembly but
-  // must not contribute again to communicator-wide physical totals.
-  // Revision identity is validated across every supplied volume rule before
-  // ownership filtering so the complete consumer view cannot mix snapshots.
-  svmp::FE::Real reference_measure{0.0};
-  svmp::FE::Real physical_measure{0.0};
-  std::uint64_t free_surface_snapshot_revision_key{0};
-  std::uint64_t source_value_revision{0};
-  std::size_t rule_count{0};
-  std::size_t revisioned_rule_count{0};
-  std::size_t physical_rule_count{0};
-  std::size_t skipped_physical_rule_count{0};
-};
 
 struct WetVolumeMeasureSelection {
   svmp::FE::Real wet_volume{0.0};
   std::string frame{"physical"};
 };
-
-// Rules stored classification-only in a cut integration context are
-// measured through that context's exact rematerialization.
-CutVolumeMeasureSummary collectCutVolumeMeasures(
-    const svmp::FE::assembly::IMeshAccess& mesh,
-    const std::vector<const svmp::FE::geometry::CutQuadratureRule*>& rules,
-    const svmp::FE::assembly::CutIntegrationContext* context = nullptr);
 
 WetVolumeMeasureSelection selectWetVolumeForDrift(
     const CutVolumeMeasureSummary& summary);
