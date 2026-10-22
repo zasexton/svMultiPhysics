@@ -1713,7 +1713,8 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
     std::array<FE::Real, 3> body_force =
         std::array<FE::Real, 3>{0.0, 0.0, 0.0},
     bool include_additional_spacetime_body_force = false,
-    bool include_prescribed_body_force_field = false)
+    bool include_prescribed_body_force_field = false,
+    bool conservative_balance_diagnostics = false)
 {
     constexpr int interface_marker = 167;
     constexpr int wall_marker = 57;
@@ -1731,6 +1732,7 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
     auto opts = baseNavierStokesOptions();
     opts.enable_convection = false;
     opts.body_force = body_force;
+    opts.conservative_balance_diagnostics = conservative_balance_diagnostics;
     if (include_additional_spacetime_body_force) {
         opts.has_body_force_spacetime = true;
         opts.body_force_spacetime[0] = FE::Real{0.19};
@@ -12772,6 +12774,75 @@ TEST(MovingDomainPhysics,
     EXPECT_TRUE(
         declaration.external_pressure_power_parameters.has_value());
     EXPECT_TRUE(declaration.endpoint_functional_power_enabled);
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesConservativeBalanceOperatorsFollowTheOptionAndLeaveTheResidualUnchanged)
+{
+    // The static-capillary certificate reads these operators, so the option
+    // that the Application sets for that initialization installs them even
+    // when the environment switch says "0" (decision D47, P0.4).  They are
+    // observation-only: the production residual is bitwise unchanged.
+    constexpr FE::Real theta =
+        FE::Real{1.04719755119659774615421446109316763};
+    constexpr std::array<FE::Real, 4> zero_velocity{
+        FE::Real{0.0}, FE::Real{0.0}, FE::Real{0.0}, FE::Real{0.0}};
+    const auto assemble = [&](bool conservative_balance_diagnostics) {
+        return assembleDynamicContactAngleCase(
+            theta,
+            theta,
+            zero_velocity,
+            /*include_dynamic_contact_angle=*/true,
+            /*assemble_jacobian=*/false,
+            std::array<FE::Real, 4>{0.0, 0.0, 0.0, 0.0},
+            std::array<FE::Real, 3>{0.0, 0.0, -1.0},
+            /*level_set_scale=*/1.0,
+            /*level_set_shift=*/0.0,
+            /*velocity_component=*/0,
+            ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
+            /*liquid_pressure=*/FE::Real{0.37},
+            /*external_pressure=*/FE::Real{0.031},
+            /*use_constitutive_viscosity=*/false,
+            /*reverse_wall_orientation=*/false,
+            /*liquid_pressure_nodal_values=*/std::nullopt,
+            /*registration_only=*/false,
+            std::array<FE::Real, 3>{0.0, 0.0, 0.0},
+            /*include_additional_spacetime_body_force=*/false,
+            /*include_prescribed_body_force_field=*/false,
+            conservative_balance_diagnostics);
+    };
+
+    DynamicContactAngleAssembly without_operators;
+    DynamicContactAngleAssembly from_option;
+    {
+        ScopedEnvVar switch_off(
+            "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC",
+            std::string("0"));
+        without_operators = assemble(false);
+        from_option = assemble(true);
+    }
+    DynamicContactAngleAssembly from_environment;
+    {
+        ScopedEnvVar switch_on(
+            "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC",
+            std::string("1"));
+        from_environment = assemble(false);
+    }
+
+    EXPECT_TRUE(without_operators.conservative_balance_residual.empty());
+    ASSERT_FALSE(from_option.conservative_balance_residual.empty());
+    EXPECT_EQ(from_option.conservative_pressure_residual,
+              from_environment.conservative_pressure_residual);
+    EXPECT_EQ(from_option.conservative_surface_energy_residual,
+              from_environment.conservative_surface_energy_residual);
+    EXPECT_EQ(from_option.conservative_balance_residual,
+              from_environment.conservative_balance_residual);
+    EXPECT_EQ(from_option.pressure_representability_pair_jacobian,
+              from_environment.pressure_representability_pair_jacobian);
+    ASSERT_FALSE(without_operators.residual.empty());
+    EXPECT_EQ(from_option.residual, without_operators.residual);
+    EXPECT_EQ(from_environment.residual, without_operators.residual);
 }
 
 TEST(MovingDomainPhysics,

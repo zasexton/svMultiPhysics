@@ -43,8 +43,19 @@ struct OutputRequestInput {
   ParameterMap params{};
 };
 
+/// Requests that the Application derives from the other equations of the
+/// same input.  They are never input keys.
+struct DerivedModuleRequests {
+  /// Install the conservative-balance diagnostic operators of the flow
+  /// module: a level-set equation enables the static-capillary
+  /// initialization, whose startup certificate evaluates them.
+  bool conservative_balance_diagnostics{false};
+};
+
 struct EquationModuleInput {
   std::string equation_type{};
+
+  DerivedModuleRequests derived_requests{};
 
   ParameterMap equation_params{};
   std::vector<std::string> nested_configuration_blocks{};

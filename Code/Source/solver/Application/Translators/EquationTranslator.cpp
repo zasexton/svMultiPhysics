@@ -479,9 +479,11 @@ EquationTranslator::snapshotLevelSetEquationInput(
 
 std::unique_ptr<svmp::Physics::PhysicsModule> EquationTranslator::createModule(
     const EquationParameters& eq_params, svmp::FE::systems::FESystem& system,
-    const std::map<std::string, std::shared_ptr<svmp::Mesh>>& meshes)
+    const std::map<std::string, std::shared_ptr<svmp::Mesh>>& meshes,
+    const svmp::Physics::DerivedModuleRequests& derived_requests)
 {
-  const auto input = buildInput(eq_params, meshes);
+  auto input = buildInput(eq_params, meshes);
+  input.derived_requests = derived_requests;
   const std::string eq_type = input.equation_type;
 
   application::core::oopCout() << "[svMultiPhysics::Application] EquationTranslator: createModule(type='" << eq_type

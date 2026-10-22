@@ -106,9 +106,13 @@ bool freeSurfaceConservativeBalanceDiagnosticEnabled()
 
 bool conservativeBalanceDiagnosticSupported(
     const std::vector<FreeSurfaceBoundary>& effective_free_surfaces,
-    bool has_exterior_free_surface)
+    bool has_exterior_free_surface,
+    bool requested_by_options)
 {
+    // The environment switch only adds observation: it cannot withdraw the
+    // operators that the configured static-capillary certificate reads.
     const bool conservative_balance_diagnostic_requested =
+        requested_by_options ||
         freeSurfaceConservativeBalanceDiagnosticEnabled();
     const bool conservative_balance_has_surface_energy =
         std::any_of(

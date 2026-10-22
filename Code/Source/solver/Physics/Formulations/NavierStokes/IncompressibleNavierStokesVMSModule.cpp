@@ -561,7 +561,8 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     auto work = bulkResidualWork(r, M, C, pspg_grad_p, -rho * inner(g, v), nonconservative_force,
                                  preflight.enable_vms, Omega);
     std::optional<ConservativeBalanceForms> balance;
-    if (conservativeBalanceDiagnosticSupported(free_surfaces, preflight.has_exterior_free_surface)) {
+    if (conservativeBalanceDiagnosticSupported(free_surfaces, preflight.has_exterior_free_surface,
+                                               o.conservative_balance_diagnostics)) {
         balance = ConservativeBalanceForms{.pressure = r.pressure.dx(Omega),
                                            .gravitational_potential = (-rho * inner(g, v)).dx(Omega)};
     }
@@ -648,7 +649,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
                               .drop_generated_boundary_nitsche_trace_requests = true});
     }
 
-    // Opt-in diagnostic operators (environment switches), after the production ones.
+    // Opt-in diagnostic operators (options or environment switches), after the production ones.
     if (balance) {
         installConservativeBalanceDiagnosticOperators(system, u_id, p_id, F.options(), balance->pressure,
                                                       balance->external_pressure, balance->surface_energy,

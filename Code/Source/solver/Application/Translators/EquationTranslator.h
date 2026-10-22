@@ -40,9 +40,12 @@ public:
       const EquationParameters& equation,
       svmp::Physics::EquationModuleInput installation_input);
 
+  /// `derived_requests` carries what the Application derived from the other
+  /// equations of the input (see svmp::Physics::DerivedModuleRequests).
   static std::unique_ptr<svmp::Physics::PhysicsModule> createModule(
       const EquationParameters& eq_params, svmp::FE::systems::FESystem& system,
-      const std::map<std::string, std::shared_ptr<svmp::Mesh>>& meshes);
+      const std::map<std::string, std::shared_ptr<svmp::Mesh>>& meshes,
+      const svmp::Physics::DerivedModuleRequests& derived_requests = {});
 };
 
 } // namespace translators

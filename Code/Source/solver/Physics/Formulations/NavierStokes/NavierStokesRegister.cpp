@@ -5309,6 +5309,8 @@ create_navier_stokes_from_input(const svmp::Physics::EquationModuleInput& input,
   }
   options.enable_convection = (input.equation_type != "stokes");
   options.jit_policy = svmp::Physics::core::resolveOopJitPolicy(input, options.jit_policy);
+  options.conservative_balance_diagnostics =
+      input.derived_requests.conservative_balance_diagnostics;
 
   apply_free_surface_schema_options(input.equation_params, options);
   apply_fluid_moving_domain_options(input, domain, options);

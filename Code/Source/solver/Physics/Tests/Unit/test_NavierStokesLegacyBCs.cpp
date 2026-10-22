@@ -9,6 +9,7 @@
 
 #include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Core/EquationModuleRegistry.h"
+#include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesRegister.h"
 
 #include "Assembly/GlobalSystemView.h"
@@ -28,12 +29,15 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
@@ -2530,6 +2534,132 @@ TEST(NavierStokesLegacyBCs,
               std::string::npos);
     EXPECT_NE(artifact->json.find("\"line_friction\":\"absent\""),
               std::string::npos);
+#endif
+}
+
+TEST(NavierStokesLegacyBCs,
+     DerivedRequestInstallsConservativeBalanceOperatorsWithoutTheEnvironmentSwitch)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    // The static-capillary certificate reads the conservative-balance
+    // operators.  The Application requests them through the module input
+    // when a level-set equation enables the static-capillary initialization
+    // (decision D47, P0.4); the environment switch cannot withdraw them.
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+    using Operators = svmp::Physics::formulations::navier_stokes::
+        FreeSurfaceConservativeBalanceDiagnosticOperators;
+
+    constexpr const char* kSwitch =
+        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC";
+    std::optional<std::string> saved_switch;
+    if (const char* existing = std::getenv(kSwitch); existing != nullptr) {
+        saved_switch = std::string(existing);
+    }
+    ASSERT_EQ(::setenv(kSwitch, "0", 1), 0);
+
+    constexpr int wall_marker = 82;
+    constexpr int interface_marker = 205;
+    const auto operators_installed = [&](bool requested) {
+        auto mesh = buildSingleTetraBoundaryMesh(
+            wall_marker, /*label_all_faces=*/false);
+        EXPECT_TRUE(mesh);
+
+        svmp::Physics::EquationModuleInput input{};
+        input.equation_type = "fluid";
+        input.mesh_name = "single_tetra";
+        input.mesh = mesh->local_mesh_ptr();
+        input.derived_requests.conservative_balance_diagnostics = requested;
+        input.equation_params["Operator_tag"] = defined("equations");
+        input.default_domain.params["Density"] = defined("1.0");
+        input.default_domain.params["Viscosity.model"] = defined("Constant");
+        input.default_domain.params["Viscosity.Value"] = defined("0.01");
+
+        svmp::Physics::BoundaryConditionInput free_surface{};
+        free_surface.name = "free_surface";
+        free_surface.boundary_marker = svmp::INVALID_LABEL;
+        free_surface.params["Type"] = defined("Free_surface");
+        free_surface.params["Implementation"] = defined("UnfittedLevelSet");
+        free_surface.params["Interface_marker"] =
+            defined(std::to_string(interface_marker));
+        free_surface.params["Level_set_field_name"] =
+            defined("phi_derived_request");
+        free_surface.params["Active_domain"] = defined("LevelSetNegative");
+        free_surface.params["Active_domain_method"] = defined("CutVolume");
+        free_surface.params["Generated_interface_geometry"] =
+            defined("LinearCorner");
+        free_surface.params["Small_cut_aggregation"] = defined("false");
+        free_surface.params["Surface_tension"] = defined("0.8");
+        free_surface.params["Curvature"] = defined("0.0");
+        free_surface.params["Use_level_set_curvature"] = defined("false");
+        free_surface.params["Contact_line_model"] =
+            defined("PrescribedAngle");
+        free_surface.params["Contact_line_wall_marker"] =
+            defined(std::to_string(wall_marker));
+        free_surface.params["Contact_line_wall_normal"] =
+            defined("0.0 0.0 -1.0");
+        free_surface.params["Contact_angle_degrees"] = defined("60.0");
+        free_surface.params["Wall_slip_model"] = defined("Navier");
+        free_surface.params["Wall_slip_length"] = defined("0.2");
+        input.boundary_conditions.push_back(std::move(free_surface));
+
+        svmp::Physics::BoundaryConditionInput wall{};
+        wall.name = "prescribed_contact_wall";
+        wall.boundary_marker = wall_marker;
+        wall.params["Type"] = defined("Dirichlet");
+        wall.params["Value"] = defined("0.0");
+        wall.params["Effective_direction"] = defined("0 0 1");
+        input.boundary_conditions.push_back(std::move(wall));
+
+        svmp::FE::systems::FESystem system(mesh);
+        auto scalar_space = svmp::FE::spaces::SpaceFactory::create_h1(
+            svmp::FE::ElementType::Tetra4, 1);
+        const auto phi = system.addField(svmp::FE::systems::FieldSpec{
+            .name = "phi_derived_request",
+            .space = scalar_space,
+            .components = 1,
+        });
+        system.addOperator("level_set_owner");
+        const auto phi_state = svmp::FE::forms::StateField(
+            phi, *scalar_space, "phi_derived_request_owner");
+        const auto eta = svmp::FE::forms::TestField(
+            phi, *scalar_space, "eta_derived_request_owner");
+        (void)svmp::FE::systems::installFormulation(
+            system,
+            "level_set_owner",
+            {phi},
+            (phi_state * eta).dx());
+
+        auto module = svmp::Physics::EquationModuleRegistry::instance().create(
+            "fluid", input, system);
+        EXPECT_TRUE(module);
+        std::size_t installed = 0u;
+        for (const std::string_view tag : {
+                 Operators::pressure_virtual_work,
+                 Operators::surface_energy_virtual_work,
+                 Operators::gravitational_potential_virtual_work,
+                 Operators::physical_potential_virtual_work,
+                 Operators::pressure_representability_load_virtual_work,
+                 Operators::conservative_balance,
+                 Operators::pressure_representability_pair,
+             }) {
+            if (system.hasOperator(std::string(tag))) {
+                ++installed;
+            }
+        }
+        return installed;
+    };
+
+    const auto without_request = operators_installed(false);
+    const auto with_request = operators_installed(true);
+    if (saved_switch.has_value()) {
+        (void)::setenv(kSwitch, saved_switch->c_str(), 1);
+    } else {
+        (void)::unsetenv(kSwitch);
+    }
+    EXPECT_EQ(without_request, 0u);
+    EXPECT_EQ(with_request, 7u);
 #endif
 }
 

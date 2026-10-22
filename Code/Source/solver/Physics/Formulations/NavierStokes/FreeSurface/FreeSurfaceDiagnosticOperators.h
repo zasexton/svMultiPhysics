@@ -12,11 +12,13 @@
  * @file FreeSurfaceDiagnosticOperators.h
  * @brief Opt-in diagnostic operators of the Navier-Stokes residual
  *
- * Installed after the production operators, only when requested through the
- * existing environment switches: SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC
- * (the conservative split used by the static-capillary path) and
- * SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC (the continuity-row parts used
- * by the cut-stability tests).  Moved from IncompressibleNavierStokesVMSModule.cpp.
+ * Installed after the production operators, only when requested: the
+ * conservative split read by the static-capillary certificate, by the
+ * options (conservative_balance_diagnostics, set for the static-capillary
+ * initialization) or the environment switch
+ * SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC; the continuity-row
+ * parts used by the cut-stability tests, by the environment switch
+ * SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC.  Moved from IncompressibleNavierStokesVMSModule.cpp.
  */
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
@@ -63,12 +65,14 @@ inline void addSurfaceEnergy(ConservativeBalanceForms* balance, const FE::forms:
     }
 }
 
-/// The conservative-balance diagnostic is requested and every free surface
-/// has a discrete-energy traction with a constant nonzero gamma (warns when
-/// it is requested but not supported).
+/// The conservative-balance diagnostic is requested (by the options or the
+/// environment switch) and every free surface has a discrete-energy traction
+/// with a constant nonzero gamma (warns when it is requested but not
+/// supported).
 [[nodiscard]] bool conservativeBalanceDiagnosticSupported(
     const std::vector<FreeSurfaceBoundary>& effective_free_surfaces,
-    bool has_exterior_free_surface);
+    bool has_exterior_free_surface,
+    bool requested_by_options);
 
 /// The operators of the conservative split
 /// (FreeSurfaceConservativeBalanceDiagnosticOperators), on the production rules.

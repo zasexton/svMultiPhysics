@@ -63,8 +63,10 @@ enum class ALEMeshVelocitySource {
 /**
  * @brief Named velocity-row operators for the conservative free-surface split
  *
- * These diagnostic operators are installed only when
- * `SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC` is enabled and the
+ * These diagnostic operators are installed only when they are requested
+ * (`IncompressibleNavierStokesVMSOptions::conservative_balance_diagnostics`,
+ * set for the static-capillary initialization, or the environment switch
+ * `SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC`) and the
  * active free-surface configuration uses constant-gamma `SurfaceStress` or
  * `KinematicAreaGradientTraction`.
  * Their residual vectors satisfy `physical_potential_virtual_work =
@@ -344,6 +346,15 @@ struct IncompressibleNavierStokesVMSOptions {
     std::vector<FreeSurfaceBoundary> free_surface{};
     std::vector<CoupledRCROutflowBC> coupled_outflow_rcr{};
     std::vector<CoupledRCRCROutflowBC> coupled_outflow_rcrcr{};
+
+    // Install the conservative-balance diagnostic operators (see
+    // FreeSurfaceConservativeBalanceDiagnosticOperators).  The Application
+    // sets it when the static-capillary initialization is configured, since
+    // its startup certificate reads them; the environment switch
+    // SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC requests them for
+    // observation as well.  Observation only: the residual and Jacobian of
+    // the production operator do not change.
+    bool conservative_balance_diagnostics{false};
 
     // Weak Dirichlet (Nitsche) options for velocity.
     FE::Real nitsche_gamma{10.0};
