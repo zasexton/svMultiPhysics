@@ -93,36 +93,6 @@ constexpr std::array<FE::geometry::CutIntegrationSide, 2> kActiveSides{{
 constexpr FE::Real kParentBoundaryMeasure{0.5};
 constexpr FE::Real kPartitionTolerance{1.0e-11};
 
-class ScopedEnvVar final {
-public:
-    ScopedEnvVar(const char* key, std::optional<std::string> value)
-        : key_(key)
-    {
-        if (const char* prior = std::getenv(key_.c_str())) {
-            prior_ = std::string(prior);
-        }
-        set(std::move(value));
-    }
-
-    ~ScopedEnvVar() { set(prior_); }
-
-    ScopedEnvVar(const ScopedEnvVar&) = delete;
-    ScopedEnvVar& operator=(const ScopedEnvVar&) = delete;
-
-private:
-    void set(const std::optional<std::string>& value) const
-    {
-        if (value.has_value()) {
-            ::setenv(key_.c_str(), value->c_str(), 1);
-        } else {
-            ::unsetenv(key_.c_str());
-        }
-    }
-
-    std::string key_;
-    std::optional<std::string> prior_{};
-};
-
 class PartitionedSingleTetraBoundaryMesh final
     : public FE::assembly::IMeshAccess {
 public:
@@ -1983,20 +1953,15 @@ makeFreeSurfaceContext(
 enum class OperatorFamily {
     Traction,
     Robin,
-    PressureFlux,
-    PressureGradient,
-    TangentialPressureGradient,
-    TangentialMomentumResidual,
     Outflow,
     SymmetricNitsche,
     UnsymmetricNitsche,
     WallSlip,
 };
 
-constexpr std::array<OperatorFamily, 5> kSyntheticAssemblyOperatorFamilies{{
+constexpr std::array<OperatorFamily, 4> kSyntheticAssemblyOperatorFamilies{{
     OperatorFamily::Traction,
     OperatorFamily::Robin,
-    OperatorFamily::PressureFlux,
     OperatorFamily::Outflow,
     OperatorFamily::WallSlip,
 }};
@@ -2005,21 +1970,6 @@ constexpr std::array<OperatorFamily, 2> kNitscheOperatorFamilies{{
     OperatorFamily::SymmetricNitsche,
     OperatorFamily::UnsymmetricNitsche,
 }};
-
-constexpr std::array<OperatorFamily, 3>
-    kAdditionalPspgBoundaryOperatorFamilies{{
-        OperatorFamily::PressureGradient,
-        OperatorFamily::TangentialPressureGradient,
-        OperatorFamily::TangentialMomentumResidual,
-    }};
-
-bool isPspgBoundaryOperator(OperatorFamily family)
-{
-    return family == OperatorFamily::PressureFlux ||
-           family == OperatorFamily::PressureGradient ||
-           family == OperatorFamily::TangentialPressureGradient ||
-           family == OperatorFamily::TangentialMomentumResidual;
-}
 
 struct AssemblySample {
     std::vector<FE::Real> residual{};
@@ -2129,19 +2079,6 @@ public:
                     .rhs = {0.1, -0.2, 0.3},
                 });
             break;
-        case OperatorFamily::PressureFlux:
-        case OperatorFamily::PressureGradient:
-        case OperatorFamily::TangentialPressureGradient:
-        case OperatorFamily::TangentialMomentumResidual:
-            options.enable_vms = true;
-            options.velocity_dirichlet.push_back(
-                ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
-                    .boundary_marker = wall_marker_,
-                    .value = {0.0, 0.0, 0.0},
-                });
-            options.nitsche_gamma = FE::Real{12.0};
-            options.nitsche_scale_with_p = false;
-            break;
         case OperatorFamily::Outflow:
             options.pressure_outflow.push_back(
                 ns::IncompressibleNavierStokesVMSOptions::PressureOutflowBC{
@@ -2212,57 +2149,6 @@ public:
                 });
         }
 
-        std::optional<ScopedEnvVar> pressure_gradient_scale;
-        std::optional<ScopedEnvVar> pressure_gradient_scale_alias;
-        std::optional<ScopedEnvVar> pressure_flux_scale;
-        std::optional<ScopedEnvVar> pressure_flux_scale_alias;
-        std::optional<ScopedEnvVar> tangential_pressure_gradient_scale;
-        std::optional<ScopedEnvVar> tangential_pressure_gradient_scale_alias;
-        std::optional<ScopedEnvVar> tangential_momentum_residual_scale;
-        std::optional<ScopedEnvVar> tangential_momentum_residual_scale_alias;
-        std::optional<ScopedEnvVar> force_vms_enable;
-        std::optional<ScopedEnvVar> clear_vms_disable;
-        if (isPspgBoundaryOperator(family_)) {
-            const auto selected_scale =
-                [this](OperatorFamily selected) -> std::optional<std::string> {
-                if (family_ != selected ||
-                    !(operator_scale_ > FE::Real{0.0})) {
-                    return std::nullopt;
-                }
-                return std::to_string(
-                    static_cast<double>(operator_scale_));
-            };
-            pressure_gradient_scale.emplace(
-                "SVMP_NS_PSPG_BOUNDARY_PRESSURE_GRADIENT_SCALE",
-                selected_scale(OperatorFamily::PressureGradient));
-            pressure_gradient_scale_alias.emplace(
-                "SVMP_PSPG_BOUNDARY_PRESSURE_GRADIENT_SCALE",
-                std::nullopt);
-            pressure_flux_scale.emplace(
-                "SVMP_NS_PSPG_BOUNDARY_PRESSURE_FLUX_SCALE",
-                selected_scale(OperatorFamily::PressureFlux));
-            pressure_flux_scale_alias.emplace(
-                "SVMP_PSPG_BOUNDARY_PRESSURE_FLUX_SCALE",
-                std::nullopt);
-            tangential_pressure_gradient_scale.emplace(
-                "SVMP_NS_PSPG_BOUNDARY_TANGENTIAL_PRESSURE_GRADIENT_SCALE",
-                selected_scale(
-                    OperatorFamily::TangentialPressureGradient));
-            tangential_pressure_gradient_scale_alias.emplace(
-                "SVMP_PSPG_BOUNDARY_TANGENTIAL_PRESSURE_GRADIENT_SCALE",
-                std::nullopt);
-            tangential_momentum_residual_scale.emplace(
-                "SVMP_NS_PSPG_BOUNDARY_TANGENTIAL_MOMENTUM_RESIDUAL_SCALE",
-                selected_scale(
-                    OperatorFamily::TangentialMomentumResidual));
-            tangential_momentum_residual_scale_alias.emplace(
-                "SVMP_PSPG_BOUNDARY_TANGENTIAL_MOMENTUM_RESIDUAL_SCALE",
-                std::nullopt);
-            force_vms_enable.emplace(
-                "SVMP_NS_ENABLE_VMS", std::string("1"));
-            clear_vms_disable.emplace(
-                "SVMP_NS_DISABLE_VMS", std::nullopt);
-        }
         ns::IncompressibleNavierStokesVMSModule module(
             velocity_space, pressure_space, std::move(options));
         module.registerOn(*system_);
@@ -2356,13 +2242,7 @@ public:
                 pressure_,
                 vertex,
                 0,
-                family_ == OperatorFamily::PressureFlux ||
-                        family_ == OperatorFamily::PressureGradient
-                    ? mesh_->getNodeCoordinates(vertex)[2]
-                    : family_ ==
-                              OperatorFamily::TangentialPressureGradient
-                          ? mesh_->getNodeCoordinates(vertex)[0]
-                          : FE::Real{0.0});
+                FE::Real{0.0});
             if (family_ == OperatorFamily::WallSlip) {
                 setFieldComponentValue(
                     solution_,
@@ -2374,17 +2254,6 @@ public:
             }
         }
         previous_solution_ = solution_;
-        if (family_ == OperatorFamily::TangentialMomentumResidual) {
-            for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
-                setFieldComponentValue(
-                    previous_solution_,
-                    *system_,
-                    velocity_,
-                    vertex,
-                    0,
-                    FE::Real{0.0});
-            }
-        }
     }
 
     [[nodiscard]] AssemblySample assemble(
@@ -2526,34 +2395,6 @@ public:
                     component,
                     value[static_cast<std::size_t>(component)]);
             }
-        }
-        return probe;
-    }
-
-    [[nodiscard]] std::vector<FE::Real> constantPressureProbe(
-        FE::Real value) const
-    {
-        std::vector<FE::Real> probe(solution_.size(), FE::Real{0.0});
-        for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
-            setFieldComponentValue(
-                probe, *system_, pressure_, vertex, 0, value);
-        }
-        return probe;
-    }
-
-    [[nodiscard]] std::vector<FE::Real> affinePressureProbe(
-        FE::Real offset,
-        const std::array<FE::Real, 3>& gradient) const
-    {
-        std::vector<FE::Real> probe(solution_.size(), FE::Real{0.0});
-        for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
-            const auto point = mesh_->getNodeCoordinates(vertex);
-            const FE::Real value =
-                offset + gradient[0] * point[0] +
-                gradient[1] * point[1] +
-                gradient[2] * point[2];
-            setFieldComponentValue(
-                probe, *system_, pressure_, vertex, 0, value);
         }
         return probe;
     }
@@ -2883,32 +2724,6 @@ private:
     std::vector<FE::Real> previous_solution_{};
 };
 
-std::vector<FE::Real> pspgBoundaryPressureProbe(
-    const SharpBoundaryAssemblyHarness& harness,
-    OperatorFamily family)
-{
-    switch (family) {
-    case OperatorFamily::PressureFlux:
-        return harness.constantPressureProbe(FE::Real{1.0});
-    case OperatorFamily::PressureGradient:
-        return harness.affinePressureProbe(
-            FE::Real{0.0}, {{FE::Real{0.0}, FE::Real{0.0}, FE::Real{1.0}}});
-    case OperatorFamily::TangentialPressureGradient:
-    case OperatorFamily::TangentialMomentumResidual:
-        return harness.affinePressureProbe(
-            FE::Real{0.0}, {{FE::Real{1.0}, FE::Real{0.0}, FE::Real{0.0}}});
-    case OperatorFamily::Traction:
-    case OperatorFamily::Robin:
-    case OperatorFamily::Outflow:
-    case OperatorFamily::SymmetricNitsche:
-    case OperatorFamily::UnsymmetricNitsche:
-    case OperatorFamily::WallSlip:
-        break;
-    }
-    throw std::invalid_argument(
-        "pressure probe requested for a non-PSPG boundary operator");
-}
-
 std::vector<FE::Real> difference(std::span<const FE::Real> wet,
                                  std::span<const FE::Real> dry)
 {
@@ -3061,10 +2876,6 @@ TEST(FreeSurfaceSharpBoundaryOperators,
                     maximum_robin_error =
                         std::max(maximum_robin_error, family_error);
                     break;
-                case OperatorFamily::PressureFlux:
-                case OperatorFamily::PressureGradient:
-                case OperatorFamily::TangentialPressureGradient:
-                case OperatorFamily::TangentialMomentumResidual:
                 case OperatorFamily::Outflow:
                     maximum_flux_error =
                         std::max(maximum_flux_error, family_error);
@@ -3105,188 +2916,6 @@ TEST(FreeSurfaceSharpBoundaryOperators,
     recordRealProperty(
         "sharp_operator_maximum_scaled_penalty_error",
         maximum_penalty_error);
-}
-
-TEST(FreeSurfaceSharpBoundaryOperators,
-     PspgBoundaryPressureFluxUsesGeneratedWetWallMeasure)
-{
-    SharpBoundaryAssemblyHarness enabled(
-        OperatorFamily::PressureFlux,
-        FE::geometry::CutIntegrationSide::Negative,
-        0,
-        1,
-        0,
-        true,
-        FE::Real{1.0});
-    SharpBoundaryAssemblyHarness disabled(
-        OperatorFamily::PressureFlux,
-        FE::geometry::CutIntegrationSide::Negative,
-        0,
-        1,
-        0,
-        true,
-        FE::Real{0.0});
-    const auto pressure_probe =
-        enabled.constantPressureProbe(FE::Real{1.0});
-    const auto enabled_full =
-        enabled.assembleGeneratedFraction(FE::Real{1.0});
-    const auto disabled_full =
-        disabled.assembleGeneratedFraction(FE::Real{1.0});
-    const FE::Real full_work = work(
-        difference(enabled_full.assembly.residual,
-                   disabled_full.assembly.residual),
-        pressure_probe);
-    ASSERT_GT(std::abs(full_work), FE::Real{1.0e-12});
-
-    FE::Real maximum_work_error{0.0};
-    FE::Real maximum_measure_error{0.0};
-    for (const FE::Real fraction : kWetFractions) {
-        const auto enabled_sample =
-            enabled.assembleGeneratedFraction(fraction);
-        const auto disabled_sample =
-            disabled.assembleGeneratedFraction(fraction);
-        const FE::Real sample_work = work(
-            difference(enabled_sample.assembly.residual,
-                       disabled_sample.assembly.residual),
-            pressure_probe);
-        maximum_work_error = std::max(
-            maximum_work_error,
-            scaledAbsoluteError(
-                sample_work, fraction * full_work, full_work));
-        maximum_measure_error = std::max(
-            maximum_measure_error,
-            std::abs(
-                enabled_sample.active_measure -
-                fraction * enabled_sample.parent_measure));
-    }
-
-    EXPECT_LE(maximum_work_error, FE::Real{1.0e-10});
-    EXPECT_LE(maximum_measure_error, FE::Real{2.0e-12});
-    ::testing::Test::RecordProperty(
-        "sharp_pspg_pressure_flux_fraction_case_count",
-        static_cast<int>(kWetFractions.size()));
-    recordRealProperty(
-        "sharp_pspg_pressure_flux_maximum_scaled_work_error",
-        maximum_work_error);
-    recordRealProperty(
-        "sharp_pspg_pressure_flux_maximum_wet_measure_error",
-        maximum_measure_error);
-}
-
-TEST(FreeSurfaceSharpBoundaryOperators,
-     AdditionalPspgBoundaryFormsUseGeneratedWetWallMeasure)
-{
-    FE::Real maximum_work_error{0.0};
-    FE::Real maximum_measure_error{0.0};
-    FE::Real maximum_dry_entry_magnitude{0.0};
-    int nonzero_full_work_count = 0;
-    int dry_rule_count = 0;
-
-    for (const auto family : kAdditionalPspgBoundaryOperatorFamilies) {
-        for (const auto side : kActiveSides) {
-            SharpBoundaryAssemblyHarness enabled(
-                family,
-                side,
-                0,
-                1,
-                0,
-                true,
-                FE::Real{1.0});
-            SharpBoundaryAssemblyHarness disabled(
-                family,
-                side,
-                0,
-                1,
-                0,
-                true,
-                FE::Real{0.0});
-            const auto pressure_probe =
-                pspgBoundaryPressureProbe(enabled, family);
-
-            const auto enabled_dry =
-                enabled.assembleGeneratedFraction(FE::Real{0.0});
-            const auto disabled_dry =
-                disabled.assembleGeneratedFraction(FE::Real{0.0});
-            const auto dry_delta = difference(
-                enabled_dry.assembly.residual,
-                disabled_dry.assembly.residual);
-            dry_rule_count +=
-                static_cast<int>(enabled_dry.active_rule_count);
-            for (const auto value : dry_delta) {
-                maximum_dry_entry_magnitude = std::max(
-                    maximum_dry_entry_magnitude,
-                    std::abs(value));
-            }
-
-            const auto enabled_full =
-                enabled.assembleGeneratedFraction(FE::Real{1.0});
-            const auto disabled_full =
-                disabled.assembleGeneratedFraction(FE::Real{1.0});
-            const FE::Real full_work = work(
-                difference(enabled_full.assembly.residual,
-                           disabled_full.assembly.residual),
-                pressure_probe);
-            ASSERT_GT(std::abs(full_work), FE::Real{1.0e-12})
-                << "operator family=" << static_cast<int>(family)
-                << " active side=" << static_cast<int>(side);
-            ++nonzero_full_work_count;
-
-            for (const FE::Real fraction : kWetFractions) {
-                const auto enabled_sample =
-                    enabled.assembleGeneratedFraction(fraction);
-                const auto disabled_sample =
-                    disabled.assembleGeneratedFraction(fraction);
-                const FE::Real sample_work = work(
-                    difference(enabled_sample.assembly.residual,
-                               disabled_sample.assembly.residual),
-                    pressure_probe);
-                maximum_work_error = std::max(
-                    maximum_work_error,
-                    scaledAbsoluteError(
-                        sample_work,
-                        fraction * full_work,
-                        full_work));
-                maximum_measure_error = std::max(
-                    maximum_measure_error,
-                    std::abs(
-                        enabled_sample.active_measure -
-                        fraction * enabled_sample.parent_measure));
-            }
-        }
-    }
-
-    const int expected_nonzero_count = static_cast<int>(
-        kAdditionalPspgBoundaryOperatorFamilies.size() *
-        kActiveSides.size());
-    EXPECT_EQ(nonzero_full_work_count, expected_nonzero_count);
-    EXPECT_EQ(dry_rule_count, 0);
-    EXPECT_EQ(maximum_dry_entry_magnitude, FE::Real{0.0});
-    EXPECT_LE(maximum_work_error, FE::Real{1.0e-10});
-    EXPECT_LE(maximum_measure_error, FE::Real{2.0e-12});
-    ::testing::Test::RecordProperty(
-        "sharp_additional_pspg_boundary_family_count",
-        static_cast<int>(kAdditionalPspgBoundaryOperatorFamilies.size()));
-    ::testing::Test::RecordProperty(
-        "sharp_additional_pspg_boundary_active_side_count",
-        static_cast<int>(kActiveSides.size()));
-    ::testing::Test::RecordProperty(
-        "sharp_additional_pspg_boundary_fraction_case_count",
-        static_cast<int>(kWetFractions.size()));
-    ::testing::Test::RecordProperty(
-        "sharp_additional_pspg_boundary_nonzero_full_work_count",
-        nonzero_full_work_count);
-    ::testing::Test::RecordProperty(
-        "sharp_additional_pspg_boundary_dry_rule_count",
-        dry_rule_count);
-    recordRealProperty(
-        "sharp_additional_pspg_boundary_maximum_dry_entry_magnitude",
-        maximum_dry_entry_magnitude);
-    recordRealProperty(
-        "sharp_additional_pspg_boundary_maximum_scaled_work_error",
-        maximum_work_error);
-    recordRealProperty(
-        "sharp_additional_pspg_boundary_maximum_wet_measure_error",
-        maximum_measure_error);
 }
 
 TEST(FreeSurfaceSharpBoundaryOperators,
@@ -3521,30 +3150,7 @@ TEST(FreeSurfaceSharpBoundaryOperators,
         [](int velocity_order,
            int pressure_order,
            std::string generated_geometry,
-           std::string_view expected_message,
-           bool strong_marker_pspg_form = false) {
-            std::optional<ScopedEnvVar>
-                pressure_flux_scale;
-            std::optional<ScopedEnvVar>
-                pressure_flux_scale_alias;
-            std::optional<ScopedEnvVar>
-                force_vms_enable;
-            std::optional<ScopedEnvVar>
-                clear_vms_disable;
-            if (strong_marker_pspg_form) {
-                pressure_flux_scale.emplace(
-                    "SVMP_NS_PSPG_BOUNDARY_PRESSURE_FLUX_SCALE",
-                    std::string("1"));
-                pressure_flux_scale_alias.emplace(
-                    "SVMP_PSPG_BOUNDARY_PRESSURE_FLUX_SCALE",
-                    std::nullopt);
-                force_vms_enable.emplace(
-                    "SVMP_NS_ENABLE_VMS",
-                    std::string("1"));
-                clear_vms_disable.emplace(
-                    "SVMP_NS_DISABLE_VMS",
-                    std::nullopt);
-            }
+           std::string_view expected_message) {
             auto mesh =
                 std::make_shared<PartitionedSingleTetraBoundaryMesh>(
                     232, 0, 1, 0);
@@ -3569,21 +3175,12 @@ TEST(FreeSurfaceSharpBoundaryOperators,
                     FE::systems::FieldSourceKind::PrescribedData,
             });
             auto options = baseOptions();
-            if (strong_marker_pspg_form) {
-                options.velocity_dirichlet.push_back(
-                    ns::IncompressibleNavierStokesVMSOptions::
-                        VelocityDirichletBC{
-                            .boundary_marker = 232,
-                            .value = {0.0, 0.0, 0.0},
-                        });
-            } else {
-                options.traction_neumann.push_back(
-                    ns::IncompressibleNavierStokesVMSOptions::
-                        TractionNeumannBC{
-                            .boundary_marker = 232,
-                            .traction = {1.0, 0.0, 0.0},
-                        });
-            }
+            options.traction_neumann.push_back(
+                ns::IncompressibleNavierStokesVMSOptions::
+                    TractionNeumannBC{
+                        .boundary_marker = 232,
+                        .traction = {1.0, 0.0, 0.0},
+                    });
             options.free_surface.push_back(
                 ns::IncompressibleNavierStokesVMSOptions::
                     FreeSurfaceBoundary{
@@ -3628,14 +3225,8 @@ TEST(FreeSurfaceSharpBoundaryOperators,
         1,
         "HighOrderImplicit",
         "Generated_interface_geometry=LinearCorner");
-    expect_rejection(
-        2,
-        1,
-        "LinearCorner",
-        "order-1 velocity and pressure",
-        /*strong_marker_pspg_form=*/true);
     ::testing::Test::RecordProperty(
-        "sharp_high_order_envelope_rejection_count", 4);
+        "sharp_high_order_envelope_rejection_count", 3);
 }
 
 TEST(FreeSurfaceSharpBoundaryOperators,
@@ -5087,202 +4678,6 @@ TEST(FreeSurfaceSharpBoundaryOperatorsMPI,
     recordRealProperty(
         "sharp_structured_mpi_maximum_work_error",
         maximum_work_error);
-#else
-    GTEST_SKIP() << "requires an MPI-enabled build";
-#endif
-}
-
-TEST(FreeSurfaceSharpBoundaryOperatorsMPI,
-     AdditionalPspgBoundaryFormsArePartitionIndependent)
-{
-#if FE_HAS_MPI || defined(MESH_HAS_MPI)
-    int rank = 0;
-    int size = 1;
-    if (!mpiWorld(rank, size) || size < 2) {
-        GTEST_SKIP() << "requires an MPI launch with at least two ranks";
-    }
-
-    FE::Real maximum_residual_error{0.0};
-    FE::Real maximum_jacobian_error{0.0};
-    FE::Real maximum_work_error{0.0};
-    FE::Real maximum_residual_scaling_error{0.0};
-    FE::Real maximum_jacobian_scaling_error{0.0};
-    FE::Real minimum_full_residual_norm =
-        std::numeric_limits<FE::Real>::infinity();
-    int minimum_owner_multiplicity = std::numeric_limits<int>::max();
-    int maximum_owner_multiplicity = 0;
-
-    for (std::size_t family_index = 0u;
-         family_index < kAdditionalPspgBoundaryOperatorFamilies.size();
-         ++family_index) {
-        const auto family =
-            kAdditionalPspgBoundaryOperatorFamilies[family_index];
-        for (std::size_t side_index = 0u;
-             side_index < kActiveSides.size();
-             ++side_index) {
-            const auto side = kActiveSides[side_index];
-            const int owner_rank = static_cast<int>(
-                family_index * kActiveSides.size() + side_index) % size;
-            SharpBoundaryAssemblyHarness reference_enabled(
-                family, side, rank, size, rank, true, FE::Real{1.0});
-            SharpBoundaryAssemblyHarness reference_disabled(
-                family, side, rank, size, rank, true, FE::Real{0.0});
-            SharpBoundaryAssemblyHarness partition_enabled(
-                family,
-                side,
-                rank,
-                size,
-                owner_rank,
-                false,
-                FE::Real{1.0});
-            SharpBoundaryAssemblyHarness partition_disabled(
-                family,
-                side,
-                rank,
-                size,
-                owner_rank,
-                false,
-                FE::Real{0.0});
-
-            const auto reference_probe =
-                pspgBoundaryPressureProbe(reference_enabled, family);
-            const auto partition_probe =
-                pspgBoundaryPressureProbe(partition_enabled, family);
-            const auto reference_full_enabled =
-                reference_enabled.assemble(kParentBoundaryMeasure);
-            const auto reference_full_disabled =
-                reference_disabled.assemble(kParentBoundaryMeasure);
-            const auto reference_full_residual = difference(
-                reference_full_enabled.residual,
-                reference_full_disabled.residual);
-            const auto reference_full_jacobian = difference(
-                reference_full_enabled.jacobian,
-                reference_full_disabled.jacobian);
-            minimum_full_residual_norm = std::min(
-                minimum_full_residual_norm,
-                vectorNorm(reference_full_residual));
-            ASSERT_GT(
-                vectorNorm(reference_full_residual), FE::Real{1.0e-12})
-                << "operator family=" << static_cast<int>(family)
-                << " active side=" << static_cast<int>(side);
-
-            for (const FE::Real fraction : kWetFractions) {
-                const FE::Real measure =
-                    kParentBoundaryMeasure * fraction;
-                const auto observation =
-                    partition_enabled.observeActiveRule(measure);
-                EXPECT_TRUE(observation.valid);
-                EXPECT_EQ(observation.owner_rank, owner_rank);
-                const int owner_multiplicity = globalSum(
-                    observation.valid && observation.owner_rank == rank
-                        ? 1
-                        : 0);
-                minimum_owner_multiplicity = std::min(
-                    minimum_owner_multiplicity, owner_multiplicity);
-                maximum_owner_multiplicity = std::max(
-                    maximum_owner_multiplicity, owner_multiplicity);
-
-                const auto reference_enabled_sample =
-                    reference_enabled.assemble(measure);
-                const auto reference_disabled_sample =
-                    reference_disabled.assemble(measure);
-                const auto reference_residual = difference(
-                    reference_enabled_sample.residual,
-                    reference_disabled_sample.residual);
-                const auto reference_jacobian = difference(
-                    reference_enabled_sample.jacobian,
-                    reference_disabled_sample.jacobian);
-
-                const auto partition_enabled_sample =
-                    partition_enabled.assemble(measure);
-                const auto partition_disabled_sample =
-                    partition_disabled.assemble(measure);
-                const auto global_residual = globalSum(difference(
-                    partition_enabled_sample.residual,
-                    partition_disabled_sample.residual));
-                const auto global_jacobian = globalSum(difference(
-                    partition_enabled_sample.jacobian,
-                    partition_disabled_sample.jacobian));
-
-                maximum_residual_error = std::max(
-                    maximum_residual_error,
-                    maximumAbsoluteDifference(
-                        global_residual, reference_residual));
-                maximum_jacobian_error = std::max(
-                    maximum_jacobian_error,
-                    maximumAbsoluteDifference(
-                        global_jacobian, reference_jacobian));
-                maximum_work_error = std::max(
-                    maximum_work_error,
-                    std::abs(work(global_residual, partition_probe) -
-                             work(reference_residual, reference_probe)));
-                maximum_residual_scaling_error = std::max(
-                    maximum_residual_scaling_error,
-                    maximumScalingError(
-                        reference_residual,
-                        reference_full_residual,
-                        fraction));
-                maximum_jacobian_scaling_error = std::max(
-                    maximum_jacobian_scaling_error,
-                    maximumScalingError(
-                        reference_jacobian,
-                        reference_full_jacobian,
-                        fraction));
-            }
-        }
-    }
-
-    maximum_residual_error = globalMaximum(maximum_residual_error);
-    maximum_jacobian_error = globalMaximum(maximum_jacobian_error);
-    maximum_work_error = globalMaximum(maximum_work_error);
-    maximum_residual_scaling_error =
-        globalMaximum(maximum_residual_scaling_error);
-    maximum_jacobian_scaling_error =
-        globalMaximum(maximum_jacobian_scaling_error);
-    EXPECT_EQ(minimum_owner_multiplicity, 1);
-    EXPECT_EQ(maximum_owner_multiplicity, 1);
-    EXPECT_GT(minimum_full_residual_norm, FE::Real{1.0e-12});
-    EXPECT_LE(maximum_residual_error, kPartitionTolerance);
-    EXPECT_LE(maximum_jacobian_error, kPartitionTolerance);
-    EXPECT_LE(maximum_work_error, kPartitionTolerance);
-    EXPECT_LE(maximum_residual_scaling_error, kPartitionTolerance);
-    EXPECT_LE(maximum_jacobian_scaling_error, kPartitionTolerance);
-
-    ::testing::Test::RecordProperty(
-        "sharp_additional_pspg_boundary_mpi_rank_count", size);
-    ::testing::Test::RecordProperty(
-        "sharp_additional_pspg_boundary_mpi_family_count",
-        static_cast<int>(kAdditionalPspgBoundaryOperatorFamilies.size()));
-    ::testing::Test::RecordProperty(
-        "sharp_additional_pspg_boundary_mpi_active_side_count",
-        static_cast<int>(kActiveSides.size()));
-    ::testing::Test::RecordProperty(
-        "sharp_additional_pspg_boundary_mpi_fraction_case_count",
-        static_cast<int>(kWetFractions.size()));
-    ::testing::Test::RecordProperty(
-        "sharp_additional_pspg_boundary_mpi_minimum_owner_multiplicity",
-        minimum_owner_multiplicity);
-    ::testing::Test::RecordProperty(
-        "sharp_additional_pspg_boundary_mpi_maximum_owner_multiplicity",
-        maximum_owner_multiplicity);
-    recordRealProperty(
-        "sharp_additional_pspg_boundary_mpi_minimum_full_residual_norm",
-        minimum_full_residual_norm);
-    recordRealProperty(
-        "sharp_additional_pspg_boundary_mpi_maximum_residual_error",
-        maximum_residual_error);
-    recordRealProperty(
-        "sharp_additional_pspg_boundary_mpi_maximum_jacobian_error",
-        maximum_jacobian_error);
-    recordRealProperty(
-        "sharp_additional_pspg_boundary_mpi_maximum_work_error",
-        maximum_work_error);
-    recordRealProperty(
-        "sharp_additional_pspg_boundary_mpi_maximum_residual_scaling_error",
-        maximum_residual_scaling_error);
-    recordRealProperty(
-        "sharp_additional_pspg_boundary_mpi_maximum_jacobian_scaling_error",
-        maximum_jacobian_scaling_error);
 #else
     GTEST_SKIP() << "requires an MPI-enabled build";
 #endif

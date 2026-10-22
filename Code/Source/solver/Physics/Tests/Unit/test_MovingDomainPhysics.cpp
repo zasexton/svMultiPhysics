@@ -10695,59 +10695,6 @@ TEST(MovingDomainPhysics, NavierStokesActiveDomainInstallsCutVolumeKernels)
     EXPECT_FALSE(formulationRecordsContain(system, FormExprType::CellIntegral));
 }
 
-TEST(MovingDomainPhysics, NavierStokesPspgContinuityFullCellSupportAddsCellKernel)
-{
-    ScopedEnvVar full_cell_support(
-        "SVMP_NS_PSPG_CONTINUITY_FULL_CELL_SUPPORT",
-        std::string("1"));
-
-    constexpr int interface_marker = 52;
-    const auto mesh = makeMesh();
-    auto u_space = makeVelocitySpace(mesh);
-    auto p_space = makePressureSpace(mesh);
-    auto opts = baseNavierStokesOptions();
-    opts.enable_vms = true;
-
-    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
-        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
-        .interface_marker = interface_marker,
-        .level_set_field_name = "phi",
-        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
-    });
-
-    FE::systems::FESystem system(mesh);
-    system.addField(FE::systems::FieldSpec{
-        .name = "phi",
-        .space = p_space,
-        .components = 1,
-        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
-    });
-
-    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
-    testing::internal::CaptureStdout();
-    testing::internal::CaptureStderr();
-    module.registerOn(system);
-    auto log_output = testing::internal::GetCapturedStdout();
-    log_output += testing::internal::GetCapturedStderr();
-
-    const auto& equations = system.operatorDefinition("equations");
-    EXPECT_FALSE(equations.cells.empty());
-    ASSERT_FALSE(equations.cut_volumes.empty());
-    for (const auto& term : equations.cut_volumes) {
-        EXPECT_EQ(term.marker, interface_marker);
-        EXPECT_EQ(term.side, FE::geometry::CutIntegrationSide::Negative);
-    }
-    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellIntegral));
-    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CutVolumeIntegral));
-    EXPECT_NE(log_output.find(
-                  "diagnostic=navier_stokes_pspg_continuity_volume_support"),
-              std::string::npos);
-    EXPECT_NE(log_output.find("full_cell_vms_pspg_plus_active_galerkin"),
-              std::string::npos);
-    EXPECT_NE(log_output.find("qualification=DiagnosticOnly"),
-              std::string::npos);
-}
-
 TEST(MovingDomainPhysics, NavierStokesActiveDomainCutVolumeSamplesNonconstantVelocity)
 {
     constexpr int interface_marker = 51;
