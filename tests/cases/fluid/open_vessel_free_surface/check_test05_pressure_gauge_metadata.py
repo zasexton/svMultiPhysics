@@ -148,18 +148,8 @@ def check_case(case_dir: Path) -> dict[str, object]:
         solver_path,
     )
     _require_text(level_set, "Enable_reinitialization", "false", solver_path)
-    _require_text(
-        level_set,
-        "Volume_correction_minimum_relative_error",
-        "1.0e-6",
-        solver_path,
-    )
-    _require_text(
-        level_set,
-        "Volume_correction_maximum_interface_displacement_fraction",
-        "0.05",
-        solver_path,
-    )
+    # The global volume correction was retired (decision D47).
+    _require_text(level_set, "Enable_volume_correction", "false", solver_path)
 
     fluid = next(
         (

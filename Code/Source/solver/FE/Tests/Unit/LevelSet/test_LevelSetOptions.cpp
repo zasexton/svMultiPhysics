@@ -296,21 +296,3 @@ TEST(LevelSetOptions, ReinitializationCadence)
     EXPECT_FALSE(level_set::shouldReinitializeLevelSet(options, 3));
 }
 
-TEST(LevelSetOptions, VolumeCorrectionCadence)
-{
-    level_set::LevelSetVolumeCorrectionOptions options{};
-    EXPECT_FALSE(level_set::shouldApplyLevelSetVolumeCorrection(options, 1));
-
-    options.enabled = true;
-    options.cadence_steps = 4;
-    EXPECT_FALSE(level_set::shouldApplyLevelSetVolumeCorrection(options, -1));
-    EXPECT_FALSE(level_set::shouldApplyLevelSetVolumeCorrection(options, 0));
-    EXPECT_FALSE(level_set::shouldApplyLevelSetVolumeCorrection(options, 1));
-    EXPECT_FALSE(level_set::shouldApplyLevelSetVolumeCorrection(options, 3));
-    EXPECT_TRUE(level_set::shouldApplyLevelSetVolumeCorrection(options, 4));
-    EXPECT_FALSE(level_set::shouldApplyLevelSetVolumeCorrection(options, 5));
-    EXPECT_TRUE(level_set::shouldApplyLevelSetVolumeCorrection(options, 8));
-
-    options.cadence_steps = -1;
-    EXPECT_FALSE(level_set::shouldApplyLevelSetVolumeCorrection(options, 4));
-}

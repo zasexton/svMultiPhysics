@@ -1554,9 +1554,6 @@ TEST(LevelSetTransport,
         options.bound_preserving.enabled = true;
     });
     expect_rejected_without_fields([](auto& options) {
-        options.volume_correction.enabled = true;
-    });
-    expect_rejected_without_fields([](auto& options) {
         options.conservative_phase.maximum_courant = 1.01;
     });
     expect_rejected_without_fields([](auto& options) {
@@ -3549,80 +3546,6 @@ TEST(LevelSetTransport, ValidatesReinitializationOptions)
 
     options.reinitialization.method =
         level_set::LevelSetReinitializationMethod::Projection;
-    FE::systems::FESystem valid_system(mesh);
-    valid_system.addField(FE::systems::FieldSpec{
-        .name = "Velocity",
-        .space = velocity_space,
-        .components = velocity_space->value_dimension(),
-    });
-    EXPECT_NO_THROW(
-        (void)level_set::installLevelSetTransport(valid_system, phi_space, options));
-}
-
-TEST(LevelSetTransport, ValidatesVolumeCorrectionOptions)
-{
-    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
-    auto phi_space = scalarSpace(mesh);
-    auto velocity_space = vectorSpace(mesh);
-
-    level_set::LevelSetTransportOptions options{};
-    options.volume_correction.enabled = true;
-
-    options.volume_correction.cadence_steps = 0;
-    FE::systems::FESystem cadence_system(mesh);
-    EXPECT_THROW(
-        (void)level_set::installLevelSetTransport(cadence_system, phi_space, options),
-        std::invalid_argument);
-
-    options.volume_correction.cadence_steps = 1;
-    options.volume_correction.volume_tolerance = 0.0;
-    FE::systems::FESystem tolerance_system(mesh);
-    EXPECT_THROW(
-        (void)level_set::installLevelSetTransport(tolerance_system, phi_space, options),
-        std::invalid_argument);
-
-    options.volume_correction.volume_tolerance = 1.0e-10;
-    options.volume_correction.max_iterations = 0;
-    FE::systems::FESystem iterations_system(mesh);
-    EXPECT_THROW(
-        (void)level_set::installLevelSetTransport(iterations_system, phi_space, options),
-        std::invalid_argument);
-
-    options.volume_correction.max_iterations = 50;
-    options.volume_correction.minimum_relative_volume_error = -1.0;
-    FE::systems::FESystem relative_error_system(mesh);
-    EXPECT_THROW(
-        (void)level_set::installLevelSetTransport(
-            relative_error_system, phi_space, options),
-        std::invalid_argument);
-
-    options.volume_correction.minimum_relative_volume_error = 1.0e-6;
-    options.volume_correction.maximum_interface_displacement_fraction = 0.0;
-    FE::systems::FESystem displacement_system(mesh);
-    EXPECT_THROW(
-        (void)level_set::installLevelSetTransport(
-            displacement_system, phi_space, options),
-        std::invalid_argument);
-
-    options.volume_correction.maximum_interface_displacement_fraction = 0.1;
-    options.volume_correction
-        .maximum_cumulative_interface_displacement_fraction = 0.0;
-    FE::systems::FESystem cumulative_displacement_system(mesh);
-    EXPECT_THROW(
-        (void)level_set::installLevelSetTransport(
-            cumulative_displacement_system, phi_space, options),
-        std::invalid_argument);
-
-    options.volume_correction
-        .maximum_cumulative_interface_displacement_fraction = 1.0;
-    options.volume_correction.use_initial_negative_volume_as_target = false;
-    options.volume_correction.target_negative_volume = -1.0;
-    FE::systems::FESystem target_system(mesh);
-    EXPECT_THROW(
-        (void)level_set::installLevelSetTransport(target_system, phi_space, options),
-        std::invalid_argument);
-
-    options.volume_correction.target_negative_volume = 0.125;
     FE::systems::FESystem valid_system(mesh);
     valid_system.addField(FE::systems::FieldSpec{
         .name = "Velocity",

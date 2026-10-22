@@ -109,7 +109,6 @@ HIGH_ORDER_CAPILLARY_RESPONSE_CASES = ("capillaryarc2d",)
 HIGH_ORDER_CAPILLARY_BALANCE_CASES = ("capillaryarc2d",)
 HIGH_ORDER_CAPILLARY_DROPLET_EQUILIBRIUM_CASES = ("droplet2d",)
 HIGH_ORDER_CAPILLARY_WAVE_CASES = ("capillarywave2d",)
-HIGH_ORDER_VOLUME_CORRECTED_MOTION_CASES = ("sloshing2d",)
 QUALIFICATION_REPORT_SCHEMA_VERSION = 2
 HIGH_ORDER_SYNTHETIC_CASES = {
     "capillaryarc2d",
@@ -722,14 +721,7 @@ def configure_solver(solver_xml: Path,
                      static_capillary_limited_memory_curvature_tolerance:
                      float | None = None,
                      enable_reinitialization: bool | None = None,
-                     reinitialization_cadence_steps: int | None = None,
-                     enable_volume_correction: bool | None = None,
-                     volume_correction_cadence_steps: int | None = None,
-                     volume_correction_use_initial_volume: bool | None = None,
-                     volume_correction_tolerance: float | None = None,
-                     volume_correction_max_iterations: int | None = None,
-                     volume_correction_maximum_cumulative_interface_displacement_fraction:
-                     float | None = None) -> None:
+                     reinitialization_cadence_steps: int | None = None) -> None:
     tree = ET.parse(solver_xml)
     root = tree.getroot()
     general = root.find("GeneralSimulationParameters")
@@ -1152,35 +1144,6 @@ def configure_solver(solver_xml: Path,
         level_set = level_set_equation(root)
         set_text(level_set, "Reinitialization_cadence_steps",
                  str(reinitialization_cadence_steps))
-
-    if enable_volume_correction is not None:
-        level_set = level_set_equation(root)
-        set_text(level_set, "Enable_volume_correction",
-                 "true" if enable_volume_correction else "false")
-    if volume_correction_cadence_steps is not None:
-        level_set = level_set_equation(root)
-        set_text(level_set, "Volume_correction_cadence_steps",
-                 str(volume_correction_cadence_steps))
-    if volume_correction_use_initial_volume is not None:
-        level_set = level_set_equation(root)
-        set_text(level_set, "Volume_correction_use_initial_volume",
-                 "true" if volume_correction_use_initial_volume else "false")
-    if volume_correction_tolerance is not None:
-        level_set = level_set_equation(root)
-        set_text(level_set, "Volume_correction_tolerance",
-                 f"{volume_correction_tolerance:.16g}")
-    if volume_correction_max_iterations is not None:
-        level_set = level_set_equation(root)
-        set_text(level_set, "Volume_correction_max_iterations",
-                 str(volume_correction_max_iterations))
-    if (volume_correction_maximum_cumulative_interface_displacement_fraction
-            is not None):
-        level_set = level_set_equation(root)
-        set_text(
-            level_set,
-            "Volume_correction_maximum_cumulative_interface_displacement_fraction",
-            f"{volume_correction_maximum_cumulative_interface_displacement_fraction:.16g}",
-        )
 
     if disable_coupled_outer_fgmres:
         assert ns_solver is not None
@@ -1953,7 +1916,6 @@ def configure_sessile_solver_xml(case_dir: Path,
     set_text(level_set, "Level_set_source", "prescribed_data")
     # Disabled maintenance operators still validate their cadence values.
     set_text(level_set, "Reinitialization_cadence_steps", "1")
-    set_text(level_set, "Volume_correction_cadence_steps", "1")
     # SurfaceStress is the first variation of the generated-interface measure
     # and does not consume a projected scalar curvature.  Keeping an otherwise
     # unused kappa field in this physical wetting deck is more than overhead:
@@ -8053,12 +8015,6 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "capillary_convergence_metric",
         "min_capillary_convergence_rate",
         "min_capillary_convergence_points",
-        "enable_level_set_volume_correction",
-        "volume_correction_cadence_steps",
-        "volume_correction_use_initial_volume",
-        "volume_correction_tolerance",
-        "volume_correction_max_iterations",
-        "volume_correction_maximum_cumulative_interface_displacement_fraction",
         "mpi_ranks",
         "synthetic_nx",
         "synthetic_ny",
@@ -12601,11 +12557,6 @@ def case_args_for_run(case_name: str,
             raise ValueError(
                 "capillary-rise qualification requires wall-aware "
                 "reinitialization")
-        if getattr(
-                case_args, "enable_level_set_volume_correction",
-                None) is True:
-            raise ValueError(
-                "capillary-rise open-inlet volume must not be globally corrected")
         for name in (
                 "max_capillary_rise_contact_motion_cells_per_step",
                 "max_capillary_rise_contact_angle_error_degrees"):
@@ -12626,7 +12577,6 @@ def case_args_for_run(case_name: str,
             CAPILLARY_RISE_CONTACT_ANGLE_DEGREES)
         case_args.wall_slip_length = CAPILLARY_RISE_SLIP_LENGTH_M
         case_args.enable_level_set_reinitialization = True
-        case_args.enable_level_set_volume_correction = False
         set_default(
             case_args,
             "wet_extension_advection_velocity_method",
@@ -13025,15 +12975,6 @@ def configure_case_solver_xml(run_dir: Path, args: argparse.Namespace) -> None:
             args, "enable_level_set_reinitialization", None),
         reinitialization_cadence_steps=getattr(
             args, "reinitialization_cadence_steps", None),
-        enable_volume_correction=args.enable_level_set_volume_correction,
-        volume_correction_cadence_steps=args.volume_correction_cadence_steps,
-        volume_correction_use_initial_volume=(
-            args.volume_correction_use_initial_volume),
-        volume_correction_tolerance=args.volume_correction_tolerance,
-        volume_correction_max_iterations=args.volume_correction_max_iterations,
-        volume_correction_maximum_cumulative_interface_displacement_fraction=(
-            args.volume_correction_maximum_cumulative_interface_displacement_fraction
-        ),
     )
 
 
@@ -13473,7 +13414,6 @@ def apply_level_set_advection_velocity_diagnostic_gate_defaults(
             "high_order_visible_motion_demo",
             "high_order_mpi_motion_smoke",
             "high_order_capillary_wave_smoke",
-            "high_order_volume_corrected_motion_smoke",
         )
     )
     if not high_order_motion_gate:
@@ -13519,8 +13459,7 @@ def apply_high_order_production_qualification_defaults(
                     "high_order_capillary_droplet_equilibrium_smoke",
                     False,
                 ) and
-                not getattr(args, "high_order_capillary_wave_smoke", False) and
-                not args.high_order_volume_corrected_motion_smoke):
+                not getattr(args, "high_order_capillary_wave_smoke", False)):
             args.steps = 1
         return
     if args.high_order_mpi_production_qualification:
@@ -13988,7 +13927,6 @@ def apply_high_order_3d_benchmark_profile_qualification_defaults(
     set_default(args, "fsils_matrix_diagnostics_max_records", 64)
     args.require_reference_profile_comparison = True
     args.enable_physical_history_instrumentation = True
-    args.require_level_set_mass_correction_histories = True
     args.enable_adaptive_time_loop = True
     args.newton_line_search_fail_on_no_reduction = True
 
@@ -14874,114 +14812,6 @@ def apply_high_order_capillary_wave_smoke_defaults(args: argparse.Namespace) -> 
                     curvature_sample_adjacency_build_budget(args))
 
 
-def apply_high_order_volume_corrected_motion_smoke_defaults(
-        args: argparse.Namespace) -> None:
-    if not args.high_order_volume_corrected_motion_smoke:
-        return
-    if args.high_order_3d_benchmark_qualification:
-        raise ValueError(
-            "--high-order-volume-corrected-motion-smoke cannot be combined with "
-            "--high-order-3d-benchmark-qualification"
-        )
-    if args.high_order_3d_benchmark_profile_qualification:
-        raise ValueError(
-            "--high-order-volume-corrected-motion-smoke cannot be combined with "
-            "--high-order-3d-benchmark-profile-qualification"
-        )
-    if args.high_order_curved_3d_simplex_smoke:
-        raise ValueError(
-            "--high-order-volume-corrected-motion-smoke cannot be combined with "
-            "--high-order-curved-3d-simplex-smoke"
-        )
-    if args.high_order_mpi_motion_smoke:
-        raise ValueError(
-            "--high-order-volume-corrected-motion-smoke cannot be combined with "
-            "--high-order-mpi-motion-smoke"
-        )
-    if args.high_order_capillary_projection_smoke:
-        raise ValueError(
-            "--high-order-volume-corrected-motion-smoke cannot be combined with "
-            "--high-order-capillary-projection-smoke"
-        )
-    if args.high_order_capillary_response_smoke:
-        raise ValueError(
-            "--high-order-volume-corrected-motion-smoke cannot be combined with "
-            "--high-order-capillary-response-smoke"
-        )
-    if args.high_order_capillary_balance_smoke:
-        raise ValueError(
-            "--high-order-volume-corrected-motion-smoke cannot be combined with "
-            "--high-order-capillary-balance-smoke"
-        )
-    if getattr(args, "high_order_capillary_droplet_equilibrium_smoke", False):
-        raise ValueError(
-            "--high-order-volume-corrected-motion-smoke cannot be combined with "
-            "--high-order-capillary-droplet-equilibrium-smoke"
-        )
-    if getattr(args, "high_order_capillary_wave_smoke", False):
-        raise ValueError(
-            "--high-order-volume-corrected-motion-smoke cannot be combined with "
-            "--high-order-capillary-wave-smoke"
-        )
-
-    if not args.case:
-        args.case = list(HIGH_ORDER_VOLUME_CORRECTED_MOTION_CASES)
-    if args.steps is None:
-        args.steps = 10
-    set_default(args, "timeout_seconds", 600.0)
-    args.use_high_order_implicit_cuts = True
-    args.disable_cut_stabilization = False
-    args.require_time_loop_convergence = True
-    args.require_process_memory_diagnostics = True
-    args.require_basis_cache_diagnostics = True
-    args.require_high_order_cut_context_diagnostics = True
-    args.require_eigen_factorization_diagnostics = True
-    args.require_active_pressure_support_diagnostics = True
-
-    set_default(args, "enable_level_set_volume_correction", True)
-    set_default(args, "volume_correction_use_initial_volume", True)
-    set_default(args, "volume_correction_cadence_steps", 1)
-    set_default(args, "volume_correction_tolerance", 1.0e-10)
-    set_default(args, "volume_correction_max_iterations", 50)
-    set_default(
-        args,
-        "volume_correction_maximum_cumulative_interface_displacement_fraction",
-        1.0,
-    )
-    set_default(args, "linear_algebra_backend", "eigen")
-    if args.min_max_speed == 1.0e-2:
-        args.min_max_speed = 1.0e-3
-    if args.min_wet_mean_speed == 2.5e-4:
-        args.min_wet_mean_speed = 1.0e-4
-    if args.min_gate_mean_ux == 1.0e-4:
-        args.min_gate_mean_ux = -1.0
-    if args.min_front_mean_ux == 1.0e-4:
-        args.min_front_mean_ux = -1.0
-    set_default(args, "min_diagnostic_solution_velocity_range", 1.0e-3)
-    set_default(args, "min_diagnostic_pressure_range", 100.0)
-    set_default(args, "max_wet_fraction_volume_error", 1.0e-8)
-    set_default(args, "min_diagnostic_level_set_volume_correction_count", 1)
-    set_default(args, "max_diagnostic_level_set_volume_correction_achieved_error", 1.0e-8)
-    set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 5.0)
-    set_default(args, "max_diagnostic_generated_cell_cache_full_miss_rebuilds", 1)
-    set_default(args, "max_diagnostic_assembly_timings_per_step", 4.0)
-    set_default(args, "max_diagnostic_extra_assembly_timings_per_step", 3.0)
-    set_default(args, "max_diagnostic_process_basis_cache_entries", 8)
-    set_default(args, "max_diagnostic_process_basis_cache_entry_growth", 8)
-    set_default(args, "max_diagnostic_implicit_cut_fallback_cells", 0)
-    set_default(args, "min_diagnostic_achieved_interface_quadrature_order", 2)
-    set_default(args, "min_diagnostic_achieved_volume_quadrature_order", 2)
-    set_default(args, "max_eigen_factorization_pressure_zero_rows", 0)
-    set_default(args, "max_eigen_factorization_pressure_zero_cols", 0)
-    set_default(args, "max_eigen_factorization_nonfinite_entries", 0)
-    set_default(args, "max_time_loop_nonlinear_iterations_per_step", 3)
-    set_default(args, "max_time_loop_linear_iterations_per_step", 10)
-    set_default(args, "min_interface_height_change", 1.0e-4)
-    set_default(args, "min_interface_mean_abs_height_change", 2.0e-5)
-    set_default(args, "min_interface_slope_change", 5.0e-5)
-    set_default(args, "min_interface_final_height_span", 1.0e-4)
-
-
 def apply_high_order_implicit_defaults(args: argparse.Namespace) -> None:
     if not args.use_high_order_implicit_cuts:
         return
@@ -15154,11 +14984,6 @@ def main(arguments: Sequence[str] | None = None) -> int:
                         help=("enable a zero-gravity high-order implicit "
                               "small-amplitude SurfaceStress capillary-wave "
                               "smoke"))
-    parser.add_argument("--high-order-volume-corrected-motion-smoke",
-                        action="store_true",
-                        help=("enable a high-order implicit free-surface "
-                              "motion smoke with runtime global level-set "
-                              "volume correction"))
     parser.add_argument("--source-ref")
     parser.add_argument("--steps", type=int)
     parser.add_argument("--time-step-size", type=float)
@@ -15648,27 +15473,6 @@ def main(arguments: Sequence[str] | None = None) -> int:
     parser.add_argument("--capillary-convergence-metric", action="append")
     parser.add_argument("--min-capillary-convergence-rate", type=float)
     parser.add_argument("--min-capillary-convergence-points", type=int)
-    parser.add_argument("--enable-level-set-volume-correction",
-                        dest="enable_level_set_volume_correction",
-                        action="store_true",
-                        default=None)
-    parser.add_argument("--disable-level-set-volume-correction",
-                        dest="enable_level_set_volume_correction",
-                        action="store_false")
-    parser.add_argument("--volume-correction-cadence-steps", type=int)
-    parser.add_argument("--volume-correction-use-initial-volume",
-                        dest="volume_correction_use_initial_volume",
-                        action="store_true",
-                        default=None)
-    parser.add_argument("--volume-correction-target-volume",
-                        dest="volume_correction_use_initial_volume",
-                        action="store_false")
-    parser.add_argument("--volume-correction-tolerance", type=float)
-    parser.add_argument("--volume-correction-max-iterations", type=int)
-    parser.add_argument(
-        "--volume-correction-maximum-cumulative-interface-displacement-fraction",
-        type=float,
-    )
     parser.add_argument("--max-nonlinear-iterations", type=int)
     add_linear_solver_control_arguments(parser)
     parser.add_argument("--disable-coupled-outer-fgmres", action="store_true")
@@ -15787,7 +15591,6 @@ def main(arguments: Sequence[str] | None = None) -> int:
     apply_high_order_capillary_balance_smoke_defaults(args)
     apply_high_order_capillary_droplet_equilibrium_smoke_defaults(args)
     apply_high_order_capillary_wave_smoke_defaults(args)
-    apply_high_order_volume_corrected_motion_smoke_defaults(args)
     apply_high_order_implicit_defaults(args)
     apply_level_set_advection_velocity_diagnostic_gate_defaults(args)
     require_profile_production_linear_solver_policy(args)

@@ -226,8 +226,9 @@ TEST(LevelSetMaintenanceConfiguration,
     put(input.equation_parameters, "Reinitialization_max_iterations", "2tail");
     put(input.equation_parameters, "Reinitialization_signed_distance_tolerance",
         "1.25tail");
-    put(input.equation_parameters, "Enable_volume_correction", "unrecognized");
-    put(input.equation_parameters, "Volume_correction_tolerance", "nan");
+    put(input.equation_parameters, "Enable_bound_preserving_limiter",
+        "unrecognized");
+    put(input.equation_parameters, "Bound_preserving_bound_tolerance", "nan");
 
     const auto resolved =
         application::core::resolveLegacyLevelSetMaintenanceConfiguration(
@@ -244,8 +245,8 @@ TEST(LevelSetMaintenanceConfiguration,
     EXPECT_EQ(transport.reinitialization.max_iterations, 2);
     EXPECT_DOUBLE_EQ(transport.reinitialization.signed_distance_tolerance,
                      1.25);
-    EXPECT_FALSE(transport.volume_correction.enabled);
-    EXPECT_TRUE(std::isnan(transport.volume_correction.volume_tolerance));
+    EXPECT_FALSE(transport.bound_preserving.enabled);
+    EXPECT_TRUE(std::isnan(transport.bound_preserving.bound_tolerance));
   }
 
   auto zero = makeLegacyInput();
@@ -522,7 +523,8 @@ TEST(LevelSetMaintenanceConfiguration,
   put(first_input.equation_parameters, "Enable_reinitialization", "true");
   auto second_input = makeLegacyInput();
   put(second_input.equation_parameters, "Level_set_field_name", "phi_second");
-  put(second_input.equation_parameters, "Enable_volume_correction", "true");
+  put(second_input.equation_parameters, "Enable_kinematic_reconciliation",
+      "true");
 
   auto first = makeInstallation(first_input, "installed_first");
   auto second = makeInstallation(second_input, "installed_second");
@@ -699,8 +701,8 @@ TEST(LevelSetMaintenanceConfiguration,
 TEST(LevelSetMaintenanceConfiguration,
      ResolvesUnavailableInstallationAndNonfiniteLegacyTolerance) {
   auto input = makeLegacyInput();
-  put(input.equation_parameters, "Enable_volume_correction", "true");
-  put(input.equation_parameters, "Volume_correction_tolerance", "nan");
+  put(input.equation_parameters, "Enable_bound_preserving_limiter", "true");
+  put(input.equation_parameters, "Bound_preserving_bound_tolerance", "nan");
 
   const auto resolved =
       application::core::resolveLegacyLevelSetMaintenanceConfiguration(
@@ -708,19 +710,19 @@ TEST(LevelSetMaintenanceConfiguration,
   ASSERT_TRUE(resolved.has_value());
   EXPECT_EQ((*resolved)->installation, nullptr);
   ASSERT_TRUE(
-      std::isnan((*resolved)->transport.volume_correction.volume_tolerance));
+      std::isnan((*resolved)->transport.bound_preserving.bound_tolerance));
   const auto *enabled =
       findObservation((*resolved)->input_observations,
-                      "enable_volume_correction", "legacy_getter");
+                      "enable_bound_preserving_limiter", "legacy_getter");
   ASSERT_NE(enabled, nullptr);
-  EXPECT_EQ(enabled->selected_spelling, "Enable_volume_correction");
+  EXPECT_EQ(enabled->selected_spelling, "Enable_bound_preserving_limiter");
   EXPECT_TRUE(enabled->supplied);
   EXPECT_FALSE(enabled->compatibility_fallback);
   const auto *tolerance =
       findObservation((*resolved)->input_observations,
-                      "volume_correction_tolerance", "legacy_getter");
+                      "bound_preserving_bound_tolerance", "legacy_getter");
   ASSERT_NE(tolerance, nullptr);
-  EXPECT_EQ(tolerance->selected_spelling, "Volume_correction_tolerance");
+  EXPECT_EQ(tolerance->selected_spelling, "Bound_preserving_bound_tolerance");
   EXPECT_TRUE(tolerance->supplied);
   EXPECT_FALSE(tolerance->compatibility_fallback);
   const auto *default_field = findObservation(
@@ -797,28 +799,6 @@ TEST(LevelSetMaintenanceConfiguration,
   EXPECT_EQ(observationLayers((*resolved)->input_observations,
                               "enable_curvature_projection", "derived"),
             (std::vector<std::string>{"derived:curvature_field_name"}));
-}
-
-TEST(LevelSetMaintenanceConfiguration,
-     RecordsEnabledVolumeCorrectionDefaultToleranceProvenance) {
-  auto input = makeLegacyInput();
-  put(input.equation_parameters, "Enable_volume_correction", "true");
-
-  const auto resolved =
-      application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-          input, std::span<const ActiveCutVolumeRequest>{});
-  ASSERT_TRUE(resolved.has_value());
-  ASSERT_TRUE(*resolved);
-  EXPECT_DOUBLE_EQ(
-      (*resolved)->transport.volume_correction.volume_tolerance, 1.0e-10);
-  const auto *tolerance =
-      findObservation((*resolved)->input_observations,
-                      "volume_correction_tolerance", "fe_default");
-  EXPECT_NE(tolerance, nullptr);
-  if (tolerance != nullptr) {
-    EXPECT_TRUE(tolerance->selected_spelling.empty());
-    EXPECT_EQ(tolerance->source_layer, "fe_default");
-  }
 }
 
 TEST(LevelSetMaintenanceConfiguration,

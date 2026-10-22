@@ -722,12 +722,6 @@ def write_solver_xml(
     hydrostatic_pressure_field_name: str | None = None,
     enable_level_set_maintenance: bool = True,
     enable_level_set_reinitialization: bool | None = None,
-    enable_level_set_volume_correction: bool | None = None,
-    volume_correction_cadence_steps: str = "5",
-    volume_correction_tolerance: str = "1.0e-5",
-    volume_correction_max_iterations: str = "50",
-    volume_correction_minimum_relative_error: str = "1.0e-6",
-    volume_correction_maximum_interface_displacement_fraction: str = "0.1",
     momentum_source_file_path: str | None = None,
     rotating_frame_angular_velocity_file_path: str | None = None,
     wet_extension_advection_velocity_method: str | None = None,
@@ -875,13 +869,8 @@ def write_solver_xml(
     jit_module_options = "jit=true; jit_specialization=true"
     if enable_level_set_reinitialization is None:
         enable_level_set_reinitialization = enable_level_set_maintenance
-    if enable_level_set_volume_correction is None:
-        enable_level_set_volume_correction = enable_level_set_maintenance
     enable_level_set_reinitialization_text = (
         "true" if enable_level_set_reinitialization else "false"
-    )
-    enable_level_set_volume_correction_text = (
-        "true" if enable_level_set_volume_correction else "false"
     )
     if wet_extension_advection_velocity_method is None:
         level_set_velocity_block = """  <Velocity_source>coupled_field</Velocity_source>
@@ -1011,13 +1000,7 @@ def write_solver_xml(
   <Reinitialization_method>projection</Reinitialization_method>
   <Reinitialization_cadence_steps>5</Reinitialization_cadence_steps>
   <Reinitialization_max_iterations>4</Reinitialization_max_iterations>
-  <Enable_volume_correction>{enable_level_set_volume_correction_text}</Enable_volume_correction>
-  <Volume_correction_use_initial_volume>true</Volume_correction_use_initial_volume>
-  <Volume_correction_cadence_steps>{volume_correction_cadence_steps}</Volume_correction_cadence_steps>
-  <Volume_correction_tolerance>{volume_correction_tolerance}</Volume_correction_tolerance>
-  <Volume_correction_max_iterations>{volume_correction_max_iterations}</Volume_correction_max_iterations>
-  <Volume_correction_minimum_relative_error>{volume_correction_minimum_relative_error}</Volume_correction_minimum_relative_error>
-  <Volume_correction_maximum_interface_displacement_fraction>{volume_correction_maximum_interface_displacement_fraction}</Volume_correction_maximum_interface_displacement_fraction>
+  <Enable_volume_correction>false</Enable_volume_correction>
 
   <Output type="Spatial">
     <Level_set>true</Level_set>
@@ -1201,12 +1184,6 @@ def write_case(
     hydrostatic_pressure_field_name: str | None = None,
     enable_level_set_maintenance: bool = True,
     enable_level_set_reinitialization: bool | None = None,
-    enable_level_set_volume_correction: bool | None = None,
-    volume_correction_cadence_steps: str = "5",
-    volume_correction_tolerance: str = "1.0e-5",
-    volume_correction_max_iterations: str = "50",
-    volume_correction_minimum_relative_error: str = "1.0e-6",
-    volume_correction_maximum_interface_displacement_fraction: str = "0.1",
     momentum_source_file_path: str | None = None,
     rotating_frame_angular_velocity_file_path: str | None = None,
     wet_extension_advection_velocity_method: str | None = None,
@@ -1279,14 +1256,6 @@ def write_case(
         hydrostatic_pressure_field_name=hydrostatic_pressure_field_name,
         enable_level_set_maintenance=enable_level_set_maintenance,
         enable_level_set_reinitialization=enable_level_set_reinitialization,
-        enable_level_set_volume_correction=enable_level_set_volume_correction,
-        volume_correction_cadence_steps=volume_correction_cadence_steps,
-        volume_correction_tolerance=volume_correction_tolerance,
-        volume_correction_max_iterations=volume_correction_max_iterations,
-        volume_correction_minimum_relative_error=volume_correction_minimum_relative_error,
-        volume_correction_maximum_interface_displacement_fraction=(
-            volume_correction_maximum_interface_displacement_fraction
-        ),
         momentum_source_file_path=momentum_source_file_path,
         rotating_frame_angular_velocity_file_path=rotating_frame_angular_velocity_file_path,
         wet_extension_advection_velocity_method=wet_extension_advection_velocity_method,
@@ -1481,8 +1450,6 @@ def generate_spheric_test10(*, allow_overlapping_face_files: bool = False) -> No
         include_pressure_constraints=False,
         hydrostatic_pressure_field_name="Pressure",
         enable_level_set_reinitialization=False,
-        volume_correction_minimum_relative_error="1.0e-6",
-        volume_correction_maximum_interface_displacement_fraction="0.05",
         wet_extension_advection_velocity_method="wall_compatible_normal",
         momentum_source_file_path="bc/test10_lateral_water_1x_roll_body_force.dat",
         rotating_frame_angular_velocity_file_path="bc/test10_lateral_water_1x_roll_angular_velocity.dat",
@@ -1633,12 +1600,6 @@ def generate_spheric_test05(*, allow_overlapping_face_files: bool = False) -> No
             hydrostatic_pressure_field_name="Pressure",
             enable_level_set_maintenance=False,
             enable_level_set_reinitialization=False,
-            enable_level_set_volume_correction=True,
-            volume_correction_cadence_steps="1",
-            volume_correction_tolerance="1.0e-10",
-            volume_correction_max_iterations="50",
-            volume_correction_minimum_relative_error="1.0e-6",
-            volume_correction_maximum_interface_displacement_fraction="0.05",
             wet_extension_advection_velocity_method="wall_compatible_normal",
             enable_adaptive_time_loop=True,
             newton_line_search_fail_on_no_reduction=True,
@@ -1760,12 +1721,6 @@ def generate_spheric_test02(*, allow_overlapping_face_files: bool = False) -> No
         hydrostatic_pressure_field_name="Pressure",
         enable_level_set_maintenance=False,
         enable_level_set_reinitialization=False,
-        enable_level_set_volume_correction=True,
-        volume_correction_cadence_steps="1",
-        volume_correction_tolerance="1.0e-10",
-        volume_correction_max_iterations="50",
-        volume_correction_minimum_relative_error="1.0e-6",
-        volume_correction_maximum_interface_displacement_fraction="0.05",
         wet_extension_advection_velocity_method="wall_compatible_normal",
         enable_adaptive_time_loop=True,
         adaptive_time_loop_min_dt="1.0e-7",

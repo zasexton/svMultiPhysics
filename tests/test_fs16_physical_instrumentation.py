@@ -200,7 +200,10 @@ def test_test05_defaults_span_historical_false_wet_window():
     assert args.steps == 562
     assert args.disable_cut_metadata_scale is True
     assert args.enable_physical_history_instrumentation is True
-    assert args.require_level_set_mass_correction_histories is True
+    # The SPHERIC 05 decks no longer run the retired global volume
+    # correction (decision D47), so no correction history is required.
+    assert not getattr(
+        args, "require_level_set_mass_correction_histories", False)
     assert args.final_output_only is False
 
 

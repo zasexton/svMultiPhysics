@@ -1489,25 +1489,6 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
       svmp::Physics::ParameterValue{true, "1.0e-4"};
   input.equation_params["Reinitialization_max_zero_set_displacement"] =
       svmp::Physics::ParameterValue{true, "2.0e-8"};
-  input.equation_params["Enable_volume_correction"] =
-      svmp::Physics::ParameterValue{true, "true"};
-  input.equation_params["Volume_correction_cadence_steps"] =
-      svmp::Physics::ParameterValue{true, "5"};
-  input.equation_params["Volume_correction_use_initial_volume"] =
-      svmp::Physics::ParameterValue{true, "false"};
-  input.equation_params["Volume_correction_target_negative_volume"] =
-      svmp::Physics::ParameterValue{true, "0.375"};
-  input.equation_params["Volume_correction_tolerance"] =
-      svmp::Physics::ParameterValue{true, "1.0e-7"};
-  input.equation_params["Volume_correction_max_iterations"] =
-      svmp::Physics::ParameterValue{true, "24"};
-  input.equation_params["Volume_correction_minimum_relative_error"] =
-      svmp::Physics::ParameterValue{true, "2.0e-5"};
-  input.equation_params["Volume_correction_maximum_interface_displacement_fraction"] =
-      svmp::Physics::ParameterValue{true, "0.025"};
-  input.equation_params[
-      "Volume_correction_maximum_cumulative_interface_displacement_fraction"] =
-      svmp::Physics::ParameterValue{true, "0.25"};
 
   svmp::Physics::BoundaryConditionInput inflow{};
   inflow.name = "inlet";
@@ -1544,7 +1525,7 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
   ASSERT_TRUE(artifact.has_value());
   EXPECT_EQ(artifact->component, "level_set_transport");
   constexpr std::string_view expected_without_phase =
-      R"json({"artifact_schema_version":1,"component":"level_set_transport","capability_label":"one_phase_interface_transport_nonlocal_conservation","units":{"system":"consistent_solver_units","length":"solver_length","time":"solver_time","volume":"solver_volume"},"operator":"transport","transport_form":"ConservativeDivergence","conservation_diagnostic":"volume_corrected_level_set_advection_not_locally_conservative","level_set":{"field":"phi","source":"Unknown","auto_register":true},"advection_velocity":{"field":"advecting_velocity","source":"PrescribedData","auto_register":true,"constant_value":[0,0,0],"algebraic_extension_source_field":"","dependency_direction":"physical_velocity_to_extension_to_level_set","physical_momentum_coupling_allowed":false,"map_guard_policy":"fixed_bounded_application_policy"},"supg":{"enabled":true,"tau_scale":0.25,"velocity_epsilon":9.9999999999999998e-13,"transient_scale":1.5},"bound_preserving":{"enabled":false,"method":"nodal_rejection_projection_nonconservative","bound_tolerance":9.9999999999999998e-13,"sign_tolerance":9.9999999999999998e-13,"maximum_courant":1,"courant_tolerance":9.9999999999999998e-13,"enforce_courant_limit":true,"enforce_impermeable_boundaries":true,"impermeable_normal_velocity_tolerance":1e-10},"interface_kinematic":{"enabled":true,"interface_marker":77,"weight_scale":1.5},"maintenance_transaction":{"ordering":"transport_then_reinitialization_then_volume_correction_then_geometry_refresh","reinitialization":{"enabled":true,"method":"Projection","cadence_steps":4,"max_iterations":8,"pseudo_time_step_scale":0.125,"interface_band_width":2.75,"signed_distance_tolerance":0.0001,"preserve_band_width":0,"maximum_zero_set_displacement":2e-08},"volume_correction":{"enabled":true,"cadence_steps":5,"use_initial_negative_volume_as_target":false,"target_negative_volume":0.375,"volume_tolerance":9.9999999999999995e-08,"max_iterations":24,"minimum_relative_volume_error":2.0000000000000002e-05,"maximum_interface_displacement_fraction":0.025000000000000001,"maximum_cumulative_interface_displacement_fraction":0.25}},"boundaries":{"inflow":[{"marker":4,"value":0.5,"penalty_scale":2}],"outflow":[{"marker":5}]}})json";
+      R"json({"artifact_schema_version":1,"component":"level_set_transport","capability_label":"one_phase_interface_transport_nonlocal_conservation","units":{"system":"consistent_solver_units","length":"solver_length","time":"solver_time","volume":"solver_volume"},"operator":"transport","transport_form":"ConservativeDivergence","conservation_diagnostic":"reinitialized_level_set_advection_not_conservative","level_set":{"field":"phi","source":"Unknown","auto_register":true},"advection_velocity":{"field":"advecting_velocity","source":"PrescribedData","auto_register":true,"constant_value":[0,0,0],"algebraic_extension_source_field":"","dependency_direction":"physical_velocity_to_extension_to_level_set","physical_momentum_coupling_allowed":false,"map_guard_policy":"fixed_bounded_application_policy"},"supg":{"enabled":true,"tau_scale":0.25,"velocity_epsilon":9.9999999999999998e-13,"transient_scale":1.5},"bound_preserving":{"enabled":false,"method":"nodal_rejection_projection_nonconservative","bound_tolerance":9.9999999999999998e-13,"sign_tolerance":9.9999999999999998e-13,"maximum_courant":1,"courant_tolerance":9.9999999999999998e-13,"enforce_courant_limit":true,"enforce_impermeable_boundaries":true,"impermeable_normal_velocity_tolerance":1e-10},"interface_kinematic":{"enabled":true,"interface_marker":77,"weight_scale":1.5},"maintenance_transaction":{"ordering":"transport_then_reinitialization_then_volume_correction_then_geometry_refresh","reinitialization":{"enabled":true,"method":"Projection","cadence_steps":4,"max_iterations":8,"pseudo_time_step_scale":0.125,"interface_band_width":2.75,"signed_distance_tolerance":0.0001,"preserve_band_width":0,"maximum_zero_set_displacement":2e-08},"volume_correction":{"enabled":false,"cadence_steps":1,"use_initial_negative_volume_as_target":true,"target_negative_volume":0,"volume_tolerance":1e-10,"max_iterations":50,"minimum_relative_volume_error":9.9999999999999995e-07,"maximum_interface_displacement_fraction":0.10000000000000001,"maximum_cumulative_interface_displacement_fraction":1}},"boundaries":{"inflow":[{"marker":4,"value":0.5,"penalty_scale":2}],"outflow":[{"marker":5}]}})json";
   std::string expected{expected_without_phase};
   const auto schema_version = expected.find("\"artifact_schema_version\":1");
   ASSERT_NE(schema_version, std::string::npos);

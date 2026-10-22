@@ -49,14 +49,13 @@ CASES = {
                        ["--level", "8", "--capillary-form", "surface_stress",
                         "--laplace-number", "12"], []),
     "capillary_wave_L32": ("capillary_wave_2d", ["--level", "32"], []),
-    "sessile_drop_L16_60_volume_correction": (
+    # Accepted-step maintenance (the global volume correction that this case
+    # used to enable was retired by decision D47).
+    "sessile_drop_L16_60_maintenance": (
         "sessile_drop_2d",
-        ["--level", "16", "--contact-angle", "60", "--transport", "pde_extension"],
-        [(r"<Enable_volume_correction>\s*false\s*</Enable_volume_correction>",
-          "<Enable_volume_correction>true</Enable_volume_correction>"
-          "<Volume_correction_cadence_steps>1</Volume_correction_cadence_steps>"
-          "<Volume_correction_minimum_relative_error>1.0e-12"
-          "</Volume_correction_minimum_relative_error>")]),
+        ["--level", "16", "--contact-angle", "60", "--transport", "pde_extension",
+         "--kinematic-reconciliation", "on", "--sign-definite-patch-bounds", "on",
+         "--interface-preserving-redistancing", "on"], []),
 }
 
 

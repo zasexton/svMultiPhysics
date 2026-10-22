@@ -320,7 +320,6 @@ def _write_solver_xml(case_dir: Path,
   <Enable_discontinuity_capturing>false</Enable_discontinuity_capturing>
   <Enable_bound_preserving_limiter>false</Enable_bound_preserving_limiter>
   <Reinitialization_cadence_steps>1</Reinitialization_cadence_steps>
-  <Volume_correction_cadence_steps>1</Volume_correction_cadence_steps>
   <Enable_reinitialization>false</Enable_reinitialization>
   <Enable_volume_correction>false</Enable_volume_correction>
   <Output type=\"Spatial\">

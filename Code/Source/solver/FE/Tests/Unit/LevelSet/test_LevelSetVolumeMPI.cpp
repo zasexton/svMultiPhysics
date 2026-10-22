@@ -233,40 +233,6 @@ private:
     return coefficients;
 }
 
-[[nodiscard]] std::vector<FE::Real> disconnectedCoefficients(
-    const FE::assembly::IMeshAccess& mesh,
-    const FE::dofs::DofHandler& dofs)
-{
-    std::vector<FE::Real> coefficients(
-        static_cast<std::size_t>(dofs.getNumDofs()), FE::Real{0.0});
-    const auto* entity_map = dofs.getEntityDofMap();
-    if (entity_map == nullptr) {
-        return {};
-    }
-    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
-        const auto vertex_dofs = entity_map->getVertexDofs(vertex);
-        if (vertex_dofs.size() != 1u || vertex_dofs.front() < 0) {
-            return {};
-        }
-        coefficients[static_cast<std::size_t>(vertex_dofs.front())] =
-            vertex == 1 || vertex == 3 ? FE::Real{-1.0}
-                                       : FE::Real{1.0};
-    }
-    return coefficients;
-}
-
-[[nodiscard]] level_set::LevelSetGlobalShiftCorrectionOptions
-correctionOptions()
-{
-    level_set::LevelSetGlobalShiftCorrectionOptions options;
-    options.target_negative_volume = FE::Real{0.46};
-    options.volume_tolerance = FE::Real{1.0e-12};
-    options.max_iterations = 80;
-    options.minimum_relative_volume_error = FE::Real{0.01};
-    options.maximum_interface_displacement_fraction = FE::Real{0.2};
-    return options;
-}
-
 void expectVolumeMatches(
     const level_set::LevelSetVolumeResult& parallel,
     const level_set::LevelSetVolumeResult& serial)
@@ -280,107 +246,6 @@ void expectVolumeMatches(
     EXPECT_NEAR(parallel.total_volume, serial.total_volume, 1.0e-13);
     EXPECT_NEAR(parallel.negative_volume, serial.negative_volume, 1.0e-13);
     EXPECT_NEAR(parallel.positive_volume, serial.positive_volume, 1.0e-13);
-}
-
-void expectCorrectionMatches(
-    const level_set::LevelSetGlobalShiftCorrectionResult& parallel,
-    const level_set::LevelSetGlobalShiftCorrectionResult& serial)
-{
-    ASSERT_TRUE(parallel.success) << parallel.diagnostic;
-    ASSERT_TRUE(serial.success) << serial.diagnostic;
-    EXPECT_EQ(parallel.correction_triggered, serial.correction_triggered);
-    EXPECT_EQ(parallel.correction_applied, serial.correction_applied);
-    EXPECT_EQ(parallel.target_reached, serial.target_reached);
-    EXPECT_EQ(parallel.limited_by_displacement_bound,
-              serial.limited_by_displacement_bound);
-    EXPECT_EQ(parallel.iterations, serial.iterations);
-    EXPECT_NEAR(parallel.applied_shift, serial.applied_shift, 1.0e-13);
-    EXPECT_NEAR(parallel.initial_negative_volume,
-                serial.initial_negative_volume,
-                1.0e-13);
-    EXPECT_NEAR(parallel.corrected_negative_volume,
-                serial.corrected_negative_volume,
-                1.0e-13);
-    EXPECT_NEAR(parallel.volume_error, serial.volume_error, 1.0e-13);
-    EXPECT_NEAR(parallel.trigger_volume_error,
-                serial.trigger_volume_error,
-                1.0e-13);
-    EXPECT_NEAR(parallel.minimum_edge_length,
-                serial.minimum_edge_length,
-                1.0e-13);
-    EXPECT_NEAR(parallel.maximum_allowed_interface_displacement,
-                serial.maximum_allowed_interface_displacement,
-                1.0e-13);
-    EXPECT_NEAR(parallel.maximum_topology_stable_shift,
-                serial.maximum_topology_stable_shift,
-                1.0e-13);
-    EXPECT_NEAR(parallel.max_interface_displacement,
-                serial.max_interface_displacement,
-                1.0e-13);
-    EXPECT_NEAR(parallel.max_contact_line_displacement,
-                serial.max_contact_line_displacement,
-                1.0e-13);
-    EXPECT_NEAR(parallel.max_contact_angle_change_radians,
-                serial.max_contact_angle_change_radians,
-                1.0e-13);
-    EXPECT_EQ(parallel.negative_component_topology_preserved,
-              serial.negative_component_topology_preserved);
-    ASSERT_EQ(parallel.negative_component_volume_transfers.size(),
-              serial.negative_component_volume_transfers.size());
-    for (std::size_t component = 0;
-         component < parallel.negative_component_volume_transfers.size();
-         ++component) {
-        const auto& parallel_component =
-            parallel.negative_component_volume_transfers[component];
-        const auto& serial_component =
-            serial.negative_component_volume_transfers[component];
-        EXPECT_EQ(parallel_component.component_global_vertex_id,
-                  serial_component.component_global_vertex_id);
-        EXPECT_NEAR(parallel_component.initial_negative_volume,
-                    serial_component.initial_negative_volume,
-                    1.0e-13);
-        EXPECT_NEAR(parallel_component.corrected_negative_volume,
-                    serial_component.corrected_negative_volume,
-                    1.0e-13);
-        EXPECT_NEAR(parallel_component.volume_transfer,
-                    serial_component.volume_transfer,
-                    1.0e-13);
-    }
-    EXPECT_NEAR(parallel.total_component_volume_transfer,
-                serial.total_component_volume_transfer,
-                1.0e-13);
-    EXPECT_NEAR(parallel.total_absolute_component_volume_transfer,
-                serial.total_absolute_component_volume_transfer,
-                1.0e-13);
-    EXPECT_NEAR(parallel.maximum_absolute_component_volume_transfer,
-                serial.maximum_absolute_component_volume_transfer,
-                1.0e-13);
-    expectVolumeMatches(parallel.initial_volume, serial.initial_volume);
-    expectVolumeMatches(parallel.corrected_volume, serial.corrected_volume);
-
-    EXPECT_TRUE(parallel.correction_triggered);
-    EXPECT_TRUE(parallel.correction_applied);
-    EXPECT_TRUE(parallel.target_reached);
-    EXPECT_FALSE(parallel.limited_by_displacement_bound);
-    EXPECT_NEAR(parallel.initial_negative_volume, 0.5, 1.0e-12);
-    EXPECT_NEAR(parallel.applied_shift, 0.04, 1.0e-10);
-    EXPECT_NEAR(parallel.corrected_negative_volume, 0.46, 1.0e-12);
-    EXPECT_NEAR(parallel.minimum_edge_length, 1.0, 1.0e-13);
-    EXPECT_NEAR(parallel.maximum_allowed_interface_displacement,
-                0.2,
-                1.0e-13);
-    EXPECT_NEAR(parallel.max_interface_displacement, 0.04, 1.0e-10);
-    EXPECT_NEAR(parallel.max_contact_line_displacement, 0.04, 1.0e-10);
-    EXPECT_DOUBLE_EQ(parallel.max_contact_angle_change_radians, 0.0);
-    EXPECT_TRUE(parallel.negative_component_topology_preserved);
-    ASSERT_EQ(parallel.negative_component_volume_transfers.size(), 1u);
-    EXPECT_EQ(parallel.negative_component_volume_transfers.front()
-                  .component_global_vertex_id,
-              0);
-    EXPECT_NEAR(parallel.total_component_volume_transfer, -0.04, 1.0e-12);
-    EXPECT_NEAR(parallel.total_absolute_component_volume_transfer,
-                0.04,
-                1.0e-12);
 }
 
 struct SystemFixture {
@@ -427,7 +292,7 @@ struct SystemFixture {
 
 } // namespace
 
-TEST(LevelSetVolumeMPI, CornerLinearizedCorrectionMatchesSerialReference)
+TEST(LevelSetVolumeMPI, CornerLinearizedVolumeMatchesSerialReference)
 {
     int rank = 0;
     int size = 1;
@@ -465,71 +330,9 @@ TEST(LevelSetVolumeMPI, CornerLinearizedCorrectionMatchesSerialReference)
     const auto serial_volume = level_set::computeLevelSetCutCellVolume(
         serial_mesh, serial_dofs, volume_options, serial_coefficients);
     expectVolumeMatches(parallel_volume, serial_volume);
-
-    // The global error is below the relative fallback trigger even though the
-    // two local partition errors are not.  This specifically proves that the
-    // correction/retention decision uses global physical volume.
-    auto retain_options = correctionOptions();
-    retain_options.target_negative_volume = FE::Real{0.49};
-    retain_options.minimum_relative_volume_error = FE::Real{0.02};
-    std::vector<FE::Real> parallel_retained;
-    std::vector<FE::Real> serial_retained;
-    const auto parallel_retention = level_set::applyGlobalLevelSetShiftCorrection(
-        parallel_mesh,
-        parallel_dofs,
-        volume_options,
-        retain_options,
-        parallel_coefficients,
-        parallel_retained);
-    const auto serial_retention = level_set::applyGlobalLevelSetShiftCorrection(
-        serial_mesh,
-        serial_dofs,
-        volume_options,
-        retain_options,
-        serial_coefficients,
-        serial_retained);
-    ASSERT_TRUE(parallel_retention.success) << parallel_retention.diagnostic;
-    ASSERT_TRUE(serial_retention.success) << serial_retention.diagnostic;
-    EXPECT_EQ(parallel_retention.correction_triggered,
-              serial_retention.correction_triggered);
-    EXPECT_EQ(parallel_retention.correction_applied,
-              serial_retention.correction_applied);
-    EXPECT_FALSE(parallel_retention.correction_triggered);
-    EXPECT_FALSE(parallel_retention.correction_applied);
-    EXPECT_DOUBLE_EQ(parallel_retention.applied_shift, 0.0);
-    EXPECT_NEAR(parallel_retention.trigger_volume_error,
-                serial_retention.trigger_volume_error,
-                1.0e-13);
-    EXPECT_NEAR(parallel_retention.initial_negative_volume,
-                serial_retention.initial_negative_volume,
-                1.0e-13);
-    EXPECT_EQ(parallel_retained, parallel_coefficients);
-    EXPECT_EQ(serial_retained, serial_coefficients);
-
-    std::vector<FE::Real> parallel_corrected;
-    std::vector<FE::Real> serial_corrected;
-    const auto parallel_correction = level_set::applyGlobalLevelSetShiftCorrection(
-        parallel_mesh,
-        parallel_dofs,
-        volume_options,
-        correctionOptions(),
-        parallel_coefficients,
-        parallel_corrected);
-    const auto serial_correction = level_set::applyGlobalLevelSetShiftCorrection(
-        serial_mesh,
-        serial_dofs,
-        volume_options,
-        correctionOptions(),
-        serial_coefficients,
-        serial_corrected);
-    expectCorrectionMatches(parallel_correction, serial_correction);
-    ASSERT_EQ(parallel_corrected.size(), serial_corrected.size());
-    for (std::size_t i = 0; i < parallel_corrected.size(); ++i) {
-        EXPECT_NEAR(parallel_corrected[i], serial_corrected[i], 1.0e-13);
-    }
 }
 
-TEST(LevelSetVolumeMPI, GeneratedQuadratureCorrectionMatchesSerialReference)
+TEST(LevelSetVolumeMPI, GeneratedQuadratureVolumeMatchesSerialReference)
 {
     int rank = 0;
     int size = 1;
@@ -565,132 +368,5 @@ TEST(LevelSetVolumeMPI, GeneratedQuadratureCorrectionMatchesSerialReference)
         serial_volume_options,
         serial.solution);
     expectVolumeMatches(parallel_volume, serial_volume);
-
-    std::vector<FE::Real> parallel_corrected;
-    std::vector<FE::Real> serial_corrected;
-    const auto parallel_correction = level_set::applyGlobalLevelSetShiftCorrection(
-        parallel.system,
-        parallel.phi,
-        parallel_volume_options,
-        correctionOptions(),
-        parallel.solution,
-        parallel_corrected);
-    const auto serial_correction = level_set::applyGlobalLevelSetShiftCorrection(
-        serial.system,
-        serial.phi,
-        serial_volume_options,
-        correctionOptions(),
-        serial.solution,
-        serial_corrected);
-    expectCorrectionMatches(parallel_correction, serial_correction);
-    ASSERT_EQ(parallel_corrected.size(), serial_corrected.size());
-    for (std::size_t i = 0; i < parallel_corrected.size(); ++i) {
-        EXPECT_NEAR(parallel_corrected[i], serial_corrected[i], 1.0e-13);
-    }
 }
 
-TEST(LevelSetVolumeMPI,
-     DisconnectedComponentTransferLedgerMatchesSerialReference)
-{
-    int rank = 0;
-    int size = 1;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
-    if (size != 2) {
-        GTEST_SKIP()
-            << "This partition-equivalence fixture requires exactly two ranks.";
-    }
-
-    const TwoTrianglePartitionMeshAccess parallel_mesh(rank, true);
-    const TwoTrianglePartitionMeshAccess serial_mesh(0, false);
-    FE::spaces::H1Space space(FE::ElementType::Triangle3, /*order=*/1);
-    FE::dofs::DofHandler parallel_dofs;
-    parallel_dofs.distributeDofs(twoTriangleTopology(true),
-                                space,
-                                dofOptions(MPI_COMM_WORLD, rank, size));
-    parallel_dofs.finalize();
-    FE::dofs::DofHandler serial_dofs;
-    serial_dofs.distributeDofs(twoTriangleTopology(false),
-                              space,
-                              dofOptions(MPI_COMM_SELF, 0, 1));
-    serial_dofs.finalize();
-
-    const auto parallel_coefficients =
-        disconnectedCoefficients(parallel_mesh, parallel_dofs);
-    const auto serial_coefficients =
-        disconnectedCoefficients(serial_mesh, serial_dofs);
-    ASSERT_EQ(parallel_coefficients.size(), serial_coefficients.size());
-    ASSERT_FALSE(parallel_coefficients.empty());
-    auto target_coefficients = serial_coefficients;
-    for (auto& value : target_coefficients) {
-        value += FE::Real{0.2};
-    }
-    const level_set::LevelSetVolumeOptions volume_options{};
-    const auto target = level_set::computeLevelSetCutCellVolume(
-        serial_mesh, serial_dofs, volume_options, target_coefficients);
-    ASSERT_TRUE(target.success) << target.diagnostic;
-    auto options = correctionOptions();
-    options.target_negative_volume = target.negative_volume;
-    options.minimum_relative_volume_error = FE::Real{0.0};
-
-    std::vector<FE::Real> parallel_corrected;
-    std::vector<FE::Real> serial_corrected;
-    const auto parallel = level_set::applyGlobalLevelSetShiftCorrection(
-        parallel_mesh,
-        parallel_dofs,
-        volume_options,
-        options,
-        parallel_coefficients,
-        parallel_corrected);
-    const auto serial = level_set::applyGlobalLevelSetShiftCorrection(
-        serial_mesh,
-        serial_dofs,
-        volume_options,
-        options,
-        serial_coefficients,
-        serial_corrected);
-
-    ASSERT_TRUE(parallel.success) << parallel.diagnostic;
-    ASSERT_TRUE(serial.success) << serial.diagnostic;
-    EXPECT_NEAR(parallel.applied_shift, 0.2, 1.0e-10);
-    EXPECT_NEAR(parallel.applied_shift, serial.applied_shift, 1.0e-13);
-    EXPECT_TRUE(parallel.negative_component_topology_preserved);
-    EXPECT_TRUE(serial.negative_component_topology_preserved);
-    ASSERT_EQ(parallel.negative_component_volume_transfers.size(), 2u);
-    ASSERT_EQ(parallel.negative_component_volume_transfers.size(),
-              serial.negative_component_volume_transfers.size());
-    for (std::size_t component = 0;
-         component < parallel.negative_component_volume_transfers.size();
-         ++component) {
-        const auto& parallel_component =
-            parallel.negative_component_volume_transfers[component];
-        const auto& serial_component =
-            serial.negative_component_volume_transfers[component];
-        EXPECT_EQ(parallel_component.component_global_vertex_id,
-                  component == 0u ? 1 : 3);
-        EXPECT_EQ(parallel_component.component_global_vertex_id,
-                  serial_component.component_global_vertex_id);
-        EXPECT_NEAR(parallel_component.initial_negative_volume,
-                    serial_component.initial_negative_volume,
-                    1.0e-13);
-        EXPECT_NEAR(parallel_component.corrected_negative_volume,
-                    serial_component.corrected_negative_volume,
-                    1.0e-13);
-        EXPECT_NEAR(parallel_component.volume_transfer,
-                    serial_component.volume_transfer,
-                    1.0e-13);
-    }
-    EXPECT_NEAR(parallel.total_component_volume_transfer,
-                serial.total_component_volume_transfer,
-                1.0e-13);
-    EXPECT_NEAR(parallel.total_absolute_component_volume_transfer,
-                serial.total_absolute_component_volume_transfer,
-                1.0e-13);
-    EXPECT_NEAR(parallel.maximum_absolute_component_volume_transfer,
-                serial.maximum_absolute_component_volume_transfer,
-                1.0e-13);
-    ASSERT_EQ(parallel_corrected.size(), serial_corrected.size());
-    for (std::size_t dof = 0; dof < parallel_corrected.size(); ++dof) {
-        EXPECT_NEAR(parallel_corrected[dof], serial_corrected[dof], 1.0e-13);
-    }
-}

@@ -197,7 +197,6 @@ def test_runner_freezes_capillary_rise_physics_and_solver_defaults():
         capillary_force_form="surface_stress",
         surface_tension=None,
         enable_level_set_reinitialization=None,
-        enable_level_set_volume_correction=None,
         max_capillary_rise_contact_motion_cells_per_step=None,
         max_capillary_rise_contact_angle_error_degrees=None,
         steps=None,
@@ -222,7 +221,6 @@ def test_runner_freezes_capillary_rise_physics_and_solver_defaults():
     assert configured.contact_angle_degrees == 30.0
     assert configured.wall_slip_length == 0.001
     assert configured.enable_level_set_reinitialization is True
-    assert configured.enable_level_set_volume_correction is False
     assert configured.wet_extension_advection_velocity_method == (
         "wall_compatible_normal"
     )

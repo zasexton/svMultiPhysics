@@ -1131,9 +1131,12 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseDeclaresRequiredControls)
   expectReviewedP1LevelSetTransportControls(level_set);
   expectText(level_set, "Enable_reinitialization", "true");
   expectText(level_set, "Reinitialization_method", "projection");
-  expectText(level_set, "Enable_volume_correction", "true");
-  expectText(level_set, "Volume_correction_use_initial_volume", "true");
-  expectText(level_set, "Volume_correction_cadence_steps", "5");
+  // The global volume correction was retired (decision D47).
+  expectText(level_set, "Enable_volume_correction", "false");
+  EXPECT_EQ(level_set.FirstChildElement("Volume_correction_use_initial_volume"),
+            nullptr);
+  EXPECT_EQ(level_set.FirstChildElement("Volume_correction_cadence_steps"),
+            nullptr);
   expectGmresSolver(level_set);
   expectOutputFields(level_set, "Spatial",
                      {"Level_set", "Generated_interface", "Surface_position"});
@@ -3226,13 +3229,9 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
                  "wall_compatible_normal");
       // Curved continuous-P1 redistancing currently fails closed rather than
       // converging generally, so the production deck leaves it disabled.
-      // Bounded volume repair remains an explicitly monitored fallback.
+      // The bounded global volume repair was retired (decision D47).
       expectText(level_set, "Enable_reinitialization", "false");
-      expectText(level_set, "Enable_volume_correction", "true");
-      expectText(level_set, "Volume_correction_minimum_relative_error", "1.0e-6");
-      expectText(level_set,
-                 "Volume_correction_maximum_interface_displacement_fraction",
-                 "0.05");
+      expectText(level_set, "Enable_volume_correction", "false");
       expectText(fluid, "Module_options", expected_jit_options);
       expectText(free_surface, "Small_cut_aggregation", "true");
       expectText(free_surface, "Active_domain", "LevelSetNegative");
@@ -3267,10 +3266,12 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
       expectText(level_set, "Level_set_field_name", "phi");
       expectText(level_set, "Velocity_source",
                  expected.level_set_velocity_source);
-      expectText(level_set, "Volume_correction_minimum_relative_error", "1.0e-6");
-      expectText(level_set,
-                 "Volume_correction_maximum_interface_displacement_fraction",
-                 "0.05");
+      EXPECT_EQ(level_set.FirstChildElement(
+                    "Volume_correction_minimum_relative_error"),
+                nullptr);
+      EXPECT_EQ(level_set.FirstChildElement(
+                    "Volume_correction_maximum_interface_displacement_fraction"),
+                nullptr);
       expectText(fluid, "Hydrostatic_pressure_field_name", "Pressure");
       EXPECT_EQ(fluid.FirstChildElement("Node_pressure_constraints"), nullptr);
       expectText(free_surface, "Generated_interface_domain_id",
