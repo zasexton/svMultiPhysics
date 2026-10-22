@@ -74,6 +74,9 @@
 #include <string>
 #include <string_view>
 #include <map>
+#include <type_traits>
+#include <typeindex>
+#include <typeinfo>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -1250,6 +1253,8 @@ public:
     }
     [[nodiscard]] FieldId findFieldByName(std::string_view name) const noexcept;
     [[nodiscard]] bool hasField(std::string_view name) const noexcept;
+    /// True when @p field is a field registered with this system.
+    [[nodiscard]] bool hasField(FieldId field) const noexcept;
     [[nodiscard]] bool fieldParticipatesInUnknownVector(FieldId field) const;
     [[nodiscard]] std::vector<FieldId> unknownFieldIdsInDofMapOrder() const;
     void setPrescribedFieldCoefficients(FieldId field, std::span<const Real> coefficients);
@@ -2573,6 +2578,38 @@ public:
     [[nodiscard]] std::uint64_t sparsityPatternRevision() const noexcept { return sparsity_pattern_revision_; }
 
     [[nodiscard]] bool isSetup() const noexcept { return is_setup_; }
+
+    /**
+     * @brief Discard what setup() built (assembler, sparsity, assembly plans
+     * and setup-time state); the next solve sets the system up again.
+     *
+     * For components that keep declarations of their own outside the system
+     * (see attachment()) and change what a set-up system may assume.
+     */
+    void invalidateSetup() noexcept;
+
+    // ---- Attachments ----
+
+    /**
+     * @brief The attachment of type @p T, default-constructed on first use.
+     *
+     * An attachment is per-system storage of a component that extends the
+     * system from outside FE, for example the accepted-step record stores of
+     * a physics formulation.  There is one attachment per type.  It lives as
+     * long as the system, moves with it, and is destroyed before every other
+     * member of the system.  @p T is a default-constructible, non-const
+     * object type; the reference stays valid until the system is destroyed.
+     */
+    template <class T>
+    [[nodiscard]] T& attachment();
+
+    /// The attachment of type @p T, or null when it was never created.
+    template <class T>
+    [[nodiscard]] T* findAttachment() noexcept;
+
+    /// The attachment of type @p T, or null when it was never created.
+    template <class T>
+    [[nodiscard]] const T* findAttachment() const noexcept;
 #if FE_HAS_MPI
     /**
      * @brief Communicator governing this system's collective operations.
@@ -2990,7 +3027,6 @@ private:
     void commitPreparedFormBoundGeneratedBoundaryNitscheTracePolicies(
         std::vector<
             GeneratedBoundaryNitscheTracePolicy> policies) noexcept;
-    void invalidateSetup() noexcept;
     void publishFinalizedSmallCutAggregationProlongations();
     // Rank-local: the reports of the current closure built so far (null
     // where a report has not been requested yet).
@@ -3649,7 +3685,43 @@ private:
         next_generated_boundary_nitsche_trace_policy_id_{1u};
     bool generated_boundary_nitsche_trace_policy_shape_validated_{false};
     std::uint64_t generated_boundary_nitsche_trace_policy_signature_{0u};
+
+    // Attachments (attachment()), keyed by type.  Declared last, so they are
+    // destroyed before every other member.
+    std::unordered_map<std::type_index, std::shared_ptr<void>> attachments_{};
 	};
+
+template <class T>
+T& FESystem::attachment()
+{
+    static_assert(std::is_object_v<T> && !std::is_const_v<T> &&
+                      !std::is_volatile_v<T>,
+                  "FESystem attachments are non-const object types");
+    static_assert(std::is_default_constructible_v<T>,
+                  "FESystem attachments are default-constructible");
+    auto& slot = attachments_[std::type_index(typeid(T))];
+    if (!slot) {
+        slot = std::make_shared<T>();
+    }
+    return *static_cast<T*>(slot.get());
+}
+
+template <class T>
+T* FESystem::findAttachment() noexcept
+{
+    const auto it = attachments_.find(std::type_index(typeid(T)));
+    return it == attachments_.end() ? nullptr
+                                    : static_cast<T*>(it->second.get());
+}
+
+template <class T>
+const T* FESystem::findAttachment() const noexcept
+{
+    const auto it = attachments_.find(std::type_index(typeid(T)));
+    return it == attachments_.end()
+               ? nullptr
+               : static_cast<const T*>(it->second.get());
+}
 
 } // namespace systems
 } // namespace FE

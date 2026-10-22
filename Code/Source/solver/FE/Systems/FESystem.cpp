@@ -22647,6 +22647,11 @@ bool FESystem::evaluateFieldAtVertices(FieldId field,
 #endif
 }
 
+bool FESystem::hasField(FieldId field) const noexcept
+{
+    return field_registry_.has(field);
+}
+
 const FieldRecord& FESystem::fieldRecord(FieldId field) const
 {
     return field_registry_.get(field);

@@ -3082,6 +3082,7 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/Systems/test_GeometricNonlinearity.cpp
 		                Tests/Unit/Systems/test_MaterialStateProvider.cpp
 		                Tests/Unit/Systems/test_FESystem.cpp
+		                Tests/Unit/Systems/test_FESystemAttachments.cpp
 		                Tests/Unit/Systems/test_FESystemMultiMesh.cpp
 		                Tests/Unit/Systems/test_FreeSurfaceFunctionalRounding.cpp
 		                Tests/Unit/Systems/test_AssemblerSelection.cpp
