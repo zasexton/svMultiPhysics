@@ -1072,6 +1072,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/FormulationBuilder.h
     Systems/FreeSurfaceFunctionalRounding.h
     Systems/FreeSurfaceRecordTypes.h
+    Systems/MeshBoundaryRecordSupport.h
     Systems/BoundedUpdatePolicy.h
     Systems/BoundaryDistanceService.h
     Interfaces/ContactLineGeometryCertificate.h
@@ -1112,6 +1113,7 @@ set(FE_SYSTEMS_SOURCES
     Systems/ContactPenaltyKernel.cpp
     Systems/FEAdaptivityTransfer.cpp
     Systems/FESystem.cpp
+    Systems/MeshBoundaryRecordSupport.cpp
     Systems/FormsInstaller.cpp
     Systems/FormulationBuilder.cpp
     Systems/BoundedUpdatePolicy.cpp
