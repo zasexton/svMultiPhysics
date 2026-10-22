@@ -51,6 +51,12 @@
 #include <vector>
 
 namespace svmp {
+namespace FE {
+namespace systems {
+class DiagnosticRegistry;
+} // namespace systems
+} // namespace FE
+
 namespace Physics {
 namespace formulations {
 namespace navier_stokes {
@@ -380,12 +386,20 @@ public:
     [[nodiscard]] std::optional<EffectiveConfigurationArtifact>
     effectiveConfigurationArtifact() const override;
 
+    /// The diagnostic sets and operators of the last registration (null
+    /// before the first registerOn).
+    [[nodiscard]] const FE::systems::DiagnosticRegistry* diagnostics() const noexcept
+    {
+        return diagnostics_.get();
+    }
+
 private:
     std::shared_ptr<const FE::spaces::FunctionSpace> velocity_space_{};
     std::shared_ptr<const FE::spaces::FunctionSpace> pressure_space_{};
     IncompressibleNavierStokesVMSOptions options_{};
     mutable std::optional<EffectiveConfigurationArtifact>
         effective_configuration_artifact_{};
+    mutable std::shared_ptr<FE::systems::DiagnosticRegistry> diagnostics_{};
 };
 
 } // namespace navier_stokes

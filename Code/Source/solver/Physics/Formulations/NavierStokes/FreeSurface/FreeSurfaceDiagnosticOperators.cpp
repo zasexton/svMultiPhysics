@@ -33,78 +33,24 @@ namespace Physics {
 namespace formulations {
 namespace navier_stokes {
 
-namespace {
-
-struct DiagnosticBooleanOverride {
-    bool value{false};
-    std::string name{};
-    std::string raw{};
-};
-
-std::optional<DiagnosticBooleanOverride> readDiagnosticBooleanOverride(
-    const char* name)
+void declareNavierStokesDiagnosticSets(FE::systems::DiagnosticRegistry& registry)
 {
-    const char* env = std::getenv(name);
-    if (env == nullptr || env[0] == '\0') {
-        return std::nullopt;
-    }
-
-    std::string normalized(env);
-    std::transform(
-        normalized.begin(),
-        normalized.end(),
-        normalized.begin(),
-        [](unsigned char ch) {
-            return static_cast<char>(std::tolower(ch));
-        });
-
-    const bool value =
-        normalized != "0" && normalized != "false" &&
-        normalized != "no" && normalized != "off";
-    return DiagnosticBooleanOverride{value, name, env};
-}
-
-} // namespace
-
-bool pressureRowContributionDiagnosticEnabled()
-{
-    if (auto value =
-            readDiagnosticBooleanOverride(
-                "SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC")) {
-        return value->value;
-    }
-    if (auto value =
-            readDiagnosticBooleanOverride(
-                "SVMP_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC")) {
-        return value->value;
-    }
-    return false;
-}
-
-bool freeSurfaceConservativeBalanceDiagnosticEnabled()
-{
-    if (auto value = readDiagnosticBooleanOverride(
-            "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC")) {
-        return value->value;
-    }
-    if (auto value = readDiagnosticBooleanOverride(
-            "SVMP_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC")) {
-        return value->value;
-    }
-    // Retain the equilibrium spelling as an explicit compatibility alias for
+    registry.declareSet(
+        std::string(kPressureRowContributionDiagnostics),
+        {"SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC",
+         "SVMP_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC"});
+    // The equilibrium spellings remain explicit compatibility aliases for
     // qualification scripts written while the diagnostic was being designed.
-    if (auto value = readDiagnosticBooleanOverride(
-            "SVMP_NS_FREE_SURFACE_EQUILIBRIUM_DIAGNOSTIC")) {
-        return value->value;
-    }
-    if (auto value = readDiagnosticBooleanOverride(
-            "SVMP_FREE_SURFACE_EQUILIBRIUM_DIAGNOSTIC")) {
-        return value->value;
-    }
-    return false;
+    registry.declareSet(
+        std::string(kConservativeBalanceDiagnostics),
+        {"SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC",
+         "SVMP_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC",
+         "SVMP_NS_FREE_SURFACE_EQUILIBRIUM_DIAGNOSTIC",
+         "SVMP_FREE_SURFACE_EQUILIBRIUM_DIAGNOSTIC"});
 }
 
 bool conservativeBalanceDiagnosticSupported(
+    const FE::systems::DiagnosticRegistry& registry,
     const std::vector<FreeSurfaceBoundary>& effective_free_surfaces,
     bool has_exterior_free_surface,
     bool requested_by_options)
@@ -113,7 +59,7 @@ bool conservativeBalanceDiagnosticSupported(
     // operators that the configured static-capillary certificate reads.
     const bool conservative_balance_diagnostic_requested =
         requested_by_options ||
-        freeSurfaceConservativeBalanceDiagnosticEnabled();
+        registry.enabled(kConservativeBalanceDiagnostics);
     const bool conservative_balance_has_surface_energy =
         std::any_of(
             effective_free_surfaces.begin(),
@@ -154,6 +100,7 @@ bool conservativeBalanceDiagnosticSupported(
 }
 
 void installConservativeBalanceDiagnosticOperators(
+    FE::systems::DiagnosticRegistry& registry,
     FE::systems::FESystem& system,
     FE::FieldId u_id,
     FE::FieldId p_id,
@@ -200,18 +147,14 @@ void installConservativeBalanceDiagnosticOperators(
     const auto install_diagnostic =
         [&](std::string_view operator_tag,
             const FormExpr& diagnostic_form) {
-            auto diagnostic_install = install;
-            diagnostic_install
-                .generated_boundary_nitsche_trace_requests
-                .clear();
-            diagnostic_install.source_component_tag =
-                std::string(operator_tag);
-            (void)FE::systems::installFormulation(
+            (void)registry.install(
                 system,
+                kConservativeBalanceDiagnostics,
                 std::string(operator_tag),
                 {u_id},
                 diagnostic_form,
-                diagnostic_install);
+                install,
+                {.source_component_tag = std::string(operator_tag)});
         };
     install_diagnostic(
         FreeSurfaceConservativeBalanceDiagnosticOperators::
@@ -238,28 +181,23 @@ void installConservativeBalanceDiagnosticOperators(
             conservative_balance,
         conservative_balance_form);
 
-    {
-        auto diagnostic_install = install;
-        diagnostic_install
-            .generated_boundary_nitsche_trace_requests
-            .clear();
-        diagnostic_install.source_component_tag = std::string(
+    // The pair is intentionally only a pressure/velocity operator.
+    // Generated geometry is frozen external state for this diagnostic;
+    // inherited level-set/curvature/ALE extra trial fields would add blocks
+    // that are outside [0,G;G^T,0].
+    (void)registry.install(
+        system,
+        kConservativeBalanceDiagnostics,
+        std::string(
             FreeSurfaceConservativeBalanceDiagnosticOperators::
-                pressure_representability_pair);
-        // The pair is intentionally only a pressure/velocity operator.
-        // Generated geometry is frozen external state for this
-        // diagnostic; inherited level-set/curvature/ALE extra trial
-        // fields would add blocks that are outside [0,G;G^T,0].
-        diagnostic_install.extra_trial_fields.clear();
-        (void)FE::systems::installFormulation(
-            system,
-            std::string(
-                FreeSurfaceConservativeBalanceDiagnosticOperators::
-                    pressure_representability_pair),
-            {u_id, p_id},
-            pressure_representability_pair_form,
-            diagnostic_install);
-    }
+                pressure_representability_pair),
+        {u_id, p_id},
+        pressure_representability_pair_form,
+        install,
+        {.source_component_tag = std::string(
+             FreeSurfaceConservativeBalanceDiagnosticOperators::
+                 pressure_representability_pair),
+         .clear_extra_trial_fields = true});
 
     FE_LOG_INFO(
         std::string(
@@ -304,6 +242,7 @@ void installConservativeBalanceDiagnosticOperators(
 }
 
 void installPressureRowContributionDiagnosticOperators(
+    FE::systems::DiagnosticRegistry& registry,
     FE::systems::FESystem& system,
     FE::FieldId u_id,
     FE::FieldId p_id,
@@ -316,70 +255,32 @@ void installPressureRowContributionDiagnosticOperators(
     const FE::forms::FormExpr& pressure_ghost_penalty_form,
     const std::optional<ActiveVolumeDomain>& active_volume_domain)
 {
-    auto diagnostic_install = install;
-    diagnostic_install
-        .generated_boundary_nitsche_trace_requests
-        .clear();
-    if (std::find(diagnostic_install.extra_trial_fields.begin(),
-                  diagnostic_install.extra_trial_fields.end(),
-                  u_id) == diagnostic_install.extra_trial_fields.end()) {
-        diagnostic_install.extra_trial_fields.push_back(u_id);
-    }
+    const FE::systems::DiagnosticOperatorOptions with_velocity{.extra_trial_fields = {u_id}};
+    const auto install_row = [&](const char* operator_tag, const FE::forms::FormExpr& form) {
+        (void)registry.install(system, kPressureRowContributionDiagnostics, operator_tag, {p_id}, form,
+                               install, with_velocity);
+    };
     FE_LOG_INFO(
         "IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pressure_row_contribution_operators"
         " installing=1"
         " ops=equations_diagnostic_ns_galerkin_continuity|equations_diagnostic_ns_active_continuity|equations_diagnostic_ns_vms_pspg|equations_diagnostic_ns_vms_pspg_pressure_gradient|equations_diagnostic_ns_vms_pspg_nonpressure|equations_diagnostic_ns_pressure_ghost_penalty");
-    (void)FE::systems::installFormulation(
-        system,
-        "equations_diagnostic_ns_galerkin_continuity",
-        {p_id},
-        integrateOnActiveVolume(
-            galerkin_continuity_integrand,
-            active_volume_domain),
-        diagnostic_install);
-        (void)FE::systems::installFormulation(
-            system,
-            "equations_diagnostic_ns_active_continuity",
-            {p_id},
-            active_continuity_diagnostic_form,
-            diagnostic_install);
+    install_row("equations_diagnostic_ns_galerkin_continuity",
+                integrateOnActiveVolume(galerkin_continuity_integrand, active_volume_domain));
+    install_row("equations_diagnostic_ns_active_continuity", active_continuity_diagnostic_form);
     if (vms_pspg_continuity_integrand.isValid()) {
-        (void)FE::systems::installFormulation(
-            system,
-            "equations_diagnostic_ns_vms_pspg",
-            {p_id},
-            integrateOnActiveVolume(
-                vms_pspg_continuity_integrand,
-                active_volume_domain),
-            diagnostic_install);
+        install_row("equations_diagnostic_ns_vms_pspg",
+                    integrateOnActiveVolume(vms_pspg_continuity_integrand, active_volume_domain));
     }
     if (vms_pspg_pressure_gradient_integrand.isValid()) {
-        (void)FE::systems::installFormulation(
-            system,
-            "equations_diagnostic_ns_vms_pspg_pressure_gradient",
-            {p_id},
-            integrateOnActiveVolume(
-                vms_pspg_pressure_gradient_integrand,
-                active_volume_domain),
-            diagnostic_install);
+        install_row("equations_diagnostic_ns_vms_pspg_pressure_gradient",
+                    integrateOnActiveVolume(vms_pspg_pressure_gradient_integrand, active_volume_domain));
     }
     if (vms_pspg_nonpressure_integrand.isValid()) {
-        (void)FE::systems::installFormulation(
-            system,
-            "equations_diagnostic_ns_vms_pspg_nonpressure",
-            {p_id},
-            integrateOnActiveVolume(
-                vms_pspg_nonpressure_integrand,
-                active_volume_domain),
-            diagnostic_install);
+        install_row("equations_diagnostic_ns_vms_pspg_nonpressure",
+                    integrateOnActiveVolume(vms_pspg_nonpressure_integrand, active_volume_domain));
     }
     if (pressure_ghost_penalty_form.isValid()) {
-        (void)FE::systems::installFormulation(
-            system,
-            "equations_diagnostic_ns_pressure_ghost_penalty",
-            {p_id},
-            pressure_ghost_penalty_form,
-            diagnostic_install);
+        install_row("equations_diagnostic_ns_pressure_ghost_penalty", pressure_ghost_penalty_form);
     }
 }
 

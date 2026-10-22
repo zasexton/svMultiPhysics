@@ -25,10 +25,12 @@
 
 #include "FE/Core/Types.h"
 #include "FE/Forms/FormExpr.h"
+#include "FE/Systems/DiagnosticRegistry.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormsInstaller.h"
 
 #include <optional>
+#include <string_view>
 #include <vector>
 
 namespace svmp {
@@ -36,9 +38,14 @@ namespace Physics {
 namespace formulations {
 namespace navier_stokes {
 
-bool pressureRowContributionDiagnosticEnabled();
+/// The diagnostic sets of the module (FE::systems::DiagnosticRegistry).
+inline constexpr std::string_view kPressureRowContributionDiagnostics =
+    "navier_stokes_pressure_row_contribution";
+inline constexpr std::string_view kConservativeBalanceDiagnostics =
+    "navier_stokes_free_surface_conservative_balance";
 
-bool freeSurfaceConservativeBalanceDiagnosticEnabled();
+/// Declares both sets with their environment switches.
+void declareNavierStokesDiagnosticSets(FE::systems::DiagnosticRegistry& registry);
 
 /// The forms of the conservative split, collected where the formulation states
 /// them (only when the diagnostic is requested and supported).
@@ -70,6 +77,7 @@ inline void addSurfaceEnergy(ConservativeBalanceForms* balance, const FE::forms:
 /// with a constant nonzero gamma (warns when it is requested but not
 /// supported).
 [[nodiscard]] bool conservativeBalanceDiagnosticSupported(
+    const FE::systems::DiagnosticRegistry& registry,
     const std::vector<FreeSurfaceBoundary>& effective_free_surfaces,
     bool has_exterior_free_surface,
     bool requested_by_options);
@@ -77,6 +85,7 @@ inline void addSurfaceEnergy(ConservativeBalanceForms* balance, const FE::forms:
 /// The operators of the conservative split
 /// (FreeSurfaceConservativeBalanceDiagnosticOperators), on the production rules.
 void installConservativeBalanceDiagnosticOperators(
+    FE::systems::DiagnosticRegistry& registry,
     FE::systems::FESystem& system,
     FE::FieldId u_id,
     FE::FieldId p_id,
@@ -94,6 +103,7 @@ void installConservativeBalanceDiagnosticOperators(
 /// The continuity-row parts used by the cut-stability tests
 /// (equations_diagnostic_ns_*).
 void installPressureRowContributionDiagnosticOperators(
+    FE::systems::DiagnosticRegistry& registry,
     FE::systems::FESystem& system,
     FE::FieldId u_id,
     FE::FieldId p_id,

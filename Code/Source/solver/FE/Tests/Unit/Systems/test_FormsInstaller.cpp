@@ -5,7 +5,10 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdlib>
+
 #include "Systems/FESystem.h"
+#include "Systems/DiagnosticRegistry.h"
 #include "Systems/FormulationBuilder.h"
 #include "Systems/BoundaryConditionManager.h"
 #include "Systems/FormsInstallerDetail.h"
@@ -1543,6 +1546,48 @@ TEST(ContactLineGeometryCertificate, PlanarWallEvidenceChecksTheConfiguredNormal
     EXPECT_NO_THROW(interfaces::certifyContactLineRules(sys, nullptr, check));
     EXPECT_TRUE(interfaces::certifyContactLineRulesCollectively(sys, nullptr, check, true, "unit"));
     EXPECT_FALSE(interfaces::certifyContactLineRulesCollectively(sys, nullptr, check, false, "unit"));
+}
+
+TEST(DiagnosticRegistry, SwitchesSetsAndRecordsTheirOperators)
+{
+    namespace systems = svmp::FE::systems;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+    systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto w_field = sys.addField(systems::FieldSpec{.name = "w", .space = space, .components = 1});
+
+    systems::DiagnosticRegistry registry;
+    registry.declareSet("unit", {"FE_UNIT_DIAGNOSTIC_REGISTRY_A", "FE_UNIT_DIAGNOSTIC_REGISTRY_B"});
+    ::unsetenv("FE_UNIT_DIAGNOSTIC_REGISTRY_A");
+    ::unsetenv("FE_UNIT_DIAGNOSTIC_REGISTRY_B");
+    EXPECT_FALSE(registry.enabled("unit"));
+    ::setenv("FE_UNIT_DIAGNOSTIC_REGISTRY_B", "Yes", 1);
+    EXPECT_TRUE(registry.enabled("unit"));
+    ::setenv("FE_UNIT_DIAGNOSTIC_REGISTRY_A", "OFF", 1);
+    EXPECT_FALSE(registry.enabled("unit"));
+    ::setenv("FE_UNIT_DIAGNOSTIC_REGISTRY_A", "", 1);
+    EXPECT_TRUE(registry.enabled("unit"));
+    ::unsetenv("FE_UNIT_DIAGNOSTIC_REGISTRY_A");
+    ::unsetenv("FE_UNIT_DIAGNOSTIC_REGISTRY_B");
+    EXPECT_THROW((void)registry.enabled("undeclared"), std::invalid_argument);
+
+    systems::FormInstallOptions formulation;
+    formulation.source_component_tag = "residual";
+    formulation.extra_trial_fields = {w_field};
+    const auto options = systems::DiagnosticRegistry::operatorOptions(
+        formulation, {.source_component_tag = "diag", .clear_extra_trial_fields = true, .extra_trial_fields = {u_field}});
+    EXPECT_EQ(options.source_component_tag, "diag");
+    EXPECT_EQ(options.extra_trial_fields, std::vector<svmp::FE::FieldId>{u_field});
+    EXPECT_EQ(systems::DiagnosticRegistry::operatorOptions(formulation, {}).source_component_tag, "residual");
+
+    const auto u = svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+    const auto installed = registry.install(sys, "unit", "diagnostic_mass", {u_field}, (u * v).dx(), formulation);
+    ASSERT_FALSE(installed.residual.empty());
+    EXPECT_EQ(registry.operators("unit"), std::vector<systems::OperatorTag>{"diagnostic_mass"});
+    registry.declareSet("unit", {"FE_UNIT_DIAGNOSTIC_REGISTRY_A"});
+    EXPECT_TRUE(registry.operators("unit").empty());
 }
 
 TEST(FormsInstaller, FormsInstaller_RegistersCutVolumeKernel)

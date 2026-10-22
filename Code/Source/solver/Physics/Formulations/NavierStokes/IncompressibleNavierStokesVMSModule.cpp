@@ -465,6 +465,8 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
 {
     const auto& o = options_;
     effective_configuration_artifact_.reset();
+    diagnostics_ = std::make_shared<fs::DiagnosticRegistry>();   // published through diagnostics()
+    declareNavierStokesDiagnosticSets(*diagnostics_);
     auto preflight = preflightNavierStokes(system, o, velocity_space_, pressure_space_);   // no mutation before
     const int dim = preflight.dim;
     const auto& free_surfaces = preflight.effective_free_surfaces;
@@ -546,7 +548,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     auto work = bulkResidualWork(r, M, C, pspg_grad_p, -rho * inner(g, v), nonconservative_force,
                                  preflight.enable_vms, Omega);
     std::optional<ConservativeBalanceForms> balance;
-    if (conservativeBalanceDiagnosticSupported(free_surfaces, preflight.has_exterior_free_surface,
+    if (conservativeBalanceDiagnosticSupported(*diagnostics_, free_surfaces, preflight.has_exterior_free_surface,
                                                o.conservative_balance_diagnostics)) {
         balance = ConservativeBalanceForms{.pressure = r.pressure.dx(Omega),
                                            .gravitational_potential = (-rho * inner(g, v)).dx(Omega)};
@@ -627,16 +629,17 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
 
     // Opt-in diagnostic operators (options or environment switches), after the production ones.
     if (balance) {
-        installConservativeBalanceDiagnosticOperators(system, u_id, p_id, F.options(), balance->pressure,
+        installConservativeBalanceDiagnosticOperators(*diagnostics_, system, u_id, p_id, F.options(), balance->pressure,
                                                       balance->external_pressure, balance->surface_energy,
                                                       balance->gravitational_potential, r.pressure, u, q,
                                                       active_volume);
     }
-    if (pressureRowContributionDiagnosticEnabled()) {
+    if (diagnostics_->enabled(kPressureRowContributionDiagnostics)) {
         const auto vms_pspg = r.pspg_pressure_gradient.isValid()
                                   ? r.pspg_pressure_gradient + r.pspg_without_pressure_gradient
                                   : FormExpr{};
-        installPressureRowContributionDiagnosticOperators(system, u_id, p_id, F.options(), r.galerkin_continuity,
+        installPressureRowContributionDiagnosticOperators(*diagnostics_, system, u_id, p_id, F.options(),
+                                                          r.galerkin_continuity,
                                                           active_continuity, vms_pspg, r.pspg_pressure_gradient,
                                                           r.pspg_without_pressure_gradient, work.ghost_penalty,
                                                           active_volume);
