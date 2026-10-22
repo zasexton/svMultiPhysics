@@ -962,6 +962,7 @@ set(FE_LEVELSET_HEADERS
     LevelSet/LevelSetCurvatureProjection.h
     LevelSet/LevelSetCurvatureSamples.h
     LevelSet/LevelSetCutVolumeMeasures.h
+    LevelSet/LevelSetCutTopology.h
     LevelSet/LevelSetInterfaceLifecycle.h
     LevelSet/LevelSetMaintenanceSchedule.h
     LevelSet/LevelSetMaintenanceSubstage.h
@@ -991,6 +992,7 @@ set(FE_LEVELSET_SOURCES
     LevelSet/LevelSetCurvatureProjection.cpp
     LevelSet/LevelSetCurvatureSamples.cpp
     LevelSet/LevelSetCutVolumeMeasures.cpp
+    LevelSet/LevelSetCutTopology.cpp
     LevelSet/LevelSetInterfaceLifecycle.cpp
     LevelSet/LevelSetImplicitCutQuadratureBackend.cpp
     LevelSet/LevelSetMaintenanceSchedule.cpp
@@ -2541,6 +2543,7 @@ if(FE_BUILD_TESTS)
             Tests/Unit/LevelSet/test_FreeSurfaceSnapshotReuse.cpp
             Tests/Unit/LevelSet/test_LevelSetCurvatureProjection.cpp
             Tests/Unit/LevelSet/test_LevelSetCurvatureSamples.cpp
+            Tests/Unit/LevelSet/test_LevelSetCutTopology.cpp
             Tests/Unit/LevelSet/test_LevelSetHeaders.cpp
             Tests/Unit/LevelSet/test_LevelSetInterfaceLifecycle.cpp
             Tests/Unit/LevelSet/test_LevelSetKinematicReconciliation.cpp
