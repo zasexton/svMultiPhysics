@@ -442,7 +442,6 @@ void addSharedGaugeEvidence(FE::systems::FESystem& system,
         owner.use_cut_metadata_scale;
     interface.cut_cell_stabilization.cut_metadata_scale_cap =
         owner.cut_metadata_scale_cap;
-    interface.velocity_extension.enabled = false;
     interface.contact_lines.clear();
     interface.small_cut_aggregation = true;
     interface.small_cut_aggregation_guards =

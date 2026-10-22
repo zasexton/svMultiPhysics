@@ -5342,7 +5342,6 @@ void setWetBlockP1Field(
     free_surface.use_level_set_curvature = false;
     free_surface.cut_cell_stabilization.enabled = false;
     free_surface.small_cut_aggregation = false;
-    free_surface.velocity_extension.enabled = false;
     options.free_surface.push_back(std::move(free_surface));
 
     ns::IncompressibleNavierStokesVMSModule module(
@@ -8588,7 +8587,6 @@ void collectivePublishWetBlockReferenceBundle(
     free_surface.use_level_set_curvature = false;
     free_surface.cut_cell_stabilization.enabled = false;
     free_surface.small_cut_aggregation = false;
-    free_surface.velocity_extension.enabled = false;
     options.free_surface.push_back(std::move(free_surface));
     ns::IncompressibleNavierStokesVMSModule module(
         velocity_space, scalar_space, options);

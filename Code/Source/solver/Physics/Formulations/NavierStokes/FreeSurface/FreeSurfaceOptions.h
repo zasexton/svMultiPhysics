@@ -205,13 +205,6 @@ struct FreeSurfaceCutCellStabilization {
     std::optional<FE::Real> cut_metadata_scale_cap{};
 };
 
-struct FreeSurfaceVelocityExtension {
-    using ScalarValue = FE::forms::bc::ScalarValue;
-
-    bool enabled{false};
-    ScalarValue diffusivity{1.0};
-};
-
 /**
  * @brief Physics-side free-surface relation on a fitted or embedded interface
  *
@@ -317,7 +310,6 @@ struct FreeSurfaceBoundary {
     bool kinematic_nitsche_scale_with_p{true};
 
     FreeSurfaceCutCellStabilization cut_cell_stabilization{};
-    FreeSurfaceVelocityExtension velocity_extension{};
     std::vector<FreeSurfaceContactLine> contact_lines{};
 
     // AgFEM-style small-cut aggregation: slave ill-posed cut-cell

@@ -523,40 +523,8 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
                "AllowCornerLinearizedGeometry"})) {
     request.allow_corner_linearized_geometry = *allow_corner_linearized;
   }
-  // Keep the aliases and diffusivity-implies-enable rule synchronized with
-  // NavierStokesRegister.cpp. The Application must retain the inactive-side
-  // cut rules whenever Physics will construct the extension problem.
-  const auto velocity_extension =
-      firstDefinedBoolParameter(
-          cut_params,
-          {"Enable_velocity_extension",
-           "EnableVelocityExtension",
-           "Velocity_extension",
-           "VelocityExtension",
-           "Extend_velocity_to_inactive_domain",
-           "ExtendVelocityToInactiveDomain",
-           "Free_surface_velocity_extension",
-           "FreeSurfaceVelocityExtension"});
-  const bool velocity_extension_explicitly_disabled =
-      velocity_extension.has_value() && !*velocity_extension;
-  bool velocity_extension_enabled =
-      velocity_extension.value_or(false);
-  if (firstDefinedDoubleParameter(
-          cut_params,
-          {"Velocity_extension_diffusivity",
-           "VelocityExtensionDiffusivity",
-           "Inactive_velocity_extension_diffusivity",
-           "InactiveVelocityExtensionDiffusivity"})
-          .has_value() &&
-      !velocity_extension_explicitly_disabled) {
-    velocity_extension_enabled = true;
-  }
-  if (velocity_extension_enabled) {
-    request.volume_retention =
-        ActiveCutVolumeRetention::ActiveAndInactive;
-  }
   // Retention A/B experiment knob: request the retained generated-volume
-  // sides regardless of the velocity-extension-driven default. Inactive-side
+  // sides regardless of the default. Inactive-side
   // rules are metadata consumers' concern (aggregation classification,
   // diagnostics). The free-surface post-processing below rejects the
   // active-only request when small-cut aggregation is enabled, because that

@@ -138,8 +138,6 @@ struct IncompressibleNavierStokesVMSOptions {
         navier_stokes::FreeSurfaceCutCellStabilization;
     using FreeSurfaceSmallCutAggregationGuards =
         FE::constraints::SmallCutAggregationGuardOptions;
-    using FreeSurfaceVelocityExtension =
-        navier_stokes::FreeSurfaceVelocityExtension;
     using FreeSurfaceBoundary = navier_stokes::FreeSurfaceBoundary;
 
     inline static constexpr int current_configuration_schema_version{2};

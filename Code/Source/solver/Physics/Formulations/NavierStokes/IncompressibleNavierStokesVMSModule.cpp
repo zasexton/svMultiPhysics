@@ -487,12 +487,6 @@ bool freeSurfaceConservativeBalanceDiagnosticEnabled()
     return false;
 }
 
-bool constrainInactiveActiveDomainVelocity(
-    const FreeSurfaceBoundary& active_domain_boundary)
-{
-    return !active_domain_boundary.velocity_extension.enabled;
-}
-
 [[nodiscard]] bool spacesCompatible(const FE::spaces::FunctionSpace& lhs,
                                     const FE::spaces::FunctionSpace& rhs) noexcept
 {
@@ -3476,9 +3470,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             "L1 limits at least one, and a row L1 limit no smaller than the "
             "coefficient limit");
     }
-    validateNonnegativeConstantScalar(
-        bc.velocity_extension.diffusivity,
-        "velocity-extension diffusivity");
     for (const auto& value : bc.prescribed_tangential_mesh_velocity) {
         validateFiniteConstantScalar(
             value, "prescribed tangential mesh velocity");
@@ -3529,10 +3520,9 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                 FreeSurfaceNormalKinematicPolicy::None ||
             bc.tangential_mesh_policy !=
                 FreeSurfaceTangentialMeshPolicy::Free ||
-            !bc.contact_lines.empty() ||
-            bc.velocity_extension.enabled) {
+            !bc.contact_lines.empty()) {
             throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: an internal material-interface volume cannot own interface kinematics, tangential mesh motion, contact laws, or velocity extension");
+                "IncompressibleNavierStokesVMSModule: an internal material-interface volume cannot own interface kinematics, tangential mesh motion, or contact laws");
         }
         const auto phi_id = resolveLevelSetFieldId(bc, system);
         const auto& phi_record = system.fieldRecord(phi_id);
@@ -3667,11 +3657,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                     "IncompressibleNavierStokesVMSModule: cut-cell metadata scale cap must be finite and at least 1");
             }
         }
-        const auto& extension = bc.velocity_extension;
-        if (extension.enabled) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: the legacy same-field dry-domain velocity diffusion is retired because it modifies physical momentum; use the separate algebraic level-set advection velocity extension and small-cut aggregation");
-        }
     } else {
         if (usesSurfaceStress(bc) && !bc.allow_fitted_surface_stress) {
             throw std::invalid_argument(
@@ -3727,10 +3712,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
         if (bc.allow_full_domain_unfitted_free_surface) {
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: Allow_full_domain_unfitted_free_surface is only valid for unfitted level-set free surfaces");
-        }
-        if (bc.velocity_extension.enabled) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: velocity extension is only valid for unfitted level-set free surfaces");
         }
         if (!options.explicit_legacy_configuration) {
             if (!ale_enabled) {
@@ -5418,8 +5399,7 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
             " pressure_stabilization=" +
             (pressureStabilizationActive(bc) ? "active" : "inactive") +
             " pressure_stabilization_disabled_reason=" +
-            pressureStabilizationDisabledReason(bc) +
-            " velocity_extension=" + (bc.velocity_extension.enabled ? "enabled" : "disabled"));
+            pressureStabilizationDisabledReason(bc));
     }
     const auto p_ext = bc::toScalarExpr(
         bc.external_pressure,
@@ -6760,11 +6740,6 @@ tangentialPolicyProvenance(
             << '}';
         out << '}'
             << ",\"pruning\":{\"decision_owner\":\"authoritative_geometry_snapshot\",\"fallback_to_whole_face\":false}"
-            << ",\"legacy_dry_velocity_diffusion\":{\"enabled\":"
-            << jsonBool(boundary.velocity_extension.enabled)
-            << ",\"diffusivity\":"
-            << jsonScalarValue(boundary.velocity_extension.diffusivity)
-            << ",\"production_allowed\":false}"
             << ",\"contact_lines\":[";
         for (std::size_t contact_index = 0;
              contact_index < contacts.size(); ++contact_index) {
@@ -7357,7 +7332,6 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         std::string level_set_field_name{};
         FE::Real level_set_isovalue{0.0};
         int interface_marker{-1};
-        bool constrain_inactive_velocity{true};
     };
     std::optional<PendingSmallCutAggregation> pending_small_cut_aggregation;
     std::optional<PendingActiveDomainConstraints>
@@ -7447,9 +7421,6 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                         FreeSurfaceActiveDomain::LevelSetPositive
                     ? FE::constraints::LevelSetConstraintSide::Positive
                     : FE::constraints::LevelSetConstraintSide::Negative;
-            const bool constrain_inactive_velocity =
-                constrainInactiveActiveDomainVelocity(
-                    *active_pressure_domain->boundary);
             pending_active_domain_constraints =
                 PendingActiveDomainConstraints{
                     .side = side,
@@ -7462,8 +7433,6 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                     .interface_marker =
                         active_pressure_domain->boundary
                             ->interface_marker,
-                    .constrain_inactive_velocity =
-                        constrain_inactive_velocity,
                 };
             // Physical essential data owns the exterior trace: the plan
             // registers the artificial inactive-side extension after every
@@ -7474,20 +7443,8 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                     *active_pressure_domain->boundary, system)
                     .side(activeDomainSide(
                         active_pressure_domain->active_domain));
-            if (constrain_inactive_velocity) {
-                constraint_plan.inactiveSide({u_id}, active_side);
-            }
+            constraint_plan.inactiveSide({u_id}, active_side);
             constraint_plan.inactiveSide({p_id}, active_side);
-            if (!constrain_inactive_velocity) {
-                FE_LOG_INFO(
-                    std::string("IncompressibleNavierStokesVMSModule: inactive active-domain velocity constraints disabled") +
-                    " marker=" +
-                    std::to_string(
-                        active_pressure_domain->boundary->interface_marker) +
-                    " level_set_field='" +
-                    active_pressure_domain->boundary->level_set_field_name +
-                    "' reason=velocity_extension_enabled");
-            }
             if (active_pressure_domain->boundary->small_cut_aggregation) {
                 const auto aggregation_side =
                     active_pressure_domain->active_domain ==

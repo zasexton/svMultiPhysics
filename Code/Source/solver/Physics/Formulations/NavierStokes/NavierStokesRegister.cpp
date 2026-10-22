@@ -4401,6 +4401,10 @@ void append_free_surface_bc(
                  "ignored by explicit schema-1 legacy mode (velocity ghost penalty retired)." << std::endl;
   }
 
+  // The legacy same-field dry-velocity diffusion (Velocity_extension) was
+  // retired with decision D42; it modified the physical momentum rows.
+  // Decks may still state it as disabled; an explicit schema-1 legacy deck
+  // may also keep an ignored archived diffusivity next to that.
   const auto velocity_extension_enabled = first_defined_bool(
       bc.params,
       {"Enable_velocity_extension", "EnableVelocityExtension",
@@ -4409,28 +4413,35 @@ void append_free_surface_bc(
        "ExtendVelocityToInactiveDomain",
        "Free_surface_velocity_extension",
        "FreeSurfaceVelocityExtension"});
-  if (velocity_extension_enabled.has_value()) {
-    fs.velocity_extension.enabled = *velocity_extension_enabled;
-  }
   const bool velocity_extension_explicitly_disabled =
       velocity_extension_enabled.has_value() &&
       !*velocity_extension_enabled;
-  if (const auto velocity_extension_diffusivity = first_defined_double(
+  const bool velocity_extension_diffusivity_present =
+      first_defined_double(
           bc.params,
           {"Velocity_extension_diffusivity", "VelocityExtensionDiffusivity",
            "Inactive_velocity_extension_diffusivity",
-           "InactiveVelocityExtensionDiffusivity"})) {
-    if (velocity_extension_explicitly_disabled &&
-        !explicit_legacy_configuration) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] Velocity_extension_diffusivity cannot accompany an explicitly disabled velocity extension; unused extension settings are accepted only by the explicit schema-1 legacy mode.");
-    }
-    fs.velocity_extension.diffusivity =
-        IncompressibleNavierStokesVMSOptions::ScalarValue{
-            static_cast<svmp::FE::Real>(*velocity_extension_diffusivity)};
-    if (!velocity_extension_explicitly_disabled) {
-      fs.velocity_extension.enabled = true;
-    }
+           "InactiveVelocityExtensionDiffusivity"})
+          .has_value();
+  if (velocity_extension_enabled.value_or(false) ||
+      (velocity_extension_diffusivity_present &&
+       !velocity_extension_explicitly_disabled)) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Physics] Free_surface BC '" + bc.name +
+        "': the legacy same-field dry-velocity diffusion "
+        "(Enable_velocity_extension / Velocity_extension_diffusivity) was "
+        "retired (decision D42) because it modified the physical momentum; "
+        "the level-set advection velocity extension and small-cut "
+        "aggregation replace it.  Remove these keys or set "
+        "Enable_velocity_extension=false.");
+  }
+  if (velocity_extension_diffusivity_present &&
+      !explicit_legacy_configuration) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Free_surface BC '" + bc.name +
+        "': Velocity_extension_diffusivity belongs to the retired legacy "
+        "dry-velocity diffusion (decision D42); only explicit schema-1 "
+        "legacy input may retain an ignored archived value.");
   }
 
   append_free_surface_contact_line(bc.params, fs);
