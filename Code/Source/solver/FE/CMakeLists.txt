@@ -1008,6 +1008,17 @@ set(FE_LEVELSET_SOURCES
     LevelSet/LevelSetRestart.cpp
 )
 
+if(FE_WITH_MESH)
+    # The generated cut-geometry lifecycle keeps the level set in a vertex
+    # field of the primary mesh.
+    list(APPEND FE_LEVELSET_HEADERS
+        LevelSet/LevelSetGeometryService.h
+    )
+    list(APPEND FE_LEVELSET_SOURCES
+        LevelSet/LevelSetGeometryService.cpp
+    )
+endif()
+
 # Auxiliary sources (auxiliary state subsystem, extracted from Systems)
 set(FE_AUXILIARY_HEADERS
     Auxiliary/AuxiliaryState.h
@@ -2544,6 +2555,7 @@ if(FE_BUILD_TESTS)
             Tests/Unit/LevelSet/test_LevelSetCurvatureProjection.cpp
             Tests/Unit/LevelSet/test_LevelSetCurvatureSamples.cpp
             Tests/Unit/LevelSet/test_LevelSetCutTopology.cpp
+            Tests/Unit/LevelSet/test_LevelSetGeometryService.cpp
             Tests/Unit/LevelSet/test_LevelSetHeaders.cpp
             Tests/Unit/LevelSet/test_LevelSetInterfaceLifecycle.cpp
             Tests/Unit/LevelSet/test_LevelSetKinematicReconciliation.cpp

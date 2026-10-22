@@ -101,6 +101,52 @@ bool collectiveAnyTrue(bool local, const CollectiveCommunicator& comm)
   return local;
 }
 
+// Moved from Application/Core/ApplicationDriver.cpp (globalSumDouble).
+double collectiveSumDouble(double local, const CollectiveCommunicator& comm)
+{
+#if FE_HAS_MPI
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (initialized && comm.size() > 1) {
+    double global = 0.0;
+    MPI_Allreduce(&local, &global, 1, MPI_DOUBLE, MPI_SUM, comm.native());
+    return global;
+  }
+#else
+  (void)comm;
+#endif
+
+  return local;
+}
+
+// Moved from Application/Core/ApplicationDriver.cpp (reduceOutputTiming).
+CollectiveTimingStatistics collectiveTimingStatistics(
+    double local,
+    const CollectiveCommunicator& comm)
+{
+  CollectiveTimingStatistics stats;
+  stats.local = local;
+  stats.min = local;
+  stats.mean = local;
+  stats.max = local;
+
+#if FE_HAS_MPI
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (initialized && comm.size() > 1) {
+    double sum = 0.0;
+    MPI_Allreduce(&local, &stats.min, 1, MPI_DOUBLE, MPI_MIN, comm.native());
+    MPI_Allreduce(&local, &stats.max, 1, MPI_DOUBLE, MPI_MAX, comm.native());
+    MPI_Allreduce(&local, &sum, 1, MPI_DOUBLE, MPI_SUM, comm.native());
+    stats.mean = sum / static_cast<double>(comm.size());
+  }
+#else
+  (void)comm;
+#endif
+
+  return stats;
+}
+
 double collectiveMinDouble(double local, const CollectiveCommunicator& comm)
 {
 #if FE_HAS_MPI

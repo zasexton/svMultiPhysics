@@ -87,6 +87,9 @@ private:
 /// True on every rank when @p local is true on at least one rank.
 [[nodiscard]] bool collectiveAnyTrue(bool local, const CollectiveCommunicator& comm);
 
+/// Sum of @p local over all ranks.
+[[nodiscard]] double collectiveSumDouble(double local, const CollectiveCommunicator& comm);
+
 /// Minimum of @p local over all ranks.
 [[nodiscard]] double collectiveMinDouble(double local, const CollectiveCommunicator& comm);
 
@@ -102,6 +105,20 @@ private:
 /// Minimum and maximum of @p local over all ranks.
 [[nodiscard]] std::pair<std::uint64_t, std::uint64_t> collectiveMinMaxUint64(
     std::uint64_t local,
+    const CollectiveCommunicator& comm);
+
+/// A rank-local value (for example a wall time) with its minimum, mean and
+/// maximum over all ranks.
+struct CollectiveTimingStatistics {
+    double local{0.0};
+    double min{0.0};
+    double mean{0.0};
+    double max{0.0};
+};
+
+/// Minimum, mean and maximum of @p local over all ranks.
+[[nodiscard]] CollectiveTimingStatistics collectiveTimingStatistics(
+    double local,
     const CollectiveCommunicator& comm);
 
 /// Sum of @p local over all ranks, reduced as long long and clamped below at
