@@ -2517,7 +2517,9 @@ struct CellCensusReply {
  * owner, when its owner did not classify it, or when the classifying ranks
  * disagree on whether it is active.  For every active cell, appends
  * [cell ID, provider rank, holder count, lowest holder rank] to the reply
- * for its owner.
+ * for its owner.  The provider of the retained measure is the owner, which
+ * always classifies the cell, so it does not depend on which ghost copies
+ * carry cut rules.
  */
 [[nodiscard]] bool resolveCellCensus(
     const GatheredInt64Words& received,
@@ -2559,7 +2561,6 @@ struct CellCensusReply {
         int owner = -1;
         std::size_t owners = 0u;
         bool owner_classified = false;
-        int provider = -1;
         int classified_active = -1;
         for (std::size_t k = first; k < last; ++k) {
             const auto& entry = entries[k];
@@ -2575,9 +2576,6 @@ struct CellCensusReply {
                 owner_classified = classified;
             }
             if (classified) {
-                if (provider < 0) {
-                    provider = entry.source;
-                }
                 if (classified_active < 0) {
                     classified_active = active;
                 } else if (classified_active != active) {
@@ -2593,7 +2591,7 @@ struct CellCensusReply {
         if (classified_active == 1) {
             auto& reply = replies[static_cast<std::size_t>(owner)];
             reply.push_back(static_cast<std::int64_t>(entries[first].gid));
-            reply.push_back(provider);
+            reply.push_back(owner);
             reply.push_back(static_cast<std::int64_t>(last - first));
             reply.push_back(entries[first].source);
         }
@@ -8774,6 +8772,10 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     std::vector<Real> global_active_cell_physical_volume_of;
     std::vector<std::vector<std::uint64_t>> global_active_cell_rule_ids_of;
     std::vector<int> global_active_cell_measure_provider_rank_of;
+    // Ranks that declared each active classified cell (ascending), as
+    // offsets into one array, to choose the owner as measure provider below.
+    std::vector<std::size_t> active_cell_declarer_offsets;
+    std::vector<int> active_cell_declarers;
     std::uint64_t local_owned_mesh_cells = 0u;
     std::exception_ptr local_class_decode_exception;
     try {
@@ -8942,6 +8944,8 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     global_active_cell_physical_volume_of.assign(n_classified, Real{0.0});
     global_active_cell_rule_ids_of.assign(n_classified, {});
     global_active_cell_measure_provider_rank_of.assign(n_classified, -1);
+    active_cell_declarer_offsets.assign(n_classified + 1u, 0u);
+    active_cell_declarers.clear();
     for (std::size_t index = 0u; index < n_classified; ++index) {
         const auto [first, last] = declaration_groups[index];
         const auto flags = decoded_cell_declarations[first].flags;
@@ -8949,8 +8953,16 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         klass.full_active = (flags & 1) != 0;
         klass.cut = (flags & 2) != 0;
         if (!klass.full_active && !klass.cut) {
+            active_cell_declarer_offsets[index + 1u] =
+                active_cell_declarers.size();
             continue;
         }
+        for (std::size_t k = first; k < last; ++k) {
+            active_cell_declarers.push_back(
+                decoded_cell_declarations[k].measure.provider_rank);
+        }
+        active_cell_declarer_offsets[index + 1u] =
+            active_cell_declarers.size();
         const auto& canonical = decoded_cell_declarations[first].measure;
         for (std::size_t k = first; k < last; ++k) {
             const auto& provider = decoded_cell_declarations[k].measure;
@@ -9141,6 +9153,26 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             throw std::logic_error(
                 "SmallCutAggregationConstraint: canonical cell owner rank "
                 "was not retained");
+        }
+    }
+    // The retained-measure provider is the owner when the owner declared
+    // the cell (generated contexts always do, like the owner-sourced census),
+    // so it does not depend on which ghost copies carry cut rules; an
+    // owner-filtered context without the owner's rules keeps the lowest
+    // declaring rank.  Every declaration carries the same measure.
+    for (std::size_t index = 0u; index < classified_cells.size(); ++index) {
+        if (global_active_cell_measure_provider_rank_of[index] < 0) {
+            continue;
+        }
+        const auto declarers_begin = active_cell_declarers.begin() +
+            static_cast<std::ptrdiff_t>(active_cell_declarer_offsets[index]);
+        const auto declarers_end = active_cell_declarers.begin() +
+            static_cast<std::ptrdiff_t>(
+                active_cell_declarer_offsets[index + 1u]);
+        if (std::find(declarers_begin, declarers_end,
+                      global_cell_owner_rank_of[index]) != declarers_end) {
+            global_active_cell_measure_provider_rank_of[index] =
+                global_cell_owner_rank_of[index];
         }
     }
 

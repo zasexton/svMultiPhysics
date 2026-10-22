@@ -117,6 +117,13 @@ struct ActiveCutVolumeRequest {
   int implicit_cut_root_max_iterations{48};
   int implicit_cut_max_subdivision_depth{16};
   int affected_cell_neighborhood_layers{0};
+  // Generated cut data is kept on the owned cells and on ghost cells at most
+  // this many face layers away from them (owned cells are layer 0); -1 keeps
+  // every stored cell.  The Application applies it to distributed runs on the
+  // production path, where no consumer of cut data reads beyond the first
+  // ghost layer, so results do not depend on it.  Like the parsing provenance
+  // above it is not part of the policy key.
+  int generated_cut_ghost_layers{2};
   LevelSetActiveSide active_side{LevelSetActiveSide::Negative};
   ActiveCutVolumeRetention volume_retention{
       ActiveCutVolumeRetention::ActiveOnly};

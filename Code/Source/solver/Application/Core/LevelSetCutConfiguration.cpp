@@ -191,6 +191,14 @@ void mergeRequestRetention(ActiveCutVolumeRequest& target,
     target.volume_retention =
         ActiveCutVolumeRetention::ActiveAndInactive;
   }
+  // Two declarations of one generated domain keep the deeper ghost cut
+  // data; -1 (every stored cell) wins.
+  target.generated_cut_ghost_layers =
+      target.generated_cut_ghost_layers < 0 ||
+              source.generated_cut_ghost_layers < 0
+          ? -1
+          : std::max(target.generated_cut_ghost_layers,
+                     source.generated_cut_ghost_layers);
   target.geometry_tangent_policy_explicit =
       target.geometry_tangent_policy_explicit ||
       source.geometry_tangent_policy_explicit;
@@ -432,6 +440,18 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
     }
     request.affected_cell_neighborhood_layers =
         *affected_neighborhood_layers;
+  }
+  if (const auto ghost_layers =
+          firstDefinedIntParameter(
+              cut_params,
+              {"Generated_cut_ghost_layers"})) {
+    if (*ghost_layers < -1) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Generated_cut_ghost_layers must "
+          "be -1 (every stored cell) or a nonnegative number of ghost "
+          "face layers.");
+    }
+    request.generated_cut_ghost_layers = *ghost_layers;
   }
   if (const auto allow_corner_linearized =
           firstDefinedBoolParameter(

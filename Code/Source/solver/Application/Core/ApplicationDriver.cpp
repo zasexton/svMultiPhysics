@@ -12274,7 +12274,9 @@ std::string cutGeometryLifecycleMemoryDetails(
 // volume regions and sensitivity records of ghost cells beyond layer k from
 // the domain every downstream consumer reads (snapshot, active boundary,
 // context, constraints, assembly, ...), to find which consumers need cut data
-// how deep into the halo.  It changes results; it is an audit tool.
+// how deep into the halo; it acts after the production restriction to
+// <Generated_cut_ghost_layers> (set that to -1 to audit against every
+// layer).  It is an audit tool.
 constexpr int kGhostLayerAuditBuckets = 16;
 
 std::vector<int> ghostCellLayers(
@@ -12333,6 +12335,98 @@ std::string ghostLayerHistogramText(
     text += (i == 0 ? "" : ",") + std::to_string(counts[i]);
   }
   return text + "]";
+}
+
+struct GhostCutWithholding {
+  std::size_t fragments{0u};
+  std::size_t regions{0u};
+  std::size_t sensitivity_records{0u};
+};
+
+// Removes the generated fragments, volume regions and sensitivity records of
+// cells beyond face layer `keep_layers` (layers from ghostCellLayers) from
+// the domain, keeping the order of the rest.
+GhostCutWithholding withholdGhostCutLayersBeyond(
+    svmp::FE::interfaces::LevelSetInterfaceDomain& domain,
+    const std::vector<int>& layers,
+    int keep_layers)
+{
+  const auto layer_of = [&](svmp::FE::MeshIndex cell) {
+    return cell >= 0 && static_cast<std::size_t>(cell) < layers.size()
+               ? layers[static_cast<std::size_t>(cell)]
+               : std::numeric_limits<int>::max();
+  };
+  GhostCutWithholding withheld;
+  svmp::FE::interfaces::LevelSetInterfaceDomain kept(domain.request());
+  for (const auto& fragment : domain.fragments()) {
+    if (layer_of(fragment.parent_cell) > keep_layers) {
+      ++withheld.fragments;
+      continue;
+    }
+    kept.addFragment(fragment);
+  }
+  for (const auto& region : domain.volumeRegions()) {
+    if (layer_of(region.parent_cell) > keep_layers) {
+      ++withheld.regions;
+      continue;
+    }
+    kept.addVolumeRegion(region);
+  }
+  for (const auto& record : domain.sensitivityRecords()) {
+    if (layer_of(record.parent_cell) > keep_layers) {
+      ++withheld.sensitivity_records;
+      continue;
+    }
+    kept.addSensitivityRecord(record);
+  }
+  domain = std::move(kept);
+  return withheld;
+}
+
+// ---- generated cut data on deep ghost cells --------------------------------
+//
+// Generated cut data is kept on the owned cells and on ghost cells at most
+// <Generated_cut_ghost_layers> face layers away from them (default 2; -1
+// keeps every stored cell); the mesh halo, the DOF layout and the numbering
+// are unchanged.  On the production path no consumer reads cut data beyond
+// the first ghost layer: assembly (ReverseScatter) assembles owned cells and
+// the interior faces of owned cells, small-cut aggregation classifies owned
+// cells and copies the canonical classes of ghosts from their owners, and
+// the active-side vertex constraint routes its marks through cell owners.
+// Runs keeping one or two ghost layers were bitwise identical to runs
+// keeping all twelve (3D sphere and sessile drop on 8 and 16 ranks, 2D
+// sessile drop, capillary wave and rise, the extended reference decks); the
+// withheld layers only cost generation bookkeeping, snapshot records and
+// their checks in every consumer.  Two consumers read deeper and keep every
+// layer: the rank-local curvature recoveries (LevelSetQuadratic and
+// GeneratedInterfacePatch fit vertex patches over the samples of all local
+// cut cells and write every local vertex; that audit run differed) and the
+// owned-rows assembly policy, which assembles every stored cell.
+[[nodiscard]] bool generatedCutNeedsEveryGhostLayer(
+    const application::core::SimulationComponents& sim,
+    const std::vector<ActiveCutVolumeRequest>& requests)
+{
+  if (sim.fe_system->assemblyGhostPolicy() !=
+      svmp::FE::assembly::GhostPolicy::ReverseScatter) {
+    return true;
+  }
+  try {
+    for (const auto& configuration :
+         resolveLevelSetMaintenanceConfigurations(
+             sim.resolved_level_set_equations_by_input_index, requests)) {
+      if (configuration && configuration->curvature_projection_enabled &&
+          configuration->curvature_projection.recovery_mode !=
+              svmp::FE::level_set::LevelSetCurvatureRecoveryMode::
+                  KinematicAreaGradient) {
+        return true;
+      }
+    }
+  } catch (...) {
+    // Without a resolvable maintenance configuration the curvature mode is
+    // unknown; keep every layer.
+    return true;
+  }
+  return false;
 }
 
 void auditGhostLayers(
@@ -12394,32 +12488,11 @@ void auditGhostLayers(
   if (!withhold) {
     return;
   }
-  svmp::FE::interfaces::LevelSetInterfaceDomain kept(domain.request());
-  std::size_t withheld_fragments = 0u;
-  std::size_t withheld_regions = 0u;
-  std::size_t withheld_sensitivity = 0u;
-  for (const auto& fragment : domain.fragments()) {
-    if (layer_of(fragment.parent_cell) > keep_layers) {
-      ++withheld_fragments;
-      continue;
-    }
-    kept.addFragment(fragment);
-  }
-  for (const auto& region : domain.volumeRegions()) {
-    if (layer_of(region.parent_cell) > keep_layers) {
-      ++withheld_regions;
-      continue;
-    }
-    kept.addVolumeRegion(region);
-  }
-  for (const auto& record : domain.sensitivityRecords()) {
-    if (layer_of(record.parent_cell) > keep_layers) {
-      ++withheld_sensitivity;
-      continue;
-    }
-    kept.addSensitivityRecord(record);
-  }
-  domain = std::move(kept);
+  const auto withheld =
+      withholdGhostCutLayersBeyond(domain, layers, keep_layers);
+  const auto withheld_fragments = withheld.fragments;
+  const auto withheld_regions = withheld.regions;
+  const auto withheld_sensitivity = withheld.sensitivity_records;
   application::core::oopCout()
       << "[svMultiPhysics::Application] Ghost-layer audit"
       << " diagnostic=ghost_layer_audit_withhold domain_id='" << domain_id
@@ -12477,6 +12550,9 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
       "active_cut_source_sync_before_snapshot_build");
   report.refreshed = true;
   const auto& mesh_access = sim.fe_system->meshAccess();
+  // Every rank decides alike: the assembler policy and the deck are shared.
+  const bool keep_every_ghost_cut_layer =
+      comm.size() <= 1 || generatedCutNeedsEveryGhostLayer(sim, requests);
   if (cutGeometryMemoryReportEnabled()) {
     logCutGeometryMemory(
         "refresh_begin",
@@ -12519,6 +12595,29 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         reduceOutputTiming(local_backend_seconds, comm);
     auto& options = *options_storage;
     auto& result = *result_storage;
+    // Generated cut data beyond the kept ghost layers is withheld before any
+    // consumer reads the domain (see generatedCutNeedsEveryGhostLayer).
+    const int kept_ghost_cut_layers =
+        keep_every_ghost_cut_layer ? -1 : request.generated_cut_ghost_layers;
+    GhostCutWithholding ghost_cut_withheld;
+    std::exception_ptr local_ghost_restriction_failure;
+    try {
+      if (kept_ghost_cut_layers >= 0) {
+        ghost_cut_withheld = withholdGhostCutLayersBeyond(
+            result.domain, ghostCellLayers(mesh_access),
+            kept_ghost_cut_layers);
+      }
+    } catch (...) {
+      local_ghost_restriction_failure = std::current_exception();
+    }
+    requireCollectivePhasePreparation(
+        local_ghost_restriction_failure,
+        comm,
+        "active_cut_ghost_layer_restriction");
+    const auto global_withheld_ghost_cut_fragments =
+        globalSumSize(ghost_cut_withheld.fragments, comm);
+    const auto global_withheld_ghost_cut_regions =
+        globalSumSize(ghost_cut_withheld.regions, comm);
     auditGhostLayers(mesh_access, result.domain, comm, request.domain_id);
     if (svmp::FE::geometryThreadsSelfCheckEnabled()) {
       // Every rank reads the same environment, so the reduction is matched.
@@ -13686,6 +13785,11 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << options.implicit_cut_max_subdivision_depth
         << " affected_cell_neighborhood_layers="
         << options.affected_cell_neighborhood_layers
+        << " generated_cut_ghost_layers=" << kept_ghost_cut_layers
+        << " withheld_ghost_cut_fragments="
+        << global_withheld_ghost_cut_fragments
+        << " withheld_ghost_cut_regions="
+        << global_withheld_ghost_cut_regions
         << " aligned_zero_interface_parent_side="
         << cutIntegrationSideName(
                options.aligned_zero_interface_parent_side)

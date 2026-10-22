@@ -18,6 +18,8 @@
 #include "Spaces/L2Space.h"
 #include "Systems/BoundaryReductionService.h"
 #include "Systems/FESystem.h"
+#include "Systems/FormsInstaller.h"
+#include "Sparsity/DistributedSparsityPattern.h"
 #include "Tests/Unit/Systems/BoundaryReductionSparseReadVector.h"
 
 #include <mpi.h>
@@ -1225,6 +1227,161 @@ TEST(SerialParallelFaceIntegralsMPI, DGPenaltyInteriorFaceAssemblyOnFourTetraCha
         EXPECT_LT(maxAbsDiff(ref_matrix, reverse_scatter), tol);
         EXPECT_LT(maxAbsDiff(owned_rows, reverse_scatter), tol);
     }
+}
+
+namespace {
+
+// A generated interface domain with one fragment (and its two volume
+// regions) on each listed cell of the four-tetrahedron chain.
+CutIntegrationContext makeFourTetraGeneratedInterfaceContext(
+    int marker,
+    const std::vector<GlobalIndex>& cells)
+{
+    interfaces::CutInterfaceDomainRequest request;
+    request.source = interfaces::LevelSetInterfaceSource::fromField(FieldId{0}, 0u, 1u);
+    request.interface_marker = marker;
+    request.quadrature_order = 0;
+    request.interface_quadrature_order = 0;
+    request.volume_quadrature_order = 0;
+    interfaces::LevelSetInterfaceDomain domain(request);
+    const auto normal = std::array<Real, 3>{{
+        Real{1.0} / std::sqrt(Real{3.0}),
+        Real{1.0} / std::sqrt(Real{3.0}),
+        Real{1.0} / std::sqrt(Real{3.0}),
+    }};
+    for (const auto cell : cells) {
+        const auto stable_base = 100u * static_cast<std::uint64_t>(cell + 1);
+        interfaces::CutInterfaceFragment fragment;
+        fragment.interface_marker = marker;
+        fragment.parent_cell = cell;
+        fragment.local_fragment_index = 0;
+        fragment.stable_id = stable_base;
+        fragment.kind = interfaces::CutInterfaceFragmentKind::Polygon;
+        fragment.measure = std::sqrt(Real{3.0}) / Real{8.0};
+        fragment.normal = normal;
+        interfaces::CutInterfaceQuadraturePoint qp;
+        qp.point = {{Real{1.0} / Real{6.0},
+                     Real{1.0} / Real{6.0},
+                     Real{1.0} / Real{6.0}}};
+        qp.parent_coordinate = qp.point;
+        qp.normal = normal;
+        qp.weight = fragment.measure;
+        fragment.quadrature_points.push_back(qp);
+        domain.addFragment(std::move(fragment));
+        for (const auto side : {geometry::CutIntegrationSide::Negative,
+                                geometry::CutIntegrationSide::Positive}) {
+            interfaces::CutInterfaceVolumeRegion region;
+            region.interface_marker = marker;
+            region.parent_cell = cell;
+            region.local_region_index =
+                side == geometry::CutIntegrationSide::Negative ? 0 : 1;
+            region.stable_id = stable_base + 1u +
+                static_cast<std::uint64_t>(region.local_region_index);
+            region.side = side;
+            region.measure = side == geometry::CutIntegrationSide::Negative
+                                 ? Real{0.05}
+                                 : Real{0.10};
+            region.parent_measure = Real{1.0} / Real{6.0};
+            region.volume_fraction = region.measure / region.parent_measure;
+            region.centroid = {{Real{0.1}, Real{0.1}, Real{0.1}}};
+            region.normal = normal;
+            domain.addVolumeRegion(std::move(region));
+        }
+    }
+    CutIntegrationContext context;
+    context.addGeneratedInterfaceDomain(domain);
+    return context;
+}
+
+// Owned rows of the operator's distributed pattern as
+// [row, n, diag cols..., m, off-diagonal cols...] with global column IDs.
+std::vector<GlobalIndex> ownedRowPattern(const systems::FESystem& system,
+                                         const systems::OperatorTag& op)
+{
+    std::vector<GlobalIndex> words;
+    const auto* pattern = system.distributedSparsityIfAvailable(op);
+    if (pattern == nullptr) {
+        return words;
+    }
+    const auto rows = pattern->ownedRows();
+    const auto cols = pattern->ownedCols();
+    for (GlobalIndex local = 0; local < rows.size(); ++local) {
+        words.push_back(rows.first + local);
+        const auto diag = pattern->getRowDiagCols(local);
+        words.push_back(static_cast<GlobalIndex>(diag.size()));
+        for (const auto col : diag) {
+            words.push_back(cols.first + col);
+        }
+        const auto off = pattern->getRowOffdiagCols(local);
+        std::vector<GlobalIndex> off_global;
+        off_global.reserve(off.size());
+        for (const auto col : off) {
+            off_global.push_back(pattern->ghostColToGlobal(col));
+        }
+        std::sort(off_global.begin(), off_global.end());
+        words.push_back(static_cast<GlobalIndex>(off_global.size()));
+        words.insert(words.end(), off_global.begin(), off_global.end());
+    }
+    return words;
+}
+
+} // namespace
+
+// The setup-time couplings of a generated interface rule are those of its
+// parent cell, added on every rank that stores the rule and sent to the row
+// owners.  When ghost cells carry no generated cut data (the production
+// restriction to <Generated_cut_ghost_layers>), the parent's owner still
+// adds them, so the distributed pattern of every owned row is unchanged:
+// here every rank keeps the rules of its owned cells only.
+TEST(SerialParallelFaceIntegralsMPI,
+     GeneratedInterfaceSparsityIsUnchangedWithoutGhostParentRules)
+{
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size < 2) {
+        GTEST_SKIP() << "Run with 2+ MPI ranks to enable this test";
+    }
+    constexpr int marker = 731;
+    const auto cell_owners = partitionFourCellsBlock(size);
+    std::vector<GlobalIndex> all_cells{0, 1, 2, 3};
+    std::vector<GlobalIndex> owned_cells;
+    for (GlobalIndex cell = 0; cell < 4; ++cell) {
+        if (cell_owners[static_cast<std::size_t>(cell)] == rank) {
+            owned_cells.push_back(cell);
+        }
+    }
+    ASSERT_FALSE(owned_cells.empty());
+
+    const auto pattern_with = [&](const std::vector<GlobalIndex>& rule_cells) {
+        auto mesh = std::make_shared<FourTetraChainFaceMeshAccess>(cell_owners, rank);
+        auto space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+        systems::FESystem system(mesh);
+        const auto u_field = system.addField(
+            systems::FieldSpec{.name = "u", .space = space, .components = 1});
+        system.addOperator("op");
+        const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+        const auto v = forms::FormExpr::testFunction(u_field, *space, "v");
+        (void)systems::installFormulation(system, "op", {u_field}, (u * v).dI(marker));
+        systems::SetupOptions options;
+        options.dof_options.global_numbering = dofs::GlobalNumberingMode::OwnerContiguous;
+        options.dof_options.ownership = dofs::OwnershipStrategy::CellOwner;
+        options.dof_options.my_rank = rank;
+        options.dof_options.world_size = size;
+        options.dof_options.mpi_comm = comm;
+        systems::SetupInputs inputs;
+        inputs.topology_override = buildFourTetraChainTopology(cell_owners, rank, size);
+        system.setup(options, inputs);
+        system.setCutIntegrationContext(std::make_shared<CutIntegrationContext>(
+            makeFourTetraGeneratedInterfaceContext(marker, rule_cells)));
+        system.setup(options, inputs);
+        return ownedRowPattern(system, "op");
+    };
+
+    const auto with_ghost_rules = pattern_with(all_cells);
+    const auto owned_rules_only = pattern_with(owned_cells);
+    EXPECT_FALSE(with_ghost_rules.empty());
+    EXPECT_EQ(with_ghost_rules, owned_rules_only);
 }
 
 } // namespace testing

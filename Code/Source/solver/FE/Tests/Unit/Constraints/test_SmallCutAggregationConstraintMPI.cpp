@@ -1536,10 +1536,13 @@ TEST(SmallCutAggregationConstraintMPI,
     EXPECT_EQ(cut_cell.active_face_neighbor_cell_gids,
               (std::vector<GlobalIndex>{1}));
 
+    // The retained-measure provider is the owner when the owner declared
+    // the cell (rank 1 for the root cell), else the lowest declaring rank
+    // (rank 1 for the cut cell, whose owner rank 0 has no rule for it).
     const auto& root_cell = finalized.active_cells[1];
     EXPECT_EQ(root_cell.cell_gid, 1);
     EXPECT_EQ(root_cell.owner_rank, 1);
-    EXPECT_EQ(root_cell.retained_measure_provider_rank, 0);
+    EXPECT_EQ(root_cell.retained_measure_provider_rank, 1);
     EXPECT_EQ(root_cell.kind,
               SmallCutAggregationActiveCellKind::FullActive);
     EXPECT_EQ(root_cell.active_feature_id, 0);

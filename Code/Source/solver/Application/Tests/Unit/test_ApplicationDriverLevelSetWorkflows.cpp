@@ -23590,6 +23590,73 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
 #endif
 }
 
+TEST(ApplicationDriverLevelSetWorkflows,
+     GeneratedCutGhostLayerRestrictionKeepsNearCellsInOrder)
+{
+  // Cells 0..5 at face layers 0, 3, 1, 2, 4 and unreachable.
+  const std::vector<int> layers{
+      0, 3, 1, 2, 4, std::numeric_limits<int>::max()};
+  svmp::FE::interfaces::CutInterfaceDomainRequest request;
+  request.interface_marker = 41;
+  const auto make_domain = [&] {
+    svmp::FE::interfaces::LevelSetInterfaceDomain domain(request);
+    for (svmp::FE::MeshIndex cell = 0; cell < 6; ++cell) {
+      svmp::FE::interfaces::CutInterfaceFragment fragment;
+      fragment.parent_cell = cell;
+      fragment.local_fragment_index = 0;
+      fragment.stable_id = 100u + static_cast<std::uint64_t>(cell);
+      domain.addFragment(fragment);
+      for (const auto side : {svmp::FE::geometry::CutIntegrationSide::Negative,
+                              svmp::FE::geometry::CutIntegrationSide::Positive}) {
+        svmp::FE::interfaces::CutInterfaceVolumeRegion region;
+        region.parent_cell = cell;
+        region.local_region_index =
+            side == svmp::FE::geometry::CutIntegrationSide::Negative ? 0 : 1;
+        region.side = side;
+        region.stable_id = 200u + 2u * static_cast<std::uint64_t>(cell) +
+                           static_cast<std::uint64_t>(region.local_region_index);
+        domain.addVolumeRegion(region);
+      }
+      svmp::FE::interfaces::GeneratedInterfaceSensitivityRecord record;
+      record.parent_cell = cell;
+      record.source_stable_id = 300u + static_cast<std::uint64_t>(cell);
+      domain.addSensitivityRecord(record);
+    }
+    return domain;
+  };
+  const auto parents = [](const auto& records) {
+    std::vector<svmp::FE::MeshIndex> cells;
+    for (const auto& record : records) {
+      cells.push_back(record.parent_cell);
+    }
+    return cells;
+  };
+
+  auto domain = make_domain();
+  const auto withheld = withholdGhostCutLayersBeyond(domain, layers, 2);
+  EXPECT_EQ(withheld.fragments, 3u);
+  EXPECT_EQ(withheld.regions, 6u);
+  EXPECT_EQ(withheld.sensitivity_records, 3u);
+  EXPECT_EQ(parents(domain.fragments()),
+            (std::vector<svmp::FE::MeshIndex>{0, 2, 3}));
+  EXPECT_EQ(parents(domain.volumeRegions()),
+            (std::vector<svmp::FE::MeshIndex>{0, 0, 2, 2, 3, 3}));
+  EXPECT_EQ(parents(domain.sensitivityRecords()),
+            (std::vector<svmp::FE::MeshIndex>{0, 2, 3}));
+  ASSERT_EQ(domain.fragments().size(), 3u);
+  EXPECT_EQ(domain.fragments()[1].stable_id, 102u);
+  EXPECT_EQ(domain.volumeRegions()[3].stable_id, 205u);
+  EXPECT_EQ(domain.sensitivityRecords()[2].source_stable_id, 303u);
+
+  // Keeping as many layers as the halo holds keeps every reachable cell;
+  // records of a cell outside every layer are always withheld.
+  auto wide = make_domain();
+  const auto withheld_wide = withholdGhostCutLayersBeyond(wide, layers, 12);
+  EXPECT_EQ(withheld_wide.fragments, 1u);
+  EXPECT_EQ(parents(wide.fragments()),
+            (std::vector<svmp::FE::MeshIndex>{0, 1, 2, 3, 4}));
+}
+
 } // namespace
 #else
 TEST(ApplicationDriverBoundPreservingCandidates,
