@@ -464,9 +464,6 @@ public:
     });
 
     channel::IncompressibleNavierStokesVMSOptions options;
-    options.symmetric_nitsche_energy_qualification_scope =
-        channel::SymmetricNitscheEnergyQualificationScope::
-            JointLowLevelPrerequisite;
     options.velocity_field_name = "u_native_channel";
     options.pressure_field_name = "p_native_channel";
     options.density = 1.0;
