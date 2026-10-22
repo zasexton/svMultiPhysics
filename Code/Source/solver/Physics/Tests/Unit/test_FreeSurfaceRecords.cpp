@@ -1,0 +1,448 @@
+/* Copyright (c) Stanford University, The Regents of the
+ * University of California, and others.
+ *
+ * All Rights Reserved.
+ *
+ * See License file.
+ */
+
+// Free-surface record tests that were FE system tests before the records
+// moved to the Navier-Stokes free-surface physics.
+
+#include <gtest/gtest.h>
+
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
+
+#include "FE/Core/FEException.h"
+#include "FE/Spaces/H1Space.h"
+#include "FE/Spaces/ProductSpace.h"
+#include "FE/Systems/FESystem.h"
+#include "FE/Systems/FreeSurfaceFunctionalRounding.h"
+#include "Mesh/Core/MeshBase.h"
+#include "Mesh/Mesh.h"
+#include "Mesh/Topology/CellShape.h"
+
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace free_surface = svmp::Physics::formulations::navier_stokes::free_surface;
+
+using svmp::CellFamily;
+using svmp::CellShape;
+using svmp::Mesh;
+using svmp::MeshBase;
+
+using svmp::FE::ElementType;
+using svmp::FE::Real;
+
+using svmp::FE::spaces::H1Space;
+using svmp::FE::spaces::ProductSpace;
+
+using svmp::FE::systems::FESystem;
+using svmp::FE::systems::FieldSourceKind;
+using svmp::FE::systems::FieldSpec;
+
+namespace {
+
+std::shared_ptr<Mesh> build_single_quad_mesh()
+{
+    auto base = std::make_shared<MeshBase>();
+
+    const std::vector<svmp::real_t> X_ref = {
+        0.0, 0.0,
+        1.0, 0.0,
+        1.0, 1.0,
+        0.0, 1.0
+    };
+    const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 4};
+    const std::vector<svmp::index_t> cell2vertex = {0, 1, 2, 3};
+
+    CellShape shape{};
+    shape.family = CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 1;
+    base->build_from_arrays(/*spatial_dim=*/2, X_ref, cell2vertex_offsets, cell2vertex, {shape});
+    base->finalize();
+
+    return svmp::create_mesh(std::move(base));
+}
+
+std::shared_ptr<Mesh> build_single_tetra_mesh()
+{
+    auto base = std::make_shared<MeshBase>();
+
+    const std::vector<svmp::real_t> X_ref = {
+        0.0, 0.0, 0.0,
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0
+    };
+    const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 4};
+    const std::vector<svmp::index_t> cell2vertex = {0, 1, 2, 3};
+
+    CellShape shape{};
+    shape.family = CellFamily::Tetra;
+    shape.num_corners = 4;
+    shape.order = 1;
+    base->build_from_arrays(/*spatial_dim=*/3, X_ref, cell2vertex_offsets, cell2vertex, {shape});
+    base->finalize();
+
+    return svmp::create_mesh(std::move(base));
+}
+
+Real recursiveSum(const std::vector<Real>& terms)
+{
+    Real sum{0.0};
+    for (const auto term : terms) {
+        sum += term;
+    }
+    return sum;
+}
+
+std::shared_ptr<svmp::Mesh> buildRoundingSingleQuadMesh()
+{
+    auto base = std::make_shared<svmp::MeshBase>();
+    const std::vector<svmp::real_t> coordinates = {
+        0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0};
+    const std::vector<svmp::offset_t> offsets = {0, 4};
+    const std::vector<svmp::index_t> vertices = {0, 1, 2, 3};
+    svmp::CellShape shape{};
+    shape.family = svmp::CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 1;
+    base->build_from_arrays(
+        /*spatial_dim=*/2, coordinates, offsets, vertices, {shape});
+    base->finalize();
+    return svmp::create_mesh(std::move(base));
+}
+
+bool fixedFiveHundredTwelveUlpNear(Real a, Real b)
+{
+    const Real scale = std::max({Real{1.0}, std::abs(a), std::abs(b)});
+    return std::abs(a - b) <=
+           Real{512.0} * std::numeric_limits<Real>::epsilon() * scale;
+}
+
+} // namespace
+
+TEST(FreeSurfaceRecords,
+     CompleteStaticConservativeBodyForceRequiresActiveVolumeEnergy)
+{
+    auto mesh = build_single_quad_mesh();
+    auto scalar_space =
+        std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    auto velocity_space =
+        std::make_shared<ProductSpace>(scalar_space, /*components=*/2);
+
+    FESystem sys(mesh);
+    const auto phi = sys.addField(
+        FieldSpec{.name = "phi_static_body_force_contract",
+                  .space = scalar_space,
+                  .components = 1});
+    const auto velocity = sys.addField(
+        FieldSpec{.name = "u_static_body_force_contract",
+                  .space = velocity_space,
+                  .components = 2});
+
+    svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration declaration{
+        .interface_marker = 91,
+        .level_set_field = phi,
+        .velocity_field = velocity,
+        .geometry_domain_id = "static_body_force_contract",
+        .parameters =
+            svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters{
+                .liquid_side =
+                    svmp::FE::geometry::CutIntegrationSide::Negative,
+                .surface_tension = 1.0,
+            },
+        .static_conservative_body_force_complete = true,
+        .owner_component = "FESystemTest.StaticBodyForceContract",
+    };
+
+    EXPECT_THROW(
+        free_surface::records(sys).declareFreeSurfaceDiscreteFunctional(declaration),
+        svmp::FE::InvalidArgumentException);
+    EXPECT_TRUE(free_surface::records(sys).freeSurfaceDiscreteFunctionalDeclarations().empty());
+
+    declaration.active_volume_energy_parameters =
+        svmp::FE::interfaces::FreeSurfaceActiveVolumeEnergyParameters{
+            .liquid_side =
+                svmp::FE::geometry::CutIntegrationSide::Negative,
+            .density = 1.0,
+        };
+    EXPECT_NO_THROW(free_surface::records(sys).declareFreeSurfaceDiscreteFunctional(declaration));
+    ASSERT_EQ(free_surface::records(sys).freeSurfaceDiscreteFunctionalDeclarations().size(), 1u);
+    EXPECT_TRUE(free_surface::records(sys).freeSurfaceDiscreteFunctionalDeclarations()
+                    .front()
+                    .static_conservative_body_force_complete);
+}
+
+TEST(FreeSurfaceRecords,
+     KinematicAreaGradientTractionRequiresPrescribedCurvatureAndPowerLedger)
+{
+    auto mesh = build_single_tetra_mesh();
+    auto scalar_space =
+        std::make_shared<H1Space>(ElementType::Tetra4, /*order=*/1);
+    auto velocity_space =
+        std::make_shared<ProductSpace>(scalar_space, /*components=*/3);
+    auto quadratic_scalar_space =
+        std::make_shared<H1Space>(ElementType::Tetra4, /*order=*/2);
+    auto quadratic_velocity_space =
+        std::make_shared<ProductSpace>(quadratic_scalar_space,
+                                       /*components=*/3);
+
+    FESystem sys(mesh);
+    const auto phi = sys.addField(
+        FieldSpec{.name = "phi_total_energy_contract",
+                  .space = scalar_space,
+                  .components = 1});
+    const auto prescribed_phi = sys.addField(
+        FieldSpec{.name = "phi_prescribed_total_energy_contract",
+                  .space = scalar_space,
+                  .components = 1,
+                  .source_kind = FieldSourceKind::PrescribedData});
+    const auto prescribed_curvature = sys.addField(
+        FieldSpec{.name = "kappa_total_energy_contract",
+                  .space = scalar_space,
+                  .components = 1,
+                  .source_kind = FieldSourceKind::PrescribedData});
+    const auto unknown_curvature = sys.addField(
+        FieldSpec{.name = "kappa_unknown_total_energy_contract",
+                  .space = scalar_space,
+                  .components = 1});
+    const auto incompatible_curvature = sys.addField(
+        FieldSpec{.name = "kappa_incompatible_total_energy_contract",
+                  .space = quadratic_scalar_space,
+                  .components = 1,
+                  .source_kind = FieldSourceKind::PrescribedData});
+    const auto velocity = sys.addField(
+        FieldSpec{.name = "u_total_energy_contract",
+                  .space = velocity_space,
+                  .components = 3});
+    const auto prescribed_velocity = sys.addField(
+        FieldSpec{.name = "u_prescribed_total_energy_contract",
+                  .space = velocity_space,
+                  .components = 3,
+                  .source_kind = FieldSourceKind::PrescribedData});
+    const auto incompatible_velocity = sys.addField(
+        FieldSpec{.name = "u_incompatible_total_energy_contract",
+                  .space = quadratic_velocity_space,
+                  .components = 3});
+
+    svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration declaration{
+        .interface_marker = 92,
+        .level_set_field = phi,
+        .curvature_field = prescribed_curvature,
+        .velocity_field = velocity,
+        .geometry_domain_id = "total_energy_contract",
+        .parameters =
+            svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters{
+                .liquid_side =
+                    svmp::FE::geometry::CutIntegrationSide::Negative,
+                .surface_tension = 1.0,
+            },
+        .endpoint_functional_power_enabled = true,
+        .capillary_balance_method =
+            svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod::
+                KinematicAreaGradientEnergyTraction,
+        .capillary_balance_qualification =
+            svmp::FE::systems::FreeSurfaceCapillaryBalanceQualification::
+                PrerequisiteOnly,
+        .owner_component = "FESystemTest.TotalEnergyTractionContract",
+    };
+
+    auto missing_power = declaration;
+    missing_power.endpoint_functional_power_enabled = false;
+    EXPECT_THROW(
+        free_surface::records(sys).declareFreeSurfaceDiscreteFunctional(missing_power),
+        svmp::FE::InvalidArgumentException);
+
+    auto aliased_level_set_and_curvature = declaration;
+    aliased_level_set_and_curvature.level_set_field = prescribed_phi;
+    aliased_level_set_and_curvature.curvature_field = prescribed_phi;
+    EXPECT_THROW(
+        free_surface::records(sys).declareFreeSurfaceDiscreteFunctional(
+            aliased_level_set_and_curvature),
+        svmp::FE::InvalidArgumentException);
+
+    auto unknown_source = declaration;
+    unknown_source.curvature_field = unknown_curvature;
+    EXPECT_THROW(
+        free_surface::records(sys).declareFreeSurfaceDiscreteFunctional(unknown_source),
+        svmp::FE::InvalidArgumentException);
+
+    auto incompatible_curvature_space = declaration;
+    incompatible_curvature_space.curvature_field = incompatible_curvature;
+    EXPECT_THROW(
+        free_surface::records(sys).declareFreeSurfaceDiscreteFunctional(
+            incompatible_curvature_space),
+        svmp::FE::InvalidArgumentException);
+
+    auto incompatible_velocity_space = declaration;
+    incompatible_velocity_space.velocity_field = incompatible_velocity;
+    EXPECT_THROW(
+        free_surface::records(sys).declareFreeSurfaceDiscreteFunctional(
+            incompatible_velocity_space),
+        svmp::FE::InvalidArgumentException);
+
+    auto prescribed_velocity_source = declaration;
+    prescribed_velocity_source.velocity_field = prescribed_velocity;
+    EXPECT_THROW(
+        free_surface::records(sys).declareFreeSurfaceDiscreteFunctional(
+            prescribed_velocity_source),
+        svmp::FE::InvalidArgumentException);
+
+    auto stationarity_with_curvature = declaration;
+    stationarity_with_curvature.capillary_balance_method =
+        svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod::
+            DiscreteEnergyVolumeStationarity;
+    EXPECT_THROW(
+        free_surface::records(sys).declareFreeSurfaceDiscreteFunctional(
+            stationarity_with_curvature),
+        svmp::FE::InvalidArgumentException);
+
+    ASSERT_NO_THROW(
+        free_surface::records(sys).declareFreeSurfaceDiscreteFunctional(declaration));
+    ASSERT_EQ(free_surface::records(sys).freeSurfaceDiscreteFunctionalDeclarations().size(), 1u);
+    EXPECT_EQ(free_surface::records(sys).freeSurfaceDiscreteFunctionalDeclarations()
+                  .front()
+                  .curvature_field,
+              prescribed_curvature);
+    EXPECT_TRUE(free_surface::records(sys).freeSurfaceDiscreteFunctionalDeclarations()
+                    .front()
+                    .endpoint_functional_power_enabled);
+}
+
+TEST(FreeSurfaceRecords,
+     AcceptedRecordAcceptsRegroupedLiquidVolumeAndRejectsInconsistency)
+{
+    using svmp::FE::ElementType;
+    using svmp::FE::geometry::CutIntegrationSide;
+    namespace interfaces = svmp::FE::interfaces;
+    namespace systems = svmp::FE::systems;
+
+    auto mesh = buildRoundingSingleQuadMesh();
+    auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Quad4, /*order=*/1);
+    auto velocity_space = std::make_shared<svmp::FE::spaces::ProductSpace>(
+        scalar_space, /*components=*/2);
+    systems::FESystem system(mesh);
+    const auto phi = system.addField(systems::FieldSpec{
+        .name = "phi_rounding_bound", .space = scalar_space, .components = 1});
+    const auto velocity = system.addField(systems::FieldSpec{
+        .name = "u_rounding_bound", .space = velocity_space, .components = 2});
+    ASSERT_NO_THROW(free_surface::records(system).declareFreeSurfaceDiscreteFunctional(
+        systems::FreeSurfaceDiscreteFunctionalDeclaration{
+            .interface_marker = 91,
+            .level_set_field = phi,
+            .velocity_field = velocity,
+            .geometry_domain_id = "rounding_bound",
+            .parameters =
+                interfaces::FreeSurfaceDiscreteFunctionalParameters{
+                    .liquid_side = CutIntegrationSide::Negative,
+                    .surface_tension = 1.0,
+                },
+            .active_volume_energy_parameters =
+                interfaces::FreeSurfaceActiveVolumeEnergyParameters{
+                    .liquid_side = CutIntegrationSide::Negative,
+                    .density = 1.0,
+                },
+            .owner_component = "FreeSurfaceFunctionalRounding.Record",
+        }));
+    ASSERT_NO_THROW(system.setup({}));
+
+    // 300000 equal weights, as on a uniform 3D mesh: the state sums them per
+    // four-point rule, the energy point by point.  The two sums differ by
+    // about 6.5e-12 relative, far above 512 ulp and below the derived bound.
+    constexpr std::size_t point_count = 300000u;
+    constexpr std::size_t points_per_rule = 4u;
+    const std::vector<Real> weights(point_count, Real{0.1});
+    const Real pointwise_volume = recursiveSum(weights);
+    Real rulewise_volume{0.0};
+    for (std::size_t begin = 0u; begin < point_count;
+         begin += points_per_rule) {
+        Real rule{0.0};
+        for (std::size_t i = begin; i < begin + points_per_rule; ++i) {
+            rule += weights[i];
+        }
+        rulewise_volume += rule;
+    }
+    ASSERT_FALSE(fixedFiveHundredTwelveUlpNear(pointwise_volume, rulewise_volume));
+
+    const interfaces::FreeSurfaceGeometryRevision revision{
+        .source_id = "field:" + std::to_string(phi),
+        .domain_id = "rounding_bound",
+        .interface_marker = 91,
+        .isovalue = 0.0,
+        .source_layout_revision = 3u,
+        .source_value_revision = 9u,
+        .mesh_geometry_revision = 4u,
+        .mesh_topology_revision = 5u,
+        .ownership_revision = 6u,
+        .numbering_revision = 7u,
+        .quadrature_policy_key = 8u,
+        .snapshot_revision_key = 101u,
+    };
+    const Real liquid_gas_area = 0.4;
+    const auto make_states = [&](Real energy_volume) {
+        interfaces::FreeSurfaceDiscreteFunctionalState state{
+            .snapshot_revision_key = 101u,
+            .liquid_side = CutIntegrationSide::Negative,
+            .surface_tension = 1.0,
+            .volume_multiplier = 0.0,
+            .owned_liquid_volume = rulewise_volume,
+            .owned_liquid_gas_area = liquid_gas_area,
+            .liquid_gas_surface_energy = Real{1.0} * liquid_gas_area,
+            .volume_constraint_potential = Real{0.0} * rulewise_volume,
+        };
+        state.total_potential = state.liquid_gas_surface_energy +
+                                state.young_wall_energy +
+                                state.volume_constraint_potential;
+        interfaces::FreeSurfaceActiveVolumeEnergyState energy{
+            .snapshot_revision_key = 101u,
+            .liquid_side = CutIntegrationSide::Negative,
+            .density = 1.0,
+            .owned_quadrature_point_count = point_count,
+            .owned_liquid_volume = energy_volume,
+        };
+        return std::vector<systems::AcceptedFreeSurfaceDiscreteFunctionalState>{
+            systems::AcceptedFreeSurfaceDiscreteFunctionalState{
+                .interface_marker = 91,
+                .geometry_revision = revision,
+                .cut_topology_revision = 102u,
+                .state = state,
+                .active_volume_energy = energy,
+            }};
+    };
+
+    EXPECT_NO_THROW(free_surface::records(system).recordAcceptedFreeSurfaceDiscreteFunctionals(
+        1u, 0.1, 0.1, 13u, 13u, make_states(pointwise_volume)));
+    ASSERT_EQ(free_surface::records(system).freeSurfaceDiscreteFunctionalHistory().size(), 1u);
+    EXPECT_EQ(free_surface::records(system).freeSurfaceDiscreteFunctionalHistory()
+                  .front()
+                  .active_volume_energy->owned_liquid_volume,
+              pointwise_volume);
+
+    for (const Real relative : {Real{1.0e-10}, Real{-1.0e-10}}) {
+        try {
+            free_surface::records(system).recordAcceptedFreeSurfaceDiscreteFunctionals(
+                2u,
+                0.2,
+                0.1,
+                14u,
+                14u,
+                make_states(pointwise_volume * (Real{1.0} + relative)));
+            ADD_FAILURE() << "a 1e-10 relative volume inconsistency was accepted";
+        } catch (const svmp::FE::InvalidArgumentException& error) {
+            EXPECT_NE(std::string(error.what()).find(
+                          "active-volume energy liquid measure is inconsistent"),
+                      std::string::npos)
+                << error.what();
+        }
+    }
+    EXPECT_EQ(free_surface::records(system).freeSurfaceDiscreteFunctionalHistory().size(), 1u);
+}

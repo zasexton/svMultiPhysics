@@ -62,6 +62,7 @@
 #include <utility>
 #include <vector>
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
 
 namespace {
 // Every small-cut aggregation prolongation report requested in this test
@@ -2724,7 +2725,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   functional_parameters.liquid_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   functional_parameters.surface_tension = 1.0;
-  system->declareFreeSurfaceDiscreteFunctional(
+  free_surface::records(*system).declareFreeSurfaceDiscreteFunctional(
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = interface_marker,
           .level_set_field = phi,
@@ -6945,7 +6946,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
             .dynamic_viscosity = svmp::FE::Real{0.4},
         });
   }
-  system->declareFreeSurfaceDiscreteFunctional(
+  free_surface::records(*system).declareFreeSurfaceDiscreteFunctional(
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = 721,
           .level_set_field = phi,
@@ -7564,7 +7565,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       accepted_state_revision,
       contact_stages));
   const auto functional_history =
-      sim.fe_system->freeSurfaceDiscreteFunctionalHistory();
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalHistory();
   ASSERT_EQ(functional_history.size(), 1u);
   const auto& functional_record = functional_history.front();
   EXPECT_EQ(functional_record.accepted_step, 2u);
@@ -9392,7 +9393,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   functional_parameters.liquid_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   functional_parameters.surface_tension = 0.5;
-  system->declareFreeSurfaceDiscreteFunctional(
+  free_surface::records(*system).declareFreeSurfaceDiscreteFunctional(
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = interface_marker,
           .level_set_field = phi,

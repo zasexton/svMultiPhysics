@@ -9,6 +9,7 @@
 #include "Parameters.h"
 #include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesRegister.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
 
 #include <algorithm>
 #include <array>
@@ -20,6 +21,8 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
+namespace free_surface = svmp::Physics::formulations::navier_stokes::free_surface;
 
 namespace {
 
@@ -891,8 +894,8 @@ TEST(EquationTranslatorFreeSurface,
   EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());
   EXPECT_TRUE(system.meshTangentialBoundaryPolicyHistory().empty());
   EXPECT_TRUE(
-      system.freeSurfaceDiscreteFunctionalDeclarations().empty());
-  EXPECT_TRUE(system.freeSurfaceDiscreteFunctionalHistory().empty());
+      free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations().empty());
+  EXPECT_TRUE(free_surface::records(system).freeSurfaceDiscreteFunctionalHistory().empty());
 
   EXPECT_FALSE(system.hasGaugeRegistry());
   EXPECT_EQ(system.gaugeRegistryIfPresent(), nullptr);

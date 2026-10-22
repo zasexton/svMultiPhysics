@@ -25,6 +25,7 @@
 #include "FE/Spaces/FunctionSpace.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/ProductSpace.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
 
 #include <algorithm>
 #include <array>
@@ -139,7 +140,7 @@ evaluateCurrentFreeSurfaceDiscreteFunctionals(
     const FreeSurfaceSystemHandle& sim)
 {
   const auto declarations =
-      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
   const auto comm = activeFESystemCommunicator(*sim.fe_system);
   const auto local_declaration_count =
       static_cast<double>(declarations.size());
@@ -389,7 +390,7 @@ void attachAcceptedFreeSurfaceEndpointFunctionalPowers(
         accepted_states)
 {
   const auto declarations =
-      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
   const auto comm = activeFESystemCommunicator(*sim.fe_system);
   const auto declared_count = std::count_if(
       declarations.begin(), declarations.end(), [](const auto& declaration) {
@@ -524,7 +525,7 @@ void attachAcceptedFreeSurfaceActiveVolumeEnergies(
         accepted_states)
 {
   const auto declarations =
-      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
   const auto comm = activeFESystemCommunicator(*sim.fe_system);
   const auto local_state_coverage =
       accepted_states.size() == declarations.size() ? 1.0 : 0.0;
@@ -698,7 +699,7 @@ void attachAcceptedFreeSurfaceActiveVolumeDissipation(
         accepted_states)
 {
   const auto declarations =
-      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
   const auto comm = activeFESystemCommunicator(*sim.fe_system);
   const auto declared_count = std::count_if(
       declarations.begin(), declarations.end(), [](const auto& declaration) {
@@ -814,7 +815,7 @@ void attachAcceptedFreeSurfaceExternalPressurePowers(
         accepted_states)
 {
   const auto declarations =
-      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
   const auto comm = activeFESystemCommunicator(*sim.fe_system);
   const auto declared_count = std::count_if(
       declarations.begin(), declarations.end(), [](const auto& declaration) {
@@ -962,7 +963,7 @@ void attachAcceptedFreeSurfaceBackwardEulerKineticWork(
         accepted_states)
 {
   const auto declarations =
-      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
   const auto comm = activeFESystemCommunicator(*sim.fe_system);
   const auto local_previous_present =
       previous_solution.empty() ? 0.0 : 1.0;
@@ -1247,7 +1248,7 @@ levelSetMaintenanceFunctionalValues(
       svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
       enriched_states(states.begin(), states.end());
   const auto declarations =
-      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
   const bool solution_channel_declared = std::any_of(
       declarations.begin(),
       declarations.end(),
@@ -1480,7 +1481,7 @@ recordAcceptedFreeSurfaceDiscreteFunctionals(
     *backward_euler_kinetic_work_bound = true;
   }
   const auto declarations =
-      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
   const auto comm = activeFESystemCommunicator(*sim.fe_system);
   const auto coverage =
       requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
@@ -1553,7 +1554,7 @@ recordAcceptedFreeSurfaceDiscreteFunctionals(
   attachAcceptedFreeSurfaceExternalPressurePowers(
       sim, accepted_solution, accepted_states);
   const auto existing_history =
-      sim.fe_system->freeSurfaceDiscreteFunctionalHistory();
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalHistory();
   attachAcceptedFreeSurfaceBackwardEulerKineticWork(
       sim,
       backward_euler_previous_solution,
@@ -1792,16 +1793,15 @@ recordAcceptedFreeSurfaceDiscreteFunctionals(
             previous.contact_line_kinematics;
       } else if (accepted_step > latest.accepted_step) {
         accepted.contact_line_kinematics =
-            svmp::FE::systems::
-                deriveFreeSurfaceAcceptedContactLineKinematics(
-                    previous,
-                    accepted_step,
-                    *accepted.contact_stage);
+            deriveFreeSurfaceAcceptedContactLineKinematics(
+                previous,
+                accepted_step,
+                *accepted.contact_stage);
       }
     }
   }
 
-  sim.fe_system->recordAcceptedFreeSurfaceDiscreteFunctionals(
+  free_surface::records(*sim.fe_system).recordAcceptedFreeSurfaceDiscreteFunctionals(
       accepted_step,
       accepted_time,
       dt,

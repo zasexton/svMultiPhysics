@@ -11,6 +11,7 @@
 #include "FE/Core/RankLog.h"
 #include "FE/LevelSet/LevelSetConservativePhaseWorkflow.h"
 #include "FE/Systems/SystemState.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
 
 #include <algorithm>
 #include <array>
@@ -33,11 +34,11 @@ using svmp::FE::rank_log::oopCout;
 EnergyParticipant::EnergyParticipant(const FreeSurfaceStepContext& context)
     : FreeSurfaceStepContext(context),
       free_surface_boundary_energy_declaration(
-          context.sim.fe_system
-              ->freeSurfaceExternalBoundaryEnergyDeclaration())
+          free_surface::records(*context.sim.fe_system)
+              .freeSurfaceExternalBoundaryEnergyDeclaration())
 {
   free_surface_declarations =
-      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
   free_surface_acceptance_coverage =
       requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
           free_surface_declarations,
@@ -47,7 +48,7 @@ EnergyParticipant::EnergyParticipant(const FreeSurfaceStepContext& context)
   has_dynamic_contact_stage =
       free_surface_acceptance_coverage.has_dynamic_contact;
   free_surface_residual_work_declarations =
-      sim.fe_system->freeSurfaceResidualWorkDeclarations();
+      free_surface::records(*sim.fe_system).freeSurfaceResidualWorkDeclarations();
   const auto [minimum_residual_work_declaration_count,
               maximum_residual_work_declaration_count] =
       globalMinMaxUint64(
@@ -625,8 +626,8 @@ void EnergyParticipant::recordAcceptedStepMaintenanceAccount(
           account);
       if (account.post_transport.has_value()) {
         const auto history =
-            sim.fe_system
-                ->freeSurfaceDiscreteFunctionalHistory();
+            free_surface::records(*sim.fe_system)
+                .freeSurfaceDiscreteFunctionalHistory();
         const auto declaration_count =
             free_surface_declarations.size();
         if (declaration_count == 0u ||
@@ -1212,7 +1213,7 @@ void EnergyParticipant::publishAcceptedEnergy(
     FreeSurfaceAggregationEnergyClassification
         aggregation_energy;
     const auto functional_history =
-        sim.fe_system->freeSurfaceDiscreteFunctionalHistory();
+        free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalHistory();
     const auto declaration_count =
         free_surface_declarations.size();
     const bool functional_history_aligned =
@@ -1754,7 +1755,7 @@ void EnergyParticipant::recordRejectedAttempt(
   if (complete_free_surface_energy_connector_available &&
       free_surface_energy_history_contiguous) {
     const auto functional_history =
-        sim.fe_system->freeSurfaceDiscreteFunctionalHistory();
+        free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalHistory();
     const auto declaration_count =
         free_surface_declarations.size();
     if (h.stepIndex() < 0 || declaration_count == 0u ||

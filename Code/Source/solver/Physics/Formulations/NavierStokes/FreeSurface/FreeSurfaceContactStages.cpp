@@ -13,6 +13,7 @@
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Assembly/GlobalSystemView.h"
 #include "FE/Geometry/CutQuadrature.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
 
 #include <algorithm>
 #include <array>
@@ -898,7 +899,7 @@ evaluateAcceptedFreeSurfaceContactStages(
 {
   const auto comm = activeFESystemCommunicator(*sim.fe_system);
   const auto declarations =
-      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
   const auto dynamic_count = static_cast<std::size_t>(std::count_if(
       declarations.begin(),
       declarations.end(),
@@ -1586,7 +1587,7 @@ captureAcceptedContactStageWallConstraints(
 {
   std::vector<svmp::FE::level_set::LevelSetWallContactConstraint> captured;
   const auto declarations =
-      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
   const auto comm = activeFESystemCommunicator(*sim.fe_system);
   const auto* context = sim.fe_system->cutIntegrationContext();
   if (globalMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {

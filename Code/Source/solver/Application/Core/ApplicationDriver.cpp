@@ -82,6 +82,7 @@
 #include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageParticipant.h"
 #include "Parameters.h"
 #include "tinyxml2.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
 
 #include <algorithm>
 #include <array>
@@ -156,6 +157,7 @@ namespace {
 
 namespace static_capillary =
     svmp::Physics::formulations::navier_stokes::static_capillary;
+namespace free_surface = svmp::Physics::formulations::navier_stokes::free_surface;
 
 using Clock = std::chrono::steady_clock;
 using application::core::ActiveCutVolumeRequest;
@@ -6520,7 +6522,7 @@ resolveLevelSetWallAwareMaintenanceContext(
 {
   LevelSetWallAwareMaintenanceContext resolved;
   const auto declarations =
-      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
   const auto comm = activeFESystemCommunicator(*sim.fe_system);
   std::uint64_t declaration_signature = 1469598103934665603ull;
   const auto mix_declaration_value = [&declaration_signature](
@@ -8566,7 +8568,7 @@ std::vector<std::string> buildLevelSetVolumeCorrectionFreeSurfaceWorkLogs(
     return logs;
   }
   const auto declarations =
-      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
   const auto local_declaration_count =
       static_cast<double>(declarations.size());
   const auto local_before_count = static_cast<double>(before.size());
@@ -9487,7 +9489,7 @@ bool requiresQuadraticTotalEnergyTractionInterfaceRules(
   const auto curvature_field =
       system.findFieldByName(request.configuration->curvature_field_name);
   const auto declarations =
-      system.freeSurfaceDiscreteFunctionalDeclarations();
+      free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations();
   return std::any_of(
       declarations.begin(),
       declarations.end(),
@@ -9505,7 +9507,7 @@ void bindKinematicAreaGradientTractionMaintenance(
     std::vector<LevelSetMaintenanceRequest>& requests)
 {
   const auto declarations =
-      system.freeSurfaceDiscreteFunctionalDeclarations();
+      free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations();
   const auto comm = activeFESystemCommunicator(system);
   const auto [minimum_declaration_count, maximum_declaration_count] =
       globalMinMaxUint64(
@@ -16125,7 +16127,7 @@ buildAcceptedFreeSurfaceContactStageCandidate(
           !dynamicContactStageProvenanceMatches(
               observation,
               sim.fe_system->meshAccess(),
-              sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations())) {
+              free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations())) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Exact generalized-alpha "
             "operator-stage base-mesh or contact-wall snapshot is stale "
@@ -16134,7 +16136,7 @@ buildAcceptedFreeSurfaceContactStageCandidate(
       }
       overlayDynamicContactOperatorStageState(
           *sim.fe_system,
-          sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations(),
+          free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations(),
           observation.operator_stage_state,
           contact_stage.stage_solution);
     }
@@ -17511,7 +17513,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
   }
 
   const auto declarations =
-      system.freeSurfaceDiscreteFunctionalDeclarations();
+      free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations();
   const bool local_declaration_matches =
       declarations.size() == 1u &&
       declarations.front().interface_marker == *marker &&
@@ -19147,7 +19149,7 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       steady_accepted_extension_maps);
   const auto steady_free_surface_coverage =
       requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
-          sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations(),
+          free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations(),
           activeFESystemCommunicator(*sim.fe_system));
   if (steady_free_surface_coverage.has_functional) {
     const auto steady_comm =

@@ -281,11 +281,6 @@ struct FreeSurfaceDiscreteFunctionalHistoryRecord {
         contact_line_kinematics{};
 };
 
-[[nodiscard]] std::vector<FreeSurfaceAcceptedContactLineKinematics>
-deriveFreeSurfaceAcceptedContactLineKinematics(
-    const FreeSurfaceDiscreteFunctionalHistoryRecord& previous,
-    std::uint64_t accepted_step,
-    const FreeSurfaceAcceptedContactStageState& current);
 
 } // namespace systems
 } // namespace FE

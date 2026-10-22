@@ -46,6 +46,7 @@
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #  include "Mesh/Fields/MeshFields.h"
@@ -110,13 +111,13 @@ void validateFreeSurfaceDiscreteFunctionalPreflight(
     if (!has_pending_declaration) {
         return;
     }
-    if (!system.freeSurfaceDiscreteFunctionalHistory().empty()) {
+    if (!free_surface::records(system).freeSurfaceDiscreteFunctionalHistory().empty()) {
         throw std::invalid_argument(
             "IncompressibleNavierStokesVMSModule: free-surface discrete-functional declarations cannot be installed after accepted history has begun");
     }
 
     const auto existing =
-        system.freeSurfaceDiscreteFunctionalDeclarations();
+        free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations();
     for (const auto& boundary : free_surfaces) {
         if (!shouldDeclareFreeSurfaceDiscreteFunctional(boundary)) {
             continue;
@@ -246,7 +247,7 @@ void declareFreeSurfaceDiscreteFunctionals(
                     bc.curvature_field_name + "'");
             }
         }
-        system.declareFreeSurfaceDiscreteFunctional(
+        free_surface::records(system).declareFreeSurfaceDiscreteFunctional(
             FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
                 .interface_marker = bc.interface_marker,
                 .level_set_field = resolveLevelSetFieldId(bc, system),
@@ -337,7 +338,7 @@ void declareFreeSurfaceExternalBoundaryEnergy(
         options.pressure_outflow.empty() &&
         options.coupled_outflow_rcr.empty() &&
         options.coupled_outflow_rcrcr.empty();
-    system.declareFreeSurfaceExternalBoundaryEnergy(
+    free_surface::records(system).declareFreeSurfaceExternalBoundaryEnergy(
         FE::systems::
             FreeSurfaceExternalBoundaryEnergyDeclaration{
                 .imposed_traction =

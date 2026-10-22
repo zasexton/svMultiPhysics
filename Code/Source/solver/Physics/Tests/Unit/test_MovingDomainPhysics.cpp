@@ -62,6 +62,9 @@
 #include <variant>
 #include <vector>
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
+
+namespace free_surface = svmp::Physics::formulations::navier_stokes::free_surface;
 
 namespace {
 // Every small-cut aggregation prolongation report requested in this test
@@ -1576,7 +1579,7 @@ void expectInvalidPreinstalledContactGeometryRejectedBeforeMutation(
     const auto field_count = system.fieldMap().numFields();
     const auto formulation_count = system.formulationRecords().size();
     const auto functional_count =
-        system.freeSurfaceDiscreteFunctionalDeclarations().size();
+        free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations().size();
     const auto policy_count =
         system.meshTangentialBoundaryPolicies().size();
     ASSERT_FALSE(
@@ -1601,7 +1604,7 @@ void expectInvalidPreinstalledContactGeometryRejectedBeforeMutation(
     EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
     EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
     EXPECT_EQ(system.formulationRecords().size(), formulation_count);
-    EXPECT_EQ(system.freeSurfaceDiscreteFunctionalDeclarations().size(),
+    EXPECT_EQ(free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations().size(),
               functional_count);
     EXPECT_EQ(system.meshTangentialBoundaryPolicies().size(), policy_count);
     EXPECT_FALSE(
@@ -1837,8 +1840,8 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
         out.pressure_field = pressure;
         out.level_set_field = phi;
         out.discrete_functional_declarations.assign(
-            system.freeSurfaceDiscreteFunctionalDeclarations().begin(),
-            system.freeSurfaceDiscreteFunctionalDeclarations().end());
+            free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations().begin(),
+            free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations().end());
         return out;
     }
     const int contact_marker =
@@ -1909,8 +1912,8 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
     out.pressure_offset = system.fieldDofOffset(pressure);
     out.pressure_dofs = system.fieldDofHandler(pressure).getNumDofs();
     out.discrete_functional_declarations.assign(
-        system.freeSurfaceDiscreteFunctionalDeclarations().begin(),
-        system.freeSurfaceDiscreteFunctionalDeclarations().end());
+        free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations().begin(),
+        free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations().end());
     out.solution.assign(static_cast<std::size_t>(out.total_dofs), 0.0);
 
     const std::array<FE::Real, 3> scaled_level_set_gradient{
@@ -6589,9 +6592,9 @@ TEST(MovingDomainPhysics,
     first.owner_component =
         "MovingDomainPhysics.FirstBulkOwnerFixture";
     ASSERT_NO_THROW(
-        system.declareFreeSurfaceDiscreteFunctional(std::move(first)));
+        free_surface::records(system).declareFreeSurfaceDiscreteFunctional(std::move(first)));
     ASSERT_EQ(
-        system.freeSurfaceDiscreteFunctionalDeclarations().size(), 1u);
+        free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations().size(), 1u);
 
     FE::systems::FreeSurfaceDiscreteFunctionalDeclaration duplicate;
     duplicate.interface_marker = 192;
@@ -6607,7 +6610,7 @@ TEST(MovingDomainPhysics,
     duplicate.owner_component =
         "MovingDomainPhysics.SecondBulkOwnerFixture";
     try {
-        system.declareFreeSurfaceDiscreteFunctional(
+        free_surface::records(system).declareFreeSurfaceDiscreteFunctional(
             std::move(duplicate));
         FAIL() << "Expected duplicate active-volume ownership to fail";
     } catch (const FE::InvalidArgumentException& error) {
@@ -6618,9 +6621,9 @@ TEST(MovingDomainPhysics,
             << error.what();
     }
     ASSERT_EQ(
-        system.freeSurfaceDiscreteFunctionalDeclarations().size(), 1u);
+        free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations().size(), 1u);
     EXPECT_EQ(
-        system.freeSurfaceDiscreteFunctionalDeclarations()
+        free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations()
             .front()
             .interface_marker,
         191);
@@ -6631,12 +6634,12 @@ TEST(MovingDomainPhysics,
     surface_only.geometry_domain_id = "surface_only_domain";
     surface_only.owner_component =
         "MovingDomainPhysics.SurfaceOnlyFixture";
-    ASSERT_NO_THROW(system.declareFreeSurfaceDiscreteFunctional(
+    ASSERT_NO_THROW(free_surface::records(system).declareFreeSurfaceDiscreteFunctional(
         std::move(surface_only)));
     ASSERT_EQ(
-        system.freeSurfaceDiscreteFunctionalDeclarations().size(), 2u);
+        free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations().size(), 2u);
     EXPECT_EQ(
-        system.freeSurfaceDiscreteFunctionalDeclarations()[1]
+        free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations()[1]
             .interface_marker,
         193);
 }
@@ -6703,19 +6706,19 @@ TEST(MovingDomainPhysics,
         FE::systems::FreeSurfaceCapillaryBalanceQualification::
             Unselected;
     EXPECT_THROW(
-        system.declareFreeSurfaceDiscreteFunctional(
+        free_surface::records(system).declareFreeSurfaceDiscreteFunctional(
             std::move(mismatched_balance_declaration)),
         FE::InvalidArgumentException);
     auto premature_balance_declaration = declaration;
     premature_balance_declaration.capillary_balance_qualification =
         FE::systems::FreeSurfaceCapillaryBalanceQualification::Qualified;
     EXPECT_THROW(
-        system.declareFreeSurfaceDiscreteFunctional(
+        free_surface::records(system).declareFreeSurfaceDiscreteFunctional(
             std::move(premature_balance_declaration)),
         FE::InvalidArgumentException);
     EXPECT_TRUE(
-        system.freeSurfaceDiscreteFunctionalDeclarations().empty());
-    ASSERT_NO_THROW(system.declareFreeSurfaceDiscreteFunctional(declaration));
+        free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations().empty());
+    ASSERT_NO_THROW(free_surface::records(system).declareFreeSurfaceDiscreteFunctional(declaration));
     ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
 
     constexpr FE::Real liquid_volume = FE::Real{0.25};
@@ -6771,14 +6774,14 @@ TEST(MovingDomainPhysics,
                 .state = functional_state,
             }};
 
-    ASSERT_NO_THROW(system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+    ASSERT_NO_THROW(free_surface::records(system).recordAcceptedFreeSurfaceDiscreteFunctionals(
         7u,
         FE::Real{0.35},
         FE::Real{0.05},
         13u,
         13u,
         accepted_states));
-    auto history = system.freeSurfaceDiscreteFunctionalHistory();
+    auto history = free_surface::records(system).freeSurfaceDiscreteFunctionalHistory();
     ASSERT_EQ(history.size(), 1u);
     EXPECT_EQ(history.front().accepted_step, 7u);
     EXPECT_DOUBLE_EQ(history.front().accepted_time, FE::Real{0.35});
@@ -6800,16 +6803,16 @@ TEST(MovingDomainPhysics,
         FE::systems::FreeSurfaceCapillaryBalanceQualification::
             PrerequisiteOnly);
 
-    ASSERT_NO_THROW(system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+    ASSERT_NO_THROW(free_surface::records(system).recordAcceptedFreeSurfaceDiscreteFunctionals(
         7u,
         FE::Real{0.35},
         FE::Real{0.05},
         13u,
         13u,
         accepted_states));
-    EXPECT_EQ(system.freeSurfaceDiscreteFunctionalHistory().size(), 1u);
+    EXPECT_EQ(free_surface::records(system).freeSurfaceDiscreteFunctionalHistory().size(), 1u);
     EXPECT_THROW(
-        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+        free_surface::records(system).recordAcceptedFreeSurfaceDiscreteFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -6821,7 +6824,7 @@ TEST(MovingDomainPhysics,
     auto mismatched_snapshot_states = accepted_states;
     mismatched_snapshot_states.front().state.snapshot_revision_key = 102u;
     EXPECT_THROW(
-        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+        free_surface::records(system).recordAcceptedFreeSurfaceDiscreteFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -6829,12 +6832,12 @@ TEST(MovingDomainPhysics,
             13u,
             mismatched_snapshot_states),
         FE::InvalidArgumentException);
-    EXPECT_EQ(system.freeSurfaceDiscreteFunctionalHistory().size(), 1u);
+    EXPECT_EQ(free_surface::records(system).freeSurfaceDiscreteFunctionalHistory().size(), 1u);
     RecordProperty("functional_snapshot_mismatch_rejected", 1);
     auto conflicting_states = accepted_states;
     conflicting_states.front().geometry_revision.source_value_revision = 10u;
     EXPECT_THROW(
-        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+        free_surface::records(system).recordAcceptedFreeSurfaceDiscreteFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -6842,7 +6845,7 @@ TEST(MovingDomainPhysics,
             13u,
             conflicting_states),
         FE::InvalidArgumentException);
-    ASSERT_NO_THROW(system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+    ASSERT_NO_THROW(free_surface::records(system).recordAcceptedFreeSurfaceDiscreteFunctionals(
         8u,
         FE::Real{0.40},
         FE::Real{0.05},
@@ -6850,18 +6853,18 @@ TEST(MovingDomainPhysics,
         14u,
         accepted_states,
         103u));
-    EXPECT_EQ(system.freeSurfaceDiscreteFunctionalHistory().size(), 2u);
+    EXPECT_EQ(free_surface::records(system).freeSurfaceDiscreteFunctionalHistory().size(), 2u);
     ASSERT_TRUE(
-        system.freeSurfaceDiscreteFunctionalHistory()
+        free_surface::records(system).freeSurfaceDiscreteFunctionalHistory()
             .back()
             .extension_map_revision.has_value());
     EXPECT_EQ(
-        *system.freeSurfaceDiscreteFunctionalHistory()
+        *free_surface::records(system).freeSurfaceDiscreteFunctionalHistory()
              .back()
              .extension_map_revision,
         103u);
     EXPECT_THROW(
-        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+        free_surface::records(system).recordAcceptedFreeSurfaceDiscreteFunctionals(
             6u,
             FE::Real{0.30},
             FE::Real{0.05},
@@ -6870,7 +6873,7 @@ TEST(MovingDomainPhysics,
             accepted_states),
         FE::InvalidArgumentException);
     EXPECT_THROW(
-        system.declareFreeSurfaceDiscreteFunctional(declaration),
+        free_surface::records(system).declareFreeSurfaceDiscreteFunctional(declaration),
         FE::InvalidArgumentException);
 }
 
@@ -6936,7 +6939,7 @@ TEST(MovingDomainPhysics,
     auto incomplete_parameters = parameters;
     incomplete_parameters.young_wall_coefficients.clear();
     EXPECT_THROW(
-        system.declareFreeSurfaceDiscreteFunctional(
+        free_surface::records(system).declareFreeSurfaceDiscreteFunctional(
             FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
                 .interface_marker = interface_marker,
                 .level_set_field = phi,
@@ -6949,7 +6952,7 @@ TEST(MovingDomainPhysics,
             }),
         FE::InvalidArgumentException);
     EXPECT_THROW(
-        system.declareFreeSurfaceDiscreteFunctional(
+        free_surface::records(system).declareFreeSurfaceDiscreteFunctional(
             FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
                 .interface_marker = interface_marker,
                 .level_set_field = phi,
@@ -6960,7 +6963,7 @@ TEST(MovingDomainPhysics,
                     "MovingDomainPhysics.MissingVelocityFixture",
             }),
         FE::InvalidArgumentException);
-    ASSERT_NO_THROW(system.declareFreeSurfaceDiscreteFunctional(
+    ASSERT_NO_THROW(free_surface::records(system).declareFreeSurfaceDiscreteFunctional(
         FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
             .interface_marker = interface_marker,
             .level_set_field = phi,
@@ -7075,14 +7078,14 @@ TEST(MovingDomainPhysics,
                         .state = contact_state,
                     },
             }};
-    ASSERT_NO_THROW(system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+    ASSERT_NO_THROW(free_surface::records(system).recordAcceptedFreeSurfaceDiscreteFunctionals(
         7u,
         FE::Real{0.35},
         FE::Real{0.05},
         13u,
         13u,
         accepted_states));
-    const auto history = system.freeSurfaceDiscreteFunctionalHistory();
+    const auto history = free_surface::records(system).freeSurfaceDiscreteFunctionalHistory();
     ASSERT_EQ(history.size(), 1u);
     EXPECT_EQ(
         history.front().pre_maintenance_endpoint_state_revision, 13u);
@@ -7129,7 +7132,7 @@ TEST(MovingDomainPhysics,
         stage.state.walls.front().mean_contact_line_tangent[1],
         FE::Real{-1.0},
         1.0e-14);
-    ASSERT_NO_THROW(system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+    ASSERT_NO_THROW(free_surface::records(system).recordAcceptedFreeSurfaceDiscreteFunctionals(
         7u,
         FE::Real{0.35},
         FE::Real{0.05},
@@ -7142,7 +7145,7 @@ TEST(MovingDomainPhysics,
         .contact_stage->first_order_generalized_alpha->dt = std::nextafter(
             FE::Real{0.05}, FE::Real{0.10});
     EXPECT_THROW(
-        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+        free_surface::records(system).recordAcceptedFreeSurfaceDiscreteFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -7150,13 +7153,13 @@ TEST(MovingDomainPhysics,
             13u,
             generalized_alpha_replay_mismatch),
         FE::InvalidArgumentException);
-    EXPECT_EQ(system.freeSurfaceDiscreteFunctionalHistory().size(), 1u);
+    EXPECT_EQ(free_surface::records(system).freeSurfaceDiscreteFunctionalHistory().size(), 1u);
 
     auto generalized_alpha_replay_drop = accepted_states;
     generalized_alpha_replay_drop.front()
         .contact_stage->first_order_generalized_alpha.reset();
     EXPECT_THROW(
-        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+        free_surface::records(system).recordAcceptedFreeSurfaceDiscreteFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -7164,10 +7167,10 @@ TEST(MovingDomainPhysics,
             13u,
             generalized_alpha_replay_drop),
         FE::InvalidArgumentException);
-    EXPECT_EQ(system.freeSurfaceDiscreteFunctionalHistory().size(), 1u);
+    EXPECT_EQ(free_surface::records(system).freeSurfaceDiscreteFunctionalHistory().size(), 1u);
 
     EXPECT_THROW(
-        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+        free_surface::records(system).recordAcceptedFreeSurfaceDiscreteFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -7175,12 +7178,12 @@ TEST(MovingDomainPhysics,
             13u,
             accepted_states),
         FE::InvalidArgumentException);
-    EXPECT_EQ(system.freeSurfaceDiscreteFunctionalHistory().size(), 1u);
+    EXPECT_EQ(free_surface::records(system).freeSurfaceDiscreteFunctionalHistory().size(), 1u);
 
     auto endpoint_mismatch = accepted_states;
     endpoint_mismatch.front().contact_stage->endpoint_state_revision = 14u;
     EXPECT_THROW(
-        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+        free_surface::records(system).recordAcceptedFreeSurfaceDiscreteFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -7188,13 +7191,13 @@ TEST(MovingDomainPhysics,
             13u,
             endpoint_mismatch),
         FE::InvalidArgumentException);
-    EXPECT_EQ(system.freeSurfaceDiscreteFunctionalHistory().size(), 1u);
+    EXPECT_EQ(free_surface::records(system).freeSurfaceDiscreteFunctionalHistory().size(), 1u);
 
     auto conflicting_replay = accepted_states;
     conflicting_replay.front().contact_stage->endpoint_state_revision =
         14u;
     EXPECT_THROW(
-        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+        free_surface::records(system).recordAcceptedFreeSurfaceDiscreteFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -7202,12 +7205,12 @@ TEST(MovingDomainPhysics,
             13u,
             conflicting_replay),
         FE::InvalidArgumentException);
-    EXPECT_EQ(system.freeSurfaceDiscreteFunctionalHistory().size(), 1u);
+    EXPECT_EQ(free_surface::records(system).freeSurfaceDiscreteFunctionalHistory().size(), 1u);
 
     auto invalid = accepted_states;
     invalid.front().contact_stage->state.snapshot_revision_key = 103u;
     EXPECT_THROW(
-        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+        free_surface::records(system).recordAcceptedFreeSurfaceDiscreteFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -7215,12 +7218,12 @@ TEST(MovingDomainPhysics,
             13u,
             invalid),
         FE::InvalidArgumentException);
-    EXPECT_EQ(system.freeSurfaceDiscreteFunctionalHistory().size(), 1u);
+    EXPECT_EQ(free_surface::records(system).freeSurfaceDiscreteFunctionalHistory().size(), 1u);
     RecordProperty("contact_snapshot_mismatch_rejected", 1);
     invalid = accepted_states;
     invalid.front().contact_stage.reset();
     EXPECT_THROW(
-        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+        free_surface::records(system).recordAcceptedFreeSurfaceDiscreteFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -7233,7 +7236,7 @@ TEST(MovingDomainPhysics,
         .contact_stage->state.walls.front()
         .constitutive_residual_integral = FE::Real{0.01};
     EXPECT_THROW(
-        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+        free_surface::records(system).recordAcceptedFreeSurfaceDiscreteFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -7246,7 +7249,7 @@ TEST(MovingDomainPhysics,
         .contact_stage->state.walls.front()
         .mean_contact_speed.reset();
     EXPECT_THROW(
-        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+        free_surface::records(system).recordAcceptedFreeSurfaceDiscreteFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -7261,7 +7264,7 @@ TEST(MovingDomainPhysics,
     invalid.front().contact_stage->state.line_friction_dissipation =
         FE::Real{0.01};
     EXPECT_THROW(
-        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+        free_surface::records(system).recordAcceptedFreeSurfaceDiscreteFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -7278,7 +7281,7 @@ TEST(MovingDomainPhysics,
     invalid.front().contact_stage->state.total_dissipation =
         FE::Real{0.01};
     EXPECT_THROW(
-        system.recordAcceptedFreeSurfaceDiscreteFunctionals(
+        free_surface::records(system).recordAcceptedFreeSurfaceDiscreteFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -7791,7 +7794,7 @@ TEST(MovingDomainPhysics,
     log_output += testing::internal::GetCapturedStderr();
 
     const auto declarations =
-        system.freeSurfaceDiscreteFunctionalDeclarations();
+        free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations();
     ASSERT_EQ(declarations.size(), 1u);
     EXPECT_EQ(declarations.front().interface_marker, interface_marker);
     EXPECT_EQ(declarations.front().level_set_field, phi);
@@ -7947,7 +7950,7 @@ TEST(MovingDomainPhysics,
     EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
     EXPECT_TRUE(system.formulationRecords().empty());
     EXPECT_TRUE(
-        system.freeSurfaceDiscreteFunctionalDeclarations().empty());
+        free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations().empty());
     EXPECT_FALSE(system.hasOperator("equations"));
     EXPECT_FALSE(module.effectiveConfigurationArtifact().has_value());
 }
@@ -8001,7 +8004,7 @@ TEST(MovingDomainPhysics,
     EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
     EXPECT_TRUE(system.formulationRecords().empty());
     EXPECT_TRUE(
-        system.freeSurfaceDiscreteFunctionalDeclarations().empty());
+        free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations().empty());
     EXPECT_FALSE(system.hasOperator("equations"));
     EXPECT_FALSE(module.effectiveConfigurationArtifact().has_value());
 }
@@ -9268,10 +9271,10 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceAddsCutCellStabilizatio
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Average));
     EXPECT_FALSE(formulationRecordsContain(system, FormExprType::ParameterRef));
     const auto residual_work =
-        system.freeSurfaceResidualWorkDeclarations();
+        free_surface::records(system).freeSurfaceResidualWorkDeclarations();
     ASSERT_EQ(residual_work.size(), 7u);
     const auto& boundary_energy =
-        system.freeSurfaceExternalBoundaryEnergyDeclaration();
+        free_surface::records(system).freeSurfaceExternalBoundaryEnergyDeclaration();
     ASSERT_TRUE(boundary_energy.has_value());
     EXPECT_EQ(
         boundary_energy->imposed_traction,
@@ -9921,7 +9924,7 @@ TEST(MovingDomainPhysics, NavierStokesInactiveActiveDomainKeepsFullCellVolumeKer
     module.registerOn(system);
 
     const auto residual_work =
-        system.freeSurfaceResidualWorkDeclarations();
+        free_surface::records(system).freeSurfaceResidualWorkDeclarations();
     ASSERT_EQ(residual_work.size(), 7u);
     for (const auto channel : {
              FE::systems::FreeSurfaceResidualWorkChannel::Convection,
@@ -10016,7 +10019,7 @@ TEST(MovingDomainPhysics,
 {
     FE::systems::FESystem system(makeMesh());
     EXPECT_THROW(
-        system.declareFreeSurfaceResidualWork(
+        free_surface::records(system).declareFreeSurfaceResidualWork(
             FE::systems::FreeSurfaceResidualWorkDeclaration{
                 .channel = static_cast<
                     FE::systems::FreeSurfaceResidualWorkChannel>(255),
@@ -10026,7 +10029,7 @@ TEST(MovingDomainPhysics,
                 .owner_component = "invalid.channel.fixture",
             }),
         FE::InvalidArgumentException);
-    EXPECT_TRUE(system.freeSurfaceResidualWorkDeclarations().empty());
+    EXPECT_TRUE(free_surface::records(system).freeSurfaceResidualWorkDeclarations().empty());
 }
 
 TEST(MovingDomainPhysics,
@@ -10038,7 +10041,7 @@ TEST(MovingDomainPhysics,
     using Declaration = FE::systems::
         FreeSurfaceExternalBoundaryEnergyDeclaration;
     EXPECT_THROW(
-        system.declareFreeSurfaceExternalBoundaryEnergy(
+        free_surface::records(system).declareFreeSurfaceExternalBoundaryEnergy(
             Declaration{
                 .imposed_traction =
                     static_cast<Applicability>(255),
@@ -10050,10 +10053,10 @@ TEST(MovingDomainPhysics,
             }),
         FE::InvalidArgumentException);
     EXPECT_FALSE(
-        system.freeSurfaceExternalBoundaryEnergyDeclaration()
+        free_surface::records(system).freeSurfaceExternalBoundaryEnergyDeclaration()
             .has_value());
 
-    system.declareFreeSurfaceExternalBoundaryEnergy(
+    free_surface::records(system).declareFreeSurfaceExternalBoundaryEnergy(
         Declaration{
             .imposed_traction = Applicability::NotApplicable,
             .open_boundary_flux = Applicability::Unresolved,
@@ -10062,10 +10065,10 @@ TEST(MovingDomainPhysics,
             .owner_component = "boundary.energy.fixture",
         });
     ASSERT_TRUE(
-        system.freeSurfaceExternalBoundaryEnergyDeclaration()
+        free_surface::records(system).freeSurfaceExternalBoundaryEnergyDeclaration()
             .has_value());
     EXPECT_THROW(
-        system.declareFreeSurfaceExternalBoundaryEnergy(
+        free_surface::records(system).declareFreeSurfaceExternalBoundaryEnergy(
             Declaration{
                 .imposed_traction = Applicability::NotApplicable,
                 .open_boundary_flux =
@@ -10132,7 +10135,7 @@ TEST(MovingDomainPhysics,
     module.registerOn(system);
 
     const auto& declaration =
-        system.freeSurfaceExternalBoundaryEnergyDeclaration();
+        free_surface::records(system).freeSurfaceExternalBoundaryEnergyDeclaration();
     ASSERT_TRUE(declaration.has_value());
     EXPECT_EQ(
         declaration->imposed_traction,
@@ -10654,7 +10657,7 @@ TEST(MovingDomainPhysics,
     module.registerOn(system);
 
     const auto declarations =
-        system.freeSurfaceDiscreteFunctionalDeclarations();
+        free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations();
     ASSERT_EQ(declarations.size(), 1u);
     EXPECT_EQ(declarations.front().interface_marker, interface_marker);
     EXPECT_EQ(declarations.front().level_set_field, phi);
@@ -10692,7 +10695,7 @@ TEST(MovingDomainPhysics,
     EXPECT_TRUE(
         declarations.front().endpoint_functional_power_enabled);
     const auto residual_work =
-        system.freeSurfaceResidualWorkDeclarations();
+        free_surface::records(system).freeSurfaceResidualWorkDeclarations();
     ASSERT_EQ(residual_work.size(), 7u);
     const auto find_residual_work =
         [&](FE::systems::FreeSurfaceResidualWorkChannel channel) {
@@ -10865,7 +10868,7 @@ TEST(MovingDomainPhysics,
     ASSERT_NO_THROW(module.registerOn(system));
 
     const auto declarations =
-        system.freeSurfaceDiscreteFunctionalDeclarations();
+        free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations();
     ASSERT_EQ(declarations.size(), 1u);
     EXPECT_EQ(declarations.front().interface_marker, interface_marker);
     EXPECT_EQ(declarations.front().level_set_field, phi);
@@ -10971,7 +10974,7 @@ TEST(MovingDomainPhysics,
             .boundary_marker = wall_marker,
             .equilibrium_contact_angle_radians = angle,
         });
-    system.declareFreeSurfaceDiscreteFunctional(
+    free_surface::records(system).declareFreeSurfaceDiscreteFunctional(
         FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
             .interface_marker = interface_marker,
             .level_set_field = phi,
@@ -11000,8 +11003,8 @@ TEST(MovingDomainPhysics,
     EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
     EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
     EXPECT_EQ(system.formulationRecords().size(), formulation_count);
-    ASSERT_EQ(system.freeSurfaceDiscreteFunctionalDeclarations().size(), 1u);
-    EXPECT_EQ(system.freeSurfaceDiscreteFunctionalDeclarations()
+    ASSERT_EQ(free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations().size(), 1u);
+    EXPECT_EQ(free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations()
                   .front()
                   .owner_component,
               "existing_functional_owner");
@@ -11068,7 +11071,7 @@ TEST(MovingDomainPhysics,
     EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
     EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
     EXPECT_EQ(system.formulationRecords().size(), formulation_count);
-    EXPECT_TRUE(system.freeSurfaceDiscreteFunctionalDeclarations().empty());
+    EXPECT_TRUE(free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations().empty());
 }
 
 TEST(MovingDomainPhysics,
@@ -14814,7 +14817,7 @@ TEST(MovingDomainPhysics,
         system.findFieldByName("u");
     ASSERT_NE(velocity, FE::INVALID_FIELD_ID);
     const auto residual_work =
-        system.freeSurfaceResidualWorkDeclarations();
+        free_surface::records(system).freeSurfaceResidualWorkDeclarations();
     ASSERT_EQ(residual_work.size(), 7u);
     const auto weak_boundary_work = std::find_if(
         residual_work.begin(),

@@ -1202,41 +1202,6 @@ public:
         Real accepted_time,
         Real dt,
         std::uint64_t state_revision);
-    void declareFreeSurfaceDiscreteFunctional(
-        FreeSurfaceDiscreteFunctionalDeclaration declaration);
-    void declareFreeSurfaceResidualWork(
-        FreeSurfaceResidualWorkDeclaration declaration);
-    [[nodiscard]] std::span<
-        const FreeSurfaceResidualWorkDeclaration>
-    freeSurfaceResidualWorkDeclarations() const noexcept {
-        return free_surface_residual_work_declarations_;
-    }
-    void declareFreeSurfaceExternalBoundaryEnergy(
-        FreeSurfaceExternalBoundaryEnergyDeclaration declaration);
-    [[nodiscard]] const std::optional<
-        FreeSurfaceExternalBoundaryEnergyDeclaration>&
-    freeSurfaceExternalBoundaryEnergyDeclaration() const noexcept {
-        return free_surface_external_boundary_energy_declaration_;
-    }
-    [[nodiscard]] std::span<
-        const FreeSurfaceDiscreteFunctionalDeclaration>
-    freeSurfaceDiscreteFunctionalDeclarations() const noexcept {
-        return free_surface_discrete_functional_declarations_;
-    }
-    void recordAcceptedFreeSurfaceDiscreteFunctionals(
-        std::uint64_t accepted_step,
-        Real accepted_time,
-        Real dt,
-        std::uint64_t pre_maintenance_endpoint_state_revision,
-        std::uint64_t state_revision,
-        std::span<const AcceptedFreeSurfaceDiscreteFunctionalState> states,
-        std::optional<std::uint64_t> extension_map_revision =
-            std::nullopt);
-    [[nodiscard]] std::span<
-        const FreeSurfaceDiscreteFunctionalHistoryRecord>
-    freeSurfaceDiscreteFunctionalHistory() const noexcept {
-        return free_surface_discrete_functional_history_;
-    }
     void setGeometricNonlinearityPolicy(GeometricNonlinearityPolicy policy);
     [[nodiscard]] const GeometricNonlinearityPolicy& geometricNonlinearityPolicy() const noexcept;
     [[nodiscard]] bool geometricNonlinearityEnabled() const noexcept;
@@ -2147,6 +2112,8 @@ public:
 
 	    // ---- Accessors ----
 	    [[nodiscard]] const assembly::IMeshAccess& meshAccess() const;
+    /// True when the system has a mesh (meshAccess() does not throw).
+    [[nodiscard]] bool hasMeshAccess() const noexcept { return mesh_access_ != nullptr; }
 
 	    /// AssemblyOptions::num_threads of the last setup() (1 before setup).
 	    [[nodiscard]] int assemblyThreadCount() const noexcept
@@ -2929,14 +2896,6 @@ private:
     bool mesh_boundary_history_transaction_active_{false};
     bool mesh_boundary_history_collective_call_active_{false};
     bool mesh_boundary_history_defer_logging_{false};
-    std::vector<FreeSurfaceDiscreteFunctionalDeclaration>
-        free_surface_discrete_functional_declarations_{};
-    std::vector<FreeSurfaceResidualWorkDeclaration>
-        free_surface_residual_work_declarations_{};
-    std::optional<FreeSurfaceExternalBoundaryEnergyDeclaration>
-        free_surface_external_boundary_energy_declaration_{};
-    std::vector<FreeSurfaceDiscreteFunctionalHistoryRecord>
-        free_surface_discrete_functional_history_{};
     GeometricNonlinearityPolicy geometric_nonlinearity_policy_{};
 
 		    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::SparsityPattern>> sparsity_by_op_{};

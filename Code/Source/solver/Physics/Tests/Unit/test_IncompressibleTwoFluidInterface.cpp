@@ -43,6 +43,9 @@
 #include <utility>
 #include <vector>
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
+
+namespace free_surface = svmp::Physics::formulations::navier_stokes::free_surface;
 
 namespace {
 // Every small-cut aggregation prolongation report requested in this test
@@ -1588,11 +1591,11 @@ TEST(IncompressibleTwoFluidModule,
                    record.active_domains.end();
       }));
   EXPECT_EQ(interface_records, 1u);
-  EXPECT_TRUE(fixture.system.freeSurfaceResidualWorkDeclarations().empty());
+  EXPECT_TRUE(free_surface::records(fixture.system).freeSurfaceResidualWorkDeclarations().empty());
   EXPECT_FALSE(
-      fixture.system.freeSurfaceExternalBoundaryEnergyDeclaration().has_value());
+      free_surface::records(fixture.system).freeSurfaceExternalBoundaryEnergyDeclaration().has_value());
   EXPECT_TRUE(
-      fixture.system.freeSurfaceDiscreteFunctionalDeclarations().empty());
+      free_surface::records(fixture.system).freeSurfaceDiscreteFunctionalDeclarations().empty());
   const auto diagnostic_declarations =
       fixture.system.twoFluidAcceptedStageDiagnosticDeclarations();
   ASSERT_EQ(diagnostic_declarations.size(), 1u);
@@ -2718,10 +2721,10 @@ TEST(IncompressibleTwoFluidModule,
           "\"surface_tension_form_effective\":\"NotApplicableInternalVolume\""),
       std::string::npos);
   EXPECT_FALSE(
-      fixture.system.freeSurfaceExternalBoundaryEnergyDeclaration().has_value());
-  EXPECT_TRUE(fixture.system.freeSurfaceResidualWorkDeclarations().empty());
+      free_surface::records(fixture.system).freeSurfaceExternalBoundaryEnergyDeclaration().has_value());
+  EXPECT_TRUE(free_surface::records(fixture.system).freeSurfaceResidualWorkDeclarations().empty());
   EXPECT_TRUE(
-      fixture.system.freeSurfaceDiscreteFunctionalDeclarations().empty());
+      free_surface::records(fixture.system).freeSurfaceDiscreteFunctionalDeclarations().empty());
 }
 
 } // namespace

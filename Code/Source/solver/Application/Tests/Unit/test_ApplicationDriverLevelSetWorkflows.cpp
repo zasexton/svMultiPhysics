@@ -56,6 +56,7 @@
 #include <utility>
 #include <vector>
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
 
 namespace {
 // Every small-cut aggregation prolongation report requested in this test
@@ -2772,7 +2773,7 @@ void expectProductionCapillaryFunctionalDerivatives(bool sessile)
         0);
 
     const auto declarations =
-        system.freeSurfaceDiscreteFunctionalDeclarations();
+        free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations();
     ASSERT_EQ(declarations.size(), 1u);
     ASSERT_EQ(fixture->requests.size(), 1u);
     const auto declaration = declarations.front();
@@ -7038,7 +7039,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       {.boundary_marker = 7,
        .equilibrium_contact_angle_radians = 0.9},
   };
-  system.declareFreeSurfaceDiscreteFunctional(
+  free_surface::records(system).declareFreeSurfaceDiscreteFunctional(
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = interface_marker,
           .level_set_field = phi,
@@ -7299,7 +7300,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       std::runtime_error);
 
   auto declarations =
-      system.freeSurfaceDiscreteFunctionalDeclarations();
+      free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations();
   ASSERT_EQ(declarations.size(), 1u);
   auto& mutable_declaration = const_cast<
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration&>(
@@ -9077,7 +9078,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   parameters.liquid_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   parameters.surface_tension = gamma;
-  system->declareFreeSurfaceDiscreteFunctional(
+  free_surface::records(*system).declareFreeSurfaceDiscreteFunctional(
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = interface_marker,
           .level_set_field = phi,
@@ -9299,7 +9300,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           previous_solution.data(), previous_solution.size()),
       /*record_backward_euler_kinetic_baseline=*/true));
   const auto baseline_history =
-      sim.fe_system->freeSurfaceDiscreteFunctionalHistory();
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalHistory();
   ASSERT_EQ(baseline_history.size(), 1u);
   const auto& baseline = baseline_history.front();
   EXPECT_EQ(baseline.accepted_step, 0u);
@@ -9386,7 +9387,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       &backward_euler_kinetic_work_bound));
   EXPECT_TRUE(backward_euler_kinetic_work_bound);
 
-  const auto history = sim.fe_system->freeSurfaceDiscreteFunctionalHistory();
+  const auto history = free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalHistory();
   ASSERT_EQ(history.size(), 2u);
   const auto& record = history.back();
   EXPECT_EQ(record.accepted_step, 3u);
@@ -9505,7 +9506,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           solution.data(), solution.size()),
       std::span<const svmp::FE::Real>(
           previous_solution.data(), previous_solution.size())));
-  EXPECT_EQ(sim.fe_system->freeSurfaceDiscreteFunctionalHistory().size(), 2u);
+  EXPECT_EQ(free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalHistory().size(), 2u);
 
   // The kinetic-work pairing is energy-ledger bookkeeping: a step whose
   // previous velocity is not the recorded endpoint (as after a cut-topology
@@ -9528,7 +9529,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       &backward_euler_kinetic_work_bound));
   EXPECT_FALSE(backward_euler_kinetic_work_bound);
   const auto unbound_history =
-      sim.fe_system->freeSurfaceDiscreteFunctionalHistory();
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalHistory();
   ASSERT_EQ(unbound_history.size(), 3u);
   EXPECT_EQ(unbound_history.back().accepted_step, 4u);
   ASSERT_TRUE(unbound_history.back().backward_euler_kinetic_work.has_value());
@@ -9808,7 +9809,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   functional_parameters.liquid_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   functional_parameters.surface_tension = 1.0;
-  system->declareFreeSurfaceDiscreteFunctional(
+  free_surface::records(*system).declareFreeSurfaceDiscreteFunctional(
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = interface_marker,
           .level_set_field = phi,
@@ -9993,7 +9994,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   // transaction, then restore this synthetic declaration so the original
   // diagnostic rollback case below retains its exact purpose.
   auto declarations =
-      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
   ASSERT_EQ(declarations.size(), 1u);
   auto& mutable_declaration = const_cast<
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration&>(
@@ -10005,7 +10006,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   const auto target_volume_before_body_force_rejection =
       effectiveStaticCapillaryEquilibriumOptions(requests.front()).target_liquid_volume;
   const auto functional_history_size_before_body_force_rejection =
-      sim.fe_system->freeSurfaceDiscreteFunctionalHistory().size();
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalHistory().size();
   std::string body_force_failure;
   try {
     (void)initializeDiscreteStaticCapillaryEquilibrium(
@@ -10028,7 +10029,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       effectiveStaticCapillaryEquilibriumOptions(requests.front()).target_liquid_volume,
       target_volume_before_body_force_rejection);
   EXPECT_EQ(
-      sim.fe_system->freeSurfaceDiscreteFunctionalHistory().size(),
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalHistory().size(),
       functional_history_size_before_body_force_rejection);
   EXPECT_EQ(gatherFeOrderedSolution(sim.time_history->u()), current);
   EXPECT_EQ(gatherFeOrderedSolution(sim.time_history->uPrev()), previous);
@@ -10076,7 +10077,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
                 .target_liquid_volume,
             target_volume_before_body_force_rejection);
         EXPECT_EQ(
-            sim.fe_system->freeSurfaceDiscreteFunctionalHistory().size(),
+            free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalHistory().size(),
             functional_history_size_before_body_force_rejection);
         EXPECT_EQ(gatherFeOrderedSolution(sim.time_history->u()), current);
         EXPECT_EQ(
@@ -10262,7 +10263,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   functional_parameters.liquid_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   functional_parameters.surface_tension = 1.0;
-  system->declareFreeSurfaceDiscreteFunctional(
+  free_surface::records(*system).declareFreeSurfaceDiscreteFunctional(
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = interface_marker,
           .level_set_field = phi,
@@ -10463,7 +10464,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   const auto target_volume_before_velocity_rejection =
       effectiveStaticCapillaryEquilibriumOptions(requests.front()).target_liquid_volume;
   const auto functional_history_size_before_velocity_rejection =
-      sim.fe_system->freeSurfaceDiscreteFunctionalHistory().size();
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalHistory().size();
   std::string velocity_failure;
   try {
     (void)initializeDiscreteStaticCapillaryEquilibrium(
@@ -10486,7 +10487,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       effectiveStaticCapillaryEquilibriumOptions(requests.front()).target_liquid_volume,
       target_volume_before_velocity_rejection);
   EXPECT_EQ(
-      sim.fe_system->freeSurfaceDiscreteFunctionalHistory().size(),
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalHistory().size(),
       functional_history_size_before_velocity_rejection);
   EXPECT_EQ(gatherFeOrderedSolution(sim.time_history->u()), current);
   EXPECT_EQ(gatherFeOrderedSolution(sim.time_history->uPrev()), previous);
@@ -11318,7 +11319,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   module.registerOn(*system);
   ASSERT_NO_THROW(system->setup({}));
   const auto declarations =
-      system->freeSurfaceDiscreteFunctionalDeclarations();
+      free_surface::records(*system).freeSurfaceDiscreteFunctionalDeclarations();
   ASSERT_EQ(declarations.size(), 1u);
   EXPECT_EQ(
       declarations.front().capillary_balance_method,
@@ -11645,8 +11646,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
         current_case.sessile,
         current_case.positive_liquid,
         svmp::FE::Real{90.0});
-    const auto declarations = fixture->simulation.fe_system
-                                  ->freeSurfaceDiscreteFunctionalDeclarations();
+    const auto declarations = free_surface::records(*fixture->simulation.fe_system)
+                                  .freeSurfaceDiscreteFunctionalDeclarations();
     ASSERT_EQ(declarations.size(), 1u);
     EXPECT_EQ(
         declarations.front().capillary_balance_method,
@@ -13568,7 +13569,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .slip_length = svmp::FE::Real{ 0.2 },
           .dynamic_viscosity = svmp::FE::Real{ 0.4 },
       });
-  system->declareFreeSurfaceDiscreteFunctional(
+  free_surface::records(*system).declareFreeSurfaceDiscreteFunctional(
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = interface_marker,
           .level_set_field = phi,
@@ -13814,7 +13815,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   exact_operator_stage_solution[velocity_offset + 1u] =
       svmp::FE::Real{-0.0};
   const auto contact_stage_declarations =
-      sim.fe_system->freeSurfaceDiscreteFunctionalDeclarations();
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
   DynamicContactFirstOrderGeneralizedAlphaObservation
       exact_operator_stage_observation{
           .step_index = 2,
@@ -14566,7 +14567,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       accepted_state_revision,
       endpoint_maintenance_stages));
   const auto history =
-      sim.fe_system->freeSurfaceDiscreteFunctionalHistory();
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalHistory();
   ASSERT_EQ(history.size(), 1u);
   EXPECT_EQ(
       history.front().pre_maintenance_endpoint_state_revision,
@@ -14658,7 +14659,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       std::string::npos);
 
   const auto kinematics_history =
-      sim.fe_system->freeSurfaceDiscreteFunctionalHistory();
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalHistory();
   ASSERT_EQ(kinematics_history.size(), 2u);
   EXPECT_TRUE(
       kinematics_history.front().contact_line_kinematics.empty());
@@ -14730,7 +14731,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       next_state_revision,
       next_contact_stages));
   EXPECT_EQ(
-      sim.fe_system->freeSurfaceDiscreteFunctionalHistory().size(), 2u);
+      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalHistory().size(), 2u);
 #endif
 }
 
@@ -14911,7 +14912,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .equilibrium_contact_angle_radians =
               svmp::FE::Real{1.57079632679489661923132169163975144},
       });
-  system->declareFreeSurfaceDiscreteFunctional(
+  free_surface::records(*system).declareFreeSurfaceDiscreteFunctional(
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = interface_marker,
           .level_set_field = phi,
@@ -15120,7 +15121,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .boundary_marker = wall_marker,
           .equilibrium_contact_angle_radians = young_angle,
       });
-  system->declareFreeSurfaceDiscreteFunctional(
+  free_surface::records(*system).declareFreeSurfaceDiscreteFunctional(
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = interface_marker,
           .level_set_field = phi,
@@ -22833,7 +22834,7 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
   svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
   parameters.surface_tension = 1.0;
   parameters.volume_multiplier = 0.5;
-  system->declareFreeSurfaceDiscreteFunctional(
+  free_surface::records(*system).declareFreeSurfaceDiscreteFunctional(
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = 808,
           .level_set_field = phi,
