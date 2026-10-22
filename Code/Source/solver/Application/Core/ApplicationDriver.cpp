@@ -61,6 +61,7 @@
 #include "FE/Systems/TransientSystem.h"
 #include "FE/TimeStepping/FieldRepairPublication.h"
 #include "FE/TimeStepping/NewtonSolver.h"
+#include "FE/TimeStepping/StepParticipants.h"
 #include "FE/TimeStepping/TimeHistory.h"
 #include "FE/TimeStepping/TimeLoop.h"
 #include "FE/TimeStepping/TimeSteppingUtils.h"
@@ -19852,22 +19853,30 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                 accepted_velocity_extension_maps);
           },
   };
-  svmp::Physics::formulations::navier_stokes::free_surface::FittedALEStageParticipant fitted_ale_stage(
-      free_surface_step_context);
+  const auto fitted_ale_stage_participant =
+      std::make_shared<svmp::Physics::formulations::navier_stokes::free_surface::FittedALEStageParticipant>(
+          free_surface_step_context);
+  auto& fitted_ale_stage = *fitted_ale_stage_participant;
   const bool& evaluate_fitted_ale_operator_stage =
       fitted_ale_stage.evaluate_fitted_ale_operator_stage;
   const auto& fitted_ale_operator_stage_state_size =
       fitted_ale_stage.fitted_ale_operator_stage_state_size;
   // Two-fluid accepted-stage diagnostics: Physics step participant
   // (Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageParticipant.h).
-  svmp::Physics::formulations::navier_stokes::two_fluid::StageParticipant two_fluid_stage(free_surface_step_context);
+  const auto two_fluid_stage_participant =
+      std::make_shared<svmp::Physics::formulations::navier_stokes::two_fluid::StageParticipant>(
+          free_surface_step_context);
+  auto& two_fluid_stage = *two_fluid_stage_participant;
   const bool& evaluate_two_fluid_stage =
       two_fluid_stage.evaluate_two_fluid_stage;
   const bool& reconcile_two_fluid_momentum =
       two_fluid_stage.reconcile_two_fluid_momentum;
   // Free-surface energy account: Physics step participant
   // (Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyParticipant.h).
-  svmp::Physics::formulations::navier_stokes::free_surface::EnergyParticipant energy(free_surface_step_context);
+  const auto energy_participant =
+      std::make_shared<svmp::Physics::formulations::navier_stokes::free_surface::EnergyParticipant>(
+          free_surface_step_context);
+  auto& energy = *energy_participant;
   const auto& free_surface_declarations = energy.free_surface_declarations;
   const bool& has_dynamic_contact_stage = energy.has_dynamic_contact_stage;
   const bool& evaluate_free_surface_residual_work =
@@ -19876,11 +19885,13 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       energy.free_surface_energy_attempt;
   // Accepted free-surface contact stages: Physics step participant
   // (Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactStageParticipant.h).
-  svmp::Physics::formulations::navier_stokes::free_surface::ContactStageParticipant contact_stage(
-      free_surface_step_context,
-      has_dynamic_contact_stage,
-      free_surface_declarations,
-      fitted_ale_operator_stage_state_size);
+  const auto contact_stage_participant =
+      std::make_shared<svmp::Physics::formulations::navier_stokes::free_surface::ContactStageParticipant>(
+          free_surface_step_context,
+          has_dynamic_contact_stage,
+          free_surface_declarations,
+          fitted_ale_operator_stage_state_size);
+  auto& contact_stage = *contact_stage_participant;
   const bool& capture_dynamic_contact_generalized_alpha =
       contact_stage.capture_dynamic_contact_generalized_alpha;
   auto& pending_dynamic_contact_generalized_alpha_observation =
@@ -20290,69 +20301,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               << " failure_message=" << std::quoted(nr.failure_message)
               << std::endl;
   };
-  std::function<void(
-      const svmp::FE::timestepping::CandidateStageObservation&)>
-      fitted_ale_candidate_stage_observer;
-  std::function<void(
-      const svmp::FE::timestepping::CandidateStageObservation&)>
-      two_fluid_candidate_stage_observer;
-  std::function<void(
-      const svmp::FE::timestepping::CandidateStageObservation&)>
-      dynamic_contact_candidate_stage_observer;
-  std::function<void(
-      const svmp::FE::timestepping::CandidateStageObservation&)>
-      free_surface_residual_work_candidate_stage_observer;
-  if (capture_dynamic_contact_generalized_alpha) {
-    dynamic_contact_candidate_stage_observer =
-        [&](const svmp::FE::timestepping::CandidateStageObservation&
-                observation) {
-          contact_stage.onCandidateStage(observation);
-        };
-  }
-  if (evaluate_fitted_ale_operator_stage) {
-    fitted_ale_candidate_stage_observer =
-        [&](const svmp::FE::timestepping::CandidateStageObservation&
-                observation) {
-          fitted_ale_stage.onCandidateStage(observation);
-        };
-  }
-  if (evaluate_two_fluid_stage) {
-    two_fluid_candidate_stage_observer =
-        [&](const svmp::FE::timestepping::CandidateStageObservation&
-                observation) {
-          two_fluid_stage.onCandidateStage(observation);
-        };
-  }
-  if (evaluate_free_surface_residual_work) {
-    free_surface_residual_work_candidate_stage_observer =
-        [&](const svmp::FE::timestepping::CandidateStageObservation&
-                observation) {
-          energy.onCandidateStage(observation);
-        };
-  }
-  if (evaluate_fitted_ale_operator_stage || evaluate_two_fluid_stage ||
-      has_conservative_phase ||
-      capture_dynamic_contact_generalized_alpha ||
-      evaluate_free_surface_residual_work) {
+  if (has_conservative_phase) {
     callbacks.on_candidate_stage =
         [&](const svmp::FE::timestepping::CandidateStageObservation&
                 observation) {
-          if (dynamic_contact_candidate_stage_observer) {
-            dynamic_contact_candidate_stage_observer(observation);
-          }
-          if (fitted_ale_candidate_stage_observer) {
-            fitted_ale_candidate_stage_observer(observation);
-          }
-          if (two_fluid_candidate_stage_observer) {
-            two_fluid_candidate_stage_observer(observation);
-          }
-          if (free_surface_residual_work_candidate_stage_observer) {
-            free_surface_residual_work_candidate_stage_observer(
-                observation);
-          }
-          if (!has_conservative_phase) {
-            return;
-          }
           const auto [minimum_pending_stage, maximum_pending_stage] =
               globalMinMaxUint64(
                   pending_conservative_phase_stage.has_value() ? 1u : 0u,
@@ -22745,6 +22697,16 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     oopCout() << "[svMultiPhysics::Application] TimeLoop: dt_updated step=" << step_index
               << " attempt=" << attempt_index << " old_dt=" << old_dt << " new_dt=" << new_dt << std::endl;
   };
+
+  // The free-surface step participants observe each converged operator
+  // stage, in this order, before the conservative-phase snapshot of the
+  // base callback.
+  svmp::FE::timestepping::StepParticipantList free_surface_step_participants;
+  free_surface_step_participants.add(contact_stage_participant);
+  free_surface_step_participants.add(fitted_ale_stage_participant);
+  free_surface_step_participants.add(two_fluid_stage_participant);
+  free_surface_step_participants.add(energy_participant);
+  callbacks = free_surface_step_participants.callbacks(std::move(callbacks));
 
   capture_kinematic_baselines(*sim.time_history);
   svmp::FE::timestepping::TimeLoop loop(opts);
