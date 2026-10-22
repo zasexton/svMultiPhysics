@@ -1341,6 +1341,7 @@ set(FE_FORMS_SOURCES
     TimeStepping/NewmarkBeta.h
     TimeStepping/TimeSteppingUtils.h
     TimeStepping/TimeLoop.h
+    TimeStepping/StepParticipants.h
 )
 
 	set(FE_TIMESTEPPING_SOURCES
@@ -1355,6 +1356,7 @@ set(FE_FORMS_SOURCES
     TimeStepping/GeneralizedAlpha.cpp
     TimeStepping/NewmarkBeta.cpp
     TimeStepping/TimeLoop.cpp
+    TimeStepping/StepParticipants.cpp
 )
 
 # Constitutive sources (header-only; depends on FE/Forms boundary)
@@ -3168,6 +3170,7 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/TimeStepping/test_MasterBearingConstraintTransient.cpp
 		                Tests/Unit/TimeStepping/test_TimeLoopDissipation.cpp
 	                Tests/Unit/TimeStepping/test_TimeLoopPerformance.cpp
+	                Tests/Unit/TimeStepping/test_StepParticipants.cpp
 		                Tests/Unit/TimeStepping/test_main.cpp
 		            )
 	            add_executable(test_fe_timestepping ${FE_TIMESTEPPING_TEST_SOURCES})
