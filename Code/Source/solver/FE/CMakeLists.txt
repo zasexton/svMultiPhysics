@@ -1023,6 +1023,17 @@ if(FE_WITH_MESH)
     )
 endif()
 
+# The PDE velocity extension works on the Mesh library's distributed mesh.
+if(FE_WITH_MESH)
+    list(APPEND FE_LEVELSET_HEADERS
+        LevelSet/Extension/LevelSetPdeVelocityExtension.h
+        LevelSet/Extension/LevelSetVelocityExtensionWall.h
+    )
+    list(APPEND FE_LEVELSET_SOURCES
+        LevelSet/Extension/LevelSetPdeVelocityExtension.cpp
+    )
+endif()
+
 # Auxiliary sources (auxiliary state subsystem, extracted from Systems)
 set(FE_AUXILIARY_HEADERS
     Auxiliary/AuxiliaryState.h
@@ -2573,6 +2584,11 @@ if(FE_BUILD_TESTS)
             Tests/Unit/LevelSet/test_LevelSetVolume.cpp
             Tests/Unit/LevelSet/test_main.cpp
         )
+        if(FE_WITH_MESH)
+            list(APPEND FE_LEVELSET_TEST_SOURCES
+                Tests/Unit/LevelSet/test_LevelSetPdeVelocityExtension.cpp
+            )
+        endif()
         add_executable(test_fe_levelset ${FE_LEVELSET_TEST_SOURCES})
         _svmp_fe_target_enable_warnings(test_fe_levelset)
         target_link_libraries(test_fe_levelset
@@ -3360,6 +3376,10 @@ if(FE_BUILD_TESTS)
         file(GLOB FE_LEVELSET_MPI_TEST_SOURCES
             Tests/Unit/LevelSet/test_*MPI*.cpp
         )
+        if(NOT FE_WITH_MESH)
+            list(FILTER FE_LEVELSET_MPI_TEST_SOURCES EXCLUDE
+                REGEX "test_LevelSetPdeVelocityExtensionMPI\\.cpp$")
+        endif()
         if(TARGET test_fe_levelset_authoritative_binding)
             add_fe_mpi_test(test_fe_levelset_authoritative_binding 2
                 ENVIRONMENT "GTEST_FILTER=LevelSetAuthoritativeDerivativeBindingMPI.*")
@@ -3380,6 +3400,13 @@ if(FE_BUILD_TESTS)
                 INSTALL_RPATH ""
             )
             add_fe_mpi_test(test_fe_levelset_mpi 2)
+            if(FE_WITH_MESH)
+                # Distributed component solves of the PDE velocity extension
+                # (component c on rank c) need at least three ranks.
+                add_fe_mpi_test(test_fe_levelset_mpi 4
+                    FILTER "LevelSetPdeVelocityExtensionMPI.FourRank*"
+                    TIMEOUT 600)
+            endif()
         endif()
 
 	        if(FE_ENABLE_ASSEMBLY)

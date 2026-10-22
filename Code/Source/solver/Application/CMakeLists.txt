@@ -11,7 +11,6 @@ add_library(svapplication STATIC
   Core/LevelSetCutConfiguration.cpp
   Core/LevelSetMaintenanceConfiguration.cpp
   Core/LevelSetMaintenanceTransactionConsensus.cpp
-  Core/LevelSetPdeVelocityExtension.cpp
   Core/LevelSetVelocityExtensionMap.cpp
   Core/MeshCollection.cpp
   Core/SimulationBuilder.cpp

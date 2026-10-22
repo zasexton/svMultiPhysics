@@ -7,7 +7,7 @@
 
 #include <gtest/gtest.h>
 
-#include "Application/Core/LevelSetPdeVelocityExtension.h"
+#include "LevelSet/Extension/LevelSetPdeVelocityExtension.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
 
@@ -27,11 +27,11 @@
 
 namespace {
 
-using application::core::PdeVelocityExtensionOperator;
-using application::core::PdeVelocityExtensionOptions;
-using application::core::WallVelocityExtensionConstraint;
-using application::core::extendVelocityByPde;
-using application::core::pdeVelocityExtensionOperatorFromToken;
+using svmp::FE::level_set::PdeVelocityExtensionOperator;
+using svmp::FE::level_set::PdeVelocityExtensionOptions;
+using svmp::FE::level_set::WallVelocityExtensionConstraint;
+using svmp::FE::level_set::extendVelocityByPde;
+using svmp::FE::level_set::pdeVelocityExtensionOperatorFromToken;
 
 constexpr svmp::label_t kSideWall = 11;
 constexpr svmp::label_t kBottomWall = 12;
@@ -149,7 +149,7 @@ Setup makeSetup(const svmp::Mesh& mesh,
 std::vector<double> run(const svmp::Mesh& mesh, const Setup& s,
                         PdeVelocityExtensionOperator op,
                         const std::vector<WallVelocityExtensionConstraint>& walls,
-                        application::core::PdeVelocityExtensionReport* report = nullptr,
+                        svmp::FE::level_set::PdeVelocityExtensionReport* report = nullptr,
                         int band_layers = 0)
 {
   std::vector<double> out;
@@ -200,7 +200,7 @@ TEST(LevelSetPdeVelocityExtension, HarmonicReproducesLinearFieldWithDirichletBou
       s.known[v] = 1u;
     }
   }
-  application::core::PdeVelocityExtensionReport report;
+  svmp::FE::level_set::PdeVelocityExtensionReport report;
   const auto w = run(*mesh, s, PdeVelocityExtensionOperator::Harmonic, {}, &report);
   EXPECT_GT(report.extension_vertices, 0u);
   for (std::size_t i = 0; i < w.size(); ++i) {
@@ -219,7 +219,7 @@ TEST(LevelSetPdeVelocityExtension, NormalExtensionIsConstantAlongNormals)
     return std::array<double, 2>{0.7 - 1.3 * t, 0.1 + 2.2 * t};
   };
   const auto s = makeSetup(*mesh, phi, u);
-  application::core::PdeVelocityExtensionReport report;
+  svmp::FE::level_set::PdeVelocityExtensionReport report;
   const auto w =
       run(*mesh, s, PdeVelocityExtensionOperator::LeastSquaresNormal, {}, &report);
   EXPECT_GT(report.extension_vertices, 20u);
@@ -272,7 +272,7 @@ TEST(LevelSetPdeVelocityExtension, WallsZeroOnlyTheConstrainedComponent)
       {.boundary_label = kBottomWall, .constrained_components = {false, true, false}}};
   for (const auto op : {PdeVelocityExtensionOperator::Harmonic,
                         PdeVelocityExtensionOperator::LeastSquaresNormal}) {
-    application::core::PdeVelocityExtensionReport report;
+    svmp::FE::level_set::PdeVelocityExtensionReport report;
     const auto w = run(*mesh, s, op, walls, &report);
     EXPECT_EQ(report.max_wall_normal_velocity, 0.0);
     EXPECT_GT(report.wall_fixed[0], 0u);
@@ -305,8 +305,8 @@ TEST(LevelSetPdeVelocityExtension, BandTruncationLeavesOutsideVerticesAtZero)
   const auto s = makeSetup(
       *mesh, [](double, double y) { return y - 0.33; },
       [](double x, double) { return std::array<double, 2>{1.0 + x, 2.0}; });
-  application::core::PdeVelocityExtensionReport full_report;
-  application::core::PdeVelocityExtensionReport band_report;
+  svmp::FE::level_set::PdeVelocityExtensionReport full_report;
+  svmp::FE::level_set::PdeVelocityExtensionReport band_report;
   (void)run(*mesh, s, PdeVelocityExtensionOperator::Harmonic, {}, &full_report);
   const auto band = run(*mesh, s, PdeVelocityExtensionOperator::Harmonic, {},
                         &band_report, /*band_layers=*/2);
@@ -416,7 +416,7 @@ TEST(LevelSetPdeVelocityExtension, AlgebraicRowsAreSatisfiedByTheSolvedExtension
       max_residual = std::max(max_residual, std::abs(residual));
     }
     EXPECT_LT(max_residual, 1e-11)
-        << application::core::pdeVelocityExtensionOperatorName(op);
+        << svmp::FE::level_set::pdeVelocityExtensionOperatorName(op);
     if (op == PdeVelocityExtensionOperator::Harmonic) {
       // Right-triangle P1 stiffness has nonpositive off-diagonals: each dry
       // value is a convex combination of its neighbors.
@@ -427,9 +427,9 @@ TEST(LevelSetPdeVelocityExtension, AlgebraicRowsAreSatisfiedByTheSolvedExtension
 
 namespace {
 
-using application::core::PdeVelocityExtensionCache;
-using application::core::PdeVelocityExtensionMeshRevisions;
-using application::core::PdeVelocityExtensionReport;
+using svmp::FE::level_set::PdeVelocityExtensionCache;
+using svmp::FE::level_set::PdeVelocityExtensionMeshRevisions;
+using svmp::FE::level_set::PdeVelocityExtensionReport;
 using ExtensionRows =
     std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>;
 
@@ -704,7 +704,7 @@ TEST(LevelSetPdeVelocityExtensionCache, CachedAndUncachedResultsAreBitwiseIdenti
     for (const auto* walls : {&cacheTestWalls(), &no_walls}) {
       for (const bool with_rows : {true, false}) {
         for (const int band_layers : {0, 3}) {
-          SCOPED_TRACE(std::string(application::core::pdeVelocityExtensionOperatorName(op)) +
+          SCOPED_TRACE(std::string(svmp::FE::level_set::pdeVelocityExtensionOperatorName(op)) +
                        (walls->empty() ? " no walls" : " walls") +
                        (with_rows ? " rows" : " no rows") + " band " +
                        std::to_string(band_layers));
@@ -829,7 +829,7 @@ CachedRun runWithFactorization(
     const svmp::Mesh& mesh, const Setup& s, PdeVelocityExtensionOperator op,
     const std::vector<WallVelocityExtensionConstraint>& walls,
     PdeVelocityExtensionCache* cache,
-    application::core::PdeVelocityExtensionFactorization factorization)
+    svmp::FE::level_set::PdeVelocityExtensionFactorization factorization)
 {
   CachedRun out;
   PdeVelocityExtensionOptions options;
@@ -954,9 +954,9 @@ TEST(LevelSetPdeVelocityExtensionCache, SelfCheckComparesWithTheUncachedSolve)
 
 TEST(LevelSetPdeVelocityExtension, ParsesFactorizationTokens)
 {
-  using application::core::PdeVelocityExtensionFactorization;
-  using application::core::pdeVelocityExtensionFactorizationFromToken;
-  using application::core::pdeVelocityExtensionFactorizationName;
+  using svmp::FE::level_set::PdeVelocityExtensionFactorization;
+  using svmp::FE::level_set::pdeVelocityExtensionFactorizationFromToken;
+  using svmp::FE::level_set::pdeVelocityExtensionFactorizationName;
   EXPECT_EQ(pdeVelocityExtensionFactorizationFromToken("lu_colamd"),
             PdeVelocityExtensionFactorization::LuColamd);
   EXPECT_EQ(pdeVelocityExtensionFactorizationFromToken("Default"),
@@ -973,7 +973,7 @@ TEST(LevelSetPdeVelocityExtension, ParsesFactorizationTokens)
 
 TEST(LevelSetPdeVelocityExtension, LdltFactorizationAgreesWithLuToRoundOff)
 {
-  using application::core::PdeVelocityExtensionFactorization;
+  using svmp::FE::level_set::PdeVelocityExtensionFactorization;
   const auto mesh = makeSquareTriangleMesh(16, 0.03);
   const auto first = makeSetup(*mesh, wavyPhi, firstVelocity);
   const auto second = makeSetup(*mesh, wavyPhi, secondVelocity);
@@ -981,7 +981,7 @@ TEST(LevelSetPdeVelocityExtension, LdltFactorizationAgreesWithLuToRoundOff)
   for (const auto op : {PdeVelocityExtensionOperator::Harmonic,
                         PdeVelocityExtensionOperator::LeastSquaresNormal}) {
     SCOPED_TRACE(std::string(
-        application::core::pdeVelocityExtensionOperatorName(op)));
+        svmp::FE::level_set::pdeVelocityExtensionOperatorName(op)));
     PdeVelocityExtensionCache cache(2u);
     const auto lu = runWithFactorization(*mesh, first, op, walls, nullptr,
                                          PdeVelocityExtensionFactorization::LuColamd);

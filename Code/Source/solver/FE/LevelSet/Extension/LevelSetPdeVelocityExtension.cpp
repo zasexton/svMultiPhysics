@@ -5,23 +5,23 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#include "Application/Core/LevelSetPdeVelocityExtension.h"
+#include "LevelSet/Extension/LevelSetPdeVelocityExtension.h"
 
-#include "FE/Assembly/GlobalSystemView.h"
-#include "FE/Backends/Interfaces/BackendFactory.h"
-#include "FE/Backends/Interfaces/BackendKind.h"
-#include "FE/Backends/Interfaces/GenericMatrix.h"
-#include "FE/Backends/Interfaces/GenericVector.h"
-#include "FE/Backends/Interfaces/LinearSolver.h"
-#include "FE/Backends/Utils/BackendOptions.h"
-#include "FE/Sparsity/SparsityPattern.h"
+#include "Assembly/GlobalSystemView.h"
+#include "Backends/Interfaces/BackendFactory.h"
+#include "Backends/Interfaces/BackendKind.h"
+#include "Backends/Interfaces/GenericMatrix.h"
+#include "Backends/Interfaces/GenericVector.h"
+#include "Backends/Interfaces/LinearSolver.h"
+#include "Backends/Utils/BackendOptions.h"
+#include "Sparsity/SparsityPattern.h"
 #include "Mesh/Topology/DistributedTopology.h"
 
-#include "FE/Backends/MUMPS/MumpsDistributedSolver.h"
+#include "Backends/MUMPS/MumpsDistributedSolver.h"
 
 #if defined(FE_HAS_EIGEN)
-#include "FE/Backends/Eigen/EigenMatrix.h"
-#include "FE/Backends/Eigen/EigenVector.h"
+#include "Backends/Eigen/EigenMatrix.h"
+#include "Backends/Eigen/EigenVector.h"
 
 #include <Eigen/OrderingMethods>
 #include <Eigen/SparseCholesky>
@@ -50,7 +50,9 @@
 #include <mpi.h>
 #endif
 
-namespace application::core {
+namespace svmp {
+namespace FE {
+namespace level_set {
 namespace {
 
 constexpr std::uint8_t kKnownFlag = 1u;
@@ -2338,4 +2340,6 @@ PdeVelocityExtensionReport extendVelocityByPde(
   return report;
 }
 
-} // namespace application::core
+} // namespace level_set
+} // namespace FE
+} // namespace svmp

@@ -155,7 +155,7 @@ itself freezes `phi` one row above the cut cells, and the level set on the dry
 vertices of the cut row then lags the flow increasingly with refinement (the
 first protocol failed at `L/h = 64` for this reason).  The advection velocity
 `w` is therefore the PDE extension of the fluid velocity `u`
-(`Application/Core/LevelSetPdeVelocityExtension.h`):
+(`FE/LevelSet/Extension/LevelSetPdeVelocityExtension.h`):
 
 - `w = u` on every wet vertex and every vertex of the retained interface
   cells, so that `w_h = u_h` on the interface;

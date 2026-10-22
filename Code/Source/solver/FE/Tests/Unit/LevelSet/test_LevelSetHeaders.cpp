@@ -21,6 +21,11 @@
 #include "LevelSet/LevelSetTransport.h"
 #include "LevelSet/LevelSetVolume.h"
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#include "LevelSet/Extension/LevelSetPdeVelocityExtension.h"
+#include "LevelSet/Extension/LevelSetVelocityExtensionWall.h"
+#endif
+
 #include <gtest/gtest.h>
 
 TEST(LevelSetHeaders, PublicHeadersCompile)

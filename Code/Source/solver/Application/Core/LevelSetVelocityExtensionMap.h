@@ -1,6 +1,7 @@
 #pragma once
 
 #include "FE/Core/Types.h"
+#include "FE/LevelSet/Extension/LevelSetVelocityExtensionWall.h"
 #include "FE/LevelSet/LevelSetVelocityExtensionConstraint.h"
 #include "Mesh/Core/MeshComm.h"
 #include "Mesh/Core/MeshTypes.h"
@@ -21,13 +22,11 @@ namespace application::core {
 inline constexpr double kVelocityExtensionMaxRegressionCondition = 1.0e8;
 inline constexpr double kVelocityExtensionCoefficientTolerance = 1.0e-12;
 inline constexpr double kVelocityExtensionRowTolerance = 1.0e-10;
-inline constexpr double kVelocityExtensionMaxWetToDryAmplification = 16.0;
 
-struct WallVelocityExtensionConstraint {
-  svmp::label_t boundary_label{svmp::INVALID_LABEL};
-  std::array<bool, 3> constrained_components{false, false, false};
-  bool project_boundary_normal{false};
-};
+// The wall data shared with the PDE extension are in
+// FE/LevelSet/Extension/LevelSetVelocityExtensionWall.h.
+using svmp::FE::level_set::kVelocityExtensionMaxWetToDryAmplification;
+using svmp::FE::level_set::WallVelocityExtensionConstraint;
 
 struct WallCompatibleVelocityExtensionResult {
   std::size_t extended_vertices{0u};

@@ -11,8 +11,8 @@
 
 #include <gtest/gtest.h>
 
-#include "Application/Core/LevelSetPdeVelocityExtension.h"
-#include "FE/Backends/MUMPS/MumpsDistributedSolver.h"
+#include "LevelSet/Extension/LevelSetPdeVelocityExtension.h"
+#include "Backends/MUMPS/MumpsDistributedSolver.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
 
@@ -32,9 +32,9 @@
 
 namespace {
 
-using application::core::PdeVelocityExtensionOperator;
-using application::core::PdeVelocityExtensionOptions;
-using application::core::WallVelocityExtensionConstraint;
+using svmp::FE::level_set::PdeVelocityExtensionOperator;
+using svmp::FE::level_set::PdeVelocityExtensionOptions;
+using svmp::FE::level_set::WallVelocityExtensionConstraint;
 
 constexpr svmp::label_t kPdeSideWall = 21;
 constexpr int kPdeCells = 12;
@@ -103,8 +103,8 @@ std::array<double, 2> uAt(double x, double y)
 std::map<std::pair<long long, long long>, std::array<double, 2>> extend(
     const svmp::Mesh& mesh, const svmp::MeshComm& comm,
     PdeVelocityExtensionOperator op,
-    application::core::PdeVelocityExtensionFactorization factorization =
-        application::core::PdeVelocityExtensionFactorization::LuColamd)
+    svmp::FE::level_set::PdeVelocityExtensionFactorization factorization =
+        svmp::FE::level_set::PdeVelocityExtensionFactorization::LuColamd)
 {
   const auto n = mesh.n_vertices();
   const auto& X = mesh.X_ref();
@@ -141,7 +141,7 @@ std::map<std::pair<long long, long long>, std::array<double, 2>> extend(
   options.op = op;
   options.factorization = factorization;
   std::vector<double> out;
-  (void)application::core::extendVelocityByPde(
+  (void)svmp::FE::level_set::extendVelocityByPde(
       mesh, comm, phi, source, 2u, known, 2u,
       std::span<const WallVelocityExtensionConstraint>(walls), options, out);
   std::map<std::pair<long long, long long>, std::array<double, 2>> result;
@@ -195,7 +195,7 @@ TEST(LevelSetPdeVelocityExtensionMPI, TwoRankResultMatchesSerialOnEveryLocalVert
     }
     int failures = 0;
     MPI_Allreduce(&local_failures, &failures, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-    EXPECT_EQ(failures, 0) << application::core::pdeVelocityExtensionOperatorName(op);
+    EXPECT_EQ(failures, 0) << svmp::FE::level_set::pdeVelocityExtensionOperatorName(op);
   }
 }
 
@@ -217,9 +217,9 @@ struct PdeCachedRun {
 PdeCachedRun extendCached(const svmp::Mesh& mesh, const svmp::MeshComm& comm,
                           PdeVelocityExtensionOperator op, double scale,
                           const std::vector<std::pair<long long, long long>>& extra,
-                          application::core::PdeVelocityExtensionCache* cache,
-                          application::core::PdeVelocityExtensionFactorization factorization =
-                              application::core::PdeVelocityExtensionFactorization::LuColamd,
+                          svmp::FE::level_set::PdeVelocityExtensionCache* cache,
+                          svmp::FE::level_set::PdeVelocityExtensionFactorization factorization =
+                              svmp::FE::level_set::PdeVelocityExtensionFactorization::LuColamd,
                           bool all_components_on_walls = false)
 {
   const auto n = mesh.n_vertices();
@@ -263,11 +263,11 @@ PdeCachedRun extendCached(const svmp::Mesh& mesh, const svmp::MeshComm& comm,
   options.op = op;
   options.factorization = factorization;
   PdeCachedRun out;
-  const auto report = application::core::extendVelocityByPde(
+  const auto report = svmp::FE::level_set::extendVelocityByPde(
       mesh, comm, phi, source, 2u, known, 2u,
       std::span<const WallVelocityExtensionConstraint>(walls), options,
       out.extended, &out.rows, cache,
-      application::core::PdeVelocityExtensionMeshRevisions{
+      svmp::FE::level_set::PdeVelocityExtensionMeshRevisions{
           .geometry = 1u, .topology = 1u, .ownership = 1u, .numbering = 1u});
   out.reused = report.reused_factorization;
   out.distributed = report.distributed_solves;
@@ -365,8 +365,8 @@ TEST(LevelSetPdeVelocityExtensionMPI, CacheReuseDecisionIsCollective)
 
   for (const auto op : {PdeVelocityExtensionOperator::Harmonic,
                         PdeVelocityExtensionOperator::LeastSquaresNormal}) {
-    SCOPED_TRACE(application::core::pdeVelocityExtensionOperatorName(op));
-    application::core::PdeVelocityExtensionCache cache;
+    SCOPED_TRACE(svmp::FE::level_set::pdeVelocityExtensionOperatorName(op));
+    svmp::FE::level_set::PdeVelocityExtensionCache cache;
     const auto check = [&](double scale,
                            const std::vector<std::pair<long long, long long>>& extra,
                            bool expect_reuse, const char* what) {
@@ -474,8 +474,8 @@ TEST(LevelSetPdeVelocityExtensionMPI, FourRankDistributedSolvesMatchTheReplicate
 
   for (const auto op : {PdeVelocityExtensionOperator::Harmonic,
                         PdeVelocityExtensionOperator::LeastSquaresNormal}) {
-    SCOPED_TRACE(application::core::pdeVelocityExtensionOperatorName(op));
-    application::core::PdeVelocityExtensionCache cache(3u);
+    SCOPED_TRACE(svmp::FE::level_set::pdeVelocityExtensionOperatorName(op));
+    svmp::FE::level_set::PdeVelocityExtensionCache cache(3u);
     const auto check = [&](double scale,
                            const std::vector<std::pair<long long, long long>>& extra,
                            bool expect_reuse, const char* what) {
@@ -524,7 +524,7 @@ TEST(LevelSetPdeVelocityExtensionMPI, FourRankDistributedSolvesMatchTheReplicate
     }
     {
       ScopedEnvironment replicated("SVMP_PDE_EXTENSION_REPLICATED_SOLVES", "1");
-      application::core::PdeVelocityExtensionCache replicated_cache(2u);
+      svmp::FE::level_set::PdeVelocityExtensionCache replicated_cache(2u);
       const auto miss =
           extendCached(*distributed, comm, op, 1.0, {}, &replicated_cache);
       const auto hit =
@@ -580,7 +580,7 @@ TEST(LevelSetPdeVelocityExtensionMPI, MumpsFactorizationMatchesDefaultOnAnyRankC
   }
   int size = 1;
   MPI_Comm_size(MPI_COMM_WORLD, &size);
-  using application::core::PdeVelocityExtensionFactorization;
+  using svmp::FE::level_set::PdeVelocityExtensionFactorization;
 
   const auto arrays = makePdeArrays();
   auto distributed = std::make_shared<svmp::Mesh>(svmp::MeshComm(MPI_COMM_WORLD));
@@ -609,13 +609,13 @@ TEST(LevelSetPdeVelocityExtensionMPI, MumpsFactorizationMatchesDefaultOnAnyRankC
       }
     }
     EXPECT_EQ(globalSum(local_failures), 0)
-        << application::core::pdeVelocityExtensionOperatorName(op) << " ranks=" << size;
+        << svmp::FE::level_set::pdeVelocityExtensionOperatorName(op) << " ranks=" << size;
   }
 
   // Cached: the second call with new velocities reuses the factorization on
   // every rank and matches an uncached MUMPS solve; the self-check (round-off
   // tolerance for MUMPS) passes on both calls.
-  application::core::PdeVelocityExtensionCache cache;
+  svmp::FE::level_set::PdeVelocityExtensionCache cache;
   PdeCachedRun first;
   PdeCachedRun second;
   {
@@ -633,8 +633,8 @@ TEST(LevelSetPdeVelocityExtensionMPI, MumpsFactorizationMatchesDefaultOnAnyRankC
   EXPECT_TRUE(reuseOverRanks(first.self_checked).first);
   EXPECT_TRUE(reuseOverRanks(second.self_checked).first);
   EXPECT_EQ(second.cache_capacity,
-            size > 1 ? application::core::PdeVelocityExtensionCache::kDefaultDistributedEntries
-                     : application::core::PdeVelocityExtensionCache::kDefaultEntries);
+            size > 1 ? svmp::FE::level_set::PdeVelocityExtensionCache::kDefaultDistributedEntries
+                     : svmp::FE::level_set::PdeVelocityExtensionCache::kDefaultEntries);
   int local_far = 0;
   ASSERT_EQ(second.extended.size(), fresh.extended.size());
   for (std::size_t i = 0; i < second.extended.size(); ++i) {
@@ -666,7 +666,7 @@ TEST(LevelSetPdeVelocityExtensionMPI, MumpsSerialIsDeterministicAndMatchesDefaul
   }
   int size = 1;
   MPI_Comm_size(MPI_COMM_WORLD, &size);
-  using application::core::PdeVelocityExtensionFactorization;
+  using svmp::FE::level_set::PdeVelocityExtensionFactorization;
   const auto arrays = makePdeArrays();
   auto distributed = std::make_shared<svmp::Mesh>(svmp::MeshComm(MPI_COMM_WORLD));
   distributed->build_from_arrays_global_and_partition(
@@ -694,10 +694,10 @@ TEST(LevelSetPdeVelocityExtensionMPI, MumpsSerialIsDeterministicAndMatchesDefaul
       }
     }
     EXPECT_EQ(globalSum(local_failures), 0)
-        << application::core::pdeVelocityExtensionOperatorName(op) << " ranks=" << size;
+        << svmp::FE::level_set::pdeVelocityExtensionOperatorName(op) << " ranks=" << size;
   }
 
-  application::core::PdeVelocityExtensionCache cache;
+  svmp::FE::level_set::PdeVelocityExtensionCache cache;
   PdeCachedRun first;
   PdeCachedRun second;
   {
@@ -728,7 +728,7 @@ TEST(LevelSetPdeVelocityExtensionMPI, MumpsSharesTheFactorizationOfIdenticalComp
   if (!svmp::FE::backends::mumpsAvailable()) {
     GTEST_SKIP() << "Built without FE_ENABLE_MUMPS.";
   }
-  using application::core::PdeVelocityExtensionFactorization;
+  using svmp::FE::level_set::PdeVelocityExtensionFactorization;
   const auto arrays = makePdeArrays();
   auto distributed = std::make_shared<svmp::Mesh>(svmp::MeshComm(MPI_COMM_WORLD));
   distributed->build_from_arrays_global_and_partition(
@@ -749,7 +749,7 @@ TEST(LevelSetPdeVelocityExtensionMPI, MumpsSharesTheFactorizationOfIdenticalComp
     EXPECT_EQ(mumps.unknowns[0], mumps.unknowns[1]);
     EXPECT_EQ(reference.shared_factorizations, 0u);
     EXPECT_EQ(globalSum(static_cast<int>(mumps.shared_factorizations)), comm.size())
-        << application::core::pdeVelocityExtensionOperatorName(op);
+        << svmp::FE::level_set::pdeVelocityExtensionOperatorName(op);
     ASSERT_EQ(mumps.extended.size(), reference.extended.size());
     int local_far = 0;
     for (std::size_t i = 0; i < mumps.extended.size(); ++i) {
@@ -759,7 +759,7 @@ TEST(LevelSetPdeVelocityExtensionMPI, MumpsSharesTheFactorizationOfIdenticalComp
       }
     }
     EXPECT_EQ(globalSum(local_far), 0)
-        << application::core::pdeVelocityExtensionOperatorName(op);
+        << svmp::FE::level_set::pdeVelocityExtensionOperatorName(op);
     const auto normal_only = extendCached(*distributed, comm, op, 1.0, {}, nullptr,
                                           PdeVelocityExtensionFactorization::Mumps);
     if (normal_only.unknowns[0] != normal_only.unknowns[1]) {
@@ -767,7 +767,7 @@ TEST(LevelSetPdeVelocityExtensionMPI, MumpsSharesTheFactorizationOfIdenticalComp
     }
   }
 
-  application::core::PdeVelocityExtensionCache cache;
+  svmp::FE::level_set::PdeVelocityExtensionCache cache;
   const auto first = extendCached(*distributed, comm, PdeVelocityExtensionOperator::Harmonic,
                                   1.0, {}, &cache, PdeVelocityExtensionFactorization::Mumps,
                                   /*all_components_on_walls=*/true);

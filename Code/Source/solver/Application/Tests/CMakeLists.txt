@@ -16,7 +16,6 @@ add_executable(test_application
   Unit/test_LevelSetCutConfiguration.cpp
   Unit/test_LevelSetEquationTranslator.cpp
   Unit/test_LevelSetMaintenanceConfiguration.cpp
-  Unit/test_LevelSetPdeVelocityExtension.cpp
   Unit/test_LegacyParameterStubs.cpp
   Unit/test_MeshCollection.cpp
   Unit/test_MeshTranslator.cpp
@@ -27,7 +26,6 @@ add_executable(test_application
   ../Core/LevelSetCutConfiguration.cpp
   ../Core/LevelSetMaintenanceConfiguration.cpp
   ../Core/LevelSetMaintenanceTransactionConsensus.cpp
-  ../Core/LevelSetPdeVelocityExtension.cpp
   ../Core/LevelSetVelocityExtensionMap.cpp
   ../Core/MeshCollection.cpp
   ../Core/SimulationBuilder.cpp
@@ -73,14 +71,12 @@ if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
     Unit/test_ApplicationDriverLevelSetWorkflowsMPI.cpp
     Unit/test_LevelSetMaintenanceTransactionConsensusMPI.cpp
     Unit/test_MeshPartitionWeightingMPI.cpp
-    Unit/test_LevelSetPdeVelocityExtensionMPI.cpp
     Unit/test_LegacyParameterStubs.cpp
     ../Core/ActiveDomainOutput.cpp
     ../Core/FreeSurfaceSemiImplicitReference.cpp
     ../Core/LevelSetCutConfiguration.cpp
     ../Core/LevelSetMaintenanceConfiguration.cpp
     ../Core/LevelSetMaintenanceTransactionConsensus.cpp
-    ../Core/LevelSetPdeVelocityExtension.cpp
     ../Core/LevelSetVelocityExtensionMap.cpp
     ../Core/MeshCollection.cpp
     ../Core/SimulationBuilder.cpp
@@ -183,16 +179,6 @@ if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
     TARGET test_application_mpi
     MPI_RANKS 4
     FILTER "MeshPartitionWeightingMPI.*"
-    TIMEOUT 600
-    ENVIRONMENT ${_application_mpi_env}
-  )
-
-  # Distributed component solves of the PDE velocity extension (component c
-  # on rank c) need at least three ranks.
-  svmp_add_gtest(Application_PdeVelocityExtension_MPI_4
-    TARGET test_application_mpi
-    MPI_RANKS 4
-    FILTER "LevelSetPdeVelocityExtensionMPI.FourRank*"
     TIMEOUT 600
     ENVIRONMENT ${_application_mpi_env}
   )
