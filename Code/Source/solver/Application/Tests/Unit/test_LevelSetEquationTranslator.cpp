@@ -1544,7 +1544,7 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
   ASSERT_TRUE(artifact.has_value());
   EXPECT_EQ(artifact->component, "level_set_transport");
   constexpr std::string_view expected_without_phase =
-      R"json({"artifact_schema_version":1,"component":"level_set_transport","capability_label":"one_phase_interface_transport_nonlocal_conservation","units":{"system":"consistent_solver_units","length":"solver_length","time":"solver_time","volume":"solver_volume"},"operator":"transport","transport_form":"ConservativeDivergence","conservation_diagnostic":"volume_corrected_level_set_advection_not_locally_conservative","level_set":{"field":"phi","source":"Unknown","auto_register":true},"advection_velocity":{"field":"advecting_velocity","source":"PrescribedData","auto_register":true,"constant_value":[0,0,0],"algebraic_extension_source_field":"","dependency_direction":"physical_velocity_to_extension_to_level_set","physical_momentum_coupling_allowed":false,"map_guard_policy":"fixed_bounded_application_policy"},"supg":{"enabled":true,"tau_scale":0.25,"velocity_epsilon":9.9999999999999998e-13,"transient_scale":1.5,"discontinuity_capturing_enabled":false,"discontinuity_capturing_scale":0.10000000000000001,"gradient_epsilon":9.9999999999999998e-13,"residual_epsilon":9.9999999999999998e-13,"maximum_courant":0.5},"bound_preserving":{"enabled":false,"method":"nodal_rejection_projection_nonconservative","bound_tolerance":9.9999999999999998e-13,"sign_tolerance":9.9999999999999998e-13,"maximum_courant":1,"courant_tolerance":9.9999999999999998e-13,"enforce_courant_limit":true,"enforce_impermeable_boundaries":true,"impermeable_normal_velocity_tolerance":1e-10},"interface_kinematic":{"enabled":true,"interface_marker":77,"weight_scale":1.5},"maintenance_transaction":{"ordering":"transport_then_reinitialization_then_volume_correction_then_geometry_refresh","reinitialization":{"enabled":true,"method":"Projection","cadence_steps":4,"max_iterations":8,"pseudo_time_step_scale":0.125,"interface_band_width":2.75,"signed_distance_tolerance":0.0001,"preserve_band_width":0,"maximum_zero_set_displacement":2e-08},"volume_correction":{"enabled":true,"cadence_steps":5,"use_initial_negative_volume_as_target":false,"target_negative_volume":0.375,"volume_tolerance":9.9999999999999995e-08,"max_iterations":24,"minimum_relative_volume_error":2.0000000000000002e-05,"maximum_interface_displacement_fraction":0.025000000000000001,"maximum_cumulative_interface_displacement_fraction":0.25}},"boundaries":{"inflow":[{"marker":4,"value":0.5,"penalty_scale":2}],"outflow":[{"marker":5}]}})json";
+      R"json({"artifact_schema_version":1,"component":"level_set_transport","capability_label":"one_phase_interface_transport_nonlocal_conservation","units":{"system":"consistent_solver_units","length":"solver_length","time":"solver_time","volume":"solver_volume"},"operator":"transport","transport_form":"ConservativeDivergence","conservation_diagnostic":"volume_corrected_level_set_advection_not_locally_conservative","level_set":{"field":"phi","source":"Unknown","auto_register":true},"advection_velocity":{"field":"advecting_velocity","source":"PrescribedData","auto_register":true,"constant_value":[0,0,0],"algebraic_extension_source_field":"","dependency_direction":"physical_velocity_to_extension_to_level_set","physical_momentum_coupling_allowed":false,"map_guard_policy":"fixed_bounded_application_policy"},"supg":{"enabled":true,"tau_scale":0.25,"velocity_epsilon":9.9999999999999998e-13,"transient_scale":1.5},"bound_preserving":{"enabled":false,"method":"nodal_rejection_projection_nonconservative","bound_tolerance":9.9999999999999998e-13,"sign_tolerance":9.9999999999999998e-13,"maximum_courant":1,"courant_tolerance":9.9999999999999998e-13,"enforce_courant_limit":true,"enforce_impermeable_boundaries":true,"impermeable_normal_velocity_tolerance":1e-10},"interface_kinematic":{"enabled":true,"interface_marker":77,"weight_scale":1.5},"maintenance_transaction":{"ordering":"transport_then_reinitialization_then_volume_correction_then_geometry_refresh","reinitialization":{"enabled":true,"method":"Projection","cadence_steps":4,"max_iterations":8,"pseudo_time_step_scale":0.125,"interface_band_width":2.75,"signed_distance_tolerance":0.0001,"preserve_band_width":0,"maximum_zero_set_displacement":2e-08},"volume_correction":{"enabled":true,"cadence_steps":5,"use_initial_negative_volume_as_target":false,"target_negative_volume":0.375,"volume_tolerance":9.9999999999999995e-08,"max_iterations":24,"minimum_relative_volume_error":2.0000000000000002e-05,"maximum_interface_displacement_fraction":0.025000000000000001,"maximum_cumulative_interface_displacement_fraction":0.25}},"boundaries":{"inflow":[{"marker":4,"value":0.5,"penalty_scale":2}],"outflow":[{"marker":5}]}})json";
   std::string expected{expected_without_phase};
   const auto schema_version = expected.find("\"artifact_schema_version\":1");
   ASSERT_NE(schema_version, std::string::npos);
@@ -1633,6 +1633,60 @@ TEST(LevelSetEquationTranslator, TranslatesTemporalSpatialInflowBoundary)
   EXPECT_TRUE(system.hasOperator("level_set"));
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Coefficient));
+#endif
+}
+
+TEST(LevelSetEquationTranslator, RejectsRetiredDiscontinuityCapturing)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  // Decision D47 retired the level-set discontinuity capturing: a deck may
+  // still state it as disabled; enabling it or naming one of its settings
+  // fails while the equation is translated.
+  const std::vector<std::pair<std::string, std::string>> cases{
+      {"Enable_discontinuity_capturing", "false"},
+      {"Enable_discontinuity_capturing", "true"},
+      {"Discontinuity_capturing_scale", "0.1"},
+      {"Discontinuity_capturing_gradient_epsilon", "1.0e-12"},
+      {"Discontinuity_capturing_max_courant", "0.5"},
+  };
+  for (const auto& [key, value] : cases) {
+    auto mesh = makeRegistryQuadMesh();
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "level_set";
+    input.mesh_name = "quad";
+    input.mesh = mesh->local_mesh_ptr();
+    input.equation_params["Level_set_field_name"] =
+        svmp::Physics::ParameterValue{true, "phi"};
+    input.equation_params["Velocity_source"] =
+        svmp::Physics::ParameterValue{true, "constant"};
+    input.equation_params["Constant_velocity"] =
+        svmp::Physics::ParameterValue{true, "0.0 0.0 0.0"};
+    input.equation_params["Enable_SUPG"] =
+        svmp::Physics::ParameterValue{true, "true"};
+    input.equation_params[key] = svmp::Physics::ParameterValue{true, value};
+
+    svmp::FE::systems::FESystem system(mesh);
+    if (value == "false") {
+      auto module =
+          application::translators::level_set::createModule(input, system);
+      ASSERT_TRUE(module);
+      const auto artifact = module->effectiveConfigurationArtifact();
+      ASSERT_TRUE(artifact.has_value());
+      EXPECT_EQ(artifact->json.find("discontinuity_capturing"),
+                std::string::npos);
+      continue;
+    }
+    try {
+      (void)application::translators::level_set::createModule(input, system);
+      ADD_FAILURE() << key << '=' << value << " was accepted";
+    } catch (const std::exception& error) {
+      EXPECT_NE(std::string(error.what()).find("retired (decision D47)"),
+                std::string::npos)
+          << key << ": " << error.what();
+    }
+  }
 #endif
 }
 

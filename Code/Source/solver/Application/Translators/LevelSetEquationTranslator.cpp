@@ -598,17 +598,7 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
       << ",\"velocity_epsilon\":"
       << json_real(options.supg.velocity_epsilon)
       << ",\"transient_scale\":"
-      << json_real(options.supg.transient_scale)
-      << ",\"discontinuity_capturing_enabled\":"
-      << json_bool(options.supg.discontinuity_capturing_enabled)
-      << ",\"discontinuity_capturing_scale\":"
-      << json_real(options.supg.discontinuity_capturing_scale)
-      << ",\"gradient_epsilon\":"
-      << json_real(options.supg.gradient_epsilon)
-      << ",\"residual_epsilon\":"
-      << json_real(options.supg.discontinuity_capturing_residual_epsilon)
-      << ",\"maximum_courant\":"
-      << json_real(options.supg.discontinuity_capturing_max_courant) << '}'
+      << json_real(options.supg.transient_scale) << '}'
       << ",\"bound_preserving\":{\"enabled\":"
       << json_bool(options.bound_preserving.enabled)
       << ",\"method\":\"nodal_rejection_projection_nonconservative\""
@@ -1445,35 +1435,20 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
           "SUPG_transient_scale")) {
     options.supg.transient_scale = *value;
   }
-  if (const auto value = get_defined_bool(
-          params,
-          {"Enable_discontinuity_capturing"})) {
-    options.supg.discontinuity_capturing_enabled = *value;
-  }
-  if (const auto value = get_defined_real(
-          params,
-          {"Discontinuity_capturing_scale"},
-          "Discontinuity_capturing_scale")) {
-    options.supg.discontinuity_capturing_scale = *value;
-  }
-  if (const auto value = get_defined_real(
-          params,
-          {"Discontinuity_capturing_gradient_epsilon"},
-          "Discontinuity_capturing_gradient_epsilon")) {
-    options.supg.gradient_epsilon = *value;
-  }
-  if (const auto value = get_defined_real(
-          params,
-          {"Discontinuity_capturing_residual_epsilon",
-           "DiscontinuityCapturingResidualEpsilon"},
-          "Discontinuity_capturing_residual_epsilon")) {
-    options.supg.discontinuity_capturing_residual_epsilon = *value;
-  }
-  if (const auto value = get_defined_real(
-          params,
-          {"Discontinuity_capturing_max_courant"},
-          "Discontinuity_capturing_max_courant")) {
-    options.supg.discontinuity_capturing_max_courant = *value;
+  // The SUPG discontinuity capturing of the level-set transport was retired
+  // (decision D47).  Decks may still state it as disabled.
+  if (get_defined_bool(params, {"Enable_discontinuity_capturing"})
+          .value_or(false) ||
+      get_defined_string(params,
+                         {"Discontinuity_capturing_scale",
+                          "Discontinuity_capturing_gradient_epsilon",
+                          "Discontinuity_capturing_max_courant"})
+          .has_value()) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Application] Level-set discontinuity capturing "
+        "(Enable_discontinuity_capturing and the Discontinuity_capturing_* "
+        "settings) was retired (decision D47); no accepted benchmark used "
+        "it.  Remove these keys or set Enable_discontinuity_capturing=false.");
   }
   if (const auto value = get_defined_bool(
           params,

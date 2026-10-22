@@ -73,21 +73,6 @@ struct LevelSetSUPGOptions {
     // Tezduyar-style transient contribution to the inverse stabilization
     // time scale.  The metric contribution is u . (J^-T J^-1) u.
     Real transient_scale{2.0};
-    // Residual-based isotropic discontinuity capturing within the SUPG path.
-    // It has a separate switch so smooth manufactured solutions can disable it
-    // while steep level-set fronts retain cross-stream control.
-    bool discontinuity_capturing_enabled{false};
-    Real discontinuity_capturing_scale{0.1};
-    Real gradient_epsilon{1.0e-12};
-    // Smooth |R| only inside the DC diffusivity as
-    // sqrt(R^2+eps_R^2)-eps_R.  This preserves zero diffusivity and selects
-    // the symmetric/Clarke derivative zero at R=0, avoiding the arbitrary
-    // one-sided abs tangent used by generic FormExpr::abs.
-    Real discontinuity_capturing_residual_epsilon{1.0e-12};
-    // Caps artificial diffusivity at this multiple of h*|u| + h^2/dt.  A
-    // positive cap prevents a large transient residual from erasing the
-    // interface.
-    Real discontinuity_capturing_max_courant{0.5};
 };
 
 /**

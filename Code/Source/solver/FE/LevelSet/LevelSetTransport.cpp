@@ -1600,36 +1600,6 @@ systems::CoupledResidualKernels installLevelSetTransport(
         throw std::invalid_argument(
             "installLevelSetTransport: SUPG transient_scale must be positive");
     }
-    if (options.supg.discontinuity_capturing_enabled &&
-        !options.supg.enabled) {
-        throw std::invalid_argument(
-            "installLevelSetTransport: discontinuity capturing requires SUPG to be enabled");
-    }
-    if (options.supg.discontinuity_capturing_enabled &&
-        (!(options.supg.discontinuity_capturing_scale > 0.0) ||
-         !std::isfinite(options.supg.discontinuity_capturing_scale))) {
-        throw std::invalid_argument(
-            "installLevelSetTransport: discontinuity_capturing_scale must be positive when enabled");
-    }
-    if (options.supg.discontinuity_capturing_enabled &&
-        (!(options.supg.gradient_epsilon > 0.0) ||
-         !std::isfinite(options.supg.gradient_epsilon))) {
-        throw std::invalid_argument(
-            "installLevelSetTransport: SUPG gradient_epsilon must be positive when discontinuity capturing is enabled");
-    }
-    if (options.supg.discontinuity_capturing_enabled &&
-        (!(options.supg.discontinuity_capturing_residual_epsilon > 0.0) ||
-         !std::isfinite(
-             options.supg.discontinuity_capturing_residual_epsilon))) {
-        throw std::invalid_argument(
-            "installLevelSetTransport: discontinuity_capturing_residual_epsilon must be positive when enabled");
-    }
-    if (options.supg.discontinuity_capturing_enabled &&
-        (!(options.supg.discontinuity_capturing_max_courant > 0.0) ||
-         !std::isfinite(options.supg.discontinuity_capturing_max_courant))) {
-        throw std::invalid_argument(
-            "installLevelSetTransport: discontinuity_capturing_max_courant must be positive when enabled");
-    }
     validateReinitializationOptions(options.reinitialization);
     validateVolumeCorrectionOptions(options.volume_correction);
     validateInterfaceKinematicOptions(options.interface_kinematic);
@@ -1911,39 +1881,6 @@ systems::CoupledResidualKernels installLevelSetTransport(
         };
         residual = residual + integrate(streamline_test * time_residual) +
                    integrate(streamline_test * spatial_residual);
-
-        if (options.supg.discontinuity_capturing_enabled) {
-            // Residual-based diffusion supplies the cross-stream control that
-            // streamline-only SUPG lacks at a gate/interface cliff.  Cap it by
-            // h|u| + h^2/dt so transient nonlinear residuals cannot create
-            // unbounded artificial diffusion while low-speed wall/interface
-            // regions retain a finite transient cap.
-            const auto strong_residual = time_residual + spatial_residual;
-            const auto grad_norm = sqrt(
-                inner(grad(phi), grad(phi)) +
-                FormExpr::constant(options.supg.gradient_epsilon));
-            const auto speed = sqrt(
-                inner(advecting_velocity, advecting_velocity) + eps);
-            const auto raw_diffusivity =
-                FormExpr::constant(options.supg.discontinuity_capturing_scale) *
-                h() *
-                (smoothAbs(
-                     strong_residual,
-                     FormExpr::constant(
-                         options.supg
-                             .discontinuity_capturing_residual_epsilon)) -
-                 FormExpr::constant(
-                     options.supg
-                         .discontinuity_capturing_residual_epsilon)) /
-                grad_norm;
-            const auto diffusivity_cap =
-                FormExpr::constant(
-                    options.supg.discontinuity_capturing_max_courant) *
-                (h() * speed + h() * h() / dt_eff);
-            const auto diffusivity = min(raw_diffusivity, diffusivity_cap);
-            residual = residual + integrate(
-                diffusivity * inner(grad(phi), grad(eta)));
-        }
     };
     if (material_interface_velocity) {
         appendSupg(

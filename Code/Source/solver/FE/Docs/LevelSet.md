@@ -69,12 +69,8 @@ directional, transient scale is
 `G = J^-T J^-1`.
 
 This metric responds to the streamline direction on anisotropic cells and stays
-finite as the velocity tends to zero. Residual-based discontinuity capturing is
-an explicit opt-in and requires SUPG to be enabled. It adds isotropic diffusion
-with
-
-`nu_dc = min(c_dc h |R| / sqrt(|grad(phi)|^2 + epsilon_g),
-             c_C (h |u| + h^2 / dt_eff))`.
+finite as the velocity tends to zero. The residual-based discontinuity
+capturing that could be added to SUPG was retired by decision D47.
 
 The bound-preserving candidate gate is also an explicit opt-in. It currently
 supports only unconstrained scalar P1 H1 level-set unknowns. After a nonlinear

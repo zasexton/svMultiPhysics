@@ -27,10 +27,6 @@ TEST(LevelSetOptions, DefaultsAreNeutral)
     EXPECT_DOUBLE_EQ(options.supg.tau_scale, 0.5);
     EXPECT_DOUBLE_EQ(options.supg.velocity_epsilon, 1.0e-12);
     EXPECT_DOUBLE_EQ(options.supg.transient_scale, 2.0);
-    EXPECT_FALSE(options.supg.discontinuity_capturing_enabled);
-    EXPECT_DOUBLE_EQ(options.supg.discontinuity_capturing_scale, 0.1);
-    EXPECT_DOUBLE_EQ(options.supg.gradient_epsilon, 1.0e-12);
-    EXPECT_DOUBLE_EQ(options.supg.discontinuity_capturing_max_courant, 0.5);
     EXPECT_FALSE(options.reinitialization.enabled);
     EXPECT_EQ(options.reinitialization.method,
               level_set::LevelSetReinitializationMethod::Projection);
@@ -150,10 +146,6 @@ TEST(LevelSetOptions, ExplicitTransportOptions)
     options.supg.tau_scale = 0.25;
     options.supg.velocity_epsilon = 1.0e-8;
     options.supg.transient_scale = 1.5;
-    options.supg.discontinuity_capturing_enabled = false;
-    options.supg.discontinuity_capturing_scale = 0.2;
-    options.supg.gradient_epsilon = 1.0e-9;
-    options.supg.discontinuity_capturing_max_courant = 0.3;
     options.reinitialization.enabled = true;
     options.reinitialization.method = level_set::LevelSetReinitializationMethod::Projection;
     options.reinitialization.cadence_steps = 4;
@@ -195,10 +187,6 @@ TEST(LevelSetOptions, ExplicitTransportOptions)
     EXPECT_DOUBLE_EQ(options.supg.tau_scale, 0.25);
     EXPECT_DOUBLE_EQ(options.supg.velocity_epsilon, 1.0e-8);
     EXPECT_DOUBLE_EQ(options.supg.transient_scale, 1.5);
-    EXPECT_FALSE(options.supg.discontinuity_capturing_enabled);
-    EXPECT_DOUBLE_EQ(options.supg.discontinuity_capturing_scale, 0.2);
-    EXPECT_DOUBLE_EQ(options.supg.gradient_epsilon, 1.0e-9);
-    EXPECT_DOUBLE_EQ(options.supg.discontinuity_capturing_max_courant, 0.3);
     EXPECT_TRUE(options.reinitialization.enabled);
     EXPECT_EQ(options.reinitialization.method, level_set::LevelSetReinitializationMethod::Projection);
     EXPECT_EQ(options.reinitialization.cadence_steps, 4);
