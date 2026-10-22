@@ -487,15 +487,6 @@ bool freeSurfaceConservativeBalanceDiagnosticEnabled()
     return false;
 }
 
-bool symmetricNitscheEnergyDiagnosticEnabled()
-{
-    if (auto value = readDiagnosticBooleanOverride(
-            "SVMP_NS_SYMMETRIC_NITSCHE_ENERGY_DIAGNOSTIC")) {
-        return value->value;
-    }
-    return false;
-}
-
 bool constrainInactiveActiveDomainVelocity(
     const FreeSurfaceBoundary& active_domain_boundary)
 {
@@ -4358,7 +4349,6 @@ void validateNavierStokesBoundaryConfiguration(
         q,
         FormExpr::constant(options.viscosity),
         generated_active_boundary_for,
-        nullptr,
         &generated_nitsche_trace_binding_preflight);
     std::size_t expected_generated_nitsche_trace_bindings = 0u;
     for (const auto& bc : options.velocity_dirichlet_weak) {
@@ -6934,21 +6924,6 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     if (options_.viscosity_model == nullptr && !(options_.viscosity > 0.0)) {
         throw std::invalid_argument("IncompressibleNavierStokesVMSModule::registerOn: viscosity must be > 0 when viscosity_model is not provided");
     }
-    const bool nitsche_energy_diagnostic_requested =
-        symmetricNitscheEnergyDiagnosticEnabled();
-    if (nitsche_energy_diagnostic_requested &&
-        options_
-                .symmetric_nitsche_energy_qualification_scope !=
-            SymmetricNitscheEnergyQualificationScope::
-                JointLowLevelPrerequisite) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule::registerOn: symmetric Nitsche energy diagnostic requires explicit joint_low_level_prerequisite scope");
-    }
-    if (nitsche_energy_diagnostic_requested &&
-        options_.viscosity_model != nullptr) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule::registerOn: symmetric Nitsche energy diagnostic requires constant viscosity; viscosity_model is unsupported");
-    }
     const bool enable_vms = options_.enable_vms;
     // The area-gradient traction publishes a compatible stationary pressure
     // state and history. Stabilizing its absolute gradient would recreate a
@@ -8224,7 +8199,6 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     // that order, after the essential conditions above.
     constraint_plan.commit();
 
-    Factories::VelocityNitscheEnergyForms nitsche_energy_forms;
     std::vector<
         FE::forms::bc::
             GeneratedBoundaryNitscheTraceFormBinding>
@@ -8240,9 +8214,6 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         q,
         mu,
         generated_active_boundary_for,
-        nitsche_energy_diagnostic_requested
-            ? &nitsche_energy_forms
-            : nullptr,
         pending_small_cut_aggregation.has_value()
             ? &generated_nitsche_trace_bindings
             : nullptr,
@@ -8548,108 +8519,6 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         }
         FE_LOG_INFO(
             "IncompressibleNavierStokesVMSModule: diagnostic=free_surface_residual_work_operators status=declared channels=convection|pressure_continuity|nonconservative_body_force|weak_boundary|vms_pspg|cut_stabilization|ghost_penalty contract=negative_dt_times_constrained_operator_stage_pairing");
-    }
-
-    if (nitsche_energy_diagnostic_requested &&
-        !nitsche_energy_forms.symmetric_boundaries.empty()) {
-        const auto bulk_viscous_form =
-            integrateOnActiveVolume(viscous, active_volume_domain);
-        const auto bulk_plus_consistency_form =
-            bulk_viscous_form +
-            nitsche_energy_forms.symmetric_consistency;
-        const auto symmetric_operator_form =
-            bulk_plus_consistency_form +
-            nitsche_energy_forms.penalty;
-        const auto energy_norm_form =
-            bulk_viscous_form + nitsche_energy_forms.penalty;
-        const auto install_velocity_diagnostic =
-            [&](std::string_view operator_tag,
-                const FormExpr& diagnostic_form) {
-                auto diagnostic_install = install;
-                diagnostic_install.source_component_tag =
-                    std::string(operator_tag);
-                diagnostic_install.extra_trial_fields.clear();
-                diagnostic_install
-                    .generated_boundary_nitsche_trace_requests
-                    .clear();
-                (void)FE::systems::installFormulation(
-                    system,
-                    std::string(operator_tag),
-                    {u_id},
-                    diagnostic_form,
-                    diagnostic_install);
-            };
-        install_velocity_diagnostic(
-            SymmetricNitscheEnergyDiagnosticOperators::bulk_viscous,
-            bulk_viscous_form);
-        install_velocity_diagnostic(
-            SymmetricNitscheEnergyDiagnosticOperators::
-                bulk_plus_consistency,
-            bulk_plus_consistency_form);
-        install_velocity_diagnostic(
-            SymmetricNitscheEnergyDiagnosticOperators::symmetric_operator,
-            symmetric_operator_form);
-        install_velocity_diagnostic(
-            SymmetricNitscheEnergyDiagnosticOperators::energy_norm,
-            energy_norm_form);
-        const auto generated_sharp_boundary_count =
-            static_cast<std::size_t>(std::count_if(
-                nitsche_energy_forms.symmetric_boundaries.begin(),
-                nitsche_energy_forms.symmetric_boundaries.end(),
-                [](const auto& route) {
-                    return route.generated_active_boundary_marker
-                        .has_value();
-                }));
-        std::string boundary_routes;
-        for (const auto& route :
-             nitsche_energy_forms.symmetric_boundaries) {
-            if (!boundary_routes.empty()) {
-                boundary_routes += ",";
-            }
-            boundary_routes +=
-                std::to_string(route.physical_boundary_marker) +
-                "->";
-            boundary_routes +=
-                route.generated_active_boundary_marker.has_value()
-                    ? std::to_string(
-                          *route.generated_active_boundary_marker)
-                    : "full";
-        }
-        FE_LOG_INFO(
-            std::string(
-                "IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_symmetric_nitsche_energy_operators") +
-            " status=installed"
-            " symmetric_boundary_count=" +
-            std::to_string(
-                nitsche_energy_forms.symmetric_boundaries.size()) +
-            " generated_sharp_boundary_count=" +
-            std::to_string(generated_sharp_boundary_count) +
-            " full_boundary_count=" +
-            std::to_string(
-                nitsche_energy_forms.symmetric_boundaries.size() -
-                generated_sharp_boundary_count) +
-            " boundary_routes='" + boundary_routes + "'" +
-            " bulk_operator='" +
-            std::string(
-                SymmetricNitscheEnergyDiagnosticOperators::bulk_viscous) +
-            "' bulk_plus_consistency_operator='" +
-            std::string(
-                SymmetricNitscheEnergyDiagnosticOperators::
-                    bulk_plus_consistency) +
-            "' symmetric_operator='" +
-            std::string(
-                SymmetricNitscheEnergyDiagnosticOperators::
-                    symmetric_operator) +
-            "' energy_norm_operator='" +
-            std::string(
-                SymmetricNitscheEnergyDiagnosticOperators::energy_norm) +
-            "' scope=velocity_viscous_block_only"
-            " transient_pressure_convection_excluded=1");
-    } else if (nitsche_energy_diagnostic_requested) {
-        FE_LOG_WARNING(
-            "IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_symmetric_nitsche_energy_operators"
-            " status=skipped"
-            " reason=no_symmetric_weak_velocity_boundary");
     }
 
     if (vms_pspg_pressure_gradient_form.isValid()) {

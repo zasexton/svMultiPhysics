@@ -379,17 +379,6 @@ namespace detail {
         marker, flux, generated_active_boundary_marker);
 }
 
-struct VelocityNitscheEnergyForms {
-    struct BoundaryRoute {
-        int physical_boundary_marker{-1};
-        std::optional<int> generated_active_boundary_marker{};
-    };
-
-    FE::forms::FormExpr symmetric_consistency{};
-    FE::forms::FormExpr penalty{};
-    std::vector<BoundaryRoute> symmetric_boundaries{};
-};
-
 inline void appendDiagnosticForm(FE::forms::FormExpr& destination,
                                  const FE::forms::FormExpr& contribution)
 {
@@ -410,7 +399,6 @@ inline void applyVelocityNitscheBCs(
     const FE::forms::FormExpr& mu,
     const std::function<std::optional<int>(int)>&
         generated_active_boundary_marker = {},
-    VelocityNitscheEnergyForms* energy_forms = nullptr,
     std::vector<
         FE::forms::bc::
             GeneratedBoundaryNitscheTraceFormBinding>*
@@ -522,21 +510,6 @@ inline void applyVelocityNitscheBCs(
                         q * FE::forms::inner(n, diff),
                         marker,
                         generated_marker));
-                if (energy_forms != nullptr) {
-                    appendDiagnosticForm(
-                        energy_forms->symmetric_consistency,
-                        bound_terms
-                            .homogeneous_symmetric_consistency);
-                    appendDiagnosticForm(
-                        energy_forms->penalty,
-                        bound_terms.homogeneous_penalty);
-                    energy_forms->symmetric_boundaries.push_back(
-                        {
-                            .physical_boundary_marker = marker,
-                            .generated_active_boundary_marker =
-                                generated_marker,
-                        });
-                }
             } else {
                 append_continuity(
                     -integrate(
@@ -566,31 +539,6 @@ inline void applyVelocityNitscheBCs(
                     q * FE::forms::inner(n, diff),
                     marker,
                     generated_marker));
-            if (energy_forms != nullptr) {
-                const auto consistency =
-                    -integrate(
-                        FE::forms::inner(stress_u * n, v),
-                        marker,
-                        generated_marker) -
-                    integrate(
-                        FE::forms::inner(stress_v * n, u),
-                        marker,
-                        generated_marker);
-                const auto penalty_energy = integrate(
-                    penalty * FE::forms::inner(u, v),
-                    marker,
-                    generated_marker);
-                appendDiagnosticForm(
-                    energy_forms->symmetric_consistency, consistency);
-                appendDiagnosticForm(
-                    energy_forms->penalty, penalty_energy);
-                energy_forms->symmetric_boundaries.push_back(
-                    {
-                        .physical_boundary_marker = marker,
-                        .generated_active_boundary_marker =
-                            generated_marker,
-                    });
-            }
         } else {
             append_momentum(
                 integrate(
