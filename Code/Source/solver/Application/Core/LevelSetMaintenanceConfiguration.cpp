@@ -159,12 +159,6 @@ void appendInstallationObservations(
                                   aliases::reinitialization_cadence,
                                   "reinitialization_cadence_steps");
     appendInstallationObservation(observations, input,
-                                  aliases::volume_correction_enable,
-                                  "enable_volume_correction");
-    appendInstallationObservation(observations, input,
-                                  aliases::volume_correction_tolerance,
-                                  "volume_correction_tolerance");
-    appendInstallationObservation(observations, input,
                                   aliases::curvature_field,
                                   "curvature_field_name");
   }
@@ -174,7 +168,7 @@ void appendInstallationObservations(
                       installation->input_observations.end());
 
   const bool source_backed = !installation->input_observations.empty();
-  constexpr std::array<std::string_view, 14> covered_keys{
+  constexpr std::array<std::string_view, 12> covered_keys{
       "level_set_field_name",
       "transport_form",
       "velocity_source",
@@ -186,8 +180,6 @@ void appendInstallationObservations(
       "enable_reinitialization",
       "reinitialization_method",
       "reinitialization_cadence_steps",
-      "enable_volume_correction",
-      "volume_correction_tolerance",
       "curvature_field_name",
   };
   for (const auto key : covered_keys) {
@@ -216,7 +208,7 @@ void appendInstallationObservations(
 }
 
 void appendLegacyDefaults(std::vector<LevelSetInputObservation> &observations) {
-  constexpr std::array<std::string_view, 17> keys{
+  constexpr std::array<std::string_view, 15> keys{
       "level_set_field_name",
       "level_set_isovalue",
       "transport_form",
@@ -229,8 +221,6 @@ void appendLegacyDefaults(std::vector<LevelSetInputObservation> &observations) {
       "enable_reinitialization",
       "reinitialization_method",
       "reinitialization_cadence_steps",
-      "enable_volume_correction",
-      "volume_correction_tolerance",
       "enable_static_capillary_equilibrium_initialization",
       "enable_curvature_projection",
       "curvature_field_name",
@@ -577,41 +567,6 @@ resolveLegacyLevelSetMaintenanceConfiguration(
              result->transport.reinitialization.max_zero_set_displacement);
   append_equation_observations();
 
-  apply_boolean(aliases::volume_correction_enable, "enable_volume_correction",
-                result->transport.volume_correction.enabled);
-  apply_integer(aliases::volume_correction_cadence,
-                "volume_correction_cadence_steps",
-                result->transport.volume_correction.cadence_steps);
-  apply_boolean(aliases::volume_correction_use_initial,
-                "volume_correction_use_initial_volume",
-                result->transport.volume_correction
-                    .use_initial_negative_volume_as_target);
-  if (const auto target =
-          reader.real(aliases::volume_correction_target,
-                      "volume_correction_target_negative_volume")) {
-    result->transport.volume_correction.target_negative_volume = *target;
-    result->transport.volume_correction.use_initial_negative_volume_as_target =
-        false;
-  }
-  apply_real(aliases::volume_correction_tolerance,
-             "volume_correction_tolerance",
-             result->transport.volume_correction.volume_tolerance);
-  apply_integer(aliases::volume_correction_iterations,
-                "volume_correction_max_iterations",
-                result->transport.volume_correction.max_iterations);
-  apply_real_list(
-      {"Volume_correction_minimum_relative_error"},
-      "volume_correction_minimum_relative_error",
-      result->transport.volume_correction.minimum_relative_volume_error);
-  apply_real_list({"Volume_correction_maximum_interface_displacement_fraction"},
-                  "volume_correction_maximum_interface_displacement_fraction",
-                  result->transport.volume_correction
-                      .maximum_interface_displacement_fraction);
-  apply_real_list(
-      {"Volume_correction_maximum_cumulative_interface_displacement_fraction"},
-      "volume_correction_maximum_cumulative_interface_displacement_fraction",
-      result->transport.volume_correction
-          .maximum_cumulative_interface_displacement_fraction);
   apply_boolean_list(
       {"Enable_kinematic_reconciliation"},
       "enable_kinematic_reconciliation",
@@ -827,7 +782,6 @@ resolveLegacyLevelSetMaintenanceConfiguration(
   const bool enabled = result->transport.bound_preserving.enabled ||
                        result->transport.conservative_phase.enabled ||
                        result->transport.reinitialization.enabled ||
-                       result->transport.volume_correction.enabled ||
                        result->transport.kinematic_reconciliation.enabled ||
                        result->transport.sign_definite_patch_bounds.enabled ||
                        result->transport.interface_preserving_redistancing.enabled ||

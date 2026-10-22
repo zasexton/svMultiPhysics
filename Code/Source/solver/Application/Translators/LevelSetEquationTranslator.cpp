@@ -628,7 +628,7 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
       << json_string(
              options.conservative_phase.enabled
                  ? "conservative_phase_transport_then_raw_geometry_rebuild_then_wall_aware_reinitialization_then_local_geometry_reconciliation_then_validation_then_commit"
-                 : "transport_then_reinitialization_then_volume_correction_then_geometry_refresh")
+                 : "transport_then_reinitialization_then_geometry_refresh")
       << ",\"reinitialization\":{\"enabled\":"
       << json_bool(options.reinitialization.enabled)
       << ",\"method\":"
@@ -645,28 +645,7 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
       << ",\"preserve_band_width\":"
       << json_real(options.reinitialization.preserve_band_width)
       << ",\"maximum_zero_set_displacement\":"
-      << json_real(options.reinitialization.max_zero_set_displacement) << '}'
-      << ",\"volume_correction\":{\"enabled\":"
-      << json_bool(options.volume_correction.enabled)
-      << ",\"cadence_steps\":" << options.volume_correction.cadence_steps
-      << ",\"use_initial_negative_volume_as_target\":"
-      << json_bool(
-             options.volume_correction.use_initial_negative_volume_as_target)
-      << ",\"target_negative_volume\":"
-      << json_real(options.volume_correction.target_negative_volume)
-      << ",\"volume_tolerance\":"
-      << json_real(options.volume_correction.volume_tolerance)
-      << ",\"max_iterations\":"
-      << options.volume_correction.max_iterations
-      << ",\"minimum_relative_volume_error\":"
-      << json_real(options.volume_correction.minimum_relative_volume_error)
-      << ",\"maximum_interface_displacement_fraction\":"
-      << json_real(
-             options.volume_correction.maximum_interface_displacement_fraction)
-      << ",\"maximum_cumulative_interface_displacement_fraction\":"
-      << json_real(options.volume_correction
-                       .maximum_cumulative_interface_displacement_fraction)
-      << '}';
+      << json_real(options.reinitialization.max_zero_set_displacement) << '}';
   // Present only when enabled, so existing configurations keep their
   // artifact unchanged.
   if (options.kinematic_reconciliation.enabled) {
@@ -1548,53 +1527,27 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
     options.reinitialization.max_zero_set_displacement = *value;
   }
 
-  if (const auto value = get_defined_bool(
-          params, level_set_aliases::volume_correction_enable)) {
-    options.volume_correction.enabled = *value;
-  }
-  if (const auto value = get_defined_positive_int(
-          params, level_set_aliases::volume_correction_cadence,
-          "Volume_correction_cadence_steps")) {
-    options.volume_correction.cadence_steps = *value;
-  }
-  if (const auto value = get_defined_bool(
-          params, level_set_aliases::volume_correction_use_initial)) {
-    options.volume_correction.use_initial_negative_volume_as_target = *value;
-  }
-  if (const auto value = get_defined_real(
-          params, level_set_aliases::volume_correction_target,
-          "Volume_correction_target_negative_volume")) {
-    options.volume_correction.target_negative_volume = *value;
-    options.volume_correction.use_initial_negative_volume_as_target = false;
-  }
-  if (const auto value = get_defined_real(
-          params, level_set_aliases::volume_correction_tolerance,
-          "Volume_correction_tolerance")) {
-    options.volume_correction.volume_tolerance = *value;
-  }
-  if (const auto value = get_defined_positive_int(
-          params, level_set_aliases::volume_correction_iterations,
-          "Volume_correction_max_iterations")) {
-    options.volume_correction.max_iterations = *value;
-  }
-  if (const auto value = get_defined_real(
+  // The global level-set volume correction was retired (decision D47).
+  // Decks may still state it as disabled.
+  if (get_defined_bool(params, {"Enable_volume_correction"}).value_or(false) ||
+      get_defined_string(
           params,
-          {"Volume_correction_minimum_relative_error"},
-          "Volume_correction_minimum_relative_error")) {
-    options.volume_correction.minimum_relative_volume_error = *value;
-  }
-  if (const auto value = get_defined_real(
-          params,
-          {"Volume_correction_maximum_interface_displacement_fraction"},
-          "Volume_correction_maximum_interface_displacement_fraction")) {
-    options.volume_correction.maximum_interface_displacement_fraction = *value;
-  }
-  if (const auto value = get_defined_real(
-          params,
-          {"Volume_correction_maximum_cumulative_interface_displacement_fraction"},
-          "Volume_correction_maximum_cumulative_interface_displacement_fraction")) {
-    options.volume_correction
-        .maximum_cumulative_interface_displacement_fraction = *value;
+          {"Volume_correction_cadence_steps",
+           "Volume_correction_use_initial_volume",
+           "Volume_correction_target_negative_volume",
+           "Volume_correction_tolerance",
+           "Volume_correction_max_iterations",
+           "Volume_correction_minimum_relative_error",
+           "Volume_correction_maximum_interface_displacement_fraction",
+           "Volume_correction_maximum_cumulative_interface_displacement_fraction"})
+          .has_value()) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Application] The global level-set volume "
+        "correction (Enable_volume_correction and the Volume_correction_* "
+        "settings) was retired (decision D47); no accepted benchmark used "
+        "it, and the kinematic reconciliation keeps the liquid volume "
+        "consistent with the transport velocity.  Remove these keys or set "
+        "Enable_volume_correction=false.");
   }
   if (const auto value = get_defined_bool(
           params,

@@ -9828,12 +9828,9 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       svmp::FE::level_set::LevelSetVelocitySource::ConstantVector;
   second_configuration.transport.reinitialization.enabled = true;
   second_configuration.transport.reinitialization.cadence_steps = 3;
-  second_configuration.transport.volume_correction.enabled = true;
-  second_configuration.transport.volume_correction.cadence_steps = 4;
+  second_configuration.transport.kinematic_reconciliation.enabled = true;
   auto second = freezeMaintenanceConfiguration(
       std::move(second_configuration));
-  second.runtime.volume_target_initialized = true;
-  second.runtime.volume_target = 2.5;
   const std::vector<LevelSetMaintenanceRequest> baseline{
       first, second};
 
@@ -9888,8 +9885,13 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
              effectiveStaticCapillaryEquilibriumOptions(requests[0])
                  .target_liquid_volume + 0.5;
        }},
-      {"volume_target",
-       [](auto& requests) { requests[1].runtime.volume_target += 0.75; }},
+      {"kinematic_reconciliation",
+       [](auto& requests) {
+         requests[1] = withMaintenanceConfiguration(
+             requests[1], [&](auto& configured) {
+               configured.transport.kinematic_reconciliation.enabled = false;
+             });
+       }},
       {"graph_dof_layout_revision",
        [](auto& requests) {
          ++requests[0].runtime.conservative_phase_graph->dof_layout_revision;

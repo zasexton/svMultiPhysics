@@ -3,7 +3,7 @@
 /**
  * @file
  * @ingroup fe_level_set
- * @brief Cut-cell volume measurement and global-shift correction utilities.
+ * @brief Cut-cell volume measurement utilities.
  */
 
 #include "Assembly/Assembler.h"
@@ -74,89 +74,6 @@ struct LevelSetVolumeResult {
     double generated_backend_elapsed_seconds{0.0};
 };
 
-struct LevelSetGlobalShiftCorrectionOptions {
-    Real target_negative_volume{0.0};
-    Real volume_tolerance{1.0e-10};
-    int max_iterations{50};
-    // Zero retains the low-level utility's historical always-correct behavior.
-    // The application supplies a positive fallback threshold.
-    Real minimum_relative_volume_error{0.0};
-    // Every individual correction event is bounded.  The low-level default
-    // permits at most one minimum mesh-edge length; applications should
-    // normally choose a tighter fraction.  This is not a cumulative-in-time
-    // displacement bound.  Zero is rejected rather than silently restoring an
-    // unbounded global shift.
-    Real maximum_interface_displacement_fraction{1.0};
-};
-
-struct LevelSetComponentVolumeTransfer {
-    // The minimum global vertex id in the topology-stable negative-phase
-    // component.  A permitted global shift cannot change vertex signs, so
-    // this identity is unchanged by the correction and across partitions.
-    GlobalIndex component_global_vertex_id{INVALID_GLOBAL_INDEX};
-    Real initial_negative_volume{0.0};
-    Real corrected_negative_volume{0.0};
-    Real volume_transfer{0.0};
-};
-
-struct LevelSetGlobalShiftCorrectionResult {
-    // All decision-driving volumes, shifts, and displacement metrics are
-    // communicator-global and therefore identical on every participating rank.
-    bool success{false};
-    bool correction_triggered{false};
-    bool correction_applied{false};
-    bool target_reached{false};
-    // True when the target lies outside the final per-event bracket imposed
-    // by either the physical-displacement or topology-stability guard.
-    bool limited_by_displacement_bound{false};
-    int iterations{0};
-    Real applied_shift{0.0};
-    Real target_negative_volume{0.0};
-    Real initial_negative_volume{0.0};
-    Real corrected_negative_volume{0.0};
-    Real volume_error{0.0};
-    Real trigger_volume_error{0.0};
-    Real minimum_edge_length{0.0};
-    Real maximum_allowed_interface_displacement{0.0};
-    // Certified symmetric coefficient-shift limit that preserves every
-    // current simplicial P1 vertex sign with a two-tolerance margin.
-    Real maximum_topology_stable_shift{0.0};
-    Real max_interface_displacement{0.0};
-    // Conservative maximum over all physical-boundary level-set
-    // intersections; this bounds the wall-contact-line subset.
-    Real max_contact_line_displacement{0.0};
-    // Retained compatibility/telemetry name for the wall-tangent contact-line
-    // displacement estimate.  It equals max_contact_line_displacement.
-    Real contact_line_displacement_bound{0.0};
-    // A uniform coefficient shift leaves the P1 gradient, and therefore the
-    // interface/wall angle inside every topology-stable cut simplex,
-    // unchanged.  This metric records that exact geometric consequence.
-    Real max_contact_angle_change_radians{0.0};
-    // Per-component accounting is evaluated on the same physical simplicial
-    // P1 cut measure as the qualified correction.  Records are ordered by the
-    // partition-independent component identity above and are identical on
-    // every participating rank.
-    bool negative_component_topology_preserved{false};
-    std::vector<LevelSetComponentVolumeTransfer>
-        negative_component_volume_transfers{};
-    Real total_component_volume_transfer{0.0};
-    Real total_absolute_component_volume_transfer{0.0};
-    Real maximum_absolute_component_volume_transfer{0.0};
-    LevelSetVolumeResult initial_volume{};
-    LevelSetVolumeResult corrected_volume{};
-    std::string diagnostic{};
-    std::size_t generated_volume_measurement_count{0};
-    std::size_t generated_cell_cache_hits{0};
-    std::size_t generated_cell_cache_misses{0};
-    std::size_t generated_cell_cache_unchanged_dof_hits{0};
-    std::size_t generated_cell_refresh_candidate_count{0};
-    std::size_t generated_directly_affected_cell_count{0};
-    std::size_t generated_affected_cell_neighborhood_count{0};
-    std::size_t generated_domain_cache_hits{0};
-    std::size_t generated_linear_full_cell_fast_path_count{0};
-    double generated_backend_elapsed_seconds{0.0};
-};
-
 [[nodiscard]] LevelSetVolumeResult computeLevelSetCutCellVolume(
     const assembly::IMeshAccess& mesh,
     const dofs::DofHandler& level_set_dofs,
@@ -168,28 +85,5 @@ struct LevelSetGlobalShiftCorrectionResult {
     FieldId level_set_field,
     const LevelSetVolumeOptions& options,
     std::span<const Real> solution);
-
-// The correction and its vertex-based displacement certification are
-// qualified only for scalar, nodal, continuous P1 fields on linear triangle
-// or tetrahedron meshes.  Other spaces/topologies fail closed before state is
-// modified.  A triggered correction also requires a nondegenerate interface
-// with a strict edge crossing and every vertex outside a two-tolerance safety
-// margin around the isovalue.
-[[nodiscard]] LevelSetGlobalShiftCorrectionResult applyGlobalLevelSetShiftCorrection(
-    const assembly::IMeshAccess& mesh,
-    const dofs::DofHandler& level_set_dofs,
-    const LevelSetVolumeOptions& volume_options,
-    const LevelSetGlobalShiftCorrectionOptions& correction_options,
-    std::span<const Real> coefficients,
-    std::vector<Real>& corrected_coefficients);
-
-// System-level overload with the same qualified-space and interface guards.
-[[nodiscard]] LevelSetGlobalShiftCorrectionResult applyGlobalLevelSetShiftCorrection(
-    const systems::FESystem& system,
-    FieldId level_set_field,
-    const LevelSetVolumeOptions& volume_options,
-    const LevelSetGlobalShiftCorrectionOptions& correction_options,
-    std::span<const Real> solution,
-    std::vector<Real>& corrected_solution);
 
 } // namespace svmp::FE::level_set

@@ -167,18 +167,6 @@ inline constexpr std::array<std::string_view, 1>
 inline constexpr std::array<std::string_view, 1>
     reinitialization_max_zero_set_displacement{
         "Reinitialization_max_zero_set_displacement"};
-inline constexpr std::array<std::string_view, 1> volume_correction_enable{
-    "Enable_volume_correction"};
-inline constexpr std::array<std::string_view, 1> volume_correction_cadence{
-    "Volume_correction_cadence_steps"};
-inline constexpr std::array<std::string_view, 1> volume_correction_use_initial{
-    "Volume_correction_use_initial_volume"};
-inline constexpr std::array<std::string_view, 1> volume_correction_target{
-    "Volume_correction_target_negative_volume"};
-inline constexpr std::array<std::string_view, 1> volume_correction_tolerance{
-    "Volume_correction_tolerance"};
-inline constexpr std::array<std::string_view, 1> volume_correction_iterations{
-    "Volume_correction_max_iterations"};
 inline constexpr std::array<std::string_view, 8> curvature_field{
     "Curvature_field_name",
     "CurvatureFieldName",

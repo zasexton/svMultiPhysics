@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "Application/Translators/EquationTranslator.h"
+#include "Application/Translators/LevelSetEquationTranslator.h"
 
 #include "Application/Core/LevelSetMaintenanceConfiguration.h"
 
@@ -125,10 +126,6 @@ void expectMaintenanceCompatibilityFieldsEqual(
             expected_transport.reinitialization.method);
   EXPECT_EQ(actual_transport.reinitialization.cadence_steps,
             expected_transport.reinitialization.cadence_steps);
-  EXPECT_EQ(actual_transport.volume_correction.enabled,
-            expected_transport.volume_correction.enabled);
-  EXPECT_EQ(actual_transport.volume_correction.volume_tolerance,
-            expected_transport.volume_correction.volume_tolerance);
   EXPECT_EQ(actual.isovalue, expected.isovalue);
   ASSERT_EQ(actual.open_boundaries.size(), expected.open_boundaries.size());
   for (std::size_t index = 0u; index < expected.open_boundaries.size(); ++index) {
@@ -2906,8 +2903,6 @@ void expectProductionCapillaryFunctionalDerivatives(bool sessile)
             history.stepIndex());
     const bool equilibrium_initialized_before =
         fixture->requests.front().runtime.static_capillary_equilibrium_initialized;
-    const bool volume_initialized_before =
-        fixture->requests.front().runtime.volume_target_initialized;
     const bool phase_initialized_before =
         fixture->requests.front().runtime.conservative_phase_initialized;
 
@@ -3610,9 +3605,6 @@ void expectProductionCapillaryFunctionalDerivatives(bool sessile)
     EXPECT_EQ(
         fixture->requests.front().runtime.static_capillary_equilibrium_initialized,
         equilibrium_initialized_before);
-    EXPECT_EQ(
-        fixture->requests.front().runtime.volume_target_initialized,
-        volume_initialized_before);
     EXPECT_EQ(
         fixture->requests.front().runtime.conservative_phase_initialized,
         phase_initialized_before);
@@ -6618,15 +6610,15 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_EQ(accepted.configuration.get(), configuration.get());
   EXPECT_DOUBLE_EQ(accepted.configuration->isovalue, 0.375);
 
-  accepted.runtime.volume_target_initialized = true;
-  accepted.runtime.volume_target = 1.25;
+  accepted.runtime.redistancing_calls = 3u;
+  accepted.runtime.redistancing_accumulated_displacement = 1.25;
   auto trial = accepted;
-  trial.runtime.volume_target = 2.5;
+  trial.runtime.redistancing_accumulated_displacement = 2.5;
 
   EXPECT_EQ(trial.configuration.get(), accepted.configuration.get());
-  EXPECT_TRUE(trial.runtime.volume_target_initialized);
-  EXPECT_DOUBLE_EQ(accepted.runtime.volume_target, 1.25);
-  EXPECT_DOUBLE_EQ(trial.runtime.volume_target, 2.5);
+  EXPECT_EQ(trial.runtime.redistancing_calls, 3u);
+  EXPECT_DOUBLE_EQ(accepted.runtime.redistancing_accumulated_displacement, 1.25);
+  EXPECT_DOUBLE_EQ(trial.runtime.redistancing_accumulated_displacement, 2.5);
   EXPECT_THROW(
       (void)LevelSetMaintenanceRequest(ConfigurationHandle{}),
       std::invalid_argument);
@@ -6768,11 +6760,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
   auto trial_requests = requests;
   trial_requests.front().runtime.measured_static_capillary_target = 1.25;
   trial_requests.front().runtime.static_capillary_equilibrium_initialized = true;
-  trial_requests.front().runtime.volume_target_initialized = true;
-  trial_requests.front().runtime.volume_target = 2.5;
-  trial_requests.front().runtime.volume_correction_reference_minimum_edge_length = 0.125;
-  trial_requests.front().runtime.cumulative_volume_correction_interface_displacement = 0.375;
-  trial_requests.front().runtime.cumulative_volume_correction_contact_line_displacement = -0.625;
   const auto trial = canonicalLevelSetMaintenanceRequestSchedule(
       trial_requests,
       LevelSetMaintenanceScheduleStage::TransientInitialization,
@@ -14238,8 +14225,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   scatterFeOrderedSolution(
       mismatched_nonendpoint_history.uDDot(), contact_acceleration);
   const LevelSetMaintenanceCandidateValidator inert_candidate_validator =
-      [](std::span<const svmp::FE::Real>,
-         std::span<const LevelSetVolumeCorrectionMaintenanceEvent>) {};
+      [](std::span<const svmp::FE::Real>) {};
   const LevelSetMaintenanceStageObserver inert_work_observer =
       [](application::core::LevelSetMaintenanceWorkSubstage,
          std::span<const svmp::FE::Real>,
@@ -14255,7 +14241,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
         contact_stages,
         contact_stage_constraints,
         contact_stage_candidate.stage_solution,
-        nullptr,
         inert_candidate_validator,
         inert_work_observer,
         nullptr,
@@ -14328,11 +14313,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
         observed_nonendpoint_after.assign(after.begin(), after.end());
       };
   const LevelSetMaintenanceCandidateValidator nonendpoint_candidate_validator =
-      [&](std::span<const svmp::FE::Real> candidate,
-          std::span<const LevelSetVolumeCorrectionMaintenanceEvent>
-              staged_volume_corrections) {
+      [&](std::span<const svmp::FE::Real> candidate) {
         ++nonendpoint_candidate_validations;
-        EXPECT_TRUE(staged_volume_corrections.empty());
         EXPECT_EQ(
             std::vector<svmp::FE::Real>(candidate.begin(), candidate.end()),
             nonendpoint_candidate_solution);
@@ -14347,7 +14329,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
       contact_stages,
       contact_stage_constraints,
       contact_stage_candidate.stage_solution,
-      nullptr,
       nonendpoint_candidate_validator,
       nonendpoint_work_observer,
       nullptr,
@@ -19830,7 +19811,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
       {},
       {},
       {},
-      nullptr,
       {},
       observe_stage);
   const auto output = testing::internal::GetCapturedStdout();
@@ -19992,7 +19972,6 @@ TEST(ApplicationDriverLevelSetMaintenance,
   const auto& transport = requests.front().configuration->transport;
   EXPECT_TRUE(transport.kinematic_reconciliation.enabled);
   EXPECT_FALSE(transport.reinitialization.enabled);
-  EXPECT_FALSE(transport.volume_correction.enabled);
   EXPECT_FALSE(svmp::FE::level_set::shouldApplyLevelSetKinematicReconciliation(
       transport.kinematic_reconciliation, 0));
   EXPECT_TRUE(svmp::FE::level_set::shouldApplyLevelSetKinematicReconciliation(
@@ -20026,7 +20005,6 @@ TEST(ApplicationDriverLevelSetMaintenance,
   EXPECT_TRUE(transport.sign_definite_patch_bounds.enabled);
   EXPECT_FALSE(transport.kinematic_reconciliation.enabled);
   EXPECT_FALSE(transport.reinitialization.enabled);
-  EXPECT_FALSE(transport.volume_correction.enabled);
   EXPECT_FALSE(svmp::FE::level_set::shouldApplyLevelSetSignDefinitePatchBounds(
       transport.sign_definite_patch_bounds, 0));
   EXPECT_TRUE(svmp::FE::level_set::shouldApplyLevelSetSignDefinitePatchBounds(
@@ -20120,8 +20098,6 @@ TEST(ApplicationDriverLevelSetMaintenance,
   first_configuration.transport.bound_preserving.enabled = true;
   first_configuration.transport.reinitialization.enabled = true;
   first_configuration.transport.reinitialization.cadence_steps = 2;
-  first_configuration.transport.volume_correction.enabled = true;
-  first_configuration.transport.volume_correction.cadence_steps = 6;
   first_configuration.curvature_projection_enabled = true;
   first_configuration.curvature_projection_cadence_steps = 6;
   auto first = freezeMaintenanceConfiguration(
@@ -20139,8 +20115,6 @@ TEST(ApplicationDriverLevelSetMaintenance,
   second_configuration.transport.conservative_phase.reconcile_geometry = true;
   second_configuration.transport.reinitialization.enabled = true;
   second_configuration.transport.reinitialization.cadence_steps = 3;
-  second_configuration.transport.volume_correction.enabled = true;
-  second_configuration.transport.volume_correction.cadence_steps = 2;
   second_configuration.static_capillary_equilibrium_enabled = true;
   auto second = freezeMaintenanceConfiguration(
       std::move(second_configuration));
@@ -20176,19 +20150,19 @@ TEST(ApplicationDriverLevelSetMaintenance,
        3355u},
       {"r1_matrix_two_prospective_step_2",
        LevelSetMaintenanceScheduleStage::ProspectiveAcceptedEndpoint, 2,
-       4027u},
+       3899u},
       {"r1_matrix_two_prospective_step_6",
        LevelSetMaintenanceScheduleStage::ProspectiveAcceptedEndpoint, 6,
-       4095u},
+       3903u},
       {"r1_matrix_two_post_step_1",
        LevelSetMaintenanceScheduleStage::AcceptedEndpointPostStep, 1,
        3355u},
       {"r1_matrix_two_post_step_2",
        LevelSetMaintenanceScheduleStage::AcceptedEndpointPostStep, 2,
-       4027u},
+       3899u},
       {"r1_matrix_two_post_step_6",
        LevelSetMaintenanceScheduleStage::AcceptedEndpointPostStep, 6,
-       4095u},
+       3903u},
   }};
   for (const auto& matrix_case : cases) {
     const auto schedule = canonicalLevelSetMaintenanceRequestSchedule(
@@ -20672,7 +20646,6 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
       accepted_graph.numbering_revision}};
   const auto accepted_static_target =
       effectiveStaticCapillaryEquilibriumOptions(requests_.front()).target_liquid_volume;
-  const auto accepted_volume_target = requests_.front().runtime.volume_target;
   const auto accepted_before =
       canonicalLevelSetMaintenanceRequestSchedule(
           requests_,
@@ -20707,12 +20680,6 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   EXPECT_NE(layout_only.words, accepted_before.words);
   trial.front().runtime.measured_static_capillary_target = 3.25;
   trial.front().runtime.static_capillary_equilibrium_initialized = true;
-  trial.front().runtime.volume_target = 4.5;
-  trial.front().runtime.volume_target_initialized = true;
-  trial.front().runtime.volume_correction_reference_minimum_edge_length = 0.125;
-  trial.front().runtime.cumulative_volume_correction_interface_displacement = 0.25;
-  trial.front().runtime.cumulative_volume_correction_contact_line_displacement =
-      -0.375;
   const auto changed_trial = canonicalLevelSetMaintenanceRequestSchedule(
       trial,
       LevelSetMaintenanceScheduleStage::ProspectiveAcceptedEndpoint,
@@ -20736,9 +20703,6 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   EXPECT_DOUBLE_EQ(
       effectiveStaticCapillaryEquilibriumOptions(requests_.front()).target_liquid_volume,
       accepted_static_target);
-  EXPECT_DOUBLE_EQ(
-      requests_.front().runtime.volume_target, accepted_volume_target);
-  EXPECT_FALSE(requests_.front().runtime.volume_target_initialized);
   trial.front().runtime.conservative_phase_graph.reset();
   EXPECT_TRUE(requests_.front().runtime.conservative_phase_graph.has_value());
 
@@ -22805,139 +22769,65 @@ TEST_F(ApplicationDriverBoundPreservingCandidatesTest,
   EXPECT_EQ(gatherFeOrderedSolution(history_.uPrev()), previous);
 }
 
-void addValidComponentTransferLedger(
-    svmp::FE::level_set::LevelSetGlobalShiftCorrectionResult& result)
-{
-  result.negative_component_topology_preserved = true;
-  result.negative_component_volume_transfers.push_back(
-      svmp::FE::level_set::LevelSetComponentVolumeTransfer{
-          .component_global_vertex_id = 0,
-      });
-}
-
 TEST(ApplicationDriverLevelSetVolumeCorrection,
      ReportsAuthoritativeFreeSurfacePotentialChange)
 {
+  // Decision D47 retired the global level-set volume correction together with
+  // its free-surface work report.  The test keeps its name, which the frozen
+  // WP-8 matrix records, and checks that a deck enabling the correction or
+  // naming one of its settings fails while its level-set equation is
+  // translated, while the disabled switch is still accepted.
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
 #else
-  auto mesh = makeWorkflowTriangleMesh();
-  auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
-      svmp::FE::ElementType::Triangle3,
-      /*order=*/1);
-  auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
-  const auto phi = system->addField(svmp::FE::systems::FieldSpec{
-      .name = "phi",
-      .space = scalar_space,
-      .components = 1,
-  });
-  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
-  parameters.surface_tension = 1.0;
-  parameters.volume_multiplier = 0.5;
-  free_surface::records(*system).declareFreeSurfaceDiscreteFunctional(
-      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
-          .interface_marker = 808,
-          .level_set_field = phi,
-          .geometry_domain_id = "volume_work_fixture",
-          .parameters = parameters,
-          .owner_component =
-              "ApplicationDriverLevelSetVolumeCorrection.WorkFixture",
-      });
-  ASSERT_NO_THROW(system->setup({}));
-  application::core::SimulationComponents sim;
-  sim.primary_mesh = mesh;
-  sim.fe_system = std::move(system);
-
-  const auto make_state = [](std::uint64_t source_revision,
-                             std::uint64_t snapshot_revision,
-                             svmp::FE::Real liquid_volume,
-                             svmp::FE::Real liquid_gas_area,
-                             svmp::FE::Real wetted_wall_area,
-                             svmp::FE::Real contact_measure,
-                             svmp::FE::Real surface_energy,
-                             svmp::FE::Real wall_energy,
-                             svmp::FE::Real volume_potential,
-                             svmp::FE::Real total_potential) {
-    svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState state;
-    state.interface_marker = 808;
-    state.geometry_revision.source_id = "field:0";
-    state.geometry_revision.domain_id = "volume_work_fixture";
-    state.geometry_revision.interface_marker = 808;
-    state.geometry_revision.source_value_revision = source_revision;
-    state.geometry_revision.snapshot_revision_key = snapshot_revision;
-    state.state.snapshot_revision_key = snapshot_revision;
-    state.state.surface_tension = 1.0;
-    state.state.volume_multiplier = 0.5;
-    state.state.owned_liquid_volume = liquid_volume;
-    state.state.owned_liquid_gas_area = liquid_gas_area;
-    state.state.owned_wetted_wall_area = wetted_wall_area;
-    state.state.owned_contact_measure = contact_measure;
-    state.state.liquid_gas_surface_energy = surface_energy;
-    state.state.young_wall_energy = wall_energy;
-    state.state.volume_constraint_potential = volume_potential;
-    state.state.total_potential = total_potential;
-    return state;
+  const std::vector<std::pair<std::string, std::string>> cases{
+      {"Enable_volume_correction", "false"},
+      {"Enable_volume_correction", "true"},
+      {"Volume_correction_cadence_steps", "1"},
+      {"Volume_correction_tolerance", "1.0e-10"},
+      {"Volume_correction_maximum_interface_displacement_fraction", "0.05"},
   };
-  const std::vector<
-      svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
-      before{make_state(
-          1u, 101u, 0.5, 2.0, 0.5, 0.25, 2.0, -0.5, 0.25, 1.75)};
-  const std::vector<
-      svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
-      after{make_state(
-          2u, 102u, 0.375, 2.25, 0.75, 0.125, 2.25, -0.375,
-          0.125, 2.0)};
-  LevelSetVolumeCorrectionMaintenanceEvent event;
-  event.level_set_field = phi;
-  event.level_set_field_name = "phi";
-  event.completed_step = 4;
-  event.correction.correction_applied = true;
-  event.correction.applied_shift = 0.125;
-  event.correction.total_component_volume_transfer = -0.125;
-  event.correction.negative_component_volume_transfers.push_back(
-      svmp::FE::level_set::LevelSetComponentVolumeTransfer{
-          .component_global_vertex_id = 0,
-          .initial_negative_volume = 0.5,
-          .corrected_negative_volume = 0.375,
-          .volume_transfer = -0.125,
-      });
-  const std::vector<LevelSetVolumeCorrectionMaintenanceEvent> events{event};
+  for (const auto& [key, value] : cases) {
+    auto mesh = makeWorkflowTriangleMesh();
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "level_set";
+    input.mesh_name = "triangle";
+    input.mesh = mesh->local_mesh_ptr();
+    input.equation_params["Level_set_field_name"] =
+        svmp::Physics::ParameterValue{true, "phi"};
+    input.equation_params["Velocity_source"] =
+        svmp::Physics::ParameterValue{true, "constant"};
+    input.equation_params["Constant_velocity"] =
+        svmp::Physics::ParameterValue{true, "0.0 0.0 0.0"};
+    input.equation_params[key] = svmp::Physics::ParameterValue{true, value};
 
-  testing::internal::CaptureStdout();
-  ASSERT_NO_THROW(logLevelSetVolumeCorrectionFreeSurfaceWork(
-      sim, events, before, after));
-  const auto output = testing::internal::GetCapturedStdout();
-  EXPECT_NE(output.find("diagnostic=level_set_volume_correction_work"),
-            std::string::npos);
-  EXPECT_NE(output.find("scope=global_shift_only"), std::string::npos);
-  EXPECT_NE(output.find("numerical_work_sign=energy_after_minus_before"),
-            std::string::npos);
-  EXPECT_NE(output.find("free_surface_functional_count=1"),
-            std::string::npos);
-  EXPECT_NE(output.find("initial_snapshot_revision=101"),
-            std::string::npos);
-  EXPECT_NE(output.find("corrected_snapshot_revision=102"),
-            std::string::npos);
-  EXPECT_NE(output.find("surface_energy_change="), std::string::npos);
-  EXPECT_NE(output.find("young_wall_energy_change="), std::string::npos);
-  EXPECT_NE(output.find("volume_constraint_potential_change="),
-            std::string::npos);
-  EXPECT_NE(output.find("liquid_volume_change=-0.125"),
-            std::string::npos);
-  EXPECT_NE(output.find("surface_energy_change=0.25"),
-            std::string::npos);
-  EXPECT_NE(output.find("young_wall_energy_change=0.125"),
-            std::string::npos);
-  EXPECT_NE(output.find("volume_constraint_potential_change=-0.125"),
-            std::string::npos);
-  EXPECT_NE(output.find("numerical_free_surface_work=0.25"),
-            std::string::npos);
+    svmp::FE::systems::FESystem system(mesh);
+    if (value == "false") {
+      EXPECT_TRUE(
+          application::translators::level_set::createModule(input, system))
+          << key;
+      continue;
+    }
+    try {
+      (void)application::translators::level_set::createModule(input, system);
+      ADD_FAILURE() << key << '=' << value << " was accepted";
+    } catch (const std::exception& error) {
+      EXPECT_NE(std::string(error.what()).find("retired (decision D47)"),
+                std::string::npos)
+          << key << ": " << error.what();
+    }
+  }
 #endif
 }
 
 TEST(ApplicationDriverLevelSetVolumeCorrection,
      CandidateGeometryFailureRestoresCompleteMaintenanceTransaction)
 {
+  // The frozen WP-8 matrix records this name.  Decision D47 retired the
+  // global volume correction that the test first used as its maintenance
+  // operation; the kinematic reconciliation now produces the candidate.  A
+  // transported level set is shifted with zero transport velocity, so the
+  // reconciliation restores the previous accepted level set exactly.
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
 #else
@@ -22958,12 +22848,23 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
       .space = scalar_space,
       .components = 1,
   });
+  auto velocity_space =
+      std::make_shared<svmp::FE::spaces::ProductSpace>(scalar_space, 2);
+  (void)system->addField(svmp::FE::systems::FieldSpec{
+      .name = "Velocity",
+      .space = velocity_space,
+      .components = 2,
+  });
   ASSERT_NO_THROW(system->setup({}));
 
   std::vector<svmp::FE::Real> phi_vertex_values(mesh->n_vertices(), 0.0);
+  std::vector<svmp::FE::Real> transported_vertex_values(
+      mesh->n_vertices(), 0.0);
   for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
     phi_vertex_values[vertex] =
         workflowVertexPoint(*mesh, vertex)[0] - svmp::FE::Real{0.5};
+    transported_vertex_values[vertex] =
+        workflowVertexPoint(*mesh, vertex)[0] - svmp::FE::Real{0.3};
   }
   const auto coefficients = projectWorkflowVertexValues(
       *system,
@@ -22971,9 +22872,18 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
       phi_vertex_values,
       /*components=*/1u,
       "ApplicationDriver maintenance transaction phi");
+  const auto transported_coefficients = projectWorkflowVertexValues(
+      *system,
+      phi,
+      transported_vertex_values,
+      /*components=*/1u,
+      "ApplicationDriver maintenance transaction transported phi");
+  // The previous accepted state (zero velocity) and the transported endpoint.
   std::vector<svmp::FE::Real> initial(
       static_cast<std::size_t>(system->dofHandler().getNumDofs()), 0.0);
   writeWorkflowFieldSlice(*system, phi, coefficients, initial);
+  std::vector<svmp::FE::Real> transported(initial.size(), 0.0);
+  writeWorkflowFieldSlice(*system, phi, transported_coefficients, transported);
 
   std::unique_ptr<svmp::FE::backends::BackendFactory> factory;
   try {
@@ -22990,9 +22900,9 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
   history.setStepIndex(1);
   history.setDt(0.1);
   history.setPrevDt(0.1);
-  scatterFeOrderedSolution(history.u(), initial);
-  scatterFeOrderedSolution(history.uPrev(), initial);
-  scatterFeOrderedSolution(history.uPrev2(), initial);
+  scatterFeOrderedSolution(history.u(), transported);
+  scatterFeOrderedSolution(history.uPrev(), transported);
+  scatterFeOrderedSolution(history.uPrev2(), transported);
   std::vector<svmp::FE::Real> rates(initial.size(), 0.375);
   scatterFeOrderedSolution(history.uDot(), rates);
 
@@ -23023,7 +22933,7 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
       refreshActiveCutIntegrationContextFromSolutionCached(
           sim,
           *params,
-          initial,
+          transported,
           lifecycle,
           refresh_cache,
           "application-driver-maintenance-transaction-initial");
@@ -23064,17 +22974,14 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
 
   application::core::ResolvedLevelSetMaintenanceCompatibilityConfiguration request_configuration;
   request_configuration.transport.level_set.field_name = "phi";
-  request_configuration.transport.volume_correction.enabled = true;
-  request_configuration.transport.volume_correction.cadence_steps = 1;
-  request_configuration.transport.volume_correction.use_initial_negative_volume_as_target = false;
-  request_configuration.transport.volume_correction.target_negative_volume = 0.36;
-  request_configuration.transport.volume_correction.minimum_relative_volume_error = 0.0;
-  request_configuration.transport.volume_correction.maximum_interface_displacement_fraction = 0.10;
-  request_configuration.transport.volume_correction
-      .maximum_cumulative_interface_displacement_fraction = 1.0;
+  request_configuration.transport.velocity.field_name = "Velocity";
+  request_configuration.transport.kinematic_reconciliation.enabled = true;
   auto request = freezeMaintenanceConfiguration(
       std::move(request_configuration));
   std::vector<LevelSetMaintenanceRequest> requests{request};
+  const std::vector<LevelSetKinematicBaseline> kinematic_baselines{
+      makeLevelSetKinematicBaseline(
+          *sim.fe_system, request, initial, history.stepIndex() - 1)};
   const auto request_before_failure =
       canonicalLevelSetMaintenanceRequestSchedule(
           requests,
@@ -23082,19 +22989,13 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
           history.stepIndex());
   recordMaintenanceSchedule(
       "r1_geometry_failure_request_before", request_before_failure);
-  std::vector<LevelSetVolumeCorrectionMaintenanceEvent> published_events;
   std::unique_ptr<LevelSetMaintenanceGeometryTransaction>
       geometry_transaction;
   std::optional<CanonicalLevelSetMaintenanceSchedule>
       rejected_trial_schedule;
   bool candidate_context_replaced = false;
   const LevelSetMaintenanceCandidateValidator reject_candidate =
-      [&](std::span<const svmp::FE::Real> candidate,
-          std::span<const LevelSetVolumeCorrectionMaintenanceEvent> events) {
-        if (events.size() != 1u) {
-          throw std::runtime_error(
-              "injected maintenance candidate had incomplete event coverage");
-        }
+      [&](std::span<const svmp::FE::Real> candidate) {
         rejected_trial_schedule =
             canonicalLevelSetMaintenanceRequestSchedule(
                 requests,
@@ -23120,15 +23021,18 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
           {},
           {},
           {},
-          &published_events,
-          reject_candidate),
+          reject_candidate,
+          {},
+          nullptr,
+          nullptr,
+          kinematic_baselines),
       std::runtime_error);
   const auto output = testing::internal::GetCapturedStdout();
   ASSERT_NE(geometry_transaction, nullptr);
   ASSERT_NO_THROW(geometry_transaction->rollback());
   EXPECT_TRUE(candidate_context_replaced);
-  EXPECT_EQ(output.find("Level-set volume corrected"), std::string::npos);
-  EXPECT_TRUE(published_events.empty());
+  EXPECT_EQ(output.find("Level-set kinematic reconciliation"),
+            std::string::npos);
   ASSERT_EQ(requests.size(), 1u);
   ASSERT_TRUE(rejected_trial_schedule.has_value());
   recordMaintenanceSchedule(
@@ -23142,13 +23046,6 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
   EXPECT_EQ(request_after_failure.words, request_before_failure.words);
   recordMaintenanceSchedule(
       "r1_geometry_failure_request_restored", request_after_failure);
-  EXPECT_FALSE(requests.front().runtime.volume_target_initialized);
-  EXPECT_DOUBLE_EQ(
-      requests.front().runtime.cumulative_volume_correction_interface_displacement,
-      0.0);
-  EXPECT_DOUBLE_EQ(
-      requests.front().runtime.cumulative_volume_correction_contact_line_displacement,
-      0.0);
 
   EXPECT_EQ(gatherFeOrderedSolution(history.u()), current_before);
   EXPECT_EQ(gatherFeOrderedSolution(history.uPrev()), previous_before);
@@ -23209,7 +23106,7 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
       refreshActiveCutIntegrationContextFromSolutionCached(
           sim,
           *params,
-          initial,
+          transported,
           lifecycle,
           refresh_cache,
           "application-driver-maintenance-transaction-restored");
@@ -23224,12 +23121,7 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
   bool committed_candidate_refreshed = false;
   bool forced_certificate_refresh_rebuilt_same_topology = false;
   const LevelSetMaintenanceCandidateValidator accept_candidate =
-      [&](std::span<const svmp::FE::Real> candidate,
-          std::span<const LevelSetVolumeCorrectionMaintenanceEvent> events) {
-        if (events.size() != 1u) {
-          throw std::runtime_error(
-              "accepted maintenance candidate had incomplete event coverage");
-        }
+      [&](std::span<const svmp::FE::Real> candidate) {
         committed_candidate.assign(candidate.begin(), candidate.end());
         geometry_transaction =
             std::make_unique<LevelSetMaintenanceGeometryTransaction>(
@@ -23254,8 +23146,11 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
       {},
       {},
       {},
-      &published_events,
-      accept_candidate));
+      accept_candidate,
+      {},
+      nullptr,
+      nullptr,
+      kinematic_baselines));
   ASSERT_NE(geometry_transaction, nullptr);
   ASSERT_NO_THROW(geometry_transaction->commit());
   EXPECT_TRUE(committed_candidate_refreshed);
@@ -23263,9 +23158,11 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
   EXPECT_FALSE(sim.fe_system->cutIntegrationContextTransactionActive());
   EXPECT_FALSE(lifecycle.transactionActive());
   EXPECT_NE(sim.fe_system->cutIntegrationContext(), original_context);
-  ASSERT_EQ(published_events.size(), 1u);
   ASSERT_EQ(requests.size(), 1u);
-  EXPECT_TRUE(requests.front().runtime.volume_target_initialized);
+  ASSERT_EQ(committed_candidate.size(), initial.size());
+  for (std::size_t i = 0u; i < initial.size(); ++i) {
+    EXPECT_NEAR(committed_candidate[i], initial[i], 1.0e-12) << "dof " << i;
+  }
   EXPECT_EQ(gatherFeOrderedSolution(history.u()), committed_candidate);
   EXPECT_EQ(gatherFeOrderedSolution(history.uPrev()), committed_candidate);
   EXPECT_EQ(gatherFeOrderedSolution(history.uPrev2()), committed_candidate);

@@ -25,7 +25,7 @@ Use specific headers when compile time or dependency clarity matters:
 | `FE/LevelSet/LevelSetOptions.h` | option structs, source enums, cadence helpers |
 | `FE/LevelSet/LevelSetTransport.h` | `installLevelSetTransport()` |
 | `FE/LevelSet/LevelSetInterfaceLifecycle.h` | generated interface domain creation and update lifecycle |
-| `FE/LevelSet/LevelSetVolume.h` | cut-cell volume measurement and global-shift correction |
+| `FE/LevelSet/LevelSetVolume.h` | cut-cell volume measurement |
 | `FE/LevelSet/LevelSetReinitialization.h` | signed-distance repair from generated interface geometry |
 | `FE/LevelSet/LevelSetDiagnostics.h` | scalar diagnostics for volume and signed-distance quality |
 | `FE/LevelSet/LevelSetRestart.h` | restart records for level-set fields and generated interfaces |

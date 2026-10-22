@@ -37,18 +37,6 @@ TEST(LevelSetOptions, DefaultsAreNeutral)
     EXPECT_DOUBLE_EQ(options.reinitialization.signed_distance_tolerance, 1.0e-6);
     EXPECT_DOUBLE_EQ(options.reinitialization.preserve_band_width, 0.0);
     EXPECT_DOUBLE_EQ(options.reinitialization.max_zero_set_displacement, 1.0e-10);
-    EXPECT_FALSE(options.volume_correction.enabled);
-    EXPECT_EQ(options.volume_correction.cadence_steps, 1);
-    EXPECT_TRUE(options.volume_correction.use_initial_negative_volume_as_target);
-    EXPECT_DOUBLE_EQ(options.volume_correction.target_negative_volume, 0.0);
-    EXPECT_DOUBLE_EQ(options.volume_correction.volume_tolerance, 1.0e-10);
-    EXPECT_EQ(options.volume_correction.max_iterations, 50);
-    EXPECT_DOUBLE_EQ(options.volume_correction.minimum_relative_volume_error, 1.0e-6);
-    EXPECT_DOUBLE_EQ(options.volume_correction.maximum_interface_displacement_fraction, 0.1);
-    EXPECT_DOUBLE_EQ(
-        options.volume_correction
-            .maximum_cumulative_interface_displacement_fraction,
-        1.0);
     EXPECT_TRUE(options.boundaries.inflow.empty());
     EXPECT_TRUE(options.boundaries.outflow.empty());
     EXPECT_FALSE(options.conservative_phase.enabled);
@@ -154,16 +142,6 @@ TEST(LevelSetOptions, ExplicitTransportOptions)
     options.reinitialization.interface_band_width = 2.5;
     options.reinitialization.signed_distance_tolerance = 1.0e-5;
     options.reinitialization.max_zero_set_displacement = 2.0e-8;
-    options.volume_correction.enabled = true;
-    options.volume_correction.cadence_steps = 5;
-    options.volume_correction.use_initial_negative_volume_as_target = false;
-    options.volume_correction.target_negative_volume = 0.375;
-    options.volume_correction.volume_tolerance = 1.0e-7;
-    options.volume_correction.max_iterations = 24;
-    options.volume_correction.minimum_relative_volume_error = 2.0e-5;
-    options.volume_correction.maximum_interface_displacement_fraction = 0.025;
-    options.volume_correction
-        .maximum_cumulative_interface_displacement_fraction = 0.25;
     options.boundaries.inflow.push_back(level_set::LevelSetInflowBoundary{
         .boundary_marker = 11,
         .value = svmp::FE::Real{2.5},
@@ -195,18 +173,6 @@ TEST(LevelSetOptions, ExplicitTransportOptions)
     EXPECT_DOUBLE_EQ(options.reinitialization.interface_band_width, 2.5);
     EXPECT_DOUBLE_EQ(options.reinitialization.signed_distance_tolerance, 1.0e-5);
     EXPECT_DOUBLE_EQ(options.reinitialization.max_zero_set_displacement, 2.0e-8);
-    EXPECT_TRUE(options.volume_correction.enabled);
-    EXPECT_EQ(options.volume_correction.cadence_steps, 5);
-    EXPECT_FALSE(options.volume_correction.use_initial_negative_volume_as_target);
-    EXPECT_DOUBLE_EQ(options.volume_correction.target_negative_volume, 0.375);
-    EXPECT_DOUBLE_EQ(options.volume_correction.volume_tolerance, 1.0e-7);
-    EXPECT_EQ(options.volume_correction.max_iterations, 24);
-    EXPECT_DOUBLE_EQ(options.volume_correction.minimum_relative_volume_error, 2.0e-5);
-    EXPECT_DOUBLE_EQ(options.volume_correction.maximum_interface_displacement_fraction, 0.025);
-    EXPECT_DOUBLE_EQ(
-        options.volume_correction
-            .maximum_cumulative_interface_displacement_fraction,
-        0.25);
     ASSERT_EQ(options.boundaries.inflow.size(), 1u);
     EXPECT_EQ(options.boundaries.inflow.front().boundary_marker, 11);
     EXPECT_DOUBLE_EQ(std::get<svmp::FE::Real>(options.boundaries.inflow.front().value), 2.5);
@@ -247,23 +213,11 @@ TEST(LevelSetOptions, ConservationDiagnosticsDistinguishRunModes)
             level_set::levelSetConservationDiagnostic(reinitialized)),
         "reinitialized_level_set_advection_not_conservative");
 
-    level_set::LevelSetTransportOptions corrected{};
-    corrected.transport_form = level_set::LevelSetTransportForm::ConservativeDivergence;
-    corrected.reinitialization.enabled = true;
-    corrected.volume_correction.enabled = true;
-    EXPECT_EQ(
-        level_set::levelSetConservationDiagnostic(corrected),
-        level_set::LevelSetConservationDiagnostic::VolumeCorrectedAdvectionNotLocallyConservative);
-    EXPECT_STREQ(
-        level_set::levelSetConservationDiagnosticName(
-            level_set::levelSetConservationDiagnostic(corrected)),
-        "volume_corrected_level_set_advection_not_locally_conservative");
-
     EXPECT_NE(
         level_set::levelSetConservationDiagnosticName(
             level_set::levelSetConservationDiagnostic(plain)),
         level_set::levelSetConservationDiagnosticName(
-            level_set::levelSetConservationDiagnostic(corrected)));
+            level_set::levelSetConservationDiagnostic(reinitialized)));
 
     level_set::LevelSetTransportOptions phase_conservative{};
     phase_conservative.conservative_phase.enabled = true;

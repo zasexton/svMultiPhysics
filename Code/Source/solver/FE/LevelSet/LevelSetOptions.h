@@ -133,28 +133,6 @@ struct LevelSetReinitializationOptions {
     Real max_zero_set_displacement{1.0e-10};
 };
 
-struct LevelSetVolumeCorrectionOptions {
-    bool enabled{false};
-    int cadence_steps{1};
-    bool use_initial_negative_volume_as_target{true};
-    Real target_negative_volume{0.0};
-    Real volume_tolerance{1.0e-10};
-    int max_iterations{50};
-    // Treat the global shift as a fallback: do nothing until the volume error
-    // exceeds this fraction of total volume (in addition to volume_tolerance).
-    Real minimum_relative_volume_error{1.0e-6};
-    // A correction may move no edge zero-crossing farther than this fraction
-    // of the smallest mesh edge.  This also conservatively bounds contact-line
-    // motion, since wall contact crossings are a subset of edge crossings.
-    Real maximum_interface_displacement_fraction{0.1};
-    // Sum the certified maximum displacement from every applied event and
-    // fail closed before that path-length bound exceeds this fraction of the
-    // smallest edge observed by the application.  This prevents many
-    // individually small global shifts from producing unbounded cumulative
-    // interface/contact-line drift.
-    Real maximum_cumulative_interface_displacement_fraction{1.0};
-};
-
 /**
  * @brief Accepted-step reconciliation of the transported P1 level set with
  * the kinematic interface flux of its own transport velocity.
@@ -338,7 +316,6 @@ struct LevelSetTransportOptions {
     LevelSetBoundPreservingOptions bound_preserving{};
     LevelSetInterfaceKinematicOptions interface_kinematic{};
     LevelSetReinitializationOptions reinitialization{};
-    LevelSetVolumeCorrectionOptions volume_correction{};
     LevelSetBoundaryOptions boundaries{};
     LevelSetConservativePhaseOptions conservative_phase{};
     LevelSetKinematicReconciliationOptions kinematic_reconciliation{};
@@ -350,14 +327,12 @@ enum class LevelSetConservationDiagnostic {
     PlainAdvectionNotConservative,
     ConservativeDivergenceAdvectionNotLocallyConservative,
     ReinitializedAdvectionNotConservative,
-    VolumeCorrectedAdvectionNotLocallyConservative,
     ConservativePhaseIndicatorLocallyConservative
 };
 
 [[nodiscard]] LevelSetConservationDiagnostic levelSetConservationDiagnostic(
     LevelSetTransportForm transport_form,
-    const LevelSetReinitializationOptions& reinitialization,
-    const LevelSetVolumeCorrectionOptions& volume_correction) noexcept;
+    const LevelSetReinitializationOptions& reinitialization) noexcept;
 
 [[nodiscard]] LevelSetConservationDiagnostic levelSetConservationDiagnostic(
     const LevelSetTransportOptions& options) noexcept;
@@ -367,10 +342,6 @@ enum class LevelSetConservationDiagnostic {
 
 [[nodiscard]] bool shouldReinitializeLevelSet(
     const LevelSetReinitializationOptions& options,
-    int completed_step_index) noexcept;
-
-[[nodiscard]] bool shouldApplyLevelSetVolumeCorrection(
-    const LevelSetVolumeCorrectionOptions& options,
     int completed_step_index) noexcept;
 
 [[nodiscard]] bool shouldApplyLevelSetKinematicReconciliation(

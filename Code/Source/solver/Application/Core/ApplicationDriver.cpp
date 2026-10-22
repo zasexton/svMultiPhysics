@@ -1286,11 +1286,6 @@ void applyMonolithicEquationNewtonControls(
 struct LevelSetMaintenanceRuntimeState {
   bool static_capillary_equilibrium_initialized{false};
   std::optional<svmp::FE::Real> measured_static_capillary_target{};
-  bool volume_target_initialized{false};
-  svmp::FE::Real volume_target{0.0};
-  svmp::FE::Real volume_correction_reference_minimum_edge_length{0.0};
-  svmp::FE::Real cumulative_volume_correction_interface_displacement{0.0};
-  svmp::FE::Real cumulative_volume_correction_contact_line_displacement{0.0};
   // Interface-preserving redistancing trigger: interface displacement bound
   // accumulated since the last redistancing, and the number of calls.
   svmp::FE::Real redistancing_accumulated_displacement{0.0};
@@ -1531,13 +1526,6 @@ std::uint64_t levelSetMaintenanceRequestActionBits(
       !request.configuration->transport.conservative_phase.enabled &&
       svmp::FE::level_set::shouldReinitializeLevelSet(
           request.configuration->transport.reinitialization, completed_step);
-  const bool accepted_volume_due =
-      !request.configuration->transport.conservative_phase.enabled &&
-      svmp::FE::level_set::shouldApplyLevelSetVolumeCorrection(
-          request.configuration->transport.volume_correction, completed_step);
-  const bool all_request_volume_due =
-      svmp::FE::level_set::shouldApplyLevelSetVolumeCorrection(
-          request.configuration->transport.volume_correction, completed_step);
   const bool accepted_kinematic_due =
       !request.configuration->transport.conservative_phase.enabled &&
       svmp::FE::level_set::shouldApplyLevelSetKinematicReconciliation(
@@ -1567,7 +1555,6 @@ std::uint64_t levelSetMaintenanceRequestActionBits(
       request.configuration->transport.conservative_phase.enabled ||
       request.configuration->transport.bound_preserving.enabled ||
       accepted_reinitialization_due ||
-      all_request_volume_due ||
       accepted_kinematic_due ||
       accepted_patch_bounds_due ||
       accepted_redistancing_due;
@@ -1582,8 +1569,7 @@ std::uint64_t levelSetMaintenanceRequestActionBits(
           ? (1ull << 3u)
           : (1ull << 4u);
   bits |= accepted_reinitialization_due ? (1ull << 5u) : 0u;
-  bits |= accepted_volume_due ? (1ull << 6u) : 0u;
-  bits |= all_request_volume_due ? (1ull << 7u) : 0u;
+  // Bits 6 and 7 described the retired global volume correction.
   bits |= functional_due ? (1ull << 8u) : 0u;
   bits |= artifact_due ? (1ull << 9u) : 0u;
   bits |= request.configuration->transport.conservative_phase.reconcile_geometry
@@ -1789,32 +1775,6 @@ canonicalLevelSetMaintenanceRequestSchedule(
         request.configuration->transport.reinitialization.max_zero_set_displacement);
 
     appendMaintenanceScheduleBool(
-        words, request.configuration->transport.volume_correction.enabled);
-    appendMaintenanceScheduleSigned(
-        words, request.configuration->transport.volume_correction.cadence_steps);
-    appendMaintenanceScheduleBool(
-        words,
-        request.configuration->transport.volume_correction
-            .use_initial_negative_volume_as_target);
-    appendMaintenanceScheduleReal(
-        words,
-        request.configuration->transport.volume_correction.target_negative_volume);
-    appendMaintenanceScheduleReal(
-        words, request.configuration->transport.volume_correction.volume_tolerance);
-    appendMaintenanceScheduleSigned(
-        words, request.configuration->transport.volume_correction.max_iterations);
-    appendMaintenanceScheduleReal(
-        words,
-        request.configuration->transport.volume_correction.minimum_relative_volume_error);
-    appendMaintenanceScheduleReal(
-        words,
-        request.configuration->transport.volume_correction
-            .maximum_interface_displacement_fraction);
-    appendMaintenanceScheduleReal(
-        words,
-        request.configuration->transport.volume_correction
-            .maximum_cumulative_interface_displacement_fraction);
-    appendMaintenanceScheduleBool(
         words,
         request.configuration->transport.kinematic_reconciliation.enabled);
     appendMaintenanceScheduleBool(
@@ -1987,20 +1947,6 @@ canonicalLevelSetMaintenanceRequestSchedule(
     appendMaintenanceScheduleEnum(
         words, curvature_options.smoothing_mode);
 
-    appendMaintenanceScheduleBool(
-        words, request.runtime.volume_target_initialized);
-    appendMaintenanceScheduleReal(words, request.runtime.volume_target);
-    appendMaintenanceScheduleReal(
-        words,
-        request.runtime.volume_correction_reference_minimum_edge_length);
-    appendMaintenanceScheduleReal(
-        words,
-        request
-            .runtime.cumulative_volume_correction_interface_displacement);
-    appendMaintenanceScheduleReal(
-        words,
-        request
-            .runtime.cumulative_volume_correction_contact_line_displacement);
     appendMaintenanceScheduleBool(
         words, request.runtime.conservative_phase_initialized);
     appendMaintenanceScheduleGraphMetadata(
@@ -3713,7 +3659,7 @@ void logLevelSetMaintenanceCoverageDiagnostics(
 
   std::set<std::string> transport_maintained_fields;
   for (const auto& request : maintenance_requests) {
-    if (request.configuration->transport.reinitialization.enabled || request.configuration->transport.volume_correction.enabled ||
+    if (request.configuration->transport.reinitialization.enabled ||
         request.configuration->transport.kinematic_reconciliation.enabled ||
         request.configuration->transport.sign_definite_patch_bounds.enabled ||
         request.configuration->transport.interface_preserving_redistancing.enabled) {
@@ -3726,8 +3672,6 @@ void logLevelSetMaintenanceCoverageDiagnostics(
         << (request.configuration->transport.reinitialization.enabled ? "enabled" : "disabled")
         << " bound_preserving="
         << (request.configuration->transport.bound_preserving.enabled ? "enabled" : "disabled")
-        << " volume_correction="
-        << (request.configuration->transport.volume_correction.enabled ? "enabled" : "disabled")
         << " kinematic_reconciliation="
         << (request.configuration->transport.kinematic_reconciliation.enabled ? "enabled" : "disabled")
         << " sign_definite_patch_bounds="
@@ -3742,17 +3686,9 @@ void logLevelSetMaintenanceCoverageDiagnostics(
         << svmp::FE::level_set::levelSetConservationDiagnosticName(
                svmp::FE::level_set::levelSetConservationDiagnostic(
                    request.configuration->transport.transport_form,
-                   request.configuration->transport.reinitialization,
-                   request.configuration->transport.volume_correction))
+                   request.configuration->transport.reinitialization))
         << " reinitialization_cadence="
         << request.configuration->transport.reinitialization.cadence_steps
-        << " volume_correction_cadence="
-        << request.configuration->transport.volume_correction.cadence_steps
-        << " volume_correction_maximum_interface_displacement_fraction="
-        << request.configuration->transport.volume_correction.maximum_interface_displacement_fraction
-        << " volume_correction_maximum_cumulative_interface_displacement_fraction="
-        << request.configuration->transport.volume_correction
-               .maximum_cumulative_interface_displacement_fraction
         << " curvature_projection_cadence="
         << request.configuration->curvature_projection_cadence_steps
         << " curvature_projection_recovery_mode="
@@ -4633,63 +4569,6 @@ svmp::FE::level_set::LevelSetVolumeOptions levelSetVolumeOptionsForMaintenance(
       request.configuration->isovalue);
 }
 
-void initializeLevelSetMaintenanceTargets(
-    application::core::SimulationComponents& sim,
-    std::vector<LevelSetMaintenanceRequest>& requests)
-{
-  if (!sim.fe_system || !sim.time_history || requests.empty()) {
-    return;
-  }
-
-  const auto fe_solution = gatherFeOrderedSolution(
-      sim.time_history->u(),
-      activeFESystemCommunicator(*sim.fe_system));
-  for (auto& request : requests) {
-    if (!request.configuration->transport.volume_correction.enabled ||
-        request.runtime.volume_target_initialized) {
-      continue;
-    }
-    if (!request.configuration->transport.volume_correction.use_initial_negative_volume_as_target) {
-      request.runtime.volume_target =
-          request.configuration->transport.volume_correction.target_negative_volume;
-      request.runtime.volume_target_initialized = true;
-      continue;
-    }
-
-    const auto field =
-        sim.fe_system->findFieldByName(request.configuration->transport.level_set.field_name);
-    if (field == svmp::FE::INVALID_FIELD_ID) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Level-set volume correction could not find field '" +
-          request.configuration->transport.level_set.field_name + "'.");
-    }
-
-    const auto volume_options =
-        levelSetVolumeOptionsForMaintenance(request);
-    auto volume = svmp::FE::level_set::computeLevelSetCutCellVolume(
-        *sim.fe_system,
-        field,
-        volume_options,
-        fe_solution);
-    if (!volume.success) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Initial level-set volume calculation failed for field '" +
-          request.configuration->transport.level_set.field_name + "': " + volume.diagnostic);
-    }
-    request.runtime.volume_target = volume.negative_volume;
-    request.runtime.volume_target_initialized = true;
-    application::core::oopCout()
-        << "[svMultiPhysics::Application] Level-set volume target field='"
-        << request.configuration->transport.level_set.field_name << "' negative_volume="
-        << request.runtime.volume_target
-        << " volume_measure_source="
-        << (volume_options.use_generated_interface_quadrature
-                ? "generated_interface_quadrature"
-                : "corner_linearized")
-        << std::endl;
-  }
-}
-
 svmp::FE::level_set::LevelSetBoundaryOptions
 resolveLevelSetOpenBoundaries(
     const application::core::SimulationComponents& sim,
@@ -4904,107 +4783,6 @@ applyLevelSetBoundPreservingCandidates(
     }
   }
   return application_result;
-}
-
-void accountAppliedLevelSetVolumeCorrection(
-    LevelSetMaintenanceRequest& request,
-    const svmp::FE::level_set::LevelSetGlobalShiftCorrectionResult& result)
-{
-  if (!result.correction_applied) {
-    return;
-  }
-  const auto finite_nonnegative = [](svmp::FE::Real value) {
-    return std::isfinite(value) && value >= svmp::FE::Real{0.0};
-  };
-  if (!(result.minimum_edge_length > svmp::FE::Real{0.0}) ||
-      !std::isfinite(result.minimum_edge_length) ||
-      !finite_nonnegative(result.max_interface_displacement) ||
-      !finite_nonnegative(result.max_contact_line_displacement) ||
-      !finite_nonnegative(result.max_contact_angle_change_radians) ||
-      !result.negative_component_topology_preserved ||
-      result.negative_component_volume_transfers.empty() ||
-      !std::isfinite(result.total_component_volume_transfer) ||
-      !finite_nonnegative(
-          result.total_absolute_component_volume_transfer) ||
-      !finite_nonnegative(
-          result.maximum_absolute_component_volume_transfer)) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Applied level-set volume correction "
-        "reported invalid geometry or component-transfer metrics.");
-  }
-
-  auto reference_edge_length =
-      request.runtime.volume_correction_reference_minimum_edge_length;
-  if (!(reference_edge_length > svmp::FE::Real{0.0}) ||
-      !std::isfinite(reference_edge_length)) {
-    reference_edge_length = result.minimum_edge_length;
-  } else {
-    reference_edge_length =
-        std::min(reference_edge_length, result.minimum_edge_length);
-  }
-  const auto allowed_cumulative_displacement =
-      request.configuration->transport.volume_correction
-          .maximum_cumulative_interface_displacement_fraction *
-      reference_edge_length;
-  const auto next_interface_displacement =
-      request.runtime.cumulative_volume_correction_interface_displacement +
-      result.max_interface_displacement;
-  const auto next_contact_line_displacement =
-      request.runtime.cumulative_volume_correction_contact_line_displacement +
-      result.max_contact_line_displacement;
-  const auto prospective_budget_consumption =
-      std::max(next_interface_displacement, next_contact_line_displacement);
-  if (!finite_nonnegative(allowed_cumulative_displacement) ||
-      !finite_nonnegative(next_interface_displacement) ||
-      !finite_nonnegative(next_contact_line_displacement) ||
-      !finite_nonnegative(prospective_budget_consumption)) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Level-set volume correction "
-        "cumulative-displacement budget is invalid or overflowed.");
-  }
-  const auto comparison_tolerance =
-      svmp::FE::Real{64.0} * std::numeric_limits<svmp::FE::Real>::epsilon() *
-      std::max({allowed_cumulative_displacement,
-                prospective_budget_consumption,
-                reference_edge_length});
-  if (prospective_budget_consumption >
-      allowed_cumulative_displacement + comparison_tolerance) {
-    const auto* limiting_path =
-        next_contact_line_displacement > next_interface_displacement
-            ? "contact_line"
-            : "interface";
-    std::ostringstream message;
-    message << std::setprecision(17)
-            << "[svMultiPhysics::Application] Level-set volume correction "
-               "would exceed the cumulative interface/contact-line "
-               "displacement budget for field '"
-            << request.configuration->transport.level_set.field_name
-            << "': previous_interface="
-            << request.runtime.cumulative_volume_correction_interface_displacement
-            << " event_interface=" << result.max_interface_displacement
-            << " prospective_interface=" << next_interface_displacement
-            << " previous_contact_line="
-            << request.runtime.cumulative_volume_correction_contact_line_displacement
-            << " event_contact_line=" << result.max_contact_line_displacement
-            << " prospective_contact_line="
-            << next_contact_line_displacement
-            << " limiting_path=" << limiting_path
-            << " prospective_budget_consumption="
-            << prospective_budget_consumption
-            << " allowed=" << allowed_cumulative_displacement
-            << " reference_minimum_edge_length=" << reference_edge_length
-            << " maximum_cumulative_fraction="
-            << request.configuration->transport.volume_correction
-                   .maximum_cumulative_interface_displacement_fraction;
-    throw std::runtime_error(message.str());
-  }
-
-  request.runtime.volume_correction_reference_minimum_edge_length =
-      reference_edge_length;
-  request.runtime.cumulative_volume_correction_interface_displacement =
-      next_interface_displacement;
-  request.runtime.cumulative_volume_correction_contact_line_displacement =
-      next_contact_line_displacement;
 }
 
 // Decision D4 gives the contact angle one owner, the momentum-side Young
@@ -5884,17 +5662,8 @@ stageLevelSetProjectionReinitialization(
   return staged;
 }
 
-struct LevelSetVolumeCorrectionMaintenanceEvent {
-  svmp::FE::FieldId level_set_field{svmp::FE::INVALID_FIELD_ID};
-  std::string level_set_field_name{};
-  int completed_step{0};
-  bool includes_other_maintenance{false};
-  svmp::FE::level_set::LevelSetGlobalShiftCorrectionResult correction{};
-};
-
-using LevelSetMaintenanceCandidateValidator = std::function<void(
-    std::span<const svmp::FE::Real>,
-    std::span<const LevelSetVolumeCorrectionMaintenanceEvent>)>;
+using LevelSetMaintenanceCandidateValidator =
+    std::function<void(std::span<const svmp::FE::Real>)>;
 
 // Accepted state from which the next transport step starts.  The kinematic
 // reconciliation of that step compares the transported endpoint with it, and
@@ -6009,8 +5778,6 @@ bool applyLevelSetMaintenance(
     std::span<const svmp::FE::level_set::LevelSetWallContactConstraint>
         accepted_contact_stage_constraints = {},
     std::span<const svmp::FE::Real> accepted_contact_stage_solution = {},
-    std::vector<LevelSetVolumeCorrectionMaintenanceEvent>*
-        applied_volume_corrections = nullptr,
     const LevelSetMaintenanceCandidateValidator& validate_candidate = {},
     const LevelSetMaintenanceStageObserver& observe_stage = {},
     std::vector<std::string>* deferred_commit_logs = nullptr,
@@ -6019,9 +5786,6 @@ bool applyLevelSetMaintenance(
 {
   if (rate_publication_started != nullptr) {
     *rate_publication_started = false;
-  }
-  if (applied_volume_corrections != nullptr) {
-    applied_volume_corrections->clear();
   }
   if (!sim.fe_system || requests.empty()) {
     return false;
@@ -6033,8 +5797,6 @@ bool applyLevelSetMaintenance(
   // request succeeds and the common FE history update is complete.
   auto staged_requests = requests;
   std::vector<std::string> staged_commit_logs;
-  std::vector<LevelSetVolumeCorrectionMaintenanceEvent>
-      staged_volume_corrections;
   bool changed = false;
   const auto comm = activeFESystemCommunicator(*sim.fe_system);
   auto fe_solution = gatherFeOrderedSolution(history.u(), comm);
@@ -6057,10 +5819,6 @@ bool applyLevelSetMaintenance(
         svmp::FE::level_set::shouldReinitializeLevelSet(
             request.configuration->transport.reinitialization,
             completed_step);
-    const bool do_volume =
-        svmp::FE::level_set::shouldApplyLevelSetVolumeCorrection(
-            request.configuration->transport.volume_correction,
-            completed_step);
     const bool do_kinematic =
         svmp::FE::level_set::shouldApplyLevelSetKinematicReconciliation(
             request.configuration->transport.kinematic_reconciliation,
@@ -6073,8 +5831,7 @@ bool applyLevelSetMaintenance(
         svmp::FE::level_set::shouldApplyLevelSetInterfacePreservingRedistancing(
             request.configuration->transport.interface_preserving_redistancing,
             completed_step);
-    if (!do_reinit && !do_volume && !do_kinematic && !do_patch_bounds &&
-        !do_redistancing) {
+    if (!do_reinit && !do_kinematic && !do_patch_bounds && !do_redistancing) {
       continue;
     }
 
@@ -6605,11 +6362,6 @@ bool applyLevelSetMaintenance(
               before_reinitialization,
               fe_solution);
         }
-        for (auto& event : staged_volume_corrections) {
-          if (event.level_set_field == field) {
-            event.includes_other_maintenance = true;
-          }
-        }
         std::ostringstream log;
         log
           << "[svMultiPhysics::Application] Level-set reinitialized field='"
@@ -6682,164 +6434,10 @@ bool applyLevelSetMaintenance(
       }
     }
 
-    if (do_volume) {
-      const auto before_correction = fe_solution;
-      const bool includes_other_maintenance =
-          modified_level_set_fields.contains(field);
-      if (!request.runtime.volume_target_initialized) {
-        request.runtime.volume_target =
-            request.configuration->transport.volume_correction.target_negative_volume;
-        request.runtime.volume_target_initialized = true;
-      }
-      const auto volume_options =
-          levelSetVolumeOptionsForMaintenance(request);
-      svmp::FE::level_set::LevelSetGlobalShiftCorrectionOptions correction_options{};
-      correction_options.target_negative_volume = request.runtime.volume_target;
-      correction_options.volume_tolerance =
-          request.configuration->transport.volume_correction.volume_tolerance;
-      correction_options.max_iterations =
-          request.configuration->transport.volume_correction.max_iterations;
-      correction_options.minimum_relative_volume_error =
-          request.configuration->transport.volume_correction.minimum_relative_volume_error;
-      correction_options.maximum_interface_displacement_fraction =
-          request.configuration->transport.volume_correction.maximum_interface_displacement_fraction;
-
-      std::vector<svmp::FE::Real> corrected;
-      auto result =
-          svmp::FE::level_set::applyGlobalLevelSetShiftCorrection(
-              *sim.fe_system,
-              field,
-              volume_options,
-              correction_options,
-              fe_solution,
-              corrected);
-      if (!result.success) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Level-set volume correction failed for field '" +
-            request.configuration->transport.level_set.field_name + "': " + result.diagnostic);
-      }
-      if (result.correction_applied) {
-        // The low-level correction has not mutated the accepted coefficients;
-        // reject before applying its returned vector if repeated global shifts
-        // would exceed the application-level cumulative path-length budget.
-        accountAppliedLevelSetVolumeCorrection(request, result);
-        if (std::any_of(
-                staged_volume_corrections.begin(),
-                staged_volume_corrections.end(),
-                [field](const auto& event) {
-                  return event.level_set_field == field;
-                })) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] One maintenance transaction cannot apply multiple global volume corrections to the same level-set field.");
-        }
-        staged_volume_corrections.push_back(
-            LevelSetVolumeCorrectionMaintenanceEvent{
-                .level_set_field = field,
-                .level_set_field_name = request.configuration->transport.level_set.field_name,
-                .completed_step = completed_step,
-                .includes_other_maintenance =
-                    includes_other_maintenance,
-                .correction = result,
-            });
-        fe_solution = std::move(corrected);
-        changed = true;
-        modified_level_set_fields.insert(field);
-      }
-      if (observe_stage) {
-        observe_stage(
-            application::core::LevelSetMaintenanceWorkSubstage::
-                GlobalCorrection,
-            before_correction,
-            fe_solution);
-      }
-      std::ostringstream log;
-      log << std::setprecision(17)
-          << "[svMultiPhysics::Application] Level-set volume corrected field='"
-          << request.configuration->transport.level_set.field_name << "' step=" << completed_step
-          << " target_negative_volume=" << result.target_negative_volume
-          << " initial_negative_volume=" << result.initial_negative_volume
-          << " initial_volume_error="
-          << (result.initial_negative_volume - result.target_negative_volume)
-          << " corrected_negative_volume="
-          << result.corrected_negative_volume
-          << " achieved_volume_error=" << result.volume_error
-          << " applied_shift=" << result.applied_shift
-          << " applied_shift_magnitude=" << std::abs(result.applied_shift)
-          << " correction_triggered="
-          << (result.correction_triggered ? "true" : "false")
-          << " correction_applied="
-          << (result.correction_applied ? "true" : "false")
-          << " target_reached="
-          << (result.target_reached ? "true" : "false")
-          << " trigger_volume_error=" << result.trigger_volume_error
-          << " limited_by_displacement_bound="
-          << (result.limited_by_displacement_bound ? "true" : "false")
-          << " max_interface_displacement="
-          << result.max_interface_displacement
-          << " max_contact_line_displacement="
-          << result.max_contact_line_displacement
-          << " contact_line_displacement_bound="
-          << result.contact_line_displacement_bound
-          << " max_contact_angle_change_radians="
-          << result.max_contact_angle_change_radians
-          << " negative_component_topology_preserved="
-          << (result.negative_component_topology_preserved ? "true"
-                                                          : "false")
-          << " negative_component_count="
-          << result.negative_component_volume_transfers.size()
-          << " total_component_volume_transfer="
-          << result.total_component_volume_transfer
-          << " total_absolute_component_volume_transfer="
-          << result.total_absolute_component_volume_transfer
-          << " maximum_absolute_component_volume_transfer="
-          << result.maximum_absolute_component_volume_transfer
-          << " maximum_allowed_interface_displacement="
-          << result.maximum_allowed_interface_displacement
-          << " maximum_topology_stable_shift="
-          << result.maximum_topology_stable_shift
-          << " minimum_edge_length=" << result.minimum_edge_length
-          << " cumulative_interface_displacement="
-          << request.runtime.cumulative_volume_correction_interface_displacement
-          << " cumulative_contact_line_displacement="
-          << request.runtime.cumulative_volume_correction_contact_line_displacement
-          << " cumulative_displacement_budget_consumption="
-          << std::max(
-                 request.runtime.cumulative_volume_correction_interface_displacement,
-                 request.runtime.cumulative_volume_correction_contact_line_displacement)
-          << " cumulative_displacement_limiting_path="
-          << (request.runtime.cumulative_volume_correction_contact_line_displacement >
-                      request.runtime.cumulative_volume_correction_interface_displacement
-                  ? "contact_line"
-                  : "interface")
-          << " cumulative_displacement_reference_minimum_edge_length="
-          << request.runtime.volume_correction_reference_minimum_edge_length
-          << " maximum_cumulative_interface_displacement="
-          << (request.runtime.volume_correction_reference_minimum_edge_length *
-              request.configuration->transport.volume_correction
-                  .maximum_cumulative_interface_displacement_fraction)
-          << " status='" << result.diagnostic << "'"
-          << " iterations=" << result.iterations
-          << " volume_measure_source="
-          << (volume_options.use_generated_interface_quadrature
-                  ? "generated_interface_quadrature"
-                  : "corner_linearized");
-      for (const auto& transfer :
-           result.negative_component_volume_transfers) {
-        log << " component_global_vertex_id="
-            << transfer.component_global_vertex_id
-            << " component_initial_negative_volume="
-            << transfer.initial_negative_volume
-            << " component_corrected_negative_volume="
-            << transfer.corrected_negative_volume
-            << " component_volume_transfer="
-            << transfer.volume_transfer;
-      }
-      staged_commit_logs.push_back(log.str());
-    }
   }
 
   if (changed && validate_candidate) {
-    validate_candidate(fe_solution, staged_volume_corrections);
+    validate_candidate(fe_solution);
   }
 
   if (changed) {
@@ -7078,336 +6676,7 @@ bool applyLevelSetMaintenance(
       application::core::oopCout() << log << std::endl;
     }
   }
-  if (applied_volume_corrections != nullptr) {
-    *applied_volume_corrections = std::move(staged_volume_corrections);
-  }
   return changed;
-}
-
-std::vector<std::string> buildLevelSetVolumeCorrectionFreeSurfaceWorkLogs(
-    application::core::SimulationComponents& sim,
-    std::span<const LevelSetVolumeCorrectionMaintenanceEvent> events,
-    std::span<const svmp::FE::systems::
-                        AcceptedFreeSurfaceDiscreteFunctionalState>
-        before,
-    std::span<const svmp::FE::systems::
-                        AcceptedFreeSurfaceDiscreteFunctionalState>
-        after)
-{
-  std::vector<std::string> logs;
-  if (!sim.fe_system) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Volume-correction work accounting requires an FE system.");
-  }
-  const auto comm = activeFESystemCommunicator(*sim.fe_system);
-  const auto local_event_count = static_cast<double>(events.size());
-  if (globalMinDouble(local_event_count, comm) !=
-      globalMaxDouble(local_event_count, comm)) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Applied volume-correction event coverage differs across the FE communicator.");
-  }
-  if (events.empty()) {
-    return logs;
-  }
-  const auto declarations =
-      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
-  const auto local_declaration_count =
-      static_cast<double>(declarations.size());
-  const auto local_before_count = static_cast<double>(before.size());
-  const auto local_after_count = static_cast<double>(after.size());
-  if (globalMinDouble(local_declaration_count, comm) !=
-          globalMaxDouble(local_declaration_count, comm) ||
-      globalMinDouble(local_before_count, comm) !=
-          globalMaxDouble(local_before_count, comm) ||
-      globalMinDouble(local_after_count, comm) !=
-          globalMaxDouble(local_after_count, comm)) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Volume-correction functional state coverage differs across the FE communicator.");
-  }
-  std::map<
-      int,
-      const svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState*>
-      before_by_marker;
-  std::map<
-      int,
-      const svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState*>
-      after_by_marker;
-  bool local_state_maps_valid =
-      before.size() == after.size() && before.size() == declarations.size();
-  for (const auto& state : before) {
-    local_state_maps_valid =
-        state.interface_marker >= 0 &&
-        before_by_marker.emplace(state.interface_marker, &state).second &&
-        local_state_maps_valid;
-  }
-  for (const auto& state : after) {
-    local_state_maps_valid =
-        state.interface_marker >= 0 &&
-        after_by_marker.emplace(state.interface_marker, &state).second &&
-        local_state_maps_valid;
-  }
-  if (local_state_maps_valid) {
-    auto before_it = before_by_marker.begin();
-    auto after_it = after_by_marker.begin();
-    for (; before_it != before_by_marker.end(); ++before_it, ++after_it) {
-      local_state_maps_valid =
-          before_it->first == after_it->first && local_state_maps_valid;
-    }
-  }
-  if (globalMinDouble(local_state_maps_valid ? 1.0 : 0.0, comm) != 1.0) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Volume-correction work accounting requires unique, matching functional state sets.");
-  }
-
-  for (const auto& event : events) {
-    const bool local_event_valid =
-        event.level_set_field != svmp::FE::INVALID_FIELD_ID &&
-        !event.level_set_field_name.empty() &&
-        sim.fe_system->findFieldByName(event.level_set_field_name) ==
-            event.level_set_field &&
-        event.completed_step >= 0 && event.correction.correction_applied &&
-        std::isfinite(event.correction.applied_shift);
-    if (globalMinDouble(local_event_valid ? 1.0 : 0.0, comm) != 1.0) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Volume-correction work accounting received an invalid applied event.");
-    }
-    const std::array<double, 5> event_metadata{
-        static_cast<double>(event.level_set_field),
-        static_cast<double>(event.completed_step),
-        event.includes_other_maintenance ? 1.0 : 0.0,
-        static_cast<double>(
-            event.correction.negative_component_volume_transfers.size()),
-        static_cast<double>(event.correction.applied_shift)};
-    bool event_metadata_consistent = true;
-    for (const auto value : event_metadata) {
-      const auto minimum = globalMinDouble(value, comm);
-      const auto maximum = globalMaxDouble(value, comm);
-      const auto tolerance =
-          4096.0 * std::numeric_limits<double>::epsilon() *
-          std::max({1.0, std::abs(minimum), std::abs(maximum)});
-      event_metadata_consistent =
-          std::isfinite(value) &&
-          std::abs(maximum - minimum) <= tolerance &&
-          event_metadata_consistent;
-    }
-    if (!event_metadata_consistent) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Applied volume-correction event metadata differs across the FE communicator.");
-    }
-    std::size_t functional_count = 0u;
-    svmp::FE::Real liquid_volume_change = 0.0;
-    svmp::FE::Real liquid_gas_area_change = 0.0;
-    svmp::FE::Real wetted_wall_area_change = 0.0;
-    svmp::FE::Real contact_measure_change = 0.0;
-    svmp::FE::Real surface_energy_change = 0.0;
-    svmp::FE::Real young_wall_energy_change = 0.0;
-    svmp::FE::Real volume_constraint_potential_change = 0.0;
-    svmp::FE::Real total_potential_change = 0.0;
-    std::ostringstream functional_details;
-    for (const auto& declaration : declarations) {
-      if (declaration.level_set_field != event.level_set_field) {
-        continue;
-      }
-      ++functional_count;
-      const auto before_it =
-          before_by_marker.find(declaration.interface_marker);
-      const auto after_it =
-          after_by_marker.find(declaration.interface_marker);
-      const bool local_state_available =
-          before_it != before_by_marker.end() &&
-          after_it != after_by_marker.end();
-      if (globalMinDouble(local_state_available ? 1.0 : 0.0, comm) != 1.0) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Volume-correction work accounting is missing a functional state for interface marker " +
-            std::to_string(declaration.interface_marker) + ".");
-      }
-      const auto& initial = *before_it->second;
-      const auto& corrected = *after_it->second;
-      const bool local_revision_valid =
-          initial.geometry_revision.complete() &&
-          corrected.geometry_revision.complete() &&
-          initial.geometry_revision.interface_marker ==
-              declaration.interface_marker &&
-          corrected.geometry_revision.interface_marker ==
-              declaration.interface_marker &&
-          initial.geometry_revision.source_id ==
-              corrected.geometry_revision.source_id &&
-          initial.geometry_revision.domain_id ==
-              declaration.geometry_domain_id &&
-          corrected.geometry_revision.domain_id ==
-              declaration.geometry_domain_id &&
-          initial.geometry_revision.isovalue ==
-              corrected.geometry_revision.isovalue &&
-          initial.geometry_revision.source_value_revision !=
-              corrected.geometry_revision.source_value_revision &&
-          initial.geometry_revision.snapshot_revision_key !=
-              corrected.geometry_revision.snapshot_revision_key &&
-          initial.state.snapshot_revision_key ==
-              initial.geometry_revision.snapshot_revision_key &&
-          corrected.state.snapshot_revision_key ==
-              corrected.geometry_revision.snapshot_revision_key &&
-          initial.state.liquid_side == corrected.state.liquid_side &&
-          initial.state.liquid_side == declaration.parameters.liquid_side &&
-          initial.state.surface_tension == corrected.state.surface_tension &&
-          initial.state.surface_tension ==
-              declaration.parameters.surface_tension &&
-          initial.state.volume_multiplier ==
-              corrected.state.volume_multiplier &&
-          initial.state.volume_multiplier ==
-              declaration.parameters.volume_multiplier;
-      if (globalMinDouble(local_revision_valid ? 1.0 : 0.0, comm) != 1.0) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Applied volume correction did not produce distinct, complete free-surface geometry revisions.");
-      }
-      const auto& initial_state = initial.state;
-      const auto& corrected_state = corrected.state;
-      const auto marker_liquid_volume_change =
-          corrected_state.owned_liquid_volume -
-          initial_state.owned_liquid_volume;
-      const auto marker_liquid_gas_area_change =
-          corrected_state.owned_liquid_gas_area -
-          initial_state.owned_liquid_gas_area;
-      const auto marker_wetted_wall_area_change =
-          corrected_state.owned_wetted_wall_area -
-          initial_state.owned_wetted_wall_area;
-      const auto marker_contact_measure_change =
-          corrected_state.owned_contact_measure -
-          initial_state.owned_contact_measure;
-      const auto marker_surface_energy_change =
-          corrected_state.liquid_gas_surface_energy -
-          initial_state.liquid_gas_surface_energy;
-      const auto marker_young_wall_energy_change =
-          corrected_state.young_wall_energy -
-          initial_state.young_wall_energy;
-      const auto marker_volume_potential_change =
-          corrected_state.volume_constraint_potential -
-          initial_state.volume_constraint_potential;
-      const auto marker_total_potential_change =
-          corrected_state.total_potential - initial_state.total_potential;
-      liquid_volume_change += marker_liquid_volume_change;
-      liquid_gas_area_change += marker_liquid_gas_area_change;
-      wetted_wall_area_change += marker_wetted_wall_area_change;
-      contact_measure_change += marker_contact_measure_change;
-      surface_energy_change += marker_surface_energy_change;
-      young_wall_energy_change += marker_young_wall_energy_change;
-      volume_constraint_potential_change +=
-          marker_volume_potential_change;
-      total_potential_change += marker_total_potential_change;
-      functional_details
-          << " interface_marker=" << declaration.interface_marker
-          << " geometry_domain_id='" << declaration.geometry_domain_id << "'"
-          << " initial_source_value_revision="
-          << initial.geometry_revision.source_value_revision
-          << " corrected_source_value_revision="
-          << corrected.geometry_revision.source_value_revision
-          << " initial_snapshot_revision="
-          << initial.geometry_revision.snapshot_revision_key
-          << " corrected_snapshot_revision="
-          << corrected.geometry_revision.snapshot_revision_key
-          << " marker_liquid_volume_change="
-          << marker_liquid_volume_change
-          << " marker_liquid_gas_area_change="
-          << marker_liquid_gas_area_change
-          << " marker_wetted_wall_area_change="
-          << marker_wetted_wall_area_change
-          << " marker_contact_measure_change="
-          << marker_contact_measure_change
-          << " marker_surface_energy_change="
-          << marker_surface_energy_change
-          << " marker_young_wall_energy_change="
-          << marker_young_wall_energy_change
-          << " marker_volume_constraint_potential_change="
-          << marker_volume_potential_change
-          << " marker_total_potential_change="
-          << marker_total_potential_change;
-    }
-    const auto local_functional_count =
-        static_cast<double>(functional_count);
-    if (globalMinDouble(local_functional_count, comm) !=
-        globalMaxDouble(local_functional_count, comm)) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Volume-correction functional matching differs across the FE communicator.");
-    }
-    const std::array<svmp::FE::Real, 8> totals{
-        liquid_volume_change,
-        liquid_gas_area_change,
-        wetted_wall_area_change,
-        contact_measure_change,
-        surface_energy_change,
-        young_wall_energy_change,
-        volume_constraint_potential_change,
-        total_potential_change};
-    bool totals_consistent = true;
-    for (const auto value : totals) {
-      const bool local_finite = std::isfinite(value);
-      if (globalMinDouble(local_finite ? 1.0 : 0.0, comm) != 1.0) {
-        totals_consistent = false;
-        continue;
-      }
-      const auto minimum = globalMinDouble(value, comm);
-      const auto maximum = globalMaxDouble(value, comm);
-      const auto tolerance =
-          4096.0 * std::numeric_limits<double>::epsilon() *
-          std::max({1.0, std::abs(minimum), std::abs(maximum)});
-      totals_consistent =
-          std::abs(maximum - minimum) <= tolerance && totals_consistent;
-    }
-    if (!totals_consistent) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Volume-correction work accounting differs across the FE communicator.");
-    }
-
-    std::ostringstream log;
-    log << std::setprecision(17)
-        << "[svMultiPhysics::Application] Level-set volume correction work"
-        << " diagnostic=level_set_volume_correction_work"
-        << " field='" << event.level_set_field_name << "'"
-        << " step=" << event.completed_step
-        << " scope="
-        << (event.includes_other_maintenance
-                ? "maintenance_sequence_with_other_stage"
-                : "global_shift_only")
-        << " numerical_work_classification=maintenance"
-        << " numerical_work_sign=energy_after_minus_before"
-        << " free_surface_functional_count=" << functional_count
-        << " applied_shift=" << event.correction.applied_shift
-        << " negative_component_count="
-        << event.correction.negative_component_volume_transfers.size()
-        << " negative_component_volume_transfer="
-        << event.correction.total_component_volume_transfer
-        << " liquid_volume_change=" << liquid_volume_change
-        << " liquid_gas_area_change=" << liquid_gas_area_change
-        << " wetted_wall_area_change=" << wetted_wall_area_change
-        << " contact_measure_change=" << contact_measure_change
-        << " surface_energy_change=" << surface_energy_change
-        << " young_wall_energy_change=" << young_wall_energy_change
-        << " volume_constraint_potential_change="
-        << volume_constraint_potential_change
-        << " total_potential_change=" << total_potential_change
-        << " numerical_free_surface_work=" << total_potential_change
-        << " applicability="
-        << (functional_count > 0u ? "declared_free_surface_functional"
-                                  : "non_free_surface_level_set")
-        << functional_details.str();
-    logs.push_back(log.str());
-  }
-  return logs;
-}
-
-void logLevelSetVolumeCorrectionFreeSurfaceWork(
-    application::core::SimulationComponents& sim,
-    std::span<const LevelSetVolumeCorrectionMaintenanceEvent> events,
-    std::span<const svmp::FE::systems::
-                        AcceptedFreeSurfaceDiscreteFunctionalState>
-        before,
-    std::span<const svmp::FE::systems::
-                        AcceptedFreeSurfaceDiscreteFunctionalState>
-        after)
-{
-  for (const auto& log : buildLevelSetVolumeCorrectionFreeSurfaceWorkLogs(
-           sim, events, before, after)) {
-    application::core::oopCout() << log << std::endl;
-  }
 }
 
 svmp::FE::systems::SystemStateView stateViewForHistory(
@@ -13938,7 +13207,6 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   sim.time_history->repack(*sim.backend);
   oopCout() << "[svMultiPhysics::Application] Steady: TimeHistory repacked." << std::endl;
 
-  initializeLevelSetMaintenanceTargets(sim, level_set_maintenance);
   auto steady_initial_cut_report =
       cut_geometry->refreshCached(sim.time_history->u(), "steady_initial");
   if (initializeDiscreteStaticCapillaryEquilibrium(
@@ -14593,7 +13861,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   // state.  Waiting until the first accepted step silently made that state
   // the reference and hid all first-step volume loss.
   std::map<std::string, svmp::FE::Real> initial_wet_volume_by_key;
-  initializeLevelSetMaintenanceTargets(sim, level_set_maintenance);
   auto initial_cut_report =
       cut_geometry->refreshCached(sim.time_history->u(), "initial");
   if (initializeDiscreteStaticCapillaryEquilibrium(
@@ -16176,13 +15443,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           "post_accept",
           /*honor_fail_on_trigger=*/true);
     }
-    const bool volume_maintenance_due = std::any_of(
-        level_set_maintenance.begin(),
-        level_set_maintenance.end(),
-        [&](const auto& request) {
-          return svmp::FE::level_set::shouldApplyLevelSetVolumeCorrection(
-              request.configuration->transport.volume_correction, h.stepIndex());
-        });
     const bool maintenance_work_due = std::any_of(
         level_set_maintenance.begin(),
         level_set_maintenance.end(),
@@ -16190,9 +15450,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           return !request.configuration->transport.conservative_phase.enabled &&
                  (svmp::FE::level_set::shouldReinitializeLevelSet(
                       request.configuration->transport.reinitialization, h.stepIndex()) ||
-                  svmp::FE::level_set::
-                      shouldApplyLevelSetVolumeCorrection(
-                          request.configuration->transport.volume_correction, h.stepIndex()) ||
                   svmp::FE::level_set::
                       shouldApplyLevelSetKinematicReconciliation(
                           request.configuration->transport
@@ -16277,16 +15534,13 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
         pre_maintenance_functionals;
     std::vector<svmp::FE::Real> pre_maintenance_solution;
-    if (maintenance_work_due || volume_maintenance_due) {
+    if (maintenance_work_due) {
       pre_maintenance_solution =
           gatherFeOrderedSolution(
               h.u(), velocity_extension_artifact_comm);
       pre_maintenance_functionals =
           evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
     }
-    std::vector<LevelSetVolumeCorrectionMaintenanceEvent>
-        applied_volume_corrections;
-    std::vector<std::string> volume_correction_work_logs;
     std::vector<std::string> maintenance_commit_logs;
     std::unique_ptr<LevelSetMaintenanceGeometryTransaction>
         maintenance_geometry_transaction;
@@ -16730,8 +15984,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
 
           maintenance_transaction_rejected = true;
           level_set_maintenance_changed = false;
-          applied_volume_corrections.clear();
-          volume_correction_work_logs.clear();
           maintenance_commit_logs.clear();
 
           if (!maintenance_rejection_records_logged) {
@@ -16849,9 +16101,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                 std::move(after_functionals);
           };
       const LevelSetMaintenanceCandidateValidator validate_candidate =
-          [&](std::span<const svmp::FE::Real> candidate,
-              std::span<const LevelSetVolumeCorrectionMaintenanceEvent>
-                  staged_volume_corrections) {
+          [&](std::span<const svmp::FE::Real> candidate) {
             ensure_maintenance_geometry_transaction();
             // The final candidate usually equals the after-candidate of the
             // last maintenance stage, whose refresh already generated its
@@ -16892,16 +16142,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                 postaccept_maintenance_topology_tracking_required) {
               postaccept_maintenance_final_topology_key.reset();
             }
-            if (!staged_volume_corrections.empty()) {
-              const auto post_maintenance_functionals =
-                  evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
-              volume_correction_work_logs =
-                  buildLevelSetVolumeCorrectionFreeSurfaceWorkLogs(
-                      sim,
-                      staged_volume_corrections,
-                      pre_maintenance_functionals,
-                      post_maintenance_functionals);
-            }
           };
       level_set_maintenance_changed = applyLevelSetMaintenance(
           sim,
@@ -16910,7 +16150,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           pending_contact_stages,
           pending_contact_stage_constraints,
           pending_contact_stage_solution,
-          &applied_volume_corrections,
           validate_candidate,
           observe_stage,
           &maintenance_commit_logs,
@@ -16924,10 +16163,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         const auto unchanged_final_candidate =
             gatherFeOrderedSolution(
                 h.u(), velocity_extension_artifact_comm);
-        validate_candidate(
-            unchanged_final_candidate,
-            std::span<const
-                LevelSetVolumeCorrectionMaintenanceEvent>{});
+        validate_candidate(unchanged_final_candidate);
       }
       if (maintenance_work_due) {
         const auto topology_evidence =
@@ -17207,8 +16443,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             << " geometry_validated_before_commit=true"
             << " accepted_state_change="
             << (level_set_maintenance_changed ? "true" : "false")
-            << " volume_corrections="
-            << applied_volume_corrections.size() << std::endl;
+            << std::endl;
       }
       if (maintenance_transaction_published &&
           !level_set_maintenance_work.acceptedAttempts().empty() &&
@@ -17279,9 +16514,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           "accepted_step");
     }
     for (const auto& log : maintenance_commit_logs) {
-      oopCout() << log << std::endl;
-    }
-    for (const auto& log : volume_correction_work_logs) {
       oopCout() << log << std::endl;
     }
     if (parseBoolEnv("SVMP_CUT_RULE_DUMP", false)) {

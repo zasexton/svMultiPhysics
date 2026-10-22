@@ -774,10 +774,6 @@ void validateConservativePhaseOptions(
         throw std::invalid_argument(
             "installLevelSetTransport: conservative phase transport is incompatible with the legacy nonconservative level-set limiter");
     }
-    if (options.volume_correction.enabled) {
-        throw std::invalid_argument(
-            "installLevelSetTransport: conservative phase transport owns geometry reconciliation and is incompatible with legacy target-volume correction");
-    }
 }
 
 void validateBoundPreservingOptions(
@@ -857,48 +853,6 @@ void validateReinitializationOptions(const LevelSetReinitializationOptions& opti
         !std::isfinite(options.max_zero_set_displacement)) {
         throw std::invalid_argument(
             "installLevelSetTransport: reinitialization max_zero_set_displacement must be finite and nonnegative");
-    }
-}
-
-void validateVolumeCorrectionOptions(const LevelSetVolumeCorrectionOptions& options)
-{
-    if (!options.enabled) {
-        return;
-    }
-    if (options.cadence_steps <= 0) {
-        throw std::invalid_argument(
-            "installLevelSetTransport: volume correction cadence_steps must be positive");
-    }
-    if (!(options.volume_tolerance > 0.0) ||
-        !std::isfinite(options.volume_tolerance)) {
-        throw std::invalid_argument(
-            "installLevelSetTransport: volume correction volume_tolerance must be positive");
-    }
-    if (options.max_iterations <= 0) {
-        throw std::invalid_argument(
-            "installLevelSetTransport: volume correction max_iterations must be positive");
-    }
-    if (!(options.minimum_relative_volume_error >= 0.0) ||
-        !std::isfinite(options.minimum_relative_volume_error)) {
-        throw std::invalid_argument(
-            "installLevelSetTransport: volume correction minimum_relative_volume_error must be finite and nonnegative");
-    }
-    if (!(options.maximum_interface_displacement_fraction > 0.0) ||
-        !(options.maximum_interface_displacement_fraction <= 1.0) ||
-        !std::isfinite(options.maximum_interface_displacement_fraction)) {
-        throw std::invalid_argument(
-            "installLevelSetTransport: volume correction maximum_interface_displacement_fraction must be finite and in (0, 1]");
-    }
-    if (!(options.maximum_cumulative_interface_displacement_fraction > 0.0) ||
-        !std::isfinite(
-            options.maximum_cumulative_interface_displacement_fraction)) {
-        throw std::invalid_argument(
-            "installLevelSetTransport: volume correction maximum_cumulative_interface_displacement_fraction must be finite and positive");
-    }
-    if (!options.use_initial_negative_volume_as_target &&
-        options.target_negative_volume < 0.0) {
-        throw std::invalid_argument(
-            "installLevelSetTransport: volume correction target_negative_volume must be nonnegative");
     }
 }
 
@@ -1482,12 +1436,8 @@ bool shouldReinitializeLevelSet(
 
 LevelSetConservationDiagnostic levelSetConservationDiagnostic(
     LevelSetTransportForm transport_form,
-    const LevelSetReinitializationOptions& reinitialization,
-    const LevelSetVolumeCorrectionOptions& volume_correction) noexcept
+    const LevelSetReinitializationOptions& reinitialization) noexcept
 {
-    if (volume_correction.enabled) {
-        return LevelSetConservationDiagnostic::VolumeCorrectedAdvectionNotLocallyConservative;
-    }
     if (reinitialization.enabled) {
         return LevelSetConservationDiagnostic::ReinitializedAdvectionNotConservative;
     }
@@ -1506,8 +1456,7 @@ LevelSetConservationDiagnostic levelSetConservationDiagnostic(
     }
     return levelSetConservationDiagnostic(
         options.transport_form,
-        options.reinitialization,
-        options.volume_correction);
+        options.reinitialization);
 }
 
 const char* levelSetConservationDiagnosticName(
@@ -1520,22 +1469,10 @@ const char* levelSetConservationDiagnosticName(
         return "conservative_divergence_level_set_advection_not_locally_conservative";
     case LevelSetConservationDiagnostic::ReinitializedAdvectionNotConservative:
         return "reinitialized_level_set_advection_not_conservative";
-    case LevelSetConservationDiagnostic::VolumeCorrectedAdvectionNotLocallyConservative:
-        return "volume_corrected_level_set_advection_not_locally_conservative";
     case LevelSetConservationDiagnostic::ConservativePhaseIndicatorLocallyConservative:
         return "conservative_p1_phase_indicator_locally_conservative";
     }
     return "unknown_level_set_conservation";
-}
-
-bool shouldApplyLevelSetVolumeCorrection(
-    const LevelSetVolumeCorrectionOptions& options,
-    int completed_step_index) noexcept
-{
-    return options.enabled &&
-           options.cadence_steps > 0 &&
-           completed_step_index > 0 &&
-           completed_step_index % options.cadence_steps == 0;
 }
 
 bool shouldApplyLevelSetKinematicReconciliation(
@@ -1601,7 +1538,6 @@ systems::CoupledResidualKernels installLevelSetTransport(
             "installLevelSetTransport: SUPG transient_scale must be positive");
     }
     validateReinitializationOptions(options.reinitialization);
-    validateVolumeCorrectionOptions(options.volume_correction);
     validateInterfaceKinematicOptions(options.interface_kinematic);
     validateBoundaryOptions(options.boundaries);
     validateBoundPreservingOptions(options.bound_preserving);
