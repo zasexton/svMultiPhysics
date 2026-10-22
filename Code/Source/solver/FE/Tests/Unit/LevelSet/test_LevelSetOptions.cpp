@@ -27,16 +27,6 @@ TEST(LevelSetOptions, DefaultsAreNeutral)
     EXPECT_DOUBLE_EQ(options.supg.tau_scale, 0.5);
     EXPECT_DOUBLE_EQ(options.supg.velocity_epsilon, 1.0e-12);
     EXPECT_DOUBLE_EQ(options.supg.transient_scale, 2.0);
-    EXPECT_FALSE(options.reinitialization.enabled);
-    EXPECT_EQ(options.reinitialization.method,
-              level_set::LevelSetReinitializationMethod::Projection);
-    EXPECT_EQ(options.reinitialization.cadence_steps, 1);
-    EXPECT_EQ(options.reinitialization.max_iterations, 10);
-    EXPECT_DOUBLE_EQ(options.reinitialization.pseudo_time_step_scale, 0.3);
-    EXPECT_DOUBLE_EQ(options.reinitialization.interface_band_width, 3.0);
-    EXPECT_DOUBLE_EQ(options.reinitialization.signed_distance_tolerance, 1.0e-6);
-    EXPECT_DOUBLE_EQ(options.reinitialization.preserve_band_width, 0.0);
-    EXPECT_DOUBLE_EQ(options.reinitialization.max_zero_set_displacement, 1.0e-10);
     EXPECT_TRUE(options.boundaries.inflow.empty());
     EXPECT_TRUE(options.boundaries.outflow.empty());
     EXPECT_FALSE(options.conservative_phase.enabled);
@@ -134,14 +124,6 @@ TEST(LevelSetOptions, ExplicitTransportOptions)
     options.supg.tau_scale = 0.25;
     options.supg.velocity_epsilon = 1.0e-8;
     options.supg.transient_scale = 1.5;
-    options.reinitialization.enabled = true;
-    options.reinitialization.method = level_set::LevelSetReinitializationMethod::Projection;
-    options.reinitialization.cadence_steps = 4;
-    options.reinitialization.max_iterations = 12;
-    options.reinitialization.pseudo_time_step_scale = 0.20;
-    options.reinitialization.interface_band_width = 2.5;
-    options.reinitialization.signed_distance_tolerance = 1.0e-5;
-    options.reinitialization.max_zero_set_displacement = 2.0e-8;
     options.boundaries.inflow.push_back(level_set::LevelSetInflowBoundary{
         .boundary_marker = 11,
         .value = svmp::FE::Real{2.5},
@@ -165,14 +147,6 @@ TEST(LevelSetOptions, ExplicitTransportOptions)
     EXPECT_DOUBLE_EQ(options.supg.tau_scale, 0.25);
     EXPECT_DOUBLE_EQ(options.supg.velocity_epsilon, 1.0e-8);
     EXPECT_DOUBLE_EQ(options.supg.transient_scale, 1.5);
-    EXPECT_TRUE(options.reinitialization.enabled);
-    EXPECT_EQ(options.reinitialization.method, level_set::LevelSetReinitializationMethod::Projection);
-    EXPECT_EQ(options.reinitialization.cadence_steps, 4);
-    EXPECT_EQ(options.reinitialization.max_iterations, 12);
-    EXPECT_DOUBLE_EQ(options.reinitialization.pseudo_time_step_scale, 0.20);
-    EXPECT_DOUBLE_EQ(options.reinitialization.interface_band_width, 2.5);
-    EXPECT_DOUBLE_EQ(options.reinitialization.signed_distance_tolerance, 1.0e-5);
-    EXPECT_DOUBLE_EQ(options.reinitialization.max_zero_set_displacement, 2.0e-8);
     ASSERT_EQ(options.boundaries.inflow.size(), 1u);
     EXPECT_EQ(options.boundaries.inflow.front().boundary_marker, 11);
     EXPECT_DOUBLE_EQ(std::get<svmp::FE::Real>(options.boundaries.inflow.front().value), 2.5);
@@ -203,22 +177,6 @@ TEST(LevelSetOptions, ConservationDiagnosticsDistinguishRunModes)
             level_set::levelSetConservationDiagnostic(conservative)),
         "conservative_divergence_level_set_advection_not_locally_conservative");
 
-    level_set::LevelSetTransportOptions reinitialized{};
-    reinitialized.reinitialization.enabled = true;
-    EXPECT_EQ(
-        level_set::levelSetConservationDiagnostic(reinitialized),
-        level_set::LevelSetConservationDiagnostic::ReinitializedAdvectionNotConservative);
-    EXPECT_STREQ(
-        level_set::levelSetConservationDiagnosticName(
-            level_set::levelSetConservationDiagnostic(reinitialized)),
-        "reinitialized_level_set_advection_not_conservative");
-
-    EXPECT_NE(
-        level_set::levelSetConservationDiagnosticName(
-            level_set::levelSetConservationDiagnostic(plain)),
-        level_set::levelSetConservationDiagnosticName(
-            level_set::levelSetConservationDiagnostic(reinitialized)));
-
     level_set::LevelSetTransportOptions phase_conservative{};
     phase_conservative.conservative_phase.enabled = true;
     EXPECT_EQ(
@@ -229,24 +187,5 @@ TEST(LevelSetOptions, ConservationDiagnosticsDistinguishRunModes)
         level_set::levelSetConservationDiagnosticName(
             level_set::levelSetConservationDiagnostic(phase_conservative)),
         "conservative_p1_phase_indicator_locally_conservative");
-}
-
-TEST(LevelSetOptions, ReinitializationCadence)
-{
-    level_set::LevelSetReinitializationOptions options{};
-    EXPECT_FALSE(level_set::shouldReinitializeLevelSet(options, 1));
-
-    options.enabled = true;
-    options.cadence_steps = 3;
-    EXPECT_FALSE(level_set::shouldReinitializeLevelSet(options, -1));
-    EXPECT_FALSE(level_set::shouldReinitializeLevelSet(options, 0));
-    EXPECT_FALSE(level_set::shouldReinitializeLevelSet(options, 1));
-    EXPECT_FALSE(level_set::shouldReinitializeLevelSet(options, 2));
-    EXPECT_TRUE(level_set::shouldReinitializeLevelSet(options, 3));
-    EXPECT_FALSE(level_set::shouldReinitializeLevelSet(options, 4));
-    EXPECT_TRUE(level_set::shouldReinitializeLevelSet(options, 6));
-
-    options.cadence_steps = 0;
-    EXPECT_FALSE(level_set::shouldReinitializeLevelSet(options, 3));
 }
 

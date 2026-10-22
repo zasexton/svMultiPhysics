@@ -146,8 +146,8 @@ def test_generated_case_uses_open_resolved_slip_contract(tmp_path: Path):
         level_set.findtext("Wet_extension_advection_velocity_method") ==
         "wall_compatible_normal"
     )
-    assert level_set.findtext("Enable_reinitialization") == "true"
-    assert level_set.findtext("Reinitialization_cadence_steps") == "1"
+    assert level_set.findtext("Enable_reinitialization") == "false"
+    assert level_set.find("Reinitialization_cadence_steps") is None
     assert level_set.findtext("Enable_volume_correction") == "false"
     assert boundary_by_name(
         level_set, "wall_bottom").findtext("Type") == "LevelSetInflow"
@@ -196,7 +196,6 @@ def test_runner_freezes_capillary_rise_physics_and_solver_defaults():
         level_set_active_domain="LevelSetNegative",
         capillary_force_form="surface_stress",
         surface_tension=None,
-        enable_level_set_reinitialization=None,
         max_capillary_rise_contact_motion_cells_per_step=None,
         max_capillary_rise_contact_angle_error_degrees=None,
         steps=None,
@@ -220,7 +219,7 @@ def test_runner_freezes_capillary_rise_physics_and_solver_defaults():
     assert configured.surface_tension == runner.CAPILLARY_RISE_SURFACE_TENSION
     assert configured.contact_angle_degrees == 30.0
     assert configured.wall_slip_length == 0.001
-    assert configured.enable_level_set_reinitialization is True
+    assert not hasattr(configured, "enable_level_set_reinitialization")
     assert configured.wet_extension_advection_velocity_method == (
         "wall_compatible_normal"
     )

@@ -297,9 +297,6 @@ def write_solver_xml(args: argparse.Namespace, *, final_time: float) -> None:
   <Interface_kinematic_weight_scale>1.0</Interface_kinematic_weight_scale>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
   <Enable_reinitialization>false</Enable_reinitialization>
-  <Reinitialization_method>projection</Reinitialization_method>
-  <Reinitialization_cadence_steps>10</Reinitialization_cadence_steps>
-  <Reinitialization_max_iterations>4</Reinitialization_max_iterations>
   <Enable_volume_correction>false</Enable_volume_correction>
   <Output type="Spatial">
     <Level_set>true</Level_set>

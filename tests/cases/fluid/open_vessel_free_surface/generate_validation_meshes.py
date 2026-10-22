@@ -720,8 +720,6 @@ def write_solver_xml(
     use_direct_fluid_solver: bool = False,
     include_pressure_constraints: bool = True,
     hydrostatic_pressure_field_name: str | None = None,
-    enable_level_set_maintenance: bool = True,
-    enable_level_set_reinitialization: bool | None = None,
     momentum_source_file_path: str | None = None,
     rotating_frame_angular_velocity_file_path: str | None = None,
     wet_extension_advection_velocity_method: str | None = None,
@@ -867,11 +865,6 @@ def write_solver_xml(
         else ""
     )
     jit_module_options = "jit=true; jit_specialization=true"
-    if enable_level_set_reinitialization is None:
-        enable_level_set_reinitialization = enable_level_set_maintenance
-    enable_level_set_reinitialization_text = (
-        "true" if enable_level_set_reinitialization else "false"
-    )
     if wet_extension_advection_velocity_method is None:
         level_set_velocity_block = """  <Velocity_source>coupled_field</Velocity_source>
   <Velocity_field_name>Velocity</Velocity_field_name>
@@ -996,10 +989,7 @@ def write_solver_xml(
   <Bound_preserving_enforce_courant_limit>true</Bound_preserving_enforce_courant_limit>
   <Bound_preserving_enforce_impermeable_boundaries>true</Bound_preserving_enforce_impermeable_boundaries>
   <Bound_preserving_impermeable_normal_velocity_tolerance>1.0e-10</Bound_preserving_impermeable_normal_velocity_tolerance>
-  <Enable_reinitialization>{enable_level_set_reinitialization_text}</Enable_reinitialization>
-  <Reinitialization_method>projection</Reinitialization_method>
-  <Reinitialization_cadence_steps>5</Reinitialization_cadence_steps>
-  <Reinitialization_max_iterations>4</Reinitialization_max_iterations>
+  <Enable_reinitialization>false</Enable_reinitialization>
   <Enable_volume_correction>false</Enable_volume_correction>
 
   <Output type="Spatial">
@@ -1182,8 +1172,6 @@ def write_case(
     use_direct_fluid_solver: bool = False,
     include_pressure_constraints: bool = True,
     hydrostatic_pressure_field_name: str | None = None,
-    enable_level_set_maintenance: bool = True,
-    enable_level_set_reinitialization: bool | None = None,
     momentum_source_file_path: str | None = None,
     rotating_frame_angular_velocity_file_path: str | None = None,
     wet_extension_advection_velocity_method: str | None = None,
@@ -1254,8 +1242,6 @@ def write_case(
         use_direct_fluid_solver=use_direct_fluid_solver,
         include_pressure_constraints=include_pressure_constraints,
         hydrostatic_pressure_field_name=hydrostatic_pressure_field_name,
-        enable_level_set_maintenance=enable_level_set_maintenance,
-        enable_level_set_reinitialization=enable_level_set_reinitialization,
         momentum_source_file_path=momentum_source_file_path,
         rotating_frame_angular_velocity_file_path=rotating_frame_angular_velocity_file_path,
         wet_extension_advection_velocity_method=wet_extension_advection_velocity_method,
@@ -1449,7 +1435,6 @@ def generate_spheric_test10(*, allow_overlapping_face_files: bool = False) -> No
         use_direct_fluid_solver=True,
         include_pressure_constraints=False,
         hydrostatic_pressure_field_name="Pressure",
-        enable_level_set_reinitialization=False,
         wet_extension_advection_velocity_method="wall_compatible_normal",
         momentum_source_file_path="bc/test10_lateral_water_1x_roll_body_force.dat",
         rotating_frame_angular_velocity_file_path="bc/test10_lateral_water_1x_roll_angular_velocity.dat",
@@ -1598,8 +1583,6 @@ def generate_spheric_test05(*, allow_overlapping_face_files: bool = False) -> No
             use_direct_fluid_solver=True,
             include_pressure_constraints=False,
             hydrostatic_pressure_field_name="Pressure",
-            enable_level_set_maintenance=False,
-            enable_level_set_reinitialization=False,
             wet_extension_advection_velocity_method="wall_compatible_normal",
             enable_adaptive_time_loop=True,
             newton_line_search_fail_on_no_reduction=True,
@@ -1719,8 +1702,6 @@ def generate_spheric_test02(*, allow_overlapping_face_files: bool = False) -> No
         use_direct_fluid_solver=True,
         include_pressure_constraints=False,
         hydrostatic_pressure_field_name="Pressure",
-        enable_level_set_maintenance=False,
-        enable_level_set_reinitialization=False,
         wet_extension_advection_velocity_method="wall_compatible_normal",
         enable_adaptive_time_loop=True,
         adaptive_time_loop_min_dt="1.0e-7",

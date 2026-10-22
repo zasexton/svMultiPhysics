@@ -431,7 +431,7 @@ TEST(LevelSetEquationTranslator,
       svmp::Physics::ParameterValue{true, "phi_equation"};
   input.equation_params["Operator_tag"] =
       svmp::Physics::ParameterValue{true, "equation_transport"};
-  input.equation_params["Reinitialization_cadence_steps"] =
+  input.equation_params["Conservative_phase_geometry_correction_max_iterations"] =
       svmp::Physics::ParameterValue{true, "2"};
   input.equation_params["Projected_curvature_field"] =
       svmp::Physics::ParameterValue{true, "k_equation"};
@@ -447,7 +447,7 @@ TEST(LevelSetEquationTranslator,
       svmp::Physics::ParameterValue{true, "phi_domain"};
   domain.params["Operator_tag"] =
       svmp::Physics::ParameterValue{true, "domain_transport"};
-  domain.params["Reinitialization_cadence_steps"] =
+  domain.params["Conservative_phase_geometry_correction_max_iterations"] =
       svmp::Physics::ParameterValue{true, "7"};
   domain.params["Projected_curvature_field"] =
       svmp::Physics::ParameterValue{true, "k_domain"};
@@ -461,7 +461,9 @@ TEST(LevelSetEquationTranslator,
   EXPECT_EQ(resolved->options.operator_tag, "domain_transport");
   EXPECT_EQ(resolved->options.transport_form,
             svmp::FE::level_set::LevelSetTransportForm::ConservativeDivergence);
-  EXPECT_EQ(resolved->options.reinitialization.cadence_steps, 7);
+  EXPECT_EQ(
+      resolved->options.conservative_phase.geometry_correction_max_iterations,
+      7);
   EXPECT_EQ(resolved->projected_curvature_fields,
             (std::vector<std::string>{"k_equation", "k_default", "k_domain"}));
 #endif
@@ -502,7 +504,7 @@ TEST(LevelSetEquationTranslator,
 
   const auto expect_real_error = [&](std::string value) {
     auto invalid = makeMaintenanceCompatibilityInput(mesh);
-    invalid.equation_params["Reinitialization_signed_distance_tolerance"] =
+    invalid.equation_params["Bound_preserving_bound_tolerance"] =
         svmp::Physics::ParameterValue{true, value};
     EXPECT_EQ(
         (maintenanceCompatibilityExceptionMessage<std::runtime_error>([&] {
@@ -510,7 +512,7 @@ TEST(LevelSetEquationTranslator,
               invalid);
         })),
         "[svMultiPhysics::Application] Failed to parse numeric value '" +
-            value + "' for Reinitialization_signed_distance_tolerance.");
+            value + "' for Bound_preserving_bound_tolerance.");
   };
   expect_real_error("1.25tail");
   expect_real_error("nan");
@@ -518,7 +520,8 @@ TEST(LevelSetEquationTranslator,
 
   const auto expect_count_error = [&](std::string value) {
     auto invalid = makeMaintenanceCompatibilityInput(mesh);
-    invalid.equation_params["Reinitialization_cadence_steps"] =
+    invalid.equation_params[
+        "Conservative_phase_geometry_correction_max_iterations"] =
         svmp::Physics::ParameterValue{true, value};
     EXPECT_EQ(
         (maintenanceCompatibilityExceptionMessage<std::runtime_error>([&] {
@@ -527,7 +530,8 @@ TEST(LevelSetEquationTranslator,
         })),
         "[svMultiPhysics::Application] Failed to parse positive integer "
         "value '" +
-            value + "' for Reinitialization_cadence_steps.");
+            value +
+            "' for Conservative_phase_geometry_correction_max_iterations.");
   };
   expect_count_error("-1");
   expect_count_error("0");
@@ -535,20 +539,24 @@ TEST(LevelSetEquationTranslator,
   expect_count_error("999999999999999999999");
 
   input = makeMaintenanceCompatibilityInput(mesh);
-  input.equation_params["Enable_reinitialization"] =
+  input.equation_params["Enable_bound_preserving_limiter"] =
       svmp::Physics::ParameterValue{true, "unrecognized"};
-  // A whitespace-only value counts as absent: the default cadence applies.
-  input.equation_params["Reinitialization_cadence_steps"] =
+  // A whitespace-only value counts as absent: the default count applies.
+  input.equation_params["Conservative_phase_geometry_correction_max_iterations"] =
       svmp::Physics::ParameterValue{true, "   "};
   resolved = application::translators::level_set::resolveConfiguration(input);
   ASSERT_TRUE(resolved);
-  EXPECT_FALSE(resolved->options.reinitialization.enabled);
-  EXPECT_EQ(resolved->options.reinitialization.cadence_steps, 1);
-  input.equation_params["Reinitialization_cadence_steps"] =
+  EXPECT_FALSE(resolved->options.bound_preserving.enabled);
+  EXPECT_EQ(
+      resolved->options.conservative_phase.geometry_correction_max_iterations,
+      50);
+  input.equation_params["Conservative_phase_geometry_correction_max_iterations"] =
       svmp::Physics::ParameterValue{true, "3"};
   resolved = application::translators::level_set::resolveConfiguration(input);
   ASSERT_TRUE(resolved);
-  EXPECT_EQ(resolved->options.reinitialization.cadence_steps, 3);
+  EXPECT_EQ(
+      resolved->options.conservative_phase.geometry_correction_max_iterations,
+      3);
 #endif
 }
 
@@ -611,7 +619,7 @@ TEST(LevelSetEquationTranslator,
     legacy.equation_type = "level_set";
     legacy.equation_parameters["Velocity_source"] =
         svmp::Physics::ParameterValue{true, separator_only};
-    legacy.equation_parameters["Enable_reinitialization"] =
+    legacy.equation_parameters["Enable_kinematic_reconciliation"] =
         svmp::Physics::ParameterValue{true, "true"};
     const auto maintenance =
         application::core::resolveLegacyLevelSetMaintenanceConfiguration(
@@ -634,7 +642,7 @@ TEST(LevelSetEquationTranslator,
   application::core::LegacyLevelSetMaintenanceInput legacy{};
   legacy.equation_type_defined = true;
   legacy.equation_type = "level_set";
-  legacy.equation_parameters["Enable_reinitialization"] =
+  legacy.equation_parameters["Enable_kinematic_reconciliation"] =
       svmp::Physics::ParameterValue{true, "true"};
 
   auto wet_input = makeMaintenanceCompatibilityInput(mesh);
@@ -701,7 +709,7 @@ TEST(LevelSetEquationTranslator,
   application::core::LegacyLevelSetMaintenanceInput legacy{};
   legacy.equation_type_defined = true;
   legacy.equation_type = "level_set";
-  legacy.equation_parameters["Enable_reinitialization"] =
+  legacy.equation_parameters["Enable_kinematic_reconciliation"] =
       svmp::Physics::ParameterValue{true, "true"};
 
   auto later_direct_input = makeMaintenanceCompatibilityInput(mesh);
@@ -1473,22 +1481,6 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
       svmp::Physics::ParameterValue{true, "77"};
   input.equation_params["Interface_kinematic_weight_scale"] =
       svmp::Physics::ParameterValue{true, "1.5"};
-  input.equation_params["Enable_reinitialization"] =
-      svmp::Physics::ParameterValue{true, "true"};
-  input.equation_params["Reinitialization_method"] =
-      svmp::Physics::ParameterValue{true, "projection"};
-  input.equation_params["Reinitialization_cadence_steps"] =
-      svmp::Physics::ParameterValue{true, "4"};
-  input.equation_params["Reinitialization_max_iterations"] =
-      svmp::Physics::ParameterValue{true, "8"};
-  input.equation_params["Reinitialization_pseudo_time_step_scale"] =
-      svmp::Physics::ParameterValue{true, "0.125"};
-  input.equation_params["Reinitialization_interface_band_width"] =
-      svmp::Physics::ParameterValue{true, "2.75"};
-  input.equation_params["Reinitialization_signed_distance_tolerance"] =
-      svmp::Physics::ParameterValue{true, "1.0e-4"};
-  input.equation_params["Reinitialization_max_zero_set_displacement"] =
-      svmp::Physics::ParameterValue{true, "2.0e-8"};
 
   svmp::Physics::BoundaryConditionInput inflow{};
   inflow.name = "inlet";
@@ -1525,7 +1517,7 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
   ASSERT_TRUE(artifact.has_value());
   EXPECT_EQ(artifact->component, "level_set_transport");
   constexpr std::string_view expected_without_phase =
-      R"json({"artifact_schema_version":1,"component":"level_set_transport","capability_label":"one_phase_interface_transport_nonlocal_conservation","units":{"system":"consistent_solver_units","length":"solver_length","time":"solver_time","volume":"solver_volume"},"operator":"transport","transport_form":"ConservativeDivergence","conservation_diagnostic":"reinitialized_level_set_advection_not_conservative","level_set":{"field":"phi","source":"Unknown","auto_register":true},"advection_velocity":{"field":"advecting_velocity","source":"PrescribedData","auto_register":true,"constant_value":[0,0,0],"algebraic_extension_source_field":"","dependency_direction":"physical_velocity_to_extension_to_level_set","physical_momentum_coupling_allowed":false,"map_guard_policy":"fixed_bounded_application_policy"},"supg":{"enabled":true,"tau_scale":0.25,"velocity_epsilon":9.9999999999999998e-13,"transient_scale":1.5},"bound_preserving":{"enabled":false,"method":"nodal_rejection_projection_nonconservative","bound_tolerance":9.9999999999999998e-13,"sign_tolerance":9.9999999999999998e-13,"maximum_courant":1,"courant_tolerance":9.9999999999999998e-13,"enforce_courant_limit":true,"enforce_impermeable_boundaries":true,"impermeable_normal_velocity_tolerance":1e-10},"interface_kinematic":{"enabled":true,"interface_marker":77,"weight_scale":1.5},"maintenance_transaction":{"ordering":"transport_then_reinitialization_then_geometry_refresh","reinitialization":{"enabled":true,"method":"Projection","cadence_steps":4,"max_iterations":8,"pseudo_time_step_scale":0.125,"interface_band_width":2.75,"signed_distance_tolerance":0.0001,"preserve_band_width":0,"maximum_zero_set_displacement":2e-08}},"boundaries":{"inflow":[{"marker":4,"value":0.5,"penalty_scale":2}],"outflow":[{"marker":5}]}})json";
+      R"json({"artifact_schema_version":1,"component":"level_set_transport","capability_label":"one_phase_interface_transport_nonlocal_conservation","units":{"system":"consistent_solver_units","length":"solver_length","time":"solver_time","volume":"solver_volume"},"operator":"transport","transport_form":"ConservativeDivergence","conservation_diagnostic":"conservative_divergence_level_set_advection_not_locally_conservative","level_set":{"field":"phi","source":"Unknown","auto_register":true},"advection_velocity":{"field":"advecting_velocity","source":"PrescribedData","auto_register":true,"constant_value":[0,0,0],"algebraic_extension_source_field":"","dependency_direction":"physical_velocity_to_extension_to_level_set","physical_momentum_coupling_allowed":false,"map_guard_policy":"fixed_bounded_application_policy"},"supg":{"enabled":true,"tau_scale":0.25,"velocity_epsilon":9.9999999999999998e-13,"transient_scale":1.5},"bound_preserving":{"enabled":false,"method":"nodal_rejection_projection_nonconservative","bound_tolerance":9.9999999999999998e-13,"sign_tolerance":9.9999999999999998e-13,"maximum_courant":1,"courant_tolerance":9.9999999999999998e-13,"enforce_courant_limit":true,"enforce_impermeable_boundaries":true,"impermeable_normal_velocity_tolerance":1e-10},"interface_kinematic":{"enabled":true,"interface_marker":77,"weight_scale":1.5},"maintenance_transaction":{"ordering":"transport_then_reinitialization_then_geometry_refresh","reinitialization":{"enabled":false,"method":"Projection","cadence_steps":1,"max_iterations":10,"pseudo_time_step_scale":0.29999999999999999,"interface_band_width":3,"signed_distance_tolerance":9.9999999999999995e-07,"preserve_band_width":0,"maximum_zero_set_displacement":1e-10}},"boundaries":{"inflow":[{"marker":4,"value":0.5,"penalty_scale":2}],"outflow":[{"marker":5}]}})json";
   std::string expected{expected_without_phase};
   const auto schema_version = expected.find("\"artifact_schema_version\":1");
   ASSERT_NE(schema_version, std::string::npos);

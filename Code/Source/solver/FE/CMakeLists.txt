@@ -2563,7 +2563,6 @@ if(FE_BUILD_TESTS)
             Tests/Unit/LevelSet/test_LevelSetInterfacePreservingRedistancing.cpp
             Tests/Unit/LevelSet/test_LevelSetInterfacePreservingRedistancing3D.cpp
             Tests/Unit/LevelSet/test_LevelSetOptions.cpp
-            Tests/Unit/LevelSet/test_LevelSetReinitialization.cpp
             Tests/Unit/LevelSet/test_LevelSetRestart.cpp
             Tests/Unit/LevelSet/test_LevelSetTransport.cpp
             Tests/Unit/LevelSet/test_LevelSetVolume.cpp

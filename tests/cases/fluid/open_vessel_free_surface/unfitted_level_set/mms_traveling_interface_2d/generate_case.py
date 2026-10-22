@@ -525,7 +525,6 @@ def write_solver_xml(args: argparse.Namespace) -> None:
     level_set_exact_inflow_block = level_set_exact_inflow_xml(args)
     level_set_coupled = "false" if args.level_set_only else "true"
     level_set_operator_tag = "  <Operator_tag>equations</Operator_tag>\n"
-    enable_reinitialization = "false" if args.disable_reinitialization else "true"
     p1_transport_safety_block = ""
     if args.enable_p1_transport_safety:
         p1_transport_safety_block = """  <SUPG_transient_scale>2.0</SUPG_transient_scale>
@@ -671,10 +670,7 @@ def write_solver_xml(args: argparse.Namespace) -> None:
 {level_set_velocity_block}
   <Enable_SUPG>{str(not args.disable_level_set_supg).lower()}</Enable_SUPG>
   <SUPG_tau_scale>{args.level_set_supg_tau_scale:.12g}</SUPG_tau_scale>
-{p1_transport_safety_block}  <Enable_reinitialization>{enable_reinitialization}</Enable_reinitialization>
-  <Reinitialization_method>projection</Reinitialization_method>
-  <Reinitialization_cadence_steps>{args.reinitialization_cadence_steps}</Reinitialization_cadence_steps>
-  <Reinitialization_max_iterations>4</Reinitialization_max_iterations>
+{p1_transport_safety_block}  <Enable_reinitialization>false</Enable_reinitialization>
   <Enable_volume_correction>false</Enable_volume_correction>
 {level_set_exact_inflow_block}  <Output type="Spatial">
     <Level_set>true</Level_set>
@@ -809,8 +805,6 @@ def write_expected(args: argparse.Namespace, *, k: float, period: float, final_t
                 "level_set_transport_form": args.level_set_transport_form,
                 "level_set_supg_enabled": not args.disable_level_set_supg,
                 "level_set_supg_tau_scale": args.level_set_supg_tau_scale,
-                "level_set_reinitialization_enabled": not args.disable_reinitialization,
-                "level_set_reinitialization_cadence_steps": args.reinitialization_cadence_steps,
                 "level_set_exact_inflow": bool(args.level_set_exact_inflow),
                 "use_cut_metadata_scale": False,
                 "cut_cell_velocity_gradient_penalty": args.cut_cell_velocity_gradient_penalty,
@@ -911,8 +905,6 @@ def write_benchmark(args: argparse.Namespace, *, k: float, period: float, final_
             "level_set_transport_form": args.level_set_transport_form,
             "level_set_supg_enabled": not args.disable_level_set_supg,
             "level_set_supg_tau_scale": args.level_set_supg_tau_scale,
-            "level_set_reinitialization_enabled": not args.disable_reinitialization,
-            "level_set_reinitialization_cadence_steps": args.reinitialization_cadence_steps,
             "level_set_exact_inflow": bool(args.level_set_exact_inflow),
             "use_cut_metadata_scale": False,
             "cut_cell_velocity_gradient_penalty": args.cut_cell_velocity_gradient_penalty,
@@ -1033,8 +1025,6 @@ Default parameters:
 - `time_steps = {args.time_steps}`
 - `spectral_radius_of_infinite_time_step = {args.spectral_radius:.12g}`
 - `element_order = {args.element_order}`
-- `level_set_reinitialization_enabled = {str(not args.disable_reinitialization).lower()}`
-- `level_set_reinitialization_cadence_steps = {args.reinitialization_cadence_steps}`
 - `cut_cell_velocity_gradient_penalty = {args.cut_cell_velocity_gradient_penalty:.12g}`
 - `cut_cell_pressure_gradient_penalty = {args.cut_cell_pressure_gradient_penalty:.12g}`
 - `cut_cell_pressure_stabilization_policy = {args.cut_cell_pressure_stabilization_policy}`
@@ -1219,20 +1209,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--disable-reinitialization",
-        action="store_true",
-        help=(
-            "disable projection reinitialization so manufactured-solution "
-            "verification compares the transported analytic level-set field"
-        ),
-    )
-    parser.add_argument(
-        "--reinitialization-cadence-steps",
-        type=int,
-        default=10,
-        help="projection reinitialization cadence written to solver.xml",
-    )
-    parser.add_argument(
         "--level-set-exact-inflow",
         action="store_true",
         help="add exact time/space level-set inflow data on side walls for moving-interface MMS diagnostics",
@@ -1278,8 +1254,6 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--spectral-radius must be in [0, 1]")
     if args.level_set_supg_tau_scale <= 0.0:
         raise ValueError("--level-set-supg-tau-scale must be positive")
-    if args.reinitialization_cadence_steps <= 0:
-        raise ValueError("--reinitialization-cadence-steps must be positive")
     if args.cut_cell_velocity_gradient_penalty < 0.0:
         raise ValueError("--cut-cell-velocity-gradient-penalty must be nonnegative")
     if args.cut_cell_pressure_gradient_penalty < 0.0:

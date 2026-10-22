@@ -719,9 +719,7 @@ def configure_solver(solver_xml: Path,
                      static_capillary_limited_memory_history_size:
                      int | None = None,
                      static_capillary_limited_memory_curvature_tolerance:
-                     float | None = None,
-                     enable_reinitialization: bool | None = None,
-                     reinitialization_cadence_steps: int | None = None) -> None:
+                     float | None = None) -> None:
     tree = ET.parse(solver_xml)
     root = tree.getroot()
     general = root.find("GeneralSimulationParameters")
@@ -1125,25 +1123,6 @@ def configure_solver(solver_xml: Path,
             "Static_capillary_limited_memory_history_size",
             str(static_capillary_limited_memory_history_size),
         )
-
-    if (enable_reinitialization is not None and
-            not isinstance(enable_reinitialization, bool)):
-        raise ValueError(
-            "level-set reinitialization enable control must be boolean")
-    if (reinitialization_cadence_steps is not None and
-            (isinstance(reinitialization_cadence_steps, bool) or
-             not isinstance(reinitialization_cadence_steps, int) or
-             reinitialization_cadence_steps <= 0)):
-        raise ValueError(
-            "level-set reinitialization cadence must be a positive integer")
-    if enable_reinitialization is not None:
-        level_set = level_set_equation(root)
-        set_text(level_set, "Enable_reinitialization",
-                 "true" if enable_reinitialization else "false")
-    if reinitialization_cadence_steps is not None:
-        level_set = level_set_equation(root)
-        set_text(level_set, "Reinitialization_cadence_steps",
-                 str(reinitialization_cadence_steps))
 
     if disable_coupled_outer_fgmres:
         assert ns_solver is not None
@@ -1914,8 +1893,6 @@ def configure_sessile_solver_xml(case_dir: Path,
     # PrescribedData denotes mesh-field initialization only; the transport
     # installer still registers phi as an unknown owned by the time integrator.
     set_text(level_set, "Level_set_source", "prescribed_data")
-    # Disabled maintenance operators still validate their cadence values.
-    set_text(level_set, "Reinitialization_cadence_steps", "1")
     # SurfaceStress is the first variation of the generated-interface measure
     # and does not consume a projected scalar curvature.  Keeping an otherwise
     # unused kappa field in this physical wetting deck is more than overhead:
@@ -4003,8 +3980,8 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             diagnostics["level_set_maintenance"].append(parse_key_values(line))
         elif "Wet volume diagnostic" in line:
             diagnostics["wet_volume_diagnostics"].append(parse_key_values(line))
-        elif ("WARNING unfitted free-surface level-set has no enabled "
-              "reinitialization or volume-correction request") in line:
+        elif ("WARNING unfitted free-surface level-set has no enabled"
+              in line):
             diagnostics["level_set_nonconservative_warnings"].append(
                 parse_key_values(line)
             )
@@ -7978,8 +7955,6 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "static_capillary_max_topology_epoch_transitions",
         "static_capillary_limited_memory_history_size",
         "static_capillary_limited_memory_curvature_tolerance",
-        "enable_level_set_reinitialization",
-        "reinitialization_cadence_steps",
         "require_static_capillary_balance_qualification",
         "expect_curvature_projection_smoothing_mode",
         "expect_curvature_projection_recovery_mode",
@@ -12551,12 +12526,6 @@ def case_args_for_run(case_name: str,
                 )):
             raise ValueError(
                 "capillary-rise surface tension is fixed by the reference")
-        if getattr(
-                case_args, "enable_level_set_reinitialization",
-                None) is False:
-            raise ValueError(
-                "capillary-rise qualification requires wall-aware "
-                "reinitialization")
         for name in (
                 "max_capillary_rise_contact_motion_cells_per_step",
                 "max_capillary_rise_contact_angle_error_degrees"):
@@ -12576,7 +12545,6 @@ def case_args_for_run(case_name: str,
         case_args.contact_angle_degrees = (
             CAPILLARY_RISE_CONTACT_ANGLE_DEGREES)
         case_args.wall_slip_length = CAPILLARY_RISE_SLIP_LENGTH_M
-        case_args.enable_level_set_reinitialization = True
         set_default(
             case_args,
             "wet_extension_advection_velocity_method",
@@ -12971,10 +12939,6 @@ def configure_case_solver_xml(run_dir: Path, args: argparse.Namespace) -> None:
             "static_capillary_limited_memory_curvature_tolerance",
             None,
         ),
-        enable_reinitialization=getattr(
-            args, "enable_level_set_reinitialization", None),
-        reinitialization_cadence_steps=getattr(
-            args, "reinitialization_cadence_steps", None),
     )
 
 
@@ -15239,18 +15203,6 @@ def main(arguments: Sequence[str] | None = None) -> int:
         "--static-capillary-limited-memory-curvature-tolerance",
         type=float,
     )
-    parser.add_argument(
-        "--enable-level-set-reinitialization",
-        dest="enable_level_set_reinitialization",
-        action="store_true",
-        default=None,
-    )
-    parser.add_argument(
-        "--disable-level-set-reinitialization",
-        dest="enable_level_set_reinitialization",
-        action="store_false",
-    )
-    parser.add_argument("--reinitialization-cadence-steps", type=int)
     parser.add_argument(
         "--require-static-capillary-balance-qualification",
         choices=("prerequisite_only", "qualified"),

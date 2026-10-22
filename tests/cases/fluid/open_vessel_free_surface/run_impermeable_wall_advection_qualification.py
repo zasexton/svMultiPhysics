@@ -386,7 +386,6 @@ def generate_case(
             "--level-set-velocity-source", "prescribed_data",
             "--level-set-only",
             "--enable-p1-transport-safety",
-            "--disable-reinitialization",
         ],
         cwd=case_dir,
         text=True,

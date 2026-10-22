@@ -2500,39 +2500,6 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   }
 }
 
-TEST(ApplicationDriverLevelSetWorkflowsMPI,
-     RepairToTargetWallConstraintFailsClosedOnEveryRank)
-{
-  int rank = 0;
-  int size = 1;
-  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-  MPI_Comm_size(MPI_COMM_WORLD, &size);
-  ASSERT_GE(size, 2) << "This collective guard test requires two ranks.";
-
-  // Decision D4: only rank 0 holds a retired repair-to-target constraint,
-  // and every rank must reject the maintenance request together.
-  svmp::FE::level_set::LevelSetWallContactConstraint preserved{
-      .kind = svmp::FE::level_set::LevelSetWallContactConstraintKind::
-          PreserveAcceptedAngle,
-      .interface_marker = 1722,
-      .boundary_marker = 152,
-      .parent_cell_global_id = 30 + rank,
-      .geometry_revision = 74u,
-  };
-  auto retired = preserved;
-  retired.kind = svmp::FE::level_set::LevelSetWallContactConstraintKind::
-      RepairToPrescribedAngle;
-  const svmp::MeshComm comm(MPI_COMM_WORLD);
-  const std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
-      all_preserved{preserved};
-  EXPECT_NO_THROW(requireAnglePreservingWallMaintenance(
-      all_preserved, comm, "phi"));
-  const std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
-      mixed{rank == 0 ? retired : preserved};
-  EXPECT_THROW(requireAnglePreservingWallMaintenance(mixed, comm, "phi"),
-               std::logic_error);
-}
-
 // The prescribed physical frame built below is read only by the retired
 // repair-to-target kind (decision D4); production harvests
 // PreserveAcceptedAngle constraints without it.
@@ -7506,56 +7473,13 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
             contact_stages.front()
                 .geometry_revision.snapshot_revision_key);
 
-  application::core::ResolvedLevelSetMaintenanceCompatibilityConfiguration maintenance_request_configuration;
-  maintenance_request_configuration.transport.level_set.field_name = "phi";
-  maintenance_request_configuration.transport.reinitialization.enabled = true;
-  maintenance_request_configuration.transport.reinitialization.cadence_steps = 1;
-  maintenance_request_configuration.transport.reinitialization.max_iterations = 100;
-  maintenance_request_configuration.transport.reinitialization.signed_distance_tolerance = 1.0e-10;
-  auto maintenance_request = freezeMaintenanceConfiguration(
-      std::move(maintenance_request_configuration));
-  std::vector<LevelSetMaintenanceRequest> maintenance_requests{
-      maintenance_request};
-  ASSERT_TRUE(applyLevelSetMaintenance(
-      sim,
-      time_history,
-      maintenance_requests,
-      contact_stages,
-      contact_stage_constraints,
-      std::span<const svmp::FE::Real>(solution.data(), solution.size())));
-  const auto maintained_solution =
-      capturePostacceptMaintenanceVectorCollectively(
-          time_history.u(),
-          activeFESystemCommunicator(*sim.fe_system));
-  ASSERT_EQ(maintained_solution.size(), solution.size());
-  for (std::size_t i = 0;
-       i < static_cast<std::size_t>(field_dofs.getNumDofs());
-       ++i) {
-    const auto index = static_cast<std::size_t>(field_offset) + i;
-    ASSERT_LT(index, maintained_solution.size());
-    EXPECT_NEAR(maintained_solution[index],
-                svmp::FE::Real{0.5} * solution[index],
-                1.0e-10)
-        << "rank=" << rank << " field_dof=" << i;
-  }
-  ActiveCutContextRefreshReport maintained_report{};
-  ASSERT_NO_THROW(
-      maintained_report = refreshActiveCutIntegrationContextFromSolution(
-          sim,
-          *params,
-          std::span<const svmp::FE::Real>(maintained_solution.data(),
-                                          maintained_solution.size()),
-          lifecycle,
-          "application-driver-mpi-wall-aware-maintenance-test"));
-  EXPECT_TRUE(maintained_report.refreshed);
-  EXPECT_NE(
-      sim.fe_system->cutIntegrationContext()
-          ->freeSurfaceGeometrySnapshotRevisionForMarker(721),
-      endpoint_snapshot_revision);
+  // Decision D47 retired the projection reinitialization that maintained
+  // this endpoint; the accepted state is the endpoint itself.
   const auto accepted_state_revision =
       collectiveLevelSetMaintenanceAlgebraicRevision(
-          maintained_solution,
+          std::span<const svmp::FE::Real>(solution.data(), solution.size()),
           activeFESystemCommunicator(*sim.fe_system));
+  EXPECT_EQ(accepted_state_revision, pre_maintenance_endpoint_state_revision);
   ASSERT_NO_THROW(recordAcceptedFreeSurfaceDiscreteFunctionals(
       sim,
       /*accepted_step=*/2u,
@@ -7572,7 +7496,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   EXPECT_EQ(
       functional_record.pre_maintenance_endpoint_state_revision,
       pre_maintenance_endpoint_state_revision);
-  EXPECT_NE(
+  EXPECT_EQ(
       functional_record.pre_maintenance_endpoint_state_revision,
       functional_record.state_revision);
   EXPECT_EQ(functional_record.state_revision,
@@ -9798,8 +9722,6 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   first_configuration.transport.level_set.field_name = "phi_first";
   first_configuration.transport.velocity.source =
       svmp::FE::level_set::LevelSetVelocitySource::ConstantVector;
-  first_configuration.transport.reinitialization.enabled = true;
-  first_configuration.transport.reinitialization.cadence_steps = 2;
   first_configuration.transport.bound_preserving.enabled = true;
   first_configuration.static_capillary_equilibrium_enabled = true;
   first_configuration.static_capillary_equilibrium.target_liquid_volume = 1.25;
@@ -9826,8 +9748,6 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   second_configuration.transport.level_set.field_name = "phi_second";
   second_configuration.transport.velocity.source =
       svmp::FE::level_set::LevelSetVelocitySource::ConstantVector;
-  second_configuration.transport.reinitialization.enabled = true;
-  second_configuration.transport.reinitialization.cadence_steps = 3;
   second_configuration.transport.kinematic_reconciliation.enabled = true;
   auto second = freezeMaintenanceConfiguration(
       std::move(second_configuration));
@@ -9843,11 +9763,11 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
        [](auto& requests) {
          std::swap(requests[0], requests[1]);
        }},
-      {"reinitialization_cadence",
+      {"sign_definite_patch_bounds",
        [](auto& requests) {
          requests[0] = withMaintenanceConfiguration(
              requests[0], [&](auto& configured) {
-               ++configured.transport.reinitialization.cadence_steps;
+               configured.transport.sign_definite_patch_bounds.enabled = true;
              });
        }},
       {"velocity_source",

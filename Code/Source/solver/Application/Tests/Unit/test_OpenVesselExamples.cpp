@@ -1129,8 +1129,11 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseDeclaresRequiredControls)
   expectText(level_set, "Velocity_source", "constant");
   expectText(level_set, "Constant_velocity", "0.0 0.0 0.0");
   expectReviewedP1LevelSetTransportControls(level_set);
-  expectText(level_set, "Enable_reinitialization", "true");
-  expectText(level_set, "Reinitialization_method", "projection");
+  // Projection reinitialization was retired (decision D47).
+  expectText(level_set, "Enable_reinitialization", "false");
+  EXPECT_EQ(level_set.FirstChildElement("Reinitialization_method"), nullptr);
+  EXPECT_EQ(level_set.FirstChildElement("Reinitialization_cadence_steps"),
+            nullptr);
   // The global volume correction was retired (decision D47).
   expectText(level_set, "Enable_volume_correction", "false");
   EXPECT_EQ(level_set.FirstChildElement("Volume_correction_use_initial_volume"),

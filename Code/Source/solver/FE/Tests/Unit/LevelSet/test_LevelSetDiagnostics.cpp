@@ -190,18 +190,14 @@ struct ScalarFieldFixture {
 
 } // namespace
 
-TEST(LevelSetDiagnostics, ReportsVolumeAndSignedDistanceError)
+TEST(LevelSetDiagnostics, ReportsVolumeAndReferenceVolumeLoss)
 {
     const ScalarFieldFixture fixture;
     const auto& field_dofs = fixture.system.fieldDofHandler(fixture.phi);
     const auto distorted = distortedPlaneCoefficients(fixture);
 
     level_set::LevelSetOutputDiagnosticsOptions options{};
-    options.signed_distance.signed_distance_tolerance = 1.0e-12;
-    // This diagnostic test exercises the exact one-step update.  The production
-    // defaults deliberately under-relax over several pseudo-time iterations.
-    options.signed_distance.pseudo_time_step_scale = 1.0;
-    options.signed_distance.max_iterations = 1;
+    options.compute_signed_distance_error = false;
     options.has_reference_negative_volume = true;
     options.reference_negative_volume = 0.125;
 
@@ -213,11 +209,6 @@ TEST(LevelSetDiagnostics, ReportsVolumeAndSignedDistanceError)
 
     ASSERT_TRUE(result.success) << result.diagnostic;
     ASSERT_TRUE(result.volume.success) << result.volume.diagnostic;
-    ASSERT_TRUE(result.signed_distance.success) << result.signed_distance.diagnostic;
-    EXPECT_EQ(result.signed_distance_samples, 4u);
-    EXPECT_NEAR(result.signed_distance_max_error, result.signed_distance.max_abs_update, 1.0e-12);
-    EXPECT_NEAR(result.signed_distance_max_error, 2.25, 1.0e-12);
-    EXPECT_GT(result.signed_distance_l2_error, 0.0);
     EXPECT_NEAR(result.negative_volume_loss,
                 options.reference_negative_volume - result.volume.negative_volume,
                 1.0e-12);
@@ -226,17 +217,14 @@ TEST(LevelSetDiagnostics, ReportsVolumeAndSignedDistanceError)
         findScalarDiagnostic(result.scalars, "level_set.negative_volume");
     const auto* volume_loss =
         findScalarDiagnostic(result.scalars, "level_set.negative_volume_loss");
-    const auto* signed_distance_error =
-        findScalarDiagnostic(result.scalars, "level_set.signed_distance_max_error");
     ASSERT_NE(negative_volume, nullptr);
     ASSERT_NE(volume_loss, nullptr);
-    ASSERT_NE(signed_distance_error, nullptr);
     EXPECT_NEAR(*negative_volume, result.volume.negative_volume, 1.0e-12);
     EXPECT_NEAR(*volume_loss, result.negative_volume_loss, 1.0e-12);
-    EXPECT_NEAR(*signed_distance_error, result.signed_distance_max_error, 1.0e-12);
+    EXPECT_EQ(result.scalars.size(), 6u);
 }
 
-TEST(LevelSetDiagnostics, FESystemOverloadCanSkipSignedDistanceError)
+TEST(LevelSetDiagnostics, FESystemOverloadReportsTheFieldSliceVolume)
 {
     const ScalarFieldFixture fixture;
     const auto coefficients = distortedPlaneCoefficients(fixture);
@@ -257,10 +245,16 @@ TEST(LevelSetDiagnostics, FESystemOverloadCanSkipSignedDistanceError)
         solution);
 
     ASSERT_TRUE(result.success) << result.diagnostic;
-    EXPECT_TRUE(result.signed_distance.success == false);
-    EXPECT_EQ(result.signed_distance_samples, 0u);
+    const auto direct = level_set::computeLevelSetCutCellVolume(
+        *fixture.mesh,
+        fixture.system.fieldDofHandler(fixture.phi),
+        level_set::LevelSetVolumeOptions{},
+        coefficients);
+    ASSERT_TRUE(direct.success) << direct.diagnostic;
+    EXPECT_DOUBLE_EQ(result.volume.negative_volume, direct.negative_volume);
+    EXPECT_DOUBLE_EQ(result.volume.positive_volume, direct.positive_volume);
     ASSERT_NE(findScalarDiagnostic(result.scalars, "level_set.total_volume"), nullptr);
-    EXPECT_EQ(findScalarDiagnostic(result.scalars, "level_set.signed_distance_max_error"),
+    EXPECT_EQ(findScalarDiagnostic(result.scalars, "level_set.negative_volume_loss"),
               nullptr);
 }
 
@@ -321,45 +315,3 @@ TEST(LevelSetDiagnostics, PureTangentialAdvectionPreservesVolumeDiagnostics)
     EXPECT_NEAR(*volume_loss, 0.0, 1.0e-12);
 }
 
-TEST(LevelSetDiagnostics, SignedDistanceMaintenanceReducesInterfaceBandError)
-{
-    const ScalarFieldFixture fixture;
-    const auto& field_dofs = fixture.system.fieldDofHandler(fixture.phi);
-    const auto distorted = distortedPlaneCoefficients(fixture);
-
-    level_set::LevelSetOutputDiagnosticsOptions options{};
-    options.signed_distance.signed_distance_tolerance = 1.0e-12;
-    options.signed_distance.interface_band_width = 2.0;
-    // This test exercises the legacy whole-field repair; the single-cell
-    // fixture lies entirely inside the automatic preservation band.
-    options.signed_distance.preserve_band_width = 0.0;
-
-    const auto before = level_set::computeLevelSetOutputDiagnostics(
-        *fixture.mesh,
-        field_dofs,
-        options,
-        distorted);
-    ASSERT_TRUE(before.success) << before.diagnostic;
-    EXPECT_EQ(before.signed_distance_samples, 4u);
-    EXPECT_GT(before.signed_distance_max_error, 1.0);
-
-    std::vector<FE::Real> repaired;
-    const auto repair = level_set::repairLevelSetSignedDistanceByProjection(
-        *fixture.mesh,
-        field_dofs,
-        options.signed_distance,
-        distorted,
-        repaired);
-    ASSERT_TRUE(repair.success) << repair.diagnostic;
-
-    const auto after = level_set::computeLevelSetOutputDiagnostics(
-        *fixture.mesh,
-        field_dofs,
-        options,
-        repaired);
-    ASSERT_TRUE(after.success) << after.diagnostic;
-    EXPECT_LT(after.signed_distance_max_error, before.signed_distance_max_error);
-    EXPECT_LT(after.signed_distance_l2_error, before.signed_distance_l2_error);
-    EXPECT_LT(after.signed_distance_max_error,
-              FE::Real(0.05) * before.signed_distance_max_error);
-}

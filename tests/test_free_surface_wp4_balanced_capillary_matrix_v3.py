@@ -42,6 +42,9 @@ SPHERE_TRIGGER = {
     },
 }
 ADDITIONAL = "ADDITIONAL_LEVEL_REQUIRED"
+# Frozen study axes that execute through the retired projection
+# reinitialization (decision D47).
+RETIRED_REINITIALIZATION_AXES = {"phi_scale", "bulk_redistance_cadence"}
 
 
 def registry():
@@ -378,7 +381,11 @@ def test_selected_traction_commands_have_one_explicit_quadratic_interface_order(
     tmp_path,
 ):
     value = registry()
-    cases = runner.expand_cases(value)
+    cases = [
+        case
+        for case in runner.expand_cases(value)
+        if case["refinement_axis"] not in RETIRED_REINITIALIZATION_AXES
+    ]
     assert cases
     for case in cases:
         arguments = runner.physical_case_arguments(
@@ -424,7 +431,7 @@ def test_conflicting_study_interface_order_override_is_rejected():
         runner.validate_contract(value)
 
 
-def test_positive_phi_scaling_executes_prescribed_wall_maintenance(tmp_path):
+def test_reinitialization_studies_fail_closed_after_retirement(tmp_path):
     value = registry()
     contract = value["maintenance_contract"]
     assert contract["prescribed_wall_maintenance"]["enabled"] is True
@@ -440,26 +447,26 @@ def test_positive_phi_scaling_executes_prescribed_wall_maintenance(tmp_path):
     assert {study["dimension"] for study in scaling} == {2, 3}
     for study in scaling:
         assert study["scope"]["fsr04_closure_evidence"] is False
-        cases = [
-            case
-            for case in runner.expand_cases(value)
-            if case["study_id"] == study["id"]
-        ]
-        for case in cases:
-            arguments = runner.physical_case_arguments(
+    # Both frozen studies that execute through the projection reinitialization
+    # (phi_scale and bulk_redistance_cadence) fail closed: decision D47
+    # retired it.
+    retired = [
+        case
+        for case in runner.expand_cases(value)
+        if case["refinement_axis"] in RETIRED_REINITIALIZATION_AXES
+    ]
+    assert {case["refinement_axis"] for case in retired} == (
+        RETIRED_REINITIALIZATION_AXES
+    )
+    for case in retired:
+        assert case["step_count"] >= 1
+        with pytest.raises(runner.MatrixError, match="decision D47"):
+            runner.physical_case_arguments(
                 value,
                 case,
                 solver=tmp_path / "solver",
                 qualification_log=tmp_path / f"{case['case_id']}.json",
             )
-            assert arguments.count("--enable-level-set-reinitialization") == 1
-            assert option_values(arguments, "--sessile-contact-line-model") == [
-                "prescribed"
-            ]
-            assert option_values(arguments, "--reinitialization-cadence-steps") == [
-                "1"
-            ]
-            assert case["step_count"] >= 1
 
 
 def test_time_refinement_preserves_one_positive_physical_horizon(tmp_path):

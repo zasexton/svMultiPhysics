@@ -152,12 +152,11 @@ def test_generated_case_uses_the_d4_configuration(tmp_path):
     assert '<LS type="Direct">' in direct and 'Linear_algebra type="eigen"' in direct
     assert "<Transient_time_integration_scheme>BackwardEuler" in direct
     assert "Spectral_radius_of_infinite_time_step" not in direct
-    maintained = ET.fromstring(gen.solver_xml("surface_stress", 120, schedule, 10, 1,
-                                              reinitialization=True))
-    level_set = maintained.find("Add_equation[@type='level_set']")
-    assert level_set.find("Enable_reinitialization").text.strip() == "true"
-    assert level_set.find("Reinitialization_cadence_steps").text.strip() == "10"
-    assert level_set.find("Reinitialization_max_iterations").text.strip() == "4"
+    # The projection reinitialization is retired (decision D47): every deck
+    # switches it off and writes none of its settings.
+    for deck in (lumped, consistent, direct):
+        assert "<Enable_reinitialization>false</Enable_reinitialization>" in deck
+        assert "<Reinitialization_" not in deck
 
 
 def write_synthetic_run(run, level, angle_offset=0.0, theta_e=60, growth=False,

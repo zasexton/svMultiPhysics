@@ -116,10 +116,6 @@ SIGN_DEFINITE_PATCH_BOUNDS = True
 # has moved one cell, and the interface is restored.  Protocol value since
 # decision D39; "off" reproduces the earlier decks byte for byte.
 INTERFACE_PRESERVING_REDISTANCING = True
-# Existing production reinitialization values (D18/D38 and sloshing decks),
-# used only with --reinitialization.
-REINITIALIZATION_CADENCE_STEPS = 10
-REINITIALIZATION_MAX_ITERATIONS = 4
 MIN_PHI_OVER_H_WARNING = 1.0e-6             # "vertex touch" warning threshold
 LEVEL_SET_FIELD = "phi"
 CURVATURE_FIELD = "kappa"
@@ -406,7 +402,7 @@ def linear_solver_block(solver: str = "fsils") -> str:
 
 
 def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, cadence: int,
-               reinitialization: bool = False, linear_solver: str = "fsils",
+               linear_solver: str = "fsils",
                time_integration: str = "generalized_alpha",
                transport: str = "pde_extension",
                kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION,
@@ -466,14 +462,7 @@ def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, ca
     <Curvature_projection_cadence_steps>1</Curvature_projection_cadence_steps>"""
     tension_form = "KinematicAreaGradientTraction" if kag else "SurfaceStress"
     curvature_bc = (f"\n      <Curvature_field>{CURVATURE_FIELD}</Curvature_field>" if kag else "")
-    if reinitialization:
-        maintenance = f"""
-    <Enable_reinitialization>true</Enable_reinitialization>
-    <Reinitialization_method>projection</Reinitialization_method>
-    <Reinitialization_cadence_steps>{REINITIALIZATION_CADENCE_STEPS}</Reinitialization_cadence_steps>
-    <Reinitialization_max_iterations>{REINITIALIZATION_MAX_ITERATIONS}</Reinitialization_max_iterations>"""
-    else:
-        maintenance = "\n    <Enable_reinitialization>false</Enable_reinitialization>"
+    maintenance = "\n    <Enable_reinitialization>false</Enable_reinitialization>"
     reconciliation = ("\n    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>"
                       if kinematic_reconciliation else "")
     if redistancing:
@@ -610,7 +599,7 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
              initial_deg: float | None = None,
              viscous_times: float = DEFAULT_VISCOUS_TIMES,
              snapshots: int = DEFAULT_SNAPSHOTS,
-             reinitialization: bool = False, linear_solver: str = "fsils",
+             linear_solver: str = "fsils",
              time_integration: str = "generalized_alpha",
              transport: str = "pde_extension",
              kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION,
@@ -680,7 +669,7 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
         node_ids, parents = faces[wall]
         write_face_vtp(mesh_dir / "mesh-surfaces" / f"{wall}.vtp", points, node_ids, parents)
     (output_dir / "solver.xml").write_text(
-        solver_xml(form, equilibrium_deg, schedule, steps, cadence, reinitialization,
+        solver_xml(form, equilibrium_deg, schedule, steps, cadence,
                    linear_solver, time_integration, transport, kinematic_reconciliation,
                    sign_definite_patch_bounds, semi_implicit, redistancing),
         encoding="utf-8")
@@ -693,7 +682,6 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
         "initial_angle_degrees": float(initial_deg),
         "capillary_form": form,
         "contact_line_model": "PrescribedAngle",
-        "reinitialization": bool(reinitialization),
         "time_integration_scheme": TIME_INTEGRATION_SCHEMES[time_integration],
         "linear_solver": linear_solver,
         "transport": transport,
@@ -770,10 +758,6 @@ def main(argv=None) -> int:
                         help="run length in units rho*R^2/mu (protocol value 5)")
     parser.add_argument("--snapshots", type=int, default=DEFAULT_SNAPSHOTS,
                         help="number of VTU outputs over the run (protocol value 100)")
-    parser.add_argument("--reinitialization", action="store_true",
-                        help="enable projection reinitialization with the production values "
-                             "(every 10 steps, at most 4 iterations; contact cells are only "
-                             "rescaled).  Off in the protocol, as in static_drop_2d.")
     parser.add_argument("--linear-solver", default="fsils", choices=LINEAR_SOLVERS,
                         help="linear solver (protocol: fsils; eigen_direct for comparison)")
     parser.add_argument("--transport", default="pde_extension", choices=TRANSPORTS,
@@ -819,7 +803,7 @@ def main(argv=None) -> int:
 
     case = generate(args.level, args.contact_angle, args.capillary_form, args.output_dir,
                     initial_deg=args.initial_angle, viscous_times=args.viscous_times,
-                    snapshots=args.snapshots, reinitialization=args.reinitialization,
+                    snapshots=args.snapshots,
                     linear_solver=args.linear_solver,
                     time_integration=args.time_integration,
                     transport=args.transport,
@@ -832,7 +816,7 @@ def main(argv=None) -> int:
     print(f"wrote {args.output_dir}")
     for key in ("level_R_over_h", "equilibrium_angle_degrees", "initial_angle_degrees",
                 "capillary_form", "time_integration_scheme", "linear_solver", "transport",
-                "kinematic_reconciliation", "sign_definite_patch_bounds", "reinitialization",
+                "kinematic_reconciliation", "sign_definite_patch_bounds",
                 "surface_tension_semi_implicit", "viscosity", "slip_length_over_h",
                 "viscous_time",
                 "end_time", "dt_rule", "dt", "dt_divisor", "dt_capillary_limit",

@@ -80,11 +80,6 @@ const std::string kPhaseDiagnostic =
     "[svMultiPhysics::Application] Conservative_phase_liquid_side must be "
     "'negative' or 'positive'.";
 
-const std::string kFastMarchingDiagnostic =
-    "[svMultiPhysics::Application] "
-    "Reinitialization_method=FastMarching is reserved until runtime "
-    "fast-marching reinitialization is implemented; use 'Projection'.";
-
 const std::string kCurvatureDiagnostic =
     "level-set curvature recovery mode 'invalid_recovery' must be "
     "level_set_quadratic, generated_interface_patch, or "
@@ -124,10 +119,11 @@ TEST(LevelSetMaintenanceConfiguration,
   put(legacy.equation_parameters, "Level_set_field_name", " phi_equation ");
   put(legacy.equation_parameters, "Level_set_isovalue", "0.25");
   put(legacy.equation_parameters, "Transport_form", "advective");
-  put(legacy.equation_parameters, "Enable_reinitialization", "true");
-  put(legacy.equation_parameters, "Reinitialization_cadence_steps", "2", false);
-  put(legacy.equation_parameters, "Reinitialization_signed_distance_tolerance",
-      "1.23457", false);
+  put(legacy.equation_parameters, "Enable_kinematic_reconciliation", "true");
+  put(legacy.equation_parameters,
+      "Conservative_phase_flux_artifact_cadence_steps", "2", false);
+  put(legacy.equation_parameters,
+      "Conservative_phase_geometry_measure_tolerance", "1.23457", false);
   put(legacy.equation_parameters, "Projected_curvature_field", " k_equation ");
 
   auto installation = makeInstallation(legacy, "phi_domain");
@@ -137,10 +133,11 @@ TEST(LevelSetMaintenanceConfiguration,
   mutable_installation->options.operator_tag = "domain_transport";
   mutable_installation->options.transport_form =
       svmp::FE::level_set::LevelSetTransportForm::ConservativeDivergence;
-  mutable_installation->options.reinitialization.enabled = true;
-  mutable_installation->options.reinitialization.cadence_steps = 7;
-  mutable_installation->options.reinitialization.signed_distance_tolerance =
-      1.2345678901234567;
+  mutable_installation->options.kinematic_reconciliation.enabled = true;
+  mutable_installation->options.conservative_phase
+      .flux_artifact_cadence_steps = 7;
+  mutable_installation->options.conservative_phase
+      .geometry_measure_tolerance = 1.2345678901234567;
   mutable_installation->projected_curvature_fields = {"k_equation", "k_default",
                                                       "k_domain"};
 
@@ -156,10 +153,12 @@ TEST(LevelSetMaintenanceConfiguration,
   EXPECT_EQ(configuration.transport.operator_tag, "level_set");
   EXPECT_EQ(configuration.transport.transport_form,
             svmp::FE::level_set::LevelSetTransportForm::Advective);
-  EXPECT_TRUE(configuration.transport.reinitialization.enabled);
-  EXPECT_EQ(configuration.transport.reinitialization.cadence_steps, 2);
+  EXPECT_TRUE(configuration.transport.kinematic_reconciliation.enabled);
+  EXPECT_EQ(
+      configuration.transport.conservative_phase.flux_artifact_cadence_steps,
+      2);
   EXPECT_DOUBLE_EQ(
-      configuration.transport.reinitialization.signed_distance_tolerance,
+      configuration.transport.conservative_phase.geometry_measure_tolerance,
       1.23457);
   EXPECT_FALSE(configuration.transport.supg.enabled);
   EXPECT_FALSE(configuration.transport.interface_kinematic.enabled);
@@ -171,9 +170,10 @@ TEST(LevelSetMaintenanceConfiguration,
   EXPECT_EQ(installation->options.level_set.field_name, "phi_domain");
   EXPECT_EQ(installation->options.transport_form,
             svmp::FE::level_set::LevelSetTransportForm::ConservativeDivergence);
-  EXPECT_EQ(installation->options.reinitialization.cadence_steps, 7);
+  EXPECT_EQ(
+      installation->options.conservative_phase.flux_artifact_cadence_steps, 7);
   EXPECT_DOUBLE_EQ(
-      installation->options.reinitialization.signed_distance_tolerance,
+      installation->options.conservative_phase.geometry_measure_tolerance,
       1.2345678901234567);
 }
 
@@ -181,19 +181,19 @@ TEST(LevelSetMaintenanceConfiguration,
      OmitsUndefinedUnrecognizedAndFullyDisabledEquations) {
   auto undefined = makeLegacyInput();
   undefined.equation_type_defined = false;
-  put(undefined.equation_parameters, "Enable_reinitialization", "true");
+  put(undefined.equation_parameters, "Enable_kinematic_reconciliation", "true");
   EXPECT_FALSE(application::core::resolveLegacyLevelSetMaintenanceConfiguration(
                    undefined, std::span<const ActiveCutVolumeRequest>{})
                    .has_value());
 
   auto unrecognized = makeLegacyInput("fluid");
-  put(unrecognized.equation_parameters, "Enable_reinitialization", "true");
+  put(unrecognized.equation_parameters, "Enable_kinematic_reconciliation", "true");
   EXPECT_FALSE(application::core::resolveLegacyLevelSetMaintenanceConfiguration(
                    unrecognized, std::span<const ActiveCutVolumeRequest>{})
                    .has_value());
 
   auto disabled = makeLegacyInput();
-  put(disabled.equation_parameters, "Enable_reinitialization", "false");
+  put(disabled.equation_parameters, "Enable_kinematic_reconciliation", "false");
   EXPECT_FALSE(application::core::resolveLegacyLevelSetMaintenanceConfiguration(
                    disabled, std::span<const ActiveCutVolumeRequest>{})
                    .has_value());
@@ -201,9 +201,7 @@ TEST(LevelSetMaintenanceConfiguration,
 
 TEST(LevelSetMaintenanceConfiguration,
      RetainsLegacyNumericVectorBooleanAndAliasPolicies) {
-  // A whitespace-only value counts as absent (the default cadence 1).  The
-  // second spelling of the cadence that the fallback once reached was
-  // removed with the unused alias spellings (decision D47).
+  // A whitespace-only value counts as absent (the default cadence 1).
   struct AcceptedCase {
     std::string vector;
     std::string cadence;
@@ -220,12 +218,13 @@ TEST(LevelSetMaintenanceConfiguration,
     auto input = makeLegacyInput();
     put(input.equation_parameters, "Velocity_source", "constant");
     put(input.equation_parameters, "Constant_velocity", test_case.vector);
-    put(input.equation_parameters, "Enable_reinitialization", "true");
-    put(input.equation_parameters, "Reinitialization_cadence_steps",
-        test_case.cadence);
-    put(input.equation_parameters, "Reinitialization_max_iterations", "2tail");
-    put(input.equation_parameters, "Reinitialization_signed_distance_tolerance",
-        "1.25tail");
+    put(input.equation_parameters, "Enable_kinematic_reconciliation", "true");
+    put(input.equation_parameters,
+        "Conservative_phase_flux_artifact_cadence_steps", test_case.cadence);
+    put(input.equation_parameters,
+        "Conservative_phase_geometry_correction_max_iterations", "2tail");
+    put(input.equation_parameters,
+        "Conservative_phase_geometry_measure_tolerance", "1.25tail");
     put(input.equation_parameters, "Enable_bound_preserving_limiter",
         "unrecognized");
     put(input.equation_parameters, "Bound_preserving_bound_tolerance", "nan");
@@ -240,23 +239,27 @@ TEST(LevelSetMaintenanceConfiguration,
     EXPECT_EQ(transport.velocity.source,
               svmp::FE::level_set::LevelSetVelocitySource::ConstantVector);
     EXPECT_EQ(transport.velocity.constant_value, test_case.expected_vector);
-    EXPECT_EQ(transport.reinitialization.cadence_steps,
+    EXPECT_EQ(transport.conservative_phase.flux_artifact_cadence_steps,
               test_case.expected_cadence);
-    EXPECT_EQ(transport.reinitialization.max_iterations, 2);
-    EXPECT_DOUBLE_EQ(transport.reinitialization.signed_distance_tolerance,
+    EXPECT_EQ(transport.conservative_phase.geometry_correction_max_iterations,
+              2);
+    EXPECT_DOUBLE_EQ(transport.conservative_phase.geometry_measure_tolerance,
                      1.25);
     EXPECT_FALSE(transport.bound_preserving.enabled);
     EXPECT_TRUE(std::isnan(transport.bound_preserving.bound_tolerance));
   }
 
   auto zero = makeLegacyInput();
-  put(zero.equation_parameters, "Enable_reinitialization", "true");
-  put(zero.equation_parameters, "Reinitialization_max_iterations", "0");
+  put(zero.equation_parameters, "Enable_kinematic_reconciliation", "true");
+  put(zero.equation_parameters,
+      "Conservative_phase_geometry_correction_max_iterations", "0");
   const auto zero_resolved =
       application::core::resolveLegacyLevelSetMaintenanceConfiguration(
           zero, std::span<const ActiveCutVolumeRequest>{});
   ASSERT_TRUE(zero_resolved.has_value());
-  EXPECT_EQ((*zero_resolved)->transport.reinitialization.max_iterations, 0);
+  EXPECT_EQ((*zero_resolved)
+                ->transport.conservative_phase.geometry_correction_max_iterations,
+            0);
 }
 
 TEST(LevelSetMaintenanceConfiguration,
@@ -265,7 +268,7 @@ TEST(LevelSetMaintenanceConfiguration,
     auto input = makeLegacyInput();
     put(input.equation_parameters, "Velocity_source", "constant");
     put(input.equation_parameters, "Constant_velocity", "0.0 0.0 0.0");
-    put(input.equation_parameters, "Enable_reinitialization", "true");
+    put(input.equation_parameters, "Enable_kinematic_reconciliation", "true");
     return input;
   };
 
@@ -285,7 +288,7 @@ TEST(LevelSetMaintenanceConfiguration,
 
   auto invalid_real = make_constant();
   put(invalid_real.equation_parameters,
-      "Reinitialization_signed_distance_tolerance", "invalid");
+      "Conservative_phase_geometry_measure_tolerance", "invalid");
   EXPECT_EQ(
       (exceptionMessage<std::invalid_argument>([&] {
         (void)application::core::resolveLegacyLevelSetMaintenanceConfiguration(
@@ -295,7 +298,7 @@ TEST(LevelSetMaintenanceConfiguration,
 
   auto overflow_real = make_constant();
   put(overflow_real.equation_parameters,
-      "Reinitialization_signed_distance_tolerance", "1e9999");
+      "Conservative_phase_geometry_measure_tolerance", "1e9999");
   EXPECT_EQ(
       (exceptionMessage<std::out_of_range>([&] {
         (void)application::core::resolveLegacyLevelSetMaintenanceConfiguration(
@@ -304,7 +307,8 @@ TEST(LevelSetMaintenanceConfiguration,
       "stod");
 
   auto overflow_count = make_constant();
-  put(overflow_count.equation_parameters, "Reinitialization_cadence_steps",
+  put(overflow_count.equation_parameters,
+      "Conservative_phase_flux_artifact_cadence_steps",
       "999999999999999999999");
   EXPECT_EQ(
       (exceptionMessage<std::out_of_range>([&] {
@@ -322,7 +326,7 @@ TEST(LevelSetMaintenanceConfiguration,
   put(input.equation_parameters, "Velocity_source", "prescribed_data");
   put(input.equation_parameters, "Advection_velocity_from_field",
       "physical_velocity");
-  put(input.equation_parameters, "Enable_reinitialization", "true");
+  put(input.equation_parameters, "Enable_kinematic_reconciliation", "true");
   put(input.equation_parameters, "Operator_tag", "ignored_operator");
   put(input.equation_parameters, "Level_set_source", "invalid_source");
   put(input.equation_parameters, "SUPG_tau_scale", "invalid_number");
@@ -355,7 +359,7 @@ TEST(LevelSetMaintenanceConfiguration,
      RejectsTheInstallationOnlyNavierStokesVelocityToken) {
   auto input = makeLegacyInput();
   put(input.equation_parameters, "Velocity_source", "navier_stokes");
-  put(input.equation_parameters, "Enable_reinitialization", "true");
+  put(input.equation_parameters, "Enable_kinematic_reconciliation", "true");
   auto installation = makeInstallation(input);
   EXPECT_EQ(installation->options.velocity.source,
             svmp::FE::level_set::LevelSetVelocitySource::CoupledField);
@@ -369,13 +373,12 @@ TEST(LevelSetMaintenanceConfiguration,
 }
 
 TEST(LevelSetMaintenanceConfiguration,
-     PreservesVelocityPhaseBoundaryReinitializationAndCurvatureOrder) {
+     PreservesVelocityPhaseBoundaryAndCurvatureOrder) {
   auto input = makeLegacyInput();
   put(input.equation_parameters, "Velocity_source", "invalid_velocity");
   put(input.equation_parameters, "Conservative_phase_liquid_side",
       "invalid_phase");
-  put(input.equation_parameters, "Enable_reinitialization", "true");
-  put(input.equation_parameters, "Reinitialization_method", "FastMarching");
+  put(input.equation_parameters, "Enable_kinematic_reconciliation", "true");
   put(input.equation_parameters, "Curvature_projection_recovery_mode",
       "invalid_recovery");
   LegacyLevelSetBoundaryInput boundary{};
@@ -402,22 +405,18 @@ TEST(LevelSetMaintenanceConfiguration,
             "stod");
 
   input.boundaries.clear();
-  EXPECT_EQ((exceptionMessage<std::runtime_error>([&] { (void)resolve(); })),
-            kFastMarchingDiagnostic);
-
-  input.equation_parameters.erase("Reinitialization_method");
-  put(input.equation_parameters, "Enable_reinitialization", "false");
   EXPECT_EQ((exceptionMessage<std::invalid_argument>([&] { (void)resolve(); })),
             kCurvatureDiagnostic);
 
   input.equation_parameters.erase("Curvature_projection_recovery_mode");
+  put(input.equation_parameters, "Enable_kinematic_reconciliation", "false");
   EXPECT_FALSE(resolve().has_value());
 }
 
 TEST(LevelSetMaintenanceConfiguration,
      PreservesBoundaryFlagsAliasesNamesAndLiteralSelection) {
   auto input = makeLegacyInput();
-  put(input.equation_parameters, "Enable_reinitialization", "true");
+  put(input.equation_parameters, "Enable_kinematic_reconciliation", "true");
 
   LegacyLevelSetBoundaryInput undefined_type{};
   undefined_type.name_defined = true;
@@ -476,7 +475,7 @@ TEST(LevelSetMaintenanceConfiguration,
   auto input = makeLegacyInput();
   put(input.equation_parameters, "Level_set_field_name", "phi");
   put(input.equation_parameters, "Level_set_isovalue", "0.5");
-  put(input.equation_parameters, "Enable_reinitialization", "true");
+  put(input.equation_parameters, "Enable_kinematic_reconciliation", "true");
 
   ActiveCutVolumeRequest other{};
   other.level_set_field_name = "other";
@@ -520,7 +519,8 @@ TEST(LevelSetMaintenanceConfiguration,
      ResolvesRetainedHandlesInInputOrderAcrossNullSlots) {
   auto first_input = makeLegacyInput();
   put(first_input.equation_parameters, "Level_set_field_name", "phi_first");
-  put(first_input.equation_parameters, "Enable_reinitialization", "true");
+  put(first_input.equation_parameters, "Enable_sign_definite_patch_bounds",
+      "true");
   auto second_input = makeLegacyInput();
   put(second_input.equation_parameters, "Level_set_field_name", "phi_second");
   put(second_input.equation_parameters, "Enable_kinematic_reconciliation",
@@ -558,11 +558,11 @@ TEST(LevelSetMaintenanceConfiguration,
      UsesInputEquationOrderForFailuresAndRejectsMissingLegacyAttachment) {
   auto velocity = makeLegacyInput();
   put(velocity.equation_parameters, "Velocity_source", "invalid_velocity");
-  put(velocity.equation_parameters, "Enable_reinitialization", "true");
+  put(velocity.equation_parameters, "Enable_kinematic_reconciliation", "true");
   auto phase = makeLegacyInput();
   put(phase.equation_parameters, "Conservative_phase_liquid_side",
       "invalid_phase");
-  put(phase.equation_parameters, "Enable_reinitialization", "true");
+  put(phase.equation_parameters, "Enable_kinematic_reconciliation", "true");
   const auto velocity_installation = makeInstallation(velocity);
   const auto phase_installation = makeInstallation(phase);
 
@@ -611,8 +611,9 @@ TEST(LevelSetMaintenanceConfiguration,
   put(legacy.equation_parameters, "Transport_form", "advective");
   put(legacy.equation_parameters, "Velocity_source", "constant");
   put(legacy.equation_parameters, "Constant_velocity", "1.0, 2.0, 3.0");
-  put(legacy.equation_parameters, "Enable_reinitialization", "true");
-  put(legacy.equation_parameters, "Reinitialization_cadence_steps", "2", false);
+  put(legacy.equation_parameters, "Enable_kinematic_reconciliation", "true");
+  put(legacy.equation_parameters,
+      "Conservative_phase_flux_artifact_cadence_steps", "2", false);
   put(legacy.equation_parameters, "Projected_curvature_field", "k_equation");
 
   auto installation = makeInstallation(legacy, "phi_domain");
@@ -626,8 +627,8 @@ TEST(LevelSetMaintenanceConfiguration,
   mutable_installation->options.velocity.auto_register_field = true;
   mutable_installation->options.velocity.algebraic_extension_source_field_name =
       "physical_velocity";
-  mutable_installation->options.reinitialization.enabled = true;
-  mutable_installation->options.reinitialization.cadence_steps = 7;
+  mutable_installation->options.conservative_phase
+      .flux_artifact_cadence_steps = 7;
   mutable_installation->projected_curvature_fields = {"k_equation", "k_domain"};
   auto mutable_snapshot =
       std::const_pointer_cast<LevelSetEquationInputSnapshot>(
@@ -658,12 +659,12 @@ TEST(LevelSetMaintenanceConfiguration,
             (std::vector<std::string>{"equation", "default_domain",
                                       "domain:liquid"}));
 
-  const auto *legacy_cadence =
-      findObservation((*resolved)->input_observations,
-                      "reinitialization_cadence_steps", "legacy_getter");
+  const auto *legacy_cadence = findObservation(
+      (*resolved)->input_observations,
+      "conservative_phase_flux_artifact_cadence_steps", "legacy_getter");
   ASSERT_NE(legacy_cadence, nullptr);
   EXPECT_EQ(legacy_cadence->selected_spelling,
-            "Reinitialization_cadence_steps");
+            "Conservative_phase_flux_artifact_cadence_steps");
   EXPECT_EQ(legacy_cadence->source_layer, "equation");
   EXPECT_FALSE(legacy_cadence->supplied);
   EXPECT_TRUE(legacy_cadence->compatibility_fallback);
@@ -671,8 +672,9 @@ TEST(LevelSetMaintenanceConfiguration,
 
   for (const auto canonical :
        {"level_set_field_name", "transport_form", "velocity_source",
-        "constant_velocity", "enable_reinitialization",
-        "reinitialization_cadence_steps", "curvature_field_name"}) {
+        "constant_velocity", "enable_kinematic_reconciliation",
+        "conservative_phase_flux_artifact_cadence_steps",
+        "curvature_field_name"}) {
     const auto *selected = findObservation((*resolved)->input_observations,
                                            canonical, "legacy_getter");
     ASSERT_NE(selected, nullptr) << canonical;
@@ -737,7 +739,7 @@ TEST(LevelSetMaintenanceConfiguration,
   auto false_wet = makeLegacyInput();
   put(false_wet.equation_parameters,
       "Use_wet_extension_advection_velocity", "false");
-  put(false_wet.equation_parameters, "Enable_reinitialization", "true");
+  put(false_wet.equation_parameters, "Enable_kinematic_reconciliation", "true");
   const auto false_wet_resolved =
       application::core::resolveLegacyLevelSetMaintenanceConfiguration(
           false_wet, std::span<const ActiveCutVolumeRequest>{});
@@ -761,7 +763,7 @@ TEST(LevelSetMaintenanceConfiguration,
   put(ordered.equation_parameters,
       "Use_wet_extension_advection_velocity", "true");
   put(ordered.equation_parameters, "Constant_velocity", "1.0 2.0 3.0");
-  put(ordered.equation_parameters, "Enable_reinitialization", "true");
+  put(ordered.equation_parameters, "Enable_kinematic_reconciliation", "true");
   const auto ordered_resolved =
       application::core::resolveLegacyLevelSetMaintenanceConfiguration(
           ordered, std::span<const ActiveCutVolumeRequest>{});
@@ -804,7 +806,7 @@ TEST(LevelSetMaintenanceConfiguration,
 TEST(LevelSetMaintenanceConfiguration,
      MarksInstallationVelocityMetadataUnavailableWithoutSnapshotEvidence) {
   auto legacy = makeLegacyInput();
-  put(legacy.equation_parameters, "Enable_reinitialization", "true");
+  put(legacy.equation_parameters, "Enable_kinematic_reconciliation", "true");
   auto installation = makeInstallation(legacy);
   auto mutable_installation =
       std::const_pointer_cast<ResolvedLevelSetEquationConfiguration>(

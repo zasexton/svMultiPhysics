@@ -12,11 +12,8 @@ benchmark for the single contact-angle mechanism of decision D4 in
   wall-area gradient inside `kappa_h` for KAG);
 - Navier slip on the wetted wall, with the slip length as a physical input;
 - a strong no-penetration condition on the contact wall;
-- angle-preserving (scale-only) level-set wall maintenance. Contact cells
-  are only rescaled, never reset to the target angle
-  (`Physics/Docs/NavierStokesFreeSurface.md`, "Level-set wall maintenance").
-  The protocol runs without reinitialization, like `static_drop_2d`;
-  `--reinitialization` adds the production maintenance.
+- no level-set reinitialization, like `static_drop_2d`; the projection
+  reinitialization was retired (decision D47).
 - since decision D39 (2026-10-11), the triggered interface-preserving
   redistancing (`Enable_interface_preserving_redistancing`): once the
   interface has moved one cell, the level set becomes the distance to its own
@@ -102,7 +99,7 @@ free-surface decks; none was chosen for this case.
 | Level-set transport | P1, advected by the harmonic PDE velocity extension of tracker D9 with monolithic coupling (`--transport pde_extension`, the default: `Advection_velocity_extension_method=pde_harmonic`, `Advection_velocity_extension_coupling=monolithic`), SUPG with the production constants (tau scale 0.5, transient scale 2.0); no volume correction, no discontinuity capturing, no bound limiter | decision of 2026-10-05 (tracker M4), as in `static_drop_2d`, `linear_sloshing_2d` and `capillary_wave_2d`. `--transport coupled` advects with the fluid velocity (`Velocity_source=coupled_field`), and `--transport wet_extension` writes the wall-compatible wet extension of the D18 and capillary-rise decks; both remain for comparison |
 | Level-set kinematic reconciliation | on (`Enable_kinematic_reconciliation=true`; `--kinematic-reconciliation off` reproduces the earlier decks). After every accepted step the transported `phi` is corrected locally so that the step's change of the sharp P1 area equals the interface flux of the transport velocity (`FE/LevelSet/LevelSetKinematicReconciliation.h`) | parameter-free, no global shift; it removes the contact-line area drift of the Galerkin transport, see "Area drift" below |
 | Level-set sign-definite patch bounds | on (`Enable_sign_definite_patch_bounds=true`; `--sign-definite-patch-bounds off` reproduces the earlier decks). After every accepted step, a node whose whole patch lies in one phase is kept inside the range of the previous values over its patch (`FE/LevelSet/LevelSetSignDefinitePatchBounds.h`) | parameter-free local maximum principle of exact transport; it never changes a cut cell, so the interface, the contact line and the area are untouched. It stops single wall vertices next to a contact line from crossing the isovalue, see "Spurious wall spots" below |
-| Level-set maintenance | none in the protocol. `--reinitialization` enables projection reinitialization every 10 steps with at most 4 iterations; the zero set then moves by at most `1e-10` per call, and contact cells are only rescaled | the transport of `static_drop_2d`, so that the D2 comparison uses one transport. The optional values are those of the D18/D38 and sloshing decks. In the first smoke run (below) that projection did not converge in 4 iterations and was skipped, so it would not have changed the state |
+| Level-set reinitialization | none (`Enable_reinitialization=false`; the projection reinitialization was retired by decision D47) | the transport of `static_drop_2d`, so that the D2 comparison uses one transport. In the first smoke run (below) the optional projection did not converge in 4 iterations and was skipped, so it never changed the state |
 | Time integration | generalized-alpha, `rho_inf = 0.5`, fixed step; no environment variable. `--time-integration backward_euler` for comparison runs | as `static_drop_2d`. Vertex crossings are accepted within a step with the default restart budget, see "Vertex crossings" below |
 | Nonlinear solve | relative tolerance 1e-4 per equation, at most 8 Newton iterations (fluid) and 4 (level set) | as `static_drop_2d` |
 | Linear solve | FSILS GMRES, as `static_drop_2d` | `--linear-solver eigen_direct` writes the serial Eigen direct solver, for comparison runs |

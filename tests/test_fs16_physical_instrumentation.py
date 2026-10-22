@@ -2173,7 +2173,9 @@ def test_kinematic_area_gradient_traction_rejects_incompatible_projection_contro
         configure(curvature_projection_smoothing_iterations=1)
 
 
-def test_reinitialization_controls_are_explicit_and_fail_closed():
+def test_reinitialization_controls_are_retired():
+    # Decision D47 retired the projection reinitialization: the runner has no
+    # control for it, and its decks switch it off and carry no settings.
     runner = _load_runner()
     with tempfile.TemporaryDirectory() as temp_dir:
         case_dir = Path(temp_dir) / "droplet2d"
@@ -2185,30 +2187,20 @@ def test_reinitialization_controls_are_explicit_and_fail_closed():
             ny=8,
         )
         solver_xml = case_dir / "solver.xml"
-        runner.configure_solver(
-            solver_xml,
-            steps=4,
-            enable_reinitialization=True,
-            reinitialization_cadence_steps=2,
-        )
-        level_set = runner.level_set_equation(
-            runner.ET.parse(solver_xml).getroot())
-        assert level_set.findtext("Enable_reinitialization") == "true"
-        assert level_set.findtext("Reinitialization_cadence_steps") == "2"
-
-        with pytest.raises(ValueError, match="cadence must be a positive integer"):
+        with pytest.raises(TypeError):
             runner.configure_solver(
                 solver_xml,
                 steps=4,
                 enable_reinitialization=True,
-                reinitialization_cadence_steps=0,
             )
-        with pytest.raises(ValueError, match="enable control must be boolean"):
-            runner.configure_solver(
-                solver_xml,
-                steps=4,
-                enable_reinitialization="true",
-            )
+        runner.configure_solver(solver_xml, steps=4)
+        level_set = runner.level_set_equation(
+            runner.ET.parse(solver_xml).getroot())
+        assert level_set.findtext("Enable_reinitialization") == "false"
+        assert not [
+            child.tag for child in level_set
+            if child.tag.startswith("Reinitialization_")
+        ]
 
         controls = {}
 
@@ -2223,8 +2215,8 @@ def test_reinitialization_controls_are_explicit_and_fail_closed():
             controls,
             ControlArguments(),
         )
-        assert controls["enable_level_set_reinitialization"] is False
-        assert controls["reinitialization_cadence_steps"] == 3
+        assert "enable_level_set_reinitialization" not in controls
+        assert "reinitialization_cadence_steps" not in controls
 
 
 def test_projected_curvature_recovery_diagnostics_are_aggregated_and_gated():

@@ -4898,518 +4898,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
-     GeneralizedAlphaMaintenanceCommonDeltaMapsEveryPostAcceptState)
-{
-  const auto capture_gate = lifecycle_capture::captureGate();
-  const std::vector<svmp::FE::Real> repair_delta{
-      svmp::FE::Real{0.25},
-      svmp::FE::Real{-0.5},
-      svmp::FE::Real{0.0}};
-  const auto original_delta = repair_delta;
-  std::vector<std::string> captured_plans;
-
-  for (const double rho_inf : {0.0, 0.2, 0.5, 0.75, 1.0}) {
-    const auto parameters =
-        svmp::FE::timestepping::utils::
-            generalizedAlphaFirstOrderFromRhoInf(rho_inf);
-    const auto scheme =
-        makeFirstOrderGeneralizedAlphaMaintenanceScheme(
-            static_cast<svmp::FE::Real>(parameters.alpha_m),
-            static_cast<svmp::FE::Real>(parameters.alpha_f),
-            static_cast<svmp::FE::Real>(parameters.gamma),
-            svmp::FE::Real{0.125});
-    const auto plan =
-        planFirstOrderGeneralizedAlphaMaintenancePublication(
-            scheme,
-            FirstOrderGeneralizedAlphaMaintenanceClosure::
-                SameRepresentationDelta,
-            repair_delta,
-            repair_delta);
-
-    EXPECT_EQ(
-        plan.status,
-        FirstOrderGeneralizedAlphaMaintenancePlanStatus::
-            AlgebraicallyComplete);
-    ASSERT_TRUE(plan.post_accept.has_value());
-    ASSERT_TRUE(plan.implied_prior_state_delta.has_value());
-    EXPECT_EQ(plan.requested_stage_state_delta, repair_delta);
-    EXPECT_EQ(plan.requested_endpoint_state_delta, repair_delta);
-    EXPECT_EQ(*plan.implied_prior_state_delta, repair_delta);
-    EXPECT_EQ(plan.post_accept->u_delta, repair_delta);
-    EXPECT_EQ(plan.post_accept->u_prev_delta, repair_delta);
-    EXPECT_EQ(
-        plan.post_accept->u_prev2_and_deeper_delta, repair_delta);
-    EXPECT_EQ(
-        plan.post_accept->prior_rate_delta,
-        std::vector<svmp::FE::Real>(repair_delta.size(), 0.0));
-    EXPECT_EQ(
-        plan.post_accept->u_dot_delta,
-        std::vector<svmp::FE::Real>(repair_delta.size(), 0.0));
-    EXPECT_EQ(
-        plan.post_accept->accepted_stage_rate_delta,
-        std::vector<svmp::FE::Real>(repair_delta.size(), 0.0));
-    EXPECT_TRUE(
-        plan.post_accept->maintained_first_order_u_ddot_unchanged);
-    EXPECT_FALSE(plan.requires_separate_geometric_motion_account);
-    EXPECT_LE(
-        plan.max_stage_state_identity_residual,
-        plan.identity_tolerance);
-    EXPECT_LE(
-        plan.max_endpoint_update_identity_residual,
-        plan.identity_tolerance);
-    EXPECT_LE(
-        plan.max_stage_rate_identity_residual,
-        plan.identity_tolerance);
-    ASSERT_TRUE(scheme.alpha_m.has_value());
-    ASSERT_TRUE(scheme.gamma.has_value());
-    EXPECT_NEAR(*scheme.alpha_m, parameters.alpha_m, 1.0e-15);
-    EXPECT_NEAR(*scheme.gamma, parameters.gamma, 1.0e-15);
-    if (capture_gate.enabled) {
-      captured_plans.push_back(lifecycle_capture::generalizedAlphaPlanJson(
-          plan,
-          "same_representation_delta",
-          "algebraically_complete",
-          "rho_inf=" + lifecycle_capture::jsonReal(rho_inf)));
-    }
-  }
-
-  const FirstOrderGeneralizedAlphaMaintenanceScheme alpha_f_only_scheme{
-      .alpha_f = svmp::FE::Real{0.75},
-  };
-  const auto alpha_f_only_plan =
-      planFirstOrderGeneralizedAlphaMaintenancePublication(
-          alpha_f_only_scheme,
-          FirstOrderGeneralizedAlphaMaintenanceClosure::
-              SameRepresentationDelta,
-          repair_delta,
-          repair_delta);
-  EXPECT_EQ(
-      alpha_f_only_plan.status,
-      FirstOrderGeneralizedAlphaMaintenancePlanStatus::
-          AlgebraicallyComplete);
-  ASSERT_TRUE(alpha_f_only_plan.post_accept.has_value());
-  EXPECT_EQ(alpha_f_only_plan.post_accept->u_delta, repair_delta);
-  EXPECT_EQ(
-      alpha_f_only_plan.post_accept->u_prev2_and_deeper_delta,
-      repair_delta);
-  EXPECT_EQ(
-      alpha_f_only_plan.post_accept->prior_rate_delta,
-      std::vector<svmp::FE::Real>(repair_delta.size(), 0.0));
-  EXPECT_EQ(
-      alpha_f_only_plan.post_accept->u_dot_delta,
-      std::vector<svmp::FE::Real>(repair_delta.size(), 0.0));
-  EXPECT_EQ(
-      alpha_f_only_plan.post_accept->accepted_stage_rate_delta,
-      std::vector<svmp::FE::Real>(repair_delta.size(), 0.0));
-
-  if (capture_gate.enabled) {
-    captured_plans.push_back(lifecycle_capture::generalizedAlphaPlanJson(
-        alpha_f_only_plan,
-        "same_representation_delta",
-        "algebraically_complete",
-        "alpha_f_only"));
-  }
-
-  EXPECT_EQ(repair_delta, original_delta);
-  if (capture_gate.enabled) {
-    lifecycle_capture::publish(
-        capture_gate,
-        "ApplicationLifecycleSerial/generalized_alpha_common_delta.json",
-        "ApplicationDriverLevelSetWorkflows",
-        "GeneralizedAlphaMaintenanceCommonDeltaMapsEveryPostAcceptState",
-        "synthetic generalized-alpha maintenance fixture components; not mesh DOFs or a complete simulation",
-        lifecycle_capture::jsonObject({
-            {"fixture_component_kind",
-             lifecycle_capture::jsonString("synthetic_algebra_vectors")},
-            {"plans", lifecycle_capture::jsonArray(captured_plans)},
-            {"unsupported_or_unobserved", lifecycle_capture::jsonObject({
-                {"mesh_identity", lifecycle_capture::jsonString("not_applicable")},
-                {"physical_trajectory", lifecycle_capture::jsonString("unavailable")},
-                {"u_ddot_values", lifecycle_capture::jsonString("outside_scope")},
-            })},
-        }));
-  }
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     GeneralizedAlphaMaintenanceFixedPriorPolicyMapsEndpointRate)
-{
-  const auto capture_gate = lifecycle_capture::captureGate();
-  const std::vector<svmp::FE::Real> endpoint_delta{
-      svmp::FE::Real{0.3},
-      svmp::FE::Real{-0.6},
-      svmp::FE::Real{0.0}};
-  const auto original_endpoint_delta = endpoint_delta;
-  std::vector<std::string> captured_plans;
-
-  for (const double rho_inf : {0.2, 1.0 / 3.0, 0.5, 1.0}) {
-    SCOPED_TRACE(::testing::Message() << "rho_inf=" << rho_inf);
-    const auto parameters =
-        svmp::FE::timestepping::utils::
-            generalizedAlphaFirstOrderFromRhoInf(rho_inf);
-    const auto scheme =
-        makeFirstOrderGeneralizedAlphaMaintenanceScheme(
-            static_cast<svmp::FE::Real>(parameters.alpha_m),
-            static_cast<svmp::FE::Real>(parameters.alpha_f),
-            static_cast<svmp::FE::Real>(parameters.gamma),
-            svmp::FE::Real{0.25});
-    std::vector<svmp::FE::Real> stage_delta(endpoint_delta.size());
-    std::transform(
-        endpoint_delta.begin(),
-        endpoint_delta.end(),
-        stage_delta.begin(),
-        [&](svmp::FE::Real delta) {
-          return scheme.alpha_f * delta;
-        });
-    // Exercise scaled rather than bit-exact closure validation.
-    stage_delta.back() = svmp::FE::Real{1.0e-14};
-    const auto original_stage_delta = stage_delta;
-
-    const auto plan =
-        planFirstOrderGeneralizedAlphaMaintenancePublication(
-            scheme,
-            FirstOrderGeneralizedAlphaMaintenanceClosure::
-                PreservePriorStateAndRate,
-            stage_delta,
-            endpoint_delta);
-
-    EXPECT_EQ(
-        plan.status,
-        FirstOrderGeneralizedAlphaMaintenancePlanStatus::
-            AlgebraicallyComplete);
-    ASSERT_TRUE(plan.post_accept.has_value());
-    ASSERT_TRUE(plan.implied_prior_state_delta.has_value());
-    const std::vector<svmp::FE::Real> zero_delta(
-        endpoint_delta.size(), 0.0);
-    EXPECT_EQ(*plan.implied_prior_state_delta, zero_delta);
-    EXPECT_EQ(plan.post_accept->u_delta, endpoint_delta);
-    EXPECT_EQ(plan.post_accept->u_prev_delta, endpoint_delta);
-    EXPECT_EQ(
-        plan.post_accept->u_prev2_and_deeper_delta, zero_delta);
-    EXPECT_EQ(plan.post_accept->prior_rate_delta, zero_delta);
-    ASSERT_EQ(
-        plan.post_accept->u_dot_delta.size(), endpoint_delta.size());
-    ASSERT_EQ(
-        plan.post_accept->accepted_stage_rate_delta.size(),
-        endpoint_delta.size());
-    for (std::size_t i = 0u; i < endpoint_delta.size(); ++i) {
-      const auto expected_endpoint_rate =
-          endpoint_delta[i] / (*scheme.gamma * *scheme.dt);
-      EXPECT_NEAR(
-          plan.post_accept->u_dot_delta[i],
-          expected_endpoint_rate,
-          1.0e-14);
-      EXPECT_NEAR(
-          plan.post_accept->accepted_stage_rate_delta[i],
-          *scheme.alpha_m * expected_endpoint_rate,
-          1.0e-14);
-    }
-    EXPECT_TRUE(plan.requires_separate_geometric_motion_account);
-    EXPECT_TRUE(
-        plan.post_accept->maintained_first_order_u_ddot_unchanged);
-    EXPECT_GT(plan.max_stage_state_identity_residual, 0.0);
-    EXPECT_LE(
-        plan.max_stage_state_identity_residual,
-        plan.identity_tolerance);
-    EXPECT_LE(
-        plan.max_endpoint_update_identity_residual,
-        plan.identity_tolerance);
-    EXPECT_LE(
-        plan.max_stage_rate_identity_residual,
-        plan.identity_tolerance);
-    EXPECT_EQ(stage_delta, original_stage_delta);
-    if (rho_inf == 0.2) {
-      EXPECT_GT(*scheme.alpha_m, svmp::FE::Real{1.0});
-    }
-    if (rho_inf == 1.0) {
-      EXPECT_DOUBLE_EQ(*scheme.alpha_m, *scheme.gamma);
-    }
-    if (capture_gate.enabled) {
-      captured_plans.push_back(lifecycle_capture::generalizedAlphaPlanJson(
-          plan,
-          "preserve_prior_state_and_rate",
-          "algebraically_complete",
-          "rho_inf=" + lifecycle_capture::jsonReal(rho_inf)));
-    }
-  }
-  EXPECT_EQ(endpoint_delta, original_endpoint_delta);
-  if (capture_gate.enabled) {
-    lifecycle_capture::publish(
-        capture_gate,
-        "ApplicationLifecycleSerial/generalized_alpha_fixed_prior_endpoint_rate.json",
-        "ApplicationDriverLevelSetWorkflows",
-        "GeneralizedAlphaMaintenanceFixedPriorPolicyMapsEndpointRate",
-        "synthetic generalized-alpha maintenance fixture components; not mesh DOFs or a complete simulation",
-        lifecycle_capture::jsonObject({
-            {"fixture_component_kind",
-             lifecycle_capture::jsonString("synthetic_algebra_vectors")},
-            {"plans", lifecycle_capture::jsonArray(captured_plans)},
-            {"unsupported_or_unobserved", lifecycle_capture::jsonObject({
-                {"mesh_identity", lifecycle_capture::jsonString("not_applicable")},
-                {"physical_trajectory", lifecycle_capture::jsonString("unavailable")},
-                {"u_ddot_values", lifecycle_capture::jsonString("outside_scope")},
-            })},
-        }));
-  }
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     GeneralizedAlphaMaintenanceArbitraryRepairPairRemainsFailClosed)
-{
-  const auto parameters =
-      svmp::FE::timestepping::utils::
-          generalizedAlphaFirstOrderFromRhoInf(0.5);
-  const auto scheme =
-      makeFirstOrderGeneralizedAlphaMaintenanceScheme(
-          static_cast<svmp::FE::Real>(parameters.alpha_m),
-          static_cast<svmp::FE::Real>(parameters.alpha_f),
-          static_cast<svmp::FE::Real>(parameters.gamma),
-          svmp::FE::Real{0.25});
-  const std::vector<svmp::FE::Real> stage_delta{0.4, -0.2};
-  const std::vector<svmp::FE::Real> endpoint_delta{0.1, 0.3};
-
-  const auto plan =
-      planFirstOrderGeneralizedAlphaMaintenancePublication(
-          scheme,
-          FirstOrderGeneralizedAlphaMaintenanceClosure::
-              PreservePriorStateAndRate,
-          stage_delta,
-          endpoint_delta);
-
-  EXPECT_EQ(
-      plan.status,
-      FirstOrderGeneralizedAlphaMaintenancePlanStatus::ClosureMismatch);
-  EXPECT_FALSE(plan.post_accept.has_value());
-  EXPECT_TRUE(plan.requires_separate_geometric_motion_account);
-  ASSERT_TRUE(plan.implied_prior_state_delta.has_value());
-  ASSERT_EQ(plan.implied_prior_state_delta->size(), stage_delta.size());
-  for (std::size_t i = 0u; i < stage_delta.size(); ++i) {
-    const auto expected_prior_delta =
-        (stage_delta[i] - scheme.alpha_f * endpoint_delta[i]) /
-        (svmp::FE::Real{1.0} - scheme.alpha_f);
-    EXPECT_NEAR(
-        (*plan.implied_prior_state_delta)[i],
-        expected_prior_delta,
-        1.0e-14);
-  }
-  EXPECT_NE(
-      plan.diagnostic.find("no selected prior-rate"),
-      std::string::npos);
-
-  const auto near_endpoint_alpha = std::nextafter(
-      svmp::FE::Real{1.0}, svmp::FE::Real{0.0});
-  const auto near_singular_scheme =
-      FirstOrderGeneralizedAlphaMaintenanceScheme{
-          .alpha_f = near_endpoint_alpha,
-      };
-  const auto near_singular_plan =
-      planFirstOrderGeneralizedAlphaMaintenancePublication(
-          near_singular_scheme,
-          FirstOrderGeneralizedAlphaMaintenanceClosure::
-              SameRepresentationDelta,
-          stage_delta,
-          endpoint_delta);
-  EXPECT_EQ(
-      near_singular_plan.status,
-      FirstOrderGeneralizedAlphaMaintenancePlanStatus::
-          NearSingularStageInversion);
-  EXPECT_FALSE(near_singular_plan.post_accept.has_value());
-  EXPECT_FALSE(near_singular_plan.implied_prior_state_delta.has_value());
-  EXPECT_TRUE(
-      near_singular_plan.requires_separate_geometric_motion_account);
-
-  const auto endpoint_scheme =
-      FirstOrderGeneralizedAlphaMaintenanceScheme{
-          .alpha_f = svmp::FE::Real{1.0},
-      };
-  const auto endpoint_policy_plan =
-      planFirstOrderGeneralizedAlphaMaintenancePublication(
-          endpoint_scheme,
-          FirstOrderGeneralizedAlphaMaintenanceClosure::
-              PreservePriorStateAndRate,
-          endpoint_delta,
-          endpoint_delta);
-  EXPECT_EQ(
-      endpoint_policy_plan.status,
-      FirstOrderGeneralizedAlphaMaintenancePlanStatus::
-          EndpointPolicyMismatch);
-  EXPECT_FALSE(endpoint_policy_plan.post_accept.has_value());
-  const auto endpoint_delta_mismatch_plan =
-      planFirstOrderGeneralizedAlphaMaintenancePublication(
-          endpoint_scheme,
-          FirstOrderGeneralizedAlphaMaintenanceClosure::
-              SameRepresentationDelta,
-          stage_delta,
-          endpoint_delta);
-  EXPECT_EQ(
-      endpoint_delta_mismatch_plan.status,
-      FirstOrderGeneralizedAlphaMaintenancePlanStatus::
-          EndpointPolicyMismatch);
-  EXPECT_FALSE(endpoint_delta_mismatch_plan.post_accept.has_value());
-
-  const FirstOrderGeneralizedAlphaMaintenanceScheme alpha_f_only_scheme{
-      .alpha_f = svmp::FE::Real{0.75},
-  };
-  const std::vector<svmp::FE::Real> compatible_endpoint_delta{0.4};
-  const std::vector<svmp::FE::Real> compatible_stage_delta{0.3};
-  const auto missing_rate_metadata_plan =
-      planFirstOrderGeneralizedAlphaMaintenancePublication(
-          alpha_f_only_scheme,
-          FirstOrderGeneralizedAlphaMaintenanceClosure::
-              PreservePriorStateAndRate,
-          compatible_stage_delta,
-          compatible_endpoint_delta);
-  EXPECT_EQ(
-      missing_rate_metadata_plan.status,
-      FirstOrderGeneralizedAlphaMaintenancePlanStatus::
-          MissingRateParameters);
-  EXPECT_FALSE(missing_rate_metadata_plan.post_accept.has_value());
-  EXPECT_NE(
-      missing_rate_metadata_plan.diagnostic.find("authentic alpha_m"),
-      std::string::npos);
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     GeneralizedAlphaMaintenanceComposesACommonPostrepairShift)
-{
-  const auto scheme =
-      makeFirstOrderGeneralizedAlphaMaintenanceScheme(
-          svmp::FE::Real{0.75},
-          svmp::FE::Real{0.75},
-          svmp::FE::Real{0.5},
-          svmp::FE::Real{0.2});
-  const std::vector<svmp::FE::Real> endpoint_delta{0.4, -0.8};
-  const std::vector<svmp::FE::Real> stage_delta{0.3, -0.6};
-  const auto plan =
-      planFirstOrderGeneralizedAlphaMaintenancePublication(
-          scheme,
-          FirstOrderGeneralizedAlphaMaintenanceClosure::
-              PreservePriorStateAndRate,
-          stage_delta,
-          endpoint_delta);
-  ASSERT_EQ(
-      plan.status,
-      FirstOrderGeneralizedAlphaMaintenancePlanStatus::
-          AlgebraicallyComplete);
-  ASSERT_TRUE(plan.post_accept.has_value());
-  const auto rate_before = plan.post_accept->u_dot_delta;
-  const auto stage_rate_before =
-      plan.post_accept->accepted_stage_rate_delta;
-  const std::vector<svmp::FE::Real> common_delta{0.1, 0.2};
-
-  const auto combined =
-      combineFirstOrderGeneralizedAlphaPublicationWithCommonDelta(
-          plan, common_delta);
-
-  const std::vector<svmp::FE::Real> expected_endpoint{0.5, -0.6};
-  ASSERT_EQ(combined.u_delta.size(), expected_endpoint.size());
-  ASSERT_EQ(combined.u_prev_delta.size(), expected_endpoint.size());
-  for (std::size_t i = 0u; i < expected_endpoint.size(); ++i) {
-    EXPECT_NEAR(combined.u_delta[i], expected_endpoint[i], 1.0e-15);
-    EXPECT_NEAR(combined.u_prev_delta[i], expected_endpoint[i], 1.0e-15);
-  }
-  EXPECT_EQ(combined.u_prev2_and_deeper_delta, common_delta);
-  EXPECT_EQ(combined.prior_rate_delta,
-            std::vector<svmp::FE::Real>({0.0, 0.0}));
-  EXPECT_EQ(combined.u_dot_delta, rate_before);
-  EXPECT_EQ(combined.accepted_stage_rate_delta, stage_rate_before);
-  EXPECT_EQ(plan.post_accept->u_delta, endpoint_delta);
-  EXPECT_EQ(
-      plan.post_accept->u_prev2_and_deeper_delta,
-      std::vector<svmp::FE::Real>({0.0, 0.0}));
-
-  const std::vector<svmp::FE::Real> wrong_layout{0.1};
-  EXPECT_THROW(
-      (void)combineFirstOrderGeneralizedAlphaPublicationWithCommonDelta(
-          plan, wrong_layout),
-      std::invalid_argument);
-  const std::vector<svmp::FE::Real> nonfinite{
-      0.0, std::numeric_limits<svmp::FE::Real>::infinity()};
-  EXPECT_THROW(
-      (void)combineFirstOrderGeneralizedAlphaPublicationWithCommonDelta(
-          plan, nonfinite),
-      std::invalid_argument);
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     GeneralizedAlphaMaintenancePlannerRejectsInvalidInputs)
-{
-  EXPECT_THROW(
-      (void)makeFirstOrderGeneralizedAlphaMaintenanceScheme(
-          0.75,
-          std::numeric_limits<svmp::FE::Real>::quiet_NaN(),
-          0.5,
-          0.1),
-      std::invalid_argument);
-  EXPECT_THROW(
-      (void)makeFirstOrderGeneralizedAlphaMaintenanceScheme(
-          0.75, -0.1, 1.35, 0.1),
-      std::invalid_argument);
-  EXPECT_THROW(
-      (void)makeFirstOrderGeneralizedAlphaMaintenanceScheme(
-          0.75, 1.01, 0.24, 0.1),
-      std::invalid_argument);
-  EXPECT_THROW(
-      (void)makeFirstOrderGeneralizedAlphaMaintenanceScheme(
-          0.75, 0.75, 0.5, 0.0),
-      std::invalid_argument);
-
-  auto scheme =
-      makeFirstOrderGeneralizedAlphaMaintenanceScheme(
-          0.75, 0.75, 0.5, 0.1);
-  const std::vector<svmp::FE::Real> one_delta{0.1};
-  const std::vector<svmp::FE::Real> two_deltas{0.1, 0.2};
-  const std::vector<svmp::FE::Real> empty;
-  EXPECT_THROW(
-      (void)planFirstOrderGeneralizedAlphaMaintenancePublication(
-          scheme,
-          FirstOrderGeneralizedAlphaMaintenanceClosure::
-              SameRepresentationDelta,
-          one_delta,
-          two_deltas),
-      std::invalid_argument);
-  EXPECT_THROW(
-      (void)planFirstOrderGeneralizedAlphaMaintenancePublication(
-          scheme,
-          FirstOrderGeneralizedAlphaMaintenanceClosure::
-              SameRepresentationDelta,
-          empty,
-          empty),
-      std::invalid_argument);
-  const std::vector<svmp::FE::Real> nonfinite_delta{
-      std::numeric_limits<svmp::FE::Real>::infinity()};
-  EXPECT_THROW(
-      (void)planFirstOrderGeneralizedAlphaMaintenancePublication(
-          scheme,
-          FirstOrderGeneralizedAlphaMaintenanceClosure::
-              SameRepresentationDelta,
-          nonfinite_delta,
-          nonfinite_delta),
-      std::invalid_argument);
-  const FirstOrderGeneralizedAlphaMaintenanceScheme partial_scheme{
-      .alpha_m = svmp::FE::Real{0.75},
-      .alpha_f = svmp::FE::Real{0.75},
-  };
-  EXPECT_THROW(
-      (void)planFirstOrderGeneralizedAlphaMaintenancePublication(
-          partial_scheme,
-          FirstOrderGeneralizedAlphaMaintenanceClosure::
-              SameRepresentationDelta,
-          one_delta,
-          one_delta),
-      std::invalid_argument);
-  *scheme.gamma += 0.1;
-  EXPECT_THROW(
-      (void)planFirstOrderGeneralizedAlphaMaintenancePublication(
-          scheme,
-          FirstOrderGeneralizedAlphaMaintenanceClosure::
-              SameRepresentationDelta,
-          one_delta,
-          one_delta),
-      std::invalid_argument);
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
      ActiveCutTopologyFingerprintUsesOnlySemanticGlobalRuleIdentity)
 {
   ActiveCutVolumeRequest request;
@@ -6194,13 +5682,13 @@ TEST(ApplicationDriverLevelSetWorkflows,
   <Add_equation type="level_set">
     <Level_set_field_name>phi_equation</Level_set_field_name>
     <Transport_form>advective</Transport_form>
-    <Enable_reinitialization>true</Enable_reinitialization>
-    <Reinitialization_cadence_steps>2</Reinitialization_cadence_steps>
+    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
+    <Conservative_phase_flux_artifact_cadence_steps>2</Conservative_phase_flux_artifact_cadence_steps>
     <Projected_curvature_field>k_equation</Projected_curvature_field>
     <Domain id="liquid">
       <Level_set_field_name>phi_domain</Level_set_field_name>
       <Transport_form>conservative_divergence</Transport_form>
-      <Reinitialization_cadence_steps>7</Reinitialization_cadence_steps>
+      <Conservative_phase_flux_artifact_cadence_steps>7</Conservative_phase_flux_artifact_cadence_steps>
       <Projected_curvature_field>k_domain</Projected_curvature_field>
     </Domain>
   </Add_equation>
@@ -6221,8 +5709,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_EQ(request.configuration->transport.level_set.field_name, "phi_equation");
   EXPECT_EQ(request.configuration->transport.transport_form,
             svmp::FE::level_set::LevelSetTransportForm::Advective);
-  EXPECT_TRUE(request.configuration->transport.reinitialization.enabled);
-  EXPECT_EQ(request.configuration->transport.reinitialization.cadence_steps, 2);
+  EXPECT_TRUE(request.configuration->transport.kinematic_reconciliation.enabled);
+  EXPECT_EQ(request.configuration->transport.conservative_phase
+                .flux_artifact_cadence_steps,
+            2);
   EXPECT_TRUE(request.configuration->curvature_projection_enabled);
   EXPECT_EQ(request.configuration->curvature_field_name, "k_equation");
 }
@@ -6234,23 +5724,25 @@ TEST(ApplicationDriverLevelSetWorkflows,
   auto* equation = new EquationParameters();
   equation->type.set("level_set");
   params.equation_parameters.push_back(equation);
-  Parameter<std::string> undefined_enable("Enable_reinitialization", "true",
-                                          false);
+  Parameter<std::string> undefined_enable("Enable_kinematic_reconciliation",
+                                          "true", false);
   Parameter<double> undefined_tolerance(
-      "Reinitialization_signed_distance_tolerance", 1.2345678901234567, false);
+      "Conservative_phase_geometry_measure_tolerance", 1.2345678901234567,
+      false);
   equation->params_map[undefined_enable.name()] = &undefined_enable;
   equation->params_map[undefined_tolerance.name()] = &undefined_tolerance;
 
   const auto getter_text = equation->get_parameter_list();
   const auto requests = legacyMaintenanceRequestsForTest(params);
 
-  ASSERT_EQ(getter_text.at("Reinitialization_signed_distance_tolerance"),
+  ASSERT_EQ(getter_text.at("Conservative_phase_geometry_measure_tolerance"),
             "1.23457");
   EXPECT_FALSE(undefined_enable.defined());
   EXPECT_FALSE(undefined_tolerance.defined());
   ASSERT_EQ(requests.size(), 1u);
-  EXPECT_TRUE(requests.front().configuration->transport.reinitialization.enabled);
-  EXPECT_DOUBLE_EQ(requests.front().configuration->transport.reinitialization.signed_distance_tolerance,
+  EXPECT_TRUE(requests.front().configuration->transport.kinematic_reconciliation.enabled);
+  EXPECT_DOUBLE_EQ(requests.front().configuration->transport.conservative_phase
+                       .geometry_measure_tolerance,
                    1.23457);
 }
 
@@ -6263,10 +5755,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
     <Level_set_field_name>phi_comma</Level_set_field_name>
     <Velocity_source>constant</Velocity_source>
     <Constant_velocity>1.25, -0.5, 3.0</Constant_velocity>
-    <Enable_reinitialization>true</Enable_reinitialization>
-    <Reinitialization_cadence_steps>-1</Reinitialization_cadence_steps>
-    <Reinitialization_max_iterations>2tail</Reinitialization_max_iterations>
-    <Reinitialization_signed_distance_tolerance>1.25tail</Reinitialization_signed_distance_tolerance>
+    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
+    <Conservative_phase_flux_artifact_cadence_steps>-1</Conservative_phase_flux_artifact_cadence_steps>
+    <Conservative_phase_geometry_correction_max_iterations>2tail</Conservative_phase_geometry_correction_max_iterations>
+    <Conservative_phase_geometry_measure_tolerance>1.25tail</Conservative_phase_geometry_measure_tolerance>
     <Enable_bound_preserving_limiter>unrecognized</Enable_bound_preserving_limiter>
     <Bound_preserving_bound_tolerance>nan</Bound_preserving_bound_tolerance>
   </Add_equation>
@@ -6274,7 +5766,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
     <Level_set_field_name>phi_whitespace</Level_set_field_name>
     <Velocity_source>constant</Velocity_source>
     <Constant_velocity>4.0 5.0 6.0</Constant_velocity>
-    <Enable_reinitialization>true</Enable_reinitialization>
+    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
   </Add_equation>
 </svMultiPhysicsFile>
 )xml");
@@ -6282,28 +5774,33 @@ TEST(ApplicationDriverLevelSetWorkflows,
   // Set a whitespace-only value at the direct parameter boundary (the XML
   // reader rejects whitespace-only elements): it counts as absent.
   params->equation_parameters[1]->set_extra_parameter_value(
-      "Reinitialization_cadence_steps", "   ");
+      "Conservative_phase_flux_artifact_cadence_steps", "   ");
 
   const auto requests = legacyMaintenanceRequestsForTest(*params);
 
   ASSERT_EQ(requests.size(), 2u);
   EXPECT_EQ(requests[0].configuration->transport.velocity.constant_value,
             (std::array<svmp::FE::Real, 3>{1.25, -0.5, 3.0}));
-  EXPECT_EQ(requests[0].configuration->transport.reinitialization.cadence_steps, -1);
-  EXPECT_EQ(requests[0].configuration->transport.reinitialization.max_iterations, 2);
-  EXPECT_DOUBLE_EQ(requests[0].configuration->transport.reinitialization.signed_distance_tolerance,
-                   1.25);
+  const auto& first_phase =
+      requests[0].configuration->transport.conservative_phase;
+  EXPECT_EQ(first_phase.flux_artifact_cadence_steps, -1);
+  EXPECT_EQ(first_phase.geometry_correction_max_iterations, 2);
+  EXPECT_DOUBLE_EQ(first_phase.geometry_measure_tolerance, 1.25);
   EXPECT_FALSE(requests[0].configuration->transport.bound_preserving.enabled);
   EXPECT_TRUE(std::isnan(requests[0].configuration->transport.bound_preserving.bound_tolerance));
   EXPECT_EQ(requests[1].configuration->transport.velocity.constant_value,
             (std::array<svmp::FE::Real, 3>{4.0, 5.0, 6.0}));
-  EXPECT_EQ(requests[1].configuration->transport.reinitialization.cadence_steps, 1);
+  EXPECT_EQ(requests[1].configuration->transport.conservative_phase
+                .flux_artifact_cadence_steps,
+            1);
 
   params->equation_parameters[1]->set_extra_parameter_value(
-      "Reinitialization_cadence_steps", "3");
+      "Conservative_phase_flux_artifact_cadence_steps", "3");
   const auto first_alias_requests = legacyMaintenanceRequestsForTest(*params);
   ASSERT_EQ(first_alias_requests.size(), 2u);
-  EXPECT_EQ(first_alias_requests[1].configuration->transport.reinitialization.cadence_steps, 3);
+  EXPECT_EQ(first_alias_requests[1].configuration->transport.conservative_phase
+                .flux_artifact_cadence_steps,
+            3);
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
@@ -6315,7 +5812,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   <Add_equation type="level_set">
     <Velocity_source>constant</Velocity_source>
     <Constant_velocity>0.0 0.0 0.0</Constant_velocity>
-    <Enable_reinitialization>true</Enable_reinitialization>
+    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
   </Add_equation>
 </svMultiPhysicsFile>
 )xml");
@@ -6336,21 +5833,22 @@ TEST(ApplicationDriverLevelSetWorkflows,
 
   auto invalid_real = make_params();
   invalid_real->equation_parameters.front()->set_extra_parameter_value(
-      "Reinitialization_signed_distance_tolerance", "invalid");
+      "Conservative_phase_geometry_measure_tolerance", "invalid");
   EXPECT_EQ((maintenanceCompatibilityExceptionMessage<std::invalid_argument>(
                 [&] { (void)legacyMaintenanceRequestsForTest(*invalid_real); })),
             "stod");
 
   auto overflow_real = make_params();
   overflow_real->equation_parameters.front()->set_extra_parameter_value(
-      "Reinitialization_signed_distance_tolerance", "1e9999");
+      "Conservative_phase_geometry_measure_tolerance", "1e9999");
   EXPECT_EQ((maintenanceCompatibilityExceptionMessage<std::out_of_range>(
                 [&] { (void)legacyMaintenanceRequestsForTest(*overflow_real); })),
             "stod");
 
   auto overflow_count = make_params();
   overflow_count->equation_parameters.front()->set_extra_parameter_value(
-      "Reinitialization_cadence_steps", "999999999999999999999");
+      "Conservative_phase_flux_artifact_cadence_steps",
+      "999999999999999999999");
   EXPECT_EQ((maintenanceCompatibilityExceptionMessage<std::out_of_range>(
                 [&] { (void)legacyMaintenanceRequestsForTest(*overflow_count); })),
             "stoi");
@@ -6366,7 +5864,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
     <Velocity_field_name>extended_velocity</Velocity_field_name>
     <Velocity_source>prescribed_data</Velocity_source>
     <Advection_velocity_from_field>physical_velocity</Advection_velocity_from_field>
-    <Enable_reinitialization>true</Enable_reinitialization>
+    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
   </Add_equation>
 </svMultiPhysicsFile>
 )xml");
@@ -6391,7 +5889,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   auto ignored = parseWorkflowParametersXml(R"xml(
 <svMultiPhysicsFile>
   <Add_equation type="level_set">
-    <Enable_reinitialization>true</Enable_reinitialization>
+    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
     <Operator_tag>ignored_operator</Operator_tag>
     <Level_set_source>invalid_source</Level_set_source>
     <SUPG_tau_scale>invalid_number</SUPG_tau_scale>
@@ -6401,7 +5899,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 )xml");
   requests = legacyMaintenanceRequestsForTest(*ignored);
   ASSERT_EQ(requests.size(), 1u);
-  EXPECT_TRUE(requests.front().configuration->transport.reinitialization.enabled);
+  EXPECT_TRUE(requests.front().configuration->transport.kinematic_reconciliation.enabled);
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
@@ -6411,7 +5909,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 <svMultiPhysicsFile>
   <Add_equation type="level_set">
     <Velocity_source>navier_stokes</Velocity_source>
-    <Enable_reinitialization>true</Enable_reinitialization>
+    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
   </Add_equation>
 </svMultiPhysicsFile>
 )xml");
@@ -6432,7 +5930,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   <Add_equation type="level_set">
     <Velocity_source>invalid_velocity</Velocity_source>
     <Conservative_phase_liquid_side>invalid_phase</Conservative_phase_liquid_side>
-    <Enable_reinitialization>true</Enable_reinitialization>
+    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
   </Add_equation>
 </svMultiPhysicsFile>
 )xml");
@@ -6443,11 +5941,11 @@ TEST(ApplicationDriverLevelSetWorkflows,
       "'coupled_field', 'prescribed_data', 'constant_vector', or "
       "'material_interface_phase_pair'.");
 
-  auto boundary_before_reinitialization = parseWorkflowParametersXml(R"xml(
+  auto boundary_before_curvature = parseWorkflowParametersXml(R"xml(
 <svMultiPhysicsFile>
   <Add_equation type="level_set">
-    <Enable_reinitialization>true</Enable_reinitialization>
-    <Reinitialization_method>FastMarching</Reinitialization_method>
+    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
+    <Curvature_projection_recovery_mode>invalid_recovery</Curvature_projection_recovery_mode>
     <Add_BC name="inlet">
       <Type>LevelSetInflow</Type>
       <Value>0.0</Value>
@@ -6455,12 +5953,12 @@ TEST(ApplicationDriverLevelSetWorkflows,
   </Add_equation>
 </svMultiPhysicsFile>
 )xml");
-  boundary_before_reinitialization->equation_parameters.front()
+  boundary_before_curvature->equation_parameters.front()
       ->boundary_conditions.front()
       ->set_extra_parameter_value("Value", "invalid");
   EXPECT_EQ(
       (maintenanceCompatibilityExceptionMessage<std::invalid_argument>([&] {
-        (void)legacyMaintenanceRequestsForTest(*boundary_before_reinitialization);
+        (void)legacyMaintenanceRequestsForTest(*boundary_before_curvature);
       })),
       "stod");
 
@@ -6487,11 +5985,11 @@ TEST(ApplicationDriverLevelSetWorkflows,
 <svMultiPhysicsFile>
   <Add_equation type="level_set">
     <Velocity_source>invalid_velocity</Velocity_source>
-    <Enable_reinitialization>true</Enable_reinitialization>
+    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
   </Add_equation>
   <Add_equation type="level_set">
     <Conservative_phase_liquid_side>invalid_phase</Conservative_phase_liquid_side>
-    <Enable_reinitialization>true</Enable_reinitialization>
+    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
   </Add_equation>
 </svMultiPhysicsFile>
 )xml");
@@ -6506,11 +6004,11 @@ TEST(ApplicationDriverLevelSetWorkflows,
 <svMultiPhysicsFile>
   <Add_equation type="level_set">
     <Conservative_phase_liquid_side>invalid_phase</Conservative_phase_liquid_side>
-    <Enable_reinitialization>true</Enable_reinitialization>
+    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
   </Add_equation>
   <Add_equation type="level_set">
     <Velocity_source>invalid_velocity</Velocity_source>
-    <Enable_reinitialization>true</Enable_reinitialization>
+    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
   </Add_equation>
 </svMultiPhysicsFile>
 )xml");
@@ -6532,7 +6030,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   </Add_equation>
   <Add_equation type="level_set">
     <Velocity_source>invalid_velocity</Velocity_source>
-    <Enable_reinitialization>true</Enable_reinitialization>
+    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
   </Add_equation>
 </svMultiPhysicsFile>
 )xml");
@@ -6550,7 +6048,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   auto params = parseWorkflowParametersXml(R"xml(
 <svMultiPhysicsFile>
   <Add_equation type="level_set">
-    <Enable_reinitialization>true</Enable_reinitialization>
+    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
     <Add_BC name="inlet">
       <Type>LevelSetDirichlet</Type>
       <Value>0.0</Value>
@@ -14034,354 +13532,19 @@ TEST(ApplicationDriverLevelSetWorkflows,
             contact_stages.front()
                 .geometry_revision.snapshot_revision_key);
 
-  application::core::ResolvedLevelSetMaintenanceCompatibilityConfiguration maintenance_request_configuration;
-  maintenance_request_configuration.transport.level_set.field_name = "phi";
-  maintenance_request_configuration.transport.reinitialization.enabled = true;
-  maintenance_request_configuration.transport.reinitialization.cadence_steps = 1;
-  maintenance_request_configuration.transport.reinitialization.max_iterations = 100;
-  maintenance_request_configuration.transport.reinitialization.signed_distance_tolerance = 1.0e-10;
-  auto maintenance_request = freezeMaintenanceConfiguration(
-      std::move(maintenance_request_configuration));
-  std::vector<LevelSetMaintenanceRequest> maintenance_requests{
-      maintenance_request};
-
-  const auto* context_before_nonendpoint_rejection =
-      sim.fe_system->cutIntegrationContext();
-  ASSERT_NE(context_before_nonendpoint_rejection, nullptr);
-  const auto context_revision_before_nonendpoint_rejection =
-      context_before_nonendpoint_rejection
-          ->freeSurfaceGeometrySnapshotRevisionForMarker(interface_marker);
-  const auto lifecycle_revision_before_nonendpoint_rejection =
-      lifecycle.valueRevision();
-  const auto endpoint_vector_revision_before_nonendpoint_rejection =
-      time_history.u().valueRevision();
-  const auto previous_vector_revision_before_nonendpoint_rejection =
-      time_history.uPrev().valueRevision();
-  const auto older_vector_revision_before_nonendpoint_rejection =
-      time_history.uPrev2().valueRevision();
-  const auto rate_before_nonendpoint_rejection =
-      gatherFeOrderedSolution(time_history.uDot());
-  const auto rate_vector_revision_before_nonendpoint_rejection =
-      time_history.uDot().valueRevision();
-  const auto acceleration_before_nonendpoint_rejection =
-      gatherFeOrderedSolution(time_history.uDDot());
-  const auto acceleration_vector_revision_before_nonendpoint_rejection =
-      time_history.uDDot().valueRevision();
-  const auto request_schedule_before_nonendpoint_rejection =
-      canonicalLevelSetMaintenanceRequestSchedule(
-          maintenance_requests,
-          LevelSetMaintenanceScheduleStage::AcceptedEndpointPostStep,
-          time_history.stepIndex());
-  ASSERT_TRUE(request_schedule_before_nonendpoint_rejection.supported);
-  const auto* mesh_phi_before_nonendpoint_rejection =
-      static_cast<const double*>(mesh->field_data(mesh_field));
-  ASSERT_NE(mesh_phi_before_nonendpoint_rejection, nullptr);
-  const auto rejection_mesh_phi_count =
-      mesh->field_components(mesh_field) *
-      mesh->field_entity_count(mesh_field);
-  const std::vector<double> mesh_phi_values_before_nonendpoint_rejection(
-      mesh_phi_before_nonendpoint_rejection,
-      mesh_phi_before_nonendpoint_rejection + rejection_mesh_phi_count);
-
-  auto nonendpoint_candidate_solution = endpoint_solution;
-  const auto direct_nonendpoint =
-      stageLevelSetProjectionReinitialization(
-          sim,
-          time_history,
-          maintenance_request,
-          phi,
-          svmp::FE::Real{0.10},
-          nonendpoint_candidate_solution,
-          contact_stages,
-          contact_stage_constraints,
-          contact_stage_candidate.stage_solution);
-  ASSERT_TRUE(direct_nonendpoint.applied);
-  ASSERT_TRUE(direct_nonendpoint.repair.converged);
-  ASSERT_TRUE(
-      direct_nonendpoint.generalized_alpha_publication.has_value());
-  const auto& direct_nonendpoint_plan =
-      *direct_nonendpoint.generalized_alpha_publication;
-  ASSERT_EQ(
-      direct_nonendpoint_plan.status,
-      FirstOrderGeneralizedAlphaMaintenancePlanStatus::
-          AlgebraicallyComplete);
-  ASSERT_TRUE(direct_nonendpoint_plan.post_accept.has_value());
-  ASSERT_EQ(
-      direct_nonendpoint_plan.requested_stage_state_delta.size(),
-      phi_dof_count);
-  ASSERT_EQ(
-      direct_nonendpoint_plan.requested_endpoint_state_delta.size(),
-      phi_dof_count);
-  for (std::size_t i = 0u; i < phi_dof_count; ++i) {
-    EXPECT_NEAR(
-        direct_nonendpoint_plan.requested_stage_state_delta[i],
-        generalized_alpha_provenance.alpha_f *
-            direct_nonendpoint_plan.requested_endpoint_state_delta[i],
-        1.0e-12);
-    EXPECT_NEAR(
-        nonendpoint_candidate_solution[phi_offset + i] -
-            endpoint_solution[phi_offset + i],
-        direct_nonendpoint_plan.requested_endpoint_state_delta[i],
-        1.0e-12);
+  // The captured accepted-stage wall constraints carry the identity of
+  // the accepted contact cells (decision D4).  The projection
+  // reinitialization that consumed them was retired (decision D47).
+  ASSERT_FALSE(contact_stage_constraints.empty());
+  for (const auto& constraint : contact_stage_constraints) {
+    EXPECT_EQ(constraint.interface_marker, interface_marker);
+    EXPECT_EQ(constraint.boundary_marker, wall_marker);
+    EXPECT_NE(constraint.parent_cell_global_id,
+              svmp::FE::INVALID_GLOBAL_INDEX);
+    EXPECT_EQ(constraint.geometry_revision,
+              contact_stages.front()
+                  .geometry_revision.snapshot_revision_key);
   }
-
-  auto missing_stage_requests = maintenance_requests;
-  EXPECT_THROW(
-      (void)applyLevelSetMaintenance(
-          sim, time_history, missing_stage_requests),
-      std::runtime_error);
-  EXPECT_EQ(gatherFeOrderedSolution(time_history.u()), endpoint_solution);
-  EXPECT_EQ(gatherFeOrderedSolution(time_history.uPrev()), previous_solution);
-
-  auto nonendpoint_stage_requests = maintenance_requests;
-  std::string nonendpoint_stage_failure;
-  try {
-    (void)applyLevelSetMaintenance(
-        sim,
-        time_history,
-        nonendpoint_stage_requests,
-        contact_stages,
-        contact_stage_constraints,
-        contact_stage_candidate.stage_solution);
-  } catch (const std::runtime_error& error) {
-    nonendpoint_stage_failure = error.what();
-  }
-  EXPECT_NE(
-      nonendpoint_stage_failure.find(
-          "requires an endpoint maintenance-work observer"),
-      std::string::npos)
-      << nonendpoint_stage_failure;
-  EXPECT_EQ(gatherFeOrderedSolution(time_history.u()), endpoint_solution);
-  EXPECT_EQ(gatherFeOrderedSolution(time_history.uPrev()), previous_solution);
-  EXPECT_EQ(gatherFeOrderedSolution(time_history.uPrev2()), previous_solution);
-  EXPECT_EQ(
-      gatherFeOrderedSolution(time_history.uDot()),
-      rate_before_nonendpoint_rejection);
-  EXPECT_EQ(
-      gatherFeOrderedSolution(time_history.uDDot()),
-      acceleration_before_nonendpoint_rejection);
-  EXPECT_EQ(
-      time_history.u().valueRevision(),
-      endpoint_vector_revision_before_nonendpoint_rejection);
-  EXPECT_EQ(
-      time_history.uPrev().valueRevision(),
-      previous_vector_revision_before_nonendpoint_rejection);
-  EXPECT_EQ(
-      time_history.uPrev2().valueRevision(),
-      older_vector_revision_before_nonendpoint_rejection);
-  EXPECT_EQ(
-      time_history.uDot().valueRevision(),
-      rate_vector_revision_before_nonendpoint_rejection);
-  EXPECT_EQ(
-      time_history.uDDot().valueRevision(),
-      acceleration_vector_revision_before_nonendpoint_rejection);
-  const auto request_schedule_after_nonendpoint_rejection =
-      canonicalLevelSetMaintenanceRequestSchedule(
-          nonendpoint_stage_requests,
-          LevelSetMaintenanceScheduleStage::AcceptedEndpointPostStep,
-          time_history.stepIndex());
-  EXPECT_EQ(
-      request_schedule_after_nonendpoint_rejection.words,
-      request_schedule_before_nonendpoint_rejection.words);
-  EXPECT_EQ(
-      sim.fe_system->cutIntegrationContext(),
-      context_before_nonendpoint_rejection);
-  EXPECT_EQ(
-      sim.fe_system->cutIntegrationContext()
-          ->freeSurfaceGeometrySnapshotRevisionForMarker(interface_marker),
-      context_revision_before_nonendpoint_rejection);
-  EXPECT_EQ(
-      lifecycle.valueRevision(),
-      lifecycle_revision_before_nonendpoint_rejection);
-  const auto* mesh_phi_after_nonendpoint_rejection =
-      static_cast<const double*>(mesh->field_data(mesh_field));
-  ASSERT_NE(mesh_phi_after_nonendpoint_rejection, nullptr);
-  EXPECT_EQ(
-      std::vector<double>(
-          mesh_phi_after_nonendpoint_rejection,
-          mesh_phi_after_nonendpoint_rejection + rejection_mesh_phi_count),
-      mesh_phi_values_before_nonendpoint_rejection);
-
-  auto mismatched_nonendpoint_history =
-      svmp::FE::timestepping::TimeHistory::allocate(
-          *factory,
-          sim.fe_system->dofHandler().getNumDofs(),
-          /*history_depth=*/2,
-          /*allocate_second_order_state=*/true);
-  mismatched_nonendpoint_history.setTime(0.10);
-  mismatched_nonendpoint_history.setDt(0.05);
-  mismatched_nonendpoint_history.setPrevDt(0.05);
-  mismatched_nonendpoint_history.setStepIndex(2);
-  scatterFeOrderedSolution(
-      mismatched_nonendpoint_history.u(), endpoint_solution);
-  auto mismatched_endpoint_copy = endpoint_solution;
-  mismatched_endpoint_copy[phi_offset] += svmp::FE::Real{0.25};
-  scatterFeOrderedSolution(
-      mismatched_nonendpoint_history.uPrev(), mismatched_endpoint_copy);
-  scatterFeOrderedSolution(
-      mismatched_nonendpoint_history.uPrev2(), previous_solution);
-  scatterFeOrderedSolution(
-      mismatched_nonendpoint_history.uDot(), contact_rate);
-  scatterFeOrderedSolution(
-      mismatched_nonendpoint_history.uDDot(), contact_acceleration);
-  const LevelSetMaintenanceCandidateValidator inert_candidate_validator =
-      [](std::span<const svmp::FE::Real>) {};
-  const LevelSetMaintenanceStageObserver inert_work_observer =
-      [](application::core::LevelSetMaintenanceWorkSubstage,
-         std::span<const svmp::FE::Real>,
-         std::span<const svmp::FE::Real>) {};
-  auto mismatched_nonendpoint_requests = maintenance_requests;
-  bool mismatched_rate_publication_started = true;
-  std::string mismatched_endpoint_copy_failure;
-  try {
-    (void)applyLevelSetMaintenance(
-        sim,
-        mismatched_nonendpoint_history,
-        mismatched_nonendpoint_requests,
-        contact_stages,
-        contact_stage_constraints,
-        contact_stage_candidate.stage_solution,
-        inert_candidate_validator,
-        inert_work_observer,
-        nullptr,
-        &mismatched_rate_publication_started);
-  } catch (const std::runtime_error& error) {
-    mismatched_endpoint_copy_failure = error.what();
-  }
-  EXPECT_NE(
-      mismatched_endpoint_copy_failure.find(
-          "requires identical finite u and uPrevK(1)"),
-      std::string::npos)
-      << mismatched_endpoint_copy_failure;
-  EXPECT_FALSE(mismatched_rate_publication_started);
-  EXPECT_EQ(
-      gatherFeOrderedSolution(mismatched_nonendpoint_history.u()),
-      endpoint_solution);
-  EXPECT_EQ(
-      gatherFeOrderedSolution(mismatched_nonendpoint_history.uPrev()),
-      mismatched_endpoint_copy);
-  EXPECT_EQ(
-      gatherFeOrderedSolution(mismatched_nonendpoint_history.uPrev2()),
-      previous_solution);
-  EXPECT_EQ(
-      gatherFeOrderedSolution(mismatched_nonendpoint_history.uDot()),
-      contact_rate);
-  EXPECT_EQ(
-      gatherFeOrderedSolution(mismatched_nonendpoint_history.uDDot()),
-      contact_acceleration);
-
-  auto published_nonendpoint_history =
-      svmp::FE::timestepping::TimeHistory::allocate(
-          *factory,
-          sim.fe_system->dofHandler().getNumDofs(),
-          /*history_depth=*/2,
-          /*allocate_second_order_state=*/true);
-  published_nonendpoint_history.setTime(0.10);
-  published_nonendpoint_history.setDt(0.05);
-  published_nonendpoint_history.setPrevDt(0.05);
-  published_nonendpoint_history.setStepIndex(2);
-  scatterFeOrderedSolution(
-      published_nonendpoint_history.u(), endpoint_solution);
-  // After acceptStep(), u and uPrevK(1) are endpoint copies while uPrevK(2)
-  // retains the prior accepted state.
-  scatterFeOrderedSolution(
-      published_nonendpoint_history.uPrev(), endpoint_solution);
-  scatterFeOrderedSolution(
-      published_nonendpoint_history.uPrev2(), previous_solution);
-  scatterFeOrderedSolution(
-      published_nonendpoint_history.uDot(), contact_rate);
-  scatterFeOrderedSolution(
-      published_nonendpoint_history.uDDot(), contact_acceleration);
-  const auto nonendpoint_rate_revision_before =
-      published_nonendpoint_history.uDot().valueRevision();
-  const auto nonendpoint_acceleration_revision_before =
-      published_nonendpoint_history.uDDot().valueRevision();
-  std::size_t nonendpoint_work_observations = 0u;
-  std::size_t nonendpoint_candidate_validations = 0u;
-  std::vector<svmp::FE::Real> observed_nonendpoint_before;
-  std::vector<svmp::FE::Real> observed_nonendpoint_after;
-  const LevelSetMaintenanceStageObserver nonendpoint_work_observer =
-      [&](application::core::LevelSetMaintenanceWorkSubstage substage,
-          std::span<const svmp::FE::Real> before,
-          std::span<const svmp::FE::Real> after) {
-        EXPECT_EQ(
-            substage,
-            application::core::LevelSetMaintenanceWorkSubstage::
-                Reinitialization);
-        ++nonendpoint_work_observations;
-        observed_nonendpoint_before.assign(before.begin(), before.end());
-        observed_nonendpoint_after.assign(after.begin(), after.end());
-      };
-  const LevelSetMaintenanceCandidateValidator nonendpoint_candidate_validator =
-      [&](std::span<const svmp::FE::Real> candidate) {
-        ++nonendpoint_candidate_validations;
-        EXPECT_EQ(
-            std::vector<svmp::FE::Real>(candidate.begin(), candidate.end()),
-            nonendpoint_candidate_solution);
-      };
-  auto published_nonendpoint_requests = maintenance_requests;
-  bool nonendpoint_rate_publication_started = false;
-  testing::internal::CaptureStdout();
-  const bool nonendpoint_changed = applyLevelSetMaintenance(
-      sim,
-      published_nonendpoint_history,
-      published_nonendpoint_requests,
-      contact_stages,
-      contact_stage_constraints,
-      contact_stage_candidate.stage_solution,
-      nonendpoint_candidate_validator,
-      nonendpoint_work_observer,
-      nullptr,
-      &nonendpoint_rate_publication_started);
-  const auto nonendpoint_output =
-      testing::internal::GetCapturedStdout();
-  ASSERT_TRUE(nonendpoint_changed);
-  EXPECT_EQ(nonendpoint_work_observations, 1u);
-  EXPECT_EQ(nonendpoint_candidate_validations, 1u);
-  EXPECT_TRUE(nonendpoint_rate_publication_started);
-  EXPECT_EQ(observed_nonendpoint_before, endpoint_solution);
-  EXPECT_EQ(observed_nonendpoint_after, nonendpoint_candidate_solution);
-  EXPECT_NE(
-      nonendpoint_output.find(
-          "generalized_alpha_history_policy=preserve_prior_state_and_rate"),
-      std::string::npos);
-  EXPECT_NE(
-      nonendpoint_output.find(
-          "rate_state=maintained_field_endpoint_rate_updated"),
-      std::string::npos);
-
-  const auto published_endpoint =
-      gatherFeOrderedSolution(published_nonendpoint_history.u());
-  const auto published_endpoint_copy =
-      gatherFeOrderedSolution(published_nonendpoint_history.uPrev());
-  const auto published_prior =
-      gatherFeOrderedSolution(published_nonendpoint_history.uPrev2());
-  const auto published_rate =
-      gatherFeOrderedSolution(published_nonendpoint_history.uDot());
-  EXPECT_EQ(published_endpoint, nonendpoint_candidate_solution);
-  EXPECT_EQ(published_endpoint_copy, nonendpoint_candidate_solution);
-  EXPECT_EQ(published_prior, previous_solution);
-  ASSERT_EQ(published_rate.size(), contact_rate.size());
-  for (std::size_t i = 0u; i < published_rate.size(); ++i) {
-    auto expected_rate = contact_rate[i];
-    if (i >= phi_offset && i < phi_offset + phi_dof_count) {
-      expected_rate +=
-          direct_nonendpoint_plan.requested_endpoint_state_delta[
-              i - phi_offset] /
-          (generalized_alpha_provenance.gamma *
-           generalized_alpha_provenance.dt);
-    }
-    EXPECT_NEAR(published_rate[i], expected_rate, 1.0e-11);
-  }
-  EXPECT_NE(
-      published_nonendpoint_history.uDot().valueRevision(),
-      nonendpoint_rate_revision_before);
-  EXPECT_EQ(
-      gatherFeOrderedSolution(published_nonendpoint_history.uDDot()),
-      contact_acceleration);
-  EXPECT_EQ(
-      published_nonendpoint_history.uDDot().valueRevision(),
-      nonendpoint_acceleration_revision_before);
 
   auto endpoint_maintenance_stage_candidate =
       buildAcceptedFreeSurfaceContactStageCandidate(
@@ -14419,126 +13582,22 @@ TEST(ApplicationDriverLevelSetWorkflows,
       svmp::FE::Real{0.60},
       1.0e-12);
 
-  auto candidate_only_solution = endpoint_solution;
-  const auto candidate_only_reinitialization =
-      stageLevelSetProjectionReinitialization(
-          sim,
-          time_history,
-          maintenance_request,
-          phi,
-          svmp::FE::Real{0.10},
-          candidate_only_solution,
-          endpoint_maintenance_stages,
-          endpoint_maintenance_constraints,
-          endpoint_maintenance_stage_candidate.stage_solution);
-  EXPECT_TRUE(candidate_only_reinitialization.applied);
-  EXPECT_TRUE(candidate_only_reinitialization.repair.converged);
-  EXPECT_EQ(candidate_only_reinitialization.repair.wall_contact_constraints,
-            1u);
-  EXPECT_DOUBLE_EQ(
-      candidate_only_reinitialization.repair.max_contact_line_displacement,
-      svmp::FE::Real{0.0});
-  EXPECT_DOUBLE_EQ(
-      candidate_only_reinitialization.repair
-          .max_contact_angle_change_radians,
-      svmp::FE::Real{0.0});
-
-  testing::internal::CaptureStdout();
-  const bool maintenance_changed = applyLevelSetMaintenance(
-      sim,
-      time_history,
-      maintenance_requests,
-      endpoint_maintenance_stages,
-      endpoint_maintenance_constraints,
-      endpoint_maintenance_stage_candidate.stage_solution);
-  const auto maintenance_output = testing::internal::GetCapturedStdout();
-  ASSERT_TRUE(maintenance_changed);
-  EXPECT_NE(maintenance_output.find(
-                "wall_contact_model=accepted_dynamic_stage"),
-            std::string::npos);
-  EXPECT_NE(maintenance_output.find("wall_contact_constraints=1"),
-            std::string::npos);
-  EXPECT_NE(maintenance_output.find("max_contact_line_displacement=0"),
-            std::string::npos);
-  EXPECT_NE(maintenance_output.find("max_contact_angle_change_radians=0"),
-            std::string::npos);
-  EXPECT_NE(maintenance_output.find("accepted_contact_stage_alpha_f=1"),
-            std::string::npos);
-
-  const auto endpoint_after = gatherFeOrderedSolution(time_history.u());
-  const auto previous_after = gatherFeOrderedSolution(time_history.uPrev());
-  ASSERT_EQ(endpoint_after.size(), endpoint_solution.size());
-  EXPECT_EQ(endpoint_after, candidate_only_solution);
-  EXPECT_EQ(
-      gatherFeOrderedSolution(time_history.uDot()),
-      rate_before_nonendpoint_rejection);
-  EXPECT_EQ(
-      time_history.uDot().valueRevision(),
-      rate_vector_revision_before_nonendpoint_rejection);
-  EXPECT_EQ(
-      gatherFeOrderedSolution(time_history.uDDot()),
-      acceleration_before_nonendpoint_rejection);
-  EXPECT_EQ(
-      time_history.uDDot().valueRevision(),
-      acceleration_vector_revision_before_nonendpoint_rejection);
-  for (std::size_t i = 0; i < phi_dof_count; ++i) {
-    const auto index = phi_offset + i;
-    EXPECT_NEAR(endpoint_after[index] - endpoint_solution[index],
-                previous_after[index] - previous_solution[index],
-                1.0e-12);
+  ASSERT_FALSE(endpoint_maintenance_constraints.empty());
+  for (const auto& constraint : endpoint_maintenance_constraints) {
+    EXPECT_EQ(constraint.interface_marker, interface_marker);
+    EXPECT_EQ(constraint.boundary_marker, wall_marker);
+    EXPECT_EQ(constraint.geometry_revision,
+              endpoint_maintenance_stages.front()
+                  .geometry_revision.snapshot_revision_key);
   }
-  ASSERT_NO_THROW((void)refreshActiveCutIntegrationContextFromSolution(
-      sim,
-      *params,
-      std::span<const svmp::FE::Real>(endpoint_after.data(),
-                                      endpoint_after.size()),
-      lifecycle,
-      "application-driver-wall-aware-maintenance-test"));
-  const auto* maintained_context = sim.fe_system->cutIntegrationContext();
-  ASSERT_NE(maintained_context, nullptr);
-  const auto maintained_snapshot_revision =
-      maintained_context->freeSurfaceGeometrySnapshotRevisionForMarker(
-          interface_marker);
-  EXPECT_NE(maintained_snapshot_revision,
-            snapshot->revision().snapshot_revision_key);
-  EXPECT_NE(maintained_snapshot_revision, endpoint_snapshot_revision);
 
+  // No maintenance changes the accepted endpoint.
+  const auto& endpoint_after = endpoint_solution;
   const auto accepted_state_revision =
       collectiveLevelSetMaintenanceAlgebraicRevision(
           endpoint_after,
           activeFESystemCommunicator(*sim.fe_system));
-  const auto maintained_endpoint_stages =
-      evaluateAcceptedFreeSurfaceContactStages(
-          sim,
-          svmp::FE::Real{0.10},
-          svmp::FE::Real{1.0},
-          previous_state_revision,
-          accepted_state_revision,
-          endpoint_after);
-  ASSERT_EQ(maintained_endpoint_stages.size(), 1u);
-  ASSERT_EQ(maintained_endpoint_stages.front().state.walls.size(), 1u);
-  EXPECT_NEAR(
-      maintained_endpoint_stages.front()
-          .state.walls.front()
-          .mean_contact_position[0],
-      svmp::FE::Real{0.60},
-      1.0e-12);
-  ASSERT_TRUE(
-      endpoint_contact_stages.front()
-          .state.walls.front()
-          .mean_dynamic_angle_radians.has_value());
-  ASSERT_TRUE(
-      maintained_endpoint_stages.front()
-          .state.walls.front()
-          .mean_dynamic_angle_radians.has_value());
-  EXPECT_NEAR(
-      *maintained_endpoint_stages.front()
-           .state.walls.front()
-           .mean_dynamic_angle_radians,
-      *endpoint_contact_stages.front()
-           .state.walls.front()
-           .mean_dynamic_angle_radians,
-      1.0e-12);
+  EXPECT_EQ(accepted_state_revision, pre_maintenance_endpoint_state_revision);
   ASSERT_NO_THROW(recordAcceptedFreeSurfaceDiscreteFunctionals(
       sim,
       /*accepted_step=*/2u,
@@ -14553,7 +13612,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_EQ(
       history.front().pre_maintenance_endpoint_state_revision,
       pre_maintenance_endpoint_state_revision);
-  EXPECT_NE(history.front().pre_maintenance_endpoint_state_revision,
+  EXPECT_EQ(history.front().pre_maintenance_endpoint_state_revision,
             history.front().state_revision);
   EXPECT_EQ(history.front().state_revision, accepted_state_revision);
   ASSERT_TRUE(history.front().contact_stage.has_value());
@@ -14856,6 +13915,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
 TEST(ApplicationDriverLevelSetWorkflows,
      PrescribedWallSnapshotDrivesEndpointReinitialization)
 {
+  // The frozen WP-2 and WP-5 matrices record this name.  Decision D47
+  // retired the projection reinitialization that consumed the context; the
+  // test checks the wall-aware context that the endpoint snapshot supplies.
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
 #else
@@ -14970,80 +14032,28 @@ TEST(ApplicationDriverLevelSetWorkflows,
   scatterFeOrderedSolution(history.uPrev(), solution);
   scatterFeOrderedSolution(history.uPrev2(), solution);
 
-  application::core::ResolvedLevelSetMaintenanceCompatibilityConfiguration request_configuration;
-  request_configuration.transport.level_set.field_name = "phi";
-  request_configuration.transport.reinitialization.enabled = true;
-  request_configuration.transport.reinitialization.cadence_steps = 1;
-  request_configuration.transport.reinitialization.max_iterations = 100;
-  request_configuration.transport.reinitialization.signed_distance_tolerance = 1.0e-10;
-  auto request = freezeMaintenanceConfiguration(
-      std::move(request_configuration));
-  std::vector<LevelSetMaintenanceRequest> requests{request};
-  auto staged_solution = solution;
-  const auto staged = stageLevelSetProjectionReinitialization(
+  const auto context = resolveLevelSetWallAwareMaintenanceContext(
       sim,
       history,
-      request,
       phi,
       svmp::FE::Real{0.1},
-      staged_solution,
-      {},
       {},
       {});
-  ASSERT_TRUE(staged.applied);
-  ASSERT_TRUE(staged.repair.converged);
-  ASSERT_EQ(staged.wall_context.local_constraints.size(), 2u);
-  EXPECT_EQ(staged.wall_context.global_prescribed_contact_rules, 2u);
-  // Decision D4: the prescribed wall is maintained by rescaling only.  No
-  // target angle or repair frame reaches the projection.
-  for (const auto& constraint : staged.wall_context.local_constraints) {
-    EXPECT_EQ(constraint.kind,
-              svmp::FE::level_set::LevelSetWallContactConstraintKind::
-                  PreserveAcceptedAngle);
-    EXPECT_DOUBLE_EQ(constraint.target_angle_radians, 0.0);
-    EXPECT_TRUE(acceptedWallConstraintFrameIsComplete(
-        constraint,
-        parameters,
-        /*dimension=*/2));
+  // Decision D4: a prescribed wall contributes the accepted identity of its
+  // contact cells, read from the endpoint snapshot; no angle or frame.
+  const auto snapshot_revision =
+      sim.fe_system->cutIntegrationContext()
+          ->freeSurfaceGeometrySnapshotRevisionForMarker(interface_marker);
+  ASSERT_EQ(context.local_constraints.size(), 2u);
+  for (const auto& constraint : context.local_constraints) {
+    EXPECT_EQ(constraint.interface_marker, interface_marker);
+    EXPECT_EQ(constraint.boundary_marker, wall_marker);
+    EXPECT_NE(constraint.parent_cell_global_id,
+              svmp::FE::INVALID_GLOBAL_INDEX);
+    EXPECT_EQ(constraint.geometry_revision, snapshot_revision);
   }
-  EXPECT_TRUE(staged.repair.wall_contact_constraints_satisfied);
-  EXPECT_LE(staged.repair.max_wall_contact_scale_residual,
-            svmp::FE::Real{1.0e-12});
-  EXPECT_DOUBLE_EQ(staged.repair.max_prescribed_contact_value_residual,
-                   svmp::FE::Real{0.0});
-  EXPECT_DOUBLE_EQ(staged.repair.max_prescribed_contact_angle_error_radians,
-                   svmp::FE::Real{0.0});
-  testing::internal::CaptureStdout();
-  const bool changed = applyLevelSetMaintenance(sim, history, requests);
-  const auto output = testing::internal::GetCapturedStdout();
-  ASSERT_TRUE(changed);
-  EXPECT_NE(output.find("wall_contact_model=prescribed_angle"),
-            std::string::npos);
-  EXPECT_NE(output.find("wall_contact_maintenance=preserve_accepted_angle"),
-            std::string::npos);
-  EXPECT_NE(output.find("prescribed_contact_rules=2"),
-            std::string::npos);
-  EXPECT_NE(output.find("dynamic_contact_rules=0"), std::string::npos);
-  EXPECT_NE(output.find("max_prescribed_contact_value_residual="),
-            std::string::npos);
-  EXPECT_NE(output.find("max_prescribed_contact_angle_error_radians="),
-            std::string::npos);
-  EXPECT_NE(output.find("max_contact_line_displacement=0"),
-            std::string::npos);
-  EXPECT_NE(output.find("max_contact_angle_change_radians=0"),
-            std::string::npos);
-
-  const auto repaired = gatherFeOrderedSolution(history.u());
-  const auto field_offset =
-      static_cast<std::size_t>(sim.fe_system->fieldDofOffset(phi));
-  const auto field_dofs = static_cast<std::size_t>(
-      sim.fe_system->fieldDofHandler(phi).getNumDofs());
-  ASSERT_LE(field_offset + field_dofs, repaired.size());
-  for (std::size_t i = 0; i < field_dofs; ++i) {
-    EXPECT_NEAR(repaired[field_offset + i],
-                svmp::FE::Real{0.5} * solution[field_offset + i],
-                1.0e-10);
-  }
+  EXPECT_LT(context.local_constraints.front().parent_cell_global_id,
+            context.local_constraints.back().parent_cell_global_id);
   mesh->event_bus().notify(svmp::MeshEvent::GeometryChanged);
   EXPECT_THROW(
       (void)resolveLevelSetWallAwareMaintenanceContext(
@@ -15055,298 +14065,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
           {}),
       std::runtime_error);
 #endif
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     PrescribedWallMaintenancePreservesAcceptedContactPointAndAngle)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  // Decision D4: endpoint maintenance of a PrescribedAngle wall keeps the
-  // accepted contact points and angles (about 100.6 and 82.9 degrees here)
-  // instead of resetting them to the declared 60 degree Young angle.  The
-  // momentum Young term is the only contact-angle mechanism.
-  constexpr int wall_marker = 31;
-  constexpr int interface_marker = 707;
-  const svmp::FE::Real pi = std::acos(svmp::FE::Real{-1.0});
-  const svmp::FE::Real young_angle = pi / svmp::FE::Real{3.0};
-  auto mesh = makeWorkflowQuadPatch2x2Mesh();
-  for (const auto face : mesh->local_mesh().boundary_faces()) {
-    mesh->local_mesh().set_boundary_label(face, wall_marker);
-  }
-  const auto mesh_field = svmp::MeshFields::attach_field(
-      mesh->local_mesh(),
-      svmp::EntityKind::Vertex,
-      "phi",
-      svmp::FieldScalarType::Float64,
-      1);
-  ASSERT_NE(svmp::MeshFields::field_data_as<svmp::real_t>(
-                mesh->local_mesh(), mesh_field),
-            nullptr);
-
-  auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
-      svmp::FE::ElementType::Quad4,
-      /*order=*/1);
-  auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
-  const auto phi = system->addField(svmp::FE::systems::FieldSpec{
-      .name = "phi",
-      .space = scalar_space,
-      .components = 1});
-  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
-  parameters.liquid_side =
-      svmp::FE::geometry::CutIntegrationSide::Negative;
-  parameters.surface_tension = svmp::FE::Real{1.0};
-  parameters.young_wall_coefficients.push_back(
-      svmp::FE::interfaces::FreeSurfaceYoungWallCoefficient{
-          .boundary_marker = wall_marker,
-          .equilibrium_contact_angle_radians = young_angle,
-      });
-  free_surface::records(*system).declareFreeSurfaceDiscreteFunctional(
-      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
-          .interface_marker = interface_marker,
-          .level_set_field = phi,
-          .geometry_domain_id = "prescribed_wall_angle_preserving",
-          .parameters = parameters,
-          .owner_component =
-              "ApplicationDriverLevelSetWorkflows.PrescribedWallAnglePreserving",
-      });
-  svmp::FE::interfaces::GeneratedInterfaceBoundaryIntersectionMarkerKey key{};
-  key.source =
-      svmp::FE::interfaces::LevelSetInterfaceSource::fromField(phi);
-  key.domain_id = "prescribed_wall_angle_preserving";
-  key.isovalue = 0.0;
-  key.interface_marker = interface_marker;
-  key.boundary_marker = wall_marker;
-  system->registerGeneratedEmbeddedInterfaceMarker(
-      svmp::FE::interfaces::
-          stableGeneratedInterfaceBoundaryIntersectionMarker(key));
-  ASSERT_NO_THROW(system->setup({}));
-
-  // A tilted interface x = 0.6 + 0.15 y with a nonuniform gradient
-  // magnitude, so the redistancing has work to do in and next to the
-  // contact cells.
-  std::vector<svmp::FE::Real> vertex_values(mesh->n_vertices(), 0.0);
-  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
-    const auto point = workflowVertexPoint(*mesh, vertex);
-    vertex_values[vertex] =
-        (svmp::FE::Real{2.0} + svmp::FE::Real{0.5} * point[1]) *
-        (point[0] - svmp::FE::Real{0.6} - svmp::FE::Real{0.15} * point[1]);
-  }
-  const auto coefficients = projectWorkflowVertexValues(
-      *system,
-      phi,
-      vertex_values,
-      /*components=*/1u,
-      "ApplicationDriver angle-preserving prescribed-wall phi");
-  std::vector<svmp::FE::Real> solution(
-      static_cast<std::size_t>(system->dofHandler().getNumDofs()), 0.0);
-  writeWorkflowFieldSlice(*system, phi, coefficients, solution);
-
-  application::core::SimulationComponents sim;
-  sim.primary_mesh = mesh;
-  sim.fe_system = std::move(system);
-  auto params = parseWorkflowParametersXml(R"xml(
-<svMultiPhysicsFile>
-  <Add_equation type="fluid">
-    <Add_BC name="free_surface">
-      <Type>Free_surface</Type>
-      <Implementation>UnfittedLevelSet</Implementation>
-      <Level_set_field_name>phi</Level_set_field_name>
-      <Generated_interface_domain_id>prescribed_wall_angle_preserving</Generated_interface_domain_id>
-      <Interface_marker>707</Interface_marker>
-      <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
-      <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
-    </Add_BC>
-  </Add_equation>
-</svMultiPhysicsFile>
-)xml");
-  svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
-  ASSERT_NO_THROW((void)refreshActiveCutIntegrationContextFromSolution(
-      sim,
-      *params,
-      std::span<const svmp::FE::Real>(solution.data(), solution.size()),
-      lifecycle,
-      "application-driver-angle-preserving-prescribed-wall-before"));
-
-  struct AcceptedContact {
-    std::array<svmp::FE::Real, 3> point{};
-    svmp::FE::Real angle{0.0};
-  };
-  // Contact point and through-liquid angle of every retained contact rule:
-  // cos(theta) = -dot(n, n_wall) with the liquid on the negative side.
-  const auto accepted_contacts = [&]() {
-    std::map<svmp::FE::GlobalIndex, AcceptedContact> contacts;
-    const auto* context = sim.fe_system->cutIntegrationContext();
-    if (context == nullptr) {
-      ADD_FAILURE() << "no cut integration context";
-      return contacts;
-    }
-    for (const auto& snapshot : context->freeSurfaceGeometrySnapshots()) {
-      if (!snapshot) {
-        continue;
-      }
-      for (const auto& record : snapshot->rules()) {
-        if (record.role != svmp::FE::interfaces::
-                               FreeSurfaceGeometryRuleRole::Contact ||
-            record.retention != svmp::FE::interfaces::
-                                    FreeSurfaceGeometryRetention::Retained ||
-            record.physical_boundary_marker != wall_marker) {
-          continue;
-        }
-        EXPECT_EQ(record.physical_rule.points.size(), 1u);
-        if (record.physical_rule.points.empty()) {
-          continue;
-        }
-        const auto& sample = record.physical_rule.points.front();
-        const auto dot = [](const auto& a, const auto& b) {
-          return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-        };
-        const auto cosine =
-            -dot(sample.normal, sample.boundary_normal) /
-            std::sqrt(dot(sample.normal, sample.normal) *
-                      dot(sample.boundary_normal, sample.boundary_normal));
-        contacts.emplace(
-            record.reference_rule.provenance.parent_entity_global_id,
-            AcceptedContact{
-                .point = sample.physical_point,
-                .angle = std::acos(std::clamp(
-                    cosine, svmp::FE::Real{-1.0}, svmp::FE::Real{1.0})),
-            });
-      }
-    }
-    return contacts;
-  };
-  const auto before = accepted_contacts();
-  ASSERT_EQ(before.size(), 2u);
-  for (const auto& [parent, contact] : before) {
-    SCOPED_TRACE(parent);
-    const bool bottom = contact.point[1] < svmp::FE::Real{1.0};
-    EXPECT_NEAR(contact.point[0],
-                bottom ? svmp::FE::Real{0.6} : svmp::FE::Real{0.9},
-                1.0e-12);
-    EXPECT_GT(std::abs(contact.angle - young_angle),
-              svmp::FE::Real{20.0} * pi / svmp::FE::Real{180.0});
-  }
-
-  auto factory = svmp::FE::backends::BackendFactory::create(
-      svmp::FE::backends::BackendKind::FSILS);
-  ASSERT_NE(factory, nullptr);
-  auto history = svmp::FE::timestepping::TimeHistory::allocate(
-      *factory, sim.fe_system->dofHandler().getNumDofs());
-  history.setTime(0.1);
-  history.setDt(0.05);
-  history.setPrevDt(0.05);
-  history.setStepIndex(1);
-  scatterFeOrderedSolution(history.u(), solution);
-  scatterFeOrderedSolution(history.uPrev(), solution);
-  scatterFeOrderedSolution(history.uPrev2(), solution);
-
-  application::core::ResolvedLevelSetMaintenanceCompatibilityConfiguration request_configuration;
-  request_configuration.transport.level_set.field_name = "phi";
-  request_configuration.transport.reinitialization.enabled = true;
-  request_configuration.transport.reinitialization.cadence_steps = 1;
-  request_configuration.transport.reinitialization.max_iterations = 100;
-  request_configuration.transport.reinitialization.signed_distance_tolerance = 1.0e-10;
-  auto request = freezeMaintenanceConfiguration(
-      std::move(request_configuration));
-  auto staged_solution = solution;
-  const auto staged = stageLevelSetProjectionReinitialization(
-      sim,
-      history,
-      request,
-      phi,
-      svmp::FE::Real{0.1},
-      staged_solution,
-      {},
-      {},
-      {});
-  ASSERT_TRUE(staged.repair.success) << staged.repair.diagnostic;
-  ASSERT_TRUE(staged.repair.converged) << staged.repair.diagnostic;
-  ASSERT_TRUE(staged.applied);
-  ASSERT_EQ(staged.wall_context.local_constraints.size(), 2u);
-  EXPECT_EQ(staged.wall_context.global_prescribed_contact_rules, 2u);
-  for (const auto& constraint : staged.wall_context.local_constraints) {
-    EXPECT_EQ(constraint.kind,
-              svmp::FE::level_set::LevelSetWallContactConstraintKind::
-                  PreserveAcceptedAngle);
-  }
-  EXPECT_TRUE(staged.repair.wall_contact_constraints_satisfied);
-  EXPECT_EQ(staged.repair.wall_contact_cells, 2u);
-  EXPECT_LE(staged.repair.max_wall_contact_scale_residual,
-            svmp::FE::Real{1.0e-12});
-  EXPECT_DOUBLE_EQ(staged.repair.max_prescribed_contact_angle_error_radians,
-                   svmp::FE::Real{0.0});
-  EXPECT_GT(staged.repair.max_abs_update, svmp::FE::Real{0.1});
-
-  ASSERT_NO_THROW((void)refreshActiveCutIntegrationContextFromSolution(
-      sim,
-      *params,
-      std::span<const svmp::FE::Real>(
-          staged_solution.data(), staged_solution.size()),
-      lifecycle,
-      "application-driver-angle-preserving-prescribed-wall-after"));
-  const auto after = accepted_contacts();
-  ASSERT_EQ(after.size(), before.size());
-  svmp::FE::Real max_contact_displacement = 0.0;
-  svmp::FE::Real max_angle_change = 0.0;
-  for (const auto& [parent, contact] : before) {
-    const auto found = after.find(parent);
-    ASSERT_NE(found, after.end()) << "parent " << parent;
-    max_contact_displacement = std::max(
-        max_contact_displacement,
-        std::hypot(found->second.point[0] - contact.point[0],
-                   found->second.point[1] - contact.point[1]));
-    max_angle_change = std::max(
-        max_angle_change, std::abs(found->second.angle - contact.angle));
-    EXPECT_GT(std::abs(found->second.angle - young_angle),
-              svmp::FE::Real{20.0} * pi / svmp::FE::Real{180.0});
-  }
-  EXPECT_LE(max_contact_displacement, 1.0e-12);
-  EXPECT_LE(max_angle_change, 1.0e-12);
-  ::testing::Test::RecordProperty(
-      "application_prescribed_preserved_contact_displacement_max",
-      ::testing::PrintToString(max_contact_displacement));
-  ::testing::Test::RecordProperty(
-      "application_prescribed_preserved_angle_change_max_degrees",
-      ::testing::PrintToString(max_angle_change * svmp::FE::Real{180.0} /
-                               pi));
-#endif
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     ProductionWallMaintenanceRejectsRepairToTargetConstraints)
-{
-  // Decision D4: production redistancing only rescales accepted contact
-  // cells.  The retired repair-to-target kind fails closed.
-  const svmp::FE::level_set::LevelSetWallContactConstraint preserved{
-      .kind = svmp::FE::level_set::LevelSetWallContactConstraintKind::
-          PreserveAcceptedAngle,
-      .interface_marker = 708,
-      .boundary_marker = 32,
-      .parent_cell_global_id = 3,
-      .geometry_revision = 5u,
-  };
-  auto retired = preserved;
-  retired.kind = svmp::FE::level_set::LevelSetWallContactConstraintKind::
-      RepairToPrescribedAngle;
-  const std::vector none{preserved};
-  EXPECT_NO_THROW(requireAnglePreservingWallMaintenance(
-      std::span<const svmp::FE::level_set::LevelSetWallContactConstraint>{},
-      svmp::MeshComm::world(),
-      "phi"));
-  EXPECT_NO_THROW(requireAnglePreservingWallMaintenance(
-      none, svmp::MeshComm::world(), "phi"));
-  const std::vector mixed{preserved, retired};
-  try {
-    requireAnglePreservingWallMaintenance(
-        mixed, svmp::MeshComm::world(), "phi");
-    ADD_FAILURE() << "a repair-to-target constraint was accepted";
-  } catch (const std::logic_error& error) {
-    EXPECT_NE(std::string(error.what()).find("decision D4"),
-              std::string::npos);
-  }
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
@@ -19572,116 +18290,20 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
-     NonconvergedReinitializationDoesNotModifyAcceptedHistory)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  auto mesh = makeWorkflowQuadPatch2x2Mesh();
-  auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
-      svmp::FE::ElementType::Quad4,
-      /*order=*/1);
-  auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
-  const auto phi = system->addField(svmp::FE::systems::FieldSpec{
-      .name = "phi",
-      .space = scalar_space,
-      .components = 1,
-  });
-  ASSERT_NO_THROW(system->setup({}));
-
-  std::vector<svmp::FE::Real> phi_vertex_values(mesh->n_vertices(), 0.0);
-  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
-    const auto point = workflowVertexPoint(*mesh, vertex);
-    // Nodal interpolation of this off-center circle gives four connected cut
-    // cells with different local gradient magnitudes.  In a fixed continuous
-    // P1 space, independently normalizing those gradients would require
-    // different positive cell multipliers, but continuity forces their shared
-    // vertex values to agree.  Exact zero-set preservation and exact
-    // redistancing are therefore not simultaneously representable here.
-    const auto dx = point[0] - svmp::FE::Real{0.8};
-    const auto dy = point[1] - svmp::FE::Real{0.9};
-    phi_vertex_values[vertex] =
-        dx * dx + dy * dy - svmp::FE::Real{0.49};
-  }
-  const auto coefficients = projectWorkflowVertexValues(
-      *system,
-      phi,
-      phi_vertex_values,
-      /*components=*/1u,
-      "ApplicationDriver nonconverged reinitialization phi");
-  std::vector<svmp::FE::Real> initial(
-      static_cast<std::size_t>(system->dofHandler().getNumDofs()), 0.0);
-  writeWorkflowFieldSlice(*system, phi, coefficients, initial);
-
-  // Verify the low-level operation deterministically produces a geometrically
-  // bounded but nonconverged candidate with the production defaults.
-  svmp::FE::level_set::LevelSetReinitializationOptions defaults{};
-  std::vector<svmp::FE::Real> candidate;
-  const auto repair =
-      svmp::FE::level_set::repairLevelSetSignedDistanceByProjection(
-          *system,
-          phi,
-          defaults,
-          initial,
-          candidate);
-  ASSERT_TRUE(repair.success) << repair.diagnostic;
-  EXPECT_FALSE(repair.converged);
-  EXPECT_TRUE(repair.zero_set_bound_satisfied);
-  EXPECT_LE(repair.max_interface_displacement,
-            defaults.max_zero_set_displacement + 1.0e-12);
-  EXPECT_GT(repair.max_signed_distance_error,
-            defaults.signed_distance_tolerance);
-
-  std::unique_ptr<svmp::FE::backends::BackendFactory> factory;
-  try {
-    factory = svmp::FE::backends::BackendFactory::create(
-        svmp::FE::backends::BackendKind::Eigen);
-  } catch (const std::exception&) {
-    GTEST_SKIP() << "Requires the Eigen FE backend.";
-  }
-  ASSERT_NE(factory, nullptr);
-  auto history = svmp::FE::timestepping::TimeHistory::allocate(
-      *factory,
-      system->dofHandler().getNumDofs());
-  history.setStepIndex(1);
-  scatterFeOrderedSolution(history.u(), initial);
-  scatterFeOrderedSolution(history.uPrev(), initial);
-  scatterFeOrderedSolution(history.uPrev2(), initial);
-
-  application::core::SimulationComponents sim;
-  sim.primary_mesh = mesh;
-  sim.fe_system = std::move(system);
-
-  application::core::ResolvedLevelSetMaintenanceCompatibilityConfiguration request_configuration;
-  request_configuration.transport.level_set.field_name = "phi";
-  request_configuration.transport.reinitialization.enabled = true;
-  request_configuration.transport.reinitialization.cadence_steps = 1;
-  auto request = freezeMaintenanceConfiguration(
-      std::move(request_configuration));
-  std::vector<LevelSetMaintenanceRequest> requests{request};
-
-  testing::internal::CaptureStdout();
-  const bool changed = applyLevelSetMaintenance(sim, history, requests);
-  const auto output = testing::internal::GetCapturedStdout();
-
-  EXPECT_FALSE(changed);
-  EXPECT_NE(output.find("reason=nonconverged"), std::string::npos);
-  EXPECT_EQ(gatherFeOrderedSolution(history.u()), initial);
-  EXPECT_EQ(gatherFeOrderedSolution(history.uPrev()), initial);
-  EXPECT_EQ(gatherFeOrderedSolution(history.uPrev2()), initial);
-#endif
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
      ConvergedMaintenanceAppliesOneRepresentationDeltaToEveryHistoryLevel)
 {
+  // The frozen WP-8 matrix records this name.  Decision D47 retired the
+  // projection reinitialization that the test first used as its maintenance
+  // operation; the sign-definite patch bounds now produce the representation
+  // change.  The single triangle lies in one phase, so every node is clamped
+  // into the range of the previous accepted state.
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
 #else
   const auto capture_gate = lifecycle_capture::captureGate();
-  auto mesh = makeWorkflowQuadPatch2x2Mesh();
+  auto mesh = makeWorkflowTriangleMesh();
   auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
-      svmp::FE::ElementType::Quad4,
+      svmp::FE::ElementType::Triangle3,
       /*order=*/1);
   auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
   const auto phi = system->addField(svmp::FE::systems::FieldSpec{
@@ -19695,7 +18317,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
     const std::array<std::string_view, 1> expected_fields{"phi"};
     canonical_map = lifecycle_capture::captureScalarP1VertexMap(
         *system, *mesh, expected_fields);
-    ASSERT_EQ(canonical_map.rows.size(), 9u);
+    ASSERT_EQ(canonical_map.rows.size(), 3u);
   }
 
   const auto make_plane = [&](svmp::FE::Real offset,
@@ -19716,9 +18338,13 @@ TEST(ApplicationDriverLevelSetWorkflows,
     writeWorkflowFieldSlice(*system, phi, coefficients, solution);
     return solution;
   };
-  const auto current_before = make_plane(0.80, 2.0);
-  const auto previous_before = make_plane(0.72, 2.0);
-  const auto previous2_before = make_plane(0.63, 2.0);
+  // phi = x - 2 is negative on the whole triangle, with range [-2, -1].  The
+  // transported endpoint is three times steeper; every node leaves that
+  // range and is clamped to -2.
+  const auto previous_accepted = make_plane(2.0, 1.0);
+  const auto current_before = make_plane(2.0, 3.0);
+  const auto previous_before = make_plane(2.1, 1.0);
+  const auto previous2_before = make_plane(2.2, 1.0);
 
   std::unique_ptr<svmp::FE::backends::BackendFactory> factory;
   try {
@@ -19765,17 +18391,14 @@ TEST(ApplicationDriverLevelSetWorkflows,
 
   application::core::ResolvedLevelSetMaintenanceCompatibilityConfiguration request_configuration;
   request_configuration.transport.level_set.field_name = "phi";
-  request_configuration.transport.reinitialization.enabled = true;
-  request_configuration.transport.reinitialization.cadence_steps = 1;
-  // With the production relaxation factor (0.3), twenty iterations leave an
-  // O(10^-3) residual for this factor-of-two planar distortion.  Give the
-  // projection enough iterations to meet the deliberately strict tolerance
-  // so this test exercises the converged maintenance/history path.
-  request_configuration.transport.reinitialization.max_iterations = 100;
-  request_configuration.transport.reinitialization.signed_distance_tolerance = 1.0e-10;
+  request_configuration.transport.sign_definite_patch_bounds.enabled = true;
   auto request = freezeMaintenanceConfiguration(
       std::move(request_configuration));
   std::vector<LevelSetMaintenanceRequest> requests{request};
+  const std::vector<LevelSetKinematicBaseline> kinematic_baselines{
+      makeLevelSetKinematicBaseline(
+          *sim.fe_system, request, previous_accepted,
+          history.stepIndex() - 1)};
   const auto request_before_maintenance =
       canonicalLevelSetMaintenanceRequestSchedule(
           requests,
@@ -19812,7 +18435,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
       {},
       {},
       {},
-      observe_stage);
+      observe_stage,
+      nullptr,
+      nullptr,
+      kinematic_baselines);
   const auto output = testing::internal::GetCapturedStdout();
   const auto request_after_maintenance =
       canonicalLevelSetMaintenanceRequestSchedule(
@@ -19822,12 +18448,13 @@ TEST(ApplicationDriverLevelSetWorkflows,
   recordMaintenanceSchedule(
       "r1_converged_history_request_after", request_after_maintenance);
   ASSERT_TRUE(changed);
+  EXPECT_NE(output.find("Level-set sign-definite patch bounds field='phi'"),
+            std::string::npos);
   EXPECT_NE(output.find("temporal_increments=preserved"), std::string::npos);
   ASSERT_EQ(observed_substages.size(), 1u);
   EXPECT_EQ(
       observed_substages.front(),
-      application::core::LevelSetMaintenanceWorkSubstage::
-          Reinitialization);
+      application::core::LevelSetMaintenanceWorkSubstage::Limiting);
   ASSERT_EQ(observed_state_revisions.size(), 1u);
   EXPECT_NE(
       observed_state_revisions.front().first,
@@ -19839,6 +18466,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
   ASSERT_EQ(current_after.size(), current_before.size());
   bool saw_nonzero_delta = false;
   for (std::size_t i = 0; i < current_after.size(); ++i) {
+    EXPECT_NEAR(current_after[i], svmp::FE::Real{-2.0}, 1.0e-12)
+        << "global DOF " << i;
     const auto current_delta = current_after[i] - current_before[i];
     saw_nonzero_delta = saw_nonzero_delta ||
                         std::abs(current_delta) > 1.0e-12;
@@ -19889,21 +18518,18 @@ TEST(ApplicationDriverLevelSetWorkflows,
             })},
             {"request", lifecycle_capture::jsonObject({
                 {"field_name", lifecycle_capture::jsonString(request.configuration->transport.level_set.field_name)},
-                {"reinitialization_enabled", lifecycle_capture::jsonBool(request.configuration->transport.reinitialization.enabled)},
-                {"cadence_steps", lifecycle_capture::jsonInteger(request.configuration->transport.reinitialization.cadence_steps)},
-                {"max_iterations", lifecycle_capture::jsonInteger(request.configuration->transport.reinitialization.max_iterations)},
-                {"signed_distance_tolerance", lifecycle_capture::jsonReal(request.configuration->transport.reinitialization.signed_distance_tolerance)},
+                {"sign_definite_patch_bounds_enabled", lifecycle_capture::jsonBool(request.configuration->transport.sign_definite_patch_bounds.enabled)},
             })},
             {"observer", lifecycle_capture::jsonObject({
                 {"callback_count", lifecycle_capture::jsonInteger(observed_substages.size())},
-                {"substage", lifecycle_capture::jsonString("reinitialization")},
+                {"substage", lifecycle_capture::jsonString("limiting")},
                 {"algebraic_revision_before", lifecycle_capture::jsonInteger(observed_state_revisions.front().first)},
                 {"algebraic_revision_after", lifecycle_capture::jsonInteger(observed_state_revisions.front().second)},
                 {"stage_input", lifecycle_capture::vectorSnapshotJson(
-                    "observer", "reinitialization_stage_input",
+                    "observer", "patch_bounds_stage_input",
                     observed_stage_input)},
                 {"stage_output", lifecycle_capture::vectorSnapshotJson(
-                    "observer", "reinitialization_stage_output",
+                    "observer", "patch_bounds_stage_output",
                     observed_stage_output)},
             })},
             {"snapshots", lifecycle_capture::jsonArray({
@@ -19971,7 +18597,6 @@ TEST(ApplicationDriverLevelSetMaintenance,
   ASSERT_EQ(requests.size(), 1u);
   const auto& transport = requests.front().configuration->transport;
   EXPECT_TRUE(transport.kinematic_reconciliation.enabled);
-  EXPECT_FALSE(transport.reinitialization.enabled);
   EXPECT_FALSE(svmp::FE::level_set::shouldApplyLevelSetKinematicReconciliation(
       transport.kinematic_reconciliation, 0));
   EXPECT_TRUE(svmp::FE::level_set::shouldApplyLevelSetKinematicReconciliation(
@@ -20004,7 +18629,6 @@ TEST(ApplicationDriverLevelSetMaintenance,
   const auto& transport = requests.front().configuration->transport;
   EXPECT_TRUE(transport.sign_definite_patch_bounds.enabled);
   EXPECT_FALSE(transport.kinematic_reconciliation.enabled);
-  EXPECT_FALSE(transport.reinitialization.enabled);
   EXPECT_FALSE(svmp::FE::level_set::shouldApplyLevelSetSignDefinitePatchBounds(
       transport.sign_definite_patch_bounds, 0));
   EXPECT_TRUE(svmp::FE::level_set::shouldApplyLevelSetSignDefinitePatchBounds(
@@ -20096,8 +18720,6 @@ TEST(ApplicationDriverLevelSetMaintenance,
       svmp::FE::level_set::LevelSetVelocitySource::ConstantVector;
   first_configuration.transport.velocity.constant_value = {{0.25, -0.5, 0.75}};
   first_configuration.transport.bound_preserving.enabled = true;
-  first_configuration.transport.reinitialization.enabled = true;
-  first_configuration.transport.reinitialization.cadence_steps = 2;
   first_configuration.curvature_projection_enabled = true;
   first_configuration.curvature_projection_cadence_steps = 6;
   auto first = freezeMaintenanceConfiguration(
@@ -20113,8 +18735,6 @@ TEST(ApplicationDriverLevelSetMaintenance,
   second_configuration.transport.conservative_phase.write_flux_artifacts = true;
   second_configuration.transport.conservative_phase.flux_artifact_cadence_steps = 2;
   second_configuration.transport.conservative_phase.reconcile_geometry = true;
-  second_configuration.transport.reinitialization.enabled = true;
-  second_configuration.transport.reinitialization.cadence_steps = 3;
   second_configuration.static_capillary_equilibrium_enabled = true;
   auto second = freezeMaintenanceConfiguration(
       std::move(second_configuration));
@@ -20150,19 +18770,19 @@ TEST(ApplicationDriverLevelSetMaintenance,
        3355u},
       {"r1_matrix_two_prospective_step_2",
        LevelSetMaintenanceScheduleStage::ProspectiveAcceptedEndpoint, 2,
-       3899u},
+       3867u},
       {"r1_matrix_two_prospective_step_6",
        LevelSetMaintenanceScheduleStage::ProspectiveAcceptedEndpoint, 6,
-       3903u},
+       3867u},
       {"r1_matrix_two_post_step_1",
        LevelSetMaintenanceScheduleStage::AcceptedEndpointPostStep, 1,
        3355u},
       {"r1_matrix_two_post_step_2",
        LevelSetMaintenanceScheduleStage::AcceptedEndpointPostStep, 2,
-       3899u},
+       3867u},
       {"r1_matrix_two_post_step_6",
        LevelSetMaintenanceScheduleStage::AcceptedEndpointPostStep, 6,
-       3903u},
+       3867u},
   }};
   for (const auto& matrix_case : cases) {
     const auto schedule = canonicalLevelSetMaintenanceRequestSchedule(
@@ -21538,7 +20158,6 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
 {
   requests_.front() = withMaintenanceConfiguration(
       requests_.front(), [&](auto& configured) {
-        configured.transport.reinitialization.enabled = false;
         configured.transport.conservative_phase.reconcile_geometry = false;
       });
 
@@ -21548,8 +20167,6 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   ASSERT_EQ(result.maintenance_ledgers.size(), 1u);
   const auto& ledger = result.maintenance_ledgers.front();
   EXPECT_TRUE(ledger.transport_stage.success);
-  EXPECT_FALSE(ledger.reinitialization_due);
-  EXPECT_FALSE(ledger.reinitialization_applied);
   EXPECT_EQ(ledger.reconciliation.iterations, 0);
   EXPECT_LE(ledger.post_correction_mismatch.maximum_nodal_residual,
             svmp::FE::Real{1.0e-10});
@@ -21563,7 +20180,6 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
 {
   requests_.front() = withMaintenanceConfiguration(
       requests_.front(), [&](auto& configured) {
-        configured.transport.reinitialization.enabled = false;
         configured.transport.conservative_phase.reconcile_geometry = false;
       });
   auto prepared = prepareConservativePhaseCandidateStage();
@@ -21657,7 +20273,6 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
 {
   requests_.front() = withMaintenanceConfiguration(
       requests_.front(), [&](auto& configured) {
-        configured.transport.reinitialization.enabled = false;
         configured.transport.conservative_phase.reconcile_geometry = false;
         configured.transport.conservative_phase.enforce_courant_limit = false;
         configured.transport.velocity.constant_value = {
@@ -21691,7 +20306,6 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
 {
   requests_.front() = withMaintenanceConfiguration(
       requests_.front(), [&](auto& configured) {
-        configured.transport.reinitialization.enabled = false;
         configured.transport.conservative_phase.reconcile_geometry = true;
         configured.transport.conservative_phase.enforce_courant_limit = false;
         configured.transport.conservative_phase.boundary_flux_policy =
@@ -21752,7 +20366,6 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
       "application-driver-conservative-phase-reconciliation-only-raw");
   requests_.front() = withMaintenanceConfiguration(
       requests_.front(), [&](auto& configured) {
-        configured.transport.reinitialization.enabled = false;
         configured.transport.conservative_phase.reconcile_geometry = true;
       });
 
@@ -21762,8 +20375,6 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   ASSERT_EQ(result.maintenance_ledgers.size(), 1u);
   const auto& ledger = result.maintenance_ledgers.front();
   EXPECT_TRUE(ledger.transport_stage.success);
-  EXPECT_FALSE(ledger.reinitialization_due);
-  EXPECT_FALSE(ledger.reinitialization_applied);
   EXPECT_DOUBLE_EQ(ledger.raw_post_transport_geometry_measure,
                    ledger.post_reinitialization_geometry_measure);
   EXPECT_GT(ledger.post_reinitialization_mismatch.maximum_nodal_residual,
@@ -21780,6 +20391,10 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
 TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
        ReinitializesBeforeLocalReconciliationAndRetainsEveryStage)
 {
+  // The frozen WP-6 matrix records this name.  Decision D47 retired the
+  // projection reinitialization stage; the candidate still passes every
+  // other stage, and the post-refresh measures precede the local
+  // reconciliation.
   auto raw_candidate = initialized_solution_;
   const auto phi_offset = fieldOffset(phi_);
   for (std::size_t i = 0u; i < fieldCount(phi_); ++i) {
@@ -21788,15 +20403,7 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   raw_candidate[phi_offset] += svmp::FE::Real{0.01};
   scatterFeOrderedSolution(history().u(), raw_candidate);
   refreshCurrentCandidate(
-      "application-driver-conservative-phase-reinitialization-raw");
-
-  requests_.front() = withMaintenanceConfiguration(
-      requests_.front(), [&](auto& configured) {
-        configured.transport.reinitialization.enabled = true;
-        configured.transport.reinitialization.cadence_steps = 1;
-        configured.transport.reinitialization.max_iterations = 100;
-        configured.transport.reinitialization.signed_distance_tolerance = 1.0e-10;
-      });
+      "application-driver-conservative-phase-every-stage-raw");
 
   testing::internal::CaptureStdout();
   auto result = applyPreparedConservativePhaseCandidate();
@@ -21820,12 +20427,8 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
             fieldCount(phase_));
   EXPECT_FALSE(ledger.transport_stage.correction.edges.empty());
   EXPECT_FALSE(ledger.transport_stage.correction.components.empty());
-  EXPECT_TRUE(ledger.reinitialization_due);
-  EXPECT_TRUE(ledger.reinitialization_applied);
-  EXPECT_TRUE(ledger.reinitialization.success);
-  EXPECT_TRUE(ledger.reinitialization.converged);
-  EXPECT_GT(ledger.reinitialization.max_abs_update,
-            svmp::FE::Real{0.0});
+  EXPECT_DOUBLE_EQ(ledger.raw_post_transport_geometry_measure,
+                   ledger.post_reinitialization_geometry_measure);
   EXPECT_NEAR(ledger.raw_post_transport_phase_measure,
               ledger.post_limit_phase_measure,
               svmp::FE::Real{1.0e-12});
@@ -22045,8 +20648,7 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
 {
   requests_.front() = withMaintenanceConfiguration(
       requests_.front(), [&](auto& configured) {
-        configured.transport.reinitialization.enabled = true;
-        configured.transport.reinitialization.cadence_steps = 1;
+        configured.transport.sign_definite_patch_bounds.enabled = true;
       });
   const auto before = gatherFeOrderedSolution(history().u());
 
@@ -22067,8 +20669,6 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
       svmp::FE::level_set::LevelSetWallContactConstraint, 1>
       constraints{{
           svmp::FE::level_set::LevelSetWallContactConstraint{
-              .kind = svmp::FE::level_set::
-                  LevelSetWallContactConstraintKind::PreserveAcceptedAngle,
               .interface_marker = 911,
               .boundary_marker = 41,
               .parent_cell_global_id = parent_global_id,
@@ -22170,13 +20770,6 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
     return values;
   };
   const auto raw_mesh_state = capture_mesh_state();
-  requests_.front() = withMaintenanceConfiguration(
-      requests_.front(), [&](auto& configured) {
-        configured.transport.reinitialization.enabled = true;
-        configured.transport.reinitialization.cadence_steps = 1;
-        configured.transport.reinitialization.max_iterations = 100;
-        configured.transport.reinitialization.signed_distance_tolerance = 1.0e-10;
-      });
   const auto request_before_candidate =
       canonicalLevelSetMaintenanceRequestSchedule(
           requests_,
@@ -22201,9 +20794,6 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   }
   ASSERT_NE(result.geometry_transaction, nullptr);
   ASSERT_EQ(result.maintenance_ledgers.size(), requests_.size());
-  EXPECT_TRUE(result.maintenance_ledgers.front().reinitialization_due);
-  EXPECT_TRUE(result.maintenance_ledgers.front().reinitialization_applied);
-  EXPECT_TRUE(result.maintenance_ledgers.front().reinitialization.converged);
   EXPECT_TRUE(sim_.fe_system->cutIntegrationContextTransactionActive());
   EXPECT_TRUE(lifecycle_.transactionActive());
   EXPECT_NE(sim_.fe_system->cutIntegrationContext(), raw_context);
@@ -22403,10 +20993,7 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
             {"request_policy", lifecycle_capture::jsonObject({
                 {"level_set_field_name", lifecycle_capture::jsonString(requests_.front().configuration->transport.level_set.field_name)},
                 {"phase_field_name", lifecycle_capture::jsonString(requests_.front().configuration->transport.conservative_phase.liquid_indicator.field_name)},
-                {"reinitialization_enabled", lifecycle_capture::jsonBool(requests_.front().configuration->transport.reinitialization.enabled)},
-                {"cadence_steps", lifecycle_capture::jsonInteger(requests_.front().configuration->transport.reinitialization.cadence_steps)},
-                {"max_iterations", lifecycle_capture::jsonInteger(requests_.front().configuration->transport.reinitialization.max_iterations)},
-                {"signed_distance_tolerance", lifecycle_capture::jsonReal(requests_.front().configuration->transport.reinitialization.signed_distance_tolerance)},
+                {"reconcile_geometry", lifecycle_capture::jsonBool(requests_.front().configuration->transport.conservative_phase.reconcile_geometry)},
             })},
             {"candidate_stage", prepared_stage},
             {"candidate_result", lifecycle_capture::jsonObject({

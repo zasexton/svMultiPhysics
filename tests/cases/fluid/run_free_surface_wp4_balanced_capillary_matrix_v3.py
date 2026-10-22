@@ -1819,6 +1819,14 @@ def physical_case_arguments(
         arguments.extend(
             ["--reinitialization-cadence-steps", str(int(case["level"]["value"]))]
         )
+    if ("--enable-level-set-reinitialization" in arguments
+            or "--reinitialization-cadence-steps" in arguments):
+        # The frozen phi_scale and bulk_redistance_cadence studies execute
+        # through the accepted-endpoint projection reinitialization.
+        raise MatrixError(
+            f"case {case['case_id']!r} cannot be executed: level-set "
+            "projection reinitialization was retired (decision D47)"
+        )
     orders = _option_values(arguments, "--interface-quadrature-order")
     if len(orders) != 1 or int(orders[0]) < 2:
         raise MatrixError(

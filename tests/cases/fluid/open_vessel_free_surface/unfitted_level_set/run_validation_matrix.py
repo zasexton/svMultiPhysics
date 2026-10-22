@@ -135,8 +135,6 @@ SOLVER_XML_CONTROL_TAGS = {
     "Operator_tag",
     "Output_frequency",
     "Preconditioner",
-    "Reinitialization_cadence_steps",
-    "Reinitialization_method",
     "SUPG_tau_scale",
     "Spectral_radius_of_infinite_time_step",
     "Temporal_and_spatial_values_file_path",
@@ -747,7 +745,6 @@ PROBES: dict[str, Probe] = {
             "--output-cadence",
             "1",
             "--level-set-exact-inflow",
-            "--disable-reinitialization",
         ),
         result_name="result_010.vtu",
         expect_solver_success=True,
@@ -756,7 +753,8 @@ PROBES: dict[str, Probe] = {
             "Every-step exact-inflow compact moving-interface diagnostic with "
             "projection reinitialization disabled. This separates transported "
             "manufactured level-set accuracy from the level-set maintenance "
-            "operation that fires on step 10 in the default compact probe."
+            "operation that fired on step 10 in the default compact probe "
+            "until the projection reinitialization was retired (decision D47)."
         ),
         verify_history=True,
         required_solver_features=HIGH_ORDER_MMS_REQUIRED_SOLVER_FEATURES,
@@ -778,7 +776,6 @@ PROBES: dict[str, Probe] = {
             "--output-cadence",
             "10",
             "--level-set-exact-inflow",
-            "--disable-reinitialization",
             "--cut-cell-pressure-stabilization-policy",
             "Enabled",
         ),
@@ -809,7 +806,6 @@ PROBES: dict[str, Probe] = {
             "--output-cadence",
             "10",
             "--level-set-exact-inflow",
-            "--disable-reinitialization",
             "--cut-cell-pressure-stabilization-policy",
             "Enabled",
         ),
@@ -840,7 +836,6 @@ PROBES: dict[str, Probe] = {
             "--output-cadence",
             "10",
             "--level-set-exact-inflow",
-            "--disable-reinitialization",
             "--cut-cell-pressure-stabilization-policy",
             "Enabled",
         ),
@@ -871,7 +866,6 @@ PROBES: dict[str, Probe] = {
             "--output-cadence",
             "1",
             "--level-set-exact-inflow",
-            "--disable-reinitialization",
             "--cut-cell-pressure-stabilization-policy",
             "Enabled",
         ),
