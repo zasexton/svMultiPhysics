@@ -3343,28 +3343,6 @@ void dumpActiveCutVolumeRulesForProbe(const svmp::FE::systems::FESystem& system,
   application::core::oopCout() << oss.str() << std::flush;
 }
 
-std::vector<const svmp::FE::geometry::CutQuadratureRule*>
-retainedVolumeRulePointersForSide(
-    const std::vector<svmp::FE::geometry::CutQuadratureRule>& rules,
-    svmp::FE::geometry::CutIntegrationSide side)
-{
-  std::vector<const svmp::FE::geometry::CutQuadratureRule*> retained;
-  if (side == svmp::FE::geometry::CutIntegrationSide::Interface) {
-    return retained;
-  }
-  retained.reserve(rules.size());
-  for (const auto& rule : rules) {
-    if (rule.kind != svmp::FE::geometry::CutQuadratureKind::Volume ||
-        rule.side != side ||
-        svmp::FE::assembly::CutIntegrationContext::
-            shouldPruneGeneratedVolumeRule(rule)) {
-      continue;
-    }
-    retained.push_back(&rule);
-  }
-  return retained;
-}
-
 ActiveSideRegionSummary summarizeActiveSideRegions(
     const svmp::FE::interfaces::LevelSetInterfaceDomain& domain,
     LevelSetActiveSide active_side,
@@ -14917,27 +14895,6 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolutionCach
   return report;
 }
 
-ActiveCutContextRefreshReport refreshActiveCutIntegrationContext(
-    application::core::SimulationComponents& sim,
-    const Parameters& params,
-    svmp::FE::backends::GenericVector& solution,
-    svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle,
-    const char* provenance)
-{
-  if (!sim.fe_system) {
-    return {};
-  }
-  const auto fe_solution = gatherFeOrderedSolution(
-      solution, activeFESystemCommunicator(*sim.fe_system));
-  return refreshActiveCutIntegrationContextFromSolution(
-      sim,
-      params,
-      std::span<const svmp::FE::Real>(fe_solution.data(), fe_solution.size()),
-      lifecycle,
-      provenance,
-      "fe_vector");
-}
-
 ActiveCutContextRefreshReport refreshActiveCutIntegrationContextCachedFromVector(
     application::core::SimulationComponents& sim,
     const Parameters& params,
@@ -15145,30 +15102,6 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextCached(
       cache,
       provenance,
       "fe_vector");
-}
-
-ActiveCutContextRefreshReport refreshActiveCutIntegrationContext(
-    application::core::SimulationComponents& sim,
-    const Parameters& params,
-    const svmp::FE::systems::SystemStateView& state,
-    svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle,
-    const char* provenance)
-{
-  if (!sim.fe_system) {
-    return {};
-  }
-  const char* solution_source =
-      state.u_vector != nullptr ? "state_vector_fe_ordered"
-                                : "state_span_assumed_fe_ordered";
-  const auto fe_solution = gatherFeOrderedSolution(
-      state, activeFESystemCommunicator(*sim.fe_system));
-  return refreshActiveCutIntegrationContextFromSolution(
-      sim,
-      params,
-      std::span<const svmp::FE::Real>(fe_solution.data(), fe_solution.size()),
-      lifecycle,
-      provenance,
-      solution_source);
 }
 
 ActiveCutContextRefreshReport refreshActiveCutIntegrationContextCached(
