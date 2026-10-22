@@ -15,9 +15,10 @@
  * A symmetric Nitsche condition on the wetted part of a wall of a cut liquid
  * is admitted only with small-cut aggregation and an aggregate-trace
  * certificate: the form bindings returned by applyVelocityNitscheBCs are
- * counted against the routes and passed to the installer, which checks the
- * minimum symmetric energy ratio at every refresh.  Moved from
- * IncompressibleNavierStokesVMSModule::registerOn.
+ * counted against the routes here, and
+ * FE::systems::FormulationBuilder::certifyGeneratedBoundaryNitscheTraces
+ * passes them to the installer, which checks the minimum symmetric energy
+ * ratio at every refresh.  Moved from IncompressibleNavierStokesVMSModule::registerOn.
  */
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
@@ -61,14 +62,6 @@ void requireCertifiedNitscheTraces(
     bool small_cut_aggregation,
     const std::vector<FE::forms::bc::GeneratedBoundaryNitscheTraceFormBinding>&
         generated_nitsche_trace_bindings);
-
-/// Moves the bindings into trace-certificate requests of the installer.
-void addNitscheTraceRequests(
-    FE::systems::FormInstallOptions& install,
-    std::vector<FE::forms::bc::GeneratedBoundaryNitscheTraceFormBinding>&
-        generated_nitsche_trace_bindings,
-    int volume_interface_marker,
-    FE::Real minimum_symmetric_energy_ratio);
 
 } // namespace navier_stokes
 } // namespace formulations

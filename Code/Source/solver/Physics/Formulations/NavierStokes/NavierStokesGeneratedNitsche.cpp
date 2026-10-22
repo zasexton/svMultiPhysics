@@ -127,29 +127,6 @@ void requireCertifiedNitscheTraces(
     }
 }
 
-void addNitscheTraceRequests(
-    FE::systems::FormInstallOptions& install,
-    std::vector<FE::forms::bc::GeneratedBoundaryNitscheTraceFormBinding>&
-        generated_nitsche_trace_bindings,
-    int volume_interface_marker,
-    FE::Real minimum_symmetric_energy_ratio)
-{
-    install.generated_boundary_nitsche_trace_requests.reserve(
-        generated_nitsche_trace_bindings.size());
-    for (auto& binding :
-         generated_nitsche_trace_bindings) {
-        install.generated_boundary_nitsche_trace_requests.push_back(
-            FE::systems::
-                GeneratedBoundaryNitscheTraceInstallRequest{
-                    .binding = std::move(binding),
-                    .volume_interface_marker =
-                        volume_interface_marker,
-                    .minimum_symmetric_energy_ratio =
-                        minimum_symmetric_energy_ratio,
-                });
-    }
-}
-
 } // namespace navier_stokes
 } // namespace formulations
 } // namespace Physics

@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "Systems/FESystem.h"
+#include "Systems/FormulationBuilder.h"
 #include "Systems/BoundaryConditionManager.h"
 #include "Systems/FormsInstallerDetail.h"
 #include "Auxiliary/AuxiliaryModelBuilder.h"
@@ -1464,6 +1465,44 @@ TEST(FormsInstaller, FormsInstaller_InstallFormulation_RegistersKernel)
         }
         EXPECT_NEAR(out.getVectorEntry(i), expected, 1e-12);
     }
+}
+
+TEST(FormulationBuilder, ComposesOptionsInCallOrderAndInstallsGroups)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto w_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "w", .space = space, .components = 1});
+
+    svmp::FE::systems::FormulationBuilder F(sys, "op", svmp::FE::systems::FormInstallOptions{});
+    EXPECT_TRUE(sys.hasOperator("op"));
+    EXPECT_EQ(F.operatorTag(), "op");
+    F.symbolicTangent().recordDynamicViscosity(u_field, 0.5);
+    EXPECT_TRUE(F.options().compiler_options.use_symbolic_tangent);
+    EXPECT_EQ(F.options().constitutive_laws.size(), 1u);
+
+    std::vector<svmp::FE::forms::bc::GeneratedBoundaryNitscheTraceFormBinding> no_bindings;
+    F.certifyGeneratedBoundaryNitscheTraces(no_bindings, /*volume_interface_marker=*/7, 0.25);
+    EXPECT_TRUE(F.options().generated_boundary_nitsche_trace_requests.empty());
+
+    const auto group = F.groupOptions({.source_component_tag = "group",
+                                       .extra_trial_fields = {w_field, w_field},
+                                       .drop_generated_boundary_nitsche_trace_requests = true});
+    EXPECT_EQ(group.source_component_tag, "group");
+    EXPECT_EQ(group.extra_trial_fields, std::vector<svmp::FE::FieldId>{w_field});
+    EXPECT_TRUE(group.compiler_options.use_symbolic_tangent);
+    EXPECT_EQ(group.constitutive_laws.size(), 1u);
+    EXPECT_TRUE(F.options().source_component_tag.empty());
+    EXPECT_TRUE(F.options().extra_trial_fields.empty());
+
+    const auto u = svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+    const auto residual = F.install({u_field}, (u * v).dx());
+    ASSERT_FALSE(residual.residual.empty());
+    const auto grouped = F.installGroup({u_field}, (u * u * v).dx(), {.source_component_tag = "nonlinear"});
+    ASSERT_FALSE(grouped.residual.empty());
 }
 
 TEST(FormsInstaller, FormsInstaller_RegistersCutVolumeKernel)

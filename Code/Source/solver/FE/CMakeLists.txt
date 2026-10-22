@@ -1066,6 +1066,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/FEAdaptivityTransfer.h
     Systems/FESystem.h
     Systems/FormsInstaller.h
+    Systems/FormulationBuilder.h
     Systems/FreeSurfaceFunctionalRounding.h
     Systems/BoundedUpdatePolicy.h
     Systems/BoundaryDistanceService.h
@@ -1106,6 +1107,7 @@ set(FE_SYSTEMS_SOURCES
     Systems/FEAdaptivityTransfer.cpp
     Systems/FESystem.cpp
     Systems/FormsInstaller.cpp
+    Systems/FormulationBuilder.cpp
     Systems/BoundedUpdatePolicy.cpp
     Systems/BoundaryDistanceService.cpp
     Systems/FieldBinding.cpp

@@ -40,7 +40,6 @@
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceValidation.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesFields.h"
-#include "Physics/Formulations/NavierStokes/NavierStokesFormHelpers.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesGeneratedNitsche.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesInitialConditions.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesPreflight.h"
@@ -56,6 +55,7 @@
 #include "FE/Systems/BoundaryConditionManager.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormsInstaller.h"
+#include "FE/Systems/FormulationBuilder.h"
 
 #include <algorithm>
 #include <cmath>
@@ -335,7 +335,7 @@ void addUnfittedFreeSurface(FormExpr& M, fs::FESystem& system, const Options& o,
 void addFittedFreeSurface(FormExpr& M, FormExpr& C, fs::FESystem& system, cs::ConstraintPlan& plan,
                           fs::BoundaryConditionManager& bcs, const Options& o, const FreeSurfaceBoundary& b,
                           const fs::ALEBinding& ale, const NavierStokesTerms& t, const FormExpr& w, FieldId u_id,
-                          const fs::FormInstallOptions& base_install, FreeSurfaceResidualWorkForms& work,
+                          fs::FormulationBuilder& F, FreeSurfaceResidualWorkForms& work,
                           ConservativeBalanceForms* balance)
 {
     const auto& [u, p, v, q, rho, mu, f, dim] = t;
@@ -405,13 +405,11 @@ void addFittedFreeSurface(FormExpr& M, FormExpr& C, fs::FESystem& system, cs::Co
                          (penalty * (inner(gap, psi) - normalTrace(gap, nc) * normalTrace(psi, nc))).ds(Gamma));
     }
     if (residual.isValid()) {   // installed before the fluid residual
-        auto install = base_install;
-        install.compiler_options.use_symbolic_tangent = true;
-        ale.configureInstallOptions(install);
+        fs::FormulationGroup rows{.ale = &ale};
         if (normal_relation) {
-            install.extra_trial_fields.push_back(u_id);
+            rows.extra_trial_fields.push_back(u_id);
         }
-        (void)fs::installFormulation(system, o.operator_tag, {ale.mesh_displacement_field}, residual, install);
+        (void)F.installGroup({ale.mesh_displacement_field}, residual, rows);
     }
     declareFittedMeshRowDescriptors(system, o.operator_tag, ale, b, u_id, residual.isValid());
 }
@@ -574,13 +572,14 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     }
     fs::BoundaryConditionManager bcs;
     bcs.install(o.velocity_dirichlet_weak, Factories::reserveMarker);   // Nitsche below; reserve the marker
-    const auto mesh_rows_install = physicsInstallOptions(o.jit_policy);
+    fs::FormulationBuilder F(system, o.operator_tag, physicsInstallOptions(o.jit_policy));
+    F.symbolicTangent();
     const auto w = o.enable_ale ? meshVelocity() : zeroVector(dim);
     for (const auto& b : free_surfaces) {
         if (isExteriorOnePhaseBoundary(b) && isUnfittedLevelSet(b)) {
             addUnfittedFreeSurface(M, system, o, b, t, balance ? &*balance : nullptr);
         } else if (isExteriorOnePhaseBoundary(b)) {
-            addFittedFreeSurface(M, C, system, plan, bcs, o, b, ale, t, w, u_id, mesh_rows_install, work,
+            addFittedFreeSurface(M, C, system, plan, bcs, o, b, ale, t, w, u_id, F, work,
                                  balance ? &*balance : nullptr);
         }
         const auto J = cutFacetPressurePenalty(b, t, o, velocity_space_->polynomial_order(),
@@ -590,20 +589,19 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
             work.ghost_penalty = sumOf(work.ghost_penalty, J);
         }
     }
-    namespace F = Factories;
     const auto on = [&](const auto& bc) { return wetted(bc.boundary_marker); };
-    bcs.install(o.traction_neumann, [&](const auto& bc) { return F::toTractionBC(bc, dim, on(bc)); });
-    bcs.install(o.traction_robin, [&](const auto& bc) { return F::toTractionRobinBC(bc, dim, on(bc)); });
-    bcs.install(o.pressure_outflow, [&](const auto& bc) { return F::toOutflowBC(bc, u, rho, on(bc)); });
-    const auto rcr = [&](const auto& bc) { return F::toCoupledOutflowBC(bc, system, u, rho, on(bc)); };
+    bcs.install(o.traction_neumann, [&](const auto& bc) { return Factories::toTractionBC(bc, dim, on(bc)); });
+    bcs.install(o.traction_robin, [&](const auto& bc) { return Factories::toTractionRobinBC(bc, dim, on(bc)); });
+    bcs.install(o.pressure_outflow, [&](const auto& bc) { return Factories::toOutflowBC(bc, u, rho, on(bc)); });
+    const auto rcr = [&](const auto& bc) { return Factories::toCoupledOutflowBC(bc, system, u, rho, on(bc)); };
     bcs.install(o.coupled_outflow_rcr, rcr);
     bcs.install(o.coupled_outflow_rcrcr, rcr);
     bcs.install(o.velocity_dirichlet,
-                [&](const auto& bc) { return F::toVelocityEssentialBC(bc, dim, o.velocity_field_name); });
+                [&](const auto& bc) { return Factories::toVelocityEssentialBC(bc, dim, o.velocity_field_name); });
     plan.essentials([&](fs::FESystem& target) { bcs.applyAll(target, M, u, v, u_id); });   // weak terms into M
     fs::BoundaryConditionManager pressure_bcs;
     pressure_bcs.install(o.pressure_dirichlet,
-                         [&](const auto& bc) { return F::toPressureEssentialBC(bc, o.pressure_field_name); });
+                         [&](const auto& bc) { return Factories::toPressureEssentialBC(bc, o.pressure_field_name); });
     plan.essentials([&](fs::FESystem& target) { pressure_bcs.applyAll(target, p_id); });
     logActiveDomainConstraints(liquid_constraints ? liquid->boundary : nullptr, aggregated);
     for (const auto& b : o.free_surface) {
@@ -619,42 +617,40 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
 
     // Weak velocity Dirichlet (Nitsche), certified on generated wetted boundaries.
     std::vector<bc::GeneratedBoundaryNitscheTraceFormBinding> nitsche_traces;
-    F::applyVelocityNitscheBCs(M, C, o, dim, u, p, v, q, t.mu, wetted, aggregated ? &nitsche_traces : nullptr,
-                               &work.weak_boundary_momentum, &work.weak_boundary_continuity);
+    Factories::applyVelocityNitscheBCs(M, C, o, dim, u, p, v, q, t.mu, wetted,
+                                       aggregated ? &nitsche_traces : nullptr,
+                                       &work.weak_boundary_momentum, &work.weak_boundary_continuity);
     requireCertifiedNitscheTraces(o, wetted, aggregated, nitsche_traces);
 
     // Install: the residual, the residual-work channels, then the PSPG pressure-gradient group.
-    auto install = physicsInstallOptions(o.jit_policy);
-    install.compiler_options.use_symbolic_tangent = true;
     if (!o.viscosity_model) {
-        install.recordDynamicViscosity(u_id, o.viscosity);
+        F.recordDynamicViscosity(u_id, o.viscosity);
     }
     if (aggregated) {
-        addNitscheTraceRequests(install, nitsche_traces, liquid->boundary->interface_marker,
-                                o.generated_boundary_nitsche_minimum_energy_ratio);
+        F.certifyGeneratedBoundaryNitscheTraces(nitsche_traces, liquid->boundary->interface_marker,
+                                                o.generated_boundary_nitsche_minimum_energy_ratio);
     }
-    appendUnfittedFreeSurfaceLevelSetTrialFields(free_surfaces, system, install);
-    appendUnfittedFreeSurfaceCurvatureTrialFields(free_surfaces, system, install);
-    ale.configureInstallOptions(install);
-    (void)fs::installFormulation(system, o.operator_tag, {u_id, p_id}, M + C, install);
+    appendUnfittedFreeSurfaceLevelSetTrialFields(free_surfaces, system, F.options());
+    appendUnfittedFreeSurfaceCurvatureTrialFields(free_surfaces, system, F.options());
+    F.configure(ale);
+    (void)F.install({u_id, p_id}, M + C);
     if (preflight.has_exterior_free_surface) {
         declareFreeSurfaceExternalBoundaryEnergy(system, o);
-        installFreeSurfaceResidualWork(system, o, u_id, p_id, install, work,
+        installFreeSurfaceResidualWork(system, o, u_id, p_id, F.options(), work,
                                        {.include_mcv = mcv,
                                         .has_nonconservative_body_force = nonconservative_force,
                                         .enable_vms = preflight.enable_vms});
     }
     if (pspg_grad_p.isValid()) {
-        auto pspg = install;
-        pspg.generated_boundary_nitsche_trace_requests.clear();
-        pspg.source_component_tag = "navier_stokes_vms_pspg_pressure_gradient";
-        appendUnique(pspg.extra_trial_fields, u_id);
-        (void)fs::installFormulation(system, o.operator_tag, {p_id}, pspg_grad_p, pspg);
+        (void)F.installGroup({p_id}, pspg_grad_p,
+                             {.source_component_tag = "navier_stokes_vms_pspg_pressure_gradient",
+                              .extra_trial_fields = {u_id},
+                              .drop_generated_boundary_nitsche_trace_requests = true});
     }
 
     // Opt-in diagnostic operators (environment switches), after the production ones.
     if (balance) {
-        installConservativeBalanceDiagnosticOperators(system, u_id, p_id, install, balance->pressure,
+        installConservativeBalanceDiagnosticOperators(system, u_id, p_id, F.options(), balance->pressure,
                                                       balance->external_pressure, balance->surface_energy,
                                                       balance->gravitational_potential, r.pressure, u, q,
                                                       active_volume);
@@ -663,7 +659,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
         const auto vms_pspg = r.pspg_pressure_gradient.isValid()
                                   ? r.pspg_pressure_gradient + r.pspg_without_pressure_gradient
                                   : FormExpr{};
-        installPressureRowContributionDiagnosticOperators(system, u_id, p_id, install, r.galerkin_continuity,
+        installPressureRowContributionDiagnosticOperators(system, u_id, p_id, F.options(), r.galerkin_continuity,
                                                           active_continuity, vms_pspg, r.pspg_pressure_gradient,
                                                           r.pspg_without_pressure_gradient, work.ghost_penalty,
                                                           active_volume);
