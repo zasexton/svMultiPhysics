@@ -11696,7 +11696,30 @@ TEST(MovingDomainPhysics,
         "\"operator_source\":\"Fitted free-surface prescribed tangential "
         "mesh velocity on marker 172\","
         "\"policy_qualification\":\"supported_configuration_envelope\"");
-    EXPECT_EQ(artifact->json, expected_with_aggregation_guards);
+    // The resolved section (decision D47) follows the keys above, which are
+    // unchanged.
+    constexpr std::string_view resolved_fragment = ",\"resolved\":";
+    const auto resolved_at = artifact->json.rfind(resolved_fragment);
+    ASSERT_NE(resolved_at, std::string::npos);
+    EXPECT_EQ(artifact->json.substr(0, resolved_at) + "}",
+              expected_with_aggregation_guards);
+    const auto resolved = artifact->json.substr(resolved_at);
+    // Built in code: no key comes from an input, and the values that differ
+    // from the boundary defaults are derived.
+    EXPECT_EQ(resolved.find("\"source\":\"explicit\""), std::string::npos)
+        << resolved;
+    EXPECT_NE(resolved.find("\"Surface_tension\":{\"value\":\"0.5\","
+                            "\"source\":\"derived\",\"origin\":\"resolution\"}"),
+              std::string::npos)
+        << resolved;
+    EXPECT_NE(resolved.find("\"External_pressure\":{\"value\":\"2.25\","
+                            "\"source\":\"derived\",\"origin\":\"resolution\"}"),
+              std::string::npos)
+        << resolved;
+    EXPECT_NE(resolved.find("\"Implementation\":{\"value\":\"FittedALE\","
+                            "\"source\":\"default\"}"),
+              std::string::npos)
+        << resolved;
 }
 
 TEST(MovingDomainPhysics,

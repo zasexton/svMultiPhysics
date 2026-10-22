@@ -7,6 +7,7 @@
  */
 
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
+#include "FE/Core/OptionSchema.h"
 #include "FE/Forms/BoundaryConditions.h"
 
 #include <array>
@@ -328,6 +329,11 @@ struct FreeSurfaceBoundary {
     // independently.
     FE::constraints::SmallCutAggregationGuardOptions
         small_cut_aggregation_guards{};
+
+    // The keys of the boundary condition this boundary was read from (empty
+    // when it is built in code).  The effective-configuration artifact
+    // records from it where each resolved value came from (decision D47).
+    FE::options::OptionInput input{};
 };
 
 } // namespace navier_stokes

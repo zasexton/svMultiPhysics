@@ -1,4 +1,5 @@
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceBoundarySchema.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleTwoFluidInterface.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleTwoFluidModule.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesRegister.h"
@@ -3857,6 +3858,9 @@ void append_free_surface_bc(
   }
 
   IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary fs{};
+  // Kept for the provenance of the resolved values (effective-configuration
+  // artifact, decision D47).
+  fs.input = svmp::Physics::formulations::navier_stokes::optionInputFromParameters(bc.params);
   const bool explicit_legacy_configuration =
       options.input_configuration_schema_version == 1 &&
       options.explicit_legacy_configuration;

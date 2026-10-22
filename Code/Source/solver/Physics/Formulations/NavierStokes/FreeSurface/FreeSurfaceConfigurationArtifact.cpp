@@ -6,6 +6,7 @@
  */
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceConfigurationArtifact.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceBoundarySchema.h"
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceCollectives.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactCertificate.h"
@@ -690,7 +691,11 @@ tangentialPolicyProvenance(
         }
         out << "]}";
     }
-    out << "]}";
+    out << "]";
+    // Every input key of each boundary with its resolved value and source
+    // (decision D47); the keys above are unchanged.
+    out << ",\"resolved\":" << resolvedFreeSurfacesJson(free_surfaces);
+    out << "}";
 
     return EffectiveConfigurationArtifact{
         .component = "incompressible_navier_stokes_free_surface",

@@ -2663,6 +2663,133 @@ TEST(NavierStokesLegacyBCs,
 #endif
 }
 
+TEST(NavierStokesLegacyBCs, ResolvedArtifactSectionRecordsTheSourceOfEveryFreeSurfaceKey)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    // Decision D47 (P1.2a): the Navier-Stokes artifact ends with a
+    // "resolved" section with every key of each free-surface boundary, its
+    // resolved value and its source.
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+
+    constexpr int wall_marker = 82;
+    constexpr int interface_marker = 205;
+    auto mesh = buildSingleTetraBoundaryMesh(
+        wall_marker, /*label_all_faces=*/false);
+    ASSERT_TRUE(mesh);
+
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "fluid";
+    input.mesh_name = "single_tetra";
+    input.mesh = mesh->local_mesh_ptr();
+    input.equation_params["Operator_tag"] = defined("equations");
+    input.default_domain.params["Density"] = defined("1.0");
+    input.default_domain.params["Viscosity.model"] = defined("Constant");
+    input.default_domain.params["Viscosity.Value"] = defined("0.01");
+
+    svmp::Physics::BoundaryConditionInput free_surface{};
+    free_surface.name = "free_surface";
+    free_surface.boundary_marker = svmp::INVALID_LABEL;
+    free_surface.params["Type"] = defined("Free_surface");
+    free_surface.params["Implementation"] = defined("UnfittedLevelSet");
+    free_surface.params["Interface_marker"] =
+        defined(std::to_string(interface_marker));
+    free_surface.params["Level_set_field_name"] = defined("phi_resolved");
+    free_surface.params["Active_domain"] = defined("negative");
+    free_surface.params["Active_domain_method"] = defined("CutVolume");
+    free_surface.params["Generated_interface_geometry"] =
+        defined("LinearCorner");
+    free_surface.params["Small_cut_aggregation"] = defined("false");
+    free_surface.params["Surface_tension"] = defined("0.8");
+    free_surface.params["Curvature"] = defined("0.0");
+    free_surface.params["Use_level_set_curvature"] = defined("false");
+    free_surface.params["Contact_line_model"] =
+        defined("PrescribedAngle");
+    free_surface.params["Contact_line_wall_marker"] =
+        defined(std::to_string(wall_marker));
+    free_surface.params["Contact_line_wall_normal"] =
+        defined("0.0 0.0 -1.0");
+    free_surface.params["Contact_angle_degrees"] = defined("60.0");
+    free_surface.params["Wall_slip_model"] = defined("Navier");
+    free_surface.params["Wall_slip_length"] = defined("0.2");
+    input.boundary_conditions.push_back(std::move(free_surface));
+
+    svmp::Physics::BoundaryConditionInput wall{};
+    wall.name = "prescribed_contact_wall";
+    wall.boundary_marker = wall_marker;
+    wall.params["Type"] = defined("Dirichlet");
+    wall.params["Value"] = defined("0.0");
+    wall.params["Effective_direction"] = defined("0 0 1");
+    input.boundary_conditions.push_back(std::move(wall));
+
+    svmp::FE::systems::FESystem system(mesh);
+    auto scalar_space = svmp::FE::spaces::SpaceFactory::create_h1(
+        svmp::FE::ElementType::Tetra4, 1);
+    const auto phi = system.addField(svmp::FE::systems::FieldSpec{
+        .name = "phi_resolved",
+        .space = scalar_space,
+        .components = 1,
+    });
+    system.addOperator("level_set_owner");
+    const auto phi_state = svmp::FE::forms::StateField(
+        phi, *scalar_space, "phi_resolved_owner");
+    const auto eta = svmp::FE::forms::TestField(
+        phi, *scalar_space, "eta_resolved_owner");
+    (void)svmp::FE::systems::installFormulation(
+        system,
+        "level_set_owner",
+        {phi},
+        (phi_state * eta).dx());
+
+    auto module = svmp::Physics::EquationModuleRegistry::instance().create(
+        "fluid", input, system);
+    ASSERT_TRUE(module);
+    const auto artifact = module->effectiveConfigurationArtifact();
+    ASSERT_TRUE(artifact.has_value());
+    const auto& json = artifact->json;
+    const auto resolved_at = json.rfind(",\"resolved\":{\"version\":1,\"free_surfaces\":[{\"boundary\":{");
+    ASSERT_NE(resolved_at, std::string::npos) << json;
+    EXPECT_EQ(json.back(), '}');
+    const auto resolved = json.substr(resolved_at);
+    const auto expect_entry = [&](std::string_view entry) {
+        EXPECT_NE(resolved.find(entry), std::string::npos) << entry << "\n" << resolved;
+    };
+    // Given by the input; the canonical value text is kept, the input text
+    // only when it differs.
+    expect_entry("\"Implementation\":{\"value\":\"UnfittedLevelSet\",\"source\":\"explicit\","
+                 "\"spelling\":\"Implementation\"}");
+    expect_entry("\"Active_domain\":{\"value\":\"LevelSetNegative\",\"source\":\"explicit\","
+                 "\"spelling\":\"Active_domain\",\"input\":\"negative\"}");
+    expect_entry("\"Interface_marker\":{\"value\":\"205\",\"source\":\"explicit\","
+                 "\"spelling\":\"Interface_marker\"}");
+    expect_entry("\"Surface_tension\":{\"value\":\"0.8\",\"source\":\"explicit\","
+                 "\"spelling\":\"Surface_tension\"}");
+    expect_entry("\"Small_cut_aggregation\":{\"value\":\"false\",\"source\":\"explicit\","
+                 "\"spelling\":\"Small_cut_aggregation\"}");
+    // Left to the defaults.
+    expect_entry("\"Level_set_isovalue\":{\"value\":\"0\",\"source\":\"default\"}");
+    expect_entry("\"Kinematic_enforcement\":{\"value\":\"None\",\"source\":\"default\"}");
+    expect_entry("\"Cut_cell_metadata_scale_cap\":{\"value\":\"none\",\"source\":\"default\"}");
+    // The contact-line keys.
+    expect_entry(",\"contact_line\":{\"Contact_line_model\":{\"value\":\"PrescribedAngle\","
+                 "\"source\":\"explicit\",\"spelling\":\"Contact_line_model\"}");
+    expect_entry("\"source\":\"explicit\",\"spelling\":\"Contact_angle_degrees\",\"input\":\"60.0\"}");
+    expect_entry("\"Contact_line_wall_marker\":{\"value\":\"82\",\"source\":\"explicit\","
+                 "\"spelling\":\"Contact_line_wall_marker\"}");
+    expect_entry("\"Wall_slip_model\":{\"value\":\"Navier\",\"source\":\"explicit\","
+                 "\"spelling\":\"Wall_slip_model\"}");
+    expect_entry("\"Contact_line_mobility\":{\"value\":\"0\",\"source\":\"default\"}");
+    // Converted from the degrees by the register.
+    const auto radians_at = resolved.find("\"Contact_angle_radians\":{");
+    ASSERT_NE(radians_at, std::string::npos);
+    EXPECT_NE(resolved.find("\"source\":\"derived\",\"origin\":\"resolution\"}", radians_at),
+              std::string::npos);
+    // Keys outside the schema (Type) are not listed.
+    EXPECT_EQ(resolved.find("\"Type\""), std::string::npos);
+#endif
+}
+
 TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceCutCellStabilizationTranslation_AddsFacetTerms)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
