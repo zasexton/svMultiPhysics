@@ -252,23 +252,6 @@ bool containsExprType(const FormExpr& expr, FormExprType target)
     return expr.isValid() && containsExprType(expr.node(), target);
 }
 
-bool containsGradientOfTrialFunction(const FormExprNode* node)
-{
-    if (node == nullptr) {
-        return false;
-    }
-    if (node->type() == FormExprType::Gradient &&
-        containsExprType(node, FormExprType::TrialFunction)) {
-        return true;
-    }
-    for (const auto* child : node->children()) {
-        if (containsGradientOfTrialFunction(child)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 bool containsFieldExprType(const FormExprNode* node,
                            FormExprType target,
                            FE::FieldId field)
@@ -399,36 +382,6 @@ bool formulationRecordsContainExprTypeAppliedToField(
         for (const auto& [block, expr] : record.block_residual_exprs) {
             (void)block;
             if (containsExprTypeAppliedToField(expr.get(), target, field)) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-bool interfaceKernelContainsGradientOfTrialFunction(
-    const FE::systems::FESystem& system,
-    int interface_marker,
-    FE::FieldId trial_field)
-{
-    const auto& equations = system.operatorDefinition("equations");
-    for (const auto& term : equations.interface_faces) {
-        if (term.marker != interface_marker ||
-            term.trial_field != trial_field ||
-            !term.kernel) {
-            continue;
-        }
-        const auto form_kernel =
-            std::dynamic_pointer_cast<FE::forms::FormKernel>(term.kernel);
-        if (!form_kernel) {
-            continue;
-        }
-        for (const auto& integral : form_kernel->ir().terms()) {
-            if (integral.domain != FE::forms::IntegralDomain::InterfaceFace ||
-                integral.interface_marker != interface_marker) {
-                continue;
-            }
-            if (containsGradientOfTrialFunction(integral.integrand.node())) {
                 return true;
             }
         }
@@ -3944,10 +3897,6 @@ TEST(MovingDomainPhysics, FittedAndUnfittedFlatStaticFreeSurfaceAgree)
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
     GTEST_SKIP() << "Requires FE built with Mesh integration.";
 #else
-    ScopedEnvVar enable_shape_tangents(
-        "SVMP_ENABLE_UNFITTED_LEVEL_SET_SHAPE_TANGENTS",
-        std::string("1"));
-
     constexpr int left_marker = 111;
     constexpr int right_marker = 112;
     constexpr int bottom_marker = 113;
@@ -4158,18 +4107,6 @@ TEST(MovingDomainPhysics, FittedAndUnfittedFlatStaticFreeSurfaceAgree)
     EXPECT_TRUE(formulationRecordsContain(unfitted_system, FormExprType::Gradient));
     EXPECT_TRUE(formulationRecordsContainInterfaceMarker(unfitted_system,
                                                         interface_marker));
-    const auto& unfitted_operator =
-        unfitted_system.operatorDefinition("equations");
-    const auto has_phi_shape_tangent =
-        std::any_of(unfitted_operator.interface_faces.begin(),
-                    unfitted_operator.interface_faces.end(),
-                    [&](const auto& term) {
-                        return term.marker == interface_marker &&
-                               term.trial_field == phi &&
-                               (term.test_field == unfitted_u ||
-                                term.test_field == unfitted_p);
-                    });
-    EXPECT_TRUE(has_phi_shape_tangent);
 #endif
 }
 
@@ -7730,18 +7667,7 @@ TEST(MovingDomainPhysics,
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
 
-    const auto register_with = [&](std::string tangent_policy,
-                                   bool enable_experimental_tangents) {
-        ScopedEnvVar enable_shape_tangents(
-            "SVMP_ENABLE_UNFITTED_LEVEL_SET_SHAPE_TANGENTS",
-            enable_experimental_tangents
-                ? std::optional<std::string>("1")
-                : std::nullopt);
-        ScopedEnvVar disable_shape_tangents(
-            "SVMP_DISABLE_UNFITTED_LEVEL_SET_SHAPE_TANGENTS",
-            enable_experimental_tangents
-                ? std::nullopt
-                : std::optional<std::string>("1"));
+    const auto register_with = [&](std::string tangent_policy) {
         auto opts = baseNavierStokesOptions();
         opts.free_surface.push_back(
             ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
@@ -7766,10 +7692,8 @@ TEST(MovingDomainPhysics,
         module.registerOn(system);
     };
 
-    EXPECT_NO_THROW(register_with("RefreshedFrozenQuadrature", false));
-    EXPECT_THROW(register_with("DifferentiatedQuadrature", false),
-                 std::invalid_argument);
-    EXPECT_THROW(register_with("RefreshedFrozenQuadrature", true),
+    EXPECT_NO_THROW(register_with("RefreshedFrozenQuadrature"));
+    EXPECT_THROW(register_with("DifferentiatedQuadrature"),
                  std::invalid_argument);
 }
 
@@ -7781,18 +7705,7 @@ TEST(MovingDomainPhysics,
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
 
-    const auto register_with = [&](std::string tangent_policy,
-                                   bool enable_experimental_tangents) {
-        ScopedEnvVar enable_shape_tangents(
-            "SVMP_ENABLE_UNFITTED_LEVEL_SET_SHAPE_TANGENTS",
-            enable_experimental_tangents
-                ? std::optional<std::string>("1")
-                : std::nullopt);
-        ScopedEnvVar disable_shape_tangents(
-            "SVMP_DISABLE_UNFITTED_LEVEL_SET_SHAPE_TANGENTS",
-            enable_experimental_tangents
-                ? std::nullopt
-                : std::optional<std::string>("1"));
+    const auto register_with = [&](std::string tangent_policy) {
         auto opts = baseNavierStokesOptions();
         opts.free_surface.push_back(
             ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
@@ -7822,10 +7735,8 @@ TEST(MovingDomainPhysics,
         module.registerOn(system);
     };
 
-    EXPECT_NO_THROW(register_with("RefreshedFrozenQuadrature", false));
-    EXPECT_THROW(register_with("DifferentiatedQuadrature", false),
-                 std::invalid_argument);
-    EXPECT_THROW(register_with("RefreshedFrozenQuadrature", true),
+    EXPECT_NO_THROW(register_with("RefreshedFrozenQuadrature"));
+    EXPECT_THROW(register_with("DifferentiatedQuadrature"),
                  std::invalid_argument);
 }
 
@@ -9274,79 +9185,8 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedSurfaceTensionRejectsRawLevelSetCu
     EXPECT_THROW(module.registerOn(system), std::invalid_argument);
 }
 
-TEST(MovingDomainPhysics, NavierStokesUnfittedLevelSetShapeTangentsDisabledByDefault)
-{
-    ScopedEnvVar enable_shape_tangents(
-        "SVMP_ENABLE_UNFITTED_LEVEL_SET_SHAPE_TANGENTS",
-        std::nullopt);
-    ScopedEnvVar disable_shape_tangents(
-        "SVMP_DISABLE_UNFITTED_LEVEL_SET_SHAPE_TANGENTS",
-        std::nullopt);
-
-    constexpr int interface_marker = 143;
-    const auto mesh = makeMesh();
-    auto u_space = makeVelocitySpace(mesh);
-    auto p_space = makePressureSpace(mesh);
-    auto opts = baseNavierStokesOptions();
-    opts.enable_convection = false;
-    opts.jit_policy.enable = false;
-
-    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
-        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
-        .interface_marker = interface_marker,
-        .level_set_field_name = "phi",
-        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
-        .external_pressure = 7.5,
-        .surface_tension = 0.0,
-        .surface_tension_form =
-            ns::FreeSurfaceSurfaceTensionForm::CurvatureTraction,
-    });
-
-    FE::systems::FESystem system(mesh);
-    const auto phi_field = system.addField(FE::systems::FieldSpec{
-        .name = "phi",
-        .space = p_space,
-        .components = 1,
-    });
-
-    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
-    testing::internal::CaptureStdout();
-    testing::internal::CaptureStderr();
-    module.registerOn(system);
-    auto log_output = testing::internal::GetCapturedStdout();
-    log_output += testing::internal::GetCapturedStderr();
-
-    const auto& equations = system.operatorDefinition("equations");
-    const auto has_phi_shape_tangent =
-        std::any_of(equations.interface_faces.begin(),
-                    equations.interface_faces.end(),
-                    [&](const auto& term) {
-                        return term.marker == interface_marker &&
-                               term.trial_field == phi_field;
-                    });
-
-    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InterfaceIntegral));
-    EXPECT_TRUE(formulationRecordsContainInterfaceMarker(system, interface_marker));
-    EXPECT_FALSE(has_phi_shape_tangent);
-    EXPECT_EQ(log_output.find(
-                  "diagnostic=unfitted_free_surface_interface_measure_shape_tangent"),
-              std::string::npos);
-    EXPECT_EQ(log_output.find(
-                  "diagnostic=unfitted_free_surface_interface_point_location_shape_tangent"),
-              std::string::npos);
-    EXPECT_NE(log_output.find("cut_volume_phi_shape_tangent=disabled_by_default"),
-              std::string::npos);
-    EXPECT_EQ(log_output.find("experimental_path=unfitted_level_set_shape_tangent"),
-              std::string::npos);
-    EXPECT_EQ(log_output.find("qualification=Experimental"), std::string::npos);
-}
-
 TEST(MovingDomainPhysics, NavierStokesUnfittedSurfaceTensionUsesSuppliedCurvatureField)
 {
-    ScopedEnvVar enable_shape_tangents(
-        "SVMP_ENABLE_UNFITTED_LEVEL_SET_SHAPE_TANGENTS",
-        std::string("1"));
-
     constexpr int interface_marker = 44;
     const auto mesh = makeMesh();
     auto u_space = makeVelocitySpace(mesh);
@@ -9366,7 +9206,7 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedSurfaceTensionUsesSuppliedCurvatur
     });
 
     FE::systems::FESystem system(mesh);
-    const auto phi_field = system.addField(FE::systems::FieldSpec{
+    system.addField(FE::systems::FieldSpec{
         .name = "phi",
         .space = p_space,
         .components = 1,
@@ -9389,23 +9229,6 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedSurfaceTensionUsesSuppliedCurvatur
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
     EXPECT_TRUE(formulationRecordsContainFieldExprType(
         system, FormExprType::DiscreteField, kappa_field));
-    const auto& equations = system.operatorDefinition("equations");
-    const auto has_phi_shape_tangent =
-        std::any_of(equations.interface_faces.begin(),
-                    equations.interface_faces.end(),
-                    [&](const auto& term) {
-                        return term.marker == interface_marker &&
-                               term.trial_field == phi_field;
-                    });
-    EXPECT_TRUE(has_phi_shape_tangent);
-    EXPECT_TRUE(interfaceKernelContainsGradientOfTrialFunction(
-        system, interface_marker, phi_field));
-    EXPECT_NE(log_output.find(
-                  "diagnostic=unfitted_free_surface_interface_point_location_shape_tangent"),
-              std::string::npos);
-    EXPECT_NE(log_output.find("experimental_path=unfitted_level_set_shape_tangent"),
-              std::string::npos);
-    EXPECT_NE(log_output.find("qualification=Experimental"), std::string::npos);
     EXPECT_EQ(log_output.find("diagnostic=unfitted_level_set_raw_curvature"),
               std::string::npos);
 }
@@ -10133,70 +9956,6 @@ TEST(MovingDomainPhysics, NavierStokesActiveDomainZeroTractionFreeSurfaceAvoidsI
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CutVolumeIntegral));
 }
 
-TEST(MovingDomainPhysics, NavierStokesActiveDomainUnknownLevelSetAddsMatrixOnlyShapeTangent)
-{
-    ScopedEnvVar enable_shape_tangents(
-        "SVMP_ENABLE_UNFITTED_LEVEL_SET_SHAPE_TANGENTS",
-        std::string("1"));
-
-    constexpr int interface_marker = 146;
-    const auto mesh = makeMesh();
-    auto u_space = makeVelocitySpace(mesh);
-    auto p_space = makePressureSpace(mesh);
-    auto opts = baseNavierStokesOptions();
-    opts.enable_convection = false;
-
-    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
-        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
-        .interface_marker = interface_marker,
-        .level_set_field_name = "phi",
-        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
-        .external_pressure = 0.0,
-        .surface_tension = 0.0,
-    });
-
-    FE::systems::FESystem system(mesh);
-    const auto phi = system.addField(FE::systems::FieldSpec{
-        .name = "phi",
-        .space = p_space,
-        .components = 1,
-    });
-
-    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
-    testing::internal::CaptureStdout();
-    testing::internal::CaptureStderr();
-    module.registerOn(system);
-    auto log_output = testing::internal::GetCapturedStdout();
-    log_output += testing::internal::GetCapturedStderr();
-
-    const auto u = system.findFieldByName(opts.velocity_field_name);
-    const auto p = system.findFieldByName(opts.pressure_field_name);
-    ASSERT_NE(u, FE::INVALID_FIELD_ID);
-    ASSERT_NE(p, FE::INVALID_FIELD_ID);
-
-    EXPECT_FALSE(formulationRecordsContain(system, FormExprType::InterfaceIntegral));
-    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CutVolumeIntegral));
-
-    const auto& equations = system.operatorDefinition("equations");
-    const auto has_phi_shape_tangent =
-        std::any_of(equations.interface_faces.begin(),
-                    equations.interface_faces.end(),
-                    [&](const auto& term) {
-                        return term.marker == interface_marker &&
-                               term.trial_field == phi &&
-                               (term.test_field == u || term.test_field == p);
-                    });
-    EXPECT_TRUE(has_phi_shape_tangent);
-    EXPECT_NE(log_output.find("cut_volume_phi_shape_tangent=matrix_only_hadamard"),
-              std::string::npos);
-    EXPECT_NE(log_output.find("experimental_path=unfitted_level_set_shape_tangent"),
-              std::string::npos);
-    EXPECT_NE(log_output.find("qualification=Experimental"), std::string::npos);
-    EXPECT_EQ(log_output.find(
-                  "no_explicit_level_set_dependence_under_frozen_cut_geometry"),
-              std::string::npos);
-}
-
 TEST(MovingDomainPhysics, NavierStokesActiveDomainExternalPressureInstallsInterfaceTraction)
 {
     constexpr int interface_marker = 48;
@@ -10290,74 +10049,6 @@ TEST(MovingDomainPhysics,
         /*eps=*/1.0e-6,
         /*rtol=*/2.0e-5,
         /*atol=*/2.0e-8);
-}
-
-TEST(MovingDomainPhysics, NavierStokesUnfittedInterfaceMeasureAddsLevelSetShapeTangent)
-{
-    ScopedEnvVar enable_shape_tangents(
-        "SVMP_ENABLE_UNFITTED_LEVEL_SET_SHAPE_TANGENTS",
-        std::string("1"));
-
-    constexpr int interface_marker = 148;
-    const auto mesh = makeMesh();
-    auto u_space = makeVelocitySpace(mesh);
-    auto p_space = makePressureSpace(mesh);
-    auto opts = baseNavierStokesOptions();
-    opts.enable_convection = false;
-
-    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
-        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
-        .interface_marker = interface_marker,
-        .level_set_field_name = "phi",
-        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
-        .external_pressure = 7.5,
-        .surface_tension = 0.0,
-        .surface_tension_form =
-            ns::FreeSurfaceSurfaceTensionForm::CurvatureTraction,
-    });
-
-    FE::systems::FESystem system(mesh);
-    const auto phi = system.addField(FE::systems::FieldSpec{
-        .name = "phi",
-        .space = p_space,
-        .components = 1,
-    });
-
-    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
-    testing::internal::CaptureStdout();
-    testing::internal::CaptureStderr();
-    EXPECT_NO_THROW(module.registerOn(system));
-    auto log_output = testing::internal::GetCapturedStdout();
-    log_output += testing::internal::GetCapturedStderr();
-
-    const auto u = system.findFieldByName(opts.velocity_field_name);
-    const auto p = system.findFieldByName(opts.pressure_field_name);
-    ASSERT_NE(u, FE::INVALID_FIELD_ID);
-    ASSERT_NE(p, FE::INVALID_FIELD_ID);
-
-    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InterfaceIntegral));
-    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
-    EXPECT_TRUE(formulationRecordsContainInterfaceMarker(system, interface_marker));
-
-    const auto& equations = system.operatorDefinition("equations");
-    const auto has_phi_shape_tangent =
-        std::any_of(equations.interface_faces.begin(),
-                    equations.interface_faces.end(),
-                    [&](const auto& term) {
-                        return term.marker == interface_marker &&
-                               term.trial_field == phi &&
-                               (term.test_field == u || term.test_field == p);
-                    });
-    EXPECT_TRUE(has_phi_shape_tangent);
-    EXPECT_NE(log_output.find(
-                  "diagnostic=unfitted_free_surface_interface_measure_shape_tangent"),
-              std::string::npos);
-    EXPECT_NE(log_output.find(
-                  "diagnostic=unfitted_free_surface_interface_point_location_shape_tangent"),
-              std::string::npos);
-    EXPECT_NE(log_output.find("experimental_path=unfitted_level_set_shape_tangent"),
-              std::string::npos);
-    EXPECT_NE(log_output.find("qualification=Experimental"), std::string::npos);
 }
 
 TEST(MovingDomainPhysics, NavierStokesActiveDomainSurfaceTensionInstallsInterfaceTraction)
