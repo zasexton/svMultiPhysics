@@ -13,6 +13,7 @@
 #include "LevelSet/LevelSetMaintenanceSubstage.h"
 #include "LevelSet/Maintenance/LevelSetMaintenanceConfiguration.h"
 #include "LevelSet/Maintenance/LevelSetMaintenancePipeline.h"
+#include "LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h"
 #include "LevelSet/LevelSetOptions.h"
 #include "LevelSet/LevelSetPhaseGeometryReconciliation.h"
 #include "LevelSet/LevelSetWallContactConstraint.h"

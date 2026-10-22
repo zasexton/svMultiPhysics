@@ -75,6 +75,16 @@ CONSERVATIVE_PHASE_WORKFLOW_SOURCE_PATH = (
     / "LevelSet"
     / "LevelSetConservativePhaseWorkflow.cpp"
 )
+MAINTENANCE_REQUEST_SCHEDULE_SOURCE_PATH = (
+    ROOT
+    / "Code"
+    / "Source"
+    / "solver"
+    / "FE"
+    / "LevelSet"
+    / "Maintenance"
+    / "LevelSetMaintenanceRequestSchedule.cpp"
+)
 
 
 def load_runner():
@@ -412,12 +422,15 @@ def test_wp6_production_source_contract_is_fail_closed(tmp_path):
         "  appendMaintenanceScheduleWord("
         "words, graph->dof_layout_revision);"
     )
-    assert source.count(replicated_graph_layout) == 1
+    schedule_source = MAINTENANCE_REQUEST_SCHEDULE_SOURCE_PATH.read_text(
+        encoding="utf-8"
+    )
+    assert schedule_source.count(replicated_graph_layout) == 1
     graph_stamp_source = (
-        tmp_path / "ApplicationDriver-local-graph-stamp.cpp"
+        tmp_path / "LevelSetMaintenanceRequestSchedule-local-graph-stamp.cpp"
     )
     graph_stamp_source.write_text(
-        source.replace(
+        schedule_source.replace(
             replicated_graph_layout,
             local_graph_stamp + replicated_graph_layout,
             1,
@@ -427,7 +440,9 @@ def test_wp6_production_source_contract_is_fail_closed(tmp_path):
     with pytest.raises(
         ValueError, match="partition-local graph mesh cache stamps"
     ):
-        runner.validate_wp6_production_source_contract(graph_stamp_source)
+        runner.validate_wp6_production_source_contract(
+            maintenance_schedule_source_path=graph_stamp_source
+        )
 
     operator_source = CONSERVATIVE_PHASE_OPERATOR_SOURCE_PATH.read_text(
         encoding="utf-8"

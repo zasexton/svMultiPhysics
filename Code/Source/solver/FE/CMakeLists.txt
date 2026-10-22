@@ -968,6 +968,7 @@ set(FE_LEVELSET_HEADERS
     LevelSet/LevelSetMaintenanceSubstage.h
     LevelSet/Maintenance/LevelSetMaintenanceConfiguration.h
     LevelSet/Maintenance/LevelSetMaintenancePipeline.h
+    LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h
     LevelSet/LevelSetImplicitCutQuadratureBackend.h
     LevelSet/LevelSetVolume.h
     LevelSet/LevelSetKinematicReconciliation.h
@@ -999,6 +1000,7 @@ set(FE_LEVELSET_SOURCES
     LevelSet/LevelSetImplicitCutQuadratureBackend.cpp
     LevelSet/LevelSetMaintenanceSchedule.cpp
     LevelSet/Maintenance/LevelSetMaintenancePipeline.cpp
+    LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.cpp
     LevelSet/LevelSetVolume.cpp
     LevelSet/LevelSetKinematicReconciliation.cpp
     LevelSet/LevelSetPhaseGeometryReconciliation.cpp
@@ -2561,6 +2563,7 @@ if(FE_BUILD_TESTS)
             Tests/Unit/LevelSet/test_LevelSetHeaders.cpp
             Tests/Unit/LevelSet/test_LevelSetInterfaceLifecycle.cpp
             Tests/Unit/LevelSet/test_LevelSetKinematicReconciliation.cpp
+            Tests/Unit/LevelSet/test_LevelSetMaintenanceRequestSchedule.cpp
             Tests/Unit/LevelSet/test_LevelSetSignDefinitePatchBounds.cpp
             Tests/Unit/LevelSet/test_LevelSetInterfacePreservingRedistancing.cpp
             Tests/Unit/LevelSet/test_LevelSetInterfacePreservingRedistancing3D.cpp

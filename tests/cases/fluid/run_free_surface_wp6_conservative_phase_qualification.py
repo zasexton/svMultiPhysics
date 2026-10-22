@@ -80,6 +80,16 @@ CONSERVATIVE_PHASE_WORKFLOW_SOURCE = (
     / "LevelSet"
     / "LevelSetConservativePhaseWorkflow.cpp"
 )
+MAINTENANCE_REQUEST_SCHEDULE_SOURCE = (
+    REPOSITORY_ROOT
+    / "Code"
+    / "Source"
+    / "solver"
+    / "FE"
+    / "LevelSet"
+    / "Maintenance"
+    / "LevelSetMaintenanceRequestSchedule.cpp"
+)
 DEFAULT_REGISTRY = SCRIPT_PATH.with_name(
     "free_surface_wp6_conservative_phase_qualification_matrix.json"
 )
@@ -258,6 +268,9 @@ def validate_wp6_production_source_contract(
     conservative_phase_workflow_source_path: Path = (
         CONSERVATIVE_PHASE_WORKFLOW_SOURCE
     ),
+    maintenance_schedule_source_path: Path = (
+        MAINTENANCE_REQUEST_SCHEDULE_SOURCE
+    ),
 ) -> dict[str, Any]:
     source = source_path.read_text(encoding="utf-8")
     time_loop_source = time_loop_source_path.read_text(encoding="utf-8")
@@ -266,6 +279,9 @@ def validate_wp6_production_source_contract(
     )
     conservative_phase_workflow_source = (
         conservative_phase_workflow_source_path.read_text(encoding="utf-8")
+    )
+    maintenance_schedule_source = (
+        maintenance_schedule_source_path.read_text(encoding="utf-8")
     )
 
     # The conservative-phase graph helpers live in the FE workflow; the
@@ -319,10 +335,12 @@ def validate_wp6_production_source_contract(
             "collective conservative graph staleness gate before rebuild"
         )
 
-    graph_metadata_start = source.find(
+    # The request schedule words live in the FE maintenance request
+    # schedule; the driver's schedule calls them.
+    graph_metadata_start = maintenance_schedule_source.find(
         "void appendMaintenanceScheduleGraphMetadata("
     )
-    graph_metadata_end = source.find(
+    graph_metadata_end = maintenance_schedule_source.find(
         "std::uint64_t levelSetMaintenanceRequestActionBits(",
         graph_metadata_start,
     )
@@ -331,7 +349,9 @@ def validate_wp6_production_source_contract(
             "WP-6 production source contract cannot isolate conservative "
             "graph request metadata"
         )
-    graph_metadata = source[graph_metadata_start:graph_metadata_end]
+    graph_metadata = maintenance_schedule_source[
+        graph_metadata_start:graph_metadata_end
+    ]
     partition_local_graph_stamps = (
         "graph->geometry_revision",
         "graph->topology_revision",
