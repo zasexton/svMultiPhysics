@@ -90,4 +90,13 @@ recordAcceptedFreeSurfaceDiscreteFunctionals(
         accepted_extension_map_revision = std::nullopt,
     bool* backward_euler_kinetic_work_bound = nullptr);
 
+void recordInitialFreeSurfaceDiscreteFunctionalBaseline(
+    const FreeSurfaceSystemHandle& sim,
+    std::uint64_t initial_step,
+    svmp::FE::Real initial_time,
+    std::span<const svmp::FE::Real> initial_solution,
+    bool record_backward_euler_kinetic_baseline = false,
+    std::optional<std::uint64_t>
+        initial_extension_map_revision = std::nullopt);
+
 } // namespace svmp::Physics::formulations::navier_stokes::free_surface

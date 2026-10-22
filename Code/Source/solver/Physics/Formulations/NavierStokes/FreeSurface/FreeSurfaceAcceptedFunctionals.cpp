@@ -8,6 +8,7 @@
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceAcceptedFunctionals.h"
 
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactStages.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceFieldEvaluators.h"
 
 #include "FE/Assembly/Assembler.h"
@@ -1809,6 +1810,42 @@ recordAcceptedFreeSurfaceDiscreteFunctionals(
       accepted_states,
       accepted_extension_map_revision);
   return accepted_states;
+}
+
+void recordInitialFreeSurfaceDiscreteFunctionalBaseline(
+    const FreeSurfaceSystemHandle& sim,
+    std::uint64_t initial_step,
+    svmp::FE::Real initial_time,
+    std::span<const svmp::FE::Real> initial_solution,
+    bool record_backward_euler_kinetic_baseline,
+    std::optional<std::uint64_t>
+        initial_extension_map_revision)
+{
+  const auto initial_state_revision =
+      collectiveLevelSetMaintenanceAlgebraicRevision(
+          initial_solution,
+          activeFESystemCommunicator(*sim.fe_system));
+  const auto initial_contact_stages =
+      evaluateAcceptedFreeSurfaceContactStages(
+          sim,
+          initial_time,
+          svmp::FE::Real{1.0},
+          initial_state_revision,
+          initial_state_revision,
+          initial_solution);
+  (void)recordAcceptedFreeSurfaceDiscreteFunctionals(
+      sim,
+      initial_step,
+      initial_time,
+      svmp::FE::Real{0.0},
+      initial_state_revision,
+      initial_state_revision,
+      initial_contact_stages,
+      initial_solution,
+      record_backward_euler_kinetic_baseline
+          ? initial_solution
+          : std::span<const svmp::FE::Real>{},
+      initial_extension_map_revision);
 }
 
 } // namespace svmp::Physics::formulations::navier_stokes::free_surface
