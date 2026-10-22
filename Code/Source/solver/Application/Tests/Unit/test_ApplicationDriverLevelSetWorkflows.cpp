@@ -7890,23 +7890,65 @@ TEST(ApplicationDriverLevelSetWorkflows,
 TEST(ApplicationDriverLevelSetWorkflows,
      ActiveCutGeneralizedAlphaPdeRateInitializationDefaultsOnAndAllowsOptOut)
 {
+  const GeneralSimulationParameters no_key;
   {
     WorkflowScopedEnvVar unset(
         "SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT", std::nullopt);
     EXPECT_TRUE(generalizedAlphaPdeRateInitializationRequested(
-        /*active_cut_domain_present=*/true));
+        no_key, /*active_cut_domain_present=*/true));
   }
+  // The deprecated environment alias still applies when the key is absent.
   {
     WorkflowScopedEnvVar disabled(
         "SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT", std::string("0"));
     EXPECT_FALSE(generalizedAlphaPdeRateInitializationRequested(
-        /*active_cut_domain_present=*/true));
+        no_key, /*active_cut_domain_present=*/true));
   }
   {
     WorkflowScopedEnvVar enabled(
         "SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT", std::string("1"));
     EXPECT_TRUE(generalizedAlphaPdeRateInitializationRequested(
-        /*active_cut_domain_present=*/true));
+        no_key, /*active_cut_domain_present=*/true));
+  }
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     GeneralizedAlphaInitialRateKeySelectsConsistentOrZero)
+{
+  WorkflowScopedEnvVar unset(
+      "SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT", std::nullopt);
+  GeneralSimulationParameters zero;
+  zero.generalized_alpha_initial_rate.set(std::string("Zero"));
+  EXPECT_FALSE(generalizedAlphaPdeRateInitializationRequested(
+      zero, /*active_cut_domain_present=*/true));
+  GeneralSimulationParameters consistent;
+  consistent.generalized_alpha_initial_rate.set(std::string(" consistent "));
+  EXPECT_TRUE(generalizedAlphaPdeRateInitializationRequested(
+      consistent, /*active_cut_domain_present=*/true));
+  GeneralSimulationParameters invalid;
+  invalid.generalized_alpha_initial_rate.set(std::string("Extrapolated"));
+  EXPECT_THROW((void)generalizedAlphaPdeRateInitializationRequested(
+                   invalid, /*active_cut_domain_present=*/true),
+               std::runtime_error);
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     GeneralizedAlphaInitialRateKeyRejectsAContradictingLegacyEnvironment)
+{
+  GeneralSimulationParameters zero;
+  zero.generalized_alpha_initial_rate.set(std::string("Zero"));
+  {
+    WorkflowScopedEnvVar agreeing(
+        "SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT", std::string("0"));
+    EXPECT_FALSE(generalizedAlphaPdeRateInitializationRequested(
+        zero, /*active_cut_domain_present=*/true));
+  }
+  {
+    WorkflowScopedEnvVar contradicting(
+        "SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT", std::string("1"));
+    EXPECT_THROW((void)generalizedAlphaPdeRateInitializationRequested(
+                     zero, /*active_cut_domain_present=*/true),
+                 std::runtime_error);
   }
 }
 

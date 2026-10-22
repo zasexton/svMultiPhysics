@@ -2393,6 +2393,10 @@ struct InputDeprecation {
 std::vector<InputDeprecation> collectInputDeprecations(const Parameters& params)
 {
   std::vector<InputDeprecation> deprecations;
+  if (std::getenv("SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT") != nullptr) {
+    deprecations.push_back({"SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT",
+                            "Generalized_alpha_initial_rate", "environment"});
+  }
   for (const auto* equation : params.equation_parameters) {
     if (equation == nullptr) {
       continue;
@@ -3046,7 +3050,58 @@ void rejectRemovedCutTopologyRestartEnvironment()
   }
 }
 
+// <Generalized_alpha_initial_rate> chooses the first generalized-alpha rate
+// uDot_0: Consistent (default) solves the PDE-consistent rate, Zero starts
+// from zero.  It replaces SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT (decision D47),
+// which stays a deprecated alias for one release: it applies only when the
+// key is absent, and a value that contradicts the key stops the run.
+constexpr const char* kLegacyInitialRateEnvironment =
+    "SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT";
+
+bool generalizedAlphaInitialRateIsConsistent(
+    const GeneralSimulationParameters& general)
+{
+  const char* legacy = std::getenv(kLegacyInitialRateEnvironment);
+  const bool legacy_consistent =
+      parseBoolEnv(kLegacyInitialRateEnvironment, true);
+  const auto& key = general.generalized_alpha_initial_rate;
+  if (!key.defined()) {
+    return legacy_consistent;
+  }
+  std::string token = trim_copy(key.value());
+  std::transform(token.begin(), token.end(), token.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  bool consistent = true;
+  if (token == "consistent") {
+    consistent = true;
+  } else if (token == "zero") {
+    consistent = false;
+  } else {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] <Generalized_alpha_initial_rate> must "
+        "be Consistent or Zero; got '" + key.value() + "'.");
+  }
+  if (legacy != nullptr) {
+    std::string value(legacy);
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const bool recognized = value == "1" || value == "true" || value == "on" ||
+                            value == "yes" || value == "0" || value == "false" ||
+                            value == "off" || value == "no";
+    if (recognized && legacy_consistent != consistent) {
+      throw std::runtime_error(
+          std::string("[svMultiPhysics::Application] ") +
+          kLegacyInitialRateEnvironment + "=" + legacy +
+          " contradicts <Generalized_alpha_initial_rate>" + key.value() +
+          "</Generalized_alpha_initial_rate>; unset the deprecated "
+          "environment variable.");
+    }
+  }
+  return consistent;
+}
+
 bool generalizedAlphaPdeRateInitializationRequested(
+    const GeneralSimulationParameters& general,
     bool active_cut_domain_present)
 {
   // Active-cut systems used to default this solve off because their dt-only
@@ -3056,7 +3111,7 @@ bool generalizedAlphaPdeRateInitializationRequested(
   // argument explicit so this policy remains covered at the application
   // boundary if active-cut startup handling changes again.
   (void)active_cut_domain_present;
-  return parseBoolEnv("SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT", true);
+  return generalizedAlphaInitialRateIsConsistent(general);
 }
 
 struct TransientTimeIntegrationSelection {
@@ -25794,6 +25849,9 @@ void ApplicationDriver::runWithParameters(const Parameters& params, RunMode mode
   oopCout() << "[svMultiPhysics::Application] Input summary: meshes=" << mesh_blocks
             << " equations=" << equation_blocks << std::endl;
   warnInputDeprecations(collectInputDeprecations(params));
+  // Validate the initial-rate key against its legacy environment alias
+  // before the setup work (it is applied by the transient solve).
+  (void)generalizedAlphaInitialRateIsConsistent(params.general_simulation_parameters);
 
   SimulationBuilder builder(params);
   auto sim = builder.build();
@@ -26325,11 +26383,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   // startup mode (the capillary-wave benchmark lost roughly half its apparent
   // stiffness this way).  TimeLoop regularizes only exact zero-mass rows
   // outside a retained cut domain, so the PDE-consistent solve is also the
-  // correctness default for active-cut systems.  Keep the environment switch
-  // as an explicit legacy/performance comparison opt-out.
+  // correctness default for active-cut systems.  <Generalized_alpha_initial_rate>
+  // Zero is the explicit opt-out (the capillary-rise protocol uses it).
   opts.initialize_first_order_rate_from_pde =
       opts.scheme == svmp::FE::timestepping::SchemeKind::GeneralizedAlpha &&
       generalizedAlphaPdeRateInitializationRequested(
+          params.general_simulation_parameters,
           !transient_active_cut_requests.empty());
   const auto level_set_advection_velocity =
       levelSetAdvectionVelocityRequests(params);

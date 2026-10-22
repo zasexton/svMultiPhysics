@@ -2811,6 +2811,8 @@ GeneralSimulationParameters::GeneralSimulationParameters()
   // RateExtrapolation, optionally restricted to a list of fields.
   set_parameter("Generalized_alpha_predictor", "ConstantRate", !required, generalized_alpha_predictor);
   set_parameter("Generalized_alpha_predictor_fields", "", !required, generalized_alpha_predictor_fields);
+  // First generalized-alpha rate: Consistent (default) or Zero (decision D47).
+  set_parameter("Generalized_alpha_initial_rate", "Consistent", !required, generalized_alpha_initial_rate);
 
   set_parameter("Increment_in_saving_restart_files", 0, !required, increment_in_saving_restart_files);
   set_parameter("Increment_in_saving_VTK_files", 0, !required, increment_in_saving_vtk_files);

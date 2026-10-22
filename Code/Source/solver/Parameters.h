@@ -1617,6 +1617,11 @@ class GeneralSimulationParameters : public ParameterLists
     // field. The predictor changes only the initial iterate of each step.
     Parameter<std::string> generalized_alpha_predictor;
     Parameter<std::string> generalized_alpha_predictor_fields;
+    // First rate uDot_0 of first-order generalized-alpha (new OOP solver):
+    // "Consistent" (default) solves the PDE-consistent rate, "Zero" starts
+    // from zero.  Replaces SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT (decision
+    // D47), which is read for one release only when this key is absent.
+    Parameter<std::string> generalized_alpha_initial_rate;
     Parameter<std::string> name_prefix_of_saved_vtk_files;
     Parameter<std::string> restart_file_name; 
     Parameter<std::string> searched_file_name_to_trigger_stop; 
