@@ -496,22 +496,10 @@ bool symmetricNitscheEnergyDiagnosticEnabled()
     return false;
 }
 
-bool constrainInactiveActiveDomainVelocity()
-{
-    const char* env = std::getenv("SVMP_CONSTRAIN_INACTIVE_ACTIVE_DOMAIN_VELOCITY");
-    if (env == nullptr || env[0] == '\0') {
-        return true;
-    }
-    return std::string_view(env) != "0" &&
-           std::string_view(env) != "false" &&
-           std::string_view(env) != "FALSE";
-}
-
 bool constrainInactiveActiveDomainVelocity(
     const FreeSurfaceBoundary& active_domain_boundary)
 {
-    return constrainInactiveActiveDomainVelocity() &&
-           !active_domain_boundary.velocity_extension.enabled;
+    return !active_domain_boundary.velocity_extension.enabled;
 }
 
 bool unfittedLevelSetShapeTangentsDisabled()
