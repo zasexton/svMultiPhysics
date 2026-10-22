@@ -25671,7 +25671,7 @@ bool ApplicationDriver::shouldUseNewSolver(const std::string& xml_file)
   return parse_bool_relaxed(flag_elem->GetText());
 }
 
-void ApplicationDriver::run(const std::string& xml_file)
+void ApplicationDriver::run(const std::string& xml_file, RunMode mode)
 {
   oopCout() << "[svMultiPhysics::Application] ApplicationDriver::run(xml_file='" << xml_file << "')" << std::endl;
   if (!xml_file.empty()) {
@@ -25684,10 +25684,10 @@ void ApplicationDriver::run(const std::string& xml_file)
 
   Parameters params;
   params.read_xml(xml_file);
-  runWithParameters(params);
+  runWithParameters(params, mode);
 }
 
-void ApplicationDriver::runWithParameters(const Parameters& params)
+void ApplicationDriver::runWithParameters(const Parameters& params, RunMode mode)
 {
   const auto comm = svmp::MeshComm::world();
 
@@ -25757,6 +25757,12 @@ void ApplicationDriver::runWithParameters(const Parameters& params)
   SimulationBuilder builder(params);
   auto sim = builder.build();
   writeEffectiveConfigurationArtifact(sim, params, comm);
+  if (mode == RunMode::ResolveOnly) {
+    oopCout() << "[svMultiPhysics::Application] --resolve-only: the effective "
+                 "configuration is written; stopping before the first solve."
+              << std::endl;
+    return;
+  }
 
   if (sim.primary_mesh) {
     const auto global_verts = sim.primary_mesh->global_n_vertices();

@@ -336,11 +336,21 @@ private:
 
 class ApplicationDriver {
 public:
+  // How far ApplicationDriver::run goes.  Full runs the simulation.
+  // ResolveOnly (svMultiPhysics --resolve-only XML_FILE) builds the
+  // simulation as a full run does, writes effective_configuration.json and
+  // stops before the first solve: the resolved configuration of a deck can
+  // be compared without running it.
+  enum class RunMode {
+    Full,
+    ResolveOnly,
+  };
+
   static bool shouldUseNewSolver(const std::string& xml_file);
-  static void run(const std::string& xml_file);
+  static void run(const std::string& xml_file, RunMode mode = RunMode::Full);
 
 private:
-  static void runWithParameters(const Parameters& params);
+  static void runWithParameters(const Parameters& params, RunMode mode);
   static void runSteadyState(SimulationComponents& sim, const Parameters& params, VtkTimeSeriesCollection* pvd);
   static void runTransient(SimulationComponents& sim, const Parameters& params, VtkTimeSeriesCollection* pvd);
   static void outputResults(const SimulationComponents& sim, const Parameters& params, int step,

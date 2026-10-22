@@ -33,6 +33,11 @@
 // Usage:
 //
 //   svMultiPhysics XML_FILE_NAME
+//   svMultiPhysics --resolve-only XML_FILE_NAME
+//
+// --resolve-only (new solver only, <Use_new_OOP_solver>true</Use_new_OOP_solver>)
+// sets the simulation up as a full run does, writes effective_configuration.json
+// and stops before the first solve.
 //
 #include "Simulation.h"
 
@@ -911,8 +916,14 @@ void run_simulation(Simulation* simulation)
 //
 int main(int argc, char *argv[])
 {
-  if (argc != 2) {
+  const bool resolve_only =
+      argc == 3 && std::string(argv[1]) == "--resolve-only";
+  if (argc != 2 && !resolve_only) {
     std::cout << "[svMultiPhysics] ERROR: The svMultiPhysics program requires the solver input XML file name as an argument." << std::endl;
+    std::cout << "[svMultiPhysics] Usage: svMultiPhysics XML_FILE_NAME" << std::endl;
+    std::cout << "[svMultiPhysics]        svMultiPhysics --resolve-only XML_FILE_NAME"
+                 " (new solver: write effective_configuration.json and stop before the first solve)"
+              << std::endl;
     exit(1);
   }
 
@@ -927,13 +938,17 @@ int main(int argc, char *argv[])
   //std::cout << "[svFSI] MPI rank: " << mpi_rank << std::endl;
   //std::cout << "[svFSI] MPI size: " << mpi_size << std::endl;
 
-  std::string file_name(argv[1]);
+  std::string file_name(argv[resolve_only ? 2 : 1]);
 
   // Early dispatch: if enabled, run the new OOP solver path and return before any legacy
   // simulation infrastructure is created (ComMod is never constructed/populated).
   if (application::core::ApplicationDriver::shouldUseNewSolver(file_name)) {
     try {
-      application::core::ApplicationDriver::run(file_name);
+      application::core::ApplicationDriver::run(
+          file_name,
+          resolve_only
+              ? application::core::ApplicationDriver::RunMode::ResolveOnly
+              : application::core::ApplicationDriver::RunMode::Full);
       MPI_Finalize();
       return 0;
     } catch (const std::exception& e) {
@@ -947,6 +962,13 @@ int main(int argc, char *argv[])
       MPI_Finalize();
       return 1;
     }
+  }
+
+  if (resolve_only) {
+    std::cout << "[svMultiPhysics] ERROR: --resolve-only requires the new solver "
+                 "(<Use_new_OOP_solver>true</Use_new_OOP_solver>)." << std::endl;
+    MPI_Finalize();
+    return 1;
   }
 
   // Create a Simulation object that stores all data structures for a simulation.
