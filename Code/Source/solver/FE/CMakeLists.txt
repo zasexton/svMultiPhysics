@@ -660,6 +660,7 @@ set(FE_CONSTRAINTS_HEADERS
     Constraints/SystemConstraint.h
     Constraints/SystemConstraints.h
     Constraints/ConstraintPlan.h
+    Constraints/InterfaceMeasureGaugeAnchor.h
     Constraints/StrongDirichletConstraint.h
     Constraints/VertexDirichletConstraint.h
     Constraints/LevelSetActiveSideVertexDirichletConstraint.h
@@ -842,6 +843,7 @@ set(FE_ASSEMBLY_SOURCES
     Constraints/SmallCutAggregationConstraint.cpp
     Constraints/ContactPointVelocityConstraint.cpp
     Constraints/ConstraintPlan.cpp
+    Constraints/InterfaceMeasureGaugeAnchor.cpp
     Analysis/GeneratedBoundaryAggregateTraceCertificate.cpp
     Assembly/AssemblerFactory.cpp
     Assembly/ParallelAssembler.cpp

@@ -14,9 +14,8 @@
  *
  * With a natural traction on Gamma_h the pressure constant is fixed by the
  * exterior pressure, provided the generated interface has a positive
- * measure.  Moved from IncompressibleNavierStokesVMSModule.cpp: the measure
- * evidence (collective reductions), the global kernel that checks it, and
- * the registration of the anchor.
+ * measure: an FE::constraints::InterfaceMeasureGaugeAnchor with the
+ * module's texts (gauge source, kernel and callback names, messages).
  */
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
@@ -36,12 +35,9 @@ namespace Physics {
 namespace formulations {
 namespace navier_stokes {
 
-/// The natural traction on an unfitted CutVolume free surface anchors the
-/// pressure constant: the gauge-registry evidence, and the global kernel and
-/// cut-context callback that certify |Gamma_h| > 0 at every refresh.
-void anchorPressureOnFreeSurface(
-    FE::systems::FESystem& system,
-    const std::string& operator_tag,
+/// The anchor of the pressure constant by the natural traction on the
+/// unfitted CutVolume free surface @p boundary (ConstraintPlan::anchorGauge).
+[[nodiscard]] FE::constraints::InterfaceMeasureGaugeAnchor freeSurfacePressureAnchor(
     FE::FieldId p_id,
     const FreeSurfaceBoundary& boundary);
 

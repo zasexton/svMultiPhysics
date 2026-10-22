@@ -165,6 +165,13 @@ ConstraintPlan& ConstraintPlan::contactPointVelocity(FieldId velocity,
     return contactPointVelocity(velocity, std::move(law));
 }
 
+ConstraintPlan& ConstraintPlan::anchorGauge(const std::string& operator_tag,
+                                            const InterfaceMeasureGaugeAnchor& anchor)
+{
+    anchorGaugeOnInterfaceMeasure(*system_, operator_tag, anchor);
+    return *this;
+}
+
 ConstraintPlan& ConstraintPlan::commitThrough(ConstraintPhase through)
 {
     requireNotPassed(through, "commitThrough");

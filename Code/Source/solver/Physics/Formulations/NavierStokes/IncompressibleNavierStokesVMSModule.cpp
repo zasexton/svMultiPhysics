@@ -491,7 +491,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     const bool cut_liquid = liquid.has_value() &&
                             liquid->boundary->active_domain_method == FreeSurfaceActiveDomainMethod::CutVolume;
     if (cut_liquid && isExteriorOnePhaseBoundary(*liquid->boundary)) {
-        anchorPressureOnFreeSurface(system, o.operator_tag, p_id, *liquid->boundary);   // traction on Gamma_h fixes p
+        plan.anchorGauge(o.operator_tag, freeSurfacePressureAnchor(p_id, *liquid->boundary));   // traction on Gamma_h fixes p
     }
     const bool liquid_constraints = cut_liquid && hasNativeMeshOrWarn(system);
     const bool aggregated = liquid_constraints && liquid->boundary->small_cut_aggregation;

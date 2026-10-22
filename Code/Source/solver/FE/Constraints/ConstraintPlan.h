@@ -45,6 +45,7 @@
  */
 
 #include "Constraints/ContactPointVelocityConstraint.h"
+#include "Constraints/InterfaceMeasureGaugeAnchor.h"
 #include "Constraints/SmallCutAggregationConstraint.h"
 #include "Constraints/SystemConstraint.h"
 #include "Constraints/VertexDirichletConstraint.h"
@@ -144,6 +145,13 @@ public:
                                          const std::array<Real, 3>& wall_normal,
                                          std::function<Real(Real)> contact_speed,
                                          std::string name);
+
+    /**
+     * Not a phase: records the gauge anchor of a natural condition on a
+     * generated interface and adds its measure checks at once
+     * (anchorGaugeOnInterfaceMeasure on @p operator_tag).
+     */
+    ConstraintPlan& anchorGauge(const std::string& operator_tag, const InterfaceMeasureGaugeAnchor& anchor);
 
     /// Registers the held declarations of every phase up to @p through, in
     /// phase and declaration order, and moves the plan to @p through.

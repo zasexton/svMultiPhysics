@@ -11,6 +11,7 @@
 #include "Spaces/ProductSpace.h"
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
+#include "Systems/SystemManifest.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
 #include <memory>
@@ -226,6 +227,68 @@ TEST(ConstraintPlan, ContactPointVelocityFromAGeometryBuildsTheSameLaw)
 
     ASSERT_EQ(explicit_law.registered().size(), 1u);
     EXPECT_EQ(from_geometry.registered(), explicit_law.registered());
+}
+
+TEST(ConstraintPlan, AnchorGaugeRecordsTheEvidenceOnceAndAddsTheMeasureKernel)
+{
+    PlanSystem s;
+    s.system->addOperator("op");
+    InterfaceMeasureGaugeAnchor anchor;
+    anchor.field = s.p;
+    anchor.interface_marker = 7;
+    anchor.level_set_field_name = "phi";
+    anchor.domain_id = "drop";
+    anchor.texts.kernel_name = "UnitAnchor";
+    InterfaceMeasureGaugeAnchor second = anchor;
+    second.interface_marker = 8;
+
+    // Two interfaces anchor the same field: one evidence record, and a kernel
+    // and a cut-context callback for each interface.
+    ConstraintPlan plan(*s.system);
+    plan.anchorGauge("op", anchor).anchorGauge("op", second);
+
+    std::size_t evidence = 0u;
+    for (const auto& e : s.system->gaugeRegistry().anchoring()) {
+        if (e.field == s.p && e.source == anchor.texts.anchor_source) {
+            ++evidence;
+        }
+    }
+    EXPECT_EQ(evidence, 1u);
+    const auto count = [](const std::vector<std::string>& lines, const std::string& text) {
+        std::size_t n = 0u;
+        for (const auto& line : lines) {
+            if (line.find(text) != std::string::npos) {
+                ++n;
+            }
+        }
+        return n;
+    };
+    const std::vector<std::string> kernel_lines = systems::kernelManifestLines(*s.system);
+    EXPECT_EQ(count(kernel_lines, "name=UnitAnchor:7"), 1u);
+    EXPECT_EQ(count(kernel_lines, "name=UnitAnchor:8"), 1u);
+    const std::vector<std::string> constraint_lines = s.system->constraintManifestLines();
+    EXPECT_EQ(count(constraint_lines, "name='interface_measure_gauge_anchor:7'"), 1u);
+    EXPECT_EQ(count(constraint_lines, "name='interface_measure_gauge_anchor:8'"), 1u);
+
+    // An interface is anchored once: the second anchor of marker 7 finds its
+    // callback name registered.
+    EXPECT_THROW(plan.anchorGauge("op", anchor), InvalidArgumentException);
+
+    const InterfaceMeasureGaugeKernel kernel(anchor);
+    EXPECT_EQ(kernel.name(), "UnitAnchor:7");
+    try {
+        kernel.validateContextUpdate(*s.system, nullptr);
+        ADD_FAILURE() << "expected a missing-measure rejection";
+    } catch (const std::runtime_error& error) {
+        const std::string text = error.what();
+        EXPECT_EQ(text.rfind("InterfaceMeasureGaugeAnchor: interface-measure gauge anchor requires a positive "
+                             "generated interface measure before a solve validation_stage=cut_context_update "
+                             "marker=7 level_set_field='phi' domain_id='drop' cut_context=missing",
+                             0),
+                  0u)
+            << text;
+        EXPECT_NE(text.find("gauge_policy=reject_zero_interface_no_dynamic_gauge_insertion"), std::string::npos);
+    }
 }
 
 } // namespace
