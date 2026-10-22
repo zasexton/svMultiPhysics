@@ -2264,6 +2264,20 @@ TEST(NonlinearFormKernelTest, JacobianMatchesFiniteDifferencesForNonlinearScalar
     }
 }
 
+TEST(FormVocabularyTest, ConstantVectorAndSumOfBuildTheExpectedTrees)
+{
+    const std::array<Real, 3> g{1.0, -2.0, 3.0};
+    EXPECT_EQ(constantVector(g, 2).toString(),
+              FormExpr::asVector({FormExpr::constant(1.0), FormExpr::constant(-2.0)}).toString());
+    EXPECT_THROW((void)constantVector(g, 0), std::invalid_argument);
+    EXPECT_THROW((void)constantVector(g, 4), std::invalid_argument);
+
+    const auto a = FormExpr::constant(1.0);
+    const auto b = FormExpr::constant(2.0);
+    EXPECT_EQ(sumOf(FormExpr{}, b).toString(), b.toString());
+    EXPECT_EQ(sumOf(a, b).toString(), (a + b).toString());
+}
+
 } // namespace test
 } // namespace forms
 } // namespace FE

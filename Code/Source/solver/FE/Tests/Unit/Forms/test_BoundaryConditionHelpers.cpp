@@ -128,6 +128,21 @@ TEST(FormsBoundaryConditions, ToVectorExpr_GeneratesStableComponentNames)
     EXPECT_EQ(component[1].toString(), "uD_7_c1");
 }
 
+TEST(FormsBoundaryConditions, ToVectorExpr_NamesUnmarkedComponentsByPrefix)
+{
+    std::array<svmp::FE::forms::bc::ScalarValue, 3> values{
+        svmp::FE::Real{1.0},
+        svmp::FE::forms::ScalarCoefficient(
+            [](svmp::FE::Real, svmp::FE::Real, svmp::FE::Real) { return 2.0; }),
+        svmp::FE::Real{3.0}};
+
+    const auto named = svmp::FE::forms::bc::toVectorExpr(values, 3, "ns_body_force_");
+    ASSERT_EQ(named.size(), 3u);
+    EXPECT_DOUBLE_EQ(*named[0].node()->constantValue(), 1.0);
+    EXPECT_EQ(named[1].toString(), "ns_body_force_1");
+    EXPECT_DOUBLE_EQ(*named[2].node()->constantValue(), 3.0);
+}
+
 TEST(FormsBoundaryConditions, ComponentEssentialBC_GeneratesSparseStrongConstraints)
 {
     std::vector<std::pair<int, svmp::FE::forms::FormExpr>> components;

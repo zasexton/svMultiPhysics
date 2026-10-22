@@ -442,6 +442,23 @@ template <class Values>
     return out;
 }
 
+/// The first @p dim entries of @p values; component d is named
+/// "<name_prefix><d>" (no boundary marker).
+template <class Values>
+[[nodiscard]] inline std::vector<FormExpr> toVectorExpr(
+    const Values& values,
+    int dim,
+    std::string_view name_prefix)
+{
+    std::vector<FormExpr> out;
+    for (int d = 0; d < dim; ++d) {
+        out.push_back(toScalarExpr(
+            values[static_cast<std::size_t>(d)],
+            std::string(name_prefix) + std::to_string(d)));
+    }
+    return out;
+}
+
 /**
  * @brief Strong (essential) Dirichlet boundary condition declaration
  *

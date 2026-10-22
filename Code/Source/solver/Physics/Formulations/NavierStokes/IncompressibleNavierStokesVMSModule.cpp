@@ -188,14 +188,16 @@ namespace {
 {
     FormExpr f = g;
     if (o.has_body_force_spacetime) {
-        f = f + scalarVector(o.body_force_spacetime, dim, "ns_body_force_spacetime_");
+        f = f + FormExpr::asVector(bc::toVectorExpr(o.body_force_spacetime, dim, "ns_body_force_spacetime_"));
     }
     if (f_id != FE::INVALID_FIELD_ID) {
         f = f + StateField(f_id, V, o.body_force_field_name);
     }
     if (o.rotating_frame_coriolis_enabled) {
         f = f + FormExpr::constant(-2.0) *
-                    cross(scalarVector(o.rotating_frame_angular_velocity, 3, "ns_rotating_frame_angular_velocity_"), u);
+                    cross(FormExpr::asVector(bc::toVectorExpr(o.rotating_frame_angular_velocity, 3,
+                                                              "ns_rotating_frame_angular_velocity_")),
+                          u);
     }
     return f;
 }

@@ -517,6 +517,25 @@ inline FormExpr zeroVector(int dim)
     return FormExpr::asVector(std::move(components));
 }
 
+/// The first @p dim entries of @p values as a constant vector.
+inline FormExpr constantVector(std::span<const Real> values, int dim)
+{
+    if (dim <= 0 || static_cast<std::size_t>(dim) > values.size()) {
+        throw std::invalid_argument("constantVector: dimension must be positive and at most the number of values");
+    }
+    std::vector<FormExpr> components;
+    for (int d = 0; d < dim; ++d) {
+        components.push_back(FormExpr::constant(values[static_cast<std::size_t>(d)]));
+    }
+    return FormExpr::asVector(std::move(components));
+}
+
+/// a + b, or b when a is empty: the left fold of a form built term by term.
+inline FormExpr sumOf(const FormExpr& a, const FormExpr& b)
+{
+    return a.isValid() ? a + b : b;
+}
+
 inline FormExpr as_tensor(std::initializer_list<std::initializer_list<FormExpr>> rows)
 {
     std::vector<std::vector<FormExpr>> r;
