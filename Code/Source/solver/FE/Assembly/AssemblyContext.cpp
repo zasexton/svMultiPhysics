@@ -1250,6 +1250,17 @@ void AssemblyContext::setSolutionCoefficients(std::span<const Real> coefficients
         return;
     }
 
+    // The trial basis tables, read directly in the loops below as the per-entry
+    // accessors (trialBasisValue, trialPhysicalGradient, trialPhysicalHessian)
+    // index them: point-major rows of trial_row_stride entries.  The accessors'
+    // checks that can fail here are applied once, before the loops.
+    const std::size_t trial_row_stride =
+        static_cast<std::size_t>(trial_is_test_ ? n_test_dofs_ : n_trial_dofs_);
+    const Real* const trial_value_rows =
+        trial_is_test_ ? test_basis_values_.data() : trial_basis_values_.data();
+    const Vector3D* const trial_gradient_rows =
+        trial_is_test_ ? test_phys_gradients_.data() : trial_phys_gradients_.data();
+
     const bool have_trial_phys_gradients =
         trial_is_test_ ? !test_phys_gradients_.empty() : !trial_phys_gradients_.empty();
     const bool need_gradients = hasFlag(required_data_, RequiredData::SolutionGradients) ||
@@ -1261,12 +1272,16 @@ void AssemblyContext::setSolutionCoefficients(std::span<const Real> coefficients
         solution_vector_values_.clear();
         solution_jacobians_.clear();
 
+        if (n_qpts_ > 0 && n_trial_dofs_ > 0 && trial_is_vector_basis_) {
+            throw std::logic_error("AssemblyContext::trialBasisValue: scalar basis values not available for vector-basis spaces");
+        }
         // Compute scalar u_h(x_q)
         solution_values_.resize(static_cast<std::size_t>(n_qpts_), 0.0);
         for (LocalIndex q = 0; q < n_qpts_; ++q) {
+            const Real* const value_row = trial_value_rows + static_cast<std::size_t>(q) * trial_row_stride;
             Real val = 0.0;
             for (LocalIndex j = 0; j < n_trial_dofs_; ++j) {
-                val += solution_coefficients_[static_cast<std::size_t>(j)] * trialBasisValue(j, q);
+                val += solution_coefficients_[static_cast<std::size_t>(j)] * value_row[j];
             }
             solution_values_[static_cast<std::size_t>(q)] = val;
         }
@@ -1276,9 +1291,11 @@ void AssemblyContext::setSolutionCoefficients(std::span<const Real> coefficients
         if (need_gradients) {
             solution_gradients_.resize(static_cast<std::size_t>(n_qpts_), Vector3D{0.0, 0.0, 0.0});
             for (LocalIndex q = 0; q < n_qpts_; ++q) {
+                const Vector3D* const gradient_row =
+                    trial_gradient_rows + static_cast<std::size_t>(q) * trial_row_stride;
                 Vector3D grad = {0.0, 0.0, 0.0};
                 for (LocalIndex j = 0; j < n_trial_dofs_; ++j) {
-                    const auto grad_j = trialPhysicalGradient(j, q);
+                    const auto& grad_j = gradient_row[j];
                     const Real coef = solution_coefficients_[static_cast<std::size_t>(j)];
                     grad[0] += coef * grad_j[0];
                     grad[1] += coef * grad_j[1];
@@ -1335,13 +1352,14 @@ void AssemblyContext::setSolutionCoefficients(std::span<const Real> coefficients
             // Compute vector u_h(x_q) for component-wise vector spaces.
             solution_vector_values_.resize(static_cast<std::size_t>(n_qpts_), Vector3D{0.0, 0.0, 0.0});
             for (LocalIndex q = 0; q < n_qpts_; ++q) {
+                const Real* const value_row = trial_value_rows + static_cast<std::size_t>(q) * trial_row_stride;
                 Vector3D u = {0.0, 0.0, 0.0};
                 for (int c = 0; c < trial_value_dim_; ++c) {
                     Real val_c = 0.0;
                     const LocalIndex base = static_cast<LocalIndex>(c) * dofs_per_component;
                     for (LocalIndex j = 0; j < dofs_per_component; ++j) {
                         const LocalIndex jj = base + j;
-                        val_c += solution_coefficients_[static_cast<std::size_t>(jj)] * trialBasisValue(jj, q);
+                        val_c += solution_coefficients_[static_cast<std::size_t>(jj)] * value_row[jj];
                     }
                     u[static_cast<std::size_t>(c)] = val_c;
                 }
@@ -1352,12 +1370,14 @@ void AssemblyContext::setSolutionCoefficients(std::span<const Real> coefficients
             if (need_gradients) {
                 solution_jacobians_.resize(static_cast<std::size_t>(n_qpts_), Matrix3x3{});
                 for (LocalIndex q = 0; q < n_qpts_; ++q) {
+                    const Vector3D* const gradient_row =
+                        trial_gradient_rows + static_cast<std::size_t>(q) * trial_row_stride;
                     Matrix3x3 J{};
                     for (int c = 0; c < trial_value_dim_; ++c) {
                         const LocalIndex base = static_cast<LocalIndex>(c) * dofs_per_component;
                         for (LocalIndex j = 0; j < dofs_per_component; ++j) {
                             const LocalIndex jj = base + j;
-                            const auto grad_j = trialPhysicalGradient(jj, q);
+                            const auto& grad_j = gradient_row[jj];
                             const Real coef = solution_coefficients_[static_cast<std::size_t>(jj)];
                             J[static_cast<std::size_t>(c)][0] += coef * grad_j[0];
                             J[static_cast<std::size_t>(c)][1] += coef * grad_j[1];
@@ -1390,15 +1410,24 @@ void AssemblyContext::setSolutionCoefficients(std::span<const Real> coefficients
             }
         }
 
+        // Read as the trialPhysicalHessian accessor reads them; its emptiness and vector-basis
+        // checks are the ones above (and this one for a test-space trial).
+        if (trial_is_test_ && test_is_vector_basis_ && n_qpts_ > 0 && n_trial_dofs_ > 0) {
+            throw std::logic_error("AssemblyContext::physicalHessian: scalar basis Hessians not available for vector-basis spaces");
+        }
+        const Matrix3x3* const trial_hessian_rows =
+            trial_is_test_ ? test_phys_hessians_.data() : trial_phys_hessians_.data();
         if (trial_field_type_ == FieldType::Scalar) {
             solution_component_hessians_.clear();
             solution_component_laplacians_.clear();
 
             solution_hessians_.resize(static_cast<std::size_t>(n_qpts_), Matrix3x3{});
             for (LocalIndex q = 0; q < n_qpts_; ++q) {
+                const Matrix3x3* const hessian_row =
+                    trial_hessian_rows + static_cast<std::size_t>(q) * trial_row_stride;
                 Matrix3x3 H{};
                 for (LocalIndex j = 0; j < n_trial_dofs_; ++j) {
-                    const auto Hj = trialPhysicalHessian(j, q);
+                    const auto& Hj = hessian_row[j];
                     const Real coef = solution_coefficients_[static_cast<std::size_t>(j)];
                     for (int r = 0; r < 3; ++r) {
                         for (int c = 0; c < 3; ++c) {
@@ -1447,12 +1476,14 @@ void AssemblyContext::setSolutionCoefficients(std::span<const Real> coefficients
             const int dim = dim_;
             for (LocalIndex q = 0; q < n_qpts_; ++q) {
                 const auto q_base = static_cast<std::size_t>(q) * static_cast<std::size_t>(trial_value_dim_);
+                const Matrix3x3* const hessian_row =
+                    trial_hessian_rows + static_cast<std::size_t>(q) * trial_row_stride;
                 for (int comp = 0; comp < trial_value_dim_; ++comp) {
                     Matrix3x3 H{};
                     const LocalIndex base = static_cast<LocalIndex>(comp) * dofs_per_component;
                     for (LocalIndex j = 0; j < dofs_per_component; ++j) {
                         const LocalIndex jj = base + j;
-                        const auto Hj = trialPhysicalHessian(jj, q);
+                        const auto& Hj = hessian_row[jj];
                         const Real coef = solution_coefficients_[static_cast<std::size_t>(jj)];
                         for (int r = 0; r < 3; ++r) {
                             for (int c = 0; c < 3; ++c) {
@@ -1524,26 +1555,43 @@ void AssemblyContext::setPreviousSolutionCoefficientsK(int k, std::span<const Re
     dst.coefficients.assign(coefficients.begin(),
                             coefficients.begin() + static_cast<std::size_t>(n_trial_dofs_));
 
+    // The trial basis tables, read directly in the loops below as the per-entry
+    // accessors (trialBasisValue, trialPhysicalGradient, trialPhysicalHessian)
+    // index them: point-major rows of trial_row_stride entries.  The accessors'
+    // checks that can fail here are applied once, before the loops.
+    const std::size_t trial_row_stride =
+        static_cast<std::size_t>(trial_is_test_ ? n_test_dofs_ : n_trial_dofs_);
+    const Real* const trial_value_rows =
+        trial_is_test_ ? test_basis_values_.data() : trial_basis_values_.data();
+    const Vector3D* const trial_gradient_rows =
+        trial_is_test_ ? test_phys_gradients_.data() : trial_phys_gradients_.data();
+
     if (trial_field_type_ == FieldType::Scalar) {
         dst.vector_values.clear();
         dst.jacobians.clear();
         dst.component_hessians.clear();
         dst.component_laplacians.clear();
 
+        if (n_qpts_ > 0 && n_trial_dofs_ > 0 && trial_is_vector_basis_) {
+            throw std::logic_error("AssemblyContext::trialBasisValue: scalar basis values not available for vector-basis spaces");
+        }
         dst.values.resize(static_cast<std::size_t>(n_qpts_), 0.0);
         for (LocalIndex q = 0; q < n_qpts_; ++q) {
+            const Real* const value_row = trial_value_rows + static_cast<std::size_t>(q) * trial_row_stride;
             Real val = 0.0;
             for (LocalIndex j = 0; j < n_trial_dofs_; ++j) {
-                val += dst.coefficients[static_cast<std::size_t>(j)] * trialBasisValue(j, q);
+                val += dst.coefficients[static_cast<std::size_t>(j)] * value_row[j];
             }
             dst.values[static_cast<std::size_t>(q)] = val;
         }
 
         dst.gradients.resize(static_cast<std::size_t>(n_qpts_), Vector3D{0.0, 0.0, 0.0});
         for (LocalIndex q = 0; q < n_qpts_; ++q) {
+            const Vector3D* const gradient_row =
+                trial_gradient_rows + static_cast<std::size_t>(q) * trial_row_stride;
             Vector3D grad = {0.0, 0.0, 0.0};
             for (LocalIndex j = 0; j < n_trial_dofs_; ++j) {
-                const auto grad_j = trialPhysicalGradient(j, q);
+                const auto& grad_j = gradient_row[j];
                 const Real coef = dst.coefficients[static_cast<std::size_t>(j)];
                 grad[0] += coef * grad_j[0];
                 grad[1] += coef * grad_j[1];
@@ -1592,13 +1640,14 @@ void AssemblyContext::setPreviousSolutionCoefficientsK(int k, std::span<const Re
 
             dst.vector_values.resize(static_cast<std::size_t>(n_qpts_), Vector3D{0.0, 0.0, 0.0});
             for (LocalIndex q = 0; q < n_qpts_; ++q) {
+                const Real* const value_row = trial_value_rows + static_cast<std::size_t>(q) * trial_row_stride;
                 Vector3D u = {0.0, 0.0, 0.0};
                 for (int c = 0; c < trial_value_dim_; ++c) {
                     Real val_c = 0.0;
                     const LocalIndex base = static_cast<LocalIndex>(c) * dofs_per_component;
                     for (LocalIndex j = 0; j < dofs_per_component; ++j) {
                         const LocalIndex jj = base + j;
-                        val_c += dst.coefficients[static_cast<std::size_t>(jj)] * trialBasisValue(jj, q);
+                        val_c += dst.coefficients[static_cast<std::size_t>(jj)] * value_row[jj];
                     }
                     u[static_cast<std::size_t>(c)] = val_c;
                 }
@@ -1607,12 +1656,14 @@ void AssemblyContext::setPreviousSolutionCoefficientsK(int k, std::span<const Re
 
             dst.jacobians.resize(static_cast<std::size_t>(n_qpts_), Matrix3x3{});
             for (LocalIndex q = 0; q < n_qpts_; ++q) {
+                const Vector3D* const gradient_row =
+                    trial_gradient_rows + static_cast<std::size_t>(q) * trial_row_stride;
                 Matrix3x3 J{};
                 for (int c = 0; c < trial_value_dim_; ++c) {
                     const LocalIndex base = static_cast<LocalIndex>(c) * dofs_per_component;
                     for (LocalIndex j = 0; j < dofs_per_component; ++j) {
                         const LocalIndex jj = base + j;
-                        const auto grad_j = trialPhysicalGradient(jj, q);
+                        const auto& grad_j = gradient_row[jj];
                         const Real coef = dst.coefficients[static_cast<std::size_t>(jj)];
                         J[static_cast<std::size_t>(c)][0] += coef * grad_j[0];
                         J[static_cast<std::size_t>(c)][1] += coef * grad_j[1];

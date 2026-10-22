@@ -7727,6 +7727,242 @@ TEST(StandardAssemblerCaches, PerCellFieldCacheStorageReuseMatchesReleasedStorag
 }
 
 // ============================================================================
+// Solution setters: direct table reads reproduce the per-entry accessor loops
+// ============================================================================
+
+namespace {
+
+[[nodiscard]] std::uint64_t setterBits(Real value)
+{
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+// Recomputes, point by point through the context's per-entry accessors
+// (trialBasisValue, trialPhysicalGradient, trialPhysicalHessian), what
+// setSolutionCoefficients() and setPreviousSolutionCoefficientsK() computed
+// before they read the tables directly, and counts every output whose bits
+// differ.
+class SolutionSetterReferenceKernel final : public AssemblyKernel {
+public:
+    SolutionSetterReferenceKernel(bool hessians, int history_states)
+        : hessians_(hessians), history_states_(history_states)
+    {
+    }
+
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/true, /*need_vector=*/true);
+        const auto n = ctx.numTrialDofs();
+        const auto nq = ctx.numQuadraturePoints();
+        const int dim = ctx.dimension();
+        const auto expect = [&](Real actual, Real reference) {
+            ++compared;
+            if (setterBits(actual) != setterBits(reference)) {
+                ++mismatches;
+            }
+        };
+        const auto expect3 = [&](const AssemblyContext::Vector3D& a, const AssemblyContext::Vector3D& b) {
+            for (std::size_t i = 0; i < 3; ++i) expect(a[i], b[i]);
+        };
+        const auto expect33 = [&](const AssemblyContext::Matrix3x3& a, const AssemblyContext::Matrix3x3& b) {
+            for (std::size_t i = 0; i < 3; ++i) expect3(a[i], b[i]);
+        };
+
+        if (ctx.trialFieldType() == FieldType::Scalar) {
+            const auto check = [&](std::span<const Real> coef, int k) {
+                for (LocalIndex q = 0; q < nq; ++q) {
+                    Real val = 0.0;
+                    for (LocalIndex j = 0; j < n; ++j) {
+                        val += coef[static_cast<std::size_t>(j)] * ctx.trialBasisValue(j, q);
+                    }
+                    AssemblyContext::Vector3D grad = {0.0, 0.0, 0.0};
+                    for (LocalIndex j = 0; j < n; ++j) {
+                        const auto g = ctx.trialPhysicalGradient(j, q);
+                        const Real c = coef[static_cast<std::size_t>(j)];
+                        grad[0] += c * g[0];
+                        grad[1] += c * g[1];
+                        grad[2] += c * g[2];
+                    }
+                    expect(k == 0 ? ctx.solutionValue(q) : ctx.previousSolutionValue(q, k), val);
+                    expect3(k == 0 ? ctx.solutionGradient(q) : ctx.previousSolutionGradient(q, k), grad);
+                    if (k == 0 && hessians_) {
+                        AssemblyContext::Matrix3x3 H{};
+                        for (LocalIndex j = 0; j < n; ++j) {
+                            const auto Hj = ctx.trialPhysicalHessian(j, q);
+                            const Real c = coef[static_cast<std::size_t>(j)];
+                            for (std::size_t r = 0; r < 3; ++r) {
+                                for (std::size_t cc = 0; cc < 3; ++cc) {
+                                    H[r][cc] += c * Hj[r][cc];
+                                }
+                            }
+                        }
+                        expect33(ctx.solutionHessian(q), H);
+                        Real lap = 0.0;
+                        for (int d = 0; d < dim; ++d) {
+                            lap += H[static_cast<std::size_t>(d)][static_cast<std::size_t>(d)];
+                        }
+                        expect(ctx.solutionLaplacian(q), lap);
+                    }
+                }
+            };
+            check(ctx.solutionCoefficients(), 0);
+            for (int k = 1; k <= history_states_; ++k) {
+                check(ctx.previousSolutionCoefficientsRaw(k), k);
+            }
+            return;
+        }
+
+        const int vd = ctx.trialValueDimension();
+        const auto dpc = static_cast<LocalIndex>(n / static_cast<LocalIndex>(vd));
+        const auto check = [&](std::span<const Real> coef, int k) {
+            for (LocalIndex q = 0; q < nq; ++q) {
+                AssemblyContext::Vector3D u = {0.0, 0.0, 0.0};
+                AssemblyContext::Matrix3x3 J{};
+                for (int c = 0; c < vd; ++c) {
+                    Real val_c = 0.0;
+                    const auto base = static_cast<LocalIndex>(c) * dpc;
+                    for (LocalIndex j = 0; j < dpc; ++j) {
+                        const LocalIndex jj = base + j;
+                        val_c += coef[static_cast<std::size_t>(jj)] * ctx.trialBasisValue(jj, q);
+                    }
+                    u[static_cast<std::size_t>(c)] = val_c;
+                }
+                for (int c = 0; c < vd; ++c) {
+                    const auto base = static_cast<LocalIndex>(c) * dpc;
+                    for (LocalIndex j = 0; j < dpc; ++j) {
+                        const LocalIndex jj = base + j;
+                        const auto g = ctx.trialPhysicalGradient(jj, q);
+                        const Real cf = coef[static_cast<std::size_t>(jj)];
+                        J[static_cast<std::size_t>(c)][0] += cf * g[0];
+                        J[static_cast<std::size_t>(c)][1] += cf * g[1];
+                        J[static_cast<std::size_t>(c)][2] += cf * g[2];
+                    }
+                }
+                expect3(k == 0 ? ctx.solutionVectorValue(q) : ctx.previousSolutionVectorValue(q, k), u);
+                expect33(k == 0 ? ctx.solutionJacobian(q) : ctx.previousSolutionJacobian(q, k), J);
+                if (k == 0 && hessians_) {
+                    for (int comp = 0; comp < vd; ++comp) {
+                        AssemblyContext::Matrix3x3 H{};
+                        const auto base = static_cast<LocalIndex>(comp) * dpc;
+                        for (LocalIndex j = 0; j < dpc; ++j) {
+                            const LocalIndex jj = base + j;
+                            const auto Hj = ctx.trialPhysicalHessian(jj, q);
+                            const Real cf = coef[static_cast<std::size_t>(jj)];
+                            for (std::size_t r = 0; r < 3; ++r) {
+                                for (std::size_t cc = 0; cc < 3; ++cc) {
+                                    H[r][cc] += cf * Hj[r][cc];
+                                }
+                            }
+                        }
+                        expect33(ctx.solutionComponentHessian(q, comp), H);
+                        Real lap = 0.0;
+                        for (int d = 0; d < dim; ++d) {
+                            lap += H[static_cast<std::size_t>(d)][static_cast<std::size_t>(d)];
+                        }
+                        expect(ctx.solutionComponentLaplacian(q, comp), lap);
+                    }
+                }
+            }
+        };
+        check(ctx.solutionCoefficients(), 0);
+        for (int k = 1; k <= history_states_; ++k) {
+            check(ctx.previousSolutionCoefficientsRaw(k), k);
+        }
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        auto data = RequiredData::BasisValues | RequiredData::PhysicalGradients |
+                    RequiredData::IntegrationWeights | RequiredData::SolutionValues |
+                    RequiredData::SolutionGradients;
+        if (hessians_) {
+            data = data | RequiredData::BasisHessians | RequiredData::SolutionHessians |
+                   RequiredData::SolutionLaplacians;
+        }
+        return data;
+    }
+
+    std::size_t compared{0};
+    std::size_t mismatches{0};
+
+private:
+    bool hessians_{false};
+    int history_states_{0};
+};
+
+} // namespace
+
+TEST(StandardAssemblerSolutionSetters, DirectTableReadsMatchPerEntryAccessorLoopsBitwise)
+{
+    MockMeshAccess mesh;
+    auto p1 = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+    auto p2 = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/2);
+    auto p1_vector = std::make_shared<spaces::ProductSpace>(p1, /*components=*/3);
+    auto p2_vector = std::make_shared<spaces::ProductSpace>(p2, /*components=*/3);
+
+    TimeIntegrationContext time_ctx;
+    time_ctx.integrator_name = "test-solution-setters";
+    time_ctx.dt1 = TimeDerivativeStencil{
+        .order = 1,
+        .a = {Real(1.0), Real(-1.0), Real(0.25)},
+    };
+
+    struct Case {
+        const spaces::FunctionSpace* space;
+        bool hessians;
+        const char* label;
+    };
+    const std::vector<Case> cases{
+        {p1.get(), false, "P1 scalar"},
+        {p1.get(), true, "P1 scalar with Hessians"},
+        {p2.get(), true, "P2 scalar with Hessians"},
+        {p1_vector.get(), true, "P1 vector with Hessians"},
+        {p2_vector.get(), false, "P2 vector"},
+    };
+    for (const auto& c : cases) {
+        SCOPED_TRACE(c.label);
+        const auto n_cell = static_cast<GlobalIndex>(c.space->dofs_per_element());
+        auto dof_map = createTwoCellDisjointDofMap(n_cell);
+        const auto n_total = static_cast<std::size_t>(2 * n_cell);
+        for (const bool non_finite : {false, true}) {
+            std::vector<Real> current(n_total);
+            std::vector<Real> previous1(n_total);
+            std::vector<Real> previous2(n_total);
+            for (std::size_t i = 0; i < n_total; ++i) {
+                const Real sign = (i % 3u == 1u) ? Real{-1.0} : Real{1.0};
+                current[i] = sign * (Real(0.11) * Real(i + 1) - Real(0.07));
+                previous1[i] = -sign * (Real(0.05) * Real(i + 2) + Real(0.3));
+                previous2[i] = sign * (Real(0.02) * Real(i + 1) - Real(0.4));
+            }
+            current[1] = Real{-0.0};
+            previous1[2] = Real{-0.0};
+            if (non_finite) {
+                current[0] = std::numeric_limits<Real>::quiet_NaN();
+                previous1[3] = std::numeric_limits<Real>::infinity();
+                previous2[n_total - 1] = -std::numeric_limits<Real>::infinity();
+            }
+
+            StandardAssembler assembler;
+            assembler.setDofMap(dof_map);
+            assembler.initialize();
+            assembler.setCurrentSolution(current);
+            assembler.setPreviousSolution(previous1);
+            assembler.setPreviousSolution2(previous2);
+            assembler.setTimeIntegrationContext(&time_ctx);
+
+            SolutionSetterReferenceKernel kernel(c.hessians, /*history_states=*/2);
+            TestDenseSystemView system(static_cast<GlobalIndex>(n_total));
+            const auto result = assembler.assembleBoth(mesh, *c.space, *c.space, kernel, system, system);
+            ASSERT_TRUE(result.success);
+            EXPECT_GT(kernel.compared, 0u);
+            EXPECT_EQ(kernel.mismatches, 0u) << "non_finite=" << non_finite;
+        }
+    }
+}
+
+// ============================================================================
 // Factory Function Tests
 // ============================================================================
 
