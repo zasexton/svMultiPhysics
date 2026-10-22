@@ -4380,25 +4380,6 @@ void validateNavierStokesBoundaryConfiguration(
     }
 }
 
-void warnUnfittedRawCurvatureIfNeeded(const FreeSurfaceBoundary& bc)
-{
-    if (!isUnfittedLevelSet(bc) ||
-        usesSurfaceStress(bc) ||
-        FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension) ||
-        !bc.use_level_set_curvature ||
-        !bc.curvature_field_name.empty()) {
-        return;
-    }
-
-    FE_LOG_WARNING(
-        std::string("IncompressibleNavierStokesVMSModule: unfitted level-set surface tension is using raw level-set curvature") +
-        " marker=" + std::to_string(bc.interface_marker) +
-        " level_set_field='" + bc.level_set_field_name + "'" +
-        " generated_interface_domain_id='" + bc.generated_interface_domain_id + "'" +
-        " diagnostic=unfitted_level_set_raw_curvature"
-        " recommendation=use zero surface tension, prescribed curvature, or projected/smoothed curvature for verification cases");
-}
-
 [[nodiscard]] FE::forms::FormExpr unfittedInterfaceNormal(
     const FreeSurfaceBoundary& bc,
     const FE::forms::FormExpr& phi)
@@ -5466,7 +5447,6 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
     };
 
     validateFreeSurfaceBoundary(bc, options, ale_enabled, system, dim);
-    warnUnfittedRawCurvatureIfNeeded(bc);
 
     const bool has_dynamic_stress =
         !bc::isZeroConstantScalarValue(bc.external_pressure) ||
