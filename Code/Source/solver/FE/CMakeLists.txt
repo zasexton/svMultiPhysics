@@ -1465,6 +1465,7 @@ set(FE_BACKENDS_HEADERS
     Backends/FSILS/liner_solver/precond.h
     Backends/FSILS/liner_solver/right_precond.h
     Backends/FSILS/liner_solver/spar_mul.h
+    Backends/FSILS/liner_solver/two_lane.h
 
     Backends/PETSc/PetscUtils.h
     Backends/PETSc/PetscFactory.h

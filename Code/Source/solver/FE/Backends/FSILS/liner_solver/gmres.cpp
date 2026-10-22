@@ -45,12 +45,14 @@
 #include "dot.h"
 #include "norm.h"
 #include "omp_la.h"
+#include "two_lane.h"
 
 #include "Array3.h"
 
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
 
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
@@ -103,6 +105,16 @@ constexpr int DOT_THREAD_PAD = 8; // doubles (64 bytes) to reduce false sharing
 [[nodiscard]] bool use_serial_hot_path(const int num_threads) noexcept
 {
   return num_threads <= 1;
+}
+
+// Test-only switch (gmres::test::set_dot_dynamic_kernel_forced): run the
+// serial dof 6 / 8 Gram-Schmidt dot with fused_dot_zz_v_dyn, the reference
+// of fused_dot_zz_v_pairs.
+std::atomic<bool> g_dot_dynamic_kernel_forced{false};
+
+[[nodiscard]] bool dot_dynamic_kernel_forced() noexcept
+{
+  return g_dot_dynamic_kernel_forced.load(std::memory_order_relaxed);
 }
 
 void apply_givens_rotation(Array<double>& h, Vector<double>& c, Vector<double>& s, Vector<double>& err, const int i)
@@ -844,9 +856,97 @@ double fused_dot_zz_v_dyn(const int dof, const fsils_int mynNo, Array3<double>& 
   return zz_sum;
 }
 
+#ifdef FSILS_HAVE_TWO_LANE
+// Serial fused_dot_zz_v_dyn for an even dof (6, 8): two basis vectors per
+// pass, one in each lane of a two-lane register.
+//
+// Each h_col[j] is computed with the operations of the serial branch of
+// fused_dot_zz_v_dyn, in the same order:
+//   h_col[j] = 0.0; per tile of BLOCK_SIZE nodes: sum = 0.0;
+//     per node: tmp = 0.0; tmp += u_j(d) * v(d) for d = 0..dof-1; sum += tmp;
+//   h_col[j] += sum.
+// Lane 0 runs this sequence for basis vector j and lane 1 for j+1 (the pairs
+// of entries are formed in registers); lane-wise IEEE operations, no
+// contraction, no reduction across lanes.  An odd number of basis vectors
+// leaves the last one to the scalar loop, and zz keeps its scalar loop.
+template <int DOF>
+double fused_dot_zz_v_pairs(const fsils_int mynNo, Array3<double>& u, const int i, const Array<double>& u_next,
+                            std::vector<double>& h_col)
+{
+  static_assert(DOF % 2 == 0, "even dof");
+  using namespace fe_fsi_linear_solver::two_lane;
+  constexpr int Q = DOF / 2;
+  const int num_vecs = i + 1;
+  const double* __restrict__ v = u_next.data();
+  const v2d zero = splat(0.0);
+
+  std::fill(h_col.begin(), h_col.begin() + num_vecs, 0.0);
+  double zz_sum = 0.0;
+
+  for (fsils_int k_start = 0; k_start < mynNo; k_start += BLOCK_SIZE) {
+    const fsils_int k_end = std::min(k_start + BLOCK_SIZE, mynNo);
+
+    int j = 0;
+    for (; j + 2 <= num_vecs; j += 2) {
+      const double* __restrict__ ua = u.slice_data(j);
+      const double* __restrict__ ub = u.slice_data(j + 1);
+      v2d sum = zero;
+      for (fsils_int k = k_start; k < k_end; ++k) {
+        const size_t base = static_cast<size_t>(k) * static_cast<size_t>(DOF);
+        v2d tmp = zero;
+        for (int q = 0; q < Q; ++q) {
+          const v2d a = load2(ua + base + 2 * q);   // u_j(2q),   u_j(2q+1)
+          const v2d b = load2(ub + base + 2 * q);   // u_j+1(2q), u_j+1(2q+1)
+          tmp = tmp + first_lanes(a, b) * splat(v[base + 2 * q]);
+          tmp = tmp + second_lanes(a, b) * splat(v[base + 2 * q + 1]);
+        }
+        sum = sum + tmp;
+      }
+      h_col[static_cast<size_t>(j)] += sum[0];
+      h_col[static_cast<size_t>(j + 1)] += sum[1];
+    }
+    for (; j < num_vecs; ++j) {
+      const double* __restrict__ uj = u.slice_data(j);
+      double sum = 0.0;
+      for (fsils_int k = k_start; k < k_end; ++k) {
+        const size_t base = static_cast<size_t>(k) * static_cast<size_t>(DOF);
+        double tmp = 0.0;
+        for (int d = 0; d < DOF; ++d) {
+          tmp += uj[base + static_cast<size_t>(d)] * v[base + static_cast<size_t>(d)];
+        }
+        sum += tmp;
+      }
+      h_col[static_cast<size_t>(j)] += sum;
+    }
+
+    double zz = 0.0;
+    for (fsils_int k = k_start; k < k_end; ++k) {
+      const size_t base = static_cast<size_t>(k) * static_cast<size_t>(DOF);
+      for (int d = 0; d < DOF; ++d) {
+        const double val = v[base + static_cast<size_t>(d)];
+        zz += val * val;
+      }
+    }
+    zz_sum += zz;
+  }
+
+  return zz_sum;
+}
+#endif // FSILS_HAVE_TWO_LANE
+
 double fused_dot_zz_v(const int dof, const fsils_int mynNo, Array3<double>& u, const int i, const Array<double>& u_next,
                       std::vector<double>& h_col, double* thread_buf, const int thread_stride, const int num_threads)
 {
+#ifdef FSILS_HAVE_TWO_LANE
+  if (use_serial_hot_path(num_threads) && !dot_dynamic_kernel_forced()) {
+    if (dof == 6) {
+      return fused_dot_zz_v_pairs<6>(mynNo, u, i, u_next, h_col);
+    }
+    if (dof == 8) {
+      return fused_dot_zz_v_pairs<8>(mynNo, u, i, u_next, h_col);
+    }
+  }
+#endif
   switch (dof) {
     case 1: return fused_dot_zz_v_impl<1>(mynNo, u, i, u_next, h_col, thread_buf, thread_stride, num_threads);
     case 2: return fused_dot_zz_v_impl<2>(mynNo, u, i, u_next, h_col, thread_buf, thread_stride, num_threads);
@@ -1890,6 +1990,11 @@ double fused_dot_zz_v_for_test(const int dof,
                         thread_buf.data(),
                         thread_stride,
                         std::max(num_threads, 1));
+}
+
+void set_dot_dynamic_kernel_forced(const bool forced) noexcept
+{
+  g_dot_dynamic_kernel_forced.store(forced, std::memory_order_relaxed);
 }
 
 void fused_update_v_inplace_for_test(const int dof,

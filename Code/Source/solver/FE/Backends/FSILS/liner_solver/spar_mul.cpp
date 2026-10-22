@@ -39,21 +39,17 @@
 
 #include "distributed_sparse_operator.h"
 #include "fsils_api.hpp"
+#include "two_lane.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
-#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #ifdef _OPENMP
 #include <omp.h>
-#endif
-
-#if defined(__GNUC__) || defined(__clang__)
-#define FSILS_SPMV_VV_LANES 1
 #endif
 
 namespace spar_mul {
@@ -443,7 +439,7 @@ static void fsils_spar_mul_vv_dyn(fsils_int iStart, fsils_int iEnd, int dof,
   }
 }
 
-#ifdef FSILS_SPMV_VV_LANES
+#ifdef FSILS_HAVE_TWO_LANE
 //====================================================================
 // VV for dof 5-8: two rows of a block per two-lane register.
 //
@@ -464,45 +460,7 @@ static void fsils_spar_mul_vv_dyn(fsils_int iStart, fsils_int iEnd, int dof,
 
 namespace vv_lanes {
 
-typedef double v2d __attribute__((vector_size(16)));
-typedef long long v2i __attribute__((vector_size(16)));
-
-inline v2d load2(const double* p) noexcept
-{
-  v2d r;
-  std::memcpy(&r, p, sizeof(r));
-  return r;
-}
-
-inline void store2(double* p, const v2d v) noexcept
-{
-  std::memcpy(p, &v, sizeof(v));
-}
-
-inline v2d splat(const double x) noexcept
-{
-  return v2d{x, x};
-}
-
-/// {a[0], b[0]}
-inline v2d first_lanes(const v2d a, const v2d b) noexcept
-{
-#if defined(__clang__)
-  return __builtin_shufflevector(a, b, 0, 2);
-#else
-  return __builtin_shuffle(a, b, v2i{0, 2});
-#endif
-}
-
-/// {a[1], b[1]}
-inline v2d second_lanes(const v2d a, const v2d b) noexcept
-{
-#if defined(__clang__)
-  return __builtin_shufflevector(a, b, 1, 3);
-#else
-  return __builtin_shuffle(a, b, v2i{1, 3});
-#endif
-}
+using namespace fe_fsi_linear_solver::two_lane;
 
 template <int DOF>
 inline void row(const fsils_int i,
@@ -598,7 +556,7 @@ static void fsils_spar_mul_vv_lanes_impl(fsils_int iStart, fsils_int iEnd,
     vv_lanes::row<DOF>(i, rp, cp, k_data, u_data, ku_data);
   }
 }
-#endif // FSILS_SPMV_VV_LANES
+#endif // FSILS_HAVE_TWO_LANE
 
 //====================================================================
 // Fused local kernels used by the distributed sparse-operator layer.
@@ -931,7 +889,7 @@ void apply_vv_range(fsils_int i_start,
                     const Array<double>& input,
                     Array<double>& output)
 {
-#ifdef FSILS_SPMV_VV_LANES
+#ifdef FSILS_HAVE_TWO_LANE
   if (dof >= 5 && dof <= 8 && !spar_mul::vv_dynamic_kernel_forced()) {
     switch (dof) {
       case 5: spar_mul::fsils_spar_mul_vv_lanes_impl<5>(i_start, i_end, row_ptr, col_ptr, values, input, output); return;

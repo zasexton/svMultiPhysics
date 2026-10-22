@@ -943,6 +943,56 @@ TEST(FsilsBackendLegacyKernels, FusedGmresDotAndUpdateMatchUnfusedReferences)
     }
 }
 
+// The serial Gram-Schmidt dot for dof 6 and 8 (two basis vectors per
+// two-lane register) must give the bits of fused_dot_zz_v_dyn for every
+// number of basis vectors, over several 256-node tiles, with ghost entries
+// and signed zeros, subnormals and infinities in the data.
+TEST(FsilsBackendLegacyKernels, FusedGmresDotDof6And8MatchesDynamicKernelBitwise)
+{
+    struct ForcedDynamicReset {
+        ~ForcedDynamicReset() { gmres::test::set_dot_dynamic_kernel_forced(false); }
+    } reset_switch;
+
+    constexpr int n_nodes = 613;
+    constexpr int owned_nodes = 600;
+    constexpr int n_slices = 14;
+    for (const int dof : {6, 8}) {
+        SCOPED_TRACE(::testing::Message() << "dof=" << dof);
+        std::mt19937_64 rng(31u * static_cast<unsigned>(dof));
+        Array3<Real> basis(dof, n_nodes, n_slices);
+        Array<Real> candidate(dof, n_nodes);
+        for (int s = 0; s < n_slices; ++s) {
+            for (int node = 0; node < n_nodes; ++node) {
+                for (int comp = 0; comp < dof; ++comp) {
+                    basis(comp, node, s) = cornerCaseValue(rng);
+                }
+            }
+        }
+        for (int node = 0; node < n_nodes; ++node) {
+            for (int comp = 0; comp < dof; ++comp) {
+                candidate(comp, node) = cornerCaseValue(rng);
+            }
+        }
+        candidate(1, 17) = std::numeric_limits<Real>::infinity();
+        basis(2, 401, 5) = -std::numeric_limits<Real>::infinity();
+
+        for (int last_i = 0; last_i < n_slices - 1; ++last_i) {
+            SCOPED_TRACE(::testing::Message() << "last_i=" << last_i);
+            std::vector<Real> h_ref(static_cast<std::size_t>(n_slices + 1), -999.0);
+            std::vector<Real> h_new(static_cast<std::size_t>(n_slices + 1), -999.0);
+            gmres::test::set_dot_dynamic_kernel_forced(true);
+            const Real zz_ref = gmres::test::fused_dot_zz_v_for_test(
+                dof, owned_nodes, basis, last_i, candidate, h_ref, /*num_threads=*/1);
+            gmres::test::set_dot_dynamic_kernel_forced(false);
+            const Real zz_new = gmres::test::fused_dot_zz_v_for_test(
+                dof, owned_nodes, basis, last_i, candidate, h_new, /*num_threads=*/1);
+            expectSameBits(h_new.data(), h_ref.data(), h_ref.size(), "h_col");
+            expectSameBits(&zz_new, &zz_ref, 1, "zz");
+            EXPECT_EQ(h_new[static_cast<std::size_t>(last_i + 1)], -999.0);
+        }
+    }
+}
+
 TEST(FsilsBackendLegacyKernels, GivensRotationAndHessenbergBacksolveMatchReferences)
 {
     Array<Real> h(4, 4);

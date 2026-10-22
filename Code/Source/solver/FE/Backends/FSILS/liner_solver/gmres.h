@@ -63,6 +63,11 @@ double fused_dot_zz_v_for_test(const int dof,
     std::vector<double>& h_col,
     const int num_threads = 1);
 
+/// Test-only: when true, the serial Gram-Schmidt dot for dof 6 and 8 uses the
+/// generic fused_dot_zz_v_dyn kernel (the reference of the two-lane kernel).
+/// Default false.
+void set_dot_dynamic_kernel_forced(bool forced) noexcept;
+
 void fused_update_v_inplace_for_test(const int dof,
     const fe_fsi_linear_solver::fsils_int nNo,
     Array3<double>& u,
