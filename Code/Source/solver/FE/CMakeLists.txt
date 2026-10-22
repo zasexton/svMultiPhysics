@@ -1073,6 +1073,8 @@ set(FE_SYSTEMS_HEADERS
     Systems/FreeSurfaceFunctionalRounding.h
     Systems/FreeSurfaceRecordTypes.h
     Systems/MeshBoundaryRecordSupport.h
+    Systems/OperatorStageMetadata.h
+    Systems/TwoFluidRecordTypes.h
     Systems/BoundedUpdatePolicy.h
     Systems/BoundaryDistanceService.h
     Interfaces/ContactLineGeometryCertificate.h
