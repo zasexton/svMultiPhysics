@@ -1512,7 +1512,7 @@ TEST(LevelSetCutConfiguration, ActiveCutRequestPolicyKeyTracksBackendOptions)
                 {changed_retention}));
 }
 
-TEST(LevelSetCutConfiguration, IgnoresSmoothedIndicatorRequests)
+TEST(LevelSetCutConfiguration, RejectsRetiredSmoothedIndicatorRequests)
 {
   for (const std::string_view method :
        {"SmoothedIndicator", "SmoothIndicator", "Indicator"}) {
@@ -1530,8 +1530,13 @@ TEST(LevelSetCutConfiguration, IgnoresSmoothedIndicatorRequests)
 )xml";
 
     auto params = parseParametersXml(xml.c_str());
-    EXPECT_TRUE(application::core::activeCutVolumeRequests(*params).empty())
-        << method;
+    try {
+      (void)application::core::activeCutVolumeRequests(*params);
+      ADD_FAILURE() << "retired method was accepted: " << method;
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string(error.what()).find("retired"), std::string::npos)
+          << error.what();
+    }
   }
 }
 

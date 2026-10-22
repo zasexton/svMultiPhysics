@@ -3375,10 +3375,8 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
              FreeSurfaceActiveDomain::LevelSetNegative ||
          bc.active_domain ==
              FreeSurfaceActiveDomain::LevelSetPositive) &&
-        (bc.active_domain_method ==
-             FreeSurfaceActiveDomainMethod::CutVolume ||
-         bc.active_domain_method ==
-             FreeSurfaceActiveDomainMethod::SmoothedIndicator) &&
+        bc.active_domain_method ==
+            FreeSurfaceActiveDomainMethod::CutVolume &&
         (bc.kinematic_enforcement ==
              FreeSurfaceKinematicEnforcement::None ||
          bc.kinematic_enforcement ==
@@ -3961,7 +3959,7 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             if (bc.active_domain_method !=
                 FreeSurfaceActiveDomainMethod::CutVolume) {
                 throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: DynamicContactAngle requires Active_domain_method=CutVolume for a sharp liquid domain; SmoothedIndicator remains a diffuse diagnostic path");
+                    "IncompressibleNavierStokesVMSModule: DynamicContactAngle requires Active_domain_method=CutVolume for a sharp liquid domain");
             }
             if (bc.active_domain_smoothing_width != FE::Real{0.0}) {
                 throw std::invalid_argument(
@@ -4544,7 +4542,6 @@ struct ActiveVolumeDomain {
     int interface_marker{-1};
     FE::forms::CutVolumeSide side{FE::forms::CutVolumeSide::Negative};
     FreeSurfaceActiveDomainMethod method{FreeSurfaceActiveDomainMethod::CutVolume};
-    FE::forms::FormExpr indicator{};
 };
 
 [[nodiscard]] FE::forms::FormExpr freeSurfaceLevelSet(
@@ -4570,8 +4567,6 @@ struct ActiveVolumeDomain {
     switch (method) {
     case FreeSurfaceActiveDomainMethod::CutVolume:
         return "CutVolume";
-    case FreeSurfaceActiveDomainMethod::SmoothedIndicator:
-        return "SmoothedIndicator";
     }
     return "Unknown";
 }
@@ -4630,21 +4625,6 @@ struct ActiveVolumeDomain {
     return side == FE::forms::CutVolumeSide::Negative
                ? FE::forms::CutVolumeSide::Positive
                : FE::forms::CutVolumeSide::Negative;
-}
-
-[[nodiscard]] FE::forms::FormExpr activeDomainIndicatorFor(
-    const FreeSurfaceBoundary& bc,
-    const FE::systems::FESystem& system)
-{
-    const auto phi = freeSurfaceLevelSet(bc, system);
-    const auto signed_phi =
-        bc.active_domain == FreeSurfaceActiveDomain::LevelSetNegative
-            ? FE::forms::FormExpr::constant(bc.level_set_isovalue) - phi
-            : phi - FE::forms::FormExpr::constant(bc.level_set_isovalue);
-    const auto width = bc.active_domain_smoothing_width > FE::Real{0.0}
-        ? FE::forms::FormExpr::constant(bc.active_domain_smoothing_width)
-        : FE::forms::h();
-    return FE::forms::smoothHeaviside(signed_phi, width);
 }
 
 void applyDynamicContactAngleResidual(
@@ -4939,8 +4919,7 @@ void applyDynamicContactAngleResidual(
 }
 
 [[nodiscard]] std::optional<ActiveVolumeDomain> activeVolumeDomainFor(
-    const std::vector<FreeSurfaceBoundary>& free_surfaces,
-    const FE::systems::FESystem& system)
+    const std::vector<FreeSurfaceBoundary>& free_surfaces)
 {
     std::optional<ActiveVolumeDomain> active_domain;
     for (const auto& bc : free_surfaces) {
@@ -4953,17 +4932,10 @@ void applyDynamicContactAngleResidual(
         }
 
         const FE::forms::CutVolumeSide side = activeDomainSide(bc.active_domain);
-        FE::forms::FormExpr indicator{};
-        if (bc.active_domain_method == FreeSurfaceActiveDomainMethod::SmoothedIndicator) {
-            indicator = activeDomainIndicatorFor(bc, system);
-            FE_LOG_WARNING(
-                "IncompressibleNavierStokesVMSModule: Active_domain_method=SmoothedIndicator is diagnostic and not a final benchmark acceptance path");
-        }
         active_domain = ActiveVolumeDomain{
             bc.interface_marker,
             side,
-            bc.active_domain_method,
-            indicator};
+            bc.active_domain_method};
 
         std::ostringstream oss;
         oss << "IncompressibleNavierStokesVMSModule: active-domain free surface "
@@ -4976,12 +4948,6 @@ void applyDynamicContactAngleResidual(
             << " Active_domain_method="
             << activeDomainMethodName(bc.active_domain_method)
             << " side=" << cutVolumeSideName(side);
-        if (bc.active_domain_method == FreeSurfaceActiveDomainMethod::SmoothedIndicator) {
-            oss << " smoothing_width="
-                << (bc.active_domain_smoothing_width > FE::Real{0.0}
-                        ? std::to_string(bc.active_domain_smoothing_width)
-                        : std::string("cell_diameter"));
-        }
         FE_LOG_INFO(oss.str());
     }
     return active_domain;
@@ -4993,9 +4959,6 @@ void applyDynamicContactAngleResidual(
 {
     if (!active_domain.has_value()) {
         return integrand.dx(FE::forms::VolumeDomain::full());
-    }
-    if (active_domain->method == FreeSurfaceActiveDomainMethod::SmoothedIndicator) {
-        return (active_domain->indicator * integrand).dx();
     }
     return integrand.dx(FE::forms::VolumeDomain::cut(
         active_domain->interface_marker, active_domain->side));
@@ -6886,12 +6849,6 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     std::set<int> prospective_fitted_normal_markers;
     for (const auto& bc : options_.free_surface) {
         auto effective_bc = withResolvedInterfaceMarker(bc, system);
-        if (effective_bc.active_domain_method ==
-                FreeSurfaceActiveDomainMethod::SmoothedIndicator &&
-            !options_.explicit_legacy_configuration) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: SmoothedIndicator is an explicit legacy diagnostic and requires configuration schema version 1 with legacy behavior enabled");
-        }
         validateFreeSurfaceBoundary(effective_bc,
                                     options_,
                                     options_.enable_ale,
@@ -7545,7 +7502,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     }
 
     const auto active_volume_domain =
-        activeVolumeDomainFor(effective_free_surfaces, system);
+        activeVolumeDomainFor(effective_free_surfaces);
 
     const auto rho = FormExpr::constant(options_.density);
 

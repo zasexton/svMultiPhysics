@@ -406,8 +406,8 @@ on that wall.
 
 `DynamicRenE` additionally requires:
 
-- `Active_domain_method=CutVolume` with zero smoothing width;
-  `SmoothedIndicator` is rejected;
+- `Active_domain_method=CutVolume` (the only method) with zero smoothing
+  width;
 - positive literal surface tension, mobility, and slip length;
 - literal Newtonian viscosity;
 - an axis-aligned wall normal, because general linear-combination essential

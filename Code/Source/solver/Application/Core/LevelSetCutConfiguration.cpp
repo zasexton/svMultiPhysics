@@ -327,15 +327,17 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
     if (method_token == "smoothedindicator" ||
         method_token == "smoothindicator" ||
         method_token == "indicator") {
-      return std::nullopt;
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Active_domain_method '" +
+          trimCopy(*method) +
+          "' (SmoothedIndicator) was retired (decision D42); use CutVolume.");
     }
     if (!method_token.empty() && method_token != "cutvolume" &&
         method_token != "cutcellvolume" &&
         method_token != "exactcutvolume") {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Unknown Active_domain_method '" +
-          trimCopy(*method) +
-          "'. Supported values: CutVolume or SmoothedIndicator.");
+          trimCopy(*method) + "'. Supported value: CutVolume.");
     }
   }
 

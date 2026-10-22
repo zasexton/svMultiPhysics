@@ -2868,11 +2868,14 @@ parse_free_surface_active_domain_method(std::string_view raw, std::string_view c
   }
   if (token == "smoothedindicator" || token == "smoothindicator" ||
       token == "indicator") {
-    return FreeSurfaceActiveDomainMethod::SmoothedIndicator;
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] " + std::string(context) + "=" +
+        std::string(raw) +
+        " (SmoothedIndicator) was retired (decision D42); use CutVolume.");
   }
   throw std::runtime_error(
       "[svMultiPhysics::Physics] " + std::string(context) +
-      " must be one of CutVolume or SmoothedIndicator.");
+      " must be CutVolume.");
 }
 
 svmp::Physics::formulations::navier_stokes::FreeSurfaceSurfaceTensionForm

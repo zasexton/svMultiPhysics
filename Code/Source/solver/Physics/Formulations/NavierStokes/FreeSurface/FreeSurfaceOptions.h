@@ -50,9 +50,10 @@ enum class FreeSurfaceActiveDomain : std::uint8_t {
     LevelSetPositive
 };
 
+// SmoothedIndicator (a smooth-Heaviside weighted bulk integral, explicit
+// schema-1 legacy diagnostic) was retired by D42.
 enum class FreeSurfaceActiveDomainMethod : std::uint8_t {
-    CutVolume,
-    SmoothedIndicator
+    CutVolume
 };
 
 enum class FreeSurfaceKinematicEnforcement : std::uint8_t {
@@ -234,10 +235,8 @@ struct FreeSurfaceBoundary {
     FreeSurfaceActiveDomain active_domain{FreeSurfaceActiveDomain::None};
     FreeSurfaceActiveDomainMethod active_domain_method{
         FreeSurfaceActiveDomainMethod::CutVolume};
-    // Width of the supported algebraic smooth Heaviside, whose tails are
-    // noncompact.  The diagnostic bulk SmoothedIndicator path retains its
-    // legacy assumption that phi is already a signed-distance field.  The
-    // DynamicContactAngle wetted-wall law instead constructs a homogeneous
+    // Smoothing width of the DynamicContactAngle wetted-wall weight.  The
+    // law constructs a homogeneous
     // physical signed-distance proxy and applies a compact C1 cubic: zero
     // on the dry side beyond one width, one on the wet side beyond one
     // width.  Positive phi rescaling is therefore immaterial.  This is a
