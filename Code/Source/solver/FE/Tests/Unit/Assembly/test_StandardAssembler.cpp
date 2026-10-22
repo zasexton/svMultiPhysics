@@ -7963,6 +7963,293 @@ TEST(StandardAssemblerSolutionSetters, DirectTableReadsMatchPerEntryAccessorLoop
 }
 
 // ============================================================================
+// Basis Hessian transforms: the signed-zero rule reproduces the sums
+// ============================================================================
+
+namespace {
+
+struct ZeroHessianRuleGuard {
+    explicit ZeroHessianRuleGuard(bool enabled)
+    {
+        detail::setZeroHessianTermsShortcutForTesting(enabled);
+    }
+    ~ZeroHessianRuleGuard() { detail::setZeroHessianTermsShortcutForTesting(true); }
+    ZeroHessianRuleGuard(const ZeroHessianRuleGuard&) = delete;
+    ZeroHessianRuleGuard& operator=(const ZeroHessianRuleGuard&) = delete;
+};
+
+[[nodiscard]] std::uint64_t hessianBits(Real value)
+{
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+// Records every physical basis gradient and Hessian of the test and trial
+// bases a cell or boundary-face context holds.
+class BasisHessianRecordingKernel final : public AssemblyKernel {
+public:
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/true, /*need_vector=*/false);
+        record(ctx);
+    }
+
+    [[nodiscard]] bool hasBoundaryFace() const noexcept override { return true; }
+
+    void computeBoundaryFace(const AssemblyContext& ctx, int /*boundary_marker*/,
+                             KernelOutput& output) override
+    {
+        const auto n = ctx.numTestDofs();
+        output.local_vector.assign(static_cast<std::size_t>(n), 0.0);
+        output.has_vector = true;
+        output.has_matrix = false;
+        output.n_test_dofs = n;
+        output.n_trial_dofs = ctx.numTrialDofs();
+        record(ctx);
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return RequiredData::BasisValues | RequiredData::PhysicalGradients |
+               RequiredData::BasisHessians | RequiredData::IntegrationWeights;
+    }
+
+    std::vector<std::uint64_t> recorded;
+
+private:
+    void record(const AssemblyContext& ctx)
+    {
+        for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+            for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
+                for (const auto& row : ctx.physicalHessian(i, q)) {
+                    for (const Real v : row) recorded.push_back(hessianBits(v));
+                }
+                for (const Real v : ctx.physicalGradient(i, q)) recorded.push_back(hessianBits(v));
+            }
+            for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
+                for (const auto& row : ctx.trialPhysicalHessian(j, q)) {
+                    for (const Real v : row) recorded.push_back(hessianBits(v));
+                }
+            }
+        }
+    }
+};
+
+} // namespace
+
+TEST(StandardAssemblerHessianTransforms, ZeroRuleMatchesTheSumsBitwise)
+{
+    using M = AssemblyContext::Matrix3x3;
+    using V = AssemblyContext::Vector3D;
+    const Real inf = std::numeric_limits<Real>::infinity();
+    const Real nan = std::numeric_limits<Real>::quiet_NaN();
+    const std::vector<M> inverse_jacobians{
+        M{{{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}}},
+        M{{{0.7, -0.2, 0.1}, {0.3, 1.9, -0.4}, {-0.5, 0.25, 2.2}}},
+        // Large but finite: a product of two or three such entries overflows.
+        M{{{1.0e200, -3.0e199, 2.0e150}, {7.0e199, 1.0e200, -1.0e180}, {-2.0e199, 5.0e190, 1.0e200}}},
+        M{{{1.0e-200, 0.0, -0.0}, {-0.0, 1.0e-300, 0.0}, {0.0, -0.0, 2.0e-250}}},
+        M{{{1.0, inf, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}}},
+        M{{{1.0, 0.0, 0.0}, {0.0, nan, 0.0}, {0.0, 0.0, 1.0}}},
+        M{{{-0.0, 1.0, 0.0}, {2.0, -0.0, 0.0}, {0.0, 0.0, -3.0}}},
+    };
+    const auto mapping_hessian = [](Real a, Real b, Real c) {
+        geometry::GeometryMapping::MappingHessian h{};
+        h[0](0, 0) = a;
+        h[1](0, 1) = b;
+        h[1](1, 0) = b;
+        h[2](2, 2) = c;
+        return h;
+    };
+    const std::vector<geometry::GeometryMapping::MappingHessian> mapping_hessians{
+        mapping_hessian(0.0, 0.0, 0.0),
+        mapping_hessian(-0.0, 0.0, -0.0),
+        mapping_hessian(0.0, 1.0e-3, 0.0),
+        mapping_hessian(0.0, 0.0, inf),
+        mapping_hessian(2.0, -1.0, 0.5),
+    };
+    const std::vector<M> reference_hessians{
+        M{},
+        M{{{-0.0, 0.0, -0.0}, {0.0, -0.0, 0.0}, {-0.0, 0.0, -0.0}}},
+        M{{{0.0, 4.0, 0.0}, {4.0, 0.0, 0.0}, {0.0, 0.0, -1.0}}},
+        M{{{nan, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}}},
+    };
+    const std::vector<V> reference_gradients{
+        V{-1.0, 1.0, 0.5},
+        V{1.0e300, -1.0e300, 3.0e299},
+        V{-0.0, 0.0, -0.0},
+        V{inf, 0.0, 1.0},
+        V{1.0, nan, 0.0},
+    };
+
+    std::size_t rule_taken = 0;
+    std::size_t hessian_rule_taken = 0;
+    std::size_t compared = 0;
+    for (int dim = 1; dim <= 3; ++dim) {
+        for (const auto& J_inv : inverse_jacobians) {
+            for (const auto& map_hess : mapping_hessians) {
+                std::array<M, 3> d2xi_on{};
+                std::array<M, 3> d2xi_off{};
+                bool zero_on = false;
+                {
+                    ZeroHessianRuleGuard guard(true);
+                    zero_on = detail::inverseMappingSecondDerivatives(J_inv, map_hess, dim, d2xi_on);
+                }
+                bool zero_off = true;
+                {
+                    ZeroHessianRuleGuard guard(false);
+                    zero_off = detail::inverseMappingSecondDerivatives(J_inv, map_hess, dim, d2xi_off);
+                }
+                EXPECT_FALSE(zero_off);
+                rule_taken += zero_on ? 1u : 0u;
+                for (std::size_t a = 0; a < 3; ++a) {
+                    for (std::size_t i = 0; i < 3; ++i) {
+                        for (std::size_t j = 0; j < 3; ++j) {
+                            ++compared;
+                            EXPECT_EQ(hessianBits(d2xi_on[a][i][j]), hessianBits(d2xi_off[a][i][j]))
+                                << "dim " << dim << " d2xi " << a << i << j;
+                        }
+                    }
+                }
+                for (const auto& H_ref : reference_hessians) {
+                    for (const auto& grad_ref : reference_gradients) {
+                        M h_on{};
+                        M h_off{};
+                        {
+                            ZeroHessianRuleGuard guard(true);
+                            h_on = detail::physicalBasisHessian(J_inv, H_ref, grad_ref, d2xi_on, dim, zero_on);
+                        }
+                        {
+                            ZeroHessianRuleGuard guard(false);
+                            h_off = detail::physicalBasisHessian(J_inv, H_ref, grad_ref, d2xi_off, dim, false);
+                        }
+                        const bool zero_h = zero_on && H_ref == M{} && std::isfinite(grad_ref[0]) &&
+                                            std::isfinite(grad_ref[1]) && std::isfinite(grad_ref[2]);
+                        hessian_rule_taken += zero_h ? 1u : 0u;
+                        for (std::size_t r = 0; r < 3; ++r) {
+                            for (std::size_t c = 0; c < 3; ++c) {
+                                ++compared;
+                                EXPECT_EQ(hessianBits(h_on[r][c]), hessianBits(h_off[r][c]))
+                                    << "dim " << dim << " H " << r << c;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    EXPECT_GT(rule_taken, 0u);
+    EXPECT_GT(hessian_rule_taken, 0u);
+    EXPECT_GT(compared, 10000u);
+}
+
+TEST(StandardAssemblerHessianTransforms, ZeroRuleKeepsCellAndFaceBasisHessiansBitwise)
+{
+    const auto run_both = [](const auto& assemble) {
+        std::vector<std::uint64_t> on;
+        std::vector<std::uint64_t> off;
+        {
+            ZeroHessianRuleGuard guard(false);
+            off = assemble();
+        }
+        {
+            ZeroHessianRuleGuard guard(true);
+            on = assemble();
+        }
+        EXPECT_FALSE(off.empty());
+        EXPECT_EQ(on, off);
+    };
+
+    // Affine tetrahedron, P1 test and P2 trial bases (per-point cell path):
+    // the rule applies to every P1 Hessian and to d2xi_dx2, not to P2 Hessians.
+    {
+        SCOPED_TRACE("tetra P1 x P2");
+        ConfigurableSingleTetraMeshAccess mesh(
+            std::array<std::array<Real, 3>, 4>{
+                std::array<Real, 3>{0.1, -0.2, 0.05},
+                std::array<Real, 3>{1.3, 0.1, -0.1},
+                std::array<Real, 3>{0.2, 0.9, 0.3},
+                std::array<Real, 3>{-0.1, 0.25, 1.1},
+            },
+            std::array<GlobalIndex, 4>{0, 1, 2, 3});
+        spaces::H1Space p1(ElementType::Tetra4, /*order=*/1);
+        spaces::H1Space p2(ElementType::Tetra4, /*order=*/2);
+        auto row_map = createSingleCellDofMap(4);
+        auto col_map = createSingleCellDofMap(static_cast<GlobalIndex>(p2.dofs_per_element()));
+        run_both([&] {
+            StandardAssembler assembler;
+            assembler.setRowDofMap(row_map, /*row_offset=*/0);
+            assembler.setColDofMap(col_map, /*col_offset=*/0);
+            BasisHessianRecordingKernel kernel;
+            DenseMatrixView A(/*rows=*/4, /*cols=*/static_cast<GlobalIndex>(p2.dofs_per_element()));
+            (void)assembler.assembleMatrix(mesh, p1, p2, kernel, A);
+            return kernel.recorded;
+        });
+    }
+
+    // Affine (rectangular) and non-affine quadrilaterals with Q1 bases.
+    const auto quad_case = [&](const IMeshAccess& mesh, const char* label) {
+        SCOPED_TRACE(label);
+        spaces::H1Space q1(ElementType::Quad4, /*order=*/1);
+        auto map = createSingleCellDofMap(4);
+        run_both([&] {
+            StandardAssembler assembler;
+            assembler.setDofMap(map);
+            assembler.initialize();
+            BasisHessianRecordingKernel kernel;
+            DenseMatrixView A(/*rows=*/4, /*cols=*/4);
+            (void)assembler.assembleMatrix(mesh, q1, q1, kernel, A);
+            return kernel.recorded;
+        });
+    };
+    AffineSingleQuadMeshAccess affine_quad;
+    quad_case(affine_quad, "affine quad Q1");
+    SingleQuadMeshAccess skewed_quad;
+    quad_case(skewed_quad, "non-affine quad Q1");
+
+    // Boundary faces of a tetrahedron (prepareContextFace), P1 and P2 bases.
+    for (const int order : {1, 2}) {
+        SCOPED_TRACE(order == 1 ? "face P1" : "face P2");
+        spaces::H1Space space(ElementType::Tetra4, order);
+        auto map = createSingleCellDofMap(static_cast<GlobalIndex>(space.dofs_per_element()));
+        for (LocalIndex local_face = 0; local_face < 4; ++local_face) {
+            SingleTetraBoundaryMeshAccess mesh(local_face);
+            run_both([&] {
+                StandardAssembler assembler;
+                assembler.setDofMap(map);
+                assembler.initialize();
+                BasisHessianRecordingKernel kernel;
+                DenseVectorView rhs(static_cast<GlobalIndex>(space.dofs_per_element()));
+                (void)assembler.assembleBoundaryFaces(mesh, /*marker=*/1, space, kernel, nullptr, &rhs);
+                return kernel.recorded;
+            });
+        }
+    }
+
+    // Boundary faces with P1 test and P2 trial bases (the face trial path).
+    {
+        SCOPED_TRACE("face P1 x P2");
+        spaces::H1Space p1(ElementType::Tetra4, /*order=*/1);
+        spaces::H1Space p2(ElementType::Tetra4, /*order=*/2);
+        auto row_map = createSingleCellDofMap(4);
+        auto col_map = createSingleCellDofMap(static_cast<GlobalIndex>(p2.dofs_per_element()));
+        for (LocalIndex local_face = 0; local_face < 4; ++local_face) {
+            SingleTetraBoundaryMeshAccess mesh(local_face);
+            run_both([&] {
+                StandardAssembler assembler;
+                assembler.setRowDofMap(row_map, /*row_offset=*/0);
+                assembler.setColDofMap(col_map, /*col_offset=*/0);
+                BasisHessianRecordingKernel kernel;
+                DenseVectorView rhs(4);
+                (void)assembler.assembleBoundaryFaces(mesh, /*marker=*/1, p1, p2, kernel, nullptr, &rhs);
+                return kernel.recorded;
+            });
+        }
+    }
+}
+
+// ============================================================================
 // Factory Function Tests
 // ============================================================================
 

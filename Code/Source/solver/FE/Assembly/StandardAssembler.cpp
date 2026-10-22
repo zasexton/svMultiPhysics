@@ -1862,6 +1862,156 @@ bool StandardAssembler::perCellCacheStorageReuseEnabled() noexcept
     return g_per_cell_cache_storage_reuse_enabled.load(std::memory_order_relaxed);
 }
 
+namespace {
+
+// Test switch for the signed-zero rule of the basis Hessian transforms (see
+// detail::setZeroHessianTermsShortcutForTesting).
+std::atomic<bool> g_zero_hessian_terms_shortcut_enabled{true};
+
+[[nodiscard]] bool leadingBlockFinite(const AssemblyContext::Matrix3x3& m, int dim) noexcept
+{
+    for (int r = 0; r < dim; ++r) {
+        for (int c = 0; c < dim; ++c) {
+            if (!std::isfinite(m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)])) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool leadingBlockZero(const AssemblyContext::Matrix3x3& m, int dim) noexcept
+{
+    for (int r = 0; r < dim; ++r) {
+        for (int c = 0; c < dim; ++c) {
+            if (m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] != Real{0.0}) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool leadingEntriesFinite(const AssemblyContext::Vector3D& v, int dim) noexcept
+{
+    for (int a = 0; a < dim; ++a) {
+        if (!std::isfinite(v[static_cast<std::size_t>(a)])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool mappingHessianLeadingBlockZero(
+    const geometry::GeometryMapping::MappingHessian& map_hess, int dim) noexcept
+{
+    for (int m = 0; m < dim; ++m) {
+        for (int p = 0; p < dim; ++p) {
+            for (int r = 0; r < dim; ++r) {
+                if (map_hess[static_cast<std::size_t>(m)](static_cast<std::size_t>(p),
+                                                          static_cast<std::size_t>(r)) != Real{0.0}) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+namespace detail {
+
+void setZeroHessianTermsShortcutForTesting(bool enabled) noexcept
+{
+    g_zero_hessian_terms_shortcut_enabled.store(enabled, std::memory_order_relaxed);
+}
+
+// The signed-zero rule.  Each product below multiplies the zero factor in
+// first: (J_inv[a][m] * map_hess[m](p, r)) * J_inv[p][i] * J_inv[r][j],
+// (J_inv[a][r] * H_ref[a][b]) * J_inv[b][c] and grad_ref[a] * d2xi_dx2[a][r][c]
+// (C++ evaluates a * b * c * d as ((a * b) * c) * d, and FE is built with
+// -ffp-contract=off), so with finite other factors every partial product is a
+// signed zero and nothing can overflow before the zero is applied.  Every
+// accumulator starts from the literal +0.0 (`Real sum = 0.0;`) and only adds,
+// and +0.0 + (+/-0.0) is +0.0 in round to nearest, so each sum is +0.0, the
+// d2xi_dx2 entry is its negation -0.0, and the Hessian entry is +0.0.
+
+bool inverseMappingSecondDerivatives(
+    const AssemblyContext::Matrix3x3& J_inv,
+    const geometry::GeometryMapping::MappingHessian& map_hess,
+    int dim,
+    std::array<AssemblyContext::Matrix3x3, 3>& d2xi_dx2)
+{
+    if (g_zero_hessian_terms_shortcut_enabled.load(std::memory_order_relaxed) &&
+        leadingBlockFinite(J_inv, dim) && mappingHessianLeadingBlockZero(map_hess, dim)) {
+        for (int a = 0; a < dim; ++a) {
+            for (int i = 0; i < dim; ++i) {
+                for (int j = 0; j < dim; ++j) {
+                    d2xi_dx2[static_cast<std::size_t>(a)][static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] =
+                        -Real{0.0};
+                }
+            }
+        }
+        return true;
+    }
+    for (int a = 0; a < dim; ++a) {
+        for (int i = 0; i < dim; ++i) {
+            for (int j = 0; j < dim; ++j) {
+                Real sum = 0.0;
+                for (int m = 0; m < dim; ++m) {
+                    for (int p = 0; p < dim; ++p) {
+                        for (int r = 0; r < dim; ++r) {
+                            sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(m)] *
+                                   map_hess[static_cast<std::size_t>(m)](
+                                       static_cast<std::size_t>(p), static_cast<std::size_t>(r)) *
+                                   J_inv[static_cast<std::size_t>(p)][static_cast<std::size_t>(i)] *
+                                   J_inv[static_cast<std::size_t>(r)][static_cast<std::size_t>(j)];
+                        }
+                    }
+                }
+                d2xi_dx2[static_cast<std::size_t>(a)][static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] = -sum;
+            }
+        }
+    }
+    return false;
+}
+
+AssemblyContext::Matrix3x3 physicalBasisHessian(
+    const AssemblyContext::Matrix3x3& J_inv,
+    const AssemblyContext::Matrix3x3& H_ref,
+    const AssemblyContext::Vector3D& grad_ref,
+    const std::array<AssemblyContext::Matrix3x3, 3>& d2xi_dx2,
+    int dim,
+    bool zero_mapping_hessian_terms)
+{
+    AssemblyContext::Matrix3x3 H_phys{};
+    if (zero_mapping_hessian_terms && leadingBlockZero(H_ref, dim) &&
+        leadingEntriesFinite(grad_ref, dim)) {
+        return H_phys;
+    }
+    for (int r = 0; r < dim; ++r) {
+        for (int c = 0; c < dim; ++c) {
+            Real sum = 0.0;
+            for (int a = 0; a < dim; ++a) {
+                for (int b = 0; b < dim; ++b) {
+                    sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
+                           H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
+                           J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                }
+            }
+            for (int a = 0; a < dim; ++a) {
+                sum += grad_ref[static_cast<std::size_t>(a)] *
+                       d2xi_dx2[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+            }
+            H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
+        }
+    }
+    return H_phys;
+}
+
+} // namespace detail
+
 // ============================================================================
 // Construction
 // ============================================================================
@@ -8072,27 +8222,10 @@ void StandardAssembler::prepareBasis(
         }
 
         std::array<AssemblyContext::Matrix3x3, 3> d2xi_dx2{};
+        bool zero_mapping_hessian_terms = false;
         if (need_basis_hessians) {
-            const auto& map_hess = mapping_hessian_at_q();
-            for (int a = 0; a < dim; ++a) {
-                for (int i = 0; i < dim; ++i) {
-                    for (int j = 0; j < dim; ++j) {
-                        Real sum = 0.0;
-                        for (int m = 0; m < dim; ++m) {
-                            for (int p = 0; p < dim; ++p) {
-                                for (int r = 0; r < dim; ++r) {
-                                    sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(m)] *
-                                           map_hess[static_cast<std::size_t>(m)](
-                                               static_cast<std::size_t>(p), static_cast<std::size_t>(r)) *
-                                           J_inv[static_cast<std::size_t>(p)][static_cast<std::size_t>(i)] *
-                                           J_inv[static_cast<std::size_t>(r)][static_cast<std::size_t>(j)];
-                                }
-                            }
-                        }
-                        d2xi_dx2[static_cast<std::size_t>(a)][static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] = -sum;
-                    }
-                }
-            }
+            zero_mapping_hessian_terms = detail::inverseMappingSecondDerivatives(
+                J_inv, mapping_hessian_at_q(), dim, d2xi_dx2);
         }
 
         if (test_is_vector_basis) {
@@ -8262,25 +8395,8 @@ void StandardAssembler::prepareBasis(
                     }
                     scratch_ref_hessians_[idx] = H_ref;
 
-                    AssemblyContext::Matrix3x3 H_phys{};
-                    for (int r = 0; r < dim; ++r) {
-                        for (int c = 0; c < dim; ++c) {
-                            Real sum = 0.0;
-                            for (int a = 0; a < dim; ++a) {
-                                for (int b = 0; b < dim; ++b) {
-                                    sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
-                                           H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
-                                           J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
-                                }
-                            }
-                            for (int a = 0; a < dim; ++a) {
-                                sum += grad_ref[static_cast<std::size_t>(a)] *
-                                       d2xi_dx2[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
-                            }
-                            H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
-                        }
-                    }
-                    scratch_phys_hessians_[idx] = H_phys;
+                    scratch_phys_hessians_[idx] = detail::physicalBasisHessian(
+                        J_inv, H_ref, grad_ref, d2xi_dx2, dim, zero_mapping_hessian_terms);
                 }
             }
         }
@@ -8449,25 +8565,8 @@ void StandardAssembler::prepareBasis(
                         }
                         trial_ref_hessians[idx] = H_ref;
 
-                        AssemblyContext::Matrix3x3 H_phys{};
-                        for (int r = 0; r < dim; ++r) {
-                            for (int c = 0; c < dim; ++c) {
-                                Real sum = 0.0;
-                                for (int a = 0; a < dim; ++a) {
-                                    for (int b = 0; b < dim; ++b) {
-                                        sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
-                                               H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
-                                               J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
-                                    }
-                                }
-                                for (int a = 0; a < dim; ++a) {
-                                    sum += grad_ref[static_cast<std::size_t>(a)] *
-                                           d2xi_dx2[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
-                                }
-                                H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
-                            }
-                        }
-                        trial_phys_hessians[idx] = H_phys;
+                        trial_phys_hessians[idx] = detail::physicalBasisHessian(
+                            J_inv, H_ref, grad_ref, d2xi_dx2, dim, zero_mapping_hessian_terms);
                     }
                 }
             }
@@ -17287,27 +17386,10 @@ void StandardAssembler::prepareContextFace(
         }
 
         std::array<AssemblyContext::Matrix3x3, 3> d2xi_dx2{};
+        bool zero_mapping_hessian_terms = false;
         if (need_basis_hessians) {
-            const auto& map_hess = mapping_hessian_at_q();
-            for (int a = 0; a < dim; ++a) {
-                for (int i = 0; i < dim; ++i) {
-                    for (int j = 0; j < dim; ++j) {
-                        Real sum = 0.0;
-                        for (int m = 0; m < dim; ++m) {
-                            for (int p = 0; p < dim; ++p) {
-                                for (int r = 0; r < dim; ++r) {
-                                    sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(m)] *
-                                           map_hess[static_cast<std::size_t>(m)](
-                                               static_cast<std::size_t>(p), static_cast<std::size_t>(r)) *
-                                           J_inv[static_cast<std::size_t>(p)][static_cast<std::size_t>(i)] *
-                                           J_inv[static_cast<std::size_t>(r)][static_cast<std::size_t>(j)];
-                                }
-                            }
-                        }
-                        d2xi_dx2[static_cast<std::size_t>(a)][static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] = -sum;
-                    }
-                }
-            }
+            zero_mapping_hessian_terms = detail::inverseMappingSecondDerivatives(
+                J_inv, mapping_hessian_at_q(), dim, d2xi_dx2);
         }
 
         if (test_is_vector_basis) {
@@ -17447,25 +17529,8 @@ void StandardAssembler::prepareContextFace(
                     }
                     scratch_ref_hessians_[idx] = H_ref;
 
-                    AssemblyContext::Matrix3x3 H_phys{};
-                    for (int r = 0; r < dim; ++r) {
-                        for (int c = 0; c < dim; ++c) {
-                            Real sum = 0.0;
-                            for (int a = 0; a < dim; ++a) {
-                                for (int b = 0; b < dim; ++b) {
-                                    sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
-                                           H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
-                                           J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
-                                }
-                            }
-                            for (int a = 0; a < dim; ++a) {
-                                sum += grad_ref[static_cast<std::size_t>(a)] *
-                                       d2xi_dx2[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
-                            }
-                            H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
-                        }
-                    }
-                    scratch_phys_hessians_[idx] = H_phys;
+                    scratch_phys_hessians_[idx] = detail::physicalBasisHessian(
+                        J_inv, H_ref, grad_ref, d2xi_dx2, dim, zero_mapping_hessian_terms);
                 }
             }
         }
@@ -17604,25 +17669,8 @@ void StandardAssembler::prepareContextFace(
                         }
                         trial_ref_hessians[idx] = H_ref;
 
-                        AssemblyContext::Matrix3x3 H_phys{};
-                        for (int r = 0; r < dim; ++r) {
-                            for (int c = 0; c < dim; ++c) {
-                                Real sum = 0.0;
-                                for (int a = 0; a < dim; ++a) {
-                                    for (int b = 0; b < dim; ++b) {
-                                        sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
-                                               H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
-                                               J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
-                                    }
-                                }
-                                for (int a = 0; a < dim; ++a) {
-                                    sum += grad_ref[static_cast<std::size_t>(a)] *
-                                           d2xi_dx2[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
-                                }
-                                H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
-                            }
-                        }
-                        trial_phys_hessians[idx] = H_phys;
+                        trial_phys_hessians[idx] = detail::physicalBasisHessian(
+                            J_inv, H_ref, grad_ref, d2xi_dx2, dim, zero_mapping_hessian_terms);
                     }
                 }
             }

@@ -73,6 +73,7 @@
 #include "Geometry/GeometryMapping.h"
 #include "Basis/BasisCache.h"
 
+#include <array>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -1923,6 +1924,46 @@ void setP1FieldDerivativeShortcutForTesting(bool enabled) noexcept;
  * default is `true`.  Process-wide; tests only.
  */
 void setPerCellCacheStorageReuseForTesting(bool enabled) noexcept;
+
+/**
+ * @brief d(xi)/dx second derivatives at one point, as the basis Hessian
+ *        transforms of prepareBasis()/prepareContextFace() use them:
+ *        d2xi_dx2[a][i][j] = -sum_{m,p,r} J_inv[a][m] H_m(p, r) J_inv[p][i] J_inv[r][j]
+ *        for a, i, j < dim (other entries untouched).
+ *
+ * Returns true when every term is a signed-zero product (finite J_inv, zero
+ * mapping Hessian: an affine cell); the entries are then -0.0, exactly what
+ * the sum computes, without the products.
+ */
+bool inverseMappingSecondDerivatives(
+    const AssemblyContext::Matrix3x3& J_inv,
+    const geometry::GeometryMapping::MappingHessian& map_hess,
+    int dim,
+    std::array<AssemblyContext::Matrix3x3, 3>& d2xi_dx2);
+
+/**
+ * @brief Physical Hessian of one scalar basis function:
+ *        J_inv^T H_ref J_inv + sum_a grad_ref[a] d2xi_dx2[a] (leading dim block).
+ *
+ * `zero_mapping_hessian_terms` is the result of
+ * inverseMappingSecondDerivatives() for the same J_inv; with it, a zero
+ * H_ref and a finite grad_ref give +0.0 entries, exactly what the sums give.
+ */
+AssemblyContext::Matrix3x3 physicalBasisHessian(
+    const AssemblyContext::Matrix3x3& J_inv,
+    const AssemblyContext::Matrix3x3& H_ref,
+    const AssemblyContext::Vector3D& grad_ref,
+    const std::array<AssemblyContext::Matrix3x3, 3>& d2xi_dx2,
+    int dim,
+    bool zero_mapping_hessian_terms);
+
+/**
+ * @brief Test-only switch for the signed-zero rule of the two functions above.
+ *
+ * With `false` they always evaluate the sums (the reference the rule must
+ * reproduce bit for bit).  The default is `true`.  Process-wide; tests only.
+ */
+void setZeroHessianTermsShortcutForTesting(bool enabled) noexcept;
 
 } // namespace detail
 
