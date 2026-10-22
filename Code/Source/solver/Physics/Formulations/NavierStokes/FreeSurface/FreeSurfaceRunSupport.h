@@ -34,6 +34,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace svmp::FE {
 namespace assembly {
@@ -42,8 +43,12 @@ class IMeshAccess;
 namespace geometry {
 class GeometryMapping;
 }
+namespace backends {
+class GenericVector;
+}
 namespace systems {
 class FESystem;
+struct SystemStateView;
 }
 } // namespace svmp::FE
 
@@ -174,6 +179,19 @@ std::uint64_t levelSetMaintenanceAlgebraicRevision(
 
 std::uint64_t collectiveLevelSetMaintenanceAlgebraicRevision(
     std::span<const svmp::FE::Real> state,
+    const svmp::MeshComm& comm);
+
+std::vector<svmp::FE::Real>
+captureFeOrderedVectorCollectively(
+    svmp::FE::backends::GenericVector& solution,
+    const svmp::MeshComm& comm);
+
+std::vector<svmp::FE::Real> gatherFeOrderedSolution(
+    svmp::FE::backends::GenericVector& solution,
+    const svmp::MeshComm& comm);
+
+std::vector<svmp::FE::Real> gatherFeOrderedSolution(
+    const svmp::FE::systems::SystemStateView& state,
     const svmp::MeshComm& comm);
 
 } // namespace detail

@@ -9,6 +9,7 @@
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRunSupport.h"
 
 #include "FE/Assembly/Assembler.h"
+#include "FE/Backends/Interfaces/GenericVector.h"
 #include "FE/Geometry/MappingFactory.h"
 #include "FE/Math/Vector.h"
 #include "FE/Systems/FESystem.h"
@@ -203,6 +204,38 @@ std::uint64_t collectiveLevelSetMaintenanceAlgebraicRevision(
         "[svMultiPhysics::Application] Level-set maintenance algebraic state revision differs across the FE communicator.");
   }
   return revision;
+}
+
+std::vector<svmp::FE::Real>
+captureFeOrderedVectorCollectively(
+    svmp::FE::backends::GenericVector& solution,
+    const svmp::MeshComm& comm)
+{
+  return svmp::FE::systems::captureFeOrderedVectorCollectively(
+      solution, feCollectiveCommunicator(comm));
+}
+
+std::vector<svmp::FE::Real> gatherFeOrderedSolution(
+    svmp::FE::backends::GenericVector& solution,
+    const svmp::MeshComm& comm)
+{
+  return captureFeOrderedVectorCollectively(solution, comm);
+}
+
+std::vector<svmp::FE::Real> gatherFeOrderedSolution(
+    const svmp::FE::systems::SystemStateView& state,
+    const svmp::MeshComm& comm)
+{
+  if (state.u_vector != nullptr) {
+    auto* solution =
+        const_cast<svmp::FE::backends::GenericVector*>(state.u_vector);
+    return gatherFeOrderedSolution(*solution, comm);
+  }
+  if (!state.u.empty()) {
+    return std::vector<svmp::FE::Real>(state.u.begin(), state.u.end());
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Application] Could not collectively gather FE-ordered state values.");
 }
 
 } // namespace svmp::Physics::formulations::navier_stokes::free_surface::detail
