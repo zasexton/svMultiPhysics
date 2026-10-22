@@ -26,6 +26,7 @@
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Constraints/ConstraintPlan.h"
 #include "FE/Core/Types.h"
+#include "FE/Interfaces/ContactLineGeometryCertificate.h"
 #include "FE/LevelSet/LevelSetGeometry.h"
 #include "FE/Systems/ALEBinding.h"
 #include "FE/Systems/FESystem.h"
@@ -38,7 +39,7 @@ namespace Physics {
 namespace formulations {
 namespace navier_stokes {
 
-constexpr FE::Real kMinimumContactTransverseSine = FE::Real{1.0e-6};
+constexpr FE::Real kMinimumContactTransverseSine = FE::interfaces::kContactLineMinimumTransverseSine;
 
 void validateDynamicContactPlanarWallMarker(
     const FE::systems::FESystem& system,

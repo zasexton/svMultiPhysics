@@ -32,6 +32,7 @@
 #include "Forms/WeakForm.h"
 
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/ContactLineGeometryCertificate.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/LevelSetInterfaceBuilder.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
@@ -1512,6 +1513,36 @@ TEST(FormulationBuilder, ComposesOptionsInCallOrderAndInstallsGroups)
     ASSERT_FALSE(residual.residual.empty());
     const auto grouped = F.installGroup({u_field}, (u * u * v).dx(), {.source_component_tag = "nonlinear"});
     ASSERT_FALSE(grouped.residual.empty());
+}
+
+TEST(ContactLineGeometryCertificate, PlanarWallEvidenceChecksTheConfiguredNormal)
+{
+    namespace interfaces = svmp::FE::interfaces;
+    constexpr int wall = 4;
+    // One boundary face, local face 0 = {0,1,2} on z = 0: outward normal (0,0,-1).
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(wall);
+    svmp::FE::systems::FESystem sys(mesh);
+
+    const auto aligned = interfaces::planarWallEvidence(sys, wall, {0.0, 0.0, -1.0});
+    EXPECT_EQ(aligned.face_count, 1u);
+    EXPECT_EQ(aligned.invalid_face_count, 0u);
+    EXPECT_NEAR(aligned.minimum_alignment, 1.0, 1e-12);
+    EXPECT_TRUE(aligned.first_failure.empty());
+
+    const auto mismatched = interfaces::planarWallEvidence(sys, wall, {1.0, 0.0, 0.0});
+    EXPECT_EQ(mismatched.face_count, 1u);
+    EXPECT_EQ(mismatched.invalid_face_count, 1u);
+    EXPECT_NE(mismatched.first_failure.find("reason=configured_normal_mismatch"), std::string::npos)
+        << mismatched.first_failure;
+
+    EXPECT_EQ(interfaces::planarWallEvidence(sys, wall + 1, {0.0, 0.0, -1.0}).face_count, 0u);
+
+    // Without a cut context there is nothing to certify.
+    const interfaces::ContactLineGeometryCheck check{
+        .contact_marker = 41, .wall_marker = wall, .wall_normal = {0.0, 0.0, -1.0}};
+    EXPECT_NO_THROW(interfaces::certifyContactLineRules(sys, nullptr, check));
+    EXPECT_TRUE(interfaces::certifyContactLineRulesCollectively(sys, nullptr, check, true, "unit"));
+    EXPECT_FALSE(interfaces::certifyContactLineRulesCollectively(sys, nullptr, check, false, "unit"));
 }
 
 TEST(FormsInstaller, FormsInstaller_RegistersCutVolumeKernel)

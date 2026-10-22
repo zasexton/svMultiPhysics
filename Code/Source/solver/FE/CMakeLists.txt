@@ -1073,6 +1073,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/FreeSurfaceFunctionalRounding.h
     Systems/BoundedUpdatePolicy.h
     Systems/BoundaryDistanceService.h
+    Interfaces/ContactLineGeometryCertificate.h
     Systems/FieldBinding.h
     Systems/FieldRegistry.h
     Systems/GeometricNonlinearity.h
@@ -1113,6 +1114,7 @@ set(FE_SYSTEMS_SOURCES
     Systems/FormulationBuilder.cpp
     Systems/BoundedUpdatePolicy.cpp
     Systems/BoundaryDistanceService.cpp
+    Interfaces/ContactLineGeometryCertificate.cpp
     Systems/FieldBinding.cpp
     Systems/FieldRegistry.cpp
     Systems/GeometryTransaction.cpp
