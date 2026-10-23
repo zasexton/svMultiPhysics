@@ -801,6 +801,103 @@ These are proposals. Each lists a recommended option and an alternative. Record 
      - Runs per angle: R/h = 8 and 16 at Δt, and R/h = 16 at Δt/2. Quarter domain, 8 ranks × 1 thread, `mumps_serial`, binary `6f23eb08-ltopgo-mumps` after its D16 check.
      - Scheduling: one 8-CPU lane, one run at a time, so that the verify chains keep the other 8 CPUs. Estimate 17–31 h in sequence (137–249 CPU-h).
      - The pre-registered 2D 90° case is not scheduled.
+- **D49, 2026-10-22 (user): `Physics/Formulations` holds only the forms-based governing equations.**
+  - **Principle:** the supporting machinery is re-posed as generic FE services, and the physics supplies forms and data to them.
+  - **Reference:** `agent-status/refactor/ns-folder-target-layout.md` (final version, 2026-10-22), with its per-file table, consumer audit, tolerance proposal and step list.
+  - **Relation to D42:** D49 extends D42's FE direction. D42 moves the physics-agnostic machinery into FE services; D49 also re-poses the free-surface machinery generically, so that Physics holds only forms.
+    - It replaces D42 step S5 / C3g (static capillary to Physics): the minimizer becomes a generic FE/LevelSet service.
+    - It redirects R2's S7 records (phase B): they go to FE services, not to Physics.
+  1. **Target: `Physics/Formulations/NavierStokes` has 8 files, about 3,900 lines.** After R1 phase 2 and R2 S7 are integrated it has 84 files and 42,045 lines; at `6f23eb08` it has 50 files and 21,651 lines.
+     - `IncompressibleNavierStokesVMSModule.{h,cpp}`: the VMS residual and `registerOn` as the weak form, with the bulk energies stated as forms (kinetic, gravitational, viscous dissipation, body-force power).
+     - `NavierStokesBCFactories.{h,cpp}`: the standard boundary conditions and the free-surface boundary condition, each term with its energy or power as a form. The free-surface terms:
+       - SurfaceStress traction with p_ext;
+       - the Young line term;
+       - the weak and strong Ren–E laws;
+       - Navier slip;
+       - the semi-implicit increment;
+       - the cut-facet pressure penalty;
+       - the fitted mesh rows and contact pin;
+       - the pressure anchor.
+     - `NavierStokesOptions.h` (option types only) and a thin `NavierStokesRegister.cpp` (the equation factory).
+     - `IncompressibleTwoFluidModule.{h,cpp}`.
+  2. **Where the machinery goes.**
+     - **FE services:**
+       - an energy-balance ledger with named channels and declared identities;
+       - accepted-stage and functional records on the FE-system attachment store;
+       - step participants;
+       - operator-stage capture;
+       - contact-line observables;
+       - snapshot field and functional evaluators;
+       - mesh-normal stage measurements;
+       - the level-set maintenance work ledger (with S9/S10);
+       - `FormulationBuilder` work channels, diagnostic forms and functional declarations;
+       - `ALEBinding` declarations;
+       - `LevelSetGeometry` markers and the contact-certificate hook;
+       - vertex-field initialization;
+       - `LevelSetVolumeConstrainedMinimizer` (FE/LevelSet), with its certificates as data.
+     - **`Physics/Core`** (the 2026-10-19 option-schema decision, D47 P2): the Navier–Stokes key schema, the capability rules and the generic input readers.
+     - **The non-form residue becomes FE data:**
+       - log formats;
+       - message and owner texts;
+       - the manifest label of the pressure-anchor kernel (the S0 manifest lines stay identical);
+       - the one-phase energy identities;
+       - the minimizer's KKT and pressure-representability certificates;
+       - the two-fluid measures.
+
+       The free-surface observer does logging only, and is removed once the logs are data.
+  3. **Energies as forms.**
+     - **What changes:** surface, wall and work energies, and the energy identities, are stated as forms by the formulation.
+     - **How they are evaluated:** by one FE service on the authoritative snapshot. It is interpreted, not JIT, and its kernels are not operator kernels, so the 0-miss JIT gate and the manifests are unaffected.
+     - **One step (E3) makes the change.**
+     - **Rule:**
+       - refsets, the S0 kernel and constraint manifests, and every solution output stay bitwise;
+       - only logged energy values may change;
+       - every other token of the energy and record logs stays byte-identical.
+     - **Tolerance gate, approved as a framework (decision 1).** It applies to E3 only and replaces R2's byte-identical energy-log gate for energy values.
+       - The final limits come back to the user after the E2 calibration (both evaluators on the same states, at 1, 2 and 4 ranks), before the gating run.
+       - The limits are 100× the calibrated maxima, within these caps:
+         - stored energies and measures: |Δ| ≤ 1e3·ε·M_c + 1e-14·S_E;
+         - powers and dissipation rates: |Δ| ≤ 1e4·ε·M_c + 1e-13·S_E/dt;
+         - derived works and balance residuals: the sum of the limits of their terms.
+       - Definitions:
+         - M_c: the channel's absolute quadrature sum Σ|w_q f_q|, logged by the new evaluator;
+         - S_E: the largest stored energy in the record;
+         - ε = 2.2e-16.
+       - Cases: refset9 and refset-ext at 1, 2 and 4 ranks, and the WP-8 energy decks.
+  4. **The minimizer exception (decision 2).**
+     - **The audit.** It traced every consumer of every energy and work value. It found one solver decision fed by energies: the static-capillary minimizer.
+       - It reads surface + Young energy, gravitational energy and volume (`ApplicationDriver.cpp` 17286–17336, target volume 17698).
+       - Every other consumer is a log, a record, or a consistency check. Those checks hold when all evaluation sites switch in one commit and totals stay sums of channels.
+     - **The minimizer keeps its present evaluator through E3.** It switches in a separate step, E4, with its own gate, declared before the run:
+       - the same minimizer outcome and certificate verdict on its tests, the certificate deck, tank at rest and the 960-case matrix;
+       - the final level set within the minimizer's tolerances.
+  5. **Exact, order-independent reduction (decision 3).**
+     - **Today:** energy sums depend on the rank count. They are rank-local sums followed by `MPI_Allreduce`, in both the snapshot evaluators and `FunctionalAssembler`.
+     - **After D49:** the energy functionals use `collectiveExactSum` (`FE/Systems/SystemCollectives`), an integer superaccumulator combined by one integer allreduce, so the functional E(state) is bitwise identical at 1, 2 and 4 ranks. Logged energies of a run still differ by the state's own rank-count spread, and nothing more.
+     - **Gates:**
+       - an FE MPI test;
+       - the t = 0 energy tokens of every deck identical at 1, 2 and 4 ranks.
+  6. **Measures (decision 3).** The logged measures switch with the energies in E3: liquid volume, areas, contact measure. Only the logged copies switch.
+     - **What keeps its current evaluator:** every measure a solver component reads. That means:
+       - the minimizer's candidate and target volumes (`ApplicationDriver.cpp` 17302, 17336, 17698);
+       - the wall-aware maintenance contact measure (6896–6906);
+       - kinematic reconciliation and its volume targets (FE/LevelSet volumes);
+       - the other maintenance stages.
+     - **E3's gates carry a measure-read audit,** like the energy-consumer audit.
+  7. **Sequencing.** R2 S7 and R1 phase 2 integrate first.
+     - **Every re-posing is two commits:**
+       - (a) an FE service with FE unit tests;
+       - (b) a bitwise switch-over.
+     - **The order:**
+       - the bitwise re-posing comes first;
+       - the energy value change (E3) comes last and alone, then E4;
+       - the options follow P2, placed in `Physics/Core`.
+     - **Owners:**
+       - R1: the formulation side, `FormulationBuilder`, logs as data, manifest labels;
+       - R2: records, ledger, participants, evaluators, the minimizer and the energy switch;
+       - S9/S10: the maintenance work ledger and the wall constraints;
+       - params: P6 and P2.
+     - **Estimate:** about 135 h of agent time and about 40 jobs. The steps are tracked in §5, milestone MR.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
@@ -1374,6 +1471,67 @@ Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch t
 - [ ] Publication-grade frozen qualification records for completed capabilities.
 
 ---
+
+### MR — Refactor: the formulation folder holds the governing equations (D42, D47, D49)
+
+**How each step is done (D49).**
+
+- Every re-posing is (a) an FE service with FE unit tests, then (b) a bitwise switch-over.
+- **Gate for every (b) step:**
+  - refset9 9/9 and refset-ext 7/7, serially and at 2 and 4 ranks;
+  - S0 manifests 16/16 with 0 JIT misses;
+  - log tokens;
+  - energy and record logs byte-identical (in E3, energy values within the D49 tolerance);
+  - effective configuration and the resolve-only corpus;
+  - CTest with no new failures;
+  - the exhaustive two-rank matrix;
+  - tank at rest.
+- **Reference:** `agent-status/refactor/ns-folder-target-layout.md`.
+- Line numbers below are at `3cb1e408`.
+
+**Phase 0**
+
+- [ ] I7: integrate R2 S7 (verify 166) and R1 phase 2 (verify 167).
+
+**Phase 1** (after I7)
+
+- [ ] P6a and P6b phase 1 (params): retire the legacy, CurvatureTraction, Penalty/Nitsche and KAG routes of the Navier–Stokes module (D47, D48).
+- [ ] B1 (R1): the free-surface statement moves into `NavierStokesBCFactories.cpp`; the observer does logging only.
+- [ ] M1 (R2): mesh-normal stage measurements and snapshot field evaluators to FE.
+- [ ] M2 (R2): `LevelSetVolumeConstrainedMinimizer` in FE/LevelSet, with its certificates as data. Its energy evaluator is unchanged.
+- [ ] X1 (R1): manifest type labels. The pressure-anchor subclass goes; the manifests stay identical.
+- [ ] E0 (R2): `collectiveExactSum`, with an FE MPI test identical at 1, 2 and 4 ranks.
+
+**Phase 2** (after S8 / integration 6b and S9/S10)
+
+- [ ] M3 (R2): run support and step context to FE.
+- [ ] M4 (S9/S10 with R2): the level-set maintenance work ledger in FE/LevelSet/Maintenance.
+- [ ] M5 (R2, S9/S10): operator-stage capture, contact-line observables, wall constraints.
+- [ ] P6b phase 2 (params): the projection and the minimizer's KAG branch.
+- [ ] G4(a) (R1): `FormulationBuilder` functional, work-channel and diagnostic declarations.
+
+**Phase 3**
+
+- [ ] G1 (R2): generic accepted-stage and functional records.
+- [ ] G2 (R2): the energy-balance ledger with named channels and declared identities.
+- [ ] G3 (R2): two-fluid stage records, with the measures as data.
+- [ ] G4(b) (R1): residual work, diagnostic operators and energy declarations stated in the module and `NavierStokesBCFactories`.
+- [ ] G5 (R1, with S8): `ALEBinding` declarations, `LevelSetGeometry` markers and the contact-certificate hook, field binding, vertex-field initialization.
+- [ ] L1 (R1): log formats as FE data. The observer is removed.
+- [ ] E1 (R2, R1): the snapshot functional evaluator for forms (interpreted, exact reduction).
+- [ ] E2 (R2): calibration run at 1, 2 and 4 ranks. The final tolerance limits go to the user before E3.
+- [ ] E3 (R2, R1): energies, powers, works and the logged measures as forms; the D49 tolerance gate. Two audits:
+  - **energy-consumer audit:** no energy value feeds a solver decision except the minimizer, which stays on its evaluator;
+  - **measure-read audit:** every solver-side read of a measure keeps its evaluator, by `git grep` at E3's base:
+    - the minimizer volumes, `ApplicationDriver.cpp` 17302, 17336, 17698;
+    - the wall-aware maintenance contact measure, 6896–6906;
+    - kinematic reconciliation and maintenance, which use FE/LevelSet volumes.
+
+**Phases 4–5**
+
+- [ ] P2 (params): the parser on `OptionSchema`; the schema, capability rules and readers to `Physics/Core`; the thin equation factory.
+- [ ] E4 (R2): the minimizer reads the form energies, and the pointwise evaluators are deleted. E4 gate (D49 item 4), approved before the run.
+- [ ] `Physics/Formulations/NavierStokes` at 8 files. Progress note in §4 D49.
 
 ## 6. Formulation reference (current code)
 
