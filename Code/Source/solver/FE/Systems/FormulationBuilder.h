@@ -26,11 +26,17 @@
  *   F.recordDynamicViscosity(u, mu).configure(ale);
  *   F.install({u, p}, M + C);                                    // the options themselves
  *   F.installGroup({p}, pspg, {.source_component_tag = "pspg", .extra_trial_fields = {u}});
+ *
+ * The formulation also declares its functionals here, as measured 0-forms
+ * (FunctionalForms.h):
+ *
+ *   F.functional("kinetic_energy", FunctionalKind::Stored, (0.5 * rho * inner(u, u)).dx());
  */
 
 #include "Core/Types.h"
 #include "Forms/IntegrationDomain.h"
 #include "Systems/FormsInstaller.h"
+#include "Systems/FunctionalForms.h"
 #include "Systems/OperatorRegistry.h"
 
 #include <initializer_list>
@@ -72,6 +78,14 @@ public:
     /// returns the domain.
     forms::ContactLineDomain registered(forms::ContactLineDomain domain);
     forms::BoundaryDomain registered(forms::BoundaryDomain domain);
+
+    /// Declares the measured functional @p form under @p name
+    /// (declareFunctionalForm), owned by @p owner, or by operatorTag() when
+    /// @p owner is empty.  Installs nothing.
+    FormulationBuilder& functional(std::string name,
+                                   FunctionalKind kind,
+                                   forms::FormExpr form,
+                                   std::string owner = {});
 
     [[nodiscard]] FormInstallOptions& options() noexcept { return options_; }
     [[nodiscard]] const FormInstallOptions& options() const noexcept { return options_; }

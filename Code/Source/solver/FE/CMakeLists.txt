@@ -1131,6 +1131,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/FreeSurfaceRecordTypes.h
     Systems/AcceptedStageRecords.h
     Systems/FunctionalRecords.h
+    Systems/FunctionalForms.h
     Systems/MeshBoundaryRecordSupport.h
     Systems/MeshNormalConstraintStageMeasurements.h
     Systems/SnapshotFieldAccess.h
@@ -1180,6 +1181,7 @@ set(FE_SYSTEMS_SOURCES
     Systems/EnergyBalanceLedger.cpp
     Systems/ExactAccumulator.cpp
     Systems/FunctionalRecords.cpp
+    Systems/FunctionalForms.cpp
     Systems/FESystem.cpp
     Systems/MeshBoundaryRecordSupport.cpp
     Systems/MeshNormalConstraintStageMeasurements.cpp

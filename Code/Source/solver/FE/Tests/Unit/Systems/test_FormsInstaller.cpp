@@ -10,6 +10,7 @@
 #include "Systems/FESystem.h"
 #include "Systems/DiagnosticRegistry.h"
 #include "Systems/FormulationBuilder.h"
+#include "Systems/FunctionalForms.h"
 #include "Systems/BoundaryConditionManager.h"
 #include "Systems/FormsInstallerDetail.h"
 #include "Auxiliary/AuxiliaryModelBuilder.h"
@@ -1516,6 +1517,53 @@ TEST(FormulationBuilder, ComposesOptionsInCallOrderAndInstallsGroups)
     ASSERT_FALSE(residual.residual.empty());
     const auto grouped = F.installGroup({u_field}, (u * u * v).dx(), {.source_component_tag = "nonlinear"});
     ASSERT_FALSE(grouped.residual.empty());
+}
+
+TEST(FormulationBuilder, DeclaresMeasuredFunctionalsWithoutInstallingThem)
+{
+    namespace systems = svmp::FE::systems;
+    namespace forms = svmp::FE::forms;
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+    systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    const auto half = forms::FormExpr::constant(0.5);
+
+    systems::FormulationBuilder F(sys, "op", systems::FormInstallOptions{});
+    EXPECT_TRUE(systems::functionalForms(sys).empty());
+    F.functional("energy", systems::FunctionalKind::Stored, (half * u * u).dx())
+        .functional("boundary_power", systems::FunctionalKind::Power, (u * u).ds(3) - (half * u).ds(4), "owner")
+        .functional("cut_measure", systems::FunctionalKind::Measure,
+                    -forms::FormExpr::constant(1.0).dCutVolume(5, forms::CutVolumeSide::Negative));
+
+    const auto declared = systems::functionalForms(sys);
+    ASSERT_EQ(declared.size(), 3u);
+    EXPECT_EQ(declared[0].name, "energy");
+    EXPECT_EQ(declared[0].kind, systems::FunctionalKind::Stored);
+    EXPECT_EQ(declared[0].owner, "op");   // the operator tag by default
+    EXPECT_EQ(declared[1].owner, "owner");
+    EXPECT_EQ(std::string(systems::functionalKindName(declared[2].kind)), "measure");
+    EXPECT_EQ(declared[0].form.toString(), (half * u * u).dx().toString());
+    // A declaration installs nothing.
+    EXPECT_TRUE(sys.operatorDefinition("op").cells.empty());
+    EXPECT_TRUE(sys.operatorDefinition("op").boundary.empty());
+
+    const auto rejects = [&](const std::string& name, const forms::FormExpr& form, const std::string& reason) {
+        try {
+            F.functional(name, systems::FunctionalKind::Stored, form);
+            ADD_FAILURE() << "expected a rejection: " << reason;
+        } catch (const svmp::FE::InvalidArgumentException& error) {
+            EXPECT_NE(std::string(error.what()).find(reason), std::string::npos) << error.what();
+        }
+    };
+    rejects("energy", (u * u).dx(), "already declared");
+    rejects("unmeasured", u * u, "sum of integrals");
+    rejects("linear", (u * v).dx(), "test or trial function");
+    rejects("", (u * u).dx(), "name must be nonempty");
+    rejects("empty", forms::FormExpr{}, "sum of integrals");
+    EXPECT_EQ(systems::functionalForms(sys).size(), 3u);
 }
 
 TEST(ContactLineGeometryCertificate, PlanarWallEvidenceChecksTheConfiguredNormal)

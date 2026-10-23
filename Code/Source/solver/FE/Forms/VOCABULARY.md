@@ -644,6 +644,8 @@ the rest `implemented/expert`. Namespace `systems`.
 | `F.installGroup(fields, residual, FormulationGroup{...})` | `Systems/FormulationBuilder.h` | A separate kernel group with a copy of the options changed by `source_component_tag`, `extra_trial_fields`, `ale`, or dropped trace requests |
 | `F.registered(ContactLineDomain)`, `F.registered(BoundaryDomain)` | `Systems/FormulationBuilder.h` | Registers a generated marker with the system and returns the domain |
 | `F.certifyGeneratedBoundaryNitscheTraces(bindings, marker, ratio)` | `Systems/FormulationBuilder.h` | `implemented/expert`; trace-certificate requests on a cut volume |
+| `F.functional(name, kind, form[, owner])` | `Systems/FormulationBuilder.h` | Declares a functional of the formulation as a measured 0-form (a sum of integrals with no test or trial function); nothing is installed; the owner defaults to the operator |
+| `declareFunctionalForm(system, FunctionalFormDeclaration)`, `functionalForms(system)`, `FunctionalKind` (`Stored`, `Power`, `DissipationRate`, `Measure`) | `Systems/FunctionalForms.h` | The system's declared functionals, in declaration order; declared before setup, names unique |
 | `DiagnosticRegistry::declareSet`, `enabled`, `install`, `operators` | `Systems/DiagnosticRegistry.h` | Opt-in diagnostic operators, switched on by environment names, installed with the formulation's options |
 | `resolveALEBinding(system, ALEBindingOptions)`, `ALEBinding::configureInstallOptions` | `Systems/ALEBinding.h` | Prescribed or coupled mesh velocity; sets geometry sensitivity and extra trial fields |
 | `resolveMeshDisplacementBinding(...)` | `Systems/MeshDisplacementBinding.h` | Mesh-displacement unknown of a mesh-motion module |

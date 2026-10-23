@@ -78,6 +78,21 @@ forms::BoundaryDomain FormulationBuilder::registered(forms::BoundaryDomain domai
     return domain;
 }
 
+FormulationBuilder& FormulationBuilder::functional(std::string name,
+                                                   FunctionalKind kind,
+                                                   forms::FormExpr form,
+                                                   std::string owner)
+{
+    declareFunctionalForm(*system_,
+                          FunctionalFormDeclaration{
+                              .name = std::move(name),
+                              .kind = kind,
+                              .form = std::move(form),
+                              .owner = owner.empty() ? operator_tag_ : std::move(owner),
+                          });
+    return *this;
+}
+
 FormInstallOptions FormulationBuilder::groupOptions(const FormulationGroup& group) const
 {
     FormInstallOptions group_options = options_;
