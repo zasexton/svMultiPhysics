@@ -965,6 +965,23 @@ These are proposals. Each lists a recommended option and an alternative. Record 
        - G4(b) and E3 state their forms in `NavierStokesPostProcessing.h`;
        - P2 thins the register to peer size.
      - **Estimate:** about 155 h of agent time and about 42 jobs in total (D49: 135 h, 40).
+- **D51, 2026-10-22 (user): the WP-4 closure decisions held since 2026-10-22 00:00 (c4, c5, c6, c7, Q2).**
+  1. **c4: the bound-preserving limiter is retired** (D47 item 5 kept it until the SPHERIC re-run).
+     - The rule declared before C2 (job 139, `plan_wp4c2.txt`) retires it unless the limiter-on run completes. Both limiter-on runs failed closed at step 1 (extension-map revision chain), while the limiter-off and patch-bound runs reached step 193 with no spurious liquid and a volume drift of 1.05e-5.
+     - The held revision-chain fix that would have kept it running (`dev/refactor-s7-main-held`) is dropped and never integrated.
+     - The retirement is S9/S10's commit `611535a7`: decks that set the limiter fail closed with a D51 message. The limiter was off by default, so the default path is bitwise.
+  2. **c7: SPHERIC 05 is regenerated as a true 2D deck** (near-isotropic h, disjoint faces, the current protocol; M1). The aggregation guard stays at 8. The step-193 stop (t = 0.0965 s) came from liquid wedges on the free-slip extrusion planes of a two-cell-thick mesh.
+  3. **c5: the MMS traveling-interface item leaves M1.** Its deck exercises HighOrderImplicit geometry, Taylor–Hood P2/P1 and projection reinitialization, which D47 retires or moves out of the free-surface schema; the deck stays as history.
+  4. **c6: the fitted 2D contact point is deferred past WP-4.** The unfitted angle is validated against exact Young caps, so the fitted reference is not needed for acceptance.
+  5. **Q2: the 12 minimally converted legacy decks are kept** (retired switches off, extension `pde_harmonic` monolithic), marked not re-validated, for smoke coverage.
+- **D52, 2026-10-22 (user): P2 (the Navier–Stokes option schema and the register at peer size) is approved, in a new `Physics/Options` folder.**
+  - **Location:** the schema, rules, registration and generic input readers go to `Physics/Options` (compiled into `svphysics`), not `Physics/Core`, so `Physics/Core` stays below `Physics/Formulations`. This replaces "Physics/Core" in D47 P2, D49 and D50 for these files.
+  - **Parse errors:** value and format errors use the schema texts (`<element> <key>: reason`). The retirement messages (D47, D48, D51) and the token `unsupported_free_surface_physical_model` stay byte-identical.
+  - **Duplicate spellings** of one key on a BC: the first defined spelling still wins in P2; revisited with the profiles (P4).
+  - **D47 item 3** (`Implementation` required on a Free_surface BC; `Active_domain` defaults to `LevelSetNegative`) lands as P2's last commit, B5.
+  - **Later, separate commits:** Poisson, Ustruct and MeshMotion switch to the shared input readers; the `Parameters.cpp` acceptance lists are generated from the schema (P4).
+  - **Option checks the forms use:** the predicates that read only option fields go inline into the module header, and the helpers that return FE types into `NavierStokesBCFactories.h`.
+  - **Reference:** `free-surface-params/implementation_plan.md`, "P2 = S13b".
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
@@ -1085,9 +1102,9 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
       1. Frequency convergence: add an error floor below which the order test is skipped, gate on the modal fit, or accept the failure.
       2. Whether the damping gate should use the modal amplitude instead of the probe.
 - [x] **2D linear sloshing (original plan item):** covered by the item above (three meshes; 64/128/256 steps per period at L/h = 32).
-- [ ] **SPHERIC 05 D18/D38** to t = 0.3 s and then further. Compare profiles with experiment. Proposal: no regression from the June RMSE of about 0.02 m, and no false wetting.
+- [ ] **SPHERIC 05 D18/D38** to t = 0.3 s and then further. Compare profiles with experiment. Proposal: no regression from the June RMSE of about 0.02 m, and no false wetting. *(D51: regenerate as a true 2D deck first; the extruded deck stops at step 193 on the aggregation guard. The limiter is retired.)*
 - [ ] **Re-run SPHERIC 10 and 02** on the current tip. They were never re-run after the aggregation, sparsity and penalty fixes. Record whether the June pressure-spike and sliver-cut failures persist.
-- [ ] **MMS traveling interface** refinement (the June matrix) as a regression.
+- ~~**MMS traveling interface** refinement (the June matrix) as a regression.~~ Dropped from M1 by D51 item 3; the deck stays as history.
 - Reuse: the `open_vessel_free_surface` cases and verifiers; the WP-6 conservative transport (run its frozen 18-point matrix only if volume drift is the failure).
 
 ### M2 — Capillary force route comparison and static drop (unfitted, 2D then 3D)
@@ -1516,7 +1533,7 @@ Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch t
   1. Capillary-wave frequency-order gate: lower the protocol amplitude to 0.0025λ, or use an amplitude-corrected reference. This affects unfitted M3 too.
   2. Overlapping face files: keep them as a warning or fail closed?
   3. Extend the Coriolis term to 2D, or run the forced SPHERIC case in 3D.
-- [ ] **2D contact point** (a codimension-2 point) with Young term and slip. Compare with the static meniscus.
+- [ ] **2D contact point** (a codimension-2 point) with Young term and slip. Compare with the static meniscus. *(Deferred past WP-4 by D51 item 4.)*
 
 ### M6 — Violent and long-horizon one-phase flows (T1/T5)
 
