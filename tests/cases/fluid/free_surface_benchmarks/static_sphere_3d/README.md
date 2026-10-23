@@ -108,16 +108,12 @@ offers the same choices as `capillary_wave_2d`:
 | `--transport` | Solver input | Status |
 |---|---|---|
 | `pde_extension` (default) | `Velocity_source=prescribed_data`, `Velocity_field_name=LevelSetAdvectionVelocity`, `Source_velocity_field_name=Velocity`, `Advection_velocity_extension_method=pde_harmonic`, `Advection_velocity_extension_coupling=monolithic` | the D9 protocol transport: the parameter-free harmonic PDE extension of the fluid velocity, as in `static_drop_2d`, `linear_sloshing_2d`, `capillary_wave_2d` and `sessile_drop_2d`. It writes no per-step files. The dry-region solve is replicated on every rank, which may need a distributed solve for large 3D meshes. |
-| `wet_extension` | `Velocity_source=prescribed_data`, `Use_wet_extension_advection_velocity=true`, `Advection_velocity_extension_method=wall_compatible_normal` | the algebraic wet extension, the D9 comparison baseline |
 | `coupled` | `Velocity_source=coupled_field` | the fluid velocity itself; dry vertices then carry zero velocity (D9 retires it) |
 
 `generate_case.py` selects the extension through `PDE_EXTENSION_METHOD` and
-`PDE_EXTENSION_COUPLING`. The wet extension writes one JSON map per
-accepted step: about 1 MB per step on the 625-vertex 2D drop and 4.7 MB per
-step on the 1,989-vertex 3D tank (`tank_at_rest`, 1/h = 16). Scaled by the
-vertex count, that is about 37 MB per step and 18 GB per run at `R/h = 8`, so
-the map output must become opt-in before any 3D run with that transport. Its
-compute cost is small (2.4% of a tank step). Criteria apply
+`PDE_EXTENSION_COUPLING`. The algebraic wet extension, the earlier D9
+comparison baseline (`--transport wet_extension`, used by the smoke run
+below), was retired by decisions D47 and D55. Criteria apply
 separately to each (capillary form, transport, `La`) study.
 
 **Time step (decision D25, 2026-10-07).** The protocol is the D19 step of

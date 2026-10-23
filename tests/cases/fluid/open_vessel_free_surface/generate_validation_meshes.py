@@ -716,7 +716,7 @@ def write_solver_xml(
     hydrostatic_pressure_field_name: str | None = None,
     momentum_source_file_path: str | None = None,
     rotating_frame_angular_velocity_file_path: str | None = None,
-    wet_extension_advection_velocity_method: str | None = None,
+    advection_velocity_extension_method: str | None = None,
     enable_adaptive_time_loop: bool = False,
     adaptive_time_loop_min_dt: str = TEST05_ADAPTIVE_TIME_LOOP_MIN_DT,
     adaptive_time_loop_max_dt: str = TEST05_ADAPTIVE_TIME_LOOP_MAX_DT,
@@ -857,7 +857,7 @@ def write_solver_xml(
         else ""
     )
     jit_module_options = "jit=true; jit_specialization=true"
-    if wet_extension_advection_velocity_method is None:
+    if advection_velocity_extension_method is None:
         level_set_velocity_block = """  <Velocity_source>coupled_field</Velocity_source>
   <Velocity_field_name>Velocity</Velocity_field_name>
   <Auto_register_velocity_field>true</Auto_register_velocity_field>"""
@@ -865,9 +865,9 @@ def write_solver_xml(
         level_set_velocity_block = f"""  <Velocity_source>prescribed_data</Velocity_source>
   <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
   <Auto_register_velocity_field>true</Auto_register_velocity_field>
-  <Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>
   <Source_velocity_field_name>Velocity</Source_velocity_field_name>
-  <Wet_extension_advection_velocity_method>{wet_extension_advection_velocity_method}</Wet_extension_advection_velocity_method>"""
+  <Advection_velocity_extension_method>{advection_velocity_extension_method}</Advection_velocity_extension_method>
+  <Advection_velocity_extension_coupling>monolithic</Advection_velocity_extension_coupling>"""
     momentum_source_block = (
         "\n  <Momentum_source_temporal_and_spatial_values_file_path>"
         f"{momentum_source_file_path}"
@@ -1160,7 +1160,7 @@ def write_case(
     hydrostatic_pressure_field_name: str | None = None,
     momentum_source_file_path: str | None = None,
     rotating_frame_angular_velocity_file_path: str | None = None,
-    wet_extension_advection_velocity_method: str | None = None,
+    advection_velocity_extension_method: str | None = None,
     enable_adaptive_time_loop: bool = False,
     adaptive_time_loop_min_dt: str = TEST05_ADAPTIVE_TIME_LOOP_MIN_DT,
     adaptive_time_loop_max_dt: str = TEST05_ADAPTIVE_TIME_LOOP_MAX_DT,
@@ -1230,7 +1230,7 @@ def write_case(
         hydrostatic_pressure_field_name=hydrostatic_pressure_field_name,
         momentum_source_file_path=momentum_source_file_path,
         rotating_frame_angular_velocity_file_path=rotating_frame_angular_velocity_file_path,
-        wet_extension_advection_velocity_method=wet_extension_advection_velocity_method,
+        advection_velocity_extension_method=advection_velocity_extension_method,
         enable_adaptive_time_loop=enable_adaptive_time_loop,
         adaptive_time_loop_min_dt=adaptive_time_loop_min_dt,
         adaptive_time_loop_max_dt=adaptive_time_loop_max_dt,
@@ -1421,7 +1421,7 @@ def generate_spheric_test10(*, allow_overlapping_face_files: bool = False) -> No
         use_direct_fluid_solver=True,
         include_pressure_constraints=False,
         hydrostatic_pressure_field_name="Pressure",
-        wet_extension_advection_velocity_method="wall_compatible_normal",
+        advection_velocity_extension_method="pde_harmonic",
         momentum_source_file_path="bc/test10_lateral_water_1x_roll_body_force.dat",
         rotating_frame_angular_velocity_file_path="bc/test10_lateral_water_1x_roll_angular_velocity.dat",
     )
@@ -1569,7 +1569,7 @@ def generate_spheric_test05(*, allow_overlapping_face_files: bool = False) -> No
             use_direct_fluid_solver=True,
             include_pressure_constraints=False,
             hydrostatic_pressure_field_name="Pressure",
-            wet_extension_advection_velocity_method="wall_compatible_normal",
+            advection_velocity_extension_method="pde_harmonic",
             enable_adaptive_time_loop=True,
             newton_line_search_fail_on_no_reduction=True,
             newton_line_search_max_iterations="6",
@@ -1688,7 +1688,7 @@ def generate_spheric_test02(*, allow_overlapping_face_files: bool = False) -> No
         use_direct_fluid_solver=True,
         include_pressure_constraints=False,
         hydrostatic_pressure_field_name="Pressure",
-        wet_extension_advection_velocity_method="wall_compatible_normal",
+        advection_velocity_extension_method="pde_harmonic",
         enable_adaptive_time_loop=True,
         adaptive_time_loop_min_dt="1.0e-7",
         adaptive_time_loop_max_dt="1.0e-3",

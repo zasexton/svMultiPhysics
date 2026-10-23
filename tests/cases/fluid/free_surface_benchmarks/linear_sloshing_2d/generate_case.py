@@ -60,10 +60,11 @@ WALLS = ("wall_left", "wall_right", "wall_bottom", "wall_top")
 EFFECTIVE_DIRECTION = {"wall_left": "1 0", "wall_right": "1 0", "wall_bottom": "0 1"}
 # Level-set advection velocity (decision D9).  The protocol advects phi with
 # the PDE extension of the fluid velocity into the dry region.  The other
-# values are comparisons: the fluid velocity itself (coupled_field), the
-# algebraic wall-compatible wet extension of the SPHERIC Test 05 decks
-# (wet_extension) and the other PDE operator.
-LEVEL_SET_VELOCITY = ("coupled_field", "wet_extension",
+# values are comparisons: the fluid velocity itself (coupled_field) and the
+# other PDE operator.  The algebraic wall-compatible wet extension of the
+# earlier SPHERIC Test 05 decks (wet_extension) was retired (decisions D47
+# and D55).
+LEVEL_SET_VELOCITY = ("coupled_field",
                       "pde_harmonic_monolithic", "pde_harmonic_prescribed",
                       "pde_normal_monolithic", "pde_normal_prescribed")
 PROTOCOL_LEVEL_SET_VELOCITY = "pde_harmonic_monolithic"
@@ -306,12 +307,7 @@ def level_set_velocity_block(mode: str) -> str:
     <Source_velocity_field_name>Velocity</Source_velocity_field_name>
     <Advection_velocity_extension_method>{method}</Advection_velocity_extension_method>
     <Advection_velocity_extension_coupling>{coupling}</Advection_velocity_extension_coupling>"""
-    return """    <Velocity_source>prescribed_data</Velocity_source>
-    <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
-    <Auto_register_velocity_field>true</Auto_register_velocity_field>
-    <Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>
-    <Source_velocity_field_name>Velocity</Source_velocity_field_name>
-    <Wet_extension_advection_velocity_method>wall_compatible_normal</Wet_extension_advection_velocity_method>"""
+    raise ValueError(f"--level-set-velocity must be one of {LEVEL_SET_VELOCITY}")
 
 
 def solver_xml(schedule: dict, steps: int, cadence: int,

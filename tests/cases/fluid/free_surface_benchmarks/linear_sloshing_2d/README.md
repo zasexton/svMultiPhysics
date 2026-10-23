@@ -249,11 +249,10 @@ protocol runs but never gates them:
 
 - `--level-set-velocity`: `pde_harmonic_monolithic` (protocol),
   `pde_normal_monolithic`, `pde_harmonic_prescribed`, `pde_normal_prescribed`,
-  `coupled_field` (the fluid velocity itself, the first protocol) or
-  `wet_extension` (the algebraic wall-compatible extension of the SPHERIC
-  Test 05 decks; with `Write_velocity_extension_maps` set to `true` in the
-  level-set equation it also writes one JSON map per step under
-  `velocity_extension_maps/`, 1.8 GB for an `L/h = 64` run; off by default).
+  `coupled_field` (the fluid velocity itself, the first protocol).  The
+  `wet_extension` value (the algebraic wall-compatible extension of the
+  earlier SPHERIC Test 05 decks) was retired by decisions D47 and D55; its
+  results below are history.
 - `--mean-depth H0`: moves the rest level, and with it the interface's
   position in its cell row; the reference is recomputed for `H0`.
 

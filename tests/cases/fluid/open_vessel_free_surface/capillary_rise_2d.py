@@ -33,11 +33,14 @@ Two deck profiles are written (``write_case(..., profile=...)``):
   cells) a liquid film left on the wall by the receding contact line holds
   aggregation candidates beyond the guards, and the run stops there; the
   comparison window is [0, 0.416] s (candidate protocol revision 3).
-* ``"legacy"``: the 2026-08-30 deck (PrescribedContactAngle, wet-extension
-  transport, corner-linearized cut geometry, tolerances 1e-6), reproduced
-  byte for byte except that the level-set discontinuity capturing and the
-  every-step projection reinitialization, both retired by decision D47, are
-  off; run_test05_velocity_growth_smoke.py keeps writing it.
+* ``"legacy"``: the 2026-08-30 deck (PrescribedContactAngle, corner-linearized
+  cut geometry, tolerances 1e-6), reproduced byte for byte except that the
+  level-set discontinuity capturing and the every-step projection
+  reinitialization, both retired by decision D47, are off, and that the
+  level set is advected by the harmonic PDE velocity extension with
+  monolithic coupling instead of the wall-compatible wet extension retired by
+  decisions D47 and D55 (not re-validated);
+  run_test05_velocity_growth_smoke.py keeps writing it.
 
 Run as a script, the module writes one comparison level (``--half-gap-cells``
 10, 20 or 40) with the time step of the frozen contact-motion limit of that
@@ -323,9 +326,9 @@ def _legacy_solver_xml(steps: int, time_step_size: float) -> str:
   <Velocity_source>prescribed_data</Velocity_source>
   <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
   <Auto_register_velocity_field>true</Auto_register_velocity_field>
-  <Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>
   <Source_velocity_field_name>Velocity</Source_velocity_field_name>
-  <Wet_extension_advection_velocity_method>wall_compatible_normal</Wet_extension_advection_velocity_method>
+  <Advection_velocity_extension_method>pde_harmonic</Advection_velocity_extension_method>
+  <Advection_velocity_extension_coupling>monolithic</Advection_velocity_extension_coupling>
   <Enable_SUPG>true</Enable_SUPG>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
   <SUPG_transient_scale>2.0</SUPG_transient_scale>

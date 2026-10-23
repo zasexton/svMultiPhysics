@@ -156,6 +156,13 @@ RETIRED_CURVATURE_PROJECTION_OPTIONS = (
     ("--max-diagnostic-curvature-projection-vertex-adjacency-builds", False),
     ("--max-diagnostic-curvature-projection-sample-adjacency-builds", False),
 )
+# Decisions D47 and D55 retired the algebraic wall-compatible wet extension
+# (wall_compatible_normal and its nearest-* aliases); its method option now
+# fails at argument validation.  --advection-velocity-extension-method
+# selects the PDE extension (pde_harmonic, pde_normal).
+RETIRED_WET_EXTENSION_OPTIONS = (
+    ("--wet-extension-advection-velocity-method", False),
+)
 HIGH_ORDER_SYNTHETIC_CASES = {
     "capillaryarc2d",
     "capillarywave2d",
@@ -712,6 +719,17 @@ def reject_retired_curvature_projection_options(
         "curvature field")
 
 
+def reject_retired_wet_extension_options(options: list[str] | None) -> None:
+    """Raise ValueError naming every retired wet-extension option given."""
+    if not options:
+        return
+    raise ValueError(
+        f"{', '.join(options)}: the algebraic wall-compatible wet extension "
+        "(wall_compatible_normal and the nearest-* methods) was retired by "
+        "decisions D47 and D55; use --advection-velocity-extension-method "
+        "pde_harmonic or pde_normal")
+
+
 def configure_solver(solver_xml: Path,
                      steps: int,
                      time_step_size: float | None = None,
@@ -750,7 +768,7 @@ def configure_solver(solver_xml: Path,
                      active_domain: str = "LevelSetNegative",
                      surface_tension: float | None = None,
                      capillary_force_form: str = "surface_stress",
-                     wet_extension_advection_velocity_method: str | None = None,
+                     advection_velocity_extension_method: str | None = None,
                      enable_static_capillary_equilibrium_initialization:
                      bool | None = None,
                      static_capillary_volume_tolerance: float | None = None,
@@ -964,21 +982,26 @@ def configure_solver(solver_xml: Path,
         set_text(free_surface, "Surface_tension", f"{surface_tension:.16g}")
         if surface_tension > 0.0:
             set_text(free_surface, "Surface_tension_form", "SurfaceStress")
-    if wet_extension_advection_velocity_method is not None:
+    if advection_velocity_extension_method is not None:
         level_set = level_set_equation(root)
-        constant_velocity = level_set.find("Constant_velocity")
-        if constant_velocity is not None:
-            level_set.remove(constant_velocity)
+        # The algebraic wet extension and its switch were retired (decisions
+        # D47 and D55); the PDE extension is selected by method and coupling.
+        for retired in ("Constant_velocity",
+                        "Use_wet_extension_advection_velocity",
+                        "Wet_extension_advection_velocity_method"):
+            element = level_set.find(retired)
+            if element is not None:
+                level_set.remove(element)
         set_text(level_set, "Velocity_source", "prescribed_data")
         set_text(level_set, "Velocity_field_name", "LevelSetAdvectionVelocity")
         set_text(level_set, "Auto_register_velocity_field", "true")
-        set_text(level_set, "Use_wet_extension_advection_velocity", "true")
         set_text(level_set, "Source_velocity_field_name", "Velocity")
         set_text(
             level_set,
-            "Wet_extension_advection_velocity_method",
-            wet_extension_advection_velocity_method,
+            "Advection_velocity_extension_method",
+            advection_velocity_extension_method,
         )
+        set_text(level_set, "Advection_velocity_extension_coupling", "monolithic")
     if enable_static_capillary_equilibrium_initialization is not None:
         level_set = level_set_equation(root)
         set_text(
@@ -2598,7 +2621,7 @@ def write_capillary_wave2d_case(case_dir: Path,
             "wall_bottom": "impermeable normal-only; horizontal tangential motion free",
             "wall_top": "dry open numerical truncation (LevelSetOutflow)",
             "vertical_wall_effective_direction": [1.0, 0.0],
-            "required_transport_extension": "wall_compatible_normal",
+            "required_transport_extension": "pde_harmonic",
         },
         "dimensions_m": {
             "tank_length": 1.0,
@@ -7282,7 +7305,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "level_set_active_domain",
         "capillary_force_form",
         "cut_cell_pressure_stabilization_policy",
-        "wet_extension_advection_velocity_method",
+        "advection_velocity_extension_method",
         "sessile_contact_line_model",
         "static_capillary_volume_tolerance",
         "static_capillary_projected_gradient_tolerance",
@@ -10663,11 +10686,11 @@ def capillary_wave_boundary_contract_metrics(case_dir: Path) -> dict[str, Any]:
             errors.append("wall_bottom prescribed normal velocity must be zero")
 
     velocity_source = (level_set.findtext("Velocity_source") or "").strip()
-    wet_extension = (
-        level_set.findtext("Use_wet_extension_advection_velocity") or ""
-    ).strip().lower()
     extension_method = (
-        level_set.findtext("Wet_extension_advection_velocity_method") or ""
+        level_set.findtext("Advection_velocity_extension_method") or ""
+    ).strip().lower()
+    extension_coupling = (
+        level_set.findtext("Advection_velocity_extension_coupling") or ""
     ).strip().lower()
     velocity_extension = (
         free_surface.findtext("Enable_velocity_extension") or ""
@@ -10684,11 +10707,13 @@ def capillary_wave_boundary_contract_metrics(case_dir: Path) -> dict[str, Any]:
         )
     if velocity_source.lower() != "prescribed_data":
         errors.append("capillary-wave level-set velocity source must be prescribed_data")
-    if wet_extension != "true":
-        errors.append("capillary-wave wet velocity extension must be enabled")
-    if extension_method != "wall_compatible_normal":
+    if extension_method != "pde_harmonic":
         errors.append(
-            "capillary-wave transport must use wall_compatible_normal extension"
+            "capillary-wave transport must use the pde_harmonic extension"
+        )
+    if extension_coupling != "monolithic":
+        errors.append(
+            "capillary-wave transport must couple the extension monolithically"
         )
     if velocity_extension in {"true", "1", "yes", "on"}:
         errors.append(
@@ -10708,8 +10733,8 @@ def capillary_wave_boundary_contract_metrics(case_dir: Path) -> dict[str, Any]:
             (top_boundaries[0].findtext("Type") or "").strip()
             if len(top_boundaries) == 1 else None
         ),
-        "capillary_wave_wet_extension_enabled": wet_extension == "true",
-        "capillary_wave_wet_extension_method": extension_method,
+        "capillary_wave_extension_method": extension_method,
+        "capillary_wave_extension_coupling": extension_coupling,
         "capillary_wave_fluid_velocity_extension_enabled": (
             velocity_extension in {"true", "1", "yes", "on"}
         ),
@@ -11743,8 +11768,8 @@ def case_args_for_run(case_name: str,
         case_args.wall_slip_length = CAPILLARY_RISE_SLIP_LENGTH_M
         set_default(
             case_args,
-            "wet_extension_advection_velocity_method",
-            "wall_compatible_normal",
+            "advection_velocity_extension_method",
+            "pde_harmonic",
         )
         case_args.min_max_speed = 0.0
         case_args.min_wet_mean_speed = 0.0
@@ -12047,8 +12072,8 @@ def configure_case_solver_xml(run_dir: Path, args: argparse.Namespace) -> None:
         surface_tension=args.surface_tension,
         capillary_force_form=getattr(
             args, "capillary_force_form", "surface_stress"),
-        wet_extension_advection_velocity_method=(
-            args.wet_extension_advection_velocity_method),
+        advection_velocity_extension_method=(
+            args.advection_velocity_extension_method),
         enable_static_capillary_equilibrium_initialization=getattr(
             args,
             "initialize_discrete_static_capillary_equilibrium",
@@ -12512,21 +12537,14 @@ def apply_level_set_advection_velocity_diagnostic_gate_defaults(
     args.require_level_set_advection_velocity_diagnostics = True
     set_default(
         args,
-        "wet_extension_advection_velocity_method",
-        "wall_compatible_normal",
+        "advection_velocity_extension_method",
+        "pde_harmonic",
     )
-    expected_method = args.wet_extension_advection_velocity_method
     set_default(
         args,
         "expect_level_set_advection_velocity_extension_method",
-        expected_method,
+        args.advection_velocity_extension_method,
     )
-    if expected_method == "nearest_active_vertex":
-        set_default(
-            args,
-            "expect_level_set_advection_velocity_interface_sample_source",
-            "all_cells",
-        )
 
 
 def apply_high_order_production_qualification_defaults(
@@ -13372,8 +13390,8 @@ def apply_high_order_capillary_wave_smoke_defaults(args: argparse.Namespace) -> 
         FREE_SURFACE_ENERGY_MAX_ABOVE_INITIAL_RELATIVE,
     )
 
-    set_default(args, "wet_extension_advection_velocity_method",
-                "wall_compatible_normal")
+    set_default(args, "advection_velocity_extension_method",
+                "pde_harmonic")
     set_default(args, "max_capillary_rejected_steps", 0)
     set_default(args, "max_capillary_dt_updates", 0)
     set_default(args, "max_capillary_speed_per_surface_tension", 10.0)
@@ -13957,13 +13975,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
                         action="store_false")
     parser.add_argument("--disable-cut-metadata-scale", action="store_true")
     parser.add_argument("--disable-velocity-extension", action="store_true")
+    # The algebraic wet extension (wall_compatible_normal and the nearest-*
+    # aliases) was retired (decisions D47 and D55).
     parser.add_argument(
-        "--wet-extension-advection-velocity-method",
-        choices=(
-            "wall_compatible_normal",
-            "nearest_active_vertex",
-            "nearest_interface_point",
-        ),
+        "--advection-velocity-extension-method",
+        choices=("pde_harmonic", "pde_normal"),
     )
     parser.add_argument("--trace-level-set-advection-velocity", action="store_true")
     parser.add_argument("--cut-cell-velocity-gradient-penalty", type=float)
@@ -14114,14 +14130,25 @@ def main(arguments: Sequence[str] | None = None) -> int:
             nargs=0 if flag else None,
             help=argparse.SUPPRESS,
         )
+    for option, flag in RETIRED_WET_EXTENSION_OPTIONS:
+        parser.add_argument(
+            option,
+            dest="retired_wet_extension_options",
+            action=RetiredOptionAction,
+            nargs=0 if flag else None,
+            help=argparse.SUPPRESS,
+        )
     args = parser.parse_args(arguments)
     try:
         validate_capillary_force_form(args.capillary_force_form)
         reject_retired_curvature_projection_options(
             args.retired_curvature_projection_options)
+        reject_retired_wet_extension_options(
+            args.retired_wet_extension_options)
     except ValueError as error:
         parser.error(str(error))
     del args.retired_curvature_projection_options
+    del args.retired_wet_extension_options
     remember_explicit_cli_overrides(args)
     apply_high_order_production_qualification_defaults(args)
     apply_high_order_mpi_production_qualification_defaults(args)

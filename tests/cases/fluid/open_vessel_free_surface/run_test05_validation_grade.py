@@ -141,10 +141,10 @@ def run_solver_case(args: argparse.Namespace, case: str) -> Path:
         "--timeout-seconds",
         f"{args.timeout_seconds:.17g}",
     ]
-    if args.wet_extension_advection_velocity_method:
+    if args.advection_velocity_extension_method:
         command.extend([
-            "--wet-extension-advection-velocity-method",
-            args.wet_extension_advection_velocity_method,
+            "--advection-velocity-extension-method",
+            args.advection_velocity_extension_method,
         ])
     if args.allow_experimental_profile_linear_solver:
         command.append("--allow-experimental-profile-linear-solver")
@@ -530,7 +530,7 @@ def main() -> int:
     parser.add_argument("--linear-algebra-backend", default="eigen")
     parser.add_argument("--linear-preconditioner", default="none")
     parser.add_argument("--allow-experimental-profile-linear-solver", action="store_true", default=True)
-    parser.add_argument("--wet-extension-advection-velocity-method", default=None)
+    parser.add_argument("--advection-velocity-extension-method", default=None)
     parser.add_argument("--extra-runner-arg", action="append", default=[])
     parser.add_argument("--adaptive-time-loop-min-dt", type=float, default=1.5625e-5)
     parser.add_argument("--adaptive-time-loop-max-dt", type=float, default=5.0e-4)

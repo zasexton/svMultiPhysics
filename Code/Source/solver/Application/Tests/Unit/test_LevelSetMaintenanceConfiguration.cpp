@@ -755,8 +755,7 @@ TEST(LevelSetMaintenanceConfiguration,
 
   auto ordered = makeLegacyInput();
   put(ordered.equation_parameters, "Velocity_source", "prescribed_data");
-  put(ordered.equation_parameters,
-      "Use_wet_extension_advection_velocity", "true");
+  put(ordered.equation_parameters, "Source_velocity_field_name", "Velocity");
   put(ordered.equation_parameters, "Constant_velocity", "1.0 2.0 3.0");
   put(ordered.equation_parameters, "Enable_kinematic_reconciliation", "true");
   const auto ordered_resolved =

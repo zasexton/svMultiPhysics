@@ -139,12 +139,18 @@ def check_case(case_dir: Path) -> dict[str, object]:
     _require_text(level_set, "Velocity_source", "prescribed_data", solver_path)
     _require_text(level_set, "Velocity_field_name", "LevelSetAdvectionVelocity", solver_path)
     _require_text(level_set, "Auto_register_velocity_field", "true", solver_path)
-    _require_text(level_set, "Use_wet_extension_advection_velocity", "true", solver_path)
     _require_text(level_set, "Source_velocity_field_name", "Velocity", solver_path)
+    # The algebraic wet extension was retired (decisions D47 and D55).
     _require_text(
         level_set,
-        "Wet_extension_advection_velocity_method",
-        "wall_compatible_normal",
+        "Advection_velocity_extension_method",
+        "pde_harmonic",
+        solver_path,
+    )
+    _require_text(
+        level_set,
+        "Advection_velocity_extension_coupling",
+        "monolithic",
         solver_path,
     )
     _require_text(level_set, "Enable_reinitialization", "false", solver_path)

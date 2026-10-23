@@ -512,7 +512,7 @@ def test_high_order_motion_gates_default_advection_velocity_diagnostics():
         high_order_mpi_motion_smoke=False,
         trace_level_set_advection_velocity=False,
         require_level_set_advection_velocity_diagnostics=False,
-        wet_extension_advection_velocity_method=None,
+        advection_velocity_extension_method=None,
         expect_level_set_advection_velocity_extension_method=None,
         expect_level_set_advection_velocity_interface_sample_source=None,
     )
@@ -523,7 +523,7 @@ def test_high_order_motion_gates_default_advection_velocity_diagnostics():
     assert args.require_level_set_advection_velocity_diagnostics is True
     assert (
         args.expect_level_set_advection_velocity_extension_method
-        == "wall_compatible_normal"
+        == "pde_harmonic"
     )
     assert args.expect_level_set_advection_velocity_interface_sample_source is None
 
@@ -537,7 +537,7 @@ def test_high_order_motion_advection_defaults_follow_requested_method():
         high_order_mpi_motion_smoke=False,
         trace_level_set_advection_velocity=False,
         require_level_set_advection_velocity_diagnostics=False,
-        wet_extension_advection_velocity_method="nearest_interface_point",
+        advection_velocity_extension_method="pde_normal",
         expect_level_set_advection_velocity_extension_method=None,
         expect_level_set_advection_velocity_interface_sample_source=None,
     )
@@ -548,7 +548,7 @@ def test_high_order_motion_advection_defaults_follow_requested_method():
     assert args.require_level_set_advection_velocity_diagnostics is True
     assert (
         args.expect_level_set_advection_velocity_extension_method
-        == "nearest_interface_point"
+        == "pde_normal"
     )
     assert args.expect_level_set_advection_velocity_interface_sample_source is None
 
@@ -922,7 +922,7 @@ def test_write_capillary_wave2d_case_records_reference_profile():
         assert wave["final_time_s"] == 0.006
         assert (
             benchmark["boundary_contract"]["required_transport_extension"]
-            == "wall_compatible_normal"
+            == "pde_harmonic"
         )
 
         root = smoke.ET.parse(case_dir / "solver.xml").getroot()
@@ -2295,14 +2295,14 @@ def test_capillary_wave_boundary_contract_gate_rejects_retired_transport():
     metrics = {
         "capillary_wave_boundary_contract_valid": False,
         "capillary_wave_boundary_contract_errors": [
-            "capillary-wave transport must use wall_compatible_normal extension"
+            "capillary-wave transport must use the pde_harmonic extension"
         ],
     }
 
     errors = smoke.capillary_wave_boundary_contract_errors(metrics, args)
 
     assert len(errors) == 1
-    assert "wall_compatible_normal" in errors[0]
+    assert "pde_harmonic" in errors[0]
 
 
 def test_capillary_stability_errors_reject_unstable_time_loop_and_speed():
@@ -2497,7 +2497,7 @@ def test_capillary_wave_defaults_enable_reference_profile_gates():
     assert args.require_reference_profile_comparison is True
     assert args.enable_physical_history_instrumentation is True
     assert args.surface_tension == 50.0
-    assert args.wet_extension_advection_velocity_method == "wall_compatible_normal"
+    assert args.advection_velocity_extension_method == "pde_harmonic"
     assert _curvature_projection_state(args) == []
     assert args.max_capillary_wave_frequency_relative_error == 0.10
     assert args.max_capillary_wave_profile_relative_error == 0.25
@@ -2772,6 +2772,20 @@ def test_curvature_projection_options_fail_closed(capsys):
         in error
     )
     assert error.count("--projected-curvature-field") == 1
+
+
+def test_retired_wet_extension_option_fails_closed(capsys):
+    smoke = _load_smoke_module()
+    for option, flag in smoke.RETIRED_WET_EXTENSION_OPTIONS:
+        for method in ("wall_compatible_normal", "nearest_interface_point",
+                       "pde_harmonic"):
+            with pytest.raises(SystemExit) as raised:
+                smoke.main(["--case", "mini2d", option] +
+                           ([] if flag else [method]))
+            assert raised.value.code == 2
+            error = capsys.readouterr().err
+            assert f"{option}: the algebraic wall-compatible wet extension" in error
+            assert "decisions D47 and D55" in error
 
 
 def test_solver_elapsed_time_errors_reject_runtime_budget_overrun():

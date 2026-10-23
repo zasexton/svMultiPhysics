@@ -26,7 +26,7 @@
     "surface_tension_semi_implicit": "NormalIncrement (decisions D13, D19, D25; None before D25)",
     "kinematic_reconciliation": "on (Enable_kinematic_reconciliation = true, decision D14; off before D25)",
     "capillary_form": "D25 gates SurfaceStress only (both KAG forms fail M2 in 2D); the criteria apply to any form.",
-    "transport": "Level-set advection velocity (decision D9): pde_extension (harmonic PDE extension, monolithic coupling; the protocol transport), wet_extension and coupled for comparison. Criteria apply separately to each transport.",
+    "transport": "Level-set advection velocity (decision D9): pde_extension (harmonic PDE extension, monolithic coupling; the protocol transport) and coupled for comparison; the wet_extension baseline was retired by decisions D47 and D55. Criteria apply separately to each transport.",
     "note": "Criteria apply separately to each (capillary form, transport, Laplace number, dt divisor) refinement study, and must pass at dt and, where the dt/2 study has the level, at dt/2. See README.md for the definitions and the cost of each level.",
     "note_before_D25": "R/h = 32 (5.3 million tetrahedra, about 4,000 steps at La = 12) may not be affordable with the current per-step cost; without it the pressure-jump criterion cannot be evaluated (README.md, Expected cost per level)."
   },

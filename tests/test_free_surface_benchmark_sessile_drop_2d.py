@@ -122,10 +122,11 @@ def test_generated_case_uses_the_d4_configuration(tmp_path):
     coupled = gen.solver_xml("surface_stress", 60, gen.time_schedule(16, 5.0, 100), 10, 1,
                              transport="coupled")
     assert "<Velocity_source>coupled_field" in coupled
-    wet = gen.solver_xml("surface_stress", 60, gen.time_schedule(16, 5.0, 100), 10, 1,
-                         transport="wet_extension")
-    assert "<Use_wet_extension_advection_velocity>true" in wet
-    assert "wall_compatible_normal" in wet
+    # The wall-compatible wet extension was retired (decisions D47 and D55).
+    assert "wet_extension" not in gen.TRANSPORTS
+    with pytest.raises(ValueError, match="transport must be one of"):
+        gen.solver_xml("surface_stress", 60, gen.time_schedule(16, 5.0, 100), 10, 1,
+                       transport="wet_extension")
     pde = gen.solver_xml("surface_stress", 60, gen.time_schedule(16, 5.0, 100), 10, 1,
                          transport="pde_extension")
     assert "<Advection_velocity_extension_method>pde_harmonic<" in pde
@@ -350,9 +351,8 @@ def test_time_step_rules_and_semi_implicit_term(tmp_path):
         gen.generate(16, 60, "surface_stress", tmp_path / "bad2", dt_rule="per-period")
     with pytest.raises(ValueError):
         gen.generate(16, 60, "surface_stress", tmp_path / "bad3", semi_implicit="Implicit")
-    with pytest.raises(ValueError):                     # the solver rejects this combination
-        gen.generate(16, 60, "surface_stress", tmp_path / "bad4", transport="wet_extension",
-                     semi_implicit="NormalIncrement")
+    with pytest.raises(ValueError):                     # the retired wet extension
+        gen.generate(16, 60, "surface_stress", tmp_path / "bad4", transport="wet_extension")
     with pytest.raises(ValueError):
         gen.generate(16, 60, "surface_stress", tmp_path / "bad5", dt_multiple=0.0)
 

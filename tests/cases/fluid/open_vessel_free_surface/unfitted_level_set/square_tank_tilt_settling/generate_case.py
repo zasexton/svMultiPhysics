@@ -378,8 +378,9 @@ def write_solver_xml(
   <Velocity_source>prescribed_data</Velocity_source>
   <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
   <Auto_register_velocity_field>true</Auto_register_velocity_field>
-  <Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>
-  <Advection_velocity_from_field>Velocity</Advection_velocity_from_field>
+  <Source_velocity_field_name>Velocity</Source_velocity_field_name>
+  <Advection_velocity_extension_method>pde_harmonic</Advection_velocity_extension_method>
+  <Advection_velocity_extension_coupling>monolithic</Advection_velocity_extension_coupling>
   <Enable_SUPG>true</Enable_SUPG>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
   <Enable_reinitialization>false</Enable_reinitialization>

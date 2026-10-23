@@ -132,11 +132,12 @@ selects the velocity that advects `phi`:
 | `--transport` | Solver input | Status |
 |---|---|---|
 | `pde_extension` (default) | `Velocity_source=prescribed_data`, `Advection_velocity_extension_method=pde_harmonic`, `Advection_velocity_extension_coupling=monolithic` | the D9 protocol transport: the parameter-free harmonic PDE extension of the fluid velocity into the dry region, with monolithic coupling, as in `linear_sloshing_2d`, `static_drop_2d` and `sessile_drop_2d` (validation in the `linear_sloshing_2d` README). It writes no per-step files. |
-| `wet_extension` | `Velocity_source=prescribed_data`, `Use_wet_extension_advection_velocity=true`, `Advection_velocity_extension_method=wall_compatible_normal` | the algebraic wall-compatible wet extension, the D9 comparison baseline. It writes one JSON map per accepted step (about 1 MB per step in the static-drop smoke run), so a 2900-step run produces gigabytes; keep such runs on `$SCRATCH`. |
 | `coupled` | `Velocity_source=coupled_field` | the fluid velocity itself, used by the smoke run below. Dry vertices then carry zero velocity; D9 retires this transport after it failed `linear_sloshing_2d` at `L/h = 64`. |
 
-The side walls hold `u_x = 0` strongly at every wall vertex, so none of the
-three moves `phi` through a wall. Criteria are applied separately to each
+The algebraic wall-compatible wet extension, the earlier D9 comparison
+baseline (`--transport wet_extension`), was retired by decisions D47 and D55.
+The side walls hold `u_x = 0` strongly at every wall vertex, so neither
+transport moves `phi` through a wall. Criteria are applied separately to each
 (capillary form, transport) study.
 
 **Time step (decision D13, 2026-10-05).** The lagged normal-increment

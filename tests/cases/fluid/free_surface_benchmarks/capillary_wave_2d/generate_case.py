@@ -59,11 +59,11 @@ SEMI_IMPLICIT_OPTIONS = ("None", "NormalIncrement")
 DEFAULT_SEMI_IMPLICIT = "NormalIncrement"
 # Level-set advection velocity (decision D9).  "pde_extension" (default) is
 # the harmonic PDE velocity extension with monolithic coupling, as in
-# linear_sloshing_2d, static_drop_2d and sessile_drop_2d.  "wet_extension" is
-# the algebraic wall-compatible wet extension, the D9 comparison baseline;
-# "coupled" is the fluid velocity itself (dry vertices then carry zero
-# velocity, which D9 retires).
-TRANSPORTS = ("pde_extension", "wet_extension", "coupled")
+# linear_sloshing_2d, static_drop_2d and sessile_drop_2d; "coupled" is the
+# fluid velocity itself (dry vertices then carry zero velocity, which D9
+# retires).  The algebraic wall-compatible wet extension, the earlier D9
+# comparison baseline, was retired (decisions D47 and D55).
+TRANSPORTS = ("pde_extension", "coupled")
 DEFAULT_TRANSPORT = "pde_extension"
 # Accepted-step kinematic reconciliation of the transported level set
 # (Enable_kinematic_reconciliation; FE/LevelSet/LevelSetKinematicReconciliation.h):
@@ -331,22 +331,14 @@ def level_set_velocity_block(transport: str) -> str:
         return """    <Velocity_source>coupled_field</Velocity_source>
     <Velocity_field_name>Velocity</Velocity_field_name>
     <Auto_register_velocity_field>true</Auto_register_velocity_field>"""
-    if transport == "pde_extension":
-        return """    <Velocity_source>prescribed_data</Velocity_source>
+    if transport != "pde_extension":
+        raise ValueError(f"--transport must be one of {TRANSPORTS}")
+    return """    <Velocity_source>prescribed_data</Velocity_source>
     <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
     <Auto_register_velocity_field>true</Auto_register_velocity_field>
     <Source_velocity_field_name>Velocity</Source_velocity_field_name>
     <Advection_velocity_extension_method>pde_harmonic</Advection_velocity_extension_method>
     <Advection_velocity_extension_coupling>monolithic</Advection_velocity_extension_coupling>"""
-    if transport != "wet_extension":
-        raise ValueError(f"--transport must be one of {TRANSPORTS}")
-    method = "wall_compatible_normal"
-    return f"""    <Velocity_source>prescribed_data</Velocity_source>
-    <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
-    <Auto_register_velocity_field>true</Auto_register_velocity_field>
-    <Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>
-    <Source_velocity_field_name>Velocity</Source_velocity_field_name>
-    <Advection_velocity_extension_method>{method}</Advection_velocity_extension_method>"""
 
 
 def wall_bc(name: str) -> str:

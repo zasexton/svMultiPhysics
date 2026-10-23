@@ -141,10 +141,15 @@ def test_generated_case_uses_open_resolved_slip_contract(tmp_path: Path):
 
     level_set = equation_by_type(root, "level_set")
     assert level_set.findtext("Velocity_source") == "prescribed_data"
-    assert level_set.findtext("Use_wet_extension_advection_velocity") == "true"
+    # The algebraic wet extension was retired (decisions D47 and D55).
+    assert level_set.find("Use_wet_extension_advection_velocity") is None
     assert (
-        level_set.findtext("Wet_extension_advection_velocity_method") ==
-        "wall_compatible_normal"
+        level_set.findtext("Advection_velocity_extension_method") ==
+        "pde_harmonic"
+    )
+    assert (
+        level_set.findtext("Advection_velocity_extension_coupling") ==
+        "monolithic"
     )
     assert level_set.findtext("Enable_reinitialization") == "false"
     assert level_set.find("Reinitialization_cadence_steps") is None
@@ -201,7 +206,7 @@ def test_runner_freezes_capillary_rise_physics_and_solver_defaults():
         steps=None,
         time_step_size=None,
         timeout_seconds=None,
-        wet_extension_advection_velocity_method=None,
+        advection_velocity_extension_method=None,
         linear_solver_type=None,
         linear_algebra_backend=None,
         linear_preconditioner=None,
@@ -220,9 +225,7 @@ def test_runner_freezes_capillary_rise_physics_and_solver_defaults():
     assert configured.contact_angle_degrees == 30.0
     assert configured.wall_slip_length == 0.001
     assert not hasattr(configured, "enable_level_set_reinitialization")
-    assert configured.wet_extension_advection_velocity_method == (
-        "wall_compatible_normal"
-    )
+    assert configured.advection_velocity_extension_method == "pde_harmonic"
     assert configured.enable_physical_history_instrumentation is True
     assert configured.require_time_loop_convergence is True
     assert configured.disable_velocity_extension is True

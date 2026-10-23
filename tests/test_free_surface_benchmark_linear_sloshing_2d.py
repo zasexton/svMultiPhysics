@@ -338,12 +338,13 @@ def test_solver_log_summary(tmp_path):
     assert summary["final_residual_max"] == 2.30e-11 and summary["wall_seconds_per_step"] == 5.0
 
 
-def test_wet_extension_diagnostic_variant(tmp_path):
-    case = gen.generate(16, tmp_path / "w", level_set_velocity="wet_extension")
-    text = (tmp_path / "w/solver.xml").read_text()
-    assert not case["protocol_run"] and case["level_set_velocity"] == "wet_extension"
-    assert "<Use_wet_extension_advection_velocity>true" in text
-    assert "<Velocity_field_name>LevelSetAdvectionVelocity" in text
+def test_retired_wet_extension_variant_is_rejected(tmp_path):
+    # The algebraic wet extension was retired (decisions D47 and D55).
+    assert "wet_extension" not in gen.LEVEL_SET_VELOCITY
+    with pytest.raises(ValueError):
+        gen.generate(16, tmp_path / "w", level_set_velocity="wet_extension")
+    with pytest.raises(ValueError):
+        gen.level_set_velocity_block("wet_extension")
     protocol = gen.generate(16, tmp_path / "p")
     assert protocol["protocol_run"]
     assert "Use_wet_extension" not in (tmp_path / "p/solver.xml").read_text()

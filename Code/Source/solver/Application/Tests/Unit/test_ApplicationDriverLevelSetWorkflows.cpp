@@ -556,37 +556,6 @@ std::shared_ptr<svmp::Mesh> makeWorkflowTriangleMesh()
   return svmp::create_mesh(std::move(base));
 }
 
-std::shared_ptr<svmp::Mesh> makeWorkflowSkewedExtensionTriangleMesh(
-    double upper_y = 2.0)
-{
-  auto base = std::make_shared<svmp::MeshBase>();
-
-  // The dry vertex is outside the tangential span of both wet neighbors.
-  // An affine tangential regression therefore requires a negative weight,
-  // while the bounded fallback remains a positive partition of unity.
-  const std::vector<svmp::real_t> x_ref = {
-      0.0, 1.0,
-      1.0, 0.0,
-      0.0, upper_y,
-  };
-  const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 3};
-  const std::vector<svmp::index_t> cell2vertex = {0, 1, 2};
-
-  svmp::CellShape shape{};
-  shape.family = svmp::CellFamily::Triangle;
-  shape.num_corners = 3;
-  shape.order = 1;
-  base->build_from_arrays(
-      /*spatial_dim=*/2,
-      x_ref,
-      cell2vertex_offsets,
-      cell2vertex,
-      {shape});
-  base->finalize();
-
-  return svmp::create_mesh(std::move(base));
-}
-
 std::shared_ptr<svmp::Mesh> makeWorkflowBiquadraticQuadMesh()
 {
   auto base = std::make_shared<svmp::MeshBase>();
@@ -616,44 +585,6 @@ std::shared_ptr<svmp::Mesh> makeWorkflowBiquadraticQuadMesh()
       cell2vertex_offsets,
       cell2vertex,
       {shape});
-  base->finalize();
-
-  return svmp::create_mesh(std::move(base));
-}
-
-std::shared_ptr<svmp::Mesh> makeDisconnectedWorkflowQuadPairMesh()
-{
-  auto base = std::make_shared<svmp::MeshBase>();
-
-  // Keep the two components geometrically close while retaining distinct
-  // topology.  A nearest-point extension can then accidentally copy data
-  // between components, whereas a cell-graph normal-band extension cannot.
-  const std::vector<svmp::real_t> x_ref = {
-      0.0, 0.0,
-      1.0, 0.0,
-      1.0, 1.0,
-      0.0, 1.0,
-      0.0, 1.05,
-      1.0, 1.05,
-      1.0, 2.05,
-      0.0, 2.05,
-  };
-  const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 4, 8};
-  const std::vector<svmp::index_t> cell2vertex = {
-      0, 1, 2, 3,
-      4, 5, 6, 7,
-  };
-
-  svmp::CellShape shape{};
-  shape.family = svmp::CellFamily::Quad;
-  shape.num_corners = 4;
-  shape.order = 1;
-  base->build_from_arrays(
-      /*spatial_dim=*/2,
-      x_ref,
-      cell2vertex_offsets,
-      cell2vertex,
-      {shape, shape});
   base->finalize();
 
   return svmp::create_mesh(std::move(base));
@@ -690,6 +621,83 @@ std::shared_ptr<svmp::Mesh> makeWorkflowThreeQuadStripMesh()
       cell2vertex_offsets,
       cell2vertex,
       {shape, shape, shape});
+  base->finalize();
+
+  return svmp::create_mesh(std::move(base));
+}
+
+// The three-quad strip with every quad split along its lower-left to
+// upper-right diagonal (the PDE velocity extension needs simplices).
+std::shared_ptr<svmp::Mesh> makeWorkflowThreeQuadStripTriangleMesh()
+{
+  auto base = std::make_shared<svmp::MeshBase>();
+
+  const std::vector<svmp::real_t> x_ref = {
+      0.0, 0.0,
+      1.0, 0.0,
+      2.0, 0.0,
+      3.0, 0.0,
+      0.0, 1.0,
+      1.0, 1.0,
+      2.0, 1.0,
+      3.0, 1.0,
+  };
+  const std::vector<svmp::offset_t> cell2vertex_offsets = {
+      0, 3, 6, 9, 12, 15, 18};
+  const std::vector<svmp::index_t> cell2vertex = {
+      0, 1, 5,
+      0, 5, 4,
+      1, 2, 6,
+      1, 6, 5,
+      2, 3, 7,
+      2, 7, 6,
+  };
+
+  svmp::CellShape shape{};
+  shape.family = svmp::CellFamily::Triangle;
+  shape.num_corners = 3;
+  shape.order = 1;
+  base->build_from_arrays(
+      /*spatial_dim=*/2,
+      x_ref,
+      cell2vertex_offsets,
+      cell2vertex,
+      std::vector<svmp::CellShape>(6u, shape));
+  base->finalize();
+
+  return svmp::create_mesh(std::move(base));
+}
+
+// The reduced D38 stencil behind a cut cell: vertex 0 is wet, the cut cell
+// (0, 1, 2) puts vertices 1 and 2 in the known set, and the only dry vertex
+// 3 belongs to the thin triangle (1, 3, 2) alone.  Its harmonic weights are
+// (1 + eps) / eps and -1 / eps, so O(0.04) data become O(10^3).
+std::shared_ptr<svmp::Mesh> makeWorkflowReducedD38ExtensionMesh(double eps)
+{
+  auto base = std::make_shared<svmp::MeshBase>();
+
+  const std::vector<svmp::real_t> x_ref = {
+      -1.0, 1.0,
+      0.0, 1.0,
+      0.0, 1.0 + eps,
+      1.0, 0.0,
+  };
+  const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 3, 6};
+  const std::vector<svmp::index_t> cell2vertex = {
+      0, 1, 2,
+      1, 3, 2,
+  };
+
+  svmp::CellShape shape{};
+  shape.family = svmp::CellFamily::Triangle;
+  shape.num_corners = 3;
+  shape.order = 1;
+  base->build_from_arrays(
+      /*spatial_dim=*/2,
+      x_ref,
+      cell2vertex_offsets,
+      cell2vertex,
+      {shape, shape});
   base->finalize();
 
   return svmp::create_mesh(std::move(base));
@@ -1268,124 +1276,6 @@ WorkflowRadialSimplexMesh makeWorkflowRadialCapillaryMesh(
   result.wall_origin = translation;
   result.wall_normal = wall_normal;
   return result;
-}
-
-std::shared_ptr<svmp::Mesh> makeWorkflowFourQuadStripMesh(
-    bool reverse_vertex_numbering = false)
-{
-  auto base = std::make_shared<svmp::MeshBase>();
-
-  std::vector<svmp::real_t> x_ref = {
-      0.0, 0.0,
-      1.0, 0.0,
-      2.0, 0.0,
-      3.0, 0.0,
-      4.0, 0.0,
-      0.0, 1.0,
-      1.0, 1.0,
-      2.0, 1.0,
-      3.0, 1.0,
-      4.0, 1.0,
-  };
-  const std::vector<svmp::offset_t> cell2vertex_offsets = {
-      0, 4, 8, 12, 16};
-  std::vector<svmp::index_t> cell2vertex = {
-      0, 1, 6, 5,
-      1, 2, 7, 6,
-      2, 3, 8, 7,
-      3, 4, 9, 8,
-  };
-  if (reverse_vertex_numbering) {
-    constexpr std::size_t vertex_count = 10u;
-    std::vector<svmp::real_t> reversed(x_ref.size(), 0.0);
-    for (std::size_t old_vertex = 0u;
-         old_vertex < vertex_count;
-         ++old_vertex) {
-      const std::size_t new_vertex = vertex_count - 1u - old_vertex;
-      reversed[2u * new_vertex] = x_ref[2u * old_vertex];
-      reversed[2u * new_vertex + 1u] = x_ref[2u * old_vertex + 1u];
-    }
-    x_ref = std::move(reversed);
-    for (auto& vertex : cell2vertex) {
-      vertex = static_cast<svmp::index_t>(
-          vertex_count - 1u - static_cast<std::size_t>(vertex));
-    }
-  }
-
-  svmp::CellShape shape{};
-  shape.family = svmp::CellFamily::Quad;
-  shape.num_corners = 4;
-  shape.order = 1;
-  base->build_from_arrays(
-      /*spatial_dim=*/2,
-      x_ref,
-      cell2vertex_offsets,
-      cell2vertex,
-      {shape, shape, shape, shape});
-  base->finalize();
-
-  return svmp::create_mesh(std::move(base));
-}
-
-std::shared_ptr<svmp::Mesh> makeWorkflowStructuredQuadMesh(int subdivisions)
-{
-  if (subdivisions <= 0) {
-    throw std::invalid_argument(
-        "structured workflow mesh requires positive subdivisions");
-  }
-
-  auto base = std::make_shared<svmp::MeshBase>();
-  const auto vertex_extent = static_cast<std::size_t>(subdivisions + 1);
-  std::vector<svmp::real_t> x_ref;
-  x_ref.reserve(2u * vertex_extent * vertex_extent);
-  for (int row = 0; row <= subdivisions; ++row) {
-    for (int column = 0; column <= subdivisions; ++column) {
-      x_ref.push_back(static_cast<svmp::real_t>(column) / subdivisions);
-      x_ref.push_back(static_cast<svmp::real_t>(row) / subdivisions);
-    }
-  }
-
-  std::vector<svmp::offset_t> cell2vertex_offsets;
-  std::vector<svmp::index_t> cell2vertex;
-  cell2vertex_offsets.reserve(
-      static_cast<std::size_t>(subdivisions * subdivisions) + 1u);
-  cell2vertex.reserve(
-      4u * static_cast<std::size_t>(subdivisions * subdivisions));
-  cell2vertex_offsets.push_back(0);
-  for (int row = 0; row < subdivisions; ++row) {
-    for (int column = 0; column < subdivisions; ++column) {
-      const auto lower_left = static_cast<svmp::index_t>(
-          static_cast<std::size_t>(row) * vertex_extent +
-          static_cast<std::size_t>(column));
-      const auto lower_right = lower_left + 1;
-      const auto upper_left =
-          lower_left + static_cast<svmp::index_t>(vertex_extent);
-      const auto upper_right = upper_left + 1;
-      cell2vertex.insert(cell2vertex.end(),
-                         {lower_left,
-                          lower_right,
-                          upper_right,
-                          upper_left});
-      cell2vertex_offsets.push_back(
-          static_cast<svmp::offset_t>(cell2vertex.size()));
-    }
-  }
-
-  svmp::CellShape shape{};
-  shape.family = svmp::CellFamily::Quad;
-  shape.num_corners = 4;
-  shape.order = 1;
-  std::vector<svmp::CellShape> shapes(
-      static_cast<std::size_t>(subdivisions * subdivisions), shape);
-  base->build_from_arrays(
-      /*spatial_dim=*/2,
-      x_ref,
-      cell2vertex_offsets,
-      cell2vertex,
-      shapes);
-  base->finalize();
-
-  return svmp::create_mesh(std::move(base));
 }
 
 std::shared_ptr<svmp::Mesh> makeWorkflowQuadPatch2x2Mesh()
@@ -9763,145 +9653,12 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
-     VelocityExtensionProjectsHierarchicalTargetCoefficients)
+     VelocityExtensionMatchesGeneratedInterfaceTraceAndZerosOuterDryWalls)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
 #else
-  auto mesh = makeWorkflowBiquadraticQuadMesh();
-  auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
-      svmp::FE::ElementType::Quad4,
-      /*order=*/2,
-      svmp::FE::BasisType::Hierarchical);
-  auto vector_space =
-      std::make_shared<svmp::FE::spaces::ProductSpace>(scalar_space, 2);
-
-  auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
-  const auto phi = system->addField(svmp::FE::systems::FieldSpec{
-      .name = "phi",
-      .space = scalar_space,
-      .components = 1});
-  const auto source_velocity = system->addField(svmp::FE::systems::FieldSpec{
-      .name = "Velocity",
-      .space = vector_space,
-      .components = 2});
-  const auto target_velocity = system->addField(
-      svmp::FE::systems::FieldSpec{
-          .name = "LevelSetAdvectionVelocity",
-          .space = vector_space,
-          .components = 2,
-          .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData});
-  ASSERT_NO_THROW(system->setup({}));
-
-  std::vector<svmp::FE::Real> phi_vertex_values(mesh->n_vertices(), 0.0);
-  std::vector<svmp::FE::Real> source_vertex_values(mesh->n_vertices() * 2u, 0.0);
-  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
-    phi_vertex_values[vertex] = workflowPhi(*mesh, vertex);
-    const auto velocity = workflowVelocity(*mesh, vertex);
-    source_vertex_values[2u * vertex] = velocity[0];
-    source_vertex_values[2u * vertex + 1u] = velocity[1];
-  }
-
-  const auto phi_coefficients = projectWorkflowVertexValues(
-      *system,
-      phi,
-      std::span<const svmp::FE::Real>(phi_vertex_values.data(),
-                                      phi_vertex_values.size()),
-      1u,
-      "ApplicationDriver velocity extension hierarchical phi");
-  const auto source_coefficients = projectWorkflowVertexValues(
-      *system,
-      source_velocity,
-      std::span<const svmp::FE::Real>(source_vertex_values.data(),
-                                      source_vertex_values.size()),
-      2u,
-      "ApplicationDriver velocity extension hierarchical source velocity");
-
-  std::vector<svmp::FE::Real> solution(
-      static_cast<std::size_t>(system->dofHandler().getNumDofs()), 0.0);
-  writeWorkflowFieldSlice(*system, phi, phi_coefficients, solution);
-  writeWorkflowFieldSlice(*system,
-                          source_velocity,
-                          source_coefficients,
-                          solution);
-
-  application::core::SimulationComponents sim;
-  sim.primary_mesh = mesh;
-  sim.fe_system = std::move(system);
-
-  svmp::FE::systems::SystemStateView state{};
-  state.u = std::span<const svmp::FE::Real>(solution.data(), solution.size());
-
-  LevelSetAdvectionVelocityRequest request{};
-  request.level_set_field_name = "phi";
-  request.source_velocity_field_name = "Velocity";
-  request.target_velocity_field_name = "LevelSetAdvectionVelocity";
-  request.extension_method = "nearest_active_vertex";
-  request.active_side = application::core::LevelSetActiveSide::Negative;
-  request.isovalue = 0.0;
-
-  EXPECT_TRUE(updateLevelSetAdvectionVelocitiesFromState(
-      sim,
-      state,
-      std::vector<LevelSetAdvectionVelocityRequest>{request}));
-
-  const auto prescribed =
-      sim.fe_system->prescribedFieldCoefficients(target_velocity);
-  ASSERT_FALSE(prescribed.empty());
-
-  std::vector<std::size_t> active_vertices;
-  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
-    if (phi_vertex_values[vertex] <= 0.0) {
-      active_vertices.push_back(vertex);
-    }
-  }
-  ASSERT_FALSE(active_vertices.empty());
-
-  auto nearest_active_vertex = [&](std::size_t vertex) {
-    if (phi_vertex_values[vertex] <= 0.0) {
-      return vertex;
-    }
-    const auto point = workflowVertexPoint(*mesh, vertex);
-    std::size_t best = active_vertices.front();
-    svmp::FE::Real best_distance2 =
-        std::numeric_limits<svmp::FE::Real>::infinity();
-    for (const auto candidate : active_vertices) {
-      const auto candidate_point = workflowVertexPoint(*mesh, candidate);
-      svmp::FE::Real distance2 = 0.0;
-      for (std::size_t d = 0; d < 2u; ++d) {
-        const auto delta = point[d] - candidate_point[d];
-        distance2 += delta * delta;
-      }
-      if (distance2 < best_distance2) {
-        best_distance2 = distance2;
-        best = candidate;
-      }
-    }
-    return best;
-  };
-
-  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
-    const auto expected_source = nearest_active_vertex(vertex);
-    const auto expected = workflowVelocity(*mesh, expected_source);
-    const auto point = workflowVertexPoint(*mesh, vertex);
-    const auto value = sim.fe_system->evaluateFieldAtPoint(
-        target_velocity,
-        svmp::FE::systems::SystemStateView{},
-        point);
-    ASSERT_TRUE(value.has_value()) << "vertex " << vertex;
-    EXPECT_NEAR((*value)[0], expected[0], 1.0e-10) << "vertex " << vertex;
-    EXPECT_NEAR((*value)[1], expected[1], 1.0e-10) << "vertex " << vertex;
-  }
-#endif
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     WallCompatibleNormalVelocityExtensionMatchesGeneratedInterfaceTraceAndProjectsOuterDryWalls)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  auto mesh = makeWorkflowThreeQuadStripMesh();
+  auto mesh = makeWorkflowThreeQuadStripTriangleMesh();
   constexpr svmp::label_t kWallLabel = 4343;
   constexpr int kInterfaceMarker = 706;
   mesh->register_label("wall", kWallLabel);
@@ -9918,7 +9675,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
                 mesh->local_mesh(), mesh_phi_field),
             nullptr);
   auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
-      svmp::FE::ElementType::Quad4,
+      svmp::FE::ElementType::Triangle3,
       /*order=*/1);
   auto vector_space =
       std::make_shared<svmp::FE::spaces::ProductSpace>(scalar_space, 2);
@@ -10009,7 +9766,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   request.level_set_field_name = "phi";
   request.source_velocity_field_name = "Velocity";
   request.target_velocity_field_name = "LevelSetAdvectionVelocity";
-  request.extension_method = "wall_compatible_normal";
+  request.extension_method = "pde_harmonic";
   request.wall_face_names = {"wall"};
   request.wall_constraints = {{.face_name = "wall"}};
   request.active_side = application::core::LevelSetActiveSide::Negative;
@@ -10034,10 +9791,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_NEAR((*active_value)[0], active_expected[0], 1.0e-10);
   EXPECT_NEAR((*active_value)[1], active_expected[1], 1.0e-10);
 
-  // Vertices 1 and 5 are dry by nodal sign but support the retained cut cell.
-  // They must be exact physical-velocity constraints, even though both lie on
-  // the labelled wall.  Projecting either one would change the Q1 trace on
-  // the free surface inside cell 0.
+  // Vertices 1 and 5 are dry by nodal sign but support the retained cut
+  // cells.  They must be exact physical-velocity constraints, even though
+  // both lie on the labelled wall.  Zeroing either one would change the P1
+  // trace on the free surface inside cells 0 and 1.
   for (const auto dry_trace_vertex : {std::size_t{1}, std::size_t{5}}) {
     ASSERT_GT(phi_vertex_values[dry_trace_vertex], 0.0);
     const auto point = workflowVertexPoint(*mesh, dry_trace_vertex);
@@ -10092,9 +9849,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
   }
   EXPECT_GT(checked_interface_points, 0u);
 
-  // Outside the cut-cell trace support, the existing graph extension and
-  // wall projection remain in force.  Vertex 3 is a dry outer corner with two
-  // independent wall normals, so its projected velocity is zero.
+  // Outside the cut-cell trace support, the strong wall masks hold: vertex
+  // 3 is a dry outer corner on the labelled wall, so the extension is zero
+  // there.
   const auto outer_dry_wall_vertex = std::size_t{3};
   ASSERT_GT(phi_vertex_values[outer_dry_wall_vertex], 0.0);
   const auto outer_point =
@@ -10110,7 +9867,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
-     WallCompatibleNormalVelocityExtensionRejectsHigherOrderFields)
+     VelocityExtensionRejectsHigherOrderFields)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
@@ -10141,7 +9898,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   request.level_set_field_name = "phi";
   request.source_velocity_field_name = "Velocity";
   request.target_velocity_field_name = "LevelSetAdvectionVelocity";
-  request.extension_method = "wall_compatible_normal";
+  request.extension_method = "pde_harmonic";
 
   EXPECT_THROW(
       {
@@ -10161,7 +9918,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
-     WallCompatibleNormalVelocityExtensionRejectsMismatchedP1Layouts)
+     VelocityExtensionRejectsMismatchedP1Layouts)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
@@ -10193,7 +9950,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   request.level_set_field_name = "phi";
   request.source_velocity_field_name = "Velocity";
   request.target_velocity_field_name = "LevelSetAdvectionVelocity";
-  request.extension_method = "wall_compatible_normal";
+  request.extension_method = "pde_harmonic";
 
   EXPECT_THROW(
       {
@@ -10214,7 +9971,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
-     AlgebraicWallCompatibleExtensionInvalidatesStaleMapWhenInterfaceDisappears)
+     AlgebraicExtensionInvalidatesStaleMapWhenInterfaceDisappears)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
@@ -10307,7 +10064,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   request.source_velocity_field_name = "Velocity";
   request.target_velocity_field_name = "LevelSetAdvectionVelocity";
   request.operator_tag = "level_set";
-  request.extension_method = "wall_compatible_normal";
+  request.extension_method = "pde_harmonic";
   request.enforce_wall_impermeability = false;
 
   EXPECT_THROW(
@@ -10407,7 +10164,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   request.source_velocity_field_name = "Velocity";
   request.target_velocity_field_name = "LevelSetAdvectionVelocity";
   request.domain_id = std::string(kDomainId);
-  request.extension_method = "wall_compatible_normal";
+  request.extension_method = "pde_harmonic";
   request.enforce_wall_impermeability = false;
   ASSERT_FALSE(request.active_cut_request_index.has_value());
   EXPECT_EQ(configuredInterfaceVelocityMarker(*system, request), std::nullopt)
@@ -10449,35 +10206,17 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
-     VelocityExtensionGraphUsesCellEdgesWithoutQuadDiagonals)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  const auto mesh = makeDisconnectedWorkflowQuadPairMesh();
-  const auto adjacency = velocityExtensionEdgeAdjacency(*mesh);
-  ASSERT_EQ(adjacency.size(), 8u);
-
-  EXPECT_EQ(adjacency[0], (std::vector<std::size_t>{1u, 3u}));
-  EXPECT_EQ(adjacency[1], (std::vector<std::size_t>{0u, 2u}));
-  EXPECT_EQ(adjacency[2], (std::vector<std::size_t>{1u, 3u}));
-  EXPECT_EQ(adjacency[3], (std::vector<std::size_t>{0u, 2u}));
-  EXPECT_EQ(adjacency[4], (std::vector<std::size_t>{5u, 7u}));
-  EXPECT_EQ(adjacency[5], (std::vector<std::size_t>{4u, 6u}));
-  EXPECT_EQ(adjacency[6], (std::vector<std::size_t>{5u, 7u}));
-  EXPECT_EQ(adjacency[7], (std::vector<std::size_t>{4u, 6u}));
-#endif
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
      AlgebraicExtensionRefreshReprojectsStateAndChangesRevision)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
 #else
-  auto mesh = makeWorkflowThreeQuadStripMesh();
+  // The least-squares normal extension of a field that is constant along the
+  // level-set normal reproduces it exactly, so every extension value equals
+  // the source velocity.
+  auto mesh = makeWorkflowThreeQuadStripTriangleMesh();
   auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
-      svmp::FE::ElementType::Quad4,
+      svmp::FE::ElementType::Triangle3,
       /*order=*/1);
   auto vector_space =
       std::make_shared<svmp::FE::spaces::ProductSpace>(scalar_space, 2);
@@ -10555,8 +10294,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   request.source_velocity_field_name = "Velocity";
   request.target_velocity_field_name = "LevelSetAdvectionVelocity";
   request.operator_tag = "level_set";
-  request.extension_method = "wall_compatible_normal";
-  request.extension_band_layers = 3;
+  request.extension_method = "pde_normal";
   request.enforce_wall_impermeability = false;
 
   ASSERT_TRUE(updateLevelSetAdvectionVelocitiesFromState(
@@ -10616,207 +10354,237 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
-     VelocityExtensionRegressionConditionEstimateDetectsNearSingularity)
-{
-  std::array<std::array<double, 4>, 4> matrix{};
-  matrix[0][0] = 1.0;
-  matrix[0][1] = 1.0 - 1.0e-12;
-  matrix[1][0] = matrix[0][1];
-  matrix[1][1] = 1.0;
-
-  const double condition = estimateSymmetricConditionNumber(matrix, 2);
-  const auto estimate =
-      application::core::estimateSymmetricRankAndCondition(matrix, 2);
-  EXPECT_TRUE(std::isfinite(condition));
-  EXPECT_GT(condition, kVelocityExtensionMaxRegressionCondition);
-  EXPECT_EQ(estimate.numerical_rank, 2);
-  EXPECT_EQ(estimate.condition_estimate, condition);
-
-  matrix[0][1] = 1.0;
-  matrix[1][0] = 1.0;
-  const auto singular =
-      application::core::estimateSymmetricRankAndCondition(matrix, 2);
-  EXPECT_EQ(singular.numerical_rank, 1);
-  EXPECT_TRUE(std::isinf(singular.condition_estimate));
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
      ReducedD38MapFailureUsesBoundedRefreshNeutralFallback)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
 #else
-  constexpr double kUpperY = 1.00001;
-  constexpr double kPhysicalVelocityScale = 0.04;
-  const auto mesh = makeWorkflowSkewedExtensionTriangleMesh(kUpperY);
-
-  // This thin tangential stencil is a deterministic reduction of the D38
-  // failure archived under free_surface_review_completion_20260717.  The
-  // earlier unguarded two-point affine evaluation is unique on this stencil:
-  // its weights reproduce constants and the tangent coordinate at the dry
-  // target, but their opposite signs turn O(0.04) data into O(10^3).
-  const auto first_source_point = workflowVertexPoint(*mesh, 0u);
-  const auto dry_target_point = workflowVertexPoint(*mesh, 1u);
-  const auto second_source_point = workflowVertexPoint(*mesh, 2u);
-  const double first_tangent =
-      first_source_point[1] - dry_target_point[1];
-  const double second_tangent =
-      second_source_point[1] - dry_target_point[1];
-  const double tangent_span = second_tangent - first_tangent;
-  ASSERT_GT(std::abs(tangent_span), 0.0);
-  const double old_first_weight = second_tangent / tangent_span;
-  const double old_second_weight = -first_tangent / tangent_span;
-  const double old_row_l1 =
-      std::abs(old_first_weight) + std::abs(old_second_weight);
-  const double old_dry_velocity =
-      old_first_weight * kPhysicalVelocityScale -
-      old_second_weight * kPhysicalVelocityScale;
-  const double old_amplification =
-      std::abs(old_dry_velocity) / kPhysicalVelocityScale;
-  EXPECT_NEAR(old_first_weight + old_second_weight, 1.0, 1.0e-10);
-  EXPECT_LT(old_second_weight, 0.0);
-  EXPECT_GT(old_row_l1, 1.0e5);
-  EXPECT_GT(std::abs(old_dry_velocity), 1.0e2);
-  EXPECT_GT(old_amplification, 1.0e5);
-
-  std::vector<double> phi(mesh->n_vertices(), 0.0);
-  std::vector<double> source(mesh->n_vertices() * 2u, 0.0);
-  std::vector<std::uint8_t> active(mesh->n_vertices(), 0u);
-  for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
-    const auto point = workflowVertexPoint(*mesh, vertex);
-    phi[vertex] = point[0] - 0.5;
-    active[vertex] = phi[vertex] <= 0.0 ? 1u : 0u;
+  // The retired graph map fell back to bounded rows on the reduced D38
+  // stencil (free_surface_review_completion_20260717).  The PDE extension
+  // has no fallback row: its harmonic weights on the thin dry triangle turn
+  // O(0.04) data into O(10^3), and the fixed wet-to-dry amplification guard
+  // refuses the map and leaves no stale frozen map installed.  On a regular
+  // stencil a same-state refresh is neutral: the same frozen revision, the
+  // same state, and extension values within the componentwise bounds of the
+  // known values.
+  std::unique_ptr<svmp::FE::backends::BackendFactory> factory;
+  try {
+    factory = svmp::FE::backends::BackendFactory::create(
+        svmp::FE::backends::BackendKind::FSILS);
+  } catch (const std::exception&) {
+    GTEST_SKIP() << "Requires an available FE vector backend.";
   }
-  source[0u] = kPhysicalVelocityScale;
-  source[4u] = -kPhysicalVelocityScale;
 
-  const auto revision = application::core::velocityExtensionMapRevision(
-      31u, 32u, 33u, 34u, 35u, phi, active);
-  const auto build_snapshot = [&]() {
-    return application::core::buildVelocityExtensionMapSnapshot(
-        *mesh,
-        svmp::MeshComm::self(),
-        revision,
-        phi,
-        source,
-        /*source_components=*/2u,
-        active,
-        /*target_components=*/2u,
-        /*copy_components=*/2u,
-        /*band_layers=*/1,
-        /*enforce_wall_impermeability=*/false,
-        std::span<const WallVelocityExtensionConstraint>{});
+  struct MonolithicExtensionFixture {
+    application::core::SimulationComponents sim;
+    svmp::FE::FieldId phi{svmp::FE::INVALID_FIELD_ID};
+    svmp::FE::FieldId source{svmp::FE::INVALID_FIELD_ID};
+    svmp::FE::FieldId extension{svmp::FE::INVALID_FIELD_ID};
+    std::shared_ptr<svmp::FE::level_set::LevelSetVelocityExtensionConstraintKernel>
+        kernel{};
+    std::unique_ptr<svmp::FE::backends::GenericVector> state_vector{};
   };
-  const auto first = build_snapshot();
-  ASSERT_TRUE(first);
-  ASSERT_EQ(first->report().regression_candidate_rows, 1u);
-  EXPECT_EQ(first->report().regression_accepted_rows, 0u);
-  EXPECT_EQ(first->report().bounded_fallback_rows, 1u);
-  EXPECT_EQ(first->report().condition_rejected_rows, 1u);
-  EXPECT_EQ(first->report().coefficient_rejected_rows, 0u);
-  EXPECT_LE(first->report().max_abs_graph_coefficient,
-            1.0 + kVelocityExtensionRowTolerance);
-  EXPECT_LE(first->report().max_graph_row_l1,
-            1.0 + kVelocityExtensionRowTolerance);
-  EXPECT_LE(first->report().max_graph_row_sum_error,
-            kVelocityExtensionRowTolerance);
-  EXPECT_LE(first->report().max_negative_graph_coefficient,
-            kVelocityExtensionCoefficientTolerance);
-  EXPECT_LE(first->wetToDryAmplification(), 1.0 + 1.0e-12);
-  ASSERT_EQ(first->preview().size(), source.size());
-  EXPECT_LE(std::abs(first->preview()[2u]),
-            kPhysicalVelocityScale + 1.0e-12);
+  const auto make_fixture =
+      [&](const std::shared_ptr<svmp::Mesh>& mesh,
+          const std::vector<svmp::FE::Real>& phi_values,
+          const std::vector<svmp::FE::Real>& source_values) {
+        auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
+            svmp::FE::ElementType::Triangle3,
+            /*order=*/1);
+        auto vector_space =
+            std::make_shared<svmp::FE::spaces::ProductSpace>(scalar_space, 2);
+        auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
+        MonolithicExtensionFixture fixture;
+        fixture.source = system->addField(svmp::FE::systems::FieldSpec{
+            .name = "Velocity", .space = vector_space, .components = 2});
+        fixture.phi = system->addField(svmp::FE::systems::FieldSpec{
+            .name = "phi", .space = scalar_space, .components = 1});
+        system->addOperator("level_set");
+        svmp::FE::level_set::LevelSetTransportOptions transport{};
+        transport.operator_tag = "level_set";
+        transport.level_set.field_name = "phi";
+        transport.level_set.auto_register_field = false;
+        transport.velocity.field_name = "LevelSetAdvectionVelocity";
+        transport.velocity.source =
+            svmp::FE::level_set::LevelSetVelocitySource::CoupledField;
+        transport.velocity.auto_register_field = true;
+        transport.velocity.space = vector_space;
+        transport.velocity.algebraic_extension_source_field_name = "Velocity";
+        transport.supg.enabled = false;
+        (void)svmp::FE::level_set::installLevelSetTransport(
+            *system, scalar_space, transport);
+        fixture.extension =
+            system->findFieldByName("LevelSetAdvectionVelocity");
+        fixture.kernel =
+            svmp::FE::level_set::findLevelSetVelocityExtensionConstraintKernel(
+                *system, "level_set", fixture.extension);
+        system->setup({});
 
-  const auto dry_diagnostic = std::find_if(
-      first->rowDiagnostics().begin(),
-      first->rowDiagnostics().end(),
-      [](const auto& diagnostic) {
-        return diagnostic.local_vertex == 1;
-      });
-  ASSERT_NE(dry_diagnostic, first->rowDiagnostics().end());
-  EXPECT_EQ(dry_diagnostic->disposition,
-            application::core::VelocityExtensionRowDisposition::
-                BoundedFallback);
-  EXPECT_TRUE(dry_diagnostic->condition_rejected);
-  EXPECT_TRUE(dry_diagnostic->bounded_fallback_used);
-  EXPECT_EQ(dry_diagnostic->negative_weight_count, 0u);
-  EXPECT_NEAR(dry_diagnostic->coefficient_sum,
-              1.0,
-              kVelocityExtensionRowTolerance);
-  EXPECT_LE(dry_diagnostic->coefficient_l1,
-            1.0 + kVelocityExtensionRowTolerance);
-  EXPECT_LE(dry_diagnostic->preview_amplification, 1.0 + 1.0e-12);
+        std::vector<svmp::FE::Real> initial(
+            static_cast<std::size_t>(system->dofHandler().getNumDofs()), 0.0);
+        writeWorkflowFieldSlice(
+            *system,
+            fixture.phi,
+            projectWorkflowVertexValues(
+                *system, fixture.phi, phi_values, 1u, "reduced D38 phi"),
+            initial);
+        writeWorkflowFieldSlice(
+            *system,
+            fixture.source,
+            projectWorkflowVertexValues(*system,
+                                        fixture.source,
+                                        source_values,
+                                        2u,
+                                        "reduced D38 source"),
+            initial);
+        fixture.state_vector =
+            factory->createVector(system->dofHandler().getNumDofs());
+        scatterFeOrderedSolution(*fixture.state_vector, initial);
+        fixture.sim.primary_mesh = mesh;
+        fixture.sim.fe_system = std::move(system);
+        return fixture;
+      };
+  LevelSetAdvectionVelocityRequest request{};
+  request.level_set_field_name = "phi";
+  request.source_velocity_field_name = "Velocity";
+  request.target_velocity_field_name = "LevelSetAdvectionVelocity";
+  request.operator_tag = "level_set";
+  request.extension_method = "pde_harmonic";
+  request.enforce_wall_impermeability = false;
 
-  const auto maximum_map_residual = [&](const auto& snapshot) {
-    double maximum = 0.0;
-    for (const auto& row : snapshot.rows()) {
-      if (row.vertex < 0 || row.component < 0 || row.component >= 2) {
-        ADD_FAILURE() << "Invalid reduced D38 extension row";
-        return std::numeric_limits<double>::infinity();
-      }
-      const auto row_vertex = static_cast<std::size_t>(row.vertex);
-      const auto row_component = static_cast<std::size_t>(row.component);
-      if (row_vertex >= mesh->n_vertices()) {
-        ADD_FAILURE() << "Reduced D38 extension row is outside the mesh";
-        return std::numeric_limits<double>::infinity();
-      }
-      double residual =
-          snapshot.preview()[2u * row_vertex + row_component];
-      for (const auto& dependency : row.dependencies) {
-        if (dependency.vertex < 0 || dependency.component < 0 ||
-            dependency.component >= 2) {
-          ADD_FAILURE() << "Invalid reduced D38 extension dependency";
-          return std::numeric_limits<double>::infinity();
-        }
-        const auto dependency_vertex =
-            static_cast<std::size_t>(dependency.vertex);
-        const auto dependency_component =
-            static_cast<std::size_t>(dependency.component);
-        if (dependency_vertex >= mesh->n_vertices()) {
-          ADD_FAILURE()
-              << "Reduced D38 extension dependency is outside the mesh";
-          return std::numeric_limits<double>::infinity();
-        }
-        const std::span<const double> values =
-            dependency.field == svmp::FE::level_set::
-                                    VelocityExtensionDependencyField::
-                                        SourceVelocity
-                ? std::span<const double>(source)
-                : snapshot.preview();
-        residual -= dependency.coefficient *
-                    values[2u * dependency_vertex + dependency_component];
-      }
-      maximum = std::max(maximum, std::abs(residual));
+  // ---- reduced D38 stencil: the guard refuses the map
+  constexpr double kEps = 1.0e-5;
+  constexpr double kPhysicalVelocityScale = 0.04;
+  const auto d38_mesh = makeWorkflowReducedD38ExtensionMesh(kEps);
+  std::vector<svmp::FE::Real> d38_phi(d38_mesh->n_vertices(), 0.0);
+  std::vector<svmp::FE::Real> d38_source(d38_mesh->n_vertices() * 2u, 0.0);
+  for (std::size_t vertex = 0; vertex < d38_mesh->n_vertices(); ++vertex) {
+    d38_phi[vertex] = workflowVertexPoint(*d38_mesh, vertex)[0] + 0.5;
+  }
+  d38_source[0u] = kPhysicalVelocityScale;
+  d38_source[2u] = kPhysicalVelocityScale;
+  d38_source[4u] = -kPhysicalVelocityScale;
+  // The harmonic value at the dry vertex: ((1 + eps) u_1 - u_2) / eps.
+  const double unguarded_dry_velocity =
+      ((1.0 + kEps) * kPhysicalVelocityScale + kPhysicalVelocityScale) / kEps;
+  const double unguarded_amplification =
+      unguarded_dry_velocity / kPhysicalVelocityScale;
+  ASSERT_GT(unguarded_amplification,
+            svmp::FE::level_set::kVelocityExtensionMaxWetToDryAmplification);
+  auto d38 = make_fixture(d38_mesh, d38_phi, d38_source);
+  ASSERT_TRUE(d38.kernel);
+  std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow> stale_rows;
+  for (svmp::FE::GlobalIndex vertex = 0;
+       vertex < static_cast<svmp::FE::GlobalIndex>(d38_mesh->n_vertices());
+       ++vertex) {
+    for (int component = 0; component < 2; ++component) {
+      stale_rows.push_back(
+          svmp::FE::level_set::VelocityExtensionConstraintRow{
+              .vertex = vertex,
+              .component = component,
+              .dependencies = {
+                  svmp::FE::level_set::VelocityExtensionDependency{
+                      .field = svmp::FE::level_set::
+                          VelocityExtensionDependencyField::SourceVelocity,
+                      .vertex = vertex,
+                      .component = component,
+                      .coefficient = 1.0}}});
     }
-    return maximum;
-  };
-  EXPECT_LE(maximum_map_residual(*first), 1.0e-14);
+  }
+  d38.kernel->setFrozenRows(std::move(stale_rows), 1u);
+  ASSERT_TRUE(d38.kernel->hasFrozenMap());
+  svmp::FE::systems::SystemStateView d38_state{};
+  d38_state.u_vector = d38.state_vector.get();
+  EXPECT_THROW(
+      {
+        try {
+          (void)updateLevelSetAdvectionVelocitiesFromState(
+              d38.sim, d38_state, {request});
+        } catch (const std::runtime_error& error) {
+          // The PDE extension's own wet-to-dry guard (max extended speed
+          // over max known speed) refuses the map before the driver's.
+          EXPECT_NE(std::string(error.what()).find("fixed wet-to-dry guard"),
+                    std::string::npos)
+              << error.what();
+          throw;
+        }
+      },
+      std::runtime_error);
+  EXPECT_FALSE(d38.kernel->hasFrozenMap())
+      << "A refused map must not leave the previous frozen map valid.";
 
-  const auto refreshed = build_snapshot();
-  ASSERT_TRUE(refreshed);
-  const auto change = application::core::compareVelocityExtensionMapSnapshots(
-      *refreshed, first.get());
-  EXPECT_TRUE(change.previous_available);
-  EXPECT_FALSE(change.revision_changed);
-  EXPECT_EQ(change.changed_owner_rows, 0u);
-  EXPECT_EQ(change.component_assignment_changes, 0u);
-  EXPECT_EQ(change.row_decision_changes, 0u);
-  EXPECT_EQ(change.dependency_row_changes, 0u);
-  EXPECT_EQ(change.maximum_coefficient_change, 0.0);
-  EXPECT_EQ(change.preview_l2_change, 0.0);
-  EXPECT_EQ(change.preview_linf_change, 0.0);
-  EXPECT_LE(maximum_map_residual(*refreshed), 1.0e-14);
+  // ---- regular stencil: a same-state refresh is neutral and bounded
+  const auto mesh = makeWorkflowThreeQuadStripTriangleMesh();
+  std::vector<svmp::FE::Real> phi_values(mesh->n_vertices(), 0.0);
+  std::vector<svmp::FE::Real> source_values(mesh->n_vertices() * 2u, 0.0);
+  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+    phi_values[vertex] = workflowPhi(*mesh, vertex);
+    const auto velocity = workflowVelocity(*mesh, vertex);
+    source_values[2u * vertex] = velocity[0];
+    source_values[2u * vertex + 1u] = velocity[1];
+  }
+  auto regular = make_fixture(mesh, phi_values, source_values);
+  ASSERT_TRUE(regular.kernel);
+  svmp::FE::systems::SystemStateView state{};
+  state.u_vector = regular.state_vector.get();
+  ASSERT_TRUE(updateLevelSetAdvectionVelocitiesFromState(
+      regular.sim, state, {request}));
+  ASSERT_TRUE(regular.kernel->hasFrozenMap());
+  const auto first_revision = regular.kernel->frozenMapRevision();
+  const auto first_solution = gatherFeOrderedSolution(*regular.state_vector);
+  ASSERT_TRUE(updateLevelSetAdvectionVelocitiesFromState(
+      regular.sim, state, {request}));
+  EXPECT_EQ(regular.kernel->frozenMapRevision(), first_revision);
+  const auto refreshed_solution =
+      gatherFeOrderedSolution(*regular.state_vector);
+  ASSERT_EQ(refreshed_solution.size(), first_solution.size());
+  double same_state_linf_change = 0.0;
+  for (std::size_t dof = 0; dof < first_solution.size(); ++dof) {
+    same_state_linf_change =
+        std::max(same_state_linf_change,
+                 std::abs(refreshed_solution[dof] - first_solution[dof]));
+  }
+  EXPECT_EQ(same_state_linf_change, 0.0);
+
+  // Vertices 0, 1, 4 and 5 support the cut cells and keep the source; the
+  // harmonic extension of the others stays within their bounds.
+  const auto extension_offset =
+      regular.sim.fe_system->fieldDofOffset(regular.extension);
+  const auto* extension_entity_map =
+      regular.sim.fe_system->fieldDofHandler(regular.extension)
+          .getEntityDofMap();
+  ASSERT_NE(extension_entity_map, nullptr);
+  constexpr std::array<std::size_t, 4> kKnownVertices{0u, 1u, 4u, 5u};
+  for (std::size_t component = 0; component < 2u; ++component) {
+    double minimum = std::numeric_limits<double>::infinity();
+    double maximum = -std::numeric_limits<double>::infinity();
+    for (const auto vertex : kKnownVertices) {
+      minimum = std::min(minimum, source_values[2u * vertex + component]);
+      maximum = std::max(maximum, source_values[2u * vertex + component]);
+    }
+    for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+      const auto dofs = extension_entity_map->getVertexDofs(
+          static_cast<svmp::FE::GlobalIndex>(vertex));
+      ASSERT_EQ(dofs.size(), 2u);
+      const double value = first_solution[static_cast<std::size_t>(
+          extension_offset + dofs[component])];
+      if (std::find(kKnownVertices.begin(), kKnownVertices.end(), vertex) !=
+          kKnownVertices.end()) {
+        EXPECT_NEAR(value, source_values[2u * vertex + component], 1.0e-12)
+            << "known vertex " << vertex;
+        continue;
+      }
+      EXPECT_GE(value, minimum - 1.0e-12) << "dry vertex " << vertex;
+      EXPECT_LE(value, maximum + 1.0e-12) << "dry vertex " << vertex;
+    }
+  }
 
   RecordProperty("d38_archived_extension_norm", "135.759");
   RecordProperty("d38_archived_physical_velocity_norm", "0.0403971");
-  RecordProperty("reduced_unguarded_row_l1",
-                 std::to_string(old_row_l1));
   RecordProperty("reduced_unguarded_amplification",
-                 std::to_string(old_amplification));
-  RecordProperty("guarded_wet_to_dry_amplification",
-                 std::to_string(first->wetToDryAmplification()));
-  RecordProperty("same_state_refresh_preview_linf_change",
-                 std::to_string(change.preview_linf_change));
+                 std::to_string(unguarded_amplification));
+  RecordProperty("same_state_refresh_linf_change",
+                 std::to_string(same_state_linf_change));
 #endif
 }
 
@@ -10848,9 +10616,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
     <Level_set_field_name>phi</Level_set_field_name>
     <Velocity_source>prescribed_data</Velocity_source>
     <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
-    <Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>
     <Source_velocity_field_name>Velocity</Source_velocity_field_name>
-    <Wet_extension_advection_velocity_method>nearest_interface_point</Wet_extension_advection_velocity_method>
+    <Advection_velocity_extension_method>pde_harmonic</Advection_velocity_extension_method>
   </Add_equation>
   <Add_equation type="fluid">
     <Add_BC name="wall">
@@ -10876,7 +10643,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 
   const auto requests = levelSetAdvectionVelocityRequests(*params);
   ASSERT_EQ(requests.size(), 1u);
-  EXPECT_EQ(requests.front().extension_method, "wall_compatible_normal");
+  EXPECT_EQ(requests.front().extension_method, "pde_harmonic");
   EXPECT_EQ(requests.front().wall_face_names,
             (std::vector<std::string>{"wall", "normal_wall"}));
   ASSERT_EQ(requests.front().wall_constraints.size(), 2u);
@@ -10936,7 +10703,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   // An unknown method name fails and lists the supported methods.
   auto unknown = parseWorkflowParametersXml(
       xml("harmonic",
-          "<Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>")
+          "<Source_velocity_field_name>Velocity</Source_velocity_field_name>")
           .c_str());
   try {
     (void)levelSetAdvectionVelocityRequests(*unknown);
@@ -10968,8 +10735,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
     <Level_set_field_name>phi</Level_set_field_name>
     <Velocity_source>prescribed_data</Velocity_source>
     <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
-    <Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>
     <Source_velocity_field_name>Velocity</Source_velocity_field_name>
+    <Advection_velocity_extension_method>pde_harmonic</Advection_velocity_extension_method>
     <Wet_extension_wall_faces>moving_lid</Wet_extension_wall_faces>
   </Add_equation>
   <Add_equation type="fluid">
@@ -11003,8 +10770,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
     <Level_set_field_name>phi</Level_set_field_name>
     <Velocity_source>prescribed_data</Velocity_source>
     <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
-    <Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>
     <Source_velocity_field_name>Velocity</Source_velocity_field_name>
+    <Advection_velocity_extension_method>pde_harmonic</Advection_velocity_extension_method>
   </Add_equation>
   <Add_equation type="heatS">
     <Add_BC name="wall">
@@ -11045,8 +10812,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
     <Level_set_field_name>phi</Level_set_field_name>
     <Velocity_source>prescribed_data</Velocity_source>
     <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
-    <Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>
     <Source_velocity_field_name>Velocity</Source_velocity_field_name>
+    <Advection_velocity_extension_method>pde_harmonic</Advection_velocity_extension_method>
   </Add_equation>
   <Add_equation type="heatS">
     <Add_BC name="wall">
@@ -11068,1328 +10835,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
         }
       },
       std::runtime_error);
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     NormalBandVelocityExtensionHonorsStrongNoSlipAndNormalOnlyMasks)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  constexpr svmp::label_t kHorizontalWall = 4242;
-  const auto mesh = makeWorkflowThreeQuadStripMesh();
-  auto& local_mesh = mesh->local_mesh();
-  for (const auto face : local_mesh.boundary_faces()) {
-    const auto normal = local_mesh.face_normal(face);
-    if (std::abs(normal[1]) > 0.9 * std::abs(normal[0])) {
-      mesh->set_boundary_label(face, kHorizontalWall);
-    }
-  }
-
-  std::vector<double> phi(mesh->n_vertices(), 0.0);
-  std::vector<double> source(mesh->n_vertices() * 2u, 0.0);
-  std::vector<std::uint8_t> active(mesh->n_vertices(), 0u);
-  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
-    const auto point = workflowVertexPoint(*mesh, vertex);
-    phi[vertex] = point[0] - 0.25;
-    active[vertex] = phi[vertex] <= 0.0 ? 1u : 0u;
-    source[2u * vertex] = 2.0 + point[1];
-    source[2u * vertex + 1u] = 5.0 - 0.5 * point[1];
-  }
-
-  const std::vector<WallVelocityExtensionConstraint> normal_only{{
-      .boundary_label = kHorizontalWall,
-      .constrained_components = {false, true, false}}};
-  std::vector<double> slip_extension;
-  const auto slip_report = extendVelocityInLevelSetNormalBand(
-      *mesh,
-      svmp::MeshComm::self(),
-      phi,
-      source,
-      /*source_components=*/2u,
-      active,
-      /*target_components=*/2u,
-      /*copy_components=*/2u,
-      /*band_layers=*/3,
-      /*enforce_wall_impermeability=*/true,
-      std::span<const WallVelocityExtensionConstraint>(normal_only),
-      slip_extension);
-
-  const std::vector<WallVelocityExtensionConstraint> no_slip{{
-      .boundary_label = kHorizontalWall,
-      .constrained_components = {true, true, true}}};
-  std::vector<double> no_slip_extension;
-  const auto no_slip_report = extendVelocityInLevelSetNormalBand(
-      *mesh,
-      svmp::MeshComm::self(),
-      phi,
-      source,
-      /*source_components=*/2u,
-      active,
-      /*target_components=*/2u,
-      /*copy_components=*/2u,
-      /*band_layers=*/3,
-      /*enforce_wall_impermeability=*/true,
-      std::span<const WallVelocityExtensionConstraint>(no_slip),
-      no_slip_extension);
-
-  EXPECT_EQ(slip_report.vertices_outside_band, 0u);
-  EXPECT_EQ(no_slip_report.vertices_outside_band, 0u);
-  EXPECT_NEAR(slip_report.max_wall_normal_velocity, 0.0, 1.0e-12);
-  EXPECT_NEAR(no_slip_report.max_wall_normal_velocity, 0.0, 1.0e-12);
-  std::size_t checked_dry_wall_vertices = 0u;
-  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
-    if (active[vertex] != 0u) {
-      continue;
-    }
-    const auto point = workflowVertexPoint(*mesh, vertex);
-    EXPECT_NEAR(slip_extension[2u * vertex],
-                2.0 + point[1],
-                1.0e-11)
-        << "normal-only wall must retain tangential extension at vertex "
-        << vertex;
-    EXPECT_NEAR(slip_extension[2u * vertex + 1u], 0.0, 1.0e-12)
-        << "normal-only wall must remove its constrained component at vertex "
-        << vertex;
-    EXPECT_NEAR(no_slip_extension[2u * vertex], 0.0, 1.0e-12)
-        << "no-slip wall must remove tangential extension at vertex " << vertex;
-    EXPECT_NEAR(no_slip_extension[2u * vertex + 1u], 0.0, 1.0e-12)
-        << "no-slip wall must remove normal extension at vertex " << vertex;
-    ++checked_dry_wall_vertices;
-  }
-  EXPECT_EQ(checked_dry_wall_vertices, 6u);
-#endif
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     NormalBandVelocityExtensionUsesSourceRowsOnDryCutCellSupport)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  const auto mesh = makeWorkflowThreeQuadStripMesh();
-  std::vector<double> phi(mesh->n_vertices(), 0.0);
-  std::vector<double> source(mesh->n_vertices() * 2u, 0.0);
-  std::vector<std::uint8_t> seed(mesh->n_vertices(), 0u);
-  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
-    const auto point = workflowVertexPoint(*mesh, vertex);
-    phi[vertex] = point[0] - 0.25;
-    seed[vertex] = phi[vertex] <= 0.0 ? 1u : 0u;
-    source[2u * vertex] = 1.25 + 0.75 * point[0] - 0.5 * point[1];
-    source[2u * vertex + 1u] = -0.4 + 0.2 * point[0] + point[1];
-  }
-
-  // Cell 0 contains the retained Q1 interface.  Its x=1 vertices (1 and 5)
-  // are dry by sign but are necessary basis support for the physical trace.
-  const std::array<svmp::FE::MeshIndex, 1> cut_cells{{0}};
-  ASSERT_EQ(markVelocityExtensionTraceSupportCells(
-                *mesh,
-                std::span<const svmp::FE::MeshIndex>(cut_cells),
-                seed),
-            2u);
-  ASSERT_EQ(synchronizeVelocityExtensionTraceSupportMask(
-                *mesh, svmp::MeshComm::self(), seed),
-            4u);
-
-  std::vector<double> extension;
-  std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow> rows;
-  const auto report = extendVelocityInLevelSetNormalBand(
-      *mesh,
-      svmp::MeshComm::self(),
-      phi,
-      source,
-      /*source_components=*/2u,
-      seed,
-      /*target_components=*/2u,
-      /*copy_components=*/2u,
-      /*band_layers=*/3,
-      /*enforce_wall_impermeability=*/false,
-      std::span<const WallVelocityExtensionConstraint>{},
-      extension,
-      &rows);
-  EXPECT_EQ(report.vertices_outside_band, 0u);
-
-  auto find_row = [&](std::size_t vertex, int component)
-      -> const svmp::FE::level_set::VelocityExtensionConstraintRow* {
-    const auto found = std::find_if(
-        rows.begin(), rows.end(), [&](const auto& row) {
-          return row.vertex == static_cast<svmp::FE::GlobalIndex>(vertex) &&
-                 row.component == component;
-        });
-    return found == rows.end() ? nullptr : &*found;
-  };
-
-  for (const auto dry_trace_vertex : {std::size_t{1}, std::size_t{5}}) {
-    ASSERT_GT(phi[dry_trace_vertex], 0.0);
-    for (int component = 0; component < 2; ++component) {
-      const auto c = static_cast<std::size_t>(component);
-      EXPECT_DOUBLE_EQ(extension[2u * dry_trace_vertex + c],
-                       source[2u * dry_trace_vertex + c]);
-      const auto* row = find_row(dry_trace_vertex, component);
-      ASSERT_NE(row, nullptr);
-      ASSERT_EQ(row->dependencies.size(), 1u);
-      EXPECT_EQ(row->dependencies.front().field,
-                svmp::FE::level_set::
-                    VelocityExtensionDependencyField::SourceVelocity);
-      EXPECT_EQ(row->dependencies.front().vertex,
-                static_cast<svmp::FE::GlobalIndex>(dry_trace_vertex));
-      EXPECT_EQ(row->dependencies.front().component, component);
-      EXPECT_DOUBLE_EQ(row->dependencies.front().coefficient, 1.0);
-    }
-  }
-
-  // Vertex 2 is dry and lies one graph layer beyond the cut-cell support, so
-  // it must remain an extension dependency rather than a physical trace row.
-  for (int component = 0; component < 2; ++component) {
-    const auto* row = find_row(/*vertex=*/2u, component);
-    ASSERT_NE(row, nullptr);
-    ASSERT_FALSE(row->dependencies.empty());
-    EXPECT_TRUE(std::all_of(
-        row->dependencies.begin(), row->dependencies.end(),
-        [](const auto& dependency) {
-          return dependency.field ==
-                 svmp::FE::level_set::
-                     VelocityExtensionDependencyField::ExtensionVelocity;
-        }));
-  }
-  EXPECT_LE(report.max_abs_graph_coefficient,
-            1.0 + kVelocityExtensionRowTolerance);
-  EXPECT_LE(report.max_graph_row_l1,
-            1.0 + kVelocityExtensionRowTolerance);
-  EXPECT_LE(report.max_graph_row_sum_error,
-            kVelocityExtensionRowTolerance);
-  EXPECT_LE(report.max_negative_graph_coefficient,
-            kVelocityExtensionCoefficientTolerance);
-  EXPECT_LE(report.max_extended_speed,
-            report.max_seed_speed + 1.0e-12);
-  for (const auto& row : rows) {
-    if (row.dependencies.empty() ||
-        row.dependencies.front().field !=
-            svmp::FE::level_set::
-                VelocityExtensionDependencyField::ExtensionVelocity) {
-      continue;
-    }
-    double coefficient_sum = 0.0;
-    double coefficient_l1 = 0.0;
-    for (const auto& dependency : row.dependencies) {
-      EXPECT_GE(dependency.coefficient,
-                -kVelocityExtensionCoefficientTolerance);
-      coefficient_sum += dependency.coefficient;
-      coefficient_l1 += std::abs(dependency.coefficient);
-    }
-    EXPECT_NEAR(coefficient_sum, 1.0, kVelocityExtensionRowTolerance);
-    EXPECT_LE(coefficient_l1, 1.0 + kVelocityExtensionRowTolerance);
-  }
-#endif
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     NormalBandVelocityExtensionReproducesTangentialAffineField)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  constexpr int subdivisions = 4;
-  const auto mesh = makeWorkflowStructuredQuadMesh(subdivisions);
-  std::vector<double> phi(mesh->n_vertices(), 0.0);
-  std::vector<double> source(mesh->n_vertices() * 2u, 0.0);
-  std::vector<std::uint8_t> active(mesh->n_vertices(), 0u);
-  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
-    const auto point = workflowVertexPoint(*mesh, vertex);
-    phi[vertex] = point[0] - 0.25;
-    active[vertex] = phi[vertex] <= 0.0 ? 1u : 0u;
-    // The exact normal extension for phi=x-0.25 is any field independent of
-    // x.  Use two affine tangential components to exercise the local fit.
-    source[2u * vertex] = 2.0 + 3.0 * point[1];
-    source[2u * vertex + 1u] = -1.0 + 0.5 * point[1];
-  }
-
-  std::vector<double> extended;
-  const auto report = extendVelocityInLevelSetNormalBand(
-      *mesh,
-      phi,
-      source,
-      /*source_components=*/2u,
-      active,
-      /*target_components=*/2u,
-      /*copy_components=*/2u,
-      /*band_layers=*/subdivisions,
-      /*enforce_wall_impermeability=*/false,
-      /*wall_boundary_labels=*/{},
-      extended);
-
-  EXPECT_EQ(report.vertices_outside_band, 0u);
-  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
-    const auto point = workflowVertexPoint(*mesh, vertex);
-    EXPECT_NEAR(extended[2u * vertex], 2.0 + 3.0 * point[1], 1.0e-11)
-        << "vertex " << vertex;
-    EXPECT_NEAR(extended[2u * vertex + 1u],
-                -1.0 + 0.5 * point[1],
-                1.0e-11)
-        << "vertex " << vertex;
-  }
-#endif
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     VelocityExtensionMapSnapshotTracksEveryRevisionDomain)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  const auto mesh = makeWorkflowThreeQuadStripMesh();
-  std::vector<double> phi(mesh->n_vertices(), 0.0);
-  std::vector<double> source(mesh->n_vertices() * 2u, 0.0);
-  std::vector<std::uint8_t> seed(mesh->n_vertices(), 0u);
-  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
-    const auto point = workflowVertexPoint(*mesh, vertex);
-    phi[vertex] = point[0] - 0.25;
-    seed[vertex] = phi[vertex] <= 0.0 ? 1u : 0u;
-    source[2u * vertex] = 2.0 + 3.0 * point[1];
-    source[2u * vertex + 1u] = -1.0 + 0.5 * point[1];
-  }
-  const std::array<svmp::FE::MeshIndex, 1> cut_cells{{0}};
-  ASSERT_EQ(markVelocityExtensionTraceSupportCells(
-                *mesh,
-                std::span<const svmp::FE::MeshIndex>(cut_cells),
-                seed),
-            2u);
-
-  const auto revision = application::core::velocityExtensionMapRevision(
-      /*mesh_geometry=*/11u,
-      /*mesh_topology=*/12u,
-      /*mesh_ownership=*/13u,
-      /*mesh_numbering=*/14u,
-      /*free_surface_geometry=*/15u,
-      phi,
-      seed);
-  const auto snapshot =
-      application::core::buildVelocityExtensionMapSnapshot(
-          *mesh,
-          svmp::MeshComm::self(),
-          revision,
-          phi,
-          source,
-          /*source_components=*/2u,
-          seed,
-          /*target_components=*/2u,
-          /*copy_components=*/2u,
-          /*band_layers=*/3,
-          /*enforce_wall_impermeability=*/false,
-          std::span<const WallVelocityExtensionConstraint>{});
-  ASSERT_TRUE(snapshot);
-  EXPECT_EQ(snapshot->revision(), revision);
-  EXPECT_EQ(snapshot->preview().size(), source.size());
-  EXPECT_EQ(snapshot->componentAssignment().size(), mesh->n_vertices());
-  ASSERT_EQ(snapshot->rowDiagnostics().size(), mesh->n_vertices());
-  EXPECT_GT(snapshot->report().max_extrapolation_distance, 0.0);
-  EXPECT_LE(snapshot->report().max_constant_reproduction_error,
-            kVelocityExtensionRowTolerance);
-  EXPECT_LE(snapshot->report().max_linear_reproduction_error,
-            kVelocityExtensionRowTolerance);
-  EXPECT_LE(snapshot->wetToDryAmplification(), 1.0 + 1.0e-12);
-
-  std::size_t trace_rows = 0u;
-  std::size_t reconstructed_rows = 0u;
-  for (const auto& diagnostic : snapshot->rowDiagnostics()) {
-    EXPECT_NE(diagnostic.local_vertex, svmp::FE::INVALID_GLOBAL_INDEX);
-    EXPECT_NE(diagnostic.global_vertex, svmp::INVALID_GID);
-    EXPECT_TRUE(diagnostic.assigned);
-    EXPECT_GE(diagnostic.extrapolation_distance, 0.0);
-    EXPECT_LE(diagnostic.preview_amplification, 1.0 + 1.0e-12);
-    if (diagnostic.disposition ==
-        application::core::VelocityExtensionRowDisposition::TraceSeed) {
-      ++trace_rows;
-      EXPECT_EQ(diagnostic.band_layer, 0);
-      EXPECT_EQ(diagnostic.numerical_rank, 1);
-      EXPECT_NEAR(diagnostic.coefficient_sum, 1.0, 0.0);
-      ASSERT_EQ(diagnostic.dependencies.size(), 1u);
-      continue;
-    }
-    ++reconstructed_rows;
-    EXPECT_TRUE(diagnostic.regression_attempted);
-    EXPECT_EQ(diagnostic.numerical_rank,
-              diagnostic.reconstruction_dimension);
-    EXPECT_NEAR(diagnostic.coefficient_sum, 1.0,
-                kVelocityExtensionRowTolerance);
-    EXPECT_LE(diagnostic.coefficient_l1,
-              1.0 + kVelocityExtensionRowTolerance);
-    EXPECT_EQ(diagnostic.negative_weight_count, 0u);
-    EXPECT_FALSE(diagnostic.dependencies.empty());
-  }
-  EXPECT_GT(trace_rows, 0u);
-  EXPECT_GT(reconstructed_rows, 0u);
-
-  auto detached_rows = snapshot->copyRows();
-  ASSERT_FALSE(detached_rows.empty());
-  detached_rows.clear();
-  EXPECT_FALSE(snapshot->rows().empty());
-
-  auto changed_phi = phi;
-  changed_phi.back() += 1.0e-6;
-  const auto phi_revision = application::core::velocityExtensionMapRevision(
-      11u, 12u, 13u, 14u, 15u, changed_phi, seed);
-  EXPECT_NE(phi_revision.key(), revision.key());
-
-  auto changed_seed = seed;
-  changed_seed.back() = changed_seed.back() == 0u ? 1u : 0u;
-  const auto active_revision =
-      application::core::velocityExtensionMapRevision(
-          11u, 12u, 13u, 14u, 15u, phi, changed_seed);
-  EXPECT_NE(active_revision.key(), revision.key());
-
-  const auto geometry_revision =
-      application::core::velocityExtensionMapRevision(
-          16u, 12u, 13u, 14u, 15u, phi, seed);
-  const auto topology_revision =
-      application::core::velocityExtensionMapRevision(
-          11u, 17u, 13u, 14u, 15u, phi, seed);
-  const auto ownership_revision =
-      application::core::velocityExtensionMapRevision(
-          11u, 12u, 18u, 14u, 15u, phi, seed);
-  const auto surface_revision =
-      application::core::velocityExtensionMapRevision(
-          11u, 12u, 13u, 14u, 19u, phi, seed);
-  EXPECT_NE(geometry_revision.key(), revision.key());
-  EXPECT_NE(topology_revision.key(), revision.key());
-  EXPECT_NE(ownership_revision.key(), revision.key());
-  EXPECT_NE(surface_revision.key(), revision.key());
-#endif
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     VelocityExtensionMapArtifactRetainsRowsAndRevisionChanges)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  const auto mesh = makeWorkflowSkewedExtensionTriangleMesh();
-  std::vector<double> phi(mesh->n_vertices(), 0.0);
-  std::vector<double> source(mesh->n_vertices() * 2u, 0.0);
-  std::vector<std::uint8_t> active(mesh->n_vertices(), 0u);
-  for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
-    const auto point = workflowVertexPoint(*mesh, vertex);
-    phi[vertex] = point[0] - 0.5;
-    active[vertex] = phi[vertex] <= 0.0 ? 1u : 0u;
-    source[2u * vertex] = 0.2;
-    source[2u * vertex + 1u] = -0.1;
-  }
-  const auto first_revision = application::core::velocityExtensionMapRevision(
-      11u, 12u, 13u, 14u, 15u, phi, active);
-  const auto first = application::core::buildVelocityExtensionMapSnapshot(
-      *mesh,
-      svmp::MeshComm::self(),
-      first_revision,
-      phi,
-      source,
-      2u,
-      active,
-      2u,
-      2u,
-      1,
-      false,
-      std::span<const WallVelocityExtensionConstraint>{});
-  ASSERT_TRUE(first);
-  ASSERT_EQ(first->report().bounded_fallback_rows, 1u);
-  ASSERT_EQ(first->report().coefficient_rejected_rows, 1u);
-
-  const auto output_directory =
-      std::filesystem::temp_directory_path() /
-      ("svmp_velocity_extension_artifact_" +
-       std::to_string(first_revision.key()));
-  std::error_code cleanup_error;
-  std::filesystem::remove_all(output_directory, cleanup_error);
-  ASSERT_FALSE(cleanup_error);
-  application::core::VelocityExtensionMapArtifactContext context{
-      .level_set_field_name = "phi",
-      .source_velocity_field_name = "Velocity",
-      .target_velocity_field_name = "LevelSetAdvectionVelocity",
-      .geometry_domain_id = "free_surface",
-      .operator_tag = "level_set",
-      .extension_method = "wall_compatible_normal",
-      .retained_side = "LevelSetNegative",
-      .accepted_step = 1u,
-      .accepted_time = 0.1,
-      .time_step = 0.1,
-      .state_revision = 101u,
-      .isovalue = 0.0,
-      .extension_band_layers = 1,
-      .enforce_wall_impermeability = false,
-      .rank = 0,
-      .ranks = 1,
-  };
-  const auto first_artifact =
-      application::core::writeVelocityExtensionMapArtifact(
-          output_directory, context, *first);
-  ASSERT_TRUE(first_artifact.success) << first_artifact.diagnostic;
-  EXPECT_EQ(first_artifact.owner_rows, mesh->n_vertices());
-  EXPECT_EQ(first_artifact.constraint_rows, 2u * mesh->n_vertices());
-  ASSERT_TRUE(std::filesystem::is_regular_file(first_artifact.path));
-  std::ifstream first_input(first_artifact.path);
-  ASSERT_TRUE(first_input.is_open());
-  const std::string first_json{
-      std::istreambuf_iterator<char>(first_input),
-      std::istreambuf_iterator<char>()};
-  EXPECT_NE(first_json.find("\"schema\":\"svmp.velocity_extension_map.v1\""),
-            std::string::npos);
-  EXPECT_NE(first_json.find("\"bounded_fallback_rows\":1"),
-            std::string::npos);
-  EXPECT_NE(first_json.find("\"coefficient_rejected\":true"),
-            std::string::npos);
-  EXPECT_NE(first_json.find("\"proposed_negative_weight_count\":1"),
-            std::string::npos);
-  EXPECT_NE(first_json.find("\"previous_available\":false"),
-            std::string::npos);
-
-  auto changed_phi = phi;
-  changed_phi[1] += 0.05;
-  auto changed_source = source;
-  for (auto& value : changed_source) {
-    value += 0.25;
-  }
-  const auto second_revision =
-      application::core::velocityExtensionMapRevision(
-          11u, 12u, 13u, 14u, 15u, changed_phi, active);
-  const auto second = application::core::buildVelocityExtensionMapSnapshot(
-      *mesh,
-      svmp::MeshComm::self(),
-      second_revision,
-      changed_phi,
-      changed_source,
-      2u,
-      active,
-      2u,
-      2u,
-      1,
-      false,
-      std::span<const WallVelocityExtensionConstraint>{});
-  ASSERT_TRUE(second);
-  const auto change = application::core::compareVelocityExtensionMapSnapshots(
-      *second, first.get());
-  EXPECT_TRUE(change.previous_available);
-  EXPECT_TRUE(change.revision_changed);
-  EXPECT_TRUE(change.level_set_values_changed);
-  EXPECT_EQ(change.common_owner_rows, mesh->n_vertices());
-  EXPECT_EQ(change.added_owner_rows, 0u);
-  EXPECT_EQ(change.removed_owner_rows, 0u);
-  EXPECT_EQ(change.preview_values_compared, 2u * mesh->n_vertices());
-  EXPECT_GT(change.preview_l2_change, 0.0);
-  EXPECT_GT(change.preview_linf_change, 0.0);
-
-  context.accepted_step = 2u;
-  context.accepted_time = 0.2;
-  context.state_revision = 102u;
-  const auto second_artifact =
-      application::core::writeVelocityExtensionMapArtifact(
-          output_directory, context, *second, first.get());
-  ASSERT_TRUE(second_artifact.success) << second_artifact.diagnostic;
-  std::ifstream second_input(second_artifact.path);
-  ASSERT_TRUE(second_input.is_open());
-  const std::string second_json{
-      std::istreambuf_iterator<char>(second_input),
-      std::istreambuf_iterator<char>()};
-  EXPECT_NE(second_json.find("\"previous_available\":true"),
-            std::string::npos);
-  EXPECT_NE(second_json.find("\"revision_changed\":true"),
-            std::string::npos);
-  EXPECT_NE(second_json.find("\"level_set_values\":true"),
-            std::string::npos);
-  const auto duplicate =
-      application::core::writeVelocityExtensionMapArtifact(
-          output_directory, context, *second, first.get());
-  EXPECT_FALSE(duplicate.success);
-  EXPECT_NE(duplicate.diagnostic.find("refuses to replace"),
-            std::string::npos);
-  cleanup_error.clear();
-  EXPECT_EQ(std::filesystem::remove_all(output_directory, cleanup_error), 3u);
-  EXPECT_FALSE(cleanup_error);
-#endif
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     AcceptedVelocityExtensionMapArtifactsAreOptIn)
-{
-  const auto request_xml = [](const std::string& extra) {
-    return R"xml(
-<svMultiPhysicsFile>
-  <Add_equation type="level_set">
-    <Level_set_field_name>phi</Level_set_field_name>
-    <Velocity_source>prescribed_data</Velocity_source>
-    <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
-    <Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>
-    <Source_velocity_field_name>Velocity</Source_velocity_field_name>
-    <Wet_extension_advection_velocity_method>wall_compatible_normal</Wet_extension_advection_velocity_method>)xml" +
-           extra + R"xml(
-  </Add_equation>
-  <Add_equation type="fluid">
-    <Add_BC name="wall">
-      <Type>Dir</Type>
-      <Value>0.0</Value>
-    </Add_BC>
-  </Add_equation>
-</svMultiPhysicsFile>
-)xml";
-  };
-  {
-    auto params = parseWorkflowParametersXml(request_xml("").c_str());
-    const auto requests = levelSetAdvectionVelocityRequests(*params);
-    ASSERT_EQ(requests.size(), 1u);
-    EXPECT_FALSE(requests.front().write_velocity_extension_maps);
-  }
-  for (const std::string key : {"Write_velocity_extension_maps"}) {
-    auto params = parseWorkflowParametersXml(
-        request_xml("<" + key + ">true</" + key + ">").c_str());
-    const auto requests = levelSetAdvectionVelocityRequests(*params);
-    ASSERT_EQ(requests.size(), 1u);
-    EXPECT_TRUE(requests.front().write_velocity_extension_maps) << key;
-  }
-
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  const auto mesh = makeWorkflowSkewedExtensionTriangleMesh();
-  std::vector<double> phi(mesh->n_vertices(), 0.0);
-  std::vector<double> source(mesh->n_vertices() * 2u, 0.0);
-  std::vector<std::uint8_t> active(mesh->n_vertices(), 0u);
-  for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
-    const auto point = workflowVertexPoint(*mesh, vertex);
-    phi[vertex] = point[0] - 0.5;
-    active[vertex] = phi[vertex] <= 0.0 ? 1u : 0u;
-    source[2u * vertex] = 0.2;
-    source[2u * vertex + 1u] = -0.1;
-  }
-  const auto revision = application::core::velocityExtensionMapRevision(
-      21u, 22u, 23u, 24u, 25u, phi, active);
-  const auto snapshot = application::core::buildVelocityExtensionMapSnapshot(
-      *mesh,
-      svmp::MeshComm::self(),
-      revision,
-      phi,
-      source,
-      2u,
-      active,
-      2u,
-      2u,
-      1,
-      false,
-      std::span<const WallVelocityExtensionConstraint>{});
-  ASSERT_TRUE(snapshot);
-
-  const auto output_root =
-      std::filesystem::temp_directory_path() /
-      ("svmp_velocity_extension_opt_in_" + std::to_string(revision.key()));
-  std::error_code cleanup_error;
-  std::filesystem::remove_all(output_root, cleanup_error);
-  ASSERT_FALSE(cleanup_error);
-  Parameters params;
-  params.general_simulation_parameters.save_results_in_folder.set(
-      output_root.string());
-  AcceptedVelocityExtensionMapRecord record{
-      .level_set_field_name = "phi",
-      .source_velocity_field_name = "Velocity",
-      .target_velocity_field_name = "LevelSetAdvectionVelocity",
-      .geometry_domain_id = "free_surface",
-      .operator_tag = "level_set",
-      .extension_method = "wall_compatible_normal",
-      .isovalue = 0.0,
-      .extension_band_layers = 1,
-      .enforce_wall_impermeability = false,
-      .retained_side = LevelSetActiveSide::Negative,
-      .snapshot = snapshot,
-  };
-  EXPECT_FALSE(record.write_artifact);
-  AcceptedVelocityExtensionMapRegistry accepted_maps;
-
-  // Default: no file, but the accepted map is still registered.
-  ASSERT_NO_THROW(writeAcceptedVelocityExtensionMapArtifacts(
-      params, {record}, 1u, 0.1, 0.1, 101u, svmp::MeshComm::self(),
-      accepted_maps));
-  EXPECT_FALSE(std::filesystem::exists(output_root));
-  ASSERT_EQ(accepted_maps.size(), 1u);
-  EXPECT_EQ(accepted_maps.begin()->second, snapshot);
-  EXPECT_EQ(acceptedVelocityExtensionMapRegistryRevision(accepted_maps),
-            acceptedVelocityExtensionMapRegistryRevision(
-                AcceptedVelocityExtensionMapRegistry{
-                    {acceptedVelocityExtensionMapKey(record), snapshot}}));
-
-  // Opted in: one JSON shard per accepted step.
-  record.write_artifact = true;
-  ASSERT_NO_THROW(writeAcceptedVelocityExtensionMapArtifacts(
-      params, {record}, 2u, 0.2, 0.1, 102u, svmp::MeshComm::self(),
-      accepted_maps));
-  EXPECT_EQ(accepted_maps.size(), 1u);
-  const auto map_directory = output_root / "velocity_extension_maps";
-  ASSERT_TRUE(std::filesystem::is_directory(map_directory));
-  std::size_t json_files = 0u;
-  for (const auto& entry :
-       std::filesystem::directory_iterator(map_directory)) {
-    if (entry.path().extension() != ".json") {
-      continue;
-    }
-    ++json_files;
-    EXPECT_NE(entry.path().filename().string().find("step_00000002"),
-              std::string::npos)
-        << entry.path();
-  }
-  EXPECT_EQ(json_files, 1u);
-  std::filesystem::remove_all(output_root, cleanup_error);
-  EXPECT_FALSE(cleanup_error);
-#endif
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     NormalBandVelocityExtensionManufacturedRefinementConvergesAndProjectsWalls)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  constexpr svmp::label_t kHorizontalWall = 4351;
-  constexpr double kInterfaceX = 0.30;
-  const double pi = std::acos(-1.0);
-  const auto exact_tangential_velocity = [pi](double y) {
-    return std::sin(pi * y) + 0.2 * std::cos(2.0 * pi * y);
-  };
-  const auto exact_normal_velocity = [pi](double y) {
-    return 0.15 * std::sin(pi * y);
-  };
-
-  struct RefinementError {
-    double l2{0.0};
-    double linf{0.0};
-  };
-  std::vector<RefinementError> errors;
-  for (const int subdivisions : {8, 16, 32}) {
-    SCOPED_TRACE("subdivisions=" + std::to_string(subdivisions));
-    const auto mesh = makeWorkflowStructuredQuadMesh(subdivisions);
-    for (const auto face : mesh->local_mesh().boundary_faces()) {
-      const auto normal = mesh->local_mesh().face_normal(face);
-      if (std::abs(normal[1]) > 0.9 * std::abs(normal[0])) {
-        mesh->set_boundary_label(face, kHorizontalWall);
-      }
-    }
-
-    std::vector<double> phi(mesh->n_vertices(), 0.0);
-    std::vector<double> source(mesh->n_vertices() * 2u, 0.0);
-    std::vector<std::uint8_t> active(mesh->n_vertices(), 0u);
-    for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
-      const auto point = workflowVertexPoint(*mesh, vertex);
-      phi[vertex] = point[0] - kInterfaceX;
-      active[vertex] = phi[vertex] <= 0.0 ? 1u : 0u;
-      // For the planar interface, n=ex and this smooth field is the exact
-      // solution of n.grad(u_ext)=0.  Its second component vanishes at the
-      // horizontal walls, so it also manufactures the no-penetration trace
-      // without making that component identically zero in the interior.
-      source[2u * vertex] = exact_tangential_velocity(point[1]);
-      source[2u * vertex + 1u] = exact_normal_velocity(point[1]);
-    }
-
-    const std::vector<WallVelocityExtensionConstraint> constraints{{
-        .boundary_label = kHorizontalWall,
-        .constrained_components = {false, true, false}}};
-    std::vector<double> extended;
-    const auto report = extendVelocityInLevelSetNormalBand(
-        *mesh,
-        svmp::MeshComm::self(),
-        phi,
-        source,
-        /*source_components=*/2u,
-        active,
-        /*target_components=*/2u,
-        /*copy_components=*/2u,
-        /*band_layers=*/subdivisions,
-        /*enforce_wall_impermeability=*/true,
-        std::span<const WallVelocityExtensionConstraint>(constraints),
-        extended);
-
-    EXPECT_EQ(report.vertices_outside_band, 0u);
-    EXPECT_GT(report.wall_projected_vertices, 0u);
-    EXPECT_NEAR(report.max_wall_normal_velocity, 0.0, 1.0e-13);
-    double squared_error = 0.0;
-    double max_error = 0.0;
-    std::size_t dry_vertices = 0u;
-    for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
-      const auto point = workflowVertexPoint(*mesh, vertex);
-      const std::array<double, 2> exact{{
-          exact_tangential_velocity(point[1]),
-          exact_normal_velocity(point[1])}};
-      if (active[vertex] != 0u) {
-        EXPECT_NEAR(extended[2u * vertex], exact[0], 1.0e-14);
-        EXPECT_NEAR(extended[2u * vertex + 1u], exact[1], 1.0e-14);
-        continue;
-      }
-      for (std::size_t component = 0; component < 2u; ++component) {
-        const double error =
-            std::abs(extended[2u * vertex + component] - exact[component]);
-        squared_error += error * error;
-        max_error = std::max(max_error, error);
-      }
-      if (point[1] <= 1.0e-14 || point[1] >= 1.0 - 1.0e-14) {
-        EXPECT_NEAR(extended[2u * vertex + 1u], 0.0, 1.0e-13);
-      }
-      ++dry_vertices;
-    }
-    ASSERT_GT(dry_vertices, 0u);
-    errors.push_back({
-        .l2 = std::sqrt(
-            squared_error / static_cast<double>(2u * dry_vertices)),
-        .linf = max_error});
-    RecordProperty("extension_l2_N" + std::to_string(subdivisions),
-                   std::to_string(errors.back().l2));
-    RecordProperty("extension_linf_N" + std::to_string(subdivisions),
-                   std::to_string(errors.back().linf));
-  }
-
-  ASSERT_EQ(errors.size(), 3u);
-  for (std::size_t level = 1; level < errors.size(); ++level) {
-    constexpr double exact_reproduction_tolerance = 5.0e-13;
-    if (errors[level - 1u].linf <= exact_reproduction_tolerance &&
-        errors[level].linf <= exact_reproduction_tolerance) {
-      RecordProperty("extension_exact_reproduction_level" +
-                         std::to_string(level),
-                     "true");
-      EXPECT_LE(errors[level - 1u].l2, exact_reproduction_tolerance);
-      EXPECT_LE(errors[level].l2, exact_reproduction_tolerance);
-      continue;
-    }
-    ASSERT_GT(errors[level].l2, 0.0);
-    ASSERT_GT(errors[level].linf, 0.0);
-    const double l2_rate =
-        std::log(errors[level - 1u].l2 / errors[level].l2) /
-        std::log(2.0);
-    const double linf_rate =
-        std::log(errors[level - 1u].linf / errors[level].linf) /
-        std::log(2.0);
-    RecordProperty("extension_l2_rate_level" + std::to_string(level),
-                   std::to_string(l2_rate));
-    RecordProperty("extension_linf_rate_level" + std::to_string(level),
-                   std::to_string(linf_rate));
-    EXPECT_GT(l2_rate, 0.75)
-        << "coarse=" << errors[level - 1u].l2
-        << " fine=" << errors[level].l2;
-    EXPECT_GT(linf_rate, 0.60)
-        << "coarse=" << errors[level - 1u].linf
-        << " fine=" << errors[level].linf;
-  }
-#endif
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     NormalBandVelocityExtensionBandSweepKeepsFallbackRowsBounded)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  constexpr int subdivisions = 8;
-  constexpr double tangential_velocity = 0.2;
-  constexpr double normal_velocity = -0.1;
-  const auto mesh = makeWorkflowStructuredQuadMesh(subdivisions);
-  std::vector<double> phi(mesh->n_vertices(), 0.0);
-  std::vector<double> source(mesh->n_vertices() * 2u, 0.0);
-  std::vector<std::uint8_t> active(mesh->n_vertices(), 0u);
-  for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
-    const auto point = workflowVertexPoint(*mesh, vertex);
-    const double dx = point[0] - 0.35;
-    const double dy = point[1] - 0.50;
-    phi[vertex] = std::sqrt(dx * dx + dy * dy) - 0.22;
-    active[vertex] = phi[vertex] <= 0.0 ? 1u : 0u;
-    source[2u * vertex] = tangential_velocity;
-    source[2u * vertex + 1u] = normal_velocity;
-  }
-
-  std::vector<std::size_t> vertices_outside_band;
-  for (const int band_layers : {1, 2, 4, 8}) {
-    SCOPED_TRACE("band_layers=" + std::to_string(band_layers));
-    std::vector<double> extended;
-    const auto report = extendVelocityInLevelSetNormalBand(
-        *mesh,
-        svmp::MeshComm::self(),
-        phi,
-        source,
-        /*source_components=*/2u,
-        active,
-        /*target_components=*/2u,
-        /*copy_components=*/2u,
-        band_layers,
-        /*enforce_wall_impermeability=*/false,
-        std::span<const WallVelocityExtensionConstraint>{},
-        extended);
-    vertices_outside_band.push_back(report.vertices_outside_band);
-    EXPECT_EQ(report.bounded_fallback_rows, 0u);
-    EXPECT_LE(report.max_abs_graph_coefficient,
-              1.0 + kVelocityExtensionRowTolerance);
-    EXPECT_LE(report.max_graph_row_l1,
-              1.0 + kVelocityExtensionRowTolerance);
-    EXPECT_LE(report.max_graph_row_sum_error,
-              kVelocityExtensionRowTolerance);
-    EXPECT_LE(report.max_negative_graph_coefficient,
-              kVelocityExtensionCoefficientTolerance);
-    EXPECT_LE(report.max_constant_reproduction_error,
-              kVelocityExtensionRowTolerance);
-    EXPECT_LE(report.max_extended_speed,
-              report.max_seed_speed + 1.0e-12);
-
-    std::size_t observed_outside = 0u;
-    for (std::size_t vertex = 0u;
-         vertex < mesh->n_vertices(); ++vertex) {
-      const bool outside =
-          extended[2u * vertex] == 0.0 &&
-          extended[2u * vertex + 1u] == 0.0;
-      if (outside) {
-        ++observed_outside;
-        continue;
-      }
-      EXPECT_NEAR(extended[2u * vertex],
-                  tangential_velocity,
-                  1.0e-12);
-      EXPECT_NEAR(extended[2u * vertex + 1u],
-                  normal_velocity,
-                  1.0e-12);
-    }
-    EXPECT_EQ(observed_outside, report.vertices_outside_band);
-    RecordProperty(
-        "extension_band_" + std::to_string(band_layers) +
-            "_outside_vertices",
-        std::to_string(report.vertices_outside_band));
-    RecordProperty(
-        "extension_band_" + std::to_string(band_layers) +
-            "_bounded_fallback_rows",
-        std::to_string(report.bounded_fallback_rows));
-    RecordProperty(
-        "extension_band_" + std::to_string(band_layers) +
-            "_wet_to_dry_speed_ratio",
-        std::to_string(
-            report.max_extended_speed / report.max_seed_speed));
-  }
-
-  ASSERT_EQ(vertices_outside_band.size(), 4u);
-  EXPECT_GT(vertices_outside_band[0], vertices_outside_band[1]);
-  EXPECT_GT(vertices_outside_band[1], vertices_outside_band[2]);
-  EXPECT_GT(vertices_outside_band[2], vertices_outside_band[3]);
-  EXPECT_EQ(vertices_outside_band.back(), 0u);
-
-  const auto fallback_mesh = makeWorkflowSkewedExtensionTriangleMesh();
-  std::vector<double> fallback_phi(fallback_mesh->n_vertices(), 0.0);
-  std::vector<double> fallback_source(
-      fallback_mesh->n_vertices() * 2u, 0.0);
-  std::vector<std::uint8_t> fallback_active(
-      fallback_mesh->n_vertices(), 0u);
-  for (std::size_t vertex = 0u;
-       vertex < fallback_mesh->n_vertices(); ++vertex) {
-    const auto point = workflowVertexPoint(*fallback_mesh, vertex);
-    fallback_phi[vertex] = point[0] - 0.5;
-    fallback_active[vertex] =
-        fallback_phi[vertex] <= 0.0 ? 1u : 0u;
-    fallback_source[2u * vertex] = tangential_velocity;
-    fallback_source[2u * vertex + 1u] = normal_velocity;
-  }
-  std::vector<double> fallback_extension;
-  std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>
-      fallback_rows;
-  std::vector<std::int64_t> fallback_components;
-  std::vector<application::core::VelocityExtensionGraphRowDiagnostic>
-      fallback_diagnostics;
-  const auto fallback_report = extendVelocityInLevelSetNormalBand(
-      *fallback_mesh,
-      svmp::MeshComm::self(),
-      fallback_phi,
-      fallback_source,
-      /*source_components=*/2u,
-      fallback_active,
-      /*target_components=*/2u,
-      /*copy_components=*/2u,
-      /*band_layers=*/1,
-      /*enforce_wall_impermeability=*/false,
-      std::span<const WallVelocityExtensionConstraint>{},
-      fallback_extension,
-      &fallback_rows,
-      &fallback_components,
-      &fallback_diagnostics);
-  EXPECT_EQ(fallback_report.vertices_outside_band, 0u);
-  EXPECT_EQ(fallback_report.regression_candidate_rows, 1u);
-  EXPECT_EQ(fallback_report.regression_accepted_rows, 0u);
-  EXPECT_EQ(fallback_report.bounded_fallback_rows, 1u);
-  EXPECT_EQ(fallback_report.condition_rejected_rows, 0u);
-  EXPECT_EQ(fallback_report.coefficient_rejected_rows, 1u);
-  EXPECT_LE(fallback_report.max_abs_graph_coefficient,
-            1.0 + kVelocityExtensionRowTolerance);
-  EXPECT_LE(fallback_report.max_graph_row_l1,
-            1.0 + kVelocityExtensionRowTolerance);
-  EXPECT_LE(fallback_report.max_graph_row_sum_error,
-            kVelocityExtensionRowTolerance);
-  EXPECT_LE(fallback_report.max_negative_graph_coefficient,
-            kVelocityExtensionCoefficientTolerance);
-  EXPECT_LE(fallback_report.max_extended_speed,
-            fallback_report.max_seed_speed + 1.0e-12);
-  const auto fallback_diagnostic = std::find_if(
-      fallback_diagnostics.begin(),
-      fallback_diagnostics.end(),
-      [](const auto& diagnostic) {
-        return diagnostic.disposition ==
-               application::core::VelocityExtensionRowDisposition::
-                   BoundedFallback;
-      });
-  ASSERT_NE(fallback_diagnostic, fallback_diagnostics.end());
-  EXPECT_TRUE(fallback_diagnostic->regression_attempted);
-  EXPECT_FALSE(fallback_diagnostic->regression_accepted);
-  EXPECT_TRUE(fallback_diagnostic->bounded_fallback_used);
-  EXPECT_FALSE(fallback_diagnostic->condition_rejected);
-  EXPECT_TRUE(fallback_diagnostic->coefficient_rejected);
-  EXPECT_GT(fallback_diagnostic->proposed_negative_weight_count, 0u);
-  EXPECT_GT(fallback_diagnostic->proposed_max_negative_coefficient, 0.0);
-  EXPECT_EQ(fallback_diagnostic->negative_weight_count, 0u);
-  EXPECT_NEAR(fallback_diagnostic->coefficient_sum, 1.0,
-              kVelocityExtensionRowTolerance);
-  EXPECT_LE(fallback_diagnostic->coefficient_l1,
-            1.0 + kVelocityExtensionRowTolerance);
-  EXPECT_LE(fallback_diagnostic->preview_amplification,
-            1.0 + 1.0e-12);
-  ASSERT_EQ(fallback_extension.size(), fallback_source.size());
-  for (std::size_t index = 0u;
-       index < fallback_extension.size(); index += 2u) {
-    EXPECT_NEAR(fallback_extension[index],
-                tangential_velocity,
-                1.0e-12);
-    EXPECT_NEAR(fallback_extension[index + 1u],
-                normal_velocity,
-                1.0e-12);
-  }
-  RecordProperty("extension_forced_bounded_fallback_rows",
-                 std::to_string(fallback_report.bounded_fallback_rows));
-
-  const auto ill_conditioned_mesh =
-      makeWorkflowSkewedExtensionTriangleMesh(1.00001);
-  std::vector<double> ill_conditioned_phi(
-      ill_conditioned_mesh->n_vertices(), 0.0);
-  std::vector<double> ill_conditioned_source(
-      ill_conditioned_mesh->n_vertices() * 2u, 0.0);
-  std::vector<std::uint8_t> ill_conditioned_active(
-      ill_conditioned_mesh->n_vertices(), 0u);
-  for (std::size_t vertex = 0u;
-       vertex < ill_conditioned_mesh->n_vertices(); ++vertex) {
-    const auto point = workflowVertexPoint(*ill_conditioned_mesh, vertex);
-    ill_conditioned_phi[vertex] = point[0] - 0.5;
-    ill_conditioned_active[vertex] =
-        ill_conditioned_phi[vertex] <= 0.0 ? 1u : 0u;
-    ill_conditioned_source[2u * vertex] = tangential_velocity;
-    ill_conditioned_source[2u * vertex + 1u] = normal_velocity;
-  }
-  std::vector<double> ill_conditioned_extension;
-  std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>
-      ill_conditioned_rows;
-  std::vector<std::int64_t> ill_conditioned_components;
-  std::vector<application::core::VelocityExtensionGraphRowDiagnostic>
-      ill_conditioned_diagnostics;
-  const auto ill_conditioned_report = extendVelocityInLevelSetNormalBand(
-      *ill_conditioned_mesh,
-      svmp::MeshComm::self(),
-      ill_conditioned_phi,
-      ill_conditioned_source,
-      /*source_components=*/2u,
-      ill_conditioned_active,
-      /*target_components=*/2u,
-      /*copy_components=*/2u,
-      /*band_layers=*/1,
-      /*enforce_wall_impermeability=*/false,
-      std::span<const WallVelocityExtensionConstraint>{},
-      ill_conditioned_extension,
-      &ill_conditioned_rows,
-      &ill_conditioned_components,
-      &ill_conditioned_diagnostics);
-  EXPECT_EQ(ill_conditioned_report.regression_candidate_rows, 1u);
-  EXPECT_EQ(ill_conditioned_report.regression_accepted_rows, 0u);
-  EXPECT_EQ(ill_conditioned_report.bounded_fallback_rows, 1u);
-  EXPECT_EQ(ill_conditioned_report.condition_rejected_rows, 1u);
-  EXPECT_EQ(ill_conditioned_report.coefficient_rejected_rows, 0u);
-  EXPECT_LE(ill_conditioned_report.max_graph_row_l1,
-            1.0 + kVelocityExtensionRowTolerance);
-  EXPECT_LE(ill_conditioned_report.max_graph_row_sum_error,
-            kVelocityExtensionRowTolerance);
-  EXPECT_LE(ill_conditioned_report.max_extended_speed,
-            ill_conditioned_report.max_seed_speed + 1.0e-12);
-  const auto condition_diagnostic = std::find_if(
-      ill_conditioned_diagnostics.begin(),
-      ill_conditioned_diagnostics.end(),
-      [](const auto& diagnostic) {
-        return diagnostic.condition_rejected;
-      });
-  ASSERT_NE(condition_diagnostic, ill_conditioned_diagnostics.end());
-  EXPECT_EQ(condition_diagnostic->disposition,
-            application::core::VelocityExtensionRowDisposition::
-                BoundedFallback);
-  EXPECT_TRUE(condition_diagnostic->bounded_fallback_used);
-  EXPECT_FALSE(condition_diagnostic->coefficient_rejected);
-  EXPECT_GT(condition_diagnostic->condition_estimate,
-            kVelocityExtensionMaxRegressionCondition);
-  EXPECT_EQ(condition_diagnostic->negative_weight_count, 0u);
-  EXPECT_LE(condition_diagnostic->coefficient_l1,
-            1.0 + kVelocityExtensionRowTolerance);
-  RecordProperty("extension_condition_fallback_rows",
-                 std::to_string(
-                     ill_conditioned_report.condition_rejected_rows));
-#endif
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     NormalBandVelocityExtensionDoesNotSwitchDisconnectedComponents)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  const auto mesh = makeDisconnectedWorkflowQuadPairMesh();
-  std::vector<double> phi(mesh->n_vertices(), 0.0);
-  std::vector<double> source(mesh->n_vertices() * 2u, 0.0);
-  std::vector<std::uint8_t> active(mesh->n_vertices(), 0u);
-  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
-    const auto point = workflowVertexPoint(*mesh, vertex);
-    phi[vertex] = point[0] - 0.25;
-    active[vertex] = phi[vertex] <= 0.0 ? 1u : 0u;
-    const bool first_component = vertex < 4u;
-    source[2u * vertex] = first_component ? 2.0 : -7.0;
-    source[2u * vertex + 1u] = first_component ? 3.0 : 11.0;
-  }
-
-  std::vector<double> extended;
-  const auto report = extendVelocityInLevelSetNormalBand(
-      *mesh,
-      phi,
-      source,
-      /*source_components=*/2u,
-      active,
-      /*target_components=*/2u,
-      /*copy_components=*/2u,
-      /*band_layers=*/1,
-      /*enforce_wall_impermeability=*/false,
-      /*wall_boundary_labels=*/{},
-      extended);
-
-  EXPECT_EQ(report.vertices_outside_band, 0u);
-  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
-    const bool first_component = vertex < 4u;
-    EXPECT_NEAR(extended[2u * vertex], first_component ? 2.0 : -7.0,
-                1.0e-12)
-        << "vertex " << vertex;
-    EXPECT_NEAR(extended[2u * vertex + 1u], first_component ? 3.0 : 11.0,
-                1.0e-12)
-        << "vertex " << vertex;
-  }
-#endif
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     NormalBandVelocityExtensionIgnoresReversedComponentNumbering)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  struct ExtensionResult {
-    WallCompatibleVelocityExtensionResult report{};
-    std::vector<std::array<double, 4>> samples{};
-    std::int64_t left_component{-1};
-    std::int64_t right_component{-1};
-  };
-  const auto run = [](const std::shared_ptr<svmp::Mesh>& mesh) {
-    std::vector<double> phi(mesh->n_vertices(), 0.0);
-    std::vector<double> source(mesh->n_vertices() * 2u, 0.0);
-    std::vector<std::uint8_t> active(mesh->n_vertices(), 0u);
-    for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
-      const auto point = workflowVertexPoint(*mesh, vertex);
-      phi[vertex] = std::min(point[0] - 0.25,
-                             4.0 - point[0] - 0.35);
-      active[vertex] = phi[vertex] <= 0.0 ? 1u : 0u;
-      const bool left = point[0] <= 2.0;
-      source[2u * vertex] =
-          left ? 2.0 + 3.0 * point[1] : -7.0 + 2.0 * point[1];
-      source[2u * vertex + 1u] =
-          left ? -1.0 + 0.5 * point[1] : 11.0 - 4.0 * point[1];
-    }
-
-    std::vector<double> extended;
-    std::vector<std::int64_t> component_assignment;
-    ExtensionResult result;
-    result.report = extendVelocityInLevelSetNormalBand(
-        *mesh,
-        svmp::MeshComm::self(),
-        phi,
-        source,
-        /*source_components=*/2u,
-        active,
-        /*target_components=*/2u,
-        /*copy_components=*/2u,
-        /*band_layers=*/4,
-        /*enforce_wall_impermeability=*/false,
-        std::span<const WallVelocityExtensionConstraint>{},
-        extended,
-        nullptr,
-        &component_assignment,
-        nullptr);
-    for (std::size_t vertex = 0u; vertex < mesh->n_vertices(); ++vertex) {
-      const auto point = workflowVertexPoint(*mesh, vertex);
-      result.samples.push_back({{
-          point[0],
-          point[1],
-          extended[2u * vertex],
-          extended[2u * vertex + 1u],
-      }});
-      if (point[0] == 0.0 && result.left_component < 0) {
-        result.left_component = component_assignment[vertex];
-      }
-      if (point[0] == 4.0 && result.right_component < 0) {
-        result.right_component = component_assignment[vertex];
-      }
-    }
-    std::sort(result.samples.begin(), result.samples.end());
-    return result;
-  };
-
-  const auto forward = run(makeWorkflowFourQuadStripMesh());
-  const auto reversed = run(makeWorkflowFourQuadStripMesh(true));
-  ASSERT_EQ(forward.report.vertices_outside_band, 0u);
-  ASSERT_EQ(reversed.report.vertices_outside_band, 0u);
-  ASSERT_GT(forward.report.component_collision_vertices, 0u);
-  EXPECT_EQ(reversed.report.component_collision_vertices,
-            forward.report.component_collision_vertices);
-  ASSERT_GE(forward.left_component, 0);
-  ASSERT_GE(forward.right_component, 0);
-  ASSERT_GE(reversed.left_component, 0);
-  ASSERT_GE(reversed.right_component, 0);
-  EXPECT_LT(forward.left_component, forward.right_component);
-  EXPECT_GT(reversed.left_component, reversed.right_component);
-  ASSERT_EQ(reversed.samples.size(), forward.samples.size());
-  for (std::size_t sample = 0u; sample < forward.samples.size(); ++sample) {
-    ASSERT_EQ(reversed.samples[sample][0], forward.samples[sample][0]);
-    ASSERT_EQ(reversed.samples[sample][1], forward.samples[sample][1]);
-    EXPECT_NEAR(reversed.samples[sample][2],
-                forward.samples[sample][2],
-                1.0e-12);
-    EXPECT_NEAR(reversed.samples[sample][3],
-                forward.samples[sample][3],
-                1.0e-12);
-
-    const double x = forward.samples[sample][0];
-    const double y = forward.samples[sample][1];
-    const bool left_branch = x < 1.95;
-    EXPECT_NEAR(forward.samples[sample][2],
-                left_branch ? 2.0 + 3.0 * y : -7.0 + 2.0 * y,
-                1.0e-12);
-    EXPECT_NEAR(forward.samples[sample][3],
-                left_branch ? -1.0 + 0.5 * y : 11.0 - 4.0 * y,
-                1.0e-12);
-  }
-  RecordProperty("forward_left_component",
-                 std::to_string(forward.left_component));
-  RecordProperty("forward_right_component",
-                 std::to_string(forward.right_component));
-  RecordProperty("reversed_left_component",
-                 std::to_string(reversed.left_component));
-  RecordProperty("reversed_right_component",
-                 std::to_string(reversed.right_component));
-#endif
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     NormalBandVelocityExtensionFailsClosedOnEquidistantComponentBands)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  const auto mesh = makeWorkflowFourQuadStripMesh();
-  std::vector<double> phi(mesh->n_vertices(), 0.0);
-  std::vector<double> source(mesh->n_vertices() * 2u, 0.0);
-  std::vector<std::uint8_t> active(mesh->n_vertices(), 0u);
-  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
-    const auto point = workflowVertexPoint(*mesh, vertex);
-    // Two disconnected active components live at opposite ends of one
-    // connected background mesh.  Their two-layer graph bands collide at
-    // x=2, where the old unlabeled propagation blended both source fields.
-    // Place both interfaces one quarter cell inside their end cells so that
-    // x=2 is also equidistant from the two geometric interfaces.
-    phi[vertex] = std::min(point[0] - 0.25,
-                           4.0 - point[0] - 0.25);
-    active[vertex] = phi[vertex] <= 0.0 ? 1u : 0u;
-    const bool left_branch = point[0] <= 2.0;
-    source[2u * vertex] = left_branch
-                              ? 2.0 + 3.0 * point[1]
-                              : -7.0 + 2.0 * point[1];
-    source[2u * vertex + 1u] = left_branch
-                                   ? -1.0 + 0.5 * point[1]
-                                   : 11.0 - 4.0 * point[1];
-  }
-
-  std::vector<double> extended;
-  EXPECT_THROW(
-      {
-        try {
-          (void)extendVelocityInLevelSetNormalBand(
-              *mesh,
-              phi,
-              source,
-              /*source_components=*/2u,
-              active,
-              /*target_components=*/2u,
-              /*copy_components=*/2u,
-              /*band_layers=*/2,
-              /*enforce_wall_impermeability=*/false,
-              /*wall_boundary_labels=*/{},
-              extended);
-        } catch (const std::runtime_error& error) {
-          EXPECT_NE(std::string(error.what()).find(
-                        "unresolved equidistant active-component collision"),
-                    std::string::npos);
-          throw;
-        }
-      },
-      std::runtime_error);
-#endif
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     NormalBandVelocityExtensionHonorsGraphLayerCutoff)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  const auto mesh = makeWorkflowThreeQuadStripMesh();
-  std::vector<double> phi(mesh->n_vertices(), 0.0);
-  std::vector<double> source(mesh->n_vertices() * 2u, 0.0);
-  std::vector<std::uint8_t> active(mesh->n_vertices(), 0u);
-  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
-    const auto point = workflowVertexPoint(*mesh, vertex);
-    phi[vertex] = point[0] - 0.25;
-    active[vertex] = phi[vertex] <= 0.0 ? 1u : 0u;
-    source[2u * vertex] = 4.0;
-    source[2u * vertex + 1u] = -2.0;
-  }
-
-  std::vector<double> extended;
-  const auto report = extendVelocityInLevelSetNormalBand(
-      *mesh,
-      phi,
-      source,
-      /*source_components=*/2u,
-      active,
-      /*target_components=*/2u,
-      /*copy_components=*/2u,
-      /*band_layers=*/1,
-      /*enforce_wall_impermeability=*/false,
-      /*wall_boundary_labels=*/{},
-      extended);
-
-  EXPECT_EQ(report.vertices_outside_band, 4u);
-  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
-    const auto point = workflowVertexPoint(*mesh, vertex);
-    if (point[0] <= 1.0) {
-      EXPECT_NEAR(extended[2u * vertex], 4.0, 1.0e-12)
-          << "vertex " << vertex;
-      EXPECT_NEAR(extended[2u * vertex + 1u], -2.0, 1.0e-12)
-          << "vertex " << vertex;
-    } else {
-      EXPECT_NEAR(extended[2u * vertex], 0.0, 1.0e-12)
-          << "vertex " << vertex;
-      EXPECT_NEAR(extended[2u * vertex + 1u], 0.0, 1.0e-12)
-          << "vertex " << vertex;
-    }
-  }
-#endif
 }
 
 application::core::LevelSetAuthoritativeFunctionalValue

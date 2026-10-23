@@ -240,11 +240,12 @@ def test_transport_options(tmp_path):
     schedule = gen.time_schedule(16, 3000.0, 4.0, 100)
     coupled = gen.solver_xml("surface_stress", schedule, 10, 1, transport="coupled")
     assert "<Velocity_source>coupled_field" in coupled and "Use_wet_extension" not in coupled
-    wet = gen.solver_xml("surface_stress", schedule, 10, 1, transport="wet_extension")
-    assert "<Use_wet_extension_advection_velocity>true<" in wet
-    assert "<Advection_velocity_extension_method>wall_compatible_normal<" in wet
-    # The PDE extension is selected by method and coupling, never together
-    # with the wet-extension switch (the solver rejects that combination).
+    # The algebraic wet extension was retired (decisions D47 and D55).
+    assert "wet_extension" not in gen.TRANSPORTS
+    with pytest.raises(ValueError, match="must be one of"):
+        gen.solver_xml("surface_stress", schedule, 10, 1, transport="wet_extension")
+    # The PDE extension is selected by method and coupling, without the
+    # retired wet-extension switch.
     pde = gen.solver_xml("surface_stress", schedule, 10, 1, transport="pde_extension")
     assert "<Advection_velocity_extension_method>pde_harmonic<" in pde
     assert "<Advection_velocity_extension_coupling>monolithic<" in pde

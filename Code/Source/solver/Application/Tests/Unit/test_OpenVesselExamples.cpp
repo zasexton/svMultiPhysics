@@ -672,15 +672,15 @@ fs::path writeWetExtensionOrderRegressionXml(const fs::path& case_dir,
                   "Velocity_field_name",
                   "LevelSetAdvectionVelocity");
   setOrAppendText(doc, level_set, "Auto_register_velocity_field", "true");
-  setOrAppendText(doc,
-                  level_set,
-                  "Use_wet_extension_advection_velocity",
-                  "true");
   setOrAppendText(doc, level_set, "Source_velocity_field_name", "Velocity");
   setOrAppendText(doc,
                   level_set,
-                  "Wet_extension_advection_velocity_method",
-                  "wall_compatible_normal");
+                  "Advection_velocity_extension_method",
+                  "pde_harmonic");
+  setOrAppendText(doc,
+                  level_set,
+                  "Advection_velocity_extension_coupling",
+                  "monolithic");
 
   if (!fitted_exclusion.empty()) {
     auto& free_surface =
@@ -3211,8 +3211,11 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
       expectBoundaryCondition(level_set, "wall_top", "LevelSetOutflow");
       expectText(level_set, "Module_options", expected_jit_options);
       expectText(level_set,
-                 "Wet_extension_advection_velocity_method",
-                 "wall_compatible_normal");
+                 "Advection_velocity_extension_method",
+                 "pde_harmonic");
+      expectText(level_set,
+                 "Advection_velocity_extension_coupling",
+                 "monolithic");
       // Curved continuous-P1 redistancing currently fails closed rather than
       // converging generally, so the production deck leaves it disabled.
       // The bounded global volume repair was retired (decision D47).
@@ -3262,9 +3265,16 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
       EXPECT_EQ(fluid.FirstChildElement("Node_pressure_constraints"), nullptr);
       expectText(free_surface, "Generated_interface_domain_id",
                  "open_vessel_surface");
+      // The algebraic wet extension was retired (decisions D47 and D55).
+      EXPECT_EQ(
+          level_set.FirstChildElement("Use_wet_extension_advection_velocity"),
+          nullptr);
       expectText(level_set,
-                 "Wet_extension_advection_velocity_method",
-                 "wall_compatible_normal");
+                 "Advection_velocity_extension_method",
+                 "pde_harmonic");
+      expectText(level_set,
+                 "Advection_velocity_extension_coupling",
+                 "monolithic");
     }
   }
 }

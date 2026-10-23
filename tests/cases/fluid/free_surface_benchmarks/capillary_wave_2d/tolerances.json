@@ -21,7 +21,7 @@
     "reference": "Prosperetti initial-value solution for a free surface (Phys. Fluids 19, 195 (1976); Phys. Fluids 24, 1217 (1981), one-fluid limit), fitted with the same damped-cosine model on the same output times as the simulation",
     "note": "Criteria apply separately to each (capillary form, transport, Laplace number, dt divisor) spatial study at one shared time step; the divisor-1 study needs every level, the divisor-2 study the levels in time_step_criterion.refined_step_levels. See README.md for the definitions and the cost of each level.",
     "time_step_study": "Gated since 2026-10-05 (D13, time_step_criterion): dt/2 (100 steps per period) at lambda/h = 64. Every level run at two or more divisors (1, 2, 4) is also reported.",
-    "transport": "Level-set advection with the PDE velocity extension of decision D9 once it is in the solver (generate_case.py --transport pde_extension); until then wet_extension (wall_compatible_normal), the D9 comparison baseline. Criteria apply per (capillary form, transport) study."
+    "transport": "Level-set advection with the PDE velocity extension of decision D9 (generate_case.py --transport pde_extension); the wet_extension (wall_compatible_normal) comparison baseline was retired by decisions D47 and D55. Criteria apply per (capillary form, transport) study."
   },
   "criteria": [
     {

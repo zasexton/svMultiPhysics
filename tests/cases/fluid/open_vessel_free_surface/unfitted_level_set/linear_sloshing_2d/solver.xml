@@ -42,8 +42,9 @@
   <Velocity_source>prescribed_data</Velocity_source>
   <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
   <Auto_register_velocity_field>true</Auto_register_velocity_field>
-  <Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>
   <Source_velocity_field_name>Velocity</Source_velocity_field_name>
+  <Advection_velocity_extension_method>pde_harmonic</Advection_velocity_extension_method>
+  <Advection_velocity_extension_coupling>monolithic</Advection_velocity_extension_coupling>
   <Enable_SUPG>false</Enable_SUPG>
   <Interface_kinematic_marker>1030234</Interface_kinematic_marker>
   <Interface_kinematic_weight_scale>1.0</Interface_kinematic_weight_scale>

@@ -1,5 +1,15 @@
 # Square Tank Tilt Settling
 
+**Status: broken, fails closed (decision D55, 2026-10-23; fix later).**
+The committed `solver.xml` relied on the algebraic wall-compatible wet
+extension, which decisions D47 and D55 retired. It now selects the harmonic
+PDE extension (`Advection_velocity_extension_method=pde_harmonic`,
+`Advection_velocity_extension_coupling=monolithic`) and is not re-validated.
+Its background mesh is Quad4, and the PDE extension needs triangle (2D) or
+tetrahedral (3D) cells in the dry region, so a run stops at the first
+extension refresh with a message that names the Quad cell. The deck needs a
+simplicial mesh before it runs again.
+
 This is a small 2D smoke/regression case for the new OOP incompressible
 Navier-Stokes unfitted level-set free-surface path. The tank starts half full
 with a horizontal level set. At `t = 0`, gravity is resolved in a frame tilted

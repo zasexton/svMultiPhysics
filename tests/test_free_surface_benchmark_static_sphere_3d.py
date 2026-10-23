@@ -153,9 +153,13 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
         assert (tmp_path / f"c/mesh/mesh-surfaces/{wall}.vtp").is_file()
     assert sum(1 for b in root.iter("Add_BC") if b.findtext("Type") == "Dir") == 6
     schedule = gen.time_schedule(8, 12.0, 5.0, 100)
-    stress = gen.solver_xml("surface_stress", schedule, 10, 1, "wet_extension")
+    stress = gen.solver_xml("surface_stress", schedule, 10, 1, "pde_extension")
     assert "SurfaceStress" in stress and "Curvature_field" not in stress
-    assert "<Advection_velocity_extension_method>wall_compatible_normal" in stress
+    assert "<Advection_velocity_extension_method>pde_harmonic" in stress
+    # The algebraic wet extension was retired (decisions D47 and D55).
+    assert "wet_extension" not in gen.TRANSPORTS
+    with pytest.raises(ValueError, match="must be one of"):
+        gen.solver_xml("surface_stress", schedule, 10, 1, "wet_extension")
 
 
 def test_retired_kag_forms_are_rejected(tmp_path, capsys):
@@ -182,8 +186,8 @@ def test_retired_kag_forms_are_rejected(tmp_path, capsys):
 
 
 def test_transport_default_is_the_pde_extension():
-    # D9: harmonic PDE extension with monolithic coupling, never combined with
-    # the wet-extension switch (the solver rejects that combination).
+    # D9: harmonic PDE extension with monolithic coupling, without the retired
+    # wet-extension switch.
     assert gen.DEFAULT_TRANSPORT == "pde_extension"
     schedule = gen.time_schedule(8, 12.0, 5.0, 100)
     pde = gen.solver_xml("surface_stress", schedule, 10, 1, "pde_extension")

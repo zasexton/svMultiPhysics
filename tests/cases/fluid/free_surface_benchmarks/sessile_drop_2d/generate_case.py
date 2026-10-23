@@ -93,9 +93,10 @@ LINEAR_SOLVERS = ("fsils", "eigen_direct")
 # Level-set transport velocity.  "pde_extension" (default): the harmonic PDE
 # velocity extension with monolithic coupling, chosen for moving-interface
 # benchmarks (tracker D9; linear_sloshing_2d README, "Level-set advection
-# velocity").  "coupled": the fluid velocity itself.  "wet_extension": the
-# wall-compatible wet extension of the D18 and capillary-rise decks.
-TRANSPORTS = ("coupled", "wet_extension", "pde_extension")
+# velocity").  "coupled": the fluid velocity itself.  The wall-compatible
+# wet extension of the earlier D18 and capillary-rise decks ("wet_extension")
+# was retired (decisions D47 and D55).
+TRANSPORTS = ("coupled", "pde_extension")
 # Accepted-step kinematic reconciliation of the transported level set
 # (Enable_kinematic_reconciliation; FE/LevelSet/LevelSetKinematicReconciliation.h):
 # a local, parameter-free correction that makes each step's change of the
@@ -422,10 +423,6 @@ def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, ca
                redistancing: bool = INTERFACE_PRESERVING_REDISTANCING) -> str:
     if semi_implicit not in SEMI_IMPLICIT_OPTIONS:
         raise ValueError(f"semi_implicit must be one of {SEMI_IMPLICIT_OPTIONS}")
-    if semi_implicit != "None" and transport == "wet_extension":
-        # The solver fails closed: the term needs a transport velocity equal to
-        # the fluid velocity on the interface (design note, section 9.1).
-        raise ValueError("Surface_tension_semi_implicit needs --transport pde_extension or coupled")
     semi_implicit_bc = ("" if semi_implicit == "None" else
                         f"\n      <Surface_tension_semi_implicit>{semi_implicit}"
                         "</Surface_tension_semi_implicit>")
@@ -434,14 +431,6 @@ def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, ca
     <Velocity_source>coupled_field</Velocity_source>
     <Velocity_field_name>Velocity</Velocity_field_name>
     <Auto_register_velocity_field>true</Auto_register_velocity_field>"""
-    elif transport == "wet_extension":
-        transport_xml = """
-    <Velocity_source>prescribed_data</Velocity_source>
-    <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
-    <Auto_register_velocity_field>true</Auto_register_velocity_field>
-    <Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>
-    <Source_velocity_field_name>Velocity</Source_velocity_field_name>
-    <Wet_extension_advection_velocity_method>wall_compatible_normal</Wet_extension_advection_velocity_method>"""
     elif transport == "pde_extension":
         transport_xml = """
     <Velocity_source>prescribed_data</Velocity_source>
@@ -619,9 +608,8 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
         raise ValueError("need viscous_times > 0 and at least 4 snapshots")
     if semi_implicit not in SEMI_IMPLICIT_OPTIONS:
         raise ValueError(f"--surface-tension-semi-implicit must be one of {SEMI_IMPLICIT_OPTIONS}")
-    if semi_implicit != "None" and transport == "wet_extension":
-        raise ValueError("--surface-tension-semi-implicit needs --transport pde_extension or "
-                         "coupled (the solver rejects the wet extension with the term)")
+    if transport not in TRANSPORTS:
+        raise ValueError(f"--transport must be one of {TRANSPORTS}")
     if output_dir.exists() and any(output_dir.iterdir()) and not force:
         raise FileExistsError(f"{output_dir} is not empty (use --force)")
 

@@ -1710,7 +1710,7 @@ def test_fs16_p1_decks_retain_transport_safety_controls():
             wave / "solver.xml",
             steps=1,
             time_step_size=0.001,
-            wet_extension_advection_velocity_method="wall_compatible_normal",
+            advection_velocity_extension_method="pde_harmonic",
         )
         for case_dir in (sessile, wave):
             root = runner.ET.parse(case_dir / "solver.xml").getroot()
@@ -1783,10 +1783,8 @@ def test_fs16_p1_decks_retain_transport_safety_controls():
         assert contract["capillary_wave_dry_top_boundary_type"] == (
             "LevelSetOutflow"
         )
-        assert (
-            contract["capillary_wave_wet_extension_method"]
-            == "wall_compatible_normal"
-        )
+        assert contract["capillary_wave_extension_method"] == "pde_harmonic"
+        assert contract["capillary_wave_extension_coupling"] == "monolithic"
 
         wave_mesh = runner.pv.read(
             wave / "mesh/background/mesh-complete.mesh.vtu")

@@ -51,13 +51,14 @@ CAPILLARY_FORMS = ("surface_stress",)
 RETIRED_CAPILLARY_FORMS = ("kag_consistent", "kag_lumped")
 # Level-set advection velocity (decision D9), as in capillary_wave_2d.
 # "pde_extension" (default) is the harmonic PDE velocity extension with
-# monolithic coupling; "wet_extension" is the algebraic wall-compatible wet
-# extension, the D9 comparison baseline; "coupled" is the fluid velocity
-# itself (dry vertices then carry zero velocity, which D9 retires).
-TRANSPORTS = ("pde_extension", "wet_extension", "coupled")
-PDE_EXTENSION_METHOD: str | None = "pde_harmonic"
-PDE_EXTENSION_COUPLING: str | None = "monolithic"
-DEFAULT_TRANSPORT = "pde_extension" if PDE_EXTENSION_METHOD else "wet_extension"
+# monolithic coupling; "coupled" is the fluid velocity itself (dry vertices
+# then carry zero velocity, which D9 retires).  The algebraic wall-compatible
+# wet extension, the earlier D9 comparison baseline, was retired (decisions
+# D47 and D55).
+TRANSPORTS = ("pde_extension", "coupled")
+PDE_EXTENSION_METHOD = "pde_harmonic"
+PDE_EXTENSION_COUPLING = "monolithic"
+DEFAULT_TRANSPORT = "pde_extension"
 DENSITY = 1.0                               # rho
 SURFACE_TENSION = 1.0                       # gamma
 RADIUS = 1.0                                # R (length unit)
@@ -389,26 +390,13 @@ def level_set_velocity_block(transport: str) -> str:
         return """    <Velocity_source>coupled_field</Velocity_source>
     <Velocity_field_name>Velocity</Velocity_field_name>
     <Auto_register_velocity_field>true</Auto_register_velocity_field>"""
-    if transport == "wet_extension":
-        return """    <Velocity_source>prescribed_data</Velocity_source>
-    <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
-    <Auto_register_velocity_field>true</Auto_register_velocity_field>
-    <Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>
-    <Source_velocity_field_name>Velocity</Source_velocity_field_name>
-    <Advection_velocity_extension_method>wall_compatible_normal</Advection_velocity_extension_method>"""
     if transport == "pde_extension":
-        if not PDE_EXTENSION_METHOD:
-            raise ValueError("--transport pde_extension: the PDE velocity extension (decision D9) "
-                             "is not in the solver yet; set PDE_EXTENSION_METHOD in "
-                             "generate_case.py to its input value once it is, or use "
-                             "--transport wet_extension or coupled")
-        coupling = (f"\n    <Advection_velocity_extension_coupling>{PDE_EXTENSION_COUPLING}"
-                    "</Advection_velocity_extension_coupling>" if PDE_EXTENSION_COUPLING else "")
         return f"""    <Velocity_source>prescribed_data</Velocity_source>
     <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
     <Auto_register_velocity_field>true</Auto_register_velocity_field>
     <Source_velocity_field_name>Velocity</Source_velocity_field_name>
-    <Advection_velocity_extension_method>{PDE_EXTENSION_METHOD}</Advection_velocity_extension_method>{coupling}"""
+    <Advection_velocity_extension_method>{PDE_EXTENSION_METHOD}</Advection_velocity_extension_method>
+    <Advection_velocity_extension_coupling>{PDE_EXTENSION_COUPLING}</Advection_velocity_extension_coupling>"""
     raise ValueError(f"--transport must be one of {TRANSPORTS}")
 
 
@@ -696,7 +684,7 @@ def main(argv=None) -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--transport", default=DEFAULT_TRANSPORT, choices=TRANSPORTS,
                         help="level-set advection velocity (decision D9); default "
-                             f"{DEFAULT_TRANSPORT}, pde_extension once the solver has it")
+                             f"{DEFAULT_TRANSPORT}, the harmonic PDE extension")
     parser.add_argument("--viscous-times", type=float, default=DEFAULT_VISCOUS_TIMES,
                         help="run length in units rho*R^2/mu (protocol value 5)")
     parser.add_argument("--snapshots", type=int, default=DEFAULT_SNAPSHOTS,

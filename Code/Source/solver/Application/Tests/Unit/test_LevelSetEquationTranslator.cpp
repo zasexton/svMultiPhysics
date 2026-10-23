@@ -643,6 +643,10 @@ TEST(LevelSetEquationTranslator,
       svmp::Physics::ParameterValue{true, "prescribed_data"};
   wet_input.equation_params["Advection_velocity_from_field"] =
       svmp::Physics::ParameterValue{true, "physical_velocity"};
+  wet_input.equation_params["Advection_velocity_extension_method"] =
+      svmp::Physics::ParameterValue{true, "pde_harmonic"};
+  wet_input.equation_params["Advection_velocity_extension_coupling"] =
+      svmp::Physics::ParameterValue{true, "monolithic"};
   const auto wet_installation =
       application::translators::level_set::resolveConfiguration(wet_input);
   const auto wet_maintenance =
@@ -662,7 +666,7 @@ TEST(LevelSetEquationTranslator,
             nullptr);
   EXPECT_NE(maintenanceCompatibilityObservation(
                 wet_observations, "velocity_source", "installation_derived",
-                "derived:wet_extension"),
+                "derived:pde_velocity_extension_monolithic"),
             nullptr);
 
   auto constant_input = makeMaintenanceCompatibilityInput(mesh);
@@ -880,7 +884,7 @@ TEST(LevelSetEquationTranslator,
 }
 
 TEST(LevelSetEquationTranslator,
-     MaintenanceCompatibilityInstallationPromotesWetExtensionAfterValidation)
+     MaintenanceCompatibilityInstallationPromotesPdeExtensionAfterValidation)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
@@ -894,6 +898,10 @@ TEST(LevelSetEquationTranslator,
       svmp::Physics::ParameterValue{true, "prescribed_data"};
   input.equation_params["Advection_velocity_from_field"] =
       svmp::Physics::ParameterValue{true, "physical_velocity"};
+  input.equation_params["Advection_velocity_extension_method"] =
+      svmp::Physics::ParameterValue{true, "pde_harmonic"};
+  input.equation_params["Advection_velocity_extension_coupling"] =
+      svmp::Physics::ParameterValue{true, "monolithic"};
 
   const auto resolved =
       application::translators::level_set::resolveConfiguration(input);
@@ -911,10 +919,8 @@ TEST(LevelSetEquationTranslator,
               (void)application::translators::level_set::resolveConfiguration(
                   input);
             })),
-            "[svMultiPhysics::Application] Wet-extension input must declare "
-            "Velocity_source=prescribed_data; the translator promotes that "
-            "state-dependent coefficient to an algebraic coupled unknown so "
-            "its monolithic velocity tangent is retained.");
+            "[svMultiPhysics::Application] The PDE velocity extension requires "
+            "Velocity_source=prescribed_data.");
 #endif
 }
 
