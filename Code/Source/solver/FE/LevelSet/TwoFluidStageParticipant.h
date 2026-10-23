@@ -6,7 +6,8 @@
  * See License file.
  */
 
-#pragma once
+#ifndef SVMP_FE_LEVELSET_TWO_FLUID_STAGE_PARTICIPANT_H
+#define SVMP_FE_LEVELSET_TWO_FLUID_STAGE_PARTICIPANT_H
 
 /**
  * @file
@@ -18,30 +19,30 @@
  *        publishes them after acceptance.
  */
 
-#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidAcceptedStage.h"
+#include "LevelSet/TwoFluidAcceptedStage.h"
 
-#include "FE/Constraints/SmallCutAggregationConstraint.h"
-#include "FE/Core/Types.h"
-#include "FE/Systems/FESystem.h"
-#include "FE/TimeStepping/NewtonSolver.h"
-#include "FE/TimeStepping/StepContext.h"
-#include "FE/TimeStepping/StepParticipants.h"
-#include "FE/TimeStepping/TimeHistory.h"
-#include "FE/TimeStepping/TimeLoop.h"
+#include "Constraints/SmallCutAggregationConstraint.h"
+#include "Core/Types.h"
+#include "Systems/FESystem.h"
+#include "TimeStepping/NewtonSolver.h"
+#include "TimeStepping/StepContext.h"
+#include "TimeStepping/StepParticipants.h"
+#include "TimeStepping/TimeHistory.h"
+#include "TimeStepping/TimeLoop.h"
 
 #include <span>
 #include <vector>
 
-namespace svmp::Physics::formulations::navier_stokes::two_fluid {
+namespace svmp::FE::level_set {
 
-class StageParticipant final
+class TwoFluidStageParticipant final
     : public svmp::FE::timestepping::IStepParticipant,
       private svmp::FE::timestepping::StepContext {
 public:
   /// Checks the two-fluid declarations and scheme support on the active FE
   /// communicator (collective); throws when they differ across ranks or the
   /// scheme is unsupported.
-  explicit StageParticipant(const svmp::FE::timestepping::StepContext& context);
+  explicit TwoFluidStageParticipant(const svmp::FE::timestepping::StepContext& context);
 
   /// CandidateStage when two-fluid accepted-stage diagnostics are declared.
   [[nodiscard]] svmp::FE::timestepping::StepHook hooks() const noexcept override;
@@ -76,4 +77,6 @@ public:
   bool pending_two_fluid_operator_stage_aggregation_captured{false};
 };
 
-} // namespace svmp::Physics::formulations::navier_stokes::two_fluid
+} // namespace svmp::FE::level_set
+
+#endif // SVMP_FE_LEVELSET_TWO_FLUID_STAGE_PARTICIPANT_H

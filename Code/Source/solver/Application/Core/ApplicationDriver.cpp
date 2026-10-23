@@ -85,8 +85,8 @@
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactStageParticipant.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyParticipant.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/StaticCapillaryEquilibrium.h"
-#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidAcceptedStage.h"
-#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageParticipant.h"
+#include "FE/LevelSet/TwoFluidAcceptedStage.h"
+#include "FE/LevelSet/TwoFluidStageParticipant.h"
 #include "Parameters.h"
 #include "tinyxml2.h"
 #include "FE/Systems/FunctionalRecords.h"
@@ -163,7 +163,6 @@ namespace {
 namespace static_capillary =
     svmp::Physics::formulations::navier_stokes::static_capillary;
 namespace free_surface = svmp::Physics::formulations::navier_stokes::free_surface;
-namespace two_fluid = svmp::Physics::formulations::navier_stokes::two_fluid;
 
 using Clock = std::chrono::steady_clock;
 using application::core::ActiveCutVolumeRequest;
@@ -3541,13 +3540,13 @@ using svmp::FE::level_set::AcceptedFunctionalCoverage;
 using svmp::FE::level_set::requireCommunicatorConsistentAcceptedFunctionalCoverage;
 using svmp::FE::level_set::recordAcceptedFunctionals;
 
-// The accepted-stage diagnostics of the two-fluid interface are Navier-Stokes
-// two-fluid physics (Physics/Formulations/NavierStokes/TwoFluid/TwoFluidAcceptedStage.h);
+// The accepted-stage diagnostics of the two-fluid interface are an FE
+// service (FE/LevelSet/TwoFluidAcceptedStage.h);
 // buildCurrentTwoFluidMomentumReconciliations of the driver's maintenance
 // requests follows ConservativePhaseRequestViews below.
-using svmp::Physics::formulations::navier_stokes::two_fluid::evaluateCurrentTwoFluidStageDiagnostics;
-using svmp::Physics::formulations::navier_stokes::two_fluid::TwoFluidMomentumReconciliationBatch;
-using svmp::Physics::formulations::navier_stokes::two_fluid::makeTwoFluidAcceptedStageSolveTelemetry;
+using svmp::FE::level_set::evaluateCurrentTwoFluidStageDiagnostics;
+using svmp::FE::level_set::TwoFluidMomentumReconciliationBatch;
+using svmp::FE::level_set::makeTwoFluidAcceptedStageSolveTelemetry;
 
 // The algebraic state revision is in
 // FE/LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h.
@@ -8184,7 +8183,7 @@ buildCurrentTwoFluidMomentumReconciliations(
     const svmp::MeshComm& comm)
 {
   ConservativePhaseRequestViews views(maintenance_requests);
-  return svmp::Physics::formulations::navier_stokes::two_fluid::buildCurrentTwoFluidMomentumReconciliations(
+  return svmp::FE::level_set::buildCurrentTwoFluidMomentumReconciliations(
       sim,
       views.all(),
       corrected_solution,
@@ -11777,10 +11776,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       fitted_ale_stage.evaluate_fitted_ale_operator_stage;
   const auto& fitted_ale_operator_stage_state_size =
       fitted_ale_stage.fitted_ale_operator_stage_state_size;
-  // Two-fluid accepted-stage diagnostics: Physics step participant
-  // (Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageParticipant.h).
+  // Two-fluid accepted-stage diagnostics: FE step participant
+  // (FE/LevelSet/TwoFluidStageParticipant.h).
   const auto two_fluid_stage_participant =
-      std::make_shared<svmp::Physics::formulations::navier_stokes::two_fluid::StageParticipant>(
+      std::make_shared<svmp::FE::level_set::TwoFluidStageParticipant>(
           free_surface_step_context);
   auto& two_fluid_stage = *two_fluid_stage_participant;
   const bool& evaluate_two_fluid_stage =

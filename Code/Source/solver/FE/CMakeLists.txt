@@ -1031,6 +1031,19 @@ if(FE_WITH_MESH)
     )
 endif()
 
+# The two-fluid accepted-stage diagnostics and their step participant use
+# the Mesh library's communicator.
+if(FE_WITH_MESH)
+    list(APPEND FE_LEVELSET_HEADERS
+        LevelSet/TwoFluidAcceptedStage.h
+        LevelSet/TwoFluidStageParticipant.h
+    )
+    list(APPEND FE_LEVELSET_SOURCES
+        LevelSet/TwoFluidAcceptedStage.cpp
+        LevelSet/TwoFluidStageParticipant.cpp
+    )
+endif()
+
 # The PDE velocity extension works on the Mesh library's distributed mesh.
 if(FE_WITH_MESH)
     list(APPEND FE_LEVELSET_HEADERS

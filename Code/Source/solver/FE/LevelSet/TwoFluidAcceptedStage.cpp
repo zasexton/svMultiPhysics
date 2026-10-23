@@ -6,19 +6,19 @@
  * See License file.
  */
 
-#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidAcceptedStage.h"
+#include "LevelSet/TwoFluidAcceptedStage.h"
 
-#include "FE/Assembly/Assembler.h"
-#include "FE/Assembly/CutIntegrationContext.h"
-#include "FE/Geometry/CutQuadratureMapping.h"
-#include "FE/Interfaces/FreeSurfaceGeometrySnapshot.h"
-#include "FE/Interfaces/LevelSetInterfaceDomain.h"
-#include "FE/Interfaces/SnapshotFieldEvaluator.h"
-#include "FE/LevelSet/LevelSetOptions.h"
-#include "FE/Systems/FESystemHandle.h"
-#include "FE/Systems/SnapshotFieldAccess.h"
-#include "FE/Systems/SystemCollectives.h"
-#include "FE/Systems/TwoFluidStageRecords.h"
+#include "Assembly/Assembler.h"
+#include "Assembly/CutIntegrationContext.h"
+#include "Geometry/CutQuadratureMapping.h"
+#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetInterfaceDomain.h"
+#include "Interfaces/SnapshotFieldEvaluator.h"
+#include "LevelSet/LevelSetOptions.h"
+#include "Systems/FESystemHandle.h"
+#include "Systems/SnapshotFieldAccess.h"
+#include "Systems/SystemCollectives.h"
+#include "Systems/TwoFluidStageRecords.h"
 
 #include <algorithm>
 #include <cmath>
@@ -30,7 +30,7 @@
 #include <string>
 #include <utility>
 
-namespace svmp::Physics::formulations::navier_stokes::two_fluid {
+namespace svmp::FE::level_set {
 
 using svmp::FE::interfaces::makeSnapshotScalarFieldEvaluator;
 using svmp::FE::interfaces::makeSnapshotVectorFieldEvaluator;
@@ -500,4 +500,4 @@ makeTwoFluidAcceptedStageSolveTelemetry(
   };
 }
 
-} // namespace svmp::Physics::formulations::navier_stokes::two_fluid
+} // namespace svmp::FE::level_set

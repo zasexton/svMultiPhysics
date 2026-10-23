@@ -6,7 +6,8 @@
  * See License file.
  */
 
-#pragma once
+#ifndef SVMP_FE_LEVELSET_TWO_FLUID_ACCEPTED_STAGE_H
+#define SVMP_FE_LEVELSET_TWO_FLUID_ACCEPTED_STAGE_H
 
 /**
  * @file
@@ -16,19 +17,19 @@
  *        accepted-stage solve telemetry.
  */
 
-#include "FE/Core/Types.h"
-#include "FE/Interfaces/IncompressibleTwoFluidDiagnostics.h"
-#include "FE/LevelSet/LevelSetConservativePhaseWorkflow.h"
-#include "FE/Systems/FESystem.h"
-#include "FE/Systems/FESystemHandle.h"
-#include "FE/TimeStepping/NewtonSolver.h"
+#include "Core/Types.h"
+#include "Interfaces/IncompressibleTwoFluidDiagnostics.h"
+#include "LevelSet/LevelSetConservativePhaseWorkflow.h"
+#include "Systems/FESystem.h"
+#include "Systems/FESystemHandle.h"
+#include "TimeStepping/NewtonSolver.h"
 #include "Mesh/Core/MeshComm.h"
 
 #include <cstdint>
 #include <span>
 #include <vector>
 
-namespace svmp::Physics::formulations::navier_stokes::two_fluid {
+namespace svmp::FE::level_set {
 
 std::vector<svmp::FE::systems::AcceptedTwoFluidStageDiagnosticState>
 evaluateCurrentTwoFluidStageDiagnostics(
@@ -61,4 +62,6 @@ svmp::FE::systems::TwoFluidAcceptedStageSolveTelemetry
 makeTwoFluidAcceptedStageSolveTelemetry(
     const svmp::FE::timestepping::NewtonReport& report);
 
-} // namespace svmp::Physics::formulations::navier_stokes::two_fluid
+} // namespace svmp::FE::level_set
+
+#endif // SVMP_FE_LEVELSET_TWO_FLUID_ACCEPTED_STAGE_H

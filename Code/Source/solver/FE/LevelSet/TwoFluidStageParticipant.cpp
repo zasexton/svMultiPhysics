@@ -6,10 +6,10 @@
  * See License file.
  */
 
-#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageParticipant.h"
+#include "LevelSet/TwoFluidStageParticipant.h"
 
-#include "FE/Systems/SystemCollectives.h"
-#include "FE/Systems/TwoFluidStageRecords.h"
+#include "Systems/SystemCollectives.h"
+#include "Systems/TwoFluidStageRecords.h"
 
 #include <algorithm>
 #include <exception>
@@ -18,14 +18,14 @@
 #include <string>
 #include <utility>
 
-namespace svmp::Physics::formulations::navier_stokes::two_fluid {
+namespace svmp::FE::level_set {
 
 using svmp::FE::systems::captureFeOrderedVectorCollectively;
 using svmp::FE::systems::collectiveAnyTrue;
 using svmp::FE::systems::collectiveMinMaxUint64;
 using svmp::FE::systems::requireCollectivePhasePreparation;
 
-StageParticipant::StageParticipant(
+TwoFluidStageParticipant::TwoFluidStageParticipant(
     const svmp::FE::timestepping::StepContext& context)
     : svmp::FE::timestepping::StepContext(context)
 {
@@ -75,14 +75,14 @@ StageParticipant::StageParticipant(
       sim.fe_system->dofHandler().getNumDofs();
 }
 
-svmp::FE::timestepping::StepHook StageParticipant::hooks() const noexcept
+svmp::FE::timestepping::StepHook TwoFluidStageParticipant::hooks() const noexcept
 {
   return evaluate_two_fluid_stage
              ? svmp::FE::timestepping::StepHook::CandidateStage
              : svmp::FE::timestepping::StepHook::None;
 }
 
-void StageParticipant::onCandidateStage(
+void TwoFluidStageParticipant::onCandidateStage(
     const svmp::FE::timestepping::CandidateStageObservation& observation)
 {
   const bool scheme_matches =
@@ -264,7 +264,7 @@ void StageParticipant::onCandidateStage(
   pending_two_fluid_operator_stage_aggregation_captured = true;
 }
 
-void StageParticipant::bindCandidateNumerics(
+void TwoFluidStageParticipant::bindCandidateNumerics(
     const svmp::FE::timestepping::NewtonReport& newton_report)
 {
   if (evaluate_two_fluid_stage) {
@@ -280,18 +280,18 @@ void StageParticipant::bindCandidateNumerics(
   }
 }
 
-void StageParticipant::resetAggregationEvidence() noexcept
+void TwoFluidStageParticipant::resetAggregationEvidence() noexcept
 {
   pending_two_fluid_operator_stage_aggregation_reports.clear();
   pending_two_fluid_operator_stage_aggregation_captured = false;
 }
 
-void StageParticipant::discardCandidate() noexcept
+void TwoFluidStageParticipant::discardCandidate() noexcept
 {
   svmp::FE::systems::twoFluidStageRecords(*sim.fe_system).discardPendingTwoFluidAcceptedStageDiagnostics();
 }
 
-void StageParticipant::commitAccepted(
+void TwoFluidStageParticipant::commitAccepted(
     const svmp::FE::timestepping::TimeHistory& h)
 {
   if (evaluate_two_fluid_stage) {
@@ -302,4 +302,4 @@ void StageParticipant::commitAccepted(
   }
 }
 
-} // namespace svmp::Physics::formulations::navier_stokes::two_fluid
+} // namespace svmp::FE::level_set
