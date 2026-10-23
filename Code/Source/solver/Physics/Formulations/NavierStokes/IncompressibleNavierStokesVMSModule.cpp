@@ -198,7 +198,7 @@ void addUnfittedFreeSurface(FormExpr& M, fs::FESystem& system, cs::ConstraintPla
     const auto gamma = freeSurfaceScalar(b.surface_tension, "ns_free_surface_surface_tension", b);
 
     registerFreeSurfacePrescribedAngleGeometry(system, b);   // contact-geometry certificate at each refresh
-    for (const auto& c : contactLaws(b, dim)) {
+    for (const auto& c : Factories::contactLaws(b, dim)) {
         const auto CL = F.registered(L.contactLine(c.wall, c.marker));
         if (c.dynamic) {
             registerDynamicContactWallNormalCheck(system, *c.line, CL.marker());
@@ -249,7 +249,7 @@ void addUnfittedFreeSurface(FormExpr& M, fs::FESystem& system, cs::ConstraintPla
     }
     if (usesSemiImplicitNormalIncrement(b)) {
         const auto u_ref = freeSurfaceSemiImplicitReferenceVelocity(system);   // u at the last geometry refresh
-        M = M + semiImplicitNormalIncrementIntegrand(gamma, u, u_ref, v, n).dI(Gamma);
+        M = M + Factories::semiImplicitNormalIncrementIntegrand(gamma, u, u_ref, v, n).dI(Gamma);
     }
     logFreeSurfaceTraction(b);
 }
@@ -267,7 +267,7 @@ void addFittedFreeSurface(FormExpr& M, fs::FESystem& system, cs::ConstraintPlan&
                           fs::FormulationBuilder& F, ConservativeBalanceForms* balance)
 {
     const auto& [u, p, v, q, rho, mu, f, dim] = t;
-    applyFreeSurfaceContactLineConstraints(plan, b, ale, dim);   // pinned contact lines: d = 0
+    Factories::applyFreeSurfaceContactLineConstraints(plan, b, ale, dim);   // pinned contact lines: d = 0
     bcs.add(std::make_unique<bc::ReservedBC>(b.boundary_marker));
 
     validateFreeSurfaceBoundary(b, o, o.enable_ale, system, dim);
@@ -306,7 +306,7 @@ void addFittedFreeSurface(FormExpr& M, fs::FESystem& system, cs::ConstraintPlan&
         const auto penalty = FormExpr::constant(b.kinematic_nitsche_gamma) / hNormal();
         rows = (penalty * normalTrace(dt(d) - u, nc) * normalTrace(psi, nc)).ds(Gamma);
     }
-    if (const auto tangential = tangentialMeshPolicyResidual(b, d, psi, nc, rec.components, Gamma);
+    if (const auto tangential = Factories::tangentialMeshPolicyResidual(b, d, psi, nc, rec.components, Gamma);
         tangential.isValid()) {
         rows = sumOf(rows, tangential);
     }
@@ -389,7 +389,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     const bool cut_liquid = liquid.has_value() &&
                             liquid->boundary->active_domain_method == FreeSurfaceActiveDomainMethod::CutVolume;
     if (cut_liquid && isExteriorOnePhaseBoundary(*liquid->boundary)) {
-        plan.anchorGauge(o.operator_tag, freeSurfacePressureAnchor(p_id, *liquid->boundary));
+        plan.anchorGauge(o.operator_tag, Factories::freeSurfacePressureAnchor(p_id, *liquid->boundary));
     }
     const bool liquid_constraints = cut_liquid && hasNativeMeshOrWarn(system);
     const bool aggregated = liquid_constraints && liquid->boundary->small_cut_aggregation;

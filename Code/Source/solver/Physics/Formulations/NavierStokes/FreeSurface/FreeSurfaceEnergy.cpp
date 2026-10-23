@@ -9,9 +9,7 @@
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactCertificate.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfacePressureGauge.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceQueries.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceSemiImplicitSurfaceTension.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceValidation.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesFields.h"

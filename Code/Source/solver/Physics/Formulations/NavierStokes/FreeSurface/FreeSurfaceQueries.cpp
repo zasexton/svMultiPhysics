@@ -7,7 +7,6 @@
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceQueries.h"
 
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceSemiImplicitSurfaceTension.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 
 #include "FE/Assembly/Assembler.h"
@@ -201,6 +200,24 @@ contactLineWallNormal(const FreeSurfaceContactLine& contact_line)
 {
     return usesSurfaceStress(bc) &&
            !FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension);
+}
+
+const char* freeSurfaceSurfaceTensionSemiImplicitName(
+    FreeSurfaceSurfaceTensionSemiImplicit value) noexcept
+{
+    switch (value) {
+    case FreeSurfaceSurfaceTensionSemiImplicit::None:
+        return "None";
+    case FreeSurfaceSurfaceTensionSemiImplicit::NormalIncrement:
+        return "NormalIncrement";
+    }
+    return "Unsupported";
+}
+
+bool usesSemiImplicitNormalIncrement(const FreeSurfaceBoundary& bc) noexcept
+{
+    return bc.surface_tension_semi_implicit ==
+           FreeSurfaceSurfaceTensionSemiImplicit::NormalIncrement;
 }
 
 [[nodiscard]] int freeSurfaceMarker(const FreeSurfaceBoundary& bc)

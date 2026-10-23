@@ -10,15 +10,24 @@
  */
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceQueries.h"
 
+#include "FE/Constraints/ConstraintPlan.h"
+#include "FE/Constraints/InterfaceMeasureGaugeAnchor.h"
+#include "FE/Forms/BoundaryConditions.h"
 #include "FE/Forms/BoundaryFunctional.h"
+#include "FE/Forms/IntegrationDomain.h"
 #include "FE/Forms/StandardBCs.h"
 #include "FE/Forms/Vocabulary.h"
 #include "FE/Auxiliary/AuxiliaryBindings.h"
 #include "FE/Auxiliary/AuxiliaryModelBuilder.h"
 #include "FE/Auxiliary/AuxiliaryModelDSL.h"
+#include "FE/Systems/ALEBinding.h"
 #include "FE/Systems/FESystem.h"
+#include "FE/Systems/FormsInstaller.h"
 
+#include <array>
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -27,6 +36,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace svmp {
@@ -556,6 +566,236 @@ inline void applyVelocityNitscheBCs(
                 penalty * FE::forms::inner(diff, v),
                 marker,
                 generated_marker));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Free surfaces: the contact-line laws, the pressure anchor, the semi-implicit
+// capillary increment, the tangential mesh rows and the contact pin
+// ---------------------------------------------------------------------------
+
+/// One PrescribedAngle or DynamicRenE contact line of a free surface.
+struct ContactLaw {
+    const FreeSurfaceContactLine* line{nullptr};
+    int wall{-1};             ///< wall boundary marker
+    int marker{-1};           ///< requested contact-line marker (-1: generated)
+    bool young{false};        ///< PrescribedAngle: Young wall energy
+    bool dynamic{false};      ///< DynamicRenE
+    bool strong{false};       ///< DynamicRenE as a contact-point law
+    FE::forms::FormExpr n_w{};           ///< wall normal, out of the liquid
+    FE::forms::FormExpr cos_e{};         ///< cos(theta_e)
+    FE::forms::FormExpr mobility{};      ///< M of the weak Ren-E law
+    FE::forms::FormExpr slip_length{};   ///< l_s of the Navier slip; empty for a no-slip wall
+    std::array<FE::Real, 3> wall_normal{};           ///< strong law: unit wall normal
+    std::function<FE::Real(FE::Real)> contact_speed{};   ///< strong law: cos(theta_d) -> M gamma (cos(theta_e) - cos(theta_d))
+};
+
+/// The PrescribedAngle and DynamicRenE contact lines of @p bc, in order.  The
+/// options are validated by the preflight.
+[[nodiscard]] inline std::vector<ContactLaw> contactLaws(const FreeSurfaceBoundary& bc, int dim)
+{
+    std::vector<ContactLaw> laws;
+    for (const auto& c : bc.contact_lines) {
+        const auto kind = contactLineKind(c);
+        if (kind != ContactLineKind::PrescribedAngle && kind != ContactLineKind::DynamicRenE) {
+            continue;
+        }
+        ContactLaw law;
+        law.line = &c;
+        law.wall = contactLineWallBoundaryMarker(c);
+        law.marker = contactLineMarker(c);
+        law.young = kind == ContactLineKind::PrescribedAngle;
+        law.dynamic = kind == ContactLineKind::DynamicRenE;
+        law.strong = law.dynamic && std::get<FreeSurfaceContactLine::DynamicRenE>(c.configuration).strong_law;
+        law.n_w = wallNormalExpression(c, dim);
+        law.cos_e = FE::forms::FormExpr::constant(
+            std::cos(constantScalarValueOrThrow(contactLineAngleRadians(c), "contact_angle_radians")));
+        if (law.dynamic && !law.strong) {
+            law.mobility = freeSurfaceScalar(contactLineMobility(c), "ns_dynamic_contact_angle_mobility", bc);
+        }
+        if (contactLineHasNavierSlip(c)) {
+            law.slip_length = freeSurfaceScalar(contactLineSlipLength(c), "ns_contact_wall_slip_length", bc);
+        }
+        if (law.strong) {
+            law.wall_normal = normalizedWallNormal(c);
+            const FE::Real mobility =
+                constantScalarValueOrThrow(contactLineMobility(c), "Strong DynamicContactAngle mobility");
+            const FE::Real gamma =
+                constantScalarValueOrThrow(bc.surface_tension, "Strong DynamicContactAngle surface tension");
+            const FE::Real cos_e = std::cos(constantScalarValueOrThrow(
+                contactLineAngleRadians(c), "Strong DynamicContactAngle equilibrium angle"));
+            law.contact_speed = [mobility, gamma, cos_e](FE::Real cos_d) {
+                return mobility * gamma * (cos_e - cos_d);
+            };
+        }
+        laws.push_back(std::move(law));
+    }
+    return laws;
+}
+
+/// The anchor of the pressure constant by the natural traction on the
+/// unfitted CutVolume free surface @p boundary (ConstraintPlan::anchorGauge): with
+/// a natural traction on Gamma_h the pressure constant is fixed by the exterior
+/// pressure, provided the generated interface has a positive measure.  The texts
+/// are the module's (gauge source, kernel and callback names, messages, and the
+/// kernel's manifest label).
+[[nodiscard]] inline FE::constraints::InterfaceMeasureGaugeAnchor freeSurfacePressureAnchor(
+    FE::FieldId p_id,
+    const FreeSurfaceBoundary& boundary)
+{
+    FE::constraints::InterfaceMeasureGaugeAnchor anchor;
+    anchor.field = p_id;
+    anchor.interface_marker = boundary.interface_marker;
+    anchor.level_set_field_name = boundary.level_set_field_name;
+    anchor.domain_id = boundary.generated_interface_domain_id;
+    auto& texts = anchor.texts;
+    texts.owner = "IncompressibleNavierStokesVMSModule";
+    texts.anchor_source =
+        "Unfitted CutVolume embedded free-surface natural traction anchors absolute pressure";
+    texts.kernel_name = "CutVolumePressureAnchorMeasureGuard";
+    texts.callback_name = "navier_stokes_cut_volume_pressure_anchor_measure";
+    texts.requirement =
+        "CutVolume embedded free-surface pressure anchor requires a positive generated "
+        "interface measure before a pressure solve";
+    texts.preflight_phase = "embedded_free_surface_measure_preflight";
+    texts.preflight_rejection =
+        "another communicator rank rejected embedded free-surface measure preflight";
+    texts.context_phase = "cut_volume_pressure_anchor_context";
+    texts.null_context_accepted = "CutVolume pressure-anchor null context was unexpectedly accepted";
+    texts.gauge_policy = "reject_zero_interface_no_dynamic_gauge_insertion";
+    // The type label the kernel manifest has always shown for this anchor.
+    texts.manifest_type_name =
+        "svmp::Physics::formulations::navier_stokes::(anonymous namespace)::CutVolumePressureAnchorMeasureGuard";
+    return anchor;
+}
+
+// The semi-implicit capillary increment (Surface_tension_semi_implicit=NormalIncrement).
+// The term (design note free_surface_semi_implicit_surface_tension_design.md,
+// section 3.3) is
+//
+//     R_SI(u; v) = gamma dt_eff int_{Gamma_h}
+//                  grad_Gamma((u - u_ref).n_h) . grad_Gamma(v.n_h) dGamma,
+//     grad_Gamma(w.n_h) = P_h (grad w)^T n_h,   P_h = I - n_h (x) n_h,
+//
+// where dt_eff = 1/a0 is the effective step of the time integrator and
+// u_ref is the velocity of the iterate that generated Gamma_h.  The
+// application overwrites u_ref at every generated-state refresh, so R_SI is
+// zero in every freshly refreshed residual: the accepted state and the
+// acceptance test of the outer fixed point are unchanged, and only the
+// Jacobian of the frozen inner solves gains the constant, symmetric,
+// positive-semidefinite velocity block
+//
+//     gamma dt_eff int_{Gamma_h} grad_Gamma(du.n_h) . grad_Gamma(v.n_h).
+//
+// n_h is constant on each LinearCorner facet, so the block is the
+// Laplace--Beltrami part of the omitted geometry Jacobian.  The coefficient
+// is a physical input times an integrator constant; nothing is tuned.
+
+/// P_h (grad w)^T n_h for a vector field w: the surface gradient of the
+/// normal component w.n_h on a facet with constant normal n_h.
+[[nodiscard]] inline FE::forms::FormExpr normalComponentSurfaceGradient(
+    const FE::forms::FormExpr& w,
+    const FE::forms::FormExpr& n)
+{
+    using namespace FE::forms;
+    const auto normal_trace_gradient = transpose(grad(w)) * n;
+    return normal_trace_gradient - inner(normal_trace_gradient, n) * n;
+}
+
+/// gamma dt_eff P_h (grad u - grad u_ref)^T n_h . P_h (grad v)^T n_h.
+/// The velocity difference is formed before the projection so that the
+/// integrand is exactly zero where u and u_ref carry identical coefficients.
+[[nodiscard]] inline FE::forms::FormExpr semiImplicitNormalIncrementIntegrand(
+    const FE::forms::FormExpr& gamma,
+    const FE::forms::FormExpr& u,
+    const FE::forms::FormExpr& u_ref,
+    const FE::forms::FormExpr& v,
+    const FE::forms::FormExpr& n)
+{
+    using namespace FE::forms;
+    const auto increment_trace_gradient =
+        transpose(grad(u) - grad(u_ref)) * n;
+    const auto increment_surface_gradient =
+        increment_trace_gradient -
+        inner(increment_trace_gradient, n) * n;
+    return gamma * FormExpr::effectiveTimeStep() *
+           inner(increment_surface_gradient,
+                 normalComponentSurfaceGradient(v, n));
+}
+
+/**
+ * @brief The tangential mesh-policy rows of a fitted free surface on @p psi
+ * (empty for Free): SmoothingOnly
+ *   weight int_Gamma (P grad d P) : (P grad psi P),   P = I - n x n,
+ * or Prescribed
+ *   penalty int_Gamma (dt d - w_t) . psi - ((dt d - w_t).n)(psi.n),
+ * with the coefficients named for the surface.
+ */
+[[nodiscard]] inline FE::forms::FormExpr tangentialMeshPolicyResidual(
+    const FreeSurfaceBoundary& b,
+    const FE::forms::FormExpr& d_mesh,
+    const FE::forms::FormExpr& psi,
+    const FE::forms::FormExpr& n,
+    int components,
+    const FE::forms::BoundaryDomain& gamma)
+{
+    using namespace FE::forms;
+    if (b.tangential_mesh_policy == FreeSurfaceTangentialMeshPolicy::SmoothingOnly) {
+        const auto P = tangentialProjector(n, components);
+        const auto weight =
+            freeSurfaceScalar(b.tangential_mesh_penalty, "ns_free_surface_tangential_mesh_smoothing_weight", b);
+        return (weight * inner(P * grad(d_mesh) * P, P * grad(psi) * P)).ds(gamma);
+    }
+    if (b.tangential_mesh_policy == FreeSurfaceTangentialMeshPolicy::Prescribed) {
+        const auto target = FormExpr::asVector(bc::toVectorExpr(
+            b.prescribed_tangential_mesh_velocity, components, "ns_free_surface_tangential_mesh_velocity",
+            b.boundary_marker, bc::ComponentValueNameStyle::Component));
+        const auto gap = dt(d_mesh) - target;
+        const auto penalty =
+            freeSurfaceScalar(b.tangential_mesh_penalty, "ns_free_surface_tangential_mesh_penalty", b);
+        return (penalty * (inner(gap, psi) - normalTrace(gap, n) * normalTrace(psi, n))).ds(gamma);
+    }
+    return {};
+}
+
+/// The pinned contact lines of a fitted free surface: d = 0 on their markers
+/// (strong, in the essential phase of the plan).
+inline void applyFreeSurfaceContactLineConstraints(
+    FE::constraints::ConstraintPlan& constraint_plan,
+    const FreeSurfaceBoundary& bc,
+    const FE::systems::ALEBinding& ale_binding,
+    int dim)
+{
+    for (const auto& contact_line : bc.contact_lines) {
+        switch (contactLineKind(contact_line)) {
+        case ContactLineKind::None:
+        case ContactLineKind::PrescribedAngle:
+        case ContactLineKind::DynamicRenE:
+            continue;
+        case ContactLineKind::Pinned:
+            break;
+        }
+
+        if (ale_binding.mesh_displacement_field == FE::INVALID_FIELD_ID) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: pinned fitted contact lines require a coupled mesh displacement unknown");
+        }
+
+        const int marker = contactLineConstraintMarker(contact_line);
+        std::vector<FE::forms::bc::StrongDirichlet> constraints;
+        constraints.reserve(static_cast<std::size_t>(dim));
+        for (int component = 0; component < dim; ++component) {
+            constraints.push_back(FE::forms::bc::StrongDirichlet{
+                .field = ale_binding.mesh_displacement_field,
+                .boundary_marker = marker,
+                .component = component,
+                .value = FE::forms::FormExpr::constant(0.0),
+                .symbol = "mesh_displacement",
+            });
+        }
+        constraint_plan.essentials([&constraints](FE::systems::FESystem& system) {
+            FE::systems::installStrongDirichlet(system, constraints);
+        });
     }
 }
 

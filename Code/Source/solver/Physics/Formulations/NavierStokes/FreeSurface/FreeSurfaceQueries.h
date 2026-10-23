@@ -77,6 +77,12 @@ enum class ContactLineKind : std::uint8_t {
 [[nodiscard]] bool surfaceStressActive(
     const FreeSurfaceBoundary& bc) noexcept;
 
+[[nodiscard]] const char* freeSurfaceSurfaceTensionSemiImplicitName(
+    FreeSurfaceSurfaceTensionSemiImplicit value) noexcept;
+
+[[nodiscard]] bool usesSemiImplicitNormalIncrement(
+    const FreeSurfaceBoundary& bc) noexcept;
+
 [[nodiscard]] int freeSurfaceMarker(const FreeSurfaceBoundary& bc);
 
 [[nodiscard]] bool useFittedCurrentGeometry(const FreeSurfaceBoundary& bc,

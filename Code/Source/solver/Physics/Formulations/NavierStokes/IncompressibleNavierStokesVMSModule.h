@@ -138,6 +138,13 @@ struct FreeSurfaceResidualWorkOperatorSuffixes {
         "free_surface_work_ghost_penalty"};
 };
 
+/// Prescribed vector field (velocity space) holding u_ref.  The
+/// Navier--Stokes module registers it when any free surface requests
+/// NormalIncrement; the application refreshes it from the velocity unknown.
+inline constexpr std::string_view
+    kFreeSurfaceSemiImplicitReferenceVelocityFieldName =
+        "ns_free_surface_semi_implicit_reference_velocity";
+
 struct IncompressibleNavierStokesVMSOptions {
     using ScalarValue = FE::forms::bc::ScalarValue;
     using FreeSurfaceContactLine = navier_stokes::FreeSurfaceContactLine;

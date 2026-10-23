@@ -40,45 +40,6 @@ namespace Physics {
 namespace formulations {
 namespace navier_stokes {
 
-void applyFreeSurfaceContactLineConstraints(
-    FE::constraints::ConstraintPlan& constraint_plan,
-    const FreeSurfaceBoundary& bc,
-    const FE::systems::ALEBinding& ale_binding,
-    int dim)
-{
-    for (const auto& contact_line : bc.contact_lines) {
-        switch (contactLineKind(contact_line)) {
-        case ContactLineKind::None:
-        case ContactLineKind::PrescribedAngle:
-        case ContactLineKind::DynamicRenE:
-            continue;
-        case ContactLineKind::Pinned:
-            break;
-        }
-
-        if (ale_binding.mesh_displacement_field == FE::INVALID_FIELD_ID) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: pinned fitted contact lines require a coupled mesh displacement unknown");
-        }
-
-        const int marker = contactLineConstraintMarker(contact_line);
-        std::vector<FE::forms::bc::StrongDirichlet> constraints;
-        constraints.reserve(static_cast<std::size_t>(dim));
-        for (int component = 0; component < dim; ++component) {
-            constraints.push_back(FE::forms::bc::StrongDirichlet{
-                .field = ale_binding.mesh_displacement_field,
-                .boundary_marker = marker,
-                .component = component,
-                .value = FE::forms::FormExpr::constant(0.0),
-                .symbol = "mesh_displacement",
-            });
-        }
-        constraint_plan.essentials([&constraints](FE::systems::FESystem& system) {
-            FE::systems::installStrongDirichlet(system, constraints);
-        });
-    }
-}
-
 std::vector<FE::systems::MeshNormalBoundaryConstraintDeclaration>
 fittedNormalKinematicDeclarations(
     const FE::systems::ALEBinding& ale_binding,
@@ -351,33 +312,6 @@ void declareFittedMeshRowDescriptors(
         systemTangentialMeshPolicy(bc.tangential_mesh_policy),
         operator_tag,
         consumer_source);
-}
-
-FE::forms::FormExpr tangentialMeshPolicyResidual(
-    const FreeSurfaceBoundary& b,
-    const FE::forms::FormExpr& d_mesh,
-    const FE::forms::FormExpr& psi,
-    const FE::forms::FormExpr& n,
-    int components,
-    const FE::forms::BoundaryDomain& gamma)
-{
-    using namespace FE::forms;
-    if (b.tangential_mesh_policy == FreeSurfaceTangentialMeshPolicy::SmoothingOnly) {
-        const auto P = tangentialProjector(n, components);
-        const auto weight =
-            freeSurfaceScalar(b.tangential_mesh_penalty, "ns_free_surface_tangential_mesh_smoothing_weight", b);
-        return (weight * inner(P * grad(d_mesh) * P, P * grad(psi) * P)).ds(gamma);
-    }
-    if (b.tangential_mesh_policy == FreeSurfaceTangentialMeshPolicy::Prescribed) {
-        const auto target = FormExpr::asVector(bc::toVectorExpr(
-            b.prescribed_tangential_mesh_velocity, components, "ns_free_surface_tangential_mesh_velocity",
-            b.boundary_marker, bc::ComponentValueNameStyle::Component));
-        const auto gap = dt(d_mesh) - target;
-        const auto penalty =
-            freeSurfaceScalar(b.tangential_mesh_penalty, "ns_free_surface_tangential_mesh_penalty", b);
-        return (penalty * (inner(gap, psi) - normalTrace(gap, n) * normalTrace(psi, n))).ds(gamma);
-    }
-    return {};
 }
 
 } // namespace navier_stokes

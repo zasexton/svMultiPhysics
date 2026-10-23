@@ -8,7 +8,6 @@
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceQueries.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceSemiImplicitSurfaceTension.h"
 
 #include "FE/Core/Logger.h"
 #include "FE/Dofs/EntityDofMap.h"

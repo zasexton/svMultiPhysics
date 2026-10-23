@@ -12,7 +12,7 @@
 #include "FE/Backends/Interfaces/GenericVector.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/SystemState.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceSemiImplicitSurfaceTension.h"
+#include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
 
 #include <algorithm>
