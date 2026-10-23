@@ -6,8 +6,6 @@
 #include "Application/Core/LevelSetMaintenanceConfiguration.h"
 #include "Application/Core/LevelSetMaintenanceTransactionConsensus.h"
 #include "Application/Core/LevelSetPdeVelocityExtension.h"
-#include "Application/Core/LevelSetVelocityExtensionMap.h"
-#include "Application/Core/NearestPointIndex.h"
 #include "Application/Core/OopMpiLog.h"
 #include "Application/Core/SimulationBuilder.h"
 
@@ -43,6 +41,7 @@
 #include "FE/LevelSet/LevelSetInterfacePreservingRedistancing3D.h"
 #include "FE/LevelSet/LevelSetTransport.h"
 #include "FE/LevelSet/LevelSetVelocityExtensionConstraint.h"
+#include "FE/LevelSet/Extension/LevelSetVelocityExtensionSeed.h"
 #include "FE/LevelSet/LevelSetVolume.h"
 #include "FE/LevelSet/LevelSetWallContactConstraint.h"
 #include "FE/Geometry/MappingFactory.h"
@@ -160,14 +159,7 @@ using Clock = std::chrono::steady_clock;
 using application::core::ActiveCutVolumeRequest;
 using application::core::LevelSetMaintenanceConfigurationHandle;
 using application::core::LevelSetActiveSide;
-using application::core::NearestPointIndex;
-using application::core::NearestPointRecord;
 using application::core::activeCutVolumeRequests;
-
-struct VelocityExtensionSample {
-  std::array<double, 3> point{0.0, 0.0, 0.0};
-  std::vector<double> value{};
-};
 
 double secondsSince(Clock::time_point start)
 {
@@ -353,115 +345,6 @@ void writeEffectiveConfigurationArtifact(
       << output_path.string() << std::endl;
 }
 
-template <typename CoordinateContainer>
-std::array<double, 3> meshVertexPoint(const CoordinateContainer& coords,
-                                      int mesh_dim,
-                                      std::size_t vertex)
-{
-  std::array<double, 3> point{0.0, 0.0, 0.0};
-  for (int d = 0; d < mesh_dim; ++d) {
-    point[static_cast<std::size_t>(d)] =
-        static_cast<double>(
-            coords[vertex * static_cast<std::size_t>(mesh_dim) +
-                   static_cast<std::size_t>(d)]);
-  }
-  return point;
-}
-
-std::vector<VelocityExtensionSample>
-gatherVelocityExtensionSamples(std::vector<VelocityExtensionSample> local_samples,
-                               std::size_t component_count,
-                               const svmp::MeshComm& comm)
-{
-  if (component_count == 0u) {
-    return local_samples;
-  }
-
-#ifdef MESH_HAS_MPI
-  if (!comm.is_parallel()) {
-    return local_samples;
-  }
-
-  if (component_count >
-      static_cast<std::size_t>(std::numeric_limits<int>::max() - 3)) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Too many velocity-extension components for MPI gather.");
-  }
-  if (local_samples.size() >
-      static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Too many local velocity-extension samples for MPI gather.");
-  }
-
-  const int width = static_cast<int>(component_count + 3u);
-  const int local_count = static_cast<int>(local_samples.size());
-  std::vector<int> counts(static_cast<std::size_t>(comm.size()), 0);
-  MPI_Allgather(&local_count, 1, MPI_INT,
-                counts.data(), 1, MPI_INT,
-                comm.native());
-
-  std::vector<int> displs(counts.size(), 0);
-  int total_count = 0;
-  for (std::size_t r = 0; r < counts.size(); ++r) {
-    if (counts[r] < 0 ||
-        counts[r] > (std::numeric_limits<int>::max() / width)) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Invalid velocity-extension sample count in MPI gather.");
-    }
-    displs[r] = total_count * width;
-    total_count += counts[r];
-  }
-
-  std::vector<double> send(
-      static_cast<std::size_t>(local_count) * static_cast<std::size_t>(width),
-      0.0);
-  for (std::size_t i = 0; i < local_samples.size(); ++i) {
-    const auto base = i * static_cast<std::size_t>(width);
-    send[base + 0u] = local_samples[i].point[0];
-    send[base + 1u] = local_samples[i].point[1];
-    send[base + 2u] = local_samples[i].point[2];
-    for (std::size_t c = 0; c < component_count; ++c) {
-      const auto value =
-          c < local_samples[i].value.size() ? local_samples[i].value[c] : 0.0;
-      send[base + 3u + c] = std::isfinite(value) ? value : 0.0;
-    }
-  }
-
-  std::vector<int> recv_counts(counts.size(), 0);
-  for (std::size_t r = 0; r < counts.size(); ++r) {
-    recv_counts[r] = counts[r] * width;
-  }
-  std::vector<double> recv(
-      static_cast<std::size_t>(total_count) * static_cast<std::size_t>(width),
-      0.0);
-  MPI_Allgatherv(send.empty() ? nullptr : send.data(),
-                 local_count * width,
-                 MPI_DOUBLE,
-                 recv.empty() ? nullptr : recv.data(),
-                 recv_counts.data(),
-                 displs.data(),
-                 MPI_DOUBLE,
-                 comm.native());
-
-  std::vector<VelocityExtensionSample> gathered;
-  gathered.reserve(static_cast<std::size_t>(total_count));
-  for (int i = 0; i < total_count; ++i) {
-    const auto base =
-        static_cast<std::size_t>(i) * static_cast<std::size_t>(width);
-    VelocityExtensionSample sample;
-    sample.point = {{recv[base + 0u], recv[base + 1u], recv[base + 2u]}};
-    sample.value.assign(component_count, 0.0);
-    for (std::size_t c = 0; c < component_count; ++c) {
-      sample.value[c] = recv[base + 3u + c];
-    }
-    gathered.push_back(std::move(sample));
-  }
-  return gathered;
-#else
-  return local_samples;
-#endif
-}
-
 svmp::MeshComm activeFESystemCommunicator(
     const svmp::FE::systems::FESystem& system)
 {
@@ -506,20 +389,13 @@ std::vector<std::size_t> communicatorWideIndexUnion(
       purpose);
 }
 
-using application::core::WallCompatibleVelocityExtensionResult;
-using application::core::WallVelocityExtensionConstraint;
-using application::core::estimateSymmetricConditionNumber;
-using application::core::extendVelocityInLevelSetNormalBand;
-using application::core::globalOwnedVelocityExtensionMaskCount;
-using application::core::globalVelocityExtensionGeometrySampleCount;
-using application::core::kVelocityExtensionCoefficientTolerance;
-using application::core::kVelocityExtensionMaxRegressionCondition;
-using application::core::kVelocityExtensionMaxWetToDryAmplification;
-using application::core::kVelocityExtensionRowTolerance;
-using application::core::markVelocityExtensionTraceSupportCells;
-using application::core::nodalVelocityExtensionInterfaceCells;
-using application::core::synchronizeVelocityExtensionTraceSupportMask;
-using application::core::velocityExtensionEdgeAdjacency;
+using svmp::FE::level_set::WallVelocityExtensionConstraint;
+using svmp::FE::level_set::globalOwnedVelocityExtensionMaskCount;
+using svmp::FE::level_set::globalVelocityExtensionGeometrySampleCount;
+using svmp::FE::level_set::kVelocityExtensionMaxWetToDryAmplification;
+using svmp::FE::level_set::markVelocityExtensionTraceSupportCells;
+using svmp::FE::level_set::nodalVelocityExtensionInterfaceCells;
+using svmp::FE::level_set::synchronizeVelocityExtensionTraceSupportMask;
 
 
 using OutputTimingStats = svmp::FE::systems::CollectiveTimingStatistics;
@@ -1566,39 +1442,15 @@ struct LevelSetAdvectionVelocityRequest {
   std::string source_velocity_field_name{"Velocity"};
   std::string target_velocity_field_name{"LevelSetAdvectionVelocity"};
   std::string operator_tag{"level_set"};
-  std::string extension_method{"wall_compatible_normal"};
-  int extension_band_layers{4};
-  // Set when the input names the band layers.  The PDE methods extend over
-  // every dry vertex unless this is set (diagnostic truncation only).
-  bool extension_band_layers_explicit{false};
+  // pde_harmonic or pde_normal (Advection_velocity_extension_method).
+  std::string extension_method{};
   bool enforce_wall_impermeability{true};
-  // Write one JSON map shard per accepted step under velocity_extension_maps/
-  // (<Write_velocity_extension_maps>, off by default; the maps are large).
-  bool write_velocity_extension_maps{false};
   std::vector<std::string> wall_face_names{};
   std::vector<WallConstraint> wall_constraints{};
   double isovalue{0.0};
   int requested_interface_marker{-1};
   std::optional<std::size_t> active_cut_request_index{};
   LevelSetActiveSide active_side{LevelSetActiveSide::Negative};
-};
-
-struct AcceptedVelocityExtensionMapRecord {
-  std::string level_set_field_name{};
-  std::string source_velocity_field_name{};
-  std::string target_velocity_field_name{};
-  std::string geometry_domain_id{};
-  std::string operator_tag{};
-  std::string extension_method{};
-  double isovalue{0.0};
-  int extension_band_layers{0};
-  bool enforce_wall_impermeability{false};
-  LevelSetActiveSide retained_side{LevelSetActiveSide::Negative};
-  std::shared_ptr<const application::core::VelocityExtensionMapSnapshot>
-      snapshot{};
-  // Publish the map as a JSON artifact; the accepted-map registry records
-  // the snapshot either way.
-  bool write_artifact{false};
 };
 
 std::vector<std::string> splitFaceNameList(std::string_view raw)
@@ -1724,11 +1576,6 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
     }
 
     const auto eq_params = eq->get_parameter_list();
-    const bool enabled =
-        first_defined_bool_parameter(
-            eq_params,
-            {"Use_wet_extension_advection_velocity"})
-            .value_or(false);
     const auto source_field =
         first_defined_parameter(
             eq_params,
@@ -1742,15 +1589,21 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
             ? application::core::pdeVelocityExtensionOperatorFromToken(
                   *method_parameter)
             : std::nullopt;
-    if (pde_operator.has_value() && enabled) {
+    // The algebraic wall-compatible wet extension was retired (decisions
+    // D47 and D55): the extension needs an explicit PDE method.  The
+    // translator rejects these settings first.
+    if (first_defined_bool_parameter(
+            eq_params, {"Use_wet_extension_advection_velocity"})
+            .value_or(false) ||
+        first_defined_bool_parameter(
+            eq_params, {"Write_velocity_extension_maps"})
+            .value_or(false) ||
+        ((method_parameter.has_value() || source_field.has_value()) &&
+         !pde_operator.has_value())) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Advection_velocity_extension_method=" +
-          trim_copy(*method_parameter) +
-          " selects the prescribed PDE extension; it cannot be combined with "
-          "Use_wet_extension_advection_velocity=true, which selects the "
-          "algebraic wet extension.");
+          std::string(application::core::kRetiredWetExtensionMessage));
     }
-    if (!enabled && !source_field.has_value() && !pde_operator.has_value()) {
+    if (!pde_operator.has_value()) {
       continue;
     }
 
@@ -1797,38 +1650,11 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
           "the generated prescribed advection field.");
     }
 
-    if (pde_operator.has_value()) {
-      request.extension_method = std::string(
-          application::core::pdeVelocityExtensionOperatorName(*pde_operator));
-    } else if (const auto extension_method = method_parameter) {
-      const auto token = normalized_token(*extension_method);
-      if (token != "nearestactivevertex" &&
-          token != "nearestactive" &&
-          token != "nearestvertex" &&
-          token != "nearestinterfacepoint" &&
-          token != "nearestinterfacevertex" &&
-          token != "nearestinterface" &&
-          token != "closestinterfacepoint" &&
-          token != "wallcompatiblenormal" &&
-          token != "normalextension" &&
-          token != "graphnormalextension") {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Unsupported wet-extension level-set "
-            "advection velocity method '" + trim_copy(*extension_method) +
-            "'. The supported methods are wall_compatible_normal (legacy "
-            "nearest-* names are aliases), pde_harmonic and pde_normal.");
-      }
-      request.extension_method = "wall_compatible_normal";
-    }
+    request.extension_method = std::string(
+        application::core::pdeVelocityExtensionOperatorName(*pde_operator));
     // Wet_extension_band_layers and Wet_extension_enforce_wall_impermeability,
     // which no deck, runner or test set, were removed (decision D47): the
-    // algebraic wet extension keeps its derived band and enforces wall
-    // impermeability.
-    if (const auto write_maps = first_defined_bool_parameter(
-            eq_params,
-            {"Write_velocity_extension_maps"})) {
-      request.write_velocity_extension_maps = *write_maps;
-    }
+    // extension covers every dry vertex and enforces wall impermeability.
     bool explicit_wall_faces = false;
     if (const auto wall_faces = first_defined_parameter(
             eq_params,
@@ -4334,16 +4160,6 @@ std::optional<int> generatedCutContextMarkerForMaintenance(
       system, request.configuration->volume_cut_request);
 }
 
-// Methods whose extension is seeded by the wet vertices plus every vertex of
-// the retained interface cells (so the extension equals u on the interface).
-bool usesTraceSeedVelocityExtension(std::string_view method)
-{
-  return method == "wall_compatible_normal" ||
-         method == "nearest_interface_point" ||
-         application::core::pdeVelocityExtensionOperatorFromToken(method)
-             .has_value();
-}
-
 // SVMP_PDE_EXTENSION_FACTORIZATION selects the dry-region factorization of
 // the PDE velocity extension: lu_colamd (default), the opt-in ldlt_amd, or
 // the opt-in mumps (distributed over all ranks) or mumps_serial (sequential
@@ -4389,7 +4205,6 @@ bool updateLevelSetAdvectionVelocitiesFromState(
     const svmp::FE::systems::SystemStateView& state,
     const std::vector<LevelSetAdvectionVelocityRequest>& requests,
     bool refresh_frozen_algebraic_map = true,
-    std::vector<AcceptedVelocityExtensionMapRecord>* refreshed_maps = nullptr,
     PdeVelocityExtensionCaches* pde_extension_caches = nullptr)
 {
   if (!sim.fe_system || !sim.primary_mesh || requests.empty()) {
@@ -4401,17 +4216,26 @@ bool updateLevelSetAdvectionVelocitiesFromState(
   const auto extension_comm = activeFESystemCommunicator(system);
   const auto n_vertices = mesh.n_vertices();
   const int mesh_dim = mesh.dim();
-  const auto& coords = mesh.X_ref();
   const bool trace_updates =
       parseBoolEnv("SVMP_TRACE_LEVEL_SET_ADVECTION", false) ||
       application::core::oopTraceEnabled();
 
-  if (refreshed_maps != nullptr) {
-    refreshed_maps->clear();
-  }
-
   bool updated = false;
   for (const auto& request : requests) {
+    // The algebraic wall-compatible wet extension was retired (decisions D47
+    // and D55); every request names a PDE method.
+    const auto pde_operator =
+        application::core::pdeVelocityExtensionOperatorFromToken(
+            request.extension_method);
+    if (!pde_operator.has_value()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Level-set advection velocity "
+          "extension method '" +
+          request.extension_method +
+          "' is not pde_harmonic or pde_normal; the algebraic "
+          "wall-compatible wet extension was retired (decisions D47 and "
+          "D55).");
+    }
     const auto phi_field = system.findFieldByName(request.level_set_field_name);
     const auto source_field =
         system.findFieldByName(request.source_velocity_field_name);
@@ -4421,7 +4245,7 @@ bool updateLevelSetAdvectionVelocitiesFromState(
         source_field == svmp::FE::INVALID_FIELD_ID ||
         target_field == svmp::FE::INVALID_FIELD_ID) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Could not find fields needed for wet-extension level-set advection velocity update.");
+          "[svMultiPhysics::Application] Could not find fields needed for the level-set advection velocity extension.");
     }
 
     const auto& phi_rec = system.fieldRecord(phi_field);
@@ -4448,15 +4272,15 @@ bool updateLevelSetAdvectionVelocitiesFromState(
           "[svMultiPhysics::Application] Algebraic level-set velocity extension source does not match the registered physical velocity field.");
     }
     if (algebraic_extension && !refresh_frozen_algebraic_map) {
-      // The map contains nonsmooth active-set/BFS choices and phi-dependent
-      // regression weights.  Freeze all of them throughout one nonlinear
-      // solve; only E and the physical source velocity remain monolithic.
+      // The rows depend on the known set and, for pde_normal, on the
+      // level-set normals.  Freeze them throughout one nonlinear solve; only
+      // E and the physical source velocity remain monolithic.
       continue;
     }
     if (algebraic_extension) {
-      // Rebuilding the cut/graph map is fail-closed.  Any exception below,
-      // including disappearance of the interface, must not leave the previous
-      // accepted interface map available to a later assembly.
+      // Rebuilding the rows is fail-closed.  Any exception below, including
+      // disappearance of the interface, must not leave the previous accepted
+      // rows available to a later assembly.
       extension_constraint->invalidateFrozenMap();
     }
 
@@ -4471,76 +4295,74 @@ bool updateLevelSetAdvectionVelocitiesFromState(
         static_cast<std::size_t>(target_rec.components);
     const auto copy_components =
         std::min(source_components, target_components);
-    if (usesTraceSeedVelocityExtension(request.extension_method)) {
-      const auto require_p1_field = [](const auto& record,
-                                       std::string_view role) {
-        if (!record.space || record.space->is_variable_order() ||
-            record.space->polynomial_order() != 1) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] wall_compatible_normal "
-              "wet-extension requires a fixed P1 " +
-              std::string(role) + " field; field '" + record.name +
-              "' is higher-order, variable-order, or has no FE space.");
-        }
-      };
-      if (phi_rec.components != 1) {
+    const auto require_p1_field = [](const auto& record,
+                                     std::string_view role) {
+      if (!record.space || record.space->is_variable_order() ||
+          record.space->polynomial_order() != 1) {
         throw std::runtime_error(
-            "[svMultiPhysics::Application] wall_compatible_normal "
-            "wet-extension requires a scalar P1 level-set field.");
+            "[svMultiPhysics::Application] The level-set velocity "
+            "extension requires a fixed P1 " +
+            std::string(role) + " field; field '" + record.name +
+            "' is higher-order, variable-order, or has no FE space.");
       }
-      require_p1_field(phi_rec, "level-set");
-      require_p1_field(source_rec, "source-velocity");
-      require_p1_field(target_rec, "target-velocity");
-      if (source_components != target_components ||
-          source_rec.space->value_dimension() !=
-              target_rec.space->value_dimension()) {
+    };
+    if (phi_rec.components != 1) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] The level-set velocity "
+          "extension requires a scalar P1 level-set field.");
+    }
+    require_p1_field(phi_rec, "level-set");
+    require_p1_field(source_rec, "source-velocity");
+    require_p1_field(target_rec, "target-velocity");
+    if (source_components != target_components ||
+        source_rec.space->value_dimension() !=
+            target_rec.space->value_dimension()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] The level-set velocity extension requires source and target P1 fields with identical component layouts.");
+    }
+    const auto& phi_dofs = system.fieldDofHandler(phi_field);
+    const auto& source_dofs = system.fieldDofHandler(source_field);
+    const auto& target_dofs = system.fieldDofHandler(target_field);
+    const auto* phi_entity_map = phi_dofs.getEntityDofMap();
+    const auto* source_entity_map = source_dofs.getEntityDofMap();
+    const auto* target_entity_map = target_dofs.getEntityDofMap();
+    if (phi_entity_map == nullptr || source_entity_map == nullptr ||
+        target_entity_map == nullptr) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] The level-set velocity extension requires matching vertex-nodal level-set, source, and target layouts.");
+    }
+    for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
+      const auto phi_vertex_dofs = phi_entity_map->getVertexDofs(
+          static_cast<svmp::FE::GlobalIndex>(vertex));
+      const auto source_vertex_dofs = source_entity_map->getVertexDofs(
+          static_cast<svmp::FE::GlobalIndex>(vertex));
+      const auto target_vertex_dofs = target_entity_map->getVertexDofs(
+          static_cast<svmp::FE::GlobalIndex>(vertex));
+      if (phi_vertex_dofs.size() != 1u ||
+          source_vertex_dofs.size() != source_components ||
+          target_vertex_dofs.size() != target_components) {
         throw std::runtime_error(
-            "[svMultiPhysics::Application] wall_compatible_normal wet-extension requires source and target P1 fields with identical component layouts.");
+            "[svMultiPhysics::Application] The level-set velocity extension requires exactly one level-set, source, and target P1 vertex DOF per component.");
       }
-      const auto& phi_dofs = system.fieldDofHandler(phi_field);
-      const auto& source_dofs = system.fieldDofHandler(source_field);
-      const auto& target_dofs = system.fieldDofHandler(target_field);
-      const auto* phi_entity_map = phi_dofs.getEntityDofMap();
-      const auto* source_entity_map = source_dofs.getEntityDofMap();
-      const auto* target_entity_map = target_dofs.getEntityDofMap();
-      if (phi_entity_map == nullptr || source_entity_map == nullptr ||
-          target_entity_map == nullptr) {
+    }
+    const auto& local_mesh = mesh.local_mesh();
+    for (svmp::index_t cell = 0; cell < local_mesh.n_cells(); ++cell) {
+      if (local_mesh.cell_shape(cell).order != 1) {
         throw std::runtime_error(
-            "[svMultiPhysics::Application] wall_compatible_normal wet-extension requires matching vertex-nodal level-set, source, and target layouts.");
+            "[svMultiPhysics::Application] The level-set velocity "
+            "extension requires linear mesh topology; high-order "
+            "geometry is not qualified for the P1 extension.");
       }
-      for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
-        const auto phi_vertex_dofs = phi_entity_map->getVertexDofs(
-            static_cast<svmp::FE::GlobalIndex>(vertex));
-        const auto source_vertex_dofs = source_entity_map->getVertexDofs(
-            static_cast<svmp::FE::GlobalIndex>(vertex));
-        const auto target_vertex_dofs = target_entity_map->getVertexDofs(
-            static_cast<svmp::FE::GlobalIndex>(vertex));
-        if (phi_vertex_dofs.size() != 1u ||
-            source_vertex_dofs.size() != source_components ||
-            target_vertex_dofs.size() != target_components) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] wall_compatible_normal wet-extension requires exactly one level-set, source, and target P1 vertex DOF per component.");
-        }
-      }
-      const auto& local_mesh = mesh.local_mesh();
-      for (svmp::index_t cell = 0; cell < local_mesh.n_cells(); ++cell) {
-        if (local_mesh.cell_shape(cell).order != 1) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] wall_compatible_normal "
-              "wet-extension requires linear mesh topology; high-order "
-              "geometry is not qualified for the vertex graph algorithm.");
-        }
-        auto [cell_vertices, cell_vertex_count] =
-            local_mesh.cell_vertices_span(cell);
-        const auto expected_cell_dofs =
-            cell_vertex_count * source_components;
-        if (cell_vertices == nullptr || cell_vertex_count == 0u ||
-            phi_rec.space->dofs_per_element(cell) != cell_vertex_count ||
-            source_rec.space->dofs_per_element(cell) != expected_cell_dofs ||
-            target_rec.space->dofs_per_element(cell) != expected_cell_dofs) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] wall_compatible_normal wet-extension requires identical nodal P1 source/target cell layouts on every retained mesh cell.");
-        }
+      auto [cell_vertices, cell_vertex_count] =
+          local_mesh.cell_vertices_span(cell);
+      const auto expected_cell_dofs =
+          cell_vertex_count * source_components;
+      if (cell_vertices == nullptr || cell_vertex_count == 0u ||
+          phi_rec.space->dofs_per_element(cell) != cell_vertex_count ||
+          source_rec.space->dofs_per_element(cell) != expected_cell_dofs ||
+          target_rec.space->dofs_per_element(cell) != expected_cell_dofs) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] The level-set velocity extension requires identical nodal P1 source/target cell layouts on every retained mesh cell.");
       }
     }
 
@@ -4581,13 +4403,10 @@ bool updateLevelSetAdvectionVelocitiesFromState(
     std::size_t dry_trace_support_vertex_count = 0u;
     std::size_t trace_seed_vertex_count = 0u;
     std::size_t wall_boundary_label_count = 0u;
-    WallCompatibleVelocityExtensionResult wall_extension_report{};
+    application::core::PdeVelocityExtensionReport pde_report{};
     std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>
         algebraic_rows;
-    std::shared_ptr<const application::core::VelocityExtensionMapSnapshot>
-        algebraic_map_snapshot;
-    // Set when a PDE extension installs its rows (no map snapshot and no
-    // per-step map artifact).
+    // Set when the monolithic extension installs its rows.
     bool pde_algebraic = false;
     std::uint64_t pde_map_revision_key = 0u;
 
@@ -4605,208 +4424,178 @@ bool updateLevelSetAdvectionVelocitiesFromState(
       }
     };
 
-    if (usesTraceSeedVelocityExtension(request.extension_method)) {
-      if (mesh_dim < 1 || mesh_dim > 3) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] nearest_interface_point level-set "
-            "advection velocity extension requires mesh dimension in [1, 3].");
-      }
+    if (mesh_dim < 1 || mesh_dim > 3) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] The level-set advection velocity "
+          "extension requires mesh dimension in [1, 3].");
+    }
 
-      // For fixed nodal P1/Q1 fields, equality at every vertex supporting a
-      // retained interface cell is both necessary and sufficient for the
-      // finite-element traces to agree pointwise on that cell:
-      //
-      //     E_h|_K = u_h|_K  =>  E_h|_(Gamma cap K) = u_h|_(Gamma cap K).
-      //
-      // The older sign-only seed marked wet vertices but graph-extrapolated
-      // the dry vertices of cut cells, so E_h and u_h differed on Gamma even
-      // though all wet nodal values agreed.  Prefer the generated cut context
-      // (the geometry used by assembly), with a nodal P1 crossing search only
-      // when no authoritative generated-interface context exists anywhere on
-      // the active communicator.  A locally empty retained-rule set is
-      // authoritative and must not resurrect an omitted cell through a nodal
-      // fallback on that rank.
-      const bool authoritative_interface_context = globalAnyBool(
-          hasAuthoritativeInterfaceVelocityContext(system, request),
-          extension_comm);
-      auto candidate_cells = authoritative_interface_context
-                                 ? interfaceVelocitySampleCandidateCells(
-                                       system, request)
-                                 : std::vector<svmp::FE::MeshIndex>{};
-      if (!authoritative_interface_context) {
-        candidate_cells = nodalVelocityExtensionInterfaceCells(
-            mesh,
-            std::span<const double>(phi_values.data(), phi_values.size()),
-            request.isovalue);
-      }
-      interface_sample_used_cut_context = authoritative_interface_context;
-      const auto local_owned_candidate_cells =
-          static_cast<std::size_t>(std::count_if(
-              candidate_cells.begin(),
-              candidate_cells.end(),
-              [&](svmp::FE::MeshIndex cell) {
-                return cell >= 0 && mesh.is_owned_cell(
-                                        static_cast<svmp::index_t>(cell));
-              }));
-      interface_sample_candidate_cell_count = globalSumSize(
-          local_owned_candidate_cells, extension_comm);
-
-      std::vector<std::uint8_t> trace_support(n_vertices, 0u);
-      markVelocityExtensionTraceSupportCells(
+    // For fixed nodal P1/Q1 fields, equality at every vertex supporting a
+    // retained interface cell is both necessary and sufficient for the
+    // finite-element traces to agree pointwise on that cell:
+    //
+    //     E_h|_K = u_h|_K  =>  E_h|_(Gamma cap K) = u_h|_(Gamma cap K).
+    //
+    // The older sign-only seed marked wet vertices but graph-extrapolated
+    // the dry vertices of cut cells, so E_h and u_h differed on Gamma even
+    // though all wet nodal values agreed.  Prefer the generated cut context
+    // (the geometry used by assembly), with a nodal P1 crossing search only
+    // when no authoritative generated-interface context exists anywhere on
+    // the active communicator.  A locally empty retained-rule set is
+    // authoritative and must not resurrect an omitted cell through a nodal
+    // fallback on that rank.
+    const bool authoritative_interface_context = globalAnyBool(
+        hasAuthoritativeInterfaceVelocityContext(system, request),
+        extension_comm);
+    auto candidate_cells = authoritative_interface_context
+                               ? interfaceVelocitySampleCandidateCells(
+                                     system, request)
+                               : std::vector<svmp::FE::MeshIndex>{};
+    if (!authoritative_interface_context) {
+      candidate_cells = nodalVelocityExtensionInterfaceCells(
           mesh,
-          std::span<const svmp::FE::MeshIndex>(candidate_cells.data(),
-                                               candidate_cells.size()),
-          trace_support);
-      trace_support_vertex_count =
-          synchronizeVelocityExtensionTraceSupportMask(
-              mesh, extension_comm, trace_support);
-      std::vector<std::uint8_t> trace_seed(active);
-      std::vector<std::uint8_t> dry_trace_support(n_vertices, 0u);
-      for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
-        if (trace_support[vertex] != 0u) {
-          trace_seed[vertex] = 1u;
-          if (active[vertex] == 0u) {
-            dry_trace_support[vertex] = 1u;
-          }
+          std::span<const double>(phi_values.data(), phi_values.size()),
+          request.isovalue);
+    }
+    interface_sample_used_cut_context = authoritative_interface_context;
+    const auto local_owned_candidate_cells =
+        static_cast<std::size_t>(std::count_if(
+            candidate_cells.begin(),
+            candidate_cells.end(),
+            [&](svmp::FE::MeshIndex cell) {
+              return cell >= 0 && mesh.is_owned_cell(
+                                      static_cast<svmp::index_t>(cell));
+            }));
+    interface_sample_candidate_cell_count = globalSumSize(
+        local_owned_candidate_cells, extension_comm);
+
+    std::vector<std::uint8_t> trace_support(n_vertices, 0u);
+    markVelocityExtensionTraceSupportCells(
+        mesh,
+        std::span<const svmp::FE::MeshIndex>(candidate_cells.data(),
+                                             candidate_cells.size()),
+        trace_support);
+    trace_support_vertex_count =
+        synchronizeVelocityExtensionTraceSupportMask(
+            mesh, extension_comm, trace_support);
+    std::vector<std::uint8_t> trace_seed(active);
+    std::vector<std::uint8_t> dry_trace_support(n_vertices, 0u);
+    for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
+      if (trace_support[vertex] != 0u) {
+        trace_seed[vertex] = 1u;
+        if (active[vertex] == 0u) {
+          dry_trace_support[vertex] = 1u;
         }
       }
-      dry_trace_support_vertex_count =
-          globalOwnedVelocityExtensionMaskCount(
-              mesh, extension_comm, dry_trace_support);
-      trace_seed_vertex_count = globalOwnedVelocityExtensionMaskCount(
-          mesh, extension_comm, trace_seed);
+    }
+    dry_trace_support_vertex_count =
+        globalOwnedVelocityExtensionMaskCount(
+            mesh, extension_comm, dry_trace_support);
+    trace_seed_vertex_count = globalOwnedVelocityExtensionMaskCount(
+        mesh, extension_comm, trace_seed);
 
-      std::size_t local_interface_geometry_sample_count = 0u;
+    std::size_t local_interface_geometry_sample_count = 0u;
 
-      auto add_interface_sample = [&](std::size_t va,
-                                      std::size_t vb,
-                                      double edge_t) {
-        if (va >= n_vertices || vb >= n_vertices ||
-            !std::isfinite(edge_t)) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] wall_compatible_normal wet-extension found an invalid nodal interface geometry sample.");
+    auto add_interface_sample = [&](std::size_t va,
+                                    std::size_t vb,
+                                    double edge_t) {
+      if (va >= n_vertices || vb >= n_vertices ||
+          !std::isfinite(edge_t)) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] The level-set velocity extension found an invalid nodal interface geometry sample.");
+      }
+      edge_t = std::clamp(edge_t, 0.0, 1.0);
+      (void)edge_t;
+      ++local_interface_geometry_sample_count;
+    };
+
+    auto add_cut_context_interface_samples = [&]() -> bool {
+      const auto* cut_context = system.cutIntegrationContext();
+      const auto marker = interfaceVelocitySampleMarker(system, request);
+      if (cut_context == nullptr || !marker.has_value() ||
+          !cut_context->hasGeneratedInterfaceMarker(*marker)) {
+        return false;
+      }
+      bool added = false;
+      for (const auto* rule :
+           cut_context->interfaceRulesForMarker(*marker)) {
+        if (rule == nullptr ||
+            rule->kind != svmp::FE::geometry::CutQuadratureKind::Interface ||
+            rule->provenance.parent_entity < 0) {
+          continue;
         }
-        edge_t = std::clamp(edge_t, 0.0, 1.0);
-        (void)edge_t;
-        ++local_interface_geometry_sample_count;
-      };
-
-      auto add_cut_context_interface_samples = [&]() -> bool {
-        const auto* cut_context = system.cutIntegrationContext();
-        const auto marker = interfaceVelocitySampleMarker(system, request);
-        if (cut_context == nullptr || !marker.has_value() ||
-            !cut_context->hasGeneratedInterfaceMarker(*marker)) {
-          return false;
-        }
-        bool added = false;
-        for (const auto* rule :
-             cut_context->interfaceRulesForMarker(*marker)) {
-          if (rule == nullptr ||
-              rule->kind != svmp::FE::geometry::CutQuadratureKind::Interface ||
-              rule->provenance.parent_entity < 0) {
+        ++interface_sample_context_rule_count;
+        for (const auto& qp : rule->points) {
+          if (!std::isfinite(qp.weight) ||
+              !(std::abs(qp.weight) > 0.0)) {
             continue;
           }
-          ++interface_sample_context_rule_count;
-          for (const auto& qp : rule->points) {
-            if (!std::isfinite(qp.weight) ||
-                !(std::abs(qp.weight) > 0.0)) {
-              continue;
-            }
-            const auto& point = qp.point;
-            if (!std::isfinite(point[0]) || !std::isfinite(point[1]) ||
-                !std::isfinite(point[2])) {
-              throw std::runtime_error(
-                "[svMultiPhysics::Application] nearest_interface_point level-set "
-                "advection velocity extension received a non-finite cut-interface sample.");
-            }
-            ++local_interface_geometry_sample_count;
-            added = true;
+          const auto& point = qp.point;
+          if (!std::isfinite(point[0]) || !std::isfinite(point[1]) ||
+              !std::isfinite(point[2])) {
+            throw std::runtime_error(
+              "[svMultiPhysics::Application] The level-set advection velocity "
+              "extension received a non-finite cut-interface sample.");
           }
+          ++local_interface_geometry_sample_count;
+          added = true;
         }
-        return added;
-      };
+      }
+      return added;
+    };
 
-      const auto& local_mesh = mesh.local_mesh();
-      constexpr double zero_tol = 1.0e-12;
-      auto add_interface_segment = [&](std::size_t va, std::size_t vb) {
-        if (va >= n_vertices || vb >= n_vertices) {
-          return;
-        }
-        const double phia = phi_values[va] - request.isovalue;
-        const double phib = phi_values[vb] - request.isovalue;
-        const bool a_zero = std::abs(phia) <= zero_tol;
-        const bool b_zero = std::abs(phib) <= zero_tol;
-        if (a_zero && b_zero) {
-          add_interface_sample(va, vb, 0.0);
-          add_interface_sample(va, vb, 1.0);
-        } else if (a_zero) {
-          add_interface_sample(va, vb, 0.0);
-        } else if (b_zero) {
-          add_interface_sample(va, vb, 1.0);
-        } else if (phia * phib < 0.0) {
-          add_interface_sample(va, vb, phia / (phia - phib));
-        }
-      };
-      const bool used_cut_context_samples =
-          add_cut_context_interface_samples();
-      interface_sample_context_rule_count = globalSumSize(
-          interface_sample_context_rule_count, extension_comm);
+    constexpr double zero_tol = 1.0e-12;
+    auto add_interface_segment = [&](std::size_t va, std::size_t vb) {
+      if (va >= n_vertices || vb >= n_vertices) {
+        return;
+      }
+      const double phia = phi_values[va] - request.isovalue;
+      const double phib = phi_values[vb] - request.isovalue;
+      const bool a_zero = std::abs(phia) <= zero_tol;
+      const bool b_zero = std::abs(phib) <= zero_tol;
+      if (a_zero && b_zero) {
+        add_interface_sample(va, vb, 0.0);
+        add_interface_sample(va, vb, 1.0);
+      } else if (a_zero) {
+        add_interface_sample(va, vb, 0.0);
+      } else if (b_zero) {
+        add_interface_sample(va, vb, 1.0);
+      } else if (phia * phib < 0.0) {
+        add_interface_sample(va, vb, phia / (phia - phib));
+      }
+    };
+    const bool used_cut_context_samples =
+        add_cut_context_interface_samples();
+    interface_sample_context_rule_count = globalSumSize(
+        interface_sample_context_rule_count, extension_comm);
 
-      auto visit_cell_edges = [&](svmp::index_t cell) {
-        if (cell < 0 || cell >= local_mesh.n_cells()) {
+    auto visit_cell_edges = [&](svmp::index_t cell) {
+      if (cell < 0 || cell >= local_mesh.n_cells()) {
+        return;
+      }
+      auto [cell_vertices, n_cell_vertices] =
+          local_mesh.cell_vertices_span(cell);
+      if (cell_vertices == nullptr || n_cell_vertices < 2u) {
+        return;
+      }
+      const auto family = local_mesh.cell_shape(cell).family;
+      if (family == svmp::CellFamily::Polygon) {
+        const auto& shape = local_mesh.cell_shape(cell);
+        const int polygon_corners =
+            shape.num_corners > 0
+                ? std::min<int>(shape.num_corners,
+                                static_cast<int>(n_cell_vertices))
+                : static_cast<int>(n_cell_vertices);
+        if (polygon_corners < 2) {
           return;
         }
-        auto [cell_vertices, n_cell_vertices] =
-            local_mesh.cell_vertices_span(cell);
-        if (cell_vertices == nullptr || n_cell_vertices < 2u) {
-          return;
-        }
-        const auto family = local_mesh.cell_shape(cell).family;
-        if (family == svmp::CellFamily::Polygon) {
-          const auto& shape = local_mesh.cell_shape(cell);
-          const int polygon_corners =
-              shape.num_corners > 0
-                  ? std::min<int>(shape.num_corners,
-                                  static_cast<int>(n_cell_vertices))
-                  : static_cast<int>(n_cell_vertices);
-          if (polygon_corners < 2) {
-            return;
-          }
-          const auto polygon_edges =
-              svmp::CellTopology::get_polygon_edges_view(polygon_corners);
-          for (int edge = 0; edge < polygon_edges.edge_count; ++edge) {
-            auto edge_dofs = local_mesh.cell_edge_geometry_dofs(cell, edge);
-            if (edge_dofs.size() < 2u) {
-              const auto local_a = polygon_edges.pairs_flat[2 * edge];
-              const auto local_b = polygon_edges.pairs_flat[2 * edge + 1];
-              if (local_a < 0 || local_b < 0 ||
-                  static_cast<std::size_t>(local_a) >= n_cell_vertices ||
-                  static_cast<std::size_t>(local_b) >= n_cell_vertices) {
-                continue;
-              }
-              edge_dofs = {
-                  cell_vertices[static_cast<std::size_t>(local_a)],
-                  cell_vertices[static_cast<std::size_t>(local_b)]};
-            }
-            for (std::size_t i = 0; i + 1u < edge_dofs.size(); ++i) {
-              const auto raw_a = edge_dofs[i];
-              const auto raw_b = edge_dofs[i + 1u];
-              if (raw_a < 0 || raw_b < 0) {
-                continue;
-              }
-              add_interface_segment(static_cast<std::size_t>(raw_a),
-                                    static_cast<std::size_t>(raw_b));
-            }
-          }
-          return;
-        }
-
-        const auto edge_view = svmp::CellTopology::get_edges_view(family);
-        for (int edge = 0; edge < edge_view.edge_count; ++edge) {
+        const auto polygon_edges =
+            svmp::CellTopology::get_polygon_edges_view(polygon_corners);
+        for (int edge = 0; edge < polygon_edges.edge_count; ++edge) {
           auto edge_dofs = local_mesh.cell_edge_geometry_dofs(cell, edge);
           if (edge_dofs.size() < 2u) {
-            const auto local_a = edge_view.pairs_flat[2 * edge];
-            const auto local_b = edge_view.pairs_flat[2 * edge + 1];
+            const auto local_a = polygon_edges.pairs_flat[2 * edge];
+            const auto local_b = polygon_edges.pairs_flat[2 * edge + 1];
             if (local_a < 0 || local_b < 0 ||
                 static_cast<std::size_t>(local_a) >= n_cell_vertices ||
                 static_cast<std::size_t>(local_b) >= n_cell_vertices) {
@@ -4826,324 +4615,225 @@ bool updateLevelSetAdvectionVelocitiesFromState(
                                   static_cast<std::size_t>(raw_b));
           }
         }
-      };
-      if (!used_cut_context_samples && mesh_dim == 2) {
-        if (authoritative_interface_context) {
-          for (const auto cell : candidate_cells) {
-            visit_cell_edges(static_cast<svmp::index_t>(cell));
-          }
-        } else {
-          for (svmp::index_t cell = 0; cell < local_mesh.n_cells(); ++cell) {
-            visit_cell_edges(cell);
-          }
-        }
+        return;
       }
 
-      interface_sample_count = globalVelocityExtensionGeometrySampleCount(
-          local_interface_geometry_sample_count, extension_comm);
-      if (interface_sample_count == 0u) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] wall_compatible_normal wet-extension found no resolved interface geometry samples on any communicator rank; refusing to retain or install a stale extension map.");
-      }
-      if (trace_support_vertex_count == 0u) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] wall_compatible_normal wet-extension resolved interface geometry but no P1 trace-support vertices.");
-      }
-
-      std::vector<WallVelocityExtensionConstraint> wall_constraints;
-      wall_constraints.reserve(request.wall_constraints.size());
-      if (request.enforce_wall_impermeability) {
-        if (request.wall_constraints.empty()) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Wet-extension wall "
-              "impermeability is enabled, but no strong homogeneous "
-              "velocity Dirichlet component masks were resolved. Specify "
-              "compatible wall BCs or disable "
-              "Wet_extension_enforce_wall_impermeability.");
-        }
-        for (const auto& wall : request.wall_constraints) {
-          const auto label = mesh.label_from_name(wall.face_name);
-          if (label == svmp::INVALID_LABEL) {
-            throw std::runtime_error(
-                "[svMultiPhysics::Application] Wet-extension wall face '" +
-                wall.face_name + "' is not registered on the active mesh.");
+      const auto edge_view = svmp::CellTopology::get_edges_view(family);
+      for (int edge = 0; edge < edge_view.edge_count; ++edge) {
+        auto edge_dofs = local_mesh.cell_edge_geometry_dofs(cell, edge);
+        if (edge_dofs.size() < 2u) {
+          const auto local_a = edge_view.pairs_flat[2 * edge];
+          const auto local_b = edge_view.pairs_flat[2 * edge + 1];
+          if (local_a < 0 || local_b < 0 ||
+              static_cast<std::size_t>(local_a) >= n_cell_vertices ||
+              static_cast<std::size_t>(local_b) >= n_cell_vertices) {
+            continue;
           }
-          wall_constraints.push_back(WallVelocityExtensionConstraint{
-              .boundary_label = label,
-              .constrained_components = strongZeroVelocityComponentMask(
-                  wall.effective_direction, mesh_dim)});
+          edge_dofs = {
+              cell_vertices[static_cast<std::size_t>(local_a)],
+              cell_vertices[static_cast<std::size_t>(local_b)]};
+        }
+        for (std::size_t i = 0; i + 1u < edge_dofs.size(); ++i) {
+          const auto raw_a = edge_dofs[i];
+          const auto raw_b = edge_dofs[i + 1u];
+          if (raw_a < 0 || raw_b < 0) {
+            continue;
+          }
+          add_interface_segment(static_cast<std::size_t>(raw_a),
+                                static_cast<std::size_t>(raw_b));
         }
       }
-      wall_boundary_label_count = wall_constraints.size();
-
-      const auto oriented_level_set = orientedLevelSetForVelocityExtension(
-          phi_values, request.isovalue, request.active_side);
-
-      if (const auto pde_operator =
-              application::core::pdeVelocityExtensionOperatorFromToken(
-                  request.extension_method)) {
-        if (algebraic_extension) {
-          // Monolithic coupling: the same discrete problem is installed as
-          // frozen owner-local rows of the extension unknown.
-          std::uint64_t free_surface_geometry_revision = 0u;
-          if (const auto* cut_context = system.cutIntegrationContext()) {
-            free_surface_geometry_revision = cut_context->contentRevision();
-            if (const auto marker =
-                    interfaceVelocitySampleMarker(system, request);
-                marker.has_value() &&
-                cut_context->hasFreeSurfaceGeometrySnapshotForMarker(
-                    *marker)) {
-              free_surface_geometry_revision =
-                  cut_context->freeSurfaceGeometrySnapshotRevisionForMarker(
-                      *marker);
-            }
-          }
-          const auto& mesh_access = system.meshAccess();
-          // The frozen-map revision must agree across ranks.
-          pde_map_revision_key = application::core::communicatorCombinedRevision(
-              application::core::velocityExtensionMapRevision(
-                  mesh_access.geometryRevision(),
-                  mesh_access.topologyRevision(),
-                  mesh_access.ownershipRevision(),
-                  mesh_access.numberingRevision(),
-                  free_surface_geometry_revision,
-                  std::span<const double>(oriented_level_set.data(),
-                                          oriented_level_set.size()),
-                  std::span<const std::uint8_t>(trace_seed.data(),
-                                                trace_seed.size()))
-                  .key(),
-              extension_comm);
-          pde_algebraic = true;
+    };
+    if (!used_cut_context_samples && mesh_dim == 2) {
+      if (authoritative_interface_context) {
+        for (const auto cell : candidate_cells) {
+          visit_cell_edges(static_cast<svmp::index_t>(cell));
         }
-        // Dry-region factorizations are reused while their content key is
-        // unchanged (one cache per target field; see
-        // PdeVelocityExtensionCache).
-        static PdeVelocityExtensionCaches solve_pde_extension_caches;
-        auto& pde_extension_cache =
-            (pde_extension_caches != nullptr
-                 ? *pde_extension_caches
-                 : solve_pde_extension_caches)
-                [request.target_velocity_field_name];
-        const auto& pde_mesh_access = system.meshAccess();
-        const auto pde_report = application::core::extendVelocityByPde(
-            mesh,
-            extension_comm,
-            std::span<const double>(oriented_level_set.data(),
-                                    oriented_level_set.size()),
-            std::span<const double>(source_values.data(),
-                                    source_values.size()),
-            source_components,
-            std::span<const std::uint8_t>(trace_seed.data(),
-                                          trace_seed.size()),
-            target_components,
-            std::span<const WallVelocityExtensionConstraint>(
-                wall_constraints),
-            application::core::PdeVelocityExtensionOptions{
-                .op = *pde_operator,
-                .band_layers = request.extension_band_layers_explicit
-                                   ? request.extension_band_layers
-                                   : 0,
-                .enforce_wall_impermeability =
-                    request.enforce_wall_impermeability,
-                .factorization = pdeVelocityExtensionFactorizationSetting()},
-            extended,
-            pde_algebraic ? &algebraic_rows : nullptr,
-            &pde_extension_cache,
-            application::core::PdeVelocityExtensionMeshRevisions{
-                .geometry = pde_mesh_access.geometryRevision(),
-                .topology = pde_mesh_access.topologyRevision(),
-                .ownership = pde_mesh_access.ownershipRevision(),
-                .numbering = pde_mesh_access.numberingRevision()});
-        wall_extension_report.extended_vertices =
-            pde_report.extension_vertices;
-        wall_extension_report.vertices_outside_band =
-            pde_report.outside_vertices;
-        wall_extension_report.max_wall_normal_velocity =
-            pde_report.max_wall_normal_velocity;
-        wall_extension_report.max_seed_speed = pde_report.max_known_speed;
-        wall_extension_report.max_extended_speed =
-            pde_report.max_extended_speed;
-        if (trace_updates) {
-          application::core::oopCout()
-              << "[svMultiPhysics::Application] PDE velocity extension"
-              << " method=" << request.extension_method
-              << " known_vertices=" << pde_report.known_vertices
-              << " extension_vertices=" << pde_report.extension_vertices
-              << " outside_vertices=" << pde_report.outside_vertices
-              << " extension_cells=" << pde_report.extension_cells
-              << " unknowns=" << pde_report.unknowns[0] << ","
-              << pde_report.unknowns[1] << "," << pde_report.unknowns[2]
-              << " wall_fixed=" << pde_report.wall_fixed[0] << ","
-              << pde_report.wall_fixed[1] << "," << pde_report.wall_fixed[2]
-              << " max_relative_residual="
-              << pde_report.max_relative_residual
-              << " max_known_speed=" << pde_report.max_known_speed
-              << " max_extended_speed=" << pde_report.max_extended_speed
-              << " max_wall_normal_velocity="
-              << pde_report.max_wall_normal_velocity
-              << " reused_factorization=" << pde_report.reused_factorization
-              << " distributed_solves=" << pde_report.distributed_solves
-              << " factorization="
-              << application::core::pdeVelocityExtensionFactorizationName(
-                     pdeVelocityExtensionFactorizationSetting())
-              << " cache_entries=" << pde_report.cache_entries
-              << " cache_capacity=" << pde_report.cache_capacity
-              << " cache_hits=" << pde_extension_cache.statistics().hits
-              << " cache_misses=" << pde_extension_cache.statistics().misses
-              << " cache_bytes=" << pde_extension_cache.statistics().bytes
-              << " cache_peak_bytes="
-              << pde_extension_cache.statistics().peak_bytes
-              << " solution_hash=" << pde_report.solution_hash
-              << " elapsed_s=" << pde_report.elapsed_seconds
-              << " component_solve_s=" << pde_report.component_solve_seconds
-              << std::endl;
-        }
-        if (pde_report.self_checked) {
-          application::core::oopCout()
-              << "[svMultiPhysics::Application] PDE velocity extension "
-                 "self-check diagnostic=pde_extension_self_check"
-              << " reused_factorization=" << pde_report.reused_factorization
-              << " distributed_solves=" << pde_report.distributed_solves
-              << " cache_entries=" << pde_report.cache_entries
-              << " mismatches=0" << std::endl;
-        }
-      } else if (algebraic_extension) {
-        std::uint64_t free_surface_geometry_revision = 0u;
-        if (const auto* cut_context = system.cutIntegrationContext()) {
-          free_surface_geometry_revision = cut_context->contentRevision();
-          if (const auto marker = interfaceVelocitySampleMarker(system, request);
-              marker.has_value() &&
-              cut_context->hasFreeSurfaceGeometrySnapshotForMarker(*marker)) {
-            free_surface_geometry_revision =
-                cut_context->freeSurfaceGeometrySnapshotRevisionForMarker(
-                    *marker);
-          }
-        }
-        const auto& mesh_access = system.meshAccess();
-        const auto map_revision =
-            application::core::velocityExtensionMapRevision(
-                mesh_access.geometryRevision(),
-                mesh_access.topologyRevision(),
-                mesh_access.ownershipRevision(),
-                mesh_access.numberingRevision(),
-                free_surface_geometry_revision,
-                std::span<const double>(oriented_level_set.data(),
-                                        oriented_level_set.size()),
-                std::span<const std::uint8_t>(trace_seed.data(),
-                                              trace_seed.size()));
-        algebraic_map_snapshot =
-            application::core::buildVelocityExtensionMapSnapshot(
-                mesh,
-                extension_comm,
-                map_revision,
-                std::span<const double>(oriented_level_set.data(),
-                                        oriented_level_set.size()),
-                std::span<const double>(source_values.data(),
-                                        source_values.size()),
-                source_components,
-                std::span<const std::uint8_t>(trace_seed.data(),
-                                              trace_seed.size()),
-                target_components,
-                copy_components,
-                request.extension_band_layers,
-                request.enforce_wall_impermeability,
-                std::span<const WallVelocityExtensionConstraint>(
-                    wall_constraints));
-        wall_extension_report = algebraic_map_snapshot->report();
-        extended.assign(algebraic_map_snapshot->preview().begin(),
-                        algebraic_map_snapshot->preview().end());
-        algebraic_rows = algebraic_map_snapshot->copyRows();
       } else {
-        wall_extension_report = extendVelocityInLevelSetNormalBand(
-            mesh,
-            extension_comm,
-            std::span<const double>(oriented_level_set.data(),
-                                    oriented_level_set.size()),
-            std::span<const double>(source_values.data(), source_values.size()),
-            source_components,
-            std::span<const std::uint8_t>(trace_seed.data(), trace_seed.size()),
-            target_components,
-            copy_components,
-            request.extension_band_layers,
-            request.enforce_wall_impermeability,
-            std::span<const WallVelocityExtensionConstraint>(wall_constraints),
-            extended);
-      }
-      constexpr double trace_equality_factor = 64.0;
-      for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
-        if (trace_support[vertex] == 0u) {
-          continue;
-        }
-        for (std::size_t component = 0; component < copy_components;
-             ++component) {
-          const double source =
-              source_values[vertex * source_components + component];
-          const double extension =
-              extended[vertex * target_components + component];
-          const double tolerance =
-              trace_equality_factor * std::numeric_limits<double>::epsilon() *
-              std::max({1.0, std::abs(source), std::abs(extension)});
-          if (!std::isfinite(source) || !std::isfinite(extension) ||
-              std::abs(extension - source) > tolerance) {
-            throw std::runtime_error(
-                "[svMultiPhysics::Application] wall_compatible_normal wet-extension failed the exact P1 trace-support equality invariant.");
-          }
+        for (svmp::index_t cell = 0; cell < local_mesh.n_cells(); ++cell) {
+          visit_cell_edges(cell);
         }
       }
-      for (std::size_t v = 0; v < n_vertices; ++v) {
-        record_speed(v);
-      }
-    } else {
-      if (algebraic_extension) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Algebraic wet-extension tangents are implemented only for wall_compatible_normal; a state-dependent prescribed fallback is not permitted.");
-      }
-      std::vector<VelocityExtensionSample> active_samples;
-      active_samples.reserve(active_vertices.size());
-      for (const auto candidate : active_vertices) {
-        VelocityExtensionSample sample;
-        sample.point = meshVertexPoint(coords, mesh_dim, candidate);
-        sample.value.assign(target_components, 0.0);
-        for (std::size_t c = 0; c < copy_components; ++c) {
-          const auto value =
-              source_values[candidate * source_components + c];
-          sample.value[c] = std::isfinite(value) ? value : 0.0;
-        }
-        active_samples.push_back(std::move(sample));
-      }
-      active_samples =
-          gatherVelocityExtensionSamples(std::move(active_samples),
-                                         target_components,
-                                         extension_comm);
-      if (active_samples.empty()) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Level-set advection velocity "
-            "extension found no active velocity samples on any MPI rank.");
-      }
+    }
 
-      std::vector<NearestPointRecord> active_records;
-      active_records.reserve(active_samples.size());
-      for (std::size_t s = 0; s < active_samples.size(); ++s) {
-        active_records.push_back(
-            NearestPointRecord{active_samples[s].point, s});
-      }
-      const NearestPointIndex active_index(mesh_dim, std::move(active_records));
+    interface_sample_count = globalVelocityExtensionGeometrySampleCount(
+        local_interface_geometry_sample_count, extension_comm);
+    if (interface_sample_count == 0u) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] The level-set velocity extension found no resolved interface geometry samples on any communicator rank; refusing to retain or install a stale extension map.");
+    }
+    if (trace_support_vertex_count == 0u) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] The level-set velocity extension resolved interface geometry but no P1 trace-support vertices.");
+    }
 
-      for (std::size_t v = 0; v < n_vertices; ++v) {
-        const auto nearest =
-            active_index.nearest(meshVertexPoint(coords, mesh_dim, v));
-        if (!nearest.found || nearest.payload >= active_samples.size()) {
+    std::vector<WallVelocityExtensionConstraint> wall_constraints;
+    wall_constraints.reserve(request.wall_constraints.size());
+    if (request.enforce_wall_impermeability) {
+      if (request.wall_constraints.empty()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Wet-extension wall "
+            "impermeability is enabled, but no strong homogeneous "
+            "velocity Dirichlet component masks were resolved. Specify "
+            "compatible wall BCs or disable "
+            "Wet_extension_enforce_wall_impermeability.");
+      }
+      for (const auto& wall : request.wall_constraints) {
+        const auto label = mesh.label_from_name(wall.face_name);
+        if (label == svmp::INVALID_LABEL) {
           throw std::runtime_error(
-              "[svMultiPhysics::Application] Level-set advection velocity extension failed to find a nearest active sample.");
+              "[svMultiPhysics::Application] Wet-extension wall face '" +
+              wall.face_name + "' is not registered on the active mesh.");
         }
-
-        const auto source_sample = nearest.payload;
-        for (std::size_t c = 0; c < copy_components; ++c) {
-          extended[v * target_components + c] =
-              active_samples[source_sample].value[c];
-        }
-        record_speed(v);
+        wall_constraints.push_back(WallVelocityExtensionConstraint{
+            .boundary_label = label,
+            .constrained_components = strongZeroVelocityComponentMask(
+                wall.effective_direction, mesh_dim)});
       }
+    }
+    wall_boundary_label_count = wall_constraints.size();
+
+    const auto oriented_level_set = orientedLevelSetForVelocityExtension(
+        phi_values, request.isovalue, request.active_side);
+
+    if (algebraic_extension) {
+      // Monolithic coupling: the same discrete problem is installed as
+      // frozen owner-local rows of the extension unknown.
+      std::uint64_t free_surface_geometry_revision = 0u;
+      if (const auto* cut_context = system.cutIntegrationContext()) {
+        free_surface_geometry_revision = cut_context->contentRevision();
+        if (const auto marker =
+                interfaceVelocitySampleMarker(system, request);
+            marker.has_value() &&
+            cut_context->hasFreeSurfaceGeometrySnapshotForMarker(
+                *marker)) {
+          free_surface_geometry_revision =
+              cut_context->freeSurfaceGeometrySnapshotRevisionForMarker(
+                  *marker);
+        }
+      }
+      const auto& mesh_access = system.meshAccess();
+      // The frozen-map revision must agree across ranks.
+      pde_map_revision_key = application::core::communicatorCombinedRevision(
+          svmp::FE::level_set::velocityExtensionMapRevision(
+              mesh_access.geometryRevision(),
+              mesh_access.topologyRevision(),
+              mesh_access.ownershipRevision(),
+              mesh_access.numberingRevision(),
+              free_surface_geometry_revision,
+              std::span<const double>(oriented_level_set.data(),
+                                      oriented_level_set.size()),
+              std::span<const std::uint8_t>(trace_seed.data(),
+                                            trace_seed.size()))
+              .key(),
+          extension_comm);
+      pde_algebraic = true;
+    }
+    // Dry-region factorizations are reused while their content key is
+    // unchanged (one cache per target field; see
+    // PdeVelocityExtensionCache).
+    static PdeVelocityExtensionCaches solve_pde_extension_caches;
+    auto& pde_extension_cache =
+        (pde_extension_caches != nullptr
+             ? *pde_extension_caches
+             : solve_pde_extension_caches)
+            [request.target_velocity_field_name];
+    const auto& pde_mesh_access = system.meshAccess();
+    pde_report = application::core::extendVelocityByPde(
+        mesh,
+        extension_comm,
+        std::span<const double>(oriented_level_set.data(),
+                                oriented_level_set.size()),
+        std::span<const double>(source_values.data(),
+                                source_values.size()),
+        source_components,
+        std::span<const std::uint8_t>(trace_seed.data(),
+                                      trace_seed.size()),
+        target_components,
+        std::span<const WallVelocityExtensionConstraint>(
+            wall_constraints),
+        application::core::PdeVelocityExtensionOptions{
+            .op = *pde_operator,
+            // Every dry vertex is extended (no band truncation).
+            .band_layers = 0,
+            .enforce_wall_impermeability =
+                request.enforce_wall_impermeability,
+            .factorization = pdeVelocityExtensionFactorizationSetting()},
+        extended,
+        pde_algebraic ? &algebraic_rows : nullptr,
+        &pde_extension_cache,
+        application::core::PdeVelocityExtensionMeshRevisions{
+            .geometry = pde_mesh_access.geometryRevision(),
+            .topology = pde_mesh_access.topologyRevision(),
+            .ownership = pde_mesh_access.ownershipRevision(),
+            .numbering = pde_mesh_access.numberingRevision()});
+    if (trace_updates) {
+      application::core::oopCout()
+          << "[svMultiPhysics::Application] PDE velocity extension"
+          << " method=" << request.extension_method
+          << " known_vertices=" << pde_report.known_vertices
+          << " extension_vertices=" << pde_report.extension_vertices
+          << " outside_vertices=" << pde_report.outside_vertices
+          << " extension_cells=" << pde_report.extension_cells
+          << " unknowns=" << pde_report.unknowns[0] << ","
+          << pde_report.unknowns[1] << "," << pde_report.unknowns[2]
+          << " wall_fixed=" << pde_report.wall_fixed[0] << ","
+          << pde_report.wall_fixed[1] << "," << pde_report.wall_fixed[2]
+          << " max_relative_residual="
+          << pde_report.max_relative_residual
+          << " max_known_speed=" << pde_report.max_known_speed
+          << " max_extended_speed=" << pde_report.max_extended_speed
+          << " max_wall_normal_velocity="
+          << pde_report.max_wall_normal_velocity
+          << " reused_factorization=" << pde_report.reused_factorization
+          << " distributed_solves=" << pde_report.distributed_solves
+          << " factorization="
+          << application::core::pdeVelocityExtensionFactorizationName(
+                 pdeVelocityExtensionFactorizationSetting())
+          << " cache_entries=" << pde_report.cache_entries
+          << " cache_capacity=" << pde_report.cache_capacity
+          << " cache_hits=" << pde_extension_cache.statistics().hits
+          << " cache_misses=" << pde_extension_cache.statistics().misses
+          << " cache_bytes=" << pde_extension_cache.statistics().bytes
+          << " cache_peak_bytes="
+          << pde_extension_cache.statistics().peak_bytes
+          << " solution_hash=" << pde_report.solution_hash
+          << " elapsed_s=" << pde_report.elapsed_seconds
+          << " component_solve_s=" << pde_report.component_solve_seconds
+          << std::endl;
+    }
+    if (pde_report.self_checked) {
+      application::core::oopCout()
+          << "[svMultiPhysics::Application] PDE velocity extension "
+             "self-check diagnostic=pde_extension_self_check"
+          << " reused_factorization=" << pde_report.reused_factorization
+          << " distributed_solves=" << pde_report.distributed_solves
+          << " cache_entries=" << pde_report.cache_entries
+          << " mismatches=0" << std::endl;
+    }
+    constexpr double trace_equality_factor = 64.0;
+    for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
+      if (trace_support[vertex] == 0u) {
+        continue;
+      }
+      for (std::size_t component = 0; component < copy_components;
+           ++component) {
+        const double source =
+            source_values[vertex * source_components + component];
+        const double extension =
+            extended[vertex * target_components + component];
+        const double tolerance =
+            trace_equality_factor * std::numeric_limits<double>::epsilon() *
+            std::max({1.0, std::abs(source), std::abs(extension)});
+        if (!std::isfinite(source) || !std::isfinite(extension) ||
+            std::abs(extension - source) > tolerance) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] The level-set velocity extension failed the exact P1 trace-support equality invariant.");
+        }
+      }
+    }
+    for (std::size_t v = 0; v < n_vertices; ++v) {
+      record_speed(v);
     }
 
     max_active_speed = globalMaxDouble(max_active_speed, extension_comm);
@@ -5158,8 +4848,8 @@ bool updateLevelSetAdvectionVelocitiesFromState(
             kVelocityExtensionMaxWetToDryAmplification) {
       std::ostringstream message;
       message
-          << "[svMultiPhysics::Application] Algebraic wet-extension refused "
-             "to install a frozen map because the dry-band preview "
+          << "[svMultiPhysics::Application] The monolithic velocity "
+             "extension refused to install a frozen map because the dry-region "
              "amplification exceeded its fixed guard: max_active_speed="
           << max_active_speed
           << " max_dry_extended_speed=" << max_dry_extended_speed
@@ -5168,7 +4858,6 @@ bool updateLevelSetAdvectionVelocitiesFromState(
       throw std::runtime_error(message.str());
     }
 
-    const auto& target_dofs = system.fieldDofHandler(target_field);
     const auto* entity_map = target_dofs.getEntityDofMap();
     if (entity_map == nullptr) {
       throw std::runtime_error(
@@ -5176,18 +4865,12 @@ bool updateLevelSetAdvectionVelocitiesFromState(
     }
     std::size_t unassigned = 0u;
     if (algebraic_extension) {
-      if ((!algebraic_map_snapshot && !pde_algebraic) ||
-          algebraic_rows.empty()) {
+      if (!pde_algebraic || algebraic_rows.empty()) {
         throw std::runtime_error(
-            "[svMultiPhysics::Application] Algebraic wet-extension refresh produced no immutable map snapshot or owned constraint rows.");
+            "[svMultiPhysics::Application] The monolithic velocity extension refresh produced no owned constraint rows.");
       }
-      // The snapshot revision hashes rank-local arrays; the frozen-map
-      // revision must agree across ranks (as for the PDE path above).
-      const std::uint64_t installed_map_revision_key =
-          pde_algebraic ? pde_map_revision_key
-                        : application::core::communicatorCombinedRevision(
-                              algebraic_map_snapshot->revision().key(),
-                              extension_comm);
+      // The frozen-map revision agrees across ranks (see above).
+      const std::uint64_t installed_map_revision_key = pde_map_revision_key;
 
       std::vector<svmp::FE::Real> projected_coefficients(
           static_cast<std::size_t>(target_dofs.getNumDofs()),
@@ -5207,7 +4890,7 @@ bool updateLevelSetAdvectionVelocitiesFromState(
               "ApplicationDriver::refreshAlgebraicVelocityExtension");
       if (projection.unassigned_dofs != 0u || state.u_vector == nullptr) {
         throw std::runtime_error(
-            "[svMultiPhysics::Application] Algebraic wet-extension map refresh requires a mutable state vector and a complete P1 preview projection.");
+            "[svMultiPhysics::Application] The monolithic velocity extension refresh requires a mutable state vector and a complete P1 preview projection.");
       }
       const auto owned_field_dofs =
           target_dofs.getPartition().locallyOwned().toVector();
@@ -5222,7 +4905,7 @@ bool updateLevelSetAdvectionVelocitiesFromState(
                 projected_coefficients.size() ||
             projected_assignment[static_cast<std::size_t>(local_dof)] == 0u) {
           throw std::runtime_error(
-              "[svMultiPhysics::Application] Algebraic wet-extension preview omitted an owned extension DOF.");
+              "[svMultiPhysics::Application] The monolithic velocity extension preview omitted an owned extension DOF.");
         }
         state_dofs.push_back(target_offset + local_dof);
         state_values.push_back(
@@ -5233,7 +4916,7 @@ bool updateLevelSetAdvectionVelocitiesFromState(
       auto state_view = mutable_state->createAssemblyView();
       if (!state_view) {
         throw std::runtime_error(
-            "[svMultiPhysics::Application] Algebraic wet-extension map refresh could not create a mutable state view.");
+            "[svMultiPhysics::Application] The monolithic velocity extension refresh could not create a mutable state view.");
       }
       const bool map_changed =
           !extension_constraint->hasFrozenMap() ||
@@ -5254,7 +4937,7 @@ bool updateLevelSetAdvectionVelocitiesFromState(
       mutable_state->updateGhosts();
       if (trace_updates) {
         application::core::oopCout()
-            << "[svMultiPhysics::Application] Accepted algebraic wet-extension map refresh"
+            << "[svMultiPhysics::Application] Accepted monolithic velocity extension refresh"
             << " map_revision="
             << installed_map_revision_key
             << " map_changed=" << (map_changed ? 1 : 0)
@@ -5292,23 +4975,6 @@ bool updateLevelSetAdvectionVelocitiesFromState(
           std::span<const svmp::FE::Real>(coefficients.data(),
                                           coefficients.size()));
     }
-    if (refreshed_maps != nullptr && algebraic_map_snapshot) {
-      refreshed_maps->push_back(AcceptedVelocityExtensionMapRecord{
-          .level_set_field_name = request.level_set_field_name,
-          .source_velocity_field_name = request.source_velocity_field_name,
-          .target_velocity_field_name = request.target_velocity_field_name,
-          .geometry_domain_id = request.domain_id,
-          .operator_tag = request.operator_tag,
-          .extension_method = request.extension_method,
-          .isovalue = request.isovalue,
-          .extension_band_layers = request.extension_band_layers,
-          .enforce_wall_impermeability =
-              request.enforce_wall_impermeability,
-          .retained_side = request.active_side,
-          .snapshot = algebraic_map_snapshot,
-          .write_artifact = request.write_velocity_extension_maps,
-      });
-    }
     updated = true;
     if (trace_updates) {
       application::core::oopCout()
@@ -5317,7 +4983,7 @@ bool updateLevelSetAdvectionVelocitiesFromState(
           << request.source_velocity_field_name << "' extension_method="
           << request.extension_method << " linearization="
           << (algebraic_extension ? "frozen_sparse_algebraic" :
-                                    "prescribed_legacy")
+                                    "prescribed")
           << " active_vertices=" << active_vertices.size() << " dry_vertices="
           << (n_vertices - active_vertices.size())
           << " interface_sample_candidates="
@@ -5336,62 +5002,15 @@ bool updateLevelSetAdvectionVelocitiesFromState(
           << " dry_trace_support_vertices="
           << dry_trace_support_vertex_count
           << " trace_seed_vertices=" << trace_seed_vertex_count
-          << " extension_band_layers=" << request.extension_band_layers
-          << " extended_vertices="
-          << wall_extension_report.extended_vertices
+          << " extended_vertices=" << pde_report.extension_vertices
           << " vertices_outside_extension_band="
-          << wall_extension_report.vertices_outside_band
-          << " wall_projected_vertices="
-          << wall_extension_report.wall_projected_vertices
-          << " component_collision_vertices="
-          << wall_extension_report.component_collision_vertices
-          << " regression_candidate_rows="
-          << wall_extension_report.regression_candidate_rows
-          << " regression_accepted_rows="
-          << wall_extension_report.regression_accepted_rows
-          << " bounded_fallback_rows="
-          << wall_extension_report.bounded_fallback_rows
-          << " condition_rejected_rows="
-          << wall_extension_report.condition_rejected_rows
-          << " coefficient_rejected_rows="
-          << wall_extension_report.coefficient_rejected_rows
-          << " map_revision="
-          << (algebraic_map_snapshot
-                  ? algebraic_map_snapshot->revision().key()
-                  : pde_algebraic ? pde_map_revision_key
-                  : 0u)
-          << " regression_condition_guard="
-          << kVelocityExtensionMaxRegressionCondition
-          << " max_regression_condition="
-          << wall_extension_report.max_regression_condition
-          << " graph_coefficient_guard="
-          << (1.0 + kVelocityExtensionRowTolerance)
-          << " max_abs_graph_coefficient="
-          << wall_extension_report.max_abs_graph_coefficient
-          << " graph_row_l1_guard="
-          << (1.0 + kVelocityExtensionRowTolerance)
-          << " max_graph_row_l1="
-          << wall_extension_report.max_graph_row_l1
-          << " graph_row_sum_tolerance="
-          << kVelocityExtensionRowTolerance
-          << " max_graph_row_sum_error="
-          << wall_extension_report.max_graph_row_sum_error
-          << " max_negative_graph_coefficient="
-          << wall_extension_report.max_negative_graph_coefficient
-          << " max_constant_reproduction_error="
-          << wall_extension_report.max_constant_reproduction_error
-          << " max_tangential_linear_reproduction_error="
-          << wall_extension_report.max_linear_reproduction_error
-          << " max_extrapolation_distance="
-          << wall_extension_report.max_extrapolation_distance
-          << " map_max_seed_speed="
-          << wall_extension_report.max_seed_speed
-          << " map_max_extended_speed="
-          << wall_extension_report.max_extended_speed
+          << pde_report.outside_vertices
+          << " map_revision=" << (pde_algebraic ? pde_map_revision_key : 0u)
+          << " map_max_seed_speed=" << pde_report.max_known_speed
+          << " map_max_extended_speed=" << pde_report.max_extended_speed
           << " wall_boundary_labels=" << wall_boundary_label_count
           << " max_wall_normal_velocity="
-          << wall_extension_report.max_wall_normal_velocity
-          << " wall_normal_scope=graph_extended_vertices_outside_trace_seed"
+          << pde_report.max_wall_normal_velocity
           << " max_active_speed=" << max_active_speed
           << " max_dry_extended_speed=" << max_dry_extended_speed
           << " wet_to_dry_amplification=" << wet_to_dry_amplification
@@ -5411,41 +5030,14 @@ bool updateLevelSetAdvectionVelocitiesFromState(
 bool updateLevelSetAdvectionVelocities(
     application::core::SimulationComponents& sim,
     svmp::FE::timestepping::TimeHistory& history,
-    const std::vector<LevelSetAdvectionVelocityRequest>& requests,
-    std::vector<AcceptedVelocityExtensionMapRecord>* refreshed_maps = nullptr)
+    const std::vector<LevelSetAdvectionVelocityRequest>& requests)
 {
   const auto state = stateViewForHistory(history);
-  return updateLevelSetAdvectionVelocitiesFromState(
-      sim, state, requests, true, refreshed_maps);
+  return updateLevelSetAdvectionVelocitiesFromState(sim, state, requests, true);
 }
 
-using AcceptedVelocityExtensionMapRegistry =
-    std::map<std::string,
-             std::shared_ptr<const
-                 application::core::VelocityExtensionMapSnapshot>>;
-
-std::string acceptedVelocityExtensionMapKey(
-    const AcceptedVelocityExtensionMapRecord& record)
-{
-  std::ostringstream key;
-  key << std::setprecision(std::numeric_limits<double>::max_digits10);
-  const auto append = [&](std::string_view value) {
-    key << value.size() << ':' << value << ';';
-  };
-  append(record.level_set_field_name);
-  append(record.source_velocity_field_name);
-  append(record.target_velocity_field_name);
-  append(record.geometry_domain_id);
-  append(record.operator_tag);
-  append(record.extension_method);
-  key << record.isovalue << ';' << record.extension_band_layers << ';'
-      << (record.enforce_wall_impermeability ? 1 : 0) << ';'
-      << static_cast<int>(record.retained_side);
-  return key.str();
-}
-
-std::uint64_t acceptedVelocityExtensionMapKeyFingerprint(
-    std::string_view key) noexcept
+// FNV-1a fingerprint of a name that enters the extension revision.
+std::uint64_t velocityExtensionNameFingerprint(std::string_view key) noexcept
 {
   std::uint64_t fingerprint = 1469598103934665603ull;
   for (const char character : key) {
@@ -5456,32 +5048,11 @@ std::uint64_t acceptedVelocityExtensionMapKeyFingerprint(
   return fingerprint == 0u ? 1u : fingerprint;
 }
 
-std::optional<std::uint64_t> acceptedVelocityExtensionMapRegistryRevision(
-    const AcceptedVelocityExtensionMapRegistry& accepted_maps) noexcept
-{
-  if (accepted_maps.empty()) {
-    return std::nullopt;
-  }
-  std::uint64_t revision = 1469598103934665603ull;
-  constexpr std::uint64_t prime = 1099511628211ull;
-  const auto mix = [&](std::uint64_t value) {
-    for (std::size_t byte = 0u; byte < sizeof(value); ++byte) {
-      revision ^= (value >> (byte * 8u)) & 0xffu;
-      revision *= prime;
-    }
-  };
-  for (const auto& [key, snapshot] : accepted_maps) {
-    mix(acceptedVelocityExtensionMapKeyFingerprint(key));
-    mix(snapshot ? snapshot->revision().key() : 0u);
-  }
-  return revision == 0u ? std::optional<std::uint64_t>{1u}
-                        : std::optional<std::uint64_t>{revision};
-}
-
+// The revision of the installed frozen extension rows of every monolithic
+// request, or nullopt when no request has frozen rows (prescribed coupling).
 std::optional<std::uint64_t> currentLevelSetVelocityExtensionRevision(
     const svmp::FE::systems::FESystem& system,
-    const std::vector<LevelSetAdvectionVelocityRequest>& requests,
-    const AcceptedVelocityExtensionMapRegistry& accepted_maps)
+    const std::vector<LevelSetAdvectionVelocityRequest>& requests)
 {
   std::uint64_t revision = 1469598103934665603ull;
   constexpr std::uint64_t prime = 1099511628211ull;
@@ -5505,28 +5076,15 @@ std::optional<std::uint64_t> currentLevelSetVelocityExtensionRevision(
       continue;
     }
     found_current = true;
-    mix(acceptedVelocityExtensionMapKeyFingerprint(
-        request.level_set_field_name));
-    mix(acceptedVelocityExtensionMapKeyFingerprint(
-        request.target_velocity_field_name));
-    mix(acceptedVelocityExtensionMapKeyFingerprint(
-        request.operator_tag));
+    mix(velocityExtensionNameFingerprint(request.level_set_field_name));
+    mix(velocityExtensionNameFingerprint(request.target_velocity_field_name));
+    mix(velocityExtensionNameFingerprint(request.operator_tag));
     mix(static_cast<std::uint64_t>(target));
     mix(kernel->frozenMapRevision());
   }
-  std::optional<std::uint64_t> resolved =
-      revision == 0u ? std::optional<std::uint64_t>{1u}
-                     : std::optional<std::uint64_t>{revision};
-  if (!found_current) {
-    // Accepted snapshot revisions hash rank-local arrays: combine them.
-    const auto registry =
-        acceptedVelocityExtensionMapRegistryRevision(accepted_maps);
-    const auto comm = activeFESystemCommunicator(system);
-    resolved = std::nullopt;
-    if (globalAnyBool(registry.has_value(), comm)) {
-      resolved = application::core::communicatorCombinedRevision(
-          registry.value_or(0u), comm);
-    }
+  std::optional<std::uint64_t> resolved;
+  if (found_current) {
+    resolved = revision == 0u ? std::uint64_t{1u} : revision;
   }
   const auto [minimum, maximum] = globalMinMaxUint64(
       resolved.value_or(0u), activeFESystemCommunicator(system));
@@ -5535,154 +5093,6 @@ std::optional<std::uint64_t> currentLevelSetVelocityExtensionRevision(
         "[svMultiPhysics::Application] Level-set maintenance extension-map revision differs across the FE communicator.");
   }
   return resolved;
-}
-
-void writeAcceptedVelocityExtensionMapArtifacts(
-    const Parameters& params,
-    const std::vector<AcceptedVelocityExtensionMapRecord>& records,
-    std::uint64_t accepted_step,
-    double accepted_time,
-    double time_step,
-    std::uint64_t state_revision,
-    const svmp::MeshComm& comm,
-    AcceptedVelocityExtensionMapRegistry& accepted_maps)
-{
-  const double local_record_count = static_cast<double>(records.size());
-  if (globalMinDouble(local_record_count, comm) !=
-      globalMaxDouble(local_record_count, comm)) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Accepted velocity-extension map count differs across ranks.");
-  }
-  if (records.empty()) {
-    return;
-  }
-
-  std::filesystem::path output_directory = ".";
-  if (params.general_simulation_parameters.save_results_in_folder.defined() &&
-      !params.general_simulation_parameters.save_results_in_folder
-           .value()
-           .empty()) {
-    output_directory =
-        params.general_simulation_parameters.save_results_in_folder.value();
-  }
-  output_directory /= "velocity_extension_maps";
-
-  bool local_preflight_failure = accepted_step == 0u ||
-                                 !std::isfinite(accepted_time) ||
-                                 !std::isfinite(time_step) || time_step < 0.0;
-  std::vector<std::string> record_keys;
-  record_keys.reserve(records.size());
-  std::set<std::string> unique_record_keys;
-  for (const auto& record : records) {
-    const auto key = acceptedVelocityExtensionMapKey(record);
-    record_keys.push_back(key);
-    local_preflight_failure =
-        local_preflight_failure || !record.snapshot ||
-        !unique_record_keys.insert(key).second;
-    const auto fingerprint =
-        acceptedVelocityExtensionMapKeyFingerprint(key);
-    const auto [minimum_fingerprint, maximum_fingerprint] =
-        globalMinMaxUint64(fingerprint, comm);
-    local_preflight_failure = local_preflight_failure ||
-                              minimum_fingerprint != maximum_fingerprint;
-  }
-  if (globalAnyBool(local_preflight_failure, comm)) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Accepted velocity-extension artifact preflight failed on at least one rank.");
-  }
-
-  std::vector<application::core::VelocityExtensionMapArtifactResult>
-      artifacts;
-  artifacts.reserve(records.size());
-  for (std::size_t index = 0u; index < records.size(); ++index) {
-    const auto& record = records[index];
-    if (!record.write_artifact) {
-      // Map output is opt-in (Write_velocity_extension_maps); the map still
-      // enters the accepted registry below.
-      artifacts.push_back(
-          application::core::VelocityExtensionMapArtifactResult{
-              .success = true});
-      continue;
-    }
-    const auto previous = accepted_maps.find(record_keys[index]);
-    const auto* previous_snapshot =
-        previous == accepted_maps.end() ? nullptr : previous->second.get();
-    const application::core::VelocityExtensionMapArtifactContext context{
-        .level_set_field_name = record.level_set_field_name,
-        .source_velocity_field_name = record.source_velocity_field_name,
-        .target_velocity_field_name = record.target_velocity_field_name,
-        .geometry_domain_id = record.geometry_domain_id,
-        .operator_tag = record.operator_tag,
-        .extension_method = record.extension_method,
-        .retained_side = activeSideName(record.retained_side),
-        .accepted_step = accepted_step,
-        .accepted_time = accepted_time,
-        .time_step = time_step,
-        .state_revision = state_revision,
-        .isovalue = record.isovalue,
-        .extension_band_layers = record.extension_band_layers,
-        .enforce_wall_impermeability =
-            record.enforce_wall_impermeability,
-        .rank = comm.rank(),
-        .ranks = comm.size(),
-    };
-    artifacts.push_back(
-        application::core::writeVelocityExtensionMapArtifact(
-            output_directory,
-            context,
-            *record.snapshot,
-            previous_snapshot));
-  }
-
-  const bool local_publication_failure = std::any_of(
-      artifacts.begin(), artifacts.end(), [](const auto& artifact) {
-        return !artifact.success;
-      });
-  if (globalAnyBool(local_publication_failure, comm)) {
-    bool local_rollback_failure = false;
-    for (const auto& artifact : artifacts) {
-      if (!artifact.success || artifact.path.empty()) {
-        continue;
-      }
-      std::error_code removal_error;
-      if (!std::filesystem::remove(artifact.path, removal_error) ||
-          removal_error) {
-        local_rollback_failure = true;
-      }
-    }
-    if (globalAnyBool(local_rollback_failure, comm)) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Accepted velocity-extension artifact publication and collective rollback both failed.");
-    }
-    std::string local_diagnostic;
-    for (const auto& artifact : artifacts) {
-      if (!artifact.success) {
-        local_diagnostic = artifact.diagnostic;
-        break;
-      }
-    }
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Accepted velocity-extension artifact publication failed: " +
-        local_diagnostic);
-  }
-
-  for (std::size_t index = 0u; index < records.size(); ++index) {
-    accepted_maps[record_keys[index]] = records[index].snapshot;
-    if (comm.rank() == 0 && records[index].write_artifact) {
-      application::core::oopCout()
-          << "[svMultiPhysics::Application] Accepted velocity-extension map artifact"
-          << " diagnostic=velocity_extension_map_artifact"
-          << " field='" << records[index].target_velocity_field_name << "'"
-          << " step=" << accepted_step
-          << " map_revision=" << records[index].snapshot->revision().key()
-          << " ranks=" << comm.size()
-          << " owner_rows_rank0=" << artifacts[index].owner_rows
-          << " constraint_rows_rank0=" << artifacts[index].constraint_rows
-          << " bytes_rank0=" << artifacts[index].bytes
-          << " path_rank0='" << artifacts[index].path.string() << "'"
-          << " outcome=written" << std::endl;
-    }
-  }
 }
 
 // ---- generated cut data on deep ghost cells --------------------------------
@@ -6867,7 +6277,6 @@ evaluateStaticCapillaryPressureCertificate(
                         state,
                         algebraic_extension_requests,
                         /*refresh_frozen_algebraic_map=*/true,
-                        /*refreshed_maps=*/nullptr,
                         &probe_pde_extension_caches);
                     probe_extension_maps_refreshed = true;
                   }}));
@@ -9080,23 +8489,8 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
 
   sim.fe_system->commitTimeStep();
   (void)cut_geometry->refreshCached(sim.time_history->u(), "steady_accepted");
-  std::vector<AcceptedVelocityExtensionMapRecord>
-      steady_velocity_extension_maps;
   (void)updateLevelSetAdvectionVelocities(
-      sim,
-      *sim.time_history,
-      steady_level_set_advection_velocity,
-      &steady_velocity_extension_maps);
-  AcceptedVelocityExtensionMapRegistry steady_accepted_extension_maps;
-  writeAcceptedVelocityExtensionMapArtifacts(
-      params,
-      steady_velocity_extension_maps,
-      /*accepted_step=*/1u,
-      solve_time,
-      sim.time_history->dt(),
-      sim.time_history->u().valueRevision(),
-      activeFESystemCommunicator(*sim.fe_system),
-      steady_accepted_extension_maps);
+      sim, *sim.time_history, steady_level_set_advection_velocity);
   const auto steady_free_surface_coverage =
       requireCommunicatorConsistentAcceptedFunctionalCoverage(
           svmp::FE::systems::functionalRecords(*sim.fe_system).functionalDeclarations(),
@@ -9131,9 +8525,7 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
             steady_solution.data(), steady_solution.size()),
         std::span<const svmp::FE::Real>{},
         currentLevelSetVelocityExtensionRevision(
-            *sim.fe_system,
-            steady_level_set_advection_velocity,
-            steady_accepted_extension_maps));
+            *sim.fe_system, steady_level_set_advection_velocity));
   }
   recordAcceptedMeshBoundaryProvenanceAtEndpoint(
       sim,
@@ -9681,7 +9073,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
 
   svmp::FE::timestepping::TimeLoopCallbacks callbacks{};
   std::vector<svmp::FE::Real> accepted_pressure_update_previous_solution;
-  AcceptedVelocityExtensionMapRegistry accepted_velocity_extension_maps;
   application::core::LevelSetMaintenanceWorkLedger
       level_set_maintenance_work;
   std::uint64_t level_set_maintenance_transaction_sequence{0u};
@@ -9707,9 +9098,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           .extension_map_revision =
               [&] {
                 return currentLevelSetVelocityExtensionRevision(
-                    *sim.fe_system,
-                    level_set_advection_velocity,
-                    accepted_velocity_extension_maps);
+                    *sim.fe_system, level_set_advection_velocity);
               },
       };
   const bool local_has_conservative_phase = std::any_of(
@@ -9802,9 +9191,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       .current_velocity_extension_revision =
           [&] {
             return currentLevelSetVelocityExtensionRevision(
-                *sim.fe_system,
-                level_set_advection_velocity,
-                accepted_velocity_extension_maps);
+                *sim.fe_system, level_set_advection_velocity);
           },
   };
   // Fitted-ALE operator-stage measurements: FE mesh-normal stage participant
@@ -10353,9 +9740,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                                 ProspectiveAcceptedEndpoint,
                     .extension_map_revision =
                         currentLevelSetVelocityExtensionRevision(
-                            *sim.fe_system,
-                            level_set_advection_velocity,
-                            accepted_velocity_extension_maps),
+                            *sim.fe_system, level_set_advection_velocity),
                 });
             const auto staged_phase_solution =
                 gatherFeOrderedSolution(
@@ -11333,9 +10718,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                             AcceptedEndpointPostStep,
                 .extension_map_revision =
                     currentLevelSetVelocityExtensionRevision(
-                        *sim.fe_system,
-                        level_set_advection_velocity,
-                        accepted_velocity_extension_maps),
+                        *sim.fe_system, level_set_advection_velocity),
             });
       } catch (...) {
         local_ledger_begin_failure = std::current_exception();
@@ -12143,28 +11526,14 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     if (parseBoolEnv("SVMP_CUT_RULE_DUMP", false)) {
       dumpActiveCutVolumeRulesForProbe(*sim.fe_system, h.stepIndex());
     }
-    std::vector<AcceptedVelocityExtensionMapRecord>
-        accepted_extension_map_records;
     (void)updateLevelSetAdvectionVelocities(
-        sim,
-        h,
-        level_set_advection_velocity,
-        &accepted_extension_map_records);
+        sim, h, level_set_advection_velocity);
     reimposeAcceptedMasterBearingState(h, *sim.fe_system);
     recordAcceptedMeshBoundaryProvenanceAtEndpoint(
         sim,
         static_cast<std::uint64_t>(h.stepIndex()),
         h.time(),
         h.dt());
-    writeAcceptedVelocityExtensionMapArtifacts(
-        params,
-        accepted_extension_map_records,
-        static_cast<std::uint64_t>(h.stepIndex()),
-        h.time(),
-        h.dt(),
-        h.u().valueRevision(),
-        velocity_extension_artifact_comm,
-        accepted_velocity_extension_maps);
     energy.publishAcceptedEnergy(h, pending_contact_stages);
     clear_pending_contact_provenance();
     if (level_set_maintenance_changed && cut_report.refreshed) {

@@ -1681,21 +1681,30 @@ translate_level_set_transport_input(
       application::core::pdeVelocityExtensionOperatorFromToken(
           extension_method->text)
           .has_value();
+  // The algebraic wall-compatible wet extension was retired (decisions D47
+  // and D55): the velocity extension needs an explicit PDE method.  Decks may
+  // still state Use_wet_extension_advection_velocity and
+  // Write_velocity_extension_maps as false.
+  if (wet_enabled.value_or(false) ||
+      get_defined_bool(input.equation_params,
+                       {"Write_velocity_extension_maps"})
+          .value_or(false) ||
+      ((extension_method.has_value() ||
+        wet_reader
+            .selected(level_set_aliases::wet_extension_source,
+                      "advection_velocity_from_field")
+            .has_value()) &&
+       !pde_velocity_extension)) {
+    throw std::runtime_error(
+        std::string(application::core::kRetiredWetExtensionMessage));
+  }
   std::optional<parsing::LevelSetSelectedParameter> wet_source;
-  bool wet_extension_enabled = wet_enabled.value_or(false);
   if (pde_velocity_extension) {
     // The PDE extension is recomputed from the physical velocity at every
     // geometry refresh.  Its coupling is explicit: "prescribed" writes it into
     // a prescribed advection field (the transport sees it lagged by one outer
     // pass); "monolithic" installs the same discrete problem as frozen rows of
     // an algebraic extension unknown, so Newton sees dR_phi/du.
-    if (wet_extension_enabled) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Advection_velocity_extension_method=" +
-          trim_copy(extension_method->text) +
-          " (PDE extension) cannot be combined with "
-          "Use_wet_extension_advection_velocity=true.");
-    }
     if (options.velocity.source !=
         ls::LevelSetVelocitySource::PrescribedData) {
       throw std::runtime_error(
@@ -1739,55 +1748,6 @@ translate_level_set_transport_input(
     append_installation_derived(input_observations,
                                 "velocity_auto_register_field",
                                 "derived:pde_velocity_extension", "equation");
-  } else if (!wet_extension_enabled) {
-    wet_source = wet_reader.string(level_set_aliases::wet_extension_source,
-                                   "advection_velocity_from_field");
-    wet_extension_enabled = wet_source.has_value();
-  }
-  if (pde_velocity_extension) {
-    // Handled above.
-  } else if (wet_extension_enabled) {
-    if (options.velocity.source !=
-        ls::LevelSetVelocitySource::PrescribedData) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Wet-extension input must declare "
-          "Velocity_source=prescribed_data; the translator promotes that "
-          "state-dependent coefficient to an algebraic coupled unknown so "
-          "its monolithic velocity tangent is retained.");
-    }
-    if (!wet_source) {
-      wet_source = wet_reader.string(level_set_aliases::wet_extension_source,
-                                     "advection_velocity_from_field");
-    }
-    options.velocity.algebraic_extension_source_field_name =
-        wet_source.has_value() ? trim_copy(wet_source->text)
-                               : std::string{"Velocity"};
-    if (options.velocity.algebraic_extension_source_field_name.empty() ||
-        options.velocity.algebraic_extension_source_field_name ==
-            options.velocity.field_name) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Wet-extension algebraic source must "
-          "name a distinct physical velocity field.");
-    }
-    append_installation_selections(input_observations, wet_reader, "equation");
-    if (wet_source) {
-      auto source_name = *wet_source;
-      source_name.canonical_key = "velocity_source_field_name";
-      append_installation_selection(input_observations, source_name,
-                                    "equation");
-    } else {
-      append_installation_derived(input_observations,
-                                  "velocity_source_field_name",
-                                  "derived:wet_extension_default_source",
-                                  "equation");
-    }
-    options.velocity.source = ls::LevelSetVelocitySource::CoupledField;
-    options.velocity.auto_register_field = true;
-    append_installation_derived(input_observations, "velocity_source",
-                                "derived:wet_extension", "equation");
-    append_installation_derived(input_observations,
-                                "velocity_auto_register_field",
-                                "derived:wet_extension", "equation");
   } else {
     append_installation_selections(input_observations, wet_reader, "equation");
   }

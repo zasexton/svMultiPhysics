@@ -105,9 +105,10 @@ The application adds three further requirements:
   `pde_harmonic` or `pde_normal`, with either coupling). The PDE extension
   equals the fluid velocity on every vertex of the retained interface cells.
 
-The algebraic `wall_compatible_normal` and `nearest_interface_point`
-extensions, plain prescribed or constant velocities, steady solves, and runs
-with the outer fixed point disabled are rejected.
+Plain prescribed or constant velocities, steady solves, and runs with the
+outer fixed point disabled are rejected. (The algebraic
+`wall_compatible_normal` and `nearest_interface_point` extensions were retired
+by decisions D47 and D55.)
 
 Validation (design note §9): with the option off the output is bitwise
 unchanged. The static drop at La = 12 passes its M2 gates at fixed steps up

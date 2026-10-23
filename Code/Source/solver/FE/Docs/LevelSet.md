@@ -59,10 +59,14 @@ The application level-set equation translator is an input adapter. It preserves
 legacy XML names, builds FE options, and calls
 `FE::level_set::installLevelSetTransport()`. It must not contain reusable
 transport, volume, maintenance, diagnostics, or restart algorithms.
-The application also owns the optional nearest-active-vertex velocity extension
-for prescribed-data level-set advection; reusable PDE-based velocity-extension
-algorithms should be added to `FE::level_set` before being exposed as general
-transport services.
+The PDE velocity extension of the level-set advection velocity
+(`Advection_velocity_extension_method` = `pde_harmonic` or `pde_normal`) is in
+`FE/LevelSet/Extension`: the dry-region solve
+(`LevelSetPdeVelocityExtension.h`), its known set and frozen-map revision
+(`LevelSetVelocityExtensionSeed.h`) and its wall data
+(`LevelSetVelocityExtensionWall.h`). The algebraic wall-compatible and
+nearest-sample wet extensions of the application were retired by decisions D47
+and D55.
 
 ## Production Transport Contract
 
@@ -82,10 +86,10 @@ correction would be required) was retired by decision D51: with it on, the
 SPHERIC reruns failed at their first step, while the runs without it and the
 sign-definite patch bounds were clean.
 
-The application's graph-based wet-side velocity extension uses the active
-`FESystem`/DOF-handler communicator, never `MPI_COMM_WORLD`, and performs a
-rank-synchronous owner-authoritative exchange after every graph layer, so
-propagation is not limited to one pre-existing ghost halo.
+The velocity extension uses the active `FESystem`/DOF-handler communicator,
+never `MPI_COMM_WORLD`; its known set is made to agree across that
+communicator before the dry-region solve, so a vertex marked by any rank is
+known on every rank.
 
 ### Kinematic Reconciliation
 

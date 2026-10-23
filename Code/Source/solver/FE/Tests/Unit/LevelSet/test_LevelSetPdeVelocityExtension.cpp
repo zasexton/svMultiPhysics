@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "LevelSet/Extension/LevelSetPdeVelocityExtension.h"
+#include "LevelSet/Extension/LevelSetVelocityExtensionSeed.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
 
@@ -181,6 +182,132 @@ TEST(LevelSetPdeVelocityExtension, ParsesOnlyExplicitPdeMethodTokens)
   EXPECT_FALSE(pdeVelocityExtensionOperatorFromToken("wall_compatible_normal"));
   EXPECT_FALSE(pdeVelocityExtensionOperatorFromToken("harmonic"));
   EXPECT_FALSE(pdeVelocityExtensionOperatorFromToken(""));
+}
+
+// The known set of the production extension: the wet vertices plus every
+// vertex of the cells the nodal level set crosses (moved from the
+// application with the retired algebraic wet extension, decision D55).
+TEST(LevelSetVelocityExtensionSeed, NodalInterfaceCellsMarkTheKnownSet)
+{
+  using svmp::FE::level_set::globalOwnedVelocityExtensionMaskCount;
+  using svmp::FE::level_set::globalVelocityExtensionGeometrySampleCount;
+  using svmp::FE::level_set::markVelocityExtensionTraceSupportCells;
+  using svmp::FE::level_set::nodalVelocityExtensionInterfaceCells;
+  using svmp::FE::level_set::synchronizeVelocityExtensionTraceSupportMask;
+
+  const auto mesh = makeSquareTriangleMesh(4);
+  const auto setup = makeSetup(
+      *mesh,
+      [](double x, double) { return x - 0.4; },
+      [](double, double) { return std::array<double, 2>{1.0, 0.0}; });
+  const auto cells =
+      nodalVelocityExtensionInterfaceCells(*mesh, setup.phi, /*isovalue=*/0.0);
+  ASSERT_FALSE(cells.empty());
+  const auto& local = mesh->local_mesh();
+  std::size_t crossing_cells = 0u;
+  for (svmp::index_t c = 0; c < local.n_cells(); ++c) {
+    auto [cv, count] = local.cell_vertices_span(c);
+    bool negative = false;
+    bool positive = false;
+    for (std::size_t i = 0; i < count; ++i) {
+      negative = negative || setup.phi[static_cast<std::size_t>(cv[i])] < 0.0;
+      positive = positive || setup.phi[static_cast<std::size_t>(cv[i])] > 0.0;
+    }
+    const bool listed =
+        std::find(cells.begin(), cells.end(),
+                  static_cast<svmp::FE::MeshIndex>(c)) != cells.end();
+    EXPECT_EQ(listed, negative && positive) << "cell " << c;
+    crossing_cells += (negative && positive) ? 1u : 0u;
+  }
+  EXPECT_EQ(cells.size(), crossing_cells);
+
+  std::vector<std::uint8_t> trace_support(mesh->n_vertices(), 0u);
+  const auto marked = markVelocityExtensionTraceSupportCells(
+      *mesh,
+      std::span<const svmp::FE::MeshIndex>(cells.data(), cells.size()),
+      trace_support);
+  const auto marked_count = static_cast<std::size_t>(
+      std::count(trace_support.begin(), trace_support.end(), 1u));
+  EXPECT_EQ(marked, marked_count);
+  EXPECT_EQ(markVelocityExtensionTraceSupportCells(
+                *mesh,
+                std::span<const svmp::FE::MeshIndex>(cells.data(),
+                                                     cells.size()),
+                trace_support),
+            0u)
+      << "marking the same cells again marks nothing new";
+  EXPECT_EQ(synchronizeVelocityExtensionTraceSupportMask(
+                *mesh, svmp::MeshComm::self(), trace_support),
+            marked_count);
+  EXPECT_EQ(globalOwnedVelocityExtensionMaskCount(
+                *mesh, svmp::MeshComm::self(), trace_support),
+            marked_count);
+  for (std::size_t v = 0; v < mesh->n_vertices(); ++v) {
+    const bool known = setup.phi[v] < 0.0 || trace_support[v] != 0u;
+    EXPECT_EQ(known, setup.known[v] != 0u) << "vertex " << v;
+  }
+  EXPECT_EQ(globalVelocityExtensionGeometrySampleCount(
+                7u, svmp::MeshComm::self()),
+            7u);
+
+  const std::vector<double> short_phi(mesh->n_vertices() - 1u, 0.0);
+  EXPECT_THROW((void)nodalVelocityExtensionInterfaceCells(*mesh, short_phi, 0.0),
+               std::runtime_error);
+  const std::array<svmp::FE::MeshIndex, 1> invalid_cell{
+      static_cast<svmp::FE::MeshIndex>(local.n_cells())};
+  EXPECT_THROW((void)markVelocityExtensionTraceSupportCells(
+                   *mesh,
+                   std::span<const svmp::FE::MeshIndex>(invalid_cell),
+                   trace_support),
+               std::runtime_error);
+}
+
+// The frozen-map revision of a monolithic extension changes with every input
+// domain it keys and is equal for equal inputs.
+TEST(LevelSetVelocityExtensionSeed, MapRevisionTracksEveryRevisionDomain)
+{
+  using svmp::FE::level_set::VelocityExtensionMapRevision;
+  using svmp::FE::level_set::velocityExtensionMapRevision;
+
+  const std::vector<double> phi{-0.5, 0.25, 0.75, 1.5};
+  const std::vector<std::uint8_t> known{1u, 1u, 0u, 0u};
+  const auto base = velocityExtensionMapRevision(1u, 2u, 3u, 4u, 5u, phi, known);
+  EXPECT_TRUE(base.complete());
+  EXPECT_NE(base.key(), 0u);
+  EXPECT_EQ(velocityExtensionMapRevision(1u, 2u, 3u, 4u, 5u, phi, known), base);
+
+  auto changed_phi = phi;
+  changed_phi[2] = std::nextafter(changed_phi[2], 2.0);
+  auto changed_known = known;
+  changed_known[2] = 1u;
+  const std::vector<VelocityExtensionMapRevision> changed{
+      velocityExtensionMapRevision(9u, 2u, 3u, 4u, 5u, phi, known),
+      velocityExtensionMapRevision(1u, 9u, 3u, 4u, 5u, phi, known),
+      velocityExtensionMapRevision(1u, 2u, 9u, 4u, 5u, phi, known),
+      velocityExtensionMapRevision(1u, 2u, 3u, 9u, 5u, phi, known),
+      velocityExtensionMapRevision(1u, 2u, 3u, 4u, 9u, phi, known),
+      velocityExtensionMapRevision(1u, 2u, 3u, 4u, 5u, changed_phi, known),
+      velocityExtensionMapRevision(1u, 2u, 3u, 4u, 5u, phi, changed_known),
+  };
+  for (std::size_t i = 0; i < changed.size(); ++i) {
+    EXPECT_NE(changed[i], base) << "domain " << i;
+    EXPECT_NE(changed[i].key(), base.key()) << "domain " << i;
+  }
+
+  const std::vector<std::uint8_t> short_known{1u, 1u, 0u};
+  EXPECT_THROW((void)velocityExtensionMapRevision(1u, 2u, 3u, 4u, 5u, phi,
+                                                  short_known),
+               std::invalid_argument);
+  auto nonfinite = phi;
+  nonfinite[1] = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_THROW((void)velocityExtensionMapRevision(1u, 2u, 3u, 4u, 5u,
+                                                  nonfinite, known),
+               std::invalid_argument);
+  auto non_binary = known;
+  non_binary[0] = 2u;
+  EXPECT_THROW((void)velocityExtensionMapRevision(1u, 2u, 3u, 4u, 5u, phi,
+                                                  non_binary),
+               std::invalid_argument);
 }
 
 TEST(LevelSetPdeVelocityExtension, HarmonicReproducesLinearFieldWithDirichletBoundary)
@@ -368,6 +495,42 @@ TEST(LevelSetPdeVelocityExtension, RejectsInvalidInput)
                                          flat.source, 2u, flat.known, 2u, {},
                                          options, out),
                std::runtime_error);
+}
+
+// Quad dry cells fail on every rank with a message that names the cell type
+// (decision D55: the Quad4 open-vessel decks fail closed).
+TEST(LevelSetPdeVelocityExtension, RejectsQuadDryCellsByName)
+{
+  auto base = std::make_shared<svmp::MeshBase>();
+  const std::vector<svmp::real_t> x{0.0, 0.0, 1.0, 0.0, 2.0, 0.0,
+                                    0.0, 1.0, 1.0, 1.0, 2.0, 1.0};
+  const std::vector<svmp::offset_t> offsets{0, 4, 8};
+  const std::vector<svmp::index_t> connectivity{0, 1, 4, 3, 1, 2, 5, 4};
+  svmp::CellShape quad{};
+  quad.family = svmp::CellFamily::Quad;
+  quad.num_corners = 4;
+  quad.order = 1;
+  base->build_from_arrays(2, x, offsets, connectivity, {quad, quad});
+  base->finalize();
+  const auto mesh = svmp::create_mesh(std::move(base));
+
+  // Known: the vertices of the first (cut) quad; dry: the right column.
+  const auto s = makeSetup(
+      *mesh,
+      [](double x, double) { return x - 0.5; },
+      [](double, double) { return std::array<double, 2>{1.0, 1.0}; });
+  ASSERT_EQ(s.known, (std::vector<std::uint8_t>{1u, 1u, 0u, 1u, 1u, 0u}));
+  try {
+    (void)run(*mesh, s, PdeVelocityExtensionOperator::Harmonic, {});
+    ADD_FAILURE() << "Quad dry cells accepted";
+  } catch (const std::runtime_error& error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find("Quad cell with 4 vertices"), std::string::npos)
+        << message;
+    EXPECT_NE(message.find("triangle or tetrahedral dry cells"),
+              std::string::npos)
+        << message;
+  }
 }
 
 TEST(LevelSetPdeVelocityExtension, AlgebraicRowsAreSatisfiedByTheSolvedExtension)

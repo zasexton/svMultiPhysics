@@ -26,7 +26,6 @@ add_executable(test_application
   ../Core/LevelSetCutConfiguration.cpp
   ../Core/LevelSetMaintenanceConfiguration.cpp
   ../Core/LevelSetMaintenanceTransactionConsensus.cpp
-  ../Core/LevelSetVelocityExtensionMap.cpp
   ../Core/MeshCollection.cpp
   ../Core/SimulationBuilder.cpp
   ../Translators/EquationTranslator.cpp
@@ -77,7 +76,6 @@ if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
     ../Core/LevelSetCutConfiguration.cpp
     ../Core/LevelSetMaintenanceConfiguration.cpp
     ../Core/LevelSetMaintenanceTransactionConsensus.cpp
-    ../Core/LevelSetVelocityExtensionMap.cpp
     ../Core/MeshCollection.cpp
     ../Core/SimulationBuilder.cpp
     ../Translators/EquationTranslator.cpp

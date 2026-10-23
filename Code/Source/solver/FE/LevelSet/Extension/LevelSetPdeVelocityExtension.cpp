@@ -58,6 +58,33 @@ namespace {
 constexpr std::uint8_t kKnownFlag = 1u;
 constexpr std::uint8_t kExtensionFlag = 2u;
 
+[[nodiscard]] const char* cellFamilyName(svmp::CellFamily family) noexcept
+{
+  switch (family) {
+  case svmp::CellFamily::Point:
+    return "Point";
+  case svmp::CellFamily::Line:
+    return "Line";
+  case svmp::CellFamily::Triangle:
+    return "Triangle";
+  case svmp::CellFamily::Quad:
+    return "Quad";
+  case svmp::CellFamily::Tetra:
+    return "Tetra";
+  case svmp::CellFamily::Hex:
+    return "Hex";
+  case svmp::CellFamily::Wedge:
+    return "Wedge";
+  case svmp::CellFamily::Pyramid:
+    return "Pyramid";
+  case svmp::CellFamily::Polygon:
+    return "Polygon";
+  case svmp::CellFamily::Polyhedron:
+    return "Polyhedron";
+  }
+  return "unknown";
+}
+
 [[nodiscard]] std::string normalizedMethodToken(std::string_view raw)
 {
   std::string token;
@@ -1329,6 +1356,8 @@ PdeVelocityExtensionReport extendVelocityByPde(
 
   // ---- local records -------------------------------------------------------
   std::vector<CellRecord> local_cells;
+  // The first unsupported dry cell of this rank; every rank fails together.
+  std::string unsupported_cell;
   for (std::size_t c = 0; c < n_cells; ++c) {
     const auto cell = static_cast<svmp::index_t>(c);
     if (!mesh.is_owned_cell(cell)) {
@@ -1356,9 +1385,14 @@ PdeVelocityExtensionReport extendVelocityByPde(
          (dim == 3 && shape.family == svmp::CellFamily::Tetra &&
           count == 4u));
     if (!simplex) {
-      throw std::runtime_error(
-          "PDE velocity extension requires affine Triangle3 (2D) or Tetra4 "
-          "(3D) cells in the dry region");
+      if (unsupported_cell.empty()) {
+        unsupported_cell =
+            "; dry cell " + std::to_string(cell_gids[c]) + " is a " +
+            cellFamilyName(shape.family) + " cell with " +
+            std::to_string(count) + " vertices (order " +
+            std::to_string(shape.order) + ")";
+      }
+      continue;
     }
     std::array<std::array<double, 3>, 4> x{};
     for (std::size_t i = 0; i < count; ++i) {
@@ -1427,6 +1461,14 @@ PdeVelocityExtensionReport extendVelocityByPde(
       }
     }
     local_cells.push_back(record);
+  }
+  if (globalMax(unsupported_cell.empty() ? 0.0 : 1.0, comm) > 0.0) {
+    throw std::runtime_error(
+        "PDE velocity extension requires affine Triangle3 (2D) or Tetra4 "
+        "(3D) cells in the dry region" +
+        unsupported_cell +
+        ".  The PDE extension (pde_harmonic, pde_normal) needs triangle or "
+        "tetrahedral dry cells: mesh the dry region with simplices.");
   }
 
   std::vector<VertexRecord> local_vertices;

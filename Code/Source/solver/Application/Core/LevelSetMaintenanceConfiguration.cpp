@@ -334,11 +334,10 @@ resolveLegacyLevelSetMaintenanceConfiguration(
   }
   apply_integer(aliases::material_interface_marker, "material_interface_marker",
                 result->transport.velocity.material_interface_marker);
+  // A source velocity field selects the velocity extension, whose field is
+  // a coupled unknown.  Use_wet_extension_advection_velocity was retired
+  // (decisions D47 and D55); translation rejects it.
   const bool wet_extension_enabled =
-      reader
-          .boolean(aliases::wet_extension_enable,
-                   "use_wet_extension_advection_velocity")
-          .value_or(false) ||
       reader
           .string(aliases::wet_extension_source,
                   "advection_velocity_from_field")

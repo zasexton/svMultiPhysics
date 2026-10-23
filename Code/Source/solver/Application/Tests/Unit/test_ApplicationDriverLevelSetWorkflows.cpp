@@ -10684,21 +10684,49 @@ TEST(ApplicationDriverLevelSetWorkflows,
     const auto requests = levelSetAdvectionVelocityRequests(*params);
     ASSERT_EQ(requests.size(), 1u);
     EXPECT_EQ(requests.front().extension_method, method);
-    EXPECT_FALSE(requests.front().extension_band_layers_explicit);
     EXPECT_EQ(requests.front().source_velocity_field_name, "Velocity");
     ASSERT_EQ(requests.front().wall_constraints.size(), 1u);
     EXPECT_EQ(requests.front().wall_constraints[0].effective_direction,
               (std::vector<int>{1, 0}));
-    EXPECT_TRUE(usesTraceSeedVelocityExtension(method));
   }
 
-  // The PDE method cannot be combined with the algebraic wet extension.
-  auto both = parseWorkflowParametersXml(
+  // The algebraic wet extension was retired (decisions D47 and D55): its
+  // switch, its methods, its map output and a source field without a method
+  // fail with the retirement message.  The switch and the map output may
+  // still be stated as false.
+  const auto expect_retired = [&](const std::string& method,
+                                  const std::string& extra) {
+    SCOPED_TRACE(method + extra);
+    auto retired = parseWorkflowParametersXml(xml(method, extra).c_str());
+    try {
+      (void)levelSetAdvectionVelocityRequests(*retired);
+      ADD_FAILURE() << "retired wet-extension setting accepted";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string(error.what()).find("decisions D47 and D55"),
+                std::string::npos)
+          << error.what();
+    }
+  };
+  expect_retired(
+      "pde_harmonic",
+      "<Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>");
+  expect_retired(
+      "pde_harmonic",
+      "<Write_velocity_extension_maps>true</Write_velocity_extension_maps>");
+  for (const std::string method :
+       {"wall_compatible_normal", "nearest_interface_point",
+        "nearest_active_vertex"}) {
+    expect_retired(
+        method,
+        "<Source_velocity_field_name>Velocity</Source_velocity_field_name>");
+    expect_retired(method, "");
+  }
+  auto stated_off = parseWorkflowParametersXml(
       xml("pde_harmonic",
-          "<Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>")
+          "<Use_wet_extension_advection_velocity>false</Use_wet_extension_advection_velocity>"
+          "<Write_velocity_extension_maps>false</Write_velocity_extension_maps>")
           .c_str());
-  EXPECT_THROW((void)levelSetAdvectionVelocityRequests(*both),
-               std::runtime_error);
+  EXPECT_EQ(levelSetAdvectionVelocityRequests(*stated_off).size(), 1u);
 
   // An unknown method name fails and lists the supported methods.
   auto unknown = parseWorkflowParametersXml(
@@ -10712,6 +10740,20 @@ TEST(ApplicationDriverLevelSetWorkflows,
     EXPECT_NE(std::string(error.what()).find("pde_harmonic"),
               std::string::npos);
   }
+
+  // A source field without a method no longer selects a default extension.
+  auto source_only = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Velocity_source>prescribed_data</Velocity_source>
+    <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
+    <Source_velocity_field_name>Velocity</Source_velocity_field_name>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  EXPECT_THROW((void)levelSetAdvectionVelocityRequests(*source_only),
+               std::runtime_error);
 
   // Without a method value, no PDE request is created silently.
   auto none = parseWorkflowParametersXml(R"xml(

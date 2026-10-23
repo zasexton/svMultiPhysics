@@ -1481,6 +1481,60 @@ TEST(LevelSetEquationTranslator, RejectsRetiredBoundPreservingLimiterSettings)
 }
 
 
+TEST(LevelSetEquationTranslator, RejectsRetiredWetExtensionSettings)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  // Decisions D47 and D55 retired the algebraic wall-compatible wet
+  // extension: the extension needs an explicit PDE method.  The disabled
+  // switch and map output are accepted; enabling either, naming a retired
+  // method, or naming a source velocity field without a method fails.
+  const std::vector<std::pair<std::string, std::string>> cases{
+      {"Use_wet_extension_advection_velocity", "false"},
+      {"Write_velocity_extension_maps", "false"},
+      {"Use_wet_extension_advection_velocity", "true"},
+      {"Write_velocity_extension_maps", "true"},
+      {"Advection_velocity_extension_method", "wall_compatible_normal"},
+      {"Advection_velocity_extension_method", "nearest_interface_point"},
+      {"Wet_extension_advection_velocity_method", "nearest_active_vertex"},
+      {"Source_velocity_field_name", "physical_velocity"},
+      {"Advection_velocity_from_field", "physical_velocity"},
+  };
+  for (const auto& [key, value] : cases) {
+    auto mesh = makeRegistryQuadMesh();
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "level_set";
+    input.mesh_name = "quad";
+    input.mesh = mesh->local_mesh_ptr();
+    input.equation_params["Level_set_field_name"] =
+        svmp::Physics::ParameterValue{true, "phi"};
+    input.equation_params["Velocity_field_name"] =
+        svmp::Physics::ParameterValue{true, "advecting_velocity"};
+    input.equation_params["Velocity_source"] =
+        svmp::Physics::ParameterValue{true, "prescribed_data"};
+    input.equation_params[key] = svmp::Physics::ParameterValue{true, value};
+
+    svmp::FE::systems::FESystem system(mesh);
+    if (value == "false") {
+      EXPECT_TRUE(
+          application::translators::level_set::createModule(input, system))
+          << key;
+      continue;
+    }
+    try {
+      (void)application::translators::level_set::createModule(input, system);
+      ADD_FAILURE() << key << '=' << value << " was accepted";
+    } catch (const std::exception& error) {
+      EXPECT_NE(std::string(error.what()).find("decisions D47 and D55"),
+                std::string::npos)
+          << key << '=' << value << ": " << error.what();
+    }
+  }
+#endif
+}
+
+
 TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
