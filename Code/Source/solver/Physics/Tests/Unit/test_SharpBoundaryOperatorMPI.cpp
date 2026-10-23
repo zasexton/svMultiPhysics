@@ -3600,14 +3600,8 @@ public:
         auto displacement_space = makeVelocitySpace(mesh_);
         auto pressure_space = makePressureSpace(mesh_);
 
-        mm::HarmonicMeshMotionOptions mesh_options;
-        mesh_options.field_name = "mesh_displacement";
-        mesh_options.operator_tag = "mesh_motion";
-        mesh_options.kappa = FE::Real{1.5};
-        mm::HarmonicMeshMotionModule mesh_module(
-            displacement_space, std::move(mesh_options));
-        mesh_module.registerOn(system_);
-
+        // MeshNitsche: the fluid equation registers first; the harmonic mesh
+        // motion registered after it acts on the mesh velocity.
         auto fluid_options = baseOptions();
         const std::string velocity_field_name =
             drift_declaration && rank == 0
@@ -3620,6 +3614,7 @@ public:
         fluid_options.mesh_displacement_field_name =
             "mesh_displacement";
         fluid_options.mesh_velocity_field_name = "mesh_velocity";
+        fluid_options.auto_register_mesh_displacement_field = true;
         fluid_options.free_surface.push_back(
             ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
                 .implementation = ns::FreeSurfaceImplementation::FittedALE,
@@ -3629,12 +3624,20 @@ public:
                     ns::FreeSurfaceTangentialMeshPolicy::Free,
                 .tangential_mesh_penalty = FE::Real{1.0},
                 .kinematic_enforcement =
-                    ns::FreeSurfaceKinematicEnforcement::Penalty,
-                .kinematic_penalty = FE::Real{9.0},
+                    ns::FreeSurfaceKinematicEnforcement::MeshNitsche,
             });
         ns::IncompressibleNavierStokesVMSModule fluid_module(
             displacement_space, pressure_space, std::move(fluid_options));
         fluid_module.registerOn(system_);
+
+        mm::HarmonicMeshMotionOptions mesh_options;
+        mesh_options.field_name = "mesh_displacement";
+        mesh_options.operator_tag = "mesh_motion";
+        mesh_options.kappa = FE::Real{1.5};
+        mesh_options.quantity = mm::HarmonicQuantity::Velocity;
+        mm::HarmonicMeshMotionModule mesh_module(
+            displacement_space, std::move(mesh_options));
+        mesh_module.registerOn(system_);
 
         displacement_ = system_.findFieldByName("mesh_displacement");
         velocity_ = system_.findFieldByName(velocity_field_name);

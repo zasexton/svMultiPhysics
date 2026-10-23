@@ -1359,8 +1359,7 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceBCTranslation_SetupSucceeds)
     bc.params["Surface_tension"] = defined("0.0");
     bc.params["Normal_kinematic_policy"] =
         defined("MatchFluidNormalVelocity");
-    bc.params["Kinematic_enforcement"] = defined("Penalty");
-    bc.params["Kinematic_penalty"] = defined("9.0");
+    bc.params["Kinematic_enforcement"] = defined("MeshNitsche");
     bc.params["Tangential_mesh_policy"] = defined("Prescribed");
     input.boundary_conditions.push_back(std::move(bc));
 
@@ -1406,7 +1405,7 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicBCTranslation_UsesCurrentG
     bc.params["Implementation"] = defined("FittedALE");
     bc.params["External_pressure"] = defined("12.5");
     bc.params["Surface_tension"] = defined("0.25");
-    bc.params["Kinematic_enforcement"] = defined("Nitsche");
+    bc.params["Kinematic_enforcement"] = defined("MeshNitsche");
     bc.params["Normal_kinematic_policy"] = defined("MatchFluidNormalVelocity");
     bc.params["Tangential_mesh_policy"] = defined("Prescribed");
     bc.params["Kinematic_nitsche_gamma"] = defined("18.0");
@@ -1596,8 +1595,7 @@ TEST(NavierStokesLegacyBCs,
     bc.params["Tangential_mesh_penalty"] = defined("6.0");
     bc.params["Normal_kinematic_policy"] =
         defined("MatchFluidNormalVelocity");
-    bc.params["Kinematic_enforcement"] = defined("Penalty");
-    bc.params["Kinematic_penalty"] = defined("8.0");
+    bc.params["Kinematic_enforcement"] = defined("MeshNitsche");
     input.boundary_conditions.push_back(std::move(bc));
 
     svmp::FE::systems::FESystem system(mesh);
@@ -1678,8 +1676,7 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfacePrescribedAngleTranslationFailsClos
     bc.params["External_pressure"] = defined("0.0");
     bc.params["Normal_kinematic_policy"] =
         defined("MatchFluidNormalVelocity");
-    bc.params["Kinematic_enforcement"] = defined("Penalty");
-    bc.params["Kinematic_penalty"] = defined("8.0");
+    bc.params["Kinematic_enforcement"] = defined("MeshNitsche");
     bc.params["Tangential_mesh_policy"] = defined("Prescribed");
     bc.params["Contact_line_model"] = defined("PrescribedContactAngle");
     bc.params["Contact_line_wall_marker"] = defined("88");

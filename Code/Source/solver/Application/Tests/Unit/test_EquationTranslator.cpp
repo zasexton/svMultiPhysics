@@ -565,8 +565,7 @@ TEST(EquationTranslatorFreeSurface,
     <Type>Free_surface</Type>
     <Implementation>FittedALE</Implementation>
     <Normal_kinematic_policy>MatchFluidNormalVelocity</Normal_kinematic_policy>
-    <Kinematic_enforcement>Penalty</Kinematic_enforcement>
-    <Kinematic_penalty>11.0</Kinematic_penalty>
+    <Kinematic_enforcement>MeshNitsche</Kinematic_enforcement>
     <Tangential_mesh_policy>Prescribed</Tangential_mesh_policy>
     <Prescribed_tangential_mesh_velocity>0.25 -0.5 0.0</Prescribed_tangential_mesh_velocity>
     <)xml") +
@@ -630,8 +629,7 @@ TEST(EquationTranslatorFreeSurface,
     <Type>Free_surface</Type>
     <Implementation>FittedALE</Implementation>
     <Normal_kinematic_policy>MatchFluidNormalVelocity</Normal_kinematic_policy>
-    <Kinematic_enforcement>Penalty</Kinematic_enforcement>
-    <Kinematic_penalty>11.0</Kinematic_penalty>
+    <Kinematic_enforcement>MeshNitsche</Kinematic_enforcement>
     <Tangential_mesh_policy>SmoothingOnly</Tangential_mesh_policy>
     <Tangential_mesh_penalty>5.0</Tangential_mesh_penalty>
   </Add_BC>
@@ -669,8 +667,7 @@ TEST(EquationTranslatorFreeSurface,
     <Type>Free_surface</Type>
     <Implementation>FittedALE</Implementation>
     <Normal_kinematic_policy>MatchFluidNormalVelocity</Normal_kinematic_policy>
-    <Kinematic_enforcement>Penalty</Kinematic_enforcement>
-    <Kinematic_penalty>11.0</Kinematic_penalty>
+    <Kinematic_enforcement>MeshNitsche</Kinematic_enforcement>
     <Tangential_mesh_policy>Free</Tangential_mesh_policy>
     <Tangential_mesh_penalty>5.0</Tangential_mesh_penalty>
   </Add_BC>
@@ -746,8 +743,7 @@ TEST(EquationTranslatorFreeSurface,
     <Implementation>FittedALE</Implementation>
     <Surface_tension>0.8</Surface_tension>
     <Normal_kinematic_policy>MatchFluidNormalVelocity</Normal_kinematic_policy>
-    <Kinematic_enforcement>Penalty</Kinematic_enforcement>
-    <Kinematic_penalty>8.0</Kinematic_penalty>
+    <Kinematic_enforcement>MeshNitsche</Kinematic_enforcement>
     <Tangential_mesh_policy>Prescribed</Tangential_mesh_policy>
     <Tangential_mesh_penalty>6.0</Tangential_mesh_penalty>
     <Contact_line_model>DynamicContactAngle</Contact_line_model>

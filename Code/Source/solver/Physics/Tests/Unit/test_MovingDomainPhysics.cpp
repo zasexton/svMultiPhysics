@@ -4678,8 +4678,7 @@ TEST(MovingDomainPhysics,
                 .tangential_mesh_policy =
                     ns::FreeSurfaceTangentialMeshPolicy::Prescribed,
                 .kinematic_enforcement =
-                    ns::FreeSurfaceKinematicEnforcement::Penalty,
-                .kinematic_penalty = FE::Real{4.0},
+                    ns::FreeSurfaceKinematicEnforcement::MeshNitsche,
             });
         return opts;
     };
@@ -4844,8 +4843,7 @@ TEST(MovingDomainPhysics,
                 .boundary_marker = marker,
                 .tangential_mesh_policy = policy,
                 .kinematic_enforcement =
-                    ns::FreeSurfaceKinematicEnforcement::Penalty,
-                .kinematic_penalty = FE::Real{4.0},
+                    ns::FreeSurfaceKinematicEnforcement::MeshNitsche,
             };
         if (policy ==
             ns::FreeSurfaceTangentialMeshPolicy::Prescribed) {
@@ -4991,7 +4989,7 @@ TEST(MovingDomainPhysics,
                   FE::analysis::VariableKey::field(velocity));
 
         const auto fluid_normal_descriptor = find_normal_descriptor(
-            "Fitted free-surface fluid normal kinematic row on marker 39");
+            "Fitted free-surface fluid natural dynamic condition on marker 39");
         ASSERT_NE(fluid_normal_descriptor,
                   system.boundaryConditionDescriptors().end());
         EXPECT_EQ(fluid_normal_descriptor->primary_variable,
@@ -5000,7 +4998,7 @@ TEST(MovingDomainPhysics,
         EXPECT_EQ(fluid_normal_descriptor->trace_kind,
                   FE::analysis::TraceKind::NormalComponent);
         EXPECT_EQ(fluid_normal_descriptor->enforcement_kind,
-                  FE::analysis::EnforcementKind::WeakPenalty);
+                  FE::analysis::EnforcementKind::WeakConsistent);
         ASSERT_EQ(fluid_normal_descriptor->related_variables.size(), 1u);
         EXPECT_EQ(fluid_normal_descriptor->related_variables.front(),
                   FE::analysis::VariableKey::field(*displacement));
@@ -5161,14 +5159,16 @@ TEST(MovingDomainPhysics,
                 .tangential_mesh_policy =
                     ns::FreeSurfaceTangentialMeshPolicy::Free,
                 .kinematic_enforcement =
-                    ns::FreeSurfaceKinematicEnforcement::Penalty,
-                .kinematic_penalty = FE::Real{4.0},
+                    ns::FreeSurfaceKinematicEnforcement::MeshNitsche,
             });
         return opts;
     };
     const auto make_mesh_options = [&]() {
         mm::HarmonicMeshMotionOptions opts;
         opts.operator_tag = "mesh_motion";
+        // MeshNitsche constrains the normal mesh velocity, so the harmonic
+        // operator acts on the mesh velocity as well.
+        opts.quantity = mm::HarmonicQuantity::Velocity;
         opts.tangential_policy.push_back(mm::TangentialPolicyBC{
             .boundary_marker = marker,
             .policy = mm::TangentialMeshPolicy::Prescribed,
@@ -5187,6 +5187,8 @@ TEST(MovingDomainPhysics,
         ASSERT_NO_THROW(mesh_module.registerOn(system));
         ns::IncompressibleNavierStokesVMSModule fluid_module(
             u_space, p_space, make_fluid_options());
+        // MeshNitsche rejects a fluid equation registered after the
+        // mesh-motion equation before the tangential owners are compared.
         EXPECT_THROW(fluid_module.registerOn(system), std::invalid_argument);
         EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
         EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
@@ -5284,8 +5286,7 @@ TEST(MovingDomainPhysics,
                 .tangential_mesh_policy =
                     ns::FreeSurfaceTangentialMeshPolicy::Free,
                 .kinematic_enforcement =
-                    ns::FreeSurfaceKinematicEnforcement::Penalty,
-                .kinematic_penalty = FE::Real{4.0},
+                    ns::FreeSurfaceKinematicEnforcement::MeshNitsche,
             });
         return opts;
     };
@@ -5314,6 +5315,23 @@ TEST(MovingDomainPhysics,
                 << message;
         }
     };
+    // MeshNitsche declares its normal relation with the mesh-motion
+    // consistency term: a mesh-motion equation registered first, or the
+    // pseudo-elastic model, is rejected before the owners are compared.
+    const auto expect_rejected = [&](const auto& invocation,
+                                     std::string_view reason) {
+        try {
+            invocation();
+            FAIL() << "Expected a MeshNitsche ordering or model rejection";
+        } catch (const std::exception& error) {
+            const std::string message(error.what());
+            EXPECT_NE(message.find(std::to_string(marker)),
+                      std::string::npos)
+                << message;
+            EXPECT_NE(message.find(reason), std::string::npos)
+                << message;
+        }
+    };
 
     {
         mm::HarmonicMeshMotionOptions mesh_options;
@@ -5331,9 +5349,9 @@ TEST(MovingDomainPhysics,
 
         ns::IncompressibleNavierStokesVMSModule fluid_module(
             u_space, p_space, make_fluid_options());
-        expect_conflict(
+        expect_rejected(
             [&]() { fluid_module.registerOn(system); },
-            "HarmonicMeshMotionModule");
+            "registered before the mesh-motion equation");
         EXPECT_EQ(system.fieldMap().numFields(), field_count);
         EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
         EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
@@ -5386,9 +5404,9 @@ TEST(MovingDomainPhysics,
         mesh_options.normal_constraint.push_back(make_normal());
         mm::PseudoElasticMeshMotionModule mesh_module(
             u_space, std::move(mesh_options));
-        expect_conflict(
+        expect_rejected(
             [&]() { mesh_module.registerOn(system); },
-            "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary");
+            "only the harmonic mesh motion provides it");
         EXPECT_EQ(system.fieldMap().numFields(), field_count);
         EXPECT_EQ(system.formulationRecords().size(), formulation_count);
         EXPECT_EQ(system.boundaryConditionDescriptors().size(),
@@ -5412,9 +5430,9 @@ TEST(MovingDomainPhysics,
 
         ns::IncompressibleNavierStokesVMSModule fluid_module(
             u_space, p_space, make_fluid_options());
-        expect_conflict(
+        expect_rejected(
             [&]() { fluid_module.registerOn(system); },
-            "PseudoElasticMeshMotionModule");
+            "registered before the mesh-motion equation");
         EXPECT_EQ(system.fieldMap().numFields(), field_count);
         EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
         EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
@@ -5450,6 +5468,7 @@ TEST(MovingDomainPhysics,
         distinct_normal.boundary_marker = marker + 1;
         mm::HarmonicMeshMotionOptions mesh_options;
         mesh_options.operator_tag = "mesh_motion";
+        mesh_options.quantity = mm::HarmonicQuantity::Velocity;
         mesh_options.normal_constraint.push_back(
             std::move(distinct_normal));
         mm::HarmonicMeshMotionModule mesh_module(
@@ -6247,8 +6266,7 @@ TEST(MovingDomainPhysics,
                     target[0], target[1], target[2]},
                 .tangential_mesh_penalty = FE::Real{7.0},
                 .kinematic_enforcement =
-                    ns::FreeSurfaceKinematicEnforcement::Penalty,
-                .kinematic_penalty = FE::Real{5.0},
+                    ns::FreeSurfaceKinematicEnforcement::MeshNitsche,
             });
 
         FE::systems::FESystem system(mesh);
@@ -6323,8 +6341,7 @@ TEST(MovingDomainPhysics,
                         .tangential_mesh_policy = policy,
                         .tangential_mesh_penalty = FE::Real{3.0},
                         .kinematic_enforcement =
-                            ns::FreeSurfaceKinematicEnforcement::Penalty,
-                        .kinematic_penalty = FE::Real{5.0},
+                            ns::FreeSurfaceKinematicEnforcement::MeshNitsche,
                     });
 
             FE::systems::FESystem system(mesh);
@@ -6406,8 +6423,7 @@ TEST(MovingDomainPhysics,
             .tangential_mesh_policy =
                 ns::FreeSurfaceTangentialMeshPolicy::Free,
             .kinematic_enforcement =
-                ns::FreeSurfaceKinematicEnforcement::Penalty,
-            .kinematic_penalty = FE::Real{5.0},
+                ns::FreeSurfaceKinematicEnforcement::MeshNitsche,
         });
     opts.free_surface.push_back(
         ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
@@ -6419,8 +6435,7 @@ TEST(MovingDomainPhysics,
                 FE::Real{0.1}, FE::Real{-0.05}, FE::Real{0.0}},
             .tangential_mesh_penalty = FE::Real{4.0},
             .kinematic_enforcement =
-                ns::FreeSurfaceKinematicEnforcement::Penalty,
-            .kinematic_penalty = FE::Real{5.0},
+                ns::FreeSurfaceKinematicEnforcement::MeshNitsche,
         });
 
     FE::systems::FESystem system(mesh);
@@ -6454,7 +6469,7 @@ TEST(MovingDomainPhysics,
             "Fitted free-surface mesh normal kinematic row on marker " +
             std::to_string(marker);
         const auto fluid_source =
-            "Fitted free-surface fluid normal kinematic row on marker " +
+            "Fitted free-surface fluid natural dynamic condition on marker " +
             std::to_string(marker);
         EXPECT_EQ(
             std::count_if(
@@ -7354,8 +7369,7 @@ TEST(MovingDomainPhysics, FittedPinnedContactLineConstrainsMeshDisplacement)
         .tangential_mesh_policy =
             ns::FreeSurfaceTangentialMeshPolicy::Prescribed,
         .kinematic_enforcement =
-            ns::FreeSurfaceKinematicEnforcement::Penalty,
-        .kinematic_penalty = FE::Real{6.0},
+            ns::FreeSurfaceKinematicEnforcement::MeshNitsche,
         .contact_lines = {
             pinnedContactLine(/*wall_marker=*/-1, marker),
         },
@@ -7469,8 +7483,7 @@ TEST(MovingDomainPhysics, FittedPrescribedContactAngleFailsClosedWithoutContactL
         .tangential_mesh_policy =
             ns::FreeSurfaceTangentialMeshPolicy::Prescribed,
         .kinematic_enforcement =
-            ns::FreeSurfaceKinematicEnforcement::Penalty,
-        .kinematic_penalty = FE::Real{6.0},
+            ns::FreeSurfaceKinematicEnforcement::MeshNitsche,
         .contact_lines = {
             prescribedContactLine(marker, 1.0, {1.0, 0.0, 0.0}),
         },
@@ -7555,8 +7568,7 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceReservesBoundaryMarker)
         .tangential_mesh_policy =
             ns::FreeSurfaceTangentialMeshPolicy::Prescribed,
         .kinematic_enforcement =
-            ns::FreeSurfaceKinematicEnforcement::Penalty,
-        .kinematic_penalty = FE::Real{6.0},
+            ns::FreeSurfaceKinematicEnforcement::MeshNitsche,
     });
 
     FE::systems::FESystem system(mesh);
@@ -7678,8 +7690,7 @@ TEST(MovingDomainPhysics, NavierStokesFittedSurfaceStressFailsClosed)
             .surface_tension_form =
                 ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
             .kinematic_enforcement =
-                ns::FreeSurfaceKinematicEnforcement::Penalty,
-            .kinematic_penalty = FE::Real{4.0},
+                ns::FreeSurfaceKinematicEnforcement::MeshNitsche,
         });
 
     FE::systems::FESystem system(mesh);
@@ -11583,10 +11594,8 @@ TEST(MovingDomainPhysics,
             .tangential_mesh_policy =
                 ns::FreeSurfaceTangentialMeshPolicy::Prescribed,
             .kinematic_enforcement =
-                ns::FreeSurfaceKinematicEnforcement::Nitsche,
+                ns::FreeSurfaceKinematicEnforcement::MeshNitsche,
             .kinematic_nitsche_gamma = 17.0,
-            .kinematic_nitsche_symmetric = false,
-            .kinematic_nitsche_scale_with_p = false,
             .contact_lines = {
                 ns::IncompressibleNavierStokesVMSOptions::
                     FreeSurfaceContactLine{},
@@ -11601,7 +11610,7 @@ TEST(MovingDomainPhysics,
     const auto artifact = module.effectiveConfigurationArtifact();
     ASSERT_TRUE(artifact.has_value());
     constexpr std::string_view expected =
-        R"json({"artifact_schema_version":1,"component":"incompressible_navier_stokes_free_surface","configuration_schema":{"input_version":2,"effective_version":2,"migration_mode":"current"},"capability_label":"one_phase_liquid_sharp_interface","units":{"system":"consistent_solver_units","angle":"radian","length":"solver_length","pressure":"solver_pressure","surface_tension":"force_per_length"},"fields":{"velocity":"u","pressure":"p","operator":"equations","dimension":3},"ale":{"enabled":true,"mesh_velocity_source":"CoupledDisplacement","mesh_velocity_field":"mesh_velocity","mesh_displacement_field":"mesh_displacement","geometry_tangent_path":"SymbolicRequired"},"generic_velocity_nitsche":{"gamma":23,"symmetric":false,"scale_with_polynomial_order":false,"generated_active_boundary_minimum_energy_ratio":0.25},"stabilization":{"vms_enabled":false,"ct_m":1,"ct_c":36,"epsilon":9.9999999999999998e-13,"pspg_pressure_gradient_form":"absolute"},"maintenance_policy":{"owner_component":"level_set_transport","coupling":"one_way_velocity_to_extension_to_level_set"},"extension_guards":{"physical_momentum_dry_extension_allowed":false,"auxiliary_extension_owner":"level_set_transport","external_owner_required":true},"free_surfaces":[{"implementation":"FittedALE","boundary_marker":172,"interface_marker":-1,"level_set_field":"level_set","generated_interface_domain":"free_surface","generated_interface_geometry":"LinearCorner","geometry_tangent_policy":"RefreshedFrozenQuadrature","level_set_isovalue":0,"active_domain":"None","active_phase_sign":"full_domain","active_domain_method":"CutVolume","active_domain_smoothing_width":0,"smoothing_width_unit":"length","allow_full_domain_unfitted_free_surface":false,"external_pressure":2.25,"surface_tension":0.5,"surface_tension_form_requested":"Automatic","surface_tension_form_effective":"CurvatureTraction","curvature_policy":"supplied_scalar","curvature_tangent_policy":"supplied_scalar_frozen","kinematic":{"normal_policy":"MatchFluidNormalVelocity","tangential_mesh_policy":"Prescribed","prescribed_tangential_mesh_velocity":[0,0,0],"enforcement":"Nitsche","penalty":0,"nitsche":{"gamma":17,"symmetric":false,"scale_with_polynomial_order":false}},"stabilization":{"enabled":false,"small_cut_aggregation":true,"pressure_policy":"Enabled","pressure_gradient_penalty":1,"use_cut_metadata_scale":false,"cut_metadata_scale_cap":null},"pruning":{"decision_owner":"authoritative_geometry_snapshot","fallback_to_whole_face":false},"contact_lines":[{"model":"None"}]}]})json";
+        R"json({"artifact_schema_version":1,"component":"incompressible_navier_stokes_free_surface","configuration_schema":{"input_version":2,"effective_version":2,"migration_mode":"current"},"capability_label":"one_phase_liquid_sharp_interface","units":{"system":"consistent_solver_units","angle":"radian","length":"solver_length","pressure":"solver_pressure","surface_tension":"force_per_length"},"fields":{"velocity":"u","pressure":"p","operator":"equations","dimension":3},"ale":{"enabled":true,"mesh_velocity_source":"CoupledDisplacement","mesh_velocity_field":"mesh_velocity","mesh_displacement_field":"mesh_displacement","geometry_tangent_path":"SymbolicRequired"},"generic_velocity_nitsche":{"gamma":23,"symmetric":false,"scale_with_polynomial_order":false,"generated_active_boundary_minimum_energy_ratio":0.25},"stabilization":{"vms_enabled":false,"ct_m":1,"ct_c":36,"epsilon":9.9999999999999998e-13,"pspg_pressure_gradient_form":"absolute"},"maintenance_policy":{"owner_component":"level_set_transport","coupling":"one_way_velocity_to_extension_to_level_set"},"extension_guards":{"physical_momentum_dry_extension_allowed":false,"auxiliary_extension_owner":"level_set_transport","external_owner_required":true},"free_surfaces":[{"implementation":"FittedALE","boundary_marker":172,"interface_marker":-1,"level_set_field":"level_set","generated_interface_domain":"free_surface","generated_interface_geometry":"LinearCorner","geometry_tangent_policy":"RefreshedFrozenQuadrature","level_set_isovalue":0,"active_domain":"None","active_phase_sign":"full_domain","active_domain_method":"CutVolume","active_domain_smoothing_width":0,"smoothing_width_unit":"length","allow_full_domain_unfitted_free_surface":false,"external_pressure":2.25,"surface_tension":0.5,"surface_tension_form_requested":"Automatic","surface_tension_form_effective":"CurvatureTraction","curvature_policy":"supplied_scalar","curvature_tangent_policy":"supplied_scalar_frozen","kinematic":{"normal_policy":"MatchFluidNormalVelocity","tangential_mesh_policy":"Prescribed","prescribed_tangential_mesh_velocity":[0,0,0],"enforcement":"MeshNitsche","penalty":0,"nitsche":{"gamma":17,"symmetric":true,"scale_with_polynomial_order":true}},"stabilization":{"enabled":false,"small_cut_aggregation":true,"pressure_policy":"Enabled","pressure_gradient_penalty":1,"use_cut_metadata_scale":false,"cut_metadata_scale_cap":null},"pruning":{"decision_owner":"authoritative_geometry_snapshot","fallback_to_whole_face":false},"contact_lines":[{"model":"None"}]}]})json";
     std::string expected_with_aggregation_guards(expected);
     constexpr std::string_view artifact_schema_fragment =
         "\"artifact_schema_version\":1";
@@ -13967,20 +13976,27 @@ TEST(MovingDomainPhysics, NavierStokesFreeSurfaceRejectsInvalidScalarParameters)
 
     const auto expect_rejected = [&](FE::Real external_pressure,
                                      FE::Real surface_tension,
-                                     FE::Real kinematic_penalty,
-                                     bool enable_penalty) {
+                                     FE::Real kinematic_nitsche_gamma,
+                                     bool enable_kinematics) {
         auto opts = baseNavierStokesOptions();
-        opts.enable_ale = enable_penalty;
+        opts.enable_ale = enable_kinematics;
+        if (enable_kinematics) {
+            // MeshNitsche needs a coupled mesh displacement; the rejection
+            // then comes from the boundary-local gamma.
+            opts.mesh_velocity_source =
+                ns::ALEMeshVelocitySource::CoupledDisplacement;
+            opts.auto_register_mesh_displacement_field = true;
+        }
         opts.free_surface.push_back(
             ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
                 .implementation = ns::FreeSurfaceImplementation::FittedALE,
                 .boundary_marker = marker,
                 .external_pressure = external_pressure,
                 .surface_tension = surface_tension,
-                .kinematic_enforcement = enable_penalty
-                    ? ns::FreeSurfaceKinematicEnforcement::Penalty
+                .kinematic_enforcement = enable_kinematics
+                    ? ns::FreeSurfaceKinematicEnforcement::MeshNitsche
                     : ns::FreeSurfaceKinematicEnforcement::None,
-                .kinematic_penalty = kinematic_penalty,
+                .kinematic_nitsche_gamma = kinematic_nitsche_gamma,
             });
         FE::systems::FESystem system(mesh);
         ns::IncompressibleNavierStokesVMSModule module(
@@ -16340,10 +16356,37 @@ TEST(MovingDomainPhysics, CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup)
 
     FE::systems::FESystem system(mesh);
 
+    // MeshNitsche: the fluid equation registers first and declares the
+    // normal relation; the harmonic mesh motion registered after it acts on
+    // the mesh velocity and adds the consistency term on that boundary.
+    auto ns_opts = baseNavierStokesOptions();
+    ns_opts.enable_ale = true;
+    ns_opts.enable_convection = false;
+    ns_opts.mesh_velocity_source = ns::ALEMeshVelocitySource::CoupledDisplacement;
+    ns_opts.mesh_displacement_field_name = "mesh_displacement";
+    ns_opts.mesh_velocity_field_name = "mesh_velocity";
+    ns_opts.auto_register_mesh_displacement_field = true;
+
+    ns_opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::FittedALE,
+        .boundary_marker = marker,
+        .external_pressure = 1.25,
+        .tangential_mesh_policy =
+            ns::FreeSurfaceTangentialMeshPolicy::Prescribed,
+        .prescribed_tangential_mesh_velocity = {
+            FE::Real{0.05}, FE::Real{-0.02}, FE::Real{0.01}},
+        .tangential_mesh_penalty = FE::Real{5.0},
+        .kinematic_enforcement = ns::FreeSurfaceKinematicEnforcement::MeshNitsche,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule ns_module(u_space, p_space, ns_opts);
+    ns_module.registerOn(system);
+
     mm::HarmonicMeshMotionOptions mesh_opts;
     mesh_opts.field_name = "mesh_displacement";
     mesh_opts.operator_tag = "mesh_motion";
     mesh_opts.kappa = 1.5;
+    mesh_opts.quantity = mm::HarmonicQuantity::Velocity;
 
     mm::NormalConstraintBC normal;
     normal.boundary_marker = mesh_normal_marker;
@@ -16357,29 +16400,6 @@ TEST(MovingDomainPhysics, CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup)
     mesh_module.registerOn(system);
     const auto displacement = system.findFieldByName("mesh_displacement");
     ASSERT_NE(displacement, FE::INVALID_FIELD_ID);
-
-    auto ns_opts = baseNavierStokesOptions();
-    ns_opts.enable_ale = true;
-    ns_opts.enable_convection = false;
-    ns_opts.mesh_velocity_source = ns::ALEMeshVelocitySource::CoupledDisplacement;
-    ns_opts.mesh_displacement_field_name = "mesh_displacement";
-    ns_opts.mesh_velocity_field_name = "mesh_velocity";
-
-    ns_opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
-        .implementation = ns::FreeSurfaceImplementation::FittedALE,
-        .boundary_marker = marker,
-        .external_pressure = 1.25,
-        .tangential_mesh_policy =
-            ns::FreeSurfaceTangentialMeshPolicy::Prescribed,
-        .prescribed_tangential_mesh_velocity = {
-            FE::Real{0.05}, FE::Real{-0.02}, FE::Real{0.01}},
-        .tangential_mesh_penalty = FE::Real{5.0},
-        .kinematic_enforcement = ns::FreeSurfaceKinematicEnforcement::Penalty,
-        .kinematic_penalty = 9.0,
-    });
-
-    ns::IncompressibleNavierStokesVMSModule ns_module(u_space, p_space, ns_opts);
-    ns_module.registerOn(system);
 
     const auto normal_declarations =
         system.meshNormalBoundaryConstraints();
@@ -16410,11 +16430,11 @@ TEST(MovingDomainPhysics, CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup)
     EXPECT_EQ(
         normal_declarations[0]
             .consumer_binding->related_fluid->descriptor_source,
-        "Fitted free-surface fluid normal kinematic row on marker 39");
+        "Fitted free-surface fluid natural dynamic condition on marker 39");
     EXPECT_EQ(
         normal_declarations[0]
             .consumer_binding->related_fluid->enforcement_kind,
-        FE::analysis::EnforcementKind::WeakPenalty);
+        FE::analysis::EnforcementKind::WeakConsistent);
     const auto* fitted_target =
         normal_declarations[0].target_expression.node();
     ASSERT_NE(fitted_target, nullptr);
@@ -16702,7 +16722,7 @@ TEST(MovingDomainPhysics, CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup)
             marker,
             "equations",
             "Fitted free-surface mesh normal kinematic row on marker 39",
-            "Fitted free-surface fluid normal kinematic row on marker 39"),
+            "Fitted free-surface fluid natural dynamic condition on marker 39"),
         FE::InvalidArgumentException);
     EXPECT_THROW(
         system.declareMeshNormalBoundaryConstraint(

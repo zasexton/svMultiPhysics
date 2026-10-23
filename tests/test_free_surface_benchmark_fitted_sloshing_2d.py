@@ -83,7 +83,7 @@ def test_study_roles_and_diagnostic_variants(tmp_path):
     dt = gen.generate(32, tmp_path / "t", steps_per_period=64)
     assert dt["study"] == "time" and dt["protocol_run"] and dt["output_cadence"] == 2
     pinned = gen.generate(16, tmp_path / "p", wall_mesh_motion="pinned",
-                          enforcement="Nitsche", steps_per_period=64)
+                          steps_per_period=64)
     assert not pinned["protocol_run"]
     root = ET.parse(tmp_path / "p/solver.xml").getroot()
     mesh = [eq for eq in root.iter("Add_equation") if eq.get("type") == "mesh_motion"][0]
