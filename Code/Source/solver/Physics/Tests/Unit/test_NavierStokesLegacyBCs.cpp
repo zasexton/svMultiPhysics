@@ -1796,6 +1796,25 @@ TEST(NavierStokesLegacyBCs, FreeSurfaceBoundaryKeysResolveThroughTheSchema)
         }
     }
 
+    // Decision D47 item 3: a Free_surface boundary condition states its
+    // Implementation.
+    {
+        auto input = make_input({});
+        input.boundary_conditions.front().params.erase("Implementation");
+        svmp::FE::systems::FESystem system(mesh);
+        try {
+            auto module =
+                svmp::Physics::EquationModuleRegistry::instance().create(
+                    "fluid", input, system);
+            (void)module;
+            ADD_FAILURE() << "a Free_surface BC without Implementation must fail";
+        } catch (const std::runtime_error& error) {
+            EXPECT_EQ(std::string(error.what()),
+                      "[Free_surface] Implementation: required: FittedALE or "
+                      "UnfittedLevelSet (decision D47)");
+        }
+    }
+
     // Accepted: restated no-op values of retired switches (the register's
     // relaxed booleans), and the level-set keys of an unfitted interface on
     // a fitted boundary, which are not read.
@@ -3567,11 +3586,13 @@ TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceKinematicAreaGradientInputsAreRet
 #endif
 }
 
-TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceActiveDomainTranslation_RejectsMissingActiveDomain)
+TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceActiveDomainTranslation_DefaultsToLevelSetNegative)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
     GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
 #else
+    // Decision D47 item 3: an unfitted surface that does not state
+    // Active_domain is liquid on the negative side (it failed before).
     svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
 
     constexpr int marker = 87;
@@ -3605,13 +3626,11 @@ TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceActiveDomainTranslation_RejectsMi
         .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData,
     });
 
-    EXPECT_THROW(
-        {
-            auto module =
-                svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
-            (void)module;
-        },
-        std::invalid_argument);
+    auto module = svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
+    ASSERT_TRUE(module);
+    EXPECT_TRUE(formulationRecordsContainCutVolumeSide(
+        system,
+        svmp::FE::forms::CutVolumeSide::Negative));
 #endif
 }
 
@@ -3690,6 +3709,8 @@ TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceActiveDomainTranslation_AllowsExp
     bc.params["Type"] = defined("Free_surface");
     bc.params["Implementation"] = defined("UnfittedLevelSet");
     bc.params["Level_set_field_name"] = defined("phi");
+    // A full-domain run states Active_domain=None (decision D47 item 3).
+    bc.params["Active_domain"] = defined("None");
     bc.params["Allow_full_domain_unfitted_free_surface"] = defined("true");
     bc.params["External_pressure"] = defined("1.0");
     input.boundary_conditions.push_back(std::move(bc));

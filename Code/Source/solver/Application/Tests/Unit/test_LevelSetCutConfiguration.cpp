@@ -698,6 +698,32 @@ TEST(LevelSetCutConfiguration,
 }
 
 TEST(LevelSetCutConfiguration,
+     UnfittedFreeSurfaceWithoutActiveDomainIsLiquidOnTheNegativeSide)
+{
+  // Decision D47 item 3: as in the register, an unfitted surface that does
+  // not state Active_domain is liquid on the negative side.
+  auto params = parseParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Add_BC name="free_surface">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Level_set_field_name>phi</Level_set_field_name>
+      <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  const auto requests = application::core::activeCutVolumeRequests(*params);
+  ASSERT_EQ(requests.size(), 1u);
+  EXPECT_EQ(requests.front().origin,
+            application::core::ActiveCutVolumeRequestOrigin::FreeSurfaceBoundary);
+  EXPECT_EQ(requests.front().active_side,
+            application::core::LevelSetActiveSide::Negative);
+  EXPECT_EQ(requests.front().domain_id, "water_air");
+}
+
+TEST(LevelSetCutConfiguration,
      TwoFluidMaterialInterfaceBuildsTwoSidedCutRequestForFluidAndStokes)
 {
   struct Case {
