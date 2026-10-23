@@ -500,7 +500,12 @@ the operator, the integral and the term in the message, e.g. `FormCompiler:
 jump() is defined only on interior-facet (dS) and interface (dI) integrals,
 but a cell integral (dx) uses it: [[u]] in the integrand '...'`. The normal
 of the minus side is `FormExpr::normal().minus()`; the DG helpers above write
-fluxes against it.
+fluxes against it. On a generated (level-set) interface the minus side is the
+negative side `phi < c` and the plus side the positive one, so `jump(u)` is
+`u(negative) - u(positive)`; in a two-sided term there `normal().minus()` is
+`-n` and `normal().plus()` is `+n` with `n = grad(phi) / |grad(phi)|`, each
+pointing into its own side, the opposite of interior facets
+(`FE/Docs/LevelSet.md`, Two-Sided Generated Interfaces).
 
 The BC trace helpers follow the core convention:
 `bc::InterfaceTraceReduction::Jump` is `jump(u) = u(-) - u(+)` for
@@ -614,7 +619,7 @@ Status: `implemented/public` for the Systems install API; compiler/IR APIs are
 
 | Vocabulary | Header | Notes |
 |------------|--------|-------|
-| `installFormulation(system, op, fields, residual[, options])` | `Systems/FormsInstaller.h` | Canonical residual installation; one or several test fields |
+| `installFormulation(system, op, fields, residual[, options])` | `Systems/FormsInstaller.h` | Canonical residual installation; one or several test fields. A single-field residual affine in the unknown, without `dt()`, `dS` or `dI` terms, coupled terminals or geometry sensitivity, is installed through the linear kernel (`trySplitAffineResidual`) |
 | `installFormulationWithMetadata(...)` | `Systems/FormsInstaller.h` | Same, returning the analysis bridge metadata of the install |
 | `FormInstallOptions` | `Systems/FormsInstaller.h` | `ad_mode`, `compiler_options` (`SymbolicOptions`), `extra_trial_fields`, `constitutive_laws`, `source_component_tag`, `contributes_to_problem_analysis`, generated-boundary Nitsche trace requests |
 | `FormInstallOptions::recordDynamicViscosity(...)` | `Systems/FormsInstaller.h` | `implemented/expert`; publishes the viscosity law to coupling contracts |

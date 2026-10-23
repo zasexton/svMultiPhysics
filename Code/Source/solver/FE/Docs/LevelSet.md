@@ -234,9 +234,9 @@ Two-sided traces use the following definitions:
 |--------|-----------------------------|
 | `u+` | Trace of `u` from the positive retained side. |
 | `u-` | Trace of `u` from the negative retained side. |
-| `jump(u)` | `u+ - u-` for scalar and component-wise vector/tensor fields unless a formulation explicitly asks for a normal jump. |
+| `jump(u)` | `u- - u+`, the `jump()` of the form language, for scalar and component-wise vector/tensor fields unless a formulation explicitly asks for a normal jump. The minus side of a two-sided generated rule is the negative retained side and the plus side the positive one (`GeneratedInterfaceTwoSidedBinding::minus_side = Negative`, `plus_side = Positive`). |
 | `avg(u)` | Arithmetic average `0.5 * (u+ + u-)`. Weighted averages are a formulation-specific extension and must declare their weights. |
-| `n+`, `n-` | `n+ = n` and `n- = -n`, where `n` is the generated-interface normal above. |
+| `n+`, `n-` | `n+ = n` and `n- = -n`, where `n` is the generated-interface normal above. In a two-sided term `normal().plus()` evaluates to `n+` and `normal().minus()` to `n-` (the assembler negates the rule normal on the negative side), so each points into its own side; on interior facets and fitted interfaces `normal().minus()` is instead the outward normal of the minus cell. A one-sided term sees the rule normal `n`. |
 
 Side ownership is a parent-cell binding, not a persistent surface mesh
 ownership. The generated rule owns a parent cell, a stable generated-domain id,
