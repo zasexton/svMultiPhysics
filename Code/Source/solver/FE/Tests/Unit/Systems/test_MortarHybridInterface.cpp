@@ -870,7 +870,7 @@ InterfaceAssembly assembleDiscontinuousInterfaceResidual(
 
 } // namespace
 
-TEST(FESystemMortar, DISABLED_AffineResidualKeepsItsInterfaceTerms)
+TEST(FESystemMortar, AffineResidualKeepsItsInterfaceTerms)
 {
     // An affine single-field residual is installed through the affine split
     // (a LinearFormKernel); its interface (dI) terms must be assembled like

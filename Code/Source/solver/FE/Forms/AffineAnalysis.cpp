@@ -399,6 +399,10 @@ std::optional<AffineResidualSplit> trySplitAffineResidual(
         if (reason_out) *reason_out = "residual contains interior-face terms dS (not yet supported for affine optimization)";
         return std::nullopt;
     }
+    if (!options.allow_interface_face_terms && residual_ir.hasInterfaceFaceTerms()) {
+        if (reason_out) *reason_out = "residual contains interface-face terms dI (not yet supported for affine optimization)";
+        return std::nullopt;
+    }
 
     FormExpr bilinear_sum{};
     FormExpr linear_sum{};

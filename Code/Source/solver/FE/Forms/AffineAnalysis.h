@@ -29,6 +29,10 @@ struct AffineResidualOptions {
 
     // Conservative default: DG interior-face residual lowering is not yet handled by LinearFormKernel.
     bool allow_interior_face_terms{false};
+
+    // Conservative default: LinearFormKernel does not assemble interface-face
+    // (dI) terms either; a split residual would silently lose them.
+    bool allow_interface_face_terms{false};
 };
 
 /**
