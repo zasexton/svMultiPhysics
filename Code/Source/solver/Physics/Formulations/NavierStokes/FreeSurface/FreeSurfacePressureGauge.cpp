@@ -7,23 +7,10 @@
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfacePressureGauge.h"
 
-#include <memory>
-
 namespace svmp {
 namespace Physics {
 namespace formulations {
 namespace navier_stokes {
-
-namespace {
-
-/// The anchor's global kernel, under the type name the kernel manifest has
-/// always shown for it.
-class CutVolumePressureAnchorMeasureGuard final : public FE::constraints::InterfaceMeasureGaugeKernel {
-public:
-    using InterfaceMeasureGaugeKernel::InterfaceMeasureGaugeKernel;
-};
-
-} // namespace
 
 FE::constraints::InterfaceMeasureGaugeAnchor freeSurfacePressureAnchor(
     FE::FieldId p_id,
@@ -49,7 +36,9 @@ FE::constraints::InterfaceMeasureGaugeAnchor freeSurfacePressureAnchor(
     texts.context_phase = "cut_volume_pressure_anchor_context";
     texts.null_context_accepted = "CutVolume pressure-anchor null context was unexpectedly accepted";
     texts.gauge_policy = "reject_zero_interface_no_dynamic_gauge_insertion";
-    anchor.kernel = std::make_shared<CutVolumePressureAnchorMeasureGuard>(anchor);
+    // The type label the kernel manifest has always shown for this anchor.
+    texts.manifest_type_name =
+        "svmp::Physics::formulations::navier_stokes::(anonymous namespace)::CutVolumePressureAnchorMeasureGuard";
     return anchor;
 }
 

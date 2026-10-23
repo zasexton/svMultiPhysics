@@ -291,5 +291,35 @@ TEST(ConstraintPlan, AnchorGaugeRecordsTheEvidenceOnceAndAddsTheMeasureKernel)
     }
 }
 
+TEST(ConstraintPlan, AnchorKernelShowsItsDeclaredManifestTypeName)
+{
+    PlanSystem s;
+    s.system->addOperator("op");
+    InterfaceMeasureGaugeAnchor anchor;
+    anchor.field = s.p;
+    anchor.interface_marker = 7;
+    anchor.texts.kernel_name = "UnitAnchor";
+    InterfaceMeasureGaugeAnchor labelled = anchor;
+    labelled.interface_marker = 8;
+    labelled.texts.manifest_type_name = "unit::(anonymous namespace)::LabelledAnchor";
+
+    ConstraintPlan plan(*s.system);
+    plan.anchorGauge("op", anchor).anchorGauge("op", labelled);
+
+    std::size_t fe_type = 0u;
+    std::size_t label = 0u;
+    for (const auto& line : systems::kernelManifestLines(*s.system)) {
+        if (line.find("type=svmp::FE::constraints::InterfaceMeasureGaugeKernel name=UnitAnchor:7") !=
+            std::string::npos) {
+            ++fe_type;
+        }
+        if (line.find("type=unit::(anonymous namespace)::LabelledAnchor name=UnitAnchor:8") != std::string::npos) {
+            ++label;
+        }
+    }
+    EXPECT_EQ(fe_type, 1u);
+    EXPECT_EQ(label, 1u);
+}
+
 } // namespace
 } // namespace svmp::FE::constraints::test

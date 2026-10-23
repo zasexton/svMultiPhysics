@@ -20,7 +20,8 @@
  * term (cell, boundary, interior-face, interface-face, cut-volume, in
  * registration order) one "kernel" line with the operator, the slot, the
  * marker and side of the registration, the test and trial fields and the
- * kernel type, followed by the compiled forms of that kernel.  Each form
+ * kernel type (for a global kernel, its declared manifestTypeName() when it
+ * has one), followed by the compiled forms of that kernel.  Each form
  * prints one "term" line per integral term (domain, markers, sides,
  * time-derivative order, exterior-boundary measure and three hashes of the
  * integrand) and one "group" line per JIT kernel group (terms grouped by

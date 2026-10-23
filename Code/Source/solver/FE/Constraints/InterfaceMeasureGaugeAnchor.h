@@ -41,8 +41,6 @@ class FESystem;
 
 namespace constraints {
 
-class InterfaceMeasureGaugeKernel;
-
 /// Texts of an anchor.  The defaults are generic; a module passes its own so
 /// that its messages, kernel and callback names stay its own.
 struct InterfaceMeasureGaugeAnchorTexts {
@@ -57,6 +55,8 @@ struct InterfaceMeasureGaugeAnchorTexts {
     std::string context_phase{"interface_measure_gauge_anchor_context"};
     std::string null_context_accepted{"interface-measure gauge anchor null context was unexpectedly accepted"};
     std::string gauge_policy{"reject_zero_interface_no_dynamic_gauge_insertion"};
+    /// The kernel's type label in the system manifest (empty: the FE type).
+    std::string manifest_type_name{};
 };
 
 struct InterfaceMeasureGaugeAnchor {
@@ -65,9 +65,6 @@ struct InterfaceMeasureGaugeAnchor {
     std::string level_set_field_name{};
     std::string domain_id{};
     InterfaceMeasureGaugeAnchorTexts texts{};
-    /// The global kernel; a module may pass one of its own type, whose name
-    /// the kernel manifest shows.  Null: an InterfaceMeasureGaugeKernel.
-    std::shared_ptr<InterfaceMeasureGaugeKernel> kernel{};
 };
 
 /// The global kernel of an anchor: checks the measure at setup (when a cut
@@ -78,6 +75,9 @@ public:
 
     /// "<kernel_name>:<interface marker>".
     [[nodiscard]] std::string name() const override;
+
+    /// texts.manifest_type_name.
+    [[nodiscard]] std::string manifestTypeName() const override;
 
     void addSparsityCouplings(const systems::FESystem& system,
                               sparsity::SparsityPattern& pattern) const override;

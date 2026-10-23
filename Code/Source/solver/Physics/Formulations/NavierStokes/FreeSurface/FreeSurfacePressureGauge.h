@@ -15,7 +15,8 @@
  * With a natural traction on Gamma_h the pressure constant is fixed by the
  * exterior pressure, provided the generated interface has a positive
  * measure: an FE::constraints::InterfaceMeasureGaugeAnchor with the
- * module's texts (gauge source, kernel and callback names, messages).
+ * module's texts (gauge source, kernel and callback names, messages, and the
+ * kernel's manifest label).
  */
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"

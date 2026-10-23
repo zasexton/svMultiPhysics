@@ -224,6 +224,11 @@ std::string InterfaceMeasureGaugeKernel::name() const
            std::to_string(interface_marker_);
 }
 
+std::string InterfaceMeasureGaugeKernel::manifestTypeName() const
+{
+    return texts_.manifest_type_name;
+}
+
 void InterfaceMeasureGaugeKernel::addSparsityCouplings(
     const systems::FESystem& system,
     sparsity::SparsityPattern&) const
@@ -290,9 +295,7 @@ void anchorGaugeOnInterfaceMeasure(systems::FESystem& system,
         });
     }
 
-    std::shared_ptr<InterfaceMeasureGaugeKernel> measure_guard =
-        anchor.kernel ? anchor.kernel
-                      : std::make_shared<InterfaceMeasureGaugeKernel>(anchor);
+    const auto measure_guard = std::make_shared<InterfaceMeasureGaugeKernel>(anchor);
     system.addGlobalKernel(operator_tag, measure_guard);
     system.addCutIntegrationContextUpdateCallback(
         systems::CutIntegrationContextUpdateCallback{

@@ -539,8 +539,11 @@ std::vector<std::string> kernelManifestLines(const FESystem& system)
         }
         for (std::size_t i = 0; i < def.global.size(); ++i) {
             const auto& k = def.global[i];
-            lines.push_back("kernel op=" + tag + " slot=global#" + std::to_string(i) + " type=" +
-                            (k ? demangledTypeName(typeid(*k)) : std::string("<null>")) +
+            std::string type = k ? k->manifestTypeName() : std::string("<null>");
+            if (type.empty()) {
+                type = demangledTypeName(typeid(*k));
+            }
+            lines.push_back("kernel op=" + tag + " slot=global#" + std::to_string(i) + " type=" + type +
                             " name=" + (k ? k->name() : std::string("<null>")));
         }
     }

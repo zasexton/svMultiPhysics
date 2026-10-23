@@ -74,6 +74,15 @@ public:
     [[nodiscard]] virtual std::string name() const { return "GlobalKernel"; }
 
     /**
+     * @brief The type label of the kernel in the system manifest
+     *
+     * Empty (the default): the manifest shows the demangled dynamic type.  A
+     * kernel that a formulation configures with data, instead of deriving a
+     * type of its own, declares the label here.
+     */
+    [[nodiscard]] virtual std::string manifestTypeName() const { return {}; }
+
+    /**
      * @brief Optional sparsity augmentation hook
      *
      * Global terms are not represented in the element/face loops used by the
