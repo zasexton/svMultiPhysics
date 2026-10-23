@@ -1,5 +1,4 @@
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceBoundarySchema.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleTwoFluidInterface.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleTwoFluidModule.h"
 
@@ -11,6 +10,7 @@
 #include "Physics/Options/BoundaryDataReaders.h"
 #include "Physics/Options/InputReaders.h"
 #include "Physics/Options/NavierStokesOptionRules.h"
+#include "Physics/Options/NavierStokesOptionSchema.h"
 #include "Physics/Options/NavierStokesRegistration.h"
 
 #include "FE/Core/Logger.h"

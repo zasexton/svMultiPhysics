@@ -29,7 +29,6 @@
 // Not mathematics: option queries, preflight, fields and initial state,
 // geometry adapters, logs, energy declarations, the residual-work ledger,
 // the diagnostic operators and the configuration artifact.
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceConfigurationArtifact.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceDiagnosticOperators.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceDiagnostics.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergy.h"
