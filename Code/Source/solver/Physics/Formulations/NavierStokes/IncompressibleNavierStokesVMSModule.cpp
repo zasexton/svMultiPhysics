@@ -20,12 +20,27 @@
  * free-surface terms are stated in NavierStokesBCFactories.h.  Everything
  * that is not mathematics (option checks, field registration, certificates,
  * logs, diagnostic operators, the configuration artifact, the residual-work
- * ledger) is behind NavierStokesSupport.h.
+ * ledger) is in the support headers included below.
  */
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
-#include "Physics/Formulations/NavierStokes/NavierStokesSupport.h"
+
+// Not mathematics: option queries, preflight, fields and initial state,
+// geometry adapters, logs, energy declarations, the residual-work ledger,
+// the diagnostic operators and the configuration artifact.
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceConfigurationArtifact.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceDiagnosticOperators.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceDiagnostics.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergy.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceFittedALE.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceQueries.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceResidualWork.h"
+#include "Physics/Formulations/NavierStokes/NavierStokesFields.h"
+#include "Physics/Formulations/NavierStokes/NavierStokesGeneratedNitsche.h"
+#include "Physics/Formulations/NavierStokes/NavierStokesInitialConditions.h"
+#include "Physics/Formulations/NavierStokes/NavierStokesPreflight.h"
 
 #include "FE/Analysis/ConstitutiveLawMetadata.h"
 #include "FE/Constitutive/MetadataTaggedModel.h"
