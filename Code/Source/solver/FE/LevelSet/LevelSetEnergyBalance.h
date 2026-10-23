@@ -1,16 +1,18 @@
-/* Copyright (c) Stanford University, The Regents of the
- * University of California, and others.
+/* Copyright (c) Stanford University, The Regents of the University of California, and others.
  *
  * All Rights Reserved.
  *
- * See License file.
+ * See Copyright-SimVascular.txt for additional details.
  */
 
-#pragma once
+#ifndef SVMP_FE_LEVELSET_LEVELSETENERGYBALANCE_H
+#define SVMP_FE_LEVELSET_LEVELSETENERGYBALANCE_H
 
 /**
- * @file
- * @brief Complete fixed-topology one-phase free-surface energy record:
+ * @file LevelSetEnergyBalance.h
+ * @brief Complete fixed-topology one-phase free-surface energy record of a
+ *        level-set run (moved from the Navier-Stokes free-surface physics,
+ *        FreeSurface/FreeSurfaceEnergyCandidate):
  *        the channels of the free-surface energy balance (data for the FE
  *        energy-balance ledger, FE/Systems/EnergyBalanceLedger.h), accepted
  *        functional groups, the energy candidate and its ledger metadata,
@@ -23,13 +25,13 @@
  * (FE/LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h).
  */
 
-#include "FE/Constraints/SmallCutAggregationConstraint.h"
-#include "FE/Core/Types.h"
-#include "FE/Interfaces/FreeSurfaceGeometrySnapshot.h"
-#include "FE/LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h"
-#include "FE/Systems/EnergyBalanceLedger.h"
-#include "FE/Systems/FESystem.h"
-#include "FE/TimeStepping/StepController.h"
+#include "Constraints/SmallCutAggregationConstraint.h"
+#include "Core/Types.h"
+#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h"
+#include "Systems/EnergyBalanceLedger.h"
+#include "Systems/FESystem.h"
+#include "TimeStepping/StepController.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -41,7 +43,7 @@
 #include <string_view>
 #include <vector>
 
-namespace svmp::Physics::formulations::navier_stokes::free_surface {
+namespace svmp::FE::level_set {
 
 /**
  * The channels of the free-surface energy balance, in the order in which
@@ -230,4 +232,6 @@ classifyAcceptedAggregationEnergy(
                   SmallCutAggregationRefreshReport> refresh_reports,
     std::span<const svmp::FE::Real> accepted_solution);
 
-} // namespace svmp::Physics::formulations::navier_stokes::free_surface
+} // namespace svmp::FE::level_set
+
+#endif // SVMP_FE_LEVELSET_LEVELSETENERGYBALANCE_H

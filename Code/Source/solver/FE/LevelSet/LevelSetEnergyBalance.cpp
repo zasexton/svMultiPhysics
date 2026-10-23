@@ -1,14 +1,13 @@
-/* Copyright (c) Stanford University, The Regents of the
- * University of California, and others.
+/* Copyright (c) Stanford University, The Regents of the University of California, and others.
  *
  * All Rights Reserved.
  *
- * See License file.
+ * See Copyright-SimVascular.txt for additional details.
  */
 
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyCandidate.h"
+#include "LevelSet/LevelSetEnergyBalance.h"
 
-#include "FE/Core/RankLog.h"
+#include "Core/RankLog.h"
 
 #include <algorithm>
 #include <array>
@@ -22,9 +21,12 @@
 #include <utility>
 #include <vector>
 
-namespace svmp::Physics::formulations::navier_stokes::free_surface {
+namespace svmp::FE::level_set {
 
-using svmp::FE::level_set::mixMaintenanceRevision;
+// Moved from the Navier-Stokes free-surface physics
+// (FreeSurface/FreeSurfaceEnergyCandidate.cpp, which held the free-surface
+// energy account too); bodies, owner texts, messages and log text unchanged.
+
 using svmp::FE::systems::EnergyBalanceAttemptMetadata;
 using svmp::FE::systems::EnergyBalanceCatalogue;
 using svmp::FE::systems::EnergyBalanceInput;
@@ -1171,4 +1173,4 @@ classifyAcceptedAggregationEnergy(
   return classification;
 }
 
-} // namespace svmp::Physics::formulations::navier_stokes::free_surface
+} // namespace svmp::FE::level_set

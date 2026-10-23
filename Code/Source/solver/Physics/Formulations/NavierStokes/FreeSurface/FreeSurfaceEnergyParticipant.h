@@ -19,10 +19,10 @@
  */
 
 #include "FE/LevelSet/AcceptedFunctionalRecorder.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyCandidate.h"
 
 #include "FE/Backends/Interfaces/GenericVector.h"
 #include "FE/LevelSet/LevelSetContactStageParticipant.h"
+#include "FE/LevelSet/LevelSetEnergyBalance.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/TimeStepping/StepContext.h"
 #include "FE/TimeStepping/StepController.h"
@@ -51,7 +51,7 @@ public:
     std::uint64_t algebraic_state_revision{0u};
     std::vector<svmp::FE::systems::ResidualWorkPairing>
         pairings{};
-    FreeSurfaceResidualWorkChannels channels{};
+    svmp::FE::level_set::FreeSurfaceResidualWorkChannels channels{};
   };
   /// Reads the free-surface functional, residual-work and exterior-boundary
   /// energy declarations and checks them on the active FE communicator
@@ -127,7 +127,7 @@ public:
   void clearPendingAccount() noexcept;
 
   svmp::FE::systems::EnergyBalanceLedger free_surface_energy_ledger{
-      freeSurfaceEnergyBalanceCatalogue()};
+      svmp::FE::level_set::freeSurfaceEnergyBalanceCatalogue()};
   std::uint64_t free_surface_energy_transaction_sequence{0u};
   bool free_surface_energy_history_contiguous{true};
   std::uint64_t free_surface_energy_attempt{0u};
@@ -155,7 +155,7 @@ public:
   std::uint64_t pending_pre_maintenance_endpoint_state_revision{0u};
   std::optional<svmp::FE::level_set::LevelSetMaintenanceAcceptedStepEnergyAccount>
       pending_accepted_step_maintenance_energy_account;
-  std::optional<LevelSetMaintenancePhysicalEndpointChannels>
+  std::optional<svmp::FE::level_set::LevelSetMaintenancePhysicalEndpointChannels>
       pending_accepted_step_physical_endpoint_channels;
 };
 

@@ -9,7 +9,7 @@
 #pragma once
 
 #include "FE/Systems/EnergyBalanceLedger.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyCandidate.h"
+#include "FE/LevelSet/LevelSetEnergyBalance.h"
 #include "FE/Core/FEConfig.h"
 #include "FE/Core/Types.h"
 
@@ -1040,8 +1040,7 @@ storedEnergyJson(const svmp::FE::systems::EnergyBalanceAttempt &attempt,
                  const std::vector<double> &value) {
   using svmp::FE::systems::EnergyChannelApplicability;
   using svmp::FE::systems::EnergyChannelKind;
-  const auto &catalogue = svmp::Physics::formulations::navier_stokes::
-      free_surface::freeSurfaceEnergyBalanceCatalogue();
+  const auto &catalogue = svmp::FE::level_set::freeSurfaceEnergyBalanceCatalogue();
   const auto channels = catalogue.channels(EnergyChannelKind::Stored);
   const auto &sources = attempt.sources[svmp::FE::systems::energyChannelKindIndex(
       EnergyChannelKind::Stored)];
@@ -1066,8 +1065,7 @@ storedEnergyJson(const svmp::FE::systems::EnergyBalanceAttempt &attempt,
 inline std::string
 energyAttemptJson(const svmp::FE::systems::EnergyBalanceAttempt &attempt) {
   using svmp::FE::systems::EnergyChannelKind;
-  const auto &catalogue = svmp::Physics::formulations::navier_stokes::
-      free_surface::freeSurfaceEnergyBalanceCatalogue();
+  const auto &catalogue = svmp::FE::level_set::freeSurfaceEnergyBalanceCatalogue();
   const auto &metadata = attempt.metadata;
   const auto endpoint_revision = [&](std::uint64_t value) {
     if (!attempt.balance_staged) {

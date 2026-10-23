@@ -975,6 +975,7 @@ set(FE_LEVELSET_HEADERS
     LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h
     LevelSet/Maintenance/LevelSetWallAwareMaintenance.h
     LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h
+    LevelSet/LevelSetEnergyBalance.h
     LevelSet/LevelSetImplicitCutQuadratureBackend.h
     LevelSet/LevelSetVolume.h
     LevelSet/LevelSetKinematicReconciliation.h
@@ -1009,6 +1010,7 @@ set(FE_LEVELSET_SOURCES
     LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.cpp
     LevelSet/Maintenance/LevelSetWallAwareMaintenance.cpp
     LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.cpp
+    LevelSet/LevelSetEnergyBalance.cpp
     LevelSet/LevelSetVolume.cpp
     LevelSet/LevelSetKinematicReconciliation.cpp
     LevelSet/LevelSetPhaseGeometryReconciliation.cpp

@@ -81,7 +81,6 @@
 #include "Mesh/Topology/CellTopology.h"
 #include "Mesh/Topology/DistributedTopology.h"
 #include "Physics/Core/PhysicsModule.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyCandidate.h"
 #include "FE/LevelSet/AcceptedFunctionalRecorder.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyParticipant.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/StaticCapillaryEquilibrium.h"
@@ -139,21 +138,21 @@
 
 namespace application::core {
 
-// The complete energy record is Navier-Stokes free-surface physics
-// (Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergy*) on
-// the FE energy-balance ledger (FE/Systems/EnergyBalanceLedger.h).
-using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceAcceptedEnergyGroup;
-using svmp::Physics::formulations::navier_stokes::free_surface::freeSurfaceEnergyBalanceCatalogue;
-using svmp::Physics::formulations::navier_stokes::free_surface::summarizeAcceptedFreeSurfaceEnergyGroup;
-using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCompleteEnergyCandidate;
-using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCompleteEnergyBuildResult;
-using svmp::Physics::formulations::navier_stokes::free_surface::buildFixedTopologyOnePhaseEnergyCandidate;
-using svmp::Physics::formulations::navier_stokes::free_surface::buildUnstagedFreeSurfaceEnergyAttemptMetadata;
-using svmp::Physics::formulations::navier_stokes::free_surface::freeSurfaceEnergyRejectionReasonForStepReject;
-using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceAggregationEnergyClassification;
-using svmp::Physics::formulations::navier_stokes::free_surface::classifyAcceptedAggregationEnergy;
+// The complete energy record of a level-set run
+// (FE/LevelSet/LevelSetEnergyBalance.h) on the FE energy-balance ledger
+// (FE/Systems/EnergyBalanceLedger.h).
+using svmp::FE::level_set::FreeSurfaceAcceptedEnergyGroup;
+using svmp::FE::level_set::freeSurfaceEnergyBalanceCatalogue;
+using svmp::FE::level_set::summarizeAcceptedFreeSurfaceEnergyGroup;
+using svmp::FE::level_set::FreeSurfaceCompleteEnergyCandidate;
+using svmp::FE::level_set::FreeSurfaceCompleteEnergyBuildResult;
+using svmp::FE::level_set::buildFixedTopologyOnePhaseEnergyCandidate;
+using svmp::FE::level_set::buildUnstagedFreeSurfaceEnergyAttemptMetadata;
+using svmp::FE::level_set::freeSurfaceEnergyRejectionReasonForStepReject;
+using svmp::FE::level_set::FreeSurfaceAggregationEnergyClassification;
+using svmp::FE::level_set::classifyAcceptedAggregationEnergy;
 using svmp::FE::level_set::logLevelSetMaintenanceWorkPublishedSince;
-using svmp::Physics::formulations::navier_stokes::free_surface::logLevelSetMaintenancePhysicalEndpointChannels;
+using svmp::FE::level_set::logLevelSetMaintenancePhysicalEndpointChannels;
 
 } // namespace application::core
 
