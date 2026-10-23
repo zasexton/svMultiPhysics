@@ -19,12 +19,12 @@
  */
 
 #include "FE/LevelSet/AcceptedFunctionalRecorder.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactStageParticipant.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyAccount.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyCandidate.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyLedger.h"
 
 #include "FE/Backends/Interfaces/GenericVector.h"
+#include "FE/LevelSet/LevelSetContactStageParticipant.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/TimeStepping/StepContext.h"
 #include "FE/TimeStepping/StepController.h"
@@ -101,7 +101,7 @@ public:
   /// binds the pending contact stages to it (collective).
   void bindAcceptedEndpoint(
       svmp::FE::timestepping::TimeHistory& h,
-      ContactStageParticipant& contact_stage);
+      svmp::FE::level_set::ContactStageParticipant& contact_stage);
 
   /// Aggregates the accepted-step maintenance energy account from the
   /// maintenance work ledger and evaluates its physical-endpoint channels.

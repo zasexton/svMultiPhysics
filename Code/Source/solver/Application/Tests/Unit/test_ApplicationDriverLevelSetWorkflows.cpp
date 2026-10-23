@@ -6529,7 +6529,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           solution,
           activeFESystemCommunicator(*sim.fe_system),
           "ApplicationDriver endpoint velocity revision");
-  ASSERT_NO_THROW(recordInitialFreeSurfaceDiscreteFunctionalBaseline(
+  ASSERT_NO_THROW(recordInitialAcceptedFunctionalBaseline(
       sim,
       /*initial_step=*/0u,
       svmp::FE::Real{0.0},
@@ -9569,7 +9569,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
       std::runtime_error);
   const auto endpoint_contact_stages =
       evaluateAcceptedFreeSurfaceContactStages(
-          sim,
+          *sim.fe_system,
+          svmp::FE::systems::functionalRecords(*sim.fe_system).functionalDeclarations(),
           svmp::FE::Real{0.10},
           svmp::FE::Real{1.0},
           previous_state_revision,
@@ -9717,7 +9718,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
           activeFESystemCommunicator(*sim.fe_system));
   const auto next_contact_stages =
       evaluateAcceptedFreeSurfaceContactStages(
-          sim,
+          *sim.fe_system,
+          svmp::FE::systems::functionalRecords(*sim.fe_system).functionalDeclarations(),
           svmp::FE::Real{0.15},
           svmp::FE::Real{1.0},
           accepted_state_revision,

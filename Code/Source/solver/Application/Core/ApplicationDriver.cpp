@@ -25,6 +25,7 @@
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/LevelSet/LevelSetCurvatureProjection.h"
 #include "FE/LevelSet/LevelSetCutTopology.h"
+#include "FE/LevelSet/LevelSetContactStageParticipant.h"
 #include "FE/LevelSet/LevelSetGeometryService.h"
 #include "FE/LevelSet/LevelSetCellEvaluator.h"
 #include "FE/LevelSet/LevelSetConservativePhaseOperator.h"
@@ -53,6 +54,7 @@
 #include "FE/Core/DeterministicParallel.h"
 #include "FE/Core/AggregationGuardDiagnostics.h"
 #include "FE/Core/HaloDiagnostics.h"
+#include "FE/Interfaces/ContactLineStageObservables.h"
 #include "FE/Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "FE/Interfaces/IncompressibleTwoFluidDiagnostics.h"
 #include "FE/Interfaces/MaterialInterfaceTransportVelocity.h"
@@ -68,6 +70,7 @@
 #include "FE/TimeStepping/FieldRepairPublication.h"
 #include "FE/TimeStepping/GeneratedState.h"
 #include "FE/TimeStepping/MeshNormalStageParticipant.h"
+#include "FE/TimeStepping/OperatorStageCapture.h"
 #include "FE/TimeStepping/NewtonSolver.h"
 #include "FE/TimeStepping/StepContext.h"
 #include "FE/TimeStepping/StepParticipants.h"
@@ -81,8 +84,6 @@
 #include "Physics/Core/PhysicsModule.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyCandidate.h"
 #include "FE/LevelSet/AcceptedFunctionalRecorder.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactStages.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactStageParticipant.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyParticipant.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/StaticCapillaryEquilibrium.h"
 #include "FE/LevelSet/TwoFluidAcceptedStage.h"
@@ -3496,29 +3497,32 @@ void requireCollectivePhasePreparation(
       local_failure, feCollectiveCommunicator(comm), phase);
 }
 
-// The accepted free-surface contact stages are Navier-Stokes free-surface
-// physics (Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactStages.h).
-using svmp::Physics::formulations::navier_stokes::free_surface::firstOrderGeneralizedAlphaContactProvenanceValid;
-using svmp::Physics::formulations::navier_stokes::free_surface::contactStageRealValuesMatch;
-using svmp::Physics::formulations::navier_stokes::free_surface::DynamicContactOperatorStageFieldSlice;
-using svmp::Physics::formulations::navier_stokes::free_surface::DynamicContactOperatorStageState;
-using svmp::Physics::formulations::navier_stokes::free_surface::DynamicContactFirstOrderGeneralizedAlphaObservation;
-using svmp::Physics::formulations::navier_stokes::free_surface::dynamicContactStageMeshRevisionMatches;
-using svmp::Physics::formulations::navier_stokes::free_surface::dynamicContactWallBoundaryFingerprint;
-using svmp::Physics::formulations::navier_stokes::free_surface::dynamicContactStageProvenanceMatches;
-using svmp::Physics::formulations::navier_stokes::free_surface::makeDynamicContactFirstOrderGeneralizedAlphaObservation;
-using svmp::Physics::formulations::navier_stokes::free_surface::captureDynamicContactOperatorStageState;
-using svmp::Physics::formulations::navier_stokes::free_surface::overlayDynamicContactOperatorStageState;
-using svmp::Physics::formulations::navier_stokes::free_surface::requireDynamicContactOperatorStageObservationConsensus;
-using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceContactStageTemporalCoordinates;
-using svmp::Physics::formulations::navier_stokes::free_surface::resolveFreeSurfaceContactStageTemporalCoordinates;
-using svmp::Physics::formulations::navier_stokes::free_surface::acceptedContactStageRevision;
-using svmp::Physics::formulations::navier_stokes::free_surface::evaluateAcceptedFreeSurfaceContactStages;
+// The accepted contact stages are FE services: the operator-stage capture
+// (FE/TimeStepping/OperatorStageCapture.h), the contact-line stage
+// observables (FE/Interfaces/ContactLineStageObservables.h), the accepted
+// wall-contact cells (FE/LevelSet/Maintenance/LevelSetWallAwareMaintenance.h)
+// and the step participant (FE/LevelSet/LevelSetContactStageParticipant.h).
+using svmp::FE::interfaces::firstOrderGeneralizedAlphaContactProvenanceValid;
+using svmp::FE::interfaces::contactStageRealValuesMatch;
+using svmp::FE::timestepping::DynamicContactOperatorStageFieldSlice;
+using svmp::FE::timestepping::DynamicContactOperatorStageState;
+using svmp::FE::timestepping::DynamicContactFirstOrderGeneralizedAlphaObservation;
+using svmp::FE::timestepping::dynamicContactStageMeshRevisionMatches;
+using svmp::FE::timestepping::dynamicContactWallBoundaryFingerprint;
+using svmp::FE::timestepping::dynamicContactStageProvenanceMatches;
+using svmp::FE::timestepping::makeDynamicContactFirstOrderGeneralizedAlphaObservation;
+using svmp::FE::timestepping::captureDynamicContactOperatorStageState;
+using svmp::FE::timestepping::overlayDynamicContactOperatorStageState;
+using svmp::FE::timestepping::requireDynamicContactOperatorStageObservationConsensus;
+using svmp::FE::timestepping::FreeSurfaceContactStageTemporalCoordinates;
+using svmp::FE::timestepping::resolveFreeSurfaceContactStageTemporalCoordinates;
+using svmp::FE::interfaces::acceptedContactStageRevision;
+using svmp::FE::interfaces::evaluateAcceptedFreeSurfaceContactStages;
 using svmp::FE::level_set::makeAcceptedSnapshotWallConstraint;
 using svmp::FE::level_set::canonicalizeAcceptedWallConstraints;
-using svmp::Physics::formulations::navier_stokes::free_surface::captureAcceptedContactStageWallConstraints;
-using svmp::Physics::formulations::navier_stokes::free_surface::bindAcceptedFreeSurfaceContactStagesToEndpointRevision;
-using svmp::Physics::formulations::navier_stokes::free_surface::assertAcceptedFreeSurfaceContactStageEndpointUnchanged;
+using svmp::FE::level_set::captureAcceptedContactStageWallConstraints;
+using svmp::FE::interfaces::bindAcceptedFreeSurfaceContactStagesToEndpointRevision;
+using svmp::FE::level_set::assertAcceptedFreeSurfaceContactStageEndpointUnchanged;
 
 std::shared_ptr<svmp::FE::geometry::GeometryMapping>
 createCellGeometryMapping(
@@ -3894,7 +3898,7 @@ void reimposeAcceptedMasterBearingState(
   }
 }
 
-using svmp::Physics::formulations::navier_stokes::free_surface::recordInitialFreeSurfaceDiscreteFunctionalBaseline;
+using svmp::FE::level_set::recordInitialAcceptedFunctionalBaseline;
 
 // The accepted-step maintenance pipeline is in
 // FE/LevelSet/Maintenance/LevelSetMaintenancePipeline.h.  The driver passes
@@ -8075,7 +8079,8 @@ buildAcceptedFreeSurfaceContactStageCandidate(
             contact_stage.stage_solution.data(),
             contact_stage.stage_solution.size()));
     contact_stage.stages = evaluateAcceptedFreeSurfaceContactStages(
-        sim,
+        *sim.fe_system,
+        svmp::FE::systems::functionalRecords(*sim.fe_system).functionalDeclarations(),
         stage_time,
         stage_alpha_f,
         previous_state_revision,
@@ -8084,7 +8089,9 @@ buildAcceptedFreeSurfaceContactStageCandidate(
         first_order_generalized_alpha);
     contact_stage.constraints =
         captureAcceptedContactStageWallConstraints(
-            sim, contact_stage.stages);
+            *sim.fe_system,
+            svmp::FE::systems::functionalRecords(*sim.fe_system).functionalDeclarations(),
+            contact_stage.stages);
   } catch (...) {
     local_stage_failure = std::current_exception();
   }
@@ -11040,7 +11047,8 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
             steady_solution, steady_comm);
     const auto steady_contact_stages =
         evaluateAcceptedFreeSurfaceContactStages(
-            sim,
+            *sim.fe_system,
+            svmp::FE::systems::functionalRecords(*sim.fe_system).functionalDeclarations(),
             static_cast<svmp::FE::Real>(solve_time),
             svmp::FE::Real{1.0},
             steady_state_revision,
@@ -11798,10 +11806,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       energy.evaluate_free_surface_residual_work;
   const std::uint64_t& free_surface_energy_attempt =
       energy.free_surface_energy_attempt;
-  // Accepted free-surface contact stages: Physics step participant
-  // (Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactStageParticipant.h).
+  // Accepted contact stages: FE step participant
+  // (FE/LevelSet/LevelSetContactStageParticipant.h).
   const auto contact_stage_participant =
-      std::make_shared<svmp::Physics::formulations::navier_stokes::free_surface::ContactStageParticipant>(
+      std::make_shared<svmp::FE::level_set::ContactStageParticipant>(
           free_surface_step_context,
           has_dynamic_contact_stage,
           free_surface_declarations,

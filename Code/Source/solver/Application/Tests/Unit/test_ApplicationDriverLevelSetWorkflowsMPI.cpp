@@ -6186,7 +6186,8 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
               accepted_endpoint.size()),
           activeFESystemCommunicator(*sim.fe_system));
   auto contact_stages = evaluateAcceptedFreeSurfaceContactStages(
-      sim,
+      *sim.fe_system,
+      svmp::FE::systems::functionalRecords(*sim.fe_system).functionalDeclarations(),
       svmp::FE::Real{0.10},
       svmp::FE::Real{1.0},
       previous_state_revision,
@@ -6194,7 +6195,10 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       std::span<const svmp::FE::Real>(solution.data(), solution.size()));
   ASSERT_EQ(contact_stages.size(), 1u);
   const auto contact_stage_constraints =
-      captureAcceptedContactStageWallConstraints(sim, contact_stages);
+      captureAcceptedContactStageWallConstraints(
+          *sim.fe_system,
+          svmp::FE::systems::functionalRecords(*sim.fe_system).functionalDeclarations(),
+          contact_stages);
   application::core::ResolvedLevelSetMaintenanceCompatibilityConfiguration contact_protection_request_configuration;
   contact_protection_request_configuration.transport.conservative_phase.liquid_indicator.field_name =
       "phi";

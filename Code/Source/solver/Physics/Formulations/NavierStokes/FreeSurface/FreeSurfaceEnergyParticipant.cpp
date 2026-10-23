@@ -13,8 +13,8 @@
 #include "FE/LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h"
 #include "FE/Systems/SystemCollectives.h"
 #include "FE/Systems/SystemState.h"
+#include "FE/TimeStepping/OperatorStageCapture.h"
 #include "FE/TimeStepping/StepController.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactStages.h"
 #include "FE/Systems/FunctionalRecords.h"
 
 #include <algorithm>
@@ -41,9 +41,11 @@ using svmp::FE::level_set::logLevelSetMaintenanceAcceptedStepEnergyAccount;
 using svmp::FE::level_set::mixConservativePhaseArtifactFingerprint;
 using svmp::FE::level_set::mixMaintenanceRevision;
 using svmp::FE::level_set::recordAcceptedFunctionals;
+using svmp::FE::level_set::recordInitialAcceptedFunctionalBaseline;
 using svmp::FE::level_set::requireCommunicatorConsistentAcceptedFunctionalCoverage;
 using svmp::FE::rank_log::oopCout;
 using svmp::FE::systems::captureFeOrderedVectorCollectively;
+using svmp::FE::timestepping::dynamicContactStageMeshRevisionMatches;
 using svmp::FE::systems::collectiveAnyTrue;
 using svmp::FE::systems::collectiveMaxDouble;
 using svmp::FE::systems::collectiveMinDouble;
@@ -456,7 +458,7 @@ void EnergyParticipant::recordInitialBaseline(
     const auto initial_solution =
         captureFeOrderedVectorCollectively(
             h.u(), active_comm);
-    recordInitialFreeSurfaceDiscreteFunctionalBaseline(
+    recordInitialAcceptedFunctionalBaseline(
         sim,
         static_cast<std::uint64_t>(h.stepIndex()),
         static_cast<svmp::FE::Real>(h.time()),
@@ -584,7 +586,7 @@ void EnergyParticipant::requireAcceptedResidualWorkStage(
 
 void EnergyParticipant::bindAcceptedEndpoint(
     svmp::FE::timestepping::TimeHistory& h,
-    ContactStageParticipant& contact_stage)
+    svmp::FE::level_set::ContactStageParticipant& contact_stage)
 {
   if (has_free_surface_functional) {
     const auto endpoint_solution =
