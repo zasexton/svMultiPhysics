@@ -310,35 +310,19 @@ void validate_free_surface_boundary_scope(
         "unsupported_free_surface_physical_model");
   }
 
-  std::size_t implementation_count = 0;
-  for (const auto key : {
-           "Implementation",
-       }) {
-    const auto it = params.find(key);
-    if (it == params.end() || !it->second.defined) {
-      continue;
-    }
-    ++implementation_count;
-    const auto implementation =
-        normalized_scope_token(it->second.value);
-    const bool supported =
-        implementation == "fitted" ||
-        implementation == "fittedale" ||
-        implementation == "ale" ||
-        implementation == "unfitted" ||
-        implementation == "unfittedlevelset" ||
-        implementation == "levelset" ||
-        implementation == "embeddedlevelset";
-    if (type != "freesurface" || !supported) {
+  // Implementation belongs to a Free_surface BC and must resolve through
+  // the free-surface schema.
+  const auto implementation_it = params.find("Implementation");
+  if (implementation_it != params.end() && implementation_it->second.defined) {
+    svmp::FE::options::OptionInput implementation;
+    implementation.add("Implementation", implementation_it->second.value);
+    if (type != "freesurface" ||
+        !free_surface_application_keys(implementation)
+             .implementation.has_value()) {
       throw std::runtime_error(
           "[svMultiPhysics::Physics] "
           "unsupported_free_surface_physical_model");
     }
-  }
-  if (implementation_count > 1) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Physics] "
-        "unsupported_free_surface_physical_model");
   }
 }
 
@@ -1337,7 +1321,8 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
     }
 
     if (free_surface_type) {
-      append_free_surface_bc(bc, is_steady, has_temp_spat, has_other_files, options);
+      options.free_surface.push_back(
+          resolve_free_surface_bc(bc, is_steady, has_temp_spat, has_other_files));
       continue;
     }
 

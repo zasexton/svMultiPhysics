@@ -23,6 +23,7 @@
 #include "Mesh/Mesh.h"
 #include "Physics/Core/PhysicsModule.h"
 #include "Physics/Core/EquationModuleInput.h"
+#include "Physics/Options/NavierStokesOptionSchema.h"
 #include "Physics/Options/NavierStokesRegistration.h"
 #include "Parameters.h"
 #include "FE/Systems/TwoFluidStageRecords.h"
@@ -508,12 +509,18 @@ bool hasUnfittedLevelSetFreeSurface(const EquationParameters& eq)
     return false;
   }
 
-  auto implementation_matches = [](const BoundaryConditionParameters& bc,
-                                   const std::string& key) {
-    const auto it = bc.extra_string_params.find(key);
-    return it != bc.extra_string_params.end() &&
-           it->second.defined() &&
-           lower_copy(it->second.value()) == "unfittedlevelset";
+  // The implementation as the register resolves it (free-surface schema).
+  auto is_unfitted = [](const BoundaryConditionParameters& bc) {
+    const auto it = bc.extra_string_params.find("Implementation");
+    if (it == bc.extra_string_params.end() || !it->second.defined()) {
+      return false;
+    }
+    svmp::FE::options::OptionInput input;
+    input.add("Implementation", it->second.value());
+    return svmp::Physics::options::free_surface_application_keys(input)
+               .implementation ==
+           svmp::Physics::formulations::navier_stokes::
+               FreeSurfaceImplementation::UnfittedLevelSet;
   };
 
   for (const auto* bc : eq.boundary_conditions) {
@@ -523,7 +530,7 @@ bool hasUnfittedLevelSetFreeSurface(const EquationParameters& eq)
     if (lower_copy(bc->type.value()) != "free_surface") {
       continue;
     }
-    if (implementation_matches(*bc, "Implementation")) {
+    if (is_unfitted(*bc)) {
       return true;
     }
   }

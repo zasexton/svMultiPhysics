@@ -14,13 +14,12 @@
  * @brief The Navier-Stokes option schema, the names of option values and the
  *        effective-configuration artifact
  *
- * Moved unchanged from the formulation folder (decisions D50 and D52):
+ * Moved from the formulation folder (decisions D50 and D52):
  *  - the input keys of a free-surface boundary condition and of its contact
  *    lines as option schemas (formerly FreeSurface/FreeSurfaceBoundarySchema;
- *    decision D47, step P1.2a).  The register still parses the input by
- *    hand; the schemas record where each resolved value came from in the
- *    "resolved" section of the artifact, and the parser of step P2 resolves
- *    with the same declarations;
+ *    decision D47, step P1.2a).  The register resolves a Free_surface
+ *    boundary condition with them (step P2), and the "resolved" section of
+ *    the artifact records where each value came from;
  *  - the input, artifact and log names of the free-surface option values,
  *    the mapping of the fitted tangential mesh policy to the FE system
  *    policy and the descriptor texts of the fitted rows (formerly
@@ -39,6 +38,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -218,17 +218,37 @@ systemTangentialMeshPolicy(FreeSurfaceTangentialMeshPolicy policy);
 
 namespace svmp::Physics::options {
 
-/// The hand-written parser of a Free_surface boundary condition (D47 P2
-/// re-poses it on the schemas of this file).
+/// The parser of a Free_surface boundary condition: its keys resolve through
+/// freeSurfaceBoundarySchema() and its contact lines through
+/// freeSurfaceContactLineInputSchema() (decision D47, step P2).
 bool is_free_surface_type(std::string_view raw);
 svmp::Physics::formulations::navier_stokes::FreeSurfaceImplementation
 free_surface_implementation_from_params(const svmp::Physics::ParameterMap& params);
-void append_free_surface_bc(
+svmp::Physics::formulations::navier_stokes::FreeSurfaceBoundary
+resolve_free_surface_bc(
     const svmp::Physics::BoundaryConditionInput& bc,
     bool is_steady,
     bool has_temp_spat,
-    bool has_other_files,
-    svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options);
+    bool has_other_files);
+
+/// The keys of a Free_surface boundary condition that the application reads
+/// before the register runs (generated-cut construction, face-name
+/// translation, solver settings), resolved through freeSurfaceBoundarySchema()
+/// so that the application and the register agree on them.
+struct FreeSurfaceApplicationKeys {
+  /// The stated implementation; std::nullopt when the input gives none, an
+  /// empty value or a value that does not parse (the register reports it).
+  std::optional<svmp::Physics::formulations::navier_stokes::FreeSurfaceImplementation>
+      implementation{};
+  /// Small_cut_aggregation (a relaxed boolean; true when not given).
+  bool small_cut_aggregation{true};
+};
+
+/// Reads Implementation and Small_cut_aggregation from the given entries;
+/// other keys are not read.
+FreeSurfaceApplicationKeys
+free_surface_application_keys(const svmp::FE::options::OptionInput& input);
+
 svmp::Physics::formulations::navier_stokes::
     IncompressibleNavierStokesVMSOptions
 translate_fitted_surface_contact_capability(

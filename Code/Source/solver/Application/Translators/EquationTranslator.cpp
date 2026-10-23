@@ -6,6 +6,7 @@
 #include "Parameters.h"
 #include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Core/EquationModuleRegistry.h"
+#include "Physics/Options/NavierStokesOptionSchema.h"
 
 #include <algorithm>
 #include <cctype>
@@ -119,11 +120,13 @@ bool is_unfitted_free_surface_bc(const svmp::Physics::ParameterMap& params)
   if (defined_param_token(params, "Type") != "freesurface") {
     return false;
   }
-  const auto implementation = defined_param_token(params, "Implementation");
-  return implementation == "unfitted" ||
-         implementation == "unfittedlevelset" ||
-         implementation == "levelset" ||
-         implementation == "embeddedlevelset";
+  // The implementation as the register resolves it (free-surface schema).
+  return svmp::Physics::options::free_surface_application_keys(
+             svmp::Physics::formulations::navier_stokes::
+                 optionInputFromParameters(params))
+             .implementation ==
+         svmp::Physics::formulations::navier_stokes::FreeSurfaceImplementation::
+             UnfittedLevelSet;
 }
 
 const svmp::Physics::ParameterValue* first_defined_param(

@@ -2,6 +2,7 @@
 
 #include "Application/Core/OopMpiLog.h"
 #include "Parameters.h"
+#include "Physics/Options/NavierStokesOptionSchema.h"
 
 #include <algorithm>
 #include <cctype>
@@ -701,19 +702,23 @@ activeCutVolumeRequests(const EquationParameters& equation)
     if (!type || normalizedToken(*type) != "freesurface") {
       continue;
     }
-    const auto implementation =
-        firstDefinedParameter(bc_params, {"Implementation"});
-    const auto implementation_token =
-        implementation.has_value() ? normalizedToken(*implementation)
-                                   : std::string{};
-    // Keep the accepted unfitted aliases synchronized with
-    // NavierStokesRegister.cpp::parse_free_surface_implementation. Otherwise
-    // Physics can install an active-domain/aggregation consumer for a BC that
-    // Application silently omits from generated cut-context construction.
-    if (implementation_token != "unfitted" &&
-        implementation_token != "unfittedlevelset" &&
-        implementation_token != "levelset" &&
-        implementation_token != "embeddedlevelset") {
+    // Implementation and Small_cut_aggregation resolve through the
+    // free-surface schema of the register, so that this construction and
+    // the active-domain and aggregation consumers of Physics agree.  An
+    // empty value is absent here; a value that does not parse leaves the BC
+    // to the register, which reports it.
+    svmp::FE::options::OptionInput free_surface_keys;
+    for (const auto& [name, value] : bc_params) {
+      if (!trimCopy(value).empty()) {
+        free_surface_keys.add(name, value);
+      }
+    }
+    const auto cut_keys =
+        svmp::Physics::options::free_surface_application_keys(
+            free_surface_keys);
+    if (cut_keys.implementation !=
+        svmp::Physics::formulations::navier_stokes::
+            FreeSurfaceImplementation::UnfittedLevelSet) {
       continue;
     }
     const auto request =
@@ -734,14 +739,7 @@ activeCutVolumeRequests(const EquationParameters& equation)
       // order to prove that every small-cut candidate reaches a valid
       // full-active root.  Retaining only the active cut-volume side makes
       // that proof impossible and can hide roots across an inactive/cut band.
-      // Keep these aliases and the default-true behavior synchronized with
-      // NavierStokesRegister.cpp and FreeSurfaceOptions.
-      const bool small_cut_aggregation =
-          firstDefinedBoolParameter(
-              bc_params,
-              {"Small_cut_aggregation"})
-              .value_or(true);
-      if (small_cut_aggregation) {
+      if (cut_keys.small_cut_aggregation) {
         if (const char* force = std::getenv("SVMP_CUT_RETENTION_FORCE");
             force != nullptr &&
             std::string_view(force) == "active_only") {

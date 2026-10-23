@@ -13,11 +13,12 @@
  * @brief Generic readers of equation input parameters
  *
  * Parameter-map access (find, defined, first defined over several
- * spellings), whole-text parsing of numbers, booleans, integer and
- * semicolon lists and three-vectors, and the element type and polynomial
- * order of a mesh.  Not specific to one formulation (decision D52: the
- * option readers live in Physics/Options, below no formulation).  Moved
- * unchanged from NavierStokesRegister.cpp.
+ * spellings), whole-text parsing of numbers, booleans, integer lists and
+ * three-vectors, and the element type and polynomial order of a mesh.
+ * Not specific to one formulation (decision D52: the option readers live in
+ * Physics/Options, below no formulation).  Moved from
+ * NavierStokesRegister.cpp; the list readers of the free-surface contact
+ * keys gave way to the schema codecs (D47 P2).
  */
 
 #include "FE/Core/Types.h"
@@ -52,7 +53,6 @@ svmp::FE::GlobalIndex parse_global_index(std::string_view raw, std::string_view 
 bool values_match(svmp::FE::Real a, svmp::FE::Real b);
 std::vector<std::string> split_csv_line(std::string_view line);
 std::vector<int> parse_int_list(std::string_view raw);
-std::vector<std::string> split_semicolon_entries(std::string_view raw);
 std::array<svmp::FE::Real, 3> parse_real_vector3(std::string_view raw,
                                                  std::string_view context);
 
@@ -77,14 +77,6 @@ std::size_t defined_parameter_count(
 bool any_parameter_defined(
     const svmp::Physics::ParameterMap& params,
     std::initializer_list<std::string_view> keys);
-std::optional<std::vector<int>> first_defined_int_entries(
-    const svmp::Physics::ParameterMap& params,
-    std::initializer_list<std::string_view> keys,
-    std::string_view context);
-std::optional<std::vector<std::array<svmp::FE::Real, 3>>>
-first_defined_vector3_entries(const svmp::Physics::ParameterMap& params,
-                              std::initializer_list<std::string_view> keys,
-                              std::string_view context);
 
 std::array<bool, 3> active_components_from_flags(const std::array<int, 3>& active, int dim);
 svmp::FE::Real direction_component(const std::vector<int>& effective_dir, int component);
