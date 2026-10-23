@@ -7963,6 +7963,221 @@ TEST(StandardAssemblerSolutionSetters, DirectTableReadsMatchPerEntryAccessorLoop
 }
 
 // ============================================================================
+// Deferred solution data: assembled cell and face contexts read the bits an
+// immediate evaluation gives
+// ============================================================================
+
+namespace {
+
+struct DeferredSolutionGuard {
+    explicit DeferredSolutionGuard(bool enabled)
+    {
+        detail::setDeferredSolutionDataForTesting(enabled);
+    }
+    ~DeferredSolutionGuard() { detail::setDeferredSolutionDataForTesting(true); }
+    DeferredSolutionGuard(const DeferredSolutionGuard&) = delete;
+    DeferredSolutionGuard& operator=(const DeferredSolutionGuard&) = delete;
+};
+
+// Records the bits of every solution accessor (current and two history
+// states) a cell or boundary-face context answers.
+class SolutionDataRecordingKernel final : public AssemblyKernel {
+public:
+    SolutionDataRecordingKernel(bool hessians, int history_states)
+        : hessians_(hessians), history_states_(history_states)
+    {
+    }
+
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/true, /*need_vector=*/true);
+        record(ctx);
+    }
+
+    [[nodiscard]] bool hasBoundaryFace() const noexcept override { return true; }
+
+    void computeBoundaryFace(const AssemblyContext& ctx, int /*boundary_marker*/,
+                             KernelOutput& output) override
+    {
+        const auto n = ctx.numTestDofs();
+        output.local_vector.assign(static_cast<std::size_t>(n), 0.0);
+        output.has_vector = true;
+        output.has_matrix = false;
+        output.n_test_dofs = n;
+        output.n_trial_dofs = ctx.numTrialDofs();
+        record(ctx);
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        auto data = RequiredData::BasisValues | RequiredData::PhysicalGradients |
+                    RequiredData::IntegrationWeights | RequiredData::SolutionValues |
+                    RequiredData::SolutionGradients;
+        if (hessians_) {
+            data = data | RequiredData::BasisHessians | RequiredData::SolutionHessians |
+                   RequiredData::SolutionLaplacians;
+        }
+        return data;
+    }
+
+    std::vector<std::uint64_t> recorded;
+
+private:
+    void put(Real v) { recorded.push_back(setterBits(v)); }
+    void put3(const AssemblyContext::Vector3D& v)
+    {
+        for (const Real x : v) put(x);
+    }
+    void put33(const AssemblyContext::Matrix3x3& m)
+    {
+        for (const auto& row : m) put3(row);
+    }
+
+    void record(const AssemblyContext& ctx)
+    {
+        recorded.push_back(ctx.hasSolutionData() ? 1u : 0u);
+        const auto nq = ctx.numQuadraturePoints();
+        for (LocalIndex q = 0; q < nq; ++q) {
+            if (ctx.trialFieldType() == FieldType::Scalar) {
+                put(ctx.solutionValue(q));
+                put3(ctx.solutionGradient(q));
+                if (hessians_) {
+                    put33(ctx.solutionHessian(q));
+                    put(ctx.solutionLaplacian(q));
+                }
+                for (int k = 1; k <= history_states_; ++k) {
+                    put(ctx.previousSolutionValue(q, k));
+                    put3(ctx.previousSolutionGradient(q, k));
+                }
+            } else {
+                put3(ctx.solutionVectorValue(q));
+                put33(ctx.solutionJacobian(q));
+                if (hessians_) {
+                    for (int c = 0; c < ctx.trialValueDimension(); ++c) {
+                        put33(ctx.solutionComponentHessian(q, c));
+                        put(ctx.solutionComponentLaplacian(q, c));
+                    }
+                }
+                for (int k = 1; k <= history_states_; ++k) {
+                    put3(ctx.previousSolutionVectorValue(q, k));
+                    put33(ctx.previousSolutionJacobian(q, k));
+                }
+            }
+        }
+    }
+
+    bool hessians_{false};
+    int history_states_{0};
+};
+
+[[nodiscard]] std::vector<Real> deferredSolutionVector(std::size_t n, Real scale, Real offset, bool non_finite,
+                                                       std::size_t special)
+{
+    std::vector<Real> v(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const Real sign = (i % 3u == 1u) ? Real{-1.0} : Real{1.0};
+        v[i] = sign * (scale * Real(i + 1) + offset);
+    }
+    v[special % n] = Real{-0.0};
+    if (non_finite) {
+        v[(special + 1u) % n] = std::numeric_limits<Real>::quiet_NaN();
+        v[(special + 2u) % n] = -std::numeric_limits<Real>::infinity();
+    }
+    return v;
+}
+
+} // namespace
+
+TEST(StandardAssemblerDeferredSolution, CellAndFaceSolutionDataMatchImmediateEvaluationBitwise)
+{
+    TimeIntegrationContext time_ctx;
+    time_ctx.integrator_name = "test-deferred-solution";
+    time_ctx.dt1 = TimeDerivativeStencil{
+        .order = 1,
+        .a = {Real(1.0), Real(-1.0), Real(0.25)},
+    };
+
+    const auto run_both = [](const auto& assemble) {
+        std::vector<std::uint64_t> immediate;
+        std::vector<std::uint64_t> deferred;
+        {
+            DeferredSolutionGuard guard(false);
+            immediate = assemble();
+        }
+        {
+            DeferredSolutionGuard guard(true);
+            deferred = assemble();
+        }
+        EXPECT_FALSE(immediate.empty());
+        EXPECT_EQ(deferred, immediate);
+    };
+
+    MockMeshAccess mesh;
+    auto p1 = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+    auto p2 = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/2);
+    auto p1_vector = std::make_shared<spaces::ProductSpace>(p1, /*components=*/3);
+    auto p2_vector = std::make_shared<spaces::ProductSpace>(p2, /*components=*/3);
+    struct Case {
+        const spaces::FunctionSpace* space;
+        bool hessians;
+        const char* label;
+    };
+    const std::vector<Case> cases{
+        {p1.get(), false, "cells P1 scalar"},
+        {p1.get(), true, "cells P1 scalar with Hessians"},
+        {p2.get(), true, "cells P2 scalar with Hessians"},
+        {p1_vector.get(), true, "cells P1 vector with Hessians"},
+        {p2_vector.get(), false, "cells P2 vector"},
+    };
+    for (const auto& c : cases) {
+        for (const bool non_finite : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << c.label << " non_finite=" << non_finite);
+            const auto n_cell = static_cast<GlobalIndex>(c.space->dofs_per_element());
+            auto dof_map = createTwoCellDisjointDofMap(n_cell);
+            const auto n_total = static_cast<std::size_t>(2 * n_cell);
+            const auto current = deferredSolutionVector(n_total, Real(0.11), Real(-0.07), non_finite, 1u);
+            const auto previous1 = deferredSolutionVector(n_total, Real(-0.05), Real(0.3), non_finite, 2u);
+            const auto previous2 = deferredSolutionVector(n_total, Real(0.02), Real(-0.4), false, 3u);
+            run_both([&] {
+                StandardAssembler assembler;
+                assembler.setDofMap(dof_map);
+                assembler.initialize();
+                assembler.setCurrentSolution(current);
+                assembler.setPreviousSolution(previous1);
+                assembler.setPreviousSolution2(previous2);
+                assembler.setTimeIntegrationContext(&time_ctx);
+                SolutionDataRecordingKernel kernel(c.hessians, /*history_states=*/2);
+                TestDenseSystemView system(static_cast<GlobalIndex>(n_total));
+                const auto result = assembler.assembleBoth(mesh, *c.space, *c.space, kernel, system, system);
+                EXPECT_TRUE(result.success);
+                return kernel.recorded;
+            });
+        }
+    }
+
+    for (const int order : {1, 2}) {
+        SCOPED_TRACE(order == 1 ? "face P1" : "face P2");
+        spaces::H1Space space(ElementType::Tetra4, order);
+        const auto n = static_cast<std::size_t>(space.dofs_per_element());
+        auto map = createSingleCellDofMap(static_cast<GlobalIndex>(n));
+        const auto current = deferredSolutionVector(n, Real(0.21), Real(-0.5), false, 0u);
+        for (LocalIndex local_face = 0; local_face < 4; ++local_face) {
+            SingleTetraBoundaryMeshAccess face_mesh(local_face);
+            run_both([&] {
+                StandardAssembler assembler;
+                assembler.setDofMap(map);
+                assembler.initialize();
+                assembler.setCurrentSolution(current);
+                SolutionDataRecordingKernel kernel(/*hessians=*/false, /*history_states=*/0);
+                DenseVectorView rhs(static_cast<GlobalIndex>(n));
+                (void)assembler.assembleBoundaryFaces(face_mesh, /*marker=*/1, space, kernel, nullptr, &rhs);
+                return kernel.recorded;
+            });
+        }
+    }
+}
+
+// ============================================================================
 // Basis Hessian transforms: the signed-zero rule reproduces the sums
 // ============================================================================
 

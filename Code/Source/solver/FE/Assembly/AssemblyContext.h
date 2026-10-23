@@ -834,8 +834,16 @@ public:
     [[nodiscard]] std::vector<Matrix3x3> trialRefHessiansRaw() const { return {trial_ref_hessians_.begin(), trial_ref_hessians_.end()}; }
 
     /** @brief Restore ref hessians from cached qpt-major data (no transpose). */
-    void restoreTestRefHessians(const std::vector<Matrix3x3>& data) { test_ref_hessians_.assign(data.begin(), data.end()); }
-    void restoreTrialRefHessians(const std::vector<Matrix3x3>& data) { trial_ref_hessians_.assign(data.begin(), data.end()); }
+    void restoreTestRefHessians(const std::vector<Matrix3x3>& data)
+    {
+        materializeDeferredSolutionData();
+        test_ref_hessians_.assign(data.begin(), data.end());
+    }
+    void restoreTrialRefHessians(const std::vector<Matrix3x3>& data)
+    {
+        materializeDeferredSolutionData();
+        trial_ref_hessians_.assign(data.begin(), data.end());
+    }
 
     // =========================================================================
     // Trial Basis Function Data (for rectangular assembly)
@@ -972,6 +980,15 @@ public:
     /**
      * @brief Set solution coefficients for evaluation
      *
+     * The coefficients are copied and checked here.  The quadrature-point
+     * values, gradients and Hessians they define are computed when they are
+     * first read (or before a basis table they depend on changes), with the
+     * same operations in the same order as an immediate evaluation; kernels
+     * that read only the raw coefficients (JIT kernels) never pay for them.
+     * configure(), configureFace() and configureForCoupledBlock() end the
+     * solution data of the previous entity: after them the solution accessors
+     * report "not set" until coefficients are set again.
+     *
      * @param coefficients DOF coefficients for current solution
      */
     void setSolutionCoefficients(std::span<const Real> coefficients);
@@ -1008,6 +1025,9 @@ public:
 
     /**
      * @brief Set k-th previous solution coefficients (u^{n-k})
+     *
+     * The quadrature-point data are computed on first read, as for
+     * setSolutionCoefficients().
      *
      * @param k History index (k=1 is u^{n-1})
      */
@@ -1237,6 +1257,7 @@ public:
      * @brief Check if solution data is available
      */
     [[nodiscard]] bool hasSolutionData() const noexcept {
+        materializeDeferredSolutionData();
         return !solution_values_.empty() || !solution_vector_values_.empty();
     }
 
@@ -2231,6 +2252,52 @@ private:
     // Indexing: history_solution_data_[k-1] corresponds to u^{n-k}, k >= 1.
     std::vector<HistorySolutionData> history_solution_data_{};
 
+    // Deferred quadrature-point solution data.  setSolutionCoefficients() and
+    // setPreviousSolutionCoefficientsK() copy and check the coefficients and
+    // record the scalars their loops read; the loops (unchanged) run in
+    // materializeDeferredSolutionData(), which every solution accessor calls
+    // first, as does every setter that changes a basis table, coefficient or
+    // solution array the loops read or write.  So the loops see the inputs of
+    // the set call, and a reader sees what an immediate evaluation would have
+    // left.  A later full set, clear(), clearPreviousSolutionDataK() and the
+    // configure*() calls drop pending data unread.  A context is used by one
+    // thread at a time (each assembly thread owns its contexts), so const
+    // readers may complete the evaluation in place.
+    struct DeferredSolutionInputs {
+        LocalIndex n_qpts{0};
+        LocalIndex n_trial_dofs{0};
+        LocalIndex n_test_dofs{0};
+        bool trial_is_test{true};
+        bool trial_is_vector_basis{false};
+        bool test_is_vector_basis{false};
+        FieldType trial_field_type{FieldType::Scalar};
+        int trial_value_dim{1};
+        int dim{3};
+        RequiredData required_data{RequiredData::None};
+        bool need_gradients{false};
+    };
+    mutable bool deferred_solution_pending_{false};
+    mutable std::size_t deferred_history_pending_count_{0};
+    DeferredSolutionInputs deferred_solution_inputs_{};
+    std::vector<DeferredSolutionInputs> deferred_history_inputs_{};  // [k-1]
+    std::vector<std::uint8_t> deferred_history_pending_{};           // [k-1]
+
+    [[nodiscard]] DeferredSolutionInputs currentSolutionInputs() const noexcept;
+    [[nodiscard]] bool solutionLoopsCannotThrow(const DeferredSolutionInputs& in) const noexcept;
+    [[nodiscard]] bool previousSolutionLoopsCannotThrow(const DeferredSolutionInputs& in) const noexcept;
+    void evaluateSolutionData(const DeferredSolutionInputs& in);
+    void evaluatePreviousSolutionData(std::size_t idx, const DeferredSolutionInputs& in);
+    void evaluateDeferredSolutionData();
+    void dropDeferredSolutionData() noexcept;
+    void dropDeferredPreviousSolutionData(std::size_t idx) noexcept;
+    void endSolutionDataOfPreviousEntity() noexcept;
+    void materializeDeferredSolutionData() const
+    {
+        if (deferred_solution_pending_ || deferred_history_pending_count_ != 0u) {
+            const_cast<AssemblyContext*>(this)->evaluateDeferredSolutionData();
+        }
+    }
+
     // Optional per-cell material state storage (owned externally)
     std::byte* material_state_old_base_{nullptr};
     std::byte* material_state_work_base_{nullptr};
@@ -2267,6 +2334,20 @@ private:
     // Remember last requested data flags so setSolutionCoefficients can compute only what is needed.
     RequiredData required_data_{RequiredData::None};
 };
+
+namespace detail {
+
+/**
+ * @brief Test-only switch for the deferred solution data of AssemblyContext.
+ *
+ * With `false`, setSolutionCoefficients() and setPreviousSolutionCoefficientsK()
+ * evaluate the quadrature-point data immediately (the reference the deferred
+ * evaluation must reproduce bit for bit).  The default is `true`.
+ * Process-wide; tests only.
+ */
+void setDeferredSolutionDataForTesting(bool enabled) noexcept;
+
+} // namespace detail
 
 // ============================================================================
 // Assembly Context Pool (for thread safety)
