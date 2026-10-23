@@ -18,8 +18,9 @@
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceDiagnosticOperators.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceFittedALE.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceQueries.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceValidation.h"
+#include "Physics/Options/NavierStokesOptionRules.h"
+#include "Physics/Options/NavierStokesOptionSchema.h"
 
 #include "FE/Constraints/ConstraintPlan.h"
 #include "FE/Constraints/InterfaceMeasureGaugeAnchor.h"
@@ -55,6 +56,23 @@ namespace svmp {
 namespace Physics {
 namespace formulations {
 namespace navier_stokes {
+
+/// The configured wall normal of a contact line, normalized, as a constant
+/// vector form (formerly FreeSurface/FreeSurfaceQueries).
+[[nodiscard]] inline FE::forms::FormExpr wallNormalExpression(
+    const IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine& contact_line,
+    int dim)
+{
+    const auto wall_normal = normalizedWallNormal(contact_line);
+    std::vector<FE::forms::FormExpr> wall_components;
+    wall_components.reserve(static_cast<std::size_t>(dim));
+    for (int d = 0; d < dim; ++d) {
+        wall_components.push_back(FE::forms::FormExpr::constant(
+            wall_normal[static_cast<std::size_t>(d)]));
+    }
+    return FE::forms::FormExpr::asVector(std::move(wall_components));
+}
+
 namespace Factories {
 
 namespace detail {

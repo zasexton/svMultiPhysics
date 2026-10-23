@@ -8,7 +8,8 @@
 #include "Physics/Formulations/NavierStokes/NavierStokesInitialConditions.h"
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceQueries.h"
+#include "Physics/Options/NavierStokesOptionRules.h"
+#include "Physics/Options/NavierStokesOptionSchema.h"
 
 #include "FE/Assembly/Assembler.h"
 #include "FE/Core/Logger.h"

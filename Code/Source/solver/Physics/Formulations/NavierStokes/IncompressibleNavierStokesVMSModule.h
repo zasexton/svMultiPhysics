@@ -45,13 +45,18 @@
 #include "FE/Forms/FormExpr.h"
 #include "FE/Spaces/FunctionSpace.h"
 
+#include <algorithm>
 #include <array>
+#include <cctype>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <variant>
 #include <vector>
 
@@ -684,6 +689,359 @@ struct IncompressibleNavierStokesVMSOptions {
     // always be finite and strictly between zero and one.
     FE::Real generated_boundary_nitsche_minimum_energy_ratio{0.25};
 };
+
+// ---------------------------------------------------------------------------
+// Option predicates the forms read (formerly FreeSurface/FreeSurfaceQueries;
+// decisions D50 and D52).  They read only option fields.
+// ---------------------------------------------------------------------------
+
+enum class ContactLineKind : std::uint8_t {
+    None,
+    Pinned,
+    PrescribedAngle,
+    DynamicRenE
+};
+
+[[nodiscard]] inline bool isUnfittedLevelSet(const FreeSurfaceBoundary& bc) noexcept
+{
+    return bc.implementation == FreeSurfaceImplementation::UnfittedLevelSet;
+}
+
+[[nodiscard]] inline bool isExteriorOnePhaseBoundary(
+    const FreeSurfaceBoundary& bc) noexcept
+{
+    return bc.role == FreeSurfaceBoundaryRole::ExteriorOnePhaseBoundary;
+}
+
+[[nodiscard]] inline bool isInternalMaterialInterfaceVolume(
+    const FreeSurfaceBoundary& bc) noexcept
+{
+    return bc.role ==
+        FreeSurfaceBoundaryRole::InternalMaterialInterfaceVolume;
+}
+
+[[nodiscard]] inline bool usesSurfaceStress(
+    const FreeSurfaceBoundary& bc) noexcept
+{
+    switch (bc.surface_tension_form) {
+    case FreeSurfaceSurfaceTensionForm::Automatic:
+        // The generated-interface rule (unfitted) or the current boundary
+        // (fitted) supplies both the measure and its normal, so the default
+        // is the variation of one discrete surface energy on both kinds of
+        // boundary (decision D47 Q2(b)).
+        return true;
+    case FreeSurfaceSurfaceTensionForm::SurfaceStress:
+        return true;
+    }
+    return false;
+}
+
+[[nodiscard]] inline bool surfaceStressActive(
+    const FreeSurfaceBoundary& bc) noexcept
+{
+    return usesSurfaceStress(bc) &&
+           !FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension);
+}
+
+inline bool usesSemiImplicitNormalIncrement(const FreeSurfaceBoundary& bc) noexcept
+{
+    return bc.surface_tension_semi_implicit ==
+           FreeSurfaceSurfaceTensionSemiImplicit::NormalIncrement;
+}
+
+[[nodiscard]] inline int freeSurfaceMarker(const FreeSurfaceBoundary& bc)
+{
+    return isUnfittedLevelSet(bc) ? bc.interface_marker : bc.boundary_marker;
+}
+
+[[nodiscard]] inline ContactLineKind contactLineKind(
+    const FreeSurfaceContactLine& contact_line) noexcept
+{
+    if (std::holds_alternative<FreeSurfaceContactLine::Pinned>(
+            contact_line.configuration)) {
+        return ContactLineKind::Pinned;
+    }
+    if (std::holds_alternative<FreeSurfaceContactLine::PrescribedAngle>(
+            contact_line.configuration)) {
+        return ContactLineKind::PrescribedAngle;
+    }
+    if (std::holds_alternative<FreeSurfaceContactLine::DynamicRenE>(
+            contact_line.configuration)) {
+        return ContactLineKind::DynamicRenE;
+    }
+    return ContactLineKind::None;
+}
+
+[[nodiscard]] inline int contactLineWallBoundaryMarker(
+    const FreeSurfaceContactLine& contact_line) noexcept
+{
+    return std::visit(
+        [](const auto& configuration) noexcept -> int {
+            using Configuration = std::decay_t<decltype(configuration)>;
+            if constexpr (std::is_same_v<Configuration,
+                                         FreeSurfaceContactLine::None>) {
+                return -1;
+            } else {
+                return configuration.wall_boundary_marker;
+            }
+        },
+        contact_line.configuration);
+}
+
+[[nodiscard]] inline int contactLineMarker(
+    const FreeSurfaceContactLine& contact_line) noexcept
+{
+    return std::visit(
+        [](const auto& configuration) noexcept -> int {
+            using Configuration = std::decay_t<decltype(configuration)>;
+            if constexpr (std::is_same_v<Configuration,
+                                         FreeSurfaceContactLine::None>) {
+                return -1;
+            } else {
+                return configuration.contact_line_marker;
+            }
+        },
+        contact_line.configuration);
+}
+
+[[nodiscard]] inline const IncompressibleNavierStokesVMSOptions::ScalarValue&
+contactLineAngleRadians(const FreeSurfaceContactLine& contact_line)
+{
+    return std::visit(
+        [](const auto& configuration)
+            -> const IncompressibleNavierStokesVMSOptions::ScalarValue& {
+            using Configuration = std::decay_t<decltype(configuration)>;
+            if constexpr (std::is_same_v<
+                              Configuration,
+                              FreeSurfaceContactLine::PrescribedAngle>) {
+                return configuration.contact_angle_radians;
+            } else if constexpr (std::is_same_v<
+                                     Configuration,
+                                     FreeSurfaceContactLine::DynamicRenE>) {
+                return configuration.equilibrium_contact_angle_radians;
+            } else {
+                throw std::logic_error(
+                    "contactLineAngleRadians requires an angle-bearing contact configuration");
+            }
+        },
+        contact_line.configuration);
+}
+
+[[nodiscard]] inline const IncompressibleNavierStokesVMSOptions::ScalarValue&
+contactLineMobility(const FreeSurfaceContactLine& contact_line)
+{
+    const auto* configuration =
+        std::get_if<FreeSurfaceContactLine::DynamicRenE>(
+            &contact_line.configuration);
+    if (configuration == nullptr) {
+        throw std::logic_error("contactLineMobility requires DynamicRenE");
+    }
+    return configuration->mobility;
+}
+
+[[nodiscard]] inline const IncompressibleNavierStokesVMSOptions::ScalarValue&
+contactLineSlipLength(const FreeSurfaceContactLine& contact_line)
+{
+    return std::visit(
+        [](const auto& configuration)
+            -> const IncompressibleNavierStokesVMSOptions::ScalarValue& {
+            using Configuration = std::decay_t<decltype(configuration)>;
+            if constexpr (std::is_same_v<
+                              Configuration,
+                              FreeSurfaceContactLine::PrescribedAngle>) {
+                if (!configuration.slip_length.has_value()) {
+                    throw std::logic_error(
+                        "contactLineSlipLength requires configured Navier slip");
+                }
+                return *configuration.slip_length;
+            } else if constexpr (std::is_same_v<
+                                     Configuration,
+                                     FreeSurfaceContactLine::DynamicRenE>) {
+                return configuration.slip_length;
+            } else {
+                throw std::logic_error(
+                    "contactLineSlipLength requires configured Navier slip");
+            }
+        },
+        contact_line.configuration);
+}
+
+[[nodiscard]] inline bool contactLineHasNavierSlip(
+    const FreeSurfaceContactLine& contact_line) noexcept
+{
+    return std::visit(
+        [](const auto& configuration) noexcept {
+            using Configuration = std::decay_t<decltype(configuration)>;
+            if constexpr (std::is_same_v<
+                              Configuration,
+                              FreeSurfaceContactLine::PrescribedAngle>) {
+                return configuration.slip_length.has_value();
+            } else {
+                return std::is_same_v<Configuration,
+                                      FreeSurfaceContactLine::DynamicRenE>;
+            }
+        },
+        contact_line.configuration);
+}
+
+[[nodiscard]] inline int contactLineConstraintMarker(
+    const IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine& contact_line)
+{
+    return contactLineMarker(contact_line) >= 0
+               ? contactLineMarker(contact_line)
+               : contactLineWallBoundaryMarker(contact_line);
+}
+
+[[nodiscard]] inline FE::Real constantScalarValueOrThrow(
+    const IncompressibleNavierStokesVMSOptions::ScalarValue& value,
+    std::string_view context)
+{
+    const auto* real = std::get_if<FE::Real>(&value);
+    if (real == nullptr) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: " + std::string(context) +
+            " currently requires a literal scalar value");
+    }
+    return *real;
+}
+
+[[nodiscard]] inline bool hasWallAwareContactLaw(
+    const FreeSurfaceBoundary& boundary)
+{
+    return std::any_of(
+        boundary.contact_lines.begin(),
+        boundary.contact_lines.end(),
+        [](const auto& contact_line) {
+            const auto kind = contactLineKind(contact_line);
+            return kind == ContactLineKind::PrescribedAngle ||
+                   kind == ContactLineKind::DynamicRenE;
+        });
+}
+
+[[nodiscard]] inline const std::array<IncompressibleNavierStokesVMSOptions::ScalarValue, 3>&
+contactLineWallNormal(const FreeSurfaceContactLine& contact_line)
+{
+    return std::visit(
+        [](const auto& configuration)
+            -> const std::array<
+                IncompressibleNavierStokesVMSOptions::ScalarValue, 3>& {
+            using Configuration = std::decay_t<decltype(configuration)>;
+            if constexpr (std::is_same_v<
+                              Configuration,
+                              FreeSurfaceContactLine::PrescribedAngle> ||
+                          std::is_same_v<
+                              Configuration,
+                              FreeSurfaceContactLine::DynamicRenE>) {
+                return configuration.wall_normal;
+            } else {
+                throw std::logic_error(
+                    "contactLineWallNormal requires an angle-bearing contact configuration");
+            }
+        },
+        contact_line.configuration);
+}
+
+[[nodiscard]] inline std::array<FE::Real, 3> normalizedWallNormal(
+    const IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine& contact_line)
+{
+    std::array<FE::Real, 3> normal{
+        constantScalarValueOrThrow(contactLineWallNormal(contact_line)[0], "contact-line wall_normal"),
+        constantScalarValueOrThrow(contactLineWallNormal(contact_line)[1], "contact-line wall_normal"),
+        constantScalarValueOrThrow(contactLineWallNormal(contact_line)[2], "contact-line wall_normal")};
+    if (!std::all_of(normal.begin(), normal.end(), [](FE::Real component) {
+            return std::isfinite(component);
+        })) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: prescribed contact angle requires finite wall_normal components");
+    }
+    const auto norm = std::sqrt(normal[0] * normal[0] +
+                                normal[1] * normal[1] +
+                                normal[2] * normal[2]);
+    if (!(norm > FE::Real{0.0}) || !std::isfinite(norm)) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: prescribed contact angle requires a finite, nonzero wall_normal");
+    }
+    for (auto& component : normal) {
+        component /= norm;
+    }
+    return normal;
+}
+
+[[nodiscard]] inline std::string normalizedFreeSurfaceOptionToken(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                   });
+    value.erase(std::remove_if(value.begin(), value.end(),
+                               [](unsigned char c) {
+                                   return c == '_' || c == '-' || std::isspace(c);
+                               }),
+                value.end());
+    return value;
+}
+
+[[nodiscard]] inline bool isRefreshedFrozenGeometryTangent(
+    const FreeSurfaceBoundary& bc)
+{
+    const auto token =
+        normalizedFreeSurfaceOptionToken(bc.geometry_tangent_policy);
+    return token.empty() || token == "refreshedfrozenquadrature" ||
+           token == "refreshedfrozen" || token == "frozenquadrature";
+}
+
+[[nodiscard]] inline bool isHighOrderImplicitGeneratedInterface(
+    const FreeSurfaceBoundary& bc)
+{
+    const auto token =
+        normalizedFreeSurfaceOptionToken(bc.generated_interface_geometry);
+    return token == "highorderimplicit" || token == "implicit" ||
+           token == "saye" || token == "sayeimplicit";
+}
+
+[[nodiscard]] inline const char* pressureStabilizationDisabledReason(
+    const FreeSurfaceBoundary& bc)
+{
+    switch (bc.cut_cell_stabilization.pressure_policy) {
+    case FreeSurfacePressureStabilizationPolicy::Enabled:
+    case FreeSurfacePressureStabilizationPolicy::Incremental:
+        return "none";
+    case FreeSurfacePressureStabilizationPolicy::Disabled:
+        return "explicit_policy_disabled";
+    case FreeSurfacePressureStabilizationPolicy::DisabledForRefreshedFrozenHighOrder:
+        break;
+    }
+    return isHighOrderImplicitGeneratedInterface(bc) &&
+                   isRefreshedFrozenGeometryTangent(bc)
+               ? "refreshed_frozen_high_order_policy"
+               : "none";
+}
+
+[[nodiscard]] inline bool pressureStabilizationDisabledByPolicy(
+    const FreeSurfaceBoundary& bc)
+{
+    return std::string_view(pressureStabilizationDisabledReason(bc)) != "none";
+}
+
+[[nodiscard]] inline bool pressureStabilizationActive(const FreeSurfaceBoundary& bc)
+{
+    return !pressureStabilizationDisabledByPolicy(bc) &&
+           !FE::forms::bc::isZeroConstantScalarValue(
+               bc.cut_cell_stabilization.pressure_gradient_penalty);
+}
+
+[[nodiscard]] inline FE::forms::CutVolumeSide activeDomainSide(
+    FreeSurfaceActiveDomain domain) noexcept
+{
+    switch (domain) {
+    case FreeSurfaceActiveDomain::None:
+    case FreeSurfaceActiveDomain::LevelSetNegative:
+        return FE::forms::CutVolumeSide::Negative;
+    case FreeSurfaceActiveDomain::LevelSetPositive:
+        return FE::forms::CutVolumeSide::Positive;
+    }
+    return FE::forms::CutVolumeSide::Negative;
+}
 
 // ---------------------------------------------------------------------------
 // Two-fluid options (IncompressibleTwoFluidModule)
