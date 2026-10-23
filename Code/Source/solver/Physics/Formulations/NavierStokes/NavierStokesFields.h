@@ -20,7 +20,7 @@
  */
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
-#include "Physics/Formulations/NavierStokes/NavierStokesPreflight.h"
+#include "Physics/Options/NavierStokesOptionRules.h"
 
 #include "FE/Systems/FieldBinding.h"
 

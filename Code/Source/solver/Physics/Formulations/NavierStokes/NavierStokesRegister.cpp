@@ -10,6 +10,7 @@
 #include "Physics/Materials/Fluid/CarreauYasudaViscosity.h"
 #include "Physics/Options/BoundaryDataReaders.h"
 #include "Physics/Options/InputReaders.h"
+#include "Physics/Options/NavierStokesOptionRules.h"
 #include "Physics/Options/NavierStokesRegistration.h"
 
 #include "FE/Core/Logger.h"
@@ -1633,36 +1634,6 @@ translate_fitted_surface_contact_capability(
         options);
   }
   return options;
-}
-
-void validate_fitted_surface_contact_capability(
-    const svmp::Physics::formulations::navier_stokes::
-        IncompressibleNavierStokesVMSOptions& options)
-{
-  using svmp::Physics::formulations::navier_stokes::
-      FreeSurfaceImplementation;
-  using ContactLine = svmp::Physics::formulations::navier_stokes::
-      IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine;
-
-  for (const auto& boundary : options.free_surface) {
-    if (boundary.implementation != FreeSurfaceImplementation::FittedALE) {
-      continue;
-    }
-    // Fitted SurfaceStress needs no opt-in (decision D47 Q2(b)); the module
-    // checks its frame, its surface tension and its contact lines.
-    for (const auto& contact_line : boundary.contact_lines) {
-      if (std::holds_alternative<ContactLine::PrescribedAngle>(
-              contact_line.configuration)) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: prescribed fitted contact angles are unsupported until a true fitted contact-line (codimension-two) integration entity is available; the condition must not be integrated over the complete free-surface boundary");
-      }
-      if (std::holds_alternative<ContactLine::DynamicRenE>(
-              contact_line.configuration)) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: DynamicContactAngle is currently supported only for sharp unfitted level-set free surfaces");
-      }
-    }
-  }
 }
 
 void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
