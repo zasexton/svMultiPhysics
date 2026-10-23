@@ -82,7 +82,7 @@
 #include "Mesh/Topology/DistributedTopology.h"
 #include "Physics/Core/PhysicsModule.h"
 #include "FE/LevelSet/AcceptedFunctionalRecorder.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyParticipant.h"
+#include "FE/LevelSet/LevelSetEnergyParticipant.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/StaticCapillaryEquilibrium.h"
 #include "FE/LevelSet/TwoFluidAcceptedStage.h"
 #include "FE/LevelSet/TwoFluidStageParticipant.h"
@@ -160,7 +160,6 @@ namespace {
 
 namespace static_capillary =
     svmp::Physics::formulations::navier_stokes::static_capillary;
-namespace free_surface = svmp::Physics::formulations::navier_stokes::free_surface;
 
 using Clock = std::chrono::steady_clock;
 using application::core::ActiveCutVolumeRequest;
@@ -11791,10 +11790,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       two_fluid_stage.evaluate_two_fluid_stage;
   const bool& reconcile_two_fluid_momentum =
       two_fluid_stage.reconcile_two_fluid_momentum;
-  // Free-surface energy account: Physics step participant
-  // (Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyParticipant.h).
+  // Free-surface energy account: FE step participant
+  // (FE/LevelSet/LevelSetEnergyParticipant.h).
   const auto energy_participant =
-      std::make_shared<svmp::Physics::formulations::navier_stokes::free_surface::EnergyParticipant>(
+      std::make_shared<svmp::FE::level_set::EnergyParticipant>(
           free_surface_step_context);
   auto& energy = *energy_participant;
   const auto& free_surface_declarations = energy.free_surface_declarations;

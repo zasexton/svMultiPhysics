@@ -1,21 +1,20 @@
-/* Copyright (c) Stanford University, The Regents of the
- * University of California, and others.
+/* Copyright (c) Stanford University, The Regents of the University of California, and others.
  *
  * All Rights Reserved.
  *
- * See License file.
+ * See Copyright-SimVascular.txt for additional details.
  */
 
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyParticipant.h"
+#include "LevelSet/LevelSetEnergyParticipant.h"
 
-#include "FE/Core/RankLog.h"
-#include "FE/LevelSet/LevelSetConservativePhaseWorkflow.h"
-#include "FE/LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h"
-#include "FE/Systems/SystemCollectives.h"
-#include "FE/Systems/SystemState.h"
-#include "FE/TimeStepping/OperatorStageCapture.h"
-#include "FE/TimeStepping/StepController.h"
-#include "FE/Systems/FunctionalRecords.h"
+#include "Core/RankLog.h"
+#include "LevelSet/LevelSetConservativePhaseWorkflow.h"
+#include "LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h"
+#include "Systems/SystemCollectives.h"
+#include "Systems/SystemState.h"
+#include "TimeStepping/OperatorStageCapture.h"
+#include "TimeStepping/StepController.h"
+#include "Systems/FunctionalRecords.h"
 
 #include <algorithm>
 #include <array>
@@ -29,31 +28,12 @@
 #include <string>
 #include <utility>
 
-namespace svmp::Physics::formulations::navier_stokes::free_surface {
+namespace svmp::FE::level_set {
 
-using svmp::FE::level_set::acceptedFunctionalDeclarationContentKey;
-using svmp::FE::level_set::aggregateLevelSetMaintenanceAcceptedStepEnergy;
-using svmp::FE::level_set::collectiveLevelSetMaintenanceAlgebraicRevision;
-using svmp::FE::level_set::FreeSurfaceAggregationEnergyClassification;
-using svmp::FE::level_set::FreeSurfaceCompleteEnergyBuildResult;
-using svmp::FE::level_set::FreeSurfaceResidualWorkChannels;
-using svmp::FE::level_set::buildFixedTopologyOnePhaseEnergyCandidate;
-using svmp::FE::level_set::buildUnstagedFreeSurfaceEnergyAttemptMetadata;
-using svmp::FE::level_set::classifyAcceptedAggregationEnergy;
-using svmp::FE::level_set::evaluateFreeSurfaceResidualWorkChannels;
-using svmp::FE::level_set::evaluateLevelSetMaintenancePhysicalEndpointChannels;
-using svmp::FE::level_set::freeSurfaceEnergyRejectionReasonForStepReject;
-using svmp::FE::level_set::logLevelSetMaintenancePhysicalEndpointChannels;
-using svmp::FE::level_set::summarizeAcceptedFreeSurfaceEnergyGroup;
-using svmp::FE::level_set::LevelSetMaintenanceWorkAttempt;
-using svmp::FE::level_set::LevelSetMaintenanceWorkLedger;
-using svmp::FE::level_set::LevelSetMaintenanceWorkRow;
-using svmp::FE::level_set::logLevelSetMaintenanceAcceptedStepEnergyAccount;
-using svmp::FE::level_set::mixConservativePhaseArtifactFingerprint;
-using svmp::FE::level_set::mixMaintenanceRevision;
-using svmp::FE::level_set::recordAcceptedFunctionals;
-using svmp::FE::level_set::recordInitialAcceptedFunctionalBaseline;
-using svmp::FE::level_set::requireCommunicatorConsistentAcceptedFunctionalCoverage;
+// Moved from the Navier-Stokes free-surface physics
+// (FreeSurface/FreeSurfaceEnergyParticipant.cpp); checks, collectives, messages
+// and log text unchanged.
+
 using svmp::FE::rank_log::oopCout;
 using svmp::FE::systems::captureFeOrderedVectorCollectively;
 using svmp::FE::timestepping::dynamicContactStageMeshRevisionMatches;
@@ -1794,4 +1774,4 @@ void EnergyParticipant::clearPendingAccount() noexcept
   pending_accepted_step_physical_endpoint_channels.reset();
 }
 
-} // namespace svmp::Physics::formulations::navier_stokes::free_surface
+} // namespace svmp::FE::level_set

@@ -1029,11 +1029,13 @@ if(FE_WITH_MESH)
         LevelSet/LevelSetGeometryService.h
         LevelSet/AcceptedFunctionalRecorder.h
         LevelSet/LevelSetContactStageParticipant.h
+        LevelSet/LevelSetEnergyParticipant.h
     )
     list(APPEND FE_LEVELSET_SOURCES
         LevelSet/LevelSetGeometryService.cpp
         LevelSet/AcceptedFunctionalRecorder.cpp
         LevelSet/LevelSetContactStageParticipant.cpp
+        LevelSet/LevelSetEnergyParticipant.cpp
     )
 endif()
 

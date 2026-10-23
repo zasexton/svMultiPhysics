@@ -1,16 +1,18 @@
-/* Copyright (c) Stanford University, The Regents of the
- * University of California, and others.
+/* Copyright (c) Stanford University, The Regents of the University of California, and others.
  *
  * All Rights Reserved.
  *
- * See License file.
+ * See Copyright-SimVascular.txt for additional details.
  */
 
-#pragma once
+#ifndef SVMP_FE_LEVELSET_LEVELSETENERGYPARTICIPANT_H
+#define SVMP_FE_LEVELSET_LEVELSETENERGYPARTICIPANT_H
 
 /**
- * @file
- * @brief Step participant of the free-surface energy account: the
+ * @file LevelSetEnergyParticipant.h
+ * @brief Step participant of the free-surface energy account of a level-set
+ *        run (moved from the Navier-Stokes free-surface physics,
+ *        FreeSurface/FreeSurfaceEnergyParticipant): the
  *        functional and residual-work declarations of the run, the
  *        backward-Euler residual-work stage of each candidate, the initial
  *        functional baseline, the accepted-step maintenance energy account
@@ -18,17 +20,17 @@
  *        the complete energy ledger with its accepted and rejected records.
  */
 
-#include "FE/LevelSet/AcceptedFunctionalRecorder.h"
+#include "LevelSet/AcceptedFunctionalRecorder.h"
 
-#include "FE/Backends/Interfaces/GenericVector.h"
-#include "FE/LevelSet/LevelSetContactStageParticipant.h"
-#include "FE/LevelSet/LevelSetEnergyBalance.h"
-#include "FE/Systems/FESystem.h"
-#include "FE/TimeStepping/StepContext.h"
-#include "FE/TimeStepping/StepController.h"
-#include "FE/TimeStepping/StepParticipants.h"
-#include "FE/TimeStepping/TimeHistory.h"
-#include "FE/TimeStepping/TimeLoop.h"
+#include "Backends/Interfaces/GenericVector.h"
+#include "LevelSet/LevelSetContactStageParticipant.h"
+#include "LevelSet/LevelSetEnergyBalance.h"
+#include "Systems/FESystem.h"
+#include "TimeStepping/StepContext.h"
+#include "TimeStepping/StepController.h"
+#include "TimeStepping/StepParticipants.h"
+#include "TimeStepping/TimeHistory.h"
+#include "TimeStepping/TimeLoop.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -37,7 +39,7 @@
 #include <span>
 #include <vector>
 
-namespace svmp::Physics::formulations::navier_stokes::free_surface {
+namespace svmp::FE::level_set {
 
 class EnergyParticipant final
     : public svmp::FE::timestepping::IStepParticipant,
@@ -159,4 +161,6 @@ public:
       pending_accepted_step_physical_endpoint_channels;
 };
 
-} // namespace svmp::Physics::formulations::navier_stokes::free_surface
+} // namespace svmp::FE::level_set
+
+#endif // SVMP_FE_LEVELSET_LEVELSETENERGYPARTICIPANT_H
