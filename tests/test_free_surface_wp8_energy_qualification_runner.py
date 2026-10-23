@@ -303,16 +303,16 @@ def test_wp8_production_source_contract_is_fail_closed(tmp_path):
             "selection.generalized_alpha_rho_inf = std::nullopt;",
             "selection.generalized_alpha_rho_inf = 0.5;",
         ),
-        "stage": (
-            "        .stage_alpha_f = svmp::FE::Real{1.0},",
-            "        .stage_alpha_f = svmp::FE::Real{0.5},",
-        ),
         "rate": (
             (
                 "opts.scheme == "
                 "svmp::FE::timestepping::SchemeKind::GeneralizedAlpha &&"
             ),
             "true &&",
+        ),
+        "resolver-binding": (
+            "contact_stage.resolveTemporalCoordinatesCollectively(",
+            "contact_stage.resolveTemporalCoordinates(",
         ),
     }
     for label, (before, after) in mutations.items():
@@ -323,6 +323,92 @@ def test_wp8_production_source_contract_is_fail_closed(tmp_path):
         runner.APPLICATION_DRIVER_SOURCE = path
         with pytest.raises(ValueError, match="WP-8 production"):
             runner.validate_wp8_production_source_contract()
+
+    # The contact-stage temporal resolver and its collective wrapper are
+    # found by symbol wherever they are defined; mutate them where they are.
+    runner = load_runner()
+    resolver_path = runner.contact_stage_temporal_resolver_source()
+    resolver_source = resolver_path.read_text(encoding="utf-8")
+    resolver_signature = (
+        "FreeSurfaceContactStageTemporalCoordinates\n"
+        "resolveFreeSurfaceContactStageTemporalCoordinates("
+    )
+    assert resolver_source.count(resolver_signature) == 1
+    resolver_mutations = {
+        "stage": (
+            "        .stage_alpha_f = svmp::FE::Real{1.0},",
+            "        .stage_alpha_f = svmp::FE::Real{0.5},",
+            "WP-8 production",
+        ),
+        "authentic-stage": (
+            "      .stage_time = observation.state_time,",
+            "      .stage_time = static_cast<svmp::FE::Real>(history.time()),",
+            "WP-8 production",
+        ),
+        "duplicate": (
+            resolver_signature,
+            resolver_signature + "\n    int) { return {}; }\n\n"
+            + resolver_signature,
+            "cannot isolate the contact stage temporal resolver",
+        ),
+        "missing": (
+            resolver_signature,
+            resolver_signature.replace("(", "Elsewhere(", 1),
+            "cannot isolate the contact stage temporal resolver",
+        ),
+    }
+    for label, (before, after, message) in resolver_mutations.items():
+        mutated = resolver_source.replace(before, after, 1)
+        assert mutated != resolver_source
+        path = tmp_path / f"resolver-{label}.cpp"
+        path.write_text(mutated, encoding="utf-8")
+        runner.SOURCE_OVERRIDES.clear()
+        runner.SOURCE_OVERRIDES[resolver_path] = path
+        with pytest.raises(ValueError, match=message):
+            runner.validate_wp8_production_source_contract()
+    runner.SOURCE_OVERRIDES.clear()
+
+    # The nominal scheme stage and generalized-alpha parameter construction
+    # stay out of the code the transient loop composes as step participants.
+    runner = load_runner()
+    (collective_path, collective_definition) = (
+        runner._isolate_production_definition(
+            runner.COLLECTIVE_CONTACT_STAGE_TEMPORAL_RESOLVER,
+            "resolveTemporalCoordinatesCollectively",
+            "collective contact stage temporal resolver",
+        )
+    )
+    collective_source = collective_path.read_text(encoding="utf-8")
+    participant_mutations = {
+        "nominal-stage": (
+            "        transient_scheme.scheme,\n",
+            "        transient_scheme.scheme,\n"
+            "        // transient_scheme.stage_alpha_f\n",
+            "nominal scheme stage",
+        ),
+        "nominal-scheme": (
+            "        transient_scheme.scheme,\n",
+            "        svmp::FE::timestepping::SchemeKind::GeneralizedAlpha,\n",
+            "collective resolution",
+        ),
+        "parameter-construction": (
+            "        transient_scheme.scheme,\n",
+            "        transient_scheme.scheme,\n"
+            "        // generalizedAlphaFirstOrderFromRhoInf(0.5)\n",
+            "generalized-alpha parameter construction",
+        ),
+    }
+    assert collective_definition.count("        transient_scheme.scheme,\n") == 1
+    for label, (before, after, message) in participant_mutations.items():
+        mutated = collective_source.replace(before, after, 1)
+        assert mutated != collective_source
+        path = tmp_path / f"participant-{label}.cpp"
+        path.write_text(mutated, encoding="utf-8")
+        runner.SOURCE_OVERRIDES.clear()
+        runner.SOURCE_OVERRIDES[collective_path] = path
+        with pytest.raises(ValueError, match=message):
+            runner.validate_wp8_production_source_contract()
+    runner.SOURCE_OVERRIDES.clear()
 
 
 def test_wp8_matrix_single_byte_mutation_is_rejected(tmp_path):

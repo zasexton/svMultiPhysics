@@ -56,6 +56,13 @@ APPLICATION_DRIVER_SOURCE = (
     / "Core"
     / "ApplicationDriver.cpp"
 )
+# The production sources that the contract searches for symbols (every C++
+# source and header under the solver tree outside Tests directories), so that
+# a definition is found wherever a refactoring moves it.
+PRODUCTION_SOURCE_ROOT = REPOSITORY_ROOT / "Code" / "Source" / "solver"
+PRODUCTION_SOURCE_SUFFIXES = (".cpp", ".h", ".hpp")
+# Fail-closed tests read a mutated copy in place of a production source.
+SOURCE_OVERRIDES: dict[Path, Path] = {}
 DEFAULT_REGISTRY = SCRIPT_PATH.with_name(
     "free_surface_wp8_energy_qualification_matrix.json"
 )
@@ -380,6 +387,195 @@ def _require_tokens_in_order(
         offset = location + len(token)
 
 
+def _production_sources(token: str) -> list[tuple[Path, str]]:
+    """The production sources that contain token, with their text."""
+    sources = []
+    for path in sorted(PRODUCTION_SOURCE_ROOT.rglob("*")):
+        if (
+            path.suffix not in PRODUCTION_SOURCE_SUFFIXES
+            or "Tests" in path.relative_to(PRODUCTION_SOURCE_ROOT).parts
+            or not path.is_file()
+        ):
+            continue
+        text = SOURCE_OVERRIDES.get(path, path).read_text(encoding="utf-8")
+        if token in text:
+            sources.append((path, text))
+    return sources
+
+
+def _skip_blanks_and_comments(text: str, index: int) -> int:
+    while index < len(text):
+        if text[index].isspace():
+            index += 1
+        elif text.startswith("//", index):
+            end = text.find("\n", index)
+            index = len(text) if end < 0 else end + 1
+        elif text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            index = len(text) if end < 0 else end + 2
+        else:
+            break
+    return index
+
+
+def _closing_bracket(text: str, index: int) -> int:
+    """Index just past the bracket that closes text[index] (one of '({['),
+    skipping comments and string and character literals; -1 when the text
+    ends first."""
+    closing = {"(": ")", "{": "}", "[": "]"}
+    stack = [closing[text[index]]]
+    position = index + 1
+    while position < len(text):
+        character = text[position]
+        if text.startswith("//", position):
+            end = text.find("\n", position)
+            if end < 0:
+                return -1
+            position = end + 1
+            continue
+        if text.startswith("/*", position):
+            end = text.find("*/", position + 2)
+            if end < 0:
+                return -1
+            position = end + 2
+            continue
+        raw = re.match(r'R"([^ ()\\\t\n]{0,16})\(', text[position:position + 20])
+        if raw and (position == 0 or not (text[position - 1].isalnum() or text[position - 1] == "_")):
+            end = text.find(")" + raw.group(1) + '"', position + raw.end())
+            if end < 0:
+                return -1
+            position = end + len(raw.group(1)) + 2
+            continue
+        if character == '"' or (
+            character == "'" and not text[position - 1].isalnum()
+        ):
+            end = position + 1
+            while end < len(text) and text[end] != character:
+                end += 2 if text[end] == "\\" else 1
+            if end >= len(text):
+                return -1
+            position = end + 1
+            continue
+        if character in closing:
+            stack.append(closing[character])
+        elif character in ")}]":
+            if not stack or stack.pop() != character:
+                return -1
+            if not stack:
+                return position + 1
+        position += 1
+    return -1
+
+
+def _function_definitions(text: str, declarator: re.Pattern[str]) -> list[str]:
+    """The text of every function definition in text whose declarator matches
+    declarator (a pattern that ends at the opening parenthesis of the
+    parameters), from the match to the brace that closes the body.
+    Declarations, deleted and defaulted functions are not definitions."""
+    definitions = []
+    for match in declarator.finditer(text):
+        index = _closing_bracket(text, match.end() - 1)
+        if index < 0:
+            continue
+        index = _skip_blanks_and_comments(text, index)
+        while True:
+            qualifier = re.match(r"(?:const|noexcept|override|final)\b", text[index:])
+            if qualifier is None:
+                break
+            index = _skip_blanks_and_comments(text, index + qualifier.end())
+            if text.startswith("(", index):
+                index = _skip_blanks_and_comments(
+                    text, _closing_bracket(text, index)
+                )
+        if text.startswith(":", index) and not text.startswith("::", index):
+            # constructor initializer list
+            index = _skip_blanks_and_comments(text, index + 1)
+            while index < len(text):
+                member = re.match(r"[A-Za-z_][\w:]*(?:<[^<>;{}]*>)?", text[index:])
+                if member is None:
+                    break
+                index = _skip_blanks_and_comments(text, index + member.end())
+                if index >= len(text) or text[index] not in "({":
+                    break
+                index = _skip_blanks_and_comments(
+                    text, _closing_bracket(text, index)
+                )
+                if text.startswith(",", index):
+                    index = _skip_blanks_and_comments(text, index + 1)
+                    continue
+                break
+        if not text.startswith("{", index):
+            continue
+        end = _closing_bracket(text, index)
+        if end < 0:
+            continue
+        definitions.append(text[match.start():end])
+    return definitions
+
+
+def _isolate_production_definition(
+    declarator: re.Pattern[str], token: str, label: str
+) -> tuple[Path, str]:
+    """The one production definition that declarator names, wherever it is."""
+    found = [
+        (path, definition)
+        for path, text in _production_sources(token)
+        for definition in _function_definitions(text, declarator)
+    ]
+    if len(found) != 1:
+        raise ValueError(
+            f"WP-8 production source contract cannot isolate the {label}"
+        )
+    return found[0]
+
+
+CONTACT_STAGE_TEMPORAL_RESOLVER = re.compile(
+    r"\b(?:\w+::)*FreeSurfaceContactStageTemporalCoordinates\s+"
+    r"(?:\w+::)*resolveFreeSurfaceContactStageTemporalCoordinates\s*\("
+)
+COLLECTIVE_CONTACT_STAGE_TEMPORAL_RESOLVER = re.compile(
+    r"\b(?:\w+::)*resolveTemporalCoordinatesCollectively\s*\("
+)
+STEP_PARTICIPANT_CLASS = re.compile(
+    r"\b(?:class|struct)\s+(\w+)(?:\s+final)?\s*:\s*(?:public\s+)?"
+    r"(?:\w+::)*IStepParticipant\b"
+)
+
+
+def contact_stage_temporal_resolver_source() -> Path:
+    """The production source that defines the contact-stage temporal
+    resolver."""
+    return _isolate_production_definition(
+        CONTACT_STAGE_TEMPORAL_RESOLVER,
+        "resolveFreeSurfaceContactStageTemporalCoordinates",
+        "contact stage temporal resolver",
+    )[0]
+
+
+def _step_participant_definitions() -> list[str]:
+    """The member function definitions of every production step participant
+    (a class derived from FE's IStepParticipant): the code that the
+    transient loop composes through its step callbacks."""
+    names = sorted(
+        {
+            match.group(1)
+            for _, text in _production_sources("IStepParticipant")
+            for match in STEP_PARTICIPANT_CLASS.finditer(text)
+        }
+    )
+    definitions = []
+    for name in names:
+        member = re.compile(rf"\b{name}::~?\w+\s*\(")
+        for _, text in _production_sources(f"{name}::"):
+            definitions.extend(_function_definitions(text, member))
+    if not names or not definitions:
+        raise ValueError(
+            "WP-8 production source contract cannot isolate the step "
+            "participants of the transient loop"
+        )
+    return definitions
+
+
 def validate_wp8_production_source_contract() -> dict[str, int]:
     parameters_header = PARAMETERS_HEADER.read_text(encoding="utf-8")
     parameters_source = PARAMETERS_SOURCE.read_text(encoding="utf-8")
@@ -523,22 +719,11 @@ def validate_wp8_production_source_contract() -> dict[str, int]:
         "pre-solve scheme selection and rate initialization",
     )
 
-    contact_resolver_start = application_source.find(
-        "FreeSurfaceContactStageTemporalCoordinates\n"
-        "resolveFreeSurfaceContactStageTemporalCoordinates("
+    _, contact_resolver = _isolate_production_definition(
+        CONTACT_STAGE_TEMPORAL_RESOLVER,
+        "resolveFreeSurfaceContactStageTemporalCoordinates",
+        "contact stage temporal resolver",
     )
-    contact_resolver_end = application_source.find(
-        "std::uint64_t acceptedContactStageRevision(",
-        contact_resolver_start,
-    )
-    if contact_resolver_start < 0 or contact_resolver_end < 0:
-        raise ValueError(
-            "WP-8 production source contract cannot isolate the contact "
-            "stage temporal resolver"
-        )
-    contact_resolver = application_source[
-        contact_resolver_start:contact_resolver_end
-    ]
     _require_tokens_in_order(
         contact_resolver,
         (
@@ -573,12 +758,39 @@ def validate_wp8_production_source_contract() -> dict[str, int]:
         ),
         "resolved prospective and final contact stages",
     )
-    if "transient_scheme.stage_alpha_f" in transient:
+    # Both contact-stage sites resolve through the collective resolver of
+    # the contact-stage step participant, which applies the resolver above to
+    # the run's actual transient scheme.
+    _, collective_resolver = _isolate_production_definition(
+        COLLECTIVE_CONTACT_STAGE_TEMPORAL_RESOLVER,
+        "resolveTemporalCoordinatesCollectively",
+        "collective contact stage temporal resolver",
+    )
+    _require_tokens_in_order(
+        collective_resolver,
+        (
+            "resolveFreeSurfaceContactStageTemporalCoordinates(",
+            "transient_scheme.scheme,",
+        ),
+        "collective resolution of the actual scheme's contact stage",
+    )
+    _require_tokens_in_order(
+        transient,
+        (
+            "const auto resolve_contact_stage_temporal_coordinates_collectively =",
+            "resolveTemporalCoordinatesCollectively(",
+        ),
+        "contact-stage sites bound to the collective resolver",
+    )
+    # The scheme-independent transient body: runTransient and the step
+    # participants it composes (code that left runTransient for them).
+    transient_body = (transient, *_step_participant_definitions())
+    if any("transient_scheme.stage_alpha_f" in part for part in transient_body):
         raise ValueError(
             "WP-8 production source contract forbids replacing authentic "
             "contact-stage provenance with the nominal scheme stage"
         )
-    if "generalizedAlphaFirstOrderFromRhoInf(" in transient:
+    if any("generalizedAlphaFirstOrderFromRhoInf(" in part for part in transient_body):
         raise ValueError(
             "WP-8 production source contract forbids generalized-alpha "
             "parameter construction in the scheme-independent transient body"
