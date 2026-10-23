@@ -20,7 +20,6 @@
  */
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
-#include "Physics/Formulations/NavierStokes/NavierStokesVMSFormulation.h"
 
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Constraints/ConstraintPlan.h"

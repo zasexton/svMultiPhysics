@@ -25,7 +25,6 @@
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesSupport.h"
-#include "Physics/Formulations/NavierStokes/NavierStokesVMSFormulation.h"
 
 #include "FE/Analysis/ConstitutiveLawMetadata.h"
 #include "FE/Constitutive/MetadataTaggedModel.h"

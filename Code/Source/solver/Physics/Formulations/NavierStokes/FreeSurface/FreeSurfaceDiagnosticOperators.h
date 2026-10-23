@@ -22,7 +22,7 @@
  */
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
-#include "Physics/Formulations/NavierStokes/NavierStokesVMSFormulation.h"
+#include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 
 #include "FE/Core/Types.h"
 #include "FE/Forms/FormExpr.h"

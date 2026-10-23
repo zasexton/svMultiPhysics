@@ -7,7 +7,6 @@
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceValidation.h"
 
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceCollectives.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactCertificate.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfacePressureGauge.h"
@@ -42,6 +41,7 @@
 #include "FE/Systems/ALEBinding.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormsInstaller.h"
+#include "FE/Systems/SystemCollectives.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
