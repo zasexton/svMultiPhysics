@@ -1686,6 +1686,140 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicEnforcementDefaultsToMeshN
 #endif
 }
 
+TEST(NavierStokesLegacyBCs, FreeSurfaceBoundaryKeysResolveThroughTheSchema)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    // Decision D47 (P2): the keys of a Free_surface boundary condition and of
+    // its contact lines resolve through the option schemas.  Values that do
+    // not parse report the schema texts (D52); the retired keys and values and
+    // the relations between keys keep the register's texts.
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+
+    constexpr int marker = 79;
+    auto mesh = buildSingleTetraBoundaryMesh(marker);
+    ASSERT_TRUE(mesh);
+
+    const auto make_input =
+        [&](const std::vector<std::pair<std::string, std::string>>& extra) {
+            svmp::Physics::EquationModuleInput input{};
+            input.equation_type = "fluid";
+            input.mesh_name = "single_tetra";
+            input.mesh = mesh->local_mesh_ptr();
+            input.equation_params["Enable_ALE"] = defined("true");
+            input.equation_params["Mesh_velocity_source"] =
+                defined("coupled_displacement");
+            input.equation_params["Auto_register_mesh_displacement_field"] =
+                defined("true");
+            input.default_domain.params["Density"] = defined("1.0");
+            input.default_domain.params["Viscosity.model"] =
+                defined("Constant");
+            input.default_domain.params["Viscosity.Value"] = defined("0.01");
+
+            svmp::Physics::BoundaryConditionInput bc{};
+            bc.name = "free_surface";
+            bc.boundary_marker = marker;
+            bc.params["Type"] = defined("Free_surface");
+            bc.params["Implementation"] = defined("FittedALE");
+            bc.params["External_pressure"] = defined("12.5");
+            bc.params["Surface_tension"] = defined("0.0");
+            bc.params["Tangential_mesh_policy"] = defined("Free");
+            for (const auto& [key, value] : extra) {
+                bc.params[key] = defined(value);
+            }
+            input.boundary_conditions.push_back(std::move(bc));
+            return input;
+        };
+
+    struct FailureCase {
+        std::vector<std::pair<std::string, std::string>> params;
+        std::string expected_message;
+    };
+    const std::vector<FailureCase> failures = {
+        // The scope check of the physical model reads Implementation first
+        // (through the schema) and keeps its token.
+        {{{"Implementation", "Sideways"}},
+         "[svMultiPhysics::Physics] unsupported_free_surface_physical_model"},
+        // Value and format errors: the schema texts.
+        {{{"Kinematic_enforcement", "Sideways"}},
+         "[Free_surface] Kinematic_enforcement: expected one of None | "
+         "MeshNitsche, got 'Sideways'"},
+        {{{"Active_domain_smoothing_width", "-1"}},
+         "[Free_surface] Active_domain_smoothing_width: number -1 outside "
+         "[0, inf]"},
+        {{{"Surface_tension", "abc"}},
+         "[Free_surface] Surface_tension: expected a number, got 'abc'"},
+        // "none" is not a value of the cap (std::stod rejected it before).
+        {{{"Cut_cell_metadata_scale_cap", "none"}},
+         "[Free_surface] Cut_cell_metadata_scale_cap: expected a number, got "
+         "'none'"},
+        {{{"Contact_line_model", "Sideways"}},
+         "[Free_surface contact line] Contact_line_model: expected one of "
+         "None | Pinned | PrescribedAngle | DynamicRenE, got 'Sideways'"},
+        {{{"Contact_line_model", "Pinned"},
+          {"Contact_line_wall_marker", "80"},
+          {"Contact_line_wall_markers", "80"}},
+         "[Free_surface contact line] Contact_line_wall_marker: defines more "
+         "than one spelling ('Contact_line_wall_markers' and "
+         "'Contact_line_wall_marker'); specify exactly one"},
+        // Retired values and relations keep the register's texts.
+        {{{"Surface_tension_form", "CurvatureTraction"}},
+         "[svMultiPhysics::Physics] Free-surface "
+         "Surface_tension_form=CurvatureTraction (CurvatureTraction) was "
+         "retired (decision D47 Q2); use SurfaceStress."},
+        {{{"Active_domain_method", "SmoothedIndicator"}},
+         "[svMultiPhysics::Physics] Free-surface "
+         "Active_domain_method=SmoothedIndicator (SmoothedIndicator) was "
+         "retired (decision D42); use CutVolume."},
+        {{{"Tangential_mesh_penalty", "2.0"}},
+         "[svMultiPhysics::Physics] Tangential_mesh_penalty requires "
+         "Tangential_mesh_policy=Prescribed or SmoothingOnly; Free has no "
+         "tangential boundary row."},
+        {{{"Prescribed_tangential_mesh_velocity", "1 0 0"}},
+         "[svMultiPhysics::Physics] Prescribed tangential mesh velocity "
+         "conflicts with an explicit non-Prescribed tangential policy."},
+    };
+    for (const auto& failure : failures) {
+        SCOPED_TRACE(failure.params.front().first + "=" +
+                     failure.params.front().second);
+        const auto input = make_input(failure.params);
+        svmp::FE::systems::FESystem system(mesh);
+        try {
+            auto module =
+                svmp::Physics::EquationModuleRegistry::instance().create(
+                    "fluid", input, system);
+            (void)module;
+            ADD_FAILURE() << "the input must fail";
+        } catch (const std::runtime_error& error) {
+            EXPECT_EQ(std::string(error.what()), failure.expected_message);
+        }
+    }
+
+    // Accepted: restated no-op values of retired switches (the register's
+    // relaxed booleans), and the level-set keys of an unfitted interface on
+    // a fitted boundary, which are not read.
+    const std::vector<std::vector<std::pair<std::string, std::string>>>
+        accepted = {
+            {{"Use_current_geometry_curvature", "no"}},
+            {{"Use_level_set_curvature", "off"}},
+            {{"Interface_marker", "not-a-marker"}},
+            {{"Level_set_isovalue", "not-a-number"}},
+        };
+    for (const auto& extra : accepted) {
+        SCOPED_TRACE(extra.front().first + "=" + extra.front().second);
+        const auto input = make_input(extra);
+        svmp::FE::systems::FESystem system(mesh);
+        EXPECT_NO_THROW({
+            auto module =
+                svmp::Physics::EquationModuleRegistry::instance().create(
+                    "fluid", input, system);
+            EXPECT_TRUE(module);
+        });
+    }
+#endif
+}
+
 TEST(NavierStokesLegacyBCs,
      FittedFreeSurfacePrescribedTangentialMeshPolicyTranslation)
 {
