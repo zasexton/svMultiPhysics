@@ -11908,9 +11908,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           velocity_extension_artifact_comm,
           "step_start_fixed_background_before_physical_solve");
     }
-    if (track_transient_cut_topology) {
-      cut_topology_attempt_tracker->beginAttempt();
-    }
     if (!step_acceptance_attempt_step.has_value() ||
         *step_acceptance_attempt_step != h.stepIndex()) {
       step_acceptance_attempt_step = h.stepIndex();
@@ -12032,14 +12029,21 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                 }}));
   }
   generated_state->bind(opts.newton);
+  // The cut geometry's part of each time step (the cut-topology attempt and
+  // the restore retention), composed with the callbacks below.
+  svmp::FE::timestepping::StepParticipantList cut_geometry_step_participants;
+  const auto cut_geometry_step =
+      svmp::FE::level_set::LevelSetGeometryStepParticipant::addTo(
+          cut_geometry_step_participants,
+          cut_geometry,
+          {.track_topology = track_transient_cut_topology});
   callbacks.on_before_physics_solve =
       [&](svmp::FE::timestepping::TimeHistory& h, double /*solve_time*/, double /*dt*/) {
-        armActiveCutRestoreRetention(*cut_refresh_cache);
-        const auto before_solve_cut_report =
-            cut_geometry->refreshCached(h.u(), "before_physics_solve");
-        if (track_transient_cut_topology) {
-          cut_topology_attempt_tracker->requireAcceptedBaseline();
-        }
+        // The cut geometry step participant has armed the restore
+        // retention, refreshed the geometry from this attempt-entry state
+        // and checked the accepted topology baseline.
+        const auto& before_solve_cut_report =
+            cut_geometry_step->attemptEntryReport();
         (void)projectLevelSetCurvatureFieldsFromState(
             sim,
             stateViewForHistory(h),
@@ -12553,14 +12557,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       };
   callbacks.on_step_candidate_discarded =
       [&](svmp::FE::timestepping::TimeHistory& h) {
-        cut_refresh_cache->closeReinstallWindow();
         energy.discardCandidate();
         pending_conservative_phase_stage.reset();
         pending_dynamic_contact_generalized_alpha_observation.reset();
         two_fluid_stage.resetAggregationEvidence();
-        if (track_transient_cut_topology) {
-          cut_topology_attempt_tracker->discardAttempt();
-        }
         fitted_ale_stage.discardCandidate();
         two_fluid_stage.discardCandidate();
         clear_pending_contact_provenance();
@@ -13053,14 +13053,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         }
         accepted_phase_candidate = std::move(pending_phase_candidate);
         pending_phase_candidate = ConservativePhaseCandidateResult{};
-        if (track_transient_cut_topology) {
-          cut_topology_attempt_tracker->completeAttempt(
-              cut_refresh_cache->topology_key);
-        }
   };
   double vtk_total_time = 0.0;
   callbacks.on_step_accepted = [&](svmp::FE::timestepping::TimeHistory& h) {
-    releaseActiveCutRestoreRetention(*cut_refresh_cache);
     requireCollectiveLevelSetMaintenanceRequestSchedule(
         level_set_maintenance,
         LevelSetMaintenanceScheduleStage::
@@ -14324,6 +14319,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   free_surface_step_participants.add(two_fluid_stage_participant);
   free_surface_step_participants.add(energy_participant);
   callbacks = free_surface_step_participants.callbacks(std::move(callbacks));
+  // The cut geometry's step participants: the entry part before each of its
+  // callbacks, the exit part before the discard and after the commit.
+  callbacks = cut_geometry_step_participants.callbacks(std::move(callbacks));
 
   capture_kinematic_baselines(*sim.time_history);
   svmp::FE::timestepping::TimeLoop loop(opts);

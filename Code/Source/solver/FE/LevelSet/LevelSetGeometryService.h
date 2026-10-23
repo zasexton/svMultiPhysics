@@ -40,6 +40,7 @@
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
 #include "Systems/SystemCollectives.h"
 #include "TimeStepping/GeneratedState.h"
+#include "TimeStepping/StepParticipants.h"
 #include "Mesh/Mesh.h"
 
 #include <cstddef>
@@ -675,6 +676,80 @@ public:
 private:
   std::shared_ptr<LevelSetGeometryService> service_;
   Options options_;
+};
+
+/**
+ * @brief The cut geometry's part of each time step, as TimeLoop hooks.
+ *
+ * The attempt protocol of the cut topology (the service's
+ * TransientCutTopologyAttemptTracker) and the restore retention of the
+ * refresh cache, at the points of the step where the transient driver ran
+ * them.  Two parts keep that order around the caller's own callbacks;
+ * addTo() registers both:
+ * - Entry (StepParticipantOrder::BeforeBase): step start begins the topology
+ *   attempt; before the physics solve arms the restore retention, refreshes
+ *   the cut geometry from the attempt-entry state ("before_physics_solve")
+ *   and requires the accepted topology baseline that this refresh seeds;
+ *   step accepted releases the retention.
+ * - Exit (StepParticipantOrder::AfterBase, whose candidate-discarded hook
+ *   runs before the caller's): candidate discarded closes the reinstall
+ *   window and discards the attempt, so that the caller's rollback refresh
+ *   is not observed by the attempt; commit ready completes the attempt after
+ *   the caller's commit.
+ * Without topology tracking only the retention, the reinstall window and the
+ * attempt-entry refresh remain.  Every hook is collective where the refresh
+ * is.
+ */
+class LevelSetGeometryStepParticipant final
+    : public svmp::FE::timestepping::IStepParticipant {
+public:
+  enum class Part : std::uint8_t {
+    Entry,
+    Exit
+  };
+
+  struct Options {
+    /// The attempt tracker follows the cut topology of each attempt.
+    bool track_topology{false};
+  };
+
+  LevelSetGeometryStepParticipant(
+      std::shared_ptr<LevelSetGeometryService> service,
+      Part part,
+      Options options);
+
+  /// Registers the entry part (BeforeBase) and the exit part (AfterBase) of
+  /// @p service with @p list; returns the entry part, whose
+  /// attemptEntryReport() the caller's before-physics-solve hook reads.
+  static std::shared_ptr<LevelSetGeometryStepParticipant> addTo(
+      svmp::FE::timestepping::StepParticipantList& list,
+      std::shared_ptr<LevelSetGeometryService> service,
+      Options options);
+
+  [[nodiscard]] svmp::FE::timestepping::StepHook hooks()
+      const noexcept override;
+
+  void onStepStart(const svmp::FE::timestepping::TimeHistory& history) override;
+  bool onBeforePhysicsSolve(svmp::FE::timestepping::TimeHistory& history,
+                            double solve_time,
+                            double dt) override;
+  void onStepCandidateDiscarded(
+      svmp::FE::timestepping::TimeHistory& history) override;
+  void onStepCommitReady(svmp::FE::timestepping::TimeHistory& history) override;
+  void onStepAccepted(svmp::FE::timestepping::TimeHistory& history) override;
+
+  /// The report of the latest attempt-entry refresh.
+  [[nodiscard]] const ActiveCutContextRefreshReport& attemptEntryReport()
+      const noexcept
+  {
+    return attempt_entry_report_;
+  }
+
+private:
+  std::shared_ptr<LevelSetGeometryService> service_;
+  Part part_;
+  Options options_;
+  ActiveCutContextRefreshReport attempt_entry_report_{};
 };
 
 } // namespace level_set

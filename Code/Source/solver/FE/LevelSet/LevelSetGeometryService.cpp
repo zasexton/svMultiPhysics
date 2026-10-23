@@ -26,6 +26,7 @@
 #include "Systems/CutIntegrationInvalidation.h"
 #include "Systems/FESystem.h"
 #include "Systems/SystemState.h"
+#include "TimeStepping/TimeHistory.h"
 
 #include <algorithm>
 #include <array>
@@ -4975,6 +4976,106 @@ void LevelSetGeometryParticipant::acknowledgeFrozenEpoch()
       << cut_topology_attempt_tracker->attemptTopologyKey()
              .value_or(0u)
       << " action=accept_on_frozen_epoch" << std::endl;
+}
+
+// ---------------------------------------------------------------------------
+// LevelSetGeometryStepParticipant
+// ---------------------------------------------------------------------------
+//
+// The statements are the cut-geometry statements of the TimeLoop callbacks
+// of ApplicationDriver's runTransient, unchanged and in their order.  The
+// retention, attempt-entry refresh and baseline check were the first
+// statements of the before-physics-solve callback and the release the first
+// of the accepted callback; the attempt completion was the last statement of
+// the commit callback.  The attempt begin (step start) and discard
+// (candidate discarded) move ahead of caller statements that neither refresh
+// the cut geometry nor read the tracker, and the discard stays ahead of the
+// caller's rollback refresh.
+
+LevelSetGeometryStepParticipant::LevelSetGeometryStepParticipant(
+    std::shared_ptr<LevelSetGeometryService> service,
+    Part part,
+    Options options)
+    : service_(std::move(service)), part_(part), options_(options)
+{
+  if (!service_) {
+    throw std::invalid_argument(
+        "LevelSetGeometryStepParticipant: null geometry service");
+  }
+}
+
+std::shared_ptr<LevelSetGeometryStepParticipant>
+LevelSetGeometryStepParticipant::addTo(
+    svmp::FE::timestepping::StepParticipantList& list,
+    std::shared_ptr<LevelSetGeometryService> service,
+    Options options)
+{
+  auto entry = std::make_shared<LevelSetGeometryStepParticipant>(
+      service, Part::Entry, options);
+  auto exit = std::make_shared<LevelSetGeometryStepParticipant>(
+      std::move(service), Part::Exit, options);
+  list.add(entry, svmp::FE::timestepping::StepParticipantOrder::BeforeBase);
+  list.add(std::move(exit),
+           svmp::FE::timestepping::StepParticipantOrder::AfterBase);
+  return entry;
+}
+
+svmp::FE::timestepping::StepHook LevelSetGeometryStepParticipant::hooks()
+    const noexcept
+{
+  using svmp::FE::timestepping::StepHook;
+  if (part_ == Part::Entry) {
+    return (options_.track_topology ? StepHook::StepStart : StepHook::None) |
+           StepHook::BeforePhysicsSolve | StepHook::Accepted;
+  }
+  return StepHook::CandidateDiscarded |
+         (options_.track_topology ? StepHook::CommitReady : StepHook::None);
+}
+
+void LevelSetGeometryStepParticipant::onStepStart(
+    const svmp::FE::timestepping::TimeHistory& /*history*/)
+{
+  if (options_.track_topology) {
+    service_->topologyTracker().beginAttempt();
+  }
+}
+
+bool LevelSetGeometryStepParticipant::onBeforePhysicsSolve(
+    svmp::FE::timestepping::TimeHistory& history,
+    double /*solve_time*/,
+    double /*dt*/)
+{
+  armActiveCutRestoreRetention(service_->refreshCache());
+  attempt_entry_report_ =
+      service_->refreshCached(history.u(), "before_physics_solve");
+  if (options_.track_topology) {
+    service_->topologyTracker().requireAcceptedBaseline();
+  }
+  return true;
+}
+
+void LevelSetGeometryStepParticipant::onStepCandidateDiscarded(
+    svmp::FE::timestepping::TimeHistory& /*history*/)
+{
+  service_->refreshCache().closeReinstallWindow();
+  if (options_.track_topology) {
+    service_->topologyTracker().discardAttempt();
+  }
+}
+
+void LevelSetGeometryStepParticipant::onStepCommitReady(
+    svmp::FE::timestepping::TimeHistory& /*history*/)
+{
+  if (options_.track_topology) {
+    service_->topologyTracker().completeAttempt(
+        service_->refreshCache().topology_key);
+  }
+}
+
+void LevelSetGeometryStepParticipant::onStepAccepted(
+    svmp::FE::timestepping::TimeHistory& /*history*/)
+{
+  releaseActiveCutRestoreRetention(service_->refreshCache());
 }
 
 } // namespace level_set

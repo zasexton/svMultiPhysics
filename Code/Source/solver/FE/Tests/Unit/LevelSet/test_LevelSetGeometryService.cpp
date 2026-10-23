@@ -11,11 +11,15 @@
 
 #if SVMP_FE_WITH_MESH
 
+#include "Backends/Interfaces/BackendFactory.h"
+#include "Backends/Interfaces/BackendKind.h"
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "LevelSet/LevelSetGeometryService.h"
 #include "Systems/SystemCollectives.h"
 #include "Systems/SystemState.h"
 #include "TimeStepping/GeneratedState.h"
+#include "TimeStepping/StepParticipants.h"
+#include "TimeStepping/TimeHistory.h"
 
 #include <map>
 #include <optional>
@@ -282,6 +286,126 @@ TEST(LevelSetGeometryService, ParticipantEpochsFollowTheAttemptTracker)
   EXPECT_FALSE(options.external_state_discontinuity(Point::OuterFixedPointState));
   ASSERT_TRUE(static_cast<bool>(options.external_state_epoch_revisited));
   EXPECT_FALSE(options.external_state_epoch_revisited(Point::OuterFixedPointState));
+}
+
+TEST(LevelSetGeometryService, StepParticipantDeclaresTheHooksOfEachPart)
+{
+  namespace ts = svmp::FE::timestepping;
+  using Part = ls::LevelSetGeometryStepParticipant::Part;
+  HostStorage storage;
+  auto service = std::make_shared<ls::LevelSetGeometryService>(
+      storage.host(), std::vector<ls::ActiveCutVolumeRequest>{});
+  const ls::LevelSetGeometryStepParticipant tracked_entry(
+      service, Part::Entry, {.track_topology = true});
+  const ls::LevelSetGeometryStepParticipant tracked_exit(
+      service, Part::Exit, {.track_topology = true});
+  EXPECT_EQ(tracked_entry.hooks(), ts::StepHook::StepStart |
+                                       ts::StepHook::BeforePhysicsSolve |
+                                       ts::StepHook::Accepted);
+  EXPECT_EQ(tracked_exit.hooks(),
+            ts::StepHook::CandidateDiscarded | ts::StepHook::CommitReady);
+  // Without tracking the attempt hooks go away.
+  const ls::LevelSetGeometryStepParticipant entry(service, Part::Entry, {});
+  const ls::LevelSetGeometryStepParticipant exit_part(service, Part::Exit, {});
+  EXPECT_EQ(entry.hooks(),
+            ts::StepHook::BeforePhysicsSolve | ts::StepHook::Accepted);
+  EXPECT_EQ(exit_part.hooks(), ts::StepHook::CandidateDiscarded);
+  EXPECT_THROW((void)ls::LevelSetGeometryStepParticipant(nullptr, Part::Entry, {}),
+               std::invalid_argument);
+}
+
+TEST(LevelSetGeometryService, StepParticipantRunsTheAttemptProtocolAroundTheCallbacks)
+{
+#if !(defined(FE_HAS_EIGEN) && FE_HAS_EIGEN)
+  GTEST_SKIP() << "the attempt-entry refresh needs a time history (Eigen backend)";
+#else
+  namespace ts = svmp::FE::timestepping;
+  using Pin = ls::ActiveCutContextRefreshCache::RestorePinState;
+  HostStorage storage;
+  auto service = std::make_shared<ls::LevelSetGeometryService>(
+      storage.host(), std::vector<ls::ActiveCutVolumeRequest>{});
+  service->trackTopology();
+  auto& cache = service->refreshCache();
+  auto& tracker = service->topologyTracker();
+
+  // The callbacks record what they see of the cut geometry.
+  std::vector<std::string> calls;
+  ts::TimeLoopCallbacks base;
+  base.on_step_start = [&](const ts::TimeHistory&) {
+    calls.push_back(tracker.attemptActive() ? "start:attempt" : "start:none");
+  };
+  base.on_before_physics_solve = [&](ts::TimeHistory&, double, double) {
+    calls.push_back(cache.restore_pin_state == Pin::Armed ? "solve:armed"
+                                                          : "solve:idle");
+    return true;
+  };
+  base.on_step_candidate_discarded = [&](ts::TimeHistory&) {
+    calls.push_back(tracker.attemptActive() || cache.reinstall_window_open
+                        ? "discard:open"
+                        : "discard:closed");
+  };
+  base.on_step_commit_ready = [&](ts::TimeHistory&) {
+    calls.push_back(tracker.attemptActive() ? "commit:attempt" : "commit:none");
+  };
+  base.on_step_accepted = [&](ts::TimeHistory&) {
+    calls.push_back(cache.restore_pin_state == Pin::Idle ? "accepted:released"
+                                                         : "accepted:armed");
+  };
+  ts::StepParticipantList list;
+  const auto entry = ls::LevelSetGeometryStepParticipant::addTo(
+      list, service, {.track_topology = true});
+  ASSERT_EQ(list.size(), 2u);
+  ASSERT_TRUE(entry);
+  const auto composed = list.callbacks(base);
+
+  auto factory = svmp::FE::backends::BackendFactory::create(
+      svmp::FE::backends::BackendKind::Eigen);
+  ASSERT_TRUE(factory);
+  auto history = ts::TimeHistory::allocate(*factory, 1);
+
+  // Step start begins the attempt before the callback.
+  composed.on_step_start(history);
+  EXPECT_TRUE(tracker.attemptActive());
+
+  // Without an FE system the attempt-entry refresh seeds no baseline, so the
+  // baseline check stops the hook before the callback.
+  EXPECT_THROW((void)composed.on_before_physics_solve(history, 0.0, 1.0),
+               std::runtime_error);
+  EXPECT_EQ(cache.restore_pin_state, Pin::Armed);
+  EXPECT_FALSE(entry->attemptEntryReport().refreshed);
+  ls::releaseActiveCutRestoreRetention(cache);
+
+  // Once a before_physics_solve refresh has seeded the baseline, the hook
+  // arms the retention before the callback.
+  ls::ActiveCutContextRefreshReport report;
+  report.refreshed = true;
+  report.topology_key = 5u;
+  ls::observeActiveCutContextRefresh(cache, report, "before_physics_solve");
+  ASSERT_EQ(tracker.acceptedTopologyKey(), std::optional<std::uint64_t>(5u));
+  EXPECT_TRUE(composed.on_before_physics_solve(history, 0.0, 1.0));
+
+  // Commit ready completes the attempt after the callback.
+  ls::observeActiveCutContextRefresh(cache, report, "final_candidate_topology_gate");
+  cache.topology_key = 5u;
+  composed.on_step_commit_ready(history);
+  EXPECT_FALSE(tracker.attemptActive());
+  EXPECT_EQ(tracker.acceptedTopologyKey(), std::optional<std::uint64_t>(5u));
+
+  // Step accepted releases the retention before the callback.
+  composed.on_step_accepted(history);
+
+  // A discarded candidate closes the reinstall window and discards the
+  // attempt before the callback, and so before the caller's rollback.
+  composed.on_step_start(history);
+  cache.reinstall_window_open = true;
+  composed.on_step_candidate_discarded(history);
+  EXPECT_FALSE(tracker.attemptActive());
+  EXPECT_FALSE(cache.reinstall_window_open);
+
+  EXPECT_EQ(calls, (std::vector<std::string>{"start:attempt", "solve:armed",
+                                             "commit:attempt", "accepted:released",
+                                             "start:attempt", "discard:closed"}));
+#endif
 }
 
 #endif // SVMP_FE_WITH_MESH

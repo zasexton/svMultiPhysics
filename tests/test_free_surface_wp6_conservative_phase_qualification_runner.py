@@ -336,10 +336,11 @@ def test_wp6_production_source_contract_is_fail_closed(tmp_path):
     }
 
     source = APPLICATION_DRIVER_SOURCE_PATH.read_text(encoding="utf-8")
+    # The cut-geometry step participant, composed before the callback,
+    # releases the rank-local restore retention.
     accepted_callback_start = (
         "callbacks.on_step_accepted = "
         "[&](svmp::FE::timestepping::TimeHistory& h) {\n"
-        "    releaseActiveCutRestoreRetention(*cut_refresh_cache);\n"
         "    requireCollectiveLevelSetMaintenanceRequestSchedule("
     )
     assert source.count(accepted_callback_start) == 1
