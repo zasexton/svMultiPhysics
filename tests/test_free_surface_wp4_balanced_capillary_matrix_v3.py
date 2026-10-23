@@ -45,6 +45,9 @@ ADDITIONAL = "ADDITIONAL_LEVEL_REQUIRED"
 # Frozen study axes that execute through the retired projection
 # reinitialization (decision D47).
 RETIRED_REINITIALIZATION_AXES = {"phi_scale", "bulk_redistance_cadence"}
+# Every frozen physical case is capillary and executes through the kinematic
+# area-gradient traction, which decision D48 retired.
+RETIRED_TRACTION = "decision D48"
 
 
 def registry():
@@ -377,10 +380,13 @@ def test_energy_variation_count_is_positive_and_bound_to_exact_gates():
     ]
 
 
-def test_selected_traction_commands_have_one_explicit_quadratic_interface_order(
-    tmp_path,
-):
+def test_capillary_traction_commands_fail_closed_after_retirement(tmp_path):
     value = registry()
+    common = value["common_runner_arguments"]
+    assert option_values(common, "--capillary-force-form") == [
+        "kinematic_area_gradient_traction"
+    ]
+    assert option_values(common, "--interface-quadrature-order") == ["2"]
     cases = [
         case
         for case in runner.expand_cases(value)
@@ -388,23 +394,17 @@ def test_selected_traction_commands_have_one_explicit_quadratic_interface_order(
     ]
     assert cases
     for case in cases:
-        arguments = runner.physical_case_arguments(
-            value,
-            case,
-            solver=tmp_path / "solver",
-            qualification_log=tmp_path / f"{case['case_id']}.json",
-        )
-        if case["surface_tension"] <= 0.0:
-            continue
-        assert option_values(arguments, "--capillary-force-form") == [
-            "kinematic_area_gradient_traction"
-        ]
-        orders = option_values(arguments, "--interface-quadrature-order")
-        assert len(orders) == 1
-        assert int(orders[0]) >= 2
+        assert case["surface_tension"] > 0.0
+        with pytest.raises(runner.MatrixError, match=RETIRED_TRACTION):
+            runner.physical_case_arguments(
+                value,
+                case,
+                solver=tmp_path / "solver",
+                qualification_log=tmp_path / f"{case['case_id']}.json",
+            )
 
 
-def test_closed_circle_commands_propagate_the_declared_radius(tmp_path):
+def test_closed_circle_cases_declare_the_radius_and_fail_closed(tmp_path):
     value = registry()
     cases = [
         case
@@ -413,13 +413,14 @@ def test_closed_circle_commands_propagate_the_declared_radius(tmp_path):
     ]
     assert cases
     for case in cases:
-        arguments = runner.physical_case_arguments(
-            value,
-            case,
-            solver=tmp_path / "solver",
-            qualification_log=tmp_path / f"{case['case_id']}.json",
-        )
-        assert option_values(arguments, "--capillary-droplet-radius") == ["0.2"]
+        assert case["radius"] == 0.2
+        with pytest.raises(runner.MatrixError, match=RETIRED_TRACTION):
+            runner.physical_case_arguments(
+                value,
+                case,
+                solver=tmp_path / "solver",
+                qualification_log=tmp_path / f"{case['case_id']}.json",
+            )
 
 
 def test_conflicting_study_interface_order_override_is_rejected():
@@ -488,13 +489,13 @@ def test_time_refinement_preserves_one_positive_physical_horizon(tmp_path):
         ordered = sorted(by_dt, reverse=True)
         assert [by_dt[dt] for dt in ordered] == sorted(by_dt.values())
         for case in selected:
-            arguments = runner.physical_case_arguments(
-                value,
-                case,
-                solver=tmp_path / "solver",
-                qualification_log=tmp_path / f"{case['case_id']}.json",
-            )
-            assert option_values(arguments, "--steps") == [str(case["step_count"])]
+            with pytest.raises(runner.MatrixError, match=RETIRED_TRACTION):
+                runner.physical_case_arguments(
+                    value,
+                    case,
+                    solver=tmp_path / "solver",
+                    qualification_log=tmp_path / f"{case['case_id']}.json",
+                )
 
 
 @pytest.mark.parametrize(
@@ -1088,7 +1089,8 @@ def test_intrinsic_completion_gate_is_derived_from_gtest_status():
     assert rejected["passed"] is False
 
 
-def test_physical_execution_adapter_uses_v3_argument_mapping(monkeypatch, tmp_path):
+def test_physical_execution_adapter_fails_closed_through_v3_argument_mapping(
+        monkeypatch, tmp_path):
     value = registry()
     case = runner.expand_cases(value)[0]
     observed = {}
@@ -1103,24 +1105,18 @@ def test_physical_execution_adapter_uses_v3_argument_mapping(monkeypatch, tmp_pa
         return {"selected_case_count": len(cases)}
 
     monkeypatch.setattr(runner, "_V2_RUN_PHYSICAL_CASES", delegated)
-    result = runner.run_physical_cases(
-        value,
-        [case],
-        solver=tmp_path / "solver",
-        output_root=tmp_path / "output",
-        rerun=False,
-    )
-    assert result == {"selected_case_count": 1}
-    assert option_values(observed["arguments"], "--steps") == [
-        str(case["step_count"])
-    ]
-    assert option_values(
-        observed["arguments"], "--interface-quadrature-order"
-    ) == ["2"]
+    with pytest.raises(runner.MatrixError, match=RETIRED_TRACTION):
+        runner.run_physical_cases(
+            value,
+            [case],
+            solver=tmp_path / "solver",
+            output_root=tmp_path / "output",
+            rerun=False,
+        )
+    assert observed == {}
 
 
-def test_physical_arguments_select_sampled_admission_limit_without_relaxing_minimized_equilibrium(
-        tmp_path):
+def test_sampled_and_minimized_closed_circle_commands_fail_closed(tmp_path):
     value = registry()
     cases = runner.expand_cases(value)
     sampled = next(
@@ -1131,26 +1127,18 @@ def test_physical_arguments_select_sampled_admission_limit_without_relaxing_mini
         case for case in cases
         if case["study_id"] == "closed_circle_discrete_minimizer"
     )
-    minimized_arguments = runner.physical_case_arguments(
-        value,
-        minimized,
-        solver=tmp_path / "solver",
-        qualification_log=tmp_path / "minimized-qualification.json",
-    )
     assert option_values(
-        minimized_arguments,
+        value["common_runner_arguments"],
         "--max-free-surface-pressure-representability-relative-distance",
     ) == ["1e-8"]
-    sampled_arguments = runner.physical_case_arguments(
-        value,
-        sampled,
-        solver=tmp_path / "solver",
-        qualification_log=tmp_path / "sampled-qualification.json",
-    )
-    assert option_values(
-        sampled_arguments,
-        "--max-free-surface-pressure-representability-relative-distance",
-    ) == ["1.0"]
+    for case, log in ((minimized, "minimized"), (sampled, "sampled")):
+        with pytest.raises(runner.MatrixError, match=RETIRED_TRACTION):
+            runner.physical_case_arguments(
+                value,
+                case,
+                solver=tmp_path / "solver",
+                qualification_log=tmp_path / f"{log}-qualification.json",
+            )
 
 
 @pytest.mark.parametrize(

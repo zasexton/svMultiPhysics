@@ -110,6 +110,11 @@ HIGH_ORDER_CAPILLARY_BALANCE_CASES = ("capillaryarc2d",)
 HIGH_ORDER_CAPILLARY_DROPLET_EQUILIBRIUM_CASES = ("droplet2d",)
 HIGH_ORDER_CAPILLARY_WAVE_CASES = ("capillarywave2d",)
 QUALIFICATION_REPORT_SCHEMA_VERSION = 2
+# Capillary force form of the free surface.  Decision D48 (2026-10-22)
+# retired the kinematic area-gradient traction (KinematicAreaGradientTraction);
+# SurfaceStress is the only capillary route.
+CAPILLARY_FORCE_FORMS = ("surface_stress",)
+RETIRED_CAPILLARY_FORCE_FORMS = ("kinematic_area_gradient_traction",)
 HIGH_ORDER_SYNTHETIC_CASES = {
     "capillaryarc2d",
     "capillarywave2d",
@@ -632,6 +637,17 @@ def navier_stokes_linear_solver(root: ET.Element) -> ET.Element:
     raise ValueError("missing fluid NS linear solver block")
 
 
+def validate_capillary_force_form(capillary_force_form: str) -> None:
+    """Raise ValueError unless the form is surface_stress (decision D48)."""
+    if capillary_force_form in RETIRED_CAPILLARY_FORCE_FORMS:
+        raise ValueError(
+            f"capillary force form {capillary_force_form} was retired by "
+            "decision D48: SurfaceStress (surface_stress) is the only "
+            "capillary route")
+    if capillary_force_form not in CAPILLARY_FORCE_FORMS:
+        raise ValueError("capillary force form must be surface_stress")
+
+
 def configure_solver(solver_xml: Path,
                      steps: int,
                      time_step_size: float | None = None,
@@ -856,14 +872,6 @@ def configure_solver(solver_xml: Path,
         set_text(free_surface, "Implicit_cut_max_subdivision_depth", str(implicit_cut_max_subdivision_depth))
     if generated_interface_quadrature_order is not None:
         set_text(free_surface, "Generated_interface_quadrature_order", str(generated_interface_quadrature_order))
-    if (capillary_force_form == "kinematic_area_gradient_traction" and
-            surface_tension is not None and surface_tension > 0.0):
-        if interface_quadrature_order is None:
-            interface_quadrature_order = 2
-        elif interface_quadrature_order < 2:
-            raise ValueError(
-                "kinematic area-gradient traction requires interface "
-                "quadrature order at least two")
     if interface_quadrature_order is not None:
         set_text(free_surface, "Interface_quadrature_order", str(interface_quadrature_order))
     if volume_quadrature_order is not None:
@@ -900,22 +908,11 @@ def configure_solver(solver_xml: Path,
             pressure_stabilization_policy_names[
                 cut_cell_pressure_stabilization_policy],
         )
-    capillary_force_form_names = {
-        "surface_stress": "SurfaceStress",
-        "kinematic_area_gradient_traction": "KinematicAreaGradientTraction",
-    }
-    if capillary_force_form not in capillary_force_form_names:
-        raise ValueError(
-            "capillary force form must be surface_stress or "
-            "kinematic_area_gradient_traction")
+    validate_capillary_force_form(capillary_force_form)
     if surface_tension is not None:
         set_text(free_surface, "Surface_tension", f"{surface_tension:.16g}")
         if surface_tension > 0.0:
-            set_text(
-                free_surface,
-                "Surface_tension_form",
-                capillary_force_form_names[capillary_force_form],
-            )
+            set_text(free_surface, "Surface_tension_form", "SurfaceStress")
     if wet_extension_advection_velocity_method is not None:
         level_set = level_set_equation(root)
         constant_velocity = level_set.find("Constant_velocity")
@@ -931,30 +928,11 @@ def configure_solver(solver_xml: Path,
             "Wet_extension_advection_velocity_method",
             wet_extension_advection_velocity_method,
         )
-    if (capillary_force_form == "kinematic_area_gradient_traction" and
-            surface_tension is not None and surface_tension > 0.0):
-        if not projected_curvature_field:
-            raise ValueError(
-                "kinematic area-gradient traction requires an explicit "
-                "projected curvature field")
-        if curvature_projection_recovery_mode != "kinematic_area_gradient":
-            raise ValueError(
-                "kinematic area-gradient traction requires the "
-                "kinematic_area_gradient recovery mode")
-        if curvature_projection_kinematic_area_gradient_filter_coefficient != 0.0:
-            raise ValueError(
-                "kinematic area-gradient traction requires an explicit zero "
-                "area-gradient filter coefficient")
-        if curvature_projection_smoothing_iterations not in (None, 0):
-            raise ValueError(
-                "kinematic area-gradient traction does not admit separate "
-                "post-projection smoothing")
     if projected_curvature_field:
         level_set = level_set_equation(root)
         set_text(level_set, "Enable_curvature_projection", "true")
         set_text(level_set, "Projected_curvature_field", projected_curvature_field)
-        if (capillary_force_form == "kinematic_area_gradient_traction" or
-                not (surface_tension is not None and surface_tension > 0.0)):
+        if not (surface_tension is not None and surface_tension > 0.0):
             set_text(free_surface, "Curvature_field", projected_curvature_field)
             set_text(free_surface, "Use_level_set_curvature", "false")
         else:
@@ -6134,23 +6112,6 @@ def static_capillary_equilibrium_initialization_errors(
             errors.append(
                 "discrete static-capillary initialization has invalid "
                 f"{key} {value!r}"
-            )
-    if getattr(args, "capillary_force_form", None) == (
-            "kinematic_area_gradient_traction"):
-        analytic_evaluations = record.get("analytic_derivative_evaluations")
-        difference_components = record.get(
-            "finite_difference_fourth_order_components")
-        if (isinstance(analytic_evaluations, bool) or
-                not isinstance(analytic_evaluations, int) or
-                analytic_evaluations <= 0):
-            errors.append(
-                "kinematic area-gradient static initialization did not use "
-                "exact functional derivatives"
-            )
-        if difference_components != 0:
-            errors.append(
-                "kinematic area-gradient static initialization unexpectedly "
-                "used finite-difference derivative components"
             )
     iterations = record.get("iterations")
     if (isinstance(iterations, bool) or not isinstance(iterations, int) or
@@ -12398,71 +12359,8 @@ def case_args_for_run(case_name: str,
             }):
         raise ValueError(
             "matrix-owned static physical gates require a static capillary case")
-    kinematic_area_gradient_traction = (
-        getattr(case_args, "capillary_force_form", "surface_stress") ==
-        "kinematic_area_gradient_traction"
-    )
-    if kinematic_area_gradient_traction:
-        if getattr(case_args, "use_high_order_implicit_cuts", False):
-            raise ValueError(
-                "kinematic area-gradient traction requires an affine P1 "
-                "simplex mesh")
-        if not getattr(case_args, "projected_curvature_field", None):
-            raise ValueError(
-                "kinematic area-gradient traction requires an explicit "
-                "projected curvature field")
-        set_default(
-            case_args,
-            "curvature_projection_recovery_mode",
-            "kinematic_area_gradient",
-        )
-        set_default(
-            case_args,
-            "curvature_projection_kinematic_area_gradient_filter_coefficient",
-            0.0,
-        )
-        set_default(
-            case_args,
-            "curvature_projection_smoothing_iterations",
-            0,
-        )
-        set_default(
-            case_args,
-            "cut_cell_pressure_stabilization_policy",
-            "incremental",
-        )
-        if (case_args.curvature_projection_recovery_mode !=
-                "kinematic_area_gradient"):
-            raise ValueError(
-                "kinematic area-gradient traction requires the "
-                "kinematic_area_gradient recovery mode")
-        if (case_args
-                .curvature_projection_kinematic_area_gradient_filter_coefficient
-                != 0.0):
-            raise ValueError(
-                "kinematic area-gradient traction requires a zero "
-                "area-gradient filter coefficient")
-        if case_args.curvature_projection_smoothing_iterations != 0:
-            raise ValueError(
-                "kinematic area-gradient traction does not admit "
-                "separate post-projection smoothing")
-        case_args.require_curvature_projection_diagnostics = True
-        case_args.require_curvature_projection_newton_freshness = True
-        set_default(
-            case_args,
-            "expect_curvature_projection_recovery_mode",
-            "kinematic_area_gradient",
-        )
-        set_default(
-            case_args,
-            "min_diagnostic_curvature_projection_count",
-            1,
-        )
-        set_default(
-            case_args,
-            "max_diagnostic_curvature_projection_zero_fallback_vertices",
-            0,
-        )
+    validate_capillary_force_form(
+        getattr(case_args, "capillary_force_form", "surface_stress"))
     if (getattr(
             case_args,
             "initialize_discrete_static_contact_geometry",
@@ -12955,10 +12853,6 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
 
     try:
         run_dir = Path(temp_name) / case_name
-        uses_kinematic_area_gradient_traction = (
-            getattr(args, "capillary_force_form", "surface_stress") ==
-            "kinematic_area_gradient_traction"
-        )
         if source is None:
             if case_name == "curvedtet3d":
                 write_curved_tet3d_case(run_dir, args.steps)
@@ -12969,8 +12863,7 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 write_capillary_arc2d_case(
                     run_dir, args.steps, pressure_jump,
                     args.synthetic_nx, args.synthetic_ny,
-                    uses_kinematic_area_gradient_traction,
-                    active_domain)
+                    active_domain=active_domain)
             elif case_name == "droplet2d":
                 droplet_radius = float(getattr(
                     args,
@@ -12985,9 +12878,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 write_capillary_droplet2d_case(
                     run_dir, args.steps, pressure_jump,
                     args.synthetic_nx, args.synthetic_ny,
-                    uses_kinematic_area_gradient_traction,
-                    active_domain,
-                    getattr(
+                    active_domain=active_domain,
+                    center_offset=getattr(
                         args,
                         "capillary_droplet_center_offset",
                         (0.0, 0.0),
@@ -13023,8 +12915,7 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 )
                 write_capillary_wave2d_case(
                     run_dir, args.steps, surface_tension, args.time_step_size,
-                    args.synthetic_nx, args.synthetic_ny,
-                    uses_kinematic_area_gradient_traction)
+                    args.synthetic_nx, args.synthetic_ny)
             elif case_name == "capillaryrise2d":
                 write_capillary_rise_case(
                     run_dir,
@@ -13063,9 +12954,9 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                         "initialize_discrete_static_contact_geometry",
                         False,
                     ),
-                    uses_kinematic_area_gradient_traction,
-                    active_domain,
-                    getattr(args, "sessile_tangent_center_offset", 0.0),
+                    active_domain=active_domain,
+                    tangent_center_offset=getattr(
+                        args, "sessile_tangent_center_offset", 0.0),
                 )
             elif case_name == "sessile3d":
                 if not (
@@ -13095,10 +12986,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                     run_dir,
                     args.steps,
                     static=(case_name == "static2d"),
-                    simplex_mesh=uses_kinematic_area_gradient_traction,
                 )
             if (args.use_high_order_implicit_cuts or
-                    uses_kinematic_area_gradient_traction or
                     case_name in {
                         "sessile2d", "sessile3d", "dynamiccontact2d",
                         "sphere3d", "capillaryrise2d",
@@ -15313,19 +15202,16 @@ def main(arguments: Sequence[str] | None = None) -> int:
             "disabled",
             "disabled_for_refreshed_frozen_high_order",
         ),
-        help=("cut-adjacent pressure ghost-penalty state; the area-gradient "
-              "pair defaults to incremental pressure stabilization"),
+        help="cut-adjacent pressure ghost-penalty state",
     )
     parser.add_argument("--surface-tension", type=float)
     parser.add_argument(
         "--capillary-force-form",
-        choices=(
-            "surface_stress",
-            "kinematic_area_gradient_traction",
-        ),
         default="surface_stress",
-        help=("surface force discretization; kinematic area-gradient "
-              "traction is an explicit unfitted candidate"),
+        metavar="{surface_stress}",
+        help=("surface force discretization: surface_stress (SurfaceStress), "
+              "the only one since decision D48 retired "
+              "kinematic_area_gradient_traction"),
     )
     parser.add_argument("--projected-curvature-field")
     parser.add_argument("--curvature-projection-cadence-steps", type=int)
@@ -15507,6 +15393,10 @@ def main(arguments: Sequence[str] | None = None) -> int:
     parser.add_argument("--adaptive-time-loop-target-newton-iterations", type=int)
     parser.add_argument("--adaptive-time-loop-max-steps-multiplier", type=int)
     args = parser.parse_args(arguments)
+    try:
+        validate_capillary_force_form(args.capillary_force_form)
+    except ValueError as error:
+        parser.error(str(error))
     remember_explicit_cli_overrides(args)
     apply_high_order_production_qualification_defaults(args)
     apply_high_order_mpi_production_qualification_defaults(args)

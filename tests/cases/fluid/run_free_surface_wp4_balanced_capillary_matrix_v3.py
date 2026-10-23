@@ -1839,6 +1839,13 @@ def physical_case_arguments(
             raise MatrixError(
                 f"case {case['case_id']!r} does not select energy traction"
             )
+        # Every frozen capillary case executes through the kinematic
+        # area-gradient traction (KinematicAreaGradientTraction).
+        raise MatrixError(
+            f"case {case['case_id']!r} cannot be executed: the kinematic "
+            "area-gradient traction was retired (decision D48); SurfaceStress "
+            "is the only capillary route"
+        )
     return arguments
 
 

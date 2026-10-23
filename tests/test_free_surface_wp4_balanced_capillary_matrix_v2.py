@@ -17,6 +17,15 @@ runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runner)
 
 
+def physical_runner():
+    spec = importlib.util.spec_from_file_location(
+        "free_surface_wp4_v2_physical_runner", runner.PHYSICAL_RUNNER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def registry():
     return runner.load_registry()
 
@@ -91,7 +100,8 @@ def test_main_sessile_studies_cover_angles_walls_signs_and_offsets():
             assert len(study["axes"]["offset_h"]) >= 2
 
 
-def test_case_arguments_map_static_state_and_three_dimensional_axes(tmp_path):
+def test_case_arguments_map_axes_and_capillary_commands_fail_closed(
+        tmp_path, capsys):
     value = registry()
     cases = runner.expand_cases(value)
     selected = next(
@@ -134,6 +144,18 @@ def test_case_arguments_map_static_state_and_three_dimensional_axes(tmp_path):
     assert "--initialize-static-compatible-pressure" in sampled_arguments
     assert "--initialize-discrete-static-capillary-equilibrium" not in (
         sampled_arguments)
+
+    # The frozen runner (pinned by V3, unchanged) still maps every case to
+    # the kinematic area-gradient traction; the physical runner rejects that
+    # form at argument validation since decision D48.
+    smoke = physical_runner()
+    for command in (arguments, sampled_arguments):
+        assert command[command.index("--capillary-force-form") + 1] == (
+            "kinematic_area_gradient_traction")
+        with pytest.raises(SystemExit):
+            smoke.main(command)
+        error = capsys.readouterr().err
+        assert "decision D48" in error and "SurfaceStress" in error
 
 
 def test_hash_shards_are_disjoint_and_cover_selected_cases():
