@@ -98,6 +98,7 @@ Adjacent FE services a formulation calls:
 | `Systems/FieldBinding.h` | Register-or-reuse of a module's fields with compatibility checks |
 | `Systems/BoundaryConditionManager.h` | Validate, apply, and install a field's boundary conditions |
 | `Systems/DiagnosticRegistry.h` | Opt-in diagnostic operators of a formulation, by set |
+| `Systems/FunctionalForms.h`, `Systems/FunctionalFormEvaluator.h` | A formulation's functionals as measured 0-forms, and their rank-independent values |
 | `Systems/ALEBinding.h`, `Systems/MeshDisplacementBinding.h` | Mesh-velocity/mesh-displacement field binding for moving-domain forms |
 | `Systems/FESystem.h` | Fields, operators, constraints, auxiliary inputs, derived results, functional kernels, and the attachment store |
 | `Systems/SystemCollectives.h`, `Systems/ExactAccumulator.h` | Collective reductions, including the exact rank-independent sum |
@@ -646,6 +647,7 @@ the rest `implemented/expert`. Namespace `systems`.
 | `F.certifyGeneratedBoundaryNitscheTraces(bindings, marker, ratio)` | `Systems/FormulationBuilder.h` | `implemented/expert`; trace-certificate requests on a cut volume |
 | `F.functional(name, kind, form[, owner])` | `Systems/FormulationBuilder.h` | Declares a functional of the formulation as a measured 0-form (a sum of integrals with no test or trial function); nothing is installed; the owner defaults to the operator |
 | `declareFunctionalForm(system, FunctionalFormDeclaration)`, `functionalForms(system)`, `FunctionalKind` (`Stored`, `Power`, `DissipationRate`, `Measure`) | `Systems/FunctionalForms.h` | The system's declared functionals, in declaration order; declared before setup, names unique |
+| `evaluateFunctionalForms(system, forms, state, comm[, cut_context])`, `evaluateDeclaredFunctionalForms(system, state, comm[, cut_context])`, `FunctionalFormValue` | `Systems/FunctionalFormEvaluator.h` | Collective values of measured 0-forms over `dx`, `ds`, `dCutVolume`, `dI`, `dL` and generated `ds` (cut rules from the cut context, for a free surface its authoritative snapshot), interpreted; every quadrature term is summed exactly over all ranks, so `value` and `absolute_mass` are the same at any rank count; `dS` is not evaluated |
 | `F.workChannel(suffix, {WorkChannelPart{...}, ...})` | `Systems/FormulationBuilder.h` | Installs a residual-work channel on operator `<operator>_<suffix>`: one install per part with the builder's options, outside the problem analysis, trace requests dropped unless the part keeps them |
 | `F.diagnostics()`, `F.diagnostic(set, operator, fields, form[, options])` | `Systems/FormulationBuilder.h` | The system's diagnostic registry; installs an opt-in diagnostic operator with the builder's options |
 | `DiagnosticRegistry::declareSet`, `enabled`, `install`, `operators`; `diagnosticRegistry(system)`, `findDiagnosticRegistry(system)` | `Systems/DiagnosticRegistry.h` | Opt-in diagnostic operators, switched on by environment names, installed with the formulation's options; one registry per system, shared by its formulations (a set declared again with the same switches keeps its operators) |
@@ -708,10 +710,10 @@ Status: `implemented/public` for named authoring helpers; slot references are
 | `FormExpr::boundaryIntegralRef(slot)` | `implemented/internal`; legacy slot reference |
 
 Legacy `boundaryIntegralValue`/`boundaryIntegralRef` terminology is superseded
-by `AuxiliaryInput`/`AuxiliaryInputSlot`. A functional is not yet a measured
-form: `BoundaryFunctional` takes an integrand and a marker, and there is no
-interface, contact-line, or cut-volume functional. Step E1 adds the snapshot
-functional evaluator for forms (see `Planned in Milestone MR`).
+by `AuxiliaryInput`/`AuxiliaryInputSlot`. `BoundaryFunctional` takes an
+integrand and a marker; a functional stated as a measured form
+(`FunctionalForms.h`), with interface, contact-line, or cut-volume integrals,
+is evaluated by `evaluateFunctionalForms` (`FunctionalFormEvaluator.h`).
 
 ### Constitutive Vocabulary
 
@@ -884,7 +886,6 @@ change the authoring surface:
 | G4(b) | `NavierStokesPostProcessing.h`: residual work, diagnostic operators, and energy declarations stated as forms, as in `PoissonPostProcessing.h` and `UstructPostProcessing.h` |
 | G1, G2 | Generic accepted-stage and functional records on the attachment store; an energy-balance ledger with named channels and declared identities |
 | G5 | `ALEBinding` declarations, `LevelSetGeometry` markers and the contact-certificate hook, field binding, and vertex-field initialization as FE services |
-| E1 | Snapshot functional evaluator for forms (interpreted, exact reduction) over cut-volume, interface, wall, and contact rules |
 | E3 | Energies, powers, works, and the logged measures as forms in `NavierStokesPostProcessing.h`, under the D49 tolerance gate |
 | L1 | Log formats as FE data (`LogRecordFormat`); the free-surface observer (`FreeSurfaceObserver` in `NavierStokesBCFactories.h`) is removed |
 
