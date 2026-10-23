@@ -19,6 +19,7 @@
 
 #include "Core/FEConfig.h"
 #include "Core/Types.h"
+#include "Systems/ExactAccumulator.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -125,6 +126,30 @@ struct CollectiveTimingStatistics {
 /// zero.
 [[nodiscard]] std::size_t collectiveSumSize(
     std::size_t local,
+    const CollectiveCommunicator& comm);
+
+/**
+ * @brief Exact sum over all ranks, correctly rounded.
+ *
+ * The exact sum of every term added to the ranks' accumulators, rounded once
+ * to nearest (ExactAccumulator).  The value is the same for any rank count
+ * and any distribution of the terms over the ranks, and equals the value()
+ * of one accumulator that holds all the terms.  One integer
+ * MPI_Allreduce(SUM) of ExactAccumulator::kSlots words; nothing is
+ * communicated on a single rank.
+ */
+[[nodiscard]] double collectiveExactSum(
+    const ExactAccumulator& local,
+    const CollectiveCommunicator& comm);
+
+/// collectiveExactSum of each accumulator, with one reduction for all.
+[[nodiscard]] std::vector<double> collectiveExactSums(
+    std::span<const ExactAccumulator> local,
+    const CollectiveCommunicator& comm);
+
+/// collectiveExactSum of the local terms.
+[[nodiscard]] double collectiveExactSum(
+    std::span<const double> local_terms,
     const CollectiveCommunicator& comm);
 
 /**

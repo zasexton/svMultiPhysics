@@ -229,6 +229,51 @@ std::size_t collectiveSumSize(
   return static_cast<std::size_t>(std::max<long long>(0, local_count));
 }
 
+std::vector<double> collectiveExactSums(
+    std::span<const ExactAccumulator> local,
+    const CollectiveCommunicator& comm)
+{
+  constexpr std::size_t kSlots = ExactAccumulator::kSlots;
+  std::vector<std::int64_t> slots(local.size() * kSlots);
+  for (std::size_t i = 0; i < local.size(); ++i) {
+    const auto own = local[i].slots();
+    std::copy(own.begin(), own.end(), slots.begin() + static_cast<std::ptrdiff_t>(i * kSlots));
+  }
+#if FE_HAS_MPI
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (initialized && comm.size() > 1 && !slots.empty()) {
+    // Normalized digits are below 2^32, so the integer sum over the ranks is
+    // exact and does not depend on the reduction order.
+    MPI_Allreduce(MPI_IN_PLACE, slots.data(), static_cast<int>(slots.size()),
+                  MPI_INT64_T, MPI_SUM, comm.native());
+  }
+#else
+  (void)comm;
+#endif
+  std::vector<double> sums(local.size());
+  for (std::size_t i = 0; i < local.size(); ++i) {
+    const std::span<const std::int64_t, kSlots> combined(
+        slots.data() + i * kSlots, kSlots);
+    sums[i] = ExactAccumulator::fromSlots(combined).value();
+  }
+  return sums;
+}
+
+double collectiveExactSum(const ExactAccumulator& local,
+                          const CollectiveCommunicator& comm)
+{
+  return collectiveExactSums(std::span<const ExactAccumulator>(&local, 1), comm).front();
+}
+
+double collectiveExactSum(std::span<const double> local_terms,
+                          const CollectiveCommunicator& comm)
+{
+  ExactAccumulator local;
+  local.add(local_terms);
+  return collectiveExactSum(local, comm);
+}
+
 void requireCollectivePhase(
     const std::exception_ptr& local_failure,
     const CollectiveCommunicator& comm,

@@ -13,8 +13,12 @@
 
 #include <mpi.h>
 
+#include <bit>
+#include <cmath>
 #include <cstdint>
 #include <exception>
+#include <limits>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -283,4 +287,156 @@ TEST(SystemCollectivesMPI, OwnershipCollectiveGathersWordsInRankOrder)
     }
     EXPECT_EQ(gathered, expected);
     EXPECT_EQ(collective.all_gather_owned_rule_identity_values(local), expected);
+}
+
+namespace {
+
+// The same terms on every rank: wide exponents and both signs, with
+// cancellation, so that a rank-partitioned floating-point sum would depend
+// on the partition.
+std::vector<double> exactSumTerms(std::size_t count)
+{
+    std::mt19937_64 random(20261022u);
+    std::uniform_real_distribution<double> mantissa(0.5, 1.0);
+    std::uniform_int_distribution<int> exponent(-1060, 1000);
+    std::vector<double> terms(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        terms[i] = std::ldexp(mantissa(random), exponent(random));
+        if (random() & 1u) {
+            terms[i] = -terms[i];
+        }
+    }
+    for (std::size_t i = 0; i < count / 4; ++i) {
+        terms.push_back(-terms[i]);
+        terms.push_back(1.0 + std::ldexp(static_cast<double>(i), -40));
+    }
+    return terms;
+}
+
+double serialExactSum(const std::vector<double>& terms)
+{
+    systems::ExactAccumulator all;
+    all.add(terms);
+    return all.value();
+}
+
+// The terms rank `rank` of `size` holds: blocks, round robin, or round robin
+// in reverse order.
+systems::ExactAccumulator shareOf(const std::vector<double>& terms, int rank, int size, int layout)
+{
+    systems::ExactAccumulator local;
+    const std::size_t n = terms.size();
+    const auto r = static_cast<std::size_t>(rank);
+    const auto p = static_cast<std::size_t>(size);
+    if (layout == 0) {
+        for (std::size_t i = r * n / p; i < (r + 1) * n / p; ++i) {
+            local.add(terms[i]);
+        }
+    } else if (layout == 1) {
+        for (std::size_t i = r; i < n; i += p) {
+            local.add(terms[i]);
+        }
+    } else {
+        for (std::size_t i = n; i-- > 0;) {
+            if (i % p == r) {
+                local.add(terms[i]);
+            }
+        }
+    }
+    return local;
+}
+
+std::uint64_t bitsOf(double value)
+{
+    return std::bit_cast<std::uint64_t>(value);
+}
+
+} // namespace
+
+TEST(SystemCollectivesMPI, ExactSumIsTheSameOnOneTwoAndFourRanks)
+{
+    const auto terms = exactSumTerms(20000);
+    // One rank: every term in one accumulator.
+    const double one_rank = serialExactSum(terms);
+    ASSERT_TRUE(std::isfinite(one_rank));
+    EXPECT_EQ(bitsOf(systems::collectiveExactSum(
+                  shareOf(terms, 0, 1, 1), systems::CollectiveCommunicator(MPI_COMM_SELF))),
+              bitsOf(one_rank));
+
+    // All ranks of the world, three layouts of the terms.
+    for (int layout = 0; layout < 3; ++layout) {
+        const auto local = shareOf(terms, worldRank(), worldSize(), layout);
+        EXPECT_EQ(bitsOf(systems::collectiveExactSum(local, world())), bitsOf(one_rank))
+            << "world of " << worldSize() << " ranks, layout " << layout;
+    }
+
+    // Pairs of ranks (two-rank communicators) when the world has four.
+    if (worldSize() == 4) {
+        MPI_Comm pair = MPI_COMM_NULL;
+        MPI_Comm_split(MPI_COMM_WORLD, worldRank() / 2, worldRank(), &pair);
+        const systems::CollectiveCommunicator pair_comm(pair);
+        ASSERT_EQ(pair_comm.size(), 2);
+        for (int layout = 0; layout < 3; ++layout) {
+            const auto local = shareOf(terms, pair_comm.rank(), 2, layout);
+            EXPECT_EQ(bitsOf(systems::collectiveExactSum(local, pair_comm)), bitsOf(one_rank))
+                << "two-rank communicator, layout " << layout;
+        }
+        MPI_Comm_free(&pair);
+    }
+
+    // A naive per-rank sum then MPI_SUM is the counterexample the exact sum
+    // removes: it changes with the layout (not asserted, only reported).
+    double naive_local = 0.0;
+    for (std::size_t i = static_cast<std::size_t>(worldRank()); i < terms.size();
+         i += static_cast<std::size_t>(worldSize())) {
+        naive_local += terms[i];
+    }
+    double naive = 0.0;
+    MPI_Allreduce(&naive_local, &naive, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    if (worldRank() == 0) {
+        RecordProperty("naive_minus_exact", std::to_string(naive - one_rank));
+    }
+}
+
+TEST(SystemCollectivesMPI, ExactSumsOfSeveralAccumulatorsUseOneReduction)
+{
+    const auto terms = exactSumTerms(6000);
+    std::vector<systems::ExactAccumulator> local(3);
+    std::vector<double> expected(3);
+    for (int k = 0; k < 3; ++k) {
+        std::vector<double> scaled = terms;
+        for (auto& t : scaled) {
+            t = std::ldexp(t, -10 * k);
+        }
+        expected[static_cast<std::size_t>(k)] = serialExactSum(scaled);
+        local[static_cast<std::size_t>(k)] = shareOf(scaled, worldRank(), worldSize(), k);
+    }
+    const auto sums = systems::collectiveExactSums(local, world());
+    ASSERT_EQ(sums.size(), 3u);
+    for (std::size_t k = 0; k < 3; ++k) {
+        EXPECT_EQ(bitsOf(sums[k]), bitsOf(expected[k])) << "accumulator " << k;
+        EXPECT_EQ(bitsOf(systems::collectiveExactSum(local[k], world())), bitsOf(expected[k]));
+    }
+    // The span overload of the local terms.
+    std::vector<double> mine;
+    for (std::size_t i = static_cast<std::size_t>(worldRank()); i < terms.size();
+         i += static_cast<std::size_t>(worldSize())) {
+        mine.push_back(terms[i]);
+    }
+    EXPECT_EQ(bitsOf(systems::collectiveExactSum(std::span<const double>(mine), world())),
+              bitsOf(serialExactSum(terms)));
+}
+
+TEST(SystemCollectivesMPI, ExactSumSeesANonFiniteTermOnAnyRank)
+{
+    systems::ExactAccumulator local;
+    local.add(1.0);
+    if (worldRank() == worldSize() - 1) {
+        local.add(std::numeric_limits<double>::infinity());
+    }
+    EXPECT_EQ(systems::collectiveExactSum(local, world()), std::numeric_limits<double>::infinity());
+    if (worldRank() == 0) {
+        local.add(-std::numeric_limits<double>::infinity());
+    }
+    EXPECT_TRUE(std::isnan(systems::collectiveExactSum(local, world())));
 }

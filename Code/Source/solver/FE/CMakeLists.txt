@@ -1101,6 +1101,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/BoundaryReductionService.h
     Systems/AuxiliaryQuadratureLayout.h
     Systems/FEAdaptivityTransfer.h
+    Systems/ExactAccumulator.h
     Systems/FESystem.h
     Systems/FormsInstaller.h
     Systems/FormulationBuilder.h
@@ -1148,6 +1149,7 @@ set(FE_SYSTEMS_SOURCES
     Systems/CutIntegrationInvalidation.cpp
     Systems/ContactPenaltyKernel.cpp
     Systems/FEAdaptivityTransfer.cpp
+    Systems/ExactAccumulator.cpp
     Systems/FESystem.cpp
     Systems/MeshBoundaryRecordSupport.cpp
     Systems/FormsInstaller.cpp
@@ -3132,6 +3134,7 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/Systems/test_MaterialStateProvider.cpp
 		                Tests/Unit/Systems/test_FESystem.cpp
 		                Tests/Unit/Systems/test_FESystemAttachments.cpp
+		                Tests/Unit/Systems/test_ExactAccumulator.cpp
 		                Tests/Unit/Systems/test_FESystemMultiMesh.cpp
 		                Tests/Unit/Systems/test_FreeSurfaceFunctionalRounding.cpp
 		                Tests/Unit/Systems/test_AssemblerSelection.cpp
