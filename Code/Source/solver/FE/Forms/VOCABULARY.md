@@ -622,7 +622,7 @@ Status: `implemented/public` for the Systems install API; compiler/IR APIs are
 | `installFormulation(system, op, fields, residual[, options])` | `Systems/FormsInstaller.h` | Canonical residual installation; one or several test fields. A single-field residual affine in the unknown, without `dt()`, `dS` or `dI` terms, coupled terminals or geometry sensitivity, is installed through the linear kernel (`trySplitAffineResidual`) |
 | `installFormulationWithMetadata(...)` | `Systems/FormsInstaller.h` | Same, returning the analysis bridge metadata of the install |
 | `FormInstallOptions` | `Systems/FormsInstaller.h` | `ad_mode`, `compiler_options` (`SymbolicOptions`), `extra_trial_fields`, `constitutive_laws`, `source_component_tag`, `contributes_to_problem_analysis`, generated-boundary Nitsche trace requests |
-| `FormInstallOptions::recordDynamicViscosity(...)` | `Systems/FormsInstaller.h` | `implemented/expert`; publishes the viscosity law to coupling contracts |
+| `FormInstallOptions::recordConstitutiveLaw(law)` | `Systems/FormsInstaller.h` | `implemented/expert`; records a constitutive law (`analysis::ConstitutiveLawMetadata`, e.g. `analysis::dynamicViscosityMetadata(u, mu)`) for the coupling contracts |
 | `installStrongDirichlet(system, bcs)` | `Systems/FormsInstaller.h` | Strong constraint installation |
 | `installMixedBilinear(...)` | `Systems/FormsInstaller.h` | Explicit bilinear block installation |
 | `installMixedLinear(...)` | `Systems/FormsInstaller.h` | Explicit linear block installation |
@@ -639,7 +639,7 @@ the rest `implemented/expert`. Namespace `systems`.
 | Vocabulary | Header | Notes |
 |------------|--------|-------|
 | `FormulationBuilder(system, operator_tag, base_options)` | `Systems/FormulationBuilder.h` | One set of install options for a module; adds the operator when missing |
-| `F.symbolicTangent()`, `F.configure(ale)`, `F.recordDynamicViscosity(field, mu)` | `Systems/FormulationBuilder.h` | Option changes, effective in call order |
+| `F.symbolicTangent()`, `F.configure(ale)`, `F.recordConstitutiveLaw(law)` | `Systems/FormulationBuilder.h` | Option changes, effective in call order |
 | `F.install(fields, residual)` | `Systems/FormulationBuilder.h` | `installFormulation` with `F.options()` |
 | `F.installGroup(fields, residual, FormulationGroup{...})` | `Systems/FormulationBuilder.h` | A separate kernel group with a copy of the options changed by `source_component_tag`, `extra_trial_fields`, `ale`, or dropped trace requests |
 | `F.registered(ContactLineDomain)`, `F.registered(BoundaryDomain)` | `Systems/FormulationBuilder.h` | Registers a generated marker with the system and returns the domain |

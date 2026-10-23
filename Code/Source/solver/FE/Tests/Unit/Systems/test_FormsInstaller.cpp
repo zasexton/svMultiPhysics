@@ -1485,7 +1485,7 @@ TEST(FormulationBuilder, ComposesOptionsInCallOrderAndInstallsGroups)
     svmp::FE::systems::FormulationBuilder F(sys, "op", svmp::FE::systems::FormInstallOptions{});
     EXPECT_TRUE(sys.hasOperator("op"));
     EXPECT_EQ(F.operatorTag(), "op");
-    F.symbolicTangent().recordDynamicViscosity(u_field, 0.5);
+    F.symbolicTangent().recordConstitutiveLaw(svmp::FE::analysis::dynamicViscosityMetadata(u_field, 0.5));
     EXPECT_TRUE(F.options().compiler_options.use_symbolic_tangent);
     EXPECT_EQ(F.options().constitutive_laws.size(), 1u);
 

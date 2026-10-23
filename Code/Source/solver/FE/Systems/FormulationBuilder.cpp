@@ -37,10 +37,9 @@ FormulationBuilder& FormulationBuilder::symbolicTangent(bool enabled)
     return *this;
 }
 
-FormulationBuilder& FormulationBuilder::recordDynamicViscosity(FieldId velocity_field,
-                                                               Real constant_viscosity)
+FormulationBuilder& FormulationBuilder::recordConstitutiveLaw(analysis::ConstitutiveLawMetadata law)
 {
-    options_.recordDynamicViscosity(velocity_field, constant_viscosity);
+    options_.recordConstitutiveLaw(std::move(law));
     return *this;
 }
 

@@ -23,7 +23,7 @@
  *   FormulationBuilder F(system, "equations", base);
  *   F.symbolicTangent();
  *   F.installGroup({d}, mesh_rows, {.ale = &ale});              // copy of the options so far
- *   F.recordDynamicViscosity(u, mu).configure(ale);
+ *   F.recordConstitutiveLaw(analysis::dynamicViscosityMetadata(u, mu)).configure(ale);
  *   F.install({u, p}, M + C);                                    // the options themselves
  *   F.installGroup({p}, pspg, {.source_component_tag = "pspg", .extra_trial_fields = {u}});
  *
@@ -81,7 +81,7 @@ public:
     FormulationBuilder(FESystem& system, OperatorTag operator_tag, FormInstallOptions base);
 
     FormulationBuilder& symbolicTangent(bool enabled = true);
-    FormulationBuilder& recordDynamicViscosity(FieldId velocity_field, Real constant_viscosity);
+    FormulationBuilder& recordConstitutiveLaw(analysis::ConstitutiveLawMetadata law);
     FormulationBuilder& configure(const ALEBinding& ale);
 
     /// Moves @p bindings into trace-certificate requests on @p volume_interface_marker.

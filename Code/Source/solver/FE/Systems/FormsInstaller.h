@@ -99,17 +99,11 @@ struct FormInstallOptions {
     std::vector<GeneratedBoundaryNitscheTraceInstallRequest>
         generated_boundary_nitsche_trace_requests{};
 
-    FormInstallOptions& recordDynamicViscosity(
-        FieldId velocity_field,
-        Real constant_viscosity,
-        std::shared_ptr<const forms::ConstitutiveModel> model = {},
-        std::string name = "dynamic_viscosity")
+    /// Records @p law for the formulation analysis (the formulation states
+    /// its laws; the service does not name any).
+    FormInstallOptions& recordConstitutiveLaw(analysis::ConstitutiveLawMetadata law)
     {
-        constitutive_laws.push_back(analysis::dynamicViscosityMetadata(
-            velocity_field,
-            constant_viscosity,
-            std::move(model),
-            std::move(name)));
+        constitutive_laws.push_back(std::move(law));
         return *this;
     }
 };
