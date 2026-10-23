@@ -24,6 +24,7 @@
 #include <memory>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 namespace svmp::FE::level_set {
@@ -107,6 +108,29 @@ public:
     {
         rows_.clear();
         map_is_valid_ = false;
+    }
+
+    /** The installed map as it is: rows, revision and validity. */
+    struct FrozenMapState {
+        std::vector<VelocityExtensionConstraintRow> rows{};
+        std::uint64_t revision{0};
+        bool valid{false};
+    };
+
+    [[nodiscard]] FrozenMapState frozenMapState() const
+    {
+        return FrozenMapState{rows_, frozen_map_revision_, map_is_valid_};
+    }
+
+    /**
+     * Reinstall a map taken with frozenMapState() exactly, for example after
+     * a probe solve that refreshed the map at another state.
+     */
+    void restoreFrozenMapState(FrozenMapState state) noexcept
+    {
+        rows_ = std::move(state.rows);
+        frozen_map_revision_ = state.revision;
+        map_is_valid_ = state.valid;
     }
 
     void addSparsityCouplings(

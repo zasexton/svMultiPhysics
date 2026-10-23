@@ -6150,12 +6150,20 @@ pdeVelocityExtensionFactorizationSetting()
   return setting;
 }
 
+// The dry-region factorization caches of the PDE extension, one per target
+// field (see PdeVelocityExtensionCache).
+using PdeVelocityExtensionCaches =
+    std::map<std::string, application::core::PdeVelocityExtensionCache>;
+
+// pde_extension_caches: the caches to use; nullptr uses the caches of the
+// solves.
 bool updateLevelSetAdvectionVelocitiesFromState(
     application::core::SimulationComponents& sim,
     const svmp::FE::systems::SystemStateView& state,
     const std::vector<LevelSetAdvectionVelocityRequest>& requests,
     bool refresh_frozen_algebraic_map = true,
-    std::vector<AcceptedVelocityExtensionMapRecord>* refreshed_maps = nullptr)
+    std::vector<AcceptedVelocityExtensionMapRecord>* refreshed_maps = nullptr,
+    PdeVelocityExtensionCaches* pde_extension_caches = nullptr)
 {
   if (!sim.fe_system || !sim.primary_mesh || requests.empty()) {
     return false;
@@ -6683,11 +6691,12 @@ bool updateLevelSetAdvectionVelocitiesFromState(
         // Dry-region factorizations are reused while their content key is
         // unchanged (one cache per target field; see
         // PdeVelocityExtensionCache).
-        static std::map<std::string,
-                        application::core::PdeVelocityExtensionCache>
-            pde_extension_caches;
+        static PdeVelocityExtensionCaches solve_pde_extension_caches;
         auto& pde_extension_cache =
-            pde_extension_caches[request.target_velocity_field_name];
+            (pde_extension_caches != nullptr
+                 ? *pde_extension_caches
+                 : solve_pde_extension_caches)
+                [request.target_velocity_field_name];
         const auto& pde_mesh_access = system.meshAccess();
         const auto pde_report = application::core::extendVelocityByPde(
             mesh,
@@ -8523,13 +8532,24 @@ struct StaticCapillaryPressureCertificate {
   std::vector<svmp::FE::Real> certified_solution{};
 };
 
+// The probe is one Newton step on a copy of the candidate.  A monolithic
+// (algebraic) advection velocity extension assembles its frozen map, which
+// the production solves refresh before a nonlinear solve and keep frozen
+// within it.  The probe therefore synchronizes its generated state as those
+// solves do, with the Extension participant of the algebraic extensions of
+// extension_requests only: at the probe's first accepted nonlinear state
+// (the candidate) it refreshes their frozen maps, with PDE extension caches
+// of its own, and keeps them frozen for the rest of the probe.  The kernels'
+// maps are restored exactly afterwards.  Without an algebraic extension the
+// probe has no state synchronization.
 StaticCapillaryPressureCertificate
 evaluateStaticCapillaryPressureCertificate(
     application::core::SimulationComponents& sim,
     std::span<const svmp::FE::Real> candidate,
     const static_capillary::
         LevelSetStaticCapillaryEquilibriumOptions& certificate_options,
-    bool initialize_compatible_pressure)
+    bool initialize_compatible_pressure,
+    const std::vector<LevelSetAdvectionVelocityRequest>& extension_requests = {})
 {
   if (!sim.fe_system || !sim.backend || !sim.linear_solver ||
       !sim.time_history) {
@@ -8548,9 +8568,41 @@ evaluateStaticCapillaryPressureCertificate(
   const auto comm = activeFESystemCommunicator(system);
   const auto auxiliary_state = system.checkpointAuxiliaryState();
   const auto bordered_state = system.borderedCoupling();
+  struct FrozenExtensionMap {
+    std::shared_ptr<svmp::FE::level_set::LevelSetVelocityExtensionConstraintKernel>
+        kernel{};
+    svmp::FE::level_set::LevelSetVelocityExtensionConstraintKernel::
+        FrozenMapState state{};
+  };
+  std::vector<LevelSetAdvectionVelocityRequest> algebraic_extension_requests;
+  std::vector<FrozenExtensionMap> frozen_extension_maps;
+  for (const auto& request : extension_requests) {
+    const auto target =
+        system.findFieldByName(request.target_velocity_field_name);
+    if (target == svmp::FE::INVALID_FIELD_ID ||
+        system.fieldRecord(target).source_kind !=
+            svmp::FE::systems::FieldSourceKind::Unknown) {
+      continue;
+    }
+    auto kernel = svmp::FE::level_set::
+        findLevelSetVelocityExtensionConstraintKernel(
+            system, request.operator_tag, target);
+    if (!kernel) {
+      continue;
+    }
+    algebraic_extension_requests.push_back(request);
+    auto state = kernel->frozenMapState();
+    frozen_extension_maps.push_back(FrozenExtensionMap{
+        .kernel = std::move(kernel),
+        .state = std::move(state),
+    });
+  }
   const auto restore_system_state = [&] {
     system.restoreAuxiliaryState(auxiliary_state);
     system.borderedCoupling() = bordered_state;
+    for (const auto& frozen : frozen_extension_maps) {
+      frozen.kernel->restoreFrozenMapState(frozen.state);
+    }
   };
 
   try {
@@ -8575,6 +8627,42 @@ evaluateStaticCapillaryPressureCertificate(
         .accepted_static_pressure_representability_max_relative_distance =
         static_cast<double>(certificate_options
                                 .pressure_representability_max_relative_distance);
+
+    PdeVelocityExtensionCaches probe_pde_extension_caches;
+    bool probe_extension_maps_refreshed = false;
+    if (!algebraic_extension_requests.empty()) {
+      using svmp::FE::timestepping::FunctionGeneratedStateParticipant;
+      using svmp::FE::timestepping::GeneratedStateRole;
+      using svmp::FE::timestepping::GeneratedStateSync;
+      const auto generated_state =
+          std::make_shared<svmp::FE::timestepping::GeneratedStateRegistry>(
+              svmp::FE::timestepping::GeneratedStatePolicy{
+                  .solve = svmp::FE::timestepping::GeneratedStateSolve::Steady});
+      generated_state->add(std::make_shared<FunctionGeneratedStateParticipant>(
+          "level_set_advection_velocity",
+          GeneratedStateRole::Extension,
+          FunctionGeneratedStateParticipant::Callbacks{
+              .synchronize =
+                  [&](const svmp::FE::systems::SystemStateView& state,
+                      GeneratedStateSync& sync) {
+                    if (probe_extension_maps_refreshed ||
+                        sync.point !=
+                            svmp::FE::timestepping::NewtonOptions::
+                                StateSynchronizationPoint::
+                                    AcceptedNonlinearState) {
+                      return;
+                    }
+                    (void)updateLevelSetAdvectionVelocitiesFromState(
+                        sim,
+                        state,
+                        algebraic_extension_requests,
+                        /*refresh_frozen_algebraic_map=*/true,
+                        /*refreshed_maps=*/nullptr,
+                        &probe_pde_extension_caches);
+                    probe_extension_maps_refreshed = true;
+                  }}));
+      generated_state->bind(options);
+    }
 
     svmp::FE::timestepping::NewtonSolver probe(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
@@ -9270,12 +9358,16 @@ void appendStaticCapillaryFailureState(
   stream << formatted.str();
 }
 
+// extension_requests: the advection velocity extensions of the solve; the
+// acceptance certificate's probe refreshes the frozen maps of the algebraic
+// ones (evaluateStaticCapillaryPressureCertificate).
 bool initializeDiscreteStaticCapillaryEquilibrium(
     application::core::SimulationComponents& sim,
     const Parameters& params,
     std::vector<LevelSetMaintenanceRequest>& requests,
     svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle,
-    ActiveCutContextRefreshCache& refresh_cache)
+    ActiveCutContextRefreshCache& refresh_cache,
+    const std::vector<LevelSetAdvectionVelocityRequest>& extension_requests = {})
 {
   const auto enabled_count = static_cast<std::size_t>(std::count_if(
       requests.begin(), requests.end(), [](const auto& request) {
@@ -9690,7 +9782,8 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
                   sim,
                   candidate,
                   capillary_options,
-                  /*initialize_compatible_pressure=*/true);
+                  /*initialize_compatible_pressure=*/true,
+                  extension_requests);
           const auto& report = certificate.report;
           const auto post_certificate_constraint_key =
               collectiveConstraintSemanticsKey(system, comm);
@@ -10870,7 +10963,8 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
           params,
           level_set_maintenance,
           *cut_lifecycle,
-          *cut_refresh_cache)) {
+          *cut_refresh_cache,
+          steady_level_set_advection_velocity)) {
     steady_initial_cut_report =
         cut_geometry->refreshCached(sim.time_history->u(), "steady_static_capillary_accepted");
   }
@@ -11524,7 +11618,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           params,
           level_set_maintenance,
           *cut_lifecycle,
-          *cut_refresh_cache)) {
+          *cut_refresh_cache,
+          level_set_advection_velocity)) {
     initial_cut_report = cut_geometry->refreshCached(
         sim.time_history->u(), "static_capillary_accepted");
   }

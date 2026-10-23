@@ -2630,6 +2630,69 @@ TEST(LevelSetTransport,
     EXPECT_EQ(kernel.frozenMapRevision(), 7u);
 }
 
+TEST(LevelSetTransport, AlgebraicExtensionFrozenMapStateRestoresTheMapExactly)
+{
+    using Field = level_set::VelocityExtensionDependencyField;
+    const auto mesh =
+        std::make_shared<StructuredQuadTransportMeshAccess>(1);
+    auto velocity_space = vectorSpace(mesh);
+    FE::systems::FESystem system(mesh);
+    const auto source = system.addField(FE::systems::FieldSpec{
+        .name = "physical_velocity",
+        .space = velocity_space,
+        .components = velocity_space->value_dimension(),
+    });
+    const auto extension = system.addField(FE::systems::FieldSpec{
+        .name = "extension_velocity",
+        .space = velocity_space,
+        .components = velocity_space->value_dimension(),
+    });
+    level_set::LevelSetVelocityExtensionConstraintKernel kernel({
+        .extension_field = extension,
+        .source_velocity_field = source,
+        .components = 3,
+        .operator_tag = "equations",
+    });
+    level_set::VelocityExtensionConstraintRow row;
+    row.vertex = 1;
+    row.component = 0;
+    row.dependencies = {
+        level_set::VelocityExtensionDependency{
+            .field = Field::SourceVelocity,
+            .vertex = 1,
+            .component = 0,
+            .coefficient = 1.0},
+        level_set::VelocityExtensionDependency{
+            .field = Field::ExtensionVelocity,
+            .vertex = 0,
+            .component = 0,
+            .coefficient = -0.5},
+    };
+
+    // No map yet: a probe that installs one leaves none behind.
+    const auto none = kernel.frozenMapState();
+    EXPECT_FALSE(none.valid);
+    kernel.setFrozenRows({row}, /*revision=*/11u);
+    ASSERT_TRUE(kernel.hasFrozenMap());
+    kernel.restoreFrozenMapState(none);
+    EXPECT_FALSE(kernel.hasFrozenMap());
+    EXPECT_TRUE(kernel.frozenRows().empty());
+    EXPECT_EQ(kernel.frozenMapRevision(), 0u);
+
+    // An installed map comes back with its rows and revision.
+    kernel.setFrozenRows({row}, /*revision=*/12u);
+    const auto installed = kernel.frozenMapState();
+    auto other = row;
+    other.dependencies.back().coefficient = -0.25;
+    kernel.setFrozenRows({other}, /*revision=*/13u);
+    kernel.restoreFrozenMapState(installed);
+    ASSERT_TRUE(kernel.hasFrozenMap());
+    EXPECT_EQ(kernel.frozenMapRevision(), 12u);
+    ASSERT_EQ(kernel.frozenRows().size(), 1u);
+    ASSERT_EQ(kernel.frozenRows().front().dependencies.size(), 2u);
+    EXPECT_EQ(kernel.frozenRows().front().dependencies.back().coefficient, -0.5);
+}
+
 TEST(LevelSetTransport,
      DuplicateExtensionPreflightDoesNotInstallAnotherFormulation)
 {
