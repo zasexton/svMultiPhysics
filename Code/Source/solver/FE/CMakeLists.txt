@@ -886,6 +886,7 @@ set(FE_GEOMETRY_HEADERS
     Geometry/CutQuadratureMapping.h
     Interfaces/CutInterfaceFieldEvaluation.h
     Interfaces/SnapshotFieldEvaluator.h
+    Interfaces/ContactLineStageObservables.h
     Interfaces/FreeSurfaceGeometrySnapshot.h
     Interfaces/IncompressibleTwoFluidDiagnostics.h
     Interfaces/MaterialInterfaceTransportVelocity.h
@@ -923,6 +924,7 @@ set(FE_GEOMETRY_SOURCES
     Geometry/CutQuadratureMapping.cpp
     Interfaces/CutInterfaceFieldEvaluation.cpp
     Interfaces/SnapshotFieldEvaluator.cpp
+    Interfaces/ContactLineStageObservables.cpp
     Interfaces/FreeSurfaceGeometrySnapshot.cpp
     Interfaces/IncompressibleTwoFluidDiagnostics.cpp
     Interfaces/MaterialInterfaceTransportVelocity.cpp
@@ -1024,10 +1026,12 @@ if(FE_WITH_MESH)
     list(APPEND FE_LEVELSET_HEADERS
         LevelSet/LevelSetGeometryService.h
         LevelSet/AcceptedFunctionalRecorder.h
+        LevelSet/LevelSetContactStageParticipant.h
     )
     list(APPEND FE_LEVELSET_SOURCES
         LevelSet/LevelSetGeometryService.cpp
         LevelSet/AcceptedFunctionalRecorder.cpp
+        LevelSet/LevelSetContactStageParticipant.cpp
     )
 endif()
 
@@ -1412,6 +1416,7 @@ set(FE_FORMS_SOURCES
     TimeStepping/TimeLoop.h
     TimeStepping/StepParticipants.h
     TimeStepping/MeshNormalStageParticipant.h
+    TimeStepping/OperatorStageCapture.h
     TimeStepping/StepContext.h
 )
 
@@ -1430,6 +1435,7 @@ set(FE_FORMS_SOURCES
     TimeStepping/TimeLoop.cpp
     TimeStepping/StepParticipants.cpp
     TimeStepping/MeshNormalStageParticipant.cpp
+    TimeStepping/OperatorStageCapture.cpp
 )
 
 # Constitutive sources (header-only; depends on FE/Forms boundary)
@@ -3261,6 +3267,7 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/TimeStepping/test_TimeLoopDissipation.cpp
 	                Tests/Unit/TimeStepping/test_TimeLoopPerformance.cpp
 	                Tests/Unit/TimeStepping/test_StepParticipants.cpp
+	                Tests/Unit/TimeStepping/test_OperatorStageCapture.cpp
 		                Tests/Unit/TimeStepping/test_main.cpp
 		            )
 	            add_executable(test_fe_timestepping ${FE_TIMESTEPPING_TEST_SOURCES})

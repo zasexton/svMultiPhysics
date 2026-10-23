@@ -1,25 +1,64 @@
-/* Copyright (c) Stanford University, The Regents of the
- * University of California, and others.
+/* Copyright (c) Stanford University, The Regents of the University of California, and others.
  *
  * All Rights Reserved.
  *
- * See License file.
+ * See Copyright-SimVascular.txt for additional details.
  */
 
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactStageParticipant.h"
+#include "LevelSet/LevelSetContactStageParticipant.h"
 
-#include "FE/Systems/SystemCollectives.h"
+#include "Interfaces/ContactLineStageObservables.h"
+#include "LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h"
+#include "Systems/FESystem.h"
 
 #include <exception>
 #include <stdexcept>
 #include <utility>
 
-namespace svmp::Physics::formulations::navier_stokes::free_surface {
+namespace svmp {
+namespace FE {
+namespace level_set {
 
+namespace {
+
+using svmp::FE::interfaces::bindAcceptedFreeSurfaceContactStagesToEndpointRevision;
 using svmp::FE::systems::collectiveMaxDouble;
 using svmp::FE::systems::collectiveMinDouble;
 using svmp::FE::systems::collectiveMinMaxUint64;
 using svmp::FE::systems::requireCollectivePhasePreparation;
+using svmp::FE::timestepping::DynamicContactFirstOrderGeneralizedAlphaObservation;
+using svmp::FE::timestepping::FreeSurfaceContactStageTemporalCoordinates;
+using svmp::FE::timestepping::captureDynamicContactOperatorStageState;
+using svmp::FE::timestepping::dynamicContactStageMeshRevisionMatches;
+using svmp::FE::timestepping::dynamicContactStageProvenanceMatches;
+using svmp::FE::timestepping::dynamicContactWallBoundaryFingerprint;
+using svmp::FE::timestepping::makeDynamicContactFirstOrderGeneralizedAlphaObservation;
+using svmp::FE::timestepping::requireDynamicContactOperatorStageObservationConsensus;
+using svmp::FE::timestepping::resolveFreeSurfaceContactStageTemporalCoordinates;
+
+} // namespace
+
+// Moved from Physics/Formulations/NavierStokes/FreeSurface/
+// FreeSurfaceContactStages.cpp and FreeSurfaceContactStageParticipant.cpp
+// with bodies, messages and collective order unchanged.
+
+void assertAcceptedFreeSurfaceContactStageEndpointUnchanged(
+    std::uint64_t expected_endpoint_algebraic_revision,
+    std::span<const svmp::FE::Real> endpoint_solution,
+    const svmp::FE::systems::CollectiveCommunicator& comm)
+{
+  const auto endpoint_algebraic_revision =
+      collectiveLevelSetMaintenanceAlgebraicRevision(
+          endpoint_solution, comm);
+  if (expected_endpoint_algebraic_revision == 0u ||
+      endpoint_algebraic_revision !=
+          expected_endpoint_algebraic_revision) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] The finalized endpoint state differs from the endpoint used to reconstruct accepted contact-stage provenance.");
+  }
+}
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 
 ContactStageParticipant::ContactStageParticipant(
     const svmp::FE::timestepping::StepContext& context,
@@ -259,4 +298,8 @@ void ContactStageParticipant::bindAcceptedStagesToEndpoint(
   }
 }
 
-} // namespace svmp::Physics::formulations::navier_stokes::free_surface
+#endif
+
+} // namespace level_set
+} // namespace FE
+} // namespace svmp

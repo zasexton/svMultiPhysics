@@ -33,7 +33,6 @@
 #include "Mesh/Core/MeshComm.h"
 
 #include <cstdint>
-#include <functional>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -110,24 +109,16 @@ recordAcceptedFunctionals(
         std::nullopt,
     bool* backward_euler_kinetic_work_bound = nullptr);
 
-/// Evaluates the accepted contact stages of a state with the given
-/// algebraic revision (the formulation's contact-stage observables).
-using AcceptedContactStageEvaluator =
-    std::function<std::vector<systems::FreeSurfaceAcceptedContactStageState>(
-        std::uint64_t state_revision)>;
-
 /**
- * @brief Record the initial accepted functional group (dt = 0).
- *
- * The contact stages of the initial state come from
- * @p evaluate_contact_stages, called once with the initial state revision.
+ * @brief Record the initial accepted functional group (dt = 0), with the
+ *        accepted contact stages of the initial state
+ *        (Interfaces/ContactLineStageObservables).
  */
 void recordInitialAcceptedFunctionalBaseline(
     const systems::FESystemHandle& sim,
     std::uint64_t initial_step,
     Real initial_time,
     std::span<const Real> initial_solution,
-    const AcceptedContactStageEvaluator& evaluate_contact_stages,
     bool record_backward_euler_kinetic_baseline = false,
     std::optional<std::uint64_t> initial_extension_map_revision =
         std::nullopt);

@@ -15,6 +15,7 @@
 #include "Geometry/CutQuadratureMapping.h"
 #include "Geometry/GeometryMapping.h"
 #include "Geometry/LinearMapping.h"
+#include "Interfaces/ContactLineStageObservables.h"
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "Interfaces/SnapshotFieldEvaluator.h"
 #include "LevelSet/LevelSetCutTopology.h"
@@ -1823,7 +1824,6 @@ void recordInitialAcceptedFunctionalBaseline(
     std::uint64_t initial_step,
     svmp::FE::Real initial_time,
     std::span<const svmp::FE::Real> initial_solution,
-    const AcceptedContactStageEvaluator& evaluate_contact_stages,
     bool record_backward_euler_kinetic_baseline,
     std::optional<std::uint64_t>
         initial_extension_map_revision)
@@ -1833,7 +1833,14 @@ void recordInitialAcceptedFunctionalBaseline(
           initial_solution,
           activeMeshCommunicator(*sim.fe_system));
   const auto initial_contact_stages =
-      evaluate_contact_stages(initial_state_revision);
+      svmp::FE::interfaces::evaluateAcceptedFreeSurfaceContactStages(
+          *sim.fe_system,
+          systems::functionalRecords(*sim.fe_system).functionalDeclarations(),
+          initial_time,
+          svmp::FE::Real{1.0},
+          initial_state_revision,
+          initial_state_revision,
+          initial_solution);
   (void)recordAcceptedFunctionals(
       sim,
       initial_step,

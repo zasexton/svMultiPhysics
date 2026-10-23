@@ -31,6 +31,7 @@
 
 #include "Core/Types.h"
 #include "LevelSet/LevelSetWallContactConstraint.h"
+#include "Systems/FreeSurfaceRecordTypes.h"
 
 #include <cstdint>
 #include <span>
@@ -143,6 +144,24 @@ canonicalizeAcceptedWallConstraints(
     std::vector<LevelSetWallContactConstraint> constraints,
     const systems::CollectiveCommunicator& comm,
     std::string_view source);
+
+/**
+ * @brief The accepted wall-contact cells of the accepted contact stages:
+ *        for every declaration with a dynamic Ren-E contact law, the
+ *        retained, owned contact rules of its stage's geometry snapshot on
+ *        the dynamic-contact walls, canonicalized across the FE
+ *        communicator.  Collective.
+ *
+ * Moved from the Navier-Stokes FreeSurfaceContactStages with body and
+ * messages unchanged.
+ */
+[[nodiscard]] std::vector<LevelSetWallContactConstraint>
+captureAcceptedContactStageWallConstraints(
+    const systems::FESystem& system,
+    std::span<const systems::FreeSurfaceDiscreteFunctionalDeclaration>
+        declarations,
+    std::span<const systems::FreeSurfaceAcceptedContactStageState>
+        accepted_contact_stages);
 
 } // namespace level_set
 } // namespace FE

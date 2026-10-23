@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <exception>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -394,6 +395,160 @@ resolveLevelSetWallContactConstraints(
       std::move(local_constraints),
       comm,
       "Wall-aware level-set maintenance");
+}
+
+// Moved from Physics/Formulations/NavierStokes/FreeSurface/
+// FreeSurfaceContactStages.cpp with body and messages unchanged; the
+// free-surface functional declarations are an argument.
+std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
+captureAcceptedContactStageWallConstraints(
+    const svmp::FE::systems::FESystem& system,
+    std::span<const svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration>
+        declarations,
+    std::span<const svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
+        accepted_contact_stages)
+{
+  std::vector<svmp::FE::level_set::LevelSetWallContactConstraint> captured;
+  const auto comm = activeFESystemCommunicator(system);
+  const auto* context = system.cutIntegrationContext();
+  if (collectiveMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted contact-stage constraint capture requires an authoritative geometry snapshot on every rank.");
+  }
+  bool local_snapshots_current = true;
+  try {
+    context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+        system.meshAccess());
+  } catch (const std::exception&) {
+    local_snapshots_current = false;
+  }
+  if (collectiveMinDouble(local_snapshots_current ? 1.0 : 0.0, comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted contact-stage constraint capture rejected a stale authoritative geometry snapshot.");
+  }
+  std::map<
+      int,
+      const svmp::FE::systems::FreeSurfaceAcceptedContactStageState*>
+      stage_by_interface;
+  bool local_stage_map_valid = true;
+  for (const auto& stage : accepted_contact_stages) {
+    const int marker = stage.geometry_revision.interface_marker;
+    local_stage_map_valid =
+        marker >= 0 && stage_by_interface.emplace(marker, &stage).second &&
+        local_stage_map_valid;
+  }
+  if (collectiveMinDouble(local_stage_map_valid ? 1.0 : 0.0, comm) != 1.0) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted contact-stage constraint capture requires unique nonnegative interface markers.");
+  }
+
+  for (const auto& declaration : declarations) {
+    const bool has_dynamic_contact_law = std::any_of(
+        declaration.parameters.dynamic_contact_coefficients.begin(),
+        declaration.parameters.dynamic_contact_coefficients.end(),
+        [](const auto& coefficient) {
+          return coefficient.law ==
+                 svmp::FE::interfaces::FreeSurfaceContactLaw::DynamicRenE;
+        });
+    if (!has_dynamic_contact_law) {
+      continue;
+    }
+    const auto stage_it = stage_by_interface.find(declaration.interface_marker);
+    const bool local_stage_available = stage_it != stage_by_interface.end();
+    if (collectiveMinDouble(local_stage_available ? 1.0 : 0.0, comm) != 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Accepted contact-stage constraint capture is missing interface marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    const auto& stage = *stage_it->second;
+    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto snapshot_it = std::find_if(
+        snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
+          return candidate &&
+                 candidate->revision().snapshot_revision_key ==
+                     stage.geometry_revision.snapshot_revision_key;
+        });
+    if (collectiveMinDouble(snapshot_it != snapshots.end() ? 1.0 : 0.0, comm) !=
+        1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Accepted contact-stage constraint capture cannot retain the stage geometry for interface marker " +
+          std::to_string(declaration.interface_marker) + ".");
+    }
+    const auto& snapshot = **snapshot_it;
+    const bool local_revision_valid =
+        stage.geometry_revision.complete() &&
+        snapshot.revision().snapshot_revision_key ==
+            stage.geometry_revision.snapshot_revision_key &&
+        snapshot.revision().interface_marker == declaration.interface_marker;
+    if (collectiveMinDouble(local_revision_valid ? 1.0 : 0.0, comm) != 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Accepted contact-stage constraint capture found mismatched stage geometry provenance.");
+    }
+
+    std::set<int> dynamic_contact_walls;
+    for (const auto& coefficient :
+         declaration.parameters.dynamic_contact_coefficients) {
+      if (coefficient.law !=
+          svmp::FE::interfaces::FreeSurfaceContactLaw::DynamicRenE) {
+        continue;
+      }
+      dynamic_contact_walls.insert(coefficient.boundary_marker);
+    }
+    bool local_parent_ids_valid = true;
+    bool local_rules_valid = true;
+    std::string local_rule_diagnostic;
+    std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
+        declaration_constraints;
+    for (const auto& record : snapshot.rules()) {
+      if (record.role != svmp::FE::interfaces::
+                             FreeSurfaceGeometryRuleRole::Contact ||
+          record.retention != svmp::FE::interfaces::
+                                  FreeSurfaceGeometryRetention::Retained ||
+          !record.locally_owned) {
+        continue;
+      }
+      if (dynamic_contact_walls.find(record.physical_boundary_marker) ==
+          dynamic_contact_walls.end()) {
+        continue;
+      }
+      const auto parent =
+          record.reference_rule.provenance.parent_entity_global_id;
+      local_parent_ids_valid =
+          parent != svmp::FE::INVALID_GLOBAL_INDEX &&
+          local_parent_ids_valid;
+      if (parent == svmp::FE::INVALID_GLOBAL_INDEX) {
+        continue;
+      }
+      try {
+        declaration_constraints.push_back(makeAcceptedSnapshotWallConstraint(
+            record,
+            declaration.interface_marker,
+            stage.geometry_revision.snapshot_revision_key));
+      } catch (const std::exception& error) {
+        local_rules_valid = false;
+        local_rule_diagnostic = error.what();
+      }
+    }
+    if (collectiveMinDouble(local_parent_ids_valid ? 1.0 : 0.0, comm) != 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Accepted contact-stage constraint capture found a rule without a partition-independent parent identity.");
+    }
+    if (collectiveMinDouble(local_rules_valid ? 1.0 : 0.0, comm) != 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Accepted contact-stage constraint capture rejected a contact rule with incomplete or stale provenance" +
+          (local_rule_diagnostic.empty()
+               ? std::string{"."}
+               : std::string{": "} + local_rule_diagnostic));
+    }
+    declaration_constraints = canonicalizeAcceptedWallConstraints(
+        std::move(declaration_constraints),
+        comm,
+        "Accepted contact-stage constraint capture");
+    captured.insert(captured.end(),
+                    declaration_constraints.begin(),
+                    declaration_constraints.end());
+  }
+  return captured;
 }
 
 } // namespace level_set
