@@ -86,7 +86,7 @@ The target cases come from `moving_free_surface_validation_cases.md` and the aud
 | SPHERIC 10 sloshing and 02 dam break (unfitted) | Unfitted | **Fail** (June: Test 10 dies near 0.9 s of 8.35 s; Test 02 has MPa pressure spikes); **not re-run** | 06-05/06-07 root-cause reports | Never re-run after the June aggregation and sparsity fixes; decks as for Test 05 (§5 M1, M5) |
 | Static drop / Laplace pressure, 2D and 3D | Unfitted | **PASS** (`static_drop_2d` and `static_sphere_3d` tolerances: error ≤ 1% at the finest level with order ≥ 1, Ca_sp decreasing, no growth, volume ≤ 1e-4, D19 Δt criterion). 2D, D19 (binary `3bc60e4e`, x86): pressure-jump error 3.29e-5 (La 12) and 3.00e-5 (La 120) at R/h = 32, orders 2.18 and 2.08. 3D sphere, D25 (x86): 1.77e-4 at R/h = 16, order 2.09. | D19, D25; §5 M2 | — |
 | Capillary wave; oscillating drop | Unfitted | **PASS** (`capillary_wave_2d` tolerances: frequency ≤ 2%, damping ≤ 5% at λ/h = 64 (D20), order ≥ 1, volume ≤ 1e-4, D19 Δt). Capillary wave, D19/D20 (job `46704019`, x86): frequency 3.94e-3 at λ/h = 32 (order 1.75), damping 3.95e-3 at 64 (order 2.90). Oscillating drop (job `46903541`, x86): frequency −1.37e-4 and damping 9.09e-4 at R/h = 32 (orders 2.15, 2.40). | D19, D20; §5 M3 | — |
-| Static contact angle (sessile), 2D and 3D | Unfitted | **PASS** (`sessile_drop_2d` and `sessile_drop_3d` tolerances: angle ≤ 2° and decreasing, base and apex ≤ 2%, D11 volume, Δt criterion). 2D 60°/120° at R/h = 16/32/64, D39 protocol (`62df122c`, x86): angle error 0.003° at 64 for both; rerun at 16/32 on arm64, D44. 3D 90° quarter domain on arm64 (D43, jobs 51 and 74): largest sector error 0.099° at R/h = 16. | D39, D43, D44; §5 M4 | 3D at 60°/120° approved and pending (D48 item 3); at 90° the Young line term `−γ cos θe ∫ v·m` (§6.1) is zero. 2D 90° is pre-registered but not run. |
+| Static contact angle (sessile), 2D and 3D | Unfitted | **PASS** (`sessile_drop_2d` and `sessile_drop_3d` tolerances: angle ≤ 2° and decreasing, base and apex ≤ 2%, D11 volume, Δt criterion). 2D 60°/120° at R/h = 16/32/64, D39 protocol (`62df122c`, x86): angle error 0.003° at 64 for both; rerun at 16/32 on arm64, D44. 3D 90° quarter domain on arm64 (D43, jobs 51 and 74): largest sector error 0.099° at R/h = 16. | D39, D43, D44; §5 M4 | — (3D at 60°/90°/120° PASS, D38/D43/D48; the 3D Young line term is tested at 60° and 120°). 2D 90° is pre-registered but not run. |
 | Dynamic contact line (Ren–E) | Unfitted | **PASS** under D39 (strong law), on x86 and arm64: geometric RMS ≤ 2.8%, mean signed within ±1.1% | `ren_e_2d/README.md`; §5 M4 | — |
 | Capillary rise | Unfitted | **PASS** on the frozen history envelope (`gruending_2020_omega1_intercode_envelope_v1`, the acceptance): L10/L20/L40 on arm64, 0/691 points outside, RMS 0.043 mm against the 0.214 mm half-width, order 1.93 (D44). Features reported, not gated (D48 item 2): peak 23.20 mm at 0.208 s and h(0.69 s) 19.43 mm, 0.02–0.03 mm above the primary range; log decrement 1.157 against 1.191–1.281. | D44, D48; §5 M4 | — |
 | Conservative phase transport | Unfitted | **Not run** (18-point WP-6 matrix frozen, not run). It fails on the sessile drop, where contact-protected nodes block its local reconciliation (§5 M4, 2026-10-05). No benchmark protocol uses it; kinematic reconciliation (D14) does the volume work. The workflow moved to FE/LevelSet (S11, D46). | `level_set_conservative_phase_transport.md`; §5 M4 | — |
@@ -976,6 +976,7 @@ These are proposals. Each lists a recommended option and an alternative. Record 
        - G4(b) and E3 state their forms in `NavierStokesPostProcessing.h`;
        - P2 thins the register to peer size.
      - **Estimate:** about 155 h of agent time and about 42 jobs in total (D49: 135 h, 40).
+  - **Progress 2026-10-23 (`07b67ee4`):** `Physics/Formulations/NavierStokes` has 52 files and 28,778 lines on main (84 and 42,045 before the train). Integrated with the train: the S9/S10 retirements, M4 and E1; P6a and P6b phase 1; R2's E0, M1, M1-r and M3; R1's X1, B1, O1 and S1; P2 batch A. Integration gates: build, CTest with no new failures, the exhaustive matrix, reference sets serial and at 2 and 4 ranks, S0 manifests 16/16 with 0 JIT misses, and the pytest statuses (11 reviewed changes). E1 was also checked MUMPS-on (gtests at 1, 2 and 4 ranks; `mumps_serial` outputs and per-rank logs identical).
 - **D51, 2026-10-22 (user): the WP-4 closure decisions held since 2026-10-22 00:00 (c4, c5, c6, c7, Q2).**
   1. **c4: the bound-preserving limiter is retired** (D47 item 5 kept it until the SPHERIC re-run).
      - The rule declared before C2 (job 139, `plan_wp4c2.txt`) retires it unless the limiter-on run completes. Both limiter-on runs failed closed at step 1 (extension-map revision chain), while the limiter-off and patch-bound runs reached step 193 with no spurious liquid and a volume drift of 1.05e-5.
@@ -993,6 +994,19 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   - **Later, separate commits:** Poisson, Ustruct and MeshMotion switch to the shared input readers; the `Parameters.cpp` acceptance lists are generated from the schema (P4).
   - **Option checks the forms use:** the predicates that read only option fields go inline into the module header, and the helpers that return FE types into `NavierStokesBCFactories.h`.
   - **Reference:** `free-surface-params/implementation_plan.md`, "P2 = S13b".
+- **D53, 2026-10-23 (user): follow-ups of the review of the form-authoring surface** (`agent-status/refactor/forms-consumer-surface-review.md`; vocabulary `FE/Forms/VOCABULARY.md` brought up to date).
+  - **Verdict:** stating one weak form reads close to the mathematics (about 4/5); posing a whole problem with constraints, coupling and outputs is weaker (about 2.5/5).
+  - **Quick wins, bitwise** (on branch `dev/forms-vocabulary-doc`, in verification): `Real` ± / ÷ `FormExpr` operators that build the spelled-out trees; an exception for an empty operand in operations that combine operands; one jump convention (u(−) − u(+), as `jump()`); restricted operators checked at compile time, with errors that name the term.
+  - **Defects fixed with tests** (no production user, so no reference result changes): the consistency-term sign of `interface::applyNitscheInterfacePoisson`, and the `Average` + `NormalComponent` reduction, which returned half the normal jump.
+  - **Folded into milestone MR:** measured 0-forms are the API of E1 and G4(a) (S1 of the review); the FE services are de-physicalized inside G4(a) and L1 (S2); public replacements for `bc::detail` follow P2 (Q4); field-symbol handles come with G5 (Q5).
+  - **Open:** `FE/Docs/LevelSet.md` states jump(u) = u⁺ − u⁻ on generated interfaces, the opposite sign of `jump()`; the side mapping is to be checked.
+- **D54, 2026-10-23 (user): Lagrange multipliers as forms** (`agent-status/refactor/forms-multipliers-design.md`).
+  - **Scope: all phases.** LM1 global multipliers (`GlobalSpace`, `FieldScope::Global`, the `.dGlobal()` measure); LM2 the FSILS route; LM3 boundary and interface multipliers with restricted support (T1); LM4 interface-owned multipliers with single-sided interface form kernels (T2); LM5 documentation and cleanups.
+  - **Timing:** after milestone MR closes.
+  - **FSILS:** the bordered route (`BorderedCouplingData` with the Newton Schur recovery of the outlet terms); multipliers that need a singular field block, such as a mean-zero pressure, are refused there.
+  - **Mean-zero pressure as a multiplier:** allowed on matrix solvers only; the automatic gauge stays the default.
+  - **Global residual rows** are summed with the exact, order-independent accumulator (D49 item 5), so they do not change with the rank count.
+  - **Bitwise:** new space and measure kinds are appended to their enumerations, so existing decks keep their JIT keys and manifests; no existing coupling is migrated as part of D54.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
@@ -1475,7 +1489,11 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - These match the x86 protocol set (job `47330724`, binary `62df122c`, re-verified 2026-10-11) to the digits reported there; the final displacements agree to 4–5 digits. The advancing displacement does not converge monotonically (0.03313 / 0.03319 / 0.03109; reported only).
   - Outputs: `/scratch/users/zsexton/svmp-dev-outer/runs/138-plan_wp4c1/rene_*`.
 - [x] **3D sessile at 90°** (quarter domain, R/h = 8/16 at Δt and Δt/2): PASS (D38, D43, 2026-10-21).
-- [ ] **3D sessile at 60° and 120° (D48 item 3): runs approved, pending.** At 90° the Young line term −γ cos θe ∫ v·m (§6.1) is zero, so only these angles test it in 3D.
+- [x] **3D sessile at 60° and 120° (D48 item 3): PASS (2026-10-23).** At 90° the Young line term −γ cos θe ∫ v·m (§6.1) is zero, so only these angles test it in 3D.
+  - **Result** (`verify.py`, OVERALL PASS at both angles; JSON in `wp4-closure/verify/s3d_a60_D48.json` and `s3d_a120_D48.json`; binary `6f23eb08-ltopgo-mumps`, jobs 171-176):
+    - 60°: mean angle 60.149° / 60.051° at R/h = 8 / 16; largest sector deviation 0.773° → 0.169° (≤ 2°, decreasing); base 4.6e-4 and apex 1.7e-3 at R/h = 16 (≤ 2%); max dV/V 7.0e-5 / 3.5e-5 (≤ 1e-4); Δt/2 at R/h = 16: angle change 0.020° (≤ 0.1°), base 7.1e-6, apex 1.4e-4 (≤ 1e-3).
+    - 120°: mean angle 120.162° / 119.937°; largest sector deviation 0.567° → 0.085°; base 5.2e-4 and apex 5.2e-4 at R/h = 16; max dV/V 1.3e-5 / 1.0e-5; Δt/2 at R/h = 16: angle change 0.003°, base 3.7e-6, apex 9.6e-6.
+    - Velocity growth is not gated (final capillary number below the D39 rest floor) at either angle.
   - Benchmark: `2e592e76` (on the main line since 2026-10-22).
     - The generator writes 60° and 120°, each started from 90°.
     - `tolerances.json` lists the angles with every criterion and limit unchanged; it was approved as written before the first run (D48).
@@ -1596,16 +1614,16 @@ Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch t
 
 **Phase 1** (after I7)
 
-- [ ] P6a and P6b phase 1 (params): retire the legacy, CurvatureTraction, Penalty/Nitsche and KAG routes of the Navier–Stokes module (D47, D48). Deletes `FreeSurfaceLegacyTerms.{h,cpp}` (84 → 82 on its own).
-- [ ] M1 (R2): mesh-normal stage measurements and snapshot field evaluators to FE. M1a `cf6f971f` and M1b `657b6ca4` are on `dev/refactor-d49-m1` (82 files / 39,703 lines).
-- [ ] M1-r (R2): remove the four forwards (`FittedALEStageRecords.h`, `FreeSurfaceFieldEvaluators.h`, `FittedALEOperatorStage.{h,cpp}`) after P6 phase 1 and S9 are on main. 80 → 76 files.
+- [x] P6a and P6b phase 1 (params): retire the legacy, CurvatureTraction, Penalty/Nitsche and KAG routes of the Navier–Stokes module (D47, D48). Deletes `FreeSurfaceLegacyTerms.{h,cpp}` (84 → 82 on its own). *(On main with the train, `07b67ee4`, 2026-10-23.)*
+- [x] M1 (R2): mesh-normal stage measurements and snapshot field evaluators to FE. M1a `cf6f971f` and M1b `657b6ca4` are on `dev/refactor-d49-m1` (82 files / 39,703 lines). *(On main with the train, `07b67ee4`, 2026-10-23.)*
+- [x] M1-r (R2): remove the four forwards (`FittedALEStageRecords.h`, `FreeSurfaceFieldEvaluators.h`, `FittedALEOperatorStage.{h,cpp}`) after P6 phase 1 and S9 are on main. 80 → 76 files. *(On main with the train, `07b67ee4`, 2026-10-23.)*
 - [ ] M2 (R2): `LevelSetVolumeConstrainedMinimizer` in FE/LevelSet, with its certificates as data. Its energy evaluator is unchanged.
-- [ ] X1 (R1): manifest type labels. The pressure-anchor subclass goes; the manifests stay identical. Comes before B1.
-- [ ] B1 (R1): the free-surface statement moves into `NavierStokesBCFactories.h`, header-only with no `.cpp`; the observer does logging only.
+- [x] X1 (R1): manifest type labels. The pressure-anchor subclass goes; the manifests stay identical. Comes before B1. *(On main with the train, `07b67ee4`, 2026-10-23.)*
+- [x] B1 (R1): the free-surface statement moves into `NavierStokesBCFactories.h`, header-only with no `.cpp`; the observer does logging only. *(On main with the train, `07b67ee4`, 2026-10-23.)*
   - Contact laws, the pressure anchor, the semi-implicit integrand, the tangential mesh rows and the contact pin move into the header.
   - `NavierStokesVMSFormulation.h` goes into the module header.
   - `FreeSurfaceCollectives.h` is deleted.
-- [ ] O1 (R1, params reviews): `FreeSurfaceOptions.h` and the two-fluid option types go into `IncompressibleNavierStokesVMSModule.h`. Type moves only.
+- [x] O1 (R1, params reviews): `FreeSurfaceOptions.h` and the two-fluid option types go into `IncompressibleNavierStokesVMSModule.h`. Type moves only. *(On main with the train, `07b67ee4`, 2026-10-23.)*
 - [ ] T1 (R1, R2 reviews): fold the two-fluid formulation into `IncompressibleNavierStokesVMSModule` as an option.
   - `IncompressibleTwoFluidModule.{h,cpp}` and `IncompressibleTwoFluidInterface.{h,cpp}` go; the interface forms move into `NavierStokesBCFactories.h`.
   - Comes before G3 and P2.
@@ -1613,12 +1631,12 @@ Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch t
     - `conservative_phase` and `two_fluid_hydrostatic`: manifests, logs and artifacts byte-identical, and np2 parity;
     - the two-fluid CTests;
     - a label audit (tags, install sequence, artifact schema 3, message texts).
-- [ ] E0 (R2): `collectiveExactSum`, with an FE MPI test identical at 1, 2 and 4 ranks.
+- [x] E0 (R2): `collectiveExactSum`, with an FE MPI test identical at 1, 2 and 4 ranks. *(On main with the train, `07b67ee4`, 2026-10-23.)*
 
 **Phase 2** (after S8 / integration 6b and S9/S10)
 
-- [ ] M3 (R2): run support and step context to FE.
-- [ ] M4 (S9/S10 with R2): the level-set maintenance work ledger in FE/LevelSet/Maintenance.
+- [x] M3 (R2): run support and step context to FE. *(On main with the train, `07b67ee4`, 2026-10-23.)*
+- [x] M4 (S9/S10 with R2): the level-set maintenance work ledger in FE/LevelSet/Maintenance. *(On main with the train, `07b67ee4`, 2026-10-23.)*
 - [ ] M5 (R2, S9/S10): operator-stage capture, contact-line observables, wall constraints.
 - [ ] P6b phase 2 (params): the projection and the minimizer's KAG branch.
 - [ ] G4(a) (R1): `FormulationBuilder` functional, work-channel and diagnostic declarations.
@@ -1642,7 +1660,7 @@ Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch t
 
 **Phases 4–5**
 
-- [ ] P2 (params): the parser on `OptionSchema`, and the register thinned to peer size (≤ ~650 lines). Moved to `Physics/Core`:
+- [ ] P2 (params): the parser on `OptionSchema`, and the register thinned to peer size (≤ ~650 lines). Moved to `Physics/Core`: *(Batch A, the verbatim moves to `Physics/Options`, is on main with the train, `07b67ee4`; batch B, the parser on `OptionSchema`, is open.)*
   - the schema, capability rules and validation;
   - the name tables;
   - the readers;
@@ -1650,7 +1668,7 @@ Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch t
   - the register API.
 
   The artifact uses `OptionSchema::describe()` with FE data.
-- [ ] S1 (R1): remove `NavierStokesSupport.h` once the last support file has left.
+- [x] S1 (R1): remove `NavierStokesSupport.h` once the last support file has left. *(On main with the train, `07b67ee4`, 2026-10-23.)*
 - [ ] E4 (R2): the minimizer reads the form energies, and the pointwise evaluators are deleted. E4 gate (D49 item 4), approved before the run.
 - [ ] `Physics/Formulations/NavierStokes` at 5 files (D50). Progress note in §4 D50.
 
