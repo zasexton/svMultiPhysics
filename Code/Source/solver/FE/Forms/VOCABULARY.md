@@ -498,13 +498,14 @@ integrals; elsewhere assembly throws `Forms: jump() used outside interior-face
 integral`. The normal of the minus side is `FormExpr::normal().minus()`; the
 DG helpers above write fluxes against it.
 
-Sign conventions differ between the core operator and the BC trace helpers:
-`bc::InterfaceTraceReduction::Jump` with `ScalarTraceOperator::Identity` is
-`u(+) - u(-)`, the negative of `jump(u)`, and with `NormalComponent` it is
-`u(+).n(+) + u(-).n(-)`. `Average` with `NormalComponent` is
-`(u(+).n(+) + u(-).n(-)) / 2`. A consistency flux passed to
-`applyInterfaceTraceNitsche` or `InterfaceTraceNitscheBC` must use the same
-orientation as the chosen reduction.
+The BC trace helpers follow the core convention:
+`bc::InterfaceTraceReduction::Jump` is `jump(u) = u(-) - u(+)` for
+`ScalarTraceOperator::Identity` and `jump(u).n(-) = u(-).n(-) + u(+).n(+)`
+for `NormalComponent`, so consistency fluxes passed to
+`applyInterfaceTraceNitsche` or `InterfaceTraceNitscheBC` are written on
+`n(-)`, and a prescribed jump `g` means `u(-) - u(+) = g`
+(`test_InterfaceTraceConventions.cpp`). `Average` with `NormalComponent` is
+`(u(+).n(+) + u(-).n(-)) / 2`, half the normal jump, not the average flux.
 
 This is enough for current weak trace loads, trace Robin terms, Nitsche terms,
 interface exchange, and simple DG terms. First-class normal/tangential jump
@@ -547,7 +548,7 @@ namespace `forms::bc`.
 | `interface::NitscheVariant`, `NitscheInterfaceOptions` | `InterfaceConditions.h` | Interface Poisson Nitsche options |
 | `interface::scalarContinuityPenaltyTerms(...)` | `InterfaceConditions.h` | Equal-and-opposite continuity penalty terms of two traced sides |
 | `interface::nitschePoissonIntegrand(...)` | `InterfaceConditions.h` | Legacy interface Poisson integrand helper; prefer explicit interface trace terms |
-| `interface::applyNitscheInterfacePoisson(...)` | `InterfaceConditions.h` | Legacy interface Poisson helper over `.dI(marker)`; builds its fluxes on `n(-)` but uses the `Jump` reduction (`u(+) - u(-)`), unlike `nitschePoissonIntegrand`; neither helper has a test |
+| `interface::applyNitscheInterfacePoisson(...)` | `InterfaceConditions.h` | Legacy interface Poisson helper over `.dI(marker)`; the same terms as `nitschePoissonIntegrand`, both tested for consistency with a linear solution |
 | `systems::BoundaryConditionManager::add`, `install(options, factory)` | `Systems/BoundaryConditionManager.h` | Collect BC objects, one factory call per option entry |
 | `BoundaryConditionManager::applyAll(system, residual, u, v, field)` | `Systems/BoundaryConditionManager.h` | Validate markers, add weak terms to the residual, install strong and affine constraints |
 | `BoundaryConditionManager::applyAll(system, field)` | `Systems/BoundaryConditionManager.h` | Strong/affine-only BCs of a field; throws before any mutation if a BC has weak terms |
@@ -887,7 +888,6 @@ helpers, scalar trace BC helpers, `.dI`, and the level-set handles with
 |------------|---------|
 | `facetTrace(expr, side)` | Explicit side/trace restriction distinct from tensor `trace` |
 | `normalJump(u)`, `tangentialJump(u)` | Orientation-aware trace jumps |
-| One jump sign convention | `bc::InterfaceTraceReduction::Jump` agrees with `jump()` |
 | Vector trace laws | Nitsche and Robin helpers for vector traces (today scalar traces only) |
 | `H(curl)` tangential essential BC wrapper | Counterpart of `NormalTraceEssentialBC`, with nonzero data |
 

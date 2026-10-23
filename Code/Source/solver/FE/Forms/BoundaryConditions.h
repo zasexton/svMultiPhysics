@@ -265,6 +265,8 @@ enum class ScalarTraceOperator : std::uint8_t {
     NormalComponent
 };
 
+/// Side reduction of an interface trace.  Jump follows the core jump():
+/// u(-) - u(+) for the Identity trace and jump(u).n(-) for the normal trace.
 enum class InterfaceTraceReduction : std::uint8_t {
     Minus,
     Plus,
@@ -327,8 +329,10 @@ enum class InterfaceTraceReduction : std::uint8_t {
     case InterfaceTraceReduction::Plus:
         return tau_plus;
     case InterfaceTraceReduction::Jump:
+        // The jump of the core, jump(u) = u(-) - u(+); for the normal trace,
+        // jump(u).n(-) = u(-).n(-) + u(+).n(+) (n(+) = -n(-)).
         if (op == ScalarTraceOperator::Identity) {
-            return tau_plus - tau_minus;
+            return tau_minus - tau_plus;
         }
         return tau_plus + tau_minus;
     case InterfaceTraceReduction::Average:

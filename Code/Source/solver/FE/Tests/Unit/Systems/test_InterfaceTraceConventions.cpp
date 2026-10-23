@@ -24,6 +24,7 @@
 #include "Assembly/GlobalSystemView.h"
 #include "Forms/BoundaryConditions.h"
 #include "Forms/InterfaceConditions.h"
+#include "Forms/StandardBCs.h"
 #include "Forms/Vocabulary.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
@@ -168,7 +169,7 @@ TEST(InterfaceTraceConventions, CoreInterfacePenaltyIntegrandIsConsistentForALin
     EXPECT_NEAR(sums.right, 1.0, 1e-12);
 }
 
-TEST(InterfaceTraceConventions, DISABLED_InterfaceNitschePoissonHelperIsConsistentForALinearSolution)
+TEST(InterfaceTraceConventions, InterfaceNitschePoissonHelperIsConsistentForALinearSolution)
 {
     // applyNitscheInterfacePoisson must state the same consistency term.
     const auto sums = assembleCellSums(
@@ -224,6 +225,60 @@ TEST(InterfaceTraceConventions, NormalComponentJumpIsTheCoreJumpAlongTheMinusNor
     EXPECT_NEAR(with_helper.left, with_core.left, 1e-12);
     EXPECT_NEAR(with_helper.right, with_core.right, 1e-12);
     EXPECT_GT(std::abs(with_core.left), 0.5);
+}
+
+TEST(InterfaceTraceConventions, IdentityJumpReductionIsTheCoreJump)
+{
+    // One jump convention: the Identity Jump reduction of the BC helpers is
+    // jump(u) = u(-) - u(+), by tree and by value.
+    spaces::L2Space space(ElementType::Quad4, 1);
+    const auto u = forms::StateField(FieldId{0}, space, "u");
+    EXPECT_EQ(forms::bc::applyInterfaceScalarTrace(u, forms::bc::ScalarTraceOperator::Identity,
+                                                   forms::bc::InterfaceTraceReduction::Jump)
+                  .toString(),
+              (u.minus() - u.plus()).toString());
+
+    const auto indicator = [](Real x) { return x < 1.0 ? Real(1.0) : Real(0.0); };
+    const auto with_helper = assembleCellSums(
+        [](const forms::FormExpr& w, const forms::FormExpr& v) {
+            return (forms::bc::applyInterfaceScalarTrace(w, forms::bc::ScalarTraceOperator::Identity,
+                                                         forms::bc::InterfaceTraceReduction::Jump) *
+                    forms::bc::applyInterfaceScalarTrace(v, forms::bc::ScalarTraceOperator::Identity,
+                                                         forms::bc::InterfaceTraceReduction::Jump))
+                .dI(kInterfaceMarker);
+        },
+        indicator);
+    const auto with_core = assembleCellSums(
+        [](const forms::FormExpr& w, const forms::FormExpr& v) {
+            return (forms::jump(w) * forms::jump(v)).dI(kInterfaceMarker);
+        },
+        indicator);
+    EXPECT_NEAR(with_helper.left, with_core.left, 1e-12);
+    EXPECT_NEAR(with_helper.right, with_core.right, 1e-12);
+    // jump(u) jump(v) with u the left indicator: +1 on the left, -1 on the right.
+    EXPECT_NEAR(with_core.left, 1.0, 1e-12);
+    EXPECT_NEAR(with_core.right, -1.0, 1e-12);
+
+    // The jump-penalty wrapper with a prescribed jump g states
+    // alpha jump(u) jump(v) - g jump(v), the same form as the core.
+    const auto penalty_wrapper = assembleCellSums(
+        [](const forms::FormExpr& w, const forms::FormExpr& v) {
+            forms::FormExpr residual = (forms::FormExpr::constant(0.0) * w * v).dx();
+            forms::bc::InterfaceTraceJumpPenaltyBC bc(kInterfaceMarker, forms::FormExpr::constant(3.0),
+                                                      forms::FormExpr::constant(2.0),
+                                                      forms::bc::ScalarTraceOperator::Identity);
+            bc.contributeToResidual(residual, w, v);
+            return residual;
+        },
+        indicator);
+    const auto penalty_core = assembleCellSums(
+        [](const forms::FormExpr& w, const forms::FormExpr& v) {
+            return (3.0 * forms::jump(w) * forms::jump(v)).dI(kInterfaceMarker) -
+                   (2.0 * forms::jump(v)).dI(kInterfaceMarker);
+        },
+        indicator);
+    EXPECT_NEAR(penalty_wrapper.left, penalty_core.left, 1e-12);
+    EXPECT_NEAR(penalty_wrapper.right, penalty_core.right, 1e-12);
 }
 
 } // namespace svmp::FE::systems::test
