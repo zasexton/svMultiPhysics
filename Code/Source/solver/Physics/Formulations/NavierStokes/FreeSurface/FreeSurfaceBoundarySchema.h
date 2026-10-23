@@ -26,7 +26,7 @@
 #include "FE/Core/Types.h"
 #include "FE/Forms/BoundaryConditions.h"
 #include "Physics/Core/EquationModuleInput.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceOptions.h"
+#include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 
 #include <array>
 #include <cstdint>

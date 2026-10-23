@@ -12,6 +12,9 @@
 /**
  * @file IncompressibleTwoFluidModule.h
  * @brief Monolithic two-field-pair incompressible material-interface module.
+ *
+ * Its options (IncompressibleTwoFluidOptions) are declared with the other
+ * option types in IncompressibleNavierStokesVMSModule.h.
  */
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
@@ -26,88 +29,6 @@ namespace svmp {
 namespace Physics {
 namespace formulations {
 namespace navier_stokes {
-
-struct IncompressibleTwoFluidPhaseOptions {
-    std::string velocity_field_name{};
-    std::string pressure_field_name{};
-    FE::Real density{1.0};
-    FE::Real viscosity{1.0};
-    std::vector<IncompressibleNavierStokesVMSOptions::VelocityDirichletBC>
-        velocity_dirichlet{};
-};
-
-struct IncompressibleTwoFluidSharedPressureGauge {
-    FE::GlobalIndex vertex_gid{-1};
-    FE::Real pressure{0.0};
-};
-
-/**
- * @brief Initial supported envelope for a sharp incompressible two-fluid pair
- *
- * The current owner intentionally admits only fixed-Eulerian affine C0 P1
- * Triangle3/Tetra4 spaces, constant phase materials, one shared generated
- * interface, CutVolume phase restriction, phasewise VMS/PSPG and ghost
- * stabilization, and phasewise small-cut aggregation. Compressible gas,
- * contact, phase change, turbulence, variable material laws, and moving-mesh
- * combinations remain outside this contract.
- */
-struct IncompressibleTwoFluidOptions {
-    IncompressibleTwoFluidPhaseOptions negative_phase{
-        .velocity_field_name = "u_negative",
-        .pressure_field_name = "p_negative",
-        .density = 1000.0,
-        .viscosity = 0.001,
-    };
-    IncompressibleTwoFluidPhaseOptions positive_phase{
-        .velocity_field_name = "u_positive",
-        .pressure_field_name = "p_positive",
-        .density = 1.0,
-        .viscosity = 0.00001,
-    };
-
-    /**
-     * Physical exterior velocity data applied identically to both phase
-     * restrictions. Phase-local velocity data remain homogeneous-only.
-     */
-    std::vector<IncompressibleNavierStokesVMSOptions::VelocityDirichletBC>
-        shared_velocity_dirichlet{};
-
-    /** Optional partition-invariant anchor for the shared pressure mode. */
-    std::optional<IncompressibleTwoFluidSharedPressureGauge>
-        shared_pressure_gauge{};
-
-    std::string operator_tag{"equations"};
-    std::string level_set_field_name{"level_set"};
-    std::string generated_interface_domain_id{"two_fluid_interface"};
-    std::string generated_interface_geometry{"LinearCorner"};
-    std::string geometry_tangent_policy{"RefreshedFrozenQuadrature"};
-    int interface_marker{-1};
-    FE::Real level_set_isovalue{0.0};
-
-    FE::Real surface_tension{0.0};
-    /** Optional manufactured p_minus-p_plus load and diagnostic target. */
-    std::optional<FE::Real> prescribed_pressure_jump{};
-    /** Optional manufactured (tau_minus-tau_plus)n target in global axes. */
-    std::optional<std::array<FE::Real, 3>>
-        prescribed_viscous_traction_jump{};
-    FE::Real interface_nitsche_gamma{20.0};
-    bool include_transient_interface_penalty{true};
-    bool require_conservative_phase_momentum_reconciliation{false};
-
-    std::array<FE::Real, 3> body_force{0.0, 0.0, 0.0};
-    bool enable_convection{true};
-    bool enable_vms{true};
-    FE::Real ct_m{1.0};
-    FE::Real ct_c{36.0};
-    FE::Real stabilization_epsilon{1.0e-12};
-
-    FE::Real pressure_gradient_penalty{1.0};
-    bool use_cut_metadata_scale{false};
-    std::optional<FE::Real> cut_metadata_scale_cap{};
-    IncompressibleNavierStokesVMSOptions::FreeSurfaceSmallCutAggregationGuards
-        small_cut_aggregation_guards{};
-    core::PhysicsJITPolicy jit_policy{};
-};
 
 /** Validate parser-visible semantics shared by preflight and registration. */
 void validateIncompressibleTwoFluidConfigurationSemantics(
