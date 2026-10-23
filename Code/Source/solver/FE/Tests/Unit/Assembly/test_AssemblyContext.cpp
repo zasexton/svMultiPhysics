@@ -26,6 +26,8 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 namespace svmp {
@@ -1367,6 +1369,121 @@ TEST(AssemblyContextDeferredSolution, SetterChecksStillThrowAtTheSetCall)
         EXPECT_THROW(ctx.setSolutionCoefficients(std::span<const Real>(c.data(), 1)), std::invalid_argument);
         EXPECT_THROW(ctx.setPreviousSolutionCoefficientsK(0, c), std::exception);
     }
+}
+
+// ============================================================================
+// Basis tables: the transposing setters write every entry, so they skip the
+// zero fill of a grown table without exposing stale arena content
+// ============================================================================
+
+TEST(AssemblyContextBasisTables, TransposedTablesOverwriteStaleArenaContentAndKeepZeroTails)
+{
+    using V3 = AssemblyContext::Vector3D;
+    using M33 = AssemblyContext::Matrix3x3;
+    AssemblyContext ctx;
+    ctx.reserve(/*max_dofs=*/16, /*max_qpts=*/8, /*dim=*/3);
+    const Real nan = std::numeric_limits<Real>::quiet_NaN();
+
+    const auto points = [](LocalIndex nq) {
+        std::vector<AssemblyContext::Point3D> pts(static_cast<std::size_t>(nq), {0.1, 0.2, 0.3});
+        std::vector<Real> wts(static_cast<std::size_t>(nq), Real(0.5));
+        return std::make_pair(pts, wts);
+    };
+    const auto set_points = [&](LocalIndex nq) {
+        auto [pts, wts] = points(nq);
+        ctx.setQuadratureData(pts, wts);
+    };
+    const auto value_of = [](std::size_t e, Real tag) { return tag + Real(0.25) * Real(e) - Real(1.0); };
+    const auto matrix_of = [&](std::size_t e, Real tag) {
+        M33 m{};
+        for (std::size_t r = 0; r < 3; ++r) {
+            for (std::size_t c = 0; c < 3; ++c) {
+                m[r][c] = value_of(e * 9u + r * 3u + c, tag);
+            }
+        }
+        return m;
+    };
+    const auto tables = [&](LocalIndex nd, LocalIndex nq, Real tag, std::size_t extra) {
+        const auto n = static_cast<std::size_t>(nd) * static_cast<std::size_t>(nq) + extra;
+        std::vector<Real> values(n);
+        std::vector<V3> grads(n);
+        std::vector<M33> hess(n);
+        for (std::size_t e = 0; e < n; ++e) {
+            values[e] = std::isnan(tag) ? nan : value_of(e, tag);
+            grads[e] = {values[e], -values[e], Real(2.0) * values[e]};
+            hess[e] = std::isnan(tag) ? M33{{{nan, nan, nan}, {nan, nan, nan}, {nan, nan, nan}}} : matrix_of(e, tag);
+        }
+        return std::make_tuple(values, grads, hess);
+    };
+    const auto set_all = [&](LocalIndex nd, LocalIndex nq, Real tag, std::size_t extra) {
+        set_points(nq);
+        auto [values, grads, hess] = tables(nd, nq, tag, extra);
+        ctx.setTestBasisData(nd, values, grads);
+        ctx.setTrialBasisData(nd, values, grads);
+        ctx.setTestBasisHessians(nd, hess);
+        ctx.setTrialBasisHessians(nd, hess);
+        ctx.setPhysicalHessians(hess, hess);
+        return std::make_tuple(values, grads, hess);
+    };
+    const auto bits = [](Real v) {
+        std::uint64_t b = 0;
+        std::memcpy(&b, &v, sizeof(b));
+        return b;
+    };
+    const auto expect_same = [&](Real a, Real b) { EXPECT_EQ(bits(a), bits(b)); };
+    const auto expect_same33 = [&](const M33& a, const M33& b) {
+        for (std::size_t r = 0; r < 3; ++r) {
+            for (std::size_t c = 0; c < 3; ++c) expect_same(a[r][c], b[r][c]);
+        }
+    };
+
+    // Fill the arena with NaN tables, shrink, then grow over the stale part.
+    (void)set_all(16, 8, nan, 0);
+    (void)set_all(4, 3, Real(1.0), 0);
+    const LocalIndex nd = 8;
+    const LocalIndex nq = 5;
+    auto [values, grads, hess] = set_all(nd, nq, Real(2.0), 0);
+    ASSERT_EQ(ctx.testBasisValuesRaw().size(), values.size());
+    const auto test_ref_h = ctx.testRefHessiansRaw();
+    const auto trial_ref_h = ctx.trialRefHessiansRaw();
+    ASSERT_EQ(test_ref_h.size(), hess.size());
+    ASSERT_EQ(trial_ref_h.size(), hess.size());
+    ASSERT_EQ(ctx.testPhysicalHessiansRaw().size(), hess.size());
+    ASSERT_EQ(ctx.trialPhysicalHessiansRaw().size(), hess.size());
+    for (LocalIndex i = 0; i < nd; ++i) {
+        for (LocalIndex q = 0; q < nq; ++q) {
+            const auto in = static_cast<std::size_t>(i * nq + q);
+            const auto out = static_cast<std::size_t>(q * nd + i);
+            expect_same(ctx.basisValue(i, q), values[in]);
+            expect_same(ctx.trialBasisValue(i, q), values[in]);
+            for (std::size_t d = 0; d < 3; ++d) {
+                expect_same(ctx.referenceGradient(i, q)[d], grads[in][d]);
+                expect_same(ctx.trialReferenceGradient(i, q)[d], grads[in][d]);
+            }
+            expect_same33(test_ref_h[out], hess[in]);
+            expect_same33(trial_ref_h[out], hess[in]);
+            expect_same33(ctx.testPhysicalHessiansRaw()[out], hess[in]);
+            expect_same33(ctx.trialPhysicalHessiansRaw()[out], hess[in]);
+        }
+    }
+
+    // An input longer than n_dofs * n_qpts keeps the zero-filled tail as before.
+    (void)set_all(2, 2, Real(3.0), 0);
+    constexpr std::size_t extra = 5;
+    auto [values2, grads2, hess2] = set_all(4, 3, Real(4.0), extra);
+    const auto written = static_cast<std::size_t>(4 * 3);
+    ASSERT_EQ(ctx.testBasisValuesRaw().size(), written + extra);
+    ASSERT_EQ(ctx.trialBasisValuesRaw().size(), written + extra);
+    const auto test_ref_h2 = ctx.testRefHessiansRaw();
+    for (std::size_t e = written; e < written + extra; ++e) {
+        expect_same(ctx.testBasisValuesRaw()[e], Real{0.0});
+        expect_same(ctx.trialBasisValuesRaw()[e], Real{0.0});
+        expect_same33(test_ref_h2[e], M33{});
+        expect_same33(ctx.testPhysicalHessiansRaw()[e], M33{});
+    }
+    (void)values2;
+    (void)grads2;
+    (void)hess2;
 }
 
 // ============================================================================

@@ -812,6 +812,21 @@ const typename Container::value_type& requireQPointData(
     return data[static_cast<std::size_t>(q)];
 }
 
+// The basis-table setters below transpose a dof-major input of `size` entries
+// into point-major storage, writing entries [0, written) with written =
+// n_dofs * n_qpts.  When the two counts agree every entry is written, so the
+// zero fill that resize() gives the grown part is overwritten unread; skip
+// it.  Otherwise keep resize(), whose zeros then remain in the unwritten part.
+template <class Array>
+void resizeForTranspose(Array& array, std::size_t size, std::size_t written)
+{
+    if (size == written) {
+        array.resizeUninit(size);
+    } else {
+        array.resize(size);
+    }
+}
+
 void requireQPointSpanSize(std::size_t size, LocalIndex n_qpts, const char* setter_name)
 {
     if (size != static_cast<std::size_t>(n_qpts)) {
@@ -3185,11 +3200,11 @@ void AssemblyContext::setTestBasisData(
     // Transpose from dof-major [i * n_qpts + q] to qpt-major [q * n_dofs + i]
     const auto nd = static_cast<std::size_t>(n_test_dofs_);
     const auto nq = static_cast<std::size_t>(n_qpts_);
-    test_basis_values_.resize(values.size());
+    resizeForTranspose(test_basis_values_, values.size(), nd * nq);
     for (std::size_t i = 0; i < nd; ++i)
         for (std::size_t q = 0; q < nq; ++q)
             test_basis_values_[q * nd + i] = values[i * nq + q];
-    test_ref_gradients_.resize(gradients.size());
+    resizeForTranspose(test_ref_gradients_, gradients.size(), nd * nq);
     for (std::size_t i = 0; i < nd; ++i)
         for (std::size_t q = 0; q < nq; ++q)
             test_ref_gradients_[q * nd + i] = gradients[i * nq + q];
@@ -3234,11 +3249,11 @@ void AssemblyContext::setTrialBasisData(
 
     const auto nd = static_cast<std::size_t>(n_trial_dofs_);
     const auto nq = static_cast<std::size_t>(n_qpts_);
-    trial_basis_values_.resize(values.size());
+    resizeForTranspose(trial_basis_values_, values.size(), nd * nq);
     for (std::size_t i = 0; i < nd; ++i)
         for (std::size_t q = 0; q < nq; ++q)
             trial_basis_values_[q * nd + i] = values[i * nq + q];
-    trial_ref_gradients_.resize(gradients.size());
+    resizeForTranspose(trial_ref_gradients_, gradients.size(), nd * nq);
     for (std::size_t i = 0; i < nd; ++i)
         for (std::size_t q = 0; q < nq; ++q)
             trial_ref_gradients_[q * nd + i] = gradients[i * nq + q];
@@ -3443,7 +3458,7 @@ void AssemblyContext::setTestBasisHessians(
     ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
     const auto nd = static_cast<std::size_t>(n_test_dofs_);
     const auto nq = static_cast<std::size_t>(n_qpts_);
-    test_ref_hessians_.resize(hessians.size());
+    resizeForTranspose(test_ref_hessians_, hessians.size(), nd * nq);
     for (std::size_t i = 0; i < nd; ++i)
         for (std::size_t q = 0; q < nq; ++q)
             test_ref_hessians_[q * nd + i] = hessians[i * nq + q];
@@ -3461,7 +3476,7 @@ void AssemblyContext::setTrialBasisHessians(
     ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
     const auto nd = static_cast<std::size_t>(n_trial_dofs_);
     const auto nq = static_cast<std::size_t>(n_qpts_);
-    trial_ref_hessians_.resize(hessians.size());
+    resizeForTranspose(trial_ref_hessians_, hessians.size(), nd * nq);
     for (std::size_t i = 0; i < nd; ++i)
         for (std::size_t q = 0; q < nq; ++q)
             trial_ref_hessians_[q * nd + i] = hessians[i * nq + q];
@@ -3510,14 +3525,14 @@ void AssemblyContext::setPhysicalHessians(
     // Transpose from dof-major [i * n_qpts + q] to qpt-major [q * n_dofs + i]
     {
         const auto nd = static_cast<std::size_t>(n_test_dofs_);
-        test_phys_hessians_.resize(test_hessians.size());
+        resizeForTranspose(test_phys_hessians_, test_hessians.size(), nd * nq);
         for (std::size_t i = 0; i < nd; ++i)
             for (std::size_t q = 0; q < nq; ++q)
                 test_phys_hessians_[q * nd + i] = test_hessians[i * nq + q];
     }
     if (!trial_is_test_) {
         const auto nd = static_cast<std::size_t>(n_trial_dofs_);
-        trial_phys_hessians_.resize(trial_hessians.size());
+        resizeForTranspose(trial_phys_hessians_, trial_hessians.size(), nd * nq);
         for (std::size_t i = 0; i < nd; ++i)
             for (std::size_t q = 0; q < nq; ++q)
                 trial_phys_hessians_[q * nd + i] = trial_hessians[i * nq + q];
