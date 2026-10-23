@@ -318,6 +318,65 @@ bool containsTwoSidedInterfaceOperator(const FormExprNode& node)
     return false;
 }
 
+/// The first jump() or avg() node under @p node, or null.
+const FormExprNode* findJumpOrAverage(const FormExprNode& node)
+{
+    if (node.type() == FormExprType::Jump || node.type() == FormExprType::Average) {
+        return &node;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child) {
+            if (const auto* found = findJumpOrAverage(*child)) {
+                return found;
+            }
+        }
+    }
+    return nullptr;
+}
+
+std::string abbreviatedTerm(const FormExpr& expr)
+{
+    constexpr std::size_t kMaxLength = 240;
+    auto text = expr.toString();
+    if (text.size() > kMaxLength) {
+        text = text.substr(0, kMaxLength) + "...";
+    }
+    return text;
+}
+
+/**
+ * jump() and avg() need the two sides of a facet: they are defined on
+ * interior-facet (dS) and interface (dI) integrals.  In a cell (dx),
+ * cut-volume (dCutVolume) or exterior-boundary (ds) integral, assembly would
+ * throw at the first evaluation; reject the term at compile time and name it.
+ */
+void requireTwoSidedOperatorsOnFacets(const std::vector<IntegralTerm>& terms)
+{
+    for (const auto& term : terms) {
+        const char* measure = nullptr;
+        switch (term.domain) {
+            case IntegralDomain::Cell: measure = "a cell integral (dx)"; break;
+            case IntegralDomain::CutVolume: measure = "a cut-volume integral (dCutVolume)"; break;
+            case IntegralDomain::Boundary: measure = "an exterior-boundary integral (ds)"; break;
+            case IntegralDomain::InteriorFace:
+            case IntegralDomain::InterfaceFace:
+                break;
+        }
+        if (measure == nullptr || !term.integrand.isValid() || term.integrand.node() == nullptr) {
+            continue;
+        }
+        const auto* found = findJumpOrAverage(*term.integrand.node());
+        if (found == nullptr) {
+            continue;
+        }
+        const char* op = found->type() == FormExprType::Jump ? "jump()" : "avg()";
+        throw std::invalid_argument(
+            std::string("FormCompiler: ") + op +
+            " is defined only on interior-facet (dS) and interface (dI) integrals, but " + measure +
+            " uses it: " + found->toString() + " in the integrand '" + abbreviatedTerm(term.integrand) + "'");
+    }
+}
+
 void requireSupportedGeometrySensitivityMode(const FormExprNode& node,
                                              const GeometrySensitivityOptions& options)
 {
@@ -1154,6 +1213,7 @@ FormIR FormCompiler::compileImpl(const FormExpr& form, FormKind kind)
 
     std::vector<IntegralTerm> terms;
     detail::collectIntegralTerms(form, /*sign=*/+1, terms);
+    detail::requireTwoSidedOperatorsOnFacets(terms);
 
     const bool form_has_geometry_sensitivity_terminals =
         detail::containsGeometrySensitivityTerminal(*form.node());
@@ -1557,6 +1617,7 @@ MixedFormIR FormCompiler::compileMixed(const FormExpr& form, FormKind kind)
     // Collect all integral terms from the mixed expression
     std::vector<IntegralTerm> all_terms;
     detail::collectIntegralTerms(form, /*sign=*/+1, all_terms);
+    detail::requireTwoSidedOperatorsOnFacets(all_terms);
 
     // Build whole-form domain summary from all terms
     mir.setDomainSummary(summarize_domains(all_terms));

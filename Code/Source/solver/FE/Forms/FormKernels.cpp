@@ -7180,7 +7180,8 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
         }
         case FormExprType::Jump: {
             if (!env.plus) {
-                throw FEException("Forms: jump() used outside interior-face integral",
+                throw FEException(std::string("Forms: jump() used outside interior-face integral: '") + node.toString() +
+                                      "' (jump() and avg() need dS or dI)",
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
             const auto kids = node.childrenShared();
@@ -7225,7 +7226,8 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
         }
         case FormExprType::Average: {
             if (!env.plus) {
-                throw FEException("Forms: avg() used outside interior-face integral",
+                throw FEException(std::string("Forms: avg() used outside interior-face integral: '") + node.toString() +
+                                      "' (jump() and avg() need dS or dI)",
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
             const auto kids = node.childrenShared();
@@ -8349,18 +8351,21 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
                 if (isVectorKind<Real>(a.kind) && a.vectorSize() != b.vectorSize()) {
-                    throw FEException("Forms: add/sub vector size mismatch",
+                    throw FEException(std::string("Forms: add/sub vector size mismatch in '") + node.toString() + "' with lhs=" +
+                                          evalKindDescription(a) + " rhs=" + evalKindDescription(b),
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
                 if (isMatrixKind<Real>(a.kind) && (a.matrixRows() != b.matrixRows() || a.matrixCols() != b.matrixCols())) {
-                    throw FEException("Forms: add/sub matrix shape mismatch",
+                    throw FEException(std::string("Forms: add/sub matrix shape mismatch in '") + node.toString() + "' with lhs=" +
+                                          evalKindDescription(a) + " rhs=" + evalKindDescription(b),
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
                 if (isTensor3Kind<Real>(a.kind) &&
                     (a.tensor3Dim0() != b.tensor3Dim0() ||
                      a.tensor3Dim1() != b.tensor3Dim1() ||
                      a.tensor3Dim2() != b.tensor3Dim2())) {
-                    throw FEException("Forms: add/sub tensor3 shape mismatch",
+                    throw FEException(std::string("Forms: add/sub tensor3 shape mismatch in '") + node.toString() + "' with lhs=" +
+                                          evalKindDescription(a) + " rhs=" + evalKindDescription(b),
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
                 EvalValue<Real> out;
@@ -8463,7 +8468,8 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                     const auto rows = b.matrixRows();
                     const auto cols = b.matrixCols();
                     if (a.vectorSize() != rows) {
-                        throw FEException("Forms: vector-matrix multiplication shape mismatch",
+                        throw FEException(std::string("Forms: vector-matrix multiplication shape mismatch in '") + node.toString() + "' with lhs=" +
+                                              evalKindDescription(a) + " rhs=" + evalKindDescription(b),
                                           __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                     }
                     EvalValue<Real> out;
@@ -8483,7 +8489,8 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                     const auto inner_dim = a.matrixCols();
                     const auto cols = b.matrixCols();
                     if (b.matrixRows() != inner_dim) {
-                        throw FEException("Forms: matrix-matrix multiplication shape mismatch",
+                        throw FEException(std::string("Forms: matrix-matrix multiplication shape mismatch in '") + node.toString() + "' with lhs=" +
+                                              evalKindDescription(a) + " rhs=" + evalKindDescription(b),
                                           __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                     }
                     EvalValue<Real> out;
@@ -8609,7 +8616,8 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                 }
                 if (isVectorKind<Real>(a.kind) && isVectorKind<Real>(b.kind)) {
                     if (a.vectorSize() != b.vectorSize()) {
-                        throw FEException("Forms: inner(vector,vector) size mismatch",
+                        throw FEException(std::string("Forms: inner(vector,vector) size mismatch in '") + node.toString() + "' with lhs=" +
+                                              evalKindDescription(a) + " rhs=" + evalKindDescription(b),
                                           __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                     }
                     Real dot = 0.0;
@@ -8620,7 +8628,8 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                 }
                 if (isMatrixKind<Real>(a.kind) && isMatrixKind<Real>(b.kind)) {
                     if (a.matrixRows() != b.matrixRows() || a.matrixCols() != b.matrixCols()) {
-                        throw FEException("Forms: inner(matrix,matrix) shape mismatch",
+                        throw FEException(std::string("Forms: inner(matrix,matrix) shape mismatch in '") + node.toString() + "' with lhs=" +
+                                              evalKindDescription(a) + " rhs=" + evalKindDescription(b),
                                           __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                     }
                     Real sum = 0.0;
@@ -8635,7 +8644,8 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                     if (a.tensor3Dim0() != b.tensor3Dim0() ||
                         a.tensor3Dim1() != b.tensor3Dim1() ||
                         a.tensor3Dim2() != b.tensor3Dim2()) {
-                        throw FEException("Forms: inner(tensor3,tensor3) shape mismatch",
+                        throw FEException(std::string("Forms: inner(tensor3,tensor3) shape mismatch in '") + node.toString() + "' with lhs=" +
+                                              evalKindDescription(a) + " rhs=" + evalKindDescription(b),
                                           __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                     }
                     Real sum = 0.0;
@@ -8710,7 +8720,8 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                 }
                 if (isVectorKind<Real>(a.kind) && isVectorKind<Real>(b.kind)) {
                     if (a.vectorSize() != b.vectorSize()) {
-                        throw FEException("Forms: doubleContraction(vector,vector) size mismatch",
+                        throw FEException(std::string("Forms: doubleContraction(vector,vector) size mismatch in '") + node.toString() + "' with lhs=" +
+                                              evalKindDescription(a) + " rhs=" + evalKindDescription(b),
                                           __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                     }
                     Real dot = 0.0;
@@ -8721,7 +8732,8 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                 }
                 if (isMatrixKind<Real>(a.kind) && isMatrixKind<Real>(b.kind)) {
                     if (a.matrixRows() != b.matrixRows() || a.matrixCols() != b.matrixCols()) {
-                        throw FEException("Forms: doubleContraction(matrix,matrix) shape mismatch",
+                        throw FEException(std::string("Forms: doubleContraction(matrix,matrix) shape mismatch in '") + node.toString() + "' with lhs=" +
+                                              evalKindDescription(a) + " rhs=" + evalKindDescription(b),
                                           __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                     }
                     Real sum = 0.0;
@@ -11656,7 +11668,8 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
         }
         case FormExprType::Jump: {
             if (!env.plus) {
-                throw FEException("Forms: jump() used outside interior-face integral",
+                throw FEException(std::string("Forms: jump() used outside interior-face integral: '") + node.toString() +
+                                      "' (jump() and avg() need dS or dI)",
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
             const auto kids = node.childrenShared();
@@ -11701,7 +11714,8 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
         }
         case FormExprType::Average: {
             if (!env.plus) {
-                throw FEException("Forms: avg() used outside interior-face integral",
+                throw FEException(std::string("Forms: avg() used outside interior-face integral: '") + node.toString() +
+                                      "' (jump() and avg() need dS or dI)",
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
             const auto kids = node.childrenShared();
@@ -12236,18 +12250,21 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
                 if (isVectorKind<Dual>(a.kind) && a.vectorSize() != b.vectorSize()) {
-                    throw FEException("Forms: add/sub vector size mismatch (dual)",
+                    throw FEException(std::string("Forms: add/sub vector size mismatch (dual) in '") + node.toString() + "' with lhs=" +
+                                          evalKindDescription(a) + " rhs=" + evalKindDescription(b),
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
                 if (isMatrixKind<Dual>(a.kind) && (a.matrixRows() != b.matrixRows() || a.matrixCols() != b.matrixCols())) {
-                    throw FEException("Forms: add/sub matrix shape mismatch (dual)",
+                    throw FEException(std::string("Forms: add/sub matrix shape mismatch (dual) in '") + node.toString() + "' with lhs=" +
+                                          evalKindDescription(a) + " rhs=" + evalKindDescription(b),
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
                 if (isTensor3Kind<Dual>(a.kind) &&
                     (a.tensor3Dim0() != b.tensor3Dim0() ||
                      a.tensor3Dim1() != b.tensor3Dim1() ||
                      a.tensor3Dim2() != b.tensor3Dim2())) {
-                    throw FEException("Forms: add/sub tensor3 shape mismatch (dual)",
+                    throw FEException(std::string("Forms: add/sub tensor3 shape mismatch (dual) in '") + node.toString() + "' with lhs=" +
+                                          evalKindDescription(a) + " rhs=" + evalKindDescription(b),
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
                 EvalValue<Dual> out;
@@ -12367,7 +12384,8 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
                     const auto rows = b.matrixRows();
                     const auto cols = b.matrixCols();
                     if (a.vectorSize() != rows) {
-                        throw FEException("Forms: vector-matrix multiplication shape mismatch (dual)",
+                        throw FEException(std::string("Forms: vector-matrix multiplication shape mismatch (dual) in '") + node.toString() + "' with lhs=" +
+                                              evalKindDescription(a) + " rhs=" + evalKindDescription(b),
                                           __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                     }
                     EvalValue<Dual> out;
@@ -12388,7 +12406,8 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
                     const auto inner_dim = a.matrixCols();
                     const auto cols = b.matrixCols();
                     if (b.matrixRows() != inner_dim) {
-                        throw FEException("Forms: matrix-matrix multiplication shape mismatch (dual)",
+                        throw FEException(std::string("Forms: matrix-matrix multiplication shape mismatch (dual) in '") + node.toString() + "' with lhs=" +
+                                              evalKindDescription(a) + " rhs=" + evalKindDescription(b),
                                           __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                     }
                     EvalValue<Dual> out;
@@ -12527,7 +12546,8 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
                 if (isVectorKind<Dual>(a.kind) && isVectorKind<Dual>(b.kind)) {
                     Dual sum = makeDualConstant(0.0, env.ws->alloc());
                     if (a.vectorSize() != b.vectorSize()) {
-                        throw FEException("Forms: inner(vector,vector) size mismatch (dual)",
+                        throw FEException(std::string("Forms: inner(vector,vector) size mismatch (dual) in '") + node.toString() + "' with lhs=" +
+                                              evalKindDescription(a) + " rhs=" + evalKindDescription(b),
                                           __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                     }
                     for (std::size_t d = 0; d < a.vectorSize(); ++d) {
@@ -12544,7 +12564,8 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
                 if (isMatrixKind<Dual>(a.kind) && isMatrixKind<Dual>(b.kind)) {
                     Dual sum = makeDualConstant(0.0, env.ws->alloc());
                     if (a.matrixRows() != b.matrixRows() || a.matrixCols() != b.matrixCols()) {
-                        throw FEException("Forms: inner(matrix,matrix) shape mismatch (dual)",
+                        throw FEException(std::string("Forms: inner(matrix,matrix) shape mismatch (dual) in '") + node.toString() + "' with lhs=" +
+                                              evalKindDescription(a) + " rhs=" + evalKindDescription(b),
                                           __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                     }
                     for (std::size_t r = 0; r < a.matrixRows(); ++r) {
@@ -12564,7 +12585,8 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
                     if (a.tensor3Dim0() != b.tensor3Dim0() ||
                         a.tensor3Dim1() != b.tensor3Dim1() ||
                         a.tensor3Dim2() != b.tensor3Dim2()) {
-                        throw FEException("Forms: inner(tensor3,tensor3) shape mismatch (dual)",
+                        throw FEException(std::string("Forms: inner(tensor3,tensor3) shape mismatch (dual) in '") + node.toString() + "' with lhs=" +
+                                              evalKindDescription(a) + " rhs=" + evalKindDescription(b),
                                           __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                     }
                     Dual sum = makeDualConstant(0.0, env.ws->alloc());
@@ -12662,7 +12684,8 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
                 if (isVectorKind<Dual>(a.kind) && isVectorKind<Dual>(b.kind)) {
                     Dual sum = makeDualConstant(0.0, env.ws->alloc());
                     if (a.vectorSize() != b.vectorSize()) {
-                        throw FEException("Forms: doubleContraction(vector,vector) size mismatch (dual)",
+                        throw FEException(std::string("Forms: doubleContraction(vector,vector) size mismatch (dual) in '") + node.toString() + "' with lhs=" +
+                                              evalKindDescription(a) + " rhs=" + evalKindDescription(b),
                                           __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                     }
                     for (std::size_t d = 0; d < a.vectorSize(); ++d) {
@@ -12679,7 +12702,8 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
                 if (isMatrixKind<Dual>(a.kind) && isMatrixKind<Dual>(b.kind)) {
                     Dual sum = makeDualConstant(0.0, env.ws->alloc());
                     if (a.matrixRows() != b.matrixRows() || a.matrixCols() != b.matrixCols()) {
-                        throw FEException("Forms: doubleContraction(matrix,matrix) shape mismatch (dual)",
+                        throw FEException(std::string("Forms: doubleContraction(matrix,matrix) shape mismatch (dual) in '") + node.toString() + "' with lhs=" +
+                                              evalKindDescription(a) + " rhs=" + evalKindDescription(b),
                                           __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                     }
                     for (std::size_t r = 0; r < a.matrixRows(); ++r) {

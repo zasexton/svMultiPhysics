@@ -11,6 +11,7 @@
 
 #include <gtest/gtest.h>
 
+#include "Forms/FormCompiler.h"
 #include "Forms/FormExpr.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/H1Space.h"
@@ -177,6 +178,50 @@ TEST(FormExprEmptyOperands, UnaryOperationsAndMeasuresKeepAnEmptyFormEmpty)
     const auto R = (s.u * s.v).dx();
     expectSameTree(sumOf(empty, R), R);
     expectSameTree(sumOf(R, R), R + R);
+}
+
+TEST(FormCompilerTraceOperators, JumpAndAverageOutsideFacetIntegralsAreRejectedAndNamed)
+{
+    spaces::H1Space space(ElementType::Triangle3, 1);
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto base = (u * v).dx();
+
+    FormCompiler compiler;
+    const auto cell = invalidArgumentMessage([&] { return compiler.compileResidual(base + (jump(u) * v).dx()); });
+    EXPECT_NE(cell.find("jump()"), std::string::npos) << cell;
+    EXPECT_NE(cell.find("a cell integral (dx)"), std::string::npos) << cell;
+    EXPECT_NE(cell.find("[[u]]"), std::string::npos) << cell;
+
+    const auto boundary =
+        invalidArgumentMessage([&] { return compiler.compileResidual(base + (avg(u) * v).ds(2)); });
+    EXPECT_NE(boundary.find("avg()"), std::string::npos) << boundary;
+    EXPECT_NE(boundary.find("exterior-boundary integral (ds)"), std::string::npos) << boundary;
+
+    const auto cut = invalidArgumentMessage([&] {
+        return compiler.compileResidual(base + (jump(u) * v).dCutVolume(4, CutVolumeSide::Negative));
+    });
+    EXPECT_NE(cut.find("cut-volume integral"), std::string::npos) << cut;
+
+    // Facet integrals keep them.
+    EXPECT_NO_THROW((void)compiler.compileResidual(base + (jump(u) * jump(v)).dS()));
+    EXPECT_NO_THROW((void)compiler.compileResidual(base + (avg(u) * jump(v)).dI(3)));
+}
+
+TEST(FormCompilerTraceOperators, MixedFormsCheckEveryTerm)
+{
+    spaces::H1Space velocity_space(ElementType::Triangle3, 2);
+    spaces::H1Space pressure_space(ElementType::Triangle3, 1);
+    const auto u = TrialFunction(velocity_space, "u");
+    const auto p = TrialFunction(pressure_space, "p");
+    const auto v = TestFunction(velocity_space, "v");
+    const auto q = TestFunction(pressure_space, "q");
+    FormCompiler compiler;
+    const auto message = invalidArgumentMessage([&] {
+        return compiler.compileMixed((u * v).dx() + (jump(p) * q).dx() + (p * q).dx());
+    });
+    EXPECT_NE(message.find("jump()"), std::string::npos) << message;
+    EXPECT_NE(message.find("[[p]]"), std::string::npos) << message;
 }
 
 } // namespace svmp::FE::forms::test

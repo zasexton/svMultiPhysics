@@ -200,7 +200,7 @@ private:
     {
         if (facet_set_marker < 0) {
             throw std::invalid_argument(
-                "cutAdjacentFacetIntegral requires a nonnegative cut-adjacent facet-set marker");
+                "FacetDomain::cutAdjacent requires a nonnegative cut-adjacent facet-set marker");
         }
     }
 

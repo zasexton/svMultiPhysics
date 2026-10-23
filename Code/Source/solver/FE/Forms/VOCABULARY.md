@@ -494,9 +494,13 @@ Status: `implemented/public`.
 | `bc::InterfaceTraceReduction` | `Minus`, `Plus`, `Jump`, or `Average` interface reduction |
 
 `jump()` and `avg()` are only defined in interior-facet and interface
-integrals; elsewhere assembly throws `Forms: jump() used outside interior-face
-integral`. The normal of the minus side is `FormExpr::normal().minus()`; the
-DG helpers above write fluxes against it.
+integrals. The form compiler rejects them in a cell, cut-volume or
+exterior-boundary integral when the form is compiled (at installation), with
+the operator, the integral and the term in the message, e.g. `FormCompiler:
+jump() is defined only on interior-facet (dS) and interface (dI) integrals,
+but a cell integral (dx) uses it: [[u]] in the integrand '...'`. The normal
+of the minus side is `FormExpr::normal().minus()`; the DG helpers above write
+fluxes against it.
 
 The BC trace helpers follow the core convention:
 `bc::InterfaceTraceReduction::Jump` is `jump(u) = u(-) - u(+)` for
@@ -842,10 +846,12 @@ explicit real/imaginary splitting today.
   are implementation details, not the recommended formulation surface.
 - `trace(A)` is tensor trace. Facet/interface trace vocabulary must use names
   such as `normalTrace` or `facetTrace`, not overload tensor `trace`.
-- Shapes are checked when a kernel evaluates, not when an expression is built;
-  a shape mismatch or `jump()` outside a facet integral is reported at
-  assembly. The form compiler checks earlier that a form is a sum of
-  integrals and has the test and trial functions its kind needs.
+- Shapes are checked when a kernel evaluates, not when an expression is built:
+  a size or shape mismatch of `+ - *`, `inner` or `doubleContraction` is
+  reported at assembly, naming the term and the operand kinds (e.g. `with
+  lhs=Vector[3] rhs=Vector[2]`). The form compiler checks earlier that a form
+  is a sum of integrals, that it has the test and trial functions its kind
+  needs, and that `jump()` and `avg()` appear only in `dS` and `dI` terms.
 - The only codimension-two measure is the generated interface-boundary
   intersection (`.dL`, `dInterfaceBoundary`); general embedded-curve, point,
   and quadrature-rule-per-measure vocabulary is not public. Cut quadrature
