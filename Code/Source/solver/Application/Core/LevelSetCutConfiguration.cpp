@@ -721,6 +721,13 @@ activeCutVolumeRequests(const EquationParameters& equation)
             FreeSurfaceImplementation::UnfittedLevelSet) {
       continue;
     }
+    // An unfitted surface that does not state Active_domain is liquid on the
+    // negative side (decision D47 item 3), as in the register.
+    if (!firstDefinedParameter(bc_params, {"Active_domain"}).has_value()) {
+      bc_params["Active_domain"] =
+          svmp::Physics::formulations::navier_stokes::pressureActiveDomainName(
+              cut_keys.default_active_domain);
+    }
     const auto request =
         activeCutVolumeRequestFromParameters(
             bc_params,

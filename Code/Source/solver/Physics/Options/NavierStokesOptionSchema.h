@@ -246,6 +246,12 @@ struct FreeSurfaceApplicationKeys {
   /// empty value or a value that does not parse (the register reports it).
   std::optional<svmp::Physics::formulations::navier_stokes::FreeSurfaceImplementation>
       implementation{};
+  /// The active domain of a boundary that does not state Active_domain:
+  /// LevelSetNegative for an unfitted surface (decision D47 item 3), None
+  /// otherwise.
+  svmp::Physics::formulations::navier_stokes::FreeSurfaceActiveDomain
+      default_active_domain{
+          svmp::Physics::formulations::navier_stokes::FreeSurfaceActiveDomain::None};
   /// Small_cut_aggregation (a relaxed boolean; true when not given).
   bool small_cut_aggregation{true};
 };

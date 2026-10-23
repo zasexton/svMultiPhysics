@@ -279,9 +279,13 @@ opt::OptionSchema<FreeSurfaceBoundary> makeFreeSurfaceBoundarySchema()
              SetOptionalRealCodec{opt::RealCodec{.minimum = 1.0}})
         // Defaults that depend on another key (the register's resolution).
         // D35: MeshNitsche is the qualified default of a fitted ALE surface.
+        // D47 item 3: an unfitted surface is liquid on the negative side of
+        // the level set unless Active_domain says otherwise.
         .implies("Implementation", "Kinematic_enforcement", "MeshNitsche",
                  opt::ImplicationSettings{.when_trigger_is = "FittedALE",
                                           .trigger_must_be_explicit = false})
+        .implies("Implementation", "Active_domain", "LevelSetNegative",
+                 opt::ImplicationSettings{.when_trigger_is = "UnfittedLevelSet"})
         .implies("Prescribed_tangential_mesh_velocity", "Tangential_mesh_policy", "Prescribed")
         .implies("Cut_cell_pressure_gradient_penalty", "Enable_cut_cell_stabilization", "true")
         .implies("Cut_cell_pressure_stabilization_policy", "Enable_cut_cell_stabilization", "true")
@@ -1711,12 +1715,19 @@ const std::vector<std::string>& unfitted_interface_spellings()
   return spellings;
 }
 
+/// The implementation of a Free_surface boundary condition, which the input
+/// must state (decision D47 item 3).
 navier_stokes::FreeSurfaceImplementation
 implementation_of(const opt::OptionInput& input)
 {
-  return navier_stokes::freeSurfaceBoundarySchema()
-      .resolve(only_spellings(input, {"Implementation"}))
-      .value.implementation;
+  const auto& schema = navier_stokes::freeSurfaceBoundarySchema();
+  const auto resolved = schema.resolve(only_spellings(input, {"Implementation"}));
+  if (!resolved.isExplicit("Implementation")) {
+    throw opt::OptionError(schema.element(), "Implementation",
+                           "required: FittedALE or UnfittedLevelSet "
+                           "(decision D47)");
+  }
+  return resolved.value.implementation;
 }
 
 /// A retired value of an enumerated key: the normalized tokens that select
@@ -2235,6 +2246,7 @@ free_surface_application_keys(const svmp::FE::options::OptionInput& input)
         schema.resolve(only_spellings(input, {"Implementation"}));
     if (resolved.isExplicit("Implementation")) {
       keys.implementation = resolved.value.implementation;
+      keys.default_active_domain = resolved.value.active_domain;
     }
   } catch (const svmp::FE::options::OptionError&) {
     // The register reports the value.
