@@ -25,6 +25,7 @@
 #include "LevelSet/LevelSetMaintenanceSubstage.h"
 #include "LevelSet/Maintenance/LevelSetMaintenanceConfiguration.h"
 #include "LevelSet/Maintenance/LevelSetMaintenancePipeline.h"
+#include "LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h"
 #include "LevelSet/LevelSetKinematicReconciliation.h"
 #include "LevelSet/LevelSetOptions.h"
 #include "LevelSet/LevelSetRestart.h"
