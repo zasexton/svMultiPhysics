@@ -16,9 +16,10 @@
  *     + SUPG/PSPG/LSIC and cross-stress terms of the static subscales u', p'
  *     + boundary and free-surface terms                                         = 0,
  *
- * with a = u - w the velocity relative to the mesh.  Everything that is not
- * mathematics (option checks, field registration, certificates, logs,
- * diagnostic operators, the configuration artifact, the residual-work
+ * with a = u - w the velocity relative to the mesh.  The boundary and
+ * free-surface terms are stated in NavierStokesBCFactories.h.  Everything
+ * that is not mathematics (option checks, field registration, certificates,
+ * logs, diagnostic operators, the configuration artifact, the residual-work
  * ledger) is behind NavierStokesSupport.h.
  */
 
@@ -175,187 +176,23 @@ namespace {
     return f;
 }
 
-// ---------------------------------------------------------------------------
-// Unfitted free surface Gamma_h = {phi_h = c}, bounding the liquid side L
-// ---------------------------------------------------------------------------
-//   - gamma cos(theta_e) int_CL v.m                    Young wall energy on the contact line CL = Gamma_h ^ wall,
-//   + int_CL (xi u.m - gamma cos(theta_e)) v.m         or the weak Ren-E law, friction xi = 1/M,
-//     or u.t_w = M gamma (cos(theta_e) - cos(theta_d))  the strong Ren-E law at the contact point (constraint);
-//   + int_W (mu/l_s) u_t . v_t                         Navier slip on the wetted wall W_h;
-//   + int_Gamma p_ext n.v + gamma (I - n x n) : grad v  the traction (SurfaceStress, the only form, D48);
-//   + gamma dt int_Gamma grad_G((u - u_ref).n) . grad_G(v.n)   semi-implicit capillary term (D13).
-// n points out of the liquid, n_w out of the liquid into the wall, m = conormal(n, n_w) is wall-tangential
-// and points out of the wetted footprint.  u.n_w = 0 holds strongly on the walls, the dry side is pinned and
-// small cuts are aggregated (registerOn), and phi is transported by the level-set equation (the kinematic
-// condition).  gamma is a literal (validated); SurfaceStress already contains gamma cos(theta_d) in its
-// conormal, so its wall term keeps only cos(theta_e).
-void addUnfittedFreeSurface(FormExpr& M, fs::FESystem& system, cs::ConstraintPlan& plan, fs::FormulationBuilder& F,
-                            const Options& o, const FreeSurfaceBoundary& b, const NavierStokesTerms& t, FieldId u_id,
-                            ConservativeBalanceForms* balance)
-{
-    const auto& [u, p, v, q, rho, mu, f, dim] = t;
-    const auto L = freeSurfaceLevelSetGeometry(b, system).side(activeDomainSide(b.active_domain));
-    const auto gamma = freeSurfaceScalar(b.surface_tension, "ns_free_surface_surface_tension", b);
-
-    registerFreeSurfacePrescribedAngleGeometry(system, b);   // contact-geometry certificate at each refresh
-    for (const auto& c : Factories::contactLaws(b, dim)) {
-        const auto CL = F.registered(L.contactLine(c.wall, c.marker));
-        if (c.dynamic) {
-            registerDynamicContactWallNormalCheck(system, *c.line, CL.marker());
-        }
-        const auto n = L.outwardNormal();   // the normal of the generated rule
-        const auto m = conormal(n, c.n_w);
-        if (c.young && !bc::isZeroConstantScalarValue(b.surface_tension)) {
-            const auto young = (-gamma * c.cos_e * dot(v, m)).dL(CL);
-            M = M + young;
-            addSurfaceEnergy(balance, young);
-        }
-        if (c.dynamic && !c.strong) {
-            const auto friction = FormExpr::constant(1.0) / c.mobility * dot(u, m);
-            M = M + ((friction - gamma * c.cos_e) * dot(v, m)).dL(CL);
-            addSurfaceEnergy(balance, (-gamma * c.cos_e * dot(v, m)).dL(CL));
-        }
-        int wetted_marker = -1;
-        if (c.slip_length.isValid()) {
-            const auto W = F.registered(L.wetted(c.wall));
-            M = M + (mu / c.slip_length * dot(tangentialProjection(u, c.n_w), tangentialProjection(v, c.n_w))).ds(W);
-            wetted_marker = W.generatedActiveBoundaryMarker();
-        }
-        logContactLineTerms(b, *c.line, CL.marker(), wetted_marker);
-        if (c.strong) {   // PointLaw phase: registered after the aggregation, so it can expand aggregated DOFs
-            plan.contactPointVelocity(u_id, L.geometry(), c.wall, c.wall_normal, c.contact_speed,
-                                      "ren_e_contact_point:" + std::to_string(c.wall));
-            logStrongContactPointLaw(*c.line);
-        }
+/// The free-surface term logs of the module (FreeSurfaceDiagnostics).
+class FreeSurfaceTermLog final : public Factories::FreeSurfaceObserver {
+public:
+    void contactLineTerms(const FreeSurfaceBoundary& b, const FreeSurfaceContactLine& line, int contact_marker,
+                          int wetted_marker) override
+    {
+        logContactLineTerms(b, line, contact_marker, wetted_marker);
     }
-
-    validateFreeSurfaceBoundary(b, o, o.enable_ale, system, dim);
-    logUnfittedFreeSurfaceMode(b);
-    if (bc::isZeroConstantScalarValue(b.external_pressure) && bc::isZeroConstantScalarValue(b.surface_tension)) {
-        logNaturalUnfittedFreeSurface(b);   // sigma n = 0: no interface term
-        return;
+    void strongContactPointLaw(const FreeSurfaceContactLine& line) override { logStrongContactPointLaw(line); }
+    void unfittedMode(const FreeSurfaceBoundary& b) override { logUnfittedFreeSurfaceMode(b); }
+    void naturalUnfittedSurface(const FreeSurfaceBoundary& b) override { logNaturalUnfittedFreeSurface(b); }
+    void traction(const FreeSurfaceBoundary& b) override { logFreeSurfaceTraction(b); }
+    void cutCellStabilization(const FreeSurfaceBoundary& b, int velocity_order, int pressure_order) override
+    {
+        logCutCellStabilization(b, velocity_order, pressure_order);
     }
-    const auto Gamma = L.interface();
-    const auto n = L.outwardNormal();
-    const auto p_ext = freeSurfaceScalar(b.external_pressure, "ns_free_surface_external_pressure", b);
-    const auto pressure = p_ext * inner(n, v);   // SurfaceStress, the only form (D48)
-    addExteriorPressure(balance, pressure.dI(Gamma));
-    if (!surfaceStressActive(b)) {   // gamma = 0
-        M = M + pressure.dI(Gamma);
-    } else {
-        const auto surface_energy = gamma * inner(tangentialProjector(n, dim), grad(v));
-        addSurfaceEnergy(balance, surface_energy.dI(Gamma));
-        M = M + (pressure + surface_energy).dI(Gamma);
-    }
-    if (usesSemiImplicitNormalIncrement(b)) {
-        const auto u_ref = freeSurfaceSemiImplicitReferenceVelocity(system);   // u at the last geometry refresh
-        M = M + Factories::semiImplicitNormalIncrementIntegrand(gamma, u, u_ref, v, n).dI(Gamma);
-    }
-    logFreeSurfaceTraction(b);
-}
-
-// ---------------------------------------------------------------------------
-// Fitted ALE free surface Gamma(t) = a boundary marker of the moving mesh
-// ---------------------------------------------------------------------------
-//   fluid rows: int_Gamma p_ext n.v + gamma (I - n x n) : grad v      (SurfaceStress);
-//   mesh rows:  int_Gamma (gamma_N/h_n) ((dt d - u).n)(psi.n)            (MeshNitsche, D35),
-//               + the tangential mesh policy (smoothing, or a prescribed tangential rate);
-//   a pinned contact line: d = 0 (strong).
-void addFittedFreeSurface(FormExpr& M, fs::FESystem& system, cs::ConstraintPlan& plan,
-                          fs::BoundaryConditionManager& bcs, const Options& o, const FreeSurfaceBoundary& b,
-                          const fs::ALEBinding& ale, const NavierStokesTerms& t, FieldId u_id,
-                          fs::FormulationBuilder& F, ConservativeBalanceForms* balance)
-{
-    const auto& [u, p, v, q, rho, mu, f, dim] = t;
-    Factories::applyFreeSurfaceContactLineConstraints(plan, b, ale, dim);   // pinned contact lines: d = 0
-    bcs.add(std::make_unique<bc::ReservedBC>(b.boundary_marker));
-
-    validateFreeSurfaceBoundary(b, o, o.enable_ale, system, dim);
-    const auto Gamma = BoundaryDomain::fullPhysical(b.boundary_marker);
-    const auto n = o.enable_ale ? currentNormal() : FormExpr::normal();   // normal of the integration frame
-    const auto gamma = freeSurfaceScalar(b.surface_tension, "ns_free_surface_surface_tension", b);
-    const auto p_ext = freeSurfaceScalar(b.external_pressure, "ns_free_surface_external_pressure", b);
-    const bool dynamic_stress =
-        !bc::isZeroConstantScalarValue(b.external_pressure) || !bc::isZeroConstantScalarValue(b.surface_tension);
-    if (dynamic_stress) {   // SurfaceStress, the only fitted form (validated)
-        const auto pressure = p_ext * inner(n, v);
-        addExteriorPressure(balance, pressure.ds(Gamma));
-        if (!surfaceStressActive(b)) {   // gamma = 0
-            M = M + pressure.ds(Gamma);
-        } else {
-            const auto surface_energy = gamma * inner(tangentialProjector(n, dim), grad(v));
-            addSurfaceEnergy(balance, surface_energy.ds(Gamma));
-            M = M + (pressure + surface_energy).ds(Gamma);
-        }
-        logFreeSurfaceTraction(b);
-    }
-
-    if (!ale.coupled()) {
-        return;
-    }
-    const auto& rec = fittedMeshDisplacementRecord(system, ale);   // throws without a displacement unknown
-    declareFittedTangentialMeshPolicy(system, ale, b);
-    const bool normal_relation =
-        b.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None &&
-        b.normal_kinematic_policy == FreeSurfaceNormalKinematicPolicy::MatchFluidNormalVelocity;
-    const auto psi = TestField(ale.mesh_displacement_field, *rec.space, "psi_free_surface_mesh");
-    const auto d = StateField(ale.mesh_displacement_field, *rec.space, "d_mesh_free_surface");
-    const auto nc = currentNormal();
-    FormExpr rows;
-    if (normal_relation) {   // (dt d - u).n = 0 on the mesh rows
-        const auto penalty = FormExpr::constant(b.kinematic_nitsche_gamma) / hNormal();
-        rows = (penalty * normalTrace(dt(d) - u, nc) * normalTrace(psi, nc)).ds(Gamma);
-    }
-    if (const auto tangential = Factories::tangentialMeshPolicyResidual(b, d, psi, nc, rec.components, Gamma);
-        tangential.isValid()) {
-        rows = sumOf(rows, tangential);
-    }
-    if (rows.isValid()) {   // installed before the fluid residual
-        fs::FormulationGroup group{.ale = &ale};
-        if (normal_relation) {
-            group.extra_trial_fields.push_back(u_id);
-        }
-        (void)F.installGroup({ale.mesh_displacement_field}, rows, group);
-    }
-    declareFittedMeshRowDescriptors(system, o.operator_tag, ale, b, u_id, rows.isValid());
-}
-
-// Pressure gradient-jump penalty on the facets next to the cut (Burman; Schott & Wall):
-//   sum_F s gamma_p 0.01 h^3/(mu + rho h^2/dt) [grad p].[grad q]   (+ h^5 [d_nn p][d_nn q] for P2 pressure)
-[[nodiscard]] FormExpr cutFacetPressurePenalty(const FreeSurfaceBoundary& b, const NavierStokesTerms& t,
-                                               const Options& o, int velocity_order, int pressure_order)
-{
-    const auto& cut = b.cut_cell_stabilization;
-    if (!isUnfittedLevelSet(b) || !cut.enabled) {
-        return {};
-    }
-    logCutCellStabilization(b, velocity_order, pressure_order);
-    if (!pressureStabilizationActive(b)) {
-        return {};
-    }
-    const bool incremental = cut.pressure_policy == FreeSurfacePressureStabilizationPolicy::Incremental;
-    const auto pp = incremental ? FormExpr::effectiveTimeStep() * dt(t.p) : t.p;
-    auto s = cut.use_cut_metadata_scale ? cutStabilizationScale() : FormExpr::constant(1.0);
-    if (cut.use_cut_metadata_scale && cut.cut_metadata_scale_cap.has_value()) {
-        s = min(s, FormExpr::constant(*cut.cut_metadata_scale_cap));
-    }
-    const auto h = avg(hNormal());
-    const auto h3 = h * h * h;
-    const auto mu_gp = t.mu + FormExpr::constant(o.density) * h * h / FormExpr::effectiveTimeStep();
-    const auto gamma_p = freeSurfaceScalar(cut.pressure_gradient_penalty, "ns_free_surface_cut_pressure_penalty", b);
-    const auto c = FormExpr::constant(0.01);
-    const auto F = b.active_domain == FreeSurfaceActiveDomain::None
-                       ? FacetDomain::cutAdjacent(b.interface_marker)
-                       : FacetDomain::cutAdjacent(b.interface_marker, activeDomainSide(b.active_domain));
-    auto J = (s * gamma_p * c * h3 / (mu_gp + FormExpr::constant(o.stabilization_epsilon)) *
-              inner(cutAdjacentFacetGradientJump(pp), cutAdjacentFacetGradientJump(t.q))).dS(F);
-    if (!incremental && pressure_order > 1) {
-        J = J + (s * gamma_p * c * (h3 * h * h) / (mu_gp + FormExpr::constant(o.stabilization_epsilon)) *
-                 cutAdjacentFacetSecondNormalDerivativeJump(pp) *
-                 cutAdjacentFacetSecondNormalDerivativeJump(t.q)).dS(F);
-    }
-    return J;
-}
+};
 
 } // namespace
 
@@ -456,14 +293,15 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     bcs.install(o.velocity_dirichlet_weak, Factories::reserveMarker);   // Nitsche below; reserve the marker
     fs::FormulationBuilder F(system, o.operator_tag, physicsInstallOptions(o.jit_policy));
     F.symbolicTangent();
+    FreeSurfaceTermLog term_log;
     for (const auto& b : free_surfaces) {
         if (isExteriorOnePhaseBoundary(b) && isUnfittedLevelSet(b)) {
-            addUnfittedFreeSurface(M, system, plan, F, o, b, t, u_id, split);
+            Factories::addUnfittedFreeSurface(M, system, plan, F, o, b, t, u_id, split, term_log);
         } else if (isExteriorOnePhaseBoundary(b)) {
-            addFittedFreeSurface(M, system, plan, bcs, o, b, ale, t, u_id, F, split);
+            Factories::addFittedFreeSurface(M, system, plan, bcs, o, b, ale, t, u_id, F, split, term_log);
         }
-        const auto J = cutFacetPressurePenalty(b, t, o, velocity_space_->polynomial_order(),
-                                               pressure_space_->polynomial_order());
+        const auto J = Factories::cutFacetPressurePenalty(b, t, o, velocity_space_->polynomial_order(),
+                                                          pressure_space_->polynomial_order(), term_log);
         if (J.isValid()) {
             C = C + J;
             work.ghost_penalty = sumOf(work.ghost_penalty, J);
