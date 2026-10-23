@@ -353,8 +353,6 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     }
     const auto& o = options_;
     effective_configuration_artifact_.reset();
-    diagnostics_ = std::make_shared<fs::DiagnosticRegistry>();   // published through diagnostics()
-    post::declareNavierStokesDiagnosticSets(*diagnostics_);
     auto preflight = preflightNavierStokes(system, o, velocity_space_, pressure_space_);   // no mutation before
     const int dim = preflight.dim;
     const auto& free_surfaces = preflight.effective_free_surfaces;
@@ -426,8 +424,10 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
                                        o.rotating_frame_coriolis_enabled;
     auto work = post::bulkResidualWork(r, M, C, pspg_grad_p, -rho * inner(g, v), nonconservative_force,
                                  preflight.enable_vms, Omega);
+    auto& diagnostics = fs::diagnosticRegistry(system);   // shared with the other formulations of the system
+    post::declareDiagnosticSets(diagnostics);
     std::optional<post::ConservativeBalanceForms> balance;
-    if (post::conservativeBalanceDiagnosticSupported(*diagnostics_, free_surfaces, preflight.has_exterior_free_surface,
+    if (post::conservativeBalanceDiagnosticSupported(diagnostics, free_surfaces, preflight.has_exterior_free_surface,
                                                o.conservative_balance_diagnostics)) {
         balance = post::ConservativeBalanceForms{.pressure = r.pressure.dx(Omega),
                                            .gravitational_potential = (-rho * inner(g, v)).dx(Omega)};
@@ -492,10 +492,10 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     (void)F.install({u_id, p_id}, M + C);
     if (preflight.has_exterior_free_surface) {
         post::declareFreeSurfaceExternalBoundaryEnergy(system, o);
-        post::installFreeSurfaceResidualWork(system, o, u_id, p_id, F.options(), work,
-                                       {.include_mcv = mcv,
-                                        .has_nonconservative_body_force = nonconservative_force,
-                                        .enable_vms = preflight.enable_vms});
+        post::installResidualWork(F, o, u_id, p_id, work,
+                                  {.include_mcv = mcv,
+                                   .has_nonconservative_body_force = nonconservative_force,
+                                   .enable_vms = preflight.enable_vms});
     }
     if (pspg_grad_p.isValid()) {
         (void)F.installGroup({p_id}, pspg_grad_p,
@@ -504,8 +504,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
                               .drop_generated_boundary_nitsche_trace_requests = true});
     }
 
-    post::installNavierStokesDiagnosticOperators(*diagnostics_, system, u_id, p_id, F.options(), r, split,
-                                           active_continuity, work.ghost_penalty, u, q, active_volume);
+    post::installDiagnosticOperators(F, u_id, p_id, r, split, active_continuity, work.ghost_penalty, u, q, Omega);
     declareFittedNormalKinematics(system, o.operator_tag, std::move(fitted_normal_kinematics), free_surfaces);
     effective_configuration_artifact_ = makeEffectiveConfigurationArtifact(
         o, free_surfaces, system, dim, preflight.enable_vms);

@@ -10,6 +10,7 @@
 
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
+#include "Physics/Formulations/NavierStokes/NavierStokesPostProcessing.h"
 
 #include "FE/Forms/FormCompiler.h"
 #include "FE/Tests/Unit/Forms/FormsTestHelpers.h"
@@ -21,7 +22,9 @@
 #include "FE/Interfaces/LevelSetInterfaceDomain.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/ProductSpace.h"
+#include "FE/Systems/DiagnosticRegistry.h"
 #include "FE/Systems/FESystem.h"
+#include "FE/Systems/SystemManifest.h"
 #include "FE/Systems/TimeIntegrator.h"
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -34,9 +37,11 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -586,6 +591,56 @@ TEST(IncompressibleTwoFluidModule,
       artifact->json.find(
           "\"shared_velocity_dirichlet\":[{\"marker\":7,\"active_components\":[true,true],\"values\":[{\"kind\":\"literal\",\"value\":1},{\"kind\":\"time_coefficient\"}]}]"),
       std::string::npos);
+}
+
+TEST(IncompressibleTwoFluidModule,
+     PhaseModulesShareTheSystemDiagnosticRegistry) {
+  // Both phase modules declare the Navier-Stokes diagnostic sets in the
+  // system's registry and install the pressure-row operators there: the
+  // positive phase's declaration keeps what the negative phase installed,
+  // and each operator holds the rows of both phases.
+  constexpr const char* kSwitch = "SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC";
+  const char* prior = std::getenv(kSwitch);
+  const std::optional<std::string> saved =
+      prior != nullptr ? std::optional<std::string>(prior) : std::nullopt;
+  ::setenv(kSwitch, "1", 1);
+  TwoFluidRegistrationFixture fixture;
+  auto module = fixture.makeModule();
+  bool registered = false;
+  try {
+    module.registerOn(fixture.system);
+    registered = true;
+  } catch (const std::exception& error) {
+    ADD_FAILURE() << error.what();
+  }
+  if (saved.has_value()) {
+    ::setenv(kSwitch, saved->c_str(), 1);
+  } else {
+    ::unsetenv(kSwitch);
+  }
+  ASSERT_TRUE(registered);
+
+  const auto* registry = FE::systems::findDiagnosticRegistry(fixture.system);
+  ASSERT_NE(registry, nullptr);
+  EXPECT_NO_THROW((void)registry->enabled(ns::post::kConservativeBalanceDiagnostics));
+  const auto operators =
+      registry->operators(ns::post::kPressureRowContributionDiagnostics);
+  ASSERT_FALSE(operators.empty());
+  EXPECT_EQ(operators.front(), "equations_diagnostic_ns_galerkin_continuity");
+  for (const auto& tag : operators) {
+    EXPECT_EQ(std::count(operators.begin(), operators.end(), tag), 1) << tag;
+  }
+  bool negative_rows = false;
+  bool positive_rows = false;
+  for (const auto& line : FE::systems::kernelManifestLines(fixture.system)) {
+    if (line.rfind("kernel op=equations_diagnostic_ns_galerkin_continuity ", 0) != 0) {
+      continue;
+    }
+    negative_rows = negative_rows || line.find(":p_negative trial=") != std::string::npos;
+    positive_rows = positive_rows || line.find(":p_positive trial=") != std::string::npos;
+  }
+  EXPECT_TRUE(negative_rows);
+  EXPECT_TRUE(positive_rows);
 }
 
 TEST(IncompressibleTwoFluidModule,

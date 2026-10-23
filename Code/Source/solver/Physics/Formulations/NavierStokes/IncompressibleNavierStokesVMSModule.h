@@ -61,12 +61,6 @@
 #include <vector>
 
 namespace svmp {
-namespace FE {
-namespace systems {
-class DiagnosticRegistry;
-} // namespace systems
-} // namespace FE
-
 namespace Physics {
 namespace formulations {
 namespace navier_stokes {
@@ -1198,13 +1192,6 @@ public:
     [[nodiscard]] std::optional<EffectiveConfigurationArtifact>
     effectiveConfigurationArtifact() const override;
 
-    /// The diagnostic sets and operators of the last registration (null
-    /// before the first registerOn).
-    [[nodiscard]] const FE::systems::DiagnosticRegistry* diagnostics() const noexcept
-    {
-        return diagnostics_.get();
-    }
-
 private:
     void registerTwoFluidOn(FE::systems::FESystem& system) const;
     void applyTwoFluidInitialConditions(const FE::systems::FESystem& system,
@@ -1218,7 +1205,6 @@ private:
     std::optional<IncompressibleTwoFluidOptions> two_fluid_options_{};   ///< set in the two-fluid mode
     mutable std::optional<EffectiveConfigurationArtifact>
         effective_configuration_artifact_{};
-    mutable std::shared_ptr<FE::systems::DiagnosticRegistry> diagnostics_{};
 };
 
 } // namespace navier_stokes

@@ -33,6 +33,7 @@
 #include "FE/Systems/DiagnosticRegistry.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormsInstaller.h"
+#include "FE/Systems/FormulationBuilder.h"
 #include "FE/Systems/FunctionalRecords.h"
 
 #include <algorithm>
@@ -411,209 +412,78 @@ inline void declareFreeSurfaceExternalBoundaryEnergy(
     return work;
 }
 
-/// Installs every produced channel as its own operator (operator tag + the
-/// suffix of FreeSurfaceResidualWorkOperatorSuffixes) with copies of
-/// @p install, and declares produced and inapplicable channels.
-inline void installFreeSurfaceResidualWork(
-    FE::systems::FESystem& system,
-    const IncompressibleNavierStokesVMSOptions& options,
-    FE::FieldId u_id,
-    FE::FieldId p_id,
-    const FE::systems::FormInstallOptions& install,
-    const FreeSurfaceResidualWorkForms& work,
-    const FreeSurfaceResidualWorkApplicability& applicability)
+/// Installs every produced channel as its own operator (F.workChannel: the
+/// operator tag + the suffix of FreeSurfaceResidualWorkOperatorSuffixes, with
+/// the builder's options) and declares produced and inapplicable channels.
+/// The momentum rows are tested with the velocity, the continuity rows with
+/// the pressure (and read the velocity); only the weak-boundary momentum rows
+/// keep the generated-boundary Nitsche trace requests.
+inline void installResidualWork(FE::systems::FormulationBuilder& F,
+                                const IncompressibleNavierStokesVMSOptions& options,
+                                FE::FieldId u_id,
+                                FE::FieldId p_id,
+                                const FreeSurfaceResidualWorkForms& work,
+                                const FreeSurfaceResidualWorkApplicability& applicability)
 {
+    namespace fs = FE::systems;
+    using Channel = fs::FreeSurfaceResidualWorkChannel;
+    using Suffix = FreeSurfaceResidualWorkOperatorSuffixes;
     using FE::forms::FormExpr;
-    const auto& convection_work_form = work.convection;
-    const auto& pressure_work_form = work.pressure;
-    const auto& continuity_work_form = work.continuity;
-    const auto& nonconservative_body_force_work_form =
-        work.nonconservative_body_force;
-    const auto& weak_boundary_momentum_work_form = work.weak_boundary_momentum;
-    const auto& weak_boundary_continuity_work_form =
-        work.weak_boundary_continuity;
-    const auto& vms_pspg_momentum_work_form = work.vms_momentum;
-    const auto& vms_pspg_continuity_work_form = work.vms_continuity;
-    const auto& vms_pspg_pressure_gradient_form =
-        work.vms_pspg_pressure_gradient;
-    const auto& pressure_ghost_penalty_form = work.ghost_penalty;
-    const bool include_mcv = applicability.include_mcv;
-    const bool has_nonconservative_body_force =
-        applicability.has_nonconservative_body_force;
-    const bool enable_vms = applicability.enable_vms;
-    const auto work_operator_tag =
-        [&](std::string_view suffix) {
-            return options.operator_tag + "_" +
-                std::string(suffix);
-        };
-    const auto install_work_operator =
-        [&](FE::systems::FreeSurfaceResidualWorkChannel channel,
-            std::string_view suffix,
-            const FormExpr& momentum_work_form,
-            const FormExpr& continuity_work_form,
-            const FormExpr& supplemental_continuity_work_form,
-            bool retain_generated_nitsche_trace_requests) {
-            const auto operator_tag = work_operator_tag(suffix);
-            bool installed = false;
-            if (momentum_work_form.isValid()) {
-                auto momentum_install = install;
-                momentum_install.contributes_to_problem_analysis = false;
-                if (!retain_generated_nitsche_trace_requests) {
-                    momentum_install
-                        .generated_boundary_nitsche_trace_requests
-                        .clear();
-                }
-                momentum_install.source_component_tag = operator_tag;
-                (void)FE::systems::installFormulation(
-                    system,
-                    operator_tag,
-                    {u_id},
-                    momentum_work_form,
-                    momentum_install);
-                installed = true;
-            }
-            const auto install_continuity_component =
-                [&](const FormExpr& work_form) {
-                    if (!work_form.isValid()) {
-                        return;
-                    }
-                    auto continuity_install = install;
-                    continuity_install.contributes_to_problem_analysis =
-                        false;
-                    continuity_install
-                        .generated_boundary_nitsche_trace_requests
-                        .clear();
-                    continuity_install.source_component_tag =
-                        operator_tag;
-                    if (std::find(
-                            continuity_install.extra_trial_fields.begin(),
-                            continuity_install.extra_trial_fields.end(),
-                            u_id) ==
-                        continuity_install.extra_trial_fields.end()) {
-                        continuity_install.extra_trial_fields.push_back(
-                            u_id);
-                    }
-                    (void)FE::systems::installFormulation(
-                        system,
-                        operator_tag,
-                        {p_id},
-                        work_form,
-                        continuity_install);
-                    installed = true;
-                };
-            install_continuity_component(continuity_work_form);
-            install_continuity_component(
-                supplemental_continuity_work_form);
-            FE_THROW_IF(
-                !installed,
-                FE::InvalidArgumentException,
-                "IncompressibleNavierStokesVMSModule: produced free-surface residual-work channel has no form component");
-            svmp::FE::systems::functionalRecords(system).declareWorkChannel(
-                FE::systems::FreeSurfaceResidualWorkDeclaration{
-                    .channel = channel,
-                    .applicability = FE::systems::
-                        FreeSurfaceResidualWorkApplicability::Produced,
-                    .operator_tag = operator_tag,
-                    .owner_component =
-                        "IncompressibleNavierStokesVMSModule." +
-                        std::string(
-                            FE::systems::
-                                freeSurfaceResidualWorkChannelName(
-                                    channel)),
-                });
-        };
-    const auto declare_inapplicable =
-        [&](FE::systems::FreeSurfaceResidualWorkChannel channel) {
-            svmp::FE::systems::functionalRecords(system).declareWorkChannel(
-                FE::systems::FreeSurfaceResidualWorkDeclaration{
-                    .channel = channel,
-                    .applicability = FE::systems::
-                        FreeSurfaceResidualWorkApplicability::
-                            NotApplicable,
-                    .operator_tag = {},
-                    .owner_component =
-                        "IncompressibleNavierStokesVMSModule." +
-                        std::string(
-                            FE::systems::
-                                freeSurfaceResidualWorkChannelName(
-                                    channel)),
-                });
-        };
+    const auto declare = [&](Channel channel, fs::OperatorTag operator_tag) {
+        const bool produced = !operator_tag.empty();
+        fs::functionalRecords(F.system()).declareWorkChannel(fs::FreeSurfaceResidualWorkDeclaration{
+            .channel = channel,
+            .applicability = produced ? fs::FreeSurfaceResidualWorkApplicability::Produced
+                                      : fs::FreeSurfaceResidualWorkApplicability::NotApplicable,
+            .operator_tag = std::move(operator_tag),
+            .owner_component = "IncompressibleNavierStokesVMSModule." +
+                               std::string(fs::freeSurfaceResidualWorkChannelName(channel)),
+        });
+    };
+    const auto produce = [&](Channel channel, std::string_view suffix, const FormExpr& momentum,
+                             const FormExpr& continuity, const FormExpr& supplemental_continuity = {},
+                             bool keep_trace_requests = false) {
+        auto operator_tag =
+            F.workChannel(suffix, {{.test_field = u_id, .form = momentum,
+                                    .keep_generated_boundary_nitsche_trace_requests = keep_trace_requests},
+                                   {.test_field = p_id, .form = continuity, .extra_trial_fields = {u_id}},
+                                   {.test_field = p_id, .form = supplemental_continuity, .extra_trial_fields = {u_id}}});
+        FE_THROW_IF(
+            operator_tag.empty(),
+            FE::InvalidArgumentException,
+            "IncompressibleNavierStokesVMSModule: produced free-surface residual-work channel has no form component");
+        declare(channel, std::move(operator_tag));
+    };
 
-    if (options.enable_convection || include_mcv) {
-        install_work_operator(
-            FE::systems::FreeSurfaceResidualWorkChannel::Convection,
-            FreeSurfaceResidualWorkOperatorSuffixes::convection,
-            convection_work_form,
-            FormExpr{},
-            FormExpr{},
-            false);
+    if (options.enable_convection || applicability.include_mcv) {
+        produce(Channel::Convection, Suffix::convection, work.convection, {});
     } else {
-        declare_inapplicable(
-            FE::systems::FreeSurfaceResidualWorkChannel::Convection);
+        declare(Channel::Convection, {});
     }
-    install_work_operator(
-        FE::systems::FreeSurfaceResidualWorkChannel::
-            PressureContinuity,
-        FreeSurfaceResidualWorkOperatorSuffixes::
-            pressure_continuity,
-        pressure_work_form,
-        continuity_work_form,
-        FormExpr{},
-        false);
-    if (has_nonconservative_body_force) {
-        install_work_operator(
-            FE::systems::FreeSurfaceResidualWorkChannel::
-                NonconservativeBodyForce,
-            FreeSurfaceResidualWorkOperatorSuffixes::
-                nonconservative_body_force,
-            nonconservative_body_force_work_form,
-            FormExpr{},
-            FormExpr{},
-            false);
+    produce(Channel::PressureContinuity, Suffix::pressure_continuity, work.pressure, work.continuity);
+    if (applicability.has_nonconservative_body_force) {
+        produce(Channel::NonconservativeBodyForce, Suffix::nonconservative_body_force,
+                work.nonconservative_body_force, {});
     } else {
-        declare_inapplicable(
-            FE::systems::FreeSurfaceResidualWorkChannel::
-                NonconservativeBodyForce);
+        declare(Channel::NonconservativeBodyForce, {});
     }
-    if (weak_boundary_momentum_work_form.isValid() ||
-        weak_boundary_continuity_work_form.isValid()) {
-        install_work_operator(
-            FE::systems::FreeSurfaceResidualWorkChannel::WeakBoundary,
-            FreeSurfaceResidualWorkOperatorSuffixes::weak_boundary,
-            weak_boundary_momentum_work_form,
-            weak_boundary_continuity_work_form,
-            FormExpr{},
-            true);
+    if (work.weak_boundary_momentum.isValid() || work.weak_boundary_continuity.isValid()) {
+        produce(Channel::WeakBoundary, Suffix::weak_boundary, work.weak_boundary_momentum,
+                work.weak_boundary_continuity, {}, /*keep_trace_requests=*/true);
     } else {
-        declare_inapplicable(
-            FE::systems::FreeSurfaceResidualWorkChannel::WeakBoundary);
+        declare(Channel::WeakBoundary, {});
     }
-    if (enable_vms) {
-        install_work_operator(
-            FE::systems::FreeSurfaceResidualWorkChannel::VmsPspg,
-            FreeSurfaceResidualWorkOperatorSuffixes::vms_pspg,
-            vms_pspg_momentum_work_form,
-            vms_pspg_continuity_work_form,
-            vms_pspg_pressure_gradient_form,
-            false);
+    if (applicability.enable_vms) {
+        produce(Channel::VmsPspg, Suffix::vms_pspg, work.vms_momentum, work.vms_continuity,
+                work.vms_pspg_pressure_gradient);
     } else {
-        declare_inapplicable(
-            FE::systems::FreeSurfaceResidualWorkChannel::VmsPspg);
+        declare(Channel::VmsPspg, {});
     }
-    declare_inapplicable(
-        FE::systems::FreeSurfaceResidualWorkChannel::CutStabilization);
-    if (pressure_ghost_penalty_form.isValid()) {
-        install_work_operator(
-            FE::systems::FreeSurfaceResidualWorkChannel::GhostPenalty,
-            FreeSurfaceResidualWorkOperatorSuffixes::ghost_penalty,
-            FormExpr{},
-            pressure_ghost_penalty_form,
-            FormExpr{},
-            false);
+    declare(Channel::CutStabilization, {});
+    if (work.ghost_penalty.isValid()) {
+        produce(Channel::GhostPenalty, Suffix::ghost_penalty, {}, work.ghost_penalty);
     } else {
-        declare_inapplicable(
-            FE::systems::FreeSurfaceResidualWorkChannel::GhostPenalty);
+        declare(Channel::GhostPenalty, {});
     }
     FE_LOG_INFO(
         "IncompressibleNavierStokesVMSModule: diagnostic=free_surface_residual_work_operators status=declared channels=convection|pressure_continuity|nonconservative_body_force|weak_boundary|vms_pspg|cut_stabilization|ghost_penalty contract=negative_dt_times_constrained_operator_stage_pairing");
@@ -636,7 +506,7 @@ inline constexpr std::string_view kConservativeBalanceDiagnostics =
     "navier_stokes_free_surface_conservative_balance";
 
 /// Declares both sets with their environment switches.
-inline void declareNavierStokesDiagnosticSets(FE::systems::DiagnosticRegistry& registry)
+inline void declareDiagnosticSets(FE::systems::DiagnosticRegistry& registry)
 {
     registry.declareSet(
         std::string(kPressureRowContributionDiagnostics),
@@ -707,11 +577,9 @@ inline void declareNavierStokesDiagnosticSets(FE::systems::DiagnosticRegistry& r
 /// The operators of the conservative split
 /// (FreeSurfaceConservativeBalanceDiagnosticOperators), on the production rules.
 inline void installConservativeBalanceDiagnosticOperators(
-    FE::systems::DiagnosticRegistry& registry,
-    FE::systems::FESystem& system,
+    FE::systems::FormulationBuilder& F,
     FE::FieldId u_id,
     FE::FieldId p_id,
-    const FE::systems::FormInstallOptions& install,
     const FE::forms::FormExpr& free_surface_conservative_pressure_form,
     const FE::forms::FormExpr& free_surface_conservative_external_pressure_form,
     const FE::forms::FormExpr& free_surface_conservative_surface_energy_form,
@@ -720,7 +588,7 @@ inline void installConservativeBalanceDiagnosticOperators(
     const FE::forms::FormExpr& pressure,
     const FE::forms::FormExpr& u,
     const FE::forms::FormExpr& q,
-    const std::optional<ActiveVolumeDomain>& active_volume_domain)
+    const FE::forms::VolumeDomain& liquid)
 {
     using namespace svmp::FE::forms;
     FE_THROW_IF(
@@ -749,18 +617,15 @@ inline void installConservativeBalanceDiagnosticOperators(
     // the backend-independent transpose action used by the matrix-free
     // LSQR representability diagnostic in NewtonSolver.
     const auto pressure_representability_pair_form =
-        integrateOnActiveVolume(pressure, active_volume_domain) -
-        integrateOnActiveVolume(q * div(u), active_volume_domain);
+        pressure.dx(liquid) - (q * div(u)).dx(liquid);
     const auto install_diagnostic =
         [&](std::string_view operator_tag,
             const FormExpr& diagnostic_form) {
-            (void)registry.install(
-                system,
+            (void)F.diagnostic(
                 kConservativeBalanceDiagnostics,
                 std::string(operator_tag),
                 {u_id},
                 diagnostic_form,
-                install,
                 {.source_component_tag = std::string(operator_tag)});
         };
     install_diagnostic(
@@ -792,15 +657,13 @@ inline void installConservativeBalanceDiagnosticOperators(
     // Generated geometry is frozen external state for this diagnostic;
     // inherited level-set/curvature/ALE extra trial fields would add blocks
     // that are outside [0,G;G^T,0].
-    (void)registry.install(
-        system,
+    (void)F.diagnostic(
         kConservativeBalanceDiagnostics,
         std::string(
             FreeSurfaceConservativeBalanceDiagnosticOperators::
                 pressure_representability_pair),
         {u_id, p_id},
         pressure_representability_pair_form,
-        install,
         {.source_component_tag = std::string(
              FreeSurfaceConservativeBalanceDiagnosticOperators::
                  pressure_representability_pair),
@@ -849,81 +712,72 @@ inline void installConservativeBalanceDiagnosticOperators(
 }
 
 /// The continuity-row parts used by the cut-stability tests
-/// (equations_diagnostic_ns_*).
+/// (equations_diagnostic_ns_*), on @p liquid.
 inline void installPressureRowContributionDiagnosticOperators(
-    FE::systems::DiagnosticRegistry& registry,
-    FE::systems::FESystem& system,
+    FE::systems::FormulationBuilder& F,
     FE::FieldId u_id,
     FE::FieldId p_id,
-    const FE::systems::FormInstallOptions& install,
     const FE::forms::FormExpr& galerkin_continuity_integrand,
     const FE::forms::FormExpr& active_continuity_diagnostic_form,
     const FE::forms::FormExpr& vms_pspg_continuity_integrand,
     const FE::forms::FormExpr& vms_pspg_pressure_gradient_integrand,
     const FE::forms::FormExpr& vms_pspg_nonpressure_integrand,
     const FE::forms::FormExpr& pressure_ghost_penalty_form,
-    const std::optional<ActiveVolumeDomain>& active_volume_domain)
+    const FE::forms::VolumeDomain& liquid)
 {
-    const FE::systems::DiagnosticOperatorOptions with_velocity{.extra_trial_fields = {u_id}};
     const auto install_row = [&](const char* operator_tag, const FE::forms::FormExpr& form) {
-        (void)registry.install(system, kPressureRowContributionDiagnostics, operator_tag, {p_id}, form,
-                               install, with_velocity);
+        (void)F.diagnostic(kPressureRowContributionDiagnostics, operator_tag, {p_id}, form,
+                           {.extra_trial_fields = {u_id}});
     };
     FE_LOG_INFO(
         "IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pressure_row_contribution_operators"
         " installing=1"
         " ops=equations_diagnostic_ns_galerkin_continuity|equations_diagnostic_ns_active_continuity|equations_diagnostic_ns_vms_pspg|equations_diagnostic_ns_vms_pspg_pressure_gradient|equations_diagnostic_ns_vms_pspg_nonpressure|equations_diagnostic_ns_pressure_ghost_penalty");
-    install_row("equations_diagnostic_ns_galerkin_continuity",
-                integrateOnActiveVolume(galerkin_continuity_integrand, active_volume_domain));
+    install_row("equations_diagnostic_ns_galerkin_continuity", galerkin_continuity_integrand.dx(liquid));
     install_row("equations_diagnostic_ns_active_continuity", active_continuity_diagnostic_form);
     if (vms_pspg_continuity_integrand.isValid()) {
-        install_row("equations_diagnostic_ns_vms_pspg",
-                    integrateOnActiveVolume(vms_pspg_continuity_integrand, active_volume_domain));
+        install_row("equations_diagnostic_ns_vms_pspg", vms_pspg_continuity_integrand.dx(liquid));
     }
     if (vms_pspg_pressure_gradient_integrand.isValid()) {
         install_row("equations_diagnostic_ns_vms_pspg_pressure_gradient",
-                    integrateOnActiveVolume(vms_pspg_pressure_gradient_integrand, active_volume_domain));
+                    vms_pspg_pressure_gradient_integrand.dx(liquid));
     }
     if (vms_pspg_nonpressure_integrand.isValid()) {
-        install_row("equations_diagnostic_ns_vms_pspg_nonpressure",
-                    integrateOnActiveVolume(vms_pspg_nonpressure_integrand, active_volume_domain));
+        install_row("equations_diagnostic_ns_vms_pspg_nonpressure", vms_pspg_nonpressure_integrand.dx(liquid));
     }
     if (pressure_ghost_penalty_form.isValid()) {
         install_row("equations_diagnostic_ns_pressure_ghost_penalty", pressure_ghost_penalty_form);
     }
 }
 
-/// The opt-in diagnostic operators, after the production operators: the
-/// conservative split when @p balance is set, and the pressure-row parts
-/// when their set is switched on.
-inline void installNavierStokesDiagnosticOperators(
-    FE::systems::DiagnosticRegistry& registry,
-    FE::systems::FESystem& system,
-    FE::FieldId u_id,
-    FE::FieldId p_id,
-    const FE::systems::FormInstallOptions& install,
-    const NavierStokesVMSIntegrands& integrands,
-    const ConservativeBalanceForms* balance,
-    const FE::forms::FormExpr& active_continuity,
-    const FE::forms::FormExpr& pressure_ghost_penalty_form,
-    const FE::forms::FormExpr& u,
-    const FE::forms::FormExpr& q,
-    const std::optional<ActiveVolumeDomain>& active_volume_domain)
+/// The opt-in diagnostic operators, after the production operators, with the
+/// builder's options on the system's diagnostic registry: the conservative
+/// split when @p balance is set, and the pressure-row parts when their set is
+/// switched on.  @p liquid is the volume the residual is integrated on.
+inline void installDiagnosticOperators(FE::systems::FormulationBuilder& F,
+                                       FE::FieldId u_id,
+                                       FE::FieldId p_id,
+                                       const NavierStokesVMSIntegrands& integrands,
+                                       const ConservativeBalanceForms* balance,
+                                       const FE::forms::FormExpr& active_continuity,
+                                       const FE::forms::FormExpr& pressure_ghost_penalty_form,
+                                       const FE::forms::FormExpr& u,
+                                       const FE::forms::FormExpr& q,
+                                       const FE::forms::VolumeDomain& liquid)
 {
     const auto& r = integrands;
     if (balance != nullptr) {
         installConservativeBalanceDiagnosticOperators(
-            registry, system, u_id, p_id, install, balance->pressure, balance->external_pressure,
-            balance->surface_energy, balance->gravitational_potential, r.pressure, u, q, active_volume_domain);
+            F, u_id, p_id, balance->pressure, balance->external_pressure, balance->surface_energy,
+            balance->gravitational_potential, r.pressure, u, q, liquid);
     }
-    if (registry.enabled(kPressureRowContributionDiagnostics)) {
+    if (F.diagnostics().enabled(kPressureRowContributionDiagnostics)) {
         const auto vms_pspg = r.pspg_pressure_gradient.isValid()
                                   ? r.pspg_pressure_gradient + r.pspg_without_pressure_gradient
                                   : FE::forms::FormExpr{};
         installPressureRowContributionDiagnosticOperators(
-            registry, system, u_id, p_id, install, r.galerkin_continuity, active_continuity, vms_pspg,
-            r.pspg_pressure_gradient, r.pspg_without_pressure_gradient, pressure_ghost_penalty_form,
-            active_volume_domain);
+            F, u_id, p_id, r.galerkin_continuity, active_continuity, vms_pspg, r.pspg_pressure_gradient,
+            r.pspg_without_pressure_gradient, pressure_ghost_penalty_form, liquid);
     }
 }
 
