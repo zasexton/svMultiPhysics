@@ -34,6 +34,10 @@
 #endif
 
 namespace svmp {
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+class MeshComm;
+#endif
+
 namespace FE {
 namespace backends {
 class GenericVector;
@@ -46,6 +50,7 @@ struct FreeSurfaceGeometryOwnershipCollective;
 namespace systems {
 
 class FESystem;
+struct SystemStateView;
 
 /**
  * @brief Communicator of the collectives below.
@@ -71,6 +76,12 @@ public:
     }
 
     [[nodiscard]] MPI_Comm native() const noexcept { return comm_; }
+#endif
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    /// The communicator, rank and size of a Mesh communicator (read when
+    /// @p comm was made), so every collective here takes a MeshComm.
+    CollectiveCommunicator(const svmp::MeshComm& comm) noexcept;
 #endif
 
     [[nodiscard]] int rank() const noexcept { return rank_; }
@@ -272,6 +283,16 @@ struct CanonicalWordsDisagreementReport {
     const CollectiveCommunicator& comm);
 
 /**
+ * @brief The FE-ordered values of the current state of @p state on every rank.
+ *
+ * The distributed vector u_vector when present (collective, as above), else
+ * a copy of the replicated span u; throws when the view has neither.
+ */
+[[nodiscard]] std::vector<Real> captureFeOrderedVectorCollectively(
+    const SystemStateView& state,
+    const CollectiveCommunicator& comm);
+
+/**
  * @brief Assign a replicated FE-ordered vector to a distributed vector.
  *
  * Each rank sets its owned rows from @p values (all ranks pass the same
@@ -323,6 +344,12 @@ void scatterFeOrderedSolution(
 [[nodiscard]] std::uint64_t collectiveConstraintSemanticsKey(
     const FESystem& system,
     const CollectiveCommunicator& comm);
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+/// The active communicator of @p system (FESystem::activeMpiCommunicator)
+/// as a Mesh communicator; MeshComm::self() without MPI.
+[[nodiscard]] svmp::MeshComm activeMeshCommunicator(const FESystem& system);
+#endif
 
 } // namespace systems
 } // namespace FE

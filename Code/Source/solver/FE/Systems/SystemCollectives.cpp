@@ -13,6 +13,11 @@
 #include "Core/Logger.h"
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "Systems/FESystem.h"
+#include "Systems/SystemState.h"
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#include "Mesh/Core/MeshComm.h"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -69,6 +74,21 @@ double maxAbsDifference(std::span<const svmp::FE::Real> left,
 }
 
 } // namespace
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+// The application's feCollectiveCommunicator(MeshComm), unchanged.
+#if FE_HAS_MPI && defined(MESH_HAS_MPI)
+CollectiveCommunicator::CollectiveCommunicator(const svmp::MeshComm& comm) noexcept
+    : comm_(comm.native()), rank_(static_cast<int>(comm.rank())), size_(comm.size())
+{
+}
+#else
+CollectiveCommunicator::CollectiveCommunicator(const svmp::MeshComm& comm) noexcept
+{
+  (void)comm;
+}
+#endif
+#endif
 
 #if FE_HAS_MPI
 CollectiveCommunicator::CollectiveCommunicator(MPI_Comm comm) : comm_(comm)
@@ -716,6 +736,24 @@ std::vector<Real> captureFeOrderedVectorCollectively(
   return values;
 }
 
+// Moved from the Navier-Stokes free-surface physics
+// (FreeSurfaceRunSupport.cpp gatherFeOrderedSolution), unchanged.
+std::vector<Real> captureFeOrderedVectorCollectively(
+    const SystemStateView& state,
+    const CollectiveCommunicator& comm)
+{
+  if (state.u_vector != nullptr) {
+    auto* solution =
+        const_cast<svmp::FE::backends::GenericVector*>(state.u_vector);
+    return captureFeOrderedVectorCollectively(*solution, comm);
+  }
+  if (!state.u.empty()) {
+    return std::vector<svmp::FE::Real>(state.u.begin(), state.u.end());
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Application] Could not collectively gather FE-ordered state values.");
+}
+
 void assignFeOrderedVectorCollectively(
     svmp::FE::backends::GenericVector& solution,
     std::span<const svmp::FE::Real> values,
@@ -1121,6 +1159,20 @@ std::uint64_t collectiveConstraintSemanticsKey(
   }
   return key == 0u ? 1u : key;
 }
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+// Moved from the Navier-Stokes free-surface physics
+// (FreeSurfaceRunSupport.cpp activeFESystemCommunicator), unchanged.
+svmp::MeshComm activeMeshCommunicator(const FESystem& system)
+{
+#if defined(MESH_HAS_MPI) && FE_HAS_MPI
+  return svmp::MeshComm(system.activeMpiCommunicator());
+#else
+  (void)system;
+  return svmp::MeshComm::self();
+#endif
+}
+#endif
 
 } // namespace systems
 } // namespace FE

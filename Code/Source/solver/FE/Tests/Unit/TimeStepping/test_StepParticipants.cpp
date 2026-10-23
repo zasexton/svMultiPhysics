@@ -7,7 +7,10 @@
 
 #include <gtest/gtest.h>
 
+#include "Systems/FESystemHandle.h"
 #include "TimeStepping/NewtonSolver.h"
+#include "TimeStepping/StepContext.h"
+#include "TimeStepping/StepController.h"
 #include "TimeStepping/StepParticipants.h"
 #include "TimeStepping/TimeHistory.h"
 
@@ -290,4 +293,42 @@ TEST(StepParticipants, NullParticipantIsRejected)
     ts::StepParticipantList list;
     EXPECT_THROW(list.add(nullptr), std::invalid_argument);
     EXPECT_TRUE(list.empty());
+}
+
+namespace {
+
+/// Holds the run pointers the way a host's simulation components do.
+struct HostComponents {
+    std::unique_ptr<svmp::FE::systems::FESystem> fe_system{};
+    std::unique_ptr<ts::TimeHistory> time_history{};
+    std::unique_ptr<svmp::FE::backends::BackendFactory> backend{};
+};
+
+const std::unique_ptr<svmp::FE::systems::FESystem>& systemOf(
+    const svmp::FE::systems::FESystemHandle& handle)
+{
+    return handle.fe_system;
+}
+
+} // namespace
+
+TEST(StepContext, RunComponentsAndSystemHandleReferToTheHostPointers)
+{
+    HostComponents host;
+    const ts::RunComponents run(host);
+    EXPECT_EQ(&run.fe_system, &host.fe_system);
+    EXPECT_EQ(&run.time_history, &host.time_history);
+    EXPECT_EQ(&run.backend, &host.backend);
+    EXPECT_EQ(&systemOf(host), &host.fe_system);
+    EXPECT_EQ(&systemOf(run), &host.fe_system);
+}
+
+TEST(StepController, RejectReasonNamesAreTheEnumeratorNames)
+{
+    EXPECT_EQ(ts::stepRejectReasonName(ts::StepRejectReason::NonlinearSolveFailed),
+              "NonlinearSolveFailed");
+    EXPECT_EQ(ts::stepRejectReasonName(ts::StepRejectReason::ErrorTooLarge), "ErrorTooLarge");
+    EXPECT_EQ(ts::stepRejectReasonName(ts::StepRejectReason::CutTopologyChanged),
+              "CutTopologyChanged");
+    EXPECT_EQ(ts::stepRejectReasonName(static_cast<ts::StepRejectReason>(7)), "7");
 }

@@ -11,10 +11,26 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 namespace svmp {
 namespace FE {
 namespace timestepping {
+
+// Moved from the Navier-Stokes free-surface physics
+// (FreeSurfaceRunSupport.cpp step_reject_reason_to_string), unchanged.
+std::string stepRejectReasonName(StepRejectReason reason)
+{
+    switch (reason) {
+        case StepRejectReason::NonlinearSolveFailed:
+            return "NonlinearSolveFailed";
+        case StepRejectReason::ErrorTooLarge:
+            return "ErrorTooLarge";
+        case StepRejectReason::CutTopologyChanged:
+            return "CutTopologyChanged";
+    }
+    return std::to_string(static_cast<int>(reason));
+}
 
 SimpleStepController::SimpleStepController(SimpleStepControllerOptions options)
     : options_(std::move(options))

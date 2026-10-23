@@ -23,6 +23,10 @@ enum class StepRejectReason : std::uint8_t {
     CutTopologyChanged
 };
 
+/// The enumerator name of @p reason ("NonlinearSolveFailed", ...); the
+/// number for a value outside the enumeration.
+[[nodiscard]] std::string stepRejectReasonName(StepRejectReason reason);
+
 struct StepAttemptInfo {
     double time{0.0};
     double t_end{0.0};

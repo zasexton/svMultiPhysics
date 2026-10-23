@@ -6,8 +6,10 @@
  */
 
 #include "Systems/SystemCollectives.h"
+#include "Systems/SystemState.h"
 
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Mesh/Core/MeshComm.h"
 
 #include <gtest/gtest.h>
 
@@ -127,6 +129,46 @@ TEST(SystemCollectivesMPI, CommunicatorReadsRankAndSize)
     const systems::CollectiveCommunicator self{};
     EXPECT_EQ(self.size(), 1);
     EXPECT_FALSE(self.isParallel());
+}
+
+TEST(SystemCollectivesMPI, MeshCommunicatorConvertsWithItsRankAndSize)
+{
+    const svmp::MeshComm mesh_world(MPI_COMM_WORLD);
+    const systems::CollectiveCommunicator comm = mesh_world;
+    EXPECT_EQ(comm.native(), MPI_COMM_WORLD);
+    EXPECT_EQ(comm.rank(), worldRank());
+    EXPECT_EQ(comm.size(), worldSize());
+    const systems::CollectiveCommunicator self = svmp::MeshComm::self();
+    EXPECT_EQ(self.native(), MPI_COMM_SELF);
+    EXPECT_EQ(self.rank(), 0);
+    EXPECT_EQ(self.size(), 1);
+
+    // The collectives take the Mesh communicator directly.
+    const int rank = worldRank();
+    const int size = worldSize();
+    EXPECT_EQ(systems::collectiveSumSize(2u, mesh_world),
+              2u * static_cast<std::size_t>(size));
+    EXPECT_EQ(systems::collectiveMaxDouble(0.5 + rank, mesh_world), 0.5 + (size - 1));
+    EXPECT_EQ(systems::collectiveSumDouble(0.25, mesh_world),
+              systems::collectiveSumDouble(0.25, world()));
+}
+
+TEST(SystemCollectivesMPI, StateViewCaptureCopiesAReplicatedStateOrThrows)
+{
+    const std::vector<svmp::FE::Real> values{1.0, -2.5, 3.25};
+    systems::SystemStateView state;
+    state.u = values;
+    EXPECT_EQ(systems::captureFeOrderedVectorCollectively(state, world()), values);
+
+    const systems::SystemStateView empty{};
+    try {
+        (void)systems::captureFeOrderedVectorCollectively(empty, world());
+        FAIL() << "a state view without values must throw";
+    } catch (const std::runtime_error& error) {
+        EXPECT_EQ(std::string(error.what()),
+                  "[svMultiPhysics::Application] Could not collectively gather "
+                  "FE-ordered state values.");
+    }
 }
 
 TEST(SystemCollectivesMPI, ReductionsAgreeOnEveryRank)

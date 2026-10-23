@@ -1112,6 +1112,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/MeshBoundaryRecordSupport.h
     Systems/MeshNormalConstraintStageMeasurements.h
     Systems/SnapshotFieldAccess.h
+    Systems/FESystemHandle.h
     Systems/OperatorStageMetadata.h
     Systems/TwoFluidRecordTypes.h
     Systems/BoundedUpdatePolicy.h
@@ -1391,6 +1392,7 @@ set(FE_FORMS_SOURCES
     TimeStepping/TimeLoop.h
     TimeStepping/StepParticipants.h
     TimeStepping/MeshNormalStageParticipant.h
+    TimeStepping/StepContext.h
 )
 
 	set(FE_TIMESTEPPING_SOURCES
