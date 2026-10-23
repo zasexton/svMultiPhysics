@@ -1,7 +1,6 @@
 #include "Application/Core/ApplicationDriver.h"
 
 #include "Application/Core/ActiveDomainOutput.h"
-#include "Application/Core/FreeSurfaceEnergyLedger.h"
 #include "Application/Core/FreeSurfaceSemiImplicitReference.h"
 #include "Application/Core/LevelSetCutConfiguration.h"
 #include "Application/Core/LevelSetCurvatureSamples.h"
@@ -140,18 +139,17 @@
 
 namespace application::core {
 
-// The free-surface energy account and the complete energy record are
-// Navier-Stokes free-surface physics
-// (Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergy*).
+// The complete energy record is Navier-Stokes free-surface physics
+// (Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergy*) on
+// the FE energy-balance ledger (FE/Systems/EnergyBalanceLedger.h).
 using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceAcceptedEnergyGroup;
+using svmp::Physics::formulations::navier_stokes::free_surface::freeSurfaceEnergyBalanceCatalogue;
 using svmp::Physics::formulations::navier_stokes::free_surface::summarizeAcceptedFreeSurfaceEnergyGroup;
 using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCompleteEnergyCandidate;
 using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCompleteEnergyBuildResult;
-using svmp::Physics::formulations::navier_stokes::free_surface::appendFreeSurfaceEnergyChannelSource;
 using svmp::Physics::formulations::navier_stokes::free_surface::buildFixedTopologyOnePhaseEnergyCandidate;
 using svmp::Physics::formulations::navier_stokes::free_surface::buildUnstagedFreeSurfaceEnergyAttemptMetadata;
 using svmp::Physics::formulations::navier_stokes::free_surface::freeSurfaceEnergyRejectionReasonForStepReject;
-using svmp::Physics::formulations::navier_stokes::free_surface::freeSurfaceEnergyRejectionReasonName;
 using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceAggregationEnergyClassification;
 using svmp::Physics::formulations::navier_stokes::free_surface::classifyAcceptedAggregationEnergy;
 using svmp::FE::level_set::logLevelSetMaintenanceWorkPublishedSince;

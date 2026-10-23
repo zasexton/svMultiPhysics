@@ -6,7 +6,12 @@
  * See License file.
  */
 
-#include "Application/Core/FreeSurfaceEnergyLedger.h"
+// The free-surface energy ledger: the FE energy-balance ledger
+// (FE/Systems/EnergyBalanceLedger.h) over the free-surface channel catalogue
+// (Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyCandidate.h).
+
+#include "FE/Systems/EnergyBalanceLedger.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyCandidate.h"
 
 #include "../Support/FreeSurfaceLifecycleReferenceCapture.h"
 
@@ -17,25 +22,46 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace {
 
 namespace lifecycle_capture =
     application_test::free_surface_lifecycle_capture;
 
-using application::core::FreeSurfaceEnergyAttemptMetadata;
-using application::core::FreeSurfaceEnergyAttemptStatus;
-using application::core::FreeSurfaceEnergyChannelApplicability;
-using application::core::FreeSurfaceEnergyChannelSource;
-using application::core::FreeSurfaceEnergyChannelSources;
-using application::core::FreeSurfaceEnergyRejectionReason;
-using application::core::FreeSurfaceEnergyTemporalScheme;
-using application::core::FreeSurfaceEnergyLedger;
-using application::core::FreeSurfaceExternalWork;
-using application::core::FreeSurfaceGasEnergyApplicability;
-using application::core::FreeSurfaceNumericalWork;
-using application::core::FreeSurfacePhysicalDissipationRate;
-using application::core::FreeSurfaceStoredEnergy;
+using FreeSurfaceEnergyAttemptMetadata =
+    svmp::FE::systems::EnergyBalanceAttemptMetadata;
+using FreeSurfaceEnergyAttemptStatus =
+    svmp::FE::systems::EnergyBalanceAttemptStatus;
+using FreeSurfaceEnergyChannelApplicability =
+    svmp::FE::systems::EnergyChannelApplicability;
+using FreeSurfaceEnergyChannelSource =
+    svmp::FE::systems::EnergyChannelSource;
+using FreeSurfaceEnergyChannelSources =
+    svmp::FE::systems::EnergyBalanceSources;
+using FreeSurfaceEnergyRejectionReason =
+    svmp::FE::systems::EnergyBalanceRejectionReason;
+using FreeSurfaceEnergyTemporalScheme =
+    svmp::FE::systems::EnergyBalanceTemporalScheme;
+using svmp::FE::systems::EnergyChannelKind;
+
+/// A ledger over the free-surface channel catalogue.
+class FreeSurfaceEnergyLedger : public svmp::FE::systems::EnergyBalanceLedger {
+public:
+  FreeSurfaceEnergyLedger()
+      : svmp::FE::systems::EnergyBalanceLedger(
+            svmp::Physics::formulations::navier_stokes::free_surface::
+                freeSurfaceEnergyBalanceCatalogue())
+  {
+  }
+};
+
+const svmp::FE::systems::EnergyBalanceCatalogue& catalogue()
+{
+  return svmp::Physics::formulations::navier_stokes::free_surface::
+      freeSurfaceEnergyBalanceCatalogue();
+}
 
 FreeSurfaceEnergyAttemptMetadata metadata(
     std::uint64_t transaction_id,
@@ -136,6 +162,47 @@ FreeSurfaceEnergyAttemptMetadata partialMetadata(
   return partial;
 }
 
+struct FreeSurfaceStoredEnergy {
+  double kinetic{0.0};
+  double gravitational{0.0};
+  double liquid_gas_surface{0.0};
+  double solid_liquid_wall{0.0};
+  double gas_or_compressibility{0.0};
+};
+
+struct FreeSurfacePhysicalDissipationRate {
+  double bulk_viscous{0.0};
+  double navier_slip{0.0};
+  double line_friction{0.0};
+};
+
+struct FreeSurfaceExternalWork {
+  double pressure{0.0};
+  double body_force{0.0};
+  double imposed_traction{0.0};
+  double open_boundary_flux{0.0};
+};
+
+struct FreeSurfaceNumericalWork {
+  double time_discretization{0.0};
+  double kinetic_domain_transport{0.0};
+  double gravitational_transport_coupling{0.0};
+  double convection{0.0};
+  double pressure_continuity{0.0};
+  double surface_transport_coupling{0.0};
+  double weak_boundary{0.0};
+  double vms_pspg{0.0};
+  double cut_stabilization{0.0};
+  double ghost_penalty{0.0};
+  double aggregation{0.0};
+  double extension{0.0};
+  double pruning{0.0};
+  double limiting{0.0};
+  double redistancing{0.0};
+  double local_reconciliation{0.0};
+  double global_correction{0.0};
+};
+
 FreeSurfaceStoredEnergy storedEnergy(
     double kinetic,
     double gravitational,
@@ -147,8 +214,6 @@ FreeSurfaceStoredEnergy storedEnergy(
       .gravitational = gravitational,
       .liquid_gas_surface = surface,
       .solid_liquid_wall = wall,
-      .gas_applicability =
-          FreeSurfaceGasEnergyApplicability::NotApplicable,
       .gas_or_compressibility = 0.0,
   };
 }
@@ -195,77 +260,143 @@ FreeSurfaceNumericalWork numericalWork()
   };
 }
 
+/// The source of channel @p name of @p kind.
+FreeSurfaceEnergyChannelSource& channelSource(
+    FreeSurfaceEnergyChannelSources& sources,
+    EnergyChannelKind kind,
+    std::string_view name)
+{
+  return sources[svmp::FE::systems::energyChannelKindIndex(kind)]
+                [catalogue().position(kind, name)];
+}
+
+const FreeSurfaceEnergyChannelSource& channelSource(
+    const FreeSurfaceEnergyChannelSources& sources,
+    EnergyChannelKind kind,
+    std::string_view name)
+{
+  return sources[svmp::FE::systems::energyChannelKindIndex(kind)]
+                [catalogue().position(kind, name)];
+}
+
 FreeSurfaceEnergyChannelSources channelSources()
 {
-  const auto produced = [](const char* owner) {
-    return FreeSurfaceEnergyChannelSource{
+  FreeSurfaceEnergyChannelSources sources;
+  for (const auto kind : svmp::FE::systems::kEnergyChannelKinds) {
+    sources[svmp::FE::systems::energyChannelKindIndex(kind)].resize(
+        catalogue().count(kind));
+  }
+  const auto set = [&](EnergyChannelKind kind,
+                       std::string_view name,
+                       const char* owner,
+                       bool produced = true) {
+    channelSource(sources, kind, name) = FreeSurfaceEnergyChannelSource{
         .applicability =
-            FreeSurfaceEnergyChannelApplicability::Produced,
+            produced ? FreeSurfaceEnergyChannelApplicability::Produced
+                     : FreeSurfaceEnergyChannelApplicability::NotApplicable,
         .owner = owner,
     };
   };
-  const auto inapplicable = [](const char* owner) {
-    return FreeSurfaceEnergyChannelSource{
-        .applicability =
-            FreeSurfaceEnergyChannelApplicability::NotApplicable,
-        .owner = owner,
-    };
+  using enum EnergyChannelKind;
+  set(Stored, "kinetic", "test.active_volume");
+  set(Stored, "gravitational", "test.active_volume");
+  set(Stored, "liquid_gas_surface", "test.snapshot");
+  set(Stored, "solid_liquid_wall", "test.snapshot");
+  set(Stored, "gas_or_compressibility", "test.one_phase_model", false);
+  set(DissipationRate, "bulk_viscous", "test.viscous_form");
+  set(DissipationRate, "navier_slip", "test.wall_form");
+  set(DissipationRate, "line_friction", "test.contact_form");
+  set(ExternalWork, "pressure", "test.pressure_form");
+  set(ExternalWork, "body_force", "test.body_force_form");
+  set(ExternalWork, "imposed_traction", "test.traction_form");
+  set(ExternalWork, "open_boundary_flux", "test.open_boundary_form");
+  set(NumericalWork, "time_discretization", "test.backward_euler_form");
+  set(NumericalWork, "kinetic_domain_transport", "test.kinetic_domain_transport");
+  set(NumericalWork, "gravitational_transport_coupling", "test.gravitational_transport");
+  set(NumericalWork, "convection", "test.convection_form");
+  set(NumericalWork, "pressure_continuity", "test.pressure_continuity_form");
+  set(NumericalWork, "surface_transport_coupling", "test.surface_transport");
+  set(NumericalWork, "weak_boundary", "test.weak_boundary_form");
+  set(NumericalWork, "vms_pspg", "test.vms_pspg_form");
+  set(NumericalWork, "cut_stabilization", "test.cut_stabilization_form");
+  set(NumericalWork, "ghost_penalty", "test.ghost_penalty_form");
+  set(NumericalWork, "aggregation", "test.aggregation");
+  set(NumericalWork, "extension", "test.extension");
+  set(NumericalWork, "pruning", "test.pruning");
+  set(NumericalWork, "limiting", "test.limiting");
+  set(NumericalWork, "redistancing", "test.redistancing");
+  set(NumericalWork, "local_reconciliation", "test.local_reconciliation");
+  set(NumericalWork, "global_correction", "test.global_correction");
+  return sources;
+}
+
+std::vector<double> storedValues(const FreeSurfaceStoredEnergy& energy)
+{
+  return {energy.kinetic,
+          energy.gravitational,
+          energy.liquid_gas_surface,
+          energy.solid_liquid_wall,
+          energy.gas_or_compressibility};
+}
+
+/**
+ * Stages named channel values.  The catalogue's identity channels (external
+ * pressure, kinetic domain transport, gravitational and surface transport
+ * coupling) are evaluated by the ledger: their inputs are chosen so that the
+ * identities give the requested values (up to rounding).
+ */
+void stage(
+    FreeSurfaceEnergyLedger& ledger,
+    const FreeSurfaceStoredEnergy& before,
+    const FreeSurfaceStoredEnergy& physical_endpoint,
+    const FreeSurfaceStoredEnergy& after,
+    const FreeSurfacePhysicalDissipationRate& dissipation_rate,
+    const FreeSurfaceExternalWork& external_work,
+    const FreeSurfaceNumericalWork& numerical_work,
+    FreeSurfaceEnergyChannelSources channel_sources)
+{
+  const double unset = std::numeric_limits<double>::quiet_NaN();
+  const double dt = ledger.activeAttempt() != nullptr
+                        ? ledger.activeAttempt()->dt
+                        : 1.0;
+  const auto& n = numerical_work;
+  svmp::FE::systems::EnergyBalanceValues values{
+      .stored_before = storedValues(before),
+      .stored_physical_endpoint = storedValues(physical_endpoint),
+      .stored_after = storedValues(after),
+      .dissipation_rate = {dissipation_rate.bulk_viscous,
+                           dissipation_rate.navier_slip,
+                           dissipation_rate.line_friction},
+      .external_work = {unset,
+                        external_work.body_force,
+                        external_work.imposed_traction,
+                        external_work.open_boundary_flux},
+      .numerical_work = {n.time_discretization, unset, unset,
+                         n.convection, n.pressure_continuity, unset,
+                         n.weak_boundary, n.vms_pspg, n.cut_stabilization,
+                         n.ghost_penalty, n.aggregation, n.extension,
+                         n.pruning, n.limiting, n.redistancing,
+                         n.local_reconciliation, n.global_correction},
   };
-  return FreeSurfaceEnergyChannelSources{
-      .stored =
-          {
-              .kinetic = produced("test.active_volume"),
-              .gravitational = produced("test.active_volume"),
-              .liquid_gas_surface = produced("test.snapshot"),
-              .solid_liquid_wall = produced("test.snapshot"),
-              .gas_or_compressibility =
-                  inapplicable("test.one_phase_model"),
-          },
-      .dissipation =
-          {
-              .bulk_viscous = produced("test.viscous_form"),
-              .navier_slip = produced("test.wall_form"),
-              .line_friction = produced("test.contact_form"),
-          },
-      .external =
-          {
-              .pressure = produced("test.pressure_form"),
-              .body_force = produced("test.body_force_form"),
-              .imposed_traction = produced("test.traction_form"),
-              .open_boundary_flux =
-                  produced("test.open_boundary_form"),
-          },
-      .numerical =
-          {
-              .time_discretization =
-                  produced("test.backward_euler_form"),
-              .kinetic_domain_transport =
-                  produced("test.kinetic_domain_transport"),
-              .gravitational_transport_coupling =
-                  produced("test.gravitational_transport"),
-              .convection = produced("test.convection_form"),
-              .pressure_continuity =
-                  produced("test.pressure_continuity_form"),
-              .surface_transport_coupling =
-                  produced("test.surface_transport"),
-              .weak_boundary =
-                  produced("test.weak_boundary_form"),
-              .vms_pspg = produced("test.vms_pspg_form"),
-              .cut_stabilization =
-                  produced("test.cut_stabilization_form"),
-              .ghost_penalty =
-                  produced("test.ghost_penalty_form"),
-              .aggregation = produced("test.aggregation"),
-              .extension = produced("test.extension"),
-              .pruning = produced("test.pruning"),
-              .limiting = produced("test.limiting"),
-              .redistancing = produced("test.redistancing"),
-              .local_reconciliation =
-                  produced("test.local_reconciliation"),
-              .global_correction =
-                  produced("test.global_correction"),
-          },
+  const std::vector<svmp::FE::systems::EnergyBalanceInput> inputs{
+      {.name = "external_pressure_power",
+       .value = external_work.pressure / dt},
+      {.name = "kinetic_energy_before_on_endpoint_domain",
+       .value = n.kinetic_domain_transport + before.kinetic},
+      {.name = "gravitational_potential_power",
+       .value = ((physical_endpoint.gravitational - before.gravitational) -
+                 n.gravitational_transport_coupling) /
+                dt},
+      {.name = "surface_wall_potential_power",
+       .value = ((((physical_endpoint.liquid_gas_surface +
+                    physical_endpoint.solid_liquid_wall) -
+                   before.liquid_gas_surface) -
+                  before.solid_liquid_wall) -
+                 n.surface_transport_coupling) /
+                dt},
   };
+  ledger.stageBalance(
+      std::move(values), std::move(channel_sources), inputs);
 }
 
 void stageWithoutMaintenance(
@@ -277,14 +408,14 @@ void stageWithoutMaintenance(
     FreeSurfaceNumericalWork numerical_work,
     FreeSurfaceEnergyChannelSources channel_sources)
 {
-  ledger.stageBalance(
-      before,
-      after,
-      after,
-      dissipation_rate,
-      external_work,
-      numerical_work,
-      channel_sources);
+  stage(ledger,
+        before,
+        after,
+        after,
+        dissipation_rate,
+        external_work,
+        numerical_work,
+        std::move(channel_sources));
 }
 
 TEST(FreeSurfaceEnergyLedger,
@@ -293,7 +424,7 @@ TEST(FreeSurfaceEnergyLedger,
   const auto capture_gate = lifecycle_capture::captureGate();
   FreeSurfaceEnergyLedger ledger;
   ledger.beginAttempt(metadata(1u));
-  ledger.stageBalance(
+  stage(ledger,
       storedEnergy(2.0, 3.0, 4.0, -1.0),
       storedEnergy(2.4, 3.1, 4.0, -0.9),
       storedEnergy(2.5, 3.2, 3.8, -0.8),
@@ -330,7 +461,7 @@ TEST(FreeSurfaceEnergyLedger,
   EXPECT_NEAR(ledger.trialBalance()->total_numerical_work, 0.48, 1e-14);
   EXPECT_NEAR(ledger.trialBalance()->trial_balance_residual, 0.22, 1e-14);
   EXPECT_DOUBLE_EQ(ledger.trialBalance()->accepted_balance_residual, 0.0);
-  std::optional<application::core::FreeSurfaceEnergyAttempt> captured_trial;
+  std::optional<svmp::FE::systems::EnergyBalanceAttempt> captured_trial;
   if (capture_gate.enabled) {
     captured_trial = *ledger.trialBalance();
   }
@@ -506,8 +637,8 @@ TEST(FreeSurfaceEnergyLedger,
 
   ledger.beginAttempt(continuationMetadata(2u));
   auto changed_owner = channelSources();
-  changed_owner.numerical.extension.owner =
-      "test.changed_extension_owner";
+  channelSource(changed_owner, EnergyChannelKind::NumericalWork, "extension")
+      .owner = "test.changed_extension_owner";
   EXPECT_THROW(
       stageWithoutMaintenance(ledger,
           storedEnergy(2.5, 3.2, 3.8, -0.8),
@@ -577,8 +708,10 @@ TEST(FreeSurfaceEnergyLedger,
 
   ledger.beginAttempt(metadataForAttempt(3u, 3u));
   auto changed_owner = channelSources();
-  changed_owner.numerical.kinetic_domain_transport.owner =
-      "test.changed_kinetic_domain_transport_owner";
+  channelSource(changed_owner,
+                EnergyChannelKind::NumericalWork,
+                "kinetic_domain_transport")
+      .owner = "test.changed_kinetic_domain_transport_owner";
   EXPECT_THROW(
       stageWithoutMaintenance(ledger,
           storedEnergy(2.0, 3.0, 4.0, -1.0),
@@ -950,7 +1083,8 @@ TEST(FreeSurfaceEnergyLedger,
   ledger.beginAttempt(metadata(1u));
 
   auto missing_owner = channelSources();
-  missing_owner.numerical.extension.owner.clear();
+  channelSource(missing_owner, EnergyChannelKind::NumericalWork, "extension")
+      .owner.clear();
   EXPECT_THROW(
       stageWithoutMaintenance(ledger,
           storedEnergy(2.0, 3.0, 4.0, -1.0),
@@ -963,8 +1097,9 @@ TEST(FreeSurfaceEnergyLedger,
   EXPECT_EQ(ledger.trialBalance(), nullptr);
 
   auto nonzero_inapplicable = channelSources();
-  nonzero_inapplicable.numerical.extension.applicability =
-      FreeSurfaceEnergyChannelApplicability::NotApplicable;
+  channelSource(
+      nonzero_inapplicable, EnergyChannelKind::NumericalWork, "extension")
+      .applicability = FreeSurfaceEnergyChannelApplicability::NotApplicable;
   EXPECT_THROW(
       stageWithoutMaintenance(ledger,
           storedEnergy(2.0, 3.0, 4.0, -1.0),
@@ -987,11 +1122,16 @@ TEST(FreeSurfaceEnergyLedger,
       nonzero_inapplicable);
   ASSERT_NE(ledger.trialBalance(), nullptr);
   EXPECT_EQ(
-      ledger.trialBalance()
-          ->channel_sources.numerical.extension.applicability,
+      channelSource(ledger.trialBalance()->sources,
+                    EnergyChannelKind::NumericalWork,
+                    "extension")
+          .applicability,
       FreeSurfaceEnergyChannelApplicability::NotApplicable);
   EXPECT_EQ(
-      ledger.trialBalance()->channel_sources.numerical.extension.owner,
+      channelSource(ledger.trialBalance()->sources,
+                    EnergyChannelKind::NumericalWork,
+                    "extension")
+          .owner,
       "test.extension");
   EXPECT_THROW(
       ledger.rejectAttempt(
@@ -1083,38 +1223,29 @@ TEST(FreeSurfaceEnergyLedger,
 TEST(FreeSurfaceEnergyLedger,
      GasApplicabilityMustBeExplicitAndStableAcrossTheStep)
 {
+  // The gas/compressibility applicability is the gas channel's source: it
+  // must be explicit, exact zero while inapplicable, and stable across the
+  // attempts of a history.
   FreeSurfaceEnergyLedger ledger;
   ledger.beginAttempt(metadata(1u));
 
-  auto before = storedEnergy(2.0, 3.0, 4.0, -1.0);
-  before.gas_applicability =
-      FreeSurfaceGasEnergyApplicability::Unspecified;
+  auto unspecified_gas = channelSources();
+  channelSource(unspecified_gas,
+                EnergyChannelKind::Stored,
+                "gas_or_compressibility")
+      .applicability = FreeSurfaceEnergyChannelApplicability::Unspecified;
   EXPECT_THROW(
       stageWithoutMaintenance(ledger,
-          before,
+          storedEnergy(2.0, 3.0, 4.0, -1.0),
           storedEnergy(2.5, 3.2, 3.8, -0.8),
           dissipation(),
           externalWork(),
           numericalWork(),
-          channelSources()),
+          unspecified_gas),
       std::invalid_argument);
 
-  before = storedEnergy(2.0, 3.0, 4.0, -1.0);
+  auto before = storedEnergy(2.0, 3.0, 4.0, -1.0);
   auto after = storedEnergy(2.5, 3.2, 3.8, -0.8);
-  after.gas_applicability =
-      FreeSurfaceGasEnergyApplicability::Active;
-  EXPECT_THROW(
-      stageWithoutMaintenance(ledger,
-          before,
-          after,
-          dissipation(),
-          externalWork(),
-          numericalWork(),
-          channelSources()),
-      std::invalid_argument);
-
-  before.gas_applicability =
-      FreeSurfaceGasEnergyApplicability::Active;
   before.gas_or_compressibility = 0.2;
   after.gas_or_compressibility = 0.3;
   EXPECT_THROW(
@@ -1128,8 +1259,10 @@ TEST(FreeSurfaceEnergyLedger,
       std::invalid_argument);
 
   auto active_gas_sources = channelSources();
-  active_gas_sources.stored.gas_or_compressibility.applicability =
-      FreeSurfaceEnergyChannelApplicability::Produced;
+  channelSource(active_gas_sources,
+                EnergyChannelKind::Stored,
+                "gas_or_compressibility")
+      .applicability = FreeSurfaceEnergyChannelApplicability::Produced;
   stageWithoutMaintenance(ledger,
       before,
       after,
@@ -1138,6 +1271,20 @@ TEST(FreeSurfaceEnergyLedger,
       numericalWork(),
       active_gas_sources);
   ledger.rejectAttempt(
+      FreeSurfaceEnergyRejectionReason::PreacceptRejection);
+
+  // The retry of the step cannot declare the gas channel inapplicable.
+  ledger.beginAttempt(metadataForAttempt(2u, 2u));
+  EXPECT_THROW(
+      stageWithoutMaintenance(ledger,
+          storedEnergy(2.0, 3.0, 4.0, -1.0),
+          storedEnergy(2.5, 3.2, 3.8, -0.8),
+          dissipation(),
+          externalWork(),
+          numericalWork(),
+          channelSources()),
+      std::invalid_argument);
+  ledger.rejectUnstagedAttempt(
       FreeSurfaceEnergyRejectionReason::PreacceptRejection);
 }
 

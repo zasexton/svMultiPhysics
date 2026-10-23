@@ -8,37 +8,365 @@
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyCandidate.h"
 
+#include "FE/Core/RankLog.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <iomanip>
+#include <iostream>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
 using svmp::FE::level_set::mixMaintenanceRevision;
+using svmp::FE::systems::EnergyBalanceAttemptMetadata;
+using svmp::FE::systems::EnergyBalanceCatalogue;
+using svmp::FE::systems::EnergyBalanceInput;
+using svmp::FE::systems::EnergyBalanceRejectionReason;
+using svmp::FE::systems::EnergyBalanceTemporalScheme;
+using svmp::FE::systems::EnergyChannelApplicability;
+using svmp::FE::systems::EnergyChannelDeclaration;
+using svmp::FE::systems::EnergyChannelIdentity;
+using svmp::FE::systems::EnergyChannelKind;
+using svmp::FE::systems::EnergyChannelSource;
 
-namespace {
-
-const char* freeSurfaceEnergyChannelApplicabilityName(
-    FreeSurfaceEnergyChannelApplicability applicability) noexcept
+const EnergyBalanceCatalogue& freeSurfaceEnergyBalanceCatalogue()
 {
-  switch (applicability) {
-    case FreeSurfaceEnergyChannelApplicability::Produced:
-      return "produced";
-    case FreeSurfaceEnergyChannelApplicability::NotApplicable:
-      return "not_applicable";
-    case FreeSurfaceEnergyChannelApplicability::Unspecified:
-      return "unspecified";
-  }
-  return "invalid";
+  static const EnergyBalanceCatalogue catalogue = [] {
+    using Rule = EnergyChannelIdentity::Rule;
+    const auto supplied = [](const char* name, bool nonnegative = false) {
+      return EnergyChannelDeclaration{
+          .name = name,
+          .nonnegative = nonnegative,
+          .identity = {},
+      };
+    };
+    const auto identity =
+        [](const char* name,
+           Rule rule,
+           std::vector<std::string> stored,
+           const char* input) {
+          return EnergyChannelDeclaration{
+              .name = name,
+              .nonnegative = false,
+              .identity =
+                  EnergyChannelIdentity{
+                      .rule = rule,
+                      .stored = std::move(stored),
+                      .input = input,
+                  },
+          };
+        };
+    return EnergyBalanceCatalogue(
+        "free-surface energy",
+        {{
+            {
+                supplied("kinetic", true),
+                supplied("gravitational"),
+                supplied("liquid_gas_surface", true),
+                supplied("solid_liquid_wall"),
+                supplied("gas_or_compressibility"),
+            },
+            {
+                supplied("bulk_viscous"),
+                supplied("navier_slip"),
+                supplied("line_friction"),
+            },
+            {
+                identity("pressure",
+                         Rule::StepWork,
+                         {},
+                         "external_pressure_power"),
+                supplied("body_force"),
+                supplied("imposed_traction"),
+                supplied("open_boundary_flux"),
+            },
+            {
+                supplied("time_discretization"),
+                identity("kinetic_domain_transport",
+                         Rule::DomainTransport,
+                         {"kinetic"},
+                         "kinetic_energy_before_on_endpoint_domain"),
+                identity("gravitational_transport_coupling",
+                         Rule::StoredTransport,
+                         {"gravitational"},
+                         "gravitational_potential_power"),
+                supplied("convection"),
+                supplied("pressure_continuity"),
+                identity("surface_transport_coupling",
+                         Rule::StoredTransport,
+                         {"liquid_gas_surface", "solid_liquid_wall"},
+                         "surface_wall_potential_power"),
+                supplied("weak_boundary"),
+                supplied("vms_pspg"),
+                supplied("cut_stabilization"),
+                supplied("ghost_penalty"),
+                supplied("aggregation"),
+                supplied("extension"),
+                supplied("pruning"),
+                supplied("limiting"),
+                supplied("redistancing"),
+                supplied("local_reconciliation"),
+                supplied("global_correction"),
+            },
+        }});
+  }();
+  return catalogue;
 }
 
-} // namespace
+std::span<const std::string> freeSurfaceResidualWorkChannelNames()
+{
+  static const std::array<std::string, 7> names{{
+      "convection",
+      "pressure_continuity",
+      "nonconservative_body_force",
+      "weak_boundary",
+      "vms_pspg",
+      "cut_stabilization",
+      "ghost_penalty",
+  }};
+  return names;
+}
+
+FreeSurfaceResidualWorkChannels
+evaluateFreeSurfaceResidualWorkChannels(
+    std::span<const svmp::FE::systems::ResidualWorkPairing> pairings,
+    double dt)
+{
+  const auto works = svmp::FE::systems::evaluateResidualStepWork(
+      pairings,
+      freeSurfaceResidualWorkChannelNames(),
+      dt,
+      "free-surface residual work");
+  return FreeSurfaceResidualWorkChannels{
+      .convection = works[0],
+      .pressure_continuity = works[1],
+      .nonconservative_body_force = works[2],
+      .weak_boundary = works[3],
+      .vms_pspg = works[4],
+      .cut_stabilization = works[5],
+      .ghost_penalty = works[6],
+  };
+}
+
+LevelSetMaintenancePhysicalEndpointChannels
+evaluateLevelSetMaintenancePhysicalEndpointChannels(
+    const svmp::FE::level_set::LevelSetMaintenanceAcceptedStepEnergyAccount&
+        account,
+    std::optional<double> preceding_gravitational_energy,
+    std::optional<double> preceding_surface_wall_energy)
+{
+  if (!account.post_transport.has_value() ||
+      !std::isfinite(account.dt) || !(account.dt > 0.0) ||
+      (preceding_gravitational_energy.has_value() &&
+       !std::isfinite(*preceding_gravitational_energy)) ||
+      (preceding_surface_wall_energy.has_value() &&
+       !std::isfinite(*preceding_surface_wall_energy))) {
+    throw std::invalid_argument(
+        "Physical endpoint energy channels require a complete post-Transport endpoint, positive duration, and finite preceding energies.");
+  }
+  const auto& endpoint = *account.post_transport;
+  LevelSetMaintenancePhysicalEndpointChannels channels;
+  if (preceding_surface_wall_energy.has_value()) {
+    const std::array<double, 2> surface_wall{{
+        endpoint.liquid_gas_surface_energy,
+        endpoint.solid_liquid_wall_energy,
+    }};
+    const std::array<double, 1> preceding{{
+        *preceding_surface_wall_energy,
+    }};
+    channels.surface_wall_energy_change =
+        svmp::FE::systems::energyChange(surface_wall, preceding);
+    if (endpoint.surface_wall_potential_power.has_value()) {
+      channels.surface_transport_coupling_work =
+          svmp::FE::systems::transportCouplingWork(
+              *channels.surface_wall_energy_change,
+              account.dt,
+              *endpoint.surface_wall_potential_power);
+    }
+  }
+  if (preceding_gravitational_energy.has_value() &&
+      endpoint.gravitational_energy.has_value()) {
+    const std::array<double, 1> gravitational{{
+        *endpoint.gravitational_energy,
+    }};
+    const std::array<double, 1> preceding{{
+        *preceding_gravitational_energy,
+    }};
+    channels.gravitational_energy_change =
+        svmp::FE::systems::energyChange(gravitational, preceding);
+    if (endpoint.gravitational_potential_power.has_value()) {
+      channels.gravitational_transport_coupling_work =
+          svmp::FE::systems::transportCouplingWork(
+              *channels.gravitational_energy_change,
+              account.dt,
+              *endpoint.gravitational_potential_power);
+    }
+  }
+  channels.bulk_viscous_dissipation_rate =
+      endpoint.bulk_viscous_dissipation_rate;
+  if (endpoint.external_pressure_power.has_value()) {
+    channels.external_pressure_work =
+        account.dt * *endpoint.external_pressure_power;
+  }
+  const std::array<std::optional<double>, 6> values{{
+      channels.surface_wall_energy_change,
+      channels.surface_transport_coupling_work,
+      channels.gravitational_energy_change,
+      channels.gravitational_transport_coupling_work,
+      channels.bulk_viscous_dissipation_rate,
+      channels.external_pressure_work,
+  }};
+  if (std::any_of(
+          values.begin(), values.end(), [](const auto& value) {
+            return value.has_value() &&
+                !std::isfinite(*value);
+          }) ||
+      (channels.bulk_viscous_dissipation_rate.has_value() &&
+       *channels.bulk_viscous_dissipation_rate < 0.0)) {
+    throw std::overflow_error(
+        "Physical endpoint energy-channel evaluation is not finite or has negative dissipation.");
+  }
+  return channels;
+}
+
+void logLevelSetMaintenancePhysicalEndpointChannels(
+    const svmp::FE::level_set::LevelSetMaintenanceAcceptedStepEnergyAccount&
+        account,
+    const LevelSetMaintenancePhysicalEndpointChannels& channels,
+    std::uint64_t preceding_accepted_step,
+    double preceding_accepted_time,
+    std::uint64_t preceding_state_revision,
+    std::uint64_t preceding_snapshot_set_revision,
+    std::uint64_t preceding_mesh_topology_set_revision,
+    std::uint64_t preceding_cut_topology_set_revision,
+    std::optional<std::uint64_t>
+        preceding_extension_map_revision,
+    std::size_t preceding_functional_count,
+    double preceding_surface_wall_energy,
+    std::optional<double> preceding_gravitational_energy,
+    std::optional<int> active_volume_owner_interface_marker)
+{
+  if (!account.post_transport.has_value()) {
+    throw std::logic_error(
+        "[svMultiPhysics::Application] Physical endpoint channel logging requires a post-Transport endpoint.");
+  }
+  const auto append_channel =
+      [](std::ostringstream& log,
+         std::string_view name,
+         std::optional<double> value) {
+        log << " " << name << "_available="
+            << (value.has_value() ? "true" : "false")
+            << " " << name << "=" << value.value_or(0.0);
+      };
+  std::ostringstream log;
+  log << std::setprecision(17)
+      << "[svMultiPhysics::Application] Level-set maintenance physical endpoint channels"
+      << " diagnostic=level_set_maintenance_physical_endpoint_channels"
+      << " step=" << account.step
+      << " attempt=" << account.attempt
+      << " time=" << account.time
+      << " dt=" << account.dt
+      << " preceding_accepted_step=" << preceding_accepted_step
+      << " preceding_accepted_time=" << preceding_accepted_time
+      << " preceding_state_revision=" << preceding_state_revision
+      << " preceding_snapshot_set_revision="
+      << preceding_snapshot_set_revision
+      << " preceding_mesh_topology_set_revision="
+      << preceding_mesh_topology_set_revision
+      << " preceding_cut_topology_set_revision="
+      << preceding_cut_topology_set_revision
+      << " preceding_extension_map_revision_available="
+      << (preceding_extension_map_revision.has_value()
+              ? "true"
+              : "false")
+      << " preceding_extension_map_revision="
+      << preceding_extension_map_revision.value_or(0u)
+      << " preceding_functional_count="
+      << preceding_functional_count
+      << " preceding_surface_wall_energy="
+      << preceding_surface_wall_energy
+      << " post_transport_algebraic_state_revision="
+      << account.post_transport->algebraic_state_revision
+      << " post_transport_snapshot_set_revision="
+      << account.post_transport->snapshot_set_revision
+      << " post_transport_mesh_topology_set_revision="
+      << account.post_transport->mesh_topology_set_revision
+      << " post_transport_cut_topology_set_revision="
+      << account.post_transport->cut_topology_set_revision
+      << " post_transport_extension_map_revision="
+      << account.post_transport->extension_map_revision.value_or(0u)
+      << " active_volume_owner_available="
+      << (active_volume_owner_interface_marker.has_value()
+              ? "true"
+              : "false")
+      << " active_volume_owner_interface_marker="
+      << active_volume_owner_interface_marker.value_or(-1);
+  append_channel(
+      log,
+      "preceding_gravitational_energy",
+      preceding_gravitational_energy);
+  append_channel(
+      log,
+      "surface_wall_energy_change",
+      channels.surface_wall_energy_change);
+  append_channel(
+      log,
+      "surface_transport_coupling_work",
+      channels.surface_transport_coupling_work);
+  append_channel(
+      log,
+      "gravitational_energy_change",
+      channels.gravitational_energy_change);
+  append_channel(
+      log,
+      "gravitational_transport_coupling_work",
+      channels.gravitational_transport_coupling_work);
+  append_channel(
+      log,
+      "bulk_viscous_dissipation_rate",
+      channels.bulk_viscous_dissipation_rate);
+  append_channel(
+      log,
+      "external_pressure_work",
+      channels.external_pressure_work);
+  append_channel(
+      log,
+      "convection_work",
+      channels.convection_work);
+  append_channel(
+      log,
+      "pressure_continuity_work",
+      channels.pressure_continuity_work);
+  append_channel(
+      log,
+      "nonconservative_body_force_work",
+      channels.nonconservative_body_force_work);
+  append_channel(
+      log,
+      "weak_boundary_work",
+      channels.weak_boundary_work);
+  append_channel(
+      log,
+      "vms_pspg_work",
+      channels.vms_pspg_work);
+  append_channel(
+      log,
+      "cut_stabilization_work",
+      channels.cut_stabilization_work);
+  append_channel(
+      log,
+      "ghost_penalty_work",
+      channels.ghost_penalty_work);
+  log << " complete_energy_record_connected=false";
+  svmp::FE::rank_log::oopCout() << log.str() << std::endl;
+}
 
 FreeSurfaceAcceptedEnergyGroup summarizeAcceptedFreeSurfaceEnergyGroup(
     std::span<const svmp::FE::systems::
@@ -240,18 +568,6 @@ FreeSurfaceAcceptedEnergyGroup summarizeAcceptedFreeSurfaceEnergyGroup(
   return group;
 }
 
-void appendFreeSurfaceEnergyChannelSource(
-    std::ostream& stream,
-    std::string_view channel,
-    const FreeSurfaceEnergyChannelSource& source)
-{
-  stream
-      << ' ' << channel << "_applicability="
-      << freeSurfaceEnergyChannelApplicabilityName(
-             source.applicability)
-      << ' ' << channel << "_owner=" << std::quoted(source.owner);
-}
-
 FreeSurfaceCompleteEnergyBuildResult
 buildFixedTopologyOnePhaseEnergyCandidate(
     std::uint64_t transaction_id,
@@ -425,21 +741,21 @@ buildFixedTopologyOnePhaseEnergyCandidate(
     return result;
   }
 
-  const auto source = [](FreeSurfaceEnergyChannelApplicability applicability,
+  const auto source = [](EnergyChannelApplicability applicability,
                          std::string owner) {
-    return FreeSurfaceEnergyChannelSource{
+    return EnergyChannelSource{
         .applicability = applicability,
         .owner = std::move(owner),
     };
   };
   const auto produced = [&](std::string owner) {
     return source(
-        FreeSurfaceEnergyChannelApplicability::Produced,
+        EnergyChannelApplicability::Produced,
         std::move(owner));
   };
   const auto inapplicable = [&](std::string owner) {
     return source(
-        FreeSurfaceEnergyChannelApplicability::NotApplicable,
+        EnergyChannelApplicability::NotApplicable,
         std::move(owner));
   };
   const auto residual_source = [&](auto channel) {
@@ -448,236 +764,262 @@ buildFixedTopologyOnePhaseEnergyCandidate(
         declaration->applicability ==
                 svmp::FE::systems::
                     FreeSurfaceResidualWorkApplicability::Produced
-            ? FreeSurfaceEnergyChannelApplicability::Produced
-            : FreeSurfaceEnergyChannelApplicability::NotApplicable,
+            ? EnergyChannelApplicability::Produced
+            : EnergyChannelApplicability::NotApplicable,
         declaration->owner_component);
-  };
-  const auto& kinetic_work =
-      *after.backward_euler_kinetic_work;
-  const double surface_energy_change =
-      after.liquid_gas_surface_energy +
-      after.solid_liquid_wall_energy -
-      before.liquid_gas_surface_energy -
-      before.solid_liquid_wall_energy;
-  const double gravitational_energy_change =
-      after.gravitational_energy - before.gravitational_energy;
-  const auto stored = [](const FreeSurfaceAcceptedEnergyGroup& group) {
-    return FreeSurfaceStoredEnergy{
-        .kinetic = group.kinetic_energy,
-        .gravitational = group.gravitational_energy,
-        .liquid_gas_surface =
-            group.liquid_gas_surface_energy,
-        .solid_liquid_wall =
-            group.solid_liquid_wall_energy,
-        .gas_applicability =
-            FreeSurfaceGasEnergyApplicability::NotApplicable,
-        .gas_or_compressibility = 0.0,
-    };
   };
   const auto maintenance_source = [&](std::string owner) {
     return inapplicable(std::move(owner));
   };
-  FreeSurfaceCompleteEnergyCandidate candidate{
-      .metadata =
-          FreeSurfaceEnergyAttemptMetadata{
-              .transaction_id = transaction_id,
-              .step = after.accepted_step,
-              .attempt = attempt,
-              .time_before = expected_time_before,
-              .time_after = after.accepted_time,
-              .dt = after.dt,
-              .temporal_scheme =
-                  FreeSurfaceEnergyTemporalScheme::BackwardEuler,
-              .physical_evaluation_time = after.accepted_time,
-              .physical_evaluation_stage_fraction = 1.0,
-              .algebraic_state_revision_before =
-                  before.state_revision,
-              .physical_endpoint_algebraic_state_revision =
-                  after.state_revision,
-              .algebraic_state_revision_after =
-                  after.state_revision,
-              .snapshot_set_revision_before =
-                  before.snapshot_set_revision,
-              .physical_endpoint_snapshot_set_revision =
-                  after.snapshot_set_revision,
-              .snapshot_set_revision_after =
-                  after.snapshot_set_revision,
-              .mesh_topology_set_revision_before =
-                  before.mesh_topology_set_revision,
-              .physical_endpoint_mesh_topology_set_revision =
-                  after.mesh_topology_set_revision,
-              .mesh_topology_set_revision_after =
-                  after.mesh_topology_set_revision,
-              .cut_topology_set_revision_before =
-                  before.cut_topology_set_revision,
-              .physical_endpoint_cut_topology_set_revision =
-                  after.cut_topology_set_revision,
-              .cut_topology_set_revision_after =
-                  after.cut_topology_set_revision,
-              .extension_map_revision_before = std::nullopt,
-              .physical_endpoint_extension_map_revision =
-                  std::nullopt,
-              .extension_map_revision_after = std::nullopt,
-          },
-      .before = stored(before),
-      .physical_endpoint = stored(after),
-      .after = stored(after),
-      .dissipation =
-          FreeSurfacePhysicalDissipationRate{
-              .bulk_viscous =
-                  *after.bulk_viscous_dissipation_rate,
-              .navier_slip =
-                  *after.navier_slip_dissipation_rate,
-              .line_friction =
-                  *after.line_friction_dissipation_rate,
-          },
-      .external =
-          FreeSurfaceExternalWork{
-              .pressure =
-                  after.dt * *after.external_pressure_power,
-              .body_force =
-                  *residual_work.nonconservative_body_force,
-              .imposed_traction = 0.0,
-              .open_boundary_flux = 0.0,
-          },
-      .numerical =
-          FreeSurfaceNumericalWork{
-              .time_discretization =
-                  -static_cast<double>(
-                      kinetic_work.time_discretization_loss),
-              .kinetic_domain_transport =
-                  static_cast<double>(
-                      kinetic_work
-                          .kinetic_energy_before_on_endpoint_domain) -
-                  before.kinetic_energy,
-              .gravitational_transport_coupling =
-                  gravitational_energy_change -
-                  after.dt *
-                      after.gravitational_potential_power,
-              .convection = *residual_work.convection,
-              .pressure_continuity =
-                  *residual_work.pressure_continuity,
-              .surface_transport_coupling =
-                  surface_energy_change -
-                  after.dt *
-                      *after.surface_wall_potential_power,
-              .weak_boundary = *residual_work.weak_boundary,
-              .vms_pspg = *residual_work.vms_pspg,
-              .cut_stabilization =
-                  *residual_work.cut_stabilization,
-              .ghost_penalty = *residual_work.ghost_penalty,
-              .aggregation = 0.0,
-              .extension = 0.0,
-              .pruning = 0.0,
-              .limiting = 0.0,
-              .redistancing = 0.0,
-              .local_reconciliation = 0.0,
-              .global_correction = 0.0,
-          },
-      .sources =
-          FreeSurfaceEnergyChannelSources{
-              .stored =
-                  FreeSurfaceStoredEnergySources{
-                      .kinetic = produced(
-                          "FreeSurfaceGeometrySnapshot.active_volume_energy"),
-                      .gravitational = produced(
-                          "FreeSurfaceGeometrySnapshot.active_volume_energy"),
-                      .liquid_gas_surface = produced(
-                          "FreeSurfaceGeometrySnapshot.discrete_functional"),
-                      .solid_liquid_wall = produced(
-                          "FreeSurfaceGeometrySnapshot.discrete_functional"),
-                      .gas_or_compressibility = inapplicable(
-                          "OnePhaseLiquidPrescribedExteriorPressure.gas_energy"),
-                  },
-              .dissipation =
-                  FreeSurfacePhysicalDissipationSources{
-                      .bulk_viscous = produced(
-                          "FreeSurfaceGeometrySnapshot.active_volume_dissipation"),
-                      .navier_slip =
-                          after.contact_dissipation_applicable
-                              ? produced(
-                                    "FreeSurfaceGeometrySnapshot.contact_stage_navier_slip")
-                              : inapplicable(
-                                    "FreeSurfaceGeometrySnapshot.contact_stage_navier_slip"),
-                      .line_friction =
-                          after.contact_dissipation_applicable
-                              ? produced(
-                                    "FreeSurfaceGeometrySnapshot.contact_stage_line_friction")
-                              : inapplicable(
-                                    "FreeSurfaceGeometrySnapshot.contact_stage_line_friction"),
-                  },
-              .external =
-                  FreeSurfaceExternalWorkSources{
-                      .pressure = produced(
-                          "FreeSurfaceGeometrySnapshot.external_pressure_power"),
-                      .body_force = residual_source(
-                          svmp::FE::systems::
-                              FreeSurfaceResidualWorkChannel::
-                                  NonconservativeBodyForce),
-                      .imposed_traction = inapplicable(
-                          boundary_energy->owner_component +
-                          ".imposed_traction"),
-                      .open_boundary_flux = inapplicable(
-                          boundary_energy->owner_component +
-                          ".open_boundary_flux"),
-                  },
-              .numerical =
-                  FreeSurfaceNumericalWorkSources{
-                      .time_discretization = produced(
-                          "FreeSurfaceGeometrySnapshot.backward_euler_kinetic_work"),
-                      .kinetic_domain_transport = produced(
-                          "FreeSurfaceGeometrySnapshot.backward_euler_kinetic_work"),
-                      .gravitational_transport_coupling = produced(
-                          "FreeSurfaceGeometrySnapshot.active_volume_energy"),
-                      .convection = residual_source(
-                          svmp::FE::systems::
-                              FreeSurfaceResidualWorkChannel::Convection),
-                      .pressure_continuity = residual_source(
-                          svmp::FE::systems::
-                              FreeSurfaceResidualWorkChannel::
-                                  PressureContinuity),
-                      .surface_transport_coupling = produced(
-                          "FreeSurfaceGeometrySnapshot.endpoint_functional_power"),
-                      .weak_boundary = residual_source(
-                          svmp::FE::systems::
-                              FreeSurfaceResidualWorkChannel::
-                                  WeakBoundary),
-                      .vms_pspg = residual_source(
-                          svmp::FE::systems::
-                              FreeSurfaceResidualWorkChannel::VmsPspg),
-                      .cut_stabilization = residual_source(
-                          svmp::FE::systems::
-                              FreeSurfaceResidualWorkChannel::
-                                  CutStabilization),
-                      .ghost_penalty = residual_source(
-                          svmp::FE::systems::
-                              FreeSurfaceResidualWorkChannel::
-                                  GhostPenalty),
-                      .aggregation = aggregation_present
-                          ? produced(
-                                "SmallCutAggregationConstraint.accepted_projection_neutrality")
-                          : inapplicable(
-                                "SmallCutAggregationConstraint.accepted_projection"),
-                      .extension = inapplicable(
-                          "LevelSetVelocityExtensionMap.direct_energy_work"),
-                      .pruning = inapplicable(
-                          "FreeSurfaceGeometrySnapshot.pruning"),
-                      .limiting = maintenance_source(
-                          "LevelSetMaintenanceWorkLedger.limiting"),
-                      .redistancing = maintenance_source(
-                          "LevelSetMaintenanceWorkLedger.redistancing"),
-                      .local_reconciliation = maintenance_source(
-                          "LevelSetMaintenanceWorkLedger.local_reconciliation"),
-                      .global_correction = maintenance_source(
-                          "LevelSetMaintenanceWorkLedger.global_correction"),
-                  },
-          },
+  const auto& kinetic_work =
+      *after.backward_euler_kinetic_work;
+
+  // The record, by channel name; the identity channels stay NaN and the
+  // ledger evaluates them from the stored energies and the inputs.
+  const auto& catalogue = freeSurfaceEnergyBalanceCatalogue();
+  const double evaluated_by_ledger =
+      std::numeric_limits<double>::quiet_NaN();
+  FreeSurfaceCompleteEnergyCandidate candidate;
+  candidate.metadata = EnergyBalanceAttemptMetadata{
+      .transaction_id = transaction_id,
+      .step = after.accepted_step,
+      .attempt = attempt,
+      .time_before = expected_time_before,
+      .time_after = after.accepted_time,
+      .dt = after.dt,
+      .temporal_scheme =
+          EnergyBalanceTemporalScheme::BackwardEuler,
+      .physical_evaluation_time = after.accepted_time,
+      .physical_evaluation_stage_fraction = 1.0,
+      .algebraic_state_revision_before =
+          before.state_revision,
+      .physical_endpoint_algebraic_state_revision =
+          after.state_revision,
+      .algebraic_state_revision_after =
+          after.state_revision,
+      .snapshot_set_revision_before =
+          before.snapshot_set_revision,
+      .physical_endpoint_snapshot_set_revision =
+          after.snapshot_set_revision,
+      .snapshot_set_revision_after =
+          after.snapshot_set_revision,
+      .mesh_topology_set_revision_before =
+          before.mesh_topology_set_revision,
+      .physical_endpoint_mesh_topology_set_revision =
+          after.mesh_topology_set_revision,
+      .mesh_topology_set_revision_after =
+          after.mesh_topology_set_revision,
+      .cut_topology_set_revision_before =
+          before.cut_topology_set_revision,
+      .physical_endpoint_cut_topology_set_revision =
+          after.cut_topology_set_revision,
+      .cut_topology_set_revision_after =
+          after.cut_topology_set_revision,
+      .extension_map_revision_before = std::nullopt,
+      .physical_endpoint_extension_map_revision =
+          std::nullopt,
+      .extension_map_revision_after = std::nullopt,
+  };
+  auto& values = candidate.values;
+  const auto stored_count = catalogue.count(EnergyChannelKind::Stored);
+  values.stored_before.assign(stored_count, evaluated_by_ledger);
+  values.stored_physical_endpoint.assign(stored_count, evaluated_by_ledger);
+  values.stored_after.assign(stored_count, evaluated_by_ledger);
+  for (const auto kind : svmp::FE::systems::kEnergyChannelKinds) {
+    if (kind != EnergyChannelKind::Stored) {
+      values.values(kind).assign(
+          catalogue.count(kind), evaluated_by_ledger);
+    }
+    candidate.sources[svmp::FE::systems::energyChannelKindIndex(kind)]
+        .resize(catalogue.count(kind));
+  }
+  const auto set_stored = [&](std::string_view name,
+                              double before_value,
+                              double after_value,
+                              EnergyChannelSource channel_source) {
+    const auto position =
+        catalogue.position(EnergyChannelKind::Stored, name);
+    values.stored_before[position] = before_value;
+    values.stored_physical_endpoint[position] = after_value;
+    values.stored_after[position] = after_value;
+    candidate.sources[svmp::FE::systems::energyChannelKindIndex(
+        EnergyChannelKind::Stored)][position] = std::move(channel_source);
+  };
+  const auto set = [&](EnergyChannelKind kind,
+                       std::string_view name,
+                       double value,
+                       EnergyChannelSource channel_source) {
+    const auto position = catalogue.position(kind, name);
+    values.values(kind)[position] = value;
+    candidate.sources[svmp::FE::systems::energyChannelKindIndex(kind)]
+                     [position] = std::move(channel_source);
+  };
+  using enum EnergyChannelKind;
+  set_stored("kinetic",
+             before.kinetic_energy,
+             after.kinetic_energy,
+             produced("FreeSurfaceGeometrySnapshot.active_volume_energy"));
+  set_stored("gravitational",
+             before.gravitational_energy,
+             after.gravitational_energy,
+             produced("FreeSurfaceGeometrySnapshot.active_volume_energy"));
+  set_stored("liquid_gas_surface",
+             before.liquid_gas_surface_energy,
+             after.liquid_gas_surface_energy,
+             produced("FreeSurfaceGeometrySnapshot.discrete_functional"));
+  set_stored("solid_liquid_wall",
+             before.solid_liquid_wall_energy,
+             after.solid_liquid_wall_energy,
+             produced("FreeSurfaceGeometrySnapshot.discrete_functional"));
+  set_stored("gas_or_compressibility",
+             0.0,
+             0.0,
+             inapplicable(
+                 "OnePhaseLiquidPrescribedExteriorPressure.gas_energy"));
+  set(DissipationRate,
+      "bulk_viscous",
+      *after.bulk_viscous_dissipation_rate,
+      produced("FreeSurfaceGeometrySnapshot.active_volume_dissipation"));
+  set(DissipationRate,
+      "navier_slip",
+      *after.navier_slip_dissipation_rate,
+      after.contact_dissipation_applicable
+          ? produced(
+                "FreeSurfaceGeometrySnapshot.contact_stage_navier_slip")
+          : inapplicable(
+                "FreeSurfaceGeometrySnapshot.contact_stage_navier_slip"));
+  set(DissipationRate,
+      "line_friction",
+      *after.line_friction_dissipation_rate,
+      after.contact_dissipation_applicable
+          ? produced(
+                "FreeSurfaceGeometrySnapshot.contact_stage_line_friction")
+          : inapplicable(
+                "FreeSurfaceGeometrySnapshot.contact_stage_line_friction"));
+  set(ExternalWork,
+      "pressure",
+      evaluated_by_ledger,
+      produced("FreeSurfaceGeometrySnapshot.external_pressure_power"));
+  set(ExternalWork,
+      "body_force",
+      *residual_work.nonconservative_body_force,
+      residual_source(
+          svmp::FE::systems::FreeSurfaceResidualWorkChannel::
+              NonconservativeBodyForce));
+  set(ExternalWork,
+      "imposed_traction",
+      0.0,
+      inapplicable(boundary_energy->owner_component +
+                   ".imposed_traction"));
+  set(ExternalWork,
+      "open_boundary_flux",
+      0.0,
+      inapplicable(boundary_energy->owner_component +
+                   ".open_boundary_flux"));
+  set(NumericalWork,
+      "time_discretization",
+      -static_cast<double>(kinetic_work.time_discretization_loss),
+      produced("FreeSurfaceGeometrySnapshot.backward_euler_kinetic_work"));
+  set(NumericalWork,
+      "kinetic_domain_transport",
+      evaluated_by_ledger,
+      produced("FreeSurfaceGeometrySnapshot.backward_euler_kinetic_work"));
+  set(NumericalWork,
+      "gravitational_transport_coupling",
+      evaluated_by_ledger,
+      produced("FreeSurfaceGeometrySnapshot.active_volume_energy"));
+  set(NumericalWork,
+      "convection",
+      *residual_work.convection,
+      residual_source(svmp::FE::systems::
+                          FreeSurfaceResidualWorkChannel::Convection));
+  set(NumericalWork,
+      "pressure_continuity",
+      *residual_work.pressure_continuity,
+      residual_source(svmp::FE::systems::FreeSurfaceResidualWorkChannel::
+                          PressureContinuity));
+  set(NumericalWork,
+      "surface_transport_coupling",
+      evaluated_by_ledger,
+      produced("FreeSurfaceGeometrySnapshot.endpoint_functional_power"));
+  set(NumericalWork,
+      "weak_boundary",
+      *residual_work.weak_boundary,
+      residual_source(svmp::FE::systems::FreeSurfaceResidualWorkChannel::
+                          WeakBoundary));
+  set(NumericalWork,
+      "vms_pspg",
+      *residual_work.vms_pspg,
+      residual_source(svmp::FE::systems::
+                          FreeSurfaceResidualWorkChannel::VmsPspg));
+  set(NumericalWork,
+      "cut_stabilization",
+      *residual_work.cut_stabilization,
+      residual_source(svmp::FE::systems::FreeSurfaceResidualWorkChannel::
+                          CutStabilization));
+  set(NumericalWork,
+      "ghost_penalty",
+      *residual_work.ghost_penalty,
+      residual_source(svmp::FE::systems::FreeSurfaceResidualWorkChannel::
+                          GhostPenalty));
+  set(NumericalWork,
+      "aggregation",
+      0.0,
+      aggregation_present
+          ? produced(
+                "SmallCutAggregationConstraint.accepted_projection_neutrality")
+          : inapplicable(
+                "SmallCutAggregationConstraint.accepted_projection"));
+  set(NumericalWork,
+      "extension",
+      0.0,
+      inapplicable("LevelSetVelocityExtensionMap.direct_energy_work"));
+  set(NumericalWork,
+      "pruning",
+      0.0,
+      inapplicable("FreeSurfaceGeometrySnapshot.pruning"));
+  set(NumericalWork,
+      "limiting",
+      0.0,
+      maintenance_source("LevelSetMaintenanceWorkLedger.limiting"));
+  set(NumericalWork,
+      "redistancing",
+      0.0,
+      maintenance_source("LevelSetMaintenanceWorkLedger.redistancing"));
+  set(NumericalWork,
+      "local_reconciliation",
+      0.0,
+      maintenance_source(
+          "LevelSetMaintenanceWorkLedger.local_reconciliation"));
+  set(NumericalWork,
+      "global_correction",
+      0.0,
+      maintenance_source(
+          "LevelSetMaintenanceWorkLedger.global_correction"));
+  candidate.inputs = {
+      EnergyBalanceInput{
+          .name = "external_pressure_power",
+          .value = *after.external_pressure_power,
+      },
+      EnergyBalanceInput{
+          .name = "kinetic_energy_before_on_endpoint_domain",
+          .value = static_cast<double>(
+              kinetic_work.kinetic_energy_before_on_endpoint_domain),
+      },
+      EnergyBalanceInput{
+          .name = "gravitational_potential_power",
+          .value = after.gravitational_potential_power,
+      },
+      EnergyBalanceInput{
+          .name = "surface_wall_potential_power",
+          .value = *after.surface_wall_potential_power,
+      },
   };
   result.candidate = std::move(candidate);
   return result;
 }
 
-FreeSurfaceEnergyAttemptMetadata
+EnergyBalanceAttemptMetadata
 buildUnstagedFreeSurfaceEnergyAttemptMetadata(
     std::uint64_t transaction_id,
     std::uint64_t prospective_step,
@@ -713,7 +1055,7 @@ buildUnstagedFreeSurfaceEnergyAttemptMetadata(
     throw std::invalid_argument(
         "An unstaged free-surface energy attempt requires one finite positive time interval.");
   }
-  return FreeSurfaceEnergyAttemptMetadata{
+  return EnergyBalanceAttemptMetadata{
       .transaction_id = transaction_id,
       .step = prospective_step,
       .attempt = attempt,
@@ -721,7 +1063,7 @@ buildUnstagedFreeSurfaceEnergyAttemptMetadata(
       .time_after = time_after,
       .dt = dt,
       .temporal_scheme =
-          FreeSurfaceEnergyTemporalScheme::BackwardEuler,
+          EnergyBalanceTemporalScheme::BackwardEuler,
       .algebraic_state_revision_before = before.state_revision,
       .snapshot_set_revision_before = before.snapshot_set_revision,
       .mesh_topology_set_revision_before =
@@ -733,7 +1075,7 @@ buildUnstagedFreeSurfaceEnergyAttemptMetadata(
   };
 }
 
-FreeSurfaceEnergyRejectionReason
+EnergyBalanceRejectionReason
 freeSurfaceEnergyRejectionReasonForStepReject(
     svmp::FE::timestepping::StepRejectReason reason)
 {
@@ -741,42 +1083,20 @@ freeSurfaceEnergyRejectionReasonForStepReject(
       svmp::FE::timestepping::StepRejectReason;
   switch (reason) {
     case StepRejectReason::NonlinearSolveFailed:
-      return FreeSurfaceEnergyRejectionReason::
+      return EnergyBalanceRejectionReason::
           NonlinearSolveFailure;
     case StepRejectReason::ErrorTooLarge:
-      return FreeSurfaceEnergyRejectionReason::
+      return EnergyBalanceRejectionReason::
           StepControllerRejection;
     case StepRejectReason::CutTopologyChanged:
       // The restored callback state has no rejected physical endpoint
       // revision tuple, so this is a preaccept rejection rather than a
       // claimed topology-jump energy record.
-      return FreeSurfaceEnergyRejectionReason::
+      return EnergyBalanceRejectionReason::
           PreacceptRejection;
   }
   throw std::invalid_argument(
       "Free-surface energy rejection received an unknown time-loop reason.");
-}
-
-const char* freeSurfaceEnergyRejectionReasonName(
-    FreeSurfaceEnergyRejectionReason reason) noexcept
-{
-  switch (reason) {
-    case FreeSurfaceEnergyRejectionReason::NonlinearSolveFailure:
-      return "nonlinear_solve_failure";
-    case FreeSurfaceEnergyRejectionReason::StepControllerRejection:
-      return "step_controller_rejection";
-    case FreeSurfaceEnergyRejectionReason::PreacceptRejection:
-      return "preaccept_rejection";
-    case FreeSurfaceEnergyRejectionReason::TopologyChange:
-      return "topology_change";
-    case FreeSurfaceEnergyRejectionReason::MaintenanceRollback:
-      return "maintenance_rollback";
-    case FreeSurfaceEnergyRejectionReason::PublicationFailure:
-      return "publication_failure";
-    case FreeSurfaceEnergyRejectionReason::None:
-      return "none";
-  }
-  return "invalid";
 }
 
 FreeSurfaceAggregationEnergyClassification

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyAccount.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyCandidate.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -22,7 +22,7 @@ struct VtkTimeSeriesCollection;
 // (FE/LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h); the physical
 // endpoint channels and the residual-work channels are Navier-Stokes
 // free-surface physics
-// (Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyAccount.h).
+// (Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyCandidate.h).
 using svmp::FE::level_set::LevelSetMaintenanceWorkStatus;
 using svmp::FE::level_set::LevelSetMaintenanceWorkSubstage;
 using svmp::FE::level_set::LevelSetMaintenanceDeclaredStage;
@@ -35,7 +35,6 @@ using svmp::FE::level_set::LevelSetMaintenanceWorkAttempt;
 using svmp::FE::level_set::LevelSetMaintenanceAcceptedStepEnergyAccount;
 using svmp::FE::level_set::aggregateLevelSetMaintenanceAcceptedStepEnergy;
 using svmp::Physics::formulations::navier_stokes::free_surface::LevelSetMaintenancePhysicalEndpointChannels;
-using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkPairing;
 using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannels;
 using svmp::Physics::formulations::navier_stokes::free_surface::evaluateFreeSurfaceResidualWorkChannels;
 using svmp::Physics::formulations::navier_stokes::free_surface::evaluateLevelSetMaintenancePhysicalEndpointChannels;

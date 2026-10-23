@@ -13335,7 +13335,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 TEST(ApplicationDriverLevelSetWorkflows,
      ResidualWorkChannelsUseSignedOperatorStagePairingsAndFailClosed)
 {
-  std::vector<application::core::FreeSurfaceResidualWorkPairing>
+  std::vector<svmp::FE::systems::ResidualWorkPairing>
       pairings{
           {.channel = "pressure_continuity",
            .produced = true,
@@ -13571,55 +13571,68 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_TRUE(result.missing_requirements.empty());
   ASSERT_TRUE(result.candidate.has_value());
   const auto& candidate = *result.candidate;
-  EXPECT_DOUBLE_EQ(candidate.numerical.time_discretization, -0.03);
-  EXPECT_NEAR(candidate.numerical.kinetic_domain_transport, 0.2, 1e-15);
-  EXPECT_NEAR(
-      candidate.numerical.gravitational_transport_coupling,
-      0.1,
-      1e-15);
-  EXPECT_DOUBLE_EQ(candidate.numerical.convection, 0.11);
-  EXPECT_DOUBLE_EQ(candidate.numerical.pressure_continuity, -0.12);
-  EXPECT_NEAR(
-      candidate.numerical.surface_transport_coupling,
-      0.5,
-      1e-15);
-  EXPECT_DOUBLE_EQ(candidate.numerical.weak_boundary, -0.14);
-  EXPECT_DOUBLE_EQ(candidate.numerical.vms_pspg, 0.15);
-  EXPECT_DOUBLE_EQ(candidate.numerical.cut_stabilization, -0.16);
-  EXPECT_DOUBLE_EQ(candidate.numerical.ghost_penalty, 0.17);
-  EXPECT_DOUBLE_EQ(candidate.external.pressure, 0.15);
-  EXPECT_DOUBLE_EQ(candidate.external.body_force, 0.13);
-  EXPECT_DOUBLE_EQ(candidate.external.imposed_traction, 0.0);
-  EXPECT_DOUBLE_EQ(candidate.external.open_boundary_flux, 0.0);
+  using svmp::FE::systems::EnergyChannelKind;
+  const auto& catalogue =
+      application::core::freeSurfaceEnergyBalanceCatalogue();
+  const auto value = [&](const svmp::FE::systems::EnergyBalanceValues& values,
+                         EnergyChannelKind kind,
+                         std::string_view name) {
+    return values.values(kind)[catalogue.position(kind, name)];
+  };
+  const auto source =
+      [&](EnergyChannelKind kind,
+          std::string_view name) -> const svmp::FE::systems::EnergyChannelSource& {
+    return candidate.sources[svmp::FE::systems::energyChannelKindIndex(kind)]
+                            [catalogue.position(kind, name)];
+  };
+  constexpr auto numerical = EnergyChannelKind::NumericalWork;
+  constexpr auto external = EnergyChannelKind::ExternalWork;
+  const auto& staged = candidate.values;
+  EXPECT_DOUBLE_EQ(value(staged, numerical, "time_discretization"), -0.03);
+  EXPECT_DOUBLE_EQ(value(staged, numerical, "convection"), 0.11);
+  EXPECT_DOUBLE_EQ(value(staged, numerical, "pressure_continuity"), -0.12);
+  EXPECT_DOUBLE_EQ(value(staged, numerical, "weak_boundary"), -0.14);
+  EXPECT_DOUBLE_EQ(value(staged, numerical, "vms_pspg"), 0.15);
+  EXPECT_DOUBLE_EQ(value(staged, numerical, "cut_stabilization"), -0.16);
+  EXPECT_DOUBLE_EQ(value(staged, numerical, "ghost_penalty"), 0.17);
+  EXPECT_DOUBLE_EQ(value(staged, external, "body_force"), 0.13);
+  EXPECT_DOUBLE_EQ(value(staged, external, "imposed_traction"), 0.0);
+  EXPECT_DOUBLE_EQ(value(staged, external, "open_boundary_flux"), 0.0);
+  // The declared identities are evaluated by the ledger.
+  for (const auto name : {"kinetic_domain_transport",
+                          "gravitational_transport_coupling",
+                          "surface_transport_coupling"}) {
+    EXPECT_TRUE(std::isnan(value(staged, numerical, name))) << name;
+  }
+  EXPECT_TRUE(std::isnan(value(staged, external, "pressure")));
   EXPECT_EQ(
-      candidate.sources.external.imposed_traction.applicability,
-      application::core::
-          FreeSurfaceEnergyChannelApplicability::NotApplicable);
-  EXPECT_EQ(
-      candidate.sources.numerical.convection.owner,
-      "energy.convection");
+      source(external, "imposed_traction").applicability,
+      svmp::FE::systems::EnergyChannelApplicability::NotApplicable);
+  EXPECT_EQ(source(numerical, "convection").owner, "energy.convection");
 
-  application::core::FreeSurfaceEnergyLedger ledger;
+  svmp::FE::systems::EnergyBalanceLedger ledger(catalogue);
   ledger.beginAttempt(candidate.metadata);
-  ledger.stageBalance(
-      candidate.before,
-      candidate.physical_endpoint,
-      candidate.after,
-      candidate.dissipation,
-      candidate.external,
-      candidate.numerical,
-      candidate.sources);
+  ledger.stageBalance(candidate.values, candidate.sources, candidate.inputs);
   ledger.commitAttempt();
   ASSERT_EQ(ledger.acceptedAttempts().size(), 1u);
   EXPECT_TRUE(ledger.rejectedAttempts().empty());
   const auto& accepted = ledger.acceptedAttempts().front();
   EXPECT_EQ(
       accepted.status,
-      application::core::FreeSurfaceEnergyAttemptStatus::Accepted);
+      svmp::FE::systems::EnergyBalanceAttemptStatus::Accepted);
   EXPECT_EQ(accepted.metadata.transaction_id, 71u);
-  EXPECT_DOUBLE_EQ(
-      accepted.numerical_work.time_discretization,
-      -0.03);
+  const auto& recorded = accepted.values;
+  EXPECT_DOUBLE_EQ(value(recorded, numerical, "time_discretization"), -0.03);
+  EXPECT_NEAR(value(recorded, numerical, "kinetic_domain_transport"), 0.2, 1e-15);
+  EXPECT_NEAR(
+      value(recorded, numerical, "gravitational_transport_coupling"),
+      0.1,
+      1e-15);
+  EXPECT_NEAR(
+      value(recorded, numerical, "surface_transport_coupling"),
+      0.5,
+      1e-15);
+  EXPECT_DOUBLE_EQ(value(recorded, external, "pressure"), 0.15);
   EXPECT_TRUE(std::isfinite(accepted.accepted_balance_residual));
 }
 
@@ -13627,7 +13640,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
      UnstagedEnergyRejectionPrecedesACompleteAcceptedRetry)
 {
   using EnergyReason =
-      application::core::FreeSurfaceEnergyRejectionReason;
+      svmp::FE::systems::EnergyBalanceRejectionReason;
   using StepReason = svmp::FE::timestepping::StepRejectReason;
   const auto before = makeCompleteEnergyEndpoint(false);
   const auto after = makeCompleteEnergyEndpoint(true);
@@ -13676,7 +13689,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
               StepReason::CutTopologyChanged),
       EnergyReason::PreacceptRejection);
 
-  application::core::FreeSurfaceEnergyLedger ledger;
+  svmp::FE::systems::EnergyBalanceLedger ledger(
+      application::core::freeSurfaceEnergyBalanceCatalogue());
   ledger.beginAttempt(std::move(rejected_metadata));
   ledger.rejectUnstagedAttempt(
       EnergyReason::NonlinearSolveFailure);
@@ -13718,14 +13732,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   ASSERT_TRUE(result.candidate.has_value());
   const auto& candidate = *result.candidate;
   ledger.beginAttempt(candidate.metadata);
-  ledger.stageBalance(
-      candidate.before,
-      candidate.physical_endpoint,
-      candidate.after,
-      candidate.dissipation,
-      candidate.external,
-      candidate.numerical,
-      candidate.sources);
+  ledger.stageBalance(candidate.values, candidate.sources, candidate.inputs);
   ledger.commitAttempt();
 
   ASSERT_EQ(ledger.acceptedAttempts().size(), 1u);

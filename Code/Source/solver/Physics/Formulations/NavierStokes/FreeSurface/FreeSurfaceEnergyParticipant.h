@@ -19,9 +19,7 @@
  */
 
 #include "FE/LevelSet/AcceptedFunctionalRecorder.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyAccount.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyCandidate.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyLedger.h"
 
 #include "FE/Backends/Interfaces/GenericVector.h"
 #include "FE/LevelSet/LevelSetContactStageParticipant.h"
@@ -51,7 +49,7 @@ public:
     double time{0.0};
     double dt{0.0};
     std::uint64_t algebraic_state_revision{0u};
-    std::vector<FreeSurfaceResidualWorkPairing>
+    std::vector<svmp::FE::systems::ResidualWorkPairing>
         pairings{};
     FreeSurfaceResidualWorkChannels channels{};
   };
@@ -128,7 +126,8 @@ public:
   /// Forgets the pending accepted-step account.
   void clearPendingAccount() noexcept;
 
-  FreeSurfaceEnergyLedger free_surface_energy_ledger;
+  svmp::FE::systems::EnergyBalanceLedger free_surface_energy_ledger{
+      freeSurfaceEnergyBalanceCatalogue()};
   std::uint64_t free_surface_energy_transaction_sequence{0u};
   bool free_surface_energy_history_contiguous{true};
   std::uint64_t free_surface_energy_attempt{0u};

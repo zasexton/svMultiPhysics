@@ -53,6 +53,67 @@ using svmp::FE::systems::collectiveMinMaxUint64;
 using svmp::FE::systems::requireCollectivePhasePreparation;
 using svmp::FE::timestepping::stepRejectReasonName;
 
+namespace {
+
+// The channel words of the complete energy record, in catalogue order:
+// stored energies at the three endpoints, then the dissipation rates and the
+// external and numerical works.
+void appendCompleteEnergyChannelValues(
+    std::ostream& log,
+    const svmp::FE::systems::EnergyBalanceCatalogue& catalogue,
+    const svmp::FE::systems::EnergyBalanceAttempt& record)
+{
+  using svmp::FE::systems::EnergyChannelKind;
+  const auto stored = catalogue.channels(EnergyChannelKind::Stored);
+  for (std::size_t i = 0u; i < stored.size(); ++i) {
+    log << " " << stored[i].name << "_energy_before="
+        << record.values.stored_before[i]
+        << " " << stored[i].name << "_energy_physical_endpoint="
+        << record.values.stored_physical_endpoint[i]
+        << " " << stored[i].name << "_energy_after="
+        << record.values.stored_after[i];
+  }
+  log << " gas_energy_applicability=not_applicable";
+  const auto rates = catalogue.channels(EnergyChannelKind::DissipationRate);
+  for (std::size_t i = 0u; i < rates.size(); ++i) {
+    log << " " << rates[i].name << "_dissipation_rate="
+        << record.values.dissipation_rate[i];
+  }
+  const auto external = catalogue.channels(EnergyChannelKind::ExternalWork);
+  for (std::size_t i = 0u; i < external.size(); ++i) {
+    log << " external_" << external[i].name << "_work="
+        << record.values.external_work[i];
+  }
+  const auto numerical = catalogue.channels(EnergyChannelKind::NumericalWork);
+  for (std::size_t i = 0u; i < numerical.size(); ++i) {
+    log << " numerical_" << numerical[i].name << "_work="
+        << record.values.numerical_work[i];
+  }
+}
+
+// " <kind>_<name>_applicability=... <kind>_<name>_owner=..." per channel,
+// in catalogue order.
+void appendCompleteEnergyChannelSources(
+    std::ostream& log,
+    const svmp::FE::systems::EnergyBalanceCatalogue& catalogue,
+    const svmp::FE::systems::EnergyBalanceAttempt& record)
+{
+  for (const auto kind : svmp::FE::systems::kEnergyChannelKinds) {
+    const auto channels = catalogue.channels(kind);
+    const auto& sources =
+        record.sources[svmp::FE::systems::energyChannelKindIndex(kind)];
+    for (std::size_t i = 0u; i < channels.size(); ++i) {
+      svmp::FE::systems::appendEnergyChannelSource(
+          log,
+          std::string(svmp::FE::systems::energyChannelKindPrefix(kind)) +
+              "_" + channels[i].name,
+          sources[i]);
+    }
+  }
+}
+
+} // namespace
+
 EnergyParticipant::EnergyParticipant(const svmp::FE::timestepping::StepContext& context)
     : svmp::FE::timestepping::StepContext(context),
       free_surface_boundary_energy_declaration(
@@ -252,7 +313,7 @@ void EnergyParticipant::onCandidateStage(
   stage_state.u_history = history.uHistorySpans();
   stage_state.dt_history = history.dtHistory();
 
-  std::vector<FreeSurfaceResidualWorkPairing>
+  std::vector<svmp::FE::systems::ResidualWorkPairing>
       pairings;
   pairings.reserve(
       free_surface_residual_work_declarations.size());
@@ -344,7 +405,7 @@ void EnergyParticipant::onCandidateStage(
       }
     }
     pairings.push_back(
-        FreeSurfaceResidualWorkPairing{
+        svmp::FE::systems::ResidualWorkPairing{
                 .channel = svmp::FE::systems::
                     freeSurfaceResidualWorkChannelName(
                         declaration.channel),
@@ -1403,19 +1464,16 @@ void EnergyParticipant::publishAcceptedEnergy(
           candidate.metadata.transaction_id;
       free_surface_energy_ledger.beginAttempt(candidate.metadata);
       free_surface_energy_ledger.stageBalance(
-          std::move(candidate.before),
-          std::move(candidate.physical_endpoint),
-          std::move(candidate.after),
-          std::move(candidate.dissipation),
-          std::move(candidate.external),
-          std::move(candidate.numerical),
-          std::move(candidate.sources));
+          std::move(candidate.values),
+          std::move(candidate.sources),
+          candidate.inputs);
       free_surface_energy_ledger.commitAttempt();
       free_surface_energy_transaction_sequence = transaction_id;
       accepted_complete_energy_record_connected = true;
       const auto& record =
           free_surface_energy_ledger.acceptedAttempts().back();
-      oopCout()
+      auto& record_log = oopCout();
+      record_log
           << std::setprecision(17)
           << "[svMultiPhysics::Application] Free-surface complete energy"
           << " diagnostic=free_surface_complete_energy_record"
@@ -1461,89 +1519,12 @@ void EnergyParticipant::publishAcceptedEnergy(
           << " cut_topology_set_revision_after="
           << record.metadata.cut_topology_set_revision_after
           << " extension_map_revision_present=false"
-          << " geometry_pruning_occurred=false"
-          << " kinetic_energy_before=" << record.before.kinetic
-          << " kinetic_energy_physical_endpoint="
-          << record.physical_endpoint_before_maintenance.kinetic
-          << " kinetic_energy_after=" << record.after.kinetic
-          << " gravitational_energy_before="
-          << record.before.gravitational
-          << " gravitational_energy_physical_endpoint="
-          << record.physical_endpoint_before_maintenance
-                 .gravitational
-          << " gravitational_energy_after="
-          << record.after.gravitational
-          << " liquid_gas_surface_energy_before="
-          << record.before.liquid_gas_surface
-          << " liquid_gas_surface_energy_physical_endpoint="
-          << record.physical_endpoint_before_maintenance
-                 .liquid_gas_surface
-          << " liquid_gas_surface_energy_after="
-          << record.after.liquid_gas_surface
-          << " solid_liquid_wall_energy_before="
-          << record.before.solid_liquid_wall
-          << " solid_liquid_wall_energy_physical_endpoint="
-          << record.physical_endpoint_before_maintenance
-                 .solid_liquid_wall
-          << " solid_liquid_wall_energy_after="
-          << record.after.solid_liquid_wall
-          << " gas_or_compressibility_energy_before="
-          << record.before.gas_or_compressibility
-          << " gas_or_compressibility_energy_physical_endpoint="
-          << record.physical_endpoint_before_maintenance
-                 .gas_or_compressibility
-          << " gas_or_compressibility_energy_after="
-          << record.after.gas_or_compressibility
-          << " gas_energy_applicability=not_applicable"
-          << " bulk_viscous_dissipation_rate="
-          << record.dissipation_rate.bulk_viscous
-          << " navier_slip_dissipation_rate="
-          << record.dissipation_rate.navier_slip
-          << " line_friction_dissipation_rate="
-          << record.dissipation_rate.line_friction
-          << " external_pressure_work="
-          << record.external_work.pressure
-          << " external_body_force_work="
-          << record.external_work.body_force
-          << " external_imposed_traction_work="
-          << record.external_work.imposed_traction
-          << " external_open_boundary_flux_work="
-          << record.external_work.open_boundary_flux
-          << " numerical_time_discretization_work="
-          << record.numerical_work.time_discretization
-          << " numerical_kinetic_domain_transport_work="
-          << record.numerical_work.kinetic_domain_transport
-          << " numerical_gravitational_transport_coupling_work="
-          << record.numerical_work
-                 .gravitational_transport_coupling
-          << " numerical_convection_work="
-          << record.numerical_work.convection
-          << " numerical_pressure_continuity_work="
-          << record.numerical_work.pressure_continuity
-          << " numerical_surface_transport_coupling_work="
-          << record.numerical_work.surface_transport_coupling
-          << " numerical_weak_boundary_work="
-          << record.numerical_work.weak_boundary
-          << " numerical_vms_pspg_work="
-          << record.numerical_work.vms_pspg
-          << " numerical_cut_stabilization_work="
-          << record.numerical_work.cut_stabilization
-          << " numerical_ghost_penalty_work="
-          << record.numerical_work.ghost_penalty
-          << " numerical_aggregation_work="
-          << record.numerical_work.aggregation
-          << " numerical_extension_work="
-          << record.numerical_work.extension
-          << " numerical_pruning_work="
-          << record.numerical_work.pruning
-          << " numerical_limiting_work="
-          << record.numerical_work.limiting
-          << " numerical_redistancing_work="
-          << record.numerical_work.redistancing
-          << " numerical_local_reconciliation_work="
-          << record.numerical_work.local_reconciliation
-          << " numerical_global_correction_work="
-          << record.numerical_work.global_correction
+          << " geometry_pruning_occurred=false";
+      appendCompleteEnergyChannelValues(
+          record_log,
+          free_surface_energy_ledger.catalogue(),
+          record);
+      record_log
           << " stored_energy_change="
           << record.accepted_stored_energy_change
           << " physical_stored_energy_change="
@@ -1578,121 +1559,10 @@ void EnergyParticipant::publishAcceptedEnergy(
           << " transaction_id=" << record.metadata.transaction_id
           << " step=" << record.metadata.step
           << " attempt=" << record.metadata.attempt;
-      const auto& sources = record.channel_sources;
-      appendFreeSurfaceEnergyChannelSource(
-          source_log, "stored_kinetic", sources.stored.kinetic);
-      appendFreeSurfaceEnergyChannelSource(
+      appendCompleteEnergyChannelSources(
           source_log,
-          "stored_gravitational",
-          sources.stored.gravitational);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "stored_liquid_gas_surface",
-          sources.stored.liquid_gas_surface);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "stored_solid_liquid_wall",
-          sources.stored.solid_liquid_wall);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "stored_gas_or_compressibility",
-          sources.stored.gas_or_compressibility);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "dissipation_bulk_viscous",
-          sources.dissipation.bulk_viscous);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "dissipation_navier_slip",
-          sources.dissipation.navier_slip);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "dissipation_line_friction",
-          sources.dissipation.line_friction);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "external_pressure",
-          sources.external.pressure);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "external_body_force",
-          sources.external.body_force);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "external_imposed_traction",
-          sources.external.imposed_traction);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "external_open_boundary_flux",
-          sources.external.open_boundary_flux);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "numerical_time_discretization",
-          sources.numerical.time_discretization);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "numerical_kinetic_domain_transport",
-          sources.numerical.kinetic_domain_transport);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "numerical_gravitational_transport_coupling",
-          sources.numerical.gravitational_transport_coupling);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "numerical_convection",
-          sources.numerical.convection);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "numerical_pressure_continuity",
-          sources.numerical.pressure_continuity);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "numerical_surface_transport_coupling",
-          sources.numerical.surface_transport_coupling);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "numerical_weak_boundary",
-          sources.numerical.weak_boundary);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "numerical_vms_pspg",
-          sources.numerical.vms_pspg);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "numerical_cut_stabilization",
-          sources.numerical.cut_stabilization);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "numerical_ghost_penalty",
-          sources.numerical.ghost_penalty);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "numerical_aggregation",
-          sources.numerical.aggregation);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "numerical_extension",
-          sources.numerical.extension);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "numerical_pruning",
-          sources.numerical.pruning);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "numerical_limiting",
-          sources.numerical.limiting);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "numerical_redistancing",
-          sources.numerical.redistancing);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "numerical_local_reconciliation",
-          sources.numerical.local_reconciliation);
-      appendFreeSurfaceEnergyChannelSource(
-          source_log,
-          "numerical_global_correction",
-          sources.numerical.global_correction);
+          free_surface_energy_ledger.catalogue(),
+          record);
       source_log << " complete_energy_record_connected=true"
                  << std::endl;
     }
@@ -1846,7 +1716,7 @@ void EnergyParticipant::recordRejectedAttempt(
         << " time_loop_rejection_reason="
         << stepRejectReasonName(reason)
         << " ledger_rejection_reason="
-        << freeSurfaceEnergyRejectionReasonName(
+        << svmp::FE::systems::energyBalanceRejectionReasonName(
                record.rejection_reason)
         << " algebraic_state_revision_before="
         << record.metadata.algebraic_state_revision_before

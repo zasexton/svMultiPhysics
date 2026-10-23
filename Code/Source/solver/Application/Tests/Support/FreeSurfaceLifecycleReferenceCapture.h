@@ -8,7 +8,8 @@
 
 #pragma once
 
-#include "Application/Core/FreeSurfaceEnergyLedger.h"
+#include "FE/Systems/EnergyBalanceLedger.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyCandidate.h"
 #include "FE/Core/FEConfig.h"
 #include "FE/Core/Types.h"
 
@@ -963,8 +964,8 @@ std::string generalizedAlphaPlanJson(const Plan &plan, std::string_view closure,
 }
 
 inline const char *
-energyStatusName(application::core::FreeSurfaceEnergyAttemptStatus status) {
-  using T = application::core::FreeSurfaceEnergyAttemptStatus;
+energyStatusName(svmp::FE::systems::EnergyBalanceAttemptStatus status) {
+  using T = svmp::FE::systems::EnergyBalanceAttemptStatus;
   switch (status) {
   case T::Trial:
     return "trial";
@@ -977,8 +978,8 @@ energyStatusName(application::core::FreeSurfaceEnergyAttemptStatus status) {
 }
 
 inline const char *
-energyReasonName(application::core::FreeSurfaceEnergyRejectionReason reason) {
-  using T = application::core::FreeSurfaceEnergyRejectionReason;
+energyReasonName(svmp::FE::systems::EnergyBalanceRejectionReason reason) {
+  using T = svmp::FE::systems::EnergyBalanceRejectionReason;
   switch (reason) {
   case T::None:
     return "none";
@@ -999,8 +1000,8 @@ energyReasonName(application::core::FreeSurfaceEnergyRejectionReason reason) {
 }
 
 inline const char *
-energySchemeName(application::core::FreeSurfaceEnergyTemporalScheme scheme) {
-  using T = application::core::FreeSurfaceEnergyTemporalScheme;
+energySchemeName(svmp::FE::systems::EnergyBalanceTemporalScheme scheme) {
+  using T = svmp::FE::systems::EnergyBalanceTemporalScheme;
   switch (scheme) {
   case T::Unspecified:
     return "unspecified";
@@ -1012,9 +1013,9 @@ energySchemeName(application::core::FreeSurfaceEnergyTemporalScheme scheme) {
   throw std::runtime_error("unknown energy temporal scheme");
 }
 
-inline std::string channelSourceJson(
-    const application::core::FreeSurfaceEnergyChannelSource &source) {
-  using T = application::core::FreeSurfaceEnergyChannelApplicability;
+inline std::string
+channelSourceJson(const svmp::FE::systems::EnergyChannelSource &source) {
+  using T = svmp::FE::systems::EnergyChannelApplicability;
   const char *applicability = "unspecified";
   if (source.applicability == T::Produced) {
     applicability = "produced";
@@ -1031,30 +1032,42 @@ inline std::string channelSourceJson(
   });
 }
 
+// The stored energies of one endpoint by channel name.  The free-surface
+// record states the gas/compressibility applicability (its channel source:
+// produced = active) just before that channel.
 inline std::string
-storedEnergyJson(const application::core::FreeSurfaceStoredEnergy &value) {
-  using G = application::core::FreeSurfaceGasEnergyApplicability;
-  const char *gas = "unspecified";
-  if (value.gas_applicability == G::Active) {
-    gas = "active";
-  } else if (value.gas_applicability == G::NotApplicable) {
-    gas = "not_applicable";
+storedEnergyJson(const svmp::FE::systems::EnergyBalanceAttempt &attempt,
+                 const std::vector<double> &value) {
+  using svmp::FE::systems::EnergyChannelApplicability;
+  using svmp::FE::systems::EnergyChannelKind;
+  const auto &catalogue = svmp::Physics::formulations::navier_stokes::
+      free_surface::freeSurfaceEnergyBalanceCatalogue();
+  const auto channels = catalogue.channels(EnergyChannelKind::Stored);
+  const auto &sources = attempt.sources[svmp::FE::systems::energyChannelKindIndex(
+      EnergyChannelKind::Stored)];
+  JsonFields fields;
+  for (std::size_t i = 0; i < channels.size(); ++i) {
+    if (channels[i].name == "gas_or_compressibility") {
+      const char *gas = "unspecified";
+      if (sources[i].applicability == EnergyChannelApplicability::Produced) {
+        gas = "active";
+      } else if (sources[i].applicability ==
+                 EnergyChannelApplicability::NotApplicable) {
+        gas = "not_applicable";
+      }
+      fields.emplace_back("gas_applicability", jsonString(gas));
+    }
+    fields.emplace_back(channels[i].name,
+                        jsonObservedReal(value[i], "unstaged"));
   }
-  return jsonObject({
-      {"kinetic", jsonObservedReal(value.kinetic, "unstaged")},
-      {"gravitational", jsonObservedReal(value.gravitational, "unstaged")},
-      {"liquid_gas_surface",
-       jsonObservedReal(value.liquid_gas_surface, "unstaged")},
-      {"solid_liquid_wall",
-       jsonObservedReal(value.solid_liquid_wall, "unstaged")},
-      {"gas_applicability", jsonString(gas)},
-      {"gas_or_compressibility",
-       jsonObservedReal(value.gas_or_compressibility, "unstaged")},
-  });
+  return jsonObject(fields);
 }
 
 inline std::string
-energyAttemptJson(const application::core::FreeSurfaceEnergyAttempt &attempt) {
+energyAttemptJson(const svmp::FE::systems::EnergyBalanceAttempt &attempt) {
+  using svmp::FE::systems::EnergyChannelKind;
+  const auto &catalogue = svmp::Physics::formulations::navier_stokes::
+      free_surface::freeSurfaceEnergyBalanceCatalogue();
   const auto &metadata = attempt.metadata;
   const auto endpoint_revision = [&](std::uint64_t value) {
     if (!attempt.balance_staged) {
@@ -1067,11 +1080,23 @@ energyAttemptJson(const application::core::FreeSurfaceEnergyAttempt &attempt) {
     return jsonObject({{"status", jsonString("available")},
                        {"value", jsonInteger(value)}});
   };
-  const auto &sources = attempt.channel_sources;
-  const auto source_group = [](const auto &group, const auto &names) {
+  const auto channel_values = [&](EnergyChannelKind kind) {
     JsonFields fields;
-    for (const auto & [ name, member ] : names) {
-      fields.emplace_back(name, channelSourceJson(group.*member));
+    const auto channels = catalogue.channels(kind);
+    const auto &values = attempt.values.values(kind);
+    for (std::size_t i = 0; i < channels.size(); ++i) {
+      fields.emplace_back(channels[i].name,
+                          jsonObservedReal(values[i], "unstaged"));
+    }
+    return jsonObject(fields);
+  };
+  const auto source_group = [&](EnergyChannelKind kind) {
+    JsonFields fields;
+    const auto channels = catalogue.channels(kind);
+    const auto &sources =
+        attempt.sources[svmp::FE::systems::energyChannelKindIndex(kind)];
+    for (std::size_t i = 0; i < channels.size(); ++i) {
+      fields.emplace_back(channels[i].name, channelSourceJson(sources[i]));
     }
     return jsonObject(fields);
   };
@@ -1136,206 +1161,20 @@ energyAttemptJson(const application::core::FreeSurfaceEnergyAttempt &attempt) {
        })},
       {"stored_energy",
        jsonObject({
-           {"before", storedEnergyJson(attempt.before)},
+           {"before", storedEnergyJson(attempt, attempt.values.stored_before)},
            {"physical_endpoint_before_maintenance",
-            storedEnergyJson(attempt.physical_endpoint_before_maintenance)},
-           {"after", storedEnergyJson(attempt.after)},
+            storedEnergyJson(attempt, attempt.values.stored_physical_endpoint)},
+           {"after", storedEnergyJson(attempt, attempt.values.stored_after)},
        })},
-      {"dissipation_rate",
-       jsonObject({
-           {"bulk_viscous",
-            jsonObservedReal(attempt.dissipation_rate.bulk_viscous,
-                             "unstaged")},
-           {"navier_slip",
-            jsonObservedReal(attempt.dissipation_rate.navier_slip, "unstaged")},
-           {"line_friction",
-            jsonObservedReal(attempt.dissipation_rate.line_friction,
-                             "unstaged")},
-       })},
-      {"external_work",
-       jsonObject({
-           {"pressure",
-            jsonObservedReal(attempt.external_work.pressure, "unstaged")},
-           {"body_force",
-            jsonObservedReal(attempt.external_work.body_force, "unstaged")},
-           {"imposed_traction",
-            jsonObservedReal(attempt.external_work.imposed_traction,
-                             "unstaged")},
-           {"open_boundary_flux",
-            jsonObservedReal(attempt.external_work.open_boundary_flux,
-                             "unstaged")},
-       })},
-      {"numerical_work",
-       jsonObject({
-           {"time_discretization",
-            jsonObservedReal(attempt.numerical_work.time_discretization,
-                             "unstaged")},
-           {"kinetic_domain_transport",
-            jsonObservedReal(attempt.numerical_work.kinetic_domain_transport,
-                             "unstaged")},
-           {"gravitational_transport_coupling",
-            jsonObservedReal(
-                attempt.numerical_work.gravitational_transport_coupling,
-                "unstaged")},
-           {"convection",
-            jsonObservedReal(attempt.numerical_work.convection, "unstaged")},
-           {"pressure_continuity",
-            jsonObservedReal(attempt.numerical_work.pressure_continuity,
-                             "unstaged")},
-           {"surface_transport_coupling",
-            jsonObservedReal(attempt.numerical_work.surface_transport_coupling,
-                             "unstaged")},
-           {"weak_boundary",
-            jsonObservedReal(attempt.numerical_work.weak_boundary, "unstaged")},
-           {"vms_pspg",
-            jsonObservedReal(attempt.numerical_work.vms_pspg, "unstaged")},
-           {"cut_stabilization",
-            jsonObservedReal(attempt.numerical_work.cut_stabilization,
-                             "unstaged")},
-           {"ghost_penalty",
-            jsonObservedReal(attempt.numerical_work.ghost_penalty, "unstaged")},
-           {"aggregation",
-            jsonObservedReal(attempt.numerical_work.aggregation, "unstaged")},
-           {"extension",
-            jsonObservedReal(attempt.numerical_work.extension, "unstaged")},
-           {"pruning",
-            jsonObservedReal(attempt.numerical_work.pruning, "unstaged")},
-           {"limiting",
-            jsonObservedReal(attempt.numerical_work.limiting, "unstaged")},
-           {"redistancing",
-            jsonObservedReal(attempt.numerical_work.redistancing, "unstaged")},
-           {"local_reconciliation",
-            jsonObservedReal(attempt.numerical_work.local_reconciliation,
-                             "unstaged")},
-           {"global_correction",
-            jsonObservedReal(attempt.numerical_work.global_correction,
-                             "unstaged")},
-       })},
+      {"dissipation_rate", channel_values(EnergyChannelKind::DissipationRate)},
+      {"external_work", channel_values(EnergyChannelKind::ExternalWork)},
+      {"numerical_work", channel_values(EnergyChannelKind::NumericalWork)},
       {"channel_sources",
        jsonObject({
-           {"stored",
-            source_group(
-                sources.stored,
-                std::array{
-                    std::pair{"kinetic",
-                              &application::core::
-                                  FreeSurfaceStoredEnergySources::kinetic},
-                    std::pair{
-                        "gravitational",
-                        &application::core::FreeSurfaceStoredEnergySources::
-                            gravitational},
-                    std::pair{
-                        "liquid_gas_surface",
-                        &application::core::FreeSurfaceStoredEnergySources::
-                            liquid_gas_surface},
-                    std::pair{
-                        "solid_liquid_wall",
-                        &application::core::FreeSurfaceStoredEnergySources::
-                            solid_liquid_wall},
-                    std::pair{
-                        "gas_or_compressibility",
-                        &application::core::FreeSurfaceStoredEnergySources::
-                            gas_or_compressibility}})},
-           {"dissipation",
-            source_group(
-                sources.dissipation,
-                std::array{
-                    std::pair{"bulk_viscous",
-                              &application::core::
-                                  FreeSurfacePhysicalDissipationSources::
-                                      bulk_viscous},
-                    std::pair{
-                        "navier_slip",
-                        &application::core::
-                            FreeSurfacePhysicalDissipationSources::navier_slip},
-                    std::pair{"line_friction",
-                              &application::core::
-                                  FreeSurfacePhysicalDissipationSources::
-                                      line_friction}})},
-           {"external",
-            source_group(
-                sources.external,
-                std::array{
-                    std::pair{"pressure",
-                              &application::core::
-                                  FreeSurfaceExternalWorkSources::pressure},
-                    std::pair{"body_force",
-                              &application::core::
-                                  FreeSurfaceExternalWorkSources::body_force},
-                    std::pair{
-                        "imposed_traction",
-                        &application::core::FreeSurfaceExternalWorkSources::
-                            imposed_traction},
-                    std::pair{
-                        "open_boundary_flux",
-                        &application::core::FreeSurfaceExternalWorkSources::
-                            open_boundary_flux}})},
-           {"numerical",
-            source_group(
-                sources.numerical,
-                std::array{
-                    std::pair{
-                        "time_discretization",
-                        &application::core::FreeSurfaceNumericalWorkSources::
-                            time_discretization},
-                    std::pair{
-                        "kinetic_domain_transport",
-                        &application::core::FreeSurfaceNumericalWorkSources::
-                            kinetic_domain_transport},
-                    std::pair{
-                        "gravitational_transport_coupling",
-                        &application::core::FreeSurfaceNumericalWorkSources::
-                            gravitational_transport_coupling},
-                    std::pair{"convection",
-                              &application::core::
-                                  FreeSurfaceNumericalWorkSources::convection},
-                    std::pair{
-                        "pressure_continuity",
-                        &application::core::FreeSurfaceNumericalWorkSources::
-                            pressure_continuity},
-                    std::pair{
-                        "surface_transport_coupling",
-                        &application::core::FreeSurfaceNumericalWorkSources::
-                            surface_transport_coupling},
-                    std::pair{
-                        "weak_boundary",
-                        &application::core::FreeSurfaceNumericalWorkSources::
-                            weak_boundary},
-                    std::pair{"vms_pspg",
-                              &application::core::
-                                  FreeSurfaceNumericalWorkSources::vms_pspg},
-                    std::pair{
-                        "cut_stabilization",
-                        &application::core::FreeSurfaceNumericalWorkSources::
-                            cut_stabilization},
-                    std::pair{
-                        "ghost_penalty",
-                        &application::core::FreeSurfaceNumericalWorkSources::
-                            ghost_penalty},
-                    std::pair{"aggregation",
-                              &application::core::
-                                  FreeSurfaceNumericalWorkSources::aggregation},
-                    std::pair{"extension",
-                              &application::core::
-                                  FreeSurfaceNumericalWorkSources::extension},
-                    std::pair{"pruning",
-                              &application::core::
-                                  FreeSurfaceNumericalWorkSources::pruning},
-                    std::pair{"limiting",
-                              &application::core::
-                                  FreeSurfaceNumericalWorkSources::limiting},
-                    std::pair{
-                        "redistancing",
-                        &application::core::FreeSurfaceNumericalWorkSources::
-                            redistancing},
-                    std::pair{
-                        "local_reconciliation",
-                        &application::core::FreeSurfaceNumericalWorkSources::
-                            local_reconciliation},
-                    std::pair{
-                        "global_correction",
-                        &application::core::FreeSurfaceNumericalWorkSources::
-                            global_correction}})},
+           {"stored", source_group(EnergyChannelKind::Stored)},
+           {"dissipation", source_group(EnergyChannelKind::DissipationRate)},
+           {"external", source_group(EnergyChannelKind::ExternalWork)},
+           {"numerical", source_group(EnergyChannelKind::NumericalWork)},
        })},
       {"derived_balance",
        jsonObject({
