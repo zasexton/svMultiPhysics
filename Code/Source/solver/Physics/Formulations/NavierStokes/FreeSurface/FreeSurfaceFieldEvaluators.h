@@ -11,32 +11,50 @@
 /**
  * @file
  * @brief Point evaluators of FE fields for the free-surface discrete
- *        functionals and accepted-stage diagnostics.
+ *        functionals and accepted-stage diagnostics: the FE snapshot field
+ *        evaluators (FE/Interfaces/SnapshotFieldEvaluator.h) of a field of
+ *        the run's FE system.
  */
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRunSupport.h"
 
 #include "FE/Core/Types.h"
 #include "FE/Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "FE/Interfaces/SnapshotFieldEvaluator.h"
+#include "FE/Systems/FESystem.h"
+#include "FE/Systems/SnapshotFieldAccess.h"
 
 #include <span>
 #include <string_view>
 
 namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
-svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator
+inline svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator
 makeFreeSurfaceVelocityEvaluator(
     const FreeSurfaceSystemHandle& sim,
     svmp::FE::FieldId velocity_field,
     std::span<const svmp::FE::Real> solution,
     std::string_view diagnostic_context,
-    bool allow_scalar_product_fast_path = true);
+    bool allow_scalar_product_fast_path = true)
+{
+  return svmp::FE::interfaces::makeSnapshotVectorFieldEvaluator(
+      svmp::FE::systems::snapshotFieldAccess(*sim.fe_system, velocity_field),
+      solution,
+      diagnostic_context,
+      allow_scalar_product_fast_path);
+}
 
-svmp::FE::interfaces::FreeSurfaceGeometryScalarEvaluator
+inline svmp::FE::interfaces::FreeSurfaceGeometryScalarEvaluator
 makeFreeSurfaceScalarValueEvaluator(
     const FreeSurfaceSystemHandle& sim,
     svmp::FE::FieldId scalar_field,
     std::span<const svmp::FE::Real> solution,
-    std::string_view diagnostic_context);
+    std::string_view diagnostic_context)
+{
+  return svmp::FE::interfaces::makeSnapshotScalarFieldEvaluator(
+      svmp::FE::systems::snapshotFieldAccess(*sim.fe_system, scalar_field),
+      solution,
+      diagnostic_context);
+}
 
 } // namespace svmp::Physics::formulations::navier_stokes::free_surface
