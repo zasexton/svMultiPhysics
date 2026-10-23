@@ -29,17 +29,15 @@
 // Not mathematics: option queries, preflight, fields and initial state,
 // geometry adapters, logs, energy declarations, the residual-work ledger,
 // the diagnostic operators and the configuration artifact.
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceDiagnosticOperators.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceDiagnostics.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergy.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceFittedALE.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
 #include "Physics/Options/NavierStokesOptionRules.h"
 #include "Physics/Options/NavierStokesOptionSchema.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceResidualWork.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesFields.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesGeneratedNitsche.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesInitialConditions.h"
+#include "Physics/Formulations/NavierStokes/NavierStokesPostProcessing.h"
 
 #include "FE/Systems/TwoFluidStageRecords.h"
 
@@ -356,14 +354,14 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     const auto& o = options_;
     effective_configuration_artifact_.reset();
     diagnostics_ = std::make_shared<fs::DiagnosticRegistry>();   // published through diagnostics()
-    declareNavierStokesDiagnosticSets(*diagnostics_);
+    post::declareNavierStokesDiagnosticSets(*diagnostics_);
     auto preflight = preflightNavierStokes(system, o, velocity_space_, pressure_space_);   // no mutation before
     const int dim = preflight.dim;
     const auto& free_surfaces = preflight.effective_free_surfaces;
     const auto ids = registerNavierStokesFields(system, o, preflight);              // u, p, f_h, u_ref
     const FieldId u_id = ids.velocity;
     const FieldId p_id = ids.pressure;
-    declareFreeSurfaceDiscreteFunctionals(free_surfaces, system, u_id, o.density, o.body_force,
+    post::declareFreeSurfaceDiscreteFunctionals(free_surfaces, system, u_id, o.density, o.body_force,
                                           !o.has_body_force_spacetime && ids.body_force == FE::INVALID_FIELD_ID,
                                           o.viscosity, o.viscosity_model == nullptr);
     // Exterior conditions act on the wetted part of a boundary when the liquid is a cut side.
@@ -426,12 +424,12 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     const auto active_continuity = pspg_grad_p.isValid() ? C + pspg_grad_p : C;
     const bool nonconservative_force = o.has_body_force_spacetime || ids.body_force != FE::INVALID_FIELD_ID ||
                                        o.rotating_frame_coriolis_enabled;
-    auto work = bulkResidualWork(r, M, C, pspg_grad_p, -rho * inner(g, v), nonconservative_force,
+    auto work = post::bulkResidualWork(r, M, C, pspg_grad_p, -rho * inner(g, v), nonconservative_force,
                                  preflight.enable_vms, Omega);
-    std::optional<ConservativeBalanceForms> balance;
-    if (conservativeBalanceDiagnosticSupported(*diagnostics_, free_surfaces, preflight.has_exterior_free_surface,
+    std::optional<post::ConservativeBalanceForms> balance;
+    if (post::conservativeBalanceDiagnosticSupported(*diagnostics_, free_surfaces, preflight.has_exterior_free_surface,
                                                o.conservative_balance_diagnostics)) {
-        balance = ConservativeBalanceForms{.pressure = r.pressure.dx(Omega),
+        balance = post::ConservativeBalanceForms{.pressure = r.pressure.dx(Omega),
                                            .gravitational_potential = (-rho * inner(g, v)).dx(Omega)};
     }
     auto* const split = balance ? &*balance : nullptr;
@@ -493,8 +491,8 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     F.configure(ale);
     (void)F.install({u_id, p_id}, M + C);
     if (preflight.has_exterior_free_surface) {
-        declareFreeSurfaceExternalBoundaryEnergy(system, o);
-        installFreeSurfaceResidualWork(system, o, u_id, p_id, F.options(), work,
+        post::declareFreeSurfaceExternalBoundaryEnergy(system, o);
+        post::installFreeSurfaceResidualWork(system, o, u_id, p_id, F.options(), work,
                                        {.include_mcv = mcv,
                                         .has_nonconservative_body_force = nonconservative_force,
                                         .enable_vms = preflight.enable_vms});
@@ -506,7 +504,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
                               .drop_generated_boundary_nitsche_trace_requests = true});
     }
 
-    installNavierStokesDiagnosticOperators(*diagnostics_, system, u_id, p_id, F.options(), r, split,
+    post::installNavierStokesDiagnosticOperators(*diagnostics_, system, u_id, p_id, F.options(), r, split,
                                            active_continuity, work.ghost_penalty, u, q, active_volume);
     declareFittedNormalKinematics(system, o.operator_tag, std::move(fitted_normal_kinematics), free_surfaces);
     effective_configuration_artifact_ = makeEffectiveConfigurationArtifact(

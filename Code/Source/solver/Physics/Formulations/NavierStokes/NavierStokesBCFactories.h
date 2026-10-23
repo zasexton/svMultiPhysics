@@ -16,9 +16,9 @@
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactCertificate.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceDiagnosticOperators.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceFittedALE.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
+#include "Physics/Formulations/NavierStokes/NavierStokesPostProcessing.h"
 #include "Physics/Options/NavierStokesOptionRules.h"
 #include "Physics/Options/NavierStokesOptionSchema.h"
 
@@ -872,7 +872,7 @@ public:
 inline void addUnfittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem& system,
                                    FE::constraints::ConstraintPlan& plan, FE::systems::FormulationBuilder& F,
                                    const IncompressibleNavierStokesVMSOptions& o, const FreeSurfaceBoundary& b,
-                                   const NavierStokesTerms& t, FE::FieldId u_id, ConservativeBalanceForms* balance,
+                                   const NavierStokesTerms& t, FE::FieldId u_id, post::ConservativeBalanceForms* balance,
                                    FreeSurfaceObserver& obs)
 {
     using namespace FE::forms;
@@ -891,12 +891,12 @@ inline void addUnfittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem
         if (c.young && !bc::isZeroConstantScalarValue(b.surface_tension)) {
             const auto young = (-gamma * c.cos_e * dot(v, m)).dL(CL);
             M = M + young;
-            addSurfaceEnergy(balance, young);
+            post::addSurfaceEnergy(balance, young);
         }
         if (c.dynamic && !c.strong) {
             const auto friction = FormExpr::constant(1.0) / c.mobility * dot(u, m);
             M = M + ((friction - gamma * c.cos_e) * dot(v, m)).dL(CL);
-            addSurfaceEnergy(balance, (-gamma * c.cos_e * dot(v, m)).dL(CL));
+            post::addSurfaceEnergy(balance, (-gamma * c.cos_e * dot(v, m)).dL(CL));
         }
         int wetted_marker = -1;
         if (c.slip_length.isValid()) {
@@ -922,12 +922,12 @@ inline void addUnfittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem
     const auto n = L.outwardNormal();
     const auto p_ext = freeSurfaceScalar(b.external_pressure, "ns_free_surface_external_pressure", b);
     const auto pressure = p_ext * inner(n, v);   // SurfaceStress, the only form (D48)
-    addExteriorPressure(balance, pressure.dI(Gamma));
+    post::addExteriorPressure(balance, pressure.dI(Gamma));
     if (!surfaceStressActive(b)) {   // gamma = 0
         M = M + pressure.dI(Gamma);
     } else {
         const auto surface_energy = gamma * inner(tangentialProjector(n, dim), grad(v));
-        addSurfaceEnergy(balance, surface_energy.dI(Gamma));
+        post::addSurfaceEnergy(balance, surface_energy.dI(Gamma));
         M = M + (pressure + surface_energy).dI(Gamma);
     }
     if (usesSemiImplicitNormalIncrement(b)) {
@@ -948,7 +948,7 @@ inline void addFittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem& 
                                  FE::constraints::ConstraintPlan& plan, FE::systems::BoundaryConditionManager& bcs,
                                  const IncompressibleNavierStokesVMSOptions& o, const FreeSurfaceBoundary& b,
                                  const FE::systems::ALEBinding& ale, const NavierStokesTerms& t, FE::FieldId u_id,
-                                 FE::systems::FormulationBuilder& F, ConservativeBalanceForms* balance,
+                                 FE::systems::FormulationBuilder& F, post::ConservativeBalanceForms* balance,
                                  FreeSurfaceObserver& obs)
 {
     using namespace FE::forms;
@@ -966,12 +966,12 @@ inline void addFittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem& 
         !bc::isZeroConstantScalarValue(b.external_pressure) || !bc::isZeroConstantScalarValue(b.surface_tension);
     if (dynamic_stress) {   // SurfaceStress, the only fitted form (validated)
         const auto pressure = p_ext * inner(n, v);
-        addExteriorPressure(balance, pressure.ds(Gamma));
+        post::addExteriorPressure(balance, pressure.ds(Gamma));
         if (!surfaceStressActive(b)) {   // gamma = 0
             M = M + pressure.ds(Gamma);
         } else {
             const auto surface_energy = gamma * inner(tangentialProjector(n, dim), grad(v));
-            addSurfaceEnergy(balance, surface_energy.ds(Gamma));
+            post::addSurfaceEnergy(balance, surface_energy.ds(Gamma));
             M = M + (pressure + surface_energy).ds(Gamma);
         }
         obs.traction(b);

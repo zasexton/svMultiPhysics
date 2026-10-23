@@ -14,6 +14,7 @@
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesFields.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesInitialConditions.h"
+#include "Physics/Formulations/NavierStokes/NavierStokesPostProcessing.h"
 #include "FE/Assembly/Assembler.h"
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Assembly/GlobalSystemView.h"
@@ -44,7 +45,6 @@
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergy.h"
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #  include "Mesh/Fields/MeshFields.h"
@@ -1630,7 +1630,7 @@ NavierStokesPreflight preflightNavierStokes(
     }
     validateFreeSurfaceContactGeometryPreflight(
         effective_free_surfaces, system);
-    validateFreeSurfaceDiscreteFunctionalPreflight(
+    post::validateFreeSurfaceDiscreteFunctionalPreflight(
         effective_free_surfaces, system);
 
     return NavierStokesPreflight{
