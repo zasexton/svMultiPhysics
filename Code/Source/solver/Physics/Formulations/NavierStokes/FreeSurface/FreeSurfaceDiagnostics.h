@@ -23,7 +23,6 @@
 #include "FE/Constraints/ConstraintPlan.h"
 #include "FE/LevelSet/LevelSetGeometry.h"
 #include "FE/Systems/ALEBinding.h"
-#include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormsInstaller.h"
 
 namespace svmp {
@@ -31,9 +30,7 @@ namespace Physics {
 namespace formulations {
 namespace navier_stokes {
 
-void logUnfittedFreeSurfaceMode(
-    const FreeSurfaceBoundary& bc,
-    const FE::systems::FESystem& system);
+void logUnfittedFreeSurfaceMode(const FreeSurfaceBoundary& bc);
 
 /// Natural mode: no interface term (sigma n = 0).
 void logNaturalUnfittedFreeSurface(const FreeSurfaceBoundary& bc);

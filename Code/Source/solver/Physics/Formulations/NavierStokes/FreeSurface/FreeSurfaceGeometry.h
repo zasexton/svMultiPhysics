@@ -16,9 +16,8 @@
  * (FE/LevelSet/LevelSetGeometry.h) bound from the free-surface options; its
  * active side is the liquid.  Moved from IncompressibleNavierStokesVMSModule.cpp:
  * the binding and its generated markers, the active (liquid) domain, the
- * integration on the free surface and the liquid, the fields the
- * free-surface terms read (level set, curvature, the semi-implicit reference
- * velocity), and the extra trial fields those reads add to the residual.
+ * integration on the liquid, and the fields the free-surface terms read (the
+ * projected curvature, the semi-implicit reference velocity).
  */
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
@@ -30,7 +29,6 @@
 #include "FE/LevelSet/LevelSetGeometry.h"
 #include "FE/Systems/ALEBinding.h"
 #include "FE/Systems/FESystem.h"
-#include "FE/Systems/FormsInstaller.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 
 #include <functional>
@@ -99,12 +97,7 @@ generatedUnfittedContactLineMarkerKey(
     const FE::systems::FESystem& system);
 
 [[nodiscard]] std::string freeSurfaceCurvatureTangentPolicyName(
-    const FreeSurfaceBoundary& bc,
-    const FE::systems::FESystem& system);
-
-[[nodiscard]] FE::forms::FormExpr unfittedInterfaceNormal(
-    const FreeSurfaceBoundary& bc,
-    const FE::forms::FormExpr& phi);
+    const FreeSurfaceBoundary& bc);
 
 [[nodiscard]] std::optional<ActiveVolumeDomain> activeVolumeDomainFor(
     const std::vector<FreeSurfaceBoundary>& free_surfaces);
@@ -113,30 +106,12 @@ generatedUnfittedContactLineMarkerKey(
     const FE::forms::FormExpr& integrand,
     const std::optional<ActiveVolumeDomain>& active_domain);
 
-[[nodiscard]] FE::forms::FormExpr freeSurfaceLevelSet(
-    const FreeSurfaceBoundary& bc,
-    const FE::systems::FESystem& system);
-
 [[nodiscard]] FE::forms::FormExpr freeSurfaceSemiImplicitReferenceVelocity(
     const FE::systems::FESystem& system);
 
+/// The projected curvature field of a KinematicAreaGradientTraction
+/// boundary, signed with the outward normal of its liquid side.
 [[nodiscard]] FE::forms::FormExpr unfittedTractionCurvature(
-    const FreeSurfaceBoundary& bc,
-    const FE::systems::FESystem& system,
-    const FE::forms::FormExpr& phi);
-
-void appendUnfittedFreeSurfaceLevelSetTrialFields(
-    const std::vector<FreeSurfaceBoundary>& free_surfaces,
-    const FE::systems::FESystem& system,
-    FE::systems::FormInstallOptions& install);
-
-void appendUnfittedFreeSurfaceCurvatureTrialFields(
-    const std::vector<FreeSurfaceBoundary>& free_surfaces,
-    const FE::systems::FESystem& system,
-    FE::systems::FormInstallOptions& install);
-
-/// The level set as a state field (the contact-line terms read its gradient).
-[[nodiscard]] FE::forms::FormExpr levelSetStateField(
     const FreeSurfaceBoundary& bc,
     const FE::systems::FESystem& system);
 

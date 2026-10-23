@@ -2658,7 +2658,6 @@ TEST(IncompressibleTwoFluidModule,
       ns::FreeSurfaceActiveDomainMethod::CutVolume;
   interface.external_pressure = FE::Real{1.0};
   interface.surface_tension = FE::Real{0.0};
-  interface.use_level_set_curvature = false;
   interface.normal_kinematic_policy =
       ns::FreeSurfaceNormalKinematicPolicy::None;
   interface.tangential_mesh_policy =
@@ -2696,7 +2695,6 @@ TEST(IncompressibleTwoFluidModule,
       ns::FreeSurfaceActiveDomainMethod::CutVolume;
   interface.external_pressure = FE::Real{0.0};
   interface.surface_tension = FE::Real{0.0};
-  interface.use_level_set_curvature = false;
   interface.normal_kinematic_policy =
       ns::FreeSurfaceNormalKinematicPolicy::None;
   interface.tangential_mesh_policy =

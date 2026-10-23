@@ -2883,13 +2883,17 @@ TEST(OpenVesselExamples, UnfittedFreeSurfaceBuilderRejectsRawCurvatureSurfaceTen
   const ScopedCurrentPath cwd(case_dir);
   ASSERT_NO_THROW(params.read_xml(xml_path.string()));
   application::core::SimulationBuilder builder(params);
+  // Decision D47 Q2 retired the CurvatureTraction route with its raw
+  // level-set curvature: the form fails while the fluid equation is
+  // translated.
   try {
     (void)builder.build();
-    FAIL() << "Expected raw level-set curvature surface tension to be rejected";
-  } catch (const std::invalid_argument& error) {
+    ADD_FAILURE() << "Expected the retired CurvatureTraction to be rejected";
+  } catch (const std::exception& error) {
     const std::string message = error.what();
-    EXPECT_NE(message.find("raw level-set curvature"), std::string::npos);
-    EXPECT_NE(message.find("not validated"), std::string::npos);
+    EXPECT_NE(message.find("decision D47 Q2"), std::string::npos)
+        << message;
+    EXPECT_NE(message.find("SurfaceStress"), std::string::npos) << message;
   }
 
   std::error_code ec;

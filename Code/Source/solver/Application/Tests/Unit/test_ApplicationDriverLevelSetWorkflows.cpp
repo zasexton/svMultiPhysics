@@ -2212,7 +2212,6 @@ makeWorkflowBalancedCapillaryFixture(
           .surface_tension_form = channel_ns::
               FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction,
           .curvature_field_name = "kappa_balanced_curved",
-          .use_level_set_curvature = false,
           .small_cut_aggregation = false,
       };
   if (sessile) {
@@ -10767,7 +10766,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
                   FreeSurfaceSurfaceTensionForm::
                       KinematicAreaGradientTraction,
               .curvature_field_name = "kappa_area_gradient_static",
-              .use_level_set_curvature = false,
               .small_cut_aggregation = false,
           };
   free_surface.contact_lines.push_back(

@@ -178,8 +178,6 @@ contactLineWallNormal(const FreeSurfaceContactLine& contact_line)
         // is the variation of one discrete surface energy on both kinds of
         // boundary (decision D47 Q2(b)).
         return true;
-    case FreeSurfaceSurfaceTensionForm::CurvatureTraction:
-        return false;
     case FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction:
         return false;
     case FreeSurfaceSurfaceTensionForm::SurfaceStress:
@@ -195,20 +193,12 @@ contactLineWallNormal(const FreeSurfaceContactLine& contact_line)
            FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction;
 }
 
-[[nodiscard]] bool usesGeneratedInterfaceNormal(
-    const FreeSurfaceBoundary& bc) noexcept
-{
-    return usesSurfaceStress(bc) || usesKinematicAreaGradientTraction(bc);
-}
-
 [[nodiscard]] const char* surfaceTensionFormName(
     const FreeSurfaceBoundary& bc) noexcept
 {
     switch (bc.surface_tension_form) {
     case FreeSurfaceSurfaceTensionForm::Automatic:
         return "SurfaceStress";
-    case FreeSurfaceSurfaceTensionForm::CurvatureTraction:
-        return "CurvatureTraction";
     case FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction:
         return "KinematicAreaGradientTraction";
     case FreeSurfaceSurfaceTensionForm::SurfaceStress:
@@ -584,22 +574,8 @@ void validatePositiveConstantScalar(
     if (usesSurfaceStress(bc)) {
         return "variational_surface_stress_generated_geometry";
     }
-    if (usesKinematicAreaGradientTraction(bc)) {
-        return "kinematic_area_gradient_total_surface_young_energy_field";
-    }
-    if (isUnfittedLevelSet(bc)) {
-        if (!bc.curvature_field_name.empty()) {
-            return "curvature_field_level_set_normal_signed";
-        }
-        if (bc.use_level_set_curvature) {
-            return "raw_level_set_curvature_guarded";
-        }
-        return "supplied_scalar_level_set_normal_signed";
-    }
-    if (!bc.curvature_field_name.empty()) {
-        return "curvature_field";
-    }
-    return "supplied_scalar";
+    // KinematicAreaGradientTraction, the only other form.
+    return "kinematic_area_gradient_total_surface_young_energy_field";
 }
 
 [[nodiscard]] const char* activeDomainName(FreeSurfaceActiveDomain domain) noexcept
@@ -633,20 +609,6 @@ void validatePositiveConstantScalar(
         return "None";
     case FreeSurfaceKinematicEnforcement::MeshNitsche:
         return "MeshNitsche";
-    }
-    return "Unknown";
-}
-
-[[nodiscard]] const char* fieldSourceKindName(
-    FE::systems::FieldSourceKind source_kind) noexcept
-{
-    switch (source_kind) {
-    case FE::systems::FieldSourceKind::Unknown:
-        return "Unknown";
-    case FE::systems::FieldSourceKind::PrescribedData:
-        return "PrescribedData";
-    case FE::systems::FieldSourceKind::DerivedFromUnknown:
-        return "DerivedFromUnknown";
     }
     return "Unknown";
 }

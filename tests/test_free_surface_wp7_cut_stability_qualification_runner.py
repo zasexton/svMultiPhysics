@@ -158,8 +158,14 @@ def test_wp7_real_properties_are_serialized_without_integer_truncation():
     registry = runner.load_registry(_registry_path())
 
     assert "std::numeric_limits<FE::Real>::max_digits10" in source
+    # The frozen registry still names the manufactured CurvatureTraction
+    # balance, which was deleted with that route (decision D47 Q2).
+    retired_tests = {
+        "FreeSurfaceCutStability."
+        "ManufacturedAffineQ1YoungLaplaceAndContactAngleBalanceToRoundoff",
+    }
     for gate in registry["quantitative_evidence"]:
-        if gate["type"] != "real":
+        if gate["type"] != "real" or gate["test"] in retired_tests:
             continue
         pattern = re.compile(
             r"RecordProperty\(\s*"

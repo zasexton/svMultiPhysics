@@ -74,9 +74,6 @@ enum class ContactLineKind : std::uint8_t {
 [[nodiscard]] bool usesKinematicAreaGradientTraction(
     const FreeSurfaceBoundary& bc) noexcept;
 
-[[nodiscard]] bool usesGeneratedInterfaceNormal(
-    const FreeSurfaceBoundary& bc) noexcept;
-
 [[nodiscard]] const char* surfaceTensionFormName(
     const FreeSurfaceBoundary& bc) noexcept;
 
@@ -172,9 +169,6 @@ void validatePositiveConstantScalar(
 
 [[nodiscard]] const char* kinematicEnforcementName(
     FreeSurfaceKinematicEnforcement enforcement) noexcept;
-
-[[nodiscard]] const char* fieldSourceKindName(
-    FE::systems::FieldSourceKind source_kind) noexcept;
 
 [[nodiscard]] const char* cutVolumeSideName(FE::forms::CutVolumeSide side) noexcept;
 

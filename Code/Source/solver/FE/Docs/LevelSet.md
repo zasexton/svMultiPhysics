@@ -495,15 +495,13 @@ smooth derivative.
 
 The default unfitted capillary form in Navier-Stokes is `SurfaceStress`. It is
 the first variation of the generated-interface measure, uses the generated
-normal, and needs no curvature field. The curvature-based forms need a named
-scalar curvature field:
+normal, and needs no curvature field. The curvature-based form
+`KinematicAreaGradientTraction` needs a named scalar curvature field recovered
+in `KinematicAreaGradient` mode (see below); `CurvatureTraction`, which read a
+supplied, unknown or projected curvature, was retired by decision D47 Q2.
 
-- `CurvatureTraction` uses a supplied or projected curvature field;
-- `KinematicAreaGradientTraction` uses a field recovered in
-  `KinematicAreaGradient` mode (see below).
-
-The field may be either an unknown FE field or a prescribed projected field
-maintained from the level-set geometry. Raw pointwise
+The field is a prescribed projected field maintained from the level-set
+geometry. Raw pointwise
 `meanCurvatureFromLevelSet(phi)` is a diagnostic path for fitted or controlled
 studies; it is not production evidence for unfitted surface tension.
 `Documentation/free_surface_program_tracker.md` records which route is being
@@ -517,16 +515,13 @@ normal of the configured active fluid side before forming
 both the interface normal and the traction curvature relative to the raw
 level-set convention. This keeps the capillary force vector invariant under
 active-side selection while preserving a single input convention for projected
-or supplied curvature fields.
+curvature fields.
 
 The supported curvature sources are:
 
 | Curvature source | Production contract |
 |------------------|---------------------|
-| Unknown scalar curvature field | The field participates in the unknown vector, is added as an extra trial field for free-surface terms, and receives the ordinary residual/Jacobian derivative with respect to that scalar field. Its defining equation or constraint must be installed by the formulation that owns the model. |
 | Prescribed projected curvature field | The application or caller refreshes a scalar field from level-set samples through the projected-curvature recovery utility. The capillary residual treats the field as fixed during the current nonlinear linearization, so the capillary update is Picard-style with respect to the level-set/cut geometry. |
-| Constant supplied curvature | The value is a prescribed verification or reduced-model input. It has no level-set derivative and cannot be used to claim geometry-coupled capillary convergence. |
-| Raw level-set curvature | Diagnostic only for unfitted generated interfaces. Production surface-tension cases must provide a named curvature field or a controlled supplied value. |
 
 Projected curvature is computed by
 `FE/LevelSet/LevelSetCurvatureProjection.*`. `Curvature_projection_recovery_mode`

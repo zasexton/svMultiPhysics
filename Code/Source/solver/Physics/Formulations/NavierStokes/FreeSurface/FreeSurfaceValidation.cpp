@@ -137,9 +137,9 @@ namespace {
 // The lagged normal-increment term is qualified only where its derivation
 // holds: an exterior unfitted interface whose generated LinearCorner facets
 // carry a piecewise-constant normal, refreshed-frozen geometry inside the
-// outer fixed point, and the SurfaceStress energy (KAG is an experiment).
-// The transient outer fixed point and the level-set transport are checked
-// by the application, which owns them.
+// outer fixed point, and the SurfaceStress energy (KAG, the only other
+// form, is an experiment).  The transient outer fixed point and the
+// level-set transport are checked by the application, which owns them.
 void validateFreeSurfaceSemiImplicitSurfaceTension(
     const FreeSurfaceBoundary& bc)
 {
@@ -161,10 +161,6 @@ void validateFreeSurfaceSemiImplicitSurfaceTension(
     };
     if (!isExteriorOnePhaseBoundary(bc) || !isUnfittedLevelSet(bc)) {
         reject("an exterior one-phase UnfittedLevelSet free surface");
-    }
-    if (!usesSurfaceStress(bc) && !usesKinematicAreaGradientTraction(bc)) {
-        reject("Surface_tension_form=SurfaceStress (or the experimental "
-               "KinematicAreaGradientTraction)");
     }
     if (!FE::forms::bc::isConstantScalarValue(bc.surface_tension) ||
         !(constantScalarValueOrThrow(
@@ -305,8 +301,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
         (bc.surface_tension_form ==
              FreeSurfaceSurfaceTensionForm::Automatic ||
          bc.surface_tension_form ==
-             FreeSurfaceSurfaceTensionForm::CurvatureTraction ||
-         bc.surface_tension_form ==
              FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction ||
          bc.surface_tension_form ==
              FreeSurfaceSurfaceTensionForm::SurfaceStress);
@@ -326,18 +320,17 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
     }
     validateFiniteConstantScalar(
         bc.external_pressure, "free-surface external_pressure");
-    // CurvatureTraction omits tangential Marangoni traction.  SurfaceStress
-    // contains the constant-gamma surface-energy variation, but its contact
-    // wall energy and current input contract also assume one literal gamma.
-    // Keep variable surface chemistry/Marangoni data fail-closed until gamma
-    // and the wall-energy law are coupled consistently throughout.
+    // SurfaceStress contains the constant-gamma surface-energy variation,
+    // but its contact wall energy and current input contract also assume one
+    // literal gamma.  Keep variable surface chemistry/Marangoni data
+    // fail-closed until gamma and the wall-energy law are coupled
+    // consistently throughout.
     (void)constantScalarValueOrThrow(
         bc.surface_tension,
         "free-surface surface_tension (variable surface tension/Marangoni traction is unsupported)");
     validateNonnegativeConstantScalar(
         bc.surface_tension, "free-surface surface_tension");
     validateFreeSurfaceSemiImplicitSurfaceTension(bc);
-    validateFiniteConstantScalar(bc.curvature, "free-surface curvature");
     validateNonnegativeConstantScalar(
         bc.cut_cell_stabilization.pressure_gradient_penalty,
         "cut-cell pressure-gradient penalty");
@@ -395,11 +388,9 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                 bc.external_pressure) ||
             !FE::forms::bc::isZeroConstantScalarValue(
                 bc.surface_tension) ||
-            !FE::forms::bc::isZeroConstantScalarValue(bc.curvature) ||
             bc.surface_tension_form !=
                 FreeSurfaceSurfaceTensionForm::Automatic ||
-            !bc.curvature_field_name.empty() ||
-            bc.use_level_set_curvature) {
+            !bc.curvature_field_name.empty()) {
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: an internal material-interface volume cannot own exterior pressure, surface tension, curvature, or an interface-traction representation");
         }
@@ -470,10 +461,9 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                 throw std::invalid_argument(
                     "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction requires Geometry_tangent_policy=RefreshedFrozenQuadrature");
             }
-            if (bc.curvature_field_name.empty() ||
-                bc.use_level_set_curvature) {
+            if (bc.curvature_field_name.empty()) {
                 throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction requires a prescribed projected Curvature_field_name and Use_level_set_curvature=false");
+                    "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction requires a prescribed projected Curvature_field_name");
             }
             const auto phi_id = resolveLevelSetFieldId(bc, system);
             const auto kappa_id =
@@ -527,13 +517,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: SurfaceStress currently requires Geometry_tangent_policy=RefreshedFrozenQuadrature; DifferentiatedQuadrature does not yet contain the complete projector-normal, point-location, and measure derivative");
         }
-        if (!usesSurfaceStress(bc) &&
-            !FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension) &&
-            bc.use_level_set_curvature &&
-            bc.curvature_field_name.empty()) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: unfitted level-set surface tension with raw level-set curvature is not validated; set Use_level_set_curvature=false and provide Curvature or a projected curvature field");
-        }
         const auto& cut = bc.cut_cell_stabilization;
         if (cut.enabled) {
             (void)constantScalarValueOrThrow(
@@ -579,7 +562,7 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
         }
         if (usesKinematicAreaGradientTraction(bc)) {
             throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction is available only for unfitted level-set free surfaces; use Automatic/CurvatureTraction for fitted boundaries");
+                "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction is available only for unfitted level-set free surfaces; use SurfaceStress for fitted boundaries");
         }
         if (bc.boundary_marker < 0) {
             throw std::invalid_argument(

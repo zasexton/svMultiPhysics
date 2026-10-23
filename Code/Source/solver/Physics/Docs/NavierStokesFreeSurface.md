@@ -23,16 +23,22 @@ the exterior-pressure load `p_ext * dot(n_h, v)` on the interface.
 |---|---|---|
 | `Automatic` (default) | `SurfaceStress`, on unfitted level-set interfaces and on fitted ALE boundaries (decision D47 Q2(b)) | — |
 | `SurfaceStress` (also `SurfaceEnergy`, `LaplaceBeltrami`, `Variational`) | `gamma * (I - n_h ⊗ n_h) : grad(v)` integrated over the generated interface rule (unfitted) or over the current fitted boundary. This is the Laplace–Beltrami form and the first variation of the discrete interface area. | Unfitted; fitted ALE (below) |
-| `CurvatureTraction` | `(p_ext + gamma*kappa) * dot(n, v)` with a supplied or projected curvature. Unfitted interfaces use `n = grad(phi)/abs(grad(phi))`; fitted boundaries use the current-geometry normal. | Legacy and verification |
 | `KinematicAreaGradientTraction` | `gamma * kappa_h * dot(n_h, v)`, where `kappa_h` is recovered by `KinematicAreaGradient` curvature projection (FE `LevelSet.md`). It includes the declared Young wall energies, so no separate line force is assembled. | Unfitted; see its requirements below |
+
+`CurvatureTraction` (`(p_ext + gamma*kappa) * dot(n, v)` with a supplied
+`Curvature`, a projected field or the raw level-set curvature
+`Use_level_set_curvature=true`) was retired by decision D47 Q2: those inputs
+fail while the boundary condition is read, with a message that names
+`SurfaceStress`, and so does `Allow_fitted_surface_stress=false`. The no-op
+restatements `Use_level_set_curvature=false` and
+`Allow_fitted_surface_stress=true` are accepted with a warning and an
+`input_deprecations` entry in `effective_configuration.json`.
 
 The unfitted forms require `Geometry_tangent_policy=RefreshedFrozenQuadrature`.
 This is not the active-cut default, so set it explicitly. It means generated
 geometry, normals, and recovered curvature are refreshed between nonlinear
 passes and contribute no geometry Jacobian. Differentiated generated-geometry
-and shape-tangent variants are rejected for these forms. Raw pointwise
-level-set curvature (`Use_level_set_curvature=true`) is rejected for unfitted
-surface tension; supply `Curvature` or a projected curvature field instead.
+and shape-tangent variants are rejected for these forms.
 
 `KinematicAreaGradientTraction` has further requirements:
 
@@ -213,7 +219,7 @@ legacy SPHERIC decks written by `generate_validation_meshes.py` declare it.
 
 **Capillarity.** The fitted form is the Laplace–Beltrami form
 `SurfaceStress`, which `Automatic` selects (decision D47 Q2(b)); it needs no
-opt-in, and `Allow_fitted_surface_stress` is no longer required. It
+opt-in (`Allow_fitted_surface_stress` was retired). It
 assembles `p_ext n.v + gamma (I - n n) : grad(v)` over the current
 boundary, with the current normal and the current-frame gradient. On a
 regular polygon it is balanced exactly by the constant pressure
@@ -221,11 +227,11 @@ regular polygon it is balanced exactly by the constant pressure
 `FittedFreeSurfaceALE.SurfaceStressOnACircularDropBalancesAConstantPressure`).
 With `gamma != 0` it requires a literal surface tension, coupled mesh
 displacement (or a static mesh), and no fitted contact-line model; with
-`gamma = 0` it is the exterior-pressure load alone. Fitted
-`CurvatureTraction` takes a supplied curvature. Its former
-`Use_current_geometry_curvature=true` (the pointwise curvature of the
-boundary facets, identically zero on affine faces) was retired by D42; a
-deck that still sets it fails while its boundary condition is read.
+`gamma = 0` it is the exterior-pressure load alone. The pointwise
+curvature of the boundary facets of the former fitted `CurvatureTraction`
+(`Use_current_geometry_curvature=true`, identically zero on affine faces)
+was retired by D42; a deck that still sets it fails while its boundary
+condition is read.
 
 ## Unfitted contact lines
 
@@ -301,7 +307,6 @@ integral, so its separate line term carries only the equilibrium part. With
 | Form | `PrescribedAngle` | `DynamicRenE` |
 |---|---|---|
 | `SurfaceStress` | `-gamma*cos(theta_e) * dot(v, m)` | `xi*dot(u,m)*dot(v,m) - gamma*cos(theta_e)*dot(v,m)` |
-| `CurvatureTraction` | `-gamma*(cos(theta_e) + dot(n,n_wall)) * dot(v, m)` | `xi*dot(u,m)*dot(v,m) - gamma*(cos(theta_e) + dot(n,n_wall))*dot(v,m)` |
 | `KinematicAreaGradientTraction` | none; the Young energy is inside `kappa_h` | `xi*dot(u,m)*dot(v,m)` |
 
 For `DynamicRenE` this is the weak form of the Ren–E law

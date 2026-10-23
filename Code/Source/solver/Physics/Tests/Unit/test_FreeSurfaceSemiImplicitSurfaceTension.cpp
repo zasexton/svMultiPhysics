@@ -774,14 +774,6 @@ TEST(FreeSurfaceSemiImplicitSurfaceTension, RejectsConfigurationsOutsideTheValid
         "Surface_tension_semi_implicit=NormalIncrement requires";
 
     {
-        SCOPED_TRACE("supplied-curvature traction");
-        auto bc = unfittedBoundary(SI::NormalIncrement);
-        bc.surface_tension_form =
-            ns::FreeSurfaceSurfaceTensionForm::CurvatureTraction;
-        bc.curvature = 2.0;
-        expectRegistrationRejected(bc, requires_prefix + " Surface_tension_form=SurfaceStress");
-    }
-    {
         SCOPED_TRACE("zero surface tension");
         expectRegistrationRejected(unfittedBoundary(SI::NormalIncrement, 0.0),
                                    requires_prefix + " a literal positive Surface_tension");

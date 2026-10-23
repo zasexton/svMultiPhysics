@@ -493,9 +493,6 @@ tangentialPolicyProvenance(
         case FreeSurfaceSurfaceTensionForm::Automatic:
             out << "\"Automatic\"";
             break;
-        case FreeSurfaceSurfaceTensionForm::CurvatureTraction:
-            out << "\"CurvatureTraction\"";
-            break;
         case FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction:
             out << "\"KinematicAreaGradientTraction\"";
             break;
@@ -527,47 +524,11 @@ tangentialPolicyProvenance(
                 << ",\"equilibrium_young_force_owner\":"
                 << "\"total_energy_gradient_traction\"";
         }
-        if (boundary.implementation ==
-            FreeSurfaceImplementation::FittedALE) {
-            out << ",\"fitted_surface_contact_capability\":{"
-                << "\"qualification\":"
-                << jsonString(
-                       options.explicit_legacy_configuration
-                           ? "unqualified_explicit_legacy"
-                           : "supported_configuration_envelope")
-                << ",\"supported_requests\":{"
-                << "\"surface_tension_form\":["
-                << "\"Automatic\",\"CurvatureTraction\",\"SurfaceStress\"],"
-                << "\"contact_line_model\":[\"None\",\"Pinned\"]}";
-            if (boundary.allow_fitted_surface_stress) {
-                out << ",\"fitted_surface_stress\":{"
-                    << "\"opt_in\":true,"
-                    << "\"form\":\"gamma_I_minus_n_outer_n_colon_grad_v\","
-                    << "\"frame\":\"current_configuration\","
-                    << "\"qualification\":\"explicit_opt_in_unqualified\"}";
-            }
-            out << ",\"exclusion_disposition\":"
-                << "\"fail_closed_before_system_mutation\""
-                << ",\"exclusions\":[{";
-            out << "\"feature\":\"surface_tension_form\","
-                << "\"value\":\"KinematicAreaGradientTraction\","
-                << "\"reason_code\":"
-                << "\"kinematic_area_gradient_traction_unfitted_only\""
-                << "},{\"feature\":\"contact_line_model\","
-                << "\"value\":\"PrescribedAngle\","
-                << "\"reason_code\":"
-                << "\"fitted_contact_line_codimension_two_unavailable\""
-                << "},{\"feature\":\"contact_line_model\","
-                << "\"value\":\"DynamicRenE\","
-                << "\"reason_code\":"
-                << "\"dynamic_contact_requires_sharp_unfitted_level_set\""
-                << "}]}";
-        }
         out << ",\"curvature_policy\":"
             << jsonString(freeSurfaceCurvaturePolicyName(boundary))
             << ",\"curvature_tangent_policy\":"
             << jsonString(
-                   freeSurfaceCurvatureTangentPolicyName(boundary, system))
+                   freeSurfaceCurvatureTangentPolicyName(boundary))
             << ",\"kinematic\":{\"normal_policy\":"
             << jsonString(normalKinematicPolicyName(
                    boundary.normal_kinematic_policy))

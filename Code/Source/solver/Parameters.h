@@ -311,6 +311,16 @@ struct CANNRow {
 std::string_view deprecated_extension_parameter_replacement(
     const std::string& xml_element_name, const std::string& name);
 
+/// @brief The input text of a retired setting restated with its only
+/// accepted value, or an empty string.
+///
+/// The keys of the retired CurvatureTraction route (decision D47 Q2) are
+/// still accepted with their no-op values, Use_level_set_curvature=false and
+/// Allow_fitted_surface_stress=true; the Navier-Stokes register rejects every
+/// other value.
+std::string restated_retired_extension_parameter(
+    const std::string& name, const std::string& value);
+
 class ParameterLists
 {
   public:
@@ -425,6 +435,10 @@ class ParameterLists
         if (!replacement.empty()) {
           deprecated_spellings.emplace_back(name, std::string(replacement));
         }
+        auto restated = restated_retired_extension_parameter(name, value);
+        if (!restated.empty()) {
+          deprecated_spellings.emplace_back(std::move(restated), std::string{});
+        }
       }
       it->second.set_raw_value(value);
     }
@@ -477,7 +491,8 @@ class ParameterLists
     std::map<std::string, Parameter<std::string>> extra_string_params;
 
     /// @brief Deprecated extension spellings this element accepted, as
-    /// (spelling, replacement) pairs in input order.
+    /// (spelling, replacement) pairs in input order.  A retired setting
+    /// restated with its no-op value is recorded as ("Key=value", "").
     std::vector<std::pair<std::string, std::string>> deprecated_spellings;
 
     std::string xml_element_name = "";

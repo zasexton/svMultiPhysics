@@ -14,11 +14,9 @@
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/Forms/CutCellForms.h"
 #include "FE/Forms/IntegrationDomain.h"
-#include "FE/Forms/Vocabulary.h"
 #include "FE/Geometry/FrameGeometry.h"
 #include "FE/LevelSet/LevelSetGeometry.h"
 #include "FE/Systems/FESystem.h"
-#include "FE/Systems/FormsInstaller.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 
@@ -27,7 +25,6 @@
 #  include "Mesh/Mesh.h"
 #endif
 
-#include <algorithm>
 #include <functional>
 #include <optional>
 #include <span>
@@ -97,47 +94,11 @@ generatedActiveBoundaryMarkerKey(
             bc.curvature_field_name + "' must be scalar");
     }
 
-    if (system.fieldParticipatesInUnknownVector(kappa_id)) {
-        return FE::forms::StateField(kappa_id, *rec.space, bc.curvature_field_name);
-    }
+    // KinematicAreaGradientTraction, the only reader, requires a prescribed
+    // field (validateFreeSurfaceBoundary); the unknown curvature field of
+    // CurvatureTraction was retired by decision D47 Q2.
     return FE::forms::FormExpr::discreteField(
         kappa_id, *rec.space, bc.curvature_field_name);
-}
-
-[[nodiscard]] bool appendUniqueExtraTrialField(
-    FE::systems::FormInstallOptions& install,
-    FE::FieldId field)
-{
-    if (field == FE::INVALID_FIELD_ID) {
-        return false;
-    }
-    if (std::find(install.extra_trial_fields.begin(),
-                  install.extra_trial_fields.end(),
-                  field) != install.extra_trial_fields.end()) {
-        return false;
-    }
-    install.extra_trial_fields.push_back(field);
-    return true;
-}
-
-[[nodiscard]] bool unfittedFreeSurfaceNeedsLevelSetTrialFieldForNavierStokes(
-    const FreeSurfaceBoundary& bc) noexcept
-{
-    if (!isUnfittedLevelSet(bc)) {
-        return false;
-    }
-    // The legacy curvature-traction contact law depends explicitly on
-    // n(phi).  Generated-geometry forms instead consume refreshed-frozen
-    // interface, contact, and sharp wall geometry from the authoritative cut
-    // snapshot; they must not advertise a nonexistent inner-Newton tangent.
-    const bool has_dynamic_contact = std::any_of(
-            bc.contact_lines.begin(),
-            bc.contact_lines.end(),
-            [](const FreeSurfaceContactLine& contact_line) {
-                return contactLineKind(contact_line) ==
-                       ContactLineKind::DynamicRenE;
-            });
-    return has_dynamic_contact && !usesGeneratedInterfaceNormal(bc);
 }
 
 } // namespace
@@ -312,8 +273,7 @@ generatedUnfittedContactLineMarkerKey(
 }
 
 [[nodiscard]] std::string freeSurfaceCurvatureTangentPolicyName(
-    const FreeSurfaceBoundary& bc,
-    const FE::systems::FESystem& system)
+    const FreeSurfaceBoundary& bc)
 {
     if (FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension)) {
         return "not_applicable";
@@ -323,32 +283,8 @@ generatedUnfittedContactLineMarkerKey(
                    ? "generated_geometry_refreshed_frozen"
                    : "fitted_geometry_surface_variation";
     }
-    if (usesKinematicAreaGradientTraction(bc)) {
-        return "kinematic_area_gradient_field_picard_generated_geometry_frozen";
-    }
-    if (!bc.curvature_field_name.empty()) {
-        const auto kappa_id = system.findFieldByName(bc.curvature_field_name);
-        if (kappa_id != FE::INVALID_FIELD_ID &&
-            system.fieldParticipatesInUnknownVector(kappa_id)) {
-            return "curvature_field_trial_coupled_geometry_curvature_frozen";
-        }
-        return "curvature_field_picard_frozen";
-    }
-    if (isUnfittedLevelSet(bc)) {
-        return "picard_frozen_or_guarded";
-    }
-    return "supplied_scalar_frozen";
-}
-
-[[nodiscard]] FE::forms::FormExpr unfittedInterfaceNormal(
-    const FreeSurfaceBoundary& bc,
-    const FE::forms::FormExpr& phi)
-{
-    auto n = FE::forms::unitNormalFromLevelSet(phi);
-    if (bc.active_domain == FreeSurfaceActiveDomain::LevelSetPositive) {
-        return -n;
-    }
-    return n;
+    // KinematicAreaGradientTraction, the only other form.
+    return "kinematic_area_gradient_field_picard_generated_geometry_frozen";
 }
 
 [[nodiscard]] std::optional<ActiveVolumeDomain> activeVolumeDomainFor(
@@ -397,22 +333,6 @@ generatedUnfittedContactLineMarkerKey(
         active_domain->interface_marker, active_domain->side));
 }
 
-[[nodiscard]] FE::forms::FormExpr freeSurfaceLevelSet(
-    const FreeSurfaceBoundary& bc,
-    const FE::systems::FESystem& system)
-{
-    if (!isUnfittedLevelSet(bc)) {
-        return FE::forms::FormExpr{};
-    }
-
-    const auto phi_id = resolveLevelSetFieldId(bc, system);
-    const auto& rec = system.fieldRecord(phi_id);
-    if (system.fieldParticipatesInUnknownVector(phi_id)) {
-        return FE::forms::StateField(phi_id, *rec.space, bc.level_set_field_name);
-    }
-    return FE::forms::FormExpr::discreteField(phi_id, *rec.space, bc.level_set_field_name);
-}
-
 // u_ref of the semi-implicit capillary term: prescribed data in the velocity
 // space, registered by registerOn and refreshed by the application.
 [[nodiscard]] FE::forms::FormExpr freeSurfaceSemiImplicitReferenceVelocity(
@@ -438,122 +358,13 @@ generatedUnfittedContactLineMarkerKey(
 
 [[nodiscard]] FE::forms::FormExpr unfittedTractionCurvature(
     const FreeSurfaceBoundary& bc,
-    const FE::systems::FESystem& system,
-    const FE::forms::FormExpr& phi)
+    const FE::systems::FESystem& system)
 {
-    FE::forms::FormExpr curvature;
-    if (!bc.curvature_field_name.empty()) {
-        curvature = freeSurfaceCurvatureField(bc, system);
-    } else if (bc.use_level_set_curvature) {
-        curvature = FE::forms::meanCurvatureFromLevelSet(phi);
-    } else {
-        curvature = FE::forms::bc::toScalarExpr(
-            bc.curvature,
-            freeSurfaceValueName("ns_free_surface_curvature", bc));
-    }
-
+    const auto curvature = freeSurfaceCurvatureField(bc, system);
     if (bc.active_domain == FreeSurfaceActiveDomain::LevelSetPositive) {
         return FE::forms::FormExpr::constant(FE::Real{-1.0}) * curvature;
     }
     return curvature;
-}
-
-void appendUnfittedFreeSurfaceLevelSetTrialFields(
-    const std::vector<FreeSurfaceBoundary>& free_surfaces,
-    const FE::systems::FESystem& system,
-    FE::systems::FormInstallOptions& install)
-{
-    for (const auto& bc : free_surfaces) {
-        if (!unfittedFreeSurfaceNeedsLevelSetTrialFieldForNavierStokes(bc)) {
-            if (isUnfittedLevelSet(bc)) {
-                std::ostringstream oss;
-                oss << "IncompressibleNavierStokesVMSModule: not adding "
-                    << "unfitted free-surface level-set field as Navier-Stokes "
-                    << "residual extra trial "
-                    << "marker=" << bc.interface_marker
-                    << " level_set_field='" << bc.level_set_field_name << "'"
-                    << " Active_domain=" << activeDomainName(bc.active_domain)
-                    << " Active_domain_method="
-                    << activeDomainMethodName(bc.active_domain_method)
-                    << " diagnostic=unfitted_free_surface_phi_extra_trial_omitted"
-                    << " reason=no_explicit_residual_level_set_dependence";
-                FE_LOG_INFO(oss.str());
-            }
-            continue;
-        }
-        const auto phi_id = resolveLevelSetFieldId(bc, system);
-        const auto& rec = system.fieldRecord(phi_id);
-        if (!system.fieldParticipatesInUnknownVector(phi_id)) {
-            continue;
-        }
-        if (!appendUniqueExtraTrialField(install, phi_id)) {
-            continue;
-        }
-
-        std::ostringstream oss;
-        oss << "IncompressibleNavierStokesVMSModule: adding unfitted free-surface "
-            << "level-set field as Navier-Stokes extra trial "
-            << "marker=" << bc.interface_marker
-            << " level_set_field='" << rec.name << "'"
-            << " level_set_source_kind=" << fieldSourceKindName(rec.source_kind)
-            << " Active_domain=" << activeDomainName(bc.active_domain)
-            << " Active_domain_method="
-            << activeDomainMethodName(bc.active_domain_method)
-            << " diagnostic=unfitted_free_surface_phi_extra_trial";
-        FE_LOG_INFO(oss.str());
-    }
-}
-
-void appendUnfittedFreeSurfaceCurvatureTrialFields(
-    const std::vector<FreeSurfaceBoundary>& free_surfaces,
-    const FE::systems::FESystem& system,
-    FE::systems::FormInstallOptions& install)
-{
-    for (const auto& bc : free_surfaces) {
-        if (!isUnfittedLevelSet(bc) ||
-            usesSurfaceStress(bc) ||
-            bc.curvature_field_name.empty() ||
-            FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension)) {
-            continue;
-        }
-
-        const auto kappa_id = system.findFieldByName(bc.curvature_field_name);
-        if (kappa_id == FE::INVALID_FIELD_ID ||
-            !system.fieldParticipatesInUnknownVector(kappa_id)) {
-            continue;
-        }
-
-        const auto& rec = system.fieldRecord(kappa_id);
-        if (rec.components != 1 || !rec.space || rec.space->value_dimension() != 1) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: curvature field '" +
-                bc.curvature_field_name + "' must be scalar");
-        }
-
-        const bool appended = appendUniqueExtraTrialField(install, kappa_id);
-        std::ostringstream oss;
-        oss << "IncompressibleNavierStokesVMSModule: "
-            << (appended ? "added" : "retained")
-            << " unfitted free-surface curvature field as Navier-Stokes trial field"
-            << " marker=" << bc.interface_marker
-            << " curvature_field='" << bc.curvature_field_name << "'"
-            << " field_id=" << kappa_id
-            << " source_kind=" << fieldSourceKindName(rec.source_kind)
-            << " diagnostic=unfitted_free_surface_curvature_trial_field";
-        FE_LOG_INFO(oss.str());
-    }
-}
-
-FE::forms::FormExpr levelSetStateField(
-    const FreeSurfaceBoundary& bc,
-    const FE::systems::FESystem& system)
-{
-    const auto phi_id = resolveLevelSetFieldId(bc, system);
-    const auto& phi_record = system.fieldRecord(phi_id);
-    return FE::forms::StateField(
-        phi_id,
-        *phi_record.space,
-        bc.level_set_field_name);
 }
 
 FE::forms::FormExpr freeSurfaceScalar(

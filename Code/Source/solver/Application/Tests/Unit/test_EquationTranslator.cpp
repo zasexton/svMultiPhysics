@@ -965,6 +965,40 @@ TEST(EquationTranslatorFreeSurface, XmlRecordsDeprecatedSpellingsWithReplacement
             (std::vector<Entry>{{"ProjectedCurvatureField", "Curvature_field"}}));
 }
 
+TEST(EquationTranslatorFreeSurface, XmlRecordsRestatedRetiredValuesWithoutReplacement)
+{
+  // Decision D47 Q2: Use_level_set_curvature=false and
+  // Allow_fitted_surface_stress=true restate retired settings with their
+  // no-op values; they are recorded with an empty replacement.  Any other
+  // value is left to the Navier-Stokes register, which rejects it.
+  auto params = parseEquationXml(R"xml(
+<Add_equation type="fluid">
+  <Add_BC name="restated_curvature">
+    <Type>Free_surface</Type>
+    <Use_level_set_curvature>False</Use_level_set_curvature>
+  </Add_BC>
+  <Add_BC name="restated_opt_in">
+    <Type>Free_surface</Type>
+    <Allow_fitted_surface_stress>true</Allow_fitted_surface_stress>
+    <Use_level_set_curvature>true</Use_level_set_curvature>
+  </Add_BC>
+  <Add_BC name="retired_values">
+    <Type>Free_surface</Type>
+    <Allow_fitted_surface_stress>false</Allow_fitted_surface_stress>
+  </Add_BC>
+</Add_equation>
+)xml");
+
+  using Entry = std::pair<std::string, std::string>;
+  EXPECT_TRUE(params->deprecated_spellings.empty());
+  ASSERT_EQ(params->boundary_conditions.size(), 3u);
+  EXPECT_EQ(params->boundary_conditions[0]->deprecated_spellings,
+            (std::vector<Entry>{{"Use_level_set_curvature=false", ""}}));
+  EXPECT_EQ(params->boundary_conditions[1]->deprecated_spellings,
+            (std::vector<Entry>{{"Allow_fitted_surface_stress=true", ""}}));
+  EXPECT_TRUE(params->boundary_conditions[2]->deprecated_spellings.empty());
+}
+
 TEST(EquationTranslatorFreeSurface, BuildInputResolvesUnfittedContactLineWallFaces)
 {
   auto mesh = buildTranslatorMesh();

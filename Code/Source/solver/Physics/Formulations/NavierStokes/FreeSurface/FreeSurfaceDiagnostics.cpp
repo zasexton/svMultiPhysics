@@ -15,7 +15,6 @@
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/Forms/CutCellForms.h"
 #include "FE/Geometry/FrameGeometry.h"
-#include "FE/Systems/FESystem.h"
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #  include "Mesh/Fields/MeshFields.h"
@@ -31,9 +30,7 @@ namespace Physics {
 namespace formulations {
 namespace navier_stokes {
 
-void logUnfittedFreeSurfaceMode(
-    const FreeSurfaceBoundary& bc,
-    const FE::systems::FESystem& system)
+void logUnfittedFreeSurfaceMode(const FreeSurfaceBoundary& bc)
 {
     const bool has_dynamic_stress =
         !FE::forms::bc::isZeroConstantScalarValue(bc.external_pressure) ||
@@ -51,7 +48,7 @@ void logUnfittedFreeSurfaceMode(
         " surface_tension_form=" + surfaceTensionFormName(bc) +
         " curvature_policy=" + freeSurfaceCurvaturePolicyName(bc) +
         " curvature_tangent_policy=" +
-        freeSurfaceCurvatureTangentPolicyName(bc, system) +
+        freeSurfaceCurvatureTangentPolicyName(bc) +
         " kinematic_enforcement=" + kinematicEnforcementName(bc.kinematic_enforcement) +
         " cut_cell_stabilization=" + (bc.cut_cell_stabilization.enabled ? "enabled" : "disabled") +
         " pressure_stabilization_policy=" +
@@ -160,10 +157,8 @@ void logContactLineTerms(
             " interface_marker=" + std::to_string(bc.interface_marker) +
             " contact_marker=" + std::to_string(contact_marker) +
             " surface_tension_form=" + surfaceTensionFormName(bc) +
-            " contact_force_discretization=" +
-            (usesSurfaceStress(bc)
-                 ? "surface_conormal_plus_equilibrium_wall_energy"
-                 : "explicit_dynamic_angle_gap") +
+            " contact_force_discretization="
+            "surface_conormal_plus_equilibrium_wall_energy"
             " diagnostic=navier_stokes_prescribed_contact_wall_energy");
         if (contactLineHasNavierSlip(contact_line)) {
             FE_LOG_INFO(
@@ -203,9 +198,7 @@ void logContactLineTerms(
         " contact_force_discretization=" +
         (usesKinematicAreaGradientTraction(bc)
              ? "total_energy_traction_plus_line_friction"
-             : usesSurfaceStress(bc)
-                   ? "surface_conormal_plus_equilibrium_wall_energy"
-                   : "explicit_dynamic_angle_gap") +
+             : "surface_conormal_plus_equilibrium_wall_energy") +
         " active_wall_marker=" +
         std::to_string(active_wall_marker) +
         " wetted_wall_domain=sharp_generated_active_boundary" +

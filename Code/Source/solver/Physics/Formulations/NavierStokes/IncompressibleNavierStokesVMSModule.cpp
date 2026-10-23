@@ -214,19 +214,16 @@ void addUnfittedFreeSurface(FormExpr& M, fs::FESystem& system, cs::ConstraintPla
                     "IncompressibleNavierStokesVMSModule: Contact_line_law_enforcement=Strong requires Surface_tension_form=SurfaceStress");
             }
         }
-        // The generated-rule normal, or (CurvatureTraction) grad(phi)/|grad phi|.
-        const auto n = usesGeneratedInterfaceNormal(b) ? L.outwardNormal()
-                                                       : unfittedInterfaceNormal(b, levelSetStateField(b, system));
+        const auto n = L.outwardNormal();   // the normal of the generated rule
         const auto m = conormal(n, c.n_w);
-        const auto wall_cos = ss ? c.cos_e : c.cos_e + dot(n, c.n_w);
         if (c.young && !kag && !bc::isZeroConstantScalarValue(b.surface_tension)) {
-            const auto young = (-gamma * wall_cos * dot(v, m)).dL(CL);
+            const auto young = (-gamma * c.cos_e * dot(v, m)).dL(CL);
             M = M + young;
             addSurfaceEnergy(ss ? balance : nullptr, young);
         }
         if (c.dynamic && !c.strong) {
             const auto friction = FormExpr::constant(1.0) / c.mobility * dot(u, m);
-            M = M + ((kag ? friction : friction - gamma * wall_cos) * dot(v, m)).dL(CL);
+            M = M + ((kag ? friction : friction - gamma * c.cos_e) * dot(v, m)).dL(CL);
             addSurfaceEnergy(ss ? balance : nullptr, (-gamma * c.cos_e * dot(v, m)).dL(CL));
         }
         int wetted_marker = -1;
@@ -244,14 +241,13 @@ void addUnfittedFreeSurface(FormExpr& M, fs::FESystem& system, cs::ConstraintPla
     }
 
     validateFreeSurfaceBoundary(b, o, o.enable_ale, system, dim);
-    logUnfittedFreeSurfaceMode(b, system);
+    logUnfittedFreeSurfaceMode(b);
     if (bc::isZeroConstantScalarValue(b.external_pressure) && bc::isZeroConstantScalarValue(b.surface_tension)) {
         logNaturalUnfittedFreeSurface(b);   // sigma n = 0: no interface term
         return;
     }
     const auto Gamma = L.interface();
-    const auto phi = freeSurfaceLevelSet(b, system);
-    const auto n = usesGeneratedInterfaceNormal(b) ? L.outwardNormal() : unfittedInterfaceNormal(b, phi);
+    const auto n = L.outwardNormal();
     const auto p_ext = freeSurfaceScalar(b.external_pressure, "ns_free_surface_external_pressure", b);
     if (ss) {
         const auto pressure = p_ext * inner(n, v);
@@ -268,12 +264,10 @@ void addUnfittedFreeSurface(FormExpr& M, fs::FESystem& system, cs::ConstraintPla
         M = M + pressure;
         addExteriorPressure(balance, pressure);
         if (!bc::isZeroConstantScalarValue(b.surface_tension)) {
-            const auto capillary = (gamma * unfittedTractionCurvature(b, system, phi) * inner(n, v)).dI(Gamma);
+            const auto capillary = (gamma * unfittedTractionCurvature(b, system) * inner(n, v)).dI(Gamma);
             M = M + capillary;
             addSurfaceEnergy(balance, capillary);
         }
-    } else {
-        M = M + unfittedCurvatureTraction(b, system, phi, p_ext, gamma, n, v).dI(Gamma);   // legacy
     }
     if (usesSemiImplicitNormalIncrement(b)) {
         const auto u_ref = freeSurfaceSemiImplicitReferenceVelocity(system);   // u at the last geometry refresh
@@ -285,8 +279,7 @@ void addUnfittedFreeSurface(FormExpr& M, fs::FESystem& system, cs::ConstraintPla
 // ---------------------------------------------------------------------------
 // Fitted ALE free surface Gamma(t) = a boundary marker of the moving mesh
 // ---------------------------------------------------------------------------
-//   fluid rows: int_Gamma p_ext n.v + gamma (I - n x n) : grad v      (SurfaceStress, the default), or
-//               - int_Gamma ((-p_ext - gamma kappa) n) . v             (CurvatureTraction, supplied kappa);
+//   fluid rows: int_Gamma p_ext n.v + gamma (I - n x n) : grad v      (SurfaceStress);
 //   mesh rows:  int_Gamma (gamma_N/h_n) ((dt d - u).n)(psi.n)            (MeshNitsche, D35),
 //               + the tangential mesh policy (smoothing, or a prescribed tangential rate);
 //   a pinned contact line: d = 0 (strong).
@@ -306,7 +299,7 @@ void addFittedFreeSurface(FormExpr& M, fs::FESystem& system, cs::ConstraintPlan&
     const auto p_ext = freeSurfaceScalar(b.external_pressure, "ns_free_surface_external_pressure", b);
     const bool dynamic_stress =
         !bc::isZeroConstantScalarValue(b.external_pressure) || !bc::isZeroConstantScalarValue(b.surface_tension);
-    if (dynamic_stress && usesSurfaceStress(b)) {
+    if (dynamic_stress) {   // SurfaceStress, the only fitted form (validated)
         const auto pressure = p_ext * inner(n, v);
         addExteriorPressure(balance, pressure.ds(Gamma));
         if (!surfaceStressActive(b)) {   // gamma = 0
@@ -316,13 +309,6 @@ void addFittedFreeSurface(FormExpr& M, fs::FESystem& system, cs::ConstraintPlan&
             addSurfaceEnergy(balance, surface_energy.ds(Gamma));
             M = M + (pressure + surface_energy).ds(Gamma);
         }
-    } else if (dynamic_stress) {
-        const auto kappa = bc::isZeroConstantScalarValue(b.surface_tension)
-                               ? FormExpr::constant(0.0)
-                               : freeSurfaceScalar(b.curvature, "ns_free_surface_curvature", b);
-        M = M + (FormExpr::constant(-1.0) * inner((-p_ext - gamma * kappa) * n, v)).ds(Gamma);
-    }
-    if (dynamic_stress) {
         logFreeSurfaceTraction(b);
     }
 
@@ -539,8 +525,6 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
         F.certifyGeneratedBoundaryNitscheTraces(nitsche_traces, liquid->boundary->interface_marker,
                                                 o.generated_boundary_nitsche_minimum_energy_ratio);
     }
-    appendUnfittedFreeSurfaceLevelSetTrialFields(free_surfaces, system, F.options());
-    appendUnfittedFreeSurfaceCurvatureTrialFields(free_surfaces, system, F.options());
     F.configure(ale);
     (void)F.install({u_id, p_id}, M + C);
     if (preflight.has_exterior_free_surface) {

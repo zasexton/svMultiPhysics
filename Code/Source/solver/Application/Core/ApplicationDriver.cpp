@@ -184,8 +184,9 @@ double secondsSince(Clock::time_point start)
 }
 
 // A deprecated input that the run accepted (decision D47): a legacy
-// spelling of an XML key that frozen decks still use, or a legacy
-// environment variable that a key replaced.
+// spelling of an XML key that frozen decks still use, a legacy environment
+// variable that a key replaced, or a retired setting restated with its
+// no-op value (empty replacement).
 struct InputDeprecation {
   std::string input;
   std::string replacement;
@@ -227,6 +228,15 @@ std::vector<InputDeprecation> collectInputDeprecations(const Parameters& params)
 void warnInputDeprecations(const std::vector<InputDeprecation>& deprecations)
 {
   for (const auto& deprecation : deprecations) {
+    if (deprecation.replacement.empty()) {
+      application::core::oopCout()
+          << "[svMultiPhysics::Application] WARNING: '" << deprecation.input
+          << "' (" << deprecation.location
+          << ") restates a retired setting (decision D47); it has no effect "
+             "and will be removed."
+          << std::endl;
+      continue;
+    }
     application::core::oopCout()
         << "[svMultiPhysics::Application] WARNING: '" << deprecation.input
         << "' (" << deprecation.location

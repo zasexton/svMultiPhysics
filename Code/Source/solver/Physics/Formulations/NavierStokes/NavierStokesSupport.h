@@ -15,7 +15,7 @@
  * Option queries and capability rules, the registration preflight, field
  * binding and initial state, the free-surface geometry adapters and
  * contact-line laws, certificates and gauges, logs, the residual-work ledger,
- * the diagnostic operators, the legacy terms and the configuration artifact.
+ * the diagnostic operators and the configuration artifact.
  * IncompressibleNavierStokesVMSModule.cpp includes this one header so that it
  * reads as the formulation.
  */
@@ -28,7 +28,6 @@
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergy.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceFittedALE.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceLegacyTerms.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfacePressureGauge.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceQueries.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceResidualWork.h"

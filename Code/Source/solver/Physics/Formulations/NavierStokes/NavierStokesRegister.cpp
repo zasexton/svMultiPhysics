@@ -2853,7 +2853,13 @@ parse_free_surface_surface_tension_form(std::string_view raw,
   }
   if (token == "curvaturetraction" || token == "explicitcurvature" ||
       token == "younglaplacetraction") {
-    return FreeSurfaceSurfaceTensionForm::CurvatureTraction;
+    // The supplied- or raw-curvature traction was used by no accepted
+    // benchmark; SurfaceStress is the variation of the discrete area.
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] " + std::string(context) + "=" +
+        std::string(raw) +
+        " (CurvatureTraction) was retired (decision D47 Q2); use "
+        "SurfaceStress.");
   }
   if (token == "generatedcurvaturetraction" ||
       token == "generatedgeometrycurvaturetraction" ||
@@ -2875,8 +2881,8 @@ parse_free_surface_surface_tension_form(std::string_view raw,
   }
   throw std::runtime_error(
       "[svMultiPhysics::Physics] " + std::string(context) +
-      " must be one of Automatic, CurvatureTraction, "
-      "KinematicAreaGradientTraction, or SurfaceStress.");
+      " must be one of Automatic, KinematicAreaGradientTraction, or "
+      "SurfaceStress.");
 }
 
 svmp::Physics::formulations::navier_stokes::FreeSurfaceSurfaceTensionSemiImplicit
@@ -3954,14 +3960,37 @@ void append_free_surface_bc(
         parse_free_surface_surface_tension_semi_implicit(
             *semi_implicit, "Free-surface Surface_tension_semi_implicit");
   }
+  // Decision D47 Q2 retired the CurvatureTraction route with its supplied
+  // curvature and its raw level-set curvature, and the opt-in of fitted
+  // SurfaceStress.  The keys stay known to Parameters, which reports the
+  // restated no-op values Use_level_set_curvature=false and
+  // Allow_fitted_surface_stress=true as input deprecations; every other
+  // value fails here.
   if (const auto allow_fitted_surface_stress = first_defined_bool(
           bc.params,
-          {"Allow_fitted_surface_stress"})) {
-    fs.allow_fitted_surface_stress = *allow_fitted_surface_stress;
+          {"Allow_fitted_surface_stress"});
+      allow_fitted_surface_stress.has_value() &&
+      !*allow_fitted_surface_stress) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Free_surface BC '" + bc.name +
+        "': Allow_fitted_surface_stress=false was retired (decision D47 "
+        "Q2); fitted SurfaceStress needs no opt-in.  Remove the key and use "
+        "Surface_tension_form=SurfaceStress.");
   }
-  if (const auto curvature = first_defined_double(bc.params, {"Curvature"})) {
-    fs.curvature = IncompressibleNavierStokesVMSOptions::ScalarValue{
-        static_cast<svmp::FE::Real>(*curvature)};
+  if (first_defined_string(bc.params, {"Curvature"}).has_value()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Free_surface BC '" + bc.name +
+        "': Curvature (the supplied curvature of the CurvatureTraction "
+        "route) was retired (decision D47 Q2); remove it and use "
+        "Surface_tension_form=SurfaceStress.");
+  }
+  if (first_defined_bool(bc.params, {"Use_level_set_curvature"})
+          .value_or(false)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Free_surface BC '" + bc.name +
+        "': Use_level_set_curvature=true (the raw level-set curvature of "
+        "the CurvatureTraction route) was retired (decision D47 Q2); use "
+        "Surface_tension_form=SurfaceStress.");
   }
   if (const auto curvature_field = first_defined_string(
           bc.params,
@@ -3969,11 +3998,6 @@ void append_free_surface_bc(
            "Projected_curvature_field", "ProjectedCurvatureField",
            "Free_surface_curvature_field", "FreeSurfaceCurvatureField"})) {
     fs.curvature_field_name = *curvature_field;
-  }
-  if (const auto use_level_set_curvature = first_defined_bool(
-          bc.params,
-          {"Use_level_set_curvature"})) {
-    fs.use_level_set_curvature = *use_level_set_curvature;
   }
   // Fitted CurvatureTraction with pointwise current-geometry curvature was
   // withdrawn by D5 (identically zero on affine faces) and retired by D42.
@@ -3986,8 +4010,7 @@ void append_free_surface_bc(
         "': Use_current_geometry_curvature=true (pointwise current-geometry "
         "curvature of the fitted CurvatureTraction) was retired (decision "
         "D42); it is identically zero on affine faces.  Use "
-        "Surface_tension_form=SurfaceStress (the fitted default), or a "
-        "supplied Curvature.");
+        "Surface_tension_form=SurfaceStress, the default.");
   }
 
   if (const auto normal_policy = first_defined_string(
@@ -4358,7 +4381,7 @@ void validate_fitted_surface_contact_capability(
     if (boundary.surface_tension_form ==
         FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction) {
       throw std::invalid_argument(
-          "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction is available only for unfitted level-set free surfaces; use Automatic/CurvatureTraction for fitted boundaries");
+          "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction is available only for unfitted level-set free surfaces; use SurfaceStress for fitted boundaries");
     }
     for (const auto& contact_line : boundary.contact_lines) {
       if (std::holds_alternative<ContactLine::PrescribedAngle>(

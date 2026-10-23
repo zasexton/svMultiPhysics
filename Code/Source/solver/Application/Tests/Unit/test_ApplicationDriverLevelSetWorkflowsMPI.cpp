@@ -3202,7 +3202,6 @@ runMpiBalancedCapillaryCase(bool sessile,
                   FreeSurfaceSurfaceTensionForm::
                       KinematicAreaGradientTraction,
               .curvature_field_name = "kappa_balanced_mpi",
-              .use_level_set_curvature = false,
               .small_cut_aggregation = false};
   if (sessile) {
     free_surface.contact_lines.push_back(
@@ -4357,7 +4356,6 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                         uses_area_gradient_traction
                             ? "kappa_physical_flat_mpi"
                             : "",
-                    .use_level_set_curvature = false,
                     .small_cut_aggregation = support_scoped,
                 };
         free_surface.contact_lines.push_back(

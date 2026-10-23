@@ -136,6 +136,33 @@ std::string_view deprecated_extension_parameter_replacement(
   return {};
 }
 
+std::string restated_retired_extension_parameter(
+    const std::string& name, const std::string& value)
+{
+  // The Navier-Stokes register reads these booleans relaxed: after
+  // trimming, true, 1, yes or on (any case) is true and every other text is
+  // false.
+  const auto first = value.find_first_not_of(" \t\r\n");
+  const auto last = value.find_last_not_of(" \t\r\n");
+  std::string token;
+  if (first != std::string::npos) {
+    for (std::size_t i = first; i <= last; ++i) {
+      const char ch = value[i];
+      token.push_back(static_cast<char>(
+          (ch >= 'A' && ch <= 'Z') ? ch - 'A' + 'a' : ch));
+    }
+  }
+  const bool relaxed_true =
+      token == "true" || token == "1" || token == "yes" || token == "on";
+  if (name == "Use_level_set_curvature" && !relaxed_true) {
+    return name + "=false";
+  }
+  if (name == "Allow_fitted_surface_stress" && relaxed_true) {
+    return name + "=true";
+  }
+  return {};
+}
+
 namespace {
 
 bool is_free_surface_physical_model_parameter(const std::string& name)

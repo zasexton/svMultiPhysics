@@ -1432,6 +1432,108 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicBCTranslation_UsesCurrentG
 #endif
 }
 
+TEST(NavierStokesLegacyBCs, FreeSurfaceCurvatureTractionInputsAreRetired)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    // Decision D47 Q2: CurvatureTraction with its supplied curvature and its
+    // raw level-set curvature, and the opt-in of fitted SurfaceStress, were
+    // retired.  Their inputs fail while the boundary is translated, with a
+    // message that names SurfaceStress; the no-op restatements
+    // Use_level_set_curvature=false and Allow_fitted_surface_stress=true are
+    // accepted (Parameters reports them as input deprecations).
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+
+    constexpr int marker = 91;
+    auto mesh = buildSingleTetraBoundaryMesh(marker);
+    ASSERT_TRUE(mesh);
+
+    using Extra = std::vector<std::pair<std::string, std::string>>;
+    const auto make_input = [&](const Extra& extra) {
+        svmp::Physics::EquationModuleInput input{};
+        input.equation_type = "fluid";
+        input.mesh_name = "single_tetra";
+        input.mesh = mesh->local_mesh_ptr();
+        input.equation_params["Enable_ALE"] = defined("true");
+        input.equation_params["Mesh_velocity_source"] =
+            defined("coupled_displacement");
+        input.equation_params["Auto_register_mesh_displacement_field"] =
+            defined("true");
+        input.default_domain.params["Density"] = defined("1.0");
+        input.default_domain.params["Viscosity.model"] = defined("Constant");
+        input.default_domain.params["Viscosity.Value"] = defined("0.01");
+
+        svmp::Physics::BoundaryConditionInput bc{};
+        bc.name = "free_surface";
+        bc.boundary_marker = marker;
+        bc.params["Type"] = defined("Free_surface");
+        bc.params["Implementation"] = defined("FittedALE");
+        bc.params["External_pressure"] = defined("12.5");
+        bc.params["Surface_tension"] = defined("0.25");
+        bc.params["Kinematic_enforcement"] = defined("MeshNitsche");
+        bc.params["Normal_kinematic_policy"] =
+            defined("MatchFluidNormalVelocity");
+        bc.params["Tangential_mesh_policy"] = defined("Free");
+        for (const auto& [key, value] : extra) {
+            bc.params[key] = defined(value);
+        }
+        input.boundary_conditions.push_back(std::move(bc));
+        return input;
+    };
+
+    const std::vector<Extra> accepted_inputs{
+        {{"Use_level_set_curvature", "false"}},
+        {{"Allow_fitted_surface_stress", "true"}},
+        {{"Surface_tension_form", "SurfaceStress"},
+         {"Allow_fitted_surface_stress", "true"}},
+    };
+    for (const auto& accepted : accepted_inputs) {
+        const auto input = make_input(accepted);
+        svmp::FE::systems::FESystem system(mesh);
+        try {
+            auto module =
+                svmp::Physics::EquationModuleRegistry::instance().create(
+                    "fluid", input, system);
+            EXPECT_TRUE(module);
+        } catch (const std::exception& error) {
+            ADD_FAILURE() << accepted.back().first << "="
+                          << accepted.back().second
+                          << " must be accepted: " << error.what();
+        }
+    }
+
+    const std::vector<Extra> retired_inputs{
+        {{"Surface_tension_form", "CurvatureTraction"}},
+        {{"Surface_tension_form", "ExplicitCurvature"}},
+        {{"Surface_tension_form", "YoungLaplaceTraction"}},
+        {{"Curvature", "2.0"}},
+        {{"Use_level_set_curvature", "true"}},
+        {{"Allow_fitted_surface_stress", "false"}},
+    };
+    for (const auto& retired : retired_inputs) {
+        const auto input = make_input(retired);
+        svmp::FE::systems::FESystem system(mesh);
+        try {
+            auto module =
+                svmp::Physics::EquationModuleRegistry::instance().create(
+                    "fluid", input, system);
+            (void)module;
+            ADD_FAILURE() << retired.front().first << "="
+                          << retired.front().second << " must fail";
+        } catch (const std::runtime_error& error) {
+            const std::string message = error.what();
+            EXPECT_NE(message.find("decision D47 Q2"), std::string::npos)
+                << message;
+            EXPECT_NE(message.find("SurfaceStress"), std::string::npos)
+                << message;
+        }
+        EXPECT_EQ(system.findFieldByName("Velocity"),
+                  svmp::FE::INVALID_FIELD_ID);
+    }
+#endif
+}
+
 TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicEnforcementDefaultsToMeshNitsche)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
@@ -2793,9 +2895,13 @@ TEST(NavierStokesLegacyBCs, ResolvedArtifactSectionRecordsTheSourceOfEveryFreeSu
     EXPECT_NE(resolved.find("\"source\":\"derived\",\"origin\":\"resolution\"}", radians_at),
               std::string::npos);
     // Keys outside the schema (Type) and retired keys (Kinematic_penalty,
-    // decision D47 Q9) are not listed.
+    // decision D47 Q9; Curvature, Use_level_set_curvature and
+    // Allow_fitted_surface_stress, decision D47 Q2) are not listed.
     EXPECT_EQ(resolved.find("\"Type\""), std::string::npos);
     EXPECT_EQ(resolved.find("\"Kinematic_penalty\""), std::string::npos);
+    EXPECT_EQ(resolved.find("\"Curvature\""), std::string::npos);
+    EXPECT_EQ(resolved.find("\"Use_level_set_curvature\""), std::string::npos);
+    EXPECT_EQ(resolved.find("\"Allow_fitted_surface_stress\""), std::string::npos);
 #endif
 }
 
