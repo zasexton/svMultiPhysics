@@ -445,12 +445,16 @@ FreeSurfaceSchemaContract resolve_free_surface_schema_contract(
     const auto value = lower_copy(trim_copy(it->second.value));
     if (value == "true" || value == "1" ||
         value == "yes" || value == "on") {
-      contract.explicit_legacy = true;
-    } else if (
-        value == "false" || value == "0" ||
-        value == "no" || value == "off") {
-      contract.explicit_legacy = false;
-    } else {
+      // The explicit schema-1 legacy input was retired (D47 P2); the
+      // module keeps the legacy options for programmatic tests only.
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] The explicit schema-1 legacy "
+          "free-surface configuration (" + std::string(key) +
+          "=true) was retired (decision D47); remove it and use the "
+          "current configuration schema.");
+    }
+    if (value != "false" && value != "0" &&
+        value != "no" && value != "off") {
       throw std::runtime_error(
           "[svMultiPhysics::Physics] "
           "unsupported_free_surface_physical_model");
@@ -461,11 +465,7 @@ FreeSurfaceSchemaContract resolve_free_surface_schema_contract(
       svmp::Physics::formulations::navier_stokes::
           IncompressibleNavierStokesVMSOptions::
               current_configuration_schema_version;
-  const bool current_contract =
-      contract.version == current && !contract.explicit_legacy;
-  const bool explicit_legacy_contract =
-      contract.version == 1 && contract.explicit_legacy;
-  if (!current_contract && !explicit_legacy_contract) {
+  if (contract.version != current) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] "
         "unsupported_free_surface_physical_model");
@@ -494,8 +494,7 @@ validate_and_resolve_free_surface_physical_model(
     selected = &it->second;
   }
 
-  const auto schema_contract =
-      resolve_free_surface_schema_contract(input.equation_params);
+  (void)resolve_free_surface_schema_contract(input.equation_params);
   auto physical_model =
       NavierStokesPhysicalModel::
           OnePhaseLiquidPrescribedExteriorPressure;
@@ -503,11 +502,6 @@ validate_and_resolve_free_surface_physical_model(
     physical_model = NavierStokesPhysicalModel::
         OnePhaseLiquidPrescribedExteriorPressure;
   } else {
-    if (schema_contract.explicit_legacy) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] "
-          "unsupported_free_surface_physical_model");
-    }
     const auto exact_value = trim_copy(selected->value);
     if (exact_value == "IncompressibleTwoFluid") {
       physical_model =
@@ -2176,7 +2170,6 @@ ResolvedOnePhaseNavierStokesInput resolve_one_phase_navier_stokes_input(
   options.conservative_balance_diagnostics =
       input.derived_requests.conservative_balance_diagnostics;
 
-  apply_free_surface_schema_options(input.equation_params, options);
   apply_fluid_moving_domain_options(input, domain, options);
   apply_fluid_momentum_source_params(input.equation_params, options);
   apply_fluid_properties(domain, options);

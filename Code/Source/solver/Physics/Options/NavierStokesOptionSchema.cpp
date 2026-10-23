@@ -250,17 +250,14 @@ opt::OptionSchema<FreeSurfaceBoundary> makeFreeSurfaceBoundarySchema()
                  "retired (decision D42): identically zero on affine faces",
                  opt::RetiredAcceptance{.value = "false"})
         .retired({"Cut_cell_velocity_gradient_penalty"},
-                 "retired with the velocity ghost penalty (small-cut aggregation replaces it)",
-                 opt::RetiredAcceptance{.any_value_in_mode = "explicit_legacy"})
+                 "retired with the velocity ghost penalty (small-cut aggregation replaces it)")
         .retired({"Cut_cell_velocity_max_derivative_order"},
-                 "retired with the velocity ghost penalty",
-                 opt::RetiredAcceptance{.any_value_in_mode = "explicit_legacy"})
+                 "retired with the velocity ghost penalty")
         .retired({"Enable_velocity_extension"},
                  "the same-field dry-velocity diffusion was retired (decision D42)",
                  opt::RetiredAcceptance{.value = "false"})
         .retired({"Velocity_extension_diffusivity"},
-                 "belongs to the retired dry-velocity diffusion (decision D42)",
-                 opt::RetiredAcceptance{.any_value_in_mode = "explicit_legacy"})
+                 "belongs to the retired dry-velocity diffusion (decision D42)")
         .retired({"Kinematic_penalty"},
                  "belongs to the retired Penalty kinematic enforcement (decision D47 Q9); "
                  "use Kinematic_enforcement=MeshNitsche")
@@ -1586,16 +1583,6 @@ std::string normalized_token(std::string_view raw)
 
 } // namespace
 
-void apply_free_surface_schema_options(
-    const svmp::Physics::ParameterMap& params,
-    svmp::Physics::formulations::navier_stokes::
-        IncompressibleNavierStokesVMSOptions& options)
-{
-  const auto contract = resolve_free_surface_schema_contract(params);
-  options.input_configuration_schema_version = contract.version;
-  options.explicit_legacy_configuration = contract.explicit_legacy;
-}
-
 bool is_free_surface_type(std::string_view raw)
 {
   return normalized_token(raw) == "freesurface";
@@ -2259,9 +2246,6 @@ void append_free_surface_bc(
   // Kept for the provenance of the resolved values (effective-configuration
   // artifact, decision D47).
   fs.input = svmp::Physics::formulations::navier_stokes::optionInputFromParameters(bc.params);
-  const bool explicit_legacy_configuration =
-      options.input_configuration_schema_version == 1 &&
-      options.explicit_legacy_configuration;
   fs.implementation = free_surface_implementation_from_params(bc.params);
   if (const auto active_domain = first_defined_string(
           bc.params,
@@ -2438,7 +2422,7 @@ void append_free_surface_bc(
         IncompressibleNavierStokesVMSOptions::ScalarValue{v[1]},
         IncompressibleNavierStokesVMSOptions::ScalarValue{v[2]}};
     if (fs.tangential_mesh_policy != FreeSurfaceTangentialMeshPolicy::Prescribed) {
-      if (tangential_policy.has_value() && !explicit_legacy_configuration) {
+      if (tangential_policy.has_value()) {
         throw std::runtime_error(
             "[svMultiPhysics::Physics] Prescribed tangential mesh velocity "
             "conflicts with an explicit non-Prescribed tangential policy.");
@@ -2464,13 +2448,11 @@ void append_free_surface_bc(
       fs.tangential_mesh_policy !=
           FreeSurfaceTangentialMeshPolicy::Prescribed &&
       fs.tangential_mesh_policy !=
-          FreeSurfaceTangentialMeshPolicy::SmoothingOnly &&
-      !explicit_legacy_configuration) {
+          FreeSurfaceTangentialMeshPolicy::SmoothingOnly) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] Tangential_mesh_penalty requires "
         "Tangential_mesh_policy=Prescribed or SmoothingOnly; Free has no "
-        "tangential boundary row, and unused tangential settings are "
-        "accepted only by the explicit schema-1 legacy mode.");
+        "tangential boundary row.");
   }
 
   const auto enforcement = first_defined_string(
@@ -2480,12 +2462,10 @@ void append_free_surface_bc(
     fs.kinematic_enforcement =
         parse_free_surface_kinematic_enforcement(
             *enforcement, "Free-surface Kinematic_enforcement");
-  } else if (fs.implementation == FreeSurfaceImplementation::FittedALE &&
-             !explicit_legacy_configuration) {
+  } else if (fs.implementation == FreeSurfaceImplementation::FittedALE) {
     // Decision D35: MeshNitsche is the qualified default for fitted ALE
     // free surfaces.  The qualified contract rejected an omitted
-    // Kinematic_enforcement before, so no accepted input changes; the
-    // explicit schema-1 legacy mode keeps its None default.
+    // Kinematic_enforcement before, so no accepted input changes.
     fs.kinematic_enforcement = FreeSurfaceKinematicEnforcement::MeshNitsche;
   }
   // Kinematic_penalty set the penalty of the Penalty enforcement (the
@@ -2509,10 +2489,9 @@ void append_free_surface_bc(
   // no deck, runner or test set, were removed (decision D47); the Nitsche
   // enforcement they configured was retired by D47 Q9.
   if (kinematic_nitsche_gamma.has_value() &&
-      fs.kinematic_enforcement != FreeSurfaceKinematicEnforcement::MeshNitsche &&
-      !explicit_legacy_configuration) {
+      fs.kinematic_enforcement != FreeSurfaceKinematicEnforcement::MeshNitsche) {
     throw std::runtime_error(
-        "[svMultiPhysics::Physics] Kinematic_nitsche_gamma requires Kinematic_enforcement=MeshNitsche; an unused gamma is accepted only by the explicit schema-1 legacy mode.");
+        "[svMultiPhysics::Physics] Kinematic_nitsche_gamma requires Kinematic_enforcement=MeshNitsche.");
   }
 
   const auto small_cut_aggregation = first_defined_bool(
@@ -2590,12 +2569,10 @@ void append_free_surface_bc(
         "maximum row L1 norm must be no smaller than the maximum absolute "
         "coefficient.");
   }
-  if (!fs.small_cut_aggregation && aggregation_guard_suboption_present &&
-      !explicit_legacy_configuration) {
+  if (!fs.small_cut_aggregation && aggregation_guard_suboption_present) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] Small_cut_aggregation=false cannot be "
-        "combined with aggregation guard settings; unused guards are "
-        "accepted only by the explicit schema-1 legacy mode.");
+        "combined with aggregation guard settings.");
   }
 
   const auto cut_cell_stabilization_enabled = first_defined_bool(
@@ -2611,14 +2588,8 @@ void append_free_surface_bc(
   if (first_defined_double(
           bc.params,
           {"Cut_cell_velocity_gradient_penalty"})) {
-    if (!explicit_legacy_configuration) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] Cut-cell velocity ghost-penalty settings are retired; small-cut aggregation replaces them. Only explicit schema-1 legacy input may retain an ignored archived value.");
-    }
-    std::cerr << "[svMultiPhysics::Physics] WARNING: "
-                 "Cut_cell_velocity_gradient_penalty is deprecated and "
-                 "ignored by explicit schema-1 legacy mode; small-cut aggregation replaces the velocity "
-                 "ghost penalty." << std::endl;
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Cut-cell velocity ghost-penalty settings are retired; small-cut aggregation replaces them.");
   }
   if (const auto pressure_penalty = first_defined_double(
           bc.params,
@@ -2659,9 +2630,9 @@ void append_free_surface_bc(
         static_cast<svmp::FE::Real>(*cut_scale_cap);
   }
   if (cut_cell_stabilization_explicitly_disabled &&
-      cut_cell_suboption_present && !explicit_legacy_configuration) {
+      cut_cell_suboption_present) {
     throw std::runtime_error(
-        "[svMultiPhysics::Physics] Enable_cut_cell_stabilization=false cannot be combined with cut-cell stabilization suboptions; unused stabilization settings are accepted only by the explicit schema-1 legacy mode.");
+        "[svMultiPhysics::Physics] Enable_cut_cell_stabilization=false cannot be combined with cut-cell stabilization suboptions.");
   }
   if (!cut_cell_stabilization_enabled.has_value() &&
       cut_cell_suboption_present) {
@@ -2670,19 +2641,13 @@ void append_free_surface_bc(
   if (first_defined_int(
           bc.params,
           {"Cut_cell_velocity_max_derivative_order"})) {
-    if (!explicit_legacy_configuration) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] Cut-cell velocity derivative-order settings are retired with the velocity ghost penalty. Only explicit schema-1 legacy input may retain an ignored archived value.");
-    }
-    std::cerr << "[svMultiPhysics::Physics] WARNING: "
-                 "Cut_cell_velocity_max_derivative_order is deprecated and "
-                 "ignored by explicit schema-1 legacy mode (velocity ghost penalty retired)." << std::endl;
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Cut-cell velocity derivative-order settings are retired with the velocity ghost penalty.");
   }
 
   // The legacy same-field dry-velocity diffusion (Velocity_extension) was
   // retired with decision D42; it modified the physical momentum rows.
-  // Decks may still state it as disabled; an explicit schema-1 legacy deck
-  // may also keep an ignored archived diffusivity next to that.
+  // Decks may still state it as disabled.
   const auto velocity_extension_enabled = first_defined_bool(
       bc.params,
       {"Enable_velocity_extension"});
@@ -2706,13 +2671,11 @@ void append_free_surface_bc(
         "aggregation replace it.  Remove these keys or set "
         "Enable_velocity_extension=false.");
   }
-  if (velocity_extension_diffusivity_present &&
-      !explicit_legacy_configuration) {
+  if (velocity_extension_diffusivity_present) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] Free_surface BC '" + bc.name +
         "': Velocity_extension_diffusivity belongs to the retired legacy "
-        "dry-velocity diffusion (decision D42); only explicit schema-1 "
-        "legacy input may retain an ignored archived value.");
+        "dry-velocity diffusion (decision D42).");
   }
 
   append_free_surface_contact_line(bc.params, fs);
@@ -2728,7 +2691,6 @@ translate_fitted_surface_contact_capability(
       IncompressibleNavierStokesVMSOptions;
 
   IncompressibleNavierStokesVMSOptions options{};
-  apply_free_surface_schema_options(input.equation_params, options);
   for (const auto& bc : input.boundary_conditions) {
     const auto* bc_type = find_param(bc.params, "Type");
     if (bc_type == nullptr || !bc_type->defined ||

@@ -952,7 +952,8 @@ TEST(NavierStokesLegacyBCs,
                     "Enable_explicit_legacy_free_surface_configuration"] =
                     defined("true");
             },
-            "unsupported_free_surface_physical_model",
+            // The explicit schema-1 legacy input was retired (D47 P2).
+            "explicit schema-1 legacy free-surface configuration",
         },
         {
             "non-current schema with explicit selector",
@@ -1049,7 +1050,7 @@ TEST(NavierStokesLegacyBCs,
                     "Enable_explicit_legacy_free_surface_configuration"] =
                     defined("true");
             },
-            "unsupported_free_surface_physical_model",
+            "explicit schema-1 legacy free-surface configuration",
         },
         {
             "pre-registration duplicate schema aliases",
@@ -1538,9 +1539,9 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicEnforcementDefaultsToMeshN
     GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
 #else
     // Decision D35: an omitted Kinematic_enforcement selects MeshNitsche on a
-    // fitted ALE free surface of the qualified contract, and the explicit
-    // schema-1 legacy mode keeps its None default.  Penalty and Nitsche were
-    // retired by decision D47 Q9.
+    // fitted ALE free surface of the qualified contract.  Penalty and Nitsche
+    // were retired by decision D47 Q9, and the explicit schema-1 legacy input,
+    // whose None default the last check below covered, by D47 (P2).
     svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
 
     constexpr int marker = 79;
@@ -1555,9 +1556,7 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicEnforcementDefaultsToMeshN
             input.mesh_name = "single_tetra";
             input.mesh = mesh->local_mesh_ptr();
             if (legacy) {
-                // The schema-1 configuration of
-                // FreeSurfaceContactNoneIsExplicitAndComplete (no ALE): a
-                // MeshNitsche default would be rejected there.
+                // The retired explicit schema-1 legacy input (no ALE).
                 input.equation_params[
                     "Free_surface_configuration_schema_version"] =
                     defined("1");
@@ -1644,7 +1643,8 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicEnforcementDefaultsToMeshN
             {{"Kinematic_enforcement", "Nitsche"}},
             {{"Kinematic_penalty", "9.0"}},
         };
-    for (const bool legacy : {false, true}) {
+    {
+        const bool legacy = false;
         for (const auto& retired : retired_inputs) {
             const auto input = make_input(legacy, retired);
             svmp::FE::systems::FESystem system(mesh);
@@ -1666,9 +1666,23 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicEnforcementDefaultsToMeshN
         }
     }
 
-    // The explicit schema-1 legacy mode keeps None: no normal relation.
-    const auto legacy_mode = declared(true, {});
-    EXPECT_EQ(legacy_mode.count, 0u);
+    // The explicit schema-1 legacy input fails at translation (D47 P2).
+    {
+        const auto input = make_input(true, {});
+        svmp::FE::systems::FESystem system(mesh);
+        try {
+            auto module =
+                svmp::Physics::EquationModuleRegistry::instance().create(
+                    "fluid", input, system);
+            (void)module;
+            ADD_FAILURE() << "the explicit schema-1 legacy input must fail";
+        } catch (const std::runtime_error& error) {
+            EXPECT_NE(std::string(error.what()).find(
+                          "explicit schema-1 legacy free-surface configuration"),
+                      std::string::npos)
+                << error.what();
+        }
+    }
 #endif
 }
 
@@ -2203,15 +2217,23 @@ TEST(NavierStokesLegacyBCs,
             defined("1");
         input.equation_params[key] = defined("true");
         svmp::FE::systems::FESystem system(mesh);
-        auto module = svmp::Physics::EquationModuleRegistry::instance().create(
-            "fluid", input, system);
-        ASSERT_TRUE(module);
-        const auto artifact = module->effectiveConfigurationArtifact();
-        ASSERT_TRUE(artifact.has_value());
-        EXPECT_NE(artifact->json.find("\"migration_mode\":\"explicit_legacy\""),
-                  std::string::npos);
-        EXPECT_NE(artifact->json.find("\"capability_label\":\"legacy_diagnostic\""),
-                  std::string::npos);
+        // Every spelling of the retired explicit legacy opt-in fails
+        // (D47 P2), and the system stays unchanged.
+        try {
+            auto module =
+                svmp::Physics::EquationModuleRegistry::instance().create(
+                    "fluid", input, system);
+            (void)module;
+            ADD_FAILURE() << key << "=true must fail";
+        } catch (const std::runtime_error& error) {
+            const std::string message = error.what();
+            EXPECT_NE(message.find("explicit schema-1 legacy free-surface configuration"), std::string::npos)
+                << message;
+            EXPECT_NE(message.find(key + "=true"), std::string::npos)
+                << message;
+        }
+        EXPECT_EQ(system.findFieldByName("Velocity"),
+                  svmp::FE::INVALID_FIELD_ID);
     }
 
     {
@@ -2252,10 +2274,12 @@ TEST(NavierStokesLegacyBCs, FreeSurfaceContactNoneIsExplicitAndComplete)
     input.equation_type = "fluid";
     input.mesh_name = "single_tetra";
     input.mesh = mesh->local_mesh_ptr();
-    input.equation_params["Free_surface_configuration_schema_version"] =
-        defined("1");
-    input.equation_params[
-        "Enable_explicit_legacy_free_surface_configuration"] =
+    // The qualified fitted contract (the explicit schema-1 legacy input
+    // this test used was retired, D47 P2).
+    input.equation_params["Enable_ALE"] = defined("true");
+    input.equation_params["Mesh_velocity_source"] =
+        defined("coupled_displacement");
+    input.equation_params["Auto_register_mesh_displacement_field"] =
         defined("true");
     input.default_domain.params["Density"] = defined("1.0");
     input.default_domain.params["Viscosity.model"] = defined("Constant");
@@ -2266,6 +2290,9 @@ TEST(NavierStokesLegacyBCs, FreeSurfaceContactNoneIsExplicitAndComplete)
     bc.boundary_marker = marker;
     bc.params["Type"] = defined("Free_surface");
     bc.params["Implementation"] = defined("FittedALE");
+    bc.params["External_pressure"] = defined("12.5");
+    bc.params["Surface_tension"] = defined("0.0");
+    bc.params["Tangential_mesh_policy"] = defined("Free");
     bc.params["Contact_line_model"] = defined("None");
     input.boundary_conditions.push_back(std::move(bc));
 
@@ -2294,11 +2321,8 @@ TEST(NavierStokesLegacyBCs, FreeSurfacePinnedIsExplicitAndComplete)
     input.equation_type = "fluid";
     input.mesh_name = "single_tetra";
     input.mesh = mesh->local_mesh_ptr();
-    input.equation_params["Free_surface_configuration_schema_version"] =
-        defined("1");
-    input.equation_params[
-        "Enable_explicit_legacy_free_surface_configuration"] =
-        defined("true");
+    // The qualified fitted contract (the explicit schema-1 legacy input
+    // this test used was retired, D47 P2).
     input.equation_params["Enable_ALE"] = defined("true");
     input.equation_params["Mesh_velocity_source"] =
         defined("coupled_displacement");
@@ -2313,6 +2337,9 @@ TEST(NavierStokesLegacyBCs, FreeSurfacePinnedIsExplicitAndComplete)
     bc.boundary_marker = marker;
     bc.params["Type"] = defined("Free_surface");
     bc.params["Implementation"] = defined("FittedALE");
+    bc.params["External_pressure"] = defined("12.5");
+    bc.params["Surface_tension"] = defined("0.0");
+    bc.params["Tangential_mesh_policy"] = defined("Free");
     bc.params["Contact_line_model"] = defined("Pinned");
     bc.params["Contact_line_marker"] = defined(std::to_string(marker));
     input.boundary_conditions.push_back(std::move(bc));

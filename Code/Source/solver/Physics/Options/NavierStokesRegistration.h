@@ -122,7 +122,6 @@ struct FreeSurfaceSchemaContract {
       svmp::Physics::formulations::navier_stokes::
           IncompressibleNavierStokesVMSOptions::
               current_configuration_schema_version};
-  bool explicit_legacy{false};
 };
 
 FreeSurfaceSchemaContract resolve_free_surface_schema_contract(
