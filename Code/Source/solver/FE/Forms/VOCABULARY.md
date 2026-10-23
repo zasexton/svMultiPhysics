@@ -6,9 +6,14 @@ previous split between `VOCABULARY.md`, `VOCABULARY_ROADMAP.md`,
 
 The goal of this file is to keep the public form-authoring surface, expert
 hooks, and planned vocabulary in one current place. It is scoped to the FE form
-language and the adjacent FE modules it calls into; mesh ownership, DOF
-management, solver configuration, and time-integration orchestration remain in
-their owning modules.
+language and the adjacent FE services a formulation calls (`FE/Systems`,
+`FE/Constraints`, `FE/LevelSet`, `FE/Interfaces`, `FE/PostProcessing`,
+`FE/Auxiliary`); mesh ownership, DOF management, solver configuration, and
+time-integration orchestration remain in their owning modules.
+
+Every entry below was checked against the headers and unit tests on
+2026-10-23. Line-level details live in the headers; this file says what exists,
+what it is for, and who should call it.
 
 ## Status Legend
 
@@ -17,8 +22,8 @@ their owning modules.
 | `implemented/public` | Intended for formulation authors and covered by current headers/tests |
 | `implemented/expert` | Supported but meant for specialized, manual, or lower-level workflows |
 | `implemented/internal` | Setup, JIT, lowering, or byte/slot based hooks; not an ergonomic public DSL |
-| `planned` | Not implemented or not public enough to document as author-facing vocabulary |
-| `out-of-scope-for-now` | Deferred until there is a concrete product/module need |
+| `planned` | Not implemented yet; tracked by a named step of milestone MR in `Documentation/free_surface_program_tracker.md` §5 |
+| `out-of-scope-for-now` | Not implemented and not scheduled; deferred until there is a concrete product/module need |
 
 ## Design Principles
 
@@ -44,25 +49,66 @@ Practical rules:
   in physics modules built on top of Forms.
 - Concise aliases are welcome only when they remain unambiguous and preserve a
   clear canonical spelling.
+- The expression tree is the identity of a term. Kernel grouping, JIT cache
+  keys, the system manifest, and the floating-point evaluation order all follow
+  the tree, so algebraically equal spellings are not interchangeable
+  (`test_IntegrationDomainLowering.cpp` checks that `a * p` and `p * a`, or
+  `inner(tangentialProjector(n, d), grad(v))` and `surfaceDivergence(v, n)`,
+  hash differently). A helper that only renames must return the identical tree;
+  typed measures and the `Vocabulary.h` helpers are tested for that.
+- `Physics/Formulations` holds the forms-based governing equations; the
+  supporting machinery (records, ledgers, certificates, logs, collectives) is
+  posed as generic FE services that take forms and data (tracker decisions
+  D42, D49, D50).
 
 ## Header Map
 
+Form language (`FE/Forms`):
+
 | Header | Role |
 |--------|------|
-| `Forms/FormExpr.h` | Core symbolic AST and low-level constructors/operators |
+| `Forms/FormExpr.h` | Core symbolic AST, low-level constructors, operators, and measures |
 | `Forms/Vocabulary.h` | High-level UFL-style helpers for normal formulation authoring |
-| `Forms/BoundaryConditions.h` | Weak and strong scalar trace helper functions |
-| `Forms/StandardBCs.h` | Public BC wrapper types used by Systems |
+| `Forms/IntegrationDomain.h` | Typed integration domains (`VolumeDomain`, `InterfaceDomain`, `ContactLineDomain`, `BoundaryDomain`, `FacetDomain`) |
+| `Forms/BoundaryConditions.h` | Value conversion (`bc::toScalarExpr`, `bc::toVectorExpr`), strong Dirichlet declarations, and weak trace helper functions |
+| `Forms/BoundaryCondition.h` | `bc::BoundaryCondition` interface consumed by `BoundaryConditionManager` |
+| `Forms/StandardBCs.h` | Standard BC wrapper types and `make*BC` factories |
 | `Forms/NitscheBC.h` | Boundary/interface Nitsche BC wrappers |
-| `Forms/InterfaceConditions.h` | Interface-face helper terms over `.dI(marker)` |
+| `Forms/ConstraintBCs.h` | Periodic and multi-point constraint BC wrappers |
+| `Forms/InterfaceConditions.h` | Interface helper terms over `.dI(marker)` |
 | `Forms/ConstitutiveModel.h` | Constitutive callback and material-state interface |
-| `Forms/BoundaryFunctional.h` | Boundary/domain functional compilation |
-| `Forms/FiniteDeformationForms.h` | Finite-deformation kinematic vocabulary |
+| `Forms/BoundaryFunctional.h` | Boundary/domain functional definition and compilation |
+| `Forms/FiniteDeformationForms.h` | Finite-deformation kinematic vocabulary (`forms::finite_deformation`) |
 | `Forms/MovingFrameForms.h` | Moving-frame helper terminals |
-| `Forms/CutCellForms.h` | Cut-cell helper terminals |
-| `Forms/FormCompiler.h`, `Forms/FormKernels.h`, `Forms/FormIR.h` | Expert compilation, kernel, and IR layers |
+| `Forms/CutCellForms.h` | Cut-cell metadata terminals and cut-adjacent facet helpers |
+| `Forms/SymbolicDifferentiation.h` | Expert symbolic differentiation helpers |
+| `Forms/PointEvaluator.h`, `Forms/AffineAnalysis.h` | Expert point evaluation and affine residual splitting |
+| `Forms/FormCompiler.h`, `Forms/FormKernels.h`, `Forms/FormIR.h`, `Forms/MixedFormIR.h` | Expert compilation, kernel, and IR layers |
 | `Forms/BlockForm.h`, `Forms/Complex.h` | Manual block and real-lifted complex workflows |
 | `Forms/Index.h`, `Forms/Einsum.h`, `Forms/Tensor/*` | Indexed/tensor-calculus infrastructure |
+| `Forms/Forms.h` | Umbrella include; not recommended as the starting include for physics modules |
+| `Forms/WeakForm.h` | Deprecated residual-plus-constraints bundle |
+
+Adjacent FE services a formulation calls:
+
+| Header | Role |
+|--------|------|
+| `Systems/FormsInstaller.h` | `installFormulation`, `FormInstallOptions`, strong Dirichlet and mixed-block installation |
+| `Systems/FormulationBuilder.h` | Install options of one formulation, composed in call order, plus generated-marker registration |
+| `Systems/FieldBinding.h` | Register-or-reuse of a module's fields with compatibility checks |
+| `Systems/BoundaryConditionManager.h` | Validate, apply, and install a field's boundary conditions |
+| `Systems/DiagnosticRegistry.h` | Opt-in diagnostic operators of a formulation, by set |
+| `Systems/ALEBinding.h`, `Systems/MeshDisplacementBinding.h` | Mesh-velocity/mesh-displacement field binding for moving-domain forms |
+| `Systems/FESystem.h` | Fields, operators, constraints, auxiliary inputs, derived results, functional kernels, and the attachment store |
+| `Systems/SystemCollectives.h`, `Systems/ExactAccumulator.h` | Collective reductions, including the exact rank-independent sum |
+| `Constraints/ConstraintPlan.h` | Phase-ordered registration of a formulation's system constraints |
+| `Constraints/InterfaceMeasureGaugeAnchor.h` | Gauge anchoring by a natural condition on a generated interface |
+| `Constraints/ContactPointVelocityConstraint.h` | Strong contact-point velocity law (2D, planar walls) |
+| `LevelSet/LevelSetGeometry.h` | Level-set geometry handles that return typed integration domains |
+| `Interfaces/ContactLineGeometryCertificate.h` | Planar-wall and contact-rule certificates of a contact line |
+| `PostProcessing/DerivedResultBuilder.h` | Derived output fields defined by a `FormExpr` |
+| `Auxiliary/AuxiliaryModelDSL.h`, `Auxiliary/AuxiliaryBindings.h` | 0D auxiliary models coupled to forms |
+| `Coupling/CouplingFormBuilder.h` | Participant-named forms for multi-module coupling contracts |
 
 ## Canonical Workflow
 
@@ -88,7 +134,42 @@ installFormulation(system, "equations", {u_id}, residual);
 
 Use unbound `TrialFunction`/`TestFunction` for explicit operator authoring
 (`installMixedBilinear`, `installMixedLinear`) and `StateField`/`TestField` for
-residual formulations (`installFormulation`).
+residual formulations (`installFormulation`). The residual form is
+differentiated automatically (forward-mode dual numbers by default, or the
+symbolic tangent when `use_symbolic_tangent` is set).
+
+A module with several fields, constraints that must be registered in a fixed
+order, or install options shared by several kernel groups uses the FE
+formulation services, as `IncompressibleNavierStokesVMSModule::registerOn`
+does:
+
+```cpp
+#include "FE/Constraints/ConstraintPlan.h"
+#include "FE/Systems/FieldBinding.h"
+#include "FE/Systems/FormulationBuilder.h"
+
+systems::FieldBinding binding(system, "MyModule::registerOn");
+const FieldId u_id = binding.unknown({.name = "u", .space = V, .components = dim}, "velocity");
+const FieldId p_id = binding.unknown({.name = "p", .space = Q}, "pressure");
+
+constraints::ConstraintPlan plan(system);            // VertexValues < Essential < ... < PointLaw
+plan.vertexValues(p_id, pressure_pins);
+
+const auto u = StateField(u_id, *V, "u");
+const auto p = StateField(p_id, *Q, "p");
+const auto v = TestField(u_id, *V, "v");
+const auto q = TestField(p_id, *Q, "q");
+auto R = (2.0 * mu * inner(sym(grad(u)), sym(grad(v))) - p * div(v) + q * div(u)).dx();
+
+systems::BoundaryConditionManager bcs;
+bcs.install(options.velocity_dirichlet, to_essential_bc);
+plan.essentials([&](systems::FESystem& s) { bcs.applyAll(s, R, u, v, u_id); });
+plan.commit();
+
+systems::FormulationBuilder F(system, "equations", base_install_options);
+F.symbolicTangent();
+F.install({u_id, p_id}, R);
+```
 
 ## Module Boundaries
 
@@ -101,6 +182,12 @@ field registration, DOF layout, boundary-condition installation, assembly
 loops, quadrature/basis data, mesh topology, and time-state storage. Forms may
 expose symbolic terminals for that data, but those modules provide the data.
 
+`FE/Constraints` owns constraint objects and their registration order
+(`ConstraintPlan`). `FE/LevelSet` owns level-set geometry, the generated cut
+context, and its markers; `FE/Interfaces` owns generated interface domains and
+their certificates. A formulation reaches the generated markers only through
+`level_set::LevelSetGeometry` handles, which return typed integration domains.
+
 ## Implemented Vocabulary
 
 ### Fields and Symbols
@@ -111,25 +198,29 @@ Status: `implemented/public`, unless noted.
 |------------|--------|-------|
 | `StateField(field_id, V, name)` | `Vocabulary.h` | Canonical residual unknown bound to a registered `FieldId` |
 | `TestField(field_id, V, name)` | `Vocabulary.h` | Canonical residual test function bound to the same `FieldId` |
-| `StateFields(...)`, `TestFields(...)` | `Vocabulary.h` | Multi-field residual helpers |
+| `StateFields(ids, spaces, names)`, `TestFields(ids, spaces, names)` | `Vocabulary.h` | Multi-field residual helpers; sizes must agree |
 | `TrialFunction(V, name)`, `TestFunction(V, name)` | `Vocabulary.h` | Operator authoring without `FieldId` binding |
-| `TrialFunctions(W, names)`, `TestFunctions(W, names)` | `Vocabulary.h` | Mixed-space operator authoring |
-| `FormExpr::trialFunction`, `testFunction`, `discreteField`, `stateField` | `FormExpr.h` | Lower-level factories, including signature overloads |
-| `FormExpr::coefficient(name, ...)` | `FormExpr.h` | Scalar, time-scalar, vector, matrix, rank-3, and rank-4 coefficient callbacks |
+| `TrialFunctions(W, names)`, `TestFunctions(W, names)` | `Vocabulary.h` | One unbound symbol per `MixedSpace` component |
+| `FormExpr::trialFunction`, `testFunction`, `discreteField`, `stateField` | `FormExpr.h` | Lower-level factories, including `FieldId` and `SpaceSignature` overloads |
+| `FormExpr::coefficient(name, f)` | `FormExpr.h` | Scalar, time-scalar, vector, matrix, rank-3, and rank-4 callbacks; interpreted call boundary, not JIT-inlined |
 | `FormExpr::constant(value)` | `FormExpr.h` | Literal scalar expression |
-| `FormExpr::parameter(name)` | `FormExpr.h` | Named runtime/JIT parameter |
+| `FormExpr::parameter(name)` | `FormExpr.h` | Named runtime parameter, resolved to a slot at setup |
 | `FormExpr::parameterRef(slot)` | `FormExpr.h` | `implemented/internal`; post-resolution slot reference |
-| `FormExpr::typedZero()` | `FormExpr.h` | Typed zero expression for lowering/simplification paths |
+| `FormExpr::typedZero()` | `FormExpr.h` | `implemented/internal`; shape-preserving zero for lowering/simplification |
+| `systems::FieldBinding::unknown(spec, role)`, `prescribed(spec, auto_register, role)` | `Systems/FieldBinding.h` | Register a field or reuse a compatible registered one; incompatible reuse throws with `"<owner> <role>: "` |
+| `systems::FieldBinding::check`, `requireDistinctNames`, `systems::spacesCompatible` | `Systems/FieldBinding.h` | Read-only checks before system mutation |
+| `FESystem::addField(FieldSpec)`, `addInterfaceField(name, space, marker)` | `Systems/FESystem.h` | Volume fields and codimension-one interface fields |
 
-Supported FE space concepts live in `FE/Spaces` and are consumable by Forms:
-`FunctionSpace`, `H1Space`, `L2Space`, `HDivSpace`, `HCurlSpace`,
-`MixedSpace`, `ProductSpace`, `TraceSpace`, `MortarSpace`, `C1Space`,
-`CompositeSpace`, `EnrichedSpace`, `AdaptiveSpace`, `GenericBasisSpace`, and
-`SpaceFactory`.
+`TestFunction(FieldId, ...)` was removed; `TestField` is the only field-bound
+test symbol. Supported FE space concepts live in `FE/Spaces` and are consumable
+by Forms: `FunctionSpace`, `H1Space`, `L2Space`, `HDivSpace` (Raviart-Thomas,
+BDM), `HCurlSpace` (Nedelec), `MixedSpace`, `ProductSpace`, `TraceSpace`,
+`MortarSpace`, `C1Space`, `CompositeSpace`, `EnrichedSpace`, `AdaptiveSpace`,
+`GenericBasisSpace`, and `SpaceFactory`.
 
 ### Geometry and Time
 
-Status: `implemented/public`.
+Status: `implemented/public`, unless noted.
 
 | Vocabulary | Notes |
 |------------|-------|
@@ -142,26 +233,31 @@ Status: `implemented/public`.
 | `meshVelocity()` | Mesh velocity at quadrature points |
 | `meshAcceleration()` | Mesh acceleration when bound |
 | `previousMeshVelocity()`, `predictedMeshVelocity()` | Time-level mesh velocity terminals |
-| `t()`, `deltat()`, `deltat_eff()` | Time, time step, and effective time step |
-| `J()`, `Jinv()`, `detJ()` | Active geometry Jacobian, inverse, and determinant |
+| `t()`, `deltat()`, `deltat_eff()` | Time, time step, and effective time step (`FormExpr::effectiveTimeStep()`, the step implied by the `dt(.)` stencil) |
+| `J()`, `Jinv()`, `detJ()` | Active geometry Jacobian, inverse, and determinant, shaped dim x dim |
 | `currentJacobian()`, `referenceJacobian()` | Frame-explicit geometry Jacobians |
 | `currentJacobianDeterminant()`, `referenceJacobianDeterminant()` | Signed determinants of the frame-explicit geometry Jacobians |
 | `FormExpr::identity()`, `FormExpr::identity(dim)` | Identity tensors |
 | `FormExpr::normal()`, `currentNormal()`, `referenceNormal()` | Active and frame-explicit normals |
 | `currentMeasure()`, `referenceMeasure()`, `surfaceJacobian()` | Frame-explicit integration measures |
 | `currentSurfaceVector()`, `referenceSurfaceVector()` | Measure-scaled normal vectors |
+| `currentMeanCurvature()` | `implemented/expert`; assembly-provided mean curvature of a fitted boundary; no formulation uses it since the curvature-traction routes were retired |
 | `pullback(expr, from, to)` | Metadata-only frame marker; runtime evaluation fails for non-identity transforms |
 | `pushforward(expr, from, to)` | Metadata-only frame marker; runtime evaluation fails for non-identity transforms |
 | `nanson(expr)`, `nanson()` | Explicit Nanson surface-vector transform using `cofactor(currentJacobian() * inv(referenceJacobian()))` |
 | `h()`, `vol()`, `area()`, `domainId()` | Cell diameter, cell volume, facet area, cell-domain marker |
-| `hNormal()` | Facet-normal cell size `2 * volume / area` |
+| `hNormal()` | Facet-normal cell size `2 * vol() / area()` |
+| `FormExpr::geometryTrialVectorVariation()`, `meshVelocityVariation()`, `currentMeasureVariation()`, `currentNormalVariation()`, `surfaceJacobianVariation()`, `geometryTrialJacobianVariation()` | `implemented/internal`; produced by symbolic geometry differentiation |
 
 The moving-domain terminals are physics-neutral. They expose assembly-provided
 mesh/domain motion and frame-explicit geometry; they do not encode a specific
 ALE, FSI, solid-mechanics, contact, or free-surface model.
 For ALE forms, spell out transport and moving-volume terms directly, such as
 `u - meshVelocity()` and `rho * div(meshVelocity()) * inner(u, v)`, so the
-mathematics remains visible in formulation modules.
+mathematics remains visible in formulation modules. Monolithic derivatives with
+respect to a mesh-displacement unknown are an install option
+(`GeometrySensitivityMode::MeshMotionUnknowns`, set by `ALEBinding`), not a
+different vocabulary.
 
 ### Trace and Projection Helpers
 
@@ -172,29 +268,77 @@ Status: `implemented/public`.
 | `normalTrace(u, n)`, `normalTrace(u)` | Scalar normal component, using explicit `n` or the active facet normal |
 | `normalProjection(u, n)`, `normalProjection(u)` | Normal vector projection |
 | `projectNormal(u, n)`, `projectNormal(u)` | Alias for `normalProjection` |
-| `tangentialProjection(u, n)`, `tangentialProjection(u)` | Tangential vector projection |
+| `tangentialProjection(u, n)`, `tangentialProjection(u)` | Tangential vector projection `u - (u.n) n` |
 | `projectTangent(u, n)`, `projectTangent(u)` | Alias for `tangentialProjection` |
-| `tangentialTrace(u, n)`, `tangentialTrace(u)` | Tangential vector trace/projection |
+| `tangentialTrace(u, n)`, `tangentialTrace(u)` | Alias for `tangentialProjection` |
+| `tangentialProjector(n, dim)` | Projector matrix `identity(dim) - outer(n, n)`, as in the surface-stress term `gamma (I - n x n) : grad(v)` |
+| `conormal(n, wall_normal[, eps])` | Unit conormal of a contact line, `safeNormalize(n - (n.n_w) n_w)` |
 
 The default overloads use `FormExpr::normal()`. Use explicit normals for
 interface-side, level-set, or frame-specific laws where the orientation should
-be visible in the formulation.
+be visible in the formulation. `bc::normalComponent(u)` is the same tree as
+`normalTrace(u)`.
 
 ### Measures
 
-Status: `implemented/public`.
+Status: `implemented/public`, unless noted.
+
+Untyped measures (`FormExpr.h`):
 
 | Vocabulary | Integral domain |
 |------------|-----------------|
 | `.dx()` | Cell/domain integral |
-| `.ds(marker)` | Boundary integral; `marker = -1` means default/all as supported by assembly |
-| `.dS()` | Interior facet integral |
-| `.dI(interface_marker)` | Registered interface-face integral |
-| `dInterfaceBoundary(expr, marker)` | Generated interface-boundary intersection measure; shares `.dI(marker)` dispatch, but the registered rule carries explicit geometric dimension d-2 (0D point in 2D, 1D line in 3D) and receives the codimension-two Jacobian |
+| `.ds(marker)` | Boundary integral; `marker = -1` means all boundary faces |
+| `.dS()`, `.dS(marker)` | Interior facet integral; with a marker, over a marker-backed facet set |
+| `.dS(marker, side)` | Interior facets of a set adjacent to one side of a cut |
+| `.dI(marker)` | Registered or generated interface integral; `marker = -1` means all interfaces |
 | `.dCutVolume(interface_marker, side)` | Generated cut-volume integral over the selected interface side |
+| `.dExteriorBoundary(measure)` | Explicit `ExteriorBoundaryMeasure`: `fullPhysical(m)` or `generatedActiveSubset(m, g)` |
+| `dInterfaceBoundary(expr, marker)` | Generated interface-boundary intersection; shares `.dI(marker)` dispatch, but the generated rule carries geometric dimension d-2 (a point in 2D, a line in 3D) and the codimension-two Jacobian |
+
+Typed domains (`IntegrationDomain.h`) are sugar over the untyped measures: each
+lowers to the tree of the untyped call (tested in
+`test_IntegrationDomainLowering.cpp`).
+
+| Vocabulary | Lowers to |
+|------------|-----------|
+| `.dx(VolumeDomain::full())`, `integrate(expr, VolumeDomain::full())` | `.dx()` |
+| `.dx(VolumeDomain::cut(m, side))` | `.dCutVolume(m, side)` |
+| `.dI(InterfaceDomain(m))` | `.dI(m)` |
+| `.dL(ContactLineDomain(m, wall))`, `dInterfaceBoundary(expr, ContactLineDomain)` | `.dI(m)` with the codimension-two generated rule |
+| `.ds(BoundaryDomain::fullPhysical(b))` | `.dExteriorBoundary(fullPhysical(b))`; not the same tree as `.ds(b)` |
+| `.ds(BoundaryDomain::generatedActiveSubset(b, g))` | `.dExteriorBoundary(generatedActiveSubset(b, g))` |
+| `.dS(FacetDomain::cutAdjacent(m[, side]))` | `.dS(m[, side])`, as `cutAdjacentFacetIntegral(expr, m[, side])` |
+
+`VolumeDomain` and `BoundaryDomain` are aliases of `VolumeIntegrationDomain`
+and `ExteriorBoundaryMeasure`.
+
+Level-set geometry handles (`LevelSet/LevelSetGeometry.h`, namespace
+`level_set`) return these domains with the stable generated markers, so a
+formulation never computes a marker by hand:
+
+| Vocabulary | Returns |
+|------------|---------|
+| `LevelSetGeometry::bind(system, {.level_set_field_name, .domain_id, .isovalue, .interface_marker})` | The geometry {phi = c}; throws for an unknown or non-scalar field |
+| `G.interface()`, `L.interface()` | `InterfaceDomain` of Gamma |
+| `G.side(CutVolumeSide::Negative \| Positive)` | `CutSide` L = {phi < c} or {phi > c} |
+| `L.volume()` | `VolumeDomain::cut(marker, side)` |
+| `L.outwardNormal()`, `outwardInterfaceNormal(side)` | The interface rule normal, negated on the positive side, so it points out of L |
+| `L.boundary(b)`, `L.wetted(w)` | `BoundaryDomain::generatedActiveSubset(b, generated marker)` |
+| `L.cutFacets()` | `FacetDomain::cutAdjacent(marker, side)` |
+| `G.contactLine(wall)`, `L.contactLine(wall)` | `ContactLineDomain` of Gamma intersected with a wall |
+| `G.contactLineKey(wall)`, `L.boundaryKey(b)` | `implemented/expert`; the generated marker keys |
+
+Binding registers nothing. A formulation that integrates over a generated
+contact line or a generated boundary subset registers that marker with
+`FormulationBuilder::registered(domain)`; cut volumes are registered by the
+installer. The cut context itself is generated by
+`level_set::LevelSetGeometryService` from the Application's
+`ActiveCutVolumeRequest`, not by the formulation.
 
 The compiler/IR distinguishes `Cell`, `Boundary`, `InteriorFace`,
-`InterfaceFace`, and `CutVolume` terms.
+`InterfaceFace`, and `CutVolume` terms. Contact-line terms are `InterfaceFace`
+terms; their dimension is carried by the generated rule.
 
 ### Differential Operators
 
@@ -206,9 +350,9 @@ Status: `implemented/public`.
 | `div(u)`, `curl(u)` | Vector differential operators |
 | `hessian(u)` | Spatial Hessian support for supported scalar/composite expressions and mappings |
 | `laplacian(u)` | `trace(hessian(u))` helper |
-| `dt(u, order)` | Symbolic time derivative; requires transient context for evaluation |
+| `dt(u, order)` | Symbolic time derivative; the stencil comes from the time integrator of the transient system |
 | `surfaceGradient(f, n)` | Projected surface gradient helper |
-| `surfaceDivergence(u, n)` | Projected surface divergence helper |
+| `surfaceDivergence(u, n)` | Projected surface divergence `div(u) - (grad(u) n).n` |
 | `surfaceLaplacian(f, n)` | Surface Laplacian helper |
 | `meanCurvatureFromNormal(n)`, `curvatureVectorFromNormal(n)` | Curvature helpers from a supplied unit normal |
 | `unitNormalFromLevelSet(phi)`, `meanCurvatureFromLevelSet(phi)` | Level-set geometry helpers |
@@ -228,16 +372,22 @@ Status: `implemented/public`.
 | Vocabulary | Notes |
 |------------|-------|
 | `+`, `-`, `*`, `/`, unary `-` | Scalar/vector/matrix expression arithmetic where shape-compatible |
-| `inner(a, b)`, `dot(a, b)` | Inner product |
+| `Real * expr`, `expr * Real`, `expr / Real` | The only mixed `Real`/`FormExpr` operators; each builds `constant(a) * expr` or `expr / constant(a)`. `Real + expr`, `expr - Real`, and `Real / expr` need `FormExpr::constant` |
+| `inner(a, b)`, `dot(a, b)` | Inner product (`dot` is an alias) |
 | `outer(a, b)`, `cross(a, b)` | Vector/tensor products |
 | `doubleContraction(A, B)` | Rank-2 Frobenius contraction and rank-4/rank-2 contraction |
-| `pow(a, b)`, `sqrt(a)`, `exp(a)`, `log(a)` | Scalar math |
+| `pow(a, b)`, `sqrt(a)`, `exp(a)`, `log(a)` | Scalar math; `pow` takes a `FormExpr` exponent |
 | `abs(a)`, `sign(a)` | Nonsmooth scalar operators |
 | `min(a, b)`, `max(a, b)` | Nonsmooth min/max operators |
 | `lt`, `le`, `gt`, `ge`, `eq`, `ne` | Predicate nodes returning scalar 0/1 values |
 | `conditional(cond, then_expr, else_expr)` | Branching expression |
 | `heaviside(a)`, `indicator(predicate)`, `clamp(a, lo, hi)` | Convenience combinators |
 | `regionIndicator(domain_id)` | Domain-id predicate helper |
+| `sumOf(a, b)` | `a + b`, or `b` when `a` is empty: the left fold of a form built term by term |
+
+Every operator returns an empty `FormExpr` when an operand is empty (default
+constructed), without an error; `sumOf` is the explicit way to start a sum from
+an empty form. An empty residual is rejected at installation.
 
 The exact nonsmooth operators are implemented. Smooth regularizations are
 separate vocabulary:
@@ -250,8 +400,8 @@ separate vocabulary:
 | `smoothMin(a, b, eps)` | Smooth minimum |
 | `smoothMax(a, b, eps)` | Smooth maximum |
 
-Additional trigonometric, hyperbolic, inverse-trigonometric, and special
-functions are still planned; see `Planned Vocabulary`.
+Trigonometric, hyperbolic, inverse-trigonometric, and special functions are not
+implemented; see `Not Scheduled`.
 
 ### Tensor Algebra and Constructors
 
@@ -261,20 +411,21 @@ Status: `implemented/public`.
 |------------|-------|
 | `as_vector({ ... })`, `FormExpr::asVector(...)` | Pack components into a vector expression |
 | `zeroVector(dim)` | Vector of `dim` scalar zero constants |
+| `constantVector(values, dim)` | The first `dim` entries of a `Real` span as a constant vector |
 | `as_tensor({ ... })`, `FormExpr::asTensor(...)` | Pack rows into a matrix/tensor expression |
 | `component(a, i[, j])`, `a.component(i[, j])` | Component extraction |
 | `transpose(A)`, `trace(A)`, `det(A)`, `inv(A)` | Matrix/tensor operations |
 | `cofactor(A)`, `dev(A)`, `sym(A)`, `skew(A)` | Tensor decomposition helpers |
 | `norm(a)`, `normalize(a)` | Vector/matrix norm helpers |
 | `SymmetricTensor(A)`, `SkewTensor(A)` | Semantic aliases around `sym(A)` and `skew(A)` |
-| `contraction(a, b)` | Shape-dependent product helper |
+| `contraction(a, b)` | Shape-dependent product helper (`a * b`) |
 | `FormExpr::coefficient(..., Tensor3Coefficient)` | Rank-3 coefficient data |
 | `FormExpr::coefficient(..., Tensor4Coefficient)` | Rank-4 coefficient data |
 
 The public value model covers real scalars, 3D vectors, 3x3 matrices, symmetric
 and skew matrix tags, rank-3 coefficients, and rank-4 coefficients with
 dedicated contraction support. True tensor-valued unknown fields and broad
-higher-rank public tensor calculus are not yet first-class authoring vocabulary.
+higher-rank public tensor calculus are not first-class authoring vocabulary.
 
 ### Indexed Notation
 
@@ -285,15 +436,17 @@ variance metadata is `implemented/expert`.
 |------------|-------|
 | `Index`, `IndexSet` | Public symbolic index ids/extents |
 | `A(i)`, `A(i, j)`, `A(i, j, k)`, `A(i, j, k, l)` | Indexed access nodes |
-| `einsum(expr)` | Einstein lowering |
+| `einsum(expr)` | Einstein lowering; required before compilation |
 | `einsum(expr, auto_extent)` | Einstein lowering with auto-extent behavior |
 | `tensor::TensorIndex`, `MultiIndex` | Expert tensor-calculus metadata path |
-| `special::delta`, `special::levicivita`, `special::levicivita2d` | Expert/internal special-tensor infrastructure |
+| `tensor::special::delta`, `levicivita`, `levicivita2d` | `implemented/internal`; integer special-tensor helpers of the tensor lowering |
 
 Current public lowering supports scalar outputs from fully contracted
 expressions and vector/matrix outputs with up to two free indices. Each index id
 may appear once as a free index or twice as a bound index in the supported
-patterns.
+patterns. Compiling a form that still holds indexed access throws
+`FormCompiler: detected indexed access (Einstein notation). Call
+forms::einsum(expr) to lower it before compilation.`
 
 ### Matrix, Eigen, Spectral, and History Operators
 
@@ -306,13 +459,13 @@ differentiability are validated by the relevant evaluators/JIT paths.
 | `logm(A)`, `A.matrixLog()` | Matrix logarithm |
 | `sqrtm(A)`, `A.matrixSqrt()` | Matrix square root |
 | `powm(A, p)`, `A.matrixPow(p)` | Matrix power |
-| `matrix*DirectionalDerivative(A, dA)` | Directional derivatives for matrix functions |
-| `A.symmetricEigenvalue(which)` | Symmetric eigenvalue |
+| `FormExpr::matrix*DirectionalDerivative(A, dA)` | Directional derivatives for matrix functions |
+| `A.symmetricEigenvalue(which)` | Symmetric eigenvalue (2x2 and 3x3, sorted descending) |
 | `eigenvalue(A, which)`, `A.eigenvalue(which)` | General eigenvalue helper |
 | `eigvec_sym(A, which)`, `A.symmetricEigenvector(which)` | Symmetric eigenvector |
 | `spectralDecomp(A)`, `A.spectralDecomposition()` | Spectral decomposition/eigenvectors-as-columns |
-| `symmetricEigen*DirectionalDerivative(...)` | Directional derivatives for supported eigen operations |
-| `FormExpr::previousSolution(k)` | Previous solution value, `k >= 1` |
+| `FormExpr::symmetricEigen*DirectionalDerivative(...)`, `spectralDecompositionDirectionalDerivative(...)` | Directional derivatives for supported eigen operations |
+| `FormExpr::previousSolution(k)` | Previous solution value, `k >= 1`, of the trial field of the block being assembled (not field-bound) |
 | `FormExpr::historyWeightedSum(weights)` | Weighted history sum |
 | `FormExpr::historyConvolution(weights)` | History convolution helper |
 
@@ -323,51 +476,82 @@ Status: `implemented/public`.
 | Vocabulary | Notes |
 |------------|-------|
 | `u.minus()`, `u.plus()`, `minus(u)`, `plus(u)` | Interior/interface side restrictions |
-| `jump(u)`, `avg(u)` | DG jump and average |
-| `weightedAverage(u, w_plus, w_minus)` | Weighted side average helper |
-| `harmonicAverage(k)` | Harmonic side average helper |
-| `upwindValue(u, beta)`, `downwindValue(u, beta)` | Basic DG upwind/downwind selection |
-| `interiorPenaltyCoefficient(eta, p)` | SIPG-style penalty scaling helper |
-| `normalComponent(u)` | Scalar normal trace `inner(u, n)` |
-| `interfaceNormalComponent(u, reduction)` | Interface scalar normal trace helper |
-| `applyInterfaceScalarTrace(...)` | Minus/plus/jump/average trace reduction |
+| `jump(u)`, `avg(u)` | `jump(u) = u(-) - u(+)`, `avg(u) = (u(-) + u(+)) / 2` |
+| `weightedAverage(u, w_plus, w_minus)` | `w_plus u(+) + w_minus u(-)` |
+| `harmonicAverage(k)` | `2 k(+) k(-) / (k(+) + k(-))` |
+| `upwindValue(u, beta)`, `downwindValue(u, beta)` | Basic DG upwind/downwind selection using `n(-)` |
+| `interiorPenaltyCoefficient(eta, p)` | SIPG scaling `eta p^2 avg(1 / hNormal())` |
+| `bc::normalComponent(u)` | Scalar normal trace `inner(u, n)` |
+| `bc::interfaceNormalComponent(u, reduction)` | Interface scalar normal trace helper |
+| `bc::applyScalarTrace(u, op)`, `bc::applyInterfaceScalarTrace(u, op, reduction)` | Scalar trace and side reduction |
 | `bc::ScalarTraceOperator` | `Identity` or `NormalComponent` scalar trace selection |
 | `bc::InterfaceTraceReduction` | `Minus`, `Plus`, `Jump`, or `Average` interface reduction |
-| `.dI(marker)` | Interface-face integration measure |
+
+`jump()` and `avg()` are only defined in interior-facet and interface
+integrals; elsewhere assembly throws `Forms: jump() used outside interior-face
+integral`. The normal of the minus side is `FormExpr::normal().minus()`; the
+DG helpers above write fluxes against it.
+
+Sign conventions differ between the core operator and the BC trace helpers:
+`bc::InterfaceTraceReduction::Jump` with `ScalarTraceOperator::Identity` is
+`u(+) - u(-)`, the negative of `jump(u)`, and with `NormalComponent` it is
+`u(+).n(+) + u(-).n(-)`. `Average` with `NormalComponent` is
+`(u(+).n(+) + u(-).n(-)) / 2`. A consistency flux passed to
+`applyInterfaceTraceNitsche` or `InterfaceTraceNitscheBC` must use the same
+orientation as the chosen reduction.
 
 This is enough for current weak trace loads, trace Robin terms, Nitsche terms,
-interface exchange, and simple DG terms. First-class normal/tangential trace
-families remain planned.
+interface exchange, and simple DG terms. First-class normal/tangential jump
+families are not implemented.
 
 ### Boundary Conditions and Constraints
 
-Status: `implemented/public`.
+Status: `implemented/public`, unless noted. Free functions and BC classes are in
+namespace `forms::bc`.
 
 | Vocabulary | Header | Notes |
 |------------|--------|-------|
-| `bc::StrongDirichlet`, `strongDirichlet(...)` | `BoundaryConditions.h` | Strong scalar/vector value constraints |
-| `applyNeumann(...)`, `applyNeumannValue(...)` | `BoundaryConditions.h` | Weak boundary load terms |
-| `applyRobin(...)`, `applyRobinValue(...)` | `BoundaryConditions.h` | Weak Robin terms |
+| `bc::ScalarValue` | `BoundaryConditions.h` | `std::variant<Real, ScalarCoefficient, TimeScalarCoefficient, FormExpr>` for option structs |
+| `bc::toScalarExpr(value, name)` | `BoundaryConditions.h` | Converts a `ScalarValue` (or any alternative) to a `FormExpr`; callbacks become named coefficients |
+| `bc::toVectorExpr(values, dim, prefix[, marker, style])` | `BoundaryConditions.h` | Per-component `std::vector<FormExpr>`; wrap with `FormExpr::asVector` for a vector expression |
+| `bc::isConstantScalarValue`, `bc::isZeroConstantScalarValue` | `BoundaryConditions.h` | Literal tests on a `ScalarValue` |
+| `bc::markerValueName`, `componentValueName`, `indexedComponentValueName` | `BoundaryConditions.h` | Coefficient naming helpers |
+| `bc::StrongDirichlet`, `strongDirichlet(...)` | `BoundaryConditions.h` | Strong scalar/component value constraints |
+| `bc::makeStrongDirichletList(...)`, `makeStrongDirichletListValue(...)` | `BoundaryConditions.h` | Declaration lists from option structs |
+| `applyNeumann(...)`, `applyNeumannValue(...)` | `BoundaryConditions.h` | Weak boundary load terms; overloads take an `ExteriorBoundaryMeasure` selector |
+| `applyRobin(...)`, `applyRobinValue(...)` | `BoundaryConditions.h` | Weak Robin terms; overloads take an `ExteriorBoundaryMeasure` selector |
 | `traceInequalityViolation(...)`, `applyTraceInequality(...)` | `BoundaryConditions.h` | One-sided scalar trace laws |
-| `applyTraceNitsche(...)` | `BoundaryConditions.h` | Boundary Nitsche scalar trace imposition |
+| `applyTraceNitsche(...)` | `BoundaryConditions.h` | Boundary Nitsche scalar trace imposition with explicit consistency flux, adjoint flux, and penalty weight |
 | `applyInterfaceTraceNitsche(...)` | `BoundaryConditions.h` | Interface Nitsche scalar trace imposition |
-| `applyNitscheDirichletPoisson(...)` | `BoundaryConditions.h` | Legacy Poisson-specific Nitsche helper; prefer explicit `applyTraceNitsche(...)` |
-| `buildTraceNitschePenalty(...)` | `BoundaryConditions.h` | Penalty helper using trace options |
-| `bc::NitscheVariant`, `NitscheDirichletOptions` | `BoundaryConditions.h` | Symmetric/nonsymmetric/skew-symmetric Nitsche options |
-| `TraceInequalitySense`, `TraceInequalityOptions` | `BoundaryConditions.h` | One-sided trace-law options |
-| `EssentialBC`, `NaturalBC`, `RobinBC` | `StandardBCs.h` | Standard public BC wrappers |
-| `NormalTraceEssentialBC` | `StandardBCs.h` | Strong `H(div)` normal-trace data |
+| `buildTraceNitschePenalty(...)` | `BoundaryConditions.h` | `gamma p^2 * penalty_weight` |
+| `applyNitscheDirichletPoisson(...)`, `applyNitscheDirichletPoissonValue(...)` | `BoundaryConditions.h` | Legacy Poisson-specific Nitsche helper; prefer explicit `applyTraceNitsche(...)` |
+| `bc::NitscheVariant`, `NitscheDirichletOptions` (`TraceNitscheOptions`) | `BoundaryConditions.h` | Symmetric/unsymmetric Nitsche options |
+| `TraceInequalitySense`, `TraceInequalityLinearization`, `TraceInequalityOptions` | `BoundaryConditions.h` | One-sided trace-law options |
+| `buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(...)`, `GeneratedBoundaryNitscheTraceFormBinding` | `BoundaryConditions.h` | `implemented/expert`; symmetric-gradient Nitsche terms on a generated boundary with an immutable binding for the installer's trace certificate |
+| `EssentialBC`, `ComponentEssentialBC`, `vectorComponentEssentialBC(...)` | `StandardBCs.h` | Strong values: scalar, dense vector, or selected components |
+| `NaturalBC`, `RobinBC` | `StandardBCs.h` | Weak flux and Robin terms on `ds(marker)` or an `ExteriorBoundaryMeasure` |
+| `ReservedBC` | `StandardBCs.h` | Reserves a marker for conflict validation; contributes nothing |
+| `NormalTraceEssentialBC` | `StandardBCs.h` | Strong `H(div)` normal-trace data (`HDivNormalConstraint`) |
 | `TraceLoadBC`, `TraceRobinBC`, `TraceInequalityBC` | `StandardBCs.h` | Boundary scalar trace wrappers |
 | `InterfaceTraceLoadBC`, `InterfaceTraceRobinBC`, `InterfaceTraceJumpPenaltyBC` | `StandardBCs.h` | Interface scalar trace wrappers |
-| `make*BC(...)` helpers | `StandardBCs.h` | Factory helpers for the standard BC wrappers |
+| `makeNormalTraceEssentialBC`, `makeTraceLoadBC`, `makeTraceRobinBC`, `makeTraceInequalityBC`, `makeInterfaceTrace*BC` | `StandardBCs.h` | Factory helpers for the trace wrappers |
 | `ScalarNitscheBC`, `TraceNitscheBC`, `InterfaceTraceNitscheBC` | `NitscheBC.h` | Nitsche wrapper types; `ScalarNitscheBC` is a legacy scalar-diffusion convenience |
+| `PeriodicBC`, `MultiPointConstraintBC` | `ConstraintBCs.h` | Affine constraints installed through `BoundaryConditionManager` |
+| `bc::BoundaryCondition` | `BoundaryCondition.h` | `implemented/expert`; interface for new BC wrappers |
 | `interface::NitscheVariant`, `NitscheInterfaceOptions` | `InterfaceConditions.h` | Interface Poisson Nitsche options |
+| `interface::scalarContinuityPenaltyTerms(...)` | `InterfaceConditions.h` | Equal-and-opposite continuity penalty terms of two traced sides |
 | `interface::nitschePoissonIntegrand(...)` | `InterfaceConditions.h` | Legacy interface Poisson integrand helper; prefer explicit interface trace terms |
-| `interface::applyNitscheInterfacePoisson(...)` | `InterfaceConditions.h` | Legacy interface Poisson helper over `.dI(marker)` |
+| `interface::applyNitscheInterfacePoisson(...)` | `InterfaceConditions.h` | Legacy interface Poisson helper over `.dI(marker)`; builds its fluxes on `n(-)` but uses the `Jump` reduction (`u(+) - u(-)`), unlike `nitschePoissonIntegrand`; neither helper has a test |
+| `systems::BoundaryConditionManager::add`, `install(options, factory)` | `Systems/BoundaryConditionManager.h` | Collect BC objects, one factory call per option entry |
+| `BoundaryConditionManager::applyAll(system, residual, u, v, field)` | `Systems/BoundaryConditionManager.h` | Validate markers, add weak terms to the residual, install strong and affine constraints |
+| `BoundaryConditionManager::applyAll(system, field)` | `Systems/BoundaryConditionManager.h` | Strong/affine-only BCs of a field; throws before any mutation if a BC has weak terms |
 
 Use equality/Robin/Nitsche helpers for equality-style laws such as
 `tau(u) = g` or weak continuity. Use `TraceInequalityBC` for one-sided laws
-whose active set can change during nonlinear solve.
+whose active set can change during nonlinear solve. `H(curl)` tangential
+essential conditions have no BC wrapper; the homogeneous
+`constraints::HCurlTangentialConstraint(field, marker)` is added with
+`FESystem::addSystemConstraint`.
 
 Exterior weak-form helpers and wrappers accept
 `ExteriorBoundaryMeasure::generatedActiveSubset(physical_marker,
@@ -386,7 +570,30 @@ region.
 
 Advanced `H(div)` trace infrastructure also exposes periodic/MPC pairing
 helpers and marker-scoped mortar/interface field workflows through the Spaces
-and Systems layers. See `Docs/HDIV_ADVANCED_USAGE_GUIDE.md` for those flows.
+and Systems layers. See `Docs/HDIV_ADVANCED_USAGE_GUIDE.md` for those flows;
+mortar and interface-field couplings there are registered as hand-written
+interface-face kernels, not as forms.
+
+### Constraint Plan and Gauge Anchors
+
+Status: `implemented/public` for `ConstraintPlan`; the individual constraint
+classes are `implemented/expert`. Namespace `constraints`.
+
+| Vocabulary | Header | Notes |
+|------------|--------|-------|
+| `ConstraintPlan(system)` | `Constraints/ConstraintPlan.h` | Holds declarations and registers them in the phase order `VertexValues < Essential < InactiveSupport < Aggregation < PointLaw`, then declaration order |
+| `plan.vertexValues(field, values, mode)` | `Constraints/ConstraintPlan.h` | `VertexDirichletConstraint` (pressure pins) |
+| `plan.essentials(install)` | `Constraints/ConstraintPlan.h` | Runs a callback that registers essential constraints, typically `BoundaryConditionManager::applyAll` or `installStrongDirichlet` |
+| `plan.inactiveSide(fields, cut_side, value)` | `Constraints/ConstraintPlan.h` | Pins the inactive side of a cut (`LevelSetActiveSideVertexDirichletConstraint`) |
+| `plan.aggregate(fields, cut_side, guards)` | `Constraints/ConstraintPlan.h` | Small-cut aggregation of the active side (`SmallCutAggregationConstraint`) |
+| `plan.contactPointVelocity(velocity, law)`, `plan.contactPointVelocity(velocity, geometry, wall, wall_normal, speed, name)` | `Constraints/ConstraintPlan.h` | Strong contact-point velocity law (`ContactPointVelocityConstraint`, 2D, axis-aligned planar walls) |
+| `plan.declare(phase, constraint)` | `Constraints/ConstraintPlan.h` | Any `ISystemConstraint` in a phase |
+| `plan.commitThrough(phase)`, `plan.commit()` | `Constraints/ConstraintPlan.h` | Registers held declarations; declaring into a passed phase throws `std::logic_error` |
+| `plan.anchorGauge(operator_tag, anchor)` | `Constraints/ConstraintPlan.h` | Not a phase: records an `InterfaceMeasureGaugeAnchor` in the gauge registry and adds its measure checks |
+| `InterfaceMeasureGaugeAnchor`, `InterfaceMeasureGaugeAnchorTexts`, `anchorGaugeOnInterfaceMeasure(...)` | `Constraints/InterfaceMeasureGaugeAnchor.h` | A natural condition on a generated interface anchors a constant mode while the interface has positive measure; the solve is rejected otherwise |
+| `ContactPointVelocityLaw`, `ContactPointVelocitySample` | `Constraints/ContactPointVelocityConstraint.h` | Law data (`contact_speed(cos theta)`) and per-point samples |
+| `GlobalConstraint::zeroMean(dofs)`, `fixedMean`, `pinDof` | `Constraints/GlobalConstraint.h` | `implemented/expert`; DOF-level global constraints |
+| `FESystem::gaugeRegistry()` | `Systems/FESystem.h` | `implemented/expert`; automatic constant-mode detection: a pure-Neumann scalar problem gets a zero-mean constraint without author code |
 
 ### Installation and Compilation
 
@@ -395,14 +602,48 @@ Status: `implemented/public` for the Systems install API; compiler/IR APIs are
 
 | Vocabulary | Header | Notes |
 |------------|--------|-------|
-| `installFormulation(system, op, fields, residual)` | `Systems/FormsInstaller.h` | Canonical residual installation |
+| `installFormulation(system, op, fields, residual[, options])` | `Systems/FormsInstaller.h` | Canonical residual installation; one or several test fields |
+| `installFormulationWithMetadata(...)` | `Systems/FormsInstaller.h` | Same, returning the analysis bridge metadata of the install |
+| `FormInstallOptions` | `Systems/FormsInstaller.h` | `ad_mode`, `compiler_options` (`SymbolicOptions`), `extra_trial_fields`, `constitutive_laws`, `source_component_tag`, `contributes_to_problem_analysis`, generated-boundary Nitsche trace requests |
+| `FormInstallOptions::recordDynamicViscosity(...)` | `Systems/FormsInstaller.h` | `implemented/expert`; publishes the viscosity law to coupling contracts |
 | `installStrongDirichlet(system, bcs)` | `Systems/FormsInstaller.h` | Strong constraint installation |
 | `installMixedBilinear(...)` | `Systems/FormsInstaller.h` | Explicit bilinear block installation |
 | `installMixedLinear(...)` | `Systems/FormsInstaller.h` | Explicit linear block installation |
 | `installMixedFormIR(...)` | `Systems/FormsInstaller.h` | Expert precompiled IR installation |
-| `BoundaryConditionManager::applyAll(...)` | `Systems/BoundaryConditionManager.h` | One-call BC workflow |
 | `FormCompiler::compile*`, `compileMixed(...)` | `Forms/FormCompiler.h` | Expert compile-without-install workflows |
 | `FormIR`, `MixedFormIR`, `FormKernels` | `Forms/*IR.h`, `Forms/FormKernels.h` | Expert IR/kernel surfaces |
+| `trySplitAffineResidual(...)` | `Forms/AffineAnalysis.h` | `implemented/expert`; splits an affine residual into bilinear and linear parts |
+
+### Formulation Services
+
+Status: `implemented/public` for `FormulationBuilder` and `FieldBinding`;
+the rest `implemented/expert`. Namespace `systems`.
+
+| Vocabulary | Header | Notes |
+|------------|--------|-------|
+| `FormulationBuilder(system, operator_tag, base_options)` | `Systems/FormulationBuilder.h` | One set of install options for a module; adds the operator when missing |
+| `F.symbolicTangent()`, `F.configure(ale)`, `F.recordDynamicViscosity(field, mu)` | `Systems/FormulationBuilder.h` | Option changes, effective in call order |
+| `F.install(fields, residual)` | `Systems/FormulationBuilder.h` | `installFormulation` with `F.options()` |
+| `F.installGroup(fields, residual, FormulationGroup{...})` | `Systems/FormulationBuilder.h` | A separate kernel group with a copy of the options changed by `source_component_tag`, `extra_trial_fields`, `ale`, or dropped trace requests |
+| `F.registered(ContactLineDomain)`, `F.registered(BoundaryDomain)` | `Systems/FormulationBuilder.h` | Registers a generated marker with the system and returns the domain |
+| `F.certifyGeneratedBoundaryNitscheTraces(bindings, marker, ratio)` | `Systems/FormulationBuilder.h` | `implemented/expert`; trace-certificate requests on a cut volume |
+| `DiagnosticRegistry::declareSet`, `enabled`, `install`, `operators` | `Systems/DiagnosticRegistry.h` | Opt-in diagnostic operators, switched on by environment names, installed with the formulation's options |
+| `resolveALEBinding(system, ALEBindingOptions)`, `ALEBinding::configureInstallOptions` | `Systems/ALEBinding.h` | Prescribed or coupled mesh velocity; sets geometry sensitivity and extra trial fields |
+| `resolveMeshDisplacementBinding(...)` | `Systems/MeshDisplacementBinding.h` | Mesh-displacement unknown of a mesh-motion module |
+| `FESystem::attachment<T>()`, `findAttachment<T>()` | `Systems/FESystem.h` | Per-system storage of a component that extends the system, one per type |
+| `collectiveExactSum(...)`, `collectiveExactSums(...)`, `ExactAccumulator` | `Systems/SystemCollectives.h`, `Systems/ExactAccumulator.h` | Sums that are bitwise identical at any rank count |
+| `CollectiveCommunicator`, `collectiveSumDouble`, `collectiveMin/MaxDouble`, `agreeOnLocalPhase(...)` | `Systems/SystemCollectives.h` | Collective reductions and agreed failure of rank-local phases |
+
+### Level-Set Interface Certificates
+
+Status: `implemented/expert`. Namespace `interfaces`.
+
+| Vocabulary | Header | Notes |
+|------------|--------|-------|
+| `planarWallEvidence(system, wall, normal)` | `Interfaces/ContactLineGeometryCertificate.h` | Every owned wall face is a first-order plane with the configured normal, reduced over the communicator |
+| `certifyContactLineRules(system, context, check)` | `Interfaces/ContactLineGeometryCertificate.h` | Contact rules are codimension-two, aligned with the wall, and transverse to it |
+| `certifyContactLineRulesCollectively(...)` | `Interfaces/ContactLineGeometryCertificate.h` | The same with the failure agreed over the ranks |
+| `ContactLineGeometryCheck`, `kContactLineAlignmentTolerance`, `kContactLineMinimumTransverseSine` | `Interfaces/ContactLineGeometryCertificate.h` | Check data and tolerances |
 
 ### Symbolic Differentiation and AD
 
@@ -411,15 +652,16 @@ Status: `implemented/public` for normal residual-to-Jacobian workflows and
 
 | Vocabulary | Notes |
 |------------|-------|
-| Residual form to Jacobian | Forward-mode dual evaluation in nonlinear kernels |
+| Residual form to Jacobian | Forward-mode dual evaluation in nonlinear kernels (`ADMode::Forward`), or the symbolic tangent with `use_symbolic_tangent` |
 | `differentiateResidual(...)` | Symbolic residual differentiation helper |
 | `directionalDerivativeWrtField(...)` | Directional derivative helper |
+| `directionalDerivativeWrtNormal(...)`, `directionalDerivativeWrtSpatialCoordinate(...)` | Geometry directional derivatives used by the symbolic geometry tangent |
 | `differentiateResidualHessianVector(...)` | Hessian-vector helper |
 | `differentiateWrtAuxiliaryOutput(...)` | Auxiliary-output sensitivity helper |
 | `simplify(...)`, `extractTermsReferencing(...)` | Symbolic utility helpers |
-| `checkSymbolicDifferentiability(...)` | Validation helper |
+| `checkSymbolicDifferentiability(...)`, `canDifferentiateSymbolically(...)` | Validation helpers |
 
-### Auxiliary Coupling and Boundary Functionals
+### Auxiliary Coupling, Functionals, and Derived Results
 
 Status: `implemented/public` for named authoring helpers; slot references are
 `implemented/internal`.
@@ -429,17 +671,25 @@ Status: `implemented/public` for named authoring helpers; slot references are
 | `AuxiliaryInput(name)` | Preferred named auxiliary input reference |
 | `AuxiliaryOutput(name)` | Preferred named auxiliary model output reference |
 | `AuxiliaryOutput(instance, name)` | Instance-qualified auxiliary model output |
-| `AuxiliaryState(name)` | Raw auxiliary state access; advanced path |
-| `AuxiliaryInputSlot(slot)`, `AuxiliaryOutputSlot(slot)` | Post-resolution slot references |
-| `FormExpr::auxiliaryStateRef(slot)` | Internal slot reference |
-| `BoundaryFunctional` | Boundary/domain functional definition |
+| `AuxiliaryState(name)` | `implemented/expert`; raw auxiliary state access; `BoundaryConditionManager::apply` rejects it in a residual |
+| `AuxiliaryInputSlot(slot)`, `AuxiliaryOutputSlot(slot)` | `implemented/internal`; post-resolution slot references |
+| `FormExpr::auxiliaryStateRef(slot)` | `implemented/internal`; slot reference |
+| `FESystem::boundaryIntegral(BoundaryFunctional, schedule)`, `boundaryIntegral(integrand, marker, ...)` | Registers a boundary (or, with `is_domain_functional`, cell) integral as an auxiliary input; the handle converts to a `FormExpr` |
+| `systems::aux::model(name, [](ModelFacade& m) { ... })` | 0D model DSL: `m.input`, `m.state`, `m.params`, `m << ddt(X) == rhs`, `m << alg(Z) == g`, `m << out("y") == e` |
+| `FESystem::deploy(use(model).name(...).boundary(m).monolithic().params(...).bind(...))` | Deployed model; `handle.output(name)` is a `FormExpr` |
+| `BoundaryFunctional` | Boundary/domain functional definition (integrand plus marker; no measure) |
 | `BoundaryFunctionalResults` | Runtime functional output container |
-| `compileBoundaryFunctionalKernel(...)` | Boundary/domain functional compilation |
-| `FormExpr::boundaryIntegral(...)` | Expert/legacy boundary-functional symbol |
-| `FormExpr::boundaryIntegralRef(slot)` | Internal/legacy slot reference |
+| `compileBoundaryFunctionalKernel(...)` | `implemented/expert`; compiles a scalar integrand to a cell or boundary-face functional kernel |
+| `FESystem::addFunctionalKernel(tag, kernel)`, `evaluateFunctional(tag, state)` | `implemented/expert`; evaluates a compiled functional on a state |
+| `post::DerivedResultBuilder(name).scope(...).policy(...).shape(...).expression(expr).build()` | Derived output field from a `FormExpr` (cell average, patch average, L2 projection, ...), added with `FESystem::addDerivedResult` |
+| `FormExpr::boundaryIntegral(...)` | `implemented/internal`; legacy boundary-functional symbol, rejected by `BoundaryConditionManager::apply` |
+| `FormExpr::boundaryIntegralRef(slot)` | `implemented/internal`; legacy slot reference |
 
-Legacy `boundaryIntegralValue`/`boundaryIntegralRef` terminology should be
-treated as superseded by `AuxiliaryInput`/`AuxiliaryInputSlot`.
+Legacy `boundaryIntegralValue`/`boundaryIntegralRef` terminology is superseded
+by `AuxiliaryInput`/`AuxiliaryInputSlot`. A functional is not yet a measured
+form: `BoundaryFunctional` takes an integrand and a marker, and there is no
+interface, contact-line, or cut-volume functional. Step E1 adds the snapshot
+functional evaluator for forms (see `Planned in Milestone MR`).
 
 ### Constitutive Vocabulary
 
@@ -451,35 +701,37 @@ terminals are `implemented/internal`.
 | `constitutive(model, input)` | Unary constitutive call |
 | `constitutive(model, {inputs...})` | N-ary constitutive call |
 | `constitutive(model, a0, a1, ...)` | Variadic n-ary helper |
-| `ConstitutiveCall::out(i)`, `output(i)` | Indexed multi-output selection |
+| `ConstitutiveCall::out(i)`, `output(i)`, `expr()` | Indexed multi-output selection; `expr()` or the implicit conversion gives output 0 |
 | `FormExpr::constitutiveOutput(call, i)` | Lower-level multi-output selection |
 | `ConstitutiveModel::evaluate*` | Real and dual constitutive evaluation hooks |
 | `outputCount()`, `outputSpec(i)`, expected input metadata | Constitutive metadata |
-| `stateLayout()`, `stateVariables()` | Constitutive state layout metadata |
+| `stateLayout()`, `stateVariables()`, `stateSpec()` | Constitutive state layout metadata |
 | `parameterSpecs()` | Constitutive parameter metadata |
-| `materialStateOldRef(offset_bytes)` | Internal byte-offset state terminal |
-| `materialStateWorkRef(offset_bytes)` | Internal byte-offset state terminal |
+| `inlinable()` | Inlinable models are required by the symbolic tangent |
+| `materialStateOldRef(offset_bytes)` | `implemented/internal`; byte-offset state terminal |
+| `materialStateWorkRef(offset_bytes)` | `implemented/internal`; byte-offset state terminal |
 
-Named material-state vocabulary is planned. Public form code should not need to
-author raw byte offsets.
+Named material-state vocabulary is not implemented. Public form code should not
+need to author raw byte offsets.
 
 ### Finite Deformation
 
-Status: `implemented/public` helper header.
+Status: `implemented/public` helper header, namespace
+`forms::finite_deformation`.
 
 `Forms/FiniteDeformationForms.h` provides finite-deformation kinematic helpers:
 
 | Vocabulary | Notes |
 |------------|-------|
-| `deformationGradient(u)` | `F` |
+| `deformationGradient(u[, dim])` | `F = I + grad(u)` |
 | `deformationGradientVariation(du)` | Variation of `F` |
-| `finiteDeformationDimension(u[, dim])` | Dimension inference/helper |
+| `finiteDeformationDimension(u[, dim])` | Dimension from the space signature; 3 when it cannot be inferred |
 | `jacobian(F)` | `det(F)` helper in finite-deformation namespace |
 | `inverseDeformationGradient(F)` | `F^{-1}` |
 | `inverseTransposeDeformationGradient(F)` | `F^{-T}` |
 | `rightCauchyGreen(F)`, `leftCauchyGreen(F)` | `C` and `b` |
 | `greenLagrangeStrain(F)`, `almansiStrain(F)` | Strain measures |
-| `kinematics(u)` | Bundled finite-deformation expressions |
+| `kinematics(u[, dim])` | Bundled `F`, `J`, `Finv`, `FinvT`, `C`, `b`, `green_lagrange`, `almansi` |
 | `linearizeKinematics(u, du)` | Bundled variation expressions |
 | `jacobianVariation(F, dF)` | Variation of `det(F)` |
 | `inverseVariation(F, dF)` | Variation of `F^{-1}` |
@@ -487,8 +739,8 @@ Status: `implemented/public` helper header.
 | `leftCauchyGreenVariation(F, dF)` | Variation of `b` |
 | `greenLagrangeVariation(F, dF)` | Variation of Green-Lagrange strain |
 | `almansiVariation(F, dF)` | Variation of Almansi strain |
-| `scalarCurrentGradientFromReferenceGradient(...)` | Reference/current scalar gradient transforms |
-| `vectorCurrentGradientFromReferenceGradient(...)` | Reference/current vector gradient transforms |
+| `scalarCurrentGradientFromReferenceGradient(...)`, `scalarReferenceGradientFromCurrentGradient(...)` | Reference/current scalar gradient transforms |
+| `vectorCurrentGradientFromReferenceGradient(...)`, `vectorReferenceGradientFromCurrentGradient(...)` | Reference/current vector gradient transforms |
 | `pushForwardVector(...)`, `pullBackVector(...)` | Vector frame transforms |
 | `contravariantPiolaPushForward(...)`, `covariantPiolaPushForward(...)` | Piola transforms |
 | `nansonMeasureVector(...)`, `nansonMeasureVectorVariation(...)` | Surface measure transforms |
@@ -516,10 +768,11 @@ prescribed moving reference frames:
 
 ### Cut Cell
 
-Status: `implemented/public` helper header.
+Status: `implemented/public` helper header, unless noted.
 
 `Forms/CutCellForms.h` provides parameter-slot terminals for cut-cell and
-embedded-boundary formulations:
+embedded-boundary formulations, and the facet terms of cut-cell stabilization
+(ghost penalty):
 
 | Vocabulary | Notes |
 |------------|-------|
@@ -527,11 +780,28 @@ embedded-boundary formulations:
 | `cutVolumeFraction()` | Cut-cell volume fraction |
 | `cutSideIndicator()` | Side/phase indicator |
 | `cutEmbeddedNormal()` | Embedded-boundary normal |
-| `cutStabilizationScale()` | Stabilization scale |
+| `cutStabilizationScale()` | Stabilization scale of the cut cells next to a facet; zero away from cut cells |
 | `cutMeasureSensitivity()` | Measure sensitivity |
 | `cutNormalSensitivity()` | Normal sensitivity vector |
 | `cutQuadratureWeightSensitivity()` | Quadrature-weight sensitivity |
 | `CutCellFormTerminals`, `cutCellTerminals()` | Bundled helper terminals |
+| `cutAdjacentFacetJump(e)`, `cutAdjacentFacetAverage(e)` | `jump(e)` and `avg(e)` |
+| `cutAdjacentFacetGradientJump(e)`, `cutAdjacentFacetNormalGradientJump(e)` | `jump(grad(e))` and its `n(-)` component |
+| `cutAdjacentFacetHessianJump(e)`, `cutAdjacentFacetSecondNormalDerivativeJump(e)` | `jump(hessian(e))` and its `n(-) n(-)` component |
+| `cutAdjacentFacetIntegral(e, marker[, side])` | `.dS(marker[, side])`; the marker-less overload is deleted |
+| `cutCellParameterCount(...)`, `cutCellParametersForRule(...)`, `cutSideIndicatorValue(...)` | `implemented/internal`; fill the parameter slots from a cut rule |
+
+### Coupling Forms
+
+Status: `implemented/expert`. Namespace `coupling`.
+
+`Coupling/CouplingFormBuilder.h` builds forms from participant and field names
+of a coupling contract (used by `Physics/Coupling/FSICouplingModule` and the
+thermal interface coupling module): `state(participant, field, symbol)`,
+`test(...)`, `timeDerivative(...)`, `previousSolution(...)`, geometry terminals
+of a participant, `integrate(integrand, region[, boundary_measure])`,
+`sharedInterface(name)` with per-side `state`, `test`, and `normal`, and
+`equationSet(...)` to declare the coupled equations.
 
 ### Manual Block and Complex Workflows
 
@@ -550,56 +820,83 @@ explicit real/imaginary splitting today.
 ## Current Capability Notes
 
 - Forms is a real-valued symbolic DSL with scalar, vector, matrix, and selected
-  higher-rank coefficient support. Broad tensor-valued unknowns are planned, not
-  current public vocabulary.
+  higher-rank coefficient support. Tensor-valued unknowns are not public
+  vocabulary.
 - Spatial second derivatives are available in supported mappings and expression
   shapes. Non-affine higher-derivative coverage remains mapping- and element
   dependent, with validation preferred over silent approximations.
-- Matrix, spectral, history, smooth regularization, and interface-measure
-  vocabulary are implemented and should not be listed as future work.
+- Matrix, spectral, history, smooth regularization, interface, cut-volume, and
+  generated contact-line measures are implemented and should not be listed as
+  future work.
 - `FormExpr::parameter(name)` is implemented. `parameterRef(slot)` is an
   internal/lowering hook.
 - Slot-indexed auxiliary references and byte-offset material-state references
   are implementation details, not the recommended formulation surface.
 - `trace(A)` is tensor trace. Facet/interface trace vocabulary must use names
   such as `normalTrace` or `facetTrace`, not overload tensor `trace`.
-- Quadrature-rule control, embedded/codimension measures, and mixed-dimensional
-  transfer operators are not yet public form vocabulary.
+- Shapes are checked when a kernel evaluates, not when an expression is built;
+  a shape mismatch or `jump()` outside a facet integral is reported at
+  assembly. The form compiler checks earlier that a form is a sum of
+  integrals and has the test and trial functions its kind needs.
+- The only codimension-two measure is the generated interface-boundary
+  intersection (`.dL`, `dInterfaceBoundary`); general embedded-curve, point,
+  and quadrature-rule-per-measure vocabulary is not public. Cut quadrature
+  orders are inputs of the cut-volume request, not of the form.
+- Mortar and mixed-dimensional interface-field couplings are registered as
+  hand-written interface-face kernels; there is no forms path for a
+  multiplier on an interface field or for a global scalar unknown.
 
 ## Planned Vocabulary
 
-These items are not implemented or not public enough to document as current
-authoring vocabulary. They are ordered by expected leverage.
+### Planned in Milestone MR
 
-### Priority 1: Trace and Interface Algebra
+Status: `planned`. These steps of milestone MR
+(`Documentation/free_surface_program_tracker.md` §5, decisions D49 and D50)
+change the authoring surface:
 
-Status: `planned`.
+| Step | Planned vocabulary |
+|------|--------------------|
+| G4(a) | `FormulationBuilder` declarations of functionals, residual-work channels, diagnostic operators, and the external boundary energy |
+| G4(b) | `NavierStokesPostProcessing.h`: residual work, diagnostic operators, and energy declarations stated as forms, as in `PoissonPostProcessing.h` and `UstructPostProcessing.h` |
+| G1, G2 | Generic accepted-stage and functional records on the attachment store; an energy-balance ledger with named channels and declared identities |
+| G5 | `ALEBinding` declarations, `LevelSetGeometry` markers and the contact-certificate hook, field binding, and vertex-field initialization as FE services |
+| E1 | Snapshot functional evaluator for forms (interpreted, exact reduction) over cut-volume, interface, wall, and contact rules |
+| E3 | Energies, powers, works, and the logged measures as forms in `NavierStokesPostProcessing.h`, under the D49 tolerance gate |
+| L1 | Log formats as FE data (`LogRecordFormat`); the free-surface observer (`FreeSurfaceObserver` in `NavierStokesBCFactories.h`) is removed |
+
+### Not Scheduled
+
+Status: `out-of-scope-for-now`. None of the items below has a step in
+milestone MR; they stay deferred until a module needs them. They are ordered by
+expected leverage.
+
+#### Trace and Interface Algebra
 
 Current public pieces include side restrictions, `jump`, `avg`,
 `weightedAverage`, `normalComponent`, normal/tangential trace-projection
-helpers, scalar trace BC helpers, and `.dI`.
-Missing vocabulary:
+helpers, scalar trace BC helpers, `.dI`, and the level-set handles with
+`outwardNormal()`. Missing vocabulary:
 
-| Planned vocabulary | Purpose |
-|--------------------|---------|
+| Vocabulary | Purpose |
+|------------|---------|
 | `facetTrace(expr, side)` | Explicit side/trace restriction distinct from tensor `trace` |
 | `normalJump(u)`, `tangentialJump(u)` | Orientation-aware trace jumps |
-| Side-specific normals/orientation metadata | Robust interface semantics for H(div), H(curl), slip, contact, and Nitsche laws |
+| One jump sign convention | `bc::InterfaceTraceReduction::Jump` agrees with `jump()` |
+| Vector trace laws | Nitsche and Robin helpers for vector traces (today scalar traces only) |
+| `H(curl)` tangential essential BC wrapper | Counterpart of `NormalTraceEssentialBC`, with nonzero data |
 
 Acceptance criteria: common H(div), H(curl), slip, and Nitsche boundary/interface
 terms can be written without raw component manipulation against side-specific
 normals.
 
-### Priority 2: Named History, Stage, and Material State
-
-Status: `planned`.
+#### Named History, Stage, and Material State
 
 Current public pieces include `dt`, `t`, `deltat`, `deltat_eff`,
 `previousSolution(k)`, `historyWeightedSum`, `historyConvolution`, and named
 auxiliary input/output/state terminals. Missing vocabulary:
 
-| Planned vocabulary | Purpose |
-|--------------------|---------|
+| Vocabulary | Purpose |
+|------------|---------|
 | `prev(u, k)` or `u_prev(k)` | Field-oriented previous solution access |
 | `stage(u, i)` | Time-integrator stage access |
 | `stateOld(name)`, `stateWork(name)` | Named material-state access from `StateLayout` |
@@ -608,19 +905,15 @@ auxiliary input/output/state terminals. Missing vocabulary:
 Acceptance criteria: transient and stateful constitutive forms can be written
 with named field/state concepts instead of slot or byte-offset references.
 
-### Priority 3: Generalized Measures and Quadrature Metadata
+#### Generalized Measures and Quadrature Metadata
 
-Status: `planned`.
+Current public measures are listed under `Measures`. Missing vocabulary:
 
-Current public measures are `.dx()`, `.ds(marker)`, `.dS()`,
-`.dI(marker)`, and `.dCutVolume(interface_marker, side)`. Missing
-vocabulary:
-
-| Planned vocabulary | Purpose |
-|--------------------|---------|
+| Vocabulary | Purpose |
+|------------|---------|
 | Subdomain-set and boundary-set measures | Integrate over marker sets without manual loops |
 | Interface-pair/interface-set measures | Nontrivial interface grouping |
-| Codimension-2 edge/curve measures | Fractures, fibers, vessel centerlines, embedded curves |
+| Codimension-2 curve measures beyond generated contact lines | Fractures, fibers, vessel centerlines, embedded curves |
 | Point measures / singular source measures | Point sources and probe-style weak terms |
 | Embedded manifold measures | Immersed or lower-dimensional physics |
 | Per-measure quadrature rule/order metadata | Local quadrature control attached to the measure |
@@ -628,31 +921,28 @@ vocabulary:
 Acceptance criteria: singular sources, embedded sources, and interface-heavy
 problems can be expressed without handwritten kernels.
 
-### Priority 4: Mixed-Dimensional Transfer Operators
-
-Status: `planned`.
+#### Mixed-Dimensional Transfer Operators and Multipliers
 
 Spaces contain `TraceSpace` and `MortarSpace` concepts, and Systems can register
 interface fields, but public bulk-to-lower-dimensional transfer vocabulary is
 not complete.
 
-| Planned vocabulary | Purpose |
-|--------------------|---------|
+| Vocabulary | Purpose |
+|------------|---------|
 | `restrictTo(manifold, u)` | Restrict a bulk field to a lower-dimensional manifold |
 | `traceTo(manifold, u)` | Explicit trace from bulk to a target manifold/interface |
 | `extendFrom(manifold, lambda)` | Extend lower-dimensional data back to the bulk |
 | `lift(...)` | Lifting/prolongation helper |
 | Nonmatching transfer operators | Mortar and embedded coupling |
+| Interface-field and global-scalar multipliers in forms | Mortar coupling and mean-value constraints written as forms |
 
 Suggested sequencing: same-mesh codimension-1 coupling, nonmatching
 codimension-1 mortar coupling, then codimension-2 and mixed 0D/1D/3D transfer.
 
-### Priority 5: Scalar Math Expansion
+#### Scalar Math Expansion
 
-Status: `planned`.
-
-| Planned vocabulary | Notes |
-|--------------------|-------|
+| Vocabulary | Notes |
+|------------|-------|
 | `sin`, `cos`, `tan` | Trigonometric functions |
 | `sinh`, `cosh`, `tanh` | Hyperbolic functions |
 | `atan`, `atan2` | Inverse tangent functions |
@@ -663,36 +953,32 @@ Status: `planned`.
 New scalar functions should ship with AD, symbolic differentiation, interpreter,
 JIT/lowering, validation, and tests.
 
-### Priority 6: Constitutive Ergonomics
-
-Status: `planned`.
+#### Constitutive Ergonomics
 
 Current support already includes n-ary constitutive inputs, multi-output calls,
 indexed output selection, output metadata, parameter specs, and state layout
 metadata. Missing vocabulary:
 
-| Planned vocabulary | Purpose |
-|--------------------|---------|
+| Vocabulary | Purpose |
+|------------|---------|
 | `call.out("stress")` | Named output selection |
 | Public output descriptors for docs/tooling | Discoverable constitutive outputs |
 | Public named material state access | Pair `StateLayout` with form vocabulary |
 | First-class adapter layer from FE constitutive laws | Reduce custom glue code |
 
-### Priority 7: Conservation-Law Trace Support
-
-Status: `planned`.
+#### Conservation-Law Trace Support
 
 Current DG helpers cover side restrictions, jump/average, weighted/harmonic
 averages, upwind/downwind values, and simple interior-penalty scaling.
 
-The planned work here is not a core `numericalFlux(...)` wrapper. Flux models
-should remain visible in formulation code or in physics-layer helper functions
-that are themselves written from Forms expressions. Core Forms should instead
-make those explicit flux expressions safer and clearer with better
-trace/orientation vocabulary.
+This is not a core `numericalFlux(...)` wrapper. Flux models should remain
+visible in formulation code or in physics-layer helper functions that are
+themselves written from Forms expressions. Core Forms should instead make those
+explicit flux expressions safer and clearer with better trace/orientation
+vocabulary.
 
-| Planned vocabulary | Purpose |
-|--------------------|---------|
+| Vocabulary | Purpose |
+|------------|---------|
 | Side-specific normal helpers | Make the normal used by `minus`/`plus` terms explicit |
 | Vector-valued trace helpers | Avoid ad hoc component handling in face fluxes |
 | Normal/tangential jump helpers | Make conservation-law and vector trace terms reviewable |
@@ -703,12 +989,10 @@ states, wall models, and similar policies should live in the relevant physics
 module when needed. They should not become generic Forms vocabulary unless they
 can be expressed as domain-neutral mathematical primitives.
 
-### Priority 8: Richer Tensor and Complex Workflows
+#### Richer Tensor and Complex Workflows
 
-Status: `planned`.
-
-| Planned vocabulary | Purpose |
-|--------------------|---------|
+| Vocabulary | Purpose |
+|------------|---------|
 | Tensor-valued trial/test/state fields | Public tensor-valued unknowns |
 | Higher-rank component access and indexing | Rank > 2 public tensor calculus |
 | More general Einstein contraction patterns | Beyond current implicit sum patterns |
