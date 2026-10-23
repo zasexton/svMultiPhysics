@@ -1023,9 +1023,11 @@ if(FE_WITH_MESH)
     # field of the primary mesh.
     list(APPEND FE_LEVELSET_HEADERS
         LevelSet/LevelSetGeometryService.h
+        LevelSet/AcceptedFunctionalRecorder.h
     )
     list(APPEND FE_LEVELSET_SOURCES
         LevelSet/LevelSetGeometryService.cpp
+        LevelSet/AcceptedFunctionalRecorder.cpp
     )
 endif()
 
@@ -1109,6 +1111,8 @@ set(FE_SYSTEMS_HEADERS
     Systems/FormulationBuilder.h
     Systems/FreeSurfaceFunctionalRounding.h
     Systems/FreeSurfaceRecordTypes.h
+    Systems/AcceptedStageRecords.h
+    Systems/FunctionalRecords.h
     Systems/MeshBoundaryRecordSupport.h
     Systems/MeshNormalConstraintStageMeasurements.h
     Systems/SnapshotFieldAccess.h
@@ -1155,6 +1159,7 @@ set(FE_SYSTEMS_SOURCES
     Systems/ContactPenaltyKernel.cpp
     Systems/FEAdaptivityTransfer.cpp
     Systems/ExactAccumulator.cpp
+    Systems/FunctionalRecords.cpp
     Systems/FESystem.cpp
     Systems/MeshBoundaryRecordSupport.cpp
     Systems/MeshNormalConstraintStageMeasurements.cpp
@@ -2604,6 +2609,7 @@ if(FE_BUILD_TESTS)
         if(FE_WITH_MESH)
             list(APPEND FE_LEVELSET_TEST_SOURCES
                 Tests/Unit/LevelSet/test_LevelSetPdeVelocityExtension.cpp
+                Tests/Unit/LevelSet/test_AcceptedFunctionalRecorder.cpp
             )
         endif()
         add_executable(test_fe_levelset ${FE_LEVELSET_TEST_SOURCES})
@@ -3145,6 +3151,8 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/Systems/test_FESystem.cpp
 		                Tests/Unit/Systems/test_FESystemAttachments.cpp
 		                Tests/Unit/Systems/test_ExactAccumulator.cpp
+		                Tests/Unit/Systems/test_AcceptedStageRecords.cpp
+		                Tests/Unit/Systems/test_FunctionalRecords.cpp
 		                Tests/Unit/Systems/test_MeshNormalConstraintStageMeasurements.cpp
 		                Tests/Unit/Systems/test_SnapshotFieldEvaluator.cpp
 		                Tests/Unit/Systems/test_FESystemMultiMesh.cpp
