@@ -3033,8 +3033,6 @@ void logLevelSetMaintenanceCoverageDiagnostics(
     application::core::oopCout()
         << "[svMultiPhysics::Application] Level-set maintenance diagnostic"
         << " field='" << request.configuration->transport.level_set.field_name << "'"
-        << " bound_preserving="
-        << (request.configuration->transport.bound_preserving.enabled ? "enabled" : "disabled")
         << " kinematic_reconciliation="
         << (request.configuration->transport.kinematic_reconciliation.enabled ? "enabled" : "disabled")
         << " sign_definite_patch_bounds="
@@ -3896,11 +3894,10 @@ void reimposeAcceptedMasterBearingState(
 
 using svmp::Physics::formulations::navier_stokes::free_surface::recordInitialFreeSurfaceDiscreteFunctionalBaseline;
 
-// The accepted-step maintenance pipeline and the bound-preserving gate are
-// in FE/LevelSet/Maintenance/LevelSetMaintenancePipeline.h.  The driver
-// passes the FE part of its requests (the configuration handle and a copy
-// of the FE run state) and copies the run state back.
-using svmp::FE::level_set::LevelSetBoundPreservingApplicationResult;
+// The accepted-step maintenance pipeline is in
+// FE/LevelSet/Maintenance/LevelSetMaintenancePipeline.h.  The driver passes
+// the FE part of its requests (the configuration handle and a copy of the FE
+// run state) and copies the run state back.
 using svmp::FE::level_set::LevelSetMaintenanceStageObserver;
 
 svmp::FE::level_set::LevelSetMaintenanceHost levelSetMaintenanceHost(
@@ -3908,30 +3905,7 @@ svmp::FE::level_set::LevelSetMaintenanceHost levelSetMaintenanceHost(
 {
   svmp::FE::level_set::LevelSetMaintenanceHost host;
   host.fe_system = sim.fe_system.get();
-  if (sim.primary_mesh) {
-    host.boundary_marker =
-        [&sim](std::string_view face_name) -> std::optional<int> {
-      const auto marker =
-          sim.primary_mesh->label_from_name(std::string(face_name));
-      if (marker == svmp::INVALID_LABEL) {
-        return std::nullopt;
-      }
-      return static_cast<int>(marker);
-    };
-  }
   return host;
-}
-
-LevelSetBoundPreservingApplicationResult
-applyLevelSetBoundPreservingCandidates(
-    application::core::SimulationComponents& sim,
-    svmp::FE::timestepping::TimeHistory& history,
-    const std::vector<LevelSetMaintenanceRequest>& requests,
-    const LevelSetMaintenanceStageObserver& observe_stage = {})
-{
-  const auto fe_requests = feLevelSetMaintenanceRequests(requests);
-  return svmp::FE::level_set::applyLevelSetBoundPreservingCandidates(
-      levelSetMaintenanceHost(sim), history, fe_requests, observe_stage);
 }
 
 // The accepted wall-contact cells of one maintained level-set field (the
@@ -12136,14 +12110,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   velocity_extension_artifact_comm));
         };
   }
-  const bool has_bound_preserving_maintenance = std::any_of(
-      level_set_maintenance.begin(),
-      level_set_maintenance.end(),
-      [](const auto& request) {
-        return request.configuration->transport.bound_preserving.enabled;
-      });
-  const bool has_precommit_maintenance =
-      has_conservative_phase || has_bound_preserving_maintenance;
+  const bool has_precommit_maintenance = has_conservative_phase;
   if (has_dynamic_contact_stage &&
       opts.scheme != svmp::FE::timestepping::SchemeKind::BackwardEuler &&
       opts.scheme != svmp::FE::timestepping::SchemeKind::BDF2 &&
@@ -12498,40 +12465,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   h, "pressure_update_rejection");
               return false;
             }
-          }
-          const auto bound_result = applyLevelSetBoundPreservingCandidates(
-              sim,
-              h,
-              level_set_maintenance,
-              [&](application::core::LevelSetMaintenanceWorkSubstage
-                      substage,
-                  std::span<const svmp::FE::Real> before_candidate,
-                  std::span<const svmp::FE::Real> after_candidate) {
-                if (!pending_phase_candidate.geometry_transaction) {
-                  pending_phase_candidate.geometry_transaction =
-                      std::make_unique<
-                          LevelSetMaintenanceGeometryTransaction>(
-                          sim,
-                          *cut_lifecycle,
-                          *cut_refresh_cache,
-                          transient_active_cut_requests);
-                }
-                (void)pending_phase_candidate.geometry_transaction
-                    ->refresh(after_candidate);
-                svmp::FE::level_set::stageLevelSetMaintenanceWorkRow(
-                    level_set_maintenance_work,
-                    maintenance_work_rows,
-                    staged_phase_functionals,
-                    substage,
-                    before_candidate,
-                    after_candidate);
-              });
-          if (!bound_result.accept_step) {
-            clear_pending_contact_provenance();
-            pending_dynamic_contact_generalized_alpha_observation.reset();
-            rollback_and_reject_pending_phase(
-                h, "bound_preserving_rejection");
-            return false;
           }
           if (reconcile_two_fluid_momentum) {
             const auto corrected_solution = gatherFeOrderedSolution(

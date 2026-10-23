@@ -28,7 +28,7 @@ Use specific headers when compile time or dependency clarity matters:
 | `FE/LevelSet/LevelSetVolume.h` | cut-cell volume measurement |
 | `FE/LevelSet/LevelSetWallContactConstraint.h` | identity of an accepted wall-contact cell |
 | `FE/LevelSet/Maintenance/LevelSetMaintenanceConfiguration.h` | configuration, run state and declaration bindings of a maintained level-set field |
-| `FE/LevelSet/Maintenance/LevelSetMaintenancePipeline.h` | accepted-step maintenance pipeline and the bound-preserving candidate gate |
+| `FE/LevelSet/Maintenance/LevelSetMaintenancePipeline.h` | accepted-step maintenance pipeline |
 | `FE/LevelSet/Maintenance/LevelSetWallAwareMaintenance.h` | accepted wall-contact cells of a maintained field from the host's plain wall input |
 | `FE/LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h` | work of maintenance on the declared functionals by substage and transaction, and the accepted-step maintenance account |
 | `FE/LevelSet/LevelSetDiagnostics.h` | scalar diagnostics for the cut-cell volume |
@@ -76,39 +76,16 @@ This metric responds to the streamline direction on anisotropic cells and stays
 finite as the velocity tends to zero. The residual-based discontinuity
 capturing that could be added to SUPG was retired by decision D47.
 
-The bound-preserving candidate gate is also an explicit opt-in. It currently
-supports only unconstrained scalar P1 H1 level-set unknowns. After a nonlinear
-solve converges and before the time step is accepted, it computes whether any
-candidate coefficient lies outside the minimum and maximum of the previous
-accepted solution over that node's one-ring cell patch. Literal inflow data
-enlarge the corresponding patch bounds; callback/nonliteral inflow data,
-constrained level-set DOFs, and higher-order or unsupported spaces fail closed.
-If a correction would be required, the converged candidate and all time-history
-vectors are left unchanged and the step is rejected. An adaptive time loop may
-then reduce `dt` and solve the coupled nonlinear problem again; a fixed-step run
-fails closed. No post-Newton coefficient clamp is accepted as a solution.
+The bound-preserving candidate gate (a nodal one-ring bound check of the step
+candidate with a Courant and wall-flux pre-check, and a step retry when a
+correction would be required) was retired by decision D51: with it on, the
+SPHERIC reruns failed at their first step, while the runs without it and the
+sign-definite patch bounds were clean.
 
-When this bound gate is active, the pre-accept safety check evaluates a nodal/center
-velocity Courant estimate and may reject an adaptive step for retry when the
-configured maximum is exceeded; a fixed-step run fails closed because it cannot
-reduce `dt`. Every exterior marker not declared as level-set inflow or outflow is
-treated as impermeable. Wall compatibility is checked at the face centroid and
-every reference face node using the maximum normalized normal flux
-`|u . n| / max(1, |u|)`. A wall-flux violation fails immediately because a time
-step retry cannot repair incompatible boundary data.
-
-All safety reductions, one-ring bound exchanges, and correction counts use the
-active `FESystem`/DOF-handler communicator, never `MPI_COMM_WORLD`. The
-application's graph-based wet-side velocity extension uses the same communicator
-and performs a rank-synchronous owner-authoritative exchange after every graph
-layer, so propagation is not limited to one pre-existing ghost halo.
-
-This retry gate is not a conservative FCT method and does not prove an invariant
-domain or high-order bounded-transport property. It prevents acceptance of a
-candidate that violates the supported P1 one-ring bounds, but it does not alter
-the fluxes or nonlinear operator that produced that candidate. Production
-validation must therefore track interface position, convergence under time-step
-refinement, and phase volume in addition to nodal bounds.
+The application's graph-based wet-side velocity extension uses the active
+`FESystem`/DOF-handler communicator, never `MPI_COMM_WORLD`, and performs a
+rank-synchronous owner-authoritative exchange after every graph layer, so
+propagation is not limited to one pre-existing ghost halo.
 
 ### Kinematic Reconciliation
 

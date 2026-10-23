@@ -216,14 +216,13 @@ std::uint64_t levelSetMaintenanceRequestActionBits(
           0u;
   const bool functional_due =
       configuration.transport.conservative_phase.enabled ||
-      configuration.transport.bound_preserving.enabled ||
       accepted_kinematic_due ||
       accepted_patch_bounds_due ||
       accepted_redistancing_due;
   std::uint64_t bits = 0u;
   bits |= configuration.transport.conservative_phase.enabled ? (1ull << 0u) : 0u;
-  bits |= configuration.transport.bound_preserving.enabled ? (1ull << 1u) : 0u;
-  // Bit 2 described the retired conservative-phase reinitialization.
+  // Bit 1 described the retired bound-preserving limiter and bit 2 the
+  // retired conservative-phase reinitialization.
   bits |=
       configuration.transport.velocity.source ==
               svmp::FE::level_set::LevelSetVelocitySource::
@@ -286,28 +285,6 @@ bool appendLevelSetMaintenanceConfigurationScheduleWords(
           .algebraic_extension_source_field_name);
   appendMaintenanceScheduleSigned(
       words, configuration.transport.velocity.material_interface_marker);
-
-  appendMaintenanceScheduleBool(
-      words, configuration.transport.bound_preserving.enabled);
-  appendMaintenanceScheduleReal(
-      words, configuration.transport.bound_preserving.bound_tolerance);
-  appendMaintenanceScheduleReal(
-      words, configuration.transport.bound_preserving.sign_tolerance);
-  appendMaintenanceScheduleReal(
-      words, configuration.transport.bound_preserving.maximum_courant);
-  appendMaintenanceScheduleReal(
-      words, configuration.transport.bound_preserving.courant_tolerance);
-  appendMaintenanceScheduleBool(
-      words,
-      configuration.transport.bound_preserving.enforce_courant_limit);
-  appendMaintenanceScheduleBool(
-      words,
-      configuration.transport.bound_preserving
-          .enforce_impermeable_boundaries);
-  appendMaintenanceScheduleReal(
-      words,
-      configuration.transport.bound_preserving
-          .impermeable_normal_velocity_tolerance);
 
   appendMaintenanceScheduleBool(
       words, configuration.transport.conservative_phase.enabled);

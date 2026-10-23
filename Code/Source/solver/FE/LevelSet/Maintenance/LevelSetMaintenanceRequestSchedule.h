@@ -75,12 +75,12 @@ struct CanonicalLevelSetMaintenanceGeometryState {
  * @brief Bits of the maintenance actions of @p configuration configured and
  *        due after @p completed_step.
  *
- * Bit 0 conservative phase, 1 bound-preserving limiter, 3 constant or 4
- * field velocity, 8 any functional maintenance due, 9 conservative flux
- * artifact due, 10 conservative geometry reconciliation, 12 kinematic
- * reconciliation due, 13 sign-definite patch bounds due, 14
- * interface-preserving redistancing due.  Bits 2, 5, 6 and 7 described
- * retired operations and stay unused; bit 11 is the application's.
+ * Bit 0 conservative phase, 3 constant or 4 field velocity, 8 any
+ * functional maintenance due, 9 conservative flux artifact due, 10
+ * conservative geometry reconciliation, 12 kinematic reconciliation due, 13
+ * sign-definite patch bounds due, 14 interface-preserving redistancing due.
+ * Bits 1, 2, 5, 6 and 7 described retired operations and stay unused; bit
+ * 11 is the application's.
  */
 [[nodiscard]] std::uint64_t levelSetMaintenanceRequestActionBits(
     const LevelSetMaintenanceConfiguration& configuration,
@@ -97,8 +97,8 @@ void appendLevelSetMaintenanceScheduleHeader(
 
 /**
  * @brief The words of a request's configuration: transport, velocity,
- *        bound-preserving limiter, conservative phase, open boundaries,
- *        accepted-step stages and the active cut-volume request.
+ *        conservative phase, open boundaries, accepted-step stages and the
+ *        active cut-volume request.
  *
  * Returns false when the configuration cannot be represented (an embedded
  * velocity FunctionSpace); the words are appended either way.

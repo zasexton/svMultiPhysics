@@ -46,12 +46,6 @@ TEST05_ADAPTIVE_TIME_LOOP_DECREASE_FACTOR = "0.5"
 TEST05_ADAPTIVE_TIME_LOOP_INCREASE_FACTOR = "1.5"
 TEST05_ADAPTIVE_TIME_LOOP_TARGET_NEWTON_ITERATIONS = "6"
 TEST05_ADAPTIVE_TIME_LOOP_MAX_STEPS_MULTIPLIER = "64"
-# The validation level-set coefficients are length-valued and expressed in
-# metres.  Permit one micrometre of coefficient-level one-ring error while
-# retaining a separate near-roundoff sign invariant.  This is a benchmark-deck
-# contract, not a relaxation of the solver-wide default.
-LEVEL_SET_BOUND_REPRESENTABILITY_TOLERANCE = "1.0e-6"
-LEVEL_SET_BOUND_SIGN_TOLERANCE = "1.0e-12"
 TEST05_PREVIOUS_INVALID_D18_GAUGE = {
     "node_id": 279,
     "initial_phi": -0.001806,
@@ -733,8 +727,6 @@ def write_solver_xml(
     adaptive_time_loop_max_steps_multiplier: str = TEST05_ADAPTIVE_TIME_LOOP_MAX_STEPS_MULTIPLIER,
     newton_line_search_fail_on_no_reduction: bool = False,
     newton_line_search_max_iterations: str = "10",
-    bound_preserving_bound_tolerance: str = LEVEL_SET_BOUND_REPRESENTABILITY_TOLERANCE,
-    bound_preserving_sign_tolerance: str = LEVEL_SET_BOUND_SIGN_TOLERANCE,
     allow_overlapping_face_files: bool = False,
 ) -> None:
     if ghost_layers < 0:
@@ -982,13 +974,7 @@ def write_solver_xml(
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
   <SUPG_transient_scale>2.0</SUPG_transient_scale>
   <Enable_discontinuity_capturing>false</Enable_discontinuity_capturing>
-  <Enable_bound_preserving_limiter>true</Enable_bound_preserving_limiter>
-  <Bound_preserving_bound_tolerance>{bound_preserving_bound_tolerance}</Bound_preserving_bound_tolerance>
-  <Bound_preserving_sign_tolerance>{bound_preserving_sign_tolerance}</Bound_preserving_sign_tolerance>
-  <Bound_preserving_maximum_courant>1.0</Bound_preserving_maximum_courant>
-  <Bound_preserving_enforce_courant_limit>true</Bound_preserving_enforce_courant_limit>
-  <Bound_preserving_enforce_impermeable_boundaries>true</Bound_preserving_enforce_impermeable_boundaries>
-  <Bound_preserving_impermeable_normal_velocity_tolerance>1.0e-10</Bound_preserving_impermeable_normal_velocity_tolerance>
+  <Enable_bound_preserving_limiter>false</Enable_bound_preserving_limiter>
   <Enable_reinitialization>false</Enable_reinitialization>
   <Enable_volume_correction>false</Enable_volume_correction>
 

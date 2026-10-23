@@ -16,8 +16,8 @@
  * A maintained level-set field is transported by the level-set equation and
  * repaired between steps: kinematic reconciliation, sign-definite patch
  * bounds and triggered interface-preserving redistancing after an accepted
- * step, the bound-preserving limiter and conservative phase transport inside
- * a step, and curvature projection.  These records hold what those
+ * step, conservative phase transport inside a step, and curvature
+ * projection.  These records hold what those
  * operations read and carry, independent of the physics that owns the field.
  * An application derives from them to add its own data (input provenance,
  * physics-specific initialization).

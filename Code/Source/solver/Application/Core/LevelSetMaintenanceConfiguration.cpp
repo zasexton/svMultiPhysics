@@ -469,32 +469,6 @@ resolveLegacyLevelSetMaintenanceConfiguration(
       result->transport.conservative_phase
           .maximum_geometry_displacement_fraction);
 
-  apply_boolean_list({"Enable_bound_preserving_limiter"},
-                     "enable_bound_preserving_limiter",
-                     result->transport.bound_preserving.enabled);
-  apply_real_list(
-      {"Bound_preserving_bound_tolerance"},
-      "bound_preserving_bound_tolerance",
-      result->transport.bound_preserving.bound_tolerance);
-  apply_real_list(
-      {"Bound_preserving_sign_tolerance"},
-      "bound_preserving_sign_tolerance",
-      result->transport.bound_preserving.sign_tolerance);
-  apply_real_list(
-      {"Bound_preserving_maximum_courant"},
-      "bound_preserving_maximum_courant",
-      result->transport.bound_preserving.maximum_courant);
-  apply_boolean_list({"Bound_preserving_enforce_courant_limit"},
-                     "bound_preserving_enforce_courant_limit",
-                     result->transport.bound_preserving.enforce_courant_limit);
-  apply_boolean_list(
-      {"Bound_preserving_enforce_impermeable_boundaries"},
-      "bound_preserving_enforce_impermeable_boundaries",
-      result->transport.bound_preserving.enforce_impermeable_boundaries);
-  apply_real_list(
-      {"Bound_preserving_impermeable_normal_velocity_tolerance"},
-      "bound_preserving_impermeable_normal_velocity_tolerance",
-      result->transport.bound_preserving.impermeable_normal_velocity_tolerance);
   append_equation_observations();
 
   for (const auto &boundary : input.boundaries) {
@@ -737,8 +711,7 @@ resolveLegacyLevelSetMaintenanceConfiguration(
       result->isovalue);
   appendLegacyDefaults(result->input_observations);
 
-  const bool enabled = result->transport.bound_preserving.enabled ||
-                       result->transport.conservative_phase.enabled ||
+  const bool enabled = result->transport.conservative_phase.enabled ||
                        result->transport.kinematic_reconciliation.enabled ||
                        result->transport.sign_definite_patch_bounds.enabled ||
                        result->transport.interface_preserving_redistancing.enabled ||

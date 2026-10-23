@@ -5753,8 +5753,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
     <Conservative_phase_flux_artifact_cadence_steps>-1</Conservative_phase_flux_artifact_cadence_steps>
     <Conservative_phase_geometry_correction_max_iterations>2tail</Conservative_phase_geometry_correction_max_iterations>
     <Conservative_phase_geometry_measure_tolerance>1.25tail</Conservative_phase_geometry_measure_tolerance>
-    <Enable_bound_preserving_limiter>unrecognized</Enable_bound_preserving_limiter>
-    <Bound_preserving_bound_tolerance>nan</Bound_preserving_bound_tolerance>
+    <Enable_sign_definite_patch_bounds>unrecognized</Enable_sign_definite_patch_bounds>
+    <Static_capillary_volume_tolerance>nan</Static_capillary_volume_tolerance>
   </Add_equation>
   <Add_equation type="level_set">
     <Level_set_field_name>phi_whitespace</Level_set_field_name>
@@ -5780,8 +5780,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_EQ(first_phase.flux_artifact_cadence_steps, -1);
   EXPECT_EQ(first_phase.geometry_correction_max_iterations, 2);
   EXPECT_DOUBLE_EQ(first_phase.geometry_measure_tolerance, 1.25);
-  EXPECT_FALSE(requests[0].configuration->transport.bound_preserving.enabled);
-  EXPECT_TRUE(std::isnan(requests[0].configuration->transport.bound_preserving.bound_tolerance));
+  EXPECT_FALSE(
+      requests[0].configuration->transport.sign_definite_patch_bounds.enabled);
+  EXPECT_TRUE(std::isnan(
+      requests[0].configuration->static_capillary_equilibrium.volume_tolerance));
   EXPECT_EQ(requests[1].configuration->transport.velocity.constant_value,
             (std::array<svmp::FE::Real, 3>{4.0, 5.0, 6.0}));
   EXPECT_EQ(requests[1].configuration->transport.conservative_phase
@@ -18646,7 +18648,6 @@ TEST(ApplicationDriverLevelSetMaintenance,
   first_configuration.transport.velocity.source =
       svmp::FE::level_set::LevelSetVelocitySource::ConstantVector;
   first_configuration.transport.velocity.constant_value = {{0.25, -0.5, 0.75}};
-  first_configuration.transport.bound_preserving.enabled = true;
   first_configuration.curvature_projection_enabled = true;
   first_configuration.curvature_projection_cadence_steps = 6;
   auto first = freezeMaintenanceConfiguration(
@@ -18689,27 +18690,27 @@ TEST(ApplicationDriverLevelSetMaintenance,
   };
   const std::array<MatrixCase, 8> cases{{
       {"r1_matrix_two_steady_step_0",
-       LevelSetMaintenanceScheduleStage::SteadyInitialization, 0, 3867u},
+       LevelSetMaintenanceScheduleStage::SteadyInitialization, 0, 3865u},
       {"r1_matrix_two_transient_step_0",
-       LevelSetMaintenanceScheduleStage::TransientInitialization, 0, 3867u},
+       LevelSetMaintenanceScheduleStage::TransientInitialization, 0, 3865u},
       {"r1_matrix_two_prospective_step_1",
        LevelSetMaintenanceScheduleStage::ProspectiveAcceptedEndpoint, 1,
-       3355u},
+       3353u},
       {"r1_matrix_two_prospective_step_2",
        LevelSetMaintenanceScheduleStage::ProspectiveAcceptedEndpoint, 2,
-       3867u},
+       3865u},
       {"r1_matrix_two_prospective_step_6",
        LevelSetMaintenanceScheduleStage::ProspectiveAcceptedEndpoint, 6,
-       3867u},
+       3865u},
       {"r1_matrix_two_post_step_1",
        LevelSetMaintenanceScheduleStage::AcceptedEndpointPostStep, 1,
-       3355u},
+       3353u},
       {"r1_matrix_two_post_step_2",
        LevelSetMaintenanceScheduleStage::AcceptedEndpointPostStep, 2,
-       3867u},
+       3865u},
       {"r1_matrix_two_post_step_6",
        LevelSetMaintenanceScheduleStage::AcceptedEndpointPostStep, 6,
-       3867u},
+       3865u},
   }};
   for (const auto& matrix_case : cases) {
     const auto schedule = canonicalLevelSetMaintenanceRequestSchedule(
@@ -21092,216 +21093,6 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   EXPECT_FALSE(lifecycle_.transactionActive());
 }
 
-class ApplicationDriverBoundPreservingCandidatesTest
-    : public ::testing::Test {
-protected:
-  void SetUp() override
-  {
-    mesh_ = makeWorkflowQuadPatch2x2Mesh();
-    auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
-        svmp::FE::ElementType::Quad4,
-        /*order=*/1);
-    auto system =
-        std::make_unique<svmp::FE::systems::FESystem>(mesh_);
-    phi_ = system->addField(svmp::FE::systems::FieldSpec{
-        .name = "phi",
-        .space = scalar_space,
-        .components = 1,
-    });
-    ASSERT_NO_THROW(system->setup({}));
-
-    factory_ = svmp::FE::backends::BackendFactory::create(
-        svmp::FE::backends::BackendKind::FSILS);
-    ASSERT_NE(factory_, nullptr);
-    history_ = svmp::FE::timestepping::TimeHistory::allocate(
-        *factory_,
-        system->dofHandler().getNumDofs(),
-        /*history_depth=*/2,
-        /*allocate_second_order_state=*/true);
-    history_.setDt(0.2);
-    history_.setPrevDt(0.2);
-
-    sim_.primary_mesh = mesh_;
-    sim_.fe_system = std::move(system);
-  }
-
-  [[nodiscard]] std::size_t solutionSize() const
-  {
-    return static_cast<std::size_t>(
-        sim_.fe_system->dofHandler().getNumDofs());
-  }
-
-  [[nodiscard]] std::size_t phiOffset() const
-  {
-    const auto offset = sim_.fe_system->fieldDofOffset(phi_);
-    if (offset < 0) {
-      throw std::runtime_error(
-          "ApplicationDriver bound-preserving test has no phi offset");
-    }
-    return static_cast<std::size_t>(offset);
-  }
-
-  [[nodiscard]] LevelSetMaintenanceRequest requestWithVelocity(
-      std::array<svmp::FE::Real, 3> velocity) const
-  {
-    application::core::ResolvedLevelSetMaintenanceCompatibilityConfiguration request_configuration;
-    request_configuration.transport.level_set.field_name = "phi";
-    request_configuration.transport.velocity.source =
-        svmp::FE::level_set::LevelSetVelocitySource::ConstantVector;
-    request_configuration.transport.velocity.constant_value = velocity;
-    request_configuration.transport.bound_preserving.enabled = true;
-    auto request = freezeMaintenanceConfiguration(
-        std::move(request_configuration));
-    return request;
-  }
-
-  void setCandidateState(std::span<const svmp::FE::Real> previous,
-                         std::span<const svmp::FE::Real> candidate,
-                         std::span<const svmp::FE::Real> rates)
-  {
-    ASSERT_EQ(previous.size(), solutionSize());
-    ASSERT_EQ(candidate.size(), solutionSize());
-    ASSERT_EQ(rates.size(), solutionSize());
-    scatterFeOrderedSolution(history_.uPrev(), previous);
-    scatterFeOrderedSolution(history_.uPrev2(), previous);
-    scatterFeOrderedSolution(history_.u(), candidate);
-    scatterFeOrderedSolution(history_.uDot(), rates);
-  }
-
-  std::shared_ptr<svmp::Mesh> mesh_{};
-  svmp::FE::FieldId phi_{svmp::FE::INVALID_FIELD_ID};
-  std::unique_ptr<svmp::FE::backends::BackendFactory> factory_{};
-  svmp::FE::timestepping::TimeHistory history_{};
-  application::core::SimulationComponents sim_{};
-};
-
-TEST_F(ApplicationDriverBoundPreservingCandidatesTest,
-       LimitedCandidateRequestsNonlinearRetryWithoutMutatingHistory)
-{
-  std::vector<svmp::FE::Real> previous(solutionSize(), 1.0);
-  auto raw_candidate = previous;
-  const auto limited_dof = phiOffset();
-  raw_candidate[limited_dof] = -2.0;
-  std::vector<svmp::FE::Real> rates(solutionSize(), 0.0);
-  for (std::size_t i = 0; i < rates.size(); ++i) {
-    rates[i] = 0.25 + 0.1 * static_cast<svmp::FE::Real>(i);
-  }
-  setCandidateState(previous, raw_candidate, rates);
-
-  testing::internal::CaptureStdout();
-  const auto result = applyLevelSetBoundPreservingCandidates(
-      sim_,
-      history_,
-      std::vector<LevelSetMaintenanceRequest>{
-          requestWithVelocity({0.0, 0.0, 0.0})});
-  const auto output = testing::internal::GetCapturedStdout();
-
-  EXPECT_FALSE(result.accept_step);
-  EXPECT_TRUE(result.changed);
-  EXPECT_NE(output.find(
-                "reason=bound_preserving_limiter_requires_nonlinear_retry"),
-            std::string::npos);
-  EXPECT_EQ(gatherFeOrderedSolution(history_.u()), raw_candidate);
-  EXPECT_EQ(gatherFeOrderedSolution(history_.uDot()), rates);
-  EXPECT_EQ(gatherFeOrderedSolution(history_.uPrev()), previous);
-}
-
-TEST_F(ApplicationDriverBoundPreservingCandidatesTest,
-       CourantViolationReturnsRetryableRejectionWithoutMutatingCandidate)
-{
-  history_.setDt(0.75);
-  std::vector<svmp::FE::Real> previous(solutionSize(), 1.0);
-  const auto raw_candidate = previous;
-  std::vector<svmp::FE::Real> rates(solutionSize(), -0.25);
-  setCandidateState(previous, raw_candidate, rates);
-
-  auto request = requestWithVelocity({2.0, 0.0, 0.0});
-  request = withMaintenanceConfiguration(
-      request, [&](auto& configured) {
-        configured.transport.bound_preserving.bound_tolerance = 10.0;
-        configured.transport.bound_preserving.courant_tolerance = 1.0e-12;
-        configured.transport.bound_preserving.enforce_impermeable_boundaries = false;
-      });
-  testing::internal::CaptureStdout();
-  const auto result = applyLevelSetBoundPreservingCandidates(
-      sim_,
-      history_,
-      std::vector<LevelSetMaintenanceRequest>{request});
-  const auto output = testing::internal::GetCapturedStdout();
-
-  EXPECT_FALSE(result.accept_step);
-  EXPECT_FALSE(result.changed);
-  EXPECT_NE(output.find("reason=bound_preserving_courant_contract"),
-            std::string::npos);
-  EXPECT_EQ(gatherFeOrderedSolution(history_.u()), raw_candidate);
-  EXPECT_EQ(gatherFeOrderedSolution(history_.uDot()), rates);
-  EXPECT_EQ(gatherFeOrderedSolution(history_.uPrev()), previous);
-}
-
-TEST_F(ApplicationDriverBoundPreservingCandidatesTest,
-       ImpermeableWallNormalVelocityFailsClosedWithoutMutatingCandidate)
-{
-  history_.setDt(0.1);
-  std::vector<svmp::FE::Real> previous(solutionSize(), 1.0);
-  const auto raw_candidate = previous;
-  std::vector<svmp::FE::Real> rates(solutionSize(), 0.125);
-  setCandidateState(previous, raw_candidate, rates);
-
-  try {
-    (void)applyLevelSetBoundPreservingCandidates(
-        sim_,
-        history_,
-        std::vector<LevelSetMaintenanceRequest>{
-            requestWithVelocity({0.0, 0.5, 0.0})});
-    FAIL() << "A nonzero normal wall velocity must fail closed";
-  } catch (const std::runtime_error& error) {
-    EXPECT_NE(std::string(error.what()).find(
-                  "incompatible impermeable-wall velocity"),
-              std::string::npos);
-  }
-
-  EXPECT_EQ(gatherFeOrderedSolution(history_.u()), raw_candidate);
-  EXPECT_EQ(gatherFeOrderedSolution(history_.uDot()), rates);
-  EXPECT_EQ(gatherFeOrderedSolution(history_.uPrev()), previous);
-}
-
-TEST_F(ApplicationDriverBoundPreservingCandidatesTest,
-       InBoundsNontrivialCandidatePassesWithoutLimiterOrRateChanges)
-{
-  std::vector<svmp::FE::Real> vertex_values(mesh_->n_vertices(), 0.0);
-  for (std::size_t vertex = 0; vertex < mesh_->n_vertices(); ++vertex) {
-    vertex_values[vertex] = workflowVertexPoint(*mesh_, vertex)[0];
-  }
-  const auto phi_coefficients = projectWorkflowVertexValues(
-      *sim_.fe_system,
-      phi_,
-      vertex_values,
-      /*components=*/1u,
-      "ApplicationDriver bound-preserving pass-through phi");
-  std::vector<svmp::FE::Real> previous(solutionSize(), 0.0);
-  writeWorkflowFieldSlice(
-      *sim_.fe_system, phi_, phi_coefficients, previous);
-  auto raw_candidate = previous;
-  for (std::size_t i = 0; i < phi_coefficients.size(); ++i) {
-    raw_candidate[phiOffset() + i] *= 0.5;
-  }
-  ASSERT_NE(raw_candidate, previous);
-  std::vector<svmp::FE::Real> rates(solutionSize(), 0.375);
-  setCandidateState(previous, raw_candidate, rates);
-
-  const auto result = applyLevelSetBoundPreservingCandidates(
-      sim_,
-      history_,
-      std::vector<LevelSetMaintenanceRequest>{
-          requestWithVelocity({0.0, 0.0, 0.0})});
-
-  EXPECT_TRUE(result.accept_step);
-  EXPECT_FALSE(result.changed);
-  EXPECT_EQ(gatherFeOrderedSolution(history_.u()), raw_candidate);
-  EXPECT_EQ(gatherFeOrderedSolution(history_.uDot()), rates);
-  EXPECT_EQ(gatherFeOrderedSolution(history_.uPrev()), previous);
-}
-
 TEST(ApplicationDriverLevelSetVolumeCorrection,
      ReportsAuthoritativeFreeSurfacePotentialChange)
 {
@@ -21783,7 +21574,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 
 } // namespace
 #else
-TEST(ApplicationDriverBoundPreservingCandidates,
+TEST(ApplicationDriverLevelSetMeshWorkflows,
      RequiresMeshIntegration)
 {
   GTEST_SKIP() << "Requires FE built with Mesh integration.";

@@ -10,11 +10,10 @@
 /**
  * @file LevelSetMaintenancePipeline.h
  * @ingroup fe_level_set
- * @brief The maintenance of level-set fields between and inside steps: the
+ * @brief The maintenance of level-set fields between steps: the
  *        accepted-step pipeline (kinematic reconciliation, sign-definite
  *        patch bounds, triggered interface-preserving redistancing and the
- *        publication of the change into the accepted history) and the
- *        bound-preserving gate of a step candidate.
+ *        publication of the change into the accepted history).
  *
  * The functions were moved from Application/Core/ApplicationDriver.cpp with
  * bodies, messages and collective order unchanged.  Every function is
@@ -58,11 +57,6 @@ struct LevelSetMaintenanceRequest {
 struct LevelSetMaintenanceHost {
     /// The FE system; the functions do nothing without one.
     systems::FESystem* fe_system{nullptr};
-
-    /// Boundary marker of the mesh face named @p face_name, nullopt for an
-    /// unknown face; empty when the caller has no mesh.  Rank-local.
-    std::function<std::optional<int>(std::string_view face_name)>
-        boundary_marker{};
 };
 
 /// Validates the final candidate of an accepted-step maintenance transaction
@@ -108,34 +102,9 @@ struct LevelSetRedistancingTrigger {
  */
 [[nodiscard]] LevelSetRedistancingTrigger resolveLevelSetRedistancingTrigger();
 
-struct LevelSetBoundPreservingApplicationResult {
-    bool accept_step{true};
-    bool changed{false};
-};
-
 /// Volume options of the field's active cut-volume request.
 [[nodiscard]] LevelSetVolumeOptions levelSetVolumeOptionsForMaintenance(
     const LevelSetMaintenanceConfiguration& configuration);
-
-/// The field's open boundaries with their mesh markers (rank-local).
-[[nodiscard]] LevelSetBoundaryOptions resolveLevelSetOpenBoundaries(
-    const LevelSetMaintenanceHost& host,
-    const LevelSetMaintenanceConfiguration& configuration);
-
-/**
- * @brief Bound-preserving gate of the step candidate in history.u().
- *
- * For every request with the limiter enabled: rejects an impermeable-wall
- * velocity, rejects the candidate (accept_step = false) above the Courant
- * limit, and rejects it (changed = true) when the limiter would change it,
- * so that the step is solved again.  history is not changed.
- */
-[[nodiscard]] LevelSetBoundPreservingApplicationResult
-applyLevelSetBoundPreservingCandidates(
-    const LevelSetMaintenanceHost& host,
-    timestepping::TimeHistory& history,
-    std::span<const LevelSetMaintenanceRequest> requests,
-    const LevelSetMaintenanceStageObserver& observe_stage = {});
 
 /// Transport-velocity coefficients in the velocity field's DOF numbering,
 /// from the unknown vector or from prescribed-data storage.

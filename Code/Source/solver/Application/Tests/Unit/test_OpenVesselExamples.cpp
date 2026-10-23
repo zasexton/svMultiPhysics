@@ -399,15 +399,17 @@ void expectReviewedP1LevelSetTransportControls(
             nullptr);
   EXPECT_EQ(level_set.FirstChildElement("Discontinuity_capturing_max_courant"),
             nullptr);
-  expectText(level_set, "Enable_bound_preserving_limiter", "true");
-  expectText(level_set, "Bound_preserving_maximum_courant", "1.0");
-  expectText(level_set, "Bound_preserving_enforce_courant_limit", "true");
-  expectText(level_set,
-             "Bound_preserving_enforce_impermeable_boundaries",
-             "true");
-  expectText(level_set,
-             "Bound_preserving_impermeable_normal_velocity_tolerance",
-             "1.0e-10");
+  // The bound-preserving limiter was retired (decision D51).
+  expectText(level_set, "Enable_bound_preserving_limiter", "false");
+  for (const char* name :
+       {"Bound_preserving_bound_tolerance",
+        "Bound_preserving_sign_tolerance",
+        "Bound_preserving_maximum_courant",
+        "Bound_preserving_enforce_courant_limit",
+        "Bound_preserving_enforce_impermeable_boundaries",
+        "Bound_preserving_impermeable_normal_velocity_tolerance"}) {
+    EXPECT_EQ(level_set.FirstChildElement(name), nullptr) << name;
+  }
 }
 
 void setOrAppendText(tinyxml2::XMLDocument& doc,

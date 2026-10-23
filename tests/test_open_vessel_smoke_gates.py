@@ -121,8 +121,10 @@ def test_validation_solver_generator_preserves_mesh_ghost_layers():
             for equation in root.findall("Add_equation")
             if equation.get("type") == "level_set"
         )
-        assert level_set.findtext("Bound_preserving_bound_tolerance") == "1.0e-6"
-        assert level_set.findtext("Bound_preserving_sign_tolerance") == "1.0e-12"
+        # The bound-preserving limiter was retired (decision D51).
+        assert level_set.findtext("Enable_bound_preserving_limiter") == "false"
+        assert level_set.find("Bound_preserving_bound_tolerance") is None
+        assert level_set.find("Bound_preserving_sign_tolerance") is None
         top = next(
             bc
             for bc in level_set.findall("Add_BC")
@@ -230,7 +232,7 @@ def test_legacy_validation_decks_declare_their_overlapping_face_files(case_dir):
 
 @pytest.mark.parametrize("case_name", ["spheric_test05_wet_bed_d18",
                                         "spheric_test05_wet_bed_d38"])
-def test_test05_decks_declare_independent_bound_and_sign_tolerances(case_name):
+def test_test05_decks_state_the_retired_bound_preserving_limiter_off(case_name):
     smoke = _load_smoke_module()
     solver_xml = (
         smoke.ROOT
@@ -240,8 +242,10 @@ def test_test05_decks_declare_independent_bound_and_sign_tolerances(case_name):
     )
     level_set = smoke.level_set_equation(ET.parse(solver_xml).getroot())
 
-    assert level_set.findtext("Bound_preserving_bound_tolerance") == "1.0e-6"
-    assert level_set.findtext("Bound_preserving_sign_tolerance") == "1.0e-12"
+    # The bound-preserving limiter was retired (decision D51).
+    assert level_set.findtext("Enable_bound_preserving_limiter") == "false"
+    assert not any(child.tag.startswith("Bound_preserving_")
+                   for child in level_set)
 
 
 def _profile_args():

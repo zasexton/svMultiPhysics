@@ -1697,17 +1697,8 @@ def test_fs16_p1_decks_retain_transport_safety_controls():
     expected = {
         "SUPG_transient_scale": "2.0",
         "Enable_discontinuity_capturing": "false",
-        "Enable_bound_preserving_limiter": "true",
-        "Bound_preserving_bound_tolerance": (
-            f"{runner.DEFAULT_BOUND_REPRESENTABILITY_SLACK:.16g}"
-        ),
-        "Bound_preserving_sign_tolerance": (
-            f"{runner.BOUND_SIGN_TOLERANCE:.16g}"
-        ),
-        "Bound_preserving_maximum_courant": "1.0",
-        "Bound_preserving_enforce_courant_limit": "true",
-        "Bound_preserving_enforce_impermeable_boundaries": "true",
-        "Bound_preserving_impermeable_normal_velocity_tolerance": "1.0e-10",
+        # The bound-preserving limiter was retired (decision D51).
+        "Enable_bound_preserving_limiter": "false",
     }
     with tempfile.TemporaryDirectory() as temp_dir:
         base = Path(temp_dir)
@@ -1730,18 +1721,18 @@ def test_fs16_p1_decks_retain_transport_safety_controls():
                 name: level_set.findtext(name)
                 for name in expected
             } == expected
-            # Level-set discontinuity capturing was retired (decision D47).
+            # Level-set discontinuity capturing was retired (decision D47),
+            # the bound-preserving limiter by decision D51.
             for name in ("Discontinuity_capturing_scale",
                          "Discontinuity_capturing_gradient_epsilon",
-                         "Discontinuity_capturing_max_courant"):
+                         "Discontinuity_capturing_max_courant",
+                         "Bound_preserving_bound_tolerance",
+                         "Bound_preserving_sign_tolerance",
+                         "Bound_preserving_maximum_courant",
+                         "Bound_preserving_enforce_courant_limit",
+                         "Bound_preserving_enforce_impermeable_boundaries",
+                         "Bound_preserving_impermeable_normal_velocity_tolerance"):
                 assert level_set.find(name) is None
-        assert (
-            runner.DEFAULT_BOUND_REPRESENTABILITY_SLACK /
-            runner.LEVEL_SET_CHARACTERISTIC_LENGTH
-            == runner.MAX_BOUND_REPRESENTABILITY_SLACK_OVER_LENGTH
-            == 1.0e-6
-        )
-        assert runner.BOUND_SIGN_TOLERANCE == 1.0e-12
         sessile_root = runner.ET.parse(sessile / "solver.xml").getroot()
         sessile_level_set = runner.level_set_equation(sessile_root)
         assert sessile_level_set.findtext("Level_set_source") == "prescribed_data"

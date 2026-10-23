@@ -75,33 +75,6 @@ struct LevelSetSUPGOptions {
     Real transient_scale{2.0};
 };
 
-/**
- * @brief Accepted-candidate invariant-domain control for P1 H1 level sets.
- *
- * The limiter bounds every transported coefficient by the extrema of the
- * previous accepted solution on its one-ring cell patch.  This is a nodal
- * invariant-domain projection, not an FCT scheme: it is deliberately
- * classified as nonconservative and can reduce local accuracy where active.
- * A one-ring domain of dependence is only physically admissible for a cell
- * Courant number no larger than @ref maximum_courant, so the production path
- * rejects (and, with an adaptive time loop, retries) larger steps.
- *
- * Boundary faces not declared as inflow or outflow are treated as
- * impermeable.  Their advecting normal velocity is checked before the
- * projection; the scalar limiter never hides an incompatible velocity wall
- * condition.
- */
-struct LevelSetBoundPreservingOptions {
-    bool enabled{false};
-    Real bound_tolerance{1.0e-12};
-    Real sign_tolerance{1.0e-12};
-    Real maximum_courant{1.0};
-    Real courant_tolerance{1.0e-12};
-    bool enforce_courant_limit{true};
-    bool enforce_impermeable_boundaries{true};
-    Real impermeable_normal_velocity_tolerance{1.0e-10};
-};
-
 struct LevelSetInterfaceKinematicOptions {
     bool enabled{false};
     int interface_marker{-1};
@@ -288,7 +261,6 @@ struct LevelSetTransportOptions {
     LevelSetFieldOptions level_set{};
     LevelSetVelocityOptions velocity{};
     LevelSetSUPGOptions supg{};
-    LevelSetBoundPreservingOptions bound_preserving{};
     LevelSetInterfaceKinematicOptions interface_kinematic{};
     LevelSetBoundaryOptions boundaries{};
     LevelSetConservativePhaseOptions conservative_phase{};

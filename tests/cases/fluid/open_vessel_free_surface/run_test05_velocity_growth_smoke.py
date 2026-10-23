@@ -288,18 +288,6 @@ FREE_SURFACE_ENERGY_MAX_ABOVE_INITIAL_RELATIVE = 1.0e-4
 # range.  This is intentionally opt-in: moving-interface qualifications report
 # the same diagnostic without rejecting physically necessary capillary loads.
 STATIC_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE = 5.0e-2
-# The generated FS16 mini-decks initialize phi in physical length units on a
-# one-metre tank.  Their P1 transport solve is allowed one part per million of
-# length as coefficient-representability slack while sign preservation remains
-# an independent, nearly exact invariant.  This is a qualification-deck
-# contract, not a relaxation of the solver's global defaults.
-LEVEL_SET_CHARACTERISTIC_LENGTH = 1.0
-MAX_BOUND_REPRESENTABILITY_SLACK_OVER_LENGTH = 1.0e-6
-DEFAULT_BOUND_REPRESENTABILITY_SLACK = (
-    MAX_BOUND_REPRESENTABILITY_SLACK_OVER_LENGTH *
-    LEVEL_SET_CHARACTERISTIC_LENGTH
-)
-BOUND_SIGN_TOLERANCE = 1.0e-12
 STATE_SYNC_CUT_CONTEXT_PROVENANCES = {
     "accepted",
     "residual",
@@ -1589,13 +1577,7 @@ def write_mini_solver_xml(case_dir: Path,
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
   <SUPG_transient_scale>2.0</SUPG_transient_scale>
   <Enable_discontinuity_capturing>false</Enable_discontinuity_capturing>
-  <Enable_bound_preserving_limiter>true</Enable_bound_preserving_limiter>
-  <Bound_preserving_bound_tolerance>{DEFAULT_BOUND_REPRESENTABILITY_SLACK:.16g}</Bound_preserving_bound_tolerance>
-  <Bound_preserving_sign_tolerance>{BOUND_SIGN_TOLERANCE:.16g}</Bound_preserving_sign_tolerance>
-  <Bound_preserving_maximum_courant>1.0</Bound_preserving_maximum_courant>
-  <Bound_preserving_enforce_courant_limit>true</Bound_preserving_enforce_courant_limit>
-  <Bound_preserving_enforce_impermeable_boundaries>true</Bound_preserving_enforce_impermeable_boundaries>
-  <Bound_preserving_impermeable_normal_velocity_tolerance>1.0e-10</Bound_preserving_impermeable_normal_velocity_tolerance>
+  <Enable_bound_preserving_limiter>false</Enable_bound_preserving_limiter>
   <Enable_reinitialization>false</Enable_reinitialization>
   <Enable_volume_correction>false</Enable_volume_correction>
   <Output type="Spatial">
@@ -1923,11 +1905,6 @@ def configure_sessile_solver_xml(case_dir: Path,
     set_text(level_set, "Velocity_source", "coupled_field")
     set_text(level_set, "Velocity_field_name", "Velocity")
     set_text(level_set, "Auto_register_velocity_field", "true")
-    if contact_line_model == "prescribed":
-        # Accepted-state wall repair owns the contact geometry for this model.
-        # The transport limiter would compare that repaired field against the
-        # unrepaired nodal range and reject an otherwise stationary update.
-        set_text(level_set, "Enable_bound_preserving_limiter", "false")
 
     fluid = fluid_equation(root)
     set_text(fluid, "Density", "1.0")
@@ -13913,9 +13890,10 @@ def apply_high_order_3d_benchmark_profile_qualification_defaults(
     set_default(args, "ns_gm_tolerance", 1.0e-4)
     set_default(args, "ns_cg_tolerance", 1.0e-4)
     # Preserve the audited D18/D38 adaptive range.  The bound-preserving gate
-    # has demonstrated valid recovery below 6.25e-5 without any sign or wall-
-    # normal violation, so a higher preset floor can reject an otherwise valid
-    # retry before the deck's own minimum is reached.
+    # (retired by decision D51) demonstrated valid recovery below 6.25e-5
+    # without any sign or wall-normal violation, so a higher preset floor can
+    # reject an otherwise valid retry before the deck's own minimum is
+    # reached.
     set_default(args, "adaptive_time_loop_min_dt", 1.5625e-5)
     set_default(args, "adaptive_time_loop_max_dt", 5.0e-4)
     set_default(args, "adaptive_time_loop_max_retries", 8)

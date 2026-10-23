@@ -39,9 +39,10 @@ TEST(LevelSetMaintenanceRequestSchedule, ActionBitsNameTheConfiguredAndDueAction
     EXPECT_EQ(level_set::levelSetMaintenanceRequestActionBits(configuration, 3),
               bit(3u));
 
-    configuration.transport.bound_preserving.enabled = true;
+    // An enabled kinematic reconciliation is due after a completed step.
+    configuration.transport.kinematic_reconciliation.enabled = true;
     EXPECT_EQ(level_set::levelSetMaintenanceRequestActionBits(configuration, 3),
-              bit(1u) | bit(3u) | bit(8u));
+              bit(3u) | bit(8u) | bit(12u));
 
     // The conservative phase writes its flux artifact every second step.
     level_set::LevelSetMaintenanceConfiguration conservative{};
@@ -57,7 +58,9 @@ TEST(LevelSetMaintenanceRequestSchedule, ActionBitsNameTheConfiguredAndDueAction
 
     // Bit 11 is left to the application; retired bits stay unused.
     for (const auto bits : {even, odd}) {
-        EXPECT_EQ(bits & (bit(2u) | bit(5u) | bit(6u) | bit(7u) | bit(11u)), 0u);
+        EXPECT_EQ(bits & (bit(1u) | bit(2u) | bit(5u) | bit(6u) | bit(7u) |
+                          bit(11u)),
+                  0u);
     }
 }
 

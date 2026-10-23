@@ -9676,7 +9676,6 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   first_configuration.transport.level_set.field_name = "phi_first";
   first_configuration.transport.velocity.source =
       svmp::FE::level_set::LevelSetVelocitySource::ConstantVector;
-  first_configuration.transport.bound_preserving.enabled = true;
   first_configuration.static_capillary_equilibrium_enabled = true;
   first_configuration.static_capillary_equilibrium.target_liquid_volume = 1.25;
   first_configuration.curvature_projection

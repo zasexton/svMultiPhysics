@@ -225,9 +225,9 @@ TEST(LevelSetMaintenanceConfiguration,
         "Conservative_phase_geometry_correction_max_iterations", "2tail");
     put(input.equation_parameters,
         "Conservative_phase_geometry_measure_tolerance", "1.25tail");
-    put(input.equation_parameters, "Enable_bound_preserving_limiter",
+    put(input.equation_parameters, "Enable_sign_definite_patch_bounds",
         "unrecognized");
-    put(input.equation_parameters, "Bound_preserving_bound_tolerance", "nan");
+    put(input.equation_parameters, "Static_capillary_volume_tolerance", "nan");
 
     const auto resolved =
         application::core::resolveLegacyLevelSetMaintenanceConfiguration(
@@ -245,8 +245,9 @@ TEST(LevelSetMaintenanceConfiguration,
               2);
     EXPECT_DOUBLE_EQ(transport.conservative_phase.geometry_measure_tolerance,
                      1.25);
-    EXPECT_FALSE(transport.bound_preserving.enabled);
-    EXPECT_TRUE(std::isnan(transport.bound_preserving.bound_tolerance));
+    EXPECT_FALSE(transport.sign_definite_patch_bounds.enabled);
+    EXPECT_TRUE(std::isnan(
+        (*resolved)->static_capillary_equilibrium.volume_tolerance));
   }
 
   auto zero = makeLegacyInput();
@@ -703,8 +704,8 @@ TEST(LevelSetMaintenanceConfiguration,
 TEST(LevelSetMaintenanceConfiguration,
      ResolvesUnavailableInstallationAndNonfiniteLegacyTolerance) {
   auto input = makeLegacyInput();
-  put(input.equation_parameters, "Enable_bound_preserving_limiter", "true");
-  put(input.equation_parameters, "Bound_preserving_bound_tolerance", "nan");
+  put(input.equation_parameters, "Enable_sign_definite_patch_bounds", "true");
+  put(input.equation_parameters, "Static_capillary_volume_tolerance", "nan");
 
   const auto resolved =
       application::core::resolveLegacyLevelSetMaintenanceConfiguration(
@@ -712,19 +713,19 @@ TEST(LevelSetMaintenanceConfiguration,
   ASSERT_TRUE(resolved.has_value());
   EXPECT_EQ((*resolved)->installation, nullptr);
   ASSERT_TRUE(
-      std::isnan((*resolved)->transport.bound_preserving.bound_tolerance));
+      std::isnan((*resolved)->static_capillary_equilibrium.volume_tolerance));
   const auto *enabled =
       findObservation((*resolved)->input_observations,
-                      "enable_bound_preserving_limiter", "legacy_getter");
+                      "enable_sign_definite_patch_bounds", "legacy_getter");
   ASSERT_NE(enabled, nullptr);
-  EXPECT_EQ(enabled->selected_spelling, "Enable_bound_preserving_limiter");
+  EXPECT_EQ(enabled->selected_spelling, "Enable_sign_definite_patch_bounds");
   EXPECT_TRUE(enabled->supplied);
   EXPECT_FALSE(enabled->compatibility_fallback);
   const auto *tolerance =
       findObservation((*resolved)->input_observations,
-                      "bound_preserving_bound_tolerance", "legacy_getter");
+                      "static_capillary_volume_tolerance", "legacy_getter");
   ASSERT_NE(tolerance, nullptr);
-  EXPECT_EQ(tolerance->selected_spelling, "Bound_preserving_bound_tolerance");
+  EXPECT_EQ(tolerance->selected_spelling, "Static_capillary_volume_tolerance");
   EXPECT_TRUE(tolerance->supplied);
   EXPECT_FALSE(tolerance->compatibility_fallback);
   const auto *default_field = findObservation(

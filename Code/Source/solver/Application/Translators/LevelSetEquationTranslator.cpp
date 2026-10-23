@@ -585,25 +585,6 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
       << json_real(options.supg.velocity_epsilon)
       << ",\"transient_scale\":"
       << json_real(options.supg.transient_scale) << '}'
-      << ",\"bound_preserving\":{\"enabled\":"
-      << json_bool(options.bound_preserving.enabled)
-      << ",\"method\":\"nodal_rejection_projection_nonconservative\""
-      << ",\"bound_tolerance\":"
-      << json_real(options.bound_preserving.bound_tolerance)
-      << ",\"sign_tolerance\":"
-      << json_real(options.bound_preserving.sign_tolerance)
-      << ",\"maximum_courant\":"
-      << json_real(options.bound_preserving.maximum_courant)
-      << ",\"courant_tolerance\":"
-      << json_real(options.bound_preserving.courant_tolerance)
-      << ",\"enforce_courant_limit\":"
-      << json_bool(options.bound_preserving.enforce_courant_limit)
-      << ",\"enforce_impermeable_boundaries\":"
-      << json_bool(options.bound_preserving.enforce_impermeable_boundaries)
-      << ",\"impermeable_normal_velocity_tolerance\":"
-      << json_real(
-             options.bound_preserving.impermeable_normal_velocity_tolerance)
-      << '}'
       << ",\"interface_kinematic\":{\"enabled\":"
       << json_bool(options.interface_kinematic.enabled)
       << ",\"interface_marker\":"
@@ -1392,44 +1373,26 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
         "settings) was retired (decision D47); no accepted benchmark used "
         "it.  Remove these keys or set Enable_discontinuity_capturing=false.");
   }
-  if (const auto value = get_defined_bool(
+  // The bound-preserving limiter of the level-set transport was retired
+  // (decision D51).  Decks may still state it as disabled.
+  if (get_defined_bool(params, {"Enable_bound_preserving_limiter"})
+          .value_or(false) ||
+      get_defined_string(
           params,
-          {"Enable_bound_preserving_limiter"})) {
-    options.bound_preserving.enabled = *value;
-  }
-  if (const auto value = get_defined_real(
-          params,
-          {"Bound_preserving_bound_tolerance"},
-          "Bound_preserving_bound_tolerance")) {
-    options.bound_preserving.bound_tolerance = *value;
-  }
-  if (const auto value = get_defined_real(
-          params,
-          {"Bound_preserving_sign_tolerance"},
-          "Bound_preserving_sign_tolerance")) {
-    options.bound_preserving.sign_tolerance = *value;
-  }
-  if (const auto value = get_defined_real(
-          params,
-          {"Bound_preserving_maximum_courant"},
-          "Bound_preserving_maximum_courant")) {
-    options.bound_preserving.maximum_courant = *value;
-  }
-  if (const auto value = get_defined_bool(
-          params,
-          {"Bound_preserving_enforce_courant_limit"})) {
-    options.bound_preserving.enforce_courant_limit = *value;
-  }
-  if (const auto value = get_defined_bool(
-          params,
-          {"Bound_preserving_enforce_impermeable_boundaries"})) {
-    options.bound_preserving.enforce_impermeable_boundaries = *value;
-  }
-  if (const auto value = get_defined_real(
-          params,
-          {"Bound_preserving_impermeable_normal_velocity_tolerance"},
-          "Bound_preserving_impermeable_normal_velocity_tolerance")) {
-    options.bound_preserving.impermeable_normal_velocity_tolerance = *value;
+          {"Bound_preserving_bound_tolerance",
+           "Bound_preserving_sign_tolerance",
+           "Bound_preserving_maximum_courant",
+           "Bound_preserving_enforce_courant_limit",
+           "Bound_preserving_enforce_impermeable_boundaries",
+           "Bound_preserving_impermeable_normal_velocity_tolerance"})
+          .has_value()) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Application] The level-set bound-preserving "
+        "limiter (Enable_bound_preserving_limiter and the "
+        "Bound_preserving_* settings) was retired (decision D51); with it "
+        "on, the SPHERIC reruns failed at their first step, while the runs "
+        "without it and the sign-definite patch bounds were clean.  Remove "
+        "these keys or set Enable_bound_preserving_limiter=false.");
   }
 
   if (const auto value = get_defined_bool(
@@ -1754,13 +1717,12 @@ translate_level_set_transport_input(
     if (!options.conservative_phase.enabled ||
         !options.conservative_phase.reconcile_geometry ||
         options.transport_form != ls::LevelSetTransportForm::Advective ||
-        options.bound_preserving.enabled ||
         options.velocity.auto_register_field ||
         !options.velocity.algebraic_extension_source_field_name.empty() ||
         !options.boundaries.inflow.empty() ||
         !options.boundaries.outflow.empty()) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Material-interface phase-pair velocity requires advective-form conservative phase transport with geometry reconciliation, interface kinematic enforcement, no legacy bound projection, no separate velocity registration or extension, and no declared inflow or outflow boundary.");
+          "[svMultiPhysics::Application] Material-interface phase-pair velocity requires advective-form conservative phase transport with geometry reconciliation, interface kinematic enforcement, no separate velocity registration or extension, and no declared inflow or outflow boundary.");
     }
   }
 
