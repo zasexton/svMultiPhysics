@@ -18,7 +18,8 @@
 #include "FE/Systems/FESystemHandle.h"
 #include "FE/Systems/SnapshotFieldAccess.h"
 #include "FE/Systems/SystemCollectives.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
+#include "FE/LevelSet/AcceptedFunctionalRecorder.h"
+#include "FE/Systems/FunctionalRecords.h"
 
 #include <algorithm>
 #include <array>
@@ -922,7 +923,7 @@ evaluateAcceptedFreeSurfaceContactStages(
 {
   const auto comm = activeMeshCommunicator(*sim.fe_system);
   const auto declarations =
-      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
+      svmp::FE::systems::functionalRecords(*sim.fe_system).functionalDeclarations();
   const auto dynamic_count = static_cast<std::size_t>(std::count_if(
       declarations.begin(),
       declarations.end(),
@@ -1196,7 +1197,7 @@ captureAcceptedContactStageWallConstraints(
 {
   std::vector<svmp::FE::level_set::LevelSetWallContactConstraint> captured;
   const auto declarations =
-      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
+      svmp::FE::systems::functionalRecords(*sim.fe_system).functionalDeclarations();
   const auto comm = activeMeshCommunicator(*sim.fe_system);
   const auto* context = sim.fe_system->cutIntegrationContext();
   if (collectiveMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
@@ -1412,6 +1413,33 @@ void assertAcceptedFreeSurfaceContactStageEndpointUnchanged(
     throw std::runtime_error(
         "[svMultiPhysics::Application] The finalized endpoint state differs from the endpoint used to reconstruct accepted contact-stage provenance.");
   }
+}
+
+void recordInitialFreeSurfaceDiscreteFunctionalBaseline(
+    const svmp::FE::systems::FESystemHandle& sim,
+    std::uint64_t initial_step,
+    svmp::FE::Real initial_time,
+    std::span<const svmp::FE::Real> initial_solution,
+    bool record_backward_euler_kinetic_baseline,
+    std::optional<std::uint64_t>
+        initial_extension_map_revision)
+{
+  svmp::FE::level_set::recordInitialAcceptedFunctionalBaseline(
+      sim,
+      initial_step,
+      initial_time,
+      initial_solution,
+      [&](std::uint64_t initial_state_revision) {
+        return evaluateAcceptedFreeSurfaceContactStages(
+            sim,
+            initial_time,
+            svmp::FE::Real{1.0},
+            initial_state_revision,
+            initial_state_revision,
+            initial_solution);
+      },
+      record_backward_euler_kinetic_baseline,
+      initial_extension_map_revision);
 }
 
 } // namespace svmp::Physics::formulations::navier_stokes::free_surface

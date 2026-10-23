@@ -62,7 +62,7 @@
 #include <utility>
 #include <vector>
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
+#include "FE/Systems/FunctionalRecords.h"
 
 namespace {
 // Every small-cut aggregation prolongation report requested in this test
@@ -2601,7 +2601,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   functional_parameters.liquid_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   functional_parameters.surface_tension = 1.0;
-  free_surface::records(*system).declareFreeSurfaceDiscreteFunctional(
+  svmp::FE::systems::functionalRecords(*system).declareFunctional(
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = interface_marker,
           .level_set_field = phi,
@@ -2744,7 +2744,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
         svmp::FE::Real{6.0};
   }
   const auto previous_velocity_revision =
-      collectiveFreeSurfaceFieldRevision(
+      collectiveFieldRevision(
           *system,
           velocity,
           previous,
@@ -2766,7 +2766,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
         svmp::FE::Real{8.0};
   }
   EXPECT_EQ(
-      collectiveFreeSurfaceFieldRevision(
+      collectiveFieldRevision(
           *system,
           velocity,
           unrelated_fields_changed,
@@ -2774,7 +2774,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           "MPI unchanged velocity revision"),
       previous_velocity_revision);
   EXPECT_NE(
-      collectiveFreeSurfaceFieldRevision(
+      collectiveFieldRevision(
           *system,
           velocity,
           older,
@@ -3798,7 +3798,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           continue;
         }
         const auto initial_functionals =
-            evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+            evaluateCurrentAcceptedFunctionals(sim);
         ASSERT_EQ(initial_functionals.size(), 1u);
         const auto expected_volume =
             svmp::FE::Real{3.0} * normal_offset;
@@ -3857,7 +3857,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
             2.0e-10);
 
         const auto final_functionals =
-            evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+            evaluateCurrentAcceptedFunctionals(sim);
         ASSERT_EQ(final_functionals.size(), 1u);
         const auto volume_error = std::abs(
             final_functionals.front().state.owned_liquid_volume -
@@ -4928,9 +4928,9 @@ void runHydrostaticFixedGaugeMpiCase(
   ASSERT_TRUE(initial_report.refreshed);
   ASSERT_NE(initial_report.topology_key, 0u);
   auto initial_functionals =
-      evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+      evaluateCurrentAcceptedFunctionals(sim);
   ASSERT_EQ(initial_functionals.size(), 1u);
-  attachAcceptedFreeSurfaceActiveVolumeEnergies(
+  attachAcceptedActiveVolumeEnergies(
       sim, current, initial_functionals);
   ASSERT_TRUE(
       initial_functionals.front().active_volume_energy.has_value());
@@ -5089,9 +5089,9 @@ void runHydrostaticFixedGaugeMpiCase(
   EXPECT_LE(phi_update, 2.0e-7);
 
   auto final_functionals =
-      evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+      evaluateCurrentAcceptedFunctionals(sim);
   ASSERT_EQ(final_functionals.size(), 1u);
-  attachAcceptedFreeSurfaceActiveVolumeEnergies(
+  attachAcceptedActiveVolumeEnergies(
       sim, certified_solution, final_functionals);
   ASSERT_TRUE(
       final_functionals.front().active_volume_energy.has_value());
@@ -5723,7 +5723,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
             .dynamic_viscosity = svmp::FE::Real{0.4},
         });
   }
-  free_surface::records(*system).declareFreeSurfaceDiscreteFunctional(
+  svmp::FE::systems::functionalRecords(*system).declareFunctional(
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = 721,
           .level_set_field = phi,
@@ -5891,7 +5891,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           svmp::MeshComm(MPI_COMM_WORLD));
   EXPECT_EQ(minimum_refresh_topology, maximum_refresh_topology);
   const auto current_functionals =
-      evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+      evaluateCurrentAcceptedFunctionals(sim);
   const auto maintenance_functionals =
       levelSetMaintenanceFunctionalValues(
           sim, current_functionals, solution);
@@ -6290,7 +6290,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           std::span<const svmp::FE::Real>(solution.data(), solution.size()),
           activeFESystemCommunicator(*sim.fe_system));
   EXPECT_EQ(accepted_state_revision, pre_maintenance_endpoint_state_revision);
-  ASSERT_NO_THROW(recordAcceptedFreeSurfaceDiscreteFunctionals(
+  ASSERT_NO_THROW(recordAcceptedFunctionals(
       sim,
       /*accepted_step=*/2u,
       svmp::FE::Real{0.10},
@@ -6299,7 +6299,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       accepted_state_revision,
       contact_stages));
   const auto functional_history =
-      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalHistory();
+      svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
   ASSERT_EQ(functional_history.size(), 1u);
   const auto& functional_record = functional_history.front();
   EXPECT_EQ(functional_record.accepted_step, 2u);
@@ -7611,7 +7611,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       inconsistent_declarations{{inconsistent_declaration}};
   bool local_declaration_mismatch_rejected = false;
   try {
-    (void)requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
+    (void)requireCommunicatorConsistentAcceptedFunctionalCoverage(
         inconsistent_declarations, svmp::MeshComm::world());
   } catch (const std::runtime_error&) {
     local_declaration_mismatch_rejected = true;
@@ -7645,7 +7645,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           inconsistent_method_declaration}};
   bool local_method_mismatch_rejected = false;
   try {
-    (void)requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
+    (void)requireCommunicatorConsistentAcceptedFunctionalCoverage(
         inconsistent_method_declarations, svmp::MeshComm::world());
   } catch (const std::runtime_error&) {
     local_method_mismatch_rejected = true;

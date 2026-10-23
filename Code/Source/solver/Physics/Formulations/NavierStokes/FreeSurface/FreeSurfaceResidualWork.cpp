@@ -47,7 +47,7 @@
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
+#include "FE/Systems/FunctionalRecords.h"
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #  include "Mesh/Fields/MeshFields.h"
@@ -180,7 +180,7 @@ void installFreeSurfaceResidualWork(
                 !installed,
                 FE::InvalidArgumentException,
                 "IncompressibleNavierStokesVMSModule: produced free-surface residual-work channel has no form component");
-            free_surface::records(system).declareFreeSurfaceResidualWork(
+            svmp::FE::systems::functionalRecords(system).declareWorkChannel(
                 FE::systems::FreeSurfaceResidualWorkDeclaration{
                     .channel = channel,
                     .applicability = FE::systems::
@@ -196,7 +196,7 @@ void installFreeSurfaceResidualWork(
         };
     const auto declare_inapplicable =
         [&](FE::systems::FreeSurfaceResidualWorkChannel channel) {
-            free_surface::records(system).declareFreeSurfaceResidualWork(
+            svmp::FE::systems::functionalRecords(system).declareWorkChannel(
                 FE::systems::FreeSurfaceResidualWorkDeclaration{
                     .channel = channel,
                     .applicability = FE::systems::

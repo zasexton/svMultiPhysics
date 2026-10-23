@@ -14,7 +14,8 @@
 #include "FE/Systems/SystemCollectives.h"
 #include "FE/Systems/SystemState.h"
 #include "FE/TimeStepping/StepController.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactStages.h"
+#include "FE/Systems/FunctionalRecords.h"
 
 #include <algorithm>
 #include <array>
@@ -30,6 +31,7 @@
 
 namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
+using svmp::FE::level_set::acceptedFunctionalDeclarationContentKey;
 using svmp::FE::level_set::aggregateLevelSetMaintenanceAcceptedStepEnergy;
 using svmp::FE::level_set::collectiveLevelSetMaintenanceAlgebraicRevision;
 using svmp::FE::level_set::LevelSetMaintenanceWorkAttempt;
@@ -38,6 +40,8 @@ using svmp::FE::level_set::LevelSetMaintenanceWorkRow;
 using svmp::FE::level_set::logLevelSetMaintenanceAcceptedStepEnergyAccount;
 using svmp::FE::level_set::mixConservativePhaseArtifactFingerprint;
 using svmp::FE::level_set::mixMaintenanceRevision;
+using svmp::FE::level_set::recordAcceptedFunctionals;
+using svmp::FE::level_set::requireCommunicatorConsistentAcceptedFunctionalCoverage;
 using svmp::FE::rank_log::oopCout;
 using svmp::FE::systems::captureFeOrderedVectorCollectively;
 using svmp::FE::systems::collectiveAnyTrue;
@@ -50,13 +54,13 @@ using svmp::FE::timestepping::stepRejectReasonName;
 EnergyParticipant::EnergyParticipant(const svmp::FE::timestepping::StepContext& context)
     : svmp::FE::timestepping::StepContext(context),
       free_surface_boundary_energy_declaration(
-          free_surface::records(*context.sim.fe_system)
-              .freeSurfaceExternalBoundaryEnergyDeclaration())
+          svmp::FE::systems::functionalRecords(*context.sim.fe_system)
+              .externalBoundaryEnergyDeclaration())
 {
   free_surface_declarations =
-      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
+      svmp::FE::systems::functionalRecords(*sim.fe_system).functionalDeclarations();
   free_surface_acceptance_coverage =
-      requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
+      requireCommunicatorConsistentAcceptedFunctionalCoverage(
           free_surface_declarations,
           active_comm);
   has_free_surface_functional =
@@ -64,7 +68,7 @@ EnergyParticipant::EnergyParticipant(const svmp::FE::timestepping::StepContext& 
   has_dynamic_contact_stage =
       free_surface_acceptance_coverage.has_dynamic_contact;
   free_surface_residual_work_declarations =
-      free_surface::records(*sim.fe_system).freeSurfaceResidualWorkDeclarations();
+      svmp::FE::systems::functionalRecords(*sim.fe_system).workChannelDeclarations();
   const auto [minimum_residual_work_declaration_count,
               maximum_residual_work_declaration_count] =
       collectiveMinMaxUint64(
@@ -642,8 +646,8 @@ void EnergyParticipant::recordAcceptedStepMaintenanceAccount(
           account);
       if (account.post_transport.has_value()) {
         const auto history =
-            free_surface::records(*sim.fe_system)
-                .freeSurfaceDiscreteFunctionalHistory();
+            svmp::FE::systems::functionalRecords(*sim.fe_system)
+                .acceptedFunctionalHistory();
         const auto declaration_count =
             free_surface_declarations.size();
         if (declaration_count == 0u ||
@@ -709,9 +713,9 @@ void EnergyParticipant::recordAcceptedStepMaintenanceAccount(
                   preceding_extension_map_revision ||
               record.declaration.interface_marker !=
                   declaration.interface_marker ||
-              freeSurfaceDiscreteFunctionalDeclarationContentKey(
+              acceptedFunctionalDeclarationContentKey(
                   record.declaration) !=
-                  freeSurfaceDiscreteFunctionalDeclarationContentKey(
+                  acceptedFunctionalDeclarationContentKey(
                   declaration) ||
               !std::isfinite(
                   record.state.liquid_gas_surface_energy) ||
@@ -918,7 +922,7 @@ void EnergyParticipant::publishAcceptedEnergy(
     }
     bool backward_euler_kinetic_work_bound = true;
     const auto accepted_functional_states =
-        recordAcceptedFreeSurfaceDiscreteFunctionals(
+        recordAcceptedFunctionals(
             sim,
             static_cast<std::uint64_t>(h.stepIndex()),
             h.time(),
@@ -1229,7 +1233,7 @@ void EnergyParticipant::publishAcceptedEnergy(
     FreeSurfaceAggregationEnergyClassification
         aggregation_energy;
     const auto functional_history =
-        free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalHistory();
+        svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
     const auto declaration_count =
         free_surface_declarations.size();
     const bool functional_history_aligned =
@@ -1771,7 +1775,7 @@ void EnergyParticipant::recordRejectedAttempt(
   if (complete_free_surface_energy_connector_available &&
       free_surface_energy_history_contiguous) {
     const auto functional_history =
-        free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalHistory();
+        svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
     const auto declaration_count =
         free_surface_declarations.size();
     if (h.stepIndex() < 0 || declaration_count == 0u ||

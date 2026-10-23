@@ -167,4 +167,16 @@ void assertAcceptedFreeSurfaceContactStageEndpointUnchanged(
     std::span<const svmp::FE::Real> endpoint_solution,
     const svmp::MeshComm& comm);
 
+/// Record the initial accepted functional group
+/// (FE/LevelSet/AcceptedFunctionalRecorder) with the accepted contact stages
+/// of the initial state.
+void recordInitialFreeSurfaceDiscreteFunctionalBaseline(
+    const svmp::FE::systems::FESystemHandle& sim,
+    std::uint64_t initial_step,
+    svmp::FE::Real initial_time,
+    std::span<const svmp::FE::Real> initial_solution,
+    bool record_backward_euler_kinetic_baseline = false,
+    std::optional<std::uint64_t>
+        initial_extension_map_revision = std::nullopt);
+
 } // namespace svmp::Physics::formulations::navier_stokes::free_surface

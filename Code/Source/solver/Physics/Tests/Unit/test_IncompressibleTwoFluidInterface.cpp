@@ -43,10 +43,9 @@
 #include <utility>
 #include <vector>
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
+#include "FE/Systems/FunctionalRecords.h"
 #include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
 
-namespace free_surface = svmp::Physics::formulations::navier_stokes::free_surface;
 namespace two_fluid = svmp::Physics::formulations::navier_stokes::two_fluid;
 
 namespace {
@@ -1593,11 +1592,11 @@ TEST(IncompressibleTwoFluidModule,
                    record.active_domains.end();
       }));
   EXPECT_EQ(interface_records, 1u);
-  EXPECT_TRUE(free_surface::records(fixture.system).freeSurfaceResidualWorkDeclarations().empty());
+  EXPECT_TRUE(svmp::FE::systems::functionalRecords(fixture.system).workChannelDeclarations().empty());
   EXPECT_FALSE(
-      free_surface::records(fixture.system).freeSurfaceExternalBoundaryEnergyDeclaration().has_value());
+      svmp::FE::systems::functionalRecords(fixture.system).externalBoundaryEnergyDeclaration().has_value());
   EXPECT_TRUE(
-      free_surface::records(fixture.system).freeSurfaceDiscreteFunctionalDeclarations().empty());
+      svmp::FE::systems::functionalRecords(fixture.system).functionalDeclarations().empty());
   const auto diagnostic_declarations =
       two_fluid::records(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
   ASSERT_EQ(diagnostic_declarations.size(), 1u);
@@ -2721,10 +2720,10 @@ TEST(IncompressibleTwoFluidModule,
           "\"surface_tension_form_effective\":\"NotApplicableInternalVolume\""),
       std::string::npos);
   EXPECT_FALSE(
-      free_surface::records(fixture.system).freeSurfaceExternalBoundaryEnergyDeclaration().has_value());
-  EXPECT_TRUE(free_surface::records(fixture.system).freeSurfaceResidualWorkDeclarations().empty());
+      svmp::FE::systems::functionalRecords(fixture.system).externalBoundaryEnergyDeclaration().has_value());
+  EXPECT_TRUE(svmp::FE::systems::functionalRecords(fixture.system).workChannelDeclarations().empty());
   EXPECT_TRUE(
-      free_surface::records(fixture.system).freeSurfaceDiscreteFunctionalDeclarations().empty());
+      svmp::FE::systems::functionalRecords(fixture.system).functionalDeclarations().empty());
 }
 
 } // namespace

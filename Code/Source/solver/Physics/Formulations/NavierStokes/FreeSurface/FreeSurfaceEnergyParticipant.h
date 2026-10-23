@@ -18,7 +18,7 @@
  *        the complete energy ledger with its accepted and rejected records.
  */
 
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceAcceptedFunctionals.h"
+#include "FE/LevelSet/AcceptedFunctionalRecorder.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactStageParticipant.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyAccount.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyCandidate.h"
@@ -136,7 +136,8 @@ public:
 
   std::span<const svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration>
       free_surface_declarations{};
-  FreeSurfaceAcceptanceCoverage free_surface_acceptance_coverage{};
+  svmp::FE::level_set::AcceptedFunctionalCoverage
+      free_surface_acceptance_coverage{};
   bool has_free_surface_functional{false};
   bool has_dynamic_contact_stage{false};
   std::span<const svmp::FE::systems::FreeSurfaceResidualWorkDeclaration>

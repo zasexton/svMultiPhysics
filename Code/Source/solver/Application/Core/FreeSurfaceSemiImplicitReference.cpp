@@ -13,7 +13,7 @@
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/SystemState.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
+#include "FE/Systems/FunctionalRecords.h"
 
 #include <algorithm>
 #include <memory>
@@ -24,8 +24,6 @@
 #ifdef MESH_HAS_MPI
 #include <mpi.h>
 #endif
-
-namespace free_surface = svmp::Physics::formulations::navier_stokes::free_surface;
 
 namespace application::core {
 namespace {
@@ -156,7 +154,7 @@ bindFreeSurfaceSemiImplicitReference(
   FieldId velocity_field = INVALID_FIELD_ID;
   std::set<FieldId> level_set_fields;
   for (const auto& declaration :
-       free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations()) {
+       svmp::FE::systems::functionalRecords(system).functionalDeclarations()) {
     if (declaration.velocity_field == INVALID_FIELD_ID) {
       continue;
     }

@@ -80,7 +80,7 @@
 #include "Mesh/Topology/DistributedTopology.h"
 #include "Physics/Core/PhysicsModule.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyCandidate.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceAcceptedFunctionals.h"
+#include "FE/LevelSet/AcceptedFunctionalRecorder.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactStages.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactStageParticipant.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyParticipant.h"
@@ -89,7 +89,7 @@
 #include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageParticipant.h"
 #include "Parameters.h"
 #include "tinyxml2.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
+#include "FE/Systems/FunctionalRecords.h"
 #include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
 
 #include <algorithm>
@@ -3531,15 +3531,15 @@ std::uint64_t collectiveLevelSetMaintenanceAlgebraicRevision(
     const svmp::MeshComm& comm);
 
 // The accepted discrete functionals are Navier-Stokes free-surface physics
-// (Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceAcceptedFunctionals.h).
-using svmp::Physics::formulations::navier_stokes::free_surface::freeSurfaceDiscreteFunctionalDeclarationContentKey;
-using svmp::Physics::formulations::navier_stokes::free_surface::evaluateCurrentFreeSurfaceDiscreteFunctionals;
-using svmp::Physics::formulations::navier_stokes::free_surface::attachAcceptedFreeSurfaceActiveVolumeEnergies;
-using svmp::Physics::formulations::navier_stokes::free_surface::collectiveFreeSurfaceFieldRevision;
-using svmp::Physics::formulations::navier_stokes::free_surface::levelSetMaintenanceFunctionalValues;
-using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceAcceptanceCoverage;
-using svmp::Physics::formulations::navier_stokes::free_surface::requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage;
-using svmp::Physics::formulations::navier_stokes::free_surface::recordAcceptedFreeSurfaceDiscreteFunctionals;
+// (FE/LevelSet/AcceptedFunctionalRecorder.h).
+using svmp::FE::level_set::acceptedFunctionalDeclarationContentKey;
+using svmp::FE::level_set::evaluateCurrentAcceptedFunctionals;
+using svmp::FE::level_set::attachAcceptedActiveVolumeEnergies;
+using svmp::FE::level_set::collectiveFieldRevision;
+using svmp::FE::level_set::levelSetMaintenanceFunctionalValues;
+using svmp::FE::level_set::AcceptedFunctionalCoverage;
+using svmp::FE::level_set::requireCommunicatorConsistentAcceptedFunctionalCoverage;
+using svmp::FE::level_set::recordAcceptedFunctionals;
 
 // The accepted-stage diagnostics of the two-fluid interface are Navier-Stokes
 // two-fluid physics (Physics/Formulations/NavierStokes/TwoFluid/TwoFluidAcceptedStage.h);
@@ -3940,7 +3940,7 @@ resolveLevelSetWallAwareMaintenanceContext(
 {
   LevelSetWallAwareMaintenanceContext resolved;
   const auto declarations =
-      free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
+      svmp::FE::systems::functionalRecords(*sim.fe_system).functionalDeclarations();
   const auto comm = activeFESystemCommunicator(*sim.fe_system);
   std::uint64_t declaration_signature = 1469598103934665603ull;
   const auto mix_declaration_value = [&declaration_signature](
@@ -4922,7 +4922,7 @@ bool requiresQuadraticTotalEnergyTractionInterfaceRules(
   const auto curvature_field =
       system.findFieldByName(request.configuration->curvature_field_name);
   const auto declarations =
-      free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations();
+      svmp::FE::systems::functionalRecords(system).functionalDeclarations();
   return std::any_of(
       declarations.begin(),
       declarations.end(),
@@ -4940,7 +4940,7 @@ void bindKinematicAreaGradientTractionMaintenance(
     std::vector<LevelSetMaintenanceRequest>& requests)
 {
   const auto declarations =
-      free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations();
+      svmp::FE::systems::functionalRecords(system).functionalDeclarations();
   const auto comm = activeFESystemCommunicator(system);
   const auto [minimum_declaration_count, maximum_declaration_count] =
       globalMinMaxUint64(
@@ -4951,7 +4951,7 @@ void bindKinematicAreaGradientTractionMaintenance(
   }
   for (const auto& declaration : declarations) {
     const auto key =
-        freeSurfaceDiscreteFunctionalDeclarationContentKey(declaration);
+        acceptedFunctionalDeclarationContentKey(declaration);
     const auto [minimum_key, maximum_key] =
         globalMinMaxUint64(key, comm);
     if (minimum_key != maximum_key) {
@@ -8016,7 +8016,7 @@ buildAcceptedFreeSurfaceContactStageCandidate(
           !dynamicContactStageProvenanceMatches(
               observation,
               sim.fe_system->meshAccess(),
-              free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations())) {
+              svmp::FE::systems::functionalRecords(*sim.fe_system).functionalDeclarations())) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Exact generalized-alpha "
             "operator-stage base-mesh or contact-wall snapshot is stale "
@@ -8025,7 +8025,7 @@ buildAcceptedFreeSurfaceContactStageCandidate(
       }
       overlayDynamicContactOperatorStageState(
           *sim.fe_system,
-          free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations(),
+          svmp::FE::systems::functionalRecords(*sim.fe_system).functionalDeclarations(),
           observation.operator_stage_state,
           contact_stage.stage_solution);
     }
@@ -9159,8 +9159,8 @@ evaluateStaticCapillaryFunctionalCandidate(
     }
   }
 
-  auto states = evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
-  attachAcceptedFreeSurfaceActiveVolumeEnergies(sim, candidate, states);
+  auto states = evaluateCurrentAcceptedFunctionals(sim);
+  attachAcceptedActiveVolumeEnergies(sim, candidate, states);
   const bool local_functional_available =
       states.size() == 1u &&
       states.front().interface_marker == marker &&
@@ -9396,7 +9396,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
   }
 
   const auto declarations =
-      free_surface::records(system).freeSurfaceDiscreteFunctionalDeclarations();
+      svmp::FE::systems::functionalRecords(system).functionalDeclarations();
   const bool local_declaration_matches =
       declarations.size() == 1u &&
       declarations.front().interface_marker == *marker &&
@@ -9449,7 +9449,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
   }
 
   const auto declaration_content_key =
-      freeSurfaceDiscreteFunctionalDeclarationContentKey(declaration);
+      acceptedFunctionalDeclarationContentKey(declaration);
   const auto [minimum_declaration_content_key,
               maximum_declaration_content_key] =
       globalMinMaxUint64(declaration_content_key, comm);
@@ -9565,7 +9565,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
   }
 
   const auto initial_states =
-      evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+      evaluateCurrentAcceptedFunctionals(sim);
   const bool local_initial_functional_available =
       initial_states.size() == 1u &&
       initial_states.front().interface_marker == *marker;
@@ -11028,8 +11028,8 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       activeFESystemCommunicator(*sim.fe_system),
       steady_accepted_extension_maps);
   const auto steady_free_surface_coverage =
-      requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
-          free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations(),
+      requireCommunicatorConsistentAcceptedFunctionalCoverage(
+          svmp::FE::systems::functionalRecords(*sim.fe_system).functionalDeclarations(),
           activeFESystemCommunicator(*sim.fe_system));
   if (steady_free_surface_coverage.has_functional) {
     const auto steady_comm =
@@ -11048,7 +11048,7 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
             steady_state_revision,
             std::span<const svmp::FE::Real>(
                 steady_solution.data(), steady_solution.size()));
-    (void)recordAcceptedFreeSurfaceDiscreteFunctionals(
+    (void)recordAcceptedFunctionals(
         sim,
         /*accepted_step=*/1u,
         solve_time,
@@ -11645,7 +11645,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               [&](std::span<const svmp::FE::Real> candidate) {
                 return levelSetMaintenanceFunctionalValues(
                     sim,
-                    evaluateCurrentFreeSurfaceDiscreteFunctionals(sim),
+                    evaluateCurrentAcceptedFunctionals(sim),
                     candidate);
               },
           .algebraic_state_revision =
@@ -13202,7 +13202,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           gatherFeOrderedSolution(
               h.u(), velocity_extension_artifact_comm);
       pre_maintenance_functionals =
-          evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
+          evaluateCurrentAcceptedFunctionals(sim);
     }
     std::vector<std::string> maintenance_commit_logs;
     std::unique_ptr<LevelSetMaintenanceGeometryTransaction>
