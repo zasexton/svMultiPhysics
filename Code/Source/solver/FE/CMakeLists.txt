@@ -885,6 +885,7 @@ set(FE_GEOMETRY_HEADERS
     Geometry/CutQuadrature.h
     Geometry/CutQuadratureMapping.h
     Interfaces/CutInterfaceFieldEvaluation.h
+    Interfaces/SnapshotFieldEvaluator.h
     Interfaces/FreeSurfaceGeometrySnapshot.h
     Interfaces/IncompressibleTwoFluidDiagnostics.h
     Interfaces/MaterialInterfaceTransportVelocity.h
@@ -921,6 +922,7 @@ set(FE_GEOMETRY_SOURCES
     Geometry/CutQuadrature.cpp
     Geometry/CutQuadratureMapping.cpp
     Interfaces/CutInterfaceFieldEvaluation.cpp
+    Interfaces/SnapshotFieldEvaluator.cpp
     Interfaces/FreeSurfaceGeometrySnapshot.cpp
     Interfaces/IncompressibleTwoFluidDiagnostics.cpp
     Interfaces/MaterialInterfaceTransportVelocity.cpp
@@ -1108,6 +1110,8 @@ set(FE_SYSTEMS_HEADERS
     Systems/FreeSurfaceFunctionalRounding.h
     Systems/FreeSurfaceRecordTypes.h
     Systems/MeshBoundaryRecordSupport.h
+    Systems/MeshNormalConstraintStageMeasurements.h
+    Systems/SnapshotFieldAccess.h
     Systems/OperatorStageMetadata.h
     Systems/TwoFluidRecordTypes.h
     Systems/BoundedUpdatePolicy.h
@@ -1152,6 +1156,8 @@ set(FE_SYSTEMS_SOURCES
     Systems/ExactAccumulator.cpp
     Systems/FESystem.cpp
     Systems/MeshBoundaryRecordSupport.cpp
+    Systems/MeshNormalConstraintStageMeasurements.cpp
+    Systems/SnapshotFieldAccess.cpp
     Systems/FormsInstaller.cpp
     Systems/FormulationBuilder.cpp
     Systems/BoundedUpdatePolicy.cpp
@@ -1384,6 +1390,7 @@ set(FE_FORMS_SOURCES
     TimeStepping/TimeSteppingUtils.h
     TimeStepping/TimeLoop.h
     TimeStepping/StepParticipants.h
+    TimeStepping/MeshNormalStageParticipant.h
 )
 
 	set(FE_TIMESTEPPING_SOURCES
@@ -1400,6 +1407,7 @@ set(FE_FORMS_SOURCES
     TimeStepping/NewmarkBeta.cpp
     TimeStepping/TimeLoop.cpp
     TimeStepping/StepParticipants.cpp
+    TimeStepping/MeshNormalStageParticipant.cpp
 )
 
 # Constitutive sources (header-only; depends on FE/Forms boundary)
@@ -3135,6 +3143,8 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/Systems/test_FESystem.cpp
 		                Tests/Unit/Systems/test_FESystemAttachments.cpp
 		                Tests/Unit/Systems/test_ExactAccumulator.cpp
+		                Tests/Unit/Systems/test_MeshNormalConstraintStageMeasurements.cpp
+		                Tests/Unit/Systems/test_SnapshotFieldEvaluator.cpp
 		                Tests/Unit/Systems/test_FESystemMultiMesh.cpp
 		                Tests/Unit/Systems/test_FreeSurfaceFunctionalRounding.cpp
 		                Tests/Unit/Systems/test_AssemblerSelection.cpp
