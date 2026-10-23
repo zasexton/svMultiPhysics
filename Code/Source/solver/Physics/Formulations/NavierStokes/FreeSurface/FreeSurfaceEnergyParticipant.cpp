@@ -28,7 +28,13 @@
 namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
 using namespace detail;
+using svmp::FE::level_set::aggregateLevelSetMaintenanceAcceptedStepEnergy;
+using svmp::FE::level_set::LevelSetMaintenanceWorkAttempt;
+using svmp::FE::level_set::LevelSetMaintenanceWorkLedger;
+using svmp::FE::level_set::LevelSetMaintenanceWorkRow;
+using svmp::FE::level_set::logLevelSetMaintenanceAcceptedStepEnergyAccount;
 using svmp::FE::level_set::mixConservativePhaseArtifactFingerprint;
+using svmp::FE::level_set::mixMaintenanceRevision;
 using svmp::FE::rank_log::oopCout;
 
 EnergyParticipant::EnergyParticipant(const FreeSurfaceStepContext& context)

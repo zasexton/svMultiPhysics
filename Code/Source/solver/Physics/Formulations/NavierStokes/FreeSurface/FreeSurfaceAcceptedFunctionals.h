@@ -16,10 +16,10 @@
  *        maintenance functional values and the accepted record.
  */
 
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyAccount.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRunSupport.h"
 
 #include "FE/Core/Types.h"
+#include "FE/LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h"
 #include "FE/Systems/FESystem.h"
 #include "Mesh/Core/MeshComm.h"
 
@@ -53,7 +53,7 @@ std::uint64_t collectiveFreeSurfaceFieldRevision(
     const svmp::MeshComm& comm,
     std::string_view diagnostic_context);
 
-std::vector<LevelSetAuthoritativeFunctionalValue>
+std::vector<svmp::FE::level_set::LevelSetAuthoritativeFunctionalValue>
 levelSetMaintenanceFunctionalValues(
     const FreeSurfaceSystemHandle& sim,
     std::span<const svmp::FE::systems::

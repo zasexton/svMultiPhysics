@@ -7,13 +7,13 @@ namespace svmp {
 class MeshComm;
 }
 
-namespace svmp::Physics::formulations::navier_stokes::free_surface {
+namespace svmp::FE::level_set {
 class LevelSetMaintenanceWorkLedger;
 }
 
 namespace application::core {
 
-using svmp::Physics::formulations::navier_stokes::free_surface::LevelSetMaintenanceWorkLedger;
+using svmp::FE::level_set::LevelSetMaintenanceWorkLedger;
 
 enum class LevelSetMaintenanceTransactionDecision : std::uint8_t {
   Commit,

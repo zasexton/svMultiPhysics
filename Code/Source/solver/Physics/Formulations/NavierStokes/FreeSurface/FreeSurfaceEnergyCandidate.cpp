@@ -19,6 +19,9 @@
 #include <vector>
 
 namespace svmp::Physics::formulations::navier_stokes::free_surface {
+
+using svmp::FE::level_set::mixMaintenanceRevision;
+
 namespace {
 
 const char* freeSurfaceEnergyChannelApplicabilityName(

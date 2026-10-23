@@ -142,7 +142,6 @@ namespace application::core {
 // The free-surface energy account and the complete energy record are
 // Navier-Stokes free-surface physics
 // (Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergy*).
-using svmp::Physics::formulations::navier_stokes::free_surface::mixMaintenanceRevision;
 using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceAcceptedEnergyGroup;
 using svmp::Physics::formulations::navier_stokes::free_surface::summarizeAcceptedFreeSurfaceEnergyGroup;
 using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCompleteEnergyCandidate;
@@ -154,9 +153,7 @@ using svmp::Physics::formulations::navier_stokes::free_surface::freeSurfaceEnerg
 using svmp::Physics::formulations::navier_stokes::free_surface::freeSurfaceEnergyRejectionReasonName;
 using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceAggregationEnergyClassification;
 using svmp::Physics::formulations::navier_stokes::free_surface::classifyAcceptedAggregationEnergy;
-using svmp::Physics::formulations::navier_stokes::free_surface::logLevelSetMaintenanceWorkRows;
-using svmp::Physics::formulations::navier_stokes::free_surface::logLevelSetMaintenanceWorkAttempts;
-using svmp::Physics::formulations::navier_stokes::free_surface::logLevelSetMaintenanceAcceptedStepEnergyAccount;
+using svmp::FE::level_set::logLevelSetMaintenanceWorkPublishedSince;
 using svmp::Physics::formulations::navier_stokes::free_surface::logLevelSetMaintenancePhysicalEndpointChannels;
 
 } // namespace application::core
@@ -11569,6 +11566,29 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   std::optional<int> step_acceptance_attempt_step{};
   const auto velocity_extension_artifact_comm =
       activeFESystemCommunicator(*sim.fe_system);
+  // What a maintenance work row records of a candidate state.
+  const svmp::FE::level_set::LevelSetMaintenanceWorkRowSource
+      maintenance_work_rows{
+          .functional_values =
+              [&](std::span<const svmp::FE::Real> candidate) {
+                return levelSetMaintenanceFunctionalValues(
+                    sim,
+                    evaluateCurrentFreeSurfaceDiscreteFunctionals(sim),
+                    candidate);
+              },
+          .algebraic_state_revision =
+              [&](std::span<const svmp::FE::Real> candidate) {
+                return collectiveLevelSetMaintenanceAlgebraicRevision(
+                    candidate, velocity_extension_artifact_comm);
+              },
+          .extension_map_revision =
+              [&] {
+                return currentLevelSetVelocityExtensionRevision(
+                    *sim.fe_system,
+                    level_set_advection_velocity,
+                    accepted_velocity_extension_maps);
+              },
+      };
   const bool local_has_conservative_phase = std::any_of(
       level_set_maintenance.begin(),
       level_set_maintenance.end(),
@@ -12045,10 +12065,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   bool pending_phase_geometry_commit_required{false};
   bool pending_phase_geometry_commit_returned{false};
   bool pending_phase_ledger_transaction_inactive{false};
-  std::size_t pending_phase_accepted_row_begin{0u};
-  std::size_t pending_phase_rejected_row_begin{0u};
-  std::size_t pending_phase_accepted_attempt_begin{0u};
-  std::size_t pending_phase_rejected_attempt_begin{0u};
+  svmp::FE::level_set::LevelSetMaintenanceWorkMark pending_phase_work_mark{};
   const auto clear_pending_contact_provenance = [&] {
     contact_stage.clearPendingProvenance();
     energy.clearPendingAccount();
@@ -12058,34 +12075,20 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       return;
     }
     level_set_maintenance_work.rejectTransaction();
-    const auto& attempts =
-        level_set_maintenance_work.rejectedAttempts();
-    logLevelSetMaintenanceWorkAttempts(
-        std::span<const application::core::
-                            LevelSetMaintenanceWorkAttempt>(attempts)
-            .subspan(pending_phase_rejected_attempt_begin));
-    const auto& rows = level_set_maintenance_work.rejectedRows();
-    logLevelSetMaintenanceWorkRows(
-        std::span<const application::core::
-                            LevelSetMaintenanceWorkRow>(rows)
-            .subspan(pending_phase_rejected_row_begin));
+    logLevelSetMaintenanceWorkPublishedSince(
+        level_set_maintenance_work,
+        pending_phase_work_mark,
+        application::core::LevelSetMaintenanceWorkStatus::Rejected);
   };
   const auto commit_pending_phase_work = [&] {
     if (!level_set_maintenance_work.transactionActive()) {
       return;
     }
     level_set_maintenance_work.commitTransaction();
-    const auto& attempts =
-        level_set_maintenance_work.acceptedAttempts();
-    logLevelSetMaintenanceWorkAttempts(
-        std::span<const application::core::
-                            LevelSetMaintenanceWorkAttempt>(attempts)
-            .subspan(pending_phase_accepted_attempt_begin));
-    const auto& rows = level_set_maintenance_work.acceptedRows();
-    logLevelSetMaintenanceWorkRows(
-        std::span<const application::core::
-                            LevelSetMaintenanceWorkRow>(rows)
-            .subspan(pending_phase_accepted_row_begin));
+    logLevelSetMaintenanceWorkPublishedSince(
+        level_set_maintenance_work,
+        pending_phase_work_mark,
+        application::core::LevelSetMaintenanceWorkStatus::Accepted);
   };
   const auto rollback_and_reject_pending_phase =
       [&](svmp::FE::timestepping::TimeHistory& h,
@@ -12239,14 +12242,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           throw std::logic_error(
               "[svMultiPhysics::Application] A level-set maintenance work transaction remained active at the start of a new acceptance attempt.");
         }
-        pending_phase_accepted_row_begin =
-            level_set_maintenance_work.acceptedRows().size();
-        pending_phase_rejected_row_begin =
-            level_set_maintenance_work.rejectedRows().size();
-        pending_phase_accepted_attempt_begin =
-            level_set_maintenance_work.acceptedAttempts().size();
-        pending_phase_rejected_attempt_begin =
-            level_set_maintenance_work.rejectedAttempts().size();
+        pending_phase_work_mark = level_set_maintenance_work.mark();
         pending_phase_candidate = ConservativePhaseCandidateResult{};
         try {
           std::vector<
@@ -12276,9 +12272,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                 gatherFeOrderedSolution(
                     h.u(), velocity_extension_artifact_comm);
             staged_phase_functionals =
-                levelSetMaintenanceFunctionalValues(
-                    sim,
-                    evaluateCurrentFreeSurfaceDiscreteFunctionals(sim),
+                maintenance_work_rows.functional_values(
                     staged_phase_solution);
           }
           const auto build_contact_stage_candidate =
@@ -12353,26 +12347,13 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                       substage,
                   std::span<const svmp::FE::Real> before_candidate,
                   std::span<const svmp::FE::Real> after_candidate) {
-                const auto after_functionals =
-                    levelSetMaintenanceFunctionalValues(
-                        sim,
-                        evaluateCurrentFreeSurfaceDiscreteFunctionals(sim),
-                        after_candidate);
-                level_set_maintenance_work.stageRow(
-                    substage,
-                    collectiveLevelSetMaintenanceAlgebraicRevision(
-                        before_candidate,
-                        velocity_extension_artifact_comm),
-                    collectiveLevelSetMaintenanceAlgebraicRevision(
-                        after_candidate,
-                        velocity_extension_artifact_comm),
+                svmp::FE::level_set::stageLevelSetMaintenanceWorkRow(
+                    level_set_maintenance_work,
+                    maintenance_work_rows,
                     staged_phase_functionals,
-                    after_functionals,
-                    currentLevelSetVelocityExtensionRevision(
-                        *sim.fe_system,
-                        level_set_advection_velocity,
-                        accepted_velocity_extension_maps));
-                staged_phase_functionals = after_functionals;
+                    substage,
+                    before_candidate,
+                    after_candidate);
               };
           if (has_conservative_phase) {
             pending_phase_candidate = applyConservativePhaseCandidates(
@@ -12442,26 +12423,13 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                 }
                 (void)pending_phase_candidate.geometry_transaction
                     ->refresh(after_candidate);
-                const auto after_functionals =
-                    levelSetMaintenanceFunctionalValues(
-                        sim,
-                        evaluateCurrentFreeSurfaceDiscreteFunctionals(sim),
-                        after_candidate);
-                level_set_maintenance_work.stageRow(
-                    substage,
-                    collectiveLevelSetMaintenanceAlgebraicRevision(
-                        before_candidate,
-                        velocity_extension_artifact_comm),
-                    collectiveLevelSetMaintenanceAlgebraicRevision(
-                        after_candidate,
-                        velocity_extension_artifact_comm),
+                svmp::FE::level_set::stageLevelSetMaintenanceWorkRow(
+                    level_set_maintenance_work,
+                    maintenance_work_rows,
                     staged_phase_functionals,
-                    after_functionals,
-                    currentLevelSetVelocityExtensionRevision(
-                        *sim.fe_system,
-                        level_set_advection_velocity,
-                        accepted_velocity_extension_maps));
-                staged_phase_functionals = after_functionals;
+                    substage,
+                    before_candidate,
+                    after_candidate);
               });
           if (!bound_result.accept_step) {
             clear_pending_contact_provenance();
@@ -13202,14 +13170,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     std::unique_ptr<LevelSetMaintenanceGeometryTransaction>
         maintenance_geometry_transaction;
     bool level_set_maintenance_changed = false;
-    const auto accepted_row_begin =
-        level_set_maintenance_work.acceptedRows().size();
-    const auto rejected_row_begin =
-        level_set_maintenance_work.rejectedRows().size();
-    const auto accepted_attempt_begin =
-        level_set_maintenance_work.acceptedAttempts().size();
-    const auto rejected_attempt_begin =
-        level_set_maintenance_work.rejectedAttempts().size();
+    const auto maintenance_work_mark = level_set_maintenance_work.mark();
     auto staged_maintenance_functionals =
         levelSetMaintenanceFunctionalValues(
             sim,
@@ -13580,13 +13541,13 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           const bool local_ledger_rejection_preflight_ready =
               level_set_maintenance_work.transactionActive() &&
               level_set_maintenance_work.acceptedRows().size() ==
-                  accepted_row_begin &&
+                  maintenance_work_mark.accepted_rows &&
               level_set_maintenance_work.rejectedRows().size() ==
-                  rejected_row_begin &&
+                  maintenance_work_mark.rejected_rows &&
               level_set_maintenance_work.acceptedAttempts().size() ==
-                  accepted_attempt_begin &&
+                  maintenance_work_mark.accepted_attempts &&
               level_set_maintenance_work.rejectedAttempts().size() ==
-                  rejected_attempt_begin &&
+                  maintenance_work_mark.rejected_attempts &&
               minimum_staged_trial_row_count ==
                   maximum_staged_trial_row_count &&
               minimum_staged_trial_row_count ==
@@ -13622,13 +13583,14 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           const bool local_terminal_rejection_complete =
               !level_set_maintenance_work.transactionActive() &&
               level_set_maintenance_work.acceptedRows().size() ==
-                  accepted_row_begin &&
+                  maintenance_work_mark.accepted_rows &&
               level_set_maintenance_work.acceptedAttempts().size() ==
-                  accepted_attempt_begin &&
+                  maintenance_work_mark.accepted_attempts &&
               level_set_maintenance_work.rejectedRows().size() ==
-                  rejected_row_begin + staged_trial_row_count &&
+                  maintenance_work_mark.rejected_rows +
+                      staged_trial_row_count &&
               level_set_maintenance_work.rejectedAttempts().size() ==
-                  rejected_attempt_begin + 1u &&
+                  maintenance_work_mark.rejected_attempts + 1u &&
               level_set_maintenance_work.trialRows().empty();
           if (!collectivePostacceptMaintenanceRecoveryPhaseReady(
                   local_terminal_rejection_complete,
@@ -13644,24 +13606,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           maintenance_commit_logs.clear();
 
           if (!maintenance_rejection_records_logged) {
-            const auto& rejected_attempts =
-                level_set_maintenance_work.rejectedAttempts();
-            if (rejected_attempts.size() > rejected_attempt_begin) {
-              logLevelSetMaintenanceWorkAttempts(
-                  std::span<const application::core::
-                                      LevelSetMaintenanceWorkAttempt>(
-                      rejected_attempts)
-                      .subspan(rejected_attempt_begin));
-            }
-            const auto& rejected_rows =
-                level_set_maintenance_work.rejectedRows();
-            if (rejected_rows.size() > rejected_row_begin) {
-              logLevelSetMaintenanceWorkRows(
-                  std::span<const application::core::
-                                      LevelSetMaintenanceWorkRow>(
-                      rejected_rows)
-                      .subspan(rejected_row_begin));
-            }
+            logLevelSetMaintenanceWorkPublishedSince(
+                level_set_maintenance_work,
+                maintenance_work_mark,
+                application::core::LevelSetMaintenanceWorkStatus::Rejected);
             maintenance_rejection_records_logged = true;
           }
 
@@ -13733,29 +13681,13 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             ensure_maintenance_geometry_transaction();
             cut_report = maintenance_geometry_transaction->refresh(
                 params, after_candidate);
-            const auto after_functional_states =
-                evaluateCurrentFreeSurfaceDiscreteFunctionals(sim);
-            auto after_functionals =
-                levelSetMaintenanceFunctionalValues(
-                    sim,
-                    after_functional_states,
-                    after_candidate);
-            level_set_maintenance_work.stageRow(
-                substage,
-                collectiveLevelSetMaintenanceAlgebraicRevision(
-                    before_candidate,
-                    velocity_extension_artifact_comm),
-                collectiveLevelSetMaintenanceAlgebraicRevision(
-                    after_candidate,
-                    velocity_extension_artifact_comm),
+            svmp::FE::level_set::stageLevelSetMaintenanceWorkRow(
+                level_set_maintenance_work,
+                maintenance_work_rows,
                 staged_maintenance_functionals,
-                after_functionals,
-                currentLevelSetVelocityExtensionRevision(
-                    *sim.fe_system,
-                    level_set_advection_velocity,
-                    accepted_velocity_extension_maps));
-            staged_maintenance_functionals =
-                std::move(after_functionals);
+                substage,
+                before_candidate,
+                after_candidate);
           };
       const LevelSetMaintenanceCandidateValidator validate_candidate =
           [&](std::span<const svmp::FE::Real> candidate) {
@@ -14102,22 +14034,11 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             << (level_set_maintenance_changed ? "true" : "false")
             << std::endl;
       }
-      if (maintenance_transaction_published &&
-          !level_set_maintenance_work.acceptedAttempts().empty() &&
-          level_set_maintenance_work.acceptedAttempts().size() >
-              accepted_attempt_begin) {
-        const auto& accepted_attempts =
-            level_set_maintenance_work.acceptedAttempts();
-        logLevelSetMaintenanceWorkAttempts(
-            std::span<const application::core::
-                                LevelSetMaintenanceWorkAttempt>(
-                accepted_attempts).subspan(accepted_attempt_begin));
-        const auto& accepted_rows =
-            level_set_maintenance_work.acceptedRows();
-        logLevelSetMaintenanceWorkRows(
-            std::span<const
-                application::core::LevelSetMaintenanceWorkRow>(
-                accepted_rows).subspan(accepted_row_begin));
+      if (maintenance_transaction_published) {
+        logLevelSetMaintenanceWorkPublishedSince(
+            level_set_maintenance_work,
+            maintenance_work_mark,
+            application::core::LevelSetMaintenanceWorkStatus::Accepted);
       }
     } catch (...) {
       const auto failure = std::current_exception();
@@ -14162,8 +14083,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     energy.recordAcceptedStepMaintenanceAccount(
         h,
         level_set_maintenance_work,
-        pending_phase_accepted_attempt_begin,
-        pending_phase_accepted_row_begin,
+        pending_phase_work_mark.accepted_attempts,
+        pending_phase_work_mark.accepted_rows,
         step_acceptance_attempt);
     if (!level_set_maintenance_changed) {
       cut_report = refreshActiveCutIntegrationContextCached(

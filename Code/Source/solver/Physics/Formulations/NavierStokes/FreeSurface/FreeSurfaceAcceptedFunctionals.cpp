@@ -1213,14 +1213,14 @@ std::uint64_t levelSetMaintenanceCutTopologyRevision(
 
 } // namespace
 
-std::vector<LevelSetAuthoritativeFunctionalValue>
+std::vector<svmp::FE::level_set::LevelSetAuthoritativeFunctionalValue>
 levelSetMaintenanceFunctionalValues(
     const FreeSurfaceSystemHandle& sim,
     std::span<const svmp::FE::systems::
                         AcceptedFreeSurfaceDiscreteFunctionalState> states,
     std::span<const svmp::FE::Real> solution)
 {
-  std::vector<LevelSetAuthoritativeFunctionalValue>
+  std::vector<svmp::FE::level_set::LevelSetAuthoritativeFunctionalValue>
       values;
   values.reserve(states.size());
   if (!sim.fe_system) {
@@ -1326,7 +1326,7 @@ levelSetMaintenanceFunctionalValues(
                   static_cast<double>(state.state.young_wall_energy)}
             : std::nullopt;
     values.push_back(
-        LevelSetAuthoritativeFunctionalValue{
+        svmp::FE::level_set::LevelSetAuthoritativeFunctionalValue{
             .interface_marker = state.interface_marker,
             .snapshot_revision =
                 state.geometry_revision.snapshot_revision_key,
