@@ -2675,8 +2675,8 @@ TEST(OpenVesselExamples,
   ensure_mpi_initialized_for_open_vessel_builder();
 
   const auto case_dir = openVesselCaseDir("unfitted_level_set");
+  // Fitted SurfaceStress is no longer excluded (decision D47 Q2(b)).
   const std::vector<std::pair<std::string_view, std::string_view>> exclusions{
-      {"SurfaceStress", "fitted-ALE SurfaceStress is not yet qualified"},
       {"KinematicAreaGradientTraction",
        "KinematicAreaGradientTraction is available only for unfitted"},
       {"PrescribedAngle", "prescribed fitted contact angles are unsupported"},
@@ -2695,7 +2695,7 @@ TEST(OpenVesselExamples,
       ASSERT_NO_THROW(params.read_xml(xml_path.string()));
     }
 
-    if (request == "SurfaceStress") {
+    if (request == "PrescribedAngle") {
       const auto level_set = std::find_if(
           params.equation_parameters.begin(),
           params.equation_parameters.end(),

@@ -547,16 +547,11 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             }
         }
     } else {
-        if (usesSurfaceStress(bc) && !bc.allow_fitted_surface_stress) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: fitted-ALE SurfaceStress is not yet qualified for current-frame test-function gradients; set Allow_fitted_surface_stress=true to opt in, or use Automatic/CurvatureTraction for fitted boundaries");
-        }
-        if (bc.allow_fitted_surface_stress) {
-            if (bc.surface_tension_form !=
-                FreeSurfaceSurfaceTensionForm::SurfaceStress) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: Allow_fitted_surface_stress requires an explicit Surface_tension_form=SurfaceStress");
-            }
+        // SurfaceStress is the fitted Automatic form and needs no opt-in
+        // (decision D47 Q2(b)).  Its checks apply only when it installs the
+        // surface energy (gamma != 0); with gamma = 0 it is the exterior
+        // pressure load alone.
+        if (surfaceStressActive(bc)) {
             // The fitted Laplace-Beltrami form gamma (I - n n) : grad(v)
             // is evaluated in the assembly (active) frame with the current
             // boundary normal.  The two frames coincide for a static mesh

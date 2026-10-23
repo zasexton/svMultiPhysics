@@ -285,7 +285,7 @@ void addUnfittedFreeSurface(FormExpr& M, fs::FESystem& system, cs::ConstraintPla
 // ---------------------------------------------------------------------------
 // Fitted ALE free surface Gamma(t) = a boundary marker of the moving mesh
 // ---------------------------------------------------------------------------
-//   fluid rows: int_Gamma p_ext n.v + gamma (I - n x n) : grad v      (SurfaceStress, opt-in), or
+//   fluid rows: int_Gamma p_ext n.v + gamma (I - n x n) : grad v      (SurfaceStress, the default), or
 //               - int_Gamma ((-p_ext - gamma kappa) n) . v             (CurvatureTraction, supplied kappa);
 //   mesh rows:  int_Gamma (gamma_N/h_n) ((dt d - u).n)(psi.n)            (MeshNitsche, D35),
 //               + the tangential mesh policy (smoothing, or a prescribed tangential rate);

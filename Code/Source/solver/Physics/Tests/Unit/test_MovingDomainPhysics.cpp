@@ -4065,12 +4065,13 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceALEUsesCurrentBoundaryGeo
     opts.enable_ale = true;
     opts.enable_convection = false;
 
+    // The exterior pressure alone: the fitted surface energy of SurfaceStress,
+    // the default (decision D47 Q2(b)), needs a coupled mesh displacement,
+    // and this mesh velocity is prescribed.
     opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
         .implementation = ns::FreeSurfaceImplementation::FittedALE,
         .boundary_marker = marker,
         .external_pressure = 2.0,
-        .surface_tension = 0.5,
-        .curvature = 1.25,
     });
 
     FE::systems::FESystem system(mesh);
@@ -4371,16 +4372,13 @@ TEST(MovingDomainPhysics,
         "\"fitted_surface_contact_capability\":{"
         "\"qualification\":\"supported_configuration_envelope\","
         "\"supported_requests\":{"
-        "\"surface_tension_form\":[\"Automatic\",\"CurvatureTraction\"],"
+        "\"surface_tension_form\":[\"Automatic\",\"CurvatureTraction\","
+        "\"SurfaceStress\"],"
         "\"contact_line_model\":[\"None\",\"Pinned\"]},"
         "\"exclusion_disposition\":"
         "\"fail_closed_before_system_mutation\","
         "\"exclusions\":[{"
         "\"feature\":\"surface_tension_form\","
-        "\"value\":\"SurfaceStress\","
-        "\"reason_code\":"
-        "\"fitted_surface_stress_current_frame_gradient_unqualified\""
-        "},{\"feature\":\"surface_tension_form\","
         "\"value\":\"KinematicAreaGradientTraction\","
         "\"reason_code\":"
         "\"kinematic_area_gradient_traction_unfitted_only\""
@@ -7246,6 +7244,9 @@ TEST(MovingDomainPhysics, NavierStokesFittedSurfaceStressFailsClosed)
     opts.mesh_velocity_source =
         ns::ALEMeshVelocitySource::CoupledDisplacement;
     opts.auto_register_mesh_displacement_field = true;
+    // Fitted SurfaceStress needs no opt-in (decision D47 Q2(b)), but its
+    // conormal line force has no fitted contact-line entity: with a contact
+    // line it still fails closed.
     opts.free_surface.push_back(
         ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
             .implementation = ns::FreeSurfaceImplementation::FittedALE,
@@ -7255,6 +7256,9 @@ TEST(MovingDomainPhysics, NavierStokesFittedSurfaceStressFailsClosed)
                 ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
             .kinematic_enforcement =
                 ns::FreeSurfaceKinematicEnforcement::MeshNitsche,
+            .contact_lines = {
+                pinnedContactLine(/*wall_marker=*/-1, marker),
+            },
         });
 
     FE::systems::FESystem system(mesh);
@@ -7262,12 +7266,12 @@ TEST(MovingDomainPhysics, NavierStokesFittedSurfaceStressFailsClosed)
         u_space, p_space, std::move(opts));
     try {
         module.registerOn(system);
-        FAIL() << "fitted SurfaceStress must fail closed";
+        FAIL() << "fitted SurfaceStress with a contact line must fail closed";
     } catch (const std::invalid_argument& error) {
         EXPECT_NE(
             std::string(error.what()).find(
-                "fitted-ALE SurfaceStress is not yet qualified for "
-                "current-frame test-function gradients"),
+                "fitted SurfaceStress is admitted only without a fitted "
+                "contact-line model"),
             std::string::npos)
             << error.what();
     }
@@ -11113,7 +11117,7 @@ TEST(MovingDomainPhysics,
     const auto artifact = module.effectiveConfigurationArtifact();
     ASSERT_TRUE(artifact.has_value());
     constexpr std::string_view expected =
-        R"json({"artifact_schema_version":1,"component":"incompressible_navier_stokes_free_surface","configuration_schema":{"input_version":2,"effective_version":2,"migration_mode":"current"},"capability_label":"one_phase_liquid_sharp_interface","units":{"system":"consistent_solver_units","angle":"radian","length":"solver_length","pressure":"solver_pressure","surface_tension":"force_per_length"},"fields":{"velocity":"u","pressure":"p","operator":"equations","dimension":3},"ale":{"enabled":true,"mesh_velocity_source":"CoupledDisplacement","mesh_velocity_field":"mesh_velocity","mesh_displacement_field":"mesh_displacement","geometry_tangent_path":"SymbolicRequired"},"generic_velocity_nitsche":{"gamma":23,"symmetric":false,"scale_with_polynomial_order":false,"generated_active_boundary_minimum_energy_ratio":0.25},"stabilization":{"vms_enabled":false,"ct_m":1,"ct_c":36,"epsilon":9.9999999999999998e-13,"pspg_pressure_gradient_form":"absolute"},"maintenance_policy":{"owner_component":"level_set_transport","coupling":"one_way_velocity_to_extension_to_level_set"},"extension_guards":{"physical_momentum_dry_extension_allowed":false,"auxiliary_extension_owner":"level_set_transport","external_owner_required":true},"free_surfaces":[{"implementation":"FittedALE","boundary_marker":172,"interface_marker":-1,"level_set_field":"level_set","generated_interface_domain":"free_surface","generated_interface_geometry":"LinearCorner","geometry_tangent_policy":"RefreshedFrozenQuadrature","level_set_isovalue":0,"active_domain":"None","active_phase_sign":"full_domain","active_domain_method":"CutVolume","active_domain_smoothing_width":0,"smoothing_width_unit":"length","allow_full_domain_unfitted_free_surface":false,"external_pressure":2.25,"surface_tension":0.5,"surface_tension_form_requested":"Automatic","surface_tension_form_effective":"CurvatureTraction","curvature_policy":"supplied_scalar","curvature_tangent_policy":"supplied_scalar_frozen","kinematic":{"normal_policy":"MatchFluidNormalVelocity","tangential_mesh_policy":"Prescribed","prescribed_tangential_mesh_velocity":[0,0,0],"enforcement":"MeshNitsche","nitsche":{"gamma":17}},"stabilization":{"enabled":false,"small_cut_aggregation":true,"pressure_policy":"Enabled","pressure_gradient_penalty":1,"use_cut_metadata_scale":false,"cut_metadata_scale_cap":null},"pruning":{"decision_owner":"authoritative_geometry_snapshot","fallback_to_whole_face":false},"contact_lines":[{"model":"None"}]}]})json";
+        R"json({"artifact_schema_version":1,"component":"incompressible_navier_stokes_free_surface","configuration_schema":{"input_version":2,"effective_version":2,"migration_mode":"current"},"capability_label":"one_phase_liquid_sharp_interface","units":{"system":"consistent_solver_units","angle":"radian","length":"solver_length","pressure":"solver_pressure","surface_tension":"force_per_length"},"fields":{"velocity":"u","pressure":"p","operator":"equations","dimension":3},"ale":{"enabled":true,"mesh_velocity_source":"CoupledDisplacement","mesh_velocity_field":"mesh_velocity","mesh_displacement_field":"mesh_displacement","geometry_tangent_path":"SymbolicRequired"},"generic_velocity_nitsche":{"gamma":23,"symmetric":false,"scale_with_polynomial_order":false,"generated_active_boundary_minimum_energy_ratio":0.25},"stabilization":{"vms_enabled":false,"ct_m":1,"ct_c":36,"epsilon":9.9999999999999998e-13,"pspg_pressure_gradient_form":"absolute"},"maintenance_policy":{"owner_component":"level_set_transport","coupling":"one_way_velocity_to_extension_to_level_set"},"extension_guards":{"physical_momentum_dry_extension_allowed":false,"auxiliary_extension_owner":"level_set_transport","external_owner_required":true},"free_surfaces":[{"implementation":"FittedALE","boundary_marker":172,"interface_marker":-1,"level_set_field":"level_set","generated_interface_domain":"free_surface","generated_interface_geometry":"LinearCorner","geometry_tangent_policy":"RefreshedFrozenQuadrature","level_set_isovalue":0,"active_domain":"None","active_phase_sign":"full_domain","active_domain_method":"CutVolume","active_domain_smoothing_width":0,"smoothing_width_unit":"length","allow_full_domain_unfitted_free_surface":false,"external_pressure":2.25,"surface_tension":0.5,"surface_tension_form_requested":"Automatic","surface_tension_form_effective":"SurfaceStress","curvature_policy":"variational_surface_stress_generated_geometry","curvature_tangent_policy":"fitted_geometry_surface_variation","kinematic":{"normal_policy":"MatchFluidNormalVelocity","tangential_mesh_policy":"Prescribed","prescribed_tangential_mesh_velocity":[0,0,0],"enforcement":"MeshNitsche","nitsche":{"gamma":17}},"stabilization":{"enabled":false,"small_cut_aggregation":true,"pressure_policy":"Enabled","pressure_gradient_penalty":1,"use_cut_metadata_scale":false,"cut_metadata_scale_cap":null},"pruning":{"decision_owner":"authoritative_geometry_snapshot","fallback_to_whole_face":false},"contact_lines":[{"model":"None"}]}]})json";
     std::string expected_with_aggregation_guards(expected);
     constexpr std::string_view artifact_schema_fragment =
         "\"artifact_schema_version\":1";
@@ -11153,7 +11157,7 @@ TEST(MovingDomainPhysics,
         "\"incompressible_two_fluid_implemented\":false,"
         "\"gas_dynamics_implemented\":false}");
     constexpr std::string_view effective_surface_tension_fragment =
-        "\"surface_tension_form_effective\":\"CurvatureTraction\"";
+        "\"surface_tension_form_effective\":\"SurfaceStress\"";
     const auto fitted_capability =
         expected_with_aggregation_guards.find(
             effective_surface_tension_fragment);
@@ -11163,16 +11167,13 @@ TEST(MovingDomainPhysics,
         ",\"fitted_surface_contact_capability\":{"
         "\"qualification\":\"supported_configuration_envelope\","
         "\"supported_requests\":{"
-        "\"surface_tension_form\":[\"Automatic\",\"CurvatureTraction\"],"
+        "\"surface_tension_form\":[\"Automatic\",\"CurvatureTraction\","
+        "\"SurfaceStress\"],"
         "\"contact_line_model\":[\"None\",\"Pinned\"]},"
         "\"exclusion_disposition\":"
         "\"fail_closed_before_system_mutation\","
         "\"exclusions\":[{"
         "\"feature\":\"surface_tension_form\","
-        "\"value\":\"SurfaceStress\","
-        "\"reason_code\":"
-        "\"fitted_surface_stress_current_frame_gradient_unqualified\""
-        "},{\"feature\":\"surface_tension_form\","
         "\"value\":\"KinematicAreaGradientTraction\","
         "\"reason_code\":"
         "\"kinematic_area_gradient_traction_unfitted_only\""

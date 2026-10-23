@@ -173,11 +173,11 @@ contactLineWallNormal(const FreeSurfaceContactLine& contact_line)
 {
     switch (bc.surface_tension_form) {
     case FreeSurfaceSurfaceTensionForm::Automatic:
-        // The generated-interface rule supplies both dI and its geometric
-        // normal, so the unfitted default can be the variation of one
-        // discrete polygonal surface energy.  Preserve the historical fitted
-        // supplied-curvature contract unless SurfaceStress is requested.
-        return isUnfittedLevelSet(bc);
+        // The generated-interface rule (unfitted) or the current boundary
+        // (fitted) supplies both the measure and its normal, so the default
+        // is the variation of one discrete surface energy on both kinds of
+        // boundary (decision D47 Q2(b)).
+        return true;
     case FreeSurfaceSurfaceTensionForm::CurvatureTraction:
         return false;
     case FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction:
@@ -206,8 +206,7 @@ contactLineWallNormal(const FreeSurfaceContactLine& contact_line)
 {
     switch (bc.surface_tension_form) {
     case FreeSurfaceSurfaceTensionForm::Automatic:
-        return isUnfittedLevelSet(bc) ? "SurfaceStress"
-                                      : "CurvatureTraction";
+        return "SurfaceStress";
     case FreeSurfaceSurfaceTensionForm::CurvatureTraction:
         return "CurvatureTraction";
     case FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction:

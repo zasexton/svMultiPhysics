@@ -6,8 +6,8 @@
  */
 
 // Focused checks of the fitted-ALE free-surface path (tracker M5, decision
-// D5): the boundary measure of fitted ALE terms, the opt-in fitted
-// SurfaceStress (Laplace-Beltrami) form on flat and circular surfaces, the
+// D5): the boundary measure of fitted ALE terms, the fitted SurfaceStress
+// (Laplace-Beltrami) form, the default, on flat and circular surfaces, the
 // MeshNitsche kinematic ownership, and component-selected (sliding)
 // mesh-motion Dirichlet conditions.
 
@@ -185,7 +185,6 @@ ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary fittedSurface(
     bc.surface_tension = surface_tension;
     if (surface_stress) {
         bc.surface_tension_form = ns::FreeSurfaceSurfaceTensionForm::SurfaceStress;
-        bc.allow_fitted_surface_stress = true;
     }
     bc.normal_kinematic_policy = ns::FreeSurfaceNormalKinematicPolicy::MatchFluidNormalVelocity;
     bc.tangential_mesh_policy = ns::FreeSurfaceTangentialMeshPolicy::Free;
@@ -403,62 +402,68 @@ TEST(FittedFreeSurfaceALE, ExternalPressureLoadUsesTheCurrentSurfaceMeasureOnce)
     EXPECT_NEAR(static_load_y, p_ext * 2.0, 1e-12);
 }
 
-TEST(FittedFreeSurfaceALE, SurfaceStressRequiresTheExplicitOptIn)
+TEST(FittedFreeSurfaceALE, SurfaceStressIsTheFittedDefaultWithoutAnOptIn)
 {
+    // Decision D47 Q2(b): Automatic is SurfaceStress on fitted boundaries as
+    // well, and SurfaceStress needs no opt-in.  Its frame, surface-tension
+    // and contact-line checks apply only when the surface energy is
+    // installed (gamma != 0).
+    constexpr FE::Real gamma = 0.5;
+    {
+        // Automatic and an explicit request assemble the same residual: on
+        // the stretched flat surface the end nodes carry the conormal line
+        // force -+gamma.
+        FittedALEFixture automatic(makeRectangleTriangleMesh(),
+                                   fittedSurface(0.0, gamma, /*surface_stress=*/false));
+        FittedALEFixture requested(makeRectangleTriangleMesh(),
+                                   fittedSurface(0.0, gamma, /*surface_stress=*/true));
+        automatic.setLinearDisplacement({{{0.5, 0.0}, {0.0, 0.0}}});
+        requested.setLinearDisplacement({{{0.5, 0.0}, {0.0, 0.0}}});
+        const auto r_automatic = automatic.residual();
+        const auto r_requested = requested.residual();
+        ASSERT_EQ(r_automatic.size(), r_requested.size());
+        for (std::size_t i = 0; i < r_automatic.size(); ++i) {
+            EXPECT_DOUBLE_EQ(r_automatic[i], r_requested[i]) << "row " << i;
+        }
+        EXPECT_NEAR(automatic.velocityRow(r_automatic, 3, 0), -gamma, 1e-13);
+        EXPECT_NEAR(automatic.velocityRow(r_automatic, 5, 0), gamma, 1e-13);
+    }
+
     auto mesh = makeRectangleTriangleMesh();
     const auto spaces = triangleSpaces();
-    auto bc = fittedSurface(0.0, 0.5, true);
-    bc.allow_fitted_surface_stress = false;
     {
         FE::systems::FESystem system(mesh);
         auto opts = coupledALEOptions();
-        opts.free_surface.push_back(bc);
-        ns::IncompressibleNavierStokesVMSModule fluid(spaces.vector, spaces.scalar, opts);
-        try {
-            fluid.registerOn(system);
-            FAIL() << "fitted SurfaceStress without the opt-in must fail closed";
-        } catch (const std::invalid_argument& error) {
-            EXPECT_NE(std::string(error.what()).find("Allow_fitted_surface_stress"),
-                      std::string::npos)
-                << error.what();
-        }
-        EXPECT_TRUE(system.formulationRecords().empty());
-    }
-    {
-        // The opt-in without an explicit SurfaceStress request is rejected.
-        auto flagged = fittedSurface(0.0, 0.5, false);
-        flagged.allow_fitted_surface_stress = true;
-        FE::systems::FESystem system(mesh);
-        auto opts = coupledALEOptions();
-        opts.free_surface.push_back(flagged);
-        ns::IncompressibleNavierStokesVMSModule fluid(spaces.vector, spaces.scalar, opts);
-        EXPECT_THROW(fluid.registerOn(system), std::invalid_argument);
-    }
-    {
-        // Prescribed mesh motion may assemble on the reference frame.
-        FE::systems::FESystem system(mesh);
-        auto opts = coupledALEOptions();
-        opts.mesh_velocity_source = ns::ALEMeshVelocitySource::PrescribedData;
-        opts.input_configuration_schema_version = 1;
-        opts.explicit_legacy_configuration = true;
-        auto legacy = fittedSurface(0.0, 0.5, true);
-        legacy.kinematic_enforcement = ns::FreeSurfaceKinematicEnforcement::None;
-        opts.free_surface.push_back(legacy);
-        ns::IncompressibleNavierStokesVMSModule fluid(spaces.vector, spaces.scalar, opts);
-        EXPECT_THROW(fluid.registerOn(system), std::invalid_argument);
-    }
-    {
-        FE::systems::FESystem system(mesh);
-        auto opts = coupledALEOptions();
-        opts.free_surface.push_back(fittedSurface(0.0, 0.5, true));
+        opts.free_surface.push_back(fittedSurface(0.0, gamma, /*surface_stress=*/false));
         ns::IncompressibleNavierStokesVMSModule fluid(spaces.vector, spaces.scalar, opts);
         ASSERT_NO_THROW(fluid.registerOn(system));
         const auto artifact = fluid.effectiveConfigurationArtifact();
         ASSERT_TRUE(artifact.has_value());
-        EXPECT_NE(artifact->json.find("\"fitted_surface_stress\":{\"opt_in\":true"),
-                  std::string::npos);
+        EXPECT_NE(artifact->json.find("\"surface_tension_form_requested\":\"Automatic\","
+                                      "\"surface_tension_form_effective\":\"SurfaceStress\""),
+                  std::string::npos)
+            << artifact->json;
         EXPECT_EQ(artifact->json.find("fitted_surface_stress_current_frame_gradient_unqualified"),
                   std::string::npos);
+    }
+    {
+        // Prescribed mesh motion may assemble on the reference frame: the
+        // surface energy is rejected there, the pressure load alone is not.
+        const auto register_prescribed = [&](FE::Real surface_tension) {
+            FE::systems::FESystem system(mesh);
+            auto opts = coupledALEOptions();
+            opts.mesh_velocity_source = ns::ALEMeshVelocitySource::PrescribedData;
+            opts.auto_register_mesh_displacement_field = false;
+            opts.input_configuration_schema_version = 1;
+            opts.explicit_legacy_configuration = true;
+            auto legacy = fittedSurface(0.25, surface_tension, /*surface_stress=*/false);
+            legacy.kinematic_enforcement = ns::FreeSurfaceKinematicEnforcement::None;
+            opts.free_surface.push_back(legacy);
+            ns::IncompressibleNavierStokesVMSModule fluid(spaces.vector, spaces.scalar, opts);
+            fluid.registerOn(system);
+        };
+        EXPECT_THROW(register_prescribed(gamma), std::invalid_argument);
+        EXPECT_NO_THROW(register_prescribed(0.0));
     }
 }
 

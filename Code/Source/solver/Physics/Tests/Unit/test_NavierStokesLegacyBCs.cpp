@@ -1421,6 +1421,13 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicBCTranslation_UsesCurrentG
     // surface measure is not applied a second time.
     ASSERT_FALSE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::CurrentMeasure));
     ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::FacetArea));
+    // Automatic is the fitted SurfaceStress form (decision D47 Q2(b)); the
+    // nonzero surface tension needs no opt-in.
+    const auto artifact = module->effectiveConfigurationArtifact();
+    ASSERT_TRUE(artifact.has_value());
+    EXPECT_NE(artifact->json.find("\"surface_tension_form_effective\":\"SurfaceStress\""),
+              std::string::npos)
+        << artifact->json;
     ASSERT_NO_THROW(system.setup());
 #endif
 }

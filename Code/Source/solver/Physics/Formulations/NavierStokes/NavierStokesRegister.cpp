@@ -3986,8 +3986,8 @@ void append_free_surface_bc(
         "': Use_current_geometry_curvature=true (pointwise current-geometry "
         "curvature of the fitted CurvatureTraction) was retired (decision "
         "D42); it is identically zero on affine faces.  Use "
-        "Surface_tension_form=SurfaceStress with "
-        "Allow_fitted_surface_stress=true, or a supplied Curvature.");
+        "Surface_tension_form=SurfaceStress (the fitted default), or a "
+        "supplied Curvature.");
   }
 
   if (const auto normal_policy = first_defined_string(
@@ -4353,12 +4353,8 @@ void validate_fitted_surface_contact_capability(
     if (boundary.implementation != FreeSurfaceImplementation::FittedALE) {
       continue;
     }
-    if (boundary.surface_tension_form ==
-            FreeSurfaceSurfaceTensionForm::SurfaceStress &&
-        !boundary.allow_fitted_surface_stress) {
-      throw std::invalid_argument(
-          "IncompressibleNavierStokesVMSModule: fitted-ALE SurfaceStress is not yet qualified for current-frame test-function gradients; set Allow_fitted_surface_stress=true to opt in, or use Automatic/CurvatureTraction for fitted boundaries");
-    }
+    // Fitted SurfaceStress needs no opt-in (decision D47 Q2(b)); the module
+    // checks its frame, its surface tension and its contact lines.
     if (boundary.surface_tension_form ==
         FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction) {
       throw std::invalid_argument(

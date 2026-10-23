@@ -537,10 +537,7 @@ tangentialPolicyProvenance(
                            : "supported_configuration_envelope")
                 << ",\"supported_requests\":{"
                 << "\"surface_tension_form\":["
-                << (boundary.allow_fitted_surface_stress
-                        ? "\"Automatic\",\"CurvatureTraction\","
-                          "\"SurfaceStress\"],"
-                        : "\"Automatic\",\"CurvatureTraction\"],")
+                << "\"Automatic\",\"CurvatureTraction\",\"SurfaceStress\"],"
                 << "\"contact_line_model\":[\"None\",\"Pinned\"]}";
             if (boundary.allow_fitted_surface_stress) {
                 out << ",\"fitted_surface_stress\":{"
@@ -552,13 +549,6 @@ tangentialPolicyProvenance(
             out << ",\"exclusion_disposition\":"
                 << "\"fail_closed_before_system_mutation\""
                 << ",\"exclusions\":[{";
-            if (!boundary.allow_fitted_surface_stress) {
-                out << "\"feature\":\"surface_tension_form\","
-                    << "\"value\":\"SurfaceStress\","
-                    << "\"reason_code\":"
-                    << "\"fitted_surface_stress_current_frame_gradient_unqualified\""
-                    << "},{";
-            }
             out << "\"feature\":\"surface_tension_form\","
                 << "\"value\":\"KinematicAreaGradientTraction\","
                 << "\"reason_code\":"

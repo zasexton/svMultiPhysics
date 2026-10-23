@@ -93,11 +93,11 @@ enum class FreeSurfacePressureStabilizationPolicy : std::uint8_t {
 /**
  * @brief Discrete representation of constant surface-tension forces
  *
- * Automatic selects SurfaceStress for unfitted level-set interfaces, where
- * the generated-interface measure and normal define one discrete surface
- * energy, and retains CurvatureTraction for fitted ALE boundaries for
- * backwards compatibility.  CurvatureTraction remains available explicitly
- * for verification and legacy supplied-curvature data.
+ * Automatic selects SurfaceStress, whose measure and normal (the
+ * generated-interface rule of an unfitted level-set interface, or the
+ * current fitted ALE boundary) define one discrete surface energy (decision
+ * D47 Q2(b)).  CurvatureTraction remains available explicitly for
+ * verification and legacy supplied-curvature data.
  * KinematicAreaGradientTraction is an unfitted-only total-energy route.  Its
  * prescribed curvature represents the variation of liquid--gas area and all
  * declared Young wetted-wall energies, so no separate equilibrium line force
@@ -273,11 +273,13 @@ struct FreeSurfaceBoundary {
     // KinematicAreaGradientTraction) form; everything else fails closed.
     FreeSurfaceSurfaceTensionSemiImplicit surface_tension_semi_implicit{
         FreeSurfaceSurfaceTensionSemiImplicit::None};
-    // Explicit opt-in for SurfaceStress on a fitted ALE boundary.  The
-    // fitted form integrates gamma (I - n n) : grad(v) over the current
-    // boundary with the current normal and the current-frame gradient; it
-    // requires coupled mesh displacement (the assembly frame is then the
-    // current configuration) or a static mesh.
+    // The former opt-in for SurfaceStress on a fitted ALE boundary.  The
+    // fitted form, the Automatic one since decision D47 Q2(b), integrates
+    // gamma (I - n n) : grad(v) over the current boundary with the current
+    // normal and the current-frame gradient; it requires coupled mesh
+    // displacement (the assembly frame is then the current configuration)
+    // or a static mesh.  The opt-in is no longer required; the artifact
+    // still records it.
     bool allow_fitted_surface_stress{false};
 
     // Supplied curvature expression/value or curvature field.  Unfitted
