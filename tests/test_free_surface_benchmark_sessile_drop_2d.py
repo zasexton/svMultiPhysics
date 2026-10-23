@@ -154,7 +154,7 @@ def test_generated_case_uses_the_d4_configuration(tmp_path):
     assert "Spectral_radius_of_infinite_time_step" not in direct
     # The projection reinitialization is retired (decision D47): every deck
     # switches it off and writes none of its settings.
-    for deck in (lumped, consistent, direct):
+    for deck in (text, direct):
         assert "<Enable_reinitialization>false</Enable_reinitialization>" in deck
         assert "<Reinitialization_" not in deck
 
