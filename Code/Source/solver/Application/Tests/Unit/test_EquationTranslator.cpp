@@ -8,7 +8,7 @@
 #include "Mesh/Topology/CellShape.h"
 #include "Parameters.h"
 #include "Physics/Core/EquationModuleInput.h"
-#include "Physics/Formulations/NavierStokes/NavierStokesRegister.h"
+#include "Physics/Options/NavierStokesRegistration.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
 #include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
 

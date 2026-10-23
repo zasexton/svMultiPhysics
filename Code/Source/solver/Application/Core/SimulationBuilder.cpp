@@ -23,7 +23,7 @@
 #include "Mesh/Mesh.h"
 #include "Physics/Core/PhysicsModule.h"
 #include "Physics/Core/EquationModuleInput.h"
-#include "Physics/Formulations/NavierStokes/NavierStokesRegister.h"
+#include "Physics/Options/NavierStokesRegistration.h"
 #include "Parameters.h"
 #include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
 

@@ -13,7 +13,7 @@
 #include "Physics/Formulations/MeshMotion/PseudoElasticMeshMotionModule.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
-#include "Physics/Formulations/NavierStokes/NavierStokesRegister.h"
+#include "Physics/Options/NavierStokesRegistration.h"
 #include "Physics/Materials/Fluid/CarreauYasudaViscosity.h"
 #include "Physics/Tests/Unit/PhysicsTestHelpers.h"
 

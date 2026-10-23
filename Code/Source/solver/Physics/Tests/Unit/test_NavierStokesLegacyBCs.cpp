@@ -10,7 +10,7 @@
 #include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Core/EquationModuleRegistry.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
-#include "Physics/Formulations/NavierStokes/NavierStokesRegister.h"
+#include "Physics/Options/NavierStokesRegistration.h"
 
 #include "Assembly/GlobalSystemView.h"
 #include "FE/Forms/FormExpr.h"
