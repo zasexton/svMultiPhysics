@@ -8,7 +8,7 @@
 
 #include "Physics/Formulations/NavierStokes/IncompressibleTwoFluidModule.h"
 
-#include "Physics/Formulations/NavierStokes/IncompressibleTwoFluidInterface.h"
+#include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 
 #include "FE/Constraints/CoupledFieldGaugeConstraint.h"
 #include "FE/Constraints/GaugeRegistry.h"
@@ -451,7 +451,7 @@ void addSharedGaugeEvidence(FE::systems::FESystem& system,
     const IncompressibleTwoFluidOptions& options,
     int dimension,
     int interface_marker,
-    const IncompressibleTwoFluidInterfaceWeights& weights)
+    const Factories::IncompressibleTwoFluidInterfaceWeights& weights)
 {
     std::ostringstream out;
     out.imbue(std::locale::classic());
@@ -812,7 +812,7 @@ void IncompressibleTwoFluidModule::registerOn(
 
     const int interface_marker =
         resolvedInterfaceMarker(options_, level_set);
-    const IncompressibleTwoFluidInterfaceParameters interface_parameters{
+    const Factories::IncompressibleTwoFluidInterfaceParameters interface_parameters{
         .dimension = dimension,
         .interface_marker = interface_marker,
         .negative_density = options_.negative_phase.density,
@@ -828,7 +828,7 @@ void IncompressibleTwoFluidModule::registerOn(
             options_.prescribed_viscous_traction_jump,
     };
     const auto interface_weights =
-        incompressibleTwoFluidInterfaceWeights(interface_parameters);
+        Factories::incompressibleTwoFluidInterfaceWeights(interface_parameters);
 
     auto negative_options = makePhaseOptions(
         options_,
@@ -869,7 +869,7 @@ void IncompressibleTwoFluidModule::registerOn(
     }
 
     using namespace FE::forms;
-    const auto forms = buildIncompressibleTwoFluidInterfaceForms(
+    const auto forms = Factories::buildIncompressibleTwoFluidInterfaceForms(
         StateField(u_negative,
                    *negative_velocity_space_,
                    options_.negative_phase.velocity_field_name),

@@ -1,5 +1,5 @@
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
-#include "Physics/Formulations/NavierStokes/IncompressibleTwoFluidInterface.h"
+#include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleTwoFluidModule.h"
 
 #include "Physics/Core/EquationModuleInput.h"
@@ -2687,7 +2687,7 @@ void preRegisterIncompressibleTwoFluidDependencyFields(
   const int interface_marker =
       FE::interfaces::stableGeneratedInterfaceMarker(marker_key);
 
-  const IncompressibleTwoFluidInterfaceParameters parameters{
+  const Factories::IncompressibleTwoFluidInterfaceParameters parameters{
       .dimension = dimension,
       .interface_marker = interface_marker,
       .negative_density = options.negative_phase.density,
@@ -2702,7 +2702,7 @@ void preRegisterIncompressibleTwoFluidDependencyFields(
       .prescribed_viscous_traction_jump =
           options.prescribed_viscous_traction_jump,
   };
-  const auto weights = incompressibleTwoFluidInterfaceWeights(parameters);
+  const auto weights = Factories::incompressibleTwoFluidInterfaceWeights(parameters);
   system.declareMaterialInterfaceTransportVelocity(
       FE::interfaces::MaterialInterfaceTransportVelocityDeclaration{
           .dimension = dimension,

@@ -8,7 +8,7 @@
 
 #include <gtest/gtest.h>
 
-#include "Physics/Formulations/NavierStokes/IncompressibleTwoFluidInterface.h"
+#include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleTwoFluidModule.h"
 
 #include "FE/Forms/FormCompiler.h"
@@ -155,8 +155,8 @@ InterfaceExpressions makeExpressions() {
   };
 }
 
-ns::IncompressibleTwoFluidInterfaceParameters makeParameters() {
-  return ns::IncompressibleTwoFluidInterfaceParameters{
+ns::Factories::IncompressibleTwoFluidInterfaceParameters makeParameters() {
+  return ns::Factories::IncompressibleTwoFluidInterfaceParameters{
       .dimension = 3,
       .interface_marker = 71,
       .negative_density = FE::Real{1000.0},
@@ -169,10 +169,10 @@ ns::IncompressibleTwoFluidInterfaceParameters makeParameters() {
   };
 }
 
-ns::IncompressibleTwoFluidInterfaceForms
-build(const ns::IncompressibleTwoFluidInterfaceParameters &parameters) {
+ns::Factories::IncompressibleTwoFluidInterfaceForms
+build(const ns::Factories::IncompressibleTwoFluidInterfaceParameters &parameters) {
   const auto expressions = makeExpressions();
-  return ns::buildIncompressibleTwoFluidInterfaceForms(
+  return ns::Factories::buildIncompressibleTwoFluidInterfaceForms(
       expressions.u_negative, expressions.p_negative, expressions.v_negative,
       expressions.q_negative, expressions.u_positive, expressions.p_positive,
       expressions.v_positive, expressions.q_positive, parameters);
@@ -747,7 +747,7 @@ TEST(IncompressibleTwoFluidModule,
 TEST(IncompressibleTwoFluidInterface,
      ViscosityWeightsAreComplementaryAndSideReversalInvariant) {
   const auto parameters = makeParameters();
-  const auto weights = ns::incompressibleTwoFluidInterfaceWeights(parameters);
+  const auto weights = ns::Factories::incompressibleTwoFluidInterfaceWeights(parameters);
   EXPECT_NEAR(weights.negative_traction + weights.positive_traction,
               FE::Real{1.0},
               FE::Real{4.0} * std::numeric_limits<FE::Real>::epsilon());
@@ -758,7 +758,7 @@ TEST(IncompressibleTwoFluidInterface,
   std::swap(reversed.negative_density, reversed.positive_density);
   std::swap(reversed.negative_viscosity, reversed.positive_viscosity);
   const auto reversed_weights =
-      ns::incompressibleTwoFluidInterfaceWeights(reversed);
+      ns::Factories::incompressibleTwoFluidInterfaceWeights(reversed);
   EXPECT_DOUBLE_EQ(reversed_weights.negative_traction,
                    weights.positive_traction);
   EXPECT_DOUBLE_EQ(reversed_weights.positive_traction,
@@ -778,7 +778,7 @@ TEST(IncompressibleTwoFluidInterface,
       std::numeric_limits<FE::Real>::max() / FE::Real{4.0};
   parameters.positive_viscosity =
       std::numeric_limits<FE::Real>::max() / FE::Real{2.0};
-  const auto weights = ns::incompressibleTwoFluidInterfaceWeights(parameters);
+  const auto weights = ns::Factories::incompressibleTwoFluidInterfaceWeights(parameters);
   EXPECT_TRUE(std::isfinite(weights.negative_traction));
   EXPECT_TRUE(std::isfinite(weights.positive_traction));
   EXPECT_TRUE(std::isfinite(weights.harmonic_viscosity));
@@ -905,7 +905,7 @@ TEST(IncompressibleTwoFluidInterface, RejectsInvalidParameters) {
 
 TEST(IncompressibleTwoFluidInterface, RejectsMissingExpression) {
   const auto expressions = makeExpressions();
-  EXPECT_THROW((void)ns::buildIncompressibleTwoFluidInterfaceForms(
+  EXPECT_THROW((void)ns::Factories::buildIncompressibleTwoFluidInterfaceForms(
                    FE::forms::FormExpr{}, expressions.p_negative,
                    expressions.v_negative, expressions.q_negative,
                    expressions.u_positive, expressions.p_positive,
