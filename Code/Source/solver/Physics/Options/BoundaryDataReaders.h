@@ -552,7 +552,7 @@ struct Vec3d {
   double z{0.0};
 };
 
-Vec3d to_vec3(const std::array<svmp::FE::Real, 3>& v)
+inline Vec3d to_vec3(const std::array<svmp::FE::Real, 3>& v)
 {
   return Vec3d{static_cast<double>(v[0]), static_cast<double>(v[1]), static_cast<double>(v[2])};
 }
@@ -568,7 +568,7 @@ inline Vec3d operator*(double s, const Vec3d& a) { return Vec3d{s * a.x, s * a.y
 
 inline double dot(const Vec3d& a, const Vec3d& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 
-double norm2(const Vec3d& a) { return dot(a, a); }
+inline double norm2(const Vec3d& a) { return dot(a, a); }
 
 inline double norm(const Vec3d& a) { return std::sqrt(norm2(a)); }
 
