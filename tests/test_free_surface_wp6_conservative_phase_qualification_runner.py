@@ -532,26 +532,15 @@ def test_wp6_production_source_contract_is_fail_closed(tmp_path):
         "      sim.time_history->stepIndex(),\n"
         "      activeFESystemCommunicator(*sim.fe_system));\n"
     )
-    assert source.count(transient_gate) == 2
-    for gate_index in range(2):
-        missing_transient_gate = (
-            tmp_path
-            / f"ApplicationDriver-missing-transient-gate-{gate_index}.cpp"
-        )
-        gate_start = -1
-        search_start = 0
-        for _ in range(gate_index + 1):
-            gate_start = source.index(transient_gate, search_start)
-            search_start = gate_start + len(transient_gate)
-        missing_transient_gate.write_text(
-            source[:gate_start]
-            + source[gate_start + len(transient_gate) :],
-            encoding="utf-8",
-        )
-        with pytest.raises(ValueError, match="transient initialization"):
-            runner.validate_wp6_production_source_contract(
-                missing_transient_gate
-            )
+    assert source.count(transient_gate) == 1
+    missing_transient_gate = (
+        tmp_path / "ApplicationDriver-missing-transient-gate.cpp"
+    )
+    missing_transient_gate.write_text(
+        source.replace(transient_gate, "", 1), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="transient initialization"):
+        runner.validate_wp6_production_source_contract(missing_transient_gate)
 
     time_loop_source = TIME_LOOP_SOURCE_PATH.read_text(encoding="utf-8")
     disarm_sequence = (

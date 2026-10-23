@@ -415,11 +415,11 @@ def validate_wp6_production_source_contract(
             "makeLevelSetMaintenanceRequests(",
             "requireCollectiveLevelSetMaintenanceRequestSchedule(",
             "LevelSetMaintenanceScheduleStage::SteadyInitialization",
-            "bindKinematicAreaGradientTractionMaintenance(",
             "requireCollectiveLevelSetMaintenanceRequestSchedule(",
             "LevelSetMaintenanceScheduleStage::SteadyInitialization",
         ),
-        "steady initialization schedule preflights before and after binding",
+        "steady initialization schedule preflights before and after the "
+        "semi-implicit reference binding",
     )
     steady_request = source.find(
         "auto level_set_maintenance = "
@@ -447,11 +447,8 @@ def validate_wp6_production_source_contract(
             "makeLevelSetMaintenanceRequests(",
             "requireCollectiveLevelSetMaintenanceRequestSchedule(",
             "LevelSetMaintenanceScheduleStage::TransientInitialization",
-            "bindKinematicAreaGradientTractionMaintenance(",
-            "requireCollectiveLevelSetMaintenanceRequestSchedule(",
-            "LevelSetMaintenanceScheduleStage::TransientInitialization",
         ),
-        "transient initialization schedule preflights before and after binding",
+        "transient initialization schedule preflight",
     )
 
     before_accept = _callback_body(

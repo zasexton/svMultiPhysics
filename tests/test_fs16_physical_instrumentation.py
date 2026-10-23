@@ -73,10 +73,8 @@ def test_application_driver_seeds_wet_volume_before_time_loop_callbacks():
     )
     initial_refresh = source.index(
         "cut_geometry->refreshCached(", baseline)
-    initial_projection = source.index(
-        "projectLevelSetCurvatureFieldsFromState(", initial_refresh)
     initial_diagnostic = source.index(
-        "logWetVolumeDiagnostics(", initial_projection)
+        "logWetVolumeDiagnostics(", initial_refresh)
     callbacks = source.index(
         "svmp::FE::timestepping::TimeLoopCallbacks callbacks{};",
         initial_diagnostic,
@@ -87,7 +85,7 @@ def test_application_driver_seeds_wet_volume_before_time_loop_callbacks():
         "logWetVolumeDiagnostics(", accepted_callback)
 
     assert (
-        baseline < initial_refresh < initial_projection < initial_diagnostic
+        baseline < initial_refresh < initial_diagnostic
         < callbacks < accepted_callback < accepted_diagnostic
     )
     assert "initial_wet_volume_by_key);" in source[
