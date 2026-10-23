@@ -11,6 +11,7 @@
 #include "Systems/DiagnosticRegistry.h"
 #include "Systems/FormulationBuilder.h"
 #include "Systems/FunctionalForms.h"
+#include "Systems/SystemManifest.h"
 #include "Systems/BoundaryConditionManager.h"
 #include "Systems/FormsInstallerDetail.h"
 #include "Auxiliary/AuxiliaryModelBuilder.h"
@@ -1564,6 +1565,81 @@ TEST(FormulationBuilder, DeclaresMeasuredFunctionalsWithoutInstallingThem)
     rejects("", (u * u).dx(), "name must be nonempty");
     rejects("empty", forms::FormExpr{}, "sum of integrals");
     EXPECT_EQ(systems::functionalForms(sys).size(), 3u);
+}
+
+TEST(FormulationBuilder, InstallsAWorkChannelAsAModuleDoesByHand)
+{
+    namespace systems = svmp::FE::systems;
+    namespace forms = svmp::FE::forms;
+    const auto build = [](bool through_builder) {
+        auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+        auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+        auto sys = std::make_unique<systems::FESystem>(mesh);
+        const auto u_field = sys->addField(systems::FieldSpec{.name = "u", .space = space, .components = 1});
+        const auto p_field = sys->addField(systems::FieldSpec{.name = "p", .space = space, .components = 1});
+        const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+        const auto p = forms::FormExpr::stateField(p_field, *space, "p");
+        const auto v = forms::FormExpr::testFunction(*space, "v");
+        const auto q = forms::FormExpr::testFunction(*space, "q");
+        const auto momentum_work = (p * u * v).dx();
+        const auto continuity_work = (u * u * q).dx();
+        systems::FormInstallOptions base;
+        base.compiler_options.use_symbolic_tangent = true;
+        if (through_builder) {
+            systems::FormulationBuilder F(*sys, "op", base);
+            const auto tag = F.workChannel("work_channel",
+                                           {{.test_field = u_field, .form = momentum_work},
+                                            {.test_field = p_field, .form = continuity_work,
+                                             .extra_trial_fields = {u_field}}});
+            EXPECT_EQ(tag, "op_work_channel");
+            EXPECT_TRUE(F.workChannel("work_none", {{.test_field = u_field}}).empty());
+            EXPECT_FALSE(sys->hasOperator("op_work_none"));
+        } else {
+            // The residual-work installation the Navier-Stokes module writes out.
+            sys->addOperator("op");
+            const systems::OperatorTag tag = "op_work_channel";
+            auto momentum_install = base;
+            momentum_install.contributes_to_problem_analysis = false;
+            momentum_install.generated_boundary_nitsche_trace_requests.clear();
+            momentum_install.source_component_tag = tag;
+            (void)systems::installFormulation(*sys, tag, {u_field}, momentum_work, momentum_install);
+            auto continuity_install = base;
+            continuity_install.contributes_to_problem_analysis = false;
+            continuity_install.generated_boundary_nitsche_trace_requests.clear();
+            continuity_install.source_component_tag = tag;
+            continuity_install.extra_trial_fields.push_back(u_field);
+            (void)systems::installFormulation(*sys, tag, {p_field}, continuity_work, continuity_install);
+        }
+        return systems::kernelManifestLines(*sys);
+    };
+    const auto by_builder = build(true);
+    const auto by_hand = build(false);
+    EXPECT_FALSE(by_builder.empty());
+    EXPECT_EQ(by_builder, by_hand);
+}
+
+TEST(FormulationBuilder, InstallsDiagnosticOperatorsThroughTheSystemRegistry)
+{
+    namespace systems = svmp::FE::systems;
+    namespace forms = svmp::FE::forms;
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+    systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    EXPECT_EQ(systems::findDiagnosticRegistry(sys), nullptr);
+
+    systems::FormulationBuilder F(sys, "op", systems::FormInstallOptions{});
+    F.diagnostics().declareSet("unit_set", {"SVMP_UNIT_DIAGNOSTIC_SWITCH_THAT_IS_NEVER_SET"});
+    EXPECT_EQ(systems::findDiagnosticRegistry(sys), &systems::diagnosticRegistry(sys));
+    EXPECT_FALSE(systems::diagnosticRegistry(sys).enabled("unit_set"));
+    const auto kernels = F.diagnostic("unit_set", "op_diagnostic", {u_field}, (u * v).dx(),
+                                      {.source_component_tag = "op_diagnostic"});
+    ASSERT_FALSE(kernels.residual.empty());
+    EXPECT_TRUE(sys.hasOperator("op_diagnostic"));
+    EXPECT_EQ(systems::diagnosticRegistry(sys).operators("unit_set"),
+              std::vector<systems::OperatorTag>{"op_diagnostic"});
 }
 
 TEST(ContactLineGeometryCertificate, PlanarWallEvidenceChecksTheConfiguredNormal)

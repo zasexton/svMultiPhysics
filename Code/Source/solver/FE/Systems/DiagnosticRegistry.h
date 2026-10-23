@@ -20,7 +20,9 @@
  * of the formulation's install options without the generated-boundary
  * Nitsche trace requests (the trace certificate belongs to the production
  * residual), and is recorded under its set, so that a solver can look the
- * operators of a set up by name.
+ * operators of a set up by name.  A system's registry is one of its
+ * attachments (diagnosticRegistry); FormulationBuilder::diagnostic installs
+ * through it.
  */
 
 #include "Core/Types.h"
@@ -86,6 +88,12 @@ private:
 
     std::vector<Set> sets_{};
 };
+
+/// The diagnostic registry of @p system: an attachment, created on first use.
+[[nodiscard]] DiagnosticRegistry& diagnosticRegistry(FESystem& system);
+
+/// The diagnostic registry of @p system, or null when none was created.
+[[nodiscard]] const DiagnosticRegistry* findDiagnosticRegistry(const FESystem& system) noexcept;
 
 } // namespace systems
 } // namespace FE

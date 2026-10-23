@@ -31,16 +31,25 @@
  * (FunctionalForms.h):
  *
  *   F.functional("kinetic_energy", FunctionalKind::Stored, (0.5 * rho * inner(u, u)).dx());
+ *
+ * and installs its residual-work channels (exact additive groups of the
+ * residual, each its own operator) and its opt-in diagnostic operators:
+ *
+ *   F.workChannel("work_pressure", {{.test_field = u, .form = pressure_work},
+ *                                   {.test_field = p, .form = continuity_work, .extra_trial_fields = {u}}});
+ *   F.diagnostic("set", "equations_diagnostic_x", {u}, form);
  */
 
 #include "Core/Types.h"
 #include "Forms/IntegrationDomain.h"
+#include "Systems/DiagnosticRegistry.h"
 #include "Systems/FormsInstaller.h"
 #include "Systems/FunctionalForms.h"
 #include "Systems/OperatorRegistry.h"
 
 #include <initializer_list>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace svmp {
@@ -56,6 +65,14 @@ struct FormulationGroup {
     std::vector<FieldId> extra_trial_fields{};    ///< appended when missing, after the ALE configuration
     const ALEBinding* ale{nullptr};               ///< configureInstallOptions, first
     bool drop_generated_boundary_nitsche_trace_requests{false};
+};
+
+/// One part of a residual-work channel: the form of one test field.
+struct WorkChannelPart {
+    FieldId test_field{INVALID_FIELD_ID};
+    forms::FormExpr form{};                       ///< the part is skipped when empty
+    std::vector<FieldId> extra_trial_fields{};    ///< appended when missing
+    bool keep_generated_boundary_nitsche_trace_requests{false};
 };
 
 class FormulationBuilder {
@@ -101,6 +118,33 @@ public:
     CoupledResidualKernels installGroup(std::initializer_list<FieldId> fields,
                                         const forms::FormExpr& residual,
                                         const FormulationGroup& group);
+
+    /**
+     * @brief Installs one residual-work channel as its own operator.
+     *
+     * The parts with a form are installed in order on the operator
+     * "<operatorTag()>_<suffix>", each with a copy of options() that is
+     * outside the problem analysis, names that operator as its source
+     * component, appends the part's extra trial fields when missing and
+     * drops the generated-boundary Nitsche trace requests unless the part
+     * keeps them.  A work channel is an exact additive group of the
+     * residual, so its operator evaluates that group alone.
+     *
+     * @return the operator tag, or an empty tag when no part has a form
+     */
+    OperatorTag workChannel(std::string_view suffix, std::initializer_list<WorkChannelPart> parts);
+
+    /// The diagnostic sets and operators of the system (diagnosticRegistry).
+    [[nodiscard]] DiagnosticRegistry& diagnostics();
+
+    /// Installs @p form as the operator @p operator_tag of the declared
+    /// diagnostic @p set with options() (DiagnosticRegistry::install), usually
+    /// after the production operators.
+    CoupledResidualKernels diagnostic(std::string_view set,
+                                      const OperatorTag& operator_tag,
+                                      std::initializer_list<FieldId> fields,
+                                      const forms::FormExpr& form,
+                                      const DiagnosticOperatorOptions& options = {});
 
 private:
     FESystem* system_{nullptr};

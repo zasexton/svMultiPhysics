@@ -12,6 +12,7 @@
 #include "Systems/FESystem.h"
 
 #include <algorithm>
+#include <string>
 #include <utility>
 
 namespace svmp {
@@ -125,6 +126,46 @@ CoupledResidualKernels FormulationBuilder::installGroup(std::initializer_list<Fi
                                                         const FormulationGroup& group)
 {
     return installFormulation(*system_, operator_tag_, fields, residual, groupOptions(group));
+}
+
+OperatorTag FormulationBuilder::workChannel(std::string_view suffix, std::initializer_list<WorkChannelPart> parts)
+{
+    const OperatorTag channel_tag = operator_tag_ + "_" + std::string(suffix);
+    bool installed = false;
+    for (const auto& part : parts) {
+        if (!part.form.isValid()) {
+            continue;
+        }
+        auto part_options = options_;
+        part_options.contributes_to_problem_analysis = false;
+        if (!part.keep_generated_boundary_nitsche_trace_requests) {
+            part_options.generated_boundary_nitsche_trace_requests.clear();
+        }
+        part_options.source_component_tag = channel_tag;
+        for (const FieldId field : part.extra_trial_fields) {
+            if (std::find(part_options.extra_trial_fields.begin(), part_options.extra_trial_fields.end(), field) ==
+                part_options.extra_trial_fields.end()) {
+                part_options.extra_trial_fields.push_back(field);
+            }
+        }
+        (void)installFormulation(*system_, channel_tag, {part.test_field}, part.form, part_options);
+        installed = true;
+    }
+    return installed ? channel_tag : OperatorTag{};
+}
+
+DiagnosticRegistry& FormulationBuilder::diagnostics()
+{
+    return diagnosticRegistry(*system_);
+}
+
+CoupledResidualKernels FormulationBuilder::diagnostic(std::string_view set,
+                                                      const OperatorTag& operator_tag,
+                                                      std::initializer_list<FieldId> fields,
+                                                      const forms::FormExpr& form,
+                                                      const DiagnosticOperatorOptions& options)
+{
+    return diagnostics().install(*system_, set, operator_tag, fields, form, options_, options);
 }
 
 } // namespace systems

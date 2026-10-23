@@ -104,6 +104,16 @@ DiagnosticRegistry::Set& DiagnosticRegistry::find(std::string_view set)
     return const_cast<Set&>(static_cast<const DiagnosticRegistry&>(*this).find(set));
 }
 
+DiagnosticRegistry& diagnosticRegistry(FESystem& system)
+{
+    return system.attachment<DiagnosticRegistry>();
+}
+
+const DiagnosticRegistry* findDiagnosticRegistry(const FESystem& system) noexcept
+{
+    return system.findAttachment<DiagnosticRegistry>();
+}
+
 } // namespace systems
 } // namespace FE
 } // namespace svmp
