@@ -1122,6 +1122,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/BoundaryReductionService.h
     Systems/AuxiliaryQuadratureLayout.h
     Systems/FEAdaptivityTransfer.h
+    Systems/EnergyBalanceLedger.h
     Systems/ExactAccumulator.h
     Systems/FESystem.h
     Systems/FormsInstaller.h
@@ -1176,6 +1177,7 @@ set(FE_SYSTEMS_SOURCES
     Systems/CutIntegrationInvalidation.cpp
     Systems/ContactPenaltyKernel.cpp
     Systems/FEAdaptivityTransfer.cpp
+    Systems/EnergyBalanceLedger.cpp
     Systems/ExactAccumulator.cpp
     Systems/FunctionalRecords.cpp
     Systems/FESystem.cpp
@@ -3175,6 +3177,7 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/Systems/test_ExactAccumulator.cpp
 		                Tests/Unit/Systems/test_AcceptedStageRecords.cpp
 		                Tests/Unit/Systems/test_FunctionalRecords.cpp
+		                Tests/Unit/Systems/test_EnergyBalanceLedger.cpp
 		                Tests/Unit/Systems/test_MeshNormalConstraintStageMeasurements.cpp
 		                Tests/Unit/Systems/test_SnapshotFieldEvaluator.cpp
 		                Tests/Unit/Systems/test_FESystemMultiMesh.cpp
