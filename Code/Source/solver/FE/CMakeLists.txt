@@ -963,8 +963,6 @@ set(FE_LEVELSET_HEADERS
     LevelSet/LevelSetTransport.h
     LevelSet/LevelSetVelocityExtensionConstraint.h
     LevelSet/LevelSetCellEvaluator.h
-    LevelSet/LevelSetCurvatureProjection.h
-    LevelSet/LevelSetCurvatureSamples.h
     LevelSet/LevelSetCutVolumeMeasures.h
     LevelSet/LevelSetCutTopology.h
     LevelSet/LevelSetInterfaceLifecycle.h
@@ -999,8 +997,6 @@ set(FE_LEVELSET_SOURCES
     LevelSet/LevelSetTransport.cpp
     LevelSet/LevelSetVelocityExtensionConstraint.cpp
     LevelSet/LevelSetCellEvaluator.cpp
-    LevelSet/LevelSetCurvatureProjection.cpp
-    LevelSet/LevelSetCurvatureSamples.cpp
     LevelSet/LevelSetCutVolumeMeasures.cpp
     LevelSet/LevelSetCutTopology.cpp
     LevelSet/LevelSetInterfaceLifecycle.cpp
@@ -2615,8 +2611,6 @@ if(FE_BUILD_TESTS)
             Tests/Unit/LevelSet/test_LevelSetGeometry.cpp
             Tests/Unit/LevelSet/test_FreeSurfaceSnapshotCompactRecords.cpp
             Tests/Unit/LevelSet/test_FreeSurfaceSnapshotReuse.cpp
-            Tests/Unit/LevelSet/test_LevelSetCurvatureProjection.cpp
-            Tests/Unit/LevelSet/test_LevelSetCurvatureSamples.cpp
             Tests/Unit/LevelSet/test_LevelSetCutTopology.cpp
             Tests/Unit/LevelSet/test_LevelSetGeometryService.cpp
             Tests/Unit/LevelSet/test_LevelSetHeaders.cpp
@@ -2649,23 +2643,6 @@ if(FE_BUILD_TESTS)
         # COST: serial seconds of the whole executable (Xeon Gold 5118); sets
         # the shard count, see Code/CMake/SvmpTestEntries.cmake.
         svmp_add_gtest(FE_LevelSet_Tests TARGET test_fe_levelset COST 1010)
-        if(FE_WITH_MESH)
-            add_executable(test_fe_levelset_authoritative_binding
-                Tests/Unit/LevelSet/test_LevelSetAuthoritativeDerivativeBinding.cpp)
-            _svmp_fe_target_enable_warnings(test_fe_levelset_authoritative_binding)
-            if(TARGET GTest::gtest)
-                target_link_libraries(test_fe_levelset_authoritative_binding
-                    PRIVATE svfe GTest::gtest)
-            else()
-                set(_fe_binding_gtest_libs ${GTEST_LIBRARIES})
-                list(REMOVE_ITEM _fe_binding_gtest_libs gtest_main GTest::gtest_main)
-                target_link_libraries(test_fe_levelset_authoritative_binding
-                    PRIVATE svfe ${_fe_binding_gtest_libs})
-            endif()
-            svmp_add_gtest(FE_LevelSet_Authoritative_Binding_Tests
-                TARGET test_fe_levelset_authoritative_binding
-                FILTER "LevelSetAuthoritativeDerivativeBinding.*")
-        endif()
     endif()
 
     # Elements module tests
@@ -3437,10 +3414,6 @@ if(FE_BUILD_TESTS)
         if(NOT FE_WITH_MESH)
             list(FILTER FE_LEVELSET_MPI_TEST_SOURCES EXCLUDE
                 REGEX "test_LevelSetPdeVelocityExtensionMPI\\.cpp$")
-        endif()
-        if(TARGET test_fe_levelset_authoritative_binding)
-            add_fe_mpi_test(test_fe_levelset_authoritative_binding 2
-                ENVIRONMENT "GTEST_FILTER=LevelSetAuthoritativeDerivativeBindingMPI.*")
         endif()
         if(FE_LEVELSET_MPI_TEST_SOURCES)
             add_executable(test_fe_levelset_mpi ${FE_LEVELSET_MPI_TEST_SOURCES})

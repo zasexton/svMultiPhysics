@@ -496,94 +496,17 @@ The unfitted capillary form in Navier-Stokes is `SurfaceStress`. It is the
 first variation of the generated-interface measure, uses the generated
 normal, and needs no curvature field. `CurvatureTraction`, which read a
 supplied, unknown or projected curvature, was retired by decision D47 Q2, and
-`KinematicAreaGradientTraction`, which read a curvature field recovered in
-`KinematicAreaGradient` mode (see below), by decision D48. The projection
-below has no Navier-Stokes consumer.
+`KinematicAreaGradientTraction`, which read a curvature field recovered by
+the level-set curvature projection, by decision D48. The projection itself
+(`LevelSetCurvatureProjection`, its least-squares and
+kinematic-area-gradient recovery modes, the curvature samples and the
+`Enable_curvature_projection`, `Curvature_field_name` and
+`Curvature_projection_*` keys) was retired with it: those keys now fail.
 
-The field is a prescribed projected field maintained from the level-set
-geometry. Raw pointwise
-`meanCurvatureFromLevelSet(phi)` is a diagnostic path for fitted or controlled
-studies; it is not production evidence for unfitted surface tension.
-`Documentation/free_surface_program_tracker.md` records which route is being
-selected and why (decision D2, milestone M2).
-
-For unfitted generated interfaces, curvature inputs are signed with the
-generated-interface normal `grad(phi) / |grad(phi)|`, pointing from the negative
-side to the positive side. Navier-Stokes converts that scalar to the outward
-normal of the configured active fluid side before forming
-`(-p_ext - gamma*kappa)n`. Therefore `Active_domain=LevelSetPositive` flips
-both the interface normal and the traction curvature relative to the raw
-level-set convention. This keeps the capillary force vector invariant under
-active-side selection while preserving a single input convention for projected
-curvature fields.
-
-The supported curvature sources are:
-
-| Curvature source | Production contract |
-|------------------|---------------------|
-| Prescribed projected curvature field | The application or caller refreshes a scalar field from level-set samples through the projected-curvature recovery utility. The capillary residual treats the field as fixed during the current nonlinear linearization, so the capillary update is Picard-style with respect to the level-set/cut geometry. |
-
-Projected curvature is computed by
-`FE/LevelSet/LevelSetCurvatureProjection.*`. `Curvature_projection_recovery_mode`
-selects one of three modes:
-
-| Recovery mode | Method |
-|---------------|--------|
-| `level_set_quadratic` (default) | Local weighted least-squares quadratic fit of `phi` on the active narrow band. Optional supplemental generated-interface and cut-volume samples, bounded fallback policies, and optional graph smoothing. |
-| `generated_interface_patch` | Fit of a local tangent graph to generated-interface quadrature samples. The level-set gradient still defines the normal. |
-| `kinematic_area_gradient` | Exact derivative of the `LinearCorner` interface measure, and of each declared Young wetted-wall measure weighted by `cos(theta_e)`, with respect to the nodal P1 level-set values on a fixed cut topology. The curvature solves `M kappa = -dE/dphi`, where `M_ij` is the integral of `N_i N_j / abs(grad(phi))` over the generated interface; the row sums of `M` equal the liquid-volume derivative. Affine P1 `Triangle3`/`Tetra4` only. Optional Helmholtz filter set by `Curvature_projection_kinematic_area_gradient_filter_coefficient`. `Curvature_projection_kinematic_area_gradient_mass` selects `Consistent` (default) or `Lumped`, which implies a zero filter (see below). |
-
-In `kinematic_area_gradient` mode, a discrete volume-constrained stationary
-state gives an exactly constant `kappa`. That constant is balanced by a
-constant pressure. The unfiltered consistent-mass solve is poorly
-conditioned when basis functions barely touch the interface.
-`Curvature_projection_kinematic_area_gradient_mass=Lumped` replaces it by the
-parameter-free row-sum mass (tracker M2, candidate b): `kappa_i = -g_i / m_i`
-on every vertex with `m_i > 0` and zero elsewhere, where `g = dE/dphi` and
-`m_i` is the row sum of `M`. There is no linear solve, and the equilibrium
-property is the same because `m` is the liquid-volume derivative up to sign.
-The mass-weighted mean curvature `sum(-g) / sum(m)` agrees in both modes up
-to the consistent solve tolerance. `Lumped` implies a zero filter: when
-`Curvature_projection_kinematic_area_gradient_filter_coefficient` is not
-supplied it is 0 (it stays 1 with `Consistent`), and an explicit nonzero
-coefficient with `Lumped` is rejected when the input is read. In the FE API
-the options default is the consistent value, so a caller selecting `Lumped`
-sets the coefficient to
-`levelSetKinematicAreaGradientDefaultFilterCoefficient(Lumped)` (0); the
-projection rejects any other value. The result reports the mass mode, zero
-linear iterations, and row-sum weighted curvature statistics. On sampled
-(non-equilibrium) data the lumped nodal values are not pointwise accurate: a
-vertex whose support holds only a sliver of the interface can carry a large
-value with a very small row sum, so judge accuracy with mass-weighted or
-trace norms.
-
-`Curvature_projection_kinematic_area_gradient_finite_difference_check=true`
-(FE option `kinematic_area_gradient_finite_difference_check`, default off)
-cross-checks every analytic interface-measure and Young-wall derivative
-against Richardson-extrapolated central differences of the strict cut
-measure and reports the largest relative disagreement
-(`kinematic_area_gradient_max_relative_fd_disagreement`). It is a
-verification aid: the curvature and derivatives are identical with and
-without it, but it costs 24 extra strict cuts per cut tetrahedron (12 per
-cut triangle), which dominates a 3D projection. When it is off the
-disagreement is not evaluated, and the projection log omits it and reports
-`kinematic_area_gradient_finite_difference_check=0`.
-
-None of these modes provides derivatives of curvature with respect to
-level-set DOFs or regenerated cut geometry. Recovered curvature is used as
-refreshed data. The `level_set_quadratic` path is suitable for production
-only when benchmark gates also pass with zero forbidden fallback vertices and
-recorded curvature, pressure, and stability metrics.
-
-Picard-style capillarity is valid only under an explicit convergence audit. A
-production run using prescribed projected curvature must refresh curvature after
-each accepted level-set or geometry update, solve the physics residual with that
-field held fixed, and record the active narrow-band curvature update. The
-accepted nonlinear state must satisfy the solver residual tolerances and the
-projected-curvature update must be small relative to the case tolerance before
-pressure-jump, capillary-balance, or stability gates are claimed. If that audit
-is not available, the case remains diagnostic even if the residual converged for
-a frozen curvature field.
+Raw pointwise `meanCurvatureFromLevelSet(phi)` is a diagnostic path for
+fitted or controlled studies; it is not production evidence for unfitted
+surface tension. `Documentation/free_surface_program_tracker.md` records the
+route selection (decisions D2 and D48, milestone M2).
 
 Diagnostics and output expose the state needed to audit a generated interface:
 
