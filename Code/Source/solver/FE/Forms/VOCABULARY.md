@@ -372,14 +372,14 @@ Status: `implemented/public`.
 | Vocabulary | Notes |
 |------------|-------|
 | `+`, `-`, `*`, `/`, unary `-` | Scalar/vector/matrix expression arithmetic where shape-compatible |
-| `Real * expr`, `expr * Real`, `expr / Real` | The only mixed `Real`/`FormExpr` operators; each builds `constant(a) * expr` or `expr / constant(a)`. `Real + expr`, `expr - Real`, and `Real / expr` need `FormExpr::constant` |
+| `a + x`, `x + a`, `a - x`, `x - a`, `a * x`, `x * a`, `a / x`, `x / a` | Mixed `Real`/`FormExpr` arithmetic; the `Real` becomes `FormExpr::constant(a)` on the side it is written (`a * x` and `x * a` both build `constant(a) * x`), so the tree, kernels and JIT keys are those of the explicit spelling (`test_FormExprOperators.cpp`) |
 | `inner(a, b)`, `dot(a, b)` | Inner product (`dot` is an alias) |
 | `outer(a, b)`, `cross(a, b)` | Vector/tensor products |
 | `doubleContraction(A, B)` | Rank-2 Frobenius contraction and rank-4/rank-2 contraction |
-| `pow(a, b)`, `sqrt(a)`, `exp(a)`, `log(a)` | Scalar math; `pow` takes a `FormExpr` exponent |
+| `pow(a, b)`, `sqrt(a)`, `exp(a)`, `log(a)` | Scalar math; `pow(x, Real)` builds `pow(x, constant(p))` |
 | `abs(a)`, `sign(a)` | Nonsmooth scalar operators |
-| `min(a, b)`, `max(a, b)` | Nonsmooth min/max operators |
-| `lt`, `le`, `gt`, `ge`, `eq`, `ne` | Predicate nodes returning scalar 0/1 values |
+| `min(a, b)`, `max(a, b)` | Nonsmooth min/max operators; either argument may be a `Real` |
+| `lt`, `le`, `gt`, `ge`, `eq`, `ne` | Predicate nodes returning scalar 0/1 values; either argument may be a `Real` |
 | `conditional(cond, then_expr, else_expr)` | Branching expression |
 | `heaviside(a)`, `indicator(predicate)`, `clamp(a, lo, hi)` | Convenience combinators |
 | `regionIndicator(domain_id)` | Domain-id predicate helper |

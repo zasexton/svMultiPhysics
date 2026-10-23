@@ -924,6 +924,16 @@ private:
 // Convenience free functions (EDSL-style)
 inline FormExpr operator*(Real scalar, const FormExpr& expr) { return expr * scalar; }
 
+// Mixed Real/FormExpr arithmetic.  Each overload builds exactly the tree of
+// the spelled-out constant on the same side, e.g. `1.0 - x` is
+// `FormExpr::constant(1.0) - x` and `x / 2.0` is `x / FormExpr::constant(2.0)`,
+// so kernels, manifests and JIT cache keys are those of the explicit spelling.
+inline FormExpr operator+(Real a, const FormExpr& b) { return FormExpr::constant(a) + b; }
+inline FormExpr operator+(const FormExpr& a, Real b) { return a + FormExpr::constant(b); }
+inline FormExpr operator-(Real a, const FormExpr& b) { return FormExpr::constant(a) - b; }
+inline FormExpr operator-(const FormExpr& a, Real b) { return a - FormExpr::constant(b); }
+inline FormExpr operator/(Real a, const FormExpr& b) { return FormExpr::constant(a) / b; }
+
 inline FormExpr grad(const FormExpr& expr) { return expr.grad(); }
 inline FormExpr div(const FormExpr& expr) { return expr.div(); }
 inline FormExpr curl(const FormExpr& expr) { return expr.curl(); }
@@ -953,6 +963,26 @@ inline FormExpr gt(const FormExpr& a, const FormExpr& b) { return a.gt(b); }
 inline FormExpr ge(const FormExpr& a, const FormExpr& b) { return a.ge(b); }
 inline FormExpr eq(const FormExpr& a, const FormExpr& b) { return a.eq(b); }
 inline FormExpr ne(const FormExpr& a, const FormExpr& b) { return a.ne(b); }
+
+// The same functions with one Real argument: the Real becomes
+// FormExpr::constant(value) in its own position (see the operators above).
+inline FormExpr pow(const FormExpr& a, Real b) { return a.pow(FormExpr::constant(b)); }
+inline FormExpr min(const FormExpr& a, Real b) { return a.min(FormExpr::constant(b)); }
+inline FormExpr min(Real a, const FormExpr& b) { return FormExpr::constant(a).min(b); }
+inline FormExpr max(const FormExpr& a, Real b) { return a.max(FormExpr::constant(b)); }
+inline FormExpr max(Real a, const FormExpr& b) { return FormExpr::constant(a).max(b); }
+inline FormExpr lt(const FormExpr& a, Real b) { return a.lt(FormExpr::constant(b)); }
+inline FormExpr lt(Real a, const FormExpr& b) { return FormExpr::constant(a).lt(b); }
+inline FormExpr le(const FormExpr& a, Real b) { return a.le(FormExpr::constant(b)); }
+inline FormExpr le(Real a, const FormExpr& b) { return FormExpr::constant(a).le(b); }
+inline FormExpr gt(const FormExpr& a, Real b) { return a.gt(FormExpr::constant(b)); }
+inline FormExpr gt(Real a, const FormExpr& b) { return FormExpr::constant(a).gt(b); }
+inline FormExpr ge(const FormExpr& a, Real b) { return a.ge(FormExpr::constant(b)); }
+inline FormExpr ge(Real a, const FormExpr& b) { return FormExpr::constant(a).ge(b); }
+inline FormExpr eq(const FormExpr& a, Real b) { return a.eq(FormExpr::constant(b)); }
+inline FormExpr eq(Real a, const FormExpr& b) { return FormExpr::constant(a).eq(b); }
+inline FormExpr ne(const FormExpr& a, Real b) { return a.ne(FormExpr::constant(b)); }
+inline FormExpr ne(Real a, const FormExpr& b) { return FormExpr::constant(a).ne(b); }
 inline FormExpr conditional(const FormExpr& cond, const FormExpr& t, const FormExpr& f) {
     return cond.conditional(t, f);
 }

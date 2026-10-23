@@ -2902,6 +2902,7 @@ if(FE_BUILD_TESTS)
 			                Tests/Unit/Forms/test_FormExpr.cpp
                             Tests/Unit/Forms/test_CutCellForms.cpp
                             Tests/Unit/Forms/test_IntegrationDomainLowering.cpp
+                            Tests/Unit/Forms/test_FormExprOperators.cpp
                             Tests/Unit/Forms/test_FiniteDeformationForms.cpp
                             Tests/Unit/Forms/test_MovingFrameForms.cpp
 			                    Tests/Unit/Forms/test_CoupledTerminals.cpp
