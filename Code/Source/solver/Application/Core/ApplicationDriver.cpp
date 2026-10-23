@@ -69,6 +69,7 @@
 #include "FE/TimeStepping/GeneratedState.h"
 #include "FE/TimeStepping/MeshNormalStageParticipant.h"
 #include "FE/TimeStepping/NewtonSolver.h"
+#include "FE/TimeStepping/StepContext.h"
 #include "FE/TimeStepping/StepParticipants.h"
 #include "FE/TimeStepping/TimeHistory.h"
 #include "FE/TimeStepping/TimeLoop.h"
@@ -11732,16 +11733,16 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         velocity_extension_artifact_comm,
         "initial_fixed_background_before_time_loop");
   }
-  // The free-surface step participants share the run's FE system,
-  // time-integration selection, active FE communicator and the driver
-  // services they call.
-  const svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceStepContext free_surface_step_context{
-      .sim = svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceRunComponents(sim),
+  // The free-surface step participants share an FE step context
+  // (FE/TimeStepping/StepContext.h): the run's FE system, time-integration
+  // selection, active FE communicator and the driver services they call.
+  const svmp::FE::timestepping::StepContext free_surface_step_context{
+      .sim = svmp::FE::timestepping::RunComponents(sim),
       .transient = transient,
       .opts = {.scheme = opts.scheme},
       .transient_scheme = {.scheme = transient_scheme.scheme,
                            .canonical_name = transient_scheme.canonical_name},
-      .velocity_extension_artifact_comm = velocity_extension_artifact_comm,
+      .active_comm = velocity_extension_artifact_comm,
       .collectiveMeshBoundaryStateFingerprint =
           [](const svmp::FE::backends::GenericVector& state,
              const svmp::MeshComm& comm) {

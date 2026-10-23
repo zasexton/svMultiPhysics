@@ -16,12 +16,11 @@
  *        accepted-stage solve telemetry.
  */
 
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRunSupport.h"
-
 #include "FE/Core/Types.h"
 #include "FE/Interfaces/IncompressibleTwoFluidDiagnostics.h"
 #include "FE/LevelSet/LevelSetConservativePhaseWorkflow.h"
 #include "FE/Systems/FESystem.h"
+#include "FE/Systems/FESystemHandle.h"
 #include "FE/TimeStepping/NewtonSolver.h"
 #include "Mesh/Core/MeshComm.h"
 
@@ -31,11 +30,9 @@
 
 namespace svmp::Physics::formulations::navier_stokes::two_fluid {
 
-using free_surface::FreeSurfaceSystemHandle;
-
 std::vector<svmp::FE::systems::AcceptedTwoFluidStageDiagnosticState>
 evaluateCurrentTwoFluidStageDiagnostics(
-    const FreeSurfaceSystemHandle& sim,
+    const svmp::FE::systems::FESystemHandle& sim,
     std::span<const svmp::FE::systems::
                         TwoFluidAcceptedStageDiagnosticDeclaration>
         declarations,
@@ -52,7 +49,7 @@ struct TwoFluidMomentumReconciliationBatch {
 
 TwoFluidMomentumReconciliationBatch
 buildCurrentTwoFluidMomentumReconciliations(
-    const FreeSurfaceSystemHandle& sim,
+    const svmp::FE::systems::FESystemHandle& sim,
     std::span<const svmp::FE::level_set::ConservativePhaseRequest>
         maintenance_requests,
     std::span<const svmp::FE::Real> corrected_solution,

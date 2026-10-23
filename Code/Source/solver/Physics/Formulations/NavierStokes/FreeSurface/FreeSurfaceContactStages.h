@@ -17,14 +17,13 @@
  *        endpoint binding.
  */
 
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRunSupport.h"
-
 #include "FE/Assembly/Assembler.h"
 #include "FE/Backends/Interfaces/GenericVector.h"
 #include "FE/Core/Types.h"
 #include "FE/Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "FE/LevelSet/LevelSetWallContactConstraint.h"
 #include "FE/Systems/FESystem.h"
+#include "FE/Systems/FESystemHandle.h"
 #include "FE/TimeStepping/TimeHistory.h"
 #include "FE/TimeStepping/TimeLoop.h"
 #include "Mesh/Core/MeshComm.h"
@@ -140,7 +139,7 @@ std::uint64_t acceptedContactStageRevision(
 
 std::vector<svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
 evaluateAcceptedFreeSurfaceContactStages(
-    const FreeSurfaceSystemHandle& sim,
+    const svmp::FE::systems::FESystemHandle& sim,
     svmp::FE::Real stage_time,
     svmp::FE::Real stage_alpha_f,
     std::uint64_t previous_state_revision,
@@ -152,7 +151,7 @@ evaluateAcceptedFreeSurfaceContactStages(
 
 std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
 captureAcceptedContactStageWallConstraints(
-    const FreeSurfaceSystemHandle& sim,
+    const svmp::FE::systems::FESystemHandle& sim,
     std::span<const svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
         accepted_contact_stages);
 

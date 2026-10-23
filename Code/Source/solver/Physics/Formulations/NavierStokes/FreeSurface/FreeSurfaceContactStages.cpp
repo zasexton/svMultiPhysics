@@ -12,8 +12,12 @@
 #include "FE/Assembly/GlobalSystemView.h"
 #include "FE/Geometry/CutQuadrature.h"
 #include "FE/Interfaces/SnapshotFieldEvaluator.h"
+#include "FE/LevelSet/LevelSetCutTopology.h"
+#include "FE/LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h"
 #include "FE/LevelSet/Maintenance/LevelSetWallAwareMaintenance.h"
+#include "FE/Systems/FESystemHandle.h"
 #include "FE/Systems/SnapshotFieldAccess.h"
+#include "FE/Systems/SystemCollectives.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
 
 #include <algorithm>
@@ -31,7 +35,18 @@
 
 namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
-using namespace detail;
+using svmp::FE::level_set::collectiveLevelSetMaintenanceAlgebraicRevision;
+using svmp::FE::level_set::kCutContextHashOffset;
+using svmp::FE::level_set::mixCutContextHash;
+using svmp::FE::systems::FESystemHandle;
+using svmp::FE::systems::activeMeshCommunicator;
+using svmp::FE::systems::collectiveAnyTrue;
+using svmp::FE::systems::collectiveMaxDouble;
+using svmp::FE::systems::collectiveMinDouble;
+using svmp::FE::systems::collectiveMinMaxUint64;
+using svmp::FE::systems::collectiveSumDouble;
+using svmp::FE::systems::collectiveSumSize;
+using svmp::FE::systems::requireCollectivePhasePreparation;
 using svmp::FE::interfaces::makeSnapshotVectorFieldEvaluator;
 using svmp::FE::systems::snapshotFieldAccess;
 
@@ -413,10 +428,10 @@ DynamicContactOperatorStageState captureDynamicContactOperatorStageState(
       comm,
       "dynamic_contact_operator_stage_layout");
   const auto [minimum_full_state_size, maximum_full_state_size] =
-      globalMinMaxUint64(
+      collectiveMinMaxUint64(
           static_cast<std::uint64_t>(captured.full_state_size), comm);
   const auto [minimum_field_count, maximum_field_count] =
-      globalMinMaxUint64(
+      collectiveMinMaxUint64(
           static_cast<std::uint64_t>(captured.fields.size()), comm);
   bool exact_layout_agrees =
       minimum_full_state_size == maximum_full_state_size &&
@@ -427,11 +442,11 @@ DynamicContactOperatorStageState captureDynamicContactOperatorStageState(
     // mismatch so all ranks enter the same reductions in the same order.
     for (std::size_t index = 0u; index < captured.fields.size(); ++index) {
       const auto& field = captured.fields[index];
-      const auto [minimum_field, maximum_field] = globalMinMaxUint64(
+      const auto [minimum_field, maximum_field] = collectiveMinMaxUint64(
           static_cast<std::uint64_t>(field.field), comm);
-      const auto [minimum_offset, maximum_offset] = globalMinMaxUint64(
+      const auto [minimum_offset, maximum_offset] = collectiveMinMaxUint64(
           static_cast<std::uint64_t>(field.offset), comm);
-      const auto [minimum_count, maximum_count] = globalMinMaxUint64(
+      const auto [minimum_count, maximum_count] = collectiveMinMaxUint64(
           static_cast<std::uint64_t>(field.count), comm);
       exact_layout_agrees =
           minimum_field == maximum_field &&
@@ -447,7 +462,7 @@ DynamicContactOperatorStageState captureDynamicContactOperatorStageState(
   const auto layout_revision =
       dynamicContactOperatorStageLayoutRevision(captured);
   const auto [minimum_layout_revision, maximum_layout_revision] =
-      globalMinMaxUint64(layout_revision, comm);
+      collectiveMinMaxUint64(layout_revision, comm);
   if (minimum_layout_revision != maximum_layout_revision) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Dynamic-contact operator-stage field "
@@ -679,7 +694,7 @@ void requireDynamicContactOperatorStageObservationConsensus(
   static_assert(sizeof(svmp::FE::Real) == sizeof(std::uint64_t));
   bool exact_metadata_agrees = true;
   const auto compare_word = [&](std::uint64_t word) {
-    const auto [minimum, maximum] = globalMinMaxUint64(word, comm);
+    const auto [minimum, maximum] = collectiveMinMaxUint64(word, comm);
     exact_metadata_agrees = minimum == maximum && exact_metadata_agrees;
   };
   const auto real_word = [](svmp::FE::Real value) {
@@ -701,7 +716,7 @@ void requireDynamicContactOperatorStageObservationConsensus(
   const auto local_field_count = static_cast<std::uint64_t>(
       observation.operator_stage_state.fields.size());
   const auto [minimum_field_count, maximum_field_count] =
-      globalMinMaxUint64(local_field_count, comm);
+      collectiveMinMaxUint64(local_field_count, comm);
   exact_metadata_agrees =
       minimum_field_count == maximum_field_count && exact_metadata_agrees;
   if (minimum_field_count == maximum_field_count) {
@@ -787,7 +802,7 @@ void requireDynamicContactOperatorStageObservationConsensus(
   const auto local_revision =
       dynamicContactFirstOrderGeneralizedAlphaObservationRevision(observation);
   const auto [minimum_revision, maximum_revision] =
-      globalMinMaxUint64(local_revision, comm);
+      collectiveMinMaxUint64(local_revision, comm);
   if (minimum_revision != maximum_revision) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Dynamic-contact generalized-alpha "
@@ -895,7 +910,7 @@ std::uint64_t acceptedContactStageRevision(
 
 std::vector<svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
 evaluateAcceptedFreeSurfaceContactStages(
-    const FreeSurfaceSystemHandle& sim,
+    const FESystemHandle& sim,
     svmp::FE::Real stage_time,
     svmp::FE::Real stage_alpha_f,
     std::uint64_t previous_state_revision,
@@ -905,7 +920,7 @@ evaluateAcceptedFreeSurfaceContactStages(
                             FreeSurfaceFirstOrderGeneralizedAlphaProvenance>&
         first_order_generalized_alpha)
 {
-  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const auto comm = activeMeshCommunicator(*sim.fe_system);
   const auto declarations =
       free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
   const auto dynamic_count = static_cast<std::size_t>(std::count_if(
@@ -928,8 +943,8 @@ evaluateAcceptedFreeSurfaceContactStages(
       "accepted_contact_stage_evaluation");
   const double local_dynamic_count =
       static_cast<double>(dynamic_count);
-  if (globalMinDouble(local_dynamic_count, comm) !=
-      globalMaxDouble(local_dynamic_count, comm)) {
+  if (collectiveMinDouble(local_dynamic_count, comm) !=
+      collectiveMaxDouble(local_dynamic_count, comm)) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Dynamic contact-stage declarations differ across the FE communicator.");
   }
@@ -947,19 +962,19 @@ evaluateAcceptedFreeSurfaceContactStages(
         !contactStageRealValuesMatch(
             stage_alpha_f,
             first_order_generalized_alpha->alpha_f)));
-  if (globalAnyBool(local_provenance_incomplete, comm)) {
+  if (collectiveAnyTrue(local_provenance_incomplete, comm)) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Accepted contact-stage provenance is incomplete.");
   }
   const double local_solution_size =
       static_cast<double>(stage_solution.size());
-  if (globalMinDouble(local_solution_size, comm) !=
-      globalMaxDouble(local_solution_size, comm)) {
+  if (collectiveMinDouble(local_solution_size, comm) !=
+      collectiveMaxDouble(local_solution_size, comm)) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Contact-stage solution layouts differ across the FE communicator.");
   }
   const auto* context = sim.fe_system->cutIntegrationContext();
-  if (globalMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
+  if (collectiveMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Accepted contact-stage recording requires an authoritative geometry snapshot on every rank.");
   }
@@ -974,12 +989,12 @@ evaluateAcceptedFreeSurfaceContactStages(
         static_cast<double>(declaration.velocity_field);
     const double local_contact_count = static_cast<double>(
         declaration.parameters.dynamic_contact_coefficients.size());
-    if (globalMinDouble(local_marker, comm) !=
-            globalMaxDouble(local_marker, comm) ||
-        globalMinDouble(local_velocity_field, comm) !=
-            globalMaxDouble(local_velocity_field, comm) ||
-        globalMinDouble(local_contact_count, comm) !=
-            globalMaxDouble(local_contact_count, comm)) {
+    if (collectiveMinDouble(local_marker, comm) !=
+            collectiveMaxDouble(local_marker, comm) ||
+        collectiveMinDouble(local_velocity_field, comm) !=
+            collectiveMaxDouble(local_velocity_field, comm) ||
+        collectiveMinDouble(local_contact_count, comm) !=
+            collectiveMaxDouble(local_contact_count, comm)) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Dynamic contact-stage declaration ordering differs across the FE communicator.");
     }
@@ -996,18 +1011,18 @@ evaluateAcceptedFreeSurfaceContactStages(
           static_cast<double>(coefficient.slip_length);
       const double dynamic_viscosity =
           static_cast<double>(coefficient.dynamic_viscosity);
-      if (globalMinDouble(boundary_marker, comm) !=
-              globalMaxDouble(boundary_marker, comm) ||
-          globalMinDouble(equilibrium_angle, comm) !=
-              globalMaxDouble(equilibrium_angle, comm) ||
-          globalMinDouble(contact_law, comm) !=
-              globalMaxDouble(contact_law, comm) ||
-          globalMinDouble(mobility, comm) !=
-              globalMaxDouble(mobility, comm) ||
-          globalMinDouble(slip_length, comm) !=
-              globalMaxDouble(slip_length, comm) ||
-          globalMinDouble(dynamic_viscosity, comm) !=
-              globalMaxDouble(dynamic_viscosity, comm)) {
+      if (collectiveMinDouble(boundary_marker, comm) !=
+              collectiveMaxDouble(boundary_marker, comm) ||
+          collectiveMinDouble(equilibrium_angle, comm) !=
+              collectiveMaxDouble(equilibrium_angle, comm) ||
+          collectiveMinDouble(contact_law, comm) !=
+              collectiveMaxDouble(contact_law, comm) ||
+          collectiveMinDouble(mobility, comm) !=
+              collectiveMaxDouble(mobility, comm) ||
+          collectiveMinDouble(slip_length, comm) !=
+              collectiveMaxDouble(slip_length, comm) ||
+          collectiveMinDouble(dynamic_viscosity, comm) !=
+              collectiveMaxDouble(dynamic_viscosity, comm)) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Dynamic contact-stage wall coefficients differ across the FE communicator for marker " +
             std::to_string(declaration.interface_marker) + ".");
@@ -1016,7 +1031,7 @@ evaluateAcceptedFreeSurfaceContactStages(
     const bool local_marker_available =
         context->hasFreeSurfaceGeometrySnapshotForMarker(
             declaration.interface_marker);
-    if (globalMinDouble(local_marker_available ? 1.0 : 0.0, comm) != 1.0) {
+    if (collectiveMinDouble(local_marker_available ? 1.0 : 0.0, comm) != 1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Accepted contact-stage marker " +
           std::to_string(declaration.interface_marker) +
@@ -1026,7 +1041,7 @@ evaluateAcceptedFreeSurfaceContactStages(
         context->freeSurfaceGeometrySnapshotRevisionForMarker(
             declaration.interface_marker);
     const auto [minimum_revision, maximum_revision] =
-        globalMinMaxUint64(snapshot_revision, comm);
+        collectiveMinMaxUint64(snapshot_revision, comm);
     if (minimum_revision != maximum_revision) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Accepted contact-stage geometry revision differs across the FE communicator for marker " +
@@ -1039,7 +1054,7 @@ evaluateAcceptedFreeSurfaceContactStages(
                  candidate->revision().snapshot_revision_key ==
                      snapshot_revision;
         });
-    if (globalMinDouble(found != snapshots.end() ? 1.0 : 0.0, comm) !=
+    if (collectiveMinDouble(found != snapshots.end() ? 1.0 : 0.0, comm) !=
         1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Accepted contact-stage snapshot storage is incomplete across the FE communicator for marker " +
@@ -1052,7 +1067,7 @@ evaluateAcceptedFreeSurfaceContactStages(
     } catch (const std::exception&) {
       local_snapshot_current = false;
     }
-    if (globalMinDouble(local_snapshot_current ? 1.0 : 0.0, comm) != 1.0) {
+    if (collectiveMinDouble(local_snapshot_current ? 1.0 : 0.0, comm) != 1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Accepted contact-stage snapshot is stale or incomplete on at least one rank for marker " +
           std::to_string(declaration.interface_marker) + ".");
@@ -1072,7 +1087,7 @@ evaluateAcceptedFreeSurfaceContactStages(
     } catch (const std::exception&) {
       local_state.reset();
     }
-    if (globalMinDouble(local_state.has_value() ? 1.0 : 0.0, comm) != 1.0) {
+    if (collectiveMinDouble(local_state.has_value() ? 1.0 : 0.0, comm) != 1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Dynamic contact-stage evaluation failed on at least one rank for marker " +
           std::to_string(declaration.interface_marker) + ".");
@@ -1080,8 +1095,8 @@ evaluateAcceptedFreeSurfaceContactStages(
     auto state = std::move(*local_state);
     const double local_wall_count =
         static_cast<double>(state.walls.size());
-    if (globalMinDouble(local_wall_count, comm) !=
-        globalMaxDouble(local_wall_count, comm)) {
+    if (collectiveMinDouble(local_wall_count, comm) !=
+        collectiveMaxDouble(local_wall_count, comm)) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Dynamic contact-stage wall ordering differs across the FE communicator for marker " +
           std::to_string(declaration.interface_marker) + ".");
@@ -1089,16 +1104,16 @@ evaluateAcceptedFreeSurfaceContactStages(
 
     const auto global_sum = [&comm](svmp::FE::Real local) {
       return static_cast<svmp::FE::Real>(
-          globalSumDouble(static_cast<double>(local), comm));
+          collectiveSumDouble(static_cast<double>(local), comm));
     };
     for (auto& wall : state.walls) {
-      wall.owned_quadrature_point_count = globalSumSize(
+      wall.owned_quadrature_point_count = collectiveSumSize(
           wall.owned_quadrature_point_count, comm);
-      wall.owned_advancing_point_count = globalSumSize(
+      wall.owned_advancing_point_count = collectiveSumSize(
           wall.owned_advancing_point_count, comm);
-      wall.owned_receding_point_count = globalSumSize(
+      wall.owned_receding_point_count = collectiveSumSize(
           wall.owned_receding_point_count, comm);
-      wall.owned_stationary_point_count = globalSumSize(
+      wall.owned_stationary_point_count = collectiveSumSize(
           wall.owned_stationary_point_count, comm);
       wall.owned_contact_measure =
           global_sum(wall.owned_contact_measure);
@@ -1116,7 +1131,7 @@ evaluateAcceptedFreeSurfaceContactStages(
           global_sum(wall.absolute_constitutive_residual_integral);
       wall.line_friction_dissipation =
           global_sum(wall.line_friction_dissipation);
-      wall.owned_wetted_wall_quadrature_point_count = globalSumSize(
+      wall.owned_wetted_wall_quadrature_point_count = collectiveSumSize(
           wall.owned_wetted_wall_quadrature_point_count, comm);
       wall.owned_wetted_wall_measure =
           global_sum(wall.owned_wetted_wall_measure);
@@ -1175,16 +1190,16 @@ evaluateAcceptedFreeSurfaceContactStages(
 
 std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
 captureAcceptedContactStageWallConstraints(
-    const FreeSurfaceSystemHandle& sim,
+    const FESystemHandle& sim,
     std::span<const svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
         accepted_contact_stages)
 {
   std::vector<svmp::FE::level_set::LevelSetWallContactConstraint> captured;
   const auto declarations =
       free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
-  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const auto comm = activeMeshCommunicator(*sim.fe_system);
   const auto* context = sim.fe_system->cutIntegrationContext();
-  if (globalMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
+  if (collectiveMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Accepted contact-stage constraint capture requires an authoritative geometry snapshot on every rank.");
   }
@@ -1195,7 +1210,7 @@ captureAcceptedContactStageWallConstraints(
   } catch (const std::exception&) {
     local_snapshots_current = false;
   }
-  if (globalMinDouble(local_snapshots_current ? 1.0 : 0.0, comm) != 1.0) {
+  if (collectiveMinDouble(local_snapshots_current ? 1.0 : 0.0, comm) != 1.0) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Accepted contact-stage constraint capture rejected a stale authoritative geometry snapshot.");
   }
@@ -1210,7 +1225,7 @@ captureAcceptedContactStageWallConstraints(
         marker >= 0 && stage_by_interface.emplace(marker, &stage).second &&
         local_stage_map_valid;
   }
-  if (globalMinDouble(local_stage_map_valid ? 1.0 : 0.0, comm) != 1.0) {
+  if (collectiveMinDouble(local_stage_map_valid ? 1.0 : 0.0, comm) != 1.0) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Accepted contact-stage constraint capture requires unique nonnegative interface markers.");
   }
@@ -1228,7 +1243,7 @@ captureAcceptedContactStageWallConstraints(
     }
     const auto stage_it = stage_by_interface.find(declaration.interface_marker);
     const bool local_stage_available = stage_it != stage_by_interface.end();
-    if (globalMinDouble(local_stage_available ? 1.0 : 0.0, comm) != 1.0) {
+    if (collectiveMinDouble(local_stage_available ? 1.0 : 0.0, comm) != 1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Accepted contact-stage constraint capture is missing interface marker " +
           std::to_string(declaration.interface_marker) + ".");
@@ -1241,7 +1256,7 @@ captureAcceptedContactStageWallConstraints(
                  candidate->revision().snapshot_revision_key ==
                      stage.geometry_revision.snapshot_revision_key;
         });
-    if (globalMinDouble(snapshot_it != snapshots.end() ? 1.0 : 0.0, comm) !=
+    if (collectiveMinDouble(snapshot_it != snapshots.end() ? 1.0 : 0.0, comm) !=
         1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Accepted contact-stage constraint capture cannot retain the stage geometry for interface marker " +
@@ -1253,7 +1268,7 @@ captureAcceptedContactStageWallConstraints(
         snapshot.revision().snapshot_revision_key ==
             stage.geometry_revision.snapshot_revision_key &&
         snapshot.revision().interface_marker == declaration.interface_marker;
-    if (globalMinDouble(local_revision_valid ? 1.0 : 0.0, comm) != 1.0) {
+    if (collectiveMinDouble(local_revision_valid ? 1.0 : 0.0, comm) != 1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Accepted contact-stage constraint capture found mismatched stage geometry provenance.");
     }
@@ -1302,11 +1317,11 @@ captureAcceptedContactStageWallConstraints(
         local_rule_diagnostic = error.what();
       }
     }
-    if (globalMinDouble(local_parent_ids_valid ? 1.0 : 0.0, comm) != 1.0) {
+    if (collectiveMinDouble(local_parent_ids_valid ? 1.0 : 0.0, comm) != 1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Accepted contact-stage constraint capture found a rule without a partition-independent parent identity.");
     }
-    if (globalMinDouble(local_rules_valid ? 1.0 : 0.0, comm) != 1.0) {
+    if (collectiveMinDouble(local_rules_valid ? 1.0 : 0.0, comm) != 1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Accepted contact-stage constraint capture rejected a contact rule with incomplete or stale provenance" +
           (local_rule_diagnostic.empty()
@@ -1315,7 +1330,7 @@ captureAcceptedContactStageWallConstraints(
     }
     declaration_constraints = canonicalizeAcceptedWallConstraints(
         std::move(declaration_constraints),
-        feCollectiveCommunicator(comm),
+        comm,
         "Accepted contact-stage constraint capture");
     captured.insert(captured.end(),
                     declaration_constraints.begin(),
@@ -1332,7 +1347,7 @@ void bindAcceptedFreeSurfaceContactStagesToEndpointRevision(
     const svmp::MeshComm& comm)
 {
   const auto [minimum_revision, maximum_revision] =
-      globalMinMaxUint64(endpoint_state_revision, comm);
+      collectiveMinMaxUint64(endpoint_state_revision, comm);
   if (endpoint_state_revision == 0u ||
       minimum_revision != maximum_revision) {
     throw std::runtime_error(
@@ -1341,7 +1356,7 @@ void bindAcceptedFreeSurfaceContactStagesToEndpointRevision(
   const auto local_stage_count =
       static_cast<std::uint64_t>(stages.size());
   const auto [minimum_stage_count, maximum_stage_count] =
-      globalMinMaxUint64(local_stage_count, comm);
+      collectiveMinMaxUint64(local_stage_count, comm);
   if (minimum_stage_count != maximum_stage_count) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Accepted contact-stage binding coverage differs across the FE communicator.");
@@ -1369,7 +1384,7 @@ void bindAcceptedFreeSurfaceContactStagesToEndpointRevision(
         stage_solution,
         stage.first_order_generalized_alpha);
     const auto [minimum_stage_revision, maximum_stage_revision] =
-        globalMinMaxUint64(bound_stage_revision, comm);
+        collectiveMinMaxUint64(bound_stage_revision, comm);
     if (minimum_stage_revision != maximum_stage_revision) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Accepted contact-stage composite revision differs across the FE communicator.");

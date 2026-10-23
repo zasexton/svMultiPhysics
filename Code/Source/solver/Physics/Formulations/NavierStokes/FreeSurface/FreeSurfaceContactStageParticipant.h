@@ -22,11 +22,11 @@
  */
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactStages.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceStepContext.h"
 
 #include "FE/Core/Types.h"
 #include "FE/LevelSet/LevelSetWallContactConstraint.h"
 #include "FE/Systems/FESystem.h"
+#include "FE/TimeStepping/StepContext.h"
 #include "FE/TimeStepping/StepParticipants.h"
 #include "FE/TimeStepping/TimeHistory.h"
 #include "FE/TimeStepping/TimeLoop.h"
@@ -41,7 +41,7 @@ namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
 class ContactStageParticipant final
     : public svmp::FE::timestepping::IStepParticipant,
-      private FreeSurfaceStepContext {
+      private svmp::FE::timestepping::StepContext {
 public:
   /// @p has_dynamic_contact_stage: a dynamic contact law is declared on
   /// every rank; @p free_surface_declarations: the FE system's free-surface
@@ -49,7 +49,7 @@ public:
   /// FE state size.  Throws when generalized-alpha contact provenance needs
   /// an FE system that is not of temporal order one.
   ContactStageParticipant(
-      const FreeSurfaceStepContext& context,
+      const svmp::FE::timestepping::StepContext& context,
       bool has_dynamic_contact_stage,
       std::span<const svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration>
           free_surface_declarations,

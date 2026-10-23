@@ -16,11 +16,10 @@
  *        maintenance functional values and the accepted record.
  */
 
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRunSupport.h"
-
 #include "FE/Core/Types.h"
 #include "FE/LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h"
 #include "FE/Systems/FESystem.h"
+#include "FE/Systems/FESystemHandle.h"
 #include "Mesh/Core/MeshComm.h"
 
 #include <cstdint>
@@ -37,10 +36,10 @@ std::uint64_t freeSurfaceDiscreteFunctionalDeclarationContentKey(
 
 std::vector<svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
 evaluateCurrentFreeSurfaceDiscreteFunctionals(
-    const FreeSurfaceSystemHandle& sim);
+    const svmp::FE::systems::FESystemHandle& sim);
 
 void attachAcceptedFreeSurfaceActiveVolumeEnergies(
-    const FreeSurfaceSystemHandle& sim,
+    const svmp::FE::systems::FESystemHandle& sim,
     std::span<const svmp::FE::Real> accepted_solution,
     std::span<
         svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
@@ -55,7 +54,7 @@ std::uint64_t collectiveFreeSurfaceFieldRevision(
 
 std::vector<svmp::FE::level_set::LevelSetAuthoritativeFunctionalValue>
 levelSetMaintenanceFunctionalValues(
-    const FreeSurfaceSystemHandle& sim,
+    const svmp::FE::systems::FESystemHandle& sim,
     std::span<const svmp::FE::systems::
                         AcceptedFreeSurfaceDiscreteFunctionalState> states,
     std::span<const svmp::FE::Real> solution);
@@ -75,7 +74,7 @@ requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
 std::vector<
     svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
 recordAcceptedFreeSurfaceDiscreteFunctionals(
-    const FreeSurfaceSystemHandle& sim,
+    const svmp::FE::systems::FESystemHandle& sim,
     std::uint64_t accepted_step,
     svmp::FE::Real accepted_time,
     svmp::FE::Real dt,
@@ -91,7 +90,7 @@ recordAcceptedFreeSurfaceDiscreteFunctionals(
     bool* backward_euler_kinetic_work_bound = nullptr);
 
 void recordInitialFreeSurfaceDiscreteFunctionalBaseline(
-    const FreeSurfaceSystemHandle& sim,
+    const svmp::FE::systems::FESystemHandle& sim,
     std::uint64_t initial_step,
     svmp::FE::Real initial_time,
     std::span<const svmp::FE::Real> initial_solution,

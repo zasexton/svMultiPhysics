@@ -20,12 +20,16 @@
 #include "FE/Geometry/LinearMapping.h"
 #include "FE/Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "FE/Interfaces/SnapshotFieldEvaluator.h"
+#include "FE/LevelSet/LevelSetCutTopology.h"
+#include "FE/LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h"
 #include "FE/Math/Matrix.h"
 #include "FE/Math/Vector.h"
 #include "FE/Spaces/FunctionSpace.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/ProductSpace.h"
+#include "FE/Systems/FESystemHandle.h"
 #include "FE/Systems/SnapshotFieldAccess.h"
+#include "FE/Systems/SystemCollectives.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
 
 #include <algorithm>
@@ -43,7 +47,18 @@
 
 namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
-using namespace detail;
+using svmp::FE::level_set::CutTopologyFingerprintMultiset;
+using svmp::FE::level_set::collectiveCutTopologyFingerprintMultiset;
+using svmp::FE::level_set::collectiveLevelSetMaintenanceAlgebraicRevision;
+using svmp::FE::level_set::kCutContextHashOffset;
+using svmp::FE::level_set::mixCutContextHash;
+using svmp::FE::systems::FESystemHandle;
+using svmp::FE::systems::activeMeshCommunicator;
+using svmp::FE::systems::collectiveMaxDouble;
+using svmp::FE::systems::collectiveMinDouble;
+using svmp::FE::systems::collectiveMinMaxUint64;
+using svmp::FE::systems::collectiveSumDouble;
+using svmp::FE::systems::collectiveSumSize;
 using svmp::FE::interfaces::makeSnapshotVectorFieldEvaluator;
 using svmp::FE::systems::snapshotFieldAccess;
 
@@ -140,15 +155,15 @@ std::uint64_t freeSurfaceDiscreteFunctionalDeclarationContentKey(
 
 std::vector<svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
 evaluateCurrentFreeSurfaceDiscreteFunctionals(
-    const FreeSurfaceSystemHandle& sim)
+    const FESystemHandle& sim)
 {
   const auto declarations =
       free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
-  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const auto comm = activeMeshCommunicator(*sim.fe_system);
   const auto local_declaration_count =
       static_cast<double>(declarations.size());
-  if (globalMinDouble(local_declaration_count, comm) !=
-      globalMaxDouble(local_declaration_count, comm)) {
+  if (collectiveMinDouble(local_declaration_count, comm) !=
+      collectiveMaxDouble(local_declaration_count, comm)) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Free-surface functional declarations differ across the FE communicator.");
   }
@@ -157,7 +172,7 @@ evaluateCurrentFreeSurfaceDiscreteFunctionals(
   }
   const auto* context = sim.fe_system->cutIntegrationContext();
   const auto context_available = context != nullptr ? 1.0 : 0.0;
-  if (globalMinDouble(context_available, comm) != 1.0) {
+  if (collectiveMinDouble(context_available, comm) != 1.0) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Free-surface functional evaluation requires an authoritative cut-integration context on every rank.");
   }
@@ -171,7 +186,7 @@ evaluateCurrentFreeSurfaceDiscreteFunctionals(
             declaration);
     const auto [minimum_declaration_content_key,
                 maximum_declaration_content_key] =
-        globalMinMaxUint64(declaration_content_key, comm);
+        collectiveMinMaxUint64(declaration_content_key, comm);
     if (minimum_declaration_content_key !=
         maximum_declaration_content_key) {
       throw std::runtime_error(
@@ -238,12 +253,12 @@ evaluateCurrentFreeSurfaceDiscreteFunctionals(
     bool declaration_metadata_consistent = true;
     for (const auto value : declaration_metadata) {
       const bool local_finite = std::isfinite(value);
-      if (globalMinDouble(local_finite ? 1.0 : 0.0, comm) != 1.0) {
+      if (collectiveMinDouble(local_finite ? 1.0 : 0.0, comm) != 1.0) {
         declaration_metadata_consistent = false;
         continue;
       }
       declaration_metadata_consistent =
-          globalMinDouble(value, comm) == globalMaxDouble(value, comm) &&
+          collectiveMinDouble(value, comm) == collectiveMaxDouble(value, comm) &&
           declaration_metadata_consistent;
     }
     if (!declaration_metadata_consistent) {
@@ -253,7 +268,7 @@ evaluateCurrentFreeSurfaceDiscreteFunctionals(
     const bool local_marker_available =
         context->hasFreeSurfaceGeometrySnapshotForMarker(
             declaration.interface_marker);
-    if (globalMinDouble(local_marker_available ? 1.0 : 0.0, comm) != 1.0) {
+    if (collectiveMinDouble(local_marker_available ? 1.0 : 0.0, comm) != 1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Free-surface functional marker " +
           std::to_string(declaration.interface_marker) +
@@ -270,7 +285,7 @@ evaluateCurrentFreeSurfaceDiscreteFunctionals(
                      snapshot_revision;
         });
     const auto [minimum_revision, maximum_revision] =
-        globalMinMaxUint64(snapshot_revision, comm);
+        collectiveMinMaxUint64(snapshot_revision, comm);
     if (minimum_revision != maximum_revision) {
       std::ostringstream diagnostic;
       diagnostic
@@ -294,7 +309,7 @@ evaluateCurrentFreeSurfaceDiscreteFunctionals(
       throw std::runtime_error(diagnostic.str());
     }
     const bool local_snapshot_available = found != snapshots.end();
-    if (globalMinDouble(local_snapshot_available ? 1.0 : 0.0, comm) != 1.0) {
+    if (collectiveMinDouble(local_snapshot_available ? 1.0 : 0.0, comm) != 1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Free-surface geometry snapshot storage is incomplete across the FE communicator for marker " +
           std::to_string(declaration.interface_marker) + ".");
@@ -303,7 +318,7 @@ evaluateCurrentFreeSurfaceDiscreteFunctionals(
         sim.fe_system->meshAccess());
     const auto& snapshot = **found;
     const bool geometry_pruning_occurred =
-        globalMaxDouble(
+        collectiveMaxDouble(
             snapshot.ledger().pruned_rule_count != 0u ? 1.0 : 0.0,
             comm) == 1.0;
     auto global_state =
@@ -311,23 +326,23 @@ evaluateCurrentFreeSurfaceDiscreteFunctionals(
             snapshot, declaration.parameters);
 
     const auto wall_count = static_cast<double>(global_state.walls.size());
-    if (globalMinDouble(wall_count, comm) !=
-        globalMaxDouble(wall_count, comm)) {
+    if (collectiveMinDouble(wall_count, comm) !=
+        collectiveMaxDouble(wall_count, comm)) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Free-surface functional wall sets differ across the FE communicator for marker " +
           std::to_string(declaration.interface_marker) + ".");
     }
     for (const auto& wall : global_state.walls) {
       const auto marker = static_cast<double>(wall.boundary_marker);
-      if (globalMinDouble(marker, comm) != globalMaxDouble(marker, comm)) {
+      if (collectiveMinDouble(marker, comm) != collectiveMaxDouble(marker, comm)) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Free-surface functional wall ordering differs across the FE communicator for marker " +
             std::to_string(declaration.interface_marker) + ".");
       }
       const auto angle_present =
           wall.equilibrium_contact_angle_radians.has_value() ? 1.0 : 0.0;
-      if (globalMinDouble(angle_present, comm) !=
-          globalMaxDouble(angle_present, comm)) {
+      if (collectiveMinDouble(angle_present, comm) !=
+          collectiveMaxDouble(angle_present, comm)) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Free-surface functional wall coefficient presence differs across the FE communicator for marker " +
             std::to_string(declaration.interface_marker) + ".");
@@ -335,7 +350,7 @@ evaluateCurrentFreeSurfaceDiscreteFunctionals(
       if (wall.equilibrium_contact_angle_radians.has_value()) {
         const auto angle = static_cast<double>(
             *wall.equilibrium_contact_angle_radians);
-        if (globalMinDouble(angle, comm) != globalMaxDouble(angle, comm)) {
+        if (collectiveMinDouble(angle, comm) != collectiveMaxDouble(angle, comm)) {
           throw std::runtime_error(
               "[svMultiPhysics::Application] Free-surface functional wall angles differ across the FE communicator for marker " +
               std::to_string(declaration.interface_marker) + ".");
@@ -345,7 +360,7 @@ evaluateCurrentFreeSurfaceDiscreteFunctionals(
 
     const auto global_sum = [&comm](svmp::FE::Real local) {
       return static_cast<svmp::FE::Real>(
-          globalSumDouble(static_cast<double>(local), comm));
+          collectiveSumDouble(static_cast<double>(local), comm));
     };
     global_state.owned_liquid_volume =
         global_sum(global_state.owned_liquid_volume);
@@ -386,7 +401,7 @@ evaluateCurrentFreeSurfaceDiscreteFunctionals(
 namespace {
 
 void attachAcceptedFreeSurfaceEndpointFunctionalPowers(
-    const FreeSurfaceSystemHandle& sim,
+    const FESystemHandle& sim,
     std::span<const svmp::FE::Real> accepted_solution,
     std::span<
         svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
@@ -394,7 +409,7 @@ void attachAcceptedFreeSurfaceEndpointFunctionalPowers(
 {
   const auto declarations =
       free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
-  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const auto comm = activeMeshCommunicator(*sim.fe_system);
   const auto declared_count = std::count_if(
       declarations.begin(), declarations.end(), [](const auto& declaration) {
         return declaration.endpoint_functional_power_enabled;
@@ -415,14 +430,14 @@ void attachAcceptedFreeSurfaceEndpointFunctionalPowers(
           : 0.0;
   const auto local_solution_size =
       static_cast<double>(accepted_solution.size());
-  if (globalMinDouble(local_coverage, comm) != 1.0 ||
-      globalMinDouble(local_solution_size, comm) !=
-          globalMaxDouble(local_solution_size, comm)) {
+  if (collectiveMinDouble(local_coverage, comm) != 1.0 ||
+      collectiveMinDouble(local_solution_size, comm) !=
+          collectiveMaxDouble(local_solution_size, comm)) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Endpoint functional power requires a communicator-consistent endpoint solution and complete accepted-state coverage.");
   }
   const auto* context = sim.fe_system->cutIntegrationContext();
-  if (globalMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
+  if (collectiveMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Endpoint functional power requires an authoritative geometry snapshot on every rank.");
   }
@@ -446,7 +461,7 @@ void attachAcceptedFreeSurfaceEndpointFunctionalPowers(
                  candidate->revision().snapshot_revision_key ==
                      accepted.geometry_revision.snapshot_revision_key;
         });
-    if (globalMinDouble(found != snapshots.end() ? 1.0 : 0.0, comm) !=
+    if (collectiveMinDouble(found != snapshots.end() ? 1.0 : 0.0, comm) !=
         1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Endpoint functional-power snapshot storage is incomplete across the FE communicator for marker " +
@@ -476,7 +491,7 @@ void attachAcceptedFreeSurfaceEndpointFunctionalPowers(
     } catch (...) {
       local_failure = std::current_exception();
     }
-    if (globalMinDouble(local_power.has_value() ? 1.0 : 0.0, comm) !=
+    if (collectiveMinDouble(local_power.has_value() ? 1.0 : 0.0, comm) !=
         1.0) {
       if (local_failure) {
         std::rethrow_exception(local_failure);
@@ -488,7 +503,7 @@ void attachAcceptedFreeSurfaceEndpointFunctionalPowers(
     auto power = std::move(*local_power);
     const auto global_sum = [&comm](svmp::FE::Real value) {
       return static_cast<svmp::FE::Real>(
-          globalSumDouble(static_cast<double>(value), comm));
+          collectiveSumDouble(static_cast<double>(value), comm));
     };
     power.owned_liquid_volume_variation =
         global_sum(power.owned_liquid_volume_variation);
@@ -520,7 +535,7 @@ void attachAcceptedFreeSurfaceEndpointFunctionalPowers(
 } // namespace
 
 void attachAcceptedFreeSurfaceActiveVolumeEnergies(
-    const FreeSurfaceSystemHandle& sim,
+    const FESystemHandle& sim,
     std::span<const svmp::FE::Real> accepted_solution,
     std::span<
         svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
@@ -528,14 +543,14 @@ void attachAcceptedFreeSurfaceActiveVolumeEnergies(
 {
   const auto declarations =
       free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
-  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const auto comm = activeMeshCommunicator(*sim.fe_system);
   const auto local_state_coverage =
       accepted_states.size() == declarations.size() ? 1.0 : 0.0;
   const auto local_declaration_count =
       static_cast<double>(declarations.size());
-  if (globalMinDouble(local_state_coverage, comm) != 1.0 ||
-      globalMinDouble(local_declaration_count, comm) !=
-          globalMaxDouble(local_declaration_count, comm)) {
+  if (collectiveMinDouble(local_state_coverage, comm) != 1.0 ||
+      collectiveMinDouble(local_declaration_count, comm) !=
+          collectiveMaxDouble(local_declaration_count, comm)) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Active-volume energy evaluation requires exactly one accepted state per free-surface declaration.");
   }
@@ -544,8 +559,8 @@ void attachAcceptedFreeSurfaceActiveVolumeEnergies(
         return declaration.active_volume_energy_parameters.has_value();
       });
   const auto local_active_count = static_cast<double>(active_count);
-  if (globalMinDouble(local_active_count, comm) !=
-      globalMaxDouble(local_active_count, comm)) {
+  if (collectiveMinDouble(local_active_count, comm) !=
+      collectiveMaxDouble(local_active_count, comm)) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Active-volume energy declaration coverage differs across the FE communicator.");
   }
@@ -555,19 +570,19 @@ void attachAcceptedFreeSurfaceActiveVolumeEnergies(
   const auto local_solution_size =
       static_cast<double>(accepted_solution.size());
   const auto all_solutions_nonempty =
-      globalMinDouble(
+      collectiveMinDouble(
           accepted_solution.empty() ? 0.0 : 1.0, comm) == 1.0;
   const auto minimum_solution_size =
-      globalMinDouble(local_solution_size, comm);
+      collectiveMinDouble(local_solution_size, comm);
   const auto maximum_solution_size =
-      globalMaxDouble(local_solution_size, comm);
+      collectiveMaxDouble(local_solution_size, comm);
   if (!all_solutions_nonempty ||
       minimum_solution_size != maximum_solution_size) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Active-volume energy evaluation requires a nonempty communicator-consistent accepted solution.");
   }
   const auto* context = sim.fe_system->cutIntegrationContext();
-  if (globalMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
+  if (collectiveMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Active-volume energy evaluation requires an authoritative geometry snapshot on every rank.");
   }
@@ -577,15 +592,15 @@ void attachAcceptedFreeSurfaceActiveVolumeEnergies(
     auto& accepted = accepted_states[index];
     const auto local_energy_declared =
         declaration.active_volume_energy_parameters.has_value() ? 1.0 : 0.0;
-    if (globalMinDouble(local_energy_declared, comm) !=
-        globalMaxDouble(local_energy_declared, comm)) {
+    if (collectiveMinDouble(local_energy_declared, comm) !=
+        collectiveMaxDouble(local_energy_declared, comm)) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Active-volume energy declaration ordering differs across the FE communicator.");
     }
     if (!declaration.active_volume_energy_parameters.has_value()) {
       const auto no_undeclared_state =
           accepted.active_volume_energy.has_value() ? 0.0 : 1.0;
-      if (globalMinDouble(no_undeclared_state, comm) != 1.0) {
+      if (collectiveMinDouble(no_undeclared_state, comm) != 1.0) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] An undeclared active-volume energy state was supplied.");
       }
@@ -607,12 +622,12 @@ void attachAcceptedFreeSurfaceActiveVolumeEnergies(
     bool metadata_consistent = true;
     for (const auto value : metadata) {
       const auto finite = std::isfinite(value) ? 1.0 : 0.0;
-      if (globalMinDouble(finite, comm) != 1.0) {
+      if (collectiveMinDouble(finite, comm) != 1.0) {
         metadata_consistent = false;
         continue;
       }
       metadata_consistent =
-          globalMinDouble(value, comm) == globalMaxDouble(value, comm) &&
+          collectiveMinDouble(value, comm) == collectiveMaxDouble(value, comm) &&
           metadata_consistent;
     }
     if (!metadata_consistent) {
@@ -625,7 +640,7 @@ void attachAcceptedFreeSurfaceActiveVolumeEnergies(
                     declaration.interface_marker
             ? 1.0
             : 0.0;
-    if (globalMinDouble(local_order_matches, comm) != 1.0) {
+    if (collectiveMinDouble(local_order_matches, comm) != 1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Active-volume energy state ordering does not match its free-surface declaration.");
     }
@@ -636,7 +651,7 @@ void attachAcceptedFreeSurfaceActiveVolumeEnergies(
                  candidate->revision().snapshot_revision_key ==
                      accepted.geometry_revision.snapshot_revision_key;
         });
-    if (globalMinDouble(found != snapshots.end() ? 1.0 : 0.0, comm) !=
+    if (collectiveMinDouble(found != snapshots.end() ? 1.0 : 0.0, comm) !=
         1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Active-volume energy snapshot storage is incomplete across the FE communicator for marker " +
@@ -657,7 +672,7 @@ void attachAcceptedFreeSurfaceActiveVolumeEnergies(
     } catch (...) {
       local_failure = std::current_exception();
     }
-    if (globalMinDouble(local_energy.has_value() ? 1.0 : 0.0, comm) !=
+    if (collectiveMinDouble(local_energy.has_value() ? 1.0 : 0.0, comm) !=
         1.0) {
       if (local_failure) {
         std::rethrow_exception(local_failure);
@@ -668,19 +683,19 @@ void attachAcceptedFreeSurfaceActiveVolumeEnergies(
     }
     auto energy = std::move(*local_energy);
     energy.owned_quadrature_point_count =
-        globalSumSize(energy.owned_quadrature_point_count, comm);
+        collectiveSumSize(energy.owned_quadrature_point_count, comm);
     energy.owned_liquid_volume = static_cast<svmp::FE::Real>(
-        globalSumDouble(
+        collectiveSumDouble(
             static_cast<double>(energy.owned_liquid_volume), comm));
     energy.kinetic_energy = static_cast<svmp::FE::Real>(
-        globalSumDouble(
+        collectiveSumDouble(
             static_cast<double>(energy.kinetic_energy), comm));
     energy.gravitational_energy = static_cast<svmp::FE::Real>(
-        globalSumDouble(
+        collectiveSumDouble(
             static_cast<double>(energy.gravitational_energy), comm));
     energy.gravitational_potential_power =
         static_cast<svmp::FE::Real>(
-            globalSumDouble(
+            collectiveSumDouble(
                 static_cast<double>(
                     energy.gravitational_potential_power),
                 comm));
@@ -693,7 +708,7 @@ void attachAcceptedFreeSurfaceActiveVolumeEnergies(
 namespace {
 
 void attachAcceptedFreeSurfaceActiveVolumeDissipation(
-    const FreeSurfaceSystemHandle& sim,
+    const FESystemHandle& sim,
     std::span<const svmp::FE::Real> accepted_solution,
     std::span<
         svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
@@ -701,7 +716,7 @@ void attachAcceptedFreeSurfaceActiveVolumeDissipation(
 {
   const auto declarations =
       free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
-  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const auto comm = activeMeshCommunicator(*sim.fe_system);
   const auto declared_count = std::count_if(
       declarations.begin(), declarations.end(), [](const auto& declaration) {
         return declaration.active_volume_dissipation_parameters.has_value();
@@ -722,14 +737,14 @@ void attachAcceptedFreeSurfaceActiveVolumeDissipation(
           : 0.0;
   const auto local_solution_size =
       static_cast<double>(accepted_solution.size());
-  if (globalMinDouble(local_coverage, comm) != 1.0 ||
-      globalMinDouble(local_solution_size, comm) !=
-          globalMaxDouble(local_solution_size, comm)) {
+  if (collectiveMinDouble(local_coverage, comm) != 1.0 ||
+      collectiveMinDouble(local_solution_size, comm) !=
+          collectiveMaxDouble(local_solution_size, comm)) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Active-volume dissipation requires a communicator-consistent endpoint solution and complete accepted-state coverage.");
   }
   const auto* context = sim.fe_system->cutIntegrationContext();
-  if (globalMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
+  if (collectiveMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Active-volume dissipation requires an authoritative geometry snapshot on every rank.");
   }
@@ -751,7 +766,7 @@ void attachAcceptedFreeSurfaceActiveVolumeDissipation(
                  candidate->revision().snapshot_revision_key ==
                      accepted.geometry_revision.snapshot_revision_key;
         });
-    if (globalMinDouble(found != snapshots.end() ? 1.0 : 0.0, comm) !=
+    if (collectiveMinDouble(found != snapshots.end() ? 1.0 : 0.0, comm) !=
         1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Active-volume dissipation snapshot storage is incomplete across the FE communicator for marker " +
@@ -776,7 +791,7 @@ void attachAcceptedFreeSurfaceActiveVolumeDissipation(
     } catch (...) {
       local_failure = std::current_exception();
     }
-    if (globalMinDouble(
+    if (collectiveMinDouble(
             local_dissipation.has_value() ? 1.0 : 0.0,
             comm) != 1.0) {
       if (local_failure) {
@@ -788,17 +803,17 @@ void attachAcceptedFreeSurfaceActiveVolumeDissipation(
     }
     auto dissipation = std::move(*local_dissipation);
     dissipation.owned_quadrature_point_count =
-        globalSumSize(
+        collectiveSumSize(
             dissipation.owned_quadrature_point_count, comm);
     dissipation.owned_liquid_volume =
         static_cast<svmp::FE::Real>(
-            globalSumDouble(
+            collectiveSumDouble(
                 static_cast<double>(
                     dissipation.owned_liquid_volume),
                 comm));
     dissipation.bulk_viscous_dissipation_rate =
         static_cast<svmp::FE::Real>(
-            globalSumDouble(
+            collectiveSumDouble(
                 static_cast<double>(
                     dissipation.bulk_viscous_dissipation_rate),
                 comm));
@@ -808,7 +823,7 @@ void attachAcceptedFreeSurfaceActiveVolumeDissipation(
 }
 
 void attachAcceptedFreeSurfaceExternalPressurePowers(
-    const FreeSurfaceSystemHandle& sim,
+    const FESystemHandle& sim,
     std::span<const svmp::FE::Real> accepted_solution,
     std::span<
         svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
@@ -816,7 +831,7 @@ void attachAcceptedFreeSurfaceExternalPressurePowers(
 {
   const auto declarations =
       free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
-  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const auto comm = activeMeshCommunicator(*sim.fe_system);
   const auto declared_count = std::count_if(
       declarations.begin(), declarations.end(), [](const auto& declaration) {
         return declaration.external_pressure_power_parameters.has_value();
@@ -837,14 +852,14 @@ void attachAcceptedFreeSurfaceExternalPressurePowers(
           : 0.0;
   const auto local_solution_size =
       static_cast<double>(accepted_solution.size());
-  if (globalMinDouble(local_coverage, comm) != 1.0 ||
-      globalMinDouble(local_solution_size, comm) !=
-          globalMaxDouble(local_solution_size, comm)) {
+  if (collectiveMinDouble(local_coverage, comm) != 1.0 ||
+      collectiveMinDouble(local_solution_size, comm) !=
+          collectiveMaxDouble(local_solution_size, comm)) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Exterior-pressure power requires a communicator-consistent endpoint solution and complete accepted-state coverage.");
   }
   const auto* context = sim.fe_system->cutIntegrationContext();
-  if (globalMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
+  if (collectiveMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Exterior-pressure power requires an authoritative geometry snapshot on every rank.");
   }
@@ -866,7 +881,7 @@ void attachAcceptedFreeSurfaceExternalPressurePowers(
                  candidate->revision().snapshot_revision_key ==
                      accepted.geometry_revision.snapshot_revision_key;
         });
-    if (globalMinDouble(found != snapshots.end() ? 1.0 : 0.0, comm) !=
+    if (collectiveMinDouble(found != snapshots.end() ? 1.0 : 0.0, comm) !=
         1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Exterior-pressure-power snapshot storage is incomplete across the FE communicator for marker " +
@@ -890,7 +905,7 @@ void attachAcceptedFreeSurfaceExternalPressurePowers(
     } catch (...) {
       local_failure = std::current_exception();
     }
-    if (globalMinDouble(local_power.has_value() ? 1.0 : 0.0, comm) !=
+    if (collectiveMinDouble(local_power.has_value() ? 1.0 : 0.0, comm) !=
         1.0) {
       if (local_failure) {
         std::rethrow_exception(local_failure);
@@ -901,11 +916,11 @@ void attachAcceptedFreeSurfaceExternalPressurePowers(
     }
     auto power = std::move(*local_power);
     power.owned_quadrature_point_count =
-        globalSumSize(
+        collectiveSumSize(
             power.owned_quadrature_point_count, comm);
     const auto global_sum = [&comm](svmp::FE::Real value) {
       return static_cast<svmp::FE::Real>(
-          globalSumDouble(static_cast<double>(value), comm));
+          collectiveSumDouble(static_cast<double>(value), comm));
     };
     power.owned_liquid_gas_area =
         global_sum(power.owned_liquid_gas_area);
@@ -954,7 +969,7 @@ std::uint64_t collectiveFreeSurfaceFieldRevision(
 namespace {
 
 void attachAcceptedFreeSurfaceBackwardEulerKineticWork(
-    const FreeSurfaceSystemHandle& sim,
+    const FESystemHandle& sim,
     std::span<const svmp::FE::Real> previous_solution,
     std::span<const svmp::FE::Real> accepted_solution,
     std::span<
@@ -963,11 +978,11 @@ void attachAcceptedFreeSurfaceBackwardEulerKineticWork(
 {
   const auto declarations =
       free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
-  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const auto comm = activeMeshCommunicator(*sim.fe_system);
   const auto local_previous_present =
       previous_solution.empty() ? 0.0 : 1.0;
-  if (globalMinDouble(local_previous_present, comm) !=
-      globalMaxDouble(local_previous_present, comm)) {
+  if (collectiveMinDouble(local_previous_present, comm) !=
+      collectiveMaxDouble(local_previous_present, comm)) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Backward-Euler kinetic-work endpoint coverage differs across the FE communicator.");
   }
@@ -988,14 +1003,14 @@ void attachAcceptedFreeSurfaceBackwardEulerKineticWork(
           : 0.0;
   const auto local_solution_size =
       static_cast<double>(accepted_solution.size());
-  if (globalMinDouble(local_coverage, comm) != 1.0 ||
-      globalMinDouble(local_solution_size, comm) !=
-          globalMaxDouble(local_solution_size, comm)) {
+  if (collectiveMinDouble(local_coverage, comm) != 1.0 ||
+      collectiveMinDouble(local_solution_size, comm) !=
+          collectiveMaxDouble(local_solution_size, comm)) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Backward-Euler kinetic work requires communicator-consistent previous and endpoint solutions with complete accepted-state coverage.");
   }
   const auto* context = sim.fe_system->cutIntegrationContext();
-  if (globalMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
+  if (collectiveMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Backward-Euler kinetic work requires an authoritative endpoint geometry snapshot on every rank.");
   }
@@ -1050,7 +1065,7 @@ void attachAcceptedFreeSurfaceBackwardEulerKineticWork(
                  candidate->revision().snapshot_revision_key ==
                      accepted.geometry_revision.snapshot_revision_key;
         });
-    if (globalMinDouble(found != snapshots.end() ? 1.0 : 0.0, comm) !=
+    if (collectiveMinDouble(found != snapshots.end() ? 1.0 : 0.0, comm) !=
         1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Backward-Euler kinetic-work endpoint snapshot storage is incomplete across the FE communicator for marker " +
@@ -1086,7 +1101,7 @@ void attachAcceptedFreeSurfaceBackwardEulerKineticWork(
     } catch (...) {
       local_failure = std::current_exception();
     }
-    if (globalMinDouble(local_work.has_value() ? 1.0 : 0.0, comm) !=
+    if (collectiveMinDouble(local_work.has_value() ? 1.0 : 0.0, comm) !=
         1.0) {
       if (local_failure) {
         std::rethrow_exception(local_failure);
@@ -1098,10 +1113,10 @@ void attachAcceptedFreeSurfaceBackwardEulerKineticWork(
 
     auto work = std::move(*local_work);
     work.owned_quadrature_point_count =
-        globalSumSize(work.owned_quadrature_point_count, comm);
+        collectiveSumSize(work.owned_quadrature_point_count, comm);
     const auto global_sum = [&](svmp::FE::Real value) {
       return static_cast<svmp::FE::Real>(
-          globalSumDouble(static_cast<double>(value), comm));
+          collectiveSumDouble(static_cast<double>(value), comm));
     };
     work.owned_liquid_volume =
         global_sum(work.owned_liquid_volume);
@@ -1212,7 +1227,7 @@ std::uint64_t levelSetMaintenanceCutTopologyRevision(
 
 std::vector<svmp::FE::level_set::LevelSetAuthoritativeFunctionalValue>
 levelSetMaintenanceFunctionalValues(
-    const FreeSurfaceSystemHandle& sim,
+    const FESystemHandle& sim,
     std::span<const svmp::FE::systems::
                         AcceptedFreeSurfaceDiscreteFunctionalState> states,
     std::span<const svmp::FE::Real> solution)
@@ -1224,11 +1239,11 @@ levelSetMaintenanceFunctionalValues(
     throw std::runtime_error(
         "[svMultiPhysics::Application] Level-set maintenance work provenance requires an FE system.");
   }
-  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const auto comm = activeMeshCommunicator(*sim.fe_system);
   const auto local_state_count =
       static_cast<std::uint64_t>(states.size());
   const auto [minimum_state_count, maximum_state_count] =
-      globalMinMaxUint64(local_state_count, comm);
+      collectiveMinMaxUint64(local_state_count, comm);
   if (minimum_state_count != maximum_state_count) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Level-set maintenance functional coverage differs across the FE communicator.");
@@ -1237,7 +1252,7 @@ levelSetMaintenanceFunctionalValues(
     return values;
   }
   const auto* context = sim.fe_system->cutIntegrationContext();
-  if (globalMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
+  if (collectiveMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Level-set maintenance work provenance requires an authoritative cut-integration context.");
   }
@@ -1257,7 +1272,7 @@ levelSetMaintenanceFunctionalValues(
       });
   const auto [minimum_solution_channel_declared,
               maximum_solution_channel_declared] =
-      globalMinMaxUint64(
+      collectiveMinMaxUint64(
           solution_channel_declared ? 1u : 0u, comm);
   if (minimum_solution_channel_declared !=
       maximum_solution_channel_declared) {
@@ -1265,7 +1280,7 @@ levelSetMaintenanceFunctionalValues(
         "[svMultiPhysics::Application] Level-set maintenance endpoint-channel declarations differ across the FE communicator.");
   }
   if (solution_channel_declared) {
-    if (globalMinDouble(
+    if (collectiveMinDouble(
             solution.empty() ? 0.0 : 1.0, comm) != 1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Level-set maintenance modeled-energy, endpoint-power, and dissipation work requires the complete FE-ordered candidate solution.");
@@ -1282,8 +1297,8 @@ levelSetMaintenanceFunctionalValues(
   const auto& snapshots = context->freeSurfaceGeometrySnapshots();
   for (const auto& state : enriched_states) {
     const auto marker = static_cast<double>(state.interface_marker);
-    if (globalMinDouble(marker, comm) !=
-        globalMaxDouble(marker, comm)) {
+    if (collectiveMinDouble(marker, comm) !=
+        collectiveMaxDouble(marker, comm)) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Level-set maintenance functional ordering differs across the FE communicator.");
     }
@@ -1293,7 +1308,7 @@ levelSetMaintenanceFunctionalValues(
                  snapshot->revision().snapshot_revision_key ==
                      state.geometry_revision.snapshot_revision_key;
         });
-    if (globalMinDouble(
+    if (collectiveMinDouble(
             found != snapshots.end() ? 1.0 : 0.0, comm) != 1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Level-set maintenance work could not resolve its authoritative geometry snapshot.");
@@ -1409,8 +1424,8 @@ requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
 {
   const auto local_declaration_count =
       static_cast<double>(declarations.size());
-  if (globalMinDouble(local_declaration_count, comm) !=
-      globalMaxDouble(local_declaration_count, comm)) {
+  if (collectiveMinDouble(local_declaration_count, comm) !=
+      collectiveMaxDouble(local_declaration_count, comm)) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Free-surface functional declaration coverage differs across the FE communicator.");
   }
@@ -1419,7 +1434,7 @@ requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
         freeSurfaceDiscreteFunctionalDeclarationContentKey(
             declaration);
     const auto [minimum_content_key, maximum_content_key] =
-        globalMinMaxUint64(declaration_content_key, comm);
+        collectiveMinMaxUint64(declaration_content_key, comm);
     if (minimum_content_key != maximum_content_key) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Free-surface functional declaration content differs across the FE communicator.");
@@ -1430,8 +1445,8 @@ requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
         static_cast<double>(
             declaration.capillary_balance_qualification)};
     for (const auto value : method_metadata) {
-      if (globalMinDouble(value, comm) !=
-          globalMaxDouble(value, comm)) {
+      if (collectiveMinDouble(value, comm) !=
+          collectiveMaxDouble(value, comm)) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Free-surface capillary-balance method declarations differ across the FE communicator.");
       }
@@ -1445,8 +1460,8 @@ requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
             return !declaration.parameters.dynamic_contact_coefficients
                         .empty();
           }));
-  if (globalMinDouble(local_dynamic_contact_count, comm) !=
-      globalMaxDouble(local_dynamic_contact_count, comm)) {
+  if (collectiveMinDouble(local_dynamic_contact_count, comm) !=
+      collectiveMaxDouble(local_dynamic_contact_count, comm)) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Dynamic contact-stage declaration coverage differs across the FE communicator.");
   }
@@ -1459,7 +1474,7 @@ requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
 std::vector<
     svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
 recordAcceptedFreeSurfaceDiscreteFunctionals(
-    const FreeSurfaceSystemHandle& sim,
+    const FESystemHandle& sim,
     std::uint64_t accepted_step,
     svmp::FE::Real accepted_time,
     svmp::FE::Real dt,
@@ -1479,7 +1494,7 @@ recordAcceptedFreeSurfaceDiscreteFunctionals(
   }
   const auto declarations =
       free_surface::records(*sim.fe_system).freeSurfaceDiscreteFunctionalDeclarations();
-  const auto comm = activeFESystemCommunicator(*sim.fe_system);
+  const auto comm = activeMeshCommunicator(*sim.fe_system);
   const auto coverage =
       requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
           declarations, comm);
@@ -1492,7 +1507,7 @@ recordAcceptedFreeSurfaceDiscreteFunctionals(
   }
   const auto [minimum_pre_maintenance_revision,
               maximum_pre_maintenance_revision] =
-      globalMinMaxUint64(
+      collectiveMinMaxUint64(
           pre_maintenance_endpoint_state_revision, comm);
   if (pre_maintenance_endpoint_state_revision == 0u ||
       minimum_pre_maintenance_revision !=
@@ -1501,7 +1516,7 @@ recordAcceptedFreeSurfaceDiscreteFunctionals(
         "[svMultiPhysics::Application] The pre-maintenance endpoint state revision must be nonzero and identical across the FE communicator.");
   }
   const auto [minimum_state_revision, maximum_state_revision] =
-      globalMinMaxUint64(state_revision, comm);
+      collectiveMinMaxUint64(state_revision, comm);
   if (state_revision == 0u ||
       minimum_state_revision != maximum_state_revision) {
     throw std::runtime_error(
@@ -1509,8 +1524,8 @@ recordAcceptedFreeSurfaceDiscreteFunctionals(
   }
   const double local_contact_stage_count =
       static_cast<double>(contact_stages.size());
-  if (globalMinDouble(local_contact_stage_count, comm) !=
-      globalMaxDouble(local_contact_stage_count, comm)) {
+  if (collectiveMinDouble(local_contact_stage_count, comm) !=
+      collectiveMaxDouble(local_contact_stage_count, comm)) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Accepted contact-stage coverage differs across the FE communicator.");
   }
@@ -1522,8 +1537,8 @@ recordAcceptedFreeSurfaceDiscreteFunctionals(
   for (const auto& stage : contact_stages) {
     const int marker = stage.geometry_revision.interface_marker;
     const double local_marker = static_cast<double>(marker);
-    if (globalMinDouble(local_marker, comm) !=
-        globalMaxDouble(local_marker, comm)) {
+    if (collectiveMinDouble(local_marker, comm) !=
+        collectiveMaxDouble(local_marker, comm)) {
       local_contact_stages_valid = false;
     }
     local_contact_stages_valid =
@@ -1533,7 +1548,7 @@ recordAcceptedFreeSurfaceDiscreteFunctionals(
         contact_stage_by_marker.emplace(marker, &stage).second &&
         local_contact_stages_valid;
   }
-  if (globalMinDouble(local_contact_stages_valid ? 1.0 : 0.0, comm) != 1.0) {
+  if (collectiveMinDouble(local_contact_stages_valid ? 1.0 : 0.0, comm) != 1.0) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Accepted contact-stage states must have communicator-consistent unique nonnegative interface markers and must bind to the pre-maintenance endpoint revision.");
   }
@@ -1630,7 +1645,7 @@ recordAcceptedFreeSurfaceDiscreteFunctionals(
     }
   }
   const bool binding_available =
-      globalMinDouble(local_binding_failure.empty() ? 1.0 : 0.0, comm) ==
+      collectiveMinDouble(local_binding_failure.empty() ? 1.0 : 0.0, comm) ==
       1.0;
   if (backward_euler_kinetic_work_bound != nullptr) {
     *backward_euler_kinetic_work_bound = binding_available;
@@ -1648,7 +1663,7 @@ recordAcceptedFreeSurfaceDiscreteFunctionals(
   }
   const auto* accepted_cut_context =
       sim.fe_system->cutIntegrationContext();
-  if (globalMinDouble(
+  if (collectiveMinDouble(
           accepted_cut_context != nullptr ? 1.0 : 0.0,
           comm) != 1.0) {
     throw std::runtime_error(
@@ -1672,7 +1687,7 @@ recordAcceptedFreeSurfaceDiscreteFunctionals(
                   accepted_state.geometry_revision
                       .snapshot_revision_key;
         });
-    if (globalMinDouble(
+    if (collectiveMinDouble(
             accepted_snapshot != accepted_snapshots.end()
                 ? 1.0
                 : 0.0,
@@ -1738,7 +1753,7 @@ recordAcceptedFreeSurfaceDiscreteFunctionals(
             local_latest_group_valid;
       }
     }
-    if (globalMinDouble(
+    if (collectiveMinDouble(
             local_latest_group_valid ? 1.0 : 0.0,
             comm) != 1.0) {
       throw std::runtime_error(
@@ -1746,33 +1761,33 @@ recordAcceptedFreeSurfaceDiscreteFunctionals(
     }
     const auto& latest = existing_history[previous_group_begin];
     const auto [minimum_latest_step, maximum_latest_step] =
-        globalMinMaxUint64(latest.accepted_step, comm);
+        collectiveMinMaxUint64(latest.accepted_step, comm);
     const auto [minimum_latest_pre_maintenance_revision,
                 maximum_latest_pre_maintenance_revision] =
-        globalMinMaxUint64(
+        collectiveMinMaxUint64(
             latest.pre_maintenance_endpoint_state_revision,
             comm);
     const auto [minimum_latest_state_revision,
                 maximum_latest_state_revision] =
-        globalMinMaxUint64(latest.state_revision, comm);
+        collectiveMinMaxUint64(latest.state_revision, comm);
     const double extension_available =
         latest.extension_map_revision.has_value() ? 1.0 : 0.0;
     const auto [minimum_latest_extension_revision,
                 maximum_latest_extension_revision] =
-        globalMinMaxUint64(
+        collectiveMinMaxUint64(
             latest.extension_map_revision.value_or(0u),
             comm);
     if (minimum_latest_step != maximum_latest_step ||
-        globalMinDouble(latest.accepted_time, comm) !=
-            globalMaxDouble(latest.accepted_time, comm) ||
-        globalMinDouble(latest.dt, comm) !=
-            globalMaxDouble(latest.dt, comm) ||
+        collectiveMinDouble(latest.accepted_time, comm) !=
+            collectiveMaxDouble(latest.accepted_time, comm) ||
+        collectiveMinDouble(latest.dt, comm) !=
+            collectiveMaxDouble(latest.dt, comm) ||
         minimum_latest_pre_maintenance_revision !=
             maximum_latest_pre_maintenance_revision ||
         minimum_latest_state_revision !=
             maximum_latest_state_revision ||
-        globalMinDouble(extension_available, comm) !=
-            globalMaxDouble(extension_available, comm) ||
+        collectiveMinDouble(extension_available, comm) !=
+            collectiveMaxDouble(extension_available, comm) ||
         minimum_latest_extension_revision !=
             maximum_latest_extension_revision) {
       throw std::runtime_error(
@@ -1810,7 +1825,7 @@ recordAcceptedFreeSurfaceDiscreteFunctionals(
 }
 
 void recordInitialFreeSurfaceDiscreteFunctionalBaseline(
-    const FreeSurfaceSystemHandle& sim,
+    const FESystemHandle& sim,
     std::uint64_t initial_step,
     svmp::FE::Real initial_time,
     std::span<const svmp::FE::Real> initial_solution,
@@ -1821,7 +1836,7 @@ void recordInitialFreeSurfaceDiscreteFunctionalBaseline(
   const auto initial_state_revision =
       collectiveLevelSetMaintenanceAlgebraicRevision(
           initial_solution,
-          activeFESystemCommunicator(*sim.fe_system));
+          activeMeshCommunicator(*sim.fe_system));
   const auto initial_contact_stages =
       evaluateAcceptedFreeSurfaceContactStages(
           sim,

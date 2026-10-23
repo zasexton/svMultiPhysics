@@ -8,21 +8,26 @@
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactStageParticipant.h"
 
+#include "FE/Systems/SystemCollectives.h"
+
 #include <exception>
 #include <stdexcept>
 #include <utility>
 
 namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
-using namespace detail;
+using svmp::FE::systems::collectiveMaxDouble;
+using svmp::FE::systems::collectiveMinDouble;
+using svmp::FE::systems::collectiveMinMaxUint64;
+using svmp::FE::systems::requireCollectivePhasePreparation;
 
 ContactStageParticipant::ContactStageParticipant(
-    const FreeSurfaceStepContext& context,
+    const svmp::FE::timestepping::StepContext& context,
     bool has_dynamic_contact_stage,
     std::span<const svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration>
         free_surface_declarations,
     svmp::FE::GlobalIndex fitted_ale_operator_stage_state_size)
-    : FreeSurfaceStepContext(context),
+    : svmp::FE::timestepping::StepContext(context),
       has_dynamic_contact_stage(has_dynamic_contact_stage),
       free_surface_declarations(free_surface_declarations),
       fitted_ale_operator_stage_state_size(
@@ -103,7 +108,7 @@ void ContactStageParticipant::onCandidateStage(
   }
   requireCollectivePhasePreparation(
       local_capture_failure,
-      velocity_extension_artifact_comm,
+      active_comm,
       "dynamic_contact_generalized_alpha_observation_capture");
   if (!captured.has_value()) {
     throw std::logic_error(
@@ -116,9 +121,9 @@ void ContactStageParticipant::onCandidateStage(
           *sim.fe_system,
           free_surface_declarations,
           *observation.state_vector,
-          velocity_extension_artifact_comm);
+          active_comm);
   requireDynamicContactOperatorStageObservationConsensus(
-      *captured, velocity_extension_artifact_comm);
+      *captured, active_comm);
   std::exception_ptr local_storage_failure;
   try {
     pending_dynamic_contact_generalized_alpha_observation.emplace(
@@ -128,7 +133,7 @@ void ContactStageParticipant::onCandidateStage(
   }
   requireCollectivePhasePreparation(
       local_storage_failure,
-      velocity_extension_artifact_comm,
+      active_comm,
       "dynamic_contact_generalized_alpha_observation_storage");
 }
 
@@ -144,11 +149,11 @@ void ContactStageParticipant::beginAttempt(
       ++dynamic_contact_solve_attempt_index;
     }
     const auto [minimum_pending_stage, maximum_pending_stage] =
-        globalMinMaxUint64(
+        collectiveMinMaxUint64(
             pending_dynamic_contact_generalized_alpha_observation.has_value()
                 ? 1u
                 : 0u,
-            velocity_extension_artifact_comm);
+            active_comm);
     if (minimum_pending_stage != maximum_pending_stage ||
         maximum_pending_stage != 0u) {
       throw std::logic_error(
@@ -186,7 +191,7 @@ ContactStageParticipant::resolveTemporalCoordinatesCollectively(
     local_failure = std::current_exception();
   }
   requireCollectivePhasePreparation(
-      local_failure, velocity_extension_artifact_comm, phase);
+      local_failure, active_comm, phase);
   if (!resolved.has_value()) {
     throw std::logic_error(
         "[svMultiPhysics::Application] Contact-stage temporal "
@@ -194,20 +199,20 @@ ContactStageParticipant::resolveTemporalCoordinatesCollectively(
   }
   const auto [minimum_generalized_alpha_present,
               maximum_generalized_alpha_present] =
-      globalMinMaxUint64(
+      collectiveMinMaxUint64(
           resolved->first_order_generalized_alpha.has_value() ? 1u : 0u,
-          velocity_extension_artifact_comm);
+          active_comm);
   bool parameters_agree =
       minimum_generalized_alpha_present ==
       maximum_generalized_alpha_present;
   const auto require_real_agreement = [&](svmp::FE::Real value) {
     parameters_agree =
-        globalMinDouble(
+        collectiveMinDouble(
             static_cast<double>(value),
-            velocity_extension_artifact_comm) ==
-            globalMaxDouble(
+            active_comm) ==
+            collectiveMaxDouble(
                 static_cast<double>(value),
-                velocity_extension_artifact_comm) &&
+                active_comm) &&
         parameters_agree;
   };
   require_real_agreement(resolved->stage_time);
@@ -245,12 +250,12 @@ void ContactStageParticipant::bindAcceptedStagesToEndpoint(
     assertAcceptedFreeSurfaceContactStageEndpointUnchanged(
         pending_contact_stage_endpoint_algebraic_revision,
         endpoint_solution,
-        velocity_extension_artifact_comm);
+        active_comm);
     bindAcceptedFreeSurfaceContactStagesToEndpointRevision(
         pending_contact_stages,
         pending_pre_maintenance_endpoint_state_revision,
         pending_contact_stage_solution,
-        velocity_extension_artifact_comm);
+        active_comm);
   }
 }
 

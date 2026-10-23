@@ -23,10 +23,10 @@
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyAccount.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyCandidate.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyLedger.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceStepContext.h"
 
 #include "FE/Backends/Interfaces/GenericVector.h"
 #include "FE/Systems/FESystem.h"
+#include "FE/TimeStepping/StepContext.h"
 #include "FE/TimeStepping/StepController.h"
 #include "FE/TimeStepping/StepParticipants.h"
 #include "FE/TimeStepping/TimeHistory.h"
@@ -43,7 +43,7 @@ namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
 class EnergyParticipant final
     : public svmp::FE::timestepping::IStepParticipant,
-      private FreeSurfaceStepContext {
+      private svmp::FE::timestepping::StepContext {
 public:
   struct FreeSurfaceResidualWorkStage {
     std::uint64_t step{0u};
@@ -59,7 +59,7 @@ public:
   /// energy declarations and checks them on the active FE communicator
   /// (collective); allocates the residual-work vector when backward-Euler
   /// residual work is evaluated.
-  explicit EnergyParticipant(const FreeSurfaceStepContext& context);
+  explicit EnergyParticipant(const svmp::FE::timestepping::StepContext& context);
 
   /// CandidateStage when backward-Euler residual work is evaluated.
   [[nodiscard]] svmp::FE::timestepping::StepHook hooks() const noexcept override;

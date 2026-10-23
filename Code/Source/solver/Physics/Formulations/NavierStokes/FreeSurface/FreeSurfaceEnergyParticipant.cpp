@@ -10,7 +10,10 @@
 
 #include "FE/Core/RankLog.h"
 #include "FE/LevelSet/LevelSetConservativePhaseWorkflow.h"
+#include "FE/LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h"
+#include "FE/Systems/SystemCollectives.h"
 #include "FE/Systems/SystemState.h"
+#include "FE/TimeStepping/StepController.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
 
 #include <algorithm>
@@ -27,8 +30,8 @@
 
 namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
-using namespace detail;
 using svmp::FE::level_set::aggregateLevelSetMaintenanceAcceptedStepEnergy;
+using svmp::FE::level_set::collectiveLevelSetMaintenanceAlgebraicRevision;
 using svmp::FE::level_set::LevelSetMaintenanceWorkAttempt;
 using svmp::FE::level_set::LevelSetMaintenanceWorkLedger;
 using svmp::FE::level_set::LevelSetMaintenanceWorkRow;
@@ -36,9 +39,16 @@ using svmp::FE::level_set::logLevelSetMaintenanceAcceptedStepEnergyAccount;
 using svmp::FE::level_set::mixConservativePhaseArtifactFingerprint;
 using svmp::FE::level_set::mixMaintenanceRevision;
 using svmp::FE::rank_log::oopCout;
+using svmp::FE::systems::captureFeOrderedVectorCollectively;
+using svmp::FE::systems::collectiveAnyTrue;
+using svmp::FE::systems::collectiveMaxDouble;
+using svmp::FE::systems::collectiveMinDouble;
+using svmp::FE::systems::collectiveMinMaxUint64;
+using svmp::FE::systems::requireCollectivePhasePreparation;
+using svmp::FE::timestepping::stepRejectReasonName;
 
-EnergyParticipant::EnergyParticipant(const FreeSurfaceStepContext& context)
-    : FreeSurfaceStepContext(context),
+EnergyParticipant::EnergyParticipant(const svmp::FE::timestepping::StepContext& context)
+    : svmp::FE::timestepping::StepContext(context),
       free_surface_boundary_energy_declaration(
           free_surface::records(*context.sim.fe_system)
               .freeSurfaceExternalBoundaryEnergyDeclaration())
@@ -48,7 +58,7 @@ EnergyParticipant::EnergyParticipant(const FreeSurfaceStepContext& context)
   free_surface_acceptance_coverage =
       requireCommunicatorConsistentFreeSurfaceAcceptanceCoverage(
           free_surface_declarations,
-          velocity_extension_artifact_comm);
+          active_comm);
   has_free_surface_functional =
       free_surface_acceptance_coverage.has_functional;
   has_dynamic_contact_stage =
@@ -57,10 +67,10 @@ EnergyParticipant::EnergyParticipant(const FreeSurfaceStepContext& context)
       free_surface::records(*sim.fe_system).freeSurfaceResidualWorkDeclarations();
   const auto [minimum_residual_work_declaration_count,
               maximum_residual_work_declaration_count] =
-      globalMinMaxUint64(
+      collectiveMinMaxUint64(
           static_cast<std::uint64_t>(
               free_surface_residual_work_declarations.size()),
-          velocity_extension_artifact_comm);
+          active_comm);
   if (minimum_residual_work_declaration_count !=
       maximum_residual_work_declaration_count) {
     throw std::runtime_error(
@@ -90,9 +100,9 @@ EnergyParticipant::EnergyParticipant(const FreeSurfaceStepContext& context)
   }
   const auto [minimum_residual_work_declaration_fingerprint,
               maximum_residual_work_declaration_fingerprint] =
-      globalMinMaxUint64(
+      collectiveMinMaxUint64(
           residual_work_declaration_fingerprint,
-          velocity_extension_artifact_comm);
+          active_comm);
   if (minimum_residual_work_declaration_fingerprint !=
       maximum_residual_work_declaration_fingerprint) {
     throw std::runtime_error(
@@ -100,11 +110,11 @@ EnergyParticipant::EnergyParticipant(const FreeSurfaceStepContext& context)
   }
   const auto [minimum_boundary_energy_declaration_present,
               maximum_boundary_energy_declaration_present] =
-      globalMinMaxUint64(
+      collectiveMinMaxUint64(
           free_surface_boundary_energy_declaration.has_value()
               ? 1u
               : 0u,
-          velocity_extension_artifact_comm);
+          active_comm);
   if (minimum_boundary_energy_declaration_present !=
       maximum_boundary_energy_declaration_present) {
     throw std::runtime_error(
@@ -138,9 +148,9 @@ EnergyParticipant::EnergyParticipant(const FreeSurfaceStepContext& context)
   }
   const auto [minimum_boundary_energy_declaration_fingerprint,
               maximum_boundary_energy_declaration_fingerprint] =
-      globalMinMaxUint64(
+      collectiveMinMaxUint64(
           boundary_energy_declaration_fingerprint,
-          velocity_extension_artifact_comm);
+          active_comm);
   if (minimum_boundary_energy_declaration_fingerprint !=
       maximum_boundary_energy_declaration_fingerprint) {
     throw std::runtime_error(
@@ -210,9 +220,9 @@ void EnergyParticipant::onCandidateStage(
       free_surface_residual_work_scratch->size() ==
           expected_size &&
       !pending_free_surface_residual_work_stage.has_value();
-  if (globalAnyBool(
+  if (collectiveAnyTrue(
           !local_stage_ready,
-          velocity_extension_artifact_comm)) {
+          active_comm)) {
     if (!local_stage_ready) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Free-surface residual work requires one fresh backward-Euler operator-stage state with matching live mesh revisions.");
@@ -297,7 +307,7 @@ void EnergyParticipant::onCandidateStage(
       }
       requireCollectivePhasePreparation(
           local_assembly_failure,
-          velocity_extension_artifact_comm,
+          active_comm,
           "free_surface_residual_work_operator_assembly");
 
       std::exception_ptr local_pairing_failure;
@@ -315,14 +325,14 @@ void EnergyParticipant::onCandidateStage(
       }
       requireCollectivePhasePreparation(
           local_pairing_failure,
-          velocity_extension_artifact_comm,
+          active_comm,
           "free_surface_residual_work_operator_pairing");
-      if (globalMinDouble(
+      if (collectiveMinDouble(
               residual_state_pairing,
-              velocity_extension_artifact_comm) !=
-          globalMaxDouble(
+              active_comm) !=
+          collectiveMaxDouble(
               residual_state_pairing,
-              velocity_extension_artifact_comm)) {
+              active_comm)) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Free-surface residual/state pairing differs across the active FE communicator.");
       }
@@ -342,19 +352,19 @@ void EnergyParticipant::onCandidateStage(
   }
 
   const auto candidate_solution =
-      gatherFeOrderedSolution(
+      captureFeOrderedVectorCollectively(
           stage_state,
-          velocity_extension_artifact_comm);
-  const auto live_solution = gatherFeOrderedSolution(
-      history.u(), velocity_extension_artifact_comm);
+          active_comm);
+  const auto live_solution = captureFeOrderedVectorCollectively(
+      history.u(), active_comm);
   const auto candidate_state_revision =
       collectiveLevelSetMaintenanceAlgebraicRevision(
           candidate_solution,
-          velocity_extension_artifact_comm);
+          active_comm);
   const auto live_state_revision =
       collectiveLevelSetMaintenanceAlgebraicRevision(
           live_solution,
-          velocity_extension_artifact_comm);
+          active_comm);
   if (candidate_state_revision == 0u ||
       candidate_state_revision != live_state_revision) {
     throw std::runtime_error(
@@ -440,8 +450,8 @@ void EnergyParticipant::recordInitialBaseline(
           "[svMultiPhysics::Application] An initial free-surface functional baseline requires a nonnegative step index.");
     }
     const auto initial_solution =
-        gatherFeOrderedSolution(
-            h.u(), velocity_extension_artifact_comm);
+        captureFeOrderedVectorCollectively(
+            h.u(), active_comm);
     recordInitialFreeSurfaceDiscreteFunctionalBaseline(
         sim,
         static_cast<std::uint64_t>(h.stepIndex()),
@@ -462,12 +472,12 @@ void EnergyParticipant::requireStagedResidualWorkForAcceptance(
   if (evaluate_free_surface_residual_work) {
     const auto [minimum_stage_present,
                 maximum_stage_present] =
-        globalMinMaxUint64(
+        collectiveMinMaxUint64(
             pending_free_surface_residual_work_stage
                     .has_value()
                 ? 1u
                 : 0u,
-            velocity_extension_artifact_comm);
+            active_comm);
     if (minimum_stage_present != 1u ||
         maximum_stage_present != 1u) {
       throw std::runtime_error(
@@ -498,12 +508,12 @@ void EnergyParticipant::requireStagedResidualWorkAtCommitReady(
   if (evaluate_free_surface_residual_work) {
     const auto [minimum_stage_present,
                 maximum_stage_present] =
-        globalMinMaxUint64(
+        collectiveMinMaxUint64(
             pending_free_surface_residual_work_stage
                     .has_value()
                 ? 1u
                 : 0u,
-            velocity_extension_artifact_comm);
+            active_comm);
     if (minimum_stage_present != 1u ||
         maximum_stage_present != 1u ||
         pending_free_surface_residual_work_stage->step !=
@@ -550,11 +560,11 @@ void EnergyParticipant::requireAcceptedResidualWorkStage(
   if (evaluate_free_surface_residual_work) {
     const auto [minimum_stage_present,
                 maximum_stage_present] =
-        globalMinMaxUint64(
+        collectiveMinMaxUint64(
             pending_free_surface_residual_work_stage.has_value()
                 ? 1u
                 : 0u,
-            velocity_extension_artifact_comm);
+            active_comm);
     if (minimum_stage_present != 1u ||
         maximum_stage_present != 1u ||
         pending_free_surface_residual_work_stage->step !=
@@ -574,12 +584,12 @@ void EnergyParticipant::bindAcceptedEndpoint(
 {
   if (has_free_surface_functional) {
     const auto endpoint_solution =
-        gatherFeOrderedSolution(
-            h.u(), velocity_extension_artifact_comm);
+        captureFeOrderedVectorCollectively(
+            h.u(), active_comm);
     pending_pre_maintenance_endpoint_state_revision =
         collectiveLevelSetMaintenanceAlgebraicRevision(
             endpoint_solution,
-            velocity_extension_artifact_comm);
+            active_comm);
     contact_stage.bindAcceptedStagesToEndpoint(
         endpoint_solution, pending_pre_maintenance_endpoint_state_revision);
   }
@@ -848,8 +858,8 @@ void EnergyParticipant::publishAcceptedEnergy(
     const auto accepted_functional_extension_map_revision =
         current_velocity_extension_revision();
     const auto accepted_state_solution =
-        gatherFeOrderedSolution(
-            h.u(), velocity_extension_artifact_comm);
+        captureFeOrderedVectorCollectively(
+            h.u(), active_comm);
     std::vector<svmp::FE::Real>
         backward_euler_previous_solution;
     if (transient_scheme.scheme ==
@@ -859,13 +869,13 @@ void EnergyParticipant::publishAcceptedEnergy(
             "[svMultiPhysics::Application] Backward-Euler free-surface kinetic work requires two accepted-history slots.");
       }
       backward_euler_previous_solution =
-          gatherFeOrderedSolution(
-              h.uPrev2(), velocity_extension_artifact_comm);
+          captureFeOrderedVectorCollectively(
+              h.uPrev2(), active_comm);
     }
     const auto accepted_state_revision =
         collectiveLevelSetMaintenanceAlgebraicRevision(
             accepted_state_solution,
-            velocity_extension_artifact_comm);
+            active_comm);
     if (pending_accepted_step_maintenance_energy_account
             .has_value()) {
       const auto& maintenance_account =
@@ -1257,33 +1267,33 @@ void EnergyParticipant::publishAcceptedEnergy(
               accepted_state_solution.size()));
       const auto [minimum_aggregation_present,
                   maximum_aggregation_present] =
-          globalMinMaxUint64(
+          collectiveMinMaxUint64(
               aggregation_energy.present ? 1u : 0u,
-              velocity_extension_artifact_comm);
+              active_comm);
       const auto [minimum_aggregation_neutral,
                   maximum_aggregation_neutral] =
-          globalMinMaxUint64(
+          collectiveMinMaxUint64(
               aggregation_energy.neutral ? 1u : 0u,
-              velocity_extension_artifact_comm);
+              active_comm);
       const auto [minimum_aggregation_rootless,
                   maximum_aggregation_rootless] =
-          globalMinMaxUint64(
+          collectiveMinMaxUint64(
               aggregation_energy.rootless ? 1u : 0u,
-              velocity_extension_artifact_comm);
+              active_comm);
       const auto [minimum_aggregation_rooted_rows,
                   maximum_aggregation_rooted_rows] =
-          globalMinMaxUint64(
+          collectiveMinMaxUint64(
               static_cast<std::uint64_t>(
                   aggregation_energy.rooted_row_count),
-              velocity_extension_artifact_comm);
+              active_comm);
       const auto minimum_aggregation_residual =
-          globalMinDouble(
+          collectiveMinDouble(
               aggregation_energy.maximum_constraint_residual,
-              velocity_extension_artifact_comm);
+              active_comm);
       const auto maximum_aggregation_residual =
-          globalMaxDouble(
+          collectiveMaxDouble(
               aggregation_energy.maximum_constraint_residual,
-              velocity_extension_artifact_comm);
+              active_comm);
       if (minimum_aggregation_present !=
               maximum_aggregation_present ||
           minimum_aggregation_neutral !=
@@ -1828,7 +1838,7 @@ void EnergyParticipant::recordRejectedAttempt(
         << " dt=" << record.metadata.dt
         << " temporal_scheme=backward_euler"
         << " time_loop_rejection_reason="
-        << step_reject_reason_to_string(reason)
+        << stepRejectReasonName(reason)
         << " ledger_rejection_reason="
         << freeSurfaceEnergyRejectionReasonName(
                record.rejection_reason)
@@ -1882,7 +1892,7 @@ void EnergyParticipant::recordRejectedAttempt(
         << " step=" << h.stepIndex() + 1
         << " attempt=" << free_surface_energy_attempt
         << " time_loop_rejection_reason="
-        << step_reject_reason_to_string(reason)
+        << stepRejectReasonName(reason)
         << " accepted_history_contiguous=false"
         << " missing_requirements=preceding_complete_energy_history"
         << " complete_energy_attempt_connected=false"

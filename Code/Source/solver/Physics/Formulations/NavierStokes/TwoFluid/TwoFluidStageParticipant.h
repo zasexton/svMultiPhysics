@@ -18,13 +18,13 @@
  *        publishes them after acceptance.
  */
 
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceStepContext.h"
 #include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidAcceptedStage.h"
 
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
 #include "FE/Core/Types.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/TimeStepping/NewtonSolver.h"
+#include "FE/TimeStepping/StepContext.h"
 #include "FE/TimeStepping/StepParticipants.h"
 #include "FE/TimeStepping/TimeHistory.h"
 #include "FE/TimeStepping/TimeLoop.h"
@@ -36,12 +36,12 @@ namespace svmp::Physics::formulations::navier_stokes::two_fluid {
 
 class StageParticipant final
     : public svmp::FE::timestepping::IStepParticipant,
-      private free_surface::FreeSurfaceStepContext {
+      private svmp::FE::timestepping::StepContext {
 public:
   /// Checks the two-fluid declarations and scheme support on the active FE
   /// communicator (collective); throws when they differ across ranks or the
   /// scheme is unsupported.
-  explicit StageParticipant(const free_surface::FreeSurfaceStepContext& context);
+  explicit StageParticipant(const svmp::FE::timestepping::StepContext& context);
 
   /// CandidateStage when two-fluid accepted-stage diagnostics are declared.
   [[nodiscard]] svmp::FE::timestepping::StepHook hooks() const noexcept override;

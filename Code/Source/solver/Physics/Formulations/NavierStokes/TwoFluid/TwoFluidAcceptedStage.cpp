@@ -15,7 +15,9 @@
 #include "FE/Interfaces/LevelSetInterfaceDomain.h"
 #include "FE/Interfaces/SnapshotFieldEvaluator.h"
 #include "FE/LevelSet/LevelSetOptions.h"
+#include "FE/Systems/FESystemHandle.h"
 #include "FE/Systems/SnapshotFieldAccess.h"
+#include "FE/Systems/SystemCollectives.h"
 #include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
 
 #include <algorithm>
@@ -33,11 +35,18 @@ namespace svmp::Physics::formulations::navier_stokes::two_fluid {
 using svmp::FE::interfaces::makeSnapshotScalarFieldEvaluator;
 using svmp::FE::interfaces::makeSnapshotVectorFieldEvaluator;
 using svmp::FE::systems::snapshotFieldAccess;
-using namespace free_surface::detail;
+using svmp::FE::systems::FESystemHandle;
+using svmp::FE::systems::collectiveAnyTrue;
+using svmp::FE::systems::collectiveMaxDouble;
+using svmp::FE::systems::collectiveMinDouble;
+using svmp::FE::systems::collectiveMinMaxUint64;
+using svmp::FE::systems::collectiveSumDouble;
+using svmp::FE::systems::collectiveSumSize;
+using svmp::FE::systems::requireCollectivePhasePreparation;
 
 std::vector<svmp::FE::systems::AcceptedTwoFluidStageDiagnosticState>
 evaluateCurrentTwoFluidStageDiagnostics(
-    const FreeSurfaceSystemHandle& sim,
+    const FESystemHandle& sim,
     std::span<const svmp::FE::systems::
                         TwoFluidAcceptedStageDiagnosticDeclaration>
         declarations,
@@ -46,8 +55,8 @@ evaluateCurrentTwoFluidStageDiagnostics(
     const svmp::MeshComm& comm)
 {
   const auto local_count = static_cast<double>(declarations.size());
-  if (globalMinDouble(local_count, comm) !=
-      globalMaxDouble(local_count, comm)) {
+  if (collectiveMinDouble(local_count, comm) !=
+      collectiveMaxDouble(local_count, comm)) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Two-fluid diagnostic declaration coverage differs across the FE communicator.");
   }
@@ -55,10 +64,10 @@ evaluateCurrentTwoFluidStageDiagnostics(
     return {};
   }
   const auto* context = sim.fe_system->cutIntegrationContext();
-  if (globalMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0 ||
-      globalMinDouble(stage_solution.empty() ? 0.0 : 1.0, comm) != 1.0 ||
-      globalMinDouble(static_cast<double>(stage_solution.size()), comm) !=
-          globalMaxDouble(static_cast<double>(stage_solution.size()), comm)) {
+  if (collectiveMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0 ||
+      collectiveMinDouble(stage_solution.empty() ? 0.0 : 1.0, comm) != 1.0 ||
+      collectiveMinDouble(static_cast<double>(stage_solution.size()), comm) !=
+          collectiveMaxDouble(static_cast<double>(stage_solution.size()), comm)) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Two-fluid stage diagnostics require an authoritative cut context and a communicator-consistent stage solution.");
   }
@@ -85,7 +94,7 @@ evaluateCurrentTwoFluidStageDiagnostics(
                  candidate->revision().isovalue ==
                      declaration.level_set_isovalue;
         });
-    if (globalMinDouble(found != snapshots.end() ? 1.0 : 0.0, comm) !=
+    if (collectiveMinDouble(found != snapshots.end() ? 1.0 : 0.0, comm) !=
         1.0) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Two-fluid stage diagnostics cannot resolve the declared authoritative snapshot for marker " +
@@ -93,7 +102,7 @@ evaluateCurrentTwoFluidStageDiagnostics(
     }
     const auto& snapshot = **found;
     const auto [minimum_snapshot_revision, maximum_snapshot_revision] =
-        globalMinMaxUint64(
+        collectiveMinMaxUint64(
             snapshot.revision().snapshot_revision_key, comm);
     if (minimum_snapshot_revision == 0u ||
         minimum_snapshot_revision != maximum_snapshot_revision) {
@@ -155,7 +164,7 @@ evaluateCurrentTwoFluidStageDiagnostics(
     } catch (...) {
       local_evaluation_failure = std::current_exception();
     }
-    if (globalAnyBool(local_evaluation_failure != nullptr, comm)) {
+    if (collectiveAnyTrue(local_evaluation_failure != nullptr, comm)) {
       if (local_evaluation_failure != nullptr) {
         std::rethrow_exception(local_evaluation_failure);
       }
@@ -166,9 +175,9 @@ evaluateCurrentTwoFluidStageDiagnostics(
 
     const auto global_sum = [&comm](svmp::FE::Real value) {
       return static_cast<svmp::FE::Real>(
-          globalSumDouble(static_cast<double>(value), comm));
+          collectiveSumDouble(static_cast<double>(value), comm));
     };
-    global.owned_interface_quadrature_point_count = globalSumSize(
+    global.owned_interface_quadrature_point_count = collectiveSumSize(
         global.owned_interface_quadrature_point_count, comm);
     global.interface_measure = global_sum(global.interface_measure);
     global.velocity_jump_squared =
@@ -209,8 +218,8 @@ evaluateCurrentTwoFluidStageDiagnostics(
     }
     const auto reduce_optional = [&](std::optional<svmp::FE::Real>& value) {
       const double present = value.has_value() ? 1.0 : 0.0;
-      if (globalMinDouble(present, comm) !=
-          globalMaxDouble(present, comm)) {
+      if (collectiveMinDouble(present, comm) !=
+          collectiveMaxDouble(present, comm)) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Two-fluid prescribed diagnostic applicability differs across the FE communicator.");
       }
@@ -224,12 +233,12 @@ evaluateCurrentTwoFluidStageDiagnostics(
         global.prescribed_viscous_traction_jump_error_squared);
     const auto reduce_phase = [&](auto& phase) {
       phase.owned_quadrature_point_count =
-          globalSumSize(phase.owned_quadrature_point_count, comm);
+          collectiveSumSize(phase.owned_quadrature_point_count, comm);
       phase.volume = global_sum(phase.volume);
       phase.velocity_squared_integral =
           global_sum(phase.velocity_squared_integral);
       phase.maximum_velocity_squared =
-          globalMaxDouble(phase.maximum_velocity_squared, comm);
+          collectiveMaxDouble(phase.maximum_velocity_squared, comm);
       phase.pressure_integral = global_sum(phase.pressure_integral);
       phase.pressure_squared_integral =
           global_sum(phase.pressure_squared_integral);
@@ -263,7 +272,7 @@ evaluateCurrentTwoFluidStageDiagnostics(
 
 TwoFluidMomentumReconciliationBatch
 buildCurrentTwoFluidMomentumReconciliations(
-    const FreeSurfaceSystemHandle& sim,
+    const FESystemHandle& sim,
     std::span<const svmp::FE::level_set::ConservativePhaseRequest>
         maintenance_requests,
     std::span<const svmp::FE::Real> corrected_solution,

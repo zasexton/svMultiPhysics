@@ -7,6 +7,8 @@
  */
 
 #include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageParticipant.h"
+
+#include "FE/Systems/SystemCollectives.h"
 #include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
 
 #include <algorithm>
@@ -18,19 +20,22 @@
 
 namespace svmp::Physics::formulations::navier_stokes::two_fluid {
 
-using namespace free_surface::detail;
+using svmp::FE::systems::captureFeOrderedVectorCollectively;
+using svmp::FE::systems::collectiveAnyTrue;
+using svmp::FE::systems::collectiveMinMaxUint64;
+using svmp::FE::systems::requireCollectivePhasePreparation;
 
 StageParticipant::StageParticipant(
-    const free_surface::FreeSurfaceStepContext& context)
-    : free_surface::FreeSurfaceStepContext(context)
+    const svmp::FE::timestepping::StepContext& context)
+    : svmp::FE::timestepping::StepContext(context)
 {
   two_fluid_stage_declarations =
       two_fluid::records(*sim.fe_system).twoFluidAcceptedStageDiagnosticDeclarations();
   const auto [minimum_two_fluid_stage_count,
               maximum_two_fluid_stage_count] =
-      globalMinMaxUint64(
+      collectiveMinMaxUint64(
           static_cast<std::uint64_t>(two_fluid_stage_declarations.size()),
-          velocity_extension_artifact_comm);
+          active_comm);
   if (minimum_two_fluid_stage_count != maximum_two_fluid_stage_count) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Two-fluid accepted-stage declaration coverage differs across the active FE communicator.");
@@ -44,9 +49,9 @@ StageParticipant::StageParticipant(
            svmp::FE::timestepping::SchemeKind::GeneralizedAlpha);
   const auto [minimum_two_fluid_stage_scheme_supported,
               maximum_two_fluid_stage_scheme_supported] =
-      globalMinMaxUint64(
+      collectiveMinMaxUint64(
           local_two_fluid_stage_scheme_supported ? 1u : 0u,
-          velocity_extension_artifact_comm);
+          active_comm);
   if (minimum_two_fluid_stage_scheme_supported !=
       maximum_two_fluid_stage_scheme_supported) {
     throw std::runtime_error(
@@ -105,9 +110,9 @@ void StageParticipant::onCandidateStage(
       observation.rate_vector->size() ==
           two_fluid_stage_state_size &&
       observation.mesh_revision.has_value();
-  if (globalAnyBool(
+  if (collectiveAnyTrue(
           !local_stage_ready,
-          velocity_extension_artifact_comm)) {
+          active_comm)) {
     if (!local_stage_ready) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Two-fluid accepted-stage diagnostics require matching temporal-order-one state/rate vectors, scheme coordinates, and a complete mesh revision.");
@@ -119,11 +124,11 @@ void StageParticipant::onCandidateStage(
   const auto stage_state_revision =
       collectiveMeshBoundaryStateFingerprint(
           *observation.state_vector,
-          velocity_extension_artifact_comm);
+          active_comm);
   const auto stage_rate_revision =
       collectiveMeshBoundaryStateFingerprint(
           *observation.rate_vector,
-          velocity_extension_artifact_comm);
+          active_comm);
   std::vector<svmp::FE::Real> stage_solution;
   std::optional<
       svmp::FE::systems::OperatorStageMeasurementMetadata>
@@ -132,9 +137,9 @@ void StageParticipant::onCandidateStage(
   try {
     svmp::FE::systems::SystemStateView stage_view;
     stage_view.u_vector = observation.state_vector;
-    stage_solution = gatherFeOrderedSolution(
+    stage_solution = captureFeOrderedVectorCollectively(
         stage_view,
-        velocity_extension_artifact_comm);
+        active_comm);
     const auto& revision = *observation.mesh_revision;
     svmp::FE::systems::OperatorStageMeasurementMetadata metadata{
         .scheme_name =
@@ -189,14 +194,14 @@ void StageParticipant::onCandidateStage(
   }
   requireCollectivePhasePreparation(
       local_preparation_failure,
-      velocity_extension_artifact_comm,
+      active_comm,
       "two_fluid_operator_stage_preparation");
   auto states = evaluateCurrentTwoFluidStageDiagnostics(
       sim,
       two_fluid_stage_declarations,
       stage_solution,
       observation.state_time - observation.step_start_time,
-      velocity_extension_artifact_comm);
+      active_comm);
   two_fluid::records(*sim.fe_system).stageTwoFluidAcceptedStageDiagnostics(
       std::move(*stage_metadata), states);
   std::vector<svmp::FE::constraints::
@@ -252,7 +257,7 @@ void StageParticipant::onCandidateStage(
   }
   requireCollectivePhasePreparation(
       local_capture_failure,
-      velocity_extension_artifact_comm,
+      active_comm,
       "two_fluid_operator_stage_aggregation_capture");
   pending_two_fluid_operator_stage_aggregation_reports =
       std::move(captured_aggregation_reports);
