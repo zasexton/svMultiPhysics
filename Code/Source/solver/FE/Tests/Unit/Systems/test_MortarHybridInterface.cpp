@@ -29,6 +29,7 @@
 #include "Tests/Unit/Forms/JITTestHelpers.h"
 
 #include <algorithm>
+#include <functional>
 #include <array>
 #include <cmath>
 #include <string>
@@ -813,4 +814,95 @@ TEST(FESystemMixedDimensional, InterfaceFieldCouplingConservesSymmetricExchange)
     EXPECT_NEAR(x[1], 0.5, 1e-12);
     EXPECT_NEAR(x[2], -0.5, 1e-12);
     EXPECT_NEAR(x[0] + x[1], 1.0, 1e-12);
+}
+
+namespace {
+
+struct InterfaceAssembly {
+    std::vector<Real> matrix;
+    std::vector<Real> vector;
+    GlobalIndex n_dofs{0};
+};
+
+/// Installs @p make_residual(u, v) for a discontinuous P1 field on two quads
+/// that share the interface "middle" and assembles matrix and vector at the
+/// state "1 on the left cell, 0 on the right".
+InterfaceAssembly assembleDiscontinuousInterfaceResidual(
+    const std::function<svmp::FE::forms::FormExpr(const svmp::FE::forms::FormExpr&,
+                                                  const svmp::FE::forms::FormExpr&)>& make_residual)
+{
+    constexpr int marker = 17;
+    auto space = std::make_shared<L2Space>(ElementType::Quad4, /*order=*/1);
+    FESystem sys(build_two_quad_mesh_with_interface_set("middle"));
+    sys.setInterfaceMeshFromFaceSet(marker, "middle");
+    const auto u_id = sys.addField(FieldSpec{.name = "u", .space = space});
+    sys.addOperator("op");
+    const auto u = svmp::FE::forms::StateField(u_id, *space, "u");
+    const auto v = svmp::FE::forms::TestField(u_id, *space, "v");
+    svmp::FE::systems::FormInstallOptions options;
+    options.compiler_options.jit.enable = false;
+    (void)svmp::FE::systems::installFormulation(sys, "op", {u_id}, make_residual(u, v), options);
+    sys.setup();
+
+    InterfaceAssembly out;
+    out.n_dofs = sys.dofHandler().getNumDofs();
+    std::vector<Real> state(static_cast<std::size_t>(out.n_dofs), 0.0);
+    for (const auto dof : sys.fieldDofHandler(u_id).getCellDofs(0)) {
+        state[static_cast<std::size_t>(sys.fieldDofOffset(u_id) + dof)] = 1.0;
+    }
+    SystemStateView view;
+    view.u = state;
+    AssemblyRequest request;
+    request.op = "op";
+    request.want_matrix = true;
+    request.want_vector = true;
+    svmp::FE::assembly::DenseSystemView system(out.n_dofs);
+    system.zero();
+    EXPECT_TRUE(sys.assemble(request, view, &system, &system).success);
+    for (GlobalIndex i = 0; i < out.n_dofs; ++i) {
+        out.vector.push_back(system.getVectorEntry(i));
+        for (GlobalIndex j = 0; j < out.n_dofs; ++j) {
+            out.matrix.push_back(system.getMatrixEntry(i, j));
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+TEST(FESystemMortar, DISABLED_AffineResidualKeepsItsInterfaceTerms)
+{
+    // An affine single-field residual is installed through the affine split
+    // (a LinearFormKernel); its interface (dI) terms must be assembled like
+    // those of the same residual installed through the nonlinear kernel.  The
+    // zero term 0 u u v makes the second residual non-affine and changes
+    // neither the residual nor the Jacobian.
+    using svmp::FE::forms::FormExpr;
+    const auto interface_terms = [](const FormExpr& u, const FormExpr& v) {
+        return (svmp::FE::forms::jump(u) * svmp::FE::forms::jump(v)).dI(17) -
+               (FormExpr::constant(2.0) * svmp::FE::forms::jump(v)).dI(17);
+    };
+    const auto affine = assembleDiscontinuousInterfaceResidual(
+        [&](const FormExpr& u, const FormExpr& v) { return (u * v).dx() + interface_terms(u, v); });
+    const auto nonlinear = assembleDiscontinuousInterfaceResidual(
+        [&](const FormExpr& u, const FormExpr& v) {
+            return (u * v).dx() + (FormExpr::constant(0.0) * u * u * v).dx() + interface_terms(u, v);
+        });
+
+    ASSERT_EQ(affine.n_dofs, 8);
+    ASSERT_EQ(nonlinear.n_dofs, affine.n_dofs);
+    for (std::size_t k = 0; k < affine.matrix.size(); ++k) {
+        EXPECT_NEAR(affine.matrix[k], nonlinear.matrix[k], 1e-12) << "matrix entry " << k;
+    }
+    for (std::size_t k = 0; k < affine.vector.size(); ++k) {
+        EXPECT_NEAR(affine.vector[k], nonlinear.vector[k], 1e-12) << "vector entry " << k;
+    }
+    // The interface terms are not empty: the matrix differs from the mass matrix.
+    const auto mass_only = assembleDiscontinuousInterfaceResidual(
+        [](const FormExpr& u, const FormExpr& v) { return (u * v).dx(); });
+    Real interface_part = 0.0;
+    for (std::size_t k = 0; k < mass_only.matrix.size(); ++k) {
+        interface_part += std::abs(nonlinear.matrix[k] - mass_only.matrix[k]);
+    }
+    EXPECT_GT(interface_part, 1e-6);
 }
