@@ -10,7 +10,7 @@
 #include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Options/NavierStokesRegistration.h"
 #include "FE/Systems/FunctionalRecords.h"
-#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
+#include "FE/Systems/TwoFluidStageRecords.h"
 
 #include <algorithm>
 #include <array>
@@ -22,8 +22,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-namespace two_fluid = svmp::Physics::formulations::navier_stokes::two_fluid;
 
 namespace {
 
@@ -1326,15 +1324,15 @@ TEST(EquationTranslatorFreeSurface,
           .front()
           .interface_marker,
       71);
-  ASSERT_EQ(two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations().size(),
+  ASSERT_EQ(svmp::FE::systems::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations().size(),
             1u);
-  EXPECT_TRUE(two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations()
+  EXPECT_TRUE(svmp::FE::systems::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations()
                   .front()
                   .require_conservative_phase_momentum_reconciliation);
-  ASSERT_TRUE(two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations()
+  ASSERT_TRUE(svmp::FE::systems::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations()
                   .front()
                   .parameters.prescribed_viscous_traction_jump.has_value());
-  EXPECT_EQ(*two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations()
+  EXPECT_EQ(*svmp::FE::systems::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations()
                  .front()
                  .parameters.prescribed_viscous_traction_jump,
             (std::array<svmp::FE::Real, 3>{{6.0, 7.0, 0.0}}));
@@ -1542,7 +1540,7 @@ TEST(EquationTranslatorFreeSurface,
   EXPECT_TRUE(
       system.materialInterfaceTransportVelocityDeclarations().empty());
   EXPECT_TRUE(
-      two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
+      svmp::FE::systems::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
 }
 
 TEST(EquationTranslatorFreeSurface,
@@ -1621,7 +1619,7 @@ TEST(EquationTranslatorFreeSurface,
     EXPECT_TRUE(
         system.materialInterfaceTransportVelocityDeclarations().empty());
     EXPECT_TRUE(
-        two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
+        svmp::FE::systems::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
   }
 }
 
@@ -1681,7 +1679,7 @@ TEST(EquationTranslatorFreeSurface,
   EXPECT_TRUE(
       system.materialInterfaceTransportVelocityDeclarations().empty());
   EXPECT_TRUE(
-      two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
+      svmp::FE::systems::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
 }
 
 TEST(EquationTranslatorFreeSurface,
@@ -1757,7 +1755,7 @@ TEST(EquationTranslatorFreeSurface,
     EXPECT_TRUE(
         system.materialInterfaceTransportVelocityDeclarations().empty());
     EXPECT_TRUE(
-        two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
+        svmp::FE::systems::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
   }
 }
 
@@ -1817,7 +1815,7 @@ TEST(EquationTranslatorFreeSurface,
   EXPECT_TRUE(
       system.materialInterfaceTransportVelocityDeclarations().empty());
   EXPECT_TRUE(
-      two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
+      svmp::FE::systems::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
 }
 
 TEST(EquationTranslatorFreeSurface,
@@ -1922,7 +1920,7 @@ TEST(EquationTranslatorFreeSurface,
     EXPECT_TRUE(
         system.materialInterfaceTransportVelocityDeclarations().empty());
     EXPECT_TRUE(
-        two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
+        svmp::FE::systems::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
   }
 }
 
@@ -2024,7 +2022,7 @@ TEST(EquationTranslatorFreeSurface,
     EXPECT_TRUE(
         system.materialInterfaceTransportVelocityDeclarations().empty());
     EXPECT_TRUE(
-        two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
+        svmp::FE::systems::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
   }
 }
 
@@ -2123,7 +2121,7 @@ TEST(EquationTranslatorFreeSurface,
     EXPECT_TRUE(
         system.materialInterfaceTransportVelocityDeclarations().empty());
     EXPECT_TRUE(
-        two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
+        svmp::FE::systems::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
   }
 }
 
@@ -2186,7 +2184,7 @@ TEST(EquationTranslatorFreeSurface,
   EXPECT_TRUE(
       system.materialInterfaceTransportVelocityDeclarations().empty());
   EXPECT_TRUE(
-      two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
+      svmp::FE::systems::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
 }
 
 TEST(EquationTranslatorNodePressureConstraints, BuildInputRejectsUnsupportedIdType)

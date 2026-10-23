@@ -1119,6 +1119,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/FESystemHandle.h
     Systems/OperatorStageMetadata.h
     Systems/TwoFluidRecordTypes.h
+    Systems/TwoFluidStageRecords.h
     Systems/BoundedUpdatePolicy.h
     Systems/BoundaryDistanceService.h
     Interfaces/ContactLineGeometryCertificate.h
@@ -1163,6 +1164,7 @@ set(FE_SYSTEMS_SOURCES
     Systems/FESystem.cpp
     Systems/MeshBoundaryRecordSupport.cpp
     Systems/MeshNormalConstraintStageMeasurements.cpp
+    Systems/TwoFluidStageRecords.cpp
     Systems/SnapshotFieldAccess.cpp
     Systems/FormsInstaller.cpp
     Systems/FormulationBuilder.cpp
@@ -3150,6 +3152,7 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/Systems/test_MaterialStateProvider.cpp
 		                Tests/Unit/Systems/test_FESystem.cpp
 		                Tests/Unit/Systems/test_FESystemAttachments.cpp
+		                Tests/Unit/Systems/test_TwoFluidStageRecords.cpp
 		                Tests/Unit/Systems/test_ExactAccumulator.cpp
 		                Tests/Unit/Systems/test_AcceptedStageRecords.cpp
 		                Tests/Unit/Systems/test_FunctionalRecords.cpp

@@ -90,7 +90,7 @@
 #include "Parameters.h"
 #include "tinyxml2.h"
 #include "FE/Systems/FunctionalRecords.h"
-#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
+#include "FE/Systems/TwoFluidStageRecords.h"
 
 #include <algorithm>
 #include <array>
@@ -7519,7 +7519,7 @@ svmp::FE::level_set::LevelSetGeometryHost levelSetGeometryHost(
           },
       .two_fluid_accepted_stage_diagnostics_declared =
           sim.fe_system &&
-          !two_fluid::records(std::as_const(*sim.fe_system))
+          !svmp::FE::systems::twoFluidStageRecords(std::as_const(*sim.fe_system))
                .twoFluidAcceptedStageDiagnosticDeclarations()
                .empty(),
   };
@@ -12534,7 +12534,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   h, "momentum_reconciliation_rejection");
               return false;
             }
-            two_fluid::records(*sim.fe_system)
+            svmp::FE::systems::twoFluidStageRecords(*sim.fe_system)
                 .bindPendingTwoFluidMomentumReconciliations(
                     reconciliation.records);
           }

@@ -9,7 +9,7 @@
 #include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageParticipant.h"
 
 #include "FE/Systems/SystemCollectives.h"
-#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
+#include "FE/Systems/TwoFluidStageRecords.h"
 
 #include <algorithm>
 #include <exception>
@@ -30,7 +30,7 @@ StageParticipant::StageParticipant(
     : svmp::FE::timestepping::StepContext(context)
 {
   two_fluid_stage_declarations =
-      two_fluid::records(*sim.fe_system).twoFluidAcceptedStageDiagnosticDeclarations();
+      svmp::FE::systems::twoFluidStageRecords(*sim.fe_system).twoFluidAcceptedStageDiagnosticDeclarations();
   const auto [minimum_two_fluid_stage_count,
               maximum_two_fluid_stage_count] =
       collectiveMinMaxUint64(
@@ -202,7 +202,7 @@ void StageParticipant::onCandidateStage(
       stage_solution,
       observation.state_time - observation.step_start_time,
       active_comm);
-  two_fluid::records(*sim.fe_system).stageTwoFluidAcceptedStageDiagnostics(
+  svmp::FE::systems::twoFluidStageRecords(*sim.fe_system).stageTwoFluidAcceptedStageDiagnostics(
       std::move(*stage_metadata), states);
   std::vector<svmp::FE::constraints::
                   SmallCutAggregationRefreshReport>
@@ -272,7 +272,7 @@ void StageParticipant::bindCandidateNumerics(
       throw std::logic_error(
           "[svMultiPhysics::Application] Two-fluid candidate reached its final gate without solved operator-stage aggregation evidence.");
     }
-    two_fluid::records(*sim.fe_system).bindPendingTwoFluidAcceptedStageNumerics(
+    svmp::FE::systems::twoFluidStageRecords(*sim.fe_system).bindPendingTwoFluidAcceptedStageNumerics(
         makeTwoFluidAcceptedStageSolveTelemetry(newton_report),
         pending_two_fluid_operator_stage_aggregation_reports);
     pending_two_fluid_operator_stage_aggregation_reports.clear();
@@ -288,14 +288,14 @@ void StageParticipant::resetAggregationEvidence() noexcept
 
 void StageParticipant::discardCandidate() noexcept
 {
-  two_fluid::records(*sim.fe_system).discardPendingTwoFluidAcceptedStageDiagnostics();
+  svmp::FE::systems::twoFluidStageRecords(*sim.fe_system).discardPendingTwoFluidAcceptedStageDiagnostics();
 }
 
 void StageParticipant::commitAccepted(
     const svmp::FE::timestepping::TimeHistory& h)
 {
   if (evaluate_two_fluid_stage) {
-    two_fluid::records(*sim.fe_system).commitPendingTwoFluidAcceptedStageDiagnostics(
+    svmp::FE::systems::twoFluidStageRecords(*sim.fe_system).commitPendingTwoFluidAcceptedStageDiagnostics(
         static_cast<std::uint64_t>(h.stepIndex()),
         static_cast<svmp::FE::Real>(h.time()),
         static_cast<svmp::FE::Real>(h.dt()));

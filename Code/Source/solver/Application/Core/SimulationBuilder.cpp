@@ -25,7 +25,7 @@
 #include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Options/NavierStokesRegistration.h"
 #include "Parameters.h"
-#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
+#include "FE/Systems/TwoFluidStageRecords.h"
 
 #include <algorithm>
 #include <array>
@@ -43,7 +43,6 @@
 #include <variant>
 #include <vector>
 
-namespace two_fluid = svmp::Physics::formulations::navier_stokes::two_fluid;
 
 namespace {
 
@@ -1271,7 +1270,7 @@ bool detail::groupTwoFluidMaterialInterfaceFsilsLayout(
   const auto& material =
       system.materialInterfaceTransportVelocityDeclarations();
   const auto& diagnostics =
-      two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations();
+      svmp::FE::systems::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations();
   if (material.size() != 1u || diagnostics.size() != 1u ||
       system.registeredFieldCount() != 6u || layout.blocks.size() != 6u) {
     return false;
@@ -1349,7 +1348,7 @@ void detail::requireTwoFluidMaterialInterfaceSolverLayout(
   const auto material_count =
       system.materialInterfaceTransportVelocityDeclarations().size();
   const auto diagnostic_count =
-      two_fluid::records(system).twoFluidAcceptedStageDiagnosticDeclarations().size();
+      svmp::FE::systems::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations().size();
   if (material_count == 0u && diagnostic_count == 0u) {
     return;
   }

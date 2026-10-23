@@ -18,7 +18,7 @@
 #include "FE/Systems/FESystemHandle.h"
 #include "FE/Systems/SnapshotFieldAccess.h"
 #include "FE/Systems/SystemCollectives.h"
-#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
+#include "FE/Systems/TwoFluidStageRecords.h"
 
 #include <algorithm>
 #include <cmath>
@@ -281,9 +281,9 @@ buildCurrentTwoFluidMomentumReconciliations(
     const svmp::MeshComm& comm)
 {
   const auto declarations =
-      two_fluid::records(*sim.fe_system).twoFluidAcceptedStageDiagnosticDeclarations();
+      svmp::FE::systems::twoFluidStageRecords(*sim.fe_system).twoFluidAcceptedStageDiagnosticDeclarations();
   const auto pending =
-      two_fluid::records(*sim.fe_system).pendingTwoFluidAcceptedStageDiagnostics();
+      svmp::FE::systems::twoFluidStageRecords(*sim.fe_system).pendingTwoFluidAcceptedStageDiagnostics();
   TwoFluidMomentumReconciliationBatch batch;
   std::vector<svmp::FE::systems::
                   TwoFluidAcceptedStageDiagnosticDeclaration>

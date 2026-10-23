@@ -44,9 +44,7 @@
 #include <vector>
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
 #include "FE/Systems/FunctionalRecords.h"
-#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
-
-namespace two_fluid = svmp::Physics::formulations::navier_stokes::two_fluid;
+#include "FE/Systems/TwoFluidStageRecords.h"
 
 namespace {
 // Every small-cut aggregation prolongation report requested in this test
@@ -429,7 +427,7 @@ TEST(IncompressibleTwoFluidModule,
         fixture.system.materialInterfaceTransportVelocityDeclarations()
             .empty());
     EXPECT_TRUE(
-        two_fluid::records(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations()
+        svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations()
             .empty());
   };
 
@@ -1598,7 +1596,7 @@ TEST(IncompressibleTwoFluidModule,
   EXPECT_TRUE(
       svmp::FE::systems::functionalRecords(fixture.system).functionalDeclarations().empty());
   const auto diagnostic_declarations =
-      two_fluid::records(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
+      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
   ASSERT_EQ(diagnostic_declarations.size(), 1u);
   EXPECT_EQ(diagnostic_declarations.front().interface_marker,
             interface_marker);
@@ -1867,7 +1865,7 @@ TEST(IncompressibleTwoFluidModule,
   fixture.system.setup({});
 
   const auto declarations =
-      two_fluid::records(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
+      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
   ASSERT_EQ(declarations.size(), 1u);
   auto state = makeAcceptedTwoFluidDiagnosticState(declarations.front());
   constexpr FE::Real hydrostatic_traction = FE::Real{36297.0};
@@ -1879,7 +1877,7 @@ TEST(IncompressibleTwoFluidModule,
   state.diagnostics.traction_jump_integral[0] = FE::Real{0.0};
   const std::array states{state};
 
-  EXPECT_NO_THROW(two_fluid::records(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  EXPECT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
       makeTwoFluidStageMetadata(), states));
 }
 
@@ -1892,17 +1890,17 @@ TEST(IncompressibleTwoFluidModule,
     fixture.system.setup({});
 
     const auto declarations =
-        two_fluid::records(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
+        svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
     ASSERT_EQ(declarations.size(), 1u);
     auto state = makeAcceptedTwoFluidDiagnosticState(declarations.front());
     mutate(state.diagnostics.negative_phase);
     const std::array states{state};
 
-    EXPECT_THROW(two_fluid::records(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+    EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
                      makeTwoFluidStageMetadata(), states),
                  FE::InvalidArgumentException);
     EXPECT_TRUE(
-        two_fluid::records(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().empty());
+        svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().empty());
   };
 
   expect_rejected([](auto& phase) {
@@ -1930,17 +1928,17 @@ TEST(IncompressibleTwoFluidModule,
     fixture.system.setup({});
 
     const auto declarations =
-        two_fluid::records(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
+        svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
     ASSERT_EQ(declarations.size(), 1u);
     auto state = makeAcceptedTwoFluidDiagnosticState(declarations.front());
     mutate(state.diagnostics.negative_phase);
     const std::array states{state};
 
-    EXPECT_THROW(two_fluid::records(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+    EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
                      makeTwoFluidStageMetadata(), states),
                  FE::InvalidArgumentException);
     EXPECT_TRUE(
-        two_fluid::records(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().empty());
+        svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().empty());
   };
 
   expect_rejected([](auto& phase) {
@@ -1972,82 +1970,82 @@ TEST(IncompressibleTwoFluidModule,
   fixture.system.setup({});
 
   const auto declarations =
-      two_fluid::records(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
+      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
   ASSERT_EQ(declarations.size(), 1u);
   const auto state = makeAcceptedTwoFluidDiagnosticState(declarations.front());
   const std::array states{state};
 
-  ASSERT_NO_THROW(two_fluid::records(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
       makeTwoFluidStageMetadata(), states));
-  EXPECT_EQ(two_fluid::records(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().size(),
+  EXPECT_EQ(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().size(),
             1u);
-  EXPECT_TRUE(two_fluid::records(fixture.system).twoFluidAcceptedStageDiagnosticHistory().empty());
-  two_fluid::records(fixture.system).discardPendingTwoFluidAcceptedStageDiagnostics();
+  EXPECT_TRUE(svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory().empty());
+  svmp::FE::systems::twoFluidStageRecords(fixture.system).discardPendingTwoFluidAcceptedStageDiagnostics();
   EXPECT_TRUE(
-      two_fluid::records(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().empty());
+      svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().empty());
 
   auto wrong_source = state;
   wrong_source.geometry_revision.source_id = "field:999";
   const std::array wrong_source_states{wrong_source};
-  EXPECT_THROW(two_fluid::records(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
                    makeTwoFluidStageMetadata(), wrong_source_states),
                FE::InvalidArgumentException);
   EXPECT_TRUE(
-      two_fluid::records(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().empty());
+      svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().empty());
 
   auto stale_local_mesh = state;
   stale_local_mesh.local_mesh_revision.mesh_geometry_revision = 1u;
   const std::array stale_local_mesh_states{stale_local_mesh};
-  EXPECT_THROW(two_fluid::records(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
                    makeTwoFluidStageMetadata(), stale_local_mesh_states),
                FE::InvalidArgumentException);
   EXPECT_TRUE(
-      two_fluid::records(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().empty());
+      svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().empty());
 
-  ASSERT_NO_THROW(two_fluid::records(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
       makeTwoFluidStageMetadata(), states));
   ASSERT_NO_THROW(bindAcceptedTwoFluidStageNumerics(
       fixture.system, declarations.front(), state));
-  ASSERT_NO_THROW(two_fluid::records(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
       1u, FE::Real{0.1}, FE::Real{0.1}));
-  ASSERT_EQ(two_fluid::records(fixture.system).twoFluidAcceptedStageDiagnosticHistory().size(),
+  ASSERT_EQ(svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory().size(),
             1u);
   EXPECT_DOUBLE_EQ(
-      two_fluid::records(fixture.system).twoFluidAcceptedStageDiagnosticHistory()
+      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory()
           .front()
           .state.diagnostics.mean_pressure_jump,
       FE::Real{3.0});
-  EXPECT_TRUE(two_fluid::records(fixture.system).twoFluidAcceptedStageDiagnosticHistory()
+  EXPECT_TRUE(svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory()
                   .front()
                   .state.diagnostics.prescribed_pressure_jump_error_squared
                   .has_value());
   EXPECT_TRUE(
-      two_fluid::records(fixture.system).twoFluidAcceptedStageDiagnosticHistory()
+      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory()
           .front()
           .state.diagnostics
           .prescribed_viscous_traction_jump_error_squared.has_value());
 
-  ASSERT_NO_THROW(two_fluid::records(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
       makeTwoFluidStageMetadata(), states));
   ASSERT_NO_THROW(bindAcceptedTwoFluidStageNumerics(
       fixture.system, declarations.front(), state));
-  ASSERT_NO_THROW(two_fluid::records(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
       1u, FE::Real{0.1}, FE::Real{0.1}));
-  EXPECT_EQ(two_fluid::records(fixture.system).twoFluidAcceptedStageDiagnosticHistory().size(),
+  EXPECT_EQ(svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory().size(),
             1u);
 
   auto changed = state;
   changed.diagnostics.surface_energy_work = FE::Real{1.0};
   const std::array changed_states{changed};
-  ASSERT_NO_THROW(two_fluid::records(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
       makeTwoFluidStageMetadata(), changed_states));
   ASSERT_NO_THROW(bindAcceptedTwoFluidStageNumerics(
       fixture.system, declarations.front(), changed));
-  EXPECT_THROW(two_fluid::records(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
+  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
                    1u, FE::Real{0.1}, FE::Real{0.1}),
                FE::InvalidArgumentException);
-  two_fluid::records(fixture.system).discardPendingTwoFluidAcceptedStageDiagnostics();
-  EXPECT_EQ(two_fluid::records(fixture.system).twoFluidAcceptedStageDiagnosticHistory().size(),
+  svmp::FE::systems::twoFluidStageRecords(fixture.system).discardPendingTwoFluidAcceptedStageDiagnostics();
+  EXPECT_EQ(svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory().size(),
             1u);
 }
 
@@ -2061,17 +2059,17 @@ TEST(IncompressibleTwoFluidModule,
   fixture.system.setup({});
 
   const auto declarations =
-      two_fluid::records(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
+      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
   ASSERT_EQ(declarations.size(), 1u);
   EXPECT_TRUE(declarations.front()
                   .require_conservative_phase_momentum_reconciliation);
   const auto raw = makeAcceptedTwoFluidDiagnosticState(declarations.front());
   const std::array raw_states{raw};
-  ASSERT_NO_THROW(two_fluid::records(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
       makeTwoFluidStageMetadata(), raw_states));
   ASSERT_NO_THROW(bindAcceptedTwoFluidStageNumerics(
       fixture.system, declarations.front(), raw));
-  EXPECT_THROW(two_fluid::records(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
+  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
                    1u, FE::Real{0.1}, FE::Real{0.1}),
                FE::InvalidArgumentException);
 
@@ -2094,12 +2092,12 @@ TEST(IncompressibleTwoFluidModule,
   wrong_revision.raw_algebraic_revision = 99u;
   const std::array wrong_revision_records{wrong_revision};
   EXPECT_THROW(
-      two_fluid::records(fixture.system).bindPendingTwoFluidMomentumReconciliations(
+      svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidMomentumReconciliations(
           wrong_revision_records),
       FE::InvalidArgumentException);
   ASSERT_EQ(
-      two_fluid::records(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().size(), 1u);
-  EXPECT_FALSE(two_fluid::records(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+      svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().size(), 1u);
+  EXPECT_FALSE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                    .front()
                    .momentum_reconciliation.has_value());
 
@@ -2119,21 +2117,21 @@ TEST(IncompressibleTwoFluidModule,
   ASSERT_FALSE(failed.satisfied);
   const std::array failed_records{failed};
   EXPECT_THROW(
-      two_fluid::records(fixture.system).bindPendingTwoFluidMomentumReconciliations(
+      svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidMomentumReconciliations(
           failed_records),
       FE::InvalidArgumentException);
 
   const std::array valid_records{valid};
   ASSERT_NO_THROW(
-      two_fluid::records(fixture.system).bindPendingTwoFluidMomentumReconciliations(
+      svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidMomentumReconciliations(
           valid_records));
-  ASSERT_TRUE(two_fluid::records(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  ASSERT_TRUE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                   .front()
                   .momentum_reconciliation.has_value());
-  ASSERT_NO_THROW(two_fluid::records(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
       1u, FE::Real{0.1}, FE::Real{0.1}));
   const auto history =
-      two_fluid::records(fixture.system).twoFluidAcceptedStageDiagnosticHistory();
+      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory();
   ASSERT_EQ(history.size(), 1u);
   ASSERT_TRUE(history.front().momentum_reconciliation.has_value());
   const auto& accepted = *history.front().momentum_reconciliation;
@@ -2257,7 +2255,7 @@ void bindAcceptedTwoFluidStageNumerics(
     const FE::systems::AcceptedTwoFluidStageDiagnosticState& state) {
   const auto reports =
       makeTwoFluidAcceptedStageAggregationReports(declaration, state);
-  two_fluid::records(system).bindPendingTwoFluidAcceptedStageNumerics(
+  svmp::FE::systems::twoFluidStageRecords(system).bindPendingTwoFluidAcceptedStageNumerics(
       makeTwoFluidAcceptedStageSolveTelemetry(), reports);
 }
 
@@ -2273,7 +2271,7 @@ TEST(IncompressibleTwoFluidModule,
   fixture.system.setup({});
 
   const auto declarations =
-      two_fluid::records(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
+      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
   ASSERT_EQ(declarations.size(), 1u);
   EXPECT_TRUE(declarations.front().require_accepted_stage_numerics);
   EXPECT_EQ(declarations.front().pressure_stabilization_coefficient,
@@ -2288,13 +2286,13 @@ TEST(IncompressibleTwoFluidModule,
             FE::Real{16.0});
   const auto state = makeAcceptedTwoFluidDiagnosticState(declarations.front());
   const std::array states{state};
-  ASSERT_NO_THROW(two_fluid::records(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
       makeTwoFluidStageMetadata(), states));
 
-  EXPECT_THROW(two_fluid::records(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
+  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
                    1u, FE::Real{0.1}, FE::Real{0.1}),
                FE::InvalidArgumentException);
-  ASSERT_FALSE(two_fluid::records(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  ASSERT_FALSE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                    .front()
                    .numerics.has_value());
 
@@ -2303,17 +2301,17 @@ TEST(IncompressibleTwoFluidModule,
       declarations.front(), state);
   auto mismatched = reports;
   mismatched.back().geometry_identity.snapshot_revision_key += 1u;
-  EXPECT_THROW(two_fluid::records(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
                    solve, mismatched),
                FE::InvalidArgumentException);
-  EXPECT_FALSE(two_fluid::records(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  EXPECT_FALSE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                    .front()
                    .numerics.has_value());
 
-  ASSERT_NO_THROW(two_fluid::records(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
       solve, reports));
   const auto pending =
-      two_fluid::records(fixture.system).pendingTwoFluidAcceptedStageDiagnostics();
+      svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics();
   ASSERT_EQ(pending.size(), 1u);
   ASSERT_TRUE(pending.front().numerics.has_value());
   const auto& numerics = *pending.front().numerics;
@@ -2354,10 +2352,10 @@ TEST(IncompressibleTwoFluidModule,
   EXPECT_EQ(numerics.negative_phase.pressure_stabilization.work_reason,
             "not_separately_resolved_by_coupled_operator");
 
-  ASSERT_NO_THROW(two_fluid::records(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
       1u, FE::Real{0.1}, FE::Real{0.1}));
   const auto history =
-      two_fluid::records(fixture.system).twoFluidAcceptedStageDiagnosticHistory();
+      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory();
   ASSERT_EQ(history.size(), 1u);
   ASSERT_TRUE(history.front().numerics.has_value());
   EXPECT_EQ(history.front().numerics->solve.linear.iterations, 17);
@@ -2374,60 +2372,60 @@ TEST(IncompressibleTwoFluidModule,
   fixture.system.setup({});
 
   const auto declarations =
-      two_fluid::records(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
+      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
   ASSERT_EQ(declarations.size(), 1u);
   const auto state = makeAcceptedTwoFluidDiagnosticState(declarations.front());
   const std::array states{state};
-  ASSERT_NO_THROW(two_fluid::records(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
       makeTwoFluidStageMetadata(), states));
 
   const auto solve = makeTwoFluidAcceptedStageSolveTelemetry();
   const auto reports = makeTwoFluidAcceptedStageAggregationReports(
       declarations.front(), state);
   const std::array missing{reports[0], reports[1], reports[2]};
-  EXPECT_THROW(two_fluid::records(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
                    solve, missing),
                FE::InvalidArgumentException);
-  EXPECT_FALSE(two_fluid::records(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  EXPECT_FALSE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                    .front()
                    .numerics.has_value());
 
   auto invalid_solve = solve;
   invalid_solve.linear.final_residual_norm =
       std::numeric_limits<FE::Real>::infinity();
-  EXPECT_THROW(two_fluid::records(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
                    invalid_solve, reports),
                FE::InvalidArgumentException);
-  EXPECT_FALSE(two_fluid::records(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  EXPECT_FALSE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                    .front()
                    .numerics.has_value());
 
   auto unattempted_solve = solve;
   unattempted_solve.linear.attempted = false;
-  EXPECT_THROW(two_fluid::records(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
                    unattempted_solve, reports),
                FE::InvalidArgumentException);
-  EXPECT_FALSE(two_fluid::records(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  EXPECT_FALSE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                    .front()
                    .numerics.has_value());
 
   auto wrong_side = reports;
   wrong_side.front().active_side =
       FE::geometry::CutIntegrationSide::Positive;
-  EXPECT_THROW(two_fluid::records(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
                    solve, wrong_side),
                FE::InvalidArgumentException);
-  EXPECT_FALSE(two_fluid::records(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  EXPECT_FALSE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                    .front()
                    .numerics.has_value());
 
   auto violated_guard = reports;
   violated_guard.front().maximum_observed_root_path =
       violated_guard.front().maximum_root_path_length + 1u;
-  EXPECT_THROW(two_fluid::records(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
                    solve, violated_guard),
                FE::InvalidArgumentException);
-  EXPECT_FALSE(two_fluid::records(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  EXPECT_FALSE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                    .front()
                    .numerics.has_value());
 
@@ -2439,20 +2437,20 @@ TEST(IncompressibleTwoFluidModule,
   transition.geometry_identity_after =
       stale_transition.front().geometry_identity;
   transition.geometry_identity_after.snapshot_revision_key += 1u;
-  EXPECT_THROW(two_fluid::records(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
                    solve, stale_transition),
                FE::InvalidArgumentException);
-  EXPECT_FALSE(two_fluid::records(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  EXPECT_FALSE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                    .front()
                    .numerics.has_value());
 
   std::vector<FE::constraints::SmallCutAggregationRefreshReport> duplicate(
       reports.begin(), reports.end());
   duplicate.push_back(reports.front());
-  EXPECT_THROW(two_fluid::records(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
                    solve, duplicate),
                FE::InvalidArgumentException);
-  EXPECT_FALSE(two_fluid::records(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  EXPECT_FALSE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                    .front()
                    .numerics.has_value());
 
@@ -2461,9 +2459,9 @@ TEST(IncompressibleTwoFluidModule,
   auto unrelated = reports.front();
   unrelated.interface_marker += 100;
   complete.push_back(std::move(unrelated));
-  ASSERT_NO_THROW(two_fluid::records(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
       solve, complete));
-  EXPECT_TRUE(two_fluid::records(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  EXPECT_TRUE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                   .front()
                   .numerics.has_value());
 }
@@ -2476,11 +2474,11 @@ TEST(IncompressibleTwoFluidModule,
   fixture.system.setup({});
 
   const auto declarations =
-      two_fluid::records(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
+      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
   ASSERT_EQ(declarations.size(), 1u);
   const auto state = makeAcceptedTwoFluidDiagnosticState(declarations.front());
   const std::array states{state};
-  ASSERT_NO_THROW(two_fluid::records(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
       makeTwoFluidStageMetadata(), states));
 
   const auto baseline_reports = makeTwoFluidAcceptedStageAggregationReports(
@@ -2491,10 +2489,10 @@ TEST(IncompressibleTwoFluidModule,
   unexpected.field = declarations.front().level_set_field;
   reports.push_back(std::move(unexpected));
 
-  EXPECT_THROW(two_fluid::records(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
                    makeTwoFluidAcceptedStageSolveTelemetry(), reports),
                FE::InvalidArgumentException);
-  EXPECT_FALSE(two_fluid::records(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  EXPECT_FALSE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                    .front()
                    .numerics.has_value());
 }
@@ -2507,11 +2505,11 @@ TEST(IncompressibleTwoFluidModule,
   fixture.system.setup({});
 
   const auto declarations =
-      two_fluid::records(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
+      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
   ASSERT_EQ(declarations.size(), 1u);
   const auto state = makeAcceptedTwoFluidDiagnosticState(declarations.front());
   const std::array states{state};
-  ASSERT_NO_THROW(two_fluid::records(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
       makeTwoFluidStageMetadata(), states));
 
   const auto reports = makeTwoFluidAcceptedStageAggregationReports(
@@ -2532,13 +2530,13 @@ TEST(IncompressibleTwoFluidModule,
           },
   };
 
-  ASSERT_NO_THROW(two_fluid::records(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
       solve, reports));
-  ASSERT_NO_THROW(two_fluid::records(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
       1u, FE::Real{0.1}, FE::Real{0.1}));
 
   const auto history =
-      two_fluid::records(fixture.system).twoFluidAcceptedStageDiagnosticHistory();
+      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory();
   ASSERT_EQ(history.size(), 1u);
   ASSERT_TRUE(history.front().numerics.has_value());
   EXPECT_FALSE(history.front().numerics->solve.linear.attempted);
@@ -2553,11 +2551,11 @@ TEST(IncompressibleTwoFluidModule,
   fixture.system.setup({});
 
   const auto declarations =
-      two_fluid::records(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
+      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
   ASSERT_EQ(declarations.size(), 1u);
   const auto state = makeAcceptedTwoFluidDiagnosticState(declarations.front());
   const std::array states{state};
-  ASSERT_NO_THROW(two_fluid::records(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
       makeTwoFluidStageMetadata(), states));
 
   auto reports = makeTwoFluidAcceptedStageAggregationReports(
@@ -2576,10 +2574,10 @@ TEST(IncompressibleTwoFluidModule,
     report.local_lineage.mesh_geometry_revision = 100u + local_ordinal;
   }
 
-  ASSERT_NO_THROW(two_fluid::records(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
       makeTwoFluidAcceptedStageSolveTelemetry(), reports));
   const auto pending =
-      two_fluid::records(fixture.system).pendingTwoFluidAcceptedStageDiagnostics();
+      svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics();
   ASSERT_TRUE(pending.front().numerics.has_value());
   EXPECT_EQ(pending.front()
                 .numerics->negative_phase.velocity_aggregation

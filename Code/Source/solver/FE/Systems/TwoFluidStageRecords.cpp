@@ -6,11 +6,11 @@
  * See License file.
  */
 
-#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
+#include "Systems/TwoFluidStageRecords.h"
 
-#include "FE/Core/FEException.h"
-#include "FE/Core/Logger.h"
-#include "FE/Systems/MeshBoundaryRecordSupport.h"
+#include "Core/FEException.h"
+#include "Core/Logger.h"
+#include "Systems/MeshBoundaryRecordSupport.h"
 
 #include <algorithm>
 #include <array>
@@ -26,7 +26,7 @@
 #include <mpi.h>
 #endif
 
-namespace svmp::Physics::formulations::navier_stokes::two_fluid {
+namespace svmp::FE::systems {
 
 // The record code moved from FE/Systems/FESystem.cpp and keeps the FE names
 // it used there.
@@ -1012,12 +1012,12 @@ ConstTwoFluidStageRecords::twoFluidAcceptedStageDiagnosticHistory()
   return store_->history;
 }
 
-TwoFluidStageRecords records(FESystem& system)
+TwoFluidStageRecords twoFluidStageRecords(FESystem& system)
 {
   return TwoFluidStageRecords(system);
 }
 
-ConstTwoFluidStageRecords records(const FESystem& system) noexcept
+ConstTwoFluidStageRecords twoFluidStageRecords(const FESystem& system) noexcept
 {
   return ConstTwoFluidStageRecords(system);
 }
@@ -2683,4 +2683,4 @@ void TwoFluidStageRecords::commitPendingTwoFluidAcceptedStageDiagnostics(
 }
 
 
-} // namespace svmp::Physics::formulations::navier_stokes::two_fluid
+} // namespace svmp::FE::systems

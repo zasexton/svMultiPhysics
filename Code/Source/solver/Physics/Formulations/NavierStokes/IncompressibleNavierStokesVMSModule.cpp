@@ -41,7 +41,7 @@
 #include "Physics/Formulations/NavierStokes/NavierStokesGeneratedNitsche.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesInitialConditions.h"
 
-#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
+#include "FE/Systems/TwoFluidStageRecords.h"
 
 #include "FE/Analysis/ConstitutiveLawMetadata.h"
 #include "FE/Constitutive/MetadataTaggedModel.h"
@@ -690,7 +690,7 @@ void IncompressibleNavierStokesVMSModule::registerTwoFluidOn(fs::FESystem& syste
             .owner_component = "incompressible_two_fluid",
         });
 
-    two_fluid::records(system).declareTwoFluidAcceptedStageDiagnostics(
+    svmp::FE::systems::twoFluidStageRecords(system).declareTwoFluidAcceptedStageDiagnostics(
         FE::systems::TwoFluidAcceptedStageDiagnosticDeclaration{
             .interface_marker = interface_marker,
             .level_set_field = level_set,

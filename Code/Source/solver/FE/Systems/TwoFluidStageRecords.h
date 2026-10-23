@@ -6,7 +6,8 @@
  * See License file.
  */
 
-#pragma once
+#ifndef SVMP_FE_SYSTEMS_TWO_FLUID_STAGE_RECORDS_H
+#define SVMP_FE_SYSTEMS_TWO_FLUID_STAGE_RECORDS_H
 
 /**
  * @file
@@ -14,35 +15,33 @@
  *        declarations, the pending group of a candidate (stage diagnostics,
  *        momentum reconciliations, solve numerics) and the accepted history.
  *
- * The records are an attachment of the FE system (FESystem::attachment), so
- * they live as long as the system.  records(system) is the interface that
- * FESystem had for them; the record data types are in
- * FE/Systems/TwoFluidRecordTypes.h for now.
+ * The records are an attachment of the FE system (FESystem::attachment): an
+ * accepted-stage record store (AcceptedStageRecords.h) of the two-fluid
+ * declarations and records, so they live as long as the system.
+ * twoFluidStageRecords(system) is the interface that FESystem had for them;
+ * the record data types are in FE/Systems/TwoFluidRecordTypes.h for now.
+ * The two-fluid formulation declares them; the two-fluid stage participant
+ * stages, discards and publishes them.
  */
 
-#include "FE/Constraints/SmallCutAggregationConstraint.h"
-#include "FE/Core/Types.h"
-#include "FE/Interfaces/IncompressibleTwoFluidDiagnostics.h"
-#include "FE/Systems/FESystem.h"
-#include "FE/Systems/TwoFluidRecordTypes.h"
+#include "Constraints/SmallCutAggregationConstraint.h"
+#include "Core/Types.h"
+#include "Interfaces/IncompressibleTwoFluidDiagnostics.h"
+#include "Systems/AcceptedStageRecords.h"
+#include "Systems/FESystem.h"
+#include "Systems/TwoFluidRecordTypes.h"
 
 #include <cstdint>
 #include <span>
 #include <vector>
 
-namespace svmp::Physics::formulations::navier_stokes::two_fluid {
+namespace svmp::FE::systems {
 
-/// The records of one FE system (its attachment).
-struct TwoFluidStageRecordStore {
-  std::vector<svmp::FE::systems::TwoFluidAcceptedStageDiagnosticDeclaration>
-      declarations{};
-  std::vector<svmp::FE::systems::TwoFluidAcceptedStageDiagnosticHistoryRecord>
-      pending{};
-  std::vector<svmp::FE::systems::TwoFluidAcceptedStageDiagnosticHistoryRecord>
-      history{};
-  bool declarations_frozen{false};
-  bool transaction_active{false};
-};
+/// The records of one FE system (its attachment): declarations, the pending
+/// group of the current attempt and the accepted history.
+using TwoFluidStageRecordStore =
+    AcceptedStageRecordStore<TwoFluidAcceptedStageDiagnosticDeclaration,
+                             TwoFluidAcceptedStageDiagnosticHistoryRecord>;
 
 /**
  * @brief The two-fluid accepted-stage diagnostic records of an FE system.
@@ -154,10 +153,12 @@ private:
 };
 
 /// The two-fluid records of @p system (created on first use).
-[[nodiscard]] TwoFluidStageRecords records(svmp::FE::systems::FESystem& system);
+[[nodiscard]] TwoFluidStageRecords twoFluidStageRecords(svmp::FE::systems::FESystem& system);
 
 /// The two-fluid records of @p system, read-only.
-[[nodiscard]] ConstTwoFluidStageRecords records(
+[[nodiscard]] ConstTwoFluidStageRecords twoFluidStageRecords(
     const svmp::FE::systems::FESystem& system) noexcept;
 
-} // namespace svmp::Physics::formulations::navier_stokes::two_fluid
+} // namespace svmp::FE::systems
+
+#endif // SVMP_FE_SYSTEMS_TWO_FLUID_STAGE_RECORDS_H
