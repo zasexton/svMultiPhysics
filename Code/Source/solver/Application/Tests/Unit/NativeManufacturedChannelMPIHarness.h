@@ -510,7 +510,6 @@ public:
                 channel::FreeSurfaceActiveDomainMethod::CutVolume,
             .external_pressure = 0.0,
             .surface_tension = 0.0,
-            .use_level_set_curvature = false,
             .cut_cell_stabilization = {.enabled = false},
             .small_cut_aggregation = true,
         });

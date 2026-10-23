@@ -2211,7 +2211,6 @@ makeWorkflowBalancedCapillaryFixture(
           .surface_tension = surface_tension,
           .surface_tension_form = channel_ns::
               FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction,
-          .curvature = 0.0,
           .curvature_field_name = "kappa_balanced_curved",
           .use_level_set_curvature = false,
           .small_cut_aggregation = false,
@@ -4034,7 +4033,6 @@ public:
                     channel_ns::FreeSurfaceActiveDomainMethod::CutVolume,
                 .external_pressure = 0.0,
                 .surface_tension = 0.0,
-                .use_level_set_curvature = false,
                 .cut_cell_stabilization = {
                     .enabled = false,
                 },
@@ -10357,8 +10355,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
                 .surface_tension = 1.0,
                 .surface_tension_form =
                     channel_ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
-                .curvature = 0.0,
-                .use_level_set_curvature = false,
                 .small_cut_aggregation = false,
             };
         free_surface.contact_lines.push_back(
@@ -10770,7 +10766,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
               .surface_tension_form = channel_ns::
                   FreeSurfaceSurfaceTensionForm::
                       KinematicAreaGradientTraction,
-              .curvature = 0.0,
               .curvature_field_name = "kappa_area_gradient_static",
               .use_level_set_curvature = false,
               .small_cut_aggregation = false,
@@ -12603,8 +12598,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
                 .surface_tension = 1.0,
                 .surface_tension_form =
                     channel_ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
-                .curvature = 0.0,
-                .use_level_set_curvature = false,
                 .small_cut_aggregation = false,
             };
     for (const auto& wall : contact_walls) {

@@ -2780,20 +2780,19 @@ TEST(OpenVesselExamples,
 #endif
 }
 
-TEST(OpenVesselExamples, UnfittedFreeSurfaceBuilderAcceptsSuppliedCurvatureSurfaceTension)
+TEST(OpenVesselExamples, UnfittedFreeSurfaceBuilderAcceptsSurfaceTension)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
 #else
   ensure_mpi_initialized_for_open_vessel_builder();
 
+  // Automatic is SurfaceStress, which reads no curvature.
   const auto case_dir = openVesselCaseDir("unfitted_level_set");
   const auto xml_path = writeUnfittedGuardRegressionXml(
       case_dir,
-      "supplied_curvature_surface_tension",
-      {{"Surface_tension", "0.0728"},
-       {"Use_level_set_curvature", "false"},
-       {"Curvature", "2.0"}});
+      "surface_tension",
+      {{"Surface_tension", "0.0728"}});
 
   Parameters params;
   {

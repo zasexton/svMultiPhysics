@@ -2787,10 +2787,6 @@ TEST(LevelSetEquationTranslator,
       svmp::Physics::ParameterValue{true, "false"};
   free_surface.params["Surface_tension"] =
       svmp::Physics::ParameterValue{true, "0.8"};
-  free_surface.params["Curvature"] =
-      svmp::Physics::ParameterValue{true, "0.0"};
-  free_surface.params["Use_level_set_curvature"] =
-      svmp::Physics::ParameterValue{true, "false"};
   free_surface.params["Contact_line_model"] =
       svmp::Physics::ParameterValue{true, "DynamicContactAngle"};
   free_surface.params["Contact_line_wall_marker"] =

@@ -172,7 +172,6 @@ ns::FreeSurfaceBoundary unfittedBoundary(
         .surface_tension = surface_tension,
         .surface_tension_form = ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
         .surface_tension_semi_implicit = semi_implicit,
-        .use_level_set_curvature = false,
         .small_cut_aggregation = false,
     };
 }

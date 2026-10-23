@@ -2360,8 +2360,6 @@ TEST(NavierStokesLegacyBCs,
         defined("LinearCorner");
     free_surface.params["Small_cut_aggregation"] = defined("false");
     free_surface.params["Surface_tension"] = defined("0.8");
-    free_surface.params["Curvature"] = defined("0.0");
-    free_surface.params["Use_level_set_curvature"] = defined("false");
     free_surface.params["Contact_line_model"] =
         defined("DynamicContactAngle");
     free_surface.params["Contact_line_wall_marker"] =
@@ -2470,8 +2468,6 @@ TEST(NavierStokesLegacyBCs,
         defined("LinearCorner");
     free_surface.params["Small_cut_aggregation"] = defined("false");
     free_surface.params["Surface_tension"] = defined("0.8");
-    free_surface.params["Curvature"] = defined("0.0");
-    free_surface.params["Use_level_set_curvature"] = defined("false");
     free_surface.params["Contact_line_model"] =
         defined("PrescribedAngle");
     free_surface.params["Contact_line_wall_marker"] =
@@ -2606,8 +2602,6 @@ TEST(NavierStokesLegacyBCs,
             defined("LinearCorner");
         free_surface.params["Small_cut_aggregation"] = defined("false");
         free_surface.params["Surface_tension"] = defined("0.8");
-        free_surface.params["Curvature"] = defined("0.0");
-        free_surface.params["Use_level_set_curvature"] = defined("false");
         free_surface.params["Contact_line_model"] =
             defined("PrescribedAngle");
         free_surface.params["Contact_line_wall_marker"] =
@@ -2717,8 +2711,6 @@ TEST(NavierStokesLegacyBCs, ResolvedArtifactSectionRecordsTheSourceOfEveryFreeSu
         defined("LinearCorner");
     free_surface.params["Small_cut_aggregation"] = defined("false");
     free_surface.params["Surface_tension"] = defined("0.8");
-    free_surface.params["Curvature"] = defined("0.0");
-    free_surface.params["Use_level_set_curvature"] = defined("false");
     free_surface.params["Contact_line_model"] =
         defined("PrescribedAngle");
     free_surface.params["Contact_line_wall_marker"] =

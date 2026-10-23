@@ -3000,7 +3000,6 @@ void equilibrate(std::vector<FE::Real>& matrix, std::size_t n)
             .active_domain_method = ns::FreeSurfaceActiveDomainMethod::CutVolume,
             .external_pressure = 0.0,
             .surface_tension = 0.0,
-            .use_level_set_curvature = false,
             .cut_cell_stabilization = {
                 .enabled = true,
                 .pressure_gradient_penalty = 1.0,
@@ -5342,7 +5341,6 @@ void setWetBlockP1Field(
         ns::FreeSurfaceActiveDomainMethod::CutVolume;
     free_surface.external_pressure = FE::Real{0.0};
     free_surface.surface_tension = FE::Real{0.0};
-    free_surface.use_level_set_curvature = false;
     free_surface.cut_cell_stabilization.enabled = false;
     free_surface.small_cut_aggregation = false;
     options.free_surface.push_back(std::move(free_surface));
@@ -8587,7 +8585,6 @@ void collectivePublishWetBlockReferenceBundle(
         ns::FreeSurfaceActiveDomainMethod::CutVolume;
     free_surface.external_pressure = FE::Real{0.0};
     free_surface.surface_tension = FE::Real{0.0};
-    free_surface.use_level_set_curvature = false;
     free_surface.cut_cell_stabilization.enabled = false;
     free_surface.small_cut_aggregation = false;
     options.free_surface.push_back(std::move(free_surface));
@@ -9935,7 +9932,6 @@ TEST(FreeSurfaceCutStability,
         ns::FreeSurfaceActiveDomainMethod::CutVolume;
     free_surface.external_pressure = FE::Real{0.0};
     free_surface.surface_tension = FE::Real{0.0};
-    free_surface.use_level_set_curvature = false;
     free_surface.cut_cell_stabilization.enabled = false;
     // The physical velocity field is retained only on wet support.  Separate
     // auxiliary advection-velocity extension, when configured by an

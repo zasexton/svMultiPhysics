@@ -343,7 +343,6 @@ constexpr const char* pressure_anchor_domain_id =
             .active_domain_method = ns::FreeSurfaceActiveDomainMethod::CutVolume,
             .external_pressure = 0.0,
             .surface_tension = 0.0,
-            .use_level_set_curvature = false,
             .small_cut_aggregation = false,
         });
     return options;

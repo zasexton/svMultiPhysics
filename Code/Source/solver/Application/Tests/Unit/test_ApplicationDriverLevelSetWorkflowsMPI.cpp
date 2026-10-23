@@ -3201,7 +3201,6 @@ runMpiBalancedCapillaryCase(bool sessile,
               .surface_tension_form = channel_ns::
                   FreeSurfaceSurfaceTensionForm::
                       KinematicAreaGradientTraction,
-              .curvature = 0.0,
               .curvature_field_name = "kappa_balanced_mpi",
               .use_level_set_curvature = false,
               .small_cut_aggregation = false};
@@ -4354,7 +4353,6 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                     .external_pressure = 0.0,
                     .surface_tension = 1.0,
                     .surface_tension_form = surface_tension_form,
-                    .curvature = 0.0,
                     .curvature_field_name =
                         uses_area_gradient_traction
                             ? "kappa_physical_flat_mpi"
@@ -5689,8 +5687,6 @@ void runHydrostaticFixedGaugeMpiCase(
               .surface_tension_form =
                   channel_ns::FreeSurfaceSurfaceTensionForm::
                       SurfaceStress,
-              .curvature = 0.0,
-              .use_level_set_curvature = false,
               .small_cut_aggregation = false,
   };
   for (const auto& wall : contact_walls) {

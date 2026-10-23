@@ -2111,9 +2111,7 @@ public:
                 });
             free_surface.surface_tension = 0.8;
             free_surface.surface_tension_form =
-                ns::FreeSurfaceSurfaceTensionForm::CurvatureTraction;
-            free_surface.curvature = 0.0;
-            free_surface.use_level_set_curvature = false;
+                ns::FreeSurfaceSurfaceTensionForm::SurfaceStress;
             free_surface.contact_lines.push_back(
                 dynamicContactLine(wall_marker_));
             break;

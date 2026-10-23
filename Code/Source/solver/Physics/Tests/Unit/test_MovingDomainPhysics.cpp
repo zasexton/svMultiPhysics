@@ -1526,9 +1526,7 @@ void expectInvalidPreinstalledContactGeometryRejectedBeforeMutation(
             .active_domain_smoothing_width = 0.0,
             .surface_tension = FE::Real{0.8},
             .surface_tension_form =
-                ns::FreeSurfaceSurfaceTensionForm::CurvatureTraction,
-            .curvature = FE::Real{0.0},
-            .use_level_set_curvature = false,
+                ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
             .small_cut_aggregation = false,
         };
     boundary.contact_lines.push_back(
@@ -1769,7 +1767,6 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
             .external_pressure = external_pressure,
             .surface_tension = gamma,
             .surface_tension_form = surface_tension_form,
-            .curvature = 0.0,
             .use_level_set_curvature = false,
             .small_cut_aggregation = false,
         };
@@ -2116,7 +2113,7 @@ std::vector<FE::Real> unfittedContactAngleResidualVector(
         std::nullopt,
     FE::Real surface_tension = FE::Real{0.0},
     ns::FreeSurfaceSurfaceTensionForm surface_tension_form =
-        ns::FreeSurfaceSurfaceTensionForm::CurvatureTraction)
+        ns::FreeSurfaceSurfaceTensionForm::SurfaceStress)
 {
     constexpr int interface_marker = 66;
     constexpr int wall_marker = 16;
@@ -2470,9 +2467,7 @@ public:
                 });
             free_surface.surface_tension = 0.8;
             free_surface.surface_tension_form =
-                ns::FreeSurfaceSurfaceTensionForm::CurvatureTraction;
-            free_surface.curvature = 0.0;
-            free_surface.use_level_set_curvature = false;
+                ns::FreeSurfaceSurfaceTensionForm::SurfaceStress;
             free_surface.contact_lines.push_back(dynamicRenEContactLine(
                 wall_marker_,
                 FE::Real{1.57079632679489661923},
@@ -3388,7 +3383,6 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceAddsBoundaryResidual)
         .boundary_marker = marker,
         .external_pressure = 2.0,
         .surface_tension = 0.5,
-        .curvature = 1.25,
     });
 
     FE::systems::FESystem system(mesh);
@@ -4032,7 +4026,7 @@ TEST(MovingDomainPhysics, FittedAndUnfittedFlatStaticFreeSurfaceAgree)
             .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
             .external_pressure = external_pressure,
             .surface_tension_form =
-                ns::FreeSurfaceSurfaceTensionForm::CurvatureTraction,
+                ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
         });
     ns::IncompressibleNavierStokesVMSModule unfitted_module(
         u_space,
@@ -7154,8 +7148,6 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceUsesLevelSetInterfaceGe
         .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
         .external_pressure = 1.0,
         .surface_tension = 0.25,
-        .curvature = 2.0,
-        .use_level_set_curvature = false,
     });
 
     FE::systems::FESystem system(mesh);
@@ -9389,8 +9381,6 @@ TEST(MovingDomainPhysics, NavierStokesActiveDomainSurfaceTensionInstallsInterfac
         .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
         .external_pressure = 0.0,
         .surface_tension = 0.0728,
-        .curvature = 3.0,
-        .use_level_set_curvature = false,
     });
 
     FE::systems::FESystem system(mesh);
@@ -10458,9 +10448,7 @@ TEST(MovingDomainPhysics,
                 ns::FreeSurfaceActiveDomain::LevelSetNegative,
             .surface_tension = FE::Real{0.8},
             .surface_tension_form =
-                ns::FreeSurfaceSurfaceTensionForm::CurvatureTraction,
-            .curvature = FE::Real{0.0},
-            .use_level_set_curvature = false,
+                ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
             .contact_lines = {
                 prescribedContactLine(
                     wall_marker,
@@ -11097,7 +11085,6 @@ TEST(MovingDomainPhysics,
             .boundary_marker = marker,
             .external_pressure = 2.25,
             .surface_tension = 0.5,
-            .curvature = 3.0,
             .tangential_mesh_policy =
                 ns::FreeSurfaceTangentialMeshPolicy::Prescribed,
             .kinematic_enforcement =
@@ -12869,7 +12856,12 @@ TEST(MovingDomainPhysics,
             /*include_dynamic_contact_angle=*/true,
             /*assemble_jacobian=*/false,
             std::array<FE::Real, 4>{0.0, 0.0, 0.0, 0.0},
-            std::array<FE::Real, 3>{0.0, 0.0, 1.0}),
+            std::array<FE::Real, 3>{0.0, 0.0, 1.0},
+            /*level_set_scale=*/1.0,
+            /*level_set_shift=*/0.0,
+            /*velocity_component=*/0,
+            ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            ns::FreeSurfaceSurfaceTensionForm::SurfaceStress),
         std::invalid_argument);
 }
 
@@ -12903,8 +12895,6 @@ TEST(MovingDomainPhysics,
                 .active_domain_method =
                     ns::FreeSurfaceActiveDomainMethod::CutVolume,
                 .surface_tension = 0.8,
-                .curvature = 0.0,
-                .use_level_set_curvature = false,
                 .contact_lines = {
                     dynamicRenEContactLine(
                         wall_marker,
@@ -12955,7 +12945,15 @@ TEST(MovingDomainPhysics,
             theta,
             /*dynamic_angle=*/0.0,
             zero_velocity,
-            /*include_dynamic_contact_angle=*/true);
+            /*include_dynamic_contact_angle=*/true,
+            /*assemble_jacobian=*/false,
+            /*level_set_nodal_perturbation=*/{},
+            /*generated_boundary_normal=*/{0.0, 0.0, -1.0},
+            /*level_set_scale=*/1.0,
+            /*level_set_shift=*/0.0,
+            /*velocity_component=*/0,
+            ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            ns::FreeSurfaceSurfaceTensionForm::SurfaceStress);
         FAIL() << "Expected a wall-parallel interface normal to fail closed";
     } catch (const std::invalid_argument& error) {
         const std::string message = error.what();
@@ -13113,16 +13111,23 @@ TEST(MovingDomainPhysics,
     constexpr FE::Real contact_measure = 0.125;
     constexpr std::array<FE::Real, 4> velocity{
         speed, speed, speed, speed};
-    const auto dynamic = assembleDynamicContactAngleCase(
-        half_pi,
-        half_pi,
-        velocity,
-        /*include_dynamic_contact_angle=*/true);
-    const auto baseline = assembleDynamicContactAngleCase(
-        half_pi,
-        half_pi,
-        velocity,
-        /*include_dynamic_contact_angle=*/false);
+    const auto assemble = [&](bool include_dynamic_contact_angle) {
+        return assembleDynamicContactAngleCase(
+            half_pi,
+            half_pi,
+            velocity,
+            include_dynamic_contact_angle,
+            /*assemble_jacobian=*/false,
+            /*level_set_nodal_perturbation=*/{},
+            /*generated_boundary_normal=*/{0.0, 0.0, -1.0},
+            /*level_set_scale=*/1.0,
+            /*level_set_shift=*/0.0,
+            /*velocity_component=*/0,
+            ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            ns::FreeSurfaceSurfaceTensionForm::SurfaceStress);
+    };
+    const auto dynamic = assemble(true);
+    const auto baseline = assemble(false);
 
     ASSERT_EQ(dynamic.residual.size(), baseline.residual.size());
     FE::Real total_dissipation = 0.0;
@@ -13146,19 +13151,25 @@ TEST(MovingDomainPhysics,
     constexpr FE::Real theta = 1.0471975511965977462;
     constexpr FE::Real epsilon = 1.0e-7;
     const std::array<FE::Real, 4> velocity{0.20, 0.28, 0.17, 0.31};
-    const auto dynamic = assembleDynamicContactAngleCase(
-        theta,
-        theta,
-        velocity,
-        /*include_dynamic_contact_angle=*/true,
-        /*assemble_jacobian=*/true);
-    const auto baseline = assembleDynamicContactAngleCase(
-        theta,
-        theta,
-        velocity,
-        /*include_dynamic_contact_angle=*/false,
-        /*assemble_jacobian=*/true);
-    ASSERT_TRUE(dynamic.has_velocity_level_set_coupling);
+    const auto assemble = [&](const std::array<FE::Real, 4>& nodal_velocity,
+                              bool include_dynamic_contact_angle,
+                              bool assemble_jacobian) {
+        return assembleDynamicContactAngleCase(
+            theta,
+            theta,
+            nodal_velocity,
+            include_dynamic_contact_angle,
+            assemble_jacobian,
+            /*level_set_nodal_perturbation=*/{},
+            /*generated_boundary_normal=*/{0.0, 0.0, -1.0},
+            /*level_set_scale=*/1.0,
+            /*level_set_shift=*/0.0,
+            /*velocity_component=*/0,
+            ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            ns::FreeSurfaceSurfaceTensionForm::SurfaceStress);
+    };
+    const auto dynamic = assemble(velocity, true, true);
+    const auto baseline = assemble(velocity, false, true);
     ASSERT_EQ(dynamic.total_dofs, baseline.total_dofs);
     ASSERT_EQ(dynamic.jacobian.size(), baseline.jacobian.size());
 
@@ -13166,14 +13177,10 @@ TEST(MovingDomainPhysics,
     auto minus_velocity = velocity;
     plus_velocity[1] += epsilon;
     minus_velocity[1] -= epsilon;
-    const auto plus_dynamic = assembleDynamicContactAngleCase(
-        theta, theta, plus_velocity, true);
-    const auto plus_baseline = assembleDynamicContactAngleCase(
-        theta, theta, plus_velocity, false);
-    const auto minus_dynamic = assembleDynamicContactAngleCase(
-        theta, theta, minus_velocity, true);
-    const auto minus_baseline = assembleDynamicContactAngleCase(
-        theta, theta, minus_velocity, false);
+    const auto plus_dynamic = assemble(plus_velocity, true, false);
+    const auto plus_baseline = assemble(plus_velocity, false, false);
+    const auto minus_dynamic = assemble(minus_velocity, true, false);
+    const auto minus_baseline = assemble(minus_velocity, false, false);
 
     const auto column = dynamic.velocity_x_dofs[1];
     FE::Real analytic_norm2 = 0.0;
@@ -13390,43 +13397,40 @@ TEST(MovingDomainPhysics,
     constexpr std::array<FE::Real, 3> outward_wall_normal{0.0, 0.0, -1.0};
     constexpr FE::Real fully_dry_shift = 2.0;
 
-    const auto dynamic = assembleDynamicContactAngleCase(
-        angle,
-        angle,
-        velocity,
-        /*include_dynamic_contact_angle=*/true,
-        /*assemble_jacobian=*/true,
-        no_perturbation,
-        outward_wall_normal,
-        /*level_set_scale=*/1.0,
-        fully_dry_shift,
-        /*velocity_component=*/1);
-    const auto baseline = assembleDynamicContactAngleCase(
-        angle,
-        angle,
-        velocity,
-        /*include_dynamic_contact_angle=*/false,
-        /*assemble_jacobian=*/true,
-        no_perturbation,
-        outward_wall_normal,
-        /*level_set_scale=*/1.0,
-        fully_dry_shift,
-        /*velocity_component=*/1);
+    const auto assemble = [&](bool include_dynamic_contact_angle) {
+        return assembleDynamicContactAngleCase(
+            angle,
+            angle,
+            velocity,
+            include_dynamic_contact_angle,
+            /*assemble_jacobian=*/true,
+            no_perturbation,
+            outward_wall_normal,
+            /*level_set_scale=*/1.0,
+            fully_dry_shift,
+            /*velocity_component=*/1,
+            ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            ns::FreeSurfaceSurfaceTensionForm::SurfaceStress);
+    };
+    const auto dynamic = assemble(true);
+    const auto baseline = assemble(false);
 
+    // The synthetic contact rule remains present because dInterfaceBoundary
+    // assembly requires a generated marker.  Velocity is wall-tangential and
+    // orthogonal to the line footprint, so its selected y rows and y-y block
+    // isolate the wetted-wall slip from the x-directed line law, which keeps
+    // the equilibrium term -gamma cos(theta_e) v.m of SurfaceStress.
     ASSERT_EQ(dynamic.residual.size(), baseline.residual.size());
     FE::Real added_residual_norm2 = 0.0;
-    for (std::size_t row = 0; row < dynamic.residual.size(); ++row) {
-        const auto added = dynamic.residual[row] - baseline.residual[row];
+    for (const auto row : dynamic.velocity_x_dofs) {
+        const auto index = static_cast<std::size_t>(row);
+        const auto added = dynamic.residual[index] - baseline.residual[index];
         added_residual_norm2 += added * added;
     }
     EXPECT_NEAR(std::sqrt(added_residual_norm2), 0.0, 2.0e-12);
 
     ASSERT_EQ(dynamic.jacobian.size(), baseline.jacobian.size());
     FE::Real added_jacobian_norm2 = 0.0;
-    // The synthetic contact rule remains present because dInterfaceBoundary
-    // assembly requires a generated marker.  Velocity is wall-tangential and
-    // orthogonal to the line footprint, so its selected y-y block isolates
-    // the wetted-wall slip tangent from the x-directed line law.
     for (const auto row : dynamic.velocity_x_dofs) {
         for (const auto column : dynamic.velocity_x_dofs) {
             const auto entry = static_cast<std::size_t>(
@@ -13793,8 +13797,6 @@ TEST(MovingDomainPhysics,
         fs.active_domain_method =
             ns::FreeSurfaceActiveDomainMethod::CutVolume;
         fs.surface_tension = 0.8;
-        fs.curvature = 0.0;
-        fs.use_level_set_curvature = false;
         fs.small_cut_aggregation = false;
         fs.contact_lines.push_back(dynamicRenEContactLine(
             wall_marker, 1.1, {0.0, 0.0, -1.0}, 0.5, 0.2));
@@ -13977,7 +13979,6 @@ TEST(MovingDomainPhysics,
                     ns::FreeSurfaceActiveDomainMethod::
                         CutVolume,
                 .surface_tension = 0.0,
-                .use_level_set_curvature = false,
                 .small_cut_aggregation = true,
             });
 
@@ -14086,7 +14087,6 @@ TEST(MovingDomainPhysics,
                     ns::FreeSurfaceActiveDomainMethod::
                         CutVolume,
                 .surface_tension = 0.0,
-                .use_level_set_curvature = false,
                 .small_cut_aggregation = true,
             });
 
