@@ -2105,7 +2105,8 @@ public:
                 .level_set_field_name = "phi_native_channel",
                 .generated_interface_domain_id =
                     "native_manufactured_channel",
-                .generated_interface_geometry = "LinearCorner",
+                .generated_interface_geometry =
+                    channel_ns::FreeSurfaceGeneratedInterfaceGeometry::LinearCorner,
                 .level_set_isovalue = 0.0,
                 .active_domain =
                     active_side_ == ActiveSide::Negative
@@ -7699,7 +7700,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
                 .level_set_field_name = "phi_physical_flat_static",
                 .generated_interface_domain_id =
                     "physical_flat_static_capillary",
-                .generated_interface_geometry = "LinearCorner",
+                .generated_interface_geometry =
+                    channel_ns::FreeSurfaceGeneratedInterfaceGeometry::LinearCorner,
                 .active_domain =
                     positive_side
                         ? channel_ns::FreeSurfaceActiveDomain::LevelSetPositive
@@ -8253,7 +8255,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
                     "phi_physical_hydrostatic_fixed_gauge",
                 .generated_interface_domain_id =
                     "physical_hydrostatic_fixed_gauge",
-                .generated_interface_geometry = "LinearCorner",
+                .generated_interface_geometry =
+                    channel_ns::FreeSurfaceGeneratedInterfaceGeometry::LinearCorner,
                 .active_domain =
                     positive_side
                         ? channel_ns::FreeSurfaceActiveDomain::LevelSetPositive

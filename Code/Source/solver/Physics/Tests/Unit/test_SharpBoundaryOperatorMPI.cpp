@@ -3150,7 +3150,7 @@ TEST(FreeSurfaceSharpBoundaryOperators,
     const auto expect_rejection =
         [](int velocity_order,
            int pressure_order,
-           std::string generated_geometry,
+           ns::FreeSurfaceGeneratedInterfaceGeometry generated_geometry,
            std::string_view expected_message) {
             auto mesh =
                 std::make_shared<PartitionedSingleTetraBoundaryMesh>(
@@ -3194,7 +3194,7 @@ TEST(FreeSurfaceSharpBoundaryOperators,
                         .generated_interface_domain_id =
                             "free_surface",
                         .generated_interface_geometry =
-                            std::move(generated_geometry),
+                            generated_geometry,
                         .active_domain =
                             ns::FreeSurfaceActiveDomain::
                                 LevelSetNegative,
@@ -3219,12 +3219,14 @@ TEST(FreeSurfaceSharpBoundaryOperators,
             FAIL() << "sharp high-order envelope did not fail closed";
         };
 
-    expect_rejection(2, 1, "LinearCorner", "order-1 velocity and pressure");
-    expect_rejection(1, 2, "LinearCorner", "order-1 velocity and pressure");
+    expect_rejection(2, 1, ns::FreeSurfaceGeneratedInterfaceGeometry::LinearCorner,
+                     "order-1 velocity and pressure");
+    expect_rejection(1, 2, ns::FreeSurfaceGeneratedInterfaceGeometry::LinearCorner,
+                     "order-1 velocity and pressure");
     expect_rejection(
         1,
         1,
-        "HighOrderImplicit",
+        ns::FreeSurfaceGeneratedInterfaceGeometry::HighOrderImplicit,
         "Generated_interface_geometry=LinearCorner");
     ::testing::Test::RecordProperty(
         "sharp_high_order_envelope_rejection_count", 3);

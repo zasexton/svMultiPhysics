@@ -6753,7 +6753,8 @@ TEST(MovingDomainPhysics,
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
 
-    const auto register_with = [&](std::string tangent_policy) {
+    const auto register_with =
+        [&](ns::FreeSurfaceGeometryTangentPolicy tangent_policy) {
         auto opts = baseNavierStokesOptions();
         opts.free_surface.push_back(
             ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
@@ -6761,7 +6762,7 @@ TEST(MovingDomainPhysics,
                     ns::FreeSurfaceImplementation::UnfittedLevelSet,
                 .interface_marker = interface_marker,
                 .level_set_field_name = "phi_surface_stress_tangent",
-                .geometry_tangent_policy = std::move(tangent_policy),
+                .geometry_tangent_policy = tangent_policy,
                 .active_domain =
                     ns::FreeSurfaceActiveDomain::LevelSetNegative,
                 .surface_tension = 0.072,
@@ -6778,8 +6779,10 @@ TEST(MovingDomainPhysics,
         module.registerOn(system);
     };
 
-    EXPECT_NO_THROW(register_with("RefreshedFrozenQuadrature"));
-    EXPECT_THROW(register_with("DifferentiatedQuadrature"),
+    EXPECT_NO_THROW(register_with(
+        ns::FreeSurfaceGeometryTangentPolicy::RefreshedFrozenQuadrature));
+    EXPECT_THROW(register_with(
+                     ns::FreeSurfaceGeometryTangentPolicy::DifferentiatedQuadrature),
                  std::invalid_argument);
 }
 
@@ -7254,7 +7257,7 @@ TEST(MovingDomainPhysics,
         [&](std::string_view variant,
             int velocity_order,
             int pressure_order,
-            std::string generated_geometry,
+            ns::FreeSurfaceGeneratedInterfaceGeometry generated_geometry,
             std::string_view expected_diagnostic,
             const auto& configure_outflow) {
             SCOPED_TRACE(variant);
@@ -7280,8 +7283,7 @@ TEST(MovingDomainPhysics,
                         "phi_coupled_outflow_envelope",
                     .generated_interface_domain_id =
                         "coupled_outflow_envelope",
-                    .generated_interface_geometry =
-                        std::move(generated_geometry),
+                    .generated_interface_geometry = generated_geometry,
                     .active_domain =
                         ns::FreeSurfaceActiveDomain::LevelSetNegative,
                     .active_domain_method =
@@ -7319,7 +7321,7 @@ TEST(MovingDomainPhysics,
         "rcr_polynomial_order",
         /*velocity_order=*/2,
         /*pressure_order=*/1,
-        "LinearCorner",
+        ns::FreeSurfaceGeneratedInterfaceGeometry::LinearCorner,
         "order-1 velocity and pressure",
         [](auto& opts) {
             opts.coupled_outflow_rcr.push_back(
@@ -7335,7 +7337,7 @@ TEST(MovingDomainPhysics,
         "rcrcr_generated_geometry",
         /*velocity_order=*/1,
         /*pressure_order=*/1,
-        "HighOrderImplicit",
+        ns::FreeSurfaceGeneratedInterfaceGeometry::HighOrderImplicit,
         "Generated_interface_geometry=LinearCorner",
         [](auto& opts) {
             opts.coupled_outflow_rcrcr.push_back(
@@ -8042,8 +8044,10 @@ TEST(MovingDomainPhysics,
     opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
         .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
         .level_set_field_name = "phi",
-        .generated_interface_geometry = "HighOrderImplicit",
-        .geometry_tangent_policy = "RefreshedFrozenQuadrature",
+        .generated_interface_geometry =
+            ns::FreeSurfaceGeneratedInterfaceGeometry::HighOrderImplicit,
+        .geometry_tangent_policy =
+            ns::FreeSurfaceGeometryTangentPolicy::RefreshedFrozenQuadrature,
         .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
         .external_pressure = 1.0,
         .cut_cell_stabilization = {
@@ -8170,8 +8174,10 @@ TEST(MovingDomainPhysics,
     opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
         .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
         .level_set_field_name = "phi",
-        .generated_interface_geometry = "HighOrderImplicit",
-        .geometry_tangent_policy = "RefreshedFrozenQuadrature",
+        .generated_interface_geometry =
+            ns::FreeSurfaceGeneratedInterfaceGeometry::HighOrderImplicit,
+        .geometry_tangent_policy =
+            ns::FreeSurfaceGeometryTangentPolicy::RefreshedFrozenQuadrature,
         .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
         .external_pressure = 1.0,
         .cut_cell_stabilization = {
@@ -11954,7 +11960,7 @@ TEST(MovingDomainPhysics,
     });
     expect_rejected([](auto& opts) {
         opts.free_surface.front().generated_interface_geometry =
-            "HighOrderImplicit";
+            ns::FreeSurfaceGeneratedInterfaceGeometry::HighOrderImplicit;
     });
     expect_rejected([](auto& opts) {
         opts.free_surface.front().active_domain_smoothing_width = 0.25;
@@ -12790,7 +12796,8 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedPrescribedContactAngleRequiresLine
     };
 
     expect_rejected(p1_space, [](auto& free_surface) {
-        free_surface.generated_interface_geometry = "HighOrderImplicit";
+        free_surface.generated_interface_geometry =
+            ns::FreeSurfaceGeneratedInterfaceGeometry::HighOrderImplicit;
     });
     auto p2_space = FE::spaces::Space(
         FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);

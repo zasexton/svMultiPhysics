@@ -132,6 +132,12 @@ freeSurfaceContactLineInputSchema();
 /// the boundary's stored input).
 [[nodiscard]] std::string resolvedFreeSurfacesJson(const std::vector<FreeSurfaceBoundary>& free_surfaces);
 
+[[nodiscard]] const char* freeSurfaceGeneratedInterfaceGeometryName(
+    FreeSurfaceGeneratedInterfaceGeometry geometry) noexcept;
+
+[[nodiscard]] const char* freeSurfaceGeometryTangentPolicyName(
+    FreeSurfaceGeometryTangentPolicy policy) noexcept;
+
 [[nodiscard]] const char* pressureActiveDomainName(
     FreeSurfaceActiveDomain domain) noexcept;
 

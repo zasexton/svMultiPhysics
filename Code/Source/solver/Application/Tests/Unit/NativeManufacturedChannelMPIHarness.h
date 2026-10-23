@@ -500,7 +500,8 @@ public:
             .level_set_field_name = "phi_native_channel",
             .generated_interface_domain_id =
                 "native_manufactured_channel",
-            .generated_interface_geometry = "LinearCorner",
+            .generated_interface_geometry =
+                channel::FreeSurfaceGeneratedInterfaceGeometry::LinearCorner,
             .level_set_isovalue = 0.0,
             .active_domain =
                 active_side_ == ActiveSide::Negative

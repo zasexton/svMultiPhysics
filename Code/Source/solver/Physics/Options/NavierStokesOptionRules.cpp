@@ -247,8 +247,8 @@ void validateFreeSurfaceSemiImplicitSurfaceTension(
         bc.active_domain_smoothing_width != FE::Real{0.0}) {
         reject("Active_domain_method=CutVolume with zero smoothing width");
     }
-    if (normalizedFreeSurfaceOptionToken(bc.generated_interface_geometry) !=
-        "linearcorner") {
+    if (bc.generated_interface_geometry !=
+        FreeSurfaceGeneratedInterfaceGeometry::LinearCorner) {
         reject("Generated_interface_geometry=LinearCorner, whose facet "
                "normal is piecewise constant");
     }
@@ -744,8 +744,8 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                     throw std::invalid_argument(
                         "IncompressibleNavierStokesVMSModule: prescribed unfitted contact angles require an active liquid side (LevelSetNegative or LevelSetPositive)");
                 }
-                if (normalizedFreeSurfaceOptionToken(
-                        bc.generated_interface_geometry) != "linearcorner") {
+                if (bc.generated_interface_geometry !=
+                    FreeSurfaceGeneratedInterfaceGeometry::LinearCorner) {
                     throw std::invalid_argument(
                         "IncompressibleNavierStokesVMSModule: prescribed unfitted contact angles currently support only Generated_interface_geometry=LinearCorner; high-order implicit contact geometry is not yet validated");
                 }
@@ -829,8 +829,8 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                 throw std::invalid_argument(
                     "IncompressibleNavierStokesVMSModule: DynamicContactAngle with Active_domain_method=CutVolume requires active_domain_smoothing_width=0 because the sharp operator has no smoothing-width parameter");
             }
-            if (normalizedFreeSurfaceOptionToken(
-                    bc.generated_interface_geometry) != "linearcorner") {
+            if (bc.generated_interface_geometry !=
+                FreeSurfaceGeneratedInterfaceGeometry::LinearCorner) {
                 throw std::invalid_argument(
                     "IncompressibleNavierStokesVMSModule: DynamicContactAngle currently supports only Generated_interface_geometry=LinearCorner; high-order implicit contact geometry is not yet validated");
             }
@@ -974,9 +974,8 @@ void validateNavierStokesBoundaryConfiguration(
         for (const auto& free_surface : free_surfaces) {
             if (isUnfittedLevelSet(free_surface) &&
                 free_surface.active_domain != FreeSurfaceActiveDomain::None &&
-                normalizedFreeSurfaceOptionToken(
-                    free_surface.generated_interface_geometry) !=
-                    "linearcorner") {
+                free_surface.generated_interface_geometry !=
+                    FreeSurfaceGeneratedInterfaceGeometry::LinearCorner) {
                 throw std::invalid_argument(
                     "IncompressibleNavierStokesVMSModule: sharp generated exterior-boundary forms currently require Generated_interface_geometry=LinearCorner; high-order active-boundary quadrature and entity measures are not qualified");
             }
@@ -1976,9 +1975,10 @@ IncompressibleTwoFluidPreflight preflightIncompressibleTwoFluid(
         throw std::invalid_argument(
             "IncompressibleTwoFluidModule: operator tag and generated-interface domain must be nonempty");
     }
-    if (options.generated_interface_geometry != "LinearCorner" ||
+    if (options.generated_interface_geometry !=
+            FreeSurfaceGeneratedInterfaceGeometry::LinearCorner ||
         options.geometry_tangent_policy !=
-            "RefreshedFrozenQuadrature") {
+            FreeSurfaceGeometryTangentPolicy::RefreshedFrozenQuadrature) {
         throw std::invalid_argument(
             "IncompressibleTwoFluidModule: the initial envelope requires LinearCorner generated geometry with RefreshedFrozenQuadrature tangents");
     }

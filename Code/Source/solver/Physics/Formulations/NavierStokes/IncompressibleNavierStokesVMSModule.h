@@ -105,6 +105,22 @@ enum class FreeSurfaceActiveDomainMethod : std::uint8_t {
     CutVolume
 };
 
+// Geometry of a generated (unfitted) interface: the piecewise-linear corner
+// geometry or the high-order implicit surface (the FE level-set
+// GeneratedInterfaceGeometryMode of the cut request).
+enum class FreeSurfaceGeneratedInterfaceGeometry : std::uint8_t {
+    LinearCorner,
+    HighOrderImplicit
+};
+
+// Newton tangent of the generated geometry: quadrature refreshed and frozen
+// within a step, or differentiated with respect to the level set (the FE
+// level-set GeometryTangentPolicy of the cut request).
+enum class FreeSurfaceGeometryTangentPolicy : std::uint8_t {
+    RefreshedFrozenQuadrature,
+    DifferentiatedQuadrature
+};
+
 // Penalty and Nitsche (schema-1 fluid kinematic rows on fitted boundaries)
 // were retired by decision D47 Q9.
 enum class FreeSurfaceKinematicEnforcement : std::uint8_t {
@@ -272,8 +288,10 @@ struct FreeSurfaceBoundary {
     int interface_marker{-1};
     std::string level_set_field_name{"level_set"};
     std::string generated_interface_domain_id{"free_surface"};
-    std::string generated_interface_geometry{"LinearCorner"};
-    std::string geometry_tangent_policy{"RefreshedFrozenQuadrature"};
+    FreeSurfaceGeneratedInterfaceGeometry generated_interface_geometry{
+        FreeSurfaceGeneratedInterfaceGeometry::LinearCorner};
+    FreeSurfaceGeometryTangentPolicy geometry_tangent_policy{
+        FreeSurfaceGeometryTangentPolicy::RefreshedFrozenQuadrature};
     FE::Real level_set_isovalue{0.0};
 
     // Optional active-domain restriction for unfitted level-set volume terms.
@@ -961,36 +979,18 @@ contactLineWallNormal(const FreeSurfaceContactLine& contact_line)
     return normal;
 }
 
-[[nodiscard]] inline std::string normalizedFreeSurfaceOptionToken(std::string value)
-{
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) {
-                       return static_cast<char>(std::tolower(c));
-                   });
-    value.erase(std::remove_if(value.begin(), value.end(),
-                               [](unsigned char c) {
-                                   return c == '_' || c == '-' || std::isspace(c);
-                               }),
-                value.end());
-    return value;
-}
-
 [[nodiscard]] inline bool isRefreshedFrozenGeometryTangent(
     const FreeSurfaceBoundary& bc)
 {
-    const auto token =
-        normalizedFreeSurfaceOptionToken(bc.geometry_tangent_policy);
-    return token.empty() || token == "refreshedfrozenquadrature" ||
-           token == "refreshedfrozen" || token == "frozenquadrature";
+    return bc.geometry_tangent_policy ==
+           FreeSurfaceGeometryTangentPolicy::RefreshedFrozenQuadrature;
 }
 
 [[nodiscard]] inline bool isHighOrderImplicitGeneratedInterface(
     const FreeSurfaceBoundary& bc)
 {
-    const auto token =
-        normalizedFreeSurfaceOptionToken(bc.generated_interface_geometry);
-    return token == "highorderimplicit" || token == "implicit" ||
-           token == "saye" || token == "sayeimplicit";
+    return bc.generated_interface_geometry ==
+           FreeSurfaceGeneratedInterfaceGeometry::HighOrderImplicit;
 }
 
 [[nodiscard]] inline const char* pressureStabilizationDisabledReason(
@@ -1093,8 +1093,10 @@ struct IncompressibleTwoFluidOptions {
     std::string operator_tag{"equations"};
     std::string level_set_field_name{"level_set"};
     std::string generated_interface_domain_id{"two_fluid_interface"};
-    std::string generated_interface_geometry{"LinearCorner"};
-    std::string geometry_tangent_policy{"RefreshedFrozenQuadrature"};
+    FreeSurfaceGeneratedInterfaceGeometry generated_interface_geometry{
+        FreeSurfaceGeneratedInterfaceGeometry::LinearCorner};
+    FreeSurfaceGeometryTangentPolicy geometry_tangent_policy{
+        FreeSurfaceGeometryTangentPolicy::RefreshedFrozenQuadrature};
     int interface_marker{-1};
     FE::Real level_set_isovalue{0.0};
 

@@ -40,8 +40,10 @@ void logUnfittedFreeSurfaceMode(const FreeSurfaceBoundary& bc)
         std::to_string(bc.interface_marker) +
         " level_set_field='" + bc.level_set_field_name + "'" +
         " generated_interface_domain_id='" + bc.generated_interface_domain_id + "'" +
-        " generated_interface_geometry=" + bc.generated_interface_geometry +
-        " geometry_tangent_policy=" + bc.geometry_tangent_policy +
+        " generated_interface_geometry=" +
+        freeSurfaceGeneratedInterfaceGeometryName(bc.generated_interface_geometry) +
+        " geometry_tangent_policy=" +
+        freeSurfaceGeometryTangentPolicyName(bc.geometry_tangent_policy) +
         " active_domain=" + activeDomainName(bc.active_domain) +
         " active_domain_method=" + activeDomainMethodName(bc.active_domain_method) +
         " dynamic_stress=" + (has_dynamic_stress ? "enabled" : "natural_zero") +
@@ -229,9 +231,10 @@ void logCutCellStabilization(
         << " Active_domain_method="
         << activeDomainMethodName(bc.active_domain_method)
         << " generated_interface_geometry="
-        << bc.generated_interface_geometry
+        << freeSurfaceGeneratedInterfaceGeometryName(
+               bc.generated_interface_geometry)
         << " geometry_tangent_policy="
-        << bc.geometry_tangent_policy
+        << freeSurfaceGeometryTangentPolicyName(bc.geometry_tangent_policy)
         << " use_cut_metadata_scale="
         << (cut.use_cut_metadata_scale ? "true" : "false")
         << " cut_metadata_scale_cap=";

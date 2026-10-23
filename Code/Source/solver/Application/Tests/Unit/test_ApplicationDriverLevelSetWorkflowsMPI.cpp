@@ -3280,7 +3280,8 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                         "phi_physical_flat_mpi",
                     .generated_interface_domain_id =
                         "physical_flat_capillary_mpi",
-                    .generated_interface_geometry = "LinearCorner",
+                    .generated_interface_geometry =
+                        channel_ns::FreeSurfaceGeneratedInterfaceGeometry::LinearCorner,
                     .active_domain =
                         positive_side
                             ? channel_ns::FreeSurfaceActiveDomain::
@@ -4529,7 +4530,8 @@ void runHydrostaticFixedGaugeMpiCase(
                   "phi_physical_hydrostatic_fixed_gauge_mpi",
               .generated_interface_domain_id =
                   "physical_hydrostatic_fixed_gauge_mpi",
-              .generated_interface_geometry = "LinearCorner",
+              .generated_interface_geometry =
+                  channel_ns::FreeSurfaceGeneratedInterfaceGeometry::LinearCorner,
               .active_domain =
                   positive_side
                       ? channel_ns::FreeSurfaceActiveDomain::
