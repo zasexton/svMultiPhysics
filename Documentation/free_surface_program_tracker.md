@@ -976,7 +976,8 @@ These are proposals. Each lists a recommended option and an alternative. Record 
        - G4(b) and E3 state their forms in `NavierStokesPostProcessing.h`;
        - P2 thins the register to peer size.
      - **Estimate:** about 155 h of agent time and about 42 jobs in total (D49: 135 h, 40).
-  - **Progress 2026-10-23 (`07b67ee4`):** `Physics/Formulations/NavierStokes` has 52 files and 28,778 lines on main (84 and 42,045 before the train). Integrated with the train: the S9/S10 retirements, M4 and E1; P6a and P6b phase 1; R2's E0, M1, M1-r and M3; R1's X1, B1, O1 and S1; P2 batch A. Integration gates: build, CTest with no new failures, the exhaustive matrix, reference sets serial and at 2 and 4 ranks, S0 manifests 16/16 with 0 JIT misses, and the pytest statuses (11 reviewed changes). E1 was also checked MUMPS-on (gtests at 1, 2 and 4 ranks; `mumps_serial` outputs and per-rank logs identical).
+  - **Progress 2026-10-23 (`07b67ee4`):** `Physics/Formulations/NavierStokes` has 52 files and 28,778 lines on main (84 and 42,045 before the train). Integrated with the train: the S9/S10 retirements, M4 and the PDE velocity-extension move to `FE/LevelSet/Extension` (the maintenance plan's step E1, not milestone step E1); P6a and P6b phase 1; R2's E0, M1, M1-r and M3; R1's X1, B1, O1 and S1; P2 batch A. Integration gates: build, CTest with no new failures, the exhaustive matrix, reference sets serial and at 2 and 4 ranks, S0 manifests 16/16 with 0 JIT misses, and the pytest statuses (11 reviewed changes). That move was also checked MUMPS-on (gtests at 1, 2 and 4 ranks; `mumps_serial` outputs and per-rank logs identical).
+  - **Progress 2026-10-23, train 2 (`1cbd8a2d`):** 28 files and 14,261 lines on main. Integrated: S8's G1 (accepted-stage and functional records in FE), R1's T1 and G3 (two-fluid formulation folded into the module; its stage records in FE), S9/S10's M5 (contact stages as FE services) and R2's G2 (the FE energy-balance ledger). Same integration gates as the first train; S8's link check now also fails on duplicate strong definitions.
 - **D51, 2026-10-22 (user): the WP-4 closure decisions held since 2026-10-22 00:00 (c4, c5, c6, c7, Q2).**
   1. **c4: the bound-preserving limiter is retired** (D47 item 5 kept it until the SPHERIC re-run).
      - The rule declared before C2 (job 139, `plan_wp4c2.txt`) retires it unless the limiter-on run completes. Both limiter-on runs failed closed at step 1 (extension-map revision chain), while the limiter-off and patch-bound runs reached step 193 with no spurious liquid and a volume drift of 1.05e-5.
@@ -1007,6 +1008,11 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   - **Mean-zero pressure as a multiplier:** allowed on matrix solvers only; the automatic gauge stays the default.
   - **Global residual rows** are summed with the exact, order-independent accumulator (D49 item 5), so they do not change with the rank count.
   - **Bitwise:** new space and measure kinds are appended to their enumerations, so existing decks keep their JIT keys and manifests; no existing coupling is migrated as part of D54.
+- **D55, 2026-10-23 (user): the advection velocity-extension method is required once the wall-compatible wet extension is retired** (D47 Q5).
+  - Retiring the wall-compatible wet extension removes it as the default `Advection_velocity_extension_method`. With the wet extension on, the method must be given: a missing method, `wall_compatible_normal` or a nearest-* alias fails with a D47 message.
+  - Decks that relied on the default (open-vessel `linear_sloshing_2d`, `square_tank_tilt_settling`), the SPHERIC and validation decks and their generators state `pde_harmonic` explicitly and are marked not re-validated, as in Q2.
+  - The MMS and wall-advection qualification records stay as history. Changing defaults stays a later, separate step (D47 item 1).
+  - **Order (maintenance plan):** W (retire `LevelSetVelocityExtensionMap.{h,cpp}`, about 3,500 lines; `velocityExtensionMapRevision` moves to `FE/LevelSet/Extension`), then E2, then E3.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
@@ -1624,7 +1630,7 @@ Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch t
   - `NavierStokesVMSFormulation.h` goes into the module header.
   - `FreeSurfaceCollectives.h` is deleted.
 - [x] O1 (R1, params reviews): `FreeSurfaceOptions.h` and the two-fluid option types go into `IncompressibleNavierStokesVMSModule.h`. Type moves only. *(On main with the train, `07b67ee4`, 2026-10-23.)*
-- [ ] T1 (R1, R2 reviews): fold the two-fluid formulation into `IncompressibleNavierStokesVMSModule` as an option.
+- [x] T1 (R1, R2 reviews): fold the two-fluid formulation into `IncompressibleNavierStokesVMSModule` as an option. *(On main with train 2, `1cbd8a2d`, 2026-10-23.)*
   - `IncompressibleTwoFluidModule.{h,cpp}` and `IncompressibleTwoFluidInterface.{h,cpp}` go; the interface forms move into `NavierStokesBCFactories.h`.
   - Comes before G3 and P2.
   - Gate:
@@ -1637,17 +1643,17 @@ Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch t
 
 - [x] M3 (R2): run support and step context to FE. *(On main with the train, `07b67ee4`, 2026-10-23.)*
 - [x] M4 (S9/S10 with R2): the level-set maintenance work ledger in FE/LevelSet/Maintenance. *(On main with the train, `07b67ee4`, 2026-10-23.)*
-- [ ] M5 (R2, S9/S10): operator-stage capture, contact-line observables, wall constraints.
+- [x] M5 (R2, S9/S10): operator-stage capture, contact-line observables, wall constraints. *(Done by S9/S10; on main with train 2, `1cbd8a2d`, 2026-10-23.)*
 - [ ] P6b phase 2 (params): the projection and the minimizer's KAG branch.
 - [ ] G4(a) (R1): `FormulationBuilder` functional, work-channel and diagnostic declarations.
 
 **Phase 3**
 
-- [ ] G1 (R2): generic accepted-stage and functional records.
-- [ ] G2 (R2): the energy-balance ledger with named channels and declared identities.
-- [ ] G3 (R2): two-fluid stage records, with the measures as data.
+- [x] G1 (R2): generic accepted-stage and functional records. *(Done by S8; on main with train 2, `1cbd8a2d`, 2026-10-23.)*
+- [x] G2 (R2): the energy-balance ledger with named channels and declared identities. *(On main with train 2, `1cbd8a2d`, 2026-10-23. G2d, the energy participant to `FE/LevelSet`, follows with train 3.)*
+- [x] G3 (R2): two-fluid stage records, with the measures as data. *(Done by R1 with T1; on main with train 2, `1cbd8a2d`, 2026-10-23.)*
 - [ ] G4(b) (R1): create `NavierStokesPostProcessing.h`. Residual work, diagnostic operators and energy declarations are stated there.
-- [ ] G5 (R1, with S8): `ALEBinding` declarations, `LevelSetGeometry` markers and the contact-certificate hook, field binding, vertex-field initialization.
+- [ ] G5 (S8 leads since 2026-10-23; R1 keeps G4(a), G4(b) and L1): `ALEBinding` declarations, `LevelSetGeometry` markers and the contact-certificate hook, field binding, vertex-field initialization.
 - [ ] L1 (R1): log formats as FE data. The observer is removed.
 - [ ] E1 (R2, R1): the snapshot functional evaluator for forms (interpreted, exact reduction).
 - [ ] E2 (R2): calibration run at 1, 2 and 4 ranks. The final tolerance limits go to the user before E3.
