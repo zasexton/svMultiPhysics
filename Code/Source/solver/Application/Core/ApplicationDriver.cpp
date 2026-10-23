@@ -67,6 +67,7 @@
 #include "FE/Systems/TransientSystem.h"
 #include "FE/TimeStepping/FieldRepairPublication.h"
 #include "FE/TimeStepping/GeneratedState.h"
+#include "FE/TimeStepping/MeshNormalStageParticipant.h"
 #include "FE/TimeStepping/NewtonSolver.h"
 #include "FE/TimeStepping/StepParticipants.h"
 #include "FE/TimeStepping/TimeHistory.h"
@@ -80,10 +81,8 @@
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyCandidate.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceAcceptedFunctionals.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactStages.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceFieldEvaluators.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactStageParticipant.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyParticipant.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FittedALEOperatorStage.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/StaticCapillaryEquilibrium.h"
 #include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidAcceptedStage.h"
 #include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageParticipant.h"
@@ -2421,9 +2420,6 @@ void applyJacobianCheckGeometryProvenance(
   }
 }
 
-using svmp::Physics::formulations::navier_stokes::free_surface::
-    requireFittedALEOperatorStageSchemeCoverage;
-
 using svmp::FE::level_set::logCutTopologyChange;
 
 std::size_t writeWetVolumeFractionOutput(
@@ -3533,12 +3529,8 @@ std::uint64_t collectiveLevelSetMaintenanceAlgebraicRevision(
     std::span<const svmp::FE::Real> state,
     const svmp::MeshComm& comm);
 
-// The free-surface field evaluators and accepted discrete functionals are
-// Navier-Stokes free-surface physics
-// (Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceFieldEvaluators.h,
-// FreeSurfaceAcceptedFunctionals.h).
-using svmp::Physics::formulations::navier_stokes::free_surface::makeFreeSurfaceVelocityEvaluator;
-using svmp::Physics::formulations::navier_stokes::free_surface::makeFreeSurfaceScalarValueEvaluator;
+// The accepted discrete functionals are Navier-Stokes free-surface physics
+// (Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceAcceptedFunctionals.h).
 using svmp::Physics::formulations::navier_stokes::free_surface::freeSurfaceDiscreteFunctionalDeclarationContentKey;
 using svmp::Physics::formulations::navier_stokes::free_surface::evaluateCurrentFreeSurfaceDiscreteFunctionals;
 using svmp::Physics::formulations::navier_stokes::free_surface::attachAcceptedFreeSurfaceActiveVolumeEnergies;
@@ -11740,10 +11732,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         velocity_extension_artifact_comm,
         "initial_fixed_background_before_time_loop");
   }
-  // Fitted-ALE operator-stage measurements: Physics step participant
-  // (Physics/Formulations/NavierStokes/FreeSurface/FittedALEOperatorStage.h).
-  // The step participants share the run's FE system, time-integration
-  // selection, active FE communicator and the driver services they call.
+  // The free-surface step participants share the run's FE system,
+  // time-integration selection, active FE communicator and the driver
+  // services they call.
   const svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceStepContext free_surface_step_context{
       .sim = svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceRunComponents(sim),
       .transient = transient,
@@ -11764,9 +11755,22 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                 accepted_velocity_extension_maps);
           },
   };
+  // Fitted-ALE operator-stage measurements: FE mesh-normal stage participant
+  // (FE/TimeStepping/MeshNormalStageParticipant.h) on the run's FE system,
+  // time-integration selection and active FE communicator.
   const auto fitted_ale_stage_participant =
-      std::make_shared<svmp::Physics::formulations::navier_stokes::free_surface::FittedALEStageParticipant>(
-          free_surface_step_context);
+      std::make_shared<svmp::FE::timestepping::MeshNormalStageParticipant>(
+          svmp::FE::timestepping::MeshNormalStageContext{
+              .system = sim.fe_system.get(),
+              .scheme = opts.scheme,
+              .scheme_name = transient_scheme.canonical_name,
+              .comm = feCollectiveCommunicator(velocity_extension_artifact_comm),
+              .state_fingerprint =
+                  [comm = velocity_extension_artifact_comm](
+                      const svmp::FE::backends::GenericVector& state) {
+                    return collectiveMeshBoundaryStateFingerprint(state, comm);
+                  },
+          });
   auto& fitted_ale_stage = *fitted_ale_stage_participant;
   const bool& evaluate_fitted_ale_operator_stage =
       fitted_ale_stage.evaluate_fitted_ale_operator_stage;

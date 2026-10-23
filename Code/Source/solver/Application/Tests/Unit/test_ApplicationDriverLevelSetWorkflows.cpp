@@ -20,9 +20,11 @@
 #include "FE/Constraints/MultiPointConstraint.h"
 #include "FE/Geometry/CutQuadratureMapping.h"
 #include "FE/Interfaces/LevelSetInterfaceBuilder.h"
+#include "FE/Interfaces/SnapshotFieldEvaluator.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/ProductSpace.h"
 #include "FE/Spaces/SpaceFactory.h"
+#include "FE/Systems/SnapshotFieldAccess.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Fields/MeshFields.h"
 #include "Mesh/Mesh.h"
@@ -5329,19 +5331,20 @@ TEST(ApplicationDriverLevelSetWorkflows,
 TEST(ApplicationDriverLevelSetWorkflows,
      RegisteredFittedALEOperatorStageHistoryRejectsUnsupportedScheme)
 {
-  EXPECT_NO_THROW(requireFittedALEOperatorStageSchemeCoverage(
+  using svmp::FE::timestepping::requireMeshNormalStageSchemeCoverage;
+  EXPECT_NO_THROW(requireMeshNormalStageSchemeCoverage(
       /*declaration_count=*/0u,
       /*scheme_supported=*/false,
       "BDF2",
       /*temporal_order=*/1));
-  EXPECT_NO_THROW(requireFittedALEOperatorStageSchemeCoverage(
+  EXPECT_NO_THROW(requireMeshNormalStageSchemeCoverage(
       /*declaration_count=*/1u,
       /*scheme_supported=*/true,
       "BackwardEuler",
       /*temporal_order=*/1));
 
   try {
-    requireFittedALEOperatorStageSchemeCoverage(
+    requireMeshNormalStageSchemeCoverage(
         /*declaration_count=*/2u,
         /*scheme_supported=*/false,
         "BDF2",
@@ -6185,11 +6188,12 @@ TEST(ApplicationDriverLevelSetWorkflows,
     const std::span<const svmp::FE::Real> solution_view(
         solution.data(), solution.size());
     const auto evaluators = std::array{
-        makeFreeSurfaceVelocityEvaluator(
-            sim, velocity, solution_view, "Velocity evaluator identity"),
-        makeFreeSurfaceVelocityEvaluator(
-            sim,
-            velocity,
+        svmp::FE::interfaces::makeSnapshotVectorFieldEvaluator(
+            svmp::FE::systems::snapshotFieldAccess(*sim.fe_system, velocity),
+            solution_view,
+            "Velocity evaluator identity"),
+        svmp::FE::interfaces::makeSnapshotVectorFieldEvaluator(
+            svmp::FE::systems::snapshotFieldAccess(*sim.fe_system, velocity),
             solution_view,
             "Velocity evaluator identity",
             /*allow_scalar_product_fast_path=*/false)};

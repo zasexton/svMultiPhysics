@@ -23,6 +23,7 @@
 #include "FE/Systems/BoundaryConditionManager.h"
 #include "FE/Systems/BoundaryReductionService.h"
 #include "FE/Systems/FormsInstaller.h"
+#include "FE/Systems/MeshNormalConstraintStageMeasurements.h"
 #include "FE/Systems/TimeIntegrator.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
@@ -50,9 +51,8 @@
 #include <utility>
 #include <vector>
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FittedALEStageRecords.h"
 
-namespace free_surface = svmp::Physics::formulations::navier_stokes::free_surface;
+using svmp::FE::systems::meshNormalConstraintStageMeasurements;
 
 namespace {
 // Every small-cut aggregation prolongation report requested in this test
@@ -3643,7 +3643,7 @@ public:
         if (displacement_ == FE::INVALID_FIELD_ID ||
             velocity_ == FE::INVALID_FIELD_ID ||
             pressure_ == FE::INVALID_FIELD_ID ||
-            free_surface::fittedALERecords(system_).fittedALENormalOperatorStageMeasurementDeclarations()
+            meshNormalConstraintStageMeasurements(system_).fittedALENormalOperatorStageMeasurementDeclarations()
                     .size() != 1u) {
             throw std::runtime_error(
                 "fitted-ALE numeric-history fixture registration failed");
@@ -3782,10 +3782,10 @@ TEST(MovingDomainPhysicsMPI,
         /*rate_revision=*/202u);
 
     ASSERT_NO_THROW(
-        free_surface::fittedALERecords(system).stageFittedALENormalOperatorStageMeasurements(
+        meshNormalConstraintStageMeasurements(system).stageFittedALENormalOperatorStageMeasurements(
             state, metadata));
     auto pending =
-        free_surface::fittedALERecords(system).pendingFittedALENormalOperatorStageMeasurements();
+        meshNormalConstraintStageMeasurements(system).pendingFittedALENormalOperatorStageMeasurements();
     ASSERT_EQ(pending.size(), 1u);
     ASSERT_TRUE(pending.front().stage.expected_stage_geometry.has_value());
     const auto raw = pending.front().raw;
@@ -3842,17 +3842,17 @@ TEST(MovingDomainPhysicsMPI,
     expect_global_value(raw.mesh_normal_sq);
     expect_global_value(raw.mesh_tangential_sq);
     EXPECT_TRUE(
-        free_surface::fittedALERecords(system).fittedALENormalOperatorStageMeasurementHistory().empty());
+        meshNormalConstraintStageMeasurements(system).fittedALENormalOperatorStageMeasurementHistory().empty());
 
     ASSERT_NO_THROW(
-        free_surface::fittedALERecords(system).commitPendingFittedALENormalOperatorStageMeasurements(
+        meshNormalConstraintStageMeasurements(system).commitPendingFittedALENormalOperatorStageMeasurements(
             /*accepted_step=*/7u,
             FE::Real{0.35},
             FE::Real{0.05}));
     EXPECT_TRUE(
-        free_surface::fittedALERecords(system).pendingFittedALENormalOperatorStageMeasurements().empty());
+        meshNormalConstraintStageMeasurements(system).pendingFittedALENormalOperatorStageMeasurements().empty());
     auto history =
-        free_surface::fittedALERecords(system).fittedALENormalOperatorStageMeasurementHistory();
+        meshNormalConstraintStageMeasurements(system).fittedALENormalOperatorStageMeasurementHistory();
     ASSERT_EQ(history.size(), 1u);
     EXPECT_DOUBLE_EQ(history.front().raw.A, raw.A);
     EXPECT_DOUBLE_EQ(history.front().raw.Wn, raw.Wn);
@@ -3873,27 +3873,27 @@ TEST(MovingDomainPhysicsMPI,
               expected_geometry);
 
     ASSERT_NO_THROW(
-        free_surface::fittedALERecords(system).stageFittedALENormalOperatorStageMeasurements(
+        meshNormalConstraintStageMeasurements(system).stageFittedALENormalOperatorStageMeasurements(
             state, metadata));
     ASSERT_NO_THROW(
-        free_surface::fittedALERecords(system).commitPendingFittedALENormalOperatorStageMeasurements(
+        meshNormalConstraintStageMeasurements(system).commitPendingFittedALENormalOperatorStageMeasurements(
             /*accepted_step=*/7u,
             FE::Real{0.35},
             FE::Real{0.05}));
     EXPECT_EQ(
-        free_surface::fittedALERecords(system).fittedALENormalOperatorStageMeasurementHistory().size(),
+        meshNormalConstraintStageMeasurements(system).fittedALENormalOperatorStageMeasurementHistory().size(),
         1u);
     EXPECT_TRUE(
-        free_surface::fittedALERecords(system).pendingFittedALENormalOperatorStageMeasurements().empty());
+        meshNormalConstraintStageMeasurements(system).pendingFittedALENormalOperatorStageMeasurements().empty());
 
     ASSERT_NO_THROW(
-        free_surface::fittedALERecords(system).stageFittedALENormalOperatorStageMeasurements(
+        meshNormalConstraintStageMeasurements(system).stageFittedALENormalOperatorStageMeasurements(
             state, metadata));
-    free_surface::fittedALERecords(system).discardPendingFittedALENormalOperatorStageMeasurements();
+    meshNormalConstraintStageMeasurements(system).discardPendingFittedALENormalOperatorStageMeasurements();
     EXPECT_TRUE(
-        free_surface::fittedALERecords(system).pendingFittedALENormalOperatorStageMeasurements().empty());
+        meshNormalConstraintStageMeasurements(system).pendingFittedALENormalOperatorStageMeasurements().empty());
     EXPECT_EQ(
-        free_surface::fittedALERecords(system).fittedALENormalOperatorStageMeasurementHistory().size(),
+        meshNormalConstraintStageMeasurements(system).fittedALENormalOperatorStageMeasurementHistory().size(),
         1u);
 
     const auto expect_coordinated_rejection =
@@ -3903,7 +3903,7 @@ TEST(MovingDomainPhysicsMPI,
             bool rejected = false;
             std::string error_message;
             try {
-                free_surface::fittedALERecords(rejected_fixture.system())
+                meshNormalConstraintStageMeasurements(rejected_fixture.system())
                     .stageFittedALENormalOperatorStageMeasurements(
                         rejected_fixture.state(),
                         std::move(rejected_metadata));
@@ -3921,15 +3921,15 @@ TEST(MovingDomainPhysicsMPI,
             EXPECT_EQ(rejection_count, size);
             EXPECT_EQ(consensus_message_count, size);
             EXPECT_TRUE(
-                free_surface::fittedALERecords(rejected_fixture.system())
+                meshNormalConstraintStageMeasurements(rejected_fixture.system())
                     .pendingFittedALENormalOperatorStageMeasurements()
                     .empty());
             EXPECT_EQ(
-                free_surface::fittedALERecords(rejected_fixture.system())
+                meshNormalConstraintStageMeasurements(rejected_fixture.system())
                     .fittedALENormalOperatorStageMeasurementHistory()
                     .size(),
                 expected_history_size);
-            free_surface::fittedALERecords(rejected_fixture.system())
+            meshNormalConstraintStageMeasurements(rejected_fixture.system())
                 .discardPendingFittedALENormalOperatorStageMeasurements();
         };
 

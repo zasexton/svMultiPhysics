@@ -9,7 +9,6 @@
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceAcceptedFunctionals.h"
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactStages.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceFieldEvaluators.h"
 
 #include "FE/Assembly/Assembler.h"
 #include "FE/Assembly/CutIntegrationContext.h"
@@ -20,11 +19,13 @@
 #include "FE/Geometry/GeometryMapping.h"
 #include "FE/Geometry/LinearMapping.h"
 #include "FE/Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "FE/Interfaces/SnapshotFieldEvaluator.h"
 #include "FE/Math/Matrix.h"
 #include "FE/Math/Vector.h"
 #include "FE/Spaces/FunctionSpace.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/ProductSpace.h"
+#include "FE/Systems/SnapshotFieldAccess.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
 
 #include <algorithm>
@@ -43,6 +44,8 @@
 namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
 using namespace detail;
+using svmp::FE::interfaces::makeSnapshotVectorFieldEvaluator;
+using svmp::FE::systems::snapshotFieldAccess;
 
 std::uint64_t freeSurfaceDiscreteFunctionalDeclarationContentKey(
     const svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration&
@@ -454,9 +457,8 @@ void attachAcceptedFreeSurfaceEndpointFunctionalPowers(
         local_power;
     std::exception_ptr local_failure;
     try {
-      const auto velocity = makeFreeSurfaceVelocityEvaluator(
-          sim,
-          declaration.velocity_field,
+      const auto velocity = makeSnapshotVectorFieldEvaluator(
+          snapshotFieldAccess(*sim.fe_system, declaration.velocity_field),
           accepted_solution,
           "Accepted endpoint functional power");
       svmp::FE::interfaces::
@@ -645,9 +647,8 @@ void attachAcceptedFreeSurfaceActiveVolumeEnergies(
         local_energy;
     std::exception_ptr local_failure;
     try {
-      const auto velocity = makeFreeSurfaceVelocityEvaluator(
-          sim,
-          declaration.velocity_field,
+      const auto velocity = makeSnapshotVectorFieldEvaluator(
+          snapshotFieldAccess(*sim.fe_system, declaration.velocity_field),
           accepted_solution,
           "Accepted active-volume energy");
       local_energy =
@@ -761,9 +762,8 @@ void attachAcceptedFreeSurfaceActiveVolumeDissipation(
         local_dissipation;
     std::exception_ptr local_failure;
     try {
-      const auto velocity = makeFreeSurfaceVelocityEvaluator(
-          sim,
-          declaration.velocity_field,
+      const auto velocity = makeSnapshotVectorFieldEvaluator(
+          snapshotFieldAccess(*sim.fe_system, declaration.velocity_field),
           accepted_solution,
           "Accepted active-volume dissipation");
       local_dissipation =
@@ -877,9 +877,8 @@ void attachAcceptedFreeSurfaceExternalPressurePowers(
         local_power;
     std::exception_ptr local_failure;
     try {
-      const auto velocity = makeFreeSurfaceVelocityEvaluator(
-          sim,
-          declaration.velocity_field,
+      const auto velocity = makeSnapshotVectorFieldEvaluator(
+          snapshotFieldAccess(*sim.fe_system, declaration.velocity_field),
           accepted_solution,
           "Accepted exterior-pressure power");
       local_power =
@@ -1063,14 +1062,12 @@ void attachAcceptedFreeSurfaceBackwardEulerKineticWork(
         local_work;
     std::exception_ptr local_failure;
     try {
-      const auto previous_velocity = makeFreeSurfaceVelocityEvaluator(
-          sim,
-          declaration.velocity_field,
+      const auto previous_velocity = makeSnapshotVectorFieldEvaluator(
+          snapshotFieldAccess(*sim.fe_system, declaration.velocity_field),
           previous_solution,
           "Backward-Euler previous-endpoint kinetic work");
-      const auto endpoint_velocity = makeFreeSurfaceVelocityEvaluator(
-          sim,
-          declaration.velocity_field,
+      const auto endpoint_velocity = makeSnapshotVectorFieldEvaluator(
+          snapshotFieldAccess(*sim.fe_system, declaration.velocity_field),
           accepted_solution,
           "Backward-Euler accepted-endpoint kinetic work");
       const auto& parameters =

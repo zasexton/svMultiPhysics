@@ -8,14 +8,14 @@
 
 #include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidAcceptedStage.h"
 
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceFieldEvaluators.h"
-
 #include "FE/Assembly/Assembler.h"
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Geometry/CutQuadratureMapping.h"
 #include "FE/Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "FE/Interfaces/LevelSetInterfaceDomain.h"
+#include "FE/Interfaces/SnapshotFieldEvaluator.h"
 #include "FE/LevelSet/LevelSetOptions.h"
+#include "FE/Systems/SnapshotFieldAccess.h"
 #include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
 
 #include <algorithm>
@@ -30,8 +30,9 @@
 
 namespace svmp::Physics::formulations::navier_stokes::two_fluid {
 
-using free_surface::makeFreeSurfaceScalarValueEvaluator;
-using free_surface::makeFreeSurfaceVelocityEvaluator;
+using svmp::FE::interfaces::makeSnapshotScalarFieldEvaluator;
+using svmp::FE::interfaces::makeSnapshotVectorFieldEvaluator;
+using svmp::FE::systems::snapshotFieldAccess;
 using namespace free_surface::detail;
 
 std::vector<svmp::FE::systems::AcceptedTwoFluidStageDiagnosticState>
@@ -106,26 +107,22 @@ evaluateCurrentTwoFluidStageDiagnostics(
     std::exception_ptr local_evaluation_failure;
     try {
       svmp::FE::interfaces::IncompressibleTwoFluidPhaseEvaluators negative{
-          .velocity = makeFreeSurfaceVelocityEvaluator(
-              sim,
-              declaration.negative_velocity_field,
+          .velocity = makeSnapshotVectorFieldEvaluator(
+              snapshotFieldAccess(*sim.fe_system, declaration.negative_velocity_field),
               stage_solution,
               "Two-fluid negative-phase stage"),
-          .pressure = makeFreeSurfaceScalarValueEvaluator(
-              sim,
-              declaration.negative_pressure_field,
+          .pressure = makeSnapshotScalarFieldEvaluator(
+              snapshotFieldAccess(*sim.fe_system, declaration.negative_pressure_field),
               stage_solution,
               "Two-fluid negative-phase stage"),
       };
       svmp::FE::interfaces::IncompressibleTwoFluidPhaseEvaluators positive{
-          .velocity = makeFreeSurfaceVelocityEvaluator(
-              sim,
-              declaration.positive_velocity_field,
+          .velocity = makeSnapshotVectorFieldEvaluator(
+              snapshotFieldAccess(*sim.fe_system, declaration.positive_velocity_field),
               stage_solution,
               "Two-fluid positive-phase stage"),
-          .pressure = makeFreeSurfaceScalarValueEvaluator(
-              sim,
-              declaration.positive_pressure_field,
+          .pressure = makeSnapshotScalarFieldEvaluator(
+              snapshotFieldAccess(*sim.fe_system, declaration.positive_pressure_field),
               stage_solution,
               "Two-fluid positive-phase stage"),
       };

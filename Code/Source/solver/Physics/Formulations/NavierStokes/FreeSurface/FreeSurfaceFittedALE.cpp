@@ -7,7 +7,6 @@
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceFittedALE.h"
 
-#include "Physics/Formulations/NavierStokes/FreeSurface/FittedALEStageRecords.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceQueries.h"
 
@@ -20,6 +19,7 @@
 #include "FE/Systems/ALEBinding.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormsInstaller.h"
+#include "FE/Systems/MeshNormalConstraintStageMeasurements.h"
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #  include "Mesh/Fields/MeshFields.h"
@@ -183,7 +183,7 @@ void declareFittedNormalKinematics(
             "Fitted free-surface mesh normal kinematic row on marker " +
                 std::to_string(marker),
             fittedFluidNormalDescriptorSource(*fitted_boundary));
-        free_surface::fittedALERecords(system)
+        FE::systems::meshNormalConstraintStageMeasurements(system)
             .registerFittedALENormalOperatorStageMeasurement(
                 displacement_field,
                 marker,

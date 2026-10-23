@@ -8,12 +8,12 @@
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactStages.h"
 
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceFieldEvaluators.h"
-
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Assembly/GlobalSystemView.h"
 #include "FE/Geometry/CutQuadrature.h"
+#include "FE/Interfaces/SnapshotFieldEvaluator.h"
 #include "FE/LevelSet/Maintenance/LevelSetWallAwareMaintenance.h"
+#include "FE/Systems/SnapshotFieldAccess.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
 
 #include <algorithm>
@@ -32,6 +32,8 @@
 namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
 using namespace detail;
+using svmp::FE::interfaces::makeSnapshotVectorFieldEvaluator;
+using svmp::FE::systems::snapshotFieldAccess;
 
 // The accepted wall-contact constraint helpers live in FE (wall-aware level-set
 // maintenance).
@@ -1060,9 +1062,8 @@ evaluateAcceptedFreeSurfaceContactStages(
         svmp::FE::interfaces::FreeSurfaceDynamicContactState>
         local_state;
     try {
-      const auto velocity = makeFreeSurfaceVelocityEvaluator(
-          sim,
-          declaration.velocity_field,
+      const auto velocity = makeSnapshotVectorFieldEvaluator(
+          snapshotFieldAccess(*sim.fe_system, declaration.velocity_field),
           stage_solution,
           "Accepted contact-stage");
       local_state =
