@@ -1862,11 +1862,26 @@ bool StandardAssembler::perCellCacheStorageReuseEnabled() noexcept
     return g_per_cell_cache_storage_reuse_enabled.load(std::memory_order_relaxed);
 }
 
+std::uint64_t StandardAssembler::CellTableStamp::next() noexcept
+{
+    static std::atomic<std::uint64_t> counter{1};
+    return counter.fetch_add(1, std::memory_order_relaxed);
+}
+
 namespace {
 
 // Test switch for the signed-zero rule of the basis Hessian transforms (see
 // detail::setZeroHessianTermsShortcutForTesting).
 std::atomic<bool> g_zero_hessian_terms_shortcut_enabled{true};
+
+// Test switch for the last-hit memo of getResolvedCellVectorEntries() (see
+// detail::setResolvedVectorLookupMemoForTesting).
+std::atomic<bool> g_resolved_vector_lookup_memo_enabled{true};
+
+[[nodiscard]] bool resolvedVectorLookupMemoEnabled() noexcept
+{
+    return g_resolved_vector_lookup_memo_enabled.load(std::memory_order_relaxed);
+}
 
 [[nodiscard]] bool leadingBlockFinite(const AssemblyContext::Matrix3x3& m, int dim) noexcept
 {
@@ -1925,6 +1940,11 @@ namespace detail {
 void setZeroHessianTermsShortcutForTesting(bool enabled) noexcept
 {
     g_zero_hessian_terms_shortcut_enabled.store(enabled, std::memory_order_relaxed);
+}
+
+void setResolvedVectorLookupMemoForTesting(bool enabled) noexcept
+{
+    g_resolved_vector_lookup_memo_enabled.store(enabled, std::memory_order_relaxed);
 }
 
 // The signed-zero rule.  Each product below multiplies the zero factor in
@@ -2652,7 +2672,9 @@ void StandardAssembler::setDofMap(const dofs::DofMap& dof_map)
     row_dof_scope_ = DofEntityScope::Cell;
     col_dof_scope_ = DofEntityScope::Cell;
     cell_dof_tables_.clear();
+    cell_table_stamp_.renew();
     cell_resolved_vector_tables_.clear();
+    cell_table_stamp_.renew();
     cell_resolved_matrix_tables_.clear();
     clearFusedResolvedScratch();
     field_access_plans_.clear();
@@ -2699,7 +2721,9 @@ void StandardAssembler::setDofHandler(const dofs::DofHandler& dof_handler)
     row_dof_scope_ = DofEntityScope::Cell;
     col_dof_scope_ = DofEntityScope::Cell;
     cell_dof_tables_.clear();
+    cell_table_stamp_.renew();
     cell_resolved_vector_tables_.clear();
+    cell_table_stamp_.renew();
     cell_resolved_matrix_tables_.clear();
     clearFusedResolvedScratch();
     field_access_plans_.clear();
@@ -2747,12 +2771,14 @@ void StandardAssembler::setCurrentSolution(std::span<const Real> solution)
     current_solution_ = solution;
     current_solution_view_ = nullptr;
     cell_resolved_vector_tables_.clear();
+    cell_table_stamp_.renew();
 }
 
 void StandardAssembler::setCurrentSolutionView(const GlobalSystemView* solution_view)
 {
     if (current_solution_view_ != solution_view) {
         cell_resolved_vector_tables_.clear();
+        cell_table_stamp_.renew();
     }
     current_solution_view_ = solution_view;
 }
@@ -3043,6 +3069,7 @@ void StandardAssembler::setPreviousSolutionK(int k, std::span<const Real> soluti
     }
     previous_solution_views_[static_cast<std::size_t>(k - 1)] = nullptr;
     cell_resolved_vector_tables_.clear();
+    cell_table_stamp_.renew();
 }
 
 void StandardAssembler::setPreviousSolutionViewK(int k, const GlobalSystemView* solution_view)
@@ -3060,6 +3087,7 @@ void StandardAssembler::setPreviousSolutionViewK(int k, const GlobalSystemView* 
     }
     if (view_changed) {
         cell_resolved_vector_tables_.clear();
+        cell_table_stamp_.renew();
     }
 }
 
@@ -3380,7 +3408,9 @@ void StandardAssembler::reset()
     cached_cell_dof_numbering_revision_ = 0;
     cached_cell_dof_field_layout_revision_ = 0;
     cell_dof_tables_.clear();
+    cell_table_stamp_.renew();
     cell_resolved_vector_tables_.clear();
+    cell_table_stamp_.renew();
     cell_resolved_matrix_tables_.clear();
     field_access_plans_.clear();
     ++field_access_plans_revision_;
@@ -3458,7 +3488,9 @@ void StandardAssembler::ensureCellDofTables(const IMeshAccess& mesh)
         cached_cell_dof_mesh_ = &mesh;
         cached_cell_dof_count_ = n_cells;
         cell_dof_tables_.clear();
+        cell_table_stamp_.renew();
         cell_resolved_vector_tables_.clear();
+        cell_table_stamp_.renew();
         cell_resolved_matrix_tables_.clear();
         clearFusedResolvedScratch();
         field_access_plans_.clear();
@@ -3510,7 +3542,9 @@ const StandardAssembler::CellDofTable& StandardAssembler::getCellDofTable(
                     });
     if (stale_table_for_key) {
         cell_dof_tables_.clear();
+        cell_table_stamp_.renew();
         cell_resolved_vector_tables_.clear();
+        cell_table_stamp_.renew();
         cell_resolved_matrix_tables_.clear();
         clearFusedResolvedScratch();
         field_access_plans_.clear();
@@ -3525,6 +3559,7 @@ const StandardAssembler::CellDofTable& StandardAssembler::getCellDofTable(
     // field_access_plans_ may reference CellDofTable pointers; clear if needed.
     field_access_plans_.clear();
     ++field_access_plans_revision_;
+    cell_table_stamp_.renew();
     auto& table = cell_dof_tables_.emplace_back();
     table.dof_map = dof_map;
     table.dof_offset = dof_offset;
@@ -3619,8 +3654,10 @@ void StandardAssembler::ensureResolvedVectorTable(
                                   table.dof_offset == dof_offset;
                        }),
         cell_resolved_vector_tables_.end());
+    cell_table_stamp_.renew();
 
     const auto& dof_table = getCellDofTable(mesh, dof_map, dof_offset);
+    cell_table_stamp_.renew();
     auto& table = cell_resolved_vector_tables_.emplace_back();
     table.layout_handle = layout_handle;
     table.layout_revision = layout_revision;
@@ -3810,6 +3847,41 @@ std::span<const GlobalIndex> StandardAssembler::getResolvedCellVectorEntries(
     const auto layout_revision = view->vectorLayoutRevision();
     const auto dof_layout_revision = dofLayoutRevision(dof_map);
 
+    const auto cell_entries = [cell_id](const CellDofTable& dof_table,
+                                        const CellResolvedVectorTable& table) {
+        const auto begin = static_cast<std::size_t>(
+            dof_table.cell_offsets[static_cast<std::size_t>(cell_id)]);
+        const auto end = static_cast<std::size_t>(
+            dof_table.cell_offsets[static_cast<std::size_t>(cell_id) + 1u]);
+        return std::span<const GlobalIndex>(table.resolved.data() + begin, end - begin);
+    };
+
+    // Last hit of this thread: the two tables the scans below found for this
+    // key, valid while the table stamp is unchanged (the stamp is renewed at
+    // every change of either container, and is unique across assemblers), so
+    // a hit returns exactly what the scans would.  Thread-local because
+    // worker assemblers call this on their shared owner concurrently.
+    struct LastResolvedVectorLookup {
+        std::uint64_t stamp{0};
+        const dofs::DofMap* dof_map{nullptr};
+        GlobalIndex dof_offset{0};
+        const void* layout_handle{nullptr};
+        std::uint64_t layout_revision{0};
+        std::uint64_t dof_layout_revision{0};
+        const CellDofTable* dof_table{nullptr};
+        const CellResolvedVectorTable* table{nullptr};
+    };
+    thread_local LastResolvedVectorLookup last{};
+    const bool memo = resolvedVectorLookupMemoEnabled();
+    if (memo && last.stamp == cell_table_stamp_.value() &&
+        last.dof_map == dof_map &&
+        last.dof_offset == dof_offset &&
+        last.layout_handle == layout_handle &&
+        last.layout_revision == layout_revision &&
+        last.dof_layout_revision == dof_layout_revision) {
+        return cell_entries(*last.dof_table, *last.table);
+    }
+
     const CellDofTable* dof_table = nullptr;
     for (const auto& table : cell_dof_tables_) {
         if (table.dof_map == dof_map &&
@@ -3829,11 +3901,12 @@ std::span<const GlobalIndex> StandardAssembler::getResolvedCellVectorEntries(
             table.dof_map == dof_map &&
             table.dof_offset == dof_offset &&
             table.dof_layout_revision == dof_layout_revision) {
-            const auto begin = static_cast<std::size_t>(
-                dof_table->cell_offsets[static_cast<std::size_t>(cell_id)]);
-            const auto end = static_cast<std::size_t>(
-                dof_table->cell_offsets[static_cast<std::size_t>(cell_id) + 1u]);
-            return std::span<const GlobalIndex>(table.resolved.data() + begin, end - begin);
+            if (memo) {
+                last = LastResolvedVectorLookup{cell_table_stamp_.value(), dof_map, dof_offset,
+                                                layout_handle, layout_revision, dof_layout_revision,
+                                                dof_table, &table};
+            }
+            return cell_entries(*dof_table, table);
         }
     }
 

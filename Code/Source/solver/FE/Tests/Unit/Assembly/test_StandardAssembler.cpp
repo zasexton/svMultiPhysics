@@ -8178,6 +8178,172 @@ TEST(StandardAssemblerDeferredSolution, CellAndFaceSolutionDataMatchImmediateEva
 }
 
 // ============================================================================
+// Resolved cell vector entries: the last-hit memo returns the scan's result
+// ============================================================================
+
+namespace {
+
+struct ResolvedLookupMemoGuard {
+    explicit ResolvedLookupMemoGuard(bool enabled)
+    {
+        detail::setResolvedVectorLookupMemoForTesting(enabled);
+    }
+    ~ResolvedLookupMemoGuard() { detail::setResolvedVectorLookupMemoForTesting(true); }
+    ResolvedLookupMemoGuard(const ResolvedLookupMemoGuard&) = delete;
+    ResolvedLookupMemoGuard& operator=(const ResolvedLookupMemoGuard&) = delete;
+};
+
+// A solution view whose backend slots rotate with every layout revision, so a
+// gather through a stale resolved table reads the wrong (NaN) slots.
+class RotatedLayoutSolutionView final : public TestDenseSystemView {
+public:
+    explicit RotatedLayoutSolutionView(std::vector<Real> fe_values)
+        : TestDenseSystemView(static_cast<GlobalIndex>(fe_values.size())), fe_(std::move(fe_values))
+    {
+        relayout();
+    }
+
+    [[nodiscard]] const void* vectorLayoutHandle() const noexcept override { return this; }
+    [[nodiscard]] std::uint64_t vectorLayoutRevision() const noexcept override { return revision_; }
+
+    void resolveVectorEntries(std::span<const GlobalIndex> dofs,
+                              std::span<GlobalIndex> resolved) const override
+    {
+        for (std::size_t i = 0; i < dofs.size(); ++i) {
+            resolved[i] = slot(dofs[i]);
+        }
+    }
+
+    void getVectorEntriesResolved(std::span<const GlobalIndex> resolved,
+                                  std::span<Real> out) const override
+    {
+        for (std::size_t i = 0; i < resolved.size(); ++i) {
+            out[i] = backend_[static_cast<std::size_t>(resolved[i])];
+        }
+    }
+
+    void getVectorEntries(std::span<const GlobalIndex> dofs, std::span<Real> out) const override
+    {
+        for (std::size_t i = 0; i < dofs.size(); ++i) {
+            out[i] = fe_[static_cast<std::size_t>(dofs[i])];
+        }
+    }
+
+    [[nodiscard]] Real getVectorEntry(GlobalIndex dof) const override
+    {
+        return fe_[static_cast<std::size_t>(dof)];
+    }
+
+    void relayoutWithNewRevision()
+    {
+        ++revision_;
+        relayout();
+    }
+
+private:
+    [[nodiscard]] GlobalIndex slot(GlobalIndex dof) const
+    {
+        const auto n = static_cast<GlobalIndex>(fe_.size());
+        return (dof + 3 * static_cast<GlobalIndex>(revision_)) % n;
+    }
+
+    void relayout()
+    {
+        backend_.assign(fe_.size(), std::numeric_limits<Real>::quiet_NaN());
+        for (std::size_t d = 0; d < fe_.size(); ++d) {
+            backend_[static_cast<std::size_t>(slot(static_cast<GlobalIndex>(d)))] = fe_[d];
+        }
+    }
+
+    std::vector<Real> fe_;
+    std::vector<Real> backend_;
+    std::uint64_t revision_{0};
+};
+
+// Records the cell id and the bits of the gathered solution coefficients.
+class CoefficientRecordingKernel final : public AssemblyKernel {
+public:
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/true, /*need_vector=*/true);
+        recorded.push_back(static_cast<std::uint64_t>(ctx.cellId()));
+        for (const Real c : ctx.solutionCoefficients()) {
+            recorded.push_back(setterBits(c));
+        }
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return RequiredData::BasisValues | RequiredData::IntegrationWeights | RequiredData::SolutionValues;
+    }
+
+    std::vector<std::uint64_t> recorded;
+};
+
+} // namespace
+
+TEST(StandardAssemblerResolvedEntries, LookupMemoReturnsWhatTheTableScanFinds)
+{
+    MockMeshAccess mesh;
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+    constexpr GlobalIndex n_cell = 4;
+    auto dof_map = createTwoCellDisjointDofMap(n_cell);
+    std::vector<Real> fe(static_cast<std::size_t>(2 * n_cell));
+    for (std::size_t d = 0; d < fe.size(); ++d) {
+        fe[d] = Real(0.5) * Real(d) - Real(1.25);
+    }
+    fe[2] = Real{-0.0};
+
+    const auto run = [&](bool memo) {
+        ResolvedLookupMemoGuard guard(memo);
+        std::vector<std::uint64_t> all;
+        RotatedLayoutSolutionView solution(fe);
+        const auto assemble = [&](StandardAssembler& assembler) {
+            CoefficientRecordingKernel kernel;
+            TestDenseSystemView system(2 * n_cell);
+            assembler.setCurrentSolutionView(&solution);
+            const auto result = assembler.assembleBoth(mesh, space, space, kernel, system, system);
+            EXPECT_TRUE(result.success);
+            // Every gathered coefficient is the FE value of its DOF.
+            ASSERT_EQ(kernel.recorded.size(), static_cast<std::size_t>(2 * (n_cell + 1)));
+            for (std::size_t c = 0; c < 2; ++c) {
+                const auto base = c * static_cast<std::size_t>(n_cell + 1);
+                const auto cell = static_cast<std::size_t>(kernel.recorded[base]);
+                for (std::size_t i = 0; i < static_cast<std::size_t>(n_cell); ++i) {
+                    EXPECT_EQ(kernel.recorded[base + 1 + i],
+                              setterBits(fe[cell * static_cast<std::size_t>(n_cell) + i]))
+                        << "cell " << cell << " dof " << i;
+                }
+            }
+            all.insert(all.end(), kernel.recorded.begin(), kernel.recorded.end());
+        };
+
+        StandardAssembler first;
+        first.setDofMap(dof_map);
+        first.initialize();
+        assemble(first);
+        assemble(first);
+        solution.relayoutWithNewRevision();
+        assemble(first);
+
+        StandardAssembler second;
+        second.setDofMap(dof_map);
+        second.initialize();
+        assemble(second);
+        assemble(first);
+        solution.relayoutWithNewRevision();
+        assemble(second);
+        assemble(first);
+        return all;
+    };
+
+    const auto scanned = run(/*memo=*/false);
+    const auto memoized = run(/*memo=*/true);
+    EXPECT_FALSE(scanned.empty());
+    EXPECT_EQ(memoized, scanned);
+}
+
+// ============================================================================
 // Basis Hessian transforms: the signed-zero rule reproduces the sums
 // ============================================================================
 

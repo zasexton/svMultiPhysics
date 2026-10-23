@@ -1579,6 +1579,30 @@ private:
     std::uint64_t cached_cell_dof_field_layout_revision_{0};
     std::deque<CellDofTable> cell_dof_tables_;
     std::vector<CellResolvedVectorTable> cell_resolved_vector_tables_;
+    // A process-wide unique stamp of cell_dof_tables_ and
+    // cell_resolved_vector_tables_, renewed at every change of either (and on
+    // both sides of a move), so a lookup memo taken at stamp S still describes
+    // these tables while the stamp is S (see getResolvedCellVectorEntries()).
+    class CellTableStamp {
+    public:
+        CellTableStamp() noexcept : value_(next()) {}
+        CellTableStamp(CellTableStamp&& other) noexcept : value_(next()) { other.value_ = next(); }
+        CellTableStamp& operator=(CellTableStamp&& other) noexcept
+        {
+            value_ = next();
+            other.value_ = next();
+            return *this;
+        }
+        CellTableStamp(const CellTableStamp&) = delete;
+        CellTableStamp& operator=(const CellTableStamp&) = delete;
+        void renew() noexcept { value_ = next(); }
+        [[nodiscard]] std::uint64_t value() const noexcept { return value_; }
+
+    private:
+        static std::uint64_t next() noexcept;
+        std::uint64_t value_;
+    };
+    CellTableStamp cell_table_stamp_{};
     std::vector<CellResolvedMatrixTable> cell_resolved_matrix_tables_;
     std::vector<FieldAccessPlan> field_access_plans_;
 
@@ -1964,6 +1988,15 @@ AssemblyContext::Matrix3x3 physicalBasisHessian(
  * reproduce bit for bit).  The default is `true`.  Process-wide; tests only.
  */
 void setZeroHessianTermsShortcutForTesting(bool enabled) noexcept;
+
+/**
+ * @brief Test-only switch for the last-hit memo of the resolved cell
+ * vector-entry lookup.
+ *
+ * With `false` every lookup scans the tables (the reference the memo must
+ * reproduce).  The default is `true`.  Process-wide; tests only.
+ */
+void setResolvedVectorLookupMemoForTesting(bool enabled) noexcept;
 
 } // namespace detail
 
