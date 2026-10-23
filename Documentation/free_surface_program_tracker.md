@@ -785,8 +785,18 @@ These are proposals. Each lists a recommended option and an alternative. Record 
        - The static capillary minimizer stays (D3) as optional tooling, keeping its CTest role: the M1 tank at rest (the serial 60-case twin and the two-rank covering design) and the 960-case exhaustive matrix.
          - These tests use `SurfaceStress`, and the minimizer (`StaticCapillaryEquilibrium`) does not call KAG or the curvature projection, so removing KAG leaves them in place.
          - Retiring the minimizer is a separate, later decision.
+         - After the KAG removal the kept minimizer has no curved-cap coverage: the 7 serial tests and the 1 two-rank test that minimized circle, sphere and sessile caps used the KAG balance method and are deleted with it (refinement 4 below). Its remaining tests are the `SurfaceStress` flat-interface, rollback, hydrostatic and tank-at-rest cases. To settle with the minimizer decision.
        - M8 drops "an energy-consistent KAG" and keeps "discrete static minimizer with nonsmooth optimization".
        - Default paths stay bitwise, because no accepted benchmark protocol uses KAG.
+       - Refinements for the removal (P6b, 2026-10-22; 1–4 user, 5–8 coordinator):
+         1. D47 Q2(b)-LS is folded into the removal: `LevelSetCurvatureProjection` (every recovery mode) and the curvature samples are deleted whole.
+         2. The three KAG reference cases are replaced, before the removal, by `sessile_L16_120`, `sessile3d_L8_60` and `oscdrop_L8` (`SurfaceStress`, FSILS), with baselines for every tag in use.
+         3. Every retired key or value (`Surface_tension_form=KinematicAreaGradientTraction`, the boundary `Curvature_field`, `Enable_curvature_projection`, `Curvature_field_name`, every `Curvature_projection_*`) fails at translation with a D48 message that names `SurfaceStress`.
+         4. The 7 + 1 KAG-only curved-cap minimizer tests are deleted.
+         5. The minimizer's exact-derivative and topology-epoch options stay (the minimizer decision is deferred).
+         6. The incremental PSPG pressure-gradient form, selected only by KAG, is deleted.
+         7. The generators keep `--capillary-form surface_stress`; frozen run lines use it.
+         8. `run_test05`'s KAG-only metric parsers are dropped.
   2. **Capillary-rise features (M4; WP-5/FSR-05): reported with the intercode spread, not gated.**
      - The frozen history envelope (`gruending_2020_omega1_intercode_envelope_v1`, D44 PASS) stays the acceptance.
      - Reason: no feature tolerance was declared before the runs, and peak and end height are points of the gated history.
