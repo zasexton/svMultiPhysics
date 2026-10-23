@@ -13013,6 +13013,49 @@ TEST(MovingDomainPhysics, NavierStokesWeakVelocityNitschePenaltyUsesTraceHeight)
     EXPECT_FALSE(containsExprType(momentum_form, FormExprType::CellDiameter));
 }
 
+TEST(MovingDomainPhysics, NavierStokesWeakVelocityNitscheAcceptsEmptyPreflightForms)
+{
+    // The option preflight (preflightNavierStokes) passes default-constructed
+    // forms and keeps only the generated-boundary bindings; combining an empty
+    // FormExpr throws, so the helper folds its rows into empty forms.
+    constexpr int marker = 21;
+    auto u_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1,
+        FE::ElementType::Tetra4,
+        /*order=*/2,
+        /*components=*/3);
+    auto p_space = FE::spaces::Space(
+        FE::spaces::SpaceType::H1,
+        FE::ElementType::Tetra4,
+        /*order=*/1);
+
+    auto opts = baseNavierStokesOptions();
+    opts.velocity_dirichlet_weak.push_back(ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
+        .boundary_marker = marker,
+        .value = {0.0, 0.0, 0.0},
+    });
+
+    const auto u = FormExpr::trialFunction(*u_space, "u");
+    const auto p = FormExpr::trialFunction(*p_space, "p");
+    const auto v = FormExpr::testFunction(*u_space, "v");
+    const auto q = FormExpr::testFunction(*p_space, "q");
+    FormExpr momentum_form;
+    FormExpr continuity_form;
+
+    EXPECT_NO_THROW(ns::Factories::applyVelocityNitscheBCs(
+        momentum_form,
+        continuity_form,
+        opts,
+        /*dim=*/3,
+        u,
+        p,
+        v,
+        q,
+        FormExpr::constant(0.04)));
+    EXPECT_TRUE(momentum_form.isValid());
+    EXPECT_TRUE(continuity_form.isValid());
+}
+
 TEST(MovingDomainPhysics, NavierStokesVMS2DUsesPhysicalMetricShape)
 {
     auto mesh = std::make_shared<FE::forms::test::SingleTriangleMeshAccess>();

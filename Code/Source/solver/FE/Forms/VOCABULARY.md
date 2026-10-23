@@ -385,9 +385,15 @@ Status: `implemented/public`.
 | `regionIndicator(domain_id)` | Domain-id predicate helper |
 | `sumOf(a, b)` | `a + b`, or `b` when `a` is empty: the left fold of a form built term by term |
 
-Every operator returns an empty `FormExpr` when an operand is empty (default
-constructed), without an error; `sumOf` is the explicit way to start a sum from
-an empty form. An empty residual is rejected at installation.
+An empty (default-constructed) `FormExpr` means "no term". Unary operations
+and measures map it to an empty `FormExpr` (`grad(e)`, `-e`, `e.dx()`), so a
+helper may return `{}` for an absent term and the caller tests `isValid()`.
+Every operation with two or more `FormExpr` operands (`+ - * /`, `inner`,
+`outer`, `cross`, `doubleContraction`, `pow`, `min`, `max`, the predicates,
+`conditional`, the smooth and matrix functions) throws `std::invalid_argument`
+when an operand is empty, naming the operation and the operand (for example
+"the left operand of '+' is empty"); `sumOf` is the explicit way to start a
+sum from an empty form. An empty residual is rejected at installation.
 
 The exact nonsmooth operators are implemented. Smooth regularizations are
 separate vocabulary:

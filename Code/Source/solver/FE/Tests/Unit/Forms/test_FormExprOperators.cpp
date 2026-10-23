@@ -18,6 +18,8 @@
 #include "Systems/SystemManifest.h"
 
 #include <memory>
+#include <stdexcept>
+#include <string>
 
 namespace svmp::FE::forms::test {
 namespace {
@@ -103,6 +105,78 @@ TEST(FormExprOperators, RealArithmeticWorksOnConstitutiveCallsAndDerivedSymbols)
     const ConstitutiveCall call{s.u};
     expectSameTree(call - 1.0, s.u - c(1.0));
     expectSameTree(1.0 + call, c(1.0) + s.u);
+}
+
+namespace {
+
+/// The message of the std::invalid_argument thrown by @p f, or "" when none.
+template <class F>
+std::string invalidArgumentMessage(F&& f)
+{
+    try {
+        (void)f();
+    } catch (const std::invalid_argument& e) {
+        return e.what();
+    }
+    return {};
+}
+
+} // namespace
+
+TEST(FormExprEmptyOperands, CombiningAnEmptyFormThrowsAndNamesTheOperation)
+{
+    Symbols s;
+    const FormExpr empty;
+
+    const auto plus = invalidArgumentMessage([&] { return empty + s.u.dx(); });
+    EXPECT_NE(plus.find("the left operand of '+'"), std::string::npos) << plus;
+    EXPECT_NE(plus.find("sumOf"), std::string::npos) << plus;
+    const auto minus = invalidArgumentMessage([&] { return s.u - empty; });
+    EXPECT_NE(minus.find("the right operand of '-'"), std::string::npos) << minus;
+    const auto both = invalidArgumentMessage([&] { return empty * empty; });
+    EXPECT_NE(both.find("each operand of '*'"), std::string::npos) << both;
+    const auto inner_message = invalidArgumentMessage([&] { return inner(s.w, empty); });
+    EXPECT_NE(inner_message.find("inner()"), std::string::npos) << inner_message;
+    const auto conditional_message =
+        invalidArgumentMessage([&] { return conditional(gt(s.u, 0.0), s.u, empty); });
+    EXPECT_NE(conditional_message.find("operand 3 of conditional()"), std::string::npos)
+        << conditional_message;
+
+    EXPECT_THROW((void)(empty / s.u), std::invalid_argument);
+    EXPECT_THROW((void)(empty * 2.0), std::invalid_argument);
+    EXPECT_THROW((void)(2.0 * empty), std::invalid_argument);
+    EXPECT_THROW((void)(empty / 2.0), std::invalid_argument);
+    EXPECT_THROW((void)(1.0 + empty), std::invalid_argument);
+    EXPECT_THROW((void)(empty - 1.0), std::invalid_argument);
+    EXPECT_THROW((void)outer(empty, s.w), std::invalid_argument);
+    EXPECT_THROW((void)cross(s.w, empty), std::invalid_argument);
+    EXPECT_THROW((void)doubleContraction(grad(s.w), empty), std::invalid_argument);
+    EXPECT_THROW((void)pow(empty, 2.0), std::invalid_argument);
+    EXPECT_THROW((void)min(empty, s.u), std::invalid_argument);
+    EXPECT_THROW((void)max(s.u, empty), std::invalid_argument);
+    EXPECT_THROW((void)lt(empty, s.u), std::invalid_argument);
+    EXPECT_THROW((void)ne(s.u, empty), std::invalid_argument);
+    EXPECT_THROW((void)smoothAbs(s.u, empty), std::invalid_argument);
+    EXPECT_THROW((void)smoothMax(s.u, empty, c(1e-3)), std::invalid_argument);
+    EXPECT_THROW((void)powm(grad(s.w), empty), std::invalid_argument);
+    EXPECT_THROW((void)FormExpr::matrixExpDirectionalDerivative(grad(s.w), empty), std::invalid_argument);
+}
+
+TEST(FormExprEmptyOperands, UnaryOperationsAndMeasuresKeepAnEmptyFormEmpty)
+{
+    Symbols s;
+    const FormExpr empty;
+    // An empty FormExpr means "no term": it may be transformed, tested and
+    // folded with sumOf, but not combined with another operand.
+    EXPECT_FALSE((-empty).isValid());
+    EXPECT_FALSE(grad(empty).isValid());
+    EXPECT_FALSE(jump(empty).isValid());
+    EXPECT_FALSE(empty.dx().isValid());
+    EXPECT_FALSE(empty.ds(1).isValid());
+    EXPECT_FALSE(empty.dI(3).isValid());
+    const auto R = (s.u * s.v).dx();
+    expectSameTree(sumOf(empty, R), R);
+    expectSameTree(sumOf(R, R), R + R);
 }
 
 } // namespace svmp::FE::forms::test

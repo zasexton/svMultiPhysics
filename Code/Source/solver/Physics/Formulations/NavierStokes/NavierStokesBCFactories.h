@@ -482,15 +482,18 @@ inline void applyVelocityNitscheBCs(
                           fullPhysical(marker);
             return integrand.dExteriorBoundary(measure);
         };
+    // The option preflight passes empty forms and keeps only the bindings, so
+    // the rows are folded with appendDiagnosticForm (the same tree as
+    // form + contribution when the form is not empty).
     const auto append_momentum = [&](const FE::forms::FormExpr& contribution) {
-        momentum_form = momentum_form + contribution;
+        appendDiagnosticForm(momentum_form, contribution);
         if (momentum_residual_work_form != nullptr) {
             appendDiagnosticForm(
                 *momentum_residual_work_form, contribution);
         }
     };
     const auto append_continuity = [&](const FE::forms::FormExpr& contribution) {
-        continuity_form = continuity_form + contribution;
+        appendDiagnosticForm(continuity_form, contribution);
         if (continuity_residual_work_form != nullptr) {
             appendDiagnosticForm(
                 *continuity_residual_work_form, contribution);

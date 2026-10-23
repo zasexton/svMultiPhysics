@@ -13,6 +13,7 @@
 #include "Forms/Tensor/TensorIndex.h"
 #include "Spaces/FunctionSpace.h"
 
+#include <initializer_list>
 #include <sstream>
 #include <stdexcept>
 
@@ -2687,6 +2688,45 @@ FormExpr FormExpr::avg() const
     return FormExpr(std::make_shared<AverageNode>(node_));
 }
 
+namespace {
+
+// Combining an empty (default-constructed) FormExpr with another operand used
+// to return an empty FormExpr, which silently dropped every term it touched.
+// The operations with two or more FormExpr operands now reject it; unary
+// operations and measures still map an empty FormExpr to an empty FormExpr
+// ("no term"), which callers test with isValid() or fold with sumOf().
+[[noreturn]] void throwEmptyOperand(std::string_view operation, const std::string& which)
+{
+    throw std::invalid_argument(
+        "FormExpr: " + which + " of " + std::string(operation) +
+        " is empty (a default-constructed FormExpr); start a sum with sumOf(a, b) "
+        "or test isValid() before combining");
+}
+
+void requireOperands(std::string_view operation, bool lhs, bool rhs)
+{
+    if (lhs && rhs) {
+        return;
+    }
+    throwEmptyOperand(operation,
+                      !lhs && !rhs ? std::string("each operand")
+                                   : (!lhs ? std::string("the left operand")
+                                           : std::string("the right operand")));
+}
+
+void requireOperands(std::string_view operation, std::initializer_list<bool> present)
+{
+    std::size_t index = 0;
+    for (const bool ok : present) {
+        ++index;
+        if (!ok) {
+            throwEmptyOperand(operation, "operand " + std::to_string(index));
+        }
+    }
+}
+
+} // namespace
+
 FormExpr FormExpr::operator-() const
 {
     if (!node_) return {};
@@ -2695,25 +2735,25 @@ FormExpr FormExpr::operator-() const
 
 FormExpr FormExpr::operator+(const FormExpr& rhs) const
 {
-    if (!node_ || !rhs.node_) return {};
+    requireOperands("'+'", node_ != nullptr, rhs.node_ != nullptr);
     return FormExpr(std::make_shared<AddNode>(node_, rhs.node_));
 }
 
 FormExpr FormExpr::operator-(const FormExpr& rhs) const
 {
-    if (!node_ || !rhs.node_) return {};
+    requireOperands("'-'", node_ != nullptr, rhs.node_ != nullptr);
     return FormExpr(std::make_shared<SubtractNode>(node_, rhs.node_));
 }
 
 FormExpr FormExpr::operator*(const FormExpr& rhs) const
 {
-    if (!node_ || !rhs.node_) return {};
+    requireOperands("'*'", node_ != nullptr, rhs.node_ != nullptr);
     return FormExpr(std::make_shared<MultiplyNode>(node_, rhs.node_));
 }
 
 FormExpr FormExpr::operator/(const FormExpr& rhs) const
 {
-    if (!node_ || !rhs.node_) return {};
+    requireOperands("'/'", node_ != nullptr, rhs.node_ != nullptr);
     return FormExpr(std::make_shared<DivideNode>(node_, rhs.node_));
 }
 
@@ -2729,25 +2769,25 @@ FormExpr FormExpr::operator/(Real scalar) const
 
 FormExpr FormExpr::inner(const FormExpr& rhs) const
 {
-    if (!node_ || !rhs.node_) return {};
+    requireOperands("inner()", node_ != nullptr, rhs.node_ != nullptr);
     return FormExpr(std::make_shared<InnerProductNode>(node_, rhs.node_));
 }
 
 FormExpr FormExpr::doubleContraction(const FormExpr& rhs) const
 {
-    if (!node_ || !rhs.node_) return {};
+    requireOperands("doubleContraction()", node_ != nullptr, rhs.node_ != nullptr);
     return FormExpr(std::make_shared<DoubleContractionNode>(node_, rhs.node_));
 }
 
 FormExpr FormExpr::outer(const FormExpr& rhs) const
 {
-    if (!node_ || !rhs.node_) return {};
+    requireOperands("outer()", node_ != nullptr, rhs.node_ != nullptr);
     return FormExpr(std::make_shared<OuterProductNode>(node_, rhs.node_));
 }
 
 FormExpr FormExpr::cross(const FormExpr& rhs) const
 {
-    if (!node_ || !rhs.node_) return {};
+    requireOperands("cross()", node_ != nullptr, rhs.node_ != nullptr);
     return FormExpr(std::make_shared<CrossProductNode>(node_, rhs.node_));
 }
 
@@ -2771,61 +2811,61 @@ FormExpr FormExpr::pushforward(FormExpr expr,
 
 FormExpr FormExpr::pow(const FormExpr& exponent) const
 {
-    if (!node_ || !exponent.node_) return {};
+    requireOperands("pow()", node_ != nullptr, exponent.node_ != nullptr);
     return FormExpr(std::make_shared<PowerNode>(node_, exponent.node_));
 }
 
 FormExpr FormExpr::min(const FormExpr& rhs) const
 {
-    if (!node_ || !rhs.node_) return {};
+    requireOperands("min()", node_ != nullptr, rhs.node_ != nullptr);
     return FormExpr(std::make_shared<MinimumNode>(node_, rhs.node_));
 }
 
 FormExpr FormExpr::max(const FormExpr& rhs) const
 {
-    if (!node_ || !rhs.node_) return {};
+    requireOperands("max()", node_ != nullptr, rhs.node_ != nullptr);
     return FormExpr(std::make_shared<MaximumNode>(node_, rhs.node_));
 }
 
 FormExpr FormExpr::lt(const FormExpr& rhs) const
 {
-    if (!node_ || !rhs.node_) return {};
+    requireOperands("lt()", node_ != nullptr, rhs.node_ != nullptr);
     return FormExpr(std::make_shared<ComparisonNode>(FormExprType::Less, node_, rhs.node_));
 }
 
 FormExpr FormExpr::le(const FormExpr& rhs) const
 {
-    if (!node_ || !rhs.node_) return {};
+    requireOperands("le()", node_ != nullptr, rhs.node_ != nullptr);
     return FormExpr(std::make_shared<ComparisonNode>(FormExprType::LessEqual, node_, rhs.node_));
 }
 
 FormExpr FormExpr::gt(const FormExpr& rhs) const
 {
-    if (!node_ || !rhs.node_) return {};
+    requireOperands("gt()", node_ != nullptr, rhs.node_ != nullptr);
     return FormExpr(std::make_shared<ComparisonNode>(FormExprType::Greater, node_, rhs.node_));
 }
 
 FormExpr FormExpr::ge(const FormExpr& rhs) const
 {
-    if (!node_ || !rhs.node_) return {};
+    requireOperands("ge()", node_ != nullptr, rhs.node_ != nullptr);
     return FormExpr(std::make_shared<ComparisonNode>(FormExprType::GreaterEqual, node_, rhs.node_));
 }
 
 FormExpr FormExpr::eq(const FormExpr& rhs) const
 {
-    if (!node_ || !rhs.node_) return {};
+    requireOperands("eq()", node_ != nullptr, rhs.node_ != nullptr);
     return FormExpr(std::make_shared<ComparisonNode>(FormExprType::Equal, node_, rhs.node_));
 }
 
 FormExpr FormExpr::ne(const FormExpr& rhs) const
 {
-    if (!node_ || !rhs.node_) return {};
+    requireOperands("ne()", node_ != nullptr, rhs.node_ != nullptr);
     return FormExpr(std::make_shared<ComparisonNode>(FormExprType::NotEqual, node_, rhs.node_));
 }
 
 FormExpr FormExpr::conditional(const FormExpr& then_expr, const FormExpr& else_expr) const
 {
-    if (!node_ || !then_expr.node_ || !else_expr.node_) return {};
+    requireOperands("conditional()", {node_ != nullptr, then_expr.node_ != nullptr, else_expr.node_ != nullptr});
     return FormExpr(std::make_shared<ConditionalNode>(node_, then_expr.node_, else_expr.node_));
 }
 
@@ -3180,61 +3220,61 @@ FormExpr FormExpr::matrixSqrt() const
 
 FormExpr FormExpr::matrixPow(const FormExpr& exponent) const
 {
-    if (!node_ || !exponent.node_) return {};
+    requireOperands("matrixPow()", node_ != nullptr, exponent.node_ != nullptr);
     return FormExpr(std::make_shared<MatrixPowerNode>(node_, exponent.node_));
 }
 
 FormExpr FormExpr::matrixExpDirectionalDerivative(const FormExpr& A, const FormExpr& dA)
 {
-    if (!A.node_ || !dA.node_) return {};
+    requireOperands("matrixExpDirectionalDerivative()", A.node_ != nullptr, dA.node_ != nullptr);
     return FormExpr(std::make_shared<MatrixExponentialDirectionalDerivativeNode>(A.node_, dA.node_));
 }
 
 FormExpr FormExpr::matrixLogDirectionalDerivative(const FormExpr& A, const FormExpr& dA)
 {
-    if (!A.node_ || !dA.node_) return {};
+    requireOperands("matrixLogDirectionalDerivative()", A.node_ != nullptr, dA.node_ != nullptr);
     return FormExpr(std::make_shared<MatrixLogarithmDirectionalDerivativeNode>(A.node_, dA.node_));
 }
 
 FormExpr FormExpr::matrixSqrtDirectionalDerivative(const FormExpr& A, const FormExpr& dA)
 {
-    if (!A.node_ || !dA.node_) return {};
+    requireOperands("matrixSqrtDirectionalDerivative()", A.node_ != nullptr, dA.node_ != nullptr);
     return FormExpr(std::make_shared<MatrixSqrtDirectionalDerivativeNode>(A.node_, dA.node_));
 }
 
 FormExpr FormExpr::matrixPowDirectionalDerivative(const FormExpr& A, const FormExpr& dA, const FormExpr& exponent)
 {
-    if (!A.node_ || !dA.node_ || !exponent.node_) return {};
+    requireOperands("matrixPowDirectionalDerivative()", {A.node_ != nullptr, dA.node_ != nullptr, exponent.node_ != nullptr});
     return FormExpr(std::make_shared<MatrixPowerDirectionalDerivativeNode>(A.node_, dA.node_, exponent.node_));
 }
 
 FormExpr FormExpr::smoothAbs(const FormExpr& eps) const
 {
-    if (!node_ || !eps.node_) return {};
+    requireOperands("smoothAbs()", node_ != nullptr, eps.node_ != nullptr);
     return FormExpr(std::make_shared<SmoothAbsoluteValueNode>(node_, eps.node_));
 }
 
 FormExpr FormExpr::smoothSign(const FormExpr& eps) const
 {
-    if (!node_ || !eps.node_) return {};
+    requireOperands("smoothSign()", node_ != nullptr, eps.node_ != nullptr);
     return FormExpr(std::make_shared<SmoothSignNode>(node_, eps.node_));
 }
 
 FormExpr FormExpr::smoothHeaviside(const FormExpr& eps) const
 {
-    if (!node_ || !eps.node_) return {};
+    requireOperands("smoothHeaviside()", node_ != nullptr, eps.node_ != nullptr);
     return FormExpr(std::make_shared<SmoothHeavisideNode>(node_, eps.node_));
 }
 
 FormExpr FormExpr::smoothMin(const FormExpr& rhs, const FormExpr& eps) const
 {
-    if (!node_ || !rhs.node_ || !eps.node_) return {};
+    requireOperands("smoothMin()", {node_ != nullptr, rhs.node_ != nullptr, eps.node_ != nullptr});
     return FormExpr(std::make_shared<SmoothMinNode>(node_, rhs.node_, eps.node_));
 }
 
 FormExpr FormExpr::smoothMax(const FormExpr& rhs, const FormExpr& eps) const
 {
-    if (!node_ || !rhs.node_ || !eps.node_) return {};
+    requireOperands("smoothMax()", {node_ != nullptr, rhs.node_ != nullptr, eps.node_ != nullptr});
     return FormExpr(std::make_shared<SmoothMaxNode>(node_, rhs.node_, eps.node_));
 }
 
@@ -3264,13 +3304,13 @@ FormExpr FormExpr::spectralDecomposition() const
 
 FormExpr FormExpr::symmetricEigenvectorDirectionalDerivative(const FormExpr& A, const FormExpr& dA, int which)
 {
-    if (!A.node_ || !dA.node_) return {};
+    requireOperands("symmetricEigenvectorDirectionalDerivative()", A.node_ != nullptr, dA.node_ != nullptr);
     return FormExpr(std::make_shared<SymmetricEigenvectorDirectionalDerivativeNode>(A.node_, dA.node_, which));
 }
 
 FormExpr FormExpr::spectralDecompositionDirectionalDerivative(const FormExpr& A, const FormExpr& dA)
 {
-    if (!A.node_ || !dA.node_) return {};
+    requireOperands("spectralDecompositionDirectionalDerivative()", A.node_ != nullptr, dA.node_ != nullptr);
     return FormExpr(std::make_shared<SpectralDecompositionDirectionalDerivativeNode>(A.node_, dA.node_));
 }
 
@@ -3296,7 +3336,7 @@ FormExpr FormExpr::historyConvolution(std::vector<FormExpr> weights)
 
 FormExpr FormExpr::symmetricEigenvalueDirectionalDerivative(const FormExpr& A, const FormExpr& dA, int which)
 {
-    if (!A.node_ || !dA.node_) return {};
+    requireOperands("symmetricEigenvalueDirectionalDerivative()", A.node_ != nullptr, dA.node_ != nullptr);
     return FormExpr(std::make_shared<SymmetricEigenvalueDirectionalDerivativeNode>(A.node_, dA.node_, which));
 }
 
@@ -3305,7 +3345,7 @@ FormExpr FormExpr::symmetricEigenvalueDirectionalDerivativeWrtA(const FormExpr& 
                                                                 const FormExpr& dA,
                                                                 int which)
 {
-    if (!A.node_ || !B.node_ || !dA.node_) return {};
+    requireOperands("symmetricEigenvalueDirectionalDerivativeWrtA()", {A.node_ != nullptr, B.node_ != nullptr, dA.node_ != nullptr});
     return FormExpr(std::make_shared<SymmetricEigenvalueDirectionalDerivativeWrtANode>(A.node_, B.node_, dA.node_, which));
 }
 
