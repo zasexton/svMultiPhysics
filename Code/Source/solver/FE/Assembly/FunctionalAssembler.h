@@ -95,6 +95,7 @@ namespace assembly {
 
 struct TimeIntegrationContext;
 class CutIntegrationContext;
+class StandardAssembler;
 
 /**
  * @brief Binding descriptor for a secondary field in multi-field functional evaluation
@@ -811,6 +812,35 @@ public:
         const CutIntegrationContext& cut_context,
         int generated_interface_marker);
 
+    /**
+     * @brief Assemble a cell functional over the cut-volume rules of one
+     * generated interface marker and side.
+     *
+     * The rules are those of the cut context (for a free surface, the rules of
+     * its authoritative geometry snapshot).  Each rule of a locally owned
+     * parent cell is integrated once with the kernel's cell integrand.  The
+     * caller owns any inter-rank reduction.
+     */
+    [[nodiscard]] Real assembleCutVolumeScalar(
+        FunctionalKernel& kernel,
+        const CutIntegrationContext& cut_context,
+        int interface_marker,
+        geometry::CutIntegrationSide side);
+
+    /**
+     * @brief Assemble a boundary-face functional over the generated interface
+     * rules of one marker: a level-set interface, a contact line (a rule of
+     * codimension two) or a generated active boundary.
+     *
+     * Each rule of a locally owned parent cell is integrated once with the
+     * kernel's boundary-face integrand.  The caller owns any inter-rank
+     * reduction.
+     */
+    [[nodiscard]] Real assembleGeneratedInterfaceScalar(
+        FunctionalKernel& kernel,
+        const CutIntegrationContext& cut_context,
+        int interface_marker);
+
     // =========================================================================
     // Multiple Functionals
     // =========================================================================
@@ -958,6 +988,14 @@ private:
      * @brief Prepare context for element
      */
     void prepareContext(GlobalIndex cell_id, RequiredData required_data);
+
+    /**
+     * @brief Run @p loop on a StandardAssembler that reads this assembler's
+     * fields, state and parameters and @p cut_context, and inserts nothing.
+     */
+    AssemblyResult runCutRuleBridge(
+        const CutIntegrationContext& cut_context,
+        const std::function<AssemblyResult(StandardAssembler&)>& loop);
 
     /**
      * @brief Kahan summation accumulator

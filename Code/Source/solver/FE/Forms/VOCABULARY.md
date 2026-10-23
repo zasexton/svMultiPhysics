@@ -701,6 +701,7 @@ Status: `implemented/public` for named authoring helpers; slot references are
 | `BoundaryFunctional` | Boundary/domain functional definition (integrand plus marker; no measure) |
 | `BoundaryFunctionalResults` | Runtime functional output container |
 | `compileBoundaryFunctionalKernel(...)` | `implemented/expert`; compiles a scalar integrand to a cell or boundary-face functional kernel |
+| `FunctionalAssembler::assembleCutVolumeScalar(kernel, cut_context, marker, side)`, `assembleGeneratedInterfaceScalar(kernel, cut_context, marker)` | `implemented/expert`; a functional kernel on the cut context's volume rules, or on its interface, contact-line or active-boundary rules, of one marker, on owned parent cells; the caller reduces |
 | `FESystem::addFunctionalKernel(tag, kernel)`, `evaluateFunctional(tag, state)` | `implemented/expert`; evaluates a compiled functional on a state |
 | `post::DerivedResultBuilder(name).scope(...).policy(...).shape(...).expression(expr).build()` | Derived output field from a `FormExpr` (cell average, patch average, L2 projection, ...), added with `FESystem::addDerivedResult` |
 | `FormExpr::boundaryIntegral(...)` | `implemented/internal`; legacy boundary-functional symbol, rejected by `BoundaryConditionManager::apply` |

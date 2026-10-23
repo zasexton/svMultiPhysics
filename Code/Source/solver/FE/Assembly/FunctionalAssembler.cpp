@@ -953,6 +953,90 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
     }
 }
 
+/**
+ * The assembly kernel of a cut-rule loop of StandardAssembler: each rule adds
+ * the functional kernel's cell total (cut-volume rules) or boundary-face total
+ * (generated interface rules) to a compensated sum; nothing is inserted.
+ */
+class CutRuleFunctionalAdapter final : public AssemblyKernel {
+public:
+    enum class Rules : std::uint8_t {
+        Volume,
+        Interface
+    };
+
+    CutRuleFunctionalAdapter(FunctionalKernel& kernel, Rules rules)
+        : kernel_(kernel)
+        , rules_(rules)
+    {
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const noexcept override
+    {
+        return kernel_.getRequiredData();
+    }
+
+    [[nodiscard]] std::vector<FieldRequirement>
+    fieldRequirements() const override
+    {
+        return kernel_.fieldRequirements();
+    }
+
+    [[nodiscard]] bool hasCell() const noexcept override
+    {
+        return rules_ == Rules::Volume;
+    }
+    [[nodiscard]] bool hasBoundaryFace() const noexcept override
+    {
+        return rules_ == Rules::Interface;
+    }
+    [[nodiscard]] bool hasSingleSidedInterfaceFace() const noexcept override
+    {
+        return rules_ == Rules::Interface;
+    }
+
+    void computeCell(const AssemblyContext& context,
+                     KernelOutput& output) override
+    {
+        if (rules_ != Rules::Volume) {
+            output.reserve(0, 0, false, false);
+            return;
+        }
+        add(kernel_.evaluateCellTotal(context));
+        output.reserve(context.numTestDofs(),
+                       context.numTrialDofs(),
+                       false,
+                       false);
+    }
+
+    void computeBoundaryFace(const AssemblyContext& context,
+                             int marker,
+                             KernelOutput& output) override
+    {
+        add(kernel_.evaluateBoundaryFaceTotal(context, marker));
+        output.reserve(context.numTestDofs(),
+                       context.numTrialDofs(),
+                       false,
+                       false);
+    }
+
+    [[nodiscard]] Real value() const noexcept { return sum_; }
+
+private:
+    void add(Real contribution) noexcept
+    {
+        const Real adjusted = contribution - compensation_;
+        const Real next = sum_ + adjusted;
+        compensation_ = (next - sum_) - adjusted;
+        sum_ = next;
+    }
+
+    FunctionalKernel& kernel_;
+    Rules rules_{Rules::Interface};
+    Real sum_{0.0};
+    Real compensation_{0.0};
+};
+
 } // namespace
 
 // ============================================================================
@@ -1760,58 +1844,145 @@ Real FunctionalAssembler::assembleCutInterfaceScalar(
         return Real{0.0};
     }
 
-    class CutFunctionalAdapter final : public AssemblyKernel {
-    public:
-        explicit CutFunctionalAdapter(FunctionalKernel& kernel) : kernel_(kernel) {}
+    CutRuleFunctionalAdapter adapter(
+        kernel, CutRuleFunctionalAdapter::Rules::Interface);
+    const auto assembly_result = runCutRuleBridge(
+        cut_context,
+        [&](StandardAssembler& bridge) {
+            return bridge.assembleCutInterfaces(
+                *mesh_,
+                cut_context,
+                generated_interface_marker,
+                *space_,
+                *space_,
+                adapter,
+                nullptr,
+                nullptr,
+                false,
+                false);
+        });
 
-        [[nodiscard]] RequiredData getRequiredData() const noexcept override
-        {
-            return kernel_.getRequiredData();
-        }
+    const Real value = kernel.postProcess(adapter.value());
+    result.value = value;
+    result.success = assembly_result.success;
+    result.error_message = assembly_result.error_message;
+    result.faces_processed = assembly_result.interface_faces_assembled;
+    result.elapsed_seconds = assembly_result.elapsed_time_seconds;
+    last_result_ = result;
+    return value;
+}
 
-        [[nodiscard]] std::vector<FieldRequirement>
-        fieldRequirements() const override
-        {
-            return kernel_.fieldRequirements();
-        }
+Real FunctionalAssembler::assembleCutVolumeScalar(
+    FunctionalKernel& kernel,
+    const CutIntegrationContext& cut_context,
+    int interface_marker,
+    geometry::CutIntegrationSide side)
+{
+    FE_THROW_IF(side == geometry::CutIntegrationSide::Interface,
+                InvalidArgumentException,
+                "FunctionalAssembler::assembleCutVolumeScalar: the side must be "
+                "Negative or Positive");
 
-        [[nodiscard]] bool hasCell() const noexcept override { return false; }
-        [[nodiscard]] bool hasBoundaryFace() const noexcept override { return true; }
-        [[nodiscard]] bool hasSingleSidedInterfaceFace() const noexcept override
-        {
-            return true;
-        }
+    FunctionalResult result;
+    if (!isConfigured()) {
+        result.success = false;
+        result.error_message = "FunctionalAssembler not configured";
+        last_result_ = result;
+        return Real{0.0};
+    }
+    if (!kernel.hasCell()) {
+        result.success = false;
+        result.error_message = "Kernel does not support cell integration";
+        last_result_ = result;
+        return Real{0.0};
+    }
 
-        void computeCell(const AssemblyContext&,
-                         KernelOutput& output) override
-        {
-            output.reserve(0, 0, false, false);
-        }
+    CutRuleFunctionalAdapter adapter(
+        kernel, CutRuleFunctionalAdapter::Rules::Volume);
+    const auto assembly_result = runCutRuleBridge(
+        cut_context,
+        [&](StandardAssembler& bridge) {
+            return bridge.assembleCutVolumes(
+                *mesh_,
+                cut_context,
+                interface_marker,
+                side,
+                *space_,
+                *space_,
+                adapter,
+                nullptr,
+                nullptr,
+                false,
+                false);
+        });
 
-        void computeBoundaryFace(const AssemblyContext& context,
-                                 int marker,
-                                 KernelOutput& output) override
-        {
-            const Real contribution =
-                kernel_.evaluateBoundaryFaceTotal(context, marker);
-            const Real adjusted = contribution - compensation_;
-            const Real next = sum_ + adjusted;
-            compensation_ = (next - sum_) - adjusted;
-            sum_ = next;
-            output.reserve(context.numTestDofs(),
-                           context.numTrialDofs(),
-                           false,
-                           false);
-        }
+    const Real value = kernel.postProcess(adapter.value());
+    result.value = value;
+    result.success = assembly_result.success;
+    result.error_message = assembly_result.error_message;
+    result.elements_processed = assembly_result.elements_assembled;
+    result.elapsed_seconds = assembly_result.elapsed_time_seconds;
+    last_result_ = result;
+    return value;
+}
 
-        [[nodiscard]] Real value() const noexcept { return sum_; }
+Real FunctionalAssembler::assembleGeneratedInterfaceScalar(
+    FunctionalKernel& kernel,
+    const CutIntegrationContext& cut_context,
+    int interface_marker)
+{
+    FE_THROW_IF(interface_marker < 0,
+                InvalidArgumentException,
+                "FunctionalAssembler::assembleGeneratedInterfaceScalar: the marker "
+                "must be nonnegative");
 
-    private:
-        FunctionalKernel& kernel_;
-        Real sum_{0.0};
-        Real compensation_{0.0};
-    };
+    FunctionalResult result;
+    if (!isConfigured()) {
+        result.success = false;
+        result.error_message = "FunctionalAssembler not configured";
+        last_result_ = result;
+        return Real{0.0};
+    }
+    if (!kernel.hasBoundaryFace()) {
+        result.success = false;
+        result.error_message =
+            "Kernel does not support boundary face integration";
+        last_result_ = result;
+        return Real{0.0};
+    }
 
+    CutRuleFunctionalAdapter adapter(
+        kernel, CutRuleFunctionalAdapter::Rules::Interface);
+    const auto assembly_result = runCutRuleBridge(
+        cut_context,
+        [&](StandardAssembler& bridge) {
+            return bridge.assembleCutInterfaces(
+                *mesh_,
+                cut_context,
+                interface_marker,
+                *space_,
+                *space_,
+                adapter,
+                nullptr,
+                nullptr,
+                false,
+                false);
+        });
+
+    const Real value = kernel.postProcess(adapter.value());
+    result.value = value;
+    result.success = assembly_result.success;
+    result.error_message = assembly_result.error_message;
+    result.faces_processed = assembly_result.interface_faces_assembled;
+    result.elapsed_seconds = assembly_result.elapsed_time_seconds;
+    last_result_ = result;
+    return value;
+}
+
+AssemblyResult FunctionalAssembler::runCutRuleBridge(
+    const CutIntegrationContext& cut_context,
+    const std::function<AssemblyResult(StandardAssembler&)>& loop)
+{
     AssemblyOptions bridge_options;
     bridge_options.deterministic = options_.deterministic;
     bridge_options.use_constraints = false;
@@ -1828,9 +1999,9 @@ Real FunctionalAssembler::assembleCutInterfaceScalar(
         primary_offset = binding->dof_offset;
     }
     FE_CHECK_NOT_NULL(primary_map,
-                      "FunctionalAssembler::assembleCutInterfaceScalar: primary dof map");
+                      "FunctionalAssembler: primary dof map of the cut-rule bridge");
     FE_CHECK_NOT_NULL(space_,
-                      "FunctionalAssembler::assembleCutInterfaceScalar: primary space");
+                      "FunctionalAssembler: primary space of the cut-rule bridge");
     bridge.setRowDofMap(*primary_map, primary_offset);
     bridge.setColDofMap(*primary_map, primary_offset);
 
@@ -1882,27 +2053,7 @@ Real FunctionalAssembler::assembleCutInterfaceScalar(
                               auxiliary_outputs_);
     bridge.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
 
-    CutFunctionalAdapter adapter(kernel);
-    const auto assembly_result = bridge.assembleCutInterfaces(
-        *mesh_,
-        cut_context,
-        generated_interface_marker,
-        *space_,
-        *space_,
-        adapter,
-        nullptr,
-        nullptr,
-        false,
-        false);
-
-    const Real value = kernel.postProcess(adapter.value());
-    result.value = value;
-    result.success = assembly_result.success;
-    result.error_message = assembly_result.error_message;
-    result.faces_processed = assembly_result.interface_faces_assembled;
-    result.elapsed_seconds = assembly_result.elapsed_time_seconds;
-    last_result_ = result;
-    return value;
+    return loop(bridge);
 }
 
 // ============================================================================
