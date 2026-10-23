@@ -444,10 +444,9 @@ remain unavailable and fail closed. Backend capabilities expose this distinction
 with `supports_refreshed_frozen_quadrature` and
 `supports_differentiated_quadrature`; unsupported families advertise neither.
 
-The Navier-Stokes unfitted surface-tension forms (`SurfaceStress`,
-`KinematicAreaGradientTraction`) do not yet have
-complete normal, point-location, and recovered-curvature derivatives. They
-therefore require `RefreshedFrozenQuadrature`. Cases with surface tension must
+The Navier-Stokes unfitted surface-tension form `SurfaceStress` does not yet
+have complete normal, point-location, and measure derivatives. It therefore
+requires `RefreshedFrozenQuadrature`. Cases with surface tension must
 set `Geometry_tangent_policy=RefreshedFrozenQuadrature` explicitly, even on the
 default `LinearCorner` path.
 
@@ -493,12 +492,13 @@ smooth derivative.
 
 ## Curvature and Capillary Contract
 
-The default unfitted capillary form in Navier-Stokes is `SurfaceStress`. It is
-the first variation of the generated-interface measure, uses the generated
-normal, and needs no curvature field. The curvature-based form
-`KinematicAreaGradientTraction` needs a named scalar curvature field recovered
-in `KinematicAreaGradient` mode (see below); `CurvatureTraction`, which read a
-supplied, unknown or projected curvature, was retired by decision D47 Q2.
+The unfitted capillary form in Navier-Stokes is `SurfaceStress`. It is the
+first variation of the generated-interface measure, uses the generated
+normal, and needs no curvature field. `CurvatureTraction`, which read a
+supplied, unknown or projected curvature, was retired by decision D47 Q2, and
+`KinematicAreaGradientTraction`, which read a curvature field recovered in
+`KinematicAreaGradient` mode (see below), by decision D48. The projection
+below has no Navier-Stokes consumer.
 
 The field is a prescribed projected field maintained from the level-set
 geometry. Raw pointwise
@@ -531,7 +531,7 @@ selects one of three modes:
 |---------------|--------|
 | `level_set_quadratic` (default) | Local weighted least-squares quadratic fit of `phi` on the active narrow band. Optional supplemental generated-interface and cut-volume samples, bounded fallback policies, and optional graph smoothing. |
 | `generated_interface_patch` | Fit of a local tangent graph to generated-interface quadrature samples. The level-set gradient still defines the normal. |
-| `kinematic_area_gradient` | Exact derivative of the `LinearCorner` interface measure, and of each declared Young wetted-wall measure weighted by `cos(theta_e)`, with respect to the nodal P1 level-set values on a fixed cut topology. The curvature solves `M kappa = -dE/dphi`, where `M_ij` is the integral of `N_i N_j / abs(grad(phi))` over the generated interface; the row sums of `M` equal the liquid-volume derivative. Affine P1 `Triangle3`/`Tetra4` only. Optional Helmholtz filter set by `Curvature_projection_kinematic_area_gradient_filter_coefficient`; `KinematicAreaGradientTraction` requires it to be 0. `Curvature_projection_kinematic_area_gradient_mass` selects `Consistent` (default) or `Lumped`, which implies a zero filter (see below). |
+| `kinematic_area_gradient` | Exact derivative of the `LinearCorner` interface measure, and of each declared Young wetted-wall measure weighted by `cos(theta_e)`, with respect to the nodal P1 level-set values on a fixed cut topology. The curvature solves `M kappa = -dE/dphi`, where `M_ij` is the integral of `N_i N_j / abs(grad(phi))` over the generated interface; the row sums of `M` equal the liquid-volume derivative. Affine P1 `Triangle3`/`Tetra4` only. Optional Helmholtz filter set by `Curvature_projection_kinematic_area_gradient_filter_coefficient`. `Curvature_projection_kinematic_area_gradient_mass` selects `Consistent` (default) or `Lumped`, which implies a zero filter (see below). |
 
 In `kinematic_area_gradient` mode, a discrete volume-constrained stationary
 state gives an exactly constant `kappa`. That constant is balanced by a

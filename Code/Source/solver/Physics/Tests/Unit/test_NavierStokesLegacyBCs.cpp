@@ -2896,12 +2896,14 @@ TEST(NavierStokesLegacyBCs, ResolvedArtifactSectionRecordsTheSourceOfEveryFreeSu
               std::string::npos);
     // Keys outside the schema (Type) and retired keys (Kinematic_penalty,
     // decision D47 Q9; Curvature, Use_level_set_curvature and
-    // Allow_fitted_surface_stress, decision D47 Q2) are not listed.
+    // Allow_fitted_surface_stress, decision D47 Q2; Curvature_field,
+    // decision D48) are not listed.
     EXPECT_EQ(resolved.find("\"Type\""), std::string::npos);
     EXPECT_EQ(resolved.find("\"Kinematic_penalty\""), std::string::npos);
     EXPECT_EQ(resolved.find("\"Curvature\""), std::string::npos);
     EXPECT_EQ(resolved.find("\"Use_level_set_curvature\""), std::string::npos);
     EXPECT_EQ(resolved.find("\"Allow_fitted_surface_stress\""), std::string::npos);
+    EXPECT_EQ(resolved.find("\"Curvature_field\""), std::string::npos);
 #endif
 }
 
@@ -3292,60 +3294,117 @@ TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceActiveDomainTranslation_SetupSucc
 #endif
 }
 
-TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceTranslation_AcceptsProjectedCurvatureField)
+TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceKinematicAreaGradientInputsAreRetired)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
     GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
 #else
+    // Decision D48: KinematicAreaGradientTraction and the projected curvature
+    // field it read were retired.  The form (any of its spellings) and the
+    // boundary key Curvature_field (any of its spellings, whatever its value)
+    // fail while the boundary is translated, with a message that names
+    // SurfaceStress; nothing is accepted as a restatement.  The same
+    // boundary without them is the SurfaceStress default.
     svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
 
     constexpr int marker = 82;
     auto mesh = buildSingleTetraBoundaryMesh(marker);
     ASSERT_TRUE(mesh);
 
-    svmp::Physics::EquationModuleInput input{};
-    input.equation_type = "fluid";
-    input.mesh_name = "single_tetra";
-    input.mesh = mesh->local_mesh_ptr();
+    using Extra = std::vector<std::pair<std::string, std::string>>;
+    const auto make_input = [&](const Extra& extra) {
+        svmp::Physics::EquationModuleInput input{};
+        input.equation_type = "fluid";
+        input.mesh_name = "single_tetra";
+        input.mesh = mesh->local_mesh_ptr();
 
-    input.default_domain.params["Density"] = defined("1.0");
-    input.default_domain.params["Viscosity.model"] = defined("Constant");
-    input.default_domain.params["Viscosity.Value"] = defined("0.01");
+        input.default_domain.params["Density"] = defined("1.0");
+        input.default_domain.params["Viscosity.model"] = defined("Constant");
+        input.default_domain.params["Viscosity.Value"] = defined("0.01");
 
-    svmp::Physics::BoundaryConditionInput bc{};
-    bc.name = "free_surface";
-    bc.boundary_marker = svmp::INVALID_LABEL;
-    bc.params["Type"] = defined("Free_surface");
-    bc.params["Implementation"] = defined("UnfittedLevelSet");
-    bc.params["Level_set_field_name"] = defined("phi");
-    bc.params["Active_domain"] = defined("LevelSetNegative");
-    bc.params["Active_domain_method"] = defined("CutVolume");
-    bc.params["Surface_tension"] = defined("0.0728");
-    bc.params["Curvature_field"] = defined("kappa_projected");
-    input.boundary_conditions.push_back(std::move(bc));
+        svmp::Physics::BoundaryConditionInput bc{};
+        bc.name = "free_surface";
+        bc.boundary_marker = svmp::INVALID_LABEL;
+        bc.params["Type"] = defined("Free_surface");
+        bc.params["Implementation"] = defined("UnfittedLevelSet");
+        bc.params["Level_set_field_name"] = defined("phi");
+        bc.params["Active_domain"] = defined("LevelSetNegative");
+        bc.params["Active_domain_method"] = defined("CutVolume");
+        bc.params["Surface_tension"] = defined("0.0728");
+        for (const auto& [key, value] : extra) {
+            bc.params[key] = defined(value);
+        }
+        input.boundary_conditions.push_back(std::move(bc));
+        return input;
+    };
+    const auto make_system = [&]() {
+        auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
+        auto scalar_space = svmp::FE::spaces::SpaceFactory::create_h1(
+            svmp::FE::ElementType::Tetra4, 1);
+        system->addField(svmp::FE::systems::FieldSpec{
+            .name = "phi",
+            .space = scalar_space,
+            .components = 1,
+            .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData,
+        });
+        system->addField(svmp::FE::systems::FieldSpec{
+            .name = "kappa_projected",
+            .space = scalar_space,
+            .components = 1,
+            .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData,
+        });
+        return system;
+    };
 
-    svmp::FE::systems::FESystem system(mesh);
-    auto scalar_space =
-        svmp::FE::spaces::SpaceFactory::create_h1(svmp::FE::ElementType::Tetra4, 1);
-    system.addField(svmp::FE::systems::FieldSpec{
-        .name = "phi",
-        .space = scalar_space,
-        .components = 1,
-        .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData,
-    });
-    system.addField(svmp::FE::systems::FieldSpec{
-        .name = "kappa_projected",
-        .space = scalar_space,
-        .components = 1,
-        .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData,
-    });
+    {
+        const auto input = make_input({});
+        auto system = make_system();
+        auto module = svmp::Physics::EquationModuleRegistry::instance().create(
+            "fluid", input, *system);
+        ASSERT_TRUE(module);
+        EXPECT_TRUE(formulationRecordsContain(
+            *system, svmp::FE::forms::FormExprType::InterfaceIntegral));
+        EXPECT_TRUE(formulationRecordsContainCutVolumeSide(
+            *system,
+            svmp::FE::forms::CutVolumeSide::Negative));
+    }
 
-    auto module = svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
-    ASSERT_TRUE(module);
-    EXPECT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::InterfaceIntegral));
-    EXPECT_TRUE(formulationRecordsContainCutVolumeSide(
-        system,
-        svmp::FE::forms::CutVolumeSide::Negative));
+    const std::vector<Extra> retired_inputs{
+        {{"Surface_tension_form", "KinematicAreaGradientTraction"}},
+        {{"Surface_tension_form", "TotalEnergyGradientTraction"}},
+        {{"Surface_tension_form", "DiscreteEnergyGradientTraction"}},
+        {{"Curvature_field", "kappa_projected"}},
+        {{"Curvature_field", ""}},
+        {{"CurvatureField", "kappa_projected"}},
+        {{"Curvature_field_name", "kappa_projected"}},
+        {{"CurvatureFieldName", "kappa_projected"}},
+        {{"Projected_curvature_field", "kappa_projected"}},
+        {{"ProjectedCurvatureField", "kappa_projected"}},
+        {{"Free_surface_curvature_field", "kappa_projected"}},
+        {{"FreeSurfaceCurvatureField", "kappa_projected"}},
+        {{"Surface_tension_form", "SurfaceStress"},
+         {"Curvature_field", "kappa_projected"}},
+    };
+    for (const auto& retired : retired_inputs) {
+        SCOPED_TRACE(retired.back().first + "=" + retired.back().second);
+        const auto input = make_input(retired);
+        auto system = make_system();
+        try {
+            auto module =
+                svmp::Physics::EquationModuleRegistry::instance().create(
+                    "fluid", input, *system);
+            (void)module;
+            ADD_FAILURE() << "the retired input must fail";
+        } catch (const std::runtime_error& error) {
+            const std::string message = error.what();
+            EXPECT_NE(message.find("decision D48"), std::string::npos)
+                << message;
+            EXPECT_NE(message.find("SurfaceStress"), std::string::npos)
+                << message;
+        }
+        EXPECT_EQ(system->findFieldByName("Velocity"),
+                  svmp::FE::INVALID_FIELD_ID);
+    }
 #endif
 }
 

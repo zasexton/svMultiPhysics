@@ -71,9 +71,6 @@ enum class ContactLineKind : std::uint8_t {
 [[nodiscard]] bool usesSurfaceStress(
     const FreeSurfaceBoundary& bc) noexcept;
 
-[[nodiscard]] bool usesKinematicAreaGradientTraction(
-    const FreeSurfaceBoundary& bc) noexcept;
-
 [[nodiscard]] const char* surfaceTensionFormName(
     const FreeSurfaceBoundary& bc) noexcept;
 

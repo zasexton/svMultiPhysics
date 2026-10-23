@@ -43,8 +43,6 @@
 #include <utility>
 #include <vector>
 
-#include "Physics/Formulations/NavierStokes/NavierStokesPreflight.h"
-
 namespace svmp {
 namespace Physics {
 namespace formulations {
@@ -55,8 +53,7 @@ namespace navier_stokes {
     std::vector<FreeSurfaceBoundary> free_surfaces,
     const FE::systems::FESystem& system,
     int dimension,
-    bool effective_enable_vms,
-    PspgPressureGradientForm pspg_pressure_gradient_form);
+    bool effective_enable_vms);
 
 } // namespace navier_stokes
 } // namespace formulations

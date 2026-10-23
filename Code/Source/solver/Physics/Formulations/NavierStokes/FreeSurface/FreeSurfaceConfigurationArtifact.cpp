@@ -342,8 +342,7 @@ tangentialPolicyProvenance(
     std::vector<FreeSurfaceBoundary> free_surfaces,
     const FE::systems::FESystem& system,
     int dimension,
-    bool effective_enable_vms,
-    PspgPressureGradientForm pspg_pressure_gradient_form)
+    bool effective_enable_vms)
 {
     std::sort(free_surfaces.begin(), free_surfaces.end(),
               freeSurfaceConfigurationLess);
@@ -437,10 +436,6 @@ tangentialPolicyProvenance(
         << ",\"ct_m\":" << jsonReal(options.ct_m)
         << ",\"ct_c\":" << jsonReal(options.ct_c)
         << ",\"epsilon\":" << jsonReal(options.stabilization_epsilon)
-        << ",\"pspg_pressure_gradient_form\":"
-        << jsonString(
-               pspgPressureGradientFormName(
-                   pspg_pressure_gradient_form))
         << '}'
         << ",\"maintenance_policy\":{\"owner_component\":\"level_set_transport\",\"coupling\":\"one_way_velocity_to_extension_to_level_set\"}"
         << ",\"extension_guards\":{\"physical_momentum_dry_extension_allowed\":false,\"auxiliary_extension_owner\":\"level_set_transport\",\"external_owner_required\":true}"
@@ -493,9 +488,6 @@ tangentialPolicyProvenance(
         case FreeSurfaceSurfaceTensionForm::Automatic:
             out << "\"Automatic\"";
             break;
-        case FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction:
-            out << "\"KinematicAreaGradientTraction\"";
-            break;
         case FreeSurfaceSurfaceTensionForm::SurfaceStress:
             out << "\"SurfaceStress\"";
             break;
@@ -512,17 +504,6 @@ tangentialPolicyProvenance(
                 << ",\"surface_tension_semi_implicit_reference_velocity\":"
                 << jsonString(std::string(
                        kFreeSurfaceSemiImplicitReferenceVelocityFieldName));
-        }
-        if (isExteriorOnePhaseBoundary(boundary) &&
-            usesKinematicAreaGradientTraction(boundary)) {
-            out << ",\"surface_tension_form_qualification\":"
-                << "\"prerequisite_only\""
-                << ",\"surface_tension_normal_source\":"
-                << "\"generated_interface_rule_geometry\""
-                << ",\"surface_tension_curvature_source\":"
-                << "\"kinematic_area_gradient_total_surface_young_energy\""
-                << ",\"equilibrium_young_force_owner\":"
-                << "\"total_energy_gradient_traction\"";
         }
         out << ",\"curvature_policy\":"
             << jsonString(freeSurfaceCurvaturePolicyName(boundary))

@@ -44,7 +44,6 @@ struct NavierStokesVMSSettings {
     bool ale{false};
     bool moving_control_volume{false};      // chi = div(w) u (ALE only)
     bool vms{true};
-    bool incremental_pspg_pressure{false};  // PSPG on grad(dt_eff dt p) instead of grad p
     FE::Real ct_m{1.0};
     FE::Real ct_c{36.0};
     FE::Real epsilon{1.0e-12};

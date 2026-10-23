@@ -72,35 +72,6 @@ generatedActiveBoundaryMarkerKey(
         .boundaryKey(physical_boundary_marker);
 }
 
-[[nodiscard]] FE::forms::FormExpr freeSurfaceCurvatureField(
-    const FreeSurfaceBoundary& bc,
-    const FE::systems::FESystem& system)
-{
-    if (bc.curvature_field_name.empty()) {
-        return FE::forms::FormExpr{};
-    }
-
-    const auto kappa_id = system.findFieldByName(bc.curvature_field_name);
-    if (kappa_id == FE::INVALID_FIELD_ID || !system.hasField(bc.curvature_field_name)) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: free surface references unknown curvature field '" +
-            bc.curvature_field_name + "'");
-    }
-
-    const auto& rec = system.fieldRecord(kappa_id);
-    if (rec.components != 1 || !rec.space || rec.space->value_dimension() != 1) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: curvature field '" +
-            bc.curvature_field_name + "' must be scalar");
-    }
-
-    // KinematicAreaGradientTraction, the only reader, requires a prescribed
-    // field (validateFreeSurfaceBoundary); the unknown curvature field of
-    // CurvatureTraction was retired by decision D47 Q2.
-    return FE::forms::FormExpr::discreteField(
-        kappa_id, *rec.space, bc.curvature_field_name);
-}
-
 } // namespace
 
 [[nodiscard]] std::optional<ActivePressureDomain>
@@ -278,13 +249,9 @@ generatedUnfittedContactLineMarkerKey(
     if (FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension)) {
         return "not_applicable";
     }
-    if (usesSurfaceStress(bc)) {
-        return isUnfittedLevelSet(bc)
-                   ? "generated_geometry_refreshed_frozen"
-                   : "fitted_geometry_surface_variation";
-    }
-    // KinematicAreaGradientTraction, the only other form.
-    return "kinematic_area_gradient_field_picard_generated_geometry_frozen";
+    // SurfaceStress, the only form (decision D48).
+    return isUnfittedLevelSet(bc) ? "generated_geometry_refreshed_frozen"
+                                  : "fitted_geometry_surface_variation";
 }
 
 [[nodiscard]] std::optional<ActiveVolumeDomain> activeVolumeDomainFor(
@@ -354,17 +321,6 @@ generatedUnfittedContactLineMarkerKey(
             "' must be prescribed data, not an unknown");
     }
     return FE::forms::FormExpr::discreteField(field, *rec.space, name);
-}
-
-[[nodiscard]] FE::forms::FormExpr unfittedTractionCurvature(
-    const FreeSurfaceBoundary& bc,
-    const FE::systems::FESystem& system)
-{
-    const auto curvature = freeSurfaceCurvatureField(bc, system);
-    if (bc.active_domain == FreeSurfaceActiveDomain::LevelSetPositive) {
-        return FE::forms::FormExpr::constant(FE::Real{-1.0}) * curvature;
-    }
-    return curvature;
 }
 
 FE::forms::FormExpr freeSurfaceScalar(

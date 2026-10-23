@@ -73,7 +73,7 @@ void logNaturalUnfittedFreeSurface(const FreeSurfaceBoundary& bc)
 
 void logFreeSurfaceTraction(const FreeSurfaceBoundary& bc)
 {
-    if (usesSurfaceStress(bc) && !surfaceStressActive(bc)) {
+    if (!surfaceStressActive(bc)) {
         FE_LOG_INFO(
             std::string("IncompressibleNavierStokesVMSModule: installed pressure-only free-surface stress") +
             " marker=" + std::to_string(freeSurfaceMarker(bc)) +
@@ -82,7 +82,7 @@ void logFreeSurfaceTraction(const FreeSurfaceBoundary& bc)
             " form=p_external_n_dot_v" +
             " surface_energy_form=omitted_literal_zero_gamma" +
             " diagnostic=free_surface_pressure_only_surface_stress");
-    } else if (usesSurfaceStress(bc)) {
+    } else {
         FE_LOG_INFO(
             std::string("IncompressibleNavierStokesVMSModule: installed variational free-surface stress") +
             " marker=" + std::to_string(freeSurfaceMarker(bc)) +
@@ -94,20 +94,6 @@ void logFreeSurfaceTraction(const FreeSurfaceBoundary& bc)
             " force_projection_applied=0" +
             " static_geometry_stationarity_required=1" +
             " diagnostic=free_surface_variational_surface_stress");
-    } else if (usesKinematicAreaGradientTraction(bc)) {
-        FE_LOG_INFO(
-            std::string("IncompressibleNavierStokesVMSModule: installed total discrete-energy-gradient traction") +
-            " marker=" +
-            std::to_string(freeSurfaceMarker(bc)) +
-            " surface_tension_form=KinematicAreaGradientTraction" +
-            " normal_source=integration_rule_geometry" +
-            " curvature_source=" +
-            freeSurfaceCurvaturePolicyName(bc) +
-            " capillary_balance_method=kinematic_area_gradient_energy_traction" +
-            " capillary_balance_qualification=prerequisite_only" +
-            " equilibrium_line_force_owner=traction" +
-            " force_projection_applied=0" +
-            " diagnostic=free_surface_total_energy_gradient_traction");
     }
     if (usesSemiImplicitNormalIncrement(bc)) {
         FE_LOG_INFO(
@@ -123,9 +109,7 @@ void logFreeSurfaceTraction(const FreeSurfaceBoundary& bc)
             " reference_refresh=every_generated_state_refresh" +
             " fresh_residual_contribution=0" +
             " coefficient=surface_tension_times_effective_time_step" +
-            " qualification=" +
-            (usesKinematicAreaGradientTraction(bc) ? "Experimental"
-                                                   : "Candidate") +
+            " qualification=Candidate" +
             " diagnostic=free_surface_semi_implicit_normal_increment");
     }
 }
@@ -138,18 +122,6 @@ void logContactLineTerms(
 {
     if (contactLineKind(contact_line) == ContactLineKind::PrescribedAngle) {
         if (FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension)) {
-            return;
-        }
-        if (usesKinematicAreaGradientTraction(bc)) {
-            FE_LOG_INFO(
-                std::string("IncompressibleNavierStokesVMSModule: equilibrium Young wall force is owned by the kinematic-area-gradient traction") +
-                " interface_marker=" +
-                std::to_string(bc.interface_marker) +
-                " contact_marker=" +
-                std::to_string(contact_marker) +
-                " surface_tension_form=KinematicAreaGradientTraction" +
-                " separate_equilibrium_line_force=omitted" +
-                " diagnostic=navier_stokes_total_energy_traction_wall_ownership");
             return;
         }
         FE_LOG_INFO(
@@ -195,10 +167,8 @@ void logContactLineTerms(
         " convention=theta_through_liquid_n_outward_liquid_nw_fluid_to_solid" +
         " law=xi_Vcl_equals_gamma_cos_thetae_minus_cos_thetad" +
         " surface_tension_form=" + surfaceTensionFormName(bc) +
-        " contact_force_discretization=" +
-        (usesKinematicAreaGradientTraction(bc)
-             ? "total_energy_traction_plus_line_friction"
-             : "surface_conormal_plus_equilibrium_wall_energy") +
+        " contact_force_discretization="
+        "surface_conormal_plus_equilibrium_wall_energy"
         " active_wall_marker=" +
         std::to_string(active_wall_marker) +
         " wetted_wall_domain=sharp_generated_active_boundary" +

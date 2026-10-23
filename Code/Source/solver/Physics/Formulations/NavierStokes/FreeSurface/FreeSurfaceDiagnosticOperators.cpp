@@ -66,8 +66,7 @@ bool conservativeBalanceDiagnosticSupported(
             effective_free_surfaces.end(),
             [](const FreeSurfaceBoundary& bc) {
                 return isExteriorOnePhaseBoundary(bc) &&
-                       (usesSurfaceStress(bc) ||
-                        usesKinematicAreaGradientTraction(bc)) &&
+                       usesSurfaceStress(bc) &&
                        FE::forms::bc::isConstantScalarValue(
                            bc.surface_tension) &&
                        !FE::forms::bc::isZeroConstantScalarValue(
@@ -80,8 +79,7 @@ bool conservativeBalanceDiagnosticSupported(
             effective_free_surfaces.end(),
             [](const FreeSurfaceBoundary& bc) {
                 return isInternalMaterialInterfaceVolume(bc) ||
-                       ((usesSurfaceStress(bc) ||
-                         usesKinematicAreaGradientTraction(bc)) &&
+                       (usesSurfaceStress(bc) &&
                         FE::forms::bc::isConstantScalarValue(
                             bc.surface_tension));
             });

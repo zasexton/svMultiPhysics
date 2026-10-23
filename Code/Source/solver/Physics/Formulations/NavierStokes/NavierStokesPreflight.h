@@ -12,9 +12,9 @@
  * @file NavierStokesPreflight.h
  * @brief Checks of a Navier-Stokes registration before the system is changed
  *
- * Moved from the beginning of IncompressibleNavierStokesVMSModule::registerOn,
- * with the choice of the PSPG pressure-gradient form (the pressure increment
- * dt_eff dt p under the kinematic area-gradient traction).
+ * Moved from the beginning of IncompressibleNavierStokesVMSModule::registerOn.
+ * The choice of an incremental PSPG pressure-gradient form went with
+ * KinematicAreaGradientTraction, its only selector (decision D48).
  */
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
@@ -52,18 +52,10 @@ namespace Physics {
 namespace formulations {
 namespace navier_stokes {
 
-enum class PspgPressureGradientForm {
-    Absolute,
-    Incremental,
-};
-
-const char* pspgPressureGradientFormName(PspgPressureGradientForm form);
-
 /// What preflightNavierStokes resolved for the registration that follows.
 struct NavierStokesPreflight {
     int dim{0};
     bool enable_vms{true};
-    PspgPressureGradientForm pspg_pressure_gradient_form{PspgPressureGradientForm::Absolute};
     FE::systems::FieldSpec u_spec;
     FE::systems::FieldSpec p_spec;
     std::optional<FE::systems::FieldSpec> body_force_spec;

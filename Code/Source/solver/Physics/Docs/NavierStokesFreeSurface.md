@@ -16,14 +16,14 @@ surface-stress divergence.
 
 The dynamic condition on the free surface is `sigma n = -(p_ext + gamma*kappa) n`.
 Here `n` is the outward normal of the liquid and `kappa = div_Gamma(n)`.
-`Surface_tension_form` selects the discrete force. Every form also contributes
-the exterior-pressure load `p_ext * dot(n_h, v)` on the interface.
+`Surface_tension_form` selects the discrete force; `SurfaceStress` is the
+only form. It also contributes the exterior-pressure load
+`p_ext * dot(n_h, v)` on the interface.
 
 | `Surface_tension_form` | Capillary term in the momentum residual | Scope |
 |---|---|---|
 | `Automatic` (default) | `SurfaceStress`, on unfitted level-set interfaces and on fitted ALE boundaries (decision D47 Q2(b)) | — |
 | `SurfaceStress` (also `SurfaceEnergy`, `LaplaceBeltrami`, `Variational`) | `gamma * (I - n_h ⊗ n_h) : grad(v)` integrated over the generated interface rule (unfitted) or over the current fitted boundary. This is the Laplace–Beltrami form and the first variation of the discrete interface area. | Unfitted; fitted ALE (below) |
-| `KinematicAreaGradientTraction` | `gamma * kappa_h * dot(n_h, v)`, where `kappa_h` is recovered by `KinematicAreaGradient` curvature projection (FE `LevelSet.md`). It includes the declared Young wall energies, so no separate line force is assembled. | Unfitted; see its requirements below |
 
 `CurvatureTraction` (`(p_ext + gamma*kappa) * dot(n, v)` with a supplied
 `Curvature`, a projected field or the raw level-set curvature
@@ -34,23 +34,20 @@ restatements `Use_level_set_curvature=false` and
 `Allow_fitted_surface_stress=true` are accepted with a warning and an
 `input_deprecations` entry in `effective_configuration.json`.
 
-The unfitted forms require `Geometry_tangent_policy=RefreshedFrozenQuadrature`.
+`KinematicAreaGradientTraction` (also `TotalEnergyGradientTraction` and
+`DiscreteEnergyGradientTraction`), the traction `gamma * kappa_h * dot(n_h, v)`
+with a curvature recovered by the `KinematicAreaGradient` projection, was
+retired by decision D48: the form and the boundary key `Curvature_field`
+(with its deprecated spellings, whatever its value) fail while the boundary
+condition is read, with a message that names `SurfaceStress`. The
+incremental PSPG pressure gradient, which only that form selected, went
+with it.
+
+The unfitted form requires `Geometry_tangent_policy=RefreshedFrozenQuadrature`.
 This is not the active-cut default, so set it explicitly. It means generated
-geometry, normals, and recovered curvature are refreshed between nonlinear
-passes and contribute no geometry Jacobian. Differentiated generated-geometry
-and shape-tangent variants are rejected for these forms.
-
-`KinematicAreaGradientTraction` has further requirements:
-
-- `Active_domain_method=CutVolume` and `Generated_interface_geometry=LinearCorner`;
-- matching scalar affine C0 P1 `Triangle3` or `Tetra4` spaces for the level set and the curvature;
-- a prescribed, projected `Curvature_field_name`, distinct from the level-set field;
-- `Curvature_projection_recovery_mode=KinematicAreaGradient`;
-- interface quadrature order of at least 2;
-- `Curvature_projection_kinematic_area_gradient_filter_coefficient=0`;
-  `Curvature_projection_kinematic_area_gradient_mass` may be `Consistent` or
-  `Lumped`. With `Lumped` the filter coefficient defaults to 0 and may be
-  omitted; with `Consistent` it defaults to 1 and must be set to 0.
+geometry and normals are refreshed between nonlinear passes and contribute
+no geometry Jacobian. Differentiated generated-geometry and shape-tangent
+variants are rejected.
 
 ## Semi-implicit surface tension
 
@@ -97,8 +94,6 @@ following:
 - `Geometry_tangent_policy=RefreshedFrozenQuadrature`, without level-set
   shape tangents;
 - a literal positive `Surface_tension`;
-- `Surface_tension_form=SurfaceStress`. `KinematicAreaGradientTraction` is
-  admitted as an experiment only;
 - an affine P1 `Triangle3` or `Tetra4` velocity space.
 
 The application adds three further requirements:
@@ -299,15 +294,13 @@ change the interpreted angle.
 
 ### Momentum contact-line terms
 
-The line terms depend on the surface-tension form. `SurfaceStress` already
-supplies the dynamic conormal force `+gamma*cos(theta_d)` through its surface
-integral, so its separate line term carries only the equilibrium part. With
-`xi = 1/Contact_line_mobility`:
+`SurfaceStress` already supplies the dynamic conormal force
+`+gamma*cos(theta_d)` through its surface integral, so its separate line term
+carries only the equilibrium part. With `xi = 1/Contact_line_mobility`:
 
 | Form | `PrescribedAngle` | `DynamicRenE` |
 |---|---|---|
 | `SurfaceStress` | `-gamma*cos(theta_e) * dot(v, m)` | `xi*dot(u,m)*dot(v,m) - gamma*cos(theta_e)*dot(v,m)` |
-| `KinematicAreaGradientTraction` | none; the Young energy is inside `kappa_h` | `xi*dot(u,m)*dot(v,m)` |
 
 For `DynamicRenE` this is the weak form of the Ren–E law
 `xi V_CL = gamma (cos(theta_e) - cos(theta_d))`. Combining it with the

@@ -73,8 +73,7 @@ enum class ALEMeshVelocitySource {
  * (`IncompressibleNavierStokesVMSOptions::conservative_balance_diagnostics`,
  * set for the static-capillary initialization, or the environment switch
  * `SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC`) and the
- * active free-surface configuration uses constant-gamma `SurfaceStress` or
- * `KinematicAreaGradientTraction`.
+ * active free-surface configuration uses constant-gamma `SurfaceStress`.
  * Their residual vectors satisfy `physical_potential_virtual_work =
  * surface_energy_virtual_work + gravitational_potential_virtual_work`,
  * `pressure_representability_load_virtual_work = prescribed exterior-

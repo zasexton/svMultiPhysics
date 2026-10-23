@@ -96,17 +96,14 @@ enum class FreeSurfacePressureStabilizationPolicy : std::uint8_t {
  * Automatic selects SurfaceStress, whose measure and normal (the
  * generated-interface rule of an unfitted level-set interface, or the
  * current fitted ALE boundary) define one discrete surface energy (decision
- * D47 Q2(b)).  CurvatureTraction, with its supplied or raw level-set
- * curvature, was retired by the same decision.
- * KinematicAreaGradientTraction is an unfitted-only total-energy route.  Its
- * prescribed curvature represents the variation of liquid--gas area and all
- * declared Young wetted-wall energies, so no separate equilibrium line force
- * is assembled.
+ * D47 Q2(b)).  SurfaceStress is the only capillary route: CurvatureTraction,
+ * with its supplied or raw level-set curvature, was retired by the same
+ * decision, and KinematicAreaGradientTraction, with its projected curvature
+ * field, by decision D48.
  */
 enum class FreeSurfaceSurfaceTensionForm : std::uint8_t {
     Automatic,
-    SurfaceStress,
-    KinematicAreaGradientTraction
+    SurfaceStress
 };
 
 /**
@@ -249,10 +246,6 @@ struct FreeSurfaceBoundary {
     // Curvature is positive for a convex liquid surface with n pointing
     // outward from the active liquid, so static equilibrium gives the
     // Young--Laplace jump p_liquid - p_ext = gamma*kappa.
-    // For unfitted level-set boundaries, a curvature field is signed with
-    // grad(phi)/|grad(phi)|; the Navier-Stokes module converts it to the
-    // active-domain outward normal convention used by n before forming the
-    // traction.
     ScalarValue external_pressure{0.0};
     // Literal constant only.  Variable surface tension requires the
     // tangential Marangoni term grad_Gamma(gamma), which is not currently
@@ -268,17 +261,15 @@ struct FreeSurfaceBoundary {
         FreeSurfaceSurfaceTensionForm::Automatic};
     // Optional semi-implicit capillary term (see the enum above).  It is
     // admitted only for unfitted LinearCorner CutVolume interfaces with a
-    // literal positive gamma and the SurfaceStress (or, experimentally,
-    // KinematicAreaGradientTraction) form; everything else fails closed.
+    // literal positive gamma; everything else fails closed.
     FreeSurfaceSurfaceTensionSemiImplicit surface_tension_semi_implicit{
         FreeSurfaceSurfaceTensionSemiImplicit::None};
 
-    // The prescribed projected curvature field that
-    // KinematicAreaGradientTraction reads.  The supplied curvature and the
-    // raw level-set curvature of CurvatureTraction were retired by decision
-    // D47 Q2, and so was the fitted SurfaceStress opt-in: the fitted form
+    // No curvature input: the supplied curvature and the raw level-set
+    // curvature of CurvatureTraction (decision D47 Q2) and the projected
+    // curvature field of KinematicAreaGradientTraction (decision D48) were
+    // retired, and so was the fitted SurfaceStress opt-in: the fitted form
     // integrates gamma (I - n n) : grad(v) over the current boundary.
-    std::string curvature_field_name{};
 
     // Fitted ALE kinematic relation: (u - meshVelocity()) · n = 0.
     FreeSurfaceNormalKinematicPolicy normal_kinematic_policy{

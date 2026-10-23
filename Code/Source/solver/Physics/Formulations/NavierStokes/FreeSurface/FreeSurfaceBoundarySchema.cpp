@@ -99,9 +99,6 @@ opt::OptionSchema<FreeSurfaceBoundary> makeFreeSurfaceBoundarySchema()
                  token(FreeSurfaceSurfaceTensionForm::Automatic, "Automatic", {"auto"}),
                  token(FreeSurfaceSurfaceTensionForm::SurfaceStress, "SurfaceStress",
                        {"surfaceenergy", "laplacebeltrami", "variational"}),
-                 token(FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction,
-                       "KinematicAreaGradientTraction",
-                       {"totalenergygradienttraction", "discreteenergygradienttraction"}),
              }})
         .key("Surface_tension_semi_implicit", &B::surface_tension_semi_implicit,
              opt::EnumCodec<FreeSurfaceSurfaceTensionSemiImplicit>{{
@@ -109,13 +106,6 @@ opt::OptionSchema<FreeSurfaceBoundary> makeFreeSurfaceBoundarySchema()
                  token(FreeSurfaceSurfaceTensionSemiImplicit::NormalIncrement, "NormalIncrement",
                        {"laggednormalincrement"}),
              }})
-        .key("Curvature_field", &B::curvature_field_name, opt::StringCodec{},
-             opt::KeySettings{.spellings = {{"Curvature_field", false},
-                                            {"CurvatureField", true},
-                                            {"Projected_curvature_field", true},
-                                            {"ProjectedCurvatureField", true},
-                                            {"Free_surface_curvature_field", true},
-                                            {"FreeSurfaceCurvatureField", true}}})
         .key("Normal_kinematic_policy", &B::normal_kinematic_policy,
              opt::EnumCodec<FreeSurfaceNormalKinematicPolicy>{{
                  token(FreeSurfaceNormalKinematicPolicy::MatchFluidNormalVelocity,
@@ -184,8 +174,8 @@ opt::OptionSchema<FreeSurfaceBoundary> makeFreeSurfaceBoundarySchema()
              opt::nestedMember(&B::cut_cell_stabilization,
                                &FreeSurfaceCutCellStabilization::cut_metadata_scale_cap),
              opt::OptionalCodec<opt::RealCodec>{opt::RealCodec{.minimum = 1.0}})
-        // Retired keys the register still recognizes (decisions D42, D47 Q9
-        // and D47 Q2).  The register applies the rules; these entries
+        // Retired keys the register still recognizes (decisions D42, D47 Q9,
+        // D47 Q2 and D48).  The register applies the rules; these entries
         // document them.
         .retired({"Use_current_geometry_curvature"},
                  "retired (decision D42): identically zero on affine faces",
@@ -214,7 +204,14 @@ opt::OptionSchema<FreeSurfaceBoundary> makeFreeSurfaceBoundarySchema()
                  opt::RetiredAcceptance{.value = "false"})
         .retired({"Allow_fitted_surface_stress"},
                  "fitted SurfaceStress needs no opt-in (decision D47 Q2)",
-                 opt::RetiredAcceptance{.value = "true"});
+                 opt::RetiredAcceptance{.value = "true"})
+        .retired({"Curvature_field", "CurvatureField", "Curvature_field_name",
+                  "CurvatureFieldName", "Projected_curvature_field",
+                  "ProjectedCurvatureField", "Free_surface_curvature_field",
+                  "FreeSurfaceCurvatureField"},
+                 "the projected curvature field of the retired "
+                 "KinematicAreaGradientTraction route (decision D48); use "
+                 "Surface_tension_form=SurfaceStress");
     return schema;
 }
 

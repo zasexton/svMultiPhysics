@@ -178,19 +178,10 @@ contactLineWallNormal(const FreeSurfaceContactLine& contact_line)
         // is the variation of one discrete surface energy on both kinds of
         // boundary (decision D47 Q2(b)).
         return true;
-    case FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction:
-        return false;
     case FreeSurfaceSurfaceTensionForm::SurfaceStress:
         return true;
     }
     return false;
-}
-
-[[nodiscard]] bool usesKinematicAreaGradientTraction(
-    const FreeSurfaceBoundary& bc) noexcept
-{
-    return bc.surface_tension_form ==
-           FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction;
 }
 
 [[nodiscard]] const char* surfaceTensionFormName(
@@ -199,8 +190,6 @@ contactLineWallNormal(const FreeSurfaceContactLine& contact_line)
     switch (bc.surface_tension_form) {
     case FreeSurfaceSurfaceTensionForm::Automatic:
         return "SurfaceStress";
-    case FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction:
-        return "KinematicAreaGradientTraction";
     case FreeSurfaceSurfaceTensionForm::SurfaceStress:
         return "SurfaceStress";
     }
@@ -571,11 +560,8 @@ void validatePositiveConstantScalar(
     if (FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension)) {
         return "inactive_zero_surface_tension";
     }
-    if (usesSurfaceStress(bc)) {
-        return "variational_surface_stress_generated_geometry";
-    }
-    // KinematicAreaGradientTraction, the only other form.
-    return "kinematic_area_gradient_total_surface_young_energy_field";
+    // SurfaceStress, the only form (decision D48).
+    return "variational_surface_stress_generated_geometry";
 }
 
 [[nodiscard]] const char* activeDomainName(FreeSurfaceActiveDomain domain) noexcept

@@ -127,12 +127,9 @@ NavierStokesVMSIntegrands navierStokesVMSIntegrands(const NavierStokesTerms& t,
         : FormExpr::constant(0.0);
     r.momentum = inertia + mcv + convection_adv + viscous + pressure_adv + forcing + supg + cross_stress;
 
-    // PSPG, split: the pressure-gradient part is its own kernel group, and with
-    // the kinematic area-gradient traction it acts on dt_eff dt p (the traction
-    // publishes a stationary pressure history).  The unit factors keep the
-    // installed trees of the previous module.
-    const auto grad_pp = grad(s.incremental_pspg_pressure ? FormExpr::effectiveTimeStep() * dt(p) : p);
-    r.pspg_pressure_gradient = FormExpr::constant(1.0) * FormExpr::constant(1.0) * inner(grad(q), tau_m * grad_pp);
+    // PSPG, split: the pressure-gradient part is its own kernel group.  The
+    // unit factors keep the installed trees of the previous module.
+    r.pspg_pressure_gradient = FormExpr::constant(1.0) * FormExpr::constant(1.0) * inner(grad(q), tau_m * grad(p));
     r.pspg_without_pressure_gradient = FormExpr::constant(1.0) * inner(grad(q), tau_m * R_np);
     r.continuity = r.galerkin_continuity + r.pspg_without_pressure_gradient;
     return r;
@@ -186,8 +183,7 @@ namespace {
 //   + int_CL (xi u.m - gamma cos(theta_e)) v.m         or the weak Ren-E law, friction xi = 1/M,
 //     or u.t_w = M gamma (cos(theta_e) - cos(theta_d))  the strong Ren-E law at the contact point (constraint);
 //   + int_W (mu/l_s) u_t . v_t                         Navier slip on the wetted wall W_h;
-//   + int_Gamma p_ext n.v + gamma (I - n x n) : grad v  the traction (SurfaceStress), or
-//   + int_Gamma (p_ext + gamma kappa_h) n.v            (KinematicAreaGradientTraction);
+//   + int_Gamma p_ext n.v + gamma (I - n x n) : grad v  the traction (SurfaceStress, the only form, D48);
 //   + gamma dt int_Gamma grad_G((u - u_ref).n) . grad_G(v.n)   semi-implicit capillary term (D13).
 // n points out of the liquid, n_w out of the liquid into the wall, m = conormal(n, n_w) is wall-tangential
 // and points out of the wetted footprint.  u.n_w = 0 holds strongly on the walls, the dry side is pinned and
@@ -201,30 +197,24 @@ void addUnfittedFreeSurface(FormExpr& M, fs::FESystem& system, cs::ConstraintPla
     const auto& [u, p, v, q, rho, mu, f, dim] = t;
     const auto L = freeSurfaceLevelSetGeometry(b, system).side(activeDomainSide(b.active_domain));
     const auto gamma = freeSurfaceScalar(b.surface_tension, "ns_free_surface_surface_tension", b);
-    const bool ss = usesSurfaceStress(b);
-    const bool kag = usesKinematicAreaGradientTraction(b);   // its curvature carries the wall energy
 
     registerFreeSurfacePrescribedAngleGeometry(system, b);   // contact-geometry certificate at each refresh
     for (const auto& c : contactLaws(b, dim)) {
         const auto CL = F.registered(L.contactLine(c.wall, c.marker));
         if (c.dynamic) {
             registerDynamicContactWallNormalCheck(system, *c.line, CL.marker());
-            if (c.strong && !ss) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: Contact_line_law_enforcement=Strong requires Surface_tension_form=SurfaceStress");
-            }
         }
         const auto n = L.outwardNormal();   // the normal of the generated rule
         const auto m = conormal(n, c.n_w);
-        if (c.young && !kag && !bc::isZeroConstantScalarValue(b.surface_tension)) {
+        if (c.young && !bc::isZeroConstantScalarValue(b.surface_tension)) {
             const auto young = (-gamma * c.cos_e * dot(v, m)).dL(CL);
             M = M + young;
-            addSurfaceEnergy(ss ? balance : nullptr, young);
+            addSurfaceEnergy(balance, young);
         }
         if (c.dynamic && !c.strong) {
             const auto friction = FormExpr::constant(1.0) / c.mobility * dot(u, m);
-            M = M + ((kag ? friction : friction - gamma * c.cos_e) * dot(v, m)).dL(CL);
-            addSurfaceEnergy(ss ? balance : nullptr, (-gamma * c.cos_e * dot(v, m)).dL(CL));
+            M = M + ((friction - gamma * c.cos_e) * dot(v, m)).dL(CL);
+            addSurfaceEnergy(balance, (-gamma * c.cos_e * dot(v, m)).dL(CL));
         }
         int wetted_marker = -1;
         if (c.slip_length.isValid()) {
@@ -249,25 +239,14 @@ void addUnfittedFreeSurface(FormExpr& M, fs::FESystem& system, cs::ConstraintPla
     const auto Gamma = L.interface();
     const auto n = L.outwardNormal();
     const auto p_ext = freeSurfaceScalar(b.external_pressure, "ns_free_surface_external_pressure", b);
-    if (ss) {
-        const auto pressure = p_ext * inner(n, v);
-        addExteriorPressure(balance, pressure.dI(Gamma));
-        if (!surfaceStressActive(b)) {   // gamma = 0
-            M = M + pressure.dI(Gamma);
-        } else {
-            const auto surface_energy = gamma * inner(tangentialProjector(n, dim), grad(v));
-            addSurfaceEnergy(balance, surface_energy.dI(Gamma));
-            M = M + (pressure + surface_energy).dI(Gamma);
-        }
-    } else if (kag) {
-        const auto pressure = (p_ext * inner(n, v)).dI(Gamma);
-        M = M + pressure;
-        addExteriorPressure(balance, pressure);
-        if (!bc::isZeroConstantScalarValue(b.surface_tension)) {
-            const auto capillary = (gamma * unfittedTractionCurvature(b, system) * inner(n, v)).dI(Gamma);
-            M = M + capillary;
-            addSurfaceEnergy(balance, capillary);
-        }
+    const auto pressure = p_ext * inner(n, v);   // SurfaceStress, the only form (D48)
+    addExteriorPressure(balance, pressure.dI(Gamma));
+    if (!surfaceStressActive(b)) {   // gamma = 0
+        M = M + pressure.dI(Gamma);
+    } else {
+        const auto surface_energy = gamma * inner(tangentialProjector(n, dim), grad(v));
+        addSurfaceEnergy(balance, surface_energy.dI(Gamma));
+        M = M + (pressure + surface_energy).dI(Gamma);
     }
     if (usesSemiImplicitNormalIncrement(b)) {
         const auto u_ref = freeSurfaceSemiImplicitReferenceVelocity(system);   // u at the last geometry refresh
@@ -450,8 +429,6 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     const auto r = navierStokesVMSIntegrands(
         t, {.convection = o.enable_convection, .ale = o.enable_ale, .moving_control_volume = mcv,
             .vms = preflight.enable_vms,
-            .incremental_pspg_pressure =
-                preflight.pspg_pressure_gradient_form == PspgPressureGradientForm::Incremental,
             .ct_m = o.ct_m, .ct_c = o.ct_c, .epsilon = o.stabilization_epsilon});
     FormExpr M = r.momentum.dx(Omega);
     FormExpr C = r.continuity.dx(Omega);
@@ -545,7 +522,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
                                            active_continuity, work.ghost_penalty, u, q, active_volume);
     declareFittedNormalKinematics(system, o.operator_tag, std::move(fitted_normal_kinematics), free_surfaces);
     effective_configuration_artifact_ = makeEffectiveConfigurationArtifact(
-        o, free_surfaces, system, dim, preflight.enable_vms, preflight.pspg_pressure_gradient_form);
+        o, free_surfaces, system, dim, preflight.enable_vms);
 }
 
 // ---------------------------------------------------------------------------

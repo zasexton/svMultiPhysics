@@ -2868,12 +2868,18 @@ parse_free_surface_surface_tension_form(std::string_view raw,
         "[svMultiPhysics::Physics] " + std::string(context) + "=" +
         std::string(raw) +
         " (GeneratedCurvatureTraction) was retired (decision D42); use "
-        "SurfaceStress or KinematicAreaGradientTraction.");
+        "SurfaceStress.");
   }
   if (token == "kinematicareagradienttraction" ||
       token == "totalenergygradienttraction" ||
       token == "discreteenergygradienttraction") {
-    return FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction;
+    // The projected-curvature traction was retired with its curvature
+    // projection; SurfaceStress is the variation of the discrete area.
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] " + std::string(context) + "=" +
+        std::string(raw) +
+        " (KinematicAreaGradientTraction) was retired (decision D48); use "
+        "SurfaceStress.");
   }
   if (token == "surfacestress" || token == "surfaceenergy" ||
       token == "laplacebeltrami" || token == "variational") {
@@ -2881,8 +2887,7 @@ parse_free_surface_surface_tension_form(std::string_view raw,
   }
   throw std::runtime_error(
       "[svMultiPhysics::Physics] " + std::string(context) +
-      " must be one of Automatic, KinematicAreaGradientTraction, or "
-      "SurfaceStress.");
+      " must be Automatic or SurfaceStress.");
 }
 
 svmp::Physics::formulations::navier_stokes::FreeSurfaceSurfaceTensionSemiImplicit
@@ -3992,12 +3997,24 @@ void append_free_surface_bc(
         "the CurvatureTraction route) was retired (decision D47 Q2); use "
         "Surface_tension_form=SurfaceStress.");
   }
-  if (const auto curvature_field = first_defined_string(
-          bc.params,
-          {"Curvature_field", "CurvatureField",
-           "Projected_curvature_field", "ProjectedCurvatureField",
-           "Free_surface_curvature_field", "FreeSurfaceCurvatureField"})) {
-    fs.curvature_field_name = *curvature_field;
+  // Decision D48 retired KinematicAreaGradientTraction, the only reader of
+  // the projected curvature field of a boundary.  Every spelling of the key
+  // fails whenever it is given, whatever its value; the keys stay known to
+  // Parameters.
+  for (const std::string_view key :
+       {"Curvature_field", "CurvatureField", "Curvature_field_name",
+        "CurvatureFieldName", "Projected_curvature_field",
+        "ProjectedCurvatureField", "Free_surface_curvature_field",
+        "FreeSurfaceCurvatureField"}) {
+    if (const auto* parameter = find_param(bc.params, key);
+        parameter != nullptr && parameter->defined) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Free_surface BC '" + bc.name + "': " +
+          std::string(key) +
+          " (the projected curvature field of the "
+          "KinematicAreaGradientTraction route) was retired (decision D48); "
+          "remove it and use Surface_tension_form=SurfaceStress.");
+    }
   }
   // Fitted CurvatureTraction with pointwise current-geometry curvature was
   // withdrawn by D5 (identically zero on affine faces) and retired by D42.
@@ -4367,8 +4384,6 @@ void validate_fitted_surface_contact_capability(
 {
   using svmp::Physics::formulations::navier_stokes::
       FreeSurfaceImplementation;
-  using svmp::Physics::formulations::navier_stokes::
-      FreeSurfaceSurfaceTensionForm;
   using ContactLine = svmp::Physics::formulations::navier_stokes::
       IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine;
 
@@ -4378,11 +4393,6 @@ void validate_fitted_surface_contact_capability(
     }
     // Fitted SurfaceStress needs no opt-in (decision D47 Q2(b)); the module
     // checks its frame, its surface tension and its contact lines.
-    if (boundary.surface_tension_form ==
-        FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction) {
-      throw std::invalid_argument(
-          "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction is available only for unfitted level-set free surfaces; use SurfaceStress for fitted boundaries");
-    }
     for (const auto& contact_line : boundary.contact_lines) {
       if (std::holds_alternative<ContactLine::PrescribedAngle>(
               contact_line.configuration)) {

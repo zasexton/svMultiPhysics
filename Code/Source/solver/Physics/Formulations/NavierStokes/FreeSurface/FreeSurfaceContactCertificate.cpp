@@ -294,10 +294,7 @@ void registerFreeSurfacePrescribedAngleGeometry(
                 std::to_string(bc.interface_marker) +
                 " contact_marker=" + std::to_string(contact_marker) +
                 " level_set_geometry_owner=none_angle_preserving_wall_maintenance"
-                " momentum_owner=" +
-                std::string(usesKinematicAreaGradientTraction(bc)
-                                ? "total_energy_gradient_traction"
-                                : "young_wall_energy") +
+                " momentum_owner=young_wall_energy"
                 " literal_codimension_two_level_set_residual=retired"
                 " diagnostic=navier_stokes_prescribed_contact_geometry");
             continue;

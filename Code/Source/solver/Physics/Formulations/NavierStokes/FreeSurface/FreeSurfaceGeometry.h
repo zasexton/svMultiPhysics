@@ -109,12 +109,6 @@ generatedUnfittedContactLineMarkerKey(
 [[nodiscard]] FE::forms::FormExpr freeSurfaceSemiImplicitReferenceVelocity(
     const FE::systems::FESystem& system);
 
-/// The projected curvature field of a KinematicAreaGradientTraction
-/// boundary, signed with the outward normal of its liquid side.
-[[nodiscard]] FE::forms::FormExpr unfittedTractionCurvature(
-    const FreeSurfaceBoundary& bc,
-    const FE::systems::FESystem& system);
-
 /// A free-surface value as a form: a constant, or the coefficient named
 /// freeSurfaceValueName(@p name, @p bc).
 [[nodiscard]] FE::forms::FormExpr freeSurfaceScalar(

@@ -53,7 +53,7 @@ void declareNavierStokesDiagnosticSets(FE::systems::DiagnosticRegistry& registry
 struct ConservativeBalanceForms {
     FE::forms::FormExpr pressure;                 // -p div v on the liquid, + p_ext n.v on Gamma
     FE::forms::FormExpr external_pressure;        // p_ext n.v on Gamma
-    FE::forms::FormExpr surface_energy;           // gamma P:grad v, the KAG traction, Young wall energy
+    FE::forms::FormExpr surface_energy;           // gamma P:grad v, Young wall energy
     FE::forms::FormExpr gravitational_potential;  // -rho g.v on the liquid
 };
 

@@ -84,17 +84,6 @@ namespace Physics {
 namespace formulations {
 namespace navier_stokes {
 
-const char* pspgPressureGradientFormName(PspgPressureGradientForm form)
-{
-    switch (form) {
-    case PspgPressureGradientForm::Absolute:
-        return "absolute";
-    case PspgPressureGradientForm::Incremental:
-        return "incremental";
-    }
-    return "unknown";
-}
-
 NavierStokesPreflight preflightNavierStokes(
     FE::systems::FESystem& system,
     const IncompressibleNavierStokesVMSOptions& options,
@@ -163,26 +152,6 @@ NavierStokesPreflight preflightNavierStokes(
         throw std::invalid_argument("IncompressibleNavierStokesVMSModule::registerOn: viscosity must be > 0 when viscosity_model is not provided");
     }
     const bool enable_vms = options.enable_vms;
-    // The area-gradient traction publishes a compatible stationary pressure
-    // state and history. Stabilizing its absolute gradient would recreate a
-    // pressure residual after the discrete capillary balance has closed.
-    const bool kinematic_area_gradient_pressure_reference =
-        std::any_of(
-            options.free_surface.begin(),
-            options.free_surface.end(),
-            usesKinematicAreaGradientTraction);
-    const PspgPressureGradientForm pspg_pressure_gradient_form =
-        kinematic_area_gradient_pressure_reference
-            ? PspgPressureGradientForm::Incremental
-            : PspgPressureGradientForm::Absolute;
-    FE_LOG_INFO(
-        std::string("IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pspg_pressure_gradient_form") +
-        " source=" +
-        (kinematic_area_gradient_pressure_reference
-             ? "kinematic_area_gradient_stationary_pressure"
-             : "absolute_pressure_default") +
-        " form=" +
-        pspgPressureGradientFormName(pspg_pressure_gradient_form));
     if (enable_vms && !(options.stabilization_epsilon > 0.0)) {
         throw std::invalid_argument("IncompressibleNavierStokesVMSModule::registerOn: stabilization_epsilon must be > 0 when VMS is enabled");
     }
@@ -385,16 +354,6 @@ NavierStokesPreflight preflightNavierStokes(
             }
         }
         effective_free_surfaces.push_back(std::move(effective_bc));
-    }
-    const bool has_kinematic_area_gradient_traction =
-        std::any_of(
-            effective_free_surfaces.begin(),
-            effective_free_surfaces.end(),
-            usesKinematicAreaGradientTraction);
-    if (has_kinematic_area_gradient_traction &&
-        !isSupportedGeneratedBoundaryTraceSpace(*velocity_space, dim)) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule::registerOn: KinematicAreaGradientTraction requires an affine P1 Product H1 velocity space on Triangle3 or Tetra4 cells");
     }
     std::optional<FE::systems::FieldSpec> semi_implicit_reference_spec;
     if (std::any_of(effective_free_surfaces.begin(),
@@ -603,7 +562,6 @@ NavierStokesPreflight preflightNavierStokes(
     return NavierStokesPreflight{
         .dim = dim,
         .enable_vms = enable_vms,
-        .pspg_pressure_gradient_form = pspg_pressure_gradient_form,
         .u_spec = std::move(u_spec),
         .p_spec = std::move(p_spec),
         .body_force_spec = std::move(body_force_spec),

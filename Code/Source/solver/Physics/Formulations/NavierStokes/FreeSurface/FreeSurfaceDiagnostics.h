@@ -35,8 +35,8 @@ void logUnfittedFreeSurfaceMode(const FreeSurfaceBoundary& bc);
 /// Natural mode: no interface term (sigma n = 0).
 void logNaturalUnfittedFreeSurface(const FreeSurfaceBoundary& bc);
 
-/// The installed traction (SurfaceStress, KinematicAreaGradientTraction) and
-/// the semi-implicit capillary term.
+/// The installed traction (SurfaceStress) and the semi-implicit capillary
+/// term.
 void logFreeSurfaceTraction(const FreeSurfaceBoundary& bc);
 
 /// The terms of one contact line (@p active_wall_marker: the wetted wall, or -1).

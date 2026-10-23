@@ -94,7 +94,6 @@ namespace {
            isUnfittedLevelSet(boundary) &&
            boundary.active_domain != FreeSurfaceActiveDomain::None &&
            (usesSurfaceStress(boundary) ||
-            usesKinematicAreaGradientTraction(boundary) ||
             hasWallAwareContactLaw(boundary));
 }
 
@@ -237,21 +236,13 @@ void declareFreeSurfaceDiscreteFunctionals(
                         .external_pressure = *external_pressure,
                     };
         }
-        FE::FieldId curvature_field = FE::INVALID_FIELD_ID;
-        if (usesKinematicAreaGradientTraction(bc)) {
-            curvature_field =
-                system.findFieldByName(bc.curvature_field_name);
-            if (curvature_field == FE::INVALID_FIELD_ID) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction could not resolve curvature field '" +
-                    bc.curvature_field_name + "'");
-            }
-        }
+        // SurfaceStress reads no curvature field (decision D48), so the
+        // declaration keeps curvature_field = INVALID_FIELD_ID.
         free_surface::records(system).declareFreeSurfaceDiscreteFunctional(
             FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
                 .interface_marker = bc.interface_marker,
                 .level_set_field = resolveLevelSetFieldId(bc, system),
-                .curvature_field = curvature_field,
+                .curvature_field = FE::INVALID_FIELD_ID,
                 .velocity_field = velocity_field,
                 .geometry_domain_id = bc.generated_interface_domain_id,
                 .parameters = std::move(parameters),
@@ -280,21 +271,15 @@ void declareFreeSurfaceDiscreteFunctionals(
                     active_volume_dissipation_parameters,
                 .external_pressure_power_parameters =
                     external_pressure_power_parameters,
-                .endpoint_functional_power_enabled =
-                    usesSurfaceStress(bc) ||
-                    usesKinematicAreaGradientTraction(bc),
+                .endpoint_functional_power_enabled = usesSurfaceStress(bc),
                 .capillary_balance_method =
                     usesSurfaceStress(bc)
                         ? FE::systems::FreeSurfaceCapillaryBalanceMethod::
                               DiscreteEnergyVolumeStationarity
-                        : usesKinematicAreaGradientTraction(bc)
-                        ? FE::systems::FreeSurfaceCapillaryBalanceMethod::
-                              KinematicAreaGradientEnergyTraction
                         : FE::systems::FreeSurfaceCapillaryBalanceMethod::
                               Unselected,
                 .capillary_balance_qualification =
-                    (usesSurfaceStress(bc) ||
-                     usesKinematicAreaGradientTraction(bc))
+                    usesSurfaceStress(bc)
                         ? FE::systems::
                               FreeSurfaceCapillaryBalanceQualification::
                                   PrerequisiteOnly

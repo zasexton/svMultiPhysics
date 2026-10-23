@@ -424,7 +424,6 @@ void addSharedGaugeEvidence(FE::systems::FESystem& system,
     interface.surface_tension = FE::Real{0.0};
     interface.surface_tension_form =
         FreeSurfaceSurfaceTensionForm::Automatic;
-    interface.curvature_field_name.clear();
     interface.normal_kinematic_policy =
         FreeSurfaceNormalKinematicPolicy::None;
     interface.tangential_mesh_policy =

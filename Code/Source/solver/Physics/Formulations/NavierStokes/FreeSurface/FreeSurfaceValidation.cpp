@@ -137,9 +137,9 @@ namespace {
 // The lagged normal-increment term is qualified only where its derivation
 // holds: an exterior unfitted interface whose generated LinearCorner facets
 // carry a piecewise-constant normal, refreshed-frozen geometry inside the
-// outer fixed point, and the SurfaceStress energy (KAG, the only other
-// form, is an experiment).  The transient outer fixed point and the
-// level-set transport are checked by the application, which owns them.
+// outer fixed point, and the SurfaceStress energy.  The transient outer
+// fixed point and the level-set transport are checked by the application,
+// which owns them.
 void validateFreeSurfaceSemiImplicitSurfaceTension(
     const FreeSurfaceBoundary& bc)
 {
@@ -301,8 +301,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
         (bc.surface_tension_form ==
              FreeSurfaceSurfaceTensionForm::Automatic ||
          bc.surface_tension_form ==
-             FreeSurfaceSurfaceTensionForm::KinematicAreaGradientTraction ||
-         bc.surface_tension_form ==
              FreeSurfaceSurfaceTensionForm::SurfaceStress);
     if (!supported_boundary_policies) {
         throw std::invalid_argument(
@@ -389,8 +387,7 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             !FE::forms::bc::isZeroConstantScalarValue(
                 bc.surface_tension) ||
             bc.surface_tension_form !=
-                FreeSurfaceSurfaceTensionForm::Automatic ||
-            !bc.curvature_field_name.empty()) {
+                FreeSurfaceSurfaceTensionForm::Automatic) {
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: an internal material-interface volume cannot own exterior pressure, surface tension, curvature, or an interface-traction representation");
         }
@@ -449,63 +446,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: unfitted level-set free surfaces use Eulerian level-set transport for kinematics; a mesh kinematic enforcement (MeshNitsche) needs a fitted ALE boundary and is therefore unsupported");
         }
-        if (usesKinematicAreaGradientTraction(bc)) {
-            if (bc.active_domain_method !=
-                    FreeSurfaceActiveDomainMethod::CutVolume ||
-                normalizedFreeSurfaceOptionToken(
-                    bc.generated_interface_geometry) != "linearcorner") {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction requires CutVolume and Generated_interface_geometry=LinearCorner");
-            }
-            if (!isRefreshedFrozenGeometryTangent(bc)) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction requires Geometry_tangent_policy=RefreshedFrozenQuadrature");
-            }
-            if (bc.curvature_field_name.empty()) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction requires a prescribed projected Curvature_field_name");
-            }
-            const auto phi_id = resolveLevelSetFieldId(bc, system);
-            const auto kappa_id =
-                system.findFieldByName(bc.curvature_field_name);
-            if (kappa_id == FE::INVALID_FIELD_ID) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction references unknown curvature field '" +
-                    bc.curvature_field_name + "'");
-            }
-            if (kappa_id == phi_id) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction requires distinct level-set and curvature fields");
-            }
-            const auto& phi_record = system.fieldRecord(phi_id);
-            const auto& kappa_record = system.fieldRecord(kappa_id);
-            const bool supported_simplex =
-                (dim == 2 && phi_record.space &&
-                 phi_record.space->element_type() ==
-                     FE::ElementType::Triangle3) ||
-                (dim == 3 && phi_record.space &&
-                 phi_record.space->element_type() ==
-                     FE::ElementType::Tetra4);
-            if (!phi_record.space || !kappa_record.space ||
-                phi_record.components != 1 ||
-                kappa_record.components != 1 ||
-                phi_record.space->value_dimension() != 1 ||
-                kappa_record.space->value_dimension() != 1 ||
-                phi_record.space->polynomial_order() != 1 ||
-                phi_record.space->continuity() != FE::Continuity::C0 ||
-                !supported_simplex ||
-                !spacesCompatible(*phi_record.space,
-                                  *kappa_record.space)) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction requires matching scalar affine C0 P1 Triangle3 or Tetra4 level-set and curvature spaces");
-            }
-            if (kappa_record.source_kind !=
-                    FE::systems::FieldSourceKind::PrescribedData ||
-                system.fieldParticipatesInUnknownVector(kappa_id)) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction curvature must be a prescribed maintenance field, not an unknown or supplied scalar");
-            }
-        }
         const bool has_surface_stress_residual =
             usesSurfaceStress(bc) &&
             (!FE::forms::bc::isZeroConstantScalarValue(
@@ -559,10 +499,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                     }
                 }
             }
-        }
-        if (usesKinematicAreaGradientTraction(bc)) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: KinematicAreaGradientTraction is available only for unfitted level-set free surfaces; use SurfaceStress for fitted boundaries");
         }
         if (bc.boundary_marker < 0) {
             throw std::invalid_argument(
