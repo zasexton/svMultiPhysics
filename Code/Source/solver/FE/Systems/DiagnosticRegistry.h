@@ -53,7 +53,11 @@ struct DiagnosticOperatorOptions {
 
 class DiagnosticRegistry {
 public:
-    /// Declares (or redeclares, forgetting its operators) a set.
+    /// Declares @p set when it is missing.  The formulations that share a
+    /// system share its registry (for example the two phases of a two-fluid
+    /// formulation), so a set may be declared again: with the same
+    /// environment switches this keeps the set and its operators; with
+    /// others it throws std::invalid_argument.
     void declareSet(std::string set, std::vector<std::string> environment_switches);
 
     /// Whether @p set is switched on now; throws std::invalid_argument for an undeclared set.
@@ -64,7 +68,8 @@ public:
                                                             const DiagnosticOperatorOptions& options);
 
     /// installFormulation of @p form as the operator @p operator_tag of @p set,
-    /// with operatorOptions(@p formulation_options, @p options).
+    /// with operatorOptions(@p formulation_options, @p options).  An operator
+    /// installed again (by another formulation) is recorded once.
     CoupledResidualKernels install(FESystem& system,
                                    std::string_view set,
                                    const OperatorTag& operator_tag,
@@ -73,7 +78,7 @@ public:
                                    const FormInstallOptions& formulation_options,
                                    const DiagnosticOperatorOptions& options = {});
 
-    /// The operators installed for @p set, in installation order.
+    /// The operators installed for @p set, in order of first installation.
     [[nodiscard]] std::vector<OperatorTag> operators(std::string_view set) const;
 
 private:

@@ -1642,6 +1642,46 @@ TEST(FormulationBuilder, InstallsDiagnosticOperatorsThroughTheSystemRegistry)
               std::vector<systems::OperatorTag>{"op_diagnostic"});
 }
 
+TEST(FormulationBuilder, PhaseFormulationsShareTheSystemDiagnosticRegistry)
+{
+    // The two phases of a two-fluid formulation, each a formulation on the same
+    // system, declare the same diagnostic set and install the same diagnostic
+    // operator for their own field.  Through the system's registry the result
+    // is what two registries of their own installed.
+    namespace systems = svmp::FE::systems;
+    namespace forms = svmp::FE::forms;
+    const auto build = [](bool shared_registry) {
+        auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+        auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+        auto sys = std::make_unique<systems::FESystem>(mesh);
+        const std::vector<std::string> switches{"SVMP_UNIT_PHASE_DIAGNOSTIC_SWITCH_THAT_IS_NEVER_SET"};
+        for (const char* name : {"u_negative", "u_positive"}) {
+            const auto field = sys->addField(systems::FieldSpec{.name = name, .space = space, .components = 1});
+            const auto u = forms::FormExpr::stateField(field, *space, name);
+            const auto v = forms::FormExpr::testFunction(*space, "v");
+            systems::FormulationBuilder F(*sys, "op", systems::FormInstallOptions{});
+            if (shared_registry) {
+                F.diagnostics().declareSet("phase_rows", switches);
+                (void)F.diagnostic("phase_rows", "op_diagnostic_row", {field}, (u * v).dx());
+            } else {
+                systems::DiagnosticRegistry own;
+                own.declareSet("phase_rows", switches);
+                (void)own.install(*sys, "phase_rows", "op_diagnostic_row", {field}, (u * v).dx(), F.options());
+            }
+        }
+        if (shared_registry) {
+            auto& registry = systems::diagnosticRegistry(*sys);
+            EXPECT_EQ(registry.operators("phase_rows"), std::vector<systems::OperatorTag>{"op_diagnostic_row"});
+            EXPECT_THROW(registry.declareSet("phase_rows", {"SVMP_UNIT_OTHER_SWITCH"}), std::invalid_argument);
+        }
+        return systems::kernelManifestLines(*sys);
+    };
+    const auto shared = build(true);
+    const auto separate = build(false);
+    EXPECT_FALSE(shared.empty());
+    EXPECT_EQ(shared, separate);
+}
+
 TEST(ContactLineGeometryCertificate, PlanarWallEvidenceChecksTheConfiguredNormal)
 {
     namespace interfaces = svmp::FE::interfaces;
@@ -1710,8 +1750,15 @@ TEST(DiagnosticRegistry, SwitchesSetsAndRecordsTheirOperators)
     const auto installed = registry.install(sys, "unit", "diagnostic_mass", {u_field}, (u * v).dx(), formulation);
     ASSERT_FALSE(installed.residual.empty());
     EXPECT_EQ(registry.operators("unit"), std::vector<systems::OperatorTag>{"diagnostic_mass"});
-    registry.declareSet("unit", {"FE_UNIT_DIAGNOSTIC_REGISTRY_A"});
-    EXPECT_TRUE(registry.operators("unit").empty());
+    // Installed again (by another formulation): recorded once.
+    (void)registry.install(sys, "unit", "diagnostic_mass", {u_field}, (u * v).dx(), formulation);
+    EXPECT_EQ(registry.operators("unit"), std::vector<systems::OperatorTag>{"diagnostic_mass"});
+
+    // Declared again with the same switches, the set keeps its operators; with others, it is rejected.
+    registry.declareSet("unit", {"FE_UNIT_DIAGNOSTIC_REGISTRY_A", "FE_UNIT_DIAGNOSTIC_REGISTRY_B"});
+    EXPECT_EQ(registry.operators("unit"), std::vector<systems::OperatorTag>{"diagnostic_mass"});
+    EXPECT_THROW(registry.declareSet("unit", {"FE_UNIT_DIAGNOSTIC_REGISTRY_A"}), std::invalid_argument);
+    EXPECT_EQ(registry.operators("unit"), std::vector<systems::OperatorTag>{"diagnostic_mass"});
 }
 
 TEST(FormsInstaller, FormsInstaller_RegistersCutVolumeKernel)

@@ -22,10 +22,12 @@ namespace systems {
 
 void DiagnosticRegistry::declareSet(std::string set, std::vector<std::string> environment_switches)
 {
-    for (auto& existing : sets_) {
+    for (const auto& existing : sets_) {
         if (existing.name == set) {
-            existing.environment_switches = std::move(environment_switches);
-            existing.operators.clear();
+            if (existing.environment_switches != environment_switches) {
+                throw std::invalid_argument("DiagnosticRegistry: diagnostic set '" + set +
+                                            "' is already declared with other environment switches");
+            }
             return;
         }
     }
@@ -80,7 +82,9 @@ CoupledResidualKernels DiagnosticRegistry::install(FESystem& system,
     auto& entry = find(set);
     auto kernels = installFormulation(system, operator_tag, fields, form,
                                       operatorOptions(formulation_options, options));
-    entry.operators.push_back(operator_tag);
+    if (std::find(entry.operators.begin(), entry.operators.end(), operator_tag) == entry.operators.end()) {
+        entry.operators.push_back(operator_tag);
+    }
     return kernels;
 }
 

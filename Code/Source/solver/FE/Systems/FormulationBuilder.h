@@ -107,6 +107,7 @@ public:
     [[nodiscard]] FormInstallOptions& options() noexcept { return options_; }
     [[nodiscard]] const FormInstallOptions& options() const noexcept { return options_; }
     [[nodiscard]] const OperatorTag& operatorTag() const noexcept { return operator_tag_; }
+    [[nodiscard]] FESystem& system() const noexcept { return *system_; }
 
     /// The options of a group: a copy of options() changed as @p group says.
     [[nodiscard]] FormInstallOptions groupOptions(const FormulationGroup& group) const;
