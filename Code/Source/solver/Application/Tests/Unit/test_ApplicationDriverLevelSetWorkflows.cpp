@@ -94,7 +94,6 @@ LevelSetMaintenanceRequest withMaintenanceConfiguration(
   configure(configuration);
   auto result = freezeMaintenanceConfiguration(std::move(configuration));
   result.runtime = request.runtime;
-  result.bindings = request.bindings;
   return result;
 }
 
@@ -148,9 +147,6 @@ void expectMaintenanceCompatibilityFieldsEqual(
   }
   EXPECT_EQ(actual.static_capillary_equilibrium_enabled,
             expected.static_capillary_equilibrium_enabled);
-  EXPECT_EQ(actual.curvature_projection_enabled,
-            expected.curvature_projection_enabled);
-  EXPECT_EQ(actual.curvature_field_name, expected.curvature_field_name);
   ASSERT_EQ(actual.input_observations.size(), expected.input_observations.size());
   for (std::size_t index = 0u; index < expected.input_observations.size();
        ++index) {
@@ -175,35 +171,6 @@ void expectMaintenanceConfigurationUnchanged(
     const MaintenanceConfiguration& before)
 {
   expectMaintenanceCompatibilityFieldsEqual(*request.configuration, before);
-  const auto& actual = request.configuration->curvature_projection;
-  const auto& expected = before.curvature_projection;
-  EXPECT_EQ(actual.isovalue, expected.isovalue);
-  EXPECT_EQ(actual.gradient_tolerance, expected.gradient_tolerance);
-  EXPECT_EQ(actual.normal_equation_tolerance, expected.normal_equation_tolerance);
-  EXPECT_EQ(actual.max_normalized_fit_residual, expected.max_normalized_fit_residual);
-  EXPECT_EQ(actual.max_neighbor_rings, expected.max_neighbor_rings);
-  EXPECT_EQ(actual.max_neighbor_fallback_vertices, expected.max_neighbor_fallback_vertices);
-  EXPECT_EQ(actual.max_zero_fallback_vertices, expected.max_zero_fallback_vertices);
-  EXPECT_EQ(actual.supplemental_sample_weight, expected.supplemental_sample_weight);
-  EXPECT_EQ(actual.recovery_mode, expected.recovery_mode);
-  EXPECT_EQ(actual.kinematic_area_gradient_filter_coefficient, expected.kinematic_area_gradient_filter_coefficient);
-  EXPECT_EQ(actual.kinematic_area_gradient_mass, expected.kinematic_area_gradient_mass);
-  EXPECT_EQ(actual.kinematic_area_gradient_negative_liquid_side, expected.kinematic_area_gradient_negative_liquid_side);
-  EXPECT_EQ(actual.narrow_band_width, expected.narrow_band_width);
-  EXPECT_EQ(actual.smoothing_iterations, expected.smoothing_iterations);
-  EXPECT_EQ(actual.smoothing_relaxation, expected.smoothing_relaxation);
-  EXPECT_EQ(actual.smoothing_mode, expected.smoothing_mode);
-  ASSERT_EQ(actual.kinematic_area_gradient_young_walls.size(),
-            expected.kinematic_area_gradient_young_walls.size());
-  for (std::size_t index = 0u;
-       index < expected.kinematic_area_gradient_young_walls.size(); ++index) {
-    EXPECT_EQ(actual.kinematic_area_gradient_young_walls[index].boundary_marker,
-              expected.kinematic_area_gradient_young_walls[index].boundary_marker);
-    EXPECT_EQ(actual.kinematic_area_gradient_young_walls[index]
-                  .equilibrium_contact_angle_radians,
-              expected.kinematic_area_gradient_young_walls[index]
-                  .equilibrium_contact_angle_radians);
-  }
   EXPECT_EQ(request.configuration->static_capillary_equilibrium.target_liquid_volume,
             before.static_capillary_equilibrium.target_liquid_volume);
 }
@@ -3776,19 +3743,16 @@ TEST(ApplicationDriverLevelSetWorkflows,
     <Transport_form>advective</Transport_form>
     <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
     <Conservative_phase_flux_artifact_cadence_steps>2</Conservative_phase_flux_artifact_cadence_steps>
-    <Projected_curvature_field>k_equation</Projected_curvature_field>
     <Domain id="liquid">
       <Level_set_field_name>phi_domain</Level_set_field_name>
       <Transport_form>conservative_divergence</Transport_form>
       <Conservative_phase_flux_artifact_cadence_steps>7</Conservative_phase_flux_artifact_cadence_steps>
-      <Projected_curvature_field>k_domain</Projected_curvature_field>
     </Domain>
   </Add_equation>
   <Add_equation type="level_set">
     <Level_set_field_name>phi_domain_only</Level_set_field_name>
     <Domain id="liquid">
-      <Enable_curvature_projection>true</Enable_curvature_projection>
-      <Projected_curvature_field>k_domain_only</Projected_curvature_field>
+      <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
     </Domain>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -3805,8 +3769,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_EQ(request.configuration->transport.conservative_phase
                 .flux_artifact_cadence_steps,
             2);
-  EXPECT_TRUE(request.configuration->curvature_projection_enabled);
-  EXPECT_EQ(request.configuration->curvature_field_name, "k_equation");
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
@@ -4371,389 +4333,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
   recordMaintenanceSchedule("r1_static_state_trial", trial);
   recordMaintenanceSchedule(
       "r1_static_state_accepted_after", accepted_after);
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     ParsesAndCanonicalizesCurvatureRecoveryControls)
-{
-  auto params = parseWorkflowParametersXml(R"xml(
-<svMultiPhysicsFile>
-  <Add_equation type="level_set">
-    <Level_set_field_name>phi</Level_set_field_name>
-    <Enable_curvature_projection>true</Enable_curvature_projection>
-    <Curvature_field_name>kappa_projected</Curvature_field_name>
-    <Curvature_projection_supplemental_sample_weight>0.125</Curvature_projection_supplemental_sample_weight>
-    <Curvature_projection_recovery_mode>generated_interface_patch</Curvature_projection_recovery_mode>
-    <Curvature_projection_kinematic_area_gradient_filter_coefficient>0.75</Curvature_projection_kinematic_area_gradient_filter_coefficient>
-  </Add_equation>
-</svMultiPhysicsFile>
-)xml");
-
-  const auto requests = legacyMaintenanceRequestsForTest(*params);
-  ASSERT_EQ(requests.size(), 1u);
-  const auto& request = requests.front();
-  EXPECT_TRUE(request.configuration->curvature_projection_enabled);
-  EXPECT_EQ(request.configuration->curvature_field_name, "kappa_projected");
-  EXPECT_DOUBLE_EQ(
-      effectiveCurvatureProjectionOptions(request).supplemental_sample_weight, 0.125);
-  EXPECT_EQ(
-      effectiveCurvatureProjectionOptions(request).recovery_mode,
-      svmp::FE::level_set::LevelSetCurvatureRecoveryMode::
-          GeneratedInterfacePatch);
-  EXPECT_DOUBLE_EQ(
-      effectiveCurvatureProjectionOptions(request)
-          .kinematic_area_gradient_filter_coefficient,
-      0.75);
-
-  const auto canonical = canonicalLevelSetMaintenanceRequestSchedule(
-      requests,
-      LevelSetMaintenanceScheduleStage::TransientInitialization,
-      /*completed_step=*/0);
-  ASSERT_TRUE(canonical.supported);
-  recordMaintenanceSchedule(
-      "r1_curvature_controls_baseline", canonical);
-  auto changed_requests = requests;
-  changed_requests.front() = withMaintenanceConfiguration(
-      changed_requests.front(), [&](auto& configured) {
-        configured.curvature_projection.recovery_mode =
-            svmp::FE::level_set::LevelSetCurvatureRecoveryMode::LevelSetQuadratic;
-      });
-  const auto changed = canonicalLevelSetMaintenanceRequestSchedule(
-      changed_requests,
-      LevelSetMaintenanceScheduleStage::TransientInitialization,
-      /*completed_step=*/0);
-  EXPECT_NE(canonical.words, changed.words);
-  recordMaintenanceSchedule(
-      "r1_curvature_controls_recovery", changed);
-  changed_requests = requests;
-  changed_requests.front() = withMaintenanceConfiguration(
-      changed_requests.front(), [&](auto& configured) {
-        configured.curvature_projection
-            .kinematic_area_gradient_filter_coefficient = 0.5;
-      });
-  const auto changed_filter = canonicalLevelSetMaintenanceRequestSchedule(
-      changed_requests,
-      LevelSetMaintenanceScheduleStage::TransientInitialization,
-      /*completed_step=*/0);
-  EXPECT_NE(canonical.words, changed_filter.words);
-  recordMaintenanceSchedule(
-      "r1_curvature_controls_filter", changed_filter);
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     ParsesAndCanonicalizesKinematicAreaGradientMassControl)
-{
-  auto params = parseWorkflowParametersXml(R"xml(
-<svMultiPhysicsFile>
-  <Add_equation type="level_set">
-    <Level_set_field_name>phi</Level_set_field_name>
-    <Enable_curvature_projection>true</Enable_curvature_projection>
-    <Curvature_field_name>kappa_projected</Curvature_field_name>
-    <Curvature_projection_recovery_mode>KinematicAreaGradient</Curvature_projection_recovery_mode>
-    <Curvature_projection_kinematic_area_gradient_filter_coefficient>0.0</Curvature_projection_kinematic_area_gradient_filter_coefficient>
-    <Curvature_projection_kinematic_area_gradient_mass>Lumped</Curvature_projection_kinematic_area_gradient_mass>
-  </Add_equation>
-</svMultiPhysicsFile>
-)xml");
-
-  const auto requests = legacyMaintenanceRequestsForTest(*params);
-  ASSERT_EQ(requests.size(), 1u);
-  const auto lumped_options =
-      effectiveCurvatureProjectionOptions(requests.front());
-  EXPECT_EQ(lumped_options.kinematic_area_gradient_mass,
-            svmp::FE::level_set::LevelSetKinematicAreaGradientMass::Lumped);
-  EXPECT_DOUBLE_EQ(lumped_options.kinematic_area_gradient_filter_coefficient,
-                   0.0);
-
-  const auto canonical = canonicalLevelSetMaintenanceRequestSchedule(
-      requests,
-      LevelSetMaintenanceScheduleStage::TransientInitialization,
-      /*completed_step=*/0);
-  ASSERT_TRUE(canonical.supported);
-  auto changed_requests = requests;
-  changed_requests.front() = withMaintenanceConfiguration(
-      changed_requests.front(), [&](auto& configured) {
-        configured.curvature_projection.kinematic_area_gradient_mass =
-            svmp::FE::level_set::LevelSetKinematicAreaGradientMass::Consistent;
-      });
-  const auto changed = canonicalLevelSetMaintenanceRequestSchedule(
-      changed_requests,
-      LevelSetMaintenanceScheduleStage::TransientInitialization,
-      /*completed_step=*/0);
-  EXPECT_NE(canonical.words, changed.words);
-  recordMaintenanceSchedule("r1_curvature_controls_mass", changed);
-
-  // The projected-curvature cache signature must not alias the two modes.
-  std::uint64_t lumped_signature = 0u;
-  std::uint64_t consistent_signature = 0u;
-  mixCurvatureProjectionOptionsSignature(lumped_signature, lumped_options);
-  mixCurvatureProjectionOptionsSignature(
-      consistent_signature,
-      effectiveCurvatureProjectionOptions(changed_requests.front()));
-  EXPECT_NE(lumped_signature, consistent_signature);
-
-  // Lumped implies a zero filter: omitting the filter key is the same
-  // request as the explicit zero above, word for word and in the cache
-  // signature.
-  auto implied = parseWorkflowParametersXml(R"xml(
-<svMultiPhysicsFile>
-  <Add_equation type="level_set">
-    <Level_set_field_name>phi</Level_set_field_name>
-    <Enable_curvature_projection>true</Enable_curvature_projection>
-    <Curvature_field_name>kappa_projected</Curvature_field_name>
-    <Curvature_projection_recovery_mode>KinematicAreaGradient</Curvature_projection_recovery_mode>
-    <Curvature_projection_kinematic_area_gradient_mass>Lumped</Curvature_projection_kinematic_area_gradient_mass>
-  </Add_equation>
-</svMultiPhysicsFile>
-)xml");
-  const auto implied_requests = legacyMaintenanceRequestsForTest(*implied);
-  ASSERT_EQ(implied_requests.size(), 1u);
-  const auto implied_options =
-      effectiveCurvatureProjectionOptions(implied_requests.front());
-  EXPECT_EQ(implied_options.kinematic_area_gradient_mass,
-            svmp::FE::level_set::LevelSetKinematicAreaGradientMass::Lumped);
-  EXPECT_EQ(implied_options.kinematic_area_gradient_filter_coefficient, 0.0);
-  const auto implied_canonical = canonicalLevelSetMaintenanceRequestSchedule(
-      implied_requests,
-      LevelSetMaintenanceScheduleStage::TransientInitialization,
-      /*completed_step=*/0);
-  ASSERT_TRUE(implied_canonical.supported);
-  EXPECT_EQ(implied_canonical.words, canonical.words);
-  std::uint64_t implied_signature = 0u;
-  mixCurvatureProjectionOptionsSignature(implied_signature, implied_options);
-  EXPECT_EQ(implied_signature, lumped_signature);
-
-  auto nonzero_filter = parseWorkflowParametersXml(R"xml(
-<svMultiPhysicsFile>
-  <Add_equation type="level_set">
-    <Level_set_field_name>phi</Level_set_field_name>
-    <Enable_curvature_projection>true</Enable_curvature_projection>
-    <Curvature_field_name>kappa_projected</Curvature_field_name>
-    <Curvature_projection_recovery_mode>KinematicAreaGradient</Curvature_projection_recovery_mode>
-    <Curvature_projection_kinematic_area_gradient_filter_coefficient>0.25</Curvature_projection_kinematic_area_gradient_filter_coefficient>
-    <Curvature_projection_kinematic_area_gradient_mass>Lumped</Curvature_projection_kinematic_area_gradient_mass>
-  </Add_equation>
-</svMultiPhysicsFile>
-)xml");
-  EXPECT_EQ(
-      (maintenanceCompatibilityExceptionMessage<std::invalid_argument>(
-          [&] { (void)legacyMaintenanceRequestsForTest(*nonzero_filter); })),
-      "[svMultiPhysics::Application] "
-      "Curvature_projection_kinematic_area_gradient_mass=Lumped is parameter "
-      "free and implies a zero "
-      "Curvature_projection_kinematic_area_gradient_filter_coefficient; omit "
-      "the filter coefficient or set it to 0.");
-
-  auto alias = parseWorkflowParametersXml(R"xml(
-<svMultiPhysicsFile>
-  <Add_equation type="level_set">
-    <Level_set_field_name>phi</Level_set_field_name>
-    <Enable_curvature_projection>true</Enable_curvature_projection>
-    <Curvature_field_name>kappa_projected</Curvature_field_name>
-    <Curvature_projection_kinematic_area_gradient_mass>row_sum</Curvature_projection_kinematic_area_gradient_mass>
-  </Add_equation>
-</svMultiPhysicsFile>
-)xml");
-  const auto alias_requests = legacyMaintenanceRequestsForTest(*alias);
-  ASSERT_EQ(alias_requests.size(), 1u);
-  EXPECT_EQ(effectiveCurvatureProjectionOptions(alias_requests.front())
-                .kinematic_area_gradient_mass,
-            svmp::FE::level_set::LevelSetKinematicAreaGradientMass::Lumped);
-  EXPECT_EQ(effectiveCurvatureProjectionOptions(alias_requests.front())
-                .kinematic_area_gradient_filter_coefficient,
-            0.0);
-
-  auto invalid = parseWorkflowParametersXml(R"xml(
-<svMultiPhysicsFile>
-  <Add_equation type="level_set">
-    <Enable_curvature_projection>true</Enable_curvature_projection>
-    <Curvature_projection_kinematic_area_gradient_mass>diagonal</Curvature_projection_kinematic_area_gradient_mass>
-  </Add_equation>
-</svMultiPhysicsFile>
-)xml");
-  EXPECT_EQ(
-      (maintenanceCompatibilityExceptionMessage<std::invalid_argument>(
-          [&] { (void)legacyMaintenanceRequestsForTest(*invalid); })),
-      "level-set kinematic-area-gradient mass 'diagonal' must be consistent "
-      "or lumped");
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     CurvatureProjectionCutRequestSignatureDistinguishesOptionalOrderStates)
-{
-  application::core::ResolvedLevelSetMaintenanceCompatibilityConfiguration request_configuration;
-  request_configuration.volume_cut_request = ActiveCutVolumeRequest{};
-  auto request = freezeMaintenanceConfiguration(
-      std::move(request_configuration));
-  const auto unset = curvatureProjectionCutRequestSignature(request);
-
-  auto generic_negative = request;
-  generic_negative = withMaintenanceConfiguration(
-      generic_negative, [&](auto& configured) {
-        configured.volume_cut_request->quadrature_order = -1;
-      });
-  auto generic_zero = request;
-  generic_zero = withMaintenanceConfiguration(
-      generic_zero, [&](auto& configured) {
-        configured.volume_cut_request->quadrature_order = 0;
-      });
-  EXPECT_NE(unset, curvatureProjectionCutRequestSignature(generic_negative));
-  EXPECT_NE(unset, curvatureProjectionCutRequestSignature(generic_zero));
-  EXPECT_NE(curvatureProjectionCutRequestSignature(generic_negative),
-            curvatureProjectionCutRequestSignature(generic_zero));
-
-  auto interface_negative = request;
-  interface_negative = withMaintenanceConfiguration(
-      interface_negative, [&](auto& configured) {
-        configured.volume_cut_request->interface_quadrature_order = -1;
-      });
-  auto interface_zero = request;
-  interface_zero = withMaintenanceConfiguration(
-      interface_zero, [&](auto& configured) {
-        configured.volume_cut_request->interface_quadrature_order = 0;
-      });
-  EXPECT_NE(unset, curvatureProjectionCutRequestSignature(interface_negative));
-  EXPECT_NE(unset, curvatureProjectionCutRequestSignature(interface_zero));
-  EXPECT_NE(
-      curvatureProjectionCutRequestSignature(interface_negative),
-      curvatureProjectionCutRequestSignature(interface_zero));
-
-  auto volume_negative = request;
-  volume_negative = withMaintenanceConfiguration(
-      volume_negative, [&](auto& configured) {
-        configured.volume_cut_request->volume_quadrature_order = -1;
-      });
-  auto volume_zero = request;
-  volume_zero = withMaintenanceConfiguration(
-      volume_zero, [&](auto& configured) {
-        configured.volume_cut_request->volume_quadrature_order = 0;
-      });
-  EXPECT_NE(unset, curvatureProjectionCutRequestSignature(volume_negative));
-  EXPECT_NE(unset, curvatureProjectionCutRequestSignature(volume_zero));
-  EXPECT_NE(curvatureProjectionCutRequestSignature(volume_negative),
-            curvatureProjectionCutRequestSignature(volume_zero));
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     TotalEnergyTractionRuleValidatorFailsClosedBeforeProjection)
-{
-  using Rule = svmp::FE::geometry::CutQuadratureRule;
-  const auto valid_rule = [] {
-    Rule rule;
-    rule.kind = svmp::FE::geometry::CutQuadratureKind::Interface;
-    rule.exact_polynomial_order = 2;
-    rule.policy.polynomial_order = 2;
-    rule.provenance.requested_quadrature_order = 2;
-    rule.provenance.achieved_quadrature_order = 2;
-    return rule;
-  };
-  const std::vector<const Rule*> empty;
-  EXPECT_THROW(
-      validateQuadraticTotalEnergyTractionInterfaceRules(empty),
-      std::runtime_error);
-
-  const std::vector<const Rule*> null_rule{nullptr};
-  EXPECT_THROW(
-      validateQuadraticTotalEnergyTractionInterfaceRules(null_rule),
-      std::runtime_error);
-
-  auto non_interface_rule = valid_rule();
-  non_interface_rule.kind = svmp::FE::geometry::CutQuadratureKind::Volume;
-  const std::vector<const Rule*> non_interface_rules{&non_interface_rule};
-  EXPECT_THROW(
-      validateQuadraticTotalEnergyTractionInterfaceRules(non_interface_rules),
-      std::runtime_error);
-
-  auto rule = valid_rule();
-  std::vector<const Rule*> rules{&rule};
-  EXPECT_NO_THROW(validateQuadraticTotalEnergyTractionInterfaceRules(rules));
-
-  rule.exact_polynomial_order = 1;
-  EXPECT_THROW(
-      validateQuadraticTotalEnergyTractionInterfaceRules(rules),
-      std::runtime_error);
-  rule = valid_rule();
-  rule.policy.polynomial_order = 1;
-  EXPECT_THROW(
-      validateQuadraticTotalEnergyTractionInterfaceRules(rules),
-      std::runtime_error);
-  rule = valid_rule();
-  rule.provenance.requested_quadrature_order = 1;
-  EXPECT_THROW(
-      validateQuadraticTotalEnergyTractionInterfaceRules(rules),
-      std::runtime_error);
-  rule = valid_rule();
-  rule.provenance.achieved_quadrature_order = 1;
-  EXPECT_THROW(
-      validateQuadraticTotalEnergyTractionInterfaceRules(rules),
-      std::runtime_error);
-
-  rule = valid_rule();
-  auto mixed_rule = valid_rule();
-  mixed_rule.provenance.achieved_quadrature_order = 3;
-  const std::vector<const Rule*> mixed_rules{&rule, &mixed_rule};
-  EXPECT_THROW(
-      validateQuadraticTotalEnergyTractionInterfaceRules(mixed_rules),
-      std::runtime_error);
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     StandaloneKinematicAreaGradientDiagnosticRetainsFilterConfiguration)
-{
-  auto mesh = makeWorkflowTriangleMesh();
-  auto scalar_space = svmp::FE::spaces::SpaceFactory::create_h1(
-      svmp::FE::ElementType::Triangle3, /*order=*/1);
-  svmp::FE::systems::FESystem system(mesh);
-  system.addField(svmp::FE::systems::FieldSpec{
-      .name = "phi_standalone_area_gradient",
-      .space = scalar_space,
-      .components = 1,
-      .source_kind =
-          svmp::FE::systems::FieldSourceKind::PrescribedData,
-  });
-  system.addField(svmp::FE::systems::FieldSpec{
-      .name = "kappa_standalone_area_gradient",
-      .space = scalar_space,
-      .components = 1,
-      .source_kind =
-          svmp::FE::systems::FieldSourceKind::PrescribedData,
-  });
-
-  application::core::ResolvedLevelSetMaintenanceCompatibilityConfiguration request_configuration;
-  request_configuration.transport.level_set.field_name = "phi_standalone_area_gradient";
-  request_configuration.curvature_projection_enabled = true;
-  request_configuration.curvature_field_name = "kappa_standalone_area_gradient";
-  request_configuration.curvature_projection.recovery_mode =
-      svmp::FE::level_set::LevelSetCurvatureRecoveryMode::
-          KinematicAreaGradient;
-  request_configuration.curvature_projection
-      .kinematic_area_gradient_filter_coefficient = 0.5;
-  request_configuration.curvature_projection
-      .kinematic_area_gradient_negative_liquid_side = false;
-  request_configuration.curvature_projection.kinematic_area_gradient_young_walls = {
-      {.boundary_marker = 17,
-       .equilibrium_contact_angle_radians = 1.2},
-  };
-  auto request = freezeMaintenanceConfiguration(
-      std::move(request_configuration));
-  std::vector<LevelSetMaintenanceRequest> requests{request};
-
-  ASSERT_NO_THROW(bindKinematicAreaGradientTractionMaintenance(
-      system, requests));
-  ASSERT_EQ(requests.size(), 1u);
-  const auto& options = effectiveCurvatureProjectionOptions(requests.front());
-  EXPECT_DOUBLE_EQ(
-      options.kinematic_area_gradient_filter_coefficient, 0.5);
-  EXPECT_FALSE(options.kinematic_area_gradient_negative_liquid_side);
-  ASSERT_EQ(options.kinematic_area_gradient_young_walls.size(), 1u);
-  EXPECT_EQ(
-      options.kinematic_area_gradient_young_walls.front().boundary_marker,
-      17);
-  EXPECT_DOUBLE_EQ(
-      options.kinematic_area_gradient_young_walls.front()
-          .equilibrium_contact_angle_radians,
-      1.2);
-  EXPECT_FALSE(requests.front().configuration->volume_cut_request.has_value());
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
@@ -14719,8 +14298,6 @@ TEST(ApplicationDriverLevelSetMaintenance,
   first_configuration.transport.velocity.source =
       svmp::FE::level_set::LevelSetVelocitySource::ConstantVector;
   first_configuration.transport.velocity.constant_value = {{0.25, -0.5, 0.75}};
-  first_configuration.curvature_projection_enabled = true;
-  first_configuration.curvature_projection_cadence_steps = 6;
   auto first = freezeMaintenanceConfiguration(
       std::move(first_configuration));
 

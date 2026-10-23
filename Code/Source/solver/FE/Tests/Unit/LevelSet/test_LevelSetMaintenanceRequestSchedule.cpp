@@ -90,16 +90,6 @@ TEST(LevelSetMaintenanceRequestSchedule, HeaderAndConfigurationWordsAreCanonical
         shifted_words, shifted));
     EXPECT_EQ(shifted_words.size(), first.size());
     EXPECT_NE(shifted_words, first);
-
-    std::vector<std::uint64_t> curvature;
-    level_set::appendLevelSetCurvatureProjectionScheduleWords(
-        curvature, configuration, configuration.curvature_projection);
-    auto filtered_options = configuration.curvature_projection;
-    filtered_options.kinematic_area_gradient_filter_coefficient += 1.0;
-    std::vector<std::uint64_t> filtered;
-    level_set::appendLevelSetCurvatureProjectionScheduleWords(
-        filtered, configuration, filtered_options);
-    EXPECT_NE(curvature, filtered);
 }
 
 TEST(LevelSetMaintenanceRequestSchedule, SingleRankAgreementRequiresASupportedSchedule)

@@ -97,7 +97,6 @@ LevelSetMaintenanceRequest withMaintenanceConfiguration(
   configure(configuration);
   auto result = freezeMaintenanceConfiguration(std::move(configuration));
   result.runtime = request.runtime;
-  result.bindings = request.bindings;
   return result;
 }
 
@@ -3521,8 +3520,6 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
         ASSERT_EQ(requests.size(), 1u);
         ASSERT_TRUE(
             requests.front().configuration->static_capillary_equilibrium_enabled);
-        EXPECT_FALSE(
-            requests.front().configuration->curvature_projection_enabled);
 
         svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle
             lifecycle;
@@ -8106,12 +8103,6 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       svmp::FE::level_set::LevelSetVelocitySource::ConstantVector;
   first_configuration.static_capillary_equilibrium_enabled = true;
   first_configuration.static_capillary_equilibrium.target_liquid_volume = 1.25;
-  first_configuration.curvature_projection
-      .kinematic_area_gradient_negative_liquid_side = false;
-  first_configuration.curvature_projection
-      .kinematic_area_gradient_young_walls = {
-          {.boundary_marker = 17,
-           .equilibrium_contact_angle_radians = 0.75}};
   auto first = freezeMaintenanceConfiguration(
       std::move(first_configuration));
   svmp::FE::level_set::LevelSetP1PhaseTransportGraph first_graph;
@@ -8137,7 +8128,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
 
   using Mutation =
       std::function<void(std::vector<LevelSetMaintenanceRequest>&)>;
-  const std::array<std::pair<const char*, Mutation>, 10> cases{{
+  const std::array<std::pair<const char*, Mutation>, 8> cases{{
       {"request_count",
        [](auto& requests) { requests.pop_back(); }},
       {"request_order",
@@ -8167,18 +8158,6 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                configured.static_capillary_equilibrium
                    .constant_pressure_kkt_max_relative_distance *= 2.0;
              });
-       }},
-      {"bound_liquid_side",
-       [](auto& requests) {
-         requests[0].bindings.negative_liquid_side = true;
-       }},
-      {"bound_young_wall_angle",
-       [](auto& requests) {
-         requests[0].bindings.young_walls =
-             effectiveCurvatureProjectionOptions(requests[0])
-                 .kinematic_area_gradient_young_walls;
-         requests[0].bindings.young_walls->at(0)
-             .equilibrium_contact_angle_radians += 0.125;
        }},
       {"measured_static_capillary_target",
        [](auto& requests) {

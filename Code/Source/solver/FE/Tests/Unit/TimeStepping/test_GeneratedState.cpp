@@ -112,25 +112,6 @@ TEST(GeneratedStateSyncPoints, FrozenExtensionRefreshesWithTheOuterFixedPoint)
   }
 }
 
-TEST(GeneratedStateSyncPoints, CachedCurvatureReuseIsAnOptInForLineSearchTrials)
-{
-  {
-    ScopedEnvironment unset("SVMP_CURVATURE_REUSE_CACHE_ON_TRIAL_FAILURE",
-                            nullptr);
-    for (const auto& [point, name] : allPoints()) {
-      EXPECT_FALSE(ts::allowCachedCurvatureAfterProjectionFailure(point))
-          << name;
-    }
-  }
-  ScopedEnvironment enabled("SVMP_CURVATURE_REUSE_CACHE_ON_TRIAL_FAILURE",
-                            "1");
-  for (const auto& [point, name] : allPoints()) {
-    EXPECT_EQ(ts::allowCachedCurvatureAfterProjectionFailure(point),
-              point == Point::LineSearchTrialResidual)
-        << name;
-  }
-}
-
 TEST(GeneratedStateSyncPoints, LineSearchTrialSynchronizationFollowsTheResidual)
 {
   {

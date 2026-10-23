@@ -681,11 +681,6 @@ fs::path writeWetExtensionOrderRegressionXml(const fs::path& case_dir,
                   level_set,
                   "Wet_extension_advection_velocity_method",
                   "wall_compatible_normal");
-  setOrAppendText(doc, level_set, "Enable_curvature_projection", "true");
-  setOrAppendText(doc,
-                  level_set,
-                  "Projected_curvature_field",
-                  "kappa_projected");
 
   if (!fitted_exclusion.empty()) {
     auto& free_surface =
@@ -1485,7 +1480,6 @@ TEST(OpenVesselExamples,
         ASSERT_NE(recovery, legacy.equation_parameters.end());
         EXPECT_TRUE(recovery->second.defined);
         EXPECT_EQ(recovery->second.value, "invalid_recovery");
-        EXPECT_TRUE((*resolved)->projected_curvature_fields.empty());
         if (expected.requires_time_advancement) {
           EXPECT_TRUE(components.fe_system->requiresTimeAdvancement());
         }
@@ -1866,11 +1860,6 @@ TEST(OpenVesselExamples,
         parameters, level_set_first);
     const std::size_t level_set_index = level_set_first ? 0u : 1u;
     const std::size_t fluid_index = level_set_first ? 1u : 0u;
-    parameters.equation_parameters[level_set_index]
-        ->set_extra_parameter_value("Enable_curvature_projection", "true");
-    parameters.equation_parameters[level_set_index]
-        ->set_extra_parameter_value(
-            "Projected_curvature_field", "kappa_projected");
 
     auto mesh = makeTranslatorTriangleMesh();
     application::core::SimulationComponents components;
@@ -1889,8 +1878,6 @@ TEST(OpenVesselExamples,
     ASSERT_TRUE(
         components.resolved_level_set_equations_by_input_index[level_set_index]);
     EXPECT_EQ(components.fe_system->registeredFieldCount(), 6u);
-    EXPECT_EQ(components.fe_system->findFieldByName("kappa_projected"),
-              svmp::FE::INVALID_FIELD_ID);
 
     delete parameters.equation_parameters[level_set_index];
     parameters.equation_parameters[level_set_index] = nullptr;
@@ -1906,10 +1893,6 @@ TEST(OpenVesselExamples,
                   .at("Level_set_field_name")
                   .value,
               "level_set");
-    EXPECT_EQ(retained->input_snapshot->installation_input.equation_params
-                  .at("Projected_curvature_field")
-                  .value,
-              "kappa_projected");
     ASSERT_TRUE(
         retained->input_snapshot->legacy_maintenance_input.has_value());
     const auto& legacy =
@@ -1918,9 +1901,6 @@ TEST(OpenVesselExamples,
     EXPECT_EQ(legacy.equation_type, "level_set");
     EXPECT_EQ(legacy.equation_parameters.at("Level_set_field_name").value,
               "level_set");
-    EXPECT_EQ(
-        legacy.equation_parameters.at("Projected_curvature_field").value,
-        "kappa_projected");
 
     ASSERT_NO_THROW(components.physics_modules.push_back(
         application::translators::level_set::createModule(
@@ -1938,10 +1918,6 @@ TEST(OpenVesselExamples,
               svmp::FE::INVALID_FIELD_ID);
     EXPECT_NE(components.fe_system->findFieldByName("phase"),
               svmp::FE::INVALID_FIELD_ID);
-    const auto projected_curvature =
-        components.fe_system->findFieldByName("kappa_projected");
-    ASSERT_NE(projected_curvature, svmp::FE::INVALID_FIELD_ID);
-    EXPECT_EQ(projected_curvature, static_cast<svmp::FE::FieldId>(6u));
     EXPECT_TRUE(components.fe_system->hasOperator("equations"));
     ASSERT_EQ(
         components.fe_system

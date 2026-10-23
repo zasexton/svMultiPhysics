@@ -433,14 +433,10 @@ TEST(LevelSetEquationTranslator,
       svmp::Physics::ParameterValue{true, "equation_transport"};
   input.equation_params["Conservative_phase_geometry_correction_max_iterations"] =
       svmp::Physics::ParameterValue{true, "2"};
-  input.equation_params["Projected_curvature_field"] =
-      svmp::Physics::ParameterValue{true, "k_equation"};
   input.default_domain.params["Level_set_field_name"] =
       svmp::Physics::ParameterValue{true, "phi_default"};
   input.default_domain.params["Transport_form"] =
       svmp::Physics::ParameterValue{true, "conservative_divergence"};
-  input.default_domain.params["Projected_curvature_field"] =
-      svmp::Physics::ParameterValue{true, "k_default"};
   svmp::Physics::DomainInput domain{};
   domain.id = "liquid";
   domain.params["Level_set_field_name"] =
@@ -449,8 +445,6 @@ TEST(LevelSetEquationTranslator,
       svmp::Physics::ParameterValue{true, "domain_transport"};
   domain.params["Conservative_phase_geometry_correction_max_iterations"] =
       svmp::Physics::ParameterValue{true, "7"};
-  domain.params["Projected_curvature_field"] =
-      svmp::Physics::ParameterValue{true, "k_domain"};
   input.domains.push_back(std::move(domain));
 
   const auto resolved =
@@ -464,8 +458,6 @@ TEST(LevelSetEquationTranslator,
   EXPECT_EQ(
       resolved->options.conservative_phase.geometry_correction_max_iterations,
       7);
-  EXPECT_EQ(resolved->projected_curvature_fields,
-            (std::vector<std::string>{"k_equation", "k_default", "k_domain"}));
 #endif
 }
 
@@ -1315,8 +1307,6 @@ TEST(LevelSetEquationTranslator,
       svmp::Physics::ParameterValue{true, "phase_resolved"};
   input.equation_params["Operator_tag"] =
       svmp::Physics::ParameterValue{true, "resolved_pair"};
-  input.equation_params["Projected_curvature_field"] =
-      svmp::Physics::ParameterValue{true, "kappa_resolved"};
 
   const auto expected_mesh = input.mesh.get();
   auto resolved =
@@ -1344,8 +1334,6 @@ TEST(LevelSetEquationTranslator,
   ASSERT_NE(phase, svmp::FE::INVALID_FIELD_ID);
   EXPECT_EQ(level_set, static_cast<svmp::FE::FieldId>(0));
   EXPECT_EQ(phase, static_cast<svmp::FE::FieldId>(1));
-  EXPECT_EQ(system.findFieldByName("kappa_resolved"),
-            svmp::FE::INVALID_FIELD_ID);
 
   const auto velocity_space =
       svmp::FE::spaces::SpaceFactory::create_vector_h1(
@@ -1380,43 +1368,6 @@ TEST(LevelSetEquationTranslator,
       *resolved, system);
   ASSERT_TRUE(module);
   EXPECT_TRUE(system.hasOperator("resolved_pair"));
-  EXPECT_NE(system.findFieldByName("kappa_resolved"),
-            svmp::FE::INVALID_FIELD_ID);
-#endif
-}
-
-TEST(LevelSetEquationTranslator,
-     ResolvedProjectedCurvatureCollisionFailsBeforeSystemMutation)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  auto mesh = makeRegistryQuadMesh();
-  svmp::Physics::EquationModuleInput input{};
-  input.equation_type = "level_set";
-  input.mesh_name = "quad";
-  input.mesh = mesh->local_mesh_ptr();
-  input.equation_params["Level_set_field_name"] =
-      svmp::Physics::ParameterValue{true, "phi_pending"};
-  input.equation_params["Velocity_source"] =
-      svmp::Physics::ParameterValue{true, "constant"};
-  input.equation_params["Constant_velocity"] =
-      svmp::Physics::ParameterValue{true, "0.0 0.0 0.0"};
-  input.equation_params["Projected_curvature_field"] =
-      svmp::Physics::ParameterValue{true, "phi_pending"};
-
-  auto resolved =
-      application::translators::level_set::resolveConfiguration(input);
-  ASSERT_TRUE(resolved);
-  svmp::FE::systems::FESystem system(mesh);
-  EXPECT_THROW(
-      static_cast<void>(application::translators::level_set::createModule(
-          *resolved, system)),
-      std::runtime_error);
-  EXPECT_EQ(system.findFieldByName("phi_pending"),
-            svmp::FE::INVALID_FIELD_ID);
-  EXPECT_FALSE(system.hasOperator("level_set"));
-  EXPECT_TRUE(system.formulationRecords().empty());
 #endif
 }
 
@@ -2863,43 +2814,8 @@ TEST(LevelSetEquationTranslator,
 #endif
 }
 
-TEST(LevelSetEquationTranslator, AutoRegistersProjectedCurvatureField)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  auto mesh = makeRegistryQuadMesh();
-
-  svmp::Physics::EquationModuleInput input{};
-  input.equation_type = "level_set";
-  input.mesh_name = "quad";
-  input.mesh = mesh->local_mesh_ptr();
-  input.equation_params["Level_set_field_name"] =
-      svmp::Physics::ParameterValue{true, "phi"};
-  input.equation_params["Velocity_source"] =
-      svmp::Physics::ParameterValue{true, "constant"};
-  input.equation_params["Constant_velocity"] =
-      svmp::Physics::ParameterValue{true, "0.0 0.0 0.0"};
-  input.equation_params["Projected_curvature_field"] =
-      svmp::Physics::ParameterValue{true, "kappa_projected"};
-
-  svmp::FE::systems::FESystem system(mesh);
-  auto module = application::translators::level_set::createModule(input, system);
-
-  ASSERT_TRUE(module);
-  const auto kappa = system.findFieldByName("kappa_projected");
-  ASSERT_NE(kappa, svmp::FE::INVALID_FIELD_ID);
-  const auto& rec = system.fieldRecord(kappa);
-  EXPECT_EQ(rec.components, 1);
-  ASSERT_TRUE(rec.space);
-  EXPECT_EQ(rec.space->value_dimension(), 1);
-  EXPECT_EQ(rec.source_kind,
-            svmp::FE::systems::FieldSourceKind::PrescribedData);
-#endif
-}
-
 TEST(LevelSetEquationTranslator,
-     InvalidWetExtensionDoesNotRegisterProjectedCurvatureOrTransportFields)
+     InvalidWetExtensionDoesNotRegisterTransportFields)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
@@ -2918,8 +2834,6 @@ TEST(LevelSetEquationTranslator,
       svmp::Physics::ParameterValue{true, "coupled_field"};
   input.equation_params["Use_wet_extension_advection_velocity"] =
       svmp::Physics::ParameterValue{true, "true"};
-  input.equation_params["Projected_curvature_field"] =
-      svmp::Physics::ParameterValue{true, "kappa_pending"};
 
   svmp::FE::systems::FESystem system(mesh);
   EXPECT_THROW(
@@ -2928,8 +2842,6 @@ TEST(LevelSetEquationTranslator,
   EXPECT_EQ(system.findFieldByName("phi_pending"),
             svmp::FE::INVALID_FIELD_ID);
   EXPECT_EQ(system.findFieldByName("extension_pending"),
-            svmp::FE::INVALID_FIELD_ID);
-  EXPECT_EQ(system.findFieldByName("kappa_pending"),
             svmp::FE::INVALID_FIELD_ID);
   EXPECT_FALSE(system.hasOperator("level_set"));
   EXPECT_TRUE(system.formulationRecords().empty());
