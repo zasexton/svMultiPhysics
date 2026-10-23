@@ -632,10 +632,6 @@ void validatePositiveConstantScalar(
     switch (enforcement) {
     case FreeSurfaceKinematicEnforcement::None:
         return "None";
-    case FreeSurfaceKinematicEnforcement::Penalty:
-        return "Penalty";
-    case FreeSurfaceKinematicEnforcement::Nitsche:
-        return "Nitsche";
     case FreeSurfaceKinematicEnforcement::MeshNitsche:
         return "MeshNitsche";
     }
@@ -714,12 +710,8 @@ systemTangentialMeshPolicy(FreeSurfaceTangentialMeshPolicy policy)
 [[nodiscard]] std::string fittedFluidNormalDescriptorSource(
     const FreeSurfaceBoundary& bc)
 {
-    if (bc.kinematic_enforcement ==
-        FreeSurfaceKinematicEnforcement::MeshNitsche) {
-        return "Fitted free-surface fluid natural dynamic condition on marker " +
-               std::to_string(bc.boundary_marker);
-    }
-    return "Fitted free-surface fluid normal kinematic row on marker " +
+    // MeshNitsche, the only normal relation, adds no fluid kinematic row.
+    return "Fitted free-surface fluid natural dynamic condition on marker " +
            std::to_string(bc.boundary_marker);
 }
 

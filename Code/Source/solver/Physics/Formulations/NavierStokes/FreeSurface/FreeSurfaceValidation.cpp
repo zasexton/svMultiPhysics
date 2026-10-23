@@ -281,10 +281,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
         (bc.kinematic_enforcement ==
              FreeSurfaceKinematicEnforcement::None ||
          bc.kinematic_enforcement ==
-             FreeSurfaceKinematicEnforcement::Penalty ||
-         bc.kinematic_enforcement ==
-             FreeSurfaceKinematicEnforcement::Nitsche ||
-         bc.kinematic_enforcement ==
              FreeSurfaceKinematicEnforcement::MeshNitsche) &&
         (bc.normal_kinematic_policy ==
              FreeSurfaceNormalKinematicPolicy::None ||
@@ -460,7 +456,7 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
         }
         if (bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None) {
             throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: unfitted level-set free surfaces use Eulerian level-set transport for kinematics; mesh-kinematic Penalty/Nitsche enforcement would constrain u.n and freeze the interface and is therefore unsupported");
+                "IncompressibleNavierStokesVMSModule: unfitted level-set free surfaces use Eulerian level-set transport for kinematics; a mesh kinematic enforcement (MeshNitsche) needs a fitted ALE boundary and is therefore unsupported");
         }
         if (usesKinematicAreaGradientTraction(bc)) {
             if (bc.active_domain_method !=
@@ -629,17 +625,12 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                     "MatchFluidNormalVelocity");
             }
             if (bc.kinematic_enforcement !=
-                    FreeSurfaceKinematicEnforcement::Penalty &&
-                bc.kinematic_enforcement !=
-                    FreeSurfaceKinematicEnforcement::Nitsche &&
-                bc.kinematic_enforcement !=
-                    FreeSurfaceKinematicEnforcement::MeshNitsche) {
+                FreeSurfaceKinematicEnforcement::MeshNitsche) {
                 throw std::invalid_argument(
                     "IncompressibleNavierStokesVMSModule: the qualified "
                     "fitted-ALE free-surface contract requires MeshNitsche "
-                    "normal enforcement (the input default) or the legacy "
-                    "Penalty or Nitsche enforcement; None is accepted only "
-                    "by the explicit schema-1 legacy mode");
+                    "normal enforcement (the input default); None is "
+                    "accepted only by the explicit schema-1 legacy mode");
             }
         }
         if (bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None &&
@@ -680,23 +671,12 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
         }
     }
 
-    validateFiniteConstantScalar(
-        bc.kinematic_penalty, "free-surface kinematic_penalty");
-    if (bc.kinematic_enforcement == FreeSurfaceKinematicEnforcement::Penalty) {
-        (void)constantScalarValueOrThrow(
-            bc.kinematic_penalty,
-            "penalty free-surface kinematic_penalty");
-        validatePositiveConstantScalar(
-            bc.kinematic_penalty,
-            "penalty free-surface kinematic_penalty");
-    }
-    if ((bc.kinematic_enforcement == FreeSurfaceKinematicEnforcement::Nitsche ||
-         bc.kinematic_enforcement ==
-             FreeSurfaceKinematicEnforcement::MeshNitsche) &&
+    if (bc.kinematic_enforcement ==
+            FreeSurfaceKinematicEnforcement::MeshNitsche &&
         (!std::isfinite(bc.kinematic_nitsche_gamma) ||
          !(bc.kinematic_nitsche_gamma > FE::Real{0.0}))) {
         throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: Nitsche free-surface kinematics require a finite positive boundary-local kinematic_nitsche_gamma");
+            "IncompressibleNavierStokesVMSModule: MeshNitsche free-surface kinematics require a finite positive boundary-local kinematic_nitsche_gamma");
     }
     if (bc.kinematic_enforcement ==
             FreeSurfaceKinematicEnforcement::MeshNitsche &&

@@ -351,27 +351,6 @@ generatedUnfittedContactLineMarkerKey(
     return n;
 }
 
-[[nodiscard]] FE::forms::FormExpr integrateOnFreeSurface(
-    const FE::forms::FormExpr& integrand,
-    const FreeSurfaceBoundary& bc,
-    bool ale_enabled)
-{
-    if (isUnfittedLevelSet(bc)) {
-        return integrand.dI(FE::forms::InterfaceDomain(bc.interface_marker));
-    }
-    // Fitted boundaries integrate over the assembly (active) frame.  The
-    // boundary quadrature weights already carry the active surface measure,
-    // so the current measure must not be applied a second time.  With ALE
-    // the active frame is the current configuration: the coupled
-    // mesh-displacement transaction (FE ALEBinding) moves the active
-    // coordinates at every trial state, and fitted SurfaceStress and
-    // MeshNitsche require that coupling.  The current normal used by the
-    // fitted terms is then the normal of the integration frame as well.
-    (void)ale_enabled;
-    return integrand.ds(
-        FE::forms::BoundaryDomain::fullPhysical(bc.boundary_marker));
-}
-
 [[nodiscard]] std::optional<ActiveVolumeDomain> activeVolumeDomainFor(
     const std::vector<FreeSurfaceBoundary>& free_surfaces)
 {

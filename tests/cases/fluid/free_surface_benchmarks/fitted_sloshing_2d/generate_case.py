@@ -71,7 +71,8 @@ MESH_MOTION_KAPPA = 1.0
 # (h_n = 2|T|/|F|): the row is coercive for gamma_N > 2 kappa; 10 leaves a
 # factor 5 (README.md).
 KINEMATIC_NITSCHE_GAMMA = 10.0
-KINEMATIC_ENFORCEMENT = ("MeshNitsche", "Nitsche", "Penalty")
+# The older fitted modes Nitsche and Penalty were retired by decision D47 (Q9).
+KINEMATIC_ENFORCEMENT = ("MeshNitsche",)
 TANGENTIAL_MESH_POLICY = "Free"
 WALLS = ("wall_left", "wall_right", "wall_bottom")
 FREE_SURFACE = "free_surface"
@@ -180,11 +181,7 @@ def linear_solver_block() -> str:
 
 
 def free_surface_block(enforcement: str, nitsche_gamma: float = KINEMATIC_NITSCHE_GAMMA) -> str:
-    if enforcement == "Penalty":
-        kinematic = """      <Kinematic_enforcement>Penalty</Kinematic_enforcement>
-      <Kinematic_penalty>1.0e4</Kinematic_penalty>"""
-    else:
-        kinematic = f"""      <Kinematic_enforcement>{enforcement}</Kinematic_enforcement>
+    kinematic = f"""      <Kinematic_enforcement>{enforcement}</Kinematic_enforcement>
       <Kinematic_nitsche_gamma>{nitsche_gamma:.17g}</Kinematic_nitsche_gamma>"""
     return f"""    <Add_BC name="{FREE_SURFACE}">
       <Type>Free_surface</Type>
@@ -421,7 +418,8 @@ def main(argv=None) -> int:
                         help="run length in inviscid periods (protocol value 4)")
     parser.add_argument("--kinematic-enforcement", choices=KINEMATIC_ENFORCEMENT,
                         default="MeshNitsche",
-                        help="diagnostic runs only (protocol value MeshNitsche)")
+                        help="MeshNitsche only (Nitsche and Penalty were retired, "
+                             "decision D47 Q9)")
     parser.add_argument("--wall-mesh-motion", choices=WALL_MESH_MOTION, default="slip",
                         help="diagnostic runs only (protocol value slip)")
     parser.add_argument("--kinematic-nitsche-gamma", type=float, default=KINEMATIC_NITSCHE_GAMMA,

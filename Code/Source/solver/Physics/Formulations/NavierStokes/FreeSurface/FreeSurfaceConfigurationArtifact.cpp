@@ -632,14 +632,8 @@ tangentialPolicyProvenance(
             << ",\"enforcement\":"
             << jsonString(kinematicEnforcementName(
                    boundary.kinematic_enforcement))
-            << ",\"penalty\":"
-            << jsonScalarValue(boundary.kinematic_penalty)
             << ",\"nitsche\":{\"gamma\":"
-            << jsonReal(boundary.kinematic_nitsche_gamma)
-            << ",\"symmetric\":"
-            << jsonBool(boundary.kinematic_nitsche_symmetric)
-            << ",\"scale_with_polynomial_order\":"
-            << jsonBool(boundary.kinematic_nitsche_scale_with_p) << "}}"
+            << jsonReal(boundary.kinematic_nitsche_gamma) << "}}"
             << ",\"stabilization\":{\"enabled\":"
             << jsonBool(boundary.cut_cell_stabilization.enabled)
             << ",\"small_cut_aggregation\":"

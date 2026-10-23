@@ -1431,9 +1431,9 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicEnforcementDefaultsToMeshN
     GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
 #else
     // Decision D35: an omitted Kinematic_enforcement selects MeshNitsche on a
-    // fitted ALE free surface of the qualified contract; Penalty and Nitsche
-    // stay explicit legacy choices, and the explicit schema-1 legacy mode
-    // keeps its None default.
+    // fitted ALE free surface of the qualified contract, and the explicit
+    // schema-1 legacy mode keeps its None default.  Penalty and Nitsche were
+    // retired by decision D47 Q9.
     svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
 
     constexpr int marker = 79;
@@ -1529,26 +1529,34 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicEnforcementDefaultsToMeshN
     EXPECT_TRUE(default_with_gamma.mesh_flux_consistency);
     EXPECT_DOUBLE_EQ(default_with_gamma.gamma, 24.0);
 
-    const auto legacy_penalty =
-        declared(false,
-                 {{"Kinematic_enforcement", "Penalty"},
-                  {"Kinematic_penalty", "9.0"}});
-    EXPECT_EQ(legacy_penalty.count, 1u);
-    EXPECT_FALSE(legacy_penalty.mesh_flux_consistency);
-
-    // A penalty without an explicit Penalty enforcement is still rejected;
-    // it does not change the default.
-    {
-        const auto input = make_input(false, {{"Kinematic_penalty", "9.0"}});
-        svmp::FE::systems::FESystem system(mesh);
-        EXPECT_THROW(
-            {
+    // The retired enforcements and Kinematic_penalty (decision D47 Q9) fail
+    // while the boundary is translated, in either configuration mode.
+    const std::vector<std::vector<std::pair<std::string, std::string>>>
+        retired_inputs{
+            {{"Kinematic_enforcement", "Penalty"}},
+            {{"Kinematic_enforcement", "Nitsche"}},
+            {{"Kinematic_penalty", "9.0"}},
+        };
+    for (const bool legacy : {false, true}) {
+        for (const auto& retired : retired_inputs) {
+            const auto input = make_input(legacy, retired);
+            svmp::FE::systems::FESystem system(mesh);
+            try {
                 auto module =
                     svmp::Physics::EquationModuleRegistry::instance().create(
                         "fluid", input, system);
                 (void)module;
-            },
-            std::runtime_error);
+                ADD_FAILURE() << retired.front().first << "="
+                              << retired.front().second
+                              << " must fail (legacy=" << legacy << ")";
+            } catch (const std::runtime_error& error) {
+                const std::string message = error.what();
+                EXPECT_NE(message.find("decision D47 Q9"), std::string::npos)
+                    << message;
+                EXPECT_NE(message.find("MeshNitsche"), std::string::npos)
+                    << message;
+            }
+        }
     }
 
     // The explicit schema-1 legacy mode keeps None: no normal relation.
@@ -2785,8 +2793,10 @@ TEST(NavierStokesLegacyBCs, ResolvedArtifactSectionRecordsTheSourceOfEveryFreeSu
     ASSERT_NE(radians_at, std::string::npos);
     EXPECT_NE(resolved.find("\"source\":\"derived\",\"origin\":\"resolution\"}", radians_at),
               std::string::npos);
-    // Keys outside the schema (Type) are not listed.
+    // Keys outside the schema (Type) and retired keys (Kinematic_penalty,
+    // decision D47 Q9) are not listed.
     EXPECT_EQ(resolved.find("\"Type\""), std::string::npos);
+    EXPECT_EQ(resolved.find("\"Kinematic_penalty\""), std::string::npos);
 #endif
 }
 

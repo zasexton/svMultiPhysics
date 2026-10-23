@@ -57,10 +57,10 @@ enum class FreeSurfaceActiveDomainMethod : std::uint8_t {
     CutVolume
 };
 
+// Penalty and Nitsche (schema-1 fluid kinematic rows on fitted boundaries)
+// were retired by decision D47 Q9.
 enum class FreeSurfaceKinematicEnforcement : std::uint8_t {
     None,
-    Penalty,
-    Nitsche,
     // Fitted ALE only.  The fluid keeps its natural dynamic traction
     // condition on the free surface (no fluid kinematic row).  The normal
     // kinematics (w - u).n = 0 are enforced on the mesh displacement by a
@@ -301,12 +301,9 @@ struct FreeSurfaceBoundary {
     ScalarValue tangential_mesh_penalty{1.0};
     FreeSurfaceKinematicEnforcement kinematic_enforcement{
         FreeSurfaceKinematicEnforcement::None};
-    ScalarValue kinematic_penalty{0.0};
     // Local to this fitted free-surface boundary. Generic weak velocity
     // conditions retain the module-level Nitsche policy below.
     FE::Real kinematic_nitsche_gamma{10.0};
-    bool kinematic_nitsche_symmetric{true};
-    bool kinematic_nitsche_scale_with_p{true};
 
     FreeSurfaceCutCellStabilization cut_cell_stabilization{};
     std::vector<FreeSurfaceContactLine> contact_lines{};

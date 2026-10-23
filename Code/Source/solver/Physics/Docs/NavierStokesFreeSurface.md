@@ -142,26 +142,21 @@ current-frame assembly as the coupled-ALE contract.)
 
 **Kinematic enforcement.** `MeshNitsche` is the qualified default
 (decision D35): a fitted free surface without `Kinematic_enforcement` uses
-it. `Penalty` and `Nitsche` are legacy options and must be selected
-explicitly. `None` is accepted only by the explicit schema-1 legacy mode,
-which keeps its own defaults (no relation, or `Penalty` when only
-`Kinematic_penalty` is given); before D35 the qualified contract rejected an
-omitted key, so no accepted input changes.
+it. `None` is accepted only by the explicit schema-1 legacy mode, which
+keeps it as its default (no relation); before D35 the qualified contract
+rejected an omitted key, so no accepted input changes.
 
 | Value | Status | Fluid row on the free surface | Mesh row on the free surface |
 |---|---|---|---|
 | `MeshNitsche` | default | none: the fluid keeps the natural dynamic condition `sigma n = -(p_ext + gamma kappa) n` | `gamma_N / h_n * (w - u).n (psi.n)` plus the Nitsche consistency `-kappa ((grad w) n . n)(psi.n)` of the harmonic mesh-velocity operator |
-| `Penalty` | legacy, explicit | `Kinematic_penalty * (u - w).n (v.n)` | `Kinematic_penalty * (w - u).n (psi.n)` |
-| `Nitsche` | legacy, explicit | Nitsche row for `u.n = w.n` whose consistency term cancels the fluid normal stress | `Kinematic_nitsche_gamma / h_n * (w - u).n (psi.n)` |
 
-With the legacy `Penalty` and `Nitsche` modes the kinematic relation is
-imposed on the fluid as well as on the mesh. The fluid row then replaces
-(Nitsche) or perturbs (Penalty, by the mesh stiffness flux) the normal
-dynamic condition, so these two modes do not reproduce free-surface
-dynamics; they remain for the existing prerequisite tests and decks, which
-state them explicitly. `Kinematic_penalty` still requires an explicit
-`Kinematic_enforcement=Penalty` and does not change the default.
-`MeshNitsche` imposes the relation on the mesh only:
+The legacy `Penalty` and `Nitsche` enforcements imposed the kinematic
+relation on the fluid as well as on the mesh. Their fluid row replaced
+(Nitsche) or perturbed (Penalty, by the mesh stiffness flux) the normal
+dynamic condition, so they did not reproduce free-surface dynamics.
+Decision D47 (Q9) retired them: `Kinematic_enforcement=Penalty` or
+`Nitsche`, and `Kinematic_penalty` in any mode, fail while the equation is
+translated. `MeshNitsche` imposes the relation on the mesh only:
 
 - `w = dt(d)` is the mesh velocity. The harmonic `mesh_motion` equation must
   act on it (`Harmonic_quantity=velocity`: `kappa grad(w):grad(psi)`), so the
@@ -186,9 +181,9 @@ state them explicitly. `Kinematic_penalty` still requires an explicit
   boundary whose normal relation declares it. The fluid equation must
   therefore precede the `mesh_motion` equation in the input; the reverse
   order and the pseudo-elastic mesh model fail closed.
-- `MeshNitsche` accepts only `Kinematic_nitsche_gamma`. The symmetry and
-  order-scaling switches of the legacy Nitsche enforcement were removed
-  (decision D47), so it always uses its symmetric, order-scaled form.
+- `MeshNitsche` accepts only `Kinematic_nitsche_gamma`; the symmetry and
+  order-scaling switches of the retired Nitsche enforcement were removed
+  (decision D47).
 
 The tangential mesh policy `Free` adds no tangential row, so free-surface
 nodes slide tangentially with the harmonic extension (principle P1).

@@ -13,11 +13,11 @@
  * @brief Free-surface terms kept for legacy configurations
  *
  * The unfitted CurvatureTraction with the level-set gradient normal (the
- * contact-line tests use it), and the fluid kinematic rows of schema-1
- * legacy enforcement on fitted boundaries (the penalty on (u - w).n and the
- * fitted Nitsche row), moved from IncompressibleNavierStokesVMSModule.cpp.
- * The production terms (SurfaceStress or the kinematic area-gradient
- * traction, MeshNitsche kinematics on the mesh rows) are stated in that file.
+ * contact-line tests use it), moved from IncompressibleNavierStokesVMSModule.cpp.
+ * The fluid kinematic rows of the schema-1 Penalty and Nitsche enforcements
+ * on fitted boundaries were retired by decision D47 Q9.  The production
+ * terms (SurfaceStress or the kinematic area-gradient traction, MeshNitsche
+ * kinematics on the mesh rows) are stated in that file.
  */
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
@@ -45,24 +45,6 @@ namespace navier_stokes {
     const FE::forms::FormExpr& gamma,
     const FE::forms::FormExpr& n,
     const FE::forms::FormExpr& v);
-
-/// The schema-1 fluid kinematic row of a fitted free surface: the penalty on
-/// (u - w).n, or the fitted Nitsche row; both also enter the weak-boundary
-/// work channels.  MeshNitsche and None add no fluid row.
-void addFittedFluidKinematicRow(
-    FE::forms::FormExpr& momentum_form,
-    FE::forms::FormExpr& continuity_form,
-    const FreeSurfaceBoundary& bc,
-    const FE::forms::FormExpr& u,
-    const FE::forms::FormExpr& p,
-    const FE::forms::FormExpr& v,
-    const FE::forms::FormExpr& q,
-    const FE::forms::FormExpr& mesh_velocity,
-    const FE::forms::FormExpr& mu,
-    const FE::forms::FormExpr& n,
-    bool ale_enabled,
-    FE::forms::FormExpr* weak_boundary_momentum_work_form,
-    FE::forms::FormExpr* weak_boundary_continuity_work_form);
 
 } // namespace navier_stokes
 } // namespace formulations

@@ -92,6 +92,9 @@ def test_study_roles_and_diagnostic_variants(tmp_path):
         gen.generate(16, tmp_path / "bad", steps_per_period=8)
     with pytest.raises(ValueError):
         gen.generate(24, tmp_path / "bad2")
+    for retired in ("Nitsche", "Penalty"):   # decision D47 Q9
+        with pytest.raises(ValueError):
+            gen.generate(16, tmp_path / "bad3", enforcement=retired)
 
 
 def write_synthetic_run(run, level, steps_per_period, omega_error, *, samples_per_period=8,

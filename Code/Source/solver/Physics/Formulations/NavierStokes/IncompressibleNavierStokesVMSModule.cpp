@@ -287,14 +287,13 @@ void addUnfittedFreeSurface(FormExpr& M, fs::FESystem& system, cs::ConstraintPla
 // ---------------------------------------------------------------------------
 //   fluid rows: int_Gamma p_ext n.v + gamma (I - n x n) : grad v      (SurfaceStress, opt-in), or
 //               - int_Gamma ((-p_ext - gamma kappa) n) . v             (CurvatureTraction, supplied kappa);
-//   mesh rows:  int_Gamma (gamma_N/h_n) ((dt d - u).n)(psi.n)            (MeshNitsche, D35; or a penalty),
+//   mesh rows:  int_Gamma (gamma_N/h_n) ((dt d - u).n)(psi.n)            (MeshNitsche, D35),
 //               + the tangential mesh policy (smoothing, or a prescribed tangential rate);
 //   a pinned contact line: d = 0 (strong).
-void addFittedFreeSurface(FormExpr& M, FormExpr& C, fs::FESystem& system, cs::ConstraintPlan& plan,
+void addFittedFreeSurface(FormExpr& M, fs::FESystem& system, cs::ConstraintPlan& plan,
                           fs::BoundaryConditionManager& bcs, const Options& o, const FreeSurfaceBoundary& b,
-                          const fs::ALEBinding& ale, const NavierStokesTerms& t, const FormExpr& w, FieldId u_id,
-                          fs::FormulationBuilder& F, FreeSurfaceResidualWorkForms& work,
-                          ConservativeBalanceForms* balance)
+                          const fs::ALEBinding& ale, const NavierStokesTerms& t, FieldId u_id,
+                          fs::FormulationBuilder& F, ConservativeBalanceForms* balance)
 {
     const auto& [u, p, v, q, rho, mu, f, dim] = t;
     applyFreeSurfaceContactLineConstraints(plan, b, ale, dim);   // pinned contact lines: d = 0
@@ -326,8 +325,6 @@ void addFittedFreeSurface(FormExpr& M, FormExpr& C, fs::FESystem& system, cs::Co
     if (dynamic_stress) {
         logFreeSurfaceTraction(b);
     }
-    addFittedFluidKinematicRow(M, C, b, u, p, v, q, w, mu, n, o.enable_ale,   // schema-1 legacy fluid rows
-                               &work.weak_boundary_momentum, &work.weak_boundary_continuity);
 
     if (!ale.coupled()) {
         return;
@@ -342,9 +339,7 @@ void addFittedFreeSurface(FormExpr& M, FormExpr& C, fs::FESystem& system, cs::Co
     const auto nc = currentNormal();
     FormExpr rows;
     if (normal_relation) {   // (dt d - u).n = 0 on the mesh rows
-        const auto penalty = b.kinematic_enforcement == FreeSurfaceKinematicEnforcement::Penalty
-            ? freeSurfaceScalar(b.kinematic_penalty, "ns_free_surface_mesh_kinematic_penalty", b)
-            : FormExpr::constant(b.kinematic_nitsche_gamma) / hNormal();
+        const auto penalty = FormExpr::constant(b.kinematic_nitsche_gamma) / hNormal();
         rows = (penalty * normalTrace(dt(d) - u, nc) * normalTrace(psi, nc)).ds(Gamma);
     }
     if (const auto tangential = tangentialMeshPolicyResidual(b, d, psi, nc, rec.components, Gamma);
@@ -499,12 +494,11 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     bcs.install(o.velocity_dirichlet_weak, Factories::reserveMarker);   // Nitsche below; reserve the marker
     fs::FormulationBuilder F(system, o.operator_tag, physicsInstallOptions(o.jit_policy));
     F.symbolicTangent();
-    const auto w = o.enable_ale ? meshVelocity() : zeroVector(dim);
     for (const auto& b : free_surfaces) {
         if (isExteriorOnePhaseBoundary(b) && isUnfittedLevelSet(b)) {
             addUnfittedFreeSurface(M, system, plan, F, o, b, t, u_id, split);
         } else if (isExteriorOnePhaseBoundary(b)) {
-            addFittedFreeSurface(M, C, system, plan, bcs, o, b, ale, t, w, u_id, F, work, split);
+            addFittedFreeSurface(M, system, plan, bcs, o, b, ale, t, u_id, F, split);
         }
         const auto J = cutFacetPressurePenalty(b, t, o, velocity_space_->polynomial_order(),
                                                pressure_space_->polynomial_order());

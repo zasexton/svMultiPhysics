@@ -711,11 +711,19 @@ TEST(EquationTranslatorFreeSurface,
 </Add_equation>
 )xml");
 
+  // Kinematic_penalty was retired with the Penalty enforcement (decision
+  // D47 Q9): it fails at translation, whatever the enforcement.
   svmp::FE::systems::FESystem system(mesh);
-  EXPECT_THROW(
-      (void)application::translators::EquationTranslator::createModule(
-          *params, system, meshes),
-      std::runtime_error);
+  try {
+    (void)application::translators::EquationTranslator::createModule(
+        *params, system, meshes);
+    ADD_FAILURE() << "Kinematic_penalty must fail at translation";
+  } catch (const std::runtime_error& error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find("decision D47 Q9"), std::string::npos)
+        << message;
+    EXPECT_NE(message.find("MeshNitsche"), std::string::npos) << message;
+  }
   EXPECT_EQ(system.fieldMap().numFields(), 0u);
   EXPECT_TRUE(system.formulationRecords().empty());
   EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());

@@ -106,11 +106,6 @@ generatedUnfittedContactLineMarkerKey(
     const FreeSurfaceBoundary& bc,
     const FE::forms::FormExpr& phi);
 
-[[nodiscard]] FE::forms::FormExpr integrateOnFreeSurface(
-    const FE::forms::FormExpr& integrand,
-    const FreeSurfaceBoundary& bc,
-    bool ale_enabled);
-
 [[nodiscard]] std::optional<ActiveVolumeDomain> activeVolumeDomainFor(
     const std::vector<FreeSurfaceBoundary>& free_surfaces);
 

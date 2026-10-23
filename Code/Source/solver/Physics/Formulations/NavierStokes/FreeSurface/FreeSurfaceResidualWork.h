@@ -58,7 +58,7 @@ struct FreeSurfaceResidualWorkForms {
     FE::forms::FormExpr pressure;                   // -p div v
     FE::forms::FormExpr continuity;                 // q div u
     FE::forms::FormExpr nonconservative_body_force; // forcing minus its constant part
-    FE::forms::FormExpr weak_boundary_momentum;     // Nitsche and kinematic penalty rows
+    FE::forms::FormExpr weak_boundary_momentum;     // weak velocity Nitsche rows
     FE::forms::FormExpr weak_boundary_continuity;
     FE::forms::FormExpr vms_momentum;               // VMS minus Galerkin
     FE::forms::FormExpr vms_continuity;

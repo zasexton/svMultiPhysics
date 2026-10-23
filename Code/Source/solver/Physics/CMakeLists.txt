@@ -366,7 +366,6 @@ if(PHYSICS_BUILD_TESTS)
         NavierStokesLegacyBCs.FreeSurfacePinnedIsExplicitAndComplete
         NavierStokesLegacyBCs.UnfittedFreeSurfaceContactLinePluralMarkersTranslation_AddsGeneratedMarkers
         NavierStokesLegacyBCs.UnfittedDynamicContactAngleTranslationRoutesLineAndSharpWallGeometry
-        MovingDomainPhysics.FittedFreeSurfaceNitschePoliciesAreBoundaryLocalAndOrderInvariant
         MovingDomainPhysics.FittedFreeSurfaceKinematicPolicyOptionsAreExplicit
         MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesRegisterCoupledMeshOwnership
         MovingDomainPhysics.FittedFreeSurfacePrescribedTangentialVelocityRequiresCoupledDisplacement

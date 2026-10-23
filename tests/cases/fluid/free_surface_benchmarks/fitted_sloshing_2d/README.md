@@ -108,11 +108,11 @@ for S in 64 128 256; do python3 $B/generate_case.py --level 32 --steps-per-perio
 python3 $B/verify.py $OUT/L16 $OUT/L32 $OUT/L64 $OUT/L32_T64 $OUT/L32_T128 $OUT/L32_T256 --json $OUT/verify.json
 ```
 
-Diagnostic options of `generate_case.py` (reported by `verify.py`, never
-gated): `--kinematic-enforcement Nitsche|Penalty` (the older fitted modes,
-which also impose the kinematic relation on the fluid) and
-`--wall-mesh-motion pinned` (Dirichlet-0 mesh walls, which pin the contact
-points).
+Diagnostic option of `generate_case.py` (reported by `verify.py`, never
+gated): `--wall-mesh-motion pinned` (Dirichlet-0 mesh walls, which pin the
+contact points). `--kinematic-enforcement` accepts only `MeshNitsche`: the
+older fitted modes `Nitsche` and `Penalty`, which also imposed the kinematic
+relation on the fluid, were retired by decision D47 (Q9).
 
 ## Results
 

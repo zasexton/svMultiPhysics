@@ -2782,18 +2782,21 @@ parse_free_surface_kinematic_enforcement(std::string_view raw, std::string_view 
   if (token.empty() || token == "none") {
     return FreeSurfaceKinematicEnforcement::None;
   }
-  if (token == "penalty") {
-    return FreeSurfaceKinematicEnforcement::Penalty;
-  }
-  if (token == "nitsche") {
-    return FreeSurfaceKinematicEnforcement::Nitsche;
+  if (token == "penalty" || token == "nitsche") {
+    // The fitted Penalty and Nitsche enforcements imposed the kinematic
+    // relation on the fluid rows as well.
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] " + std::string(context) + "=" +
+        std::string(raw) + " (" +
+        (token == "penalty" ? "Penalty" : "Nitsche") +
+        ") was retired (decision D47 Q9); use MeshNitsche.");
   }
   if (token == "meshnitsche") {
     return FreeSurfaceKinematicEnforcement::MeshNitsche;
   }
   throw std::runtime_error(
       "[svMultiPhysics::Physics] " + std::string(context) +
-      " must be one of None, Penalty, Nitsche, or MeshNitsche.");
+      " must be None or MeshNitsche.");
 }
 
 svmp::Physics::formulations::navier_stokes::FreeSurfaceActiveDomain
@@ -4056,31 +4059,20 @@ void append_free_surface_bc(
   } else if (fs.implementation == FreeSurfaceImplementation::FittedALE &&
              !explicit_legacy_configuration) {
     // Decision D35: MeshNitsche is the qualified default for fitted ALE
-    // free surfaces (Penalty and Nitsche remain explicit legacy choices).
-    // The qualified contract rejected an omitted Kinematic_enforcement
-    // before, so no accepted input changes; the explicit schema-1 legacy
-    // mode keeps its None default and the Kinematic_penalty promotion.
+    // free surfaces.  The qualified contract rejected an omitted
+    // Kinematic_enforcement before, so no accepted input changes; the
+    // explicit schema-1 legacy mode keeps its None default.
     fs.kinematic_enforcement = FreeSurfaceKinematicEnforcement::MeshNitsche;
   }
-  const auto penalty = first_defined_double(
-      bc.params,
-      {"Kinematic_penalty"});
-  if (penalty.has_value()) {
-    fs.kinematic_penalty = IncompressibleNavierStokesVMSOptions::ScalarValue{
-        static_cast<svmp::FE::Real>(*penalty)};
-    if (!enforcement.has_value() && explicit_legacy_configuration) {
-      fs.kinematic_enforcement = FreeSurfaceKinematicEnforcement::Penalty;
-    }
-  }
-  if (penalty.has_value() &&
-      fs.kinematic_enforcement != FreeSurfaceKinematicEnforcement::Penalty &&
-      !explicit_legacy_configuration) {
+  // Kinematic_penalty set the penalty of the Penalty enforcement (the
+  // schema-1 legacy mode promoted it to Penalty); both were retired by
+  // decision D47 Q9, so the key fails whenever it is given.
+  if (first_defined_string(bc.params, {"Kinematic_penalty"}).has_value()) {
     throw std::runtime_error(
-        "[svMultiPhysics::Physics] Kinematic_penalty requires explicit "
-        "Kinematic_enforcement=Penalty (legacy); it does not change the "
-        "default enforcement (MeshNitsche on fitted ALE free surfaces) and "
-        "unused penalty settings are accepted only by the explicit schema-1 "
-        "legacy mode.");
+        "[svMultiPhysics::Physics] Free_surface BC '" + bc.name +
+        "': Kinematic_penalty (the penalty of the Penalty kinematic "
+        "enforcement) was retired (decision D47 Q9); remove it and use "
+        "Kinematic_enforcement=MeshNitsche.");
   }
   const auto kinematic_nitsche_gamma = first_defined_double(
           bc.params,
@@ -4090,14 +4082,13 @@ void append_free_surface_bc(
         static_cast<svmp::FE::Real>(*kinematic_nitsche_gamma);
   }
   // Kinematic_nitsche_symmetric and Kinematic_nitsche_scale_with_p, which
-  // no deck, runner or test set, were removed (decision D47); the legacy
-  // Nitsche enforcement keeps its symmetric, order-scaled defaults.
+  // no deck, runner or test set, were removed (decision D47); the Nitsche
+  // enforcement they configured was retired by D47 Q9.
   if (kinematic_nitsche_gamma.has_value() &&
-      fs.kinematic_enforcement != FreeSurfaceKinematicEnforcement::Nitsche &&
       fs.kinematic_enforcement != FreeSurfaceKinematicEnforcement::MeshNitsche &&
       !explicit_legacy_configuration) {
     throw std::runtime_error(
-        "[svMultiPhysics::Physics] Boundary-local free-surface Nitsche settings require Kinematic_enforcement=Nitsche (MeshNitsche accepts Kinematic_nitsche_gamma only); unused Nitsche settings are accepted only by the explicit schema-1 legacy mode.");
+        "[svMultiPhysics::Physics] Kinematic_nitsche_gamma requires Kinematic_enforcement=MeshNitsche; an unused gamma is accepted only by the explicit schema-1 legacy mode.");
   }
 
   const auto small_cut_aggregation = first_defined_bool(

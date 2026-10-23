@@ -321,14 +321,9 @@ void declareFittedMeshRowDescriptors(
         fluid_descriptor.boundary_marker = bc.boundary_marker;
         fluid_descriptor.trace_kind =
             FE::analysis::TraceKind::NormalComponent;
+        // MeshNitsche: the fluid keeps its natural dynamic condition.
         fluid_descriptor.enforcement_kind =
-            bc.kinematic_enforcement ==
-                    FreeSurfaceKinematicEnforcement::Nitsche
-                ? FE::analysis::EnforcementKind::WeakNitsche
-                : bc.kinematic_enforcement ==
-                          FreeSurfaceKinematicEnforcement::MeshNitsche
-                      ? FE::analysis::EnforcementKind::WeakConsistent
-                      : FE::analysis::EnforcementKind::WeakPenalty;
+            FE::analysis::EnforcementKind::WeakConsistent;
         fluid_descriptor.source = fluid_source;
         system.addBoundaryConditionDescriptor(
             std::move(fluid_descriptor), operator_tag);

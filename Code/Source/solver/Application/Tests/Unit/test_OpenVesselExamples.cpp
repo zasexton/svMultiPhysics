@@ -2848,16 +2848,16 @@ TEST(OpenVesselExamples, UnfittedFreeSurfaceBuilderRejectsNitscheKinematics)
   const ScopedCurrentPath cwd(case_dir);
   ASSERT_NO_THROW(params.read_xml(xml_path.string()));
   application::core::SimulationBuilder builder(params);
+  // Decision D47 Q9 retired the Nitsche enforcement: the value fails while
+  // the fluid equation is translated, before any unfitted check.
   try {
     (void)builder.build();
-    FAIL() << "Expected unfitted Nitsche kinematics to be rejected";
-  } catch (const std::invalid_argument& error) {
+    ADD_FAILURE() << "Expected the retired Nitsche kinematics to be rejected";
+  } catch (const std::exception& error) {
     const std::string message = error.what();
-    EXPECT_NE(message.find("Eulerian level-set transport"), std::string::npos)
+    EXPECT_NE(message.find("decision D47 Q9"), std::string::npos)
         << message;
-    EXPECT_NE(message.find("Penalty/Nitsche enforcement"),
-              std::string::npos)
-        << message;
+    EXPECT_NE(message.find("MeshNitsche"), std::string::npos) << message;
   }
 
   std::error_code ec;

@@ -142,11 +142,8 @@ opt::OptionSchema<FreeSurfaceBoundary> makeFreeSurfaceBoundarySchema()
         .key("Kinematic_enforcement", &B::kinematic_enforcement,
              opt::EnumCodec<FreeSurfaceKinematicEnforcement>{{
                  token(FreeSurfaceKinematicEnforcement::None, "None"),
-                 token(FreeSurfaceKinematicEnforcement::Penalty, "Penalty"),
-                 token(FreeSurfaceKinematicEnforcement::Nitsche, "Nitsche"),
                  token(FreeSurfaceKinematicEnforcement::MeshNitsche, "MeshNitsche"),
              }})
-        .key("Kinematic_penalty", &B::kinematic_penalty, anyScalar())
         .key("Kinematic_nitsche_gamma", &B::kinematic_nitsche_gamma, anyReal())
         .key("Small_cut_aggregation", &B::small_cut_aggregation, relaxedBool())
         .key("Small_cut_aggregation_maximum_root_path_length",
@@ -192,8 +189,8 @@ opt::OptionSchema<FreeSurfaceBoundary> makeFreeSurfaceBoundarySchema()
              opt::nestedMember(&B::cut_cell_stabilization,
                                &FreeSurfaceCutCellStabilization::cut_metadata_scale_cap),
              opt::OptionalCodec<opt::RealCodec>{opt::RealCodec{.minimum = 1.0}})
-        // Retired keys the register still recognizes (decision D42).  The
-        // register applies the rules; these entries document them.
+        // Retired keys the register still recognizes (decisions D42 and D47
+        // Q9).  The register applies the rules; these entries document them.
         .retired({"Use_current_geometry_curvature"},
                  "retired (decision D42): identically zero on affine faces",
                  opt::RetiredAcceptance{.value = "false"})
@@ -208,7 +205,10 @@ opt::OptionSchema<FreeSurfaceBoundary> makeFreeSurfaceBoundarySchema()
                  opt::RetiredAcceptance{.value = "false"})
         .retired({"Velocity_extension_diffusivity"},
                  "belongs to the retired dry-velocity diffusion (decision D42)",
-                 opt::RetiredAcceptance{.any_value_in_mode = "explicit_legacy"});
+                 opt::RetiredAcceptance{.any_value_in_mode = "explicit_legacy"})
+        .retired({"Kinematic_penalty"},
+                 "belongs to the retired Penalty kinematic enforcement (decision D47 Q9); "
+                 "use Kinematic_enforcement=MeshNitsche");
     return schema;
 }
 
