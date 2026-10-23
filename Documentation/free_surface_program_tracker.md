@@ -84,11 +84,11 @@ The target cases come from `moving_free_surface_validation_cases.md` and the aud
 | 2D linear sloshing | Unfitted | **PASS** (D35/D36 tolerances). arm64, job 138, with reconciliation: spatial frequency error 0.003% at L/h = 64, damping 0.63%, dA/A ≤ 2.3e-8. The x86 D36 pass also stands. | `linear_sloshing_2d/README.md`; §5 M1 | — |
 | SPHERIC 05 dam break | Unfitted | **Not run** on the current tip. June: the early profile passes at t = 0.156 s (RMSE 0.0184 m with cadence-1 volume correction) | 06-02 to 06-12 logs; §8.2 | June D18 false wetting after 0.22 s. The decks use the four algorithms D47 item 5 retires, plus the limiter, and declare the overlapping-face opt-out (`363f1264`) |
 | SPHERIC 10 sloshing and 02 dam break (unfitted) | Unfitted | **Fail** (June: Test 10 dies near 0.9 s of 8.35 s; Test 02 has MPa pressure spikes); **not re-run** | 06-05/06-07 root-cause reports | Never re-run after the June aggregation and sparsity fixes; decks as for Test 05 (§5 M1, M5) |
-| Static drop / Laplace pressure, 2D and 3D | Unfitted | **PASS** (`static_drop_2d` and `static_sphere_3d` tolerances: error ≤ 1% at the finest level with order ≥ 1, Ca_sp decreasing, no growth, volume ≤ 1e-4, D19 Δt criterion). 2D, D19 (binary `3bc60e4e`, x86): pressure-jump error 3.29e-5 (La 12) and 3.00e-5 (La 120) at R/h = 32, orders 2.18 and 2.08. 3D sphere, D25 (x86): 1.77e-4 at R/h = 16, order 2.09. | D19, D25; §5 M2 | Route selection not yet recorded (§5 M2 Selection). Both KAG forms fail M2 (2026-10-01). |
+| Static drop / Laplace pressure, 2D and 3D | Unfitted | **PASS** (`static_drop_2d` and `static_sphere_3d` tolerances: error ≤ 1% at the finest level with order ≥ 1, Ca_sp decreasing, no growth, volume ≤ 1e-4, D19 Δt criterion). 2D, D19 (binary `3bc60e4e`, x86): pressure-jump error 3.29e-5 (La 12) and 3.00e-5 (La 120) at R/h = 32, orders 2.18 and 2.08. 3D sphere, D25 (x86): 1.77e-4 at R/h = 16, order 2.09. | D19, D25; §5 M2 | — |
 | Capillary wave; oscillating drop | Unfitted | **PASS** (`capillary_wave_2d` tolerances: frequency ≤ 2%, damping ≤ 5% at λ/h = 64 (D20), order ≥ 1, volume ≤ 1e-4, D19 Δt). Capillary wave, D19/D20 (job `46704019`, x86): frequency 3.94e-3 at λ/h = 32 (order 1.75), damping 3.95e-3 at 64 (order 2.90). Oscillating drop (job `46903541`, x86): frequency −1.37e-4 and damping 9.09e-4 at R/h = 32 (orders 2.15, 2.40). | D19, D20; §5 M3 | — |
-| Static contact angle (sessile), 2D and 3D | Unfitted | **PASS** (`sessile_drop_2d` and `sessile_drop_3d` tolerances: angle ≤ 2° and decreasing, base and apex ≤ 2%, D11 volume, Δt criterion). 2D 60°/120° at R/h = 16/32/64, D39 protocol (`62df122c`, x86): angle error 0.003° at 64 for both; rerun at 16/32 on arm64, D44. 3D 90° quarter domain on arm64 (D43, jobs 51 and 74): largest sector error 0.099° at R/h = 16. | D39, D43, D44; §5 M4 | 3D tested only at 90°, where the Young line term `−γ cos θe ∫ v·m` (§6.1) is zero; other angles open (§5 M4). 2D 90° is pre-registered but not run. |
+| Static contact angle (sessile), 2D and 3D | Unfitted | **PASS** (`sessile_drop_2d` and `sessile_drop_3d` tolerances: angle ≤ 2° and decreasing, base and apex ≤ 2%, D11 volume, Δt criterion). 2D 60°/120° at R/h = 16/32/64, D39 protocol (`62df122c`, x86): angle error 0.003° at 64 for both; rerun at 16/32 on arm64, D44. 3D 90° quarter domain on arm64 (D43, jobs 51 and 74): largest sector error 0.099° at R/h = 16. | D39, D43, D44; §5 M4 | 3D at 60°/120° approved and pending (D48 item 3); at 90° the Young line term `−γ cos θe ∫ v·m` (§6.1) is zero. 2D 90° is pre-registered but not run. |
 | Dynamic contact line (Ren–E) | Unfitted | **PASS** under D39 (strong law), on x86 and arm64: geometric RMS ≤ 2.8%, mean signed within ±1.1% | `ren_e_2d/README.md`; §5 M4 | — |
-| Capillary rise | Unfitted | **Partial.** Frozen history envelope (`gruending_2020_omega1_intercode_envelope_v1`) **PASS**: L10/L20/L40 on arm64, 0/691 points outside, RMS 0.043 mm against the 0.214 mm half-width, order 1.93 (D44). Feature gates not evaluated. | D44; `campaign-e7080344/verify-2d-cr/` | Feature gates have no pre-declared uncertainty (§5 M4) |
+| Capillary rise | Unfitted | **PASS** on the frozen history envelope (`gruending_2020_omega1_intercode_envelope_v1`, the acceptance): L10/L20/L40 on arm64, 0/691 points outside, RMS 0.043 mm against the 0.214 mm half-width, order 1.93 (D44). Features reported, not gated (D48 item 2): peak 23.20 mm at 0.208 s and h(0.69 s) 19.43 mm, 0.02–0.03 mm above the primary range; log decrement 1.157 against 1.191–1.281. | D44, D48; §5 M4 | — |
 | Conservative phase transport | Unfitted | **Not run** (18-point WP-6 matrix frozen, not run). It fails on the sessile drop, where contact-protected nodes block its local reconciliation (§5 M4, 2026-10-05). No benchmark protocol uses it; kinematic reconciliation (D14) does the volume work. The workflow moved to FE/LevelSet (S11, D46). | `level_set_conservative_phase_transport.md`; §5 M4 | — |
 | Cut stability (aggregation, pressure facet jump) | Unfitted | **Partial.** Robust in every accepted M1–M4 protocol run since the aggregation fixes (D26 A; D34 fix 2 part 1; halo depth 12, `d61f469d`, D39 item 5; stalled-inversion fix `c705ee79`, D41). No uniform stability bound (WP-7). | `free_surface_wp7_combined_p1_method.md`; D26, D39, D41 | WP-7 bound not shown; sliver cuts in line-search trial states (M6) |
 | Discrete energy ledger | Unfitted | **Partial.** The narrow fixed-topology backward-Euler connector passes. With the lagged term, energy does not increase except for two start-up steps (relative 3.5e-7 and 7.6e-7, D13). | WP-8 records; D13 | No physical energy campaign (M8); history not re-anchored after topology changes (D35 item 14) |
@@ -703,7 +703,7 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   - **Capillary rise L10, L20, L40 (8 ranks, with the inversion fix `c705ee79`): all three reach t = 0.69 s.** L40 is the first complete run at that level (32.5 h).
     - Frozen comparison `gruending_2020_omega1_intercode_envelope_v1`, three-level candidate: PASS, 0 of 691 points outside, largest normalized error 0.41, RMS 0.043 mm against the 0.214 mm half-width, observed order 1.93. Evaluated over the full 0–0.69 s grid; the 0–0.416 s window gives the same verdict.
     - Apex RMS against the reference centre 0.017 / 0.037 / 0.043 mm (x86 L10 and L20: 0.017 / 0.037). The levels converge (L20 − L10 0.024 mm, L40 − L20 0.006 mm RMS) to a curve slightly above the inter-code median, well inside twice the reference uncertainty.
-    - Contact motion per step passes at every level (0.030 / 0.023 / 0.016 cells). The feature gates (peak, timing, end height, damping) stay open pending a pre-declared feature uncertainty.
+    - Contact motion per step passes at every level (0.030 / 0.023 / 0.016 cells). The feature gates (peak, timing, end height, damping) stay open pending a pre-declared feature uncertainty. *(D48 item 2: reported with the intercode spread, not gated.)*
     - Outputs and tables: `/scratch/users/zsexton/campaign-e7080344/verify-2d-cr/`.
   - **Integrated on the main line (cherry-picked, each branch verified on its own first):**
     - The arm64 test port (D41 item 3): FE CTest 58/58, Physics 25/25, Application 12/12, with no arm64-only failures left. Outputs are bitwise unchanged on the reference sets.
@@ -765,6 +765,42 @@ These are proposals. Each lists a recommended option and an alternative. Record 
     - Step P1 has started: `OptionSchema<T>` (FE/Core) declares each key of an option struct once (spellings, codec, documentation, cross-key rules). Nothing parses through it yet; `describe()` records where each key of an already resolved struct came from.
     - The Navier-Stokes effective-configuration artifact ends with a "resolved" section: every free-surface boundary and contact-line key with its value and source (explicit, deprecated spelling, derived, default). The keys before it are unchanged.
     - Evidence: CTest FE 58/58, Physics 25/25, Application 13/13; exhaustive two-rank matrix passed (job 155); reference sets identical serially (vs `e7080344`) and at 2 and 4 ranks (vs `pwd-92f1a2fc`) (job 156).
+- **D48, 2026-10-22 (user): WP-4 closure decisions on the capillary route, the capillary-rise features and the 3D sessile angles.**
+  1. **M2 route selection: `SurfaceStress` is the default and only production capillary route, unfitted and fitted.**
+     - Evidence. The M2 La = 12 study (2026-10-01): `surface_stress` passes every gate (pressure-jump error 6.8e-4 / 1.5e-4 / 3.3e-5 at R/h = 8/16/32, order 2.18). `kag_lumped` does not converge (order 0.17) and its velocity grows (1.33, 1.26). `kag_consistent` stops on the outer loop at R/h = 16 and 32. `SurfaceStress` then passes D19 and D25 (M2, 2D and 3D), D19/D20 and the oscillating drop (M3), and D39/D43/D44 (M4 sessile, Ren–E, capillary rise). The fitted static drop is second order (job `46109392`).
+     - P1: `SurfaceStress` has no numerical parameter. The filtered-KAG fallback of D2 was not needed.
+     - Consequences:
+       - D2 is complete, and M2 has no open item.
+       - No default changes. `SurfaceStress` is already the unfitted default, and D47 item 2 makes it the fitted default.
+       - Retired in the refactor (D42 rule; the params agent owns the code work):
+         - `KinematicAreaGradientTraction` (lumped and consistent mass);
+         - the KAG mode of `LevelSetCurvatureProjection`, with its keys;
+         - `--capillary-form kag_lumped|kag_consistent` in the `static_drop_2d` generator;
+         - the KAG unit and workflow tests, for example `KinematicAreaGradientTractionDispatchesCollectiveCurvatureRecovery`.
+       - Cases to replace in the change that removes KAG:
+         - the PGO training cases `drop_kagl_L8` and `drop_kagc_L8` (`FE/Docs/BuildOptimization.md`, `build_ltopgo_arm64.sbatch`), and the x86 sphere proxy deck `sphere_proxy_L8_kagl`;
+         - three of the nine reference cases used for the bitwise checks (`drop_L8_kagl`, `drop_L8_kagc`, `drop_L16_kagl`).
+         Until then, KAG decks still run (`6f23eb08`, job 156).
+       - The static capillary minimizer stays (D3) as optional tooling, keeping its CTest role: the M1 tank at rest (the serial 60-case twin and the two-rank covering design) and the 960-case exhaustive matrix.
+         - These tests use `SurfaceStress`, and the minimizer (`StaticCapillaryEquilibrium`) does not call KAG or the curvature projection, so removing KAG leaves them in place.
+         - Retiring the minimizer is a separate, later decision.
+       - M8 drops "an energy-consistent KAG" and keeps "discrete static minimizer with nonsmooth optimization".
+       - Default paths stay bitwise, because no accepted benchmark protocol uses KAG.
+  2. **Capillary-rise features (M4; WP-5/FSR-05): reported with the intercode spread, not gated.**
+     - The frozen history envelope (`gruending_2020_omega1_intercode_envelope_v1`, D44 PASS) stays the acceptance.
+     - Reason: no feature tolerance was declared before the runs, and peak and end height are points of the gated history.
+     - The `feature_gates` list of `free_surface_wp5_capillary_rise_comparison_v1.json` is reported, not gated. The frozen file stays unchanged as history. Values: §5 M4.
+  3. **3D sessile at 60° and 120° (M4).** The extension of `sessile_drop_3d/tolerances.json` (`2e592e76`, drafted as `e48f4964`) is approved as written, before the first run.
+     - Angles: equilibrium 60/90/120°, started from 90/120/90°.
+     - Criteria and limits unchanged:
+       - largest rotation-averaged sector error ≤ 2° at R/h = 16, decreasing from 8;
+       - base radius and apex height within 2%;
+       - max dV/V ≤ 1e-4 in every run;
+       - velocity growth not gated below Ca = 1e-3;
+       - Δt check at R/h = 16: 0.1° and 0.1%.
+     - Runs per angle: R/h = 8 and 16 at Δt, and R/h = 16 at Δt/2. Quarter domain, 8 ranks × 1 thread, `mumps_serial`, binary `6f23eb08-ltopgo-mumps` after its D16 check.
+     - Scheduling: one 8-CPU lane, one run at a time, so that the verify chains keep the other 8 CPUs. Estimate 17–31 h in sequence (137–249 CPU-h).
+     - The pre-registered 2D 90° case is not scheduled.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
@@ -1027,9 +1063,14 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - final `Ca_sp` strictly decreasing with h, with absolute values reported. There is no absolute limit (decided 2026-09-29), because the July speed/γ figure was a start-up transient in SI units, not a capillary number;
   - no growth of `max|u|` in time;
   - volume drift ≤ 1e-4.
-- [ ] **Selection.** After the M2 static drop, the M3 capillary wave, and the M4 sessile and Ren–E comparisons, record the chosen default route and the reason in §4.
-  - Among candidates meeting the D1 criteria, prefer the one without tunable parameters (P1).
-  - Then run the 3D sphere at R/h = 8, 16, 32.
+- [x] **Selection (D48, 2026-10-22): `SurfaceStress` is the default and only production capillary route, unfitted and fitted.** It is the only parameter-free candidate that meets the D1 criteria on:
+  - the M2 static drop (2D at La = 12 and 120, D19; 3D sphere, D25);
+  - the M3 capillary wave and oscillating drop (D19/D20);
+  - the M4 sessile (D39, D43, D44), Ren–E (D39; arm64 job 138) and capillary-rise (D44) studies.
+  - Both KAG forms fail M2 (La = 12 study, 2026-10-01), so they were not run on M3 or M4.
+  - P1 is satisfied: the one passing candidate has no tunable parameter.
+  - The 3D sphere ran at R/h = 8/16 (D25); R/h = 32 is not affordable (D25 item 1).
+  - KAG (lumped and consistent) and the KAG mode of the curvature projection are retired in the refactor. The static minimizer stays (D3; D48 item 1).
 - [x] **3D readiness (2026-09-30; benchmark merged as `e687c6bd`, `12f30793`, `6350285e`).**
   - Closed 2026-10-22: the four open questions were answered by D25 items 1–4; the sphere passes at R/h = 8/16 (D25, 2026-10-10); R/h = 32 is not affordable (D25 item 1).
   - **Benchmark.** `tests/cases/fluid/free_surface_benchmarks/static_sphere_3d/` (16 Python tests), ready but unrun.
@@ -1217,14 +1258,42 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
   - scale-only wall maintenance (`PreserveAcceptedAngle`), as on the dynamic-contact path;
   - no repair-to-target.
 - [x] **2D sessile relaxation: PASS at 60° and 120° (2026-10-13)** with the D39 protocol (triggered redistancing). Angle errors at R/h = 64 are 0.003° for both angles; see the D35 item 1 results in §4. 90° was not part of the D29 resolution study. **Protocol since 2026-10-06:** PDE transport (D15), reconciliation (D14) and patch bounds (D21). R/h = 16 passes every single-level check at 60° and 120° (D21 validation). The resolution study at R/h = 16, 32, 64 (60° and 120°; 4 ranks at 32, 8 at 64) runs on one binary that includes the FSILS layout-stamp fix (stale assembly slots after a layout rebuild, found by the uninitialized-read work), because sessile runs rebuild layouts at every topology change. Estimated from the R/h = 16 serial times (29 and 74 min on Milan): about 8 and 21 h serial at R/h = 32 and 6 and 15 days serial at R/h = 64. Benchmark scripts merged 2026-09-30: `tests/cases/fluid/free_surface_benchmarks/sessile_drop_2d/` (angles by local circle fit, within 0.13° at R/h = 16 on exact caps; slip length R/8; La = 12). Unblocked by the vertex-crossing fix. Generalized-α + FSILS is the single default configuration; `--transport coupled|wet_extension|pde_extension` selects the transport (`pde_extension` refused until D9 lands). The first 300 steps (above) show 60° at 59.5/59.3° with base error 2.8% and apex error 4.8%, still slowing down, and 120° at 115.3/118.6°, still receding (base error 13%). `verify.py` requires the last output at the end time. Start from a *non-equilibrium* shape (for example a 90° cap for a 60° target) and relax to equilibrium at R/h = 16, 32, 64. Proposal: angle error ≤ 2° at R/h = 32 and decreasing; base radius and apex height within 2%.
-- [x] **Capillary rise** against the prepared Gründing et al. envelope, using `free_surface_wp5_capillary_rise_reference.json` and the comparison runner: L10/L20/L40 PASS on the frozen comparison (D44, 2026-10-21); the feature gates are still open.
+- [x] **Capillary rise** against the prepared Gründing et al. envelope, using `free_surface_wp5_capillary_rise_reference.json` and the comparison runner: L10/L20/L40 PASS on the frozen history envelope (D44, 2026-10-21), which is the acceptance. The features are reported with the intercode spread, not gated (D48 item 2):
+
+  | curve | peak (mm) | t_peak (s) | trough (mm) | t_trough (s) | h(0.69 s) (mm) | overshoot (mm) | log decrement |
+  |---|---:|---:|---:|---:|---:|---:|---:|
+  | primary median (interTrackFoam, BoSSS, FS3D) | 23.133 | 0.208 | 18.280 | 0.466 | 19.379 | 3.754 | 1.229 |
+  | primary range | 22.960–23.179 | 0.208 | 18.251–18.377 | 0.464–0.468 | 19.373–19.400 | 3.587–3.779 | 1.191–1.281 |
+  | interFoam (sensitivity only) | 23.644 | 0.218 | 18.203 | 0.495 | 19.431 | 4.213 | 1.233 |
+  | L10 / L20 / L40 (arm64, D44) | 23.145 / 23.190 / 23.201 | 0.208 | 18.265 / 18.250 / 18.247 | 0.466 | 19.412 / 19.428 / 19.432 | 3.733 / 3.762 / 3.769 | 1.181 / 1.161 / 1.157 |
+
+  - **Timing.** Peak and trough times equal the primary median at every level.
+  - **Heights at L40 against the primary median.**
+    - Peak +0.068 mm, height at 0.69 s +0.053 mm, overshoot +0.015 mm, trough −0.033 mm. All are well inside the envelope half-width (about 0.2 mm).
+    - Against the primary range: the peak and the height at 0.69 s lie just above it (by 0.022 and 0.032 mm), the trough lies 0.004 mm below it, and the overshoot lies inside it.
+  - **Damping.** The log decrement is ln(overshoot/undershoot), with undershoot = h(0.69 s) − trough.
+    - At L40 it is 1.157: 6% below the primary median and 0.033 below the lowest primary code (BoSSS).
+    - The levels converge toward that value (1.181 / 1.161 / 1.157).
+  - **Not reported.** `corrected_equilibrium_height` is named in the contract's feature list but not defined there.
+  - **Method.** The frozen comparison's 1 ms grid (0–0.69 s), using apex heights. Script `/scratch/users/zsexton/wp4-closure/tools/capillary_rise_features.py`; output `/scratch/users/zsexton/wp4-closure/verify/capillary_rise_features_d44.json`; inputs `campaign-e7080344/verify-2d-cr/`.
 - [x] **Ren–E advancing and receding: PASS under D39 (strong law), on x86 and on arm64.**
   - arm64 confirmation: job 138, 2026-10-22, binary b74ea15c, 18 serial runs (R/h = 8/16/32 with ℓ_s/h = 2/4/8; dt0, dt0/2, dt0/4).
   - Geometric RMS error at dt0/4: 2.34 / 1.26 / 1.41% (advancing) and 1.16 / 1.04 / 2.83% (receding). Mean signed error: +0.74 / −0.23 / +0.67% and −1.02 / −0.63 / −1.03%.
   - Displacement change from dt0/2 to dt0/4 at R/h = 32: 0.29% and 0.06%. Max area drift 3.0e-5. Signs agree in every sample; every run completed. The fluid law error is ≤ 2e-15 (imposed).
   - These match the x86 protocol set (job `47330724`, binary `62df122c`, re-verified 2026-10-11) to the digits reported there; the final displacements agree to 4–5 digits. The advancing displacement does not converge monotonically (0.03313 / 0.03319 / 0.03109; reported only).
   - Outputs: `/scratch/users/zsexton/svmp-dev-outer/runs/138-plan_wp4c1/rene_*`.
-- [x] **3D sessile** at one angle (90°, quarter domain, R/h = 8/16 at Δt and Δt/2): PASS (D38, D43, 2026-10-21). Extending to other angles is open.
+- [x] **3D sessile at 90°** (quarter domain, R/h = 8/16 at Δt and Δt/2): PASS (D38, D43, 2026-10-21).
+- [ ] **3D sessile at 60° and 120° (D48 item 3): runs approved, pending.** At 90° the Young line term −γ cos θe ∫ v·m (§6.1) is zero, so only these angles test it in 3D.
+  - Benchmark: `2e592e76` (on the main line since 2026-10-22).
+    - The generator writes 60° and 120°, each started from 90°.
+    - `tolerances.json` lists the angles with every criterion and limit unchanged; it was approved as written before the first run (D48).
+    - `verify.py` takes the runs of one angle at a time.
+  - Decks, 1,400 steps each (2,800 at Δt/2):
+    - 60°: box 1.125 × 1 × 1.125; 3,888 / 31,104 tets at R/h = 8 / 16.
+    - 120°: box 1.5 × 1.75 × 1.5; 12,096 / 96,768 tets.
+    - Measurement error on sampled exact equilibrium caps, at R/h = 8 / 16: 0.25° / 0.064° (60°) and 0.39° / 0.044° (120°).
+  - Runs: six per the protocol (R/h = 8 and 16 at Δt, R/h = 16 at Δt/2, per angle). 8 ranks × 1 thread, `mumps_serial`, on one 8-CPU lane one at a time, with `6f23eb08-ltopgo-mumps` after its D16 check. Estimate 17–31 h in sequence.
+    - Jobs (arm64): build 169 (`6f23eb08-ltopgo-mumps`); D16 check 170 (bitwise against the plain `6f23eb08` binary on the nine reference cases); runs 171–176 in the order a60 R/h = 8, a120 R/h = 8, a60 R/h = 16, a60 R/h = 16 Δt/2, a120 R/h = 16, a120 R/h = 16 Δt/2. Every run needs a D16 pass and starts after the previous run ends.
 
 ### M5 — Fitted ALE reference path
 
@@ -1299,7 +1368,7 @@ Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch t
 ### M8 — Optional research track (not on the capability critical path)
 
 - [ ] Exact discrete energy law for moving interfaces (WP-8 physical campaigns).
-- [ ] An energy-consistent KAG pulled back through the actual level-set transport operator.
+- ~~An energy-consistent KAG pulled back through the actual level-set transport operator.~~ Dropped by D48 item 1 (KAG is retired).
 - [ ] Discrete static minimizer with nonsmooth optimization.
 - [ ] φ-scale invariance to roundoff.
 - [ ] Publication-grade frozen qualification records for completed capabilities.
