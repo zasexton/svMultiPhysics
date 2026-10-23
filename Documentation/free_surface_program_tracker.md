@@ -898,6 +898,73 @@ These are proposals. Each lists a recommended option and an alternative. Record 
        - S9/S10: the maintenance work ledger and the wall constraints;
        - params: P6 and P2.
      - **Estimate:** about 135 h of agent time and about 40 jobs. The steps are tracked in §5, milestone MR.
+- **D50, 2026-10-22 (user): `Physics/Formulations/NavierStokes` ends with at most five files, following the Poisson/Ustruct pattern.**
+  - **Refines** D49 item 1, which had eight files.
+  - **Reference:** `agent-status/refactor/ns-folder-target-layout.md` (D50 section; the D49 version is its appendix).
+  1. **The five files:**
+     - `IncompressibleNavierStokesVMSModule.h` (~900 lines): the module class and all option types, as `PoissonOptions` and `UstructOptions` live in their module headers. That covers the Navier–Stokes options, the free-surface BC options (today's `FreeSurfaceOptions.h`) and the two-fluid options.
+     - `IncompressibleNavierStokesVMSModule.cpp` (~700): the weak form, one-phase and two-fluid.
+     - `NavierStokesBCFactories.h` (~1,200): header-only, with no `.cpp`, like MeshMotion, Poisson and Ustruct. It holds every boundary condition, including the free-surface terms and the two-fluid interface terms.
+     - `NavierStokesPostProcessing.h` (~450): derived results registered as forms, as in `PoissonPostProcessing.h` and `UstructPostProcessing.h`. It also holds the D49 energy, power, dissipation and diagnostic forms, and the work-channel and energy-identity declarations.
+     - `NavierStokesRegister.cpp` (≤ ~650): the thin equation factory, at peer size (Poisson 506, MeshMotion 653, Ustruct 737 lines).
+
+     In total about 3,900 lines. `NavierStokesOptions.h` and `NavierStokesSupport.h` are dropped; the residue is FE data (D49).
+  2. **Two-fluid is folded into the module as an option (user choice).**
+     - `IncompressibleTwoFluidModule.{h,cpp}` and `IncompressibleTwoFluidInterface.{h,cpp}` go.
+     - The interface forms join the BC factories.
+     - The two-fluid validation goes to `Physics/Core`, and the two-fluid artifact keys and texts become data.
+     - The register mapping is unchanged: equation types `fluid` and `stokes`, and `Free_surface_physical_model=IncompressibleTwoFluid` selects the two-fluid mode.
+     - **Labels stay identical.** The S0 manifests print operator tags, source-component tags, and FE kernel and constraint types, never the module type. The fold keeps:
+       - the tags, including `<operator_tag>_two_fluid_material_interface`;
+       - the install sequence (negative phase, positive phase, interface, gauge);
+       - the two-fluid artifact (schema version 3);
+       - the message texts.
+     - **Gate:**
+       - `conservative_phase` and `two_fluid_hydrostatic` (refset-ext): manifests, logs and artifacts byte-identical, and np2 parity;
+       - the two-fluid CTests;
+       - a label audit in the commit message.
+  3. **Energy forms in `NavierStokesPostProcessing.h` (user choice).** E3 states the energies, powers, dissipations, works and logged measures there. The D49 tolerance gate, the energy-consumer audit and the measure-read audit are unchanged.
+  4. **Header-only BC factories.**
+     - The inline free-surface bodies call members of `LevelSetGeometry`/`CutSide`, `ConstraintPlan`, `FormulationBuilder`, `ALEBinding`, `BoundaryConditionManager` and `InterfaceMeasureGaugeAnchor`. Those headers must be complete, so none of them can stay forward-declared.
+     - The cost is acceptable: `FESystem.h`, already included, dominates, and about five translation units include the header.
+     - X1 comes before B1, so that no anonymous-namespace kernel class sits in a header.
+  5. **The register at peer size.** P2 moves to `Physics/Core` (about 7,000 lines before P2's own deletions):
+     - the schema, the capability rules and the validation;
+     - the option-value name tables;
+     - the generic input readers;
+     - the two-fluid translation and preflight;
+     - the register API (today's `NavierStokesRegister.h`).
+  6. **File-count trajectory** for `Physics/Formulations/NavierStokes`:
+
+     | After | Files | Lines |
+     |---|---:|---:|
+     | main `e9978098` | 84 | 42,045 |
+     | M1b `657b6ca4` | 82 | 39,703 |
+     | P6 phase 1 | 80 | |
+     | M1-r | 76 | |
+     | M2 | 74 | |
+     | B1 | 66 | |
+     | O1 | 65 | |
+     | T1 | 61 | |
+     | phase 2 | 54 | |
+     | G1–G3 | 36 | |
+     | G4(b), with `NavierStokesPostProcessing.h` | 31 | |
+     | G5 | 19 | |
+     | L1 | 17 | |
+     | P2 | 6 | |
+     | S1 | 5 | about 3,900 |
+
+     Every MR hand-back reports its file and line delta.
+  7. **New and changed steps:**
+     - **New:**
+       - O1: option types into the module header;
+       - T1: the two-fluid fold;
+       - S1: removal of `NavierStokesSupport.h`.
+     - **Changed:**
+       - B1 is header-only;
+       - G4(b) and E3 state their forms in `NavierStokesPostProcessing.h`;
+       - P2 thins the register to peer size.
+     - **Estimate:** about 155 h of agent time and about 42 jobs in total (D49: 135 h, 40).
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
@@ -1472,9 +1539,9 @@ Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch t
 
 ---
 
-### MR — Refactor: the formulation folder holds the governing equations (D42, D47, D49)
+### MR — Refactor: the formulation folder holds the governing equations (D42, D47, D49, D50)
 
-**How each step is done (D49).**
+**How each step is done (D49, D50).**
 
 - Every re-posing is (a) an FE service with FE unit tests, then (b) a bitwise switch-over.
 - **Gate for every (b) step:**
@@ -1486,20 +1553,38 @@ Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch t
   - CTest with no new failures;
   - the exhaustive two-rank matrix;
   - tank at rest.
+- **Target (D50):**
+  - `IncompressibleNavierStokesVMSModule.{h,cpp}`;
+  - `NavierStokesBCFactories.h`;
+  - `NavierStokesPostProcessing.h`;
+  - `NavierStokesRegister.cpp`.
+- Every hand-back reports the NS-folder file and line delta.
 - **Reference:** `agent-status/refactor/ns-folder-target-layout.md`.
 - Line numbers below are at `3cb1e408`.
 
 **Phase 0**
 
-- [ ] I7: integrate R2 S7 (verify 166) and R1 phase 2 (verify 167).
+- [x] I7: integrate R2 S7 (verify 166) and R1 phase 2 (verify 167). On main by `5b5cc136`, pushed with D49 (`b831e954`).
 
 **Phase 1** (after I7)
 
-- [ ] P6a and P6b phase 1 (params): retire the legacy, CurvatureTraction, Penalty/Nitsche and KAG routes of the Navier–Stokes module (D47, D48).
-- [ ] B1 (R1): the free-surface statement moves into `NavierStokesBCFactories.cpp`; the observer does logging only.
-- [ ] M1 (R2): mesh-normal stage measurements and snapshot field evaluators to FE.
+- [ ] P6a and P6b phase 1 (params): retire the legacy, CurvatureTraction, Penalty/Nitsche and KAG routes of the Navier–Stokes module (D47, D48). Deletes `FreeSurfaceLegacyTerms.{h,cpp}` (84 → 82 on its own).
+- [ ] M1 (R2): mesh-normal stage measurements and snapshot field evaluators to FE. M1a `cf6f971f` and M1b `657b6ca4` are on `dev/refactor-d49-m1` (82 files / 39,703 lines).
+- [ ] M1-r (R2): remove the four forwards (`FittedALEStageRecords.h`, `FreeSurfaceFieldEvaluators.h`, `FittedALEOperatorStage.{h,cpp}`) after P6 phase 1 and S9 are on main. 80 → 76 files.
 - [ ] M2 (R2): `LevelSetVolumeConstrainedMinimizer` in FE/LevelSet, with its certificates as data. Its energy evaluator is unchanged.
-- [ ] X1 (R1): manifest type labels. The pressure-anchor subclass goes; the manifests stay identical.
+- [ ] X1 (R1): manifest type labels. The pressure-anchor subclass goes; the manifests stay identical. Comes before B1.
+- [ ] B1 (R1): the free-surface statement moves into `NavierStokesBCFactories.h`, header-only with no `.cpp`; the observer does logging only.
+  - Contact laws, the pressure anchor, the semi-implicit integrand, the tangential mesh rows and the contact pin move into the header.
+  - `NavierStokesVMSFormulation.h` goes into the module header.
+  - `FreeSurfaceCollectives.h` is deleted.
+- [ ] O1 (R1, params reviews): `FreeSurfaceOptions.h` and the two-fluid option types go into `IncompressibleNavierStokesVMSModule.h`. Type moves only.
+- [ ] T1 (R1, R2 reviews): fold the two-fluid formulation into `IncompressibleNavierStokesVMSModule` as an option.
+  - `IncompressibleTwoFluidModule.{h,cpp}` and `IncompressibleTwoFluidInterface.{h,cpp}` go; the interface forms move into `NavierStokesBCFactories.h`.
+  - Comes before G3 and P2.
+  - Gate:
+    - `conservative_phase` and `two_fluid_hydrostatic`: manifests, logs and artifacts byte-identical, and np2 parity;
+    - the two-fluid CTests;
+    - a label audit (tags, install sequence, artifact schema 3, message texts).
 - [ ] E0 (R2): `collectiveExactSum`, with an FE MPI test identical at 1, 2 and 4 ranks.
 
 **Phase 2** (after S8 / integration 6b and S9/S10)
@@ -1515,12 +1600,12 @@ Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch t
 - [ ] G1 (R2): generic accepted-stage and functional records.
 - [ ] G2 (R2): the energy-balance ledger with named channels and declared identities.
 - [ ] G3 (R2): two-fluid stage records, with the measures as data.
-- [ ] G4(b) (R1): residual work, diagnostic operators and energy declarations stated in the module and `NavierStokesBCFactories`.
+- [ ] G4(b) (R1): create `NavierStokesPostProcessing.h`. Residual work, diagnostic operators and energy declarations are stated there.
 - [ ] G5 (R1, with S8): `ALEBinding` declarations, `LevelSetGeometry` markers and the contact-certificate hook, field binding, vertex-field initialization.
 - [ ] L1 (R1): log formats as FE data. The observer is removed.
 - [ ] E1 (R2, R1): the snapshot functional evaluator for forms (interpreted, exact reduction).
 - [ ] E2 (R2): calibration run at 1, 2 and 4 ranks. The final tolerance limits go to the user before E3.
-- [ ] E3 (R2, R1): energies, powers, works and the logged measures as forms; the D49 tolerance gate. Two audits:
+- [ ] E3 (R2, R1): energies, powers, works and the logged measures as forms in `NavierStokesPostProcessing.h`; the D49 tolerance gate. Two audits:
   - **energy-consumer audit:** no energy value feeds a solver decision except the minimizer, which stays on its evaluator;
   - **measure-read audit:** every solver-side read of a measure keeps its evaluator, by `git grep` at E3's base:
     - the minimizer volumes, `ApplicationDriver.cpp` 17302, 17336, 17698;
@@ -1529,9 +1614,17 @@ Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch t
 
 **Phases 4–5**
 
-- [ ] P2 (params): the parser on `OptionSchema`; the schema, capability rules and readers to `Physics/Core`; the thin equation factory.
+- [ ] P2 (params): the parser on `OptionSchema`, and the register thinned to peer size (≤ ~650 lines). Moved to `Physics/Core`:
+  - the schema, capability rules and validation;
+  - the name tables;
+  - the readers;
+  - the two-fluid translation;
+  - the register API.
+
+  The artifact uses `OptionSchema::describe()` with FE data.
+- [ ] S1 (R1): remove `NavierStokesSupport.h` once the last support file has left.
 - [ ] E4 (R2): the minimizer reads the form energies, and the pointwise evaluators are deleted. E4 gate (D49 item 4), approved before the run.
-- [ ] `Physics/Formulations/NavierStokes` at 8 files. Progress note in §4 D49.
+- [ ] `Physics/Formulations/NavierStokes` at 5 files (D50). Progress note in §4 D50.
 
 ## 6. Formulation reference (current code)
 
