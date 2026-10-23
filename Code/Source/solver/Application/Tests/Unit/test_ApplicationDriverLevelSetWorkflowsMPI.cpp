@@ -2538,7 +2538,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
 
   const auto canonical = canonicalizeAcceptedWallConstraints(
       std::vector{constraint, constraint},
-      svmp::MeshComm(MPI_COMM_WORLD),
+      feCollectiveCommunicator(svmp::MeshComm(MPI_COMM_WORLD)),
       "MPI wall-constraint duplicate test");
   ASSERT_EQ(canonical.size(), 1u);
   const std::array<double, 4> payload{{
@@ -2583,7 +2583,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   EXPECT_THROW(
       (void)canonicalizeAcceptedWallConstraints(
           std::move(rank_local_constraints),
-          svmp::MeshComm(MPI_COMM_WORLD),
+          feCollectiveCommunicator(svmp::MeshComm(MPI_COMM_WORLD)),
           "MPI wall-constraint conflict test"),
       std::runtime_error);
 }

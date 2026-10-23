@@ -150,20 +150,6 @@ evaluateAcceptedFreeSurfaceContactStages(
                             FreeSurfaceFirstOrderGeneralizedAlphaProvenance>&
         first_order_generalized_alpha = std::nullopt);
 
-svmp::FE::level_set::LevelSetWallContactConstraint
-makeAcceptedSnapshotWallConstraint(
-    const svmp::FE::interfaces::FreeSurfaceGeometryRuleRecord& record,
-    int interface_marker,
-    std::uint64_t snapshot_revision);
-
-[[nodiscard]] std::vector<
-    svmp::FE::level_set::LevelSetWallContactConstraint>
-canonicalizeAcceptedWallConstraints(
-    std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
-        constraints,
-    const svmp::MeshComm& comm,
-    std::string_view source);
-
 std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
 captureAcceptedContactStageWallConstraints(
     const FreeSurfaceSystemHandle& sim,

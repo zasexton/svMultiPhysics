@@ -36,6 +36,7 @@
 #include "FE/LevelSet/Maintenance/LevelSetMaintenanceConfiguration.h"
 #include "FE/LevelSet/Maintenance/LevelSetMaintenancePipeline.h"
 #include "FE/LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h"
+#include "FE/LevelSet/Maintenance/LevelSetWallAwareMaintenance.h"
 #include "FE/LevelSet/LevelSetImplicitCutQuadratureBackend.h"
 #include "FE/LevelSet/LevelSetInterfaceLifecycle.h"
 #include "FE/LevelSet/LevelSetKinematicReconciliation.h"
@@ -3512,8 +3513,8 @@ using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceConta
 using svmp::Physics::formulations::navier_stokes::free_surface::resolveFreeSurfaceContactStageTemporalCoordinates;
 using svmp::Physics::formulations::navier_stokes::free_surface::acceptedContactStageRevision;
 using svmp::Physics::formulations::navier_stokes::free_surface::evaluateAcceptedFreeSurfaceContactStages;
-using svmp::Physics::formulations::navier_stokes::free_surface::makeAcceptedSnapshotWallConstraint;
-using svmp::Physics::formulations::navier_stokes::free_surface::canonicalizeAcceptedWallConstraints;
+using svmp::FE::level_set::makeAcceptedSnapshotWallConstraint;
+using svmp::FE::level_set::canonicalizeAcceptedWallConstraints;
 using svmp::Physics::formulations::navier_stokes::free_surface::captureAcceptedContactStageWallConstraints;
 using svmp::Physics::formulations::navier_stokes::free_surface::bindAcceptedFreeSurfaceContactStagesToEndpointRevision;
 using svmp::Physics::formulations::navier_stokes::free_surface::assertAcceptedFreeSurfaceContactStageEndpointUnchanged;
@@ -4038,11 +4039,6 @@ resolveLevelSetWallAwareMaintenanceContext(
     return resolved;
   }
 
-  const auto* context = sim.fe_system->cutIntegrationContext();
-  if (globalMinDouble(context != nullptr ? 1.0 : 0.0, comm) != 1.0) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Wall-aware level-set maintenance requires an authoritative geometry snapshot on every rank.");
-  }
   const double local_stage_count =
       static_cast<double>(accepted_contact_stages.size());
   if (globalMinDouble(local_stage_count, comm) !=
@@ -4069,22 +4065,24 @@ resolveLevelSetWallAwareMaintenanceContext(
   // Decision D4: the momentum-side Young term is the only owner of the
   // contact angle, so a constraint carries only the identity of an accepted
   // contact cell, on a prescribed or a dynamic wall alike.  Walls differ only
-  // in which accepted state supplies their contact rules.
-  enum class WallContactRuleSource : std::uint8_t {
-    EndpointSnapshot,
-    AcceptedDynamicStage
-  };
+  // in which accepted state supplies their contact rules.  The host validates
+  // its declarations and accepted stages and states the walls of the field;
+  // FE resolves the geometry (resolveLevelSetWallContactConstraints).
+  using svmp::FE::level_set::LevelSetWallContactSource;
+  svmp::FE::level_set::LevelSetWallAwareMaintenanceInput input;
   bool dynamic_stage_initialized = false;
   for (const auto& declaration : declarations) {
-    if (declaration.level_set_field != level_set_field) {
+    if (declaration.level_set_field != level_set_field ||
+        (declaration.parameters.young_wall_coefficients.empty() &&
+         declaration.parameters.dynamic_contact_coefficients.empty())) {
       continue;
     }
-    std::map<int, WallContactRuleSource> contact_source_by_wall;
+    std::map<int, LevelSetWallContactSource> contact_source_by_wall;
     for (const auto& coefficient :
          declaration.parameters.young_wall_coefficients) {
       contact_source_by_wall.emplace(
           coefficient.boundary_marker,
-          WallContactRuleSource::EndpointSnapshot);
+          LevelSetWallContactSource::EndpointSnapshot);
     }
     for (const auto& coefficient :
          declaration.parameters.dynamic_contact_coefficients) {
@@ -4096,11 +4094,14 @@ resolveLevelSetWallAwareMaintenanceContext(
       // wall.  The latter remains the momentum-side energy coefficient; the
       // accepted stage owns the redistancing geometry.
       contact_source_by_wall[coefficient.boundary_marker] =
-          WallContactRuleSource::AcceptedDynamicStage;
+          LevelSetWallContactSource::AcceptedStage;
     }
+    auto& field_interface = input.interfaces.emplace_back();
+    field_interface.interface_marker = declaration.interface_marker;
     if (contact_source_by_wall.empty()) {
       continue;
     }
+    std::map<int, bool> owned_contact_by_wall;
 
     const bool has_dynamic_contact_law = std::any_of(
         declaration.parameters.dynamic_contact_coefficients.begin(),
@@ -4251,56 +4252,12 @@ resolveLevelSetWallAwareMaintenanceContext(
               "[svMultiPhysics::Application] One maintained level-set field cannot use multiple accepted dynamic contact stages.");
         }
       }
-      std::map<int, std::size_t> local_rule_count_by_wall;
-      std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
-          declaration_constraints;
-      bool local_constraints_valid = true;
-      for (const auto& constraint : accepted_contact_stage_constraints) {
-        if (constraint.interface_marker != declaration.interface_marker) {
-          continue;
-        }
-        const auto source =
-            contact_source_by_wall.find(constraint.boundary_marker);
-        const bool accepted_stage_wall =
-            source != contact_source_by_wall.end() &&
-            source->second == WallContactRuleSource::AcceptedDynamicStage;
-        local_constraints_valid =
-            accepted_stage_wall &&
-            constraint.parent_cell_global_id !=
-                svmp::FE::INVALID_GLOBAL_INDEX &&
-            constraint.geometry_revision ==
-                accepted_dynamic_stage->geometry_revision
-                    .snapshot_revision_key &&
-            local_constraints_valid;
-        if (!accepted_stage_wall ||
-            constraint.parent_cell_global_id ==
-                svmp::FE::INVALID_GLOBAL_INDEX ||
-            constraint.geometry_revision !=
-                accepted_dynamic_stage->geometry_revision
-                    .snapshot_revision_key) {
-          continue;
-        }
-        declaration_constraints.push_back(constraint);
-      }
-      if (globalMinDouble(local_constraints_valid ? 1.0 : 0.0, comm) !=
-          1.0) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Wall-aware level-set maintenance rejected a captured contact constraint that does not match its accepted stage.");
-      }
-      declaration_constraints = canonicalizeAcceptedWallConstraints(
-          std::move(declaration_constraints),
-          comm,
-          "Accepted contact-stage wall-aware maintenance");
-      for (const auto& constraint : declaration_constraints) {
-        resolved.local_constraints.push_back(constraint);
-        ++local_rule_count_by_wall[constraint.boundary_marker];
-      }
+      field_interface.accepted_stage_geometry_revision =
+          accepted_dynamic_stage->geometry_revision.snapshot_revision_key;
       for (const auto& [boundary_marker, source] : contact_source_by_wall) {
-        if (source != WallContactRuleSource::AcceptedDynamicStage) {
+        if (source != LevelSetWallContactSource::AcceptedStage) {
           continue;
         }
-        const auto global_rule_count = globalSumSize(
-            local_rule_count_by_wall[boundary_marker], comm);
         const int dynamic_boundary_marker = boundary_marker;
         const auto wall_count = static_cast<std::size_t>(std::count_if(
             accepted_dynamic_stage->state.walls.begin(),
@@ -4325,132 +4282,25 @@ resolveLevelSetWallAwareMaintenanceContext(
               "[svMultiPhysics::Application] Wall-aware level-set maintenance is missing the accepted dynamic wall state for boundary marker " +
               std::to_string(boundary_marker) + ".");
         }
-        const bool dynamic_state_has_contact =
+        owned_contact_by_wall[boundary_marker] =
             wall_it->owned_quadrature_point_count > 0u ||
             wall_it->owned_contact_measure > svmp::FE::Real{0.0};
-        if (dynamic_state_has_contact != (global_rule_count > 0u)) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Wall-aware level-set maintenance contact-rule coverage disagrees with the accepted dynamic wall state for boundary marker " +
-              std::to_string(boundary_marker) + ".");
-        }
       }
-    }
-
-    const bool local_marker_available =
-        context->hasFreeSurfaceGeometrySnapshotForMarker(
-            declaration.interface_marker);
-    if (globalMinDouble(local_marker_available ? 1.0 : 0.0, comm) != 1.0) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Wall-aware level-set maintenance is missing the authoritative snapshot for interface marker " +
-          std::to_string(declaration.interface_marker) + ".");
-    }
-    const auto snapshot_revision =
-        context->freeSurfaceGeometrySnapshotRevisionForMarker(
-            declaration.interface_marker);
-    const auto [minimum_revision, maximum_revision] =
-        globalMinMaxUint64(snapshot_revision, comm);
-    if (minimum_revision != maximum_revision) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Wall-aware level-set maintenance found different geometry revisions across ranks for interface marker " +
-          std::to_string(declaration.interface_marker) + ".");
-    }
-    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
-    const auto snapshot_it = std::find_if(
-        snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
-          return candidate &&
-                 candidate->revision().snapshot_revision_key ==
-                     snapshot_revision;
-        });
-    if (globalMinDouble(snapshot_it != snapshots.end() ? 1.0 : 0.0, comm) !=
-        1.0) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Wall-aware level-set maintenance found incomplete snapshot storage for interface marker " +
-          std::to_string(declaration.interface_marker) + ".");
-    }
-    bool local_snapshot_current = true;
-    try {
-      context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
-          sim.fe_system->meshAccess());
-    } catch (const std::exception&) {
-      local_snapshot_current = false;
-    }
-    if (globalMinDouble(local_snapshot_current ? 1.0 : 0.0, comm) != 1.0) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Wall-aware level-set maintenance rejected a stale geometry snapshot for interface marker " +
-          std::to_string(declaration.interface_marker) + ".");
-    }
-    const auto& snapshot = **snapshot_it;
-    const bool local_snapshot_matches_declaration =
-        snapshot.revision().complete() &&
-        snapshot.revision().interface_marker == declaration.interface_marker &&
-        snapshot.revision().snapshot_revision_key == snapshot_revision;
-    if (globalMinDouble(local_snapshot_matches_declaration ? 1.0 : 0.0,
-                        comm) != 1.0) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Wall-aware level-set maintenance snapshot provenance does not match interface marker " +
-          std::to_string(declaration.interface_marker) + ".");
     }
     for (const auto& [boundary_marker, source] : contact_source_by_wall) {
-      if (source != WallContactRuleSource::EndpointSnapshot) {
-        continue;
-      }
-      std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
-          wall_constraints;
-      bool local_parent_ids_valid = true;
-      bool local_rules_valid = true;
-      std::string local_rule_diagnostic;
-      for (const auto& record : snapshot.rules()) {
-        if (record.role != svmp::FE::interfaces::
-                               FreeSurfaceGeometryRuleRole::Contact ||
-            record.retention != svmp::FE::interfaces::
-                                    FreeSurfaceGeometryRetention::Retained ||
-            record.physical_boundary_marker != boundary_marker ||
-            !record.locally_owned) {
-          continue;
-        }
-        const auto parent =
-            record.reference_rule.provenance.parent_entity_global_id;
-        local_parent_ids_valid =
-            parent != svmp::FE::INVALID_GLOBAL_INDEX &&
-            local_parent_ids_valid;
-        if (parent == svmp::FE::INVALID_GLOBAL_INDEX) {
-          continue;
-        }
-        try {
-          wall_constraints.push_back(makeAcceptedSnapshotWallConstraint(
-              record,
-              declaration.interface_marker,
-              snapshot_revision));
-        } catch (const std::exception& error) {
-          local_rules_valid = false;
-          local_rule_diagnostic = error.what();
-        }
-      }
-      if (globalMinDouble(local_parent_ids_valid ? 1.0 : 0.0, comm) != 1.0) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Wall-aware level-set maintenance found a contact rule without a partition-independent parent identity.");
-      }
-      if (globalMinDouble(local_rules_valid ? 1.0 : 0.0, comm) != 1.0) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Wall-aware level-set maintenance rejected a prescribed-angle contact rule with incomplete or stale provenance" +
-            (local_rule_diagnostic.empty()
-                 ? std::string{"."}
-                 : std::string{": "} + local_rule_diagnostic));
-      }
-      wall_constraints = canonicalizeAcceptedWallConstraints(
-          std::move(wall_constraints),
-          comm,
-          "Prescribed wall-aware level-set maintenance");
-      resolved.local_constraints.insert(
-          resolved.local_constraints.end(),
-          wall_constraints.begin(),
-          wall_constraints.end());
+      field_interface.walls.push_back(
+          svmp::FE::level_set::LevelSetWallAwareWall{
+              .boundary_marker = boundary_marker,
+              .source = source,
+              .accepted_stage_has_owned_contact =
+                  source == LevelSetWallContactSource::AcceptedStage &&
+                  owned_contact_by_wall[boundary_marker],
+          });
     }
   }
-  resolved.local_constraints = canonicalizeAcceptedWallConstraints(
-      std::move(resolved.local_constraints),
-      comm,
-      "Wall-aware level-set maintenance");
+  resolved.local_constraints =
+      svmp::FE::level_set::resolveLevelSetWallContactConstraints(
+          *sim.fe_system, input, accepted_contact_stage_constraints);
   return resolved;
 }
 

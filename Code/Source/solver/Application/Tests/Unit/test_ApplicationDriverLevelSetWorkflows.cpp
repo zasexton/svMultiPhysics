@@ -13807,7 +13807,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   const std::vector duplicates{constraint, constraint};
   const auto canonical = canonicalizeAcceptedWallConstraints(
       duplicates,
-      svmp::MeshComm::world(),
+      feCollectiveCommunicator(svmp::MeshComm::world()),
       "Application wall-constraint test");
   ASSERT_EQ(canonical.size(), 1u);
   auto conflict = constraint;
@@ -13815,7 +13815,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_THROW(
       (void)canonicalizeAcceptedWallConstraints(
           std::vector{constraint, conflict},
-          svmp::MeshComm::world(),
+          feCollectiveCommunicator(svmp::MeshComm::world()),
           "Application wall-constraint conflict test"),
       std::runtime_error);
 

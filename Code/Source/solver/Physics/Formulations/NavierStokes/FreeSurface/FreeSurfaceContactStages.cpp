@@ -13,6 +13,7 @@
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Assembly/GlobalSystemView.h"
 #include "FE/Geometry/CutQuadrature.h"
+#include "FE/LevelSet/Maintenance/LevelSetWallAwareMaintenance.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecords.h"
 
 #include <algorithm>
@@ -31,6 +32,11 @@
 namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
 using namespace detail;
+
+// The accepted wall-contact constraint helpers live in FE (wall-aware level-set
+// maintenance).
+using svmp::FE::level_set::canonicalizeAcceptedWallConstraints;
+using svmp::FE::level_set::makeAcceptedSnapshotWallConstraint;
 
 bool firstOrderGeneralizedAlphaContactProvenanceValid(
     const svmp::FE::systems::
@@ -1166,97 +1172,6 @@ evaluateAcceptedFreeSurfaceContactStages(
   return stages;
 }
 
-svmp::FE::level_set::LevelSetWallContactConstraint
-makeAcceptedSnapshotWallConstraint(
-    const svmp::FE::interfaces::FreeSurfaceGeometryRuleRecord& record,
-    int interface_marker,
-    std::uint64_t snapshot_revision)
-{
-  // Decision D4: the constraint names the accepted contact cell; no angle or
-  // physical frame is read.
-  const auto parent =
-      record.reference_rule.provenance.parent_entity_global_id;
-  if (record.role !=
-          svmp::FE::interfaces::FreeSurfaceGeometryRuleRole::Contact ||
-      record.retention !=
-          svmp::FE::interfaces::FreeSurfaceGeometryRetention::Retained ||
-      parent == svmp::FE::INVALID_GLOBAL_INDEX || snapshot_revision == 0u ||
-      record.reference_rule.provenance.free_surface_snapshot_revision_key !=
-          snapshot_revision ||
-      record.physical_rule.free_surface_snapshot_revision_key !=
-          snapshot_revision) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Accepted contact geometry cannot "
-        "provide a wall-contact constraint for interface marker " +
-        std::to_string(interface_marker) + ", boundary marker " +
-        std::to_string(record.physical_boundary_marker) +
-        ": the retained rule has incomplete or stale provenance.");
-  }
-  return svmp::FE::level_set::LevelSetWallContactConstraint{
-      .interface_marker = interface_marker,
-      .boundary_marker = record.physical_boundary_marker,
-      .parent_cell_global_id = parent,
-      .geometry_revision = snapshot_revision,
-  };
-}
-
-namespace {
-
-[[nodiscard]] bool sameAcceptedWallConstraint(
-    const svmp::FE::level_set::LevelSetWallContactConstraint& left,
-    const svmp::FE::level_set::LevelSetWallContactConstraint& right) noexcept
-{
-  return left.interface_marker == right.interface_marker &&
-         left.boundary_marker == right.boundary_marker &&
-         left.parent_cell_global_id == right.parent_cell_global_id &&
-         left.geometry_revision == right.geometry_revision;
-}
-
-} // namespace
-
-[[nodiscard]] std::vector<
-    svmp::FE::level_set::LevelSetWallContactConstraint>
-canonicalizeAcceptedWallConstraints(
-    std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
-        constraints,
-    const svmp::MeshComm& comm,
-    std::string_view source)
-{
-  const auto order = [](const auto& left, const auto& right) {
-    return std::tie(left.parent_cell_global_id,
-                    left.interface_marker,
-                    left.boundary_marker,
-                    left.geometry_revision) <
-           std::tie(right.parent_cell_global_id,
-                    right.interface_marker,
-                    right.boundary_marker,
-                    right.geometry_revision);
-  };
-  std::sort(constraints.begin(), constraints.end(), order);
-  std::vector<svmp::FE::level_set::LevelSetWallContactConstraint> unique;
-  unique.reserve(constraints.size());
-  bool local_conflict = false;
-  for (const auto& constraint : constraints) {
-    if (!unique.empty() &&
-        unique.back().parent_cell_global_id ==
-            constraint.parent_cell_global_id) {
-      if (sameAcceptedWallConstraint(unique.back(), constraint)) {
-        continue;
-      }
-      local_conflict = true;
-      continue;
-    }
-    unique.push_back(constraint);
-  }
-  if (globalMinDouble(local_conflict ? 0.0 : 1.0, comm) != 1.0) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] " + std::string(source) +
-        " assigns distinct accepted wall-contact constraints to one parent "
-        "cell.");
-  }
-  return unique;
-}
-
 std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
 captureAcceptedContactStageWallConstraints(
     const FreeSurfaceSystemHandle& sim,
@@ -1399,7 +1314,7 @@ captureAcceptedContactStageWallConstraints(
     }
     declaration_constraints = canonicalizeAcceptedWallConstraints(
         std::move(declaration_constraints),
-        comm,
+        feCollectiveCommunicator(comm),
         "Accepted contact-stage constraint capture");
     captured.insert(captured.end(),
                     declaration_constraints.begin(),
