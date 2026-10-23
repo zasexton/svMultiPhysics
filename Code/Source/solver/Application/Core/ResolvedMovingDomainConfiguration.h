@@ -34,7 +34,6 @@ struct ResolvedLevelSetEquationConfiguration {
   std::shared_ptr<const svmp::FE::spaces::FunctionSpace> level_set_space{};
   svmp::FE::level_set::LevelSetTransportOptions options{};
   svmp::FE::systems::FormInstallOptions install_options{};
-  std::vector<std::string> projected_curvature_fields{};
   std::vector<LevelSetInputObservation> input_observations{};
   LevelSetEquationInputHandle input_snapshot{};
 };

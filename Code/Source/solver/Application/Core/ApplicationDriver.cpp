@@ -3,7 +3,6 @@
 #include "Application/Core/ActiveDomainOutput.h"
 #include "Application/Core/FreeSurfaceSemiImplicitReference.h"
 #include "Application/Core/LevelSetCutConfiguration.h"
-#include "Application/Core/LevelSetCurvatureSamples.h"
 #include "Application/Core/LevelSetMaintenanceConfiguration.h"
 #include "Application/Core/LevelSetMaintenanceTransactionConsensus.h"
 #include "Application/Core/LevelSetPdeVelocityExtension.h"
@@ -22,7 +21,6 @@
 #include "FE/Backends/MUMPS/MumpsDistributedSolver.h"
 #include "FE/Constraints/AffineConstraints.h"
 #include "FE/Dofs/EntityDofMap.h"
-#include "FE/LevelSet/LevelSetCurvatureProjection.h"
 #include "FE/LevelSet/LevelSetCutTopology.h"
 #include "FE/LevelSet/LevelSetContactStageParticipant.h"
 #include "FE/LevelSet/LevelSetGeometryService.h"
@@ -1301,8 +1299,6 @@ struct LevelSetMaintenanceRuntimeState
       conservative_phase_graph{};
 };
 
-using svmp::FE::level_set::LevelSetMaintenanceDeclarationBindings;
-
 struct LevelSetMaintenanceRequest {
   explicit LevelSetMaintenanceRequest(
       LevelSetMaintenanceConfigurationHandle configured)
@@ -1316,7 +1312,6 @@ struct LevelSetMaintenanceRequest {
 
   LevelSetMaintenanceConfigurationHandle configuration;
   LevelSetMaintenanceRuntimeState runtime{};
-  LevelSetMaintenanceDeclarationBindings bindings{};
 };
 
 std::vector<LevelSetMaintenanceRequest> makeLevelSetMaintenanceRequests(
@@ -1328,20 +1323,6 @@ std::vector<LevelSetMaintenanceRequest> makeLevelSetMaintenanceRequests(
     requests.emplace_back(configuration);
   }
   return requests;
-}
-
-svmp::FE::level_set::LevelSetCurvatureProjectionOptions
-effectiveCurvatureProjectionOptions(const LevelSetMaintenanceRequest& request)
-{
-  auto options = request.configuration->curvature_projection;
-  if (request.bindings.negative_liquid_side.has_value()) {
-    options.kinematic_area_gradient_negative_liquid_side =
-        *request.bindings.negative_liquid_side;
-  }
-  if (request.bindings.young_walls.has_value()) {
-    options.kinematic_area_gradient_young_walls = *request.bindings.young_walls;
-  }
-  return options;
 }
 
 static_capillary::LevelSetStaticCapillaryEquilibriumOptions
@@ -1386,7 +1367,6 @@ using svmp::FE::level_set::appendMaintenanceScheduleWord;
 using svmp::FE::level_set::CanonicalLevelSetMaintenanceGeometryState;
 using svmp::FE::level_set::appendCanonicalLevelSetMaintenanceGeometrySection;
 using svmp::FE::level_set::appendCanonicalLevelSetMaintenanceScheduleSection;
-using svmp::FE::level_set::appendLevelSetCurvatureProjectionScheduleWords;
 using svmp::FE::level_set::appendLevelSetMaintenanceConfigurationScheduleWords;
 using svmp::FE::level_set::appendLevelSetMaintenanceScheduleHeader;
 using svmp::FE::level_set::appendMaintenanceScheduleGraphMetadata;
@@ -1425,7 +1405,6 @@ canonicalLevelSetMaintenanceRequestSchedule(
       words, stage, completed_step, requests.size(), aggregate_action_bits);
 
   for (const auto& request : requests) {
-    const auto curvature_options = effectiveCurvatureProjectionOptions(request);
     const auto capillary_options = effectiveStaticCapillaryEquilibriumOptions(request);
     appendMaintenanceScheduleWord(
         words,
@@ -1527,9 +1506,6 @@ canonicalLevelSetMaintenanceRequestSchedule(
     appendMaintenanceScheduleBool(
         words, request.runtime.static_capillary_equilibrium_initialized);
 
-    appendLevelSetCurvatureProjectionScheduleWords(
-        words, *request.configuration, curvature_options);
-
     appendMaintenanceScheduleBool(
         words, request.runtime.conservative_phase_initialized);
     appendMaintenanceScheduleGraphMetadata(
@@ -1577,29 +1553,6 @@ void requireCollectiveLevelSetMaintenanceRequestSchedule(
           requests, stage, completed_step),
       feCollectiveCommunicator(comm));
 }
-
-struct CurvatureProjectionCacheEntry {
-  bool valid{false};
-  std::uint64_t signature{0};
-  bool fast_valid{false};
-  std::uint64_t fast_signature{0};
-  bool cut_context_signature_valid{false};
-  const svmp::FE::assembly::CutIntegrationContext* cut_context_signature_context{nullptr};
-  std::uint64_t cut_context_signature_context_revision{0};
-  std::optional<int> cut_context_signature_marker{};
-  std::uint64_t cut_context_signature_request_key{0};
-  std::uint64_t cut_context_signature{0};
-  std::size_t cut_context_signature_cache_hits{0};
-  std::size_t cut_context_signature_cache_misses{0};
-  std::uint64_t target_prescribed_revision{0};
-  svmp::FE::level_set::LevelSetCurvatureProjectionWorkspace workspace{};
-  svmp::FE::level_set::LevelSetCurvatureProjectionResult last_result{};
-  std::vector<svmp::FE::Real> last_curvature_vertex_values{};
-};
-
-struct CurvatureProjectionCache {
-  std::map<std::string, CurvatureProjectionCacheEntry> entries;
-};
 
 struct LevelSetAdvectionVelocityRequest {
   struct WallConstraint {
@@ -2355,7 +2308,6 @@ const char* stateSyncPointName(
   return svmp::FE::timestepping::generatedStateSyncPointName(point);
 }
 
-using svmp::FE::timestepping::allowCachedCurvatureAfterProjectionFailure;
 using svmp::FE::timestepping::refreshesFrozenLevelSetExtensionAtStateSync;
 using svmp::FE::timestepping::restoresAcceptedTimeStepGeneratedState;
 using svmp::FE::timestepping::synchronizeTransientLineSearchTrials;
@@ -3042,23 +2994,10 @@ void logLevelSetMaintenanceCoverageDiagnostics(
         << (request.configuration->transport.sign_definite_patch_bounds.enabled ? "enabled" : "disabled")
         << (request.configuration->transport.interface_preserving_redistancing.enabled
                 ? " interface_preserving_redistancing=enabled" : "")
-        << " curvature_projection="
-        << (request.configuration->curvature_projection_enabled ? "enabled" : "disabled")
-        << " curvature_field='"
-        << request.configuration->curvature_field_name << "'"
         << " conservation_diagnostic="
         << svmp::FE::level_set::levelSetConservationDiagnosticName(
                svmp::FE::level_set::levelSetConservationDiagnostic(
                    request.configuration->transport.transport_form))
-        << " curvature_projection_cadence="
-        << request.configuration->curvature_projection_cadence_steps
-        << " curvature_projection_recovery_mode="
-        << svmp::FE::level_set::levelSetCurvatureRecoveryModeName(
-               effectiveCurvatureProjectionOptions(request).recovery_mode)
-        << " curvature_projection_kinematic_area_gradient_mass="
-        << svmp::FE::level_set::levelSetKinematicAreaGradientMassName(
-               effectiveCurvatureProjectionOptions(request)
-                   .kinematic_area_gradient_mass)
         << std::endl;
   }
 
@@ -4392,1695 +4331,12 @@ std::shared_ptr<svmp::FE::geometry::GeometryMapping> createCellGeometryMapping(
   return svmp::FE::geometry::MappingFactory::create(map_request, nodes);
 }
 
-std::optional<std::array<svmp::FE::Real, 3>> physicalCellPointAtReference(
-    const svmp::FE::geometry::GeometryMapping& mapping,
-    const std::array<svmp::FE::Real, 3>& reference_point)
-{
-  svmp::FE::math::Vector<svmp::FE::Real, 3> xi{};
-  xi[0] = reference_point[0];
-  xi[1] = reference_point[1];
-  xi[2] = reference_point[2];
-  const auto physical = mapping.map_to_physical(xi);
-  return std::array<svmp::FE::Real, 3>{
-      physical[0], physical[1], physical[2]};
-}
-
-std::vector<svmp::FE::level_set::LevelSetCurvatureProjectionSample>
-collectLevelSetCurvatureSupplementalSamples(
-    const svmp::FE::systems::FESystem& system,
-    const svmp::FE::systems::SystemStateView& state,
-    svmp::FE::FieldId field,
-    svmp::FE::Real isovalue,
-    std::optional<int> interface_marker = std::nullopt,
-    std::optional<svmp::FE::geometry::CutIntegrationSide> volume_side =
-        std::nullopt,
-    std::uint64_t evaluated_state_source_revision = 0u)
-{
-  std::vector<svmp::FE::level_set::LevelSetCurvatureProjectionSample> samples;
-  const auto& rec = system.fieldRecord(field);
-  if (!rec.space || rec.components != 1) {
-    return samples;
-  }
-
-  std::uint64_t authoritative_snapshot_revision_key = 0u;
-  std::uint64_t authoritative_source_value_revision = 0u;
-  if (interface_marker.has_value()) {
-    if (const auto* cut_context = system.cutIntegrationContext();
-        cut_context != nullptr &&
-        cut_context->hasFreeSurfaceGeometrySnapshotForMarker(
-            *interface_marker)) {
-      cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
-          system.meshAccess());
-      authoritative_snapshot_revision_key =
-          cut_context->freeSurfaceGeometrySnapshotRevisionForMarker(
-              *interface_marker);
-      const auto& snapshots = cut_context->freeSurfaceGeometrySnapshots();
-      const auto found = std::find_if(
-          snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
-            return candidate &&
-                   candidate->revision().snapshot_revision_key ==
-                       authoritative_snapshot_revision_key;
-          });
-      if (found == snapshots.end()) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Curvature sample collection could "
-            "not resolve its authoritative geometry snapshot revision.");
-      }
-      authoritative_source_value_revision =
-          (*found)->revision().source_value_revision;
-      if (evaluated_state_source_revision == 0u ||
-          evaluated_state_source_revision !=
-              authoritative_source_value_revision) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Curvature supplemental sample "
-            "state does not match the authoritative geometry source revision.");
-      }
-    }
-  }
-
-  const auto& mesh = system.meshAccess();
-  application::core::LevelSetCurvatureSampleDuplicateFilter duplicate_filter;
-  auto append_sample =
-      [&](svmp::FE::MeshIndex parent_cell,
-          const std::array<svmp::FE::Real, 3>& coordinate,
-          svmp::FE::Real value,
-          std::uint64_t snapshot_revision_key = 0u,
-          std::uint64_t source_value_revision = 0u,
-          std::uint64_t cut_topology_revision = 0u,
-          bool generated_interface_geometry = false) {
-        if (authoritative_snapshot_revision_key != 0u) {
-          if (snapshot_revision_key !=
-                  authoritative_snapshot_revision_key ||
-              source_value_revision !=
-                  authoritative_source_value_revision ||
-              cut_topology_revision == 0u) {
-            throw std::runtime_error(
-                "[svMultiPhysics::Application] Curvature supplemental sample "
-                "has incomplete or stale authoritative revision provenance.");
-          }
-        } else if (snapshot_revision_key != 0u ||
-                   source_value_revision != 0u ||
-                   cut_topology_revision != 0u) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Revisioned curvature "
-              "supplemental sample has no authoritative geometry snapshot.");
-        }
-        if (!std::isfinite(coordinate[0]) ||
-            !std::isfinite(coordinate[1]) ||
-            !std::isfinite(coordinate[2]) ||
-            !std::isfinite(value)) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Level-set curvature projection "
-              "received a non-finite supplemental sample.");
-        }
-        // Hashed per-cell lookup with the same duplicate criterion and
-        // first-match order as a scan over all earlier samples.
-        const auto* existing = duplicate_filter.appendUnlessDuplicate(
-            samples,
-            svmp::FE::level_set::LevelSetCurvatureProjectionSample{
-                .parent_cell = parent_cell,
-                .coordinate = coordinate,
-                .value = value,
-                .free_surface_snapshot_revision_key = snapshot_revision_key,
-                .source_value_revision = source_value_revision,
-                .cut_topology_revision = cut_topology_revision,
-                .generated_interface_geometry =
-                    generated_interface_geometry});
-        if (existing != nullptr &&
-            existing->free_surface_snapshot_revision_key != 0u &&
-            snapshot_revision_key != 0u &&
-            (existing->free_surface_snapshot_revision_key !=
-                 snapshot_revision_key ||
-             existing->source_value_revision != source_value_revision)) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Level-set curvature projection "
-              "found duplicate samples from different geometry snapshots.");
-        }
-      };
-
-  if (interface_marker.has_value()) {
-    if (const auto* cut_context = system.cutIntegrationContext()) {
-      std::map<svmp::FE::GlobalIndex,
-               std::shared_ptr<svmp::FE::geometry::GeometryMapping>>
-          mapping_cache;
-      auto mapping_for_cell =
-          [&](svmp::FE::GlobalIndex cell)
-              -> std::shared_ptr<svmp::FE::geometry::GeometryMapping> {
-        auto it = mapping_cache.find(cell);
-        if (it != mapping_cache.end()) {
-          return it->second;
-        }
-        auto mapping = createCellGeometryMapping(mesh, cell);
-        mapping_cache.emplace(cell, mapping);
-        return mapping;
-      };
-      for (const auto* rule :
-           cut_context->interfaceRulesForMarker(*interface_marker)) {
-        if (rule == nullptr ||
-            rule->kind != svmp::FE::geometry::CutQuadratureKind::Interface) {
-          continue;
-        }
-        const auto parent_cell = rule->provenance.parent_entity;
-        if (parent_cell < 0 || parent_cell >= mesh.numCells()) {
-          continue;
-        }
-        for (const auto& point : rule->points) {
-          if (!std::isfinite(point.weight) ||
-              !(std::abs(point.weight) > svmp::FE::Real{0.0})) {
-            continue;
-          }
-          std::optional<std::array<svmp::FE::Real, 3>> physical_point;
-          if (rule->frame == svmp::FE::geometry::CutGeometryFrame::Current) {
-            physical_point = point.point;
-          } else {
-            auto mapping = mapping_for_cell(parent_cell);
-            if (mapping != nullptr) {
-              physical_point =
-                  physicalCellPointAtReference(*mapping, point.point);
-            }
-          }
-          if (!physical_point.has_value()) {
-            continue;
-          }
-          append_sample(
-              parent_cell,
-              *physical_point,
-              isovalue,
-              rule->provenance.free_surface_snapshot_revision_key,
-              rule->provenance.source_value_revision,
-              rule->provenance.cut_topology_revision,
-              /*generated_interface_geometry=*/true);
-        }
-      }
-    }
-  }
-
-  if (interface_marker.has_value() && volume_side.has_value()) {
-    const auto cut_volume_samples =
-        application::core::collectLevelSetCurvatureCutVolumeSupplementalSamples(
-            system,
-            state,
-            field,
-            *interface_marker,
-            *volume_side,
-            evaluated_state_source_revision);
-    for (const auto& sample : cut_volume_samples) {
-      append_sample(sample.parent_cell,
-                    sample.coordinate,
-                    sample.value,
-                    sample.free_surface_snapshot_revision_key,
-                    sample.source_value_revision,
-                    sample.cut_topology_revision);
-    }
-  }
-
-  bool has_high_order_cells = false;
-  mesh.forEachCell([&](svmp::FE::GlobalIndex cell) {
-    has_high_order_cells =
-        has_high_order_cells || rec.space->polynomial_order(cell) > 1;
-  });
-  if (has_high_order_cells) {
-    if (!interface_marker.has_value()) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] High-order curvature sampling "
-          "requires an authoritative interface marker and geometry snapshot.");
-    }
-    const auto high_order_samples =
-        application::core::
-            collectLevelSetCurvatureHighOrderSupplementalSamples(
-                system,
-                state,
-                field,
-                *interface_marker,
-                evaluated_state_source_revision);
-    for (const auto& sample : high_order_samples) {
-      append_sample(sample.parent_cell,
-                    sample.coordinate,
-                    sample.value,
-                    sample.free_surface_snapshot_revision_key,
-                    sample.source_value_revision,
-                    sample.cut_topology_revision);
-    }
-  }
-
-  return samples;
-}
-
-bool shouldProjectLevelSetCurvature(const LevelSetMaintenanceRequest& request,
-                                    int step)
-{
-  if (!request.configuration->curvature_projection_enabled) {
-    return false;
-  }
-  if (request.configuration->curvature_field_name.empty()) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Level-set curvature projection requires Curvature_field_name.");
-  }
-  if (request.configuration->curvature_projection_cadence_steps <= 0) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Curvature_projection_cadence_steps must be positive.");
-  }
-  return step <= 0 || step % request.configuration->curvature_projection_cadence_steps == 0;
-}
-
-void mixCurvatureSignature(std::uint64_t& seed,
-                           std::uint64_t value) noexcept
-{
-  seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
-}
-
-std::uint64_t realBitsForSignature(svmp::FE::Real value) noexcept
-{
-  std::uint64_t bits = 0u;
-  static_assert(sizeof(value) <= sizeof(bits),
-                "curvature projection signatures expect Real <= 64 bits");
-  std::memcpy(&bits, &value, sizeof(value));
-  return bits;
-}
-
-void mixCurvatureSignatureString(std::uint64_t& seed,
-                                 std::string_view value) noexcept
-{
-  mixCurvatureSignature(seed, static_cast<std::uint64_t>(value.size()));
-  for (const unsigned char c : value) {
-    mixCurvatureSignature(seed, static_cast<std::uint64_t>(c));
-  }
-}
-
-void mixCurvatureSignatureReal(std::uint64_t& seed,
-                               svmp::FE::Real value) noexcept
-{
-  mixCurvatureSignature(seed, realBitsForSignature(value));
-}
-
-void mixCurvatureSignatureOptionalInt(
-    std::uint64_t& seed,
-    const std::optional<int>& value) noexcept
-{
-  mixCurvatureSignature(seed, value.has_value() ? 1u : 0u);
-  mixCurvatureSignature(
-      seed,
-      static_cast<std::uint64_t>(
-          static_cast<std::int64_t>(value.value_or(0))));
-}
-
-void mixCurvatureProjectionOptionsSignature(
-    std::uint64_t& seed,
-    const svmp::FE::level_set::LevelSetCurvatureProjectionOptions& options)
-    noexcept
-{
-  mixCurvatureSignatureReal(seed, options.isovalue);
-  mixCurvatureSignatureReal(seed, options.gradient_tolerance);
-  mixCurvatureSignatureReal(seed, options.normal_equation_tolerance);
-  mixCurvatureSignatureReal(seed, options.max_normalized_fit_residual);
-  mixCurvatureSignature(
-      seed, static_cast<std::uint64_t>(options.max_neighbor_rings));
-  mixCurvatureSignature(
-      seed,
-      static_cast<std::uint64_t>(options.max_neighbor_fallback_vertices));
-  mixCurvatureSignature(
-      seed,
-      static_cast<std::uint64_t>(options.max_zero_fallback_vertices));
-  mixCurvatureSignatureReal(seed, options.supplemental_sample_weight);
-  mixCurvatureSignature(
-      seed, static_cast<std::uint64_t>(options.recovery_mode));
-  mixCurvatureSignatureReal(
-      seed, options.kinematic_area_gradient_filter_coefficient);
-  mixCurvatureSignature(
-      seed, static_cast<std::uint64_t>(options.kinematic_area_gradient_mass));
-  mixCurvatureSignature(
-      seed,
-      options.kinematic_area_gradient_negative_liquid_side ? 1u : 0u);
-  mixCurvatureSignature(
-      seed,
-      static_cast<std::uint64_t>(
-          options.kinematic_area_gradient_young_walls.size()));
-  for (const auto& wall : options.kinematic_area_gradient_young_walls) {
-    mixCurvatureSignature(
-        seed, static_cast<std::uint64_t>(wall.boundary_marker));
-    mixCurvatureSignatureReal(
-        seed, wall.equilibrium_contact_angle_radians);
-  }
-  mixCurvatureSignatureReal(seed, options.narrow_band_width);
-  mixCurvatureSignature(
-      seed, static_cast<std::uint64_t>(options.smoothing_iterations));
-  mixCurvatureSignatureReal(seed, options.smoothing_relaxation);
-  mixCurvatureSignature(
-      seed, static_cast<std::uint64_t>(options.smoothing_mode));
-}
-
-std::string curvatureProjectionCacheKey(
-    const LevelSetMaintenanceRequest& request)
-{
-  return request.configuration->transport.level_set.field_name + '\n' + request.configuration->curvature_field_name;
-}
-
-void mixCurvatureProjectionCutRuleSignature(
-    std::uint64_t& seed,
-    const svmp::FE::geometry::CutQuadratureRule& rule)
-{
-  mixCurvatureSignature(seed, static_cast<std::uint64_t>(rule.kind));
-  mixCurvatureSignature(seed, static_cast<std::uint64_t>(rule.side));
-  mixCurvatureSignature(
-      seed,
-      static_cast<std::uint64_t>(
-          svmp::FE::geometry::cutQuadratureRulePointCount(rule)));
-  mixCurvatureSignature(seed, rule.exact_for_constants ? 1u : 0u);
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            std::max(0, rule.exact_polynomial_order)));
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(rule.policy.kind));
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            std::max(0, rule.policy.polynomial_order)));
-  mixCurvatureSignatureReal(seed, rule.policy.tolerance);
-  mixCurvatureSignatureString(seed, rule.policy.name);
-  mixCurvatureSignatureString(seed, rule.provenance.embedded_geometry_id);
-  mixCurvatureSignatureString(seed, rule.provenance.cut_topology_id);
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            std::max<svmp::FE::MeshIndex>(
-                                0, rule.provenance.parent_entity)));
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            std::max(0, rule.provenance.marker)));
-  mixCurvatureSignature(seed, rule.provenance.predicate_policy_key);
-  mixCurvatureSignature(seed, rule.provenance.cut_topology_revision);
-  mixCurvatureSignature(seed, rule.provenance.source_value_revision);
-  mixCurvatureSignature(
-      seed, rule.provenance.free_surface_snapshot_revision_key);
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            rule.provenance.construction));
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(rule.provenance.frame));
-  mixCurvatureSignatureString(seed, rule.provenance.implicit_geometry_mode);
-  mixCurvatureSignatureString(seed, rule.provenance.implicit_quadrature_backend);
-  mixCurvatureSignatureString(seed,
-                              rule.provenance.selected_implicit_quadrature_backend);
-  mixCurvatureSignatureString(seed, rule.provenance.implicit_fallback_policy);
-  mixCurvatureSignatureString(seed, rule.provenance.implicit_fallback_status);
-  mixCurvatureSignatureString(seed, rule.provenance.geometry_tangent_policy);
-  mixCurvatureSignatureReal(seed, rule.provenance.implicit_cut_root_tolerance);
-  mixCurvatureSignatureReal(seed,
-                            rule.provenance.implicit_cut_root_coordinate_tolerance);
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            std::max(0,
-                                     rule.provenance.implicit_cut_root_max_iterations)));
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            std::max(0, rule.provenance.requested_quadrature_order)));
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            std::max(0, rule.provenance.achieved_quadrature_order)));
-  mixCurvatureSignature(seed, rule.curved_geometry ? 1u : 0u);
-  mixCurvatureSignature(seed, rule.full_cell_equivalent ? 1u : 0u);
-}
-
 std::optional<int> generatedCutContextMarkerForMaintenance(
     const svmp::FE::systems::FESystem& system,
     const LevelSetMaintenanceRequest& request)
 {
   return svmp::FE::level_set::generatedCutContextMarkerForMaintenance(
       system, request.configuration->volume_cut_request);
-}
-
-int requestedTotalEnergyTractionInterfaceQuadratureOrder(
-    const ActiveCutVolumeRequest& request) noexcept
-{
-  return request.interface_quadrature_order.value_or(
-      request.quadrature_order.value_or(1));
-}
-
-void validateQuadraticTotalEnergyTractionInterfaceRules(
-    std::span<const svmp::FE::geometry::CutQuadratureRule* const> rules)
-{
-  if (rules.empty()) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Total-energy traction requires nonempty generated interface rules.");
-  }
-  std::optional<std::array<int, 4>> expected_orders;
-  for (const auto* rule : rules) {
-    if (rule == nullptr ||
-        rule->kind != svmp::FE::geometry::CutQuadratureKind::Interface) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Total-energy traction received an invalid generated interface rule.");
-    }
-    const std::array<int, 4> orders{
-        rule->exact_polynomial_order,
-        rule->policy.polynomial_order,
-        rule->provenance.requested_quadrature_order,
-        rule->provenance.achieved_quadrature_order};
-    if (std::any_of(orders.begin(), orders.end(),
-                    [](int order) { return order < 2; })) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Total-energy traction requires generated interface rules with exact, policy, requested, and achieved order >= 2.");
-    }
-    if (expected_orders.has_value() && *expected_orders != orders) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Total-energy traction rejects mixed generated interface rule orders.");
-    }
-    expected_orders = orders;
-  }
-}
-
-void validateQuadraticTotalEnergyTractionInterfaceRulesCollectively(
-    std::span<const svmp::FE::geometry::CutQuadratureRule* const> rules,
-    const svmp::MeshComm& comm)
-{
-  bool local_invalid = false;
-  std::array<int, 4> local_minimum_orders;
-  std::array<int, 4> local_maximum_orders;
-  local_minimum_orders.fill(std::numeric_limits<int>::max());
-  local_maximum_orders.fill(std::numeric_limits<int>::lowest());
-  for (const auto* rule : rules) {
-    if (rule == nullptr ||
-        rule->kind != svmp::FE::geometry::CutQuadratureKind::Interface) {
-      local_invalid = true;
-      continue;
-    }
-    const std::array<int, 4> orders{
-        rule->exact_polynomial_order,
-        rule->policy.polynomial_order,
-        rule->provenance.requested_quadrature_order,
-        rule->provenance.achieved_quadrature_order};
-    for (std::size_t index = 0u; index < orders.size(); ++index) {
-      local_minimum_orders[index] = std::min(
-          local_minimum_orders[index], orders[index]);
-      local_maximum_orders[index] = std::max(
-          local_maximum_orders[index], orders[index]);
-    }
-    if (std::any_of(orders.begin(), orders.end(),
-                    [](int order) { return order < 2; })) {
-      local_invalid = true;
-    }
-  }
-
-  const auto global_rule_count = globalSumSize(rules.size(), comm);
-  const bool global_invalid = globalAnyBool(local_invalid, comm);
-  std::array<std::pair<int, int>, 4> global_order_ranges;
-  for (std::size_t index = 0u; index < global_order_ranges.size(); ++index) {
-    global_order_ranges[index] = globalMinMaxInt(
-        local_minimum_orders[index], comm);
-    const auto global_maximum_range = globalMinMaxInt(
-        local_maximum_orders[index], comm);
-    global_order_ranges[index].second = global_maximum_range.second;
-  }
-
-  const bool globally_mixed = std::any_of(
-      global_order_ranges.begin(),
-      global_order_ranges.end(),
-      [](const std::pair<int, int>& range) {
-        return range.first != range.second;
-      });
-  if (global_rule_count == 0u) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Total-energy traction requires nonempty generated interface rules collectively.");
-  }
-  if (global_invalid) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Total-energy traction received an invalid generated interface rule collectively.");
-  }
-  if (globally_mixed) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Total-energy traction rejects mixed generated interface rule orders collectively.");
-  }
-}
-
-bool requiresQuadraticTotalEnergyTractionInterfaceRules(
-    const svmp::FE::systems::FESystem& system,
-    const LevelSetMaintenanceRequest& request)
-{
-  if (!request.configuration->volume_cut_request.has_value()) {
-    return false;
-  }
-  const auto level_set_field =
-      system.findFieldByName(request.configuration->transport.level_set.field_name);
-  const auto curvature_field =
-      system.findFieldByName(request.configuration->curvature_field_name);
-  const auto declarations =
-      svmp::FE::systems::functionalRecords(system).functionalDeclarations();
-  return std::any_of(
-      declarations.begin(),
-      declarations.end(),
-      [&](const auto& declaration) {
-        return declaration.capillary_balance_method ==
-                   svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod::
-                       KinematicAreaGradientEnergyTraction &&
-               declaration.level_set_field == level_set_field &&
-               declaration.curvature_field == curvature_field;
-      });
-}
-
-void bindKinematicAreaGradientTractionMaintenance(
-    svmp::FE::systems::FESystem& system,
-    std::vector<LevelSetMaintenanceRequest>& requests)
-{
-  const auto declarations =
-      svmp::FE::systems::functionalRecords(system).functionalDeclarations();
-  const auto comm = activeFESystemCommunicator(system);
-  const auto [minimum_declaration_count, maximum_declaration_count] =
-      globalMinMaxUint64(
-          static_cast<std::uint64_t>(declarations.size()), comm);
-  if (minimum_declaration_count != maximum_declaration_count) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Total-energy curvature declarations differ across the FE communicator.");
-  }
-  for (const auto& declaration : declarations) {
-    const auto key =
-        acceptedFunctionalDeclarationContentKey(declaration);
-    const auto [minimum_key, maximum_key] =
-        globalMinMaxUint64(key, comm);
-    if (minimum_key != maximum_key) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Total-energy curvature declaration content differs across the FE communicator.");
-    }
-  }
-
-  std::vector<unsigned char> matched(declarations.size(), 0u);
-  for (auto& request : requests) {
-    const auto curvature_options = effectiveCurvatureProjectionOptions(request);
-    if (curvature_options.recovery_mode !=
-        svmp::FE::level_set::LevelSetCurvatureRecoveryMode::
-            KinematicAreaGradient) {
-      continue;
-    }
-    const auto level_set_field =
-        system.findFieldByName(request.configuration->transport.level_set.field_name);
-    const auto curvature_field =
-        system.findFieldByName(request.configuration->curvature_field_name);
-    std::vector<std::size_t> candidates;
-    for (std::size_t index = 0u; index < declarations.size(); ++index) {
-      const auto& declaration = declarations[index];
-      if (declaration.capillary_balance_method ==
-              svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod::
-                  KinematicAreaGradientEnergyTraction &&
-          declaration.level_set_field == level_set_field &&
-          declaration.curvature_field == curvature_field) {
-        candidates.push_back(index);
-      }
-    }
-    if (candidates.empty()) {
-      continue;
-    }
-    if (candidates.size() != 1u) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Kinematic-area-gradient recovery requires exactly one matching total-energy traction declaration.");
-    }
-    if (!request.configuration->curvature_projection_enabled ||
-        request.configuration->curvature_field_name.empty() ||
-        !request.configuration->volume_cut_request.has_value()) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Kinematic-area-gradient recovery requires enabled curvature maintenance, a target field, and an authoritative active cut-volume request.");
-    }
-    if (curvature_options
-            .kinematic_area_gradient_filter_coefficient != 0.0) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Total-energy traction requires Curvature_projection_kinematic_area_gradient_filter_coefficient=0 (the default with Curvature_projection_kinematic_area_gradient_mass=Lumped) so the recovered curvature is the exact consistent- or lumped-mass representation of the discrete functional derivative.");
-    }
-    const auto marker =
-        generatedCutContextMarkerForMaintenance(system, request);
-    if (level_set_field == svmp::FE::INVALID_FIELD_ID ||
-        curvature_field == svmp::FE::INVALID_FIELD_ID ||
-        !marker.has_value()) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Kinematic-area-gradient recovery could not resolve its level-set field, curvature field, or authoritative interface marker.");
-    }
-    const auto declaration_index = candidates.front();
-    const auto& declaration = declarations[declaration_index];
-    const auto& cut_request = *request.configuration->volume_cut_request;
-    if (declaration.interface_marker != *marker ||
-        declaration.capillary_balance_qualification !=
-            svmp::FE::systems::FreeSurfaceCapillaryBalanceQualification::
-                PrerequisiteOnly ||
-        !declaration.endpoint_functional_power_enabled ||
-        declaration.curvature_field != curvature_field ||
-        declaration.geometry_domain_id != cut_request.domain_id ||
-        request.configuration->transport.level_set.field_name !=
-            cut_request.level_set_field_name ||
-        request.configuration->isovalue != cut_request.isovalue ||
-        declaration.parameters.liquid_side !=
-            cutIntegrationSide(cut_request.active_side) ||
-        cut_request.geometry_mode !=
-            svmp::FE::level_set::GeneratedInterfaceGeometryMode::
-                LinearCorner ||
-        cut_request.geometry_tangent_policy !=
-            svmp::FE::level_set::GeometryTangentPolicy::
-                RefreshedFrozenQuadrature) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Kinematic-area-gradient recovery is not bound to the same prerequisite-only endpoint total-energy traction, level-set isovalue, curvature field, domain, liquid side, and frozen LinearCorner geometry.");
-    }
-    if (requestedTotalEnergyTractionInterfaceQuadratureOrder(cut_request) <
-        2) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Total-energy traction requires interface quadrature order >= 2.");
-    }
-    if (matched[declaration_index] != 0u) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] More than one curvature-maintenance request targets the same total-energy traction declaration.");
-    }
-
-    std::vector<svmp::FE::level_set::
-                    LevelSetKinematicAreaGradientYoungWall>
-        young_walls;
-    young_walls.reserve(
-        declaration.parameters.young_wall_coefficients.size());
-    for (const auto& coefficient :
-         declaration.parameters.young_wall_coefficients) {
-      young_walls.push_back(
-          {.boundary_marker = coefficient.boundary_marker,
-           .equilibrium_contact_angle_radians =
-               coefficient.equilibrium_contact_angle_radians});
-    }
-    std::sort(
-        young_walls.begin(),
-        young_walls.end(),
-        [](const auto& lhs, const auto& rhs) {
-          return lhs.boundary_marker < rhs.boundary_marker;
-        });
-    for (std::size_t index = 0u; index < young_walls.size(); ++index) {
-      if (young_walls[index].boundary_marker < 0 ||
-          !std::isfinite(
-              young_walls[index]
-                  .equilibrium_contact_angle_radians) ||
-          (index > 0u &&
-           young_walls[index - 1u].boundary_marker ==
-               young_walls[index].boundary_marker)) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Total-energy traction declares an invalid or duplicate Young wall coefficient.");
-      }
-    }
-    const auto& configured_walls =
-        curvature_options
-            .kinematic_area_gradient_young_walls;
-    if (!configured_walls.empty()) {
-      const bool same = configured_walls.size() == young_walls.size() &&
-          std::equal(
-              configured_walls.begin(),
-              configured_walls.end(),
-              young_walls.begin(),
-              [](const auto& lhs, const auto& rhs) {
-                return lhs.boundary_marker == rhs.boundary_marker &&
-                       lhs.equilibrium_contact_angle_radians ==
-                           rhs.equilibrium_contact_angle_radians;
-              });
-      if (!same) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Curvature maintenance cannot override the Young-wall list owned by the total-energy traction declaration.");
-      }
-    }
-    request.bindings.negative_liquid_side =
-        declaration.parameters.liquid_side ==
-        svmp::FE::geometry::CutIntegrationSide::Negative;
-    request.bindings.young_walls =
-        std::move(young_walls);
-    matched[declaration_index] = 1u;
-  }
-
-  for (std::size_t index = 0u; index < declarations.size(); ++index) {
-    if (declarations[index].capillary_balance_method ==
-            svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod::
-                KinematicAreaGradientEnergyTraction &&
-        matched[index] == 0u) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] A total-energy traction declaration has no unique kinematic-area-gradient curvature-maintenance owner.");
-    }
-  }
-}
-
-struct CurvatureProjectionSnapshotIdentity {
-  std::uint64_t free_surface_snapshot_revision_key{0};
-  std::uint64_t source_value_revision{0};
-};
-
-CurvatureProjectionSnapshotIdentity curvatureProjectionSnapshotIdentity(
-    const svmp::FE::systems::FESystem& system,
-    const LevelSetMaintenanceRequest& request)
-{
-  const auto marker = generatedCutContextMarkerForMaintenance(system, request);
-  const auto* cut_context = system.cutIntegrationContext();
-  if (!marker.has_value() || cut_context == nullptr ||
-      !cut_context->hasFreeSurfaceGeometrySnapshotForMarker(*marker)) {
-    return {};
-  }
-
-  cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
-      system.meshAccess());
-  const auto snapshot_revision_key =
-      cut_context->freeSurfaceGeometrySnapshotRevisionForMarker(*marker);
-  const auto& snapshots = cut_context->freeSurfaceGeometrySnapshots();
-  const auto found = std::find_if(
-      snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
-        return candidate &&
-               candidate->revision().snapshot_revision_key ==
-                   snapshot_revision_key;
-      });
-  if (found == snapshots.end()) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Curvature projection could not resolve "
-        "its authoritative geometry snapshot revision.");
-  }
-  return CurvatureProjectionSnapshotIdentity{
-      .free_surface_snapshot_revision_key = snapshot_revision_key,
-      .source_value_revision = (*found)->revision().source_value_revision};
-}
-
-std::uint64_t curvatureProjectionCutRequestSignature(
-    const LevelSetMaintenanceRequest& request)
-{
-  std::uint64_t seed = 0x9e3779b97f4a7c15ull;
-  mixCurvatureSignature(seed, request.configuration->volume_cut_request.has_value() ? 1u : 0u);
-  if (!request.configuration->volume_cut_request.has_value()) {
-    return seed;
-  }
-
-  const auto& cut_request = *request.configuration->volume_cut_request;
-  mixCurvatureSignatureString(seed, cut_request.level_set_field_name);
-  mixCurvatureSignatureString(seed, cut_request.domain_id);
-  mixCurvatureSignatureReal(
-      seed, static_cast<svmp::FE::Real>(cut_request.isovalue));
-  mixCurvatureSignatureOptionalInt(seed, cut_request.quadrature_order);
-  mixCurvatureSignatureOptionalInt(
-      seed, cut_request.interface_quadrature_order);
-  mixCurvatureSignatureOptionalInt(
-      seed, cut_request.volume_quadrature_order);
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            std::max(0, cut_request.requested_interface_marker)));
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(cut_request.active_side));
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(cut_request.geometry_mode));
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            cut_request.implicit_cut_backend));
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            cut_request.implicit_cut_fallback_policy));
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            cut_request.geometry_tangent_policy));
-  mixCurvatureSignatureReal(
-      seed, static_cast<svmp::FE::Real>(
-                cut_request.implicit_cut_root_tolerance));
-  mixCurvatureSignatureReal(
-      seed, static_cast<svmp::FE::Real>(
-                cut_request.implicit_cut_root_coordinate_tolerance));
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            std::max(0, cut_request.implicit_cut_root_max_iterations)));
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            std::max(0, cut_request.implicit_cut_max_subdivision_depth)));
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            std::max(0, cut_request.affected_cell_neighborhood_layers)));
-  return seed;
-}
-
-std::uint64_t curvatureProjectionCutContextSignature(
-    const svmp::FE::systems::FESystem& system,
-    const LevelSetMaintenanceRequest& request,
-    CurvatureProjectionCacheEntry* cache_entry = nullptr,
-    bool* cache_hit = nullptr)
-{
-  std::uint64_t seed = curvatureProjectionCutRequestSignature(request);
-
-  const auto* cut_context = system.cutIntegrationContext();
-  const bool requires_quadratic_interface_rules =
-      requiresQuadraticTotalEnergyTractionInterfaceRules(system, request);
-  mixCurvatureSignature(seed, cut_context != nullptr ? 1u : 0u);
-  if (cut_context == nullptr) {
-    if (requires_quadratic_interface_rules) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Total-energy traction has no generated cut context for curvature projection.");
-    }
-    if (cache_hit != nullptr) {
-      *cache_hit = false;
-    }
-    return seed;
-  }
-
-  const auto marker = generatedCutContextMarkerForMaintenance(system, request);
-  if (!marker.has_value()) {
-    if (requires_quadratic_interface_rules) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Total-energy traction could not resolve its generated interface marker for curvature projection.");
-    }
-    mixCurvatureSignature(seed, 0u);
-    if (cache_hit != nullptr) {
-      *cache_hit = false;
-    }
-    return seed;
-  }
-  const auto interface_rules = cut_context->interfaceRulesForMarker(*marker);
-  if (requires_quadratic_interface_rules) {
-    validateQuadraticTotalEnergyTractionInterfaceRulesCollectively(
-        interface_rules, activeFESystemCommunicator(system));
-  }
-  mixCurvatureSignature(seed, 1u);
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(std::max(0, *marker)));
-  const auto snapshot_identity =
-      curvatureProjectionSnapshotIdentity(system, request);
-  mixCurvatureSignature(
-      seed, snapshot_identity.free_surface_snapshot_revision_key);
-  mixCurvatureSignature(seed, snapshot_identity.source_value_revision);
-
-  const auto request_key = curvatureProjectionCutRequestSignature(request);
-  const auto context_revision = cut_context->contentRevision();
-  if (cache_entry != nullptr &&
-      cache_entry->cut_context_signature_valid &&
-      cache_entry->cut_context_signature_context == cut_context &&
-      cache_entry->cut_context_signature_context_revision == context_revision &&
-      cache_entry->cut_context_signature_marker == marker &&
-      cache_entry->cut_context_signature_request_key == request_key) {
-    if (cache_hit != nullptr) {
-      *cache_hit = true;
-    }
-    ++cache_entry->cut_context_signature_cache_hits;
-    return cache_entry->cut_context_signature;
-  }
-  if (cache_hit != nullptr) {
-    *cache_hit = false;
-  }
-  if (cache_entry != nullptr) {
-    ++cache_entry->cut_context_signature_cache_misses;
-  }
-
-  const auto volume_rules = cut_context->generatedVolumeRulesForMarker(*marker);
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(volume_rules.size()));
-  for (const auto* rule : volume_rules) {
-    if (rule != nullptr) {
-      mixCurvatureProjectionCutRuleSignature(seed, *rule);
-    }
-  }
-
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(interface_rules.size()));
-  for (const auto* rule : interface_rules) {
-    if (rule != nullptr) {
-      mixCurvatureProjectionCutRuleSignature(seed, *rule);
-    }
-  }
-  if (cache_entry != nullptr) {
-    cache_entry->cut_context_signature_valid = true;
-    cache_entry->cut_context_signature_context = cut_context;
-    cache_entry->cut_context_signature_context_revision = context_revision;
-    cache_entry->cut_context_signature_marker = marker;
-    cache_entry->cut_context_signature_request_key = request_key;
-    cache_entry->cut_context_signature = seed;
-  }
-  return seed;
-}
-
-std::uint64_t curvatureProjectionInputSignature(
-    const LevelSetMaintenanceRequest& request,
-    const svmp::FE::level_set::LevelSetCurvatureProjectionOptions& options,
-    std::uint64_t cut_context_signature,
-    std::span<const svmp::FE::Real> phi,
-    std::span<const svmp::FE::level_set::LevelSetCurvatureProjectionSample>
-        supplemental_samples,
-    svmp::FE::GlobalIndex mesh_vertices,
-    svmp::FE::GlobalIndex mesh_cells,
-    int mesh_dimension,
-    bool mesh_revision_tracking_available,
-    std::uint64_t mesh_geometry_revision,
-    std::uint64_t mesh_topology_revision,
-    std::uint64_t mesh_ownership_revision,
-    std::uint64_t mesh_numbering_revision,
-    std::uint64_t mesh_coordinate_configuration_key)
-{
-  std::uint64_t seed = 0xcbf29ce484222325ull;
-  mixCurvatureSignatureString(seed, request.configuration->transport.level_set.field_name);
-  mixCurvatureSignatureString(seed, request.configuration->curvature_field_name);
-  mixCurvatureSignatureReal(seed,
-                            static_cast<svmp::FE::Real>(request.configuration->isovalue));
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            request.configuration->curvature_projection_cadence_steps));
-  mixCurvatureProjectionOptionsSignature(seed, options);
-  mixCurvatureSignature(seed, cut_context_signature);
-  mixCurvatureSignature(seed, static_cast<std::uint64_t>(mesh_vertices));
-  mixCurvatureSignature(seed, static_cast<std::uint64_t>(mesh_cells));
-  mixCurvatureSignature(seed, static_cast<std::uint64_t>(mesh_dimension));
-  mixCurvatureSignature(seed, mesh_revision_tracking_available ? 1u : 0u);
-  mixCurvatureSignature(seed, mesh_geometry_revision);
-  mixCurvatureSignature(seed, mesh_topology_revision);
-  mixCurvatureSignature(seed, mesh_ownership_revision);
-  mixCurvatureSignature(seed, mesh_numbering_revision);
-  mixCurvatureSignature(seed, mesh_coordinate_configuration_key);
-  mixCurvatureSignature(seed, static_cast<std::uint64_t>(phi.size()));
-  for (const auto value : phi) {
-    mixCurvatureSignatureReal(seed, value);
-  }
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            supplemental_samples.size()));
-  for (const auto& sample : supplemental_samples) {
-    mixCurvatureSignature(seed,
-                          static_cast<std::uint64_t>(sample.parent_cell));
-    mixCurvatureSignature(
-        seed, sample.free_surface_snapshot_revision_key);
-    mixCurvatureSignature(seed, sample.source_value_revision);
-    mixCurvatureSignature(seed, sample.cut_topology_revision);
-    mixCurvatureSignature(seed,
-                          sample.generated_interface_geometry ? 1u : 0u);
-    for (const auto coordinate : sample.coordinate) {
-      mixCurvatureSignatureReal(seed, coordinate);
-    }
-    mixCurvatureSignatureReal(seed, sample.value);
-  }
-  return seed;
-}
-
-std::optional<std::uint64_t> curvatureProjectionFastInputSignature(
-    const svmp::FE::systems::FESystem& system,
-    const svmp::FE::systems::SystemStateView& state,
-    svmp::FE::FieldId phi_field,
-    const LevelSetMaintenanceRequest& request,
-    const svmp::FE::level_set::LevelSetCurvatureProjectionOptions& options,
-    std::uint64_t cut_context_signature,
-    svmp::FE::GlobalIndex mesh_vertices,
-    svmp::FE::GlobalIndex mesh_cells,
-    int mesh_dimension,
-    bool mesh_revision_tracking_available,
-    std::uint64_t mesh_geometry_revision,
-    std::uint64_t mesh_topology_revision,
-    std::uint64_t mesh_ownership_revision,
-    std::uint64_t mesh_numbering_revision,
-    std::uint64_t mesh_field_layout_revision,
-    std::uint64_t mesh_label_revision,
-    std::uint64_t mesh_coordinate_configuration_key)
-{
-  if (!mesh_revision_tracking_available) {
-    return std::nullopt;
-  }
-
-  const auto& rec = system.fieldRecord(phi_field);
-  std::uint64_t source_kind = 0u;
-  std::uint64_t source_revision = 0u;
-  if (rec.source_kind == svmp::FE::systems::FieldSourceKind::PrescribedData) {
-    source_kind = 1u;
-    source_revision = system.prescribedFieldRevision(phi_field);
-  } else if (state.u_vector != nullptr &&
-             system.fieldParticipatesInUnknownVector(phi_field)) {
-    const auto field_offset = system.fieldDofOffset(phi_field);
-    const auto n_field_dofs = system.fieldDofHandler(phi_field).getNumDofs();
-    std::optional<std::uint64_t> field_value_hash;
-    if (field_offset >= 0 && n_field_dofs >= 0 &&
-        state.u_vector->size() >= 0) {
-      try {
-        const auto values = state.u_vector->localSpan();
-        const auto begin = static_cast<std::size_t>(field_offset);
-        const auto count = static_cast<std::size_t>(n_field_dofs);
-        const auto vector_size = static_cast<std::size_t>(state.u_vector->size());
-        if (values.size() == vector_size &&
-            begin <= values.size() &&
-            count <= values.size() - begin) {
-          std::uint64_t h = 0x510e527fade682d1ull;
-          mixCurvatureSignature(h, static_cast<std::uint64_t>(begin));
-          mixCurvatureSignature(h, static_cast<std::uint64_t>(count));
-          for (std::size_t i = 0; i < count; ++i) {
-            mixCurvatureSignatureReal(h, values[begin + i]);
-          }
-          field_value_hash = h;
-        }
-      } catch (...) {
-        field_value_hash.reset();
-      }
-    }
-
-    if (field_value_hash.has_value()) {
-      source_kind = 2u;
-      source_revision = *field_value_hash;
-    } else {
-      source_kind = 3u;
-      source_revision = state.u_vector->valueRevision();
-    }
-  } else {
-    return std::nullopt;
-  }
-
-  std::uint64_t seed = 0x6a09e667f3bcc909ull;
-  mixCurvatureSignatureString(seed, request.configuration->transport.level_set.field_name);
-  mixCurvatureSignatureString(seed, request.configuration->curvature_field_name);
-  mixCurvatureSignatureReal(seed,
-                            static_cast<svmp::FE::Real>(request.configuration->isovalue));
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            request.configuration->curvature_projection_cadence_steps));
-  mixCurvatureProjectionOptionsSignature(seed, options);
-  mixCurvatureSignature(seed, cut_context_signature);
-  mixCurvatureSignature(seed, static_cast<std::uint64_t>(mesh_vertices));
-  mixCurvatureSignature(seed, static_cast<std::uint64_t>(mesh_cells));
-  mixCurvatureSignature(seed, static_cast<std::uint64_t>(mesh_dimension));
-  mixCurvatureSignature(seed, mesh_geometry_revision);
-  mixCurvatureSignature(seed, mesh_topology_revision);
-  mixCurvatureSignature(seed, mesh_ownership_revision);
-  mixCurvatureSignature(seed, mesh_numbering_revision);
-  mixCurvatureSignature(seed, mesh_field_layout_revision);
-  mixCurvatureSignature(seed, mesh_label_revision);
-  mixCurvatureSignature(seed, mesh_coordinate_configuration_key);
-  mixCurvatureSignature(seed, system.spaceRevision());
-  mixCurvatureSignature(seed, system.dofLayoutRevision());
-  mixCurvatureSignature(seed, system.systemLayoutRevision());
-  mixCurvatureSignature(seed, static_cast<std::uint64_t>(phi_field));
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            std::max<svmp::FE::GlobalIndex>(
-                                0, system.fieldDofOffset(phi_field))));
-  mixCurvatureSignature(seed,
-                        static_cast<std::uint64_t>(
-                            std::max<svmp::FE::GlobalIndex>(
-                                0,
-                                system.fieldDofHandler(phi_field).getNumDofs())));
-  mixCurvatureSignature(seed, static_cast<std::uint64_t>(rec.components));
-  mixCurvatureSignature(seed, source_kind);
-  mixCurvatureSignature(seed, source_revision);
-  return seed;
-}
-
-void logLevelSetCurvatureProjectionDiagnostic(
-    const LevelSetMaintenanceRequest& request,
-    int step,
-    std::string_view reason,
-    const svmp::FE::level_set::LevelSetCurvatureProjectionResult& result,
-    std::string_view cache_state,
-    bool projection_skipped,
-    std::uint64_t signature,
-    std::string_view cut_signature_cache_state = "unavailable",
-    std::size_t cut_signature_cache_hits = 0u,
-    std::size_t cut_signature_cache_misses = 0u)
-{
-  if (!application::core::oopDiagnosticsEnabled()) {
-    return;
-  }
-  const auto curvature_options = effectiveCurvatureProjectionOptions(request);
-  auto& out = application::core::oopCout();
-  out
-      << "[svMultiPhysics::Application] Level-set curvature projected"
-      << " field='" << request.configuration->transport.level_set.field_name << "'"
-      << " curvature_field='" << request.configuration->curvature_field_name << "'"
-      << " step=" << step
-      << " reason=" << reason
-      << " cache=" << cache_state
-      << " projection_skipped=" << (projection_skipped ? 1 : 0)
-      << " signature=" << signature
-      << " free_surface_snapshot_revision_key="
-      << result.free_surface_snapshot_revision_key
-      << " source_value_revision=" << result.source_value_revision
-      << " cut_rule_signature=" << result.cut_rule_signature
-      << " cut_signature_cache=" << cut_signature_cache_state
-      << " cut_signature_cache_hits=" << cut_signature_cache_hits
-      << " cut_signature_cache_misses=" << cut_signature_cache_misses
-      << " fitted_vertices=" << result.fitted_vertices
-      << " supplemental_samples=" << result.supplemental_samples
-      << " generated_interface_geometry_samples="
-      << result.generated_interface_geometry_samples
-      << " supplemental_sample_rows=" << result.supplemental_sample_rows
-      << " vertices_with_supplemental_samples="
-      << result.vertices_with_supplemental_samples
-      << " supplemental_sample_weight=" << result.supplemental_sample_weight
-      << " recovery_mode="
-      << svmp::FE::level_set::levelSetCurvatureRecoveryModeName(
-             result.recovery_mode)
-      << " generated_interface_patch_fitted_vertices="
-      << result.generated_interface_patch_fitted_vertices
-      << " generated_interface_patch_expanded_vertices="
-      << result.generated_interface_patch_expanded_vertices
-      << " kinematic_area_gradient_collective_replication="
-      << (result.kinematic_area_gradient_collective_replication ? 1 : 0)
-      << " kinematic_area_gradient_parallel_size="
-      << result.kinematic_area_gradient_parallel_size
-      << " kinematic_area_gradient_gathered_owned_cells="
-      << result.kinematic_area_gradient_gathered_owned_cells
-      << " kinematic_area_gradient_gathered_owned_boundary_faces="
-      << result.kinematic_area_gradient_gathered_owned_boundary_faces
-      << " kinematic_area_gradient_cut_cells="
-      << result.kinematic_area_gradient_cut_cells
-      << " kinematic_area_gradient_operator_vertices="
-      << result.kinematic_area_gradient_operator_vertices
-      << " kinematic_area_gradient_operator_nonzeros="
-      << result.kinematic_area_gradient_operator_nonzeros
-      << " kinematic_area_gradient_measure_evaluations="
-      << result.kinematic_area_gradient_measure_evaluations
-      << " kinematic_area_gradient_young_wall_count="
-      << result.kinematic_area_gradient_young_wall_count
-      << " kinematic_area_gradient_young_wall_boundary_faces="
-      << result.kinematic_area_gradient_young_wall_boundary_faces
-      << " kinematic_area_gradient_young_wall_cut_faces="
-      << result.kinematic_area_gradient_young_wall_cut_faces
-      << " kinematic_area_gradient_young_wall_measure_evaluations="
-      << result.kinematic_area_gradient_young_wall_measure_evaluations
-      << " kinematic_area_gradient_components="
-      << result.kinematic_area_gradient_components
-      << " kinematic_area_gradient_interface_measure="
-      << result.kinematic_area_gradient_interface_measure
-      << " kinematic_area_gradient_kinematic_mass="
-      << result.kinematic_area_gradient_kinematic_mass
-      << " kinematic_area_gradient_mass_weighted_mean_curvature="
-      << result.kinematic_area_gradient_mass_weighted_mean_curvature
-      << " kinematic_area_gradient_mass_weighted_rms_deviation="
-      << result.kinematic_area_gradient_mass_weighted_rms_deviation
-      << " kinematic_area_gradient_filter_coefficient="
-      << result.kinematic_area_gradient_filter_coefficient
-      << " kinematic_area_gradient_mass="
-      << svmp::FE::level_set::levelSetKinematicAreaGradientMassName(
-             result.kinematic_area_gradient_mass)
-      << " kinematic_area_gradient_min_filter_radius_cells="
-      << result.kinematic_area_gradient_min_filter_radius_cells
-      << " kinematic_area_gradient_max_filter_radius_cells="
-      << result.kinematic_area_gradient_max_filter_radius_cells
-      << " kinematic_area_gradient_tie_break_vertices="
-      << result.kinematic_area_gradient_tie_break_vertices
-      << " kinematic_area_gradient_max_tie_break_value="
-      << result.kinematic_area_gradient_max_tie_break_value
-      << " kinematic_area_gradient_surface_gradient_norm="
-      << result.kinematic_area_gradient_surface_gradient_norm
-      << " kinematic_area_gradient_young_wall_gradient_norm="
-      << result.kinematic_area_gradient_young_wall_gradient_norm
-      << " kinematic_area_gradient_total_energy_gradient_norm="
-      << result.kinematic_area_gradient_total_energy_gradient_norm
-      << " kinematic_area_gradient_finite_difference_check="
-      << (result.kinematic_area_gradient_finite_difference_check ? 1 : 0);
-  // The finite-difference cross-check is opt-in; without it there is no
-  // disagreement to report.
-  if (result.kinematic_area_gradient_finite_difference_check) {
-    out << " kinematic_area_gradient_max_relative_fd_disagreement="
-        << result.kinematic_area_gradient_max_relative_fd_disagreement;
-  }
-  out << " kinematic_area_gradient_linear_iterations="
-      << result.kinematic_area_gradient_linear_iterations
-      << " kinematic_area_gradient_minimum_norm_solver="
-      << (result.kinematic_area_gradient_minimum_norm_solver ? 1 : 0)
-      << " kinematic_area_gradient_relative_linear_residual="
-      << result.kinematic_area_gradient_relative_linear_residual
-      << " kinematic_area_gradient_max_regularized_identity_residual="
-      << result.kinematic_area_gradient_max_regularized_identity_residual
-      << " kinematic_area_gradient_max_relative_regularized_identity_residual="
-      << result
-             .kinematic_area_gradient_max_relative_regularized_identity_residual
-      << " narrow_band_width=" << result.narrow_band_width
-      << " narrow_band_vertices=" << result.narrow_band_vertices
-      << " skipped_far_vertices=" << result.skipped_far_vertices
-      << " fallback_vertices=" << result.fallback_vertices
-      << " max_neighbor_fallback_vertices="
-      << curvature_options.max_neighbor_fallback_vertices
-      << " zero_fallback_vertices=" << result.zero_fallback_vertices
-      << " max_zero_fallback_vertices="
-      << curvature_options.max_zero_fallback_vertices
-      << " insufficient_stencil_vertices="
-      << result.insufficient_stencil_vertices
-      << " singular_stencil_vertices=" << result.singular_stencil_vertices
-      << " small_gradient_vertices=" << result.small_gradient_vertices
-      << " fit_residual_failure_vertices="
-      << result.fit_residual_failure_vertices
-      << " smoothing_mode="
-      << svmp::FE::level_set::levelSetCurvatureSmoothingModeName(
-             result.smoothing_mode)
-      << " smoothing_iterations="
-      << result.smoothing_iterations_applied
-      << " smoothing_operator_edges="
-      << result.smoothing_operator_edges
-      << " smoothing_mean_abs_update="
-      << result.smoothing_mean_abs_update
-      << " smoothing_max_abs_update="
-      << result.smoothing_max_abs_update
-      << " reused_vertex_adjacency="
-      << (result.reused_vertex_adjacency ? 1 : 0)
-      << " reused_sample_adjacency="
-      << (result.reused_sample_adjacency ? 1 : 0)
-      << " vertex_adjacency_builds="
-      << result.vertex_adjacency_builds
-      << " sample_adjacency_builds="
-      << result.sample_adjacency_builds
-      << " mean_fit_rms_residual=" << result.mean_fit_rms_residual
-      << " max_fit_rms_residual=" << result.max_fit_rms_residual
-      << " mean_normalized_fit_residual="
-      << result.mean_normalized_fit_residual
-      << " max_normalized_fit_residual="
-      << result.max_normalized_fit_residual
-      << " min_curvature=" << result.min_curvature
-      << " max_curvature=" << result.max_curvature
-      << " max_abs_curvature=" << result.max_abs_curvature
-      << std::endl;
-}
-
-void setScalarPrescribedVertexFieldFromValues(
-    svmp::FE::systems::FESystem& system,
-    const svmp::Mesh& mesh,
-    svmp::FE::FieldId field,
-    std::span<const svmp::FE::Real> vertex_values,
-    std::string_view context)
-{
-  const auto n_vertices = static_cast<svmp::FE::GlobalIndex>(mesh.n_vertices());
-  if (vertex_values.size() != static_cast<std::size_t>(n_vertices)) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] " + std::string(context) +
-        " received a vertex-value buffer with the wrong size.");
-  }
-
-  const auto& rec = system.fieldRecord(field);
-  if (rec.source_kind != svmp::FE::systems::FieldSourceKind::PrescribedData ||
-      rec.components != 1) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] " + std::string(context) +
-        " target field '" + rec.name +
-        "' must be a scalar PrescribedData field.");
-  }
-
-  const auto& field_dofs = system.fieldDofHandler(field);
-  const auto n_field_dofs =
-      static_cast<std::size_t>(field_dofs.getNumDofs());
-  std::vector<svmp::FE::Real> coefficients(n_field_dofs, 0.0);
-  std::vector<std::uint8_t> assigned(n_field_dofs, 0u);
-  const auto projection =
-      system.projectMeshVertexValuesToFieldCoefficients(
-          field,
-          vertex_values,
-          1u,
-          std::span<svmp::FE::Real>(coefficients.data(),
-                                    coefficients.size()),
-          std::span<std::uint8_t>(assigned.data(), assigned.size()),
-          context);
-  if (projection.unassigned_dofs != 0u) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] " + std::string(context) +
-        " left " + std::to_string(projection.unassigned_dofs) +
-        " target field coefficient(s) without a safe mesh-vertex projection.");
-  }
-  system.setPrescribedFieldCoefficients(
-      field,
-      std::span<const svmp::FE::Real>(coefficients.data(),
-                                      coefficients.size()));
-}
-
-std::size_t projectLevelSetCurvatureFieldsFromState(
-    application::core::SimulationComponents& sim,
-    const svmp::FE::systems::SystemStateView& state,
-    const std::map<int, std::uint64_t>& evaluated_state_source_revisions,
-    const std::vector<LevelSetMaintenanceRequest>& requests,
-    int step,
-    std::string_view reason,
-    bool honor_cadence,
-    CurvatureProjectionCache* curvature_cache = nullptr,
-    bool reuse_cached_on_projection_failure = false)
-{
-  if (!sim.fe_system || !sim.primary_mesh || requests.empty()) {
-    return 0u;
-  }
-
-  auto& system = *sim.fe_system;
-  const auto& mesh = *sim.primary_mesh;
-  std::size_t updated_fields = 0u;
-
-  for (const auto& request : requests) {
-    if (!request.configuration->curvature_projection_enabled) {
-      continue;
-    }
-    const bool cadence_due =
-        !honor_cadence || shouldProjectLevelSetCurvature(request, step);
-    if (!honor_cadence && request.configuration->curvature_field_name.empty()) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Level-set curvature projection requires Curvature_field_name.");
-    }
-    CurvatureProjectionCacheEntry* cache_entry = nullptr;
-    if (curvature_cache != nullptr) {
-      const auto key = curvatureProjectionCacheKey(request);
-      auto [it, inserted] = curvature_cache->entries.try_emplace(key);
-      (void)inserted;
-      cache_entry = &it->second;
-    }
-    if (honor_cadence && !cadence_due &&
-        (cache_entry == nullptr || !cache_entry->valid)) {
-      continue;
-    }
-
-    const auto phi_field = system.findFieldByName(request.configuration->transport.level_set.field_name);
-    const auto kappa_field = system.findFieldByName(request.configuration->curvature_field_name);
-    if (phi_field == svmp::FE::INVALID_FIELD_ID ||
-        kappa_field == svmp::FE::INVALID_FIELD_ID) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Level-set curvature projection could not find level-set field '" +
-              request.configuration->transport.level_set.field_name + "' or curvature field '" +
-              request.configuration->curvature_field_name + "'.");
-    }
-
-    auto reapply_cached_curvature_if_needed =
-        [&](CurvatureProjectionCacheEntry& entry) {
-      if (!entry.valid || entry.last_curvature_vertex_values.empty()) {
-        return;
-      }
-      if (entry.last_curvature_vertex_values.size() !=
-          static_cast<std::size_t>(mesh.n_vertices())) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Cached level-set curvature projection "
-            "has an incompatible vertex count for field '" +
-            request.configuration->transport.level_set.field_name + "'.");
-      }
-      const auto current_revision = system.prescribedFieldRevision(kappa_field);
-      if (current_revision == entry.target_prescribed_revision) {
-        return;
-      }
-      setScalarPrescribedVertexFieldFromValues(
-          system,
-          mesh,
-          kappa_field,
-          std::span<const svmp::FE::Real>(
-              entry.last_curvature_vertex_values.data(),
-              entry.last_curvature_vertex_values.size()),
-          "Cached level-set curvature projection");
-      entry.target_prescribed_revision =
-          system.prescribedFieldRevision(kappa_field);
-    };
-
-    auto options = effectiveCurvatureProjectionOptions(request);
-    options.isovalue = static_cast<svmp::FE::Real>(request.configuration->isovalue);
-    const auto& mesh_access = system.meshAccess();
-    const bool mesh_revisions_available =
-        mesh_access.revisionTrackingAvailable();
-    const auto mesh_vertices = mesh_access.numVertices();
-    const auto mesh_cells = mesh_access.numCells();
-    const auto mesh_dimension = mesh_access.dimension();
-    const auto mesh_geometry_revision =
-        mesh_revisions_available ? mesh_access.geometryRevision() : 0u;
-    const auto mesh_topology_revision =
-        mesh_revisions_available ? mesh_access.topologyRevision() : 0u;
-    const auto mesh_ownership_revision =
-        mesh_revisions_available ? mesh_access.ownershipRevision() : 0u;
-    const auto mesh_numbering_revision =
-        mesh_revisions_available ? mesh_access.numberingRevision() : 0u;
-    const auto mesh_field_layout_revision =
-        mesh_revisions_available ? mesh_access.fieldLayoutRevision() : 0u;
-    const auto mesh_label_revision =
-        mesh_revisions_available ? mesh_access.labelRevision() : 0u;
-    const auto mesh_coordinate_configuration_key =
-        mesh_revisions_available
-            ? mesh_access.coordinateConfigurationKey()
-            : 0u;
-    bool cut_context_signature_cache_hit = false;
-    const auto cut_context_signature =
-        curvatureProjectionCutContextSignature(
-            system, request, cache_entry, &cut_context_signature_cache_hit);
-    const auto snapshot_identity =
-        curvatureProjectionSnapshotIdentity(system, request);
-    const auto interface_marker =
-        generatedCutContextMarkerForMaintenance(system, request);
-    std::uint64_t evaluated_state_source_revision = 0u;
-    if (snapshot_identity.free_surface_snapshot_revision_key != 0u) {
-      if (!interface_marker.has_value()) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Revision-bound curvature "
-            "projection has no authoritative interface marker.");
-      }
-      const auto evaluated_revision =
-          evaluated_state_source_revisions.find(*interface_marker);
-      if (evaluated_revision == evaluated_state_source_revisions.end() ||
-          evaluated_revision->second == 0u ||
-          evaluated_revision->second !=
-              snapshot_identity.source_value_revision) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Curvature projection state does "
-            "not match the authoritative geometry source revision.");
-      }
-      evaluated_state_source_revision = evaluated_revision->second;
-    }
-    const auto cut_context_signature_cache_state =
-        cache_entry == nullptr
-            ? std::string_view{"disabled"}
-            : (cut_context_signature_cache_hit ? std::string_view{"hit"}
-                                               : std::string_view{"miss"});
-
-    std::optional<std::uint64_t> fast_signature;
-    if (cache_entry != nullptr) {
-      fast_signature = curvatureProjectionFastInputSignature(
-          system,
-          state,
-          phi_field,
-          request,
-          options,
-          cut_context_signature,
-          mesh_vertices,
-          mesh_cells,
-          mesh_dimension,
-          mesh_revisions_available,
-          mesh_geometry_revision,
-          mesh_topology_revision,
-          mesh_ownership_revision,
-          mesh_numbering_revision,
-          mesh_field_layout_revision,
-          mesh_label_revision,
-          mesh_coordinate_configuration_key);
-      // The signatures hash rank-local data while the projection below can
-      // be collective (kinematic-area-gradient recovery): reuse the cache
-      // only when every rank can.
-      const bool local_fast_hit =
-          fast_signature.has_value() &&
-          cache_entry->valid &&
-          cache_entry->fast_valid &&
-          cache_entry->fast_signature == *fast_signature;
-      if (!globalAnyBool(!local_fast_hit,
-                         activeFESystemCommunicator(system))) {
-        reapply_cached_curvature_if_needed(*cache_entry);
-        logLevelSetCurvatureProjectionDiagnostic(
-            request,
-            step,
-            reason,
-            cache_entry->last_result,
-            "fast_hit",
-            /*projection_skipped=*/true,
-            cache_entry->signature,
-            cut_context_signature_cache_state,
-            cache_entry->cut_context_signature_cache_hits,
-            cache_entry->cut_context_signature_cache_misses);
-        continue;
-      }
-    }
-
-    const auto phi_values =
-        evaluateVertexField(system,
-                            mesh,
-                            phi_field,
-                            state,
-                            1u,
-                            "projecting level-set curvature");
-    std::vector<svmp::FE::Real> phi(
-        phi_values.begin(), phi_values.end());
-    const auto supplemental_samples =
-        collectLevelSetCurvatureSupplementalSamples(
-            system,
-            state,
-            phi_field,
-            options.isovalue,
-            interface_marker,
-            request.configuration->volume_cut_request.has_value()
-                ? std::optional<svmp::FE::geometry::CutIntegrationSide>(
-                      cutIntegrationSide(request.configuration->volume_cut_request->active_side))
-                : std::nullopt,
-            evaluated_state_source_revision);
-    std::vector<svmp::FE::Real> curvature;
-    const auto signature = curvatureProjectionInputSignature(
-        request,
-        options,
-        cut_context_signature,
-        std::span<const svmp::FE::Real>(phi.data(), phi.size()),
-        std::span<const svmp::FE::level_set::LevelSetCurvatureProjectionSample>(
-            supplemental_samples.data(), supplemental_samples.size()),
-        mesh_vertices,
-        mesh_cells,
-        mesh_dimension,
-        mesh_revisions_available,
-        mesh_geometry_revision,
-        mesh_topology_revision,
-        mesh_ownership_revision,
-        mesh_numbering_revision,
-        mesh_coordinate_configuration_key);
-    if (cache_entry != nullptr) {
-      const bool local_signature_hit =
-          cache_entry->valid && cache_entry->signature == signature;
-      if (!globalAnyBool(!local_signature_hit,
-                         activeFESystemCommunicator(system))) {
-        if (fast_signature.has_value()) {
-          cache_entry->fast_valid = true;
-          cache_entry->fast_signature = *fast_signature;
-        } else {
-          cache_entry->fast_valid = false;
-          cache_entry->fast_signature = 0u;
-        }
-        reapply_cached_curvature_if_needed(*cache_entry);
-        logLevelSetCurvatureProjectionDiagnostic(
-            request,
-            step,
-            reason,
-            cache_entry->last_result,
-            "hit",
-            /*projection_skipped=*/true,
-            signature,
-            cut_context_signature_cache_state,
-            cache_entry->cut_context_signature_cache_hits,
-            cache_entry->cut_context_signature_cache_misses);
-        continue;
-      }
-    }
-
-    if (honor_cadence && !cadence_due) {
-      application::core::oopCout()
-          << "[svMultiPhysics::Application] Level-set curvature projection "
-          << "overriding cadence because level-set/cut signature changed"
-          << " field='" << request.configuration->transport.level_set.field_name << "'"
-          << " curvature_field='" << request.configuration->curvature_field_name << "'"
-          << " step=" << step
-          << " reason=" << reason
-          << " diagnostic=curvature_projection_cadence_override_changed_signature"
-          << std::endl;
-    }
-
-    const bool collective_kinematic_area_gradient =
-        options.recovery_mode == svmp::FE::level_set::
-            LevelSetCurvatureRecoveryMode::KinematicAreaGradient;
-    auto result = cache_entry != nullptr
-        ? (collective_kinematic_area_gradient
-               ? svmp::FE::level_set::projectLevelSetMeanCurvatureToVertices(
-                     system,
-                     phi_field,
-                     phi,
-                     supplemental_samples,
-                     options,
-                     curvature,
-                     cache_entry->workspace)
-               : svmp::FE::level_set::projectLevelSetMeanCurvatureToVertices(
-                     system.meshAccess(),
-                     phi,
-                     supplemental_samples,
-                     options,
-                     curvature,
-                     cache_entry->workspace))
-        : (collective_kinematic_area_gradient
-               ? svmp::FE::level_set::projectLevelSetMeanCurvatureToVertices(
-                     system,
-                     phi_field,
-                     phi,
-                     supplemental_samples,
-                     options,
-                     curvature)
-               : svmp::FE::level_set::projectLevelSetMeanCurvatureToVertices(
-                     system.meshAccess(),
-                     phi,
-                     supplemental_samples,
-                     options,
-                     curvature));
-    // The rank-local projections take their revision from this rank's own
-    // samples, and a rank whose partition holds no interface has none, so
-    // only ranks with samples can contradict the snapshot.  Decide the
-    // rejection collectively so that every rank throws together.
-    const bool local_snapshot_revision_mismatch =
-        snapshot_identity.free_surface_snapshot_revision_key != 0u &&
-        result.supplemental_samples > 0u &&
-        (result.free_surface_snapshot_revision_key == 0u ||
-         result.free_surface_snapshot_revision_key !=
-             snapshot_identity.free_surface_snapshot_revision_key ||
-         result.source_value_revision !=
-             snapshot_identity.source_value_revision);
-    if (globalAnyBool(local_snapshot_revision_mismatch,
-                      activeFESystemCommunicator(system))) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Curvature projection samples do "
-          "not carry the authoritative geometry snapshot revision.");
-    }
-    result.cut_rule_signature = cut_context_signature;
-    if (cache_entry != nullptr) {
-      cache_entry->workspace.free_surface_snapshot_revision_key =
-          result.free_surface_snapshot_revision_key;
-      cache_entry->workspace.source_value_revision =
-          result.source_value_revision;
-      cache_entry->workspace.cut_rule_signature = cut_context_signature;
-    }
-    // Projection success and cache reuse are rank-local facts; the next
-    // steps (prescribed-field update, rethrow) must be taken together.
-    if (globalAnyBool(!result.success, activeFESystemCommunicator(system))) {
-      const bool local_reuse_available =
-          reuse_cached_on_projection_failure &&
-          cache_entry != nullptr &&
-          cache_entry->valid &&
-          cache_entry->last_result.free_surface_snapshot_revision_key ==
-              result.free_surface_snapshot_revision_key &&
-          cache_entry->last_result.source_value_revision ==
-              result.source_value_revision &&
-          cache_entry->last_result.cut_rule_signature ==
-              result.cut_rule_signature;
-      if (!globalAnyBool(!local_reuse_available,
-                         activeFESystemCommunicator(system))) {
-        reapply_cached_curvature_if_needed(*cache_entry);
-        application::core::oopCout()
-            << "[svMultiPhysics::Application] WARNING Level-set curvature projection"
-            << " failed residual screening and reused cached curvature"
-            << " field='" << request.configuration->transport.level_set.field_name << "'"
-            << " curvature_field='" << request.configuration->curvature_field_name << "'"
-            << " step=" << step
-            << " reason=" << reason
-            << " diagnostic=curvature_projection_cached_after_failed_trial"
-            << " failure='" << result.diagnostic << "'"
-            << " previous_signature=" << cache_entry->signature
-            << std::endl;
-        logLevelSetCurvatureProjectionDiagnostic(
-            request,
-            step,
-            reason,
-            cache_entry->last_result,
-            "stale_after_failed_trial",
-            /*projection_skipped=*/true,
-            cache_entry->signature,
-            cut_context_signature_cache_state,
-            cache_entry->cut_context_signature_cache_hits,
-            cache_entry->cut_context_signature_cache_misses);
-        continue;
-      }
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Level-set curvature projection failed for field '" +
-          request.configuration->transport.level_set.field_name + "': " + result.diagnostic);
-    }
-
-    setScalarPrescribedVertexFieldFromValues(
-        system,
-        mesh,
-        kappa_field,
-        std::span<const svmp::FE::Real>(curvature.data(), curvature.size()),
-        "Level-set curvature projection");
-    if (cache_entry != nullptr) {
-      cache_entry->valid = true;
-      cache_entry->signature = signature;
-      if (fast_signature.has_value()) {
-        cache_entry->fast_valid = true;
-        cache_entry->fast_signature = *fast_signature;
-      } else {
-        cache_entry->fast_valid = false;
-        cache_entry->fast_signature = 0u;
-      }
-      cache_entry->last_result = result;
-      cache_entry->last_curvature_vertex_values = curvature;
-      cache_entry->target_prescribed_revision =
-          system.prescribedFieldRevision(kappa_field);
-    }
-    ++updated_fields;
-
-    logLevelSetCurvatureProjectionDiagnostic(
-        request,
-        step,
-        reason,
-        result,
-        cache_entry != nullptr ? "miss" : "disabled",
-        /*projection_skipped=*/false,
-        signature,
-        cut_context_signature_cache_state,
-        cache_entry != nullptr ? cache_entry->cut_context_signature_cache_hits : 0u,
-        cache_entry != nullptr ? cache_entry->cut_context_signature_cache_misses : 0u);
-  }
-
-  return updated_fields;
 }
 
 // Methods whose extension is seeded by the wet vertices plus every vertex of
@@ -7448,36 +5704,16 @@ void writeAcceptedVelocityExtensionMapArtifacts(
 // keeping all twelve (3D sphere and sessile drop on 8 and 16 ranks, 2D
 // sessile drop, capillary wave and rise, the extended reference decks); the
 // withheld layers only cost generation bookkeeping, snapshot records and
-// their checks in every consumer.  Two consumers read deeper and keep every
-// layer: the rank-local curvature recoveries (LevelSetQuadratic and
-// GeneratedInterfacePatch fit vertex patches over the samples of all local
-// cut cells and write every local vertex; that audit run differed) and the
-// owned-rows assembly policy, which assembles every stored cell.
+// their checks in every consumer.  The owned-rows assembly policy reads
+// deeper (it assembles every stored cell) and keeps every layer.  The
+// rank-local curvature recoveries that also did were retired with the
+// level-set curvature projection (decisions D47 and D48).
 [[nodiscard]] bool generatedCutNeedsEveryGhostLayer(
     const application::core::SimulationComponents& sim,
-    const std::vector<ActiveCutVolumeRequest>& requests)
+    const std::vector<ActiveCutVolumeRequest>& /*requests*/)
 {
-  if (sim.fe_system->assemblyGhostPolicy() !=
-      svmp::FE::assembly::GhostPolicy::ReverseScatter) {
-    return true;
-  }
-  try {
-    for (const auto& configuration :
-         resolveLevelSetMaintenanceConfigurations(
-             sim.resolved_level_set_equations_by_input_index, requests)) {
-      if (configuration && configuration->curvature_projection_enabled &&
-          configuration->curvature_projection.recovery_mode !=
-              svmp::FE::level_set::LevelSetCurvatureRecoveryMode::
-                  KinematicAreaGradient) {
-        return true;
-      }
-    }
-  } catch (...) {
-    // Without a resolvable maintenance configuration the curvature mode is
-    // unknown; keep every layer.
-    return true;
-  }
-  return false;
+  return sim.fe_system->assemblyGhostPolicy() !=
+         svmp::FE::assembly::GhostPolicy::ReverseScatter;
 }
 
 // The cut-context lifecycle (refresh, cache, signatures, resync, reinstall,
@@ -8889,8 +7125,7 @@ evaluateStaticCapillaryFunctionalCandidate(
     std::span<const svmp::FE::Real> baseline,
     LevelSetMaintenanceGeometryTransaction& transaction,
     std::span<const svmp::FE::Real> coefficients,
-    static_capillary::LevelSetStaticCapillaryEvaluationPurpose purpose,
-    bool exact_functional_derivatives_requested)
+    static_capillary::LevelSetStaticCapillaryEvaluationPurpose purpose)
 {
   StaticCapillaryFunctionalCandidate result;
   auto& evaluation = result.evaluation;
@@ -8905,10 +7140,6 @@ evaluateStaticCapillaryFunctionalCandidate(
       system.fieldDofHandler(level_set_field).getNumDofs();
   const auto field_offset = static_cast<std::size_t>(raw_field_offset);
   const auto field_count = static_cast<std::size_t>(raw_field_count);
-  const bool uses_kinematic_area_gradient_traction =
-      declaration.capillary_balance_method ==
-      svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod::
-          KinematicAreaGradientEnergyTraction;
   const double constraint_dt =
       std::isfinite(history.dt()) && history.dt() > 0.0
           ? history.dt()
@@ -8976,191 +7207,6 @@ evaluateStaticCapillaryFunctionalCandidate(
     return result;
   }
 
-  std::vector<svmp::FE::Real> physical_potential_derivative;
-  std::vector<svmp::FE::Real> liquid_volume_derivative;
-  if (exact_functional_derivatives_requested) {
-    const auto producer_linkage =
-        transaction.currentCandidateProducerLinkage(
-            params, candidate, refresh_report);
-    if (!producer_linkage.success) {
-      evaluation.diagnostic =
-          "candidate_exact_functional_derivative_producer_linkage_failed:" +
-          producer_linkage.diagnostic;
-      return result;
-    }
-    svmp::FE::systems::SystemStateView derivative_state;
-    derivative_state.time = history.time();
-    derivative_state.dt = constraint_dt;
-    derivative_state.effective_dt = constraint_dt;
-    derivative_state.dt_prev = history.dtPrev();
-    derivative_state.u = candidate;
-    const auto phi_values = evaluateVertexField(
-        system,
-        *sim.primary_mesh,
-        level_set_field,
-        derivative_state,
-        1u,
-        "differentiating the static capillary functional");
-    std::vector<svmp::FE::Real> trial_curvature;
-    const std::vector<
-        svmp::FE::level_set::LevelSetCurvatureProjectionSample>
-        no_supplemental_samples;
-    const auto derivative_projection =
-        svmp::FE::level_set::projectLevelSetMeanCurvatureToVertices(
-            system,
-            level_set_field,
-            phi_values,
-            no_supplemental_samples,
-            effectiveCurvatureProjectionOptions(request),
-            trial_curvature);
-    const bool local_derivative_projection_valid =
-        derivative_projection.success &&
-        derivative_projection
-            .kinematic_area_gradient_derivatives_global_dof_order &&
-        derivative_projection
-                .kinematic_area_gradient_total_energy_derivative.size() ==
-            field_count &&
-        derivative_projection
-                .kinematic_area_gradient_liquid_volume_derivative.size() ==
-            field_count;
-    if (globalAnyBool(!local_derivative_projection_valid, comm)) {
-      evaluation.diagnostic =
-          "candidate_exact_functional_derivative_projection_failed:" +
-          derivative_projection.diagnostic;
-      return result;
-    }
-
-    std::vector<svmp::FE::Real> full_energy_derivative(
-        candidate.size(), svmp::FE::Real{0.0});
-    std::vector<svmp::FE::Real> full_volume_derivative(
-        candidate.size(), svmp::FE::Real{0.0});
-    const auto surface_tension = declaration.parameters.surface_tension;
-    for (std::size_t dof = 0u; dof < field_count; ++dof) {
-      full_energy_derivative[field_offset + dof] =
-          surface_tension *
-          derivative_projection
-              .kinematic_area_gradient_total_energy_derivative[dof];
-      full_volume_derivative[field_offset + dof] =
-          derivative_projection
-              .kinematic_area_gradient_liquid_volume_derivative[dof];
-    }
-
-    bool local_constraint_transpose_invalid = false;
-    for (const auto slave : system.constraints().getConstrainedDofs()) {
-      if (slave < 0 ||
-          static_cast<std::size_t>(slave) >= candidate.size()) {
-        local_constraint_transpose_invalid = true;
-        continue;
-      }
-      const auto constraint = system.constraints().getConstraint(slave);
-      if (!constraint.has_value()) {
-        local_constraint_transpose_invalid = true;
-        continue;
-      }
-      const auto slave_index = static_cast<std::size_t>(slave);
-      const auto energy_slave = full_energy_derivative[slave_index];
-      const auto volume_slave = full_volume_derivative[slave_index];
-      full_energy_derivative[slave_index] = 0.0;
-      full_volume_derivative[slave_index] = 0.0;
-      for (const auto& entry : constraint->entries) {
-        if (entry.master_dof < 0 ||
-            static_cast<std::size_t>(entry.master_dof) >= candidate.size() ||
-            system.constraints().isConstrained(entry.master_dof) ||
-            !std::isfinite(entry.weight)) {
-          local_constraint_transpose_invalid = true;
-          continue;
-        }
-        const auto master = static_cast<std::size_t>(entry.master_dof);
-        full_energy_derivative[master] += entry.weight * energy_slave;
-        full_volume_derivative[master] += entry.weight * volume_slave;
-      }
-    }
-    const bool cross_field_derivative =
-        std::any_of(
-            full_energy_derivative.begin(),
-            full_energy_derivative.begin() +
-                static_cast<std::ptrdiff_t>(field_offset),
-            [](svmp::FE::Real value) {
-              return value != svmp::FE::Real{0.0};
-            }) ||
-        std::any_of(
-            full_energy_derivative.begin() +
-                static_cast<std::ptrdiff_t>(field_offset + field_count),
-            full_energy_derivative.end(),
-            [](svmp::FE::Real value) {
-              return value != svmp::FE::Real{0.0};
-            }) ||
-        std::any_of(
-            full_volume_derivative.begin(),
-            full_volume_derivative.begin() +
-                static_cast<std::ptrdiff_t>(field_offset),
-            [](svmp::FE::Real value) {
-              return value != svmp::FE::Real{0.0};
-            }) ||
-        std::any_of(
-            full_volume_derivative.begin() +
-                static_cast<std::ptrdiff_t>(field_offset + field_count),
-            full_volume_derivative.end(),
-            [](svmp::FE::Real value) {
-              return value != svmp::FE::Real{0.0};
-            });
-    local_constraint_transpose_invalid =
-        local_constraint_transpose_invalid || cross_field_derivative ||
-        !std::all_of(
-            full_energy_derivative.begin(),
-            full_energy_derivative.end(),
-            [](svmp::FE::Real value) { return std::isfinite(value); }) ||
-        !std::all_of(
-            full_volume_derivative.begin(),
-            full_volume_derivative.end(),
-            [](svmp::FE::Real value) { return std::isfinite(value); });
-    if (globalAnyBool(local_constraint_transpose_invalid, comm)) {
-      evaluation.diagnostic =
-          "candidate_exact_functional_derivative_constraint_transpose_failed";
-      return result;
-    }
-    physical_potential_derivative.assign(
-        full_energy_derivative.begin() +
-            static_cast<std::ptrdiff_t>(field_offset),
-        full_energy_derivative.begin() +
-            static_cast<std::ptrdiff_t>(field_offset + field_count));
-    liquid_volume_derivative.assign(
-        full_volume_derivative.begin() +
-            static_cast<std::ptrdiff_t>(field_offset),
-        full_volume_derivative.begin() +
-            static_cast<std::ptrdiff_t>(field_offset + field_count));
-  }
-
-  if (purpose ==
-          static_capillary::LevelSetStaticCapillaryEvaluationPurpose::
-              AcceptanceCertificate &&
-      uses_kinematic_area_gradient_traction) {
-    svmp::FE::systems::SystemStateView candidate_state;
-    candidate_state.time = history.time();
-    candidate_state.dt = constraint_dt;
-    candidate_state.effective_dt = constraint_dt;
-    candidate_state.dt_prev = history.dtPrev();
-    candidate_state.u = candidate;
-    CurvatureProjectionCache acceptance_curvature_cache;
-    const std::vector<LevelSetMaintenanceRequest>
-        acceptance_curvature_requests{request};
-    const auto projected_fields = projectLevelSetCurvatureFieldsFromState(
-        sim,
-        candidate_state,
-        refresh_report.evaluated_state_source_revisions,
-        acceptance_curvature_requests,
-        history.stepIndex(),
-        "static_capillary_acceptance_certificate",
-        /*honor_cadence=*/false,
-        &acceptance_curvature_cache,
-        /*reuse_cached_on_projection_failure=*/false);
-    if (projected_fields != 1u) {
-      evaluation.diagnostic =
-          "accepted_kinematic_area_gradient_curvature_projection_count_mismatch";
-      return result;
-    }
-  }
-
   auto states = evaluateCurrentAcceptedFunctionals(sim);
   attachAcceptedActiveVolumeEnergies(sim, candidate, states);
   const bool local_functional_available =
@@ -9212,12 +7258,10 @@ evaluateStaticCapillaryFunctionalCandidate(
   evaluation.surface_wall_energy = energy;
   evaluation.gravitational_potential_energy = gravitational_energy;
   evaluation.liquid_volume = volume;
-  evaluation.functional_derivatives_available =
-      exact_functional_derivatives_requested;
-  evaluation.physical_potential_derivative =
-      std::move(physical_potential_derivative);
-  evaluation.liquid_volume_derivative =
-      std::move(liquid_volume_derivative);
+  // Difference gradients: the functional supplies no derivatives (the
+  // kinematic-area-gradient producer of exact derivatives was retired with
+  // decision D48).
+  evaluation.functional_derivatives_available = false;
   evaluation.production_force_projection_applied = false;
   evaluation.diagnostic = "functional_trial_available";
   return result;
@@ -9379,8 +7423,6 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
   }
 
   auto& system = *sim.fe_system;
-  bindKinematicAreaGradientTractionMaintenance(system, requests);
-  const auto curvature_options = effectiveCurvatureProjectionOptions(request);
   auto& history = *sim.time_history;
   const auto comm = activeFESystemCommunicator(system);
   const auto level_set_field =
@@ -9410,45 +7452,17 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
               request.configuration->volume_cut_request->active_side) &&
       declarations.front().parameters.surface_tension >
           svmp::FE::Real{0.0} &&
-      (declarations.front().capillary_balance_method ==
-           svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod::
-               DiscreteEnergyVolumeStationarity ||
-       declarations.front().capillary_balance_method ==
-           svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod::
-               KinematicAreaGradientEnergyTraction) &&
+      declarations.front().capillary_balance_method ==
+          svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod::
+              DiscreteEnergyVolumeStationarity &&
       declarations.front().capillary_balance_qualification ==
           svmp::FE::systems::FreeSurfaceCapillaryBalanceQualification::
               PrerequisiteOnly;
   if (globalAnyBool(!local_declaration_matches, comm)) {
     throw std::runtime_error(
-        "[svMultiPhysics::Application] Static capillary initialization requires one matching positive-tension, active-side-consistent, prerequisite-only discrete-energy or kinematic-area-gradient free-surface declaration.");
+        "[svMultiPhysics::Application] Static capillary initialization requires one matching positive-tension, active-side-consistent, prerequisite-only discrete-energy free-surface declaration.");
   }
   const auto& declaration = declarations.front();
-  const bool uses_kinematic_area_gradient_traction =
-      declaration.capillary_balance_method ==
-      svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod::
-          KinematicAreaGradientEnergyTraction;
-  bool local_curvature_maintenance_matches =
-      !uses_kinematic_area_gradient_traction;
-  if (uses_kinematic_area_gradient_traction) {
-    const auto curvature_field =
-        system.findFieldByName(request.configuration->curvature_field_name);
-    local_curvature_maintenance_matches =
-        request.configuration->curvature_projection_enabled &&
-        curvature_options.recovery_mode ==
-            svmp::FE::level_set::LevelSetCurvatureRecoveryMode::
-                KinematicAreaGradient &&
-        curvature_options
-                .kinematic_area_gradient_filter_coefficient ==
-            svmp::FE::Real{0.0} &&
-        curvature_field != svmp::FE::INVALID_FIELD_ID &&
-        curvature_field == declaration.curvature_field;
-  }
-  if (globalAnyBool(
-          !local_curvature_maintenance_matches, comm)) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Static capillary kinematic-area-gradient traction requires one enabled, zero-filter curvature projection bound to the declaration's prescribed curvature field.");
-  }
 
   const auto declaration_content_key =
       acceptedFunctionalDeclarationContentKey(declaration);
@@ -9477,9 +7491,6 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
           [](svmp::FE::Real value) {
             return value == svmp::FE::Real{0.0};
           });
-  const bool exact_functional_derivatives_requested =
-      uses_kinematic_area_gradient_traction &&
-      gravitational_acceleration_is_zero;
 
   const auto baseline =
       captureFeOrderedVectorCollectively(
@@ -9635,61 +7646,51 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
         "[svMultiPhysics::Application] Static capillary initialization level-set coefficient count differs across the FE communicator.");
   }
 
-  // Exact total-energy derivatives are supplied in field order and remain
-  // available as the cut support migrates between bounded topology epochs.
-  // Difference gradients stay in the initial epoch and therefore retain the
-  // smaller authoritative cut-cell support.
+  // The difference gradients stay in the initial cut-topology epoch and keep
+  // the authoritative cut-cell support of the interface.
   std::vector<std::size_t> local_active_parameters;
   bool local_active_support_invalid = false;
-  if (exact_functional_derivatives_requested) {
-    local_active_parameters.resize(field_count);
-    std::iota(
-        local_active_parameters.begin(),
-        local_active_parameters.end(),
-        std::size_t{0u});
-  } else {
-    try {
-      const auto* cut_context = system.cutIntegrationContext();
-      if (cut_context == nullptr ||
-          !cut_context->hasFreeSurfaceGeometrySnapshotForMarker(*marker)) {
+  try {
+    const auto* cut_context = system.cutIntegrationContext();
+    if (cut_context == nullptr ||
+        !cut_context->hasFreeSurfaceGeometrySnapshotForMarker(*marker)) {
+      local_active_support_invalid = true;
+    } else {
+      const auto bound_revision =
+          cut_context->freeSurfaceGeometrySnapshotRevisionForMarker(
+              *marker);
+      const auto& snapshots =
+          cut_context->freeSurfaceGeometrySnapshots();
+      const auto snapshot = std::find_if(
+          snapshots.begin(), snapshots.end(),
+          [&](const auto& candidate) {
+            return candidate != nullptr &&
+                   candidate->revision().interface_marker == *marker &&
+                   candidate->revision().snapshot_revision_key ==
+                       bound_revision;
+          });
+      if (snapshot == snapshots.end()) {
         local_active_support_invalid = true;
       } else {
-        const auto bound_revision =
-            cut_context->freeSurfaceGeometrySnapshotRevisionForMarker(
-                *marker);
-        const auto& snapshots =
-            cut_context->freeSurfaceGeometrySnapshots();
-        const auto snapshot = std::find_if(
-            snapshots.begin(), snapshots.end(),
-            [&](const auto& candidate) {
-              return candidate != nullptr &&
-                     candidate->revision().interface_marker == *marker &&
-                     candidate->revision().snapshot_revision_key ==
-                         bound_revision;
-            });
-        if (snapshot == snapshots.end()) {
-          local_active_support_invalid = true;
-        } else {
-          const auto& field_dofs =
-              system.fieldDofHandler(level_set_field);
-          for (const auto cell :
-               (*snapshot)->interfaceDomain().cutCells()) {
-            for (const auto dof : field_dofs.getCellDofs(cell)) {
-              if (dof < 0 ||
-                  static_cast<std::uint64_t>(dof) >=
-                      static_cast<std::uint64_t>(field_count)) {
-                local_active_support_invalid = true;
-                continue;
-              }
-              local_active_parameters.push_back(
-                  static_cast<std::size_t>(dof));
+        const auto& field_dofs =
+            system.fieldDofHandler(level_set_field);
+        for (const auto cell :
+             (*snapshot)->interfaceDomain().cutCells()) {
+          for (const auto dof : field_dofs.getCellDofs(cell)) {
+            if (dof < 0 ||
+                static_cast<std::uint64_t>(dof) >=
+                    static_cast<std::uint64_t>(field_count)) {
+              local_active_support_invalid = true;
+              continue;
             }
+            local_active_parameters.push_back(
+                static_cast<std::size_t>(dof));
           }
         }
       }
-    } catch (...) {
-      local_active_support_invalid = true;
     }
+  } catch (...) {
+    local_active_support_invalid = true;
   }
   if (globalAnyBool(local_active_support_invalid, comm)) {
     throw std::runtime_error(
@@ -9705,23 +7706,14 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
         "[svMultiPhysics::Application] Static capillary initialization authoritative interface has no active level-set coefficients.");
   }
 
-  std::vector<svmp::FE::FieldId> transaction_prescribed_fields;
-  if (uses_kinematic_area_gradient_traction) {
-    transaction_prescribed_fields.push_back(
-        declaration.curvature_field);
-  }
   LevelSetMaintenanceGeometryTransaction transaction(
       sim,
       lifecycle,
       refresh_cache,
-      active_requests,
-      std::span<const svmp::FE::FieldId>(
-          transaction_prescribed_fields.data(),
-          transaction_prescribed_fields.size()));
+      active_requests);
   auto minimization_options =
       capillary_options;
-  minimization_options.allow_topology_epoch_transitions =
-      exact_functional_derivatives_requested;
+  minimization_options.allow_topology_epoch_transitions = false;
   std::vector<svmp::FE::Real> certified_solution;
   svmp::FE::FieldId certified_pressure_field{
       svmp::FE::INVALID_FIELD_ID};
@@ -9742,8 +7734,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
             baseline,
             transaction,
             coefficients,
-            purpose,
-            exact_functional_derivatives_requested);
+            purpose);
         auto evaluation = std::move(functional.evaluation);
         if (!evaluation.success) {
           return evaluation;
@@ -10813,8 +8804,6 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       LevelSetMaintenanceScheduleStage::SteadyInitialization,
       sim.time_history->stepIndex(),
       activeFESystemCommunicator(*sim.fe_system));
-  bindKinematicAreaGradientTractionMaintenance(
-      *sim.fe_system, level_set_maintenance);
   // The semi-implicit capillary term is defined by the transient outer
   // fixed point; a steady solve fails closed here.
   (void)bindFreeSurfaceSemiImplicitReference(
@@ -10850,8 +8839,6 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   newton_opts.accepted_state_sync_invalidates_residual =
       steady_has_generated_state &&
       !use_steady_external_state_fixed_point;
-  auto curvature_projection_cache =
-      std::make_shared<CurvatureProjectionCache>();
   applyJacobianCheckGeometryProvenance(
       newton_opts,
       steady_active_cut_requests,
@@ -10863,8 +8850,7 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   using StateSyncPoint =
       svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
   // The generated state of the solve, synchronized by the registry: the cut
-  // geometry, then the curvature projected from it and the advection
-  // velocity extended from it.
+  // geometry, then the advection velocity extended from it.
   using svmp::FE::timestepping::FunctionGeneratedStateParticipant;
   using svmp::FE::timestepping::GeneratedStateRole;
   using svmp::FE::timestepping::GeneratedStateSync;
@@ -10878,32 +8864,6 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
           cut_geometry,
           svmp::FE::level_set::LevelSetGeometryParticipant::Options{
               .solve = svmp::FE::timestepping::GeneratedStateSolve::Steady}));
-  generated_state->add(std::make_shared<FunctionGeneratedStateParticipant>(
-      "level_set_curvature",
-      GeneratedStateRole::DerivedField,
-      FunctionGeneratedStateParticipant::Callbacks{
-          .prepare =
-              [curvature_projection_cache](const GeneratedStateSync& sync) {
-                if (sync.point == StateSyncPoint::RestoredOuterFixedPointState) {
-                  curvature_projection_cache->entries.clear();
-                }
-              },
-          .synchronize =
-              [&, curvature_projection_cache](
-                  const svmp::FE::systems::SystemStateView& state,
-                  GeneratedStateSync& sync) {
-                (void)projectLevelSetCurvatureFieldsFromState(
-                    sim,
-                    state,
-                    sync.evaluated_state_source_revisions,
-                    level_set_maintenance,
-                    -1,
-                    stateSyncPointName(sync.point),
-                    /*honor_cadence=*/false,
-                    curvature_projection_cache.get(),
-                    /*reuse_cached_on_projection_failure=*/
-                    allowCachedCurvatureAfterProjectionFailure(sync.point));
-              }}));
   generated_state->add(std::make_shared<FunctionGeneratedStateParticipant>(
       "level_set_advection_velocity",
       GeneratedStateRole::Extension,
@@ -10935,8 +8895,7 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   sim.time_history->repack(*sim.backend);
   oopCout() << "[svMultiPhysics::Application] Steady: TimeHistory repacked." << std::endl;
 
-  auto steady_initial_cut_report =
-      cut_geometry->refreshCached(sim.time_history->u(), "steady_initial");
+  (void)cut_geometry->refreshCached(sim.time_history->u(), "steady_initial");
   if (initializeDiscreteStaticCapillaryEquilibrium(
           sim,
           params,
@@ -10944,20 +8903,10 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
           *cut_lifecycle,
           *cut_refresh_cache,
           steady_level_set_advection_velocity)) {
-    steady_initial_cut_report =
-        cut_geometry->refreshCached(sim.time_history->u(), "steady_static_capillary_accepted");
+    (void)cut_geometry->refreshCached(
+        sim.time_history->u(), "steady_static_capillary_accepted");
   }
   initializeConservativePhaseStates(sim, level_set_maintenance);
-  (void)projectLevelSetCurvatureFieldsFromState(
-      sim,
-      stateViewForHistory(*sim.time_history),
-      steady_initial_cut_report.evaluated_state_source_revisions,
-      level_set_maintenance,
-      sim.time_history->stepIndex(),
-      "steady_initial",
-      /*honor_cadence=*/false,
-      curvature_projection_cache.get(),
-      /*reuse_cached_on_projection_failure=*/false);
   (void)updateLevelSetAdvectionVelocities(
       sim, *sim.time_history, steady_level_set_advection_velocity);
   logLevelSetMaintenanceCoverageDiagnostics(
@@ -11000,18 +8949,7 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   }
 
   sim.fe_system->commitTimeStep();
-  const auto steady_accepted_cut_report =
-      cut_geometry->refreshCached(sim.time_history->u(), "steady_accepted");
-  (void)projectLevelSetCurvatureFieldsFromState(
-      sim,
-      stateViewForHistory(*sim.time_history),
-      steady_accepted_cut_report.evaluated_state_source_revisions,
-      level_set_maintenance,
-      sim.time_history->stepIndex(),
-      "steady_accepted",
-      /*honor_cadence=*/false,
-      curvature_projection_cache.get(),
-      /*reuse_cached_on_projection_failure=*/false);
+  (void)cut_geometry->refreshCached(sim.time_history->u(), "steady_accepted");
   std::vector<AcceptedVelocityExtensionMapRecord>
       steady_velocity_extension_maps;
   (void)updateLevelSetAdvectionVelocities(
@@ -11311,13 +9249,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       LevelSetMaintenanceScheduleStage::TransientInitialization,
       sim.time_history->stepIndex(),
       activeFESystemCommunicator(*sim.fe_system));
-  bindKinematicAreaGradientTractionMaintenance(
-      *sim.fe_system, level_set_maintenance);
-  requireCollectiveLevelSetMaintenanceRequestSchedule(
-      level_set_maintenance,
-      LevelSetMaintenanceScheduleStage::TransientInitialization,
-      sim.time_history->stepIndex(),
-      activeFESystemCommunicator(*sim.fe_system));
   applyCoupledLevelSetFieldResidualCriteria(
       *sim.fe_system, params, opts.newton);
   const bool has_frozen_algebraic_level_set_extension =
@@ -11334,8 +9265,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                        findLevelSetVelocityExtensionConstraintKernel(
                            *sim.fe_system, request.operator_tag, target));
           });
-  // Generated cut rules, projected curvature, active-set constraints, and the
-  // wet-extension map form one residual-defining package G(u).  The assembled
+  // Generated cut rules, active-set constraints, and the wet-extension map
+  // form one residual-defining package G(u).  The assembled
   // tangent differentiates R(u,G) at fixed G; it does not contain every shape,
   // projection, or active-set derivative.  Solve the consistent nested
   // problem with outer regeneration and inner frozen-geometry Newton solves.
@@ -11576,8 +9507,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   const bool synchronize_line_search_trials =
       synchronizeTransientLineSearchTrials(
           opts.newton.accepted_state_sync_invalidates_residual);
-  auto curvature_projection_cache =
-      std::make_shared<CurvatureProjectionCache>();
   // The cut geometry of the run; the aliases keep its members' names.
   auto cut_geometry =
       std::make_shared<svmp::FE::level_set::LevelSetGeometryService>(
@@ -11591,8 +9520,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   // state.  Waiting until the first accepted step silently made that state
   // the reference and hid all first-step volume loss.
   std::map<std::string, svmp::FE::Real> initial_wet_volume_by_key;
-  auto initial_cut_report =
-      cut_geometry->refreshCached(sim.time_history->u(), "initial");
+  (void)cut_geometry->refreshCached(sim.time_history->u(), "initial");
   if (initializeDiscreteStaticCapillaryEquilibrium(
           sim,
           params,
@@ -11600,7 +9528,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           *cut_lifecycle,
           *cut_refresh_cache,
           level_set_advection_velocity)) {
-    initial_cut_report = cut_geometry->refreshCached(
+    (void)cut_geometry->refreshCached(
         sim.time_history->u(), "static_capillary_accepted");
   }
   initializeConservativePhaseStates(sim, level_set_maintenance);
@@ -11608,16 +9536,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     dumpActiveCutVolumeRulesForProbe(*sim.fe_system,
                                      sim.time_history->stepIndex());
   }
-  (void)projectLevelSetCurvatureFieldsFromState(
-      sim,
-      stateViewForHistory(*sim.time_history),
-      initial_cut_report.evaluated_state_source_revisions,
-      level_set_maintenance,
-      sim.time_history->stepIndex(),
-      "initial",
-      /*honor_cadence=*/false,
-      curvature_projection_cache.get(),
-      /*reuse_cached_on_projection_failure=*/false);
   logLevelSetMaintenanceCoverageDiagnostics(
       activeCutVolumeRequests(params),
       level_set_maintenance);
@@ -11933,8 +9851,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   using svmp::FE::timestepping::GeneratedStateRole;
   using svmp::FE::timestepping::GeneratedStateSync;
   // The cut geometry first (it provides the cut-topology epochs of the outer
-  // fixed point), then the curvature projected from it, the advection
-  // velocity extended from it and the semi-implicit reference state.
+  // fixed point), then the advection velocity extended from it and the
+  // semi-implicit reference state.
   generated_state->add(
       std::make_shared<svmp::FE::level_set::LevelSetGeometryParticipant>(
           cut_geometry,
@@ -11945,36 +9863,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   has_dynamic_contact_stage &&
                   !parseBoolEnv("SVMP_DISABLE_CUT_CONTEXT_REINSTALL", false),
               .expected_request_policy_key = expected_cut_request_policy_key}));
-  generated_state->add(std::make_shared<FunctionGeneratedStateParticipant>(
-      "level_set_curvature",
-      GeneratedStateRole::DerivedField,
-      FunctionGeneratedStateParticipant::Callbacks{
-          .prepare =
-              [curvature_projection_cache](const GeneratedStateSync& sync) {
-                if (sync.restoring_generated_state) {
-                  curvature_projection_cache->entries.clear();
-                }
-              },
-          .synchronize =
-              [&, curvature_projection_cache](
-                  const svmp::FE::systems::SystemStateView& state,
-                  GeneratedStateSync& sync) {
-                (void)projectLevelSetCurvatureFieldsFromState(
-                    sim,
-                    state,
-                    sync.evaluated_state_source_revisions,
-                    level_set_maintenance,
-                    -1,
-                    stateSyncPointName(sync.point),
-                    /*honor_cadence=*/false,
-                    curvature_projection_cache.get(),
-                    /*reuse_cached_on_projection_failure=*/
-                    allowCachedCurvatureAfterProjectionFailure(sync.point));
-              },
-          .invalidate =
-              [curvature_projection_cache] {
-                curvature_projection_cache->entries.clear();
-              }}));
   generated_state->add(std::make_shared<FunctionGeneratedStateParticipant>(
       "level_set_advection_velocity",
       GeneratedStateRole::Extension,
@@ -12035,28 +9923,15 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   // The cut geometry's part of each time step (the cut-topology attempt and
   // the restore retention), composed with the callbacks below.
   svmp::FE::timestepping::StepParticipantList cut_geometry_step_participants;
-  const auto cut_geometry_step =
-      svmp::FE::level_set::LevelSetGeometryStepParticipant::addTo(
-          cut_geometry_step_participants,
-          cut_geometry,
-          {.track_topology = track_transient_cut_topology});
+  svmp::FE::level_set::LevelSetGeometryStepParticipant::addTo(
+      cut_geometry_step_participants,
+      cut_geometry,
+      {.track_topology = track_transient_cut_topology});
   callbacks.on_before_physics_solve =
       [&](svmp::FE::timestepping::TimeHistory& h, double /*solve_time*/, double /*dt*/) {
         // The cut geometry step participant has armed the restore
         // retention, refreshed the geometry from this attempt-entry state
         // and checked the accepted topology baseline.
-        const auto& before_solve_cut_report =
-            cut_geometry_step->attemptEntryReport();
-        (void)projectLevelSetCurvatureFieldsFromState(
-            sim,
-            stateViewForHistory(h),
-            before_solve_cut_report.evaluated_state_source_revisions,
-            level_set_maintenance,
-            h.stepIndex(),
-            "before_physics_solve",
-            /*honor_cadence=*/false,
-            curvature_projection_cache.get(),
-            /*reuse_cached_on_projection_failure=*/false);
         (void)updateLevelSetAdvectionVelocities(
             sim, h, level_set_advection_velocity);
         if (semi_implicit_reference) {
@@ -14138,16 +12013,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     if (parseBoolEnv("SVMP_CUT_RULE_DUMP", false)) {
       dumpActiveCutVolumeRulesForProbe(*sim.fe_system, h.stepIndex());
     }
-    (void)projectLevelSetCurvatureFieldsFromState(
-        sim,
-        stateViewForHistory(h),
-        cut_report.evaluated_state_source_revisions,
-        level_set_maintenance,
-        h.stepIndex(),
-        "accepted_step",
-        /*honor_cadence=*/false,
-        curvature_projection_cache.get(),
-        /*reuse_cached_on_projection_failure=*/false);
     std::vector<AcceptedVelocityExtensionMapRecord>
         accepted_extension_map_records;
     (void)updateLevelSetAdvectionVelocities(

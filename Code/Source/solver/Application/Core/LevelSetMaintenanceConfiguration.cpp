@@ -149,9 +149,6 @@ void appendInstallationObservations(
     appendInstallationObservation(observations, input,
                                   aliases::conservative_phase_side,
                                   "conservative_phase_liquid_side");
-    appendInstallationObservation(observations, input,
-                                  aliases::curvature_field,
-                                  "curvature_field_name");
   }
 
   observations.insert(observations.end(),
@@ -159,7 +156,7 @@ void appendInstallationObservations(
                       installation->input_observations.end());
 
   const bool source_backed = !installation->input_observations.empty();
-  constexpr std::array<std::string_view, 9> covered_keys{
+  constexpr std::array<std::string_view, 8> covered_keys{
       "level_set_field_name",
       "transport_form",
       "velocity_source",
@@ -168,7 +165,6 @@ void appendInstallationObservations(
       "velocity_space_present",
       "enable_conservative_phase_transport",
       "conservative_phase_liquid_side",
-      "curvature_field_name",
   };
   for (const auto key : covered_keys) {
     const bool observed =
@@ -196,7 +192,7 @@ void appendInstallationObservations(
 }
 
 void appendLegacyDefaults(std::vector<LevelSetInputObservation> &observations) {
-  constexpr std::array<std::string_view, 12> keys{
+  constexpr std::array<std::string_view, 10> keys{
       "level_set_field_name",
       "level_set_isovalue",
       "transport_form",
@@ -207,8 +203,6 @@ void appendLegacyDefaults(std::vector<LevelSetInputObservation> &observations) {
       "enable_conservative_phase_transport",
       "conservative_phase_liquid_side",
       "enable_static_capillary_equilibrium_initialization",
-      "enable_curvature_projection",
-      "curvature_field_name",
   };
   const auto has_effective_observation = [&](std::string_view key) {
     return std::any_of(observations.begin(), observations.end(),
@@ -608,104 +602,23 @@ resolveLegacyLevelSetMaintenanceConfiguration(
       result->static_capillary_equilibrium.minimum_volume_merit_penalty);
   append_equation_observations();
 
-  apply_boolean_list(
-      {"Enable_curvature_projection"},
-      "enable_curvature_projection", result->curvature_projection_enabled);
-  if (const auto field =
-          reader.string(aliases::curvature_field, "curvature_field_name")) {
-    result->curvature_field_name = parsing::trimCopy(field->text);
-    result->curvature_projection_enabled = true;
-    append_equation_observations();
-    appendDerivedObservation(result->input_observations,
-                             "enable_curvature_projection",
-                             "derived:curvature_field_name");
-  }
-  apply_integer_list(
-      {"Curvature_projection_cadence_steps"},
-      "curvature_projection_cadence_steps",
-      result->curvature_projection_cadence_steps);
-  apply_real_list({"Curvature_projection_max_normalized_fit_residual"},
-                  "curvature_projection_max_normalized_fit_residual",
-                  result->curvature_projection.max_normalized_fit_residual);
-  apply_integer_list(
-      {"Curvature_projection_max_neighbor_fallback_vertices"},
-      "curvature_projection_max_neighbor_fallback_vertices",
-      result->curvature_projection.max_neighbor_fallback_vertices);
-  apply_integer_list({"Curvature_projection_max_zero_fallback_vertices"},
-                     "curvature_projection_max_zero_fallback_vertices",
-                     result->curvature_projection.max_zero_fallback_vertices);
-  apply_real_list({"Curvature_projection_supplemental_sample_weight"},
-                  "curvature_projection_supplemental_sample_weight",
-                  result->curvature_projection.supplemental_sample_weight);
-  if (const auto mode = reader.string({"Curvature_projection_recovery_mode"},
-                                      "curvature_projection_recovery_mode")) {
-    result->curvature_projection.recovery_mode =
-        ls::parseLevelSetCurvatureRecoveryMode(mode->text);
-  }
-  // The filter default depends on the mass mode: Lumped is parameter free
-  // and implies a zero filter, Consistent keeps the FE default. An explicit
-  // nonzero coefficient with Lumped is rejected here instead of at the first
-  // projection.
-  const auto filter_coefficient = reader.real(
-      {"Curvature_projection_kinematic_area_gradient_filter_coefficient"},
-      "curvature_projection_kinematic_area_gradient_filter_coefficient");
-  if (const auto mass = reader.string(
-          {"Curvature_projection_kinematic_area_gradient_mass"},
-          "curvature_projection_kinematic_area_gradient_mass")) {
-    result->curvature_projection.kinematic_area_gradient_mass =
-        ls::parseLevelSetKinematicAreaGradientMass(mass->text);
-  }
-  {
-    const auto mass = result->curvature_projection.kinematic_area_gradient_mass;
-    const auto mass_default =
-        ls::levelSetKinematicAreaGradientDefaultFilterCoefficient(mass);
-    auto &coefficient =
-        result->curvature_projection.kinematic_area_gradient_filter_coefficient;
-    if (filter_coefficient.has_value()) {
-      coefficient = *filter_coefficient;
-      if (mass == ls::LevelSetKinematicAreaGradientMass::Lumped &&
-          coefficient != mass_default) {
-        throw std::invalid_argument(
-            "[svMultiPhysics::Application] "
-            "Curvature_projection_kinematic_area_gradient_mass=Lumped is "
-            "parameter free and implies a zero "
-            "Curvature_projection_kinematic_area_gradient_filter_coefficient; "
-            "omit the filter coefficient or set it to 0.");
-      }
-    } else {
-      coefficient = mass_default;
-      if (mass == ls::LevelSetKinematicAreaGradientMass::Lumped) {
-        append_equation_observations();
-        appendDerivedObservation(
-            result->input_observations,
-            "curvature_projection_kinematic_area_gradient_filter_coefficient",
-            "derived:curvature_projection_kinematic_area_gradient_mass");
-      }
+  // The level-set curvature projection was retired (decision D48; its
+  // least-squares recovery modes by decision D47).  Every key of it fails,
+  // here where it was parsed, so the error order of the setup is unchanged.
+  for (const auto &[key, value] : input.equation_parameters) {
+    if (value.defined &&
+        (key == "Enable_curvature_projection" ||
+         key.rfind("Curvature_projection_", 0) == 0)) {
+      throw std::invalid_argument(
+          "[svMultiPhysics::Application] '" + key +
+          "': The level-set curvature projection (Enable_curvature_projection, "
+          "Curvature_field_name and the Curvature_projection_* settings) was "
+          "retired (decision D48; its least-squares recovery modes by decision "
+          "D47): SurfaceStress, the only capillary route, reads no curvature "
+          "field.  Remove these keys.");
     }
   }
-  apply_boolean_list(
-      {"Curvature_projection_kinematic_area_gradient_finite_difference_check"},
-      "curvature_projection_kinematic_area_gradient_finite_difference_check",
-      result->curvature_projection
-          .kinematic_area_gradient_finite_difference_check);
-  apply_real_list({"Curvature_projection_narrow_band_width"},
-                  "curvature_projection_narrow_band_width",
-                  result->curvature_projection.narrow_band_width);
-  apply_integer_list({"Curvature_projection_smoothing_iterations"},
-                     "curvature_projection_smoothing_iterations",
-                     result->curvature_projection.smoothing_iterations);
-  apply_real_list({"Curvature_projection_smoothing_relaxation"},
-                  "curvature_projection_smoothing_relaxation",
-                  result->curvature_projection.smoothing_relaxation);
-  if (const auto mode = reader.string({"Curvature_projection_smoothing_mode"},
-                                      "curvature_projection_smoothing_mode")) {
-    result->curvature_projection.smoothing_mode =
-        ls::parseLevelSetCurvatureSmoothingMode(mode->text);
-  }
-  append_equation_observations();
 
-  result->curvature_projection.isovalue =
-      static_cast<svmp::FE::Real>(result->isovalue);
   result->volume_cut_request = matchingActiveCutVolumeRequest(
       active_requests, result->transport.level_set.field_name,
       result->isovalue);
@@ -715,8 +628,7 @@ resolveLegacyLevelSetMaintenanceConfiguration(
                        result->transport.kinematic_reconciliation.enabled ||
                        result->transport.sign_definite_patch_bounds.enabled ||
                        result->transport.interface_preserving_redistancing.enabled ||
-                       result->static_capillary_equilibrium_enabled ||
-                       result->curvature_projection_enabled;
+                       result->static_capillary_equilibrium_enabled;
   if (!enabled) {
     return std::nullopt;
   }

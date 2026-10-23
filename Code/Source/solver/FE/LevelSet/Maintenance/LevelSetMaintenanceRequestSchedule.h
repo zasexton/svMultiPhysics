@@ -23,10 +23,9 @@
  * (appendLevelSetMaintenanceScheduleHeader), then for each request its
  * action bits, its configuration words
  * (appendLevelSetMaintenanceConfigurationScheduleWords), the words the
- * application adds for its own maintenance, its curvature-projection words
- * (appendLevelSetCurvatureProjectionScheduleWords), and its
- * conservative-phase run state (initialized flag and
- * appendMaintenanceScheduleGraphMetadata).
+ * application adds for its own maintenance, and its conservative-phase run
+ * state (initialized flag and appendMaintenanceScheduleGraphMetadata).  The
+ * curvature-projection words went with the projection (decision D48).
  *
  * The functions were moved from Application/Core/ApplicationDriver.cpp with
  * the words, messages and collective order unchanged.
@@ -34,7 +33,6 @@
 
 #include "Core/Types.h"
 #include "LevelSet/LevelSetConservativePhaseOperator.h"
-#include "LevelSet/LevelSetCurvatureProjection.h"
 #include "LevelSet/LevelSetMaintenanceSchedule.h"
 #include "LevelSet/Maintenance/LevelSetMaintenanceConfiguration.h"
 #include "LevelSet/Maintenance/LevelSetMaintenancePipeline.h"
@@ -106,13 +104,6 @@ void appendLevelSetMaintenanceScheduleHeader(
 [[nodiscard]] bool appendLevelSetMaintenanceConfigurationScheduleWords(
     std::vector<std::uint64_t>& words,
     const LevelSetMaintenanceConfiguration& configuration);
-
-/// The curvature-projection words of a request; @p curvature_options are
-/// the effective options (the configured ones with the bound declarations).
-void appendLevelSetCurvatureProjectionScheduleWords(
-    std::vector<std::uint64_t>& words,
-    const LevelSetMaintenanceConfiguration& configuration,
-    const LevelSetCurvatureProjectionOptions& curvature_options);
 
 /// The replicated identity of a conservative-phase graph.  The graph's
 /// rank-local mesh event counters are left out: equally valid partitions can

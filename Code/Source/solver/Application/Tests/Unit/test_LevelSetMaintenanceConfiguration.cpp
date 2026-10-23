@@ -80,10 +80,20 @@ const std::string kPhaseDiagnostic =
     "[svMultiPhysics::Application] Conservative_phase_liquid_side must be "
     "'negative' or 'positive'.";
 
+// Decision D48: every key of the retired level-set curvature projection
+// fails where the projection was configured.
+std::string retiredCurvatureDiagnostic(std::string_view key) {
+  return "[svMultiPhysics::Application] '" + std::string(key) +
+         "': The level-set curvature projection "
+         "(Enable_curvature_projection, Curvature_field_name and the "
+         "Curvature_projection_* settings) was retired (decision D48; its "
+         "least-squares recovery modes by decision D47): SurfaceStress, the "
+         "only capillary route, reads no curvature field.  Remove these "
+         "keys.";
+}
+
 const std::string kCurvatureDiagnostic =
-    "level-set curvature recovery mode 'invalid_recovery' must be "
-    "level_set_quadratic, generated_interface_patch, or "
-    "kinematic_area_gradient";
+    retiredCurvatureDiagnostic("Curvature_projection_recovery_mode");
 
 const LevelSetInputObservation *
 findObservation(const std::vector<LevelSetInputObservation> &observations,
@@ -797,5 +807,41 @@ TEST(LevelSetMaintenanceConfiguration,
       EXPECT_TRUE(unavailable->selected_spelling.empty()) << canonical;
       EXPECT_EQ(unavailable->source_layer, "unavailable") << canonical;
     }
+  }
+}
+
+TEST(LevelSetMaintenanceConfiguration, CurvatureProjectionKeysAreRetired) {
+  // Every key of the retired projection fails, also when it restates the
+  // disabled default or the projection is switched off.
+  for (const auto &[key, value] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"Enable_curvature_projection", "true"},
+           {"Enable_curvature_projection", "false"},
+           {"Curvature_projection_cadence_steps", "1"},
+           {"Curvature_projection_recovery_mode", "KinematicAreaGradient"},
+           {"Curvature_projection_recovery_mode", "LevelSetQuadratic"},
+           {"Curvature_projection_kinematic_area_gradient_mass", "Lumped"},
+           {"Curvature_projection_kinematic_area_gradient_filter_coefficient",
+            "0"},
+           {"Curvature_projection_kinematic_area_gradient_finite_difference_check",
+            "false"},
+           {"Curvature_projection_max_normalized_fit_residual", "1.0"},
+           {"Curvature_projection_max_neighbor_fallback_vertices", "0"},
+           {"Curvature_projection_max_zero_fallback_vertices", "0"},
+           {"Curvature_projection_supplemental_sample_weight", "1.0"},
+           {"Curvature_projection_narrow_band_width", "2.0"},
+           {"Curvature_projection_smoothing_iterations", "0"},
+           {"Curvature_projection_smoothing_relaxation", "0.5"},
+           {"Curvature_projection_smoothing_mode", "None"}}) {
+    auto input = makeLegacyInput();
+    put(input.equation_parameters, "Enable_kinematic_reconciliation", "true");
+    put(input.equation_parameters, key, value);
+    EXPECT_EQ((exceptionMessage<std::invalid_argument>([&] {
+                (void)application::core::
+                    resolveLegacyLevelSetMaintenanceConfiguration(
+                        input, std::span<const ActiveCutVolumeRequest>{});
+              })),
+              retiredCurvatureDiagnostic(key))
+        << key << "=" << value;
   }
 }

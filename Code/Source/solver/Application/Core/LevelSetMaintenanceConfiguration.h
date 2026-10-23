@@ -2,7 +2,6 @@
 
 #include "Application/Core/LevelSetCutConfiguration.h"
 #include "Application/Core/ResolvedMovingDomainConfiguration.h"
-#include "FE/LevelSet/LevelSetCurvatureProjection.h"
 #include "FE/LevelSet/LevelSetOptions.h"
 #include "FE/LevelSet/Maintenance/LevelSetMaintenanceConfiguration.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/StaticCapillaryEquilibrium.h"

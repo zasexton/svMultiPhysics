@@ -103,14 +103,6 @@ bool refreshesFrozenLevelSetExtensionAtStateSync(
          point == Point::RestoredProjectedTimeStepState;
 }
 
-bool allowCachedCurvatureAfterProjectionFailure(
-    svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint point)
-{
-  using Point = svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
-  return point == Point::LineSearchTrialResidual &&
-         parseBoolEnv("SVMP_CURVATURE_REUSE_CACHE_ON_TRIAL_FAILURE", false);
-}
-
 bool synchronizeTransientLineSearchTrials(
     bool residual_defining_state_changes)
 {

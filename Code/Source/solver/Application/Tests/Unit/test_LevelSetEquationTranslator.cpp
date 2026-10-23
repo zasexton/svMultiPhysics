@@ -2929,3 +2929,51 @@ TEST(LevelSetEquationTranslator, TranslatesJITPolicy)
   }
 #endif
 }
+
+TEST(LevelSetEquationTranslator, RetiredCurvatureFieldFailsAtTranslation)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  // Decision D48: the projected curvature field of the retired level-set
+  // curvature projection fails at translation, at the equation and at the
+  // domain level; an empty name restates the default and is accepted.
+  auto mesh = makeRegistryTriangleMesh();
+  const auto make_input = [&] {
+    return makeMaintenanceCompatibilityInput(mesh);
+  };
+  for (const std::string spelling :
+       {"Curvature_field_name", "Projected_curvature_field",
+        "Free_surface_curvature_field"}) {
+    for (const int layer : {0, 1, 2}) {
+      auto input = make_input();
+      const svmp::Physics::ParameterValue value{true, "kappa"};
+      if (layer == 0) {
+        input.equation_params[spelling] = value;
+      } else if (layer == 1) {
+        input.default_domain.params[spelling] = value;
+      } else {
+        svmp::Physics::DomainInput domain{};
+        domain.id = "liquid";
+        domain.params[spelling] = value;
+        input.domains.push_back(std::move(domain));
+      }
+      try {
+        (void)application::translators::level_set::resolveConfiguration(input);
+        ADD_FAILURE() << spelling << " at layer " << layer
+                      << " was accepted";
+      } catch (const std::invalid_argument& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("decision D48"), std::string::npos) << message;
+        EXPECT_NE(message.find("SurfaceStress"), std::string::npos) << message;
+        EXPECT_NE(message.find("'kappa'"), std::string::npos) << message;
+      }
+    }
+  }
+  auto empty = make_input();
+  empty.equation_params["Curvature_field_name"] =
+      svmp::Physics::ParameterValue{true, " "};
+  EXPECT_NO_THROW(
+      (void)application::translators::level_set::resolveConfiguration(empty));
+#endif
+}

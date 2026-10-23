@@ -76,11 +76,6 @@ namespace timestepping {
     NewtonOptions::StateSynchronizationPoint point,
     bool use_external_state_fixed_point) noexcept;
 
-/// True when a line-search trial may reuse the cached curvature after a
-/// failed projection (opt-in: SVMP_CURVATURE_REUSE_CACHE_ON_TRIAL_FAILURE).
-[[nodiscard]] bool allowCachedCurvatureAfterProjectionFailure(
-    NewtonOptions::StateSynchronizationPoint point);
-
 /// Whether line-search trials synchronize generated state; defaults to
 /// @p residual_defining_state_changes (override: SVMP_SYNC_LINE_SEARCH_TRIALS).
 [[nodiscard]] bool synchronizeTransientLineSearchTrials(

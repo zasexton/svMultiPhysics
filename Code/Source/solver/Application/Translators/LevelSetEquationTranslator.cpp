@@ -1475,95 +1475,30 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
   }
 }
 
-std::optional<std::string> projected_curvature_field_name(
-    const svmp::Physics::ParameterMap& params)
-{
-  return get_defined_string(
-      params, level_set_aliases::curvature_field);
-}
-
-std::vector<std::string> projected_curvature_fields_from_input(
+// The projected curvature field of the retired level-set curvature
+// projection (decision D48): a field name at the equation or domain level
+// fails at translation.
+void reject_retired_curvature_field(
     const svmp::Physics::EquationModuleInput& input)
 {
-  std::vector<std::string> fields;
-  const auto append = [&fields](const svmp::Physics::ParameterMap& params) {
-    const auto field = projected_curvature_field_name(params);
-    if (!field.has_value()) {
-      return;
-    }
-    const auto name = trim_copy(*field);
-    if (name.empty()) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Projected curvature field name must be non-empty.");
-    }
-    if (std::find(fields.begin(), fields.end(), name) == fields.end()) {
-      fields.push_back(name);
+  const auto reject = [](const svmp::Physics::ParameterMap& params) {
+    const auto field =
+        get_defined_string(params, level_set_aliases::curvature_field);
+    if (field.has_value() && !trim_copy(*field).empty()) {
+      throw std::invalid_argument(
+          "[svMultiPhysics::Application] Curvature_field_name '" +
+          trim_copy(*field) +
+          "': The level-set curvature projection (Enable_curvature_projection, "
+          "Curvature_field_name and the Curvature_projection_* settings) was "
+          "retired (decision D48; its least-squares recovery modes by decision "
+          "D47): SurfaceStress, the only capillary route, reads no curvature "
+          "field.  Remove these keys.");
     }
   };
-  append(input.equation_params);
-  append(input.default_domain.params);
+  reject(input.equation_params);
+  reject(input.default_domain.params);
   for (const auto& domain : input.domains) {
-    append(domain.params);
-  }
-  return fields;
-}
-
-void preflight_projected_curvature_fields(
-    const svmp::FE::systems::FESystem& system,
-    const std::vector<std::string>& fields,
-    const std::shared_ptr<const svmp::FE::spaces::FunctionSpace>& space,
-    std::string_view level_set_field,
-    std::string_view velocity_field,
-    std::string_view conservative_phase_field)
-{
-  for (const auto& field : fields) {
-    if (field == level_set_field ||
-        (!velocity_field.empty() && field == velocity_field) ||
-        (!conservative_phase_field.empty() &&
-         field == conservative_phase_field)) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Projected curvature field '" +
-          field + "' must be distinct from level-set, velocity, and conservative phase fields.");
-    }
-    const auto existing = system.findFieldByName(field);
-    if (existing == svmp::FE::INVALID_FIELD_ID) {
-      if (!space || space->value_dimension() != 1) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Projected curvature field auto-registration requires a scalar function space.");
-      }
-      continue;
-    }
-    const auto& rec = system.fieldRecord(existing);
-    if (rec.components != 1 || !rec.space ||
-        rec.space->value_dimension() != 1) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Projected curvature field '" +
-          field + "' must be scalar.");
-    }
-    if (rec.source_kind !=
-        svmp::FE::systems::FieldSourceKind::PrescribedData) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Projected curvature field '" +
-          field + "' must be registered as PrescribedData.");
-    }
-  }
-}
-
-void register_projected_curvature_fields(
-    svmp::FE::systems::FESystem& system,
-    const std::vector<std::string>& fields,
-    const std::shared_ptr<const svmp::FE::spaces::FunctionSpace>& space)
-{
-  for (const auto& field : fields) {
-    if (system.findFieldByName(field) != svmp::FE::INVALID_FIELD_ID) {
-      continue;
-    }
-    system.addField(svmp::FE::systems::FieldSpec{
-        .name = field,
-        .space = space,
-        .components = 1,
-        .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData,
-    });
+    reject(domain.params);
   }
 }
 
@@ -1876,15 +1811,13 @@ translate_level_set_transport_input(
     append_installation_derived(input_observations, "velocity_space_present",
                                 "derived:material_interface_phase_pair");
   }
-  const auto projected_curvature_fields =
-      projected_curvature_fields_from_input(input);
+  reject_retired_curvature_field(input);
   return application::core::ResolvedLevelSetEquationConfiguration{
       .source_mesh = input.mesh,
       .source_mesh_name = input.mesh_name,
       .level_set_space = std::move(level_set_space),
       .options = std::move(options),
       .install_options = install_options,
-      .projected_curvature_fields = projected_curvature_fields,
       .input_observations = std::move(input_observations),
   };
 }
@@ -1895,33 +1828,12 @@ create_level_set_transport_from_configuration(
         configuration,
     svmp::FE::systems::FESystem& system)
 {
-  preflight_projected_curvature_fields(
-      system,
-      configuration.projected_curvature_fields,
-      configuration.level_set_space,
-      configuration.options.level_set.field_name,
-      configuration.options.velocity.source ==
-                  ls::LevelSetVelocitySource::ConstantVector ||
-              configuration.options.velocity.source ==
-                  ls::LevelSetVelocitySource::MaterialInterfacePhasePair
-          ? std::string_view{}
-          : std::string_view{configuration.options.velocity.field_name},
-      configuration.options.conservative_phase.enabled
-          ? std::string_view{
-                configuration.options.conservative_phase.liquid_indicator
-                    .field_name}
-          : std::string_view{});
-  const auto projected_curvature_space = configuration.level_set_space;
 
   auto module = std::make_unique<LevelSetTransportInputAdapter>(
       configuration.level_set_space,
       configuration.options,
       configuration.install_options);
   module->registerOn(system);
-  register_projected_curvature_fields(
-      system,
-      configuration.projected_curvature_fields,
-      projected_curvature_space);
   return module;
 }
 
@@ -2088,13 +2000,6 @@ void preRegisterMaterialInterfaceTransportFields(
         "[svMultiPhysics::Application] material-interface level-set and phase field names must be distinct");
   }
 
-  preflight_projected_curvature_fields(
-      system,
-      configuration.projected_curvature_fields,
-      configuration.level_set_space,
-      options.level_set.field_name,
-      std::string_view{},
-      options.conservative_phase.liquid_indicator.field_name);
   preflightScalarTransportField(
       system,
       options.level_set,

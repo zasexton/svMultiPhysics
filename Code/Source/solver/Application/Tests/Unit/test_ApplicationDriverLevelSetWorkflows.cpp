@@ -86,6 +86,21 @@ LevelSetMaintenanceRequest freezeMaintenanceConfiguration(
       std::make_shared<const MaintenanceConfiguration>(std::move(configuration)));
 }
 
+// The physical point of a reference-frame cut quadrature point (moved from
+// the driver, whose curvature samples were its other user).
+std::optional<std::array<svmp::FE::Real, 3>> physicalCellPointAtReference(
+    const svmp::FE::geometry::GeometryMapping& mapping,
+    const std::array<svmp::FE::Real, 3>& reference_point)
+{
+  svmp::FE::math::Vector<svmp::FE::Real, 3> xi{};
+  xi[0] = reference_point[0];
+  xi[1] = reference_point[1];
+  xi[2] = reference_point[2];
+  const auto physical = mapping.map_to_physical(xi);
+  return std::array<svmp::FE::Real, 3>{
+      physical[0], physical[1], physical[2]};
+}
+
 template <typename Configure>
 LevelSetMaintenanceRequest withMaintenanceConfiguration(
     const LevelSetMaintenanceRequest& request, Configure configure)
@@ -4029,9 +4044,12 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_EQ(
       (maintenanceCompatibilityExceptionMessage<std::invalid_argument>(
           [&] { (void)legacyMaintenanceRequestsForTest(*disabled_curvature); })),
-      "level-set curvature recovery mode 'invalid_recovery' must be "
-      "level_set_quadratic, generated_interface_patch, or "
-      "kinematic_area_gradient");
+      "[svMultiPhysics::Application] 'Curvature_projection_recovery_mode': "
+      "The level-set curvature projection (Enable_curvature_projection, "
+      "Curvature_field_name and the Curvature_projection_* settings) was "
+      "retired (decision D48; its least-squares recovery modes by decision "
+      "D47): SurfaceStress, the only capillary route, reads no curvature "
+      "field.  Remove these keys.");
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,

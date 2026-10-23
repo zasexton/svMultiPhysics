@@ -1373,9 +1373,12 @@ TEST(OpenVesselExamples,
            .name = "steady_delayed_maintenance",
            .number_of_time_steps = 0},
        ExceptionCategory::InvalidArgument,
-       "level-set curvature recovery mode 'invalid_recovery' must be "
-       "level_set_quadratic, generated_interface_patch, or "
-       "kinematic_area_gradient",
+       "[svMultiPhysics::Application] 'Curvature_projection_recovery_mode': "
+       "The level-set curvature projection (Enable_curvature_projection, "
+       "Curvature_field_name and the Curvature_projection_* settings) was "
+       "retired (decision D48; its least-squares recovery modes by decision "
+       "D47): SurfaceStress, the only capillary route, reads no curvature "
+       "field.  Remove these keys.",
        true,
        false},
       {DriverSetupRegressionVariant{
@@ -1383,9 +1386,12 @@ TEST(OpenVesselExamples,
            .number_of_time_steps = 1,
            .transient_scheme = "BackwardEuler"},
        ExceptionCategory::InvalidArgument,
-       "level-set curvature recovery mode 'invalid_recovery' must be "
-       "level_set_quadratic, generated_interface_patch, or "
-       "kinematic_area_gradient",
+       "[svMultiPhysics::Application] 'Curvature_projection_recovery_mode': "
+       "The level-set curvature projection (Enable_curvature_projection, "
+       "Curvature_field_name and the Curvature_projection_* settings) was "
+       "retired (decision D48; its least-squares recovery modes by decision "
+       "D47): SurfaceStress, the only capillary route, reads no curvature "
+       "field.  Remove these keys.",
        true,
        true},
       {DriverSetupRegressionVariant{
