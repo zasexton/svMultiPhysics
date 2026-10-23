@@ -9,7 +9,7 @@
 #include <gtest/gtest.h>
 
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
-#include "Physics/Formulations/NavierStokes/IncompressibleTwoFluidModule.h"
+#include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 
 #include "FE/Forms/FormCompiler.h"
 #include "FE/Tests/Unit/Forms/FormsTestHelpers.h"
@@ -330,9 +330,9 @@ struct TwoFluidRegistrationFixture {
     });
   }
 
-  [[nodiscard]] ns::IncompressibleTwoFluidModule makeModule(
+  [[nodiscard]] ns::IncompressibleNavierStokesVMSModule makeModule(
       ns::IncompressibleTwoFluidOptions options = {}) const {
-    return ns::IncompressibleTwoFluidModule(
+    return ns::IncompressibleNavierStokesVMSModule(
         velocity_space, scalar_space, velocity_space, scalar_space,
         std::move(options));
   }
@@ -646,7 +646,7 @@ TEST(IncompressibleTwoFluidModule,
       ns::IncompressibleNavierStokesVMSOptions::ScalarValue{-0.75};
   options.shared_velocity_dirichlet.push_back(std::move(wall));
 
-  ns::IncompressibleTwoFluidModule module(
+  ns::IncompressibleNavierStokesVMSModule module(
       velocity_space,
       pressure_space,
       velocity_space,
@@ -709,7 +709,7 @@ TEST(IncompressibleTwoFluidModule,
           .vertex_gid = 101,
           .pressure = FE::Real{4.25},
       };
-  ns::IncompressibleTwoFluidModule module(
+  ns::IncompressibleNavierStokesVMSModule module(
       velocity_space,
       pressure_space,
       velocity_space,
@@ -2601,7 +2601,7 @@ TEST(IncompressibleTwoFluidModule,
   auto velocity_space =
       std::make_shared<FE::spaces::ProductSpace>(scalar_space, 2);
   FE::systems::FESystem system(mesh);
-  ns::IncompressibleTwoFluidModule module(
+  ns::IncompressibleNavierStokesVMSModule module(
       velocity_space, scalar_space, velocity_space, scalar_space);
 
   EXPECT_THROW(module.registerOn(system), std::invalid_argument);
@@ -2628,7 +2628,7 @@ TEST(IncompressibleTwoFluidModule,
       .components = 1,
       .source_kind = FE::systems::FieldSourceKind::PrescribedData,
   });
-  ns::IncompressibleTwoFluidModule module(
+  ns::IncompressibleNavierStokesVMSModule module(
       velocity_space, scalar_space, velocity_space, scalar_space);
 
   EXPECT_THROW(module.registerOn(system), std::invalid_argument);

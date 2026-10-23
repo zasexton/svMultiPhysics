@@ -8,8 +8,8 @@
 
 #include "Physics/Options/NavierStokesRegistration.h"
 
-#include "Physics/Formulations/NavierStokes/IncompressibleTwoFluidModule.h"
 #include "Physics/Options/InputReaders.h"
+#include "Physics/Options/NavierStokesOptionRules.h"
 
 #include "FE/Spaces/FunctionSpace.h"
 #include "FE/Systems/FESystem.h"

@@ -125,6 +125,30 @@ struct NavierStokesPreflight {
 /// warns (and the constraints are skipped) otherwise.
 [[nodiscard]] bool hasNativeMeshOrWarn(const FE::systems::FESystem& system);
 
+/** Validate parser-visible semantics shared by preflight and registration. */
+void validateIncompressibleTwoFluidConfigurationSemantics(
+    const IncompressibleTwoFluidOptions& options);
+
+/// What preflightIncompressibleTwoFluid resolved for the two-fluid
+/// registration that follows.
+struct IncompressibleTwoFluidPreflight {
+    int dimension{0};
+    FE::FieldId level_set{FE::INVALID_FIELD_ID};
+};
+
+/// Every check of a two-fluid registration that runs before the system is
+/// changed: the phase spaces, the options of the initial envelope (with
+/// validateIncompressibleTwoFluidConfigurationSemantics), the registered
+/// level-set field and any existing phase unknowns.  The messages are the
+/// two-fluid module's ("IncompressibleTwoFluidModule: ...").
+[[nodiscard]] IncompressibleTwoFluidPreflight preflightIncompressibleTwoFluid(
+    const FE::systems::FESystem& system,
+    const IncompressibleTwoFluidOptions& options,
+    const std::shared_ptr<const FE::spaces::FunctionSpace>& negative_velocity_space,
+    const std::shared_ptr<const FE::spaces::FunctionSpace>& negative_pressure_space,
+    const std::shared_ptr<const FE::spaces::FunctionSpace>& positive_velocity_space,
+    const std::shared_ptr<const FE::spaces::FunctionSpace>& positive_pressure_space);
+
 } // namespace navier_stokes
 } // namespace formulations
 } // namespace Physics

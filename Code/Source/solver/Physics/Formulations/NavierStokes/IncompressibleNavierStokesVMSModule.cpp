@@ -41,19 +41,32 @@
 #include "Physics/Formulations/NavierStokes/NavierStokesGeneratedNitsche.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesInitialConditions.h"
 
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
+
 #include "FE/Analysis/ConstitutiveLawMetadata.h"
 #include "FE/Constitutive/MetadataTaggedModel.h"
 #include "FE/Constraints/ConstraintPlan.h"
+#include "FE/Constraints/CoupledFieldGaugeConstraint.h"
+#include "FE/Constraints/GaugeRegistry.h"
+#include "FE/Constraints/VertexDirichletConstraint.h"
 #include "FE/Forms/CutCellForms.h"
 #include "FE/Forms/IntegrationDomain.h"
 #include "FE/Forms/Vocabulary.h"
+#include "FE/Interfaces/LevelSetInterfaceDomain.h"
 #include "FE/LevelSet/LevelSetGeometry.h"
 #include "FE/Systems/ALEBinding.h"
 #include "FE/Systems/BoundaryConditionManager.h"
+#include "FE/Systems/FESystem.h"
+#include "FE/Systems/FormsInstaller.h"
 #include "FE/Systems/FormulationBuilder.h"
 
+#include <array>
 #include <optional>
+#include <span>
+#include <stdexcept>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace svmp {
@@ -75,6 +88,20 @@ IncompressibleNavierStokesVMSModule::IncompressibleNavierStokesVMSModule(
     : velocity_space_(std::move(velocity_space))
     , pressure_space_(std::move(pressure_space))
     , options_(std::move(options))
+{
+}
+
+IncompressibleNavierStokesVMSModule::IncompressibleNavierStokesVMSModule(
+    std::shared_ptr<const FE::spaces::FunctionSpace> negative_velocity_space,
+    std::shared_ptr<const FE::spaces::FunctionSpace> negative_pressure_space,
+    std::shared_ptr<const FE::spaces::FunctionSpace> positive_velocity_space,
+    std::shared_ptr<const FE::spaces::FunctionSpace> positive_pressure_space,
+    IncompressibleTwoFluidOptions options)
+    : velocity_space_(std::move(negative_velocity_space))
+    , pressure_space_(std::move(negative_pressure_space))
+    , positive_velocity_space_(std::move(positive_velocity_space))
+    , positive_pressure_space_(std::move(positive_pressure_space))
+    , two_fluid_options_(std::move(options))
 {
 }
 
@@ -208,6 +235,112 @@ public:
     }
 };
 
+// ---------------------------------------------------------------------------
+// Two-fluid composition
+// ---------------------------------------------------------------------------
+
+[[nodiscard]] int resolvedInterfaceMarker(
+    const IncompressibleTwoFluidOptions& options,
+    FE::FieldId level_set_field)
+{
+    FE::interfaces::GeneratedInterfaceMarkerKey key{};
+    key.source =
+        FE::interfaces::LevelSetInterfaceSource::fromField(level_set_field);
+    key.domain_id = options.generated_interface_domain_id;
+    key.isovalue = options.level_set_isovalue;
+    key.requested_marker = options.interface_marker;
+    return FE::interfaces::stableGeneratedInterfaceMarker(key);
+}
+
+void addSharedGaugeEvidence(FE::systems::FESystem& system,
+                            FE::FieldId negative_pressure,
+                            FE::FieldId positive_pressure)
+{
+    constexpr std::string_view source =
+        "Coupled two-fluid shared pressure gauge constraint";
+    for (const auto field : {negative_pressure, positive_pressure}) {
+        system.gaugeRegistry().addAnchoring(FE::gauge::AnchoringEvidence{
+            .field = field,
+            .component = -1,
+            .region = -1,
+            .family = FE::gauge::NullspaceModeFamily::ScalarConstant,
+            .verdict = FE::gauge::AnchoringVerdict::Anchored,
+            .source = std::string(source),
+        });
+    }
+}
+
+[[nodiscard]] IncompressibleNavierStokesVMSOptions makePhaseOptions(
+    const IncompressibleTwoFluidOptions& owner,
+    const IncompressibleTwoFluidPhaseOptions& phase,
+    FreeSurfaceActiveDomain active_domain,
+    int interface_marker)
+{
+    IncompressibleNavierStokesVMSOptions options;
+    options.velocity_field_name = phase.velocity_field_name;
+    options.pressure_field_name = phase.pressure_field_name;
+    options.operator_tag = owner.operator_tag;
+    options.density = phase.density;
+    options.viscosity = phase.viscosity;
+    options.body_force = owner.body_force;
+    options.enable_convection = owner.enable_convection;
+    options.enable_vms = owner.enable_vms;
+    options.ct_m = owner.ct_m;
+    options.ct_c = owner.ct_c;
+    options.stabilization_epsilon = owner.stabilization_epsilon;
+    options.jit_policy = owner.jit_policy;
+    options.velocity_dirichlet = phase.velocity_dirichlet;
+    options.velocity_dirichlet.insert(
+        options.velocity_dirichlet.end(),
+        owner.shared_velocity_dirichlet.begin(),
+        owner.shared_velocity_dirichlet.end());
+
+    IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary interface;
+    interface.role =
+        FreeSurfaceBoundaryRole::InternalMaterialInterfaceVolume;
+    interface.implementation =
+        FreeSurfaceImplementation::UnfittedLevelSet;
+    interface.boundary_marker = -1;
+    interface.interface_marker = interface_marker;
+    interface.level_set_field_name = owner.level_set_field_name;
+    interface.generated_interface_domain_id =
+        owner.generated_interface_domain_id;
+    interface.generated_interface_geometry =
+        owner.generated_interface_geometry;
+    interface.geometry_tangent_policy = owner.geometry_tangent_policy;
+    interface.level_set_isovalue = owner.level_set_isovalue;
+    interface.active_domain = active_domain;
+    interface.active_domain_method =
+        FreeSurfaceActiveDomainMethod::CutVolume;
+    interface.active_domain_smoothing_width = FE::Real{0.0};
+    interface.allow_full_domain_unfitted_free_surface = false;
+    interface.external_pressure = FE::Real{0.0};
+    interface.surface_tension = FE::Real{0.0};
+    interface.surface_tension_form =
+        FreeSurfaceSurfaceTensionForm::Automatic;
+    interface.normal_kinematic_policy =
+        FreeSurfaceNormalKinematicPolicy::None;
+    interface.tangential_mesh_policy =
+        FreeSurfaceTangentialMeshPolicy::Free;
+    interface.kinematic_enforcement =
+        FreeSurfaceKinematicEnforcement::None;
+    interface.cut_cell_stabilization.enabled = true;
+    interface.cut_cell_stabilization.pressure_gradient_penalty =
+        owner.pressure_gradient_penalty;
+    interface.cut_cell_stabilization.pressure_policy =
+        FreeSurfacePressureStabilizationPolicy::Enabled;
+    interface.cut_cell_stabilization.use_cut_metadata_scale =
+        owner.use_cut_metadata_scale;
+    interface.cut_cell_stabilization.cut_metadata_scale_cap =
+        owner.cut_metadata_scale_cap;
+    interface.contact_lines.clear();
+    interface.small_cut_aggregation = true;
+    interface.small_cut_aggregation_guards =
+        owner.small_cut_aggregation_guards;
+    options.free_surface.push_back(std::move(interface));
+    return options;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -216,6 +349,10 @@ public:
 
 void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
 {
+    if (two_fluid_options_) {
+        registerTwoFluidOn(system);
+        return;
+    }
     const auto& o = options_;
     effective_configuration_artifact_.reset();
     diagnostics_ = std::make_shared<fs::DiagnosticRegistry>();   // published through diagnostics()
@@ -383,6 +520,10 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
 void IncompressibleNavierStokesVMSModule::applyInitialConditions(const fs::FESystem& system,
                                                                  FE::backends::GenericVector& u0) const
 {
+    if (two_fluid_options_) {
+        applyTwoFluidInitialConditions(system, u0);
+        return;
+    }
     // u0 and p0 from mesh vertex fields where given; hydrostatic initialization sets
     //   p0(x) = p_ref + rho g . (x - x_ref)   on the liquid support (p_ref on dry vertices).
     const auto& init = options_.hydrostatic_pressure_initialization;
@@ -394,6 +535,241 @@ void IncompressibleNavierStokesVMSModule::applyInitialConditions(const fs::FESys
         return p0;
     };
     initializeNavierStokesState(system, u0, options_, hydrostatic);
+}
+
+// ---------------------------------------------------------------------------
+// The two-fluid mode: the statement above on each side of a generated
+// material interface (the negative phase, then the positive phase), coupled
+// on the interface (NavierStokesBCFactories.h) and through one shared
+// pressure gauge.  velocity_space_ and pressure_space_ are the negative
+// phase's.  The messages keep the two-fluid module's texts.
+// ---------------------------------------------------------------------------
+
+void IncompressibleNavierStokesVMSModule::registerTwoFluidOn(fs::FESystem& system) const
+{
+    const auto& o = *two_fluid_options_;
+    effective_configuration_artifact_.reset();
+    const auto preflight = preflightIncompressibleTwoFluid(system, o, velocity_space_, pressure_space_,
+                                                           positive_velocity_space_, positive_pressure_space_);
+    const auto dimension = preflight.dimension;
+    const auto level_set = preflight.level_set;
+
+    const int interface_marker =
+        resolvedInterfaceMarker(o, level_set);
+    const Factories::IncompressibleTwoFluidInterfaceParameters interface_parameters{
+        .dimension = dimension,
+        .interface_marker = interface_marker,
+        .negative_density = o.negative_phase.density,
+        .positive_density = o.positive_phase.density,
+        .negative_viscosity = o.negative_phase.viscosity,
+        .positive_viscosity = o.positive_phase.viscosity,
+        .nitsche_gamma = o.interface_nitsche_gamma,
+        .surface_tension = o.surface_tension,
+        .include_transient_penalty =
+            o.include_transient_interface_penalty,
+        .prescribed_pressure_jump = o.prescribed_pressure_jump,
+        .prescribed_viscous_traction_jump =
+            o.prescribed_viscous_traction_jump,
+    };
+    const auto interface_weights =
+        Factories::incompressibleTwoFluidInterfaceWeights(interface_parameters);
+
+    auto negative_options = makePhaseOptions(
+        o,
+        o.negative_phase,
+        FreeSurfaceActiveDomain::LevelSetNegative,
+        interface_marker);
+    auto positive_options = makePhaseOptions(
+        o,
+        o.positive_phase,
+        FreeSurfaceActiveDomain::LevelSetPositive,
+        interface_marker);
+
+    IncompressibleNavierStokesVMSModule negative_module(
+        velocity_space_,
+        pressure_space_,
+        std::move(negative_options));
+    IncompressibleNavierStokesVMSModule positive_module(
+        positive_velocity_space_,
+        positive_pressure_space_,
+        std::move(positive_options));
+    negative_module.registerOn(system);
+    positive_module.registerOn(system);
+
+    const auto u_negative = system.findFieldByName(
+        o.negative_phase.velocity_field_name);
+    const auto p_negative = system.findFieldByName(
+        o.negative_phase.pressure_field_name);
+    const auto u_positive = system.findFieldByName(
+        o.positive_phase.velocity_field_name);
+    const auto p_positive = system.findFieldByName(
+        o.positive_phase.pressure_field_name);
+    if (u_negative == FE::INVALID_FIELD_ID ||
+        p_negative == FE::INVALID_FIELD_ID ||
+        u_positive == FE::INVALID_FIELD_ID ||
+        p_positive == FE::INVALID_FIELD_ID) {
+        throw std::logic_error(
+            "IncompressibleTwoFluidModule: phase registration did not create all four unknown fields");
+    }
+
+    using namespace FE::forms;
+    const auto forms = Factories::buildIncompressibleTwoFluidInterfaceForms(
+        StateField(u_negative,
+                   *velocity_space_,
+                   o.negative_phase.velocity_field_name),
+        StateField(p_negative,
+                   *pressure_space_,
+                   o.negative_phase.pressure_field_name),
+        TestField(u_negative, *velocity_space_, "v_negative"),
+        TestField(p_negative, *pressure_space_, "q_negative"),
+        StateField(u_positive,
+                   *positive_velocity_space_,
+                   o.positive_phase.velocity_field_name),
+        StateField(p_positive,
+                   *positive_pressure_space_,
+                   o.positive_phase.pressure_field_name),
+        TestField(u_positive, *positive_velocity_space_, "v_positive"),
+        TestField(p_positive, *positive_pressure_space_, "q_positive"),
+        interface_parameters);
+
+    auto install = physicsInstallOptions(o.jit_policy);
+    install.compiler_options.use_symbolic_tangent = true;
+    install.source_component_tag =
+        o.operator_tag + "_two_fluid_material_interface";
+    install.recordDynamicViscosity(
+        u_negative,
+        o.negative_phase.viscosity,
+        {},
+        "negative_dynamic_viscosity");
+    install.recordDynamicViscosity(
+        u_positive,
+        o.positive_phase.viscosity,
+        {},
+        "positive_dynamic_viscosity");
+    const std::array<FE::FieldId, 4> fields{
+        u_negative, p_negative, u_positive, p_positive};
+    (void)FE::systems::installFormulation(
+        system,
+        o.operator_tag,
+        std::span<const FE::FieldId>(fields),
+        forms.residual,
+        install);
+
+    if (o.shared_pressure_gauge.has_value()) {
+        const auto& gauge = *o.shared_pressure_gauge;
+        std::vector<FE::constraints::VertexDirichletValue> values{
+            FE::constraints::VertexDirichletValue{
+                .vertex_id = gauge.vertex_gid,
+                .value = gauge.pressure,
+            }};
+        system.addSystemConstraint(
+            std::make_unique<FE::constraints::VertexDirichletConstraint>(
+                p_negative,
+                std::move(values),
+                FE::constraints::VertexIdMode::GlobalVertexGid));
+    } else {
+        system.addSystemConstraint(
+            std::make_unique<FE::constraints::CoupledFieldGaugeConstraint>(
+                p_negative, p_positive));
+    }
+    addSharedGaugeEvidence(system, p_negative, p_positive);
+
+    system.declareMaterialInterfaceTransportVelocity(
+        FE::interfaces::MaterialInterfaceTransportVelocityDeclaration{
+            .dimension = dimension,
+            .interface_marker = interface_marker,
+            .level_set_field = level_set,
+            .negative_velocity_field = u_negative,
+            .positive_velocity_field = u_positive,
+            .level_set_isovalue = o.level_set_isovalue,
+            .negative_trace_weight =
+                interface_weights.negative_complement,
+            .positive_trace_weight =
+                interface_weights.positive_complement,
+            .geometry_domain_id = o.generated_interface_domain_id,
+            .owner_component = "incompressible_two_fluid",
+        });
+
+    two_fluid::records(system).declareTwoFluidAcceptedStageDiagnostics(
+        FE::systems::TwoFluidAcceptedStageDiagnosticDeclaration{
+            .interface_marker = interface_marker,
+            .level_set_field = level_set,
+            .negative_velocity_field = u_negative,
+            .negative_pressure_field = p_negative,
+            .positive_velocity_field = u_positive,
+            .positive_pressure_field = p_positive,
+            .operator_tag = o.operator_tag,
+            .geometry_domain_id = o.generated_interface_domain_id,
+            .level_set_isovalue = o.level_set_isovalue,
+            .require_conservative_phase_momentum_reconciliation =
+                o
+                    .require_conservative_phase_momentum_reconciliation,
+            .require_accepted_stage_numerics = true,
+            .pressure_stabilization_coefficient =
+                o.pressure_gradient_penalty,
+            .pressure_stabilization_use_cut_metadata_scale =
+                o.use_cut_metadata_scale,
+            .pressure_stabilization_cut_metadata_scale_cap =
+                o.cut_metadata_scale_cap,
+            .parameters =
+                FE::interfaces::IncompressibleTwoFluidDiagnosticParameters{
+                    .dimension = dimension,
+                    .interface_marker = interface_marker,
+                    .negative_density = o.negative_phase.density,
+                    .positive_density = o.positive_phase.density,
+                    .negative_viscosity = o.negative_phase.viscosity,
+                    .positive_viscosity = o.positive_phase.viscosity,
+                    .nitsche_gamma = o.interface_nitsche_gamma,
+                    .surface_tension = o.surface_tension,
+                    .include_transient_penalty =
+                        o.include_transient_interface_penalty,
+                    .prescribed_pressure_jump =
+                        o.prescribed_pressure_jump,
+                    .prescribed_viscous_traction_jump =
+                        o.prescribed_viscous_traction_jump,
+                    .body_force = o.body_force,
+                },
+            .owner_component = "incompressible_two_fluid",
+        });
+
+    effective_configuration_artifact_ = makeIncompressibleTwoFluidConfigurationArtifact(
+        o, dimension, interface_marker, interface_weights);
+}
+
+void IncompressibleNavierStokesVMSModule::applyTwoFluidInitialConditions(const fs::FESystem& system,
+                                                                         FE::backends::GenericVector& u0) const
+{
+    const auto& o = *two_fluid_options_;
+    const auto level_set =
+        system.findFieldByName(o.level_set_field_name);
+    if (level_set == FE::INVALID_FIELD_ID) {
+        throw std::invalid_argument(
+            "IncompressibleTwoFluidModule: initial conditions require the registered level-set field '" +
+            o.level_set_field_name + "'");
+    }
+    const auto interface_marker =
+        resolvedInterfaceMarker(o, level_set);
+    auto negative_options = makePhaseOptions(
+        o,
+        o.negative_phase,
+        FreeSurfaceActiveDomain::LevelSetNegative,
+        interface_marker);
+    auto positive_options = makePhaseOptions(
+        o,
+        o.positive_phase,
+        FreeSurfaceActiveDomain::LevelSetPositive,
+        interface_marker);
+
+    IncompressibleNavierStokesVMSModule negative_module(
+        velocity_space_,
+        pressure_space_,
+        std::move(negative_options));
+    IncompressibleNavierStokesVMSModule positive_module(
+        positive_velocity_space_,
+        positive_pressure_space_,
+        std::move(positive_options));
+    negative_module.applyInitialConditions(system, u0);
+    positive_module.applyInitialConditions(system, u0);
 }
 
 std::optional<EffectiveConfigurationArtifact>

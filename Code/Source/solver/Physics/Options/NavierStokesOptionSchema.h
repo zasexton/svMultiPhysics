@@ -53,6 +53,10 @@ namespace Physics {
 namespace formulations {
 namespace navier_stokes {
 
+namespace Factories {
+struct IncompressibleTwoFluidInterfaceWeights;
+} // namespace Factories
+
 /// A scalar boundary value: the input is a real number (the free-surface
 /// input reads only steady constants); other kinds are printed by name.
 struct ScalarValueCodec {
@@ -198,6 +202,14 @@ systemTangentialMeshPolicy(FreeSurfaceTangentialMeshPolicy policy);
     const FE::systems::FESystem& system,
     int dimension,
     bool effective_enable_vms);
+
+/// The effective configuration of the two-fluid mode: artifact_schema_version
+/// 3, component "incompressible_two_fluid", with the interface weights.
+[[nodiscard]] EffectiveConfigurationArtifact makeIncompressibleTwoFluidConfigurationArtifact(
+    const IncompressibleTwoFluidOptions& options,
+    int dimension,
+    int interface_marker,
+    const Factories::IncompressibleTwoFluidInterfaceWeights& weights);
 
 } // namespace navier_stokes
 } // namespace formulations

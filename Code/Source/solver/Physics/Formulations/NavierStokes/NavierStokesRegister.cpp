@@ -1,6 +1,5 @@
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
-#include "Physics/Formulations/NavierStokes/IncompressibleTwoFluidModule.h"
 
 #include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Core/JITRuntimePolicy.h"
@@ -2491,7 +2490,7 @@ create_incompressible_two_fluid_from_input(
     svmp::FE::systems::FESystem& system)
 {
   using Module = svmp::Physics::formulations::navier_stokes::
-      IncompressibleTwoFluidModule;
+      IncompressibleNavierStokesVMSModule;   // the two-fluid mode
   auto translated = translate_incompressible_two_fluid_input(input, system);
   auto module = std::make_unique<Module>(
       translated.velocity_space,

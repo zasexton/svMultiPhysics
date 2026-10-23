@@ -38,6 +38,7 @@
 #include "FE/Systems/BoundaryConditionManager.h"
 #include "FE/Systems/ALEBinding.h"
 #include "FE/Systems/FESystem.h"
+#include "FE/Spaces/ProductSpace.h"
 #include "FE/Systems/FormsInstaller.h"
 #include "FE/Systems/SystemCollectives.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
@@ -1660,6 +1661,418 @@ bool hasNativeMeshOrWarn(const FE::systems::FESystem& system)
             "is unavailable in this FESystem");
     }
     return native_mesh_available;
+}
+
+
+// ---------------------------------------------------------------------------
+// The two-fluid mode (was IncompressibleTwoFluidModule)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+[[nodiscard]] bool twoFluidSpacesCompatible(
+    const FE::spaces::FunctionSpace& lhs,
+    const FE::spaces::FunctionSpace& rhs) noexcept
+{
+    return lhs.element_type() == rhs.element_type() &&
+           lhs.polynomial_order() == rhs.polynomial_order() &&
+           lhs.continuity() == rhs.continuity() &&
+           lhs.value_dimension() == rhs.value_dimension();
+}
+
+void requireFinitePositive(FE::Real value, std::string_view name)
+{
+    if (!std::isfinite(value) || !(value > FE::Real{0.0})) {
+        throw std::invalid_argument(
+            "IncompressibleTwoFluidModule: " + std::string(name) +
+            " must be finite and positive");
+    }
+}
+
+enum class VelocityBoundaryDataPolicy {
+    HomogeneousPhaseLocal,
+    SharedExternalData,
+};
+
+void validateSharedVelocityBoundaryValue(
+    const IncompressibleNavierStokesVMSOptions::ScalarValue& value,
+    std::string_view scope)
+{
+    if (const auto* literal = std::get_if<FE::Real>(&value)) {
+        if (!std::isfinite(*literal)) {
+            throw std::invalid_argument(
+                "[svMultiPhysics::Physics] "
+                "unsupported_two_fluid_nonfinite_shared_velocity_boundary:" +
+                std::string(scope));
+        }
+        return;
+    }
+    if (const auto* coefficient =
+            std::get_if<FE::forms::ScalarCoefficient>(&value)) {
+        if (!*coefficient) {
+            throw std::invalid_argument(
+                "[svMultiPhysics::Physics] "
+                "unsupported_two_fluid_empty_shared_velocity_coefficient:" +
+                std::string(scope));
+        }
+        return;
+    }
+    if (const auto* coefficient =
+            std::get_if<FE::forms::TimeScalarCoefficient>(&value)) {
+        if (!*coefficient) {
+            throw std::invalid_argument(
+                "[svMultiPhysics::Physics] "
+                "unsupported_two_fluid_empty_shared_velocity_coefficient:" +
+                std::string(scope));
+        }
+        return;
+    }
+    throw std::invalid_argument(
+        "[svMultiPhysics::Physics] "
+        "unsupported_two_fluid_shared_velocity_form_expression:" +
+        std::string(scope));
+}
+
+void validateVelocityBoundaryData(
+    std::span<const IncompressibleNavierStokesVMSOptions::VelocityDirichletBC>
+        boundaries,
+    std::string_view scope,
+    VelocityBoundaryDataPolicy policy)
+{
+    std::set<int> markers;
+    for (const auto& boundary : boundaries) {
+        if (boundary.boundary_marker < 0) {
+            throw std::invalid_argument(
+                "[svMultiPhysics::Physics] "
+                "unsupported_two_fluid_negative_velocity_boundary_marker:" +
+                std::string(scope));
+        }
+        if (!markers.insert(boundary.boundary_marker).second) {
+            throw std::invalid_argument(
+                "[svMultiPhysics::Physics] "
+                "unsupported_two_fluid_duplicate_velocity_boundary_marker:" +
+                std::string(scope));
+        }
+        for (std::size_t component = 0u;
+             component < boundary.active_components.size(); ++component) {
+            if (!boundary.active_components[component]) {
+                continue;
+            }
+            if (policy == VelocityBoundaryDataPolicy::SharedExternalData) {
+                validateSharedVelocityBoundaryValue(
+                    boundary.value[component], scope);
+            } else if (!FE::forms::bc::isZeroConstantScalarValue(
+                           boundary.value[component])) {
+                throw std::invalid_argument(
+                    "[svMultiPhysics::Physics] "
+                    "unsupported_two_fluid_nonhomogeneous_velocity_boundary:" +
+                    std::string(scope));
+            }
+        }
+    }
+}
+
+void validateNoSharedVelocityBoundaryOverlap(
+    std::span<const IncompressibleNavierStokesVMSOptions::VelocityDirichletBC>
+        shared,
+    std::span<const IncompressibleNavierStokesVMSOptions::VelocityDirichletBC>
+        phase_local,
+    std::string_view phase)
+{
+    std::set<int> shared_markers;
+    for (const auto& boundary : shared) {
+        shared_markers.insert(boundary.boundary_marker);
+    }
+    for (const auto& boundary : phase_local) {
+        if (shared_markers.find(boundary.boundary_marker) !=
+            shared_markers.end()) {
+            throw std::invalid_argument(
+                "[svMultiPhysics::Physics] "
+                "unsupported_two_fluid_overlapping_shared_velocity_boundary_marker:" +
+                std::string(phase));
+        }
+    }
+}
+
+void validateVelocitySpace(
+    const std::shared_ptr<const FE::spaces::FunctionSpace>& space,
+    std::string_view phase)
+{
+    if (!space) {
+        throw std::invalid_argument(
+            "IncompressibleTwoFluidModule: null " + std::string(phase) +
+            " velocity space");
+    }
+    const auto product = std::dynamic_pointer_cast<
+        const FE::spaces::ProductSpace>(space);
+    const auto dim = space->value_dimension();
+    const bool supported_cell =
+        (dim == 2 && space->element_type() == FE::ElementType::Triangle3) ||
+        (dim == 3 && space->element_type() == FE::ElementType::Tetra4);
+    if (!product || !supported_cell || space->polynomial_order() != 1 ||
+        space->continuity() != FE::Continuity::C0) {
+        throw std::invalid_argument(
+            "IncompressibleTwoFluidModule: phase velocity spaces must be affine C0 P1 Product H1 spaces on Triangle3 or Tetra4 cells");
+    }
+}
+
+void validatePressureSpace(
+    const std::shared_ptr<const FE::spaces::FunctionSpace>& space,
+    const FE::spaces::FunctionSpace& velocity_space,
+    std::string_view phase)
+{
+    if (!space || space->value_dimension() != 1 ||
+        space->space_type() != FE::spaces::SpaceType::H1 ||
+        space->element_type() != velocity_space.element_type() ||
+        space->polynomial_order() != 1 ||
+        space->continuity() != FE::Continuity::C0) {
+        throw std::invalid_argument(
+            "IncompressibleTwoFluidModule: " + std::string(phase) +
+            " pressure space must be a matching scalar affine C0 P1 H1 space");
+    }
+}
+
+void validateExistingUnknownField(
+    const FE::systems::FESystem& system,
+    std::string_view name,
+    const FE::spaces::FunctionSpace& space,
+    int components)
+{
+    const auto field = system.findFieldByName(name);
+    if (field == FE::INVALID_FIELD_ID) {
+        return;
+    }
+    const auto& record = system.fieldRecord(field);
+    if (record.source_kind != FE::systems::FieldSourceKind::Unknown ||
+        record.components != components || !record.space ||
+        !twoFluidSpacesCompatible(*record.space, space)) {
+        throw std::invalid_argument(
+            "IncompressibleTwoFluidModule: existing field '" +
+            std::string(name) +
+            "' is incompatible with the requested phase unknown");
+    }
+}
+
+} // namespace
+
+void validateIncompressibleTwoFluidConfigurationSemantics(
+    const IncompressibleTwoFluidOptions& options)
+{
+    for (const auto acceleration : options.body_force) {
+        if (!std::isfinite(acceleration)) {
+            throw std::invalid_argument(
+                "[svMultiPhysics::Physics] "
+                "unsupported_two_fluid_nonfinite_body_force");
+        }
+    }
+    if (options.prescribed_pressure_jump.has_value() &&
+        !std::isfinite(*options.prescribed_pressure_jump)) {
+        throw std::invalid_argument(
+            "[svMultiPhysics::Physics] "
+            "unsupported_two_fluid_nonfinite_prescribed_pressure_jump");
+    }
+    if (options.prescribed_viscous_traction_jump.has_value() &&
+        !std::all_of(
+            options.prescribed_viscous_traction_jump->begin(),
+            options.prescribed_viscous_traction_jump->end(),
+            [](FE::Real value) { return std::isfinite(value); })) {
+        throw std::invalid_argument(
+            "[svMultiPhysics::Physics] "
+            "unsupported_two_fluid_nonfinite_prescribed_viscous_traction_jump");
+    }
+    if (options.shared_pressure_gauge.has_value() &&
+        options.shared_pressure_gauge->vertex_gid < 0) {
+        throw std::invalid_argument(
+            "[svMultiPhysics::Physics] "
+            "unsupported_two_fluid_negative_shared_pressure_gauge_vertex_gid");
+    }
+    if (options.shared_pressure_gauge.has_value() &&
+        !std::isfinite(options.shared_pressure_gauge->pressure)) {
+        throw std::invalid_argument(
+            "[svMultiPhysics::Physics] "
+            "unsupported_two_fluid_nonfinite_shared_pressure_gauge_value");
+    }
+    validateVelocityBoundaryData(
+        options.negative_phase.velocity_dirichlet,
+        "negative-phase",
+        VelocityBoundaryDataPolicy::HomogeneousPhaseLocal);
+    validateVelocityBoundaryData(
+        options.positive_phase.velocity_dirichlet,
+        "positive-phase",
+        VelocityBoundaryDataPolicy::HomogeneousPhaseLocal);
+    validateVelocityBoundaryData(
+        options.shared_velocity_dirichlet,
+        "shared",
+        VelocityBoundaryDataPolicy::SharedExternalData);
+    validateNoSharedVelocityBoundaryOverlap(
+        options.shared_velocity_dirichlet,
+        options.negative_phase.velocity_dirichlet,
+        "negative-phase");
+    validateNoSharedVelocityBoundaryOverlap(
+        options.shared_velocity_dirichlet,
+        options.positive_phase.velocity_dirichlet,
+        "positive-phase");
+}
+
+IncompressibleTwoFluidPreflight preflightIncompressibleTwoFluid(
+    const FE::systems::FESystem& system,
+    const IncompressibleTwoFluidOptions& options,
+    const std::shared_ptr<const FE::spaces::FunctionSpace>& negative_velocity_space,
+    const std::shared_ptr<const FE::spaces::FunctionSpace>& negative_pressure_space,
+    const std::shared_ptr<const FE::spaces::FunctionSpace>& positive_velocity_space,
+    const std::shared_ptr<const FE::spaces::FunctionSpace>& positive_pressure_space)
+{
+    validateVelocitySpace(negative_velocity_space, "negative-phase");
+    validateVelocitySpace(positive_velocity_space, "positive-phase");
+    validatePressureSpace(
+        negative_pressure_space, *negative_velocity_space, "negative-phase");
+    validatePressureSpace(
+        positive_pressure_space, *positive_velocity_space, "positive-phase");
+    const auto dimension = negative_velocity_space->value_dimension();
+    if (positive_velocity_space->value_dimension() != dimension ||
+        !twoFluidSpacesCompatible(*negative_velocity_space,
+                          *positive_velocity_space) ||
+        !twoFluidSpacesCompatible(*negative_pressure_space,
+                          *positive_pressure_space)) {
+        throw std::invalid_argument(
+            "IncompressibleTwoFluidModule: both phases must use matching velocity and pressure spaces");
+    }
+    if (dimension == 2 && options.body_force[2] != FE::Real{0.0}) {
+        throw std::invalid_argument(
+            "[svMultiPhysics::Physics] "
+            "unsupported_two_fluid_out_of_plane_body_force");
+    }
+    if (options.prescribed_viscous_traction_jump.has_value() &&
+        dimension == 2 &&
+        (*options.prescribed_viscous_traction_jump)[2] != FE::Real{0.0}) {
+        throw std::invalid_argument(
+            "[svMultiPhysics::Physics] "
+            "unsupported_two_fluid_out_of_plane_prescribed_viscous_traction_jump");
+    }
+
+    const std::array<std::string_view, 5> field_names{
+        options.negative_phase.velocity_field_name,
+        options.negative_phase.pressure_field_name,
+        options.positive_phase.velocity_field_name,
+        options.positive_phase.pressure_field_name,
+        options.level_set_field_name,
+    };
+    for (const auto name : field_names) {
+        if (name.empty()) {
+            throw std::invalid_argument(
+                "IncompressibleTwoFluidModule: field names must be nonempty");
+        }
+    }
+    for (std::size_t i = 0; i < field_names.size(); ++i) {
+        for (std::size_t j = i + 1u; j < field_names.size(); ++j) {
+            if (field_names[i] == field_names[j]) {
+                throw std::invalid_argument(
+                    "IncompressibleTwoFluidModule: all phase and level-set field names must be distinct");
+            }
+        }
+    }
+    if (options.operator_tag.empty() ||
+        options.generated_interface_domain_id.empty()) {
+        throw std::invalid_argument(
+            "IncompressibleTwoFluidModule: operator tag and generated-interface domain must be nonempty");
+    }
+    if (options.generated_interface_geometry != "LinearCorner" ||
+        options.geometry_tangent_policy !=
+            "RefreshedFrozenQuadrature") {
+        throw std::invalid_argument(
+            "IncompressibleTwoFluidModule: the initial envelope requires LinearCorner generated geometry with RefreshedFrozenQuadrature tangents");
+    }
+    if (!std::isfinite(options.level_set_isovalue) ||
+        !std::isfinite(options.surface_tension) ||
+        options.surface_tension < FE::Real{0.0}) {
+        throw std::invalid_argument(
+            "IncompressibleTwoFluidModule: level-set isovalue and nonnegative surface tension must be finite");
+    }
+    if (!options.enable_vms) {
+        throw std::invalid_argument(
+            "IncompressibleTwoFluidModule: the affine equal-order initial envelope requires phasewise VMS/PSPG stabilization");
+    }
+    requireFinitePositive(
+        options.negative_phase.density, "negative density");
+    requireFinitePositive(
+        options.positive_phase.density, "positive density");
+    requireFinitePositive(
+        options.negative_phase.viscosity, "negative viscosity");
+    requireFinitePositive(
+        options.positive_phase.viscosity, "positive viscosity");
+    requireFinitePositive(
+        options.interface_nitsche_gamma, "interface Nitsche gamma");
+    requireFinitePositive(options.ct_m, "VMS ct_m");
+    requireFinitePositive(options.ct_c, "VMS ct_c");
+    requireFinitePositive(
+        options.stabilization_epsilon, "stabilization epsilon");
+    requireFinitePositive(
+        options.pressure_gradient_penalty,
+        "pressure-gradient ghost penalty");
+    if (options.cut_metadata_scale_cap.has_value() &&
+        (!std::isfinite(*options.cut_metadata_scale_cap) ||
+         *options.cut_metadata_scale_cap < FE::Real{1.0})) {
+        throw std::invalid_argument(
+            "IncompressibleTwoFluidModule: cut metadata scale cap must be finite and at least one");
+    }
+    const auto& guards = options.small_cut_aggregation_guards;
+    if (guards.maximum_root_path_length == 0u ||
+        !std::isfinite(guards.maximum_reference_extrapolation_distance) ||
+        guards.maximum_reference_extrapolation_distance < FE::Real{0.0} ||
+        !std::isfinite(guards.maximum_absolute_coefficient) ||
+        guards.maximum_absolute_coefficient < FE::Real{1.0} ||
+        !std::isfinite(guards.maximum_row_l1_norm) ||
+        guards.maximum_row_l1_norm < guards.maximum_absolute_coefficient) {
+        throw std::invalid_argument(
+            "IncompressibleTwoFluidModule: invalid small-cut aggregation guards");
+    }
+    validateIncompressibleTwoFluidConfigurationSemantics(options);
+
+    const auto level_set =
+        system.findFieldByName(options.level_set_field_name);
+    if (level_set == FE::INVALID_FIELD_ID) {
+        throw std::invalid_argument(
+            "IncompressibleTwoFluidModule: level-set field '" +
+            options.level_set_field_name +
+            "' must be registered before the coupled fluid owner");
+    }
+    const auto& level_set_record = system.fieldRecord(level_set);
+    const bool supported_level_set_source =
+        level_set_record.source_kind ==
+            FE::systems::FieldSourceKind::Unknown ||
+        level_set_record.source_kind ==
+            FE::systems::FieldSourceKind::PrescribedData;
+    if (!supported_level_set_source || level_set_record.components != 1 ||
+        !level_set_record.space ||
+        level_set_record.space->space_type() !=
+            FE::spaces::SpaceType::H1 ||
+        !twoFluidSpacesCompatible(*level_set_record.space,
+                          *negative_pressure_space)) {
+        throw std::invalid_argument(
+            "IncompressibleTwoFluidModule: level-set field must be a prescribed or unknown scalar field in the matching affine C0 P1 space");
+    }
+
+    validateExistingUnknownField(
+        system,
+        options.negative_phase.velocity_field_name,
+        *negative_velocity_space,
+        dimension);
+    validateExistingUnknownField(
+        system,
+        options.negative_phase.pressure_field_name,
+        *negative_pressure_space,
+        1);
+    validateExistingUnknownField(
+        system,
+        options.positive_phase.velocity_field_name,
+        *positive_velocity_space,
+        dimension);
+    validateExistingUnknownField(
+        system,
+        options.positive_phase.pressure_field_name,
+        *positive_pressure_space,
+        1);
+    return IncompressibleTwoFluidPreflight{.dimension = dimension, .level_set = level_set};
 }
 
 } // namespace navier_stokes

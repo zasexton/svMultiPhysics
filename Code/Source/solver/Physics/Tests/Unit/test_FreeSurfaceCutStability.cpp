@@ -28,7 +28,6 @@
 #include <gtest/gtest.h>
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
-#include "Physics/Formulations/NavierStokes/IncompressibleTwoFluidModule.h"
 
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Core/AggregationGuardDiagnostics.h"
@@ -5843,7 +5842,7 @@ template <typename MatrixGlobalizer>
         options.positive_phase = target_phase;
     }
 
-    ns::IncompressibleTwoFluidModule module(
+    ns::IncompressibleNavierStokesVMSModule module(
         velocity_space,
         pressure_space,
         velocity_space,
@@ -12687,7 +12686,7 @@ TEST(FreeSurfaceCutStabilityMPI,
     options.prescribed_viscous_traction_jump =
         std::array<FE::Real, 3>{{1.0, 2.0, 3.0}};
     options.require_conservative_phase_momentum_reconciliation = true;
-    ns::IncompressibleTwoFluidModule module(
+    ns::IncompressibleNavierStokesVMSModule module(
         velocity_space,
         pressure_space,
         velocity_space,

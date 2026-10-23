@@ -1284,6 +1284,282 @@ tangentialPolicyProvenance(
     };
 }
 
+
+// ---------------------------------------------------------------------------
+// The two-fluid artifact (artifact_schema_version 3; was IncompressibleTwoFluidModule)
+// ---------------------------------------------------------------------------
+
+namespace {
+namespace two_fluid_artifact {
+
+[[nodiscard]] std::string jsonString(std::string_view value)
+{
+    std::string out{"\""};
+    for (const unsigned char c : value) {
+        switch (c) {
+        case '\"':
+            out += "\\\"";
+            break;
+        case '\\':
+            out += "\\\\";
+            break;
+        case '\b':
+            out += "\\b";
+            break;
+        case '\f':
+            out += "\\f";
+            break;
+        case '\n':
+            out += "\\n";
+            break;
+        case '\r':
+            out += "\\r";
+            break;
+        case '\t':
+            out += "\\t";
+            break;
+        default:
+            if (c < 0x20u) {
+                std::ostringstream escaped;
+                escaped << "\\u" << std::hex << std::setw(4)
+                        << std::setfill('0') << static_cast<unsigned int>(c);
+                out += escaped.str();
+            } else {
+                out.push_back(static_cast<char>(c));
+            }
+            break;
+        }
+    }
+    out.push_back('\"');
+    return out;
+}
+
+[[nodiscard]] std::string jsonReal(FE::Real value)
+{
+    if (!std::isfinite(value)) {
+        throw std::invalid_argument(
+            "IncompressibleTwoFluidModule: effective configuration contains a non-finite scalar");
+    }
+    std::ostringstream out;
+    out.imbue(std::locale::classic());
+    out << std::setprecision(std::numeric_limits<FE::Real>::max_digits10)
+        << value;
+    return out.str();
+}
+
+[[nodiscard]] constexpr const char* jsonBool(bool value) noexcept
+{
+    return value ? "true" : "false";
+}
+
+[[nodiscard]] std::string sharedVelocityValueArtifact(
+    const IncompressibleNavierStokesVMSOptions::ScalarValue& value)
+{
+    if (const auto* literal = std::get_if<FE::Real>(&value)) {
+        return "{\"kind\":\"literal\",\"value\":" +
+               jsonReal(*literal) + '}';
+    }
+    if (std::holds_alternative<FE::forms::ScalarCoefficient>(value)) {
+        return R"({"kind":"spatial_coefficient"})";
+    }
+    if (std::holds_alternative<FE::forms::TimeScalarCoefficient>(value)) {
+        return R"({"kind":"time_coefficient"})";
+    }
+    return R"({"kind":"form_expression"})";
+}
+
+void appendVelocityBoundaryArtifact(
+    std::ostringstream& out,
+    const IncompressibleTwoFluidOptions& options,
+    int dimension)
+{
+    out << ",\"boundary_conditions\":{"
+        << "\"shared_velocity_dirichlet_count\":"
+        << options.shared_velocity_dirichlet.size()
+        << ",\"shared_velocity_dirichlet_policy\":"
+        << jsonString(
+               "identical_external_data_on_both_phase_restrictions")
+        << ",\"shared_velocity_dirichlet\":[";
+    for (std::size_t boundary_index = 0u;
+         boundary_index < options.shared_velocity_dirichlet.size();
+         ++boundary_index) {
+        if (boundary_index != 0u) {
+            out << ',';
+        }
+        const auto& boundary =
+            options.shared_velocity_dirichlet[boundary_index];
+        out << "{\"marker\":" << boundary.boundary_marker
+            << ",\"active_components\":[";
+        for (int component = 0; component < dimension; ++component) {
+            if (component != 0) {
+                out << ',';
+            }
+            out << jsonBool(
+                boundary.active_components[static_cast<std::size_t>(
+                    component)]);
+        }
+        out << "],\"values\":[";
+        for (int component = 0; component < dimension; ++component) {
+            if (component != 0) {
+                out << ',';
+            }
+            out << sharedVelocityValueArtifact(
+                boundary.value[static_cast<std::size_t>(component)]);
+        }
+        out << "]}";
+    }
+    out << "]"
+        << ",\"negative_phase_local_velocity_dirichlet_count\":"
+        << options.negative_phase.velocity_dirichlet.size()
+        << ",\"positive_phase_local_velocity_dirichlet_count\":"
+        << options.positive_phase.velocity_dirichlet.size() << '}';
+}
+
+[[nodiscard]] EffectiveConfigurationArtifact makeArtifact(
+    const IncompressibleTwoFluidOptions& options,
+    int dimension,
+    int interface_marker,
+    const Factories::IncompressibleTwoFluidInterfaceWeights& weights)
+{
+    std::ostringstream out;
+    out.imbue(std::locale::classic());
+    out << "{\"artifact_schema_version\":3"
+        << ",\"component\":\"incompressible_two_fluid\""
+        << ",\"capability_label\":\"incompressible_two_phase_sharp_interface_initial_envelope\""
+        << ",\"momentum_operator\":"
+        << jsonString(options.enable_convection ? "navier_stokes" : "stokes")
+        << ",\"fields\":{\"negative_velocity\":"
+        << jsonString(options.negative_phase.velocity_field_name)
+        << ",\"negative_pressure\":"
+        << jsonString(options.negative_phase.pressure_field_name)
+        << ",\"positive_velocity\":"
+        << jsonString(options.positive_phase.velocity_field_name)
+        << ",\"positive_pressure\":"
+        << jsonString(options.positive_phase.pressure_field_name)
+        << ",\"level_set\":" << jsonString(options.level_set_field_name)
+        << ",\"operator\":" << jsonString(options.operator_tag)
+        << ",\"dimension\":" << dimension << '}'
+        << ",\"material\":{\"negative_density\":"
+        << jsonReal(options.negative_phase.density)
+        << ",\"negative_viscosity\":"
+        << jsonReal(options.negative_phase.viscosity)
+        << ",\"positive_density\":"
+        << jsonReal(options.positive_phase.density)
+        << ",\"positive_viscosity\":"
+        << jsonReal(options.positive_phase.viscosity) << '}'
+        << ",\"body_force\":[";
+    for (int component = 0; component < dimension; ++component) {
+        if (component != 0) {
+            out << ',';
+        }
+        out << jsonReal(
+            options.body_force[static_cast<std::size_t>(component)]);
+    }
+    out << ']'
+        << ",\"hydrostatic_balance_diagnostic\":\"phasewise_integrated_pressure_gradient_minus_density_body_force\""
+        << ",\"interface\":{\"marker\":" << interface_marker
+        << ",\"domain\":"
+        << jsonString(options.generated_interface_domain_id)
+        << ",\"isovalue\":" << jsonReal(options.level_set_isovalue)
+        << ",\"geometry\":"
+        << jsonString(options.generated_interface_geometry)
+        << ",\"geometry_tangent_policy\":"
+        << jsonString(options.geometry_tangent_policy)
+        << ",\"surface_tension\":" << jsonReal(options.surface_tension)
+        << ",\"prescribed_pressure_jump_mode\":\"manufactured_normal_traction_and_diagnostic_target\""
+        << ",\"prescribed_pressure_jump_applicable\":"
+        << jsonBool(options.prescribed_pressure_jump.has_value());
+    if (options.prescribed_pressure_jump.has_value()) {
+        out << ",\"prescribed_pressure_jump\":"
+            << jsonReal(*options.prescribed_pressure_jump);
+    }
+    out << ",\"prescribed_viscous_traction_jump_mode\":\"manufactured_global_viscous_traction_and_composed_stress_target\""
+        << ",\"prescribed_viscous_traction_jump_applicable\":"
+        << jsonBool(options.prescribed_viscous_traction_jump.has_value());
+    if (options.prescribed_viscous_traction_jump.has_value()) {
+        out << ",\"prescribed_viscous_traction_jump\":[";
+        for (int component = 0; component < dimension; ++component) {
+            if (component != 0) {
+                out << ',';
+            }
+            out << jsonReal(
+                (*options.prescribed_viscous_traction_jump)
+                    [static_cast<std::size_t>(component)]);
+        }
+        out << ']';
+    }
+    out
+        << ",\"nitsche_gamma\":"
+        << jsonReal(options.interface_nitsche_gamma)
+        << ",\"transient_penalty\":"
+        << jsonBool(options.include_transient_interface_penalty)
+        << ",\"negative_traction_weight\":"
+        << jsonReal(weights.negative_traction)
+        << ",\"positive_traction_weight\":"
+        << jsonReal(weights.positive_traction)
+        << ",\"harmonic_viscosity\":"
+        << jsonReal(weights.harmonic_viscosity)
+        << ",\"harmonic_density\":"
+        << jsonReal(weights.harmonic_density) << '}'
+        << ",\"stabilization\":{\"phasewise_vms_pspg\":"
+        << jsonBool(options.enable_vms)
+        << ",\"phasewise_pressure_ghost_penalty\":true"
+        << ",\"phasewise_small_cut_aggregation\":true"
+        << ",\"pressure_gradient_penalty\":"
+        << jsonReal(options.pressure_gradient_penalty)
+        << ",\"use_cut_metadata_scale\":"
+        << jsonBool(options.use_cut_metadata_scale)
+        << ",\"cut_metadata_scale_cap\":";
+    if (options.cut_metadata_scale_cap.has_value()) {
+        out << jsonReal(*options.cut_metadata_scale_cap);
+    } else {
+        out << "null";
+    }
+    out << '}';
+    appendVelocityBoundaryArtifact(out, options, dimension);
+    out << ",\"pressure_space\":{\"representation\":\"separate_phase_fields\",\"shared_gauge_count\":1";
+    if (options.shared_pressure_gauge.has_value()) {
+        out << ",\"shared_gauge_policy\":\"explicit_global_vertex_gid\""
+            << ",\"shared_gauge_field\":"
+            << jsonString(options.negative_phase.pressure_field_name)
+            << ",\"shared_gauge_id_type\":\"Global_vertex_gid\""
+            << ",\"shared_gauge_vertex_gid\":"
+            << options.shared_pressure_gauge->vertex_gid
+            << ",\"shared_gauge_value\":"
+            << jsonReal(options.shared_pressure_gauge->pressure);
+    } else {
+        out << ",\"shared_gauge_policy\":\"automatic_first_unconstrained_pressure_dof\""
+            << ",\"shared_gauge_field\":null"
+            << ",\"shared_gauge_id_type\":null"
+            << ",\"shared_gauge_vertex_gid\":null"
+            << ",\"shared_gauge_value\":0";
+    }
+    out << '}'
+        << ",\"solver_contract\":{\"backend\":\"FSILS\",\"method\":\"BlockSchur\",\"unknown_role_order\":[\"material_interface_level_set\",\"conservative_phase_indicator\",\"negative_velocity\",\"positive_velocity\",\"negative_pressure\",\"positive_pressure\"],\"blocks\":[{\"name\":\"TwoFluidMaterialInterfaceComputationalPrimary\",\"role\":\"primary\"},{\"name\":\"TwoFluidPressureConstraints\",\"role\":\"constraint\"}],\"generic_fallback_allowed\":false}"
+        << ",\"phase_transport_coupling\":{\"owner\":\"declared_material_interface_phase_pair\",\"weak_bulk_velocity\":\"sharp_phase_local\",\"weak_interface_trace\":\"complementary_weighted\",\"conservative_graph_velocity\":\"complementary_weighted_every_node\",\"momentum_reconciliation_required\":"
+        << jsonBool(
+               options.require_conservative_phase_momentum_reconciliation)
+        << ",\"momentum_reconciliation_policy\":\"phasewise_fail_closed_no_hidden_velocity_update\"}"
+        << ",\"accepted_stage_evidence\":{\"required\":true,\"operator_stage_interface_mass_momentum_flux\":true,\"canonical_phase_aggregation\":true,\"pressure_stabilization_configuration\":true,\"shared_coupled_nonlinear_linear_report\":true,\"timing_values_retained\":false,\"rank_local_aggregation_lineage_retained\":false,\"phase_resolved_iterations\":\"unavailable_from_shared_backend\",\"pressure_stabilization_work\":\"not_separately_resolved_by_coupled_operator\"}"
+        << ",\"exclusions\":[\"compressible_gas\",\"trapped_gas_pressure\",\"air_cushioning\",\"phase_change\",\"contact\",\"moving_mesh\",\"variable_material_laws\",\"turbulence\"]}";
+    return EffectiveConfigurationArtifact{
+        .component = "incompressible_two_fluid",
+        .json = out.str(),
+    };
+}
+
+} // namespace two_fluid_artifact
+} // namespace
+
+EffectiveConfigurationArtifact makeIncompressibleTwoFluidConfigurationArtifact(
+    const IncompressibleTwoFluidOptions& options,
+    int dimension,
+    int interface_marker,
+    const Factories::IncompressibleTwoFluidInterfaceWeights& weights)
+{
+    return two_fluid_artifact::makeArtifact(options, dimension, interface_marker, weights);
+}
+
 } // namespace navier_stokes
 } // namespace formulations
 } // namespace Physics

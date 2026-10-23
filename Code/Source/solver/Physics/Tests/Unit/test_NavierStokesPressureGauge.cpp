@@ -8,7 +8,6 @@
 #include <gtest/gtest.h>
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
-#include "Physics/Formulations/NavierStokes/IncompressibleTwoFluidModule.h"
 #include "Physics/Materials/Fluid/CarreauYasudaViscosity.h"
 
 #include "Analysis/ConstitutiveLawMetadata.h"
@@ -986,7 +985,7 @@ TEST(NavierStokesInitialConditions,
 
     formulations::navier_stokes::IncompressibleTwoFluidOptions options;
     options.interface_marker = 71;
-    formulations::navier_stokes::IncompressibleTwoFluidModule module(
+    formulations::navier_stokes::IncompressibleNavierStokesVMSModule module(
         velocity_space,
         scalar_space,
         velocity_space,

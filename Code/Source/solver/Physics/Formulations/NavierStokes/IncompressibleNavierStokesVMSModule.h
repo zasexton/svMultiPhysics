@@ -1044,7 +1044,7 @@ contactLineWallNormal(const FreeSurfaceContactLine& contact_line)
 }
 
 // ---------------------------------------------------------------------------
-// Two-fluid options (IncompressibleTwoFluidModule)
+// Two-fluid options (the two-fluid mode of IncompressibleNavierStokesVMSModule)
 // ---------------------------------------------------------------------------
 
 struct IncompressibleTwoFluidPhaseOptions {
@@ -1183,6 +1183,15 @@ public:
                                         std::shared_ptr<const FE::spaces::FunctionSpace> pressure_space,
                                         IncompressibleNavierStokesVMSOptions options = {});
 
+    /// The two-fluid mode: one incompressible fluid on each side of a
+    /// generated material interface (the negative and the positive phase),
+    /// coupled on the interface and through one shared pressure gauge.
+    IncompressibleNavierStokesVMSModule(std::shared_ptr<const FE::spaces::FunctionSpace> negative_velocity_space,
+                                        std::shared_ptr<const FE::spaces::FunctionSpace> negative_pressure_space,
+                                        std::shared_ptr<const FE::spaces::FunctionSpace> positive_velocity_space,
+                                        std::shared_ptr<const FE::spaces::FunctionSpace> positive_pressure_space,
+                                        IncompressibleTwoFluidOptions options = {});
+
     void registerOn(FE::systems::FESystem& system) const override;
     void applyInitialConditions(const FE::systems::FESystem& system,
                                 FE::backends::GenericVector& u0) const override;
@@ -1197,9 +1206,16 @@ public:
     }
 
 private:
-    std::shared_ptr<const FE::spaces::FunctionSpace> velocity_space_{};
+    void registerTwoFluidOn(FE::systems::FESystem& system) const;
+    void applyTwoFluidInitialConditions(const FE::systems::FESystem& system,
+                                        FE::backends::GenericVector& u0) const;
+
+    std::shared_ptr<const FE::spaces::FunctionSpace> velocity_space_{};   ///< the negative phase's in the two-fluid mode
     std::shared_ptr<const FE::spaces::FunctionSpace> pressure_space_{};
+    std::shared_ptr<const FE::spaces::FunctionSpace> positive_velocity_space_{};   ///< two-fluid mode only
+    std::shared_ptr<const FE::spaces::FunctionSpace> positive_pressure_space_{};
     IncompressibleNavierStokesVMSOptions options_{};
+    std::optional<IncompressibleTwoFluidOptions> two_fluid_options_{};   ///< set in the two-fluid mode
     mutable std::optional<EffectiveConfigurationArtifact>
         effective_configuration_artifact_{};
     mutable std::shared_ptr<FE::systems::DiagnosticRegistry> diagnostics_{};
