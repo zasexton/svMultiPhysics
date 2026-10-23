@@ -175,6 +175,31 @@ void preflightTwoFluidTranslationBeforeMutation(
     const TranslatedIncompressibleTwoFluidInput& translated,
     const svmp::FE::systems::FESystem& system);
 
+/// The one-phase options and spaces of a fluid or stokes input.
+struct ResolvedOnePhaseNavierStokesInput {
+  std::shared_ptr<const svmp::FE::spaces::FunctionSpace> velocity_space{};
+  std::shared_ptr<const svmp::FE::spaces::FunctionSpace> pressure_space{};
+  svmp::Physics::formulations::navier_stokes::
+      IncompressibleNavierStokesVMSOptions options{};
+};
+
+/// A resolved fluid or stokes input: the physical model and, for it, the
+/// one-phase or the two-fluid options and spaces.
+struct ResolvedNavierStokesInput {
+  NavierStokesPhysicalModel physical_model{
+      NavierStokesPhysicalModel::OnePhaseLiquidPrescribedExteriorPressure};
+  std::optional<ResolvedOnePhaseNavierStokesInput> one_phase{};
+  std::optional<TranslatedIncompressibleTwoFluidInput> two_fluid{};
+};
+
+/// Resolve a fluid or stokes equation input: the fitted contact preflight,
+/// the physical model, then the one-phase translation (equation, domain and
+/// boundary keys, boundary data files) or the two-fluid translation.  The
+/// register constructs the module from the result.
+[[nodiscard]] ResolvedNavierStokesInput resolveNavierStokesInput(
+    const svmp::Physics::EquationModuleInput& input,
+    svmp::FE::systems::FESystem& system);
+
 } // namespace svmp::Physics::options
 
 #endif // SVMP_PHYSICS_OPTIONS_NAVIER_STOKES_REGISTRATION_H

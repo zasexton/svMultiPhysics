@@ -216,4 +216,28 @@ systemTangentialMeshPolicy(FreeSurfaceTangentialMeshPolicy policy);
 } // namespace Physics
 } // namespace svmp
 
+namespace svmp::Physics::options {
+
+/// The hand-written parser of a Free_surface boundary condition (D47 P2
+/// re-poses it on the schemas of this file).
+void apply_free_surface_schema_options(
+    const svmp::Physics::ParameterMap& params,
+    svmp::Physics::formulations::navier_stokes::
+        IncompressibleNavierStokesVMSOptions& options);
+bool is_free_surface_type(std::string_view raw);
+svmp::Physics::formulations::navier_stokes::FreeSurfaceImplementation
+free_surface_implementation_from_params(const svmp::Physics::ParameterMap& params);
+void append_free_surface_bc(
+    const svmp::Physics::BoundaryConditionInput& bc,
+    bool is_steady,
+    bool has_temp_spat,
+    bool has_other_files,
+    svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options);
+svmp::Physics::formulations::navier_stokes::
+    IncompressibleNavierStokesVMSOptions
+translate_fitted_surface_contact_capability(
+    const svmp::Physics::EquationModuleInput& input);
+
+} // namespace svmp::Physics::options
+
 #endif // SVMP_PHYSICS_OPTIONS_NAVIER_STOKES_OPTION_SCHEMA_H
