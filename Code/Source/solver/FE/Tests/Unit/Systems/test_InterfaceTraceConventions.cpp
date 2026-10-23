@@ -183,7 +183,7 @@ TEST(InterfaceTraceConventions, InterfaceNitschePoissonHelperIsConsistentForALin
     EXPECT_NEAR(sums.right, 1.0, 1e-12);
 }
 
-TEST(InterfaceTraceConventions, DISABLED_AverageOfTheNormalTraceIsTheAverageFlux)
+TEST(InterfaceTraceConventions, AverageOfTheNormalTraceIsTheAverageFlux)
 {
     // {c}.n(-) jump(v) for c = (2, 0): +2 on the left cell, -2 on the right.
     const auto sums = assembleCellSums(

@@ -504,8 +504,9 @@ The BC trace helpers follow the core convention:
 for `NormalComponent`, so consistency fluxes passed to
 `applyInterfaceTraceNitsche` or `InterfaceTraceNitscheBC` are written on
 `n(-)`, and a prescribed jump `g` means `u(-) - u(+) = g`
-(`test_InterfaceTraceConventions.cpp`). `Average` with `NormalComponent` is
-`(u(+).n(+) + u(-).n(-)) / 2`, half the normal jump, not the average flux.
+(`test_InterfaceTraceConventions.cpp`). `Average` is `avg(u)` for the
+Identity trace and the average flux `avg(u).n(-) = (u(-).n(-) - u(+).n(+)) / 2`
+for `NormalComponent`.
 
 This is enough for current weak trace loads, trace Robin terms, Nitsche terms,
 interface exchange, and simple DG terms. First-class normal/tangential jump
