@@ -43,7 +43,10 @@ EQUILIBRIUM_ANGLES_DEG = (60, 90, 120)      # theta_e, measured through the liqu
 # Initial cap angle for each target: two advancing cases (60, 90) and one
 # receding case (120), each 30 degrees from equilibrium.
 INITIAL_ANGLE_DEG = {60: 90.0, 90: 120.0, 120: 90.0}
-CAPILLARY_FORMS = ("surface_stress", "kag_consistent", "kag_lumped")
+CAPILLARY_FORMS = ("surface_stress",)
+# Decision D48 (2026-10-22) retired the KinematicAreaGradientTraction forms
+# (kag_consistent, kag_lumped); SurfaceStress is the only capillary route.
+RETIRED_CAPILLARY_FORMS = ("kag_consistent", "kag_lumped")
 DENSITY = 1.0                               # rho
 SURFACE_TENSION = 1.0                       # gamma
 RADIUS = 1.0                                # R, radius of the equilibrium cap (length unit)
@@ -118,7 +121,6 @@ SIGN_DEFINITE_PATCH_BOUNDS = True
 INTERFACE_PRESERVING_REDISTANCING = True
 MIN_PHI_OVER_H_WARNING = 1.0e-6             # "vertex touch" warning threshold
 LEVEL_SET_FIELD = "phi"
-CURVATURE_FIELD = "kappa"
 INTERFACE_DOMAIN_ID = "sessile_drop_surface"
 CONTACT_WALL = "wall_bottom"
 CONTACT_WALL_NORMAL = (0.0, -1.0, 0.0)      # out of the liquid, into the solid
@@ -401,6 +403,15 @@ def linear_solver_block(solver: str = "fsils") -> str:
     </LS>"""
 
 
+def check_capillary_form(form: str) -> None:
+    """Raise ValueError unless form is surface_stress (the KAG forms: decision D48)."""
+    if form in RETIRED_CAPILLARY_FORMS:
+        raise ValueError(f"capillary form {form!r} was retired by decision D48: SurfaceStress "
+                         "(surface_stress) is the only capillary route")
+    if form not in CAPILLARY_FORMS:
+        raise ValueError(f"--capillary-form must be one of {CAPILLARY_FORMS}")
+
+
 def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, cadence: int,
                linear_solver: str = "fsils",
                time_integration: str = "generalized_alpha",
@@ -448,20 +459,7 @@ def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, ca
         "<Spectral_radius_of_infinite_time_step>0.50</Spectral_radius_of_infinite_time_step>"
         if scheme == "GeneralizedAlpha" else
         f"<Transient_time_integration_scheme>{scheme}</Transient_time_integration_scheme>")
-    kag = form in ("kag_consistent", "kag_lumped")
-    curvature_projection = ""
-    if kag:
-        mass = ("\n    <Curvature_projection_kinematic_area_gradient_mass>Lumped"
-                "</Curvature_projection_kinematic_area_gradient_mass>"
-                if form == "kag_lumped" else "")
-        curvature_projection = f"""
-    <Enable_curvature_projection>true</Enable_curvature_projection>
-    <Curvature_field_name>{CURVATURE_FIELD}</Curvature_field_name>
-    <Curvature_projection_recovery_mode>KinematicAreaGradient</Curvature_projection_recovery_mode>
-    <Curvature_projection_kinematic_area_gradient_filter_coefficient>0.0</Curvature_projection_kinematic_area_gradient_filter_coefficient>{mass}
-    <Curvature_projection_cadence_steps>1</Curvature_projection_cadence_steps>"""
-    tension_form = "KinematicAreaGradientTraction" if kag else "SurfaceStress"
-    curvature_bc = (f"\n      <Curvature_field>{CURVATURE_FIELD}</Curvature_field>" if kag else "")
+    check_capillary_form(form)
     maintenance = "\n    <Enable_reinitialization>false</Enable_reinitialization>"
     reconciliation = ("\n    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>"
                       if kinematic_reconciliation else "")
@@ -527,7 +525,7 @@ def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, ca
     <Enable_SUPG>true</Enable_SUPG>
     <SUPG_tau_scale>0.5</SUPG_tau_scale>
     <SUPG_transient_scale>2.0</SUPG_transient_scale>{maintenance}
-    <Enable_volume_correction>false</Enable_volume_correction>{reconciliation}{curvature_projection}
+    <Enable_volume_correction>false</Enable_volume_correction>{reconciliation}
     <Output type="Spatial">
       <Level_set>true</Level_set>
     </Output>
@@ -575,7 +573,7 @@ def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, ca
       <Interface_quadrature_order>2</Interface_quadrature_order>
       <External_pressure>{EXTERNAL_PRESSURE:.17g}</External_pressure>
       <Surface_tension>{SURFACE_TENSION:.17g}</Surface_tension>
-      <Surface_tension_form>{tension_form}</Surface_tension_form>{semi_implicit_bc}{curvature_bc}
+      <Surface_tension_form>SurfaceStress</Surface_tension_form>{semi_implicit_bc}
       <Use_level_set_curvature>false</Use_level_set_curvature>
       <Contact_line_model>PrescribedAngle</Contact_line_model>
       <Contact_line_wall_face>{CONTACT_WALL}</Contact_line_wall_face>
@@ -612,8 +610,7 @@ def generate(level: int, equilibrium_deg: float, form: str, output_dir: Path, *,
         raise ValueError(f"--level must be one of {LEVELS}")
     if equilibrium_deg not in EQUILIBRIUM_ANGLES_DEG:
         raise ValueError(f"--contact-angle must be one of {EQUILIBRIUM_ANGLES_DEG}")
-    if form not in CAPILLARY_FORMS:
-        raise ValueError(f"--capillary-form must be one of {CAPILLARY_FORMS}")
+    check_capillary_form(form)
     if initial_deg is None:
         initial_deg = INITIAL_ANGLE_DEG[int(equilibrium_deg)]
     if not (10.0 <= initial_deg <= 170.0):
@@ -749,7 +746,9 @@ def main(argv=None) -> int:
     parser.add_argument("--contact-angle", type=int, required=True,
                         choices=EQUILIBRIUM_ANGLES_DEG,
                         help="equilibrium (Young) angle theta_e in degrees")
-    parser.add_argument("--capillary-form", default="surface_stress", choices=CAPILLARY_FORMS)
+    parser.add_argument("--capillary-form", default="surface_stress", metavar="{surface_stress}",
+                        help="capillary form: surface_stress (SurfaceStress), the only one since "
+                             "decision D48 retired kag_lumped and kag_consistent")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--initial-angle", type=float, default=None,
                         help="initial cap angle in degrees (protocol: 90 for 60 and 120, "
@@ -800,6 +799,10 @@ def main(argv=None) -> int:
                              "marked truncated and verify.py rejects it for acceptance")
     parser.add_argument("--force", action="store_true", help="allow a non-empty output dir")
     args = parser.parse_args(argv)
+    try:
+        check_capillary_form(args.capillary_form)
+    except ValueError as error:
+        parser.error(str(error))
 
     case = generate(args.level, args.contact_angle, args.capillary_form, args.output_dir,
                     initial_deg=args.initial_angle, viscous_times=args.viscous_times,

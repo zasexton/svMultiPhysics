@@ -4,9 +4,11 @@ A closed 2D liquid drop at rest, fully enclosed by its free surface. It
 measures the Laplace pressure jump and the parasitic (spurious) currents of
 the unfitted level-set free surface on the physically relaxed state
 (decisions D1 and D3 in `Documentation/free_surface_program_tracker.md`).
-The same case is run for the three capillary routes compared in decision D2
+The same case was run for the three capillary routes compared in decision D2
 (milestone M2): `SurfaceStress`, KAG with a lumped trace mass, and KAG with
-the consistent trace mass.
+the consistent trace mass.  Decision D48 (2026-10-22) kept `SurfaceStress`
+and retired both KAG forms; `generate_case.py` now writes `surface_stress`
+only and rejects `kag_lumped` and `kag_consistent`.
 
 Files:
 
@@ -64,11 +66,9 @@ none was chosen for this case.
 |---|---|---|
 | Mesh | affine `Triangle3`, `h = R/level`, diagonals alternating with cell parity, 24/48/96/192 cells per side (625/2401/9409/37249 vertices) | geometry choice; the alternating diagonal has no preferred direction |
 | Centre offset | `(pi, e)/100 R` from the box centre | transcendental, so the circle cannot pass exactly through a vertex of any of the nested dyadic grids. The minimum of `abs(phi)/h` over the vertices is 4.8e-3, 6.8e-3, 3.1e-3 and 1.8e-3 at `R/h` = 8, 16, 32, 64. `generate_case.py` prints it and warns below 1e-6. |
-| Free surface | `UnfittedLevelSet`, `Active_domain=LevelSetNegative`, `Active_domain_method=CutVolume`, `Generated_interface_geometry=LinearCorner`, `Geometry_tangent_policy=RefreshedFrozenQuadrature`, `Interface_quadrature_order=2`, `Use_level_set_curvature=false` | required by unfitted surface tension (`NavierStokesFreeSurface.md`); order 2 is required by KAG and used for all forms so that only the force differs |
+| Free surface | `UnfittedLevelSet`, `Active_domain=LevelSetNegative`, `Active_domain_method=CutVolume`, `Generated_interface_geometry=LinearCorner`, `Geometry_tangent_policy=RefreshedFrozenQuadrature`, `Interface_quadrature_order=2`, `Use_level_set_curvature=false` | required by unfitted surface tension (`NavierStokesFreeSurface.md`); order 2 was required by KAG (retired by D48) and was used for all forms so that only the force differed |
 | Cut stabilization | pressure-gradient facet penalty 1.0, `Use_cut_metadata_scale=false`, `Small_cut_aggregation=true`, no velocity extension | production defaults (tracker section 6.1) |
-| `surface_stress` | `Surface_tension_form=SurfaceStress` | D2 candidate (a) |
-| `kag_lumped` | `Surface_tension_form=KinematicAreaGradientTraction`, projected P1 field `kappa` (`Enable_curvature_projection`, `Curvature_field_name`), `Curvature_projection_recovery_mode=KinematicAreaGradient`, filter coefficient 0, cadence 1, `Curvature_projection_kinematic_area_gradient_mass=Lumped` | D2 candidate (b). With `Lumped` the filter coefficient defaults to 0, so the explicit 0 is optional. |
-| `kag_consistent` | as `kag_lumped` without the mass key (default `Consistent`) | D2 candidate (c), reference only |
+| `surface_stress` | `Surface_tension_form=SurfaceStress` | D2 candidate (a), the only form since D48 (candidates (b) and (c), `kag_lumped` and `kag_consistent`, were retired) |
 | Level-set transport | P1, SUPG with the production constants (tau scale 0.5, transient scale 2.0); no reinitialization, no volume correction, no discontinuity capturing, no bound limiter; advected by the harmonic PDE extension of the fluid velocity with monolithic coupling (`Advection_velocity_extension_method=pde_harmonic`, `Advection_velocity_extension_coupling=monolithic`; generator value `pde_harmonic_monolithic`) | decision D9; the volume drift is a measured quantity, so it is not corrected |
 | Level-set kinematic reconciliation | on (`Enable_kinematic_reconciliation=true`; `--kinematic-reconciliation off` reproduces the earlier decks): after every accepted step the transported `phi` is corrected locally so that the step's change of the sharp P1 area equals the interface flux of the transport velocity (`FE/LevelSet/LevelSetKinematicReconciliation.h`) | parameter-free and local, not a volume target or global shift; the area drift stays a measured quantity (the flux of a discretely divergence-free velocity) |
 | Time integration | generalized-alpha, `rho_inf = 0.5` | all free-surface decks |
@@ -237,13 +237,14 @@ OUT=$SCRATCH/free-surface-benchmarks/static_drop_2d/$(git rev-parse --short HEAD
 SVMP=/path/to/build/bin/svmultiphysics
 JOB=/path/to/run_case.sbatch   # sets PATH/LD_LIBRARY_PATH, then runs
                                # timeout -k 30 <s> mpiexec -n 1 --bind-to none $SVMP solver.xml
-for form in surface_stress kag_lumped kag_consistent; do for L in 8 16 32; do
+form=surface_stress   # the only capillary form since D48
+for L in 8 16 32; do
   d=$OUT/La12/$form/L$L
   python3 $B/generate_case.py --level $L --capillary-form $form --laplace-number 12 --output-dir $d
   sbatch --export=NONE --time=<see table> --job-name=drop_${form}_L$L \
          --output=$d/slurm-%j.out $JOB $d $SVMP <timeout_s>
   # half-step check: the same with --dt-divisor 2 into $OUT/La12/$form/L${L}_dt2
-done; done
+done
 # after the jobs end (both steps in one call; verify.py groups by dt divisor):
 python3 $B/verify.py $OUT/La12/surface_stress/L{8,16,32}{,_dt2} --json $OUT/La12_surface_stress.json
 ```
@@ -300,8 +301,8 @@ solver speed-ups of `67b4395a`): `surface_stress`, La = 12, `2 dt_B`, serial,
 The PDE extension adds about 15–18% per step.  With the prescribed coupling
 the start-up steps need up to 11 outer passes against the 12-pass cap, which
 is why the protocol uses the monolithic coupling.  Timings vary by node
-generation (up to about 1.8x).  `kag_consistent` costs about 50% more per
-step.  `La` of 1,200 and above, and `R/h = 64`, remain deferred.
+generation (up to about 1.8x).  `kag_consistent` (retired by D48) cost about 50%
+more per step.  `La` of 1,200 and above, and `R/h = 64`, remain deferred.
 
 Memory is small: 0.26 GB RSS at `R/h = 8`.
 

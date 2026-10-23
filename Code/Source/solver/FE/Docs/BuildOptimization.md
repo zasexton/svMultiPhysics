@@ -96,19 +96,24 @@ For `39c88f74` it took 1 h 42 min with 16 CPUs on a Skylake node: 7 min
 instrumented build, 69 min training, 25 min optimized build with tests.
 
 Training set: decks written by the generators of the same commit, truncated
-with `--max-steps`, plus the 3D sphere proxy of the reference set; 12 runs on
-13 CPUs at the same time, default JIT settings.
+with `--max-steps`; 11 runs, default JIT settings.  Before decision D48
+(2026-10-22) retired `KinematicAreaGradientTraction`, the set had 12 runs on
+13 CPUs at the same time: the KAG static drops `drop_kagl_L8` and
+`drop_kagc_L8` stood where the `SurfaceStress` drop at R/h = 8 stands now,
+and the 3D sphere proxy of the reference set (`sphere_proxy_L8_kagl`, also
+retired by D48) where the 3D sessile drop stands.  The arm64 build already
+ran the 3D sessile drop, because the reference deck is not on that machine.
 
 | Case | Generator arguments | Steps | Ranks |
 |------|---------------------|-------|-------|
 | static drop, `SurfaceStress`, R/h = 16 | `static_drop_2d --level 16 --capillary-form surface_stress --laplace-number 12` | 200 | 1 and 4 |
-| static drop, KAG lumped and consistent, R/h = 8 | `static_drop_2d --level 8 --capillary-form kag_lumped` (`kag_consistent`) `--laplace-number 12` | 50 each | 1 |
+| static drop, `SurfaceStress`, R/h = 8 | `static_drop_2d --level 8 --capillary-form surface_stress --laplace-number 12` | 50 | 1 |
 | capillary wave, λ/h = 32 | `capillary_wave_2d --level 32` | 100 | 1 and 4 |
 | sessile drop, R/h = 16, 60° | `sessile_drop_2d --level 16 --contact-angle 60` | 300 | 1 and 4 |
 | sessile drop, R/h = 16, 120° | `sessile_drop_2d --level 16 --contact-angle 120` | 300 | 1 |
 | linear sloshing, L/h = 32 | `linear_sloshing_2d --level 32` | 128 | 1 |
 | 3D tank at rest, 1/h = 8 | `tank_at_rest --dim 3 --level 8` | 40 | 1 |
-| 3D static-sphere proxy, R/h = 8 | reference deck `sphere_proxy_L8_kagl` | 1 | 1 |
+| 3D sessile drop, R/h = 8 | `sessile_drop_3d --level 8` | 3 | 1 |
 
 The protocol decks cover PDE transport, kinematic reconciliation, the
 sign-definite patch bounds of the sessile drop and FSILS; the FSILS decks also

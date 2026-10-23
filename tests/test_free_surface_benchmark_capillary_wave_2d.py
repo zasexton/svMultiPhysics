@@ -214,13 +214,26 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     assert case["epsilon"] == pytest.approx(0.0458, abs=1e-4)
     for wall in gen.WALLS:
         assert (tmp_path / f"c/mesh/mesh-surfaces/{wall}.vtp").is_file()
-    finer = gen.generate(16, "kag_lumped", tmp_path / "d", dt_divisor=4)
+    finer = gen.generate(16, "surface_stress", tmp_path / "d", dt_divisor=4)
     assert finer["dt"] == pytest.approx(case["dt"] / 4.0, rel=1e-14)
     assert finer["steps"] == 4 * case["steps"]
-    assert "<Curvature_projection_kinematic_area_gradient_mass>Lumped" in (tmp_path / "d/solver.xml").read_text()
-    consistent = gen.solver_xml("kag_consistent", gen.time_schedule(16, 3000.0, 4.0, 100), 10, 1)
-    assert "KinematicAreaGradientTraction" in consistent
-    assert "kinematic_area_gradient_mass" not in consistent
+    assert "<Surface_tension_form>SurfaceStress" in (tmp_path / "d/solver.xml").read_text()
+    # Decision D48 retired the KAG forms; nothing is written for them.
+    for form in ("kag_lumped", "kag_consistent"):
+        with pytest.raises(ValueError, match="D48.*SurfaceStress"):
+            gen.solver_xml(form, gen.time_schedule(16, 3000.0, 4.0, 100), 10, 1)
+        with pytest.raises(ValueError, match="D48.*SurfaceStress"):
+            gen.generate(16, form, tmp_path / form)
+        assert not (tmp_path / form).exists()
+
+
+def test_cli_rejects_the_retired_kag_forms(tmp_path, capsys):
+    for form in ("kag_lumped", "kag_consistent"):
+        with pytest.raises(SystemExit):
+            gen.main(["--level", "16", "--capillary-form", form,
+                      "--output-dir", str(tmp_path / form)])
+        assert "D48" in capsys.readouterr().err
+        assert not (tmp_path / form).exists()
 
 
 def test_transport_options(tmp_path):

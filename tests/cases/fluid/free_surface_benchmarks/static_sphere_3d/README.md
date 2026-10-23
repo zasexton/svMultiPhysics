@@ -8,7 +8,8 @@ relaxed state (decisions D1 and D3 in
 compared in decision D2 (milestone M2): `SurfaceStress`, KAG with a lumped
 trace mass, and KAG with the consistent trace mass. The protocol is decision
 D25 (2026-10-07): `SurfaceStress` at R/h = 8 and 16, gated at R/h = 16, with
-the D19 time step of `static_drop_2d`.
+the D19 time step of `static_drop_2d`. Decision D48 (2026-10-22) retired the
+two KAG forms; `generate_case.py` now writes `surface_stress` only.
 
 Files:
 
@@ -90,9 +91,9 @@ README for the sources); none was chosen for this case.
 | Mesh | affine `Tetra4`, `h = R/level`; each cube of a 24/48/96 cells-per-side grid split into the six Kuhn tetrahedra around a main diagonal, reflected along every axis whose cube index is odd | the reflected split is conforming and symmetric under reflection about the grid planes, the 3D analogue of the alternating 2D diagonal; a plain Kuhn split would prefer the (1,1,1) direction |
 | Mesh size | R/h = 8: 15,625 vertices, 82,944 cells; 16: 117,649 and 663,552; 32: 912,673 and 5,308,416 | |
 | Centre offset | `(pi, e, sqrt(3))/100 R` from the box centre | irrational, so the sphere passes through no vertex of the nested dyadic grids. Of the simple triples tried (`(pi, e, sqrt 2)`, `(pi, e, sqrt 3)`, `(pi, e, ln 2)`, `(pi, e, Euler gamma)`, `(sqrt 2, sqrt 3, sqrt 5)` and permutations), this one has the largest worst-level `min abs(phi)/h`: 1.2e-3, 2.9e-4 and 6.5e-5 at `R/h` = 8, 16, 32 (`generate_case.py` prints it and warns below 1e-6). In 3D many more vertices lie near the surface than in 2D (1.8e-3 to 6.8e-3 there), so smaller values are expected for any centre; small cut fragments are handled by the small-cut aggregation. |
-| Free surface | `UnfittedLevelSet`, `Active_domain=LevelSetNegative`, `CutVolume`, `LinearCorner`, `Geometry_tangent_policy=RefreshedFrozenQuadrature`, `Interface_quadrature_order=2`, `Use_level_set_curvature=false` | as `static_drop_2d`; order 2 is required by KAG and used for all forms |
+| Free surface | `UnfittedLevelSet`, `Active_domain=LevelSetNegative`, `CutVolume`, `LinearCorner`, `Geometry_tangent_policy=RefreshedFrozenQuadrature`, `Interface_quadrature_order=2`, `Use_level_set_curvature=false` | as `static_drop_2d`; order 2 was required by KAG (retired by D48) and was used for all forms |
 | Cut stabilization | pressure-gradient facet penalty 1.0, `Use_cut_metadata_scale=false`, `Small_cut_aggregation=true`, no velocity extension | production defaults (tracker section 6.1) |
-| Capillary forms | `surface_stress`, `kag_lumped`, `kag_consistent`: same keys as `static_drop_2d` | D2 candidates (a), (b), (c) |
+| Capillary form | `surface_stress`: same keys as `static_drop_2d` | D2 candidate (a); `kag_lumped` and `kag_consistent`, candidates (b) and (c), were retired by D48 |
 | Level-set transport | `--transport`, see below; P1 SUPG (tau scale 0.5, transient scale 2.0), no reinitialization, no volume correction, no sign-definite patch bounds | D9; the volume drift is a measured quantity, so it is not corrected |
 | Level-set kinematic reconciliation | on (`Enable_kinematic_reconciliation=true`; `--kinematic-reconciliation off` reproduces the earlier decks): after every accepted step the transported `phi` is corrected locally so that the step's change of the sharp P1 volume equals the interface flux of the transport velocity (`FE/LevelSet/LevelSetKinematicReconciliation.h`) | D14, as `static_drop_2d`; parameter-free and local, not a volume target or global shift |
 | Semi-implicit capillary term | `Surface_tension_semi_implicit=NormalIncrement` in the free-surface block (`--surface-tension-semi-implicit None` removes it) | D13; protocol value since D25, as in `static_drop_2d` under D19 |

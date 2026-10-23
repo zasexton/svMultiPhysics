@@ -9,7 +9,7 @@ benchmark for the single contact-angle mechanism of decision D4 in
 
 - the angle is imposed only by the variational Young term in the momentum
   equation (the `SurfaceStress` line term `-gamma cos(theta_e) v.m`, or the
-  wall-area gradient inside `kappa_h` for KAG);
+  wall-area gradient inside `kappa_h` for KAG, retired by D48);
 - Navier slip on the wetted wall, with the slip length as a physical input;
 - a strong no-penetration condition on the contact wall;
 - no level-set reinitialization, like `static_drop_2d`; the projection
@@ -22,8 +22,10 @@ benchmark for the single contact-angle mechanism of decision D4 in
   `--interface-preserving-redistancing off` writes the earlier decks byte for
   byte.
 
-The same case serves the M4 part of the capillary-route comparison of
-decision D2, with the three capillary forms of `static_drop_2d`.
+The same case served the M4 part of the capillary-route comparison of
+decision D2, with the three capillary forms of `static_drop_2d`.  Decision
+D48 (2026-10-22) retired the two KAG forms, so `generate_case.py` writes
+`surface_stress` only.
 
 Files:
 
@@ -94,8 +96,7 @@ free-surface decks; none was chosen for this case.
 | Wall slip | `Wall_slip_model=Navier`, `Wall_slip_length=R/8` on the wetted part of `wall_bottom` | D4 |
 | Velocity walls | `wall_bottom`: `Dir`, value 0, `Effective_direction 0 1`, a strong zero normal velocity only; its tangential velocity is governed by the Navier term. The other walls stay dry and are no-slip. | D4 strong no-penetration; the prescribed-angle slip validation requires exactly this wall condition |
 | Cut stabilization | pressure-gradient facet penalty 1.0, `Use_cut_metadata_scale=false`, `Small_cut_aggregation=true`, no velocity extension | production defaults, as `static_drop_2d` |
-| `surface_stress` (default) | `Surface_tension_form=SurfaceStress` | D2 candidate (a) |
-| `kag_lumped`, `kag_consistent` | as in `static_drop_2d` | D2 candidates (b) and (c) |
+| `surface_stress` (default) | `Surface_tension_form=SurfaceStress` | D2 candidate (a), the only form since D48 (`kag_lumped` and `kag_consistent` were retired) |
 | Level-set transport | P1, advected by the harmonic PDE velocity extension of tracker D9 with monolithic coupling (`--transport pde_extension`, the default: `Advection_velocity_extension_method=pde_harmonic`, `Advection_velocity_extension_coupling=monolithic`), SUPG with the production constants (tau scale 0.5, transient scale 2.0); no volume correction, no discontinuity capturing, no bound limiter | decision of 2026-10-05 (tracker M4), as in `static_drop_2d`, `linear_sloshing_2d` and `capillary_wave_2d`. `--transport coupled` advects with the fluid velocity (`Velocity_source=coupled_field`), and `--transport wet_extension` writes the wall-compatible wet extension of the D18 and capillary-rise decks; both remain for comparison |
 | Level-set kinematic reconciliation | on (`Enable_kinematic_reconciliation=true`; `--kinematic-reconciliation off` reproduces the earlier decks). After every accepted step the transported `phi` is corrected locally so that the step's change of the sharp P1 area equals the interface flux of the transport velocity (`FE/LevelSet/LevelSetKinematicReconciliation.h`) | parameter-free, no global shift; it removes the contact-line area drift of the Galerkin transport, see "Area drift" below |
 | Level-set sign-definite patch bounds | on (`Enable_sign_definite_patch_bounds=true`; `--sign-definite-patch-bounds off` reproduces the earlier decks). After every accepted step, a node whose whole patch lies in one phase is kept inside the range of the previous values over its patch (`FE/LevelSet/LevelSetSignDefinitePatchBounds.h`) | parameter-free local maximum principle of exact transport; it never changes a cut cell, so the interface, the contact line and the area are untouched. It stops single wall vertices next to a contact line from crossing the isovalue, see "Spurious wall spots" below |

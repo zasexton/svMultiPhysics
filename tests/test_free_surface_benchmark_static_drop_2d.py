@@ -68,12 +68,12 @@ def test_observed_order_recovers_power_law():
 
 
 def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
-    case = gen.generate(8, "kag_lumped", 12.0, tmp_path / "c")
+    case = gen.generate(8, "surface_stress", 12.0, tmp_path / "c")
     root = ET.parse(tmp_path / "c/solver.xml").getroot()
     text = (tmp_path / "c/solver.xml").read_text()
     assert "<Geometry_tangent_policy>RefreshedFrozenQuadrature" in text
-    assert "<Surface_tension_form>KinematicAreaGradientTraction" in text
-    assert "<Curvature_projection_kinematic_area_gradient_mass>Lumped" in text
+    assert "<Surface_tension_form>SurfaceStress" in text
+    assert "Curvature_projection" not in text and "Curvature_field" not in text
     assert root.find("GeneralSimulationParameters/Number_of_time_steps").text == str(case["steps"])
     # D13: one fixed physical step at every level, 0.02 at La = 12 and 0.01 at La = 120.
     assert case["dt"] == 0.02 and case["dt_rule"] == "protocol_fixed" and case["dt_divisor"] == 1
@@ -93,8 +93,6 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     assert case["min_abs_phi_over_h"] > 1e-3
     for wall in gen.WALLS:
         assert (tmp_path / f"c/mesh/mesh-surfaces/{wall}.vtp").is_file()
-    consistent = (gen.solver_xml("kag_consistent", gen.time_schedule(8, 12.0, 5.0, 100), 10, 1))
-    assert "kinematic_area_gradient_mass" not in consistent
     stress = gen.solver_xml("surface_stress", gen.time_schedule(8, 12.0, 5.0, 100), 10, 1)
     assert "SurfaceStress" in stress and "Curvature_field" not in stress
     pde = gen.solver_xml("surface_stress", gen.time_schedule(8, 12.0, 5.0, 100), 10, 1,
@@ -105,6 +103,29 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     assert "Use_wet_extension_advection_velocity" not in pde
     with pytest.raises(ValueError):
         gen.generate(8, "surface_stress", 12.0, tmp_path / "bad", level_set_velocity="wet")
+
+
+def test_retired_kag_forms_are_rejected(tmp_path, capsys):
+    """Decision D48 retired kag_lumped and kag_consistent; nothing is written."""
+    schedule = gen.time_schedule(8, 12.0, 5.0, 100)
+    for form in ("kag_lumped", "kag_consistent"):
+        with pytest.raises(ValueError, match="D48.*SurfaceStress"):
+            gen.generate(8, form, 12.0, tmp_path / form)
+        with pytest.raises(ValueError, match="D48.*SurfaceStress"):
+            gen.solver_xml(form, schedule, 10, 1)
+        with pytest.raises(SystemExit):
+            gen.main(["--level", "8", "--capillary-form", form, "--laplace-number", "12",
+                      "--output-dir", str(tmp_path / f"cli_{form}")])
+        assert "D48" in capsys.readouterr().err
+        assert not (tmp_path / form).exists() and not (tmp_path / f"cli_{form}").exists()
+    # --capillary-form is optional; its default is surface_stress.
+    assert gen.main(["--level", "8", "--laplace-number", "12", "--max-steps", "2",
+                     "--output-dir", str(tmp_path / "default")]) == 0
+    assert gen.main(["--level", "8", "--capillary-form", "surface_stress", "--laplace-number",
+                     "12", "--max-steps", "2", "--output-dir", str(tmp_path / "explicit")]) == 0
+    for name in ("solver.xml", "case.json", "mesh/mesh-complete.mesh.vtu"):
+        assert ((tmp_path / "default" / name).read_bytes()
+                == (tmp_path / "explicit" / name).read_bytes())
 
 
 def write_synthetic_run(run, level, speed_scale, growth=False, pressure_error=None, drop_last=False,

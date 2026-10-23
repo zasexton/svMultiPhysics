@@ -143,10 +143,10 @@ def test_generated_case_uses_the_d4_configuration(tmp_path):
     for wall in gen.WALLS:
         assert (tmp_path / f"c/mesh/mesh-surfaces/{wall}.vtp").is_file()
     schedule = gen.time_schedule(16, 5.0, 100)
-    lumped = gen.solver_xml("kag_lumped", 90, schedule, 10, 1)
-    assert "KinematicAreaGradientTraction" in lumped and "mass>Lumped" in lumped
-    consistent = gen.solver_xml("kag_consistent", 90, schedule, 10, 1)
-    assert "kinematic_area_gradient_mass" not in consistent
+    # Decision D48 retired the KAG forms.
+    for form in ("kag_lumped", "kag_consistent"):
+        with pytest.raises(ValueError, match="D48.*SurfaceStress"):
+            gen.solver_xml(form, 90, schedule, 10, 1)
     direct = gen.solver_xml("surface_stress", 90, schedule, 10, 1, linear_solver="eigen_direct",
                             time_integration="backward_euler")
     assert '<LS type="Direct">' in direct and 'Linear_algebra type="eigen"' in direct
@@ -157,6 +157,18 @@ def test_generated_case_uses_the_d4_configuration(tmp_path):
     for deck in (lumped, consistent, direct):
         assert "<Enable_reinitialization>false</Enable_reinitialization>" in deck
         assert "<Reinitialization_" not in deck
+
+
+def test_retired_kag_forms_are_rejected_before_writing(tmp_path, capsys):
+    """Decision D48 retired kag_lumped and kag_consistent (generate() and the CLI)."""
+    for form in ("kag_lumped", "kag_consistent"):
+        with pytest.raises(ValueError, match="D48.*SurfaceStress"):
+            gen.generate(16, 90, form, tmp_path / form)
+        with pytest.raises(SystemExit):
+            gen.main(["--level", "16", "--contact-angle", "90", "--capillary-form", form,
+                      "--output-dir", str(tmp_path / f"cli_{form}")])
+        assert "D48" in capsys.readouterr().err
+        assert not (tmp_path / form).exists() and not (tmp_path / f"cli_{form}").exists()
 
 
 def write_synthetic_run(run, level, angle_offset=0.0, theta_e=60, growth=False,

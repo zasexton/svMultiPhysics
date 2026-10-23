@@ -117,14 +117,14 @@ def test_observed_order_recovers_power_law():
 # Case generation
 # ---------------------------------------------------------------------------
 def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
-    case = gen.generate(8, "kag_lumped", 12.0, tmp_path / "c", transport="coupled")
+    case = gen.generate(8, "surface_stress", 12.0, tmp_path / "c", transport="coupled")
     root = ET.parse(tmp_path / "c/solver.xml").getroot()
     text = (tmp_path / "c/solver.xml").read_text()
     assert root.find("GeneralSimulationParameters/Number_of_spatial_dimensions").text == "3"
     assert "<Geometry_tangent_policy>RefreshedFrozenQuadrature" in text
     assert "<Interface_quadrature_order>2" in text
-    assert "<Surface_tension_form>KinematicAreaGradientTraction" in text
-    assert "<Curvature_projection_kinematic_area_gradient_mass>Lumped" in text
+    assert "<Surface_tension_form>SurfaceStress" in text
+    assert "Curvature_projection" not in text and "Curvature_field" not in text
     assert "<Velocity_source>coupled_field" in text
     assert root.find("GeneralSimulationParameters/Number_of_time_steps").text == str(case["steps"])
     dt_b = math.sqrt(case["h"] ** 3 / (4.0 * math.pi))
@@ -153,11 +153,32 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
         assert (tmp_path / f"c/mesh/mesh-surfaces/{wall}.vtp").is_file()
     assert sum(1 for b in root.iter("Add_BC") if b.findtext("Type") == "Dir") == 6
     schedule = gen.time_schedule(8, 12.0, 5.0, 100)
-    consistent = gen.solver_xml("kag_consistent", schedule, 10, 1, "coupled")
-    assert "kinematic_area_gradient_mass" not in consistent
     stress = gen.solver_xml("surface_stress", schedule, 10, 1, "wet_extension")
     assert "SurfaceStress" in stress and "Curvature_field" not in stress
     assert "<Advection_velocity_extension_method>wall_compatible_normal" in stress
+
+
+def test_retired_kag_forms_are_rejected(tmp_path, capsys):
+    """Decision D48 retired kag_lumped and kag_consistent; nothing is written."""
+    schedule = gen.time_schedule(8, 12.0, 5.0, 100)
+    for form in ("kag_lumped", "kag_consistent"):
+        with pytest.raises(ValueError, match="D48.*SurfaceStress"):
+            gen.generate(8, form, 12.0, tmp_path / form, transport="coupled")
+        with pytest.raises(ValueError, match="D48.*SurfaceStress"):
+            gen.solver_xml(form, schedule, 10, 1, "coupled")
+        with pytest.raises(SystemExit):
+            gen.main(["--level", "8", "--capillary-form", form, "--laplace-number", "12",
+                      "--output-dir", str(tmp_path / f"cli_{form}")])
+        assert "D48" in capsys.readouterr().err
+        assert not (tmp_path / form).exists() and not (tmp_path / f"cli_{form}").exists()
+    # --capillary-form is optional; its default is surface_stress.
+    assert gen.main(["--level", "8", "--laplace-number", "12", "--max-steps", "3",
+                     "--output-dir", str(tmp_path / "default")]) == 0
+    assert gen.main(["--level", "8", "--capillary-form", "surface_stress", "--laplace-number",
+                     "12", "--max-steps", "3", "--output-dir", str(tmp_path / "explicit")]) == 0
+    for name in ("solver.xml", "case.json", "mesh/mesh-complete.mesh.vtu"):
+        assert ((tmp_path / "default" / name).read_bytes()
+                == (tmp_path / "explicit" / name).read_bytes())
 
 
 def test_transport_default_is_the_pde_extension():
@@ -436,10 +457,10 @@ def test_half_step_and_diagnostic_step_options(tmp_path):
 
 
 # SHA-256 of solver.xml written by the generator before D25 (commit 8174b6c2) for
-# R/h = 8 with its defaults: surface_stress at La = 12 and kag_lumped at La = 120.
+# R/h = 8 with its defaults: surface_stress at La = 12.  The kag_lumped deck at
+# La = 120 left the table with the form (decision D48).
 DECK_SHA256_BEFORE_D25 = {
     ("surface_stress", 12.0, 2.0): "f3fad82993c16e662bd59fd2817696638dc847d568fd854ac7125ea6ea2699a3",
-    ("kag_lumped", 120.0, 1.0): "7b906042c13e63c590cfd631819845aa2a3817272861d8290fc5d58aa24a5c5a",
 }
 
 

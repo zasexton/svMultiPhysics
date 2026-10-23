@@ -305,8 +305,10 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     assert case["initial_amplitude"] == pytest.approx(0.01 / math.sqrt(1.00005), rel=1e-14)
     for wall in gen.WALLS:
         assert (tmp_path / f"c/mesh/mesh-surfaces/{wall}.vtp").is_file()
-    lumped = gen.solver_xml("kag_lumped", gen.time_schedule(8, 800.0, 4.0, 100), 10, 1)
-    assert "<Curvature_projection_kinematic_area_gradient_mass>Lumped" in lumped
+    # Decision D48 retired the KAG forms.
+    for form in ("kag_lumped", "kag_consistent"):
+        with pytest.raises(ValueError, match="D48.*SurfaceStress"):
+            gen.solver_xml(form, gen.time_schedule(8, 800.0, 4.0, 100), 10, 1)
     plain = gen.solver_xml("surface_stress", gen.time_schedule(8, 800.0, 4.0, 100), 10, 1,
                            kinematic_reconciliation=False, semi_implicit="None")
     assert "Enable_kinematic_reconciliation" not in plain and "semi_implicit" not in plain
@@ -314,6 +316,18 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
         gen.generate(16, "surface_stress", tmp_path / "bad", dt_divisor=3)
     with pytest.raises(FileExistsError):
         gen.generate(16, "surface_stress", tmp_path / "c")
+
+
+def test_retired_kag_forms_are_rejected_before_writing(tmp_path, capsys):
+    """Decision D48 retired kag_lumped and kag_consistent (generate() and the CLI)."""
+    for form in ("kag_lumped", "kag_consistent"):
+        with pytest.raises(ValueError, match="D48.*SurfaceStress"):
+            gen.generate(8, form, tmp_path / form)
+        with pytest.raises(SystemExit):
+            gen.main(["--level", "8", "--capillary-form", form,
+                      "--output-dir", str(tmp_path / f"cli_{form}")])
+        assert "D48" in capsys.readouterr().err
+        assert not (tmp_path / form).exists() and not (tmp_path / f"cli_{form}").exists()
 
 
 def test_mesh_is_the_static_drop_mesh():

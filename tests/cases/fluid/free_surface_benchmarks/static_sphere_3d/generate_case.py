@@ -45,7 +45,10 @@ import numpy as np
 # (principle P1); README.md gives the source or the derivation of each one.
 # ---------------------------------------------------------------------------
 LEVELS = (8, 16, 32)                        # R/h
-CAPILLARY_FORMS = ("surface_stress", "kag_consistent", "kag_lumped")
+CAPILLARY_FORMS = ("surface_stress",)
+# Decision D48 (2026-10-22) retired the KinematicAreaGradientTraction forms
+# (kag_consistent, kag_lumped); SurfaceStress is the only capillary route.
+RETIRED_CAPILLARY_FORMS = ("kag_consistent", "kag_lumped")
 # Level-set advection velocity (decision D9), as in capillary_wave_2d.
 # "pde_extension" (default) is the harmonic PDE velocity extension with
 # monolithic coupling; "wet_extension" is the algebraic wall-compatible wet
@@ -106,7 +109,6 @@ DEFAULT_SEMI_IMPLICIT = "NormalIncrement"
 GHOST_LAYERS: int | str = 12
 MIN_PHI_OVER_H_WARNING = 1.0e-6             # "vertex touch" warning threshold
 LEVEL_SET_FIELD = "phi"
-CURVATURE_FIELD = "kappa"
 INTERFACE_DOMAIN_ID = "static_sphere_surface"
 # (name, axis, end): the wall lies on the plane x[axis] = end * BOX_SIDE.
 WALL_PLANES = (("wall_left", 0, 0), ("wall_right", 0, 1),
@@ -423,6 +425,15 @@ def ghost_layers_value(value) -> int | str:
     return layers
 
 
+def check_capillary_form(form: str) -> None:
+    """Raise ValueError unless form is surface_stress (the KAG forms: decision D48)."""
+    if form in RETIRED_CAPILLARY_FORMS:
+        raise ValueError(f"capillary form {form!r} was retired by decision D48: SurfaceStress "
+                         "(surface_stress) is the only capillary route")
+    if form not in CAPILLARY_FORMS:
+        raise ValueError(f"--capillary-form must be one of {CAPILLARY_FORMS}")
+
+
 def solver_xml(form: str, schedule: dict, steps: int, cadence: int,
                transport: str = DEFAULT_TRANSPORT,
                kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION,
@@ -439,20 +450,7 @@ def solver_xml(form: str, schedule: dict, steps: int, cadence: int,
     reconciliation = ("\n    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>"
                       if kinematic_reconciliation else "")
     velocity = level_set_velocity_block(transport)
-    kag = form in ("kag_consistent", "kag_lumped")
-    curvature_projection = ""
-    if kag:
-        mass = ("\n    <Curvature_projection_kinematic_area_gradient_mass>Lumped"
-                "</Curvature_projection_kinematic_area_gradient_mass>"
-                if form == "kag_lumped" else "")
-        curvature_projection = f"""
-    <Enable_curvature_projection>true</Enable_curvature_projection>
-    <Curvature_field_name>{CURVATURE_FIELD}</Curvature_field_name>
-    <Curvature_projection_recovery_mode>KinematicAreaGradient</Curvature_projection_recovery_mode>
-    <Curvature_projection_kinematic_area_gradient_filter_coefficient>0.0</Curvature_projection_kinematic_area_gradient_filter_coefficient>{mass}
-    <Curvature_projection_cadence_steps>1</Curvature_projection_cadence_steps>"""
-    tension_form = "KinematicAreaGradientTraction" if kag else "SurfaceStress"
-    curvature_bc = (f"\n      <Curvature_field>{CURVATURE_FIELD}</Curvature_field>" if kag else "")
+    check_capillary_form(form)
     walls = "\n".join(f"""    <Add_BC name="{w}">
       <Type>Dir</Type>
       <Value>0.0</Value>
@@ -502,7 +500,7 @@ def solver_xml(form: str, schedule: dict, steps: int, cadence: int,
     <SUPG_tau_scale>0.5</SUPG_tau_scale>
     <SUPG_transient_scale>2.0</SUPG_transient_scale>
     <Enable_reinitialization>false</Enable_reinitialization>
-    <Enable_volume_correction>false</Enable_volume_correction>{reconciliation}{curvature_projection}
+    <Enable_volume_correction>false</Enable_volume_correction>{reconciliation}
     <Output type="Spatial">
       <Level_set>true</Level_set>
     </Output>
@@ -549,7 +547,7 @@ def solver_xml(form: str, schedule: dict, steps: int, cadence: int,
       <Interface_quadrature_order>2</Interface_quadrature_order>
       <External_pressure>{EXTERNAL_PRESSURE:.17g}</External_pressure>
       <Surface_tension>{SURFACE_TENSION:.17g}</Surface_tension>
-      <Surface_tension_form>{tension_form}</Surface_tension_form>{semi_implicit_bc}{curvature_bc}
+      <Surface_tension_form>SurfaceStress</Surface_tension_form>{semi_implicit_bc}
       <Use_level_set_curvature>false</Use_level_set_curvature>
       <Enable_velocity_extension>false</Enable_velocity_extension>
       <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
@@ -580,8 +578,7 @@ def generate(level: int, form: str, laplace: float, output_dir: Path, *,
              ghost_layers: int | str = GHOST_LAYERS) -> dict:
     if level not in LEVELS:
         raise ValueError(f"--level must be one of {LEVELS}")
-    if form not in CAPILLARY_FORMS:
-        raise ValueError(f"--capillary-form must be one of {CAPILLARY_FORMS}")
+    check_capillary_form(form)
     level_set_velocity_block(transport)                 # validates the transport choice
     if not (math.isfinite(laplace) and laplace > 0.0):
         raise ValueError("--laplace-number must be positive and finite")
@@ -691,7 +688,9 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--level", type=int, required=True, choices=LEVELS, help="R/h")
-    parser.add_argument("--capillary-form", required=True, choices=CAPILLARY_FORMS)
+    parser.add_argument("--capillary-form", default="surface_stress", metavar="{surface_stress}",
+                        help="capillary form: surface_stress (SurfaceStress), the only one since "
+                             "decision D48 retired kag_lumped and kag_consistent")
     parser.add_argument("--laplace-number", type=float, required=True,
                         help="La = rho*gamma*D/mu^2, D = 2R")
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -730,6 +729,10 @@ def main(argv=None) -> int:
                              "'derived' leaves it unset, so the solver derives 8 (earlier decks)")
     parser.add_argument("--force", action="store_true", help="allow a non-empty output dir")
     args = parser.parse_args(argv)
+    try:
+        check_capillary_form(args.capillary_form)
+    except ValueError as error:
+        parser.error(str(error))
 
     case = generate(args.level, args.capillary_form, args.laplace_number, args.output_dir,
                     transport=args.transport, viscous_times=args.viscous_times,

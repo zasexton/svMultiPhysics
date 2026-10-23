@@ -4,10 +4,11 @@ A small-amplitude standing capillary wave on the free surface of a deep
 one-phase liquid, released from rest. It measures the frequency and the
 viscous damping rate of the unfitted level-set free surface against
 Prosperetti's initial-value solution (milestone M3 in
-`Documentation/free_surface_program_tracker.md`). The same case is run for
+`Documentation/free_surface_program_tracker.md`). The case was written for
 the three capillary routes compared in decision D2: `SurfaceStress`, KAG
 with a lumped trace mass, and KAG with the consistent trace mass (the two KAG
-forms are generated but have not been run).
+forms were generated but never run).  Decision D48 (2026-10-22) retired both
+KAG forms; `generate_case.py` now writes `surface_stress` only.
 
 The protocol follows decisions D9 to D11 of 2026-09-30 and D13 of
 2026-10-05: `phi` is advected with the harmonic PDE velocity extension
@@ -121,7 +122,7 @@ the level-set advection velocity differ.
 | Mesh | affine `Triangle3`, `h = lambda/level`, diagonals alternating with cell parity; 8 x 20, 16 x 40, 32 x 80 cells (189, 697, 2673 vertices) | geometry choice. With an even number of columns the mesh is mirror-symmetric about `x = lambda/4`, the node line of the mode, so crest and trough see the same mesh. |
 | Mean-level offset | `sqrt(2)/100 lambda` above `y = lambda` | irrational, so the mean level lies on no grid line of the nested dyadic meshes and the sampled surface cannot pass exactly through a vertex. Among the simple irrational offsets tried (`pi/100`, `e/100`, `pi/1000`, `sqrt(2)/100`, ...) it is one of the two that keep `min abs(phi)/h` at or above 0.03 on all three levels: 0.066, 0.13, 0.030 at `lambda/h` = 16, 32, 64 (printed by `generate_case.py`). The static drop, by comparison, starts from 1.8e-3 to 6.8e-3. It has no physical effect (depth paragraph above). |
 | Walls | `Dir`, value 0; `Effective_direction 1 0` (sides), `0 1` (bottom); full no-slip on the dry top | free-slip mirror planes and bottom (see Physical setup) |
-| Free surface, cut stabilization, capillary forms, level-set discretization, time integration, nonlinear and linear solves | identical to `static_drop_2d` (`SurfaceStress` / KAG keys, `RefreshedFrozenQuadrature`, `Interface_quadrature_order=2`, aggregation, pressure-gradient facet penalty 1.0, SUPG 0.5/2.0, no reinitialization or volume correction, generalized-alpha `rho_inf = 0.5`, FSILS GMRES) | production values, see `static_drop_2d/README.md` |
+| Free surface, cut stabilization, capillary forms, level-set discretization, time integration, nonlinear and linear solves | identical to `static_drop_2d` (`SurfaceStress`, `RefreshedFrozenQuadrature`, `Interface_quadrature_order=2`, aggregation, pressure-gradient facet penalty 1.0, SUPG 0.5/2.0, no reinitialization or volume correction, generalized-alpha `rho_inf = 0.5`, FSILS GMRES) | production values, see `static_drop_2d/README.md` |
 | Level-set advection velocity | `--transport`, see below | decision D9 |
 | Level-set kinematic reconciliation | on (`Enable_kinematic_reconciliation=true`; `--kinematic-reconciliation off` reproduces the earlier decks): after every accepted step the transported `phi` is corrected locally so that the step's change of the sharp P1 area equals the interface flux of the transport velocity (`FE/LevelSet/LevelSetKinematicReconciliation.h`) | parameter-free and local, not a volume target or global shift; the area drift stays a measured quantity (the flux of a discretely divergence-free velocity) |
 
@@ -238,7 +239,8 @@ B=tests/cases/fluid/free_surface_benchmarks/capillary_wave_2d
 OUT=$SCRATCH/free-surface-benchmarks/capillary_wave_2d/$(git rev-parse --short HEAD)
 SVMP=/path/to/build/bin/svmultiphysics
 TRANSPORT=pde_extension        # protocol transport (D9)
-for form in surface_stress kag_lumped kag_consistent; do for L in 16 32 64; do
+form=surface_stress            # the only capillary form since D48
+for L in 16 32 64; do
   d=$OUT/$TRANSPORT/$form/L$L
   python3 $B/generate_case.py --level $L --capillary-form $form --transport $TRANSPORT --output-dir $d
   cat > $d/run.sbatch <<EOS
@@ -251,7 +253,7 @@ EOS
   sbatch --export=NONE --partition=amarsden --time=<see table> --nodes=1 --ntasks=1 --mem=8G \
          --mail-user=$USER@stanford.edu --mail-type=BEGIN,END,FAIL \
          --job-name=capwave_${form}_L$L --output=$d/slurm-%j.out $d/run.sbatch
-done; done
+done
 # after the jobs end:
 python3 $B/verify.py $OUT/$TRANSPORT/surface_stress/L{16,32,64} \
     --json $OUT/$TRANSPORT/surface_stress.json
@@ -327,7 +329,7 @@ The tip column assumes the speed-up measured on the static drop at
 `45bc5b09` (3.41 to 1.08 s/step, `static_drop_2d/README.md`); this case has
 not been timed on the tip. Node generations differ by up to about 1.8x, and
 the wet-extension and PDE transports and the KAG forms (about 50% more per
-step on the static drop) were not timed here. Requests of 1 h, 3 h and 12 h
+step on the static drop; retired by D48) were not timed here. Requests of 1 h, 3 h and 12 h
 for the three levels and 6 h and 12 h for the time-step runs cover the
 baseline timings and leave a margin of about three on the tip. Memory is small: 0.66 GB peak RSS for the batch
 step of the smoke job.
