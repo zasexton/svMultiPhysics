@@ -986,6 +986,7 @@ set(FE_LEVELSET_HEADERS
     LevelSet/LevelSetWallContactConstraint.h
     LevelSet/LevelSetDiagnostics.h
     LevelSet/LevelSetGeometry.h
+    LevelSet/LevelSetSideSupport.h
     LevelSet/LevelSetRestart.h
 )
 
@@ -1018,6 +1019,7 @@ set(FE_LEVELSET_SOURCES
     LevelSet/LevelSetInterfacePreservingRedistancing3D.cpp
     LevelSet/LevelSetDiagnostics.cpp
     LevelSet/LevelSetGeometry.cpp
+    LevelSet/LevelSetSideSupport.cpp
     LevelSet/LevelSetRestart.cpp
 )
 
@@ -1137,6 +1139,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/FunctionalForms.h
     Systems/FunctionalFormEvaluator.h
     Systems/MeshBoundaryKinematics.h
+    Systems/VertexFieldInitialization.h
     Systems/MeshBoundaryRecordSupport.h
     Systems/MeshNormalConstraintStageMeasurements.h
     Systems/SnapshotFieldAccess.h
@@ -1190,6 +1193,7 @@ set(FE_SYSTEMS_SOURCES
     Systems/FunctionalFormEvaluator.cpp
     Systems/FESystem.cpp
     Systems/MeshBoundaryKinematics.cpp
+    Systems/VertexFieldInitialization.cpp
     Systems/MeshBoundaryRecordSupport.cpp
     Systems/MeshNormalConstraintStageMeasurements.cpp
     Systems/TwoFluidStageRecords.cpp
@@ -2642,6 +2646,7 @@ if(FE_BUILD_TESTS)
             list(APPEND FE_LEVELSET_TEST_SOURCES
                 Tests/Unit/LevelSet/test_LevelSetPdeVelocityExtension.cpp
                 Tests/Unit/LevelSet/test_AcceptedFunctionalRecorder.cpp
+                Tests/Unit/LevelSet/test_LevelSetSideSupport.cpp
             )
         endif()
         add_executable(test_fe_levelset ${FE_LEVELSET_TEST_SOURCES})
