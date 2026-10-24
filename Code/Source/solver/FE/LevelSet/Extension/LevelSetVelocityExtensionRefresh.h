@@ -32,6 +32,11 @@
  *
  * Every step is collective over the active communicator of the FE system.
  *
+ * LevelSetVelocityExtensionParticipant is the generated-state participant
+ * (TimeStepping/GeneratedState.h) of the extension: it refreshes the
+ * extension at every synchronization point of a solve and drops the frozen
+ * rows of the monolithic requests when the generated state is invalidated.
+ *
  * Moved from Application/Core/ApplicationDriver.cpp with the bodies, messages
  * and log lines unchanged.
  */
@@ -40,6 +45,7 @@
 #include "LevelSet/Extension/LevelSetPdeVelocityExtension.h"
 #include "LevelSet/LevelSetGeometry.h"
 #include "Mesh/Mesh.h"
+#include "TimeStepping/GeneratedState.h"
 
 #include <array>
 #include <cstddef>
@@ -47,6 +53,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace svmp {
@@ -150,6 +157,59 @@ bool refreshLevelSetVelocityExtensions(
     std::span<const LevelSetVelocityExtensionRequest> requests,
     const LevelSetVelocityExtensionRefreshOptions& options,
     PdeVelocityExtensionCaches& caches);
+
+/**
+ * @brief The generated-state participant of the velocity extension
+ *        ("level_set_advection_velocity", role Extension).
+ *
+ * synchronize() refreshes every request.  The frozen rows of the monolithic
+ * requests are refreshed, in a steady solve, only with the outer fixed
+ * point, and in a transient solve where
+ * refreshesFrozenLevelSetExtensionAtStateSync() says so.  invalidate() drops
+ * those frozen rows (a rejected cut-topology change).  The FE system, the
+ * mesh and the caches must outlive the participant.
+ */
+class LevelSetVelocityExtensionParticipant final
+    : public timestepping::IGeneratedStateParticipant {
+public:
+  struct Options {
+    timestepping::GeneratedStateSolve solve{
+        timestepping::GeneratedStateSolve::Transient};
+    /// The solve regenerates its state in an outer fixed point.
+    bool outer_fixed_point{false};
+    PdeVelocityExtensionFactorization factorization{
+        PdeVelocityExtensionFactorization::LuColamd};
+    /// Write the per-request trace lines.
+    bool trace{false};
+  };
+
+  LevelSetVelocityExtensionParticipant(
+      systems::FESystem& system,
+      const svmp::Mesh& mesh,
+      std::vector<LevelSetVelocityExtensionRequest> requests,
+      Options options,
+      PdeVelocityExtensionCaches& caches);
+
+  [[nodiscard]] std::string_view name() const noexcept override
+  {
+    return "level_set_advection_velocity";
+  }
+  [[nodiscard]] timestepping::GeneratedStateRole role() const noexcept override
+  {
+    return timestepping::GeneratedStateRole::Extension;
+  }
+
+  void synchronize(const systems::SystemStateView& state,
+                   timestepping::GeneratedStateSync& sync) override;
+  void invalidate() override;
+
+private:
+  systems::FESystem* system_{nullptr};
+  const svmp::Mesh* mesh_{nullptr};
+  std::vector<LevelSetVelocityExtensionRequest> requests_{};
+  Options options_{};
+  PdeVelocityExtensionCaches* caches_{nullptr};
+};
 
 } // namespace level_set
 } // namespace FE

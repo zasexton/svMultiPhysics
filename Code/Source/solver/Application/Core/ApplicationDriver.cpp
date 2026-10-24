@@ -3984,6 +3984,21 @@ pdeVelocityExtensionFactorizationSetting()
 // FE/LevelSet/Extension/LevelSetVelocityExtensionRefresh.h.
 using svmp::FE::level_set::PdeVelocityExtensionCaches;
 
+// The dry-region factorization caches of the solves: factorizations are
+// reused while their content key is unchanged (one cache per target field;
+// see PdeVelocityExtensionCache).  The static-certificate probe keeps its own.
+PdeVelocityExtensionCaches& solvePdeExtensionCaches()
+{
+  static PdeVelocityExtensionCaches caches;
+  return caches;
+}
+
+bool levelSetAdvectionTraceEnabled()
+{
+  return parseBoolEnv("SVMP_TRACE_LEVEL_SET_ADVECTION", false) ||
+         application::core::oopTraceEnabled();
+}
+
 // pde_extension_caches: the caches to use; nullptr uses the caches of the
 // solves.
 bool updateLevelSetAdvectionVelocitiesFromState(
@@ -3996,9 +4011,6 @@ bool updateLevelSetAdvectionVelocitiesFromState(
   if (!sim.fe_system || !sim.primary_mesh || requests.empty()) {
     return false;
   }
-  // Dry-region factorizations are reused while their content key is
-  // unchanged (one cache per target field; see PdeVelocityExtensionCache).
-  static PdeVelocityExtensionCaches solve_pde_extension_caches;
   return svmp::FE::level_set::refreshLevelSetVelocityExtensions(
       *sim.fe_system,
       *sim.primary_mesh,
@@ -4007,10 +4019,35 @@ bool updateLevelSetAdvectionVelocitiesFromState(
       svmp::FE::level_set::LevelSetVelocityExtensionRefreshOptions{
           .refresh_frozen_rows = refresh_frozen_algebraic_map,
           .factorization = pdeVelocityExtensionFactorizationSetting(),
-          .trace = parseBoolEnv("SVMP_TRACE_LEVEL_SET_ADVECTION", false) ||
-                   application::core::oopTraceEnabled()},
+          .trace = levelSetAdvectionTraceEnabled()},
       pde_extension_caches != nullptr ? *pde_extension_caches
-                                      : solve_pde_extension_caches);
+                                      : solvePdeExtensionCaches());
+}
+
+// Registers the generated-state participant of the velocity extension
+// (FE/LevelSet/Extension/LevelSetVelocityExtensionRefresh.h) when the run
+// extends a level-set advection velocity.
+void addLevelSetVelocityExtensionParticipant(
+    svmp::FE::timestepping::GeneratedStateRegistry& generated_state,
+    application::core::SimulationComponents& sim,
+    const std::vector<LevelSetAdvectionVelocityRequest>& requests,
+    svmp::FE::timestepping::GeneratedStateSolve solve,
+    bool outer_fixed_point)
+{
+  if (requests.empty() || !sim.fe_system || !sim.primary_mesh) {
+    return;
+  }
+  generated_state.add(
+      std::make_shared<svmp::FE::level_set::LevelSetVelocityExtensionParticipant>(
+          *sim.fe_system,
+          *sim.primary_mesh,
+          requests,
+          svmp::FE::level_set::LevelSetVelocityExtensionParticipant::Options{
+              .solve = solve,
+              .outer_fixed_point = outer_fixed_point,
+              .factorization = pdeVelocityExtensionFactorizationSetting(),
+              .trace = levelSetAdvectionTraceEnabled()},
+          solvePdeExtensionCaches()));
 }
 
 bool updateLevelSetAdvectionVelocities(
@@ -7389,20 +7426,12 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
           cut_geometry,
           svmp::FE::level_set::LevelSetGeometryParticipant::Options{
               .solve = svmp::FE::timestepping::GeneratedStateSolve::Steady}));
-  generated_state->add(std::make_shared<FunctionGeneratedStateParticipant>(
-      "level_set_advection_velocity",
-      GeneratedStateRole::Extension,
-      FunctionGeneratedStateParticipant::Callbacks{
-          .synchronize =
-              [&](const svmp::FE::systems::SystemStateView& state,
-                  GeneratedStateSync&) {
-                (void)updateLevelSetAdvectionVelocitiesFromState(
-                    sim,
-                    state,
-                    steady_level_set_advection_velocity,
-                    /*refresh_frozen_algebraic_map=*/
-                        use_steady_external_state_fixed_point);
-              }}));
+  addLevelSetVelocityExtensionParticipant(
+      *generated_state,
+      sim,
+      steady_level_set_advection_velocity,
+      svmp::FE::timestepping::GeneratedStateSolve::Steady,
+      use_steady_external_state_fixed_point);
   generated_state->bind(newton_opts);
 
   const auto integrator = std::make_shared<const ZeroTimeDerivativeIntegrator>();
@@ -8366,47 +8395,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   has_dynamic_contact_stage &&
                   !parseBoolEnv("SVMP_DISABLE_CUT_CONTEXT_REINSTALL", false),
               .expected_request_policy_key = expected_cut_request_policy_key}));
-  generated_state->add(std::make_shared<FunctionGeneratedStateParticipant>(
-      "level_set_advection_velocity",
-      GeneratedStateRole::Extension,
-      FunctionGeneratedStateParticipant::Callbacks{
-          .synchronize =
-              [&](const svmp::FE::systems::SystemStateView& state,
-                  GeneratedStateSync& sync) {
-                (void)updateLevelSetAdvectionVelocitiesFromState(
-                    sim,
-                    state,
-                    level_set_advection_velocity,
-                    /*refresh_frozen_algebraic_map=*/
-                        refreshesFrozenLevelSetExtensionAtStateSync(
-                            sync.point,
-                            use_transient_external_state_fixed_point));
-              },
-          .invalidate =
-              [&] {
-                for (const auto& request : level_set_advection_velocity) {
-                  const auto target = sim.fe_system->findFieldByName(
-                      request.target_velocity_field_name);
-                  if (target == svmp::FE::INVALID_FIELD_ID) {
-                    throw std::runtime_error(
-                        "[svMultiPhysics::Application] Cut-topology rejection could not invalidate a level-set velocity extension target field.");
-                  }
-                  auto extension_constraint =
-                      svmp::FE::level_set::
-                          findLevelSetVelocityExtensionConstraintKernel(
-                              *sim.fe_system, request.operator_tag, target);
-                  const bool algebraic_extension =
-                      sim.fe_system->fieldRecord(target).source_kind ==
-                      svmp::FE::systems::FieldSourceKind::Unknown;
-                  if (algebraic_extension && !extension_constraint) {
-                    throw std::runtime_error(
-                        "[svMultiPhysics::Application] Cut-topology rejection could not resolve a frozen level-set velocity extension kernel.");
-                  }
-                  if (extension_constraint) {
-                    extension_constraint->invalidateFrozenMap();
-                  }
-                }
-              }}));
+  addLevelSetVelocityExtensionParticipant(
+      *generated_state,
+      sim,
+      level_set_advection_velocity,
+      svmp::FE::timestepping::GeneratedStateSolve::Transient,
+      use_transient_external_state_fixed_point);
   if (semi_implicit_reference) {
     generated_state->add(std::make_shared<FunctionGeneratedStateParticipant>(
         "free_surface_semi_implicit_reference",

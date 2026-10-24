@@ -384,6 +384,30 @@ TEST(LevelSetVelocityExtensionRefresh, PrescribedFieldMatchesTheDirectExtension)
     EXPECT_DOUBLE_EQ(refreshed[i], expected[i]) << "value " << i;
   }
 
+  // The generated-state participant refreshes the same field at a
+  // synchronization point; with a prescribed target there are no frozen
+  // rows to drop.
+  prescribe(extension, std::vector<double>(expected.size(), 0.0), 2u);
+  svmp::FE::level_set::LevelSetVelocityExtensionParticipant participant(
+      system, *mesh, requests,
+      svmp::FE::level_set::LevelSetVelocityExtensionParticipant::Options{},
+      caches);
+  EXPECT_EQ(participant.name(), "level_set_advection_velocity");
+  EXPECT_EQ(participant.role(),
+            svmp::FE::timestepping::GeneratedStateRole::Extension);
+  svmp::FE::timestepping::GeneratedStateSync sync{};
+  sync.point = svmp::FE::timestepping::NewtonOptions::
+      StateSynchronizationPoint::AcceptedNonlinearState;
+  participant.synchronize(svmp::FE::systems::SystemStateView{}, sync);
+  const auto synchronized = svmp::FE::level_set::evaluateVertexField(
+      system, *mesh, extension, svmp::FE::systems::SystemStateView{}, 2u,
+      "velocity-extension participant test");
+  ASSERT_EQ(synchronized.size(), expected.size());
+  for (std::size_t i = 0; i < expected.size(); ++i) {
+    EXPECT_DOUBLE_EQ(synchronized[i], expected[i]) << "value " << i;
+  }
+  EXPECT_NO_THROW(participant.invalidate());
+
   // The algebraic wet extension was retired (decisions D47 and D55).
   auto retired = request;
   retired.extension_method = "wall_compatible_normal";

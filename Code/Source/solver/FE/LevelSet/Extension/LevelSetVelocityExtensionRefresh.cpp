@@ -27,6 +27,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 
 namespace svmp {
 namespace FE {
@@ -1030,6 +1031,65 @@ bool refreshLevelSetVelocityExtensions(
   }
 
   return updated;
+}
+
+LevelSetVelocityExtensionParticipant::LevelSetVelocityExtensionParticipant(
+    systems::FESystem& system,
+    const svmp::Mesh& mesh,
+    std::vector<LevelSetVelocityExtensionRequest> requests,
+    Options options,
+    PdeVelocityExtensionCaches& caches)
+    : system_(&system),
+      mesh_(&mesh),
+      requests_(std::move(requests)),
+      options_(options),
+      caches_(&caches)
+{
+}
+
+void LevelSetVelocityExtensionParticipant::synchronize(
+    const systems::SystemStateView& state,
+    timestepping::GeneratedStateSync& sync)
+{
+  const bool refresh_frozen_rows =
+      options_.solve == timestepping::GeneratedStateSolve::Steady
+          ? options_.outer_fixed_point
+          : timestepping::refreshesFrozenLevelSetExtensionAtStateSync(
+                sync.point, options_.outer_fixed_point);
+  (void)refreshLevelSetVelocityExtensions(
+      *system_,
+      *mesh_,
+      state,
+      requests_,
+      LevelSetVelocityExtensionRefreshOptions{
+          .refresh_frozen_rows = refresh_frozen_rows,
+          .factorization = options_.factorization,
+          .trace = options_.trace},
+      *caches_);
+}
+
+void LevelSetVelocityExtensionParticipant::invalidate()
+{
+  for (const auto& request : requests_) {
+    const auto target =
+        system_->findFieldByName(request.target_velocity_field_name);
+    if (target == INVALID_FIELD_ID) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Cut-topology rejection could not invalidate a level-set velocity extension target field.");
+    }
+    auto extension_constraint = findLevelSetVelocityExtensionConstraintKernel(
+        *system_, request.operator_tag, target);
+    const bool algebraic_extension =
+        system_->fieldRecord(target).source_kind ==
+        systems::FieldSourceKind::Unknown;
+    if (algebraic_extension && !extension_constraint) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Cut-topology rejection could not resolve a frozen level-set velocity extension kernel.");
+    }
+    if (extension_constraint) {
+      extension_constraint->invalidateFrozenMap();
+    }
+  }
 }
 
 } // namespace level_set
