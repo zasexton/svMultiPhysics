@@ -24,6 +24,7 @@ namespace {
 
 void validateOptions(
     const LevelSetVolumeConstrainedMinimizerOptions& options,
+    const LevelSetVolumeConstrainedProblem& problem,
     std::span<const Real> input_coefficients,
     std::span<const std::size_t> active_coefficient_indices,
     const LevelSetVolumeConstrainedEvaluator& evaluator)
@@ -47,19 +48,24 @@ void validateOptions(
         throw std::invalid_argument(
             "static capillary equilibrium minimization requires finite coefficients");
     }
+    if (problem.energy_components.empty()) {
+        throw std::invalid_argument(
+            "static capillary equilibrium minimization requires named energy components");
+    }
+    const bool check_limits_valid = std::all_of(
+        problem.acceptance_checks.begin(),
+        problem.acceptance_checks.end(),
+        [](const LevelSetVolumeConstrainedAcceptanceCheck& check) {
+            return std::all_of(check.limits.begin(),
+                               check.limits.end(),
+                               [](Real limit) {
+                                   return finiteNonnegative(limit);
+                               });
+        });
     if (!finitePositive(options.target_liquid_volume) ||
         !finitePositive(options.volume_tolerance) ||
         !finiteNonnegative(options.projected_gradient_tolerance) ||
-        !finiteNonnegative(
-            options.pressure_representability_max_residual_norm) ||
-        !finiteNonnegative(
-            options.pressure_representability_max_relative_distance) ||
-        !finiteNonnegative(
-            options.physical_equilibrium_max_residual_norm) ||
-        !finiteNonnegative(
-            options.constant_pressure_kkt_max_residual_norm) ||
-        !finiteNonnegative(
-            options.constant_pressure_kkt_max_relative_distance) ||
+        !check_limits_valid ||
         !finitePositive(
             options.finite_difference_reference_coefficient_scale) ||
         !finitePositive(options.finite_difference_relative_step) ||
@@ -128,11 +134,19 @@ void projectOrthogonalTo(
     }
 }
 
-[[nodiscard]] Real physicalPotentialEnergy(
+/// The sum of the energy components, in their order.
+[[nodiscard]] Real totalEnergy(
     const LevelSetVolumeConstrainedEvaluation& evaluation) noexcept
 {
-    return evaluation.surface_wall_energy +
-           evaluation.gravitational_potential_energy;
+    const auto& components = evaluation.energy_components;
+    if (components.empty()) {
+        return Real{0.0};
+    }
+    Real energy = components.front();
+    for (std::size_t i = 1u; i < components.size(); ++i) {
+        energy += components[i];
+    }
+    return energy;
 }
 
 } // namespace
@@ -140,6 +154,7 @@ void projectOrthogonalTo(
 LevelSetVolumeConstrainedMinimizerResult
 minimizeLevelSetVolumeConstrained(
     const LevelSetVolumeConstrainedMinimizerOptions& options,
+    const LevelSetVolumeConstrainedProblem& problem,
     std::span<const Real> input_coefficients,
     std::span<const std::size_t> active_coefficient_indices,
     const LevelSetVolumeConstrainedEvaluator& evaluator,
@@ -147,6 +162,7 @@ minimizeLevelSetVolumeConstrained(
 {
     validateOptions(
         options,
+        problem,
         input_coefficients,
         active_coefficient_indices,
         evaluator);
@@ -177,7 +193,7 @@ minimizeLevelSetVolumeConstrained(
     std::vector<Real> coefficients(
         input_coefficients.begin(), input_coefficients.end());
 
-    bool forbidden_projection_seen = false;
+    bool forbidden_substitution_seen = false;
     std::string last_evaluation_diagnostic;
     const auto evaluate =
         [&](std::span<const Real> candidate,
@@ -209,32 +225,35 @@ minimizeLevelSetVolumeConstrained(
                         : evaluation.diagnostic;
                 return false;
             }
-            if (evaluation.production_force_projection_applied) {
-                forbidden_projection_seen = true;
+            if (evaluation.forbidden_substitution_applied) {
+                forbidden_substitution_seen = true;
                 last_evaluation_diagnostic =
-                    "candidate_evaluator_projected_production_force";
+                    problem.forbidden_substitution_evaluation_diagnostic;
                 return false;
             }
             if (evaluation.snapshot_revision_key == 0u ||
                 evaluation.cut_topology_key == 0u ||
                 evaluation.constraint_semantics_key == 0u ||
-                !std::isfinite(evaluation.surface_wall_energy) ||
-                !std::isfinite(
-                    evaluation.gravitational_potential_energy) ||
-                !std::isfinite(physicalPotentialEnergy(evaluation)) ||
+                evaluation.energy_components.size() !=
+                    problem.energy_components.size() ||
+                !std::all_of(
+                    evaluation.energy_components.begin(),
+                    evaluation.energy_components.end(),
+                    [](Real value) { return std::isfinite(value); }) ||
+                !std::isfinite(totalEnergy(evaluation)) ||
                 !finiteNonnegative(evaluation.liquid_volume)) {
                 last_evaluation_diagnostic =
                     "candidate_evaluator_returned_invalid_functional_state";
                 return false;
             }
             if (evaluation.functional_derivatives_available &&
-                (evaluation.physical_potential_derivative.size() !=
+                (evaluation.energy_derivative.size() !=
                      candidate.size() ||
                  evaluation.liquid_volume_derivative.size() !=
                      candidate.size() ||
                  !std::all_of(
-                     evaluation.physical_potential_derivative.begin(),
-                     evaluation.physical_potential_derivative.end(),
+                     evaluation.energy_derivative.begin(),
+                     evaluation.energy_derivative.end(),
                      [](Real value) { return std::isfinite(value); }) ||
                  !std::all_of(
                      evaluation.liquid_volume_derivative.begin(),
@@ -244,24 +263,30 @@ minimizeLevelSetVolumeConstrained(
                     "candidate_evaluator_returned_invalid_functional_derivatives";
                 return false;
             }
-            if (evaluation.pressure_representability_available &&
-                (!finiteNonnegative(
-                     evaluation.pressure_representability_residual_norm) ||
-                 !finiteNonnegative(
-                     evaluation
-                         .pressure_representability_relative_distance))) {
+            const auto& checks = problem.acceptance_checks;
+            if (evaluation.checks.size() != checks.size()) {
                 last_evaluation_diagnostic =
-                    "candidate_evaluator_returned_invalid_pressure_representability_state";
+                    "candidate_evaluator_returned_invalid_acceptance_checks";
                 return false;
             }
-            if (evaluation.constant_pressure_kkt_available &&
-                (!finiteNonnegative(
-                     evaluation.constant_pressure_kkt_residual_norm) ||
-                 !finiteNonnegative(
-                     evaluation.constant_pressure_kkt_relative_distance))) {
-                last_evaluation_diagnostic =
-                    "candidate_evaluator_returned_invalid_constant_pressure_kkt_state";
-                return false;
+            for (std::size_t i = 0u; i < checks.size(); ++i) {
+                const auto& value = evaluation.checks[i];
+                if (value.values.size() != checks[i].limits.size()) {
+                    last_evaluation_diagnostic =
+                        "candidate_evaluator_returned_invalid_acceptance_checks";
+                    return false;
+                }
+                if (!checks[i].invalid_state_diagnostic.empty() &&
+                    value.available &&
+                    !std::all_of(value.values.begin(),
+                                 value.values.end(),
+                                 [](Real measured) {
+                                     return finiteNonnegative(measured);
+                                 })) {
+                    last_evaluation_diagnostic =
+                        checks[i].invalid_state_diagnostic;
+                    return false;
+                }
             }
             last_evaluation_diagnostic.clear();
             return true;
@@ -273,8 +298,8 @@ minimizeLevelSetVolumeConstrained(
             LevelSetVolumeConstrainedEvaluationPurpose::FunctionalTrial,
             current)) {
         result.diagnostic =
-            forbidden_projection_seen
-                ? "production_force_projection_is_forbidden"
+            forbidden_substitution_seen
+                ? problem.forbidden_substitution_diagnostic
                 : "initial_candidate_evaluation_failed:" +
                       last_evaluation_diagnostic;
         return result;
@@ -291,18 +316,10 @@ minimizeLevelSetVolumeConstrained(
     result.cut_topology_key = topology_epoch_key;
     result.constraint_semantics_key =
         constraint_epoch_key;
-    result.initial_surface_wall_energy =
-        current.surface_wall_energy;
-    result.final_surface_wall_energy =
-        current.surface_wall_energy;
-    result.initial_gravitational_potential_energy =
-        current.gravitational_potential_energy;
-    result.final_gravitational_potential_energy =
-        current.gravitational_potential_energy;
-    result.initial_physical_potential_energy =
-        physicalPotentialEnergy(current);
-    result.final_physical_potential_energy =
-        physicalPotentialEnergy(current);
+    result.initial_energy_components = current.energy_components;
+    result.final_energy_components = current.energy_components;
+    result.initial_energy = totalEnergy(current);
+    result.final_energy = totalEnergy(current);
     result.initial_liquid_volume = current.liquid_volume;
     result.final_liquid_volume = current.liquid_volume;
 
@@ -333,7 +350,7 @@ minimizeLevelSetVolumeConstrained(
                  ++local) {
                 const auto index = active_indices[local];
                 energy[local] =
-                    evaluation.physical_potential_derivative[index];
+                    evaluation.energy_derivative[index];
                 volume[local] =
                     evaluation.liquid_volume_derivative[index];
             }
@@ -359,36 +376,14 @@ minimizeLevelSetVolumeConstrained(
         [&](const LevelSetVolumeConstrainedEvaluation& evaluation) {
             result.final_snapshot_revision_key =
                 evaluation.snapshot_revision_key;
-            result.final_surface_wall_energy =
-                evaluation.surface_wall_energy;
-            result.final_gravitational_potential_energy =
-                evaluation.gravitational_potential_energy;
-            result.final_physical_potential_energy =
-                physicalPotentialEnergy(evaluation);
+            result.final_energy_components =
+                evaluation.energy_components;
+            result.final_energy = totalEnergy(evaluation);
             result.final_liquid_volume = evaluation.liquid_volume;
             result.final_volume_error =
                 evaluation.liquid_volume -
                 options.target_liquid_volume;
-            result.final_pressure_representability_available =
-                evaluation.pressure_representability_available;
-            result.final_pressure_representability_converged =
-                evaluation.pressure_representability_converged;
-            result.final_pressure_representability_breakdown =
-                evaluation.pressure_representability_breakdown;
-            result.final_pressure_representability_residual_norm =
-                evaluation.pressure_representability_residual_norm;
-            result.final_pressure_representability_relative_distance =
-                evaluation.pressure_representability_relative_distance;
-            result.final_production_residual_norm =
-                evaluation.production_residual_norm;
-            result.final_constant_pressure_kkt_required =
-                evaluation.constant_pressure_kkt_required;
-            result.final_constant_pressure_kkt_available =
-                evaluation.constant_pressure_kkt_available;
-            result.final_constant_pressure_kkt_residual_norm =
-                evaluation.constant_pressure_kkt_residual_norm;
-            result.final_constant_pressure_kkt_relative_distance =
-                evaluation.constant_pressure_kkt_relative_distance;
+            result.final_checks = evaluation.checks;
         };
     updateFinalEvaluation(current);
 
@@ -401,7 +396,7 @@ minimizeLevelSetVolumeConstrained(
                  ++local) {
                 const auto index = active_indices[local];
                 energy_gradient[local] =
-                    current.physical_potential_derivative[index];
+                    current.energy_derivative[index];
                 volume_gradient[local] =
                     current.liquid_volume_derivative[index];
             }
@@ -443,9 +438,9 @@ minimizeLevelSetVolumeConstrained(
                                      states[sample]);
                         diagnostics[sample] = last_evaluation_diagnostic;
                     }
-                    if (forbidden_projection_seen) {
+                    if (forbidden_substitution_seen) {
                         result.diagnostic =
-                            "production_force_projection_is_forbidden";
+                            problem.forbidden_substitution_diagnostic;
                         return result;
                     }
                     const bool all_available =
@@ -467,10 +462,10 @@ minimizeLevelSetVolumeConstrained(
                                     });
                     if (topology_preserved && constraints_preserved) {
                         const std::array<Real, 4> energies{
-                            {physicalPotentialEnergy(states[0]),
-                             physicalPotentialEnergy(states[1]),
-                             physicalPotentialEnergy(states[2]),
-                             physicalPotentialEnergy(states[3])}};
+                            {totalEnergy(states[0]),
+                             totalEnergy(states[1]),
+                             totalEnergy(states[2]),
+                             totalEnergy(states[3])}};
                         const std::array<Real, 4> volumes{
                             {states[0].liquid_volume, states[1].liquid_volume,
                              states[2].liquid_volume, states[3].liquid_volume}};
@@ -696,8 +691,8 @@ minimizeLevelSetVolumeConstrained(
                         AcceptanceCertificate,
                     certificate)) {
                 result.diagnostic =
-                    forbidden_projection_seen
-                        ? "production_force_projection_is_forbidden"
+                    forbidden_substitution_seen
+                        ? problem.forbidden_substitution_diagnostic
                         : "acceptance_certificate_evaluation_failed:" +
                               last_evaluation_diagnostic;
                 return result;
@@ -716,10 +711,8 @@ minimizeLevelSetVolumeConstrained(
                     "acceptance_certificate_constraint_semantics_changed";
                 return result;
             }
-            if (certificate.surface_wall_energy !=
-                    current.surface_wall_energy ||
-                certificate.gravitational_potential_energy !=
-                    current.gravitational_potential_energy ||
+            if (certificate.energy_components !=
+                    current.energy_components ||
                 certificate.liquid_volume !=
                     current.liquid_volume) {
                 result.diagnostic =
@@ -742,27 +735,27 @@ minimizeLevelSetVolumeConstrained(
                     "acceptance_certificate_volume_gate_failed";
                 return result;
             }
-            if (!current.pressure_representability_available) {
-                result.diagnostic =
-                    "pressure_representability_unavailable_at_parameter_stationary_geometry";
-                return result;
-            }
-            if (!current.pressure_representability_converged ||
-                current.pressure_representability_breakdown) {
-                result.diagnostic =
-                    "pressure_representability_gate_failed_at_parameter_stationary_geometry";
-                return result;
-            }
-            if (!finiteNonnegative(current.production_residual_norm)) {
-                result.diagnostic =
-                    "physical_equilibrium_residual_gate_failed_at_parameter_stationary_geometry";
-                return result;
-            }
-            if (current.constant_pressure_kkt_required &&
-                !current.constant_pressure_kkt_available) {
-                result.diagnostic =
-                    "constant_pressure_kkt_unavailable_at_parameter_stationary_geometry";
-                return result;
+            // The certificates in their declared order: availability,
+            // convergence and finite values first, then the limits.
+            const auto& checks = problem.acceptance_checks;
+            for (std::size_t i = 0u; i < checks.size(); ++i) {
+                const auto& value = current.checks[i];
+                if (!value.required) {
+                    continue;
+                }
+                if (!value.available) {
+                    result.diagnostic = checks[i].unavailable_diagnostic;
+                    return result;
+                }
+                if (!value.converged || value.breakdown ||
+                    !std::all_of(value.values.begin(),
+                                 value.values.end(),
+                                 [](Real measured) {
+                                     return finiteNonnegative(measured);
+                                 })) {
+                    result.diagnostic = checks[i].failed_diagnostic;
+                    return result;
+                }
             }
 
             Real tightening_factor = Real{0.1};
@@ -770,7 +763,7 @@ minimizeLevelSetVolumeConstrained(
             const auto accountForFailedGate =
                 [&](Real value,
                     Real limit,
-                    const char* diagnostic) {
+                    const std::string& diagnostic) {
                     if (value <= limit) {
                         return;
                     }
@@ -787,27 +780,16 @@ minimizeLevelSetVolumeConstrained(
                     tightening_factor =
                         std::min(tightening_factor, gate_factor);
                 };
-            accountForFailedGate(
-                current.pressure_representability_residual_norm,
-                options.pressure_representability_max_residual_norm,
-                "pressure_representability_gate_failed_at_parameter_stationary_geometry");
-            accountForFailedGate(
-                current.pressure_representability_relative_distance,
-                options.pressure_representability_max_relative_distance,
-                "pressure_representability_gate_failed_at_parameter_stationary_geometry");
-            accountForFailedGate(
-                current.production_residual_norm,
-                options.physical_equilibrium_max_residual_norm,
-                "physical_equilibrium_residual_gate_failed_at_parameter_stationary_geometry");
-            if (current.constant_pressure_kkt_required) {
-                accountForFailedGate(
-                    current.constant_pressure_kkt_residual_norm,
-                    options.constant_pressure_kkt_max_residual_norm,
-                    "constant_pressure_kkt_gate_failed_at_parameter_stationary_geometry");
-                accountForFailedGate(
-                    current.constant_pressure_kkt_relative_distance,
-                    options.constant_pressure_kkt_max_relative_distance,
-                    "constant_pressure_kkt_gate_failed_at_parameter_stationary_geometry");
+            for (std::size_t i = 0u; i < checks.size(); ++i) {
+                const auto& value = current.checks[i];
+                if (!value.required) {
+                    continue;
+                }
+                for (std::size_t j = 0u; j < value.values.size(); ++j) {
+                    accountForFailedGate(value.values[j],
+                                         checks[i].limits[j],
+                                         checks[i].failed_diagnostic);
+                }
             }
 
             if (!failed_gate_diagnostic.empty()) {
@@ -1031,7 +1013,7 @@ minimizeLevelSetVolumeConstrained(
             return result;
         }
         const Real current_merit =
-            physicalPotentialEnergy(current) +
+            totalEnergy(current) +
             merit_penalty * std::abs(volume_error);
 
         struct TopologyTransitionTrial {
@@ -1081,10 +1063,10 @@ minimizeLevelSetVolumeConstrained(
                     LevelSetVolumeConstrainedEvaluationPurpose::
                         FunctionalTrial,
                     trial_state);
-            if (forbidden_projection_seen) {
+            if (forbidden_substitution_seen) {
                 appendLineSearchRecord(std::move(trace_record));
                 result.diagnostic =
-                    "production_force_projection_is_forbidden";
+                    problem.forbidden_substitution_diagnostic;
                 return result;
             }
             if (trial_available) {
@@ -1092,7 +1074,7 @@ minimizeLevelSetVolumeConstrained(
                     trial_state.liquid_volume -
                     options.target_liquid_volume;
                 const Real trial_merit =
-                    physicalPotentialEnergy(trial_state) +
+                    totalEnergy(trial_state) +
                     merit_penalty *
                         std::abs(trial_volume_error);
                 const Real armijo_bound =
@@ -1283,7 +1265,7 @@ minimizeLevelSetVolumeConstrained(
                     reproduced_state.liquid_volume -
                     options.target_liquid_volume;
                 const Real reproduced_merit =
-                    physicalPotentialEnergy(reproduced_state) +
+                    totalEnergy(reproduced_state) +
                     merit_penalty *
                         std::abs(reproduced_volume_error);
                 const Real reproduced_armijo_bound =
@@ -1310,10 +1292,8 @@ minimizeLevelSetVolumeConstrained(
                         deferred_state.cut_topology_key &&
                     reproduced_state.constraint_semantics_key ==
                         deferred_state.constraint_semantics_key &&
-                    reproduced_state.surface_wall_energy ==
-                        deferred_state.surface_wall_energy &&
-                    reproduced_state.gravitational_potential_energy ==
-                        deferred_state.gravitational_potential_energy &&
+                    reproduced_state.energy_components ==
+                        deferred_state.energy_components &&
                     reproduced_state.liquid_volume ==
                         deferred_state.liquid_volume &&
                     std::isfinite(reproduced_merit) &&

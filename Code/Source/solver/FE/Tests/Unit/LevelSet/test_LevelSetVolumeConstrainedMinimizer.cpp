@@ -20,6 +20,94 @@ namespace level_set = svmp::FE::level_set;
 using EvaluationPurpose =
     level_set::LevelSetVolumeConstrainedEvaluationPurpose;
 
+// The static cap as the Navier-Stokes driver states it: two energy
+// components and three pressure certificates, in this order, with the limits
+// of its options.
+constexpr std::size_t kSurfaceWallEnergy = 0u;
+constexpr std::size_t kGravitationalPotentialEnergy = 1u;
+constexpr std::size_t kPressureRepresentability = 0u;
+constexpr std::size_t kPhysicalEquilibrium = 1u;
+constexpr std::size_t kConstantPressureKkt = 2u;
+
+struct CapillaryOptions : level_set::LevelSetVolumeConstrainedMinimizerOptions {
+    FE::Real pressure_representability_max_residual_norm{1.0e-10};
+    FE::Real pressure_representability_max_relative_distance{1.0e-8};
+    FE::Real physical_equilibrium_max_residual_norm{1.0e-10};
+    FE::Real constant_pressure_kkt_max_residual_norm{1.0e-10};
+    FE::Real constant_pressure_kkt_max_relative_distance{1.0e-8};
+};
+
+level_set::LevelSetVolumeConstrainedProblem
+capillaryProblem(const CapillaryOptions& options)
+{
+    level_set::LevelSetVolumeConstrainedProblem problem;
+    problem.energy_components = {"surface_wall_energy",
+                                 "gravitational_potential_energy"};
+    problem.acceptance_checks.resize(3u);
+    auto& pressure = problem.acceptance_checks[kPressureRepresentability];
+    pressure.name = "pressure_representability";
+    pressure.limits = {options.pressure_representability_max_residual_norm,
+                       options.pressure_representability_max_relative_distance};
+    pressure.invalid_state_diagnostic =
+        "candidate_evaluator_returned_invalid_pressure_representability_state";
+    pressure.unavailable_diagnostic =
+        "pressure_representability_unavailable_at_parameter_stationary_geometry";
+    pressure.failed_diagnostic =
+        "pressure_representability_gate_failed_at_parameter_stationary_geometry";
+    auto& equilibrium = problem.acceptance_checks[kPhysicalEquilibrium];
+    equilibrium.name = "physical_equilibrium_residual";
+    equilibrium.limits = {options.physical_equilibrium_max_residual_norm};
+    equilibrium.failed_diagnostic =
+        "physical_equilibrium_residual_gate_failed_at_parameter_stationary_geometry";
+    auto& kkt = problem.acceptance_checks[kConstantPressureKkt];
+    kkt.name = "constant_pressure_kkt";
+    kkt.limits = {options.constant_pressure_kkt_max_residual_norm,
+                  options.constant_pressure_kkt_max_relative_distance};
+    kkt.invalid_state_diagnostic =
+        "candidate_evaluator_returned_invalid_constant_pressure_kkt_state";
+    kkt.unavailable_diagnostic =
+        "constant_pressure_kkt_unavailable_at_parameter_stationary_geometry";
+    kkt.failed_diagnostic =
+        "constant_pressure_kkt_gate_failed_at_parameter_stationary_geometry";
+    problem.forbidden_substitution_evaluation_diagnostic =
+        "candidate_evaluator_projected_production_force";
+    problem.forbidden_substitution_diagnostic =
+        "production_force_projection_is_forbidden";
+    return problem;
+}
+
+// A successful evaluation starts from a NaN surface energy, zero gravity
+// energy and unmeasured certificates.
+level_set::LevelSetVolumeConstrainedEvaluation capillaryEvaluation()
+{
+    constexpr auto nan = std::numeric_limits<FE::Real>::quiet_NaN();
+    level_set::LevelSetVolumeConstrainedEvaluation evaluation;
+    evaluation.energy_components = {nan, FE::Real{0.0}};
+    evaluation.checks.resize(3u);
+    evaluation.checks[kPressureRepresentability].converged = false;
+    evaluation.checks[kPressureRepresentability].values = {nan, nan};
+    evaluation.checks[kPhysicalEquilibrium].available = true;
+    evaluation.checks[kPhysicalEquilibrium].values = {nan};
+    evaluation.checks[kConstantPressureKkt].values = {nan, nan};
+    return evaluation;
+}
+
+level_set::LevelSetVolumeConstrainedMinimizerResult minimizeCapillary(
+    const CapillaryOptions& options,
+    std::span<const FE::Real> input_coefficients,
+    std::span<const std::size_t> active_coefficient_indices,
+    const level_set::LevelSetVolumeConstrainedEvaluator& evaluator,
+    std::vector<FE::Real>& accepted_coefficients)
+{
+    return level_set::minimizeLevelSetVolumeConstrained(
+        options,
+        capillaryProblem(options),
+        input_coefficients,
+        active_coefficient_indices,
+        evaluator,
+        accepted_coefficients);
+}
+
 std::uint64_t coefficientRevision(std::span<const FE::Real> coefficients)
 {
     static_assert(sizeof(FE::Real) == sizeof(std::uint64_t));
@@ -39,7 +127,7 @@ quadraticCapillaryEvaluation(
     bool constraint_barrier = false,
     bool provide_functional_derivatives = false)
 {
-    level_set::LevelSetVolumeConstrainedEvaluation evaluation;
+    auto evaluation = capillaryEvaluation();
     if (coefficients.size() != 2u) {
         evaluation.diagnostic = "unexpected_coefficient_count";
         return evaluation;
@@ -71,52 +159,52 @@ quadraticCapillaryEvaluation(
         topology_barrier && x < FE::Real{0.9} ? 22u : 11u;
     evaluation.constraint_semantics_key =
         constraint_barrier && x < FE::Real{0.9} ? 44u : 33u;
-    evaluation.surface_wall_energy =
+    evaluation.energy_components[kSurfaceWallEnergy] =
         energy_x * energy_x + energy_y * energy_y;
     evaluation.liquid_volume = x + y;
     evaluation.functional_derivatives_available =
         provide_functional_derivatives;
     if (provide_functional_derivatives) {
-        evaluation.physical_potential_derivative = {
+        evaluation.energy_derivative = {
             gradient_x, gradient_y};
         evaluation.liquid_volume_derivative = {
             FE::Real{1.0}, FE::Real{1.0}};
     }
-    evaluation.pressure_representability_available =
+    evaluation.checks[kPressureRepresentability].available =
         purpose == EvaluationPurpose::AcceptanceCertificate;
-    evaluation.pressure_representability_converged =
-        evaluation.pressure_representability_available;
-    evaluation.pressure_representability_residual_norm =
-        evaluation.pressure_representability_available
+    evaluation.checks[kPressureRepresentability].converged =
+        evaluation.checks[kPressureRepresentability].available;
+    evaluation.checks[kPressureRepresentability].values[0] =
+        evaluation.checks[kPressureRepresentability].available
             ? residual_norm
             : std::numeric_limits<FE::Real>::quiet_NaN();
-    evaluation.pressure_representability_relative_distance =
-        evaluation.pressure_representability_available
+    evaluation.checks[kPressureRepresentability].values[1] =
+        evaluation.checks[kPressureRepresentability].available
             ? residual_norm /
                   std::max(FE::Real{1.0}, gradient_norm)
             : std::numeric_limits<FE::Real>::quiet_NaN();
-    evaluation.production_residual_norm =
-        evaluation.pressure_representability_available
+    evaluation.checks[kPhysicalEquilibrium].values[0] =
+        evaluation.checks[kPressureRepresentability].available
             ? residual_norm
             : std::numeric_limits<FE::Real>::quiet_NaN();
-    evaluation.constant_pressure_kkt_available =
+    evaluation.checks[kConstantPressureKkt].available =
         purpose == EvaluationPurpose::AcceptanceCertificate;
-    if (evaluation.constant_pressure_kkt_available) {
-        evaluation.constant_pressure_kkt_residual_norm =
+    if (evaluation.checks[kConstantPressureKkt].available) {
+        evaluation.checks[kConstantPressureKkt].values[0] =
             residual_norm;
-        evaluation.constant_pressure_kkt_relative_distance =
+        evaluation.checks[kConstantPressureKkt].values[1] =
             residual_norm /
             std::max(FE::Real{1.0}, gradient_norm);
     }
-    evaluation.production_force_projection_applied = false;
+    evaluation.forbidden_substitution_applied = false;
     evaluation.diagnostic = "available";
     return evaluation;
 }
 
-level_set::LevelSetVolumeConstrainedMinimizerOptions
+CapillaryOptions
 quadraticOptions()
 {
-    level_set::LevelSetVolumeConstrainedMinimizerOptions options;
+    CapillaryOptions options;
     options.target_liquid_volume = 3.0;
     options.volume_tolerance = 1.0e-10;
     options.projected_gradient_tolerance = 1.0e-7;
@@ -147,7 +235,7 @@ piecewiseTransitionEvaluation(
     std::span<const FE::Real> coefficients,
     FE::Real positive_energy_slope)
 {
-    level_set::LevelSetVolumeConstrainedEvaluation evaluation;
+    auto evaluation = capillaryEvaluation();
     if (coefficients.size() != 2u) {
         evaluation.diagnostic = "unexpected_coefficient_count";
         return evaluation;
@@ -159,13 +247,13 @@ piecewiseTransitionEvaluation(
     evaluation.snapshot_revision_key = coefficientRevision(coefficients);
     evaluation.cut_topology_key = x <= FE::Real{0.0} ? 101u : 202u;
     evaluation.constraint_semantics_key = 303u;
-    evaluation.surface_wall_energy =
+    evaluation.energy_components[kSurfaceWallEnergy] =
         x <= FE::Real{0.0}
             ? FE::Real{1.0} - x
             : FE::Real{1.0} + positive_energy_slope * epsilon * x;
     evaluation.liquid_volume = x + y;
     evaluation.functional_derivatives_available = true;
-    evaluation.physical_potential_derivative = {
+    evaluation.energy_derivative = {
         x <= FE::Real{0.0}
             ? FE::Real{-1.0}
             : positive_energy_slope * epsilon,
@@ -176,7 +264,7 @@ piecewiseTransitionEvaluation(
     return evaluation;
 }
 
-level_set::LevelSetVolumeConstrainedMinimizerOptions
+CapillaryOptions
 piecewiseTransitionOptions(int line_search_trials, FE::Real shrink = 0.5)
 {
     auto options = quadraticOptions();
@@ -208,20 +296,20 @@ TEST(LevelSetVolumeConstrainedMinimizer,
         evaluated_coefficients.emplace_back(c.begin(), c.end());
         const std::array<FE::Real, 2> compact{c[1], c[4]};
         auto e = piecewiseTransitionEvaluation(compact, FE::Real{1.0});
-        const auto ge = e.physical_potential_derivative;
+        const auto ge = e.energy_derivative;
         const auto gv = e.liquid_volume_derivative;
         e.snapshot_revision_key = coefficientRevision(c);
-        e.physical_potential_derivative.assign(c.size(), FE::Real{0.0});
+        e.energy_derivative.assign(c.size(), FE::Real{0.0});
         e.liquid_volume_derivative.assign(c.size(), FE::Real{0.0});
-        e.physical_potential_derivative[1] = ge[0];
-        e.physical_potential_derivative[4] = ge[1];
+        e.energy_derivative[1] = ge[0];
+        e.energy_derivative[4] = ge[1];
         e.liquid_volume_derivative[1] = gv[0];
         e.liquid_volume_derivative[4] = gv[1];
         return e;
     };
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             piecewiseTransitionOptions(4),
             input,
             active,
@@ -297,20 +385,20 @@ TEST(LevelSetVolumeConstrainedMinimizer,
                               EvaluationPurpose) {
         const std::array<FE::Real, 2> compact{c[1], c.back()};
         auto e = piecewiseTransitionEvaluation(compact, FE::Real{1.0});
-        const auto ge = e.physical_potential_derivative;
+        const auto ge = e.energy_derivative;
         const auto gv = e.liquid_volume_derivative;
         e.snapshot_revision_key = coefficientRevision(c);
-        e.physical_potential_derivative.assign(c.size(), FE::Real{0.0});
+        e.energy_derivative.assign(c.size(), FE::Real{0.0});
         e.liquid_volume_derivative.assign(c.size(), FE::Real{0.0});
-        e.physical_potential_derivative[1] = ge[0];
-        e.physical_potential_derivative.back() = ge[1];
+        e.energy_derivative[1] = ge[0];
+        e.energy_derivative.back() = ge[1];
         e.liquid_volume_derivative[1] = gv[0];
         e.liquid_volume_derivative.back() = gv[1];
         return e;
     };
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             piecewiseTransitionOptions(4),
             input,
             active,
@@ -368,7 +456,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     };
 
     const auto success =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             quadraticOptions(),
             input,
             active,
@@ -393,7 +481,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     const std::vector<FE::Real> sentinel{106.0, 107.0, 108.0};
     accepted = sentinel;
     const auto pre_search_exit =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             limited_options,
             input,
             active,
@@ -428,7 +516,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             piecewiseTransitionOptions(4),
             input,
             active,
@@ -486,7 +574,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             piecewiseTransitionOptions(4),
             input,
             active,
@@ -522,7 +610,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     std::vector<FE::Real> accepted{86.0};
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             piecewiseTransitionOptions(70, FE::Real{0.99}),
             input,
             active,
@@ -565,7 +653,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     std::vector<FE::Real> accepted{87.0};
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             piecewiseTransitionOptions(1),
             input,
             active,
@@ -611,7 +699,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     std::size_t positive_candidate_evaluations = 0u;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             piecewiseTransitionOptions(4),
             input,
             active,
@@ -622,7 +710,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
                     coefficients, FE::Real{-1000000.0});
                 if (coefficients[0] > FE::Real{0.0} &&
                     ++positive_candidate_evaluations == 2u) {
-                    evaluation.surface_wall_energy += FE::Real{0.125};
+                    evaluation.energy_components[kSurfaceWallEnergy] += FE::Real{0.125};
                 }
                 return evaluation;
             },
@@ -667,7 +755,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     options.max_line_search_iterations = 2;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             options,
             input,
             active,
@@ -732,14 +820,13 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     options.limited_memory_history_size = 0;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             options,
             input,
             active,
             [](std::span<const FE::Real> coefficients,
                EvaluationPurpose) {
-                level_set::LevelSetVolumeConstrainedEvaluation
-                    evaluation;
+                auto evaluation = capillaryEvaluation();
                 const bool initial =
                     coefficients[0] == FE::Real{0.0};
                 evaluation.success = true;
@@ -747,12 +834,12 @@ TEST(LevelSetVolumeConstrainedMinimizer,
                     coefficientRevision(coefficients);
                 evaluation.cut_topology_key = 401u;
                 evaluation.constraint_semantics_key = 402u;
-                evaluation.surface_wall_energy =
+                evaluation.energy_components[kSurfaceWallEnergy] =
                     initial ? FE::Real{1.0} : FE::Real{0.5};
                 evaluation.liquid_volume =
                     coefficients[0] + coefficients[1];
                 evaluation.functional_derivatives_available = true;
-                evaluation.physical_potential_derivative = {
+                evaluation.energy_derivative = {
                     initial ? FE::Real{-1.0e-100} : FE::Real{1.0e100},
                     FE::Real{0.0}};
                 evaluation.liquid_volume_derivative = {
@@ -782,7 +869,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     std::vector<FE::Real> accepted{91.0, 92.0, 93.0};
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             quadraticOptions(),
             input,
             active,
@@ -802,11 +889,11 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     EXPECT_DOUBLE_EQ(input[0], 2.5);
     EXPECT_DOUBLE_EQ(input[1], 0.5);
     EXPECT_NEAR(result.final_liquid_volume, 3.0, 1.0e-10);
-    EXPECT_NEAR(result.final_surface_wall_energy, 0.0, 1.0e-13);
+    EXPECT_NEAR(result.final_energy_components[kSurfaceWallEnergy], 0.0, 1.0e-13);
     EXPECT_LE(result.final_projected_gradient_norm, 1.0e-7);
-    EXPECT_TRUE(result.final_constant_pressure_kkt_available);
+    EXPECT_TRUE(result.final_checks[kConstantPressureKkt].available);
     EXPECT_LE(
-        result.final_constant_pressure_kkt_relative_distance,
+        result.final_checks[kConstantPressureKkt].values[1],
         1.0e-7);
     EXPECT_GT(result.functional_evaluations, 1u);
     EXPECT_EQ(result.acceptance_certificate_evaluations, 1u);
@@ -830,7 +917,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     std::vector<FE::Real> accepted;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             quadraticOptions(),
             input,
             active,
@@ -872,7 +959,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     options.limited_memory_history_size = 0;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             options,
             input,
             active,
@@ -894,7 +981,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     EXPECT_GT(result.iterations, 0);
     EXPECT_EQ(result.acceptance_certificate_evaluations, 2u);
     EXPECT_LE(result.final_projected_gradient_norm, 1.0e-6);
-    EXPECT_LE(result.final_production_residual_norm, 1.0e-6);
+    EXPECT_LE(result.final_checks[kPhysicalEquilibrium].values[0], 1.0e-6);
 }
 
 TEST(LevelSetVolumeConstrainedMinimizer,
@@ -907,7 +994,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     options.limited_memory_history_size = 0;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             options,
             input,
             active,
@@ -943,7 +1030,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     options.max_iterations = 4;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             options,
             input,
             active,
@@ -955,25 +1042,25 @@ TEST(LevelSetVolumeConstrainedMinimizer,
                     /*topology_barrier=*/false,
                     /*constraint_barrier=*/false,
                     /*provide_functional_derivatives=*/true);
-                evaluation.surface_wall_energy =
+                evaluation.energy_components[kSurfaceWallEnergy] =
                     coefficients[0] < FE::Real{2.0}
                         ? std::nextafter(
                               FE::Real{1.0},
                               std::numeric_limits<FE::Real>::infinity())
                         : FE::Real{1.0};
                 for (auto& derivative :
-                     evaluation.physical_potential_derivative) {
+                     evaluation.energy_derivative) {
                     derivative *= energy_scale;
                 }
-                if (evaluation.pressure_representability_available) {
-                    evaluation.pressure_representability_residual_norm *=
+                if (evaluation.checks[kPressureRepresentability].available) {
+                    evaluation.checks[kPressureRepresentability].values[0] *=
                         energy_scale;
-                    evaluation.pressure_representability_relative_distance *=
+                    evaluation.checks[kPressureRepresentability].values[1] *=
                         energy_scale;
-                    evaluation.production_residual_norm *= energy_scale;
-                    evaluation.constant_pressure_kkt_residual_norm *=
+                    evaluation.checks[kPhysicalEquilibrium].values[0] *= energy_scale;
+                    evaluation.checks[kConstantPressureKkt].values[0] *=
                         energy_scale;
-                    evaluation.constant_pressure_kkt_relative_distance *=
+                    evaluation.checks[kConstantPressureKkt].values[1] *=
                         energy_scale;
                 }
                 return evaluation;
@@ -998,7 +1085,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             quadraticOptions(),
             input,
             active,
@@ -1031,7 +1118,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     std::vector<FE::Real> accepted{71.0, 72.0, 73.0};
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             quadraticOptions(),
             input,
             active,
@@ -1039,14 +1126,14 @@ TEST(LevelSetVolumeConstrainedMinimizer,
                EvaluationPurpose purpose) {
                 auto evaluation = quadraticCapillaryEvaluation(
                     coefficients, purpose);
-                evaluation.gravitational_potential_energy =
-                    evaluation.surface_wall_energy;
-                evaluation.surface_wall_energy = FE::Real{0.0};
-                evaluation.constant_pressure_kkt_required = false;
-                evaluation.constant_pressure_kkt_available = false;
-                evaluation.constant_pressure_kkt_residual_norm =
+                evaluation.energy_components[kGravitationalPotentialEnergy] =
+                    evaluation.energy_components[kSurfaceWallEnergy];
+                evaluation.energy_components[kSurfaceWallEnergy] = FE::Real{0.0};
+                evaluation.checks[kConstantPressureKkt].required = false;
+                evaluation.checks[kConstantPressureKkt].available = false;
+                evaluation.checks[kConstantPressureKkt].values[0] =
                     std::numeric_limits<FE::Real>::quiet_NaN();
-                evaluation.constant_pressure_kkt_relative_distance =
+                evaluation.checks[kConstantPressureKkt].values[1] =
                     std::numeric_limits<FE::Real>::quiet_NaN();
                 return evaluation;
             },
@@ -1056,16 +1143,16 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     ASSERT_EQ(accepted.size(), 2u);
     EXPECT_NEAR(accepted[0], 1.0, 1.0e-7);
     EXPECT_NEAR(accepted[1], 2.0, 1.0e-7);
-    EXPECT_DOUBLE_EQ(result.final_surface_wall_energy, 0.0);
+    EXPECT_DOUBLE_EQ(result.final_energy_components[kSurfaceWallEnergy], 0.0);
     EXPECT_NEAR(
-        result.final_gravitational_potential_energy, 0.0, 1.0e-13);
+        result.final_energy_components[kGravitationalPotentialEnergy], 0.0, 1.0e-13);
     EXPECT_NEAR(
-        result.final_physical_potential_energy, 0.0, 1.0e-13);
-    EXPECT_TRUE(result.final_pressure_representability_available);
-    EXPECT_TRUE(result.final_pressure_representability_converged);
-    EXPECT_FALSE(result.final_pressure_representability_breakdown);
-    EXPECT_FALSE(result.final_constant_pressure_kkt_required);
-    EXPECT_FALSE(result.final_constant_pressure_kkt_available);
+        result.final_energy, 0.0, 1.0e-13);
+    EXPECT_TRUE(result.final_checks[kPressureRepresentability].available);
+    EXPECT_TRUE(result.final_checks[kPressureRepresentability].converged);
+    EXPECT_FALSE(result.final_checks[kPressureRepresentability].breakdown);
+    EXPECT_FALSE(result.final_checks[kConstantPressureKkt].required);
+    EXPECT_FALSE(result.final_checks[kConstantPressureKkt].available);
 }
 
 TEST(LevelSetVolumeConstrainedMinimizer,
@@ -1079,7 +1166,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     options.maximum_coefficient_update_linf = 4.0;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             options,
             input,
             active,
@@ -1114,7 +1201,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     options.max_iterations = 120;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             options,
             input,
             active,
@@ -1153,7 +1240,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     options.max_iterations = 120;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             options,
             input,
             active,
@@ -1190,7 +1277,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     options.maximum_coefficient_update_linf = 4.0;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             options,
             input,
             active,
@@ -1223,7 +1310,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             quadraticOptions(),
             input,
             active,
@@ -1232,9 +1319,9 @@ TEST(LevelSetVolumeConstrainedMinimizer,
                 auto evaluation =
                     quadraticCapillaryEvaluation(
                         coefficients, purpose);
-                evaluation.constant_pressure_kkt_residual_norm =
+                evaluation.checks[kConstantPressureKkt].values[0] =
                     0.25;
-                evaluation.constant_pressure_kkt_relative_distance =
+                evaluation.checks[kConstantPressureKkt].values[1] =
                     0.0;
                 return evaluation;
             },
@@ -1258,7 +1345,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             quadraticOptions(),
             input,
             active,
@@ -1267,9 +1354,9 @@ TEST(LevelSetVolumeConstrainedMinimizer,
                 auto evaluation =
                     quadraticCapillaryEvaluation(
                         coefficients, purpose);
-                evaluation.constant_pressure_kkt_residual_norm =
+                evaluation.checks[kConstantPressureKkt].values[0] =
                     0.0;
-                evaluation.constant_pressure_kkt_relative_distance =
+                evaluation.checks[kConstantPressureKkt].values[1] =
                     0.25;
                 return evaluation;
             },
@@ -1293,7 +1380,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             quadraticOptions(),
             input,
             active,
@@ -1301,9 +1388,9 @@ TEST(LevelSetVolumeConstrainedMinimizer,
                EvaluationPurpose purpose) {
                 auto evaluation = quadraticCapillaryEvaluation(
                     coefficients, purpose);
-                evaluation.pressure_representability_residual_norm = 0.25;
-                evaluation.pressure_representability_relative_distance = 0.0;
-                evaluation.production_residual_norm = 0.0;
+                evaluation.checks[kPressureRepresentability].values[0] = 0.25;
+                evaluation.checks[kPressureRepresentability].values[1] = 0.0;
+                evaluation.checks[kPhysicalEquilibrium].values[0] = 0.0;
                 return evaluation;
             },
             accepted);
@@ -1326,7 +1413,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             quadraticOptions(),
             input,
             active,
@@ -1334,9 +1421,9 @@ TEST(LevelSetVolumeConstrainedMinimizer,
                EvaluationPurpose purpose) {
                 auto evaluation = quadraticCapillaryEvaluation(
                     coefficients, purpose);
-                evaluation.pressure_representability_residual_norm = 0.0;
-                evaluation.pressure_representability_relative_distance = 0.0;
-                evaluation.production_residual_norm = 0.25;
+                evaluation.checks[kPressureRepresentability].values[0] = 0.0;
+                evaluation.checks[kPressureRepresentability].values[1] = 0.0;
+                evaluation.checks[kPhysicalEquilibrium].values[0] = 0.25;
                 return evaluation;
             },
             accepted);
@@ -1359,7 +1446,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             quadraticOptions(),
             input,
             active,
@@ -1370,7 +1457,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
                         coefficients, purpose);
                 if (purpose ==
                     EvaluationPurpose::AcceptanceCertificate) {
-                    evaluation.surface_wall_energy += 1.0e-12;
+                    evaluation.energy_components[kSurfaceWallEnergy] += 1.0e-12;
                 }
                 return evaluation;
             },
@@ -1393,7 +1480,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             quadraticOptions(),
             input,
             active,
@@ -1427,7 +1514,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             quadraticOptions(),
             input,
             active,
@@ -1461,7 +1548,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             quadraticOptions(),
             input,
             active,
@@ -1470,7 +1557,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
                 auto evaluation =
                     quadraticCapillaryEvaluation(
                         coefficients, purpose);
-                evaluation.constant_pressure_kkt_available = false;
+                evaluation.checks[kConstantPressureKkt].available = false;
                 return evaluation;
             },
             accepted);
@@ -1492,7 +1579,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             quadraticOptions(),
             input,
             active,
@@ -1501,7 +1588,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
                 auto evaluation =
                     quadraticCapillaryEvaluation(
                         coefficients, purpose);
-                evaluation.production_force_projection_applied =
+                evaluation.forbidden_substitution_applied =
                     purpose ==
                     EvaluationPurpose::AcceptanceCertificate;
                 return evaluation;
@@ -1525,7 +1612,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             quadraticOptions(),
             input,
             active,
@@ -1566,7 +1653,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     std::vector<FE::Real> accepted = sentinel;
 
     const auto result =
-        level_set::minimizeLevelSetVolumeConstrained(
+        minimizeCapillary(
             quadraticOptions(),
             input,
             active,
@@ -1575,7 +1662,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
                 auto evaluation =
                     quadraticCapillaryEvaluation(
                         coefficients, purpose);
-                evaluation.production_force_projection_applied = true;
+                evaluation.forbidden_substitution_applied = true;
                 return evaluation;
             },
             accepted);
@@ -1596,7 +1683,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     std::vector<FE::Real> accepted = sentinel;
 
     EXPECT_THROW(
-        (void)level_set::minimizeLevelSetVolumeConstrained(
+        (void)minimizeCapillary(
             quadraticOptions(),
             input,
             duplicated_active,
@@ -1613,7 +1700,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     zero_volume_options.target_liquid_volume = 0.0;
     const std::array<std::size_t, 2> valid_active{0u, 1u};
     EXPECT_THROW(
-        (void)level_set::minimizeLevelSetVolumeConstrained(
+        (void)minimizeCapillary(
             zero_volume_options,
             input,
             valid_active,
@@ -1629,7 +1716,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     auto invalid_epoch_options = quadraticOptions();
     invalid_epoch_options.max_topology_epoch_transitions = -1;
     EXPECT_THROW(
-        (void)level_set::minimizeLevelSetVolumeConstrained(
+        (void)minimizeCapillary(
             invalid_epoch_options,
             input,
             valid_active,
@@ -1644,3 +1731,107 @@ TEST(LevelSetVolumeConstrainedMinimizer,
 }
 
 } // namespace
+
+TEST(LevelSetVolumeConstrainedMinimizer,
+     MinimizesAnyNamedEnergyComponentsUnderDeclaredCertificates)
+{
+    // Three named components and one certificate: the stationarity residual
+    // |dE/dx - dE/dy| of E = (x - 1)^2 + (y - 2)^2 + 1/2 on x + y = 3.
+    level_set::LevelSetVolumeConstrainedProblem problem;
+    problem.energy_components = {"x_part", "y_part", "offset"};
+    level_set::LevelSetVolumeConstrainedAcceptanceCheck stationarity;
+    stationarity.name = "stationarity";
+    stationarity.limits = {1.0e-7};
+    stationarity.unavailable_diagnostic = "stationarity_unavailable";
+    stationarity.failed_diagnostic = "stationarity_failed";
+    problem.acceptance_checks = {stationarity};
+    problem.forbidden_substitution_evaluation_diagnostic = "forbidden_evaluation";
+    problem.forbidden_substitution_diagnostic = "forbidden";
+
+    const auto evaluation =
+        [](std::span<const FE::Real> c, bool certificate_available,
+           std::size_t check_count) {
+            level_set::LevelSetVolumeConstrainedEvaluation e;
+            e.success = true;
+            e.snapshot_revision_key = coefficientRevision(c);
+            e.cut_topology_key = 1u;
+            e.constraint_semantics_key = 2u;
+            const FE::Real dx = c[0] - FE::Real{1.0};
+            const FE::Real dy = c[1] - FE::Real{2.0};
+            e.energy_components = {dx * dx, dy * dy, FE::Real{0.5}};
+            e.liquid_volume = c[0] + c[1];
+            e.functional_derivatives_available = true;
+            e.energy_derivative = {FE::Real{2.0} * dx, FE::Real{2.0} * dy};
+            e.liquid_volume_derivative = {FE::Real{1.0}, FE::Real{1.0}};
+            level_set::LevelSetVolumeConstrainedCheckValue check;
+            check.available = certificate_available;
+            check.values = {std::abs(FE::Real{2.0} * dx - FE::Real{2.0} * dy)};
+            e.checks.assign(check_count, check);
+            return e;
+        };
+    const level_set::LevelSetVolumeConstrainedMinimizerOptions options =
+        quadraticOptions();
+    const std::vector<FE::Real> input{2.5, 0.5};
+    const std::vector<std::size_t> active{0u, 1u};
+
+    std::vector<FE::Real> accepted;
+    const auto result = level_set::minimizeLevelSetVolumeConstrained(
+        options,
+        problem,
+        input,
+        active,
+        [&](std::span<const FE::Real> c, EvaluationPurpose purpose) {
+            return evaluation(
+                c, purpose == EvaluationPurpose::AcceptanceCertificate, 1u);
+        },
+        accepted);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    ASSERT_EQ(accepted.size(), 2u);
+    EXPECT_NEAR(accepted[0], 1.0, 1.0e-7);
+    EXPECT_NEAR(accepted[1], 2.0, 1.0e-7);
+    ASSERT_EQ(result.initial_energy_components.size(), 3u);
+    ASSERT_EQ(result.final_energy_components.size(), 3u);
+    EXPECT_EQ(result.initial_energy,
+              (result.initial_energy_components[0] +
+               result.initial_energy_components[1]) +
+                  result.initial_energy_components[2]);
+    EXPECT_NEAR(result.final_energy, 0.5, 1.0e-12);
+    ASSERT_EQ(result.final_checks.size(), 1u);
+    EXPECT_TRUE(result.final_checks[0].available);
+    EXPECT_LE(result.final_checks[0].values[0], 1.0e-7);
+
+    const auto failure = [&](bool certificate_available,
+                             std::size_t check_count) {
+        std::vector<FE::Real> unchanged{7.0};
+        const auto failed = level_set::minimizeLevelSetVolumeConstrained(
+            options,
+            problem,
+            input,
+            active,
+            [&](std::span<const FE::Real> c, EvaluationPurpose) {
+                return evaluation(c, certificate_available, check_count);
+            },
+            unchanged);
+        EXPECT_FALSE(failed.success);
+        EXPECT_EQ(unchanged, std::vector<FE::Real>{7.0});
+        return failed.diagnostic;
+    };
+    EXPECT_EQ(failure(false, 1u), "stationarity_unavailable");
+    EXPECT_EQ(failure(true, 0u),
+              "initial_candidate_evaluation_failed:"
+              "candidate_evaluator_returned_invalid_acceptance_checks");
+
+    auto unnamed = problem;
+    unnamed.energy_components.clear();
+    std::vector<FE::Real> ignored;
+    EXPECT_THROW((void)level_set::minimizeLevelSetVolumeConstrained(
+                     options,
+                     unnamed,
+                     input,
+                     active,
+                     [&](std::span<const FE::Real> c, EvaluationPurpose) {
+                         return evaluation(c, true, 1u);
+                     },
+                     ignored),
+                 std::invalid_argument);
+}

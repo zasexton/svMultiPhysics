@@ -2,7 +2,15 @@
 
 /**
  * @file
- * @brief Transactional fixed-volume minimization for a discrete static cap.
+ * @brief Transactional fixed-volume minimization of a level-set energy.
+ *
+ * The minimizer changes level-set coefficients c to minimize an energy E(c),
+ * the sum of named components, subject to a prescribed volume V(c) = V0, for
+ * example the surface, wall and gravitational energy of a discrete static
+ * cap.  A caller-supplied evaluator measures one candidate.  What a converged
+ * candidate must also satisfy is data: named acceptance certificates with
+ * their limits and diagnostics (LevelSetVolumeConstrainedProblem), measured
+ * by the evaluator.
  */
 
 #include "Core/Types.h"
@@ -18,19 +26,14 @@
 namespace svmp::FE::level_set {
 
 /**
- * Options for piecewise-smooth minimization of the snapshot-owned surface,
- * Young-wall, and gravitational potential energy at a prescribed liquid
- * volume.
+ * Options for piecewise-smooth minimization of the energy at a prescribed
+ * liquid volume.  The limits of the acceptance certificates are part of the
+ * problem (LevelSetVolumeConstrainedAcceptanceCheck).
  */
 struct LevelSetVolumeConstrainedMinimizerOptions {
     Real target_liquid_volume{0.0};
     Real volume_tolerance{1.0e-10};
     Real projected_gradient_tolerance{1.0e-8};
-    Real pressure_representability_max_residual_norm{1.0e-10};
-    Real pressure_representability_max_relative_distance{1.0e-8};
-    Real physical_equilibrium_max_residual_norm{1.0e-10};
-    Real constant_pressure_kkt_max_residual_norm{1.0e-10};
-    Real constant_pressure_kkt_max_relative_distance{1.0e-8};
 
     // Coefficient-valued scales. The relative finite-difference step is
     // multiplied by the larger of this reference scale and the coefficient
@@ -62,6 +65,51 @@ struct LevelSetVolumeConstrainedMinimizerOptions {
 };
 
 /**
+ * One acceptance certificate of a converged candidate, declared as data.
+ *
+ * The evaluator measures it on every candidate
+ * (LevelSetVolumeConstrainedCheckValue, one value per limit).  A
+ * parameter-stationary candidate is accepted only when every required
+ * certificate is available, converged without breakdown, and each measured
+ * value is finite, nonnegative and at most its limit.  The diagnostics are
+ * the texts the minimizer reports.
+ */
+struct LevelSetVolumeConstrainedAcceptanceCheck {
+    std::string name{};
+    std::vector<Real> limits{};
+    // When nonempty, an evaluation whose available certificate has a
+    // nonfinite or negative value is invalid, with this diagnostic.
+    std::string invalid_state_diagnostic{};
+    // A required certificate is unavailable at the stationary candidate.
+    std::string unavailable_diagnostic{};
+    // Not converged, broken down, or a value that is not finite and
+    // nonnegative or exceeds its limit.
+    std::string failed_diagnostic{};
+};
+
+/// One certificate as measured on a candidate, in the problem's order.
+struct LevelSetVolumeConstrainedCheckValue {
+    bool required{true};
+    bool available{false};
+    bool converged{true};
+    bool breakdown{false};
+    std::vector<Real> values{};
+};
+
+/// What the minimizer minimizes and certifies.
+struct LevelSetVolumeConstrainedProblem {
+    // The named components of the energy; the energy is their sum, in this
+    // order.
+    std::vector<std::string> energy_components{};
+    std::vector<LevelSetVolumeConstrainedAcceptanceCheck> acceptance_checks{};
+    // The diagnostics of an evaluation that applied a forbidden substitution
+    // (LevelSetVolumeConstrainedEvaluation::forbidden_substitution_applied):
+    // the evaluation's, and the minimizer's.
+    std::string forbidden_substitution_evaluation_diagnostic{};
+    std::string forbidden_substitution_diagnostic{};
+};
+
+/**
  * Globally reduced evaluation of one immutable candidate geometry.
  *
  * The energy excludes the volume-multiplier term. The evaluator must build
@@ -78,37 +126,21 @@ struct LevelSetVolumeConstrainedEvaluation {
     // the candidate. The evaluator must recompute it from slave/master
     // relations, weights, and prescribed values.
     std::uint64_t constraint_semantics_key{0u};
-    Real surface_wall_energy{
-        std::numeric_limits<Real>::quiet_NaN()};
-    Real gravitational_potential_energy{0.0};
+    // The problem's energy components, in its order.
+    std::vector<Real> energy_components{};
     Real liquid_volume{std::numeric_limits<Real>::quiet_NaN()};
     // Optional exact derivatives in the evaluator's coefficient order. When
     // present, both arrays must cover every supplied coefficient; the
     // minimizer then avoids finite-difference trial geometry entirely.
     bool functional_derivatives_available{false};
-    std::vector<Real> physical_potential_derivative{};
+    std::vector<Real> energy_derivative{};
     std::vector<Real> liquid_volume_derivative{};
-    bool pressure_representability_available{false};
-    bool pressure_representability_converged{false};
-    bool pressure_representability_breakdown{false};
-    Real pressure_representability_residual_norm{
-        std::numeric_limits<Real>::quiet_NaN()};
-    Real pressure_representability_relative_distance{
-        std::numeric_limits<Real>::quiet_NaN()};
-    Real production_residual_norm{
-        std::numeric_limits<Real>::quiet_NaN()};
-    // A free constant pressure trace provides a sharper scalar KKT check for
-    // zero-gravity equilibria. Fixed gauges and hydrostatic pressure fields
-    // use the general constrained pressure-space certificate instead.
-    bool constant_pressure_kkt_required{true};
-    bool constant_pressure_kkt_available{false};
-    Real constant_pressure_kkt_residual_norm{
-        std::numeric_limits<Real>::quiet_NaN()};
-    Real constant_pressure_kkt_relative_distance{
-        std::numeric_limits<Real>::quiet_NaN()};
-    // Trial evaluation must never obtain equilibrium by replacing the
-    // production surface/Young load with a pressure-range projection.
-    bool production_force_projection_applied{false};
+    // The problem's acceptance certificates, in its order.
+    std::vector<LevelSetVolumeConstrainedCheckValue> checks{};
+    // Trial evaluation must never obtain the energy's equilibrium by a
+    // substitution the problem forbids (for a static cap, replacing the
+    // production surface/Young load with a pressure-range projection).
+    bool forbidden_substitution_applied{false};
     std::string diagnostic{};
 };
 
@@ -237,18 +269,12 @@ struct LevelSetVolumeConstrainedMinimizerResult {
     std::uint64_t final_snapshot_revision_key{0u};
     std::uint64_t cut_topology_key{0u};
     std::uint64_t constraint_semantics_key{0u};
-    Real initial_surface_wall_energy{
-        std::numeric_limits<Real>::quiet_NaN()};
-    Real final_surface_wall_energy{
-        std::numeric_limits<Real>::quiet_NaN()};
-    Real initial_gravitational_potential_energy{
-        std::numeric_limits<Real>::quiet_NaN()};
-    Real final_gravitational_potential_energy{
-        std::numeric_limits<Real>::quiet_NaN()};
-    Real initial_physical_potential_energy{
-        std::numeric_limits<Real>::quiet_NaN()};
-    Real final_physical_potential_energy{
-        std::numeric_limits<Real>::quiet_NaN()};
+    // The energy components (empty until the initial candidate is
+    // evaluated) and their sum.
+    std::vector<Real> initial_energy_components{};
+    std::vector<Real> final_energy_components{};
+    Real initial_energy{std::numeric_limits<Real>::quiet_NaN()};
+    Real final_energy{std::numeric_limits<Real>::quiet_NaN()};
     Real initial_liquid_volume{
         std::numeric_limits<Real>::quiet_NaN()};
     Real final_liquid_volume{
@@ -259,26 +285,14 @@ struct LevelSetVolumeConstrainedMinimizerResult {
         std::numeric_limits<Real>::quiet_NaN()};
     Real final_projected_gradient_norm{
         std::numeric_limits<Real>::quiet_NaN()};
-    bool final_pressure_representability_available{false};
-    bool final_pressure_representability_converged{false};
-    bool final_pressure_representability_breakdown{false};
-    Real final_pressure_representability_residual_norm{
-        std::numeric_limits<Real>::quiet_NaN()};
-    Real final_pressure_representability_relative_distance{
-        std::numeric_limits<Real>::quiet_NaN()};
-    Real final_production_residual_norm{
-        std::numeric_limits<Real>::quiet_NaN()};
-    bool final_constant_pressure_kkt_required{true};
-    bool final_constant_pressure_kkt_available{false};
-    Real final_constant_pressure_kkt_residual_norm{
-        std::numeric_limits<Real>::quiet_NaN()};
-    Real final_constant_pressure_kkt_relative_distance{
-        std::numeric_limits<Real>::quiet_NaN()};
+    // The acceptance certificates of the final candidate (empty until the
+    // initial candidate is evaluated).
+    std::vector<LevelSetVolumeConstrainedCheckValue> final_checks{};
     std::string diagnostic{};
 };
 
 /**
- * Minimize a piecewise-smooth discrete capillary functional.
+ * Minimize a piecewise-smooth discrete energy at a prescribed volume.
  *
  * Roundoff-balanced fourth-order differences are evaluated only inside the
  * current cut-topology and constrained-trace epoch. With exact derivatives,
@@ -287,10 +301,11 @@ struct LevelSetVolumeConstrainedMinimizerResult {
  * accepted and discards all secant history. Each SQP-like step uses a
  * safeguarded limited-memory tangent inverse Hessian, satisfies the linearized
  * volume constraint, and descends an l1 volume-merit function. Convergence
- * additionally requires the evaluator's unprojected physical-potential load
- * to pass the constrained pressure-space and production-residual gates. A
- * constant-pressure KKT gate is additionally required when the evaluator
- * declares that the pressure constraints preserve the constant mode.
+ * additionally requires the problem's acceptance certificates, measured by
+ * the evaluator, in their declared order (for a static cap: the constrained
+ * pressure-space and production-residual gates of the unprojected
+ * physical-potential load, and a constant-pressure KKT gate when the
+ * evaluator declares it required).
  *
  * `accepted_coefficients` is assigned only after every convergence gate
  * passes. It is left byte-for-byte unchanged on invalid input, evaluator
@@ -300,6 +315,7 @@ struct LevelSetVolumeConstrainedMinimizerResult {
 [[nodiscard]] LevelSetVolumeConstrainedMinimizerResult
 minimizeLevelSetVolumeConstrained(
     const LevelSetVolumeConstrainedMinimizerOptions& options,
+    const LevelSetVolumeConstrainedProblem& problem,
     std::span<const Real> input_coefficients,
     std::span<const std::size_t> active_coefficient_indices,
     const LevelSetVolumeConstrainedEvaluator& evaluator,
