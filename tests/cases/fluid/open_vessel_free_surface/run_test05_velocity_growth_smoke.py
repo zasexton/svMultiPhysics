@@ -104,9 +104,6 @@ HIGH_ORDER_3D_BENCHMARK_QUALIFICATION_CASES = ("d18", "d38")
 HIGH_ORDER_3D_BENCHMARK_PROFILE_CASES = ("d18", "d38")
 HIGH_ORDER_CURVED_3D_SIMPLEX_CASES = ("curvedtet3d",)
 HIGH_ORDER_MPI_MOTION_CASES = ("sloshing2d",)
-HIGH_ORDER_CAPILLARY_PROJECTION_CASES = ("sloshing2d",)
-HIGH_ORDER_CAPILLARY_RESPONSE_CASES = ("capillaryarc2d",)
-HIGH_ORDER_CAPILLARY_BALANCE_CASES = ("capillaryarc2d",)
 HIGH_ORDER_CAPILLARY_DROPLET_EQUILIBRIUM_CASES = ("droplet2d",)
 HIGH_ORDER_CAPILLARY_WAVE_CASES = ("capillarywave2d",)
 QUALIFICATION_REPORT_SCHEMA_VERSION = 2
@@ -115,6 +112,50 @@ QUALIFICATION_REPORT_SCHEMA_VERSION = 2
 # SurfaceStress is the only capillary route.
 CAPILLARY_FORCE_FORMS = ("surface_stress",)
 RETIRED_CAPILLARY_FORCE_FORMS = ("kinematic_area_gradient_traction",)
+# Decision D48 also retired the level-set curvature projection: the solver
+# rejects its keys, and SurfaceStress reads no curvature field.  These
+# options wrote, required or gated that projection, and the three smokes
+# ran on it; each one now fails at argument validation.  The flag column
+# marks the options that take no value.
+RETIRED_CURVATURE_PROJECTION_OPTIONS = (
+    ("--high-order-capillary-projection-smoke", True),
+    ("--high-order-capillary-response-smoke", True),
+    ("--high-order-capillary-balance-smoke", True),
+    ("--projected-curvature-field", False),
+    ("--curvature-projection-cadence-steps", False),
+    ("--curvature-projection-max-normalized-fit-residual", False),
+    ("--curvature-projection-max-neighbor-fallback-vertices", False),
+    ("--curvature-projection-max-zero-fallback-vertices", False),
+    ("--curvature-projection-supplemental-sample-weight", False),
+    ("--curvature-projection-recovery-mode", False),
+    ("--curvature-projection-kinematic-area-gradient-filter-coefficient", False),
+    ("--curvature-projection-narrow-band-width", False),
+    ("--curvature-projection-smoothing-iterations", False),
+    ("--curvature-projection-smoothing-relaxation", False),
+    ("--curvature-projection-smoothing-mode", False),
+    ("--expect-curvature-projection-smoothing-mode", False),
+    ("--expect-curvature-projection-recovery-mode", False),
+    ("--max-capillary-curvature-relative-error", False),
+    ("--require-curvature-projection-diagnostics", True),
+    ("--require-curvature-projection-newton-freshness", True),
+    ("--min-diagnostic-curvature-projection-count", False),
+    ("--min-diagnostic-curvature-projection-max-abs-curvature", False),
+    ("--max-diagnostic-curvature-projection-fallback-vertices", False),
+    ("--max-diagnostic-curvature-projection-zero-fallback-vertices", False),
+    ("--max-diagnostic-curvature-projection-normalized-fit-residual", False),
+    ("--min-diagnostic-curvature-projection-smoothing-iterations", False),
+    ("--min-diagnostic-curvature-projection-operator-edges", False),
+    ("--min-diagnostic-curvature-projection-interface-geometry-samples", False),
+    ("--min-diagnostic-curvature-projection-interface-patch-fitted-vertices", False),
+    ("--min-diagnostic-curvature-projection-skipped-count", False),
+    ("--min-diagnostic-curvature-projection-cache-hit-count", False),
+    ("--max-diagnostic-curvature-projection-cache-miss-count", False),
+    ("--min-diagnostic-curvature-projection-cut-signature-cache-hit-count", False),
+    ("--min-diagnostic-curvature-projection-reused-vertex-adjacency-count", False),
+    ("--min-diagnostic-curvature-projection-reused-sample-adjacency-count", False),
+    ("--max-diagnostic-curvature-projection-vertex-adjacency-builds", False),
+    ("--max-diagnostic-curvature-projection-sample-adjacency-builds", False),
+)
 HIGH_ORDER_SYNTHETIC_CASES = {
     "capillaryarc2d",
     "capillarywave2d",
@@ -648,6 +689,29 @@ def validate_capillary_force_form(capillary_force_form: str) -> None:
         raise ValueError("capillary force form must be surface_stress")
 
 
+class RetiredOptionAction(argparse.Action):
+    """Record a retired option; main() rejects it after parsing."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        seen = list(getattr(namespace, self.dest, None) or [])
+        if option_string not in seen:
+            seen.append(option_string)
+        setattr(namespace, self.dest, seen)
+
+
+def reject_retired_curvature_projection_options(
+        options: list[str] | None) -> None:
+    """Raise ValueError naming every retired projection option given."""
+    if not options:
+        return
+    raise ValueError(
+        f"{', '.join(options)}: the level-set curvature projection was "
+        "retired by decision D48, with the options that configured, "
+        "required or gated it and the projection, response and balance "
+        "smokes that ran on it; SurfaceStress (surface_stress) reads no "
+        "curvature field")
+
+
 def configure_solver(solver_xml: Path,
                      steps: int,
                      time_step_size: float | None = None,
@@ -687,19 +751,6 @@ def configure_solver(solver_xml: Path,
                      surface_tension: float | None = None,
                      capillary_force_form: str = "surface_stress",
                      wet_extension_advection_velocity_method: str | None = None,
-                     projected_curvature_field: str | None = None,
-                     curvature_projection_cadence_steps: int | None = None,
-                     curvature_projection_max_normalized_fit_residual: float | None = None,
-                     curvature_projection_max_neighbor_fallback_vertices: int | None = None,
-                     curvature_projection_max_zero_fallback_vertices: int | None = None,
-                     curvature_projection_supplemental_sample_weight: float | None = None,
-                     curvature_projection_recovery_mode: str | None = None,
-                     curvature_projection_kinematic_area_gradient_filter_coefficient:
-                     float | None = None,
-                     curvature_projection_narrow_band_width: float | None = None,
-                     curvature_projection_smoothing_iterations: int | None = None,
-                     curvature_projection_smoothing_relaxation: float | None = None,
-                     curvature_projection_smoothing_mode: str | None = None,
                      enable_static_capillary_equilibrium_initialization:
                      bool | None = None,
                      static_capillary_volume_tolerance: float | None = None,
@@ -928,84 +979,6 @@ def configure_solver(solver_xml: Path,
             "Wet_extension_advection_velocity_method",
             wet_extension_advection_velocity_method,
         )
-    if projected_curvature_field:
-        level_set = level_set_equation(root)
-        set_text(level_set, "Enable_curvature_projection", "true")
-        set_text(level_set, "Projected_curvature_field", projected_curvature_field)
-        if not (surface_tension is not None and surface_tension > 0.0):
-            set_text(free_surface, "Curvature_field", projected_curvature_field)
-            set_text(free_surface, "Use_level_set_curvature", "false")
-        else:
-            curvature_field = free_surface.find("Curvature_field")
-            if curvature_field is not None:
-                free_surface.remove(curvature_field)
-        if curvature_projection_cadence_steps is not None:
-            set_text(
-                level_set,
-                "Curvature_projection_cadence_steps",
-                str(curvature_projection_cadence_steps),
-            )
-        if curvature_projection_max_normalized_fit_residual is not None:
-            set_text(
-                level_set,
-                "Curvature_projection_max_normalized_fit_residual",
-                f"{curvature_projection_max_normalized_fit_residual:.16g}",
-            )
-        if curvature_projection_max_neighbor_fallback_vertices is not None:
-            set_text(
-                level_set,
-                "Curvature_projection_max_neighbor_fallback_vertices",
-                str(curvature_projection_max_neighbor_fallback_vertices),
-            )
-        if curvature_projection_max_zero_fallback_vertices is not None:
-            set_text(
-                level_set,
-                "Curvature_projection_max_zero_fallback_vertices",
-                str(curvature_projection_max_zero_fallback_vertices),
-            )
-        if curvature_projection_supplemental_sample_weight is not None:
-            set_text(
-                level_set,
-                "Curvature_projection_supplemental_sample_weight",
-                f"{curvature_projection_supplemental_sample_weight:.16g}",
-            )
-        if curvature_projection_recovery_mode is not None:
-            set_text(
-                level_set,
-                "Curvature_projection_recovery_mode",
-                curvature_projection_recovery_mode,
-            )
-        if (curvature_projection_kinematic_area_gradient_filter_coefficient
-                is not None):
-            set_text(
-                level_set,
-                "Curvature_projection_kinematic_area_gradient_filter_coefficient",
-                f"{curvature_projection_kinematic_area_gradient_filter_coefficient:.16g}",
-            )
-        if curvature_projection_narrow_band_width is not None:
-            set_text(
-                level_set,
-                "Curvature_projection_narrow_band_width",
-                f"{curvature_projection_narrow_band_width:.16g}",
-            )
-        if curvature_projection_smoothing_iterations is not None:
-            set_text(
-                level_set,
-                "Curvature_projection_smoothing_iterations",
-                str(curvature_projection_smoothing_iterations),
-            )
-        if curvature_projection_smoothing_relaxation is not None:
-            set_text(
-                level_set,
-                "Curvature_projection_smoothing_relaxation",
-                f"{curvature_projection_smoothing_relaxation:.16g}",
-            )
-        if curvature_projection_smoothing_mode is not None:
-            set_text(
-                level_set,
-                "Curvature_projection_smoothing_mode",
-                curvature_projection_smoothing_mode,
-            )
     if enable_static_capillary_equilibrium_initialization is not None:
         level_set = level_set_equation(root)
         set_text(
@@ -1853,27 +1826,6 @@ def configure_sessile_solver_xml(case_dir: Path,
     # PrescribedData denotes mesh-field initialization only; the transport
     # installer still registers phi as an unknown owned by the time integrator.
     set_text(level_set, "Level_set_source", "prescribed_data")
-    # SurfaceStress is the first variation of the generated-interface measure
-    # and does not consume a projected scalar curvature.  Keeping an otherwise
-    # unused kappa field in this physical wetting deck is more than overhead:
-    # it adds a non-residual generated field to the nonlinear outer-state
-    # transaction and makes projection freshness look like force freshness.
-    # Dedicated curvature-projection smokes retain that independent recovery
-    # path.  Remove inherited controls defensively so this deck proves the
-    # actual SurfaceStress contract.
-    for name in (
-            "Enable_curvature_projection",
-            "Projected_curvature_field",
-            "Curvature_projection_cadence_steps",
-            "Curvature_projection_supplemental_sample_weight",
-            "Curvature_projection_recovery_mode",
-            "Curvature_projection_narrow_band_width",
-            "Curvature_projection_smoothing_iterations",
-            "Curvature_projection_smoothing_relaxation",
-            "Curvature_projection_smoothing_mode"):
-        element = level_set.find(name)
-        if element is not None:
-            level_set.remove(element)
     # Keep phi coupled to the solved velocity for both contact models. The
     # moving probe exercises Ren--E kinematics; the stationary prescribed
     # probe exercises accepted-state wall repair and Young wall energy.
@@ -1925,9 +1877,6 @@ def configure_sessile_solver_xml(case_dir: Path,
     set_text(free_surface, "Enable_velocity_extension", "false")
     set_text(free_surface, "Surface_tension", f"{surface_tension:.16g}")
     set_text(free_surface, "Surface_tension_form", "SurfaceStress")
-    curvature_field = free_surface.find("Curvature_field")
-    if curvature_field is not None:
-        free_surface.remove(curvature_field)
     set_text(
         free_surface,
         "Contact_line_model",
@@ -2239,7 +2188,6 @@ def write_sessile2d_case(case_dir: Path,
                     "none_angle_preserving_wall_maintenance"),
                 "momentum_owner": "young_wall_energy",
             }),
-            "curvature_projection_narrow_band_width": 1.0 / max(nx, ny),
             "discrete_contact_initialization": (
                 "wall-adjacent LinearCorner fragments replaced by exact "
                 "initial-angle tangent planes"
@@ -3161,13 +3109,6 @@ def increment_count(counts: dict[str, int], key: str) -> None:
     counts[key] = counts.get(key, 0) + 1
 
 
-def diagnostic_flag(record: dict[str, Any], name: str) -> bool:
-    value = record.get(name, 0)
-    if isinstance(value, str):
-        return value.strip().lower() in ("1", "true", "yes")
-    return bool(value)
-
-
 def parse_count_summary(value: Any) -> dict[str, int]:
     if not isinstance(value, str) or not value or value == "none":
         return {}
@@ -3758,7 +3699,6 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "cut_volume_timings": [],
         "eigen_factorization_diagnostics": [],
         "active_pressure_support_constraints": [],
-        "curvature_projections": [],
         "dynamic_contact_operator_angles": [],
         "free_surface_conservative_balances": [],
         "free_surface_pressure_representability_distance_gates": [],
@@ -3927,8 +3867,6 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             diagnostics["active_pressure_support_constraints"].append(
                 parse_key_values(line)
             )
-        elif "Level-set curvature projected" in line:
-            diagnostics["curvature_projections"].append(parse_key_values(line))
         elif "Level-set volume corrected" in line:
             diagnostics["level_set_volume_corrections"].append(parse_key_values(line))
         elif "Level-set maintenance diagnostic" in line:
@@ -4597,333 +4535,6 @@ def cut_context_policy_errors(metrics: dict[str, Any],
     return errors
 
 
-def curvature_projection_errors(metrics: dict[str, Any],
-                                args: argparse.Namespace) -> list[str]:
-    errors = []
-    if args.require_curvature_projection_diagnostics and not metrics["diagnostics"].get(
-            "curvature_projections"):
-        errors.append("curvature projection diagnostics were not reported")
-    if args.min_diagnostic_curvature_projection_count is not None:
-        count = metrics.get("diagnostic_curvature_projection_count")
-        if not isinstance(count, int):
-            errors.append("curvature projection diagnostic count is unavailable")
-        elif count < args.min_diagnostic_curvature_projection_count:
-            errors.append(
-                f"curvature projection diagnostic count {count} is below "
-                f"{args.min_diagnostic_curvature_projection_count}"
-            )
-    if args.min_diagnostic_curvature_projection_max_abs_curvature is not None:
-        value = metrics.get("diagnostic_curvature_projection_max_abs_curvature")
-        if not isinstance(value, (int, float)):
-            errors.append("curvature projection max-abs-curvature diagnostic is unavailable")
-        elif value < args.min_diagnostic_curvature_projection_max_abs_curvature:
-            errors.append(
-                f"curvature projection max abs curvature {value:.6g} is below "
-                f"{args.min_diagnostic_curvature_projection_max_abs_curvature:.6g}"
-            )
-    if args.max_diagnostic_curvature_projection_fallback_vertices is not None:
-        value = metrics.get("diagnostic_curvature_projection_max_fallback_vertices")
-        if not isinstance(value, (int, float)):
-            errors.append("curvature projection fallback diagnostic is unavailable")
-        elif value > args.max_diagnostic_curvature_projection_fallback_vertices:
-            errors.append(
-                f"curvature projection fallback vertices {value} exceed "
-                f"{args.max_diagnostic_curvature_projection_fallback_vertices}"
-            )
-    if args.max_diagnostic_curvature_projection_zero_fallback_vertices is not None:
-        value = metrics.get(
-            "diagnostic_curvature_projection_max_zero_fallback_vertices")
-        if not isinstance(value, (int, float)):
-            errors.append("curvature projection zero-fallback diagnostic is unavailable")
-        elif value > args.max_diagnostic_curvature_projection_zero_fallback_vertices:
-            errors.append(
-                f"curvature projection zero fallback vertices {value} exceed "
-                f"{args.max_diagnostic_curvature_projection_zero_fallback_vertices}"
-            )
-    if args.max_diagnostic_curvature_projection_normalized_fit_residual is not None:
-        value = metrics.get(
-            "diagnostic_curvature_projection_max_normalized_fit_residual")
-        if not isinstance(value, (int, float)):
-            errors.append("curvature projection normalized fit residual diagnostic is unavailable")
-        elif value > args.max_diagnostic_curvature_projection_normalized_fit_residual:
-            errors.append(
-                f"curvature projection normalized fit residual {value:.6g} exceeds "
-                f"{args.max_diagnostic_curvature_projection_normalized_fit_residual:.6g}"
-            )
-    if args.min_diagnostic_curvature_projection_smoothing_iterations is not None:
-        value = metrics.get(
-            "diagnostic_curvature_projection_max_smoothing_iterations")
-        if not isinstance(value, (int, float)):
-            errors.append("curvature projection smoothing diagnostic is unavailable")
-        elif value < args.min_diagnostic_curvature_projection_smoothing_iterations:
-            errors.append(
-                f"curvature projection smoothing iterations {value} are below "
-                f"{args.min_diagnostic_curvature_projection_smoothing_iterations}"
-            )
-    if args.expect_curvature_projection_smoothing_mode is not None:
-        counts = metrics.get(
-            "diagnostic_curvature_projection_smoothing_mode_counts")
-        expected = args.expect_curvature_projection_smoothing_mode
-        if not isinstance(counts, dict) or not counts:
-            errors.append("curvature projection smoothing-mode diagnostics are unavailable")
-        elif expected not in counts:
-            observed = ", ".join(str(key) for key in sorted(counts))
-            errors.append(
-                "curvature projection smoothing mode "
-                f"{observed or 'unavailable'} does not include {expected}"
-            )
-    expected_recovery_mode = getattr(
-        args, "expect_curvature_projection_recovery_mode", None)
-    if expected_recovery_mode is not None:
-        counts = metrics.get(
-            "diagnostic_curvature_projection_recovery_mode_counts")
-        expected = expected_recovery_mode
-        if not isinstance(counts, dict) or not counts:
-            errors.append("curvature projection recovery-mode diagnostics are unavailable")
-        elif expected not in counts:
-            observed = ", ".join(str(key) for key in sorted(counts))
-            errors.append(
-                "curvature projection recovery mode "
-                f"{observed or 'unavailable'} does not include {expected}"
-            )
-    for argument, metric, label in (
-        (
-            "min_diagnostic_curvature_projection_interface_geometry_samples",
-            "diagnostic_curvature_projection_max_interface_geometry_samples",
-            "generated interface geometry samples",
-        ),
-        (
-            "min_diagnostic_curvature_projection_interface_patch_fitted_vertices",
-            "diagnostic_curvature_projection_max_interface_patch_fitted_vertices",
-            "generated interface patch fitted vertices",
-        ),
-    ):
-        minimum = getattr(args, argument, None)
-        if minimum is None:
-            continue
-        value = metrics.get(metric)
-        if not isinstance(value, (int, float)):
-            errors.append(f"curvature projection {label} diagnostic is unavailable")
-        elif value < minimum:
-            errors.append(
-                f"curvature projection {label} {value} is below {minimum}"
-            )
-    if args.min_diagnostic_curvature_projection_operator_edges is not None:
-        value = metrics.get(
-            "diagnostic_curvature_projection_max_smoothing_operator_edges")
-        if not isinstance(value, (int, float)):
-            errors.append("curvature projection smoothing-operator edge diagnostic is unavailable")
-        elif value < args.min_diagnostic_curvature_projection_operator_edges:
-            errors.append(
-                f"curvature projection smoothing operator edges {value} are below "
-                f"{args.min_diagnostic_curvature_projection_operator_edges}"
-            )
-    if args.min_diagnostic_curvature_projection_skipped_count is not None:
-        value = metrics.get("diagnostic_curvature_projection_skipped_count")
-        if not isinstance(value, int):
-            errors.append("curvature projection skipped-count diagnostic is unavailable")
-        elif value < args.min_diagnostic_curvature_projection_skipped_count:
-            errors.append(
-                f"curvature projection skipped count {value} is below "
-                f"{args.min_diagnostic_curvature_projection_skipped_count}"
-            )
-    if args.min_diagnostic_curvature_projection_cache_hit_count is not None:
-        value = metrics.get("diagnostic_curvature_projection_cache_hit_count")
-        if not isinstance(value, int):
-            errors.append("curvature projection cache-hit diagnostic is unavailable")
-        elif value < args.min_diagnostic_curvature_projection_cache_hit_count:
-            errors.append(
-                f"curvature projection cache-hit count {value} is below "
-                f"{args.min_diagnostic_curvature_projection_cache_hit_count}"
-            )
-    if args.max_diagnostic_curvature_projection_cache_miss_count is not None:
-        value = metrics.get("diagnostic_curvature_projection_cache_miss_count")
-        if not isinstance(value, int):
-            errors.append("curvature projection cache-miss diagnostic is unavailable")
-        elif value > args.max_diagnostic_curvature_projection_cache_miss_count:
-            errors.append(
-                f"curvature projection cache-miss count {value} exceeds "
-                f"{args.max_diagnostic_curvature_projection_cache_miss_count}"
-            )
-    if args.min_diagnostic_curvature_projection_cut_signature_cache_hit_count is not None:
-        value = metrics.get(
-            "diagnostic_curvature_projection_cut_signature_cache_hit_count")
-        if not isinstance(value, int):
-            errors.append(
-                "curvature projection cut-signature cache-hit diagnostic is unavailable")
-        elif value < args.min_diagnostic_curvature_projection_cut_signature_cache_hit_count:
-            errors.append(
-                f"curvature projection cut-signature cache-hit count {value} is below "
-                f"{args.min_diagnostic_curvature_projection_cut_signature_cache_hit_count}"
-            )
-    if args.min_diagnostic_curvature_projection_reused_vertex_adjacency_count is not None:
-        value = metrics.get(
-            "diagnostic_curvature_projection_reused_vertex_adjacency_count")
-        if not isinstance(value, int):
-            errors.append("curvature projection vertex-adjacency reuse diagnostic is unavailable")
-        elif value < args.min_diagnostic_curvature_projection_reused_vertex_adjacency_count:
-            errors.append(
-                f"curvature projection vertex-adjacency reuse count {value} is below "
-                f"{args.min_diagnostic_curvature_projection_reused_vertex_adjacency_count}"
-            )
-    if args.min_diagnostic_curvature_projection_reused_sample_adjacency_count is not None:
-        value = metrics.get(
-            "diagnostic_curvature_projection_reused_sample_adjacency_count")
-        if not isinstance(value, int):
-            errors.append("curvature projection sample-adjacency reuse diagnostic is unavailable")
-        elif value < args.min_diagnostic_curvature_projection_reused_sample_adjacency_count:
-            errors.append(
-                f"curvature projection sample-adjacency reuse count {value} is below "
-                f"{args.min_diagnostic_curvature_projection_reused_sample_adjacency_count}"
-            )
-    if args.max_diagnostic_curvature_projection_vertex_adjacency_builds is not None:
-        value = metrics.get(
-            "diagnostic_curvature_projection_max_vertex_adjacency_builds")
-        if not isinstance(value, (int, float)):
-            errors.append("curvature projection vertex-adjacency build diagnostic is unavailable")
-        elif value > args.max_diagnostic_curvature_projection_vertex_adjacency_builds:
-            errors.append(
-                f"curvature projection vertex-adjacency builds {value} exceed "
-                f"{args.max_diagnostic_curvature_projection_vertex_adjacency_builds}"
-            )
-    if args.max_diagnostic_curvature_projection_sample_adjacency_builds is not None:
-        value = metrics.get(
-            "diagnostic_curvature_projection_max_sample_adjacency_builds")
-        if not isinstance(value, (int, float)):
-            errors.append("curvature projection sample-adjacency build diagnostic is unavailable")
-        elif value > args.max_diagnostic_curvature_projection_sample_adjacency_builds:
-            errors.append(
-                f"curvature projection sample-adjacency builds {value} exceed "
-                f"{args.max_diagnostic_curvature_projection_sample_adjacency_builds}"
-            )
-    if args.require_curvature_projection_newton_freshness:
-        reason_counts = metrics.get("diagnostic_curvature_projection_reason_counts")
-        if not isinstance(reason_counts, dict):
-            errors.append("curvature projection reason-count diagnostics are unavailable")
-            return errors
-        summary = metrics.get("time_loop", {}).get("summary", {})
-        accepted_steps = summary.get("accepted_steps") if isinstance(summary, dict) else None
-        if not isinstance(accepted_steps, int) or accepted_steps <= 0:
-            errors.append("curvature projection freshness requires accepted-step count")
-            return errors
-        required_reasons = {
-            "initial": 1,
-            "before_physics_solve": accepted_steps,
-            "accepted_step": accepted_steps,
-        }
-        # ApplicationDriver refreshes cut geometry and phi-derived state at
-        # line-search trials whenever that state defines the nonlinear
-        # residual (the default for coupled free-surface workflows).  The
-        # callback is still conditional on both the residual contract and
-        # whether backtracking actually evaluates a trial, and it retains an
-        # explicit SVMP_SYNC_LINE_SEARCH_TRIALS override.  Requiring one trial
-        # refresh per accepted step would therefore be semantically wrong:
-        # some accepted steps do not backtrack or do not have residual-defining
-        # generated state.
-        for reason, minimum in required_reasons.items():
-            count = reason_counts.get(reason, 0)
-            if not isinstance(count, int) or count < minimum:
-                errors.append(
-                    f"curvature projection reason '{reason}' count {count} is below {minimum}"
-                )
-        residual_refreshes = reason_counts.get("jacobian_and_residual", 0)
-        residual_path_valid = (
-            isinstance(residual_refreshes, int) and
-            residual_refreshes >= accepted_steps
-        )
-        outer_iterations = summary.get("outer_iterations_total")
-        projected_outer_refreshes = reason_counts.get(
-            "projected_outer_fixed_point", 0)
-        outer_path_valid = (
-            isinstance(outer_iterations, int) and outer_iterations > 0 and
-            isinstance(projected_outer_refreshes, int) and
-            projected_outer_refreshes >= outer_iterations
-        )
-        # Production generated geometry has two admissible nonlinear
-        # contracts.  Refreshed residual/Jacobian solves synchronize generated
-        # state at assembly.  Frozen-generated-state solves instead establish
-        # one projected constraint/state fixed point before every inner solve;
-        # the inner residual and Jacobian then share that exact state.  The
-        # latter deliberately has no jacobian_and_residual callback.
-        if not residual_path_valid and not outer_path_valid:
-            errors.append(
-                "curvature projection freshness has neither "
-                "jacobian_and_residual refreshes for every accepted step "
-                "nor projected_outer_fixed_point refreshes for every "
-                "reported outer iteration "
-                f"(jacobian_and_residual={residual_refreshes!r}, "
-                f"accepted_steps={accepted_steps}, "
-                f"projected_outer_fixed_point={projected_outer_refreshes!r}, "
-                f"outer_iterations_total={outer_iterations!r})"
-            )
-    return errors
-
-
-def projected_curvature_interface_band_observation(
-        metrics: dict[str, Any]) -> dict[str, Any] | None:
-    """Return final-state projected curvature measured near the interface.
-
-    Prefer the mean of an explicitly serialized projected-curvature field.
-    Production decks currently expose the projection through the solver
-    diagnostic instead, in which case ``max_abs_curvature`` is admissible only
-    when the latest projection used a positive narrow band and actually
-    excluded far vertices.  That qualification prevents the all-domain
-    maximum (including the signed-distance medial-axis singularity) from being
-    mistaken for interface curvature.
-    """
-    observed = metrics.get("projected_curvature_near_interface_mean_abs")
-    band_width = metrics.get("projected_curvature_near_interface_band_width")
-    sample_count = metrics.get("projected_curvature_near_interface_point_count")
-    if (isinstance(observed, (int, float)) and not isinstance(observed, bool) and
-            math.isfinite(float(observed)) and
-            isinstance(band_width, (int, float)) and
-            not isinstance(band_width, bool) and
-            math.isfinite(float(band_width)) and float(band_width) > 0.0 and
-            isinstance(sample_count, int) and not isinstance(sample_count, bool) and
-            sample_count > 0):
-        return {
-            "value": float(observed),
-            "metric": "projected_curvature_near_interface_mean_abs",
-            "source": "vtk_point_data_projected_curvature_field",
-            "source_field": metrics.get("projected_curvature_field_name"),
-            "statistic": "mean_abs",
-            "band_width": float(band_width),
-            "sample_count": sample_count,
-            "sampling_domain": "abs(phi)<=postprocessed_interface_band_width",
-        }
-
-    latest = metrics.get("latest_curvature_projection")
-    if not isinstance(latest, dict):
-        return None
-    observed = latest.get("max_abs_curvature")
-    band_width = latest.get("narrow_band_width")
-    sample_count = latest.get("narrow_band_vertices")
-    skipped_far = latest.get("skipped_far_vertices")
-    if (not isinstance(observed, (int, float)) or isinstance(observed, bool) or
-            not math.isfinite(float(observed)) or
-            not isinstance(band_width, (int, float)) or
-            isinstance(band_width, bool) or
-            not math.isfinite(float(band_width)) or float(band_width) <= 0.0 or
-            not isinstance(sample_count, int) or isinstance(sample_count, bool) or
-            sample_count <= 0 or
-            not isinstance(skipped_far, int) or isinstance(skipped_far, bool) or
-            skipped_far <= 0):
-        return None
-    return {
-        "value": float(observed),
-        "metric": "latest_curvature_projection.max_abs_curvature",
-        "source": "solver_latest_curvature_projection_diagnostic",
-        "source_field": latest.get("curvature_field"),
-        "statistic": "max_abs",
-        "band_width": float(band_width),
-        "sample_count": sample_count,
-        "skipped_far_vertex_count": skipped_far,
-        "sampling_domain": (
-            "configured_narrow_band_and_interface_sample_adjacency"
-        ),
-    }
-
-
 def capillary_benchmark_errors(metrics: dict[str, Any],
                                args: argparse.Namespace) -> list[str]:
     errors = []
@@ -4933,65 +4544,6 @@ def capillary_benchmark_errors(metrics: dict[str, Any],
 
     radius = benchmark.get("capillary_radius", benchmark.get("capillary_arc_radius"))
     curvature_factor = benchmark.get("capillary_curvature_factor", 1.0)
-    if args.max_capillary_curvature_relative_error is not None:
-        observation = projected_curvature_interface_band_observation(metrics)
-        if not isinstance(radius, (int, float)) or float(radius) <= 0.0:
-            errors.append("capillary curvature gate requires benchmark capillary radius")
-        elif observation is None:
-            errors.append(
-                "capillary curvature gate requires a projected-curvature "
-                "interface-band statistic"
-            )
-        else:
-            observed = observation["value"]
-            if (not isinstance(curvature_factor, (int, float)) or
-                    isinstance(curvature_factor, bool) or
-                    not math.isfinite(float(curvature_factor)) or
-                    float(curvature_factor) <= 0.0):
-                errors.append(
-                    "capillary curvature gate requires a positive curvature "
-                    "factor")
-                return errors
-            expected = float(curvature_factor) / float(radius)
-            relative_error = abs(float(observed) - expected) / max(abs(expected), 1.0e-300)
-            metrics["capillary_benchmark_radius"] = float(radius)
-            metrics["capillary_expected_curvature"] = expected
-            metrics["capillary_observed_curvature"] = float(observed)
-            statistic = str(observation["statistic"])
-            metrics[
-                f"capillary_projected_curvature_interface_band_{statistic}"
-            ] = float(observed)
-            metrics["capillary_projected_curvature_observed_metric"] = (
-                observation["metric"]
-            )
-            metrics["capillary_projected_curvature_observed_source"] = (
-                observation["source"]
-            )
-            metrics["capillary_projected_curvature_observed_statistic"] = statistic
-            metrics["capillary_projected_curvature_interface_band_width"] = (
-                observation["band_width"]
-            )
-            metrics["capillary_projected_curvature_interface_band_sample_count"] = (
-                observation["sample_count"]
-            )
-            metrics["capillary_projected_curvature_sampling_domain"] = (
-                observation["sampling_domain"]
-            )
-            source_field = observation.get("source_field")
-            if isinstance(source_field, str) and source_field:
-                metrics["capillary_projected_curvature_source_field"] = source_field
-            skipped_far = observation.get("skipped_far_vertex_count")
-            if isinstance(skipped_far, int):
-                metrics[
-                    "capillary_projected_curvature_interface_band_skipped_far_vertex_count"
-                ] = skipped_far
-            metrics["capillary_curvature_relative_error"] = relative_error
-            if relative_error > args.max_capillary_curvature_relative_error:
-                errors.append(
-                    f"capillary curvature relative error {relative_error:.6g} exceeds "
-                    f"{args.max_capillary_curvature_relative_error:.6g}"
-                )
-
     if args.max_capillary_pressure_jump_relative_error is not None:
         surface_tension = metrics.get("surface_tension")
         observed_jump = metrics.get("capillary_final_pressure_jump")
@@ -6282,7 +5834,7 @@ def static_capillary_equilibrium_initialization_errors(
 
 def normalized_capillary_convergence_metrics(value: Any) -> list[str]:
     if value is None:
-        return ["capillary_curvature_relative_error"]
+        return []
     raw_values: list[Any]
     if isinstance(value, (list, tuple)):
         raw_values = list(value)
@@ -6294,7 +5846,7 @@ def normalized_capillary_convergence_metrics(value: Any) -> list[str]:
             name = item.strip()
             if name:
                 metrics.append(name)
-    return metrics or ["capillary_curvature_relative_error"]
+    return metrics
 
 
 def capillary_convergence_rate_errors(
@@ -6312,6 +5864,12 @@ def capillary_convergence_rate_errors(
     )
     metric_names = normalized_capillary_convergence_metrics(
         getattr(args, "capillary_convergence_metric", None))
+    if not metric_names:
+        # The default metric was the projected-curvature error, retired with
+        # the curvature projection (decision D48).
+        return [
+            "capillary convergence requires --capillary-convergence-metric"
+        ]
 
     errors = []
     if min_points < 2:
@@ -7153,149 +6711,6 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         value = latest_support.get("inactive_vertex_runs")
         if isinstance(value, str):
             metrics["diagnostic_active_pressure_support_latest_inactive_vertex_runs"] = value
-    if diagnostics.get("curvature_projections"):
-        records = diagnostics["curvature_projections"]
-        metrics["latest_curvature_projection"] = records[-1]
-        metrics["diagnostic_curvature_projection_count"] = len(records)
-        field_counts: dict[str, int] = {}
-        for record in records:
-            increment_count(
-                field_counts,
-                str(record.get("curvature_field", "unknown")),
-            )
-        metrics["diagnostic_curvature_projection_field_counts"] = (
-            top_counts(field_counts)
-        )
-        reason_counts: dict[str, int] = {}
-        for record in records:
-            increment_count(
-                reason_counts,
-                str(record.get("reason", "unknown")),
-            )
-        metrics["diagnostic_curvature_projection_reason_counts"] = (
-            top_counts(reason_counts)
-        )
-        smoothing_mode_counts: dict[str, int] = {}
-        for record in records:
-            increment_count(
-                smoothing_mode_counts,
-                str(record.get("smoothing_mode", "unknown")),
-            )
-        metrics["diagnostic_curvature_projection_smoothing_mode_counts"] = (
-            top_counts(smoothing_mode_counts)
-        )
-        recovery_mode_counts: dict[str, int] = {}
-        for record in records:
-            increment_count(
-                recovery_mode_counts,
-                str(record.get("recovery_mode", "unknown")),
-            )
-        metrics["diagnostic_curvature_projection_recovery_mode_counts"] = (
-            top_counts(recovery_mode_counts)
-        )
-        cache_counts: dict[str, int] = {}
-        cut_signature_cache_counts: dict[str, int] = {}
-        skipped_count = 0
-        cache_hit_count = 0
-        cache_miss_count = 0
-        cut_signature_cache_hit_count = 0
-        cut_signature_cache_miss_count = 0
-        reused_vertex_adjacency_count = 0
-        reused_sample_adjacency_count = 0
-        for record in records:
-            cache_state = str(record.get("cache", "unknown"))
-            increment_count(cache_counts, cache_state)
-            cut_signature_cache_state = str(
-                record.get("cut_signature_cache", "unknown"))
-            increment_count(cut_signature_cache_counts,
-                            cut_signature_cache_state)
-            if diagnostic_flag(record, "projection_skipped"):
-                skipped_count += 1
-            if cache_state in ("hit", "fast_hit"):
-                cache_hit_count += 1
-            if cache_state == "miss":
-                cache_miss_count += 1
-            if cut_signature_cache_state == "hit":
-                cut_signature_cache_hit_count += 1
-            if cut_signature_cache_state == "miss":
-                cut_signature_cache_miss_count += 1
-            if diagnostic_flag(record, "reused_vertex_adjacency"):
-                reused_vertex_adjacency_count += 1
-            if diagnostic_flag(record, "reused_sample_adjacency"):
-                reused_sample_adjacency_count += 1
-        metrics["diagnostic_curvature_projection_cache_counts"] = (
-            top_counts(cache_counts)
-        )
-        metrics["diagnostic_curvature_projection_skipped_count"] = skipped_count
-        metrics["diagnostic_curvature_projection_cache_hit_count"] = cache_hit_count
-        metrics["diagnostic_curvature_projection_cache_miss_count"] = cache_miss_count
-        metrics["diagnostic_curvature_projection_cut_signature_cache_counts"] = (
-            top_counts(cut_signature_cache_counts)
-        )
-        metrics["diagnostic_curvature_projection_cut_signature_cache_hit_count"] = (
-            cut_signature_cache_hit_count
-        )
-        metrics["diagnostic_curvature_projection_cut_signature_cache_miss_count"] = (
-            cut_signature_cache_miss_count
-        )
-        metrics["diagnostic_curvature_projection_reused_vertex_adjacency_count"] = (
-            reused_vertex_adjacency_count
-        )
-        metrics["diagnostic_curvature_projection_reused_sample_adjacency_count"] = (
-            reused_sample_adjacency_count
-        )
-        for source, target in (
-                ("fitted_vertices",
-                 "diagnostic_curvature_projection_max_fitted_vertices"),
-                ("generated_interface_geometry_samples",
-                 "diagnostic_curvature_projection_max_interface_geometry_samples"),
-                ("generated_interface_patch_fitted_vertices",
-                 "diagnostic_curvature_projection_max_interface_patch_fitted_vertices"),
-                ("generated_interface_patch_expanded_vertices",
-                 "diagnostic_curvature_projection_max_interface_patch_expanded_vertices"),
-                ("fallback_vertices",
-                 "diagnostic_curvature_projection_max_fallback_vertices"),
-                ("zero_fallback_vertices",
-                 "diagnostic_curvature_projection_max_zero_fallback_vertices"),
-                ("insufficient_stencil_vertices",
-                 "diagnostic_curvature_projection_max_insufficient_stencil_vertices"),
-                ("singular_stencil_vertices",
-                 "diagnostic_curvature_projection_max_singular_stencil_vertices"),
-                ("small_gradient_vertices",
-                 "diagnostic_curvature_projection_max_small_gradient_vertices"),
-                ("fit_residual_failure_vertices",
-                 "diagnostic_curvature_projection_max_fit_residual_failure_vertices"),
-                ("narrow_band_width",
-                 "diagnostic_curvature_projection_max_narrow_band_width"),
-                ("narrow_band_vertices",
-                 "diagnostic_curvature_projection_max_narrow_band_vertices"),
-                ("skipped_far_vertices",
-                 "diagnostic_curvature_projection_max_skipped_far_vertices"),
-                ("smoothing_iterations",
-                 "diagnostic_curvature_projection_max_smoothing_iterations"),
-                ("smoothing_operator_edges",
-                 "diagnostic_curvature_projection_max_smoothing_operator_edges"),
-                ("smoothing_mean_abs_update",
-                 "diagnostic_curvature_projection_max_smoothing_mean_abs_update"),
-                ("smoothing_max_abs_update",
-                 "diagnostic_curvature_projection_max_smoothing_max_abs_update"),
-                ("mean_normalized_fit_residual",
-                 "diagnostic_curvature_projection_max_mean_normalized_fit_residual"),
-                ("max_normalized_fit_residual",
-                 "diagnostic_curvature_projection_max_normalized_fit_residual"),
-                ("vertex_adjacency_builds",
-                 "diagnostic_curvature_projection_max_vertex_adjacency_builds"),
-                ("sample_adjacency_builds",
-                 "diagnostic_curvature_projection_max_sample_adjacency_builds"),
-                ("max_abs_curvature",
-                 "diagnostic_curvature_projection_max_abs_curvature")):
-            values = [
-                record.get(source)
-                for record in records
-                if isinstance(record.get(source), (int, float))
-            ]
-            if values:
-                metrics[target] = max(values)
     if diagnostics.get("level_set_volume_corrections"):
         records = diagnostics["level_set_volume_corrections"]
         metrics["latest_level_set_volume_correction"] = records[-1]
@@ -7868,18 +7283,6 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "capillary_force_form",
         "cut_cell_pressure_stabilization_policy",
         "wet_extension_advection_velocity_method",
-        "projected_curvature_field",
-        "curvature_projection_cadence_steps",
-        "curvature_projection_max_normalized_fit_residual",
-        "curvature_projection_max_neighbor_fallback_vertices",
-        "curvature_projection_max_zero_fallback_vertices",
-        "curvature_projection_supplemental_sample_weight",
-        "curvature_projection_recovery_mode",
-        "curvature_projection_kinematic_area_gradient_filter_coefficient",
-        "curvature_projection_narrow_band_width",
-        "curvature_projection_smoothing_iterations",
-        "curvature_projection_smoothing_relaxation",
-        "curvature_projection_smoothing_mode",
         "sessile_contact_line_model",
         "static_capillary_volume_tolerance",
         "static_capillary_projected_gradient_tolerance",
@@ -7894,12 +7297,6 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "static_capillary_limited_memory_history_size",
         "static_capillary_limited_memory_curvature_tolerance",
         "require_static_capillary_balance_qualification",
-        "expect_curvature_projection_smoothing_mode",
-        "expect_curvature_projection_recovery_mode",
-        "min_diagnostic_curvature_projection_operator_edges",
-        "min_diagnostic_curvature_projection_interface_geometry_samples",
-        "min_diagnostic_curvature_projection_interface_patch_fitted_vertices",
-        "max_capillary_curvature_relative_error",
         "max_capillary_pressure_jump_relative_error",
         "max_capillary_parasitic_capillary_number",
         "max_sessile_contact_angle_error_degrees",
@@ -7991,8 +7388,6 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "require_eigen_factorization_diagnostics",
         "require_active_pressure_support_diagnostics",
         "require_level_set_advection_velocity_diagnostics",
-        "require_curvature_projection_diagnostics",
-        "require_curvature_projection_newton_freshness",
         "require_fsils_matrix_diagnostics",
         "require_assembly_topology_consistency",
         "require_high_order_cut_context_diagnostics",
@@ -8042,19 +7437,6 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "max_reference_profile_max_abs_error",
         "max_reference_profile_elevated_front_lag",
         "max_solver_elapsed_wall_seconds",
-        "curvature_projection_max_normalized_fit_residual",
-        "curvature_projection_max_neighbor_fallback_vertices",
-        "curvature_projection_max_zero_fallback_vertices",
-        "curvature_projection_supplemental_sample_weight",
-        "curvature_projection_recovery_mode",
-        "curvature_projection_smoothing_iterations",
-        "curvature_projection_smoothing_relaxation",
-        "expect_curvature_projection_smoothing_mode",
-        "expect_curvature_projection_recovery_mode",
-        "min_diagnostic_curvature_projection_operator_edges",
-        "min_diagnostic_curvature_projection_interface_geometry_samples",
-        "min_diagnostic_curvature_projection_interface_patch_fitted_vertices",
-        "max_capillary_curvature_relative_error",
         "max_capillary_pressure_jump_relative_error",
         "max_capillary_rejected_steps",
         "max_capillary_dt_updates",
@@ -8067,20 +7449,6 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "max_capillary_wave_temporal_liquid_volume_relative_drift",
         "min_capillary_convergence_rate",
         "min_capillary_convergence_points",
-        "min_diagnostic_curvature_projection_count",
-        "min_diagnostic_curvature_projection_max_abs_curvature",
-        "max_diagnostic_curvature_projection_fallback_vertices",
-        "max_diagnostic_curvature_projection_zero_fallback_vertices",
-        "max_diagnostic_curvature_projection_normalized_fit_residual",
-        "min_diagnostic_curvature_projection_smoothing_iterations",
-        "min_diagnostic_curvature_projection_skipped_count",
-        "min_diagnostic_curvature_projection_cache_hit_count",
-        "max_diagnostic_curvature_projection_cache_miss_count",
-        "min_diagnostic_curvature_projection_cut_signature_cache_hit_count",
-        "min_diagnostic_curvature_projection_reused_vertex_adjacency_count",
-        "min_diagnostic_curvature_projection_reused_sample_adjacency_count",
-        "max_diagnostic_curvature_projection_vertex_adjacency_builds",
-        "max_diagnostic_curvature_projection_sample_adjacency_builds",
         "min_diagnostic_level_set_advection_interface_samples",
         "max_solver_elapsed_seconds_per_accepted_step",
         "min_reference_profile_coverage",
@@ -8270,7 +7638,6 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
     if args.require_cut_context_solution_source_diagnostics:
         errors.extend(cut_context_solution_source_errors(diagnostics))
     errors.extend(cut_context_policy_errors(metrics, args))
-    errors.extend(curvature_projection_errors(metrics, args))
     errors.extend(capillary_benchmark_errors(metrics, args))
     errors.extend(capillary_wave_benchmark_errors(metrics, args))
     errors.extend(capillary_wave_boundary_contract_errors(metrics, args))
@@ -8781,50 +8148,6 @@ def coordinate_min_spacing(points: np.ndarray) -> float | None:
         if positive.size:
             spacings.append(float(np.min(positive)))
     return min(spacings) if spacings else None
-
-
-def add_projected_curvature_field_metrics(metrics: dict[str, Any],
-                                          output: pv.DataSet) -> None:
-    if "phi" not in output.point_data:
-        return
-    curvature_name = None
-    for candidate in ("kappa_projected", "curvature_projected"):
-        if candidate in output.point_data:
-            curvature_name = candidate
-            break
-    if curvature_name is None:
-        return
-
-    phi = np.asarray(output.point_data["phi"], dtype=float).reshape(-1)
-    curvature = np.asarray(output.point_data[curvature_name], dtype=float).reshape(-1)
-    if phi.shape[0] != curvature.shape[0]:
-        return
-
-    points = np.asarray(output.points, dtype=float)
-    spacing = coordinate_min_spacing(points)
-    band_width = 0.15 if spacing is None else max(1.0e-12, 1.5 * spacing)
-    finite = np.isfinite(phi) & np.isfinite(curvature)
-    near_interface = finite & (np.abs(phi) <= band_width)
-    if not np.any(near_interface):
-        return
-
-    near_values = curvature[near_interface]
-    metrics["projected_curvature_field_name"] = curvature_name
-    metrics["projected_curvature_near_interface_source"] = (
-        "vtk_point_data_projected_curvature_field"
-    )
-    metrics["projected_curvature_near_interface_sampling_domain"] = (
-        "abs(phi)<=postprocessed_interface_band_width"
-    )
-    metrics["projected_curvature_near_interface_band_width"] = float(band_width)
-    metrics["projected_curvature_near_interface_point_count"] = int(
-        np.count_nonzero(near_interface))
-    metrics["projected_curvature_near_interface_mean_abs"] = float(
-        np.mean(np.abs(near_values)))
-    metrics["projected_curvature_near_interface_median_abs"] = float(
-        np.median(np.abs(near_values)))
-    metrics["projected_curvature_near_interface_max_abs"] = float(
-        np.max(np.abs(near_values)))
 
 
 def result_time_series_paths(case_dir: Path) -> list[tuple[int, Path]]:
@@ -11487,7 +10810,6 @@ def compute_metrics(case_name: str,
             metrics["interface_extraction_error"] = str(exc)
     add_interface_motion_metrics(metrics, initial, output)
     add_capillary_wave_profile_metrics(metrics, benchmark, initial, output)
-    add_projected_curvature_field_metrics(metrics, output)
     add_capillary_output_pressure_metrics(metrics, benchmark, output)
     if (benchmark.get("spatial_dimension") == 3 and
             benchmark.get("capillary_geometry") in {
@@ -11788,7 +11110,6 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
     if args.require_cut_context_solution_source_diagnostics:
         errors.extend(cut_context_solution_source_errors(metrics["diagnostics"]))
     errors.extend(cut_context_policy_errors(metrics, args))
-    errors.extend(curvature_projection_errors(metrics, args))
     errors.extend(capillary_benchmark_errors(metrics, args))
     errors.extend(capillary_wave_benchmark_errors(metrics, args))
     errors.extend(capillary_rise_history_errors(metrics, args))
@@ -12728,33 +12049,6 @@ def configure_case_solver_xml(run_dir: Path, args: argparse.Namespace) -> None:
             args, "capillary_force_form", "surface_stress"),
         wet_extension_advection_velocity_method=(
             args.wet_extension_advection_velocity_method),
-        projected_curvature_field=args.projected_curvature_field,
-        curvature_projection_cadence_steps=args.curvature_projection_cadence_steps,
-        curvature_projection_max_normalized_fit_residual=(
-            args.curvature_projection_max_normalized_fit_residual),
-        curvature_projection_max_neighbor_fallback_vertices=(
-            args.curvature_projection_max_neighbor_fallback_vertices),
-        curvature_projection_max_zero_fallback_vertices=(
-            args.curvature_projection_max_zero_fallback_vertices),
-        curvature_projection_supplemental_sample_weight=(
-            args.curvature_projection_supplemental_sample_weight),
-        curvature_projection_recovery_mode=(
-            args.curvature_projection_recovery_mode),
-        curvature_projection_kinematic_area_gradient_filter_coefficient=(
-            getattr(
-                args,
-                "curvature_projection_kinematic_area_gradient_filter_coefficient",
-                None,
-            )
-        ),
-        curvature_projection_narrow_band_width=(
-            args.curvature_projection_narrow_band_width),
-        curvature_projection_smoothing_iterations=(
-            args.curvature_projection_smoothing_iterations),
-        curvature_projection_smoothing_relaxation=(
-            args.curvature_projection_smoothing_relaxation),
-        curvature_projection_smoothing_mode=(
-            args.curvature_projection_smoothing_mode),
         enable_static_capillary_equilibrium_initialization=getattr(
             args,
             "initialize_discrete_static_capillary_equilibrium",
@@ -12857,11 +12151,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
             if case_name == "curvedtet3d":
                 write_curved_tet3d_case(run_dir, args.steps)
             elif case_name == "capillaryarc2d":
-                pressure_jump = 0.0
-                if args.high_order_capillary_balance_smoke:
-                    pressure_jump = float(args.surface_tension) / CAPILLARY_ARC_RADIUS
                 write_capillary_arc2d_case(
-                    run_dir, args.steps, pressure_jump,
+                    run_dir, args.steps, 0.0,
                     args.synthetic_nx, args.synthetic_ny,
                     active_domain=active_domain)
             elif case_name == "droplet2d":
@@ -13162,38 +12453,6 @@ def set_default(args: argparse.Namespace, name: str, value: Any) -> None:
         setattr(args, name, value)
 
 
-def synthetic_curvature_projection_band_width(args: argparse.Namespace) -> float:
-    # Namespace-based unit/instrumentation callers may omit parser defaults;
-    # mirror the CLI's 16-by-16 synthetic mesh in that case.
-    nx = getattr(args, "synthetic_nx", 16)
-    ny = getattr(args, "synthetic_ny", 16)
-    if (not isinstance(nx, int) or isinstance(nx, bool) or nx <= 0 or
-            not isinstance(ny, int) or isinstance(ny, bool) or ny <= 0):
-        raise ValueError(
-            "synthetic curvature-projection band requires positive nx and ny"
-        )
-    return 1.0 / float(max(nx, ny))
-
-
-def curvature_sample_adjacency_build_budget(args: argparse.Namespace) -> int:
-    steps = getattr(args, "steps", None)
-    if isinstance(steps, int) and steps > 0:
-        return steps
-    return 1
-
-
-def capillary_wave_curvature_projection_cache_miss_budget(
-        args: argparse.Namespace) -> int:
-    """Budget the state-changing projection opportunities in a wave run."""
-    steps = getattr(args, "steps", None)
-    if not isinstance(steps, int) or steps <= 0:
-        return 1
-    # One initial projection, then accepted_step plus the two accepted-state
-    # synchronization points exercised by each transient step.  Cache hits at
-    # residual/Jacobian synchronization points remain independently required.
-    return 1 + 3 * steps
-
-
 def remember_explicit_cli_overrides(args: argparse.Namespace) -> None:
     for name in (
         "linear_solver_type",
@@ -13281,9 +12540,6 @@ def apply_high_order_production_qualification_defaults(
                 not args.high_order_3d_benchmark_profile_qualification and
                 not args.high_order_curved_3d_simplex_smoke and
                 not args.high_order_mpi_motion_smoke and
-                not args.high_order_capillary_projection_smoke and
-                not args.high_order_capillary_response_smoke and
-                not args.high_order_capillary_balance_smoke and
                 not getattr(
                     args,
                     "high_order_capillary_droplet_equilibrium_smoke",
@@ -13960,357 +13216,6 @@ def apply_high_order_mpi_motion_smoke_defaults(
     set_default(args, "min_interface_final_height_span", 1.0e-4)
 
 
-def apply_high_order_capillary_projection_smoke_defaults(
-        args: argparse.Namespace) -> None:
-    if not args.high_order_capillary_projection_smoke:
-        return
-    if args.high_order_3d_benchmark_qualification:
-        raise ValueError(
-            "--high-order-capillary-projection-smoke cannot be combined with "
-            "--high-order-3d-benchmark-qualification"
-        )
-    if args.high_order_3d_benchmark_profile_qualification:
-        raise ValueError(
-            "--high-order-capillary-projection-smoke cannot be combined with "
-            "--high-order-3d-benchmark-profile-qualification"
-        )
-    if args.high_order_curved_3d_simplex_smoke:
-        raise ValueError(
-            "--high-order-capillary-projection-smoke cannot be combined with "
-            "--high-order-curved-3d-simplex-smoke"
-        )
-    if args.high_order_mpi_motion_smoke:
-        raise ValueError(
-            "--high-order-capillary-projection-smoke cannot be combined with "
-            "--high-order-mpi-motion-smoke"
-        )
-    if getattr(args, "high_order_capillary_droplet_equilibrium_smoke", False):
-        raise ValueError(
-            "--high-order-capillary-projection-smoke cannot be combined with "
-            "--high-order-capillary-droplet-equilibrium-smoke"
-        )
-
-    if not args.case:
-        args.case = list(HIGH_ORDER_CAPILLARY_PROJECTION_CASES)
-    if args.steps is None:
-        args.steps = 10
-    set_default(args, "timeout_seconds", 600.0)
-    args.use_high_order_implicit_cuts = True
-    args.disable_cut_stabilization = False
-    args.require_time_loop_convergence = True
-    args.require_process_memory_diagnostics = True
-    args.require_basis_cache_diagnostics = True
-    args.require_high_order_cut_context_diagnostics = True
-    args.require_eigen_factorization_diagnostics = True
-    args.require_active_pressure_support_diagnostics = True
-    args.require_curvature_projection_diagnostics = True
-    args.require_curvature_projection_newton_freshness = True
-
-    set_default(args, "surface_tension", 1.0e-3)
-    set_default(args, "projected_curvature_field", "kappa_projected")
-    set_default(args, "curvature_projection_cadence_steps", 1)
-    set_default(args, "curvature_projection_max_normalized_fit_residual", 5.0e-2)
-    set_default(args, "curvature_projection_max_zero_fallback_vertices", 0)
-    set_default(args, "curvature_projection_smoothing_iterations", 1)
-    set_default(args, "curvature_projection_smoothing_relaxation", 0.25)
-    set_default(args, "curvature_projection_smoothing_mode", "mass_stiffness_operator")
-    set_default(args, "expect_curvature_projection_smoothing_mode", "mass_stiffness_operator")
-    set_default(args, "min_diagnostic_curvature_projection_operator_edges", 1)
-    set_default(args, "max_capillary_rejected_steps", 0)
-    set_default(args, "max_capillary_dt_updates", 0)
-    set_default(args, "max_capillary_speed_per_surface_tension", 10.0)
-    args.required_implicit_cut_backend_qualification = "ProductionQualified"
-    set_default(args, "linear_algebra_backend", "eigen")
-    if args.min_max_speed == 1.0e-2:
-        args.min_max_speed = 1.0e-3
-    if args.min_wet_mean_speed == 2.5e-4:
-        args.min_wet_mean_speed = 1.0e-4
-    if args.min_gate_mean_ux == 1.0e-4:
-        args.min_gate_mean_ux = -1.0
-    if args.min_front_mean_ux == 1.0e-4:
-        args.min_front_mean_ux = -1.0
-    set_default(args, "min_diagnostic_solution_velocity_range", 1.0e-3)
-    set_default(args, "min_diagnostic_pressure_range", 100.0)
-    set_default(args, "max_wet_fraction_volume_error", 1.0e-8)
-    set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 4.0)
-    set_default(args, "min_diagnostic_cut_context_refresh_skips", 1)
-    set_default(args, "max_diagnostic_assembly_timings_per_step", 4.0)
-    set_default(args, "max_diagnostic_extra_assembly_timings_per_step", 3.0)
-    set_default(args, "max_diagnostic_process_basis_cache_entries", 8)
-    set_default(args, "max_diagnostic_process_basis_cache_entry_growth", 8)
-    set_default(args, "max_diagnostic_implicit_cut_fallback_cells", 0)
-    set_default(args, "min_diagnostic_achieved_interface_quadrature_order", 2)
-    set_default(args, "min_diagnostic_achieved_volume_quadrature_order", 2)
-    set_default(args, "max_eigen_factorization_pressure_zero_rows", 0)
-    set_default(args, "max_eigen_factorization_pressure_zero_cols", 0)
-    set_default(args, "max_eigen_factorization_nonfinite_entries", 0)
-    set_default(args, "max_time_loop_nonlinear_iterations_per_step", 3)
-    set_default(args, "max_time_loop_linear_iterations_per_step", 10)
-    set_default(args, "min_interface_height_change", 1.0e-4)
-    set_default(args, "min_interface_mean_abs_height_change", 2.0e-5)
-    set_default(args, "min_interface_slope_change", 5.0e-5)
-    set_default(args, "min_interface_final_height_span", 1.0e-4)
-    set_default(args, "min_diagnostic_curvature_projection_count", 1)
-    set_default(args, "min_diagnostic_curvature_projection_max_abs_curvature", 1.0e-6)
-    set_default(args, "max_diagnostic_curvature_projection_zero_fallback_vertices", 0)
-    set_default(args, "max_diagnostic_curvature_projection_normalized_fit_residual", 5.0e-2)
-    set_default(args, "min_diagnostic_curvature_projection_smoothing_iterations", 1)
-    set_default(args, "min_diagnostic_curvature_projection_skipped_count", 1)
-    set_default(args, "min_diagnostic_curvature_projection_cache_hit_count", 1)
-    set_default(args, "max_diagnostic_curvature_projection_cache_miss_count", 35)
-    set_default(args,
-                "min_diagnostic_curvature_projection_cut_signature_cache_hit_count",
-                1)
-    set_default(args, "min_diagnostic_curvature_projection_reused_vertex_adjacency_count", 1)
-    set_default(args, "min_diagnostic_curvature_projection_reused_sample_adjacency_count", 1)
-    set_default(args, "max_diagnostic_curvature_projection_vertex_adjacency_builds", 1)
-    set_default(args, "max_diagnostic_curvature_projection_sample_adjacency_builds",
-                curvature_sample_adjacency_build_budget(args))
-
-
-def apply_high_order_capillary_response_smoke_defaults(
-        args: argparse.Namespace) -> None:
-    if not args.high_order_capillary_response_smoke:
-        return
-    if args.high_order_3d_benchmark_qualification:
-        raise ValueError(
-            "--high-order-capillary-response-smoke cannot be combined with "
-            "--high-order-3d-benchmark-qualification"
-        )
-    if args.high_order_3d_benchmark_profile_qualification:
-        raise ValueError(
-            "--high-order-capillary-response-smoke cannot be combined with "
-            "--high-order-3d-benchmark-profile-qualification"
-        )
-    if args.high_order_curved_3d_simplex_smoke:
-        raise ValueError(
-            "--high-order-capillary-response-smoke cannot be combined with "
-            "--high-order-curved-3d-simplex-smoke"
-        )
-    if args.high_order_mpi_motion_smoke:
-        raise ValueError(
-            "--high-order-capillary-response-smoke cannot be combined with "
-            "--high-order-mpi-motion-smoke"
-        )
-    if args.high_order_capillary_projection_smoke:
-        raise ValueError(
-            "--high-order-capillary-response-smoke cannot be combined with "
-            "--high-order-capillary-projection-smoke"
-        )
-    if getattr(args, "high_order_capillary_droplet_equilibrium_smoke", False):
-        raise ValueError(
-            "--high-order-capillary-response-smoke cannot be combined with "
-            "--high-order-capillary-droplet-equilibrium-smoke"
-        )
-
-    if not args.case:
-        args.case = list(HIGH_ORDER_CAPILLARY_RESPONSE_CASES)
-    if args.steps is None:
-        args.steps = 3
-    set_default(args, "timeout_seconds", 300.0)
-    set_default(args, "max_solver_elapsed_seconds_per_accepted_step", 1.0)
-    args.use_high_order_implicit_cuts = True
-    args.disable_cut_stabilization = False
-    args.require_time_loop_convergence = True
-    args.require_process_memory_diagnostics = True
-    args.require_basis_cache_diagnostics = True
-    args.require_high_order_cut_context_diagnostics = True
-    args.require_eigen_factorization_diagnostics = True
-    args.require_active_pressure_support_diagnostics = True
-    args.require_curvature_projection_diagnostics = True
-    args.require_curvature_projection_newton_freshness = True
-
-    set_default(args, "surface_tension", 0.5)
-    set_default(args, "projected_curvature_field", "kappa_projected")
-    set_default(args, "curvature_projection_cadence_steps", 1)
-    set_default(
-        args,
-        "curvature_projection_narrow_band_width",
-        synthetic_curvature_projection_band_width(args),
-    )
-    set_default(args, "curvature_projection_max_normalized_fit_residual", 5.0e-2)
-    set_default(args, "curvature_projection_max_zero_fallback_vertices", 0)
-    set_default(args, "curvature_projection_smoothing_iterations", 1)
-    set_default(args, "curvature_projection_smoothing_relaxation", 0.25)
-    set_default(args, "curvature_projection_smoothing_mode", "mass_stiffness_operator")
-    set_default(args, "expect_curvature_projection_smoothing_mode", "mass_stiffness_operator")
-    set_default(args, "min_diagnostic_curvature_projection_operator_edges", 1)
-    set_default(args, "max_capillary_curvature_relative_error", 0.75)
-    set_default(args, "max_capillary_rejected_steps", 0)
-    set_default(args, "max_capillary_dt_updates", 0)
-    set_default(args, "max_capillary_speed_per_surface_tension", 10.0)
-    args.required_implicit_cut_backend_qualification = "ProductionQualified"
-    set_default(args, "linear_algebra_backend", "eigen")
-    if args.min_max_speed == 1.0e-2:
-        args.min_max_speed = 1.0e-6
-    if args.min_wet_mean_speed == 2.5e-4:
-        args.min_wet_mean_speed = 1.0e-7
-    if args.min_gate_mean_ux == 1.0e-4:
-        args.min_gate_mean_ux = -1.0
-    if args.min_front_mean_ux == 1.0e-4:
-        args.min_front_mean_ux = -1.0
-    set_default(args, "min_diagnostic_solution_velocity_range", 1.0e-6)
-    set_default(args, "min_capillary_response_speed_per_surface_tension", 1.0e-6)
-    set_default(args, "max_wet_fraction_volume_error", 1.0e-8)
-    set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 4.0)
-    set_default(args, "min_diagnostic_cut_context_refresh_skips", 1)
-    set_default(args, "max_diagnostic_generated_cell_cache_full_miss_rebuilds", 1)
-    set_default(args, "max_diagnostic_assembly_timings_per_step", 4.0)
-    set_default(args, "max_diagnostic_extra_assembly_timings_per_step", 3.0)
-    set_default(args, "max_diagnostic_process_basis_cache_entries", 8)
-    set_default(args, "max_diagnostic_process_basis_cache_entry_growth", 8)
-    set_default(args, "max_diagnostic_implicit_cut_fallback_cells", 0)
-    set_default(args, "min_diagnostic_achieved_interface_quadrature_order", 2)
-    set_default(args, "min_diagnostic_achieved_volume_quadrature_order", 2)
-    set_default(args, "max_eigen_factorization_pressure_zero_rows", 0)
-    set_default(args, "max_eigen_factorization_pressure_zero_cols", 0)
-    set_default(args, "max_eigen_factorization_nonfinite_entries", 0)
-    set_default(args, "max_time_loop_nonlinear_iterations_per_step", 3)
-    set_default(args, "max_time_loop_linear_iterations_per_step", 10)
-    set_default(args, "min_diagnostic_curvature_projection_count", 1)
-    set_default(args, "min_diagnostic_curvature_projection_max_abs_curvature", 1.0)
-    set_default(args, "max_diagnostic_curvature_projection_zero_fallback_vertices", 0)
-    set_default(args, "max_diagnostic_curvature_projection_normalized_fit_residual", 5.0e-2)
-    set_default(args, "min_diagnostic_curvature_projection_smoothing_iterations", 1)
-    set_default(args, "min_diagnostic_curvature_projection_skipped_count", 1)
-    set_default(args, "min_diagnostic_curvature_projection_cache_hit_count", 1)
-    set_default(args, "max_diagnostic_curvature_projection_cache_miss_count", 35)
-    set_default(args,
-                "min_diagnostic_curvature_projection_cut_signature_cache_hit_count",
-                1)
-    set_default(args, "min_diagnostic_curvature_projection_reused_vertex_adjacency_count", 1)
-    set_default(args, "min_diagnostic_curvature_projection_reused_sample_adjacency_count", 1)
-    set_default(args, "max_diagnostic_curvature_projection_vertex_adjacency_builds", 1)
-    set_default(args, "max_diagnostic_curvature_projection_sample_adjacency_builds",
-                curvature_sample_adjacency_build_budget(args))
-
-
-def apply_high_order_capillary_balance_smoke_defaults(
-        args: argparse.Namespace) -> None:
-    if not args.high_order_capillary_balance_smoke:
-        return
-    if args.high_order_3d_benchmark_qualification:
-        raise ValueError(
-            "--high-order-capillary-balance-smoke cannot be combined with "
-            "--high-order-3d-benchmark-qualification"
-        )
-    if args.high_order_3d_benchmark_profile_qualification:
-        raise ValueError(
-            "--high-order-capillary-balance-smoke cannot be combined with "
-            "--high-order-3d-benchmark-profile-qualification"
-        )
-    if args.high_order_curved_3d_simplex_smoke:
-        raise ValueError(
-            "--high-order-capillary-balance-smoke cannot be combined with "
-            "--high-order-curved-3d-simplex-smoke"
-        )
-    if args.high_order_mpi_motion_smoke:
-        raise ValueError(
-            "--high-order-capillary-balance-smoke cannot be combined with "
-            "--high-order-mpi-motion-smoke"
-        )
-    if args.high_order_capillary_projection_smoke:
-        raise ValueError(
-            "--high-order-capillary-balance-smoke cannot be combined with "
-            "--high-order-capillary-projection-smoke"
-        )
-    if args.high_order_capillary_response_smoke:
-        raise ValueError(
-            "--high-order-capillary-balance-smoke cannot be combined with "
-            "--high-order-capillary-response-smoke"
-        )
-    if getattr(args, "high_order_capillary_droplet_equilibrium_smoke", False):
-        raise ValueError(
-            "--high-order-capillary-balance-smoke cannot be combined with "
-            "--high-order-capillary-droplet-equilibrium-smoke"
-        )
-
-    if not args.case:
-        args.case = list(HIGH_ORDER_CAPILLARY_BALANCE_CASES)
-    if args.steps is None:
-        args.steps = 3
-    set_default(args, "timeout_seconds", 300.0)
-    set_default(args, "max_solver_elapsed_seconds_per_accepted_step", 1.0)
-    args.use_high_order_implicit_cuts = True
-    args.disable_cut_stabilization = False
-    args.require_time_loop_convergence = True
-    args.require_process_memory_diagnostics = True
-    args.require_basis_cache_diagnostics = True
-    args.require_high_order_cut_context_diagnostics = True
-    args.require_eigen_factorization_diagnostics = True
-    args.require_active_pressure_support_diagnostics = True
-    args.require_curvature_projection_diagnostics = True
-    args.require_curvature_projection_newton_freshness = True
-
-    set_default(args, "surface_tension", 0.5)
-    set_default(args, "projected_curvature_field", "kappa_projected")
-    set_default(args, "curvature_projection_cadence_steps", 1)
-    set_default(
-        args,
-        "curvature_projection_narrow_band_width",
-        synthetic_curvature_projection_band_width(args),
-    )
-    set_default(args, "curvature_projection_max_normalized_fit_residual", 5.0e-2)
-    set_default(args, "curvature_projection_max_zero_fallback_vertices", 0)
-    set_default(args, "curvature_projection_smoothing_iterations", 1)
-    set_default(args, "curvature_projection_smoothing_relaxation", 0.25)
-    set_default(args, "curvature_projection_smoothing_mode", "mass_stiffness_operator")
-    set_default(args, "expect_curvature_projection_smoothing_mode", "mass_stiffness_operator")
-    set_default(args, "min_diagnostic_curvature_projection_operator_edges", 1)
-    set_default(args, "max_capillary_curvature_relative_error", 0.75)
-    # Solved P1 pressure samples across an unfitted circle cannot satisfy a
-    # machine-precision Young--Laplace jump.  This fixed 15% bound is applied
-    # to the final liquid/gas medians, never to the preloaded initial field.
-    set_default(args, "max_capillary_pressure_jump_relative_error", 0.15)
-    set_default(args, "max_capillary_rejected_steps", 0)
-    set_default(args, "max_capillary_dt_updates", 0)
-    set_default(args, "max_capillary_speed_per_surface_tension", 1.0e-6)
-    args.required_implicit_cut_backend_qualification = "ProductionQualified"
-    set_default(args, "linear_algebra_backend", "eigen")
-    if args.min_max_speed == 1.0e-2:
-        args.min_max_speed = 0.0
-    if args.min_wet_mean_speed == 2.5e-4:
-        args.min_wet_mean_speed = 0.0
-    if args.min_gate_mean_ux == 1.0e-4:
-        args.min_gate_mean_ux = -1.0
-    if args.min_front_mean_ux == 1.0e-4:
-        args.min_front_mean_ux = -1.0
-    set_default(args, "max_capillary_balance_speed_per_surface_tension", 1.0e-6)
-    set_default(args, "min_diagnostic_pressure_range", 0.5)
-    set_default(args, "max_wet_fraction_volume_error", 1.0e-8)
-    set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 4.0)
-    set_default(args, "min_diagnostic_cut_context_refresh_skips", 1)
-    set_default(args, "max_diagnostic_generated_cell_cache_full_miss_rebuilds", 1)
-    set_default(args, "max_diagnostic_assembly_timings_per_step", 4.0)
-    set_default(args, "max_diagnostic_extra_assembly_timings_per_step", 3.0)
-    set_default(args, "max_diagnostic_process_basis_cache_entries", 8)
-    set_default(args, "max_diagnostic_process_basis_cache_entry_growth", 8)
-    set_default(args, "max_diagnostic_implicit_cut_fallback_cells", 0)
-    set_default(args, "min_diagnostic_achieved_interface_quadrature_order", 2)
-    set_default(args, "min_diagnostic_achieved_volume_quadrature_order", 2)
-    set_default(args, "max_eigen_factorization_pressure_zero_rows", 0)
-    set_default(args, "max_eigen_factorization_pressure_zero_cols", 0)
-    set_default(args, "max_eigen_factorization_nonfinite_entries", 0)
-    set_default(args, "max_time_loop_nonlinear_iterations_per_step", 3)
-    set_default(args, "max_time_loop_linear_iterations_per_step", 10)
-    set_default(args, "min_diagnostic_curvature_projection_count", 1)
-    set_default(args, "min_diagnostic_curvature_projection_max_abs_curvature", 1.0)
-    set_default(args, "max_diagnostic_curvature_projection_zero_fallback_vertices", 0)
-    set_default(args, "max_diagnostic_curvature_projection_normalized_fit_residual", 5.0e-2)
-    set_default(args, "min_diagnostic_curvature_projection_smoothing_iterations", 1)
-    set_default(args, "min_diagnostic_curvature_projection_skipped_count", 1)
-    set_default(args, "min_diagnostic_curvature_projection_cache_hit_count", 1)
-    set_default(args, "max_diagnostic_curvature_projection_cache_miss_count", 35)
-    set_default(args,
-                "min_diagnostic_curvature_projection_cut_signature_cache_hit_count",
-                1)
-    set_default(args, "min_diagnostic_curvature_projection_reused_vertex_adjacency_count", 1)
-    set_default(args, "min_diagnostic_curvature_projection_reused_sample_adjacency_count", 1)
-    set_default(args, "max_diagnostic_curvature_projection_vertex_adjacency_builds", 1)
-    set_default(args, "max_diagnostic_curvature_projection_sample_adjacency_builds",
-                curvature_sample_adjacency_build_budget(args))
-
-
 def apply_high_order_capillary_droplet_equilibrium_smoke_defaults(
         args: argparse.Namespace) -> None:
     if not getattr(args, "high_order_capillary_droplet_equilibrium_smoke", False):
@@ -14335,21 +13240,6 @@ def apply_high_order_capillary_droplet_equilibrium_smoke_defaults(
             "--high-order-capillary-droplet-equilibrium-smoke cannot be "
             "combined with --high-order-mpi-motion-smoke"
         )
-    if getattr(args, "high_order_capillary_projection_smoke", False):
-        raise ValueError(
-            "--high-order-capillary-droplet-equilibrium-smoke cannot be "
-            "combined with --high-order-capillary-projection-smoke"
-        )
-    if getattr(args, "high_order_capillary_response_smoke", False):
-        raise ValueError(
-            "--high-order-capillary-droplet-equilibrium-smoke cannot be "
-            "combined with --high-order-capillary-response-smoke"
-        )
-    if getattr(args, "high_order_capillary_balance_smoke", False):
-        raise ValueError(
-            "--high-order-capillary-droplet-equilibrium-smoke cannot be "
-            "combined with --high-order-capillary-balance-smoke"
-        )
 
     if not args.case:
         args.case = list(HIGH_ORDER_CAPILLARY_DROPLET_EQUILIBRIUM_CASES)
@@ -14370,29 +13260,8 @@ def apply_high_order_capillary_droplet_equilibrium_smoke_defaults(
     args.enable_fsils_matrix_diagnostics = True
     args.require_fsils_matrix_diagnostics = True
     args.require_active_pressure_support_diagnostics = True
-    # SurfaceStress consumes generated normals and measure directly.  A scalar
-    # curvature projection is output-only when a caller explicitly requests
-    # one; it is not a residual-freshness or force-accuracy requirement.
-    args.require_curvature_projection_diagnostics = bool(
-        getattr(args, "projected_curvature_field", None))
-    args.require_curvature_projection_newton_freshness = False
 
     set_default(args, "surface_tension", 0.5)
-    if getattr(args, "projected_curvature_field", None):
-        set_default(args, "curvature_projection_cadence_steps", 1)
-        set_default(
-            args,
-            "curvature_projection_narrow_band_width",
-            synthetic_curvature_projection_band_width(args),
-        )
-        set_default(args, "curvature_projection_max_normalized_fit_residual", 5.0e-2)
-        set_default(args, "curvature_projection_max_zero_fallback_vertices", 0)
-        set_default(args, "curvature_projection_smoothing_iterations", 1)
-        set_default(args, "curvature_projection_smoothing_relaxation", 0.25)
-        set_default(args, "curvature_projection_smoothing_mode", "mass_stiffness_operator")
-        set_default(args, "expect_curvature_projection_smoothing_mode",
-                    "mass_stiffness_operator")
-        set_default(args, "min_diagnostic_curvature_projection_operator_edges", 1)
     # Fixed a priori for the n=8/16/32 P1 refinement matrix and evaluated from
     # final solved liquid/gas pressure samples (not initial preload metadata).
     set_default(args, "max_capillary_pressure_jump_relative_error", 0.15)
@@ -14434,28 +13303,6 @@ def apply_high_order_capillary_droplet_equilibrium_smoke_defaults(
     set_default(args, "max_fsils_matrix_duplicate_diag_rows", 0)
     set_default(args, "max_fsils_matrix_zero_diag", 0)
     set_default(args, "max_fsils_matrix_nonfinite_entries", 0)
-    if getattr(args, "projected_curvature_field", None):
-        set_default(args, "min_diagnostic_curvature_projection_count", 1)
-        set_default(args, "min_diagnostic_curvature_projection_max_abs_curvature", 1.0)
-        set_default(args, "max_diagnostic_curvature_projection_zero_fallback_vertices", 0)
-        set_default(args, "max_diagnostic_curvature_projection_normalized_fit_residual",
-                    5.0e-2)
-        set_default(args, "min_diagnostic_curvature_projection_smoothing_iterations", 1)
-        set_default(args, "min_diagnostic_curvature_projection_skipped_count", 1)
-        set_default(args, "min_diagnostic_curvature_projection_cache_hit_count", 1)
-        set_default(args, "max_diagnostic_curvature_projection_cache_miss_count", 35)
-        set_default(args,
-                    "min_diagnostic_curvature_projection_cut_signature_cache_hit_count",
-                    1)
-        set_default(args,
-                    "min_diagnostic_curvature_projection_reused_vertex_adjacency_count",
-                    1)
-        set_default(args,
-                    "min_diagnostic_curvature_projection_reused_sample_adjacency_count",
-                    1)
-        set_default(args, "max_diagnostic_curvature_projection_vertex_adjacency_builds", 1)
-        set_default(args, "max_diagnostic_curvature_projection_sample_adjacency_builds",
-                    curvature_sample_adjacency_build_budget(args))
 
 
 def apply_high_order_capillary_wave_smoke_defaults(args: argparse.Namespace) -> None:
@@ -14480,21 +13327,6 @@ def apply_high_order_capillary_wave_smoke_defaults(args: argparse.Namespace) -> 
         raise ValueError(
             "--high-order-capillary-wave-smoke cannot be combined with "
             "--high-order-mpi-motion-smoke"
-        )
-    if getattr(args, "high_order_capillary_projection_smoke", False):
-        raise ValueError(
-            "--high-order-capillary-wave-smoke cannot be combined with "
-            "--high-order-capillary-projection-smoke"
-        )
-    if getattr(args, "high_order_capillary_response_smoke", False):
-        raise ValueError(
-            "--high-order-capillary-wave-smoke cannot be combined with "
-            "--high-order-capillary-response-smoke"
-        )
-    if getattr(args, "high_order_capillary_balance_smoke", False):
-        raise ValueError(
-            "--high-order-capillary-wave-smoke cannot be combined with "
-            "--high-order-capillary-balance-smoke"
         )
     if getattr(args, "high_order_capillary_droplet_equilibrium_smoke", False):
         raise ValueError(
@@ -14523,12 +13355,6 @@ def apply_high_order_capillary_wave_smoke_defaults(args: argparse.Namespace) -> 
     args.enable_fsils_matrix_diagnostics = True
     args.require_fsils_matrix_diagnostics = True
     args.require_active_pressure_support_diagnostics = True
-    # SurfaceStress consumes generated normals and measure directly.  A scalar
-    # curvature projection is output-only when a caller explicitly requests
-    # one; it is not a residual-freshness or force-accuracy requirement.
-    args.require_curvature_projection_diagnostics = bool(
-        getattr(args, "projected_curvature_field", None))
-    args.require_curvature_projection_newton_freshness = False
     args.require_reference_profile_comparison = True
     args.enable_physical_history_instrumentation = True
     args.require_free_surface_energy_history = True
@@ -14548,16 +13374,6 @@ def apply_high_order_capillary_wave_smoke_defaults(args: argparse.Namespace) -> 
 
     set_default(args, "wet_extension_advection_velocity_method",
                 "wall_compatible_normal")
-    if getattr(args, "projected_curvature_field", None):
-        set_default(args, "curvature_projection_cadence_steps", 1)
-        set_default(args, "curvature_projection_max_normalized_fit_residual", 5.0e-2)
-        set_default(args, "curvature_projection_max_zero_fallback_vertices", 0)
-        set_default(args, "curvature_projection_smoothing_iterations", 1)
-        set_default(args, "curvature_projection_smoothing_relaxation", 0.25)
-        set_default(args, "curvature_projection_smoothing_mode", "mass_stiffness_operator")
-        set_default(args, "expect_curvature_projection_smoothing_mode",
-                    "mass_stiffness_operator")
-        set_default(args, "min_diagnostic_curvature_projection_operator_edges", 1)
     set_default(args, "max_capillary_rejected_steps", 0)
     set_default(args, "max_capillary_dt_updates", 0)
     set_default(args, "max_capillary_speed_per_surface_tension", 10.0)
@@ -14615,32 +13431,6 @@ def apply_high_order_capillary_wave_smoke_defaults(args: argparse.Namespace) -> 
     set_default(args, "max_fsils_matrix_duplicate_diag_rows", 0)
     set_default(args, "max_fsils_matrix_zero_diag", 0)
     set_default(args, "max_fsils_matrix_nonfinite_entries", 0)
-    if getattr(args, "projected_curvature_field", None):
-        set_default(args, "min_diagnostic_curvature_projection_count", 1)
-        set_default(args, "min_diagnostic_curvature_projection_max_abs_curvature", 0.01)
-        set_default(args, "max_diagnostic_curvature_projection_zero_fallback_vertices", 0)
-        set_default(args, "max_diagnostic_curvature_projection_normalized_fit_residual",
-                    5.0e-2)
-        set_default(args, "min_diagnostic_curvature_projection_smoothing_iterations", 1)
-        set_default(args, "min_diagnostic_curvature_projection_skipped_count", 1)
-        set_default(args, "min_diagnostic_curvature_projection_cache_hit_count", 1)
-        set_default(
-            args,
-            "max_diagnostic_curvature_projection_cache_miss_count",
-            capillary_wave_curvature_projection_cache_miss_budget(args),
-        )
-        set_default(args,
-                    "min_diagnostic_curvature_projection_cut_signature_cache_hit_count",
-                    1)
-        set_default(args,
-                    "min_diagnostic_curvature_projection_reused_vertex_adjacency_count",
-                    1)
-        set_default(args,
-                    "min_diagnostic_curvature_projection_reused_sample_adjacency_count",
-                    1)
-        set_default(args, "max_diagnostic_curvature_projection_vertex_adjacency_builds", 1)
-        set_default(args, "max_diagnostic_curvature_projection_sample_adjacency_builds",
-                    curvature_sample_adjacency_build_budget(args))
 
 
 def apply_high_order_implicit_defaults(args: argparse.Namespace) -> None:
@@ -14790,26 +13580,10 @@ def main(arguments: Sequence[str] | None = None) -> int:
     parser.add_argument("--high-order-mpi-motion-smoke", action="store_true",
                         help=("enable the high-order implicit MPI free-surface "
                               "motion smoke defaults"))
-    parser.add_argument("--high-order-capillary-projection-smoke",
-                        action="store_true",
-                        help=("enable a high-order implicit free-surface smoke "
-                              "with nonzero surface tension and projected "
-                              "level-set curvature"))
-    parser.add_argument("--high-order-capillary-response-smoke",
-                        action="store_true",
-                        help=("enable a zero-gravity high-order implicit "
-                              "capillary response smoke with projected "
-                              "level-set curvature"))
-    parser.add_argument("--high-order-capillary-balance-smoke",
-                        action="store_true",
-                        help=("enable a zero-gravity high-order implicit "
-                              "Laplace-style capillary balance smoke with "
-                              "projected level-set curvature"))
     parser.add_argument("--high-order-capillary-droplet-equilibrium-smoke",
                         action="store_true",
                         help=("enable a zero-gravity high-order implicit "
-                              "closed-droplet SurfaceStress equilibrium smoke; "
-                              "projected curvature is optional output only"))
+                              "closed-droplet SurfaceStress equilibrium smoke"))
     parser.add_argument("--high-order-capillary-wave-smoke",
                         action="store_true",
                         help=("enable a zero-gravity high-order implicit "
@@ -15213,50 +13987,6 @@ def main(arguments: Sequence[str] | None = None) -> int:
               "the only one since decision D48 retired "
               "kinematic_area_gradient_traction"),
     )
-    parser.add_argument("--projected-curvature-field")
-    parser.add_argument("--curvature-projection-cadence-steps", type=int)
-    parser.add_argument("--curvature-projection-max-normalized-fit-residual", type=float)
-    parser.add_argument("--curvature-projection-max-neighbor-fallback-vertices", type=int)
-    parser.add_argument("--curvature-projection-max-zero-fallback-vertices", type=int)
-    parser.add_argument("--curvature-projection-supplemental-sample-weight", type=float)
-    parser.add_argument(
-        "--curvature-projection-recovery-mode",
-        choices=(
-            "level_set_quadratic",
-            "generated_interface_patch",
-            "kinematic_area_gradient",
-        ),
-    )
-    parser.add_argument(
-        "--curvature-projection-kinematic-area-gradient-filter-coefficient",
-        type=float,
-    )
-    parser.add_argument("--curvature-projection-narrow-band-width", type=float)
-    parser.add_argument("--curvature-projection-smoothing-iterations", type=int)
-    parser.add_argument("--curvature-projection-smoothing-relaxation", type=float)
-    parser.add_argument(
-        "--curvature-projection-smoothing-mode",
-        choices=("local_graph", "mass_stiffness_operator", "mass_stiffness"),
-    )
-    parser.add_argument("--expect-curvature-projection-smoothing-mode")
-    parser.add_argument(
-        "--expect-curvature-projection-recovery-mode",
-        choices=(
-            "level_set_quadratic",
-            "generated_interface_patch",
-            "kinematic_area_gradient",
-        ),
-    )
-    parser.add_argument("--min-diagnostic-curvature-projection-operator-edges", type=int)
-    parser.add_argument(
-        "--min-diagnostic-curvature-projection-interface-geometry-samples",
-        type=int,
-    )
-    parser.add_argument(
-        "--min-diagnostic-curvature-projection-interface-patch-fitted-vertices",
-        type=int,
-    )
-    parser.add_argument("--max-capillary-curvature-relative-error", type=float)
     parser.add_argument("--max-capillary-pressure-jump-relative-error", type=float)
     parser.add_argument("--max-capillary-rejected-steps", type=int)
     parser.add_argument("--max-capillary-dt-updates", type=int)
@@ -15359,22 +14089,6 @@ def main(arguments: Sequence[str] | None = None) -> int:
     parser.add_argument("--expect-level-set-advection-velocity-extension-method")
     parser.add_argument("--expect-level-set-advection-velocity-interface-sample-source")
     parser.add_argument("--min-diagnostic-level-set-advection-interface-samples", type=int)
-    parser.add_argument("--require-curvature-projection-diagnostics", action="store_true")
-    parser.add_argument("--require-curvature-projection-newton-freshness", action="store_true")
-    parser.add_argument("--min-diagnostic-curvature-projection-count", type=int)
-    parser.add_argument("--min-diagnostic-curvature-projection-max-abs-curvature", type=float)
-    parser.add_argument("--max-diagnostic-curvature-projection-fallback-vertices", type=int)
-    parser.add_argument("--max-diagnostic-curvature-projection-zero-fallback-vertices", type=int)
-    parser.add_argument("--max-diagnostic-curvature-projection-normalized-fit-residual", type=float)
-    parser.add_argument("--min-diagnostic-curvature-projection-smoothing-iterations", type=int)
-    parser.add_argument("--min-diagnostic-curvature-projection-skipped-count", type=int)
-    parser.add_argument("--min-diagnostic-curvature-projection-cache-hit-count", type=int)
-    parser.add_argument("--max-diagnostic-curvature-projection-cache-miss-count", type=int)
-    parser.add_argument("--min-diagnostic-curvature-projection-cut-signature-cache-hit-count", type=int)
-    parser.add_argument("--min-diagnostic-curvature-projection-reused-vertex-adjacency-count", type=int)
-    parser.add_argument("--min-diagnostic-curvature-projection-reused-sample-adjacency-count", type=int)
-    parser.add_argument("--max-diagnostic-curvature-projection-vertex-adjacency-builds", type=int)
-    parser.add_argument("--max-diagnostic-curvature-projection-sample-adjacency-builds", type=int)
     parser.add_argument("--max-eigen-factorization-zero-rows", type=int)
     parser.add_argument("--max-eigen-factorization-pressure-zero-rows", type=int)
     parser.add_argument("--max-eigen-factorization-pressure-zero-cols", type=int)
@@ -15392,11 +14106,22 @@ def main(arguments: Sequence[str] | None = None) -> int:
     parser.add_argument("--adaptive-time-loop-increase-factor", type=float)
     parser.add_argument("--adaptive-time-loop-target-newton-iterations", type=int)
     parser.add_argument("--adaptive-time-loop-max-steps-multiplier", type=int)
+    for option, flag in RETIRED_CURVATURE_PROJECTION_OPTIONS:
+        parser.add_argument(
+            option,
+            dest="retired_curvature_projection_options",
+            action=RetiredOptionAction,
+            nargs=0 if flag else None,
+            help=argparse.SUPPRESS,
+        )
     args = parser.parse_args(arguments)
     try:
         validate_capillary_force_form(args.capillary_force_form)
+        reject_retired_curvature_projection_options(
+            args.retired_curvature_projection_options)
     except ValueError as error:
         parser.error(str(error))
+    del args.retired_curvature_projection_options
     remember_explicit_cli_overrides(args)
     apply_high_order_production_qualification_defaults(args)
     apply_high_order_mpi_production_qualification_defaults(args)
@@ -15406,9 +14131,6 @@ def main(arguments: Sequence[str] | None = None) -> int:
     apply_high_order_3d_benchmark_profile_qualification_defaults(args)
     apply_high_order_curved_3d_simplex_smoke_defaults(args)
     apply_high_order_mpi_motion_smoke_defaults(args)
-    apply_high_order_capillary_projection_smoke_defaults(args)
-    apply_high_order_capillary_response_smoke_defaults(args)
-    apply_high_order_capillary_balance_smoke_defaults(args)
     apply_high_order_capillary_droplet_equilibrium_smoke_defaults(args)
     apply_high_order_capillary_wave_smoke_defaults(args)
     apply_high_order_implicit_defaults(args)

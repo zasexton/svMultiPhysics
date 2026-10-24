@@ -1771,10 +1771,11 @@ def test_fs16_p1_decks_retain_transport_safety_controls():
             sessile_benchmark["sessile_contact"]["contact_line_model"]
             == "DynamicContactAngle"
         )
+        # The projection band width was retired with the level-set
+        # curvature projection (decision D48).
         assert (
-            sessile_benchmark["sessile_contact"]
-            ["curvature_projection_narrow_band_width"]
-            == 0.125
+            "curvature_projection_narrow_band_width"
+            not in sessile_benchmark["sessile_contact"]
         )
         contract = runner.capillary_wave_boundary_contract_metrics(wave)
         assert contract["capillary_wave_boundary_contract_valid"] is True
@@ -1825,79 +1826,58 @@ def test_fs16_p1_decks_retain_transport_safety_controls():
 
 def test_surface_stress_droplet_omits_curvature_traction_state_by_default():
     runner = _load_runner()
-
-    def droplet_args(projected_field=None, band_width=None):
-        return runner.argparse.Namespace(
-            high_order_capillary_droplet_equilibrium_smoke=True,
-            high_order_3d_benchmark_qualification=False,
-            high_order_3d_benchmark_profile_qualification=False,
-            high_order_curved_3d_simplex_smoke=False,
-            high_order_mpi_motion_smoke=False,
-            high_order_capillary_projection_smoke=False,
-            high_order_capillary_response_smoke=False,
-            high_order_capillary_balance_smoke=False,
-            case=None,
-            steps=None,
-            timeout_seconds=None,
-            synthetic_nx=32,
-            synthetic_ny=16,
-            projected_curvature_field=projected_field,
-            curvature_projection_narrow_band_width=band_width,
-            min_max_speed=1.0e-2,
-            min_wet_mean_speed=2.5e-4,
-            min_gate_mean_ux=1.0e-4,
-            min_front_mean_ux=1.0e-4,
-        )
-
-    args = droplet_args()
+    args = runner.argparse.Namespace(
+        high_order_capillary_droplet_equilibrium_smoke=True,
+        high_order_3d_benchmark_qualification=False,
+        high_order_3d_benchmark_profile_qualification=False,
+        high_order_curved_3d_simplex_smoke=False,
+        high_order_mpi_motion_smoke=False,
+        case=None,
+        steps=None,
+        timeout_seconds=None,
+        synthetic_nx=32,
+        synthetic_ny=16,
+        min_max_speed=1.0e-2,
+        min_wet_mean_speed=2.5e-4,
+        min_gate_mean_ux=1.0e-4,
+        min_front_mean_ux=1.0e-4,
+    )
     runner.apply_high_order_capillary_droplet_equilibrium_smoke_defaults(args)
 
-    assert args.projected_curvature_field is None
-    assert args.require_curvature_projection_diagnostics is False
-    assert args.require_curvature_projection_newton_freshness is False
-    assert args.curvature_projection_narrow_band_width is None
-    assert getattr(args, "max_capillary_curvature_relative_error", None) is None
-
-    # A caller may still request kappa as an output-only diagnostic.  Its
-    # narrow band remains mesh scaled, but it never becomes a SurfaceStress
-    # Newton-freshness or force-accuracy gate.
-    diagnostic = droplet_args(projected_field="kappa_projected")
-    runner.apply_high_order_capillary_droplet_equilibrium_smoke_defaults(diagnostic)
-    assert diagnostic.curvature_projection_narrow_band_width == 1.0 / 32.0
-    assert diagnostic.require_curvature_projection_diagnostics is True
-    assert diagnostic.require_curvature_projection_newton_freshness is False
-    assert getattr(diagnostic, "max_capillary_curvature_relative_error", None) is None
-
-    overridden = droplet_args(
-        projected_field="kappa_projected", band_width=0.2)
-    runner.apply_high_order_capillary_droplet_equilibrium_smoke_defaults(overridden)
-    assert overridden.curvature_projection_narrow_band_width == 0.2
+    # SurfaceStress reads no curvature field, and decision D48 retired the
+    # level-set curvature projection: the defaults set no projection state.
+    assert not [
+        name for name in vars(args)
+        if "curvature_projection" in name or name in (
+            "projected_curvature_field",
+            "max_capillary_curvature_relative_error",
+        )
+    ]
 
     with tempfile.TemporaryDirectory() as temp_dir:
         case_dir = Path(temp_dir) / "droplet2d"
         runner.write_capillary_droplet2d_case(
             case_dir,
-            steps=diagnostic.steps,
+            steps=args.steps,
             pressure_jump=(
-                diagnostic.surface_tension / runner.CAPILLARY_DROPLET_RADIUS),
-            nx=diagnostic.synthetic_nx,
-            ny=diagnostic.synthetic_ny,
+                args.surface_tension / runner.CAPILLARY_DROPLET_RADIUS),
+            nx=args.synthetic_nx,
+            ny=args.synthetic_ny,
         )
         runner.configure_solver(
             case_dir / "solver.xml",
-            diagnostic.steps,
-            surface_tension=diagnostic.surface_tension,
-            projected_curvature_field=diagnostic.projected_curvature_field,
-            curvature_projection_narrow_band_width=(
-                diagnostic.curvature_projection_narrow_band_width
-            ),
+            args.steps,
+            surface_tension=args.surface_tension,
         )
         root = runner.ET.parse(case_dir / "solver.xml").getroot()
         level_set = runner.level_set_equation(root)
         free_surface = runner.free_surface_bc(root)
-        assert level_set.findtext(
-            "Curvature_projection_narrow_band_width"
-        ) == "0.03125"
+        assert not [
+            child.tag for child in level_set
+            if child.tag in ("Enable_curvature_projection",
+                             "Projected_curvature_field") or
+            child.tag.startswith("Curvature_projection_")
+        ]
         assert free_surface.findtext("Surface_tension_form") == "SurfaceStress"
         assert free_surface.find("Curvature_field") is None
 
@@ -1918,10 +1898,6 @@ def test_static_capillary_controls_are_written_and_area_gradient_traction_is_ret
             solver,
             steps=1,
             surface_tension=0.5,
-            projected_curvature_field="kappa_area_gradient",
-            curvature_projection_recovery_mode="kinematic_area_gradient",
-            curvature_projection_kinematic_area_gradient_filter_coefficient=0.0,
-            curvature_projection_smoothing_iterations=0,
             cut_cell_pressure_stabilization_policy="incremental",
             static_capillary_finite_difference_relative_step=2.0e-5,
             static_capillary_limited_memory_history_size=6,
@@ -1936,13 +1912,6 @@ def test_static_capillary_controls_are_written_and_area_gradient_traction_is_ret
         assert free_surface.find("Curvature_field") is None
         assert free_surface.findtext(
             "Cut_cell_pressure_stabilization_policy") == "Incremental"
-        assert level_set.findtext(
-            "Curvature_projection_recovery_mode") == "kinematic_area_gradient"
-        assert level_set.findtext(
-            "Curvature_projection_kinematic_area_gradient_filter_coefficient"
-        ) == "0"
-        assert level_set.findtext(
-            "Curvature_projection_smoothing_iterations") == "0"
         assert level_set.findtext(
             "Static_capillary_finite_difference_relative_step") == "2e-05"
         assert level_set.findtext(
@@ -1959,9 +1928,6 @@ def test_static_capillary_controls_are_written_and_area_gradient_traction_is_ret
                 steps=1,
                 surface_tension=0.5,
                 capillary_force_form="kinematic_area_gradient_traction",
-                projected_curvature_field="kappa_area_gradient",
-                curvature_projection_recovery_mode="kinematic_area_gradient",
-                curvature_projection_kinematic_area_gradient_filter_coefficient=0.0,
             )
 
 
@@ -2130,11 +2096,9 @@ def test_kinematic_area_gradient_traction_is_retired_in_every_entry_point(capsys
                 steps=1,
                 surface_tension=0.5,
                 capillary_force_form="kinematic_area_gradient_traction",
-                projected_curvature_field="kappa_area_gradient",
             )
     args = runner.argparse.Namespace(
         capillary_force_form="kinematic_area_gradient_traction",
-        projected_curvature_field="kappa_area_gradient",
     )
     with pytest.raises(ValueError, match="decision D48.*SurfaceStress"):
         runner.case_args_for_run("droplet2d", args)
@@ -2142,7 +2106,6 @@ def test_kinematic_area_gradient_traction_is_retired_in_every_entry_point(capsys
         runner.main([
             "--case", "droplet2d",
             "--capillary-force-form", "kinematic_area_gradient_traction",
-            "--projected-curvature-field", "kappa_area_gradient",
         ])
     error = capsys.readouterr().err
     assert "decision D48" in error and "SurfaceStress" in error
@@ -2192,54 +2155,6 @@ def test_reinitialization_controls_are_retired():
         )
         assert "enable_level_set_reinitialization" not in controls
         assert "reinitialization_cadence_steps" not in controls
-
-
-def test_projected_curvature_recovery_diagnostics_are_aggregated_and_gated():
-    runner = _load_runner()
-    diagnostics = runner.parse_solver_diagnostics(
-        "[svMultiPhysics::Application] Level-set curvature projected "
-        "field='phi' curvature_field='kappa_projected' reason=initial "
-        "cache=miss cut_signature_cache=miss recovery_mode=generated_interface_patch "
-        "generated_interface_geometry_samples=12 "
-        "generated_interface_patch_fitted_vertices=7 "
-        "generated_interface_patch_expanded_vertices=2 fitted_vertices=7"
-    )
-    metrics = {}
-    runner.add_diagnostic_metrics(metrics, diagnostics)
-
-    assert metrics[
-        "diagnostic_curvature_projection_recovery_mode_counts"
-    ] == {"generated_interface_patch": 1}
-    assert metrics[
-        "diagnostic_curvature_projection_max_interface_geometry_samples"
-    ] == 12
-    assert metrics[
-        "diagnostic_curvature_projection_max_interface_patch_fitted_vertices"
-    ] == 7
-    assert metrics[
-        "diagnostic_curvature_projection_max_interface_patch_expanded_vertices"
-    ] == 2
-
-    class OptionalArguments:
-        def __getattr__(self, _name):
-            return None
-
-    args = OptionalArguments()
-    args.require_curvature_projection_diagnostics = True
-    args.expect_curvature_projection_recovery_mode = (
-        "generated_interface_patch"
-    )
-    args.min_diagnostic_curvature_projection_interface_geometry_samples = 12
-    args.min_diagnostic_curvature_projection_interface_patch_fitted_vertices = 7
-    assert runner.curvature_projection_errors(metrics, args) == []
-
-    args.expect_curvature_projection_recovery_mode = "level_set_quadratic"
-    args.min_diagnostic_curvature_projection_interface_geometry_samples = 13
-    args.min_diagnostic_curvature_projection_interface_patch_fitted_vertices = 8
-    errors = runner.curvature_projection_errors(metrics, args)
-    assert any("does not include level_set_quadratic" in error for error in errors)
-    assert any("geometry samples 12 is below 13" in error for error in errors)
-    assert any("fitted vertices 7 is below 8" in error for error in errors)
 
 
 def test_sessile_case_uses_monolithic_fsils_gmres_linear_budget():
@@ -2318,7 +2233,6 @@ def test_sessile_case_uses_monolithic_fsils_gmres_linear_budget():
     area_gradient_args = runner.argparse.Namespace(**vars(minimized_args))
     area_gradient_args.capillary_force_form = (
         "kinematic_area_gradient_traction")
-    area_gradient_args.projected_curvature_field = "kappa_area_gradient"
     for case_name in ("sessile2d", "droplet2d", "sphere3d"):
         with pytest.raises(ValueError, match="decision D48.*SurfaceStress"):
             runner.case_args_for_run(
@@ -2408,9 +2322,6 @@ def test_capillary_wave_uses_monolithic_fsils_gmres_linear_budget():
         high_order_3d_benchmark_profile_qualification=False,
         high_order_curved_3d_simplex_smoke=False,
         high_order_mpi_motion_smoke=False,
-        high_order_capillary_projection_smoke=False,
-        high_order_capillary_response_smoke=False,
-        high_order_capillary_balance_smoke=False,
         high_order_capillary_droplet_equilibrium_smoke=False,
         case=None,
         steps=None,

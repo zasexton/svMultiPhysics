@@ -40,11 +40,6 @@ run_gate \
   --high-order-production-qualification
 
 run_gate \
-  "2D capillary projected-curvature gate" \
-  "high_order_capillary_projection_sloshing2d_smoke_${STAMP}.json" \
-  --high-order-capillary-projection-smoke
-
-run_gate \
   "2D volume-corrected free-surface motion gate" \
   "high_order_volume_corrected_sloshing2d_${STAMP}.json" \
   --high-order-volume-corrected-motion-smoke

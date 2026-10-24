@@ -293,7 +293,6 @@ def _profile_args():
         "max_diagnostic_process_rss_growth_kb": None,
         "max_diagnostic_process_basis_cache_entries": None,
         "max_diagnostic_process_basis_cache_entry_growth": None,
-        "curvature_projection_max_zero_fallback_vertices": None,
         "max_time_loop_nonlinear_iterations_per_step": None,
         "max_time_loop_linear_iterations_per_step": None,
         "min_reference_profile_coverage": None,
@@ -653,177 +652,9 @@ def test_cut_context_policy_errors_reject_missing_qualification_evidence():
     ]
 
 
-def test_curvature_projection_errors_reject_fallback_budgets():
+def test_capillary_benchmark_errors_check_pressure_jump():
     smoke = _load_smoke_module()
     args = argparse.Namespace(
-        require_curvature_projection_diagnostics=False,
-        require_curvature_projection_newton_freshness=False,
-        min_diagnostic_curvature_projection_count=None,
-        min_diagnostic_curvature_projection_max_abs_curvature=None,
-        max_diagnostic_curvature_projection_fallback_vertices=0,
-        max_diagnostic_curvature_projection_zero_fallback_vertices=0,
-        max_diagnostic_curvature_projection_normalized_fit_residual=None,
-        min_diagnostic_curvature_projection_smoothing_iterations=None,
-        expect_curvature_projection_smoothing_mode=None,
-        min_diagnostic_curvature_projection_operator_edges=None,
-        min_diagnostic_curvature_projection_skipped_count=None,
-        min_diagnostic_curvature_projection_cache_hit_count=None,
-        max_diagnostic_curvature_projection_cache_miss_count=None,
-        min_diagnostic_curvature_projection_cut_signature_cache_hit_count=None,
-        min_diagnostic_curvature_projection_reused_vertex_adjacency_count=None,
-        min_diagnostic_curvature_projection_reused_sample_adjacency_count=None,
-        max_diagnostic_curvature_projection_vertex_adjacency_builds=None,
-        max_diagnostic_curvature_projection_sample_adjacency_builds=None,
-    )
-    metrics = {
-        "diagnostics": {},
-        "diagnostic_curvature_projection_max_fallback_vertices": 1,
-        "diagnostic_curvature_projection_max_zero_fallback_vertices": 2,
-    }
-
-    errors = smoke.curvature_projection_errors(metrics, args)
-
-    assert len(errors) == 2
-    assert any("fallback vertices" in error for error in errors)
-    assert any("zero fallback vertices" in error for error in errors)
-
-
-def test_curvature_projection_errors_reject_wrong_smoothing_mode():
-    smoke = _load_smoke_module()
-    args = argparse.Namespace(
-        require_curvature_projection_diagnostics=False,
-        require_curvature_projection_newton_freshness=False,
-        min_diagnostic_curvature_projection_count=None,
-        min_diagnostic_curvature_projection_max_abs_curvature=None,
-        max_diagnostic_curvature_projection_fallback_vertices=None,
-        max_diagnostic_curvature_projection_zero_fallback_vertices=None,
-        max_diagnostic_curvature_projection_normalized_fit_residual=None,
-        min_diagnostic_curvature_projection_smoothing_iterations=None,
-        expect_curvature_projection_smoothing_mode="mass_stiffness_operator",
-        min_diagnostic_curvature_projection_operator_edges=1,
-        min_diagnostic_curvature_projection_skipped_count=None,
-        min_diagnostic_curvature_projection_cache_hit_count=None,
-        max_diagnostic_curvature_projection_cache_miss_count=None,
-        min_diagnostic_curvature_projection_cut_signature_cache_hit_count=None,
-        min_diagnostic_curvature_projection_reused_vertex_adjacency_count=None,
-        min_diagnostic_curvature_projection_reused_sample_adjacency_count=None,
-        max_diagnostic_curvature_projection_vertex_adjacency_builds=None,
-        max_diagnostic_curvature_projection_sample_adjacency_builds=None,
-    )
-    metrics = {
-        "diagnostics": {},
-        "diagnostic_curvature_projection_smoothing_mode_counts": {
-            "local_graph": 2,
-        },
-        "diagnostic_curvature_projection_max_smoothing_operator_edges": 0,
-    }
-
-    errors = smoke.curvature_projection_errors(metrics, args)
-
-    assert len(errors) == 2
-    assert any("smoothing mode" in error for error in errors)
-    assert any("operator edges" in error for error in errors)
-
-
-def test_curvature_projection_freshness_does_not_require_a_trial_per_accepted_step():
-    smoke = _load_smoke_module()
-
-    class OptionalArgs:
-        def __getattr__(self, _name):
-            return None
-
-    args = OptionalArgs()
-    args.require_curvature_projection_diagnostics = False
-    args.require_curvature_projection_newton_freshness = True
-    metrics = {
-        "diagnostics": {},
-        "diagnostic_curvature_projection_reason_counts": {
-            "initial": 1,
-            "before_physics_solve": 2,
-            "jacobian_and_residual": 2,
-            "accepted_step": 2,
-            # Synchronized trial refreshes are conditional on the nonlinear
-            # residual contract and on backtracking actually evaluating a
-            # trial; they are not guaranteed once per accepted step.
-            "line_search_trial": 0,
-        },
-        "time_loop": {"summary": {"accepted_steps": 2}},
-    }
-
-    assert smoke.curvature_projection_errors(metrics, args) == []
-
-    metrics["diagnostic_curvature_projection_reason_counts"][
-        "before_physics_solve"] = 1
-    errors = smoke.curvature_projection_errors(metrics, args)
-    assert errors == [
-        "curvature projection reason 'before_physics_solve' count 1 is below 2"
-    ]
-
-
-def test_curvature_projection_freshness_accepts_projected_outer_fixed_points():
-    smoke = _load_smoke_module()
-
-    class OptionalArgs:
-        def __getattr__(self, _name):
-            return None
-
-    args = OptionalArgs()
-    args.require_curvature_projection_diagnostics = False
-    args.require_curvature_projection_newton_freshness = True
-    metrics = {
-        "diagnostics": {},
-        "diagnostic_curvature_projection_reason_counts": {
-            "initial": 1,
-            "before_physics_solve": 2,
-            "projected_outer_fixed_point": 5,
-            "accepted_step": 2,
-        },
-        "time_loop": {"summary": {
-            "accepted_steps": 2,
-            "outer_iterations_total": 5,
-        }},
-    }
-
-    assert smoke.curvature_projection_errors(metrics, args) == []
-
-    metrics["diagnostic_curvature_projection_reason_counts"][
-        "projected_outer_fixed_point"] = 4
-    errors = smoke.curvature_projection_errors(metrics, args)
-    assert len(errors) == 1
-    assert "neither jacobian_and_residual" in errors[0]
-    assert "projected_outer_fixed_point=4" in errors[0]
-    assert "outer_iterations_total=5" in errors[0]
-
-
-def test_curvature_projection_freshness_rejects_missing_refresh_contract():
-    smoke = _load_smoke_module()
-
-    class OptionalArgs:
-        def __getattr__(self, _name):
-            return None
-
-    args = OptionalArgs()
-    args.require_curvature_projection_diagnostics = False
-    args.require_curvature_projection_newton_freshness = True
-    metrics = {
-        "diagnostics": {},
-        "diagnostic_curvature_projection_reason_counts": {
-            "initial": 1,
-            "before_physics_solve": 1,
-            "accepted_step": 1,
-        },
-        "time_loop": {"summary": {"accepted_steps": 1}},
-    }
-
-    errors = smoke.curvature_projection_errors(metrics, args)
-    assert len(errors) == 1
-    assert "neither jacobian_and_residual" in errors[0]
-
-
-def test_capillary_benchmark_errors_check_curvature_and_pressure_jump():
-    smoke = _load_smoke_module()
-    args = argparse.Namespace(
-        max_capillary_curvature_relative_error=0.1,
         max_capillary_pressure_jump_relative_error=0.1,
     )
     metrics = {
@@ -832,29 +663,21 @@ def test_capillary_benchmark_errors_check_curvature_and_pressure_jump():
             "initial_active_pressure": 1.0,
         },
         "surface_tension": 0.5,
-        "capillary_final_pressure_jump": 1.0,
-        "diagnostic_curvature_projection_max_abs_curvature": 20.0,
-        "latest_curvature_projection": {
-            "curvature_field": "kappa_projected",
-            "narrow_band_width": 0.0625,
-            "narrow_band_vertices": 32,
-            "skipped_far_vertices": 48,
-            "max_abs_curvature": 1.0,
-        },
+        "capillary_final_pressure_jump": 1.5,
     }
 
     errors = smoke.capillary_benchmark_errors(metrics, args)
 
     assert len(errors) == 1
-    assert any("curvature relative error" in error for error in errors)
-    assert metrics["capillary_expected_curvature"] == 2.0
+    assert "pressure-jump relative error" in errors[0]
     assert metrics["capillary_expected_pressure_jump"] == 1.0
+    # The projected-curvature gate was retired with the projection (D48).
+    assert "capillary_expected_curvature" not in metrics
 
 
 def test_capillary_benchmark_errors_accept_generic_droplet_radius():
     smoke = _load_smoke_module()
     args = argparse.Namespace(
-        max_capillary_curvature_relative_error=0.01,
         max_capillary_pressure_jump_relative_error=0.01,
     )
     metrics = {
@@ -864,36 +687,18 @@ def test_capillary_benchmark_errors_accept_generic_droplet_radius():
         },
         "surface_tension": 0.5,
         "capillary_final_pressure_jump": 2.0,
-        "diagnostic_curvature_projection_max_abs_curvature": 40.0,
-        "latest_curvature_projection": {
-            "curvature_field": "kappa_projected",
-            "narrow_band_width": 0.03125,
-            "narrow_band_vertices": 64,
-            "skipped_far_vertices": 96,
-            "max_abs_curvature": 4.0,
-        },
     }
 
     errors = smoke.capillary_benchmark_errors(metrics, args)
 
     assert errors == []
     assert metrics["capillary_benchmark_radius"] == 0.25
-    assert metrics["capillary_expected_curvature"] == 4.0
     assert metrics["capillary_expected_pressure_jump"] == 2.0
-    assert metrics["capillary_projected_curvature_interface_band_max_abs"] == 4.0
-    assert metrics["capillary_projected_curvature_observed_source"] == (
-        "solver_latest_curvature_projection_diagnostic"
-    )
-    assert metrics["capillary_projected_curvature_observed_metric"] == (
-        "latest_curvature_projection.max_abs_curvature"
-    )
-    assert "capillary_projected_curvature_max_abs" not in metrics
 
 
-def test_spatial_capillary_factor_scales_curvature_and_pressure_jump():
+def test_spatial_capillary_factor_scales_pressure_jump():
     smoke = _load_smoke_module()
     args = argparse.Namespace(
-        max_capillary_curvature_relative_error=0.01,
         max_capillary_pressure_jump_relative_error=0.01,
         max_capillary_parasitic_capillary_number=0.01,
     )
@@ -907,17 +712,9 @@ def test_spatial_capillary_factor_scales_curvature_and_pressure_jump():
         "surface_tension": 0.5,
         "capillary_final_pressure_jump": 4.0,
         "spatial_capillary_final_max_liquid_speed": 0.025,
-        "latest_curvature_projection": {
-            "curvature_field": "kappa_projected",
-            "narrow_band_width": 0.03125,
-            "narrow_band_vertices": 64,
-            "skipped_far_vertices": 96,
-            "max_abs_curvature": 8.0,
-        },
     }
 
     assert smoke.capillary_benchmark_errors(metrics, args) == []
-    assert metrics["capillary_expected_curvature"] == 8.0
     assert metrics["capillary_expected_pressure_jump"] == 4.0
     assert metrics["capillary_final_parasitic_capillary_number"] == pytest.approx(
         0.005)
@@ -926,7 +723,6 @@ def test_spatial_capillary_factor_scales_curvature_and_pressure_jump():
 def test_capillary_pressure_jump_gate_requires_solved_final_pressure_samples():
     smoke = _load_smoke_module()
     args = argparse.Namespace(
-        max_capillary_curvature_relative_error=None,
         max_capillary_pressure_jump_relative_error=0.1,
     )
     metrics = {
@@ -943,63 +739,6 @@ def test_capillary_pressure_jump_gate_requires_solved_final_pressure_samples():
     assert errors == [
         "capillary pressure-jump gate requires final liquid/gas pressure samples"
     ]
-
-
-def test_capillary_benchmark_errors_prefer_near_interface_curvature_mean():
-    smoke = _load_smoke_module()
-    args = argparse.Namespace(
-        max_capillary_curvature_relative_error=0.1,
-        max_capillary_pressure_jump_relative_error=None,
-    )
-    metrics = {
-        "benchmark": {
-            "capillary_arc_radius": 0.8,
-        },
-        "diagnostic_curvature_projection_max_abs_curvature": 2.45,
-        "projected_curvature_near_interface_mean_abs": 1.30,
-        "projected_curvature_near_interface_band_width": 0.05,
-        "projected_curvature_near_interface_point_count": 12,
-        "projected_curvature_field_name": "kappa_projected",
-    }
-
-    errors = smoke.capillary_benchmark_errors(metrics, args)
-
-    assert errors == []
-    assert metrics["capillary_projected_curvature_observed_metric"] == (
-        "projected_curvature_near_interface_mean_abs"
-    )
-    assert metrics["capillary_projected_curvature_observed_source"] == (
-        "vtk_point_data_projected_curvature_field"
-    )
-    assert metrics["capillary_projected_curvature_interface_band_mean_abs"] == 1.30
-    assert metrics["capillary_observed_curvature"] == 1.30
-
-
-def test_capillary_curvature_gate_rejects_global_or_zero_band_maximum():
-    smoke = _load_smoke_module()
-    args = argparse.Namespace(
-        max_capillary_curvature_relative_error=0.1,
-        max_capillary_pressure_jump_relative_error=None,
-    )
-    metrics = {
-        "benchmark": {"capillary_radius": 0.25},
-        "diagnostic_curvature_projection_max_abs_curvature": 4.0,
-        "latest_curvature_projection": {
-            "curvature_field": "kappa_projected",
-            "narrow_band_width": 0.0,
-            "narrow_band_vertices": 81,
-            "skipped_far_vertices": 0,
-            "max_abs_curvature": 4.0,
-        },
-    }
-
-    errors = smoke.capillary_benchmark_errors(metrics, args)
-
-    assert errors == [
-        "capillary curvature gate requires a projected-curvature "
-        "interface-band statistic"
-    ]
-    assert "capillary_observed_curvature" not in metrics
 
 
 def test_write_capillary_droplet2d_case_records_equilibrium_benchmark():
@@ -2599,30 +2338,15 @@ def test_capillary_stability_errors_reject_unstable_time_loop_and_speed():
     assert metrics["capillary_stability_speed_per_surface_tension"] == 4.0
 
 
-def test_capillary_smoke_defaults_enable_stability_gates():
-    smoke = _load_smoke_module()
-    args = argparse.Namespace(
-        high_order_capillary_response_smoke=True,
-        high_order_3d_benchmark_qualification=False,
-        high_order_3d_benchmark_profile_qualification=False,
-        high_order_curved_3d_simplex_smoke=False,
-        high_order_mpi_motion_smoke=False,
-        high_order_capillary_projection_smoke=False,
-        case=None,
-        steps=None,
-        timeout_seconds=None,
-        max_solver_elapsed_seconds_per_accepted_step=None,
-        min_max_speed=1.0e-2,
-        min_wet_mean_speed=2.5e-4,
-        min_gate_mean_ux=1.0e-4,
-        min_front_mean_ux=1.0e-4,
+def _curvature_projection_state(args):
+    """Names of the retired curvature-projection settings found in args."""
+    return sorted(
+        name for name in vars(args)
+        if "curvature_projection" in name or name in (
+            "projected_curvature_field",
+            "max_capillary_curvature_relative_error",
+        )
     )
-
-    smoke.apply_high_order_capillary_response_smoke_defaults(args)
-
-    assert args.max_capillary_rejected_steps == 0
-    assert args.max_capillary_dt_updates == 0
-    assert args.max_capillary_speed_per_surface_tension == 10.0
 
 
 def test_capillary_droplet_defaults_enable_equilibrium_gates():
@@ -2646,10 +2370,9 @@ def test_capillary_droplet_defaults_enable_equilibrium_gates():
     assert args.use_high_order_implicit_cuts is True
     assert args.required_implicit_cut_backend_qualification == "ProductionQualified"
     assert args.surface_tension == 0.5
-    assert getattr(args, "projected_curvature_field", None) is None
-    assert args.require_curvature_projection_diagnostics is False
-    assert args.require_curvature_projection_newton_freshness is False
-    assert getattr(args, "max_capillary_curvature_relative_error", None) is None
+    # SurfaceStress reads no curvature field; decision D48 retired the
+    # level-set curvature projection.
+    assert _curvature_projection_state(args) == []
     assert args.max_capillary_pressure_jump_relative_error == 0.15
     assert args.max_capillary_rejected_steps == 0
     assert args.max_capillary_dt_updates == 0
@@ -2672,9 +2395,6 @@ def test_capillary_droplet_defaults_enable_equilibrium_gates():
     assert args.max_fsils_matrix_duplicate_diag_rows == 0
     assert args.max_fsils_matrix_zero_diag == 0
     assert args.max_fsils_matrix_nonfinite_entries == 0
-    assert getattr(
-        args, "max_diagnostic_curvature_projection_sample_adjacency_builds", None
-    ) is None
     assert args.max_solver_elapsed_seconds_per_accepted_step is None
     assert getattr(args, "max_time_loop_nonlinear_iterations_per_step", None) is None
     assert getattr(args, "max_time_loop_linear_iterations_per_step", None) is None
@@ -2778,9 +2498,7 @@ def test_capillary_wave_defaults_enable_reference_profile_gates():
     assert args.enable_physical_history_instrumentation is True
     assert args.surface_tension == 50.0
     assert args.wet_extension_advection_velocity_method == "wall_compatible_normal"
-    assert getattr(args, "projected_curvature_field", None) is None
-    assert args.require_curvature_projection_diagnostics is False
-    assert args.require_curvature_projection_newton_freshness is False
+    assert _curvature_projection_state(args) == []
     assert args.max_capillary_wave_frequency_relative_error == 0.10
     assert args.max_capillary_wave_profile_relative_error == 0.25
     assert args.max_capillary_wave_mean_offset == 4.0e-3
@@ -2805,12 +2523,6 @@ def test_capillary_wave_defaults_enable_reference_profile_gates():
     assert args.max_fsils_matrix_nonfinite_entries == 0
     assert args.reference_profile_sample_radius == 0.02
     assert args.max_reference_profile_rmse == 0.01
-    assert getattr(
-        args, "max_diagnostic_curvature_projection_sample_adjacency_builds", None
-    ) is None
-    assert getattr(
-        args, "max_diagnostic_curvature_projection_cache_miss_count", None
-    ) is None
     assert args.max_solver_elapsed_seconds_per_accepted_step is None
     assert getattr(args, "max_time_loop_nonlinear_iterations_per_step", None) is None
     assert getattr(args, "max_time_loop_linear_iterations_per_step", None) is None
@@ -2921,9 +2633,7 @@ def test_capillary_wave_defaults_preserve_explicit_step_count():
     smoke.apply_high_order_capillary_wave_smoke_defaults(args)
 
     assert args.steps == 3
-    assert getattr(
-        args, "max_diagnostic_curvature_projection_cache_miss_count", None
-    ) is None
+    assert _curvature_projection_state(args) == []
 
 
 def test_capillary_convergence_rate_errors_reject_low_rate():
@@ -2932,18 +2642,18 @@ def test_capillary_convergence_rate_errors_reject_low_rate():
         min_capillary_convergence_rate=1.5,
         min_capillary_convergence_points=2,
         capillary_convergence_resolution_key="nx",
-        capillary_convergence_metric=["capillary_curvature_relative_error"],
+        capillary_convergence_metric=["capillary_pressure_jump_relative_error"],
     )
     probes = [
         {
             "passed": True,
             "nx": 8,
-            "capillary_curvature_relative_error": 0.20,
+            "capillary_pressure_jump_relative_error": 0.20,
         },
         {
             "passed": True,
             "nx": 16,
-            "capillary_curvature_relative_error": 0.12,
+            "capillary_pressure_jump_relative_error": 0.12,
         },
     ]
 
@@ -2951,7 +2661,7 @@ def test_capillary_convergence_rate_errors_reject_low_rate():
 
     assert len(errors) == 1
     assert "convergence rate" in errors[0]
-    assert "capillary_curvature_relative_error" in errors[0]
+    assert "capillary_pressure_jump_relative_error" in errors[0]
 
 
 def test_capillary_convergence_rate_errors_accept_expected_rate():
@@ -2961,26 +2671,27 @@ def test_capillary_convergence_rate_errors_accept_expected_rate():
         min_capillary_convergence_points=3,
         capillary_convergence_resolution_key="nx",
         capillary_convergence_metric=[
-            "capillary_curvature_relative_error,capillary_pressure_jump_relative_error"
+            "capillary_wave_profile_relative_error,"
+            "capillary_pressure_jump_relative_error"
         ],
     )
     probes = [
         {
             "passed": True,
             "nx": 8,
-            "capillary_curvature_relative_error": 0.16,
+            "capillary_wave_profile_relative_error": 0.16,
             "capillary_pressure_jump_relative_error": 0.08,
         },
         {
             "passed": True,
             "nx": 16,
-            "capillary_curvature_relative_error": 0.04,
+            "capillary_wave_profile_relative_error": 0.04,
             "capillary_pressure_jump_relative_error": 0.02,
         },
         {
             "passed": True,
             "nx": 32,
-            "capillary_curvature_relative_error": 0.01,
+            "capillary_wave_profile_relative_error": 0.01,
             "capillary_pressure_jump_relative_error": 0.005,
         },
     ]
@@ -2996,13 +2707,13 @@ def test_capillary_convergence_rate_errors_require_enough_samples():
         min_capillary_convergence_rate=1.0,
         min_capillary_convergence_points=2,
         capillary_convergence_resolution_key="nx",
-        capillary_convergence_metric=None,
+        capillary_convergence_metric=["capillary_pressure_jump_relative_error"],
     )
     probes = [
         {
             "passed": True,
             "nx": 8,
-            "capillary_curvature_relative_error": 0.1,
+            "capillary_pressure_jump_relative_error": 0.1,
         },
     ]
 
@@ -3010,6 +2721,57 @@ def test_capillary_convergence_rate_errors_require_enough_samples():
 
     assert len(errors) == 1
     assert "usable sample" in errors[0]
+
+
+def test_capillary_convergence_rate_errors_require_a_metric():
+    # The default metric was the projected-curvature error, retired with the
+    # curvature projection (decision D48).
+    smoke = _load_smoke_module()
+    args = argparse.Namespace(
+        min_capillary_convergence_rate=1.0,
+        min_capillary_convergence_points=2,
+        capillary_convergence_resolution_key="nx",
+        capillary_convergence_metric=None,
+    )
+    probes = [
+        {"passed": True, "nx": 8, "capillary_pressure_jump_relative_error": 0.1},
+        {"passed": True, "nx": 16, "capillary_pressure_jump_relative_error": 0.05},
+    ]
+
+    errors = smoke.capillary_convergence_rate_errors(probes, args)
+
+    assert errors == [
+        "capillary convergence requires --capillary-convergence-metric"
+    ]
+
+
+def test_curvature_projection_options_fail_closed(capsys):
+    smoke = _load_smoke_module()
+    options = smoke.RETIRED_CURVATURE_PROJECTION_OPTIONS
+    assert len(options) == len({option for option, _ in options}) == 37
+    for option, flag in options:
+        with pytest.raises(SystemExit) as raised:
+            smoke.main(["--case", "mini2d", option] + ([] if flag else ["1"]))
+        assert raised.value.code == 2
+        error = capsys.readouterr().err
+        assert f"{option}: the level-set curvature projection was retired" in error
+        assert "decision D48" in error and "SurfaceStress" in error
+
+    # Every retired option of one command is named, once.
+    with pytest.raises(SystemExit):
+        smoke.main([
+            "--case", "droplet2d",
+            "--high-order-capillary-droplet-equilibrium-smoke",
+            "--projected-curvature-field", "kappa_projected",
+            "--require-curvature-projection-diagnostics",
+            "--projected-curvature-field", "kappa",
+        ])
+    error = capsys.readouterr().err
+    assert (
+        "--projected-curvature-field, --require-curvature-projection-diagnostics:"
+        in error
+    )
+    assert error.count("--projected-curvature-field") == 1
 
 
 def test_solver_elapsed_time_errors_reject_runtime_budget_overrun():
