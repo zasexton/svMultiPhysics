@@ -8,10 +8,8 @@
 
 #include "Physics/Options/NavierStokesOptionRules.h"
 
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
 #include "Physics/Options/NavierStokesOptionSchema.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
-#include "Physics/Formulations/NavierStokes/NavierStokesInitialConditions.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesPostProcessing.h"
 #include "FE/Analysis/GeneratedBoundaryAggregateTraceCertificate.h"
 #include "FE/Assembly/Assembler.h"

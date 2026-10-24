@@ -12,10 +12,8 @@
 #include "Physics/Options/NavierStokesRegistration.h"
 
 #include "FE/Systems/FESystem.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
 #include "Physics/Options/NavierStokesOptionRules.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
-#include "Physics/Formulations/NavierStokes/NavierStokesInitialConditions.h"
 #include "FE/Assembly/Assembler.h"
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Assembly/GlobalSystemView.h"

@@ -15,7 +15,6 @@
  */
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesPostProcessing.h"
 #include "Physics/Options/NavierStokesOptionRules.h"
 #include "Physics/Options/NavierStokesOptionSchema.h"

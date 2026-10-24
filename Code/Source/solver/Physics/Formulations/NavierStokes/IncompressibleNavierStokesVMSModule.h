@@ -52,8 +52,10 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -62,6 +64,18 @@
 #include <vector>
 
 namespace svmp {
+namespace FE {
+namespace systems {
+class FESystem;
+} // namespace systems
+namespace level_set {
+class LevelSetGeometry;
+} // namespace level_set
+namespace interfaces {
+struct GeneratedInterfaceBoundaryIntersectionMarkerKey;
+} // namespace interfaces
+} // namespace FE
+
 namespace Physics {
 namespace formulations {
 namespace navier_stokes {
@@ -1235,6 +1249,99 @@ private:
     mutable std::optional<EffectiveConfigurationArtifact>
         effective_configuration_artifact_{};
 };
+
+// ---------------------------------------------------------------------------
+// Free-surface geometry of the options (formerly FreeSurface/FreeSurfaceGeometry),
+// defined in IncompressibleNavierStokesVMSModule.cpp, and the active-domain
+// pressure-constraint check of the initial state
+// ---------------------------------------------------------------------------
+
+struct ActivePressureDomain {
+    const FreeSurfaceBoundary* boundary{nullptr};
+    FreeSurfaceActiveDomain active_domain{FreeSurfaceActiveDomain::None};
+};
+
+struct ActiveVolumeDomain {
+    int interface_marker{-1};
+    FE::forms::CutVolumeSide side{FE::forms::CutVolumeSide::Negative};
+    FreeSurfaceActiveDomainMethod method{FreeSurfaceActiveDomainMethod::CutVolume};
+};
+
+[[nodiscard]] std::optional<ActivePressureDomain>
+activePressureDomainFor(
+    const std::vector<FreeSurfaceBoundary>& free_surfaces);
+
+[[nodiscard]] FE::forms::FormExpr generatedInterfaceOutwardNormal(
+    const FreeSurfaceBoundary& bc);
+
+[[nodiscard]] FE::FieldId resolveLevelSetFieldId(
+    const FreeSurfaceBoundary& bc,
+    const FE::systems::FESystem& system);
+
+[[nodiscard]] FE::level_set::LevelSetGeometry freeSurfaceLevelSetGeometry(
+    const FreeSurfaceBoundary& bc,
+    const FE::systems::FESystem& system);
+
+[[nodiscard]] FE::interfaces::GeneratedInterfaceBoundaryIntersectionMarkerKey
+generatedUnfittedContactLineMarkerKey(
+    const IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine&
+        contact_line,
+    const FreeSurfaceBoundary& bc,
+    const FE::systems::FESystem& system);
+
+[[nodiscard]] int generatedUnfittedContactLineMarker(
+    const IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine&
+        contact_line,
+    const FreeSurfaceBoundary& bc,
+    const FE::systems::FESystem& system);
+
+[[nodiscard]] int generatedActiveBoundaryMarker(
+    const FreeSurfaceBoundary& bc,
+    int physical_boundary_marker,
+    const FE::systems::FESystem& system);
+
+[[nodiscard]] std::optional<int> sharpActiveBoundaryMarkerFor(
+    int physical_boundary_marker,
+    std::span<const FreeSurfaceBoundary> boundaries,
+    const FE::systems::FESystem& system);
+
+[[nodiscard]] FreeSurfaceBoundary withResolvedInterfaceMarker(
+    FreeSurfaceBoundary bc,
+    const FE::systems::FESystem& system);
+
+[[nodiscard]] std::string freeSurfaceCurvatureTangentPolicyName(
+    const FreeSurfaceBoundary& bc);
+
+[[nodiscard]] std::optional<ActiveVolumeDomain> activeVolumeDomainFor(
+    const std::vector<FreeSurfaceBoundary>& free_surfaces);
+
+[[nodiscard]] FE::forms::FormExpr integrateOnActiveVolume(
+    const FE::forms::FormExpr& integrand,
+    const std::optional<ActiveVolumeDomain>& active_domain);
+
+[[nodiscard]] FE::forms::FormExpr freeSurfaceSemiImplicitReferenceVelocity(
+    const FE::systems::FESystem& system);
+
+/// A free-surface value as a form: a constant, or the coefficient named
+/// freeSurfaceValueName(@p name, @p bc).
+[[nodiscard]] FE::forms::FormExpr freeSurfaceScalar(
+    const FE::forms::bc::ScalarValue& value,
+    std::string_view name,
+    const FreeSurfaceBoundary& bc);
+
+/// The generated marker of the wetted part of a physical boundary
+/// (sharpActiveBoundaryMarkerFor), registered with @p system when it exists.
+/// The resolver refers to @p system and @p free_surfaces, which must outlive it.
+[[nodiscard]] std::function<std::optional<int>(int)> wettedBoundaryResolver(
+    FE::systems::FESystem& system,
+    const std::vector<FreeSurfaceBoundary>& free_surfaces);
+
+/// The node pressure constraints of an active-domain free surface lie on its
+/// wet side (the initial state; Physics/Options validates with it).
+void validateActiveDomainPressureConstraints(
+    const FE::systems::FESystem& system,
+    const IncompressibleNavierStokesVMSOptions& options,
+    const std::vector<FreeSurfaceBoundary>& free_surfaces);
 
 } // namespace navier_stokes
 } // namespace formulations

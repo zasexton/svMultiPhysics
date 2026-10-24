@@ -20,7 +20,6 @@
  */
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
 
 #include "FE/Core/FEException.h"
 #include "FE/Core/LogRecord.h"
