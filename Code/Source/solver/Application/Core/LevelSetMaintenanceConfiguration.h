@@ -4,7 +4,7 @@
 #include "Application/Core/ResolvedMovingDomainConfiguration.h"
 #include "FE/LevelSet/LevelSetOptions.h"
 #include "FE/LevelSet/Maintenance/LevelSetMaintenanceConfiguration.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/StaticCapillaryEquilibrium.h"
+#include "FE/LevelSet/LevelSetVolumeConstrainedMinimizer.h"
 
 #include <memory>
 #include <optional>
@@ -23,7 +23,7 @@ struct ResolvedLevelSetMaintenanceCompatibilityConfiguration
     : svmp::FE::level_set::LevelSetMaintenanceConfiguration {
   ResolvedLevelSetEquationHandle installation{};
   bool static_capillary_equilibrium_enabled{false};
-  svmp::Physics::formulations::navier_stokes::static_capillary::LevelSetStaticCapillaryEquilibriumOptions
+  svmp::FE::level_set::LevelSetVolumeConstrainedMinimizerOptions
       static_capillary_equilibrium{};
   std::vector<LevelSetInputObservation> input_observations{};
 };

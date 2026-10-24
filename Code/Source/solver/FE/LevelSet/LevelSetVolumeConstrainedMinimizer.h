@@ -5,7 +5,7 @@
  * @brief Transactional fixed-volume minimization for a discrete static cap.
  */
 
-#include "FE/Core/Types.h"
+#include "Core/Types.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -15,16 +15,14 @@
 #include <string>
 #include <vector>
 
-namespace svmp::Physics::formulations::navier_stokes::static_capillary {
-
-using svmp::FE::Real;
+namespace svmp::FE::level_set {
 
 /**
  * Options for piecewise-smooth minimization of the snapshot-owned surface,
  * Young-wall, and gravitational potential energy at a prescribed liquid
  * volume.
  */
-struct LevelSetStaticCapillaryEquilibriumOptions {
+struct LevelSetVolumeConstrainedMinimizerOptions {
     Real target_liquid_volume{0.0};
     Real volume_tolerance{1.0e-10};
     Real projected_gradient_tolerance{1.0e-8};
@@ -70,7 +68,7 @@ struct LevelSetStaticCapillaryEquilibriumOptions {
  * all fields from the supplied coefficients, return identical decision data
  * on every participating rank, and leave published solver state unchanged.
  */
-struct LevelSetStaticCapillaryEquilibriumEvaluation {
+struct LevelSetVolumeConstrainedEvaluation {
     bool success{false};
     std::uint64_t snapshot_revision_key{0u};
     // Candidate-stable combinatorial key. It must exclude source-value and
@@ -114,25 +112,25 @@ struct LevelSetStaticCapillaryEquilibriumEvaluation {
     std::string diagnostic{};
 };
 
-enum class LevelSetStaticCapillaryEvaluationPurpose : std::uint8_t {
+enum class LevelSetVolumeConstrainedEvaluationPurpose : std::uint8_t {
     FunctionalTrial,
     AcceptanceCertificate,
 };
 
-using LevelSetStaticCapillaryEquilibriumEvaluator =
-    std::function<LevelSetStaticCapillaryEquilibriumEvaluation(
+using LevelSetVolumeConstrainedEvaluator =
+    std::function<LevelSetVolumeConstrainedEvaluation(
         std::span<const Real>,
-        LevelSetStaticCapillaryEvaluationPurpose)>;
+        LevelSetVolumeConstrainedEvaluationPurpose)>;
 
 inline constexpr std::size_t
-    kLevelSetStaticCapillaryLineSearchTraceCapacity{64u};
+    kLevelSetVolumeConstrainedLineSearchTraceCapacity{64u};
 
-enum class LevelSetStaticCapillaryLineSearchPhase : std::uint8_t {
+enum class LevelSetVolumeConstrainedLineSearchPhase : std::uint8_t {
     Trial,
     DeferredReproduction,
 };
 
-enum class LevelSetStaticCapillaryLineSearchDisposition : std::uint8_t {
+enum class LevelSetVolumeConstrainedLineSearchDisposition : std::uint8_t {
     UnavailableOrForbidden,
     TopologyRejected,
     ConstraintRejected,
@@ -147,17 +145,17 @@ enum class LevelSetStaticCapillaryLineSearchDisposition : std::uint8_t {
 /**
  * Scalar evidence for one trial in the latest line-search attempt.
  *
- * At most kLevelSetStaticCapillaryLineSearchTraceCapacity records are
+ * At most kLevelSetVolumeConstrainedLineSearchTraceCapacity records are
  * retained. Uncomputed scalar measurements remain NaN and are distinguished
  * from computed values by evaluation_available.
  */
-struct LevelSetStaticCapillaryLineSearchRecord {
+struct LevelSetVolumeConstrainedLineSearchRecord {
     std::size_t accepted_iteration_index{0u};
     std::size_t line_search_trial_index{0u};
-    LevelSetStaticCapillaryLineSearchPhase phase{
-        LevelSetStaticCapillaryLineSearchPhase::Trial};
-    LevelSetStaticCapillaryLineSearchDisposition disposition{
-        LevelSetStaticCapillaryLineSearchDisposition::
+    LevelSetVolumeConstrainedLineSearchPhase phase{
+        LevelSetVolumeConstrainedLineSearchPhase::Trial};
+    LevelSetVolumeConstrainedLineSearchDisposition disposition{
+        LevelSetVolumeConstrainedLineSearchDisposition::
             UnavailableOrForbidden};
     bool evaluation_available{false};
     bool used_limited_memory_direction{false};
@@ -176,18 +174,18 @@ struct LevelSetStaticCapillaryLineSearchRecord {
 };
 
 inline constexpr std::size_t
-    kLevelSetStaticCapillaryFailureStateCoefficientCapacity{65536u};
+    kLevelSetVolumeConstrainedFailureStateCoefficientCapacity{65536u};
 
-enum class LevelSetStaticCapillaryFailureStateStatus : std::uint8_t {
+enum class LevelSetVolumeConstrainedFailureStateStatus : std::uint8_t {
     NotApplicable,
     Available,
     CapacityExceeded,
     RecordingFailed,
 };
 
-struct LevelSetStaticCapillaryFailureState {
-    LevelSetStaticCapillaryFailureStateStatus status{
-        LevelSetStaticCapillaryFailureStateStatus::NotApplicable};
+struct LevelSetVolumeConstrainedFailureState {
+    LevelSetVolumeConstrainedFailureStateStatus status{
+        LevelSetVolumeConstrainedFailureStateStatus::NotApplicable};
     std::size_t coefficient_count{0u};
     std::size_t active_coefficient_count{0u};
     std::size_t accepted_iteration_index{0u};
@@ -206,7 +204,7 @@ struct LevelSetStaticCapillaryFailureState {
     std::vector<Real> direction{};
 };
 
-struct LevelSetStaticCapillaryEquilibriumResult {
+struct LevelSetVolumeConstrainedMinimizerResult {
     bool success{false};
     bool converged{false};
     bool accepted_coefficients_assigned{false};
@@ -231,9 +229,9 @@ struct LevelSetStaticCapillaryEquilibriumResult {
     std::size_t projected_gradient_fallbacks{0u};
     std::size_t line_search_trace_total_attempt_count{0u};
     std::size_t line_search_trace_omitted_count{0u};
-    std::vector<LevelSetStaticCapillaryLineSearchRecord>
+    std::vector<LevelSetVolumeConstrainedLineSearchRecord>
         line_search_trace{};
-    LevelSetStaticCapillaryFailureState line_search_failure_state{};
+    LevelSetVolumeConstrainedFailureState line_search_failure_state{};
 
     std::uint64_t initial_snapshot_revision_key{0u};
     std::uint64_t final_snapshot_revision_key{0u};
@@ -299,12 +297,12 @@ struct LevelSetStaticCapillaryEquilibriumResult {
  * failure, disallowed topology change, line-search failure, or
  * nonconvergence.
  */
-[[nodiscard]] LevelSetStaticCapillaryEquilibriumResult
-minimizeLevelSetStaticCapillaryEquilibrium(
-    const LevelSetStaticCapillaryEquilibriumOptions& options,
+[[nodiscard]] LevelSetVolumeConstrainedMinimizerResult
+minimizeLevelSetVolumeConstrained(
+    const LevelSetVolumeConstrainedMinimizerOptions& options,
     std::span<const Real> input_coefficients,
     std::span<const std::size_t> active_coefficient_indices,
-    const LevelSetStaticCapillaryEquilibriumEvaluator& evaluator,
+    const LevelSetVolumeConstrainedEvaluator& evaluator,
     std::vector<Real>& accepted_coefficients);
 
-} // namespace svmp::Physics::formulations::navier_stokes::static_capillary
+} // namespace svmp::FE::level_set

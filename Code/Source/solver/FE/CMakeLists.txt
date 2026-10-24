@@ -976,6 +976,7 @@ set(FE_LEVELSET_HEADERS
     LevelSet/LevelSetEnergyBalance.h
     LevelSet/LevelSetImplicitCutQuadratureBackend.h
     LevelSet/LevelSetVolume.h
+    LevelSet/LevelSetVolumeConstrainedMinimizer.h
     LevelSet/LevelSetKinematicReconciliation.h
     LevelSet/LevelSetPhaseGeometryReconciliation.h
     LevelSet/LevelSetSignDefinitePatchBounds.h
@@ -1008,6 +1009,7 @@ set(FE_LEVELSET_SOURCES
     LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.cpp
     LevelSet/LevelSetEnergyBalance.cpp
     LevelSet/LevelSetVolume.cpp
+    LevelSet/LevelSetVolumeConstrainedMinimizer.cpp
     LevelSet/LevelSetKinematicReconciliation.cpp
     LevelSet/LevelSetPhaseGeometryReconciliation.cpp
     LevelSet/LevelSetSignDefinitePatchBounds.cpp
@@ -2630,6 +2632,7 @@ if(FE_BUILD_TESTS)
             Tests/Unit/LevelSet/test_LevelSetRestart.cpp
             Tests/Unit/LevelSet/test_LevelSetTransport.cpp
             Tests/Unit/LevelSet/test_LevelSetVolume.cpp
+            Tests/Unit/LevelSet/test_LevelSetVolumeConstrainedMinimizer.cpp
             Tests/Unit/LevelSet/test_main.cpp
         )
         if(FE_WITH_MESH)

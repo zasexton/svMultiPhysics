@@ -20,6 +20,7 @@
 #include "LevelSet/LevelSetRestart.h"
 #include "LevelSet/LevelSetTransport.h"
 #include "LevelSet/LevelSetVolume.h"
+#include "LevelSet/LevelSetVolumeConstrainedMinimizer.h"
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #include "LevelSet/Extension/LevelSetPdeVelocityExtension.h"

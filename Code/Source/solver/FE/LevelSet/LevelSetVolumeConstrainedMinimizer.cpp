@@ -1,4 +1,4 @@
-#include "Physics/Formulations/NavierStokes/FreeSurface/StaticCapillaryEquilibrium.h"
+#include "LevelSet/LevelSetVolumeConstrainedMinimizer.h"
 
 #include <algorithm>
 #include <array>
@@ -9,7 +9,7 @@
 #include <stdexcept>
 #include <utility>
 
-namespace svmp::Physics::formulations::navier_stokes::static_capillary {
+namespace svmp::FE::level_set {
 namespace {
 
 [[nodiscard]] bool finiteNonnegative(Real value) noexcept
@@ -23,10 +23,10 @@ namespace {
 }
 
 void validateOptions(
-    const LevelSetStaticCapillaryEquilibriumOptions& options,
+    const LevelSetVolumeConstrainedMinimizerOptions& options,
     std::span<const Real> input_coefficients,
     std::span<const std::size_t> active_coefficient_indices,
-    const LevelSetStaticCapillaryEquilibriumEvaluator& evaluator)
+    const LevelSetVolumeConstrainedEvaluator& evaluator)
 {
     if (!evaluator) {
         throw std::invalid_argument(
@@ -129,7 +129,7 @@ void projectOrthogonalTo(
 }
 
 [[nodiscard]] Real physicalPotentialEnergy(
-    const LevelSetStaticCapillaryEquilibriumEvaluation& evaluation) noexcept
+    const LevelSetVolumeConstrainedEvaluation& evaluation) noexcept
 {
     return evaluation.surface_wall_energy +
            evaluation.gravitational_potential_energy;
@@ -137,12 +137,12 @@ void projectOrthogonalTo(
 
 } // namespace
 
-LevelSetStaticCapillaryEquilibriumResult
-minimizeLevelSetStaticCapillaryEquilibrium(
-    const LevelSetStaticCapillaryEquilibriumOptions& options,
+LevelSetVolumeConstrainedMinimizerResult
+minimizeLevelSetVolumeConstrained(
+    const LevelSetVolumeConstrainedMinimizerOptions& options,
     std::span<const Real> input_coefficients,
     std::span<const std::size_t> active_coefficient_indices,
-    const LevelSetStaticCapillaryEquilibriumEvaluator& evaluator,
+    const LevelSetVolumeConstrainedEvaluator& evaluator,
     std::vector<Real>& accepted_coefficients)
 {
     validateOptions(
@@ -151,19 +151,19 @@ minimizeLevelSetStaticCapillaryEquilibrium(
         active_coefficient_indices,
         evaluator);
 
-    LevelSetStaticCapillaryEquilibriumResult result;
+    LevelSetVolumeConstrainedMinimizerResult result;
     result.line_search_trace.reserve(
-        kLevelSetStaticCapillaryLineSearchTraceCapacity);
+        kLevelSetVolumeConstrainedLineSearchTraceCapacity);
     const auto clearLineSearchTrace = [&result]() {
         result.line_search_trace.clear();
         result.line_search_trace_total_attempt_count = 0u;
         result.line_search_trace_omitted_count = 0u;
     };
     const auto appendLineSearchRecord =
-        [&result](LevelSetStaticCapillaryLineSearchRecord record) {
+        [&result](LevelSetVolumeConstrainedLineSearchRecord record) {
             ++result.line_search_trace_total_attempt_count;
             if (result.line_search_trace.size() ==
-                kLevelSetStaticCapillaryLineSearchTraceCapacity) {
+                kLevelSetVolumeConstrainedLineSearchTraceCapacity) {
                 result.line_search_trace.erase(
                     result.line_search_trace.begin());
                 ++result.line_search_trace_omitted_count;
@@ -181,11 +181,11 @@ minimizeLevelSetStaticCapillaryEquilibrium(
     std::string last_evaluation_diagnostic;
     const auto evaluate =
         [&](std::span<const Real> candidate,
-            LevelSetStaticCapillaryEvaluationPurpose purpose,
-            LevelSetStaticCapillaryEquilibriumEvaluation& evaluation) {
+            LevelSetVolumeConstrainedEvaluationPurpose purpose,
+            LevelSetVolumeConstrainedEvaluation& evaluation) {
             ++result.functional_evaluations;
             if (purpose ==
-                LevelSetStaticCapillaryEvaluationPurpose::
+                LevelSetVolumeConstrainedEvaluationPurpose::
                     AcceptanceCertificate) {
                 ++result.acceptance_certificate_evaluations;
             }
@@ -267,10 +267,10 @@ minimizeLevelSetStaticCapillaryEquilibrium(
             return true;
         };
 
-    LevelSetStaticCapillaryEquilibriumEvaluation current;
+    LevelSetVolumeConstrainedEvaluation current;
     if (!evaluate(
             coefficients,
-            LevelSetStaticCapillaryEvaluationPurpose::FunctionalTrial,
+            LevelSetVolumeConstrainedEvaluationPurpose::FunctionalTrial,
             current)) {
         result.diagnostic =
             forbidden_projection_seen
@@ -321,7 +321,7 @@ minimizeLevelSetStaticCapillaryEquilibrium(
     std::string pending_acceptance_gate_diagnostic;
 
     const auto exactProjectedGradientNorm =
-        [&](const LevelSetStaticCapillaryEquilibriumEvaluation& evaluation,
+        [&](const LevelSetVolumeConstrainedEvaluation& evaluation,
             Real& projected_norm) {
             if (!evaluation.functional_derivatives_available) {
                 return false;
@@ -356,7 +356,7 @@ minimizeLevelSetStaticCapillaryEquilibrium(
         };
 
     const auto updateFinalEvaluation =
-        [&](const LevelSetStaticCapillaryEquilibriumEvaluation& evaluation) {
+        [&](const LevelSetVolumeConstrainedEvaluation& evaluation) {
             result.final_snapshot_revision_key =
                 evaluation.snapshot_revision_key;
             result.final_surface_wall_energy =
@@ -427,7 +427,7 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                      ++attempt) {
                     constexpr std::array<Real, 4> offsets{
                         {Real{-2.0}, Real{-1.0}, Real{1.0}, Real{2.0}}};
-                    std::array<LevelSetStaticCapillaryEquilibriumEvaluation,
+                    std::array<LevelSetVolumeConstrainedEvaluation,
                                offsets.size()>
                         states;
                     std::array<bool, offsets.size()> available{};
@@ -438,7 +438,7 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                         perturbed[index] += offsets[sample] * difference_step;
                         available[sample] =
                             evaluate(perturbed,
-                                     LevelSetStaticCapillaryEvaluationPurpose::
+                                     LevelSetVolumeConstrainedEvaluationPurpose::
                                          FunctionalTrial,
                                      states[sample]);
                         diagnostics[sample] = last_evaluation_diagnostic;
@@ -688,11 +688,11 @@ minimizeLevelSetStaticCapillaryEquilibrium(
             effective_projected_gradient_tolerance;
         if (volume_converged &&
             parameter_gradient_converged) {
-            LevelSetStaticCapillaryEquilibriumEvaluation
+            LevelSetVolumeConstrainedEvaluation
                 certificate;
             if (!evaluate(
                     coefficients,
-                    LevelSetStaticCapillaryEvaluationPurpose::
+                    LevelSetVolumeConstrainedEvaluationPurpose::
                         AcceptanceCertificate,
                     certificate)) {
                 result.diagnostic =
@@ -1038,12 +1038,12 @@ minimizeLevelSetStaticCapillaryEquilibrium(
             Real alpha{0.0};
             std::size_t line_search_trial_index{0u};
             std::vector<Real> coefficients{};
-            LevelSetStaticCapillaryEquilibriumEvaluation evaluation{};
+            LevelSetVolumeConstrainedEvaluation evaluation{};
         };
         bool step_accepted = false;
         bool accepted_topology_transition = false;
         std::vector<Real> accepted_trial;
-        LevelSetStaticCapillaryEquilibriumEvaluation accepted_state;
+        LevelSetVolumeConstrainedEvaluation accepted_state;
         std::optional<TopologyTransitionTrial>
             deferred_topology_transition;
         for (int line_search_iteration = 0;
@@ -1057,8 +1057,8 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                 trial[active_indices[i]] +=
                     alpha * direction[i];
             }
-            LevelSetStaticCapillaryEquilibriumEvaluation trial_state;
-            LevelSetStaticCapillaryLineSearchRecord trace_record;
+            LevelSetVolumeConstrainedEvaluation trial_state;
+            LevelSetVolumeConstrainedLineSearchRecord trace_record;
             trace_record.accepted_iteration_index =
                 static_cast<std::size_t>(result.iterations);
             trace_record.line_search_trial_index =
@@ -1078,7 +1078,7 @@ minimizeLevelSetStaticCapillaryEquilibrium(
             const bool trial_available =
                 evaluate(
                     trial,
-                    LevelSetStaticCapillaryEvaluationPurpose::
+                    LevelSetVolumeConstrainedEvaluationPurpose::
                         FunctionalTrial,
                     trial_state);
             if (forbidden_projection_seen) {
@@ -1134,7 +1134,7 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                                 std::move(trial),
                                 std::move(trial_state)};
                         trace_record.disposition =
-                            LevelSetStaticCapillaryLineSearchDisposition::
+                            LevelSetVolumeConstrainedLineSearchDisposition::
                                 Deferred;
                         appendLineSearchRecord(
                             std::move(trace_record));
@@ -1155,14 +1155,14 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                             "candidate_cut_topology_changed";
                     }
                     trace_record.disposition =
-                        LevelSetStaticCapillaryLineSearchDisposition::
+                        LevelSetVolumeConstrainedLineSearchDisposition::
                             TopologyRejected;
                 } else if (constraints_changed) {
                     ++result.constraint_change_rejections;
                     last_evaluation_diagnostic =
                         "candidate_constraint_semantics_changed";
                     trace_record.disposition =
-                        LevelSetStaticCapillaryLineSearchDisposition::
+                        LevelSetVolumeConstrainedLineSearchDisposition::
                             ConstraintRejected;
                 } else {
                     Real trial_projected_gradient_norm =
@@ -1205,9 +1205,9 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                         }
                         trace_record.disposition =
                             derivative_resolution_step
-                                ? LevelSetStaticCapillaryLineSearchDisposition::
+                                ? LevelSetVolumeConstrainedLineSearchDisposition::
                                       DerivativeResolutionAccepted
-                                : LevelSetStaticCapillaryLineSearchDisposition::
+                                : LevelSetVolumeConstrainedLineSearchDisposition::
                                       ArmijoAccepted;
                         appendLineSearchRecord(
                             std::move(trace_record));
@@ -1218,7 +1218,7 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                             ? "candidate_capillary_merit_decrease_insufficient"
                             : "candidate_capillary_merit_is_nonfinite";
                     trace_record.disposition =
-                        LevelSetStaticCapillaryLineSearchDisposition::
+                        LevelSetVolumeConstrainedLineSearchDisposition::
                             SameTopologyMeritRejected;
                 }
             }
@@ -1236,9 +1236,9 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                 continue;
             }
             if (deferred_topology_transition.has_value()) {
-                LevelSetStaticCapillaryEquilibriumEvaluation
+                LevelSetVolumeConstrainedEvaluation
                     reproduced_state;
-                LevelSetStaticCapillaryLineSearchRecord
+                LevelSetVolumeConstrainedLineSearchRecord
                     reproduction_record;
                 reproduction_record.accepted_iteration_index =
                     static_cast<std::size_t>(result.iterations);
@@ -1246,10 +1246,10 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                     deferred_topology_transition
                         ->line_search_trial_index;
                 reproduction_record.phase =
-                    LevelSetStaticCapillaryLineSearchPhase::
+                    LevelSetVolumeConstrainedLineSearchPhase::
                         DeferredReproduction;
                 reproduction_record.disposition =
-                    LevelSetStaticCapillaryLineSearchDisposition::
+                    LevelSetVolumeConstrainedLineSearchDisposition::
                         ReproductionRejected;
                 reproduction_record.used_limited_memory_direction =
                     search_used_limited_memory_direction;
@@ -1267,7 +1267,7 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                     predicted_merit_decrease;
                 if (!evaluate(
                         deferred_topology_transition->coefficients,
-                        LevelSetStaticCapillaryEvaluationPurpose::
+                        LevelSetVolumeConstrainedEvaluationPurpose::
                             FunctionalTrial,
                         reproduced_state)) {
                     appendLineSearchRecord(
@@ -1320,9 +1320,9 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                     reproduced_merit <= reproduced_armijo_bound;
                 reproduction_record.disposition =
                     transition_reproduced
-                        ? LevelSetStaticCapillaryLineSearchDisposition::
+                        ? LevelSetVolumeConstrainedLineSearchDisposition::
                               ReproductionAccepted
-                        : LevelSetStaticCapillaryLineSearchDisposition::
+                        : LevelSetVolumeConstrainedLineSearchDisposition::
                               ReproductionRejected;
                 appendLineSearchRecord(
                     std::move(reproduction_record));
@@ -1362,18 +1362,18 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                 saved.current_merit = current_merit;
                 saved.merit_penalty = merit_penalty;
                 if (saved.coefficient_count >
-                        kLevelSetStaticCapillaryFailureStateCoefficientCapacity ||
+                        kLevelSetVolumeConstrainedFailureStateCoefficientCapacity ||
                     saved.active_coefficient_count >
-                        kLevelSetStaticCapillaryFailureStateCoefficientCapacity) {
+                        kLevelSetVolumeConstrainedFailureStateCoefficientCapacity) {
                     saved.status =
-                        LevelSetStaticCapillaryFailureStateStatus::
+                        LevelSetVolumeConstrainedFailureStateStatus::
                             CapacityExceeded;
                 } else if (active_indices.size() > coefficients.size() ||
                            energy_gradient.size() != active_indices.size() ||
                            volume_gradient.size() != active_indices.size() ||
                            direction.size() != active_indices.size()) {
                     saved.status =
-                        LevelSetStaticCapillaryFailureStateStatus::
+                        LevelSetVolumeConstrainedFailureStateStatus::
                             RecordingFailed;
                 } else {
                     try {
@@ -1384,12 +1384,12 @@ minimizeLevelSetStaticCapillaryEquilibrium(
                         complete.volume_gradient = volume_gradient;
                         complete.direction = direction;
                         complete.status =
-                            LevelSetStaticCapillaryFailureStateStatus::
+                            LevelSetVolumeConstrainedFailureStateStatus::
                                 Available;
                         saved = std::move(complete);
                     } catch (...) {
                         saved.status =
-                            LevelSetStaticCapillaryFailureStateStatus::
+                            LevelSetVolumeConstrainedFailureStateStatus::
                                 RecordingFailed;
                     }
                 }
@@ -1428,4 +1428,4 @@ minimizeLevelSetStaticCapillaryEquilibrium(
     }
 }
 
-} // namespace svmp::Physics::formulations::navier_stokes::static_capillary
+} // namespace svmp::FE::level_set
