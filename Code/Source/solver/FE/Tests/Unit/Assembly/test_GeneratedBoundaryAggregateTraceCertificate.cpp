@@ -38,9 +38,13 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <iomanip>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <optional>
+#include <sstream>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -188,6 +192,32 @@ void installFormBoundTracePolicy(
         {velocity},
         terms.route_contribution,
         install);
+}
+
+// One line per certificate record, for the verify job, which compares these
+// lines byte for byte between commits that must not change a certificate.
+void logTraceCertificates(
+    std::string_view scenario,
+    std::span<const systems::GeneratedBoundaryNitscheTraceCertificateRecord> records)
+{
+    for (const auto& record : records) {
+        std::ostringstream line;
+        line << "generated_boundary_trace_certificate_log: scenario=" << scenario
+             << " op=" << record.policy.op << std::hex
+             << " form_binding_digest=" << record.policy.form_binding_digest
+             << " canonical_certificate_digest=" << record.certificate.canonical_certificate_digest
+             << " aggregation_content_digest=" << record.certificate.aggregation_content_digest
+             << std::dec << std::setprecision(std::numeric_limits<Real>::max_digits10)
+             << " coefficient=" << record.policy.dynamic_viscosity
+             << " certificate_coefficient=" << record.certificate.dynamic_viscosity
+             << " patches=" << record.certificate.certified_patch_count
+             << " boundary_rules=" << record.certificate.generated_boundary_rule_count
+             << " bound=" << record.certificate.global_conservative_upper_bound
+             << " route_ratio=" << record.trace_to_penalty_ratio
+             << " grouped_ratio=" << record.grouped_symmetric_trace_to_penalty_ratio
+             << " effective_penalty=" << record.effective_penalty_multiplier;
+        std::cout << line.str() << '\n';
+    }
 }
 
 class ScopedEnvironmentVariable {
@@ -1807,6 +1837,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
         *eager.front()
              .symmetric_energy_ratio_lower_bound,
         eager.front().policy.minimum_symmetric_energy_ratio);
+    logTraceCertificates("full_active_unit_triangle", eager);
 
     const auto repeated =
         certifyGeneratedBoundaryAggregateTrace(
@@ -3478,6 +3509,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
                 system
                     .generatedBoundaryNitscheTraceCertificates();
             ASSERT_EQ(records.size(), 2u);
+            logTraceCertificates("operator_level_group", records);
             EXPECT_GT(
                 records[0]
                     .grouped_symmetric_trace_to_penalty_ratio,
