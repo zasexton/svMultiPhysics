@@ -5180,4 +5180,23 @@ certifyGeneratedBoundaryAggregateTrace(
     return result;
 }
 
+bool isCertifiedGeneratedBoundaryTraceSpace(
+    const spaces::FunctionSpace& space,
+    int dimension) noexcept
+{
+    const auto element_type = space.element_type();
+    return space.space_type() ==
+               spaces::SpaceType::Product &&
+           space.continuity() == Continuity::C0 &&
+           space.polynomial_order() == 1 &&
+           space.value_dimension() == dimension &&
+           !space.element().basis().is_vector_valued() &&
+           space.element().basis().size() ==
+               static_cast<std::size_t>(dimension + 1) &&
+           ((dimension == 2 &&
+             element_type == ElementType::Triangle3) ||
+            (dimension == 3 &&
+             element_type == ElementType::Tetra4));
+}
+
 } // namespace svmp::FE::analysis

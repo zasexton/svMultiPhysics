@@ -100,6 +100,33 @@ void certifyContactLineRules(
     bool local_followup_available,
     std::string_view phase);
 
+/// When a registered contact-line certificate checks the rules.
+enum class ContactLineCertificateRefresh : std::uint8_t {
+    /// At every cut-context update with a context; initially always.
+    EveryContext,
+    /// At every cut-context update with a context once the system is set
+    /// up; initially the same, with the current context.
+    SetUpSystemContext
+};
+
+/**
+ * @brief Keep the contact rules of @p check certified: at every cut-context
+ *        update of @p system (FESystem::addCutIntegrationContextUpdateCallback
+ *        named @p callback_name, phase @p phase), and once now, on the
+ *        current context (phase @p initial_phase).
+ *
+ * Each certification is certifyContactLineRulesCollectively, with the local
+ * follow-up available as @p refresh says.  Collective over the system's
+ * ranks at each call.
+ */
+void registerContactLineCertificate(
+    systems::FESystem& system,
+    const ContactLineGeometryCheck& check,
+    std::string callback_name,
+    std::string phase,
+    std::string_view initial_phase,
+    ContactLineCertificateRefresh refresh);
+
 } // namespace interfaces
 } // namespace FE
 } // namespace svmp

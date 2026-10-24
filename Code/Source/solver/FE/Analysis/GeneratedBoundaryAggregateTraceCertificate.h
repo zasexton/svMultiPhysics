@@ -29,6 +29,10 @@ namespace systems {
 class FESystem;
 }
 
+namespace spaces {
+class FunctionSpace;
+}
+
 namespace analysis {
 
 enum class GeneratedBoundaryRigidModeQuotientStatus : std::uint8_t {
@@ -188,6 +192,16 @@ void validateGeneratedBoundaryAggregateTraceCertificateDigest(
 certifyGeneratedBoundaryAggregateTrace(
     const systems::FESystem& system,
     const GeneratedBoundaryAggregateTraceCertificationOptions& options);
+
+/**
+ * @brief Whether @p space is a velocity trace space the generated-boundary
+ *        certificate covers: a C0 first-order Lagrange product space of
+ *        @p dimension scalar components on Triangle3 (2D) or Tetra4 (3D)
+ *        cells.
+ */
+[[nodiscard]] bool isCertifiedGeneratedBoundaryTraceSpace(
+    const spaces::FunctionSpace& space,
+    int dimension) noexcept;
 
 } // namespace analysis
 } // namespace FE

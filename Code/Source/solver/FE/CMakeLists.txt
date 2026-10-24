@@ -1136,6 +1136,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/FunctionalRecords.h
     Systems/FunctionalForms.h
     Systems/FunctionalFormEvaluator.h
+    Systems/MeshBoundaryKinematics.h
     Systems/MeshBoundaryRecordSupport.h
     Systems/MeshNormalConstraintStageMeasurements.h
     Systems/SnapshotFieldAccess.h
@@ -1188,6 +1189,7 @@ set(FE_SYSTEMS_SOURCES
     Systems/FunctionalForms.cpp
     Systems/FunctionalFormEvaluator.cpp
     Systems/FESystem.cpp
+    Systems/MeshBoundaryKinematics.cpp
     Systems/MeshBoundaryRecordSupport.cpp
     Systems/MeshNormalConstraintStageMeasurements.cpp
     Systems/TwoFluidStageRecords.cpp
@@ -3170,6 +3172,7 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/Systems/test_FunctionalRecords.cpp
 		                Tests/Unit/Systems/test_FunctionalFormEvaluator.cpp
 		                Tests/Unit/Systems/test_EnergyBalanceLedger.cpp
+		                Tests/Unit/Systems/test_MeshBoundaryKinematics.cpp
 		                Tests/Unit/Systems/test_MeshNormalConstraintStageMeasurements.cpp
 		                Tests/Unit/Systems/test_SnapshotFieldEvaluator.cpp
 		                Tests/Unit/Systems/test_FESystemMultiMesh.cpp

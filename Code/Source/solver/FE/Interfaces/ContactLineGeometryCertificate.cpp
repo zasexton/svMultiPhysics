@@ -29,6 +29,7 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace svmp {
@@ -543,6 +544,41 @@ bool certifyContactLineRulesCollectively(
         local_followup_available,
         phase,
         check.owner);
+}
+
+void registerContactLineCertificate(
+    systems::FESystem& system,
+    const ContactLineGeometryCheck& check,
+    std::string callback_name,
+    std::string phase,
+    std::string_view initial_phase,
+    ContactLineCertificateRefresh refresh)
+{
+    const bool requires_setup =
+        refresh == ContactLineCertificateRefresh::SetUpSystemContext;
+    system.addCutIntegrationContextUpdateCallback(
+        systems::CutIntegrationContextUpdateCallback{
+            .name = std::move(callback_name),
+            .callback =
+                [&system, check, phase = std::move(phase), requires_setup](
+                    const assembly::CutIntegrationContext* cut_context) {
+                    static_cast<void>(certifyContactLineRulesCollectively(
+                        system,
+                        cut_context,
+                        check,
+                        cut_context != nullptr &&
+                            (!requires_setup || system.isSetup()),
+                        phase));
+                }});
+    const auto* current_cut_context = system.cutIntegrationContext();
+    static_cast<void>(certifyContactLineRulesCollectively(
+        system,
+        current_cut_context,
+        check,
+        requires_setup
+            ? current_cut_context != nullptr && system.isSetup()
+            : true,
+        initial_phase));
 }
 
 } // namespace interfaces
