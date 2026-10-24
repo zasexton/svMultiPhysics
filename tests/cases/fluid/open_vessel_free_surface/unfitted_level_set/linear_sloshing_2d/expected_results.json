@@ -51,8 +51,8 @@
       "surface_tension": 0.0
     },
     "solid_walls": {
-      "realization": "exact_time_space_dirichlet_velocity",
-      "note": "The linear theory assumes impermeable slip walls. The current OOP XML path supports exact time/space Dirichlet data, so the wall velocity components are prescribed from the analytic potential-flow solution."
+      "realization": "free_slip_strong_zero_normal_velocity",
+      "note": "The linear theory assumes impermeable slip walls. The walls prescribe a strong zero normal velocity (Effective_direction) and leave the tangential velocity free, as in the M1 benchmark."
     }
   },
   "verification": {

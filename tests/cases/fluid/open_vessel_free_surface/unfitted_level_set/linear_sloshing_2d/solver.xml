@@ -104,18 +104,18 @@
 
   <Add_BC name="wall_left">
     <Type>Dir</Type>
-    <Time_dependence>General</Time_dependence>
-    <Temporal_and_spatial_values_file_path>bc/wall_left_velocity.dat</Temporal_and_spatial_values_file_path>
+    <Value>0.0</Value>
+    <Effective_direction>1 0</Effective_direction>
   </Add_BC>
   <Add_BC name="wall_right">
     <Type>Dir</Type>
-    <Time_dependence>General</Time_dependence>
-    <Temporal_and_spatial_values_file_path>bc/wall_right_velocity.dat</Temporal_and_spatial_values_file_path>
+    <Value>0.0</Value>
+    <Effective_direction>1 0</Effective_direction>
   </Add_BC>
   <Add_BC name="wall_bottom">
     <Type>Dir</Type>
-    <Time_dependence>General</Time_dependence>
-    <Temporal_and_spatial_values_file_path>bc/wall_bottom_velocity.dat</Temporal_and_spatial_values_file_path>
+    <Value>0.0</Value>
+    <Effective_direction>0 1</Effective_direction>
   </Add_BC>
 
   <Add_BC name="free_surface">

@@ -2,7 +2,7 @@
   "name": "linear_sloshing_2d",
   "type": "fluid_free_surface_unfitted_level_set",
   "solver": "new_oop",
-  "description": "Small-amplitude 2D standing sloshing wave with exact wall velocity data.",
+  "description": "Small-amplitude 2D standing sloshing wave with free-slip walls.",
   "mesh": {
     "nx": 16,
     "ny": 16

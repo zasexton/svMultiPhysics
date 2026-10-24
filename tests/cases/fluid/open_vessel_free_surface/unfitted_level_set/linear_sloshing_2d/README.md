@@ -1,14 +1,12 @@
 # Linear Sloshing 2D
 
-**Status: broken, fails closed (decision D55, 2026-10-23; fix later).**
+**Status: not re-validated (decision D55, 2026-10-23).**
 The committed `solver.xml` relied on the algebraic wall-compatible wet
 extension, which decisions D47 and D55 retired. It now selects the harmonic
 PDE extension (`Advection_velocity_extension_method=pde_harmonic`,
-`Advection_velocity_extension_coupling=monolithic`) and is not re-validated.
-Its background mesh is Quad4, and the PDE extension needs triangle (2D) or
-tetrahedral (3D) cells in the dry region, so a run stops at the first
-extension refresh with a message that names the Quad cell. The deck needs a
-simplicial mesh before it runs again.
+`Advection_velocity_extension_coupling=monolithic`), which extends over its
+Quad4 cells since 2026-10-24; its results have not been re-validated against
+the earlier extension.
 
 This is a small-amplitude standing-wave free-surface regression test for the
 new OOP incompressible Navier-Stokes solver with an unfitted level-set active
@@ -19,16 +17,19 @@ status, known remaining issues, and the planned acceptance criteria for the
 unfitted level-set free-surface method.
 
 The milestone M1 benchmark for this mode is
-`tests/cases/fluid/free_surface_benchmarks/linear_sloshing_2d/`. It uses
-free-slip walls instead of the prescribed wall velocity below (which drives
-the tank at the analytic frequency), a three-level refinement study, and a
-tolerance file.
+`tests/cases/fluid/free_surface_benchmarks/linear_sloshing_2d/`. It adds a
+three-level refinement study on triangles and a tolerance file.
 
 The analytic reference is the linearized inviscid potential-flow solution in a
 rectangular tank. It is exact for impermeable slip walls and zero surface
-tension, not for viscous no-slip Navier-Stokes. The solver XML uses exact
-time/space Dirichlet velocity data on the left, right, and bottom walls because
-that is the currently supported OOP fallback for the slip-wall analytic data.
+tension, not for viscous no-slip Navier-Stokes. The left, right, and bottom
+walls are free-slip: a strong zero normal velocity (`Effective_direction`) with
+a free tangential velocity, as in the M1 benchmark. Until 2026-10-24 they
+prescribed the analytic velocity as time/space Dirichlet data (the fallback
+before the solver supported slip walls). The PDE extension enforces wall
+impermeability and takes its wall masks only from strong homogeneous
+Dirichlet conditions, so that data, which cannot be proven homogeneous,
+stopped the run at its first extension refresh.
 The level-set transport equation is coupled directly to the fluid `Velocity`
 field and includes a weak kinematic residual on the generated free-surface
 interface. The interface term keeps the zero contour tied to the free-surface

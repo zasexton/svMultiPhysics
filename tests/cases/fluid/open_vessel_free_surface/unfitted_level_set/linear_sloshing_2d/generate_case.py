@@ -169,14 +169,6 @@ def line_polydata(grid: pv.UnstructuredGrid, edges: list[tuple[int, int]], paren
     return poly
 
 
-def boundary_node_ids(nx: int, ny: int) -> dict[str, list[int]]:
-    return {
-        "wall_left": [node_id(0, j, nx) for j in range(ny + 1)],
-        "wall_right": [node_id(nx, j, nx) for j in range(ny + 1)],
-        "wall_bottom": [node_id(i, 0, nx) for i in range(nx + 1)],
-    }
-
-
 def write_boundary_surfaces(grid: pv.UnstructuredGrid, nx: int, ny: int, surface_dir: Path) -> None:
     surface_dir.mkdir(parents=True, exist_ok=True)
     specs: dict[str, tuple[list[tuple[int, int]], list[int]]] = {
@@ -199,51 +191,6 @@ def write_boundary_surfaces(grid: pv.UnstructuredGrid, nx: int, ny: int, surface
     }
     for name, (edges, parent_cells) in specs.items():
         line_polydata(grid, edges, parent_cells).save(surface_dir / f"{name}.vtp", binary=False)
-
-
-def time_samples_for_period(period: float, time_step: float) -> list[float]:
-    count = max(2, int(math.ceil(period / time_step)) + 1)
-    times = [i * period / (count - 1) for i in range(count)]
-    times[0] = 0.0
-    times[-1] = period
-    return times
-
-
-def write_velocity_bc_files(args: argparse.Namespace, grid: pv.UnstructuredGrid, *, k: float, omega: float, period: float) -> None:
-    bc_dir = CASE_DIR / "bc"
-    if bc_dir.exists():
-        shutil.rmtree(bc_dir)
-    bc_dir.mkdir(parents=True)
-    times = time_samples_for_period(period, args.time_step)
-    for name, ids in boundary_node_ids(args.nx, args.ny).items():
-        path = bc_dir / f"{name}_velocity.dat"
-        with path.open("w") as output:
-            output.write(f"2 {len(times)} {len(ids)}\n")
-            for t in times:
-                output.write(f"{t:.12e}\n")
-            for gid in ids:
-                x, y, _ = grid.points[gid]
-                values = velocity_exact(
-                    np.array([x]),
-                    np.array([y]),
-                    0.0,
-                    depth=args.depth,
-                    amplitude=args.amplitude,
-                    k=k,
-                    omega=omega,
-                )
-                output.write(f"{gid + 1}\n")
-                for t in times:
-                    values = velocity_exact(
-                        np.array([x]),
-                        np.array([y]),
-                        t,
-                        depth=args.depth,
-                        amplitude=args.amplitude,
-                        k=k,
-                        omega=omega,
-                    )
-                    output.write(f"{values[0, 0]:.18e} {values[0, 1]:.18e}\n")
 
 
 def write_solver_xml(args: argparse.Namespace, *, final_time: float) -> None:
@@ -351,18 +298,18 @@ def write_solver_xml(args: argparse.Namespace, *, final_time: float) -> None:
 
   <Add_BC name="wall_left">
     <Type>Dir</Type>
-    <Time_dependence>General</Time_dependence>
-    <Temporal_and_spatial_values_file_path>bc/wall_left_velocity.dat</Temporal_and_spatial_values_file_path>
+    <Value>0.0</Value>
+    <Effective_direction>1 0</Effective_direction>
   </Add_BC>
   <Add_BC name="wall_right">
     <Type>Dir</Type>
-    <Time_dependence>General</Time_dependence>
-    <Temporal_and_spatial_values_file_path>bc/wall_right_velocity.dat</Temporal_and_spatial_values_file_path>
+    <Value>0.0</Value>
+    <Effective_direction>1 0</Effective_direction>
   </Add_BC>
   <Add_BC name="wall_bottom">
     <Type>Dir</Type>
-    <Time_dependence>General</Time_dependence>
-    <Temporal_and_spatial_values_file_path>bc/wall_bottom_velocity.dat</Temporal_and_spatial_values_file_path>
+    <Value>0.0</Value>
+    <Effective_direction>0 1</Effective_direction>
   </Add_BC>
 
   <Add_BC name="free_surface">
@@ -453,8 +400,8 @@ def write_expected(args: argparse.Namespace, *, k: float, omega: float, period: 
                 "surface_tension": 0.0,
             },
             "solid_walls": {
-                "realization": "exact_time_space_dirichlet_velocity",
-                "note": "The linear theory assumes impermeable slip walls. The current OOP XML path supports exact time/space Dirichlet data, so the wall velocity components are prescribed from the analytic potential-flow solution.",
+                "realization": "free_slip_strong_zero_normal_velocity",
+                "note": "The linear theory assumes impermeable slip walls. The walls prescribe a strong zero normal velocity (Effective_direction) and leave the tangential velocity free, as in the M1 benchmark.",
             },
         },
         "verification": {
@@ -478,7 +425,7 @@ def write_benchmark(args: argparse.Namespace, *, omega: float, period: float, fi
         "name": "linear_sloshing_2d",
         "type": "fluid_free_surface_unfitted_level_set",
         "solver": "new_oop",
-        "description": "Small-amplitude 2D standing sloshing wave with exact wall velocity data.",
+        "description": "Small-amplitude 2D standing sloshing wave with free-slip walls.",
         "mesh": {"nx": args.nx, "ny": args.ny},
         "run": {"dt": args.time_step, "steps": args.time_steps, "final_time": final_time},
         "targets": {
@@ -505,9 +452,9 @@ domain. Negative `phi` denotes liquid.
 
 The analytic reference is the linearized inviscid potential-flow solution in a
 rectangular tank. It is exact for impermeable slip walls and zero surface
-tension, not for viscous no-slip Navier-Stokes. The solver XML uses exact
-time/space Dirichlet velocity data on the left, right, and bottom walls because
-that is the currently supported OOP fallback for the slip-wall analytic data.
+tension, not for viscous no-slip Navier-Stokes. The left, right, and bottom
+walls are free-slip: a strong zero normal velocity (`Effective_direction`) with
+a free tangential velocity.
 
 Default parameters:
 
@@ -639,7 +586,6 @@ def main() -> None:
     grid = structured_quad_mesh(args, k=k, omega=omega)
     grid.save(mesh_dir / "mesh-complete.mesh.vtu", binary=False)
     write_boundary_surfaces(grid, args.nx, args.ny, mesh_dir / "mesh-surfaces")
-    write_velocity_bc_files(args, grid, k=k, omega=omega, period=period)
     write_solver_xml(args, final_time=final_time)
     write_expected(args, k=k, omega=omega, period=period, final_time=final_time)
     write_benchmark(args, omega=omega, period=period, final_time=final_time)
