@@ -29,7 +29,6 @@
 // Not mathematics: option queries, preflight, fields and initial state,
 // geometry adapters, logs, energy declarations, the residual-work ledger,
 // the diagnostic operators and the configuration artifact.
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceDiagnostics.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceFittedALE.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
 #include "Physics/Options/NavierStokesOptionRules.h"
@@ -214,24 +213,6 @@ namespace {
     }
     return f;
 }
-
-/// The free-surface term logs of the module (FreeSurfaceDiagnostics).
-class FreeSurfaceTermLog final : public Factories::FreeSurfaceObserver {
-public:
-    void contactLineTerms(const FreeSurfaceBoundary& b, const FreeSurfaceContactLine& line, int contact_marker,
-                          int wetted_marker) override
-    {
-        logContactLineTerms(b, line, contact_marker, wetted_marker);
-    }
-    void strongContactPointLaw(const FreeSurfaceContactLine& line) override { logStrongContactPointLaw(line); }
-    void unfittedMode(const FreeSurfaceBoundary& b) override { logUnfittedFreeSurfaceMode(b); }
-    void naturalUnfittedSurface(const FreeSurfaceBoundary& b) override { logNaturalUnfittedFreeSurface(b); }
-    void traction(const FreeSurfaceBoundary& b) override { logFreeSurfaceTraction(b); }
-    void cutCellStabilization(const FreeSurfaceBoundary& b, int velocity_order, int pressure_order) override
-    {
-        logCutCellStabilization(b, velocity_order, pressure_order);
-    }
-};
 
 // ---------------------------------------------------------------------------
 // Two-fluid composition
@@ -442,15 +423,14 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     bcs.install(o.velocity_dirichlet_weak, Factories::reserveMarker);   // Nitsche below; reserve the marker
     fs::FormulationBuilder F(system, o.operator_tag, physicsInstallOptions(o.jit_policy));
     F.symbolicTangent();
-    FreeSurfaceTermLog term_log;
     for (const auto& b : free_surfaces) {
         if (isExteriorOnePhaseBoundary(b) && isUnfittedLevelSet(b)) {
-            Factories::addUnfittedFreeSurface(M, system, plan, F, o, b, t, u_id, split, term_log);
+            Factories::addUnfittedFreeSurface(M, system, plan, F, o, b, t, u_id, split);
         } else if (isExteriorOnePhaseBoundary(b)) {
-            Factories::addFittedFreeSurface(M, system, plan, bcs, o, b, ale, t, u_id, F, split, term_log);
+            Factories::addFittedFreeSurface(M, system, plan, bcs, o, b, ale, t, u_id, F, split);
         }
         const auto J = Factories::cutFacetPressurePenalty(b, t, o, velocity_space_->polynomial_order(),
-                                                          pressure_space_->polynomial_order(), term_log);
+                                                          pressure_space_->polynomial_order(), F);
         if (J.isValid()) {
             C = C + J;
             work.ghost_penalty = sumOf(work.ghost_penalty, J);
@@ -470,7 +450,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     pressure_bcs.install(o.pressure_dirichlet,
                          [&](const auto& bc) { return Factories::toPressureEssentialBC(bc, o.pressure_field_name); });
     plan.essentials([&](fs::FESystem& target) { pressure_bcs.applyAll(target, p_id); });
-    logActiveDomainConstraints(liquid_constraints ? liquid->boundary : nullptr, aggregated);
+    F.log(Factories::activeDomainConstraintLogs(liquid_constraints ? liquid->boundary : nullptr, aggregated));
     plan.commit();
 
     // Weak velocity Dirichlet (Nitsche), certified on generated wetted boundaries.

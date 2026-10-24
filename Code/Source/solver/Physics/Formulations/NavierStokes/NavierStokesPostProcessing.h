@@ -23,7 +23,7 @@
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
 
 #include "FE/Core/FEException.h"
-#include "FE/Core/Logger.h"
+#include "FE/Core/LogRecord.h"
 #include "FE/Core/Types.h"
 #include "FE/Forms/BoundaryConditions.h"
 #include "FE/Forms/FormExpr.h"
@@ -52,6 +52,12 @@ namespace Physics {
 namespace formulations {
 namespace navier_stokes {
 namespace post {
+
+/// A log record of the formulation: "IncompressibleNavierStokesVMSModule: <message> key=value ...".
+[[nodiscard]] inline FE::LogRecord navierStokesLog(std::string message = {}, FE::LogLevel level = FE::LogLevel::INFO)
+{
+    return FE::LogRecord("IncompressibleNavierStokesVMSModule", std::move(message), level);
+}
 
 // ---------------------------------------------------------------------------
 // The groups the module and the BC factories collect while they state the terms
@@ -485,8 +491,12 @@ inline void installResidualWork(FE::systems::FormulationBuilder& F,
     } else {
         declare(Channel::GhostPenalty, {});
     }
-    FE_LOG_INFO(
-        "IncompressibleNavierStokesVMSModule: diagnostic=free_surface_residual_work_operators status=declared channels=convection|pressure_continuity|nonconservative_body_force|weak_boundary|vms_pspg|cut_stabilization|ghost_penalty contract=negative_dt_times_constrained_operator_stage_pairing");
+    F.log(navierStokesLog()
+              .text("diagnostic", "free_surface_residual_work_operators")
+              .text("status", "declared")
+              .text("channels", "convection|pressure_continuity|nonconservative_body_force|weak_boundary|vms_pspg|"
+                                "cut_stabilization|ghost_penalty")
+              .text("contract", "negative_dt_times_constrained_operator_stage_pairing"));
 }
 
 // ---------------------------------------------------------------------------
@@ -566,10 +576,12 @@ inline void declareDiagnosticSets(FE::systems::DiagnosticRegistry& registry)
         conservative_balance_all_discrete_energy_tractions;
     if (!conservative_balance_diagnostic_supported &&
         conservative_balance_diagnostic_requested) {
-        FE_LOG_WARNING(
-            "IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_free_surface_conservative_balance_operators"
-            " status=skipped"
-            " reason=requires_all_free_surfaces_discrete_energy_traction_and_nonzero_constant_surface_tension");
+        FE::logRecord(
+            navierStokesLog({}, FE::LogLevel::WARNING)
+                .text("diagnostic", "navier_stokes_free_surface_conservative_balance_operators")
+                .text("status", "skipped")
+                .text("reason",
+                      "requires_all_free_surfaces_discrete_energy_traction_and_nonzero_constant_surface_tension"));
     }
     return conservative_balance_diagnostic_supported;
 }
@@ -669,46 +681,27 @@ inline void installConservativeBalanceDiagnosticOperators(
                  pressure_representability_pair),
          .clear_extra_trial_fields = true});
 
-    FE_LOG_INFO(
-        std::string(
-            "IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_free_surface_conservative_balance_operators") +
-        " status=installed" +
-        " pressure_operator='" +
-        std::string(
-            FreeSurfaceConservativeBalanceDiagnosticOperators::
-                pressure_virtual_work) +
-        "' surface_energy_operator='" +
-        std::string(
-            FreeSurfaceConservativeBalanceDiagnosticOperators::
-                surface_energy_virtual_work) +
-        "' gravitational_potential_operator='" +
-        std::string(
-            FreeSurfaceConservativeBalanceDiagnosticOperators::
-                gravitational_potential_virtual_work) +
-        "' physical_potential_operator='" +
-        std::string(
-            FreeSurfaceConservativeBalanceDiagnosticOperators::
-                physical_potential_virtual_work) +
-        "' pressure_representability_load_operator='" +
-        std::string(
-            FreeSurfaceConservativeBalanceDiagnosticOperators::
-                pressure_representability_load_virtual_work) +
-        "' balance_operator='" +
-        std::string(
-            FreeSurfaceConservativeBalanceDiagnosticOperators::
-                conservative_balance) +
-        "' pressure_representability_pair_operator='" +
-        std::string(
-            FreeSurfaceConservativeBalanceDiagnosticOperators::
-                pressure_representability_pair) +
-        "' pressure_terms=active_volume_minus_p_div_v_plus_external_pressure_n_dot_v" +
-        " surface_energy_terms=surface_area_variation_plus_young_wall_energy" +
-        " gravitational_potential_terms=active_volume_minus_density_g_dot_v" +
-        " pressure_representability_load_terms=prescribed_external_pressure_plus_surface_energy_plus_gravitational_potential" +
-        " excluded_terms=line_friction_and_wetted_wall_navier_dissipation" +
-        " scope=pressure_and_physical_potential_first_variations_only" +
-        " total_momentum_equilibrium_claimed=0" +
-        " qualification=diagnostic_only_no_time_discrete_energy_claim");
+    using Operators = FreeSurfaceConservativeBalanceDiagnosticOperators;
+    F.log(navierStokesLog()
+              .text("diagnostic", "navier_stokes_free_surface_conservative_balance_operators")
+              .text("status", "installed")
+              .quoted("pressure_operator", Operators::pressure_virtual_work)
+              .quoted("surface_energy_operator", Operators::surface_energy_virtual_work)
+              .quoted("gravitational_potential_operator", Operators::gravitational_potential_virtual_work)
+              .quoted("physical_potential_operator", Operators::physical_potential_virtual_work)
+              .quoted("pressure_representability_load_operator",
+                      Operators::pressure_representability_load_virtual_work)
+              .quoted("balance_operator", Operators::conservative_balance)
+              .quoted("pressure_representability_pair_operator", Operators::pressure_representability_pair)
+              .text("pressure_terms", "active_volume_minus_p_div_v_plus_external_pressure_n_dot_v")
+              .text("surface_energy_terms", "surface_area_variation_plus_young_wall_energy")
+              .text("gravitational_potential_terms", "active_volume_minus_density_g_dot_v")
+              .text("pressure_representability_load_terms",
+                    "prescribed_external_pressure_plus_surface_energy_plus_gravitational_potential")
+              .text("excluded_terms", "line_friction_and_wetted_wall_navier_dissipation")
+              .text("scope", "pressure_and_physical_potential_first_variations_only")
+              .text("total_momentum_equilibrium_claimed", "0")
+              .text("qualification", "diagnostic_only_no_time_discrete_energy_claim"));
 }
 
 /// The continuity-row parts used by the cut-stability tests
@@ -729,10 +722,12 @@ inline void installPressureRowContributionDiagnosticOperators(
         (void)F.diagnostic(kPressureRowContributionDiagnostics, operator_tag, {p_id}, form,
                            {.extra_trial_fields = {u_id}});
     };
-    FE_LOG_INFO(
-        "IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pressure_row_contribution_operators"
-        " installing=1"
-        " ops=equations_diagnostic_ns_galerkin_continuity|equations_diagnostic_ns_active_continuity|equations_diagnostic_ns_vms_pspg|equations_diagnostic_ns_vms_pspg_pressure_gradient|equations_diagnostic_ns_vms_pspg_nonpressure|equations_diagnostic_ns_pressure_ghost_penalty");
+    F.log(navierStokesLog()
+              .text("diagnostic", "navier_stokes_pressure_row_contribution_operators")
+              .text("installing", "1")
+              .text("ops", "equations_diagnostic_ns_galerkin_continuity|equations_diagnostic_ns_active_continuity|"
+                           "equations_diagnostic_ns_vms_pspg|equations_diagnostic_ns_vms_pspg_pressure_gradient|"
+                           "equations_diagnostic_ns_vms_pspg_nonpressure|equations_diagnostic_ns_pressure_ghost_penalty"));
     install_row("equations_diagnostic_ns_galerkin_continuity", galerkin_continuity_integrand.dx(liquid));
     install_row("equations_diagnostic_ns_active_continuity", active_continuity_diagnostic_form);
     if (vms_pspg_continuity_integrand.isValid()) {

@@ -888,7 +888,7 @@ change the authoring surface:
 | G1, G2 | Generic accepted-stage and functional records on the attachment store; an energy-balance ledger with named channels and declared identities |
 | G5 | `ALEBinding` declarations, `LevelSetGeometry` markers and the contact-certificate hook, field binding, and vertex-field initialization as FE services |
 | E3 | Energies, powers, works, and the logged measures as forms in `NavierStokesPostProcessing.h`, under the D49 tolerance gate |
-| L1 | Log formats as FE data (`LogRecordFormat`); the free-surface observer (`FreeSurfaceObserver` in `NavierStokesBCFactories.h`) is removed |
+| L1 | Log lines as FE data (`LogRecord`, above): the Navier-Stokes term and post-processing lines are records printed through `F.log`, and the free-surface observer is removed; the energy, record and maintenance lines of the FE services follow |
 
 ### Not Scheduled
 
