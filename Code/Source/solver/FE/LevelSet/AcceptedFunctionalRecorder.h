@@ -17,7 +17,9 @@
  * the snapshot of the system's cut-integration context at an accepted
  * endpoint: the stored functionals, endpoint powers, active-volume energies
  * and dissipation, exterior-pressure powers and backward-Euler kinetic
- * work, with communicator-consistent coverage and revisions.  The accepted
+ * work, with communicator-consistent coverage and revisions.  Their values
+ * are the measured 0-forms the formulation declares (Systems/FunctionalForms,
+ * D49 steps E3 and E4), evaluated with an exact reduction.  The accepted
  * group is recorded in the functional records, and the level-set
  * maintenance reads the same values (LevelSetAuthoritativeFunctionalValue).
  *
@@ -48,16 +50,33 @@ std::uint64_t acceptedFunctionalDeclarationContentKey(
     const systems::FreeSurfaceDiscreteFunctionalDeclaration&
         declaration) noexcept;
 
-/// The declared functionals evaluated on the current snapshot.
+/**
+ * @brief The accepted-functional states of the current geometry without
+ *        their values (collective).
+ *
+ * One state per declaration, in declaration order: the interface, the
+ * geometry revision of its snapshot, the parameters and the walls, with
+ * communicator-consistent declarations and snapshots.  Every value is zero;
+ * the values are the declared functionals (evaluateDeclaredAcceptedFunctionals,
+ * recordAcceptedFunctionals, levelSetMaintenanceFunctionalValues).
+ */
 std::vector<systems::AcceptedFreeSurfaceDiscreteFunctionalState>
-evaluateCurrentAcceptedFunctionals(const systems::FESystemHandle& sim);
+currentAcceptedFunctionalLayouts(const systems::FESystemHandle& sim);
 
-/// Attach the active-volume energies of @p accepted_solution.
-void attachAcceptedActiveVolumeEnergies(
+/**
+ * @brief The accepted-functional states of the current geometry with the
+ *        values of the declared functionals on @p solution (collective).
+ *
+ * The layouts, the solution channels the declarations name (endpoint power,
+ * active-volume energy, dissipation, exterior-pressure power; only with a
+ * nonempty @p solution) and the values of the measured 0-forms the
+ * formulation declares, with the exact reduction.  Throws when a recorded
+ * quantity has no declared functional.
+ */
+std::vector<systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+evaluateDeclaredAcceptedFunctionals(
     const systems::FESystemHandle& sim,
-    std::span<const Real> accepted_solution,
-    std::span<systems::AcceptedFreeSurfaceDiscreteFunctionalState>
-        accepted_states);
+    std::span<const Real> solution);
 
 /**
  * @brief One free-surface functional of an interface as a measured 0-form

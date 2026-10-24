@@ -3081,9 +3081,9 @@ std::uint64_t collectiveLevelSetMaintenanceAlgebraicRevision(
 // The accepted discrete functionals are Navier-Stokes free-surface physics
 // (FE/LevelSet/AcceptedFunctionalRecorder.h).
 using svmp::FE::level_set::acceptedFunctionalDeclarationContentKey;
-using svmp::FE::level_set::evaluateCurrentAcceptedFunctionals;
+using svmp::FE::level_set::currentAcceptedFunctionalLayouts;
+using svmp::FE::level_set::evaluateDeclaredAcceptedFunctionals;
 using svmp::FE::level_set::evaluateDeclaredFreeSurfaceFunctionals;
-using svmp::FE::level_set::attachAcceptedActiveVolumeEnergies;
 using svmp::FE::level_set::collectiveFieldRevision;
 using svmp::FE::level_set::levelSetMaintenanceFunctionalValues;
 using svmp::FE::level_set::AcceptedFunctionalCoverage;
@@ -5764,7 +5764,7 @@ evaluateStaticCapillaryFunctionalCandidate(
     return result;
   }
 
-  auto states = evaluateCurrentAcceptedFunctionals(sim);
+  auto states = currentAcceptedFunctionalLayouts(sim);
   // D49 step E4: the volume and the energies are the declared functionals
   // of the interface (measured 0-forms, exact reduction) on the candidate:
   // the liquid volume, the liquid-gas surface energy plus the Young energy
@@ -6146,7 +6146,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
   }
 
   const auto initial_states =
-      evaluateCurrentAcceptedFunctionals(sim);
+      currentAcceptedFunctionalLayouts(sim);
   const bool local_initial_functional_available =
       initial_states.size() == 1u &&
       initial_states.front().interface_marker == *marker;
@@ -8125,7 +8125,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               [&](std::span<const svmp::FE::Real> candidate) {
                 return levelSetMaintenanceFunctionalValues(
                     sim,
-                    evaluateCurrentAcceptedFunctionals(sim),
+                    currentAcceptedFunctionalLayouts(sim),
                     candidate);
               },
           .algebraic_state_revision =
@@ -9598,7 +9598,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           gatherFeOrderedSolution(
               h.u(), velocity_extension_artifact_comm);
       pre_maintenance_functionals =
-          evaluateCurrentAcceptedFunctionals(sim);
+          currentAcceptedFunctionalLayouts(sim);
     }
     std::vector<std::string> maintenance_commit_logs;
     std::unique_ptr<LevelSetMaintenanceGeometryTransaction>

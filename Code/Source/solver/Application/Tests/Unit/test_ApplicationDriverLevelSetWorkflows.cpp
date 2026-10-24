@@ -5966,7 +5966,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       "application-driver-accepted-functional-test");
   ASSERT_TRUE(report.refreshed);
   const auto current_functionals =
-      evaluateCurrentAcceptedFunctionals(sim);
+      currentAcceptedFunctionalLayouts(sim);
   const auto maintenance_functionals =
       levelSetMaintenanceFunctionalValues(
           sim, current_functionals, solution);
@@ -6687,7 +6687,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .owner_component =
               "ApplicationDriverLevelSetWorkflows.StaticCapillaryRollback",
       },
-      *velocity_space,
+      velocity_space.get(),
       /*dimension=*/2);
   // The production residual is intentionally empty. The acceptance probe can
   // assemble it, but the physical pressure/surface diagnostic operators are
@@ -7144,7 +7144,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .owner_component =
               "ApplicationDriverLevelSetWorkflows.StaticCapillaryPublication",
       },
-      *velocity_space,
+      velocity_space.get(),
       /*dimension=*/2);
   system->addOperator("equations");
   // This compact mass-pair fixture certifies application transaction
@@ -7870,7 +7870,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
             "application-driver-physical-flat-static-initial");
         ASSERT_TRUE(initial_report.refreshed);
         const auto initial_functionals =
-            evaluateCurrentAcceptedFunctionals(sim);
+            evaluateDeclaredAcceptedFunctionals(sim, {});
         ASSERT_EQ(initial_functionals.size(), 1u);
         const auto expected_volume = svmp::FE::Real{3.0} * normal_offset;
         EXPECT_NEAR(initial_functionals.front().state.owned_liquid_volume,
@@ -7908,7 +7908,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
             certificate.constant_pressure_kkt_pressure_jump, 0.0, 2.0e-10);
 
         const auto final_functionals =
-            evaluateCurrentAcceptedFunctionals(sim);
+            evaluateDeclaredAcceptedFunctionals(sim, {});
         ASSERT_EQ(final_functionals.size(), 1u);
         const auto volume_error =
             std::abs(final_functionals.front().state.owned_liquid_volume -
@@ -8433,10 +8433,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
         "application-driver-hydrostatic-fixed-gauge-initial");
     ASSERT_TRUE(initial_report.refreshed);
     auto initial_functionals =
-        evaluateCurrentAcceptedFunctionals(sim);
+        evaluateDeclaredAcceptedFunctionals(sim, current);
     ASSERT_EQ(initial_functionals.size(), 1u);
-    attachAcceptedActiveVolumeEnergies(
-        sim, current, initial_functionals);
     ASSERT_TRUE(initial_functionals.front().active_volume_energy.has_value());
     const auto interface_measure = spatial_dimension == 2
                                        ? svmp::FE::Real{3.0}
@@ -8588,10 +8586,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
     EXPECT_LE(phi_update, 2.0e-7);
 
     auto final_functionals =
-        evaluateCurrentAcceptedFunctionals(sim);
+        evaluateDeclaredAcceptedFunctionals(sim, certified_solution);
     ASSERT_EQ(final_functionals.size(), 1u);
-    attachAcceptedActiveVolumeEnergies(
-        sim, certified_solution, final_functionals);
     ASSERT_TRUE(final_functionals.front().active_volume_energy.has_value());
     const auto gravitational_energy_error = std::abs(
         final_functionals.front().active_volume_energy->gravitational_energy -
@@ -8726,7 +8722,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .slip_length = svmp::FE::Real{ 0.2 },
           .dynamic_viscosity = svmp::FE::Real{ 0.4 },
       });
-  svmp::FE::systems::functionalRecords(*system).declareFunctional(
+  application_test::declared_free_surface_functionals::declareFreeSurfaceFunctionalWithForms(
+      *system,
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = interface_marker,
           .level_set_field = phi,
@@ -8735,7 +8732,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .parameters = functional_parameters,
           .owner_component =
               "ApplicationDriverLevelSetWorkflows.ContactStageFixture",
-      });
+      },
+      velocity_space.get(),
+      /*dimension=*/2);
 
   svmp::FE::interfaces::GeneratedInterfaceBoundaryIntersectionMarkerKey key{};
   key.source = svmp::FE::interfaces::LevelSetInterfaceSource::fromField(phi);
@@ -9562,7 +9561,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .equilibrium_contact_angle_radians =
               svmp::FE::Real{1.57079632679489661923132169163975144},
       });
-  svmp::FE::systems::functionalRecords(*system).declareFunctional(
+  application_test::declared_free_surface_functionals::declareFreeSurfaceFunctionalWithForms(
+      *system,
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = interface_marker,
           .level_set_field = phi,
@@ -9570,7 +9570,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .parameters = parameters,
           .owner_component =
               "ApplicationDriverLevelSetWorkflows.PrescribedWallFixture",
-      });
+      },
+      nullptr,
+      /*dimension=*/2);
   svmp::FE::interfaces::GeneratedInterfaceBoundaryIntersectionMarkerKey key{};
   key.source =
       svmp::FE::interfaces::LevelSetInterfaceSource::fromField(phi);

@@ -4192,7 +4192,7 @@ FreeSurfaceGeometrySnapshot::ledger() const noexcept
     return ledger_;
 }
 
-FreeSurfaceDiscreteFunctionalState evaluateFreeSurfaceDiscreteFunctional(
+FreeSurfaceDiscreteFunctionalState freeSurfaceDiscreteFunctionalLayout(
     const FreeSurfaceGeometrySnapshot& snapshot,
     const FreeSurfaceDiscreteFunctionalParameters& parameters)
 {
@@ -4240,10 +4240,6 @@ FreeSurfaceDiscreteFunctionalState evaluateFreeSurfaceDiscreteFunctional(
         ensure_geometry_wall(active.request().boundary_marker);
     }
 
-    const auto volume_role =
-        parameters.liquid_side == geometry::CutIntegrationSide::Negative
-            ? FreeSurfaceGeometryRuleRole::NegativeVolume
-            : FreeSurfaceGeometryRuleRole::PositiveVolume;
     const auto wall_role =
         parameters.liquid_side == geometry::CutIntegrationSide::Negative
             ? FreeSurfaceGeometryRuleRole::NegativeExteriorBoundary
@@ -4256,609 +4252,62 @@ FreeSurfaceDiscreteFunctionalState evaluateFreeSurfaceDiscreteFunctional(
     state.surface_tension = parameters.surface_tension;
     state.volume_multiplier = parameters.volume_multiplier;
 
+    // Every wall the owned retained rules touch is a wall of the layout.
     for (const auto& record : snapshot.rules()) {
         if (!record.locally_owned ||
             record.retention != FreeSurfaceGeometryRetention::Retained) {
             continue;
         }
-        const Real measure = record.physical_rule.physical_measure;
-        if (!std::isfinite(measure) || measure < Real{0.0}) {
-            throw std::invalid_argument(
-                "free-surface functional encountered an invalid owned physical measure");
-        }
-        if (record.role == volume_role) {
-            state.owned_liquid_volume += measure;
-        } else if (record.role == FreeSurfaceGeometryRuleRole::Interface) {
-            state.owned_liquid_gas_area += measure;
-        } else if (record.role == wall_role) {
+        if (record.role == wall_role) {
             if (record.physical_boundary_marker < 0) {
                 throw std::invalid_argument(
                     "free-surface functional encountered exterior-boundary geometry without a physical marker");
             }
-            state.owned_wetted_wall_area += measure;
-            auto& wall = walls[record.physical_boundary_marker];
-            wall.boundary_marker = record.physical_boundary_marker;
-            wall.owned_wetted_wall_area += measure;
+            ensure_geometry_wall(record.physical_boundary_marker);
         } else if (record.role == FreeSurfaceGeometryRuleRole::Contact) {
             if (record.physical_boundary_marker < 0) {
                 throw std::invalid_argument(
                     "free-surface functional encountered contact geometry without a physical marker");
             }
-            state.owned_contact_measure += measure;
-            auto& wall = walls[record.physical_boundary_marker];
-            wall.boundary_marker = record.physical_boundary_marker;
-            wall.owned_contact_measure += measure;
+            ensure_geometry_wall(record.physical_boundary_marker);
         }
     }
 
-    state.liquid_gas_surface_energy =
-        parameters.surface_tension * state.owned_liquid_gas_area;
     state.walls.reserve(walls.size());
     for (auto& [boundary_marker, wall] : walls) {
         (void)boundary_marker;
-        if (wall.equilibrium_contact_angle_radians.has_value()) {
-            wall.young_wall_energy =
-                -parameters.surface_tension *
-                std::cos(*wall.equilibrium_contact_angle_radians) *
-                wall.owned_wetted_wall_area;
-            state.young_wall_energy += wall.young_wall_energy;
-        }
         state.walls.push_back(wall);
     }
-    state.volume_constraint_potential =
-        parameters.volume_multiplier * state.owned_liquid_volume;
-    state.total_potential = state.liquid_gas_surface_energy +
-                            state.young_wall_energy +
-                            state.volume_constraint_potential;
-    if (!std::isfinite(state.total_potential)) {
-        throw std::invalid_argument(
-            "free-surface functional produced a non-finite potential");
-    }
     return state;
 }
 
-FreeSurfaceActiveVolumeEnergyState
-evaluateFreeSurfaceActiveVolumeEnergy(
+std::size_t freeSurfaceOwnedRulePointCount(
     const FreeSurfaceGeometrySnapshot& snapshot,
-    const FreeSurfaceActiveVolumeEnergyParameters& parameters,
-    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity,
+    FreeSurfaceGeometryRuleRole role,
     const assembly::IMeshAccess* mesh)
 {
-    if (!snapshot.revision().complete()) {
-        throw std::invalid_argument(
-            "free-surface active-volume energy requires a revision-complete snapshot");
-    }
-    if (parameters.liquid_side !=
-            geometry::CutIntegrationSide::Negative &&
-        parameters.liquid_side !=
-            geometry::CutIntegrationSide::Positive) {
-        throw std::invalid_argument(
-            "free-surface active-volume energy requires a physical liquid side");
-    }
-    if (!std::isfinite(parameters.density) ||
-        !(parameters.density > Real{0.0}) ||
-        !finitePoint(parameters.gravitational_acceleration) ||
-        !finitePoint(parameters.gravitational_reference_point)) {
-        throw std::invalid_argument(
-            "free-surface active-volume energy requires positive finite density and finite gravitational data");
-    }
-    if (!velocity.canEvaluateValue()) {
-        throw std::invalid_argument(
-            "free-surface active-volume energy requires a velocity evaluator");
-    }
-
-    const auto volume_role =
-        parameters.liquid_side ==
-                geometry::CutIntegrationSide::Negative
-            ? FreeSurfaceGeometryRuleRole::NegativeVolume
-            : FreeSurfaceGeometryRuleRole::PositiveVolume;
-    FreeSurfaceActiveVolumeEnergyState state;
-    state.snapshot_revision_key =
-        snapshot.revision().snapshot_revision_key;
-    state.liquid_side = parameters.liquid_side;
-    state.density = parameters.density;
-    state.gravitational_acceleration =
-        parameters.gravitational_acceleration;
-    state.gravitational_reference_point =
-        parameters.gravitational_reference_point;
-
+    std::size_t count = 0u;
     for (const auto& stored_record : snapshot.rules()) {
-        if (!stored_record.locally_owned ||
-            stored_record.retention !=
-                FreeSurfaceGeometryRetention::Retained ||
-            stored_record.role != volume_role) {
-            continue;
-        }
-        std::optional<FreeSurfaceGeometryRuleRecord> rematerialized;
-        const auto& record = integrationRecord(
-            stored_record, mesh, rematerialized, "free-surface active-volume energy");
-        if (record.reference_rule.kind !=
-                geometry::CutQuadratureKind::Volume ||
-            record.physical_rule.kind !=
-                geometry::CutQuadratureKind::Volume ||
-            record.reference_rule.side != parameters.liquid_side ||
-            record.physical_rule.side != parameters.liquid_side ||
-            record.reference_rule.points.size() !=
-                record.physical_rule.points.size()) {
-            throw std::invalid_argument(
-                "free-surface active-volume energy encountered an inconsistent liquid-volume rule");
-        }
-        for (std::size_t point_index = 0;
-             point_index < record.physical_rule.points.size();
-             ++point_index) {
-            const auto& physical =
-                record.physical_rule.points[point_index];
-            const auto& reference =
-                record.reference_rule.points[point_index];
-            const Real weight = physical.physical_weight;
-            if (!std::isfinite(weight) ||
-                !(weight > Real{0.0}) ||
-                !finitePoint(physical.physical_point) ||
-                !finitePoint(reference.parent_coordinate)) {
-                throw std::invalid_argument(
-                    "free-surface active-volume energy encountered invalid physical quadrature data");
-            }
-            const auto value = velocity.value(
-                record.reference_rule.provenance.parent_entity,
-                reference.parent_coordinate,
-                record.reference_rule.provenance);
-            if (!finitePoint(value)) {
-                throw std::invalid_argument(
-                    "free-surface active-volume energy velocity evaluator returned a non-finite value");
-            }
-            const Real speed_squared = dot(value, value);
-            std::array<Real, 3> displacement{};
-            for (std::size_t component = 0u; component < 3u;
-                 ++component) {
-                displacement[component] =
-                    physical.physical_point[component] -
-                    parameters.gravitational_reference_point[component];
-            }
-            const Real kinetic_density =
-                Real{0.5} * parameters.density * speed_squared;
-            const Real gravitational_density =
-                -parameters.density *
-                dot(parameters.gravitational_acceleration,
-                    displacement);
-            const Real gravitational_potential_power_density =
-                -parameters.density *
-                dot(parameters.gravitational_acceleration, value);
-            if (!std::isfinite(speed_squared) ||
-                speed_squared < Real{0.0} ||
-                !std::isfinite(kinetic_density) ||
-                !std::isfinite(gravitational_density) ||
-                !std::isfinite(
-                    gravitational_potential_power_density)) {
-                throw std::invalid_argument(
-                    "free-surface active-volume energy produced a non-finite point contribution");
-            }
-            ++state.owned_quadrature_point_count;
-            state.owned_liquid_volume += weight;
-            state.kinetic_energy += kinetic_density * weight;
-            state.gravitational_energy +=
-                gravitational_density * weight;
-            state.gravitational_potential_power +=
-                gravitational_potential_power_density * weight;
-        }
-    }
-    state.total_energy =
-        state.kinetic_energy + state.gravitational_energy;
-    if (!std::isfinite(state.owned_liquid_volume) ||
-        state.owned_liquid_volume < Real{0.0} ||
-        !std::isfinite(state.kinetic_energy) ||
-        state.kinetic_energy < Real{0.0} ||
-        !std::isfinite(state.gravitational_energy) ||
-        !std::isfinite(state.gravitational_potential_power) ||
-        !std::isfinite(state.total_energy)) {
-        throw std::invalid_argument(
-            "free-surface active-volume energy produced invalid totals");
-    }
-    return state;
-}
-
-FreeSurfaceActiveVolumeDissipationState
-evaluateFreeSurfaceActiveVolumeDissipation(
-    const FreeSurfaceGeometrySnapshot& snapshot,
-    const FreeSurfaceActiveVolumeDissipationParameters& parameters,
-    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity,
-    const assembly::IMeshAccess* mesh)
-{
-    if (!snapshot.revision().complete()) {
-        throw std::invalid_argument(
-            "free-surface active-volume dissipation requires a revision-complete snapshot");
-    }
-    if (parameters.liquid_side !=
-            geometry::CutIntegrationSide::Negative &&
-        parameters.liquid_side !=
-            geometry::CutIntegrationSide::Positive) {
-        throw std::invalid_argument(
-            "free-surface active-volume dissipation requires a physical liquid side");
-    }
-    if (!std::isfinite(parameters.dynamic_viscosity) ||
-        !(parameters.dynamic_viscosity > Real{0.0})) {
-        throw std::invalid_argument(
-            "free-surface active-volume dissipation requires positive finite dynamic viscosity");
-    }
-    if (!velocity.canEvaluatePhysicalGradient()) {
-        throw std::invalid_argument(
-            "free-surface active-volume dissipation requires a physical velocity-gradient evaluator");
-    }
-
-    const auto volume_role =
-        parameters.liquid_side ==
-                geometry::CutIntegrationSide::Negative
-            ? FreeSurfaceGeometryRuleRole::NegativeVolume
-            : FreeSurfaceGeometryRuleRole::PositiveVolume;
-    FreeSurfaceActiveVolumeDissipationState state;
-    state.snapshot_revision_key =
-        snapshot.revision().snapshot_revision_key;
-    state.liquid_side = parameters.liquid_side;
-    state.dynamic_viscosity = parameters.dynamic_viscosity;
-
-    for (const auto& stored_record : snapshot.rules()) {
-        if (!stored_record.locally_owned ||
-            stored_record.retention !=
-                FreeSurfaceGeometryRetention::Retained ||
-            stored_record.role != volume_role) {
-            continue;
-        }
-        std::optional<FreeSurfaceGeometryRuleRecord> rematerialized;
-        const auto& record = integrationRecord(
-            stored_record, mesh, rematerialized, "free-surface active-volume dissipation");
-        if (record.reference_rule.kind !=
-                geometry::CutQuadratureKind::Volume ||
-            record.physical_rule.kind !=
-                geometry::CutQuadratureKind::Volume ||
-            record.reference_rule.side != parameters.liquid_side ||
-            record.physical_rule.side != parameters.liquid_side ||
-            record.reference_rule.points.size() !=
-                record.physical_rule.points.size()) {
-            throw std::invalid_argument(
-                "free-surface active-volume dissipation encountered an inconsistent liquid-volume rule");
-        }
-        for (std::size_t point_index = 0;
-             point_index < record.physical_rule.points.size();
-             ++point_index) {
-            const auto& physical =
-                record.physical_rule.points[point_index];
-            const auto& reference =
-                record.reference_rule.points[point_index];
-            const Real weight = physical.physical_weight;
-            if (!std::isfinite(weight) ||
-                !(weight > Real{0.0}) ||
-                !finitePoint(physical.physical_point) ||
-                !finitePoint(reference.parent_coordinate)) {
-                throw std::invalid_argument(
-                    "free-surface active-volume dissipation encountered invalid physical quadrature data");
-            }
-            const auto gradient = velocity.physical_gradient(
-                record.reference_rule.provenance.parent_entity,
-                reference.parent_coordinate,
-                record.reference_rule.provenance);
-            const bool finite_gradient = std::all_of(
-                gradient.begin(), gradient.end(), [](const auto& row) {
-                    return std::all_of(
-                        row.begin(), row.end(), [](Real value) {
-                            return std::isfinite(value);
-                        });
-                });
-            if (!finite_gradient) {
-                throw std::invalid_argument(
-                    "free-surface active-volume dissipation velocity-gradient evaluator returned a non-finite value");
-            }
-            Real symmetric_gradient_squared = Real{0.0};
-            for (std::size_t row = 0u; row < 3u; ++row) {
-                for (std::size_t column = 0u; column < 3u;
-                     ++column) {
-                    const Real symmetric_component =
-                        Real{0.5} *
-                        (gradient[row][column] +
-                         gradient[column][row]);
-                    symmetric_gradient_squared +=
-                        symmetric_component * symmetric_component;
-                }
-            }
-            const Real dissipation_density =
-                Real{2.0} * parameters.dynamic_viscosity *
-                symmetric_gradient_squared;
-            if (!std::isfinite(symmetric_gradient_squared) ||
-                symmetric_gradient_squared < Real{0.0} ||
-                !std::isfinite(dissipation_density) ||
-                dissipation_density < Real{0.0}) {
-                throw std::invalid_argument(
-                    "free-surface active-volume dissipation produced an invalid point contribution");
-            }
-            ++state.owned_quadrature_point_count;
-            state.owned_liquid_volume += weight;
-            state.bulk_viscous_dissipation_rate +=
-                dissipation_density * weight;
-        }
-    }
-    if (!std::isfinite(state.owned_liquid_volume) ||
-        state.owned_liquid_volume < Real{0.0} ||
-        !std::isfinite(state.bulk_viscous_dissipation_rate) ||
-        state.bulk_viscous_dissipation_rate < Real{0.0}) {
-        throw std::invalid_argument(
-            "free-surface active-volume dissipation produced invalid totals");
-    }
-    return state;
-}
-
-FreeSurfaceExternalPressurePowerState
-evaluateFreeSurfaceExternalPressurePower(
-    const FreeSurfaceGeometrySnapshot& snapshot,
-    const FreeSurfaceExternalPressurePowerParameters& parameters,
-    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity)
-{
-    if (!snapshot.revision().complete()) {
-        throw std::invalid_argument(
-            "free-surface exterior-pressure power requires a revision-complete snapshot");
-    }
-    if (parameters.liquid_side !=
-            geometry::CutIntegrationSide::Negative &&
-        parameters.liquid_side !=
-            geometry::CutIntegrationSide::Positive) {
-        throw std::invalid_argument(
-            "free-surface exterior-pressure power requires a physical liquid side");
-    }
-    if (!std::isfinite(parameters.external_pressure)) {
-        throw std::invalid_argument(
-            "free-surface exterior-pressure power requires finite pressure");
-    }
-    if (!velocity.canEvaluateValue()) {
-        throw std::invalid_argument(
-            "free-surface exterior-pressure power requires a velocity evaluator");
-    }
-
-    FreeSurfaceExternalPressurePowerState state;
-    state.snapshot_revision_key =
-        snapshot.revision().snapshot_revision_key;
-    state.liquid_side = parameters.liquid_side;
-    state.external_pressure = parameters.external_pressure;
-    const bool positive_liquid =
-        parameters.liquid_side ==
-        geometry::CutIntegrationSide::Positive;
-
-    for (const auto& record : snapshot.rules()) {
-        if (!record.locally_owned ||
-            record.retention !=
-                FreeSurfaceGeometryRetention::Retained ||
-            record.role != FreeSurfaceGeometryRuleRole::Interface) {
-            continue;
-        }
-        if (record.reference_rule.kind !=
-                geometry::CutQuadratureKind::Interface ||
-            record.physical_rule.kind !=
-                geometry::CutQuadratureKind::Interface ||
-            record.reference_rule.points.size() !=
-                record.physical_rule.points.size()) {
-            throw std::invalid_argument(
-                "free-surface exterior-pressure power encountered an inconsistent interface rule");
-        }
-        for (std::size_t point_index = 0u;
-             point_index < record.physical_rule.points.size();
-             ++point_index) {
-            const auto& physical =
-                record.physical_rule.points[point_index];
-            const auto& reference =
-                record.reference_rule.points[point_index];
-            const Real weight = physical.physical_weight;
-            if (!std::isfinite(weight) ||
-                !(weight > Real{0.0}) ||
-                !finitePoint(physical.physical_point) ||
-                !finitePoint(physical.normal) ||
-                !finitePoint(reference.parent_coordinate)) {
-                throw std::invalid_argument(
-                    "free-surface exterior-pressure power encountered invalid physical quadrature data");
-            }
-            const auto value = velocity.value(
-                record.reference_rule.provenance.parent_entity,
-                reference.parent_coordinate,
-                record.reference_rule.provenance);
-            if (!finitePoint(value)) {
-                throw std::invalid_argument(
-                    "free-surface exterior-pressure power velocity evaluator returned a non-finite value");
-            }
-            auto liquid_normal = physical.normal;
-            if (positive_liquid) {
-                for (auto& component : liquid_normal) {
-                    component = -component;
-                }
-            }
-            const Real flux_density = dot(value, liquid_normal);
-            const Real pressure_power_density =
-                -parameters.external_pressure * flux_density;
-            if (!std::isfinite(flux_density) ||
-                !std::isfinite(pressure_power_density)) {
-                throw std::invalid_argument(
-                    "free-surface exterior-pressure power produced a non-finite point contribution");
-            }
-            ++state.owned_quadrature_point_count;
-            state.owned_liquid_gas_area += weight;
-            state.outward_liquid_volume_flux_rate +=
-                flux_density * weight;
-            state.external_pressure_power +=
-                pressure_power_density * weight;
-        }
-    }
-    if (!std::isfinite(state.owned_liquid_gas_area) ||
-        state.owned_liquid_gas_area < Real{0.0} ||
-        !std::isfinite(state.outward_liquid_volume_flux_rate) ||
-        !std::isfinite(state.external_pressure_power)) {
-        throw std::invalid_argument(
-            "free-surface exterior-pressure power produced invalid totals");
-    }
-    return state;
-}
-
-FreeSurfaceBackwardEulerKineticWorkState
-evaluateFreeSurfaceBackwardEulerKineticWork(
-    const FreeSurfaceGeometrySnapshot& endpoint_snapshot,
-    geometry::CutIntegrationSide liquid_side,
-    Real density,
-    std::uint64_t previous_velocity_revision,
-    std::uint64_t endpoint_velocity_revision,
-    const FreeSurfaceDiscreteFunctionalVectorEvaluator& previous_velocity,
-    const FreeSurfaceDiscreteFunctionalVectorEvaluator& endpoint_velocity,
-    const assembly::IMeshAccess* mesh)
-{
-    if (!endpoint_snapshot.revision().complete()) {
-        throw std::invalid_argument(
-            "free-surface backward-Euler kinetic work requires a revision-complete endpoint snapshot");
-    }
-    if (liquid_side != geometry::CutIntegrationSide::Negative &&
-        liquid_side != geometry::CutIntegrationSide::Positive) {
-        throw std::invalid_argument(
-            "free-surface backward-Euler kinetic work requires a physical liquid side");
-    }
-    if (!std::isfinite(density) || !(density > Real{0.0})) {
-        throw std::invalid_argument(
-            "free-surface backward-Euler kinetic work requires positive finite density");
-    }
-    if (previous_velocity_revision == 0u ||
-        endpoint_velocity_revision == 0u) {
-        throw std::invalid_argument(
-            "free-surface backward-Euler kinetic work requires both velocity endpoint revisions");
-    }
-    if (!previous_velocity.canEvaluateValue() ||
-        !endpoint_velocity.canEvaluateValue()) {
-        throw std::invalid_argument(
-            "free-surface backward-Euler kinetic work requires both endpoint velocity evaluators");
-    }
-
-    const auto volume_role =
-        liquid_side == geometry::CutIntegrationSide::Negative
-            ? FreeSurfaceGeometryRuleRole::NegativeVolume
-            : FreeSurfaceGeometryRuleRole::PositiveVolume;
-    FreeSurfaceBackwardEulerKineticWorkState state;
-    state.snapshot_revision_key =
-        endpoint_snapshot.revision().snapshot_revision_key;
-    state.previous_velocity_revision = previous_velocity_revision;
-    state.endpoint_velocity_revision = endpoint_velocity_revision;
-    state.liquid_side = liquid_side;
-    state.density = density;
-
-    for (const auto& stored_record : endpoint_snapshot.rules()) {
         if (!stored_record.locally_owned ||
             stored_record.retention != FreeSurfaceGeometryRetention::Retained ||
-            stored_record.role != volume_role) {
+            stored_record.role != role) {
             continue;
         }
         std::optional<FreeSurfaceGeometryRuleRecord> rematerialized;
         const auto& record = integrationRecord(
-            stored_record, mesh, rematerialized, "free-surface backward-Euler kinetic work");
-        if (record.reference_rule.kind !=
-                geometry::CutQuadratureKind::Volume ||
-            record.physical_rule.kind !=
-                geometry::CutQuadratureKind::Volume ||
-            record.reference_rule.side != liquid_side ||
-            record.physical_rule.side != liquid_side ||
-            record.reference_rule.points.size() !=
-                record.physical_rule.points.size()) {
+            stored_record, mesh, rematerialized, "free-surface functional quadrature-point count");
+        if (record.reference_rule.points.size() !=
+            record.physical_rule.points.size()) {
             throw std::invalid_argument(
-                "free-surface backward-Euler kinetic work encountered an inconsistent liquid-volume rule");
+                "free-surface functional quadrature-point count found mismatched reference and physical rule points");
         }
-        for (std::size_t point_index = 0;
-             point_index < record.physical_rule.points.size();
-             ++point_index) {
-            const auto& physical =
-                record.physical_rule.points[point_index];
-            const auto& reference =
-                record.reference_rule.points[point_index];
-            const Real weight = physical.physical_weight;
-            if (!std::isfinite(weight) || !(weight > Real{0.0}) ||
-                !finitePoint(physical.physical_point) ||
-                !finitePoint(reference.parent_coordinate)) {
-                throw std::invalid_argument(
-                    "free-surface backward-Euler kinetic work encountered invalid physical quadrature data");
-            }
-            const auto before = previous_velocity.value(
-                record.reference_rule.provenance.parent_entity,
-                reference.parent_coordinate,
-                record.reference_rule.provenance);
-            const auto after = endpoint_velocity.value(
-                record.reference_rule.provenance.parent_entity,
-                reference.parent_coordinate,
-                record.reference_rule.provenance);
-            if (!finitePoint(before) || !finitePoint(after)) {
-                throw std::invalid_argument(
-                    "free-surface backward-Euler kinetic work velocity evaluator returned a non-finite value");
-            }
-            std::array<Real, 3> increment{};
-            for (std::size_t component = 0u; component < 3u;
-                 ++component) {
-                increment[component] =
-                    after[component] - before[component];
-            }
-            const Real before_squared = dot(before, before);
-            const Real after_squared = dot(after, after);
-            const Real increment_squared = dot(increment, increment);
-            const Real inertia_density =
-                density * dot(increment, after);
-            const Real time_loss_density =
-                Real{0.5} * density * increment_squared;
-            const std::array<Real, 5> point_values{
-                before_squared,
-                after_squared,
-                increment_squared,
-                inertia_density,
-                time_loss_density};
-            if (!std::all_of(
-                    point_values.begin(),
-                    point_values.end(),
-                    [](Real value) { return std::isfinite(value); }) ||
-                before_squared < Real{0.0} ||
-                after_squared < Real{0.0} ||
-                increment_squared < Real{0.0} ||
-                time_loss_density < Real{0.0}) {
-                throw std::invalid_argument(
-                    "free-surface backward-Euler kinetic work produced a non-finite point contribution");
-            }
-
-            ++state.owned_quadrature_point_count;
-            state.owned_liquid_volume += weight;
-            state.kinetic_energy_before_on_endpoint_domain +=
-                Real{0.5} * density * before_squared * weight;
-            state.kinetic_energy_after +=
-                Real{0.5} * density * after_squared * weight;
-            state.step_integrated_inertia_work +=
-                inertia_density * weight;
-            state.time_discretization_loss +=
-                time_loss_density * weight;
-        }
+        count += record.physical_rule.points.size();
     }
-
-    state.kinetic_energy_change_on_endpoint_domain =
-        state.kinetic_energy_after -
-        state.kinetic_energy_before_on_endpoint_domain;
-    state.identity_residual =
-        state.step_integrated_inertia_work -
-        state.kinetic_energy_change_on_endpoint_domain -
-        state.time_discretization_loss;
-    const std::array<Real, 7> totals{
-        state.owned_liquid_volume,
-        state.kinetic_energy_before_on_endpoint_domain,
-        state.kinetic_energy_after,
-        state.kinetic_energy_change_on_endpoint_domain,
-        state.step_integrated_inertia_work,
-        state.time_discretization_loss,
-        state.identity_residual};
-    if (!std::all_of(
-            totals.begin(),
-            totals.end(),
-            [](Real value) { return std::isfinite(value); }) ||
-        state.owned_liquid_volume < Real{0.0} ||
-        state.kinetic_energy_before_on_endpoint_domain < Real{0.0} ||
-        state.kinetic_energy_after < Real{0.0} ||
-        state.time_discretization_loss < Real{0.0}) {
-        throw std::invalid_argument(
-            "free-surface backward-Euler kinetic work produced invalid totals");
-    }
-    return state;
+    return count;
 }
 
 FreeSurfaceDiscreteFunctionalVariationState
-evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
+evaluateFreeSurfaceWallAreaVariation(
     const FreeSurfaceGeometrySnapshot& snapshot,
     const FreeSurfaceDiscreteFunctionalParameters& parameters,
     const FreeSurfaceDiscreteFunctionalDeformationEvaluator& deformation)
@@ -4868,47 +4317,36 @@ evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
         throw std::invalid_argument(
             "free-surface functional first variation requires a physical liquid side");
     }
-    if (!deformation.canEvaluateValue() ||
-        !deformation.canEvaluatePhysicalGradient()) {
+    if (!deformation.canEvaluateValue()) {
         throw std::invalid_argument(
-            "free-surface functional first variation requires deformation value and physical-gradient evaluators");
+            "free-surface functional first variation requires a deformation value evaluator");
     }
 
-    // Reuse the scalar functional's validation and wall canonicalization so
-    // the value and first variation cannot silently accept different
-    // coefficients, geometry revisions, or wall sets.
-    const auto functional =
-        evaluateFreeSurfaceDiscreteFunctional(snapshot, parameters);
+    // The layout's validation and wall canonicalization, so the walls of
+    // the variation are the walls of the record.
+    const auto layout = freeSurfaceDiscreteFunctionalLayout(snapshot, parameters);
 
     FreeSurfaceDiscreteFunctionalVariationState state;
-    state.snapshot_revision_key = functional.snapshot_revision_key;
-    state.liquid_side = functional.liquid_side;
-    state.surface_tension = functional.surface_tension;
-    state.volume_multiplier = functional.volume_multiplier;
-    state.walls.reserve(functional.walls.size());
+    state.snapshot_revision_key = layout.snapshot_revision_key;
+    state.liquid_side = layout.liquid_side;
+    state.surface_tension = layout.surface_tension;
+    state.volume_multiplier = layout.volume_multiplier;
+    state.walls.reserve(layout.walls.size());
     std::map<int, std::size_t> wall_index;
-    for (const auto& functional_wall : functional.walls) {
+    for (const auto& layout_wall : layout.walls) {
         const auto index = state.walls.size();
-        if (!wall_index.emplace(functional_wall.boundary_marker, index).second) {
+        if (!wall_index.emplace(layout_wall.boundary_marker, index).second) {
             throw std::logic_error(
                 "free-surface functional first variation found a duplicate canonical wall");
         }
         state.walls.push_back(
             FreeSurfaceDiscreteWallFunctionalVariationState{
-                .boundary_marker = functional_wall.boundary_marker,
+                .boundary_marker = layout_wall.boundary_marker,
                 .equilibrium_contact_angle_radians =
-                    functional_wall.equilibrium_contact_angle_radians,
+                    layout_wall.equilibrium_contact_angle_radians,
             });
     }
 
-    const auto finite_gradient = [](const auto& gradient) noexcept {
-        return std::all_of(
-            gradient.begin(), gradient.end(), [](const auto& row) {
-                return std::all_of(row.begin(), row.end(), [](Real value) {
-                    return std::isfinite(value);
-                });
-            });
-    };
     const auto unit_direction = [](std::array<Real, 3> direction,
                                    const char* diagnostic) {
         const Real magnitude = norm(direction);
@@ -4927,8 +4365,7 @@ evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
     for (const auto& record : snapshot.rules()) {
         if (!record.locally_owned ||
             record.retention != FreeSurfaceGeometryRetention::Retained ||
-            (record.role != FreeSurfaceGeometryRuleRole::Interface &&
-             record.role != FreeSurfaceGeometryRuleRole::Contact)) {
+            record.role != FreeSurfaceGeometryRuleRole::Contact) {
             continue;
         }
         if (record.reference_rule.points.size() !=
@@ -4936,13 +4373,21 @@ evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
             throw std::invalid_argument(
                 "free-surface functional first variation found mismatched reference and physical rule points");
         }
-        const int codimension =
-            record.role == FreeSurfaceGeometryRuleRole::Interface ? 1 : 2;
         const int ambient_dimension =
-            record.physical_rule.geometric_dimension + codimension;
+            record.physical_rule.geometric_dimension + 2;
         if (ambient_dimension <= 0 || ambient_dimension > 3) {
             throw std::invalid_argument(
                 "free-surface functional first variation found an invalid ambient dimension");
+        }
+        if (record.physical_boundary_marker < 0) {
+            throw std::invalid_argument(
+                "free-surface functional first variation found contact geometry without a physical marker");
+        }
+        const auto found_wall =
+            wall_index.find(record.physical_boundary_marker);
+        if (found_wall == wall_index.end()) {
+            throw std::logic_error(
+                "free-surface functional first variation could not resolve a canonical contact wall");
         }
 
         for (std::size_t point_index = 0;
@@ -4974,51 +4419,6 @@ evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
                     component = -component;
                 }
             }
-
-            if (record.role == FreeSurfaceGeometryRuleRole::Interface) {
-                const auto gradient = deformation.physical_gradient(
-                    record.reference_rule.provenance.parent_entity,
-                    reference.parent_coordinate,
-                    record.reference_rule.provenance);
-                if (!finite_gradient(gradient)) {
-                    throw std::invalid_argument(
-                        "free-surface functional first variation deformation returned a non-finite physical gradient");
-                }
-                Real surface_divergence{0.0};
-                for (int i = 0; i < ambient_dimension; ++i) {
-                    surface_divergence += gradient[static_cast<std::size_t>(i)]
-                                                  [static_cast<std::size_t>(i)];
-                    for (int j = 0; j < ambient_dimension; ++j) {
-                        surface_divergence -=
-                            liquid_normal[static_cast<std::size_t>(i)] *
-                            gradient[static_cast<std::size_t>(i)]
-                                    [static_cast<std::size_t>(j)] *
-                            liquid_normal[static_cast<std::size_t>(j)];
-                    }
-                }
-                const Real area_variation = surface_divergence * weight;
-                const Real volume_variation =
-                    dot(value, liquid_normal) * weight;
-                if (!std::isfinite(area_variation) ||
-                    !std::isfinite(volume_variation)) {
-                    throw std::invalid_argument(
-                        "free-surface functional first variation produced a non-finite interface contribution");
-                }
-                state.owned_liquid_gas_area_variation += area_variation;
-                state.owned_liquid_volume_variation += volume_variation;
-                continue;
-            }
-
-            if (record.physical_boundary_marker < 0) {
-                throw std::invalid_argument(
-                    "free-surface functional first variation found contact geometry without a physical marker");
-            }
-            const auto found_wall =
-                wall_index.find(record.physical_boundary_marker);
-            if (found_wall == wall_index.end()) {
-                throw std::logic_error(
-                    "free-surface functional first variation could not resolve a canonical contact wall");
-            }
             const auto wall_normal = unit_direction(
                 physical.boundary_normal,
                 "free-surface functional first variation found a degenerate wall normal");
@@ -5045,9 +4445,6 @@ evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
         }
     }
 
-    state.liquid_gas_surface_energy_variation =
-        parameters.surface_tension *
-        state.owned_liquid_gas_area_variation;
     for (auto& wall : state.walls) {
         if (!wall.equilibrium_contact_angle_radians.has_value()) {
             continue;
@@ -5059,20 +4456,8 @@ evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
         state.young_wall_energy_variation +=
             wall.young_wall_energy_variation;
     }
-    state.volume_constraint_potential_variation =
-        parameters.volume_multiplier *
-        state.owned_liquid_volume_variation;
-    state.total_potential_variation =
-        state.liquid_gas_surface_energy_variation +
-        state.young_wall_energy_variation +
-        state.volume_constraint_potential_variation;
-    if (!std::isfinite(state.owned_liquid_volume_variation) ||
-        !std::isfinite(state.owned_liquid_gas_area_variation) ||
-        !std::isfinite(state.owned_wetted_wall_area_variation) ||
-        !std::isfinite(state.liquid_gas_surface_energy_variation) ||
-        !std::isfinite(state.young_wall_energy_variation) ||
-        !std::isfinite(state.volume_constraint_potential_variation) ||
-        !std::isfinite(state.total_potential_variation)) {
+    if (!std::isfinite(state.owned_wetted_wall_area_variation) ||
+        !std::isfinite(state.young_wall_energy_variation)) {
         throw std::invalid_argument(
             "free-surface functional first variation produced a non-finite total");
     }

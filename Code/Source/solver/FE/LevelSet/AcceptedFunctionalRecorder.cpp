@@ -153,7 +153,7 @@ std::uint64_t acceptedFunctionalDeclarationContentKey(
 }
 
 std::vector<svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
-evaluateCurrentAcceptedFunctionals(
+currentAcceptedFunctionalLayouts(
     const FESystemHandle& sim)
 {
   const auto declarations =
@@ -320,7 +320,7 @@ evaluateCurrentAcceptedFunctionals(
             snapshot.ledger().pruned_rule_count != 0u ? 1.0 : 0.0,
             comm) == 1.0;
     auto global_state =
-        svmp::FE::interfaces::evaluateFreeSurfaceDiscreteFunctional(
+        svmp::FE::interfaces::freeSurfaceDiscreteFunctionalLayout(
             snapshot, declaration.parameters);
 
     const auto wall_count = static_cast<double>(global_state.walls.size());
@@ -356,33 +356,7 @@ evaluateCurrentAcceptedFunctionals(
       }
     }
 
-    const auto global_sum = [&comm](svmp::FE::Real local) {
-      return static_cast<svmp::FE::Real>(
-          collectiveSumDouble(static_cast<double>(local), comm));
-    };
-    global_state.owned_liquid_volume =
-        global_sum(global_state.owned_liquid_volume);
-    global_state.owned_liquid_gas_area =
-        global_sum(global_state.owned_liquid_gas_area);
-    global_state.owned_wetted_wall_area =
-        global_sum(global_state.owned_wetted_wall_area);
-    global_state.owned_contact_measure =
-        global_sum(global_state.owned_contact_measure);
-    global_state.liquid_gas_surface_energy =
-        global_sum(global_state.liquid_gas_surface_energy);
-    global_state.young_wall_energy =
-        global_sum(global_state.young_wall_energy);
-    global_state.volume_constraint_potential =
-        global_sum(global_state.volume_constraint_potential);
-    global_state.total_potential =
-        global_sum(global_state.total_potential);
-    for (auto& wall : global_state.walls) {
-      wall.owned_wetted_wall_area =
-          global_sum(wall.owned_wetted_wall_area);
-      wall.owned_contact_measure =
-          global_sum(wall.owned_contact_measure);
-      wall.young_wall_energy = global_sum(wall.young_wall_energy);
-    }
+    // The values are the declared functionals (applyDeclaredFunctionalForms).
     states.push_back(
         svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState{
             .interface_marker = declaration.interface_marker,
@@ -397,6 +371,15 @@ evaluateCurrentAcceptedFunctionals(
 }
 
 namespace {
+
+/// The snapshot rule role of the liquid volume on @p side.
+[[nodiscard]] svmp::FE::interfaces::FreeSurfaceGeometryRuleRole liquidVolumeRole(
+    svmp::FE::geometry::CutIntegrationSide side) noexcept
+{
+  return side == svmp::FE::geometry::CutIntegrationSide::Negative
+             ? svmp::FE::interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume
+             : svmp::FE::interfaces::FreeSurfaceGeometryRuleRole::PositiveVolume;
+}
 
 void attachAcceptedFreeSurfaceEndpointFunctionalPowers(
     const FESystemHandle& sim,
@@ -481,11 +464,8 @@ void attachAcceptedFreeSurfaceEndpointFunctionalPowers(
       deformation.physical_gradient =
           velocity.physical_gradient;
       local_power =
-          svmp::FE::interfaces::
-              evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
-                  **found,
-                  declaration.parameters,
-                  deformation);
+          svmp::FE::interfaces::evaluateFreeSurfaceWallAreaVariation(
+              **found, declaration.parameters, deformation);
     } catch (...) {
       local_failure = std::current_exception();
     }
@@ -503,22 +483,14 @@ void attachAcceptedFreeSurfaceEndpointFunctionalPowers(
       return static_cast<svmp::FE::Real>(
           collectiveSumDouble(static_cast<double>(value), comm));
     };
-    power.owned_liquid_volume_variation =
-        global_sum(power.owned_liquid_volume_variation);
-    power.owned_liquid_gas_area_variation =
-        global_sum(power.owned_liquid_gas_area_variation);
+    // The wetted-wall rates are pointwise here (the contact-line part of the
+    // power); declared wall functionals replace them, and the area and
+    // volume rates and the totals come from the declared functionals
+    // (applyDeclaredFunctionalForms).
     power.owned_wetted_wall_area_variation =
         global_sum(power.owned_wetted_wall_area_variation);
-    power.liquid_gas_surface_energy_variation =
-        global_sum(
-            power.liquid_gas_surface_energy_variation);
     power.young_wall_energy_variation =
         global_sum(power.young_wall_energy_variation);
-    power.volume_constraint_potential_variation =
-        global_sum(
-            power.volume_constraint_potential_variation);
-    power.total_potential_variation =
-        global_sum(power.total_potential_variation);
     for (auto& wall : power.walls) {
       wall.owned_wetted_wall_area_variation =
           global_sum(
@@ -529,8 +501,6 @@ void attachAcceptedFreeSurfaceEndpointFunctionalPowers(
     accepted.endpoint_functional_power = std::move(power);
   }
 }
-
-} // namespace
 
 void attachAcceptedActiveVolumeEnergies(
     const FESystemHandle& sim,
@@ -655,18 +625,23 @@ void attachAcceptedActiveVolumeEnergies(
           "[svMultiPhysics::Application] Active-volume energy snapshot storage is incomplete across the FE communicator for marker " +
           std::to_string(declaration.interface_marker) + ".");
     }
+    // The record's structure; the values are the declared functionals
+    // (applyDeclaredFunctionalForms), the point count the snapshot's.
     std::optional<
         svmp::FE::interfaces::FreeSurfaceActiveVolumeEnergyState>
         local_energy;
     std::exception_ptr local_failure;
     try {
-      const auto velocity = makeSnapshotVectorFieldEvaluator(
-          snapshotFieldAccess(*sim.fe_system, declaration.velocity_field),
-          accepted_solution,
-          "Accepted active-volume energy");
-      local_energy =
-          svmp::FE::interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
-              **found, parameters, velocity, &sim.fe_system->meshAccess());
+      svmp::FE::interfaces::FreeSurfaceActiveVolumeEnergyState energy;
+      energy.snapshot_revision_key = (*found)->revision().snapshot_revision_key;
+      energy.liquid_side = parameters.liquid_side;
+      energy.density = parameters.density;
+      energy.gravitational_acceleration = parameters.gravitational_acceleration;
+      energy.gravitational_reference_point = parameters.gravitational_reference_point;
+      energy.owned_quadrature_point_count =
+          svmp::FE::interfaces::freeSurfaceOwnedRulePointCount(
+              **found, liquidVolumeRole(parameters.liquid_side), &sim.fe_system->meshAccess());
+      local_energy = std::move(energy);
     } catch (...) {
       local_failure = std::current_exception();
     }
@@ -682,28 +657,9 @@ void attachAcceptedActiveVolumeEnergies(
     auto energy = std::move(*local_energy);
     energy.owned_quadrature_point_count =
         collectiveSumSize(energy.owned_quadrature_point_count, comm);
-    energy.owned_liquid_volume = static_cast<svmp::FE::Real>(
-        collectiveSumDouble(
-            static_cast<double>(energy.owned_liquid_volume), comm));
-    energy.kinetic_energy = static_cast<svmp::FE::Real>(
-        collectiveSumDouble(
-            static_cast<double>(energy.kinetic_energy), comm));
-    energy.gravitational_energy = static_cast<svmp::FE::Real>(
-        collectiveSumDouble(
-            static_cast<double>(energy.gravitational_energy), comm));
-    energy.gravitational_potential_power =
-        static_cast<svmp::FE::Real>(
-            collectiveSumDouble(
-                static_cast<double>(
-                    energy.gravitational_potential_power),
-                comm));
-    energy.total_energy =
-        energy.kinetic_energy + energy.gravitational_energy;
     accepted.active_volume_energy = std::move(energy);
   }
 }
-
-namespace {
 
 void attachAcceptedFreeSurfaceActiveVolumeDissipation(
     const FESystemHandle& sim,
@@ -775,17 +731,16 @@ void attachAcceptedFreeSurfaceActiveVolumeDissipation(
         local_dissipation;
     std::exception_ptr local_failure;
     try {
-      const auto velocity = makeSnapshotVectorFieldEvaluator(
-          snapshotFieldAccess(*sim.fe_system, declaration.velocity_field),
-          accepted_solution,
-          "Accepted active-volume dissipation");
-      local_dissipation =
-          svmp::FE::interfaces::
-              evaluateFreeSurfaceActiveVolumeDissipation(
-                  **found,
-                  *declaration.active_volume_dissipation_parameters,
-                  velocity,
-                  &sim.fe_system->meshAccess());
+      // The record's structure; the values are the declared functionals.
+      const auto& parameters = *declaration.active_volume_dissipation_parameters;
+      svmp::FE::interfaces::FreeSurfaceActiveVolumeDissipationState dissipation;
+      dissipation.snapshot_revision_key = (*found)->revision().snapshot_revision_key;
+      dissipation.liquid_side = parameters.liquid_side;
+      dissipation.dynamic_viscosity = parameters.dynamic_viscosity;
+      dissipation.owned_quadrature_point_count =
+          svmp::FE::interfaces::freeSurfaceOwnedRulePointCount(
+              **found, liquidVolumeRole(parameters.liquid_side), &sim.fe_system->meshAccess());
+      local_dissipation = std::move(dissipation);
     } catch (...) {
       local_failure = std::current_exception();
     }
@@ -803,18 +758,6 @@ void attachAcceptedFreeSurfaceActiveVolumeDissipation(
     dissipation.owned_quadrature_point_count =
         collectiveSumSize(
             dissipation.owned_quadrature_point_count, comm);
-    dissipation.owned_liquid_volume =
-        static_cast<svmp::FE::Real>(
-            collectiveSumDouble(
-                static_cast<double>(
-                    dissipation.owned_liquid_volume),
-                comm));
-    dissipation.bulk_viscous_dissipation_rate =
-        static_cast<svmp::FE::Real>(
-            collectiveSumDouble(
-                static_cast<double>(
-                    dissipation.bulk_viscous_dissipation_rate),
-                comm));
     accepted.active_volume_dissipation =
         std::move(dissipation);
   }
@@ -890,16 +833,16 @@ void attachAcceptedFreeSurfaceExternalPressurePowers(
         local_power;
     std::exception_ptr local_failure;
     try {
-      const auto velocity = makeSnapshotVectorFieldEvaluator(
-          snapshotFieldAccess(*sim.fe_system, declaration.velocity_field),
-          accepted_solution,
-          "Accepted exterior-pressure power");
-      local_power =
-          svmp::FE::interfaces::
-              evaluateFreeSurfaceExternalPressurePower(
-                  **found,
-                  *declaration.external_pressure_power_parameters,
-                  velocity);
+      // The record's structure; the values are the declared functionals.
+      const auto& parameters = *declaration.external_pressure_power_parameters;
+      svmp::FE::interfaces::FreeSurfaceExternalPressurePowerState power;
+      power.snapshot_revision_key = (*found)->revision().snapshot_revision_key;
+      power.liquid_side = parameters.liquid_side;
+      power.external_pressure = parameters.external_pressure;
+      power.owned_quadrature_point_count =
+          svmp::FE::interfaces::freeSurfaceOwnedRulePointCount(
+              **found, svmp::FE::interfaces::FreeSurfaceGeometryRuleRole::Interface);
+      local_power = std::move(power);
     } catch (...) {
       local_failure = std::current_exception();
     }
@@ -916,17 +859,6 @@ void attachAcceptedFreeSurfaceExternalPressurePowers(
     power.owned_quadrature_point_count =
         collectiveSumSize(
             power.owned_quadrature_point_count, comm);
-    const auto global_sum = [&comm](svmp::FE::Real value) {
-      return static_cast<svmp::FE::Real>(
-          collectiveSumDouble(static_cast<double>(value), comm));
-    };
-    power.owned_liquid_gas_area =
-        global_sum(power.owned_liquid_gas_area);
-    power.outward_liquid_volume_flux_rate =
-        global_sum(
-            power.outward_liquid_volume_flux_rate);
-    power.external_pressure_power =
-        global_sum(power.external_pressure_power);
     accepted.external_pressure_power = std::move(power);
   }
 }
@@ -1075,27 +1007,21 @@ void attachAcceptedFreeSurfaceBackwardEulerKineticWork(
         local_work;
     std::exception_ptr local_failure;
     try {
-      const auto previous_velocity = makeSnapshotVectorFieldEvaluator(
-          snapshotFieldAccess(*sim.fe_system, declaration.velocity_field),
-          previous_solution,
-          "Backward-Euler previous-endpoint kinetic work");
-      const auto endpoint_velocity = makeSnapshotVectorFieldEvaluator(
-          snapshotFieldAccess(*sim.fe_system, declaration.velocity_field),
-          accepted_solution,
-          "Backward-Euler accepted-endpoint kinetic work");
+      // The record's structure; the values are the declared kinetic energy
+      // on the previous state and on the step change
+      // (applyDeclaredFunctionalForms).
       const auto& parameters =
           *declaration.active_volume_energy_parameters;
-      local_work =
-          svmp::FE::interfaces::
-              evaluateFreeSurfaceBackwardEulerKineticWork(
-                  **found,
-                  parameters.liquid_side,
-                  parameters.density,
-                  previous_velocity_revision,
-                  endpoint_velocity_revision,
-                  previous_velocity,
-                  endpoint_velocity,
-                  &sim.fe_system->meshAccess());
+      svmp::FE::interfaces::FreeSurfaceBackwardEulerKineticWorkState work;
+      work.snapshot_revision_key = (*found)->revision().snapshot_revision_key;
+      work.previous_velocity_revision = previous_velocity_revision;
+      work.endpoint_velocity_revision = endpoint_velocity_revision;
+      work.liquid_side = parameters.liquid_side;
+      work.density = parameters.density;
+      work.owned_quadrature_point_count =
+          svmp::FE::interfaces::freeSurfaceOwnedRulePointCount(
+              **found, liquidVolumeRole(parameters.liquid_side), &sim.fe_system->meshAccess());
+      local_work = std::move(work);
     } catch (...) {
       local_failure = std::current_exception();
     }
@@ -1112,47 +1038,10 @@ void attachAcceptedFreeSurfaceBackwardEulerKineticWork(
     auto work = std::move(*local_work);
     work.owned_quadrature_point_count =
         collectiveSumSize(work.owned_quadrature_point_count, comm);
-    const auto global_sum = [&](svmp::FE::Real value) {
-      return static_cast<svmp::FE::Real>(
-          collectiveSumDouble(static_cast<double>(value), comm));
-    };
-    work.owned_liquid_volume =
-        global_sum(work.owned_liquid_volume);
-    work.kinetic_energy_before_on_endpoint_domain =
-        global_sum(
-            work.kinetic_energy_before_on_endpoint_domain);
-    work.kinetic_energy_after =
-        global_sum(work.kinetic_energy_after);
-    work.step_integrated_inertia_work =
-        global_sum(work.step_integrated_inertia_work);
-    work.time_discretization_loss =
-        global_sum(work.time_discretization_loss);
-    work.kinetic_energy_change_on_endpoint_domain =
-        work.kinetic_energy_after -
-        work.kinetic_energy_before_on_endpoint_domain;
-    work.identity_residual =
-        work.step_integrated_inertia_work -
-        work.kinetic_energy_change_on_endpoint_domain -
-        work.time_discretization_loss;
-
-    const auto& energy = *accepted.active_volume_energy;
-    const auto values_near = [](svmp::FE::Real left,
-                                svmp::FE::Real right) {
-      const auto scale = std::max(
-          {svmp::FE::Real{1.0}, std::abs(left), std::abs(right)});
-      return std::abs(left - right) <=
-          svmp::FE::Real{256.0} *
-              std::numeric_limits<svmp::FE::Real>::epsilon() * scale;
-    };
-    if (!values_near(
-            work.owned_liquid_volume,
-            energy.owned_liquid_volume) ||
-        !values_near(
-            work.kinetic_energy_after,
-            energy.kinetic_energy) ||
-        !values_near(work.identity_residual, svmp::FE::Real{0.0})) {
+    if (work.owned_quadrature_point_count !=
+        accepted.active_volume_energy->owned_quadrature_point_count) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Backward-Euler kinetic work is inconsistent with the accepted stored energy or its endpoint-domain identity for marker " +
+          "[svMultiPhysics::Application] Backward-Euler kinetic work and the accepted stored energy cover different liquid quadrature for marker " +
           std::to_string(declaration.interface_marker) + ".");
     }
     accepted.backward_euler_kinetic_work = std::move(work);
@@ -1229,14 +1118,18 @@ std::uint64_t levelSetMaintenanceCutTopologyRevision(
 // live on the generated domains of the walls the interface meets, so the
 // recorder integrates them over the snapshot's wall domains with the
 // coefficients of the discrete-functional declaration ("free_surface.<m>.
-// wall.<w>.wetted_area", "contact_measure", "young_energy").  The pointwise
-// evaluators above still produce every other field and the consistency
-// checks they pass.  The static minimizer reads the declared functionals
-// too (step E4, freeSurfaceFunctionalForm).  Totals stay sums of channels.
-// The contact-line part of the wall power is the declared wall functionals
+// wall.<w>.wetted_area", "contact_measure", "young_energy").  Since step
+// E4 there is no other evaluator of these values: the functions above give
+// the records their structure (walls, parameters, revisions,
+// quadrature-point counts), the static minimizer reads the declared
+// functionals too (freeSurfaceFunctionalForm), and a record without its
+// declared functionals fails closed.  Totals stay sums of channels.  The
+// contact-line part of the wall power is the declared wall functionals
 // "wall.<b>.wetted_area_rate" and "wall.<b>.young_energy_rate"
 // (Systems/FunctionalForms.h) over the snapshot's contact lines of each
-// wall; the contact stage states the wall slip the same way
+// wall, replacing the pointwise wetted-wall rates
+// (evaluateFreeSurfaceWallAreaVariation) where they are declared; the
+// contact stage states the wall slip the same way
 // (Interfaces/ContactLineStageObservables.cpp), and the line friction stays
 // pointwise until a deck with a nonzero friction calibrates its form.
 
@@ -1581,7 +1474,7 @@ std::vector<DeclaredFunctionalMasses> applyDeclaredFunctionalForms(
 {
   std::vector<DeclaredFunctionalMasses> out;
   const auto declared = systems::functionalForms(*sim.fe_system);
-  if (declared.empty() || states.empty()) {
+  if (states.empty()) {
     return out;
   }
   const auto& system = *sim.fe_system;
@@ -1616,8 +1509,36 @@ std::vector<DeclaredFunctionalMasses> applyDeclaredFunctionalForms(
       names.push_back(declaration.name);
       forms.push_back(declaration.form);
     }
-    if (forms.empty()) {
-      continue;  // nothing declared for this interface: the pointwise values stay
+    // Every quantity the record holds is a declared functional (D49 step
+    // E4: there is no other evaluator).  The forms that read fields are
+    // required only when a solution is supplied; the record's solution
+    // channels exist only then.
+    std::vector<std::string_view> required{
+        "liquid_volume", "liquid_gas_area", "liquid_gas_surface_energy"};
+    if (accepted.active_volume_energy.has_value()) {
+      required.insert(required.end(),
+                      {"kinetic_energy", "gravitational_energy", "gravitational_potential_power"});
+    }
+    if (accepted.active_volume_dissipation.has_value()) {
+      required.push_back("bulk_viscous_dissipation_rate");
+    }
+    if (accepted.external_pressure_power.has_value()) {
+      required.insert(required.end(), {"external_pressure_power", "liquid_volume_flux"});
+    }
+    if (accepted.endpoint_functional_power.has_value()) {
+      required.insert(required.end(), {"liquid_volume_rate", "liquid_gas_area_rate"});
+    }
+    for (const auto quantity : required) {
+      const bool declared_here = std::any_of(names.begin(), names.end(), [&](const std::string& name) {
+        return std::string_view(name).substr(prefix.size()) == quantity;
+      });
+      if (!declared_here) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] The free-surface record of interface " +
+            std::to_string(accepted.interface_marker) + " needs the declared functional " + prefix +
+            std::string(quantity) +
+            "; the formulation states its energies, powers and measures as measured 0-forms (D49).");
+      }
     }
     // The per-wall quantities over the snapshot's wall domains.
     const auto record_declaration = std::find_if(
@@ -1854,6 +1775,25 @@ std::optional<std::vector<svmp::FE::Real>> evaluateDeclaredFreeSurfaceFunctional
     out.push_back(value.value);
   }
   return out;
+}
+
+std::vector<svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+evaluateDeclaredAcceptedFunctionals(
+    const FESystemHandle& sim,
+    std::span<const svmp::FE::Real> solution)
+{
+  auto states = currentAcceptedFunctionalLayouts(sim);
+  if (states.empty()) {
+    return states;
+  }
+  if (!solution.empty()) {
+    attachAcceptedFreeSurfaceEndpointFunctionalPowers(sim, solution, states);
+    attachAcceptedActiveVolumeEnergies(sim, solution, states);
+    attachAcceptedFreeSurfaceActiveVolumeDissipation(sim, solution, states);
+    attachAcceptedFreeSurfaceExternalPressurePowers(sim, solution, states);
+  }
+  (void)applyDeclaredFunctionalForms(sim, solution, {}, states);
+  return states;
 }
 
 std::vector<svmp::FE::level_set::LevelSetAuthoritativeFunctionalValue>
@@ -2184,7 +2124,7 @@ recordAcceptedFunctionals(
     throw std::runtime_error(
         "[svMultiPhysics::Application] Accepted contact-stage states must have communicator-consistent unique nonnegative interface markers and must bind to the pre-maintenance endpoint revision.");
   }
-  auto accepted_states = evaluateCurrentAcceptedFunctionals(sim);
+  auto accepted_states = currentAcceptedFunctionalLayouts(sim);
   if (accepted_states.size() != declarations.size()) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Accepted free-surface functional evaluation returned incomplete declaration coverage.");

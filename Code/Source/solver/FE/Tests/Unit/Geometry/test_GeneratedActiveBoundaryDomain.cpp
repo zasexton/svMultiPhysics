@@ -36,6 +36,145 @@ namespace {
 namespace FE = svmp::FE;
 namespace interfaces = svmp::FE::interfaces;
 
+/// The physical measure of the snapshot's retained, rank-owned rules of
+/// @p role (on one physical boundary when @p boundary_marker is set): the
+/// geometry the declared measures integrate (D49 E4 retired the pointwise
+/// functional evaluators that summed it).
+FE::Real ownedRuleMeasure(const interfaces::FreeSurfaceGeometrySnapshot& snapshot,
+                          interfaces::FreeSurfaceGeometryRuleRole role,
+                          int boundary_marker = -1)
+{
+    FE::Real measure{0.0};
+    for (const auto& record : snapshot.rules()) {
+        if (!record.locally_owned ||
+            record.retention != interfaces::FreeSurfaceGeometryRetention::Retained ||
+            record.role != role ||
+            (boundary_marker >= 0 && record.physical_boundary_marker != boundary_marker)) {
+            continue;
+        }
+        measure += record.physical_rule.physical_measure;
+    }
+    return measure;
+}
+
+// Test references of the capillary functional and of the interface part of
+// its first variation on the snapshot's retained, rank-owned rules: the
+// pointwise sums and the surface-divergence identity that D49 E4 retired
+// from production (the records evaluate the declared measured 0-forms, which
+// state the same integrals, on the same rules).  They are the
+// finite-difference reference of the frozen WP-4 and WP-8 first-variation
+// evidence, with the arithmetic of the retired evaluator; the wetted-wall
+// part of the variation is the production evaluateFreeSurfaceWallAreaVariation.
+interfaces::FreeSurfaceDiscreteFunctionalState referenceDiscreteFunctional(
+    const interfaces::FreeSurfaceGeometrySnapshot& snapshot,
+    const interfaces::FreeSurfaceDiscreteFunctionalParameters& parameters)
+{
+    auto state = interfaces::freeSurfaceDiscreteFunctionalLayout(snapshot, parameters);
+    const auto volume_role =
+        parameters.liquid_side == FE::geometry::CutIntegrationSide::Negative
+            ? interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume
+            : interfaces::FreeSurfaceGeometryRuleRole::PositiveVolume;
+    const auto wall_role =
+        parameters.liquid_side == FE::geometry::CutIntegrationSide::Negative
+            ? interfaces::FreeSurfaceGeometryRuleRole::NegativeExteriorBoundary
+            : interfaces::FreeSurfaceGeometryRuleRole::PositiveExteriorBoundary;
+    const auto wall_of = [&state](int boundary_marker) -> interfaces::FreeSurfaceDiscreteWallFunctionalState& {
+        for (auto& wall : state.walls) {
+            if (wall.boundary_marker == boundary_marker) {
+                return wall;
+            }
+        }
+        throw std::logic_error("reference functional: wall outside the layout");
+    };
+    for (const auto& record : snapshot.rules()) {
+        if (!record.locally_owned ||
+            record.retention != interfaces::FreeSurfaceGeometryRetention::Retained) {
+            continue;
+        }
+        const FE::Real measure = record.physical_rule.physical_measure;
+        if (record.role == volume_role) {
+            state.owned_liquid_volume += measure;
+        } else if (record.role == interfaces::FreeSurfaceGeometryRuleRole::Interface) {
+            state.owned_liquid_gas_area += measure;
+        } else if (record.role == wall_role) {
+            state.owned_wetted_wall_area += measure;
+            wall_of(record.physical_boundary_marker).owned_wetted_wall_area += measure;
+        } else if (record.role == interfaces::FreeSurfaceGeometryRuleRole::Contact) {
+            state.owned_contact_measure += measure;
+            wall_of(record.physical_boundary_marker).owned_contact_measure += measure;
+        }
+    }
+    state.liquid_gas_surface_energy = parameters.surface_tension * state.owned_liquid_gas_area;
+    for (auto& wall : state.walls) {
+        if (wall.equilibrium_contact_angle_radians.has_value()) {
+            wall.young_wall_energy = -parameters.surface_tension *
+                                     std::cos(*wall.equilibrium_contact_angle_radians) *
+                                     wall.owned_wetted_wall_area;
+            state.young_wall_energy += wall.young_wall_energy;
+        }
+    }
+    state.volume_constraint_potential = parameters.volume_multiplier * state.owned_liquid_volume;
+    state.total_potential =
+        state.liquid_gas_surface_energy + state.young_wall_energy + state.volume_constraint_potential;
+    return state;
+}
+
+interfaces::FreeSurfaceDiscreteFunctionalVariationState referenceFirstVariation(
+    const interfaces::FreeSurfaceGeometrySnapshot& snapshot,
+    const interfaces::FreeSurfaceDiscreteFunctionalParameters& parameters,
+    const interfaces::FreeSurfaceDiscreteFunctionalDeformationEvaluator& deformation)
+{
+    auto state = interfaces::evaluateFreeSurfaceWallAreaVariation(snapshot, parameters, deformation);
+    const bool positive_liquid = parameters.liquid_side == FE::geometry::CutIntegrationSide::Positive;
+    for (const auto& record : snapshot.rules()) {
+        if (!record.locally_owned ||
+            record.retention != interfaces::FreeSurfaceGeometryRetention::Retained ||
+            record.role != interfaces::FreeSurfaceGeometryRuleRole::Interface) {
+            continue;
+        }
+        const int ambient_dimension = record.physical_rule.geometric_dimension + 1;
+        for (std::size_t point_index = 0; point_index < record.physical_rule.points.size(); ++point_index) {
+            const auto& physical = record.physical_rule.points[point_index];
+            const auto& reference = record.reference_rule.points[point_index];
+            const FE::Real weight = physical.physical_weight;
+            const auto value = deformation.value(record.reference_rule.provenance.parent_entity,
+                                                 reference.parent_coordinate,
+                                                 record.reference_rule.provenance);
+            auto liquid_normal = physical.normal;
+            const FE::Real magnitude =
+                std::sqrt(liquid_normal[0] * liquid_normal[0] + liquid_normal[1] * liquid_normal[1] +
+                          liquid_normal[2] * liquid_normal[2]);
+            for (auto& component : liquid_normal) {
+                component /= magnitude;
+                if (positive_liquid) {
+                    component = -component;
+                }
+            }
+            const auto gradient = deformation.physical_gradient(record.reference_rule.provenance.parent_entity,
+                                                                reference.parent_coordinate,
+                                                                record.reference_rule.provenance);
+            FE::Real surface_divergence{0.0};
+            for (int i = 0; i < ambient_dimension; ++i) {
+                const auto ui = static_cast<std::size_t>(i);
+                surface_divergence += gradient[ui][ui];
+                for (int j = 0; j < ambient_dimension; ++j) {
+                    const auto uj = static_cast<std::size_t>(j);
+                    surface_divergence -= liquid_normal[ui] * gradient[ui][uj] * liquid_normal[uj];
+                }
+            }
+            state.owned_liquid_gas_area_variation += surface_divergence * weight;
+            state.owned_liquid_volume_variation +=
+                (value[0] * liquid_normal[0] + value[1] * liquid_normal[1] + value[2] * liquid_normal[2]) * weight;
+        }
+    }
+    state.liquid_gas_surface_energy_variation = parameters.surface_tension * state.owned_liquid_gas_area_variation;
+    state.volume_constraint_potential_variation = parameters.volume_multiplier * state.owned_liquid_volume_variation;
+    state.total_potential_variation = state.liquid_gas_surface_energy_variation +
+                                      state.young_wall_energy_variation +
+                                      state.volume_constraint_potential_variation;
+    return state;
+}
+
 void record_real(std::ostream& output, FE::Real value)
 {
     output << std::bit_cast<std::uint64_t>(value) << '\n';
@@ -3000,28 +3139,34 @@ TEST(FreeSurfaceGeometrySnapshot,
          .slip_length = FE::Real{0.2},
          .dynamic_viscosity = FE::Real{0.4}});
     functional_parameters.volume_multiplier = 3.0;
+    // The layout of the record and the owned rules the declared measures
+    // integrate (D49 E4: the values are declared measured 0-forms).
     const auto functional =
-        interfaces::evaluateFreeSurfaceDiscreteFunctional(
+        interfaces::freeSurfaceDiscreteFunctionalLayout(
             *snapshot, functional_parameters);
     EXPECT_EQ(functional.snapshot_revision_key,
               snapshot->revision().snapshot_revision_key);
-    EXPECT_NEAR(functional.owned_liquid_volume,
+    EXPECT_NEAR(ownedRuleMeasure(
+                    *snapshot,
+                    interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume),
                 snapshot->ledger().owned_retained_negative_physical_volume,
                 1.0e-14);
-    EXPECT_NEAR(functional.owned_liquid_gas_area,
+    EXPECT_NEAR(ownedRuleMeasure(
+                    *snapshot,
+                    interfaces::FreeSurfaceGeometryRuleRole::Interface),
                 snapshot->ledger().interface_physical_measure,
                 1.0e-14);
-    EXPECT_NEAR(functional.owned_wetted_wall_area,
+    EXPECT_NEAR(ownedRuleMeasure(
+                    *snapshot,
+                    interfaces::FreeSurfaceGeometryRuleRole::NegativeExteriorBoundary,
+                    10),
                 expected_negative_wall_area,
                 1.0e-14);
-    EXPECT_NEAR(functional.owned_contact_measure,
+    EXPECT_NEAR(ownedRuleMeasure(
+                    *snapshot,
+                    interfaces::FreeSurfaceGeometryRuleRole::Contact,
+                    10),
                 expected_contact_measure,
-                1.0e-14);
-    EXPECT_NEAR(functional.liquid_gas_surface_energy,
-                2.0 * functional.owned_liquid_gas_area,
-                1.0e-14);
-    EXPECT_NEAR(functional.young_wall_energy,
-                -functional.owned_wetted_wall_area,
                 1.0e-14);
     ASSERT_EQ(functional.walls.size(), 1u);
     EXPECT_EQ(functional.walls.front().boundary_marker, 10);
@@ -3031,23 +3176,10 @@ TEST(FreeSurfaceGeometrySnapshot,
                      .equilibrium_contact_angle_radians,
                 std::acos(FE::Real{0.5}),
                 1.0e-14);
-    EXPECT_NEAR(functional.walls.front().owned_wetted_wall_area,
-                functional.owned_wetted_wall_area,
-                1.0e-14);
-    EXPECT_NEAR(functional.walls.front().owned_contact_measure,
-                functional.owned_contact_measure,
-                1.0e-14);
-    EXPECT_NEAR(functional.walls.front().young_wall_energy,
-                functional.young_wall_energy,
-                1.0e-14);
-    EXPECT_NEAR(functional.volume_constraint_potential,
-                3.0 * functional.owned_liquid_volume,
-                1.0e-14);
-    EXPECT_NEAR(functional.total_potential,
-                functional.liquid_gas_surface_energy +
-                    functional.young_wall_energy +
-                    functional.volume_constraint_potential,
-                1.0e-14);
+    EXPECT_EQ(functional.walls.front().owned_wetted_wall_area, 0.0);
+    EXPECT_EQ(functional.owned_liquid_volume, 0.0);
+    EXPECT_DOUBLE_EQ(functional.surface_tension, 2.0);
+    EXPECT_DOUBLE_EQ(functional.volume_multiplier, 3.0);
 
     interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator velocity;
     velocity.value = [](FE::GlobalIndex,
@@ -3210,21 +3342,21 @@ TEST(FreeSurfaceGeometrySnapshot,
     auto invalid_parameters = functional_parameters;
     invalid_parameters.surface_tension = -1.0;
     EXPECT_THROW(
-        (void)interfaces::evaluateFreeSurfaceDiscreteFunctional(
+        (void)interfaces::freeSurfaceDiscreteFunctionalLayout(
             *snapshot, invalid_parameters),
         std::invalid_argument);
     invalid_parameters = functional_parameters;
     invalid_parameters.young_wall_coefficients.front()
         .equilibrium_contact_angle_radians = 0.0;
     EXPECT_THROW(
-        (void)interfaces::evaluateFreeSurfaceDiscreteFunctional(
+        (void)interfaces::freeSurfaceDiscreteFunctionalLayout(
             *snapshot, invalid_parameters),
         std::invalid_argument);
     invalid_parameters = functional_parameters;
     invalid_parameters.young_wall_coefficients.push_back(
         invalid_parameters.young_wall_coefficients.front());
     EXPECT_THROW(
-        (void)interfaces::evaluateFreeSurfaceDiscreteFunctional(
+        (void)interfaces::freeSurfaceDiscreteFunctionalLayout(
             *snapshot, invalid_parameters),
         std::invalid_argument);
 
@@ -4802,16 +4934,16 @@ TEST(FreeSurfaceGeometrySnapshot,
         parameters.volume_multiplier = FE::Real{-0.8};
 
         const auto base =
-            interfaces::evaluateFreeSurfaceDiscreteFunctional(
+            referenceDiscreteFunctional(
                 *base_snapshot, parameters);
         const auto plus =
-            interfaces::evaluateFreeSurfaceDiscreteFunctional(
+            referenceDiscreteFunctional(
                 *plus_snapshot, parameters);
         const auto minus =
-            interfaces::evaluateFreeSurfaceDiscreteFunctional(
+            referenceDiscreteFunctional(
                 *minus_snapshot, parameters);
         const auto variation =
-            interfaces::evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
+            referenceFirstVariation(
                 *base_snapshot, parameters, deformation);
 
         EXPECT_EQ(variation.snapshot_revision_key,
@@ -5379,16 +5511,16 @@ TEST(FreeSurfaceGeometrySnapshot,
         parameters.volume_multiplier = FE::Real{-0.7};
 
         const auto base =
-            interfaces::evaluateFreeSurfaceDiscreteFunctional(
+            referenceDiscreteFunctional(
                 *base_snapshot, parameters);
         const auto plus =
-            interfaces::evaluateFreeSurfaceDiscreteFunctional(
+            referenceDiscreteFunctional(
                 *plus_snapshot, parameters);
         const auto minus =
-            interfaces::evaluateFreeSurfaceDiscreteFunctional(
+            referenceDiscreteFunctional(
                 *minus_snapshot, parameters);
         const auto variation =
-            interfaces::evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
+            referenceFirstVariation(
                 *base_snapshot, parameters, deformation);
 
         EXPECT_EQ(variation.snapshot_revision_key,
@@ -5478,107 +5610,6 @@ TEST(FreeSurfaceGeometrySnapshot,
 }
 
 TEST(FreeSurfaceGeometrySnapshot,
-     GravitationalPotentialPowerMatchesMaterialTranslationDifference)
-{
-    constexpr int interface_marker = 116;
-    constexpr FE::Real epsilon = FE::Real{1.0e-6};
-    constexpr std::array<FE::Real, 3> translation_velocity{
-        {FE::Real{0.37}, FE::Real{-0.21}, FE::Real{0.0}}};
-    const std::vector<std::array<FE::Real, 3>> base_coordinates{
-        {{0.0, 0.0, 0.0}},
-        {{1.0, 0.0, 0.0}},
-        {{1.0, 1.0, 0.0}},
-        {{0.0, 1.0, 0.0}},
-    };
-    const auto translated_coordinates =
-        [&](FE::Real signed_step) {
-            auto coordinates = base_coordinates;
-            for (auto& point : coordinates) {
-                for (std::size_t component = 0u;
-                     component < point.size();
-                     ++component) {
-                    point[component] +=
-                        signed_step *
-                        translation_velocity[component];
-                }
-            }
-            return coordinates;
-        };
-
-    const SingleQuadBoundaryMesh base_mesh(
-        7, 0, 1, 0, true, FE::ElementType::Quad4,
-        base_coordinates);
-    const SingleQuadBoundaryMesh plus_mesh(
-        7, 0, 1, 0, true, FE::ElementType::Quad4,
-        translated_coordinates(epsilon));
-    const SingleQuadBoundaryMesh minus_mesh(
-        7, 0, 1, 0, true, FE::ElementType::Quad4,
-        translated_coordinates(-epsilon));
-    const auto build_snapshot = [&](const auto& mesh,
-                                    std::string owner) {
-        return interfaces::buildFreeSurfaceGeometrySnapshot(
-            verticalInterfaceWithVolumes(interface_marker),
-            {},
-            {},
-            mesh,
-            snapshotPolicyWithoutBoundary(),
-            verticalScalar(),
-            std::move(owner));
-    };
-    const auto base_snapshot = build_snapshot(base_mesh, "gravity_base");
-    const auto plus_snapshot = build_snapshot(plus_mesh, "gravity_plus");
-    const auto minus_snapshot = build_snapshot(minus_mesh, "gravity_minus");
-
-    interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator velocity;
-    velocity.value =
-        [translation_velocity](FE::GlobalIndex,
-           const std::array<FE::Real, 3>&,
-           const FE::geometry::CutQuadratureProvenance&) {
-            return translation_velocity;
-        };
-
-    for (const auto side : {
-             FE::geometry::CutIntegrationSide::Negative,
-             FE::geometry::CutIntegrationSide::Positive}) {
-        interfaces::FreeSurfaceActiveVolumeEnergyParameters parameters;
-        parameters.liquid_side = side;
-        parameters.density = FE::Real{2.7};
-        parameters.gravitational_acceleration =
-            {{FE::Real{1.4}, FE::Real{-2.3}, FE::Real{0.0}}};
-        parameters.gravitational_reference_point =
-            {{FE::Real{-0.8}, FE::Real{0.45}, FE::Real{0.0}}};
-
-        const auto base =
-            interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
-                *base_snapshot, parameters, velocity);
-        const auto plus =
-            interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
-                *plus_snapshot, parameters, velocity);
-        const auto minus =
-            interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
-                *minus_snapshot, parameters, velocity);
-        const FE::Real central_difference =
-            (plus.gravitational_energy - minus.gravitational_energy) /
-            (FE::Real{2.0} * epsilon);
-
-        EXPECT_GT(base.owned_liquid_volume, FE::Real{0.0});
-        EXPECT_NE(base.gravitational_potential_power, FE::Real{0.0});
-        EXPECT_NEAR(
-            central_difference,
-            base.gravitational_potential_power,
-            FE::Real{2.0e-9});
-        EXPECT_NEAR(
-            plus.owned_liquid_volume,
-            base.owned_liquid_volume,
-            FE::Real{1.0e-14});
-        EXPECT_NEAR(
-            minus.owned_liquid_volume,
-            base.owned_liquid_volume,
-            FE::Real{1.0e-14});
-    }
-}
-
-TEST(FreeSurfaceGeometrySnapshot,
      DiscreteFunctionalExcludesGhostRuleContributions)
 {
     constexpr int interface_marker = 117;
@@ -5636,250 +5667,36 @@ TEST(FreeSurfaceGeometrySnapshot,
                 {{0.0, 0.0, 0.0}},
             }};
         };
-    const auto owner_state =
-        interfaces::evaluateFreeSurfaceDiscreteFunctional(
+    // The values are declared measured 0-forms (D49 E4); the snapshot
+    // supplies the owned rules they integrate, the layout and the counts.
+    const auto owner_layout =
+        interfaces::freeSurfaceDiscreteFunctionalLayout(
             *owner_snapshot, parameters);
     const auto owner_variation =
-        interfaces::evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
+        interfaces::evaluateFreeSurfaceWallAreaVariation(
             *owner_snapshot, parameters, deformation);
-    interfaces::FreeSurfaceActiveVolumeEnergyParameters
-        volume_energy_parameters;
-    volume_energy_parameters.density = 3.0;
-    volume_energy_parameters.gravitational_acceleration =
-        {{0.0, -2.0, 0.0}};
-    interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator
-        volume_velocity;
-    volume_velocity.value =
-        [](FE::GlobalIndex,
-           const std::array<FE::Real, 3>&,
-           const FE::geometry::CutQuadratureProvenance&) {
-            return std::array<FE::Real, 3>{{2.0, -1.0, 0.0}};
-        };
-    volume_velocity.physical_gradient =
-        [](FE::GlobalIndex,
-           const std::array<FE::Real, 3>&,
-           const FE::geometry::CutQuadratureProvenance&) {
-            return FE::interfaces::
-                FreeSurfaceDiscreteFunctionalPhysicalGradient{{
-                    {{1.0, 2.0, 0.0}},
-                    {{0.0, -1.0, 0.0}},
-                    {{0.0, 0.0, 0.0}},
-                }};
-        };
-    const auto owner_volume_energy =
-        interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
-            *owner_snapshot,
-            volume_energy_parameters,
-            volume_velocity);
-    interfaces::FreeSurfaceActiveVolumeDissipationParameters
-        volume_dissipation_parameters;
-    volume_dissipation_parameters.dynamic_viscosity = 0.5;
-    const auto owner_volume_dissipation =
-        interfaces::evaluateFreeSurfaceActiveVolumeDissipation(
-            *owner_snapshot,
-            volume_dissipation_parameters,
-            volume_velocity);
-    interfaces::FreeSurfaceExternalPressurePowerParameters
-        exterior_pressure_parameters;
-    exterior_pressure_parameters.external_pressure = 2.5;
-    const auto owner_exterior_pressure_power =
-        interfaces::evaluateFreeSurfaceExternalPressurePower(
-            *owner_snapshot,
-            exterior_pressure_parameters,
-            volume_velocity);
-    interfaces::FreeSurfaceDiscreteFunctionalDeformationEvaluator
-        endpoint_velocity_deformation;
-    endpoint_velocity_deformation.value = volume_velocity.value;
-    endpoint_velocity_deformation.physical_gradient =
-        volume_velocity.physical_gradient;
-    const auto endpoint_velocity_variation =
-        interfaces::evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
-            *owner_snapshot,
-            parameters,
-            endpoint_velocity_deformation);
-    interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator
-        previous_volume_velocity;
-    previous_volume_velocity.value =
-        [](FE::GlobalIndex,
-           const std::array<FE::Real, 3>&,
-           const FE::geometry::CutQuadratureProvenance&) {
-            return std::array<FE::Real, 3>{{1.0, 0.0, 0.0}};
-        };
-    const auto owner_kinetic_work =
-        interfaces::evaluateFreeSurfaceBackwardEulerKineticWork(
-            *owner_snapshot,
-            volume_energy_parameters.liquid_side,
-            volume_energy_parameters.density,
-            /*previous_velocity_revision=*/17u,
-            /*endpoint_velocity_revision=*/18u,
-            previous_volume_velocity,
-            volume_velocity);
-    EXPECT_GT(owner_state.owned_liquid_volume, 0.0);
-    EXPECT_GT(owner_state.owned_liquid_gas_area, 0.0);
-    EXPECT_GT(owner_variation.owned_liquid_volume_variation, 0.0);
-    EXPECT_GT(owner_variation.owned_liquid_gas_area_variation, 0.0);
-    EXPECT_GT(owner_variation.total_potential_variation, 0.0);
-    EXPECT_EQ(
-        owner_volume_energy.snapshot_revision_key,
-        owner_snapshot->revision().snapshot_revision_key);
-    EXPECT_GT(owner_volume_energy.owned_quadrature_point_count, 0u);
-    EXPECT_NEAR(
-        owner_volume_energy.owned_liquid_volume,
-        owner_state.owned_liquid_volume,
-        1.0e-14);
-    EXPECT_NEAR(
-        owner_volume_energy.kinetic_energy,
-        FE::Real{0.5} * FE::Real{3.0} * FE::Real{5.0} *
-            owner_state.owned_liquid_volume,
-        1.0e-14);
-    EXPECT_NEAR(
-        owner_volume_energy.gravitational_energy,
-        1.5,
-        1.0e-14);
-    EXPECT_NEAR(
-        owner_volume_energy.gravitational_potential_power,
-        FE::Real{-6.0} * owner_state.owned_liquid_volume,
-        1.0e-14);
-    EXPECT_NEAR(
-        owner_volume_energy.total_energy,
-        owner_volume_energy.kinetic_energy +
-            owner_volume_energy.gravitational_energy,
-        1.0e-14);
-    EXPECT_EQ(
-        owner_volume_dissipation.snapshot_revision_key,
-        owner_snapshot->revision().snapshot_revision_key);
-    EXPECT_EQ(
-        owner_volume_dissipation.owned_quadrature_point_count,
-        owner_volume_energy.owned_quadrature_point_count);
-    EXPECT_NEAR(
-        owner_volume_dissipation.owned_liquid_volume,
-        owner_state.owned_liquid_volume,
-        1.0e-14);
-    EXPECT_NEAR(
-        owner_volume_dissipation.bulk_viscous_dissipation_rate,
-        FE::Real{4.0} * owner_state.owned_liquid_volume,
-        1.0e-14);
-    EXPECT_EQ(
-        owner_exterior_pressure_power.snapshot_revision_key,
-        owner_snapshot->revision().snapshot_revision_key);
-    EXPECT_GT(
-        owner_exterior_pressure_power.owned_quadrature_point_count,
-        0u);
-    EXPECT_NEAR(
-        owner_exterior_pressure_power.owned_liquid_gas_area,
-        owner_state.owned_liquid_gas_area,
-        1.0e-14);
-    EXPECT_NEAR(
-        owner_exterior_pressure_power
-            .outward_liquid_volume_flux_rate,
-        endpoint_velocity_variation
-            .owned_liquid_volume_variation,
-        1.0e-14);
-    EXPECT_NEAR(
-        owner_exterior_pressure_power.external_pressure_power,
-        -exterior_pressure_parameters.external_pressure *
-            owner_exterior_pressure_power
-                .outward_liquid_volume_flux_rate,
-        1.0e-14);
-    EXPECT_EQ(
-        owner_kinetic_work.snapshot_revision_key,
-        owner_snapshot->revision().snapshot_revision_key);
-    EXPECT_EQ(owner_kinetic_work.previous_velocity_revision, 17u);
-    EXPECT_EQ(owner_kinetic_work.endpoint_velocity_revision, 18u);
-    EXPECT_EQ(
-        owner_kinetic_work.owned_quadrature_point_count,
-        owner_volume_energy.owned_quadrature_point_count);
-    EXPECT_NEAR(
-        owner_kinetic_work.owned_liquid_volume,
-        owner_state.owned_liquid_volume,
-        1.0e-14);
-    EXPECT_NEAR(
-        owner_kinetic_work.kinetic_energy_before_on_endpoint_domain,
-        FE::Real{1.5} * owner_state.owned_liquid_volume,
-        1.0e-14);
-    EXPECT_NEAR(
-        owner_kinetic_work.kinetic_energy_after,
-        FE::Real{7.5} * owner_state.owned_liquid_volume,
-        1.0e-14);
-    EXPECT_NEAR(
-        owner_kinetic_work.kinetic_energy_change_on_endpoint_domain,
-        FE::Real{6.0} * owner_state.owned_liquid_volume,
-        1.0e-14);
-    EXPECT_NEAR(
-        owner_kinetic_work.step_integrated_inertia_work,
-        FE::Real{9.0} * owner_state.owned_liquid_volume,
-        1.0e-14);
-    EXPECT_NEAR(
-        owner_kinetic_work.time_discretization_loss,
-        FE::Real{3.0} * owner_state.owned_liquid_volume,
-        1.0e-14);
-    EXPECT_NEAR(owner_kinetic_work.identity_residual, 0.0, 1.0e-14);
-    EXPECT_THROW(
-        (void)interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
-            *owner_snapshot,
-            volume_energy_parameters,
-            {}),
-        std::invalid_argument);
-    auto invalid_volume_energy_parameters =
-        volume_energy_parameters;
-    invalid_volume_energy_parameters.density = 0.0;
-    EXPECT_THROW(
-        (void)interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
-            *owner_snapshot,
-            invalid_volume_energy_parameters,
-            volume_velocity),
-        std::invalid_argument);
-    EXPECT_THROW(
-        (void)interfaces::evaluateFreeSurfaceBackwardEulerKineticWork(
-            *owner_snapshot,
-            volume_energy_parameters.liquid_side,
-            volume_energy_parameters.density,
-            /*previous_velocity_revision=*/17u,
-            /*endpoint_velocity_revision=*/18u,
-            previous_volume_velocity,
-            {}),
-        std::invalid_argument);
-    EXPECT_THROW(
-        (void)interfaces::evaluateFreeSurfaceBackwardEulerKineticWork(
-            *owner_snapshot,
-            volume_energy_parameters.liquid_side,
-            volume_energy_parameters.density,
-            /*previous_velocity_revision=*/0u,
-            /*endpoint_velocity_revision=*/18u,
-            previous_volume_velocity,
-            volume_velocity),
-        std::invalid_argument);
-    EXPECT_THROW(
-        (void)interfaces::evaluateFreeSurfaceActiveVolumeDissipation(
-            *owner_snapshot,
-            volume_dissipation_parameters,
-            previous_volume_velocity),
-        std::invalid_argument);
-    auto invalid_volume_dissipation_parameters =
-        volume_dissipation_parameters;
-    invalid_volume_dissipation_parameters.dynamic_viscosity = 0.0;
-    EXPECT_THROW(
-        (void)interfaces::evaluateFreeSurfaceActiveVolumeDissipation(
-            *owner_snapshot,
-            invalid_volume_dissipation_parameters,
-            volume_velocity),
-        std::invalid_argument);
-    EXPECT_THROW(
-        (void)interfaces::evaluateFreeSurfaceExternalPressurePower(
-            *owner_snapshot,
-            exterior_pressure_parameters,
-            {}),
-        std::invalid_argument);
-    auto invalid_exterior_pressure_parameters =
-        exterior_pressure_parameters;
-    invalid_exterior_pressure_parameters.external_pressure =
-        std::numeric_limits<FE::Real>::quiet_NaN();
-    EXPECT_THROW(
-        (void)interfaces::evaluateFreeSurfaceExternalPressurePower(
-            *owner_snapshot,
-            invalid_exterior_pressure_parameters,
-            volume_velocity),
-        std::invalid_argument);
+    EXPECT_EQ(owner_layout.snapshot_revision_key,
+              owner_snapshot->revision().snapshot_revision_key);
+    EXPECT_EQ(owner_layout.owned_liquid_volume, 0.0);
+    EXPECT_GT(ownedRuleMeasure(
+                  *owner_snapshot,
+                  interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume),
+              0.0);
+    EXPECT_GT(ownedRuleMeasure(
+                  *owner_snapshot,
+                  interfaces::FreeSurfaceGeometryRuleRole::Interface),
+              0.0);
+    EXPECT_GT(interfaces::freeSurfaceOwnedRulePointCount(
+                  *owner_snapshot,
+                  interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume),
+              0u);
+    EXPECT_GT(interfaces::freeSurfaceOwnedRulePointCount(
+                  *owner_snapshot,
+                  interfaces::FreeSurfaceGeometryRuleRole::Interface),
+              0u);
+    EXPECT_EQ(owner_variation.owned_wetted_wall_area_variation, 0.0);
+    EXPECT_EQ(owner_variation.owned_liquid_volume_variation, 0.0);
+    EXPECT_EQ(owner_variation.owned_liquid_gas_area_variation, 0.0);
 
     const SingleQuadBoundaryMesh ghost_mesh(
         /*marker=*/7,
@@ -5911,90 +5728,33 @@ TEST(FreeSurfaceGeometrySnapshot,
             verticalScalar(),
             "functional_owner",
             std::move(ghost_collective));
-    const auto ghost_state =
-        interfaces::evaluateFreeSurfaceDiscreteFunctional(
+    const auto ghost_layout =
+        interfaces::freeSurfaceDiscreteFunctionalLayout(
             *ghost_snapshot, parameters);
     const auto ghost_variation =
-        interfaces::evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
+        interfaces::evaluateFreeSurfaceWallAreaVariation(
             *ghost_snapshot, parameters, deformation);
-    const auto ghost_volume_energy =
-        interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
-            *ghost_snapshot,
-            volume_energy_parameters,
-            volume_velocity);
-    const auto ghost_volume_dissipation =
-        interfaces::evaluateFreeSurfaceActiveVolumeDissipation(
-            *ghost_snapshot,
-            volume_dissipation_parameters,
-            volume_velocity);
-    const auto ghost_exterior_pressure_power =
-        interfaces::evaluateFreeSurfaceExternalPressurePower(
-            *ghost_snapshot,
-            exterior_pressure_parameters,
-            volume_velocity);
-    const auto ghost_kinetic_work =
-        interfaces::evaluateFreeSurfaceBackwardEulerKineticWork(
-            *ghost_snapshot,
-            volume_energy_parameters.liquid_side,
-            volume_energy_parameters.density,
-            /*previous_velocity_revision=*/17u,
-            /*endpoint_velocity_revision=*/18u,
-            previous_volume_velocity,
-            volume_velocity);
     EXPECT_EQ(ghost_snapshot->revision().snapshot_revision_key,
               owner_snapshot->revision().snapshot_revision_key);
-    EXPECT_EQ(ghost_state.owned_liquid_volume, 0.0);
-    EXPECT_EQ(ghost_state.owned_liquid_gas_area, 0.0);
-    EXPECT_EQ(ghost_state.owned_wetted_wall_area, 0.0);
-    EXPECT_EQ(ghost_state.owned_contact_measure, 0.0);
-    EXPECT_EQ(ghost_state.total_potential, 0.0);
-    EXPECT_EQ(ghost_variation.owned_liquid_volume_variation, 0.0);
-    EXPECT_EQ(ghost_variation.owned_liquid_gas_area_variation, 0.0);
+    EXPECT_EQ(ghost_layout.walls.size(), owner_layout.walls.size());
+    EXPECT_EQ(ownedRuleMeasure(
+                  *ghost_snapshot,
+                  interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume),
+              0.0);
+    EXPECT_EQ(ownedRuleMeasure(
+                  *ghost_snapshot,
+                  interfaces::FreeSurfaceGeometryRuleRole::Interface),
+              0.0);
+    EXPECT_EQ(interfaces::freeSurfaceOwnedRulePointCount(
+                  *ghost_snapshot,
+                  interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume),
+              0u);
+    EXPECT_EQ(interfaces::freeSurfaceOwnedRulePointCount(
+                  *ghost_snapshot,
+                  interfaces::FreeSurfaceGeometryRuleRole::Interface),
+              0u);
     EXPECT_EQ(ghost_variation.owned_wetted_wall_area_variation, 0.0);
-    EXPECT_EQ(ghost_variation.liquid_gas_surface_energy_variation, 0.0);
     EXPECT_EQ(ghost_variation.young_wall_energy_variation, 0.0);
-    EXPECT_EQ(ghost_variation.volume_constraint_potential_variation, 0.0);
-    EXPECT_EQ(ghost_variation.total_potential_variation, 0.0);
-    EXPECT_EQ(ghost_volume_energy.owned_quadrature_point_count, 0u);
-    EXPECT_EQ(ghost_volume_energy.owned_liquid_volume, 0.0);
-    EXPECT_EQ(ghost_volume_energy.kinetic_energy, 0.0);
-    EXPECT_EQ(ghost_volume_energy.gravitational_energy, 0.0);
-    EXPECT_EQ(
-        ghost_volume_energy.gravitational_potential_power, 0.0);
-    EXPECT_EQ(ghost_volume_energy.total_energy, 0.0);
-    EXPECT_EQ(
-        ghost_volume_dissipation.owned_quadrature_point_count, 0u);
-    EXPECT_EQ(ghost_volume_dissipation.owned_liquid_volume, 0.0);
-    EXPECT_EQ(
-        ghost_volume_dissipation.bulk_viscous_dissipation_rate,
-        0.0);
-    EXPECT_EQ(
-        ghost_exterior_pressure_power.owned_quadrature_point_count,
-        0u);
-    EXPECT_EQ(
-        ghost_exterior_pressure_power.owned_liquid_gas_area,
-        0.0);
-    EXPECT_EQ(
-        ghost_exterior_pressure_power
-            .outward_liquid_volume_flux_rate,
-        0.0);
-    EXPECT_EQ(
-        ghost_exterior_pressure_power.external_pressure_power,
-        0.0);
-    EXPECT_EQ(ghost_kinetic_work.owned_quadrature_point_count, 0u);
-    EXPECT_EQ(ghost_kinetic_work.previous_velocity_revision, 17u);
-    EXPECT_EQ(ghost_kinetic_work.endpoint_velocity_revision, 18u);
-    EXPECT_EQ(ghost_kinetic_work.owned_liquid_volume, 0.0);
-    EXPECT_EQ(
-        ghost_kinetic_work.kinetic_energy_before_on_endpoint_domain,
-        0.0);
-    EXPECT_EQ(ghost_kinetic_work.kinetic_energy_after, 0.0);
-    EXPECT_EQ(
-        ghost_kinetic_work.kinetic_energy_change_on_endpoint_domain,
-        0.0);
-    EXPECT_EQ(ghost_kinetic_work.step_integrated_inertia_work, 0.0);
-    EXPECT_EQ(ghost_kinetic_work.time_discretization_loss, 0.0);
-    EXPECT_EQ(ghost_kinetic_work.identity_residual, 0.0);
     RecordProperty("functional_first_variation_ghost_contribution_count", 0);
 }
 

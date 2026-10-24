@@ -455,6 +455,56 @@ testVelocity(FE::Real scale)
     return velocity;
 }
 
+// The physical measure of the retained, rank-owned rules of one role (the
+// geometry of a declared measure; D49 E4 retired the pointwise functionals).
+[[nodiscard]] FE::Real ownedRuleMeasure(
+    const interfaces::FreeSurfaceGeometrySnapshot& snapshot,
+    interfaces::FreeSurfaceGeometryRuleRole role)
+{
+    FE::Real measure{0.0};
+    for (const auto& record : snapshot.rules()) {
+        if (record.locally_owned &&
+            record.retention == interfaces::FreeSurfaceGeometryRetention::Retained &&
+            record.role == role) {
+            measure += record.physical_rule.physical_measure;
+        }
+    }
+    return measure;
+}
+
+// A point integral over the retained, rank-owned rules of one role, the
+// weighted |v|^2 of a smooth velocity at the reference points, with
+// classification-only records rematerialized from @p mesh.
+[[nodiscard]] FE::Real ownedRulePointIntegral(
+    const interfaces::FreeSurfaceGeometrySnapshot& snapshot,
+    interfaces::FreeSurfaceGeometryRuleRole role,
+    const interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity,
+    const FE::assembly::IMeshAccess* mesh)
+{
+    FE::Real integral{0.0};
+    for (const auto& stored : snapshot.rules()) {
+        if (!stored.locally_owned ||
+            stored.retention != interfaces::FreeSurfaceGeometryRetention::Retained ||
+            stored.role != role) {
+            continue;
+        }
+        if (stored.classification_only && mesh == nullptr) {
+            throw std::invalid_argument("classification-only record without a mesh");
+        }
+        const auto record = stored.classification_only
+                                ? interfaces::materializeFreeSurfaceGeometryRuleRecord(stored, *mesh)
+                                : stored;
+        for (std::size_t q = 0; q < record.physical_rule.points.size(); ++q) {
+            const auto value = velocity.value(record.reference_rule.provenance.parent_entity,
+                                              record.reference_rule.points[q].parent_coordinate,
+                                              record.reference_rule.provenance);
+            integral += record.physical_rule.points[q].physical_weight *
+                        (value[0] * value[0] + value[1] * value[1] + value[2] * value[2]);
+        }
+    }
+    return integral;
+}
+
 TEST(FreeSurfaceSnapshotCompactRecords,
      DryFullCellRecordsAreClassificationOnlyAndRematerializeExactly)
 {
@@ -555,7 +605,8 @@ TEST(FreeSurfaceSnapshotCompactRecords, ConsumersGetIdenticalAnswers)
     ASSERT_NE(full, nullptr);
     ASSERT_NE(compact, nullptr);
 
-    // Measure-only functional over every role, both liquid sides.
+    // The record layout and the measures of every role, both liquid sides
+    // (the values of the records are declared measured 0-forms, D49 E4).
     for (const auto liquid : {geometry::CutIntegrationSide::Negative,
                               geometry::CutIntegrationSide::Positive}) {
         interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
@@ -563,80 +614,35 @@ TEST(FreeSurfaceSnapshotCompactRecords, ConsumersGetIdenticalAnswers)
         parameters.surface_tension = FE::Real{0.7};
         parameters.volume_multiplier = FE::Real{-1.3};
         const auto a =
-            interfaces::evaluateFreeSurfaceDiscreteFunctional(*full, parameters);
-        const auto b = interfaces::evaluateFreeSurfaceDiscreteFunctional(
+            interfaces::freeSurfaceDiscreteFunctionalLayout(*full, parameters);
+        const auto b = interfaces::freeSurfaceDiscreteFunctionalLayout(
             *compact, parameters);
-        EXPECT_TRUE(sameBits(a.owned_liquid_volume, b.owned_liquid_volume));
-        EXPECT_TRUE(sameBits(a.owned_liquid_gas_area, b.owned_liquid_gas_area));
-        EXPECT_TRUE(sameBits(a.total_potential, b.total_potential));
+        EXPECT_EQ(a.snapshot_revision_key, b.snapshot_revision_key);
+        EXPECT_EQ(a.walls.size(), b.walls.size());
+    }
+    for (const auto role : {interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume,
+                            interfaces::FreeSurfaceGeometryRuleRole::PositiveVolume,
+                            interfaces::FreeSurfaceGeometryRuleRole::Interface}) {
+        EXPECT_TRUE(sameBits(ownedRuleMeasure(*full, role), ownedRuleMeasure(*compact, role)));
     }
 
-    // Wet-side point integrals are unchanged.
+    // Wet-side point counts and point integrals are unchanged.
     const auto velocity = testVelocity(FE::Real{0.4});
-    interfaces::FreeSurfaceActiveVolumeEnergyParameters energy;
-    energy.liquid_side = geometry::CutIntegrationSide::Negative;
-    energy.density = FE::Real{1.2};
-    energy.gravitational_acceleration = {{0.0, 0.0, -9.81}};
-    const auto energy_full =
-        interfaces::evaluateFreeSurfaceActiveVolumeEnergy(*full, energy,
-                                                          velocity);
-    const auto energy_compact =
-        interfaces::evaluateFreeSurfaceActiveVolumeEnergy(*compact, energy,
-                                                          velocity);
-    EXPECT_EQ(energy_full.owned_quadrature_point_count,
-              energy_compact.owned_quadrature_point_count);
-    EXPECT_TRUE(sameBits(energy_full.owned_liquid_volume,
-                         energy_compact.owned_liquid_volume));
-    EXPECT_TRUE(sameBits(energy_full.kinetic_energy,
-                         energy_compact.kinetic_energy));
-    EXPECT_TRUE(sameBits(energy_full.gravitational_energy,
-                         energy_compact.gravitational_energy));
-    EXPECT_TRUE(sameBits(energy_full.gravitational_potential_power,
-                         energy_compact.gravitational_potential_power));
+    EXPECT_EQ(interfaces::freeSurfaceOwnedRulePointCount(
+                  *full, interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume),
+              interfaces::freeSurfaceOwnedRulePointCount(
+                  *compact, interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume));
+    EXPECT_TRUE(sameBits(
+        ownedRulePointIntegral(*full, interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume, velocity, nullptr),
+        ownedRulePointIntegral(*compact, interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume, velocity,
+                               nullptr)));
 
-    interfaces::FreeSurfaceActiveVolumeDissipationParameters dissipation;
-    dissipation.liquid_side = geometry::CutIntegrationSide::Negative;
-    dissipation.dynamic_viscosity = FE::Real{0.3};
-    const auto dissipation_full =
-        interfaces::evaluateFreeSurfaceActiveVolumeDissipation(
-            *full, dissipation, velocity);
-    const auto dissipation_compact =
-        interfaces::evaluateFreeSurfaceActiveVolumeDissipation(
-            *compact, dissipation, velocity);
-    EXPECT_TRUE(sameBits(dissipation_full.bulk_viscous_dissipation_rate,
-                         dissipation_compact.bulk_viscous_dissipation_rate));
-    EXPECT_TRUE(sameBits(dissipation_full.owned_liquid_volume,
-                         dissipation_compact.owned_liquid_volume));
-
-    const auto previous = testVelocity(FE::Real{0.25});
-    const auto work_full = interfaces::evaluateFreeSurfaceBackwardEulerKineticWork(
-        *full, geometry::CutIntegrationSide::Negative, FE::Real{1.2}, 3u, 4u,
-        previous, velocity);
-    const auto work_compact =
-        interfaces::evaluateFreeSurfaceBackwardEulerKineticWork(
-            *compact, geometry::CutIntegrationSide::Negative, FE::Real{1.2},
-            3u, 4u, previous, velocity);
-    EXPECT_TRUE(sameBits(work_full.step_integrated_inertia_work,
-                         work_compact.step_integrated_inertia_work));
-    EXPECT_TRUE(sameBits(work_full.identity_residual,
-                         work_compact.identity_residual));
-
-    // A dry-side point integral fails closed instead of skipping volume.
-    energy.liquid_side = geometry::CutIntegrationSide::Positive;
-    EXPECT_NO_THROW((void)interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
-        *full, energy, velocity));
-    EXPECT_THROW((void)interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
-                     *compact, energy, velocity),
+    // A dry-side point count fails closed instead of skipping volume.
+    EXPECT_NO_THROW((void)interfaces::freeSurfaceOwnedRulePointCount(
+        *full, interfaces::FreeSurfaceGeometryRuleRole::PositiveVolume));
+    EXPECT_THROW((void)interfaces::freeSurfaceOwnedRulePointCount(
+                     *compact, interfaces::FreeSurfaceGeometryRuleRole::PositiveVolume),
                  std::invalid_argument);
-    dissipation.liquid_side = geometry::CutIntegrationSide::Positive;
-    EXPECT_THROW((void)interfaces::evaluateFreeSurfaceActiveVolumeDissipation(
-                     *compact, dissipation, velocity),
-                 std::invalid_argument);
-    EXPECT_THROW(
-        (void)interfaces::evaluateFreeSurfaceBackwardEulerKineticWork(
-            *compact, geometry::CutIntegrationSide::Positive, FE::Real{1.2},
-            3u, 4u, previous, velocity),
-        std::invalid_argument);
 
     // The cut integration context imports identical rules from both.
     FE::assembly::CutIntegrationContext context_full;
@@ -693,56 +699,16 @@ TEST(FreeSurfaceSnapshotCompactRecords,
     }
     EXPECT_GT(wet_compact, 0u);
 
-    // Point integrals over the wet side rematerialize exactly.
+    // Point counts and point integrals over both sides rematerialize exactly.
     const auto velocity = testVelocity(FE::Real{0.4});
-    const auto previous = testVelocity(FE::Real{0.25});
-    interfaces::FreeSurfaceActiveVolumeEnergyParameters energy;
-    energy.liquid_side = geometry::CutIntegrationSide::Negative;
-    energy.density = FE::Real{1.2};
-    energy.gravitational_acceleration = {{0.0, 0.0, -9.81}};
-    interfaces::FreeSurfaceActiveVolumeDissipationParameters dissipation;
-    dissipation.liquid_side = geometry::CutIntegrationSide::Negative;
-    dissipation.dynamic_viscosity = FE::Real{0.3};
-    for (const auto side : {geometry::CutIntegrationSide::Negative,
-                            geometry::CutIntegrationSide::Positive}) {
-        energy.liquid_side = side;
-        dissipation.liquid_side = side;
-        const auto e_full = interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
-            *full, energy, velocity);
-        const auto e_compact =
-            interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
-                *compact, energy, velocity, mesh);
-        EXPECT_EQ(e_full.owned_quadrature_point_count,
-                  e_compact.owned_quadrature_point_count);
-        EXPECT_TRUE(sameBits(e_full.owned_liquid_volume,
-                             e_compact.owned_liquid_volume));
-        EXPECT_TRUE(sameBits(e_full.kinetic_energy, e_compact.kinetic_energy));
-        EXPECT_TRUE(sameBits(e_full.gravitational_energy,
-                             e_compact.gravitational_energy));
-        EXPECT_TRUE(sameBits(e_full.gravitational_potential_power,
-                             e_compact.gravitational_potential_power));
-        const auto d_full =
-            interfaces::evaluateFreeSurfaceActiveVolumeDissipation(
-                *full, dissipation, velocity);
-        const auto d_compact =
-            interfaces::evaluateFreeSurfaceActiveVolumeDissipation(
-                *compact, dissipation, velocity, mesh);
-        EXPECT_TRUE(sameBits(d_full.bulk_viscous_dissipation_rate,
-                             d_compact.bulk_viscous_dissipation_rate));
-        const auto w_full =
-            interfaces::evaluateFreeSurfaceBackwardEulerKineticWork(
-                *full, side, FE::Real{1.2}, 3u, 4u, previous, velocity);
-        const auto w_compact =
-            interfaces::evaluateFreeSurfaceBackwardEulerKineticWork(
-                *compact, side, FE::Real{1.2}, 3u, 4u, previous, velocity,
-                mesh);
-        EXPECT_TRUE(sameBits(w_full.step_integrated_inertia_work,
-                             w_compact.step_integrated_inertia_work));
-        EXPECT_TRUE(sameBits(w_full.identity_residual,
-                             w_compact.identity_residual));
-        // Without the mesh the evaluators fail closed.
-        EXPECT_THROW((void)interfaces::evaluateFreeSurfaceActiveVolumeEnergy(
-                         *compact, energy, velocity),
+    for (const auto role : {interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume,
+                            interfaces::FreeSurfaceGeometryRuleRole::PositiveVolume}) {
+        EXPECT_EQ(interfaces::freeSurfaceOwnedRulePointCount(*full, role),
+                  interfaces::freeSurfaceOwnedRulePointCount(*compact, role, mesh));
+        EXPECT_TRUE(sameBits(ownedRulePointIntegral(*full, role, velocity, nullptr),
+                             ownedRulePointIntegral(*compact, role, velocity, mesh)));
+        // Without the mesh the count fails closed.
+        EXPECT_THROW((void)interfaces::freeSurfaceOwnedRulePointCount(*compact, role),
                      std::invalid_argument);
     }
 }

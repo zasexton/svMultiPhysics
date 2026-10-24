@@ -1750,7 +1750,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           .owner_component =
               "ApplicationDriverLevelSetWorkflowsMPI.StaticCapillaryPublication",
       },
-      *velocity_space,
+      velocity_space.get(),
       /*dimension=*/2);
 
   system->addOperator("equations");
@@ -2917,7 +2917,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           continue;
         }
         const auto initial_functionals =
-            evaluateCurrentAcceptedFunctionals(sim);
+            evaluateDeclaredAcceptedFunctionals(sim, {});
         ASSERT_EQ(initial_functionals.size(), 1u);
         const auto expected_volume =
             svmp::FE::Real{3.0} * normal_offset;
@@ -2976,7 +2976,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
             2.0e-10);
 
         const auto final_functionals =
-            evaluateCurrentAcceptedFunctionals(sim);
+            evaluateDeclaredAcceptedFunctionals(sim, {});
         ASSERT_EQ(final_functionals.size(), 1u);
         const auto volume_error = std::abs(
             final_functionals.front().state.owned_liquid_volume -
@@ -4048,10 +4048,8 @@ void runHydrostaticFixedGaugeMpiCase(
   ASSERT_TRUE(initial_report.refreshed);
   ASSERT_NE(initial_report.topology_key, 0u);
   auto initial_functionals =
-      evaluateCurrentAcceptedFunctionals(sim);
+      evaluateDeclaredAcceptedFunctionals(sim, current);
   ASSERT_EQ(initial_functionals.size(), 1u);
-  attachAcceptedActiveVolumeEnergies(
-      sim, current, initial_functionals);
   ASSERT_TRUE(
       initial_functionals.front().active_volume_energy.has_value());
   const auto tangent_measure =
@@ -4209,10 +4207,8 @@ void runHydrostaticFixedGaugeMpiCase(
   EXPECT_LE(phi_update, 2.0e-7);
 
   auto final_functionals =
-      evaluateCurrentAcceptedFunctionals(sim);
+      evaluateDeclaredAcceptedFunctionals(sim, certified_solution);
   ASSERT_EQ(final_functionals.size(), 1u);
-  attachAcceptedActiveVolumeEnergies(
-      sim, certified_solution, final_functionals);
   ASSERT_TRUE(
       final_functionals.front().active_volume_energy.has_value());
   const auto gravitational_energy_error = std::abs(
@@ -4843,7 +4839,8 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
             .dynamic_viscosity = svmp::FE::Real{0.4},
         });
   }
-  svmp::FE::systems::functionalRecords(*system).declareFunctional(
+  application_test::declared_free_surface_functionals::declareFreeSurfaceFunctionalWithForms(
+      *system,
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = 721,
           .level_set_field = phi,
@@ -4852,7 +4849,9 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           .parameters = functional_parameters,
           .owner_component =
               "ApplicationDriverLevelSetWorkflowsMPI.FunctionalFixture",
-      });
+      },
+      velocity_space.get(),
+      /*dimension=*/2);
 
   system->addOperator("equations");
   for (const auto field : {phi, phase, velocity}) {
@@ -5011,7 +5010,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           svmp::MeshComm(MPI_COMM_WORLD));
   EXPECT_EQ(minimum_refresh_topology, maximum_refresh_topology);
   const auto current_functionals =
-      evaluateCurrentAcceptedFunctionals(sim);
+      currentAcceptedFunctionalLayouts(sim);
   const auto maintenance_functionals =
       levelSetMaintenanceFunctionalValues(
           sim, current_functionals, solution);

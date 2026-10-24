@@ -308,10 +308,12 @@ struct FreeSurfaceDiscreteWallFunctionalState {
 };
 
 /**
- * Rank-owned contribution to one immutable snapshot's capillary functional.
+ * The capillary functional of one immutable snapshot, as an accepted record
+ * holds it.
  *
- * Ghost rules are deliberately excluded.  Distributed callers sum each
- * scalar across the snapshot communicator exactly once.
+ * freeSurfaceDiscreteFunctionalLayout gives its walls and parameters; the
+ * values are the measured 0-forms the formulation declares (D49 steps E3 and
+ * E4), which the recorder evaluates (LevelSet/AcceptedFunctionalRecorder).
  */
 struct FreeSurfaceDiscreteFunctionalState {
     std::uint64_t snapshot_revision_key{0};
@@ -370,12 +372,15 @@ struct FreeSurfaceDiscreteWallFunctionalVariationState {
 };
 
 /**
- * Rank-owned first variation of the immutable snapshot's capillary functional.
+ * First variation of the immutable snapshot's capillary functional under a
+ * deformation (the endpoint functional power of a record).
  *
- * The liquid--gas area uses the surface-divergence identity on retained
- * interface rules.  Wetted-wall area uses the outward wetted-footprint flux
- * on retained contact rules, and liquid volume uses the outward-liquid flux
- * on retained interface rules.  Ghost rules are deliberately excluded.
+ * The liquid-gas area and liquid volume rates are declared measured 0-forms
+ * (D49 step E3), and so are the wetted-wall and Young-energy rates of each wall
+ * where the formulation declares them as wall functionals (over the wall's
+ * contact lines, with the rule's wall normal).  evaluateFreeSurfaceWallAreaVariation
+ * gives the record its walls and the outward wetted-footprint flux on the
+ * retained, rank-owned contact rules, which a declared wall functional replaces.
  */
 struct FreeSurfaceDiscreteFunctionalVariationState {
     std::uint64_t snapshot_revision_key{0};
@@ -498,8 +503,9 @@ struct FreeSurfaceActiveVolumeEnergyParameters {
 };
 
 /**
- * Rank-owned kinetic and gravitational energy on one snapshot's retained
- * active-liquid volume rules.
+ * Kinetic and gravitational energy of the active liquid, as an accepted
+ * record holds it; the values are declared measured 0-forms (D49 steps E3
+ * and E4), the point count is the snapshot's (freeSurfaceOwnedRulePointCount).
  *
  * The gravitational potential density is
  *
@@ -527,13 +533,6 @@ struct FreeSurfaceActiveVolumeEnergyState {
     Real total_energy{0.0};
 };
 
-[[nodiscard]] FreeSurfaceActiveVolumeEnergyState
-evaluateFreeSurfaceActiveVolumeEnergy(
-    const FreeSurfaceGeometrySnapshot& snapshot,
-    const FreeSurfaceActiveVolumeEnergyParameters& parameters,
-    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity,
-    const assembly::IMeshAccess* mesh = nullptr);
-
 struct FreeSurfaceActiveVolumeDissipationParameters {
     geometry::CutIntegrationSide liquid_side{
         geometry::CutIntegrationSide::Negative};
@@ -541,8 +540,8 @@ struct FreeSurfaceActiveVolumeDissipationParameters {
 };
 
 /**
- * Rank-owned endpoint bulk-viscous dissipation on the retained active-liquid
- * volume rules.
+ * Endpoint bulk-viscous dissipation of the active liquid, as an accepted
+ * record holds it (a declared measured 0-form).
  *
  * The rate is the production Newtonian form tested by the endpoint velocity,
  *
@@ -561,13 +560,6 @@ struct FreeSurfaceActiveVolumeDissipationState {
     Real bulk_viscous_dissipation_rate{0.0};
 };
 
-[[nodiscard]] FreeSurfaceActiveVolumeDissipationState
-evaluateFreeSurfaceActiveVolumeDissipation(
-    const FreeSurfaceGeometrySnapshot& snapshot,
-    const FreeSurfaceActiveVolumeDissipationParameters& parameters,
-    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity,
-    const assembly::IMeshAccess* mesh = nullptr);
-
 struct FreeSurfaceExternalPressurePowerParameters {
     geometry::CutIntegrationSide liquid_side{
         geometry::CutIntegrationSide::Negative};
@@ -575,8 +567,8 @@ struct FreeSurfaceExternalPressurePowerParameters {
 };
 
 /**
- * Rank-owned prescribed exterior-pressure power on the retained liquid--gas
- * interface rules.
+ * Prescribed exterior-pressure power on the liquid-gas interface, as an
+ * accepted record holds it (declared measured 0-forms).
  *
  * With the snapshot normal directed outward from the selected liquid, the
  * work rate added to the modeled liquid is
@@ -594,15 +586,10 @@ struct FreeSurfaceExternalPressurePowerState {
     Real external_pressure_power{0.0};
 };
 
-[[nodiscard]] FreeSurfaceExternalPressurePowerState
-evaluateFreeSurfaceExternalPressurePower(
-    const FreeSurfaceGeometrySnapshot& snapshot,
-    const FreeSurfaceExternalPressurePowerParameters& parameters,
-    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity);
-
 /**
- * Rank-owned backward-Euler kinetic-work identity evaluated on the retained
- * active-liquid volume rules of the endpoint snapshot.
+ * Backward-Euler kinetic-work identity on the active liquid of the endpoint
+ * snapshot, as an accepted record holds it: the declared kinetic energy
+ * evaluated on the previous state and on the step change (D49 step E3).
  *
  * Both velocity endpoints are evaluated on that one domain. The identity is
  *
@@ -632,17 +619,6 @@ struct FreeSurfaceBackwardEulerKineticWorkState {
     Real time_discretization_loss{0.0};
     Real identity_residual{0.0};
 };
-
-[[nodiscard]] FreeSurfaceBackwardEulerKineticWorkState
-evaluateFreeSurfaceBackwardEulerKineticWork(
-    const FreeSurfaceGeometrySnapshot& endpoint_snapshot,
-    geometry::CutIntegrationSide liquid_side,
-    Real density,
-    std::uint64_t previous_velocity_revision,
-    std::uint64_t endpoint_velocity_revision,
-    const FreeSurfaceDiscreteFunctionalVectorEvaluator& previous_velocity,
-    const FreeSurfaceDiscreteFunctionalVectorEvaluator& endpoint_velocity,
-    const assembly::IMeshAccess* mesh = nullptr);
 
 /** Recompute non-additive mean and motion fields after rank reduction. */
 void finalizeFreeSurfaceDynamicContactState(
@@ -774,13 +750,37 @@ private:
     FreeSurfaceGeometryValidationLedger ledger_{};
 };
 
+/**
+ * The walls and parameters of the snapshot's capillary functional, every
+ * value zero: the walls with an equilibrium angle and every wall the
+ * snapshot's domains or its retained, rank-owned rules touch, in marker
+ * order.  Validates the parameters.  The values are the declared measured
+ * 0-forms (D49 steps E3 and E4).
+ */
 [[nodiscard]] FreeSurfaceDiscreteFunctionalState
-evaluateFreeSurfaceDiscreteFunctional(
+freeSurfaceDiscreteFunctionalLayout(
     const FreeSurfaceGeometrySnapshot& snapshot,
     const FreeSurfaceDiscreteFunctionalParameters& parameters);
 
+/**
+ * The number of quadrature points of the retained, rank-owned rules of
+ * @p role (classification-only volume records are rematerialized, which
+ * needs @p mesh).
+ */
+[[nodiscard]] std::size_t freeSurfaceOwnedRulePointCount(
+    const FreeSurfaceGeometrySnapshot& snapshot,
+    FreeSurfaceGeometryRuleRole role,
+    const assembly::IMeshAccess* mesh = nullptr);
+
+/**
+ * The rank-owned wetted-wall rates of the first variation: the deformation's
+ * outward wetted-footprint flux on the retained contact rules, per wall and
+ * in total, and the Young-energy rates of the walls with an angle.  The area
+ * and volume rates are zero here; they are declared measured 0-forms, and a
+ * declared wall functional replaces a wall's rates in the record.
+ */
 [[nodiscard]] FreeSurfaceDiscreteFunctionalVariationState
-evaluateFreeSurfaceDiscreteFunctionalFirstVariation(
+evaluateFreeSurfaceWallAreaVariation(
     const FreeSurfaceGeometrySnapshot& snapshot,
     const FreeSurfaceDiscreteFunctionalParameters& parameters,
     const FreeSurfaceDiscreteFunctionalDeformationEvaluator& deformation);

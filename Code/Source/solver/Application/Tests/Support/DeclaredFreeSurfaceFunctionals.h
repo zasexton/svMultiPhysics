@@ -22,6 +22,7 @@
 #include "FE/Systems/FunctionalRecords.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesPostProcessing.h"
 
+#include <string>
 #include <utility>
 
 namespace application_test::declared_free_surface_functionals {
@@ -29,14 +30,38 @@ namespace application_test::declared_free_surface_functionals {
 /// Declares @p declaration in the functional records of @p system and the
 /// formulation's energy functionals of the same interface, with the
 /// coefficients of the declaration (post::freeSurfaceEnergyFunctionals).
-/// Call before the system is set up.
+/// Without a velocity space only the functionals of the geometry are
+/// declared (liquid volume, liquid-gas area and surface energy, the same
+/// forms).  Call before the system is set up.
 inline void declareFreeSurfaceFunctionalWithForms(
     svmp::FE::systems::FESystem& system,
     svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration declaration,
-    const svmp::FE::spaces::FunctionSpace& velocity_space,
+    const svmp::FE::spaces::FunctionSpace* velocity_space,
     int dimension)
 {
     namespace post = svmp::Physics::formulations::navier_stokes::post;
+    if (velocity_space == nullptr) {
+        using svmp::FE::forms::FormExpr;
+        using Kind = svmp::FE::systems::FunctionalKind;
+        const int m = declaration.interface_marker;
+        const auto side = declaration.parameters.liquid_side == svmp::FE::geometry::CutIntegrationSide::Positive
+                              ? svmp::FE::forms::CutVolumeSide::Positive
+                              : svmp::FE::forms::CutVolumeSide::Negative;
+        const auto gamma = declaration.parameters.surface_tension;
+        const std::string owner = "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary";
+        svmp::FE::systems::functionalRecords(system).declareFunctional(std::move(declaration));
+        const auto one = FormExpr::constant(1.0);
+        svmp::FE::systems::declareFunctionalForm(
+            system, {.name = post::freeSurfaceFunctionalName(m, "liquid_volume"), .kind = Kind::Measure,
+                     .form = one.dCutVolume(m, side), .owner = owner});
+        svmp::FE::systems::declareFunctionalForm(
+            system, {.name = post::freeSurfaceFunctionalName(m, "liquid_gas_area"), .kind = Kind::Measure,
+                     .form = one.dI(m), .owner = owner});
+        svmp::FE::systems::declareFunctionalForm(
+            system, {.name = post::freeSurfaceFunctionalName(m, "liquid_gas_surface_energy"), .kind = Kind::Stored,
+                     .form = FormExpr::constant(gamma).dI(m), .owner = owner});
+        return;
+    }
     post::FreeSurfaceEnergyStatement statement;
     statement.interface_marker = declaration.interface_marker;
     statement.liquid_side =
@@ -44,7 +69,7 @@ inline void declareFreeSurfaceFunctionalWithForms(
             ? svmp::FE::forms::CutVolumeSide::Positive
             : svmp::FE::forms::CutVolumeSide::Negative;
     statement.velocity_field = declaration.velocity_field;
-    statement.velocity_space = &velocity_space;
+    statement.velocity_space = velocity_space;
     statement.dimension = dimension;
     statement.surface_tension = declaration.parameters.surface_tension;
     if (declaration.active_volume_energy_parameters.has_value()) {
