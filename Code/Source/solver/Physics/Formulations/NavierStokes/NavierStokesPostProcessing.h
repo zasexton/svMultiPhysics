@@ -116,6 +116,10 @@ inline void addSurfaceEnergy(ConservativeBalanceForms* balance, const FE::forms:
 // of the external boundary energy.
 // ---------------------------------------------------------------------------
 
+/// The reference point x_ref of the gravitational energy -rho g.(x - x_ref):
+/// the declaration of the records and the declared form both read it.
+inline constexpr std::array<FE::Real, 3> kGravitationalReferencePoint{{FE::Real{0.0}, FE::Real{0.0}, FE::Real{0.0}}};
+
 [[nodiscard]] inline bool shouldDeclareFreeSurfaceDiscreteFunctional(
     const FreeSurfaceBoundary& boundary)
 {
@@ -285,9 +289,7 @@ inline void declareFreeSurfaceDiscreteFunctionals(
                             .gravitational_acceleration =
                                 gravitational_acceleration,
                             .gravitational_reference_point =
-                                {{FE::Real{0.0},
-                                  FE::Real{0.0},
-                                  FE::Real{0.0}}},
+                                kGravitationalReferencePoint,
                         },
                 .static_conservative_body_force_complete =
                     static_conservative_body_force_complete,
@@ -803,7 +805,7 @@ struct FreeSurfaceEnergyStatement {
     FE::Real surface_tension{0.0};
     FE::Real density{0.0};
     std::array<FE::Real, 3> gravitational_acceleration{{0.0, 0.0, 0.0}};
-    std::array<FE::Real, 3> gravitational_reference_point{{0.0, 0.0, 0.0}};
+    std::array<FE::Real, 3> gravitational_reference_point{kGravitationalReferencePoint};
     std::optional<FE::Real> dynamic_viscosity{};   ///< constant: the bulk viscous dissipation
     std::optional<FE::Real> external_pressure{};   ///< constant: the exterior-pressure power
     bool endpoint_functional_power{false};         ///< the area and volume rates

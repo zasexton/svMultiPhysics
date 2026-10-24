@@ -3607,6 +3607,9 @@ TEST(NavierStokesPostProcessing, StatesTheFreeSurfaceEnergiesAsMeasured0Forms)
         .endpoint_functional_power = true,
     };
 
+    // The gravitational energy -rho g.(x - x_ref) reads the reference point of the record declaration.
+    EXPECT_EQ(statement.gravitational_reference_point, post::kGravitationalReferencePoint);
+
     const auto functionals = post::freeSurfaceEnergyFunctionals(statement);
     std::vector<std::string> names;
     for (const auto& functional : functionals) {
