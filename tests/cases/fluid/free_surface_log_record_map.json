@@ -175,7 +175,7 @@
     "message": "accepted two-fluid interface diagnostics",
     "diagnostic": "two_fluid_interface_history",
     "level": "INFO",
-    "scope": "every"
+    "scope": "root"
    },
    "renames": {},
    "split": [],

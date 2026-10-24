@@ -8,6 +8,8 @@
 
 #include "Systems/TwoFluidStageRecords.h"
 
+#include "Core/LogRecord.h"
+
 #include "Core/FEException.h"
 #include "Core/Logger.h"
 #include "Systems/MeshBoundaryRecordSupport.h"
@@ -2363,319 +2365,196 @@ void TwoFluidStageRecords::commitPendingTwoFluidAcceptedStageDiagnostics(
             const auto& record =
                 two_fluid_accepted_stage_diagnostic_history_[index];
             const auto& state = record.state.diagnostics;
-            std::ostringstream message;
-            message << std::setprecision(17)
-                    << "FESystem: accepted two-fluid interface diagnostics"
-                    << " semantics=operator_stage"
-                    << " scheme='" << record.stage.scheme_name << "'"
-                    << " accepted_step=" << accepted_step
-                    << " attempt=" << record.stage.prospective_attempt
-                    << " state_time=" << record.stage.state_time
-                    << " interface_marker="
-                    << record.state.interface_marker
-                    << " snapshot_revision="
-                    << state.snapshot_revision_key
-                    << " transient_penalty_effective_dt=";
+            // The accepted two-fluid interface record (map entry R1.9); rank 0 prints it.
+            LogRecord log_line("TwoFluidStageRecords", "accepted two-fluid interface diagnostics");
+            log_line.diagnostic("two_fluid_interface_history");
+            log_line
+                    .text("semantics", "operator_stage")
+                    .quoted("scheme", record.stage.scheme_name)
+                    .value("accepted_step", accepted_step)
+                    .value("attempt", record.stage.prospective_attempt)
+                    .value("state_time", record.stage.state_time)
+                    .value("interface_marker", record.state.interface_marker)
+                    .value("snapshot_revision", state.snapshot_revision_key);
             if (state.transient_penalty_effective_dt.has_value()) {
-                message << *state.transient_penalty_effective_dt;
+                log_line.real("transient_penalty_effective_dt", *state.transient_penalty_effective_dt);
             } else {
-                message << "not_applicable";
+                log_line.text("transient_penalty_effective_dt", "not_applicable");
             }
-            message
-                    << " interface_quadrature_points="
-                    << state.interface_quadrature_point_count
-                    << " interface_measure=" << state.interface_measure
-                    << " interface_normal_integral_0="
-                    << state.interface_normal_integral[0]
-                    << " interface_normal_integral_1="
-                    << state.interface_normal_integral[1]
-                    << " interface_normal_integral_2="
-                    << state.interface_normal_integral[2]
-                    << " velocity_jump_sq="
-                    << state.velocity_jump_squared
-                    << " velocity_jump_normal_sq="
-                    << state.normal_velocity_jump_squared
-                    << " velocity_jump_tangential_sq="
-                    << state.tangential_velocity_jump_squared
-                    << " negative_normal_flux="
-                    << state.negative_normal_flux
-                    << " positive_normal_flux="
-                    << state.positive_normal_flux
-                    << " normal_flux_jump=" << state.normal_flux_jump
-                    << " negative_mass_flux="
-                    << state.negative_mass_flux
-                    << " positive_mass_flux="
-                    << state.positive_mass_flux
-                    << " mean_pressure_jump="
-                    << state.mean_pressure_jump
-                    << " pressure_jump_sq="
-                    << state.pressure_jump_squared
-                    << " pressure_jump_integral="
-                    << state.pressure_jump_integral
-                    << " traction_jump_sq="
-                    << state.traction_jump_squared
-                    << " traction_jump_normal_integral="
-                    << state.traction_jump_normal_integral
-                    << " negative_traction_integral_0="
-                    << state.negative_traction_integral[0]
-                    << " negative_traction_integral_1="
-                    << state.negative_traction_integral[1]
-                    << " negative_traction_integral_2="
-                    << state.negative_traction_integral[2]
-                    << " positive_traction_integral_0="
-                    << state.positive_traction_integral[0]
-                    << " positive_traction_integral_1="
-                    << state.positive_traction_integral[1]
-                    << " positive_traction_integral_2="
-                    << state.positive_traction_integral[2]
-                    << " traction_jump_integral_0="
-                    << state.traction_jump_integral[0]
-                    << " traction_jump_integral_1="
-                    << state.traction_jump_integral[1]
-                    << " traction_jump_integral_2="
-                    << state.traction_jump_integral[2]
-                    << " viscous_traction_jump_sq="
-                    << state.viscous_traction_jump_squared
-                    << " negative_viscous_traction_integral_0="
-                    << state.negative_viscous_traction_integral[0]
-                    << " negative_viscous_traction_integral_1="
-                    << state.negative_viscous_traction_integral[1]
-                    << " negative_viscous_traction_integral_2="
-                    << state.negative_viscous_traction_integral[2]
-                    << " positive_viscous_traction_integral_0="
-                    << state.positive_viscous_traction_integral[0]
-                    << " positive_viscous_traction_integral_1="
-                    << state.positive_viscous_traction_integral[1]
-                    << " positive_viscous_traction_integral_2="
-                    << state.positive_viscous_traction_integral[2]
-                    << " viscous_traction_jump_integral_0="
-                    << state.viscous_traction_jump_integral[0]
-                    << " viscous_traction_jump_integral_1="
-                    << state.viscous_traction_jump_integral[1]
-                    << " viscous_traction_jump_integral_2="
-                    << state.viscous_traction_jump_integral[2]
-                    << " surface_energy_work="
-                    << state.surface_energy_work
-                    << " nitsche_consistency_work="
-                    << state.nitsche_consistency_work
-                    << " nitsche_adjoint_work="
-                    << state.nitsche_adjoint_work
-                    << " nitsche_penalty_work="
-                    << state.nitsche_penalty_work
-                    << " negative_phase_quadrature_points="
-                    << state.negative_phase.quadrature_point_count
-                    << " negative_density="
-                    << state.negative_phase.density
-                    << " negative_volume="
-                    << state.negative_phase.volume
-                    << " negative_mass=" << state.negative_phase.mass
-                    << " negative_momentum_0="
-                    << state.negative_phase.momentum[0]
-                    << " negative_momentum_1="
-                    << state.negative_phase.momentum[1]
-                    << " negative_momentum_2="
-                    << state.negative_phase.momentum[2]
-                    << " negative_mean_velocity_0="
-                    << state.negative_phase.mean_velocity[0]
-                    << " negative_mean_velocity_1="
-                    << state.negative_phase.mean_velocity[1]
-                    << " negative_mean_velocity_2="
-                    << state.negative_phase.mean_velocity[2]
-                    << " negative_maximum_quadrature_speed="
-                    << state.negative_phase.maximum_quadrature_speed
-                    << " negative_kinetic_energy="
-                    << state.negative_phase.kinetic_energy
-                    << " negative_pressure_integral="
-                    << state.negative_phase.pressure_integral
-                    << " negative_mean_pressure="
-                    << state.negative_phase.mean_pressure
-                    << " negative_pressure_squared_integral="
-                    << state.negative_phase.pressure_squared_integral
-                    << " negative_pressure_gradient_integral_0="
-                    << state.negative_phase.pressure_gradient_integral[0]
-                    << " negative_pressure_gradient_integral_1="
-                    << state.negative_phase.pressure_gradient_integral[1]
-                    << " negative_pressure_gradient_integral_2="
-                    << state.negative_phase.pressure_gradient_integral[2]
-                    << " negative_body_force_density_integral_0="
-                    << state.negative_phase.body_force_density_integral[0]
-                    << " negative_body_force_density_integral_1="
-                    << state.negative_phase.body_force_density_integral[1]
-                    << " negative_body_force_density_integral_2="
-                    << state.negative_phase.body_force_density_integral[2]
-                    << " negative_hydrostatic_residual_integral_0="
-                    << state.negative_phase.hydrostatic_residual_integral[0]
-                    << " negative_hydrostatic_residual_integral_1="
-                    << state.negative_phase.hydrostatic_residual_integral[1]
-                    << " negative_hydrostatic_residual_integral_2="
-                    << state.negative_phase.hydrostatic_residual_integral[2]
-                    << " negative_hydrostatic_residual_sq="
-                    << state.negative_phase.hydrostatic_residual_squared
-                    << " positive_phase_quadrature_points="
-                    << state.positive_phase.quadrature_point_count
-                    << " positive_density="
-                    << state.positive_phase.density
-                    << " positive_volume="
-                    << state.positive_phase.volume
-                    << " positive_mass=" << state.positive_phase.mass
-                    << " positive_momentum_0="
-                    << state.positive_phase.momentum[0]
-                    << " positive_momentum_1="
-                    << state.positive_phase.momentum[1]
-                    << " positive_momentum_2="
-                    << state.positive_phase.momentum[2]
-                    << " positive_mean_velocity_0="
-                    << state.positive_phase.mean_velocity[0]
-                    << " positive_mean_velocity_1="
-                    << state.positive_phase.mean_velocity[1]
-                    << " positive_mean_velocity_2="
-                    << state.positive_phase.mean_velocity[2]
-                    << " positive_maximum_quadrature_speed="
-                    << state.positive_phase.maximum_quadrature_speed
-                    << " positive_kinetic_energy="
-                    << state.positive_phase.kinetic_energy
-                    << " positive_pressure_integral="
-                    << state.positive_phase.pressure_integral
-                    << " positive_mean_pressure="
-                    << state.positive_phase.mean_pressure
-                    << " positive_pressure_squared_integral="
-                    << state.positive_phase.pressure_squared_integral
-                    << " positive_pressure_gradient_integral_0="
-                    << state.positive_phase.pressure_gradient_integral[0]
-                    << " positive_pressure_gradient_integral_1="
-                    << state.positive_phase.pressure_gradient_integral[1]
-                    << " positive_pressure_gradient_integral_2="
-                    << state.positive_phase.pressure_gradient_integral[2]
-                    << " positive_body_force_density_integral_0="
-                    << state.positive_phase.body_force_density_integral[0]
-                    << " positive_body_force_density_integral_1="
-                    << state.positive_phase.body_force_density_integral[1]
-                    << " positive_body_force_density_integral_2="
-                    << state.positive_phase.body_force_density_integral[2]
-                    << " positive_hydrostatic_residual_integral_0="
-                    << state.positive_phase.hydrostatic_residual_integral[0]
-                    << " positive_hydrostatic_residual_integral_1="
-                    << state.positive_phase.hydrostatic_residual_integral[1]
-                    << " positive_hydrostatic_residual_integral_2="
-                    << state.positive_phase.hydrostatic_residual_integral[2]
-                    << " positive_hydrostatic_residual_sq="
-                    << state.positive_phase.hydrostatic_residual_squared
-                    << " prescribed_pressure_jump_applicable="
-                    << (state.prescribed_pressure_jump_error_squared.has_value()
-                            ? "true"
-                            : "false");
+            log_line
+                    .value("interface_quadrature_points", state.interface_quadrature_point_count)
+                    .value("interface_measure", state.interface_measure)
+                    .value("interface_normal_integral_0", state.interface_normal_integral[0])
+                    .value("interface_normal_integral_1", state.interface_normal_integral[1])
+                    .value("interface_normal_integral_2", state.interface_normal_integral[2])
+                    .value("velocity_jump_sq", state.velocity_jump_squared)
+                    .value("velocity_jump_normal_sq", state.normal_velocity_jump_squared)
+                    .value("velocity_jump_tangential_sq", state.tangential_velocity_jump_squared)
+                    .value("negative_normal_flux", state.negative_normal_flux)
+                    .value("positive_normal_flux", state.positive_normal_flux)
+                    .value("normal_flux_jump", state.normal_flux_jump)
+                    .value("negative_mass_flux", state.negative_mass_flux)
+                    .value("positive_mass_flux", state.positive_mass_flux)
+                    .value("mean_pressure_jump", state.mean_pressure_jump)
+                    .value("pressure_jump_sq", state.pressure_jump_squared)
+                    .value("pressure_jump_integral", state.pressure_jump_integral)
+                    .value("traction_jump_sq", state.traction_jump_squared)
+                    .value("traction_jump_normal_integral", state.traction_jump_normal_integral)
+                    .value("negative_traction_integral_0", state.negative_traction_integral[0])
+                    .value("negative_traction_integral_1", state.negative_traction_integral[1])
+                    .value("negative_traction_integral_2", state.negative_traction_integral[2])
+                    .value("positive_traction_integral_0", state.positive_traction_integral[0])
+                    .value("positive_traction_integral_1", state.positive_traction_integral[1])
+                    .value("positive_traction_integral_2", state.positive_traction_integral[2])
+                    .value("traction_jump_integral_0", state.traction_jump_integral[0])
+                    .value("traction_jump_integral_1", state.traction_jump_integral[1])
+                    .value("traction_jump_integral_2", state.traction_jump_integral[2])
+                    .value("viscous_traction_jump_sq", state.viscous_traction_jump_squared)
+                    .value("negative_viscous_traction_integral_0", state.negative_viscous_traction_integral[0])
+                    .value("negative_viscous_traction_integral_1", state.negative_viscous_traction_integral[1])
+                    .value("negative_viscous_traction_integral_2", state.negative_viscous_traction_integral[2])
+                    .value("positive_viscous_traction_integral_0", state.positive_viscous_traction_integral[0])
+                    .value("positive_viscous_traction_integral_1", state.positive_viscous_traction_integral[1])
+                    .value("positive_viscous_traction_integral_2", state.positive_viscous_traction_integral[2])
+                    .value("viscous_traction_jump_integral_0", state.viscous_traction_jump_integral[0])
+                    .value("viscous_traction_jump_integral_1", state.viscous_traction_jump_integral[1])
+                    .value("viscous_traction_jump_integral_2", state.viscous_traction_jump_integral[2])
+                    .value("surface_energy_work", state.surface_energy_work)
+                    .value("nitsche_consistency_work", state.nitsche_consistency_work)
+                    .value("nitsche_adjoint_work", state.nitsche_adjoint_work)
+                    .value("nitsche_penalty_work", state.nitsche_penalty_work)
+                    .value("negative_phase_quadrature_points", state.negative_phase.quadrature_point_count)
+                    .value("negative_density", state.negative_phase.density)
+                    .value("negative_volume", state.negative_phase.volume)
+                    .value("negative_mass", state.negative_phase.mass)
+                    .value("negative_momentum_0", state.negative_phase.momentum[0])
+                    .value("negative_momentum_1", state.negative_phase.momentum[1])
+                    .value("negative_momentum_2", state.negative_phase.momentum[2])
+                    .value("negative_mean_velocity_0", state.negative_phase.mean_velocity[0])
+                    .value("negative_mean_velocity_1", state.negative_phase.mean_velocity[1])
+                    .value("negative_mean_velocity_2", state.negative_phase.mean_velocity[2])
+                    .value("negative_maximum_quadrature_speed", state.negative_phase.maximum_quadrature_speed)
+                    .value("negative_kinetic_energy", state.negative_phase.kinetic_energy)
+                    .value("negative_pressure_integral", state.negative_phase.pressure_integral)
+                    .value("negative_mean_pressure", state.negative_phase.mean_pressure)
+                    .value("negative_pressure_squared_integral", state.negative_phase.pressure_squared_integral)
+                    .value("negative_pressure_gradient_integral_0", state.negative_phase.pressure_gradient_integral[0])
+                    .value("negative_pressure_gradient_integral_1", state.negative_phase.pressure_gradient_integral[1])
+                    .value("negative_pressure_gradient_integral_2", state.negative_phase.pressure_gradient_integral[2])
+                    .value("negative_body_force_density_integral_0", state.negative_phase.body_force_density_integral[0])
+                    .value("negative_body_force_density_integral_1", state.negative_phase.body_force_density_integral[1])
+                    .value("negative_body_force_density_integral_2", state.negative_phase.body_force_density_integral[2])
+                    .value("negative_hydrostatic_residual_integral_0", state.negative_phase.hydrostatic_residual_integral[0])
+                    .value("negative_hydrostatic_residual_integral_1", state.negative_phase.hydrostatic_residual_integral[1])
+                    .value("negative_hydrostatic_residual_integral_2", state.negative_phase.hydrostatic_residual_integral[2])
+                    .value("negative_hydrostatic_residual_sq", state.negative_phase.hydrostatic_residual_squared)
+                    .value("positive_phase_quadrature_points", state.positive_phase.quadrature_point_count)
+                    .value("positive_density", state.positive_phase.density)
+                    .value("positive_volume", state.positive_phase.volume)
+                    .value("positive_mass", state.positive_phase.mass)
+                    .value("positive_momentum_0", state.positive_phase.momentum[0])
+                    .value("positive_momentum_1", state.positive_phase.momentum[1])
+                    .value("positive_momentum_2", state.positive_phase.momentum[2])
+                    .value("positive_mean_velocity_0", state.positive_phase.mean_velocity[0])
+                    .value("positive_mean_velocity_1", state.positive_phase.mean_velocity[1])
+                    .value("positive_mean_velocity_2", state.positive_phase.mean_velocity[2])
+                    .value("positive_maximum_quadrature_speed", state.positive_phase.maximum_quadrature_speed)
+                    .value("positive_kinetic_energy", state.positive_phase.kinetic_energy)
+                    .value("positive_pressure_integral", state.positive_phase.pressure_integral)
+                    .value("positive_mean_pressure", state.positive_phase.mean_pressure)
+                    .value("positive_pressure_squared_integral", state.positive_phase.pressure_squared_integral)
+                    .value("positive_pressure_gradient_integral_0", state.positive_phase.pressure_gradient_integral[0])
+                    .value("positive_pressure_gradient_integral_1", state.positive_phase.pressure_gradient_integral[1])
+                    .value("positive_pressure_gradient_integral_2", state.positive_phase.pressure_gradient_integral[2])
+                    .value("positive_body_force_density_integral_0", state.positive_phase.body_force_density_integral[0])
+                    .value("positive_body_force_density_integral_1", state.positive_phase.body_force_density_integral[1])
+                    .value("positive_body_force_density_integral_2", state.positive_phase.body_force_density_integral[2])
+                    .value("positive_hydrostatic_residual_integral_0", state.positive_phase.hydrostatic_residual_integral[0])
+                    .value("positive_hydrostatic_residual_integral_1", state.positive_phase.hydrostatic_residual_integral[1])
+                    .value("positive_hydrostatic_residual_integral_2", state.positive_phase.hydrostatic_residual_integral[2])
+                    .value("positive_hydrostatic_residual_sq", state.positive_phase.hydrostatic_residual_squared)
+                    .boolean("prescribed_pressure_jump_applicable", state.prescribed_pressure_jump_error_squared.has_value());
             if (state.prescribed_pressure_jump_error_squared.has_value()) {
-                message
-                    << " prescribed_pressure_jump_target="
-                    << *record.declaration.parameters
-                            .prescribed_pressure_jump
-                    << " prescribed_pressure_jump_error_sq="
-                    << *state.prescribed_pressure_jump_error_squared;
+                log_line
+                    .value("prescribed_pressure_jump_target", *record.declaration.parameters
+                            .prescribed_pressure_jump)
+                    .value("prescribed_pressure_jump_error_sq", *state.prescribed_pressure_jump_error_squared);
             }
-            message << " prescribed_viscous_traction_jump_applicable="
-                    << (state
+            log_line
+                    .boolean("prescribed_viscous_traction_jump_applicable", state
                                 .prescribed_viscous_traction_jump_error_squared
-                                .has_value()
-                            ? "true"
-                            : "false");
+                                .has_value());
             if (state.prescribed_viscous_traction_jump_error_squared
                     .has_value()) {
                 const auto& target =
                     *record.declaration.parameters
                          .prescribed_viscous_traction_jump;
-                message
-                    << " prescribed_viscous_traction_jump_target_0="
-                    << target[0]
-                    << " prescribed_viscous_traction_jump_target_1="
-                    << target[1]
-                    << " prescribed_viscous_traction_jump_target_2="
-                    << target[2]
-                    << " prescribed_viscous_traction_jump_error_sq="
-                    << *state
-                            .prescribed_viscous_traction_jump_error_squared;
+                log_line
+                    .value("prescribed_viscous_traction_jump_target_0", target[0])
+                    .value("prescribed_viscous_traction_jump_target_1", target[1])
+                    .value("prescribed_viscous_traction_jump_target_2", target[2])
+                    .value("prescribed_viscous_traction_jump_error_sq", *state
+                            .prescribed_viscous_traction_jump_error_squared);
             }
-            message << " prescribed_stress_jump_residual_applicable="
-                    << (state.prescribed_stress_jump_residual_squared
-                                .has_value()
-                            ? "true"
-                            : "false");
+            log_line
+                    .boolean("prescribed_stress_jump_residual_applicable", state.prescribed_stress_jump_residual_squared
+                                .has_value());
             if (state.prescribed_stress_jump_residual_squared.has_value()) {
-                message << " prescribed_stress_jump_residual_sq="
-                        << *state.prescribed_stress_jump_residual_squared;
+                log_line
+                    .value("prescribed_stress_jump_residual_sq", *state.prescribed_stress_jump_residual_squared);
             }
-            message << " momentum_reconciliation_applicable="
-                    << (record.momentum_reconciliation.has_value()
-                            ? "true"
-                            : "false");
+            log_line
+                    .boolean("momentum_reconciliation_applicable", record.momentum_reconciliation.has_value());
             if (record.momentum_reconciliation.has_value()) {
                 const auto& reconciliation =
                     *record.momentum_reconciliation;
-                message
-                    << " corrected_snapshot_revision="
-                    << reconciliation.corrected_geometry_revision
-                           .snapshot_revision_key
-                    << " raw_algebraic_revision="
-                    << reconciliation.raw_algebraic_revision
-                    << " corrected_algebraic_revision="
-                    << reconciliation.corrected_algebraic_revision
-                    << " momentum_relative_tolerance="
-                    << reconciliation.relative_tolerance
-                    << " velocity_update_applied=false"
-                    << " negative_momentum_delta_norm="
-                    << reconciliation.negative_phase.momentum_delta_norm
-                    << " negative_allowed_momentum_delta="
-                    << reconciliation.negative_phase
-                           .allowed_momentum_delta
-                    << " positive_momentum_delta_norm="
-                    << reconciliation.positive_phase.momentum_delta_norm
-                    << " positive_allowed_momentum_delta="
-                    << reconciliation.positive_phase
-                           .allowed_momentum_delta
-                    << " momentum_reconciliation_satisfied=true";
+                log_line
+                    .value("corrected_snapshot_revision", reconciliation.corrected_geometry_revision
+                           .snapshot_revision_key)
+                    .value("raw_algebraic_revision", reconciliation.raw_algebraic_revision)
+                    .value("corrected_algebraic_revision", reconciliation.corrected_algebraic_revision)
+                    .value("momentum_relative_tolerance", reconciliation.relative_tolerance)
+                    .boolean("velocity_update_applied", false)
+                    .value("negative_momentum_delta_norm", reconciliation.negative_phase.momentum_delta_norm)
+                    .value("negative_allowed_momentum_delta", reconciliation.negative_phase
+                           .allowed_momentum_delta)
+                    .value("positive_momentum_delta_norm", reconciliation.positive_phase.momentum_delta_norm)
+                    .value("positive_allowed_momentum_delta", reconciliation.positive_phase
+                           .allowed_momentum_delta)
+                    .boolean("momentum_reconciliation_satisfied", true);
             }
-            message << " accepted_stage_numerics_applicable="
-                    << (record.numerics.has_value() ? "true" : "false");
+            log_line
+                    .boolean("accepted_stage_numerics_applicable", record.numerics.has_value());
             if (record.numerics.has_value()) {
                 const auto& numerics = *record.numerics;
-                message
-                    << " nonlinear_converged="
-                    << (numerics.solve.nonlinear.converged ? "true"
-                                                           : "false")
-                    << " nonlinear_iterations="
-                    << numerics.solve.nonlinear.iterations
-                    << " nonlinear_initial_residual_norm="
-                    << numerics.solve.nonlinear.initial_residual_norm
-                    << " nonlinear_final_residual_norm="
-                    << numerics.solve.nonlinear.final_residual_norm
-                    << " nonlinear_reason='"
-                    << numerics.solve.nonlinear.reason << "'"
-                    << " linear_converged="
-                    << (numerics.solve.linear.converged ? "true"
-                                                        : "false")
-                    << " linear_iterations="
-                    << numerics.solve.linear.iterations
-                    << " linear_relative_residual="
-                    << numerics.solve.linear.relative_residual
-                    << " linear_reason='"
-                    << numerics.solve.linear.reason << "'"
-                    << " blockschur_outer_iterations="
-                    << numerics.solve.linear.blockschur_outer_iterations
-                    << " negative_velocity_aggregate_dofs="
-                    << numerics.negative_phase.velocity_aggregation
-                           .canonical_owned_aggregate_dofs
-                    << " negative_pressure_aggregate_dofs="
-                    << numerics.negative_phase.pressure_aggregation
-                           .canonical_owned_aggregate_dofs
-                    << " positive_velocity_aggregate_dofs="
-                    << numerics.positive_phase.velocity_aggregation
-                           .canonical_owned_aggregate_dofs
-                    << " positive_pressure_aggregate_dofs="
-                    << numerics.positive_phase.pressure_aggregation
-                           .canonical_owned_aggregate_dofs
-                    << " pressure_stabilization_work=unavailable"
-                    << " phase_iteration_scope=shared_coupled_solve";
+                log_line
+                    .boolean("nonlinear_converged", numerics.solve.nonlinear.converged)
+                    .value("nonlinear_iterations", numerics.solve.nonlinear.iterations)
+                    .value("nonlinear_initial_residual_norm", numerics.solve.nonlinear.initial_residual_norm)
+                    .value("nonlinear_final_residual_norm", numerics.solve.nonlinear.final_residual_norm)
+                    .quoted("nonlinear_reason", numerics.solve.nonlinear.reason)
+                    .boolean("linear_converged", numerics.solve.linear.converged)
+                    .value("linear_iterations", numerics.solve.linear.iterations)
+                    .value("linear_relative_residual", numerics.solve.linear.relative_residual)
+                    .quoted("linear_reason", numerics.solve.linear.reason)
+                    .value("blockschur_outer_iterations", numerics.solve.linear.blockschur_outer_iterations)
+                    .value("negative_velocity_aggregate_dofs", numerics.negative_phase.velocity_aggregation
+                           .canonical_owned_aggregate_dofs)
+                    .value("negative_pressure_aggregate_dofs", numerics.negative_phase.pressure_aggregation
+                           .canonical_owned_aggregate_dofs)
+                    .value("positive_velocity_aggregate_dofs", numerics.positive_phase.velocity_aggregation
+                           .canonical_owned_aggregate_dofs)
+                    .value("positive_pressure_aggregate_dofs", numerics.positive_phase.pressure_aggregation
+                           .canonical_owned_aggregate_dofs);
+                // Fixed fields of the shared coupled solve, as key=value texts
+                // (the WP-10 capability-boundary contract reads these texts).
+                for (const std::string_view field : {std::string_view("pressure_stabilization_work=unavailable"),
+                                                     std::string_view("phase_iteration_scope=shared_coupled_solve")}) {
+                    const auto equals = field.find('=');
+                    log_line.text(std::string(field.substr(0, equals)), field.substr(equals + 1));
+                }
             }
-            FE_LOG_INFO(message.str());
+            logRecord(log_line);
         }
     } catch (...) {
         // Accepted semantic history is authoritative; diagnostics are best effort.

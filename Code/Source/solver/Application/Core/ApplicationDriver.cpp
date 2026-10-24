@@ -1,4 +1,5 @@
 #include "Application/Core/ApplicationDriver.h"
+#include "FE/Core/LogRecord.h"
 
 #include "Application/Core/ActiveDomainOutput.h"
 #include "Application/Core/FreeSurfaceSemiImplicitReference.h"
@@ -8896,32 +8897,23 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                     static_cast<svmp::FE::Real>(h.dt()),
                     velocity_extension_artifact_comm);
             for (const auto& record : reconciliation.records) {
-              oopCout()
-                  << std::setprecision(17)
-                  << "[svMultiPhysics::Application] Two-fluid momentum reconciliation"
-                  << " marker=" << record.interface_marker
-                  << " raw_snapshot="
-                  << record.raw_geometry_revision.snapshot_revision_key
-                  << " corrected_snapshot="
-                  << record.corrected_geometry_revision
-                         .snapshot_revision_key
-                  << " raw_algebraic_revision="
-                  << record.raw_algebraic_revision
-                  << " corrected_algebraic_revision="
-                  << record.corrected_algebraic_revision
-                  << " tolerance=" << record.relative_tolerance
-                  << " negative_delta_norm="
-                  << record.negative_phase.momentum_delta_norm
-                  << " negative_allowed_delta="
-                  << record.negative_phase.allowed_momentum_delta
-                  << " positive_delta_norm="
-                  << record.positive_phase.momentum_delta_norm
-                  << " positive_allowed_delta="
-                  << record.positive_phase.allowed_momentum_delta
-                  << " velocity_update_applied=false"
-                  << " status="
-                  << (record.satisfied ? "satisfied" : "rejected")
-                  << std::endl;
+              // Map entry R1.180 (tests/cases/fluid/free_surface_log_record_map.json).
+              svmp::FE::logRecord(
+                  svmp::FE::LogRecord("TwoFluidAcceptedStage", "momentum reconciliation")
+                      .diagnostic("two_fluid_momentum_reconciliation")
+                      .rootOnly()
+                      .value("marker", record.interface_marker)
+                      .value("raw_snapshot", record.raw_geometry_revision.snapshot_revision_key)
+                      .value("corrected_snapshot", record.corrected_geometry_revision.snapshot_revision_key)
+                      .value("raw_algebraic_revision", record.raw_algebraic_revision)
+                      .value("corrected_algebraic_revision", record.corrected_algebraic_revision)
+                      .real("tolerance", record.relative_tolerance)
+                      .real("negative_delta_norm", record.negative_phase.momentum_delta_norm)
+                      .real("negative_allowed_delta", record.negative_phase.allowed_momentum_delta)
+                      .real("positive_delta_norm", record.positive_phase.momentum_delta_norm)
+                      .real("positive_allowed_delta", record.positive_phase.allowed_momentum_delta)
+                      .boolean("velocity_update_applied", false)
+                      .text("status", record.satisfied ? "satisfied" : "rejected"));
             }
             if (!reconciliation.satisfied) {
               clear_pending_contact_provenance();
