@@ -3700,28 +3700,17 @@ TEST(NavierStokesPostProcessing, StatesTheContactLineChannelsWithTheRuleWallNorm
     EXPECT_EQ(walls[2].boundary_marker, 9);
     EXPECT_FALSE(walls[2].line_friction.has_value() || walls[2].slip_friction.has_value());
 
-    // The snapshot's domains: wall 5 has two contact lines, wall 9 none.
-    walls[0].contact_lines = {ContactLineDomain(101, 3)};
-    walls[0].wetted_wall = {BoundaryDomain::generatedActiveSubset(3, 201)};
-    walls[1].contact_lines = {ContactLineDomain(102, 5), ContactLineDomain(103, 5)};
-    walls[1].wetted_wall = {BoundaryDomain::generatedActiveSubset(5, 202)};
-    walls[2].wetted_wall = {BoundaryDomain::generatedActiveSubset(9, 203)};
-
-    const auto functionals = post::freeSurfaceContactLineFunctionals(statement, walls);
-    const std::vector<std::string> expected{
-        "free_surface.7.wall.3.wetted_area_rate",
-        "free_surface.7.wall.3.young_energy_rate",
-        "free_surface.7.wall.3.contact_line_friction_dissipation",
-        "free_surface.7.wall.3.wall_slip_dissipation",
-        "free_surface.7.wall.5.wetted_area_rate",
-        "free_surface.7.wall.5.young_energy_rate",
-        "free_surface.7.wall.5.wall_slip_dissipation",
-    };
-    const std::vector<Kind> kinds{Kind::Power, Kind::Power, Kind::DissipationRate, Kind::DissipationRate,
-                                  Kind::Power, Kind::Power, Kind::DissipationRate};
-    // Integrals per form: one per contact line (dL) or wetted part (ds).
-    const std::vector<int> integrals{1, 1, 1, 1, 2, 2, 1};
-    ASSERT_EQ(functionals.size(), expected.size());
+    // The wall functionals: integrands with the rule's wall normal, integrated
+    // by the evaluator over each wall's domains in the snapshot.
+    using Measure = svmp::FE::systems::WallMeasure;
+    const auto functionals = post::freeSurfaceWallFunctionals(statement, walls);
+    ASSERT_EQ(functionals.size(), 4u);
+    const std::vector<std::string> quantities{"wetted_area_rate", "young_energy_rate",
+                                              "contact_line_friction_dissipation", "wall_slip_dissipation"};
+    const std::vector<Kind> kinds{Kind::Power, Kind::Power, Kind::DissipationRate, Kind::DissipationRate};
+    const std::vector<Measure> measures{Measure::ContactLines, Measure::ContactLines, Measure::ContactLines,
+                                        Measure::WettedPart};
+    const std::vector<std::vector<int>> listed{{}, {3, 5, 9}, {3}, {3, 5}};
     const std::function<int(const FormExprNode&, FormExprType)> count =
         [&count](const FormExprNode& node, FormExprType type) {
             int n = node.type() == type ? 1 : 0;
@@ -3732,15 +3721,36 @@ TEST(NavierStokesPostProcessing, StatesTheContactLineChannelsWithTheRuleWallNorm
         };
     for (std::size_t i = 0; i < functionals.size(); ++i) {
         const auto& functional = functionals[i];
-        SCOPED_TRACE(functional.name);
-        EXPECT_EQ(functional.name, expected[i]);
+        SCOPED_TRACE(functional.quantity);
+        EXPECT_EQ(functional.prefix, "free_surface.7.");
+        EXPECT_EQ(functional.quantity, quantities[i]);
         EXPECT_EQ(functional.kind, kinds[i]);
+        EXPECT_EQ(functional.measure, measures[i]);
         EXPECT_EQ(functional.owner, "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary");
-        EXPECT_TRUE(svmp::FE::systems::isSumOfIntegrals(functional.form));
-        EXPECT_FALSE(functional.form.hasTest() || functional.form.hasTrial());
-        // The wall normal is the rule's, never a configured constant.
-        EXPECT_GT(count(*functional.form.node(), FormExprType::BoundaryNormal), 0);
-        // dL and the ds of a generated wetted part are both generated-rule integrals.
-        EXPECT_EQ(count(*functional.form.node(), FormExprType::InterfaceIntegral), integrals[i]);
+        EXPECT_EQ(functional.integrand.isValid(), i == 0u);   // the wetted-area rate holds on every wall
+        std::vector<int> walls_listed;
+        for (const auto& [wall, integrand] : functional.by_wall) {
+            walls_listed.push_back(wall);
+            // The wall normal is the rule's, never a configured constant; no measure yet.
+            EXPECT_GT(count(*integrand.node(), FormExprType::BoundaryNormal), 0);
+            EXPECT_EQ(count(*integrand.node(), FormExprType::InterfaceIntegral), 0);
+            EXPECT_FALSE(integrand.hasTest() || integrand.hasTrial());
+        }
+        EXPECT_EQ(walls_listed, listed[i]);
     }
+    EXPECT_GT(count(*functionals[0].integrand.node(), FormExprType::BoundaryNormal), 0);
+    EXPECT_EQ(svmp::FE::systems::wallFunctionalName(functionals[3], 5),
+              "free_surface.7.wall.5.wall_slip_dissipation");
+
+    // On a snapshot where wall 5 has two contact lines and wall 9 a wetted part only.
+    const std::vector<ContactLineDomain> lines_5{ContactLineDomain(102, 5), ContactLineDomain(103, 5)};
+    const std::vector<BoundaryDomain> wetted_9{BoundaryDomain::generatedActiveSubset(9, 203)};
+    const auto young_5 = svmp::FE::systems::wallFunctionalForm(functionals[1], 5, lines_5, {});
+    EXPECT_TRUE(svmp::FE::systems::isSumOfIntegrals(young_5));
+    EXPECT_EQ(count(*young_5.node(), FormExprType::InterfaceIntegral), 2);
+    EXPECT_FALSE(svmp::FE::systems::wallFunctionalForm(functionals[0], 9, {}, wetted_9).isValid());  // no line
+    EXPECT_FALSE(svmp::FE::systems::wallFunctionalForm(functionals[3], 9, {}, wetted_9).isValid());  // no slip
+    EXPECT_FALSE(svmp::FE::systems::wallFunctionalForm(functionals[2], 5, lines_5, {}).isValid());   // no friction
+    const std::vector<BoundaryDomain> wetted_3{BoundaryDomain::generatedActiveSubset(3, 201)};
+    EXPECT_TRUE(svmp::FE::systems::isSumOfIntegrals(svmp::FE::systems::wallFunctionalForm(functionals[3], 3, {}, wetted_3)));
 }

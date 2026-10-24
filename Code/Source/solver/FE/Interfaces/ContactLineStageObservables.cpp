@@ -11,8 +11,10 @@
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "Interfaces/SnapshotFieldEvaluator.h"
 #include "Systems/FESystem.h"
+#include "Systems/FunctionalFormEvaluator.h"
 #include "Systems/FunctionalForms.h"
 #include "Systems/SnapshotFieldAccess.h"
+#include "Systems/SystemState.h"
 
 #include <algorithm>
 #include <cmath>
@@ -50,6 +52,73 @@ svmp::FE::systems::CollectiveCommunicator activeSystemCommunicator(
   (void)system;
   return {};
 #endif
+}
+
+/**
+ * The wall-slip dissipation of each wall of an accepted contact stage as the
+ * declared wall functional "wall.<b>.wall_slip_dissipation" of its interface
+ * (D49 E3, contact-line switch), evaluated at the stage solution on the
+ * stage's snapshot with the exact reduction; the totals stay sums of the
+ * walls.  The line friction stays pointwise until a deck with a nonzero
+ * friction calibrates its form.  Without a declared wall-slip functional the
+ * stage keeps its pointwise values.  Collective.
+ */
+void applyDeclaredStageWallSlipDissipation(
+    const svmp::FE::systems::FESystem& system,
+    const svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration& declaration,
+    const FreeSurfaceGeometrySnapshot& snapshot,
+    std::span<const svmp::FE::Real> stage_solution,
+    svmp::FE::systems::FreeSurfaceAcceptedContactStageState& stage,
+    const svmp::FE::systems::CollectiveCommunicator& comm)
+{
+  auto& state = stage.state;
+  std::vector<int> walls;
+  walls.reserve(state.walls.size());
+  for (const auto& wall : state.walls) {
+    walls.push_back(wall.boundary_marker);
+  }
+  constexpr std::string_view kWallSlip = "wall_slip_dissipation";
+  const std::string prefix =
+      "free_surface." + std::to_string(declaration.interface_marker) + ".";
+  const auto declared = declaredWallFunctionalForms(
+      system, prefix, snapshot, walls, declaration.parameters.liquid_side,
+      std::span<const std::string_view>(&kWallSlip, 1u));
+  const auto [minimum_count, maximum_count] = collectiveMinMaxUint64(
+      static_cast<std::uint64_t>(declared.size()), comm);
+  if (minimum_count != maximum_count) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] The declared contact-stage wall functionals of interface " +
+        std::to_string(declaration.interface_marker) +
+        " differ across the FE communicator.");
+  }
+  if (declared.empty()) {
+    return;
+  }
+  std::vector<svmp::FE::forms::FormExpr> forms;
+  forms.reserve(declared.size());
+  for (const auto& entry : declared) {
+    forms.push_back(entry.form);
+  }
+  svmp::FE::systems::SystemStateView view;
+  view.u = stage_solution;
+  const auto values =
+      svmp::FE::systems::evaluateFunctionalForms(system, forms, view, comm);
+  for (std::size_t k = 0; k < declared.size(); ++k) {
+    for (auto& wall : state.walls) {
+      if (wall.boundary_marker == declared[k].wall) {
+        wall.wall_slip_dissipation = values[k].value;
+      }
+    }
+    stage.declared_functional_masses.emplace_back(declared[k].name,
+                                                  values[k].absolute_mass);
+  }
+  // As finalizeFreeSurfaceDynamicContactState forms them.
+  state.wall_slip_dissipation = svmp::FE::Real{0.0};
+  for (const auto& wall : state.walls) {
+    state.wall_slip_dissipation += wall.wall_slip_dissipation;
+  }
+  state.total_dissipation =
+      state.line_friction_dissipation + state.wall_slip_dissipation;
 }
 
 } // namespace
@@ -477,6 +546,8 @@ evaluateAcceptedFreeSurfaceContactStages(
         local_completion_failure,
         comm,
         "accepted_contact_stage_evaluation_completion");
+    applyDeclaredStageWallSlipDissipation(
+        system, declaration, snapshot, stage_solution, stages.back(), comm);
   }
   return stages;
 }

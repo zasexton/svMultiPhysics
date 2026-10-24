@@ -1232,8 +1232,13 @@ std::uint64_t levelSetMaintenanceCutTopologyRevision(
 // wall.<w>.wetted_area", "contact_measure", "young_energy").  The pointwise
 // evaluators above still produce every other field and the consistency
 // checks they pass; the static minimizer reads them directly until E4.
-// Totals stay sums of channels.  The contact-line part of the wall power and
-// the contact-stage dissipations stay pointwise (a follow-up of E3).
+// Totals stay sums of channels.  The contact-line part of the wall power is
+// the declared wall functionals "wall.<b>.wetted_area_rate" and
+// "wall.<b>.young_energy_rate" (Systems/FunctionalForms.h) over the
+// snapshot's contact lines of each wall; the contact stage states the wall
+// slip the same way (Interfaces/ContactLineStageObservables.cpp), and the
+// line friction stays pointwise until a deck with a nonzero friction
+// calibrates its form.
 
 /// The absolute masses sum |w f| of the declared functionals of one record.
 struct DeclaredFunctionalMasses {
@@ -1269,6 +1274,7 @@ struct ReplacedChannels {
   bool gravitational{false};
   bool volume_variation{false};
   bool surface_variation{false};
+  bool wall_variation{false};
 };
 
 template <class Walls>
@@ -1303,6 +1309,20 @@ bool replaceDeclaredChannel(
       return false;
     }
     const auto wall_quantity = rest.substr(dot + 1);
+    if ((wall_quantity == "wetted_area_rate" || wall_quantity == "young_energy_rate") &&
+        accepted.endpoint_functional_power.has_value()) {
+      auto* wall = findWall(accepted.endpoint_functional_power->walls, boundary_marker);
+      if (wall == nullptr) {
+        return false;
+      }
+      if (wall_quantity == "wetted_area_rate") {
+        wall->owned_wetted_wall_area_variation = value;
+      } else {
+        wall->young_wall_energy_variation = value;
+      }
+      replaced.wall_variation = true;
+      return true;
+    }
     if (wall_quantity == "wetted_area" || wall_quantity == "contact_measure" ||
         wall_quantity == "young_energy") {
       auto* wall = findWall(state.walls, boundary_marker);
@@ -1439,10 +1459,22 @@ void recomputeTotals(
     energy.total_energy = energy.kinetic_energy + energy.gravitational_energy;
   }
   if (accepted.endpoint_functional_power.has_value() &&
-      (replaced.volume_variation || replaced.surface_variation)) {
+      (replaced.volume_variation || replaced.surface_variation || replaced.wall_variation)) {
     auto& power = *accepted.endpoint_functional_power;
     // As the pointwise first variation: the surface-energy rate is gamma
-    // times the area rate; the wall rates stay pointwise.
+    // times the area rate; the wall rates are the sums over the walls.
+    if (replaced.wall_variation) {
+      svmp::FE::Real wetted{0.0};
+      svmp::FE::Real young{0.0};
+      for (const auto& wall : power.walls) {
+        wetted += wall.owned_wetted_wall_area_variation;
+        if (wall.equilibrium_contact_angle_radians.has_value()) {
+          young += wall.young_wall_energy_variation;
+        }
+      }
+      power.owned_wetted_wall_area_variation = wetted;
+      power.young_wall_energy_variation = young;
+    }
     if (replaced.surface_variation) {
       power.liquid_gas_surface_energy_variation =
           power.surface_tension * power.owned_liquid_gas_area_variation;
@@ -1569,6 +1601,20 @@ std::vector<DeclaredFunctionalMasses> applyDeclaredFunctionalForms(
         if (!contact.empty()) {
           names.push_back(wall_prefix + "contact_measure");
           forms.push_back(sum_of(contact));
+        }
+      }
+      // The contact-line part of the wall power on the power's walls.
+      if (accepted.endpoint_functional_power.has_value() && !solution.empty()) {
+        std::vector<int> power_walls;
+        for (const auto& wall : accepted.endpoint_functional_power->walls) {
+          power_walls.push_back(wall.boundary_marker);
+        }
+        constexpr std::array<std::string_view, 2> wall_rates{"wetted_area_rate", "young_energy_rate"};
+        for (auto& declared_wall : interfaces::declaredWallFunctionalForms(
+                 system, prefix, *snapshot, power_walls, record_declaration->parameters.liquid_side,
+                 wall_rates)) {
+          names.push_back(std::move(declared_wall.name));
+          forms.push_back(std::move(declared_wall.form));
         }
       }
     }
@@ -2236,6 +2282,14 @@ recordAcceptedFunctionals(
             << " interface_marker=" << record.interface_marker;
     for (const auto& [name, mass] : record.masses) {
       message << ' ' << name << '=' << mass;
+    }
+    // Then the wall functionals the contact stage evaluated on its stage state.
+    for (const auto& accepted : accepted_states) {
+      if (accepted.interface_marker == record.interface_marker && accepted.contact_stage.has_value()) {
+        for (const auto& [name, mass] : accepted.contact_stage->declared_functional_masses) {
+          message << ' ' << name << '=' << mass;
+        }
+      }
     }
     FE_LOG_INFO(message.str());
   }

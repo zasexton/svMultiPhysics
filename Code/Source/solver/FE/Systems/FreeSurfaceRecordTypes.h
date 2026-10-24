@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace svmp {
@@ -191,6 +192,9 @@ struct FreeSurfaceAcceptedContactStageState {
     std::uint64_t stage_state_revision{0};
     interfaces::FreeSurfaceGeometryRevision geometry_revision{};
     interfaces::FreeSurfaceDynamicContactState state{};
+    // The absolute mass sums |w f| of the declared wall functionals evaluated
+    // on the stage (name, mass), for the record's absolute-mass line.
+    std::vector<std::pair<std::string, Real>> declared_functional_masses{};
 };
 
 /**
