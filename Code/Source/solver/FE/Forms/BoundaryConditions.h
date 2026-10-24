@@ -14,6 +14,7 @@
  */
 
 #include "Forms/FormExpr.h"
+#include "Forms/NitscheTraceBilinearForm.h"
 
 #include <bit>
 #include <cmath>
@@ -764,31 +765,49 @@ struct NitscheDirichletOptions {
 
 using TraceNitscheOptions = NitscheDirichletOptions;
 
+/// The bilinear form of a generated-boundary Nitsche route
+/// (NitscheTraceBilinearForm.h) with its coefficient.
+struct GeneratedBoundaryNitscheBilinearForm {
+    NitscheTraceBilinearForm kind{NitscheTraceBilinearForm::SymmetricGradient};
+    FormExpr coefficient{};   ///< k, a finite positive constant
+};
+
+/// The symmetric-gradient form 2 k eps(u) : eps(v) with coefficient @p k.
+[[nodiscard]] inline GeneratedBoundaryNitscheBilinearForm symmetricGradientForm(FormExpr k)
+{
+    return GeneratedBoundaryNitscheBilinearForm{
+        .kind = NitscheTraceBilinearForm::SymmetricGradient,
+        .coefficient = std::move(k),
+    };
+}
+
 class GeneratedBoundaryNitscheTraceFormBinding;
 struct GeneratedBoundaryNitscheTraceTerms;
 
+/// The Nitsche terms of u = @p prescribed_value on the generated active part
+/// of a physical boundary, consistent with @p form, and their binding.
 [[nodiscard]] GeneratedBoundaryNitscheTraceTerms
-buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
+buildGeneratedBoundaryNitscheTraceTerms(
     const FormExpr& u,
     const FormExpr& v,
     const FormExpr& prescribed_value,
-    const FormExpr& dynamic_viscosity,
+    const GeneratedBoundaryNitscheBilinearForm& form,
     int physical_boundary_marker,
     int generated_active_boundary_marker,
     const TraceNitscheOptions& opts = {});
 
 /**
- * Immutable proof that a generated-interface symmetric-gradient Nitsche
- * contribution was constructed from canonical state/test terminals with a
- * matching complete function-space signature by the canonical FE form
- * helper.
+ * Immutable proof that a generated-boundary Nitsche contribution consistent
+ * with a declared bilinear form (bilinearForm(), formCoefficient()) was
+ * constructed from canonical state/test terminals with a matching complete
+ * function-space signature by the canonical FE form helper.
  *
  * Callers can copy a valid binding but cannot manufacture or edit one. The
  * formulation installer additionally requires the exact immutable route
  * anchor to occur once as an unscaled top-level additive summand in the
  * original residual being installed before it derives a generated-boundary
  * trace-certificate policy. This binding authenticates only that boundary
- * route; it does not authenticate a matching bulk viscous form. Any
+ * route; it does not authenticate the matching bulk form. Any
  * coercivity interpretation of the resulting trace policy is therefore
  * conditional on the caller providing the corresponding bulk energy.
  */
@@ -820,9 +839,13 @@ public:
     {
         return generated_active_boundary_marker_;
     }
-    [[nodiscard]] Real dynamicViscosity() const noexcept
+    [[nodiscard]] NitscheTraceBilinearForm bilinearForm() const noexcept
     {
-        return dynamic_viscosity_;
+        return bilinear_form_;
+    }
+    [[nodiscard]] Real formCoefficient() const noexcept
+    {
+        return form_coefficient_;
     }
     [[nodiscard]] Real penaltyGamma() const noexcept
     {
@@ -859,7 +882,8 @@ private:
         SpaceSignature velocity_space_signature,
         int physical_boundary_marker,
         int generated_active_boundary_marker,
-        Real dynamic_viscosity,
+        NitscheTraceBilinearForm bilinear_form,
+        Real form_coefficient,
         Real penalty_gamma,
         bool scale_with_polynomial_order,
         int penalty_polynomial_order,
@@ -873,7 +897,8 @@ private:
         , physical_boundary_marker_(physical_boundary_marker)
         , generated_active_boundary_marker_(
               generated_active_boundary_marker)
-        , dynamic_viscosity_(dynamic_viscosity)
+        , bilinear_form_(bilinear_form)
+        , form_coefficient_(form_coefficient)
         , penalty_gamma_(penalty_gamma)
         , scale_with_polynomial_order_(scale_with_polynomial_order)
         , penalty_polynomial_order_(penalty_polynomial_order)
@@ -886,11 +911,11 @@ private:
     }
 
     friend GeneratedBoundaryNitscheTraceTerms
-    buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
+    buildGeneratedBoundaryNitscheTraceTerms(
         const FormExpr&,
         const FormExpr&,
         const FormExpr&,
-        const FormExpr&,
+        const GeneratedBoundaryNitscheBilinearForm&,
         int,
         int,
         const TraceNitscheOptions&);
@@ -899,7 +924,9 @@ private:
     SpaceSignature velocity_space_signature_{};
     int physical_boundary_marker_{-1};
     int generated_active_boundary_marker_{-1};
-    Real dynamic_viscosity_{0.0};
+    NitscheTraceBilinearForm bilinear_form_{
+        NitscheTraceBilinearForm::SymmetricGradient};
+    Real form_coefficient_{0.0};
     Real penalty_gamma_{0.0};
     bool scale_with_polynomial_order_{true};
     int penalty_polynomial_order_{0};
@@ -917,35 +944,36 @@ struct GeneratedBoundaryNitscheTraceTerms {
 };
 
 [[nodiscard]] inline GeneratedBoundaryNitscheTraceTerms
-buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
+buildGeneratedBoundaryNitscheTraceTerms(
     const FormExpr& u,
     const FormExpr& v,
     const FormExpr& prescribed_value,
-    const FormExpr& dynamic_viscosity,
+    const GeneratedBoundaryNitscheBilinearForm& form,
     int physical_boundary_marker,
     int generated_active_boundary_marker,
     const TraceNitscheOptions& opts)
 {
+    const FormExpr& coefficient = form.coefficient;
     if (!u.isValid() || !v.isValid() ||
         !prescribed_value.isValid() ||
-        !dynamic_viscosity.isValid()) {
+        !coefficient.isValid()) {
         throw std::invalid_argument(
-            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: invalid form input");
+            "forms::bc::buildGeneratedBoundaryNitscheTraceTerms: invalid form input");
     }
     if (physical_boundary_marker < 0 ||
         generated_active_boundary_marker < 0) {
         throw std::invalid_argument(
-            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: markers must be nonnegative");
+            "forms::bc::buildGeneratedBoundaryNitscheTraceTerms: markers must be nonnegative");
     }
     if (!(opts.gamma > Real{0.0}) ||
         !std::isfinite(opts.gamma)) {
         throw std::invalid_argument(
-            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: gamma must be finite and > 0");
+            "forms::bc::buildGeneratedBoundaryNitscheTraceTerms: gamma must be finite and > 0");
     }
     if (opts.variant != NitscheVariant::Symmetric &&
         opts.variant != NitscheVariant::Unsymmetric) {
         throw std::invalid_argument(
-            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: Nitsche variant is invalid");
+            "forms::bc::buildGeneratedBoundaryNitscheTraceTerms: Nitsche variant is invalid");
     }
     const auto* u_node = u.node();
     const auto* v_node = v.node();
@@ -958,19 +986,19 @@ buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
     if (!u_field.has_value() || !v_field.has_value() ||
         *u_field == INVALID_FIELD_ID || *u_field != *v_field) {
         throw std::invalid_argument(
-            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: u and v must be bound to the same valid field");
+            "forms::bc::buildGeneratedBoundaryNitscheTraceTerms: u and v must be bound to the same valid field");
     }
     if (u_node->type() != FormExprType::StateField ||
         v_node->type() != FormExprType::TestFunction) {
         throw std::invalid_argument(
-            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: u must be a state-field terminal and v must be a test-function terminal");
+            "forms::bc::buildGeneratedBoundaryNitscheTraceTerms: u must be a state-field terminal and v must be a test-function terminal");
     }
     const auto* u_space = u_node->spaceSignature();
     const auto* v_space = v_node->spaceSignature();
     if (u_space == nullptr || v_space == nullptr ||
         !detail::spaceSignaturesMatch(*u_space, *v_space)) {
         throw std::invalid_argument(
-            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: u and v must use the same complete function-space signature");
+            "forms::bc::buildGeneratedBoundaryNitscheTraceTerms: u and v must use the same complete function-space signature");
     }
     const auto* prescribed_value_node =
         prescribed_value.node();
@@ -978,30 +1006,34 @@ buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
         detail::hasForbiddenPrescribedValueDependency(
             *prescribed_value_node)) {
         throw std::invalid_argument(
-            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: prescribed value must be independent of FE state, coupled data, and variational geometry");
+            "forms::bc::buildGeneratedBoundaryNitscheTraceTerms: prescribed value must be independent of FE state, coupled data, and variational geometry");
     }
     if (!detail::isCompatiblePrescribedVector(
             *prescribed_value_node,
             *u_space)) {
         throw std::invalid_argument(
-            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: prescribed value must be a vector compatible with u");
+            "forms::bc::buildGeneratedBoundaryNitscheTraceTerms: prescribed value must be a vector compatible with u");
     }
-    const auto viscosity =
-        dynamic_viscosity.node() == nullptr
-            ? std::optional<Real>{}
-            : dynamic_viscosity.node()->constantValue();
-    if (!viscosity.has_value() ||
-        !(*viscosity > Real{0.0}) ||
-        !std::isfinite(*viscosity)) {
+    if (form.kind != NitscheTraceBilinearForm::SymmetricGradient) {
         throw std::invalid_argument(
-            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: dynamic viscosity must be a finite positive constant");
+            "forms::bc::buildGeneratedBoundaryNitscheTraceTerms: the bilinear form is not supported");
+    }
+    const auto coefficient_value =
+        coefficient.node() == nullptr
+            ? std::optional<Real>{}
+            : coefficient.node()->constantValue();
+    if (!coefficient_value.has_value() ||
+        !(*coefficient_value > Real{0.0}) ||
+        !std::isfinite(*coefficient_value)) {
+        throw std::invalid_argument(
+            "forms::bc::buildGeneratedBoundaryNitscheTraceTerms: the form coefficient must be a finite positive constant");
     }
 
     const int penalty_polynomial_order =
         u_space->polynomial_order;
     if (penalty_polynomial_order < 1) {
         throw std::invalid_argument(
-            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: polynomial order must be at least one");
+            "forms::bc::buildGeneratedBoundaryNitscheTraceTerms: polynomial order must be at least one");
     }
     const Real order_scale =
         opts.scale_with_p
@@ -1013,24 +1045,25 @@ buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
     if (!(effective_penalty_multiplier > Real{0.0}) ||
         !std::isfinite(effective_penalty_multiplier)) {
         throw std::invalid_argument(
-            "forms::bc::buildGeneratedBoundarySymmetricGradientNitscheTraceTerms: effective penalty multiplier is invalid");
+            "forms::bc::buildGeneratedBoundaryNitscheTraceTerms: effective penalty multiplier is invalid");
     }
 
     const auto n = FormExpr::normal();
     const auto diff = u - prescribed_value;
+    // The flux 2 k eps(.) n of the symmetric-gradient form.
     const auto stress_u =
         FormExpr::constant(Real{2.0}) *
-        dynamic_viscosity * sym(grad(u));
+        coefficient * sym(grad(u));
     const auto stress_v =
         FormExpr::constant(Real{2.0}) *
-        dynamic_viscosity * sym(grad(v));
+        coefficient * sym(grad(v));
     const auto h_normal =
         (FormExpr::constant(Real{2.0}) *
          FormExpr::cellVolume()) /
         FormExpr::facetArea();
     const auto penalty =
         FormExpr::constant(effective_penalty_multiplier) *
-        dynamic_viscosity / h_normal;
+        coefficient / h_normal;
     const auto measure =
         ExteriorBoundaryMeasure::generatedActiveSubset(
             physical_boundary_marker,
@@ -1095,7 +1128,9 @@ buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
     mix(static_cast<std::uint64_t>(
         static_cast<std::int64_t>(
             generated_active_boundary_marker)));
-    mix(std::bit_cast<std::uint64_t>(*viscosity));
+    // The symmetric-gradient form is the only kind (checked above), so the
+    // digest carries its coefficient in the word the route always had.
+    mix(std::bit_cast<std::uint64_t>(*coefficient_value));
     mix(std::bit_cast<std::uint64_t>(opts.gamma));
     mix(opts.scale_with_p ? 1u : 0u);
     mix(static_cast<std::uint64_t>(
@@ -1115,7 +1150,8 @@ buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
             *u_space,
             physical_boundary_marker,
             generated_active_boundary_marker,
-            *viscosity,
+            form.kind,
+            *coefficient_value,
             opts.gamma,
             opts.scale_with_p,
             penalty_polynomial_order,

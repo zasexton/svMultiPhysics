@@ -544,7 +544,7 @@ namespace `forms::bc`.
 | `applyNitscheDirichletPoisson(...)`, `applyNitscheDirichletPoissonValue(...)` | `BoundaryConditions.h` | Legacy Poisson-specific Nitsche helper; prefer explicit `applyTraceNitsche(...)` |
 | `bc::NitscheVariant`, `NitscheDirichletOptions` (`TraceNitscheOptions`) | `BoundaryConditions.h` | Symmetric/unsymmetric Nitsche options |
 | `TraceInequalitySense`, `TraceInequalityLinearization`, `TraceInequalityOptions` | `BoundaryConditions.h` | One-sided trace-law options |
-| `buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(...)`, `GeneratedBoundaryNitscheTraceFormBinding` | `BoundaryConditions.h` | `implemented/expert`; symmetric-gradient Nitsche terms on a generated boundary with an immutable binding for the installer's trace certificate |
+| `buildGeneratedBoundaryNitscheTraceTerms(u, v, g, form, ...)`, `symmetricGradientForm(k)`, `GeneratedBoundaryNitscheTraceFormBinding` | `BoundaryConditions.h`, `NitscheTraceBilinearForm.h` | `implemented/expert`; Nitsche terms on a generated boundary consistent with a declared bilinear form (`NitscheTraceBilinearForm::SymmetricGradient`, 2 k eps(u) : eps(v)), with an immutable binding for the installer's trace certificate, which bounds the form's flux by its energy |
 | `EssentialBC`, `ComponentEssentialBC`, `vectorComponentEssentialBC(...)` | `StandardBCs.h` | Strong values: scalar, dense vector, or selected components |
 | `NaturalBC`, `RobinBC` | `StandardBCs.h` | Weak flux and Robin terms on `ds(marker)` or an `ExteriorBoundaryMeasure` |
 | `ReservedBC` | `StandardBCs.h` | Reserves a marker for conflict validation; contributes nothing |

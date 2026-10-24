@@ -165,11 +165,11 @@ void installFormBoundTracePolicy(
             std::move(zero_components));
     auto terms =
         forms::bc::
-            buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
+            buildGeneratedBoundaryNitscheTraceTerms(
                 u,
                 v,
                 zero,
-                forms::FormExpr::constant(Real{2.5}),
+                forms::bc::symmetricGradientForm(forms::FormExpr::constant(Real{2.5})),
                 kWallMarker,
                 kActiveBoundaryMarker,
                 forms::bc::TraceNitscheOptions{
@@ -208,8 +208,8 @@ void logTraceCertificates(
              << " canonical_certificate_digest=" << record.certificate.canonical_certificate_digest
              << " aggregation_content_digest=" << record.certificate.aggregation_content_digest
              << std::dec << std::setprecision(std::numeric_limits<Real>::max_digits10)
-             << " coefficient=" << record.policy.dynamic_viscosity
-             << " certificate_coefficient=" << record.certificate.dynamic_viscosity
+             << " coefficient=" << record.policy.form_coefficient
+             << " certificate_coefficient=" << record.certificate.form_coefficient
              << " patches=" << record.certificate.certified_patch_count
              << " boundary_rules=" << record.certificate.generated_boundary_rule_count
              << " bound=" << record.certificate.global_conservative_upper_bound
@@ -1037,34 +1037,61 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
                         "discrete_u_binding_negative");
                 EXPECT_THROW(
                     (void)forms::bc::
-                        buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
+                        buildGeneratedBoundaryNitscheTraceTerms(
                             discrete_u,
                             v,
                             zero,
-                            forms::FormExpr::constant(
-                                Real{2.5}),
+                            forms::bc::symmetricGradientForm(forms::FormExpr::constant(
+                                Real{2.5})),
                             kWallMarker,
                             kActiveBoundaryMarker),
                     std::invalid_argument);
                 EXPECT_THROW(
                     (void)forms::bc::
-                        buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
+                        buildGeneratedBoundaryNitscheTraceTerms(
                             u,
                             discrete_u,
                             zero,
-                            forms::FormExpr::constant(
-                                Real{2.5}),
+                            forms::bc::symmetricGradientForm(forms::FormExpr::constant(
+                                Real{2.5})),
+                            kWallMarker,
+                            kActiveBoundaryMarker),
+                    std::invalid_argument);
+                // A bilinear form the route and its certificate do not know,
+                // and a coefficient that is not a positive constant.
+                EXPECT_THROW(
+                    (void)forms::bc::
+                        buildGeneratedBoundaryNitscheTraceTerms(
+                            u,
+                            v,
+                            zero,
+                            forms::bc::GeneratedBoundaryNitscheBilinearForm{
+                                .kind = static_cast<
+                                    forms::bc::NitscheTraceBilinearForm>(0),
+                                .coefficient =
+                                    forms::FormExpr::constant(Real{2.5})},
                             kWallMarker,
                             kActiveBoundaryMarker),
                     std::invalid_argument);
                 EXPECT_THROW(
                     (void)forms::bc::
-                        buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
+                        buildGeneratedBoundaryNitscheTraceTerms(
                             u,
                             v,
                             zero,
-                            forms::FormExpr::constant(
-                                Real{2.5}),
+                            forms::bc::symmetricGradientForm(
+                                forms::FormExpr::constant(Real{0.0})),
+                            kWallMarker,
+                            kActiveBoundaryMarker),
+                    std::invalid_argument);
+                EXPECT_THROW(
+                    (void)forms::bc::
+                        buildGeneratedBoundaryNitscheTraceTerms(
+                            u,
+                            v,
+                            zero,
+                            forms::bc::symmetricGradientForm(forms::FormExpr::constant(
+                                Real{2.5})),
                             kWallMarker,
                             kActiveBoundaryMarker,
                             forms::bc::TraceNitscheOptions{
@@ -1081,13 +1108,13 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
                             prescribed_value) {
                         EXPECT_THROW(
                             (void)forms::bc::
-                                buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
+                                buildGeneratedBoundaryNitscheTraceTerms(
                                     u,
                                     v,
                                     prescribed_value,
-                                    forms::FormExpr::
+                                    forms::bc::symmetricGradientForm(forms::FormExpr::
                                         constant(
-                                            Real{2.5}),
+                                            Real{2.5})),
                                     kWallMarker,
                                     kActiveBoundaryMarker),
                             std::invalid_argument);
@@ -1157,12 +1184,12 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
                         "mismatched_v_binding_negative");
                 EXPECT_THROW(
                     (void)forms::bc::
-                        buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
+                        buildGeneratedBoundaryNitscheTraceTerms(
                             u,
                             mismatched_v,
                             zero,
-                            forms::FormExpr::constant(
-                                Real{2.5}),
+                            forms::bc::symmetricGradientForm(forms::FormExpr::constant(
+                                Real{2.5})),
                             kWallMarker,
                             kActiveBoundaryMarker),
                     std::invalid_argument);
@@ -1187,12 +1214,12 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
                         "wrong_space_v_binding_negative");
                 auto wrong_space_terms =
                     forms::bc::
-                        buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
+                        buildGeneratedBoundaryNitscheTraceTerms(
                             wrong_space_u,
                             wrong_space_v,
                             zero,
-                            forms::FormExpr::constant(
-                                Real{2.5}),
+                            forms::bc::symmetricGradientForm(forms::FormExpr::constant(
+                                Real{2.5})),
                             kWallMarker,
                             kActiveBoundaryMarker,
                             forms::bc::TraceNitscheOptions{
@@ -1235,11 +1262,11 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
             }
             auto terms =
                 forms::bc::
-                    buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
+                    buildGeneratedBoundaryNitscheTraceTerms(
                         u,
                         v,
                         zero,
-                        forms::FormExpr::constant(Real{2.5}),
+                        forms::bc::symmetricGradientForm(forms::FormExpr::constant(Real{2.5})),
                         kWallMarker,
                         kActiveBoundaryMarker,
                         forms::bc::TraceNitscheOptions{
@@ -1358,6 +1385,12 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
     EXPECT_EQ(
         policies.front().effective_penalty_multiplier,
         Real{8.0});
+    EXPECT_EQ(
+        policies.front().bilinear_form,
+        forms::bc::NitscheTraceBilinearForm::SymmetricGradient);
+    EXPECT_EQ(
+        policies.front().form_coefficient,
+        Real{2.5});
     EXPECT_NE(
         policies.front().id,
         systems::
@@ -1483,7 +1516,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
         kInterfaceMarker;
     options.generated_active_boundary_marker =
         kActiveBoundaryMarker;
-    options.dynamic_viscosity = Real{2.5};
+    options.form_coefficient = Real{2.5};
 
     GeneratedBoundaryAggregateTraceCertificate
         certificate;
@@ -1874,13 +1907,21 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
             system,
             wrong_generated_boundary_marker),
         std::runtime_error);
-    auto invalid_viscosity = options;
-    invalid_viscosity.dynamic_viscosity =
+    auto invalid_coefficient = options;
+    invalid_coefficient.form_coefficient =
         Real{0.0};
     EXPECT_THROW(
         (void)certifyGeneratedBoundaryAggregateTrace(
             system,
-            invalid_viscosity),
+            invalid_coefficient),
+        std::runtime_error);
+    auto unsupported_form = options;
+    unsupported_form.bilinear_form =
+        static_cast<forms::bc::NitscheTraceBilinearForm>(0);
+    EXPECT_THROW(
+        (void)certifyGeneratedBoundaryAggregateTrace(
+            system,
+            unsupported_form),
         std::runtime_error);
     auto invalid_dimension_cap = options;
     invalid_dimension_cap.maximum_reduced_dimension =
@@ -2320,7 +2361,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
         kInterfaceMarker;
     options.generated_active_boundary_marker =
         kActiveBoundaryMarker;
-    options.dynamic_viscosity = Real{2.5};
+    options.form_coefficient = Real{2.5};
 
     const auto certificate =
         certifyGeneratedBoundaryAggregateTrace(
@@ -2584,7 +2625,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
                 .volume_interface_marker = kInterfaceMarker,
                 .generated_active_boundary_marker =
                     kActiveBoundaryMarker,
-                .dynamic_viscosity = Real{2.5},
+                .form_coefficient = Real{2.5},
             });
     EXPECT_EQ(certificate.generated_boundary_rule_count, 1u);
     EXPECT_EQ(certificate.certified_patch_count, 1u);
@@ -2693,7 +2734,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
                 .volume_interface_marker = kInterfaceMarker,
                 .generated_active_boundary_marker =
                     kActiveBoundaryMarker,
-                .dynamic_viscosity = Real{2.5},
+                .form_coefficient = Real{2.5},
             });
     EXPECT_EQ(certificate.generated_boundary_rule_count, 1u);
     EXPECT_EQ(certificate.certified_patch_count, 1u);
@@ -2813,7 +2854,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
                     kInterfaceMarker,
                 .generated_active_boundary_marker =
                     kActiveBoundaryMarker,
-                .dynamic_viscosity = Real{2.5},
+                .form_coefficient = Real{2.5},
             });
         FAIL() << "rootless aggregate trace certification "
                   "must fail closed";
@@ -2910,7 +2951,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
                     kInterfaceMarker,
                 .generated_active_boundary_marker =
                     kActiveBoundaryMarker,
-                .dynamic_viscosity = Real{2.5},
+                .form_coefficient = Real{2.5},
             });
         FAIL() << "snapshot-free trace certification must fail "
                   "closed";
@@ -2952,7 +2993,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
                     kInterfaceMarker,
                 .generated_active_boundary_marker =
                     kActiveBoundaryMarker,
-                .dynamic_viscosity = Real{1.0},
+                .form_coefficient = Real{1.0},
             });
         FAIL() << "scalar trace certification must fail closed";
     } catch (const std::runtime_error& error) {
@@ -3422,12 +3463,12 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
                                 Real{0.0}),
                         });
                     return forms::bc::
-                        buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
+                        buildGeneratedBoundaryNitscheTraceTerms(
                             u,
                             v,
                             zero,
-                            forms::FormExpr::constant(
-                                Real{2.5}),
+                            forms::bc::symmetricGradientForm(forms::FormExpr::constant(
+                                Real{2.5})),
                             kWallMarker,
                             kActiveBoundaryMarker,
                             forms::bc::TraceNitscheOptions{

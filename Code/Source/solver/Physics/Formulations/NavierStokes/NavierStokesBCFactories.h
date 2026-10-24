@@ -531,11 +531,11 @@ inline void applyVelocityNitscheBCs(
             generated_trace_bindings != nullptr) {
             auto bound_terms =
                 FE::forms::bc::
-                    buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
+                    buildGeneratedBoundaryNitscheTraceTerms(
                         u,
                         v,
                         uD,
-                        mu,
+                        FE::forms::bc::symmetricGradientForm(mu),   // the viscous form 2 mu eps(u) : eps(v)
                         marker,
                         *generated_marker,
                         FE::forms::bc::TraceNitscheOptions{

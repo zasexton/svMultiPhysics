@@ -1306,6 +1306,7 @@ set(FE_FORMS_HEADERS
 	    Forms/NitscheBC.h
 	    Forms/ConstraintBCs.h
     Forms/BoundaryFunctional.h
+    Forms/NitscheTraceBilinearForm.h
 	    Forms/AffineAnalysis.h
 	    Forms/FormExpr.h
     Forms/CutCellForms.h

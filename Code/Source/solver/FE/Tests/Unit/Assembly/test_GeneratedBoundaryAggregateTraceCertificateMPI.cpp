@@ -98,11 +98,11 @@ void installFormBoundTracePolicy(
             std::move(zero_components));
     auto terms =
         forms::bc::
-            buildGeneratedBoundarySymmetricGradientNitscheTraceTerms(
+            buildGeneratedBoundaryNitscheTraceTerms(
                 u,
                 v,
                 zero,
-                forms::FormExpr::constant(Real{2.5}),
+                forms::bc::symmetricGradientForm(forms::FormExpr::constant(Real{2.5})),
                 kWallMarker,
                 kActiveBoundaryMarker,
                 forms::bc::TraceNitscheOptions{
@@ -1102,7 +1102,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificateMPI,
         kInterfaceMarker;
     options.generated_active_boundary_marker =
         kActiveBoundaryMarker;
-    options.dynamic_viscosity = Real{2.5};
+    options.form_coefficient = Real{2.5};
 
     GeneratedBoundaryAggregateTraceCertificate
         certificate;

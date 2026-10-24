@@ -557,7 +557,7 @@ inline constexpr GeneratedBoundaryNitscheTracePolicyId
  * trace-to-penalty ratio for their operator is no greater than a
  * downward-safe cap for the configured positive energy floor on every
  * accepted state. At this generic FE layer that floor is conditional on the
- * caller installing the matching bulk viscous energy; the bound route
+ * caller installing the energy of the matching bulk form; the bound route
  * authenticates only the boundary consistency and penalty contribution.
  * Unsymmetric routes retain the same revision-bound trace certificate as a
  * continuity diagnostic without applying the symmetric coercivity
@@ -572,7 +572,10 @@ struct GeneratedBoundaryNitscheTracePolicy {
     int physical_boundary_marker{-1};
     int volume_interface_marker{-1};
     int generated_active_boundary_marker{-1};
-    Real dynamic_viscosity{0.0};
+    /// The bilinear form of the route and its coefficient (the binding's).
+    forms::bc::NitscheTraceBilinearForm bilinear_form{
+        forms::bc::NitscheTraceBilinearForm::SymmetricGradient};
+    Real form_coefficient{0.0};
     Real penalty_gamma{0.0};
     bool scale_with_polynomial_order{true};
     int penalty_polynomial_order{0};

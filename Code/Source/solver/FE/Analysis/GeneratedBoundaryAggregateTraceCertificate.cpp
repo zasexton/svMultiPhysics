@@ -891,8 +891,12 @@ struct SelectedState {
         options.generated_active_boundary_marker < 0) {
         reject("physical and generated markers must be nonnegative");
     }
-    if (!finitePositive(options.dynamic_viscosity)) {
-        reject("dynamic viscosity must be finite and positive");
+    if (options.bilinear_form !=
+        forms::bc::NitscheTraceBilinearForm::SymmetricGradient) {
+        reject("the bilinear form is not supported");
+    }
+    if (!finitePositive(options.form_coefficient)) {
+        reject("the form coefficient must be finite and positive");
     }
     if (options.maximum_reduced_dimension == 0u ||
         options.maximum_reduced_dimension >
@@ -1256,10 +1260,12 @@ struct SelectedState {
         digest,
         static_cast<std::uint64_t>(
             options.generated_active_boundary_marker));
+    // The symmetric-gradient form is the only kind (checked), so the
+    // signature carries its coefficient in the word it always had.
     digestMix(
         digest,
         std::bit_cast<std::uint64_t>(
-            options.dynamic_viscosity));
+            options.form_coefficient));
     digestMix(digest, options.maximum_reduced_dimension);
     digestMix(
         digest,
@@ -4770,7 +4776,9 @@ certifyPatch(
         digest,
         static_cast<std::uint64_t>(
             certificate.communicator_size));
-    mix_real(digest, certificate.dynamic_viscosity);
+    // The symmetric-gradient form is the only kind a certificate is made
+    // for, so the digest carries its coefficient in the word it always had.
+    mix_real(digest, certificate.form_coefficient);
     digestMix(
         digest,
         certificate.aggregation_content_digest);
@@ -5040,8 +5048,10 @@ certifyGeneratedBoundaryAggregateTrace(
             options.volume_interface_marker;
         result.generated_active_boundary_marker =
             options.generated_active_boundary_marker;
-        result.dynamic_viscosity =
-            options.dynamic_viscosity;
+        result.bilinear_form =
+            options.bilinear_form;
+        result.form_coefficient =
+            options.form_coefficient;
         result.communicator_size =
             collective.size;
         result.aggregation_content_digest =

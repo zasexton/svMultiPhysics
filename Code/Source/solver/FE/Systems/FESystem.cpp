@@ -1648,10 +1648,12 @@ void mixGeneratedBoundaryNitscheTracePolicy(
         static_cast<std::uint64_t>(
             static_cast<std::int64_t>(
                 policy.generated_active_boundary_marker)));
+    // The symmetric-gradient form is the only kind a policy accepts, so the
+    // digest carries its coefficient in the word the route always had.
     mixGeneratedBoundaryTraceHash(
         digest,
         generatedBoundaryTraceRealBits(
-            policy.dynamic_viscosity));
+            policy.form_coefficient));
     mixGeneratedBoundaryTraceHash(
         digest,
         generatedBoundaryTraceRealBits(policy.penalty_gamma));
@@ -1701,7 +1703,8 @@ void mixGeneratedBoundaryNitscheTracePolicy(
         policy.physical_boundary_marker,
         policy.volume_interface_marker,
         policy.generated_active_boundary_marker,
-        generatedBoundaryTraceRealBits(policy.dynamic_viscosity),
+        policy.bilinear_form,
+        generatedBoundaryTraceRealBits(policy.form_coefficient),
         generatedBoundaryTraceRealBits(policy.penalty_gamma),
         policy.scale_with_polynomial_order,
         policy.penalty_polynomial_order,
@@ -13197,8 +13200,10 @@ void FESystem::prepareFormBoundGeneratedBoundaryNitscheTracePolicies(
             policy.physical_boundary_marker < 0 ||
             policy.volume_interface_marker < 0 ||
             policy.generated_active_boundary_marker < 0 ||
-            !(policy.dynamic_viscosity > Real{0.0}) ||
-            !std::isfinite(policy.dynamic_viscosity) ||
+            policy.bilinear_form !=
+                forms::bc::NitscheTraceBilinearForm::SymmetricGradient ||
+            !(policy.form_coefficient > Real{0.0}) ||
+            !std::isfinite(policy.form_coefficient) ||
             !(policy.penalty_gamma > Real{0.0}) ||
             !std::isfinite(policy.penalty_gamma) ||
             policy.penalty_polynomial_order < 1 ||
@@ -13570,8 +13575,10 @@ void FESystem::refreshGeneratedBoundaryNitscheTraceCertificates(
                         .generated_active_boundary_marker =
                             policy
                                 ->generated_active_boundary_marker,
-                        .dynamic_viscosity =
-                            policy->dynamic_viscosity,
+                        .bilinear_form =
+                            policy->bilinear_form,
+                        .form_coefficient =
+                            policy->form_coefficient,
                         .maximum_reduced_dimension =
                             policy->maximum_reduced_dimension,
                     });
@@ -13876,10 +13883,12 @@ void FESystem::requireCurrentGeneratedBoundaryNitscheTraceCertificates(
                         .generated_active_boundary_marker !=
                     record->policy
                         .generated_active_boundary_marker ||
+                record->certificate.bilinear_form !=
+                    record->policy.bilinear_form ||
                 generatedBoundaryTraceRealBits(
-                    record->certificate.dynamic_viscosity) !=
+                    record->certificate.form_coefficient) !=
                     generatedBoundaryTraceRealBits(
-                        record->policy.dynamic_viscosity) ||
+                        record->policy.form_coefficient) ||
                 record->certificate.aggregation_content_digest !=
                     record->aggregation_report
                         ->canonical_content_digest ||

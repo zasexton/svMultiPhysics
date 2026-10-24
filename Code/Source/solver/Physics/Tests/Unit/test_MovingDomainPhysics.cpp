@@ -12468,8 +12468,12 @@ TEST(MovingDomainPhysics,
     EXPECT_NE(
         production_policy->generated_active_boundary_marker,
         left_marker);
+    // The route is consistent with the viscous form 2 mu eps(u) : eps(v).
     EXPECT_EQ(
-        production_policy->dynamic_viscosity,
+        production_policy->bilinear_form,
+        FE::forms::bc::NitscheTraceBilinearForm::SymmetricGradient);
+    EXPECT_EQ(
+        production_policy->form_coefficient,
         FE::Real{0.037});
     EXPECT_EQ(
         production_policy->penalty_gamma,

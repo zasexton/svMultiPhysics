@@ -14,6 +14,7 @@
  */
 
 #include "Core/Types.h"
+#include "Forms/NitscheTraceBilinearForm.h"
 #include "Math/DenseLinearAlgebra.h"
 
 #include <cstddef>
@@ -61,7 +62,11 @@ struct GeneratedBoundaryAggregateTraceCertificationOptions {
     int physical_boundary_marker{-1};
     int volume_interface_marker{-1};
     int generated_active_boundary_marker{-1};
-    Real dynamic_viscosity{0.0};
+    /// The bilinear form whose flux is bounded by its energy, and its
+    /// coefficient k (finite and positive).
+    forms::bc::NitscheTraceBilinearForm bilinear_form{
+        forms::bc::NitscheTraceBilinearForm::SymmetricGradient};
+    Real form_coefficient{0.0};
     std::size_t maximum_reduced_dimension{128u};
 };
 
@@ -71,15 +76,16 @@ struct GeneratedBoundaryAggregateTraceCertificationOptions {
  * A localized patch is either a singleton full-active boundary cell or a
  * boundary-parent/aggregate-root support used when the complete canonical
  * aggregate cannot fit the fixed exact quotient cap. Existing aggregation
- * patches retain their canonical index. The generalized bound is for
+ * patches retain their canonical index. The generalized bound is, for the
+ * symmetric-gradient form with coefficient k,
  *
- *   integral_boundary (h_normal / mu) |(2 mu eps(v)) n|^2
+ *   integral_boundary (h_normal / k) |(2 k eps(v)) n|^2
  *       <= C_patch
- *          integral_support 2 mu eps(v) : eps(v)
+ *          integral_support 2 k eps(v) : eps(v)
  *
  * on the exact closed tangent rows of this patch. The implementation divides
- * both forms by the common positive factor `2 mu` before certification,
- * preserving the quotient while avoiding viscosity-dependent overflow and
+ * both forms by the common positive factor `2 k` before certification,
+ * preserving the quotient while avoiding coefficient-dependent overflow and
  * underflow. Acceptance is controlled by the exact factorized dyadic proof
  * stored in `generalized_bound.exact_dyadic`; formed dense matrices and their
  * floating eigensolver values are diagnostics only. Consequently,
@@ -131,7 +137,9 @@ struct GeneratedBoundaryAggregateTraceCertificate {
     int physical_boundary_marker{-1};
     int volume_interface_marker{-1};
     int generated_active_boundary_marker{-1};
-    Real dynamic_viscosity{0.0};
+    forms::bc::NitscheTraceBilinearForm bilinear_form{
+        forms::bc::NitscheTraceBilinearForm::SymmetricGradient};
+    Real form_coefficient{0.0};
     int communicator_size{1};
     std::uint64_t aggregation_content_digest{0u};
     // Canonical only within this communicator/algebraic partition.

@@ -3241,8 +3241,8 @@ makeFormBoundGeneratedBoundaryNitscheTracePolicies(
                 request.volume_interface_marker,
             .generated_active_boundary_marker =
                 binding.generatedActiveBoundaryMarker(),
-            .dynamic_viscosity =
-                binding.dynamicViscosity(),
+            .bilinear_form = binding.bilinearForm(),
+            .form_coefficient = binding.formCoefficient(),
             .penalty_gamma = binding.penaltyGamma(),
             .scale_with_polynomial_order =
                 binding.scaleWithPolynomialOrder(),
