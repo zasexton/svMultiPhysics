@@ -61,6 +61,11 @@
 #include <vector>
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
 #include "FE/Systems/FunctionalRecords.h"
+#include "FE/Systems/FunctionalFormEvaluator.h"
+#include "FE/Systems/FunctionalForms.h"
+#include "FE/Systems/SystemCollectives.h"
+#include "FE/Systems/SystemState.h"
+#include "Physics/Formulations/NavierStokes/NavierStokesPostProcessing.h"
 
 // The level-set velocity extension refresh and its known set are FE services
 // (FE/LevelSet/Extension).
@@ -5860,6 +5865,27 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .owner_component =
               "ApplicationDriverLevelSetWorkflows.FunctionalFixture",
       });
+  // The energy functionals the Navier-Stokes formulation declares for this
+  // free surface (D49 step E3): the record logs their values.
+  {
+    namespace post = svmp::Physics::formulations::navier_stokes::post;
+    post::FreeSurfaceEnergyStatement statement;
+    statement.interface_marker = interface_marker;
+    statement.liquid_side = svmp::FE::forms::CutVolumeSide::Negative;
+    statement.velocity_field = velocity;
+    statement.velocity_space = velocity_space.get();
+    statement.dimension = 2;
+    statement.surface_tension = gamma;
+    statement.density = svmp::FE::Real{2.0};
+    statement.gravitational_acceleration = {
+        {svmp::FE::Real{0.0}, svmp::FE::Real{-1.0}, svmp::FE::Real{0.0}}};
+    statement.dynamic_viscosity = svmp::FE::Real{0.5};
+    statement.external_pressure = svmp::FE::Real{2.5};
+    statement.endpoint_functional_power = true;
+    for (auto& declaration : post::freeSurfaceEnergyFunctionals(statement)) {
+      svmp::FE::systems::declareFunctionalForm(*system, std::move(declaration));
+    }
+  }
   ASSERT_NO_THROW(system->setup({}));
 
   std::vector<svmp::FE::Real> phi_vertex_values(mesh->n_vertices(), 0.0);
@@ -6228,6 +6254,88 @@ TEST(ApplicationDriverLevelSetWorkflows,
       record.backward_euler_kinetic_work->identity_residual,
       svmp::FE::Real{0.0},
       1.0e-13);
+  // The logged copies are the declared forms on the accepted state, bit for
+  // bit; the backward-Euler work evaluates the kinetic form on the previous
+  // state and on the step change, and the copies of the volume agree.
+  {
+    namespace systems = svmp::FE::systems;
+    const systems::CollectiveCommunicator comm(
+        activeFESystemCommunicator(*sim.fe_system));
+    const auto declared = systems::functionalForms(*sim.fe_system);
+    const auto declared_value = [&](std::string_view quantity,
+                                    std::span<const svmp::FE::Real> u) {
+      const std::string name = "free_surface." +
+                               std::to_string(interface_marker) + "." +
+                               std::string(quantity);
+      const auto found = std::find_if(
+          declared.begin(), declared.end(),
+          [&](const auto& declaration) { return declaration.name == name; });
+      EXPECT_NE(found, declared.end()) << name;
+      if (found == declared.end()) {
+        return std::numeric_limits<svmp::FE::Real>::quiet_NaN();
+      }
+      systems::SystemStateView view;
+      view.u = u;
+      const std::vector<svmp::FE::forms::FormExpr> forms{found->form};
+      return systems::evaluateFunctionalForms(
+                 *sim.fe_system, forms, view, comm)
+          .front()
+          .value;
+    };
+    const std::span<const svmp::FE::Real> accepted(
+        solution.data(), solution.size());
+    std::vector<svmp::FE::Real> change(solution.size());
+    for (std::size_t i = 0; i < change.size(); ++i) {
+      change[i] = solution[i] - previous_solution[i];
+    }
+    EXPECT_EQ(record.state.owned_liquid_volume,
+              declared_value("liquid_volume", accepted));
+    EXPECT_EQ(record.state.owned_liquid_gas_area,
+              declared_value("liquid_gas_area", accepted));
+    EXPECT_EQ(record.state.liquid_gas_surface_energy,
+              declared_value("liquid_gas_surface_energy", accepted));
+    EXPECT_EQ(record.active_volume_energy->kinetic_energy,
+              declared_value("kinetic_energy", accepted));
+    EXPECT_EQ(record.active_volume_energy->gravitational_energy,
+              declared_value("gravitational_energy", accepted));
+    EXPECT_EQ(record.active_volume_energy->gravitational_potential_power,
+              declared_value("gravitational_potential_power", accepted));
+    EXPECT_EQ(
+        record.active_volume_dissipation->bulk_viscous_dissipation_rate,
+        declared_value("bulk_viscous_dissipation_rate", accepted));
+    EXPECT_EQ(record.external_pressure_power->external_pressure_power,
+              declared_value("external_pressure_power", accepted));
+    EXPECT_EQ(
+        record.external_pressure_power->outward_liquid_volume_flux_rate,
+        declared_value("liquid_volume_flux", accepted));
+    EXPECT_EQ(
+        record.endpoint_functional_power->owned_liquid_volume_variation,
+        declared_value("liquid_volume_rate", accepted));
+    EXPECT_EQ(
+        record.endpoint_functional_power->owned_liquid_gas_area_variation,
+        declared_value("liquid_gas_area_rate", accepted));
+    EXPECT_EQ(record.active_volume_energy->owned_liquid_volume,
+              record.state.owned_liquid_volume);
+    EXPECT_EQ(record.active_volume_dissipation->owned_liquid_volume,
+              record.state.owned_liquid_volume);
+    EXPECT_EQ(record.external_pressure_power->owned_liquid_gas_area,
+              record.state.owned_liquid_gas_area);
+    const auto& work = *record.backward_euler_kinetic_work;
+    EXPECT_EQ(work.kinetic_energy_after,
+              record.active_volume_energy->kinetic_energy);
+    EXPECT_EQ(work.kinetic_energy_before_on_endpoint_domain,
+              declared_value("kinetic_energy",
+                             std::span<const svmp::FE::Real>(
+                                 previous_solution.data(),
+                                 previous_solution.size())));
+    EXPECT_EQ(work.time_discretization_loss,
+              declared_value("kinetic_energy",
+                             std::span<const svmp::FE::Real>(
+                                 change.data(), change.size())));
+    EXPECT_EQ(work.step_integrated_inertia_work,
+              work.kinetic_energy_change_on_endpoint_domain +
+                  work.time_discretization_loss);
+  }
   ASSERT_NO_THROW(recordAcceptedFunctionals(
       sim,
       /*accepted_step=*/3u,

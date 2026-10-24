@@ -10,6 +10,7 @@
 #include "Assembly/Assembler.h"
 #include "Assembly/CutIntegrationContext.h"
 #include "Basis/BasisFunction.h"
+#include "Core/Logger.h"
 #include "Core/RankLog.h"
 #include "Elements/Element.h"
 #include "Geometry/CutQuadratureMapping.h"
@@ -28,7 +29,10 @@
 #include "Systems/FESystemHandle.h"
 #include "Systems/SnapshotFieldAccess.h"
 #include "Systems/SystemCollectives.h"
+#include "Systems/FunctionalFormEvaluator.h"
+#include "Systems/FunctionalForms.h"
 #include "Systems/FunctionalRecords.h"
+#include "Systems/SystemState.h"
 
 #include <algorithm>
 #include <array>
@@ -41,6 +45,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace svmp {
@@ -1216,6 +1221,409 @@ std::uint64_t levelSetMaintenanceCutTopologyRevision(
   return revision == 0u ? 1u : revision;
 }
 
+// D49 step E3.  The logged copies of the free-surface functionals are the
+// values of the measured 0-forms the formulation declares
+// (Systems/FunctionalForms.h, "free_surface.<interface marker>.<quantity>"),
+// evaluated by the FE form evaluator (interpreted, exact reduction) on the
+// same state and the same authoritative snapshot.  The per-wall quantities
+// live on the generated domains of the walls the interface meets, so the
+// recorder integrates them over the snapshot's wall domains with the
+// coefficients of the discrete-functional declaration ("free_surface.<m>.
+// wall.<w>.wetted_area", "contact_measure", "young_energy").  The pointwise
+// evaluators above still produce every other field and the consistency
+// checks they pass; the static minimizer reads them directly until E4.
+// Totals stay sums of channels.  The contact-line part of the wall power and
+// the contact-stage dissipations stay pointwise (a follow-up of E3).
+
+/// The absolute masses sum |w f| of the declared functionals of one record.
+struct DeclaredFunctionalMasses {
+  int interface_marker{-1};
+  std::vector<std::pair<std::string, svmp::FE::Real>> masses{};
+};
+
+[[nodiscard]] bool formReadsFields(const svmp::FE::forms::FormExprNode& node)
+{
+  using svmp::FE::forms::FormExprType;
+  const auto type = node.type();
+  if (type == FormExprType::DiscreteField ||
+      type == FormExprType::StateField ||
+      type == FormExprType::PreviousSolutionRef) {
+    return true;
+  }
+  for (const auto& child : node.childrenShared()) {
+    if (child && formReadsFields(*child)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/// Flags of the channels replaced in one record (for the totals).
+struct ReplacedChannels {
+  bool volume{false};
+  bool surface{false};
+  bool wetted{false};
+  bool contact{false};
+  bool young{false};
+  bool kinetic{false};
+  bool gravitational{false};
+  bool volume_variation{false};
+  bool surface_variation{false};
+};
+
+template <class Walls>
+[[nodiscard]] auto* findWall(Walls& walls, int boundary_marker)
+{
+  const auto found = std::find_if(walls.begin(), walls.end(), [&](const auto& wall) {
+    return wall.boundary_marker == boundary_marker;
+  });
+  return found == walls.end() ? nullptr : &*found;
+}
+
+/// Writes the value of one declared quantity into its record field(s);
+/// false when the record has no such field.
+bool replaceDeclaredChannel(
+    svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState& accepted,
+    std::string_view quantity,
+    svmp::FE::Real value,
+    ReplacedChannels& replaced)
+{
+  auto& state = accepted.state;
+  constexpr std::string_view wall_prefix = "wall.";
+  if (quantity.substr(0, wall_prefix.size()) == wall_prefix) {
+    const auto rest = quantity.substr(wall_prefix.size());
+    const auto dot = rest.find('.');
+    if (dot == std::string_view::npos) {
+      return false;
+    }
+    int boundary_marker = -1;
+    try {
+      boundary_marker = std::stoi(std::string(rest.substr(0, dot)));
+    } catch (const std::exception&) {
+      return false;
+    }
+    const auto wall_quantity = rest.substr(dot + 1);
+    if (wall_quantity == "wetted_area" || wall_quantity == "contact_measure" ||
+        wall_quantity == "young_energy") {
+      auto* wall = findWall(state.walls, boundary_marker);
+      if (wall == nullptr) {
+        return false;
+      }
+      if (wall_quantity == "wetted_area") {
+        wall->owned_wetted_wall_area = value;
+        replaced.wetted = true;
+      } else if (wall_quantity == "contact_measure") {
+        wall->owned_contact_measure = value;
+        replaced.contact = true;
+      } else {
+        wall->young_wall_energy = value;
+        replaced.young = true;
+      }
+      return true;
+    }
+    return false;
+  }
+  if (quantity == "liquid_volume") {
+    state.owned_liquid_volume = value;
+    if (accepted.active_volume_energy.has_value()) {
+      accepted.active_volume_energy->owned_liquid_volume = value;
+    }
+    if (accepted.active_volume_dissipation.has_value()) {
+      accepted.active_volume_dissipation->owned_liquid_volume = value;
+    }
+    if (accepted.backward_euler_kinetic_work.has_value()) {
+      accepted.backward_euler_kinetic_work->owned_liquid_volume = value;
+    }
+    replaced.volume = true;
+    return true;
+  }
+  if (quantity == "liquid_gas_area") {
+    state.owned_liquid_gas_area = value;
+    if (accepted.external_pressure_power.has_value()) {
+      accepted.external_pressure_power->owned_liquid_gas_area = value;
+    }
+    return true;
+  }
+  if (quantity == "liquid_gas_surface_energy") {
+    state.liquid_gas_surface_energy = value;
+    replaced.surface = true;
+    return true;
+  }
+  if (accepted.active_volume_energy.has_value()) {
+    auto& energy = *accepted.active_volume_energy;
+    if (quantity == "kinetic_energy") {
+      energy.kinetic_energy = value;
+      if (accepted.backward_euler_kinetic_work.has_value()) {
+        accepted.backward_euler_kinetic_work->kinetic_energy_after = value;
+      }
+      replaced.kinetic = true;
+      return true;
+    }
+    if (quantity == "gravitational_energy") {
+      energy.gravitational_energy = value;
+      replaced.gravitational = true;
+      return true;
+    }
+    if (quantity == "gravitational_potential_power") {
+      energy.gravitational_potential_power = value;
+      return true;
+    }
+  }
+  if (quantity == "bulk_viscous_dissipation_rate" && accepted.active_volume_dissipation.has_value()) {
+    accepted.active_volume_dissipation->bulk_viscous_dissipation_rate = value;
+    return true;
+  }
+  if (accepted.external_pressure_power.has_value()) {
+    if (quantity == "liquid_volume_flux") {
+      accepted.external_pressure_power->outward_liquid_volume_flux_rate = value;
+      return true;
+    }
+    if (quantity == "external_pressure_power") {
+      accepted.external_pressure_power->external_pressure_power = value;
+      return true;
+    }
+  }
+  if (accepted.endpoint_functional_power.has_value()) {
+    auto& power = *accepted.endpoint_functional_power;
+    if (quantity == "liquid_volume_rate") {
+      power.owned_liquid_volume_variation = value;
+      replaced.volume_variation = true;
+      return true;
+    }
+    if (quantity == "liquid_gas_area_rate") {
+      power.owned_liquid_gas_area_variation = value;
+      replaced.surface_variation = true;
+      return true;
+    }
+  }
+  return false;
+}
+
+/// The totals of a record whose channels were replaced: sums of channels, in
+/// the order the pointwise evaluators form them.
+void recomputeTotals(
+    svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState& accepted,
+    const ReplacedChannels& replaced)
+{
+  auto& state = accepted.state;
+  if (replaced.wetted || replaced.contact || replaced.young) {
+    svmp::FE::Real wetted{0.0};
+    svmp::FE::Real contact{0.0};
+    svmp::FE::Real young{0.0};
+    for (const auto& wall : state.walls) {
+      wetted += wall.owned_wetted_wall_area;
+      contact += wall.owned_contact_measure;
+      if (wall.equilibrium_contact_angle_radians.has_value()) {
+        young += wall.young_wall_energy;
+      }
+    }
+    if (replaced.wetted) {
+      state.owned_wetted_wall_area = wetted;
+    }
+    if (replaced.contact) {
+      state.owned_contact_measure = contact;
+    }
+    if (replaced.young) {
+      state.young_wall_energy = young;
+    }
+  }
+  if (replaced.volume) {
+    state.volume_constraint_potential = state.volume_multiplier * state.owned_liquid_volume;
+  }
+  if (replaced.volume || replaced.surface || replaced.young) {
+    state.total_potential =
+        state.liquid_gas_surface_energy + state.young_wall_energy + state.volume_constraint_potential;
+  }
+  if (accepted.active_volume_energy.has_value() && (replaced.kinetic || replaced.gravitational)) {
+    auto& energy = *accepted.active_volume_energy;
+    energy.total_energy = energy.kinetic_energy + energy.gravitational_energy;
+  }
+  if (accepted.endpoint_functional_power.has_value() &&
+      (replaced.volume_variation || replaced.surface_variation)) {
+    auto& power = *accepted.endpoint_functional_power;
+    // As the pointwise first variation: the surface-energy rate is gamma
+    // times the area rate; the wall rates stay pointwise.
+    if (replaced.surface_variation) {
+      power.liquid_gas_surface_energy_variation =
+          power.surface_tension * power.owned_liquid_gas_area_variation;
+    }
+    power.volume_constraint_potential_variation =
+        power.volume_multiplier * power.owned_liquid_volume_variation;
+    power.total_potential_variation = power.liquid_gas_surface_energy_variation +
+                                      power.young_wall_energy_variation +
+                                      power.volume_constraint_potential_variation;
+  }
+}
+
+/**
+ * Replaces the logged channels of @p states with the declared functionals of
+ * their interfaces (collective).  The backward-Euler kinetic work evaluates
+ * the declared kinetic energy on the previous accepted state and on the step
+ * change, both on the endpoint snapshot, and derives the inertia work.  A
+ * form that reads fields is skipped when no solution is supplied.  Returns
+ * the absolute masses, for the record log.
+ */
+std::vector<DeclaredFunctionalMasses> applyDeclaredFunctionalForms(
+    const FESystemHandle& sim,
+    std::span<const svmp::FE::Real> solution,
+    std::span<const svmp::FE::Real> previous_solution,
+    std::span<svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState> states)
+{
+  std::vector<DeclaredFunctionalMasses> out;
+  const auto declared = systems::functionalForms(*sim.fe_system);
+  if (declared.empty() || states.empty()) {
+    return out;
+  }
+  const auto& system = *sim.fe_system;
+  const systems::CollectiveCommunicator comm(activeMeshCommunicator(system));
+  const auto record_declarations =
+      systems::functionalRecords(*sim.fe_system).functionalDeclarations();
+  const auto* context = system.cutIntegrationContext();
+  for (auto& accepted : states) {
+    const std::string prefix = "free_surface." + std::to_string(accepted.interface_marker) + ".";
+    std::vector<svmp::FE::forms::FormExpr> forms;
+    std::vector<std::string> names;
+    const systems::FunctionalFormDeclaration* kinetic = nullptr;
+    for (const auto& declaration : declared) {
+      if (declaration.name.compare(0, prefix.size(), prefix) != 0) {
+        continue;
+      }
+      const std::string_view quantity(declaration.name.data() + prefix.size(),
+                                      declaration.name.size() - prefix.size());
+      const auto ends_with = [&](std::string_view suffix) {
+        return quantity.size() >= suffix.size() &&
+               quantity.substr(quantity.size() - suffix.size()) == suffix;
+      };
+      if (ends_with("contact_line_friction_dissipation") || ends_with("wall_slip_dissipation")) {
+        continue;  // evaluated on the contact stage
+      }
+      if (solution.empty() && formReadsFields(*declaration.form.node())) {
+        continue;
+      }
+      if (quantity == "kinetic_energy") {
+        kinetic = &declaration;
+      }
+      names.push_back(declaration.name);
+      forms.push_back(declaration.form);
+    }
+    if (forms.empty()) {
+      continue;  // nothing declared for this interface: the pointwise values stay
+    }
+    // The per-wall quantities over the snapshot's wall domains.
+    const auto record_declaration = std::find_if(
+        record_declarations.begin(), record_declarations.end(), [&](const auto& declaration) {
+          return declaration.interface_marker == accepted.interface_marker;
+        });
+    const interfaces::FreeSurfaceGeometrySnapshot* snapshot = nullptr;
+    if (context != nullptr) {
+      for (const auto& candidate : context->freeSurfaceGeometrySnapshots()) {
+        if (candidate && candidate->revision().snapshot_revision_key ==
+                             accepted.geometry_revision.snapshot_revision_key) {
+          snapshot = candidate.get();
+          break;
+        }
+      }
+    }
+    if (record_declaration != record_declarations.end() && snapshot != nullptr) {
+      using svmp::FE::forms::FormExpr;
+      const auto liquid = record_declaration->parameters.liquid_side;
+      const auto gamma = record_declaration->parameters.surface_tension;
+      const auto one = FormExpr::constant(1.0);
+      const auto sum_of = [](std::vector<FormExpr> terms) {
+        FormExpr sum{};
+        for (auto& term : terms) {
+          sum = sum.isValid() ? sum + term : std::move(term);
+        }
+        return sum;
+      };
+      for (const auto& wall : accepted.state.walls) {
+        const int b = wall.boundary_marker;
+        const std::string wall_prefix = prefix + "wall." + std::to_string(b) + ".";
+        std::vector<FormExpr> wetted;
+        std::vector<FormExpr> young;
+        const svmp::FE::Real coefficient =
+            wall.equilibrium_contact_angle_radians.has_value()
+                ? -gamma * std::cos(*wall.equilibrium_contact_angle_radians)
+                : svmp::FE::Real{0.0};
+        for (const auto& active : snapshot->activeBoundaryDomains()) {
+          if (active.request().boundary_marker == b && active.request().side == liquid) {
+            const auto domain = svmp::FE::forms::BoundaryDomain::generatedActiveSubset(b, active.marker());
+            wetted.push_back(one.ds(domain));
+            young.push_back(FormExpr::constant(coefficient).ds(domain));
+          }
+        }
+        std::vector<FormExpr> contact;
+        for (const auto& domain : snapshot->contactDomains()) {
+          if (domain.boundaryMarker() == b) {
+            contact.push_back(one.dL(svmp::FE::forms::ContactLineDomain(domain.marker(), b)));
+          }
+        }
+        if (!wetted.empty()) {
+          names.push_back(wall_prefix + "wetted_area");
+          forms.push_back(sum_of(wetted));
+          if (wall.equilibrium_contact_angle_radians.has_value()) {
+            names.push_back(wall_prefix + "young_energy");
+            forms.push_back(sum_of(young));
+          }
+        }
+        if (!contact.empty()) {
+          names.push_back(wall_prefix + "contact_measure");
+          forms.push_back(sum_of(contact));
+        }
+      }
+    }
+    // The evaluation is collective: every rank must state the same forms
+    // (the wall domains are the snapshot's, which every rank holds).
+    const auto [minimum_form_count, maximum_form_count] =
+        collectiveMinMaxUint64(static_cast<std::uint64_t>(forms.size()), comm);
+    if (minimum_form_count != maximum_form_count) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] The declared free-surface functionals of interface " +
+          std::to_string(accepted.interface_marker) + " differ across the FE communicator.");
+    }
+    systems::SystemStateView state;
+    state.u = solution;
+    const auto values = systems::evaluateFunctionalForms(system, forms, state, comm);
+    DeclaredFunctionalMasses masses{.interface_marker = accepted.interface_marker};
+    ReplacedChannels replaced;
+    for (std::size_t k = 0; k < names.size(); ++k) {
+      const std::string_view quantity(names[k].data() + prefix.size(), names[k].size() - prefix.size());
+      (void)replaceDeclaredChannel(accepted, quantity, values[k].value, replaced);
+      masses.masses.emplace_back(names[k], values[k].absolute_mass);
+    }
+    if (accepted.backward_euler_kinetic_work.has_value() && kinetic != nullptr &&
+        previous_solution.size() == solution.size() && !previous_solution.empty()) {
+      std::vector<svmp::FE::Real> change(solution.size());
+      for (std::size_t i = 0; i < change.size(); ++i) {
+        change[i] = solution[i] - previous_solution[i];
+      }
+      const std::vector<svmp::FE::forms::FormExpr> kinetic_form{kinetic->form};
+      systems::SystemStateView before_state;
+      before_state.u = previous_solution;
+      const auto before = systems::evaluateFunctionalForms(system, kinetic_form, before_state, comm);
+      systems::SystemStateView change_state;
+      change_state.u = change;
+      const auto loss = systems::evaluateFunctionalForms(system, kinetic_form, change_state, comm);
+      auto& work = *accepted.backward_euler_kinetic_work;
+      work.kinetic_energy_before_on_endpoint_domain = before.front().value;
+      work.time_discretization_loss = loss.front().value;
+      work.kinetic_energy_change_on_endpoint_domain =
+          work.kinetic_energy_after - work.kinetic_energy_before_on_endpoint_domain;
+      work.step_integrated_inertia_work =
+          work.kinetic_energy_change_on_endpoint_domain + work.time_discretization_loss;
+      work.identity_residual = work.step_integrated_inertia_work -
+                               work.kinetic_energy_change_on_endpoint_domain -
+                               work.time_discretization_loss;
+      masses.masses.emplace_back(prefix + "kinetic_energy_before_on_endpoint_domain",
+                                 before.front().absolute_mass);
+      masses.masses.emplace_back(prefix + "time_discretization_loss", loss.front().absolute_mass);
+    }
+    recomputeTotals(accepted, replaced);
+    out.push_back(std::move(masses));
+  }
+  return out;
+}
+
 } // namespace
 
 std::vector<svmp::FE::level_set::LevelSetAuthoritativeFunctionalValue>
@@ -1287,6 +1695,7 @@ levelSetMaintenanceFunctionalValues(
     attachAcceptedFreeSurfaceExternalPressurePowers(
         sim, solution, enriched_states);
   }
+  (void)applyDeclaredFunctionalForms(sim, solution, {}, enriched_states);
   const auto& snapshots = context->freeSurfaceGeometrySnapshots();
   for (const auto& state : enriched_states) {
     const auto marker = static_cast<double>(state.interface_marker);
@@ -1565,6 +1974,8 @@ recordAcceptedFunctionals(
       backward_euler_previous_solution,
       accepted_solution,
       accepted_states);
+  const auto declared_masses = applyDeclaredFunctionalForms(
+      sim, accepted_solution, backward_euler_previous_solution, accepted_states);
   const bool has_backward_euler_work = std::any_of(
       accepted_states.begin(),
       accepted_states.end(),
@@ -1814,6 +2225,20 @@ recordAcceptedFunctionals(
       state_revision,
       accepted_states,
       accepted_extension_map_revision);
+  // The absolute mass sum |w f| of each declared functional, the scale of the
+  // E3 tolerance gate (D49).
+  for (const auto& record : declared_masses) {
+    std::ostringstream message;
+    message << std::setprecision(17)
+            << "FESystem: free-surface functional absolute mass"
+            << " diagnostic=functional_absolute_mass"
+            << " accepted_step=" << accepted_step
+            << " interface_marker=" << record.interface_marker;
+    for (const auto& [name, mass] : record.masses) {
+      message << ' ' << name << '=' << mass;
+    }
+    FE_LOG_INFO(message.str());
+  }
   return accepted_states;
 }
 
