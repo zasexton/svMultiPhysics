@@ -978,6 +978,7 @@ These are proposals. Each lists a recommended option and an alternative. Record 
      - **Estimate:** about 155 h of agent time and about 42 jobs in total (D49: 135 h, 40).
   - **Progress 2026-10-23 (`07b67ee4`):** `Physics/Formulations/NavierStokes` has 52 files and 28,778 lines on main (84 and 42,045 before the train). Integrated with the train: the S9/S10 retirements, M4 and the PDE velocity-extension move to `FE/LevelSet/Extension` (the maintenance plan's step E1, not milestone step E1); P6a and P6b phase 1; R2's E0, M1, M1-r and M3; R1's X1, B1, O1 and S1; P2 batch A. Integration gates: build, CTest with no new failures, the exhaustive matrix, reference sets serial and at 2 and 4 ranks, S0 manifests 16/16 with 0 JIT misses, and the pytest statuses (11 reviewed changes). That move was also checked MUMPS-on (gtests at 1, 2 and 4 ranks; `mumps_serial` outputs and per-rank logs identical).
   - **Progress 2026-10-23, train 2 (`1cbd8a2d`):** 28 files and 14,261 lines on main. Integrated: S8's G1 (accepted-stage and functional records in FE), R1's T1 and G3 (two-fluid formulation folded into the module; its stage records in FE), S9/S10's M5 (contact stages as FE services) and R2's G2 (the FE energy-balance ledger). Same integration gates as the first train; S8's link check now also fails on duplicate strong definitions.
+  - **Progress 2026-10-23, train 3 (`9d133dad`):** 26 files and 12,305 lines on main. Integrated: R2's G2d (the energy participant to `FE/LevelSet`), params' P6b phase 2 (the curvature projection and the minimizer's KAG branch retired), outer-pass round 4 (solution quadrature data evaluated when read, the basis-table zero fill skipped where the transpose overwrites it, and a per-thread memo of the resolved vector-entry tables; bitwise, timing run pending) and the D53 form follow-ups. Same integration gates; no pytest status changed.
 - **D51, 2026-10-22 (user): the WP-4 closure decisions held since 2026-10-22 00:00 (c4, c5, c6, c7, Q2).**
   1. **c4: the bound-preserving limiter is retired** (D47 item 5 kept it until the SPHERIC re-run).
      - The rule declared before C2 (job 139, `plan_wp4c2.txt`) retires it unless the limiter-on run completes. Both limiter-on runs failed closed at step 1 (extension-map revision chain), while the limiter-off and patch-bound runs reached step 193 with no spurious liquid and a volume drift of 1.05e-5.
@@ -997,10 +998,10 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   - **Reference:** `free-surface-params/implementation_plan.md`, "P2 = S13b".
 - **D53, 2026-10-23 (user): follow-ups of the review of the form-authoring surface** (`agent-status/refactor/forms-consumer-surface-review.md`; vocabulary `FE/Forms/VOCABULARY.md` brought up to date).
   - **Verdict:** stating one weak form reads close to the mathematics (about 4/5); posing a whole problem with constraints, coupling and outputs is weaker (about 2.5/5).
-  - **Quick wins, bitwise** (on branch `dev/forms-vocabulary-doc`, in verification): `Real` ± / ÷ `FormExpr` operators that build the spelled-out trees; an exception for an empty operand in operations that combine operands; one jump convention (u(−) − u(+), as `jump()`); restricted operators checked at compile time, with errors that name the term.
-  - **Defects fixed with tests** (no production user, so no reference result changes): the consistency-term sign of `interface::applyNitscheInterfacePoisson`, and the `Average` + `NormalComponent` reduction, which returned half the normal jump.
+  - **Quick wins, bitwise** (on main with train 3, `9d133dad`): `Real` ± / ÷ `FormExpr` operators that build the spelled-out trees; an exception for an empty operand in operations that combine operands; one jump convention (u(−) − u(+), as `jump()`); restricted operators checked at compile time, with errors that name the term.
+  - **Defects fixed with tests** (no production user, so no reference result changes): the consistency-term sign of `interface::applyNitscheInterfacePoisson`; the `Average` + `NormalComponent` reduction, which returned half the normal jump; and the affine split of `installResidualForm`, which dropped the `dI` terms of a single-field affine residual (such residuals now take the nonlinear kernel; no production form took the split).
   - **Folded into milestone MR:** measured 0-forms are the API of E1 and G4(a) (S1 of the review); the FE services are de-physicalized inside G4(a) and L1 (S2); public replacements for `bc::detail` follow P2 (Q4); field-symbol handles come with G5 (Q5).
-  - **Open:** `FE/Docs/LevelSet.md` states jump(u) = u⁺ − u⁻ on generated interfaces, the opposite sign of `jump()`; the side mapping is to be checked.
+  - **Resolved with train 3:** on a two-sided generated rule the minus side is the negative side (φ < c), so `jump(u)` = u(−) − u(+) takes the negative side first. The assembler negates the rule normal on the negative side, so each side's normal points into its own side, the opposite of interior facets and fitted interfaces. `FE/Docs/LevelSet.md` and `VOCABULARY.md` now state this.
 - **D54, 2026-10-23 (user): Lagrange multipliers as forms** (`agent-status/refactor/forms-multipliers-design.md`).
   - **Scope: all phases.** LM1 global multipliers (`GlobalSpace`, `FieldScope::Global`, the `.dGlobal()` measure); LM2 the FSILS route; LM3 boundary and interface multipliers with restricted support (T1); LM4 interface-owned multipliers with single-sided interface form kernels (T2); LM5 documentation and cleanups.
   - **Timing:** after milestone MR closes.
@@ -1013,6 +1014,7 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   - Decks that relied on the default (open-vessel `linear_sloshing_2d`, `square_tank_tilt_settling`), the SPHERIC and validation decks and their generators state `pde_harmonic` explicitly and are marked not re-validated, as in Q2.
   - The MMS and wall-advection qualification records stay as history. Changing defaults stays a later, separate step (D47 item 1).
   - **Order (maintenance plan):** W (retire `LevelSetVelocityExtensionMap.{h,cpp}`, about 3,500 lines; `velocityExtensionMapRevision` moves to `FE/LevelSet/Extension`), then E2, then E3.
+  - **Quad4 decks (user, 2026-10-23): fail closed, fix later.** The open-vessel `linear_sloshing_2d` and `square_tank_tilt_settling` decks use structured Quad4 meshes, and the PDE extension needs triangle or tetrahedral cells in the dry region. Once W lands, both stop at their first extension refresh with a message that names the cell type, until a follow-up.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
@@ -1644,13 +1646,13 @@ Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch t
 - [x] M3 (R2): run support and step context to FE. *(On main with the train, `07b67ee4`, 2026-10-23.)*
 - [x] M4 (S9/S10 with R2): the level-set maintenance work ledger in FE/LevelSet/Maintenance. *(On main with the train, `07b67ee4`, 2026-10-23.)*
 - [x] M5 (R2, S9/S10): operator-stage capture, contact-line observables, wall constraints. *(Done by S9/S10; on main with train 2, `1cbd8a2d`, 2026-10-23.)*
-- [ ] P6b phase 2 (params): the projection and the minimizer's KAG branch.
+- [x] P6b phase 2 (params): the projection and the minimizer's KAG branch. *(On main with train 3, `9d133dad`, 2026-10-23; the source contracts it left stale are updated in `e0d82ad0`.)*
 - [ ] G4(a) (R1): `FormulationBuilder` functional, work-channel and diagnostic declarations.
 
 **Phase 3**
 
 - [x] G1 (R2): generic accepted-stage and functional records. *(Done by S8; on main with train 2, `1cbd8a2d`, 2026-10-23.)*
-- [x] G2 (R2): the energy-balance ledger with named channels and declared identities. *(On main with train 2, `1cbd8a2d`, 2026-10-23. G2d, the energy participant to `FE/LevelSet`, follows with train 3.)*
+- [x] G2 (R2): the energy-balance ledger with named channels and declared identities. *(On main with train 2, `1cbd8a2d`, 2026-10-23. G2d, the energy participant to `FE/LevelSet`, followed with train 3, `9d133dad`.)*
 - [x] G3 (R2): two-fluid stage records, with the measures as data. *(Done by R1 with T1; on main with train 2, `1cbd8a2d`, 2026-10-23.)*
 - [ ] G4(b) (R1): create `NavierStokesPostProcessing.h`. Residual work, diagnostic operators and energy declarations are stated there.
 - [ ] G5 (S8 leads since 2026-10-23; R1 keeps G4(a), G4(b) and L1): `ALEBinding` declarations, `LevelSetGeometry` markers and the contact-certificate hook, field binding, vertex-field initialization.
