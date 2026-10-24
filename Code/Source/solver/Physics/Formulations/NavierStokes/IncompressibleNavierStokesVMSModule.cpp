@@ -313,18 +313,15 @@ namespace {
         const FE::forms::CutVolumeSide side = activeDomainSide(bc.active_domain);
         active_boundary = &bc;
 
-        std::ostringstream oss;
-        oss << "IncompressibleNavierStokesVMSModule: active-domain free surface "
-            << "marker=" << bc.interface_marker
-            << " level_set_field='" << bc.level_set_field_name << "'"
-            << " isovalue=" << bc.level_set_isovalue
-            << " generated_interface_domain_id='"
-            << bc.generated_interface_domain_id << "'"
-            << " Active_domain=" << activeDomainName(bc.active_domain)
-            << " Active_domain_method="
-            << activeDomainMethodName(bc.active_domain_method)
-            << " side=" << cutVolumeSideName(side);
-        FE_LOG_INFO(oss.str());
+        FE::logRecord(post::navierStokesLog("active-domain free surface")
+                          .diagnostic("active_domain_free_surface")
+                          .integer("marker", bc.interface_marker)
+                          .quoted("level_set_field", bc.level_set_field_name)
+                          .real("isovalue", bc.level_set_isovalue)
+                          .quoted("generated_interface_domain_id", bc.generated_interface_domain_id)
+                          .text("active_domain", activeDomainName(bc.active_domain))
+                          .text("active_domain_method", activeDomainMethodName(bc.active_domain_method))
+                          .text("side", cutVolumeSideName(side)));
     }
     if (active_boundary == nullptr) {
         return FE::forms::VolumeDomain::full();
@@ -526,21 +523,18 @@ void validateActiveDomainPressureConstraints(
     if (!std::isfinite(constraint_pressure_max)) {
         constraint_pressure_max = FE::Real{0.0};
     }
-    std::ostringstream oss;
-    oss << "IncompressibleNavierStokesVMSModule: pressure gauge diagnostic"
-        << " diagnostic=pressure_gauge_check"
-        << " constraints=" << options.node_pressure_constraints.values.size()
-        << " checked_local_constraints=" << checked_local_constraints
-        << " skipped_nonlocal_constraints=" << skipped_nonlocal_constraints
-        << " constraint_pressure_min=" << constraint_pressure_min
-        << " constraint_pressure_max=" << constraint_pressure_max
-        << " Active_domain="
-        << pressureActiveDomainName(active_pressure_domain->active_domain)
-        << " isovalue=" << bc.level_set_isovalue
-        << " min_signed_gap=" << min_signed_gap
-        << " max_signed_gap=" << max_signed_gap
-        << " margin=" << kPressureGaugeLevelSetMargin;
-    FE_LOG_INFO(oss.str());
+    FE::logRecord(post::navierStokesLog("pressure gauge")
+                      .diagnostic("pressure_gauge_check")
+                      .integer("constraints", options.node_pressure_constraints.values.size())
+                      .integer("checked_local_constraints", checked_local_constraints)
+                      .integer("skipped_nonlocal_constraints", skipped_nonlocal_constraints)
+                      .real("constraint_pressure_min", constraint_pressure_min)
+                      .real("constraint_pressure_max", constraint_pressure_max)
+                      .text("active_domain", pressureActiveDomainName(active_pressure_domain->active_domain))
+                      .real("isovalue", bc.level_set_isovalue)
+                      .real("min_signed_gap", min_signed_gap)
+                      .real("max_signed_gap", max_signed_gap)
+                      .real("margin", kPressureGaugeLevelSetMargin));
 }
 
 namespace {
@@ -568,24 +562,20 @@ void initializeNavierStokesState(
             system.findFieldByName(options.pressure_field_name),
             "mesh-field pressure initialization");
         if (mesh_field_initialization_dofs > 0u) {
-            std::ostringstream oss;
-            oss << "IncompressibleNavierStokesVMSModule: mesh-field "
-                   "initialization diagnostic=mesh_field_initialization"
-                << " initialized_dofs=" << mesh_field_initialization_dofs
-                << " velocity_field='" << options.velocity_field_name << "'"
-                << " pressure_field='" << options.pressure_field_name << "'";
-            FE_LOG_INFO(oss.str());
+            FE::logRecord(post::navierStokesLog("mesh-field initialization")
+                              .diagnostic("mesh_field_initialization")
+                              .integer("initialized_dofs", mesh_field_initialization_dofs)
+                              .quoted("velocity_field", options.velocity_field_name)
+                              .quoted("pressure_field", options.pressure_field_name));
         }
         return;
     }
 
     if (mesh_field_initialization_dofs > 0u) {
-        std::ostringstream oss;
-        oss << "IncompressibleNavierStokesVMSModule: mesh-field "
-               "initialization diagnostic=mesh_field_initialization"
-            << " initialized_dofs=" << mesh_field_initialization_dofs
-            << " velocity_field='" << options.velocity_field_name << "'";
-        FE_LOG_INFO(oss.str());
+        FE::logRecord(post::navierStokesLog("mesh-field initialization")
+                          .diagnostic("mesh_field_initialization")
+                          .integer("initialized_dofs", mesh_field_initialization_dofs)
+                          .quoted("velocity_field", options.velocity_field_name));
     }
 
     const auto p_id = system.findFieldByName(options.pressure_field_name);
@@ -716,37 +706,31 @@ void initializeNavierStokesState(
             return std::isfinite(value) ? value : FE::Real{0.0};
         };
         const auto& statistics = entries.statistics;
-        std::ostringstream oss;
-        oss << "IncompressibleNavierStokesVMSModule: hydrostatic pressure "
-            << "initialization diagnostic=hydrostatic_initialization Active_domain="
-            << pressureActiveDomainName(active_pressure_domain->active_domain)
-            << " wet_pressure_vertices=" << statistics.on_side_vertices
-            << " dry_pressure_vertices=" << statistics.off_side_vertices
-            << " active_support_pressure_vertices="
-            << statistics.supported_vertices
-            << " dry_sign_active_support_pressure_vertices="
-            << statistics.off_side_supported_vertices
-            << " reference_pressure=" << init.reference_pressure
-            << " initialized_pressure_min=" << finite(statistics.value_min)
-            << " initialized_pressure_max=" << finite(statistics.value_max)
-            << " wet_pressure_min=" << finite(statistics.supported_value_min)
-            << " wet_pressure_max=" << finite(statistics.supported_value_max)
-            << " gauge_constraints="
-            << options.node_pressure_constraints.values.size()
-            << " checked_gauge_constraints=" << checked_gauge_constraints
-            << " skipped_gauge_constraints=" << skipped_gauge_constraints
-            << " gauge_pressure_min=" << finite(gauge_pressure_min)
-            << " gauge_pressure_max=" << finite(gauge_pressure_max)
-            << " gauge_initialized_pressure_min="
-            << finite(gauge_initialized_pressure_min)
-            << " gauge_initialized_pressure_max="
-            << finite(gauge_initialized_pressure_max)
-            << " gauge_pressure_max_abs_error="
-            << gauge_pressure_max_abs_error;
+        auto record =
+            post::navierStokesLog("hydrostatic pressure initialization")
+                .diagnostic("hydrostatic_initialization")
+                .text("active_domain", pressureActiveDomainName(active_pressure_domain->active_domain))
+                .integer("wet_pressure_vertices", statistics.on_side_vertices)
+                .integer("dry_pressure_vertices", statistics.off_side_vertices)
+                .integer("active_support_pressure_vertices", statistics.supported_vertices)
+                .integer("dry_sign_active_support_pressure_vertices", statistics.off_side_supported_vertices)
+                .real("reference_pressure", init.reference_pressure)
+                .real("initialized_pressure_min", finite(statistics.value_min))
+                .real("initialized_pressure_max", finite(statistics.value_max))
+                .real("wet_pressure_min", finite(statistics.supported_value_min))
+                .real("wet_pressure_max", finite(statistics.supported_value_max))
+                .integer("gauge_constraints", options.node_pressure_constraints.values.size())
+                .integer("checked_gauge_constraints", checked_gauge_constraints)
+                .integer("skipped_gauge_constraints", skipped_gauge_constraints)
+                .real("gauge_pressure_min", finite(gauge_pressure_min))
+                .real("gauge_pressure_max", finite(gauge_pressure_max))
+                .real("gauge_initialized_pressure_min", finite(gauge_initialized_pressure_min))
+                .real("gauge_initialized_pressure_max", finite(gauge_initialized_pressure_max))
+                .real("gauge_pressure_max_abs_error", gauge_pressure_max_abs_error);
         if (!init.field_name.empty()) {
-            oss << " pressure_field='" << init.field_name << "'";
+            record.quoted("pressure_field", init.field_name);
         }
-        FE_LOG_INFO(oss.str());
+        FE::logRecord(record);
     }
 }
 

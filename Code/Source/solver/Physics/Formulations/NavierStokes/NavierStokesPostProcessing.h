@@ -491,8 +491,8 @@ inline void installResidualWork(FE::systems::FormulationBuilder& F,
     } else {
         declare(Channel::GhostPenalty, {});
     }
-    F.log(navierStokesLog()
-              .text("diagnostic", "free_surface_residual_work_operators")
+    F.log(navierStokesLog("residual work operators")
+              .diagnostic("free_surface_residual_work_operators")
               .text("status", "declared")
               .text("channels", "convection|pressure_continuity|nonconservative_body_force|weak_boundary|vms_pspg|"
                                 "cut_stabilization|ghost_penalty")
@@ -577,8 +577,8 @@ inline void declareDiagnosticSets(FE::systems::DiagnosticRegistry& registry)
     if (!conservative_balance_diagnostic_supported &&
         conservative_balance_diagnostic_requested) {
         FE::logRecord(
-            navierStokesLog({}, FE::LogLevel::WARNING)
-                .text("diagnostic", "navier_stokes_free_surface_conservative_balance_operators")
+            navierStokesLog("conservative balance operators", FE::LogLevel::WARNING)
+                .diagnostic("navier_stokes_free_surface_conservative_balance_operators")
                 .text("status", "skipped")
                 .text("reason",
                       "requires_all_free_surfaces_discrete_energy_traction_and_nonzero_constant_surface_tension"));
@@ -682,8 +682,8 @@ inline void installConservativeBalanceDiagnosticOperators(
          .clear_extra_trial_fields = true});
 
     using Operators = FreeSurfaceConservativeBalanceDiagnosticOperators;
-    F.log(navierStokesLog()
-              .text("diagnostic", "navier_stokes_free_surface_conservative_balance_operators")
+    F.log(navierStokesLog("conservative balance operators")
+              .diagnostic("navier_stokes_free_surface_conservative_balance_operators")
               .text("status", "installed")
               .quoted("pressure_operator", Operators::pressure_virtual_work)
               .quoted("surface_energy_operator", Operators::surface_energy_virtual_work)
@@ -722,8 +722,8 @@ inline void installPressureRowContributionDiagnosticOperators(
         (void)F.diagnostic(kPressureRowContributionDiagnostics, operator_tag, {p_id}, form,
                            {.extra_trial_fields = {u_id}});
     };
-    F.log(navierStokesLog()
-              .text("diagnostic", "navier_stokes_pressure_row_contribution_operators")
+    F.log(navierStokesLog("pressure-row contribution operators")
+              .diagnostic("navier_stokes_pressure_row_contribution_operators")
               .text("installing", "1")
               .text("ops", "equations_diagnostic_ns_galerkin_continuity|equations_diagnostic_ns_active_continuity|"
                            "equations_diagnostic_ns_vms_pspg|equations_diagnostic_ns_vms_pspg_pressure_gradient|"

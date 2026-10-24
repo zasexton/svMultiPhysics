@@ -1003,6 +1003,7 @@ inline void applyFreeSurfaceContactLineConstraints(
         !FE::forms::bc::isZeroConstantScalarValue(bc.external_pressure) ||
         !FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension);
     return post::navierStokesLog("unfitted free-surface boundary mode")
+        .diagnostic("unfitted_free_surface_boundary_mode")
         .integer("marker", bc.interface_marker)
         .quoted("level_set_field", bc.level_set_field_name)
         .quoted("generated_interface_domain_id", bc.generated_interface_domain_id)
@@ -1032,7 +1033,7 @@ inline void applyFreeSurfaceContactLineConstraints(
         .quoted("level_set_field", bc.level_set_field_name)
         .text("dynamic_stress", "natural_zero")
         .text("kinematic_enforcement", "None")
-        .text("diagnostic", "unfitted_free_surface_natural_mode");
+        .diagnostic("unfitted_free_surface_natural_mode");
 }
 
 /// The installed traction (SurfaceStress) and the semi-implicit capillary term.
@@ -1046,7 +1047,7 @@ inline void applyFreeSurfaceContactLineConstraints(
                            .text("normal_source", "integration_rule_geometry")
                            .text("form", "p_external_n_dot_v")
                            .text("surface_energy_form", "omitted_literal_zero_gamma")
-                           .text("diagnostic", "free_surface_pressure_only_surface_stress"));
+                           .diagnostic("free_surface_pressure_only_surface_stress"));
     } else {
         logs.push_back(post::navierStokesLog("installed variational free-surface stress")
                            .integer("marker", freeSurfaceMarker(bc))
@@ -1057,7 +1058,7 @@ inline void applyFreeSurfaceContactLineConstraints(
                            .text("capillary_balance_qualification", "prerequisite_only")
                            .text("force_projection_applied", "0")
                            .text("static_geometry_stationarity_required", "1")
-                           .text("diagnostic", "free_surface_variational_surface_stress"));
+                           .diagnostic("free_surface_variational_surface_stress"));
     }
     if (usesSemiImplicitNormalIncrement(bc)) {
         logs.push_back(post::navierStokesLog("installed semi-implicit capillary term")
@@ -1071,7 +1072,7 @@ inline void applyFreeSurfaceContactLineConstraints(
                            .text("fresh_residual_contribution", "0")
                            .text("coefficient", "surface_tension_times_effective_time_step")
                            .text("qualification", "Candidate")
-                           .text("diagnostic", "free_surface_semi_implicit_normal_increment"));
+                           .diagnostic("free_surface_semi_implicit_normal_increment"));
     }
     return logs;
 }
@@ -1092,7 +1093,7 @@ inline void applyFreeSurfaceContactLineConstraints(
                            .integer("contact_marker", contact_marker)
                            .text("surface_tension_form", surfaceTensionFormName(bc))
                            .text("contact_force_discretization", kContactForce)
-                           .text("diagnostic", "navier_stokes_prescribed_contact_wall_energy"));
+                           .diagnostic("navier_stokes_prescribed_contact_wall_energy"));
         if (contactLineHasNavierSlip(contact_line)) {
             logs.push_back(post::navierStokesLog("installed prescribed-angle sharp Navier wall slip")
                                .integer("interface_marker", bc.interface_marker)
@@ -1100,16 +1101,16 @@ inline void applyFreeSurfaceContactLineConstraints(
                                .integer("active_wall_marker", active_wall_marker)
                                .text("wetted_wall_domain", "sharp_generated_active_boundary")
                                .text("line_friction", "absent")
-                               .text("diagnostic", "navier_stokes_prescribed_contact_navier_slip"));
+                               .diagnostic("navier_stokes_prescribed_contact_navier_slip"));
         }
         return logs;
     }
     if (std::get<FreeSurfaceContactLine::DynamicRenE>(contact_line.configuration).strong_law) {
         logs.push_back(post::navierStokesLog("DynamicContactAngle uses the strong contact-point law")
                            .integer("contact_marker", contact_marker)
-                           .text("Contact_line_law_enforcement", "Strong")
+                           .text("contact_line_law_enforcement", "Strong")
                            .text("line_friction_and_young_term", "replaced_by_constraint_reaction")
-                           .text("diagnostic", "navier_stokes_dynamic_contact_strong_law"));
+                           .diagnostic("navier_stokes_dynamic_contact_strong_law"));
     }
     logs.push_back(post::navierStokesLog("installed coupled dissipative Ren--E DynamicContactAngle")
                        .integer("interface_marker", bc.interface_marker)
@@ -1121,7 +1122,7 @@ inline void applyFreeSurfaceContactLineConstraints(
                        .text("contact_force_discretization", kContactForce)
                        .integer("active_wall_marker", active_wall_marker)
                        .text("wetted_wall_domain", "sharp_generated_active_boundary")
-                       .text("diagnostic", "navier_stokes_dynamic_contact_angle"));
+                       .diagnostic("navier_stokes_dynamic_contact_angle"));
     return logs;
 }
 
@@ -1132,10 +1133,10 @@ inline void applyFreeSurfaceContactLineConstraints(
         constantScalarValueOrThrow(contactLineMobility(contact_line), "Strong DynamicContactAngle mobility");
     return post::navierStokesLog("registered the strong Ren-E contact-point constraint")
         .integer("wall_marker", contactLineWallBoundaryMarker(contact_line))
-        .fixed("mobility", mobility)
+        .real("mobility", mobility)
         .text("registration_order", "after_small_cut_aggregation")
         .text("value_lag", "frozen_per_outer_geometry_pass")
-        .text("diagnostic", "navier_stokes_strong_contact_point_law");
+        .diagnostic("navier_stokes_strong_contact_point_law");
 }
 
 /// The cut-cell stabilization of an unfitted free surface (the velocity and
@@ -1174,18 +1175,19 @@ inline void applyFreeSurfaceContactLineConstraints(
 
     std::vector<FE::LogRecord> logs;
     auto log = post::navierStokesLog("cut-cell stabilization");
-    log.integer("marker", bc.interface_marker)
+    log.diagnostic("cut_cell_stabilization")
+        .integer("marker", bc.interface_marker)
         .quoted("level_set_field", bc.level_set_field_name)
         .text("interface_side", interface_side)
         .text("active_domain", activeDomainName(bc.active_domain))
         .text("active_domain_side", active_domain_side)
-        .text("Active_domain_method", activeDomainMethodName(bc.active_domain_method))
+        .text("active_domain_method", activeDomainMethodName(bc.active_domain_method))
         .text("generated_interface_geometry",
               freeSurfaceGeneratedInterfaceGeometryName(bc.generated_interface_geometry))
         .text("geometry_tangent_policy", freeSurfaceGeometryTangentPolicyName(bc.geometry_tangent_policy))
         .text("use_cut_metadata_scale", cut.use_cut_metadata_scale ? "true" : "false");
     if (cut.cut_metadata_scale_cap.has_value()) {
-        log.general("cut_metadata_scale_cap", *cut.cut_metadata_scale_cap);
+        log.real("cut_metadata_scale_cap", *cut.cut_metadata_scale_cap);
     } else {
         log.text("cut_metadata_scale_cap", "unbounded");
     }
@@ -1200,7 +1202,7 @@ inline void applyFreeSurfaceContactLineConstraints(
         .integer("pressure_polynomial_order", pressure_polynomial_order)
         .text("derivative_orders", derivative_order_label(max_derivative_order))
         .text("pressure_derivative_orders", derivative_order_label(pressure_derivative_order))
-        .general("cut_penalty_transient_calibration", kCutPenaltyTransientCalibration)
+        .real("cut_penalty_transient_calibration", kCutPenaltyTransientCalibration)
         .text("small_cut_aggregation", bc.small_cut_aggregation ? "true" : "false")
         .text("velocity_ghost_penalty_mode", "retired_replaced_by_aggregation")
         .text("pressure_scaling", pressure_derivative_order <= 0
@@ -1210,11 +1212,10 @@ inline void applyFreeSurfaceContactLineConstraints(
                                              : "0.01*h^3/(mu+rho*h^2/dt)"));
     logs.push_back(std::move(log));
     if (has_unsupported_derivative_order) {
-        logs.push_back(post::navierStokesLog(
-            "high-order cut-cell stabilization currently supports derivative_orders=1,2; "
-            "higher-normal-derivative penalties above derivative_order=" +
-                std::to_string(supported_derivative_order) + " are not yet available",
-            FE::LogLevel::WARNING));
+        logs.push_back(post::navierStokesLog("high-order cut-cell stabilization supports derivative orders 1 and 2 only",
+                                             FE::LogLevel::WARNING)
+                           .diagnostic("cut_cell_stabilization_order_unsupported")
+                           .integer("supported_derivative_order", supported_derivative_order));
     }
     return logs;
 }
@@ -1234,6 +1235,7 @@ inline void applyFreeSurfaceContactLineConstraints(
     // Aggregation remains last and therefore sees the complete physical and
     // inactive constraint set.
     logs.push_back(post::navierStokesLog("active-domain inactive constraints enabled")
+                       .diagnostic("active_domain_inactive_constraints")
                        .integer("marker", liquid_boundary->interface_marker)
                        .text("registration_order", "after_physical_essential_constraints")
                        .text("physical_trace_precedence", "per_dof"));
@@ -1253,12 +1255,12 @@ inline void applyFreeSurfaceContactLineConstraints(
                        .text("registration_order", "after_strong_constraints")
                        .text("component_precedence", "per_dof")
                        .integer("maximum_root_path_length", guards.maximum_root_path_length)
-                       .fixed("maximum_reference_extrapolation_distance",
-                              guards.maximum_reference_extrapolation_distance)
-                       .fixed("maximum_absolute_coefficient", guards.maximum_absolute_coefficient)
-                       .fixed("maximum_row_l1_norm", guards.maximum_row_l1_norm)
+                       .real("maximum_reference_extrapolation_distance",
+                             guards.maximum_reference_extrapolation_distance)
+                       .real("maximum_absolute_coefficient", guards.maximum_absolute_coefficient)
+                       .real("maximum_row_l1_norm", guards.maximum_row_l1_norm)
                        .text("rootless_fallback", guards.rootless_fallback ? "1" : "0")
-                       .text("diagnostic", "small_cut_aggregation_registration")
+                       .diagnostic("small_cut_aggregation_registration")
                        .text("velocity_ghost_penalty", "skipped_by_aggregation"));
     return logs;
 }
