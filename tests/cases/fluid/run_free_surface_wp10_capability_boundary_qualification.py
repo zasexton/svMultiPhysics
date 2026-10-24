@@ -287,8 +287,8 @@ EXPECTED_SOURCE_CHECKS = {
     },
     "incompressible_two_fluid_translation": {
         "path": (
-            "Code/Source/solver/Physics/Formulations/NavierStokes/"
-            "NavierStokesRegister.cpp"
+            "Code/Source/solver/Physics/Options/"
+            "NavierStokesRegistration.cpp"
         ),
         "required_fragments": [
             "translate_incompressible_two_fluid_input(",
