@@ -33,6 +33,7 @@
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormsInstaller.h"
 #include "FE/Systems/FormulationBuilder.h"
+#include "FE/Systems/FunctionalForms.h"
 #include "FE/Systems/FunctionalRecords.h"
 
 #include <algorithm>
@@ -769,6 +770,182 @@ inline void installDiagnosticOperators(FE::systems::FormulationBuilder& F,
         installPressureRowContributionDiagnosticOperators(
             F, u_id, p_id, r.galerkin_continuity, active_continuity, vms_pspg, r.pspg_pressure_gradient,
             r.pspg_without_pressure_gradient, pressure_ghost_penalty_form, liquid);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// D49 step E3: the energies, powers, dissipation rates and measures of an
+// unfitted free surface as measured 0-forms, declared on the system with the
+// forms and names that E2 calibrated against the pointwise evaluators
+// (svmp-dev-refactor-moves/logs/e2-e8dad540).  The accepted-functional records
+// read their values (E1's evaluator, exact reduction) instead of the
+// pointwise sums; the static-capillary minimizer keeps the pointwise path
+// until E4.  The record's other copies come from the same forms:
+// active_liquid_volume = liquid_volume, and the backward-Euler kinetic work
+// evaluates kinetic_energy on the accepted, the previous and the difference
+// states (kinetic_energy_after, kinetic_energy_before_on_endpoint_domain,
+// time_discretization_loss).  The per-wall quantities (wetted wall area,
+// contact measure, solid-liquid wall energy) live on the generated domains
+// of the walls the interface meets, so they are integrated over the
+// snapshot's wall domains with the declaration's wall coefficients.  Totals
+// stay sums of channels; the volume-constraint potential is zero while no
+// multiplier is declared.
+// ---------------------------------------------------------------------------
+
+/// What one unfitted free surface declares as its energy functionals (the
+/// data of its FreeSurfaceDiscreteFunctionalDeclaration).
+struct FreeSurfaceEnergyStatement {
+    int interface_marker{-1};
+    FE::forms::CutVolumeSide liquid_side{FE::forms::CutVolumeSide::Negative};
+    FE::FieldId velocity_field{FE::INVALID_FIELD_ID};
+    const FE::spaces::FunctionSpace* velocity_space{nullptr};
+    int dimension{0};
+    FE::Real surface_tension{0.0};
+    FE::Real density{0.0};
+    std::array<FE::Real, 3> gravitational_acceleration{{0.0, 0.0, 0.0}};
+    std::array<FE::Real, 3> gravitational_reference_point{{0.0, 0.0, 0.0}};
+    std::optional<FE::Real> dynamic_viscosity{};   ///< constant: the bulk viscous dissipation
+    std::optional<FE::Real> external_pressure{};   ///< constant: the exterior-pressure power
+    bool endpoint_functional_power{false};         ///< the area and volume rates
+};
+
+/// "free_surface.<interface marker>.<quantity>".
+[[nodiscard]] inline std::string freeSurfaceFunctionalName(int interface_marker, std::string_view quantity)
+{
+    return "free_surface." + std::to_string(interface_marker) + "." + std::string(quantity);
+}
+
+/// The statement of @p bc, with the coefficients declareFreeSurfaceDiscreteFunctionals declares.
+[[nodiscard]] inline FreeSurfaceEnergyStatement freeSurfaceEnergyStatement(
+    const FreeSurfaceBoundary& bc,
+    FE::FieldId velocity_field,
+    const FE::spaces::FunctionSpace& velocity_space,
+    int dimension,
+    FE::Real density,
+    const std::array<FE::Real, 3>& gravitational_acceleration,
+    FE::Real dynamic_viscosity,
+    bool has_constant_dynamic_viscosity)
+{
+    FreeSurfaceEnergyStatement statement;
+    statement.interface_marker = bc.interface_marker;
+    statement.liquid_side = bc.active_domain == FreeSurfaceActiveDomain::LevelSetPositive
+                                ? FE::forms::CutVolumeSide::Positive
+                                : FE::forms::CutVolumeSide::Negative;
+    statement.velocity_field = velocity_field;
+    statement.velocity_space = &velocity_space;
+    statement.dimension = dimension;
+    statement.surface_tension =
+        constantScalarValueOrThrow(bc.surface_tension, "free-surface discrete-functional surface tension");
+    statement.density = density;
+    statement.gravitational_acceleration = gravitational_acceleration;
+    if (has_constant_dynamic_viscosity) {
+        statement.dynamic_viscosity = dynamic_viscosity;
+    }
+    if (const auto* external_pressure = std::get_if<FE::Real>(&bc.external_pressure); external_pressure != nullptr) {
+        statement.external_pressure = *external_pressure;
+    }
+    statement.endpoint_functional_power = usesSurfaceStress(bc);
+    return statement;
+}
+
+/// The energy functionals of one free surface, in this order:
+///   liquid_volume                  Measure          int_L 1
+///   liquid_gas_area                Measure          int_Gamma 1
+///   liquid_gas_surface_energy      Stored           int_Gamma gamma
+///   kinetic_energy                 Stored           int_L rho/2 u.u
+///   gravitational_energy           Stored           -int_L rho g.(x - x_ref)
+///   gravitational_potential_power  Power            -int_L rho g.u
+///   bulk_viscous_dissipation_rate  DissipationRate  int_L 2 mu eps(u):eps(u)      (constant mu)
+///   external_pressure_power        Power            -p_ext int_Gamma u.n_L        (constant p_ext)
+///   liquid_volume_flux             Power            int_Gamma u.n_L               (constant p_ext)
+///   liquid_gas_area_rate           Power            int_Gamma div_Gamma u         (SurfaceStress)
+///   liquid_volume_rate             Power            int_Gamma u.n_L               (SurfaceStress)
+/// with L the liquid side of the interface, n_L = s n the rule normal turned
+/// out of the liquid (s = +1 for a negative liquid, -1 for a positive one).
+[[nodiscard]] inline std::vector<FE::systems::FunctionalFormDeclaration> freeSurfaceEnergyFunctionals(
+    const FreeSurfaceEnergyStatement& statement)
+{
+    using namespace FE::forms;
+    using Kind = FE::systems::FunctionalKind;
+    const std::string owner = "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary";
+    const int m = statement.interface_marker;
+    const auto side = statement.liquid_side;
+    const FE::Real orientation = side == CutVolumeSide::Negative ? FE::Real{1.0} : FE::Real{-1.0};
+    const auto one = FormExpr::constant(1.0);
+    const auto n = FormExpr::normal();
+    const auto u = FormExpr::discreteField(statement.velocity_field, *statement.velocity_space, "u");
+    const auto x = FormExpr::coordinate();
+    const int dim = statement.dimension;
+    const int velocity_components = std::min(dim, statement.velocity_space->value_dimension());
+    const auto& g = statement.gravitational_acceleration;
+    const auto& x_ref = statement.gravitational_reference_point;
+    const FE::Real rho = statement.density;
+
+    std::vector<FE::systems::FunctionalFormDeclaration> out;
+    const auto add = [&](std::string_view quantity, Kind kind, FormExpr form) {
+        out.push_back(FE::systems::FunctionalFormDeclaration{
+            .name = freeSurfaceFunctionalName(m, quantity), .kind = kind, .form = std::move(form), .owner = owner});
+    };
+
+    FormExpr potential = FormExpr::constant(0.0);
+    FormExpr g_dot_u = FormExpr::constant(0.0);
+    for (int i = 0; i < dim; ++i) {
+        const auto component = static_cast<std::size_t>(i);
+        potential = potential + FormExpr::constant(g[component]) *
+                                    (x.component(i) - FormExpr::constant(x_ref[component]));
+        if (i < velocity_components) {
+            g_dot_u = g_dot_u + FormExpr::constant(g[component]) * u.component(i);
+        }
+    }
+    add("liquid_volume", Kind::Measure, one.dCutVolume(m, side));
+    add("liquid_gas_area", Kind::Measure, one.dI(m));
+    add("liquid_gas_surface_energy", Kind::Stored, FormExpr::constant(statement.surface_tension).dI(m));
+    add("kinetic_energy", Kind::Stored, (FormExpr::constant(0.5 * rho) * inner(u, u)).dCutVolume(m, side));
+    add("gravitational_energy", Kind::Stored, (FormExpr::constant(-rho) * potential).dCutVolume(m, side));
+    add("gravitational_potential_power", Kind::Power, (FormExpr::constant(-rho) * g_dot_u).dCutVolume(m, side));
+    if (statement.dynamic_viscosity.has_value()) {
+        const auto strain = grad(u).sym();
+        add("bulk_viscous_dissipation_rate", Kind::DissipationRate,
+            (FormExpr::constant(2.0 * *statement.dynamic_viscosity) * strain.doubleContraction(strain))
+                .dCutVolume(m, side));
+    }
+    if (statement.external_pressure.has_value()) {
+        const auto flux = FormExpr::constant(orientation) * inner(u, n);
+        add("external_pressure_power", Kind::Power,
+            (FormExpr::constant(-*statement.external_pressure) * flux).dI(m));
+        add("liquid_volume_flux", Kind::Power, flux.dI(m));
+    }
+    if (statement.endpoint_functional_power) {
+        add("liquid_gas_area_rate", Kind::Power, surfaceDivergence(u, n).dI(m));
+        add("liquid_volume_rate", Kind::Power, (FormExpr::constant(orientation) * inner(u, n)).dI(m));
+    }
+    return out;
+}
+
+/// Declares the energy functionals of every free surface that declares a
+/// discrete functional (shouldDeclareFreeSurfaceDiscreteFunctional), with
+/// the coefficients of declareFreeSurfaceDiscreteFunctionals.
+inline void declareFreeSurfaceEnergyFunctionals(FE::systems::FormulationBuilder& F,
+                                                const std::vector<FreeSurfaceBoundary>& free_surfaces,
+                                                FE::FieldId velocity_field,
+                                                const FE::spaces::FunctionSpace& velocity_space,
+                                                int dimension,
+                                                FE::Real density,
+                                                const std::array<FE::Real, 3>& gravitational_acceleration,
+                                                FE::Real dynamic_viscosity,
+                                                bool has_constant_dynamic_viscosity)
+{
+    for (const auto& bc : free_surfaces) {
+        if (!shouldDeclareFreeSurfaceDiscreteFunctional(bc)) {
+            continue;
+        }
+        const auto statement =
+            freeSurfaceEnergyStatement(bc, velocity_field, velocity_space, dimension, density,
+                                       gravitational_acceleration, dynamic_viscosity, has_constant_dynamic_viscosity);
+        for (auto& declaration : freeSurfaceEnergyFunctionals(statement)) {
+            F.functional(std::move(declaration.name), declaration.kind, std::move(declaration.form),
+                         std::move(declaration.owner));
+        }
     }
 }
 

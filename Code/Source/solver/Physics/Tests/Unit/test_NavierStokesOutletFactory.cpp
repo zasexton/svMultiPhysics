@@ -36,6 +36,10 @@
 #include "FE/Forms/FormExpr.h"
 #include "FE/Forms/StandardBCs.h"
 #include "FE/Spaces/SpaceFactory.h"
+#include "FE/Spaces/H1Space.h"
+#include "FE/Spaces/ProductSpace.h"
+#include "FE/Systems/FunctionalForms.h"
+#include "Physics/Formulations/NavierStokes/NavierStokesPostProcessing.h"
 #include "FE/Dofs/DofHandler.h"
 #include "FE/Dofs/DofMap.h"
 #include "FE/Dofs/EntityDofMap.h"
@@ -3579,4 +3583,63 @@ TEST(NavierStokesOutletFactory, RdZero_Throws)
     opts.Rd = 0.0;
 
     EXPECT_THROW(Factories::toCoupledOutflowBC(opts, sys, u, rho), std::invalid_argument);
+}
+
+TEST(NavierStokesPostProcessing, StatesTheFreeSurfaceEnergiesAsMeasured0Forms)
+{
+    // E3: one free surface (interface 7, liquid on the positive side) with the
+    // coefficients of its discrete-functional declaration.
+    namespace post = svmp::Physics::formulations::navier_stokes::post;
+    using Kind = svmp::FE::systems::FunctionalKind;
+    auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    auto vector = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar, 3);
+    post::FreeSurfaceEnergyStatement statement{
+        .interface_marker = 7,
+        .liquid_side = CutVolumeSide::Positive,
+        .velocity_field = 0,
+        .velocity_space = vector.get(),
+        .dimension = 3,
+        .surface_tension = 0.07,
+        .density = 1000.0,
+        .gravitational_acceleration = {{0.0, 0.0, -9.81}},
+        .dynamic_viscosity = 1.0e-3,
+        .external_pressure = 0.0,
+        .endpoint_functional_power = true,
+    };
+
+    const auto functionals = post::freeSurfaceEnergyFunctionals(statement);
+    std::vector<std::string> names;
+    for (const auto& functional : functionals) {
+        names.push_back(functional.name);
+        EXPECT_TRUE(svmp::FE::systems::isSumOfIntegrals(functional.form)) << functional.name;
+        EXPECT_FALSE(functional.form.hasTest() || functional.form.hasTrial()) << functional.name;
+        EXPECT_EQ(functional.owner, "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary");
+    }
+    const std::vector<std::string> expected{
+        "free_surface.7.liquid_volume",
+        "free_surface.7.liquid_gas_area",
+        "free_surface.7.liquid_gas_surface_energy",
+        "free_surface.7.kinetic_energy",
+        "free_surface.7.gravitational_energy",
+        "free_surface.7.gravitational_potential_power",
+        "free_surface.7.bulk_viscous_dissipation_rate",
+        "free_surface.7.external_pressure_power",
+        "free_surface.7.liquid_volume_flux",
+        "free_surface.7.liquid_gas_area_rate",
+        "free_surface.7.liquid_volume_rate",
+    };
+    EXPECT_EQ(names, expected);
+    const std::vector<Kind> kinds{Kind::Measure, Kind::Measure, Kind::Stored, Kind::Stored,
+                                  Kind::Stored, Kind::Power, Kind::DissipationRate, Kind::Power,
+                                  Kind::Power, Kind::Power, Kind::Power};
+    ASSERT_EQ(functionals.size(), kinds.size());
+    for (std::size_t i = 0; i < kinds.size(); ++i) {
+        EXPECT_EQ(functionals[i].kind, kinds[i]) << functionals[i].name;
+    }
+
+    // Without a constant viscosity, an exterior pressure or the surface stress those channels are absent.
+    statement.dynamic_viscosity.reset();
+    statement.external_pressure.reset();
+    statement.endpoint_functional_power = false;
+    EXPECT_EQ(post::freeSurfaceEnergyFunctionals(statement).size(), 6u);
 }

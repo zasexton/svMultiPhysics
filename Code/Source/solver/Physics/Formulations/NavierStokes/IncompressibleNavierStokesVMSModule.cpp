@@ -1306,6 +1306,9 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     bcs.install(o.velocity_dirichlet_weak, Factories::reserveMarker);   // Nitsche below; reserve the marker
     fs::FormulationBuilder F(system, o.operator_tag, physicsInstallOptions(o.jit_policy));
     F.symbolicTangent();
+    // The energies, powers and measures of the free surfaces as forms (E3; NavierStokesPostProcessing.h).
+    post::declareFreeSurfaceEnergyFunctionals(F, free_surfaces, u_id, *velocity_space_, dim, o.density, o.body_force,
+                                              o.viscosity, o.viscosity_model == nullptr);
     for (const auto& b : free_surfaces) {
         if (isExteriorOnePhaseBoundary(b) && isUnfittedLevelSet(b)) {
             Factories::addUnfittedFreeSurface(M, system, plan, F, o, b, t, u_id, split);
