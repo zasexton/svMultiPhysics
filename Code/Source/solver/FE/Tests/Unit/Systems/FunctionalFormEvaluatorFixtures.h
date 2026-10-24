@@ -12,7 +12,8 @@
  * @file FunctionalFormEvaluatorFixtures.h
  * @brief A cut quadrilateral strip with an authoritative free-surface snapshot
  *
- * The strip [0, extent] x [0, 1] of Quad4 cells along x, with the wall y = 0,
+ * The strip [0, extent] x [0, 1] of Quad4 cells along x, with the wall y = 0
+ * (or a faceted curved wall through y = wall_profile(x) at the wall nodes),
  * a level set phi(x, y) cut cell by cell (LinearCorner), its contact points
  * with the wall and its wetted wall (the wall where phi < 0), imported into a
  * cut integration context as one geometry snapshot.  Every rank sees every
@@ -58,11 +59,18 @@ using PlaneFunction = std::function<Real(Real, Real)>;
 
 class QuadStripMeshAccess final : public assembly::IMeshAccess {
 public:
-    QuadStripMeshAccess(int rank, int size, GlobalIndex cell_count, Real extent)
+    /// @p wall_profile, when given, puts the wall nodes at y = wall_profile(x)
+    /// (a curved, faceted wall) instead of y = 0.
+    QuadStripMeshAccess(int rank,
+                        int size,
+                        GlobalIndex cell_count,
+                        Real extent,
+                        std::function<Real(Real)> wall_profile = {})
         : rank_(rank)
         , size_(size)
         , cell_count_(cell_count)
         , extent_(extent)
+        , wall_profile_(std::move(wall_profile))
     {
     }
 
@@ -125,7 +133,10 @@ public:
     [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override
     {
         const GlobalIndex nx = cell_count_ + 1;
-        return {{x(node_id % nx), static_cast<Real>(node_id / nx), Real{0.0}}};
+        const Real xi = x(node_id % nx);
+        const bool wall_node = node_id / nx == 0;
+        const Real yi = wall_node ? (wall_profile_ ? wall_profile_(xi) : Real{0.0}) : Real{1.0};
+        return {{xi, yi, Real{0.0}}};
     }
 
     void getCellCoordinates(GlobalIndex cell, std::vector<std::array<Real, 3>>& coordinates) const override
@@ -205,6 +216,7 @@ private:
     int size_{1};
     GlobalIndex cell_count_{0};
     Real extent_{1.0};
+    std::function<Real(Real)> wall_profile_{};
 };
 
 /// The Q1 DOFs of the strip: DOF = node.

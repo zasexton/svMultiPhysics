@@ -183,6 +183,7 @@ FormExpr rebuildWithIndexSubstitution(const std::shared_ptr<FormExprNode>& node,
         case FormExprType::JacobianInverse:
         case FormExprType::JacobianDeterminant:
         case FormExprType::Normal:
+        case FormExprType::BoundaryNormal:
         case FormExprType::CellDiameter:
         case FormExprType::CellVolume:
         case FormExprType::FacetArea:

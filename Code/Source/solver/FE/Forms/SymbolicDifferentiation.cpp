@@ -995,6 +995,7 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
             case FormExprType::CellVolume:
             case FormExprType::FacetArea:
             case FormExprType::CellDomainId:
+            case FormExprType::BoundaryNormal:
                 out.primal = FormExpr(node);
                 out.deriv = zeroOf(out.primal);
                 break;
@@ -2046,6 +2047,7 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
             case FormExprType::ReferenceMeasure:
             case FormExprType::SurfaceJacobian:
             case FormExprType::Normal:
+            case FormExprType::BoundaryNormal:
             case FormExprType::Jacobian:
             case FormExprType::JacobianInverse:
             case FormExprType::JacobianDeterminant:

@@ -407,6 +407,7 @@ struct DualValue {
         case FormExprType::JacobianInverse:
         case FormExprType::JacobianDeterminant:
         case FormExprType::Normal:
+        case FormExprType::BoundaryNormal:
         case FormExprType::CurrentJacobian:
         case FormExprType::ReferenceJacobian:
         case FormExprType::CurrentJacobianDeterminant:
@@ -772,6 +773,7 @@ struct DualValue {
         case FormExprType::JacobianInverse:
         case FormExprType::JacobianDeterminant:
         case FormExprType::Normal:
+        case FormExprType::BoundaryNormal:
         case FormExprType::CurrentJacobian:
         case FormExprType::ReferenceJacobian:
         case FormExprType::CurrentJacobianDeterminant:

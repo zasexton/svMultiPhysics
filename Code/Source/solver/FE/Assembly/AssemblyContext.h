@@ -498,6 +498,21 @@ public:
         return normals_;
     }
 
+    /**
+     * @brief Outward unit normal of the physical boundary at a quadrature point
+     *
+     * Set for the generated rules that lie on the physical boundary: a
+     * contact line (the rule's boundary normal, mapped to the physical
+     * frame) and a wetted (generated active) boundary (its face normal).
+     * Throws for any other context.
+     */
+    [[nodiscard]] Vector3D boundaryNormal(LocalIndex q) const;
+
+    /// The boundary normals of the current rule (empty when it has none).
+    [[nodiscard]] std::span<const Vector3D> boundaryNormals() const noexcept {
+        return boundary_normals_;
+    }
+
     // =========================================================================
     // Moving-Domain Geometry Data (optional; frame-explicit)
     // =========================================================================
@@ -1920,6 +1935,9 @@ public:
      */
     void setNormals(std::span<const Vector3D> normals);
 
+    /// Set the boundary normals of a generated boundary rule (boundaryNormal()).
+    void setBoundaryNormals(std::span<const Vector3D> normals);
+
     void setReferenceGeometry(std::span<const Point3D> points,
                               std::span<const Matrix3x3> jacobians,
                               std::span<const Matrix3x3> inverse_jacobians,
@@ -2147,6 +2165,7 @@ private:
     JITAlignedVector<Matrix3x3> current_inverse_jacobians_{};
     JITAlignedVector<Vector3D> reference_normals_{};
     JITAlignedVector<Vector3D> current_normals_{};
+    std::vector<Vector3D> boundary_normals_{};   ///< generated boundary rules only
     JITAlignedVector<Real> current_mean_curvatures_{};
     JITAlignedVector<Real> reference_measures_{};
     JITAlignedVector<Real> current_measures_{};

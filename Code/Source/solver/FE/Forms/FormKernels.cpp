@@ -1789,10 +1789,11 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
 	            }
 	            return out;
 	        }
-	        case FormExprType::Normal: {
+	        case FormExprType::Normal:
+	        case FormExprType::BoundaryNormal: {
 	            out.value.kind = EvalValue<Scalar>::Kind::Vector;
 	            out.value.vector_size = dim;
-	            const auto n = ctx.normal(q);
+	            const auto n = node.type() == FormExprType::BoundaryNormal ? ctx.boundaryNormal(q) : ctx.normal(q);
 	            for (int d = 0; d < 3; ++d) {
 	                out.value.v[static_cast<std::size_t>(d)] =
 	                    makeScalarConstant<Scalar>(n[static_cast<std::size_t>(d)], env);
@@ -5287,7 +5288,7 @@ EvalValue<Real> evalConstitutiveOutputReal(const FormExprNode& call_node,
 
 using EvalRealDispatchFn = EvalValue<Real> (*)(const FormExprNode&, const EvalEnvReal&, Side, LocalIndex);
 constexpr std::size_t kFormExprDispatchSize =
-    static_cast<std::size_t>(FormExprType::HistoryConvolution) + 1u;
+    static_cast<std::size_t>(FormExprType::BoundaryNormal) + 1u;
 
 EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                                    const EvalEnvReal& env,
@@ -5839,6 +5840,13 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
             EvalValue<Real> out;
             out.kind = EvalValue<Real>::Kind::Vector;
             out.v = ctx.normal(q);
+            out.vector_size = dim;
+            return out;
+        }
+        case FormExprType::BoundaryNormal: {
+            EvalValue<Real> out;
+            out.kind = EvalValue<Real>::Kind::Vector;
+            out.v = ctx.boundaryNormal(q);
             out.vector_size = dim;
             return out;
         }
@@ -10411,11 +10419,12 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
                         "Forms: ConstitutiveOutput node has negative output index (dual)");
             return evalConstitutiveOutputDual(*kids[0], env, side, q, static_cast<std::size_t>(out_idx));
         }
-        case FormExprType::Normal: {
+        case FormExprType::Normal:
+        case FormExprType::BoundaryNormal: {
             EvalValue<Dual> out;
             out.kind = EvalValue<Dual>::Kind::Vector;
             out.vector_size = dim;
-            const auto n = ctx.normal(q);
+            const auto n = node.type() == FormExprType::BoundaryNormal ? ctx.boundaryNormal(q) : ctx.normal(q);
             for (int d = 0; d < 3; ++d) {
                 out.v[static_cast<std::size_t>(d)] = makeDualConstant(n[static_cast<std::size_t>(d)], env.ws->alloc());
             }

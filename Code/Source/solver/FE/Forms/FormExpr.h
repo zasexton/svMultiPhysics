@@ -554,6 +554,10 @@ struct SymbolicOptions {
         // Convolution / history operators
         HistoryWeightedSum,
         HistoryConvolution,
+
+        // Generated boundary rules.  Appended: the values above enter kernel
+        // and manifest hashes.
+        BoundaryNormal, ///< Outward normal of the physical boundary on a generated contact-line or wetted-boundary rule
 		};
 
 class FormExpr;
@@ -730,6 +734,18 @@ public:
 	    static FormExpr jacobianInverse();
     static FormExpr jacobianDeterminant();
     static FormExpr normal();
+    /**
+     * @brief Outward unit normal of the physical boundary on a generated
+     * boundary rule
+     *
+     * On a generated contact line (dL) it is the boundary normal the rule
+     * carries at each point, mapped to the physical frame; on a generated
+     * wetted (active) boundary (generatedActiveSubset ds) it is the face
+     * normal.  It is the wall's normal where the rule lies, not a configured
+     * one.  Evaluated by the form interpreter only (not the JIT); any other
+     * integral rejects it at evaluation.
+     */
+    static FormExpr boundaryNormal();
     static FormExpr cellDiameter();
     static FormExpr cellVolume();
     static FormExpr facetArea();

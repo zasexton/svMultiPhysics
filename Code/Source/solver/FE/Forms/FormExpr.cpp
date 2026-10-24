@@ -314,6 +314,14 @@ public:
     [[nodiscard]] bool hasTrial() const noexcept override { return false; }
 };
 
+class BoundaryNormalNode final : public FormExprNode {
+public:
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::BoundaryNormal; }
+    [[nodiscard]] std::string toString() const override { return "n_boundary"; }
+    [[nodiscard]] bool hasTest() const noexcept override { return false; }
+    [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+};
+
 class CellDiameterNode final : public FormExprNode {
 public:
     [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::CellDiameter; }
@@ -2535,6 +2543,11 @@ FormExpr FormExpr::jacobianDeterminant()
 FormExpr FormExpr::normal()
 {
     return FormExpr(std::make_shared<NormalNode>());
+}
+
+FormExpr FormExpr::boundaryNormal()
+{
+    return FormExpr(std::make_shared<BoundaryNormalNode>());
 }
 
 FormExpr FormExpr::cellDiameter()

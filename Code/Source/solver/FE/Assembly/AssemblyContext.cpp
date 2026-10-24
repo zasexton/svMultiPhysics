@@ -685,6 +685,7 @@ void AssemblyContext::clearMovingDomainData() noexcept
     current_inverse_jacobians_.clear();
     reference_normals_.clear();
     current_normals_.clear();
+    boundary_normals_.clear();
     current_mean_curvatures_.clear();
     reference_measures_.clear();
     current_measures_.clear();
@@ -765,6 +766,16 @@ AssemblyContext::Matrix3x3 AssemblyContext::inverseJacobian(LocalIndex q) const
         throw std::out_of_range("AssemblyContext::inverseJacobian: index out of range");
     }
     return inverse_jacobians_[static_cast<std::size_t>(q)];
+}
+
+AssemblyContext::Vector3D AssemblyContext::boundaryNormal(LocalIndex q) const
+{
+    if (q >= n_qpts_ || static_cast<std::size_t>(q) >= boundary_normals_.size()) {
+        throw std::logic_error(
+            "AssemblyContext::boundaryNormal: the boundary normal is defined on generated contact-line and "
+            "wetted-boundary rules only");
+    }
+    return boundary_normals_[static_cast<std::size_t>(q)];
 }
 
 AssemblyContext::Vector3D AssemblyContext::normal(LocalIndex q) const
@@ -3163,6 +3174,7 @@ void AssemblyContext::copyGeometryDataFrom(const AssemblyContext& other)
     current_inverse_jacobians_ = other.current_inverse_jacobians_;
     reference_normals_ = other.reference_normals_;
     current_normals_ = other.current_normals_;
+    boundary_normals_ = other.boundary_normals_;
     current_mean_curvatures_ = other.current_mean_curvatures_;
     reference_measures_ = other.reference_measures_;
     current_measures_ = other.current_measures_;
@@ -3689,6 +3701,11 @@ AssemblyContext::Matrix3x3* AssemblyContext::trialPhysHessiansWritePtr(std::size
     ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
     trial_phys_hessians_.resizeUninit(count);
     return trial_phys_hessians_.data();
+}
+
+void AssemblyContext::setBoundaryNormals(std::span<const Vector3D> normals)
+{
+    boundary_normals_.assign(normals.begin(), normals.end());
 }
 
 void AssemblyContext::setNormals(std::span<const Vector3D> normals)

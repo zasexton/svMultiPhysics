@@ -240,6 +240,7 @@ Status: `implemented/public`, unless noted.
 | `currentJacobianDeterminant()`, `referenceJacobianDeterminant()` | Signed determinants of the frame-explicit geometry Jacobians |
 | `FormExpr::identity()`, `FormExpr::identity(dim)` | Identity tensors |
 | `FormExpr::normal()`, `currentNormal()`, `referenceNormal()` | Active and frame-explicit normals |
+| `FormExpr::boundaryNormal()` | Outward normal of the physical boundary under a generated rule (a contact line `dL`, a wetted boundary `ds(generatedActiveSubset(...))`), read from the rule; on a curved wall it follows the wall facet, on a flat wall it equals the configured wall normal; evaluation on any other rule fails; interpreted only (no JIT) |
 | `currentMeasure()`, `referenceMeasure()`, `surfaceJacobian()` | Frame-explicit integration measures |
 | `currentSurfaceVector()`, `referenceSurfaceVector()` | Measure-scaled normal vectors |
 | `currentMeanCurvature()` | `implemented/expert`; assembly-provided mean curvature of a fitted boundary; no formulation uses it since the curvature-traction routes were retired |

@@ -550,6 +550,7 @@ assembly::RequiredData analyzeRequiredData(const FormExprNode& node, FormKind ki
                 required |= RequiredData::JacobianDets;
                 break;
             case FormExprType::Normal:
+            case FormExprType::BoundaryNormal:
                 required |= RequiredData::Normals;
                 break;
             case FormExprType::CellDiameter:

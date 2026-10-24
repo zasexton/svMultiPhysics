@@ -93,6 +93,7 @@ inline void hashMix(std::uint64_t& h, std::uint64_t v) noexcept
         case FormExprType::JacobianInverse: return "JacobianInverse";
         case FormExprType::JacobianDeterminant: return "JacobianDeterminant";
         case FormExprType::Normal: return "Normal";
+        case FormExprType::BoundaryNormal: return "BoundaryNormal";
         case FormExprType::CellDiameter: return "CellDiameter";
         case FormExprType::CellVolume: return "CellVolume";
         case FormExprType::FacetArea: return "FacetArea";

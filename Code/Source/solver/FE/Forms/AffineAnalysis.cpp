@@ -127,6 +127,7 @@ bool decomposeAffineInTrial(const FormExpr& expr, Decomp& out, std::string* reas
         case FormExprType::JacobianInverse:
         case FormExprType::JacobianDeterminant:
         case FormExprType::Normal:
+        case FormExprType::BoundaryNormal:
         case FormExprType::CellDiameter:
         case FormExprType::CellVolume:
         case FormExprType::FacetArea:

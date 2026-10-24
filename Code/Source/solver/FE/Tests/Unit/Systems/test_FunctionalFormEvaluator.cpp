@@ -23,8 +23,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -52,6 +54,13 @@ struct PlanarCut {
     svmp::FE::assembly::FunctionalAssembler assembler{};
 
     PlanarCut() { fixture::configureQuadStripAssembler(assembler, mesh, dof_map, space, u_values); }
+
+    /// The same cut over a curved wall through y = wall_profile(x) at the wall nodes.
+    explicit PlanarCut(std::function<Real(Real)> wall_profile)
+        : mesh{0, 1, kCellCount, kExtent, std::move(wall_profile)}
+    {
+        fixture::configureQuadStripAssembler(assembler, mesh, dof_map, space, u_values);
+    }
 
     [[nodiscard]] FormExpr u() const { return FormExpr::discreteField(fixture::kField, space, "u"); }
 
@@ -237,6 +246,74 @@ TEST(FunctionalFormEvaluator, EvaluatesTheDeclaredFunctionalsOfASystemInOrder)
                                           cut.u().dI(fixture::kInterfaceMarker)});
     for (std::size_t i = 0; i < values.size(); ++i) {
         EXPECT_NEAR(values[i].value, standalone[i].value, Real{1.0e-12} * std::max(Real{1.0}, values[i].value));
+    }
+}
+
+TEST(FunctionalFormEvaluator, ReadsTheBoundaryNormalOfAFlatWall)
+{
+    // The wall y = 0: its rules' boundary normal is the configured wall normal (0, -1).
+    PlanarCut cut;
+    const Real c = kInterfaceX;
+    const auto n_boundary = FormExpr::boundaryNormal();
+    const auto configured = forms::FormExpr::asVector({FormExpr::constant(0.0), FormExpr::constant(-1.0)});
+    const std::vector<FormExpr> forms{
+        n_boundary.component(0).dL(contactLine()),
+        n_boundary.component(1).dL(contactLine()),
+        n_boundary.component(0).ds(wettedWall()),
+        n_boundary.component(1).ds(wettedWall()),
+        inner(n_boundary, configured).dL(contactLine()),
+        inner(n_boundary, configured).ds(wettedWall()),
+    };
+    const std::vector<Real> expected{Real{0.0}, Real{-1.0}, Real{0.0}, -c, Real{1.0}, c};
+    const auto values = cut.evaluate(forms);
+    ASSERT_EQ(values.size(), expected.size());
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        SCOPED_TRACE(i);
+        EXPECT_NEAR(values[i].value, expected[i], Real{1.0e-12});
+    }
+}
+
+TEST(FunctionalFormEvaluator, ReadsTheBoundaryNormalOfACurvedWall)
+{
+    // The wall nodes on y = 0.02 x^2: each wall face has its own outward
+    // normal (dy, -dx) / |(dx, dy)|, which the rules carry; a configured
+    // (flat) normal would not.
+    const auto bottom = [](Real x) { return Real{0.02} * x * x; };
+    PlanarCut cut{bottom};
+
+    const Real c = kInterfaceX;
+    const Real x0 = cut.mesh.x(1);   // the contact face [x0, x1] holds x = c
+    const Real x1 = cut.mesh.x(2);
+    const Real dx = x1 - x0;
+    const Real dy = bottom(x1) - bottom(x0);
+    const Real length = std::sqrt(dx * dx + dy * dy);
+    const Real wall_height_at_contact = bottom(x0) + dy * (c - x0) / dx;
+
+    const auto n_boundary = FormExpr::boundaryNormal();
+    const std::vector<FormExpr> forms{
+        n_boundary.component(0).dL(contactLine()),
+        n_boundary.component(1).dL(contactLine()),
+        // int_W n_x ds = the rise of the wetted wall, int_W n_y ds = -(its run).
+        n_boundary.component(0).ds(wettedWall()),
+        n_boundary.component(1).ds(wettedWall()),
+    };
+    const std::vector<Real> expected{dy / length, -dx / length, wall_height_at_contact - bottom(Real{0.0}), -c};
+    const auto values = cut.evaluate(forms);
+    ASSERT_EQ(values.size(), expected.size());
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        SCOPED_TRACE(i);
+        EXPECT_NEAR(values[i].value, expected[i], Real{1.0e-12});
+    }
+    EXPECT_GT(std::abs(values[0].value), Real{1.0e-3});   // not the flat normal
+}
+
+TEST(FunctionalFormEvaluator, RejectsTheBoundaryNormalAwayFromTheBoundary)
+{
+    PlanarCut cut;
+    const auto n_boundary = FormExpr::boundaryNormal();
+    for (const auto& form : {n_boundary.component(0).dI(fixture::kInterfaceMarker), n_boundary.component(0).dx()}) {
+        const std::vector<FormExpr> forms{form};
+        EXPECT_ANY_THROW((void)cut.evaluate(forms));
     }
 }
 

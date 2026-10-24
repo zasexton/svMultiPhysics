@@ -541,6 +541,13 @@ void remapCutInterfaceGeometry(AssemblyContext& context,
     const auto jacobian_dets = context.jacobianDets();
     std::vector<AssemblyContext::Vector3D> normals;
     normals.reserve(rule.points.size());
+    // A generated rule on the physical boundary (a contact line or a wetted
+    // boundary) also carries the boundary's outward normal (boundaryNormal()).
+    const bool on_physical_boundary = rule.provenance.parent_boundary_entity >= 0;
+    std::vector<AssemblyContext::Vector3D> boundary_normals;
+    if (on_physical_boundary) {
+        boundary_normals.reserve(rule.points.size());
+    }
 
     const int geometric_dimension =
         rule.geometric_dimension >= 0 ? rule.geometric_dimension
@@ -568,6 +575,9 @@ void remapCutInterfaceGeometry(AssemblyContext& context,
                          std::string(error_prefix) + ": " + error.what());
             }
             normals.push_back(mapped.interface_normal);
+            if (on_physical_boundary) {
+                boundary_normals.push_back(mapped.boundary_normal);
+            }
             integration_weights[q] = mapped.weight;
             continue;
         }
@@ -578,6 +588,16 @@ void remapCutInterfaceGeometry(AssemblyContext& context,
         const auto n_phys_raw = inverseTransposeReferenceNormal(inverse_jacobians[q], n_ref);
         const auto n_phys = normalizeOr(n_phys_raw, n_ref);
         normals.push_back(n_phys);
+        if (on_physical_boundary) {
+            // As the cut-quadrature mapping: the point's boundary normal when
+            // it carries one, else its (boundary facet) normal.
+            const AssemblyContext::Vector3D n_boundary_ref{
+                {qp.boundary_normal[0], qp.boundary_normal[1], qp.boundary_normal[2]}};
+            boundary_normals.push_back(
+                norm3(n_boundary_ref) > Real{0.0}
+                    ? normalizeOr(inverseTransposeReferenceNormal(inverse_jacobians[q], n_boundary_ref), n_phys)
+                    : n_phys);
+        }
 
         Real measure_scale = Real{1.0};
         if (geometric_dimension == dimension - 1 && dimension == 3) {
@@ -603,6 +623,7 @@ void remapCutInterfaceGeometry(AssemblyContext& context,
     }
 
     context.setNormals(normals);
+    context.setBoundaryNormals(boundary_normals);
     context.markGeometryDirty();
 }
 

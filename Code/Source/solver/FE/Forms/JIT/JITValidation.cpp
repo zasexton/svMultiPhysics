@@ -285,6 +285,7 @@ struct ConstantMatrix {
         case FormExprType::Coordinate:
         case FormExprType::ReferenceCoordinate:
         case FormExprType::Normal:
+        case FormExprType::BoundaryNormal:
         case FormExprType::MeshDisplacement:
         case FormExprType::MeshVelocity:
         case FormExprType::MeshAcceleration:
@@ -1113,6 +1114,12 @@ ValidationResult canCompileImpl(const FormExpr& integrand,
             case FormExprType::AuxiliaryStateSymbol:
                 out.ok = false;
                 out.first_issue = issue(n, "JIT: coupled placeholder must be resolved to slot-based refs");
+                return;
+            case FormExprType::BoundaryNormal:
+                out.ok = false;
+                out.first_issue = issue(
+                    n,
+                    "JIT: boundaryNormal() reads the boundary normals of generated boundary rules; use interpreter fallback");
                 return;
             case FormExprType::AuxiliaryOutputRef:
             case FormExprType::AuxiliaryOutputSymbol:
