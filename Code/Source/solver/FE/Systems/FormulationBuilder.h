@@ -106,6 +106,10 @@ public:
                                    forms::FormExpr form,
                                    std::string owner = {});
 
+    /// Declares the wall functional @p declaration (declareWallFunctionalForm),
+    /// owned by operatorTag() when its owner is empty.  Installs nothing.
+    FormulationBuilder& wallFunctional(WallFunctionalFormDeclaration declaration);
+
     [[nodiscard]] FormInstallOptions& options() noexcept { return options_; }
     [[nodiscard]] const FormInstallOptions& options() const noexcept { return options_; }
     [[nodiscard]] const OperatorTag& operatorTag() const noexcept { return operator_tag_; }

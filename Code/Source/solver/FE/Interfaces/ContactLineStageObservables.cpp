@@ -11,6 +11,7 @@
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "Interfaces/SnapshotFieldEvaluator.h"
 #include "Systems/FESystem.h"
+#include "Systems/FunctionalForms.h"
 #include "Systems/SnapshotFieldAccess.h"
 
 #include <algorithm>
@@ -52,6 +53,54 @@ svmp::FE::systems::CollectiveCommunicator activeSystemCommunicator(
 }
 
 } // namespace
+
+std::vector<DeclaredWallFunctionalForm> declaredWallFunctionalForms(
+    const svmp::FE::systems::FESystem& system,
+    std::string_view prefix,
+    const FreeSurfaceGeometrySnapshot& snapshot,
+    std::span<const int> walls,
+    geometry::CutIntegrationSide liquid_side,
+    std::span<const std::string_view> quantities)
+{
+  std::vector<DeclaredWallFunctionalForm> out;
+  const auto declarations = svmp::FE::systems::wallFunctionalForms(system);
+  if (declarations.empty()) {
+    return out;
+  }
+  for (const int wall : walls) {
+    std::vector<svmp::FE::forms::ContactLineDomain> contact_lines;
+    for (const auto& domain : snapshot.contactDomains()) {
+      if (domain.boundaryMarker() == wall) {
+        contact_lines.emplace_back(domain.marker(), wall);
+      }
+    }
+    std::vector<svmp::FE::forms::BoundaryDomain> wetted_parts;
+    for (const auto& domain : snapshot.activeBoundaryDomains()) {
+      if (domain.request().boundary_marker == wall &&
+          domain.request().side == liquid_side) {
+        wetted_parts.push_back(
+            svmp::FE::forms::BoundaryDomain::generatedActiveSubset(wall, domain.marker()));
+      }
+    }
+    for (const auto& declaration : declarations) {
+      if (declaration.prefix != prefix ||
+          std::find(quantities.begin(), quantities.end(),
+                    std::string_view(declaration.quantity)) == quantities.end()) {
+        continue;
+      }
+      auto form = svmp::FE::systems::wallFunctionalForm(
+          declaration, wall, contact_lines, wetted_parts);
+      if (form.isValid()) {
+        out.push_back(DeclaredWallFunctionalForm{
+            .wall = wall,
+            .quantity = declaration.quantity,
+            .name = svmp::FE::systems::wallFunctionalName(declaration, wall),
+            .form = std::move(form)});
+      }
+    }
+  }
+  return out;
+}
 
 // Moved from Physics/Formulations/NavierStokes/FreeSurface/
 // FreeSurfaceContactStages.cpp with bodies, messages and collective order

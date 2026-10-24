@@ -28,10 +28,12 @@
 
 #include "Core/Types.h"
 #include "Forms/FormExpr.h"
+#include "Forms/IntegrationDomain.h"
 
 #include <cstdint>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace svmp {
@@ -80,6 +82,68 @@ void declareFunctionalForm(FESystem& system, FunctionalFormDeclaration declarati
 
 /// Whether @p form is a sum (+, -, unary -) of integrals.
 [[nodiscard]] bool isSumOfIntegrals(const forms::FormExpr& form);
+
+/// The generated domains of a wall that a wall functional is integrated over.
+enum class WallMeasure : std::uint8_t {
+    ContactLines, ///< the contact lines of the interface with the wall (dL)
+    WettedPart    ///< the part of the wall on the liquid side of the interface (ds)
+};
+
+/**
+ * @brief A functional of every wall an interface meets, stated by its integrand.
+ *
+ * Which walls an interface meets, and their contact lines and wetted parts,
+ * follow the interface, so a formulation cannot name these domains when it
+ * is set up.  It states the integrand instead (a scalar without a test or
+ * trial function and without a measure) and which domains of a wall it is
+ * integrated over; an evaluator integrates it over those domains of each
+ * wall in the interface's geometry snapshot (wallFunctionalForm).  The
+ * functional of wall b is named "<prefix>wall.<b>.<quantity>".
+ */
+struct WallFunctionalFormDeclaration {
+    std::string prefix{};   ///< the name of the interface's functionals, e.g. "free_surface.<marker>."
+    std::string quantity{};
+    FunctionalKind kind{FunctionalKind::Stored};
+    WallMeasure measure{WallMeasure::ContactLines};
+    forms::FormExpr integrand{};                            ///< of every wall not in by_wall (none when invalid)
+    std::vector<std::pair<int, forms::FormExpr>> by_wall{}; ///< the integrand of a wall, by boundary marker
+    std::string owner{};
+};
+
+/// The wall functionals declared on an FE system (its attachment), in order.
+struct WallFunctionalFormStore {
+    std::vector<WallFunctionalFormDeclaration> declarations{};
+};
+
+/**
+ * @brief Declares one wall functional on @p system.
+ *
+ * Throws InvalidArgumentException, before the system is set up, when the
+ * prefix, quantity or owner is empty, the pair (prefix, quantity) is already
+ * declared, no integrand is given, a wall is listed twice, or an integrand
+ * is not a scalar integrand of a 0-form (it must not contain a measure, a
+ * test or a trial function).  Throws after setup.
+ */
+void declareWallFunctionalForm(FESystem& system, WallFunctionalFormDeclaration declaration);
+
+/// The wall functionals declared on @p system, in declaration order (empty when none).
+[[nodiscard]] std::span<const WallFunctionalFormDeclaration> wallFunctionalForms(const FESystem& system) noexcept;
+
+/// "<prefix>wall.<wall>.<quantity>".
+[[nodiscard]] std::string wallFunctionalName(const WallFunctionalFormDeclaration& declaration, int wall);
+
+/**
+ * @brief The functional of one wall as a measured 0-form.
+ *
+ * The integrand of @p wall (its by_wall entry, else the integrand of every
+ * wall) integrated over @p contact_lines (dL) or @p wetted_parts (ds), as the
+ * declaration's measure says, summed in the order given.  Invalid when the
+ * wall has no integrand or no domain of that kind.
+ */
+[[nodiscard]] forms::FormExpr wallFunctionalForm(const WallFunctionalFormDeclaration& declaration,
+                                                 int wall,
+                                                 std::span<const forms::ContactLineDomain> contact_lines,
+                                                 std::span<const forms::BoundaryDomain> wetted_parts);
 
 } // namespace systems
 } // namespace FE

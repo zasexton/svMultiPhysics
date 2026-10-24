@@ -27,12 +27,16 @@
  */
 
 #include "Core/Types.h"
+#include "Forms/FormExpr.h"
 #include "Systems/FreeSurfaceRecordTypes.h"
 #include "Systems/SystemCollectives.h"
 
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace svmp {
@@ -83,6 +87,34 @@ evaluateAcceptedFreeSurfaceContactStages(
     const std::optional<
         systems::FreeSurfaceFirstOrderGeneralizedAlphaProvenance>&
         first_order_generalized_alpha = std::nullopt);
+
+/// One declared wall functional of one wall as a measured 0-form.
+struct DeclaredWallFunctionalForm {
+    int wall{-1};
+    std::string quantity{};
+    std::string name{};   ///< "<prefix>wall.<wall>.<quantity>"
+    forms::FormExpr form{};
+};
+
+/**
+ * @brief The declared wall functionals of one interface on a snapshot.
+ *
+ * The wall functionals declared on @p system (Systems/FunctionalForms.h)
+ * under @p prefix whose quantity is one of @p quantities, as measured
+ * 0-forms of each wall of @p walls over its domains in @p snapshot: the
+ * interface's contact lines with the wall and the wall's parts on
+ * @p liquid_side.  Named "<prefix>wall.<b>.<quantity>", by wall in the order
+ * of @p walls and then in declaration order; a wall without an integrand or
+ * without a domain of that kind has none.  Not collective: the snapshot
+ * lists the same wall domains on every rank.
+ */
+[[nodiscard]] std::vector<DeclaredWallFunctionalForm> declaredWallFunctionalForms(
+    const systems::FESystem& system,
+    std::string_view prefix,
+    const FreeSurfaceGeometrySnapshot& snapshot,
+    std::span<const int> walls,
+    geometry::CutIntegrationSide liquid_side,
+    std::span<const std::string_view> quantities);
 
 /// Binds @p stages to the accepted endpoint @p endpoint_state_revision:
 /// recomputes their composite revisions with @p stage_solution.  Collective.

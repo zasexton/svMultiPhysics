@@ -93,6 +93,15 @@ FormulationBuilder& FormulationBuilder::functional(std::string name,
     return *this;
 }
 
+FormulationBuilder& FormulationBuilder::wallFunctional(WallFunctionalFormDeclaration declaration)
+{
+    if (declaration.owner.empty()) {
+        declaration.owner = operator_tag_;
+    }
+    declareWallFunctionalForm(*system_, std::move(declaration));
+    return *this;
+}
+
 FormInstallOptions FormulationBuilder::groupOptions(const FormulationGroup& group) const
 {
     FormInstallOptions group_options = options_;

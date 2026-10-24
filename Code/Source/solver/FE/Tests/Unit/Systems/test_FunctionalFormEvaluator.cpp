@@ -12,6 +12,8 @@
 #include "Dofs/EntityDofMap.h"
 #include "Forms/FormExpr.h"
 #include "Forms/IntegrationDomain.h"
+#include "Interfaces/ContactLineStageObservables.h"
+#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "Spaces/H1Space.h"
 #include "Systems/FESystem.h"
 #include "Systems/FunctionalFormEvaluator.h"
@@ -26,6 +28,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -190,6 +193,32 @@ TEST(FunctionalFormEvaluator, EvaluatesTheDeclaredFunctionalsOfASystemInOrder)
         sys, {.name = "wetted_wall", .kind = systems::FunctionalKind::Measure, .form = one().ds(wettedWall()), .owner = "t"});
     systems::declareFunctionalForm(
         sys, {.name = "interface_u", .kind = systems::FunctionalKind::Power, .form = u.dI(fixture::kInterfaceMarker), .owner = "t"});
+    // Two wall functionals: u on the contact lines of every wall, x on the
+    // wetted part of the wall kWallMarker.
+    systems::declareWallFunctionalForm(sys, {.prefix = "t.",
+                                             .quantity = "contact_u",
+                                             .kind = systems::FunctionalKind::Power,
+                                             .measure = systems::WallMeasure::ContactLines,
+                                             .integrand = u,
+                                             .owner = "t"});
+    systems::declareWallFunctionalForm(sys, {.prefix = "t.",
+                                             .quantity = "wetted_x",
+                                             .kind = systems::FunctionalKind::Measure,
+                                             .measure = systems::WallMeasure::WettedPart,
+                                             .by_wall = {{fixture::kWallMarker, coordinateX()}},
+                                             .owner = "t"});
+    const auto rejects = [&](systems::WallFunctionalFormDeclaration declaration, const std::string& reason) {
+        try {
+            systems::declareWallFunctionalForm(sys, std::move(declaration));
+            ADD_FAILURE() << "expected a rejection: " << reason;
+        } catch (const svmp::FE::InvalidArgumentException& error) {
+            EXPECT_NE(std::string(error.what()).find(reason), std::string::npos) << error.what();
+        }
+    };
+    rejects({.prefix = "t.", .quantity = "measured", .integrand = one().dx(), .owner = "t"}, "has a measure");
+    rejects({.prefix = "t.", .quantity = "contact_u", .integrand = u, .owner = "t"}, "already declared");
+    rejects({.prefix = "t.", .quantity = "none", .owner = "t"}, "no integrand");
+    ASSERT_EQ(systems::wallFunctionalForms(sys).size(), 2u);
 
     svmp::FE::dofs::MeshTopologyInfo topology;
     topology.n_cells = kCellCount;
@@ -238,6 +267,28 @@ TEST(FunctionalFormEvaluator, EvaluatesTheDeclaredFunctionalsOfASystemInOrder)
     EXPECT_NEAR(values[0].value, Real{290.0} / Real{3.0}, Real{1.0e-11});
     EXPECT_NEAR(values[1].value, kInterfaceX, Real{1.0e-12});
     EXPECT_NEAR(values[2].value, Real{1.0} + Real{2.0} * kInterfaceX + Real{1.5}, Real{1.0e-12});
+
+    // The wall functionals over the wall domains of the snapshot.
+    const auto& snapshots = sys.cutIntegrationContext()->freeSurfaceGeometrySnapshots();
+    ASSERT_EQ(snapshots.size(), 1u);
+    const std::vector<int> walls{fixture::kWallMarker};
+    const std::vector<std::string_view> quantities{"contact_u", "wetted_x"};
+    const auto declared_walls = svmp::FE::interfaces::declaredWallFunctionalForms(
+        sys, "t.", *snapshots.front(), walls, svmp::FE::geometry::CutIntegrationSide::Negative, quantities);
+    ASSERT_EQ(declared_walls.size(), 2u);
+    EXPECT_EQ(declared_walls[0].name, "t.wall." + std::to_string(fixture::kWallMarker) + ".contact_u");
+    EXPECT_EQ(declared_walls[1].name, "t.wall." + std::to_string(fixture::kWallMarker) + ".wetted_x");
+    EXPECT_EQ(declared_walls[1].wall, fixture::kWallMarker);
+    const std::vector<FormExpr> wall_forms{declared_walls[0].form, declared_walls[1].form};
+    const auto wall_values = systems::evaluateFunctionalForms(sys, wall_forms, state, systems::CollectiveCommunicator{});
+    EXPECT_NEAR(wall_values[0].value, Real{1.0} + Real{2.0} * kInterfaceX, Real{1.0e-12});   // u(c, 0)
+    EXPECT_NEAR(wall_values[1].value, Real{0.5} * kInterfaceX * kInterfaceX, Real{1.0e-12});
+    // Another wall has no domain in the snapshot: no form.
+    const std::vector<int> other_wall{fixture::kWallMarker + 1000};
+    EXPECT_TRUE(svmp::FE::interfaces::declaredWallFunctionalForms(
+                    sys, "t.", *snapshots.front(), other_wall, svmp::FE::geometry::CutIntegrationSide::Negative,
+                    quantities)
+                    .empty());
 
     // The same forms through a standalone assembler give the same values.
     PlanarCut cut;
