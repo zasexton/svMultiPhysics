@@ -17,8 +17,10 @@
 #endif
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -134,6 +136,133 @@ std::size_t initializeFieldFromMeshVertexField(
     (void)message_prefix;
     return 0u;
 #endif
+}
+
+MeshVertexFieldView requireMeshVertexField(
+    const FESystem& system,
+    const std::string& field_name,
+    GlobalIndex n_vertices,
+    const MeshVertexFieldMessages& messages)
+{
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    const auto* native_mesh = system.mesh();
+    if (native_mesh == nullptr) {
+        throw std::runtime_error(messages.no_native_mesh);
+    }
+
+    const auto& local_mesh = native_mesh->local_mesh();
+    if (!MeshFields::has_field(local_mesh, EntityKind::Vertex, field_name)) {
+        throw std::runtime_error(
+            messages.missing_field_prefix + field_name + "'");
+    }
+
+    const auto handle = MeshFields::get_field_handle(
+        local_mesh, EntityKind::Vertex, field_name);
+    if (MeshFields::field_type(local_mesh, handle) != FieldScalarType::Float64) {
+        throw std::runtime_error(messages.not_float64);
+    }
+
+    const auto components = MeshFields::field_components(local_mesh, handle);
+    if (components < 1u) {
+        throw std::runtime_error(messages.no_components);
+    }
+
+    const auto entity_count = MeshFields::field_entity_count(local_mesh, handle);
+    if (entity_count < static_cast<std::size_t>(n_vertices)) {
+        throw std::runtime_error(messages.too_few_entries);
+    }
+
+    const auto* values = MeshFields::field_data_as<Real>(local_mesh, handle);
+    if (values == nullptr) {
+        throw std::runtime_error(messages.empty);
+    }
+
+    if (!messages.non_finite_prefix.empty()) {
+        for (GlobalIndex vertex = 0; vertex < n_vertices; ++vertex) {
+            const auto value =
+                values[static_cast<std::size_t>(vertex) * components];
+            if (!std::isfinite(value)) {
+                std::ostringstream oss;
+                oss << messages.non_finite_prefix << vertex;
+                throw std::runtime_error(oss.str());
+            }
+        }
+    }
+
+    return MeshVertexFieldView{values, components, entity_count};
+#else
+    (void)system;
+    (void)field_name;
+    (void)n_vertices;
+    throw std::runtime_error(messages.no_mesh_support);
+#endif
+}
+
+std::optional<GlobalIndex> localVertexOf(
+    const FESystem& system,
+    constraints::VertexIdMode id_mode,
+    GlobalIndex node_id,
+    const LocalVertexMessages& messages)
+{
+    if (node_id < 0) {
+        throw std::invalid_argument(messages.negative_id);
+    }
+
+    switch (id_mode) {
+    case constraints::VertexIdMode::LocalVertexId:
+        return node_id;
+    case constraints::VertexIdMode::GlobalVertexGid:
+        break;
+    }
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    const auto* native_mesh = system.mesh();
+    if (native_mesh == nullptr) {
+        throw std::invalid_argument(messages.no_native_mesh);
+    }
+    const auto local_vertex =
+        native_mesh->local_mesh().global_to_local_vertex(static_cast<gid_t>(node_id));
+    if (local_vertex == INVALID_INDEX) {
+        return std::nullopt;
+    }
+    return static_cast<GlobalIndex>(local_vertex);
+#else
+    (void)system;
+    throw std::invalid_argument(messages.no_mesh_support);
+#endif
+}
+
+const dofs::EntityDofMap& requireVertexDofMap(
+    const FESystem& system,
+    FieldId field,
+    const std::string& message)
+{
+    const auto* entity_map = system.fieldDofHandler(field).getEntityDofMap();
+    if (entity_map == nullptr) {
+        throw std::runtime_error(message);
+    }
+    return *entity_map;
+}
+
+void writeVectorEntries(
+    backends::GenericVector& u0,
+    const std::vector<GlobalIndex>& dofs,
+    const std::vector<Real>& values,
+    const std::string& no_entries_message,
+    const std::string& no_view_message)
+{
+    if (dofs.empty()) {
+        throw std::runtime_error(no_entries_message);
+    }
+
+    auto view = u0.createAssemblyView();
+    if (!view) {
+        throw std::runtime_error(no_view_message);
+    }
+    view->beginAssemblyPhase();
+    view->setVectorEntries(dofs, values);
+    view->endAssemblyPhase();
+    view->finalizeAssembly();
 }
 
 } // namespace systems

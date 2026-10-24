@@ -3178,6 +3178,7 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/Systems/test_FunctionalFormEvaluator.cpp
 		                Tests/Unit/Systems/test_EnergyBalanceLedger.cpp
 		                Tests/Unit/Systems/test_MeshBoundaryKinematics.cpp
+		                Tests/Unit/Systems/test_VertexFieldInitialization.cpp
 		                Tests/Unit/Systems/test_MeshNormalConstraintStageMeasurements.cpp
 		                Tests/Unit/Systems/test_SnapshotFieldEvaluator.cpp
 		                Tests/Unit/Systems/test_FESystemMultiMesh.cpp

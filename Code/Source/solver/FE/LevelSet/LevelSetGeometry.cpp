@@ -390,6 +390,69 @@ forms::FacetDomain CutSide::cutFacets() const
     return forms::FacetDomain::cutAdjacent(geometry_.interfaceMarker(), side_);
 }
 
+FieldId resolveScalarLevelSetField(
+    const systems::FESystem& system,
+    const std::string& name,
+    const std::string& unknown_field_prefix,
+    const std::string& owner)
+{
+    const auto phi_id = system.findFieldByName(name);
+    if (phi_id == INVALID_FIELD_ID) {
+        throw std::invalid_argument(unknown_field_prefix + name + "'");
+    }
+
+    const auto& rec = system.fieldRecord(phi_id);
+    if (rec.components != 1 || !rec.space || rec.space->value_dimension() != 1) {
+        throw std::invalid_argument(
+            owner + ": level-set field '" + name + "' must be scalar");
+    }
+    return phi_id;
+}
+
+std::optional<int> resolveGeneratedActiveBoundaryMarker(
+    int physical_boundary_marker,
+    std::size_t owner_count,
+    const std::function<std::optional<interfaces::GeneratedActiveBoundaryMarkerKey>(
+        std::size_t owner)>& key_of,
+    const std::string& owner)
+{
+    std::optional<int> marker;
+    std::string owner_key;
+    for (std::size_t index = 0u; index < owner_count; ++index) {
+        const auto key = key_of(index);
+        if (!key.has_value()) {
+            continue;
+        }
+        const int candidate =
+            interfaces::stableGeneratedActiveBoundaryMarker(*key);
+        if (!marker.has_value()) {
+            marker = candidate;
+            owner_key = key->stableKey();
+            continue;
+        }
+        if (*marker != candidate || owner_key != key->stableKey()) {
+            throw std::invalid_argument(
+                owner + ": physical boundary marker " +
+                std::to_string(physical_boundary_marker) +
+                " is covered by multiple ambiguous unfitted active domains; select one explicit active-domain owner");
+        }
+    }
+    return marker;
+}
+
+std::function<std::optional<int>(int)> wettedBoundaryResolver(
+    systems::FESystem& system,
+    std::function<std::optional<int>(int)> resolve)
+{
+    return [&system, resolve = std::move(resolve)](int marker) -> std::optional<int> {
+        const auto generated = resolve(marker);
+        if (generated.has_value()) {
+            system.registerGeneratedEmbeddedInterfaceMarker(*generated);
+        }
+        return generated;
+    };
+}
+
 } // namespace level_set
 } // namespace FE
 } // namespace svmp

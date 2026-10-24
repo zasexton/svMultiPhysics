@@ -7,7 +7,9 @@
 
 #include "LevelSet/LevelSetSideSupport.h"
 
+#include "Assembly/Assembler.h"
 #include "Assembly/CutIntegrationContext.h"
+#include "Dofs/EntityDofMap.h"
 #include "Geometry/CutQuadrature.h"
 #include "Systems/FESystem.h"
 
@@ -15,6 +17,9 @@
 #  include "Mesh/Mesh.h"
 #endif
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -178,6 +183,132 @@ std::vector<unsigned char> levelSetSideSupportVertices(
     }
 #endif
     return support;
+}
+
+LevelSetVertexSide levelSetVertexSide(
+    const LevelSetVertexValues& level_set,
+    GlobalIndex vertex,
+    Real isovalue,
+    LevelSetSupportSide side,
+    Real margin) noexcept
+{
+    LevelSetVertexSide result{};
+    result.phi = level_set.values[
+        static_cast<std::size_t>(vertex) * level_set.components];
+    result.signed_gap = result.phi - isovalue;
+    result.on_side = vertexOnLevelSetSide(result.phi, isovalue, side);
+    result.within_margin = std::abs(result.signed_gap) < margin;
+    return result;
+}
+
+LevelSetSideVertexChoice levelSetSideVertexChoice(
+    const LevelSetSideVertexValues& values,
+    GlobalIndex vertex)
+{
+    LevelSetSideVertexChoice choice{};
+    if (values.side.has_value()) {
+        const auto& side = *values.side;
+        const auto vertex_offset =
+            static_cast<std::size_t>(vertex) * side.level_set.components;
+        const auto phi = side.level_set.values[vertex_offset];
+        choice.on_side = vertexOnLevelSetSide(phi, side.isovalue, side.side);
+        choice.supported =
+            side.support.has_value()
+                ? ((*side.support)[static_cast<std::size_t>(vertex)] !=
+                   static_cast<unsigned char>(0))
+                : choice.on_side;
+    }
+    return choice;
+}
+
+namespace {
+
+[[nodiscard]] Real sideVertexValue(
+    const LevelSetSideVertexValues& values,
+    bool supported,
+    GlobalIndex vertex,
+    const std::array<Real, 3>& x)
+{
+    return supported
+        ? (values.field_values != nullptr
+               ? values.field_values[
+                     static_cast<std::size_t>(vertex) *
+                     values.field_components]
+               : values.value(x))
+        : values.dry_value;
+}
+
+} // namespace
+
+Real levelSetSideVertexValue(
+    const LevelSetSideVertexValues& values,
+    GlobalIndex vertex,
+    const std::array<Real, 3>& x)
+{
+    return sideVertexValue(
+        values, levelSetSideVertexChoice(values, vertex).supported, vertex, x);
+}
+
+LevelSetSideVertexEntries collectVertexFieldOnLevelSetSide(
+    const systems::FESystem& system,
+    FieldId field,
+    const dofs::EntityDofMap& vertex_dof_map,
+    const LevelSetSideVertexValues& values,
+    const std::string& non_finite_prefix,
+    const std::string& non_finite_suffix)
+{
+    const auto& mesh = system.meshAccess();
+    const auto field_offset = system.fieldDofOffset(field);
+    const auto n_vertices = mesh.numVertices();
+
+    LevelSetSideVertexEntries result{};
+    auto& statistics = result.statistics;
+    statistics.value_min = std::numeric_limits<Real>::infinity();
+    statistics.value_max = -std::numeric_limits<Real>::infinity();
+    statistics.supported_value_min = std::numeric_limits<Real>::infinity();
+    statistics.supported_value_max = -std::numeric_limits<Real>::infinity();
+    for (GlobalIndex vertex = 0; vertex < n_vertices; ++vertex) {
+        const auto vertex_dofs = vertex_dof_map.getVertexDofs(vertex);
+        if (vertex_dofs.empty()) {
+            continue;
+        }
+
+        const auto x = mesh.getNodeCoordinates(vertex);
+        const auto choice = levelSetSideVertexChoice(values, vertex);
+        if (values.side.has_value()) {
+            if (choice.on_side) {
+                ++statistics.on_side_vertices;
+            } else {
+                ++statistics.off_side_vertices;
+            }
+            if (choice.supported) {
+                ++statistics.supported_vertices;
+                if (!choice.on_side) {
+                    ++statistics.off_side_supported_vertices;
+                }
+            }
+        }
+        const Real value = sideVertexValue(values, choice.supported, vertex, x);
+        if (!std::isfinite(value)) {
+            std::ostringstream oss;
+            oss << non_finite_prefix << vertex << non_finite_suffix;
+            throw std::runtime_error(oss.str());
+        }
+        statistics.value_min = std::min(statistics.value_min, value);
+        statistics.value_max = std::max(statistics.value_max, value);
+        if (choice.supported) {
+            statistics.supported_value_min =
+                std::min(statistics.supported_value_min, value);
+            statistics.supported_value_max =
+                std::max(statistics.supported_value_max, value);
+        }
+
+        for (const auto local_dof : vertex_dofs) {
+            result.dofs.push_back(field_offset + local_dof);
+            result.values.push_back(value);
+        }
+    }
+    return result;
 }
 
 } // namespace level_set

@@ -55,7 +55,9 @@
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
 #include "LevelSet/LevelSetVolume.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <utility>
@@ -281,6 +283,45 @@ private:
     LevelSetGeometry geometry_;
     forms::CutVolumeSide side_;
 };
+
+/**
+ * @brief The id of the scalar level-set field @p name of @p system.
+ *
+ * Throws std::invalid_argument "<unknown_field_prefix><name>'" when the
+ * system has no such field, and "<owner>: level-set field '<name>' must be
+ * scalar" when it is not a scalar field.
+ */
+[[nodiscard]] FieldId resolveScalarLevelSetField(
+    const systems::FESystem& system,
+    const std::string& name,
+    const std::string& unknown_field_prefix,
+    const std::string& owner);
+
+/**
+ * @brief The generated active-boundary marker of a physical boundary
+ *        marker, over several level-set owners.
+ *
+ * @p key_of(i) is the generated active-boundary key of owner i on the
+ * physical marker, or nothing when owner i does not restrict it; it is
+ * called once per owner, in order.  Every owner that has a key must give the
+ * same marker and stable key; otherwise std::invalid_argument "<owner>:
+ * physical boundary marker <m> is covered by multiple ambiguous unfitted
+ * active domains; select one explicit active-domain owner".
+ */
+[[nodiscard]] std::optional<int> resolveGeneratedActiveBoundaryMarker(
+    int physical_boundary_marker,
+    std::size_t owner_count,
+    const std::function<std::optional<interfaces::GeneratedActiveBoundaryMarkerKey>(
+        std::size_t owner)>& key_of,
+    const std::string& owner);
+
+/**
+ * @brief A wetted-boundary resolver: @p resolve, registering each generated
+ *        marker it returns as an embedded interface marker of @p system.
+ */
+[[nodiscard]] std::function<std::optional<int>(int)> wettedBoundaryResolver(
+    systems::FESystem& system,
+    std::function<std::optional<int>(int)> resolve);
 
 } // namespace level_set
 } // namespace FE

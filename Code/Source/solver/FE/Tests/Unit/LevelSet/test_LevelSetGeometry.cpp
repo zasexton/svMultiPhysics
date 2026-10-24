@@ -19,6 +19,8 @@
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
 #include <memory>
+#include <optional>
+#include <string>
 #include <stdexcept>
 #include <vector>
 
@@ -183,6 +185,73 @@ TEST(LevelSetGeometry, CutVolumeRequestPolicyKeyIgnoresProvenance)
     b.active_side = LevelSetActiveSide::Positive;
     EXPECT_NE(activeCutVolumeRequestPolicyKey({a}), activeCutVolumeRequestPolicyKey({b}));
     EXPECT_FALSE(hasHighOrderGeneratedInterfaceGeometry({a}));
+}
+
+TEST(LevelSetGeometry, ScalarLevelSetFieldIsResolvedWithTheOwnersMessages)
+{
+    GeometrySystem s;
+    EXPECT_EQ(resolveScalarLevelSetField(*s.system, "phi", "Owner: unknown field '", "Owner"), s.phi);
+    try {
+        (void)resolveScalarLevelSetField(*s.system, "psi", "Owner: unknown field '", "Owner");
+        FAIL() << "unknown field accepted";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_EQ(std::string(error.what()), "Owner: unknown field 'psi'");
+    }
+    try {
+        (void)resolveScalarLevelSetField(*s.system, "u", "Owner: unknown field '", "Owner");
+        FAIL() << "vector field accepted";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_EQ(std::string(error.what()), "Owner: level-set field 'u' must be scalar");
+    }
+}
+
+TEST(LevelSetGeometry, GeneratedActiveBoundaryMarkerMustAgreeOverItsOwners)
+{
+    interfaces::GeneratedActiveBoundaryMarkerKey first{};
+    first.source = interfaces::LevelSetInterfaceSource::fromField(FieldId{1});
+    first.domain_id = "drop";
+    first.interface_marker = 5;
+    first.boundary_marker = 2;
+    auto second = first;
+    second.side = geometry::CutIntegrationSide::Positive;
+    const std::vector<std::optional<interfaces::GeneratedActiveBoundaryMarkerKey>> agree{
+        std::nullopt, first, first};
+    std::vector<std::size_t> asked;
+    const auto marker = resolveGeneratedActiveBoundaryMarker(
+        2, agree.size(), [&](std::size_t i) { asked.push_back(i); return agree[i]; }, "Owner");
+    ASSERT_TRUE(marker.has_value());
+    EXPECT_EQ(*marker, interfaces::stableGeneratedActiveBoundaryMarker(first));
+    EXPECT_EQ(asked, (std::vector<std::size_t>{0, 1, 2}));
+    EXPECT_FALSE(resolveGeneratedActiveBoundaryMarker(
+                     2, 1, [](std::size_t) { return std::optional<interfaces::GeneratedActiveBoundaryMarkerKey>{}; },
+                     "Owner")
+                     .has_value());
+
+    const std::vector<std::optional<interfaces::GeneratedActiveBoundaryMarkerKey>> ambiguous{first, second};
+    try {
+        (void)resolveGeneratedActiveBoundaryMarker(
+            2, ambiguous.size(), [&](std::size_t i) { return ambiguous[i]; }, "Owner");
+        FAIL() << "ambiguous owners accepted";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_EQ(std::string(error.what()),
+                  "Owner: physical boundary marker 2 is covered by multiple ambiguous unfitted active "
+                  "domains; select one explicit active-domain owner");
+    }
+}
+
+TEST(LevelSetGeometry, WettedBoundaryResolverRegistersTheGeneratedMarkers)
+{
+    GeometrySystem s;
+    const auto resolve = wettedBoundaryResolver(
+        *s.system, [](int marker) -> std::optional<int> {
+            return marker == 1 ? std::optional<int>(3000007) : std::nullopt;
+        });
+    EXPECT_FALSE(resolve(2).has_value());
+    EXPECT_FALSE(s.system->isGeneratedEmbeddedInterfaceMarkerRegistered(3000007));
+    const auto generated = resolve(1);
+    ASSERT_TRUE(generated.has_value());
+    EXPECT_EQ(*generated, 3000007);
+    EXPECT_TRUE(s.system->isGeneratedEmbeddedInterfaceMarkerRegistered(3000007));
 }
 
 } // namespace

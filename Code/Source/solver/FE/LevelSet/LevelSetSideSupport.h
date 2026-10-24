@@ -16,13 +16,19 @@
 
 #include "Core/Types.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace svmp {
 namespace FE {
+namespace dofs {
+class EntityDofMap;
+}
 namespace systems {
 class FESystem;
 }
@@ -78,6 +84,99 @@ struct LevelSetSideSupportQuery {
     const systems::FESystem& system,
     const LevelSetSideSupportQuery& query,
     GlobalIndex n_vertices);
+
+/// The side of one level-set vertex value, and its distance to the isovalue.
+struct LevelSetVertexSide {
+    Real phi{0.0};
+    /// phi - isovalue
+    Real signed_gap{0.0};
+    bool on_side{false};
+    /// |phi - isovalue| < margin
+    bool within_margin{false};
+};
+
+/// The side of vertex @p vertex of @p level_set relative to @p isovalue.
+[[nodiscard]] LevelSetVertexSide levelSetVertexSide(
+    const LevelSetVertexValues& level_set,
+    GlobalIndex vertex,
+    Real isovalue,
+    LevelSetSupportSide side,
+    Real margin) noexcept;
+
+/// The values of a field's vertices on one side of a level set.
+struct LevelSetSideVertexValues {
+    /// The level set, when the field is restricted to one of its sides.
+    struct Side {
+        LevelSetVertexValues level_set{};
+        Real isovalue{0.0};
+        LevelSetSupportSide side{LevelSetSupportSide::Negative};
+        /// The support vertices (levelSetSideSupportVertices); without them
+        /// a vertex is supported when it is on the side.
+        std::optional<std::vector<unsigned char>> support{};
+    };
+    std::optional<Side> side{};
+    /// Supported vertices take component 0 of this vertex field when it is
+    /// given, else value(x).
+    const Real* field_values{nullptr};
+    std::size_t field_components{0};
+    std::function<Real(const std::array<Real, 3>&)> value{};
+    /// Unsupported vertices take this value.
+    Real dry_value{0.0};
+};
+
+/// Whether @p vertex takes the supported value, and whether it is on the side.
+struct LevelSetSideVertexChoice {
+    bool supported{true};
+    bool on_side{true};
+};
+
+[[nodiscard]] LevelSetSideVertexChoice levelSetSideVertexChoice(
+    const LevelSetSideVertexValues& values,
+    GlobalIndex vertex);
+
+/// The value of @p vertex at coordinates @p x.
+[[nodiscard]] Real levelSetSideVertexValue(
+    const LevelSetSideVertexValues& values,
+    GlobalIndex vertex,
+    const std::array<Real, 3>& x);
+
+/// What collectVertexFieldOnLevelSetSide collected.
+struct LevelSetSideVertexStatistics {
+    std::size_t on_side_vertices{0};
+    std::size_t off_side_vertices{0};
+    std::size_t supported_vertices{0};
+    std::size_t off_side_supported_vertices{0};
+    /// Minimum and maximum of the values (infinite when there is none).
+    Real value_min{0.0};
+    Real value_max{0.0};
+    /// Minimum and maximum of the supported values (infinite when none).
+    Real supported_value_min{0.0};
+    Real supported_value_max{0.0};
+};
+
+/// The vertex coefficients of a field and their statistics.
+struct LevelSetSideVertexEntries {
+    std::vector<GlobalIndex> dofs{};
+    std::vector<Real> values{};
+    LevelSetSideVertexStatistics statistics{};
+};
+
+/**
+ * @brief The vertex coefficients of @p field, whose vertex DOF map is
+ *        @p vertex_dof_map (systems::requireVertexDofMap): every mesh vertex
+ *        with DOFs takes levelSetSideVertexValue, for each of its DOFs.
+ *
+ * The side counts are taken when the values are restricted to a side.
+ * Throws std::runtime_error "<non_finite_prefix><vertex><non_finite_suffix>"
+ * for a non-finite value.  Write the result with systems::writeVectorEntries.
+ */
+[[nodiscard]] LevelSetSideVertexEntries collectVertexFieldOnLevelSetSide(
+    const systems::FESystem& system,
+    FieldId field,
+    const dofs::EntityDofMap& vertex_dof_map,
+    const LevelSetSideVertexValues& values,
+    const std::string& non_finite_prefix,
+    const std::string& non_finite_suffix);
 
 } // namespace level_set
 } // namespace FE
