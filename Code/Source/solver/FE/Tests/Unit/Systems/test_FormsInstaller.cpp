@@ -1564,6 +1564,7 @@ TEST(FormulationBuilder, DeclaresMeasuredFunctionalsWithoutInstallingThem)
     rejects("linear", (u * v).dx(), "test or trial function");
     rejects("", (u * u).dx(), "name must be nonempty");
     rejects("empty", forms::FormExpr{}, "sum of integrals");
+    rejects("facet_measure", (half * u * u).dx() + half.dS(), "interior-facet integral (dS)");
     EXPECT_EQ(systems::functionalForms(sys).size(), 3u);
 }
 

@@ -18,8 +18,8 @@
  *
  *   E = (0.5 * rho * inner(u, u)).dx(Omega) + gamma.dI(L.interface()),
  *
- * with any measure (dx, ds, dS, dI, dL, dCutVolume and the typed domains
- * that lower to them).  A formulation declares its functionals on the FE
+ * with the measures an evaluator integrates (dx, ds, dI, dL, dCutVolume and
+ * the typed domains that lower to them; not dS, the interior facets).  A formulation declares its functionals on the FE
  * system (an attachment, in declaration order), usually through
  * FormulationBuilder::functional; an evaluator of functionals reads the
  * declarations (D49 step E1).  Declaring a functional changes no operator,
@@ -69,8 +69,9 @@ struct FunctionalFormStore {
  *
  * Throws InvalidArgumentException, before the system is set up, when the
  * name or the owner is empty, the name is already declared, or the form is
- * not a measured 0-form: a valid sum of integrals (dx, ds, dS, dI,
- * dCutVolume) without a test or trial function.  Throws after setup.
+ * not a measured 0-form: a valid sum of integrals (dx, ds, dI, dL,
+ * dCutVolume; an interior-facet integral, dS, is rejected because it is not
+ * evaluated) without a test or trial function.  Throws after setup.
  */
 void declareFunctionalForm(FESystem& system, FunctionalFormDeclaration declaration);
 

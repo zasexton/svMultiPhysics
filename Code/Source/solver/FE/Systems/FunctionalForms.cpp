@@ -46,6 +46,24 @@ namespace {
     }
 }
 
+/// Whether a sum of integrals has an interior-facet (dS) term.
+[[nodiscard]] bool hasInteriorFaceIntegral(const forms::FormExprNode& node)
+{
+    if (node.type() == forms::FormExprType::InteriorFaceIntegral) {
+        return true;
+    }
+    if (node.type() != forms::FormExprType::Add && node.type() != forms::FormExprType::Subtract &&
+        node.type() != forms::FormExprType::Negate) {
+        return false;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child && hasInteriorFaceIntegral(*child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 const char* functionalKindName(FunctionalKind kind) noexcept
@@ -78,8 +96,11 @@ void declareFunctionalForm(FESystem& system, FunctionalFormDeclaration declarati
     FE_THROW_IF(std::string_view(functionalKindName(declaration.kind)) == "unknown", InvalidArgumentException,
                 where + "the kind is invalid");
     FE_THROW_IF(!isSumOfIntegrals(declaration.form), InvalidArgumentException,
-                where + "the form must be a sum of integrals (state it with a measure: dx, ds, dS, dI, dL, "
+                where + "the form must be a sum of integrals (state it with a measure: dx, ds, dI, dL, "
                         "dCutVolume)");
+    FE_THROW_IF(hasInteriorFaceIntegral(*declaration.form.node()), InvalidArgumentException,
+                where + "the form has an interior-facet integral (dS), which a functional evaluator does not "
+                        "integrate; state the functional with dx, ds, dI, dL or dCutVolume");
     FE_THROW_IF(declaration.form.hasTest() || declaration.form.hasTrial(), InvalidArgumentException,
                 where + "the form must not contain a test or trial function (a functional is a 0-form)");
     auto& store = system.attachment<FunctionalFormStore>();
