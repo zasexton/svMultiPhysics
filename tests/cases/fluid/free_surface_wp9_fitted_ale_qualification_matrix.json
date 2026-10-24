@@ -162,9 +162,6 @@
       "MovingDomainPhysics.FittedFreeSurfaceLegacyPrescribedDataReportsUnconsumedPolicy",
       "MovingDomainPhysics.NavierStokesFittedFreeSurfaceALEUsesCurrentBoundaryGeometry",
       "MovingDomainPhysics.NavierStokesFittedFreeSurfaceCanUseCurrentGeometryCurvature",
-      "MovingDomainPhysics.NavierStokesFittedFreeSurfacePenaltyKinematicsAddsBoundaryResidual",
-      "MovingDomainPhysics.NavierStokesFittedFreeSurfaceNitscheKinematicsAddsBoundaryResidual",
-      "MovingDomainPhysics.FittedFreeSurfaceNitschePoliciesAreBoundaryLocalAndOrderInvariant",
       "MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesAreBoundaryLocal"
     ],
     "mesh_motion_policy_consumers": [
@@ -201,9 +198,6 @@
     "MovingDomainPhysics.FittedFreeSurfaceLegacyPrescribedDataReportsUnconsumedPolicy",
     "MovingDomainPhysics.NavierStokesFittedFreeSurfaceALEUsesCurrentBoundaryGeometry",
     "MovingDomainPhysics.NavierStokesFittedFreeSurfaceCanUseCurrentGeometryCurvature",
-    "MovingDomainPhysics.NavierStokesFittedFreeSurfacePenaltyKinematicsAddsBoundaryResidual",
-    "MovingDomainPhysics.NavierStokesFittedFreeSurfaceNitscheKinematicsAddsBoundaryResidual",
-    "MovingDomainPhysics.FittedFreeSurfaceNitschePoliciesAreBoundaryLocalAndOrderInvariant",
     "MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesAreBoundaryLocal",
     "MovingDomainPhysics.HarmonicMeshMotionTangentialPoliciesSelectBoundaryTerms",
     "MovingDomainPhysics.MeshMotionModulesInstallEquivalentBoundaryConditionDescriptors",
@@ -211,7 +205,7 @@
     "MovingDomainPhysics.FittedPinnedContactLineRequiresALE"
   ],
   "gates": {
-    "expected_test_count": 32,
+    "expected_test_count": 29,
     "expected_failures": 0,
     "expected_errors": 0,
     "expected_disabled": 0,

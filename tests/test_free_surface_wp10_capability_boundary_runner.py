@@ -78,13 +78,16 @@ def test_canonical_boundary_is_strict_and_explicitly_open(tmp_path):
         for check in matrix["source_checks"]
         if check["id"] == "explicit_one_phase_momentum_artifact"
     )
+    # The fitted contact-capability block of the artifact was retired with
+    # the CurvatureTraction route (decision D47 Q2); the artifact keeps its
+    # qualification label.
+    assert momentum_check["path"] == (
+        "Code/Source/solver/Physics/Options/NavierStokesOptionSchema.cpp"
+    )
     for fragment in (
-        "fitted_surface_contact_capability",
         "supported_configuration_envelope",
-        "fail_closed_before_system_mutation",
-        "fitted_surface_stress_current_frame_gradient_unqualified",
-        "fitted_contact_line_codimension_two_unavailable",
-        "dynamic_contact_requires_sharp_unfitted_level_set",
+        '",\\"physical_model\\":"',
+        '"one_phase_liquid_sharp_interface"',
     ):
         assert fragment in momentum_check["required_fragments"]
     application_preflight = next(
@@ -187,7 +190,7 @@ def test_canonical_boundary_is_strict_and_explicitly_open(tmp_path):
                 for check in document["source_checks"]
                 if check["id"] == "explicit_one_phase_momentum_artifact"
             )["required_fragments"].remove(
-                "fitted_surface_contact_capability"
+                "supported_configuration_envelope"
             ),
         )
 
@@ -394,7 +397,7 @@ def test_validate_only_reports_boundary_without_claiming_closure():
 
     assert summary["outcome"] == "PASS"
     assert summary["requested_claim"] == "staged_two_fluid_capability_boundary"
-    assert summary["source_check_count"] == 13
+    assert summary["source_check_count"] == 20
     assert summary["group_count"] == 5
     assert summary["test_count"] == 40
     assert summary["staged_wp10_capability_count"] == 8

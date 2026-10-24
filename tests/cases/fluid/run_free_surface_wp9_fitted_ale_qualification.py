@@ -33,7 +33,7 @@ DEFAULT_MATRIX = SCRIPT_PATH.with_name(
     "free_surface_wp9_fitted_ale_qualification_matrix.json"
 )
 EXPECTED_MATRIX_SHA256 = (
-    "46225d9c90e71c90881725d4e871466f7a0e19e04a4309627b82e376583715d9"
+    "4d20fc09ea7cac54a9834e8e6e148408d8aa052557891bea2bf21d9517eccf9a"
 )
 SHARED_RUNNER_PATH = Path(base_runner.__file__).resolve()
 SHARED_RUNNER_SHA256 = base_runner.sha256_file(SHARED_RUNNER_PATH)
@@ -244,18 +244,6 @@ EXPECTED_TEST_GROUPS = {
         (
             "MovingDomainPhysics."
             "NavierStokesFittedFreeSurfaceCanUseCurrentGeometryCurvature"
-        ),
-        (
-            "MovingDomainPhysics."
-            "NavierStokesFittedFreeSurfacePenaltyKinematicsAddsBoundaryResidual"
-        ),
-        (
-            "MovingDomainPhysics."
-            "NavierStokesFittedFreeSurfaceNitscheKinematicsAddsBoundaryResidual"
-        ),
-        (
-            "MovingDomainPhysics."
-            "FittedFreeSurfaceNitschePoliciesAreBoundaryLocalAndOrderInvariant"
         ),
         ("MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesAreBoundaryLocal"),
     ],

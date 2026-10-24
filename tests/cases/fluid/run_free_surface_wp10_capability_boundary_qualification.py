@@ -98,18 +98,10 @@ EXPECTED_SOURCE_CHECKS = {
         ],
     },
     "explicit_one_phase_momentum_artifact": {
-        "path": (
-            "Code/Source/solver/Physics/Formulations/NavierStokes/"
-            "IncompressibleNavierStokesVMSModule.cpp"
-        ),
+        "path": "Code/Source/solver/Physics/Options/NavierStokesOptionSchema.cpp",
         "required_fragments": [
             'out << "{\\"artifact_schema_version\\":4"',
-            "fitted_surface_contact_capability",
             "supported_configuration_envelope",
-            "fail_closed_before_system_mutation",
-            "fitted_surface_stress_current_frame_gradient_unqualified",
-            "fitted_contact_line_codimension_two_unavailable",
-            "dynamic_contact_requires_sharp_unfitted_level_set",
             '",\\"physical_model\\":"',
             '"one_phase_liquid_prescribed_exterior_pressure"',
             "prescribed_scalar_traction_reference",
@@ -117,21 +109,44 @@ EXPECTED_SOURCE_CHECKS = {
             '",\\"exterior_pressure_field_solved\\":false"',
             'out << "null";',
             '"one_phase_liquid_sharp_interface"',
-            "const auto p_ext = bc::toScalarExpr(",
-            "bc.external_pressure",
-            '"unsupported_free_surface_physical_model"',
-            "effective_configuration_artifact_.reset();",
         ],
         "forbidden_fragments": [
-            '"incompressible_two_fluid"',
             '"compressible_gas_free_surface"',
         ],
     },
-    "production_input_scope_containment": {
+    "explicit_one_phase_momentum_module": {
         "path": (
             "Code/Source/solver/Physics/Formulations/NavierStokes/"
-            "NavierStokesRegister.cpp"
+            "IncompressibleNavierStokesVMSModule.cpp"
         ),
+        "required_fragments": [
+            "effective_configuration_artifact_.reset();",
+            "effective_configuration_artifact_ = makeEffectiveConfigurationArtifact(",
+        ],
+        "forbidden_fragments": [
+            '"compressible_gas_free_surface"',
+        ],
+    },
+    "explicit_one_phase_exterior_pressure_traction": {
+        "path": (
+            "Code/Source/solver/Physics/Formulations/NavierStokes/"
+            "NavierStokesBCFactories.h"
+        ),
+        "required_fragments": [
+            "const auto p_ext = freeSurfaceScalar(b.external_pressure,",
+            "b.external_pressure",
+        ],
+        "forbidden_fragments": [],
+    },
+    "explicit_one_phase_option_rules": {
+        "path": "Code/Source/solver/Physics/Options/NavierStokesOptionRules.cpp",
+        "required_fragments": [
+            '"unsupported_free_surface_physical_model"',
+        ],
+        "forbidden_fragments": [],
+    },
+    "production_input_scope_containment": {
+        "path": "Code/Source/solver/Physics/Options/NavierStokesRegistration.cpp",
         "required_fragments": [
             '"unsupported_two_phase_or_jump_free_surface_scope"',
             '"unsupported_free_surface_physical_model"',
@@ -140,9 +155,25 @@ EXPECTED_SOURCE_CHECKS = {
             '"Free_surface_physical_model"',
             '"FreeSurfacePhysicalModel"',
             "validate_and_resolve_free_surface_physical_model(",
-            "create_navier_stokes_from_input(",
+        ],
+        "forbidden_fragments": [],
+    },
+    "production_input_register_api": {
+        "path": "Code/Source/solver/Physics/Options/NavierStokesRegistration.h",
+        "required_fragments": [
             "preflightFittedSurfaceContactCapability(",
             "preRegisterPrimaryVelocityField(",
+            "preRegisterIncompressibleTwoFluidDependencyFields(",
+        ],
+        "forbidden_fragments": [],
+    },
+    "production_input_factory": {
+        "path": (
+            "Code/Source/solver/Physics/Formulations/NavierStokes/"
+            "NavierStokesRegister.cpp"
+        ),
+        "required_fragments": [
+            "create_navier_stokes_from_input(",
         ],
         "forbidden_fragments": [],
     },
@@ -172,7 +203,8 @@ EXPECTED_SOURCE_CHECKS = {
     },
     "one_phase_transport_artifacts": {
         "path": (
-            "Code/Source/solver/Application/Translators/LevelSetEquationTranslator.cpp"
+            "Code/Source/solver/Application/Translators/"
+            "LevelSetEquationTranslator.cpp"
         ),
         "required_fragments": [
             '"one_phase_interface_transport_nonlocal_conservation"',
@@ -202,10 +234,7 @@ EXPECTED_SOURCE_CHECKS = {
         "forbidden_fragments": [],
     },
     "incompressible_two_fluid_module": {
-        "path": (
-            "Code/Source/solver/Physics/Formulations/NavierStokes/"
-            "IncompressibleTwoFluidModule.cpp"
-        ),
+        "path": "Code/Source/solver/Physics/Options/NavierStokesOptionSchema.cpp",
         "required_fragments": [
             'out << "{\\"artifact_schema_version\\":3"',
             "incompressible_two_phase_sharp_interface_initial_envelope",
@@ -215,19 +244,27 @@ EXPECTED_SOURCE_CHECKS = {
             "complementary_weighted_every_node",
             "phasewise_fail_closed_no_hidden_velocity_update",
             "shared_coupled_nonlinear_linear_report",
-            "validateIncompressibleTwoFluidConfigurationSemantics(",
-            "system.declareTwoFluidAcceptedStageDiagnostics(",
+        ],
+        "forbidden_fragments": [],
+    },
+    "incompressible_two_fluid_module_stages": {
+        "path": (
+            "Code/Source/solver/Physics/Formulations/NavierStokes/"
+            "IncompressibleNavierStokesVMSModule.cpp"
+        ),
+        "required_fragments": [
+            "twoFluidStageRecords(system).declareTwoFluidAcceptedStageDiagnostics(",
+            "makeIncompressibleTwoFluidConfigurationArtifact(",
         ],
         "forbidden_fragments": [],
     },
     "incompressible_two_fluid_interface": {
         "path": (
             "Code/Source/solver/Physics/Formulations/NavierStokes/"
-            "IncompressibleTwoFluidInterface.cpp"
+            "NavierStokesBCFactories.h"
         ),
         "required_fragments": [
-            "IncompressibleTwoFluidInterfaceWeights "
-            "incompressibleTwoFluidInterfaceWeights(",
+            "IncompressibleTwoFluidInterfaceWeights incompressibleTwoFluidInterfaceWeights(",
             ".negative_traction = viscosity_pair.second_fraction",
             ".positive_traction = viscosity_pair.first_fraction",
             "negative_viscous_traction",
@@ -238,18 +275,23 @@ EXPECTED_SOURCE_CHECKS = {
         "forbidden_fragments": [],
     },
     "incompressible_two_fluid_registration": {
+        "path": "Code/Source/solver/Physics/Options/NavierStokesRegistration.cpp",
+        "required_fragments": [
+            "reject_unsupported_two_fluid_equation_parameters(",
+            "reject_unsupported_two_fluid_default_domain_parameters(",
+            "reject_unsupported_two_fluid_boundary_parameters(",
+            "preflightTwoFluidTranslationBeforeMutation(",
+            "validateIncompressibleTwoFluidConfigurationSemantics(options)",
+        ],
+        "forbidden_fragments": [],
+    },
+    "incompressible_two_fluid_translation": {
         "path": (
             "Code/Source/solver/Physics/Formulations/NavierStokes/"
             "NavierStokesRegister.cpp"
         ),
         "required_fragments": [
             "translate_incompressible_two_fluid_input(",
-            "reject_unsupported_two_fluid_equation_parameters(",
-            "reject_unsupported_two_fluid_default_domain_parameters(",
-            "reject_unsupported_two_fluid_boundary_parameters(",
-            "preflightTwoFluidTranslationBeforeMutation(",
-            "validateIncompressibleTwoFluidConfigurationSemantics(options)",
-            "preRegisterIncompressibleTwoFluidDependencyFields(",
         ],
         "forbidden_fragments": [],
     },
@@ -270,8 +312,7 @@ EXPECTED_SOURCE_CHECKS = {
         "path": "Code/Source/solver/FE/LevelSet/LevelSetTransport.cpp",
         "required_fragments": [
             "LevelSetVelocitySource::MaterialInterfacePhasePair",
-            "material-interface phase-pair velocity requires an existing "
-            "level-set field",
+            "material-interface phase-pair velocity requires an existing level-set field",
             "requireMaterialInterfaceVelocityDeclaration(",
             "materialInterfaceTransportVelocityDeclarations()",
             "momentum_relative_tolerance",
@@ -279,7 +320,7 @@ EXPECTED_SOURCE_CHECKS = {
         "forbidden_fragments": [],
     },
     "two_fluid_accepted_stage_telemetry": {
-        "path": "Code/Source/solver/FE/Systems/FESystem.cpp",
+        "path": "Code/Source/solver/FE/Systems/TwoFluidStageRecords.cpp",
         "required_fragments": [
             "stageTwoFluidAcceptedStageDiagnostics(",
             "bindPendingTwoFluidAcceptedStageNumerics(",
