@@ -979,6 +979,7 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   - **Progress 2026-10-23 (`07b67ee4`):** `Physics/Formulations/NavierStokes` has 52 files and 28,778 lines on main (84 and 42,045 before the train). Integrated with the train: the S9/S10 retirements, M4 and the PDE velocity-extension move to `FE/LevelSet/Extension` (the maintenance plan's step E1, not milestone step E1); P6a and P6b phase 1; R2's E0, M1, M1-r and M3; R1's X1, B1, O1 and S1; P2 batch A. Integration gates: build, CTest with no new failures, the exhaustive matrix, reference sets serial and at 2 and 4 ranks, S0 manifests 16/16 with 0 JIT misses, and the pytest statuses (11 reviewed changes). That move was also checked MUMPS-on (gtests at 1, 2 and 4 ranks; `mumps_serial` outputs and per-rank logs identical).
   - **Progress 2026-10-23, train 2 (`1cbd8a2d`):** 28 files and 14,261 lines on main. Integrated: S8's G1 (accepted-stage and functional records in FE), R1's T1 and G3 (two-fluid formulation folded into the module; its stage records in FE), S9/S10's M5 (contact stages as FE services) and R2's G2 (the FE energy-balance ledger). Same integration gates as the first train; S8's link check now also fails on duplicate strong definitions.
   - **Progress 2026-10-23, train 3 (`9d133dad`):** 26 files and 12,305 lines on main. Integrated: R2's G2d (the energy participant to `FE/LevelSet`), params' P6b phase 2 (the curvature projection and the minimizer's KAG branch retired), outer-pass round 4 (solution quadrature data evaluated when read, the basis-table zero fill skipped where the transpose overwrites it, and a per-thread memo of the resolved vector-entry tables; bitwise, timing run pending) and the D53 form follow-ups. Same integration gates; no pytest status changed.
+  - **Progress 2026-10-24, train 4 (`015480fc`):** 17 files and 7,104 lines on main. Integrated: R1's G4(a), G4(a2), G4(b) and L1 (`NavierStokesPostProcessing.h` created; `FreeSurfaceDiagnostics` and the observer deleted), R2's E1 and M2 (the minimizer in `FE/LevelSet`), and params' P2 batches B and C (the Navier–Stokes keys on the option schema). Same integration gates; no pytest status changed. Two verify gates failed on tooling and were accepted on offline re-runs: M2's application-log gate (a stdout split inside a log prefix in the base run; identical once rejoined) and one P2 deck-matrix gate (duplicate-key decks whose error now comes from the schema; declared).
 - **D51, 2026-10-22 (user): the WP-4 closure decisions held since 2026-10-22 00:00 (c4, c5, c6, c7, Q2).**
   1. **c4: the bound-preserving limiter is retired** (D47 item 5 kept it until the SPHERIC re-run).
      - The rule declared before C2 (job 139, `plan_wp4c2.txt`) retires it unless the limiter-on run completes. Both limiter-on runs failed closed at step 1 (extension-map revision chain), while the limiter-off and patch-bound runs reached step 193 with no spurious liquid and a volume drift of 1.05e-5.
@@ -1625,7 +1626,7 @@ Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch t
 - [x] P6a and P6b phase 1 (params): retire the legacy, CurvatureTraction, Penalty/Nitsche and KAG routes of the Navier–Stokes module (D47, D48). Deletes `FreeSurfaceLegacyTerms.{h,cpp}` (84 → 82 on its own). *(On main with the train, `07b67ee4`, 2026-10-23.)*
 - [x] M1 (R2): mesh-normal stage measurements and snapshot field evaluators to FE. M1a `cf6f971f` and M1b `657b6ca4` are on `dev/refactor-d49-m1` (82 files / 39,703 lines). *(On main with the train, `07b67ee4`, 2026-10-23.)*
 - [x] M1-r (R2): remove the four forwards (`FittedALEStageRecords.h`, `FreeSurfaceFieldEvaluators.h`, `FittedALEOperatorStage.{h,cpp}`) after P6 phase 1 and S9 are on main. 80 → 76 files. *(On main with the train, `07b67ee4`, 2026-10-23.)*
-- [ ] M2 (R2): `LevelSetVolumeConstrainedMinimizer` in FE/LevelSet, with its certificates as data. Its energy evaluator is unchanged.
+- [x] M2 (R2): `LevelSetVolumeConstrainedMinimizer` in FE/LevelSet, with its certificates as data. Its energy evaluator is unchanged. *(On main with train 4, `015480fc`, 2026-10-24.)*
 - [x] X1 (R1): manifest type labels. The pressure-anchor subclass goes; the manifests stay identical. Comes before B1. *(On main with the train, `07b67ee4`, 2026-10-23.)*
 - [x] B1 (R1): the free-surface statement moves into `NavierStokesBCFactories.h`, header-only with no `.cpp`; the observer does logging only. *(On main with the train, `07b67ee4`, 2026-10-23.)*
   - Contact laws, the pressure anchor, the semi-implicit integrand, the tangential mesh rows and the contact pin move into the header.
@@ -1647,17 +1648,17 @@ Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch t
 - [x] M4 (S9/S10 with R2): the level-set maintenance work ledger in FE/LevelSet/Maintenance. *(On main with the train, `07b67ee4`, 2026-10-23.)*
 - [x] M5 (R2, S9/S10): operator-stage capture, contact-line observables, wall constraints. *(Done by S9/S10; on main with train 2, `1cbd8a2d`, 2026-10-23.)*
 - [x] P6b phase 2 (params): the projection and the minimizer's KAG branch. *(On main with train 3, `9d133dad`, 2026-10-23; the source contracts it left stale are updated in `e0d82ad0`.)*
-- [ ] G4(a) (R1): `FormulationBuilder` functional, work-channel and diagnostic declarations.
+- [x] G4(a) (R1): `FormulationBuilder` functional, work-channel and diagnostic declarations. *(On main with train 4, `015480fc`, 2026-10-24, with G4(a2): the generated-boundary Nitsche route takes its bilinear form as a parameter, and no FE service names the viscosity.)*
 
 **Phase 3**
 
 - [x] G1 (R2): generic accepted-stage and functional records. *(Done by S8; on main with train 2, `1cbd8a2d`, 2026-10-23.)*
 - [x] G2 (R2): the energy-balance ledger with named channels and declared identities. *(On main with train 2, `1cbd8a2d`, 2026-10-23. G2d, the energy participant to `FE/LevelSet`, followed with train 3, `9d133dad`.)*
 - [x] G3 (R2): two-fluid stage records, with the measures as data. *(Done by R1 with T1; on main with train 2, `1cbd8a2d`, 2026-10-23.)*
-- [ ] G4(b) (R1): create `NavierStokesPostProcessing.h`. Residual work, diagnostic operators and energy declarations are stated there.
+- [x] G4(b) (R1): create `NavierStokesPostProcessing.h`. Residual work, diagnostic operators and energy declarations are stated there. *(On main with train 4, `015480fc`, 2026-10-24.)*
 - [ ] G5 (S8 leads since 2026-10-23; R1 keeps G4(a), G4(b) and L1): `ALEBinding` declarations, `LevelSetGeometry` markers and the contact-certificate hook, field binding, vertex-field initialization.
-- [ ] L1 (R1): log formats as FE data. The observer is removed.
-- [ ] E1 (R2, R1): the snapshot functional evaluator for forms (interpreted, exact reduction).
+- [x] L1 (R1): log formats as FE data. The observer is removed. *(On main with train 4, `015480fc`, 2026-10-24: `FE/Core/LogRecord.h`; the Navier–Stokes term logs are declared records, byte-identical. The other services' log lines follow after milestone MR.)*
+- [x] E1 (R2, R1): the snapshot functional evaluator for forms (interpreted, exact reduction). *(On main with train 4, `015480fc`, 2026-10-24: `FE/Systems/FunctionalFormEvaluator`, identical at 1, 2 and 4 ranks; interior-facet functionals are rejected at declaration.)*
 - [ ] E2 (R2): calibration run at 1, 2 and 4 ranks. The final tolerance limits go to the user before E3.
 - [ ] E3 (R2, R1): energies, powers, works and the logged measures as forms in `NavierStokesPostProcessing.h`; the D49 tolerance gate. Two audits:
   - **energy-consumer audit:** no energy value feeds a solver decision except the minimizer, which stays on its evaluator;
@@ -1668,7 +1669,7 @@ Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch t
 
 **Phases 4–5**
 
-- [ ] P2 (params): the parser on `OptionSchema`, and the register thinned to peer size (≤ ~650 lines). Moved to `Physics/Core`: *(Batch A, the verbatim moves to `Physics/Options`, is on main with the train, `07b67ee4`; batch B, the parser on `OptionSchema`, is open.)*
+- [x] P2 (params): the parser on `OptionSchema`, and the register thinned to peer size (≤ ~650 lines). Moved to `Physics/Core`: *(Batch A, the verbatim moves to `Physics/Options`, is on main with the train, `07b67ee4`; batch B, the parser on `OptionSchema`, is open.)* *(On main with train 4, `015480fc`, 2026-10-24: batches B and C; the register is 59 lines. The generic module keys and the standard boundary-condition keys follow with the profiles, P4.)*
   - the schema, capability rules and validation;
   - the name tables;
   - the readers;
