@@ -374,6 +374,179 @@ opt::OptionSchema<FreeSurfaceContactLineInputView> makeContactLineInputSchema()
     return schema;
 }
 
+/// The keys the equation and the domain element share: the moving domain,
+/// the momentum source and the rotating frame.  When an element names a key
+/// twice the register kept the later spelling of the moving domain and the
+/// first of the momentum source; the declared spelling order says the same.
+void addSharedNavierStokesKeys(opt::OptionSchema<NavierStokesInputView>& schema)
+{
+    using V = NavierStokesInputView;
+    schema
+        .key("Enable_ALE", &V::enable_ale, relaxedBool())
+        .key("Mesh_velocity_field", &V::mesh_velocity_field, opt::StringCodec{})
+        .key("Mesh_velocity_source", &V::mesh_velocity_source,
+             opt::EnumCodec<ALEMeshVelocitySource>{{
+                 token(ALEMeshVelocitySource::PrescribedData, "prescribed_data",
+                       {"prescribed", "data", "mesh_motion_data"}),
+                 token(ALEMeshVelocitySource::CoupledDisplacement, "coupled_displacement",
+                       {"coupled", "derived", "derived_from_displacement", "monolithic"}),
+             }})
+        .key("Mesh_displacement_field", &V::mesh_displacement_field, opt::StringCodec{},
+             opt::KeySettings{.spellings = {{"MeshDisplacementField", false},
+                                            {"Mesh_displacement_field", false}}})
+        .key("Auto_register_mesh_displacement_field", &V::auto_register_mesh_displacement_field,
+             relaxedBool())
+        .key("Moving_mesh_tangent_path", &V::moving_mesh_tangent_path,
+             opt::EnumCodec<FE::forms::GeometryTangentPath>{{
+                 token(FE::forms::GeometryTangentPath::SymbolicRequired, "SymbolicRequired",
+                       {"symbolic", "required"}),
+                 token(FE::forms::GeometryTangentPath::ADReference, "ADReference",
+                       {"ad", "reference_ad"}),
+                 token(FE::forms::GeometryTangentPath::SymbolicWithADCheck, "SymbolicWithADCheck",
+                       {"symbolic_ad_check", "check", "parity_check"}),
+                 token(FE::forms::GeometryTangentPath::Auto, "Auto"),
+             }},
+             opt::KeySettings{.spellings = {{"Moving_mesh_tangent_path", false},
+                                            {"MovingMeshTangentPath", false}}})
+        .key("Momentum_source_field_name", &V::momentum_source_field_name, opt::StringCodec{},
+             opt::KeySettings{.spellings = {{"Momentum_source_field_name", false},
+                                            {"MomentumSourceFieldName", false},
+                                            {"Body_force_field_name", false},
+                                            {"BodyForceFieldName", false},
+                                            {"Body_force_field", false},
+                                            {"BodyForceField", false}}})
+        .key("Auto_register_momentum_source_field", &V::auto_register_momentum_source_field,
+             relaxedBool(),
+             opt::KeySettings{.spellings = {{"Auto_register_momentum_source_field", false},
+                                            {"AutoRegisterMomentumSourceField", false},
+                                            {"Auto_register_body_force_field", false},
+                                            {"AutoRegisterBodyForceField", false}}})
+        .key("Momentum_source_temporal_and_spatial_values_file_path", &V::momentum_source_file,
+             opt::StringCodec{},
+             opt::KeySettings{.spellings = {{"Momentum_source_temporal_and_spatial_values_file_path", false},
+                                            {"MomentumSourceTemporalAndSpatialValuesFilePath", false},
+                                            {"Body_force_temporal_and_spatial_values_file_path", false},
+                                            {"BodyForceTemporalAndSpatialValuesFilePath", false}}})
+        .key("Rotating_frame_coriolis", &V::rotating_frame_coriolis, relaxedBool(),
+             opt::KeySettings{.spellings = {{"Rotating_frame_coriolis", false},
+                                            {"RotatingFrameCoriolis", false},
+                                            {"Enable_rotating_frame_coriolis", false},
+                                            {"EnableRotatingFrameCoriolis", false}}})
+        .key("Rotating_frame_angular_velocity", &V::rotating_frame_angular_velocity, opt::Vector3Codec{},
+             opt::KeySettings{.spellings = {{"Rotating_frame_angular_velocity", false},
+                                            {"RotatingFrameAngularVelocity", false},
+                                            {"Angular_velocity", false},
+                                            {"AngularVelocity", false}}})
+        .key("Rotating_frame_angular_velocity_temporal_values_file_path",
+             &V::rotating_frame_angular_velocity_file, opt::StringCodec{},
+             opt::KeySettings{
+                 .spellings = {{"Rotating_frame_angular_velocity_temporal_values_file_path", false},
+                               {"RotatingFrameAngularVelocityTemporalValuesFilePath", false},
+                               {"Angular_velocity_temporal_values_file_path", false},
+                               {"AngularVelocityTemporalValuesFilePath", false}}});
+}
+
+void addPhysicalModelKeys(auto& schema, auto physical_model, auto schema_version)
+{
+    schema
+        .key("Free_surface_physical_model", physical_model, opt::StringCodec{},
+             opt::KeySettings{.spellings = {{"Free_surface_physical_model", false},
+                                            {"FreeSurfacePhysicalModel", false}},
+                              .doc = "checked first by the scope check of the register"})
+        .key("Free_surface_configuration_schema_version", schema_version, opt::IntCodec{},
+             opt::KeySettings{.spellings = {{"Free_surface_configuration_schema_version", false},
+                                            {"FreeSurfaceConfigurationSchemaVersion", false},
+                                            {"Free_surface_schema_version", false}},
+                              .doc = "checked first by the configuration contract of the register"});
+}
+
+opt::OptionSchema<NavierStokesInputView> makeNavierStokesEquationSchema()
+{
+    using V = NavierStokesInputView;
+    opt::OptionSchema<V> schema("Navier-Stokes equation");
+    addPhysicalModelKeys(schema, &V::physical_model, &V::configuration_schema_version);
+    schema
+        .key("Operator_tag", &V::operator_tag, opt::StringCodec{},
+             opt::KeySettings{.spellings = {{"Operator_tag", false}, {"OperatorTag", false}}})
+        .key("Use_taylor_hood_type_basis", &V::use_taylor_hood_type_basis, relaxedBool());
+    addSharedNavierStokesKeys(schema);
+    return schema;
+}
+
+opt::OptionSchema<NavierStokesInputView> makeNavierStokesDomainSchema()
+{
+    using V = NavierStokesInputView;
+    opt::OptionSchema<V> schema("Navier-Stokes domain");
+    schema
+        .key("Density", &V::density, anyReal(),
+             opt::KeySettings{.spellings = {{"Density", false}, {"Fluid_density", false}}})
+        .key("Force_x", [](V& v) -> FE::Real& { return v.body_force[0]; }, anyReal())
+        .key("Force_y", [](V& v) -> FE::Real& { return v.body_force[1]; }, anyReal())
+        .key("Force_z", [](V& v) -> FE::Real& { return v.body_force[2]; }, anyReal())
+        .key("Hydrostatic_pressure_initialization", &V::hydrostatic_pressure_initialization,
+             relaxedBool())
+        .key("Hydrostatic_pressure_reference", &V::hydrostatic_pressure_reference, anyReal())
+        .key("Hydrostatic_pressure_reference_point", &V::hydrostatic_pressure_reference_point,
+             opt::Vector3Codec{})
+        .key("Hydrostatic_pressure_field_name", &V::hydrostatic_pressure_field_name, opt::StringCodec{})
+        // The register reads the parameters of the stated viscosity model
+        // only, and reads them with their Parameters defaults when the deck
+        // leaves them out.
+        .key("Viscosity.model", &V::viscosity_model, opt::StringCodec{})
+        .key("Viscosity.Value", &V::viscosity_value, anyReal())
+        .key("Viscosity.Limiting_high_shear_rate_viscosity",
+             &V::limiting_high_shear_rate_viscosity, anyReal())
+        .key("Viscosity.Limiting_low_shear_rate_viscosity",
+             &V::limiting_low_shear_rate_viscosity, anyReal())
+        .key("Viscosity.Shear_rate_tensor_multiplier", &V::shear_rate_tensor_multiplier, anyReal())
+        .key("Viscosity.Power_law_index", &V::power_law_index, anyReal())
+        .key("Viscosity.Shear_rate_tensor_exponent", &V::shear_rate_tensor_exponent, anyReal())
+        .key("Backflow_stabilization_coefficient", &V::backflow_stabilization_coefficient, anyReal(),
+             opt::KeySettings{.empty = opt::EmptyPolicy::Absent});
+    addSharedNavierStokesKeys(schema);
+    return schema;
+}
+
+opt::OptionSchema<IncompressibleTwoFluidInputView> makeIncompressibleTwoFluidSchema()
+{
+    using V = IncompressibleTwoFluidInputView;
+    opt::OptionSchema<V> schema("Incompressible two-fluid");
+    addPhysicalModelKeys(schema, &V::physical_model, &V::configuration_schema_version);
+    const auto optional_real = SetOptionalRealCodec{anyReal()};
+    schema
+        .key("Level_set_field_name", &V::level_set_field_name, opt::StringCodec{})
+        .key("Generated_interface_domain_id", &V::generated_interface_domain_id, opt::StringCodec{})
+        .key("Material_interface_marker", &V::material_interface_marker, opt::IntCodec{})
+        .key("Negative_phase_density", &V::negative_phase_density, anyReal())
+        .key("Negative_phase_dynamic_viscosity", &V::negative_phase_dynamic_viscosity, anyReal())
+        .key("Positive_phase_density", &V::positive_phase_density, anyReal())
+        .key("Positive_phase_dynamic_viscosity", &V::positive_phase_dynamic_viscosity, anyReal())
+        .key("Two_fluid_surface_tension", &V::two_fluid_surface_tension, anyReal())
+        .key("Two_fluid_interface_nitsche_gamma", &V::two_fluid_interface_nitsche_gamma, anyReal())
+        .key("Prescribed_pressure_jump", &V::prescribed_pressure_jump, optional_real)
+        .key("Prescribed_viscous_traction_jump_x", &V::prescribed_viscous_traction_jump_x,
+             optional_real)
+        .key("Prescribed_viscous_traction_jump_y", &V::prescribed_viscous_traction_jump_y,
+             optional_real)
+        .key("Prescribed_viscous_traction_jump_z", &V::prescribed_viscous_traction_jump_z,
+             optional_real)
+        .key("Operator_tag", &V::operator_tag, opt::StringCodec{},
+             opt::KeySettings{.spellings = {{"Operator_tag", false}, {"OperatorTag", false}}})
+        .key("Use_taylor_hood_type_basis", &V::use_taylor_hood_type_basis, relaxedBool());
+    return schema;
+}
+
+opt::OptionSchema<NavierStokesInputView> makeIncompressibleTwoFluidDomainSchema()
+{
+    using V = NavierStokesInputView;
+    opt::OptionSchema<V> schema("Incompressible two-fluid domain");
+    schema
+        .key("Force_x", [](V& v) -> FE::Real& { return v.body_force[0]; }, anyReal())
+        .key("Force_y", [](V& v) -> FE::Real& { return v.body_force[1]; }, anyReal())
+        .key("Force_z", [](V& v) -> FE::Real& { return v.body_force[2]; }, anyReal());
+    return schema;
+}
+
 [[nodiscard]] FE::Real constantOr(const ScalarValue& value, FE::Real fallback)
 {
     const auto* literal = std::get_if<FE::Real>(&value);
@@ -429,6 +602,30 @@ const opt::OptionSchema<FreeSurfaceBoundary>& freeSurfaceBoundarySchema()
 const opt::OptionSchema<FreeSurfaceContactLineInputView>& freeSurfaceContactLineInputSchema()
 {
     static const auto schema = makeContactLineInputSchema();
+    return schema;
+}
+
+const opt::OptionSchema<NavierStokesInputView>& navierStokesEquationSchema()
+{
+    static const auto schema = makeNavierStokesEquationSchema();
+    return schema;
+}
+
+const opt::OptionSchema<NavierStokesInputView>& navierStokesDomainSchema()
+{
+    static const auto schema = makeNavierStokesDomainSchema();
+    return schema;
+}
+
+const opt::OptionSchema<IncompressibleTwoFluidInputView>& incompressibleTwoFluidSchema()
+{
+    static const auto schema = makeIncompressibleTwoFluidSchema();
+    return schema;
+}
+
+const opt::OptionSchema<NavierStokesInputView>& incompressibleTwoFluidDomainSchema()
+{
+    static const auto schema = makeIncompressibleTwoFluidDomainSchema();
     return schema;
 }
 
@@ -503,7 +700,8 @@ opt::OptionInput optionInputFromParameters(const ParameterMap& params)
     return input;
 }
 
-std::string resolvedFreeSurfacesJson(const std::vector<FreeSurfaceBoundary>& free_surfaces)
+std::string resolvedFreeSurfacesJson(const std::vector<FreeSurfaceBoundary>& free_surfaces,
+                                     const std::string& resolved_input_json)
 {
     const auto& boundary_schema = freeSurfaceBoundarySchema();
     const auto& contact_schema = freeSurfaceContactLineInputSchema();
@@ -520,7 +718,12 @@ std::string resolvedFreeSurfacesJson(const std::vector<FreeSurfaceBoundary>& fre
             boundary.input, contactLineInputView(boundary), FreeSurfaceContactLineInputView{}));
         out += '}';
     }
-    out += "]}";
+    out += ']';
+    if (!resolved_input_json.empty()) {
+        out += ',';
+        out += resolved_input_json;
+    }
+    out += '}';
     return out;
 }
 
@@ -1347,7 +1550,8 @@ tangentialPolicyProvenance(
     out << "]";
     // Every input key of each boundary with its resolved value and source
     // (decision D47); the keys above are unchanged.
-    out << ",\"resolved\":" << resolvedFreeSurfacesJson(free_surfaces);
+    out << ",\"resolved\":"
+        << resolvedFreeSurfacesJson(free_surfaces, options.resolved_input_json);
     out << "}";
 
     return EffectiveConfigurationArtifact{
@@ -1615,7 +1819,13 @@ void appendVelocityBoundaryArtifact(
                options.require_conservative_phase_momentum_reconciliation)
         << ",\"momentum_reconciliation_policy\":\"phasewise_fail_closed_no_hidden_velocity_update\"}"
         << ",\"accepted_stage_evidence\":{\"required\":true,\"operator_stage_interface_mass_momentum_flux\":true,\"canonical_phase_aggregation\":true,\"pressure_stabilization_configuration\":true,\"shared_coupled_nonlinear_linear_report\":true,\"timing_values_retained\":false,\"rank_local_aggregation_lineage_retained\":false,\"phase_resolved_iterations\":\"unavailable_from_shared_backend\",\"pressure_stabilization_work\":\"not_separately_resolved_by_coupled_operator\"}"
-        << ",\"exclusions\":[\"compressible_gas\",\"trapped_gas_pressure\",\"air_cushioning\",\"phase_change\",\"contact\",\"moving_mesh\",\"variable_material_laws\",\"turbulence\"]}";
+        << ",\"exclusions\":[\"compressible_gas\",\"trapped_gas_pressure\",\"air_cushioning\",\"phase_change\",\"contact\",\"moving_mesh\",\"variable_material_laws\",\"turbulence\"]";
+    // The two-fluid keys of the input with their resolved values and sources
+    // (decision D47); the keys above are unchanged.
+    if (!options.resolved_input_json.empty()) {
+        out << ",\"resolved\":{\"version\":1," << options.resolved_input_json << '}';
+    }
+    out << '}';
     return EffectiveConfigurationArtifact{
         .component = "incompressible_two_fluid",
         .json = out.str(),

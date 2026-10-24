@@ -661,6 +661,12 @@ struct IncompressibleNavierStokesVMSOptions {
     bool enable_vms{true};
     core::PhysicsJITPolicy jit_policy{};
 
+    // The equation and domain keys of the input this module was translated
+    // from, with their resolved values and sources, as members of the
+    // artifact's "resolved" section (written by the input translation,
+    // decision D47; empty when the options are built in code).
+    std::string resolved_input_json{};
+
     // Legacy-inspired tuning constants used in tau_M (metric-based):
     //   tau_M/rho = 1 / (rho * sqrt( 4*(ct_m/dt)^2 + u^T Kxi u + ct_c * ||Kxi||_F^2 * nu^2 ))
     // with Kxi = J^{-T} J^{-1} and nu = mu/rho.
@@ -1123,6 +1129,12 @@ struct IncompressibleTwoFluidOptions {
     IncompressibleNavierStokesVMSOptions::FreeSurfaceSmallCutAggregationGuards
         small_cut_aggregation_guards{};
     core::PhysicsJITPolicy jit_policy{};
+
+    // The two-fluid equation and domain keys of the input, with their
+    // resolved values and sources, as members of the artifact's "resolved"
+    // section (written by the input translation, decision D47; empty when the
+    // options are built in code).
+    std::string resolved_input_json{};
 };
 
 // ---------------------------------------------------------------------------

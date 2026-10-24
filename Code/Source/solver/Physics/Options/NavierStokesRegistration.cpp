@@ -567,44 +567,12 @@ std::string require_two_fluid_string(
       require_two_fluid_parameter(params, keys, canonical_name).value);
 }
 
-svmp::FE::Real require_two_fluid_real(
-    const svmp::Physics::ParameterMap& params,
-    std::initializer_list<std::string_view> keys,
-    std::string_view canonical_name)
-{
-  const auto& parameter =
-      require_two_fluid_parameter(params, keys, canonical_name);
-  return static_cast<svmp::FE::Real>(
-      parse_double(parameter.value, canonical_name));
-}
-
-int require_two_fluid_int(
-    const svmp::Physics::ParameterMap& params,
-    std::initializer_list<std::string_view> keys,
-    std::string_view canonical_name)
-{
-  const auto& parameter =
-      require_two_fluid_parameter(params, keys, canonical_name);
-  const auto value = trim_copy(parameter.value);
-  try {
-    std::size_t parsed = 0u;
-    const int result = std::stoi(value, &parsed);
-    if (parsed != value.size()) {
-      throw std::runtime_error("");
-    }
-    return result;
-  } catch (...) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Physics] Failed to parse integer value '" +
-        parameter.value + "' for " + std::string(canonical_name) + ".");
-  }
-}
-
 void reject_unsupported_two_fluid_default_domain_parameters(
     const svmp::Physics::ParameterMap& params)
 {
-  static constexpr std::array<std::string_view, 3> supported{
-      "Force_x", "Force_y", "Force_z"};
+  // The keys of incompressibleTwoFluidDomainSchema() (the body force).
+  static const auto supported = svmp::Physics::formulations::navier_stokes::
+      incompressibleTwoFluidDomainSchema().spellings();
   for (const auto& [key, parameter] : params) {
     if (!parameter.defined ||
         std::find(supported.begin(), supported.end(), key) !=
@@ -621,34 +589,34 @@ void reject_unsupported_two_fluid_default_domain_parameters(
 void reject_unsupported_two_fluid_equation_parameters(
     const svmp::Physics::ParameterMap& params)
 {
-  static constexpr std::array<std::string_view, 24> supported{
-      "Coupled",
-      "Max_iterations",
-      "Min_iterations",
-      "Tolerance",
-      "Use_taylor_hood_type_basis",
-      "Free_surface_physical_model",
-      "FreeSurfacePhysicalModel",
-      "Free_surface_configuration_schema_version",
-      "FreeSurfaceConfigurationSchemaVersion",
-      "Free_surface_schema_version",
-      "Enable_explicit_legacy_free_surface_configuration",
-      "EnableExplicitLegacyFreeSurfaceConfiguration",
-      "Free_surface_legacy_behavior",
-      "Level_set_field_name",
-      "Generated_interface_domain_id",
-      "Operator_tag",
-      "OperatorTag",
-      "Element_order",
-      "Jit_enable",
-      "Enable_jit",
-      "Use_jit",
-      "Jit_specialization_enable",
-      "Enable_jit_specialization",
-      "Use_jit_specialization",
-  };
+  // The keys of incompressibleTwoFluidSchema(), the generic keys of every
+  // module (nonlinear solver, element order, JIT) and the retired legacy
+  // switches, which the configuration contract reports.
+  static const auto supported = [] {
+    auto keys = svmp::Physics::formulations::navier_stokes::
+        incompressibleTwoFluidSchema().spellings();
+    for (const char* key : {
+             "Coupled",
+             "Max_iterations",
+             "Min_iterations",
+             "Tolerance",
+             "Element_order",
+             "Jit_enable",
+             "Enable_jit",
+             "Use_jit",
+             "Jit_specialization_enable",
+             "Enable_jit_specialization",
+             "Use_jit_specialization",
+             "Enable_explicit_legacy_free_surface_configuration",
+             "EnableExplicitLegacyFreeSurfaceConfiguration",
+             "Free_surface_legacy_behavior",
+         }) {
+      keys.emplace_back(key);
+    }
+    return keys;
+  }();
   for (const auto& [key, parameter] : params) {
-    if (!parameter.defined || is_two_fluid_configuration_key(key) ||
+    if (!parameter.defined ||
         std::find(supported.begin(), supported.end(), key) !=
             supported.end()) {
       continue;
@@ -842,34 +810,153 @@ void preflightTwoFluidTranslationBeforeMutation(
 
 // The Navier-Stokes input translation: the equation, domain and boundary
 // keys, the boundary data files and the two-fluid translation (moved from
-// NavierStokesRegister.cpp, decision D50; the option schema of D47 P2
-// replaces the hand-written readers step by step).
+// NavierStokesRegister.cpp, decision D50).  The equation, domain and
+// two-fluid keys resolve through the option schemas (D47 P2); the standard
+// boundary conditions keep their readers.
 
 namespace {
 
-svmp::FE::forms::GeometryTangentPath parse_geometry_tangent_path(std::string_view raw,
-                                                                 std::string_view context)
+namespace ns = svmp::Physics::formulations::navier_stokes;
+namespace opt = svmp::FE::options;
+
+/// The input restricted to the given spellings.
+opt::OptionInput select_spellings(const opt::OptionInput& input,
+                                  const std::vector<std::string>& spellings)
 {
-  const auto path = lower_copy(trim_copy(std::string(raw)));
-  if (path == "symbolic" || path == "symbolic_required" ||
-      path == "symbolicrequired" || path == "required") {
-    return svmp::FE::forms::GeometryTangentPath::SymbolicRequired;
+  opt::OptionInput out;
+  for (const auto& entry : input.entries()) {
+    if (std::find(spellings.begin(), spellings.end(), entry.spelling) !=
+        spellings.end()) {
+      out.add(entry.spelling, entry.text);
+    }
   }
-  if (path == "ad" || path == "ad_reference" || path == "adreference" ||
-      path == "reference_ad" || path == "referencead") {
-    return svmp::FE::forms::GeometryTangentPath::ADReference;
+  return out;
+}
+
+/// Every spelling of the given keys of a schema.
+template <class T>
+std::vector<std::string> spellings_of(const opt::OptionSchema<T>& schema,
+                                      std::initializer_list<std::string_view> keys)
+{
+  std::vector<std::string> out;
+  for (const auto& documentation : schema.documentation()) {
+    if (std::find(keys.begin(), keys.end(), documentation.key) != keys.end()) {
+      out.insert(out.end(), documentation.spellings.begin(), documentation.spellings.end());
+      out.insert(out.end(), documentation.deprecated_spellings.begin(),
+                 documentation.deprecated_spellings.end());
+    }
   }
-  if (path == "symbolic_ad_check" || path == "symbolic_with_ad_check" ||
-      path == "symbolicadcheck" || path == "symbolicwithadcheck" ||
-      path == "check" || path == "parity_check" || path == "paritycheck") {
-    return svmp::FE::forms::GeometryTangentPath::SymbolicWithADCheck;
+  return out;
+}
+
+/// The keys of the moving domain and the momentum source (the keys the
+/// two-fluid mode reads from both elements, to reject them).
+const std::vector<std::string>& moving_domain_and_momentum_source_spellings()
+{
+  static const auto spellings = spellings_of(
+      ns::navierStokesDomainSchema(),
+      {"Enable_ALE", "Mesh_velocity_field", "Mesh_velocity_source",
+       "Mesh_displacement_field", "Auto_register_mesh_displacement_field",
+       "Moving_mesh_tangent_path", "Momentum_source_field_name",
+       "Auto_register_momentum_source_field"});
+  return spellings;
+}
+
+/// The domain keys as the register reads them: the defined entries, and the
+/// parameters of the stated viscosity model and the backflow coefficient
+/// whether the deck defines them or not (the domain snapshot holds their
+/// Parameters defaults, which the register uses).
+opt::OptionInput domain_keys_as_read(const svmp::Physics::ParameterMap& params)
+{
+  const auto* model = find_param(params, "Viscosity.model");
+  const auto model_token = model != nullptr && model->defined
+                               ? lower_copy(trim_copy(model->value))
+                               : std::string{};
+  std::vector<std::string_view> model_keys;
+  if (model_token == "constant") {
+    model_keys = {"Viscosity.Value"};
+  } else if (model_token == "carreau-yasuda" || model_token == "carreau_yasuda") {
+    model_keys = {"Viscosity.Limiting_high_shear_rate_viscosity",
+                  "Viscosity.Limiting_low_shear_rate_viscosity",
+                  "Viscosity.Shear_rate_tensor_multiplier",
+                  "Viscosity.Power_law_index",
+                  "Viscosity.Shear_rate_tensor_exponent"};
   }
-  if (path == "auto") {
-    return svmp::FE::forms::GeometryTangentPath::Auto;
+  opt::OptionInput input;
+  for (const auto& [name, parameter] : params) {
+    if (name == "Backflow_stabilization_coefficient") {
+      if (!trim_copy(parameter.value).empty()) {
+        input.add(name, parameter.value);
+      }
+    } else if (name.rfind("Viscosity.", 0) == 0 && name != "Viscosity.model") {
+      if (std::find(model_keys.begin(), model_keys.end(), name) != model_keys.end()) {
+        input.add(name, parameter.value);
+      }
+    } else if (parameter.defined) {
+      input.add(name, parameter.value);
+    }
   }
-  throw std::runtime_error(
-      "[svMultiPhysics::Physics] " + std::string(context) +
-      " must be one of 'symbolic', 'ad', 'symbolic_ad_check', or 'auto'.");
+  return input;
+}
+
+/// The equation and domain keys of an input, resolved through
+/// navierStokesEquationSchema() and navierStokesDomainSchema().
+struct NavierStokesKeys {
+  opt::OptionInput equation_input{};
+  opt::OptionInput domain_input{};
+  opt::ResolvedOptions<ns::NavierStokesInputView> equation{};
+  opt::ResolvedOptions<ns::NavierStokesInputView> domain{};
+
+  /// The element that sets a key both elements read: the domain when it
+  /// gives the key, else the equation when it does, else none.
+  [[nodiscard]] const ns::NavierStokesInputView* domainFirst(std::string_view key) const
+  {
+    if (domain.isExplicit(key)) {
+      return &domain.value;
+    }
+    return equation.isExplicit(key) ? &equation.value : nullptr;
+  }
+  /// The equation when it gives the key, else the domain when it does.
+  [[nodiscard]] const ns::NavierStokesInputView* equationFirst(std::string_view key) const
+  {
+    if (equation.isExplicit(key)) {
+      return &equation.value;
+    }
+    return domain.isExplicit(key) ? &domain.value : nullptr;
+  }
+};
+
+NavierStokesKeys resolve_navier_stokes_keys(const svmp::Physics::ParameterMap& equation_params,
+                                            const svmp::Physics::ParameterMap& domain_params)
+{
+  NavierStokesKeys keys;
+  keys.equation_input = ns::optionInputFromParameters(equation_params);
+  keys.domain_input = ns::optionInputFromParameters(domain_params);
+  keys.equation = ns::navierStokesEquationSchema().resolve(keys.equation_input);
+  keys.domain = ns::navierStokesDomainSchema().resolve(domain_keys_as_read(domain_params));
+  return keys;
+}
+
+/// The moving domain and momentum source keys only (the two-fluid mode).
+NavierStokesKeys resolve_moving_domain_and_momentum_source_keys(
+    const svmp::Physics::ParameterMap& equation_params,
+    const svmp::Physics::ParameterMap& domain_params)
+{
+  const auto& spellings = moving_domain_and_momentum_source_spellings();
+  NavierStokesKeys keys;
+  keys.equation_input = select_spellings(ns::optionInputFromParameters(equation_params), spellings);
+  keys.domain_input = select_spellings(ns::optionInputFromParameters(domain_params), spellings);
+  keys.equation = ns::navierStokesEquationSchema().resolve(keys.equation_input);
+  keys.domain = ns::navierStokesDomainSchema().resolve(keys.domain_input);
+  return keys;
+}
+
+svmp::FE::Real backflow_coefficient(const svmp::Physics::ParameterMap& domain_params)
+{
+  return ns::navierStokesDomainSchema()
+      .resolve(select_spellings(domain_keys_as_read(domain_params),
+                                {"Backflow_stabilization_coefficient"}))
+      .value.backflow_stabilization_coefficient;
 }
 
 void apply_node_pressure_constraints(
@@ -887,78 +974,95 @@ void apply_node_pressure_constraints(
       read_node_pressure_constraints_csv(node_constraints.values_file_path);
 }
 
-void apply_fluid_momentum_source_params(
-    const svmp::Physics::ParameterMap& params,
+/// The moving-domain keys: a domain value replaces an equation value.
+void apply_fluid_moving_domain_options(
+    const NavierStokesKeys& keys,
     svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
 {
-  for (const auto key : {"Momentum_source_field_name", "MomentumSourceFieldName",
-                         "Body_force_field_name", "BodyForceFieldName",
-                         "Body_force_field", "BodyForceField"}) {
-    if (const auto field_name = get_defined_string(params, key)) {
-      options.body_force_field_name = *field_name;
-      break;
-    }
+  if (const auto* view = keys.domainFirst("Enable_ALE")) {
+    options.enable_ale = view->enable_ale;
   }
-  for (const auto key : {"Auto_register_momentum_source_field", "AutoRegisterMomentumSourceField",
-                         "Auto_register_body_force_field", "AutoRegisterBodyForceField"}) {
-    if (const auto auto_register = get_defined_bool(params, key)) {
-      options.auto_register_body_force_field = *auto_register;
-      break;
-    }
+  if (const auto* view = keys.domainFirst("Mesh_velocity_field")) {
+    options.mesh_velocity_field_name = view->mesh_velocity_field;
+  }
+  if (const auto* view = keys.domainFirst("Mesh_velocity_source")) {
+    options.mesh_velocity_source = view->mesh_velocity_source;
+  }
+  if (const auto* view = keys.domainFirst("Mesh_displacement_field")) {
+    options.mesh_displacement_field_name = view->mesh_displacement_field;
+  }
+  if (const auto* view = keys.domainFirst("Auto_register_mesh_displacement_field")) {
+    options.auto_register_mesh_displacement_field =
+        view->auto_register_mesh_displacement_field;
+  }
+  if (const auto* view = keys.domainFirst("Moving_mesh_tangent_path")) {
+    options.moving_mesh_tangent_path = view->moving_mesh_tangent_path;
+  }
+  if (trim_copy(options.mesh_velocity_field_name).empty()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Mesh_velocity_field must be non-empty when configuring Navier-Stokes ALE.");
+  }
+  if (options.mesh_velocity_source ==
+          svmp::Physics::formulations::navier_stokes::ALEMeshVelocitySource::CoupledDisplacement &&
+      trim_copy(options.mesh_displacement_field_name).empty()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Mesh_displacement_field must be non-empty when configuring coupled ALE.");
+  }
+}
+
+/// The momentum-source field keys: a domain value replaces an equation value.
+void apply_fluid_momentum_source_params(
+    const NavierStokesKeys& keys,
+    svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
+{
+  if (const auto* view = keys.domainFirst("Momentum_source_field_name")) {
+    options.body_force_field_name = view->momentum_source_field_name;
+  }
+  if (const auto* view = keys.domainFirst("Auto_register_momentum_source_field")) {
+    options.auto_register_body_force_field = view->auto_register_momentum_source_field;
   }
 }
 
 void apply_fluid_properties(const svmp::Physics::DomainInput& domain,
+                            const NavierStokesKeys& keys,
                             svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
 {
-  using svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions;
-
-  if (const auto rho = get_defined_double(domain.params, "Density")) {
-    options.density = static_cast<svmp::FE::Real>(*rho);
-  } else if (const auto rho2 = get_defined_double(domain.params, "Fluid_density")) {
-    options.density = static_cast<svmp::FE::Real>(*rho2);
+  const auto& view = keys.domain.value;
+  if (keys.domain.isExplicit("Density")) {
+    options.density = view.density;
   }
-
-  if (const auto fx = get_defined_double(domain.params, "Force_x")) {
-    options.body_force[0] = static_cast<svmp::FE::Real>(*fx);
+  for (std::size_t d = 0; d < 3u; ++d) {
+    static constexpr std::array<std::string_view, 3> force_keys{"Force_x", "Force_y", "Force_z"};
+    if (keys.domain.isExplicit(force_keys[d])) {
+      options.body_force[d] = view.body_force[d];
+    }
   }
-  if (const auto fy = get_defined_double(domain.params, "Force_y")) {
-    options.body_force[1] = static_cast<svmp::FE::Real>(*fy);
+  if (keys.domain.isExplicit("Hydrostatic_pressure_initialization")) {
+    options.hydrostatic_pressure_initialization.enabled = view.hydrostatic_pressure_initialization;
   }
-  if (const auto fz = get_defined_double(domain.params, "Force_z")) {
-    options.body_force[2] = static_cast<svmp::FE::Real>(*fz);
-  }
-  apply_fluid_momentum_source_params(domain.params, options);
-
-  if (const auto enabled = get_defined_bool(domain.params, "Hydrostatic_pressure_initialization")) {
-    options.hydrostatic_pressure_initialization.enabled = *enabled;
-  }
-  if (const auto reference = get_defined_double(domain.params, "Hydrostatic_pressure_reference")) {
+  if (keys.domain.isExplicit("Hydrostatic_pressure_reference")) {
     options.hydrostatic_pressure_initialization.reference_pressure =
-        static_cast<svmp::FE::Real>(*reference);
+        view.hydrostatic_pressure_reference;
   }
-  if (const auto reference_point =
-          get_defined_string(domain.params, "Hydrostatic_pressure_reference_point")) {
+  if (keys.domain.isExplicit("Hydrostatic_pressure_reference_point")) {
     options.hydrostatic_pressure_initialization.reference_point =
-        parse_real_vector3(*reference_point, "Hydrostatic_pressure_reference_point");
+        view.hydrostatic_pressure_reference_point;
   }
-  if (const auto field_name = get_defined_string(domain.params, "Hydrostatic_pressure_field_name")) {
-    options.hydrostatic_pressure_initialization.field_name = *field_name;
+  if (keys.domain.isExplicit("Hydrostatic_pressure_field_name")) {
+    options.hydrostatic_pressure_initialization.field_name = view.hydrostatic_pressure_field_name;
   }
 
-  const auto* model_param = find_param(domain.params, "Viscosity.model");
-  if (!model_param || !model_param->defined || trim_copy(model_param->value).empty()) {
+  if (!keys.domain.isExplicit("Viscosity.model")) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] <Viscosity model=\"...\"> is required for the new solver Navier-Stokes module. "
         "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
   }
 
-  const auto model_raw = trim_copy(model_param->value);
+  const auto& model_raw = view.viscosity_model;
   const auto model = lower_copy(model_raw);
 
   if (model == "constant") {
-    const auto* mu_param = find_param(domain.params, "Viscosity.Value");
-    const double mu = mu_param ? parse_double(mu_param->value, "Viscosity/Value") : 0.0;
+    const double mu = static_cast<double>(view.viscosity_value);
     if (!(mu > 0.0)) {
       throw std::runtime_error(
           "[svMultiPhysics::Physics] Constant viscosity must be > 0 for the new solver Navier-Stokes module. "
@@ -970,22 +1074,11 @@ void apply_fluid_properties(const svmp::Physics::DomainInput& domain,
   }
 
   if (model == "carreau-yasuda" || model == "carreau_yasuda") {
-    const auto* p_mu_inf = find_param(domain.params, "Viscosity.Limiting_high_shear_rate_viscosity");
-    const auto* p_mu0 = find_param(domain.params, "Viscosity.Limiting_low_shear_rate_viscosity");
-    const auto* p_lambda = find_param(domain.params, "Viscosity.Shear_rate_tensor_multiplier");
-    const auto* p_n = find_param(domain.params, "Viscosity.Power_law_index");
-    const auto* p_a = find_param(domain.params, "Viscosity.Shear_rate_tensor_exponent");
-
-    const auto mu_inf = static_cast<svmp::FE::Real>(
-        p_mu_inf ? parse_double(p_mu_inf->value, "Viscosity/Limiting_high_shear_rate_viscosity") : 0.0);
-    const auto mu0 = static_cast<svmp::FE::Real>(
-        p_mu0 ? parse_double(p_mu0->value, "Viscosity/Limiting_low_shear_rate_viscosity") : 0.0);
-    const auto lambda = static_cast<svmp::FE::Real>(
-        p_lambda ? parse_double(p_lambda->value, "Viscosity/Shear_rate_tensor_multiplier") : 0.0);
-    const auto n =
-        static_cast<svmp::FE::Real>(p_n ? parse_double(p_n->value, "Viscosity/Power_law_index") : 0.0);
-    const auto a = static_cast<svmp::FE::Real>(
-        p_a ? parse_double(p_a->value, "Viscosity/Shear_rate_tensor_exponent") : 0.0);
+    const auto mu_inf = view.limiting_high_shear_rate_viscosity;
+    const auto mu0 = view.limiting_low_shear_rate_viscosity;
+    const auto lambda = view.shear_rate_tensor_multiplier;
+    const auto n = view.power_law_index;
+    const auto a = view.shear_rate_tensor_exponent;
 
     try {
       options.viscosity_model = std::make_shared<svmp::Physics::materials::fluid::CarreauYasudaViscosity>(
@@ -997,7 +1090,10 @@ void apply_fluid_properties(const svmp::Physics::DomainInput& domain,
           e.what() + ". Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
     }
 
-    if (p_mu0 && p_mu0->defined) {
+    // The deck's own limiting low-shear viscosity (not its Parameters
+    // default) is also the reference viscosity.
+    if (const auto* p_mu0 = find_param(domain.params, "Viscosity.Limiting_low_shear_rate_viscosity");
+        p_mu0 != nullptr && p_mu0->defined) {
       options.viscosity = mu0;
     }
     return;
@@ -1015,157 +1111,40 @@ void apply_fluid_properties(const svmp::Physics::DomainInput& domain,
       "to use the legacy solver.");
 }
 
-void apply_fluid_moving_domain_params(
-    const svmp::Physics::ParameterMap& params,
-    svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
-{
-  namespace ns = svmp::Physics::formulations::navier_stokes;
-
-  constexpr std::array<std::string_view, 1> kAleKeys = {
-      "Enable_ALE",
-  };
-  for (const auto key : kAleKeys) {
-    if (const auto value = get_defined_bool(params, key)) {
-      options.enable_ale = *value;
-    }
-  }
-
-  constexpr std::array<std::string_view, 1> kMeshVelocityFieldKeys = {
-      "Mesh_velocity_field",
-  };
-  for (const auto key : kMeshVelocityFieldKeys) {
-    if (const auto value = get_defined_string(params, key)) {
-      options.mesh_velocity_field_name = *value;
-    }
-  }
-
-  constexpr std::array<std::string_view, 1> kMeshVelocitySourceKeys = {
-      "Mesh_velocity_source",
-  };
-  for (const auto key : kMeshVelocitySourceKeys) {
-    if (const auto value = get_defined_string(params, key)) {
-      const auto source = lower_copy(trim_copy(*value));
-      if (source == "prescribed" || source == "prescribed_data" ||
-          source == "data" || source == "mesh_motion_data") {
-        options.mesh_velocity_source = ns::ALEMeshVelocitySource::PrescribedData;
-      } else if (source == "coupled" || source == "coupled_displacement" ||
-                 source == "derived" || source == "derived_from_displacement" ||
-                 source == "monolithic") {
-        options.mesh_velocity_source = ns::ALEMeshVelocitySource::CoupledDisplacement;
-      } else {
-        throw std::runtime_error(
-            "[svMultiPhysics::Physics] Mesh_velocity_source must be one of "
-            "'prescribed_data' or 'coupled_displacement'.");
-      }
-    }
-  }
-
-  constexpr std::array<std::string_view, 2> kMeshDisplacementFieldKeys = {
-      "Mesh_displacement_field",
-      "MeshDisplacementField",
-  };
-  for (const auto key : kMeshDisplacementFieldKeys) {
-    if (const auto value = get_defined_string(params, key)) {
-      options.mesh_displacement_field_name = *value;
-    }
-  }
-
-  constexpr std::array<std::string_view, 1> kAutoRegisterMeshDisplacementKeys = {
-      "Auto_register_mesh_displacement_field",
-  };
-  for (const auto key : kAutoRegisterMeshDisplacementKeys) {
-    if (const auto value = get_defined_bool(params, key)) {
-      options.auto_register_mesh_displacement_field = *value;
-    }
-  }
-
-  constexpr std::array<std::string_view, 2> kMovingMeshTangentPathKeys = {
-      "MovingMeshTangentPath",
-      "Moving_mesh_tangent_path",
-  };
-  for (const auto key : kMovingMeshTangentPathKeys) {
-    if (const auto value = get_defined_string(params, key)) {
-      options.moving_mesh_tangent_path =
-          parse_geometry_tangent_path(*value, key);
-    }
-  }
-}
-
-void apply_fluid_moving_domain_options(
-    const svmp::Physics::EquationModuleInput& input,
-    const svmp::Physics::DomainInput& domain,
-    svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
-{
-  apply_fluid_moving_domain_params(input.equation_params, options);
-  apply_fluid_moving_domain_params(domain.params, options);
-  if (trim_copy(options.mesh_velocity_field_name).empty()) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Physics] Mesh_velocity_field must be non-empty when configuring Navier-Stokes ALE.");
-  }
-  if (options.mesh_velocity_source ==
-          svmp::Physics::formulations::navier_stokes::ALEMeshVelocitySource::CoupledDisplacement &&
-      trim_copy(options.mesh_displacement_field_name).empty()) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Physics] Mesh_displacement_field must be non-empty when configuring coupled ALE.");
-  }
-}
-
+/// The rotating frame: an equation value replaces a domain value.
 void apply_fluid_rotating_frame_coriolis(
-    const svmp::Physics::EquationModuleInput& input,
-    const svmp::Physics::DomainInput& domain,
+    const NavierStokesKeys& keys,
     int dim,
     svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
 {
   using Options = svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions;
 
-  const auto enabled = first_defined_bool(
-      input.equation_params,
-      {"Rotating_frame_coriolis", "RotatingFrameCoriolis",
-       "Enable_rotating_frame_coriolis", "EnableRotatingFrameCoriolis"})
-      .value_or(first_defined_bool(
-          domain.params,
-          {"Rotating_frame_coriolis", "RotatingFrameCoriolis",
-           "Enable_rotating_frame_coriolis", "EnableRotatingFrameCoriolis"})
-          .value_or(false));
+  const auto* switch_view = keys.equationFirst("Rotating_frame_coriolis");
+  const bool enabled = switch_view != nullptr && switch_view->rotating_frame_coriolis;
 
-  const auto equation_omega = first_defined_string(
-      input.equation_params,
-      {"Rotating_frame_angular_velocity", "RotatingFrameAngularVelocity",
-       "Angular_velocity", "AngularVelocity"});
-  const auto domain_omega = first_defined_string(
-      domain.params,
-      {"Rotating_frame_angular_velocity", "RotatingFrameAngularVelocity",
-       "Angular_velocity", "AngularVelocity"});
-  const auto equation_omega_file = first_defined_string(
-      input.equation_params,
-      {"Rotating_frame_angular_velocity_temporal_values_file_path",
-       "RotatingFrameAngularVelocityTemporalValuesFilePath",
-       "Angular_velocity_temporal_values_file_path",
-       "AngularVelocityTemporalValuesFilePath"});
-  const auto domain_omega_file = first_defined_string(
-      domain.params,
-      {"Rotating_frame_angular_velocity_temporal_values_file_path",
-       "RotatingFrameAngularVelocityTemporalValuesFilePath",
-       "Angular_velocity_temporal_values_file_path",
-       "AngularVelocityTemporalValuesFilePath"});
-
-  if (equation_omega && equation_omega_file) {
+  constexpr std::string_view omega_key = "Rotating_frame_angular_velocity";
+  constexpr std::string_view file_key = "Rotating_frame_angular_velocity_temporal_values_file_path";
+  if (keys.equation.isExplicit(omega_key) && keys.equation.isExplicit(file_key)) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] Specify either Rotating_frame_angular_velocity or "
         "Rotating_frame_angular_velocity_temporal_values_file_path, not both.");
   }
-  if (domain_omega && domain_omega_file) {
+  if (keys.domain.isExplicit(omega_key) && keys.domain.isExplicit(file_key)) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] Specify either Rotating_frame_angular_velocity or "
         "Rotating_frame_angular_velocity_temporal_values_file_path in a domain, not both.");
   }
 
-  const bool equation_has_omega = equation_omega || equation_omega_file;
-  const auto omega = equation_omega ? equation_omega : (!equation_has_omega ? domain_omega : std::nullopt);
-  const auto omega_file =
-      equation_omega_file ? equation_omega_file : (!equation_has_omega ? domain_omega_file : std::nullopt);
+  // The equation's angular velocity (value or file) replaces the domain's.
+  const bool equation_has_omega =
+      keys.equation.isExplicit(omega_key) || keys.equation.isExplicit(file_key);
+  const auto& omega_keys = equation_has_omega ? keys.equation : keys.domain;
+  const ns::NavierStokesInputView* omega =
+      omega_keys.isExplicit(omega_key) ? &omega_keys.value : nullptr;
+  const ns::NavierStokesInputView* omega_file =
+      omega_keys.isExplicit(file_key) ? &omega_keys.value : nullptr;
 
-  if (!enabled && !omega && !omega_file) {
+  if (!enabled && omega == nullptr && omega_file == nullptr) {
     return;
   }
   if (dim != 3) {
@@ -1174,15 +1153,16 @@ void apply_fluid_rotating_frame_coriolis(
   }
 
   options.rotating_frame_coriolis_enabled = true;
-  if (omega) {
-    const auto parsed = parse_real_vector3(*omega, "Rotating_frame_angular_velocity");
-    for (std::size_t d = 0; d < parsed.size(); ++d) {
-      options.rotating_frame_angular_velocity[d] = Options::ScalarValue{parsed[d]};
+  if (omega != nullptr) {
+    for (std::size_t d = 0; d < 3u; ++d) {
+      options.rotating_frame_angular_velocity[d] =
+          Options::ScalarValue{omega->rotating_frame_angular_velocity[d]};
     }
   }
-  if (omega_file) {
+  if (omega_file != nullptr) {
     auto temporal = svmp::Physics::readTemporalValuesFile(
-        *omega_file, /*num_components=*/3, svmp::Physics::TemporalEndBehavior::Clamp);
+        omega_file->rotating_frame_angular_velocity_file, /*num_components=*/3,
+        svmp::Physics::TemporalEndBehavior::Clamp);
     for (int d = 0; d < 3; ++d) {
       const int comp = d;
       options.rotating_frame_angular_velocity[static_cast<std::size_t>(d)] =
@@ -1197,28 +1177,17 @@ void apply_fluid_rotating_frame_coriolis(
   }
 }
 
+/// The time/space momentum-source file: an equation value replaces a domain
+/// value.
 void apply_fluid_momentum_source_spacetime_file(
     const svmp::Physics::EquationModuleInput& input,
-    const svmp::Physics::DomainInput& domain,
+    const NavierStokesKeys& keys,
     int dim,
     MarkerCommunicator comm,
     svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
 {
-  const auto path = first_defined_string(
-      input.equation_params,
-      {"Momentum_source_temporal_and_spatial_values_file_path",
-       "MomentumSourceTemporalAndSpatialValuesFilePath",
-       "Body_force_temporal_and_spatial_values_file_path",
-       "BodyForceTemporalAndSpatialValuesFilePath"});
-  const auto domain_path = first_defined_string(
-      domain.params,
-      {"Momentum_source_temporal_and_spatial_values_file_path",
-       "MomentumSourceTemporalAndSpatialValuesFilePath",
-       "Body_force_temporal_and_spatial_values_file_path",
-       "BodyForceTemporalAndSpatialValuesFilePath"});
-
-  const auto source_path = path ? path : domain_path;
-  if (!source_path || source_path->empty()) {
+  const auto* source = keys.equationFirst("Momentum_source_temporal_and_spatial_values_file_path");
+  if (source == nullptr || source->momentum_source_file.empty()) {
     return;
   }
   if (!input.mesh) {
@@ -1229,7 +1198,7 @@ void apply_fluid_momentum_source_spacetime_file(
   auto data = read_temporal_and_spatial_values_file(
       *input.mesh,
       /*boundary_marker=*/-1,
-      *source_path,
+      source->momentum_source_file,
       comm);
   options.has_body_force_spacetime = true;
   for (int d = 0; d < dim; ++d) {
@@ -1252,6 +1221,53 @@ void apply_fluid_momentum_source_spacetime_file(
   }
 }
 
+/// The equation and domain members of the artifact's "resolved" section:
+/// each key with the value the module uses and its source (the input of
+/// its element; "derived" when the value comes from the other element or
+/// from a Parameters default).
+std::string resolved_navier_stokes_input_json(
+    const NavierStokesKeys& keys,
+    const svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
+{
+  auto used = keys.domain.value;
+  const auto& equation = keys.equation.value;
+  used.physical_model = equation.physical_model;
+  used.configuration_schema_version = equation.configuration_schema_version;
+  used.operator_tag = options.operator_tag;
+  used.use_taylor_hood_type_basis = equation.use_taylor_hood_type_basis;
+  used.enable_ale = options.enable_ale;
+  used.mesh_velocity_field = options.mesh_velocity_field_name;
+  used.mesh_velocity_source = options.mesh_velocity_source;
+  used.mesh_displacement_field = options.mesh_displacement_field_name;
+  used.auto_register_mesh_displacement_field = options.auto_register_mesh_displacement_field;
+  used.moving_mesh_tangent_path = options.moving_mesh_tangent_path;
+  used.momentum_source_field_name = options.body_force_field_name;
+  used.auto_register_momentum_source_field = options.auto_register_body_force_field;
+  const auto* source_file = keys.equationFirst("Momentum_source_temporal_and_spatial_values_file_path");
+  used.momentum_source_file = source_file != nullptr ? source_file->momentum_source_file : std::string{};
+  used.rotating_frame_coriolis = options.rotating_frame_coriolis_enabled;
+  const bool equation_has_omega =
+      keys.equation.isExplicit("Rotating_frame_angular_velocity") ||
+      keys.equation.isExplicit("Rotating_frame_angular_velocity_temporal_values_file_path");
+  const auto& omega = equation_has_omega ? keys.equation.value : keys.domain.value;
+  used.rotating_frame_angular_velocity = omega.rotating_frame_angular_velocity;
+  used.rotating_frame_angular_velocity_file = omega.rotating_frame_angular_velocity_file;
+  used.density = options.density;
+  used.body_force = options.body_force;
+  used.hydrostatic_pressure_initialization = options.hydrostatic_pressure_initialization.enabled;
+  used.hydrostatic_pressure_reference = options.hydrostatic_pressure_initialization.reference_pressure;
+  used.hydrostatic_pressure_reference_point = options.hydrostatic_pressure_initialization.reference_point;
+  used.hydrostatic_pressure_field_name = options.hydrostatic_pressure_initialization.field_name;
+
+  const auto& equation_schema = ns::navierStokesEquationSchema();
+  const auto& domain_schema = ns::navierStokesDomainSchema();
+  const ns::NavierStokesInputView defaults{};
+  return "\"equation\":" +
+         equation_schema.toJson(equation_schema.describe(keys.equation_input, used, defaults)) +
+         ",\"domain\":" +
+         domain_schema.toJson(domain_schema.describe(keys.domain_input, used, defaults));
+}
+
 void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
                      const svmp::Physics::DomainInput& domain,
                      MarkerCommunicator comm,
@@ -1272,12 +1288,7 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
         ". Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
   }
 
-  svmp::FE::Real backflow_beta = 0.0;
-  if (const auto* p = find_param(domain.params, "Backflow_stabilization_coefficient")) {
-    if (!trim_copy(p->value).empty()) {
-      backflow_beta = static_cast<svmp::FE::Real>(parse_double(p->value, "Backflow_stabilization_coefficient"));
-    }
-  }
+  const svmp::FE::Real backflow_beta = backflow_coefficient(domain.params);
 
   for (const auto& bc : input.boundary_conditions) {
     const auto* bc_type_raw = find_param(bc.params, "Type");
@@ -1912,9 +1923,13 @@ translate_incompressible_two_fluid_input(
       (dimension == 3 && element_type == svmp::FE::ElementType::Tetra4);
   const int order =
       resolve_element_order(input, infer_polynomial_order(*input.mesh));
-  const bool taylor_hood = first_defined_bool(
-      input.equation_params,
-      {"Use_taylor_hood_type_basis"}).value_or(false);
+  // The two-fluid keys resolve through incompressibleTwoFluidSchema()
+  // (decision D47, P2); the basis switch is read first, as before.
+  const auto& schema = ns::incompressibleTwoFluidSchema();
+  const auto equation_input = ns::optionInputFromParameters(input.equation_params);
+  const bool taylor_hood =
+      schema.resolve(select_spellings(equation_input, {"Use_taylor_hood_type_basis"}))
+          .value.use_taylor_hood_type_basis;
   if (!supported_cell || order != 1 || taylor_hood) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] Incompressible two-fluid input requires affine equal-order P1 Triangle3 or Tetra4 spaces.");
@@ -1938,55 +1953,28 @@ translate_incompressible_two_fluid_input(
             .pressure = values.front().pressure,
         };
   }
-  options.level_set_field_name = require_two_fluid_string(
-      input.equation_params,
-      {"Level_set_field_name"},
-      "Level_set_field_name");
-  options.generated_interface_domain_id = require_two_fluid_string(
-      input.equation_params,
-      {"Generated_interface_domain_id"},
-      "Generated_interface_domain_id");
-  options.interface_marker = require_two_fluid_int(
-      input.equation_params,
-      {"Material_interface_marker"},
-      "Material_interface_marker");
-  options.negative_phase.density = require_two_fluid_real(
-      input.equation_params,
-      {"Negative_phase_density"},
-      "Negative_phase_density");
-  options.negative_phase.viscosity = require_two_fluid_real(
-      input.equation_params,
-      {"Negative_phase_dynamic_viscosity"},
-      "Negative_phase_dynamic_viscosity");
-  options.positive_phase.density = require_two_fluid_real(
-      input.equation_params,
-      {"Positive_phase_density"},
-      "Positive_phase_density");
-  options.positive_phase.viscosity = require_two_fluid_real(
-      input.equation_params,
-      {"Positive_phase_dynamic_viscosity"},
-      "Positive_phase_dynamic_viscosity");
-  options.surface_tension = require_two_fluid_real(
-      input.equation_params,
-      {"Two_fluid_surface_tension"},
-      "Two_fluid_surface_tension");
-  options.interface_nitsche_gamma = require_two_fluid_real(
-      input.equation_params,
-      {"Two_fluid_interface_nitsche_gamma"},
-      "Two_fluid_interface_nitsche_gamma");
-  if (any_parameter_defined(
-          input.equation_params,
-          {"Prescribed_pressure_jump"})) {
-    options.prescribed_pressure_jump = require_two_fluid_real(
-        input.equation_params,
-        {"Prescribed_pressure_jump"},
-        "Prescribed_pressure_jump");
+  // Required keys: absent or empty values and two spellings fail with the
+  // register's tokens, in the register's order; then every value resolves.
+  const auto require = [&](std::initializer_list<std::string_view> keys,
+                           std::string_view canonical) {
+    (void)require_two_fluid_string(input.equation_params, keys, canonical);
+  };
+  for (const std::string_view key :
+       {"Level_set_field_name", "Generated_interface_domain_id", "Material_interface_marker",
+        "Negative_phase_density", "Negative_phase_dynamic_viscosity", "Positive_phase_density",
+        "Positive_phase_dynamic_viscosity", "Two_fluid_surface_tension",
+        "Two_fluid_interface_nitsche_gamma"}) {
+    require({key}, key);
   }
-  if (any_parameter_defined(
-          input.equation_params,
-          {"Prescribed_viscous_traction_jump_x",
-           "Prescribed_viscous_traction_jump_y",
-           "Prescribed_viscous_traction_jump_z"})) {
+  if (any_parameter_defined(input.equation_params, {"Prescribed_pressure_jump"})) {
+    require({"Prescribed_pressure_jump"}, "Prescribed_pressure_jump");
+  }
+  const bool traction_jump = any_parameter_defined(
+      input.equation_params,
+      {"Prescribed_viscous_traction_jump_x",
+       "Prescribed_viscous_traction_jump_y",
+       "Prescribed_viscous_traction_jump_z"});
+  if (traction_jump) {
     if (dimension == 2 &&
         any_parameter_defined(
             input.equation_params,
@@ -1995,20 +1983,36 @@ translate_incompressible_two_fluid_input(
           "[svMultiPhysics::Physics] "
           "unsupported_two_fluid_out_of_plane_prescribed_viscous_traction_jump");
     }
-    std::array<svmp::FE::Real, 3> target{};
-    target[0] = require_two_fluid_real(
-        input.equation_params,
-        {"Prescribed_viscous_traction_jump_x"},
-        "Prescribed_viscous_traction_jump_x");
-    target[1] = require_two_fluid_real(
-        input.equation_params,
-        {"Prescribed_viscous_traction_jump_y"},
-        "Prescribed_viscous_traction_jump_y");
+    require({"Prescribed_viscous_traction_jump_x"}, "Prescribed_viscous_traction_jump_x");
+    require({"Prescribed_viscous_traction_jump_y"}, "Prescribed_viscous_traction_jump_y");
     if (dimension == 3) {
-      target[2] = require_two_fluid_real(
-          input.equation_params,
-          {"Prescribed_viscous_traction_jump_z"},
-          "Prescribed_viscous_traction_jump_z");
+      require({"Prescribed_viscous_traction_jump_z"}, "Prescribed_viscous_traction_jump_z");
+    }
+  }
+  if (any_parameter_defined(
+          input.equation_params, {"Operator_tag", "OperatorTag"})) {
+    require({"Operator_tag", "OperatorTag"}, "Operator_tag");
+  }
+  const auto resolved = schema.resolve(equation_input);
+  const auto& keys = resolved.value;
+  options.level_set_field_name = keys.level_set_field_name;
+  options.generated_interface_domain_id = keys.generated_interface_domain_id;
+  options.interface_marker = keys.material_interface_marker;
+  options.negative_phase.density = keys.negative_phase_density;
+  options.negative_phase.viscosity = keys.negative_phase_dynamic_viscosity;
+  options.positive_phase.density = keys.positive_phase_density;
+  options.positive_phase.viscosity = keys.positive_phase_dynamic_viscosity;
+  options.surface_tension = keys.two_fluid_surface_tension;
+  options.interface_nitsche_gamma = keys.two_fluid_interface_nitsche_gamma;
+  if (keys.prescribed_pressure_jump.has_value()) {
+    options.prescribed_pressure_jump = *keys.prescribed_pressure_jump;
+  }
+  if (traction_jump) {
+    std::array<svmp::FE::Real, 3> target{};
+    target[0] = keys.prescribed_viscous_traction_jump_x.value_or(svmp::FE::Real{0.0});
+    target[1] = keys.prescribed_viscous_traction_jump_y.value_or(svmp::FE::Real{0.0});
+    if (dimension == 3) {
+      target[2] = keys.prescribed_viscous_traction_jump_z.value_or(svmp::FE::Real{0.0});
     }
     options.prescribed_viscous_traction_jump = target;
   }
@@ -2017,38 +2021,34 @@ translate_incompressible_two_fluid_input(
     throw std::runtime_error(
         "[svMultiPhysics::Physics] Material_interface_marker must be nonnegative for incompressible two-fluid input.");
   }
-  if (any_parameter_defined(
-          input.equation_params, {"Operator_tag", "OperatorTag"})) {
-    options.operator_tag = require_two_fluid_string(
-        input.equation_params,
-        {"Operator_tag", "OperatorTag"},
-        "Operator_tag");
+  if (resolved.isExplicit("Operator_tag")) {
+    options.operator_tag = keys.operator_tag;
   }
   options.enable_convection = input.equation_type != "stokes";
   options.jit_policy =
       svmp::Physics::core::resolveOopJitPolicy(input, options.jit_policy);
 
+  const auto& domain_schema = ns::incompressibleTwoFluidDomainSchema();
+  const auto domain_input = ns::optionInputFromParameters(input.default_domain.params);
+  const auto domain_keys = domain_schema.resolve(domain_input);
   for (std::size_t component = 0u; component < options.body_force.size();
        ++component) {
     static constexpr std::array<std::string_view, 3> force_keys{
         "Force_x", "Force_y", "Force_z"};
-    if (const auto value = get_defined_double(
-            input.default_domain.params, force_keys[component])) {
-      options.body_force[component] = static_cast<svmp::FE::Real>(*value);
+    if (domain_keys.isExplicit(force_keys[component])) {
+      options.body_force[component] = domain_keys.value.body_force[component];
     }
   }
 
   BoundaryOptions translated_boundaries;
-  apply_fluid_moving_domain_options(
-      input, input.default_domain, translated_boundaries);
+  const auto shared_keys = resolve_moving_domain_and_momentum_source_keys(
+      input.equation_params, input.default_domain.params);
+  apply_fluid_moving_domain_options(shared_keys, translated_boundaries);
   if (translated_boundaries.enable_ale) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] unsupported_two_fluid_moving_mesh");
   }
-  apply_fluid_momentum_source_params(
-      input.equation_params, translated_boundaries);
-  apply_fluid_momentum_source_params(
-      input.default_domain.params, translated_boundaries);
+  apply_fluid_momentum_source_params(shared_keys, translated_boundaries);
   if (!translated_boundaries.body_force_field_name.empty() ||
       any_parameter_defined(
           input.equation_params,
@@ -2089,6 +2089,13 @@ translate_incompressible_two_fluid_input(
       input.boundary_conditions);
   options.shared_velocity_dirichlet =
       std::move(translated_boundaries.velocity_dirichlet);
+  // The two-fluid members of the artifact's "resolved" section.
+  options.resolved_input_json =
+      "\"two_fluid\":" +
+      schema.toJson(schema.describe(equation_input, keys, ns::IncompressibleTwoFluidInputView{})) +
+      ",\"domain\":" +
+      domain_schema.toJson(domain_schema.describe(domain_input, domain_keys.value,
+                                                  ns::NavierStokesInputView{}));
 
   auto velocity_space = svmp::FE::spaces::VectorSpace(
       svmp::FE::spaces::SpaceType::H1,
@@ -2129,10 +2136,10 @@ ResolvedOnePhaseNavierStokesInput resolve_one_phase_navier_stokes_input(
   const auto element_type = infer_base_element_type(*input.mesh);
   const int vel_order = resolve_element_order(input, infer_polynomial_order(*input.mesh));
 
-  bool taylor_hood = false;
-  if (const auto* p = find_param(input.equation_params, "Use_taylor_hood_type_basis"); p && p->defined) {
-    taylor_hood = parse_bool_relaxed(p->value);
-  }
+  // The equation and domain keys (decision D47, P2): every value and format
+  // error of these keys is reported here.
+  const auto keys = resolve_navier_stokes_keys(input.equation_params, domain.params);
+  const bool taylor_hood = keys.equation.value.use_taylor_hood_type_basis;
   const int p_order = taylor_hood ? std::max(1, vel_order - 1) : vel_order;
 
   auto velocity_space =
@@ -2146,23 +2153,23 @@ ResolvedOnePhaseNavierStokesInput resolve_one_phase_navier_stokes_input(
       svmp::Physics::formulations::navier_stokes::
           FreeSurfacePhysicalModel::
               OnePhaseLiquidPrescribedExteriorPressure;
-  if (const auto operator_tag = first_defined_string(
-          input.equation_params, {"Operator_tag", "OperatorTag"})) {
-    options.operator_tag = *operator_tag;
+  if (keys.equation.isExplicit("Operator_tag")) {
+    options.operator_tag = keys.equation.value.operator_tag;
   }
   options.enable_convection = (input.equation_type != "stokes");
   options.jit_policy = svmp::Physics::core::resolveOopJitPolicy(input, options.jit_policy);
   options.conservative_balance_diagnostics =
       input.derived_requests.conservative_balance_diagnostics;
 
-  apply_fluid_moving_domain_options(input, domain, options);
-  apply_fluid_momentum_source_params(input.equation_params, options);
-  apply_fluid_properties(domain, options);
+  apply_fluid_moving_domain_options(keys, options);
+  apply_fluid_momentum_source_params(keys, options);
+  apply_fluid_properties(domain, keys, options);
   apply_fluid_momentum_source_spacetime_file(
-      input, domain, dim, markerCommunicator(system), options);
-  apply_fluid_rotating_frame_coriolis(input, domain, dim, options);
+      input, keys, dim, markerCommunicator(system), options);
+  apply_fluid_rotating_frame_coriolis(keys, dim, options);
   apply_node_pressure_constraints(input, options);
   apply_fluid_bcs(input, domain, markerCommunicator(system), options);
+  options.resolved_input_json = resolved_navier_stokes_input_json(keys, options);
 
   return ResolvedOnePhaseNavierStokesInput{
       .velocity_space = std::move(velocity_space),

@@ -125,12 +125,98 @@ freeSurfaceContactLineInputSchema();
 /// The defined entries of a parameter map, as schema input.
 [[nodiscard]] FE::options::OptionInput optionInputFromParameters(const ParameterMap& params);
 
+/// The Navier-Stokes keys of an equation element and of its domain element,
+/// as one value (decision D47, P2): navierStokesEquationSchema() reads the
+/// keys of the equation, navierStokesDomainSchema() those of the domain.
+/// Keys of the moving domain, the momentum source and the rotating frame
+/// belong to both elements; the register merges the two values (the domain
+/// value of the moving domain and the momentum source replaces the equation
+/// value; the equation value of the rotating frame and of the momentum
+/// source file replaces the domain value).
+struct NavierStokesInputView {
+    // Equation element.
+    std::string physical_model{"OnePhaseLiquidPrescribedExteriorPressure"};
+    int configuration_schema_version{
+        IncompressibleNavierStokesVMSOptions::current_configuration_schema_version};
+    std::string operator_tag{"equations"};
+    bool use_taylor_hood_type_basis{false};
+    // Equation and domain elements.
+    bool enable_ale{false};
+    std::string mesh_velocity_field{"mesh_velocity"};
+    ALEMeshVelocitySource mesh_velocity_source{ALEMeshVelocitySource::PrescribedData};
+    std::string mesh_displacement_field{"mesh_displacement"};
+    bool auto_register_mesh_displacement_field{false};
+    FE::forms::GeometryTangentPath moving_mesh_tangent_path{
+        FE::forms::GeometryTangentPath::SymbolicRequired};
+    std::string momentum_source_field_name{};
+    bool auto_register_momentum_source_field{true};
+    std::string momentum_source_file{};
+    bool rotating_frame_coriolis{false};
+    std::array<FE::Real, 3> rotating_frame_angular_velocity{0.0, 0.0, 0.0};
+    std::string rotating_frame_angular_velocity_file{};
+    // Domain element.
+    FE::Real density{1.0};
+    std::array<FE::Real, 3> body_force{0.0, 0.0, 0.0};
+    bool hydrostatic_pressure_initialization{false};
+    FE::Real hydrostatic_pressure_reference{0.0};
+    std::array<FE::Real, 3> hydrostatic_pressure_reference_point{0.0, 0.0, 0.0};
+    std::string hydrostatic_pressure_field_name{};
+    std::string viscosity_model{};
+    FE::Real viscosity_value{0.0};
+    FE::Real limiting_high_shear_rate_viscosity{0.0};
+    FE::Real limiting_low_shear_rate_viscosity{0.0};
+    FE::Real shear_rate_tensor_multiplier{0.0};
+    FE::Real power_law_index{0.0};
+    FE::Real shear_rate_tensor_exponent{0.0};
+    FE::Real backflow_stabilization_coefficient{0.0};
+};
+
+/// The keys of the equation element of a one-phase Navier-Stokes input.
+[[nodiscard]] const FE::options::OptionSchema<NavierStokesInputView>& navierStokesEquationSchema();
+
+/// The keys of the domain element of a one-phase Navier-Stokes input.
+[[nodiscard]] const FE::options::OptionSchema<NavierStokesInputView>& navierStokesDomainSchema();
+
+/// The keys of the equation element of the incompressible two-fluid mode
+/// (Free_surface_physical_model=IncompressibleTwoFluid).
+struct IncompressibleTwoFluidInputView {
+    std::string physical_model{"IncompressibleTwoFluid"};
+    int configuration_schema_version{
+        IncompressibleNavierStokesVMSOptions::current_configuration_schema_version};
+    std::string level_set_field_name{"level_set"};
+    std::string generated_interface_domain_id{"two_fluid_interface"};
+    int material_interface_marker{-1};
+    FE::Real negative_phase_density{1000.0};
+    FE::Real negative_phase_dynamic_viscosity{0.001};
+    FE::Real positive_phase_density{1.0};
+    FE::Real positive_phase_dynamic_viscosity{0.00001};
+    FE::Real two_fluid_surface_tension{0.0};
+    FE::Real two_fluid_interface_nitsche_gamma{20.0};
+    std::optional<FE::Real> prescribed_pressure_jump{};
+    std::optional<FE::Real> prescribed_viscous_traction_jump_x{};
+    std::optional<FE::Real> prescribed_viscous_traction_jump_y{};
+    std::optional<FE::Real> prescribed_viscous_traction_jump_z{};
+    std::string operator_tag{"equations"};
+    bool use_taylor_hood_type_basis{false};
+};
+
+[[nodiscard]] const FE::options::OptionSchema<IncompressibleTwoFluidInputView>&
+incompressibleTwoFluidSchema();
+
+/// The keys of the default domain of the two-fluid mode (the body force).
+[[nodiscard]] const FE::options::OptionSchema<NavierStokesInputView>&
+incompressibleTwoFluidDomainSchema();
+
 /// The "resolved" section of the Navier-Stokes artifact, for the boundaries
 /// in the given order:
-///   {"version":1,"free_surfaces":[{"boundary":{...},"contact_line":{...}},...]}
+///   {"version":1,"free_surfaces":[{"boundary":{...},"contact_line":{...}},...]
+///    [,"equation":{...},"domain":{...}]}
 /// Each key carries its value and its source (OptionSchema::describe against
-/// the boundary's stored input).
-[[nodiscard]] std::string resolvedFreeSurfacesJson(const std::vector<FreeSurfaceBoundary>& free_surfaces);
+/// the boundary's stored input).  The equation and domain members are the
+/// options' resolved_input_json (written by the input translation; absent
+/// for options built in code).
+[[nodiscard]] std::string resolvedFreeSurfacesJson(const std::vector<FreeSurfaceBoundary>& free_surfaces,
+                                                   const std::string& resolved_input_json = {});
 
 [[nodiscard]] const char* freeSurfaceGeneratedInterfaceGeometryName(
     FreeSurfaceGeneratedInterfaceGeometry geometry) noexcept;

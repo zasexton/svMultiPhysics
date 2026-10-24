@@ -19,10 +19,10 @@
  * the fitted contact preflight, the two-fluid dependency and the early
  * registration of fields.  Below it, in svmp::Physics::options, are the
  * scope and schema-contract checks, the physical-model resolution, the
- * two-fluid parameter readers and the two-fluid preflight, moved unchanged
- * from NavierStokesRegister.cpp (decision D52).  The register API functions
- * are still defined in NavierStokesRegister.cpp, which owns the two-fluid
- * translation until the option schema replaces it (D47 P2, batch B).
+ * two-fluid checks and preflight, and resolveNavierStokesInput(), the
+ * translation of an input into the module's options (decisions D50, D52).
+ * The equation, domain, two-fluid and Free_surface keys resolve through the
+ * option schemas of NavierStokesOptionSchema.h (D47 P2).
  */
 
 #include "Physics/Core/EquationModuleInput.h"
@@ -132,14 +132,6 @@ validate_and_resolve_free_surface_physical_model(
     const svmp::Physics::EquationModuleInput& input);
 
 std::string require_two_fluid_string(
-    const svmp::Physics::ParameterMap& params,
-    std::initializer_list<std::string_view> keys,
-    std::string_view canonical_name);
-svmp::FE::Real require_two_fluid_real(
-    const svmp::Physics::ParameterMap& params,
-    std::initializer_list<std::string_view> keys,
-    std::string_view canonical_name);
-int require_two_fluid_int(
     const svmp::Physics::ParameterMap& params,
     std::initializer_list<std::string_view> keys,
     std::string_view canonical_name);
