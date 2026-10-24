@@ -39,9 +39,10 @@ namespace systems {
 enum class FreeSurfaceCapillaryBalanceMethod : std::uint8_t {
     Unselected,
     /** Snapshot energy variation plus a fixed-volume stationary geometry. */
-    DiscreteEnergyVolumeStationarity,
-    /** Total surface-plus-Young-wall energy gradient represented as traction. */
-    KinematicAreaGradientEnergyTraction
+    DiscreteEnergyVolumeStationarity
+    // KinematicAreaGradientEnergyTraction, the total energy gradient as a
+    // traction on a projected curvature field, was retired with its
+    // traction (decision D48).
 };
 
 /** Evidence boundary for the selected capillary-balance construction. */
@@ -133,8 +134,6 @@ struct FreeSurfaceExternalBoundaryEnergyDeclaration {
 struct FreeSurfaceDiscreteFunctionalDeclaration {
     int interface_marker{-1};
     FieldId level_set_field{INVALID_FIELD_ID};
-    /** Prescribed curvature carrying the selected total energy gradient. */
-    FieldId curvature_field{INVALID_FIELD_ID};
     FieldId velocity_field{INVALID_FIELD_ID};
     std::string geometry_domain_id{};
     interfaces::FreeSurfaceDiscreteFunctionalParameters parameters{};

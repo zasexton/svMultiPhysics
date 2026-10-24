@@ -262,13 +262,10 @@ inline void declareFreeSurfaceDiscreteFunctionals(
                         .external_pressure = *external_pressure,
                     };
         }
-        // SurfaceStress reads no curvature field (decision D48), so the
-        // declaration keeps curvature_field = INVALID_FIELD_ID.
         svmp::FE::systems::functionalRecords(system).declareFunctional(
             FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
                 .interface_marker = bc.interface_marker,
                 .level_set_field = resolveLevelSetFieldId(bc, system),
-                .curvature_field = FE::INVALID_FIELD_ID,
                 .velocity_field = velocity_field,
                 .geometry_domain_id = bc.generated_interface_domain_id,
                 .parameters = std::move(parameters),

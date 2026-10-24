@@ -3894,8 +3894,6 @@ resolveLevelSetWallAwareMaintenanceContext(
     mix_declaration_value(static_cast<std::uint64_t>(
         static_cast<std::int64_t>(declaration.level_set_field)));
     mix_declaration_value(static_cast<std::uint64_t>(
-        static_cast<std::int64_t>(declaration.curvature_field)));
-    mix_declaration_value(static_cast<std::uint64_t>(
         static_cast<std::int64_t>(declaration.interface_marker)));
     mix_declaration_value(static_cast<std::uint64_t>(
         declaration.parameters.liquid_side));

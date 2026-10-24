@@ -80,7 +80,6 @@ std::uint64_t acceptedFunctionalDeclarationContentKey(
 
   mix_signed(declaration.interface_marker);
   mix_signed(declaration.level_set_field);
-  mix_signed(declaration.curvature_field);
   mix_signed(declaration.velocity_field);
   mixCutContextHash(key, declaration.geometry_domain_id);
   mix_signed(declaration.parameters.liquid_side);
@@ -191,10 +190,9 @@ evaluateCurrentAcceptedFunctionals(
         declaration.active_volume_energy_parameters;
     const auto& active_dissipation =
         declaration.active_volume_dissipation_parameters;
-    const std::array<double, 23> declaration_metadata{
+    const std::array<double, 22> declaration_metadata{
         static_cast<double>(declaration.interface_marker),
         static_cast<double>(declaration.level_set_field),
-        static_cast<double>(declaration.curvature_field),
         static_cast<double>(declaration.velocity_field),
         static_cast<double>(declaration.parameters.liquid_side),
         static_cast<double>(declaration.parameters.surface_tension),
