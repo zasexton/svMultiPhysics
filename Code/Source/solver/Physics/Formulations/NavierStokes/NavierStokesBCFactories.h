@@ -174,18 +174,11 @@ inline void registerFreeSurfacePrescribedAngleGeometry(
             continue;
         }
         if (isUnfittedLevelSet(bc)) {
-            const auto phi_id = system.findFieldByName(bc.level_set_field_name);
-            if (phi_id == FE::INVALID_FIELD_ID) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: prescribed unfitted contact angle references unknown level-set field '" +
-                    bc.level_set_field_name + "'");
-            }
-            const auto& rec = system.fieldRecord(phi_id);
-            if (rec.components != 1 || !rec.space || rec.space->value_dimension() != 1) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: level-set field '" +
-                    bc.level_set_field_name + "' must be scalar");
-            }
+            const auto phi_id = FE::level_set::resolveScalarLevelSetField(
+                system,
+                bc.level_set_field_name,
+                "IncompressibleNavierStokesVMSModule: prescribed unfitted contact angle references unknown level-set field '",
+                "IncompressibleNavierStokesVMSModule");
             if (!system.fieldParticipatesInUnknownVector(phi_id)) {
                 throw std::invalid_argument(
                     "IncompressibleNavierStokesVMSModule: prescribed unfitted contact angles require the level-set field to be an unknown");

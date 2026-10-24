@@ -1261,12 +1261,6 @@ struct ActivePressureDomain {
     FreeSurfaceActiveDomain active_domain{FreeSurfaceActiveDomain::None};
 };
 
-struct ActiveVolumeDomain {
-    int interface_marker{-1};
-    FE::forms::CutVolumeSide side{FE::forms::CutVolumeSide::Negative};
-    FreeSurfaceActiveDomainMethod method{FreeSurfaceActiveDomainMethod::CutVolume};
-};
-
 [[nodiscard]] std::optional<ActivePressureDomain>
 activePressureDomainFor(
     const std::vector<FreeSurfaceBoundary>& free_surfaces);
@@ -1312,13 +1306,6 @@ generatedUnfittedContactLineMarkerKey(
 [[nodiscard]] std::string freeSurfaceCurvatureTangentPolicyName(
     const FreeSurfaceBoundary& bc);
 
-[[nodiscard]] std::optional<ActiveVolumeDomain> activeVolumeDomainFor(
-    const std::vector<FreeSurfaceBoundary>& free_surfaces);
-
-[[nodiscard]] FE::forms::FormExpr integrateOnActiveVolume(
-    const FE::forms::FormExpr& integrand,
-    const std::optional<ActiveVolumeDomain>& active_domain);
-
 [[nodiscard]] FE::forms::FormExpr freeSurfaceSemiImplicitReferenceVelocity(
     const FE::systems::FESystem& system);
 
@@ -1337,7 +1324,8 @@ generatedUnfittedContactLineMarkerKey(
     const std::vector<FreeSurfaceBoundary>& free_surfaces);
 
 /// The node pressure constraints of an active-domain free surface lie on its
-/// wet side (the initial state; Physics/Options validates with it).
+/// wet side, away from the interface, and are logged (the initial state;
+/// Physics/Options validates with it after validateNodePressureConstraints).
 void validateActiveDomainPressureConstraints(
     const FE::systems::FESystem& system,
     const IncompressibleNavierStokesVMSOptions& options,

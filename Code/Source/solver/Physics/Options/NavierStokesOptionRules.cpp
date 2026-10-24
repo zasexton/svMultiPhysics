@@ -41,6 +41,7 @@
 #include "FE/Spaces/ProductSpace.h"
 #include "FE/Systems/FormsInstaller.h"
 #include "FE/Systems/SystemCollectives.h"
+#include "FE/Systems/VertexFieldInitialization.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
@@ -483,6 +484,71 @@ void validateGeneratedFreeSurfaceMarkerUniqueness(
                 marker,
                 "contact:" + key.stableKey(),
                 "interface/contact");
+        }
+    }
+}
+
+FE::constraints::VertexIdMode nodePressureIdMode(
+    const IncompressibleNavierStokesVMSOptions& options)
+{
+    FE::constraints::VertexIdMode mode = FE::constraints::VertexIdMode::GlobalVertexGid;
+    switch (options.node_pressure_constraints.id_type) {
+    case IncompressibleNavierStokesVMSOptions::NodePressureConstraintIdType::GlobalVertexGid:
+        mode = FE::constraints::VertexIdMode::GlobalVertexGid;
+        break;
+    case IncompressibleNavierStokesVMSOptions::NodePressureConstraintIdType::LocalVertexId:
+        mode = FE::constraints::VertexIdMode::LocalVertexId;
+        break;
+    }
+    return mode;
+}
+
+std::optional<FE::GlobalIndex> pressureConstraintLocalVertex(
+    const FE::systems::FESystem& system,
+    const IncompressibleNavierStokesVMSOptions& options,
+    FE::GlobalIndex node_id)
+{
+    return FE::systems::localVertexOf(
+        system,
+        nodePressureIdMode(options),
+        node_id,
+        {.negative_id =
+             "IncompressibleNavierStokesVMSModule: pressure constraint references a negative node id",
+         .no_native_mesh =
+             "IncompressibleNavierStokesVMSModule: active-domain pressure constraint validation requires a native mesh for global vertex ids",
+         .no_mesh_support =
+             "IncompressibleNavierStokesVMSModule: active-domain pressure constraint validation requires native mesh support for global vertex ids"});
+}
+
+void validateNodePressureConstraints(
+    const FE::systems::FESystem& system,
+    const IncompressibleNavierStokesVMSOptions& options)
+{
+    std::unordered_map<FE::GlobalIndex, FE::Real> pressure_by_node;
+    const auto n_vertices = system.meshAccess().numVertices();
+    for (const auto& constraint : options.node_pressure_constraints.values) {
+        if (constraint.node_id < 0) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: pressure constraint references a negative node id");
+        }
+        if (!std::isfinite(constraint.pressure)) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: pressure constraint value must be finite");
+        }
+        const auto [existing, inserted] = pressure_by_node.emplace(
+            constraint.node_id, constraint.pressure);
+        if (!inserted && existing->second != constraint.pressure) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: duplicate pressure constraint node has conflicting values");
+        }
+        const auto local_vertex = pressureConstraintLocalVertex(
+            system, options, constraint.node_id);
+        if (local_vertex.has_value() &&
+            (*local_vertex < 0 || *local_vertex >= n_vertices)) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: pressure constraint references vertex " +
+                std::to_string(constraint.node_id) +
+                " outside the local pressure mesh");
         }
     }
 }
@@ -1626,6 +1692,7 @@ NavierStokesPreflight preflightNavierStokes(
     }
     validateGeneratedFreeSurfaceMarkerUniqueness(
         effective_free_surfaces, system);
+    validateNodePressureConstraints(system, options);
     validateActiveDomainPressureConstraints(
         system,
         options,

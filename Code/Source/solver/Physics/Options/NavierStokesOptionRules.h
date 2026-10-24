@@ -33,6 +33,7 @@
 
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Constraints/ConstraintPlan.h"
+#include "FE/Constraints/VertexDirichletConstraint.h"
 #include "FE/Core/Types.h"
 #include "FE/Forms/BoundaryConditions.h"
 #include "FE/Forms/FormExpr.h"
@@ -82,6 +83,23 @@ void validatePositiveConstantScalar(
 void validateGeneratedFreeSurfaceMarkerUniqueness(
     std::span<const FreeSurfaceBoundary> boundaries,
     const FE::systems::FESystem& system);
+
+/// The vertex-id mode of the node pressure constraints.
+[[nodiscard]] FE::constraints::VertexIdMode nodePressureIdMode(
+    const IncompressibleNavierStokesVMSOptions& options);
+
+/// The local pressure vertex of node pressure constraint id @p node_id, or
+/// nothing when its global vertex is not on this rank.
+[[nodiscard]] std::optional<FE::GlobalIndex> pressureConstraintLocalVertex(
+    const FE::systems::FESystem& system,
+    const IncompressibleNavierStokesVMSOptions& options,
+    FE::GlobalIndex node_id);
+
+/// The node pressure constraints have nonnegative ids, finite values, one
+/// value per node, and local vertices inside the local pressure mesh.
+void validateNodePressureConstraints(
+    const FE::systems::FESystem& system,
+    const IncompressibleNavierStokesVMSOptions& options);
 
 void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                                  const IncompressibleNavierStokesVMSOptions& options,
