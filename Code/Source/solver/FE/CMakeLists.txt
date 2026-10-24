@@ -321,6 +321,7 @@ set(FE_CORE_HEADERS
     Core/FEConfig.h
     Core/FEException.h
     Core/Logger.h
+    Core/LogRecord.h
     Core/KernelTrace.h
     Core/StateVariableMetadata.h
     Core/DeterministicParallel.h

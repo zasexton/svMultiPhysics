@@ -158,6 +158,18 @@ DiagnosticRegistry& FormulationBuilder::diagnostics()
     return diagnosticRegistry(*system_);
 }
 
+FormulationBuilder& FormulationBuilder::log(const LogRecord& record)
+{
+    logRecord(record);
+    return *this;
+}
+
+FormulationBuilder& FormulationBuilder::log(std::span<const LogRecord> records)
+{
+    logRecords(records);
+    return *this;
+}
+
 CoupledResidualKernels FormulationBuilder::diagnostic(std::string_view set,
                                                       const OperatorTag& operator_tag,
                                                       std::initializer_list<FieldId> fields,

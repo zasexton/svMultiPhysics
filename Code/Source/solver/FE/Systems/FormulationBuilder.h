@@ -40,6 +40,7 @@
  *   F.diagnostic("set", "equations_diagnostic_x", {u}, form);
  */
 
+#include "Core/LogRecord.h"
 #include "Core/Types.h"
 #include "Forms/IntegrationDomain.h"
 #include "Systems/DiagnosticRegistry.h"
@@ -48,6 +49,7 @@
 #include "Systems/OperatorRegistry.h"
 
 #include <initializer_list>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -137,6 +139,11 @@ public:
 
     /// The diagnostic sets and operators of the system (diagnosticRegistry).
     [[nodiscard]] DiagnosticRegistry& diagnostics();
+
+    /// Prints the log records a formulation declares for what it installs
+    /// (LogRecord), at the point where it states it.
+    FormulationBuilder& log(const LogRecord& record);
+    FormulationBuilder& log(std::span<const LogRecord> records);
 
     /// Installs @p form as the operator @p operator_tag of the declared
     /// diagnostic @p set with options() (DiagnosticRegistry::install), usually

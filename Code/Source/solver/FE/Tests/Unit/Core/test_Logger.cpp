@@ -19,11 +19,13 @@
 #include <gtest/gtest.h>
 
 #include "Core/Logger.h"
+#include "Core/LogRecord.h"
 
 #include <atomic>
 #include <cstdlib>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace svmp {
 namespace FE {
@@ -129,6 +131,47 @@ TEST(LoggerEnvironment, WarningLevelFromEnvironmentSuppressesInfo)
     logger.set_level(LogLevel::WARNING);
     EXPECT_EQ(g_info_probes.load(), info_before + 1);
     EXPECT_NE(explicit_out.find("explicit-info"), std::string::npos) << explicit_out;
+}
+
+TEST(LogRecord, PrintsItsOwnerMessageAndFieldsInOrder)
+{
+    LogRecord record("Owner", "installed a term");
+    record.integer("marker", 7)
+        .quoted("level_set_field", "level_set")
+        .text("form", "a_b")
+        .fixed("mobility", 0.25)
+        .general("calibration", 0.01)
+        .general("cap", 2.5)
+        .integer("count", std::size_t{3});
+    EXPECT_EQ(record.str(),
+              "Owner: installed a term marker=7 level_set_field='level_set' form=a_b mobility=0.250000 "
+              "calibration=0.01 cap=2.5 count=3");
+    EXPECT_EQ(record.level(), LogLevel::INFO);
+    ASSERT_EQ(record.fields().size(), 7u);
+    EXPECT_EQ(record.fields()[1].key, "level_set_field");
+    EXPECT_TRUE(record.fields()[1].quoted);
+
+    // Without a message the fields follow the owner; without fields the message is the line.
+    EXPECT_EQ(LogRecord("Owner").text("diagnostic", "d").text("status", "declared").str(),
+              "Owner: diagnostic=d status=declared");
+    EXPECT_EQ(LogRecord("Owner", "free text", LogLevel::WARNING).str(), "Owner: free text");
+}
+
+TEST(LogRecord, IsLoggedAtItsLevel)
+{
+    testing::internal::CaptureStderr();
+    logRecord(LogRecord("svmp-log-record-probe", "line", LogLevel::WARNING).integer("n", 1));
+    logRecords(std::vector<LogRecord>{LogRecord("svmp-log-record-probe", "", LogLevel::WARNING).text("a", "b"),
+                                      LogRecord("svmp-log-record-probe", "last", LogLevel::WARNING)});
+    const std::string err = testing::internal::GetCapturedStderr();
+    const auto first = err.find("[WARN] svmp-log-record-probe: line n=1\n");
+    const auto second = err.find("[WARN] svmp-log-record-probe: a=b\n");
+    const auto third = err.find("[WARN] svmp-log-record-probe: last\n");
+    EXPECT_NE(first, std::string::npos) << err;
+    EXPECT_NE(second, std::string::npos) << err;
+    EXPECT_NE(third, std::string::npos) << err;
+    EXPECT_LT(first, second);
+    EXPECT_LT(second, third);
 }
 
 } // namespace test
