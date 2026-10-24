@@ -2985,6 +2985,9 @@ TEST(NavierStokesLegacyBCs, ResolvedArtifactSectionRecordsTheSourceOfEveryFreeSu
     free_surface.params["Interface_marker"] =
         defined(std::to_string(interface_marker));
     free_surface.params["Level_set_field_name"] = defined("phi_resolved");
+    // A key both elements read: the domain value replaces the equation's.
+    input.equation_params["Mesh_velocity_field"] = defined("equation_mesh_velocity");
+    input.default_domain.params["Mesh_velocity_field"] = defined("domain_mesh_velocity");
     free_surface.params["Active_domain"] = defined("negative");
     free_surface.params["Active_domain_method"] = defined("CutVolume");
     free_surface.params["Generated_interface_geometry"] =
@@ -3082,6 +3085,104 @@ TEST(NavierStokesLegacyBCs, ResolvedArtifactSectionRecordsTheSourceOfEveryFreeSu
     EXPECT_EQ(resolved.find("\"Use_level_set_curvature\""), std::string::npos);
     EXPECT_EQ(resolved.find("\"Allow_fitted_surface_stress\""), std::string::npos);
     EXPECT_EQ(resolved.find("\"Curvature_field\""), std::string::npos);
+
+    // The equation and domain keys (decision D47, P2): the value the module
+    // uses, and its source in the element's own input ("input" keeps the
+    // element's text when the other element set the value).
+    const auto equation_at = resolved.find(",\"equation\":{");
+    const auto domain_at = resolved.find(",\"domain\":{");
+    ASSERT_NE(equation_at, std::string::npos) << resolved;
+    ASSERT_NE(domain_at, std::string::npos) << resolved;
+    ASSERT_LT(equation_at, domain_at);
+    const auto equation_section = resolved.substr(equation_at, domain_at - equation_at);
+    const auto domain_section = resolved.substr(domain_at);
+    const auto expect_in = [](const std::string& section, std::string_view entry) {
+        EXPECT_NE(section.find(entry), std::string::npos) << entry << "\n" << section;
+    };
+    expect_in(equation_section,
+              "\"Operator_tag\":{\"value\":\"equations\",\"source\":\"explicit\","
+              "\"spelling\":\"Operator_tag\"}");
+    expect_in(equation_section, "\"Enable_ALE\":{\"value\":\"false\",\"source\":\"default\"}");
+    expect_in(equation_section,
+              "\"Mesh_velocity_field\":{\"value\":\"domain_mesh_velocity\",\"source\":\"explicit\","
+              "\"spelling\":\"Mesh_velocity_field\",\"input\":\"equation_mesh_velocity\"}");
+    expect_in(domain_section,
+              "\"Mesh_velocity_field\":{\"value\":\"domain_mesh_velocity\",\"source\":\"explicit\","
+              "\"spelling\":\"Mesh_velocity_field\"}");
+    expect_in(domain_section,
+              "\"Density\":{\"value\":\"1\",\"source\":\"explicit\",\"spelling\":\"Density\","
+              "\"input\":\"1.0\"}");
+    expect_in(domain_section,
+              "\"Viscosity.model\":{\"value\":\"Constant\",\"source\":\"explicit\","
+              "\"spelling\":\"Viscosity.model\"}");
+    expect_in(domain_section,
+              "\"Viscosity.Value\":{\"value\":\"0.01\",\"source\":\"explicit\","
+              "\"spelling\":\"Viscosity.Value\"}");
+    expect_in(domain_section,
+              "\"Backflow_stabilization_coefficient\":{\"value\":\"0\",\"source\":\"default\"}");
+#endif
+}
+
+TEST(NavierStokesLegacyBCs, NavierStokesEquationAndDomainKeysResolveThroughTheSchema)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    // Decision D47 (P2): the equation and domain keys resolve through the
+    // option schemas.  Values that do not parse report the schema texts
+    // (D52); the register's own checks keep their texts.
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+
+    constexpr int marker = 83;
+    auto mesh = buildSingleTetraBoundaryMesh(marker);
+    ASSERT_TRUE(mesh);
+
+    using Keys = std::vector<std::pair<std::string, std::string>>;
+    struct FailureCase {
+        Keys equation;
+        Keys domain;
+        std::string expected_message;
+    };
+    const std::vector<FailureCase> failures = {
+        {{}, {{"Density", "abc"}},
+         "[Navier-Stokes domain] Density: expected a number, got 'abc'"},
+        {{{"Mesh_velocity_source", "sideways"}}, {},
+         "[Navier-Stokes equation] Mesh_velocity_source: expected one of "
+         "prescribed_data | coupled_displacement, got 'sideways'"},
+        {{{"Moving_mesh_tangent_path", "sideways"}}, {},
+         "[Navier-Stokes equation] Moving_mesh_tangent_path: expected one of "
+         "SymbolicRequired | ADReference | SymbolicWithADCheck | Auto, got 'sideways'"},
+        {{}, {{"Viscosity.Value", "0"}},
+         "[svMultiPhysics::Physics] Constant viscosity must be > 0 for the new "
+         "solver Navier-Stokes module. Set <Use_new_OOP_solver>false"
+         "</Use_new_OOP_solver> to use the legacy solver."},
+    };
+    for (const auto& failure : failures) {
+        SCOPED_TRACE(failure.expected_message);
+        svmp::Physics::EquationModuleInput input{};
+        input.equation_type = "fluid";
+        input.mesh_name = "single_tetra";
+        input.mesh = mesh->local_mesh_ptr();
+        input.default_domain.params["Density"] = defined("1.0");
+        input.default_domain.params["Viscosity.model"] = defined("Constant");
+        input.default_domain.params["Viscosity.Value"] = defined("0.01");
+        for (const auto& [key, value] : failure.equation) {
+            input.equation_params[key] = defined(value);
+        }
+        for (const auto& [key, value] : failure.domain) {
+            input.default_domain.params[key] = defined(value);
+        }
+        svmp::FE::systems::FESystem system(mesh);
+        try {
+            auto module =
+                svmp::Physics::EquationModuleRegistry::instance().create(
+                    "fluid", input, system);
+            (void)module;
+            ADD_FAILURE() << "the input must fail";
+        } catch (const std::runtime_error& error) {
+            EXPECT_EQ(std::string(error.what()), failure.expected_message);
+        }
+    }
 #endif
 }
 

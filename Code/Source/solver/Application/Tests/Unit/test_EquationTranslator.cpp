@@ -1304,6 +1304,25 @@ TEST(EquationTranslatorFreeSurface,
   EXPECT_EQ(
       artifact->json.find("momentum_flux_reconciliation_qualified"),
       std::string::npos);
+  // The two-fluid keys with their resolved values and sources (decision
+  // D47, P2), after the keys above.
+  const auto resolved_at =
+      artifact->json.rfind(",\"resolved\":{\"version\":1,\"two_fluid\":{");
+  ASSERT_NE(resolved_at, std::string::npos) << artifact->json;
+  const auto resolved = artifact->json.substr(resolved_at);
+  for (const std::string_view entry : {
+           std::string_view{"\"Material_interface_marker\":{\"value\":\"71\","
+                            "\"source\":\"explicit\",\"spelling\":\"Material_interface_marker\"}"},
+           std::string_view{"\"Negative_phase_density\":{\"value\":\"1000\","
+                            "\"source\":\"explicit\",\"spelling\":\"Negative_phase_density\","
+                            "\"input\":\"1000.0\"}"},
+           std::string_view{"\"Prescribed_viscous_traction_jump_z\":{\"value\":\"none\","
+                            "\"source\":\"default\"}"},
+           std::string_view{"\"Operator_tag\":{\"value\":\"equations\",\"source\":\"default\"}"},
+           std::string_view{",\"domain\":{\"Force_x\":{\"value\":\"0\",\"source\":\"default\"}"},
+       }) {
+    EXPECT_NE(resolved.find(entry), std::string::npos) << entry << "\n" << resolved;
+  }
   EXPECT_NE(
       system.findFieldByName("u_negative"),
       svmp::FE::INVALID_FIELD_ID);
