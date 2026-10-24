@@ -1057,11 +1057,13 @@ endif()
 if(FE_WITH_MESH)
     list(APPEND FE_LEVELSET_HEADERS
         LevelSet/Extension/LevelSetPdeVelocityExtension.h
+        LevelSet/Extension/LevelSetVelocityExtensionRefresh.h
         LevelSet/Extension/LevelSetVelocityExtensionSeed.h
         LevelSet/Extension/LevelSetVelocityExtensionWall.h
     )
     list(APPEND FE_LEVELSET_SOURCES
         LevelSet/Extension/LevelSetPdeVelocityExtension.cpp
+        LevelSet/Extension/LevelSetVelocityExtensionRefresh.cpp
         LevelSet/Extension/LevelSetVelocityExtensionSeed.cpp
     )
 endif()

@@ -8,7 +8,13 @@
 #include <gtest/gtest.h>
 
 #include "LevelSet/Extension/LevelSetPdeVelocityExtension.h"
+#include "LevelSet/Extension/LevelSetVelocityExtensionRefresh.h"
 #include "LevelSet/Extension/LevelSetVelocityExtensionSeed.h"
+#include "LevelSet/LevelSetGeometryService.h"
+#include "Spaces/H1Space.h"
+#include "Spaces/ProductSpace.h"
+#include "Systems/FESystem.h"
+#include "Systems/SystemState.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
 
@@ -307,6 +313,109 @@ TEST(LevelSetVelocityExtensionSeed, MapRevisionTracksEveryRevisionDomain)
   non_binary[0] = 2u;
   EXPECT_THROW((void)velocityExtensionMapRevision(1u, 2u, 3u, 4u, 5u, phi,
                                                   non_binary),
+               std::invalid_argument);
+}
+
+// The refresh of a prescribed advection velocity: the same extension as the
+// direct PDE solve with the production known set, written into the field.
+TEST(LevelSetVelocityExtensionRefresh, PrescribedFieldMatchesTheDirectExtension)
+{
+  using svmp::FE::level_set::LevelSetVelocityExtensionRefreshOptions;
+  using svmp::FE::level_set::LevelSetVelocityExtensionRequest;
+  using svmp::FE::level_set::PdeVelocityExtensionCaches;
+
+  const auto mesh = makeSquareTriangleMesh(4);
+  const auto setup = makeSetup(
+      *mesh,
+      [](double x, double) { return x - 0.4; },
+      [](double x, double y) {
+        return std::array<double, 2>{1.0 + x * y, 0.5 - 2.0 * y};
+      });
+  const auto expected = run(*mesh, setup, PdeVelocityExtensionOperator::Harmonic,
+                            {});
+
+  auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
+      svmp::FE::ElementType::Triangle3, /*order=*/1);
+  auto vector_space =
+      std::make_shared<svmp::FE::spaces::ProductSpace>(scalar_space, 2);
+  svmp::FE::systems::FESystem system(mesh);
+  const auto prescribed = svmp::FE::systems::FieldSourceKind::PrescribedData;
+  const auto phi = system.addField(svmp::FE::systems::FieldSpec{
+      .name = "phi", .space = scalar_space, .components = 1,
+      .source_kind = prescribed});
+  const auto velocity = system.addField(svmp::FE::systems::FieldSpec{
+      .name = "Velocity", .space = vector_space, .components = 2,
+      .source_kind = prescribed});
+  const auto extension = system.addField(svmp::FE::systems::FieldSpec{
+      .name = "LevelSetAdvectionVelocity", .space = vector_space,
+      .components = 2, .source_kind = prescribed});
+  ASSERT_NO_THROW(system.setup());
+  const auto prescribe = [&](svmp::FE::FieldId field,
+                             const std::vector<double>& vertex_values,
+                             std::size_t components) {
+    std::vector<svmp::FE::Real> coefficients(
+        static_cast<std::size_t>(system.fieldDofHandler(field).getNumDofs()),
+        0.0);
+    const auto projection = system.projectMeshVertexValuesToFieldCoefficients(
+        field, vertex_values, components, coefficients);
+    ASSERT_EQ(projection.unassigned_dofs, 0u);
+    system.setPrescribedFieldCoefficients(field, coefficients);
+  };
+  prescribe(phi, setup.phi, 1u);
+  prescribe(velocity, setup.source, 2u);
+
+  LevelSetVelocityExtensionRequest request{};
+  request.level_set_field_name = "phi";
+  request.source_velocity_field_name = "Velocity";
+  request.target_velocity_field_name = "LevelSetAdvectionVelocity";
+  request.extension_method = "pde_harmonic";
+  request.enforce_wall_impermeability = false;
+  PdeVelocityExtensionCaches caches;
+  const std::vector<LevelSetVelocityExtensionRequest> requests{request};
+  EXPECT_TRUE(svmp::FE::level_set::refreshLevelSetVelocityExtensions(
+      system, *mesh, svmp::FE::systems::SystemStateView{}, requests,
+      LevelSetVelocityExtensionRefreshOptions{}, caches));
+  EXPECT_EQ(caches.size(), 1u);
+  const auto refreshed = svmp::FE::level_set::evaluateVertexField(
+      system, *mesh, extension, svmp::FE::systems::SystemStateView{}, 2u,
+      "velocity-extension refresh test");
+  ASSERT_EQ(refreshed.size(), expected.size());
+  for (std::size_t i = 0; i < expected.size(); ++i) {
+    EXPECT_DOUBLE_EQ(refreshed[i], expected[i]) << "value " << i;
+  }
+
+  // The algebraic wet extension was retired (decisions D47 and D55).
+  auto retired = request;
+  retired.extension_method = "wall_compatible_normal";
+  try {
+    (void)svmp::FE::level_set::refreshLevelSetVelocityExtensions(
+        system, *mesh, svmp::FE::systems::SystemStateView{},
+        std::span<const LevelSetVelocityExtensionRequest>(&retired, 1u),
+        LevelSetVelocityExtensionRefreshOptions{}, caches);
+    ADD_FAILURE() << "retired extension method accepted";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find("decisions D47 and D55"),
+              std::string::npos)
+        << error.what();
+  }
+}
+
+TEST(LevelSetVelocityExtensionRefresh, WallMasksFollowTheEffectiveDirection)
+{
+  using svmp::FE::level_set::strongZeroVelocityComponentMask;
+  const std::vector<int> none{};
+  const std::vector<int> normal_x{1, 0};
+  const std::vector<int> all_active{1, 1};
+  const std::vector<int> all_zero{0, 0};
+  EXPECT_EQ(strongZeroVelocityComponentMask(none, 2),
+            (std::array<bool, 3>{true, true, true}));
+  EXPECT_EQ(strongZeroVelocityComponentMask(normal_x, 2),
+            (std::array<bool, 3>{true, false, false}));
+  EXPECT_EQ(strongZeroVelocityComponentMask(all_active, 2),
+            (std::array<bool, 3>{true, true, true}));
+  EXPECT_EQ(strongZeroVelocityComponentMask(all_zero, 2),
+            (std::array<bool, 3>{true, true, true}));
+  EXPECT_THROW((void)strongZeroVelocityComponentMask(none, 0),
                std::invalid_argument);
 }
 
