@@ -684,11 +684,13 @@ bool refreshLevelSetVelocityExtensions(
     if (request.enforce_wall_impermeability) {
       if (request.wall_constraints.empty()) {
         throw std::runtime_error(
-            "[svMultiPhysics::Application] Wet-extension wall "
-            "impermeability is enabled, but no strong homogeneous "
-            "velocity Dirichlet component masks were resolved. Specify "
-            "compatible wall BCs or disable "
-            "Wet_extension_enforce_wall_impermeability.");
+            "[svMultiPhysics::Application] The level-set velocity "
+            "extension enforces wall impermeability, but no strong "
+            "homogeneous velocity Dirichlet component masks were resolved "
+            "on the fluid walls (time- or space-varying and file-based "
+            "Dirichlet values cannot be proven homogeneous). Give the walls "
+            "strong homogeneous velocity Dirichlet conditions (no-slip, or "
+            "free-slip through Effective_direction).");
       }
       for (const auto& wall : request.wall_constraints) {
         const auto label = mesh.label_from_name(wall.face_name);

@@ -302,6 +302,20 @@ void EigenMatrix::addValue(GlobalIndex row_g, GlobalIndex col_g, Real value, ass
                                   " SVMP_EIGEN_STRICT_PATTERN=1 to fail fast)"
                                 : "");
         }
+        // A dropped zero changes no entry.  The first dropped nonzero is the
+        // write that makes the matrix differ from the assembled operator, so
+        // name it even when zeros came first.
+        static std::atomic<long> dropped_nonzero{0};
+        if (value != Real{0} && ++dropped_nonzero == 1 && n != 1) {
+            std::fprintf(stderr,
+                         "[EigenMatrix] dropped the first nonzero out-of-pattern write"
+                         " (#%ld, row=%lld col=%lld value=%.6g): the matrix misses an"
+                         " assembled coupling, so a Jacobian built in it no longer"
+                         " matches its residual\n",
+                         n, static_cast<long long>(row_g),
+                         static_cast<long long>(col_g),
+                         static_cast<double>(value));
+        }
         return;
     }
 

@@ -4505,7 +4505,20 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                         FEException,
                         "TimeLoop: external-state discontinuity requires an adaptive step controller");
                 }
-                FE_THROW(FEException, "TimeLoop: nonlinear solve did not converge");
+                // Name the step and the last Newton state: the status line of
+                // an FEException alone does not say what failed.
+                std::ostringstream failure;
+                failure << std::setprecision(6)
+                        << "TimeLoop: nonlinear solve did not converge in step "
+                        << history.stepIndex() << " (t=" << history.time()
+                        << ", dt=" << dt << ") after " << nr.iterations
+                        << " Newton iterations: ||r||=" << nr.residual_norm
+                        << ", ||r0||=" << nr.residual_norm0;
+                if (!nr.failure_message.empty()) {
+                    failure << "; " << nr.failure_message;
+                }
+                throw FEException(failure.str(), __FILE__, __LINE__,
+                                  __func__, FEStatus::ConvergenceError);
             }
 
             restoreAcceptedStateAfterFailedSolve();
