@@ -84,8 +84,8 @@
    },
    "renames": {
     "A": "boundary_measure",
-    "Wn": "normal_work",
-    "Un": "normal_velocity_moment"
+    "Wn": "mesh_normal_velocity_integral",
+    "Un": "fluid_normal_velocity_integral"
    },
    "split": [],
    "identifying": [],
