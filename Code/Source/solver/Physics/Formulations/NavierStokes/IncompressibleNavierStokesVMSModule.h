@@ -43,6 +43,7 @@
 #include "FE/Forms/BoundaryConditions.h"
 #include "FE/Forms/ConstitutiveModel.h"
 #include "FE/Forms/FormExpr.h"
+#include "FE/Interfaces/ContactLineGeometryCertificate.h"
 #include "FE/Spaces/FunctionSpace.h"
 
 #include <algorithm>
@@ -983,6 +984,20 @@ contactLineWallNormal(const FreeSurfaceContactLine& contact_line)
         component /= norm;
     }
     return normal;
+}
+
+/// The geometry check of an unfitted contact line on its wall
+/// (FE/Interfaces/ContactLineGeometryCertificate).
+[[nodiscard]] inline FE::interfaces::ContactLineGeometryCheck contactLineCheck(
+    const IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine& contact_line,
+    int contact_marker)
+{
+    return FE::interfaces::ContactLineGeometryCheck{
+        .contact_marker = contact_marker,
+        .wall_marker = contactLineWallBoundaryMarker(contact_line),
+        .wall_normal = normalizedWallNormal(contact_line),
+        .owner = std::string("IncompressibleNavierStokesVMSModule"),
+    };
 }
 
 [[nodiscard]] inline bool isRefreshedFrozenGeometryTangent(

@@ -15,8 +15,6 @@
  */
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactCertificate.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceFittedALE.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesPostProcessing.h"
 #include "Physics/Options/NavierStokesOptionRules.h"
@@ -24,12 +22,14 @@
 
 #include "FE/Constraints/ConstraintPlan.h"
 #include "FE/Constraints/InterfaceMeasureGaugeAnchor.h"
+#include "FE/Core/Logger.h"
 #include "FE/Forms/BoundaryConditions.h"
 #include "FE/Forms/BoundaryFunctional.h"
 #include "FE/Forms/CutCellForms.h"
 #include "FE/Forms/IntegrationDomain.h"
 #include "FE/Forms/StandardBCs.h"
 #include "FE/Forms/Vocabulary.h"
+#include "FE/Interfaces/ContactLineGeometryCertificate.h"
 #include "FE/Auxiliary/AuxiliaryBindings.h"
 #include "FE/Auxiliary/AuxiliaryModelBuilder.h"
 #include "FE/Auxiliary/AuxiliaryModelDSL.h"
@@ -39,6 +39,7 @@
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormsInstaller.h"
 #include "FE/Systems/FormulationBuilder.h"
+#include "FE/Systems/MeshBoundaryKinematics.h"
 
 #include <algorithm>
 #include <array>
@@ -72,6 +73,171 @@ namespace navier_stokes {
             wall_normal[static_cast<std::size_t>(d)]));
     }
     return FE::forms::FormExpr::asVector(std::move(wall_components));
+}
+
+// The fitted-ALE mesh rows and the contact-line certificates of a free
+// surface (formerly FreeSurface/FreeSurfaceFittedALE and
+// FreeSurface/FreeSurfaceContactCertificate), on the FE moving-boundary and
+// contact-line services.
+
+[[nodiscard]] inline const FE::systems::FieldRecord& fittedMeshDisplacementRecord(
+    const FE::systems::FESystem& system,
+    const FE::systems::ALEBinding& ale_binding)
+{
+    return FE::systems::requireMeshDisplacementRecord(
+        system,
+        ale_binding,
+        "IncompressibleNavierStokesVMSModule: fitted free-surface mesh kinematics require a coupled mesh displacement unknown",
+        "IncompressibleNavierStokesVMSModule: fitted free-surface mesh displacement field has no function space");
+}
+
+inline void declareFittedTangentialMeshPolicy(
+    FE::systems::FESystem& system,
+    const FE::systems::ALEBinding& ale_binding,
+    const FreeSurfaceBoundary& bc)
+{
+    const bool install_tangential_smoothing =
+        bc.tangential_mesh_policy ==
+        FreeSurfaceTangentialMeshPolicy::SmoothingOnly;
+    const bool install_tangential_prescription =
+        bc.tangential_mesh_policy ==
+        FreeSurfaceTangentialMeshPolicy::Prescribed;
+
+    system.declareMeshTangentialBoundaryPolicy(
+        FE::systems::MeshTangentialBoundaryPolicyDeclaration{
+            .mesh_displacement_field = ale_binding.mesh_displacement_field,
+            .boundary_marker = bc.boundary_marker,
+            .policy =
+                systemTangentialMeshPolicy(bc.tangential_mesh_policy),
+            .owner_component =
+                "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary",
+        });
+
+    FE_LOG_INFO(
+        std::string("IncompressibleNavierStokesVMSModule: fitted "
+                    "free-surface mesh policy") +
+        " marker=" + std::to_string(bc.boundary_marker) +
+        " tangential_policy=" +
+        tangentialMeshPolicyName(bc.tangential_mesh_policy) +
+        " tangential_owner=free_surface_boundary" +
+        " tangential_enforcement=" +
+        (install_tangential_prescription
+             ? "weak_velocity_penalty"
+             : install_tangential_smoothing
+                   ? "surface_smoothing_functional"
+                   : "natural_no_tangential_constraint") +
+        " diagnostic=fitted_free_surface_mesh_policy");
+}
+
+inline void declareFittedMeshRowDescriptors(
+    FE::systems::FESystem& system,
+    const std::string& operator_tag,
+    const FE::systems::ALEBinding& ale_binding,
+    const FreeSurfaceBoundary& bc,
+    FE::FieldId velocity_field,
+    bool rows_installed)
+{
+    FE::systems::declareMeshBoundaryRowDescriptors(
+        system,
+        operator_tag,
+        FE::systems::MeshBoundaryRows{
+            .boundary_marker = bc.boundary_marker,
+            .mesh_displacement_field = ale_binding.mesh_displacement_field,
+            .velocity_field = velocity_field,
+            .normal_relation =
+                bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None &&
+                bc.normal_kinematic_policy ==
+                    FreeSurfaceNormalKinematicPolicy::MatchFluidNormalVelocity,
+            .tangential_prescribed =
+                bc.tangential_mesh_policy ==
+                FreeSurfaceTangentialMeshPolicy::Prescribed,
+            .tangential_policy =
+                systemTangentialMeshPolicy(bc.tangential_mesh_policy),
+            .mesh_normal_source =
+                "Fitted free-surface mesh normal kinematic row on marker " +
+                std::to_string(bc.boundary_marker),
+            .fluid_normal_source = fittedFluidNormalDescriptorSource(bc),
+            .tangential_source = fittedTangentialOperatorSource(
+                bc.boundary_marker, bc.tangential_mesh_policy),
+            .missing_velocity_message =
+                "IncompressibleNavierStokesVMSModule: fitted normal "
+                "kinematics require a related fluid velocity field",
+        },
+        rows_installed);
+}
+
+inline void registerFreeSurfacePrescribedAngleGeometry(
+    FE::systems::FESystem& system,
+    const FreeSurfaceBoundary& bc)
+{
+    for (const auto& contact_line : bc.contact_lines) {
+        if (contactLineKind(contact_line) != ContactLineKind::PrescribedAngle) {
+            continue;
+        }
+        if (isUnfittedLevelSet(bc)) {
+            const auto phi_id = system.findFieldByName(bc.level_set_field_name);
+            if (phi_id == FE::INVALID_FIELD_ID) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: prescribed unfitted contact angle references unknown level-set field '" +
+                    bc.level_set_field_name + "'");
+            }
+            const auto& rec = system.fieldRecord(phi_id);
+            if (rec.components != 1 || !rec.space || rec.space->value_dimension() != 1) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: level-set field '" +
+                    bc.level_set_field_name + "' must be scalar");
+            }
+            if (!system.fieldParticipatesInUnknownVector(phi_id)) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: prescribed unfitted contact angles require the level-set field to be an unknown");
+            }
+
+            const int contact_marker =
+                generatedUnfittedContactLineMarker(
+                    contact_line,
+                    bc,
+                    system);
+            system.registerGeneratedEmbeddedInterfaceMarker(contact_marker);
+            const auto check = contactLineCheck(contact_line, contact_marker);
+            FE::interfaces::registerContactLineCertificate(
+                system,
+                check,
+                "navier_stokes_prescribed_contact_geometry:" +
+                    std::to_string(contact_marker),
+                "prescribed_contact_geometry",
+                "prescribed_contact_geometry_initial",
+                FE::interfaces::ContactLineCertificateRefresh::EveryContext);
+            FE_LOG_INFO(
+                std::string("IncompressibleNavierStokesVMSModule: registered prescribed-angle contact geometry without a level-set residual") +
+                " interface_marker=" +
+                std::to_string(bc.interface_marker) +
+                " contact_marker=" + std::to_string(contact_marker) +
+                " level_set_geometry_owner=none_angle_preserving_wall_maintenance"
+                " momentum_owner=young_wall_energy"
+                " literal_codimension_two_level_set_residual=retired"
+                " diagnostic=navier_stokes_prescribed_contact_geometry");
+            continue;
+        }
+
+        throw std::logic_error(
+            "IncompressibleNavierStokesVMSModule: fitted prescribed contact-angle validation did not fail closed");
+    }
+}
+
+inline void registerDynamicContactWallNormalCheck(
+    FE::systems::FESystem& system,
+    const FreeSurfaceContactLine& contact_line,
+    int contact_marker)
+{
+    const auto check = contactLineCheck(contact_line, contact_marker);
+    FE::interfaces::registerContactLineCertificate(
+        system,
+        check,
+        "navier_stokes_dynamic_contact_wall_normal:" +
+            std::to_string(contact_marker),
+        "dynamic_contact_operator_angle",
+        "dynamic_contact_operator_angle_initial",
+        FE::interfaces::ContactLineCertificateRefresh::SetUpSystemContext);
 }
 
 namespace Factories {

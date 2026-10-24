@@ -12,13 +12,9 @@
 #include "Physics/Options/NavierStokesRegistration.h"
 
 #include "FE/Systems/FESystem.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceContactCertificate.h"
-#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceFittedALE.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceGeometry.h"
 #include "Physics/Options/NavierStokesOptionRules.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
-#include "Physics/Formulations/NavierStokes/NavierStokesFields.h"
-#include "Physics/Formulations/NavierStokes/NavierStokesGeneratedNitsche.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesInitialConditions.h"
 #include "FE/Assembly/Assembler.h"
 #include "FE/Assembly/CutIntegrationContext.h"
