@@ -8,12 +8,16 @@
 #include "LevelSet/Extension/LevelSetPdeVelocityExtension.h"
 
 #include "Assembly/GlobalSystemView.h"
+#include "Assembly/MeshAccess.h"
 #include "Backends/Interfaces/BackendFactory.h"
 #include "Backends/Interfaces/BackendKind.h"
 #include "Backends/Interfaces/GenericMatrix.h"
 #include "Backends/Interfaces/GenericVector.h"
 #include "Backends/Interfaces/LinearSolver.h"
 #include "Backends/Utils/BackendOptions.h"
+#include "Elements/ElementTransform.h"
+#include "Elements/LagrangeElement.h"
+#include "Geometry/MappingFactory.h"
 #include "Sparsity/SparsityPattern.h"
 #include "Mesh/Topology/DistributedTopology.h"
 
@@ -41,8 +45,11 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <type_traits>
 #include <unordered_map>
 
@@ -292,13 +299,159 @@ bool simplexGradients(const std::array<std::array<double, 3>, 4>& x,
   return true;
 }
 
-// One gathered cell: global cell ID, vertex count, vertex GIDs, element matrix.
-struct CellRecord {
+// Element matrices of the other first-order cells (Quad4, Hex8, Wedge6,
+// Pyramid5, ...) from the FE Lagrange element of the cell type: its basis
+// and stiffness quadrature, the isoparametric map of the cell vertices
+// (Mesh and FE share the VTK vertex order) and the physical basis gradients.
+// One element and one map per type, reused from cell to cell.
+class LagrangeCellMatrices {
+public:
+  // True when FE has a first-order Lagrange element of `type` with `count`
+  // nodes.
+  [[nodiscard]] bool supports(svmp::FE::ElementType type, std::size_t count)
+  {
+    const auto* entry = typeEntry(type);
+    return entry != nullptr && entry->element->num_nodes() == count;
+  }
+
+  // matrix[i * count + j] of the harmonic operator, sum_q w_q |det J_q|
+  // grad N_i . grad N_j, or of the least-squares normal operator, with
+  // n_q = grad phi_h(x_q) / |grad phi_h(x_q)| at every quadrature point.
+  // False for a degenerate cell (a zero, non-finite or sign-changing
+  // Jacobian determinant).
+  template <std::size_t N>
+  [[nodiscard]] bool compute(svmp::FE::ElementType type,
+                             int dim,
+                             std::span<const std::array<double, 3>> x,
+                             std::span<const double> phi,
+                             PdeVelocityExtensionOperator op,
+                             std::array<double, N * N>& matrix)
+  {
+    auto* entry = typeEntry(type);
+    const auto count = x.size();
+    if (entry == nullptr || entry->element->num_nodes() != count ||
+        count > N) {
+      return false;
+    }
+    nodes_.assign(count, svmp::FE::math::Vector<svmp::FE::Real, 3>{});
+    for (std::size_t i = 0; i < count; ++i) {
+      for (std::size_t d = 0; d < 3u; ++d) {
+        nodes_[i][d] = static_cast<svmp::FE::Real>(x[i][d]);
+      }
+    }
+    if (!entry->mapping) {
+      entry->mapping = svmp::FE::geometry::MappingFactory::create(
+          svmp::FE::geometry::MappingRequest{.element_type = type,
+                                             .geometry_order = 1,
+                                             .use_affine = false},
+          nodes_);
+    } else {
+      entry->mapping->resetNodes(nodes_);
+    }
+    const auto& basis = entry->element->basis();
+    const auto& rule = *entry->element->quadrature();
+    matrix.fill(0.0);
+    double orientation = 0.0;
+    for (std::size_t q = 0; q < rule.num_points(); ++q) {
+      const auto xi = rule.point(q);
+      const double det =
+          static_cast<double>(entry->mapping->jacobian_determinant(xi));
+      if (!std::isfinite(det) || det == 0.0 ||
+          (orientation != 0.0 && det * orientation <= 0.0)) {
+        return false;
+      }
+      orientation = det > 0.0 ? 1.0 : -1.0;
+      basis.evaluate_gradients(xi, reference_);
+      svmp::FE::elements::ElementTransform::gradients_to_physical(
+          *entry->mapping, xi, reference_, physical_);
+      const double weight = static_cast<double>(rule.weight(q)) * std::abs(det);
+      if (op == PdeVelocityExtensionOperator::Harmonic) {
+        for (std::size_t i = 0; i < count; ++i) {
+          for (std::size_t j = 0; j < count; ++j) {
+            double dot = 0.0;
+            for (int d = 0; d < dim; ++d) {
+              const auto c = static_cast<std::size_t>(d);
+              dot += static_cast<double>(physical_[i][c]) *
+                     static_cast<double>(physical_[j][c]);
+            }
+            matrix[i * count + j] += weight * dot;
+          }
+        }
+        continue;
+      }
+      std::array<double, 3> gphi{0.0, 0.0, 0.0};
+      for (std::size_t i = 0; i < count; ++i) {
+        for (int d = 0; d < dim; ++d) {
+          const auto c = static_cast<std::size_t>(d);
+          gphi[c] += phi[i] * static_cast<double>(physical_[i][c]);
+        }
+      }
+      const double gnorm =
+          std::sqrt(gphi[0] * gphi[0] + gphi[1] * gphi[1] + gphi[2] * gphi[2]);
+      if (!(gnorm > 0.0) || !std::isfinite(gnorm)) {
+        throw std::runtime_error(
+            "PDE least-squares normal extension found a dry cell with a zero "
+            "level-set gradient; the normal is undefined");
+      }
+      std::array<double, N> ndg{};
+      for (std::size_t i = 0; i < count; ++i) {
+        for (int d = 0; d < dim; ++d) {
+          const auto c = static_cast<std::size_t>(d);
+          ndg[i] += gphi[c] / gnorm * static_cast<double>(physical_[i][c]);
+        }
+      }
+      for (std::size_t i = 0; i < count; ++i) {
+        for (std::size_t j = 0; j < count; ++j) {
+          matrix[i * count + j] += weight * ndg[i] * ndg[j];
+        }
+      }
+    }
+    return true;
+  }
+
+private:
+  struct TypeEntry {
+    std::unique_ptr<svmp::FE::elements::LagrangeElement> element;
+    std::shared_ptr<svmp::FE::geometry::GeometryMapping> mapping;
+  };
+
+  [[nodiscard]] TypeEntry* typeEntry(svmp::FE::ElementType type)
+  {
+    const auto found = types_.find(type);
+    if (found != types_.end()) {
+      return found->second.element ? &found->second : nullptr;
+    }
+    auto& entry = types_[type];
+    try {
+      entry.element =
+          std::make_unique<svmp::FE::elements::LagrangeElement>(type, 1);
+    } catch (const std::exception&) {
+      entry.element.reset();
+    }
+    return entry.element ? &entry : nullptr;
+  }
+
+  std::map<svmp::FE::ElementType, TypeEntry> types_;
+  std::vector<svmp::FE::math::Vector<svmp::FE::Real, 3>> nodes_;
+  std::vector<svmp::FE::basis::Gradient> reference_;
+  std::vector<svmp::FE::math::Vector<svmp::FE::Real, 3>> physical_;
+};
+
+// One gathered cell: global cell ID, vertex count, vertex GIDs, element
+// matrix (count x count, row major).
+template <std::size_t N>
+struct CellRecordOf {
   std::int64_t cell_gid{0};
   std::int64_t count{0};
-  std::array<std::int64_t, 4> vertex_gid{0, 0, 0, 0};
-  std::array<double, 16> matrix{};
+  std::array<std::int64_t, N> vertex_gid{};
+  std::array<double, N * N> matrix{};
 };
+// Cells with at most four vertices (Triangle3, Quad4, Tetra4).
+using CellRecord = CellRecordOf<4>;
+// Cells with five to eight vertices (Pyramid5, Wedge6, Hex8), gathered
+// separately so that meshes without them exchange the same records as before.
+constexpr std::size_t kMaxCellVertices = 8u;
+using WideCellRecord = CellRecordOf<kMaxCellVertices>;
 
 // One gathered vertex (owned copy only).
 struct VertexRecord {
@@ -322,6 +475,45 @@ static_assert(std::is_trivially_copyable_v<CellRecord> &&
                   sizeof(CellRecord) ==
                       6u * sizeof(std::int64_t) + 16u * sizeof(double),
               "CellRecord must be padding-free for bitwise comparison");
+static_assert(std::is_trivially_copyable_v<WideCellRecord> &&
+                  sizeof(WideCellRecord) ==
+                      10u * sizeof(std::int64_t) + 64u * sizeof(double),
+              "WideCellRecord must be padding-free for bitwise comparison");
+
+// The gathered dry-region cells in canonical order (the narrow records by
+// cell ID, then the wide records by cell ID) with the canonical index of
+// every cell vertex.
+struct GatheredCells {
+  std::vector<CellRecord> narrow;
+  std::vector<std::array<std::size_t, 4>> narrow_vertices;
+  std::vector<WideCellRecord> wide;
+  std::vector<std::array<std::size_t, kMaxCellVertices>> wide_vertices;
+
+  [[nodiscard]] std::size_t size() const noexcept
+  {
+    return narrow.size() + wide.size();
+  }
+
+  // f(cell, vertices) for every cell, in canonical order.
+  template <typename F>
+  void forEach(F&& f) const
+  {
+    for (std::size_t k = 0; k < narrow.size(); ++k) {
+      f(narrow[k], narrow_vertices[k]);
+    }
+    for (std::size_t k = 0; k < wide.size(); ++k) {
+      f(wide[k], wide_vertices[k]);
+    }
+  }
+
+  [[nodiscard]] std::size_t bytes() const noexcept
+  {
+    return narrow.capacity() * sizeof(CellRecord) +
+           narrow_vertices.capacity() * sizeof(narrow_vertices.front()) +
+           wide.capacity() * sizeof(WideCellRecord) +
+           wide_vertices.capacity() * sizeof(wide_vertices.front());
+  }
+};
 
 // This rank's exact contribution to the dry-region systems and rows.
 struct LocalSignature {
@@ -329,6 +521,7 @@ struct LocalSignature {
   std::vector<svmp::gid_t> vertex_gids;
   std::vector<std::uint8_t> vertex_masks;
   std::vector<CellRecord> cells;
+  std::vector<WideCellRecord> wide_cells;
 };
 
 template <typename T>
@@ -345,7 +538,7 @@ template <typename T>
   return sameBytes(a.scalars, b.scalars) &&
          sameBytes(a.vertex_gids, b.vertex_gids) &&
          sameBytes(a.vertex_masks, b.vertex_masks) &&
-         sameBytes(a.cells, b.cells);
+         sameBytes(a.cells, b.cells) && sameBytes(a.wide_cells, b.wide_cells);
 }
 
 [[nodiscard]] bool sameDoubleBits(double a, double b) noexcept
@@ -487,6 +680,9 @@ private:
   hasher.addVector(signature.vertex_gids);
   hasher.addVector(signature.vertex_masks);
   hasher.addVector(signature.cells);
+  if (!signature.wide_cells.empty()) {
+    hasher.addVector(signature.wide_cells);
+  }
   return hasher.value();
 }
 
@@ -952,8 +1148,7 @@ struct PdeVelocityExtensionCache::Entry {
   LocalSignature signature;
   // Gathered system in canonical order (sorted cell and vertex IDs).  The
   // vertex values are replaced on every reuse.
-  std::vector<CellRecord> cells;
-  std::vector<std::array<std::size_t, 4>> cell_vertices;
+  GatheredCells cells;
   std::vector<VertexRecord> vertices;
   std::unordered_map<std::int64_t, std::size_t> vertex_index;
   // Position in the vertex-record gather -> canonical vertex index.
@@ -968,9 +1163,9 @@ struct PdeVelocityExtensionCache::Entry {
     total += signature.scalars.capacity() * sizeof(std::uint64_t) +
              signature.vertex_gids.capacity() * sizeof(svmp::gid_t) +
              signature.vertex_masks.capacity() +
-             signature.cells.capacity() * sizeof(CellRecord);
-    total += cells.capacity() * sizeof(CellRecord) +
-             cell_vertices.capacity() * sizeof(cell_vertices.front()) +
+             signature.cells.capacity() * sizeof(CellRecord) +
+             signature.wide_cells.capacity() * sizeof(WideCellRecord);
+    total += cells.bytes() +
              vertices.capacity() * sizeof(VertexRecord) +
              gathered_to_sorted.capacity() * sizeof(std::size_t);
     // Hash map: buckets plus one node per entry.
@@ -1356,6 +1551,9 @@ PdeVelocityExtensionReport extendVelocityByPde(
 
   // ---- local records -------------------------------------------------------
   std::vector<CellRecord> local_cells;
+  std::vector<WideCellRecord> local_wide_cells;
+  const svmp::FE::assembly::MeshAccess mesh_access(mesh);
+  LagrangeCellMatrices lagrange_matrices;
   // The first unsupported dry cell of this rank; every rank fails together.
   std::string unsupported_cell;
   for (std::size_t c = 0; c < n_cells; ++c) {
@@ -1385,12 +1583,73 @@ PdeVelocityExtensionReport extendVelocityByPde(
          (dim == 3 && shape.family == svmp::CellFamily::Tetra &&
           count == 4u));
     if (!simplex) {
-      if (unsupported_cell.empty()) {
-        unsupported_cell =
-            "; dry cell " + std::to_string(cell_gids[c]) + " is a " +
-            cellFamilyName(shape.family) + " cell with " +
-            std::to_string(count) + " vertices (order " +
-            std::to_string(shape.order) + ")";
+      // Other first-order cells: the FE Lagrange element of the cell type.
+      std::optional<svmp::FE::ElementType> type;
+      if (shape.order == 1) {
+        try {
+          const auto candidate = mesh_access.getCellType(
+              static_cast<svmp::FE::GlobalIndex>(cell));
+          if (svmp::FE::element_dimension(candidate) == dim &&
+              count <= kMaxCellVertices &&
+              lagrange_matrices.supports(candidate, count)) {
+            type = candidate;
+          }
+        } catch (const std::exception&) {
+          type.reset();
+        }
+      }
+      if (!type.has_value()) {
+        if (unsupported_cell.empty()) {
+          unsupported_cell =
+              "; dry cell " + std::to_string(cell_gids[c]) + " is a " +
+              cellFamilyName(shape.family) + " cell with " +
+              std::to_string(count) + " vertices (order " +
+              std::to_string(shape.order) + ")";
+        }
+        continue;
+      }
+      std::array<std::array<double, 3>, kMaxCellVertices> x{};
+      std::array<double, kMaxCellVertices> phi{};
+      for (std::size_t i = 0; i < count; ++i) {
+        const auto v = static_cast<std::size_t>(cv[i]);
+        for (int d = 0; d < dim; ++d) {
+          x[i][static_cast<std::size_t>(d)] = static_cast<double>(
+              coords[v * static_cast<std::size_t>(dim) +
+                     static_cast<std::size_t>(d)]);
+        }
+        phi[i] = level_set[v];
+        if (options.op != PdeVelocityExtensionOperator::Harmonic &&
+            !std::isfinite(phi[i])) {
+          throw std::runtime_error(
+              "PDE velocity extension found a non-finite level set");
+        }
+      }
+      const auto fill = [&](auto& record) {
+        record.cell_gid = static_cast<std::int64_t>(cell_gids[c]);
+        record.count = static_cast<std::int64_t>(count);
+        for (std::size_t i = 0; i < count; ++i) {
+          record.vertex_gid[i] = static_cast<std::int64_t>(
+              vertex_gids[static_cast<std::size_t>(cv[i])]);
+        }
+        constexpr std::size_t n = std::tuple_size_v<
+            std::remove_reference_t<decltype(record.vertex_gid)>>;
+        if (!lagrange_matrices.compute<n>(
+                *type, dim,
+                std::span<const std::array<double, 3>>(x.data(), count),
+                std::span<const double>(phi.data(), count), options.op,
+                record.matrix)) {
+          throw std::runtime_error(
+              "PDE velocity extension found a degenerate cell");
+        }
+      };
+      if (count <= 4u) {
+        CellRecord record;
+        fill(record);
+        local_cells.push_back(record);
+      } else {
+        WideCellRecord record;
+        fill(record);
+        local_wide_cells.push_back(record);
       }
       continue;
     }
@@ -1464,11 +1723,10 @@ PdeVelocityExtensionReport extendVelocityByPde(
   }
   if (globalMax(unsupported_cell.empty() ? 0.0 : 1.0, comm) > 0.0) {
     throw std::runtime_error(
-        "PDE velocity extension requires affine Triangle3 (2D) or Tetra4 "
-        "(3D) cells in the dry region" +
-        unsupported_cell +
-        ".  The PDE extension (pde_harmonic, pde_normal) needs triangle or "
-        "tetrahedral dry cells: mesh the dry region with simplices.");
+        "PDE velocity extension requires first-order Lagrange cells in the "
+        "dry region (Triangle3 or Quad4 in 2D; Tetra4, Hex8, Wedge6 or "
+        "Pyramid5 in 3D)" +
+        unsupported_cell + ".");
   }
 
   std::vector<VertexRecord> local_vertices;
@@ -1550,6 +1808,7 @@ PdeVelocityExtensionReport extendVelocityByPde(
       signature.vertex_masks[v] = bits;
     }
     signature.cells = local_cells;
+    signature.wide_cells = local_wide_cells;
 
     static_assert(ReuseVote::kSlots >= PdeVelocityExtensionCache::kMaxEntries);
     ReuseVote vote;
@@ -1632,10 +1891,9 @@ PdeVelocityExtensionReport extendVelocityByPde(
   const bool reuse = cached != nullptr;
 
   // ---- replicated global system -------------------------------------------
-  std::vector<CellRecord> gathered_cells;
+  GatheredCells gathered_cells;
   std::vector<VertexRecord> vertices;
   std::unordered_map<std::int64_t, std::size_t> gathered_vertex_index;
-  std::vector<std::array<std::size_t, 4>> gathered_cell_vertices;
   std::vector<std::size_t> gathered_to_sorted;
   if (reuse) {
     // Same structure: only the vertex values are gathered, in the order of
@@ -1657,7 +1915,8 @@ PdeVelocityExtensionReport extendVelocityByPde(
   } else {
     auto& cells = gathered_cells;
     auto& vertex_index = gathered_vertex_index;
-    cells = allGatherV(local_cells, comm);
+    cells.narrow = allGatherV(local_cells, comm);
+    cells.wide = allGatherV(local_wide_cells, comm);
     vertices = allGatherV(local_vertices, comm);
     std::vector<std::int64_t> gathered_gids;
     if (store_factorization) {
@@ -1666,8 +1925,12 @@ PdeVelocityExtensionReport extendVelocityByPde(
         gathered_gids.push_back(vertex.gid);
       }
     }
-    std::sort(cells.begin(), cells.end(),
+    std::sort(cells.narrow.begin(), cells.narrow.end(),
               [](const CellRecord& a, const CellRecord& b) {
+                return a.cell_gid < b.cell_gid;
+              });
+    std::sort(cells.wide.begin(), cells.wide.end(),
+              [](const WideCellRecord& a, const WideCellRecord& b) {
                 return a.cell_gid < b.cell_gid;
               });
     std::sort(vertices.begin(), vertices.end(),
@@ -1681,34 +1944,36 @@ PdeVelocityExtensionReport extendVelocityByPde(
             "PDE velocity extension gathered duplicate vertex records");
       }
     }
-    for (const auto& cell : cells) {
-      for (std::int64_t i = 0; i < cell.count; ++i) {
-        if (vertex_index.find(cell.vertex_gid[static_cast<std::size_t>(i)]) ==
-            vertex_index.end()) {
-          throw std::runtime_error(
-              "PDE velocity extension found a cell vertex without an owned "
-              "vertex record");
+    const auto index_vertices = [&](const auto& records, auto& indices) {
+      for (const auto& cell : records) {
+        for (std::int64_t i = 0; i < cell.count; ++i) {
+          if (vertex_index.find(cell.vertex_gid[static_cast<std::size_t>(i)]) ==
+              vertex_index.end()) {
+            throw std::runtime_error(
+                "PDE velocity extension found a cell vertex without an owned "
+                "vertex record");
+          }
         }
       }
-    }
-    gathered_cell_vertices.resize(cells.size());
-    for (std::size_t k = 0; k < cells.size(); ++k) {
-      for (std::int64_t i = 0; i < cells[k].count; ++i) {
-        const auto a = static_cast<std::size_t>(i);
-        gathered_cell_vertices[k][a] = vertex_index.at(cells[k].vertex_gid[a]);
+      indices.resize(records.size());
+      for (std::size_t k = 0; k < records.size(); ++k) {
+        for (std::int64_t i = 0; i < records[k].count; ++i) {
+          const auto a = static_cast<std::size_t>(i);
+          indices[k][a] = vertex_index.at(records[k].vertex_gid[a]);
+        }
       }
-    }
+    };
+    index_vertices(cells.narrow, cells.narrow_vertices);
+    index_vertices(cells.wide, cells.wide_vertices);
     gathered_to_sorted.reserve(gathered_gids.size());
     for (const auto gid : gathered_gids) {
       gathered_to_sorted.push_back(vertex_index.at(gid));
     }
   }
+  // The cells and the canonical index of every cell vertex.
   const auto& cells = reuse ? cached->cells : gathered_cells;
   const auto& vertex_index =
       reuse ? cached->vertex_index : gathered_vertex_index;
-  // Canonical vertex index of every cell vertex.
-  const auto& cell_vertices =
-      reuse ? cached->cell_vertices : gathered_cell_vertices;
 
   PdeVelocityExtensionReport report;
   report.reused_factorization = reuse;
@@ -1833,21 +2098,21 @@ PdeVelocityExtensionReport extendVelocityByPde(
       ++report.shared_factorizations;
     } else {
       svmp::FE::sparsity::SparsityPattern pattern(n_unknown, n_unknown);
-      for (std::size_t k = 0; k < cells.size(); ++k) {
-        const auto count = static_cast<std::size_t>(cells[k].count);
+      cells.forEach([&](const auto& cell, const auto& cell_vertices) {
+        const auto count = static_cast<std::size_t>(cell.count);
         for (std::size_t a = 0; a < count; ++a) {
-          const auto ia = unknown[cell_vertices[k][a]];
+          const auto ia = unknown[cell_vertices[a]];
           if (ia < 0) {
             continue;
           }
           for (std::size_t b = 0; b < count; ++b) {
-            const auto ib = unknown[cell_vertices[k][b]];
+            const auto ib = unknown[cell_vertices[b]];
             if (ib >= 0) {
               pattern.addEntry(ia, ib);
             }
           }
         }
-      }
+      });
       for (svmp::FE::GlobalIndex i = 0; i < n_unknown; ++i) {
         pattern.addEntry(i, i);
       }
@@ -1862,14 +2127,15 @@ PdeVelocityExtensionReport extendVelocityByPde(
       {
         auto view = assembled->createAssemblyView();
         view->beginAssemblyPhase();
-        for (std::size_t k = 0; k < cells.size(); ++k) {
-          const auto& cell = cells[k];
+        cells.forEach([&](const auto& cell, const auto& cell_vertices) {
+          constexpr std::size_t n_max = std::tuple_size_v<
+              std::remove_reference_t<decltype(cell.vertex_gid)>>;
           const auto count = static_cast<std::size_t>(cell.count);
-          std::array<svmp::FE::GlobalIndex, 4> dofs{};
-          std::array<std::size_t, 4> local{};
+          std::array<svmp::FE::GlobalIndex, n_max> dofs{};
+          std::array<std::size_t, n_max> local{};
           std::size_t n_local = 0u;
           for (std::size_t a = 0; a < count; ++a) {
-            const auto ia = unknown[cell_vertices[k][a]];
+            const auto ia = unknown[cell_vertices[a]];
             if (ia >= 0) {
               dofs[n_local] = ia;
               local[n_local] = a;
@@ -1877,9 +2143,9 @@ PdeVelocityExtensionReport extendVelocityByPde(
             }
           }
           if (n_local == 0u) {
-            continue;
+            return;
           }
-          std::array<double, 16> block{};
+          std::array<double, n_max * n_max> block{};
           for (std::size_t p = 0; p < n_local; ++p) {
             for (std::size_t q = 0; q < n_local; ++q) {
               block[p * n_local + q] = cell.matrix[local[p] * count + local[q]];
@@ -1889,7 +2155,7 @@ PdeVelocityExtensionReport extendVelocityByPde(
               std::span<const svmp::FE::GlobalIndex>(dofs.data(), n_local),
               std::span<const double>(block.data(), n_local * n_local),
               svmp::FE::assembly::AddMode::Add);
-        }
+        });
         view->endAssemblyPhase();
         view->finalizeAssembly();
       }
@@ -1908,23 +2174,22 @@ PdeVelocityExtensionReport extendVelocityByPde(
     // Dirichlet data of the known and wall-fixed vertices, accumulated in the
     // canonical cell order.
     std::vector<double> rhs(static_cast<std::size_t>(n_unknown), 0.0);
-    for (std::size_t k = 0; k < cells.size(); ++k) {
-      const auto& cell = cells[k];
+    cells.forEach([&](const auto& cell, const auto& cell_vertices) {
       const auto count = static_cast<std::size_t>(cell.count);
       for (std::size_t a = 0; a < count; ++a) {
-        const auto ia = unknown[cell_vertices[k][a]];
+        const auto ia = unknown[cell_vertices[a]];
         if (ia < 0) {
           continue;
         }
         for (std::size_t bb = 0; bb < count; ++bb) {
-          const auto j = cell_vertices[k][bb];
+          const auto j = cell_vertices[bb];
           if (unknown[j] < 0) {
             rhs[static_cast<std::size_t>(ia)] -=
                 cell.matrix[a * count + bb] * solution[j * 3u + component];
           }
         }
       }
-    }
+    });
     {
       auto span = b->localSpan();
       std::copy(rhs.begin(), rhs.end(), span.begin());
@@ -2175,7 +2440,7 @@ PdeVelocityExtensionReport extendVelocityByPde(
                             std::map<std::int64_t, double>{});
       }
     }
-    for (const auto& cell : cells) {
+    cells.forEach([&](const auto& cell, const auto&) {
       const auto count = static_cast<std::size_t>(cell.count);
       for (std::size_t a = 0; a < count; ++a) {
         const auto found = row_entries.find(cell.vertex_gid[a]);
@@ -2186,7 +2451,7 @@ PdeVelocityExtensionReport extendVelocityByPde(
           found->second[cell.vertex_gid[b]] += cell.matrix[a * count + b];
         }
       }
-    }
+    });
     for (std::size_t v = 0; v < n_vertices; ++v) {
       if (!ownsVertex(mesh, comm, v)) {
         continue;
@@ -2308,7 +2573,6 @@ PdeVelocityExtensionReport extendVelocityByPde(
       fresh->distributed_solves = distributed_solves;
       fresh->signature = std::move(signature);
       fresh->cells = std::move(gathered_cells);
-      fresh->cell_vertices = std::move(gathered_cell_vertices);
       fresh->vertices = std::move(vertices);
       for (auto& vertex : fresh->vertices) {
         vertex.value = {0.0, 0.0, 0.0};

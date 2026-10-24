@@ -630,38 +630,398 @@ TEST(LevelSetPdeVelocityExtension, RejectsInvalidInput)
                std::runtime_error);
 }
 
-// Quad dry cells fail on every rank with a message that names the cell type
-// (decision D55: the Quad4 open-vessel decks fail closed).
-TEST(LevelSetPdeVelocityExtension, RejectsQuadDryCellsByName)
+// ---- every first-order cell type ------------------------------------------
+
+namespace {
+
+
+// A mesh from vertex coordinates (dim per vertex) and cells of one shape each.
+std::shared_ptr<svmp::Mesh> makeCellMesh(
+    int dim,
+    const std::vector<double>& coordinates,
+    const std::vector<std::vector<svmp::index_t>>& cells,
+    const std::vector<svmp::CellShape>& shapes)
 {
   auto base = std::make_shared<svmp::MeshBase>();
-  const std::vector<svmp::real_t> x{0.0, 0.0, 1.0, 0.0, 2.0, 0.0,
-                                    0.0, 1.0, 1.0, 1.0, 2.0, 1.0};
-  const std::vector<svmp::offset_t> offsets{0, 4, 8};
-  const std::vector<svmp::index_t> connectivity{0, 1, 4, 3, 1, 2, 5, 4};
-  svmp::CellShape quad{};
-  quad.family = svmp::CellFamily::Quad;
-  quad.num_corners = 4;
-  quad.order = 1;
-  base->build_from_arrays(2, x, offsets, connectivity, {quad, quad});
+  std::vector<svmp::real_t> x(coordinates.begin(), coordinates.end());
+  std::vector<svmp::offset_t> offsets{0};
+  std::vector<svmp::index_t> connectivity;
+  for (const auto& cell : cells) {
+    connectivity.insert(connectivity.end(), cell.begin(), cell.end());
+    offsets.push_back(static_cast<svmp::offset_t>(connectivity.size()));
+  }
+  base->build_from_arrays(dim, x, offsets, connectivity, shapes);
   base->finalize();
-  const auto mesh = svmp::create_mesh(std::move(base));
+  return svmp::create_mesh(std::move(base));
+}
 
-  // Known: the vertices of the first (cut) quad; dry: the right column.
-  const auto s = makeSetup(
-      *mesh,
-      [](double x, double) { return x - 0.5; },
-      [](double, double) { return std::array<double, 2>{1.0, 1.0}; });
-  ASSERT_EQ(s.known, (std::vector<std::uint8_t>{1u, 1u, 0u, 1u, 1u, 0u}));
+svmp::CellShape firstOrderShape(svmp::CellFamily family, int corners)
+{
+  svmp::CellShape shape{};
+  shape.family = family;
+  shape.num_corners = corners;
+  shape.order = 1;
+  return shape;
+}
+
+// The unit-cube cells of an nx x ny x nz grid, split by the type of each
+// column of cubes (x index): Hex8, two Wedge6 (the xy square cut along one
+// diagonal, the same in every cube) or six Pyramid5 around a centre vertex.
+enum class CubeSplit { Hex, Wedge, Pyramid };
+
+std::shared_ptr<svmp::Mesh> makeCubeMesh(
+    int nx, int ny, int nz,
+    const std::function<CubeSplit(int)>& split_of_column)
+{
+  std::vector<double> x;
+  const auto vid = [&](int i, int j, int k) {
+    return static_cast<svmp::index_t>((k * (ny + 1) + j) * (nx + 1) + i);
+  };
+  for (int k = 0; k <= nz; ++k) {
+    for (int j = 0; j <= ny; ++j) {
+      for (int i = 0; i <= nx; ++i) {
+        x.insert(x.end(), {static_cast<double>(i), static_cast<double>(j),
+                           static_cast<double>(k)});
+      }
+    }
+  }
+  const auto point = [&](svmp::index_t v) {
+    const auto o = static_cast<std::size_t>(3 * v);
+    return std::array<double, 3>{x[o], x[o + 1], x[o + 2]};
+  };
+  std::vector<std::vector<svmp::index_t>> cells;
+  std::vector<svmp::CellShape> shapes;
+  for (int k = 0; k < nz; ++k) {
+    for (int j = 0; j < ny; ++j) {
+      for (int i = 0; i < nx; ++i) {
+        const auto a = vid(i, j, k), b = vid(i + 1, j, k),
+                   c = vid(i + 1, j + 1, k), d = vid(i, j + 1, k);
+        const auto e = vid(i, j, k + 1), f = vid(i + 1, j, k + 1),
+                   g = vid(i + 1, j + 1, k + 1), h = vid(i, j + 1, k + 1);
+        switch (split_of_column(i)) {
+        case CubeSplit::Hex:
+          cells.push_back({a, b, c, d, e, f, g, h});
+          shapes.push_back(firstOrderShape(svmp::CellFamily::Hex, 8));
+          break;
+        case CubeSplit::Wedge:
+          cells.push_back({a, b, c, e, f, g});
+          cells.push_back({a, c, d, e, g, h});
+          shapes.push_back(firstOrderShape(svmp::CellFamily::Wedge, 6));
+          shapes.push_back(firstOrderShape(svmp::CellFamily::Wedge, 6));
+          break;
+        case CubeSplit::Pyramid: {
+          const auto centre = static_cast<svmp::index_t>(x.size() / 3u);
+          x.insert(x.end(), {i + 0.5, j + 0.5, k + 0.5});
+          const std::array<std::array<svmp::index_t, 4>, 6> faces{{
+              {a, b, c, d}, {e, f, g, h}, {a, b, f, e},
+              {b, c, g, f}, {c, d, h, g}, {d, a, e, h}}};
+          for (auto face : faces) {
+            // Base normal towards the apex (positive volume).
+            const auto p0 = point(face[0]), p1 = point(face[1]),
+                       p2 = point(face[2]), apex = point(centre);
+            const std::array<double, 3> u{p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]};
+            const std::array<double, 3> v{p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]};
+            const std::array<double, 3> w{apex[0] - p0[0], apex[1] - p0[1],
+                                          apex[2] - p0[2]};
+            const double volume = (u[1] * v[2] - u[2] * v[1]) * w[0] +
+                                  (u[2] * v[0] - u[0] * v[2]) * w[1] +
+                                  (u[0] * v[1] - u[1] * v[0]) * w[2];
+            if (volume < 0.0) {
+              std::swap(face[1], face[3]);
+            }
+            cells.push_back({face[0], face[1], face[2], face[3], centre});
+            shapes.push_back(firstOrderShape(svmp::CellFamily::Pyramid, 5));
+          }
+          break;
+        }
+        }
+      }
+    }
+  }
+  return makeCellMesh(3, x, cells, shapes);
+}
+
+// The unit-square cells of an n x n grid: Quad4 in the columns where
+// `quad_column` holds, two Triangle3 elsewhere.
+std::shared_ptr<svmp::Mesh> makeSquareMesh(
+    int n, const std::function<bool(int)>& quad_column)
+{
+  std::vector<double> x;
+  for (int j = 0; j <= n; ++j) {
+    for (int i = 0; i <= n; ++i) {
+      x.insert(x.end(), {static_cast<double>(i) / n, static_cast<double>(j) / n});
+    }
+  }
+  const auto vid = [n](int i, int j) {
+    return static_cast<svmp::index_t>(j * (n + 1) + i);
+  };
+  std::vector<std::vector<svmp::index_t>> cells;
+  std::vector<svmp::CellShape> shapes;
+  for (int j = 0; j < n; ++j) {
+    for (int i = 0; i < n; ++i) {
+      const auto a = vid(i, j), b = vid(i + 1, j), c = vid(i + 1, j + 1),
+                 d = vid(i, j + 1);
+      if (quad_column(i)) {
+        cells.push_back({a, b, c, d});
+        shapes.push_back(firstOrderShape(svmp::CellFamily::Quad, 4));
+      } else {
+        cells.push_back({a, b, c});
+        cells.push_back({a, c, d});
+        shapes.push_back(firstOrderShape(svmp::CellFamily::Triangle, 3));
+        shapes.push_back(firstOrderShape(svmp::CellFamily::Triangle, 3));
+      }
+    }
+  }
+  return makeCellMesh(2, x, cells, shapes);
+}
+
+// Phi, a linear source of `components` components and the production known
+// set (wet vertices plus every vertex of a cell the zero level crosses),
+// optionally with every boundary vertex of the box known as well.
+struct CellSetup {
+  std::vector<double> phi;
+  std::vector<double> source;
+  std::vector<std::uint8_t> known;
+  std::size_t components{0u};
+};
+
+CellSetup makeCellSetup(
+    const svmp::Mesh& mesh,
+    const std::function<double(const std::array<double, 3>&)>& phi_fn,
+    const std::function<std::array<double, 3>(const std::array<double, 3>&)>&
+        u_fn,
+    bool boundary_known)
+{
+  CellSetup s;
+  const auto n = mesh.n_vertices();
+  const int dim = mesh.dim();
+  s.components = static_cast<std::size_t>(dim);
+  s.phi.resize(n);
+  s.source.resize(n * s.components);
+  s.known.assign(n, 0u);
+  std::array<double, 3> lo{1e300, 1e300, 1e300};
+  std::array<double, 3> hi{-1e300, -1e300, -1e300};
+  std::vector<std::array<double, 3>> points(n);
+  for (std::size_t v = 0; v < n; ++v) {
+    for (int d = 0; d < dim; ++d) {
+      points[v][static_cast<std::size_t>(d)] = static_cast<double>(
+          mesh.X_ref()[v * static_cast<std::size_t>(dim) +
+                       static_cast<std::size_t>(d)]);
+      lo[static_cast<std::size_t>(d)] =
+          std::min(lo[static_cast<std::size_t>(d)], points[v][static_cast<std::size_t>(d)]);
+      hi[static_cast<std::size_t>(d)] =
+          std::max(hi[static_cast<std::size_t>(d)], points[v][static_cast<std::size_t>(d)]);
+    }
+  }
+  for (std::size_t v = 0; v < n; ++v) {
+    s.phi[v] = phi_fn(points[v]);
+    const auto u = u_fn(points[v]);
+    for (std::size_t c = 0; c < s.components; ++c) {
+      s.source[v * s.components + c] = u[c];
+    }
+    s.known[v] = s.phi[v] < 0.0 ? 1u : 0u;
+    if (boundary_known) {
+      for (int d = 0; d < dim; ++d) {
+        const auto c = static_cast<std::size_t>(d);
+        if (std::abs(points[v][c] - lo[c]) < 1e-12 ||
+            std::abs(points[v][c] - hi[c]) < 1e-12) {
+          s.known[v] = 1u;
+        }
+      }
+    }
+  }
+  const auto& local = mesh.local_mesh();
+  for (svmp::index_t c = 0; c < local.n_cells(); ++c) {
+    auto [cv, count] = local.cell_vertices_span(c);
+    bool neg = false, pos = false;
+    for (std::size_t i = 0; i < count; ++i) {
+      neg = neg || s.phi[static_cast<std::size_t>(cv[i])] < 0.0;
+      pos = pos || s.phi[static_cast<std::size_t>(cv[i])] >= 0.0;
+    }
+    if (neg && pos) {
+      for (std::size_t i = 0; i < count; ++i) {
+        s.known[static_cast<std::size_t>(cv[i])] = 1u;
+      }
+    }
+  }
+  return s;
+}
+
+std::vector<double> runCells(const svmp::Mesh& mesh, const CellSetup& s,
+                             PdeVelocityExtensionOperator op,
+                             svmp::FE::level_set::PdeVelocityExtensionReport*
+                                 report = nullptr)
+{
+  std::vector<double> out;
+  PdeVelocityExtensionOptions options;
+  options.op = op;
+  options.enforce_wall_impermeability = false;
+  const auto r = extendVelocityByPde(
+      mesh, svmp::MeshComm::self(), s.phi, s.source, s.components, s.known,
+      s.components, std::span<const WallVelocityExtensionConstraint>{}, options,
+      out);
+  if (report != nullptr) {
+    *report = r;
+  }
+  return out;
+}
+
+struct NamedMesh {
+  std::string name;
+  std::shared_ptr<svmp::Mesh> mesh;
+};
+
+// Every first-order cell type FE has a Lagrange element for, alone and mixed.
+std::vector<NamedMesh> everyCellTypeMesh()
+{
+  return {
+      {"Quad4", makeSquareMesh(4, [](int) { return true; })},
+      {"Triangle3+Quad4", makeSquareMesh(4, [](int i) { return i % 2 == 0; })},
+      {"Hex8", makeCubeMesh(3, 3, 3, [](int) { return CubeSplit::Hex; })},
+      {"Wedge6", makeCubeMesh(3, 3, 3, [](int) { return CubeSplit::Wedge; })},
+      {"Pyramid5", makeCubeMesh(2, 2, 2, [](int) { return CubeSplit::Pyramid; })},
+      {"Hex8+Wedge6+Pyramid5",
+       makeCubeMesh(3, 2, 2,
+                    [](int i) {
+                      return i == 0 ? CubeSplit::Hex
+                                    : i == 1 ? CubeSplit::Wedge
+                                             : CubeSplit::Pyramid;
+                    })},
+  };
+}
+
+} // namespace
+
+// Every boundary vertex known: a field linear in x is the exact discrete
+// harmonic extension on every cell type (FE reproduces linear fields and
+// its quadrature integrates the basis gradients exactly on these affine
+// cells), as for simplices.
+TEST(LevelSetPdeVelocityExtensionCells, HarmonicReproducesLinearFields)
+{
+  for (const auto& [name, mesh] : everyCellTypeMesh()) {
+    SCOPED_TRACE(name);
+    const int dim = mesh->dim();
+    const auto s = makeCellSetup(
+        *mesh,
+        [dim](const std::array<double, 3>& p) {
+          return p[static_cast<std::size_t>(dim - 1)] -
+                 (dim == 2 ? 0.43 : 0.37);
+        },
+        [](const std::array<double, 3>& p) {
+          return std::array<double, 3>{0.3 + 1.7 * p[0] - 0.4 * p[1] + 0.2 * p[2],
+                                       -0.2 + 0.5 * p[0] + 2.1 * p[1] - 0.3 * p[2],
+                                       0.9 - 0.6 * p[0] + 0.1 * p[1] + 1.1 * p[2]};
+        },
+        /*boundary_known=*/true);
+    svmp::FE::level_set::PdeVelocityExtensionReport report;
+    const auto w =
+        runCells(*mesh, s, PdeVelocityExtensionOperator::Harmonic, &report);
+    EXPECT_GT(report.extension_vertices, 0u);
+    EXPECT_GT(report.extension_cells, 0u);
+    EXPECT_LT(report.max_relative_residual, 1e-10);
+    ASSERT_EQ(w.size(), s.source.size());
+    for (std::size_t i = 0; i < w.size(); ++i) {
+      EXPECT_NEAR(w[i], s.source[i], 1e-10) << "entry " << i;
+    }
+  }
+}
+
+// The least-squares normal extension of a field that is constant along the
+// (tilted) level-set normal is that field on every cell type; the normal is
+// evaluated at every quadrature point.
+TEST(LevelSetPdeVelocityExtensionCells, NormalExtensionIsConstantAlongNormals)
+{
+  for (const auto& [name, mesh] : everyCellTypeMesh()) {
+    SCOPED_TRACE(name);
+    const int dim = mesh->dim();
+    // n is proportional to (-0.2, 1) in 2D and (-0.2, 0.1, 1) in 3D.
+    const auto phi = [dim](const std::array<double, 3>& p) {
+      return dim == 2 ? (p[1] - 0.4) - 0.2 * (p[0] - 0.5)
+                      : (p[2] - 0.37) - 0.2 * (p[0] - 0.5) + 0.1 * (p[1] - 0.5);
+    };
+    // Linear in the coordinates orthogonal to n.
+    const auto u = [dim](const std::array<double, 3>& p) {
+      const double t = p[0] + 0.2 * (dim == 2 ? p[1] : p[2]);
+      const double r = dim == 2 ? 0.0 : p[1] - 0.1 * p[2];
+      return std::array<double, 3>{0.7 - 1.3 * t + 0.4 * r, 0.1 + 2.2 * t - r,
+                                   -0.5 + 0.3 * t + 0.6 * r};
+    };
+    const auto s = makeCellSetup(*mesh, phi, u, /*boundary_known=*/true);
+    svmp::FE::level_set::PdeVelocityExtensionReport report;
+    const auto w = runCells(
+        *mesh, s, PdeVelocityExtensionOperator::LeastSquaresNormal, &report);
+    EXPECT_GT(report.extension_vertices, 0u);
+    EXPECT_LT(report.max_relative_residual, 1e-10);
+    for (std::size_t i = 0; i < w.size(); ++i) {
+      EXPECT_NEAR(w[i], s.source[i], 1e-10) << "entry " << i;
+    }
+  }
+}
+
+// With the natural condition on the outer boundary of the dry region, a
+// constant field is reproduced and the known vertices keep their values
+// bit for bit.
+TEST(LevelSetPdeVelocityExtensionCells, HarmonicKeepsConstantsAndKnownValues)
+{
+  for (const auto& [name, mesh] : everyCellTypeMesh()) {
+    SCOPED_TRACE(name);
+    const int dim = mesh->dim();
+    auto s = makeCellSetup(
+        *mesh,
+        [dim](const std::array<double, 3>& p) {
+          return p[static_cast<std::size_t>(dim - 1)] -
+                 (dim == 2 ? 0.43 : 0.37);
+        },
+        [](const std::array<double, 3>&) {
+          return std::array<double, 3>{0.25, -1.5, 3.0};
+        },
+        /*boundary_known=*/false);
+    const auto w = runCells(*mesh, s, PdeVelocityExtensionOperator::Harmonic);
+    for (std::size_t v = 0; v < mesh->n_vertices(); ++v) {
+      for (std::size_t c = 0; c < s.components; ++c) {
+        const auto i = v * s.components + c;
+        if (s.known[v] != 0u) {
+          EXPECT_EQ(w[i], s.source[i]) << "known vertex " << v;
+        } else {
+          EXPECT_NEAR(w[i], s.source[i], 1e-12) << "dry vertex " << v;
+        }
+      }
+    }
+  }
+}
+
+// Cells FE has no first-order Lagrange element for (here a biquadratic
+// quadrilateral) still fail on every rank with a message that names them.
+TEST(LevelSetPdeVelocityExtension, RejectsUnsupportedDryCellsByName)
+{
+  svmp::CellShape quad9{};
+  quad9.family = svmp::CellFamily::Quad;
+  quad9.num_corners = 4;
+  quad9.order = 2;
+  const auto mesh = makeCellMesh(
+      2,
+      {0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.5, 0.0, 1.0, 0.5, 0.5, 1.0,
+       0.0, 0.5, 0.5, 0.5},
+      {{0, 1, 2, 3, 4, 5, 6, 7, 8}}, {quad9});
+  auto s = makeCellSetup(
+      *mesh, [](const std::array<double, 3>& p) { return p[0] - 0.25; },
+      [](const std::array<double, 3>&) {
+        return std::array<double, 3>{1.0, 1.0, 0.0};
+      },
+      /*boundary_known=*/false);
+  // Only the wet vertices are known, so the cell holds dry vertices.
+  for (std::size_t v = 0; v < s.known.size(); ++v) {
+    s.known[v] = s.phi[v] < 0.0 ? 1u : 0u;
+  }
   try {
-    (void)run(*mesh, s, PdeVelocityExtensionOperator::Harmonic, {});
-    ADD_FAILURE() << "Quad dry cells accepted";
+    (void)runCells(*mesh, s, PdeVelocityExtensionOperator::Harmonic);
+    ADD_FAILURE() << "unsupported dry cell accepted";
   } catch (const std::runtime_error& error) {
     const std::string message = error.what();
-    EXPECT_NE(message.find("Quad cell with 4 vertices"), std::string::npos)
-        << message;
-    EXPECT_NE(message.find("triangle or tetrahedral dry cells"),
+    EXPECT_NE(message.find("Quad cell with 9 vertices (order 2)"),
               std::string::npos)
+        << message;
+    EXPECT_NE(message.find("first-order Lagrange cells"), std::string::npos)
         << message;
   }
 }

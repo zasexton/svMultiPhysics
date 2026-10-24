@@ -64,9 +64,12 @@ The PDE velocity extension of the level-set advection velocity
 `FE/LevelSet/Extension`: the dry-region solve
 (`LevelSetPdeVelocityExtension.h`), its known set and frozen-map revision
 (`LevelSetVelocityExtensionSeed.h`) and its wall data
-(`LevelSetVelocityExtensionWall.h`). The algebraic wall-compatible and
-nearest-sample wet extensions of the application were retired by decisions D47
-and D55.
+(`LevelSetVelocityExtensionWall.h`). It works on every first-order Lagrange
+cell (Triangle3, Quad4, Tetra4, Hex8, Wedge6, Pyramid5) and on meshes that mix
+them: simplices keep their constant P1 gradients, the other cells use the FE
+Lagrange element of their type, its quadrature and the isoparametric map. The
+algebraic wall-compatible and nearest-sample wet extensions of the application
+were retired by decisions D47 and D55.
 
 ## Production Transport Contract
 

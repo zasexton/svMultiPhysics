@@ -27,6 +27,15 @@
 // condition.  Components are independent because every supported wall mask is
 // axis-aligned.
 //
+// Cells: every first-order Lagrange cell (Triangle3 and Quad4 in 2D; Tetra4,
+// Hex8, Wedge6 and Pyramid5 in 3D), mixed freely.  Simplices use their
+// constant P1 gradients and cell normal; the other cells use the FE Lagrange
+// element of their type (basis, stiffness quadrature, isoparametric map) and,
+// for LeastSquaresNormal, the normal of grad(phi_h) at every quadrature point.
+// Other dry cells fail on every rank with a message that names them.  The
+// wet-to-dry guard and the convergence assume shape-regular dry cells next
+// to the known set.
+//
 // The system is small (dry vertices only).  Each rank contributes the element
 // matrices of its owned cells; every rank assembles the same global system in
 // a canonical order (sorted global IDs) and solves it with the FE Eigen
