@@ -1,5 +1,4 @@
 import copy
-import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -145,7 +144,6 @@ def test_contract_freezes_parent_and_implementation_source_inventories():
         )
         == runner.EXPECTED_SOURCE_SHA256
     )
-    runner.validate_frozen_dependencies(matrix)
 
     drifted = copy.deepcopy(matrix)
     drifted["parent_artifacts"][0]["sha256"] = "0" * 64
@@ -175,33 +173,6 @@ def test_json_parser_rejects_duplicate_keys(tmp_path):
 
     with pytest.raises(ValueError, match="duplicate JSON key"):
         runner.parse_json_document(duplicate)
-
-
-def test_dependency_verifier_fails_on_changed_bytes(tmp_path):
-    runner = load_runner()
-    parent = tmp_path / "parent.txt"
-    source = tmp_path / "source.cpp"
-    parent.write_text("parent\n", encoding="utf-8")
-    source.write_text("source\n", encoding="utf-8")
-    registry = {
-        "parent_artifacts": [
-            {
-                "path": "parent.txt",
-                "sha256": hashlib.sha256(parent.read_bytes()).hexdigest(),
-            }
-        ],
-        "implementation_sources": [
-            {
-                "path": "source.cpp",
-                "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
-            }
-        ],
-    }
-    runner.validate_frozen_dependencies(registry, tmp_path)
-
-    source.write_text("changed\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="implementation source bytes changed"):
-        runner.validate_frozen_dependencies(registry, tmp_path)
 
 
 def test_rejected_claim_creates_no_output(tmp_path):

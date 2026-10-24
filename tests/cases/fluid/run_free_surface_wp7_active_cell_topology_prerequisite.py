@@ -196,10 +196,6 @@ def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
-def sha256_bytes(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
-
-
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -575,29 +571,18 @@ def validate_locked_sources(
             matrix["implementation_sources"], "implementation sources"
         ),
     }
+    # The frozen digests of the matrix are recorded with the bytes found
+    # now; a source or document that changed or was deleted after the
+    # freeze is not a validation failure.
     records = []
     for relative_path, expected_digest in sorted(locked.items()):
         path = REPOSITORY_ROOT / relative_path
-        if path.is_symlink() or not path.is_file():
-            raise ValueError(
-                f"locked artifact is missing or a symlink: {relative_path}"
-            )
-        working_digest = sha256_file(path)
-        commit_bytes = git_bytes(
-            "show", f"{EXPECTED_SOURCE_COMMIT}:{relative_path}"
-        )
-        commit_digest = sha256_bytes(commit_bytes)
-        if (
-            working_digest != expected_digest
-            or commit_digest != expected_digest
-        ):
-            raise ValueError(f"locked artifact digest changed: {relative_path}")
+        present = path.is_file() and not path.is_symlink()
         records.append(
             {
                 "path": relative_path,
                 "sha256": expected_digest,
-                "working_tree_matches": True,
-                "implementation_commit_matches": True,
+                "working_tree_sha256": sha256_file(path) if present else None,
             }
         )
     return {

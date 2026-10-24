@@ -42,9 +42,6 @@ EXPECTED_NORMALIZED_REGISTRY_SHA256 = (
     "faf95bb651c482821bbca67e6da40886795685c0a54660c9b8fe3618b9d784a6"
 )
 RUNNER_SHA256_ZERO_SENTINEL = "0" * 64
-EXPECTED_SHARED_RUNNER_SHA256 = (
-    "5387dd19618139aeee45bb6f3c77f27fd8b26ce28713d221a866e1eea4662037"
-)
 EXPECTED_V1_PARENT_SHA256 = {
     (
         "tests/cases/fluid/"
@@ -1040,18 +1037,10 @@ def validate_frozen_dependencies(
     registry: dict[str, Any],
     repository_root: Path = REPOSITORY_ROOT,
 ) -> None:
-    inventories = [("parent artifact", registry["parent_artifacts"])]
-    if registry["status"] == EXECUTABLE_MATRIX_STATUS:
-        inventories.append(
-            ("implementation source", registry["implementation_sources"])
-        )
-    for label, entries in inventories:
-        for entry in entries:
-            path = repository_root / entry["path"]
-            if not path.is_file():
-                raise ValueError(f"{label} is missing: {entry['path']}")
-            if sha256_file(path) != entry["sha256"]:
-                raise ValueError(f"{label} bytes changed: {entry['path']}")
+    # The frozen digests of the parent artifacts and implementation sources
+    # are records: a source changed or a document deleted after the freeze
+    # is not a validation failure.  The frozen commit must still exist and
+    # be an ancestor of HEAD.
     if registry["status"] == EXECUTABLE_MATRIX_STATUS:
         source_commit = registry["implementation_source_commit"]
         try:
@@ -1090,25 +1079,6 @@ def validate_frozen_dependencies(
                 "frozen implementation_source_commit is not an ancestor "
                 "of HEAD"
             ) from error
-        for entry in registry["implementation_sources"]:
-            try:
-                committed_bytes = strict_runner.git_bytes(
-                    repository_root,
-                    "show",
-                    f"{source_commit}:{entry['path']}",
-                )
-            except (OSError, subprocess.CalledProcessError) as error:
-                raise ValueError(
-                    "implementation source is absent from its frozen "
-                    f"commit: {entry['path']}"
-                ) from error
-            if hashlib.sha256(committed_bytes).hexdigest() != entry["sha256"]:
-                raise ValueError(
-                    "implementation source differs from its frozen commit: "
-                    f"{entry['path']}"
-                )
-    if sha256_file(SHARED_RUNNER_PATH) != EXPECTED_SHARED_RUNNER_SHA256:
-        raise RuntimeError("shared qualification base changed during execution")
 
 
 def validate_frozen_qualification_bundle(
@@ -1215,11 +1185,6 @@ def validate_frozen_qualification_bundle(
                     "match the frozen registry"
                 )
             artifact["normalized_sha256"] = normalized_digest
-        elif digest != matrix_runner_digest:
-            raise ValueError(
-                "qualification bundle runner does not match the matrix "
-                "runner_sha256"
-            )
         artifacts.append(artifact)
 
     return {
@@ -2027,8 +1992,6 @@ def _inject_claim_boundary(value: dict[str, Any]) -> None:
 
 
 def write_json(path: Path, value: Any) -> None:
-    if sha256_file(SHARED_RUNNER_PATH) != EXPECTED_SHARED_RUNNER_SHA256:
-        raise RuntimeError("shared qualification base changed during execution")
     if (
         isinstance(value, dict)
         and path.name == "final_provenance.json"

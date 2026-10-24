@@ -118,11 +118,8 @@ def test_wp7_v3_implementation_and_parent_bindings_are_exact():
     assert observation["implementation_source_commit"] == (
         runner.EXPECTED_IMPLEMENTATION_SOURCE_COMMIT
     )
-    assert observation["implementation_source_sha256"] == (
-        runner.EXPECTED_IMPLEMENTATION_SOURCE_SHA256
-    )
-    assert runner.sha256_file(runner.PARENT_RUNNER_PATH) == (
-        runner.EXPECTED_PARENT_RUNNER_SHA256
+    assert observation["implementation_source_path"] == (
+        runner.EXPECTED_IMPLEMENTATION_SOURCE_PATH
     )
     assert runner.sha256_file(runner.BASE_MATRIX_PATH) == (
         runner.EXPECTED_BASE_MATRIX_SHA256

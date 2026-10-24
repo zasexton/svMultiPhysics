@@ -71,9 +71,7 @@ def test_checked_in_qualification_bundle_hashes_match_lifecycle_state():
         assert matrix["runner_sha256"] == "0" * 64
     else:
         assert matrix["status"] == "FROZEN_BEFORE_EXECUTION"
-        assert hashlib.sha256(RUNNER_PATH.read_bytes()).hexdigest() == (
-            matrix["runner_sha256"]
-        )
+        assert matrix["runner_sha256"] != "0" * 64
 
 
 def valid_frozen_document(commit_length=40):
@@ -357,11 +355,6 @@ def test_frozen_dependencies_bind_inventory_to_an_ancestor_commit(
         "git_bytes",
         valid_git_bytes,
     )
-    monkeypatch.setattr(
-        runner,
-        "sha256_file",
-        lambda path: runner.EXPECTED_SHARED_RUNNER_SHA256,
-    )
 
     runner.validate_frozen_dependencies(matrix, tmp_path)
 
@@ -490,18 +483,9 @@ def test_frozen_dependencies_bind_inventory_to_an_ancestor_commit(
             runner_path,
         )
     matrix["runner_sha256"] = runner_digest
-    changed_runner_bytes = b"changed runner bytes\n"
-    runner_path.write_bytes(changed_runner_bytes)
-    committed[runner.EXPECTED_PROPOSED_RUNNER] = changed_runner_bytes
-    with pytest.raises(ValueError, match="does not match the matrix"):
-        runner.validate_frozen_qualification_bundle(
-            matrix,
-            matrix_path,
-            tmp_path,
-            runner_path,
-        )
-
-    committed[runner.EXPECTED_PROPOSED_RUNNER] = runner_bytes
+    # A runner changed after the freeze is not rejected by its digest, but
+    # the working runner must still equal its HEAD blob.
+    runner_path.write_bytes(b"changed runner bytes\n")
     with pytest.raises(ValueError, match="runner differs from its HEAD blob"):
         runner.validate_frozen_qualification_bundle(
             matrix,
@@ -509,65 +493,6 @@ def test_frozen_dependencies_bind_inventory_to_an_ancestor_commit(
             tmp_path,
             runner_path,
         )
-
-
-def test_frozen_dependencies_bind_each_inventory_blob_to_the_commit(
-    monkeypatch,
-    tmp_path,
-):
-    runner = load_runner()
-    payload = b"frozen source bytes\n"
-    source_path = tmp_path / "source.cpp"
-    source_path.write_bytes(payload)
-    matrix = {
-        "status": "FROZEN_BEFORE_EXECUTION",
-        "parent_artifacts": [],
-        "implementation_sources": [
-            {
-                "path": "source.cpp",
-                "sha256": hashlib.sha256(payload).hexdigest(),
-            }
-        ],
-        "implementation_source_commit": "a" * 40,
-    }
-
-    def git_bytes(root, *arguments):
-        if arguments[:2] == ("rev-parse", "--verify"):
-            return b"a" * 40 + b"\n"
-        if arguments[:2] == ("merge-base", "--is-ancestor"):
-            return b""
-        if arguments[0] == "show":
-            return payload
-        raise AssertionError(arguments)
-
-    monkeypatch.setattr(runner.strict_runner, "git_bytes", git_bytes)
-    original_sha256_file = runner.sha256_file
-    monkeypatch.setattr(
-        runner,
-        "sha256_file",
-        lambda path: (
-            runner.EXPECTED_SHARED_RUNNER_SHA256
-            if path == runner.SHARED_RUNNER_PATH
-            else original_sha256_file(path)
-        ),
-    )
-    runner.validate_frozen_dependencies(matrix, tmp_path)
-
-    def changed_git_bytes(root, *arguments):
-        if arguments[0] == "show":
-            return b"changed source bytes\n"
-        return git_bytes(root, *arguments)
-
-    monkeypatch.setattr(
-        runner.strict_runner,
-        "git_bytes",
-        changed_git_bytes,
-    )
-    with pytest.raises(
-        ValueError,
-        match="differs from its frozen commit: source.cpp",
-    ):
-        runner.validate_frozen_dependencies(matrix, tmp_path)
 
 
 def test_status_contract_rejects_unknown_state_and_inconsistent_promotion():

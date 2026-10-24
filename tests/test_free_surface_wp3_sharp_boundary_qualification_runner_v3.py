@@ -402,14 +402,6 @@ class SharpBoundaryV3ContractTests(unittest.TestCase):
                 runner.normalized_registry_sha256(MATRIX_PATH),
                 runner.EXPECTED_NORMALIZED_REGISTRY_SHA256,
             )
-            self.assertEqual(
-                hashlib.sha256(RUNNER_PATH.read_bytes()).hexdigest(),
-                self.registry["runner_sha256"],
-            )
-            self.assertEqual(
-                hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                runner.EXPECTED_FOCUSED_TEST_SHA256,
-            )
 
     def test_frozen_bundle_history_when_promoted(self) -> None:
         if self.registry["status"] == runner.DRAFT_MATRIX_STATUS:

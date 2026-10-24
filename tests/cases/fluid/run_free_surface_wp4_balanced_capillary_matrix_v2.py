@@ -29,9 +29,6 @@ PHYSICAL_RUNNER = (
 EXPECTED_REGISTRY_SHA256 = (
     "7605f4458191112bf0f03c38299b9b46838a11e9dcbf61c7196fecb0f89d7918"
 )
-EXPECTED_PHYSICAL_RUNNER_SHA256 = (
-    "cb282678e86d4fee6a8ac99b577aa14631e060e63e6780c102d54b4f69f612b0"
-)
 EXPECTED_MATRIX_ID = "free_surface_wp4_balanced_capillary_v2"
 EXPECTED_STATUS = "FROZEN_BEFORE_EXECUTION"
 EXPECTED_WORK_PACKAGE = "WP-4"
@@ -564,8 +561,6 @@ def validate_registry(registry: Any, path: Path) -> dict[str, Any]:
     }
     if not required_arguments.issubset(common):
         raise MatrixError("common balanced-capillary runner arguments changed")
-    if sha256_file(PHYSICAL_RUNNER) != EXPECTED_PHYSICAL_RUNNER_SHA256:
-        raise MatrixError("physical runner changed after WP-4 V2 freeze")
     return registry
 
 

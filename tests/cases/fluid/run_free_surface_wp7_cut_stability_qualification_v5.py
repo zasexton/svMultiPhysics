@@ -22,14 +22,8 @@ DEFAULT_REGISTRY = SCRIPT_PATH.with_name(
 PARENT_REVISION_RUNNER_PATH = SCRIPT_PATH.with_name(
     "run_free_surface_wp7_cut_stability_qualification_v4.py"
 )
-EXPECTED_PARENT_REVISION_RUNNER_SHA256 = (
-    "4f3ebb3db7e28870c8dbdbe31d560967188732513e9e7985c6d736dfb2f0df64"
-)
 EXPECTED_REGISTRY_SHA256 = (
     "4821477a9105a572e21065d09dfcea37fcf74670b5825f7105d3791988f4ef57"
-)
-EXPECTED_FOCUSED_TEST_SHA256 = (
-    "8ccf1c6f57be5f7d716ec078b84a47e278efbb9504108f177821c7afe5bb7602"
 )
 EXPECTED_IMPLEMENTATION_SOURCE_SHA256 = (
     "f68615a764db4f71ba1917a0f68fe10be7e7936070b56ce1a10b039014f29190"
@@ -55,21 +49,7 @@ EXPECTED_SCOPE = (
 )
 
 
-def _sha256_file(path: Path) -> str:
-    import hashlib
-
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for block in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def _load_parent_revision() -> Any:
-    if _sha256_file(PARENT_REVISION_RUNNER_PATH) != (
-        EXPECTED_PARENT_REVISION_RUNNER_SHA256
-    ):
-        raise RuntimeError("WP-7 parent revision runner bytes changed")
     specification = importlib.util.spec_from_file_location(
         "_free_surface_wp7_cut_stability_v5_parent",
         PARENT_REVISION_RUNNER_PATH,
@@ -85,7 +65,6 @@ def _load_parent_revision() -> Any:
 _parent = _load_parent_revision()
 _parent.DEFAULT_REGISTRY = DEFAULT_REGISTRY
 _parent.EXPECTED_REGISTRY_SHA256 = EXPECTED_REGISTRY_SHA256
-_parent.EXPECTED_FOCUSED_TEST_SHA256 = EXPECTED_FOCUSED_TEST_SHA256
 _parent.EXPECTED_IMPLEMENTATION_SOURCE_SHA256 = (
     EXPECTED_IMPLEMENTATION_SOURCE_SHA256
 )

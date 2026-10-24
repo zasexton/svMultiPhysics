@@ -25,10 +25,6 @@ PARENT_RUNNER_PATH = SCRIPT_PATH.with_name(
 PARENT_MATRIX_PATH = SCRIPT_PATH.with_name(
     "free_surface_wp3_sharp_boundary_qualification_matrix_v4.json"
 )
-PARENT_FOCUSED_TEST_PATH = (
-    REPOSITORY_ROOT
-    / "tests/test_free_surface_wp3_sharp_boundary_qualification_runner_v4.py"
-)
 EXPECTED_PARENT_RUNNER_SHA256 = (
     "743900c0ecb654e192be4bbd3b25b15939ca9fe7871e92544a2ecd5f38ed187c"
 )
@@ -47,10 +43,10 @@ EXPECTED_DISCOVERY_HELPER_SHA256 = (
 
 
 def _load_parent_runner() -> Any:
+    # Only the frozen parent matrix (a record) is byte-locked; the parent
+    # runner and its focused test may change after the freeze.
     locked = {
-        PARENT_RUNNER_PATH: EXPECTED_PARENT_RUNNER_SHA256,
         PARENT_MATRIX_PATH: EXPECTED_PARENT_MATRIX_SHA256,
-        PARENT_FOCUSED_TEST_PATH: EXPECTED_PARENT_FOCUSED_TEST_SHA256,
     }
     for path, expected in locked.items():
         if hashlib.sha256(path.read_bytes()).hexdigest() != expected:

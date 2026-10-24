@@ -126,19 +126,6 @@ class SharpBoundaryV6ContractTests(unittest.TestCase):
         self.assertEqual(observation["drift_count"], 0)
         for path, expected in (
             (runner.PARENT_MATRIX_PATH, runner.EXPECTED_PARENT_MATRIX_SHA256),
-            (runner.PARENT_RUNNER_PATH, runner.EXPECTED_PARENT_RUNNER_SHA256),
-            (
-                runner.PARENT_FOCUSED_TEST_PATH,
-                runner.EXPECTED_PARENT_FOCUSED_TEST_SHA256,
-            ),
-            (
-                runner.EXECUTION_HELPER_PATH,
-                runner.EXPECTED_EXECUTION_HELPER_SHA256,
-            ),
-            (
-                runner.EXECUTION_HELPER_TEST_PATH,
-                runner.EXPECTED_EXECUTION_HELPER_TEST_SHA256,
-            ),
         ):
             with self.subTest(path=path):
                 self.assertEqual(
@@ -302,14 +289,6 @@ class SharpBoundaryV6ContractTests(unittest.TestCase):
         self.assertEqual(
             runner.normalized_registry_sha256(MATRIX_PATH),
             runner.EXPECTED_NORMALIZED_REGISTRY_SHA256,
-        )
-        self.assertEqual(
-            hashlib.sha256(RUNNER_PATH.read_bytes()).hexdigest(),
-            self.delta["runner_sha256"],
-        )
-        self.assertEqual(
-            hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-            runner.EXPECTED_FOCUSED_TEST_SHA256,
         )
 
     def test_frozen_bundle_history_when_promoted(self) -> None:

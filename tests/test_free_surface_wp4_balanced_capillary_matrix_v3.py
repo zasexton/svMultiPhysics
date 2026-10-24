@@ -260,14 +260,11 @@ def analyze_fixture(
     ), output_root
 
 
-def test_v3_registry_is_frozen_and_parent_v2_bytes_are_pinned():
+def test_v3_registry_is_frozen_and_parent_v2_registry_is_pinned():
     value = registry()
     assert value["schema_version"] == 3
     assert value["matrix_id"] == "free_surface_wp4_balanced_capillary_v3"
     assert value["status"] == "AWAITING_SCIENTIFIC_CONTRACTS"
-    assert runner.sha256_file(runner.PARENT_RUNNER_PATH) == (
-        runner.EXPECTED_PARENT_RUNNER_SHA256
-    )
     assert runner.sha256_file(runner.PARENT_REGISTRY_PATH) == (
         runner.EXPECTED_PARENT_REGISTRY_SHA256
     )

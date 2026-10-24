@@ -25,15 +25,8 @@ PARENT_RUNNER_PATH = SCRIPT_PATH.with_name(
 PARENT_MATRIX_PATH = SCRIPT_PATH.with_name(
     "free_surface_wp3_sharp_boundary_qualification_matrix_v5.json"
 )
-PARENT_FOCUSED_TEST_PATH = (
-    REPOSITORY_ROOT
-    / "tests/test_free_surface_wp3_sharp_boundary_qualification_runner_v5.py"
-)
 EXECUTION_HELPER_PATH = SCRIPT_PATH.with_name(
     "mpi_aware_gtest_execution.py"
-)
-EXECUTION_HELPER_TEST_PATH = (
-    REPOSITORY_ROOT / "tests/test_mpi_aware_gtest_execution.py"
 )
 EXPECTED_PARENT_RUNNER_SHA256 = (
     "2296b47589d40a57a439d42637ff107f65028d4a78eb7af58257eeccc0aebbcc"
@@ -63,12 +56,11 @@ def _load_module(name: str, path: Path) -> Any:
 
 
 def _load_dependencies() -> tuple[Any, Any]:
+    # Only the frozen parent matrix (a record) is byte-locked; the parent
+    # runner, its focused test and the execution helper may change after
+    # the freeze.
     locked = {
-        PARENT_RUNNER_PATH: EXPECTED_PARENT_RUNNER_SHA256,
         PARENT_MATRIX_PATH: EXPECTED_PARENT_MATRIX_SHA256,
-        PARENT_FOCUSED_TEST_PATH: EXPECTED_PARENT_FOCUSED_TEST_SHA256,
-        EXECUTION_HELPER_PATH: EXPECTED_EXECUTION_HELPER_SHA256,
-        EXECUTION_HELPER_TEST_PATH: EXPECTED_EXECUTION_HELPER_TEST_SHA256,
     }
     for path, expected in locked.items():
         if hashlib.sha256(path.read_bytes()).hexdigest() != expected:

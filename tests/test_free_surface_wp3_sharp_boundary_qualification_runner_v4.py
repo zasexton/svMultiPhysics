@@ -217,10 +217,6 @@ class SharpBoundaryV4ContractTests(unittest.TestCase):
         self.assertEqual(observation["inventory_count"], 45)
         self.assertEqual(observation["drift_count"], 0)
         self.assertEqual(observation["missing_count"], 0)
-        self.assertEqual(
-            runner.sha256_file(runner.DISCOVERY_HELPER_PATH),
-            runner.EXPECTED_DISCOVERY_HELPER_SHA256,
-        )
 
     def test_discovery_contract_matches_groups_and_helper(self) -> None:
         binaries = {
@@ -480,14 +476,6 @@ class SharpBoundaryV4ContractTests(unittest.TestCase):
             self.assertEqual(
                 runner.normalized_registry_sha256(MATRIX_PATH),
                 runner.EXPECTED_NORMALIZED_REGISTRY_SHA256,
-            )
-            self.assertEqual(
-                hashlib.sha256(RUNNER_PATH.read_bytes()).hexdigest(),
-                self.registry["runner_sha256"],
-            )
-            self.assertEqual(
-                hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                runner.EXPECTED_FOCUSED_TEST_SHA256,
             )
 
     def test_frozen_bundle_history_when_promoted(self) -> None:

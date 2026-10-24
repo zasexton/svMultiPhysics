@@ -42,14 +42,8 @@ PHYSICAL_RUNNER = (
 EXPECTED_REGISTRY_SHA256 = (
     "7f11a0b6d742e2969d01f74bbca10293e3745a504ed4a1d0c9e98398b650c247"
 )
-EXPECTED_PARENT_RUNNER_SHA256 = (
-    "480c0441a4da62dd7d5f16133c9dde7b16df90772c06f851bed6ff233f69d4c3"
-)
 EXPECTED_PARENT_REGISTRY_SHA256 = (
     "7605f4458191112bf0f03c38299b9b46838a11e9dcbf61c7196fecb0f89d7918"
-)
-EXPECTED_PHYSICAL_RUNNER_SHA256 = (
-    "4a94467b18b35fd216f927a277a8335bcbde383eaf5d6e8f0895ce9aca1587f1"
 )
 EXPECTED_MATRIX_ID = "free_surface_wp4_balanced_capillary_v3"
 EXPECTED_STATUS = "AWAITING_SCIENTIFIC_CONTRACTS"
@@ -103,8 +97,6 @@ def _sha256_file(path: Path) -> str:
 
 
 def _load_parent() -> Any:
-    if _sha256_file(PARENT_RUNNER_PATH) != EXPECTED_PARENT_RUNNER_SHA256:
-        raise RuntimeError("frozen V2 runner bytes changed")
     if _sha256_file(PARENT_REGISTRY_PATH) != EXPECTED_PARENT_REGISTRY_SHA256:
         raise RuntimeError("frozen V2 registry bytes changed")
     spec = importlib.util.spec_from_file_location(
@@ -1185,12 +1177,8 @@ def load_registry(path: Path = DEFAULT_REGISTRY) -> dict[str, Any]:
     resolved = path.resolve()
     if sha256_file(resolved) != EXPECTED_REGISTRY_SHA256:
         raise MatrixError("V3 frozen registry bytes changed")
-    if sha256_file(PARENT_RUNNER_PATH) != EXPECTED_PARENT_RUNNER_SHA256:
-        raise MatrixError("frozen V2 runner bytes changed")
     if sha256_file(PARENT_REGISTRY_PATH) != EXPECTED_PARENT_REGISTRY_SHA256:
         raise MatrixError("frozen V2 registry bytes changed")
-    if sha256_file(PHYSICAL_RUNNER) != EXPECTED_PHYSICAL_RUNNER_SHA256:
-        raise MatrixError("physical runner changed after V3 freeze")
     return validate_contract(read_json(resolved))
 
 

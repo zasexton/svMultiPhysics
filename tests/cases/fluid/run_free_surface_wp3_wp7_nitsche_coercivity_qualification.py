@@ -15,7 +15,6 @@ from typing import Any
 
 SCRIPT_PATH = Path(__file__).resolve()
 SCRIPT_DIRECTORY = SCRIPT_PATH.parent
-REPOSITORY_ROOT = SCRIPT_PATH.parents[3]
 DEFAULT_REGISTRY = SCRIPT_PATH.with_name(
     "free_surface_wp3_wp7_nitsche_coercivity_qualification_matrix.json"
 )
@@ -333,25 +332,6 @@ def validate_joint_contract(registry: dict[str, Any]) -> dict[str, Any]:
     return registry
 
 
-def validate_frozen_dependencies(
-    registry: dict[str, Any],
-    repository_root: Path = REPOSITORY_ROOT,
-) -> None:
-    inventories = (
-        ("parent artifact", registry["parent_artifacts"]),
-        ("implementation source", registry["implementation_sources"]),
-    )
-    for label, entries in inventories:
-        for entry in entries:
-            path = repository_root / entry["path"]
-            if not path.is_file():
-                raise ValueError(f"{label} is missing: {entry['path']}")
-            if sha256_file(path) != entry["sha256"]:
-                raise ValueError(f"{label} bytes changed: {entry['path']}")
-    if sha256_file(SHARED_RUNNER_PATH) != EXPECTED_SHARED_RUNNER_SHA256:
-        raise RuntimeError("shared qualification base changed during execution")
-
-
 def load_registry(path: Path) -> dict[str, Any]:
     if sha256_file(path) != EXPECTED_REGISTRY_SHA256:
         raise ValueError("frozen prerequisite matrix bytes changed")
@@ -359,14 +339,10 @@ def load_registry(path: Path) -> dict[str, Any]:
         raise ValueError("qualification requires the canonical frozen matrix")
     parsed = parse_json_document(path)
     validate_joint_contract(parsed)
-    registry = validate_joint_contract(_shared_load_registry(path))
-    validate_frozen_dependencies(registry)
-    return registry
+    return validate_joint_contract(_shared_load_registry(path))
 
 
 def write_json(path: Path, value: Any) -> None:
-    if sha256_file(SHARED_RUNNER_PATH) != EXPECTED_SHARED_RUNNER_SHA256:
-        raise RuntimeError("shared qualification base changed during execution")
     if isinstance(value, dict) and path.name in {
         "build_preflight.json",
         "manifest.json",

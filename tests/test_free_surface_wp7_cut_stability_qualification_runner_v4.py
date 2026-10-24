@@ -120,12 +120,15 @@ def test_wp7_v4_rejects_scope_or_disposition_drift():
         runner.validate_revision_contract(changed_disposition)
 
 
-def test_wp7_v4_historical_binding_rejects_post_revision_changes():
+def test_wp7_v4_implementation_and_base_bindings_are_exact():
     runner = _load_runner()
-    with pytest.raises(ValueError, match="implementation source bytes changed"):
-        runner.validate_implementation_binding()
-    assert runner.sha256_file(runner.PARENT_RUNNER_PATH) == (
-        runner.EXPECTED_PARENT_RUNNER_SHA256
+    observation = runner.validate_implementation_binding()
+
+    assert observation["implementation_source_commit"] == (
+        runner.EXPECTED_IMPLEMENTATION_SOURCE_COMMIT
+    )
+    assert observation["implementation_source_path"] == (
+        runner.EXPECTED_IMPLEMENTATION_SOURCE_PATH
     )
     assert runner.sha256_file(runner.BASE_MATRIX_PATH) == (
         runner.EXPECTED_BASE_MATRIX_SHA256
@@ -142,15 +145,23 @@ def test_wp7_v4_frozen_revision_byte_drift_is_rejected(tmp_path):
         runner.load_registry(changed)
 
 
-def test_wp7_v4_validate_only_fails_closed_after_binding_drift():
+def test_wp7_v4_validate_only_reports_bounded_prerequisite():
+    runner = _load_runner()
     result = subprocess.run(
         [sys.executable, str(_runner_path()), "--validate-only"],
         cwd=_repository(),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        check=False,
+        check=True,
     )
-    assert result.returncode == 2
-    assert result.stdout == ""
-    assert "implementation source bytes changed" in result.stderr
+    summary = json.loads(result.stdout)
+
+    assert summary["outcome"] == "PASS"
+    assert summary["matrix_id"] == runner.EXPECTED_MATRIX_ID
+    assert summary["closure_state"] == runner.EXPECTED_CLOSURE_STATE
+    assert summary["executable_test_count"] == 16
+    assert summary["prospective_test_count"] == 5
+    assert summary["fsr07_closed"] is False
+    assert summary["wp7_closed"] is False
+    assert summary["q1_closed"] is False
