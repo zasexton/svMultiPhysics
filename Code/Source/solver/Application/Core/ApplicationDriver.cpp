@@ -3082,6 +3082,7 @@ std::uint64_t collectiveLevelSetMaintenanceAlgebraicRevision(
 // (FE/LevelSet/AcceptedFunctionalRecorder.h).
 using svmp::FE::level_set::acceptedFunctionalDeclarationContentKey;
 using svmp::FE::level_set::evaluateCurrentAcceptedFunctionals;
+using svmp::FE::level_set::evaluateDeclaredFreeSurfaceFunctionals;
 using svmp::FE::level_set::attachAcceptedActiveVolumeEnergies;
 using svmp::FE::level_set::collectiveFieldRevision;
 using svmp::FE::level_set::levelSetMaintenanceFunctionalValues;
@@ -5764,22 +5765,33 @@ evaluateStaticCapillaryFunctionalCandidate(
   }
 
   auto states = evaluateCurrentAcceptedFunctionals(sim);
-  attachAcceptedActiveVolumeEnergies(sim, candidate, states);
+  // D49 step E4: the volume and the energies are the declared functionals
+  // of the interface (measured 0-forms, exact reduction) on the candidate:
+  // the liquid volume, the liquid-gas surface energy plus the Young energy
+  // of the walls (one form), and the gravitational energy.
+  const std::array<std::vector<std::string_view>, 3> declared_quantities{{
+      {"liquid_volume"},
+      {"liquid_gas_surface_energy", "young_wall_energy"},
+      {"gravitational_energy"}}};
+  const auto declared_values = evaluateDeclaredFreeSurfaceFunctionals(
+      sim, marker, declared_quantities, candidate);
+  if (!declared_values.has_value()) {
+    evaluation.diagnostic =
+        "candidate_declared_functional_unavailable";
+    return result;
+  }
   const bool local_functional_available =
       states.size() == 1u &&
-      states.front().interface_marker == marker &&
-      states.front().active_volume_energy.has_value();
+      states.front().interface_marker == marker;
   if (globalAnyBool(!local_functional_available, comm)) {
     evaluation.diagnostic =
         "candidate_authoritative_functional_unavailable";
     return result;
   }
   const auto& state = states.front();
-  const auto energy = state.state.liquid_gas_surface_energy +
-                      state.state.young_wall_energy;
-  const auto gravitational_energy =
-      state.active_volume_energy->gravitational_energy;
-  const auto volume = state.state.owned_liquid_volume;
+  const auto volume = (*declared_values)[0];
+  const auto energy = (*declared_values)[1];
+  const auto gravitational_energy = (*declared_values)[2];
   const bool local_functional_valid =
       std::isfinite(energy) && std::isfinite(gravitational_energy) &&
       std::isfinite(energy + gravitational_energy) &&
@@ -6143,8 +6155,19 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
     throw std::runtime_error(
         "[svMultiPhysics::Application] Static capillary initialization could not evaluate its initial authoritative functional.");
   }
-  const auto target_volume =
-      initial_states.front().state.owned_liquid_volume;
+  // D49 step E4: the target is the declared liquid volume of the initial
+  // geometry (a measured 0-form that reads no field).
+  const std::array<std::vector<std::string_view>, 1> volume_quantity{{
+      {"liquid_volume"}}};
+  const auto declared_volume = evaluateDeclaredFreeSurfaceFunctionals(
+      sim, *marker, volume_quantity, {});
+  if (!declared_volume.has_value()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Static capillary initialization requires the declared liquid volume free_surface." +
+        std::to_string(*marker) +
+        ".liquid_volume of its interface; the minimizer reads the functionals the formulation declares.");
+  }
+  const auto target_volume = declared_volume->front();
   const bool local_target_volume_valid =
       std::isfinite(target_volume) &&
       target_volume > svmp::FE::Real{0.0};

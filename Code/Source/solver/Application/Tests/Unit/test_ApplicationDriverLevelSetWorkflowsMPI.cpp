@@ -64,6 +64,7 @@
 #include <vector>
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
 #include "FE/Systems/FunctionalRecords.h"
+#include "../Support/DeclaredFreeSurfaceFunctionals.h"
 
 // The known set of the level-set velocity extension is an FE service
 // (FE/LevelSet/Extension/LevelSetVelocityExtensionSeed.h).
@@ -1717,7 +1718,8 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   functional_parameters.liquid_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   functional_parameters.surface_tension = 1.0;
-  svmp::FE::systems::functionalRecords(*system).declareFunctional(
+  application_test::declared_free_surface_functionals::declareFreeSurfaceFunctionalWithForms(
+      *system,
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = interface_marker,
           .level_set_field = phi,
@@ -1747,7 +1749,9 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                       PrerequisiteOnly,
           .owner_component =
               "ApplicationDriverLevelSetWorkflowsMPI.StaticCapillaryPublication",
-      });
+      },
+      *velocity_space,
+      /*dimension=*/2);
 
   system->addOperator("equations");
   for (const auto field : {phi, velocity, pressure}) {

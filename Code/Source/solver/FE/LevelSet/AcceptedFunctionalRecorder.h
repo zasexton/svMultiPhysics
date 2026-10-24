@@ -26,6 +26,7 @@
  */
 
 #include "Core/Types.h"
+#include "Forms/FormExpr.h"
 #include "LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h"
 #include "Systems/FESystem.h"
 #include "Systems/FESystemHandle.h"
@@ -57,6 +58,42 @@ void attachAcceptedActiveVolumeEnergies(
     std::span<const Real> accepted_solution,
     std::span<systems::AcceptedFreeSurfaceDiscreteFunctionalState>
         accepted_states);
+
+/**
+ * @brief One free-surface functional of an interface as a measured 0-form
+ *        (D49 steps E3 and E4).
+ *
+ * @p quantity is a functional the formulation declares
+ * ("free_surface.<interface_marker>.<quantity>", Systems/FunctionalForms.h),
+ * or a wall quantity the recorder states on the current snapshot with the
+ * coefficients of the discrete-functional declaration:
+ * "wall.<b>.wetted_area", "wall.<b>.young_energy" (a wall with an angle) and
+ * "wall.<b>.contact_measure" (empty when the snapshot has no domain of that
+ * wall), or their sums over the walls, "wetted_wall_area",
+ * "young_wall_energy" and "contact_measure" (the zero form when the
+ * snapshot has no wall domain).  Empty when the quantity is not declared.
+ * Not collective; every rank states the same form.
+ */
+std::optional<forms::FormExpr> freeSurfaceFunctionalForm(
+    const systems::FESystemHandle& sim,
+    int interface_marker,
+    std::string_view quantity);
+
+/**
+ * @brief The values of free-surface functionals of one interface on
+ *        @p solution and the current snapshot (collective).
+ *
+ * Each entry of @p sums is a list of freeSurfaceFunctionalForm quantities
+ * whose sum is evaluated as one form, with the exact reduction of
+ * Systems/FunctionalFormEvaluator.h, so the value is the same at every rank
+ * count.  Empty on every rank when a quantity is not declared on some rank.
+ * An empty @p solution suffices for forms that read no field.
+ */
+std::optional<std::vector<Real>> evaluateDeclaredFreeSurfaceFunctionals(
+    const systems::FESystemHandle& sim,
+    int interface_marker,
+    std::span<const std::vector<std::string_view>> sums,
+    std::span<const Real> solution);
 
 /// A communicator-consistent revision of one field's values.
 std::uint64_t collectiveFieldRevision(

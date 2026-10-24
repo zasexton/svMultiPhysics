@@ -61,6 +61,7 @@
 #include <vector>
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
 #include "FE/Systems/FunctionalRecords.h"
+#include "../Support/DeclaredFreeSurfaceFunctionals.h"
 #include "FE/Systems/FunctionalFormEvaluator.h"
 #include "FE/Systems/FunctionalForms.h"
 #include "FE/Systems/SystemCollectives.h"
@@ -6651,7 +6652,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
   functional_parameters.liquid_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   functional_parameters.surface_tension = 1.0;
-  svmp::FE::systems::functionalRecords(*system).declareFunctional(
+  application_test::declared_free_surface_functionals::declareFreeSurfaceFunctionalWithForms(
+      *system,
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = interface_marker,
           .level_set_field = phi,
@@ -6684,7 +6686,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
                       PrerequisiteOnly,
           .owner_component =
               "ApplicationDriverLevelSetWorkflows.StaticCapillaryRollback",
-      });
+      },
+      *velocity_space,
+      /*dimension=*/2);
   // The production residual is intentionally empty. The acceptance probe can
   // assemble it, but the physical pressure/surface diagnostic operators are
   // absent and must make the static initializer fail closed.
@@ -7105,7 +7109,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
   functional_parameters.liquid_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   functional_parameters.surface_tension = 1.0;
-  svmp::FE::systems::functionalRecords(*system).declareFunctional(
+  application_test::declared_free_surface_functionals::declareFreeSurfaceFunctionalWithForms(
+      *system,
       svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = interface_marker,
           .level_set_field = phi,
@@ -7138,7 +7143,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
                       PrerequisiteOnly,
           .owner_component =
               "ApplicationDriverLevelSetWorkflows.StaticCapillaryPublication",
-      });
+      },
+      *velocity_space,
+      /*dimension=*/2);
   system->addOperator("equations");
   // This compact mass-pair fixture certifies application transaction
   // mechanics only. It is not physical static-cap qualification evidence.

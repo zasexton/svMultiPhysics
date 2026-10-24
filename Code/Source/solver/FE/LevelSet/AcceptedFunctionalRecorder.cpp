@@ -1231,14 +1231,14 @@ std::uint64_t levelSetMaintenanceCutTopologyRevision(
 // coefficients of the discrete-functional declaration ("free_surface.<m>.
 // wall.<w>.wetted_area", "contact_measure", "young_energy").  The pointwise
 // evaluators above still produce every other field and the consistency
-// checks they pass; the static minimizer reads them directly until E4.
-// Totals stay sums of channels.  The contact-line part of the wall power is
-// the declared wall functionals "wall.<b>.wetted_area_rate" and
-// "wall.<b>.young_energy_rate" (Systems/FunctionalForms.h) over the
-// snapshot's contact lines of each wall; the contact stage states the wall
-// slip the same way (Interfaces/ContactLineStageObservables.cpp), and the
-// line friction stays pointwise until a deck with a nonzero friction
-// calibrates its form.
+// checks they pass.  The static minimizer reads the declared functionals
+// too (step E4, freeSurfaceFunctionalForm).  Totals stay sums of channels.
+// The contact-line part of the wall power is the declared wall functionals
+// "wall.<b>.wetted_area_rate" and "wall.<b>.young_energy_rate"
+// (Systems/FunctionalForms.h) over the snapshot's contact lines of each
+// wall; the contact stage states the wall slip the same way
+// (Interfaces/ContactLineStageObservables.cpp), and the line friction stays
+// pointwise until a deck with a nonzero friction calibrates its form.
 
 /// The absolute masses sum |w f| of the declared functionals of one record.
 struct DeclaredFunctionalMasses {
@@ -1284,6 +1284,84 @@ template <class Walls>
     return wall.boundary_marker == boundary_marker;
   });
   return found == walls.end() ? nullptr : &*found;
+}
+
+/// The wall quantities of one wall as forms on the snapshot's generated
+/// domains, with the coefficients of the discrete-functional declaration:
+/// the wetted area (1 over the wall's liquid-side active-boundary domains),
+/// the Young energy (-gamma cos(theta_b) over the same domains, when the
+/// wall has an angle) and the contact measure (1 over the wall's contact-line
+/// domains).  A quantity without a domain on this snapshot is empty.
+struct WallFunctionalForms {
+  std::optional<svmp::FE::forms::FormExpr> wetted_area{};
+  std::optional<svmp::FE::forms::FormExpr> young_energy{};
+  std::optional<svmp::FE::forms::FormExpr> contact_measure{};
+};
+
+[[nodiscard]] WallFunctionalForms wallFunctionalForms(
+    const interfaces::FreeSurfaceGeometrySnapshot& snapshot,
+    const systems::FreeSurfaceDiscreteFunctionalDeclaration& declaration,
+    int boundary_marker,
+    std::optional<svmp::FE::Real> equilibrium_contact_angle_radians)
+{
+  using svmp::FE::forms::FormExpr;
+  const auto liquid = declaration.parameters.liquid_side;
+  const auto gamma = declaration.parameters.surface_tension;
+  const auto one = FormExpr::constant(1.0);
+  const auto sum_of = [](std::vector<FormExpr> terms) {
+    FormExpr sum{};
+    for (auto& term : terms) {
+      sum = sum.isValid() ? sum + term : std::move(term);
+    }
+    return sum;
+  };
+  const int b = boundary_marker;
+  std::vector<FormExpr> wetted;
+  std::vector<FormExpr> young;
+  const svmp::FE::Real coefficient =
+      equilibrium_contact_angle_radians.has_value()
+          ? -gamma * std::cos(*equilibrium_contact_angle_radians)
+          : svmp::FE::Real{0.0};
+  for (const auto& active : snapshot.activeBoundaryDomains()) {
+    if (active.request().boundary_marker == b && active.request().side == liquid) {
+      const auto domain = svmp::FE::forms::BoundaryDomain::generatedActiveSubset(b, active.marker());
+      wetted.push_back(one.ds(domain));
+      young.push_back(FormExpr::constant(coefficient).ds(domain));
+    }
+  }
+  std::vector<FormExpr> contact;
+  for (const auto& domain : snapshot.contactDomains()) {
+    if (domain.boundaryMarker() == b) {
+      contact.push_back(one.dL(svmp::FE::forms::ContactLineDomain(domain.marker(), b)));
+    }
+  }
+  WallFunctionalForms out;
+  if (!wetted.empty()) {
+    out.wetted_area = sum_of(std::move(wetted));
+    if (equilibrium_contact_angle_radians.has_value()) {
+      out.young_energy = sum_of(std::move(young));
+    }
+  }
+  if (!contact.empty()) {
+    out.contact_measure = sum_of(std::move(contact));
+  }
+  return out;
+}
+
+/// The snapshot of the current geometry of @p interface_marker, or null.
+[[nodiscard]] const interfaces::FreeSurfaceGeometrySnapshot* currentSnapshot(
+    const assembly::CutIntegrationContext* context, int interface_marker)
+{
+  if (context == nullptr || !context->hasFreeSurfaceGeometrySnapshotForMarker(interface_marker)) {
+    return nullptr;
+  }
+  const auto revision = context->freeSurfaceGeometrySnapshotRevisionForMarker(interface_marker);
+  for (const auto& candidate : context->freeSurfaceGeometrySnapshots()) {
+    if (candidate && candidate->revision().snapshot_revision_key == revision) {
+      return candidate.get();
+    }
+  }
+  return nullptr;
 }
 
 /// Writes the value of one declared quantity into its record field(s);
@@ -1557,50 +1635,21 @@ std::vector<DeclaredFunctionalMasses> applyDeclaredFunctionalForms(
       }
     }
     if (record_declaration != record_declarations.end() && snapshot != nullptr) {
-      using svmp::FE::forms::FormExpr;
-      const auto liquid = record_declaration->parameters.liquid_side;
-      const auto gamma = record_declaration->parameters.surface_tension;
-      const auto one = FormExpr::constant(1.0);
-      const auto sum_of = [](std::vector<FormExpr> terms) {
-        FormExpr sum{};
-        for (auto& term : terms) {
-          sum = sum.isValid() ? sum + term : std::move(term);
-        }
-        return sum;
-      };
       for (const auto& wall : accepted.state.walls) {
-        const int b = wall.boundary_marker;
-        const std::string wall_prefix = prefix + "wall." + std::to_string(b) + ".";
-        std::vector<FormExpr> wetted;
-        std::vector<FormExpr> young;
-        const svmp::FE::Real coefficient =
-            wall.equilibrium_contact_angle_radians.has_value()
-                ? -gamma * std::cos(*wall.equilibrium_contact_angle_radians)
-                : svmp::FE::Real{0.0};
-        for (const auto& active : snapshot->activeBoundaryDomains()) {
-          if (active.request().boundary_marker == b && active.request().side == liquid) {
-            const auto domain = svmp::FE::forms::BoundaryDomain::generatedActiveSubset(b, active.marker());
-            wetted.push_back(one.ds(domain));
-            young.push_back(FormExpr::constant(coefficient).ds(domain));
-          }
-        }
-        std::vector<FormExpr> contact;
-        for (const auto& domain : snapshot->contactDomains()) {
-          if (domain.boundaryMarker() == b) {
-            contact.push_back(one.dL(svmp::FE::forms::ContactLineDomain(domain.marker(), b)));
-          }
-        }
-        if (!wetted.empty()) {
+        const std::string wall_prefix = prefix + "wall." + std::to_string(wall.boundary_marker) + ".";
+        auto wall_forms = wallFunctionalForms(
+            *snapshot, *record_declaration, wall.boundary_marker, wall.equilibrium_contact_angle_radians);
+        if (wall_forms.wetted_area.has_value()) {
           names.push_back(wall_prefix + "wetted_area");
-          forms.push_back(sum_of(wetted));
-          if (wall.equilibrium_contact_angle_radians.has_value()) {
+          forms.push_back(std::move(*wall_forms.wetted_area));
+          if (wall_forms.young_energy.has_value()) {
             names.push_back(wall_prefix + "young_energy");
-            forms.push_back(sum_of(young));
+            forms.push_back(std::move(*wall_forms.young_energy));
           }
         }
-        if (!contact.empty()) {
+        if (wall_forms.contact_measure.has_value()) {
           names.push_back(wall_prefix + "contact_measure");
-          forms.push_back(sum_of(contact));
+          forms.push_back(std::move(*wall_forms.contact_measure));
         }
       }
       // The contact-line part of the wall power on the power's walls.
@@ -1671,6 +1720,141 @@ std::vector<DeclaredFunctionalMasses> applyDeclaredFunctionalForms(
 }
 
 } // namespace
+
+std::optional<svmp::FE::forms::FormExpr> freeSurfaceFunctionalForm(
+    const FESystemHandle& sim,
+    int interface_marker,
+    std::string_view quantity)
+{
+  if (!sim.fe_system) {
+    return std::nullopt;
+  }
+  const auto& system = *sim.fe_system;
+  const std::string prefix = "free_surface." + std::to_string(interface_marker) + ".";
+  for (const auto& declaration : systems::functionalForms(system)) {
+    if (declaration.name.size() == prefix.size() + quantity.size() &&
+        declaration.name.compare(0, prefix.size(), prefix) == 0 &&
+        std::string_view(declaration.name).substr(prefix.size()) == quantity) {
+      return declaration.form;
+    }
+  }
+  // The wall quantities: the recorder states them on the current snapshot
+  // with the coefficients of the discrete-functional declaration.
+  const auto record_declarations = systems::functionalRecords(system).functionalDeclarations();
+  const auto record = std::find_if(
+      record_declarations.begin(), record_declarations.end(), [&](const auto& declaration) {
+        return declaration.interface_marker == interface_marker;
+      });
+  const auto* snapshot = currentSnapshot(system.cutIntegrationContext(), interface_marker);
+  if (record == record_declarations.end() || snapshot == nullptr) {
+    return std::nullopt;
+  }
+  const auto angle_of = [&](int boundary_marker) -> std::optional<svmp::FE::Real> {
+    for (const auto& coefficient : record->parameters.young_wall_coefficients) {
+      if (coefficient.boundary_marker == boundary_marker) {
+        return coefficient.equilibrium_contact_angle_radians;
+      }
+    }
+    return std::nullopt;
+  };
+  constexpr std::string_view wall_prefix = "wall.";
+  if (quantity.substr(0, wall_prefix.size()) == wall_prefix) {
+    const auto rest = quantity.substr(wall_prefix.size());
+    const auto dot = rest.find('.');
+    if (dot == std::string_view::npos) {
+      return std::nullopt;
+    }
+    int boundary_marker = -1;
+    try {
+      boundary_marker = std::stoi(std::string(rest.substr(0, dot)));
+    } catch (const std::exception&) {
+      return std::nullopt;
+    }
+    auto wall = wallFunctionalForms(*snapshot, *record, boundary_marker, angle_of(boundary_marker));
+    const auto wall_quantity = rest.substr(dot + 1);
+    if (wall_quantity == "wetted_area") {
+      return wall.wetted_area;
+    }
+    if (wall_quantity == "young_energy") {
+      return wall.young_energy;
+    }
+    if (wall_quantity == "contact_measure") {
+      return wall.contact_measure;
+    }
+    return std::nullopt;
+  }
+  if (quantity != "wetted_wall_area" && quantity != "contact_measure" && quantity != "young_wall_energy") {
+    return std::nullopt;
+  }
+  // A sum over the walls of the snapshot (zero when it has no wall domain).
+  std::vector<int> walls;
+  for (const auto& active : snapshot->activeBoundaryDomains()) {
+    walls.push_back(active.request().boundary_marker);
+  }
+  for (const auto& contact : snapshot->contactDomains()) {
+    walls.push_back(contact.boundaryMarker());
+  }
+  std::sort(walls.begin(), walls.end());
+  walls.erase(std::unique(walls.begin(), walls.end()), walls.end());
+  svmp::FE::forms::FormExpr sum{};
+  for (const int boundary_marker : walls) {
+    auto wall = wallFunctionalForms(*snapshot, *record, boundary_marker, angle_of(boundary_marker));
+    auto& term = quantity == "wetted_wall_area" ? wall.wetted_area
+                 : quantity == "contact_measure" ? wall.contact_measure
+                                                 : wall.young_energy;
+    if (term.has_value()) {
+      sum = sum.isValid() ? sum + *term : std::move(*term);
+    }
+  }
+  if (!sum.isValid()) {
+    sum = svmp::FE::forms::FormExpr::constant(0.0).dI(interface_marker);
+  }
+  return sum;
+}
+
+std::optional<std::vector<svmp::FE::Real>> evaluateDeclaredFreeSurfaceFunctionals(
+    const FESystemHandle& sim,
+    int interface_marker,
+    std::span<const std::vector<std::string_view>> sums,
+    std::span<const svmp::FE::Real> solution)
+{
+  if (!sim.fe_system) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Declared free-surface functionals require an FE system.");
+  }
+  const auto& system = *sim.fe_system;
+  const systems::CollectiveCommunicator comm(activeMeshCommunicator(system));
+  std::vector<svmp::FE::forms::FormExpr> forms;
+  bool complete = !sums.empty();
+  for (const auto& terms : sums) {
+    svmp::FE::forms::FormExpr sum{};
+    for (const auto quantity : terms) {
+      auto form = freeSurfaceFunctionalForm(sim, interface_marker, quantity);
+      if (!form.has_value()) {
+        complete = false;
+        break;
+      }
+      sum = sum.isValid() ? sum + *form : std::move(*form);
+    }
+    if (!complete || !sum.isValid()) {
+      complete = false;
+      break;
+    }
+    forms.push_back(std::move(sum));
+  }
+  if (systems::collectiveAnyTrue(!complete, comm)) {
+    return std::nullopt;
+  }
+  systems::SystemStateView state;
+  state.u = solution;
+  const auto values = systems::evaluateFunctionalForms(system, forms, state, comm);
+  std::vector<svmp::FE::Real> out;
+  out.reserve(values.size());
+  for (const auto& value : values) {
+    out.push_back(value.value);
+  }
+  return out;
+}
 
 std::vector<svmp::FE::level_set::LevelSetAuthoritativeFunctionalValue>
 levelSetMaintenanceFunctionalValues(
