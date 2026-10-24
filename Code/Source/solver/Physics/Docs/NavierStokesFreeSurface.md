@@ -144,9 +144,10 @@ current-frame assembly as the coupled-ALE contract.)
 
 **Kinematic enforcement.** `MeshNitsche` is the qualified default
 (decision D35): a fitted free surface without `Kinematic_enforcement` uses
-it. `None` is accepted only by the explicit schema-1 legacy mode, which
-keeps it as its default (no relation); before D35 the qualified contract
-rejected an omitted key, so no accepted input changes.
+it, and `None` is rejected: the schema-1 legacy mode that accepted it was
+retired (its input in D47 P2, its module options on 2026-10-24), so every
+fitted free surface is the qualified contract.  Before D35 the qualified
+contract rejected an omitted key, so no accepted input changed.
 
 | Value | Status | Fluid row on the free surface | Mesh row on the free surface |
 |---|---|---|---|

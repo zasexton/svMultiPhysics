@@ -384,8 +384,6 @@ if(PHYSICS_BUILD_TESTS)
         MovingDomainPhysics.FittedPrescribedContactAngleFailsClosedWithoutContactLineIntegration
         MovingDomainPhysics.NavierStokesFittedSurfaceStressFailsClosed
         MovingDomainPhysics.NavierStokesRejectsBoundaryConflictBeforeFluidMutation
-        MovingDomainPhysics.NavierStokesConfigurationSchemaRejectsBeforeSystemMutation
-        MovingDomainPhysics.NavierStokesLegacySchemaIsExplicitAndLosesCurrentCapabilityLabel
         MovingDomainPhysics.NavierStokesEffectiveConfigurationSnapshotExpandsBoundaryDefaults
         MovingDomainPhysics.NavierStokesRejectsDuplicatePrescribedWallOwnershipWithUniqueMarkers
         MovingDomainPhysics.FreeSurfaceContactAlternativesExcludeCrossModelState

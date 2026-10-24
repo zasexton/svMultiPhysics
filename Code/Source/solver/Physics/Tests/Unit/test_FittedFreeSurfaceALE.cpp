@@ -233,49 +233,37 @@ struct FittedALEFixture {
     bool explicit_previous{false};
 
     FittedALEFixture(std::shared_ptr<Mesh> m,
-                     ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary bc,
-                     bool ale = true)
+                     ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary bc)
         : mesh(std::move(m))
     {
         // Coupled ALE assembles on the trial current configuration; the
         // application builds its FE system the same way for such inputs.
-        system = std::make_unique<FE::systems::FESystem>(
-            mesh, ale ? svmp::Configuration::Current : svmp::Configuration::Reference);
+        system = std::make_unique<FE::systems::FESystem>(mesh, svmp::Configuration::Current);
         auto opts = coupledALEOptions();
-        if (!ale) {
-            opts.enable_ale = false;
-            opts.mesh_velocity_source = ns::ALEMeshVelocitySource::PrescribedData;
-            opts.input_configuration_schema_version = 1;
-            opts.explicit_legacy_configuration = true;
-            bc.kinematic_enforcement = ns::FreeSurfaceKinematicEnforcement::None;
-            bc.tangential_mesh_policy = ns::FreeSurfaceTangentialMeshPolicy::SmoothingOnly;
-        }
         opts.free_surface.push_back(bc);
         ns::IncompressibleNavierStokesVMSModule fluid(spaces.vector, spaces.scalar, opts);
         fluid.registerOn(*system);
-        if (ale) {
-            // Sliding walls where the mesh has them (the rectangle); the drop
-            // has none.  Without them the harmonic operator has a constant
-            // null space and the FE gauge registry adds a mean-zero
-            // constraint to the mesh rows.
-            auto mesh_options = harmonicOptions();
-            for (const auto& [marker, component] :
-                 std::array<std::pair<int, int>, 3>{{{kLeft, 0}, {kRight, 0}, {kBottom, 1}}}) {
-                if (mesh->local_mesh().list_label_names().count(static_cast<label_t>(marker)) == 0u) {
-                    continue;
-                }
-                mm::HarmonicMeshMotionOptions::DirichletBC wall{};
-                wall.boundary_marker = marker;
-                wall.active_components = {component == 0, component == 1, false};
-                mesh_options.dirichlet.push_back(wall);
+        // Sliding walls where the mesh has them (the rectangle); the drop
+        // has none.  Without them the harmonic operator has a constant null
+        // space and the FE gauge registry adds a mean-zero constraint to the
+        // mesh rows.
+        auto mesh_options = harmonicOptions();
+        for (const auto& [marker, component] :
+             std::array<std::pair<int, int>, 3>{{{kLeft, 0}, {kRight, 0}, {kBottom, 1}}}) {
+            if (mesh->local_mesh().list_label_names().count(static_cast<label_t>(marker)) == 0u) {
+                continue;
             }
-            mm::HarmonicMeshMotionModule mesh_motion(spaces.vector, mesh_options);
-            mesh_motion.registerOn(*system);
+            mm::HarmonicMeshMotionOptions::DirichletBC wall{};
+            wall.boundary_marker = marker;
+            wall.active_components = {component == 0, component == 1, false};
+            mesh_options.dirichlet.push_back(wall);
         }
+        mm::HarmonicMeshMotionModule mesh_motion(spaces.vector, mesh_options);
+        mesh_motion.registerOn(*system);
         system->setup();
         u = system->findFieldByName("u");
         p = system->findFieldByName("p");
-        d = ale ? system->findFieldByName("mesh_displacement") : FE::INVALID_FIELD_ID;
+        d = system->findFieldByName("mesh_displacement");
         solution.assign(static_cast<std::size_t>(system->dofHandler().getNumDofs()), 0.0);
     }
 
@@ -391,9 +379,9 @@ TEST(FittedFreeSurfaceALE, ExternalPressureLoadUsesTheCurrentSurfaceMeasureOnce)
     EXPECT_NEAR(ale.velocityRow(r, 4, 1), p_ext * 1.5, 1e-12);
     EXPECT_NEAR(ale.velocityRow(r, 5, 1), p_ext * 0.75, 1e-12);
 
-    // The same boundary on a static mesh carries p_ext times its length 2.
-    FittedALEFixture fixed(makeRectangleTriangleMesh(), fittedSurface(p_ext, 0.0, false),
-                           /*ale=*/false);
+    // The same boundary on the undisplaced mesh (d = 0: the current surface
+    // is the reference one) carries p_ext times its length 2.
+    FittedALEFixture fixed(makeRectangleTriangleMesh(), fittedSurface(p_ext, 0.0, false));
     const auto r0 = fixed.residual();
     FE::Real static_load_y = 0.0;
     for (FE::GlobalIndex v = 0; v < 6; ++v) {
@@ -448,22 +436,31 @@ TEST(FittedFreeSurfaceALE, SurfaceStressIsTheFittedDefaultWithoutAnOptIn)
     }
     {
         // Prescribed mesh motion may assemble on the reference frame: the
-        // surface energy is rejected there, the pressure load alone is not.
-        const auto register_prescribed = [&](FE::Real surface_tension) {
+        // surface energy is rejected there by the frame check, and the
+        // pressure load alone by the qualified fitted-ALE contract.
+        const auto register_prescribed = [&](FE::Real surface_tension) -> std::string {
             FE::systems::FESystem system(mesh);
             auto opts = coupledALEOptions();
             opts.mesh_velocity_source = ns::ALEMeshVelocitySource::PrescribedData;
             opts.auto_register_mesh_displacement_field = false;
-            opts.input_configuration_schema_version = 1;
-            opts.explicit_legacy_configuration = true;
-            auto legacy = fittedSurface(0.25, surface_tension, /*surface_stress=*/false);
-            legacy.kinematic_enforcement = ns::FreeSurfaceKinematicEnforcement::None;
-            opts.free_surface.push_back(legacy);
+            opts.free_surface.push_back(
+                fittedSurface(0.25, surface_tension, /*surface_stress=*/false));
             ns::IncompressibleNavierStokesVMSModule fluid(spaces.vector, spaces.scalar, opts);
-            fluid.registerOn(system);
+            try {
+                fluid.registerOn(system);
+            } catch (const std::invalid_argument& error) {
+                return error.what();
+            }
+            return {};
         };
-        EXPECT_THROW(register_prescribed(gamma), std::invalid_argument);
-        EXPECT_NO_THROW(register_prescribed(0.0));
+        EXPECT_NE(register_prescribed(gamma).find(
+                      "fitted SurfaceStress requires a static mesh or ALE with a "
+                      "coupled mesh-displacement unknown"),
+                  std::string::npos);
+        EXPECT_NE(register_prescribed(0.0).find(
+                      "contract requires mesh velocity derived from a coupled "
+                      "mesh-displacement unknown"),
+                  std::string::npos);
     }
 }
 

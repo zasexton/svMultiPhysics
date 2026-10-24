@@ -159,7 +159,6 @@
       "EquationTranslatorFreeSurface.XmlFittedDynamicContactFailsClosedBeforeSystemMutation"
     ],
     "schema_1_unqualified_legacy_operator_regressions": [
-      "MovingDomainPhysics.FittedFreeSurfaceLegacyPrescribedDataReportsUnconsumedPolicy",
       "MovingDomainPhysics.NavierStokesFittedFreeSurfaceALEUsesCurrentBoundaryGeometry",
       "MovingDomainPhysics.NavierStokesFittedFreeSurfaceCanUseCurrentGeometryCurvature",
       "MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesAreBoundaryLocal"
@@ -195,7 +194,6 @@
     "MovingDomainPhysics.NavierStokesFittedSurfaceStressFailsClosed",
     "NavierStokesLegacyBCs.FittedFreeSurfacePrescribedAngleTranslationFailsClosed",
     "EquationTranslatorFreeSurface.XmlFittedDynamicContactFailsClosedBeforeSystemMutation",
-    "MovingDomainPhysics.FittedFreeSurfaceLegacyPrescribedDataReportsUnconsumedPolicy",
     "MovingDomainPhysics.NavierStokesFittedFreeSurfaceALEUsesCurrentBoundaryGeometry",
     "MovingDomainPhysics.NavierStokesFittedFreeSurfaceCanUseCurrentGeometryCurvature",
     "MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesAreBoundaryLocal",
@@ -205,7 +203,7 @@
     "MovingDomainPhysics.FittedPinnedContactLineRequiresALE"
   ],
   "gates": {
-    "expected_test_count": 29,
+    "expected_test_count": 28,
     "expected_failures": 0,
     "expected_errors": 0,
     "expected_disabled": 0,
@@ -242,8 +240,7 @@
     {
       "claim": "schema_1_paths_are_explicitly_unqualified_and_can_report_no_owner_or_operator",
       "evidence": [
-        "MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesRegisterCoupledMeshOwnership",
-        "MovingDomainPhysics.FittedFreeSurfaceLegacyPrescribedDataReportsUnconsumedPolicy"
+        "MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesRegisterCoupledMeshOwnership"
       ]
     },
     {

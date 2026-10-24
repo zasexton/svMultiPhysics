@@ -346,10 +346,6 @@ EXPECTED_GROUPS = {
             ),
             (
                 "MovingDomainPhysics."
-                "NavierStokesLegacySchemaIsExplicitAndLosesCurrentCapabilityLabel"
-            ),
-            (
-                "MovingDomainPhysics."
                 "NavierStokesRejectsUnsupportedPhysicalModelBeforeSystemMutation"
             ),
             (

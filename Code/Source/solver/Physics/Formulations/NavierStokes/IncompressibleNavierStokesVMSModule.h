@@ -492,9 +492,6 @@ struct IncompressibleNavierStokesVMSOptions {
     using FreeSurfaceBoundary = navier_stokes::FreeSurfaceBoundary;
 
     inline static constexpr int current_configuration_schema_version{2};
-    int input_configuration_schema_version{
-        current_configuration_schema_version};
-    bool explicit_legacy_configuration{false};
     FreeSurfacePhysicalModel free_surface_physical_model{
         FreeSurfacePhysicalModel::OnePhaseLiquidPrescribedExteriorPressure};
 

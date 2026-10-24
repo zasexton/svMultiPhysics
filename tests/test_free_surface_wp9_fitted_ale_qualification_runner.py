@@ -142,15 +142,11 @@ def test_wp9_matrix_contains_exact_xml_and_provenance_regressions():
         ),
         (
             "MovingDomainPhysics."
-            "FittedFreeSurfaceLegacyPrescribedDataReportsUnconsumedPolicy"
-        ),
-        (
-            "MovingDomainPhysics."
             "NavierStokesEffectiveConfigurationSnapshotExpandsBoundaryDefaults"
         ),
     } <= tests
     assert len(runner._tests_for_binary(matrix, "application")) == 4
-    assert len(runner._tests_for_binary(matrix, "physics")) == 25
+    assert len(runner._tests_for_binary(matrix, "physics")) == 24
     dynamic_contact_exit = next(
         entry
         for entry in matrix["unqualified_required_method_exits"]
@@ -284,9 +280,9 @@ def test_wp9_validate_only_reports_prerequisite_nonclosure():
 
     assert summary["outcome"] == "PASS_PREREQUISITE_NONCLOSURE"
     assert summary["requested_claim"] == "low_level_prerequisite"
-    assert summary["test_count"] == 29
+    assert summary["test_count"] == 28
     assert summary["application_test_count"] == 4
-    assert summary["physics_test_count"] == 25
+    assert summary["physics_test_count"] == 24
     assert summary["unqualified_method_exit_count"] == 9
     assert summary["unqualified_simulation_exit_count"] == 3
     assert summary["fsr10_closed"] is False

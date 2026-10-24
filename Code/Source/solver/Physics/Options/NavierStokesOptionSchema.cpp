@@ -1282,27 +1282,20 @@ tangentialPolicyProvenance(
     out << "{\"artifact_schema_version\":4"
         << ",\"component\":\"incompressible_navier_stokes_free_surface\""
         << ",\"configuration_schema\":{\"input_version\":"
-        << options.input_configuration_schema_version
+        << IncompressibleNavierStokesVMSOptions::
+               current_configuration_schema_version
         << ",\"effective_version\":"
         << IncompressibleNavierStokesVMSOptions::
                current_configuration_schema_version
-        << ",\"migration_mode\":"
-        << jsonString(options.explicit_legacy_configuration
-                          ? "explicit_legacy"
-                          : "current")
-        << '}'
+        << ",\"migration_mode\":\"current\"}"
         << ",\"capability_label\":"
-        << jsonString(options.explicit_legacy_configuration
-                          ? "legacy_diagnostic"
-                          : has_internal_material_interface_volume &&
-                                    !has_exterior_one_phase_boundary
-                                ? "internal_material_interface_phase_volume"
-                                : "one_phase_liquid_sharp_interface")
+        << jsonString(has_internal_material_interface_volume &&
+                              !has_exterior_one_phase_boundary
+                          ? "internal_material_interface_phase_volume"
+                          : "one_phase_liquid_sharp_interface")
         << ",\"physical_model\":";
-    if (options.explicit_legacy_configuration) {
-        out << "null";
-    } else if (has_internal_material_interface_volume &&
-               !has_exterior_one_phase_boundary) {
+    if (has_internal_material_interface_volume &&
+        !has_exterior_one_phase_boundary) {
         out << "{\"name\":\"internal_material_interface_phase_volume\""
             << ",\"interface_traction_owner\":\"coupled_parent\""
             << ",\"pressure_gauge_owner\":\"coupled_parent\""
@@ -1482,9 +1475,7 @@ tangentialPolicyProvenance(
                    boundary.implementation !=
                            FreeSurfaceImplementation::FittedALE
                        ? "not_applicable"
-                       : options.explicit_legacy_configuration
-                             ? "unqualified_explicit_legacy"
-                             : "supported_configuration_envelope")
+                       : "supported_configuration_envelope")
             << ",\"enforcement\":"
             << jsonString(kinematicEnforcementName(
                    boundary.kinematic_enforcement))

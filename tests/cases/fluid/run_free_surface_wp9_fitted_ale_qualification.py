@@ -33,7 +33,7 @@ DEFAULT_MATRIX = SCRIPT_PATH.with_name(
     "free_surface_wp9_fitted_ale_qualification_matrix.json"
 )
 EXPECTED_MATRIX_SHA256 = (
-    "4d20fc09ea7cac54a9834e8e6e148408d8aa052557891bea2bf21d9517eccf9a"
+    "c308491783b2ec799258f512d15a799a28e9754658c481d063945a7df6f5f05e"
 )
 SHARED_RUNNER_PATH = Path(base_runner.__file__).resolve()
 SHARED_RUNNER_SHA256 = base_runner.sha256_file(SHARED_RUNNER_PATH)
@@ -233,10 +233,6 @@ EXPECTED_TEST_GROUPS = {
         ),
     ],
     "schema_1_unqualified_legacy_operator_regressions": [
-        (
-            "MovingDomainPhysics."
-            "FittedFreeSurfaceLegacyPrescribedDataReportsUnconsumedPolicy"
-        ),
         (
             "MovingDomainPhysics."
             "NavierStokesFittedFreeSurfaceALEUsesCurrentBoundaryGeometry"

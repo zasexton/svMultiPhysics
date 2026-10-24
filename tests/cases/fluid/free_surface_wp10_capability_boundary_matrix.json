@@ -482,7 +482,6 @@
       "binary_argument": "physics_binary",
       "tests": [
         "MovingDomainPhysics.NavierStokesEffectiveConfigurationSnapshotExpandsBoundaryDefaults",
-        "MovingDomainPhysics.NavierStokesLegacySchemaIsExplicitAndLosesCurrentCapabilityLabel",
         "MovingDomainPhysics.NavierStokesRejectsUnsupportedPhysicalModelBeforeSystemMutation",
         "NavierStokesLegacyBCs.FreeSurfacePhysicalModelDirectInputIsExplicitAndFailClosed"
       ],

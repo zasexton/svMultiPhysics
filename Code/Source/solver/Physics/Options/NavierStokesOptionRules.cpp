@@ -824,62 +824,36 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: Allow_full_domain_unfitted_free_surface is only valid for unfitted level-set free surfaces");
         }
-        if (!options.explicit_legacy_configuration) {
-            if (!ale_enabled) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: the qualified "
-                    "fitted-ALE free-surface contract requires ALE to be "
-                    "enabled");
-            }
-            if (options.mesh_velocity_source !=
-                ALEMeshVelocitySource::CoupledDisplacement) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: the qualified "
-                    "fitted-ALE free-surface contract requires mesh velocity "
-                    "derived from a coupled mesh-displacement unknown");
-            }
-            if (bc.normal_kinematic_policy !=
-                FreeSurfaceNormalKinematicPolicy::
-                    MatchFluidNormalVelocity) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: the qualified "
-                    "fitted-ALE free-surface contract requires "
-                    "MatchFluidNormalVelocity");
-            }
-            if (bc.kinematic_enforcement !=
-                FreeSurfaceKinematicEnforcement::MeshNitsche) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: the qualified "
-                    "fitted-ALE free-surface contract requires MeshNitsche "
-                    "normal enforcement (the input default); None is "
-                    "accepted only by the explicit schema-1 legacy mode");
-            }
-        }
-        if (bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None &&
-            !ale_enabled) {
+        // The qualified fitted-ALE contract, the only fitted configuration
+        // (the schema-1 legacy mode that waived it was retired).
+        if (!ale_enabled) {
             throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: fitted free-surface kinematics require ALE to be enabled");
+                "IncompressibleNavierStokesVMSModule: the qualified "
+                "fitted-ALE free-surface contract requires ALE to be "
+                "enabled");
         }
-        if (bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None &&
-            bc.normal_kinematic_policy == FreeSurfaceNormalKinematicPolicy::None) {
+        if (options.mesh_velocity_source !=
+            ALEMeshVelocitySource::CoupledDisplacement) {
             throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: fitted free-surface kinematic enforcement requires a normal kinematic policy");
+                "IncompressibleNavierStokesVMSModule: the qualified "
+                "fitted-ALE free-surface contract requires mesh velocity "
+                "derived from a coupled mesh-displacement unknown");
         }
-        if (bc.tangential_mesh_policy ==
-                FreeSurfaceTangentialMeshPolicy::Prescribed &&
-            !ale_enabled) {
+        if (bc.normal_kinematic_policy !=
+            FreeSurfaceNormalKinematicPolicy::
+                MatchFluidNormalVelocity) {
             throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: prescribed fitted "
-                "free-surface tangential mesh velocity requires ALE");
+                "IncompressibleNavierStokesVMSModule: the qualified "
+                "fitted-ALE free-surface contract requires "
+                "MatchFluidNormalVelocity");
         }
-        if (bc.tangential_mesh_policy ==
-                FreeSurfaceTangentialMeshPolicy::Prescribed &&
-            options.mesh_velocity_source !=
-                ALEMeshVelocitySource::CoupledDisplacement) {
+        if (bc.kinematic_enforcement !=
+            FreeSurfaceKinematicEnforcement::MeshNitsche) {
             throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: prescribed fitted "
-                "free-surface tangential mesh velocity requires a coupled "
-                "mesh-displacement unknown");
+                "IncompressibleNavierStokesVMSModule: the qualified "
+                "fitted-ALE free-surface contract requires MeshNitsche "
+                "normal enforcement (the input default); None is "
+                "accepted only by the explicit schema-1 legacy mode");
         }
         for (int component = dim; component < 3; ++component) {
             if (!FE::forms::bc::isZeroConstantScalarValue(
@@ -899,14 +873,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
          !(bc.kinematic_nitsche_gamma > FE::Real{0.0}))) {
         throw std::invalid_argument(
             "IncompressibleNavierStokesVMSModule: MeshNitsche free-surface kinematics require a finite positive boundary-local kinematic_nitsche_gamma");
-    }
-    if (bc.kinematic_enforcement ==
-            FreeSurfaceKinematicEnforcement::MeshNitsche &&
-        (isUnfittedLevelSet(bc) || !ale_enabled ||
-         options.mesh_velocity_source !=
-             ALEMeshVelocitySource::CoupledDisplacement)) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: MeshNitsche free-surface kinematics require a fitted ALE boundary with a coupled mesh-displacement unknown");
     }
 
     for (std::size_t i = 0; i < bc.contact_lines.size(); ++i) {
@@ -937,10 +903,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             if (isUnfittedLevelSet(bc)) {
                 throw std::invalid_argument(
                     "IncompressibleNavierStokesVMSModule: pinned contact lines are currently supported only for fitted ALE free surfaces");
-            }
-            if (!ale_enabled) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: pinned fitted contact lines require ALE to be enabled");
             }
             if (contactLineConstraintMarker(contact_line) < 0) {
                 throw std::invalid_argument(
@@ -1416,25 +1378,6 @@ NavierStokesPreflight preflightNavierStokes(
             "IncompressibleNavierStokesVMSModule::registerOn: "
             "unsupported_free_surface_physical_model");
     }
-    const auto current_schema =
-        IncompressibleNavierStokesVMSOptions::
-            current_configuration_schema_version;
-    if (options.input_configuration_schema_version != current_schema &&
-        options.input_configuration_schema_version != 1) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule::registerOn: unsupported free-surface configuration schema version " +
-            std::to_string(options.input_configuration_schema_version));
-    }
-    if (options.input_configuration_schema_version == 1 &&
-        !options.explicit_legacy_configuration) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule::registerOn: schema version 1 requires explicit_legacy_configuration=true and cannot inherit the current capability label");
-    }
-    if (options.input_configuration_schema_version == current_schema &&
-        options.explicit_legacy_configuration) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule::registerOn: explicit legacy behavior requires input configuration schema version 1");
-    }
     if (!velocity_space) {
         throw std::invalid_argument("IncompressibleNavierStokesVMSModule::registerOn: null velocity_space");
     }
@@ -1525,11 +1468,10 @@ NavierStokesPreflight preflightNavierStokes(
                                     options.enable_ale,
                                     system,
                                     dim);
+        // A validated fitted boundary has ALE with a coupled
+        // mesh-displacement unknown.
         if (effective_bc.implementation ==
-                FreeSurfaceImplementation::FittedALE &&
-            options.enable_ale &&
-            options.mesh_velocity_source ==
-                ALEMeshVelocitySource::CoupledDisplacement) {
+                FreeSurfaceImplementation::FittedALE) {
             if (!system.meshTangentialBoundaryPolicyHistory().empty()) {
                 throw std::invalid_argument(
                     "IncompressibleNavierStokesVMSModule: fitted "

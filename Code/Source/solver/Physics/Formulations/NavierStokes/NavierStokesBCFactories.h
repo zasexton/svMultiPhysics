@@ -1363,9 +1363,9 @@ inline void addFittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem& 
     Factories::applyFreeSurfaceContactLineConstraints(plan, b, ale, dim);   // pinned contact lines: d = 0
     bcs.add(std::make_unique<bc::ReservedBC>(b.boundary_marker));
 
-    validateFreeSurfaceBoundary(b, o, o.enable_ale, system, dim);
+    validateFreeSurfaceBoundary(b, o, o.enable_ale, system, dim);   // the qualified fitted-ALE contract
     const auto Gamma = BoundaryDomain::fullPhysical(b.boundary_marker);
-    const auto n = o.enable_ale ? currentNormal() : FormExpr::normal();   // normal of the integration frame
+    const auto n = currentNormal();   // normal of the integration frame
     const auto gamma = freeSurfaceScalar(b.surface_tension, "ns_free_surface_surface_tension", b);
     const auto p_ext = freeSurfaceScalar(b.external_pressure, "ns_free_surface_external_pressure", b);
     const bool dynamic_stress =
@@ -1383,34 +1383,23 @@ inline void addFittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem& 
         F.log(tractionLogs(b));
     }
 
-    if (!ale.coupled()) {
-        return;
-    }
+    // Coupled ALE, MeshNitsche and MatchFluidNormalVelocity (validated).
     const auto& rec = fittedMeshDisplacementRecord(system, ale);   // throws without a displacement unknown
     declareFittedTangentialMeshPolicy(system, ale, b);
-    const bool normal_relation =
-        b.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None &&
-        b.normal_kinematic_policy == FreeSurfaceNormalKinematicPolicy::MatchFluidNormalVelocity;
     const auto psi = TestField(ale.mesh_displacement_field, *rec.space, "psi_free_surface_mesh");
     const auto d = StateField(ale.mesh_displacement_field, *rec.space, "d_mesh_free_surface");
     const auto nc = currentNormal();
-    FormExpr rows;
-    if (normal_relation) {   // (dt d - u).n = 0 on the mesh rows
-        const auto penalty = FormExpr::constant(b.kinematic_nitsche_gamma) / hNormal();
-        rows = (penalty * normalTrace(dt(d) - u, nc) * normalTrace(psi, nc)).ds(Gamma);
-    }
+    // (dt d - u).n = 0 on the mesh rows
+    const auto penalty = FormExpr::constant(b.kinematic_nitsche_gamma) / hNormal();
+    FormExpr rows = (penalty * normalTrace(dt(d) - u, nc) * normalTrace(psi, nc)).ds(Gamma);
     if (const auto tangential = Factories::tangentialMeshPolicyResidual(b, d, psi, nc, rec.components, Gamma);
         tangential.isValid()) {
         rows = sumOf(rows, tangential);
     }
-    if (rows.isValid()) {   // installed before the fluid residual
-        fs::FormulationGroup group{.ale = &ale};
-        if (normal_relation) {
-            group.extra_trial_fields.push_back(u_id);
-        }
-        (void)F.installGroup({ale.mesh_displacement_field}, rows, group);
-    }
-    declareFittedMeshRowDescriptors(system, o.operator_tag, ale, b, u_id, rows.isValid());
+    fs::FormulationGroup group{.ale = &ale};   // installed before the fluid residual
+    group.extra_trial_fields.push_back(u_id);
+    (void)F.installGroup({ale.mesh_displacement_field}, rows, group);
+    declareFittedMeshRowDescriptors(system, o.operator_tag, ale, b, u_id, /*rows_installed=*/true);
 }
 
 // Pressure gradient-jump penalty on the facets next to the cut (Burman; Schott & Wall):
