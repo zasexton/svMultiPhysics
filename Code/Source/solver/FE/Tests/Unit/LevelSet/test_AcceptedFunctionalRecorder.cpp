@@ -23,7 +23,6 @@ FreeSurfaceDiscreteFunctionalDeclaration declaration()
     FreeSurfaceDiscreteFunctionalDeclaration result{};
     result.interface_marker = 4;
     result.level_set_field = 2;
-    result.curvature_field = 3;
     result.velocity_field = 0;
     result.geometry_domain_id = "liquid";
     result.parameters.surface_tension = 0.07;
