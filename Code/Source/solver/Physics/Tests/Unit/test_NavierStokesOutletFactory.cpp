@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <functional>
 #include <numeric>
 #include <unordered_set>
 
@@ -3645,4 +3646,101 @@ TEST(NavierStokesPostProcessing, StatesTheFreeSurfaceEnergiesAsMeasured0Forms)
     statement.external_pressure.reset();
     statement.endpoint_functional_power = false;
     EXPECT_EQ(post::freeSurfaceEnergyFunctionals(statement).size(), 6u);
+}
+
+TEST(NavierStokesPostProcessing, StatesTheContactLineChannelsWithTheRuleWallNormal)
+{
+    // The record declaration of interface 7 (liquid on the positive side):
+    // Young walls 3 (Ren-E with Navier slip), 5 (prescribed angle with Navier
+    // slip) and 9 (prescribed angle only).
+    namespace post = svmp::Physics::formulations::navier_stokes::post;
+    namespace fs = svmp::FE::interfaces;
+    using Kind = svmp::FE::systems::FunctionalKind;
+    auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    auto vector = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar, 3);
+    FreeSurfaceDiscreteFunctionalDeclaration declaration;
+    declaration.interface_marker = 7;
+    declaration.velocity_field = 0;
+    declaration.parameters.liquid_side = svmp::FE::geometry::CutIntegrationSide::Positive;
+    declaration.parameters.surface_tension = 0.07;
+    declaration.parameters.young_wall_coefficients = {{.boundary_marker = 9, .equilibrium_contact_angle_radians = 1.5},
+                                                      {.boundary_marker = 3, .equilibrium_contact_angle_radians = 1.0},
+                                                      {.boundary_marker = 5, .equilibrium_contact_angle_radians = 2.0}};
+    declaration.parameters.dynamic_contact_coefficients = {
+        {.boundary_marker = 3, .equilibrium_contact_angle_radians = 1.0, .law = fs::FreeSurfaceContactLaw::DynamicRenE,
+         .mobility = 4.0, .slip_length = 0.1, .dynamic_viscosity = 1.0e-3},
+        {.boundary_marker = 5, .equilibrium_contact_angle_radians = 2.0,
+         .law = fs::FreeSurfaceContactLaw::PrescribedAngle, .mobility = 0.0, .slip_length = 0.2,
+         .dynamic_viscosity = 1.0e-3}};
+    declaration.active_volume_energy_parameters = fs::FreeSurfaceActiveVolumeEnergyParameters{
+        .liquid_side = svmp::FE::geometry::CutIntegrationSide::Positive,
+        .density = 1000.0,
+        .gravitational_acceleration = {{0.0, 0.0, -9.81}},
+        .gravitational_reference_point = post::kGravitationalReferencePoint};
+
+    // The statement of the record declaration.
+    const auto statement = post::freeSurfaceEnergyStatement(declaration, *vector, 3);
+    EXPECT_EQ(statement.interface_marker, 7);
+    EXPECT_EQ(statement.liquid_side, CutVolumeSide::Positive);
+    EXPECT_EQ(statement.velocity_space, vector.get());
+    EXPECT_EQ(statement.surface_tension, 0.07);
+    EXPECT_EQ(statement.density, 1000.0);
+    EXPECT_FALSE(statement.dynamic_viscosity.has_value());
+    EXPECT_FALSE(statement.external_pressure.has_value());
+
+    // The walls by marker, with the line friction 1/M and the slip friction mu/l_s.
+    auto walls = post::freeSurfaceContactWallStatements(declaration.parameters);
+    ASSERT_EQ(walls.size(), 3u);
+    EXPECT_EQ(walls[0].boundary_marker, 3);
+    EXPECT_EQ(walls[0].line_friction, std::optional<Real>(0.25));
+    EXPECT_EQ(walls[0].slip_friction, std::optional<Real>(1.0e-3 / 0.1));
+    EXPECT_EQ(walls[1].boundary_marker, 5);
+    EXPECT_FALSE(walls[1].line_friction.has_value());
+    EXPECT_EQ(walls[1].slip_friction, std::optional<Real>(1.0e-3 / 0.2));
+    EXPECT_EQ(walls[2].boundary_marker, 9);
+    EXPECT_FALSE(walls[2].line_friction.has_value() || walls[2].slip_friction.has_value());
+
+    // The snapshot's domains: wall 5 has two contact lines, wall 9 none.
+    walls[0].contact_lines = {ContactLineDomain(101, 3)};
+    walls[0].wetted_wall = {BoundaryDomain::generatedActiveSubset(3, 201)};
+    walls[1].contact_lines = {ContactLineDomain(102, 5), ContactLineDomain(103, 5)};
+    walls[1].wetted_wall = {BoundaryDomain::generatedActiveSubset(5, 202)};
+    walls[2].wetted_wall = {BoundaryDomain::generatedActiveSubset(9, 203)};
+
+    const auto functionals = post::freeSurfaceContactLineFunctionals(statement, walls);
+    const std::vector<std::string> expected{
+        "free_surface.7.wall.3.wetted_area_rate",
+        "free_surface.7.wall.3.young_energy_rate",
+        "free_surface.7.wall.3.contact_line_friction_dissipation",
+        "free_surface.7.wall.3.wall_slip_dissipation",
+        "free_surface.7.wall.5.wetted_area_rate",
+        "free_surface.7.wall.5.young_energy_rate",
+        "free_surface.7.wall.5.wall_slip_dissipation",
+    };
+    const std::vector<Kind> kinds{Kind::Power, Kind::Power, Kind::DissipationRate, Kind::DissipationRate,
+                                  Kind::Power, Kind::Power, Kind::DissipationRate};
+    // Integrals per form: one per contact line (dL) or wetted part (ds).
+    const std::vector<int> integrals{1, 1, 1, 1, 2, 2, 1};
+    ASSERT_EQ(functionals.size(), expected.size());
+    const std::function<int(const FormExprNode&, FormExprType)> count =
+        [&count](const FormExprNode& node, FormExprType type) {
+            int n = node.type() == type ? 1 : 0;
+            for (const auto& child : node.childrenShared()) {
+                n += child ? count(*child, type) : 0;
+            }
+            return n;
+        };
+    for (std::size_t i = 0; i < functionals.size(); ++i) {
+        const auto& functional = functionals[i];
+        SCOPED_TRACE(functional.name);
+        EXPECT_EQ(functional.name, expected[i]);
+        EXPECT_EQ(functional.kind, kinds[i]);
+        EXPECT_EQ(functional.owner, "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary");
+        EXPECT_TRUE(svmp::FE::systems::isSumOfIntegrals(functional.form));
+        EXPECT_FALSE(functional.form.hasTest() || functional.form.hasTrial());
+        // The wall normal is the rule's, never a configured constant.
+        EXPECT_GT(count(*functional.form.node(), FormExprType::BoundaryNormal), 0);
+        // dL and the ds of a generated wetted part are both generated-rule integrals.
+        EXPECT_EQ(count(*functional.form.node(), FormExprType::InterfaceIntegral), integrals[i]);
+    }
 }

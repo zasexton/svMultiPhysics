@@ -38,6 +38,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -792,6 +793,13 @@ inline void installDiagnosticOperators(FE::systems::FormulationBuilder& F,
 // snapshot's wall domains with the declaration's wall coefficients.  Totals
 // stay sums of channels; the volume-constraint potential is zero while no
 // multiplier is declared.
+//
+// The contact-line channels (the contact-line part of the wall power, the
+// line friction and the Navier slip) are stated per wall with the rule's
+// wall normal (FormExpr::boundaryNormal()) by freeSurfaceContactLineFunctionals,
+// over the wall domains of the snapshot.  They are not logged yet: the records
+// keep their pointwise values until an E2 calibration of these forms (E2b)
+// gives their limits.
 // ---------------------------------------------------------------------------
 
 /// What one unfitted free surface declares as its energy functionals (the
@@ -920,6 +928,148 @@ struct FreeSurfaceEnergyStatement {
     if (statement.endpoint_functional_power) {
         add("liquid_gas_area_rate", Kind::Power, surfaceDivergence(u, n).dI(m));
         add("liquid_volume_rate", Kind::Power, (FormExpr::constant(orientation) * inner(u, n)).dI(m));
+    }
+    return out;
+}
+
+/// The statement of the free surface that @p declaration declares (the
+/// record declaration of declareFreeSurfaceDiscreteFunctionals), with the
+/// velocity space of its velocity field.
+[[nodiscard]] inline FreeSurfaceEnergyStatement freeSurfaceEnergyStatement(
+    const FE::systems::FreeSurfaceDiscreteFunctionalDeclaration& declaration,
+    const FE::spaces::FunctionSpace& velocity_space,
+    int dimension)
+{
+    FreeSurfaceEnergyStatement statement;
+    statement.interface_marker = declaration.interface_marker;
+    statement.liquid_side = declaration.parameters.liquid_side == FE::geometry::CutIntegrationSide::Positive
+                                ? FE::forms::CutVolumeSide::Positive
+                                : FE::forms::CutVolumeSide::Negative;
+    statement.velocity_field = declaration.velocity_field;
+    statement.velocity_space = &velocity_space;
+    statement.dimension = dimension;
+    statement.surface_tension = declaration.parameters.surface_tension;
+    if (const auto& energy = declaration.active_volume_energy_parameters; energy.has_value()) {
+        statement.density = energy->density;
+        statement.gravitational_acceleration = energy->gravitational_acceleration;
+        statement.gravitational_reference_point = energy->gravitational_reference_point;
+    }
+    if (const auto& dissipation = declaration.active_volume_dissipation_parameters; dissipation.has_value()) {
+        statement.dynamic_viscosity = dissipation->dynamic_viscosity;
+    }
+    if (const auto& pressure = declaration.external_pressure_power_parameters; pressure.has_value()) {
+        statement.external_pressure = pressure->external_pressure;
+    }
+    statement.endpoint_functional_power = declaration.endpoint_functional_power_enabled;
+    return statement;
+}
+
+/// One wall that the contact lines of a free surface meet: the coefficients
+/// of the discrete-functional declaration and the wall's domains in the
+/// geometry snapshot (its contact lines and its wetted, liquid-side part).
+struct FreeSurfaceContactWallStatement {
+    int boundary_marker{-1};
+    std::optional<FE::Real> equilibrium_contact_angle_radians{};  ///< a Young wall
+    std::optional<FE::Real> line_friction{};                      ///< 1/M of a Ren-E wall
+    std::optional<FE::Real> slip_friction{};                      ///< mu/l_s of a dynamic-contact wall
+    std::vector<FE::forms::ContactLineDomain> contact_lines{};
+    std::vector<FE::forms::BoundaryDomain> wetted_wall{};
+};
+
+/// The walls of @p parameters by boundary marker: the Young walls, with the
+/// line friction of a Ren-E law and the Navier-slip friction of their
+/// dynamic-contact coefficient; the caller adds the snapshot's domains.
+[[nodiscard]] inline std::vector<FreeSurfaceContactWallStatement> freeSurfaceContactWallStatements(
+    const FE::interfaces::FreeSurfaceDiscreteFunctionalParameters& parameters)
+{
+    std::vector<FreeSurfaceContactWallStatement> walls;
+    for (const auto& young : parameters.young_wall_coefficients) {
+        FreeSurfaceContactWallStatement wall;
+        wall.boundary_marker = young.boundary_marker;
+        wall.equilibrium_contact_angle_radians = young.equilibrium_contact_angle_radians;
+        for (const auto& dynamic : parameters.dynamic_contact_coefficients) {
+            if (dynamic.boundary_marker != young.boundary_marker) {
+                continue;
+            }
+            if (dynamic.law == FE::interfaces::FreeSurfaceContactLaw::DynamicRenE) {
+                wall.line_friction = FE::Real{1.0} / dynamic.mobility;
+            }
+            wall.slip_friction = dynamic.dynamic_viscosity / dynamic.slip_length;
+        }
+        walls.push_back(std::move(wall));
+    }
+    std::sort(walls.begin(), walls.end(),
+              [](const auto& a, const auto& b) { return a.boundary_marker < b.boundary_marker; });
+    return walls;
+}
+
+/// The contact-line functionals of one free surface, per wall b (in the order
+/// of @p walls), named "free_surface.<m>.wall.<b>.<quantity>":
+///   wetted_area_rate                   Power            int_CL u.m_b
+///   young_energy_rate                  Power            -gamma cos(theta_b) int_CL u.m_b    (Young wall)
+///   contact_line_friction_dissipation  DissipationRate  (1/M_b) int_CL (u.m_b)^2            (Ren-E wall)
+///   wall_slip_dissipation              DissipationRate  (mu/l_s) int_W |u - (u.n_w) n_w|^2 (dynamic-contact wall)
+/// with CL the wall's contact lines, W its wetted part, n_w the rule's wall
+/// normal (FormExpr::boundaryNormal(): it follows a curved wall; on a flat
+/// wall it is the configured normal), n_L the rule normal turned out of the
+/// liquid and m_b = conormal(n_L, n_w), the direction along the wall out of
+/// the wetted footprint.  A channel whose domains the snapshot does not have
+/// is absent.  The first two are the contact-line part of the wall power, on
+/// the accepted state; the two dissipations are evaluated on the accepted
+/// contact-stage state (its stage velocity), as the contact stage is.
+[[nodiscard]] inline std::vector<FE::systems::FunctionalFormDeclaration> freeSurfaceContactLineFunctionals(
+    const FreeSurfaceEnergyStatement& statement,
+    std::span<const FreeSurfaceContactWallStatement> walls)
+{
+    using namespace FE::forms;
+    using Kind = FE::systems::FunctionalKind;
+    const std::string owner = "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary";
+    const int m = statement.interface_marker;
+    const FE::Real orientation =
+        statement.liquid_side == CutVolumeSide::Negative ? FE::Real{1.0} : FE::Real{-1.0};
+    const auto u = FormExpr::discreteField(statement.velocity_field, *statement.velocity_space, "u");
+    const auto n_wall = FormExpr::boundaryNormal();
+    const auto footprint = conormal(FormExpr::constant(orientation) * FormExpr::normal(), n_wall);
+    const auto contact_speed = inner(u, footprint);
+    const auto slip_velocity = u - inner(u, n_wall) * n_wall;
+    const auto sum_over = [](const auto& domains, const auto& measure) {
+        FormExpr sum{};
+        for (const auto& domain : domains) {
+            auto term = measure(domain);
+            sum = sum.isValid() ? sum + term : std::move(term);
+        }
+        return sum;
+    };
+
+    std::vector<FE::systems::FunctionalFormDeclaration> out;
+    for (const auto& wall : walls) {
+        const std::string wall_name = "wall." + std::to_string(wall.boundary_marker) + ".";
+        const auto add = [&](std::string_view quantity, Kind kind, FormExpr form) {
+            out.push_back(FE::systems::FunctionalFormDeclaration{
+                .name = freeSurfaceFunctionalName(m, wall_name + std::string(quantity)),
+                .kind = kind,
+                .form = std::move(form),
+                .owner = owner});
+        };
+        const auto on_contact_lines = [&](const FormExpr& integrand) {
+            return sum_over(wall.contact_lines, [&](const ContactLineDomain& line) { return integrand.dL(line); });
+        };
+        if (!wall.contact_lines.empty()) {
+            add("wetted_area_rate", Kind::Power, on_contact_lines(contact_speed));
+            if (wall.equilibrium_contact_angle_radians.has_value()) {
+                const FE::Real young = -statement.surface_tension * std::cos(*wall.equilibrium_contact_angle_radians);
+                add("young_energy_rate", Kind::Power, on_contact_lines(FormExpr::constant(young) * contact_speed));
+            }
+            if (wall.line_friction.has_value()) {
+                add("contact_line_friction_dissipation", Kind::DissipationRate,
+                    on_contact_lines(FormExpr::constant(*wall.line_friction) * contact_speed * contact_speed));
+            }
+        }
+        if (!wall.wetted_wall.empty() && wall.slip_friction.has_value()) {
+            const auto slip = FormExpr::constant(*wall.slip_friction) * inner(slip_velocity, slip_velocity);
+            add("wall_slip_dissipation", Kind::DissipationRate,
+                sum_over(wall.wetted_wall, [&](const BoundaryDomain& part) { return slip.ds(part); }));
+        }
     }
     return out;
 }
