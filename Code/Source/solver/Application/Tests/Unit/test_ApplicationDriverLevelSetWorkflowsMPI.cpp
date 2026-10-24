@@ -4,7 +4,7 @@
 
 // The workflow helper under test currently has internal linkage in the
 // application driver.  Include the implementation, as the serial workflow
-// tests do, so this exercises the production graph-extension implementation.
+// tests do, so these tests exercise the production workflow helpers.
 #include "../../Core/ApplicationDriver.cpp"
 
 #include "Application/Translators/MeshTranslator.h"
@@ -16,6 +16,7 @@
 #include "FE/Backends/Utils/BackendOptions.h"
 #include "FE/Forms/Forms.h"
 #include "FE/Forms/Vocabulary.h"
+#include "FE/LevelSet/Extension/LevelSetVelocityExtensionSeed.h"
 #include "FE/Sparsity/DistributedSparsityPattern.h"
 #include "FE/Spaces/SpaceFactory.h"
 #include "FE/Spaces/ProductSpace.h"
@@ -63,6 +64,11 @@
 #include <vector>
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
 #include "FE/Systems/FunctionalRecords.h"
+
+// The known set of the level-set velocity extension is an FE service
+// (FE/LevelSet/Extension/LevelSetVelocityExtensionSeed.h).
+using svmp::FE::level_set::markVelocityExtensionTraceSupportCells;
+using svmp::FE::level_set::synchronizeVelocityExtensionTraceSupportMask;
 
 namespace {
 // Every small-cut aggregation prolongation report requested in this test

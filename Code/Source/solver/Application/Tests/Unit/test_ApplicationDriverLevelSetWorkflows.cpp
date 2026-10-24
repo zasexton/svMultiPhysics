@@ -21,6 +21,7 @@
 #include "FE/Geometry/CutQuadratureMapping.h"
 #include "FE/Interfaces/LevelSetInterfaceBuilder.h"
 #include "FE/Interfaces/SnapshotFieldEvaluator.h"
+#include "FE/LevelSet/Extension/LevelSetVelocityExtensionSeed.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/ProductSpace.h"
 #include "FE/Spaces/SpaceFactory.h"
@@ -60,6 +61,14 @@
 #include <vector>
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
 #include "FE/Systems/FunctionalRecords.h"
+
+// The level-set velocity extension refresh and its known set are FE services
+// (FE/LevelSet/Extension).
+using svmp::FE::level_set::configuredInterfaceVelocityMarker;
+using svmp::FE::level_set::hasAuthoritativeInterfaceVelocityContext;
+using svmp::FE::level_set::interfaceVelocitySampleCandidateCells;
+using svmp::FE::level_set::nodalVelocityExtensionInterfaceCells;
+using svmp::FE::level_set::orientedLevelSetForVelocityExtension;
 
 namespace {
 // Every small-cut aggregation prolongation report requested in this test
