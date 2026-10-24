@@ -2281,10 +2281,14 @@ TEST(LevelSetTransport,
 }
 
 TEST(LevelSetTransport,
-     AlgebraicExtensionSparsityUsesQuadEdgesWithoutCellDiagonals)
+     AlgebraicExtensionSparsityCouplesEveryCornerPairOfQuadCells)
 {
+    // The PDE extension's rows are rows of assembled Q1 cell matrices, which
+    // couple the corners across a quad's diagonal as well as along its edges.
+    // On a 2x2 grid vertex 0 shares a cell with 1, 3 and its diagonal 4, but
+    // not with 2.
     const auto mesh =
-        std::make_shared<StructuredQuadTransportMeshAccess>(1);
+        std::make_shared<StructuredQuadTransportMeshAccess>(2);
     auto velocity_space = vectorSpace(mesh);
 
     FE::systems::FESystem system(mesh);
@@ -2331,17 +2335,20 @@ TEST(LevelSetTransport,
 
     const auto row = vertex_dof(extension, 0, 0);
     for (int component = 0; component < 3; ++component) {
-        EXPECT_TRUE(pattern.hasEntry(
-            row, vertex_dof(extension, 0, component)));
-        EXPECT_TRUE(pattern.hasEntry(
-            row, vertex_dof(extension, 1, component)));
-        EXPECT_TRUE(pattern.hasEntry(
-            row, vertex_dof(extension, 2, component)));
-        EXPECT_FALSE(pattern.hasEntry(
-            row, vertex_dof(extension, 3, component)));
+        for (const FE::GlobalIndex vertex : {0, 1, 3, 4}) {
+            EXPECT_TRUE(pattern.hasEntry(
+                row, vertex_dof(extension, vertex, component)))
+                << "vertex " << vertex << " component " << component;
+        }
+        for (const FE::GlobalIndex vertex : {2, 5, 8}) {
+            EXPECT_FALSE(pattern.hasEntry(
+                row, vertex_dof(extension, vertex, component)))
+                << "vertex " << vertex << " component " << component;
+        }
     }
     EXPECT_TRUE(pattern.hasEntry(row, vertex_dof(source, 0, 0)));
     EXPECT_FALSE(pattern.hasEntry(row, vertex_dof(source, 1, 0)));
+    EXPECT_FALSE(pattern.hasEntry(row, vertex_dof(source, 4, 0)));
 }
 
 namespace {

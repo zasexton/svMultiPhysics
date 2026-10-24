@@ -187,15 +187,18 @@ void LevelSetVelocityExtensionConstraintKernel::addSparsityCouplings(
     const systems::FESystem& system,
     sparsity::SparsityPattern& pattern) const
 {
-    // The active set can change between time steps.  Its direct graph equation
-    // always couples an extension vertex to itself, its mesh-edge neighbors
-    // (including cross-components after wall projection), and the same-vertex
-    // physical velocity.  Register that conservative fixed graph before setup
-    // so later coefficient refreshes never mutate sparsity.  In particular,
-    // do not use the cell clique: that admits quad/hex face and body diagonals
-    // that the extension-map builder is forbidden to use.
+    // The active set can change between time steps.  A row couples an
+    // extension vertex to itself, to every corner vertex of the cells around
+    // it (including cross-components after wall projection), and to the
+    // same-vertex physical velocity: the PDE extension's rows are rows of
+    // assembled cell matrices, which on a quad, hex, wedge or pyramid also
+    // couple the corners across a face or the body, not only along an edge.
+    // Register that conservative fixed graph before setup so later
+    // coefficient refreshes never mutate sparsity.  On simplices every corner
+    // pair is an edge, so the graph is the edge graph.
     const auto& mesh = system.meshAccess();
     std::map<GlobalIndex, std::set<GlobalIndex>> neighbors;
+    std::vector<GlobalIndex> corners;
     mesh.forEachCell([&](GlobalIndex cell) {
         std::vector<GlobalIndex> vertices;
         mesh.getCellNodes(cell, vertices);
@@ -208,6 +211,8 @@ void LevelSetVelocityExtensionConstraintKernel::addSparsityCouplings(
         for (const auto vertex : vertices) {
             neighbors.try_emplace(vertex);
         }
+        // The corners are the end points of the reference edges.
+        corners.clear();
         for (std::size_t edge = 0; edge < reference.num_edges(); ++edge) {
             const auto& local_nodes = reference.edge_nodes(edge);
             if (local_nodes.size() != 2u || local_nodes[0] < 0 ||
@@ -225,8 +230,18 @@ void LevelSetVelocityExtensionConstraintKernel::addSparsityCouplings(
                 throw std::runtime_error(
                     "LevelSetVelocityExtensionConstraintKernel found a degenerate mesh edge");
             }
-            neighbors[first].insert(second);
-            neighbors[second].insert(first);
+            corners.push_back(first);
+            corners.push_back(second);
+        }
+        std::sort(corners.begin(), corners.end());
+        corners.erase(std::unique(corners.begin(), corners.end()),
+                      corners.end());
+        for (const auto first : corners) {
+            for (const auto second : corners) {
+                if (first != second) {
+                    neighbors[first].insert(second);
+                }
+            }
         }
     });
 

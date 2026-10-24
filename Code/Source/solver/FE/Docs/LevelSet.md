@@ -67,7 +67,10 @@ The PDE velocity extension of the level-set advection velocity
 (`LevelSetVelocityExtensionWall.h`). It works on every first-order Lagrange
 cell (Triangle3, Quad4, Tetra4, Hex8, Wedge6, Pyramid5) and on meshes that mix
 them: simplices keep their constant P1 gradients, the other cells use the FE
-Lagrange element of their type, its quadrature and the isoparametric map. The
+Lagrange element of their type, its quadrature and the isoparametric map. With
+monolithic coupling its rows enter the Jacobian through
+`LevelSetVelocityExtensionConstraintKernel`, whose sparsity couples every
+corner pair of a cell (on a quad or hex also across faces and the body). The
 algebraic wall-compatible and nearest-sample wet extensions of the application
 were retired by decisions D47 and D55.
 
