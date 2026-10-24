@@ -49,6 +49,22 @@ MIN_FIT_SAMPLES = 8
 class DataError(RuntimeError):
     """Missing or inconsistent input; verification cannot proceed."""
 
+def _log_records():
+    """The shared reader of the solver's log lines in their old and record
+    format (tests/cases/fluid/free_surface_log_records.py)."""
+    import importlib.util
+
+    name = "free_surface_log_records"
+    module = sys.modules.get(name)
+    if module is None:
+        path = next(parent / f"{name}.py" for parent in Path(__file__).resolve().parents
+                    if (parent / f"{name}.py").is_file())
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
 
 # ---------------------------------------------------------------------------
 # Geometry of the P1 liquid region {phi_h < 0} on affine triangles
@@ -265,10 +281,6 @@ def output_series(run: Path, case: dict) -> list[tuple[float, Path]]:
     return series
 
 
-_WET_VOLUME = re.compile(r"Wet volume diagnostic step=(\d+) .*?domain_id='([^']*)'.*?"
-                         r"physical_wet_volume=([-+0-9.eE]+)")
-
-
 def logged_wet_volumes(run: Path, domain_id: str) -> dict[int, float]:
     """Per-step liquid area from the solver's 'Wet volume diagnostic' log lines.
 
@@ -282,14 +294,16 @@ def logged_wet_volumes(run: Path, domain_id: str) -> dict[int, float]:
     else:
         return {}
     opener = gzip.open if path.suffix == ".gz" else open
+    records = _log_records()
     volumes: dict[int, float] = {}
     with opener(path, "rt", errors="replace") as log:
         for line in log:
-            if "Wet volume diagnostic step=" not in line:
+            if not records.is_record(line, "wet_volume"):
                 continue
-            m = _WET_VOLUME.search(line)
-            if m and m.group(2) == domain_id:
-                volumes[int(m.group(1))] = float(m.group(3))
+            fields = records.line_fields(line)
+            if (records.value(fields.get("domain_id", "")) == domain_id and "step" in fields
+                    and "physical_wet_volume" in fields):
+                volumes[int(fields["step"])] = float(fields["physical_wet_volume"])
     return volumes
 
 

@@ -7,8 +7,25 @@ import argparse
 import json
 import math
 import re
+import sys
 from pathlib import Path
 from typing import Any
+
+def _log_records():
+    """The shared reader of the solver's log lines in their old and record
+    format (tests/cases/fluid/free_surface_log_records.py)."""
+    import importlib.util
+
+    name = "free_surface_log_records"
+    module = sys.modules.get(name)
+    if module is None:
+        path = next(parent / f"{name}.py" for parent in Path(__file__).resolve().parents
+                    if (parent / f"{name}.py").is_file())
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
 
 import numpy as np
 import pyvista as pv
@@ -177,7 +194,7 @@ def parse_wet_volume_diagnostics(path: Path | None) -> dict[int, dict[str, Any]]
     diagnostics: dict[int, dict[str, float]] = {}
     with path.open(encoding="utf-8", errors="replace") as stream:
         for line_number, line in enumerate(stream, start=1):
-            if "Wet volume diagnostic step=" not in line:
+            if not _log_records().is_record(line, "wet_volume"):
                 continue
             entry = selected_key_values(line, WET_VOLUME_KEYS, line_number=line_number)
             step = int(entry.pop("step"))
@@ -254,7 +271,7 @@ def parse_solver_step_context(path: Path | None) -> dict[str, Any]:
                     entry["solution_state_pressure_norms"] = pressure_norms
                 continue
 
-            if "Active-domain cut context diagnostic=cut_context_rebuild" in line:
+            if "diagnostic=cut_context_rebuild" in line:
                 context = selected_key_values(line, CUT_CONTEXT_KEYS, line_number=line_number)
                 provenance = context.get("provenance")
                 if provenance == "accepted_step" and last_accepted_result_step is not None:
@@ -329,7 +346,7 @@ def parse_solver_step_context(path: Path | None) -> dict[str, Any]:
                 volume_correction[step] = entry
                 continue
 
-            if "WARNING ActiveFluid/WetVolumeFraction disagreement" in line:
+            if _log_records().is_record(line, "active_fluid_wet_fraction_disagreement"):
                 entry = selected_key_values(line, ACTIVEFLUID_WARNING_KEYS, line_number=line_number)
                 step = int(entry.pop("step"))
                 if "time" in entry:

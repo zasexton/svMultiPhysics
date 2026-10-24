@@ -1,0 +1,1471 @@
+{
+ "_comment": [
+  "Log-record conversion map (agent-status/refactor/logrecord-cleanup-proposal.md, approved 2026-10-24).",
+  "One entry per converted line: how the line reads before (head text before its first key, and/or its diagnostic word)",
+  "and after (owner, message, diagnostic first, level, scope), key renames, repeated groups that become child lines",
+  "(split: a group starts at \"start\" and holds the following keys with \"prefix\"), the keys a child line repeats from its",
+  "parent (identifying), and the few lines with a special shape.  Read by tests/cases/fluid/free_surface_log_records.py",
+  "(both formats) and by the --map gate of the module-log comparator.  Values never change in a conversion."
+ ],
+ "version": 1,
+ "entries": [
+  {
+   "id": "S8.2",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "contact_point_velocity",
+    "head_regex": "^ContactPointVelocityConstraint '(?P<constraint>[^']*)':$"
+   },
+   "after": {
+    "owner": "ContactPointVelocityConstraint",
+    "message": "contact-point velocity",
+    "diagnostic": "contact_point_velocity",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": "bracket_points",
+   "child_diagnostic": "contact_point_velocity_point"
+  },
+  {
+   "id": "S8.3",
+   "batch": "S8",
+   "before": {
+    "head": "FESystem:",
+    "diagnostic": "mesh_normal_boundary_constraint"
+   },
+   "after": {
+    "owner": "MeshBoundaryKinematics",
+    "message": "declared normal mesh constraint",
+    "diagnostic": "mesh_normal_boundary_constraint",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.4",
+   "batch": "S8",
+   "before": {
+    "head": "FESystem:",
+    "diagnostic": "mesh_tangential_boundary_policy"
+   },
+   "after": {
+    "owner": "MeshBoundaryKinematics",
+    "message": "declared tangential mesh policy",
+    "diagnostic": "mesh_tangential_boundary_policy",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.5",
+   "batch": "S8",
+   "before": {
+    "head": "FESystem: accepted fitted-ALE normal measurement",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "MeshNormalConstraintStageMeasurements",
+    "message": "accepted fitted-ALE normal measurement",
+    "diagnostic": "fitted_ale_normal_measurement",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {
+    "A": "boundary_measure",
+    "Wn": "normal_work",
+    "Un": "normal_velocity_moment"
+   },
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R2.6",
+   "batch": "R2",
+   "before": {
+    "head": "FESystem: accepted free-surface discrete functional",
+    "diagnostic": "free_surface_discrete_functional_history"
+   },
+   "after": {
+    "owner": "FunctionalRecords",
+    "message": "accepted free-surface functionals",
+    "diagnostic": "free_surface_discrete_functional_history",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [
+    {
+     "start": "wall_marker",
+     "prefix": "wall_",
+     "diagnostic": "free_surface_wall_history"
+    },
+    {
+     "start": "contact_wall_marker",
+     "prefix": "contact_",
+     "exclude_prefix": "contact_stage_",
+     "diagnostic": "free_surface_contact_stage_wall_history"
+    }
+   ],
+   "identifying": [
+    "accepted_step",
+    "interface_marker"
+   ],
+   "special": null
+  },
+  {
+   "id": "S8.7",
+   "batch": "S8",
+   "before": {
+    "head": "FESystem: accepted normal mesh constraint history",
+    "diagnostic": "mesh_normal_boundary_constraint_history"
+   },
+   "after": {
+    "owner": "MeshBoundaryKinematics",
+    "message": "accepted normal mesh constraint history",
+    "diagnostic": "mesh_normal_boundary_constraint_history",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.8",
+   "batch": "S8",
+   "before": {
+    "head": "FESystem: accepted tangential mesh policy history",
+    "diagnostic": "mesh_tangential_boundary_policy_history"
+   },
+   "after": {
+    "owner": "MeshBoundaryKinematics",
+    "message": "accepted tangential mesh policy history",
+    "diagnostic": "mesh_tangential_boundary_policy_history",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.9",
+   "batch": "R1",
+   "before": {
+    "head": "FESystem: accepted two-fluid interface diagnostics",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "TwoFluidStageRecords",
+    "message": "accepted two-fluid interface diagnostics",
+    "diagnostic": "two_fluid_interface_history",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null,
+   "frozen_reader_text": "accepted two-fluid interface diagnostics"
+  },
+  {
+   "id": "R2.11",
+   "batch": "R2",
+   "before": {
+    "head": "FESystem: declared free-surface discrete functional",
+    "diagnostic": "free_surface_discrete_functional_declaration"
+   },
+   "after": {
+    "owner": "FunctionalRecords",
+    "message": "declared free-surface functional",
+    "diagnostic": "free_surface_discrete_functional_declaration",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [
+    {
+     "start": "wall_marker",
+     "prefix": "wall_",
+     "diagnostic": "free_surface_wall_declaration"
+    }
+   ],
+   "identifying": [
+    "interface_marker"
+   ],
+   "special": null
+  },
+  {
+   "id": "R2.12",
+   "batch": "R2",
+   "before": {
+    "head": "FESystem: free-surface functional absolute mass",
+    "diagnostic": "functional_absolute_mass"
+   },
+   "after": {
+    "owner": "AcceptedFunctionalRecorder",
+    "message": "declared functional absolute masses",
+    "diagnostic": "functional_absolute_mass",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [
+    "accepted_step",
+    "interface_marker"
+   ],
+   "special": "interface_quantity_keys",
+   "child_diagnostic": "functional_absolute_mass_wall"
+  },
+  {
+   "id": "S8.36",
+   "batch": "S8",
+   "before": {
+    "head": "LevelSetActiveSideVertexDirichletConstraint:",
+    "diagnostic": "level_set_active_side_vertex_constraint"
+   },
+   "after": {
+    "owner": "LevelSetActiveSideVertexDirichletConstraint",
+    "message": "active-side vertex constraint",
+    "diagnostic": "level_set_active_side_vertex_constraint",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.110",
+   "batch": "S8",
+   "before": {
+    "head": "[svMultiPhysics::Application] Active pressure support constraint refresh",
+    "diagnostic": "active_pressure_constraint_refresh"
+   },
+   "after": {
+    "owner": "LevelSetGeometryService",
+    "message": "active pressure support constraint refresh",
+    "diagnostic": "active_pressure_constraint_refresh",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.111",
+   "batch": "S8",
+   "before": {
+    "head": "[svMultiPhysics::Application] Active-domain cut context",
+    "diagnostic": "cut_context_rebuild"
+   },
+   "after": {
+    "owner": "LevelSetGeometryService",
+    "message": "active-domain cut context",
+    "diagnostic": "cut_context_rebuild",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R2.113",
+   "batch": "R2",
+   "before": {
+    "head": "[svMultiPhysics::Application] Backward-Euler kinetic work",
+    "diagnostic": "backward_euler_kinetic_work_binding"
+   },
+   "after": {
+    "owner": "AcceptedFunctionalRecorder",
+    "message": "backward-Euler kinetic work binding",
+    "diagnostic": "backward_euler_kinetic_work_binding",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S9.115",
+   "batch": "S9",
+   "before": {
+    "head": "[svMultiPhysics::Application] Conservative phase candidate",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "LevelSetConservativePhase",
+    "message": "candidate",
+    "diagnostic": "conservative_phase_candidate",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S9.116",
+   "batch": "S9",
+   "before": {
+    "head": "[svMultiPhysics::Application] Conservative phase component ledger",
+    "diagnostic": "conservative_phase_component_ledger"
+   },
+   "after": {
+    "owner": "LevelSetConservativePhase",
+    "message": "component ledger",
+    "diagnostic": "conservative_phase_component_ledger",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S9.117",
+   "batch": "S9",
+   "before": {
+    "head": "[svMultiPhysics::Application] Conservative phase geometry validated",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "LevelSetConservativePhase",
+    "message": "Conservative phase geometry validated",
+    "diagnostic": "conservative_phase_geometry_validation",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null,
+   "frozen_reader_text": "Conservative phase geometry validated"
+  },
+  {
+   "id": "S9.118",
+   "batch": "S9",
+   "before": {
+    "head": "[svMultiPhysics::Application] Conservative phase initialized",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "LevelSetConservativePhase",
+    "message": "initialized",
+    "diagnostic": "conservative_phase_initialization",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S9.119",
+   "batch": "S9",
+   "before": {
+    "head": "[svMultiPhysics::Application] Conservative phase maintenance ledger",
+    "diagnostic": "conservative_phase_maintenance_ledger"
+   },
+   "after": {
+    "owner": "LevelSetConservativePhase",
+    "message": "maintenance ledger",
+    "diagnostic": "conservative_phase_maintenance_ledger",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S9.120",
+   "batch": "S9",
+   "before": {
+    "head": "[svMultiPhysics::Application] Conservative phase staged",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "LevelSetConservativePhase",
+    "message": "Conservative phase staged",
+    "diagnostic": "conservative_phase_stage",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null,
+   "frozen_reader_text": "Conservative phase staged"
+  },
+  {
+   "id": "S9.121",
+   "batch": "S9",
+   "before": {
+    "head": "[svMultiPhysics::Application] Conservative phase stationary geometry equilibrium preserved",
+    "diagnostic": "stationary_geometry_equilibrium_projection"
+   },
+   "after": {
+    "owner": "LevelSetConservativePhase",
+    "message": "stationary geometry equilibrium preserved",
+    "diagnostic": "stationary_geometry_equilibrium_projection",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.122",
+   "batch": "S8",
+   "before": {
+    "head": "[svMultiPhysics::Application] Cut context kept after a mesh field change",
+    "diagnostic": "cut_context_resync"
+   },
+   "after": {
+    "owner": "LevelSetGeometryService",
+    "message": "cut context kept after a mesh field change",
+    "diagnostic": "cut_context_resync",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.123",
+   "batch": "S8",
+   "before": {
+    "head": "[svMultiPhysics::Application] Cut context reinstalled",
+    "diagnostic": "cut_context_reinstall"
+   },
+   "after": {
+    "owner": "LevelSetGeometryService",
+    "message": "cut context reinstalled",
+    "diagnostic": "cut_context_reinstall",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.124",
+   "batch": "S8",
+   "before": {
+    "head": "[svMultiPhysics::Application] Cut-context refresh skipped",
+    "diagnostic": "cut_context_refresh_skip"
+   },
+   "after": {
+    "owner": "LevelSetGeometryService",
+    "message": "cut-context refresh skipped",
+    "diagnostic": "cut_context_refresh_skip",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R2.131",
+   "batch": "R2",
+   "before": {
+    "head": "[svMultiPhysics::Application] Free-surface complete energy",
+    "diagnostic": "free_surface_complete_energy_channel_sources"
+   },
+   "after": {
+    "owner": "LevelSetEnergyParticipant",
+    "message": "complete energy channel sources",
+    "diagnostic": "free_surface_complete_energy_channel_sources",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R2.132",
+   "batch": "R2",
+   "before": {
+    "head": "[svMultiPhysics::Application] Free-surface complete energy",
+    "diagnostic": "free_surface_complete_energy_record"
+   },
+   "after": {
+    "owner": "LevelSetEnergyParticipant",
+    "message": "complete energy record",
+    "diagnostic": "free_surface_complete_energy_record",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R2.133",
+   "batch": "R2",
+   "before": {
+    "head": "[svMultiPhysics::Application] Free-surface residual work",
+    "diagnostic": "free_surface_residual_work_stage"
+   },
+   "after": {
+    "owner": "LevelSetEnergyParticipant",
+    "message": "residual work stage",
+    "diagnostic": "free_surface_residual_work_stage",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R2.135",
+   "batch": "R2",
+   "before": {
+    "head": "[svMultiPhysics::Application] Level-set accepted-step maintenance energy account",
+    "diagnostic": "level_set_maintenance_accepted_step_energy"
+   },
+   "after": {
+    "owner": "LevelSetMaintenanceWorkLedger",
+    "message": "accepted-step energy account",
+    "diagnostic": "level_set_maintenance_accepted_step_energy",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S9.136",
+   "batch": "S9",
+   "before": {
+    "head": "[svMultiPhysics::Application] Level-set interface-preserving redistancing",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "LevelSetMaintenancePipeline",
+    "message": "interface-preserving redistancing",
+    "diagnostic": "level_set_interface_preserving_redistancing",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S9.137",
+   "batch": "S9",
+   "before": {
+    "head": "[svMultiPhysics::Application] Level-set kinematic reconciliation",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "LevelSetMaintenancePipeline",
+    "message": "kinematic reconciliation",
+    "diagnostic": "level_set_kinematic_reconciliation",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S9.138",
+   "batch": "S9",
+   "before": {
+    "head": "[svMultiPhysics::Application] Level-set maintenance diagnostic",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "LevelSetMaintenancePipeline",
+    "message": "maintenance configuration",
+    "diagnostic": "level_set_maintenance_configuration",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R2.139",
+   "batch": "R2",
+   "before": {
+    "head": "[svMultiPhysics::Application] Level-set maintenance physical endpoint channels",
+    "diagnostic": "level_set_maintenance_physical_endpoint_channels"
+   },
+   "after": {
+    "owner": "LevelSetEnergyBalance",
+    "message": "maintenance physical endpoint channels",
+    "diagnostic": "level_set_maintenance_physical_endpoint_channels",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S9.140",
+   "batch": "S9",
+   "before": {
+    "head": "[svMultiPhysics::Application] Level-set maintenance refreshed cut context",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "LevelSetMaintenancePipeline",
+    "message": "refreshed cut context",
+    "diagnostic": "level_set_maintenance_cut_context_refresh",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S9.141",
+   "batch": "S9",
+   "before": {
+    "head": "[svMultiPhysics::Application] Level-set maintenance synchronized",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "LevelSetMaintenancePipeline",
+    "message": "synchronized",
+    "diagnostic": "level_set_maintenance_synchronization",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S9.142",
+   "batch": "S9",
+   "before": {
+    "head": "[svMultiPhysics::Application] Level-set maintenance transaction",
+    "diagnostic": "level_set_maintenance_transaction"
+   },
+   "after": {
+    "owner": "LevelSetMaintenance",
+    "message": "maintenance transaction",
+    "diagnostic": "level_set_maintenance_transaction",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R2.143",
+   "batch": "R2",
+   "before": {
+    "head": "[svMultiPhysics::Application] Level-set maintenance work attempt",
+    "diagnostic": "level_set_maintenance_work_attempt"
+   },
+   "after": {
+    "owner": "LevelSetMaintenanceWorkLedger",
+    "message": "work attempt",
+    "diagnostic": "level_set_maintenance_work_attempt",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R2.144",
+   "batch": "R2",
+   "before": {
+    "head": "[svMultiPhysics::Application] Level-set maintenance work row",
+    "diagnostic": "level_set_maintenance_work"
+   },
+   "after": {
+    "owner": "LevelSetMaintenanceWorkLedger",
+    "message": "work row",
+    "diagnostic": "level_set_maintenance_work",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R2.145",
+   "batch": "R2",
+   "before": {
+    "head": "[svMultiPhysics::Application] Level-set maintenance-to-accepted endpoint connection",
+    "diagnostic": "level_set_maintenance_accepted_endpoint_connection"
+   },
+   "after": {
+    "owner": "LevelSetEnergyParticipant",
+    "message": "maintenance-to-accepted endpoint connection",
+    "diagnostic": "level_set_maintenance_accepted_endpoint_connection",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R2.146",
+   "batch": "R2",
+   "before": {
+    "head": "[svMultiPhysics::Application] Level-set maintenance-to-current accepted functional endpoint",
+    "diagnostic": "level_set_maintenance_current_functional_endpoint"
+   },
+   "after": {
+    "owner": "LevelSetEnergyParticipant",
+    "message": "maintenance-to-current functional endpoint",
+    "diagnostic": "level_set_maintenance_current_functional_endpoint",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S9.148",
+   "batch": "S9",
+   "before": {
+    "head": "[svMultiPhysics::Application] Level-set sign-definite patch bounds",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "LevelSetMaintenancePipeline",
+    "message": "sign-definite patch bounds",
+    "diagnostic": "level_set_sign_definite_patch_bounds",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "params.152",
+   "batch": "params",
+   "before": {
+    "head": "[svMultiPhysics::Application] Semi-implicit capillary term:",
+    "diagnostic": "free_surface_semi_implicit_reference"
+   },
+   "after": {
+    "owner": "ApplicationDriver",
+    "message": "semi-implicit capillary term",
+    "diagnostic": "free_surface_semi_implicit_reference",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.178",
+   "batch": "S8",
+   "before": {
+    "head": "[svMultiPhysics::Application] Transient cut-topology nonlinear restart",
+    "diagnostic": "cut_topology_nonlinear_restart"
+   },
+   "after": {
+    "owner": "LevelSetGeometryService",
+    "message": "transient cut-topology nonlinear restart",
+    "diagnostic": "cut_topology_nonlinear_restart",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.180",
+   "batch": "R1",
+   "before": {
+    "head": "[svMultiPhysics::Application] Two-fluid momentum reconciliation",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "TwoFluidAcceptedStage",
+    "message": "momentum reconciliation",
+    "diagnostic": "two_fluid_momentum_reconciliation",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.181",
+   "batch": "S8",
+   "before": {
+    "head": "[svMultiPhysics::Application] WARNING ActiveFluid/WetVolumeFraction disagreement",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "ApplicationDriver",
+    "message": "ActiveFluid and WetVolumeFraction disagree",
+    "diagnostic": "active_fluid_wet_fraction_disagreement",
+    "level": "WARNING",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S9.182",
+   "batch": "S9",
+   "before": {
+    "head": "[svMultiPhysics::Application] WARNING unfitted free-surface level-set has no enabled accepted-step maintenance request",
+    "diagnostic": "plain_level_set_advection_not_conservative"
+   },
+   "after": {
+    "owner": "ApplicationDriver",
+    "message": "unfitted free-surface level set has no accepted-state maintenance",
+    "diagnostic": "plain_level_set_advection_not_conservative",
+    "level": "WARNING",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.183",
+   "batch": "S8",
+   "before": {
+    "head": "[svMultiPhysics::Application] WARNING wet-volume drift exceeds diagnostic threshold",
+    "diagnostic": "nonconservative_level_set_volume_drift"
+   },
+   "after": {
+    "owner": "ApplicationDriver",
+    "message": "wet-volume drift exceeds the diagnostic threshold",
+    "diagnostic": "nonconservative_level_set_volume_drift",
+    "level": "WARNING",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "params.184",
+   "batch": "params",
+   "before": {
+    "head": null,
+    "diagnostic": null,
+    "line_regex": "^\\[svMultiPhysics::Application\\] WARNING: '(?P<setting>[^']*)' \\((?P<location>[^)]*)\\) (?:restates a retired setting \\(decision (?P<decision>\\w+)\\); it has no effect and will be removed\\.|is deprecated \\(decision (?P<decision2>\\w+)\\) and will be removed; use '(?P<replacement>[^']*)'.*)$"
+   },
+   "after": {
+    "owner": "ApplicationDriver",
+    "message": "retired input setting",
+    "diagnostic": "input_deprecation",
+    "level": "WARNING",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": "input_deprecation_text"
+  },
+  {
+   "id": "S8.185",
+   "batch": "S8",
+   "before": {
+    "head": "[svMultiPhysics::Application] Wet volume diagnostic",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "ApplicationDriver",
+    "message": "wet volume",
+    "diagnostic": "wet_volume",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.186",
+   "batch": "S8",
+   "before": {
+    "head": "[svMultiPhysics::FE] assembleOperator",
+    "diagnostic": "process_memory"
+   },
+   "after": {
+    "owner": "SystemAssembly",
+    "message": "process memory",
+    "diagnostic": "process_memory",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.187",
+   "batch": "S8",
+   "before": {
+    "head": "assembleOperator: cut-volume active-domain diagnostics",
+    "diagnostic": "cut_volume_assembly"
+   },
+   "after": {
+    "owner": "CutVolumeAssembly",
+    "message": "cut-volume active-domain diagnostics",
+    "diagnostic": "cut_volume_assembly",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.17",
+   "batch": "R1",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule:",
+    "diagnostic": "free_surface_residual_work_operators"
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "residual work operators",
+    "diagnostic": "free_surface_residual_work_operators",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.18",
+   "batch": "R1",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule: DynamicContactAngle uses the strong contact-point law",
+    "diagnostic": "navier_stokes_dynamic_contact_strong_law"
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "DynamicContactAngle uses the strong contact-point law",
+    "diagnostic": "navier_stokes_dynamic_contact_strong_law",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {
+    "Contact_line_law_enforcement": "contact_line_law_enforcement"
+   },
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.19",
+   "batch": "R1",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule: active-domain free surface",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "active-domain free surface",
+    "diagnostic": "active_domain_free_surface",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {
+    "Active_domain": "active_domain",
+    "Active_domain_method": "active_domain_method"
+   },
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.20",
+   "batch": "R1",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule: active-domain inactive constraints enabled",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "active-domain inactive constraints enabled",
+    "diagnostic": "active_domain_inactive_constraints",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.21",
+   "batch": "R1",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule: cut-cell stabilization",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "cut-cell stabilization",
+    "diagnostic": "cut_cell_stabilization",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {
+    "Active_domain_method": "active_domain_method"
+   },
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.22",
+   "batch": "R1",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule: fitted free-surface mesh policy",
+    "diagnostic": "fitted_free_surface_mesh_policy"
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "fitted free-surface mesh policy",
+    "diagnostic": "fitted_free_surface_mesh_policy",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.23",
+   "batch": "R1",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule: installed coupled dissipative Ren--E DynamicContactAngle",
+    "diagnostic": "navier_stokes_dynamic_contact_angle"
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "installed coupled dissipative Ren--E DynamicContactAngle",
+    "diagnostic": "navier_stokes_dynamic_contact_angle",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.24",
+   "batch": "R1",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule: installed prescribed-angle sharp Navier wall slip",
+    "diagnostic": "navier_stokes_prescribed_contact_navier_slip"
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "installed prescribed-angle sharp Navier wall slip",
+    "diagnostic": "navier_stokes_prescribed_contact_navier_slip",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.25",
+   "batch": "R1",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule: installed prescribed-angle wall-energy momentum term",
+    "diagnostic": "navier_stokes_prescribed_contact_wall_energy"
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "installed prescribed-angle wall-energy momentum term",
+    "diagnostic": "navier_stokes_prescribed_contact_wall_energy",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.26",
+   "batch": "R1",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule: installed semi-implicit capillary term",
+    "diagnostic": "free_surface_semi_implicit_normal_increment"
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "installed semi-implicit capillary term",
+    "diagnostic": "free_surface_semi_implicit_normal_increment",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.27",
+   "batch": "R1",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule: installed variational free-surface stress",
+    "diagnostic": "free_surface_variational_surface_stress"
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "installed variational free-surface stress",
+    "diagnostic": "free_surface_variational_surface_stress",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.28",
+   "batch": "R1",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule: mesh-field initialization",
+    "diagnostic": "mesh_field_initialization"
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "mesh-field initialization",
+    "diagnostic": "mesh_field_initialization",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.29",
+   "batch": "R1",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule: registered prescribed-angle contact geometry without a level-set residual",
+    "diagnostic": "navier_stokes_prescribed_contact_geometry"
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "registered prescribed-angle contact geometry without a level-set residual",
+    "diagnostic": "navier_stokes_prescribed_contact_geometry",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.30",
+   "batch": "R1",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule: registered the strong Ren-E contact-point constraint",
+    "diagnostic": "navier_stokes_strong_contact_point_law"
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "registered the strong Ren-E contact-point constraint",
+    "diagnostic": "navier_stokes_strong_contact_point_law",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.31",
+   "batch": "R1",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule: small-cut aggregation enabled for unfitted free surface",
+    "diagnostic": "small_cut_aggregation_registration"
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "small-cut aggregation enabled for unfitted free surface",
+    "diagnostic": "small_cut_aggregation_registration",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.32",
+   "batch": "R1",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule: unfitted free surface installs no explicit dI boundary residual",
+    "diagnostic": "unfitted_free_surface_natural_mode"
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "unfitted free surface installs no explicit dI boundary residual",
+    "diagnostic": "unfitted_free_surface_natural_mode",
+    "level": "WARNING",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.33",
+   "batch": "R1",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule: unfitted free-surface boundary mode",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "unfitted free-surface boundary mode",
+    "diagnostic": "unfitted_free_surface_boundary_mode",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "params.34",
+   "batch": "params",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule: validated complete DynamicContactAngle planar wall marker",
+    "diagnostic": "dynamic_contact_complete_wall_marker_validation"
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "validated complete DynamicContactAngle planar wall marker",
+    "diagnostic": "dynamic_contact_complete_wall_marker_validation",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.hydrostatic",
+   "batch": "R1",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule: hydrostatic pressure initialization",
+    "diagnostic": "hydrostatic_initialization"
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "hydrostatic pressure initialization",
+    "diagnostic": "hydrostatic_initialization",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {
+    "Active_domain": "active_domain"
+   },
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.pressure_gauge",
+   "batch": "R1",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule: pressure gauge diagnostic",
+    "diagnostic": "pressure_gauge_check"
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "pressure gauge",
+    "diagnostic": "pressure_gauge_check",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {
+    "Active_domain": "active_domain"
+   },
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.pressure_only",
+   "batch": "R1",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule: installed pressure-only free-surface stress",
+    "diagnostic": "free_surface_pressure_only_surface_stress"
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "installed pressure-only free-surface stress",
+    "diagnostic": "free_surface_pressure_only_surface_stress",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.conservative_balance",
+   "batch": "R1",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule:",
+    "diagnostic": "navier_stokes_free_surface_conservative_balance_operators"
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "conservative balance operators",
+    "diagnostic": "navier_stokes_free_surface_conservative_balance_operators",
+    "level": [
+     "INFO",
+     "WARNING"
+    ],
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.pressure_row",
+   "batch": "R1",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule:",
+    "diagnostic": "navier_stokes_pressure_row_contribution_operators"
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "pressure-row contribution operators",
+    "diagnostic": "navier_stokes_pressure_row_contribution_operators",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "R1.cut_cell_order_warning",
+   "batch": "R1",
+   "before": {
+    "head": null,
+    "diagnostic": null,
+    "line_regex": "^IncompressibleNavierStokesVMSModule: high-order cut-cell stabilization currently supports derivative_orders=1,2; higher-normal-derivative penalties above derivative_order=(?P<supported_derivative_order>\\d+) are not yet available$"
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "high-order cut-cell stabilization supports derivative orders 1 and 2 only",
+    "diagnostic": "cut_cell_stabilization_order_unsupported",
+    "level": "WARNING",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": "regex_fields"
+  }
+ ]
+}

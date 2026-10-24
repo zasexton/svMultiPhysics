@@ -26,6 +26,22 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
+def _log_records():
+    """The shared reader of the solver's log lines in their old and record
+    format (tests/cases/fluid/free_surface_log_records.py)."""
+    import importlib.util
+
+    name = "free_surface_log_records"
+    module = sys.modules.get(name)
+    if module is None:
+        path = next(parent / f"{name}.py" for parent in Path(__file__).resolve().parents
+                    if (parent / f"{name}.py").is_file())
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
 
 ROOT = Path(__file__).resolve().parents[5]
 CASE_ROOT = ROOT / "tests/cases/fluid/open_vessel_free_surface/unfitted_level_set"
@@ -5292,7 +5308,7 @@ def parse_solver_log(log_path: Path) -> dict[str, Any]:
                     accepted_record["cut_volume_assembly_by_side"] = copy.deepcopy(
                         metrics["last_cut_volume_assembly_by_side"]
                     )
-        if "Wet volume diagnostic" in line:
+        if _log_records().is_record(line, "wet_volume"):
             values = parse_key_values(line)
             record = compact_wet_volume_diagnostic(values)
             metrics["last_wet_volume_diagnostic"] = record

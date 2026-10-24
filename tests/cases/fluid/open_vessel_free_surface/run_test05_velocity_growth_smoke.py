@@ -20,6 +20,22 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Sequence
 
+def _log_records():
+    """The shared reader of the solver's log lines in their old and record
+    format (tests/cases/fluid/free_surface_log_records.py)."""
+    import importlib.util
+
+    name = "free_surface_log_records"
+    module = sys.modules.get(name)
+    if module is None:
+        path = next(parent / f"{name}.py" for parent in Path(__file__).resolve().parents
+                    if (parent / f"{name}.py").is_file())
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
 import numpy as np
 import pyvista as pv
 
@@ -3742,7 +3758,10 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "true_residual_failure_count": solver_output.count("true residual check failed"),
     }
     active_assembly_timing: dict[str, Any] | None = None
+    log_records = _log_records()
     for line in solver_output.splitlines():
+        # The record word of the line in its old or record format.
+        word = log_records.line_diagnostic(line) if "=" in line else None
         timing_header = ASSEMBLY_TIMING_HEADER_RE.search(line)
         if timing_header is not None:
             active_assembly_timing = {
@@ -3791,7 +3810,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             diagnostics["time_loop"]["vtk_outputs"].append(vtk_match.group("path").strip())
         elif "diagnostic=cut_context_refresh_skip" in line:
             diagnostics["cut_context_refresh_skips"].append(parse_key_values(line))
-        elif "Active-domain cut context" in line:
+        elif word == "cut_context_rebuild":
             record = parse_key_values(line)
             diagnostics["cut_context_rebuilds"].append(record)
             if isinstance(record.get("process_rss_kb"), (int, float)):
@@ -3804,11 +3823,11 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             diagnostics["level_set_advection_velocity_updates"].append(
                 parse_key_values(line)
             )
-        elif "cut-volume active-domain diagnostics" in line:
+        elif word == "cut_volume_assembly":
             diagnostics["cut_volume_assemblies"].append(parse_key_values(line))
-        elif "hydrostatic pressure initialization" in line:
+        elif word == "hydrostatic_initialization":
             diagnostics["hydrostatic_initializations"].append(parse_key_values(line))
-        elif "pressure gauge diagnostic" in line:
+        elif word == "pressure_gauge_check":
             diagnostics["pressure_gauge_checks"].append(parse_key_values(line))
         elif "diagnostic=dynamic_contact_operator_angle" in line:
             diagnostics["dynamic_contact_operator_angles"].append(
@@ -3892,12 +3911,11 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             )
         elif "Level-set volume corrected" in line:
             diagnostics["level_set_volume_corrections"].append(parse_key_values(line))
-        elif "Level-set maintenance diagnostic" in line:
+        elif word == "level_set_maintenance_configuration":
             diagnostics["level_set_maintenance"].append(parse_key_values(line))
-        elif "Wet volume diagnostic" in line:
+        elif word == "wet_volume":
             diagnostics["wet_volume_diagnostics"].append(parse_key_values(line))
-        elif ("WARNING unfitted free-surface level-set has no enabled"
-              in line):
+        elif word == "plain_level_set_advection_not_conservative":
             diagnostics["level_set_nonconservative_warnings"].append(
                 parse_key_values(line)
             )

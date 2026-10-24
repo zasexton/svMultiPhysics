@@ -41,7 +41,6 @@ LOG_NAMES = ("solver_run.log", "solver_run.log.gz")
 # The per-step solver volume is used for the volume criterion only if it
 # matches the exact snapshot volume at every output to this relative level.
 LOG_VOLUME_AGREEMENT = 1.0e-8
-WET_VOLUME_LINE = re.compile(r"Wet volume diagnostic step=(\d+) time=(\S+) .*? wet_volume=(\S+)")
 LOCAL_EDGES = ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
 # dt_rule values of generate_case.py that are protocol time steps (D25); a case
 # without dt_rule was written before D25 and is reported as diagnostic.
@@ -50,6 +49,22 @@ PROTOCOL_DT_RULES = ("protocol_fixed", "protocol_capillary_limit")
 
 class DataError(RuntimeError):
     """Missing or inconsistent input; verification cannot proceed."""
+
+def _log_records():
+    """The shared reader of the solver's log lines in their old and record
+    format (tests/cases/fluid/free_surface_log_records.py)."""
+    import importlib.util
+
+    name = "free_surface_log_records"
+    module = sys.modules.get(name)
+    if module is None:
+        path = next(parent / f"{name}.py" for parent in Path(__file__).resolve().parents
+                    if (parent / f"{name}.py").is_file())
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
 
 
 # ---------------------------------------------------------------------------
@@ -241,11 +256,14 @@ def log_wet_volumes(run: Path) -> list[tuple[int, float, float]] | None:
         if path.is_file():
             opener = gzip.open if name.endswith(".gz") else open
             with opener(path, "rt", errors="replace") as handle:
+                records = _log_records()
                 rows = {}
                 for line in handle:
-                    m = WET_VOLUME_LINE.search(line)
-                    if m:
-                        rows[int(m.group(1))] = (float(m.group(2)), float(m.group(3)))
+                    if not records.is_record(line, "wet_volume"):
+                        continue
+                    fields = records.line_fields(line)
+                    if {"step", "time", "wet_volume"} <= fields.keys():
+                        rows[int(fields["step"])] = (float(fields["time"]), float(fields["wet_volume"]))
             return [(s, t, v) for s, (t, v) in sorted(rows.items())]
     return None
 
