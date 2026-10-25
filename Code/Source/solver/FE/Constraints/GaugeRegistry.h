@@ -99,11 +99,12 @@ enum class GaugeStatus : std::uint8_t {
  * @brief Strategy for enforcing a detected nullspace mode
  */
 enum class EnforcementPolicy : std::uint8_t {
-    None,                   ///< Mode is anchored, nothing to do
-    PinDof,                 ///< Deterministic fallback: pin one DOF to zero
-    MeanZeroElimination,    ///< Constrain mean to zero via GlobalConstraint
-    LagrangeMultiplier,     ///< Augment system with Lagrange multiplier
-    SolverNullspace,        ///< Pass nullspace basis to solver (currently not assigned by resolver)
+    None = 0,                ///< Mode is anchored, nothing to do
+    PinDof = 1,              ///< Deterministic fallback: pin one DOF to zero
+    MeanZeroElimination = 2, ///< Constrain mean to zero via GlobalConstraint
+    // 3 was a Lagrange multiplier policy that pinned a DOF; a multiplier is a
+    // global field in the form (D54).  The values stay as they were.
+    SolverNullspace = 4,     ///< Pass nullspace basis to solver (currently not assigned by resolver)
 };
 
 // ============================================================================

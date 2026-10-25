@@ -51,10 +51,11 @@ namespace constraints {
  * @brief Strategy for enforcing global constraints
  */
 enum class GlobalConstraintStrategy {
-    PinSingleDof,        ///< Pin one DOF to fix the constant (simplest)
-    LagrangeMultiplier,  ///< Add Lagrange multiplier for integral constraint
-    NullspaceProjection, ///< Project out nullspace component
-    WeightedMean         ///< Constrain weighted mean to specified value
+    PinSingleDof = 0,        ///< Pin one DOF to fix the constant (simplest)
+    // 1 was a Lagrange multiplier strategy that pinned a DOF; a multiplier is
+    // a global field in the form (D54).  The values stay as they were.
+    NullspaceProjection = 2, ///< Project out nullspace component (pins one DOF today)
+    WeightedMean = 3         ///< Constrain weighted mean to specified value
 };
 
 /**

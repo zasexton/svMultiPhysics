@@ -106,11 +106,10 @@ void GlobalConstraint::apply(AffineConstraints& constraints) const {
             break;
         }
 
-        case GlobalConstraintStrategy::LagrangeMultiplier:
         case GlobalConstraintStrategy::NullspaceProjection:
-            // These strategies require system-level modifications
+            // This strategy requires system-level modifications
             // and cannot be expressed as simple DOF constraints.
-            // They need to be handled at the assembly/solver level.
+            // It needs to be handled at the assembly/solver level.
             // For now, fall back to PinSingleDof
             pinned_dof_ = selectDofToPin();
             constraints.addLine(pinned_dof_);

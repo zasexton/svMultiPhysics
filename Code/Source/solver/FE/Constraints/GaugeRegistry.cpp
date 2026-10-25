@@ -65,7 +65,6 @@ const char* toString(EnforcementPolicy p) noexcept {
         case EnforcementPolicy::None:                return "None";
         case EnforcementPolicy::PinDof:              return "PinDof";
         case EnforcementPolicy::MeanZeroElimination: return "MeanZeroElimination";
-        case EnforcementPolicy::LagrangeMultiplier:  return "LagrangeMultiplier";
         case EnforcementPolicy::SolverNullspace:     return "SolverNullspace";
     }
     return "Unknown";
@@ -585,18 +584,6 @@ int GaugeRegistry::applyEnforcement(constraints::AffineConstraints& constraints,
                     "(family=%s) — no algebraic constraint created\n",
                     static_cast<int>(mode.candidate.field),
                     toString(mode.candidate.family));
-                break;
-
-            case EnforcementPolicy::LagrangeMultiplier:
-                std::fprintf(stderr,
-                    "[GaugeRegistry] Lagrange multiplier enforcement requested for field %d "
-                    "but not yet implemented — falling back to PinDof\n",
-                    static_cast<int>(mode.candidate.field));
-                {
-                    auto gc = constraints::GlobalConstraint::pinDof(dofs[0], 0.0);
-                    gc.apply(constraints);
-                    ++count;
-                }
                 break;
 
             case EnforcementPolicy::None:
