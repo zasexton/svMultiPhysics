@@ -6634,10 +6634,29 @@ void applyAuxiliaryDelta(systems::FESystem& system,
     }
 
     auto* mgr = system.auxiliaryStateManagerIfPresent();
-    FE_CHECK_NOT_NULL(mgr, "NewtonSolver: auxiliary state manager");
+    std::vector<Real> global_values(system.borderedGlobalValues().begin(),
+                                    system.borderedGlobalValues().end());
+    bool global_values_changed = false;
+    std::size_t global_offset = 0;
 
     std::size_t offset = 0;
     for (const auto& blk_info : bc.aux_blocks) {
+        if (blk_info.global_field != INVALID_FIELD_ID) {
+            // A bordered global field: its DOFs follow the field DOFs in
+            // the order of the bordered blocks, as the system holds them.
+            const auto block_dim = static_cast<std::size_t>(blk_info.dim);
+            FE_THROW_IF(offset + block_dim > dx.size() || global_offset + block_dim > global_values.size(),
+                        systems::InvalidStateException,
+                        "NewtonSolver: bordered global update exceeds dx size");
+            for (std::size_t i = 0; i < block_dim; ++i) {
+                global_values[global_offset + i] -= alpha * dx[offset + i];
+            }
+            global_values_changed = true;
+            global_offset += block_dim;
+            offset += block_dim;
+            continue;
+        }
+        FE_CHECK_NOT_NULL(mgr, "NewtonSolver: auxiliary state manager");
         auto& blk = mgr->getBlock(blk_info.name);
         auto work = blk.work();
         const auto block_dim = static_cast<std::size_t>(blk_info.dim);
@@ -6656,7 +6675,12 @@ void applyAuxiliaryDelta(systems::FESystem& system,
     FE_THROW_IF(offset != dx.size(), systems::InvalidStateException,
                 "NewtonSolver: auxiliary bordered update did not consume all dx entries");
 
-    mgr->syncGhosts();
+    if (global_values_changed) {
+        system.setBorderedGlobalValues(global_values);
+    }
+    if (mgr != nullptr) {
+        mgr->syncGhosts();
+    }
 }
 
 // Message of a captured exception for failure reports that combine two
@@ -9260,6 +9284,11 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
         aux_registry && aux_registry->isLayoutFinalized()) {
         has_monolithic_auxiliary_unknowns =
             aux_registry->auxiliaryLayout().total_aux_unknowns > 0;
+    }
+    // Bordered global multipliers (D54) are bordered unknowns too: their
+    // rows and columns are assembled into the bordered blocks.
+    if (transient.system().hasBorderedGlobalFields()) {
+        has_monolithic_auxiliary_unknowns = true;
     }
 
     std::vector<GlobalIndex> constrained_dofs;

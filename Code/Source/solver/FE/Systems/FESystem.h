@@ -709,8 +709,9 @@ public:
      * sparsity, the backend vectors and the matrix hold the field DOFs only,
      * and the global DOFs take the indices that follow them
      * (fieldDofOffset(global field) >= dofHandler().getNumDofs()).  Their
-     * values live in the system (borderedGlobalValues()), and assembly routes
-     * their rows and columns into borderedCoupling().
+     * values live in the system (borderedGlobalValues()), assembly routes
+     * their rows and columns into borderedCoupling(), and Newton solves them
+     * with the bordered correction.
      */
     [[nodiscard]] bool hasBorderedGlobalFields() const noexcept;
     /// The number of bordered global DOFs (0 without the bordered lowering).

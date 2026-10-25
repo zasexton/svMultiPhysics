@@ -20,12 +20,13 @@ namespace systems {
  * The form states the coupling; the lowering is chosen at setup.  InMatrix
  * assembles every global row and column into the matrix.  Bordered keeps the
  * global DOFs out of the matrix for backends with a fixed node layout
- * (FSILS): their rows and columns go to FESystem::borderedCoupling() (LM2).
+ * (FSILS): their rows and columns go to FESystem::borderedCoupling() and
+ * Newton solves them with the bordered correction (LM2).
  */
 enum class MultiplierLowering : std::uint8_t {
     Auto,     ///< In the matrix
     InMatrix, ///< Global rows and columns assembled into the matrix
-    Bordered, ///< Global DOFs kept out of the matrix, rows and columns in the bordered blocks
+    Bordered, ///< Global DOFs kept out of the matrix, bordered blocks solved by Newton
 };
 
 [[nodiscard]] constexpr const char* multiplierLoweringName(MultiplierLowering lowering) noexcept

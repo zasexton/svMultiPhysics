@@ -25482,16 +25482,27 @@ void FESystem::inferQuadraturePointLayout_(DeployedAuxEntry& entry)
 
 std::vector<Real> FESystem::checkpointAuxiliaryState() const
 {
+    std::vector<Real> packed;
     if (auxiliary_state_manager_) {
-        return auxiliary_state_manager_->packAll();
+        packed = auxiliary_state_manager_->packAll();
     }
-    return {};
+    // The bordered global DOFs follow the auxiliary state.
+    packed.insert(packed.end(), bordered_global_values_.begin(), bordered_global_values_.end());
+    return packed;
 }
 
 void FESystem::restoreAuxiliaryState(std::span<const Real> data)
 {
-    if (auxiliary_state_manager_ && !data.empty()) {
-        auxiliary_state_manager_->unpackAll(data);
+    const auto n_global = bordered_global_values_.size();
+    FE_THROW_IF(!data.empty() && data.size() < n_global, InvalidArgumentException,
+                "FESystem::restoreAuxiliaryState: the checkpoint has fewer values than the bordered global DOFs");
+    const auto auxiliary = data.empty() ? data : data.first(data.size() - n_global);
+    if (auxiliary_state_manager_ && !auxiliary.empty()) {
+        auxiliary_state_manager_->unpackAll(auxiliary);
+    }
+    if (!data.empty() && n_global > 0u) {
+        const auto global = data.last(n_global);
+        std::copy(global.begin(), global.end(), bordered_global_values_.begin());
     }
 }
 

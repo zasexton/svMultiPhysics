@@ -20,8 +20,8 @@
  * equal those under the gauge, and the pressures differ by a constant.
  *
  * The bordered lowering (LM2): the bordered blocks are the in-matrix row and
- * column bit for bit, and gauge-type multipliers (G2, G3) and time
- * derivatives are refused.
+ * column bit for bit, Newton's bordered solve gives the in-matrix solution,
+ * and gauge-type multipliers (G2, G3) and time derivatives are refused.
  */
 
 #include <gtest/gtest.h>
@@ -46,6 +46,16 @@
 #include "Systems/FunctionalFormEvaluator.h"
 #include "Systems/SystemCollectives.h"
 #include "Systems/SystemManifest.h"
+#include "Systems/TimeIntegrator.h"
+#include "Systems/TransientSystem.h"
+#include "TimeStepping/NewtonSolver.h"
+#include "TimeStepping/TimeHistory.h"
+
+#include "Backends/Interfaces/BackendFactory.h"
+#include "Backends/Interfaces/BackendKind.h"
+#include "Backends/Interfaces/GenericVector.h"
+#include "Backends/Interfaces/LinearSolver.h"
+#include "Backends/Utils/BackendOptions.h"
 
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
@@ -1109,6 +1119,57 @@ std::vector<Real> borderedTestState(std::size_t n_field)
     return u;
 }
 
+struct NewtonSolution {
+    std::vector<Real> u;
+    std::vector<Real> lambda;
+    bool converged{false};
+};
+
+/// A steady Newton solve of @p op from 0 with the Eigen direct solver.
+NewtonSolution solveWithNewton(FESystem& sys, FieldId lambda, const OperatorTag& op = "poisson")
+{
+    NewtonSolution out;
+    auto factory = backends::BackendFactory::create(backends::BackendKind::Eigen);
+    EXPECT_NE(factory, nullptr);
+    if (!factory) {
+        return out;
+    }
+    backends::SolverOptions direct;
+    direct.method = backends::SolverMethod::Direct;
+    direct.preconditioner = backends::PreconditionerType::None;
+    direct.rel_tol = 1e-14;
+    direct.abs_tol = 1e-14;
+    direct.max_iter = 1;
+    auto linear = factory->createLinearSolver(direct);
+    TransientSystem transient(sys, std::make_shared<ZeroTimeDerivativeIntegrator>());
+    const auto n = sys.dofHandler().getNumDofs();
+    auto history = timestepping::TimeHistory::allocate(*factory, n);
+    history.setDt(1.0);
+    history.setPrevDt(1.0);
+    timestepping::NewtonOptions options;
+    options.residual_op = op;
+    options.jacobian_op = op;
+    options.max_iterations = 6;
+    options.abs_tolerance = 1e-12;
+    options.rel_tolerance = 1e-12;
+    options.use_line_search = false;
+    timestepping::NewtonSolver newton(options);
+    timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(sys, *factory, workspace);
+    const auto report = newton.solveStep(transient, *linear, /*solve_time=*/0.0, history, workspace);
+    out.converged = report.converged;
+    auto view = history.u().createAssemblyView();
+    out.u.resize(static_cast<std::size_t>(n));
+    for (GlobalIndex i = 0; i < n; ++i) {
+        out.u[static_cast<std::size_t>(i)] = view->getVectorEntry(i);
+    }
+    SystemStateView state;
+    state.u_vector = &history.u();
+    state.u = history.uSpan();
+    out.lambda = sys.globalFieldValues(lambda, state);
+    return out;
+}
+
 } // namespace
 
 TEST(GlobalBordered, TheBorderedBlocksAreTheInMatrixRowAndColumn)
@@ -1152,6 +1213,32 @@ TEST(GlobalBordered, TheBorderedBlocksAreTheInMatrixRowAndColumn)
         }
         EXPECT_EQ(bc.D[0], full.matrix[n * m + n]) << "order " << order;
         EXPECT_EQ(bc.g[0], full.vector[n]) << "order " << order;
+    }
+}
+
+TEST(GlobalBordered, NewtonSolvesTheBorderedSystemAsTheMatrixDoes)
+{
+    // G1 on Q2: lambda = 12c (exact), and the bordered solve gives the
+    // in-matrix solution to round-off.
+    constexpr Real c = 1.5;
+    auto in_matrix = buildMeanConstrainedPoisson(4, 2, 0.5, 2, c);
+    auto bordered = buildMeanConstrainedPoisson(4, 2, 0.5, 2, c,
+                                                BuildOptions{.lowering = MultiplierLowering::Bordered});
+    const auto a = solveWithNewton(*in_matrix.system, in_matrix.lambda);
+    const auto b = solveWithNewton(*bordered.system, bordered.lambda);
+    ASSERT_TRUE(a.converged);
+    ASSERT_TRUE(b.converged);
+    ASSERT_EQ(a.lambda.size(), 1u);
+    ASSERT_EQ(b.lambda.size(), 1u);
+    EXPECT_NEAR(a.lambda[0], 12.0 * c, 1e-10 * 12.0 * c);
+    EXPECT_NEAR(b.lambda[0], a.lambda[0], 1e-10 * std::abs(a.lambda[0]));
+    ASSERT_EQ(a.u.size(), b.u.size() + 1);
+    Real scale = 0.0;
+    for (const auto value : b.u) {
+        scale = std::max(scale, std::abs(value));
+    }
+    for (std::size_t i = 0; i < b.u.size(); ++i) {
+        EXPECT_NEAR(b.u[i], a.u[i], 1e-10 * scale) << "dof " << i;
     }
 }
 

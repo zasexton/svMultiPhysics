@@ -7,7 +7,7 @@
 
 /**
  * @file test_GlobalMultiplierMPI.cpp
- * @brief G1, G2 and G3 on 1, 2 and 4 ranks (G4)
+ * @brief G1, G2 and G3 on 1, 2 and 4 ranks (G4); G1 under the bordered lowering on FSILS (G5)
  *
  * G1 (mean-constrained Poisson) runs on a strip of Q1 cells; G2 (pure Neumann
  * with a mean-zero multiplier) on P1 triangles and G3 (Taylor-Hood Stokes with
@@ -28,6 +28,14 @@
  *   - through the ordinary parallel path (double sums of the shared entries),
  *     lambda agrees with the one-rank lambda to round-off, and with the closed
  *     form 12c / (1 - h^2) of Q1.
+ *
+ * G5 solves G1 under the bordered lowering on FSILS GMRES (the field block on
+ * FSILS, the multiplier through Newton's bordered correction) and compares
+ * lambda and u with the one-rank in-matrix solution of Eigen's direct solver,
+ * to 1e-10 relative.  FSILS takes the owner-contiguous numbering with cell
+ * ownership, as in the FSILS tests (on this strip, whose cells every rank
+ * sees, FSILS does not reach the solution at 4 ranks with GlobalIds and
+ * vertex ownership, with or without a multiplier).
  */
 
 #include <gtest/gtest.h>
@@ -41,6 +49,8 @@
 #include "Geometry/MappingFactory.h"
 #include "Spaces/ProductSpace.h"
 #include "Constraints/DirichletBC.h"
+#include "Constraints/VertexDirichletConstraint.h"
+#include "Core/FEException.h"
 #include "Dofs/EntityDofMap.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/GlobalSpace.h"
@@ -49,6 +59,19 @@
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
 #include "Systems/SystemCollectives.h"
+#include "Systems/TimeIntegrator.h"
+#include "Systems/TransientSystem.h"
+#include "TimeStepping/NewtonSolver.h"
+#include "TimeStepping/TimeHistory.h"
+
+#include "Backends/Interfaces/BackendFactory.h"
+#include "Backends/Interfaces/BackendKind.h"
+#include "Backends/Interfaces/GenericVector.h"
+#include "Backends/Interfaces/LinearSolver.h"
+#include "Backends/Utils/BackendOptions.h"
+#if defined(FE_HAS_FSILS)
+#include "Backends/FSILS/FsilsFactory.h"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -189,7 +212,9 @@ struct Problem {
 };
 
 /// G1 on @p comm; u = 0 on the vertices of x = 0 and x = 1 (DOF = vertex for Q1 here).
-Problem buildProblem(MPI_Comm comm, int rank, int size)
+Problem buildProblem(MPI_Comm comm, int rank, int size,
+                     MultiplierLowering lowering = MultiplierLowering::Auto,
+                     bool owner_contiguous = false)
 {
     Problem out;
     auto mesh = std::make_shared<StripMeshAccess>(rank, size);
@@ -207,20 +232,38 @@ Problem buildProblem(MPI_Comm comm, int rank, int size)
     (void)installFormulation(sys, "poisson", {out.u, out.lambda},
                              (forms::inner(forms::grad(u), forms::grad(v)) - lam * v).dx() -
                                  (mu * u).dx() + (mu * FormExpr::constant(kMean * kHeight)).dGlobal());
-    std::vector<GlobalIndex> wall{0, 1, 2 * kCells, 2 * kCells + 1};
-    sys.addConstraint(std::make_unique<constraints::DirichletBC>(std::move(wall), 0.0));
+    // The DOF of a wall vertex is the vertex itself under GlobalIds numbering;
+    // under the owner-contiguous numbering the condition names the vertices.
+    if (!owner_contiguous) {
+        std::vector<GlobalIndex> wall{0, 1, 2 * kCells, 2 * kCells + 1};
+        sys.addConstraint(std::make_unique<constraints::DirichletBC>(std::move(wall), 0.0));
+    } else {
+        std::vector<constraints::VertexDirichletValue> wall;
+        for (const GlobalIndex vertex : {GlobalIndex{0}, GlobalIndex{1}, GlobalIndex{2 * kCells},
+                                         GlobalIndex{2 * kCells + 1}}) {
+            wall.push_back({.vertex_id = vertex, .value = 0.0});
+        }
+        sys.addSystemConstraint(std::make_unique<constraints::VertexDirichletConstraint>(
+            out.u, std::move(wall), constraints::VertexIdMode::LocalVertexId));
+    }
 
     SetupOptions options;
-    options.dof_options.global_numbering = dofs::GlobalNumberingMode::GlobalIds;
-    options.dof_options.ownership = dofs::OwnershipStrategy::VertexGID;
+    options.dof_options.global_numbering = owner_contiguous ? dofs::GlobalNumberingMode::OwnerContiguous
+                                                            : dofs::GlobalNumberingMode::GlobalIds;
+    options.dof_options.ownership = owner_contiguous ? dofs::OwnershipStrategy::CellOwner
+                                                     : dofs::OwnershipStrategy::VertexGID;
     options.dof_options.my_rank = rank;
     options.dof_options.world_size = size;
     options.dof_options.mpi_comm = comm;
     options.assembly_options.deterministic = true;
     options.assembly_options.overlap_communication = false;
+    options.multiplier_lowering = lowering;
     SetupInputs inputs;
     inputs.topology_override = stripTopology(rank, size);
     sys.setup(options, inputs);
+    if (owner_contiguous) {
+        return out;
+    }
 
     // The constrained DOFs are the wall vertices'.
     const auto* entities = sys.dofHandler().getEntityDofMap();
@@ -671,7 +714,8 @@ SetupOptions parallelOptions(MPI_Comm comm, int rank, int size)
 constexpr Real kPi = 3.14159265358979323846;
 
 /// G2 on the triangle grid: pure Neumann Poisson with a mean-zero multiplier.
-std::unique_ptr<FESystem> buildG2(int n, MPI_Comm comm, int rank, int size, FieldId& lambda)
+std::unique_ptr<FESystem> buildG2(int n, MPI_Comm comm, int rank, int size, FieldId& lambda,
+                                  MultiplierLowering lowering = MultiplierLowering::Auto)
 {
     auto mesh = std::make_shared<TriangleGridAccess>(n, rank, size);
     auto h1 = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
@@ -692,7 +736,9 @@ std::unique_ptr<FESystem> buildG2(int n, MPI_Comm comm, int rank, int size, Fiel
                                  (mu * u).dx());
     SetupInputs inputs;
     inputs.topology_override = mesh->topology();
-    sys->setup(parallelOptions(comm, rank, size), inputs);
+    auto options = parallelOptions(comm, rank, size);
+    options.multiplier_lowering = lowering;
+    sys->setup(options, inputs);
     return sys;
 }
 
@@ -882,6 +928,149 @@ TEST(GlobalMultiplierG4MPI, G3PressureMultiplierIsTheOneRankSolution)
     auto one = buildG3(n, MPI_COMM_SELF, 0, 1, wall);
     auto many = buildG3(n, comm, rank, size, wall);
     expectOneRankValues(*one.system, *many.system, one.lambda, "stokes", comm);
+}
+
+// ---------------------------------------------------------------------------
+// G5: G1 under the bordered lowering on FSILS GMRES at 1, 2 and 4 ranks
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct SteadySolution {
+    bool converged{false};
+    Real lambda{0.0};
+    /// The values at the vertices whose DOF this rank owns, by vertex.
+    std::map<GlobalIndex, Real> owned_u;
+};
+
+/// A steady Newton solve of G1 from 0 with @p factory's solver.
+SteadySolution solveSteady(Problem& problem,
+                           const backends::BackendFactory& factory,
+                           const backends::SolverOptions& solver_options)
+{
+    SteadySolution out;
+    auto& sys = *problem.system;
+    auto linear = factory.createLinearSolver(solver_options);
+    EXPECT_NE(linear, nullptr);
+    if (!linear) {
+        return out;
+    }
+    TransientSystem transient(sys, std::make_shared<ZeroTimeDerivativeIntegrator>());
+    const auto n = sys.dofHandler().getNumDofs();
+    auto history = timestepping::TimeHistory::allocate(factory, n);
+    history.setDt(1.0);
+    history.setPrevDt(1.0);
+    timestepping::NewtonOptions options;
+    options.residual_op = "poisson";
+    options.jacobian_op = "poisson";
+    options.max_iterations = 6;
+    options.abs_tolerance = 1e-12;
+    options.rel_tolerance = 1e-12;
+    options.use_line_search = false;
+    timestepping::NewtonSolver newton(options);
+    timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(sys, factory, workspace);
+    history.repack(factory);
+    const auto report = newton.solveStep(transient, *linear, /*solve_time=*/0.0, history, workspace);
+    out.converged = report.converged;
+    SystemStateView state;
+    state.u_vector = &history.u();
+    state.u = history.uSpan();
+    const auto lambda = sys.globalFieldValues(problem.lambda, state);
+    EXPECT_EQ(lambda.size(), 1u);
+    if (!lambda.empty()) {
+        out.lambda = lambda.front();
+    }
+    auto view = history.u().createGhostedReadView();
+    const auto& owned = sys.dofHandler().getPartition().locallyOwned();
+    const auto* map = sys.dofHandler().getEntityDofMap();
+    EXPECT_NE(map, nullptr);
+    if (map != nullptr) {
+        for (GlobalIndex vertex = 0; vertex < 2 * (kCells + 1); ++vertex) {
+            const auto dofs = map->getVertexDofs(vertex);
+            if (dofs.size() == 1u && owned.contains(dofs[0])) {
+                out.owned_u[vertex] = view->getVectorEntry(dofs[0]);
+            }
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+TEST(GlobalMultiplierG5MPI, G1BorderedOnFsilsGmresIsTheEigenInMatrixSolution)
+{
+#if !defined(FE_HAS_FSILS)
+    GTEST_SKIP() << "FSILS backend is not enabled in this build";
+#else
+    MPI_Comm comm = MPI_COMM_WORLD;
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+
+    // The reference: one rank, the multiplier in the matrix, Eigen's direct solve.
+    auto reference = buildProblem(MPI_COMM_SELF, 0, 1, MultiplierLowering::InMatrix);
+    auto eigen = backends::BackendFactory::create(backends::BackendKind::Eigen);
+    ASSERT_NE(eigen, nullptr);
+    backends::SolverOptions direct;
+    direct.method = backends::SolverMethod::Direct;
+    direct.preconditioner = backends::PreconditionerType::None;
+    direct.rel_tol = 1e-14;
+    direct.abs_tol = 1e-14;
+    direct.max_iter = 1;
+    const auto one = solveSteady(reference, *eigen, direct);
+    ASSERT_TRUE(one.converged);
+    // Q1 on the strip: lambda_h = 12c / (1 - h^2).
+    const Real h = 1.0 / static_cast<Real>(kCells);
+    EXPECT_NEAR(one.lambda, 12.0 * kMean / (1.0 - h * h), 1e-10 * 12.0 * kMean);
+
+    // The bordered lowering on FSILS at this rank count: the field block on
+    // FSILS, the multiplier through the bordered correction.
+    auto bordered = buildProblem(comm, rank, size, MultiplierLowering::Bordered, /*owner_contiguous=*/true);
+    auto& sys = *bordered.system;
+    ASSERT_TRUE(sys.hasBorderedGlobalFields());
+    ASSERT_EQ(sys.dofHandler().getNumDofs(), reference.system->dofHandler().getNumDofs() - 1);
+    backends::FsilsFactory fsils(/*dof_per_node=*/1, sys.dofPermutation(), comm);
+    backends::SolverOptions gmres;
+    gmres.method = backends::SolverMethod::GMRES;
+    gmres.preconditioner = backends::PreconditionerType::Diagonal;
+    gmres.rel_tol = 1e-13;
+    gmres.abs_tol = 1e-15;
+    gmres.max_iter = 2000;
+    const auto many = solveSteady(bordered, fsils, gmres);
+    ASSERT_TRUE(many.converged);
+    EXPECT_NEAR(many.lambda, one.lambda, 1e-10 * std::abs(one.lambda)) << "ranks " << size;
+    // The field values agree too, vertex by vertex.
+    Real scale = 0.0;
+    for (const auto& [dof, value] : one.owned_u) {
+        scale = std::max(scale, std::abs(value));
+    }
+    for (const auto& [dof, value] : many.owned_u) {
+        const auto it = one.owned_u.find(dof);
+        ASSERT_NE(it, one.owned_u.end()) << "vertex " << dof;
+        EXPECT_NEAR(value, it->second, 1e-10 * scale) << "ranks " << size << " vertex " << dof;
+    }
+#endif
+}
+
+TEST(GlobalMultiplierG5MPI, G2UnderTheBorderedLoweringIsRefusedOnEveryRank)
+{
+    MPI_Comm comm = MPI_COMM_WORLD;
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+    FieldId lambda = INVALID_FIELD_ID;
+    std::string message;
+    try {
+        (void)buildG2(4, comm, rank, size, lambda, MultiplierLowering::Bordered);
+    } catch (const FEException& e) {
+        message = e.what();
+    }
+    EXPECT_NE(message.find("the multiplier 'lambda' is a gauge: its row alone fixes the constant of field 'u'"),
+              std::string::npos)
+        << "rank " << rank << ": " << message;
 }
 
 } // namespace svmp::FE::systems::test_global_multiplier_mpi
