@@ -394,6 +394,155 @@ TEST(GlobalField, ColoredAssemblyIsRefused)
 }
 
 // ---------------------------------------------------------------------------
+// Installation of a global row
+// ---------------------------------------------------------------------------
+
+TEST(GlobalRow, IsLoweredToAGlobalKernelAndMatrixOnlyElementKernels)
+{
+    auto problem = buildMeanConstrainedPoisson(4, 1, 0.5, 1, 1.0);
+    const auto lines = kernelManifestLines(*problem.system);
+    std::string manifest;
+    for (const auto& line : lines) {
+        manifest += line + "\n";
+    }
+    EXPECT_NE(manifest.find("GlobalRowKernel"), std::string::npos) << manifest;
+}
+
+TEST(GlobalRow, ResidualEntryIsTheExactMeasuredFormPlusThePointTerms)
+{
+    const Real c = 0.75;
+    const Real height = 0.5;
+    auto problem = buildMeanConstrainedPoisson(6, 2, height, 1, c);
+    auto& sys = *problem.system;
+    const auto n = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+    const auto lam = static_cast<std::size_t>(sys.fieldDofOffset(problem.lambda));
+
+    std::vector<Real> state(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        state[i] = std::sin(0.7 * static_cast<Real>(i) + 0.3);
+    }
+    sys.constraints().distribute(state);
+    const auto assembled = assembleAt(sys, state);
+
+    // The entry: -(integral of u) + c |Omega|, the integral evaluated exactly.
+    SystemStateView view;
+    view.u = state;
+    const auto u = forms::StateField(problem.u, *problem.u_space, "u");
+    const std::array<FormExpr, 1> forms{(-u).dx()};
+    const auto integral = evaluateFunctionalForms(sys, forms, view, CollectiveCommunicator{});
+    EXPECT_EQ(assembled.vector[lam], integral.front().value + c * height);
+
+    // The row is linear in u: its Jacobian row reproduces the residual change.
+    std::vector<Real> direction(n, 0.0);
+    for (std::size_t i = 0; i < lam; ++i) {
+        direction[i] = std::cos(1.3 * static_cast<Real>(i));
+    }
+    sys.constraints().distributeHomogeneous(direction);
+    auto shifted = state;
+    for (std::size_t i = 0; i < n; ++i) {
+        shifted[i] += direction[i];
+    }
+    const auto assembled_shifted = assembleAt(sys, shifted, /*want_matrix=*/false);
+    Real predicted = 0.0;
+    for (std::size_t j = 0; j < n; ++j) {
+        predicted += assembled.matrix[lam * n + j] * direction[j];
+    }
+    EXPECT_NEAR(assembled_shifted.vector[lam] - assembled.vector[lam], predicted, 1e-13);
+    EXPECT_EQ(assembled.matrix[lam * n + lam], 0.0);
+}
+
+TEST(GlobalRow, ThreadedAssemblyEqualsSerialAssembly)
+{
+    auto serial = buildMeanConstrainedPoisson(8, 3, 0.5, 2, 0.75);
+    auto threaded = buildMeanConstrainedPoisson(8, 3, 0.5, 2, 0.75, {.threads = 4});
+    const auto n = static_cast<std::size_t>(serial.system->dofHandler().getNumDofs());
+    std::vector<Real> state(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        state[i] = std::cos(0.41 * static_cast<Real>(i));
+    }
+    serial.system->constraints().distribute(state);
+    const auto one = assembleAt(*serial.system, state);
+    const auto four = assembleAt(*threaded.system, state);
+    EXPECT_EQ(one.vector, four.vector);
+    EXPECT_EQ(one.matrix, four.matrix);
+}
+
+TEST(GlobalRow, PointTermsWithTheMultiplierGiveTheDBlock)
+{
+    auto mesh = buildGrid(3, 1, 1.0, 1.0, 1);
+    auto h1 = quadSpace(1);
+    auto r1 = std::make_shared<spaces::GlobalSpace>(1);
+    FESystem sys(mesh);
+    const auto u_id = sys.addField(FieldSpec{.name = "u", .space = h1});
+    const auto lam_id = sys.addField(FieldSpec{.name = "lambda", .space = r1});
+    sys.addOperator("poisson");
+    const auto u = forms::StateField(u_id, *h1, "u");
+    const auto v = forms::TestField(u_id, *h1, "v");
+    const auto lam = forms::StateField(lam_id, *r1, "lambda");
+    const auto mu = forms::TestField(lam_id, *r1, "mu");
+    const Real eps = 0.25;
+    const auto residual = (forms::inner(forms::grad(u), forms::grad(v)) - lam * v).dx() -
+                          (mu * u).dx() - (FormExpr::constant(eps) * lam * lam * mu).dGlobal() +
+                          (FormExpr::constant(2.0) * mu).dGlobal();
+    (void)installFormulation(sys, "poisson", {u_id, lam_id}, residual);
+    sys.setup();
+
+    const auto n = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+    const auto row = static_cast<std::size_t>(sys.fieldDofOffset(lam_id));
+    EXPECT_TRUE(sys.sparsity("poisson").hasEntry(static_cast<GlobalIndex>(row),
+                                                 static_cast<GlobalIndex>(row)));
+    std::vector<Real> state(n, 0.0);
+    state[row] = 3.0;
+    const auto assembled = assembleAt(sys, state);
+    EXPECT_DOUBLE_EQ(assembled.vector[row], -eps * 9.0 + 2.0);
+    EXPECT_DOUBLE_EQ(assembled.matrix[row * n + row], -2.0 * eps * 3.0);
+}
+
+TEST(GlobalRow, PointTermsHoldOnlyGlobalSymbols)
+{
+    auto mesh = buildGrid(2, 1, 1.0, 1.0, 1);
+    auto h1 = quadSpace(1);
+    auto r1 = std::make_shared<spaces::GlobalSpace>(1);
+    FESystem sys(mesh);
+    const auto u_id = sys.addField(FieldSpec{.name = "u", .space = h1});
+    const auto lam_id = sys.addField(FieldSpec{.name = "lambda", .space = r1});
+    sys.addOperator("op");
+    const auto u = forms::StateField(u_id, *h1, "u");
+    const auto v = forms::TestField(u_id, *h1, "v");
+    const auto lam = forms::StateField(lam_id, *r1, "lambda");
+    const auto mu = forms::TestField(lam_id, *r1, "mu");
+    const auto base = (forms::inner(forms::grad(u), forms::grad(v)) + lam * v).dx() + (mu * u).dx();
+
+    // A field that is not global inside dGlobal.
+    const auto volume_field = feMessage([&] {
+        (void)installFormulation(sys, "op", {u_id, lam_id}, base + (mu * u).dGlobal());
+    });
+    EXPECT_NE(volume_field.find("a field that is not global"), std::string::npos) << volume_field;
+    // A spatial terminal inside dGlobal.
+    const auto spatial = feMessage([&] {
+        (void)installFormulation(sys, "op", {u_id, lam_id},
+                                 base + (mu * forms::component(FormExpr::coordinate(), 0)).dGlobal());
+    });
+    EXPECT_NE(spatial.find("spatial or unsupported"), std::string::npos) << spatial;
+    // A dGlobal term in the row of a volume field.
+    const auto volume_row = feMessage([&] {
+        (void)installFormulation(sys, "op", {u_id, lam_id}, base + (lam * v).dGlobal());
+    });
+    EXPECT_NE(volume_row.find("tests field 'u'"), std::string::npos) << volume_row;
+    // dGlobal nested inside another node.
+    const auto nested = feMessage([&] {
+        (void)installFormulation(sys, "op", {u_id, lam_id},
+                                 base + FormExpr::constant(2.0) * (mu * lam).dGlobal());
+    });
+    EXPECT_NE(nested.find("must be a term of the residual's sum"), std::string::npos) << nested;
+    // The row of a global field through the one-block installer.
+    const auto one_block = feMessage([&] {
+        (void)installResidualForm(sys, "op", lam_id, u_id, (mu * u).dx());
+    });
+    EXPECT_NE(one_block.find("installed by installFormulation"), std::string::npos) << one_block;
+}
+
+// ---------------------------------------------------------------------------
 // G1: mean-constrained Poisson
 // ---------------------------------------------------------------------------
 

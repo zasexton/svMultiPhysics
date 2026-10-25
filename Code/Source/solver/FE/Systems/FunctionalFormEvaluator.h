@@ -90,13 +90,30 @@ struct FunctionalFormValue {
 /**
  * @brief Evaluates @p forms on a set-up @p system at @p state.
  *
- * Every unknown field of the system is bound (the first one in DOF-map order
- * gives the cell quadrature), as for the system's boundary functionals.  The
- * ghost values of the state's backend vectors are refreshed first.  A null
- * @p cut_context means the system's published cut integration context.
+ * Every volume and global unknown field of the system is bound (the first
+ * non-global one in DOF-map order gives the cell quadrature), as for the
+ * system's boundary functionals.  The ghost values of the state's backend
+ * vectors are refreshed first.  A null @p cut_context means the system's
+ * published cut integration context.
  */
 [[nodiscard]] std::vector<FunctionalFormValue> evaluateFunctionalForms(
     const FESystem& system,
+    std::span<const forms::FormExpr> forms,
+    const SystemStateView& state,
+    const CollectiveCommunicator& comm,
+    const assembly::CutIntegrationContext* cut_context = nullptr);
+
+/**
+ * @brief evaluateFunctionalForms with the quadrature of @p quadrature_field
+ *
+ * The volume field @p quadrature_field is the primary field: its element's
+ * rule integrates the cells, and the face rule of its order the faces.  The
+ * rows of a global test function use the field of the largest quadrature
+ * order, whose rule the global space binds on the cells.
+ */
+[[nodiscard]] std::vector<FunctionalFormValue> evaluateFunctionalFormsWithQuadratureOf(
+    const FESystem& system,
+    FieldId quadrature_field,
     std::span<const forms::FormExpr> forms,
     const SystemStateView& state,
     const CollectiveCommunicator& comm,

@@ -403,8 +403,11 @@ std::vector<FunctionalFormValue> evaluateFunctionalForms(
     return values;
 }
 
-std::vector<FunctionalFormValue> evaluateFunctionalForms(
+namespace {
+
+std::vector<FunctionalFormValue> evaluateOnSystem(
     const FESystem& system,
+    std::optional<FieldId> quadrature_field,
     std::span<const forms::FormExpr> forms,
     const SystemStateView& state,
     const CollectiveCommunicator& comm,
@@ -430,7 +433,23 @@ std::vector<FunctionalFormValue> evaluateFunctionalForms(
     const auto fields = system.unknownFieldIdsInDofMapOrder();
     FE_THROW_IF(fields.empty(), InvalidStateException,
                 std::string(kWhere) + "the system has no unknown fields");
-    const auto& primary = system.fieldRecord(fields.front());
+    // A global field has no cell quadrature of its own; the first other
+    // field gives it.
+    FieldId primary_field = fields.front();
+    for (const auto field : fields) {
+        if (system.fieldRecord(field).scope != FieldScope::Global) {
+            primary_field = field;
+            break;
+        }
+    }
+    if (quadrature_field.has_value()) {
+        FE_THROW_IF(std::find(fields.begin(), fields.end(), *quadrature_field) == fields.end() ||
+                        system.fieldRecord(*quadrature_field).scope != FieldScope::VolumeCell,
+                    InvalidArgumentException,
+                    std::string(kWhere) + "the quadrature field must be a volume unknown of the system");
+        primary_field = *quadrature_field;
+    }
+    const auto& primary = system.fieldRecord(primary_field);
     FE_CHECK_NOT_NULL(primary.space.get(), "FE::systems::evaluateFunctionalForms: primary field space");
 
     assembly::FunctionalAssembler assembler;
@@ -438,11 +457,12 @@ std::vector<FunctionalFormValue> evaluateFunctionalForms(
     assembler.setDofMap(system.dofHandler().getDofMap());
     assembler.setPrimaryFieldDofOffset(0);
     assembler.setSpace(*primary.space);
-    assembler.setPrimaryField(fields.front());
+    assembler.setPrimaryField(primary_field);
     assembler.setDofPerNode(0); // block DOF layout
     for (const auto field : fields) {
         const auto& record = system.fieldRecord(field);
-        if (record.scope != FieldScope::VolumeCell || !record.space) {
+        if ((record.scope != FieldScope::VolumeCell && record.scope != FieldScope::Global) ||
+            !record.space) {
             continue;
         }
         const auto& dof_handler = system.fieldDofHandler(field);
@@ -520,6 +540,29 @@ std::vector<FunctionalFormValue> evaluateFunctionalForms(
                                    forms,
                                    cut_context != nullptr ? cut_context : system.cutIntegrationContext(),
                                    comm);
+}
+
+} // namespace
+
+std::vector<FunctionalFormValue> evaluateFunctionalForms(
+    const FESystem& system,
+    std::span<const forms::FormExpr> forms,
+    const SystemStateView& state,
+    const CollectiveCommunicator& comm,
+    const assembly::CutIntegrationContext* cut_context)
+{
+    return evaluateOnSystem(system, std::nullopt, forms, state, comm, cut_context);
+}
+
+std::vector<FunctionalFormValue> evaluateFunctionalFormsWithQuadratureOf(
+    const FESystem& system,
+    FieldId quadrature_field,
+    std::span<const forms::FormExpr> forms,
+    const SystemStateView& state,
+    const CollectiveCommunicator& comm,
+    const assembly::CutIntegrationContext* cut_context)
+{
+    return evaluateOnSystem(system, quadrature_field, forms, state, comm, cut_context);
 }
 
 std::vector<FunctionalFormValue> evaluateDeclaredFunctionalForms(

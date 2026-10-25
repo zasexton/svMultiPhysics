@@ -36,6 +36,7 @@
 #include "Analysis/FormContributionLowerer.h"
 
 #include "Systems/FESystem.h"
+#include "Systems/GlobalRowKernel.h"
 #include "Constraints/StrongDirichletConstraint.h"
 #include "Spaces/FunctionSpace.h"
 
@@ -1557,6 +1558,83 @@ forms::FormExpr lowerStateFields(
     return plan;
 }
 
+[[nodiscard]] bool containsGlobalIntegral(const forms::FormExprNode& node)
+{
+    if (node.type() == forms::FormExprType::GlobalIntegral) {
+        return true;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child && containsGlobalIntegral(*child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The terms of a global test function's row, split by measure.
+struct GlobalRowTerms {
+    forms::FormExpr measured{};        ///< terms with a spatial measure, or invalid
+    forms::FormExpr point_integrand{}; ///< signed sum of the dGlobal integrands, or invalid
+};
+
+[[nodiscard]] GlobalRowTerms splitGlobalRowTerms(const forms::FormExpr& row,
+                                                 const std::string& field_name)
+{
+    GlobalRowTerms out;
+    const auto append = [](forms::FormExpr& sum, forms::FormExpr term, bool negated) {
+        if (!sum.isValid()) {
+            sum = negated ? -term : std::move(term);
+        } else {
+            sum = negated ? sum - term : sum + term;
+        }
+    };
+    const auto visit = [&](const auto& self, const std::shared_ptr<forms::FormExprNode>& node,
+                           bool negated) -> void {
+        FE_CHECK_NOT_NULL(node.get(), "installFormulation: global row term");
+        const auto kids = node->childrenShared();
+        switch (node->type()) {
+        case forms::FormExprType::Add:
+        case forms::FormExprType::Subtract:
+            if (kids.size() == 2u && kids[0] && kids[1]) {
+                self(self, kids[0], negated);
+                self(self, kids[1],
+                     node->type() == forms::FormExprType::Subtract ? !negated : negated);
+                return;
+            }
+            break;
+        case forms::FormExprType::Negate:
+            if (kids.size() == 1u && kids[0]) {
+                self(self, kids[0], !negated);
+                return;
+            }
+            break;
+        case forms::FormExprType::GlobalIntegral:
+            FE_THROW_IF(kids.size() != 1u || !kids[0], InvalidArgumentException,
+                        "installFormulation: a dGlobal() term of the row of '" + field_name +
+                            "' has no integrand");
+            append(out.point_integrand, forms::FormExpr(kids[0]), negated);
+            return;
+        default:
+            break;
+        }
+        FE_THROW_IF(containsGlobalIntegral(*node), InvalidArgumentException,
+                    "installFormulation: a dGlobal() measure of the row of '" + field_name +
+                        "' must be a term of the residual's sum, not inside '" + node->toString() + "'");
+        append(out.measured, forms::FormExpr(node), negated);
+    };
+    visit(visit, row.nodeShared(), /*negated=*/false);
+    return out;
+}
+
+void requireNoGlobalTestRow(const FESystem& system, FieldId test_field, std::string_view api)
+{
+    const auto& rec = system.fieldRecord(test_field);
+    FE_THROW_IF(rec.scope == FieldScope::Global, NotImplementedException,
+                std::string(api) + ": the row of the global field '" + rec.name +
+                    "' is installed by installFormulation with the fields it constrains "
+                    "(for example {u, lambda}), which adds its residual entry exactly");
+}
+
 void traceMixedKernelPlan(const char* prefix, const MixedKernelPlan& plan)
 {
     if (!core::kernelTraceEnabled(core::KernelTraceChannel::Selection)) {
@@ -1578,6 +1656,7 @@ KernelPtr installResidualForm(
     const forms::FormExpr& residual_form,
     const FormInstallOptions& options)
 {
+    requireNoGlobalTestRow(system, test_field, "installResidualForm");
     const auto& test_rec = system.fieldRecord(test_field);
     const auto& trial_rec = system.fieldRecord(trial_field);
     FE_CHECK_NOT_NULL(test_rec.space.get(), "installResidualForm: test field space");
@@ -1890,6 +1969,9 @@ CoupledResidualKernels installCoupledResidual(
                 "installCoupledResidual: empty test field list");
     FE_THROW_IF(trial_fields.empty(), InvalidArgumentException,
                 "installCoupledResidual: empty trial field list");
+    for (const auto field : test_fields) {
+        requireNoGlobalTestRow(system, field, "installCoupledResidual");
+    }
 
     auto install_options = options;
     install_options.compiler_options =
@@ -2516,6 +2598,23 @@ CoupledResidualKernels installCoupledResidualMixed(
     bool mixed_block_cell_feasible = true;
     std::string monolithic_disable_reason{};
     std::string mixed_block_disable_reason{};
+    {
+        // A global field is not nodal: the fused cell kernels combine the
+        // blocks' outputs on the nodes of the cell, so its rows and columns
+        // take one element kernel per block instead.
+        const auto is_global = [&](FieldId field) {
+            return system.fieldRecord(field).scope == FieldScope::Global;
+        };
+        if (std::any_of(test_fields.begin(), test_fields.end(), is_global) ||
+            std::any_of(trial_fields.begin(), trial_fields.end(), is_global)) {
+            monolithic_cell_feasible = false;
+            mixed_block_cell_feasible = false;
+            monolithic_disable_reason =
+                "installCoupledResidualMixed: monolithic cell fusion disabled for a global field";
+            mixed_block_disable_reason =
+                "installCoupledResidualMixed: mixed-block cell fusion disabled for a global field";
+        }
+    }
 
     validateGeometrySensitivityField(system, install_options.compiler_options.geometry_sensitivity);
     validateLevelSetCutDomainTrialFields(
@@ -2523,14 +2622,37 @@ CoupledResidualKernels installCoupledResidualMixed(
         trial_fields,
         install_options.compiler_options.geometry_sensitivity);
 
+    std::vector<std::shared_ptr<GlobalRowKernel>> pending_global_rows;
     for (std::size_t i = 0; i < residual_blocks.numTestFields(); ++i) {
         if (!residual_blocks.hasBlock(i)) {
             continue;
         }
 
-        const auto& base_expr = residual_blocks.block(i);
+        forms::FormExpr base_expr = residual_blocks.block(i);
         FE_THROW_IF(!base_expr.isValid(), InvalidArgumentException,
                     "installCoupledResidualMixed: invalid residual block");
+
+        // The row of a global test function: its element kernels give the
+        // Jacobian only, and a GlobalRowKernel adds its residual entry as an
+        // exact measured 0-form plus its dGlobal terms.
+        const auto& test_record = system.fieldRecord(test_fields[i]);
+        const bool global_row = test_record.scope == FieldScope::Global;
+        if (global_row || containsGlobalIntegral(*base_expr.node())) {
+            FE_THROW_IF(!global_row, InvalidArgumentException,
+                        "installCoupledResidualMixed: dGlobal() terms belong to the row of a global "
+                        "test function, but a dGlobal() term tests field '" + test_record.name + "'");
+            auto row_terms = splitGlobalRowTerms(base_expr, test_record.name);
+            FE_THROW_IF(row_terms.measured.isValid() && row_terms.measured.hasTrial(),
+                        InvalidArgumentException,
+                        "installCoupledResidualMixed: state the unknowns of the global row of '" +
+                            test_record.name + "' as StateField, not TrialFunction");
+            pending_global_rows.push_back(std::make_shared<GlobalRowKernel>(
+                test_fields[i], test_record.name, row_terms.measured, row_terms.point_integrand));
+            if (!row_terms.measured.isValid()) {
+                continue;
+            }
+            base_expr = row_terms.measured;
+        }
 
         const auto* root = base_expr.node();
         FE_CHECK_NOT_NULL(root, "installCoupledResidualMixed: residual block root");
@@ -2555,6 +2677,10 @@ CoupledResidualKernels installCoupledResidualMixed(
 
         if (active_trial == INVALID_FIELD_ID) {
             logMixedRowDiagnostic(op, system, i, test_fields[i], active_trial, state_fields);
+            if (global_row) {
+                // A source-only global row: its entry is the GlobalRowKernel's.
+                continue;
+            }
             forms::FormCompiler compiler(install_options.compiler_options);
             auto linear_ir = compiler.compileLinear(base_expr);
             const auto dispatch = analyzeDispatch(linear_ir);
@@ -2636,7 +2762,7 @@ CoupledResidualKernels installCoupledResidualMixed(
             FE_THROW_IF(!dispatchHasAnyTerm(dispatch), InvalidArgumentException,
                         "installCoupledResidualMixed: compiled residual block has no integral terms");
 
-            const bool owns_row_vector = (trial == active_trial);
+            const bool owns_row_vector = (trial == active_trial) && !global_row;
             const auto output = owns_row_vector
                 ? forms::NonlinearKernelOutput::Both
                 : forms::NonlinearKernelOutput::MatrixOnly;
@@ -2828,6 +2954,9 @@ CoupledResidualKernels installCoupledResidualMixed(
                 !pending.cell_semantics_owned_by_monolithic,
             install_options.source_component_tag);
     }
+    for (auto& row_kernel : pending_global_rows) {
+        system.addGlobalKernel(op, std::move(row_kernel));
+    }
 
     if (plan->monolithic_cell_enabled) {
         auto jit_compiler = forms::jit::JITCompiler::getOrCreate(install_options.compiler_options.jit);
@@ -2861,6 +2990,9 @@ installMixedFormIR(
                 "installMixedFormIR: test_fields size does not match mir.numTestFields()");
     FE_THROW_IF(trial_fields.size() != mir.numTrialFields(), InvalidArgumentException,
                 "installMixedFormIR: trial_fields size does not match mir.numTrialFields()");
+    for (const auto field : test_fields) {
+        requireNoGlobalTestRow(system, field, "installMixedFormIR");
+    }
 
     auto operator_snapshot =
         system.operator_registry_.snapshot();
@@ -4169,6 +4301,12 @@ CoupledResidualKernels installFormulation(
 
     if (num_test == 1 && trial_fields.size() == 1) {
         // Single-field path.
+        FE_THROW_IF(system.fieldRecord(fields[0]).scope == FieldScope::Global ||
+                        containsGlobalIntegral(*resolved.node()),
+                    NotImplementedException,
+                    "installFormulation: a global multiplier is installed with the fields it "
+                    "constrains (for example {u, lambda}); a one-field formulation cannot hold a "
+                    "global row or a dGlobal() term");
         FE_THROW_IF(fields.size() != 1, InvalidArgumentException,
                     "installFormulation: expression has 1 TestFunction space but " +
                     std::to_string(fields.size()) + " fields provided");
