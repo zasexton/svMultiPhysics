@@ -1895,6 +1895,23 @@ void SimulationBuilder::createSolvers()
 
   auto solver_options = translateSolverOptions(params_, backend_kind);
 
+  // A trace multiplier without a stabilization term has a zero diagonal on its
+  // active rows (D54 T1), which FSILS's diagonal and row-column scaling and its
+  // iterative solvers cannot handle; its gathered direct solve pivots.
+  if (backend_kind == svmp::FE::backends::BackendKind::FSILS &&
+      solver_options.method != svmp::FE::backends::SolverMethod::Direct) {
+    const auto unstabilized = components_.fe_system->unstabilizedTraceMultiplierFields();
+    if (!unstabilized.empty()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] SimulationBuilder: the trace multiplier '" +
+          components_.fe_system->fieldRecord(unstabilized.front()).name +
+          "' has no stabilization term, so its rows have a zero diagonal, which the iterative FSILS solvers "
+          "cannot handle; use the FSILS direct solve, add a stabilization term (for example "
+          "bc::makeLagrangeDirichletBC(..., beta > 0)), or a backend with a direct or saddle-point solve "
+          "(Eigen, PETSc).");
+    }
+  }
+
   // Populate block layout from field metadata — available for any multi-field system.
   {
     const auto& fmap = components_.fe_system->fieldMap();

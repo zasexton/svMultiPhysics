@@ -8289,6 +8289,23 @@ std::vector<FieldId> FESystem::traceMultiplierFields() const
     return fields;
 }
 
+std::vector<FieldId> FESystem::unstabilizedTraceMultiplierFields() const
+{
+    std::vector<FieldId> fields;
+    for (const auto multiplier : traceMultiplierFields()) {
+        bool diagonal = false;
+        for (const auto& rec : formulation_records_) {
+            for (const auto& [test, trial] : rec.block_couplings) {
+                diagonal = diagonal || (test == multiplier && trial == multiplier);
+            }
+        }
+        if (!diagonal) {
+            fields.push_back(multiplier);
+        }
+    }
+    return fields;
+}
+
 std::vector<FieldId> FESystem::unknownFieldIdsInDofMapOrder() const
 {
     requireSetup();

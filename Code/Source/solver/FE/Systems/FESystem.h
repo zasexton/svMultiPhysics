@@ -746,6 +746,16 @@ public:
      * the order of their first restriction.
      */
     [[nodiscard]] std::vector<FieldId> traceMultiplierFields() const;
+    /**
+     * @brief The trace multipliers whose rows have no diagonal block
+     *
+     * An unstabilized multiplier (no term in its own row holds it) gives a
+     * saddle-point system with a zero diagonal on its active rows, which
+     * diagonal scaling, ILU, AMG and the FSILS iterative solvers cannot
+     * handle; a direct solve with pivoting, or a stabilization term (for
+     * example Barbosa-Hughes), can.
+     */
+    [[nodiscard]] std::vector<FieldId> unstabilizedTraceMultiplierFields() const;
     void setPrescribedFieldCoefficients(FieldId field, std::span<const Real> coefficients);
     void setPrescribedFieldCoefficientPairs(FieldId field,
                                             std::span<const Real> high,

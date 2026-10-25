@@ -16,7 +16,8 @@
  *
  * Setup: the multiplier's rows anchor the constant of u (no automatic gauge),
  * a multiplier that couples only to DOFs an essential condition fixes is
- * refused and the condition is exclusive on its marker.
+ * refused, the condition is exclusive on its marker, and an unstabilized
+ * multiplier is reported for the FSILS refusal.
  */
 
 #include <gtest/gtest.h>
@@ -497,6 +498,17 @@ TEST(TraceMultiplierSetup, TheConditionIsExclusiveOnItsBoundary)
     bcs.add(forms::bc::makeLagrangeDirichletBC(kLeft, FormExpr::constant(0.0), lam_id));
     bcs.add(std::make_unique<forms::bc::EssentialBC>(kLeft, FormExpr::constant(0.0)));
     EXPECT_THROW(bcs.applyAll(sys, residual, u, v, u_id), std::invalid_argument);
+}
+
+TEST(TraceMultiplierSetup, AnUnstabilizedMultiplierIsReportedForTheIterativeSolvers)
+{
+    const auto quad1 = [] { return std::make_shared<spaces::H1Space>(ElementType::Quad4, 1); };
+    auto plain = buildWeakDirichletPoisson(buildQuadGrid(2, 2, 1.0, 1.0, 1, kWholeBoundary), quad1(), quad1(),
+                                           FormExpr::constant(1.0), FormExpr::constant(0.0));
+    EXPECT_EQ(plain.system->unstabilizedTraceMultiplierFields(), std::vector<FieldId>{plain.lambda});
+    auto stabilized = buildWeakDirichletPoisson(buildQuadGrid(2, 2, 1.0, 1.0, 1, kWholeBoundary), quad1(), quad1(),
+                                                FormExpr::constant(1.0), FormExpr::constant(0.0), Real(0.1));
+    EXPECT_TRUE(stabilized.system->unstabilizedTraceMultiplierFields().empty());
 }
 
 } // namespace svmp::FE::test_trace_multiplier
