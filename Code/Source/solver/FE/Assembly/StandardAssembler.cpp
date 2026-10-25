@@ -1854,14 +1854,27 @@ std::atomic<bool> g_p1_field_derivative_shortcut_enabled{true};
            allFinite(coefficients) && allFinite(inverse_jacobians.front());
 }
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 // The face of @p cell, numbered as its reference element numbers its faces,
-// whose corners are all among @p vertices (mesh vertex ids), or -1.  Found by
-// the vertices, it needs neither the mesh's face numbering nor a face id.
-[[nodiscard]] LocalIndex referenceFacetWithVertices(const IMeshAccess& mesh,
-                                                    GlobalIndex cell,
-                                                    std::span<const GlobalIndex> vertices,
-                                                    std::vector<GlobalIndex>& cell_nodes)
+// whose corners are all vertices of face @p iface of @p interface_mesh, or -1;
+// the facet of either side of an interface face, single- or two-sided.
+// Found by the vertices, it needs neither the mesh's canonical face numbering
+// (which the InterfaceMesh records, and which differs for Tetra4) nor the
+// InterfaceMesh's volume face id (stale once setup stores more faces).
+// @p vertices and @p cell_nodes are scratch; @p cell_nodes ends up holding the
+// cell's nodes.
+[[nodiscard]] LocalIndex interfaceFacetOf(const IMeshAccess& mesh,
+                                          const svmp::InterfaceMesh& interface_mesh,
+                                          svmp::index_t iface,
+                                          GlobalIndex cell,
+                                          std::vector<GlobalIndex>& vertices,
+                                          std::vector<GlobalIndex>& cell_nodes)
 {
+    const auto [iface_vertices_ptr, iface_vertex_count] = interface_mesh.face_vertices_span(iface);
+    vertices.clear();
+    for (std::size_t a = 0; a < iface_vertex_count; ++a) {
+        vertices.push_back(static_cast<GlobalIndex>(interface_mesh.volume_vertex(iface_vertices_ptr[a])));
+    }
     mesh.getCellNodes(cell, cell_nodes);
     const auto& ref = elements::ReferenceElement::shared(mesh.getCellType(cell));
     for (std::size_t lf = 0; lf < ref.num_faces(); ++lf) {
@@ -1879,6 +1892,7 @@ std::atomic<bool> g_p1_field_derivative_shortcut_enabled{true};
     }
     return LocalIndex{-1};
 }
+#endif
 
 // align[j] = i: node j of the plus cell's facet is node i of the minus cell's
 // facet, whose parameterization is the reference (canonicalToFacetCoordinates),
@@ -5963,30 +5977,17 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
         auto selected_side = kernel.interfaceEvaluationSide();
 
         // The selected cell's facet holding the interface face's vertices,
-        // numbered as the reference element numbers its faces.  Neither the
-        // InterfaceMesh's local face (the mesh's canonical face numbering,
-        // which differs for Tetra4) nor its volume face id (stale once setup
-        // stores more faces, e.g. for the edge DOFs of a second-order field)
-        // can say which.
+        // numbered as the reference element numbers its faces (interfaceFacetOf,
+        // as the two-sided faces below): neither the InterfaceMesh's local face
+        // nor its volume face id can say which.
+        std::vector<GlobalIndex> selected_iface_vertices;
         auto facet_of = [&](svmp::index_t iface, GlobalIndex cell, const char* op_name) -> LocalIndex {
-            mesh.getCellNodes(cell, selected_cell_nodes);
-            const auto [iface_vertices_ptr, iface_vertex_count] = interface_mesh.face_vertices_span(iface);
-            const auto& ref = elements::ReferenceElement::shared(mesh.getCellType(cell));
-            for (std::size_t lf = 0; lf < ref.num_faces(); ++lf) {
-                const auto& face_nodes = ref.face_nodes(lf);
-                bool holds_all = iface_vertex_count > 0u;
-                for (std::size_t a = 0; a < iface_vertex_count && holds_all; ++a) {
-                    const auto vertex = static_cast<GlobalIndex>(interface_mesh.volume_vertex(iface_vertices_ptr[a]));
-                    holds_all = std::any_of(face_nodes.begin(), face_nodes.end(), [&](LocalIndex node) {
-                        return selected_cell_nodes.at(static_cast<std::size_t>(node)) == vertex;
-                    });
-                }
-                if (holds_all) {
-                    return static_cast<LocalIndex>(lf);
-                }
-            }
-            FE_THROW(FEException, std::string(op_name) + ": the selected cell has no facet with the vertices of "
-                                                         "interface face " + std::to_string(iface));
+            const LocalIndex facet = interfaceFacetOf(mesh, interface_mesh, iface, cell, selected_iface_vertices,
+                                                      selected_cell_nodes);
+            FE_THROW_IF(facet < 0, FEException,
+                        std::string(op_name) + ": the selected cell has no facet with the vertices of "
+                                               "interface face " + std::to_string(iface));
+            return facet;
         };
         auto select_cell = [&](svmp::index_t iface,
                                const char* op_name) -> std::pair<GlobalIndex, LocalIndex> {
@@ -6282,25 +6283,17 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
         }
 
         // The two cells' facets holding the interface face's vertices,
-        // numbered as each cell's reference element numbers its faces.
-        // Neither the InterfaceMesh's local faces (the mesh's canonical face
-        // numbering, which differs for Tetra4) nor its volume face id (stale
-        // once setup stores more faces) can say which.
+        // numbered as each cell's reference element numbers its faces
+        // (interfaceFacetOf): neither the InterfaceMesh's local faces nor its
+        // volume face id can say which.
         FE_THROW_IF(interface_mesh.local_face_in_cell_minus(iface) < 0 ||
                         interface_mesh.local_face_in_cell_plus(iface) < 0,
                     FEException,
                     "StandardAssembler::assembleInterfaceFaces: invalid local face index in InterfaceMesh");
-        {
-            const auto [vertices_ptr, vertex_count] = interface_mesh.face_vertices_span(iface);
-            iface_vertices.clear();
-            for (std::size_t a = 0; a < vertex_count; ++a) {
-                iface_vertices.push_back(static_cast<GlobalIndex>(interface_mesh.volume_vertex(vertices_ptr[a])));
-            }
-        }
         const LocalIndex local_face_minus =
-            referenceFacetWithVertices(mesh, cell_minus, iface_vertices, cell_nodes_minus);
+            interfaceFacetOf(mesh, interface_mesh, iface, cell_minus, iface_vertices, cell_nodes_minus);
         const LocalIndex local_face_plus =
-            referenceFacetWithVertices(mesh, cell_plus, iface_vertices, cell_nodes_plus);
+            interfaceFacetOf(mesh, interface_mesh, iface, cell_plus, iface_vertices, cell_nodes_plus);
         FE_THROW_IF(local_face_minus < 0 || local_face_plus < 0, FEException,
                     "StandardAssembler::assembleInterfaceFaces: a cell of interface face " +
                         std::to_string(iface) + " has no facet with the face's vertices");
