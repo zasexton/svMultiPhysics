@@ -1,6 +1,6 @@
 /**
  * @file test_GlobalMultiplier.cpp
- * @brief Global multipliers as forms: the global field, its rows and the G1/G2 cases
+ * @brief Global multipliers as forms: the global field, its rows and the G1-G3 cases
  *
  * A global field lives on a GlobalSpace and has one DOF for the whole domain.
  * Its test function's row is a measured 0-form plus dGlobal terms; the
@@ -12,22 +12,30 @@
  * lambda = 12c.  Q2 is exact; on Q1 the nodal values are those of u and the
  * trapezoidal mean gives lambda_h = 12c / (1 - h^2), so the error is O(h^2).
  *
- * G2 (pure Neumann, mean zero) needs the multiplier's anchoring evidence in the
- * gauge registry (step LM1b) and stays disabled.
+ * G2 (pure Neumann, mean zero): the multiplier's row fixes the constant of u,
+ * so the gauge adds nothing, and u_h equals the solution under the automatic
+ * weighted mean-zero gauge.  G3 (Taylor-Hood Stokes with a mean-zero pressure
+ * multiplier): the velocities equal those with a pinned pressure, and the
+ * pressures differ by a constant.
  */
 
 #include <gtest/gtest.h>
 
 #include "Assembly/GlobalSystemView.h"
 #include "Constraints/AffineConstraints.h"
+#include "Constraints/DirichletBC.h"
 #include "Core/FEException.h"
 #include "Dofs/EntityDofMap.h"
 #include "Forms/BoundaryConditions.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/GlobalSpace.h"
 #include "Spaces/H1Space.h"
+#include "Spaces/ProductSpace.h"
 #include "Sparsity/SparsityPattern.h"
+#include "Constraints/GaugeRegistry.h"
 #include "Systems/FESystem.h"
+#include "Systems/FieldBinding.h"
+#include "Systems/FormulationBuilder.h"
 #include "Systems/FormsInstaller.h"
 #include "Systems/FormsInstallerDetail.h"
 #include "Systems/FunctionalFormEvaluator.h"
@@ -40,6 +48,7 @@
 
 #include <array>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <span>
 #include <string>
@@ -146,6 +155,78 @@ std::shared_ptr<spaces::H1Space> quadSpace(int order)
     return std::make_shared<spaces::H1Space>(order == 1 ? ElementType::Quad4 : ElementType::Quad9, order);
 }
 
+/**
+ * The n x n grid of the unit square, each square split into two Triangle3
+ * cells along its diagonal, with the boundary edges labelled as buildGrid.
+ * Fields of any order live on these linear cells.
+ */
+std::shared_ptr<svmp::Mesh> buildTriangleGrid(int n)
+{
+    auto base = std::make_shared<svmp::MeshBase>();
+    const auto id = [&](int i, int j) { return static_cast<svmp::index_t>(j * (n + 1) + i); };
+    std::vector<svmp::real_t> X;
+    for (int j = 0; j <= n; ++j) {
+        for (int i = 0; i <= n; ++i) {
+            X.push_back(static_cast<svmp::real_t>(static_cast<Real>(i) / static_cast<Real>(n)));
+            X.push_back(static_cast<svmp::real_t>(static_cast<Real>(j) / static_cast<Real>(n)));
+        }
+    }
+    std::vector<svmp::offset_t> offsets{0};
+    std::vector<svmp::index_t> conn;
+    std::vector<svmp::CellShape> shapes;
+    svmp::CellShape shape{};
+    shape.family = svmp::CellFamily::Triangle;
+    shape.num_corners = 3;
+    shape.order = 1;
+    // Cell 2 (j n + i) is the lower triangle of square (i, j), 2 (j n + i) + 1 the upper.
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < n; ++i) {
+            conn.insert(conn.end(), {id(i, j), id(i + 1, j), id(i + 1, j + 1)});
+            offsets.push_back(static_cast<svmp::offset_t>(conn.size()));
+            conn.insert(conn.end(), {id(i, j), id(i + 1, j + 1), id(i, j + 1)});
+            offsets.push_back(static_cast<svmp::offset_t>(conn.size()));
+            shapes.push_back(shape);
+            shapes.push_back(shape);
+        }
+    }
+    base->build_from_arrays(/*spatial_dim=*/2, X, offsets, conn, shapes);
+
+    std::vector<svmp::CellShape> face_shapes;
+    std::vector<svmp::offset_t> face_offsets{0};
+    std::vector<svmp::index_t> face_conn;
+    std::vector<std::array<svmp::index_t, 2>> face_cells;
+    std::vector<int> labels;
+    svmp::CellShape line{};
+    line.family = svmp::CellFamily::Line;
+    line.num_corners = 2;
+    line.order = 1;
+    const auto lower = [&](int i, int j) { return static_cast<svmp::index_t>(2 * (j * n + i)); };
+    const auto add_face = [&](svmp::index_t a, svmp::index_t b, svmp::index_t cell, int label) {
+        face_shapes.push_back(line);
+        face_conn.insert(face_conn.end(), {a, b});
+        face_offsets.push_back(static_cast<svmp::offset_t>(face_conn.size()));
+        face_cells.push_back({cell, svmp::INVALID_INDEX});
+        labels.push_back(label);
+    };
+    for (int i = 0; i < n; ++i) {
+        add_face(id(i, 0), id(i + 1, 0), lower(i, 0), kBottom);
+        add_face(id(i + 1, n), id(i, n), lower(i, n - 1) + 1, kTop);
+    }
+    for (int j = 0; j < n; ++j) {
+        add_face(id(n, j), id(n, j + 1), lower(n - 1, j), kRight);
+        add_face(id(0, j + 1), id(0, j), lower(0, j) + 1, kLeft);
+    }
+    base->set_faces_from_arrays(std::move(face_shapes),
+                                std::move(face_offsets),
+                                std::move(face_conn),
+                                std::move(face_cells),
+                                svmp::MeshCodim1StorageMode::BoundaryOnly);
+    for (std::size_t f = 0; f < labels.size(); ++f) {
+        base->set_boundary_label(static_cast<svmp::index_t>(f), labels[f]);
+    }
+    return svmp::create_mesh(std::move(base));
+}
+
 /// Solves A x = b (dense, partial pivoting; the saddle-point diagonal has zeros).
 std::vector<Real> solveDense(std::vector<Real> a, std::vector<Real> b)
 {
@@ -247,7 +328,8 @@ struct Assembled {
     std::vector<Real> vector;
 };
 
-Assembled assembleAt(FESystem& sys, std::span<const Real> u, bool want_matrix = true)
+Assembled assembleAt(FESystem& sys, std::span<const Real> u, bool want_matrix = true,
+                     const OperatorTag& op = "poisson")
 {
     const auto n = sys.dofHandler().getNumDofs();
     assembly::DenseSystemView out(n);
@@ -255,7 +337,7 @@ Assembled assembleAt(FESystem& sys, std::span<const Real> u, bool want_matrix = 
     SystemStateView state;
     state.u = u;
     AssemblyRequest request;
-    request.op = "poisson";
+    request.op = op;
     request.want_matrix = want_matrix;
     request.want_vector = true;
     request.suppress_constraint_inhomogeneity = true;
@@ -268,11 +350,11 @@ Assembled assembleAt(FESystem& sys, std::span<const Real> u, bool want_matrix = 
 }
 
 /// One Newton step from 0 (the problem is linear): the solution.
-std::vector<Real> solveFromZero(FESystem& sys)
+std::vector<Real> solveFromZero(FESystem& sys, const OperatorTag& op = "poisson")
 {
     const auto n = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
     std::vector<Real> zero(n, 0.0);
-    const auto assembled = assembleAt(sys, zero);
+    const auto assembled = assembleAt(sys, zero, /*want_matrix=*/true, op);
     std::vector<Real> rhs(n);
     for (std::size_t i = 0; i < n; ++i) {
         rhs[i] = -assembled.vector[i];
@@ -589,24 +671,39 @@ TEST(GlobalMultiplierG1, BilinearElementsConvergeAtSecondOrder)
 }
 
 // ---------------------------------------------------------------------------
-// G2: pure Neumann, mean zero (needs the multiplier's gauge evidence, LM1b)
+// G2: pure Neumann, mean zero
 // ---------------------------------------------------------------------------
 
-TEST(GlobalMultiplierG2, DISABLED_MeanZeroMultiplierMatchesTheAutomaticGauge)
+namespace {
+
+/// One Newton step from 0, the constraints' slaves filled in from their masters.
+std::vector<Real> solveConstrainedFromZero(FESystem& sys, const OperatorTag& op = "poisson")
 {
-    // u = cos(pi x) cos(pi y) on the unit square, -Delta u = 2 pi^2 u, natural
-    // boundaries, mean zero.  With the multiplier, u_h equals the solution of
-    // the automatic mean-zero gauge, and lambda_h -> 0.
+    auto solution = solveFromZero(sys, op);
+    sys.constraints().distribute(solution);
+    return solution;
+}
+
+} // namespace
+
+TEST(GlobalMultiplierG2, MeanZeroMultiplierMatchesTheAutomaticGauge)
+{
+    // u = cos(pi x) cos(pi y) on the unit square: -Delta u = 2 pi^2 u with
+    // natural boundaries and mean zero.  The multiplier's row fixes the
+    // constant of u, so the gauge adds nothing for u, and u_h equals the
+    // solution under the automatic weighted mean-zero gauge (on P1 triangles
+    // its weights are the integrals of the basis functions); lambda_h is the
+    // mean of the discrete load and goes to 0.
     constexpr Real pi = 3.14159265358979323846;
     const auto f = FormExpr::coefficient("f", [](Real x, Real y, Real) {
         return 2.0 * pi * pi * std::cos(pi * x) * std::cos(pi * y);
     });
-    for (const int n : {8, 16}) {
-        auto mesh = buildGrid(n, n, 1.0, 1.0, 1);
-        auto h1 = quadSpace(1);
+    std::vector<Real> lambdas;
+    for (const int n : {4, 8, 16}) {
+        auto h1 = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
         auto r1 = std::make_shared<spaces::GlobalSpace>(1);
 
-        FESystem with_multiplier(mesh);
+        FESystem with_multiplier(buildTriangleGrid(n));
         const auto u_id = with_multiplier.addField(FieldSpec{.name = "u", .space = h1});
         const auto lam_id = with_multiplier.addField(FieldSpec{.name = "lambda", .space = r1});
         with_multiplier.addOperator("poisson");
@@ -618,9 +715,21 @@ TEST(GlobalMultiplierG2, DISABLED_MeanZeroMultiplierMatchesTheAutomaticGauge)
                                  (forms::inner(forms::grad(u), forms::grad(v)) - f * v - lam * v).dx() -
                                      (mu * u).dx());
         with_multiplier.setup();
+        EXPECT_EQ(with_multiplier.constraints().numConstraints(), 0) << "no gauge for u or lambda";
+        const auto* registry = with_multiplier.gaugeRegistryIfPresent();
+        if (registry != nullptr) {
+            for (const auto& candidate : registry->candidates()) {
+                EXPECT_NE(candidate.field, lam_id) << "a multiplier is never a gauge candidate";
+            }
+            for (const auto& mode : registry->resolvedModes()) {
+                if (mode.candidate.field == u_id) {
+                    EXPECT_EQ(mode.status, gauge::GaugeStatus::Anchored);
+                    EXPECT_EQ(mode.policy, gauge::EnforcementPolicy::None);
+                }
+            }
+        }
 
-        auto mesh_gauge = buildGrid(n, n, 1.0, 1.0, 1);
-        FESystem gauged(mesh_gauge);
+        FESystem gauged(buildTriangleGrid(n));
         const auto w_id = gauged.addField(FieldSpec{.name = "u", .space = h1});
         gauged.addOperator("poisson");
         const auto w = forms::StateField(w_id, *h1, "u");
@@ -628,14 +737,156 @@ TEST(GlobalMultiplierG2, DISABLED_MeanZeroMultiplierMatchesTheAutomaticGauge)
         (void)installFormulation(gauged, "poisson", {w_id},
                                  (forms::inner(forms::grad(w), forms::grad(z)) - f * z).dx());
         gauged.setup();
+        EXPECT_GT(gauged.constraints().numConstraints(), 0) << "the automatic gauge fixes u";
 
         const auto multiplier_solution = solveFromZero(with_multiplier);
-        const auto gauged_solution = solveFromZero(gauged);
+        const auto gauged_solution = solveConstrainedFromZero(gauged);
         const auto n_u = static_cast<std::size_t>(with_multiplier.fieldDofHandler(u_id).getNumDofs());
+        ASSERT_EQ(gauged_solution.size(), n_u);
+        Real scale = 0.0;
         for (std::size_t i = 0; i < n_u; ++i) {
-            EXPECT_NEAR(multiplier_solution[i], gauged_solution[i], 1e-10);
+            scale = std::max(scale, std::abs(gauged_solution[i]));
         }
-        EXPECT_LT(std::abs(multiplier_solution[n_u]), 1.0 / static_cast<Real>(n));
+        for (std::size_t i = 0; i < n_u; ++i) {
+            EXPECT_NEAR(multiplier_solution[i], gauged_solution[i], 1e-10 * scale) << "n=" << n << " dof " << i;
+        }
+        lambdas.push_back(std::abs(multiplier_solution[n_u]));
+    }
+    // lambda_h -> 0 (the discrete load's mean, O(h^2)).
+    EXPECT_LT(lambdas[1], lambdas[0]);
+    EXPECT_LT(lambdas[2], lambdas[1]);
+    EXPECT_LT(lambdas[2], 0.05);
+}
+
+// ---------------------------------------------------------------------------
+// G3: Taylor-Hood Stokes with a mean-zero pressure multiplier
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct StokesSystem {
+    std::unique_ptr<FESystem> system;
+    FieldId u{INVALID_FIELD_ID};
+    FieldId p{INVALID_FIELD_ID};
+    FieldId lambda{INVALID_FIELD_ID};
+};
+
+/**
+ * P2/P1 Stokes on the unit square with u = 0 on the boundary and the forcing of
+ * u = curl(sin^2(pi x) sin^2(pi y)), p = cos(pi x) cos(pi y):
+ * (grad u : grad v - p div v - q div u - f . v) dx, plus, with the multiplier,
+ * (lambda q) dx + (mu p) dx (mean-zero pressure).  Without the multiplier the
+ * first pressure DOF is pinned instead: the automatic gauge does not fix the
+ * pressure of this enclosed flow (its integration-by-parts evidence takes
+ * boundaryDofsByMarker's P2 DOFs, some of which are interior, for natural
+ * boundaries).
+ */
+StokesSystem buildStokes(int n, bool multiplier)
+{
+    constexpr Real pi = 3.14159265358979323846;
+    StokesSystem out;
+    auto p2 = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 2);
+    auto velocity_space = std::make_shared<spaces::ProductSpace>(p2, 2);
+    auto pressure_space = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+    auto r1 = std::make_shared<spaces::GlobalSpace>(1);
+    out.system = std::make_unique<FESystem>(buildTriangleGrid(n));
+    auto& sys = *out.system;
+    out.u = sys.addField(FieldSpec{.name = "u", .space = velocity_space, .components = 2});
+    out.p = sys.addField(FieldSpec{.name = "p", .space = pressure_space});
+    if (multiplier) {
+        out.lambda = sys.addField(FieldSpec{.name = "lambda", .space = r1});
+    }
+    sys.addOperator("stokes");
+    const auto f = FormExpr::coefficient("f", [](Real x, Real y, Real) {
+        const Real two_pi_cubed = 2.0 * pi * pi * pi;
+        return std::array<Real, 3>{
+            -two_pi_cubed * std::sin(2.0 * pi * y) * (2.0 * std::cos(2.0 * pi * x) - 1.0) -
+                pi * std::sin(pi * x) * std::cos(pi * y),
+            two_pi_cubed * std::sin(2.0 * pi * x) * (2.0 * std::cos(2.0 * pi * y) - 1.0) -
+                pi * std::cos(pi * x) * std::sin(pi * y),
+            0.0};
+    });
+    const auto u = forms::StateField(out.u, *velocity_space, "u");
+    const auto v = forms::TestField(out.u, *velocity_space, "v");
+    const auto p = forms::StateField(out.p, *pressure_space, "p");
+    const auto q = forms::TestField(out.p, *pressure_space, "q");
+    auto residual = (forms::inner(forms::grad(u), forms::grad(v)) - p * forms::div(v) - forms::inner(f, v)).dx() -
+                    (q * forms::div(u)).dx();
+    if (multiplier) {
+        const auto lam = forms::StateField(out.lambda, *r1, "lambda");
+        const auto mu = forms::TestField(out.lambda, *r1, "mu");
+        residual = residual + (lam * q).dx() + (mu * p).dx();
+        (void)installFormulation(sys, "stokes", {out.u, out.p, out.lambda}, residual);
+    } else {
+        (void)installFormulation(sys, "stokes", {out.u, out.p}, residual);
+    }
+    std::vector<forms::bc::StrongDirichlet> bcs;
+    for (const int marker : {kLeft, kRight, kBottom, kTop}) {
+        for (const int component : {0, 1}) {
+            bcs.push_back(forms::bc::strongDirichlet(out.u, marker, FormExpr::constant(0.0), "u", component));
+        }
+    }
+    installStrongDirichlet(sys, std::span<const forms::bc::StrongDirichlet>(bcs));
+    if (!multiplier) {
+        // The pressure DOFs follow the 2 (2n + 1)^2 velocity DOFs.
+        const auto first_pressure = static_cast<GlobalIndex>(2 * (2 * n + 1) * (2 * n + 1));
+        sys.addConstraint(std::make_unique<constraints::DirichletBC>(std::vector<GlobalIndex>{first_pressure}, 0.0));
+    }
+    sys.setup();
+    if (!multiplier) {
+        EXPECT_EQ(sys.fieldDofOffset(out.p), static_cast<GlobalIndex>(2 * (2 * n + 1) * (2 * n + 1)));
+    }
+    return out;
+}
+
+} // namespace
+
+TEST(GlobalMultiplierG3, MeanZeroPressureMultiplierMatchesAPinnedPressure)
+{
+    for (const int n : {4, 8}) {
+        auto with_multiplier = buildStokes(n, /*multiplier=*/true);
+        auto pinned = buildStokes(n, /*multiplier=*/false);
+
+        // The multiplier's row fixes the pressure constant: no constraint on
+        // p or lambda.
+        auto& sys = *with_multiplier.system;
+        const auto p_offset = sys.fieldDofOffset(with_multiplier.p);
+        const auto p_count = sys.fieldDofHandler(with_multiplier.p).getNumDofs();
+        for (GlobalIndex d = p_offset; d < p_offset + p_count + 1; ++d) {
+            EXPECT_FALSE(sys.constraints().isConstrained(d)) << "n=" << n << " dof " << d;
+        }
+
+        const auto a = solveFromZero(sys, "stokes");
+        const auto b = solveConstrainedFromZero(*pinned.system, "stokes");
+        const auto n_u = static_cast<std::size_t>(sys.fieldDofHandler(with_multiplier.u).getNumDofs());
+        const auto n_p = static_cast<std::size_t>(p_count);
+        Real velocity_scale = 0.0;
+        for (std::size_t i = 0; i < n_u; ++i) {
+            velocity_scale = std::max(velocity_scale, std::abs(b[i]));
+        }
+        for (std::size_t i = 0; i < n_u; ++i) {
+            EXPECT_NEAR(a[i], b[i], 1e-10 * velocity_scale) << "n=" << n << " velocity dof " << i;
+        }
+        // The pressures differ by a constant only.
+        Real lowest = std::numeric_limits<Real>::max();
+        Real highest = std::numeric_limits<Real>::lowest();
+        Real pressure_scale = 0.0;
+        for (std::size_t i = n_u; i < n_u + n_p; ++i) {
+            lowest = std::min(lowest, a[i] - b[i]);
+            highest = std::max(highest, a[i] - b[i]);
+            pressure_scale = std::max(pressure_scale, std::abs(a[i]));
+        }
+        EXPECT_LT(highest - lowest, 1e-9 * pressure_scale) << "n=" << n;
+        // The multiplier's pressure has zero integral, and the multiplier is 0:
+        // the divergence of a velocity that vanishes on the boundary integrates
+        // to 0.
+        SystemStateView state;
+        state.u = a;
+        const auto p = forms::StateField(with_multiplier.p, *sys.fieldRecord(with_multiplier.p).space, "p");
+        const std::array<FormExpr, 1> mean{p.dx()};
+        const auto integral = evaluateFunctionalForms(sys, mean, state, CollectiveCommunicator{});
+        EXPECT_LT(std::abs(integral.front().value), 1e-12 * pressure_scale) << "n=" << n;
+        EXPECT_LT(std::abs(a[n_u + n_p]), 1e-10 * pressure_scale) << "n=" << n;
     }
 }
 

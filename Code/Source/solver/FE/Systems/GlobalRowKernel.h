@@ -76,6 +76,21 @@ public:
                                                     assembly::GlobalSystemView* vector_out) override;
 
     [[nodiscard]] FieldId testField() const noexcept { return test_field_; }
+    [[nodiscard]] const std::string& testFieldName() const noexcept { return test_field_name_; }
+
+    /**
+     * @brief Whether the row fixes the constant mode of the scalar field @p field
+     *
+     * True when the field enters the row's measured terms without a
+     * derivative and a constant shift of it changes the row (the derivative
+     * of the measured 0-form in the direction 1 is not identically zero), as
+     * for the mean-value constraint (mu * p).dx().  The gauge registry takes
+     * this as the field's anchoring evidence.
+     */
+    [[nodiscard]] bool anchorsConstantModeOf(FieldId field) const;
+
+    /// The global fields the dGlobal terms depend on (a D block when non-empty)
+    [[nodiscard]] std::vector<FieldId> pointTermFields() const;
 
     /// The measured 0-form of the residual entry (the measured terms with mu = 1)
     [[nodiscard]] const forms::FormExpr& measuredValueForm() const noexcept { return measured_value_form_; }

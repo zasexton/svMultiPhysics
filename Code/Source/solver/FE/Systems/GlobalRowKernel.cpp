@@ -207,6 +207,64 @@ GlobalRowKernel::GlobalRowKernel(FieldId test_field,
     }
 }
 
+namespace {
+
+/// Whether StateField(@p field) occurs in @p node outside every derivative.
+[[nodiscard]] bool occursUndifferentiated(const FormExprNode& node, FieldId field)
+{
+    switch (node.type()) {
+    case FormExprType::Gradient:
+    case FormExprType::Divergence:
+    case FormExprType::Curl:
+    case FormExprType::Hessian:
+    case FormExprType::TimeDerivative:
+        return false;
+    case FormExprType::StateField:
+    case FormExprType::DiscreteField:
+        return node.fieldId().has_value() && *node.fieldId() == field;
+    default:
+        break;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child && occursUndifferentiated(*child, field)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] bool isZeroConstant(const FormExpr& expr)
+{
+    if (!expr.isValid()) {
+        return true;
+    }
+    const auto value = expr.node()->constantValue();
+    return expr.node()->type() == FormExprType::Constant && value.has_value() && *value == Real(0.0);
+}
+
+} // namespace
+
+bool GlobalRowKernel::anchorsConstantModeOf(FieldId field) const
+{
+    if (!measured_value_form_.isValid() || !occursUndifferentiated(*measured_value_form_.node(), field)) {
+        return false;
+    }
+    const auto derivative = forms::simplify(
+        forms::directionalDerivativeWrtField(measured_value_form_, field, FormExpr::constant(Real(1.0))));
+    return !isZeroConstant(derivative);
+}
+
+std::vector<FieldId> GlobalRowKernel::pointTermFields() const
+{
+    std::vector<FieldId> fields;
+    fields.reserve(point_derivatives_.size());
+    for (const auto& [field, derivative] : point_derivatives_) {
+        static_cast<void>(derivative);
+        fields.push_back(field);
+    }
+    return fields;
+}
+
 std::string GlobalRowKernel::name() const
 {
     return "GlobalRowKernel(" + test_field_name_ + ")";

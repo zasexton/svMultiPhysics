@@ -6,6 +6,7 @@
  */
 
 #include "Systems/FESystem.h"
+#include "Systems/GlobalRowKernel.h"
 #include "Systems/GlobalKernelStateProvider.h"
 #include "Systems/MaterialStateProvider.h"
 #include "Systems/OperatorBackends.h"
@@ -3655,6 +3656,12 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
             if (field == INVALID_FIELD_ID) {
                 return;
             }
+            // A global field is a multiplier: an unknown of its own constraint,
+            // never a gauge candidate.
+            if (field_registry_.has(field) &&
+                field_registry_.get(field).scope == FieldScope::Global) {
+                return;
+            }
 
             gauge::GaugeCandidate c;
             c.field = field;
@@ -3987,6 +3994,44 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         }
 
         // -----------------------------------------------------------------
+        // Multiplier evidence: the row of a global test function that changes
+        // under a constant shift of a scalar field (a mean-value constraint)
+        // fixes that field's constant mode, so no gauge is added for it.  One
+        // global constraint fixes one constant: on a mesh of several regions
+        // the evidence stays global and per-region modes keep their gauges.
+        // -----------------------------------------------------------------
+        {
+            std::vector<FieldId> scalar_candidates;
+            for (const auto& c : gauge_registry_->candidates()) {
+                if (c.family == gauge::NullspaceModeFamily::ScalarConstant &&
+                    std::find(scalar_candidates.begin(), scalar_candidates.end(), c.field) ==
+                        scalar_candidates.end()) {
+                    scalar_candidates.push_back(c.field);
+                }
+            }
+            for (const auto& tag : operator_registry_.list()) {
+                for (const auto& kernel : operator_registry_.get(tag).global) {
+                    const auto* row = dynamic_cast<const GlobalRowKernel*>(kernel.get());
+                    if (row == nullptr) {
+                        continue;
+                    }
+                    for (const auto field : scalar_candidates) {
+                        if (row->anchorsConstantModeOf(field)) {
+                            gauge_registry_->addAnchoring(gauge::AnchoringEvidence{
+                                field,
+                                -1,
+                                -1,
+                                gauge::NullspaceModeFamily::ScalarConstant,
+                                gauge::AnchoringVerdict::Anchored,
+                                "multiplier '" + row->testFieldName() +
+                                    "': its row fixes the constant of field " + std::to_string(field)});
+                        }
+                    }
+                }
+            }
+        }
+
+        // -----------------------------------------------------------------
         // IBP coupling analysis: detect cross-field nullspace anchoring
         // from integration-by-parts boundary terms.
         //
@@ -4049,6 +4094,12 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                         const FieldId trial_fid = pairing.col_var.field_id;
                         const FieldId test_fid  = pairing.row_var.field_id;
                         if (trial_fid == test_fid) continue;  // Skip diagonal
+                        // A global row has no integration by parts (its own
+                        // evidence is the multiplier evidence above).
+                        if (field_registry_.has(test_fid) &&
+                            field_registry_.get(test_fid).scope == FieldScope::Global) {
+                            continue;
+                        }
 
                         auto it = candidate_fields.find(trial_fid);
                         if (it == candidate_fields.end()) continue;

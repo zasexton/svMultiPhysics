@@ -617,7 +617,7 @@ classes are `implemented/expert`. Namespace `constraints`.
 | `InterfaceMeasureGaugeAnchor`, `InterfaceMeasureGaugeAnchorTexts`, `anchorGaugeOnInterfaceMeasure(...)` | `Constraints/InterfaceMeasureGaugeAnchor.h` | A natural condition on a generated interface anchors a constant mode while the interface has positive measure; the solve is rejected otherwise |
 | `ContactPointVelocityLaw`, `ContactPointVelocitySample` | `Constraints/ContactPointVelocityConstraint.h` | Law data (`contact_speed(cos theta)`) and per-point samples |
 | `GlobalConstraint::zeroMean(dofs)`, `fixedMean`, `pinDof` | `Constraints/GlobalConstraint.h` | `implemented/expert`; DOF-level global constraints |
-| `FESystem::gaugeRegistry()` | `Systems/FESystem.h` | `implemented/expert`; automatic constant-mode detection: a pure-Neumann scalar problem gets a zero-mean constraint without author code |
+| `FESystem::gaugeRegistry()` | `Systems/FESystem.h` | `implemented/expert`; automatic constant-mode detection: a pure-Neumann scalar problem gets a zero-mean constraint without author code. A global multiplier's row that a constant shift of a scalar field changes (a mean-value constraint such as `(mu * p).dx()`) anchors that field's constant, so no gauge is added; global fields are never candidates |
 
 ### Installation and Compilation
 
