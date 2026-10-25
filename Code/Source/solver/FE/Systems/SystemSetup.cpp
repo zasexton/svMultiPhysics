@@ -3929,7 +3929,16 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         }
     }
 
-    const auto trace_multipliers = traceMultiplierFields();
+    // The multipliers that live on a boundary or interface: the trace
+    // multipliers (volume fields a SupportRestrictionConstraint restricts,
+    // D54 T1) and the interface-owned fields (D54 T2).
+    auto trace_multipliers = traceMultiplierFields();
+    for (const auto& rec : field_registry_.records()) {
+        if (rec.scope == FieldScope::InterfaceFace &&
+            std::find(trace_multipliers.begin(), trace_multipliers.end(), rec.id) == trace_multipliers.end()) {
+            trace_multipliers.push_back(rec.id);
+        }
+    }
     const auto add_gauge_candidate =
         [this, &trace_multipliers](FieldId field,
                int component,
@@ -4323,12 +4332,14 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         }
 
         // -----------------------------------------------------------------
-        // Trace-multiplier evidence (D54 T1): the rows of a field restricted
-        // to a boundary or interface that change under a constant shift of a
-        // scalar field (a trace constraint such as (mu * (u - g)).ds) fix
-        // that field's constant, as an essential condition on the trace would.
+        // Trace-multiplier evidence (D54 T1, T2): the rows of a field
+        // restricted to a boundary or interface, or of an interface-owned
+        // field, that change under a constant shift of a scalar field (a
+        // trace constraint such as (mu * (u - g)).ds or
+        // (mu * (u.minus() - g)).dI) fix that field's constant, as an
+        // essential condition on the trace would.
         // -----------------------------------------------------------------
-        if (const auto multipliers = traceMultiplierFields(); !multipliers.empty()) {
+        if (const auto& multipliers = trace_multipliers; !multipliers.empty()) {
             std::vector<FieldId> scalar_candidates;
             for (const auto& c : gauge_registry_->candidates()) {
                 if (c.family == gauge::NullspaceModeFamily::ScalarConstant &&

@@ -25,7 +25,8 @@
  * pairs and has no numerical inf-sup estimator (AssemblyAccess::infSupEstimate
  * forwards a supplied summary only).
  *
- * Setup: the multiplier's rows anchor the constant of u (no automatic gauge),
+ * Setup: the multiplier's rows anchor the constant of u (no automatic gauge;
+ * also for an interface-field multiplier),
  * a multiplier that couples only to DOFs an essential condition fixes is
  * refused, the condition is exclusive on its marker, and an unstabilized
  * multiplier is reported for the FSILS refusal.
@@ -132,6 +133,47 @@ TEST(TraceMultiplierSetup, TheMultiplierAnchorsTheConstantOfU)
     EXPECT_EQ(sys.traceMultiplierFields(), std::vector<FieldId>{lam_id});
     // The evidence comes from the multiplier's rows; the multiplier itself is
     // no gauge candidate.
+    bool anchored_by_rows = false;
+    for (const auto& evidence : sys.gaugeRegistry().anchoring()) {
+        anchored_by_rows = anchored_by_rows ||
+                           (evidence.field == u_id &&
+                            evidence.source.find("trace multiplier 'lambda': its rows fix the constant") !=
+                                std::string::npos);
+    }
+    EXPECT_TRUE(anchored_by_rows);
+    for (const auto& candidate : sys.gaugeRegistry().candidates()) {
+        EXPECT_NE(candidate.field, lam_id);
+    }
+}
+
+TEST(TraceMultiplierSetup, AnInterfaceFieldMultiplierAnchorsTheConstantOfU)
+{
+    // The same problem with the multiplier an interface field on the boundary
+    // faces (D54 T2) and its terms on dI: its rows anchor u likewise, and it is
+    // no gauge candidate either.
+    constexpr int marker = 107;
+    auto mesh = buildQuadGrid(3, 3, 1.0, 1.0, 1, kWholeBoundary);
+    auto h1 = std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+    auto line = std::make_shared<spaces::H1Space>(ElementType::Line2, 1);
+    FESystem sys(mesh);
+    sys.setInterfaceMeshFromBoundaryLabel(marker, kWholeBoundary);
+    const auto u_id = sys.addField(FieldSpec{.name = "u", .space = h1});
+    const auto lam_id = sys.addInterfaceField("lambda", line, marker);
+    sys.addOperator("op");
+    const auto u = forms::StateField(u_id, *h1, "u");
+    const auto v = forms::TestField(u_id, *h1, "v");
+    const auto lam = forms::StateField(lam_id, *line, "lambda");
+    const auto mu = forms::TestField(lam_id, *line, "mu");
+    (void)systems::installFormulation(
+        sys, "op", {u_id, lam_id},
+        (forms::inner(forms::grad(u), forms::grad(v)) - FormExpr::constant(1.0) * v).dx() +
+            (lam * v.minus()).dI(marker) + (mu * u.minus()).dI(marker));
+    sys.setup();
+
+    const auto offset_u = sys.fieldDofOffset(u_id);
+    for (GlobalIndex d = 0; d < sys.fieldDofHandler(u_id).getNumDofs(); ++d) {
+        EXPECT_FALSE(sys.constraints().isConstrained(offset_u + d)) << "u dof " << d;
+    }
     bool anchored_by_rows = false;
     for (const auto& evidence : sys.gaugeRegistry().anchoring()) {
         anchored_by_rows = anchored_by_rows ||
