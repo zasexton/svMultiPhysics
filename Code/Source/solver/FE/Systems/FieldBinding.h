@@ -15,8 +15,8 @@
  * A module registers its unknowns and its prescribed data through one
  * FieldBinding.  A field of the same name that is already registered (by
  * another module or an earlier call) is reused when its source kind,
- * component count and function space agree; otherwise the call throws
- * std::invalid_argument.  Fields are added in call order, which is the DOF
+ * component count, function space and scope (volume, interface with its
+ * marker, or global) agree; otherwise the call throws std::invalid_argument.  Fields are added in call order, which is the DOF
  * order.  Every message starts with "<owner> <role>: ", or with the context
  * passed to check().
  */
@@ -55,7 +55,9 @@ public:
      *
      * Throws when the name is empty, the spec has no space, the field is
      * missing and @p allow_missing is false, or the registered field differs
-     * in source kind, component count or space.
+     * in source kind, component count, space or scope.  The scope of the spec
+     * follows its space as the registry sets it: global on a GlobalSpace,
+     * interface on a MortarSpace (with its marker).
      */
     static void check(const FESystem& system,
                       const FieldSpec& spec,
@@ -65,6 +67,15 @@ public:
 
     /// An unknown field: registered, or the compatible registered one.
     [[nodiscard]] FieldId unknown(FieldSpec spec, std::string_view role);
+
+    /**
+     * @brief A global multiplier: one scalar for the whole domain
+     *
+     * unknown() of a field on a new spaces::GlobalSpace with the automatic
+     * quadrature, or the registered global field of that name.  Its space is
+     * fieldRecord(id).space, for StateField and TestField.
+     */
+    [[nodiscard]] FieldId global(std::string name, std::string_view role);
 
     /// Prescribed data: registered when missing and @p auto_register is
     /// true, otherwise the compatible registered field.

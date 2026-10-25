@@ -8,6 +8,8 @@
 #include "Systems/FieldBinding.h"
 
 #include "Spaces/FunctionSpace.h"
+#include "Spaces/GlobalSpace.h"
+#include "Spaces/MortarSpace.h"
 #include "Systems/FESystem.h"
 
 #include <stdexcept>
@@ -27,6 +29,36 @@ bool spacesCompatible(const spaces::FunctionSpace& lhs,
            lhs.polynomial_order() == rhs.polynomial_order() &&
            lhs.element_type() == rhs.element_type();
 }
+
+namespace {
+
+/// The scope and marker FieldRegistry::add gives @p spec.
+[[nodiscard]] std::pair<FieldScope, int> registeredScope(const FieldSpec& spec)
+{
+    if (spec.space->space_type() == spaces::SpaceType::Global) {
+        return {FieldScope::Global, -1};
+    }
+    if (spec.space->space_type() == spaces::SpaceType::Mortar) {
+        const auto* mortar = dynamic_cast<const spaces::MortarSpace*>(spec.space.get());
+        return {FieldScope::InterfaceFace, mortar != nullptr ? mortar->interface_marker() : spec.interface_marker};
+    }
+    return {spec.scope, spec.interface_marker};
+}
+
+[[nodiscard]] std::string scopeText(FieldScope scope, int marker)
+{
+    switch (scope) {
+    case FieldScope::VolumeCell:
+        return "a volume field";
+    case FieldScope::InterfaceFace:
+        return "an interface field on marker " + std::to_string(marker);
+    case FieldScope::Global:
+        return "a global field";
+    }
+    return "a field of unknown scope";
+}
+
+} // namespace
 
 FieldBinding::FieldBinding(FESystem& system, std::string owner)
     : system_(&system)
@@ -78,6 +110,12 @@ void FieldBinding::check(const FESystem& system,
             std::string(context) + ": existing field '" + rec.name +
             "' uses an incompatible function space");
     }
+    const auto [scope, marker] = registeredScope(spec);
+    if (rec.scope != scope || (scope == FieldScope::InterfaceFace && rec.interface_marker != marker)) {
+        throw std::invalid_argument(
+            std::string(context) + ": existing field '" + rec.name + "' is " +
+            scopeText(rec.scope, rec.interface_marker) + ", expected " + scopeText(scope, marker));
+    }
 }
 
 FieldId FieldBinding::unknown(FieldSpec spec, std::string_view role)
@@ -88,6 +126,16 @@ FieldId FieldBinding::unknown(FieldSpec spec, std::string_view role)
         return system_->addField(std::move(spec));
     }
     return existing;
+}
+
+FieldId FieldBinding::global(std::string name, std::string_view role)
+{
+    FieldSpec spec;
+    spec.name = std::move(name);
+    spec.space = std::make_shared<spaces::GlobalSpace>(1);
+    spec.components = 1;
+    spec.scope = FieldScope::Global;
+    return unknown(std::move(spec), role);
 }
 
 FieldId FieldBinding::prescribed(FieldSpec spec, bool auto_register, std::string_view role)

@@ -475,6 +475,38 @@ TEST(GlobalField, ColoredAssemblyIsRefused)
     EXPECT_THROW(sys.setup(options), FEException);
 }
 
+TEST(GlobalField, FieldBindingChecksTheScope)
+{
+    auto mesh = buildGrid(2, 1, 1.0, 1.0, 1);
+    auto h1 = quadSpace(1);
+    FESystem sys(mesh);
+    FieldBinding fields(sys, "Test::registerOn");
+    const auto lam = fields.global("lambda", "multiplier");
+    EXPECT_EQ(sys.fieldRecord(lam).scope, FieldScope::Global);
+    EXPECT_EQ(sys.fieldRecord(lam).space->space_type(), spaces::SpaceType::Global);
+    // The registered global field is reused, by global() or by its spec.
+    EXPECT_EQ(fields.global("lambda", "multiplier"), lam);
+    auto r1 = std::make_shared<spaces::GlobalSpace>(1);
+    EXPECT_EQ(fields.unknown(FieldSpec{.name = "lambda", .space = r1, .scope = FieldScope::Global}, "multiplier"),
+              lam);
+    // A volume field of that name is not a global field, and the reverse.
+    const auto u = fields.unknown(FieldSpec{.name = "u", .space = h1}, "unknown");
+    EXPECT_THROW((void)fields.global("u", "multiplier"), std::invalid_argument);
+    EXPECT_THROW((void)fields.unknown(FieldSpec{.name = "lambda", .space = h1}, "unknown"), std::invalid_argument);
+    EXPECT_EQ(fields.unknown(FieldSpec{.name = "u", .space = h1}, "unknown"), u);
+    // The same space with another scope is another field.
+    try {
+        (void)fields.unknown(
+            FieldSpec{.name = "u", .space = h1, .scope = FieldScope::InterfaceFace, .interface_marker = 3},
+            "trace");
+        ADD_FAILURE() << "a volume field was reused as an interface field";
+    } catch (const std::invalid_argument& e) {
+        EXPECT_NE(std::string(e.what()).find("is a volume field, expected an interface field on marker 3"),
+                  std::string::npos)
+            << e.what();
+    }
+}
+
 TEST(GlobalField, LoweringIsInMatrixAndTheBorderedRouteIsRefused)
 {
     {

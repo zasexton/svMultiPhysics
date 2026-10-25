@@ -208,7 +208,8 @@ Status: `implemented/public`, unless noted.
 | `FormExpr::parameter(name)` | `FormExpr.h` | Named runtime parameter, resolved to a slot at setup |
 | `FormExpr::parameterRef(slot)` | `FormExpr.h` | `implemented/internal`; post-resolution slot reference |
 | `FormExpr::typedZero()` | `FormExpr.h` | `implemented/internal`; shape-preserving zero for lowering/simplification |
-| `systems::FieldBinding::unknown(spec, role)`, `prescribed(spec, auto_register, role)` | `Systems/FieldBinding.h` | Register a field or reuse a compatible registered one; incompatible reuse throws with `"<owner> <role>: "` |
+| `systems::FieldBinding::unknown(spec, role)`, `prescribed(spec, auto_register, role)` | `Systems/FieldBinding.h` | Register a field or reuse a compatible registered one (source kind, components, space, and scope: volume, interface with its marker, or global, as the registry sets it from the space); incompatible reuse throws with `"<owner> <role>: "` |
+| `systems::FieldBinding::global(name, role)` | `Systems/FieldBinding.h` | A global multiplier: an unknown on a new `GlobalSpace` with the automatic quadrature, or the registered global field of that name; its space is `fieldRecord(id).space` |
 | `systems::FieldBinding::check`, `requireDistinctNames`, `systems::spacesCompatible` | `Systems/FieldBinding.h` | Read-only checks before system mutation |
 | `FESystem::addField(FieldSpec)`, `addInterfaceField(name, space, marker)` | `Systems/FESystem.h` | Volume fields and codimension-one interface fields |
 | `spaces::GlobalSpace(n = 1, quadrature_order = 0)` | `Spaces/GlobalSpace.h` | One value for the whole domain: basis 1 and gradient 0 on every cell, so `lam * v` and `mu * u` integrate with the usual measures. One scalar per field (declare one global field per scalar). Its rows use the quadrature of the highest-order volume field, bound at setup, unless an order is given |
