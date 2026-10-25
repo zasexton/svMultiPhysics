@@ -13262,7 +13262,24 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
         grouped_bordered_field_couplings.clear();
         algebraic_aux_reduction = {};
         solve_bordered_ptr = has_bordered ? &bordered_full : nullptr;
+        // Bordered global fields (D54 multipliers) are solved with the explicit
+        // bordered Schur correction, which handles any D exactly, on every
+        // backend.  The algebraic reduction of a stabilized multiplier (D
+        // invertible) and the condensed path would turn its dense B and Ct
+        // columns over every field DOF into reduced updates: the explicit
+        // fallback puts dense outer products into the sparse Jacobian
+        // (dropped outside its pattern, owned blocks only at np > 1), and
+        // the native FSILS updates fail their true-residual check on G1 with
+        // a stabilized multiplier.  So both are skipped for them.
+        const bool bordered_global_blocks =
+            has_bordered &&
+            std::any_of(bordered_full.aux_blocks.begin(),
+                        bordered_full.aux_blocks.end(),
+                        [](const systems::FESystem::BorderedCouplingData::AuxBlock& block) {
+                            return block.global_field != INVALID_FIELD_ID;
+                        });
         if (has_bordered &&
+            !bordered_global_blocks &&
             buildAlgebraicAuxiliaryReduction(
                 bordered_full,
                 owned_dofs,
@@ -13343,6 +13360,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
         std::vector<Real> condensed_Dinv;
         std::vector<Real> condensed_DinvC;
         if (has_solve_bordered &&
+            !bordered_global_blocks &&
             linear.supportsNativeReducedFieldUpdates() &&
             !any_non_dirichlet_affine_constraints) {
             const auto& solve_bordered = *solve_bordered_ptr;

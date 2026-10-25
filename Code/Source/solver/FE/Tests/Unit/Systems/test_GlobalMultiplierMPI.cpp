@@ -214,7 +214,8 @@ struct Problem {
 /// G1 on @p comm; u = 0 on the vertices of x = 0 and x = 1 (DOF = vertex for Q1 here).
 Problem buildProblem(MPI_Comm comm, int rank, int size,
                      MultiplierLowering lowering = MultiplierLowering::Auto,
-                     bool owner_contiguous = false)
+                     bool owner_contiguous = false,
+                     Real stabilization = 0.0)
 {
     Problem out;
     auto mesh = std::make_shared<StripMeshAccess>(rank, size);
@@ -229,9 +230,12 @@ Problem buildProblem(MPI_Comm comm, int rank, int size,
     const auto v = forms::TestField(out.u, *out.u_space, "v");
     const auto lam = forms::StateField(out.lambda, *out.r1, "lambda");
     const auto mu = forms::TestField(out.lambda, *out.r1, "mu");
-    (void)installFormulation(sys, "poisson", {out.u, out.lambda},
-                             (forms::inner(forms::grad(u), forms::grad(v)) - lam * v).dx() -
-                                 (mu * u).dx() + (mu * FormExpr::constant(kMean * kHeight)).dGlobal());
+    auto residual = (forms::inner(forms::grad(u), forms::grad(v)) - lam * v).dx() - (mu * u).dx() +
+                    (mu * FormExpr::constant(kMean * kHeight)).dGlobal();
+    if (stabilization != 0.0) {
+        residual = residual - (FormExpr::constant(stabilization) * lam * mu).dGlobal();
+    }
+    (void)installFormulation(sys, "poisson", {out.u, out.lambda}, residual);
     // The DOF of a wall vertex is the vertex itself under GlobalIds numbering;
     // under the owner-contiguous numbering the condition names the vertices.
     if (!owner_contiguous) {
@@ -1050,6 +1054,54 @@ TEST(GlobalMultiplierG5MPI, G1BorderedOnFsilsGmresIsTheEigenInMatrixSolution)
         const auto it = one.owned_u.find(dof);
         ASSERT_NE(it, one.owned_u.end()) << "vertex " << dof;
         EXPECT_NEAR(value, it->second, 1e-10 * scale) << "ranks " << size << " vertex " << dof;
+    }
+#endif
+}
+
+TEST(GlobalMultiplierG5MPI, StabilizedG1BorderedOnFsilsIsTheEigenInMatrixSolution)
+{
+#if !defined(FE_HAS_FSILS)
+    GTEST_SKIP() << "FSILS backend is not enabled in this build";
+#else
+    // -(eps lambda mu) dGlobal: D = -eps, invertible.  The explicit bordered
+    // Schur correction solves it on FSILS as for D = 0.
+    MPI_Comm comm = MPI_COMM_WORLD;
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+    constexpr Real eps = 0.25;
+    auto reference = buildProblem(MPI_COMM_SELF, 0, 1, MultiplierLowering::InMatrix, false, eps);
+    auto eigen = backends::BackendFactory::create(backends::BackendKind::Eigen);
+    ASSERT_NE(eigen, nullptr);
+    backends::SolverOptions direct;
+    direct.method = backends::SolverMethod::Direct;
+    direct.preconditioner = backends::PreconditionerType::None;
+    direct.rel_tol = 1e-14;
+    direct.abs_tol = 1e-14;
+    direct.max_iter = 1;
+    const auto one = solveSteady(reference, *eigen, direct);
+    ASSERT_TRUE(one.converged);
+
+    auto bordered = buildProblem(comm, rank, size, MultiplierLowering::Bordered, /*owner_contiguous=*/true, eps);
+    backends::FsilsFactory fsils(/*dof_per_node=*/1, bordered.system->dofPermutation(), comm);
+    backends::SolverOptions gmres;
+    gmres.method = backends::SolverMethod::GMRES;
+    gmres.preconditioner = backends::PreconditionerType::Diagonal;
+    gmres.rel_tol = 1e-13;
+    gmres.abs_tol = 1e-15;
+    gmres.max_iter = 2000;
+    const auto many = solveSteady(bordered, fsils, gmres);
+    ASSERT_TRUE(many.converged);
+    EXPECT_NEAR(many.lambda, one.lambda, 1e-10 * std::abs(one.lambda)) << "ranks " << size;
+    Real scale = 0.0;
+    for (const auto& [vertex, value] : one.owned_u) {
+        scale = std::max(scale, std::abs(value));
+    }
+    for (const auto& [vertex, value] : many.owned_u) {
+        const auto it = one.owned_u.find(vertex);
+        ASSERT_NE(it, one.owned_u.end()) << "vertex " << vertex;
+        EXPECT_NEAR(value, it->second, 1e-10 * scale) << "ranks " << size << " vertex " << vertex;
     }
 #endif
 }

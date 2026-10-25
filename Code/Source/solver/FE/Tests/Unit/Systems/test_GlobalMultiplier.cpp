@@ -297,6 +297,7 @@ struct BuildOptions {
     bool point_term{true}; ///< the dGlobal term; without it the integral of u is 0
     int threads{1};        ///< assembly threads
     MultiplierLowering lowering{MultiplierLowering::Auto};
+    Real stabilization{0.0}; ///< eps of a -(eps lambda mu) dGlobal term (D = -eps)
 };
 
 /**
@@ -324,6 +325,9 @@ MeanConstrainedPoisson buildMeanConstrainedPoisson(int nx, int ny, Real height, 
     auto residual = (forms::inner(forms::grad(u), forms::grad(v)) - lam * v).dx() - (mu * u).dx();
     if (build.point_term) {
         residual = residual + (mu * FormExpr::constant(c * height)).dGlobal();
+    }
+    if (build.stabilization != 0.0) {
+        residual = residual - (FormExpr::constant(build.stabilization) * lam * mu).dGlobal();
     }
     (void)installFormulation(sys, "poisson", {out.u, out.lambda}, residual);
 
@@ -1239,6 +1243,34 @@ TEST(GlobalBordered, NewtonSolvesTheBorderedSystemAsTheMatrixDoes)
     }
     for (std::size_t i = 0; i < b.u.size(); ++i) {
         EXPECT_NEAR(b.u[i], a.u[i], 1e-10 * scale) << "dof " << i;
+    }
+}
+
+TEST(GlobalBordered, AStabilizedMultiplierIsSolvedExactly)
+{
+    // -(eps lambda mu) dGlobal gives D = -eps, invertible.  Newton solves it
+    // with the explicit bordered Schur correction, as for D = 0.
+    constexpr Real c = 1.5;
+    constexpr Real eps = 0.25;
+    for (const int order : {1, 2}) {
+        auto in_matrix = buildMeanConstrainedPoisson(4, 2, 0.5, order, c, BuildOptions{.stabilization = eps});
+        auto bordered = buildMeanConstrainedPoisson(
+            4, 2, 0.5, order, c, BuildOptions{.lowering = MultiplierLowering::Bordered, .stabilization = eps});
+        const std::vector<Real> zero(static_cast<std::size_t>(bordered.system->dofHandler().getNumDofs()), 0.0);
+        (void)assembleAt(*bordered.system, zero);
+        EXPECT_EQ(bordered.system->borderedCoupling().D.at(0), -eps) << "order " << order;
+        const auto a = solveWithNewton(*in_matrix.system, in_matrix.lambda);
+        const auto b = solveWithNewton(*bordered.system, bordered.lambda);
+        ASSERT_TRUE(a.converged);
+        ASSERT_TRUE(b.converged);
+        EXPECT_NEAR(b.lambda[0], a.lambda[0], 1e-10 * std::abs(a.lambda[0])) << "order " << order;
+        Real scale = 0.0;
+        for (const auto value : b.u) {
+            scale = std::max(scale, std::abs(value));
+        }
+        for (std::size_t i = 0; i < b.u.size(); ++i) {
+            EXPECT_NEAR(b.u[i], a.u[i], 1e-10 * scale) << "order " << order << " dof " << i;
+        }
     }
 }
 
