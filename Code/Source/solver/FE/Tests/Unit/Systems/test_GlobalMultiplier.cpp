@@ -475,6 +475,79 @@ TEST(GlobalField, ColoredAssemblyIsRefused)
     EXPECT_THROW(sys.setup(options), FEException);
 }
 
+TEST(GlobalField, AConstrainedMultiplierIsRefused)
+{
+    auto mesh = buildGrid(3, 1, 1.0, 1.0, 1);
+    auto h1 = quadSpace(1);
+    auto r1 = std::make_shared<spaces::GlobalSpace>(1);
+    FESystem sys(mesh);
+    const auto u_id = sys.addField(FieldSpec{.name = "u", .space = h1});
+    const auto lam_id = sys.addField(FieldSpec{.name = "lambda", .space = r1});
+    sys.addOperator("op");
+    const auto u = forms::StateField(u_id, *h1, "u");
+    const auto v = forms::TestField(u_id, *h1, "v");
+    const auto lam = forms::StateField(lam_id, *r1, "lambda");
+    const auto mu = forms::TestField(lam_id, *r1, "mu");
+    (void)installFormulation(sys, "op", {u_id, lam_id},
+                             (forms::inner(forms::grad(u), forms::grad(v)) + lam * v).dx() + (mu * u).dx());
+    // The multiplier's DOF follows u's 8 DOFs.
+    sys.addConstraint(std::make_unique<constraints::DirichletBC>(std::vector<GlobalIndex>{8}, 0.0));
+    const auto message = feMessage([&] { sys.setup(); });
+    EXPECT_NE(message.find("the DOF of the global field 'lambda' is constrained"), std::string::npos) << message;
+}
+
+TEST(GlobalField, AMultiplierAndAnEssentialConditionOnTheSameDofsAreRefused)
+{
+    // One Q1 cell: every DOF of u is on a Dirichlet boundary, so the mean
+    // constraint has nothing left to act on.
+    auto mesh = buildGrid(1, 1, 1.0, 1.0, 1);
+    auto h1 = quadSpace(1);
+    auto r1 = std::make_shared<spaces::GlobalSpace>(1);
+    FESystem sys(mesh);
+    const auto u_id = sys.addField(FieldSpec{.name = "u", .space = h1});
+    const auto lam_id = sys.addField(FieldSpec{.name = "lambda", .space = r1});
+    sys.addOperator("op");
+    const auto u = forms::StateField(u_id, *h1, "u");
+    const auto v = forms::TestField(u_id, *h1, "v");
+    const auto lam = forms::StateField(lam_id, *r1, "lambda");
+    const auto mu = forms::TestField(lam_id, *r1, "mu");
+    (void)installFormulation(sys, "op", {u_id, lam_id},
+                             (forms::inner(forms::grad(u), forms::grad(v)) - lam * v).dx() - (mu * u).dx() +
+                                 (mu * FormExpr::constant(1.0)).dGlobal());
+    const std::array<forms::bc::StrongDirichlet, 2> bcs{
+        forms::bc::strongDirichlet(u_id, kLeft, FormExpr::constant(0.0), "u"),
+        forms::bc::strongDirichlet(u_id, kRight, FormExpr::constant(0.0), "u")};
+    installStrongDirichlet(sys, std::span<const forms::bc::StrongDirichlet>(bcs));
+    const auto message = feMessage([&] { sys.setup(); });
+    EXPECT_NE(message.find("every DOF the row of the multiplier 'lambda' couples to"), std::string::npos)
+        << message;
+}
+
+TEST(GlobalField, AMultiplierNeedsItsRowAndItsColumn)
+{
+    auto mesh = buildGrid(2, 1, 1.0, 1.0, 1);
+    auto h1 = quadSpace(1);
+    auto r1 = std::make_shared<spaces::GlobalSpace>(1);
+    FESystem sys(mesh);
+    const auto u_id = sys.addField(FieldSpec{.name = "u", .space = h1});
+    const auto lam_id = sys.addField(FieldSpec{.name = "lambda", .space = r1});
+    sys.addOperator("op");
+    const auto u = forms::StateField(u_id, *h1, "u");
+    const auto v = forms::TestField(u_id, *h1, "v");
+    const auto lam = forms::StateField(lam_id, *r1, "lambda");
+    const auto mu = forms::TestField(lam_id, *r1, "mu");
+    const auto no_row = feMessage([&] {
+        (void)installFormulation(sys, "op", {u_id, lam_id},
+                                 (forms::inner(forms::grad(u), forms::grad(v)) + lam * v).dx());
+    });
+    EXPECT_NE(no_row.find("the global field 'lambda' has no row"), std::string::npos) << no_row;
+    const auto no_column = feMessage([&] {
+        (void)installFormulation(sys, "op", {u_id, lam_id},
+                                 (forms::inner(forms::grad(u), forms::grad(v))).dx() + (mu * u).dx());
+    });
+    EXPECT_NE(no_column.find("the global field 'lambda' enters no row"), std::string::npos) << no_column;
+}
+
 // ---------------------------------------------------------------------------
 // Installation of a global row
 // ---------------------------------------------------------------------------

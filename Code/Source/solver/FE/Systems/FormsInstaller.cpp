@@ -2409,6 +2409,22 @@ CoupledResidualKernels installCoupledResidualMixed(
         }
     }
 
+    // A global field needs its row: the multiplier's constraint.
+    for (const auto field : test_fields) {
+        const auto& rec = system.fieldRecord(field);
+        if (rec.scope != FieldScope::Global) {
+            continue;
+        }
+        const auto has_row = std::any_of(test_infos.begin(), test_infos.end(), [&](const TestInfo& info) {
+            return info.bound_field.has_value()
+                       ? *info.bound_field == field
+                       : (rec.space && signaturesMatch(info.signature, signatureFromSpace(*rec.space)));
+        });
+        FE_THROW_IF(!has_row, InvalidArgumentException,
+                    "installCoupledResidualMixed: the global field '" + rec.name +
+                        "' has no row; a multiplier needs its constraint, a term with its test function "
+                        "(TestField(" + rec.name + ", ...))");
+    }
     FE_THROW_IF(test_infos.size() != test_fields.size(), InvalidArgumentException,
                 "installCoupledResidualMixed: expression has " + std::to_string(test_infos.size()) +
                 " TestFunction spaces but " + std::to_string(test_fields.size()) + " test fields provided");
@@ -2623,6 +2639,7 @@ CoupledResidualKernels installCoupledResidualMixed(
         install_options.compiler_options.geometry_sensitivity);
 
     std::vector<std::shared_ptr<GlobalRowKernel>> pending_global_rows;
+    std::unordered_set<FieldId> fields_in_rows;
     for (std::size_t i = 0; i < residual_blocks.numTestFields(); ++i) {
         if (!residual_blocks.hasBlock(i)) {
             continue;
@@ -2648,6 +2665,9 @@ CoupledResidualKernels installCoupledResidualMixed(
                             test_record.name + "' as StateField, not TrialFunction");
             pending_global_rows.push_back(std::make_shared<GlobalRowKernel>(
                 test_fields[i], test_record.name, row_terms.measured, row_terms.point_integrand));
+            for (const auto field : pending_global_rows.back()->pointTermFields()) {
+                fields_in_rows.insert(field);
+            }
             if (!row_terms.measured.isValid()) {
                 continue;
             }
@@ -2662,6 +2682,9 @@ CoupledResidualKernels installCoupledResidualMixed(
                                           install_options.compiler_options);
         const auto state_fields =
             gatherResidualDependencies(*root, install_options.compiler_options.geometry_sensitivity);
+        for (const auto field : state_fields) {
+            fields_in_rows.insert(field);
+        }
 
         FieldId active_trial = INVALID_FIELD_ID;
         if (i < trial_fields.size() && state_fields.contains(trial_fields[i])) {
@@ -2913,6 +2936,16 @@ CoupledResidualKernels installCoupledResidualMixed(
                 });
             }
         }
+    }
+
+    // A global field needs its column: the multiplier must enter a row.
+    for (const auto field : trial_fields) {
+        const auto& rec = system.fieldRecord(field);
+        FE_THROW_IF(rec.scope == FieldScope::Global && !fields_in_rows.contains(field),
+                    InvalidArgumentException,
+                    "installCoupledResidualMixed: the global field '" + rec.name +
+                        "' enters no row, so its column is empty; a multiplier acts on the equations it "
+                        "constrains (for example (" + rec.name + " * v).dx())");
     }
 
     plan->semantic_type = MixedKernelSemanticType::MixedBlockSet;

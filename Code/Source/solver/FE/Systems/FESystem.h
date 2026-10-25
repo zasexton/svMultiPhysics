@@ -2385,6 +2385,7 @@ private:
         const OperatorTag& op) const;
     void requireSetup() const;
     void requireSingleFieldSetup() const;
+    void validateGlobalMultiplierConstraints() const;
     void buildAssemblyPlans();
     void bumpSpaceRevision() noexcept { ++fe_layout_revisions_.space; }
     void bumpDofLayoutRevision() noexcept { ++fe_layout_revisions_.dof_layout; }

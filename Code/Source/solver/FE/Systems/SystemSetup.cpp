@@ -7,6 +7,7 @@
 
 #include "Systems/FESystem.h"
 #include "Systems/GlobalRowKernel.h"
+#include "Systems/SystemCollectives.h"
 #include "Systems/GlobalKernelStateProvider.h"
 #include "Systems/MaterialStateProvider.h"
 #include "Systems/OperatorBackends.h"
@@ -2723,6 +2724,66 @@ void validateGlobalFieldAssembly(const assembly::AssemblyOptions& options,
 }
 
 } // namespace
+
+void FESystem::validateGlobalMultiplierConstraints() const
+{
+#if FE_HAS_MPI
+    const CollectiveCommunicator comm(dof_handler_.mpiComm());
+#else
+    const CollectiveCommunicator comm;
+#endif
+    std::vector<std::pair<GlobalIndex, GlobalIndex>> global_ranges;
+    for (const auto& rec : field_registry_.records()) {
+        if (rec.scope != FieldScope::Global) {
+            continue;
+        }
+        const auto offset = field_dof_offsets_[static_cast<std::size_t>(rec.id)];
+        const auto count = field_dof_handlers_[static_cast<std::size_t>(rec.id)].getNumDofs();
+        global_ranges.emplace_back(offset, offset + count);
+        // A multiplier is the unknown of its own constraint: no condition,
+        // gauge or other constraint may fix it.
+        bool constrained = false;
+        for (GlobalIndex d = offset; d < offset + count; ++d) {
+            constrained = constrained || affine_constraints_.isConstrained(d);
+        }
+        FE_THROW_IF(collectiveAnyTrue(constrained, comm), InvalidArgumentException,
+                    "FESystem::setup: the DOF of the global field '" + rec.name +
+                        "' is constrained; a multiplier is the unknown of its own constraint and takes no "
+                        "boundary condition, gauge or other constraint");
+    }
+    const auto is_global_dof = [&](GlobalIndex dof) {
+        return std::any_of(global_ranges.begin(), global_ranges.end(),
+                           [dof](const auto& range) { return dof >= range.first && dof < range.second; });
+    };
+
+    // A global row without a D block whose every coupled DOF is constrained
+    // vanishes after the constraints, and so does the multiplier's column:
+    // the multiplier and an essential condition fix the same DOFs.
+    for (const auto& tag : operator_registry_.list()) {
+        const auto pattern_it = sparsity_by_op_.find(tag);
+        for (const auto& kernel : operator_registry_.get(tag).global) {
+            const auto* row_kernel = dynamic_cast<const GlobalRowKernel*>(kernel.get());
+            if (row_kernel == nullptr || !row_kernel->pointTermFields().empty()) {
+                continue;
+            }
+            std::size_t free_columns = 0;
+            if (pattern_it != sparsity_by_op_.end() && pattern_it->second) {
+                const auto row = fieldDofOffset(row_kernel->testField());
+                for (const auto col : pattern_it->second->getRowIndices(row)) {
+                    if (!is_global_dof(col) && !affine_constraints_.isConstrained(col)) {
+                        ++free_columns;
+                    }
+                }
+            }
+            FE_THROW_IF(collectiveSumSize(free_columns, comm) == 0u, InvalidArgumentException,
+                        "FESystem::setup: every DOF the row of the multiplier '" +
+                            row_kernel->testFieldName() + "' couples to (operator '" + tag +
+                            "') is constrained, so its row and column vanish and the system is singular: "
+                            "the multiplier and an essential condition (or another constraint) fix the same "
+                            "DOFs; drop one of them");
+        }
+    }
+}
 
 SetupStoragePlan FESystem::computeSetupStoragePlan() const
 {
@@ -6689,6 +6750,10 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 }
             }
         }
+    }
+
+    if (hasGlobalFieldRecords(field_registry_)) {
+        validateGlobalMultiplierConstraints();
     }
 
     buildAssemblyPlans();
