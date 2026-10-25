@@ -36,7 +36,8 @@
  * - Trade-off between accuracy and conditioning
  *
  * @see AffineConstraints for elimination-based enforcement
- * @see LagrangeMultiplier for exact weak enforcement
+ * For exact weak enforcement, state a Lagrange multiplier in the form (D54):
+ * a global field, or a field restricted to a boundary (LagrangeDirichletBC).
  */
 
 #include "AffineConstraints.h"

@@ -653,7 +653,6 @@ set(FE_CONSTRAINTS_HEADERS
     Constraints/ParallelConstraints.h
     Constraints/ConstraintTools.h
     Constraints/ConstraintTransform.h
-    Constraints/LagrangeMultiplier.h
     Constraints/PenaltyMethod.h
     Constraints/RobinBC.h
     Constraints/ConstraintsIO.h
@@ -687,7 +686,6 @@ set(FE_CONSTRAINTS_SOURCES
     Constraints/ParallelConstraints.cpp
     Constraints/ConstraintTools.cpp
     Constraints/ConstraintTransform.cpp
-    Constraints/LagrangeMultiplier.cpp
     Constraints/PenaltyMethod.cpp
     Constraints/RobinBC.cpp
     Constraints/ConstraintsIO.cpp
@@ -2765,7 +2763,6 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Constraints/test_GeometricIntegralConstraint.cpp
         Tests/Unit/Constraints/test_MovingConstraintComposition.cpp
         Tests/Unit/Constraints/test_ParallelConstraints.cpp
-        Tests/Unit/Constraints/test_LagrangeMultiplier.cpp
         Tests/Unit/Constraints/test_PenaltyMethod.cpp
         Tests/Unit/Constraints/test_ConstraintDistributor.cpp
         Tests/Unit/Constraints/test_ConstraintsIO.cpp

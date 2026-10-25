@@ -1938,7 +1938,6 @@ public:
 | `PeriodicBC` | Periodic boundary conditions |
 | `MultiPointConstraint` | Linear combinations of DOFs |
 | `HangingNodeConstraint` | Hanging node constraints for non-conforming meshes |
-| `LagrangeMultiplier` | Lagrange multiplier constraints |
 
 ```cpp
 namespace svmp::FE::constraints {

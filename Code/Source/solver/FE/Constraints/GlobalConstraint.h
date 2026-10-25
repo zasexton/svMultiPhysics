@@ -29,7 +29,9 @@
  * This class provides the ALGEBRAIC machinery for these constraints.
  *
  * @see AffineConstraints for constraint storage
- * @see LagrangeMultiplier for saddle-point formulations
+ *
+ * A multiplier for a global constraint (a mean value, an integral) is a
+ * global field in the form (D54): FieldBinding::global and dGlobal.
  */
 
 #include "Constraint.h"
@@ -108,8 +110,8 @@ struct GlobalConstraintInfo {
  *   constraints.close();
  * @endcode
  *
- * For more sophisticated enforcement (e.g., Lagrange multipliers), see
- * the LagrangeMultiplier class.
+ * For enforcement through a Lagrange multiplier, state the multiplier as a
+ * global field in the form (D54).
  */
 class GlobalConstraint : public Constraint {
 public:
