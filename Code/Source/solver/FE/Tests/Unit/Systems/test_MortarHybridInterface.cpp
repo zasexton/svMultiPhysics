@@ -532,7 +532,7 @@ namespace {
  * FacetSourceKernel).
  */
 void installHybridForms(FESystem& sys, const std::string& op, svmp::FE::FieldId q, svmp::FE::FieldId lambda,
-                        int marker, Real c, Real s)
+                        int marker, Real c, Real s, Real plus = 1.0)
 {
     using svmp::FE::forms::FormExpr;
     const auto& q_space = *sys.fieldRecord(q).space;
@@ -541,8 +541,9 @@ void installHybridForms(FESystem& sys, const std::string& op, svmp::FE::FieldId 
     const auto w = svmp::FE::forms::TestField(q, q_space, "w");
     const auto lam = svmp::FE::forms::StateField(lambda, l_space, "lambda");
     const auto mu = svmp::FE::forms::TestField(lambda, l_space, "mu");
-    auto residual = (qq * w).dx() + (lam * w.minus()).dI(marker) + (lam * w.plus()).dI(marker) +
-                    (mu * qq.minus()).dI(marker) + (mu * qq.plus()).dI(marker);
+    const auto b = FormExpr::constant(plus);
+    auto residual = (qq * w).dx() + (lam * w.minus()).dI(marker) + (b * lam * w.plus()).dI(marker) +
+                    (mu * qq.minus()).dI(marker) + (b * mu * qq.plus()).dI(marker);
     if (c != Real(0.0)) {
         residual = residual + (FormExpr::constant(c) * lam * mu).dI(marker);
     }
@@ -699,7 +700,9 @@ TEST(FESystemMortar, FormsGiveTheHandWrittenHybridOperator)
 {
     // The operator of HybridizedToyCondensationMatchesFullSolve (hand-written
     // kernels, kept as the reference), written as forms: the same A and b, for
-    // a mortar multiplier and for an interface-field multiplier.
+    // a mortar multiplier and for an interface-field multiplier.  First-order
+    // spaces (Q1 q, P1 lambda) and the plus side's terms weighted by 2, so a
+    // swap of the sides or of the face points would show.
     constexpr int marker = 17;
     for (const bool mortar : {true, false}) {
         SCOPED_TRACE(mortar ? "MortarSpace multiplier" : "interface-field multiplier");
@@ -707,8 +710,8 @@ TEST(FESystemMortar, FormsGiveTheHandWrittenHybridOperator)
             auto system = std::make_unique<FESystem>(build_two_quad_mesh_with_interface_set("middle"));
             auto& sys = *system;
             sys.setInterfaceMeshFromFaceSet(marker, "middle");
-            auto volume_space = std::make_shared<L2Space>(ElementType::Quad4, /*order=*/0);
-            auto line_space = std::make_shared<L2Space>(ElementType::Line2, /*order=*/0);
+            auto volume_space = std::make_shared<L2Space>(ElementType::Quad4, /*order=*/1);
+            auto line_space = std::make_shared<L2Space>(ElementType::Line2, /*order=*/1);
             const auto q = sys.addField(FieldSpec{.name = "q", .space = volume_space});
             const auto lambda =
                 mortar ? sys.addField(FieldSpec{.name = "lambda",
@@ -716,14 +719,15 @@ TEST(FESystemMortar, FormsGiveTheHandWrittenHybridOperator)
                        : sys.addInterfaceField("lambda", line_space, marker);
             sys.addOperator("op");
             if (forms) {
-                installHybridForms(sys, "op", q, lambda, marker, /*c=*/0.5, /*s=*/1.0);
+                installHybridForms(sys, "op", q, lambda, marker, /*c=*/0.5, /*s=*/1.0, /*plus=*/2.0);
             } else {
                 sys.addCellKernel("op", q, std::make_shared<MassKernel>(1.0));
                 for (const auto side : {InterfaceEvaluationSide::Minus, InterfaceEvaluationSide::Plus}) {
+                    const Real weight = side == InterfaceEvaluationSide::Plus ? 2.0 : 1.0;
                     sys.addInterfaceFaceKernel("op", marker, lambda, q,
-                                               std::make_shared<NormalTraceCouplingKernel>(1.0, side));
+                                               std::make_shared<NormalTraceCouplingKernel>(weight, side));
                     sys.addInterfaceFaceKernel("op", marker, q, lambda,
-                                               std::make_shared<NormalTraceCouplingKernel>(1.0, side));
+                                               std::make_shared<NormalTraceCouplingKernel>(weight, side));
                 }
                 sys.addInterfaceFaceKernel("op", marker, lambda, std::make_shared<FacetMassKernel>(0.5));
                 sys.addInterfaceFaceKernel("op", marker, lambda, std::make_shared<FacetSourceKernel>(1.0));
