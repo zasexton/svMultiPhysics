@@ -2971,8 +2971,14 @@ CoupledResidualKernels installCoupledResidualMixed(
 
     // The single-sided interface kernels: per row and side, one kernel per
     // unknown of the side's terms; the kernel of the interface-owned unknown
-    // (or of the first unknown) adds the row's vector.  Interpreted: whether
-    // their JIT kernels match is a separate question (D54 LM4, C4).
+    // (or of the first unknown) adds the row's vector.  They are interpreted
+    // AD kernels whatever the JIT and tangent options (D54 LM4, C4): JIT
+    // kernels of these forms are not bitwise the interpreted ones.  (Tried
+    // on I1 and I2: the JIT lowering and the symbolic tangents refuse a form
+    // over spaces of two topological dimensions (inferAutoIndexExtent); with
+    // that lifted, the symbolic residual kernels' JIT results differ from the
+    // interpreted ones in a few entries by up to 6e-17, and the boundary-face
+    // JIT does not run the AD kernels at all.)
     struct PendingSideInstall {
         FieldId test_field{INVALID_FIELD_ID};
         FieldId trial_field{INVALID_FIELD_ID};

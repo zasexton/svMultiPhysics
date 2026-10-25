@@ -615,7 +615,7 @@ and not in the row of a global field); it takes no `.minus()`, `.plus()`,
 `jump()` or `avg()` (it has one value); a volume field in such a term needs
 its side; a product of the two sides, or of the interface-owned unknown with
 another unknown, is refused, as is `dI()` without a marker.  The kernels are
-interpreted.
+interpreted AD kernels, also with the JIT on and with symbolic tangents.
 
 ### Constraint Plan and Gauge Anchors
 
@@ -934,7 +934,7 @@ multipliers of LM1a and LM1b:
 | LM1 (later) | Several scalars per global field (`GlobalSpace(n)`, n > 1); the anchoring evidence of vector fields (componentwise constants); distributed sparsity graphs of global rows for the distributed matrix backends (PETSc, Trilinos) |
 | LM2 (later) | The bordered lowering for transient problems and together with monolithic auxiliary unknowns |
 | LM3 (later) | A support restriction to a union of boundaries (one multiplier on several markers), to a generated active boundary subset and to a contact line; the restriction of vector fields' rows (componentwise anchoring) |
-| LM4 (later) | The JIT for single-sided interface kernels (only if bitwise against the interpreted kernels); the state of an interface-owned field gathered by face, so a product of it with another unknown can be installed; an interface-owned field in the row of a global field (e.g. its zero mean as a gauge) |
+| LM4 (later) | The JIT for single-sided interface kernels (not bitwise against the interpreted kernels in LM4: a form over two topological dimensions needs `inferAutoIndexExtent` to take the cells' dimension, and the symbolic residual kernels' JIT results then differ by round-off in a few entries); the state of an interface-owned field gathered by face, so a product of it with another unknown can be installed; an interface-owned field in the row of a global field (e.g. its zero mean as a gauge) |
 | LM5 | Documentation; the dead multiplier gauge policies implemented or retired; `constraints::LagrangeMultiplier` retired |
 
 ### Not Scheduled
