@@ -22,7 +22,7 @@ what it is for, and who should call it.
 | `implemented/public` | Intended for formulation authors and covered by current headers/tests |
 | `implemented/expert` | Supported but meant for specialized, manual, or lower-level workflows |
 | `implemented/internal` | Setup, JIT, lowering, or byte/slot based hooks; not an ergonomic public DSL |
-| `planned` | Not implemented yet; tracked by a named step of milestone MR in `Documentation/free_surface_program_tracker.md` §5, or by a phase (LM1-LM5) of decision D54 there |
+| `planned` | Not implemented yet; tracked by a named step of milestone MR in `Documentation/free_surface_program_tracker.md` §5, or left for later by a phase (LM1-LM4) of decision D54 there |
 | `out-of-scope-for-now` | Not implemented and not scheduled; deferred until there is a concrete product/module need |
 
 ## Design Principles
@@ -636,7 +636,7 @@ classes are `implemented/expert`. Namespace `constraints`.
 | `plan.anchorGauge(operator_tag, anchor)` | `Constraints/ConstraintPlan.h` | Not a phase: records an `InterfaceMeasureGaugeAnchor` in the gauge registry and adds its measure checks |
 | `InterfaceMeasureGaugeAnchor`, `InterfaceMeasureGaugeAnchorTexts`, `anchorGaugeOnInterfaceMeasure(...)` | `Constraints/InterfaceMeasureGaugeAnchor.h` | A natural condition on a generated interface anchors a constant mode while the interface has positive measure; the solve is rejected otherwise |
 | `ContactPointVelocityLaw`, `ContactPointVelocitySample` | `Constraints/ContactPointVelocityConstraint.h` | Law data (`contact_speed(cos theta)`) and per-point samples |
-| `GlobalConstraint::zeroMean(dofs)`, `fixedMean`, `pinDof` | `Constraints/GlobalConstraint.h` | `implemented/expert`; DOF-level global constraints |
+| `GlobalConstraint::zeroMean(dofs)`, `fixedMean`, `pinDof` | `Constraints/GlobalConstraint.h` | `implemented/expert`; DOF-level global constraints. `GlobalConstraintStrategy` is `PinSingleDof`, `WeightedMean` or `NullspaceProjection`, and `NullspaceProjection` (so also `GlobalConstraint::nullspacePinning`) is a pin today: it pins one DOF like `PinSingleDof`. A constraint enforced by a multiplier is a global field in the form (`GlobalSpace`, `.dGlobal()`; D54), not a strategy or a gauge policy |
 | `FESystem::gaugeRegistry()` | `Systems/FESystem.h` | `implemented/expert`; automatic constant-mode detection: a pure-Neumann scalar problem gets a zero-mean constraint without author code. A field that enters another field's equation undifferentiated (the pressure in `p div(v)`) is anchored by a boundary marker on which the other field has an unconstrained DOF, so the pressure of an enclosed flow gets a gauge. A global multiplier's row that a constant shift of a scalar field changes (a mean-value constraint such as `(mu * p).dx()`) anchors that field's constant, so no gauge is added; global fields are never candidates |
 | `boundaryDofsByMarker(mesh, dof_handler, marker)`, `boundaryDofsByFaceSet(mesh, dof_handler, set)`, `makeDirichletConstantByMarker`, `makeDirichletConstantByFaceSet` | `Constraints/SystemConstraints.h` | `implemented/expert`; the DOFs of the vertices, edges and faces of a marker's or a face set's faces, with the edges numbered as the DofHandler numbers them (in 2D with every face stored, edge f is face f); the gauge reads natural boundaries from them |
 
@@ -922,12 +922,17 @@ change the authoring surface:
 | E3 | Energies, powers, works, and the logged measures as forms in `NavierStokesPostProcessing.h`, under the D49 tolerance gate |
 | L1 | Log lines as FE data (`LogRecord`, above): the Navier-Stokes term and post-processing lines are records printed through `F.log`, and the free-surface observer is removed; the energy, record and maintenance lines of the FE services follow |
 
-### Planned by D54 (multipliers as forms)
+### Left for Later by D54 (multipliers as forms)
 
-Status: `planned`. The phases of decision D54
+Status: `planned`. Decision D54
 (`Documentation/free_surface_program_tracker.md`;
-`agent-status/refactor/forms-multipliers-design.md`) after the global
-multipliers of LM1a and LM1b:
+`agent-status/refactor/forms-multipliers-design.md`) is done through its last
+phase: global multipliers as forms (LM1), their bordered lowering for fixed
+node layouts such as FSILS (LM2), trace multipliers restricted to a boundary or
+interface (LM3), interface-owned multipliers in forms (LM4), and the deletion of
+the multiplier gauge policy and global-constraint strategy and the retirement
+of `constraints::LagrangeMultiplier` (LM5; a multiplier is a field in the
+form). What the phases left for later:
 
 | Phase | Planned vocabulary |
 |-------|--------------------|
@@ -935,7 +940,14 @@ multipliers of LM1a and LM1b:
 | LM2 (later) | The bordered lowering for transient problems and together with monolithic auxiliary unknowns |
 | LM3 (later) | A support restriction to a union of boundaries (one multiplier on several markers), to a generated active boundary subset and to a contact line; the restriction of vector fields' rows (componentwise anchoring) |
 | LM4 (later) | The JIT for single-sided interface kernels (not bitwise against the interpreted kernels in LM4: a form over two topological dimensions needs `inferAutoIndexExtent` to take the cells' dimension, and the symbolic residual kernels' JIT results then differ by round-off in a few entries); the state of an interface-owned field gathered by face, so a product of it with another unknown can be installed; an interface-owned field in the row of a global field (e.g. its zero mean as a gauge) |
-| LM5 | Documentation; the dead multiplier gauge policies implemented or retired; `constraints::LagrangeMultiplier` retired |
+
+Open limits, one line each (not scheduled):
+
+- Analysis gives no inf-sup verdict for a trace multiplier pair: it classifies the pair (`TraceMultiplier`), but its Fortin construction needs trace DOF metadata it does not have, and `infSupEstimate` only forwards a supplied summary.
+- One integral holds one test function: write `(lam * v).ds(m) + (mu * (u - g)).ds(m)`, not `(lam * v + mu * (u - g)).ds(m)`.
+- A multiplier continuous around a corner of its boundary cannot follow the jump of du/dn there: it converges at O(h^1/2) and pollutes u; give each side its own multiplier.
+- A mesh of several cell types cannot carry a field of order >= 1: `SpaceFactory` refuses such a mesh, and the DOF numbering of a Mesh refuses the variable-order space it would need (the assembler itself takes a space with an element per cell type).
+- The material-state lookup of a kernel on an InterfaceMesh face still takes the face id the InterfaceMesh recorded, which goes stale once setup stores more faces (the facets are found by the face's vertices).
 
 ### Not Scheduled
 

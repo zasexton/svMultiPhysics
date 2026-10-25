@@ -50,9 +50,11 @@ FE/
 | **Trace Nitsche BCs** | `TraceNitscheBC` / `InterfaceTraceNitscheBC` | `Forms/NitscheBC.h` |
 | **One-sided trace laws** | `TraceInequalityBC` | `Forms/StandardBCs.h` |
 | **H(div) periodic/MPC trace relations** | `makeHDivTracePeriodicBC*()` / `makeHDivTracePeriodicMPC*()` | `Constraints/ConstraintTools.h` |
-| **Mixed-dimensional interface fields** | `FESystem::addInterfaceField()` | `Systems/FESystem.h` |
+| **Mixed-dimensional interface fields** | `FESystem::addInterfaceField()`, coupled by `.dI(marker)` forms | `Systems/FESystem.h` |
 | **Level-set transport and generated interfaces** | `level_set::installLevelSetTransport()` and lifecycle utilities | `LevelSet/LevelSet.h` |
-| **Mortar/hybrid facet fields** | `MortarSpace` + `FESystem::addInterfaceFaceKernel()` | `Spaces/MortarSpace.h` / `Systems/FESystem.h` |
+| **Mortar/hybrid facet fields** | `MortarSpace`, coupled by `.dI(marker)` forms (`FESystem::addInterfaceFaceKernel()` for hand-written kernels) | `Spaces/MortarSpace.h` / `Systems/FormsInstaller.h` |
+| **Global multipliers** (a mean value, a scalar unknown) | A `GlobalSpace` field in the form (`(mu * p).dx()`, `.dGlobal()`) | `Spaces/GlobalSpace.h` / `Forms/Vocabulary.h` |
+| **Trace multipliers** (a boundary condition through a multiplier) | `plan.restrictSupport()` + `bc::LagrangeDirichletBC` | `Constraints/ConstraintPlan.h` / `Forms/LagrangeDirichletBC.h` |
 | **Compile without installing** | `FormCompiler::compile(form, kind)` | `Forms/FormCompiler.h` |
 | **Auxiliary state models** | `AuxiliaryModelBuilder("name")` | `Auxiliary/AuxiliaryModelBuilder.h` |
 | **Deploy auxiliary models** | `use(model).name(...).scope(...)` | `Auxiliary/AuxiliaryBindings.h` |

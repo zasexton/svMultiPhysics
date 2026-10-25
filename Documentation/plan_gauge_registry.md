@@ -9,7 +9,9 @@ pressure in incompressible flow with pure Neumann BCs).
 
 The core abstraction is unchanged: `A u = f`, known/suspected nullspace basis
 `Z`, side conditions `C u = d`, and enforcement policies (pinning, elimination,
-multiplier augmentation, solver-side nullspace handling).
+solver-side nullspace handling). Multiplier augmentation is not a policy: a
+multiplier is a global field in the form (decision D54; the
+`LagrangeMultiplier` policy, which pinned a DOF, was deleted in LM5).
 
 ---
 
@@ -57,7 +59,7 @@ that appears only through `grad(field)` in the weak form.
   - [x] `Confidence` enum (High, Medium, Low)
   - [x] `AnchoringVerdict` enum (Anchored, PartiallyAnchored, Preserved, Unknown)
   - [x] `GaugeStatus` enum (Anchored, ExactNullspace, NearNullspace, Unknown)
-  - [x] `EnforcementPolicy` enum (None, PinDof, MeanZeroElimination, LagrangeMultiplier, SolverNullspace)
+  - [x] `EnforcementPolicy` enum (None, PinDof, MeanZeroElimination, SolverNullspace; the LagrangeMultiplier value was deleted under D54 LM5)
   - [x] `GaugeCandidate` struct (field, component, family, confidence, reason, source)
   - [x] `AnchoringEvidence` struct (verdict, source description)
   - [x] `ResolvedMode` struct (candidate + status + policy + anchoring evidence)

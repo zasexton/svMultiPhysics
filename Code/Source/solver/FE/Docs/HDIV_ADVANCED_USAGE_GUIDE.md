@@ -44,6 +44,7 @@ interface infrastructure.
 
 - `spaces::MortarSpace`
 - `FESystem::addInterfaceField()`
+- `systems::installFormulation()` with `.dI(marker)` terms for their couplings
 
 These names are the ones new code and new documentation should use.
 
@@ -186,12 +187,15 @@ entities are supplied.
 
 ## 5. Mortar And Hybridized Facet Fields
 
-Mortar and hybridized facet unknowns are represented by `spaces::MortarSpace`.
-The current public path is an expert `FESystem` path using explicit interface
-field registration and interface-face kernels.
+Mortar and hybridized facet unknowns are represented by `spaces::MortarSpace`
+(an interface-owned field on the InterfaceMesh of its marker; its interface
+space must be discontinuous). Their couplings are forms on `.dI(marker)`
+(decision D54, LM4), installed with the volume fields like any formulation:
 
 ```cpp
+#include "FE/Forms/Vocabulary.h"
 #include "FE/Spaces/MortarSpace.h"
+#include "FE/Systems/FormsInstaller.h"
 
 constexpr int marker = 17;
 
@@ -205,22 +209,37 @@ system.setInterfaceMeshFromFaceSet(marker, "middle");
 
 const auto q = system.addField({.name = "q", .space = volume_space});
 const auto lambda = system.addField({.name = "lambda", .space = mortar_space});
-
 system.addOperator("hybrid");
-system.addInterfaceFaceKernel("hybrid", marker, lambda, q, my_lambda_q_kernel);
-system.addInterfaceFaceKernel("hybrid", marker, q, lambda, my_q_lambda_kernel);
-system.addInterfaceFaceKernel("hybrid", marker, lambda, my_facet_kernel);
+
+const auto qq = forms::StateField(q, *volume_space, "q");
+const auto w = forms::TestField(q, *volume_space, "w");
+const auto lam = forms::StateField(lambda, *mortar_space, "lambda");
+const auto mu = forms::TestField(lambda, *mortar_space, "mu");
+const auto residual = (qq * w).dx() +
+                      (lam * w.minus()).dI(marker) + (lam * w.plus()).dI(marker) +
+                      (mu * qq.minus()).dI(marker) + (mu * qq.plus()).dI(marker);
+systems::installFormulation(system, "hybrid", {q, lambda}, residual);
 system.setup();
 ```
 
-The FE library now owns the facet DOF numbering, sparsity, and interface-face
-assembly path. The application still chooses the actual mortar or hybridized
-weak form through the registered kernels.
+The installer evaluates each product of a `.dI(marker)` term on one side of
+each interface face: the side of the volume field it holds (`.minus()` or
+`.plus()`), or the minus side when it holds only the interface field. The
+interface field takes no restriction (it has one value), appears in `.dI`
+terms only, and enters linearly with one unknown per product; the full rules
+and refusals are in `Forms/VOCABULARY.md` (Boundary Conditions and
+Constraints, the interface-owned field paragraph). The FE library owns the
+facet DOF numbering, sparsity, and the interface-face assembly.
+
+Hand-written interface-face kernels (`FESystem::addInterfaceFaceKernel`)
+remain the expert path for a law the forms cannot state.
 
 ## 6. Mixed-Dimensional Interface Fields
 
 True codimension-1 unknowns are registered with `FESystem::addInterfaceField()`
-rather than by restricting a volume field through `TraceSpace`.
+rather than by restricting a volume field through `TraceSpace`, and coupled to
+the volume fields by forms on `.dI(marker)` in the same way. Two subdomains
+`u` (minus side) and `w` (plus side) glued by a multiplier on their interface:
 
 ```cpp
 constexpr int marker = 23;
@@ -230,17 +249,21 @@ auto interface_space = std::make_shared<spaces::H1Space>(ElementType::Line2, 1);
 systems::FESystem system(mesh);
 system.setInterfaceMeshFromFaceSet(marker, "middle_vertical");
 
-const auto q = system.addField({.name = "q", .space = volume_space});
 const auto lambda = system.addInterfaceField("lambda", interface_space, marker);
+const auto lam = forms::StateField(lambda, *interface_space, "lambda");
+const auto mu = forms::TestField(lambda, *interface_space, "mu");
 
-system.addOperator("mixeddim");
-system.addInterfaceFaceKernel("mixeddim", marker, q, lambda, my_q_lambda_kernel);
-system.addInterfaceFaceKernel("mixeddim", marker, lambda, q, my_lambda_q_kernel);
-system.setup();
+auto residual = volume_terms +
+                (lam * v.minus()).dI(marker) - (lam * z.plus()).dI(marker) +
+                (mu * (u.minus() - w.plus())).dI(marker);
+systems::installFormulation(system, "glue", {u_field, w_field, lambda}, residual);
 ```
 
-This path is appropriate for fractures, membranes, wells, or any codimension-1
-field that must own its own DOFs, history, and algebraic blocks.
+(`v` and `z` are the test functions of `u` and `w`.) This path is appropriate
+for fractures, membranes, wells, or any codimension-1 field that must own its
+own DOFs, history, and algebraic blocks. A multiplier restricted to a boundary
+or interface but written as a volume field is the other route (D54 T1:
+`plan.restrictSupport`, `bc::LagrangeDirichletBC`).
 
 ## 7. One-Sided Trace Laws
 
@@ -275,8 +298,8 @@ For equality-based trace laws, prefer `NormalTraceEssentialBC`,
 
 The current public FE surface is intentionally limited in a few places:
 
-- mortar examples currently use explicit kernel registration rather than a dedicated formulation installer
-- mixed-dimensional examples currently use interface-face kernels rather than a higher-level coupling DSL
+- mortar and interface-field couplings are forms on `.dI(marker)` only within the limits of D54 LM4: linear in the interface field, one unknown per product, one side per product, interpreted kernels (no JIT)
+- there is no public bulk-to-manifold transfer vocabulary (`restrictTo`, `traceTo`, `extendFrom`; `Forms/VOCABULARY.md`, Not Scheduled)
 - the first one-sided nonlinear contract is `TraceInequalityBC`; there is not a separate multiplier-style complementarity API
 
 These are deliberate FE-layer boundaries, not missing documentation.

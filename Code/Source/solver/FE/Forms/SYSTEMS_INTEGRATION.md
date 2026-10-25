@@ -15,8 +15,10 @@ How `FE/Forms` weak-form expressions become assembled operators in `FE/Systems`.
 | Trace Nitsche BCs | `TraceNitscheBC` / `InterfaceTraceNitscheBC` | `NitscheBC.h` |
 | One-sided trace laws | `TraceInequalityBC` | `StandardBCs.h` |
 | H(div) periodic/MPC trace helpers | `makeHDivTracePeriodicBC*()` / `makeHDivTracePeriodicMPC*()` | `ConstraintTools.h` |
-| Mixed-dimensional interface fields | `FESystem::addInterfaceField()` | `FESystem.h` |
-| Mortar/hybrid facet fields | `MortarSpace` + `FESystem::addInterfaceFaceKernel()` | `MortarSpace.h` / `FESystem.h` |
+| Mixed-dimensional interface fields | `FESystem::addInterfaceField()`, coupled by `.dI(marker)` forms | `FESystem.h` |
+| Mortar/hybrid facet fields | `MortarSpace`, coupled by `.dI(marker)` forms (`FESystem::addInterfaceFaceKernel()` for hand-written kernels) | `MortarSpace.h` / `FormsInstaller.h` |
+| Global multipliers | A `GlobalSpace` field in the form (`(mu * p).dx()`, `.dGlobal()`) | `GlobalSpace.h` / `Vocabulary.h` |
+| Trace multipliers | `plan.restrictSupport()` + `bc::LagrangeDirichletBC` | `ConstraintPlan.h` / `LagrangeDirichletBC.h` |
 | Auto-detecting compilation | `FormCompiler::compile()` | `FormCompiler.h` |
 | Explicit mixed compilation | `FormCompiler::compileMixed()` | `FormCompiler.h` |
 | Pre-compiled IR installation | `installMixedFormIR()` | `FormsInstaller.h` |
@@ -152,17 +154,17 @@ The canonical public trace-condition names are:
 
 ## 2.1 Advanced H(div) Paths
 
-Three advanced `H(div)` capabilities currently live on the expert/system side
-rather than the high-level `FormsInstaller` path:
+Three advanced `H(div)` capabilities are registered on the expert/system side:
 
 - periodic and MPC trace relations through `Constraints/ConstraintTools.h`
 - mortar and hybridized facet unknowns through `spaces::MortarSpace`
 - mixed-dimensional codimension-1 unknowns through `FESystem::addInterfaceField()`
 
-These are intentional FE-core capabilities, but today they are assembled
-through explicit `FESystem` registration rather than a formulation-module
-wrapper. The current public usage examples are collected in
-`Docs/HDIV_ADVANCED_USAGE_GUIDE.md`.
+The periodic and MPC relations are constraints. The mortar and interface
+fields are registered on the `FESystem` and coupled to the volume fields by
+`.dI(marker)` terms that `installFormulation` installs (decision D54, LM4),
+within the limits listed in `VOCABULARY.md`. The current public usage examples
+are collected in `Docs/HDIV_ADVANCED_USAGE_GUIDE.md`.
 
 For multi-field:
 ```cpp
