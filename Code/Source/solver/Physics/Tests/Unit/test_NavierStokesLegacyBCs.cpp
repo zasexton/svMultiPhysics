@@ -2459,6 +2459,62 @@ TEST(NavierStokesLegacyBCs, FreeSurfaceContactNoneIsExplicitAndComplete)
 #endif
 }
 
+TEST(NavierStokesLegacyBCs, FittedFreeSurfaceRejectsKinematicEnforcementNone)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+
+    constexpr int marker = 80;
+    auto mesh = buildSingleTetraBoundaryMesh(marker);
+    ASSERT_TRUE(mesh);
+
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "fluid";
+    input.mesh_name = "single_tetra";
+    input.mesh = mesh->local_mesh_ptr();
+    input.equation_params["Enable_ALE"] = defined("true");
+    input.equation_params["Mesh_velocity_source"] =
+        defined("coupled_displacement");
+    input.equation_params["Auto_register_mesh_displacement_field"] =
+        defined("true");
+    input.default_domain.params["Density"] = defined("1.0");
+    input.default_domain.params["Viscosity.model"] = defined("Constant");
+    input.default_domain.params["Viscosity.Value"] = defined("0.01");
+
+    svmp::Physics::BoundaryConditionInput bc{};
+    bc.name = "free_surface";
+    bc.boundary_marker = marker;
+    bc.params["Type"] = defined("Free_surface");
+    bc.params["Implementation"] = defined("FittedALE");
+    bc.params["External_pressure"] = defined("12.5");
+    bc.params["Surface_tension"] = defined("0.0");
+    bc.params["Tangential_mesh_policy"] = defined("Free");
+    bc.params["Contact_line_model"] = defined("None");
+    bc.params["Kinematic_enforcement"] = defined("None");
+    input.boundary_conditions.push_back(std::move(bc));
+
+    // The text the user chose for the qualified fitted-ALE contract
+    // (2026-10-24): it names the rejected input, not a retired mode.
+    const std::string expected =
+        "IncompressibleNavierStokesVMSModule: the qualified fitted-ALE "
+        "free-surface contract requires MeshNitsche normal enforcement (the "
+        "input default); Kinematic_enforcement None is not accepted for a "
+        "fitted free surface";
+    svmp::FE::systems::FESystem system(mesh);
+    try {
+        auto module =
+            svmp::Physics::EquationModuleRegistry::instance().create(
+                "fluid", input, system);
+        ADD_FAILURE() << "a fitted free surface with Kinematic_enforcement=None was accepted";
+    } catch (const std::exception& error) {
+        EXPECT_NE(std::string(error.what()).find(expected), std::string::npos)
+            << error.what();
+    }
+#endif
+}
+
 TEST(NavierStokesLegacyBCs, FreeSurfacePinnedIsExplicitAndComplete)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)

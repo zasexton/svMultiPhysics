@@ -932,7 +932,10 @@
     "message": "retired input setting",
     "diagnostic": "input_deprecation",
     "level": "WARNING",
-    "scope": "root"
+    "scope": "root",
+    "alternate_messages": [
+     "deprecated input setting"
+    ]
    },
    "renames": {},
    "split": [],
@@ -1344,6 +1347,56 @@
    "split": [],
    "identifying": [],
    "special": null
+  },
+  {
+   "id": "params.native_mesh",
+   "batch": "params",
+   "before": {
+    "head": "IncompressibleNavierStokesVMSModule: skipping active-domain inactive velocity/pressure constraints because native mesh support is unavailable in this FESystem",
+    "diagnostic": null,
+    "fieldless_marker": "skipping active-domain inactive velocity/pressure constraints because native mesh support is unavailable"
+   },
+   "after": {
+    "owner": "IncompressibleNavierStokesVMSModule",
+    "message": "active-domain inactive constraints skipped",
+    "diagnostic": "active_domain_inactive_constraints_skipped",
+    "level": "WARNING",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null,
+   "added_fields": [
+    [
+     "reason",
+     "native_mesh_unavailable"
+    ]
+   ]
+  },
+  {
+   "id": "params.effective_configuration",
+   "batch": "params",
+   "before": {
+    "head": null,
+    "diagnostic": null,
+    "line_regex": "^\\[svMultiPhysics::Application\\] Wrote effective configuration: (?P<path>.*)$",
+    "fieldless_marker": "[svMultiPhysics::Application] Wrote effective configuration: "
+   },
+   "after": {
+    "owner": "ApplicationDriver",
+    "message": "wrote effective configuration",
+    "diagnostic": "effective_configuration",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": "regex_fields",
+   "quoted_fields": [
+    "path"
+   ]
   },
   {
    "id": "R1.hydrostatic",

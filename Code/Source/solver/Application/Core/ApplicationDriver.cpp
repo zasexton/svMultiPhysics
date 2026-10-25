@@ -212,20 +212,21 @@ std::vector<InputDeprecation> collectInputDeprecations(const Parameters& params)
 void warnInputDeprecations(const std::vector<InputDeprecation>& deprecations)
 {
   for (const auto& deprecation : deprecations) {
-    if (deprecation.replacement.empty()) {
-      application::core::oopCout()
-          << "[svMultiPhysics::Application] WARNING: '" << deprecation.input
-          << "' (" << deprecation.location
-          << ") restates a retired setting (decision D47); it has no effect "
-             "and will be removed."
-          << std::endl;
-      continue;
+    const bool retired = deprecation.replacement.empty();
+    svmp::FE::LogRecord record("ApplicationDriver",
+                               retired ? "retired input setting"
+                                       : "deprecated input setting",
+                               svmp::FE::LogLevel::WARNING);
+    record.diagnostic("input_deprecation")
+        .quoted("setting", deprecation.input)
+        .quoted("location", deprecation.location)
+        .text("decision", "D47");
+    if (retired) {
+      record.text("effect", "none");
+    } else {
+      record.quoted("replacement", deprecation.replacement);
     }
-    application::core::oopCout()
-        << "[svMultiPhysics::Application] WARNING: '" << deprecation.input
-        << "' (" << deprecation.location
-        << ") is deprecated (decision D47) and will be removed; use '"
-        << deprecation.replacement << "'." << std::endl;
+    svmp::FE::logRecord(record.rootOnly());
   }
 }
 
@@ -341,9 +342,11 @@ void writeEffectiveConfigurationArtifact(
         output_path.string() + "': " + rename_error.message());
   }
 
-  application::core::oopCout()
-      << "[svMultiPhysics::Application] Wrote effective configuration: "
-      << output_path.string() << std::endl;
+  svmp::FE::logRecord(
+      svmp::FE::LogRecord("ApplicationDriver", "wrote effective configuration")
+          .diagnostic("effective_configuration")
+          .quoted("path", output_path.string())
+          .rootOnly());
 }
 
 svmp::MeshComm activeFESystemCommunicator(
@@ -8050,15 +8053,18 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         *sim.fe_system,
         *semi_implicit_reference,
         stateViewForHistory(*sim.time_history));
-    oopCout()
-        << "[svMultiPhysics::Application] Semi-implicit capillary term:"
-        << " surface_tension_semi_implicit=NormalIncrement"
-        << " reference_field=" << sim.fe_system->fieldRecord(
-                                      semi_implicit_reference->reference_field)
-                                      .name
-        << " velocity_field=" << semi_implicit_reference->velocity_field_name
-        << " reference_refresh=projected_outer|endpoint|restored|before_solve"
-        << " diagnostic=free_surface_semi_implicit_reference" << std::endl;
+    svmp::FE::logRecord(
+        svmp::FE::LogRecord("ApplicationDriver", "semi-implicit capillary term")
+            .diagnostic("free_surface_semi_implicit_reference")
+            .text("surface_tension_semi_implicit", "NormalIncrement")
+            .text("reference_field",
+                  sim.fe_system
+                      ->fieldRecord(semi_implicit_reference->reference_field)
+                      .name)
+            .text("velocity_field", semi_implicit_reference->velocity_field_name)
+            .text("reference_refresh",
+                  "projected_outer|endpoint|restored|before_solve")
+            .rootOnly());
   }
   // When generated data is refreshed at accepted iterates, reassemble the
   // residual after that refresh before deciding that Newton has converged.

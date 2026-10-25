@@ -111,3 +111,56 @@ def test_value_comparison_and_shortest_reals():
     assert "diagnostic is not the first field" in problems
     assert any("not snake_case" in p for p in problems) and any("repeats" in p for p in problems)
     assert any("shortest" in p for p in problems)
+
+
+def test_params_records_read_the_same_in_both_formats():
+    pairs = [
+        ("[R0] [INFO] IncompressibleNavierStokesVMSModule: validated complete DynamicContactAngle planar wall "
+         "marker wall_boundary_marker=3 global_owned_faces=162 minimum_alignment=1.000000 alignment_tolerance=1e-8 "
+         "geometry_contract=first_order_planar_current_physical "
+         "diagnostic=dynamic_contact_complete_wall_marker_validation",
+         "[12:00:00.000] [R0] [INFO] IncompressibleNavierStokesVMSModule: validated complete DynamicContactAngle "
+         "planar wall marker diagnostic=dynamic_contact_complete_wall_marker_validation wall_boundary_marker=3 "
+         "global_owned_faces=162 minimum_alignment=1 alignment_tolerance=1e-08 "
+         "geometry_contract=first_order_planar_current_physical"),
+        ("[svMultiPhysics::Application] Semi-implicit capillary term: surface_tension_semi_implicit=NormalIncrement "
+         "reference_field=ns_free_surface_semi_implicit_reference_velocity velocity_field=Velocity "
+         "reference_refresh=projected_outer|endpoint|restored|before_solve "
+         "diagnostic=free_surface_semi_implicit_reference",
+         "[12:00:00.000] [R0] [INFO] ApplicationDriver: semi-implicit capillary term "
+         "diagnostic=free_surface_semi_implicit_reference surface_tension_semi_implicit=NormalIncrement "
+         "reference_field=ns_free_surface_semi_implicit_reference_velocity velocity_field=Velocity "
+         "reference_refresh=projected_outer|endpoint|restored|before_solve"),
+        ("[svMultiPhysics::Application] WARNING: 'Use_level_set_curvature=false' (Add_equation type=fluid Add_BC "
+         "name=free_surface) restates a retired setting (decision D47); it has no effect and will be removed.",
+         "[12:00:00.000] [R0] [WARN] ApplicationDriver: retired input setting diagnostic=input_deprecation "
+         "setting='Use_level_set_curvature=false' location='Add_equation type=fluid Add_BC name=free_surface' "
+         "decision=D47 effect=none"),
+        ("[svMultiPhysics::Application] WARNING: 'Use_ALE' (Add_equation type=fluid) is deprecated (decision D47) "
+         "and will be removed; use 'Enable_ALE'.",
+         "[12:00:00.000] [R0] [WARN] ApplicationDriver: deprecated input setting diagnostic=input_deprecation "
+         "setting='Use_ALE' location='Add_equation type=fluid' decision=D47 replacement='Enable_ALE'"),
+        ("[R1] [WARN] IncompressibleNavierStokesVMSModule: skipping active-domain inactive velocity/pressure "
+         "constraints because native mesh support is unavailable in this FESystem",
+         "[12:00:00.000] [R1] [WARN] IncompressibleNavierStokesVMSModule: active-domain inactive constraints "
+         "skipped diagnostic=active_domain_inactive_constraints_skipped reason=native_mesh_unavailable"),
+        ("[svMultiPhysics::Application] Wrote effective configuration: /tmp/run/effective_configuration.json",
+         "[12:00:00.000] [R0] [INFO] ApplicationDriver: wrote effective configuration "
+         "diagnostic=effective_configuration path='/tmp/run/effective_configuration.json'"),
+    ]
+    logmap = L.load_map()
+    for old, new in pairs:
+        (a,) = L.records([old])
+        (b,) = L.records([new])
+        assert a.entry["id"] == b.entry["id"] and a.entry["batch"] == "params", new
+        assert a.diagnostic == b.diagnostic, new
+        assert [k for k, _ in a.fields] == [k for k, _ in b.fields], new
+        assert all(L.values_equal(va, vb) for (_, va), (_, vb) in zip(a.fields, b.fields)), new
+        assert a.level == b.level, new
+        assert L.lint_line(new) == [], new
+        entry, role = logmap.match(L.Line(new))
+        assert L._is_new_format(L.Line(new), entry, role), new
+        assert not L._is_new_format(L.Line(old), *logmap.match(L.Line(old))), old
+    # The deprecated spelling shares the word and keeps its own message.
+    (deprecated,) = L.records([pairs[3][0]])
+    assert deprecated.message == "deprecated input setting"

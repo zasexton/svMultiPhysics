@@ -121,6 +121,10 @@ class LogMap:
         self.by_head = {}
         self.by_core = {}
         self.regex = []
+        # Old lines without a key=value field that an entry reads (records()
+        # skips other lines without '=').
+        self.fieldless = tuple(e["before"]["fieldless_marker"] for e in self.entries
+                               if e["before"].get("fieldless_marker"))
         for e in self.entries:
             before, after = e["before"], e["after"]
             if before.get("diagnostic"):
@@ -189,19 +193,25 @@ def _canonical(line: Line, entry: dict, role: str) -> Record:
     if special == "input_deprecation_text" and line.diagnostic is None:
         m = re.match(entry["before"]["line_regex"], line.text)
         fields = []
+        message = after["message"]
         if m:
-            fields = [("setting", "'%s'" % m.group("setting")), ("location", "'%s'" % m.group("location")),
-                      ("decision", m.group("decision") or m.group("decision2"))]
-            if m.group("replacement") is not None:
-                fields.append(("replacement", "'%s'" % m.group("replacement")))
+            groups = m.groupdict()
+            fields = [("setting", "'%s'" % groups["setting"]), ("location", "'%s'" % groups["location"]),
+                      ("decision", groups.get("decision") or groups.get("decision2"))]
+            if groups.get("replacement") is not None:
+                fields.append(("replacement", "'%s'" % groups["replacement"]))
+                message = (after.get("alternate_messages") or [message])[0]
             else:
                 fields.append(("effect", "none"))
-        return Record(entry, after["owner"], after["message"], after["diagnostic"], after["level"], rank, fields)
+        return Record(entry, after["owner"], message, after["diagnostic"], after["level"], rank, fields)
     if special == "regex_fields" and line.diagnostic is None:
         m = re.match(entry["before"]["line_regex"], line.text)
-        fields = [(k, v) for k, v in (m.groupdict().items() if m else [])]
+        quoted = set(entry.get("quoted_fields") or [])
+        fields = [(k, "'%s'" % v if k in quoted else v) for k, v in (m.groupdict().items() if m else [])]
         return Record(entry, after["owner"], after["message"], after["diagnostic"], after["level"], rank, fields)
     pairs = [(k, v) for k, v in _KV.findall(text) if k != "diagnostic"]
+    if line.diagnostic is None:   # an old line: the fields the record adds
+        pairs += [(k, v) for k, v in entry.get("added_fields") or []]
     renames = entry.get("renames") or {}
     pairs = [(renames.get(k, k), v) for k, v in pairs]
     if special == "interface_quantity_keys":
@@ -294,7 +304,7 @@ def records(lines: Iterable[str] | str, diagnostic: str | None = None,
     out: list[Record] = []
     last: dict = {}
     for raw in lines:
-        if "=" not in raw and "WARNING: '" not in raw:
+        if "=" not in raw and "WARNING: '" not in raw and not any(m in raw for m in logmap.fieldless):
             continue
         line = Line(raw)
         entry, role = logmap.match(line)
@@ -379,8 +389,9 @@ def _is_new_format(line: Line, entry: dict, role: str) -> bool:
     after = entry["after"]
     if role == "child":
         return True
-    head = after["owner"] + ":" + (" " + after["message"] if after["message"] else "")
-    return line.head == head and line.fields[:1] == [("diagnostic", after["diagnostic"])]
+    heads = {after["owner"] + ":" + (" " + message if message else "")
+             for message in [after["message"]] + list(after.get("alternate_messages") or [])}
+    return line.head in heads and line.fields[:1] == [("diagnostic", after["diagnostic"])]
 
 
 def value(text: str):

@@ -163,16 +163,13 @@ void validateDynamicContactPlanarWallMarker(
         throw std::invalid_argument(message.str());
     }
 
-    FE_LOG_INFO(
-        std::string("IncompressibleNavierStokesVMSModule: validated complete DynamicContactAngle planar wall marker") +
-        " wall_boundary_marker=" +
-        std::to_string(contactLineWallBoundaryMarker(contact_line)) +
-        " global_owned_faces=" + std::to_string(evidence.face_count) +
-        " minimum_alignment=" +
-        std::to_string(evidence.minimum_alignment) +
-        " alignment_tolerance=1e-8" +
-        " geometry_contract=first_order_planar_current_physical" +
-        " diagnostic=dynamic_contact_complete_wall_marker_validation");
+    FE::logRecord(post::navierStokesLog("validated complete DynamicContactAngle planar wall marker")
+                      .diagnostic("dynamic_contact_complete_wall_marker_validation")
+                      .integer("wall_boundary_marker", contactLineWallBoundaryMarker(contact_line))
+                      .integer("global_owned_faces", evidence.face_count)
+                      .real("minimum_alignment", evidence.minimum_alignment)
+                      .real("alignment_tolerance", alignment_tolerance)
+                      .text("geometry_contract", "first_order_planar_current_physical"));
 }
 
 void validateFreeSurfaceContactGeometryPreflight(
@@ -852,8 +849,9 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: the qualified "
                 "fitted-ALE free-surface contract requires MeshNitsche "
-                "normal enforcement (the input default); None is "
-                "accepted only by the explicit schema-1 legacy mode");
+                "normal enforcement (the input default); "
+                "Kinematic_enforcement None is not accepted for a fitted "
+                "free surface");
         }
         for (int component = dim; component < 3; ++component) {
             if (!FE::forms::bc::isZeroConstantScalarValue(
@@ -1836,10 +1834,9 @@ bool hasNativeMeshOrWarn(const FE::systems::FESystem& system)
     const bool native_mesh_available = false;
 #endif
     if (!native_mesh_available) {
-        FE_LOG_WARNING(
-            "IncompressibleNavierStokesVMSModule: skipping active-domain "
-            "inactive velocity/pressure constraints because native mesh support "
-            "is unavailable in this FESystem");
+        FE::logRecord(post::navierStokesLog("active-domain inactive constraints skipped", FE::LogLevel::WARNING)
+                          .diagnostic("active_domain_inactive_constraints_skipped")
+                          .text("reason", "native_mesh_unavailable"));
     }
     return native_mesh_available;
 }
