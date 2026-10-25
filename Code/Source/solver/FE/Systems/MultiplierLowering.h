@@ -24,7 +24,7 @@ namespace systems {
  * Newton solves them with the bordered correction (LM2).
  */
 enum class MultiplierLowering : std::uint8_t {
-    Auto,     ///< In the matrix
+    Auto,     ///< In the matrix (the Application asks for Bordered with FSILS)
     InMatrix, ///< Global rows and columns assembled into the matrix
     Bordered, ///< Global DOFs kept out of the matrix, bordered blocks solved by Newton
 };

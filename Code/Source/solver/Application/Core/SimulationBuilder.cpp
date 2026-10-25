@@ -1697,6 +1697,14 @@ void SimulationBuilder::setupSystem()
                 << std::endl;
     }
   }
+  if (fsils_backend && components_.fe_system->hasGlobalFields()) {
+    // FSILS needs one block of DOFs per node: global multipliers take the
+    // bordered lowering (D54), out of the matrix, solved by Newton's
+    // bordered correction.
+    setup_opts.multiplier_lowering = svmp::FE::systems::MultiplierLowering::Bordered;
+    oopCout() << "[svMultiPhysics::Application] FSILS backend: global multipliers take the bordered lowering"
+              << std::endl;
+  }
   if (fsils_backend) {
     setup_opts.use_backend_row_ownership_for_assembly = true;
     // FSILS matrices hold constraint-fill columns beyond the ghost layers as
@@ -1842,11 +1850,14 @@ void SimulationBuilder::createSolvers()
   }
 #endif
 
-  if (backend_kind == svmp::FE::backends::BackendKind::FSILS && components_.fe_system->hasGlobalFields()) {
+  if (backend_kind == svmp::FE::backends::BackendKind::FSILS && components_.fe_system->hasGlobalFields() &&
+      !components_.fe_system->hasBorderedGlobalFields()) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] SimulationBuilder: a global field (a multiplier) has no mesh node, "
-        "and FSILS needs one block of DOFs per node; use a backend with a variable block layout "
-        "(Eigen, PETSc, Trilinos) until the bordered lowering for FSILS exists.");
+        "and FSILS needs one block of DOFs per node, so its multipliers take the bordered lowering; the "
+        "system was set up with the " +
+        std::string(svmp::FE::systems::multiplierLoweringName(components_.fe_system->multiplierLowering())) +
+        " lowering.");
   }
   if (backend_kind == svmp::FE::backends::BackendKind::FSILS && create_options.dof_per_node > 1) {
     oopCout() << "[svMultiPhysics::Application] SimulationBuilder: configuring FSILS DOF permutation." << std::endl;
