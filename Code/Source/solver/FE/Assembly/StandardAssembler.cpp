@@ -1854,6 +1854,32 @@ std::atomic<bool> g_p1_field_derivative_shortcut_enabled{true};
            allFinite(coefficients) && allFinite(inverse_jacobians.front());
 }
 
+// The face of @p cell, numbered as its reference element numbers its faces,
+// whose corners are all among @p vertices (mesh vertex ids), or -1.  Found by
+// the vertices, it needs neither the mesh's face numbering nor a face id.
+[[nodiscard]] LocalIndex referenceFacetWithVertices(const IMeshAccess& mesh,
+                                                    GlobalIndex cell,
+                                                    std::span<const GlobalIndex> vertices,
+                                                    std::vector<GlobalIndex>& cell_nodes)
+{
+    mesh.getCellNodes(cell, cell_nodes);
+    const auto& ref = elements::ReferenceElement::shared(mesh.getCellType(cell));
+    for (std::size_t lf = 0; lf < ref.num_faces(); ++lf) {
+        const auto& face_nodes = ref.face_nodes(lf);
+        if (face_nodes.empty() || face_nodes.size() > vertices.size()) {
+            continue;
+        }
+        const bool holds_all = std::all_of(face_nodes.begin(), face_nodes.end(), [&](LocalIndex node) {
+            const auto vertex = cell_nodes.at(static_cast<std::size_t>(node));
+            return std::find(vertices.begin(), vertices.end(), vertex) != vertices.end();
+        });
+        if (holds_all) {
+            return static_cast<LocalIndex>(lf);
+        }
+    }
+    return LocalIndex{-1};
+}
+
 } // namespace
 
 namespace {
@@ -6211,6 +6237,7 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
     std::vector<std::vector<Real>> plus_prev_solution_coeffs;
     std::vector<GlobalIndex> cell_nodes_minus;
     std::vector<GlobalIndex> cell_nodes_plus;
+    std::vector<GlobalIndex> iface_vertices;
 
     const bool owned_rows_only = requiresOwnedRowFiltering(options_, mesh);
     const auto should_process = [&](GlobalIndex cell_minus, GlobalIndex cell_plus) -> bool {
@@ -6251,15 +6278,29 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
             continue;
         }
 
-        // The two cells' facets on the interface face, numbered as the
-        // reference element numbers its faces: the InterfaceMesh records the
-        // mesh's canonical face numbering, which differs for Tetra4.
+        // The two cells' facets holding the interface face's vertices,
+        // numbered as each cell's reference element numbers its faces.
+        // Neither the InterfaceMesh's local faces (the mesh's canonical face
+        // numbering, which differs for Tetra4) nor its volume face id (stale
+        // once setup stores more faces) can say which.
         FE_THROW_IF(interface_mesh.local_face_in_cell_minus(iface) < 0 ||
                         interface_mesh.local_face_in_cell_plus(iface) < 0,
                     FEException,
                     "StandardAssembler::assembleInterfaceFaces: invalid local face index in InterfaceMesh");
-        const LocalIndex local_face_minus = mesh.getLocalFaceIndex(face_id, cell_minus);
-        const LocalIndex local_face_plus = mesh.getLocalFaceIndex(face_id, cell_plus);
+        {
+            const auto [vertices_ptr, vertex_count] = interface_mesh.face_vertices_span(iface);
+            iface_vertices.clear();
+            for (std::size_t a = 0; a < vertex_count; ++a) {
+                iface_vertices.push_back(static_cast<GlobalIndex>(interface_mesh.volume_vertex(vertices_ptr[a])));
+            }
+        }
+        const LocalIndex local_face_minus =
+            referenceFacetWithVertices(mesh, cell_minus, iface_vertices, cell_nodes_minus);
+        const LocalIndex local_face_plus =
+            referenceFacetWithVertices(mesh, cell_plus, iface_vertices, cell_nodes_plus);
+        FE_THROW_IF(local_face_minus < 0 || local_face_plus < 0, FEException,
+                    "StandardAssembler::assembleInterfaceFaces: a cell of interface face " +
+                        std::to_string(iface) + " has no facet with the face's vertices");
 
         // Get DOFs for both cells (rows/cols may differ)
         minus_row_dofs = getCellDofsCached(mesh, cell_minus, row_dof_map_, row_dof_offset_);

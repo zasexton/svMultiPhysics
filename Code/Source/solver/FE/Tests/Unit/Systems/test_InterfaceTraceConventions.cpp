@@ -22,7 +22,8 @@
  * face mass of a continuous first-order field, on a tetrahedral interface
  * face that the mesh and the reference element number differently (faces 2
  * and 3 of Tetra4) and on a quadrilateral face that the two sides' facets
- * run in opposite directions, as an interior and as an interface face.
+ * run in opposite directions, as an interior and as an interface face; and
+ * on an interface face whose stored face id setup renumbers.
  */
 
 #include <gtest/gtest.h>
@@ -32,6 +33,7 @@
 #include "Forms/InterfaceConditions.h"
 #include "Forms/StandardBCs.h"
 #include "Forms/Vocabulary.h"
+#include "Mesh/Core/InterfaceMesh.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"
@@ -463,5 +465,97 @@ TEST(InterfaceFaceGeometry, TwoSidedTermsOnAQuadrilateralFaceGiveTheExactFaceMas
         }
     }
 }
+
+TEST(InterfaceFaceGeometry, TwoSidedInterfaceFacesSurviveTheFacesSetupStores)
+{
+    // The two tetrahedra of the first test, the mesh storing its boundary
+    // faces and the shared face only, the shared face last.  The interior
+    // face terms make setup store every face, which renumbers them after the
+    // InterfaceMesh recorded the shared face's id; the two-sided assembly
+    // must find each cell's facet by the face's vertices.
+    using forms::FormExpr;
+    const std::vector<svmp::real_t> X = {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1};
+    const std::vector<svmp::index_t> conn = {0, 1, 2, 3, 1, 4, 2, 3};
+    const Real area = std::sqrt(Real(3.0)) / Real(2.0);
+    const std::set<svmp::index_t> face = {1, 2, 3};
+    for (const auto& [name, terms] :
+         sidedFaceTerms([](const FormExpr& e) { return e.dI(kInterfaceMarker); })) {
+        SCOPED_TRACE(name);
+        svmp::CellShape tet{};
+        tet.family = svmp::CellFamily::Tetra;
+        tet.num_corners = 4;
+        tet.order = 1;
+        auto base = std::make_shared<svmp::MeshBase>();
+        base->build_from_arrays(/*spatial_dim=*/3, X, {0, 4, 8}, conn, {tet, tet});
+        svmp::CellShape tri{};
+        tri.family = svmp::CellFamily::Triangle;
+        tri.num_corners = 3;
+        tri.order = 1;
+        std::vector<svmp::index_t> face_conn = {0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 4, 1, 4, 3, 2, 3, 4, 1, 2, 3};
+        std::vector<std::array<svmp::index_t, 2>> face_cells = {
+            {0, svmp::INVALID_INDEX}, {0, svmp::INVALID_INDEX}, {0, svmp::INVALID_INDEX}, {1, svmp::INVALID_INDEX},
+            {1, svmp::INVALID_INDEX}, {1, svmp::INVALID_INDEX}, {0, 1}};
+        std::vector<svmp::offset_t> face_offsets;
+        for (std::size_t f = 0; f <= face_cells.size(); ++f) {
+            face_offsets.push_back(static_cast<svmp::offset_t>(3 * f));
+        }
+        base->set_faces_from_arrays(std::vector<svmp::CellShape>(face_cells.size(), tri), std::move(face_offsets),
+                                    std::move(face_conn), std::move(face_cells),
+                                    svmp::MeshCodim1StorageMode::BoundaryOnly);
+        base->add_to_set(svmp::EntityKind::Face, "shared", 6);
+        auto mesh = svmp::create_mesh(std::move(base));
+
+        auto space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+        FESystem sys(mesh);
+        sys.setInterfaceMeshFromFaceSet(kInterfaceMarker, "shared", /*compute_orientation=*/false);
+        const auto recorded_face = sys.interfaceMesh(kInterfaceMarker).volume_face(0);
+        const FieldId u_id = sys.addField(FieldSpec{.name = "u", .space = space});
+        sys.addOperator("op");
+        const auto u = forms::StateField(u_id, *space, "u");
+        const auto v = forms::TestField(u_id, *space, "v");
+        FormInstallOptions options;
+        options.compiler_options.jit.enable = false;
+        (void)installFormulation(sys, "op", {u_id},
+                                 (FormExpr::constant(0.0) * u * v).dx() + terms(u, v) +
+                                     (FormExpr::constant(0.0) * forms::jump(u) * forms::jump(v)).dS(),
+                                 options);
+        sys.setup();
+
+        // Setup stored every face, and the recorded id is now another face.
+        const auto& mbase = mesh->local_mesh();
+        ASSERT_EQ(mbase.n_faces(), 7u);
+        const auto [recorded_ptr, recorded_count] =
+            mbase.face_vertices_span(static_cast<svmp::index_t>(recorded_face));
+        std::set<svmp::index_t> recorded(recorded_ptr, recorded_ptr + recorded_count);
+        EXPECT_NE(recorded, face);
+
+        const auto n_dofs = sys.dofHandler().getNumDofs();
+        std::vector<Real> zero(static_cast<std::size_t>(n_dofs), 0.0);
+        SystemStateView state;
+        state.u = zero;
+        AssemblyRequest request;
+        request.op = "op";
+        request.want_matrix = true;
+        assembly::DenseMatrixView A(n_dofs);
+        ASSERT_TRUE(sys.assemble(request, state, &A, nullptr).success);
+        std::map<GlobalIndex, svmp::index_t> vertex_of_dof;
+        for (GlobalIndex cell = 0; cell < 2; ++cell) {
+            const auto dofs = sys.fieldDofHandler(u_id).getCellDofs(cell);
+            for (std::size_t k = 0; k < dofs.size(); ++k) {
+                vertex_of_dof[sys.fieldDofOffset(u_id) + dofs[k]] = conn[static_cast<std::size_t>(cell) * 4u + k];
+            }
+        }
+        for (const auto& [i, a] : vertex_of_dof) {
+            for (const auto& [j, b] : vertex_of_dof) {
+                const bool on_face = face.contains(a) && face.contains(b);
+                const Real expected = (name == "jump-jump" || !on_face)
+                                          ? Real(0.0)
+                                          : area / Real(12.0) * (a == b ? Real(2.0) : Real(1.0));
+                EXPECT_NEAR(A.getMatrixEntry(i, j), expected, 1e-13) << "vertices " << a << ", " << b;
+            }
+        }
+    }
+}
+
 
 } // namespace svmp::FE::systems::test
