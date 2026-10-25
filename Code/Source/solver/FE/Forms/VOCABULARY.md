@@ -906,12 +906,11 @@ change the authoring surface:
 Status: `planned`. The phases of decision D54
 (`Documentation/free_surface_program_tracker.md`;
 `agent-status/refactor/forms-multipliers-design.md`) after the global
-multipliers of LM1a:
+multipliers of LM1a and LM1b:
 
 | Phase | Planned vocabulary |
 |-------|--------------------|
-| LM1b | `FieldBinding` scope checks for global and interface fields; `F.multiplierLowering(Auto \| InMatrix \| Bordered)`; a multiplier's anchoring evidence in the gauge registry, and global fields left out of the gauge candidates; the over-constraint check; the mean-zero multiplier case G2 |
-| LM1 (later) | Several scalars per global field (`GlobalSpace(n)`, n > 1); distributed sparsity graphs of global rows for the distributed matrix backends |
+| LM1 (later) | Several scalars per global field (`GlobalSpace(n)`, n > 1); the anchoring evidence of vector fields (componentwise constants); distributed sparsity graphs of global rows for the distributed matrix backends (PETSc, Trilinos) |
 | LM2 | The bordered lowering of global multipliers for FSILS (`BorderedCouplingData`, the Newton Schur recovery); gauge-type multipliers refused there |
 | LM3 | `plan.restrictSupport(fields, domain)` (`SupportRestrictionConstraint`) and `bc::LagrangeDirichletBC`: boundary and interface multipliers as volume fields with restricted support |
 | LM4 | Interface-owned multipliers (`FieldScope::InterfaceFace`) in single-sided interface forms |
