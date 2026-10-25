@@ -10,6 +10,7 @@
 #include "Assembly/TimeIntegrationContext.h"
 #include "Core/FEException.h"
 #include "Core/Logger.h"
+#include "Core/LogRecord.h"
 #include "Forms/BoundaryFunctional.h"
 #include "Forms/FormExpr.h"
 #include "Forms/Vocabulary.h"
@@ -1448,82 +1449,47 @@ void MeshNormalConstraintStageMeasurements::commitPendingFittedALENormalOperator
              ++index) {
             const auto& record =
                 fitted_ale_normal_measurement_history_[index];
-            std::ostringstream message;
-            message << std::setprecision(17)
-                    << "FESystem: accepted fitted-ALE normal measurement"
-                    << " semantics=operator_stage"
-                    << " raw_moments_not_work_or_dissipation=true"
-                    << " scheme='" << record.stage.scheme_name << "'"
-                    << " accepted_step=" << accepted_step
-                    << " attempt="
-                    << record.stage.prospective_attempt
-                    << " state_time=" << record.stage.state_time
-                    << " rate_time=" << record.stage.rate_time
-                    << " mesh_displacement_field="
-                    << record.raw.key.mesh_displacement_field
-                    << " boundary_marker="
-                    << record.raw.key.boundary_marker
-                    << " A=" << record.raw.A
-                    << " Wn=" << record.raw.Wn
-                    << " Un=" << record.raw.Un
-                    << " gap_sq=" << record.raw.gap_sq
-                    << " mesh_velocity_sq="
-                    << record.raw.mesh_velocity_sq
-                    << " mesh_normal_sq="
-                    << record.raw.mesh_normal_sq
-                    << " mesh_tangential_sq="
-                    << record.raw.mesh_tangential_sq
-                    << " tangential_target_gap_applicable="
-                    << (record.raw.tangential_target_gap_sq.has_value()
-                            ? "true"
-                            : "false");
+            LogRecord line("MeshNormalConstraintStageMeasurements", "accepted fitted-ALE normal measurement");
+            line.diagnostic("fitted_ale_normal_measurement")
+                .text("semantics", "operator_stage")
+                .text("raw_moments_not_work_or_dissipation", "true")
+                .quoted("scheme", record.stage.scheme_name)
+                .value("accepted_step", accepted_step)
+                .value("attempt", record.stage.prospective_attempt)
+                .value("state_time", record.stage.state_time)
+                .value("rate_time", record.stage.rate_time)
+                .value("mesh_displacement_field", record.raw.key.mesh_displacement_field)
+                .value("boundary_marker", record.raw.key.boundary_marker)
+                .value("boundary_measure", record.raw.A)
+                .value("mesh_normal_velocity_integral", record.raw.Wn)
+                .value("fluid_normal_velocity_integral", record.raw.Un)
+                .value("gap_sq", record.raw.gap_sq)
+                .value("mesh_velocity_sq", record.raw.mesh_velocity_sq)
+                .value("mesh_normal_sq", record.raw.mesh_normal_sq)
+                .value("mesh_tangential_sq", record.raw.mesh_tangential_sq)
+                .value("tangential_target_gap_applicable", (record.raw.tangential_target_gap_sq.has_value() ? "true" : "false"));
             if (record.raw.tangential_target_gap_sq.has_value()) {
-                message << " tangential_target_gap_sq="
-                        << *record.raw.tangential_target_gap_sq
-                        << " tangential_target_gap_rms="
-                        << std::sqrt(
-                               *record.raw.tangential_target_gap_sq /
-                               record.raw.A);
+                line.value("tangential_target_gap_sq",
+                           *record.raw.tangential_target_gap_sq)
+                    .value("tangential_target_gap_rms",
+                           std::sqrt(*record.raw.tangential_target_gap_sq /
+                                     record.raw.A));
             }
-            message
-                    << " mesh_velocity_rms="
-                    << std::sqrt(
-                           record.raw.mesh_velocity_sq /
-                           record.raw.A)
-                    << " mesh_normal_rms="
-                    << std::sqrt(
-                           record.raw.mesh_normal_sq /
-                           record.raw.A)
-                    << " mesh_tangential_rms="
-                    << std::sqrt(
-                           record.raw.mesh_tangential_sq /
-                           record.raw.A)
-                    << " normal_gap_rms="
-                    << std::sqrt(record.raw.gap_sq / record.raw.A)
-                    << " projection_identity_residual="
-                    << record.raw.mesh_velocity_sq -
-                           record.raw.mesh_normal_sq -
-                           record.raw.mesh_tangential_sq
-                    << " stage_mesh_geometry_revision="
-                    << record.raw.stage_mesh_revision.geometry_revision
-                    << " stage_mesh_topology_revision="
-                    << record.raw.stage_mesh_revision.topology_revision
-                    << " stage_mesh_ownership_revision="
-                    << record.raw.stage_mesh_revision.ownership_revision
-                    << " stage_mesh_numbering_revision="
-                    << record.raw.stage_mesh_revision.numbering_revision
-                    << " stage_mesh_field_layout_revision="
-                    << record.raw.stage_mesh_revision.field_layout_revision
-                    << " stage_mesh_label_revision="
-                    << record.raw.stage_mesh_revision.label_revision
-                    << " stage_mesh_active_configuration_epoch="
-                    << record.raw.stage_mesh_revision
-                           .active_configuration_epoch
-                    << " stage_coordinate_configuration_key="
-                    << record.raw.stage_mesh_revision
-                           .coordinate_configuration_key
-                    << " geometry_provenance_scope=rank_local";
-            FE_LOG_INFO(message.str());
+            line.value("mesh_velocity_rms", std::sqrt(record.raw.mesh_velocity_sq / record.raw.A))
+                .value("mesh_normal_rms", std::sqrt(record.raw.mesh_normal_sq / record.raw.A))
+                .value("mesh_tangential_rms", std::sqrt(record.raw.mesh_tangential_sq / record.raw.A))
+                .value("normal_gap_rms", std::sqrt(record.raw.gap_sq / record.raw.A))
+                .value("projection_identity_residual", record.raw.mesh_velocity_sq - record.raw.mesh_normal_sq - record.raw.mesh_tangential_sq)
+                .value("stage_mesh_geometry_revision", record.raw.stage_mesh_revision.geometry_revision)
+                .value("stage_mesh_topology_revision", record.raw.stage_mesh_revision.topology_revision)
+                .value("stage_mesh_ownership_revision", record.raw.stage_mesh_revision.ownership_revision)
+                .value("stage_mesh_numbering_revision", record.raw.stage_mesh_revision.numbering_revision)
+                .value("stage_mesh_field_layout_revision", record.raw.stage_mesh_revision.field_layout_revision)
+                .value("stage_mesh_label_revision", record.raw.stage_mesh_revision.label_revision)
+                .value("stage_mesh_active_configuration_epoch", record.raw.stage_mesh_revision.active_configuration_epoch)
+                .value("stage_coordinate_configuration_key", record.raw.stage_mesh_revision.coordinate_configuration_key)
+                .text("geometry_provenance_scope", "rank_local");
+            logRecord(line);
         }
     } catch (...) {
         // Accepted semantic history is authoritative; diagnostics are best effort.

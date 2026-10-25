@@ -10,6 +10,7 @@
 #include "Constraints/AffineConstraints.h"
 #include "Core/FEException.h"
 #include "Core/Logger.h"
+#include "Core/LogRecord.h"
 #include "Dofs/EntityDofMap.h"
 #include "Elements/ReferenceElement.h"
 #include "Systems/FESystem.h"
@@ -426,15 +427,23 @@ void ContactPointVelocityConstraint::apply(const systems::FESystem& system,
     }
     const char* trace = std::getenv("SVMP_CONTACT_POINT_VELOCITY_TRACE");
     if (trace != nullptr && trace[0] != '\0' && trace[0] != '0') {
-        std::ostringstream oss;
-        oss << std::setprecision(10) << "ContactPointVelocityConstraint '" << law_.name
-            << "': diagnostic=contact_point_velocity points=" << samples_.size();
+        // One child line per sample point.
+        LogRecord line("ContactPointVelocityConstraint", "contact-point velocity");
+        line.diagnostic("contact_point_velocity")
+            .quoted("constraint", law_.name)
+            .value("points", samples_.size());
+        std::size_t point = 0u;
         for (const auto& sample : samples_) {
-            oss << " [x=" << sample.point[0] << " y=" << sample.point[1]
-                << " s=" << sample.fraction << " cos_theta=" << sample.cos_theta
-                << " target=" << sample.target << " slave=" << sample.slave_dof << "]";
+            line.child("contact_point_velocity_point", {})
+                .value("point", point++)
+                .value("x", sample.point[0])
+                .value("y", sample.point[1])
+                .value("s", sample.fraction)
+                .value("cos_theta", sample.cos_theta)
+                .value("target", sample.target)
+                .value("slave", sample.slave_dof);
         }
-        FE_LOG_INFO(oss.str());
+        logRecord(line);
     }
 }
 

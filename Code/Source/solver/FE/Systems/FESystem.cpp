@@ -33,6 +33,7 @@
 #include "Systems/SystemsExceptions.h"
 #include "Systems/FreeSurfaceFunctionalRounding.h"
  #include "Core/Logger.h"
+#include "Core/LogRecord.h"
 
 #include "Assembly/AssemblyKernel.h"
 #include "Assembly/CutIntegrationContext.h"
@@ -8599,18 +8600,20 @@ void FESystem::declareMeshNormalBoundaryConstraint(
     }
 
     invalidateSetup();
-    FE_LOG_INFO(
-        "FESystem: diagnostic=mesh_normal_boundary_constraint marker=" +
-        std::to_string(declaration.boundary_marker) + " owner='" +
-        declaration.owner_component + "' target=" +
-        (declaration.target_kind ==
-                 MeshNormalBoundaryTargetKind::PrescribedDisplacement
-             ? std::string("PrescribedDisplacement")
-             : declaration.target_kind ==
-                       MeshNormalBoundaryTargetKind::
-                           TimeScaledPrescribedVelocity
-                   ? std::string("TimeScaledPrescribedVelocity")
-                   : std::string("FluidNormalVelocity")));
+    logRecord(
+        LogRecord("MeshBoundaryKinematics", "declared normal mesh constraint")
+            .diagnostic("mesh_normal_boundary_constraint")
+            .value("marker", declaration.boundary_marker)
+            .quoted("owner", declaration.owner_component)
+            .text("target",
+                  declaration.target_kind ==
+                          MeshNormalBoundaryTargetKind::PrescribedDisplacement
+                      ? "PrescribedDisplacement"
+                      : declaration.target_kind ==
+                                MeshNormalBoundaryTargetKind::
+                                    TimeScaledPrescribedVelocity
+                            ? "TimeScaledPrescribedVelocity"
+                            : "FluidNormalVelocity"));
     mesh_normal_boundary_constraints_.push_back(std::move(declaration));
     std::sort(
         mesh_normal_boundary_constraints_.begin(),
@@ -9276,42 +9279,35 @@ void FESystem::emitAcceptedMeshNormalBoundaryConstraintHistory(
                        MeshNormalBoundaryTargetKind::FluidNormalVelocity) {
                 target_name = "FluidNormalVelocity";
             }
-            std::ostringstream message;
-            message << std::setprecision(17)
-                    << "FESystem: accepted normal mesh constraint history"
-                    << " diagnostic=mesh_normal_boundary_constraint_history"
-                    << " accepted_step=" << record.accepted_step
-                    << " accepted_time=" << record.accepted_time
-                    << " dt=" << record.dt
-                    << " state_revision=" << record.state_revision
-                    << " mesh_geometry_revision="
-                    << record.mesh_geometry_revision
-                    << " mesh_geometry_revision_scope=rank_local"
-                    << " mesh_displacement_field="
-                    << declaration.mesh_displacement_field
-                    << " boundary_marker=" << declaration.boundary_marker
-                    << " target=" << target_name
-                    << " owner='" << declaration.owner_component << "'"
-                    << " consumer_operator_tag='"
-                    << binding.operator_tag << "'"
-                    << " mesh_descriptor_source='"
-                    << binding.mesh_descriptor_source << "'"
-                    << " related_fluid_bound="
-                    << (binding.related_fluid.has_value() ? "true" : "false");
+            LogRecord line("MeshBoundaryKinematics", "accepted normal mesh constraint history");
+            line.diagnostic("mesh_normal_boundary_constraint_history")
+                .value("accepted_step", record.accepted_step)
+                .value("accepted_time", record.accepted_time)
+                .value("dt", record.dt)
+                .value("state_revision", record.state_revision)
+                .value("mesh_geometry_revision", record.mesh_geometry_revision)
+                .text("mesh_geometry_revision_scope", "rank_local")
+                .value("mesh_displacement_field", declaration.mesh_displacement_field)
+                .value("boundary_marker", declaration.boundary_marker)
+                .value("target", target_name)
+                .quoted("owner", declaration.owner_component)
+                .quoted("consumer_operator_tag", binding.operator_tag)
+                .quoted("mesh_descriptor_source", binding.mesh_descriptor_source)
+                .value("related_fluid_bound", (binding.related_fluid.has_value() ? "true" : "false"));
             if (binding.related_fluid.has_value()) {
-                message << " related_fluid_descriptor_source='"
-                        << binding.related_fluid->descriptor_source << "'"
-                        << " related_fluid_enforcement="
-                        << (binding.related_fluid->enforcement_kind ==
-                                    analysis::EnforcementKind::WeakNitsche
-                                ? "WeakNitsche"
-                                : binding.related_fluid->enforcement_kind ==
-                                          analysis::EnforcementKind::
-                                              WeakConsistent
-                                      ? "WeakConsistent"
-                                      : "WeakPenalty");
+                line.quoted("related_fluid_descriptor_source",
+                            binding.related_fluid->descriptor_source)
+                    .text("related_fluid_enforcement",
+                          binding.related_fluid->enforcement_kind ==
+                                  analysis::EnforcementKind::WeakNitsche
+                              ? "WeakNitsche"
+                              : binding.related_fluid->enforcement_kind ==
+                                        analysis::EnforcementKind::
+                                            WeakConsistent
+                                    ? "WeakConsistent"
+                                    : "WeakPenalty");
             }
-            FE_LOG_INFO(message.str());
+            logRecord(line);
         }
     } catch (...) {
         // Accepted history is semantic state; diagnostics are best effort.
@@ -9401,16 +9397,18 @@ void FESystem::declareMeshTangentialBoundaryPolicy(
     }
 
     invalidateSetup();
-    FE_LOG_INFO(
-        "FESystem: diagnostic=mesh_tangential_boundary_policy marker=" +
-        std::to_string(declaration.boundary_marker) + " owner='" +
-        declaration.owner_component + "' policy=" +
-        (declaration.policy == MeshTangentialBoundaryPolicy::Free
-             ? std::string("Free")
-             : declaration.policy ==
-                       MeshTangentialBoundaryPolicy::SmoothingOnly
-                   ? std::string("SmoothingOnly")
-                   : std::string("Prescribed")));
+    logRecord(
+        LogRecord("MeshBoundaryKinematics", "declared tangential mesh policy")
+            .diagnostic("mesh_tangential_boundary_policy")
+            .value("marker", declaration.boundary_marker)
+            .quoted("owner", declaration.owner_component)
+            .text("policy",
+                  declaration.policy == MeshTangentialBoundaryPolicy::Free
+                      ? "Free"
+                      : declaration.policy ==
+                                MeshTangentialBoundaryPolicy::SmoothingOnly
+                            ? "SmoothingOnly"
+                            : "Prescribed"));
     mesh_tangential_boundary_policies_.push_back(std::move(declaration));
     std::sort(
         mesh_tangential_boundary_policies_.begin(),
@@ -9788,29 +9786,22 @@ void FESystem::emitAcceptedMeshTangentialBoundaryPolicyHistory(
                 policy_name = "Prescribed";
                 break;
             }
-            std::ostringstream message;
-            message << std::setprecision(17)
-                    << "FESystem: accepted tangential mesh policy history"
-                    << " diagnostic=mesh_tangential_boundary_policy_history"
-                    << " accepted_step=" << record.accepted_step
-                    << " accepted_time=" << record.accepted_time
-                    << " dt=" << record.dt
-                    << " state_revision=" << record.state_revision
-                    << " mesh_geometry_revision="
-                    << record.mesh_geometry_revision
-                    << " mesh_geometry_revision_scope=rank_local"
-                    << " mesh_displacement_field="
-                    << record.mesh_displacement_field
-                    << " boundary_marker=" << record.boundary_marker
-                    << " policy=" << policy_name
-                    << " owner='" << record.owner_component << "'"
-                    << " consumer_bound="
-                    << (record.consumer_bound ? "true" : "false")
-                    << " consumer_operator_tag='"
-                    << record.consumer_operator_tag << "'"
-                    << " consumer_source='"
-                    << record.consumer_source << "'";
-            FE_LOG_INFO(message.str());
+            LogRecord line("MeshBoundaryKinematics", "accepted tangential mesh policy history");
+            line.diagnostic("mesh_tangential_boundary_policy_history")
+                .value("accepted_step", record.accepted_step)
+                .value("accepted_time", record.accepted_time)
+                .value("dt", record.dt)
+                .value("state_revision", record.state_revision)
+                .value("mesh_geometry_revision", record.mesh_geometry_revision)
+                .text("mesh_geometry_revision_scope", "rank_local")
+                .value("mesh_displacement_field", record.mesh_displacement_field)
+                .value("boundary_marker", record.boundary_marker)
+                .value("policy", policy_name)
+                .quoted("owner", record.owner_component)
+                .value("consumer_bound", (record.consumer_bound ? "true" : "false"))
+                .quoted("consumer_operator_tag", record.consumer_operator_tag)
+                .quoted("consumer_source", record.consumer_source);
+            logRecord(line);
         }
     } catch (...) {
         // Accepted history is semantic state; diagnostics are best effort.

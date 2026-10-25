@@ -2344,22 +2344,22 @@ void logActiveFluidWetFractionDisagreementWarnings(
     if (disagreeing_cut_cell_count == 0u) {
       continue;
     }
-    application::core::oopCout()
-        << "[svMultiPhysics::Application] WARNING ActiveFluid/WetVolumeFraction "
-        << "disagreement"
-        << " step=" << step
-        << " time=" << time
-        << " field='" << request.level_set_field_name << "'"
-        << " domain_id='" << request.domain_id << "'"
-        << " marker=" << *marker
-        << " active_side=" << activeSideName(request.active_side)
-        << " isovalue=" << request.isovalue
-        << " compared_cut_cell_count=" << compared_cut_cell_count
-        << " disagreeing_cut_cell_count=" << disagreeing_cut_cell_count
-        << " threshold=" << strong_disagreement_threshold
-        << " max_abs_difference=" << max_abs_difference
-        << " max_difference_cell=" << max_difference_cell
-        << std::endl;
+    svmp::FE::logRecord(
+        svmp::FE::LogRecord("ApplicationDriver", "ActiveFluid and WetVolumeFraction disagree", svmp::FE::LogLevel::WARNING)
+            .diagnostic("active_fluid_wet_fraction_disagreement")
+            .value("step", step)
+            .value("time", time)
+            .quoted("field", request.level_set_field_name)
+            .quoted("domain_id", request.domain_id)
+            .value("marker", *marker)
+            .value("active_side", activeSideName(request.active_side))
+            .value("isovalue", request.isovalue)
+            .value("compared_cut_cell_count", compared_cut_cell_count)
+            .value("disagreeing_cut_cell_count", disagreeing_cut_cell_count)
+            .value("threshold", strong_disagreement_threshold)
+            .value("max_abs_difference", max_abs_difference)
+            .value("max_difference_cell", max_difference_cell)
+            .rootOnly());
   }
 }
 
@@ -2388,51 +2388,47 @@ void logWetVolumeDiagnostics(
                             std::to_string(diagnostic.marker);
     const auto drift = application::core::computeWetVolumeDrift(
         key, diagnostic.wet_volume, initial_wet_volume_by_key);
-    application::core::oopCout()
-        << "[svMultiPhysics::Application] Wet volume diagnostic"
-        << " step=" << step
-        << " time=" << time
-        << " field='" << diagnostic.level_set_field_name << "'"
-        << " domain_id='" << diagnostic.domain_id << "'"
-        << " marker=" << diagnostic.marker
-        << " free_surface_snapshot_revision_key="
-        << diagnostic.free_surface_snapshot_revision_key
-        << " source_value_revision=" << diagnostic.source_value_revision
-        << " active_side=" << activeSideName(diagnostic.active_side)
-        << " isovalue=" << diagnostic.isovalue
-        << " wet_volume=" << diagnostic.wet_volume
-        << " wet_volume_frame=" << diagnostic.wet_volume_frame
-        << " reference_wet_volume=" << diagnostic.reference_wet_volume
-        << " physical_wet_volume=" << diagnostic.physical_wet_volume
-        << " initial_wet_volume=" << drift.initial_wet_volume
-        << " wet_volume_drift=" << drift.wet_volume_drift
-        << " relative_wet_volume_drift=" << drift.relative_wet_volume_drift
-        << " volume_rule_count=" << diagnostic.volume_rule_count
-        << " physical_volume_rule_count="
-        << diagnostic.physical_volume_rule_count
-        << " skipped_physical_volume_rule_count="
-        << diagnostic.skipped_physical_volume_rule_count
-        << " cut_cell_count=" << diagnostic.cut_cell_count
-        << " full_wet_cell_count=" << diagnostic.full_wet_cell_count
-        << " full_dry_cell_count=" << diagnostic.full_dry_cell_count
-        << std::endl;
+    svmp::FE::logRecord(
+        svmp::FE::LogRecord("ApplicationDriver", "wet volume")
+            .diagnostic("wet_volume")
+            .value("step", step)
+            .value("time", time)
+            .quoted("field", diagnostic.level_set_field_name)
+            .quoted("domain_id", diagnostic.domain_id)
+            .value("marker", diagnostic.marker)
+            .value("free_surface_snapshot_revision_key", diagnostic.free_surface_snapshot_revision_key)
+            .value("source_value_revision", diagnostic.source_value_revision)
+            .value("active_side", activeSideName(diagnostic.active_side))
+            .value("isovalue", diagnostic.isovalue)
+            .value("wet_volume", diagnostic.wet_volume)
+            .value("wet_volume_frame", diagnostic.wet_volume_frame)
+            .value("reference_wet_volume", diagnostic.reference_wet_volume)
+            .value("physical_wet_volume", diagnostic.physical_wet_volume)
+            .value("initial_wet_volume", drift.initial_wet_volume)
+            .value("wet_volume_drift", drift.wet_volume_drift)
+            .value("relative_wet_volume_drift", drift.relative_wet_volume_drift)
+            .value("volume_rule_count", diagnostic.volume_rule_count)
+            .value("physical_volume_rule_count", diagnostic.physical_volume_rule_count)
+            .value("skipped_physical_volume_rule_count", diagnostic.skipped_physical_volume_rule_count)
+            .value("cut_cell_count", diagnostic.cut_cell_count)
+            .value("full_wet_cell_count", diagnostic.full_wet_cell_count)
+            .value("full_dry_cell_count", diagnostic.full_dry_cell_count)
+            .rootOnly());
     if (drift_warning_threshold > 0.0 &&
         std::abs(static_cast<double>(drift.relative_wet_volume_drift)) >
             drift_warning_threshold) {
-      application::core::oopCout()
-          << "[svMultiPhysics::Application] WARNING wet-volume drift exceeds "
-          << "diagnostic threshold"
-          << " step=" << step
-          << " time=" << time
-          << " field='" << diagnostic.level_set_field_name << "'"
-          << " domain_id='" << diagnostic.domain_id << "'"
-          << " marker=" << diagnostic.marker
-          << " active_side=" << activeSideName(diagnostic.active_side)
-          << " relative_wet_volume_drift="
-          << drift.relative_wet_volume_drift
-          << " threshold=" << drift_warning_threshold
-          << " diagnostic=nonconservative_level_set_volume_drift"
-          << std::endl;
+      svmp::FE::logRecord(
+          svmp::FE::LogRecord("ApplicationDriver", "wet-volume drift exceeds the diagnostic threshold", svmp::FE::LogLevel::WARNING)
+              .diagnostic("nonconservative_level_set_volume_drift")
+              .value("step", step)
+              .value("time", time)
+              .quoted("field", diagnostic.level_set_field_name)
+              .quoted("domain_id", diagnostic.domain_id)
+              .value("marker", diagnostic.marker)
+              .value("active_side", activeSideName(diagnostic.active_side))
+              .value("relative_wet_volume_drift", drift.relative_wet_volume_drift)
+              .value("threshold", drift_warning_threshold)
+              .rootOnly());
     }
   }
 }

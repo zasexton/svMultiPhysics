@@ -29,6 +29,7 @@
 #include "Backends/FSILS/FsilsMatrix.h"
 #include "Core/KernelTrace.h"
 #include "Core/Logger.h"
+#include "Core/LogRecord.h"
 #include "Core/Alignment.h"
 #include "Core/AlignedAllocator.h"
 #include "Core/FEConfig.h"
@@ -1077,34 +1078,29 @@ void logCutVolumeAssemblyDiagnostics(const assembly::CutIntegrationContext& cut_
     const auto diagnostics =
         cut_context.generatedVolumeDiagnosticsForMarkerAndSide(marker, side);
 
-    std::ostringstream oss;
-    oss << "assembleOperator: cut-volume active-domain diagnostics"
-        << " diagnostic=cut_volume_assembly"
-        << " marker="
-        << marker
-        << " side=" << cutIntegrationSideName(side)
-        << " active_wet_volume=" << diagnostics.active_volume
-        << " cut_cell_active_wet_volume="
-        << diagnostics.cut_cell_active_volume
-        << " full_cell_active_wet_volume="
-        << diagnostics.full_cell_active_volume
-        << " rules=" << diagnostics.rule_count
-        << " cut_cell_rules=" << diagnostics.cut_cell_rules
-        << " full_cell_rules=" << diagnostics.full_cell_rules
-        << " quadrature_points=" << diagnostics.quadrature_points
-        << " null_rules=" << diagnostics.null_rules
-        << " zero_quadrature_rules=" << diagnostics.zero_quadrature_rules
-        << " nonfinite_measure_rules=" << diagnostics.nonfinite_measure_rules
-        << " negative_measure_rules=" << diagnostics.negative_measure_rules
-        << " nonfinite_volume_fraction_rules="
-        << diagnostics.nonfinite_volume_fraction_rules
-        << " min_rule_measure=" << diagnostics.min_rule_measure
-        << " max_rule_measure=" << diagnostics.max_rule_measure
-        << " min_volume_fraction=" << diagnostics.min_volume_fraction
-        << " max_volume_fraction=" << diagnostics.max_volume_fraction
-        << " min_exact_order=" << diagnostics.min_exact_order
-        << " max_exact_order=" << diagnostics.max_exact_order;
-    FE_LOG_INFO(oss.str());
+    svmp::FE::logRecord(
+        svmp::FE::LogRecord("CutVolumeAssembly", "cut-volume active-domain diagnostics")
+            .diagnostic("cut_volume_assembly")
+            .value("marker", marker)
+            .value("side", cutIntegrationSideName(side))
+            .value("active_wet_volume", diagnostics.active_volume)
+            .value("cut_cell_active_wet_volume", diagnostics.cut_cell_active_volume)
+            .value("full_cell_active_wet_volume", diagnostics.full_cell_active_volume)
+            .value("rules", diagnostics.rule_count)
+            .value("cut_cell_rules", diagnostics.cut_cell_rules)
+            .value("full_cell_rules", diagnostics.full_cell_rules)
+            .value("quadrature_points", diagnostics.quadrature_points)
+            .value("null_rules", diagnostics.null_rules)
+            .value("zero_quadrature_rules", diagnostics.zero_quadrature_rules)
+            .value("nonfinite_measure_rules", diagnostics.nonfinite_measure_rules)
+            .value("negative_measure_rules", diagnostics.negative_measure_rules)
+            .value("nonfinite_volume_fraction_rules", diagnostics.nonfinite_volume_fraction_rules)
+            .value("min_rule_measure", diagnostics.min_rule_measure)
+            .value("max_rule_measure", diagnostics.max_rule_measure)
+            .value("min_volume_fraction", diagnostics.min_volume_fraction)
+            .value("max_volume_fraction", diagnostics.max_volume_fraction)
+            .value("min_exact_order", diagnostics.min_exact_order)
+            .value("max_exact_order", diagnostics.max_exact_order));
 }
 
 #if FE_HAS_MPI
@@ -3330,14 +3326,14 @@ assembly::AssemblyResult assembleOperator(
                 std::fprintf(stderr,
                     "  ================================================\n");
                 const auto memory = readProcessMemorySnapshot();
-                std::fprintf(stderr,
-                    "[svMultiPhysics::FE] assembleOperator diagnostic=process_memory"
-                    " phase=assemble_operator rank=%d op='%s'"
-                    " process_vm_kb=%ld process_rss_kb=%ld\n",
-                    rank,
-                    request.op.c_str(),
-                    memory.vm_kb,
-                    memory.rss_kb);
+                // Rank 0 of the system's communicator only (this block).
+                logRecord(LogRecord("SystemAssembly", "process memory")
+                              .diagnostic("process_memory")
+                              .text("phase", "assemble_operator")
+                              .value("rank", rank)
+                              .quoted("op", request.op)
+                              .value("process_vm_kb", memory.vm_kb)
+                              .value("process_rss_kb", memory.rss_kb));
             }
         }
     }

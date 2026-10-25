@@ -13,6 +13,7 @@
 #include "Backends/Interfaces/GenericVector.h"
 #include "Basis/BasisCache.h"
 #include "Core/DeterministicParallel.h"
+#include "Core/LogRecord.h"
 #include "Core/RankLog.h"
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
@@ -2676,254 +2677,149 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         svmp::FE::level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature;
     const bool high_order_refreshed_frozen_tangent =
         high_order_geometry && refreshed_frozen_tangent;
-    svmp::FE::rank_log::oopDiagnosticsCout()
-        << "[svMultiPhysics::Application] Active-domain cut context"
-        << " diagnostic=cut_context_rebuild"
-        << " provenance=" << (provenance != nullptr ? provenance : "unknown")
-        << " solution_source="
-        << (solution_source != nullptr ? solution_source : "unknown")
-        << " marker="
-        << result.interface_marker << " field='" << request.level_set_field_name
-        << "' domain_id='" << request.domain_id
-        << "' active_side=" << activeSideName(request.active_side)
-        << " retained_volume_sides="
-        << retainedVolumeSidesName(request.volume_retention)
-        << " interface_contract=one_sided_embedded"
-        << " generated_interface_boundary_intersection_fragments="
-        << global_boundary_intersection_fragments
-        << " generated_interface_boundary_intersection_active_fragments="
-        << global_active_boundary_intersection_fragments
-        << " generated_interface_boundary_intersection_skipped_fragments="
-        << global_skipped_boundary_intersection_fragments
-        << " generated_interface_boundary_intersection_qpoints="
-        << global_boundary_intersection_qpoints
-        << " generated_interface_boundary_intersection_measure="
-        << global_boundary_intersection_measure
-        << " generated_interface_geometry="
-        << svmp::FE::level_set::generatedInterfaceGeometryModeName(
-               options.geometry_mode)
-        << " implicit_cut_quadrature_backend="
-        << svmp::FE::level_set::implicitCutQuadratureBackendName(
-               options.implicit_cut_quadrature_backend)
-        << " selected_implicit_cut_quadrature_backend_counts="
-        << formatImplicitCutBackendCounts(global_selected_backend_counts)
-        << " implicit_cut_backend_qualification_counts="
-        << formatImplicitCutBackendQualificationCounts(
-               global_backend_qualification_counts)
-        << " required_implicit_cut_backend_qualification="
-        << (options.require_production_qualified_implicit_cut_backend
-                ? "ProductionQualified"
-                : "none")
-        << " implicit_cut_backend_seconds=" << backend_timing.local
-        << " implicit_cut_backend_seconds_min=" << backend_timing.min
-        << " implicit_cut_backend_seconds_mean=" << backend_timing.mean
-        << " implicit_cut_backend_seconds_max=" << backend_timing.max
-        << " implicit_cut_backend_internal_seconds="
-        << result.backend_elapsed_seconds
-        << " implicit_cut_backend_internal_seconds_total="
-        << global_backend_elapsed_seconds
-        << " generated_cell_work_scope=summed_rank_local_including_ghost_cells"
-        << " generated_cell_cache_hits="
-        << global_generated_cell_cache_hits
-        << " generated_cell_cache_misses="
-        << global_generated_cell_cache_misses
-        << " generated_cell_cache_unchanged_dof_hits="
-        << global_generated_cell_cache_unchanged_dof_hits
-        << " generated_cell_refresh_candidates="
-        << global_generated_cell_refresh_candidates
-        << " generated_cell_directly_affected="
-        << global_generated_cell_directly_affected
-        << " generated_cell_affected_neighborhood="
-        << global_generated_cell_affected_neighborhood
-        << " generated_cell_affected_neighborhood_layers="
-        << result.affected_cell_neighborhood_layers
-        << " generated_domain_cache_hits="
-        << global_generated_domain_cache_hits
-        << " linear_full_cell_fast_path_cells="
-        << global_linear_full_cell_fast_path_cells
-        << " implicit_cut_fallback_policy="
-        << svmp::FE::level_set::implicitCutFallbackPolicyName(
-               options.implicit_cut_fallback_policy)
-        << " geometry_tangent_policy="
-        << svmp::FE::level_set::geometryTangentPolicyName(
-               options.geometry_tangent_policy)
-        << " geometry_tangent_warning="
-        << (high_order_refreshed_frozen_tangent
-                ? "quadrature_sensitivities_omitted"
-                : "none")
-        << " implicit_cut_root_tolerance="
-        << options.implicit_cut_root_tolerance
-        << " implicit_cut_root_coordinate_tolerance="
-        << options.implicit_cut_root_coordinate_tolerance
-        << " implicit_cut_root_max_iterations="
-        << options.implicit_cut_root_max_iterations
-        << " implicit_cut_max_subdivision_depth="
-        << options.implicit_cut_max_subdivision_depth
-        << " affected_cell_neighborhood_layers="
-        << options.affected_cell_neighborhood_layers
-        << " generated_cut_ghost_layers=" << kept_ghost_cut_layers
-        << " withheld_ghost_cut_fragments="
-        << global_withheld_ghost_cut_fragments
-        << " withheld_ghost_cut_regions="
-        << global_withheld_ghost_cut_regions
-        << " aligned_zero_interface_parent_side="
-        << cutIntegrationSideName(
-               options.aligned_zero_interface_parent_side)
-        << " quadrature_order=" << options.quadrature_order
-        << " interface_quadrature_order="
-        << options.interface_quadrature_order
-        << " volume_quadrature_order="
-        << options.volume_quadrature_order
-        << " achieved_interface_quadrature_order="
-        << result.achieved_interface_quadrature_order
-        << " achieved_volume_quadrature_order="
-        << result.achieved_volume_quadrature_order
-        << " implicit_cut_fallback_cells="
-        << global_implicit_cut_fallback_cells
-        << " backend_volume_quadrature_point_count="
-        << global_backend_volume_quadrature_points
-        << " backend_interface_quadrature_point_count="
-        << global_backend_interface_quadrature_points
-        << " backend_total_quadrature_point_count="
-        << (global_backend_volume_quadrature_points +
-            global_backend_interface_quadrature_points)
-        << " allow_corner_linearized_geometry="
-        << (request.allow_corner_linearized_geometry ? "true" : "false")
-        << " isovalue=" << request.isovalue
-        << " cut_context_revision=" << result.value_revision
-        << " cut_context_topology_key=" << topology_key
-        << " active_cut_request_policy_key=" << report.request_policy_key
-        << " quadrature_policy_key="
-        << domain_request.quadrature_policy_key
-        << " source_layout_revision="
-        << domain_request.source.layout_revision
-        << " source_value_revision="
-        << domain_request.source.value_revision
-        << " mesh_geometry_revision="
-        << domain_request.mesh_geometry_revision
-        << " mesh_topology_revision="
-        << domain_request.mesh_topology_revision
-        << " ownership_revision="
-        << domain_request.ownership_revision
-        << " cell_count=" << global_cell_count
-        << " corner_linearized_cells="
-        << global_corner_linearized_cells
-        << " active_side_volume=" << global_active_volume
-        << " active_side_volume_frame=reference"
-        << " active_side_volume_local=" << active_volume
-        << " active_side_physical_volume="
-        << global_active_physical_volume
-        << " snapshot_active_side_physical_volume="
-        << global_snapshot_active_physical_volume
-        << " active_constant_one_measure_error="
-        << active_constant_one_error
-        << " constant_one_measure_tolerance="
-        << constant_one_tolerance
-        << " active_side_physical_rule_count="
-        << global_active_physical_volume_rules
-        << " active_side_skipped_physical_rule_count="
-        << global_active_skipped_physical_volume_rules
-        << " active_side_available_cut_volume_rule_count="
-        << global_active_available_cut_volume_rules
-        << " active_side_retained_cut_volume_rule_count="
-        << global_active_retained_cut_volume_rules
-        << " active_side_cut_volume_consumer_count="
-        << active_cut_volume_consumer_count
-        << " inactive_side_physical_volume="
-        << global_inactive_physical_volume
-        << " snapshot_inactive_side_physical_volume="
-        << global_snapshot_inactive_physical_volume
-        << " inactive_constant_one_measure_error="
-        << inactive_constant_one_error
-        << " inactive_side_physical_rule_count="
-        << global_inactive_physical_volume_rules
-        << " inactive_side_skipped_physical_rule_count="
-        << global_inactive_skipped_physical_volume_rules
-        << " inactive_side_available_cut_volume_rule_count="
-        << global_inactive_available_cut_volume_rules
-        << " inactive_side_retained_cut_volume_rule_count="
-        << global_inactive_retained_cut_volume_rules
-        << " inactive_side_cut_volume_consumer_count="
-        << inactive_cut_volume_consumer_count
-        << " active_side_raw_volume=" << global_raw_active_volume
-        << " active_side_raw_volume_local=" << raw_active_volume
-        << " interface_fragments=" << global_interface_fragments
-        << " active_interface_fragments=" << global_active_interface_fragments
-        << " interface_rule_count=" << global_active_interface_fragments
-        << " interface_quadrature_point_count="
-        << global_interface_quadrature_points
-        << " domain_interface_quadrature_point_count="
-        << global_interface_quadrature_points
-        << " domain_volume_quadrature_point_count="
-        << global_domain_volume_quadrature_points
-        << " domain_total_quadrature_point_count="
-        << global_domain_total_quadrature_points
-        << " active_volume_regions="
-        << global_active_volume_regions
-        << " active_volume_rule_count="
-        << global_active_volume_regions
-        << " active_raw_volume_regions="
-        << global_raw_active_volume_regions
-        << " active_pruned_volume_regions="
-        << global_pruned_volume_regions
-        << " active_pruned_volume=" << global_pruned_volume
-        << " generated_volume_prune_min_fraction="
-        << svmp::FE::assembly::CutIntegrationContext::
-               minGeneratedCutVolumeFraction()
-        << " generated_pruned_volume_scope=summed_rank_local_including_ghost_cells"
-        << " generated_pruned_volume_rules="
-        << global_generated_pruned_volume_rules
-        << " generated_pruned_volume=" << global_generated_pruned_volume
-        << " active_wet_cells=" << global_active_wet_cells
-        << " active_cut_cells=" << global_cut_cells
-        << " active_full_wet_cells=" << global_full_wet_cells
-        << " active_full_dry_cells=" << global_full_dry_cells
-        << " active_quadrature_points="
-        << global_active_quadrature_points
-        << " active_volume_quadrature_point_count="
-        << global_active_quadrature_points
-        << " active_empty_quadrature_regions="
-        << global_empty_quadrature_regions
-        << " active_nonfinite_measure_regions="
-        << global_nonfinite_measure_regions
-        << " active_negative_measure_regions="
-        << global_negative_measure_regions
-        << " active_min_volume_fraction="
-        << global_min_volume_fraction
-        << " active_max_volume_fraction="
-        << global_max_volume_fraction
-        << " cut_adjacent_scope=summed_rank_local_including_ghost_cells"
-        << " cut_adjacent_facets=" << global_cut_adjacent_facets
-        << " cut_adjacent_metadata="
-        << global_cut_adjacent_metadata
-        << " cut_adjacent_zero_scale="
-        << global_zero_scale_count
-        << " cut_adjacent_nonfinite_scale="
-        << global_nonfinite_scale_count
-        << " cut_adjacent_capped_scale="
-        << global_capped_scale_count
-        << " cut_adjacent_min_scale="
-        << global_min_scale
-        << " cut_adjacent_max_scale="
-        << global_max_scale
-        << " cut_adjacent_mean_scale="
-        << global_mean_scale
-        << " process_vm_kb=" << memory.vm_kb
-        << " process_rss_kb=" << memory.rss_kb
-        << " basis_cache_entries="
-        << svmp::FE::basis::BasisCache::instance().size()
-        << " negative_volume=" << global_negative_volume
-        << " negative_reference_volume=" << global_negative_volume
-        << " negative_physical_volume=" << global_negative_physical_volume
-        << " negative_skipped_physical_rule_count="
-        << global_negative_skipped_physical_volume_rules
-        << " negative_volume_local=" << summary.negative_volume_measure
-        << " positive_volume=" << global_positive_volume
-        << " positive_reference_volume=" << global_positive_volume
-        << " positive_physical_volume=" << global_positive_physical_volume
-        << " positive_skipped_physical_rule_count="
-        << global_positive_skipped_physical_volume_rules
-        << " positive_volume_local=" << summary.positive_volume_measure << std::endl;
+    svmp::FE::logRecord(
+        svmp::FE::LogRecord("LevelSetGeometryService", "active-domain cut context")
+            .diagnostic("cut_context_rebuild")
+            .value("provenance", (provenance != nullptr ? provenance : "unknown"))
+            .value("solution_source", (solution_source != nullptr ? solution_source : "unknown"))
+            .value("marker", result.interface_marker)
+            .quoted("field", request.level_set_field_name)
+            .quoted("domain_id", request.domain_id)
+            .value("active_side", activeSideName(request.active_side))
+            .value("retained_volume_sides", retainedVolumeSidesName(request.volume_retention))
+            .text("interface_contract", "one_sided_embedded")
+            .value("generated_interface_boundary_intersection_fragments", global_boundary_intersection_fragments)
+            .value("generated_interface_boundary_intersection_active_fragments", global_active_boundary_intersection_fragments)
+            .value("generated_interface_boundary_intersection_skipped_fragments", global_skipped_boundary_intersection_fragments)
+            .value("generated_interface_boundary_intersection_qpoints", global_boundary_intersection_qpoints)
+            .value("generated_interface_boundary_intersection_measure", global_boundary_intersection_measure)
+            .value("generated_interface_geometry", svmp::FE::level_set::generatedInterfaceGeometryModeName(options.geometry_mode))
+            .value("implicit_cut_quadrature_backend", svmp::FE::level_set::implicitCutQuadratureBackendName(options.implicit_cut_quadrature_backend))
+            .value("selected_implicit_cut_quadrature_backend_counts", formatImplicitCutBackendCounts(global_selected_backend_counts))
+            .value("implicit_cut_backend_qualification_counts", formatImplicitCutBackendQualificationCounts(global_backend_qualification_counts))
+            .value("required_implicit_cut_backend_qualification", (options.require_production_qualified_implicit_cut_backend ? "ProductionQualified" : "none"))
+            .value("implicit_cut_backend_seconds", backend_timing.local)
+            .value("implicit_cut_backend_seconds_min", backend_timing.min)
+            .value("implicit_cut_backend_seconds_mean", backend_timing.mean)
+            .value("implicit_cut_backend_seconds_max", backend_timing.max)
+            .value("implicit_cut_backend_internal_seconds", result.backend_elapsed_seconds)
+            .value("implicit_cut_backend_internal_seconds_total", global_backend_elapsed_seconds)
+            .text("generated_cell_work_scope", "summed_rank_local_including_ghost_cells")
+            .value("generated_cell_cache_hits", global_generated_cell_cache_hits)
+            .value("generated_cell_cache_misses", global_generated_cell_cache_misses)
+            .value("generated_cell_cache_unchanged_dof_hits", global_generated_cell_cache_unchanged_dof_hits)
+            .value("generated_cell_refresh_candidates", global_generated_cell_refresh_candidates)
+            .value("generated_cell_directly_affected", global_generated_cell_directly_affected)
+            .value("generated_cell_affected_neighborhood", global_generated_cell_affected_neighborhood)
+            .value("generated_cell_affected_neighborhood_layers", result.affected_cell_neighborhood_layers)
+            .value("generated_domain_cache_hits", global_generated_domain_cache_hits)
+            .value("linear_full_cell_fast_path_cells", global_linear_full_cell_fast_path_cells)
+            .value("implicit_cut_fallback_policy", svmp::FE::level_set::implicitCutFallbackPolicyName(options.implicit_cut_fallback_policy))
+            .value("geometry_tangent_policy", svmp::FE::level_set::geometryTangentPolicyName(options.geometry_tangent_policy))
+            .value("geometry_tangent_warning", (high_order_refreshed_frozen_tangent ? "quadrature_sensitivities_omitted" : "none"))
+            .value("implicit_cut_root_tolerance", options.implicit_cut_root_tolerance)
+            .value("implicit_cut_root_coordinate_tolerance", options.implicit_cut_root_coordinate_tolerance)
+            .value("implicit_cut_root_max_iterations", options.implicit_cut_root_max_iterations)
+            .value("implicit_cut_max_subdivision_depth", options.implicit_cut_max_subdivision_depth)
+            .value("affected_cell_neighborhood_layers", options.affected_cell_neighborhood_layers)
+            .value("generated_cut_ghost_layers", kept_ghost_cut_layers)
+            .value("withheld_ghost_cut_fragments", global_withheld_ghost_cut_fragments)
+            .value("withheld_ghost_cut_regions", global_withheld_ghost_cut_regions)
+            .value("aligned_zero_interface_parent_side", cutIntegrationSideName(options.aligned_zero_interface_parent_side))
+            .value("quadrature_order", options.quadrature_order)
+            .value("interface_quadrature_order", options.interface_quadrature_order)
+            .value("volume_quadrature_order", options.volume_quadrature_order)
+            .value("achieved_interface_quadrature_order", result.achieved_interface_quadrature_order)
+            .value("achieved_volume_quadrature_order", result.achieved_volume_quadrature_order)
+            .value("implicit_cut_fallback_cells", global_implicit_cut_fallback_cells)
+            .value("backend_volume_quadrature_point_count", global_backend_volume_quadrature_points)
+            .value("backend_interface_quadrature_point_count", global_backend_interface_quadrature_points)
+            .value("backend_total_quadrature_point_count", (global_backend_volume_quadrature_points + global_backend_interface_quadrature_points))
+            .value("allow_corner_linearized_geometry", (request.allow_corner_linearized_geometry ? "true" : "false"))
+            .value("isovalue", request.isovalue)
+            .value("cut_context_revision", result.value_revision)
+            .value("cut_context_topology_key", topology_key)
+            .value("active_cut_request_policy_key", report.request_policy_key)
+            .value("quadrature_policy_key", domain_request.quadrature_policy_key)
+            .value("source_layout_revision", domain_request.source.layout_revision)
+            .value("source_value_revision", domain_request.source.value_revision)
+            .value("mesh_geometry_revision", domain_request.mesh_geometry_revision)
+            .value("mesh_topology_revision", domain_request.mesh_topology_revision)
+            .value("ownership_revision", domain_request.ownership_revision)
+            .value("cell_count", global_cell_count)
+            .value("corner_linearized_cells", global_corner_linearized_cells)
+            .value("active_side_volume", global_active_volume)
+            .text("active_side_volume_frame", "reference")
+            .value("active_side_volume_local", active_volume)
+            .value("active_side_physical_volume", global_active_physical_volume)
+            .value("snapshot_active_side_physical_volume", global_snapshot_active_physical_volume)
+            .value("active_constant_one_measure_error", active_constant_one_error)
+            .value("constant_one_measure_tolerance", constant_one_tolerance)
+            .value("active_side_physical_rule_count", global_active_physical_volume_rules)
+            .value("active_side_skipped_physical_rule_count", global_active_skipped_physical_volume_rules)
+            .value("active_side_available_cut_volume_rule_count", global_active_available_cut_volume_rules)
+            .value("active_side_retained_cut_volume_rule_count", global_active_retained_cut_volume_rules)
+            .value("active_side_cut_volume_consumer_count", active_cut_volume_consumer_count)
+            .value("inactive_side_physical_volume", global_inactive_physical_volume)
+            .value("snapshot_inactive_side_physical_volume", global_snapshot_inactive_physical_volume)
+            .value("inactive_constant_one_measure_error", inactive_constant_one_error)
+            .value("inactive_side_physical_rule_count", global_inactive_physical_volume_rules)
+            .value("inactive_side_skipped_physical_rule_count", global_inactive_skipped_physical_volume_rules)
+            .value("inactive_side_available_cut_volume_rule_count", global_inactive_available_cut_volume_rules)
+            .value("inactive_side_retained_cut_volume_rule_count", global_inactive_retained_cut_volume_rules)
+            .value("inactive_side_cut_volume_consumer_count", inactive_cut_volume_consumer_count)
+            .value("active_side_raw_volume", global_raw_active_volume)
+            .value("active_side_raw_volume_local", raw_active_volume)
+            .value("interface_fragments", global_interface_fragments)
+            .value("active_interface_fragments", global_active_interface_fragments)
+            .value("interface_rule_count", global_active_interface_fragments)
+            .value("interface_quadrature_point_count", global_interface_quadrature_points)
+            .value("domain_interface_quadrature_point_count", global_interface_quadrature_points)
+            .value("domain_volume_quadrature_point_count", global_domain_volume_quadrature_points)
+            .value("domain_total_quadrature_point_count", global_domain_total_quadrature_points)
+            .value("active_volume_regions", global_active_volume_regions)
+            .value("active_volume_rule_count", global_active_volume_regions)
+            .value("active_raw_volume_regions", global_raw_active_volume_regions)
+            .value("active_pruned_volume_regions", global_pruned_volume_regions)
+            .value("active_pruned_volume", global_pruned_volume)
+            .value("generated_volume_prune_min_fraction", svmp::FE::assembly::CutIntegrationContext:: minGeneratedCutVolumeFraction())
+            .text("generated_pruned_volume_scope", "summed_rank_local_including_ghost_cells")
+            .value("generated_pruned_volume_rules", global_generated_pruned_volume_rules)
+            .value("generated_pruned_volume", global_generated_pruned_volume)
+            .value("active_wet_cells", global_active_wet_cells)
+            .value("active_cut_cells", global_cut_cells)
+            .value("active_full_wet_cells", global_full_wet_cells)
+            .value("active_full_dry_cells", global_full_dry_cells)
+            .value("active_quadrature_points", global_active_quadrature_points)
+            .value("active_volume_quadrature_point_count", global_active_quadrature_points)
+            .value("active_empty_quadrature_regions", global_empty_quadrature_regions)
+            .value("active_nonfinite_measure_regions", global_nonfinite_measure_regions)
+            .value("active_negative_measure_regions", global_negative_measure_regions)
+            .value("active_min_volume_fraction", global_min_volume_fraction)
+            .value("active_max_volume_fraction", global_max_volume_fraction)
+            .text("cut_adjacent_scope", "summed_rank_local_including_ghost_cells")
+            .value("cut_adjacent_facets", global_cut_adjacent_facets)
+            .value("cut_adjacent_metadata", global_cut_adjacent_metadata)
+            .value("cut_adjacent_zero_scale", global_zero_scale_count)
+            .value("cut_adjacent_nonfinite_scale", global_nonfinite_scale_count)
+            .value("cut_adjacent_capped_scale", global_capped_scale_count)
+            .value("cut_adjacent_min_scale", global_min_scale)
+            .value("cut_adjacent_max_scale", global_max_scale)
+            .value("cut_adjacent_mean_scale", global_mean_scale)
+            .value("process_vm_kb", memory.vm_kb)
+            .value("process_rss_kb", memory.rss_kb)
+            .value("basis_cache_entries", svmp::FE::basis::BasisCache::instance().size())
+            .value("negative_volume", global_negative_volume)
+            .value("negative_reference_volume", global_negative_volume)
+            .value("negative_physical_volume", global_negative_physical_volume)
+            .value("negative_skipped_physical_rule_count", global_negative_skipped_physical_volume_rules)
+            .value("negative_volume_local", summary.negative_volume_measure)
+            .value("positive_volume", global_positive_volume)
+            .value("positive_reference_volume", global_positive_volume)
+            .value("positive_physical_volume", global_positive_physical_volume)
+            .value("positive_skipped_physical_rule_count", global_positive_skipped_physical_volume_rules)
+            .value("positive_volume_local", summary.positive_volume_measure)
+            .rootOnly());
   }
 
   report.topology_key =
@@ -2944,17 +2840,15 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
   logCutGeometryMemory("after_install");
   sim.fe_system->rebuildConstraintState();
   logCutGeometryMemory("after_constraint_rebuild");
-  svmp::FE::rank_log::oopDiagnosticsCout()
-      << "[svMultiPhysics::Application] Active pressure support constraint refresh"
-      << " diagnostic=active_pressure_constraint_refresh"
-      << " provenance=" << (provenance != nullptr ? provenance : "unknown")
-      << " solution_source="
-      << (solution_source != nullptr ? solution_source : "unknown")
-      << " synchronized_level_set_fields="
-      << synchronized_level_set_fields
-      << " support_source=retained_cut_context"
-      << " constraints=" << sim.fe_system->constraints().numConstraints()
-      << std::endl;
+  svmp::FE::logRecord(
+      svmp::FE::LogRecord("LevelSetGeometryService", "active pressure support constraint refresh")
+          .diagnostic("active_pressure_constraint_refresh")
+          .value("provenance", (provenance != nullptr ? provenance : "unknown"))
+          .value("solution_source", (solution_source != nullptr ? solution_source : "unknown"))
+          .value("synchronized_level_set_fields", synchronized_level_set_fields)
+          .text("support_source", "retained_cut_context")
+          .value("constraints", sim.fe_system->constraints().numConstraints())
+          .rootOnly());
   return report;
 }
 
@@ -3111,36 +3005,29 @@ void logActiveCutContextRefreshSkipped(
     const char* solution_source,
     const char* skip_reason)
 {
-  svmp::FE::rank_log::oopDiagnosticsCout()
-      << "[svMultiPhysics::Application] Cut-context refresh skipped"
-      << " diagnostic=cut_context_refresh_skip"
-      << " provenance=" << (provenance != nullptr ? provenance : "unknown")
-      << " solution_source="
-      << (solution_source != nullptr ? solution_source : "unknown")
-      << " skip_reason=" << (skip_reason != nullptr ? skip_reason : "unknown")
-      << " active_cut_request_policy_key=" << signature.request_policy_key
-      << " signature_kind="
-      << activeCutRefreshSignatureKindName(signature.solution_signature_kind)
-      << " solution_hash=" << signature.solution_hash
-      << " solution_size=" << signature.solution_size
-      << " mesh_geometry_revision=" << signature.mesh_geometry_revision
-      << " mesh_topology_revision=" << signature.mesh_topology_revision
-      << " ownership_revision=" << signature.mesh_ownership_revision
-      << " mesh_numbering_revision=" << signature.mesh_numbering_revision
-      << " mesh_field_layout_revision="
-      << signature.mesh_field_layout_revision
-      << " mesh_label_revision=" << signature.mesh_label_revision
-      << " mesh_active_configuration_epoch="
-      << signature.mesh_active_configuration_epoch
-      << " mesh_coordinate_configuration_key="
-      << signature.mesh_coordinate_configuration_key
-      << " system_space_revision=" << signature.system_space_revision
-      << " system_dof_layout_revision="
-      << signature.system_dof_layout_revision
-      << " system_block_layout_revision="
-      << signature.system_block_layout_revision
-      << " level_set_dof_layout_key="
-      << signature.level_set_dof_layout_key << std::endl;
+  svmp::FE::logRecord(
+      svmp::FE::LogRecord("LevelSetGeometryService", "cut-context refresh skipped")
+          .diagnostic("cut_context_refresh_skip")
+          .value("provenance", (provenance != nullptr ? provenance : "unknown"))
+          .value("solution_source", (solution_source != nullptr ? solution_source : "unknown"))
+          .value("skip_reason", (skip_reason != nullptr ? skip_reason : "unknown"))
+          .value("active_cut_request_policy_key", signature.request_policy_key)
+          .value("signature_kind", activeCutRefreshSignatureKindName(signature.solution_signature_kind))
+          .value("solution_hash", signature.solution_hash)
+          .value("solution_size", signature.solution_size)
+          .value("mesh_geometry_revision", signature.mesh_geometry_revision)
+          .value("mesh_topology_revision", signature.mesh_topology_revision)
+          .value("ownership_revision", signature.mesh_ownership_revision)
+          .value("mesh_numbering_revision", signature.mesh_numbering_revision)
+          .value("mesh_field_layout_revision", signature.mesh_field_layout_revision)
+          .value("mesh_label_revision", signature.mesh_label_revision)
+          .value("mesh_active_configuration_epoch", signature.mesh_active_configuration_epoch)
+          .value("mesh_coordinate_configuration_key", signature.mesh_coordinate_configuration_key)
+          .value("system_space_revision", signature.system_space_revision)
+          .value("system_dof_layout_revision", signature.system_dof_layout_revision)
+          .value("system_block_layout_revision", signature.system_block_layout_revision)
+          .value("level_set_dof_layout_key", signature.level_set_dof_layout_key)
+          .rootOnly());
 }
 
 // Diagnostic only: why a cached refresh could not keep the installed context
@@ -3501,28 +3388,25 @@ reinstallActiveCutContextCandidate(
       "active_cut_reinstall_source_sync");
   sim.fe_system->setCutIntegrationContext(reinstalled.context);
   sim.fe_system->rebuildConstraintState();
-  svmp::FE::rank_log::oopDiagnosticsCout()
-      << "[svMultiPhysics::Application] Active pressure support constraint refresh"
-      << " diagnostic=active_pressure_constraint_refresh"
-      << " provenance=" << (provenance != nullptr ? provenance : "unknown")
-      << " solution_source="
-      << (solution_source != nullptr ? solution_source : "unknown")
-      << " synchronized_level_set_fields=" << synchronized_level_set_fields
-      << " support_source=retained_cut_context"
-      << " constraints=" << sim.fe_system->constraints().numConstraints()
-      << std::endl;
-  svmp::FE::rank_log::oopDiagnosticsCout()
-      << "[svMultiPhysics::Application] Cut context reinstalled"
-      << " diagnostic=cut_context_reinstall"
-      << " provenance=" << (provenance != nullptr ? provenance : "unknown")
-      << " solution_source="
-      << (solution_source != nullptr ? solution_source : "unknown")
-      << " solution_hash=" << reinstalled.signature.solution_hash
-      << " level_set_dof_layout_key="
-      << reinstalled.signature.level_set_dof_layout_key
-      << " cut_context_topology_key=" << *reinstalled.topology_key
-      << " active_cut_request_policy_key=" << request_policy_key
-      << std::endl;
+  svmp::FE::logRecord(
+      svmp::FE::LogRecord("LevelSetGeometryService", "active pressure support constraint refresh")
+          .diagnostic("active_pressure_constraint_refresh")
+          .value("provenance", (provenance != nullptr ? provenance : "unknown"))
+          .value("solution_source", (solution_source != nullptr ? solution_source : "unknown"))
+          .value("synchronized_level_set_fields", synchronized_level_set_fields)
+          .text("support_source", "retained_cut_context")
+          .value("constraints", sim.fe_system->constraints().numConstraints())
+          .rootOnly());
+  svmp::FE::logRecord(
+      svmp::FE::LogRecord("LevelSetGeometryService", "cut context reinstalled")
+          .diagnostic("cut_context_reinstall")
+          .value("provenance", (provenance != nullptr ? provenance : "unknown"))
+          .value("solution_source", (solution_source != nullptr ? solution_source : "unknown"))
+          .value("solution_hash", reinstalled.signature.solution_hash)
+          .value("level_set_dof_layout_key", reinstalled.signature.level_set_dof_layout_key)
+          .value("cut_context_topology_key", *reinstalled.topology_key)
+          .value("active_cut_request_policy_key", request_policy_key)
+          .rootOnly());
 
   // As after a rebuild, the cache records the signature of the state after
   // the mesh field was rewritten.
@@ -3614,27 +3498,24 @@ resyncInstalledActiveCutContext(
       "active_cut_resync_source_sync");
   sim.fe_system->setCutIntegrationContext(context);
   sim.fe_system->rebuildConstraintState();
-  svmp::FE::rank_log::oopDiagnosticsCout()
-      << "[svMultiPhysics::Application] Active pressure support constraint refresh"
-      << " diagnostic=active_pressure_constraint_refresh"
-      << " provenance=" << (provenance != nullptr ? provenance : "unknown")
-      << " solution_source="
-      << (solution_source != nullptr ? solution_source : "unknown")
-      << " synchronized_level_set_fields=" << synchronized_level_set_fields
-      << " support_source=retained_cut_context"
-      << " constraints=" << sim.fe_system->constraints().numConstraints()
-      << std::endl;
-  svmp::FE::rank_log::oopDiagnosticsCout()
-      << "[svMultiPhysics::Application] Cut context kept after a mesh field "
-         "change"
-      << " diagnostic=cut_context_resync"
-      << " provenance=" << (provenance != nullptr ? provenance : "unknown")
-      << " solution_source="
-      << (solution_source != nullptr ? solution_source : "unknown")
-      << " solution_hash=" << signature->solution_hash
-      << " cut_context_topology_key=" << *cache.topology_key
-      << " active_cut_request_policy_key=" << request_policy_key
-      << std::endl;
+  svmp::FE::logRecord(
+      svmp::FE::LogRecord("LevelSetGeometryService", "active pressure support constraint refresh")
+          .diagnostic("active_pressure_constraint_refresh")
+          .value("provenance", (provenance != nullptr ? provenance : "unknown"))
+          .value("solution_source", (solution_source != nullptr ? solution_source : "unknown"))
+          .value("synchronized_level_set_fields", synchronized_level_set_fields)
+          .text("support_source", "retained_cut_context")
+          .value("constraints", sim.fe_system->constraints().numConstraints())
+          .rootOnly());
+  svmp::FE::logRecord(
+      svmp::FE::LogRecord("LevelSetGeometryService", "cut context kept after a mesh field change")
+          .diagnostic("cut_context_resync")
+          .value("provenance", (provenance != nullptr ? provenance : "unknown"))
+          .value("solution_source", (solution_source != nullptr ? solution_source : "unknown"))
+          .value("solution_hash", signature->solution_hash)
+          .value("cut_context_topology_key", *cache.topology_key)
+          .value("active_cut_request_policy_key", request_policy_key)
+          .rootOnly());
 
   // As after a rebuild, the cache records the signature of the state after
   // the mesh field was rewritten.
@@ -4211,16 +4092,15 @@ reinstallRetainedActiveCutContextForRestoredState(
   const char* solution_source =
       state.u_vector != nullptr ? "state_vector_fe_ordered"
                                 : "state_span_assumed_fe_ordered";
-  svmp::FE::rank_log::oopCout()
-      << "[svMultiPhysics::Application] Active pressure support constraint refresh"
-      << " diagnostic=active_pressure_constraint_refresh"
-      << " provenance=" << (provenance != nullptr ? provenance : "unknown")
-      << " solution_source=" << solution_source
-      << " synchronized_level_set_fields="
-      << synchronized_level_set_fields
-      << " support_source=retained_cut_context"
-      << " constraints=" << sim.fe_system->constraints().numConstraints()
-      << std::endl;
+  svmp::FE::logRecord(
+      svmp::FE::LogRecord("LevelSetGeometryService", "active pressure support constraint refresh")
+          .diagnostic("active_pressure_constraint_refresh")
+          .value("provenance", (provenance != nullptr ? provenance : "unknown"))
+          .value("solution_source", solution_source)
+          .value("synchronized_level_set_fields", synchronized_level_set_fields)
+          .text("support_source", "retained_cut_context")
+          .value("constraints", sim.fe_system->constraints().numConstraints())
+          .rootOnly());
   std::ostringstream reuse_line;
   reuse_line
       << "[svMultiPhysics::Application] Restored-state cut context reused"
@@ -4930,24 +4810,15 @@ void LevelSetGeometryParticipant::acknowledgeEpochDiscontinuity(
       cut_topology_attempt_tracker->attemptTopologyKey()
           .value_or(0u);
   cut_topology_attempt_tracker->acknowledgeNonlinearRestart();
-  svmp::FE::rank_log::oopCout()
-      << "[svMultiPhysics::Application] Transient cut-topology "
-         "nonlinear restart"
-      << " diagnostic=cut_topology_nonlinear_restart"
-      << " committed_topology_key="
-      << cut_topology_attempt_tracker->acceptedTopologyKey()
-             .value_or(0u)
-      << " previous_attempt_topology_key="
-      << previous_attempt_key
-      << " restarted_attempt_topology_key="
-      << cut_topology_attempt_tracker->attemptTopologyKey()
-             .value_or(0u)
-      << " first_mismatched_topology_key="
-      << cut_topology_attempt_tracker
-             ->firstMismatchedTopologyKey()
-             .value_or(0u)
-      << " action=continue_on_refreshed_epoch"
-      << std::endl;
+  svmp::FE::logRecord(
+      svmp::FE::LogRecord("LevelSetGeometryService", "transient cut-topology nonlinear restart")
+          .diagnostic("cut_topology_nonlinear_restart")
+          .value("committed_topology_key", cut_topology_attempt_tracker->acceptedTopologyKey().value_or(0u))
+          .value("previous_attempt_topology_key", previous_attempt_key)
+          .value("restarted_attempt_topology_key", cut_topology_attempt_tracker->attemptTopologyKey().value_or(0u))
+          .value("first_mismatched_topology_key", cut_topology_attempt_tracker->firstMismatchedTopologyKey().value_or(0u))
+          .text("action", "continue_on_refreshed_epoch")
+          .rootOnly());
 }
 
 bool LevelSetGeometryParticipant::epochRevisited(

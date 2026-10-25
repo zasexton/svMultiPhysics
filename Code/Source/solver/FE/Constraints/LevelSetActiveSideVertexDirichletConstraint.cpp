@@ -12,6 +12,7 @@
 #include "Assembly/CutIntegrationContext.h"
 #include "Dofs/EntityDofMap.h"
 #include "Core/Logger.h"
+#include "Core/LogRecord.h"
 #include "Spaces/FunctionSpace.h"
 #include "Systems/FESystem.h"
 
@@ -831,47 +832,45 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
     if (!log_constraint_diagnostic) {
         return;
     }
-    std::ostringstream oss;
-    oss << "LevelSetActiveSideVertexDirichletConstraint: diagnostic=level_set_active_side_vertex_constraint"
-        << " field='" << rec.name << "'"
-        << " level_set_field='" << level_set_field_name_ << "'"
-        << " active_side=" << sideName(active_side_)
-        << " isovalue=" << isovalue_
-        << " support_mode=" << support_mode
-        << " interface_marker=" << interface_marker_
-        << " total_vertices=" << n_vertices
-        << " active_sign_vertices=" << active_sign_vertices
-        << " active_support_cells=" << active_support_cells
-        << " active_support_cells_from_volume_support="
-        << active_support_cells_from_volume_support
-        << " active_support_cells_from_cut_adjacent_facets="
-        << active_support_cells_from_cut_adjacent_facets
-        << " active_support_vertices=" << active_support_vertices
-        << " total_dofs=" << n_field_dofs
-        << " active_support_dofs=" << active_support_dofs
-        << " active_support_vertex_dofs=" << active_support_by_entity.vertex
-        << " active_support_edge_dofs=" << active_support_by_entity.edge
-        << " active_support_face_dofs=" << active_support_by_entity.face
-        << " active_support_cell_dofs=" << active_support_by_entity.cell
-        << " active_support_unknown_dofs=" << active_support_by_entity.unknown
-        << " active_sign_vertices_without_support=" << active_sign_vertices_without_support
-        << " inactive_sign_vertices_with_support=" << inactive_sign_vertices_with_support
-        << " inactive_vertices=" << inactive_vertices.size()
-        << " inactive_dofs=" << inactive_dofs.size()
-        << " inactive_vertex_dofs=" << inactive_by_entity.vertex
-        << " inactive_edge_dofs=" << inactive_by_entity.edge
-        << " inactive_face_dofs=" << inactive_by_entity.face
-        << " inactive_cell_dofs=" << inactive_by_entity.cell
-        << " inactive_unknown_dofs=" << inactive_by_entity.unknown
-        << " constrained_owned_dofs=" << constrained_dofs
-        << " constrained_owned_vertex_dofs=" << constrained_owned_by_entity.vertex
-        << " constrained_owned_edge_dofs=" << constrained_owned_by_entity.edge
-        << " constrained_owned_face_dofs=" << constrained_owned_by_entity.face
-        << " constrained_owned_cell_dofs=" << constrained_owned_by_entity.cell
-        << " constrained_owned_unknown_dofs=" << constrained_owned_by_entity.unknown
-        << " inactive_vertex_runs=" << formatRuns(inactive_vertices)
-        << " inactive_dof_runs=" << formatRuns(inactive_dofs);
-    FE_LOG_INFO(oss.str());
+    svmp::FE::logRecord(
+        svmp::FE::LogRecord("LevelSetActiveSideVertexDirichletConstraint", "active-side vertex constraint")
+            .diagnostic("level_set_active_side_vertex_constraint")
+            .quoted("field", rec.name)
+            .quoted("level_set_field", level_set_field_name_)
+            .value("active_side", sideName(active_side_))
+            .value("isovalue", isovalue_)
+            .value("support_mode", support_mode)
+            .value("interface_marker", interface_marker_)
+            .value("total_vertices", n_vertices)
+            .value("active_sign_vertices", active_sign_vertices)
+            .value("active_support_cells", active_support_cells)
+            .value("active_support_cells_from_volume_support", active_support_cells_from_volume_support)
+            .value("active_support_cells_from_cut_adjacent_facets", active_support_cells_from_cut_adjacent_facets)
+            .value("active_support_vertices", active_support_vertices)
+            .value("total_dofs", n_field_dofs)
+            .value("active_support_dofs", active_support_dofs)
+            .value("active_support_vertex_dofs", active_support_by_entity.vertex)
+            .value("active_support_edge_dofs", active_support_by_entity.edge)
+            .value("active_support_face_dofs", active_support_by_entity.face)
+            .value("active_support_cell_dofs", active_support_by_entity.cell)
+            .value("active_support_unknown_dofs", active_support_by_entity.unknown)
+            .value("active_sign_vertices_without_support", active_sign_vertices_without_support)
+            .value("inactive_sign_vertices_with_support", inactive_sign_vertices_with_support)
+            .value("inactive_vertices", inactive_vertices.size())
+            .value("inactive_dofs", inactive_dofs.size())
+            .value("inactive_vertex_dofs", inactive_by_entity.vertex)
+            .value("inactive_edge_dofs", inactive_by_entity.edge)
+            .value("inactive_face_dofs", inactive_by_entity.face)
+            .value("inactive_cell_dofs", inactive_by_entity.cell)
+            .value("inactive_unknown_dofs", inactive_by_entity.unknown)
+            .value("constrained_owned_dofs", constrained_dofs)
+            .value("constrained_owned_vertex_dofs", constrained_owned_by_entity.vertex)
+            .value("constrained_owned_edge_dofs", constrained_owned_by_entity.edge)
+            .value("constrained_owned_face_dofs", constrained_owned_by_entity.face)
+            .value("constrained_owned_cell_dofs", constrained_owned_by_entity.cell)
+            .value("constrained_owned_unknown_dofs", constrained_owned_by_entity.unknown)
+            .value("inactive_vertex_runs", formatRuns(inactive_vertices))
+            .value("inactive_dof_runs", formatRuns(inactive_dofs)));
 }
 
 bool LevelSetActiveSideVertexDirichletConstraint::updateValues(
