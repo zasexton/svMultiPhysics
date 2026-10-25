@@ -22,13 +22,19 @@
  * face mass of a continuous first-order field, on a tetrahedral interface
  * face that the mesh and the reference element number differently (faces 2
  * and 3 of Tetra4) and on a quadrilateral face that the two sides' facets
- * run in opposite directions, as an interior and as an interface face; and
- * on an interface face whose stored face id setup renumbers.
+ * run in opposite directions, as an interior and as an interface face; on an
+ * interface face whose stored face id setup renumbers; and on the face
+ * between two cells of different types (Quad4-Triangle3, Pyramid5-Tetra4,
+ * Wedge6-Tetra4, Hex8-Wedge6, Hex8-Pyramid5), with a first-order field on
+ * each cell's own element.
  */
 
 #include <gtest/gtest.h>
 
 #include "Assembly/GlobalSystemView.h"
+#include "Assembly/MeshAccess.h"
+#include "Elements/ElementFactory.h"
+#include "Elements/ReferenceElement.h"
 #include "Forms/BoundaryConditions.h"
 #include "Forms/InterfaceConditions.h"
 #include "Forms/StandardBCs.h"
@@ -42,6 +48,8 @@
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 #include <map>
@@ -466,6 +474,341 @@ TEST(InterfaceFaceGeometry, TwoSidedTermsOnAQuadrilateralFaceGiveTheExactFaceMas
     }
 }
 
+
+namespace {
+
+/// First-order Lagrange on each cell's own reference element: a continuous
+/// P1/Q1 field on a mesh of several cell types (numbered through the
+/// variable-order DOF path, which reads each cell's element).
+class FirstOrderOnEachCellType final : public spaces::FunctionSpace {
+public:
+    FirstOrderOnEachCellType(int dim, std::vector<ElementType> cell_types)
+        : dim_(dim), cell_types_(std::move(cell_types))
+    {
+        for (const auto type : cell_types_) {
+            if (elements_.find(type) == elements_.end()) {
+                elements::ElementRequest request;
+                request.element_type = type;
+                request.field_type = FieldType::Scalar;
+                request.continuity = Continuity::C0;
+                request.basis_type = BasisType::Lagrange;
+                request.order = 1;
+                elements_[type] = elements::ElementFactory::create(request);
+            }
+        }
+    }
+
+    spaces::SpaceType space_type() const noexcept override { return spaces::SpaceType::H1; }
+    FieldType field_type() const noexcept override { return FieldType::Scalar; }
+    Continuity continuity() const noexcept override { return Continuity::C0; }
+    int value_dimension() const noexcept override { return 1; }
+    int topological_dimension() const noexcept override { return dim_; }
+    int polynomial_order() const noexcept override { return 1; }
+    int polynomial_order(GlobalIndex /*cell_id*/) const noexcept override { return 1; }
+    bool is_variable_order() const noexcept override { return true; }
+    ElementType element_type() const noexcept override { return ElementType::Unknown; }
+    const elements::Element& element() const noexcept override { return *elements_.at(cell_types_.front()); }
+    const elements::Element& getElement(ElementType cell_type, GlobalIndex /*cell_id*/) const noexcept override
+    {
+        return *elements_.at(cell_type);
+    }
+    std::shared_ptr<const elements::Element> element_ptr() const noexcept override
+    {
+        return elements_.at(cell_types_.front());
+    }
+    std::size_t dofs_per_element() const noexcept override { return element().num_dofs(); }
+    std::size_t dofs_per_element(GlobalIndex cell_id) const noexcept override
+    {
+        return elements_.at(cell_types_.at(static_cast<std::size_t>(cell_id)))->num_dofs();
+    }
+    void interpolate(const ValueFunction& /*function*/, std::vector<Real>& /*coefficients*/) const override {}
+    Value evaluate(const Value& /*xi*/, const std::vector<Real>& /*coefficients*/) const override { return {}; }
+
+private:
+    int dim_;
+    std::vector<ElementType> cell_types_;
+    std::map<ElementType, std::shared_ptr<elements::Element>> elements_;
+};
+
+/// Two cells of different types sharing one face; cell 0 is the minus side.
+struct MixedCellPair {
+    std::string name;
+    int dim{3};
+    std::vector<svmp::real_t> X;
+    std::array<ElementType, 2> types{};
+    std::array<std::vector<svmp::index_t>, 2> cells;   ///< vertices in each type's reference order
+};
+
+svmp::CellFamily familyOf(ElementType type)
+{
+    switch (type) {
+    case ElementType::Triangle3: return svmp::CellFamily::Triangle;
+    case ElementType::Quad4: return svmp::CellFamily::Quad;
+    case ElementType::Tetra4: return svmp::CellFamily::Tetra;
+    case ElementType::Hex8: return svmp::CellFamily::Hex;
+    case ElementType::Wedge6: return svmp::CellFamily::Wedge;
+    case ElementType::Pyramid5: return svmp::CellFamily::Pyramid;
+    default: return svmp::CellFamily::Point;
+    }
+}
+
+/// The same pair with its cells in the other order (the other type is minus).
+MixedCellPair swapped(MixedCellPair pair)
+{
+    std::swap(pair.types[0], pair.types[1]);
+    std::swap(pair.cells[0], pair.cells[1]);
+    pair.name += " (swapped)";
+    return pair;
+}
+
+/// The topology the variable-order DOF numbering reads: the cells' vertices
+/// and their edges (and faces in 3D) in each reference element's order.
+dofs::MeshTopologyInfo topologyOf(const MixedCellPair& pair)
+{
+    dofs::MeshTopologyInfo topo;
+    topo.dim = pair.dim;
+    topo.n_cells = 2;
+    topo.n_vertices = static_cast<GlobalIndex>(pair.X.size() / static_cast<std::size_t>(pair.dim));
+    std::map<std::vector<svmp::index_t>, MeshIndex> edges;
+    std::map<std::vector<svmp::index_t>, MeshIndex> faces;
+    topo.cell2vertex_offsets = {0};
+    topo.cell2edge_offsets = {0};
+    topo.cell2face_offsets = {0};
+    topo.face2vertex_offsets = {0};
+    for (std::size_t c = 0; c < 2; ++c) {
+        const auto& cell = pair.cells[c];
+        const auto& ref = elements::ReferenceElement::shared(pair.types[c]);
+        topo.cell2vertex_data.insert(topo.cell2vertex_data.end(), cell.begin(), cell.end());
+        topo.cell2vertex_offsets.push_back(static_cast<MeshOffset>(topo.cell2vertex_data.size()));
+        for (std::size_t e = 0; e < ref.num_edges(); ++e) {
+            std::vector<svmp::index_t> key;
+            for (const auto node : ref.edge_nodes(e)) {
+                key.push_back(cell[static_cast<std::size_t>(node)]);
+            }
+            std::sort(key.begin(), key.end());
+            const auto [it, added] = edges.emplace(key, static_cast<MeshIndex>(edges.size()));
+            if (added) {
+                topo.edge2vertex_data.insert(topo.edge2vertex_data.end(), key.begin(), key.end());
+            }
+            topo.cell2edge_data.push_back(it->second);
+        }
+        topo.cell2edge_offsets.push_back(static_cast<MeshOffset>(topo.cell2edge_data.size()));
+        if (pair.dim == 3) {
+            for (std::size_t f = 0; f < ref.num_faces(); ++f) {
+                std::vector<svmp::index_t> key;
+                for (const auto node : ref.face_nodes(f)) {
+                    key.push_back(cell[static_cast<std::size_t>(node)]);
+                }
+                std::vector<svmp::index_t> sorted = key;
+                std::sort(sorted.begin(), sorted.end());
+                const auto [it, added] = faces.emplace(sorted, static_cast<MeshIndex>(faces.size()));
+                if (added) {
+                    topo.face2vertex_data.insert(topo.face2vertex_data.end(), key.begin(), key.end());
+                    topo.face2vertex_offsets.push_back(static_cast<MeshOffset>(topo.face2vertex_data.size()));
+                }
+                topo.cell2face_data.push_back(it->second);
+            }
+            topo.cell2face_offsets.push_back(static_cast<MeshOffset>(topo.cell2face_data.size()));
+        }
+    }
+    topo.n_edges = static_cast<GlobalIndex>(edges.size());
+    if (pair.dim == 3) {
+        topo.n_faces = static_cast<GlobalIndex>(faces.size());
+    } else {
+        topo.cell2face_offsets.clear();
+        topo.face2vertex_offsets.clear();
+    }
+    for (GlobalIndex v = 0; v < topo.n_vertices; ++v) {
+        topo.vertex_gids.push_back(static_cast<gid_t>(v));
+    }
+    for (GlobalIndex e = 0; e < topo.n_edges; ++e) {
+        topo.edge_gids.push_back(static_cast<gid_t>(e));
+    }
+    for (GlobalIndex f = 0; f < topo.n_faces; ++f) {
+        topo.face_gids.push_back(static_cast<gid_t>(f));
+    }
+    topo.cell_gids = {0, 1};
+    topo.cell_owner_ranks = {0, 0};
+    return topo;
+}
+
+/**
+ * The matrix of @p face_terms(u, v) for a continuous first-order field u on
+ * the two cells of @p pair, the shared face also an InterfaceMesh face, keyed
+ * by the mesh vertices of its row and column.
+ */
+std::map<std::pair<svmp::index_t, svmp::index_t>, Real> mixedVertexMatrix(const MixedCellPair& pair,
+                                                                          const FaceTerms& face_terms)
+{
+    using forms::FormExpr;
+    std::vector<svmp::CellShape> shapes;
+    std::vector<svmp::offset_t> offsets{0};
+    std::vector<svmp::index_t> conn;
+    for (std::size_t c = 0; c < 2; ++c) {
+        svmp::CellShape shape{};
+        shape.family = familyOf(pair.types[c]);
+        shape.num_corners = static_cast<int>(pair.cells[c].size());
+        shape.order = 1;
+        shapes.push_back(shape);
+        conn.insert(conn.end(), pair.cells[c].begin(), pair.cells[c].end());
+        offsets.push_back(static_cast<svmp::offset_t>(conn.size()));
+    }
+    auto base = std::make_shared<svmp::MeshBase>();
+    base->build_from_arrays(pair.dim, pair.X, offsets, conn, shapes);
+    base->finalize();
+    auto mesh = svmp::create_mesh(std::move(base));
+    auto& mbase = mesh->local_mesh();
+    for (svmp::index_t f = 0; f < static_cast<svmp::index_t>(mbase.n_faces()); ++f) {
+        if (mbase.face2cell()[static_cast<std::size_t>(f)][1] != svmp::INVALID_INDEX) {
+            mbase.add_to_set(svmp::EntityKind::Face, "shared", f);
+        }
+    }
+
+    auto space = std::make_shared<FirstOrderOnEachCellType>(pair.dim, std::vector<ElementType>{pair.types[0], pair.types[1]});
+    FESystem sys(std::make_shared<assembly::MeshAccess>(*mesh));
+    sys.setInterfaceMesh(kInterfaceMarker, std::make_shared<svmp::InterfaceMesh>(
+                                               svmp::InterfaceMesh::build_from_face_set(mbase, "shared", false)));
+    const FieldId u_id = sys.addField(FieldSpec{.name = "u", .space = space});
+    sys.addOperator("op");
+    const auto u = forms::StateField(u_id, *space, "u");
+    const auto v = forms::TestField(u_id, *space, "v");
+    FormInstallOptions options;
+    options.compiler_options.jit.enable = false;
+    (void)installFormulation(sys, "op", {u_id}, (FormExpr::constant(0.0) * u * v).dx() + face_terms(u, v),
+                             options);
+    SetupInputs inputs;
+    inputs.topology_override = topologyOf(pair);
+    sys.setup({}, inputs);
+
+    const auto n_dofs = sys.dofHandler().getNumDofs();
+    std::vector<Real> zero(static_cast<std::size_t>(n_dofs), 0.0);
+    SystemStateView state;
+    state.u = zero;
+    AssemblyRequest request;
+    request.op = "op";
+    request.want_matrix = true;
+    assembly::DenseMatrixView A(n_dofs);
+    EXPECT_TRUE(sys.assemble(request, state, &A, nullptr).success);
+
+    std::map<GlobalIndex, svmp::index_t> vertex_of_dof;
+    for (GlobalIndex cell = 0; cell < 2; ++cell) {
+        const auto& vertices = pair.cells[static_cast<std::size_t>(cell)];
+        const auto dofs = sys.fieldDofHandler(u_id).getCellDofs(cell);
+        EXPECT_EQ(dofs.size(), vertices.size());
+        for (std::size_t k = 0; k < dofs.size() && k < vertices.size(); ++k) {
+            vertex_of_dof[sys.fieldDofOffset(u_id) + dofs[k]] = vertices[k];
+        }
+    }
+    std::map<std::pair<svmp::index_t, svmp::index_t>, Real> out;
+    for (const auto& [i, vi] : vertex_of_dof) {
+        for (const auto& [j, vj] : vertex_of_dof) {
+            out[{vi, vj}] = A.getMatrixEntry(i, j);
+        }
+    }
+    return out;
+}
+
+/// The exact first-order face mass of a planar segment, triangle or unit square
+/// with corners @p face, between mesh vertices @p a and @p b.
+Real exactFaceMass(const MixedCellPair& pair, const std::vector<svmp::index_t>& face, svmp::index_t a,
+                   svmp::index_t b)
+{
+    const auto dim = static_cast<std::size_t>(pair.dim);
+    const auto point = [&](svmp::index_t vertex) {
+        std::array<Real, 3> x{0.0, 0.0, 0.0};
+        for (std::size_t d = 0; d < dim; ++d) {
+            x[d] = pair.X[static_cast<std::size_t>(vertex) * dim + d];
+        }
+        return x;
+    };
+    const auto sub = [](const std::array<Real, 3>& p, const std::array<Real, 3>& q) {
+        return std::array<Real, 3>{p[0] - q[0], p[1] - q[1], p[2] - q[2]};
+    };
+    const auto norm = [](const std::array<Real, 3>& p) { return std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]); };
+    if (face.size() == 2u) {
+        return norm(sub(point(face[1]), point(face[0]))) / 6.0 * (a == b ? 2.0 : 1.0);
+    }
+    if (face.size() == 3u) {
+        const auto e1 = sub(point(face[1]), point(face[0]));
+        const auto e2 = sub(point(face[2]), point(face[0]));
+        const std::array<Real, 3> n{e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2],
+                                    e1[0] * e2[1] - e1[1] * e2[0]};
+        return norm(n) / 2.0 / 12.0 * (a == b ? 2.0 : 1.0);
+    }
+    const Real distance = norm(sub(point(a), point(b)));   // unit square: 0, 1 or sqrt(2)
+    return (distance < 0.5 ? 4.0 : distance < 1.2 ? 2.0 : 1.0) / 36.0;
+}
+
+std::vector<MixedCellPair> mixedCellPairs()
+{
+    std::vector<MixedCellPair> pairs;
+    // Quad4 [0,1] x [0,1] and a triangle on its side x = 1.
+    pairs.push_back({"Quad4-Triangle3", 2, {0, 0, 1, 0, 2, 0.5, 0, 1, 1, 1},
+                     {ElementType::Quad4, ElementType::Triangle3}, {{{0, 1, 4, 3}, {1, 2, 4}}}});
+    // A pyramid on the unit square and a tetrahedron on its side face
+    // {0, 1, 4}, which the tetrahedron's facet runs turned by one place.
+    pairs.push_back({"Pyramid5-Tetra4", 3,
+                     {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0.5, 0.5, 1, 0.5, -1, 0.5},
+                     {ElementType::Pyramid5, ElementType::Tetra4}, {{{0, 1, 2, 3, 4}, {1, 4, 0, 5}}}});
+    // A unit-height wedge and a tetrahedron on its top face {3, 4, 5}, turned by one place.
+    pairs.push_back({"Wedge6-Tetra4", 3,
+                     {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0.3, 0.3, 2},
+                     {ElementType::Wedge6, ElementType::Tetra4}, {{{0, 1, 2, 3, 4, 5}, {4, 5, 3, 6}}}});
+    // The unit cube and a wedge on its face x = 1, which the wedge's facet runs mirrored.
+    const std::vector<svmp::real_t> cube_and_tip = {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 1, 1, 1,
+                                                    0, 1, 1, 2, 0.5, 0, 2, 0.5, 1};
+    pairs.push_back({"Hex8-Wedge6", 3, cube_and_tip, {ElementType::Hex8, ElementType::Wedge6},
+                     {{{0, 1, 2, 3, 4, 5, 6, 7}, {1, 8, 2, 5, 9, 6}}}});
+    // The unit cube and a pyramid on its face x = 1, its base turned a quarter.
+    std::vector<svmp::real_t> cube_and_apex(cube_and_tip.begin(), cube_and_tip.begin() + 24);
+    cube_and_apex.insert(cube_and_apex.end(), {1.5, 0.5, 0.5});
+    pairs.push_back({"Hex8-Pyramid5", 3, cube_and_apex, {ElementType::Hex8, ElementType::Pyramid5},
+                     {{{0, 1, 2, 3, 4, 5, 6, 7}, {2, 6, 5, 1, 8}}}});
+    return pairs;
+}
+
+} // namespace
+
+TEST(InterfaceFaceGeometry, TwoSidedTermsOnAFaceBetweenCellsOfDifferentTypesGiveTheExactFaceMass)
+{
+    // For a continuous first-order field on two cells of different types,
+    // each side pairing of u v on the shared face, as an interior face (dS)
+    // and as an interface face (dI), is the face mass of the face's vertices,
+    // and jump(u) = 0; either cell as the minus side.
+    for (const auto& base_pair : mixedCellPairs()) {
+        for (const auto& pair : {base_pair, swapped(base_pair)}) {
+            std::set<svmp::index_t> shared(pair.cells[0].begin(), pair.cells[0].end());
+            std::vector<svmp::index_t> face;
+            for (const auto vertex : pair.cells[1]) {
+                if (shared.contains(vertex)) {
+                    face.push_back(vertex);
+                }
+            }
+            const std::set<svmp::index_t> on_face(face.begin(), face.end());
+            std::vector<std::pair<std::string, FaceTerms>> cases;
+            for (auto& [name, terms] : sidedFaceTerms([](const forms::FormExpr& e) { return e.dS(); })) {
+                cases.emplace_back("dS " + name, std::move(terms));
+            }
+            for (auto& [name, terms] :
+                 sidedFaceTerms([](const forms::FormExpr& e) { return e.dI(kInterfaceMarker); })) {
+                cases.emplace_back("dI " + name, std::move(terms));
+            }
+            for (const auto& [name, terms] : cases) {
+                SCOPED_TRACE(pair.name + ": " + name);
+                const auto M = mixedVertexMatrix(pair, terms);
+                for (const auto& [key, value] : M) {
+                    const auto [a, b] = key;
+                    const Real expected = (!name.ends_with("jump-jump") && on_face.contains(a) && on_face.contains(b))
+                                              ? exactFaceMass(pair, face, a, b)
+                                              : Real(0.0);
+                    EXPECT_NEAR(value, expected, 1e-13) << "vertices " << a << ", " << b;
+                }
+            }
+        }
+    }
+}
+
+
 TEST(InterfaceFaceGeometry, TwoSidedInterfaceFacesSurviveTheFacesSetupStores)
 {
     // The two tetrahedra of the first test, the mesh storing its boundary
@@ -556,6 +899,5 @@ TEST(InterfaceFaceGeometry, TwoSidedInterfaceFacesSurviveTheFacesSetupStores)
         }
     }
 }
-
 
 } // namespace svmp::FE::systems::test

@@ -1880,6 +1880,47 @@ std::atomic<bool> g_p1_field_derivative_shortcut_enabled{true};
     return LocalIndex{-1};
 }
 
+// align[j] = i: node j of the plus cell's facet is node i of the minus cell's
+// facet, whose parameterization is the reference (canonicalToFacetCoordinates),
+// matched by mesh vertex.  Each facet is read from its own cell's reference
+// element, so the two cells may differ in type.  Empty unless the facets are
+// line, triangle or quadrilateral faces with the same vertices.
+[[nodiscard]] std::span<const LocalIndex> plusFacetAlignment(const IMeshAccess& mesh,
+                                                             GlobalIndex cell_minus,
+                                                             LocalIndex local_face_minus,
+                                                             GlobalIndex cell_plus,
+                                                             LocalIndex local_face_plus,
+                                                             std::vector<GlobalIndex>& cell_nodes_minus,
+                                                             std::vector<GlobalIndex>& cell_nodes_plus,
+                                                             std::array<LocalIndex, 4>& storage)
+{
+    const auto& ref_minus = elements::ReferenceElement::shared(mesh.getCellType(cell_minus));
+    const auto& ref_plus = elements::ReferenceElement::shared(mesh.getCellType(cell_plus));
+    const auto& face_nodes_minus = ref_minus.face_nodes(static_cast<std::size_t>(local_face_minus));
+    const auto& face_nodes_plus = ref_plus.face_nodes(static_cast<std::size_t>(local_face_plus));
+    if (face_nodes_minus.size() != face_nodes_plus.size() || face_nodes_minus.size() < 2u ||
+        face_nodes_minus.size() > 4u) {
+        return {};
+    }
+    mesh.getCellNodes(cell_minus, cell_nodes_minus);
+    mesh.getCellNodes(cell_plus, cell_nodes_plus);
+    for (std::size_t j = 0; j < face_nodes_plus.size(); ++j) {
+        const GlobalIndex global_plus = cell_nodes_plus.at(static_cast<std::size_t>(face_nodes_plus[j]));
+        std::size_t i_match = face_nodes_minus.size();
+        for (std::size_t i = 0; i < face_nodes_minus.size(); ++i) {
+            if (cell_nodes_minus.at(static_cast<std::size_t>(face_nodes_minus[i])) == global_plus) {
+                i_match = i;
+                break;
+            }
+        }
+        if (i_match >= face_nodes_minus.size()) {
+            return {};
+        }
+        storage[j] = static_cast<LocalIndex>(i_match);
+    }
+    return std::span<const LocalIndex>(storage.data(), face_nodes_plus.size());
+}
+
 } // namespace
 
 namespace {
@@ -5565,47 +5606,9 @@ void StandardAssembler::assembleInteriorFaceItem(const InteriorFaceLoop& loop,
 
     stage_start = face_now();
     std::array<LocalIndex, 4> align_plus_storage{};
-    std::span<const LocalIndex> align_plus{};
-    const ElementType cell_type_minus = mesh.getCellType(cell_minus);
-    const ElementType cell_type_plus = mesh.getCellType(cell_plus);
-    if (cell_type_minus == cell_type_plus) {
-        const elements::ReferenceElement& ref = elements::ReferenceElement::shared(cell_type_minus);
-        const auto& face_nodes_minus = ref.face_nodes(static_cast<std::size_t>(local_face_minus));
-        const auto& face_nodes_plus = ref.face_nodes(static_cast<std::size_t>(local_face_plus));
-        // Line, triangle and quadrilateral faces (canonicalToFacetCoordinates).
-        if (face_nodes_minus.size() == face_nodes_plus.size() &&
-            face_nodes_minus.size() >= 2u && face_nodes_minus.size() <= 4u) {
-            mesh.getCellNodes(cell_minus, cell_nodes_minus);
-            mesh.getCellNodes(cell_plus, cell_nodes_plus);
-
-            for (std::size_t j = 0; j < face_nodes_plus.size(); ++j) {
-                const GlobalIndex global_plus = cell_nodes_plus.at(static_cast<std::size_t>(face_nodes_plus[j]));
-                std::size_t i_match = face_nodes_minus.size();
-                for (std::size_t i = 0; i < face_nodes_minus.size(); ++i) {
-                    const GlobalIndex global_minus = cell_nodes_minus.at(static_cast<std::size_t>(face_nodes_minus[i]));
-                    if (global_minus == global_plus) {
-                        i_match = i;
-                        break;
-                    }
-                }
-                align_plus_storage[j] = static_cast<LocalIndex>(i_match);
-            }
-
-            bool ok = true;
-            for (std::size_t j = 0; j < face_nodes_plus.size(); ++j) {
-                if (static_cast<std::size_t>(align_plus_storage[j]) >= face_nodes_minus.size()) {
-                    ok = false;
-                    break;
-                }
-            }
-
-            if (ok) {
-                align_plus = std::span<const LocalIndex>(
-                    align_plus_storage.data(),
-                    face_nodes_plus.size());
-            }
-        }
-    }
+    const std::span<const LocalIndex> align_plus =
+        plusFacetAlignment(mesh, cell_minus, local_face_minus, cell_plus, local_face_plus,
+                           cell_nodes_minus, cell_nodes_plus, align_plus_storage);
     face_alignment_time += face_now() - stage_start;
 
     stage_start = face_now();
@@ -6325,47 +6328,9 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
         context_.clearAllPreviousSolutionData();
 
         std::array<LocalIndex, 4> align_plus_storage{};
-        std::span<const LocalIndex> align_plus{};
-        const ElementType cell_type_minus = mesh.getCellType(cell_minus);
-        const ElementType cell_type_plus = mesh.getCellType(cell_plus);
-        if (cell_type_minus == cell_type_plus) {
-            const elements::ReferenceElement& ref = elements::ReferenceElement::shared(cell_type_minus);
-            const auto& face_nodes_minus = ref.face_nodes(static_cast<std::size_t>(local_face_minus));
-            const auto& face_nodes_plus = ref.face_nodes(static_cast<std::size_t>(local_face_plus));
-            // Line, triangle and quadrilateral faces (canonicalToFacetCoordinates).
-            if (face_nodes_minus.size() == face_nodes_plus.size() &&
-                face_nodes_minus.size() >= 2u && face_nodes_minus.size() <= 4u) {
-                mesh.getCellNodes(cell_minus, cell_nodes_minus);
-                mesh.getCellNodes(cell_plus, cell_nodes_plus);
-
-                for (std::size_t j = 0; j < face_nodes_plus.size(); ++j) {
-                    const GlobalIndex global_plus = cell_nodes_plus.at(static_cast<std::size_t>(face_nodes_plus[j]));
-                    std::size_t i_match = face_nodes_minus.size();
-                    for (std::size_t i = 0; i < face_nodes_minus.size(); ++i) {
-                        const GlobalIndex global_minus = cell_nodes_minus.at(static_cast<std::size_t>(face_nodes_minus[i]));
-                        if (global_minus == global_plus) {
-                            i_match = i;
-                            break;
-                        }
-                    }
-                    align_plus_storage[j] = static_cast<LocalIndex>(i_match);
-                }
-
-                bool ok = true;
-                for (std::size_t j = 0; j < face_nodes_plus.size(); ++j) {
-                    if (static_cast<std::size_t>(align_plus_storage[j]) >= face_nodes_minus.size()) {
-                        ok = false;
-                        break;
-                    }
-                }
-
-                if (ok) {
-                    align_plus = std::span<const LocalIndex>(
-                        align_plus_storage.data(),
-                        face_nodes_plus.size());
-                }
-            }
-        }
+        const std::span<const LocalIndex> align_plus =
+            plusFacetAlignment(mesh, cell_minus, local_face_minus, cell_plus, local_face_plus,
+                               cell_nodes_minus, cell_nodes_plus, align_plus_storage);
 
         prepareContextFace(context_plus, mesh, face_id, cell_plus, local_face_plus, test_space, trial_space,
                            required_data, ContextType::InteriorFace, align_plus);
@@ -7734,8 +7699,8 @@ void StandardAssembler::prepareBasis(
     const auto& trial_element = getElement(trial_space, cell_id, cell_type);
 
     const auto n_qpts = static_cast<LocalIndex>(quad_rule.num_points());
-    const auto n_test_dofs = static_cast<LocalIndex>(test_space.dofs_per_element());
-    const auto n_trial_dofs = static_cast<LocalIndex>(trial_space.dofs_per_element());
+    const auto n_test_dofs = static_cast<LocalIndex>(test_space.dofs_per_element(cell_id));
+    const auto n_trial_dofs = static_cast<LocalIndex>(trial_space.dofs_per_element(cell_id));
     const auto n_test_scalar_dofs = static_cast<LocalIndex>(test_element.num_dofs());
     const auto n_trial_scalar_dofs = static_cast<LocalIndex>(trial_element.num_dofs());
     const bool test_is_product = (test_space.space_type() == spaces::SpaceType::Product);
@@ -17082,8 +17047,8 @@ void StandardAssembler::prepareContextFace(
     auto quad_rule = quadrature::QuadratureFactory::create_pinned(face_type, quad_order);
 
     const auto n_qpts = static_cast<LocalIndex>(quad_rule->num_points());
-    const auto n_test_dofs = static_cast<LocalIndex>(test_space.dofs_per_element());
-    const auto n_trial_dofs = static_cast<LocalIndex>(trial_space.dofs_per_element());
+    const auto n_test_dofs = static_cast<LocalIndex>(test_space.dofs_per_element(cell_id));
+    const auto n_trial_dofs = static_cast<LocalIndex>(trial_space.dofs_per_element(cell_id));
     const auto n_test_scalar_dofs = static_cast<LocalIndex>(test_element.num_dofs());
     const auto n_trial_scalar_dofs = static_cast<LocalIndex>(trial_element.num_dofs());
     const bool test_is_product = (test_space.space_type() == spaces::SpaceType::Product);
