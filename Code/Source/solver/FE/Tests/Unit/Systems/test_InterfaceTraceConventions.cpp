@@ -17,6 +17,11 @@
  *   interface part of the boundary flux of the left cell.
  * - Average of a normal trace: for a constant vector c = (2, 0),
  *   {c}.n(-) jump(v) integrates, for v = 1 on the left cell, to c.n_left = 2.
+ *
+ * InterfaceFaceGeometry: two-sided face terms on 3D faces against the exact
+ * face mass of a continuous first-order field, on a tetrahedral interface
+ * face that the mesh and the reference element number differently (faces 2
+ * and 3 of Tetra4).
  */
 
 #include <gtest/gtest.h>
@@ -29,14 +34,18 @@
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"
+#include "Spaces/H1Space.h"
 #include "Spaces/L2Space.h"
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
 
 #include <cmath>
 #include <functional>
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace svmp::FE::systems::test {
@@ -279,6 +288,132 @@ TEST(InterfaceTraceConventions, IdentityJumpReductionIsTheCoreJump)
         indicator);
     EXPECT_NEAR(penalty_wrapper.left, penalty_core.left, 1e-12);
     EXPECT_NEAR(penalty_wrapper.right, penalty_core.right, 1e-12);
+}
+
+namespace {
+
+/**
+ * Two cells of one shape, every face stored, the shared face in the face set
+ * "shared".
+ */
+std::shared_ptr<svmp::Mesh> twoCells(svmp::CellFamily family,
+                                     const std::vector<svmp::real_t>& X,
+                                     const std::vector<svmp::index_t>& conn)
+{
+    svmp::CellShape shape{};
+    shape.family = family;
+    shape.num_corners = static_cast<int>(conn.size() / 2u);
+    shape.order = 1;
+    const auto corners = static_cast<svmp::offset_t>(shape.num_corners);
+    auto base = std::make_shared<svmp::MeshBase>();
+    base->build_from_arrays(/*spatial_dim=*/3, X, {0, corners, 2 * corners}, conn, {shape, shape});
+    base->finalize();
+
+    auto mesh = svmp::create_mesh(std::move(base));
+    auto& mbase = mesh->local_mesh();
+    for (svmp::index_t f = 0; f < static_cast<svmp::index_t>(mbase.n_faces()); ++f) {
+        if (mbase.face2cell()[static_cast<std::size_t>(f)][1] != svmp::INVALID_INDEX) {
+            mbase.add_to_set(svmp::EntityKind::Face, "shared", f);
+        }
+    }
+    return mesh;
+}
+
+using FaceTerms = std::function<forms::FormExpr(const forms::FormExpr&, const forms::FormExpr&)>;
+
+/**
+ * The matrix of @p face_terms(u, v) for a continuous first-order field u on
+ * @p mesh (the two cells @p conn), keyed by the mesh vertices of its row and
+ * column (the cells' DOFs in their vertex order).
+ */
+std::map<std::pair<svmp::index_t, svmp::index_t>, Real> vertexMatrix(const std::shared_ptr<svmp::Mesh>& mesh,
+                                                                     ElementType cell_type,
+                                                                     const std::vector<svmp::index_t>& conn,
+                                                                     const FaceTerms& face_terms)
+{
+    using forms::FormExpr;
+    auto space = std::make_shared<spaces::H1Space>(cell_type, 1);
+    FESystem sys(mesh);
+    sys.setInterfaceMeshFromFaceSet(kInterfaceMarker, "shared");
+    const FieldId u_id = sys.addField(FieldSpec{.name = "u", .space = space});
+    sys.addOperator("op");
+    const auto u = forms::StateField(u_id, *space, "u");
+    const auto v = forms::TestField(u_id, *space, "v");
+    FormInstallOptions options;
+    options.compiler_options.jit.enable = false;
+    (void)installFormulation(sys, "op", {u_id}, (FormExpr::constant(0.0) * u * v).dx() + face_terms(u, v),
+                             options);
+    sys.setup();
+
+    const auto n_dofs = sys.dofHandler().getNumDofs();
+    std::vector<Real> zero(static_cast<std::size_t>(n_dofs), 0.0);
+    SystemStateView state;
+    state.u = zero;
+    AssemblyRequest request;
+    request.op = "op";
+    request.want_matrix = true;
+    assembly::DenseMatrixView A(n_dofs);
+    EXPECT_TRUE(sys.assemble(request, state, &A, nullptr).success);
+
+    const auto corners = conn.size() / 2u;
+    std::map<GlobalIndex, svmp::index_t> vertex_of_dof;
+    for (GlobalIndex cell = 0; cell < 2; ++cell) {
+        const auto dofs = sys.fieldDofHandler(u_id).getCellDofs(cell);
+        EXPECT_EQ(dofs.size(), corners);
+        for (std::size_t k = 0; k < dofs.size() && k < corners; ++k) {
+            vertex_of_dof[sys.fieldDofOffset(u_id) + dofs[k]] = conn[static_cast<std::size_t>(cell) * corners + k];
+        }
+    }
+    std::map<std::pair<svmp::index_t, svmp::index_t>, Real> out;
+    for (const auto& [i, vi] : vertex_of_dof) {
+        for (const auto& [j, vj] : vertex_of_dof) {
+            out[{vi, vj}] = A.getMatrixEntry(i, j);
+        }
+    }
+    return out;
+}
+
+/// u v on the shared face for each pair of sides, and jump(u) jump(v).
+std::vector<std::pair<std::string, FaceTerms>> sidedFaceTerms(
+    const std::function<forms::FormExpr(const forms::FormExpr&)>& on_face)
+{
+    using forms::FormExpr;
+    return {
+        {"minus-minus", [=](const FormExpr& u, const FormExpr& v) { return on_face(u.minus() * v.minus()); }},
+        {"plus-plus", [=](const FormExpr& u, const FormExpr& v) { return on_face(u.plus() * v.plus()); }},
+        {"minus-plus", [=](const FormExpr& u, const FormExpr& v) { return on_face(u.minus() * v.plus()); }},
+        {"plus-minus", [=](const FormExpr& u, const FormExpr& v) { return on_face(u.plus() * v.minus()); }},
+        {"jump-jump",
+         [=](const FormExpr& u, const FormExpr& v) { return on_face(forms::jump(u) * forms::jump(v)); }},
+    };
+}
+
+} // namespace
+
+TEST(InterfaceFaceGeometry, TwoSidedTermsOnATetrahedralInterfaceFaceGiveTheExactFaceMass)
+{
+    // The shared face {1, 2, 3} is reference face 2 of cell 0 and reference
+    // face 3 of cell 1: ReferenceElement numbers the Tetra4 faces {0,1,2},
+    // {0,1,3}, {1,2,3}, {0,2,3}, and the mesh's canonical table (which the
+    // InterfaceMesh records) swaps the last two.  For a continuous P1 field
+    // each side pairing of u v on the face is the P1 face mass of the face's
+    // vertices, |F|/12 (1 + delta_ij) with |F| = sqrt(3)/2, and jump(u) = 0.
+    const std::vector<svmp::real_t> X = {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1};
+    const std::vector<svmp::index_t> conn = {0, 1, 2, 3, 1, 4, 2, 3};
+    const Real area = std::sqrt(Real(3.0)) / Real(2.0);
+    const std::set<svmp::index_t> face = {1, 2, 3};
+    for (const auto& [name, terms] :
+         sidedFaceTerms([](const forms::FormExpr& e) { return e.dI(kInterfaceMarker); })) {
+        SCOPED_TRACE(name);
+        const auto M = vertexMatrix(twoCells(svmp::CellFamily::Tetra, X, conn), ElementType::Tetra4, conn, terms);
+        for (const auto& [key, value] : M) {
+            const auto [a, b] = key;
+            const bool on_face = face.contains(a) && face.contains(b);
+            const Real expected =
+                (name == "jump-jump" || !on_face) ? Real(0.0) : area / Real(12.0) * (a == b ? Real(2.0) : Real(1.0));
+            EXPECT_NEAR(value, expected, 1e-13) << "vertices " << a << ", " << b;
+        }
+    }
 }
 
 } // namespace svmp::FE::systems::test

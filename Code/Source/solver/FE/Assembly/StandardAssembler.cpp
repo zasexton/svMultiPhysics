@@ -6220,10 +6220,15 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
             continue;
         }
 
-        const LocalIndex local_face_minus = static_cast<LocalIndex>(interface_mesh.local_face_in_cell_minus(iface));
-        const LocalIndex local_face_plus = static_cast<LocalIndex>(interface_mesh.local_face_in_cell_plus(iface));
-        FE_THROW_IF(local_face_minus < 0 || local_face_plus < 0, FEException,
+        // The two cells' facets on the interface face, numbered as the
+        // reference element numbers its faces: the InterfaceMesh records the
+        // mesh's canonical face numbering, which differs for Tetra4.
+        FE_THROW_IF(interface_mesh.local_face_in_cell_minus(iface) < 0 ||
+                        interface_mesh.local_face_in_cell_plus(iface) < 0,
+                    FEException,
                     "StandardAssembler::assembleInterfaceFaces: invalid local face index in InterfaceMesh");
+        const LocalIndex local_face_minus = mesh.getLocalFaceIndex(face_id, cell_minus);
+        const LocalIndex local_face_plus = mesh.getLocalFaceIndex(face_id, cell_plus);
 
         // Get DOFs for both cells (rows/cols may differ)
         minus_row_dofs = getCellDofsCached(mesh, cell_minus, row_dof_map_, row_dof_offset_);
