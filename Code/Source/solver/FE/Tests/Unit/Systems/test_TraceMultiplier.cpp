@@ -14,6 +14,17 @@
  * solution, and B^T lambda_h is minus its reaction (K u - F on the boundary
  * rows).
  *
+ * I3 (cut interface): a circle of radius 0.5 in a square of side 2, k1 = 1
+ * inside and k2 = 10 outside, u = r^2 / k_i + c_i (continuous), f = -4, so
+ * the flux k du/dn on the circle is 2r = 1.  Two phase fields on the
+ * background mesh (each pinned off its side) are glued by a multiplier
+ * restricted to the cut cells, stabilized as Barbosa-Hughes on the interface;
+ * the result is compared with the symmetric Nitsche coupling of the same
+ * fields.  The Analysis subsystem gives no inf-sup verdict for this pair: it
+ * classifies it as TraceMultiplier, but builds no Fortin projection for trace
+ * pairs and has no numerical inf-sup estimator (AssemblyAccess::infSupEstimate
+ * forwards a supplied summary only).
+ *
  * Setup: the multiplier's rows anchor the constant of u (no automatic gauge),
  * a multiplier that couples only to DOFs an essential condition fixes is
  * refused, the condition is exclusive on its marker, and an unstabilized
@@ -509,6 +520,170 @@ TEST(TraceMultiplierSetup, AnUnstabilizedMultiplierIsReportedForTheIterativeSolv
     auto stabilized = buildWeakDirichletPoisson(buildQuadGrid(2, 2, 1.0, 1.0, 1, kWholeBoundary), quad1(), quad1(),
                                                 FormExpr::constant(1.0), FormExpr::constant(0.0), Real(0.1));
     EXPECT_TRUE(stabilized.system->unstabilizedTraceMultiplierFields().empty());
+}
+
+// ---------------------------------------------------------------------------
+// I3: a cut interface glued by a stabilized multiplier, against Nitsche
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr int kInterface = 41;
+constexpr Real kInner = 1.0;  ///< k1, inside the circle
+constexpr Real kOuter = 10.0; ///< k2, outside
+constexpr Real kRadius = 0.5;
+
+Real radius(Real x, Real y) { return std::sqrt((x - 1.0) * (x - 1.0) + (y - 1.0) * (y - 1.0)); }
+Real exactInner(Real x, Real y) { return radius(x, y) * radius(x, y) / kInner + kRadius * kRadius * (1.0 / kOuter - 1.0 / kInner); }
+Real exactOuter(Real x, Real y) { return radius(x, y) * radius(x, y) / kOuter; }
+
+struct CutProblem {
+    std::shared_ptr<svmp::Mesh> mesh;
+    std::unique_ptr<FESystem> system;
+    std::shared_ptr<spaces::H1Space> space;
+    FieldId u1{INVALID_FIELD_ID};
+    FieldId u2{INVALID_FIELD_ID};
+    FieldId lambda{INVALID_FIELD_ID};
+};
+
+/// u1 inside, u2 outside, coupled on the circle by a multiplier (@p multiplier)
+/// or by symmetric Nitsche.
+CutProblem buildCutProblem(int n, bool multiplier, Real beta)
+{
+    CutProblem out;
+    out.mesh = buildQuadGrid(n, n, 2.0, 2.0, 1, kWholeBoundary);
+    const auto phi = [](Real x, Real y) { return radius(x, y) - kRadius; };
+    {
+        auto& base = out.mesh->local_mesh();
+        const auto handle = svmp::MeshFields::attach_field(base, svmp::EntityKind::Vertex, "phi",
+                                                           svmp::FieldScalarType::Float64, 1);
+        auto* values = svmp::MeshFields::field_data_as<svmp::real_t>(base, handle);
+        for (std::size_t v = 0; v < base.n_vertices(); ++v) {
+            const auto x = base.get_vertex_coords(static_cast<svmp::index_t>(v));
+            values[v] = static_cast<svmp::real_t>(phi(static_cast<Real>(x[0]), static_cast<Real>(x[1])));
+        }
+    }
+    out.space = std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+    out.system = std::make_unique<FESystem>(out.mesh);
+    auto& sys = *out.system;
+    sys.setCutIntegrationContext(generatedInterfaceContext(*out.mesh, kInterface, phi, 1u, /*quadrature_order=*/4));
+    out.u1 = sys.addField(FieldSpec{.name = "u1", .space = out.space});
+    out.u2 = sys.addField(FieldSpec{.name = "u2", .space = out.space});
+    if (multiplier) {
+        out.lambda = sys.addField(FieldSpec{.name = "lambda", .space = out.space});
+    }
+    sys.addOperator("op");
+
+    const auto& V = *out.space;
+    const auto u1 = forms::StateField(out.u1, V, "u1");
+    const auto v1 = forms::TestField(out.u1, V, "v1");
+    const auto u2 = forms::StateField(out.u2, V, "u2");
+    const auto v2 = forms::TestField(out.u2, V, "v2");
+    const auto k1 = FormExpr::constant(kInner);
+    const auto k2 = FormExpr::constant(kOuter);
+    const auto f = FormExpr::constant(-4.0);
+    const auto n_ = FormExpr::normal(); // from u1's side (phi < 0) to u2's
+    const auto h = FormExpr::cellDiameter();
+    const auto inside = forms::CutVolumeSide::Negative;
+    const auto outside = forms::CutVolumeSide::Positive;
+    auto residual = (k1 * forms::inner(forms::grad(u1), forms::grad(v1)) - f * v1).dCutVolume(kInterface, inside) +
+                    (k2 * forms::inner(forms::grad(u2), forms::grad(v2)) - f * v2).dCutVolume(kInterface, outside);
+    // The mean flux {k du/dn} and its test counterparts.
+    const auto flux_u = FormExpr::constant(0.5) * (k1 * forms::inner(forms::grad(u1), n_) +
+                                                   k2 * forms::inner(forms::grad(u2), n_));
+    const auto half_flux_v1 = FormExpr::constant(0.5) * k1 * forms::inner(forms::grad(v1), n_);
+    const auto half_flux_v2 = FormExpr::constant(0.5) * k2 * forms::inner(forms::grad(v2), n_);
+    std::vector<FieldId> fields{out.u1, out.u2};
+    if (multiplier) {
+        const auto lam = forms::StateField(out.lambda, V, "lambda");
+        const auto mu = forms::TestField(out.lambda, V, "mu");
+        // lambda (v2 - v1) + mu (u2 - u1): lambda is the flux k du/dn.
+        residual = residual + (lam * v2).dI(kInterface) - (lam * v1).dI(kInterface) +
+                   (mu * (u2 - u1)).dI(kInterface);
+        // - beta h (lambda - {k du/dn}) (mu - {k dv/dn}), one integral per test function.
+        const auto weighted = FormExpr::constant(beta) * h * (lam - flux_u);
+        residual = residual - (weighted * mu).dI(kInterface) + (weighted * half_flux_v1).dI(kInterface) +
+                   (weighted * half_flux_v2).dI(kInterface);
+        fields.push_back(out.lambda);
+    } else {
+        // Symmetric Nitsche: - {k du/dn}[v] - {k dv/dn}[u] + gamma k2 / h [u][v], [w] = w1 - w2.
+        const auto jump_u = u1 - u2;
+        const auto penalty = FormExpr::constant(10.0 * kOuter) / h;
+        residual = residual - (flux_u * v1).dI(kInterface) + (flux_u * v2).dI(kInterface) -
+                   (half_flux_v1 * jump_u).dI(kInterface) - (half_flux_v2 * jump_u).dI(kInterface) +
+                   (penalty * jump_u * v1).dI(kInterface) - (penalty * jump_u * v2).dI(kInterface);
+    }
+    (void)systems::installFormulation(sys, "op", fields, residual);
+
+    sys.addSystemConstraint(std::make_unique<constraints::LevelSetActiveSideVertexDirichletConstraint>(
+        out.u1, "phi", constraints::LevelSetConstraintSide::Negative, Real(0.0), Real(0.0), kInterface));
+    sys.addSystemConstraint(std::make_unique<constraints::LevelSetActiveSideVertexDirichletConstraint>(
+        out.u2, "phi", constraints::LevelSetConstraintSide::Positive, Real(0.0), Real(0.0), kInterface));
+    const std::array<forms::bc::StrongDirichlet, 1> bcs{
+        forms::bc::strongDirichlet(out.u2, kWholeBoundary, coefficient("u2_exact", exactOuter), "u2")};
+    systems::installStrongDirichlet(sys, std::span<const forms::bc::StrongDirichlet>(bcs));
+    if (multiplier) {
+        sys.addSystemConstraint(
+            std::make_unique<constraints::SupportRestrictionConstraint>(out.lambda, kInterface, std::string("phi")));
+    }
+    sys.setup();
+    return out;
+}
+
+struct CutErrors {
+    Real u{0.0};      ///< L2 error of u1 inside plus u2 outside
+    Real lambda{0.0}; ///< L2 error of lambda on the circle against the flux 1
+};
+
+CutErrors cutErrors(const CutProblem& problem, const std::vector<Real>& state)
+{
+    const auto& V = *problem.space;
+    const auto u1 = forms::StateField(problem.u1, V, "u1");
+    const auto u2 = forms::StateField(problem.u2, V, "u2");
+    const auto e1 = u1 - coefficient("u1_exact", exactInner);
+    const auto e2 = u2 - coefficient("u2_exact", exactOuter);
+    std::vector<FormExpr> forms_{(e1 * e1).dCutVolume(kInterface, forms::CutVolumeSide::Negative),
+                                 (e2 * e2).dCutVolume(kInterface, forms::CutVolumeSide::Positive)};
+    if (problem.lambda != INVALID_FIELD_ID) {
+        const auto lam = forms::StateField(problem.lambda, V, "lambda");
+        forms_.push_back(((lam - FormExpr::constant(1.0)) * (lam - FormExpr::constant(1.0))).dI(kInterface));
+    }
+    systems::SystemStateView view;
+    view.u = state;
+    const auto values =
+        systems::evaluateFunctionalForms(*problem.system, forms_, view, systems::CollectiveCommunicator{});
+    CutErrors out;
+    out.u = std::sqrt(values[0].value + values[1].value);
+    if (values.size() > 2u) {
+        out.lambda = std::sqrt(values[2].value);
+    }
+    return out;
+}
+
+} // namespace
+
+TEST(TraceMultiplierI3, AStabilizedMultiplierOnACutInterfaceMatchesNitsche)
+{
+    std::vector<CutErrors> with_multiplier;
+    std::vector<CutErrors> with_nitsche;
+    for (const int n : {16, 32}) {
+        auto multiplier = buildCutProblem(n, /*multiplier=*/true, /*beta=*/0.05);
+        with_multiplier.push_back(cutErrors(multiplier, solveLinear(*multiplier.system)));
+        auto nitsche = buildCutProblem(n, /*multiplier=*/false, 0.0);
+        with_nitsche.push_back(cutErrors(nitsche, solveLinear(*nitsche.system)));
+        std::cout << "[ I3 n=" << n << " ] multiplier e_u=" << with_multiplier.back().u
+                  << " e_lambda=" << with_multiplier.back().lambda << "  nitsche e_u=" << with_nitsche.back().u
+                  << std::endl;
+    }
+    for (std::size_t k = 0; k < with_multiplier.size(); ++k) {
+        // The multiplier coupling is as accurate as Nitsche's.
+        EXPECT_LT(with_multiplier[k].u, 3.0 * with_nitsche[k].u) << "mesh " << k;
+    }
+    // Both converge at second order in u; lambda tends to the flux.
+    EXPECT_GT(std::log2(with_multiplier[0].u / with_multiplier[1].u), 1.5);
+    EXPECT_GT(std::log2(with_nitsche[0].u / with_nitsche[1].u), 1.5);
+    EXPECT_LT(with_multiplier[1].lambda, with_multiplier[0].lambda);
+    EXPECT_LT(with_multiplier[1].lambda, 0.1);
 }
 
 } // namespace svmp::FE::test_trace_multiplier
