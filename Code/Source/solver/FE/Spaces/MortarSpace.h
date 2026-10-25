@@ -20,9 +20,12 @@
  * This class is **mesh-agnostic** and does not own any interface topology or
  * master/slave pairing logic. Those responsibilities belong to Systems/Mesh.
  *
- * Note: FE/Assembly currently does not provide a dedicated "interface entity"
- * assembly loop for MortarSpace. It exists as a space vocabulary term for
- * future interface/mortar infrastructure.
+ * A field on a MortarSpace is interface-owned (FieldScope::InterfaceFace,
+ * the InterfaceMesh of its marker): FESystem distributes its DOFs on the
+ * interface faces, and StandardAssembler::assembleInterfaceFaces evaluates it
+ * one side at a time on the interface face's own parameterization.  Forms
+ * use it in dI(marker) terms (Systems/InterfaceSideSplit.h); the interface
+ * space must be discontinuous (e.g. an L2Space).
  */
 
 #include "Spaces/FunctionSpace.h"
