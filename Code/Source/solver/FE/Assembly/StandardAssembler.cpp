@@ -5546,8 +5546,9 @@ void StandardAssembler::assembleInteriorFaceItem(const InteriorFaceLoop& loop,
         const elements::ReferenceElement& ref = elements::ReferenceElement::shared(cell_type_minus);
         const auto& face_nodes_minus = ref.face_nodes(static_cast<std::size_t>(local_face_minus));
         const auto& face_nodes_plus = ref.face_nodes(static_cast<std::size_t>(local_face_plus));
+        // Line, triangle and quadrilateral faces (canonicalToFacetCoordinates).
         if (face_nodes_minus.size() == face_nodes_plus.size() &&
-            (face_nodes_minus.size() == 2 || face_nodes_minus.size() == 3)) {
+            face_nodes_minus.size() >= 2u && face_nodes_minus.size() <= 4u) {
             mesh.getCellNodes(cell_minus, cell_nodes_minus);
             mesh.getCellNodes(cell_plus, cell_nodes_plus);
 
@@ -6260,8 +6261,9 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
             const elements::ReferenceElement& ref = elements::ReferenceElement::shared(cell_type_minus);
             const auto& face_nodes_minus = ref.face_nodes(static_cast<std::size_t>(local_face_minus));
             const auto& face_nodes_plus = ref.face_nodes(static_cast<std::size_t>(local_face_plus));
+            // Line, triangle and quadrilateral faces (canonicalToFacetCoordinates).
             if (face_nodes_minus.size() == face_nodes_plus.size() &&
-                (face_nodes_minus.size() == 2 || face_nodes_minus.size() == 3)) {
+                face_nodes_minus.size() >= 2u && face_nodes_minus.size() <= 4u) {
                 mesh.getCellNodes(cell_minus, cell_nodes_minus);
                 mesh.getCellNodes(cell_plus, cell_nodes_plus);
 

@@ -21,7 +21,8 @@
  * InterfaceFaceGeometry: two-sided face terms on 3D faces against the exact
  * face mass of a continuous first-order field, on a tetrahedral interface
  * face that the mesh and the reference element number differently (faces 2
- * and 3 of Tetra4).
+ * and 3 of Tetra4) and on a quadrilateral face that the two sides' facets
+ * run in opposite directions, as an interior and as an interface face.
  */
 
 #include <gtest/gtest.h>
@@ -411,6 +412,53 @@ TEST(InterfaceFaceGeometry, TwoSidedTermsOnATetrahedralInterfaceFaceGiveTheExact
             const bool on_face = face.contains(a) && face.contains(b);
             const Real expected =
                 (name == "jump-jump" || !on_face) ? Real(0.0) : area / Real(12.0) * (a == b ? Real(2.0) : Real(1.0));
+            EXPECT_NEAR(value, expected, 1e-13) << "vertices " << a << ", " << b;
+        }
+    }
+}
+
+TEST(InterfaceFaceGeometry, TwoSidedTermsOnAQuadrilateralFaceGiveTheExactFaceMass)
+{
+    // Two unit cubes in the same vertex order share the face x = 1, which the
+    // two sides' reference facets run in opposite directions.  For a
+    // continuous Q1 field each side pairing of u v on the face, as an
+    // interior face (dS) and as an interface face (dI), is the Q1 face mass
+    // of the unit square ((4, 2, 1)/36 for the same vertex, an edge neighbour
+    // and the opposite vertex), and jump(u) = 0.
+    std::vector<svmp::real_t> X;
+    for (int k = 0; k < 2; ++k) {
+        for (int j = 0; j < 2; ++j) {
+            for (int i = 0; i < 3; ++i) {
+                X.insert(X.end(), {static_cast<svmp::real_t>(i), static_cast<svmp::real_t>(j),
+                                   static_cast<svmp::real_t>(k)});
+            }
+        }
+    }
+    const auto vid = [](int i, int j, int k) { return static_cast<svmp::index_t>(i + 3 * (j + 2 * k)); };
+    std::vector<svmp::index_t> conn;
+    for (int c = 0; c < 2; ++c) {
+        conn.insert(conn.end(), {vid(c, 0, 0), vid(c + 1, 0, 0), vid(c + 1, 1, 0), vid(c, 1, 0),
+                                 vid(c, 0, 1), vid(c + 1, 0, 1), vid(c + 1, 1, 1), vid(c, 1, 1)});
+    }
+    std::vector<std::pair<std::string, FaceTerms>> cases;
+    for (auto& [name, terms] : sidedFaceTerms([](const forms::FormExpr& e) { return e.dS(); })) {
+        cases.emplace_back("dS " + name, std::move(terms));
+    }
+    for (auto& [name, terms] : sidedFaceTerms([](const forms::FormExpr& e) { return e.dI(kInterfaceMarker); })) {
+        cases.emplace_back("dI " + name, std::move(terms));
+    }
+    for (const auto& [name, terms] : cases) {
+        SCOPED_TRACE(name);
+        const auto M = vertexMatrix(twoCells(svmp::CellFamily::Hex, X, conn), ElementType::Hex8, conn, terms);
+        for (const auto& [key, value] : M) {
+            const auto [a, b] = key;
+            const bool on_face = (a % 3 == 1) && (b % 3 == 1);
+            Real expected = 0.0;
+            if (on_face && !name.ends_with("jump-jump")) {
+                const int apart = std::abs(static_cast<int>((a / 3) % 2) - static_cast<int>((b / 3) % 2)) +
+                                  std::abs(static_cast<int>(a / 6) - static_cast<int>(b / 6));
+                expected = (apart == 0 ? Real(4.0) : apart == 1 ? Real(2.0) : Real(1.0)) / Real(36.0);
+            }
             EXPECT_NEAR(value, expected, 1e-13) << "vertices " << a << ", " << b;
         }
     }
