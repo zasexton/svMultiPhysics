@@ -1165,6 +1165,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/GlobalKernelStateProvider.h
     Systems/GlobalRowKernel.h
     Systems/BorderedGlobalViews.h
+    Systems/InterfaceSideSplit.h
     Systems/MultiplierLowering.h
     Systems/MaterialStateProvider.h
     Systems/InterfaceOperators.h
@@ -1219,6 +1220,7 @@ set(FE_SYSTEMS_SOURCES
     Systems/GlobalKernelStateProvider.cpp
     Systems/GlobalRowKernel.cpp
     Systems/BorderedGlobalViews.cpp
+    Systems/InterfaceSideSplit.cpp
     Systems/MaterialStateProvider.cpp
     Systems/InterfaceOperators.cpp
     Systems/MeshSearchAccess.cpp
@@ -3208,6 +3210,7 @@ if(FE_BUILD_TESTS)
                 Tests/Unit/Systems/test_MortarHybridInterface.cpp
                 Tests/Unit/Systems/test_InterfaceTraceConventions.cpp
                 Tests/Unit/Systems/test_GlobalMultiplier.cpp
+                Tests/Unit/Systems/test_InterfaceMultiplier.cpp
 	                Tests/Unit/Systems/test_BackendParity.cpp
 	                Tests/Unit/Systems/test_CanonicalWorkflow.cpp
 	                Tests/Unit/Systems/test_GaugeIntegration.cpp

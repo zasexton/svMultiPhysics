@@ -37,6 +37,7 @@
 
 #include "Systems/FESystem.h"
 #include "Systems/GlobalRowKernel.h"
+#include "Systems/InterfaceSideSplit.h"
 #include "Constraints/StrongDirichletConstraint.h"
 #include "Spaces/FunctionSpace.h"
 
@@ -2640,6 +2641,10 @@ CoupledResidualKernels installCoupledResidualMixed(
 
     std::vector<std::shared_ptr<GlobalRowKernel>> pending_global_rows;
     std::unordered_set<FieldId> fields_in_rows;
+    // Interface-owned fields (D54 T2): the dI terms that hold one are
+    // installed one side at a time (Systems/InterfaceSideSplit.h).
+    const bool has_interface_owned_fields = hasInterfaceOwnedFields(system);
+    std::vector<std::pair<std::size_t, InterfaceSidePart>> pending_side_parts;
     for (std::size_t i = 0; i < residual_blocks.numTestFields(); ++i) {
         if (!residual_blocks.hasBlock(i)) {
             continue;
@@ -2672,6 +2677,23 @@ CoupledResidualKernels installCoupledResidualMixed(
                 continue;
             }
             base_expr = row_terms.measured;
+        }
+
+        if (has_interface_owned_fields && !global_row) {
+            auto split = splitInterfaceSides(system, base_expr, test_record.name);
+            if (!split.parts.empty()) {
+                FE_THROW_IF(test_record.scope == FieldScope::InterfaceFace && split.rest.isValid(),
+                            InvalidArgumentException,
+                            "installCoupledResidualMixed: the row of the interface-owned field '" +
+                                test_record.name + "' holds terms off its interface; it takes dI() terms only");
+                for (auto& part : split.parts) {
+                    pending_side_parts.emplace_back(i, std::move(part));
+                }
+                if (!split.rest.isValid()) {
+                    continue;
+                }
+                base_expr = split.rest;
+            }
         }
 
         const auto* root = base_expr.node();
@@ -2938,6 +2960,89 @@ CoupledResidualKernels installCoupledResidualMixed(
         }
     }
 
+    // The single-sided interface kernels: per row and side, one kernel per
+    // unknown of the side's terms; the kernel of the interface-owned unknown
+    // (or of the first unknown) adds the row's vector.  Interpreted: whether
+    // their JIT kernels match is a separate question (D54 LM4, C4).
+    struct PendingSideInstall {
+        FieldId test_field{INVALID_FIELD_ID};
+        FieldId trial_field{INVALID_FIELD_ID};
+        int marker{-1};
+        KernelPtr kernel{};
+    };
+    std::vector<PendingSideInstall> pending_side_installs;
+    for (const auto& [row, part] : pending_side_parts) {
+        const auto all = part.integral();
+        if (!all.isValid()) {
+            continue;
+        }
+        const auto& row_name = system.fieldRecord(test_fields[row]).name;
+        auto side_options = install_options;
+        side_options.compiler_options.jit.enable = false;
+        const auto state_fields =
+            gatherResidualDependencies(*all.node(), install_options.compiler_options.geometry_sensitivity);
+        for (const auto field : state_fields) {
+            fields_in_rows.insert(field);
+        }
+        if (state_fields.empty()) {
+            forms::FormCompiler compiler(side_options.compiler_options);
+            auto kernel = std::make_shared<SingleSidedInterfaceKernel>(
+                std::make_shared<forms::FormKernel>(compiler.compileLinear(all)), part.side);
+            pending_side_installs.push_back({test_fields[row], test_fields[row], part.marker, kernel});
+            if (!out.residual[row]) {
+                out.residual[row] = kernel;
+            }
+            continue;
+        }
+        FieldId owner = INVALID_FIELD_ID;
+        std::size_t interface_unknowns = 0;
+        for (const auto field : trial_fields) {
+            if (state_fields.contains(field) && system.fieldRecord(field).scope == FieldScope::InterfaceFace) {
+                ++interface_unknowns;
+                if (owner == INVALID_FIELD_ID) {
+                    owner = field;
+                }
+            }
+        }
+        FE_THROW_IF(interface_unknowns > 1u, InvalidArgumentException,
+                    "installCoupledResidualMixed: the interface terms of the row of '" + row_name +
+                        "' hold two interface-owned unknowns on one side; a single-sided context holds one");
+        if (owner == INVALID_FIELD_ID) {
+            for (const auto field : trial_fields) {
+                if (state_fields.contains(field)) {
+                    owner = field;
+                    break;
+                }
+            }
+        }
+        FE_THROW_IF(owner == INVALID_FIELD_ID, InvalidArgumentException,
+                    "installCoupledResidualMixed: the interface terms of the row of '" + row_name +
+                        "' hold no unknown of the field list");
+        for (std::size_t j = 0; j < trial_fields.size(); ++j) {
+            const FieldId trial = trial_fields[j];
+            if (!state_fields.contains(trial)) {
+                continue;
+            }
+            const bool owns_row_vector = trial == owner;
+            const auto expr = owns_row_vector ? all : part.integral(trial);
+            forms::FormCompiler compiler(compilerOptionsForTrial(side_options.compiler_options, trial));
+            auto residual_ir = compiler.compileResidual(lowerStateFields(expr, trial, system));
+            auto kernel = std::make_shared<SingleSidedInterfaceKernel>(
+                std::make_shared<forms::NonlinearFormKernel>(
+                    std::move(residual_ir),
+                    install_options.ad_mode,
+                    owns_row_vector ? forms::NonlinearKernelOutput::Both : forms::NonlinearKernelOutput::MatrixOnly),
+                part.side);
+            pending_side_installs.push_back({test_fields[row], trial, part.marker, kernel});
+            if (!out.jacobian_blocks[row][j]) {
+                out.jacobian_blocks[row][j] = kernel;
+            }
+            if (owns_row_vector && !out.residual[row]) {
+                out.residual[row] = kernel;
+            }
+        }
+    }
+
     // A global field needs its column: the multiplier must enter a row of
     // this call, its own row included.
     for (const auto field : trial_fields) {
@@ -2990,6 +3095,9 @@ CoupledResidualKernels installCoupledResidualMixed(
     }
     for (auto& row_kernel : pending_global_rows) {
         system.addGlobalKernel(op, std::move(row_kernel));
+    }
+    for (const auto& pending : pending_side_installs) {
+        system.addInterfaceFaceKernel(op, pending.marker, pending.test_field, pending.trial_field, pending.kernel);
     }
 
     if (plan->monolithic_cell_enabled) {
