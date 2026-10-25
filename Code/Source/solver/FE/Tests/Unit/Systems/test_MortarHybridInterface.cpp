@@ -21,6 +21,7 @@
 #include "Spaces/MortarSpace.h"
 #include "Spaces/ProductSpace.h"
 
+#include "Systems/FormsInstaller.h"
 #include "Systems/FormsInstallerDetail.h"
 #include "Mesh/Mesh.h"
 #include "Mesh/Core/MeshBase.h"
@@ -32,6 +33,7 @@
 #include <functional>
 #include <array>
 #include <cmath>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -520,6 +522,57 @@ TEST(FESystemMortar, MovingMeshInterfaceSymbolicWithADCheckUsesJITPrimary)
     EXPECT_NE(snapshot.kernel_name.find("SymbolicNonlinearFormKernel"), std::string::npos);
 }
 
+namespace {
+
+/**
+ * The hybrid operator of these tests as forms (D54 LM4): the mass of q, lambda
+ * coupled to the trace of q on both sides of the interface, c lambda mu and the
+ * source s mu, as the residual R = A x - b of the hand-written kernels'
+ * A x = b (MassKernel, NormalTraceCouplingKernel on each side, FacetMassKernel,
+ * FacetSourceKernel).
+ */
+void installHybridForms(FESystem& sys, const std::string& op, svmp::FE::FieldId q, svmp::FE::FieldId lambda,
+                        int marker, Real c, Real s)
+{
+    using svmp::FE::forms::FormExpr;
+    const auto& q_space = *sys.fieldRecord(q).space;
+    const auto& l_space = *sys.fieldRecord(lambda).space;
+    const auto qq = svmp::FE::forms::StateField(q, q_space, "q");
+    const auto w = svmp::FE::forms::TestField(q, q_space, "w");
+    const auto lam = svmp::FE::forms::StateField(lambda, l_space, "lambda");
+    const auto mu = svmp::FE::forms::TestField(lambda, l_space, "mu");
+    auto residual = (qq * w).dx() + (lam * w.minus()).dI(marker) + (lam * w.plus()).dI(marker) +
+                    (mu * qq.minus()).dI(marker) + (mu * qq.plus()).dI(marker);
+    if (c != Real(0.0)) {
+        residual = residual + (FormExpr::constant(c) * lam * mu).dI(marker);
+    }
+    if (s != Real(0.0)) {
+        residual = residual - (FormExpr::constant(s) * mu).dI(marker);
+    }
+    (void)svmp::FE::systems::installFormulation(sys, op, {q, lambda}, residual);
+}
+
+/// A and b of A x = b for an operator installed as forms: the Jacobian and
+/// minus the residual at x = 0.
+void assembleLinearForms(FESystem& sys, const std::string& op, DenseMatrixView& A, DenseVectorView& b)
+{
+    const auto n = sys.dofHandler().getNumDofs();
+    std::vector<Real> zero(static_cast<std::size_t>(n), 0.0);
+    SystemStateView state;
+    state.u = zero;
+    AssemblyRequest req;
+    req.op = op;
+    req.want_matrix = true;
+    req.want_vector = true;
+    DenseVectorView residual(n);
+    ASSERT_TRUE(sys.assemble(req, state, &A, &residual).success);
+    for (GlobalIndex i = 0; i < n; ++i) {
+        b.addVectorEntries(std::array<GlobalIndex, 1>{i}, std::array<Real, 1>{-residual.getVectorEntry(i)});
+    }
+}
+
+} // namespace
+
 TEST(FESystemMortar, MatchingInterfaceAssemblyBuildsMortarCouplingBlocks)
 {
     constexpr int marker = 17;
@@ -534,26 +587,14 @@ TEST(FESystemMortar, MatchingInterfaceAssemblyBuildsMortarCouplingBlocks)
     const auto q = sys.addField(FieldSpec{.name = "q", .space = volume_space});
     const auto lambda = sys.addField(FieldSpec{.name = "lambda", .space = mortar_space});
     sys.addOperator("hybrid");
-    sys.addCellKernel("hybrid", q, std::make_shared<MassKernel>(1.0));
-    sys.addInterfaceFaceKernel("hybrid", marker, lambda, q,
-                               std::make_shared<NormalTraceCouplingKernel>(1.0, InterfaceEvaluationSide::Minus));
-    sys.addInterfaceFaceKernel("hybrid", marker, lambda, q,
-                               std::make_shared<NormalTraceCouplingKernel>(1.0, InterfaceEvaluationSide::Plus));
-    sys.addInterfaceFaceKernel("hybrid", marker, q, lambda,
-                               std::make_shared<NormalTraceCouplingKernel>(1.0, InterfaceEvaluationSide::Minus));
-    sys.addInterfaceFaceKernel("hybrid", marker, q, lambda,
-                               std::make_shared<NormalTraceCouplingKernel>(1.0, InterfaceEvaluationSide::Plus));
-    sys.addInterfaceFaceKernel("hybrid", marker, lambda,
-                               std::make_shared<FacetMassKernel>(0.25));
+    // The mortar coupling written as forms (D54 LM4): one single-sided kernel
+    // per side of the interface.
+    installHybridForms(sys, "hybrid", q, lambda, marker, /*c=*/0.25, /*s=*/0.0);
     sys.setup();
 
     DenseMatrixView A(sys.dofHandler().getNumDofs());
-    SystemStateView state;
-    AssemblyRequest req;
-    req.op = "hybrid";
-    req.want_matrix = true;
-    const auto result = sys.assemble(req, state, &A, nullptr);
-    ASSERT_TRUE(result.success);
+    DenseVectorView b(sys.dofHandler().getNumDofs());
+    assembleLinearForms(sys, "hybrid", A, b);
 
     const auto q_off = sys.fieldDofOffset(q);
     const auto lambda_off = sys.fieldDofOffset(lambda);
@@ -652,6 +693,76 @@ TEST(FESystemMortar, HybridizedToyCondensationMatchesFullSolve)
                     x_full[static_cast<std::size_t>(i)], 1e-10);
     }
     EXPECT_NEAR(lambda_condensed, x_full[static_cast<std::size_t>(n_q)], 1e-10);
+}
+
+TEST(FESystemMortar, FormsGiveTheHandWrittenHybridOperator)
+{
+    // The operator of HybridizedToyCondensationMatchesFullSolve (hand-written
+    // kernels, kept as the reference), written as forms: the same A and b, for
+    // a mortar multiplier and for an interface-field multiplier.
+    constexpr int marker = 17;
+    for (const bool mortar : {true, false}) {
+        SCOPED_TRACE(mortar ? "MortarSpace multiplier" : "interface-field multiplier");
+        const auto build = [&](bool forms) {
+            auto system = std::make_unique<FESystem>(build_two_quad_mesh_with_interface_set("middle"));
+            auto& sys = *system;
+            sys.setInterfaceMeshFromFaceSet(marker, "middle");
+            auto volume_space = std::make_shared<L2Space>(ElementType::Quad4, /*order=*/0);
+            auto line_space = std::make_shared<L2Space>(ElementType::Line2, /*order=*/0);
+            const auto q = sys.addField(FieldSpec{.name = "q", .space = volume_space});
+            const auto lambda =
+                mortar ? sys.addField(FieldSpec{.name = "lambda",
+                                                .space = std::make_shared<MortarSpace>(line_space, marker)})
+                       : sys.addInterfaceField("lambda", line_space, marker);
+            sys.addOperator("op");
+            if (forms) {
+                installHybridForms(sys, "op", q, lambda, marker, /*c=*/0.5, /*s=*/1.0);
+            } else {
+                sys.addCellKernel("op", q, std::make_shared<MassKernel>(1.0));
+                for (const auto side : {InterfaceEvaluationSide::Minus, InterfaceEvaluationSide::Plus}) {
+                    sys.addInterfaceFaceKernel("op", marker, lambda, q,
+                                               std::make_shared<NormalTraceCouplingKernel>(1.0, side));
+                    sys.addInterfaceFaceKernel("op", marker, q, lambda,
+                                               std::make_shared<NormalTraceCouplingKernel>(1.0, side));
+                }
+                sys.addInterfaceFaceKernel("op", marker, lambda, std::make_shared<FacetMassKernel>(0.5));
+                sys.addInterfaceFaceKernel("op", marker, lambda, std::make_shared<FacetSourceKernel>(1.0));
+            }
+            sys.setup();
+            return system;
+        };
+        auto hand = build(false);
+        auto forms = build(true);
+        const auto n = hand->dofHandler().getNumDofs();
+        ASSERT_EQ(forms->dofHandler().getNumDofs(), n);
+
+        DenseMatrixView A_hand(n);
+        DenseVectorView b_hand(n);
+        SystemStateView state;
+        AssemblyRequest req;
+        req.op = "op";
+        req.want_matrix = true;
+        req.want_vector = true;
+        ASSERT_TRUE(hand->assemble(req, state, &A_hand, &b_hand).success);
+        DenseMatrixView A_forms(n);
+        DenseVectorView b_forms(n);
+        assembleLinearForms(*forms, "op", A_forms, b_forms);
+
+        Real scale = 0.0;
+        for (GlobalIndex i = 0; i < n; ++i) {
+            for (GlobalIndex j = 0; j < n; ++j) {
+                scale = std::max(scale, std::abs(A_hand.getMatrixEntry(i, j)));
+            }
+        }
+        ASSERT_GT(scale, 0.0);
+        for (GlobalIndex i = 0; i < n; ++i) {
+            EXPECT_NEAR(b_forms.getVectorEntry(i), b_hand.getVectorEntry(i), 1e-13 * scale) << "b " << i;
+            for (GlobalIndex j = 0; j < n; ++j) {
+                EXPECT_NEAR(A_forms.getMatrixEntry(i, j), A_hand.getMatrixEntry(i, j), 1e-13 * scale)
+                    << "A " << i << "," << j;
+            }
+        }
+    }
 }
 
 TEST(FESystemMixedDimensional, SetupDistributesContinuousInterfaceFieldOnConnectedInterface)
@@ -812,28 +923,13 @@ TEST(FESystemMixedDimensional, InterfaceFieldCouplingConservesSymmetricExchange)
     const auto q = sys.addField(FieldSpec{.name = "q", .space = volume_space});
     const auto lambda = sys.addInterfaceField("lambda", interface_space, marker);
     sys.addOperator("mixeddim_balance");
-    sys.addCellKernel("mixeddim_balance", q, std::make_shared<MassKernel>(1.0));
-    sys.addInterfaceFaceKernel("mixeddim_balance", marker, q, lambda,
-                               std::make_shared<NormalTraceCouplingKernel>(1.0, InterfaceEvaluationSide::Minus));
-    sys.addInterfaceFaceKernel("mixeddim_balance", marker, q, lambda,
-                               std::make_shared<NormalTraceCouplingKernel>(1.0, InterfaceEvaluationSide::Plus));
-    sys.addInterfaceFaceKernel("mixeddim_balance", marker, lambda, q,
-                               std::make_shared<NormalTraceCouplingKernel>(1.0, InterfaceEvaluationSide::Minus));
-    sys.addInterfaceFaceKernel("mixeddim_balance", marker, lambda, q,
-                               std::make_shared<NormalTraceCouplingKernel>(1.0, InterfaceEvaluationSide::Plus));
-    sys.addInterfaceFaceKernel("mixeddim_balance", marker, lambda,
-                               std::make_shared<FacetSourceKernel>(1.0));
+    // The interface-field coupling written as forms (D54 LM4).
+    installHybridForms(sys, "mixeddim_balance", q, lambda, marker, /*c=*/0.0, /*s=*/1.0);
     sys.setup();
 
     DenseMatrixView A(sys.dofHandler().getNumDofs());
     DenseVectorView b(sys.dofHandler().getNumDofs());
-    SystemStateView state;
-    AssemblyRequest req;
-    req.op = "mixeddim_balance";
-    req.want_matrix = true;
-    req.want_vector = true;
-    const auto result = sys.assemble(req, state, &A, &b);
-    ASSERT_TRUE(result.success);
+    assembleLinearForms(sys, "mixeddim_balance", A, b);
 
     const auto q_off = sys.fieldDofOffset(q);
     const auto lambda_off = sys.fieldDofOffset(lambda);
