@@ -8,6 +8,9 @@
 #include "Constraints/ConstraintPlan.h"
 
 #include "Constraints/LevelSetActiveSideVertexDirichletConstraint.h"
+#include "Constraints/SupportRestrictionConstraint.h"
+#include "Forms/FormExpr.h"
+#include "Forms/IntegrationDomain.h"
 #include "LevelSet/LevelSetGeometry.h"
 #include "Systems/FESystem.h"
 
@@ -120,6 +123,38 @@ ConstraintPlan& ConstraintPlan::inactiveSide(std::initializer_list<FieldId> fiel
                     geometry.isovalue(),
                     value,
                     geometry.interfaceMarker()));
+    }
+    return *this;
+}
+
+ConstraintPlan& ConstraintPlan::restrictSupport(std::initializer_list<FieldId> fields,
+                                                const forms::ExteriorBoundaryMeasure& domain)
+{
+    requireNotPassed(ConstraintPhase::InactiveSupport, "restrictSupport");
+    for (const auto field : fields) {
+        declare(ConstraintPhase::InactiveSupport, std::make_unique<SupportRestrictionConstraint>(field, domain));
+    }
+    return *this;
+}
+
+ConstraintPlan& ConstraintPlan::restrictSupport(std::initializer_list<FieldId> fields,
+                                                const forms::InterfaceDomain& domain)
+{
+    requireNotPassed(ConstraintPhase::InactiveSupport, "restrictSupport");
+    for (const auto field : fields) {
+        declare(ConstraintPhase::InactiveSupport, std::make_unique<SupportRestrictionConstraint>(field, domain));
+    }
+    return *this;
+}
+
+ConstraintPlan& ConstraintPlan::restrictSupport(std::initializer_list<FieldId> fields,
+                                                const level_set::LevelSetGeometry& geometry)
+{
+    requireNotPassed(ConstraintPhase::InactiveSupport, "restrictSupport");
+    const auto& level_set_name = system_->fieldRecord(geometry.levelSetField()).name;
+    for (const auto field : fields) {
+        declare(ConstraintPhase::InactiveSupport,
+                std::make_unique<SupportRestrictionConstraint>(field, geometry.interfaceMarker(), level_set_name));
     }
     return *this;
 }

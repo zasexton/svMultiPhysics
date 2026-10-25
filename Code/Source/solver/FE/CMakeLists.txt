@@ -666,6 +666,7 @@ set(FE_CONSTRAINTS_HEADERS
     Constraints/StrongDirichletConstraint.h
     Constraints/VertexDirichletConstraint.h
     Constraints/LevelSetActiveSideVertexDirichletConstraint.h
+    Constraints/SupportRestrictionConstraint.h
     Constraints/AuxiliaryDrivenDirichletConstraint.h
     Constraints/HCurlTangentialConstraint.h
     Constraints/HDivNormalConstraint.h
@@ -697,6 +698,7 @@ set(FE_CONSTRAINTS_SOURCES
     Constraints/StrongDirichletConstraint.cpp
     Constraints/VertexDirichletConstraint.cpp
     Constraints/LevelSetActiveSideVertexDirichletConstraint.cpp
+    Constraints/SupportRestrictionConstraint.cpp
     Constraints/AuxiliaryDrivenDirichletConstraint.cpp
     Constraints/HCurlTangentialConstraint.cpp
     Constraints/HDivNormalConstraint.cpp
@@ -3222,6 +3224,21 @@ if(FE_BUILD_TESTS)
 	                    ${GTEST_LIBRARIES}
             )
             svmp_add_gtest(FE_Systems_Tests TARGET test_fe_systems COST 62)
+
+            # Trace multipliers written as restricted volume fields (D54 LM3):
+            # the support restriction, the multiplier rows at setup, the
+            # Lagrange-multiplier Dirichlet condition and the B1, B2, I3 cases.
+            add_executable(test_fe_trace_multipliers
+                Tests/Unit/Constraints/test_SupportRestrictionConstraint.cpp
+                Tests/Unit/Systems/test_main.cpp
+            )
+            _svmp_fe_target_enable_warnings(test_fe_trace_multipliers)
+            target_link_libraries(test_fe_trace_multipliers
+                PRIVATE
+                    svfe
+                    ${GTEST_LIBRARIES}
+            )
+            svmp_add_gtest(FE_TraceMultiplier_Tests TARGET test_fe_trace_multipliers)
         endif()
 
         # Coupling module tests (physics-agnostic setup and plan metadata)

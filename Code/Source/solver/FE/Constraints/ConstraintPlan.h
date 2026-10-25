@@ -28,7 +28,8 @@
  *    by a BoundaryConditionManager together with their weak terms, so the
  *    plan runs them through essentials(install) at the point of the call.
  * 3. InactiveSupport: degrees of freedom outside the active side of a cut
- *    are pinned, where no physical condition owns them.
+ *    are pinned, where no physical condition owns them, and so are those of
+ *    a trace multiplier off its boundary or interface (restrictSupport).
  * 4. Aggregation: small-cut aggregation of the active side.
  * 5. PointLaw: point conditions that expand aggregated degrees of freedom
  *    (the strong contact-point velocity law).
@@ -65,6 +66,11 @@ namespace FE {
 
 namespace systems {
 class FESystem;
+}
+
+namespace forms {
+class ExteriorBoundaryMeasure;
+class InterfaceDomain;
 }
 
 namespace level_set {
@@ -120,6 +126,27 @@ public:
     ConstraintPlan& inactiveSide(std::initializer_list<FieldId> fields,
                                  const level_set::CutSide& active_side,
                                  Real value = Real{0.0});
+
+    /**
+     * InactiveSupport: a trace multiplier written as a volume field (D54 T1).
+     * For each field, SupportRestrictionConstraint(field, domain) pins the
+     * degrees of freedom whose basis function vanishes on the domain: off the
+     * closure of a physical boundary (`BoundaryDomain::fullPhysical(b)`) or of
+     * a fitted interface (an InterfaceDomain with a registered InterfaceMesh).
+     */
+    ConstraintPlan& restrictSupport(std::initializer_list<FieldId> fields,
+                                    const forms::ExteriorBoundaryMeasure& domain);
+    ConstraintPlan& restrictSupport(std::initializer_list<FieldId> fields,
+                                    const forms::InterfaceDomain& domain);
+
+    /**
+     * InactiveSupport: for each field, SupportRestrictionConstraint on the
+     * generated interface of @p geometry: the field lives on the cells the
+     * interface cuts, and the pinned set follows the level set (a new cut
+     * epoch rebuilds it without a new setup).
+     */
+    ConstraintPlan& restrictSupport(std::initializer_list<FieldId> fields,
+                                    const level_set::LevelSetGeometry& geometry);
 
     /**
      * Aggregation: for each field, SmallCutAggregationConstraint(field,
