@@ -10,6 +10,7 @@
 #include "Assembly/Assembler.h"
 #include "Assembly/CutIntegrationContext.h"
 #include "Basis/BasisFunction.h"
+#include "Core/LogRecord.h"
 #include "Core/Logger.h"
 #include "Core/RankLog.h"
 #include "Elements/Element.h"
@@ -34,12 +35,15 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -1104,6 +1108,54 @@ struct DeclaredFunctionalMasses {
   int interface_marker{-1};
   std::vector<std::pair<std::string, svmp::FE::Real>> masses{};
 };
+
+/// A declared functional name as the mass record writes it (map entry
+/// R2.12): "free_surface.<m>.<quantity>" is the quantity,
+/// "free_surface.<m>.wall.<b>.<quantity>" the quantity of wall b, any other
+/// name itself (tests/cases/fluid/free_surface_log_records.py reads the old
+/// keys the same way).
+struct MassQuantity {
+  std::optional<std::string> wall{};
+  std::string quantity{};
+};
+
+[[nodiscard]] MassQuantity freeSurfaceMassQuantity(const std::string& name)
+{
+  const auto word = [](std::string_view text) {
+    return !text.empty() && std::all_of(text.begin(), text.end(), [](char c) {
+      return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_';
+    });
+  };
+  const auto digits = [](std::string_view text) {
+    return !text.empty() && std::all_of(text.begin(), text.end(), [](char c) {
+      return std::isdigit(static_cast<unsigned char>(c)) != 0;
+    });
+  };
+  constexpr std::string_view head = "free_surface.";
+  constexpr std::string_view wall = "wall.";
+  std::string_view rest(name);
+  if (rest.substr(0, head.size()) != head) {
+    return {.quantity = name};
+  }
+  rest.remove_prefix(head.size());
+  const auto marker_end = rest.find('.');
+  if (marker_end == std::string_view::npos || !digits(rest.substr(0, marker_end))) {
+    return {.quantity = name};
+  }
+  rest.remove_prefix(marker_end + 1);
+  if (rest.substr(0, wall.size()) == wall) {
+    const auto tail = rest.substr(wall.size());
+    const auto wall_end = tail.find('.');
+    if (wall_end != std::string_view::npos && digits(tail.substr(0, wall_end)) &&
+        word(tail.substr(wall_end + 1))) {
+      return {.wall = std::string(tail.substr(0, wall_end)), .quantity = std::string(tail.substr(wall_end + 1))};
+    }
+  }
+  if (word(rest)) {
+    return {.quantity = std::string(rest)};
+  }
+  return {.quantity = name};
+}
 
 [[nodiscard]] bool formReadsFields(const svmp::FE::forms::FormExprNode& node)
 {
@@ -2217,15 +2269,16 @@ recordAcceptedFunctionals(
     *backward_euler_kinetic_work_bound = binding_available;
   }
   if (!binding_available) {
-    svmp::FE::rank_log::oopCout()
-        << "[svMultiPhysics::Application] Backward-Euler kinetic work"
-        << " diagnostic=backward_euler_kinetic_work_binding"
-        << " status=unavailable"
-        << " accepted_step=" << accepted_step
-        << " reason="
-        << (local_binding_failure.empty() ? "failure_on_another_rank"
-                                          : local_binding_failure)
-        << " action=record_unbound_and_continue" << std::endl;
+    // Map entry R2.113; rank 0 prints it.
+    svmp::FE::logRecord(
+        svmp::FE::LogRecord("AcceptedFunctionalRecorder", "backward-Euler kinetic work binding")
+            .diagnostic("backward_euler_kinetic_work_binding")
+            .rootOnly()
+            .text("status", "unavailable")
+            .value("accepted_step", accepted_step)
+            .text("reason", local_binding_failure.empty() ? std::string("failure_on_another_rank")
+                                                          : local_binding_failure)
+            .text("action", "record_unbound_and_continue"));
   }
   const auto* accepted_cut_context =
       sim.fe_system->cutIntegrationContext();
@@ -2389,25 +2442,48 @@ recordAcceptedFunctionals(
       accepted_extension_map_revision);
   // The absolute mass sum |w f| of each declared functional, the scale of the
   // E3 tolerance gate (D49).
+  // Map entry R2.12: the quantities of "free_surface.<m>.<quantity>" on the
+  // line, those of "free_surface.<m>.wall.<b>.<quantity>" on one child line
+  // per wall (in the order the walls first appear).
   for (const auto& record : declared_masses) {
-    std::ostringstream message;
-    message << std::setprecision(17)
-            << "FESystem: free-surface functional absolute mass"
-            << " diagnostic=functional_absolute_mass"
-            << " accepted_step=" << accepted_step
-            << " interface_marker=" << record.interface_marker;
+    svmp::FE::LogRecord log_line("AcceptedFunctionalRecorder", "declared functional absolute masses");
+    log_line.diagnostic("functional_absolute_mass")
+        .value("accepted_step", accepted_step)
+        .value("interface_marker", record.interface_marker);
+    std::vector<std::pair<std::string, std::vector<std::pair<std::string, svmp::FE::Real>>>> walls;
+    const auto add = [&](const std::string& name, svmp::FE::Real mass) {
+      const auto quantity = freeSurfaceMassQuantity(name);
+      if (!quantity.wall.has_value()) {
+        log_line.value(quantity.quantity, mass);
+        return;
+      }
+      auto wall = std::find_if(walls.begin(), walls.end(),
+                               [&](const auto& entry) { return entry.first == *quantity.wall; });
+      if (wall == walls.end()) {
+        walls.emplace_back(*quantity.wall, std::vector<std::pair<std::string, svmp::FE::Real>>{});
+        wall = std::prev(walls.end());
+      }
+      wall->second.emplace_back(quantity.quantity, mass);
+    };
     for (const auto& [name, mass] : record.masses) {
-      message << ' ' << name << '=' << mass;
+      add(name, mass);
     }
     // Then the wall functionals the contact stage evaluated on its stage state.
     for (const auto& accepted : accepted_states) {
       if (accepted.interface_marker == record.interface_marker && accepted.contact_stage.has_value()) {
         for (const auto& [name, mass] : accepted.contact_stage->declared_functional_masses) {
-          message << ' ' << name << '=' << mass;
+          add(name, mass);
         }
       }
     }
-    FE_LOG_INFO(message.str());
+    for (const auto& [wall, masses] : walls) {
+      auto& wall_line = log_line.child("functional_absolute_mass_wall", {"accepted_step", "interface_marker"});
+      wall_line.text("wall_marker", wall);
+      for (const auto& [quantity, mass] : masses) {
+        wall_line.value(quantity, mass);
+      }
+    }
+    svmp::FE::logRecord(log_line);
   }
   return accepted_states;
 }

@@ -200,9 +200,14 @@
    "renames": {},
    "split": [
     {
-     "start": "wall_marker",
-     "prefix": "wall_",
+     "start": "young_wall_marker",
+     "prefix": "equilibrium_contact_angle",
      "diagnostic": "free_surface_wall_declaration"
+    },
+    {
+     "start": "contact_stage_marker",
+     "prefix": "contact_stage_",
+     "diagnostic": "free_surface_contact_stage_wall_declaration"
     }
    ],
    "identifying": [

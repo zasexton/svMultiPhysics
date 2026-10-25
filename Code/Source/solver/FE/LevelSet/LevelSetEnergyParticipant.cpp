@@ -7,6 +7,7 @@
 
 #include "LevelSet/LevelSetEnergyParticipant.h"
 
+#include "Core/LogRecord.h"
 #include "Core/RankLog.h"
 #include "LevelSet/LevelSetConservativePhaseWorkflow.h"
 #include "LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h"
@@ -50,42 +51,37 @@ namespace {
 // stored energies at the three endpoints, then the dissipation rates and the
 // external and numerical works.
 void appendCompleteEnergyChannelValues(
-    std::ostream& log,
+    svmp::FE::LogRecord& log,
     const svmp::FE::systems::EnergyBalanceCatalogue& catalogue,
     const svmp::FE::systems::EnergyBalanceAttempt& record)
 {
   using svmp::FE::systems::EnergyChannelKind;
   const auto stored = catalogue.channels(EnergyChannelKind::Stored);
   for (std::size_t i = 0u; i < stored.size(); ++i) {
-    log << " " << stored[i].name << "_energy_before="
-        << record.values.stored_before[i]
-        << " " << stored[i].name << "_energy_physical_endpoint="
-        << record.values.stored_physical_endpoint[i]
-        << " " << stored[i].name << "_energy_after="
-        << record.values.stored_after[i];
+    log.value(stored[i].name + "_energy_before", record.values.stored_before[i])
+        .value(stored[i].name + "_energy_physical_endpoint", record.values.stored_physical_endpoint[i])
+        .value(stored[i].name + "_energy_after", record.values.stored_after[i]);
   }
-  log << " gas_energy_applicability=not_applicable";
+  log.text("gas_energy_applicability", "not_applicable");
   const auto rates = catalogue.channels(EnergyChannelKind::DissipationRate);
   for (std::size_t i = 0u; i < rates.size(); ++i) {
-    log << " " << rates[i].name << "_dissipation_rate="
-        << record.values.dissipation_rate[i];
+    log.value(rates[i].name + "_dissipation_rate", record.values.dissipation_rate[i]);
   }
   const auto external = catalogue.channels(EnergyChannelKind::ExternalWork);
   for (std::size_t i = 0u; i < external.size(); ++i) {
-    log << " external_" << external[i].name << "_work="
-        << record.values.external_work[i];
+    log.value("external_" + external[i].name + "_work", record.values.external_work[i]);
   }
   const auto numerical = catalogue.channels(EnergyChannelKind::NumericalWork);
   for (std::size_t i = 0u; i < numerical.size(); ++i) {
-    log << " numerical_" << numerical[i].name << "_work="
-        << record.values.numerical_work[i];
+    log.value("numerical_" + numerical[i].name + "_work", record.values.numerical_work[i]);
   }
 }
 
-// " <kind>_<name>_applicability=... <kind>_<name>_owner=..." per channel,
-// in catalogue order.
+// "<kind>_<name>_applicability=... <kind>_<name>_owner=..." per channel, in
+// catalogue order; the owner in double quotes (std::quoted), as
+// systems::appendEnergyChannelSource writes it.
 void appendCompleteEnergyChannelSources(
-    std::ostream& log,
+    svmp::FE::LogRecord& log,
     const svmp::FE::systems::EnergyBalanceCatalogue& catalogue,
     const svmp::FE::systems::EnergyBalanceAttempt& record)
 {
@@ -94,13 +90,25 @@ void appendCompleteEnergyChannelSources(
     const auto& sources =
         record.sources[svmp::FE::systems::energyChannelKindIndex(kind)];
     for (std::size_t i = 0u; i < channels.size(); ++i) {
-      svmp::FE::systems::appendEnergyChannelSource(
-          log,
-          std::string(svmp::FE::systems::energyChannelKindPrefix(kind)) +
-              "_" + channels[i].name,
-          sources[i]);
+      const std::string label =
+          std::string(svmp::FE::systems::energyChannelKindPrefix(kind)) + "_" + channels[i].name;
+      std::ostringstream owner;
+      owner << std::quoted(sources[i].owner);
+      log.text(label + "_applicability",
+               svmp::FE::systems::energyChannelApplicabilityName(sources[i].applicability))
+          .text(label + "_owner", owner.str());
     }
   }
+}
+
+// The records of this file were rank-0 console lines that set the console
+// stream's precision to 17.  The Application console lines that are not
+// records yet (TimeLoop: step_start, nonlinear_done, step_accepted, ...)
+// print their reals with that precision, so it is still set where those
+// lines set it.
+void keepConsolePrecision()
+{
+  oopCout() << std::setprecision(17);
 }
 
 } // namespace
@@ -232,14 +240,14 @@ EnergyParticipant::EnergyParticipant(const svmp::FE::timestepping::StepContext& 
           "[svMultiPhysics::Application] Could not allocate the free-surface residual-work vector.");
     }
   } else if (maximum_residual_work_declaration_count != 0u) {
-    oopCout()
-        << "[svMultiPhysics::Application] Free-surface residual work"
-        << " diagnostic=free_surface_residual_work_stage"
-        << " status=not_evaluated"
-        << " scheme=" << transient_scheme.canonical_name
-        << " temporal_order=" << sim.fe_system->temporalOrder()
-        << " reason=backward_euler_temporal_order_one_required"
-        << std::endl;
+    // Map entry R2.133; rank 0 prints it.
+    logRecord(LogRecord("LevelSetEnergyParticipant", "residual work stage")
+                  .diagnostic("free_surface_residual_work_stage")
+                  .rootOnly()
+                  .text("status", "not_evaluated")
+                  .text("scheme", transient_scheme.canonical_name)
+                  .value("temporal_order", sim.fe_system->temporalOrder())
+                  .text("reason", "backward_euler_temporal_order_one_required"));
   }
   initial_free_surface_functional_baseline_recorded =
       !has_free_surface_functional;
@@ -444,33 +452,24 @@ void EnergyParticipant::onCandidateStage(
       });
   const auto& staged =
       *pending_free_surface_residual_work_stage;
-  oopCout()
-      << std::setprecision(17)
-      << "[svMultiPhysics::Application] Free-surface residual work"
-      << " diagnostic=free_surface_residual_work_stage"
-      << " status=staged"
-      << " step=" << staged.step
-      << " attempt_index=" << staged.attempt_index
-      << " time=" << staged.time
-      << " dt=" << staged.dt
-      << " algebraic_state_revision="
-      << staged.algebraic_state_revision
-      << " convection_work="
-      << *staged.channels.convection
-      << " pressure_continuity_work="
-      << *staged.channels.pressure_continuity
-      << " nonconservative_body_force_work="
-      << *staged.channels.nonconservative_body_force
-      << " weak_boundary_work="
-      << *staged.channels.weak_boundary
-      << " vms_pspg_work="
-      << *staged.channels.vms_pspg
-      << " cut_stabilization_work="
-      << *staged.channels.cut_stabilization
-      << " ghost_penalty_work="
-      << *staged.channels.ghost_penalty
-      << " accepted_state_contribution=staged_not_published"
-      << std::endl;
+  keepConsolePrecision();
+  logRecord(LogRecord("LevelSetEnergyParticipant", "residual work stage")
+                .diagnostic("free_surface_residual_work_stage")
+                .rootOnly()
+                .text("status", "staged")
+                .value("step", staged.step)
+                .value("attempt_index", staged.attempt_index)
+                .value("time", staged.time)
+                .value("dt", staged.dt)
+                .value("algebraic_state_revision", staged.algebraic_state_revision)
+                .value("convection_work", *staged.channels.convection)
+                .value("pressure_continuity_work", *staged.channels.pressure_continuity)
+                .value("nonconservative_body_force_work", *staged.channels.nonconservative_body_force)
+                .value("weak_boundary_work", *staged.channels.weak_boundary)
+                .value("vms_pspg_work", *staged.channels.vms_pspg)
+                .value("cut_stabilization_work", *staged.channels.cut_stabilization)
+                .value("ghost_penalty_work", *staged.channels.ghost_penalty)
+                .text("accepted_state_contribution", "staged_not_published"));
 }
 
 void EnergyParticipant::requireNoResidualWorkStageAtStepStart() const
@@ -590,24 +589,20 @@ void EnergyParticipant::requireStagedResidualWorkAtCommitReady(
 void EnergyParticipant::discardCandidate()
 {
   if (pending_free_surface_residual_work_stage.has_value()) {
-    oopCout()
-        << std::setprecision(17)
-        << "[svMultiPhysics::Application] Free-surface residual work"
-        << " diagnostic=free_surface_residual_work_stage"
-        << " status=discarded"
-        << " step="
-        << pending_free_surface_residual_work_stage->step
-        << " attempt_index="
-        << pending_free_surface_residual_work_stage
-               ->attempt_index
-        << " accepted_state_convection_work=0"
-        << " accepted_state_pressure_continuity_work=0"
-        << " accepted_state_nonconservative_body_force_work=0"
-        << " accepted_state_weak_boundary_work=0"
-        << " accepted_state_vms_pspg_work=0"
-        << " accepted_state_cut_stabilization_work=0"
-        << " accepted_state_ghost_penalty_work=0"
-        << std::endl;
+    keepConsolePrecision();
+    logRecord(LogRecord("LevelSetEnergyParticipant", "residual work stage")
+                  .diagnostic("free_surface_residual_work_stage")
+                  .rootOnly()
+                  .text("status", "discarded")
+                  .value("step", pending_free_surface_residual_work_stage->step)
+                  .value("attempt_index", pending_free_surface_residual_work_stage->attempt_index)
+                  .text("accepted_state_convection_work", "0")
+                  .text("accepted_state_pressure_continuity_work", "0")
+                  .text("accepted_state_nonconservative_body_force_work", "0")
+                  .text("accepted_state_weak_boundary_work", "0")
+                  .text("accepted_state_vms_pspg_work", "0")
+                  .text("accepted_state_cut_stabilization_work", "0")
+                  .text("accepted_state_ghost_penalty_work", "0"));
     pending_free_surface_residual_work_stage.reset();
   }
 }
@@ -949,30 +944,21 @@ void EnergyParticipant::publishAcceptedEnergy(
           maintenance_endpoint_available &&
           maintenance_endpoint_revision ==
               accepted_state_revision;
-      oopCout()
-          << std::setprecision(17)
-          << "[svMultiPhysics::Application] Level-set maintenance-to-accepted endpoint connection"
-          << " diagnostic=level_set_maintenance_accepted_endpoint_connection"
-          << " step=" << h.stepIndex()
-          << " attempt=" << maintenance_account.attempt
-          << " maintenance_endpoint_available="
-          << (maintenance_endpoint_available ? "true" : "false")
-          << " maintenance_endpoint_algebraic_state_revision="
-          << maintenance_endpoint_revision
-          << " accepted_endpoint_algebraic_state_revision="
-          << accepted_state_revision
-          << " accepted_endpoint_matches_maintenance_end="
-          << (accepted_endpoint_matches_maintenance_end
-                  ? "true"
-                  : "false")
-          << " accepted_endpoint_match_scope=algebraic_state_revision_only"
-          << " subsequent_state_change_requires_separate_work="
-          << (maintenance_endpoint_available &&
-                      !accepted_endpoint_matches_maintenance_end
-                  ? "true"
-                  : "false")
-          << " complete_energy_record_connected=false"
-          << std::endl;
+      // Map entry R2.145; rank 0 prints it.
+      keepConsolePrecision();
+      logRecord(LogRecord("LevelSetEnergyParticipant", "maintenance-to-accepted endpoint connection")
+                    .diagnostic("level_set_maintenance_accepted_endpoint_connection")
+                    .rootOnly()
+                    .value("step", h.stepIndex())
+                    .value("attempt", maintenance_account.attempt)
+                    .boolean("maintenance_endpoint_available", maintenance_endpoint_available)
+                    .value("maintenance_endpoint_algebraic_state_revision", maintenance_endpoint_revision)
+                    .value("accepted_endpoint_algebraic_state_revision", accepted_state_revision)
+                    .boolean("accepted_endpoint_matches_maintenance_end", accepted_endpoint_matches_maintenance_end)
+                    .text("accepted_endpoint_match_scope", "algebraic_state_revision_only")
+                    .boolean("subsequent_state_change_requires_separate_work",
+                             maintenance_endpoint_available && !accepted_endpoint_matches_maintenance_end)
+                    .boolean("complete_energy_record_connected", false));
     }
     bool backward_euler_kinetic_work_bound = true;
     const auto accepted_functional_states =
@@ -1196,91 +1182,45 @@ void EnergyParticipant::publishAcceptedEnergy(
           component_energy_matches;
       const bool unclassified_post_maintenance_work_required =
           !stored_energy_endpoint_match;
-      oopCout()
-          << std::setprecision(17)
-          << "[svMultiPhysics::Application] Level-set maintenance-to-current accepted functional endpoint"
-          << " diagnostic=level_set_maintenance_current_functional_endpoint"
-          << " step=" << h.stepIndex()
-          << " attempt="
-          << pending_accepted_step_maintenance_energy_account
-                 ->attempt
-          << " maintenance_algebraic_state_revision="
-          << maintenance_endpoint.algebraic_state_revision
-          << " current_algebraic_state_revision="
-          << accepted_state_revision
-          << " algebraic_revision_matches="
-          << (algebraic_revision_matches ? "true" : "false")
-          << " maintenance_snapshot_set_revision="
-          << maintenance_endpoint.snapshot_set_revision
-          << " current_snapshot_set_revision="
-          << current_snapshot_set_revision
-          << " snapshot_revision_matches="
-          << (snapshot_revision_matches ? "true" : "false")
-          << " maintenance_mesh_topology_set_revision="
-          << maintenance_endpoint.mesh_topology_set_revision
-          << " current_mesh_topology_set_revision="
-          << current_mesh_topology_set_revision
-          << " mesh_topology_revision_matches="
-          << (mesh_topology_revision_matches
-                  ? "true"
-                  : "false")
-          << " maintenance_cut_topology_set_revision="
-          << maintenance_endpoint.cut_topology_set_revision
-          << " current_cut_topology_set_revision="
-          << current_cut_topology_set_revision
-          << " cut_topology_revision_matches="
-          << (cut_topology_revision_matches
-                  ? "true"
-                  : "false")
-          << " cut_topology_source=accepted_functional_state"
-          << " maintenance_extension_map_revision_available="
-          << (maintenance_endpoint.extension_map_revision
-                      .has_value()
-                  ? "true"
-                  : "false")
-          << " current_extension_map_revision_available="
-          << (current_extension_map_revision.has_value()
-                  ? "true"
-                  : "false")
-          << " maintenance_extension_map_revision="
-          << maintenance_endpoint.extension_map_revision
-                 .value_or(0u)
-          << " current_extension_map_revision="
-          << current_extension_map_revision.value_or(0u)
-          << " extension_revision_matches="
-          << (extension_revision_matches ? "true" : "false")
-          << " kinetic_energy_change_available="
-          << (current_kinetic_energy.has_value()
-                  ? "true"
-                  : "false")
-          << " kinetic_energy_change="
-          << kinetic_energy_change
-          << " gravitational_energy_change_available="
-          << (current_gravitational_energy.has_value()
-                  ? "true"
-                  : "false")
-          << " gravitational_energy_change="
-          << gravitational_energy_change
-          << " liquid_gas_surface_energy_change="
-          << liquid_gas_surface_energy_change
-          << " solid_liquid_wall_energy_change="
-          << solid_liquid_wall_energy_change
-          << " modeled_stored_energy_change_available="
-          << (modeled_energy_available ? "true" : "false")
-          << " modeled_stored_energy_change="
-          << modeled_stored_energy_change
-          << " unclassified_post_maintenance_work_required="
-          << (unclassified_post_maintenance_work_required
-                  ? "true"
-                  : "false")
-          << " stored_energy_endpoint_match_available="
-          << (stored_energy_endpoint_match_available
-                  ? "true"
-                  : "false")
-          << " stored_energy_endpoint_match="
-          << (stored_energy_endpoint_match ? "true" : "false")
-          << " complete_energy_record_connected=false"
-          << std::endl;
+      // Map entry R2.146; rank 0 prints it.
+      keepConsolePrecision();
+      logRecord(
+          LogRecord("LevelSetEnergyParticipant", "maintenance-to-current functional endpoint")
+              .diagnostic("level_set_maintenance_current_functional_endpoint")
+              .rootOnly()
+              .value("step", h.stepIndex())
+              .value("attempt", pending_accepted_step_maintenance_energy_account->attempt)
+              .value("maintenance_algebraic_state_revision", maintenance_endpoint.algebraic_state_revision)
+              .value("current_algebraic_state_revision", accepted_state_revision)
+              .boolean("algebraic_revision_matches", algebraic_revision_matches)
+              .value("maintenance_snapshot_set_revision", maintenance_endpoint.snapshot_set_revision)
+              .value("current_snapshot_set_revision", current_snapshot_set_revision)
+              .boolean("snapshot_revision_matches", snapshot_revision_matches)
+              .value("maintenance_mesh_topology_set_revision", maintenance_endpoint.mesh_topology_set_revision)
+              .value("current_mesh_topology_set_revision", current_mesh_topology_set_revision)
+              .boolean("mesh_topology_revision_matches", mesh_topology_revision_matches)
+              .value("maintenance_cut_topology_set_revision", maintenance_endpoint.cut_topology_set_revision)
+              .value("current_cut_topology_set_revision", current_cut_topology_set_revision)
+              .boolean("cut_topology_revision_matches", cut_topology_revision_matches)
+              .text("cut_topology_source", "accepted_functional_state")
+              .boolean("maintenance_extension_map_revision_available",
+                       maintenance_endpoint.extension_map_revision.has_value())
+              .boolean("current_extension_map_revision_available", current_extension_map_revision.has_value())
+              .value("maintenance_extension_map_revision", maintenance_endpoint.extension_map_revision.value_or(0u))
+              .value("current_extension_map_revision", current_extension_map_revision.value_or(0u))
+              .boolean("extension_revision_matches", extension_revision_matches)
+              .boolean("kinetic_energy_change_available", current_kinetic_energy.has_value())
+              .value("kinetic_energy_change", kinetic_energy_change)
+              .boolean("gravitational_energy_change_available", current_gravitational_energy.has_value())
+              .value("gravitational_energy_change", gravitational_energy_change)
+              .value("liquid_gas_surface_energy_change", liquid_gas_surface_energy_change)
+              .value("solid_liquid_wall_energy_change", solid_liquid_wall_energy_change)
+              .boolean("modeled_stored_energy_change_available", modeled_energy_available)
+              .value("modeled_stored_energy_change", modeled_stored_energy_change)
+              .boolean("unclassified_post_maintenance_work_required", unclassified_post_maintenance_work_required)
+              .boolean("stored_energy_endpoint_match_available", stored_energy_endpoint_match_available)
+              .boolean("stored_energy_endpoint_match", stored_energy_endpoint_match)
+              .boolean("complete_energy_record_connected", false));
     }
 
     FreeSurfaceCompleteEnergyBuildResult complete_energy_build;
@@ -1421,33 +1361,25 @@ void EnergyParticipant::publishAcceptedEnergy(
         missing_requirements
             << complete_energy_build.missing_requirements[index];
       }
-      oopCout()
-          << std::setprecision(17)
-          << "[svMultiPhysics::Application] Free-surface complete energy"
-          << " diagnostic=free_surface_complete_energy_record"
-          << " status=not_published"
-          << " step=" << h.stepIndex()
-          << " attempt="
-          << free_surface_energy_attempt
-          << " preceding_history_complete="
-          << (preceding_history_complete ? "true" : "false")
-          << " accepted_history_contiguous=false"
-          << " missing_requirement_count="
-          << complete_energy_build.missing_requirements.size()
-          << " missing_requirements="
-          << missing_requirements.str()
-          << " aggregation_present="
-          << (aggregation_energy.present ? "true" : "false")
-          << " aggregation_neutral="
-          << (aggregation_energy.neutral ? "true" : "false")
-          << " aggregation_rootless="
-          << (aggregation_energy.rootless ? "true" : "false")
-          << " aggregation_rooted_row_count="
-          << aggregation_energy.rooted_row_count
-          << " aggregation_maximum_constraint_residual="
-          << aggregation_energy.maximum_constraint_residual
-          << " complete_energy_record_connected=false"
-          << std::endl;
+      // Map entry R2.132; rank 0 prints it.
+      keepConsolePrecision();
+      logRecord(LogRecord("LevelSetEnergyParticipant", "complete energy record")
+                    .diagnostic("free_surface_complete_energy_record")
+                    .rootOnly()
+                    .text("status", "not_published")
+                    .value("step", h.stepIndex())
+                    .value("attempt", free_surface_energy_attempt)
+                    .boolean("preceding_history_complete", preceding_history_complete)
+                    .boolean("accepted_history_contiguous", false)
+                    .value("missing_requirement_count", complete_energy_build.missing_requirements.size())
+                    .text("missing_requirements", missing_requirements.str())
+                    .boolean("aggregation_present", aggregation_energy.present)
+                    .boolean("aggregation_neutral", aggregation_energy.neutral)
+                    .boolean("aggregation_rootless", aggregation_energy.rootless)
+                    .value("aggregation_rooted_row_count", aggregation_energy.rooted_row_count)
+                    .value("aggregation_maximum_constraint_residual",
+                           aggregation_energy.maximum_constraint_residual)
+                    .boolean("complete_energy_record_connected", false));
     } else {
       auto candidate =
           std::move(*complete_energy_build.candidate);
@@ -1463,99 +1395,64 @@ void EnergyParticipant::publishAcceptedEnergy(
       accepted_complete_energy_record_connected = true;
       const auto& record =
           free_surface_energy_ledger.acceptedAttempts().back();
-      auto& record_log = oopCout();
-      record_log
-          << std::setprecision(17)
-          << "[svMultiPhysics::Application] Free-surface complete energy"
-          << " diagnostic=free_surface_complete_energy_record"
-          << " status=accepted"
-          << " transaction_id="
-          << record.metadata.transaction_id
-          << " step=" << record.metadata.step
-          << " attempt=" << record.metadata.attempt
-          << " time_before=" << record.metadata.time_before
-          << " time_after=" << record.metadata.time_after
-          << " dt=" << record.metadata.dt
-          << " temporal_scheme=backward_euler"
-          << " physical_evaluation_time="
-          << record.metadata.physical_evaluation_time
-          << " physical_evaluation_stage_fraction="
-          << record.metadata.physical_evaluation_stage_fraction
-          << " algebraic_state_revision_before="
-          << record.metadata.algebraic_state_revision_before
-          << " physical_endpoint_algebraic_state_revision="
-          << record.metadata
-                 .physical_endpoint_algebraic_state_revision
-          << " algebraic_state_revision_after="
-          << record.metadata.algebraic_state_revision_after
-          << " snapshot_set_revision_before="
-          << record.metadata.snapshot_set_revision_before
-          << " physical_endpoint_snapshot_set_revision="
-          << record.metadata
-                 .physical_endpoint_snapshot_set_revision
-          << " snapshot_set_revision_after="
-          << record.metadata.snapshot_set_revision_after
-          << " mesh_topology_set_revision_before="
-          << record.metadata.mesh_topology_set_revision_before
-          << " physical_endpoint_mesh_topology_set_revision="
-          << record.metadata
-                 .physical_endpoint_mesh_topology_set_revision
-          << " mesh_topology_set_revision_after="
-          << record.metadata.mesh_topology_set_revision_after
-          << " cut_topology_set_revision_before="
-          << record.metadata.cut_topology_set_revision_before
-          << " physical_endpoint_cut_topology_set_revision="
-          << record.metadata
-                 .physical_endpoint_cut_topology_set_revision
-          << " cut_topology_set_revision_after="
-          << record.metadata.cut_topology_set_revision_after
-          << " extension_map_revision_present=false"
-          << " geometry_pruning_occurred=false";
-      appendCompleteEnergyChannelValues(
-          record_log,
-          free_surface_energy_ledger.catalogue(),
-          record);
-      record_log
-          << " stored_energy_change="
-          << record.accepted_stored_energy_change
-          << " physical_stored_energy_change="
-          << record.accepted_physical_stored_energy_change
-          << " maintenance_stored_energy_change="
-          << record.accepted_maintenance_stored_energy_change
-          << " integrated_physical_dissipation="
-          << record.accepted_integrated_physical_dissipation
-          << " external_work="
-          << record.accepted_external_work
-          << " numerical_work="
-          << record.accepted_numerical_work
-          << " accepted_balance_residual="
-          << record.accepted_balance_residual
-          << " aggregation_present="
-          << (aggregation_energy.present ? "true" : "false")
-          << " aggregation_neutral="
-          << (aggregation_energy.neutral ? "true" : "false")
-          << " aggregation_rooted_row_count="
-          << aggregation_energy.rooted_row_count
-          << " aggregation_maximum_constraint_residual="
-          << aggregation_energy.maximum_constraint_residual
-          << " accepted_history_contiguous=true"
-          << " complete_energy_record_connected=true"
-          << std::endl;
+      // Map entries R2.132 and R2.131; rank 0 prints them.
+      keepConsolePrecision();
+      LogRecord record_line("LevelSetEnergyParticipant", "complete energy record");
+      record_line.diagnostic("free_surface_complete_energy_record")
+          .rootOnly()
+          .text("status", "accepted")
+          .value("transaction_id", record.metadata.transaction_id)
+          .value("step", record.metadata.step)
+          .value("attempt", record.metadata.attempt)
+          .value("time_before", record.metadata.time_before)
+          .value("time_after", record.metadata.time_after)
+          .value("dt", record.metadata.dt)
+          .text("temporal_scheme", "backward_euler")
+          .value("physical_evaluation_time", record.metadata.physical_evaluation_time)
+          .value("physical_evaluation_stage_fraction", record.metadata.physical_evaluation_stage_fraction)
+          .value("algebraic_state_revision_before", record.metadata.algebraic_state_revision_before)
+          .value("physical_endpoint_algebraic_state_revision",
+                 record.metadata.physical_endpoint_algebraic_state_revision)
+          .value("algebraic_state_revision_after", record.metadata.algebraic_state_revision_after)
+          .value("snapshot_set_revision_before", record.metadata.snapshot_set_revision_before)
+          .value("physical_endpoint_snapshot_set_revision", record.metadata.physical_endpoint_snapshot_set_revision)
+          .value("snapshot_set_revision_after", record.metadata.snapshot_set_revision_after)
+          .value("mesh_topology_set_revision_before", record.metadata.mesh_topology_set_revision_before)
+          .value("physical_endpoint_mesh_topology_set_revision",
+                 record.metadata.physical_endpoint_mesh_topology_set_revision)
+          .value("mesh_topology_set_revision_after", record.metadata.mesh_topology_set_revision_after)
+          .value("cut_topology_set_revision_before", record.metadata.cut_topology_set_revision_before)
+          .value("physical_endpoint_cut_topology_set_revision",
+                 record.metadata.physical_endpoint_cut_topology_set_revision)
+          .value("cut_topology_set_revision_after", record.metadata.cut_topology_set_revision_after)
+          .boolean("extension_map_revision_present", false)
+          .boolean("geometry_pruning_occurred", false);
+      appendCompleteEnergyChannelValues(record_line, free_surface_energy_ledger.catalogue(), record);
+      record_line.value("stored_energy_change", record.accepted_stored_energy_change)
+          .value("physical_stored_energy_change", record.accepted_physical_stored_energy_change)
+          .value("maintenance_stored_energy_change", record.accepted_maintenance_stored_energy_change)
+          .value("integrated_physical_dissipation", record.accepted_integrated_physical_dissipation)
+          .value("external_work", record.accepted_external_work)
+          .value("numerical_work", record.accepted_numerical_work)
+          .value("accepted_balance_residual", record.accepted_balance_residual)
+          .boolean("aggregation_present", aggregation_energy.present)
+          .boolean("aggregation_neutral", aggregation_energy.neutral)
+          .value("aggregation_rooted_row_count", aggregation_energy.rooted_row_count)
+          .value("aggregation_maximum_constraint_residual", aggregation_energy.maximum_constraint_residual)
+          .boolean("accepted_history_contiguous", true)
+          .boolean("complete_energy_record_connected", true);
+      logRecord(record_line);
 
-      auto& source_log = oopCout();
-      source_log
-          << "[svMultiPhysics::Application] Free-surface complete energy"
-          << " diagnostic=free_surface_complete_energy_channel_sources"
-          << " status=accepted"
-          << " transaction_id=" << record.metadata.transaction_id
-          << " step=" << record.metadata.step
-          << " attempt=" << record.metadata.attempt;
-      appendCompleteEnergyChannelSources(
-          source_log,
-          free_surface_energy_ledger.catalogue(),
-          record);
-      source_log << " complete_energy_record_connected=true"
-                 << std::endl;
+      LogRecord source_line("LevelSetEnergyParticipant", "complete energy channel sources");
+      source_line.diagnostic("free_surface_complete_energy_channel_sources")
+          .rootOnly()
+          .text("status", "accepted")
+          .value("transaction_id", record.metadata.transaction_id)
+          .value("step", record.metadata.step)
+          .value("attempt", record.metadata.attempt);
+      appendCompleteEnergyChannelSources(source_line, free_surface_energy_ledger.catalogue(), record);
+      source_line.boolean("complete_energy_record_connected", true);
+      logRecord(source_line);
     }
   }
   if (pending_free_surface_residual_work_stage.has_value()) {
@@ -1589,44 +1486,29 @@ void EnergyParticipant::publishAcceptedEnergy(
             ->cut_stabilization_work.has_value() &&
         pending_accepted_step_physical_endpoint_channels
             ->ghost_penalty_work.has_value();
-    oopCout()
-        << std::setprecision(17)
-        << "[svMultiPhysics::Application] Free-surface residual work"
-        << " diagnostic=free_surface_residual_work_stage"
-        << " status=accepted"
-        << " step=" << residual_work_stage.step
-        << " attempt_index="
-        << residual_work_stage.attempt_index
-        << " time=" << residual_work_stage.time
-        << " dt=" << residual_work_stage.dt
-        << " algebraic_state_revision="
-        << residual_work_stage.algebraic_state_revision
-        << " maintenance_chain_start_available="
-        << (maintenance_chain_start_available ? "true" : "false")
-        << " maintenance_chain_start_matches="
-        << (maintenance_chain_start_matches ? "true" : "false")
-        << " physical_channel_connection_complete="
-        << (physical_channel_connection_complete ? "true" : "false")
-        << " accepted_state_convection_work="
-        << *residual_work_stage.channels.convection
-        << " accepted_state_pressure_continuity_work="
-        << *residual_work_stage.channels.pressure_continuity
-        << " accepted_state_nonconservative_body_force_work="
-        << *residual_work_stage.channels
-                .nonconservative_body_force
-        << " accepted_state_weak_boundary_work="
-        << *residual_work_stage.channels.weak_boundary
-        << " accepted_state_vms_pspg_work="
-        << *residual_work_stage.channels.vms_pspg
-        << " accepted_state_cut_stabilization_work="
-        << *residual_work_stage.channels.cut_stabilization
-        << " accepted_state_ghost_penalty_work="
-        << *residual_work_stage.channels.ghost_penalty
-        << " complete_energy_record_connected="
-        << (accepted_complete_energy_record_connected
-                ? "true"
-                : "false")
-        << std::endl;
+    // Map entry R2.133; rank 0 prints it.
+    keepConsolePrecision();
+    logRecord(LogRecord("LevelSetEnergyParticipant", "residual work stage")
+                  .diagnostic("free_surface_residual_work_stage")
+                  .rootOnly()
+                  .text("status", "accepted")
+                  .value("step", residual_work_stage.step)
+                  .value("attempt_index", residual_work_stage.attempt_index)
+                  .value("time", residual_work_stage.time)
+                  .value("dt", residual_work_stage.dt)
+                  .value("algebraic_state_revision", residual_work_stage.algebraic_state_revision)
+                  .boolean("maintenance_chain_start_available", maintenance_chain_start_available)
+                  .boolean("maintenance_chain_start_matches", maintenance_chain_start_matches)
+                  .boolean("physical_channel_connection_complete", physical_channel_connection_complete)
+                  .value("accepted_state_convection_work", *residual_work_stage.channels.convection)
+                  .value("accepted_state_pressure_continuity_work", *residual_work_stage.channels.pressure_continuity)
+                  .value("accepted_state_nonconservative_body_force_work",
+                         *residual_work_stage.channels.nonconservative_body_force)
+                  .value("accepted_state_weak_boundary_work", *residual_work_stage.channels.weak_boundary)
+                  .value("accepted_state_vms_pspg_work", *residual_work_stage.channels.vms_pspg)
+                  .value("accepted_state_cut_stabilization_work", *residual_work_stage.channels.cut_stabilization)
+                  .value("accepted_state_ghost_penalty_work", *residual_work_stage.channels.ghost_penalty)
+                  .boolean("complete_energy_record_connected", accepted_complete_energy_record_connected));
     pending_free_surface_residual_work_stage.reset();
   }
 }
@@ -1691,79 +1573,56 @@ void EnergyParticipant::recordRejectedAttempt(
     free_surface_energy_transaction_sequence = transaction_id;
     const auto& record =
         free_surface_energy_ledger.rejectedAttempts().back();
-    oopCout()
-        << std::setprecision(17)
-        << "[svMultiPhysics::Application] Free-surface complete energy"
-        << " diagnostic=free_surface_complete_energy_record"
-        << " status=rejected"
-        << " transaction_id="
-        << record.metadata.transaction_id
-        << " step=" << record.metadata.step
-        << " attempt=" << record.metadata.attempt
-        << " time_before=" << record.metadata.time_before
-        << " time_after=" << record.metadata.time_after
-        << " dt=" << record.metadata.dt
-        << " temporal_scheme=backward_euler"
-        << " time_loop_rejection_reason="
-        << stepRejectReasonName(reason)
-        << " ledger_rejection_reason="
-        << svmp::FE::systems::energyBalanceRejectionReasonName(
-               record.rejection_reason)
-        << " algebraic_state_revision_before="
-        << record.metadata.algebraic_state_revision_before
-        << " snapshot_set_revision_before="
-        << record.metadata.snapshot_set_revision_before
-        << " mesh_topology_set_revision_before="
-        << record.metadata.mesh_topology_set_revision_before
-        << " cut_topology_set_revision_before="
-        << record.metadata.cut_topology_set_revision_before
-        << " extension_map_revision_before_available="
-        << (record.metadata.extension_map_revision_before
-                    .has_value()
-                ? "true"
-                : "false")
-        << " extension_map_revision_before="
-        << record.metadata.extension_map_revision_before
-               .value_or(0u)
-        << " physical_endpoint_metadata_available=false"
-        << " topology_event_endpoint_metadata_available=false"
-        << " topology_change_mapped_to_preaccept="
-        << (reason == svmp::FE::timestepping::
-                          StepRejectReason::CutTopologyChanged
-                ? "true"
-                : "false")
-        << " balance_staged=false"
-        << " trial_balance_values_available=false"
-        << " accepted_stored_energy_change="
-        << record.accepted_stored_energy_change
-        << " accepted_physical_stored_energy_change="
-        << record.accepted_physical_stored_energy_change
-        << " accepted_maintenance_stored_energy_change="
-        << record.accepted_maintenance_stored_energy_change
-        << " accepted_integrated_physical_dissipation="
-        << record.accepted_integrated_physical_dissipation
-        << " accepted_external_work="
-        << record.accepted_external_work
-        << " accepted_numerical_work="
-        << record.accepted_numerical_work
-        << " accepted_balance_residual="
-        << record.accepted_balance_residual
-        << " accepted_history_contiguous=true"
-        << " complete_energy_attempt_connected=true"
-        << std::endl;
+    // Map entry R2.132; rank 0 prints it.
+    keepConsolePrecision();
+    logRecord(
+        LogRecord("LevelSetEnergyParticipant", "complete energy record")
+            .diagnostic("free_surface_complete_energy_record")
+            .rootOnly()
+            .text("status", "rejected")
+            .value("transaction_id", record.metadata.transaction_id)
+            .value("step", record.metadata.step)
+            .value("attempt", record.metadata.attempt)
+            .value("time_before", record.metadata.time_before)
+            .value("time_after", record.metadata.time_after)
+            .value("dt", record.metadata.dt)
+            .text("temporal_scheme", "backward_euler")
+            .text("time_loop_rejection_reason", stepRejectReasonName(reason))
+            .text("ledger_rejection_reason",
+                  svmp::FE::systems::energyBalanceRejectionReasonName(record.rejection_reason))
+            .value("algebraic_state_revision_before", record.metadata.algebraic_state_revision_before)
+            .value("snapshot_set_revision_before", record.metadata.snapshot_set_revision_before)
+            .value("mesh_topology_set_revision_before", record.metadata.mesh_topology_set_revision_before)
+            .value("cut_topology_set_revision_before", record.metadata.cut_topology_set_revision_before)
+            .boolean("extension_map_revision_before_available",
+                     record.metadata.extension_map_revision_before.has_value())
+            .value("extension_map_revision_before", record.metadata.extension_map_revision_before.value_or(0u))
+            .boolean("physical_endpoint_metadata_available", false)
+            .boolean("topology_event_endpoint_metadata_available", false)
+            .boolean("topology_change_mapped_to_preaccept",
+                     reason == svmp::FE::timestepping::StepRejectReason::CutTopologyChanged)
+            .boolean("balance_staged", false)
+            .boolean("trial_balance_values_available", false)
+            .value("accepted_stored_energy_change", record.accepted_stored_energy_change)
+            .value("accepted_physical_stored_energy_change", record.accepted_physical_stored_energy_change)
+            .value("accepted_maintenance_stored_energy_change", record.accepted_maintenance_stored_energy_change)
+            .value("accepted_integrated_physical_dissipation", record.accepted_integrated_physical_dissipation)
+            .value("accepted_external_work", record.accepted_external_work)
+            .value("accepted_numerical_work", record.accepted_numerical_work)
+            .value("accepted_balance_residual", record.accepted_balance_residual)
+            .boolean("accepted_history_contiguous", true)
+            .boolean("complete_energy_attempt_connected", true));
   } else if (complete_free_surface_energy_connector_available) {
-    oopCout()
-        << "[svMultiPhysics::Application] Free-surface complete energy"
-        << " diagnostic=free_surface_complete_energy_record"
-        << " status=not_published"
-        << " step=" << h.stepIndex() + 1
-        << " attempt=" << free_surface_energy_attempt
-        << " time_loop_rejection_reason="
-        << stepRejectReasonName(reason)
-        << " accepted_history_contiguous=false"
-        << " missing_requirements=preceding_complete_energy_history"
-        << " complete_energy_attempt_connected=false"
-        << std::endl;
+    logRecord(LogRecord("LevelSetEnergyParticipant", "complete energy record")
+                  .diagnostic("free_surface_complete_energy_record")
+                  .rootOnly()
+                  .text("status", "not_published")
+                  .value("step", h.stepIndex() + 1)
+                  .value("attempt", free_surface_energy_attempt)
+                  .text("time_loop_rejection_reason", stepRejectReasonName(reason))
+                  .boolean("accepted_history_contiguous", false)
+                  .text("missing_requirements", "preceding_complete_energy_history")
+                  .boolean("complete_energy_attempt_connected", false));
   }
 }
 

@@ -455,9 +455,13 @@ def cxx_shortest(x: float) -> str:
 def values_equal(base: str, new: str) -> bool:
     """The conversion gate's value comparison: the same text, the same
     double, or a new value that the base line's format prints as the base
-    text (the old line printed it rounded)."""
+    text (the old line printed it rounded); a point "(x,y,z)" component by
+    component."""
     if base == new:
         return True
+    if base[:1] == new[:1] == "(" and base[-1:] == new[-1:] == ")":
+        a, b = base[1:-1].split(","), new[1:-1].split(",")
+        return len(a) == len(b) and all(values_equal(x, y) for x, y in zip(a, b))
     b, n = value(base), value(new)
     if isinstance(b, bool) or isinstance(n, bool) or b is None or n is None:
         return False

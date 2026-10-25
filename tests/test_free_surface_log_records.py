@@ -180,3 +180,29 @@ def test_other_child_words_and_fieldless_lines_are_read():
             old_line = e["before"].get("head") or (marker + "./effective_configuration.json")
             assert marker in old_line
             assert L.line_diagnostic(old_line) == e["after"]["diagnostic"], e["id"]
+
+
+def test_declared_walls_are_child_lines_and_points_compare_by_component():
+    old = ("[R0] [INFO] FESystem: declared free-surface discrete functional "
+           "diagnostic=free_surface_discrete_functional_declaration interface_marker=7 young_wall_count=1 "
+           "contact_stage_count=1 owner='O' gravitational_acceleration=(0,-4.1699999999999999,0) "
+           "young_wall_marker=3 equilibrium_contact_angle_radians=1.0471975511965976 "
+           "contact_stage_marker=3 contact_stage_law=PrescribedAngle contact_stage_mobility=0")
+    new = [
+        "[R0] [INFO] FunctionalRecords: declared free-surface functional "
+        "diagnostic=free_surface_discrete_functional_declaration interface_marker=7 young_wall_count=1 "
+        "contact_stage_count=1 owner='O' gravitational_acceleration=(0,-4.17,0)",
+        "[R0] [INFO] FunctionalRecords: declared free-surface functional diagnostic=free_surface_wall_declaration "
+        "interface_marker=7 young_wall_marker=3 equilibrium_contact_angle_radians=1.0471975511965976",
+        "[R0] [INFO] FunctionalRecords: declared free-surface functional "
+        "diagnostic=free_surface_contact_stage_wall_declaration interface_marker=7 contact_stage_marker=3 "
+        "contact_stage_law=PrescribedAngle contact_stage_mobility=0",
+    ]
+    (a,) = L.records([old], "free_surface_discrete_functional_declaration")
+    (b,) = L.records(new, "free_surface_discrete_functional_declaration")
+    assert [k for k, _ in a.fields] == [k for k, _ in b.fields]
+    assert [(c.diagnostic, c.fields) for c in a.children] == [(c.diagnostic, c.fields) for c in b.children]
+    assert L.values_equal(a.get("gravitational_acceleration"), b.get("gravitational_acceleration"))
+    assert not L.values_equal("(0,-4.1699999999999999,0)", "(0,-4.18,0)")
+    assert not L.values_equal("(0,1)", "(0,1,0)")
+    assert all(L.lint_line(line) == [] for line in new)

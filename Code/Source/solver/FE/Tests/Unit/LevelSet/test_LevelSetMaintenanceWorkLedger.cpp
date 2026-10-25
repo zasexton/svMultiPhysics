@@ -372,10 +372,13 @@ TEST(LevelSetMaintenanceWorkLedger, PublicationLogsNameOnlyTheNewOutcome)
         GTEST_SKIP() << "This rank does not log.";
     }
     EXPECT_EQ(output.find("transaction_id=110"), std::string::npos);
+    // The log records of map entries R2.143 and R2.144.
     const auto attempt = output.find(
+        "LevelSetMaintenanceWorkLedger: work attempt "
         "diagnostic=level_set_maintenance_work_attempt transaction_id=111 "
         "status=accepted");
     const auto row = output.find(
+        "LevelSetMaintenanceWorkLedger: work row "
         "diagnostic=level_set_maintenance_work transaction_id=111 "
         "status=accepted substage=reinitialization");
     ASSERT_NE(attempt, std::string::npos);

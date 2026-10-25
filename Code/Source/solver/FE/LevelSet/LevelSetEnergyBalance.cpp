@@ -7,6 +7,7 @@
 
 #include "LevelSet/LevelSetEnergyBalance.h"
 
+#include "Core/LogRecord.h"
 #include "Core/RankLog.h"
 
 #include <algorithm>
@@ -15,8 +16,10 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -259,115 +262,51 @@ void logLevelSetMaintenancePhysicalEndpointChannels(
     throw std::logic_error(
         "[svMultiPhysics::Application] Physical endpoint channel logging requires a post-Transport endpoint.");
   }
-  const auto append_channel =
-      [](std::ostringstream& log,
-         std::string_view name,
-         std::optional<double> value) {
-        log << " " << name << "_available="
-            << (value.has_value() ? "true" : "false")
-            << " " << name << "=" << value.value_or(0.0);
-      };
-  std::ostringstream log;
-  log << std::setprecision(17)
-      << "[svMultiPhysics::Application] Level-set maintenance physical endpoint channels"
-      << " diagnostic=level_set_maintenance_physical_endpoint_channels"
-      << " step=" << account.step
-      << " attempt=" << account.attempt
-      << " time=" << account.time
-      << " dt=" << account.dt
-      << " preceding_accepted_step=" << preceding_accepted_step
-      << " preceding_accepted_time=" << preceding_accepted_time
-      << " preceding_state_revision=" << preceding_state_revision
-      << " preceding_snapshot_set_revision="
-      << preceding_snapshot_set_revision
-      << " preceding_mesh_topology_set_revision="
-      << preceding_mesh_topology_set_revision
-      << " preceding_cut_topology_set_revision="
-      << preceding_cut_topology_set_revision
-      << " preceding_extension_map_revision_available="
-      << (preceding_extension_map_revision.has_value()
-              ? "true"
-              : "false")
-      << " preceding_extension_map_revision="
-      << preceding_extension_map_revision.value_or(0u)
-      << " preceding_functional_count="
-      << preceding_functional_count
-      << " preceding_surface_wall_energy="
-      << preceding_surface_wall_energy
-      << " post_transport_algebraic_state_revision="
-      << account.post_transport->algebraic_state_revision
-      << " post_transport_snapshot_set_revision="
-      << account.post_transport->snapshot_set_revision
-      << " post_transport_mesh_topology_set_revision="
-      << account.post_transport->mesh_topology_set_revision
-      << " post_transport_cut_topology_set_revision="
-      << account.post_transport->cut_topology_set_revision
-      << " post_transport_extension_map_revision="
-      << account.post_transport->extension_map_revision.value_or(0u)
-      << " active_volume_owner_available="
-      << (active_volume_owner_interface_marker.has_value()
-              ? "true"
-              : "false")
-      << " active_volume_owner_interface_marker="
-      << active_volume_owner_interface_marker.value_or(-1);
-  append_channel(
-      log,
-      "preceding_gravitational_energy",
-      preceding_gravitational_energy);
-  append_channel(
-      log,
-      "surface_wall_energy_change",
-      channels.surface_wall_energy_change);
-  append_channel(
-      log,
-      "surface_transport_coupling_work",
-      channels.surface_transport_coupling_work);
-  append_channel(
-      log,
-      "gravitational_energy_change",
-      channels.gravitational_energy_change);
-  append_channel(
-      log,
-      "gravitational_transport_coupling_work",
-      channels.gravitational_transport_coupling_work);
-  append_channel(
-      log,
-      "bulk_viscous_dissipation_rate",
-      channels.bulk_viscous_dissipation_rate);
-  append_channel(
-      log,
-      "external_pressure_work",
-      channels.external_pressure_work);
-  append_channel(
-      log,
-      "convection_work",
-      channels.convection_work);
-  append_channel(
-      log,
-      "pressure_continuity_work",
-      channels.pressure_continuity_work);
-  append_channel(
-      log,
-      "nonconservative_body_force_work",
-      channels.nonconservative_body_force_work);
-  append_channel(
-      log,
-      "weak_boundary_work",
-      channels.weak_boundary_work);
-  append_channel(
-      log,
-      "vms_pspg_work",
-      channels.vms_pspg_work);
-  append_channel(
-      log,
-      "cut_stabilization_work",
-      channels.cut_stabilization_work);
-  append_channel(
-      log,
-      "ghost_penalty_work",
-      channels.ghost_penalty_work);
-  log << " complete_energy_record_connected=false";
-  svmp::FE::rank_log::oopCout() << log.str() << std::endl;
+  // Map entry R2.139; rank 0 prints it.
+  svmp::FE::LogRecord log("LevelSetEnergyBalance", "maintenance physical endpoint channels");
+  const auto append_channel = [&log](std::string_view name, std::optional<double> value) {
+    const std::string key(name);
+    log.boolean(key + "_available", value.has_value()).value(key, value.value_or(0.0));
+  };
+  log.diagnostic("level_set_maintenance_physical_endpoint_channels")
+      .rootOnly()
+      .value("step", account.step)
+      .value("attempt", account.attempt)
+      .value("time", account.time)
+      .value("dt", account.dt)
+      .value("preceding_accepted_step", preceding_accepted_step)
+      .value("preceding_accepted_time", preceding_accepted_time)
+      .value("preceding_state_revision", preceding_state_revision)
+      .value("preceding_snapshot_set_revision", preceding_snapshot_set_revision)
+      .value("preceding_mesh_topology_set_revision", preceding_mesh_topology_set_revision)
+      .value("preceding_cut_topology_set_revision", preceding_cut_topology_set_revision)
+      .boolean("preceding_extension_map_revision_available", preceding_extension_map_revision.has_value())
+      .value("preceding_extension_map_revision", preceding_extension_map_revision.value_or(0u))
+      .value("preceding_functional_count", preceding_functional_count)
+      .value("preceding_surface_wall_energy", preceding_surface_wall_energy)
+      .value("post_transport_algebraic_state_revision", account.post_transport->algebraic_state_revision)
+      .value("post_transport_snapshot_set_revision", account.post_transport->snapshot_set_revision)
+      .value("post_transport_mesh_topology_set_revision", account.post_transport->mesh_topology_set_revision)
+      .value("post_transport_cut_topology_set_revision", account.post_transport->cut_topology_set_revision)
+      .value("post_transport_extension_map_revision", account.post_transport->extension_map_revision.value_or(0u))
+      .boolean("active_volume_owner_available", active_volume_owner_interface_marker.has_value())
+      .value("active_volume_owner_interface_marker", active_volume_owner_interface_marker.value_or(-1));
+  append_channel("preceding_gravitational_energy", preceding_gravitational_energy);
+  append_channel("surface_wall_energy_change", channels.surface_wall_energy_change);
+  append_channel("surface_transport_coupling_work", channels.surface_transport_coupling_work);
+  append_channel("gravitational_energy_change", channels.gravitational_energy_change);
+  append_channel("gravitational_transport_coupling_work", channels.gravitational_transport_coupling_work);
+  append_channel("bulk_viscous_dissipation_rate", channels.bulk_viscous_dissipation_rate);
+  append_channel("external_pressure_work", channels.external_pressure_work);
+  append_channel("convection_work", channels.convection_work);
+  append_channel("pressure_continuity_work", channels.pressure_continuity_work);
+  append_channel("nonconservative_body_force_work", channels.nonconservative_body_force_work);
+  append_channel("weak_boundary_work", channels.weak_boundary_work);
+  append_channel("vms_pspg_work", channels.vms_pspg_work);
+  append_channel("cut_stabilization_work", channels.cut_stabilization_work);
+  append_channel("ghost_penalty_work", channels.ghost_penalty_work);
+  log.boolean("complete_energy_record_connected", false);
+  svmp::FE::logRecord(log);
 }
 
 FreeSurfaceAcceptedEnergyGroup summarizeAcceptedFreeSurfaceEnergyGroup(

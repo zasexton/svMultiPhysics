@@ -8,6 +8,7 @@
 #include "Systems/FunctionalRecords.h"
 
 #include "Core/FEException.h"
+#include "Core/LogRecord.h"
 #include "Core/Logger.h"
 #include "Spaces/FunctionSpace.h"
 #include "Systems/FreeSurfaceFunctionalRounding.h"
@@ -1105,94 +1106,65 @@ void FunctionalRecords::declareFunctional(
             return candidate.interface_marker ==
                    declared_marker;
         });
-    std::ostringstream message;
-    message << std::setprecision(17)
-            << "FESystem: declared free-surface discrete functional"
-            << " diagnostic=free_surface_discrete_functional_declaration"
-            << " interface_marker=" << stored.interface_marker
-            << " level_set_field=" << stored.level_set_field
-            << " velocity_field=" << stored.velocity_field
-            << " geometry_domain_id='" << stored.geometry_domain_id << "'"
-            << " liquid_side="
-            << (stored.parameters.liquid_side ==
-                        geometry::CutIntegrationSide::Negative
-                    ? "Negative"
-                    : "Positive")
-            << " surface_tension=" << stored.parameters.surface_tension
-            << " volume_multiplier=" << stored.parameters.volume_multiplier
-            << " young_wall_count="
-            << stored.parameters.young_wall_coefficients.size()
-            << " contact_stage_count="
-            << stored.parameters.dynamic_contact_coefficients.size()
-            << " active_volume_energy="
-            << (stored.active_volume_energy_parameters.has_value()
-                    ? "enabled"
-                    : "disabled")
-            << " static_conservative_body_force_complete="
-            << (stored.static_conservative_body_force_complete ? 1 : 0)
-            << " active_volume_dissipation="
-            << (stored.active_volume_dissipation_parameters.has_value()
-                    ? "enabled"
-                    : "disabled")
-            << " external_pressure_power="
-            << (stored.external_pressure_power_parameters.has_value()
-                    ? "enabled"
-                    : "disabled")
-            << " endpoint_functional_power="
-            << (stored.endpoint_functional_power_enabled
-                    ? "enabled"
-                    : "disabled")
-            << " capillary_balance_method="
-            << (stored.capillary_balance_method ==
-                        FreeSurfaceCapillaryBalanceMethod::
-                            DiscreteEnergyVolumeStationarity
-                    ? "discrete_energy_volume_stationarity"
-                    : "unselected")
-            << " capillary_balance_qualification="
-            << (stored.capillary_balance_qualification ==
-                        FreeSurfaceCapillaryBalanceQualification::Qualified
-                    ? "qualified"
-                    : stored.capillary_balance_qualification ==
-                              FreeSurfaceCapillaryBalanceQualification::
-                                  PrerequisiteOnly
-                          ? "prerequisite_only"
-                          : "unselected")
-            << " owner='" << stored.owner_component << "'";
+    // The declaration record (map entry R2.11), the Young walls and the
+    // contact-stage walls as child lines.
+    const auto point = [](const std::array<Real, 3>& x) {
+        return "(" + LogRecord::shortestReal(x[0]) + "," + LogRecord::shortestReal(x[1]) + "," +
+               LogRecord::shortestReal(x[2]) + ")";
+    };
+    LogRecord log_line("FunctionalRecords", "declared free-surface functional");
+    log_line.diagnostic("free_surface_discrete_functional_declaration")
+        .value("interface_marker", stored.interface_marker)
+        .value("level_set_field", stored.level_set_field)
+        .value("velocity_field", stored.velocity_field)
+        .quoted("geometry_domain_id", stored.geometry_domain_id)
+        .text("liquid_side",
+              stored.parameters.liquid_side == geometry::CutIntegrationSide::Negative ? "Negative" : "Positive")
+        .value("surface_tension", stored.parameters.surface_tension)
+        .value("volume_multiplier", stored.parameters.volume_multiplier)
+        .value("young_wall_count", stored.parameters.young_wall_coefficients.size())
+        .value("contact_stage_count", stored.parameters.dynamic_contact_coefficients.size())
+        .text("active_volume_energy", stored.active_volume_energy_parameters.has_value() ? "enabled" : "disabled")
+        .integer("static_conservative_body_force_complete", stored.static_conservative_body_force_complete ? 1 : 0)
+        .text("active_volume_dissipation",
+              stored.active_volume_dissipation_parameters.has_value() ? "enabled" : "disabled")
+        .text("external_pressure_power",
+              stored.external_pressure_power_parameters.has_value() ? "enabled" : "disabled")
+        .text("endpoint_functional_power", stored.endpoint_functional_power_enabled ? "enabled" : "disabled")
+        .text("capillary_balance_method",
+              stored.capillary_balance_method == FreeSurfaceCapillaryBalanceMethod::DiscreteEnergyVolumeStationarity
+                  ? "discrete_energy_volume_stationarity"
+                  : "unselected")
+        .text("capillary_balance_qualification",
+              stored.capillary_balance_qualification == FreeSurfaceCapillaryBalanceQualification::Qualified
+                  ? "qualified"
+                  : stored.capillary_balance_qualification ==
+                            FreeSurfaceCapillaryBalanceQualification::PrerequisiteOnly
+                        ? "prerequisite_only"
+                        : "unselected")
+        .quoted("owner", stored.owner_component);
     if (stored.active_volume_energy_parameters.has_value()) {
-        const auto& energy =
-            *stored.active_volume_energy_parameters;
-        message
-            << " active_volume_density=" << energy.density
-            << " gravitational_acceleration=("
-            << energy.gravitational_acceleration[0] << ","
-            << energy.gravitational_acceleration[1] << ","
-            << energy.gravitational_acceleration[2] << ")"
-            << " gravitational_reference_point=("
-            << energy.gravitational_reference_point[0] << ","
-            << energy.gravitational_reference_point[1] << ","
-            << energy.gravitational_reference_point[2] << ")";
+        const auto& energy = *stored.active_volume_energy_parameters;
+        log_line.value("active_volume_density", energy.density)
+            .text("gravitational_acceleration", point(energy.gravitational_acceleration))
+            .text("gravitational_reference_point", point(energy.gravitational_reference_point));
     }
     for (const auto& wall : stored.parameters.young_wall_coefficients) {
-        message << " young_wall_marker=" << wall.boundary_marker
-                << " equilibrium_contact_angle_radians="
-                << wall.equilibrium_contact_angle_radians;
+        log_line.child("free_surface_wall_declaration", {"interface_marker"})
+            .value("young_wall_marker", wall.boundary_marker)
+            .value("equilibrium_contact_angle_radians", wall.equilibrium_contact_angle_radians);
     }
-    for (const auto& contact :
-         stored.parameters.dynamic_contact_coefficients) {
-        message << " contact_stage_marker=" << contact.boundary_marker
-                << " contact_stage_law="
-                << (contact.law ==
-                            interfaces::FreeSurfaceContactLaw::DynamicRenE
-                        ? "DynamicRenE"
-                        : "PrescribedAngle")
-                << " contact_stage_equilibrium_angle_radians="
-                << contact.equilibrium_contact_angle_radians
-                << " contact_stage_mobility=" << contact.mobility
-                << " contact_stage_slip_length=" << contact.slip_length
-                << " contact_stage_viscosity="
-                << contact.dynamic_viscosity;
+    for (const auto& contact : stored.parameters.dynamic_contact_coefficients) {
+        log_line.child("free_surface_contact_stage_wall_declaration", {"interface_marker"})
+            .value("contact_stage_marker", contact.boundary_marker)
+            .text("contact_stage_law",
+                  contact.law == interfaces::FreeSurfaceContactLaw::DynamicRenE ? "DynamicRenE" : "PrescribedAngle")
+            .value("contact_stage_equilibrium_angle_radians", contact.equilibrium_contact_angle_radians)
+            .value("contact_stage_mobility", contact.mobility)
+            .value("contact_stage_slip_length", contact.slip_length)
+            .value("contact_stage_viscosity", contact.dynamic_viscosity);
     }
-    FE_LOG_INFO(message.str());
+    logRecord(log_line);
 }
 
 void FunctionalRecords::recordAcceptedFunctionals(
@@ -2570,216 +2542,134 @@ void FunctionalRecords::recordAcceptedFunctionals(
             });
         const auto& revision = accepted.geometry_revision;
         const auto& state = accepted.state;
-        std::ostringstream message;
-        message << std::setprecision(17)
-                << "FESystem: accepted free-surface discrete functional"
-                << " diagnostic=free_surface_discrete_functional_history"
-                << " accepted_step=" << accepted_step
-                << " accepted_time=" << accepted_time
-                << " dt=" << dt
-                << " pre_maintenance_endpoint_state_revision="
-                << pre_maintenance_endpoint_state_revision
-                << " state_revision=" << state_revision
-                << " extension_map_revision_available="
-                << (extension_map_revision.has_value()
-                        ? "true"
-                        : "false")
-                << " extension_map_revision="
-                << extension_map_revision.value_or(0u)
-                << " interface_marker=" << declaration.interface_marker
-                << " level_set_field=" << declaration.level_set_field
-                << " velocity_field=" << declaration.velocity_field
-                << " capillary_balance_method="
-                << (declaration.capillary_balance_method ==
-                            FreeSurfaceCapillaryBalanceMethod::
-                                DiscreteEnergyVolumeStationarity
-                        ? "discrete_energy_volume_stationarity"
-                        : "unselected")
-                << " capillary_balance_qualification="
-                << (declaration.capillary_balance_qualification ==
-                            FreeSurfaceCapillaryBalanceQualification::Qualified
-                        ? "qualified"
-                        : declaration.capillary_balance_qualification ==
-                                  FreeSurfaceCapillaryBalanceQualification::
-                                      PrerequisiteOnly
-                              ? "prerequisite_only"
-                              : "unselected")
-                << " geometry_source_id='" << revision.source_id << "'"
-                << " geometry_domain_id='" << revision.domain_id << "'"
-                << " geometry_isovalue=" << revision.isovalue
-                << " source_layout_revision="
-                << revision.source_layout_revision
-                << " source_value_revision="
-                << revision.source_value_revision
-                << " mesh_geometry_revision="
-                << revision.mesh_geometry_revision
-                << " mesh_topology_revision="
-                << revision.mesh_topology_revision
-                << " ownership_revision=" << revision.ownership_revision
-                << " numbering_revision=" << revision.numbering_revision
-                << " quadrature_policy_key="
-                << revision.quadrature_policy_key
-                << " snapshot_revision="
-                << revision.snapshot_revision_key
-                << " cut_topology_revision="
-                << accepted.cut_topology_revision
-                << " geometry_pruning_occurred="
-                << (accepted.geometry_pruning_occurred
-                        ? "true"
-                        : "false")
-                << " liquid_side="
-                << (state.liquid_side ==
-                            geometry::CutIntegrationSide::Negative
-                        ? "Negative"
-                        : "Positive")
-                << " surface_tension=" << state.surface_tension
-                << " volume_multiplier=" << state.volume_multiplier
-                << " liquid_volume=" << state.owned_liquid_volume
-                << " liquid_gas_area=" << state.owned_liquid_gas_area
-                << " wetted_wall_area=" << state.owned_wetted_wall_area
-                << " contact_measure=" << state.owned_contact_measure
-                << " liquid_gas_surface_energy="
-                << state.liquid_gas_surface_energy
-                << " young_wall_energy=" << state.young_wall_energy
-                << " volume_constraint_potential="
-                << state.volume_constraint_potential
-                << " total_potential=" << state.total_potential
-                << " wall_count=" << state.walls.size()
-                << " owner='" << declaration.owner_component << "'";
+        // The history record (map entry R2.6), the walls and the
+        // contact-stage walls as child lines.
+        LogRecord log_line("FunctionalRecords", "accepted free-surface functionals");
+        log_line.diagnostic("free_surface_discrete_functional_history")
+            .value("accepted_step", accepted_step)
+            .value("accepted_time", accepted_time)
+            .value("dt", dt)
+            .value("pre_maintenance_endpoint_state_revision", pre_maintenance_endpoint_state_revision)
+            .value("state_revision", state_revision)
+            .boolean("extension_map_revision_available", extension_map_revision.has_value())
+            .value("extension_map_revision", extension_map_revision.value_or(0u))
+            .value("interface_marker", declaration.interface_marker)
+            .value("level_set_field", declaration.level_set_field)
+            .value("velocity_field", declaration.velocity_field)
+            .text("capillary_balance_method",
+                  declaration.capillary_balance_method ==
+                          FreeSurfaceCapillaryBalanceMethod::DiscreteEnergyVolumeStationarity
+                      ? "discrete_energy_volume_stationarity"
+                      : "unselected")
+            .text("capillary_balance_qualification",
+                  declaration.capillary_balance_qualification == FreeSurfaceCapillaryBalanceQualification::Qualified
+                      ? "qualified"
+                      : declaration.capillary_balance_qualification ==
+                                FreeSurfaceCapillaryBalanceQualification::PrerequisiteOnly
+                            ? "prerequisite_only"
+                            : "unselected")
+            .quoted("geometry_source_id", revision.source_id)
+            .quoted("geometry_domain_id", revision.domain_id)
+            .value("geometry_isovalue", revision.isovalue)
+            .value("source_layout_revision", revision.source_layout_revision)
+            .value("source_value_revision", revision.source_value_revision)
+            .value("mesh_geometry_revision", revision.mesh_geometry_revision)
+            .value("mesh_topology_revision", revision.mesh_topology_revision)
+            .value("ownership_revision", revision.ownership_revision)
+            .value("numbering_revision", revision.numbering_revision)
+            .value("quadrature_policy_key", revision.quadrature_policy_key)
+            .value("snapshot_revision", revision.snapshot_revision_key)
+            .value("cut_topology_revision", accepted.cut_topology_revision)
+            .boolean("geometry_pruning_occurred", accepted.geometry_pruning_occurred)
+            .text("liquid_side", state.liquid_side == geometry::CutIntegrationSide::Negative ? "Negative" : "Positive")
+            .value("surface_tension", state.surface_tension)
+            .value("volume_multiplier", state.volume_multiplier)
+            .value("liquid_volume", state.owned_liquid_volume)
+            .value("liquid_gas_area", state.owned_liquid_gas_area)
+            .value("wetted_wall_area", state.owned_wetted_wall_area)
+            .value("contact_measure", state.owned_contact_measure)
+            .value("liquid_gas_surface_energy", state.liquid_gas_surface_energy)
+            .value("young_wall_energy", state.young_wall_energy)
+            .value("volume_constraint_potential", state.volume_constraint_potential)
+            .value("total_potential", state.total_potential)
+            .value("wall_count", state.walls.size())
+            .quoted("owner", declaration.owner_component);
         if (accepted.endpoint_functional_power.has_value()) {
-            const auto& power =
-                *accepted.endpoint_functional_power;
-            message
-                << " endpoint_liquid_volume_power="
-                << power.owned_liquid_volume_variation
-                << " endpoint_liquid_gas_area_power="
-                << power.owned_liquid_gas_area_variation
-                << " endpoint_wetted_wall_area_power="
-                << power.owned_wetted_wall_area_variation
-                << " endpoint_liquid_gas_surface_energy_power="
-                << power.liquid_gas_surface_energy_variation
-                << " endpoint_young_wall_energy_power="
-                << power.young_wall_energy_variation
-                << " endpoint_volume_constraint_power="
-                << power.volume_constraint_potential_variation
-                << " endpoint_total_functional_power="
-                << power.total_potential_variation;
+            const auto& power = *accepted.endpoint_functional_power;
+            log_line.value("endpoint_liquid_volume_power", power.owned_liquid_volume_variation)
+                .value("endpoint_liquid_gas_area_power", power.owned_liquid_gas_area_variation)
+                .value("endpoint_wetted_wall_area_power", power.owned_wetted_wall_area_variation)
+                .value("endpoint_liquid_gas_surface_energy_power", power.liquid_gas_surface_energy_variation)
+                .value("endpoint_young_wall_energy_power", power.young_wall_energy_variation)
+                .value("endpoint_volume_constraint_power", power.volume_constraint_potential_variation)
+                .value("endpoint_total_functional_power", power.total_potential_variation);
         }
         if (accepted.active_volume_energy.has_value()) {
             const auto& energy = *accepted.active_volume_energy;
-            message
-                << " active_volume_qpoints="
-                << energy.owned_quadrature_point_count
-                << " active_volume_liquid_measure="
-                << energy.owned_liquid_volume
-                << " kinetic_energy=" << energy.kinetic_energy
-                << " gravitational_energy="
-                << energy.gravitational_energy
-                << " gravitational_potential_power="
-                << energy.gravitational_potential_power
-                << " active_volume_total_energy="
-                << energy.total_energy;
+            log_line.value("active_volume_qpoints", energy.owned_quadrature_point_count)
+                .value("active_volume_liquid_measure", energy.owned_liquid_volume)
+                .value("kinetic_energy", energy.kinetic_energy)
+                .value("gravitational_energy", energy.gravitational_energy)
+                .value("gravitational_potential_power", energy.gravitational_potential_power)
+                .value("active_volume_total_energy", energy.total_energy);
         }
         if (accepted.active_volume_dissipation.has_value()) {
-            const auto& dissipation =
-                *accepted.active_volume_dissipation;
-            message
-                << " active_volume_dissipation_qpoints="
-                << dissipation.owned_quadrature_point_count
-                << " active_volume_dissipation_liquid_measure="
-                << dissipation.owned_liquid_volume
-                << " bulk_viscous_dissipation_rate="
-                << dissipation.bulk_viscous_dissipation_rate;
+            const auto& dissipation = *accepted.active_volume_dissipation;
+            log_line.value("active_volume_dissipation_qpoints", dissipation.owned_quadrature_point_count)
+                .value("active_volume_dissipation_liquid_measure", dissipation.owned_liquid_volume)
+                .value("bulk_viscous_dissipation_rate", dissipation.bulk_viscous_dissipation_rate);
         }
         if (accepted.external_pressure_power.has_value()) {
-            const auto& pressure =
-                *accepted.external_pressure_power;
-            message
-                << " exterior_pressure_surface_qpoints="
-                << pressure.owned_quadrature_point_count
-                << " exterior_pressure_surface_area="
-                << pressure.owned_liquid_gas_area
-                << " exterior_pressure_outward_liquid_flux_rate="
-                << pressure.outward_liquid_volume_flux_rate
-                << " exterior_pressure=" << pressure.external_pressure
-                << " exterior_pressure_power="
-                << pressure.external_pressure_power;
+            const auto& pressure = *accepted.external_pressure_power;
+            log_line.value("exterior_pressure_surface_qpoints", pressure.owned_quadrature_point_count)
+                .value("exterior_pressure_surface_area", pressure.owned_liquid_gas_area)
+                .value("exterior_pressure_outward_liquid_flux_rate", pressure.outward_liquid_volume_flux_rate)
+                .value("exterior_pressure", pressure.external_pressure)
+                .value("exterior_pressure_power", pressure.external_pressure_power);
         }
         if (accepted.backward_euler_kinetic_work.has_value()) {
-            const auto& work =
-                *accepted.backward_euler_kinetic_work;
-            message
-                << " backward_euler_previous_velocity_revision="
-                << work.previous_velocity_revision
-                << " backward_euler_endpoint_velocity_revision="
-                << work.endpoint_velocity_revision
-                << " backward_euler_kinetic_before_on_endpoint_domain="
-                << work.kinetic_energy_before_on_endpoint_domain
-                << " backward_euler_kinetic_after="
-                << work.kinetic_energy_after
-                << " backward_euler_kinetic_change_on_endpoint_domain="
-                << work.kinetic_energy_change_on_endpoint_domain
-                << " backward_euler_step_integrated_inertia_work="
-                << work.step_integrated_inertia_work
-                << " backward_euler_time_discretization_loss="
-                << work.time_discretization_loss
-                << " backward_euler_kinetic_identity_residual="
-                << work.identity_residual;
+            const auto& work = *accepted.backward_euler_kinetic_work;
+            log_line.value("backward_euler_previous_velocity_revision", work.previous_velocity_revision)
+                .value("backward_euler_endpoint_velocity_revision", work.endpoint_velocity_revision)
+                .value("backward_euler_kinetic_before_on_endpoint_domain",
+                       work.kinetic_energy_before_on_endpoint_domain)
+                .value("backward_euler_kinetic_after", work.kinetic_energy_after)
+                .value("backward_euler_kinetic_change_on_endpoint_domain",
+                       work.kinetic_energy_change_on_endpoint_domain)
+                .value("backward_euler_step_integrated_inertia_work", work.step_integrated_inertia_work)
+                .value("backward_euler_time_discretization_loss", work.time_discretization_loss)
+                .value("backward_euler_kinetic_identity_residual", work.identity_residual);
         }
         for (const auto& wall : state.walls) {
-            message << " wall_marker=" << wall.boundary_marker;
-            if (wall.equilibrium_contact_angle_radians.has_value()) {
-                message << " wall_equilibrium_contact_angle_radians="
-                        << *wall.equilibrium_contact_angle_radians;
-            } else {
-                message << " wall_equilibrium_contact_angle_radians=none";
-            }
-            message << " wall_wetted_area="
-                    << wall.owned_wetted_wall_area
-                    << " wall_contact_measure="
-                    << wall.owned_contact_measure
-                    << " wall_young_energy=" << wall.young_wall_energy;
+            log_line.child("free_surface_wall_history", {"accepted_step", "interface_marker"})
+                .value("wall_marker", wall.boundary_marker)
+                .optionalReal("wall_equilibrium_contact_angle_radians", wall.equilibrium_contact_angle_radians)
+                .value("wall_wetted_area", wall.owned_wetted_wall_area)
+                .value("wall_contact_measure", wall.owned_contact_measure)
+                .value("wall_young_energy", wall.young_wall_energy);
         }
         if (accepted.contact_stage.has_value()) {
             const auto& contact_stage = *accepted.contact_stage;
-            message
-                << " contact_stage_time=" << contact_stage.stage_time
-                << " contact_stage_alpha_f="
-                << contact_stage.stage_alpha_f
-                << " contact_stage_previous_state_revision="
-                << contact_stage.previous_state_revision
-                << " contact_stage_endpoint_state_revision="
-                << contact_stage.endpoint_state_revision
-                << " contact_stage_state_revision="
-                << contact_stage.stage_state_revision
-                << " contact_stage_snapshot_revision="
-                << contact_stage.geometry_revision.snapshot_revision_key
-                << " contact_stage_source_value_revision="
-                << contact_stage.geometry_revision.source_value_revision
-                << " contact_stage_measure="
-                << contact_stage.state.owned_contact_measure
-                << " contact_stage_wetted_wall_measure="
-                << contact_stage.state.owned_wetted_wall_measure
-                << " contact_stage_line_friction_dissipation="
-                << contact_stage.state.line_friction_dissipation
-                << " contact_stage_wall_slip_dissipation="
-                << contact_stage.state.wall_slip_dissipation
-                << " contact_stage_total_dissipation="
-                << contact_stage.state.total_dissipation;
+            log_line.value("contact_stage_time", contact_stage.stage_time)
+                .value("contact_stage_alpha_f", contact_stage.stage_alpha_f)
+                .value("contact_stage_previous_state_revision", contact_stage.previous_state_revision)
+                .value("contact_stage_endpoint_state_revision", contact_stage.endpoint_state_revision)
+                .value("contact_stage_state_revision", contact_stage.stage_state_revision)
+                .value("contact_stage_snapshot_revision", contact_stage.geometry_revision.snapshot_revision_key)
+                .value("contact_stage_source_value_revision", contact_stage.geometry_revision.source_value_revision)
+                .value("contact_stage_measure", contact_stage.state.owned_contact_measure)
+                .value("contact_stage_wetted_wall_measure", contact_stage.state.owned_wetted_wall_measure)
+                .value("contact_stage_line_friction_dissipation", contact_stage.state.line_friction_dissipation)
+                .value("contact_stage_wall_slip_dissipation", contact_stage.state.wall_slip_dissipation)
+                .value("contact_stage_total_dissipation", contact_stage.state.total_dissipation);
             if (contact_stage.first_order_generalized_alpha.has_value()) {
-                const auto& generalized_alpha =
-                    *contact_stage.first_order_generalized_alpha;
-                message
-                    << " contact_stage_generalized_alpha_alpha_m="
-                    << generalized_alpha.alpha_m
-                    << " contact_stage_generalized_alpha_alpha_f="
-                    << generalized_alpha.alpha_f
-                    << " contact_stage_generalized_alpha_gamma="
-                    << generalized_alpha.gamma
-                    << " contact_stage_generalized_alpha_dt="
-                    << generalized_alpha.dt;
+                const auto& generalized_alpha = *contact_stage.first_order_generalized_alpha;
+                log_line.value("contact_stage_generalized_alpha_alpha_m", generalized_alpha.alpha_m)
+                    .value("contact_stage_generalized_alpha_alpha_f", generalized_alpha.alpha_f)
+                    .value("contact_stage_generalized_alpha_gamma", generalized_alpha.gamma)
+                    .value("contact_stage_generalized_alpha_dt", generalized_alpha.dt);
             } else {
-                message << " contact_stage_generalized_alpha=none";
+                log_line.text("contact_stage_generalized_alpha", "none");
             }
             for (const auto& contact : contact_stage.state.walls) {
                 const char* motion = "Absent";
@@ -2799,134 +2689,81 @@ void FunctionalRecords::recordAcceptedFunctionals(
                     motion = "Mixed";
                     break;
                 }
-                message
-                    << " contact_wall_marker=" << contact.boundary_marker
-                    << " contact_law="
-                    << (contact.law ==
-                                interfaces::FreeSurfaceContactLaw::DynamicRenE
-                            ? "DynamicRenE"
-                            : "PrescribedAngle")
-                    << " contact_equilibrium_angle_radians="
-                    << contact.equilibrium_contact_angle_radians
-                    << " contact_mobility=" << contact.mobility
-                    << " contact_slip_length=" << contact.slip_length
-                    << " contact_dynamic_viscosity="
-                    << contact.dynamic_viscosity
-                    << " contact_qpoints="
-                    << contact.owned_quadrature_point_count
-                    << " contact_advancing_qpoints="
-                    << contact.owned_advancing_point_count
-                    << " contact_receding_qpoints="
-                    << contact.owned_receding_point_count
-                    << " contact_stationary_qpoints="
-                    << contact.owned_stationary_point_count
-                    << " contact_measure="
-                    << contact.owned_contact_measure
-                    << " contact_motion=" << motion
-                    << " contact_line_friction_dissipation="
-                    << contact.line_friction_dissipation
-                    << " contact_speed_squared_integral="
-                    << contact.contact_speed_squared_integral
-                    << " contact_wetted_wall_qpoints="
-                    << contact.owned_wetted_wall_quadrature_point_count
-                    << " contact_wetted_wall_measure="
-                    << contact.owned_wetted_wall_measure
-                    << " contact_wall_slip_speed_integral="
-                    << contact.wall_slip_speed_integral
-                    << " contact_wall_slip_speed_squared_integral="
-                    << contact.wall_slip_speed_squared_integral
-                    << " contact_wall_slip_dissipation="
-                    << contact.wall_slip_dissipation;
+                auto& wall_line =
+                    log_line.child("free_surface_contact_stage_wall_history", {"accepted_step", "interface_marker"});
+                wall_line.value("contact_wall_marker", contact.boundary_marker)
+                    .text("contact_law",
+                          contact.law == interfaces::FreeSurfaceContactLaw::DynamicRenE ? "DynamicRenE"
+                                                                                       : "PrescribedAngle")
+                    .value("contact_equilibrium_angle_radians", contact.equilibrium_contact_angle_radians)
+                    .value("contact_mobility", contact.mobility)
+                    .value("contact_slip_length", contact.slip_length)
+                    .value("contact_dynamic_viscosity", contact.dynamic_viscosity)
+                    .value("contact_qpoints", contact.owned_quadrature_point_count)
+                    .value("contact_advancing_qpoints", contact.owned_advancing_point_count)
+                    .value("contact_receding_qpoints", contact.owned_receding_point_count)
+                    .value("contact_stationary_qpoints", contact.owned_stationary_point_count)
+                    .value("contact_measure", contact.owned_contact_measure)
+                    .text("contact_motion", motion)
+                    .value("contact_line_friction_dissipation", contact.line_friction_dissipation)
+                    .value("contact_speed_squared_integral", contact.contact_speed_squared_integral)
+                    .value("contact_wetted_wall_qpoints", contact.owned_wetted_wall_quadrature_point_count)
+                    .value("contact_wetted_wall_measure", contact.owned_wetted_wall_measure)
+                    .value("contact_wall_slip_speed_integral", contact.wall_slip_speed_integral)
+                    .value("contact_wall_slip_speed_squared_integral", contact.wall_slip_speed_squared_integral)
+                    .value("contact_wall_slip_dissipation", contact.wall_slip_dissipation);
                 const auto kinematics = std::find_if(
-                    accepted.contact_line_kinematics.begin(),
-                    accepted.contact_line_kinematics.end(),
-                    [&](const auto& candidate) {
-                        return candidate.boundary_marker ==
-                               contact.boundary_marker;
-                    });
-                message << " contact_geometric_kinematics_available="
-                        << (kinematics !=
-                                    accepted.contact_line_kinematics.end()
-                                ? "true"
-                                : "false");
-                if (kinematics !=
-                    accepted.contact_line_kinematics.end()) {
-                    message
-                        << " contact_geometric_previous_accepted_step="
-                        << kinematics->previous_accepted_step
-                        << " contact_geometric_previous_accepted_time="
-                        << kinematics->previous_accepted_time
-                        << " contact_geometric_previous_stage_time="
-                        << kinematics->previous_stage_time
-                        << " contact_geometric_previous_stage_state_revision="
-                        << kinematics->previous_stage_state_revision
-                        << " contact_geometric_previous_snapshot_revision="
-                        << kinematics->previous_snapshot_revision_key
-                        << " contact_geometric_stage_time_interval="
-                        << kinematics->stage_time_interval
-                        << " contact_projected_centroid_speed="
-                        << kinematics->projected_contact_centroid_speed
-                        << " contact_geometric_mean_fluid_speed="
-                        << kinematics->mean_fluid_contact_speed
-                        << " contact_fluid_minus_geometric_speed="
-                        << kinematics->fluid_minus_geometric_contact_speed;
+                    accepted.contact_line_kinematics.begin(), accepted.contact_line_kinematics.end(),
+                    [&](const auto& candidate) { return candidate.boundary_marker == contact.boundary_marker; });
+                const bool has_kinematics = kinematics != accepted.contact_line_kinematics.end();
+                wall_line.boolean("contact_geometric_kinematics_available", has_kinematics);
+                if (has_kinematics) {
+                    wall_line.value("contact_geometric_previous_accepted_step", kinematics->previous_accepted_step)
+                        .value("contact_geometric_previous_accepted_time", kinematics->previous_accepted_time)
+                        .value("contact_geometric_previous_stage_time", kinematics->previous_stage_time)
+                        .value("contact_geometric_previous_stage_state_revision",
+                               kinematics->previous_stage_state_revision)
+                        .value("contact_geometric_previous_snapshot_revision",
+                               kinematics->previous_snapshot_revision_key)
+                        .value("contact_geometric_stage_time_interval", kinematics->stage_time_interval)
+                        .value("contact_projected_centroid_speed", kinematics->projected_contact_centroid_speed)
+                        .value("contact_geometric_mean_fluid_speed", kinematics->mean_fluid_contact_speed)
+                        .value("contact_fluid_minus_geometric_speed", kinematics->fluid_minus_geometric_contact_speed);
                 }
                 if (contact.mean_dynamic_angle_radians.has_value()) {
-                    message
-                        << " contact_mean_dynamic_angle_radians="
-                        << *contact.mean_dynamic_angle_radians
-                        << " contact_mean_dynamic_cosine="
-                        << *contact.mean_dynamic_cosine
-                        << " contact_mean_speed="
-                        << *contact.mean_contact_speed
-                        << " contact_mean_constitutive_residual="
-                        << *contact.mean_constitutive_residual
-                        << " contact_mean_absolute_constitutive_residual="
-                        << *contact.mean_absolute_constitutive_residual;
+                    wall_line.value("contact_mean_dynamic_angle_radians", *contact.mean_dynamic_angle_radians)
+                        .value("contact_mean_dynamic_cosine", *contact.mean_dynamic_cosine)
+                        .value("contact_mean_speed", *contact.mean_contact_speed)
+                        .value("contact_mean_constitutive_residual", *contact.mean_constitutive_residual)
+                        .value("contact_mean_absolute_constitutive_residual",
+                               *contact.mean_absolute_constitutive_residual);
                 } else {
-                    message << " contact_mean_dynamic_angle_radians=none"
-                            << " contact_mean_dynamic_cosine=none"
-                            << " contact_mean_speed=none"
-                            << " contact_mean_constitutive_residual=none"
-                            << " contact_mean_absolute_constitutive_residual=none";
+                    wall_line.text("contact_mean_dynamic_angle_radians", "none")
+                        .text("contact_mean_dynamic_cosine", "none")
+                        .text("contact_mean_speed", "none")
+                        .text("contact_mean_constitutive_residual", "none")
+                        .text("contact_mean_absolute_constitutive_residual", "none");
                 }
-                if (contact.mean_wall_slip_speed.has_value()) {
-                    message << " contact_mean_wall_slip_speed="
-                            << *contact.mean_wall_slip_speed;
-                } else {
-                    message << " contact_mean_wall_slip_speed=none";
-                }
-                for (std::size_t component = 0; component < 3u;
-                     ++component) {
-                    message
-                        << " contact_mean_position_" << component << "="
-                        << contact.mean_contact_position[component]
-                        << " contact_mean_wall_normal_" << component << "="
-                        << contact.mean_wall_normal[component]
-                        << " contact_mean_footprint_direction_" << component
-                        << "="
-                        << contact.mean_footprint_direction[component]
-                        << " contact_mean_contact_line_tangent_"
-                        << component << "="
-                        << contact.mean_contact_line_tangent[component]
-                        << " contact_mean_wall_tangential_velocity_"
-                        << component << "="
-                        << contact.mean_wall_tangential_velocity[component];
-                    if (kinematics !=
-                        accepted.contact_line_kinematics.end()) {
-                        message
-                            << " contact_geometric_previous_mean_position_"
-                            << component << "="
-                            << kinematics
-                                   ->previous_mean_contact_position[component]
-                            << " contact_geometric_projection_direction_"
-                            << component << "="
-                            << kinematics->projection_direction[component];
+                wall_line.optionalReal("contact_mean_wall_slip_speed", contact.mean_wall_slip_speed);
+                for (std::size_t component = 0; component < 3u; ++component) {
+                    const std::string c = std::to_string(component);
+                    wall_line.value("contact_mean_position_" + c, contact.mean_contact_position[component])
+                        .value("contact_mean_wall_normal_" + c, contact.mean_wall_normal[component])
+                        .value("contact_mean_footprint_direction_" + c, contact.mean_footprint_direction[component])
+                        .value("contact_mean_contact_line_tangent_" + c, contact.mean_contact_line_tangent[component])
+                        .value("contact_mean_wall_tangential_velocity_" + c,
+                               contact.mean_wall_tangential_velocity[component]);
+                    if (has_kinematics) {
+                        wall_line
+                            .value("contact_geometric_previous_mean_position_" + c,
+                                   kinematics->previous_mean_contact_position[component])
+                            .value("contact_geometric_projection_direction_" + c,
+                                   kinematics->projection_direction[component]);
                     }
                 }
             }
         }
-        FE_LOG_INFO(message.str());
+        logRecord(log_line);
     }
 }
 
