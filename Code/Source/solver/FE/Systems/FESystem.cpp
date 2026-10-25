@@ -10677,6 +10677,7 @@ void FESystem::rollbackMeshCoordinateTransaction()
     if (auxiliary_state_manager_) {
         auxiliary_state_manager_->rollbackAll();
     }
+    bordered_global_values_ = bordered_global_committed_values_;
     if (auxiliary_input_registry_) {
         auxiliary_input_registry_->invalidateAll();
     }
@@ -12628,6 +12629,7 @@ void FESystem::notifyMeshReferenceRebased()
     if (auxiliary_state_manager_) {
         auxiliary_state_manager_->resetAllToCommitted();
     }
+    bordered_global_values_ = bordered_global_committed_values_;
     if (auxiliary_input_registry_) {
         auxiliary_input_registry_->invalidateAll();
     }
@@ -15693,6 +15695,9 @@ void FESystem::beginTimeStep(bool reset_auxiliary_state,
     if (reset_auxiliary_state && auxiliary_state_manager_) {
         auxiliary_state_manager_->resetAllToCommitted();
     }
+    if (reset_auxiliary_state) {
+        bordered_global_values_ = bordered_global_committed_values_;
+    }
     // Invalidate all auxiliary inputs for the new time step.
     if (invalidate_auxiliary_inputs && auxiliary_input_registry_) {
         auxiliary_input_registry_->invalidateAll();
@@ -15716,6 +15721,7 @@ void FESystem::commitTimeStep()
     if (auxiliary_state_manager_) {
         auxiliary_state_manager_->commitAll(last_auxiliary_advance_time_);
     }
+    bordered_global_committed_values_ = bordered_global_values_;
 }
 
 void FESystem::finalizeMonolithicAuxiliaryStageState(Real alpha_f, Real final_time)
@@ -23569,6 +23575,7 @@ void FESystem::rollbackAuxiliaryState()
     if (auxiliary_state_manager_) {
         auxiliary_state_manager_->rollbackAll();
     }
+    bordered_global_values_ = bordered_global_committed_values_;
 }
 
 void FESystem::finalizeAuxiliaryLayout()
@@ -25494,8 +25501,15 @@ std::vector<Real> FESystem::checkpointAuxiliaryState() const
 void FESystem::restoreAuxiliaryState(std::span<const Real> data)
 {
     const auto n_global = bordered_global_values_.size();
-    FE_THROW_IF(!data.empty() && data.size() < n_global, InvalidArgumentException,
-                "FESystem::restoreAuxiliaryState: the checkpoint has fewer values than the bordered global DOFs");
+    if (!data.empty() && n_global > 0u) {
+        // A checkpoint of this system: the packed auxiliary state, then the
+        // bordered global values.
+        const auto packed = auxiliary_state_manager_ ? auxiliary_state_manager_->packAll().size() : std::size_t{0};
+        FE_THROW_IF(data.size() != packed + n_global, InvalidArgumentException,
+                    "FESystem::restoreAuxiliaryState: the checkpoint has " + std::to_string(data.size()) +
+                        " values, the system packs " + std::to_string(packed) + " auxiliary values and " +
+                        std::to_string(n_global) + " bordered global values");
+    }
     const auto auxiliary = data.empty() ? data : data.first(data.size() - n_global);
     if (auxiliary_state_manager_ && !auxiliary.empty()) {
         auxiliary_state_manager_->unpackAll(auxiliary);

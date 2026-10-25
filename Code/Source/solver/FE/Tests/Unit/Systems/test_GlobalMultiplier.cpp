@@ -1130,7 +1130,8 @@ struct NewtonSolution {
 };
 
 /// A steady Newton solve of @p op from 0 with the Eigen direct solver.
-NewtonSolution solveWithNewton(FESystem& sys, FieldId lambda, const OperatorTag& op = "poisson")
+NewtonSolution solveWithNewton(FESystem& sys, FieldId lambda, const OperatorTag& op = "poisson",
+                               bool line_search = false)
 {
     NewtonSolution out;
     auto factory = backends::BackendFactory::create(backends::BackendKind::Eigen);
@@ -1156,7 +1157,7 @@ NewtonSolution solveWithNewton(FESystem& sys, FieldId lambda, const OperatorTag&
     options.max_iterations = 6;
     options.abs_tolerance = 1e-12;
     options.rel_tolerance = 1e-12;
-    options.use_line_search = false;
+    options.use_line_search = line_search;
     timestepping::NewtonSolver newton(options);
     timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(sys, *factory, workspace);
@@ -1272,6 +1273,86 @@ TEST(GlobalBordered, AStabilizedMultiplierIsSolvedExactly)
             EXPECT_NEAR(b.u[i], a.u[i], 1e-10 * scale) << "order " << order << " dof " << i;
         }
     }
+}
+
+TEST(GlobalBordered, LineSearchKeepsTheBorderedValuesConsistent)
+{
+    // Line search trials restore and re-apply the bordered values through
+    // the auxiliary checkpoint.
+    constexpr Real c = 1.5;
+    auto in_matrix = buildMeanConstrainedPoisson(4, 2, 0.5, 2, c);
+    auto bordered = buildMeanConstrainedPoisson(4, 2, 0.5, 2, c,
+                                                BuildOptions{.lowering = MultiplierLowering::Bordered});
+    const auto a = solveWithNewton(*in_matrix.system, in_matrix.lambda, "poisson", /*line_search=*/true);
+    const auto b = solveWithNewton(*bordered.system, bordered.lambda, "poisson", /*line_search=*/true);
+    ASSERT_TRUE(a.converged);
+    ASSERT_TRUE(b.converged);
+    EXPECT_NEAR(b.lambda[0], 12.0 * c, 1e-10 * 12.0 * c);
+    EXPECT_NEAR(b.lambda[0], a.lambda[0], 1e-10 * std::abs(a.lambda[0]));
+}
+
+TEST(GlobalBordered, TheCheckpointAndTheStepResetCarryTheBorderedValues)
+{
+    auto problem = buildMeanConstrainedPoisson(4, 1, 0.5, 1, 1.0,
+                                               BuildOptions{.lowering = MultiplierLowering::Bordered});
+    auto& sys = *problem.system;
+    ASSERT_EQ(sys.numBorderedGlobalDofs(), 1);
+    EXPECT_EQ(sys.borderedGlobalValues()[0], 0.0) << "setup commits zeros";
+
+    // Checkpoint round trip.
+    const std::array<Real, 1> first{2.5};
+    sys.setBorderedGlobalValues(first);
+    const auto checkpoint = sys.checkpointAuxiliaryState();
+    ASSERT_EQ(checkpoint.size(), 1u);
+    EXPECT_EQ(checkpoint[0], 2.5);
+    const std::array<Real, 1> second{-4.0};
+    sys.setBorderedGlobalValues(second);
+    sys.restoreAuxiliaryState(checkpoint);
+    EXPECT_EQ(sys.borderedGlobalValues()[0], 2.5);
+    const std::vector<Real> foreign{1.0, 2.0};
+    const auto wrong_size = feMessage([&] { sys.restoreAuxiliaryState(foreign); });
+    EXPECT_NE(wrong_size.find("bordered global values"), std::string::npos) << wrong_size;
+
+    // A step that is reset or rolled back restores the committed values.
+    sys.commitTimeStep();
+    sys.setBorderedGlobalValues(second);
+    sys.beginTimeStep(/*reset_auxiliary_state=*/true, /*invalidate_auxiliary_inputs=*/false);
+    EXPECT_EQ(sys.borderedGlobalValues()[0], 2.5);
+    sys.setBorderedGlobalValues(second);
+    sys.rollbackAuxiliaryState();
+    EXPECT_EQ(sys.borderedGlobalValues()[0], 2.5);
+    sys.setBorderedGlobalValues(second);
+    sys.beginTimeStep(/*reset_auxiliary_state=*/false, /*invalidate_auxiliary_inputs=*/false);
+    EXPECT_EQ(sys.borderedGlobalValues()[0], -4.0) << "without the reset the values stay";
+}
+
+TEST(GlobalBordered, TheExternalStateDynamicRelaxationIsRefused)
+{
+    auto problem = buildMeanConstrainedPoisson(4, 1, 0.5, 1, 1.0,
+                                               BuildOptions{.lowering = MultiplierLowering::Bordered});
+    auto& sys = *problem.system;
+    auto factory = backends::BackendFactory::create(backends::BackendKind::Eigen);
+    ASSERT_NE(factory, nullptr);
+    backends::SolverOptions direct;
+    direct.method = backends::SolverMethod::Direct;
+    direct.preconditioner = backends::PreconditionerType::None;
+    auto linear = factory->createLinearSolver(direct);
+    TransientSystem transient(sys, std::make_shared<ZeroTimeDerivativeIntegrator>());
+    auto history = timestepping::TimeHistory::allocate(*factory, sys.dofHandler().getNumDofs());
+    history.setDt(1.0);
+    history.setPrevDt(1.0);
+    timestepping::NewtonOptions options;
+    options.residual_op = "poisson";
+    options.jacobian_op = "poisson";
+    options.external_state_fixed_point.enabled = true;
+    options.external_state_fixed_point.dynamic_relaxation.enabled = true;
+    options.synchronize_state = [](const SystemStateView&, timestepping::NewtonOptions::StateSynchronizationPoint) {};
+    timestepping::NewtonSolver newton(options);
+    timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(sys, *factory, workspace);
+    const auto message =
+        feMessage([&] { (void)newton.solveStep(transient, *linear, /*solve_time=*/0.0, history, workspace); });
+    EXPECT_NE(message.find("dynamic relaxation"), std::string::npos) << message;
 }
 
 TEST(GlobalBordered, AGaugeTypeMultiplierIsRefused)

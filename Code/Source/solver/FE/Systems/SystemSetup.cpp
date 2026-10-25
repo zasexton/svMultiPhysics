@@ -3245,6 +3245,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         }
         if (bordered_global_values_.size() != static_cast<std::size_t>(bordered_dofs)) {
             bordered_global_values_.assign(static_cast<std::size_t>(bordered_dofs), Real(0.0));
+            bordered_global_committed_values_ = bordered_global_values_;
         }
     }
 

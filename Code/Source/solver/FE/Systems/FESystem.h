@@ -721,7 +721,14 @@ public:
     }
     /// The current values of the bordered global DOFs, in index order (same on every rank).
     [[nodiscard]] std::span<const Real> borderedGlobalValues() const noexcept { return bordered_global_values_; }
-    /// Sets the values of the bordered global DOFs (the size must be numBorderedGlobalDofs()).
+    /**
+     * @brief Sets the values of the bordered global DOFs (the size must be numBorderedGlobalDofs())
+     *
+     * Like the auxiliary state, the values have a committed copy:
+     * commitTimeStep() takes it, and beginTimeStep(reset_auxiliary_state),
+     * rollbackAuxiliaryState() and the rollbacks of a rejected step restore
+     * it.  Setup commits zeros.
+     */
     void setBorderedGlobalValues(std::span<const Real> values);
     /**
      * @brief The values of a global field in @p state, under either lowering
@@ -2477,6 +2484,8 @@ private:
     std::optional<std::pair<MultiplierLowering, std::string>> multiplier_lowering_request_{};
     MultiplierLowering multiplier_lowering_{MultiplierLowering::Auto};
     std::vector<Real> bordered_global_values_{};
+    /// The bordered global values of the last committed time step (restored when a step is reset or rolled back).
+    std::vector<Real> bordered_global_committed_values_{};
     /// Per operator, the field DOFs each bordered global row couples to (setup sparsity).
     std::unordered_map<OperatorTag, std::vector<std::vector<GlobalIndex>>> bordered_global_row_columns_{};
     OperatorRegistry operator_registry_;

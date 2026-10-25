@@ -6648,6 +6648,12 @@ void applyAuxiliaryDelta(systems::FESystem& system,
             FE_THROW_IF(offset + block_dim > dx.size() || global_offset + block_dim > global_values.size(),
                         systems::InvalidStateException,
                         "NewtonSolver: bordered global update exceeds dx size");
+            FE_THROW_IF(system.fieldDofOffset(blk_info.global_field) -
+                                static_cast<GlobalIndex>(bc.n_field_dofs) !=
+                            static_cast<GlobalIndex>(global_offset),
+                        systems::InvalidStateException,
+                        "NewtonSolver: the bordered block of global field '" + blk_info.name +
+                            "' is not at its DOFs' place among the bordered global values");
             for (std::size_t i = 0; i < block_dim; ++i) {
                 global_values[global_offset + i] -= alpha * dx[offset + i];
             }
@@ -7630,6 +7636,12 @@ NewtonReport NewtonSolver::solveStep(
         systems::InvalidStateException,
         "NewtonSolver: external-state fixed point currently requires fixed mesh coordinates so a failed outer solve can restore the complete entry state");
     FE_THROW_IF(
+        options_.external_state_fixed_point.dynamic_relaxation.enabled &&
+            transient.system().hasBorderedGlobalFields(),
+        NotImplementedException,
+        "NewtonSolver: the external-state dynamic relaxation relaxes the solution vector, and bordered global "
+        "multipliers live outside it; disable the dynamic relaxation or use the InMatrix lowering");
+    FE_THROW_IF(
         transient.system().meshCoordinateTransactionActive(),
         systems::InvalidStateException,
         "NewtonSolver: external-state fixed point cannot start with an active mesh-coordinate transaction");
@@ -8446,6 +8458,11 @@ NewtonReport NewtonSolver::solveStep(
                 "NewtonSolver: external-state refresh opened a mesh-coordinate transaction");
 
             previous_outer_iterate->copyFrom(history.u());
+            // Bordered global multipliers live outside history.u(): their
+            // change counts in the outer state-change norm too.
+            const std::vector<Real> previous_outer_bordered_globals(
+                system.borderedGlobalValues().begin(),
+                system.borderedGlobalValues().end());
             const bool residual_first_refresh =
                 residual_first_on_predicted_certificate &&
                 !finish_on_frozen_epoch && certificatePredicted();
@@ -8551,8 +8568,19 @@ NewtonReport NewtonSolver::solveStep(
             axpy(*workspace.residual_scratch,
                  static_cast<Real>(-1.0),
                  *previous_outer_iterate);
-            const double state_change_norm =
+            double state_change_norm =
                 workspace.residual_scratch->norm();
+            if (!previous_outer_bordered_globals.empty()) {
+                // The bordered values are replicated on every rank.
+                const auto current_globals = system.borderedGlobalValues();
+                double squared = state_change_norm * state_change_norm;
+                for (std::size_t i = 0; i < previous_outer_bordered_globals.size(); ++i) {
+                    const double change =
+                        static_cast<double>(current_globals[i] - previous_outer_bordered_globals[i]);
+                    squared += change * change;
+                }
+                state_change_norm = std::sqrt(squared);
+            }
 
             aggregate = inner_report;
             aggregate.external_state_discontinuity_restarts =
