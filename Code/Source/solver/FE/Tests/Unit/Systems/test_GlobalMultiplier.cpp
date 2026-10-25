@@ -15,8 +15,9 @@
  * G2 (pure Neumann, mean zero): the multiplier's row fixes the constant of u,
  * so the gauge adds nothing, and u_h equals the solution under the automatic
  * weighted mean-zero gauge.  G3 (Taylor-Hood Stokes with a mean-zero pressure
- * multiplier): the velocities equal those with a pinned pressure, and the
- * pressures differ by a constant.
+ * multiplier): the multiplier's row fixes the pressure constant of the
+ * enclosed flow, which otherwise the automatic gauge fixes; the velocities
+ * equal those under the gauge, and the pressures differ by a constant.
  */
 
 #include <gtest/gtest.h>
@@ -912,11 +913,9 @@ struct StokesSystem {
  * P2/P1 Stokes on the unit square with u = 0 on the boundary and the forcing of
  * u = curl(sin^2(pi x) sin^2(pi y)), p = cos(pi x) cos(pi y):
  * (grad u : grad v - p div v - q div u - f . v) dx, plus, with the multiplier,
- * (lambda q) dx + (mu p) dx (mean-zero pressure).  Without the multiplier the
- * first pressure DOF is pinned instead: the automatic gauge does not fix the
- * pressure of this enclosed flow (its integration-by-parts evidence takes
- * boundaryDofsByMarker's P2 DOFs, some of which are interior, for natural
- * boundaries).
+ * (lambda q) dx + (mu p) dx (mean-zero pressure).  Without the multiplier no
+ * boundary is natural for u, so nothing anchors the pressure constant and the
+ * automatic gauge fixes it.
  */
 StokesSystem buildStokes(int n, bool multiplier)
 {
@@ -964,25 +963,36 @@ StokesSystem buildStokes(int n, bool multiplier)
         }
     }
     installStrongDirichlet(sys, std::span<const forms::bc::StrongDirichlet>(bcs));
-    if (!multiplier) {
-        // The pressure DOFs follow the 2 (2n + 1)^2 velocity DOFs.
-        const auto first_pressure = static_cast<GlobalIndex>(2 * (2 * n + 1) * (2 * n + 1));
-        sys.addConstraint(std::make_unique<constraints::DirichletBC>(std::vector<GlobalIndex>{first_pressure}, 0.0));
-    }
     sys.setup();
-    if (!multiplier) {
-        EXPECT_EQ(sys.fieldDofOffset(out.p), static_cast<GlobalIndex>(2 * (2 * n + 1) * (2 * n + 1)));
-    }
     return out;
 }
 
 } // namespace
 
-TEST(GlobalMultiplierG3, MeanZeroPressureMultiplierMatchesAPinnedPressure)
+TEST(GlobalMultiplierG3, MeanZeroPressureMultiplierMatchesTheAutomaticGauge)
 {
     for (const int n : {4, 8}) {
         auto with_multiplier = buildStokes(n, /*multiplier=*/true);
-        auto pinned = buildStokes(n, /*multiplier=*/false);
+        auto gauged = buildStokes(n, /*multiplier=*/false);
+
+        // Without the multiplier the pressure constant is a null mode: the
+        // integration-by-parts evidence finds no natural boundary of u, and
+        // the automatic gauge fixes p.
+        const auto* registry = gauged.system->gaugeRegistryIfPresent();
+        ASSERT_NE(registry, nullptr);
+        for (const auto& evidence : registry->anchoring()) {
+            EXPECT_FALSE(evidence.field == gauged.p && evidence.verdict == gauge::AnchoringVerdict::Anchored)
+                << "n=" << n << " " << evidence.source;
+        }
+        bool p_mode = false;
+        for (const auto& mode : registry->resolvedModes()) {
+            if (mode.candidate.field == gauged.p) {
+                p_mode = true;
+                EXPECT_EQ(mode.status, gauge::GaugeStatus::ExactNullspace) << "n=" << n;
+                EXPECT_NE(mode.policy, gauge::EnforcementPolicy::None) << "n=" << n;
+            }
+        }
+        EXPECT_TRUE(p_mode) << "n=" << n;
 
         // The multiplier's row fixes the pressure constant: no constraint on
         // p or lambda.
@@ -994,7 +1004,7 @@ TEST(GlobalMultiplierG3, MeanZeroPressureMultiplierMatchesAPinnedPressure)
         }
 
         const auto a = solveFromZero(sys, "stokes");
-        const auto b = solveConstrainedFromZero(*pinned.system, "stokes");
+        const auto b = solveConstrainedFromZero(*gauged.system, "stokes");
         const auto n_u = static_cast<std::size_t>(sys.fieldDofHandler(with_multiplier.u).getNumDofs());
         const auto n_p = static_cast<std::size_t>(p_count);
         Real velocity_scale = 0.0;
