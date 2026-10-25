@@ -14,11 +14,12 @@
  *
  * A module registers its unknowns and its prescribed data through one
  * FieldBinding.  A field of the same name that is already registered (by
- * another module or an earlier call) is reused when its source kind,
- * component count, function space and scope (volume, interface with its
- * marker, or global) agree; otherwise the call throws std::invalid_argument.  Fields are added in call order, which is the DOF
- * order.  Every message starts with "<owner> <role>: ", or with the context
- * passed to check().
+ * another module or an earlier call) is reused when its source kind, scope
+ * (volume, interface with its marker, or global), component count and
+ * function space agree; otherwise the call throws std::invalid_argument,
+ * naming the first of these that differs.  Fields are added in call order,
+ * which is the DOF order.  Every message starts with "<owner> <role>: ", or
+ * with the context passed to check().
  */
 
 #include "Core/Types.h"
@@ -55,9 +56,10 @@ public:
      *
      * Throws when the name is empty, the spec has no space, the field is
      * missing and @p allow_missing is false, or the registered field differs
-     * in source kind, component count, space or scope.  The scope of the spec
-     * follows its space as the registry sets it: global on a GlobalSpace,
-     * interface on a MortarSpace (with its marker).
+     * in source kind, scope, component count or space (checked in that
+     * order).  The scope of the spec follows its space as the registry sets
+     * it: global on a GlobalSpace, interface on a MortarSpace (with its
+     * marker).
      */
     static void check(const FESystem& system,
                       const FieldSpec& spec,

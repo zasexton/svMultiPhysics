@@ -99,6 +99,15 @@ void FieldBinding::check(const FESystem& system,
                  ? "' must be an unknown field"
                  : "' must be a prescribed data field"));
     }
+    // The scope before the components and the space: a global or an interface
+    // field differs from a volume field in its space too, and the scope is
+    // what the caller got wrong.
+    const auto [scope, marker] = registeredScope(spec);
+    if (rec.scope != scope || (scope == FieldScope::InterfaceFace && rec.interface_marker != marker)) {
+        throw std::invalid_argument(
+            std::string(context) + ": existing field '" + rec.name + "' is " +
+            scopeText(rec.scope, rec.interface_marker) + ", expected " + scopeText(scope, marker));
+    }
     if (rec.components != spec.components) {
         throw std::invalid_argument(
             std::string(context) + ": existing field '" + rec.name +
@@ -109,12 +118,6 @@ void FieldBinding::check(const FESystem& system,
         throw std::invalid_argument(
             std::string(context) + ": existing field '" + rec.name +
             "' uses an incompatible function space");
-    }
-    const auto [scope, marker] = registeredScope(spec);
-    if (rec.scope != scope || (scope == FieldScope::InterfaceFace && rec.interface_marker != marker)) {
-        throw std::invalid_argument(
-            std::string(context) + ": existing field '" + rec.name + "' is " +
-            scopeText(rec.scope, rec.interface_marker) + ", expected " + scopeText(scope, marker));
     }
 }
 

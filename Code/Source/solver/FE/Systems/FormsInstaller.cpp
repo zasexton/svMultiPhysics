@@ -2938,7 +2938,8 @@ CoupledResidualKernels installCoupledResidualMixed(
         }
     }
 
-    // A global field needs its column: the multiplier must enter a row.
+    // A global field needs its column: the multiplier must enter a row of
+    // this call, its own row included.
     for (const auto field : trial_fields) {
         const auto& rec = system.fieldRecord(field);
         FE_THROW_IF(rec.scope == FieldScope::Global && !fields_in_rows.contains(field),

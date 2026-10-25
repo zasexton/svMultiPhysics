@@ -490,10 +490,25 @@ TEST(GlobalField, FieldBindingChecksTheScope)
     auto r1 = std::make_shared<spaces::GlobalSpace>(1);
     EXPECT_EQ(fields.unknown(FieldSpec{.name = "lambda", .space = r1, .scope = FieldScope::Global}, "multiplier"),
               lam);
-    // A volume field of that name is not a global field, and the reverse.
+    // A volume field of that name is not a global field, and the reverse; the
+    // scope is named before the components and the space, which differ too.
+    const auto message = [](const auto& bind) {
+        try {
+            bind();
+        } catch (const std::invalid_argument& e) {
+            return std::string(e.what());
+        }
+        return std::string("no exception");
+    };
     const auto u = fields.unknown(FieldSpec{.name = "u", .space = h1}, "unknown");
-    EXPECT_THROW((void)fields.global("u", "multiplier"), std::invalid_argument);
-    EXPECT_THROW((void)fields.unknown(FieldSpec{.name = "lambda", .space = h1}, "unknown"), std::invalid_argument);
+    EXPECT_EQ(message([&] { (void)fields.global("u", "multiplier"); }),
+              "Test::registerOn multiplier: existing field 'u' is a volume field, expected a global field");
+    EXPECT_EQ(message([&] { (void)fields.unknown(FieldSpec{.name = "lambda", .space = h1}, "unknown"); }),
+              "Test::registerOn unknown: existing field 'lambda' is a global field, expected a volume field");
+    auto velocity_space = std::make_shared<spaces::ProductSpace>(h1, 2);
+    (void)fields.unknown(FieldSpec{.name = "w", .space = velocity_space, .components = 2}, "velocity");
+    EXPECT_EQ(message([&] { (void)fields.global("w", "multiplier"); }),
+              "Test::registerOn multiplier: existing field 'w' is a volume field, expected a global field");
     EXPECT_EQ(fields.unknown(FieldSpec{.name = "u", .space = h1}, "unknown"), u);
     // The same space with another scope is another field.
     try {
@@ -611,6 +626,23 @@ TEST(GlobalField, AMultiplierNeedsItsRowAndItsColumn)
                                  (forms::inner(forms::grad(u), forms::grad(v))).dx() + (mu * u).dx());
     });
     EXPECT_NE(no_column.find("the global field 'lambda' enters no row"), std::string::npos) << no_column;
+
+    // Its own row counts: a multiplier fixed by its own row alone (here
+    // lambda = 0 next to mean(u) = 0) has a column, and is installed.
+    FESystem own(mesh);
+    const auto w_id = own.addField(FieldSpec{.name = "u", .space = h1});
+    const auto nu_id = own.addField(FieldSpec{.name = "lambda", .space = r1});
+    own.addOperator("op");
+    const auto w = forms::StateField(w_id, *h1, "u");
+    const auto z = forms::TestField(w_id, *h1, "v");
+    const auto nu = forms::StateField(nu_id, *r1, "lambda");
+    const auto eta = forms::TestField(nu_id, *r1, "mu");
+    const auto own_row = feMessage([&] {
+        (void)installFormulation(own, "op", {w_id, nu_id},
+                                 (forms::inner(forms::grad(w), forms::grad(z))).dx() + (eta * w).dx() +
+                                     (nu * eta).dGlobal());
+    });
+    EXPECT_TRUE(own_row.empty()) << own_row;
 }
 
 // ---------------------------------------------------------------------------

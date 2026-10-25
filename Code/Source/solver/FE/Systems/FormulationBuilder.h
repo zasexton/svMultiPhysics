@@ -44,9 +44,9 @@
 #include "Core/Types.h"
 #include "Forms/IntegrationDomain.h"
 #include "Systems/DiagnosticRegistry.h"
-#include "Systems/MultiplierLowering.h"
 #include "Systems/FormsInstaller.h"
 #include "Systems/FunctionalForms.h"
+#include "Systems/MultiplierLowering.h"
 #include "Systems/OperatorRegistry.h"
 
 #include <initializer_list>
