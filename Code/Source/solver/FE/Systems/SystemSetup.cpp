@@ -64,6 +64,7 @@
 #include "Forms/JIT/JITKernelWrapper.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
@@ -4744,14 +4745,29 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 #endif
 
     const auto owned_iv_opt = partition.locallyOwned().contiguousRange();
-    if (mpi_parallel && backend_map.has_value() && opts.use_backend_row_ownership_for_assembly) {
+    // The layout is one decision of all ranks: the pattern entries a rank
+    // sends to another are read in the receiver's indexing.  Natural only
+    // when every rank's owned DOFs are one range; node-interleaved on every
+    // rank otherwise (when every rank has the backend map).
+    bool every_rank_contiguous = owned_iv_opt.has_value();
+    bool every_rank_backend_map = backend_map.has_value();
+#if FE_HAS_MPI
+    if (mpi_parallel) {
+        const std::array<int, 2> local_flags{every_rank_contiguous ? 1 : 0, every_rank_backend_map ? 1 : 0};
+        std::array<int, 2> global_flags{0, 0};
+        MPI_Allreduce(local_flags.data(), global_flags.data(), 2, MPI_INT, MPI_MIN, dof_handler_.mpiComm());
+        every_rank_contiguous = global_flags[0] != 0;
+        every_rank_backend_map = global_flags[1] != 0;
+    }
+#endif
+    if (mpi_parallel && every_rank_backend_map && opts.use_backend_row_ownership_for_assembly) {
         dist_mode = DistSparsityMode::NodalInterleaved;
         owned_range = backend_map->owned_range;
         nodal_map = std::move(backend_map);
-    } else if (mpi_parallel && owned_iv_opt.has_value()) {
+    } else if (mpi_parallel && every_rank_contiguous) {
         dist_mode = DistSparsityMode::ContiguousRange;
         owned_range = sparsity::IndexRange{owned_iv_opt->begin, owned_iv_opt->end};
-    } else if (mpi_parallel && backend_map.has_value()) {
+    } else if (mpi_parallel && every_rank_backend_map) {
         dist_mode = DistSparsityMode::NodalInterleaved;
         owned_range = backend_map->owned_range;
         nodal_map = std::move(backend_map);

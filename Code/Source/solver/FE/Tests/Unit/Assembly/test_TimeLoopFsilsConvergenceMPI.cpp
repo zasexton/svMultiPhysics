@@ -29,6 +29,7 @@
 #include "Core/Types.h"
 
 #include "Constraints/SystemConstraint.h"
+#include "Constraints/VertexDirichletConstraint.h"
 
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
@@ -42,6 +43,7 @@
 
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
+#include "Systems/TimeIntegrator.h"
 #include "Systems/TransientSystem.h"
 
 #include "TimeStepping/TimeHistory.h"
@@ -3604,6 +3606,98 @@ TEST(TimeLoopFsilsConvergenceMPI,
                   comm);
     EXPECT_EQ(solve_caught_min, 1);
     EXPECT_EQ(synchronization_calls_max, 0);
+#endif
+}
+
+TEST(TimeLoopFsilsConvergenceMPI, ProcessCountIndependentNumberingSolvesExactly)
+{
+#if !defined(FE_HAS_FSILS)
+    GTEST_SKIP() << "FSILS backend is not enabled in this build";
+#else
+    // -Delta u = 1 on the 12-cell strip (every rank sees every cell), u = 0 at
+    // x = 0 and 1: the nodal values are x (1 - x) / 2 at any rank count.
+    // Process-count independent numbering with vertex-hash ownership leaves
+    // the owned DOFs of ranks 0 and 1 out of one range at 4 ranks.  The
+    // distributed sparsity layout is one decision of all ranks
+    // (node-interleaved on every rank then); when each rank chose its own,
+    // ranks 2 and 3 read the pattern entries of ranks 0 and 1 in the wrong
+    // indexing and two FSILS rows came out wrong.
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    constexpr int n_cells = 12;
+    for (const auto numbering : {dofs::GlobalNumberingMode::GlobalIds, dofs::GlobalNumberingMode::DenseGlobalIds}) {
+        for (const bool backend_rows : {false, true}) {
+            SCOPED_TRACE(std::string(numbering == dofs::GlobalNumberingMode::GlobalIds ? "GlobalIds" : "DenseGlobalIds") +
+                         (backend_rows ? ", backend row ownership" : ", FE row ownership"));
+            auto mesh = std::make_shared<StripQuadMeshAccess>(n_cells, rank, size);
+            const auto space =
+                spaces::Space(spaces::SpaceType::H1, ElementType::Quad4, /*order=*/1, /*components=*/1);
+            ASSERT_TRUE(space);
+            systems::FESystem sys(mesh);
+            const auto u_id = sys.addField(systems::FieldSpec{.name = "u", .space = space, .components = 1});
+            sys.addOperator("poisson");
+            const auto u = forms::FormExpr::stateField(u_id, *space, "u");
+            const auto v = forms::TestFunction(*space, "v");
+            (void)systems::installFormulation(
+                sys, "poisson", {u_id},
+                (forms::inner(forms::grad(u), forms::grad(v)) - forms::FormExpr::constant(Real{1}) * v).dx());
+            std::vector<constraints::VertexDirichletValue> wall;
+            for (const GlobalIndex vertex : {GlobalIndex{0}, GlobalIndex{1}, GlobalIndex{2 * n_cells},
+                                             GlobalIndex{2 * n_cells + 1}}) {
+                wall.push_back({.vertex_id = vertex, .value = 0.0});
+            }
+            sys.addSystemConstraint(std::make_unique<constraints::VertexDirichletConstraint>(
+                u_id, std::move(wall), constraints::VertexIdMode::LocalVertexId));
+
+            systems::SetupOptions options;
+            options.dof_options.global_numbering = numbering;
+            options.dof_options.ownership = dofs::OwnershipStrategy::VertexGID;
+            options.dof_options.my_rank = rank;
+            options.dof_options.world_size = size;
+            options.dof_options.mpi_comm = comm;
+            options.assembly_options.deterministic = true;
+            options.assembly_options.overlap_communication = false;
+            options.use_backend_row_ownership_for_assembly = backend_rows;
+            systems::SetupInputs inputs;
+            inputs.topology_override = buildStripTopology(n_cells, rank, size);
+            ASSERT_NO_THROW(sys.setup(options, inputs));
+
+            backends::FsilsFactory factory(/*dof_per_node=*/1, sys.dofPermutation(), comm);
+            auto linear = factory.createLinearSolver(fsilsGmresDiagOptions());
+            ASSERT_TRUE(linear);
+            systems::TransientSystem transient(sys, std::make_shared<systems::ZeroTimeDerivativeIntegrator>());
+            auto history = timestepping::TimeHistory::allocate(factory, sys.dofHandler().getNumDofs());
+            history.setDt(1.0);
+            history.setPrevDt(1.0);
+            timestepping::NewtonOptions newton_opts;
+            newton_opts.residual_op = "poisson";
+            newton_opts.jacobian_op = "poisson";
+            newton_opts.max_iterations = 4;
+            newton_opts.abs_tolerance = 1e-12;
+            newton_opts.rel_tolerance = 1e-12;
+            newton_opts.use_line_search = false;
+            timestepping::NewtonSolver newton(newton_opts);
+            timestepping::NewtonWorkspace workspace;
+            newton.allocateWorkspace(sys, factory, workspace);
+            history.repack(factory);
+            const auto report = newton.solveStep(transient, *linear, /*solve_time=*/0.0, history, workspace);
+            EXPECT_TRUE(report.converged) << "ranks " << size;
+            const auto* map = sys.dofHandler().getEntityDofMap();
+            ASSERT_NE(map, nullptr);
+            const auto& owned = sys.dofHandler().getPartition().locallyOwned();
+            auto view = history.u().createGhostedReadView();
+            for (GlobalIndex vertex = 0; vertex < 2 * (n_cells + 1); ++vertex) {
+                const auto dof = map->getVertexDofs(vertex)[0];
+                if (!owned.contains(dof)) {
+                    continue;
+                }
+                const Real x = static_cast<Real>(vertex / 2) / static_cast<Real>(n_cells);
+                EXPECT_NEAR(view->getVectorEntry(dof), 0.5 * x * (1.0 - x), 1e-10)
+                    << "ranks " << size << " vertex " << vertex;
+            }
+        }
+    }
 #endif
 }
 
