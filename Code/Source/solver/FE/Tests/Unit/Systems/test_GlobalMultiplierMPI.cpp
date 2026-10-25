@@ -1106,6 +1106,161 @@ TEST(GlobalMultiplierG5MPI, StabilizedG1BorderedOnFsilsIsTheEigenInMatrixSolutio
 #endif
 }
 
+TEST(GlobalMultiplierG5MPI, StabilizedG1ReductionOnScalarFsilsGmresIsTheEigenInMatrixSolution)
+{
+#if !defined(FE_HAS_FSILS)
+    GTEST_SKIP() << "FSILS backend is not enabled in this build";
+#else
+    // The algebraic reduction Newton applies to a bordered unknown with D
+    // invertible (the stabilized multiplier: D = -eps, B = Ct^T = b): the field
+    // block K - B D^-1 Ct = K - b b^T / D as a native low-rank update, the
+    // right-hand side r - B D^-1 g, and lambda's increment D^-1 (g - Ct du).
+    // The system is scalar (one DOF per node), where FSILS's scalar GMRES
+    // applied no native update.  G1 is linear: the first step from 0 is the
+    // solution (u = -du, lambda = -dlambda), once as a rank-one update (the
+    // native-face form Newton promotes it to) and once as a reduced field
+    // update.
+    MPI_Comm comm = MPI_COMM_WORLD;
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+    constexpr Real eps = 0.25;
+    auto reference = buildProblem(MPI_COMM_SELF, 0, 1, MultiplierLowering::InMatrix, false, eps);
+    auto eigen = backends::BackendFactory::create(backends::BackendKind::Eigen);
+    ASSERT_NE(eigen, nullptr);
+    backends::SolverOptions direct;
+    direct.method = backends::SolverMethod::Direct;
+    direct.preconditioner = backends::PreconditionerType::None;
+    direct.rel_tol = 1e-14;
+    direct.abs_tol = 1e-14;
+    direct.max_iter = 1;
+    const auto one = solveSteady(reference, *eigen, direct);
+    ASSERT_TRUE(one.converged);
+
+    auto bordered = buildProblem(comm, rank, size, MultiplierLowering::Bordered, /*owner_contiguous=*/true, eps);
+    auto& sys = *bordered.system;
+    const auto n = sys.dofHandler().getNumDofs();
+    // The distributed pattern on several ranks, the serial one on one.
+    const auto* distributed_pattern = sys.distributedSparsityIfAvailable("poisson");
+    backends::FsilsFactory fsils(/*dof_per_node=*/1, sys.dofPermutation(), comm);
+    const auto makeMatrix = [&]() {
+        return distributed_pattern != nullptr ? fsils.createMatrix(*distributed_pattern)
+                                              : fsils.createMatrix(sys.sparsity("poisson"));
+    };
+    std::vector<GlobalIndex> dirichlet;
+    sys.constraints().forEach([&dirichlet](const constraints::AffineConstraints::ConstraintView& constraint) {
+        dirichlet.push_back(constraint.slave_dof);
+    });
+    std::sort(dirichlet.begin(), dirichlet.end());
+    dirichlet.erase(std::unique(dirichlet.begin(), dirichlet.end()), dirichlet.end());
+    const auto& owned = sys.dofHandler().getPartition().locallyOwned();
+    const auto* map = sys.dofHandler().getEntityDofMap();
+    ASSERT_NE(map, nullptr);
+
+    for (const bool as_reduced_update : {false, true}) {
+        SCOPED_TRACE(as_reduced_update ? "reduced field update" : "rank-one update");
+        auto K = makeMatrix();
+        auto r = fsils.createVector(n);
+        K->zero();
+        r->zero();
+        const std::vector<Real> zero(static_cast<std::size_t>(n), 0.0);
+        SystemStateView state;
+        state.u = zero;
+        {
+            auto K_view = K->createAssemblyView();
+            auto r_view = r->createAssemblyView();
+            ASSERT_TRUE(sys.assemble(jacobianAndResidual(), state, K_view.get(), r_view.get()).success);
+        }
+        K->finalizeAssembly();
+        const auto& bc = sys.borderedCoupling();
+        ASSERT_TRUE(bc.active);
+        ASSERT_EQ(bc.n_aux, 1);
+        ASSERT_EQ(bc.n_field_dofs, static_cast<std::size_t>(n));
+        const Real d = bc.D[0];
+        ASSERT_NEAR(d, -eps, 1e-14);
+        const Real g = bc.g[0];
+
+        // The update and the shifted right-hand side, on the owned rows.
+        backends::RankOneUpdate rank_one;
+        rank_one.sigma = -1.0 / d;
+        rank_one.prefer_native_face = true;
+        backends::ReducedFieldUpdate reduced;
+        reduced.sigma = -1.0;
+        {
+            auto r_view = r->createAssemblyView();
+            r_view->beginAssemblyPhase();
+            for (GlobalIndex dof = 0; dof < n; ++dof) {
+                if (!owned.contains(dof)) {
+                    continue;
+                }
+                const auto k = static_cast<std::size_t>(dof);
+                ASSERT_NEAR(bc.B[k], bc.Ct[k], 1e-15) << dof;
+                if (bc.B[k] != 0.0) {
+                    rank_one.v.emplace_back(dof, bc.B[k]);
+                    reduced.left.emplace_back(dof, bc.B[k]);
+                    r_view->addVectorEntry(dof, -bc.B[k] * g / d, assembly::AddMode::Add);
+                }
+                if (bc.Ct[k] != 0.0) {
+                    reduced.right.emplace_back(dof, bc.Ct[k] / d);
+                }
+            }
+            r_view->finalizeAssembly();
+        }
+
+        backends::SolverOptions gmres;
+        gmres.method = backends::SolverMethod::GMRES;
+        gmres.preconditioner = backends::PreconditionerType::Diagonal;
+        gmres.rel_tol = 1e-13;
+        gmres.abs_tol = 1e-15;
+        gmres.max_iter = 2000;
+        auto linear = fsils.createLinearSolver(gmres);
+        ASSERT_NE(linear, nullptr);
+        ASSERT_TRUE(linear->supportsNativeRankOneUpdates());
+        ASSERT_TRUE(linear->supportsNativeReducedFieldUpdates());
+        linear->setDirichletDofs(dirichlet);
+        if (as_reduced_update) {
+            linear->setReducedFieldUpdates(std::span<const backends::ReducedFieldUpdate>(&reduced, 1));
+        } else {
+            linear->setRankOneUpdates(std::span<const backends::RankOneUpdate>(&rank_one, 1));
+        }
+        auto du = fsils.createVector(n);
+        du->zero();
+        // FsilsLinearSolver checks the true residual of the full operator
+        // (the matrix and the update): before the fix it failed at rel 0.17.
+        const auto report = linear->solve(*K, *du, *r);
+        ASSERT_TRUE(report.converged) << report.message;
+
+        auto du_view = du->createGhostedReadView();
+        Real local_ct_du = 0.0;
+        for (GlobalIndex dof = 0; dof < n; ++dof) {
+            if (owned.contains(dof)) {
+                local_ct_du += bc.Ct[static_cast<std::size_t>(dof)] * du_view->getVectorEntry(dof);
+            }
+        }
+        Real ct_du = 0.0;
+        MPI_Allreduce(&local_ct_du, &ct_du, 1, MPI_DOUBLE, MPI_SUM, comm);
+        const Real lambda = -(g - ct_du) / d;
+        EXPECT_NEAR(lambda, one.lambda, 1e-10 * std::abs(one.lambda)) << "ranks " << size;
+
+        Real scale = 0.0;
+        for (const auto& [vertex, value] : one.owned_u) {
+            scale = std::max(scale, std::abs(value));
+        }
+        for (GlobalIndex vertex = 0; vertex < 2 * (kCells + 1); ++vertex) {
+            const auto dofs = map->getVertexDofs(vertex);
+            if (dofs.size() != 1u || !owned.contains(dofs[0])) {
+                continue;
+            }
+            const auto it = one.owned_u.find(vertex);
+            ASSERT_NE(it, one.owned_u.end()) << "vertex " << vertex;
+            EXPECT_NEAR(-du_view->getVectorEntry(dofs[0]), it->second, 1e-10 * scale)
+                << "ranks " << size << " vertex " << vertex;
+        }
+    }
+#endif
+}
+
 TEST(GlobalMultiplierG5MPI, G2UnderTheBorderedLoweringIsRefusedOnEveryRank)
 {
     MPI_Comm comm = MPI_COMM_WORLD;
