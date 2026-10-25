@@ -701,6 +701,52 @@ TEST(FESystemMixedDimensional, SetupDistributesContinuousInterfaceFieldOnConnect
     EXPECT_EQ(shared.front(), middle_dof);
 }
 
+TEST(FESystemMixedDimensional, AContinuousInterfaceFieldCouplesAlikeToBothSides)
+{
+    // A P1 interface field against a continuous Q1 field: the coupling of the
+    // minus side's trace equals that of the plus side's (the same trace).  The
+    // interface field's basis lives on the interface face, so on the plus
+    // side, whose facet runs the other way, it must not be reversed.
+    constexpr int marker = 23;
+    const auto coupling = [&](InterfaceEvaluationSide side) {
+        FESystem sys(build_four_quad_mesh_with_interface_set("middle_vertical"));
+        sys.setInterfaceMeshFromFaceSet(marker, "middle_vertical");
+        auto volume_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+        auto line_space = std::make_shared<H1Space>(ElementType::Line2, /*order=*/1);
+        const auto u = sys.addField(FieldSpec{.name = "u", .space = volume_space});
+        const auto lambda = sys.addInterfaceField("lambda", line_space, marker);
+        sys.addOperator("op");
+        sys.addCellKernel("op", u, std::make_shared<MassKernel>(1.0));
+        sys.addInterfaceFaceKernel("op", marker, lambda, u, std::make_shared<NormalTraceCouplingKernel>(1.0, side));
+        sys.addInterfaceFaceKernel("op", marker, lambda, std::make_shared<FacetMassKernel>(1.0));
+        sys.setup();
+        DenseMatrixView A(sys.dofHandler().getNumDofs());
+        SystemStateView state;
+        AssemblyRequest req;
+        req.op = "op";
+        req.want_matrix = true;
+        EXPECT_TRUE(sys.assemble(req, state, &A, nullptr).success);
+        std::vector<Real> block;
+        const auto l0 = sys.fieldDofOffset(lambda);
+        const auto u0 = sys.fieldDofOffset(u);
+        for (GlobalIndex i = 0; i < sys.fieldDofHandler(lambda).getNumDofs(); ++i) {
+            for (GlobalIndex j = 0; j < sys.fieldDofHandler(u).getNumDofs(); ++j) {
+                block.push_back(A.getMatrixEntry(l0 + i, u0 + j));
+            }
+        }
+        return block;
+    };
+    const auto minus = coupling(InterfaceEvaluationSide::Minus);
+    const auto plus = coupling(InterfaceEvaluationSide::Plus);
+    ASSERT_EQ(minus.size(), plus.size());
+    Real total = 0.0;
+    for (std::size_t k = 0; k < minus.size(); ++k) {
+        EXPECT_NEAR(plus[k], minus[k], 1e-14) << "entry " << k;
+        total += std::abs(minus[k]);
+    }
+    EXPECT_GT(total, 0.0);
+}
+
 TEST(FESystemMixedDimensional, InterfaceFieldHistoryAssemblyUsesPreviousState)
 {
     constexpr int marker = 23;

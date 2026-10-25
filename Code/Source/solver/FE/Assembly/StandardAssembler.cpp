@@ -17317,26 +17317,12 @@ void StandardAssembler::prepareContextFace(
                 const auto& xi_cell = scratch_quad_points_[qidx];
                 const auto& xi_trace_face_point = scratch_face_quad_points_[qidx];
 
-                math::Vector<Real, 3> xi_embedded_face{};
-                if (face_type == ElementType::Line2) {
-                    xi_embedded_face = math::Vector<Real, 3>{
-                        Real(2) * xi_trace_face_point[0] - Real(1),
-                        Real(0),
-                        Real(0)};
-                } else if (face_type == ElementType::Quad4) {
-                    xi_embedded_face = math::Vector<Real, 3>{
-                        Real(2) * xi_trace_face_point[0] - Real(1),
-                        Real(2) * xi_trace_face_point[1] - Real(1),
-                        Real(0)};
-                } else {
-                    xi_embedded_face = math::Vector<Real, 3>{
-                        xi_trace_face_point[0],
-                        xi_trace_face_point[1],
-                        xi_trace_face_point[2]};
-                }
-
                 if (force_face_reference_coords) {
-                    points.push_back(xi_embedded_face);
+                    // An interface-owned field's basis lives on the interface
+                    // face: its rule's canonical point, not the cell's facet
+                    // point (they differ by the facet alignment).
+                    const auto& canonical = quad_rule->points()[qidx];
+                    points.push_back(math::Vector<Real, 3>{canonical[0], canonical[1], canonical[2]});
                 } else if (uses_trace_face_reference_coords(space)) {
                     points.push_back(math::Vector<Real, 3>{
                         xi_trace_face_point[0],
@@ -17430,23 +17416,14 @@ void StandardAssembler::prepareContextFace(
             scratch_quad_points_[q][2]};
         const auto& xi_trace_face_point =
             scratch_face_quad_points_[static_cast<std::size_t>(q)];
-        math::Vector<Real, 3> xi_embedded_face{};
-        if (face_type == ElementType::Line2) {
-            xi_embedded_face = math::Vector<Real, 3>{
-                Real(2) * xi_trace_face_point[0] - Real(1),
-                Real(0),
-                Real(0)};
-        } else if (face_type == ElementType::Quad4) {
-            xi_embedded_face = math::Vector<Real, 3>{
-                Real(2) * xi_trace_face_point[0] - Real(1),
-                Real(2) * xi_trace_face_point[1] - Real(1),
-                Real(0)};
-        } else {
-            xi_embedded_face = math::Vector<Real, 3>{
-                xi_trace_face_point[0],
-                xi_trace_face_point[1],
-                xi_trace_face_point[2]};
-        }
+        // An interface-owned field's basis (force_*_face_reference_coords)
+        // lives on the interface face: it is evaluated at the face rule's
+        // canonical point.  The cell's facet point differs from it by the
+        // facet alignment (on the plus side of an interface the facet runs
+        // the other way), so evaluating there would reverse the basis.
+        const auto& canonical_point = quad_rule->points()[static_cast<std::size_t>(q)];
+        const math::Vector<Real, 3> xi_embedded_face{
+            canonical_point[0], canonical_point[1], canonical_point[2]};
         const math::Vector<Real, 3> xi_test =
             force_test_face_reference_coords
                 ? xi_embedded_face
