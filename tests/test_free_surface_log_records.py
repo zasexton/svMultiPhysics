@@ -164,3 +164,19 @@ def test_params_records_read_the_same_in_both_formats():
     # The deprecated spelling shares the word and keeps its own message.
     (deprecated,) = L.records([pairs[3][0]])
     assert deprecated.message == "deprecated input setting"
+
+
+def test_other_child_words_and_fieldless_lines_are_read():
+    logmap = L.load_map()
+    # Every child word an entry names is read as a child of that entry.
+    for e in logmap.entries:
+        for word in e.get("other_children") or []:
+            entry, role = logmap.by_diagnostic[word]
+            assert entry["id"] == e["id"] and role == "child", word
+    # An old line without a key=value field is read through its marker.
+    for e in logmap.entries:
+        marker = e["before"].get("fieldless_marker")
+        if marker:
+            old_line = e["before"].get("head") or (marker + "./effective_configuration.json")
+            assert marker in old_line
+            assert L.line_diagnostic(old_line) == e["after"]["diagnostic"], e["id"]

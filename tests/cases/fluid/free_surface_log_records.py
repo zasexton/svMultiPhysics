@@ -134,6 +134,9 @@ class LogMap:
                 self.by_diagnostic.setdefault(s["diagnostic"], (e, "child"))
             if e.get("child_diagnostic"):
                 self.by_diagnostic.setdefault(e["child_diagnostic"], (e, "child"))
+            # Further child words of an entry (e.g. a child line's own children).
+            for word in e.get("other_children") or []:
+                self.by_diagnostic.setdefault(word, (e, "child"))
             if before.get("head"):
                 self.by_head.setdefault(before["head"], e)
                 if _core(before["head"]):
@@ -258,10 +261,11 @@ def _canonical(line: Line, entry: dict, role: str) -> Record:
 def line_diagnostic(raw: str, logmap: LogMap | None = None) -> str | None:
     """The diagnostic word of a line in either format: the new word of a
     converted line (also for its old text), else the line's own word."""
-    if "=" not in raw and "WARNING: '" not in raw:
+    logmap = logmap or load_map()
+    if "=" not in raw and "WARNING: '" not in raw and not any(m in raw for m in logmap.fieldless):
         return None
     line = Line(raw)
-    entry, role = (logmap or load_map()).match(line)
+    entry, role = logmap.match(line)
     if entry is None:
         return line.diagnostic
     return line.diagnostic if role == "child" else entry["after"]["diagnostic"]
