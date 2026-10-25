@@ -25,6 +25,7 @@
 #include "Systems/GeometricNonlinearity.h"
 #include "Systems/GeometryTransaction.h"
 #include "Systems/GlobalKernel.h"
+#include "Systems/MultiplierLowering.h"
 #include "Systems/GlobalKernelStateProvider.h"
 #include "Systems/OperatorRegistry.h"
 #include "Systems/ParameterRegistry.h"
@@ -178,6 +179,10 @@ struct SetupOptions {
     /// after nullspace resolution during setup().  Useful for debugging
     /// nullspace detection and enforcement decisions.
     bool gauge_diagnostics{false};
+
+    /// The lowering of global multipliers; a formulation's request
+    /// (FESystem::requestMultiplierLowering) takes precedence over Auto.
+    MultiplierLowering multiplier_lowering{MultiplierLowering::Auto};
 };
 
 struct AssemblyRequest {
@@ -686,6 +691,17 @@ public:
     [[nodiscard]] std::vector<FieldId> unknownFieldIdsInDofMapOrder() const;
     /// True when a registered field is global (FieldScope::Global, on a GlobalSpace).
     [[nodiscard]] bool hasGlobalFields() const noexcept;
+    /**
+     * @brief Ask for a lowering of the global multipliers (definition phase)
+     *
+     * Auto asks for nothing.  Two different non-Auto requests throw, naming
+     * both requesters; a request other than Auto overrides
+     * SetupOptions::multiplier_lowering when the two differ only by Auto,
+     * and setup throws when they conflict.
+     */
+    void requestMultiplierLowering(MultiplierLowering lowering, std::string requester);
+    /// The lowering setup chose: InMatrix for a system with global fields, Auto without.
+    [[nodiscard]] MultiplierLowering multiplierLowering() const noexcept { return multiplier_lowering_; }
     void setPrescribedFieldCoefficients(FieldId field, std::span<const Real> coefficients);
     void setPrescribedFieldCoefficientPairs(FieldId field,
                                             std::span<const Real> high,
@@ -2428,6 +2444,8 @@ private:
 #endif
 
     FieldRegistry field_registry_;
+    std::optional<std::pair<MultiplierLowering, std::string>> multiplier_lowering_request_{};
+    MultiplierLowering multiplier_lowering_{MultiplierLowering::Auto};
     OperatorRegistry operator_registry_;
     std::vector<FormCellDomainRestriction> form_install_cell_domain_restrictions_{};
     std::shared_ptr<const assembly::CutIntegrationContext> cut_integration_context_{};

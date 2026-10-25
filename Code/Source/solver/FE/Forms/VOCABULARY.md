@@ -648,6 +648,7 @@ the rest `implemented/expert`. Namespace `systems`.
 |------------|--------|-------|
 | `FormulationBuilder(system, operator_tag, base_options)` | `Systems/FormulationBuilder.h` | One set of install options for a module; adds the operator when missing |
 | `F.symbolicTangent()`, `F.configure(ale)`, `F.recordConstitutiveLaw(law)` | `Systems/FormulationBuilder.h` | Option changes, effective in call order |
+| `F.multiplierLowering(MultiplierLowering::Auto \| InMatrix \| Bordered)`, `FESystem::requestMultiplierLowering(lowering, requester)`, `SetupOptions::multiplier_lowering`, `FESystem::multiplierLowering()` | `Systems/FormulationBuilder.h`, `Systems/MultiplierLowering.h`, `Systems/FESystem.h` | How global multipliers reach the linear algebra, chosen at setup; a formulation's request overrides `Auto`, and conflicting requests or options throw. `Auto` is `InMatrix` (every global row and column in the matrix); `Bordered`, the route for backends with a fixed node layout, is planned (D54, LM2) and refused |
 | `F.install(fields, residual)` | `Systems/FormulationBuilder.h` | `installFormulation` with `F.options()` |
 | `F.installGroup(fields, residual, FormulationGroup{...})` | `Systems/FormulationBuilder.h` | A separate kernel group with a copy of the options changed by `source_component_tag`, `extra_trial_fields`, `ale`, or dropped trace requests |
 | `F.registered(ContactLineDomain)`, `F.registered(BoundaryDomain)` | `Systems/FormulationBuilder.h` | Registers a generated marker with the system and returns the domain |

@@ -475,6 +475,38 @@ TEST(GlobalField, ColoredAssemblyIsRefused)
     EXPECT_THROW(sys.setup(options), FEException);
 }
 
+TEST(GlobalField, LoweringIsInMatrixAndTheBorderedRouteIsRefused)
+{
+    {
+        auto problem = buildMeanConstrainedPoisson(4, 1, 0.5, 1, 1.0);
+        EXPECT_EQ(problem.system->multiplierLowering(), MultiplierLowering::InMatrix);
+    }
+    auto mesh = buildGrid(2, 1, 1.0, 1.0, 1);
+    auto h1 = quadSpace(1);
+    auto r1 = std::make_shared<spaces::GlobalSpace>(1);
+    FESystem sys(mesh);
+    const auto u_id = sys.addField(FieldSpec{.name = "u", .space = h1});
+    const auto lam_id = sys.addField(FieldSpec{.name = "lambda", .space = r1});
+    FormulationBuilder F(sys, "op", FormInstallOptions{});
+    const auto u = forms::StateField(u_id, *h1, "u");
+    const auto v = forms::TestField(u_id, *h1, "v");
+    const auto lam = forms::StateField(lam_id, *r1, "lambda");
+    const auto mu = forms::TestField(lam_id, *r1, "mu");
+    F.multiplierLowering(MultiplierLowering::Bordered);
+    (void)F.install({u_id, lam_id}, (forms::inner(forms::grad(u), forms::grad(v)) + lam * v).dx() + (mu * u).dx());
+    const auto bordered = feMessage([&] { sys.setup(); });
+    EXPECT_NE(bordered.find("bordered lowering"), std::string::npos) << bordered;
+    EXPECT_NE(bordered.find("LM2"), std::string::npos) << bordered;
+    // A second, different request is refused; the same one is accepted.
+    EXPECT_NO_THROW(sys.requestMultiplierLowering(MultiplierLowering::Bordered, "other"));
+    EXPECT_THROW(sys.requestMultiplierLowering(MultiplierLowering::InMatrix, "other"), FEException);
+    // Options that contradict the request are refused at setup.
+    SetupOptions options;
+    options.multiplier_lowering = MultiplierLowering::InMatrix;
+    const auto conflict = feMessage([&] { sys.setup(options); });
+    EXPECT_NE(conflict.find("asks for Bordered"), std::string::npos) << conflict;
+}
+
 TEST(GlobalField, AConstrainedMultiplierIsRefused)
 {
     auto mesh = buildGrid(3, 1, 1.0, 1.0, 1);

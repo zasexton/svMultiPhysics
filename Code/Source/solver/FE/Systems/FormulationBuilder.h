@@ -44,6 +44,7 @@
 #include "Core/Types.h"
 #include "Forms/IntegrationDomain.h"
 #include "Systems/DiagnosticRegistry.h"
+#include "Systems/MultiplierLowering.h"
 #include "Systems/FormsInstaller.h"
 #include "Systems/FunctionalForms.h"
 #include "Systems/OperatorRegistry.h"
@@ -83,6 +84,10 @@ public:
     FormulationBuilder(FESystem& system, OperatorTag operator_tag, FormInstallOptions base);
 
     FormulationBuilder& symbolicTangent(bool enabled = true);
+
+    /// Asks for a lowering of the system's global multipliers
+    /// (FESystem::requestMultiplierLowering, requested by operatorTag()).
+    FormulationBuilder& multiplierLowering(MultiplierLowering lowering);
     FormulationBuilder& recordConstitutiveLaw(analysis::ConstitutiveLawMetadata law);
     FormulationBuilder& configure(const ALEBinding& ale);
 

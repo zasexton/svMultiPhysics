@@ -3119,6 +3119,31 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     if (hasGlobalFieldRecords(field_registry_)) {
         bindGlobalSpaceQuadrature(field_registry_, meshAccess(), opts.dof_options);
     }
+    {
+        // The lowering of the global multipliers: a formulation's request
+        // overrides Auto; requests that conflict with the options throw.
+        auto lowering = opts.multiplier_lowering;
+        if (multiplier_lowering_request_.has_value()) {
+            const auto requested = multiplier_lowering_request_->first;
+            FE_THROW_IF(lowering != MultiplierLowering::Auto && lowering != requested,
+                        InvalidArgumentException,
+                        std::string("FESystem::setup: SetupOptions::multiplier_lowering is ") +
+                            multiplierLoweringName(lowering) + ", but '" +
+                            multiplier_lowering_request_->second + "' asks for " +
+                            multiplierLoweringName(requested));
+            lowering = requested;
+        }
+        if (hasGlobalFieldRecords(field_registry_)) {
+            if (lowering == MultiplierLowering::Auto) {
+                lowering = MultiplierLowering::InMatrix;
+            }
+            FE_THROW_IF(lowering == MultiplierLowering::Bordered, NotImplementedException,
+                        "FESystem::setup: the bordered lowering of global multipliers (global DOFs kept out "
+                        "of the matrix, for backends with a fixed node layout) is planned (D54, LM2); use "
+                        "InMatrix with a backend that has a variable block layout");
+        }
+        multiplier_lowering_ = lowering;
+    }
 
     // Assign monolithic offsets in field registration order.
     GlobalIndex total_dofs = 0;

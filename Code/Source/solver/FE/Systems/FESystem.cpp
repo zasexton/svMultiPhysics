@@ -8202,6 +8202,23 @@ bool FESystem::hasField(std::string_view name) const noexcept
     return findFieldByName(name) != INVALID_FIELD_ID;
 }
 
+void FESystem::requestMultiplierLowering(MultiplierLowering lowering, std::string requester)
+{
+    if (lowering == MultiplierLowering::Auto) {
+        return;
+    }
+    if (multiplier_lowering_request_.has_value()) {
+        FE_THROW_IF(multiplier_lowering_request_->first != lowering, InvalidArgumentException,
+                    "FESystem::requestMultiplierLowering: '" + requester + "' asks for the " +
+                        multiplierLoweringName(lowering) + " lowering of the global multipliers, but '" +
+                        multiplier_lowering_request_->second + "' asked for " +
+                        multiplierLoweringName(multiplier_lowering_request_->first));
+        return;
+    }
+    invalidateSetup();
+    multiplier_lowering_request_ = std::make_pair(lowering, std::move(requester));
+}
+
 bool FESystem::hasGlobalFields() const noexcept
 {
     const auto& records = field_registry_.records();

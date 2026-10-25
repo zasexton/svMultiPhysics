@@ -31,6 +31,12 @@ FormulationBuilder::FormulationBuilder(FESystem& system,
     }
 }
 
+FormulationBuilder& FormulationBuilder::multiplierLowering(MultiplierLowering lowering)
+{
+    system_->requestMultiplierLowering(lowering, operator_tag_);
+    return *this;
+}
+
 FormulationBuilder& FormulationBuilder::symbolicTangent(bool enabled)
 {
     options_.compiler_options.use_symbolic_tangent = enabled;

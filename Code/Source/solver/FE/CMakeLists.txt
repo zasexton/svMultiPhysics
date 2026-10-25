@@ -1164,6 +1164,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/GlobalKernel.h
     Systems/GlobalKernelStateProvider.h
     Systems/GlobalRowKernel.h
+    Systems/MultiplierLowering.h
     Systems/MaterialStateProvider.h
     Systems/InterfaceOperators.h
     Systems/MeshSearchAccess.h
