@@ -43,6 +43,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace svmp {
 namespace FE {
@@ -99,6 +100,18 @@ public:
     /// The physical boundary marker, or the interface marker.
     [[nodiscard]] int marker() const noexcept { return marker_; }
     [[nodiscard]] const std::string& levelSetFieldName() const noexcept { return level_set_field_name_; }
+
+    /// Free degrees of freedom of the field (owned by this rank) whose rows
+    /// couple, on the support, only fixed degrees of freedom of
+    /// @p coupled_fields (a Dirichlet value each): their rows and columns
+    /// vanish after the constraints, and the system is singular.
+    struct DeadRows {
+        std::size_t count{0u};
+        GlobalIndex first{-1};
+    };
+    [[nodiscard]] DeadRows rowsWithoutFreeCoupling(const systems::FESystem& system,
+                                                   const AffineConstraints& constraints,
+                                                   const std::vector<FieldId>& coupled_fields) const;
 
     /// Owned degrees of freedom of the field on the support at the last
     /// apply(), and those it pinned (on this rank).

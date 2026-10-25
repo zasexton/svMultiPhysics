@@ -9,6 +9,7 @@
 
 #include "Assembly/CutIntegrationContext.h"
 #include "Constraints/BoundaryDofOwnerCompletion.h"
+#include "Dofs/DofMap.h"
 #include "Forms/FormExpr.h"
 #include "Forms/IntegrationDomain.h"
 #include "Spaces/FaceRestriction.h"
@@ -333,6 +334,118 @@ void SupportRestrictionConstraint::apply(const systems::FESystem& system, Affine
         constraints.addDirichlet(dof, Real{0.0});
         ++pinned_dofs_;
     }
+}
+
+SupportRestrictionConstraint::DeadRows SupportRestrictionConstraint::rowsWithoutFreeCoupling(
+    const systems::FESystem& system,
+    const AffineConstraints& constraints,
+    const std::vector<FieldId>& coupled_fields) const
+{
+    DeadRows out;
+    if (coupled_fields.empty()) {
+        return out;
+    }
+    const auto& rec = system.fieldRecord(field_);
+    const std::string ctx = context(system);
+    const auto& mesh = system.meshAccess();
+    const GlobalIndex offset = system.fieldDofOffset(field_);
+    const int n_components = std::max(1, rec.components);
+    const auto& dof_map = system.fieldDofHandler(field_).getDofMap();
+    FaceDofs face_dofs(*rec.space, ctx);
+
+    struct Coupled {
+        FieldId field;
+        GlobalIndex offset;
+        int components;
+        const dofs::DofMap* dof_map;
+        std::unique_ptr<FaceDofs> faces;
+    };
+    std::vector<Coupled> coupled;
+    for (const auto f : coupled_fields) {
+        const auto& crec = system.fieldRecord(f);
+        if (!crec.space || crec.scope == systems::FieldScope::Global) {
+            continue;
+        }
+        coupled.push_back(Coupled{f, system.fieldDofOffset(f), std::max(1, crec.components),
+                                  &system.fieldDofHandler(f).getDofMap(),
+                                  std::make_unique<FaceDofs>(*crec.space, ctx + " coupled field '" + crec.name + "'")});
+    }
+    // A DOF is fixed when a Dirichlet line (a value, no dependence on other
+    // DOFs) constrains it; a line that writes it through other DOFs leaves
+    // its row and column alive.
+    const auto fixed = [&](GlobalIndex dof) {
+        const auto line = constraints.getConstraint(dof);
+        return line.has_value() && line->isDirichlet();
+    };
+
+    // For each multiplier DOF on the support: whether some entity couples it
+    // to a free DOF of a coupled field.
+    std::unordered_map<GlobalIndex, bool> alive;
+    forEachSupportEntity(system, [&](GlobalIndex cell, int local_face) {
+        bool any_free = false;
+        for (auto& c : coupled) {
+            const auto cell_dofs = c.dof_map->getCellDofs(cell);
+            const auto visit = [&](GlobalIndex local_dof) {
+                any_free = any_free || !fixed(c.offset + local_dof);
+            };
+            if (local_face < 0) {
+                for (const auto local_dof : cell_dofs) {
+                    visit(local_dof);
+                }
+            } else {
+                componentDofs(cell_dofs, c.components, c.faces->onFace(mesh.getCellType(cell), local_face), ctx,
+                              cell, visit);
+            }
+        }
+        const auto record = [&](GlobalIndex local_dof) {
+            auto& state = alive[offset + local_dof];
+            state = state || any_free;
+        };
+        const auto cell_dofs = dof_map.getCellDofs(cell);
+        if (local_face < 0) {
+            for (const auto local_dof : cell_dofs) {
+                record(local_dof);
+            }
+        } else {
+            componentDofs(cell_dofs, n_components, face_dofs.onFace(mesh.getCellType(cell), local_face), ctx, cell,
+                          record);
+        }
+    });
+
+    // The owner of a DOF decides from what every rank sees of it: the
+    // support DOFs and those some entity keeps alive, completed to their
+    // owners (collective).
+    std::vector<GlobalIndex> seen;
+    std::vector<GlobalIndex> kept;
+    for (const auto& [dof, is_alive] : alive) {
+        seen.push_back(dof);
+        if (is_alive) {
+            kept.push_back(dof);
+        }
+    }
+    std::sort(seen.begin(), seen.end());
+    std::sort(kept.begin(), kept.end());
+    std::vector<Real> no_payload;
+    (void)completeOwnedBoundaryDofs(system, seen, no_payload, 0u, ctx + " support");
+    (void)completeOwnedBoundaryDofs(system, kept, no_payload, 0u, ctx + " coupled support");
+    std::sort(kept.begin(), kept.end());
+    kept.erase(std::unique(kept.begin(), kept.end()), kept.end());
+
+    const auto& owned = system.dofHandler().getPartition().locallyOwned();
+    std::vector<GlobalIndex> dead;
+    for (const auto dof : seen) {
+        if (owned.contains(dof) && !constraints.isConstrained(dof) &&
+            !std::binary_search(kept.begin(), kept.end(), dof)) {
+            dead.push_back(dof);
+        }
+    }
+    std::sort(dead.begin(), dead.end());
+    dead.erase(std::unique(dead.begin(), dead.end()), dead.end());
+    out.count = dead.size();
+    if (!dead.empty()) {
+        out.first = dead.front();
+    }
+    return out;
 }
 
 bool SupportRestrictionConstraint::updateValues(const systems::FESystem& system,

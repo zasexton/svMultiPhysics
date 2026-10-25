@@ -3230,6 +3230,7 @@ if(FE_BUILD_TESTS)
             # Lagrange-multiplier Dirichlet condition and the B1, B2, I3 cases.
             add_executable(test_fe_trace_multipliers
                 Tests/Unit/Constraints/test_SupportRestrictionConstraint.cpp
+                Tests/Unit/Systems/test_TraceMultiplier.cpp
                 Tests/Unit/Systems/test_main.cpp
             )
             _svmp_fe_target_enable_warnings(test_fe_trace_multipliers)

@@ -28,6 +28,7 @@
 #include "Auxiliary/AuxiliaryInitializationSolver.h"
 #include "Auxiliary/AuxiliaryEventManager.h"
 #include "Constraints/AuxiliaryDrivenDirichletConstraint.h"
+#include "Constraints/SupportRestrictionConstraint.h"
 #include "Forms/PointEvaluator.h"
 #include "Auxiliary/AuxiliaryDerivativeProvider.h"
 #include "Systems/SystemsExceptions.h"
@@ -8273,6 +8274,19 @@ std::vector<Real> FESystem::globalFieldValues(FieldId field, const SystemStateVi
         values[static_cast<std::size_t>(d)] = state.u[dof];
     }
     return values;
+}
+
+std::vector<FieldId> FESystem::traceMultiplierFields() const
+{
+    std::vector<FieldId> fields;
+    for (const auto& constraint : system_constraint_defs_) {
+        const auto* restriction = dynamic_cast<const constraints::SupportRestrictionConstraint*>(constraint.get());
+        if (restriction != nullptr &&
+            std::find(fields.begin(), fields.end(), restriction->field()) == fields.end()) {
+            fields.push_back(restriction->field());
+        }
+    }
+    return fields;
 }
 
 std::vector<FieldId> FESystem::unknownFieldIdsInDofMapOrder() const

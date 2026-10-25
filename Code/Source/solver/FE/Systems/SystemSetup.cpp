@@ -33,6 +33,8 @@
 #include "Constraints/GlobalConstraint.h"
 #include "Constraints/ParallelConstraints.h"
 
+#include "Constraints/SupportRestrictionConstraint.h"
+#include "Forms/SymbolicDifferentiation.h"
 #include "Constraints/SystemConstraints.h"
 
 #include "Analysis/TopologyAnalysisContext.h"
@@ -2587,6 +2589,60 @@ LocalIndex maxInteriorFaceQuadraturePoints(const assembly::IMeshAccess& mesh,
     return {};
 }
 
+/// Whether StateField(@p field) occurs in @p node outside every derivative.
+[[nodiscard]] bool occursUndifferentiatedIn(const forms::FormExprNode& node, FieldId field)
+{
+    switch (node.type()) {
+    case forms::FormExprType::Gradient:
+    case forms::FormExprType::Divergence:
+    case forms::FormExprType::Curl:
+    case forms::FormExprType::Hessian:
+    case forms::FormExprType::TimeDerivative:
+        return false;
+    case forms::FormExprType::StateField:
+    case forms::FormExprType::DiscreteField:
+        return node.fieldId().has_value() && *node.fieldId() == field;
+    default:
+        break;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child && occursUndifferentiatedIn(*child, field)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Whether the rows of a test field fix the constant of @p field: @p row is the
+ * residual of one test field (its rows); with the test function set to 1 it
+ * is the sum of those rows, and a constant shift of @p field changes it.
+ * (GlobalRowKernel::anchorsConstantModeOf asks the same of a global row.)
+ */
+[[nodiscard]] bool rowsFixTheConstantOf(const forms::FormExpr& row, FieldId field)
+{
+    if (!row.isValid()) {
+        return false;
+    }
+    const auto unit_row = row.transformNodes([](const forms::FormExprNode& node) -> std::optional<forms::FormExpr> {
+        if (node.type() == forms::FormExprType::TestFunction) {
+            return forms::FormExpr::constant(Real(1.0));
+        }
+        return std::nullopt;
+    });
+    if (!unit_row.isValid() || !occursUndifferentiatedIn(*unit_row.node(), field)) {
+        return false;
+    }
+    const auto derivative = forms::simplify(
+        forms::directionalDerivativeWrtField(unit_row, field, forms::FormExpr::constant(Real(1.0))));
+    if (!derivative.isValid()) {
+        return false;
+    }
+    const auto value = derivative.node()->constantValue();
+    return !(derivative.node()->type() == forms::FormExprType::Constant && value.has_value() &&
+             *value == Real(0.0));
+}
+
 [[nodiscard]] bool hasGlobalFieldRecords(const FieldRegistry& registry) noexcept
 {
     return std::any_of(registry.records().begin(), registry.records().end(),
@@ -2832,6 +2888,49 @@ void FESystem::refuseGaugeTypeMultipliersUnderBorderedLowering() const
                      "with a fixed node layout, such as FSILS) solves with the field block; drop the "
                      "multiplier and let the automatic gauge fix the constant, or use the InMatrix lowering "
                      "with a backend that has a variable block layout");
+    }
+}
+
+void FESystem::validateTraceMultiplierRows() const
+{
+#if FE_HAS_MPI
+    const CollectiveCommunicator comm(dof_handler_.mpiComm());
+#else
+    const CollectiveCommunicator comm;
+#endif
+    for (const auto& def : system_constraint_defs_) {
+        const auto* restriction = dynamic_cast<const constraints::SupportRestrictionConstraint*>(def.get());
+        if (restriction == nullptr) {
+            continue;
+        }
+        const auto multiplier = restriction->field();
+        // The fields the multiplier's rows hold: the unknowns of its constraint.
+        std::vector<FieldId> coupled;
+        for (const auto& rec : formulation_records_) {
+            for (const auto& [test, trial] : rec.block_couplings) {
+                if (test == multiplier && trial != multiplier &&
+                    std::find(coupled.begin(), coupled.end(), trial) == coupled.end()) {
+                    coupled.push_back(trial);
+                }
+            }
+        }
+        const auto dead = restriction->rowsWithoutFreeCoupling(*this, affine_constraints_, coupled);
+        const auto total = collectiveSumSize(dead.count, comm);
+        if (total == 0u) {
+            continue;
+        }
+        std::string names;
+        for (const auto field : coupled) {
+            names += (names.empty() ? "'" : ", '") + field_registry_.get(field).name + "'";
+        }
+        FE_THROW(InvalidArgumentException,
+                 "FESystem::setup: " + std::to_string(total) + " degree(s) of freedom of the trace multiplier '" +
+                     field_registry_.get(multiplier).name + "' (restricted to " +
+                     constraints::supportDomainKindName(restriction->domainKind()) + " " +
+                     std::to_string(restriction->marker()) + ") couple only to fixed degrees of freedom of " +
+                     names + ": their rows and columns vanish and the system is singular.  An essential "
+                     "condition (or another constraint) and the multiplier fix the same degrees of freedom; "
+                     "drop one of them");
     }
 }
 
@@ -3830,8 +3929,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         }
     }
 
+    const auto trace_multipliers = traceMultiplierFields();
     const auto add_gauge_candidate =
-        [this](FieldId field,
+        [this, &trace_multipliers](FieldId field,
                int component,
                analysis::NullspaceFamily family,
                analysis::AnalysisConfidence confidence,
@@ -3844,6 +3944,11 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
             // never a gauge candidate.
             if (field_registry_.has(field) &&
                 field_registry_.get(field).scope == FieldScope::Global) {
+                return;
+            }
+            // A trace multiplier lives on its boundary or interface: its
+            // constant is not admissible, so it is never a gauge candidate.
+            if (std::find(trace_multipliers.begin(), trace_multipliers.end(), field) != trace_multipliers.end()) {
                 return;
             }
 
@@ -4211,6 +4316,48 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                                     "': its row fixes the constant of field " + std::to_string(field),
                                 -1,
                                 row->testField()});
+                        }
+                    }
+                }
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // Trace-multiplier evidence (D54 T1): the rows of a field restricted
+        // to a boundary or interface that change under a constant shift of a
+        // scalar field (a trace constraint such as (mu * (u - g)).ds) fix
+        // that field's constant, as an essential condition on the trace would.
+        // -----------------------------------------------------------------
+        if (const auto multipliers = traceMultiplierFields(); !multipliers.empty()) {
+            std::vector<FieldId> scalar_candidates;
+            for (const auto& c : gauge_registry_->candidates()) {
+                if (c.family == gauge::NullspaceModeFamily::ScalarConstant &&
+                    std::find(scalar_candidates.begin(), scalar_candidates.end(), c.field) ==
+                        scalar_candidates.end()) {
+                    scalar_candidates.push_back(c.field);
+                }
+            }
+            for (const auto& rec : formulation_records_) {
+                if (!rec.contributes_to_problem_analysis) {
+                    continue;
+                }
+                for (const auto& [block, node] : rec.block_residual_exprs) {
+                    const auto multiplier = block.first;
+                    if (!node ||
+                        std::find(multipliers.begin(), multipliers.end(), multiplier) == multipliers.end()) {
+                        continue;
+                    }
+                    const forms::FormExpr row(std::const_pointer_cast<forms::FormExprNode>(node));
+                    for (const auto field : scalar_candidates) {
+                        if (field != multiplier && rowsFixTheConstantOf(row, field)) {
+                            gauge_registry_->addAnchoring(gauge::AnchoringEvidence{
+                                field,
+                                -1,
+                                -1,
+                                gauge::NullspaceModeFamily::ScalarConstant,
+                                gauge::AnchoringVerdict::Anchored,
+                                "trace multiplier '" + field_registry_.get(multiplier).name +
+                                    "': its rows fix the constant of field " + std::to_string(field)});
                         }
                     }
                 }
@@ -6938,6 +7085,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 
     if (hasGlobalFieldRecords(field_registry_)) {
         validateGlobalMultiplierConstraints();
+    }
+    if (!traceMultiplierFields().empty()) {
+        validateTraceMultiplierRows();
     }
 
     buildAssemblyPlans();

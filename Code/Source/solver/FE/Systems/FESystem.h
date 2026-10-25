@@ -737,6 +737,15 @@ public:
      * system's values (borderedGlobalValues()), which the solver updates.
      */
     [[nodiscard]] std::vector<Real> globalFieldValues(FieldId field, const SystemStateView& state) const;
+    /**
+     * @brief The trace multipliers: fields a SupportRestrictionConstraint restricts
+     *
+     * A trace multiplier written as a volume field (D54 T1) lives on a
+     * boundary or interface; it is never a gauge candidate, and its row's
+     * dependence on another scalar field anchors that field's constant.  In
+     * the order of their first restriction.
+     */
+    [[nodiscard]] std::vector<FieldId> traceMultiplierFields() const;
     void setPrescribedFieldCoefficients(FieldId field, std::span<const Real> coefficients);
     void setPrescribedFieldCoefficientPairs(FieldId field,
                                             std::span<const Real> high,
@@ -2439,6 +2448,7 @@ private:
     void validateGlobalMultiplierConstraints() const;
     /// Under the bordered lowering, refuses a multiplier whose row is the only anchoring of a constant mode.
     void refuseGaugeTypeMultipliersUnderBorderedLowering() const;
+    void validateTraceMultiplierRows() const;
     void buildAssemblyPlans();
     void bumpSpaceRevision() noexcept { ++fe_layout_revisions_.space; }
     void bumpDofLayoutRevision() noexcept { ++fe_layout_revisions_.dof_layout; }
