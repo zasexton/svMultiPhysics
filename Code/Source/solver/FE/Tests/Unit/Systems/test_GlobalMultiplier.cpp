@@ -546,7 +546,7 @@ TEST(GlobalRow, PointTermsHoldOnlyGlobalSymbols)
 // G1: mean-constrained Poisson
 // ---------------------------------------------------------------------------
 
-TEST(GlobalMultiplierG1, DISABLED_QuadraticElementsAreExact)
+TEST(GlobalMultiplierG1, QuadraticElementsAreExact)
 {
     const Real c = 1.5;
     const Real height = 0.5;
@@ -567,7 +567,7 @@ TEST(GlobalMultiplierG1, DISABLED_QuadraticElementsAreExact)
     }
 }
 
-TEST(GlobalMultiplierG1, DISABLED_BilinearElementsConvergeAtSecondOrder)
+TEST(GlobalMultiplierG1, BilinearElementsConvergeAtSecondOrder)
 {
     const Real c = 1.5;
     const Real height = 0.5;
