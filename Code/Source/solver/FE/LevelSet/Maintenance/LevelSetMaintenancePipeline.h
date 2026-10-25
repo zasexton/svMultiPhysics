@@ -21,6 +21,7 @@
  * failure is agreed on before any rank acts on it.
  */
 
+#include "Core/LogRecord.h"
 #include "Core/Types.h"
 #include "LevelSet/LevelSetMaintenanceSubstage.h"
 #include "LevelSet/LevelSetOptions.h"
@@ -130,7 +131,9 @@ struct LevelSetRedistancingTrigger {
  * (resolveLevelSetRedistancingTrigger) fires; then the changed candidate is
  * passed to @p validate_candidate, and the change of every maintained field
  * is published as one common delta on every stored state of @p history.  The requests' run state is updated only when everything
- * succeeds.  Returns whether a field changed.  The commit logs go to
+ * succeeds.  Returns whether a field changed.  The commit records
+ * (kinematic reconciliation, sign-definite patch bounds, interface-preserving
+ * redistancing, synchronized; rank 0 prints them) go to
  * @p deferred_commit_logs when given, else to the log.
  */
 bool applyLevelSetMaintenance(
@@ -139,7 +142,7 @@ bool applyLevelSetMaintenance(
     std::vector<LevelSetMaintenanceRequest>& requests,
     const LevelSetMaintenanceCandidateValidator& validate_candidate = {},
     const LevelSetMaintenanceStageObserver& observe_stage = {},
-    std::vector<std::string>* deferred_commit_logs = nullptr,
+    std::vector<LogRecord>* deferred_commit_logs = nullptr,
     bool* rate_publication_started = nullptr,
     std::span<const LevelSetKinematicBaseline> kinematic_baselines = {});
 

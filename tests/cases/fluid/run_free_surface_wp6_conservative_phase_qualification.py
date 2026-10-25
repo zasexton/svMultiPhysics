@@ -522,7 +522,7 @@ def validate_wp6_production_source_contract(
             "LevelSetMaintenancePublicationState::Publishing",
             "pending_phase_candidate.geometry_transaction->commit();",
             "commit_pending_phase_work();",
-            '<< " outcome=committed"',
+            '.text("outcome", "committed")',
             "LevelSetMaintenancePublicationState::Published",
         ),
         "precommit consensus and publication ordering",
@@ -542,8 +542,8 @@ def validate_wp6_production_source_contract(
         source[rollback_start:rollback_end],
         (
             "if (publication_began)",
-            '<< " outcome=publication_failed"',
-            '<< " rollback_claimed=false"',
+            '.text("outcome", "publication_failed")',
+            '.boolean("rollback_claimed", false)',
             "throw std::runtime_error(",
             "std::string recovery_failure;",
             "rollbackConservativePhaseCandidate(",
@@ -597,7 +597,7 @@ def validate_wp6_production_source_contract(
             "level_set_maintenance_work.commitTransaction();",
             "maintenance_transaction_published = true;",
             "if (maintenance_transaction_published &&",
-            '<< " outcome=committed"',
+            '.text("outcome", "committed")',
         ),
         "postaccept consensus and publication ordering",
     )

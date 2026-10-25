@@ -9,6 +9,7 @@
 
 #include "Assembly/Assembler.h"
 #include "Backends/Interfaces/GenericVector.h"
+#include "Core/LogRecord.h"
 #include "Core/RankLog.h"
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
@@ -343,22 +344,18 @@ void initializeConservativePhaseStates(
     }
     history.updateGhosts();
     request.runtime.conservative_phase_initialized = true;
-    svmp::FE::rank_log::oopCout()
-        << "[svMultiPhysics::Application] Conservative phase initialized"
-        << " field='"
-        << request.configuration->transport.conservative_phase.liquid_indicator.field_name << "'"
-        << " level_set_field='" << request.configuration->transport.level_set.field_name << "'"
-        << " liquid_side="
-        << (request.configuration->transport.conservative_phase.liquid_side ==
-                    svmp::FE::level_set::LevelSetPhaseSide::Negative
-                ? "negative"
-                : "positive")
-        << " retained_measure=" << projection.retained_liquid_measure
-        << " projected_measure=" << projection.projected_liquid_measure
-        << " cut_context_revision=" << projection.cut_context_revision
-        << " source_value_revision=" << projection.source_value_revision
-        << " graph_nodes=" << projection.nodes
-        << std::endl;
+    svmp::FE::logRecord(
+        svmp::FE::LogRecord("LevelSetConservativePhase", "initialized")
+            .diagnostic("conservative_phase_initialization")
+            .rootOnly()
+            .quoted("field", request.configuration->transport.conservative_phase.liquid_indicator.field_name)
+            .quoted("level_set_field", request.configuration->transport.level_set.field_name)
+            .text("liquid_side", request.configuration->transport.conservative_phase.liquid_side == svmp::FE::level_set::LevelSetPhaseSide::Negative ? "negative" : "positive")
+            .value("retained_measure", projection.retained_liquid_measure)
+            .value("projected_measure", projection.projected_liquid_measure)
+            .value("cut_context_revision", projection.cut_context_revision)
+            .value("source_value_revision", projection.source_value_revision)
+            .value("graph_nodes", projection.nodes));
   }
 }
 
@@ -2446,15 +2443,15 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
             "[svMultiPhysics::Application] Conservative phase graph-stage rejection reason differs across the active FE communicator.");
       }
       if (any_courant_rejection) {
-        svmp::FE::rank_log::oopCout()
-            << "[svMultiPhysics::Application] Conservative phase candidate rejected"
-            << " field='"
-            << request.configuration->transport.conservative_phase.liquid_indicator.field_name
-            << "' reason=courant_contract"
-            << " courant=" << stage.maximum_courant
-            << " maximum_courant="
-            << request.configuration->transport.conservative_phase.maximum_courant
-            << " dt=" << history.dt() << std::endl;
+        svmp::FE::logRecord(
+            svmp::FE::LogRecord("LevelSetConservativePhase", "candidate rejected")
+                .diagnostic("conservative_phase_candidate_rejection")
+                .rootOnly()
+                .quoted("field", request.configuration->transport.conservative_phase.liquid_indicator.field_name)
+                .text("reason", "courant_contract")
+                .value("courant", stage.maximum_courant)
+                .value("maximum_courant", request.configuration->transport.conservative_phase.maximum_courant)
+                .value("dt", history.dt()));
         result.accept_step = false;
         return result;
       }
@@ -2654,90 +2651,46 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
             "': " + maintenance_ledger.region_ledger.diagnostic);
       }
 
-      svmp::FE::rank_log::oopCout()
-        << "[svMultiPhysics::Application] Conservative phase staged"
-        << " field='"
-        << request.configuration->transport.conservative_phase.liquid_indicator.field_name << "'"
-        << " step=" << history.stepIndex() + 1
-        << " previous_measure="
-        << stage.correction.total_previous_liquid_measure
-        << " accepted_measure=" << phase_measure
-        << " boundary_transfer="
-        << stage.correction.total_physical_boundary_mass_transfer
-        << " maximum_nodal_boundary_mass_transfer="
-        << maximum_nodal_boundary_mass_transfer
-        << " boundary_mass_tolerance=" << boundary_mass_tolerance
-        << " boundary_flux_policy="
-        << svmp::FE::level_set::
-               levelSetConservativePhaseBoundaryFluxPolicyName(
-                   request.configuration->transport.conservative_phase.boundary_flux_policy)
-        << " boundary_safety_scope="
-        << svmp::FE::level_set::
-               levelSetConservativePhaseBoundaryFluxScope(
-                   request.configuration->transport.conservative_phase.boundary_flux_policy)
-        << " boundary_safety_limitation=blind_where_q_is_zero"
-        << " divergence_source="
-        << stage.correction.total_discrete_divergence_mass_source
-        << " global_balance_residual="
-        << stage.correction.global_mass_balance_residual
-        << " max_local_balance_residual="
-        << stage.correction.maximum_local_mass_balance_residual
-        << " phase_components=" << stage.correction.components.size()
-        << " component_activity_tolerance="
-        << stage.correction.component_activity_tolerance
-        << " subthreshold_component_present="
-        << (stage.correction.subthreshold_component_present
-                ? "true"
-                : "false")
-        << " subthreshold_limited_measure="
-        << stage.correction.subthreshold_component
-               .limited_liquid_measure
-        << " max_component_balance_residual="
-        << stage.correction.maximum_component_balance_residual
-        << " tracked_regions="
-        << maintenance_ledger.region_ledger.regions.size()
-        << " max_region_balance_residual="
-        << maintenance_ledger.region_ledger.maximum_balance_residual
-        << " limited_edges=" << stage.correction.limited_edges
-        << " courant=" << stage.maximum_courant
-        << " temporal_split_scheme="
-        << svmp::FE::level_set::levelSetP1PhaseSplitSchemeName(
-               split_stage_validation.provenance.scheme)
-        << " temporal_order="
-        << split_stage_validation.provenance.temporal_order
-        << " attempt=" << split_stage_validation.provenance.attempt
-        << " q_input_time="
-        << split_stage_validation.provenance.q_input_time
-        << " velocity_state_time="
-        << split_stage_validation.provenance.velocity_state_time
-        << " operator_state_revision="
-        << split_stage_validation.provenance.operator_state_revision
-        << " previous_q_revision="
-        << split_stage_validation.provenance.previous_q_revision
-        << " nodal_velocity_revision="
-        << split_stage_validation.provenance.nodal_velocity_revision
-        << " final_flux_ledger_digest="
-        << split_stage_validation.provenance.final_flux_ledger_digest
-        << " stage_invariant_tolerance="
-        << split_stage_validation.provenance
-               .stage_options.invariant_tolerance
-        << " stage_component_activity_tolerance="
-        << split_stage_validation.provenance
-               .stage_options.component_activity_tolerance
-        << " stage_maximum_courant="
-        << split_stage_validation.provenance
-               .stage_options.maximum_courant
-        << " stage_enforce_courant_limit="
-        << (split_stage_validation.provenance
-                    .stage_options.enforce_courant_limit
-                ? "true"
-                : "false")
-        << " stage_require_constant_preservation="
-        << (split_stage_validation.provenance
-                    .stage_options.require_constant_preservation
-                ? "true"
-                : "false")
-          << std::endl;
+      svmp::FE::logRecord(
+          svmp::FE::LogRecord("LevelSetConservativePhase", "Conservative phase staged")
+              .diagnostic("conservative_phase_stage")
+              .rootOnly()
+              .quoted("field", request.configuration->transport.conservative_phase.liquid_indicator.field_name)
+              .value("step", history.stepIndex() + 1)
+              .value("previous_measure", stage.correction.total_previous_liquid_measure)
+              .value("accepted_measure", phase_measure)
+              .value("boundary_transfer", stage.correction.total_physical_boundary_mass_transfer)
+              .value("maximum_nodal_boundary_mass_transfer", maximum_nodal_boundary_mass_transfer)
+              .value("boundary_mass_tolerance", boundary_mass_tolerance)
+              .value("boundary_flux_policy", svmp::FE::level_set::levelSetConservativePhaseBoundaryFluxPolicyName(request.configuration->transport.conservative_phase.boundary_flux_policy))
+              .value("boundary_safety_scope", svmp::FE::level_set::levelSetConservativePhaseBoundaryFluxScope(request.configuration->transport.conservative_phase.boundary_flux_policy))
+              .text("boundary_safety_limitation", "blind_where_q_is_zero")
+              .value("divergence_source", stage.correction.total_discrete_divergence_mass_source)
+              .value("global_balance_residual", stage.correction.global_mass_balance_residual)
+              .value("max_local_balance_residual", stage.correction.maximum_local_mass_balance_residual)
+              .value("phase_components", stage.correction.components.size())
+              .value("component_activity_tolerance", stage.correction.component_activity_tolerance)
+              .boolean("subthreshold_component_present", stage.correction.subthreshold_component_present)
+              .value("subthreshold_limited_measure", stage.correction.subthreshold_component.limited_liquid_measure)
+              .value("max_component_balance_residual", stage.correction.maximum_component_balance_residual)
+              .value("tracked_regions", maintenance_ledger.region_ledger.regions.size())
+              .value("max_region_balance_residual", maintenance_ledger.region_ledger.maximum_balance_residual)
+              .value("limited_edges", stage.correction.limited_edges)
+              .value("courant", stage.maximum_courant)
+              .value("temporal_split_scheme", svmp::FE::level_set::levelSetP1PhaseSplitSchemeName(split_stage_validation.provenance.scheme))
+              .value("temporal_order", split_stage_validation.provenance.temporal_order)
+              .value("attempt", split_stage_validation.provenance.attempt)
+              .value("q_input_time", split_stage_validation.provenance.q_input_time)
+              .value("velocity_state_time", split_stage_validation.provenance.velocity_state_time)
+              .value("operator_state_revision", split_stage_validation.provenance.operator_state_revision)
+              .value("previous_q_revision", split_stage_validation.provenance.previous_q_revision)
+              .value("nodal_velocity_revision", split_stage_validation.provenance.nodal_velocity_revision)
+              .value("final_flux_ledger_digest", split_stage_validation.provenance.final_flux_ledger_digest)
+              .value("stage_invariant_tolerance", split_stage_validation.provenance.stage_options.invariant_tolerance)
+              .value("stage_component_activity_tolerance", split_stage_validation.provenance.stage_options.component_activity_tolerance)
+              .value("stage_maximum_courant", split_stage_validation.provenance.stage_options.maximum_courant)
+              .boolean("stage_enforce_courant_limit", split_stage_validation.provenance.stage_options.enforce_courant_limit)
+              .boolean("stage_require_constant_preservation", split_stage_validation.provenance.stage_options.require_constant_preservation));
       maintenance_ledger.transport_stage = std::move(stage);
     } catch (...) {
       local_region_ledger_failure = std::current_exception();
@@ -2964,22 +2917,17 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
         reconciliation.final_total_residual = svmp::FE::Real{0.0};
         reconciliation.diagnostic =
             "stationary_geometry_equilibrium_projection";
-        svmp::FE::rank_log::oopCout()
-            << "[svMultiPhysics::Application] Conservative phase stationary geometry equilibrium preserved"
-            << " diagnostic=" << reconciliation.diagnostic
-            << " field='"
-            << request.configuration->transport.conservative_phase.liquid_indicator.field_name
-            << "' initial_local_residual_norm="
-            << transported_geometry_mismatch.residual_norm
-            << " maximum_initial_nodal_residual="
-            << transported_geometry_mismatch.maximum_nodal_residual
-            << " initial_total_residual="
-            << transported_geometry_mismatch.total_residual
-            << " stationary_geometry_maximum_nodal_residual="
-            << stationary_geometry_mismatch.maximum_nodal_residual
-            << " stationary_geometry_total_residual="
-            << stationary_geometry_mismatch.total_residual
-            << " tolerance=" << equilibrium_tolerance << std::endl;
+        svmp::FE::logRecord(
+            svmp::FE::LogRecord("LevelSetConservativePhase", "stationary geometry equilibrium preserved")
+                .diagnostic("stationary_geometry_equilibrium_projection")
+                .rootOnly()
+                .quoted("field", request.configuration->transport.conservative_phase.liquid_indicator.field_name)
+                .value("initial_local_residual_norm", transported_geometry_mismatch.residual_norm)
+                .value("maximum_initial_nodal_residual", transported_geometry_mismatch.maximum_nodal_residual)
+                .value("initial_total_residual", transported_geometry_mismatch.total_residual)
+                .value("stationary_geometry_maximum_nodal_residual", stationary_geometry_mismatch.maximum_nodal_residual)
+                .value("stationary_geometry_total_residual", stationary_geometry_mismatch.total_residual)
+                .value("tolerance", equilibrium_tolerance));
       } else {
         reconciliation = reconcileConservativePhaseGeometry(
             host,
@@ -2992,42 +2940,29 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       reconciliation_reports[request_index] = reconciliation;
       maintenance_ledger.reconciliation = reconciliation;
       if (!reconciliation.success || !reconciliation.target_reached) {
-        svmp::FE::rank_log::oopCout()
-            << "[svMultiPhysics::Application] Conservative phase candidate rejected"
-            << " field='"
-            << request.configuration->transport.conservative_phase.liquid_indicator.field_name
-            << "' reason=local_geometry_reconciliation_contract"
-            << " iterations=" << reconciliation.iterations
-            << " line_search_evaluations="
-            << reconciliation.line_search_evaluations
-            << " geometry_refresh_requests="
-            << reconciliation.geometry_refresh_requests
-            << " geometry_rebuilds="
-            << reconciliation.geometry_rebuilds
-            << " rejected_geometry_trials="
-            << reconciliation.rejected_geometry_trials
-            << " contact_protected_nodes="
-            << reconciliation.contact_protected_nodes
-            << " maximum_removed_contact_increment="
-            << reconciliation.maximum_removed_contact_increment
-            << " initial_local_residual_norm="
-            << reconciliation.initial_residual_norm
-            << " final_local_residual_norm="
-            << reconciliation.final_residual_norm
-            << " max_final_nodal_residual="
-            << reconciliation.maximum_final_nodal_residual
-            << " total_final_residual="
-            << reconciliation.final_total_residual
-            << " accumulated_interface_displacement_bound="
-            << reconciliation.accumulated_interface_displacement_bound
-            << " allowed_interface_displacement="
-            << reconciliation.allowed_interface_displacement
-            << " limited_by_displacement="
-            << (reconciliation.limited_by_displacement ? "true" : "false")
-            << " limited_by_topology="
-            << (reconciliation.limited_by_topology ? "true" : "false")
-            << " diagnostic='" << reconciliation.diagnostic << "'"
-            << " dt=" << history.dt() << std::endl;
+        svmp::FE::logRecord(
+            svmp::FE::LogRecord("LevelSetConservativePhase", "candidate rejected")
+                .diagnostic("conservative_phase_candidate_rejection")
+                .rootOnly()
+                .quoted("field", request.configuration->transport.conservative_phase.liquid_indicator.field_name)
+                .text("reason", "local_geometry_reconciliation_contract")
+                .value("iterations", reconciliation.iterations)
+                .value("line_search_evaluations", reconciliation.line_search_evaluations)
+                .value("geometry_refresh_requests", reconciliation.geometry_refresh_requests)
+                .value("geometry_rebuilds", reconciliation.geometry_rebuilds)
+                .value("rejected_geometry_trials", reconciliation.rejected_geometry_trials)
+                .value("contact_protected_nodes", reconciliation.contact_protected_nodes)
+                .value("maximum_removed_contact_increment", reconciliation.maximum_removed_contact_increment)
+                .value("initial_local_residual_norm", reconciliation.initial_residual_norm)
+                .value("final_local_residual_norm", reconciliation.final_residual_norm)
+                .value("max_final_nodal_residual", reconciliation.maximum_final_nodal_residual)
+                .value("total_final_residual", reconciliation.final_total_residual)
+                .value("accumulated_interface_displacement_bound", reconciliation.accumulated_interface_displacement_bound)
+                .value("allowed_interface_displacement", reconciliation.allowed_interface_displacement)
+                .boolean("limited_by_displacement", reconciliation.limited_by_displacement)
+                .boolean("limited_by_topology", reconciliation.limited_by_topology)
+                .quoted("reconciliation_diagnostic", reconciliation.diagnostic)
+                .value("dt", history.dt()));
         transaction->rollback();
         result.accept_step = false;
         return result;
@@ -3082,53 +3017,31 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       }
       const auto& reconciliation =
           reconciliation_reports[request_index];
-      svmp::FE::rank_log::oopCout()
-          << "[svMultiPhysics::Application] Conservative phase geometry validated"
-          << " field='"
-          << request.configuration->transport.conservative_phase.liquid_indicator.field_name << "'"
-          << " step=" << history.stepIndex() + 1
-          << " phase_measure=" << phase_measure
-          << " retained_geometry_measure="
-          << projection.retained_liquid_measure
-          << " measure_mismatch=" << mismatch
-          << " max_nodal_moment_mismatch="
-          << local_mismatch.maximum_nodal_residual
-          << " nodal_moment_residual_norm="
-          << local_mismatch.residual_norm
-          << " reconciliation_iterations="
-          << reconciliation.iterations
-          << " reconciliation_line_search_evaluations="
-          << reconciliation.line_search_evaluations
-          << " reconciliation_geometry_refresh_requests="
-          << reconciliation.geometry_refresh_requests
-          << " reconciliation_geometry_rebuilds="
-          << reconciliation.geometry_rebuilds
-          << " reconciliation_rejected_geometry_trials="
-          << reconciliation.rejected_geometry_trials
-          << " reconciliation_initial_residual_norm="
-          << reconciliation.initial_residual_norm
-          << " reconciliation_final_residual_norm="
-          << reconciliation.final_residual_norm
-          << " reconciliation_diagnostic='"
-          << reconciliation.diagnostic << "'"
-          << " interface_displacement_bound="
-          << reconciliation.accumulated_interface_displacement_bound
-          << " interface_displacement_limit="
-          << reconciliation.allowed_interface_displacement
-          << " tolerance=" << tolerance
-          << " reconciliation_enabled="
-          << (request.configuration->transport.conservative_phase.reconcile_geometry ? "true"
-                                                             : "false")
-          << " cut_context_revision="
-          << projection.cut_context_revision
-          << " cut_context_refreshed="
-          << (raw_transport_refresh_report.refreshed ||
-                      post_limit_refresh_report.refreshed ||
-                      post_reinitialization_refresh_report.refreshed ||
-                      reconciliation.geometry_rebuilds > 0
-                  ? "true"
-                  : "false")
-          << std::endl;
+      svmp::FE::logRecord(
+          svmp::FE::LogRecord("LevelSetConservativePhase", "Conservative phase geometry validated")
+              .diagnostic("conservative_phase_geometry_validation")
+              .rootOnly()
+              .quoted("field", request.configuration->transport.conservative_phase.liquid_indicator.field_name)
+              .value("step", history.stepIndex() + 1)
+              .value("phase_measure", phase_measure)
+              .value("retained_geometry_measure", projection.retained_liquid_measure)
+              .value("measure_mismatch", mismatch)
+              .value("max_nodal_moment_mismatch", local_mismatch.maximum_nodal_residual)
+              .value("nodal_moment_residual_norm", local_mismatch.residual_norm)
+              .value("reconciliation_iterations", reconciliation.iterations)
+              .value("reconciliation_line_search_evaluations", reconciliation.line_search_evaluations)
+              .value("reconciliation_geometry_refresh_requests", reconciliation.geometry_refresh_requests)
+              .value("reconciliation_geometry_rebuilds", reconciliation.geometry_rebuilds)
+              .value("reconciliation_rejected_geometry_trials", reconciliation.rejected_geometry_trials)
+              .value("reconciliation_initial_residual_norm", reconciliation.initial_residual_norm)
+              .value("reconciliation_final_residual_norm", reconciliation.final_residual_norm)
+              .quoted("reconciliation_diagnostic", reconciliation.diagnostic)
+              .value("interface_displacement_bound", reconciliation.accumulated_interface_displacement_bound)
+              .value("interface_displacement_limit", reconciliation.allowed_interface_displacement)
+              .value("tolerance", tolerance)
+              .boolean("reconciliation_enabled", request.configuration->transport.conservative_phase.reconcile_geometry)
+              .value("cut_context_revision", projection.cut_context_revision)
+              .boolean("cut_context_refreshed", raw_transport_refresh_report.refreshed || post_limit_refresh_report.refreshed || post_reinitialization_refresh_report.refreshed || reconciliation.geometry_rebuilds > 0));
       const auto& transport = maintenance_ledger.transport_stage;
       if (!maintenance_ledger.split_stage_provenance.has_value()) {
         throw std::logic_error(
@@ -3143,171 +3056,94 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
             ledger_maximum_nodal_boundary_transfer,
             std::abs(transfer));
       }
-      svmp::FE::rank_log::oopCout()
-          << std::setprecision(17)
-          << "[svMultiPhysics::Application] Conservative phase maintenance ledger"
-          << " diagnostic=conservative_phase_maintenance_ledger"
-          << " field='"
-          << request.configuration->transport.conservative_phase.liquid_indicator.field_name << "'"
-          << " step=" << history.stepIndex() + 1
-          << " raw_post_transport_phase_measure="
-          << maintenance_ledger.raw_post_transport_phase_measure
-          << " post_limit_phase_measure="
-          << maintenance_ledger.post_limit_phase_measure
-          << " raw_post_transport_geometry_measure="
-          << maintenance_ledger.raw_post_transport_geometry_measure
-          << " post_reinitialization_phase_measure="
-          << maintenance_ledger.post_limit_phase_measure
-          << " post_reinitialization_geometry_measure="
-          << maintenance_ledger.post_reinitialization_geometry_measure
-          << " post_reinitialization_max_nodal_mismatch="
-          << maintenance_ledger.post_reinitialization_mismatch
-                 .maximum_nodal_residual
-          << " post_correction_phase_measure="
-          << maintenance_ledger.post_correction_phase_measure
-          << " post_correction_geometry_measure="
-          << maintenance_ledger.post_correction_geometry_measure
-          << " post_correction_max_nodal_mismatch="
-          << maintenance_ledger.post_correction_mismatch
-                 .maximum_nodal_residual
-          << " retained_assembly_measure="
-          << projection.retained_liquid_measure
-          << " temporal_split_scheme="
-          << svmp::FE::level_set::levelSetP1PhaseSplitSchemeName(
-                 split_stage.scheme)
-          << " temporal_order=" << split_stage.temporal_order
-          << " prospective_step=" << split_stage.prospective_step
-          << " attempt=" << split_stage.attempt
-          << " step_start_time=" << split_stage.step_start_time
-          << " step_end_time=" << split_stage.step_end_time
-          << " q_input_time=" << split_stage.q_input_time
-          << " velocity_state_time=" << split_stage.velocity_state_time
-          << " operator_state_revision="
-          << split_stage.operator_state_revision
-          << " previous_q_revision="
-          << split_stage.previous_q_revision
-          << " nodal_velocity_revision="
-          << split_stage.nodal_velocity_revision
-          << " transport_graph_content_revision="
-          << split_stage.operator_graph_identity.content_revision
-          << " final_flux_ledger_digest="
-          << split_stage.final_flux_ledger_digest
-          << " stage_invariant_tolerance="
-          << split_stage.stage_options.invariant_tolerance
-          << " stage_component_activity_tolerance="
-          << split_stage.stage_options.component_activity_tolerance
-          << " stage_maximum_courant="
-          << split_stage.stage_options.maximum_courant
-          << " stage_enforce_courant_limit="
-          << (split_stage.stage_options.enforce_courant_limit
-                  ? "true"
-                  : "false")
-          << " stage_require_constant_preservation="
-          << (split_stage.stage_options.require_constant_preservation
-                  ? "true"
-                  : "false")
-          << " total_physical_boundary_mass_transfer="
-          << transport.correction
-                 .total_physical_boundary_mass_transfer
-          << " maximum_nodal_physical_boundary_mass_transfer="
-          << ledger_maximum_nodal_boundary_transfer
-          << " boundary_mass_tolerance="
-          << maintenance_ledger.boundary_mass_tolerance
-          << " boundary_flux_policy="
-          << svmp::FE::level_set::
-                 levelSetConservativePhaseBoundaryFluxPolicyName(
-                     maintenance_ledger.boundary_flux_policy)
-          << " boundary_safety_scope="
-          << svmp::FE::level_set::
-                 levelSetConservativePhaseBoundaryFluxScope(
-                     maintenance_ledger.boundary_flux_policy)
-          << " boundary_safety_limitation=blind_where_q_is_zero"
-          << " transport_nodes="
-          << transport.correction.nodes.size()
-          << " transport_edges="
-          << transport.correction.edges.size()
-          << " transport_components="
-          << transport.correction.components.size()
-          << " transport_component_activity_tolerance="
-          << transport.correction.component_activity_tolerance
-          << " transport_subthreshold_component_present="
-          << (transport.correction.subthreshold_component_present
-                  ? "true"
-                  : "false")
-          << " transport_subthreshold_nodes="
-          << transport.correction.subthreshold_component.nodes
-          << " transport_subthreshold_limited_measure="
-          << transport.correction.subthreshold_component
-                 .limited_liquid_measure
-          << " transport_component_balance_satisfied="
-          << (transport.correction.component_balance_satisfied
-                  ? "true"
-                  : "false")
-          << " transport_component_measure_closure_satisfied="
-          << (transport.correction.component_measure_closure_satisfied
-                  ? "true"
-                  : "false")
-          << " transport_max_component_balance_residual="
-          << transport.correction.maximum_component_balance_residual
-          << " transport_limited_component_closure_residual="
-          << transport.correction
-                 .limited_component_measure_closure_residual
-          << " transport_limited_component_transfer_closure_residual="
-          << transport.correction
-                 .limited_component_transfer_closure_residual
-          << " reconciliation_iterations="
-          << reconciliation.iterations
-          << " reconciliation_interface_displacement_bound="
-          << reconciliation.accumulated_interface_displacement_bound
-          << " reconciliation_contact_protected_nodes="
-          << reconciliation.contact_protected_nodes
-          << " reconciliation_maximum_removed_contact_increment="
-          << reconciliation.maximum_removed_contact_increment
-          << " reconciliation_initial_residual_norm="
-          << reconciliation.initial_residual_norm
-          << " reconciliation_final_residual_norm="
-          << reconciliation.final_residual_norm
-          << " reconciliation_diagnostic='"
-          << reconciliation.diagnostic << "'"
-          << std::endl;
+      // The stream line this record replaced left std::cout at 17 digits,
+      // and the stream lines printed after it still write with that
+      // precision, so set it as before.
+      svmp::FE::rank_log::oopCout() << std::setprecision(17);
+      svmp::FE::logRecord(
+          svmp::FE::LogRecord("LevelSetConservativePhase", "maintenance ledger")
+              .diagnostic("conservative_phase_maintenance_ledger")
+              .rootOnly()
+              .quoted("field", request.configuration->transport.conservative_phase.liquid_indicator.field_name)
+              .value("step", history.stepIndex() + 1)
+              .value("raw_post_transport_phase_measure", maintenance_ledger.raw_post_transport_phase_measure)
+              .value("post_limit_phase_measure", maintenance_ledger.post_limit_phase_measure)
+              .value("raw_post_transport_geometry_measure", maintenance_ledger.raw_post_transport_geometry_measure)
+              .value("post_reinitialization_phase_measure", maintenance_ledger.post_limit_phase_measure)
+              .value("post_reinitialization_geometry_measure", maintenance_ledger.post_reinitialization_geometry_measure)
+              .value("post_reinitialization_max_nodal_mismatch", maintenance_ledger.post_reinitialization_mismatch.maximum_nodal_residual)
+              .value("post_correction_phase_measure", maintenance_ledger.post_correction_phase_measure)
+              .value("post_correction_geometry_measure", maintenance_ledger.post_correction_geometry_measure)
+              .value("post_correction_max_nodal_mismatch", maintenance_ledger.post_correction_mismatch.maximum_nodal_residual)
+              .value("retained_assembly_measure", projection.retained_liquid_measure)
+              .value("temporal_split_scheme", svmp::FE::level_set::levelSetP1PhaseSplitSchemeName(split_stage.scheme))
+              .value("temporal_order", split_stage.temporal_order)
+              .value("prospective_step", split_stage.prospective_step)
+              .value("attempt", split_stage.attempt)
+              .value("step_start_time", split_stage.step_start_time)
+              .value("step_end_time", split_stage.step_end_time)
+              .value("q_input_time", split_stage.q_input_time)
+              .value("velocity_state_time", split_stage.velocity_state_time)
+              .value("operator_state_revision", split_stage.operator_state_revision)
+              .value("previous_q_revision", split_stage.previous_q_revision)
+              .value("nodal_velocity_revision", split_stage.nodal_velocity_revision)
+              .value("transport_graph_content_revision", split_stage.operator_graph_identity.content_revision)
+              .value("final_flux_ledger_digest", split_stage.final_flux_ledger_digest)
+              .value("stage_invariant_tolerance", split_stage.stage_options.invariant_tolerance)
+              .value("stage_component_activity_tolerance", split_stage.stage_options.component_activity_tolerance)
+              .value("stage_maximum_courant", split_stage.stage_options.maximum_courant)
+              .boolean("stage_enforce_courant_limit", split_stage.stage_options.enforce_courant_limit)
+              .boolean("stage_require_constant_preservation", split_stage.stage_options.require_constant_preservation)
+              .value("total_physical_boundary_mass_transfer", transport.correction.total_physical_boundary_mass_transfer)
+              .value("maximum_nodal_physical_boundary_mass_transfer", ledger_maximum_nodal_boundary_transfer)
+              .value("boundary_mass_tolerance", maintenance_ledger.boundary_mass_tolerance)
+              .value("boundary_flux_policy", svmp::FE::level_set::levelSetConservativePhaseBoundaryFluxPolicyName(maintenance_ledger.boundary_flux_policy))
+              .value("boundary_safety_scope", svmp::FE::level_set::levelSetConservativePhaseBoundaryFluxScope(maintenance_ledger.boundary_flux_policy))
+              .text("boundary_safety_limitation", "blind_where_q_is_zero")
+              .value("transport_nodes", transport.correction.nodes.size())
+              .value("transport_edges", transport.correction.edges.size())
+              .value("transport_components", transport.correction.components.size())
+              .value("transport_component_activity_tolerance", transport.correction.component_activity_tolerance)
+              .boolean("transport_subthreshold_component_present", transport.correction.subthreshold_component_present)
+              .value("transport_subthreshold_nodes", transport.correction.subthreshold_component.nodes)
+              .value("transport_subthreshold_limited_measure", transport.correction.subthreshold_component.limited_liquid_measure)
+              .boolean("transport_component_balance_satisfied", transport.correction.component_balance_satisfied)
+              .boolean("transport_component_measure_closure_satisfied", transport.correction.component_measure_closure_satisfied)
+              .value("transport_max_component_balance_residual", transport.correction.maximum_component_balance_residual)
+              .value("transport_limited_component_closure_residual", transport.correction.limited_component_measure_closure_residual)
+              .value("transport_limited_component_transfer_closure_residual", transport.correction.limited_component_transfer_closure_residual)
+              .value("reconciliation_iterations", reconciliation.iterations)
+              .value("reconciliation_interface_displacement_bound", reconciliation.accumulated_interface_displacement_bound)
+              .value("reconciliation_contact_protected_nodes", reconciliation.contact_protected_nodes)
+              .value("reconciliation_maximum_removed_contact_increment", reconciliation.maximum_removed_contact_increment)
+              .value("reconciliation_initial_residual_norm", reconciliation.initial_residual_norm)
+              .value("reconciliation_final_residual_norm", reconciliation.final_residual_norm)
+              .quoted("reconciliation_diagnostic", reconciliation.diagnostic));
       const auto emit_component_ledger =
           [&](const auto& component, std::string_view classification) {
-        svmp::FE::rank_log::oopCout()
-            << std::setprecision(17)
-            << "[svMultiPhysics::Application] Conservative phase component ledger"
-            << " diagnostic=conservative_phase_component_ledger"
-            << " field='"
-            << request.configuration->transport.conservative_phase.liquid_indicator.field_name
-            << "'"
-            << " step=" << history.stepIndex() + 1
-            << " classification=" << classification
-            << " component_id=" << component.component_id
-            << " nodes=" << component.nodes
-            << " previous_liquid_measure="
-            << component.previous_liquid_measure
-            << " low_order_liquid_measure="
-            << component.low_order_liquid_measure
-            << " raw_target_liquid_measure="
-            << component.raw_target_liquid_measure
-            << " limited_liquid_measure="
-            << component.limited_liquid_measure
-            << " physical_boundary_mass_transfer="
-            << component.physical_boundary_mass_transfer
-            << " discrete_divergence_mass_source="
-            << component.discrete_divergence_mass_source
-            << " low_order_interior_mass_transfer="
-            << component.low_order_interior_mass_transfer
-            << " raw_antidiffusive_mass_transfer="
-            << component.raw_antidiffusive_mass_transfer
-            << " limited_antidiffusive_mass_transfer="
-            << component.limited_antidiffusive_mass_transfer
-            << " low_order_balance_residual="
-            << component.low_order_balance_residual
-            << " raw_target_balance_residual="
-            << component.raw_target_balance_residual
-            << " limited_balance_residual="
-            << component.limited_balance_residual
-            << std::endl;
+        // As for the maintenance ledger: keep std::cout at 17 digits.
+        svmp::FE::rank_log::oopCout() << std::setprecision(17);
+        svmp::FE::logRecord(
+            svmp::FE::LogRecord("LevelSetConservativePhase", "component ledger")
+                .diagnostic("conservative_phase_component_ledger")
+                .rootOnly()
+                .quoted("field", request.configuration->transport.conservative_phase.liquid_indicator.field_name)
+                .value("step", history.stepIndex() + 1)
+                .value("classification", classification)
+                .value("component_id", component.component_id)
+                .value("nodes", component.nodes)
+                .value("previous_liquid_measure", component.previous_liquid_measure)
+                .value("low_order_liquid_measure", component.low_order_liquid_measure)
+                .value("raw_target_liquid_measure", component.raw_target_liquid_measure)
+                .value("limited_liquid_measure", component.limited_liquid_measure)
+                .value("physical_boundary_mass_transfer", component.physical_boundary_mass_transfer)
+                .value("discrete_divergence_mass_source", component.discrete_divergence_mass_source)
+                .value("low_order_interior_mass_transfer", component.low_order_interior_mass_transfer)
+                .value("raw_antidiffusive_mass_transfer", component.raw_antidiffusive_mass_transfer)
+                .value("limited_antidiffusive_mass_transfer", component.limited_antidiffusive_mass_transfer)
+                .value("low_order_balance_residual", component.low_order_balance_residual)
+                .value("raw_target_balance_residual", component.raw_target_balance_residual)
+                .value("limited_balance_residual", component.limited_balance_residual));
       };
       for (const auto& component : transport.correction.components) {
         emit_component_ledger(component, "resolved");

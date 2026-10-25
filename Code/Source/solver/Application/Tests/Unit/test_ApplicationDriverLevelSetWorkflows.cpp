@@ -12667,7 +12667,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
   recordMaintenanceSchedule(
       "r1_converged_history_request_after", request_after_maintenance);
   ASSERT_TRUE(changed);
-  EXPECT_NE(output.find("Level-set sign-definite patch bounds field='phi'"),
+  EXPECT_NE(output.find("LevelSetMaintenancePipeline: sign-definite patch "
+                        "bounds diagnostic=level_set_sign_definite_patch_bounds "
+                        "field='phi'"),
             std::string::npos);
   EXPECT_NE(output.find("temporal_increments=preserved"), std::string::npos);
   ASSERT_EQ(observed_substages.size(), 1u);
@@ -15643,7 +15645,7 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
   ASSERT_NE(geometry_transaction, nullptr);
   ASSERT_NO_THROW(geometry_transaction->rollback());
   EXPECT_TRUE(candidate_context_replaced);
-  EXPECT_EQ(output.find("Level-set kinematic reconciliation"),
+  EXPECT_EQ(output.find("diagnostic=level_set_kinematic_reconciliation"),
             std::string::npos);
   ASSERT_EQ(requests.size(), 1u);
   ASSERT_TRUE(rejected_trial_schedule.has_value());

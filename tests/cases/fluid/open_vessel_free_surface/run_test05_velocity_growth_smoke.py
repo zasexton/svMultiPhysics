@@ -3819,7 +3819,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
                 diagnostics["process_memory"].append(memory_record)
         elif "diagnostic=process_memory" in line:
             diagnostics["process_memory"].append(parse_key_values(line))
-        elif "Updated level-set advection velocity" in line:
+        elif word == "level_set_advection_velocity_update":
             diagnostics["level_set_advection_velocity_updates"].append(
                 parse_key_values(line)
             )

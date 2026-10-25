@@ -2595,20 +2595,26 @@ void logLevelSetMaintenanceCoverageDiagnostics(
         request.configuration->transport.interface_preserving_redistancing.enabled) {
       transport_maintained_fields.insert(request.configuration->transport.level_set.field_name);
     }
-    application::core::oopCout()
-        << "[svMultiPhysics::Application] Level-set maintenance diagnostic"
-        << " field='" << request.configuration->transport.level_set.field_name << "'"
-        << " kinematic_reconciliation="
-        << (request.configuration->transport.kinematic_reconciliation.enabled ? "enabled" : "disabled")
-        << " sign_definite_patch_bounds="
-        << (request.configuration->transport.sign_definite_patch_bounds.enabled ? "enabled" : "disabled")
-        << (request.configuration->transport.interface_preserving_redistancing.enabled
-                ? " interface_preserving_redistancing=enabled" : "")
-        << " conservation_diagnostic="
-        << svmp::FE::level_set::levelSetConservationDiagnosticName(
-               svmp::FE::level_set::levelSetConservationDiagnostic(
-                   request.configuration->transport.transport_form))
-        << std::endl;
+    // Map entry S9.138 (tests/cases/fluid/free_surface_log_record_map.json).
+    const auto& transport = request.configuration->transport;
+    svmp::FE::LogRecord configuration(
+        "LevelSetMaintenancePipeline", "maintenance configuration");
+    configuration.diagnostic("level_set_maintenance_configuration")
+        .rootOnly()
+        .quoted("field", transport.level_set.field_name)
+        .text("kinematic_reconciliation",
+              transport.kinematic_reconciliation.enabled ? "enabled" : "disabled")
+        .text("sign_definite_patch_bounds",
+              transport.sign_definite_patch_bounds.enabled ? "enabled" : "disabled");
+    if (transport.interface_preserving_redistancing.enabled) {
+      configuration.text("interface_preserving_redistancing", "enabled");
+    }
+    configuration.text(
+        "conservation_diagnostic",
+        svmp::FE::level_set::levelSetConservationDiagnosticName(
+            svmp::FE::level_set::levelSetConservationDiagnostic(
+                transport.transport_form)));
+    svmp::FE::logRecord(configuration);
   }
 
   std::set<std::string> warned_fields;
@@ -2620,14 +2626,17 @@ void logLevelSetMaintenanceCoverageDiagnostics(
     if (!warned_fields.insert(request.level_set_field_name).second) {
       continue;
     }
-    application::core::oopCout()
-        << "[svMultiPhysics::Application] WARNING unfitted free-surface "
-        << "level-set has no enabled accepted-step maintenance request"
-        << " field='" << request.level_set_field_name << "'"
-        << " domain_id='" << request.domain_id << "'"
-        << " active_side=" << activeSideName(request.active_side)
-        << " diagnostic=plain_level_set_advection_not_conservative"
-        << std::endl;
+    // Map entry S9.182: a warning, so stderr.
+    svmp::FE::logRecord(
+        svmp::FE::LogRecord(
+            "ApplicationDriver",
+            "unfitted free-surface level set has no accepted-state maintenance",
+            svmp::FE::LogLevel::WARNING)
+            .diagnostic("plain_level_set_advection_not_conservative")
+            .rootOnly()
+            .quoted("field", request.level_set_field_name)
+            .quoted("domain_id", request.domain_id)
+            .text("active_side", activeSideName(request.active_side)));
   }
 }
 
@@ -3869,7 +3878,7 @@ bool applyLevelSetMaintenance(
     std::span<const svmp::FE::Real> /*accepted_contact_stage_solution*/ = {},
     const LevelSetMaintenanceCandidateValidator& validate_candidate = {},
     const LevelSetMaintenanceStageObserver& observe_stage = {},
-    std::vector<std::string>* deferred_commit_logs = nullptr,
+    std::vector<svmp::FE::LogRecord>* deferred_commit_logs = nullptr,
     bool* rate_publication_started = nullptr,
     std::span<const LevelSetKinematicBaseline> kinematic_baselines = {})
 {
@@ -8581,22 +8590,17 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             pending_phase_publication_state !=
             LevelSetMaintenancePublicationState::Staged;
         if (publication_began) {
-          oopCout()
-              << "[svMultiPhysics::Application] Conservative phase candidate"
-              << " diagnostic=level_set_maintenance_transaction"
-              << " step=" << h.stepIndex() + 1
-              << " reason='" << reason << "'"
-              << " outcome=publication_failed"
-              << " publication_state="
-              << levelSetMaintenancePublicationStateName(
-                     pending_phase_publication_state)
-              << " rollback_claimed=false"
-              << " candidate_geometry_and_state_restored=false"
-              << " ledger_transaction_inactive="
-              << (!level_set_maintenance_work.transactionActive()
-                      ? "true"
-                      : "false")
-              << std::endl;
+          svmp::FE::logRecord(
+              svmp::FE::LogRecord("LevelSetMaintenance", "maintenance transaction")
+                  .diagnostic("level_set_maintenance_transaction")
+                  .rootOnly()
+                  .value("step", h.stepIndex() + 1)
+                  .quoted("reason", reason)
+                  .text("outcome", "publication_failed")
+                  .value("publication_state", levelSetMaintenancePublicationStateName(pending_phase_publication_state))
+                  .boolean("rollback_claimed", false)
+                  .boolean("candidate_geometry_and_state_restored", false)
+                  .boolean("ledger_transaction_inactive", !level_set_maintenance_work.transactionActive()));
           throw std::runtime_error(
               "[svMultiPhysics::Application] Conservative phase "
               "publication had already begun; candidate discard is "
@@ -8639,24 +8643,17 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             recovery_failure.empty() &&
             candidate_restored &&
             ledger_rejected;
-        oopCout()
-            << "[svMultiPhysics::Application] Conservative phase candidate"
-            << " diagnostic=level_set_maintenance_transaction"
-            << " step=" << h.stepIndex() + 1
-            << " reason='" << reason << "'"
-            << " outcome="
-            << (restored ? "rolled_back"
-                         : "rollback_failed")
-            << " publication_state="
-            << levelSetMaintenancePublicationStateName(
-                   pending_phase_publication_state)
-            << " rollback_claimed="
-            << (restored ? "true" : "false")
-            << " candidate_geometry_and_state_restored="
-            << (candidate_restored ? "true" : "false")
-            << " ledger_rejected="
-            << (ledger_rejected ? "true" : "false")
-            << std::endl;
+        svmp::FE::logRecord(
+            svmp::FE::LogRecord("LevelSetMaintenance", "maintenance transaction")
+                .diagnostic("level_set_maintenance_transaction")
+                .rootOnly()
+                .value("step", h.stepIndex() + 1)
+                .quoted("reason", reason)
+                .text("outcome", restored ? "rolled_back" : "rollback_failed")
+                .value("publication_state", levelSetMaintenancePublicationStateName(pending_phase_publication_state))
+                .boolean("rollback_claimed", restored)
+                .boolean("candidate_geometry_and_state_restored", candidate_restored)
+                .boolean("ledger_rejected", ledger_rejected));
         if (!restored) {
           if (recovery_failure.empty()) {
             recovery_failure =
@@ -9406,14 +9403,14 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             commit_pending_phase_work();
             pending_phase_ledger_transaction_inactive =
                 !level_set_maintenance_work.transactionActive();
-            oopCout()
-                << "[svMultiPhysics::Application] Conservative phase candidate"
-                << " step=" << h.stepIndex() + 1
-                << " outcome=committed"
-                << " geometry_validated_before_commit=true"
-                << " accepted_state_change="
-                << (changed ? "true" : "false")
-                << std::endl;
+            svmp::FE::logRecord(
+                svmp::FE::LogRecord("LevelSetConservativePhase", "candidate")
+                    .diagnostic("conservative_phase_candidate")
+                    .rootOnly()
+                    .value("step", h.stepIndex() + 1)
+                    .text("outcome", "committed")
+                    .boolean("geometry_validated_before_commit", true)
+                    .boolean("accepted_state_change", changed));
             pending_phase_publication_state =
                 LevelSetMaintenancePublicationState::Published;
           } catch (...) {
@@ -9421,25 +9418,16 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                 LevelSetMaintenancePublicationState::PublicationFailed;
             pending_phase_ledger_transaction_inactive =
                 !level_set_maintenance_work.transactionActive();
-            oopCout()
-                << "[svMultiPhysics::Application] Conservative phase candidate"
-                << " diagnostic=level_set_maintenance_transaction"
-                << " step=" << h.stepIndex() + 1
-                << " outcome=publication_failed"
-                << " geometry_commit_required="
-                << (pending_phase_geometry_commit_required
-                        ? "true"
-                        : "false")
-                << " geometry_commit_returned="
-                << (pending_phase_geometry_commit_returned
-                        ? "true"
-                        : "false")
-                << " ledger_transaction_inactive="
-                << (pending_phase_ledger_transaction_inactive
-                        ? "true"
-                        : "false")
-                << " rollback_claimed=false"
-                << std::endl;
+            svmp::FE::logRecord(
+                svmp::FE::LogRecord("LevelSetMaintenance", "maintenance transaction")
+                    .diagnostic("level_set_maintenance_transaction")
+                    .rootOnly()
+                    .value("step", h.stepIndex() + 1)
+                    .text("outcome", "publication_failed")
+                    .boolean("geometry_commit_required", pending_phase_geometry_commit_required)
+                    .boolean("geometry_commit_returned", pending_phase_geometry_commit_returned)
+                    .boolean("ledger_transaction_inactive", pending_phase_ledger_transaction_inactive)
+                    .boolean("rollback_claimed", false));
             throw;
           }
         }
@@ -9596,7 +9584,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       pre_maintenance_functionals =
           currentAcceptedFunctionalLayouts(sim);
     }
-    std::vector<std::string> maintenance_commit_logs;
+    std::vector<svmp::FE::LogRecord> maintenance_commit_logs;
     std::unique_ptr<LevelSetMaintenanceGeometryTransaction>
         maintenance_geometry_transaction;
     bool level_set_maintenance_changed = false;
@@ -10045,36 +10033,27 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               postacceptMaintenanceTopologyEvidence(
                   postaccept_maintenance_baseline_topology_key,
                   postaccept_maintenance_final_topology_key);
-          oopCout()
-              << "[svMultiPhysics::Application] Level-set maintenance transaction"
-              << " diagnostic=level_set_maintenance_transaction"
-              << " step=" << h.stepIndex()
-              << " reason_code="
-              << postacceptMaintenanceRollbackReasonName(reason)
-              << " rollback_scope="
-              << postacceptMaintenanceRollbackScopeName(
-                     rollback_scope)
-              << " outcome=maintenance_transaction_rejected"
-              << " physical_step_retained=true"
-              << " full_time_step_rollback=false"
-              << " maintenance_state_change_retained=false"
-              << " geometry_state_restored=true"
-              << " request_current_history_state_restored=true"
-              << " restored_topology_verified="
-              << (restored_topology_verified ? "true" : "false")
-              << " maintenance_work_ledger_rejected=true"
-              << " free_surface_energy_ledger_rejected=false"
-              << " topology_baseline_present="
-              << (topology_evidence.baseline_present ? "true" : "false")
-              << " topology_baseline_key="
-              << topology_evidence.baseline_key
-              << " topology_final_present="
-              << (topology_evidence.final_present ? "true" : "false")
-              << " topology_final_key="
-              << topology_evidence.final_key
-              << " topology_keys_equal="
-              << (topology_evidence.keys_equal ? "true" : "false")
-              << std::endl;
+          svmp::FE::logRecord(
+              svmp::FE::LogRecord("LevelSetMaintenance", "maintenance transaction")
+                  .diagnostic("level_set_maintenance_transaction")
+                  .rootOnly()
+                  .value("step", h.stepIndex())
+                  .value("reason_code", postacceptMaintenanceRollbackReasonName(reason))
+                  .value("rollback_scope", postacceptMaintenanceRollbackScopeName(rollback_scope))
+                  .text("outcome", "maintenance_transaction_rejected")
+                  .boolean("physical_step_retained", true)
+                  .boolean("full_time_step_rollback", false)
+                  .boolean("maintenance_state_change_retained", false)
+                  .boolean("geometry_state_restored", true)
+                  .boolean("request_current_history_state_restored", true)
+                  .boolean("restored_topology_verified", restored_topology_verified)
+                  .boolean("maintenance_work_ledger_rejected", true)
+                  .boolean("free_surface_energy_ledger_rejected", false)
+                  .boolean("topology_baseline_present", topology_evidence.baseline_present)
+                  .value("topology_baseline_key", topology_evidence.baseline_key)
+                  .boolean("topology_final_present", topology_evidence.final_present)
+                  .value("topology_final_key", topology_evidence.final_key)
+                  .boolean("topology_keys_equal", topology_evidence.keys_equal));
         };
     try {
       const auto ensure_maintenance_geometry_transaction = [&] {
@@ -10428,39 +10407,29 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         } catch (...) {
           maintenance_ledger_commit_completed =
               !level_set_maintenance_work.transactionActive();
-          oopCout()
-              << "[svMultiPhysics::Application] Level-set maintenance transaction"
-              << " diagnostic=level_set_maintenance_transaction"
-              << " step=" << h.stepIndex()
-              << " outcome=publication_failed"
-              << " geometry_commit_required="
-              << (maintenance_geometry_commit_required
-                      ? "true"
-                      : "false")
-              << " geometry_commit_returned="
-              << (maintenance_geometry_commit_returned
-                      ? "true"
-                      : "false")
-              << " ledger_transaction_inactive="
-              << (maintenance_ledger_commit_completed
-                      ? "true"
-                      : "false")
-              << " rollback_claimed=false"
-              << std::endl;
+          svmp::FE::logRecord(
+              svmp::FE::LogRecord("LevelSetMaintenance", "maintenance transaction")
+                  .diagnostic("level_set_maintenance_transaction")
+                  .rootOnly()
+                  .value("step", h.stepIndex())
+                  .text("outcome", "publication_failed")
+                  .boolean("geometry_commit_required", maintenance_geometry_commit_required)
+                  .boolean("geometry_commit_returned", maintenance_geometry_commit_returned)
+                  .boolean("ledger_transaction_inactive", maintenance_ledger_commit_completed)
+                  .boolean("rollback_claimed", false));
           throw;
         }
       }
       if (maintenance_transaction_published &&
           maintenance_geometry_transaction) {
-        oopCout()
-            << "[svMultiPhysics::Application] Level-set maintenance transaction"
-            << " diagnostic=level_set_maintenance_transaction"
-            << " step=" << h.stepIndex()
-            << " outcome=committed"
-            << " geometry_validated_before_commit=true"
-            << " accepted_state_change="
-            << (level_set_maintenance_changed ? "true" : "false")
-            << std::endl;
+        svmp::FE::logRecord(
+            svmp::FE::LogRecord("LevelSetMaintenance", "maintenance transaction")
+                .diagnostic("level_set_maintenance_transaction")
+                .rootOnly()
+                .value("step", h.stepIndex())
+                .text("outcome", "committed")
+                .boolean("geometry_validated_before_commit", true)
+                .boolean("accepted_state_change", level_set_maintenance_changed));
       }
       if (maintenance_transaction_published) {
         logLevelSetMaintenanceWorkPublishedSince(
@@ -10475,25 +10444,16 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         std::rethrow_exception(failure);
       }
       if (maintenance_publication_started) {
-        oopCout()
-            << "[svMultiPhysics::Application] Level-set maintenance transaction"
-            << " diagnostic=level_set_maintenance_transaction"
-            << " step=" << h.stepIndex()
-            << " outcome=publication_failed"
-            << " geometry_commit_required="
-            << (maintenance_geometry_commit_required
-                    ? "true"
-                    : "false")
-            << " geometry_commit_returned="
-            << (maintenance_geometry_commit_returned
-                    ? "true"
-                    : "false")
-            << " ledger_transaction_inactive="
-            << (maintenance_ledger_commit_completed
-                    ? "true"
-                    : "false")
-            << " rollback_claimed=false"
-            << std::endl;
+        svmp::FE::logRecord(
+            svmp::FE::LogRecord("LevelSetMaintenance", "maintenance transaction")
+                .diagnostic("level_set_maintenance_transaction")
+                .rootOnly()
+                .value("step", h.stepIndex())
+                .text("outcome", "publication_failed")
+                .boolean("geometry_commit_required", maintenance_geometry_commit_required)
+                .boolean("geometry_commit_returned", maintenance_geometry_commit_returned)
+                .boolean("ledger_transaction_inactive", maintenance_ledger_commit_completed)
+                .boolean("rollback_claimed", false));
         std::rethrow_exception(failure);
       }
       try {
@@ -10519,9 +10479,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           sim, params, h.u(), *cut_lifecycle, *cut_refresh_cache,
           "accepted_step");
     }
-    for (const auto& log : maintenance_commit_logs) {
-      oopCout() << log << std::endl;
-    }
+    svmp::FE::logRecords(maintenance_commit_logs);
     if (parseBoolEnv("SVMP_CUT_RULE_DUMP", false)) {
       dumpActiveCutVolumeRulesForProbe(*sim.fe_system, h.stepIndex());
     }
@@ -10536,58 +10494,40 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     energy.publishAcceptedEnergy(h, pending_contact_stages);
     clear_pending_contact_provenance();
     if (level_set_maintenance_changed && cut_report.refreshed) {
-      oopCout()
-          << "[svMultiPhysics::Application] Level-set maintenance refreshed cut context"
-          << " step=" << h.stepIndex()
-          << " cut_context_revision=" << cut_report.value_revision
-          << " cell_count=" << cut_report.cell_count
-          << " corner_linearized_cells="
-          << cut_report.corner_linearized_cell_count
-          << " active_cut_cells=" << cut_report.active_cut_cells
-          << " active_quadrature_points="
-          << cut_report.active_quadrature_points
-          << " domain_interface_quadrature_point_count="
-          << cut_report.domain_interface_quadrature_point_count
-          << " domain_volume_quadrature_point_count="
-          << cut_report.domain_volume_quadrature_point_count
-          << " domain_total_quadrature_point_count="
-          << cut_report.domain_total_quadrature_point_count
-          << " backend_volume_quadrature_point_count="
-          << cut_report.backend_volume_quadrature_point_count
-          << " backend_interface_quadrature_point_count="
-          << cut_report.backend_interface_quadrature_point_count
-          << " backend_total_quadrature_point_count="
-          << (cut_report.backend_volume_quadrature_point_count +
-              cut_report.backend_interface_quadrature_point_count)
-          << " backend_elapsed_seconds="
-          << cut_report.backend_elapsed_seconds
-          << " generated_cell_cache_hits="
-          << cut_report.generated_cell_cache_hits
-          << " generated_cell_cache_misses="
-          << cut_report.generated_cell_cache_misses
-          << " generated_cell_cache_unchanged_dof_hits="
-          << cut_report.generated_cell_cache_unchanged_dof_hits
-          << " generated_cell_refresh_candidates="
-          << cut_report.generated_cell_refresh_candidates
-          << " generated_cell_directly_affected="
-          << cut_report.generated_cell_directly_affected
-          << " generated_cell_affected_neighborhood="
-          << cut_report.generated_cell_affected_neighborhood
-          << " generated_domain_cache_hits="
-          << cut_report.generated_domain_cache_hits
-          << " process_vm_kb=" << cut_report.process_vm_kb
-          << " process_rss_kb=" << cut_report.process_rss_kb
-          << " basis_cache_entries=" << cut_report.basis_cache_entries
-          << " negative_volume=" << cut_report.negative_volume
-          << " negative_reference_volume=" << cut_report.negative_volume
-          << " negative_physical_volume="
-          << cut_report.negative_physical_volume
-          << " positive_volume=" << cut_report.positive_volume
-          << " positive_reference_volume=" << cut_report.positive_volume
-          << " positive_physical_volume="
-          << cut_report.positive_physical_volume
-          << " cut_adjacent_facets=" << cut_report.cut_adjacent_facets
-          << std::endl;
+      svmp::FE::logRecord(
+          svmp::FE::LogRecord("LevelSetMaintenancePipeline", "refreshed cut context")
+              .diagnostic("level_set_maintenance_cut_context_refresh")
+              .rootOnly()
+              .value("step", h.stepIndex())
+              .value("cut_context_revision", cut_report.value_revision)
+              .value("cell_count", cut_report.cell_count)
+              .value("corner_linearized_cells", cut_report.corner_linearized_cell_count)
+              .value("active_cut_cells", cut_report.active_cut_cells)
+              .value("active_quadrature_points", cut_report.active_quadrature_points)
+              .value("domain_interface_quadrature_point_count", cut_report.domain_interface_quadrature_point_count)
+              .value("domain_volume_quadrature_point_count", cut_report.domain_volume_quadrature_point_count)
+              .value("domain_total_quadrature_point_count", cut_report.domain_total_quadrature_point_count)
+              .value("backend_volume_quadrature_point_count", cut_report.backend_volume_quadrature_point_count)
+              .value("backend_interface_quadrature_point_count", cut_report.backend_interface_quadrature_point_count)
+              .value("backend_total_quadrature_point_count", cut_report.backend_volume_quadrature_point_count + cut_report.backend_interface_quadrature_point_count)
+              .value("backend_elapsed_seconds", cut_report.backend_elapsed_seconds)
+              .value("generated_cell_cache_hits", cut_report.generated_cell_cache_hits)
+              .value("generated_cell_cache_misses", cut_report.generated_cell_cache_misses)
+              .value("generated_cell_cache_unchanged_dof_hits", cut_report.generated_cell_cache_unchanged_dof_hits)
+              .value("generated_cell_refresh_candidates", cut_report.generated_cell_refresh_candidates)
+              .value("generated_cell_directly_affected", cut_report.generated_cell_directly_affected)
+              .value("generated_cell_affected_neighborhood", cut_report.generated_cell_affected_neighborhood)
+              .value("generated_domain_cache_hits", cut_report.generated_domain_cache_hits)
+              .value("process_vm_kb", cut_report.process_vm_kb)
+              .value("process_rss_kb", cut_report.process_rss_kb)
+              .value("basis_cache_entries", cut_report.basis_cache_entries)
+              .value("negative_volume", cut_report.negative_volume)
+              .value("negative_reference_volume", cut_report.negative_volume)
+              .value("negative_physical_volume", cut_report.negative_physical_volume)
+              .value("positive_volume", cut_report.positive_volume)
+              .value("positive_reference_volume", cut_report.positive_volume)
+              .value("positive_physical_volume", cut_report.positive_physical_volume)
+              .value("cut_adjacent_facets", cut_report.cut_adjacent_facets));
     }
     capture_kinematic_baselines(h);
     logWetVolumeDiagnostics(

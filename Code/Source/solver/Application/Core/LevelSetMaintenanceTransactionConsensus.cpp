@@ -1,6 +1,7 @@
 #include "Application/Core/LevelSetMaintenanceTransactionConsensus.h"
 
 #include "Application/Core/ApplicationDriver.h"
+#include "FE/Core/LogRecord.h"
 #include "FE/LevelSet/LevelSetMaintenanceSchedule.h"
 #include "FE/Systems/SystemCollectives.h"
 #include "Mesh/Core/MeshComm.h"
@@ -10,10 +11,8 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
-#include <iostream>
 #include <limits>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -256,14 +255,16 @@ collectiveLevelSetMaintenanceTransactionDecision(
     if (local_flags[0] == 0 || local_flags[1] == 0 ||
         local_flags[2] == 0) {
       try {
-        std::ostringstream message;
-        message << "[svMultiPhysics::Application] [R" << comm.rank()
-                << "] Level-set maintenance transaction rejected locally"
-                << " diagnostic=maintenance_consensus_local_rejection"
-                << " transaction_active=" << local_flags[0]
-                << " invariants_satisfied=" << local_flags[1]
-                << " canonical_prepared=" << local_flags[2] << "\n";
-        std::cerr << message.str() << std::flush;
+        // Every rejecting rank prints it (the logger names the rank); a
+        // warning, so stderr as before.
+        svmp::FE::logRecord(
+            svmp::FE::LogRecord("LevelSetMaintenanceTransactionConsensus",
+                                "transaction rejected locally",
+                                svmp::FE::LogLevel::WARNING)
+                .diagnostic("maintenance_consensus_local_rejection")
+                .boolean("transaction_active", local_flags[0] != 0)
+                .boolean("invariants_satisfied", local_flags[1] != 0)
+                .boolean("canonical_prepared", local_flags[2] != 0));
       } catch (...) {
       }
     }

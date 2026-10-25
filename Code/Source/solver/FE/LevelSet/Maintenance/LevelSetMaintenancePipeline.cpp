@@ -8,6 +8,7 @@
 #include "LevelSet/Maintenance/LevelSetMaintenancePipeline.h"
 
 #include "Backends/Interfaces/GenericVector.h"
+#include "Core/LogRecord.h"
 #include "Core/RankLog.h"
 #include "Dofs/DofHandler.h"
 #include "LevelSet/LevelSetGeometry.h"
@@ -28,11 +29,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
-#include <iomanip>
 #include <map>
 #include <optional>
 #include <set>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -249,7 +248,7 @@ void reconcileMaintainedLevelSetStep(
     std::vector<svmp::FE::Real>& fe_solution,
     bool& changed,
     std::set<svmp::FE::FieldId>& modified_level_set_fields,
-    std::vector<std::string>& staged_commit_logs)
+    std::vector<svmp::FE::LogRecord>& staged_commit_logs)
 {
   // Reconcile the transport step before any representation change: the
   // baseline is the accepted state the transport started from.
@@ -317,36 +316,32 @@ void reconcileMaintainedLevelSetStep(
           fe_solution);
     }
   }
-  std::ostringstream log;
-  log << std::setprecision(17)
-      << "[svMultiPhysics::Application] Level-set kinematic reconciliation"
-      << " field='" << request.configuration->transport.level_set.field_name
-      << "' step=" << completed_step
-      << " dt=" << history.dt()
-      << " applied=" << (result.applied ? "true" : "false")
-      << " converged=" << (result.converged ? "true" : "false")
-      << " iterations=" << result.iterations
-      << " previous_interface_cells=" << result.previous_interface_cells
-      << " current_interface_cells=" << result.current_interface_cells
-      << " corrected_dofs=" << result.corrected_dofs
-      << " sign_preserving_redistributed_dofs="
-      << result.sign_preserving_redistributed_dofs
-      << " sign_preserving_skipped_dofs="
-      << result.sign_preserving_skipped_dofs
-      << " degeneracy_frozen_dofs=" << result.degeneracy_frozen_dofs
-      << " previous_negative_volume=" << result.previous_negative_volume
-      << " transported_negative_volume="
-      << result.transported_negative_volume
-      << " reconciled_negative_volume="
-      << result.reconciled_negative_volume
-      << " previous_interface_flux=" << result.previous_interface_flux
-      << " current_interface_flux=" << result.current_interface_flux
-      << " kinematic_volume_change=" << result.kinematic_volume_change
-      << " transported_volume_error=" << result.transported_volume_error
-      << " reconciled_volume_error=" << result.reconciled_volume_error
-      << " max_abs_correction=" << result.max_abs_correction
-      << " status='" << result.diagnostic << "'";
-  staged_commit_logs.push_back(log.str());
+  svmp::FE::LogRecord record("LevelSetMaintenancePipeline", "kinematic reconciliation");
+  record.diagnostic("level_set_kinematic_reconciliation")
+      .rootOnly()
+      .quoted("field", request.configuration->transport.level_set.field_name)
+      .value("step", completed_step)
+      .value("dt", history.dt())
+      .boolean("applied", result.applied)
+      .boolean("converged", result.converged)
+      .value("iterations", result.iterations)
+      .value("previous_interface_cells", result.previous_interface_cells)
+      .value("current_interface_cells", result.current_interface_cells)
+      .value("corrected_dofs", result.corrected_dofs)
+      .value("sign_preserving_redistributed_dofs", result.sign_preserving_redistributed_dofs)
+      .value("sign_preserving_skipped_dofs", result.sign_preserving_skipped_dofs)
+      .value("degeneracy_frozen_dofs", result.degeneracy_frozen_dofs)
+      .value("previous_negative_volume", result.previous_negative_volume)
+      .value("transported_negative_volume", result.transported_negative_volume)
+      .value("reconciled_negative_volume", result.reconciled_negative_volume)
+      .value("previous_interface_flux", result.previous_interface_flux)
+      .value("current_interface_flux", result.current_interface_flux)
+      .value("kinematic_volume_change", result.kinematic_volume_change)
+      .value("transported_volume_error", result.transported_volume_error)
+      .value("reconciled_volume_error", result.reconciled_volume_error)
+      .value("max_abs_correction", result.max_abs_correction)
+      .quoted("status", result.diagnostic);
+  staged_commit_logs.push_back(std::move(record));
 }
 
 // Stage 2, sign-definite patch bounds.
@@ -360,7 +355,7 @@ void boundMaintainedLevelSetPatches(
     std::vector<svmp::FE::Real>& fe_solution,
     bool& changed,
     std::set<svmp::FE::FieldId>& modified_level_set_fields,
-    std::vector<std::string>& staged_commit_logs)
+    std::vector<svmp::FE::LogRecord>& staged_commit_logs)
 {
   // Restore the one-ring maximum principle of exact transport on nodes
   // whose patch lies in one phase.  It changes no cut cell, so it does
@@ -434,18 +429,18 @@ void boundMaintainedLevelSetPatches(
           fe_solution);
     }
   }
-  std::ostringstream log;
-  log << std::setprecision(17)
-      << "[svMultiPhysics::Application] Level-set sign-definite patch bounds"
-      << " field='" << request.configuration->transport.level_set.field_name
-      << "' step=" << completed_step
-      << " applied=" << (result.applied ? "true" : "false")
-      << " sign_definite_dofs=" << result.sign_definite_dofs
-      << " bounded_dofs=" << result.bounded_dofs
-      << " sign_changes_prevented=" << result.sign_changes_prevented
-      << " max_abs_correction=" << result.max_abs_correction
-      << " status='" << result.diagnostic << "'";
-  staged_commit_logs.push_back(log.str());
+  svmp::FE::LogRecord record("LevelSetMaintenancePipeline", "sign-definite patch bounds");
+  record.diagnostic("level_set_sign_definite_patch_bounds")
+      .rootOnly()
+      .quoted("field", request.configuration->transport.level_set.field_name)
+      .value("step", completed_step)
+      .boolean("applied", result.applied)
+      .value("sign_definite_dofs", result.sign_definite_dofs)
+      .value("bounded_dofs", result.bounded_dofs)
+      .value("sign_changes_prevented", result.sign_changes_prevented)
+      .value("max_abs_correction", result.max_abs_correction)
+      .quoted("status", result.diagnostic);
+  staged_commit_logs.push_back(std::move(record));
 }
 
 // Stage 3, interface-preserving redistancing when its trigger fires; it
@@ -460,7 +455,7 @@ void redistanceMaintainedLevelSet(
     std::vector<svmp::FE::Real>& fe_solution,
     bool& changed,
     std::set<svmp::FE::FieldId>& modified_level_set_fields,
-    std::vector<std::string>& staged_commit_logs)
+    std::vector<svmp::FE::LogRecord>& staged_commit_logs)
 {
   // Interface-preserving redistancing (opt-in): after the transport has
   // been reconciled and bounded, replace the level set by the signed
@@ -656,40 +651,38 @@ void redistanceMaintainedLevelSet(
             fe_solution);
       }
     }
-    std::ostringstream log;
-    log << std::setprecision(17)
-        << "[svMultiPhysics::Application] Level-set interface-preserving redistancing"
-        << " field='" << request.configuration->transport.level_set.field_name
-        << "' step=" << completed_step
-        << " applied=" << (applied ? "true" : "false")
-        << " segments=" << redistance.interface_segments
-        << " open_ends=" << redistance.open_ends
-        << " redistanced_dofs=" << redistance.redistanced_dofs
-        << " max_abs_change=" << redistance.max_abs_change
-        << " raw_max_crossing_shift=" << change_raw.max_crossing_shift
-        << " raw_max_open_end_shift=" << change_raw.max_open_end_shift
-        << " restoration_converged="
-        << (restoration.converged ? "true" : "false")
-        << " restoration_iterations=" << restoration.iterations
-        << " restoration_corrected_dofs=" << restoration.corrected_dofs
-        << " restoration_frozen_dofs=" << restoration.degeneracy_frozen_dofs
-        << " restoration_skipped_dofs="
-        << restoration.sign_preserving_skipped_dofs
-        << " restoration_passes=" << restoration_passes
-        << " reverted_dofs=" << reverted_dofs
-        << " max_crossing_shift=" << change.max_crossing_shift
-        << " max_open_end_shift=" << change.max_open_end_shift
-        << " cells_with_changed_cut=" << change.cells_with_changed_cut
-        << " open_ends_before=" << change.open_ends_first
-        << " open_ends_after=" << change.open_ends_second
-        << " negative_volume_before=" << volume_before.negative_volume
-        << " negative_volume_after=" << volume_after.negative_volume
-        << " trigger_call=" << (request.runtime.redistancing_calls + 1)
-        << " accumulated_displacement_over_h=" << (accumulated / motion.min_edge)
-        << " trigger_cells=" << trigger_cells
-        << " time=" << history.time()
-        << " status='" << redistance.diagnostic << "'";
-    staged_commit_logs.push_back(log.str());
+    svmp::FE::LogRecord record("LevelSetMaintenancePipeline", "interface-preserving redistancing");
+    record.diagnostic("level_set_interface_preserving_redistancing")
+        .rootOnly()
+        .quoted("field", request.configuration->transport.level_set.field_name)
+        .value("step", completed_step)
+        .boolean("applied", applied)
+        .value("segments", redistance.interface_segments)
+        .value("open_ends", redistance.open_ends)
+        .value("redistanced_dofs", redistance.redistanced_dofs)
+        .value("max_abs_change", redistance.max_abs_change)
+        .value("raw_max_crossing_shift", change_raw.max_crossing_shift)
+        .value("raw_max_open_end_shift", change_raw.max_open_end_shift)
+        .boolean("restoration_converged", restoration.converged)
+        .value("restoration_iterations", restoration.iterations)
+        .value("restoration_corrected_dofs", restoration.corrected_dofs)
+        .value("restoration_frozen_dofs", restoration.degeneracy_frozen_dofs)
+        .value("restoration_skipped_dofs", restoration.sign_preserving_skipped_dofs)
+        .value("restoration_passes", restoration_passes)
+        .value("reverted_dofs", reverted_dofs)
+        .value("max_crossing_shift", change.max_crossing_shift)
+        .value("max_open_end_shift", change.max_open_end_shift)
+        .value("cells_with_changed_cut", change.cells_with_changed_cut)
+        .value("open_ends_before", change.open_ends_first)
+        .value("open_ends_after", change.open_ends_second)
+        .value("negative_volume_before", volume_before.negative_volume)
+        .value("negative_volume_after", volume_after.negative_volume)
+        .value("trigger_call", request.runtime.redistancing_calls + 1)
+        .value("accumulated_displacement_over_h", accumulated / motion.min_edge)
+        .value("trigger_cells", trigger_cells)
+        .value("time", history.time())
+        .quoted("status", redistance.diagnostic);
+    staged_commit_logs.push_back(std::move(record));
     accumulated = svmp::FE::Real{0.0};
     ++request.runtime.redistancing_calls;
   }
@@ -703,7 +696,7 @@ void publishMaintainedLevelSetChanges(
     const std::vector<svmp::FE::Real>& fe_solution,
     const std::vector<svmp::FE::Real>& accepted_solution_before_maintenance,
     const std::set<svmp::FE::FieldId>& modified_level_set_fields,
-    std::vector<std::string>& staged_commit_logs,
+    std::vector<svmp::FE::LogRecord>& staged_commit_logs,
     bool* rate_publication_started)
 {
   // Publish each representation change through one explicit field mapping:
@@ -816,19 +809,19 @@ void publishMaintainedLevelSetChanges(
           staged_history_publication->history.front().data(),
           staged_history_publication->history.front().size()),
       comm);
-  std::ostringstream log;
-  log
-      << "[svMultiPhysics::Application] Level-set maintenance synchronized"
-      << " step=" << history.stepIndex()
-      << " representation_delta=all_history_levels"
-      << " temporal_increments=preserved"
-      << " rate_state=unchanged_consistently"
-      << " rate_synchronized_fields=0"
-      << " synchronized_fields=" << modified_level_set_fields.size()
-      << " synchronized_dofs=" << synchronized_dofs
-      << " current_previous_max_abs_delta=" << current_previous_delta
-      << " history_depth=" << history.historyDepth();
-  staged_commit_logs.push_back(log.str());
+  svmp::FE::LogRecord record("LevelSetMaintenancePipeline", "synchronized");
+  record.diagnostic("level_set_maintenance_synchronization")
+      .rootOnly()
+      .value("step", history.stepIndex())
+      .text("representation_delta", "all_history_levels")
+      .text("temporal_increments", "preserved")
+      .text("rate_state", "unchanged_consistently")
+      .integer("rate_synchronized_fields", 0)
+      .value("synchronized_fields", modified_level_set_fields.size())
+      .value("synchronized_dofs", synchronized_dofs)
+      .value("current_previous_max_abs_delta", current_previous_delta)
+      .value("history_depth", history.historyDepth());
+  staged_commit_logs.push_back(std::move(record));
 
   // Every size, field-slice, collective, and diagnostic invariant has now
   // passed.  Publish the staged coefficient arrays only after those checks
@@ -850,7 +843,7 @@ bool applyLevelSetMaintenance(
     std::vector<LevelSetMaintenanceRequest>& requests,
     const LevelSetMaintenanceCandidateValidator& validate_candidate,
     const LevelSetMaintenanceStageObserver& observe_stage,
-    std::vector<std::string>* deferred_commit_logs,
+    std::vector<svmp::FE::LogRecord>* deferred_commit_logs,
     bool* rate_publication_started,
     std::span<const LevelSetKinematicBaseline> kinematic_baselines)
 {
@@ -866,7 +859,7 @@ bool applyLevelSetMaintenance(
   // been computed, but no accounting/target state may advance unless every
   // request succeeds and the common FE history update is complete.
   auto staged_requests = requests;
-  std::vector<std::string> staged_commit_logs;
+  std::vector<svmp::FE::LogRecord> staged_commit_logs;
   bool changed = false;
   const auto comm = activeFESystemCommunicator(*host.fe_system);
   auto fe_solution = gatherFeOrderedSolution(history.u(), comm);
@@ -947,9 +940,7 @@ bool applyLevelSetMaintenance(
   if (deferred_commit_logs != nullptr) {
     *deferred_commit_logs = std::move(staged_commit_logs);
   } else {
-    for (const auto& log : staged_commit_logs) {
-      svmp::FE::rank_log::oopCout() << log << std::endl;
-    }
+    svmp::FE::logRecords(staged_commit_logs);
   }
   return changed;
 }

@@ -15,6 +15,7 @@
 #include "Backends/Interfaces/GenericVector.h"
 #include "Backends/Interfaces/LinearSolver.h"
 #include "Backends/Utils/BackendOptions.h"
+#include "Core/LogRecord.h"
 #include "Elements/ElementTransform.h"
 #include "Elements/LagrangeElement.h"
 #include "Geometry/MappingFactory.h"
@@ -41,7 +42,6 @@
 #include <cstring>
 #include <exception>
 #include <fstream>
-#include <iostream>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -945,20 +945,22 @@ public:
         (environmentFlag("SVMP_PDE_EXTENSION_MUMPS_DIAGNOSTICS") ||
          environmentFlag("SVMP_TRACE_LEVEL_SET_ADVECTION"))) {
       const auto& s = solver_.statistics();
-      std::cout << "[svMultiPhysics::Application] PDE velocity extension "
-                   "diagnostic=pde_extension_mumps"
-                << " ok=" << (ok ? 1 : 0) << " ranks=" << comm.size()
-                << " n=" << s.n << " entries=" << s.entries
-                << " factor_entries=" << s.factor_entries
-                << " analyze_s=" << s.analyze_seconds
-                << " factor_s=" << s.factor_seconds
-                << " peak_mb_max_rank=" << s.peak_memory_mb_max_rank
-                << " peak_mb_total=" << s.peak_memory_mb_total
-                << " relaxation_percent=" << s.memory_relaxation_percent;
+      svmp::FE::LogRecord record("DryRegionMumps", "factorization");
+      record.diagnostic("pde_extension_mumps")
+          .boolean("ok", ok)
+          .value("ranks", comm.size())
+          .value("n", s.n)
+          .value("entries", s.entries)
+          .value("factor_entries", s.factor_entries)
+          .value("analyze_s", s.analyze_seconds)
+          .value("factor_s", s.factor_seconds)
+          .value("peak_mb_max_rank", s.peak_memory_mb_max_rank)
+          .value("peak_mb_total", s.peak_memory_mb_total)
+          .value("relaxation_percent", s.memory_relaxation_percent);
       if (!ok) {
-        std::cout << " error=\"" << solver_.lastError() << "\"";
+        record.quoted("error", solver_.lastError());
       }
-      std::cout << std::endl;
+      svmp::FE::logRecord(record);
     }
     return ok;
   }

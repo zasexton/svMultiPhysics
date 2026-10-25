@@ -901,6 +901,142 @@
    "special": null
   },
   {
+   "id": "S9.candidate_rejection",
+   "batch": "S9",
+   "before": {
+    "head": "[svMultiPhysics::Application] Conservative phase candidate rejected",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "LevelSetConservativePhase",
+    "message": "candidate rejected",
+    "diagnostic": "conservative_phase_candidate_rejection",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {
+    "diagnostic": "reconciliation_diagnostic"
+   },
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S9.pde_extension_solve",
+   "batch": "S9",
+   "before": {
+    "head": "[svMultiPhysics::Application] PDE velocity extension",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "LevelSetPdeVelocityExtension",
+    "message": "solve",
+    "diagnostic": "pde_extension_solve",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S9.pde_extension_self_check",
+   "batch": "S9",
+   "before": {
+    "head": "[svMultiPhysics::Application] PDE velocity extension self-check",
+    "diagnostic": "pde_extension_self_check"
+   },
+   "after": {
+    "owner": "LevelSetPdeVelocityExtension",
+    "message": "self-check",
+    "diagnostic": "pde_extension_self_check",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S9.pde_extension_mumps",
+   "batch": "S9",
+   "before": {
+    "head": "[svMultiPhysics::Application] PDE velocity extension",
+    "diagnostic": "pde_extension_mumps"
+   },
+   "after": {
+    "owner": "DryRegionMumps",
+    "message": "factorization",
+    "diagnostic": "pde_extension_mumps",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S9.monolithic_extension_refresh",
+   "batch": "S9",
+   "before": {
+    "head": "[svMultiPhysics::Application] Accepted monolithic velocity extension refresh",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "LevelSetVelocityExtensionRefresh",
+    "message": "monolithic extension refreshed",
+    "diagnostic": "monolithic_extension_refresh",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S9.advection_velocity_update",
+   "batch": "S9",
+   "before": {
+    "head": "[svMultiPhysics::Application] Updated level-set advection velocity",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "LevelSetVelocityExtensionRefresh",
+    "message": "advection velocity updated",
+    "diagnostic": "level_set_advection_velocity_update",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S9.consensus_local_rejection",
+   "batch": "S9",
+   "before": {
+    "head": null,
+    "diagnostic": "maintenance_consensus_local_rejection",
+    "head_regex": "^\\[svMultiPhysics::Application\\] \\[R\\d+\\] Level-set maintenance transaction rejected locally$"
+   },
+   "after": {
+    "owner": "LevelSetMaintenanceTransactionConsensus",
+    "message": "transaction rejected locally",
+    "diagnostic": "maintenance_consensus_local_rejection",
+    "level": "WARNING",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
    "id": "S8.183",
    "batch": "S8",
    "before": {

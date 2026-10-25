@@ -9,6 +9,7 @@
 
 #include "Assembly/CutIntegrationContext.h"
 #include "Backends/Interfaces/GenericVector.h"
+#include "Core/LogRecord.h"
 #include "Core/RankLog.h"
 #include "Dofs/EntityDofMap.h"
 #include "Geometry/CutQuadrature.h"
@@ -22,10 +23,12 @@
 #include "Systems/SystemState.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -776,48 +779,52 @@ bool refreshLevelSetVelocityExtensions(
             .topology = pde_mesh_access.topologyRevision(),
             .ownership = pde_mesh_access.ownershipRevision(),
             .numbering = pde_mesh_access.numberingRevision()});
+    // A list of the three components, joined by commas.
+    const auto components = [](const std::array<std::size_t, 3>& counts) {
+      return std::to_string(counts[0]) + "," + std::to_string(counts[1]) +
+             "," + std::to_string(counts[2]);
+    };
     if (trace_updates) {
-      rank_log::oopCout()
-          << "[svMultiPhysics::Application] PDE velocity extension"
-          << " method=" << request.extension_method
-          << " known_vertices=" << pde_report.known_vertices
-          << " extension_vertices=" << pde_report.extension_vertices
-          << " outside_vertices=" << pde_report.outside_vertices
-          << " extension_cells=" << pde_report.extension_cells
-          << " unknowns=" << pde_report.unknowns[0] << ","
-          << pde_report.unknowns[1] << "," << pde_report.unknowns[2]
-          << " wall_fixed=" << pde_report.wall_fixed[0] << ","
-          << pde_report.wall_fixed[1] << "," << pde_report.wall_fixed[2]
-          << " max_relative_residual="
-          << pde_report.max_relative_residual
-          << " max_known_speed=" << pde_report.max_known_speed
-          << " max_extended_speed=" << pde_report.max_extended_speed
-          << " max_wall_normal_velocity="
-          << pde_report.max_wall_normal_velocity
-          << " reused_factorization=" << pde_report.reused_factorization
-          << " distributed_solves=" << pde_report.distributed_solves
-          << " factorization="
-          << pdeVelocityExtensionFactorizationName(options.factorization)
-          << " cache_entries=" << pde_report.cache_entries
-          << " cache_capacity=" << pde_report.cache_capacity
-          << " cache_hits=" << pde_extension_cache.statistics().hits
-          << " cache_misses=" << pde_extension_cache.statistics().misses
-          << " cache_bytes=" << pde_extension_cache.statistics().bytes
-          << " cache_peak_bytes="
-          << pde_extension_cache.statistics().peak_bytes
-          << " solution_hash=" << pde_report.solution_hash
-          << " elapsed_s=" << pde_report.elapsed_seconds
-          << " component_solve_s=" << pde_report.component_solve_seconds
-          << std::endl;
+      logRecord(
+          LogRecord("LevelSetPdeVelocityExtension", "solve")
+              .diagnostic("pde_extension_solve")
+              .rootOnly()
+              .text("method", request.extension_method)
+              .value("known_vertices", pde_report.known_vertices)
+              .value("extension_vertices", pde_report.extension_vertices)
+              .value("outside_vertices", pde_report.outside_vertices)
+              .value("extension_cells", pde_report.extension_cells)
+              .text("unknowns", components(pde_report.unknowns))
+              .text("wall_fixed", components(pde_report.wall_fixed))
+              .real("max_relative_residual", pde_report.max_relative_residual)
+              .real("max_known_speed", pde_report.max_known_speed)
+              .real("max_extended_speed", pde_report.max_extended_speed)
+              .real("max_wall_normal_velocity",
+                    pde_report.max_wall_normal_velocity)
+              .boolean("reused_factorization", pde_report.reused_factorization)
+              .boolean("distributed_solves", pde_report.distributed_solves)
+              .text("factorization",
+                    pdeVelocityExtensionFactorizationName(options.factorization))
+              .value("cache_entries", pde_report.cache_entries)
+              .value("cache_capacity", pde_report.cache_capacity)
+              .value("cache_hits", pde_extension_cache.statistics().hits)
+              .value("cache_misses", pde_extension_cache.statistics().misses)
+              .value("cache_bytes", pde_extension_cache.statistics().bytes)
+              .value("cache_peak_bytes",
+                     pde_extension_cache.statistics().peak_bytes)
+              .value("solution_hash", pde_report.solution_hash)
+              .real("elapsed_s", pde_report.elapsed_seconds)
+              .real("component_solve_s", pde_report.component_solve_seconds));
     }
     if (pde_report.self_checked) {
-      rank_log::oopCout()
-          << "[svMultiPhysics::Application] PDE velocity extension "
-             "self-check diagnostic=pde_extension_self_check"
-          << " reused_factorization=" << pde_report.reused_factorization
-          << " distributed_solves=" << pde_report.distributed_solves
-          << " cache_entries=" << pde_report.cache_entries
-          << " mismatches=0" << std::endl;
+      logRecord(
+          LogRecord("LevelSetPdeVelocityExtension", "self-check")
+              .diagnostic("pde_extension_self_check")
+              .rootOnly()
+              .boolean("reused_factorization", pde_report.reused_factorization)
+              .boolean("distributed_solves", pde_report.distributed_solves)
+              .value("cache_entries", pde_report.cache_entries)
+              .integer("mismatches", 0));
     }
     constexpr double trace_equality_factor = 64.0;
     for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
@@ -944,13 +951,13 @@ bool refreshLevelSetVelocityExtensions(
       mutable_state->markModified();
       mutable_state->updateGhosts();
       if (trace_updates) {
-        rank_log::oopCout()
-            << "[svMultiPhysics::Application] Accepted monolithic velocity extension refresh"
-            << " map_revision="
-            << installed_map_revision_key
-            << " map_changed=" << (map_changed ? 1 : 0)
-            << " reprojected_owned_dofs=" << state_dofs.size()
-            << std::endl;
+        logRecord(
+            LogRecord("LevelSetVelocityExtensionRefresh", "monolithic extension refreshed")
+                .diagnostic("monolithic_extension_refresh")
+                .rootOnly()
+                .value("map_revision", installed_map_revision_key)
+                .boolean("map_changed", map_changed)
+                .value("reprojected_owned_dofs", state_dofs.size()));
       }
     } else {
       std::vector<svmp::FE::Real> coefficients(
@@ -985,50 +992,42 @@ bool refreshLevelSetVelocityExtensions(
     }
     updated = true;
     if (trace_updates) {
-      rank_log::oopCout()
-          << "[svMultiPhysics::Application] Updated level-set advection velocity field='"
-          << request.target_velocity_field_name << "' from source='"
-          << request.source_velocity_field_name << "' extension_method="
-          << request.extension_method << " linearization="
-          << (algebraic_extension ? "frozen_sparse_algebraic" :
-                                    "prescribed")
-          << " active_vertices=" << active_vertices.size() << " dry_vertices="
-          << (n_vertices - active_vertices.size())
-          << " interface_sample_candidates="
-          << interface_sample_candidate_cell_count
-          << " interface_sample_context_rules="
-          << interface_sample_context_rule_count
-          << " interface_samples=" << interface_sample_count
-          << " interface_geometry_samples=" << interface_sample_count
-          << " interface_geometry_sample_scope=summed_rank_local"
-          << " interface_geometry_sample_exchange=checked_scalar_allreduce"
-          << " interface_samples_used_for_constraints=0"
-          << " interface_sample_source="
-          << (interface_sample_used_cut_context ? "cut_context" : "all_cells")
-          << " trace_constraint_source=cut_cell_p1_support"
-          << " trace_support_vertices=" << trace_support_vertex_count
-          << " dry_trace_support_vertices="
-          << dry_trace_support_vertex_count
-          << " trace_seed_vertices=" << trace_seed_vertex_count
-          << " extended_vertices=" << pde_report.extension_vertices
-          << " vertices_outside_extension_band="
-          << pde_report.outside_vertices
-          << " map_revision=" << (pde_algebraic ? pde_map_revision_key : 0u)
-          << " map_max_seed_speed=" << pde_report.max_known_speed
-          << " map_max_extended_speed=" << pde_report.max_extended_speed
-          << " wall_boundary_labels=" << wall_boundary_label_count
-          << " max_wall_normal_velocity="
-          << pde_report.max_wall_normal_velocity
-          << " max_active_speed=" << max_active_speed
-          << " max_dry_extended_speed=" << max_dry_extended_speed
-          << " wet_to_dry_amplification=" << wet_to_dry_amplification
-          << " wet_to_dry_amplification_guard="
-          << kVelocityExtensionMaxWetToDryAmplification
-          << " target_value_semantics="
-          << (algebraic_extension ? "generalized_alpha_stage_unknown" :
-                                    "prescribed_current_coefficients")
-          << " computed_extension_semantics=current_state_constraint_preview"
-          << " unassigned_dofs=" << unassigned << std::endl;
+      logRecord(
+          LogRecord("LevelSetVelocityExtensionRefresh", "advection velocity updated")
+              .diagnostic("level_set_advection_velocity_update")
+              .rootOnly()
+              .quoted("field", request.target_velocity_field_name)
+              .quoted("source", request.source_velocity_field_name)
+              .value("extension_method", request.extension_method)
+              .text("linearization", algebraic_extension ? "frozen_sparse_algebraic" : "prescribed")
+              .value("active_vertices", active_vertices.size())
+              .value("dry_vertices", n_vertices - active_vertices.size())
+              .value("interface_sample_candidates", interface_sample_candidate_cell_count)
+              .value("interface_sample_context_rules", interface_sample_context_rule_count)
+              .value("interface_samples", interface_sample_count)
+              .value("interface_geometry_samples", interface_sample_count)
+              .text("interface_geometry_sample_scope", "summed_rank_local")
+              .text("interface_geometry_sample_exchange", "checked_scalar_allreduce")
+              .integer("interface_samples_used_for_constraints", 0)
+              .text("interface_sample_source", interface_sample_used_cut_context ? "cut_context" : "all_cells")
+              .text("trace_constraint_source", "cut_cell_p1_support")
+              .value("trace_support_vertices", trace_support_vertex_count)
+              .value("dry_trace_support_vertices", dry_trace_support_vertex_count)
+              .value("trace_seed_vertices", trace_seed_vertex_count)
+              .value("extended_vertices", pde_report.extension_vertices)
+              .value("vertices_outside_extension_band", pde_report.outside_vertices)
+              .value("map_revision", pde_algebraic ? pde_map_revision_key : 0u)
+              .value("map_max_seed_speed", pde_report.max_known_speed)
+              .value("map_max_extended_speed", pde_report.max_extended_speed)
+              .value("wall_boundary_labels", wall_boundary_label_count)
+              .value("max_wall_normal_velocity", pde_report.max_wall_normal_velocity)
+              .value("max_active_speed", max_active_speed)
+              .value("max_dry_extended_speed", max_dry_extended_speed)
+              .value("wet_to_dry_amplification", wet_to_dry_amplification)
+              .value("wet_to_dry_amplification_guard", kVelocityExtensionMaxWetToDryAmplification)
+              .text("target_value_semantics", algebraic_extension ? "generalized_alpha_stage_unknown" : "prescribed_current_coefficients")
+              .text("computed_extension_semantics", "current_state_constraint_preview")
+              .value("unassigned_dofs", unassigned));
     }
   }
 
