@@ -8135,10 +8135,13 @@ void StandardAssembler::prepareBasis(
                 test_basis, quad_rule, true, need_basis_hessians));
             test_bcache = &*local_test_bcache;
         } else {
-            if (!cached_test_bcache_) {
+            const CachedBasisKey test_key{test_basis.basis_type(), test_basis.element_type(),
+                                          test_basis.order(), test_basis.size()};
+            if (!cached_test_bcache_ || cached_test_bcache_key_ != test_key) {
                 cached_test_bcache_handle_ = basis::BasisCache::instance().prewarm_handle(
                     test_basis, quad_rule, true, need_basis_hessians);
                 cached_test_bcache_ = &cached_test_bcache_handle_.entry();
+                cached_test_bcache_key_ = test_key;
             }
             test_bcache = cached_test_bcache_;
         }
@@ -8157,10 +8160,13 @@ void StandardAssembler::prepareBasis(
                 trial_basis, quad_rule, true, need_basis_hessians));
             trial_bcache = &*local_trial_bcache;
         } else {
-            if (!cached_trial_bcache_) {
+            const CachedBasisKey trial_key{trial_basis.basis_type(), trial_basis.element_type(),
+                                           trial_basis.order(), trial_basis.size()};
+            if (!cached_trial_bcache_ || cached_trial_bcache_key_ != trial_key) {
                 cached_trial_bcache_handle_ = basis::BasisCache::instance().prewarm_handle(
                     trial_basis, quad_rule, true, need_basis_hessians);
                 cached_trial_bcache_ = &cached_trial_bcache_handle_.entry();
+                cached_trial_bcache_key_ = trial_key;
             }
             trial_bcache = cached_trial_bcache_;
         }

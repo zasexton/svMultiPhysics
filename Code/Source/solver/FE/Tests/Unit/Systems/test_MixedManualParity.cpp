@@ -14,6 +14,9 @@
 #include "Systems/FormsInstaller.h"
 #include "Systems/FormsInstallerDetail.h"
 
+#include "Assembly/GlobalSystemView.h"
+#include "Forms/Vocabulary.h"
+
 #include "Assembly/AssemblyKernel.h"
 
 #include "Forms/BlockForm.h"
@@ -29,6 +32,7 @@
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
 #include <array>
+#include <vector>
 
 using svmp::FE::ElementType;
 using svmp::FE::FieldId;
@@ -374,6 +378,58 @@ TEST(MixedManualParity, BilinearAssemblyParity_MatrixValues)
         for (GlobalIndex j = 0; j < n; ++j) {
             EXPECT_NEAR(mat_manual.getMatrixEntry(i, j), mat_mixed.getMatrixEntry(i, j), 1e-14)
                 << "Mismatch at (" << i << ", " << j << ")";
+        }
+    }
+}
+
+TEST(MixedManualParity, ConstantTestSpaceRowsTabulateTheirOwnBasis)
+{
+    // The cells of one operator are traversed with one rule; the row of a P0
+    // test function must use its own basis (1), not the P1 basis of the term
+    // assembled before it on the same cell.
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto u_space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    auto p_space = std::make_shared<svmp::FE::spaces::L2Space>(ElementType::Tetra4, 0);
+
+    for (const bool jit : {false, true}) {
+        svmp::FE::systems::FESystem sys(mesh);
+        const auto u_f = sys.addField({.name = "u", .space = u_space, .components = 1});
+        const auto p_f = sys.addField({.name = "p", .space = p_space, .components = 1});
+        sys.addOperator("op");
+        const auto u = svmp::FE::forms::StateField(u_f, *u_space, "u");
+        const auto v = svmp::FE::forms::TestField(u_f, *u_space, "v");
+        const auto p = svmp::FE::forms::StateField(p_f, *p_space, "p");
+        const auto q = svmp::FE::forms::TestField(p_f, *p_space, "q");
+        svmp::FE::systems::FormInstallOptions options;
+        options.compiler_options.jit.enable = jit;
+        (void)svmp::FE::systems::installFormulation(
+            sys, "op", {u_f, p_f},
+            (svmp::FE::forms::inner(svmp::FE::forms::grad(u), svmp::FE::forms::grad(v)) + u * v - p * v).dx() +
+                (q * u).dx(),
+            options);
+        svmp::FE::systems::SetupInputs inputs;
+        inputs.topology_override = singleTetraTopology();
+        sys.setup({}, inputs);
+
+        const auto n = sys.dofHandler().getNumDofs();
+        ASSERT_EQ(n, 5);
+        std::vector<Real> zero(static_cast<std::size_t>(n), 0.0);
+        svmp::FE::systems::SystemStateView state;
+        state.u = zero;
+        svmp::FE::assembly::DenseSystemView out(n);
+        out.zero();
+        svmp::FE::systems::AssemblyRequest req;
+        req.op = "op";
+        req.want_matrix = true;
+        req.want_vector = true;
+        ASSERT_TRUE(sys.assemble(req, state, &out, &out).success);
+
+        // Integral of each P1 basis function over the unit tetrahedron: (1/6) / 4.
+        const Real quarter = 1.0 / 24.0;
+        const auto row = sys.fieldDofOffset(p_f);
+        for (GlobalIndex j = 0; j < sys.fieldDofOffset(p_f); ++j) {
+            EXPECT_NEAR(out.getMatrixEntry(row, j), quarter, 1e-14) << "jit=" << jit << " column " << j;
+            EXPECT_NEAR(out.getMatrixEntry(j, row), -quarter, 1e-14) << "jit=" << jit << " row " << j;
         }
     }
 }

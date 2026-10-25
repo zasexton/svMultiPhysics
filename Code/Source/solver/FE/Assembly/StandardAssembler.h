@@ -1247,6 +1247,19 @@ private:
     const basis::BasisCacheEntry* cached_geom_bcache_{nullptr};
     const basis::BasisCacheEntry* cached_test_bcache_{nullptr};
     const basis::BasisCacheEntry* cached_trial_bcache_{nullptr};
+    // The basis each cached entry tabulates.  Terms of one traversal share a
+    // rule, so a term whose test or trial basis differs (family, element type,
+    // order or size; a global multiplier's constant next to a Q1 field) must
+    // not reuse the previous term's tabulation.
+    struct CachedBasisKey {
+        BasisType type{BasisType::Lagrange};
+        ElementType element{ElementType::Unknown};
+        int order{-1};
+        std::size_t size{0};
+        bool operator==(const CachedBasisKey&) const = default;
+    };
+    CachedBasisKey cached_test_bcache_key_{};
+    CachedBasisKey cached_trial_bcache_key_{};
     bool cached_need_hessians_{false};
     const void* cached_quad_rule_ptr_{nullptr}; // identity check for quad rule change
 
