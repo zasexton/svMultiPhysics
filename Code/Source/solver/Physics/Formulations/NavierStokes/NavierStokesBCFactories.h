@@ -112,20 +112,15 @@ inline void declareFittedTangentialMeshPolicy(
                 "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary",
         });
 
-    FE_LOG_INFO(
-        std::string("IncompressibleNavierStokesVMSModule: fitted "
-                    "free-surface mesh policy") +
-        " marker=" + std::to_string(bc.boundary_marker) +
-        " tangential_policy=" +
-        tangentialMeshPolicyName(bc.tangential_mesh_policy) +
-        " tangential_owner=free_surface_boundary" +
-        " tangential_enforcement=" +
-        (install_tangential_prescription
-             ? "weak_velocity_penalty"
-             : install_tangential_smoothing
-                   ? "surface_smoothing_functional"
-                   : "natural_no_tangential_constraint") +
-        " diagnostic=fitted_free_surface_mesh_policy");
+    FE::logRecord(post::navierStokesLog("fitted free-surface mesh policy")
+                      .diagnostic("fitted_free_surface_mesh_policy")
+                      .integer("marker", bc.boundary_marker)
+                      .text("tangential_policy", tangentialMeshPolicyName(bc.tangential_mesh_policy))
+                      .text("tangential_owner", "free_surface_boundary")
+                      .text("tangential_enforcement", install_tangential_prescription ? "weak_velocity_penalty"
+                                                      : install_tangential_smoothing
+                                                          ? "surface_smoothing_functional"
+                                                          : "natural_no_tangential_constraint"));
 }
 
 inline void declareFittedMeshRowDescriptors(
@@ -199,15 +194,14 @@ inline void registerFreeSurfacePrescribedAngleGeometry(
                 "prescribed_contact_geometry",
                 "prescribed_contact_geometry_initial",
                 FE::interfaces::ContactLineCertificateRefresh::EveryContext);
-            FE_LOG_INFO(
-                std::string("IncompressibleNavierStokesVMSModule: registered prescribed-angle contact geometry without a level-set residual") +
-                " interface_marker=" +
-                std::to_string(bc.interface_marker) +
-                " contact_marker=" + std::to_string(contact_marker) +
-                " level_set_geometry_owner=none_angle_preserving_wall_maintenance"
-                " momentum_owner=young_wall_energy"
-                " literal_codimension_two_level_set_residual=retired"
-                " diagnostic=navier_stokes_prescribed_contact_geometry");
+            FE::logRecord(
+                post::navierStokesLog("registered prescribed-angle contact geometry without a level-set residual")
+                    .diagnostic("navier_stokes_prescribed_contact_geometry")
+                    .integer("interface_marker", bc.interface_marker)
+                    .integer("contact_marker", contact_marker)
+                    .text("level_set_geometry_owner", "none_angle_preserving_wall_maintenance")
+                    .text("momentum_owner", "young_wall_energy")
+                    .text("literal_codimension_two_level_set_residual", "retired"));
             continue;
         }
 
