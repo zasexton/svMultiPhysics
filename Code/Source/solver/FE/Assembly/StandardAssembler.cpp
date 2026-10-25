@@ -5933,20 +5933,46 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
 
         auto selected_side = kernel.interfaceEvaluationSide();
 
+        // The selected cell's facet holding the interface face's vertices,
+        // numbered as the reference element numbers its faces.  Neither the
+        // InterfaceMesh's local face (the mesh's canonical face numbering,
+        // which differs for Tetra4) nor its volume face id (stale once setup
+        // stores more faces, e.g. for the edge DOFs of a second-order field)
+        // can say which.
+        auto facet_of = [&](svmp::index_t iface, GlobalIndex cell, const char* op_name) -> LocalIndex {
+            mesh.getCellNodes(cell, selected_cell_nodes);
+            const auto [iface_vertices_ptr, iface_vertex_count] = interface_mesh.face_vertices_span(iface);
+            const auto& ref = elements::ReferenceElement::shared(mesh.getCellType(cell));
+            for (std::size_t lf = 0; lf < ref.num_faces(); ++lf) {
+                const auto& face_nodes = ref.face_nodes(lf);
+                bool holds_all = iface_vertex_count > 0u;
+                for (std::size_t a = 0; a < iface_vertex_count && holds_all; ++a) {
+                    const auto vertex = static_cast<GlobalIndex>(interface_mesh.volume_vertex(iface_vertices_ptr[a]));
+                    holds_all = std::any_of(face_nodes.begin(), face_nodes.end(), [&](LocalIndex node) {
+                        return selected_cell_nodes.at(static_cast<std::size_t>(node)) == vertex;
+                    });
+                }
+                if (holds_all) {
+                    return static_cast<LocalIndex>(lf);
+                }
+            }
+            FE_THROW(FEException, std::string(op_name) + ": the selected cell has no facet with the vertices of "
+                                                         "interface face " + std::to_string(iface));
+        };
         auto select_cell = [&](svmp::index_t iface,
                                const char* op_name) -> std::pair<GlobalIndex, LocalIndex> {
             if (selected_side == InterfaceEvaluationSide::Plus) {
                 const auto cell_plus = static_cast<GlobalIndex>(interface_mesh.volume_cell_plus(iface));
-                const auto face_plus = static_cast<LocalIndex>(interface_mesh.local_face_in_cell_plus(iface));
-                FE_THROW_IF(cell_plus == INVALID_GLOBAL_INDEX || face_plus < 0, FEException,
+                FE_THROW_IF(cell_plus == INVALID_GLOBAL_INDEX || interface_mesh.local_face_in_cell_plus(iface) < 0,
+                            FEException,
                             std::string(op_name) + ": requested plus-side interface evaluation on a one-sided interface face");
-                return {cell_plus, face_plus};
+                return {cell_plus, facet_of(iface, cell_plus, op_name)};
             }
             const auto cell_minus = static_cast<GlobalIndex>(interface_mesh.volume_cell_minus(iface));
-            const auto face_minus = static_cast<LocalIndex>(interface_mesh.local_face_in_cell_minus(iface));
-            FE_THROW_IF(cell_minus == INVALID_GLOBAL_INDEX || face_minus < 0, FEException,
+            FE_THROW_IF(cell_minus == INVALID_GLOBAL_INDEX || interface_mesh.local_face_in_cell_minus(iface) < 0,
+                        FEException,
                         std::string(op_name) + ": interface face is missing a valid minus-side parent cell");
-            return {cell_minus, face_minus};
+            return {cell_minus, facet_of(iface, cell_minus, op_name)};
         };
 
         const bool owned_rows_only = requiresOwnedRowFiltering(options_, mesh);
@@ -6014,32 +6040,37 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
                         auto [iface_vertices_ptr, iface_vertex_count] =
                             interface_mesh.face_vertices_span(iface);
                         if (iface_vertex_count == face_nodes.size()) {
+                            // align[i] = j: node i of the cell's facet is vertex
+                            // j of the interface face, whose parameterization
+                            // is the reference (canonicalToFacetCoordinates).
                             bool ok = true;
-                            for (std::size_t j = 0; j < iface_vertex_count; ++j) {
-                                const GlobalIndex iface_vertex =
-                                    static_cast<GlobalIndex>(
-                                        interface_mesh.volume_vertex(iface_vertices_ptr[j]));
-                                std::size_t i_match = face_nodes.size();
-                                for (std::size_t i = 0; i < face_nodes.size(); ++i) {
-                                    const GlobalIndex cell_vertex =
-                                        selected_cell_nodes.at(static_cast<std::size_t>(face_nodes[i]));
+                            for (std::size_t i = 0; i < face_nodes.size(); ++i) {
+                                const GlobalIndex cell_vertex =
+                                    selected_cell_nodes.at(static_cast<std::size_t>(face_nodes[i]));
+                                std::size_t j_match = iface_vertex_count;
+                                for (std::size_t j = 0; j < iface_vertex_count; ++j) {
+                                    const GlobalIndex iface_vertex =
+                                        static_cast<GlobalIndex>(
+                                            interface_mesh.volume_vertex(iface_vertices_ptr[j]));
                                     if (cell_vertex == iface_vertex) {
-                                        i_match = i;
+                                        j_match = j;
                                         break;
                                     }
                                 }
-                                align_iface_storage[j] =
-                                    static_cast<LocalIndex>(i_match);
-                                if (i_match >= face_nodes.size()) {
+                                align_iface_storage[i] =
+                                    static_cast<LocalIndex>(j_match);
+                                if (j_match >= iface_vertex_count) {
                                     ok = false;
                                     break;
                                 }
                             }
-                            if (ok) {
-                                align_iface = std::span<const LocalIndex>(
-                                    align_iface_storage.data(),
-                                    iface_vertex_count);
-                            }
+                            FE_THROW_IF(!ok, FEException,
+                                        "StandardAssembler::assembleInterfaceFaces: the vertices of interface "
+                                        "face " + std::to_string(iface) +
+                                            " are not those of the selected cell's facet");
+                            align_iface = std::span<const LocalIndex>(
+                                align_iface_storage.data(),
+                                iface_vertex_count);
                         }
                     }
                 }

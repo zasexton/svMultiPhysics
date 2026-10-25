@@ -12,6 +12,12 @@
  * interface by a multiplier lambda in the full trace space of u (P1 on the
  * interface faces).  The glued solution equals the single-domain solution of
  * the same mesh to solver tolerance.
+ *
+ * InterfaceFaceAlignment: on a triangular or quadrilateral interface face
+ * turned against the side's facet (3-cycles and quarter turns, which are not
+ * their own inverses), and on a tetrahedral facet that the mesh and the
+ * reference element number differently, a first-order interface field couples
+ * to a first-order volume field as the exact face mass of the mesh vertices.
  */
 
 #include <gtest/gtest.h>
@@ -21,6 +27,7 @@
 #include "Constraints/SystemConstraint.h"
 #include "Core/FEException.h"
 #include "Dofs/EntityDofMap.h"
+#include "Elements/ReferenceElement.h"
 #include "Forms/BoundaryConditions.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/H1Space.h"
@@ -28,6 +35,7 @@
 #include "Systems/FormsInstaller.h"
 #include "Systems/InterfaceSideSplit.h"
 
+#include "Mesh/Core/InterfaceMesh.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"
@@ -45,6 +53,7 @@
 #include <set>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace svmp::FE::test_interface_multiplier {
@@ -229,6 +238,142 @@ std::vector<Real> vertexValues(const FESystem& sys, FieldId field, const std::ve
     return out;
 }
 
+/**
+ * Two cells of @p cell_type sharing one face, every face stored, the shared
+ * face in the face set "gamma".  The shared face's vertex list (which the
+ * InterfaceMesh takes as its face) is cell 0's facet in the node order of
+ * the reference element (elements::ReferenceElement::face_nodes), turned by
+ * @p turn places: cell 0, the minus side, sees the interface face turned
+ * against its facet.
+ */
+std::shared_ptr<svmp::Mesh> buildCellPair(ElementType cell_type,
+                                          const std::vector<svmp::real_t>& X,
+                                          const std::vector<svmp::index_t>& conn,
+                                          int turn)
+{
+    svmp::CellShape shape{};
+    shape.family = cell_type == ElementType::Tetra4 ? svmp::CellFamily::Tetra : svmp::CellFamily::Hex;
+    shape.num_corners = static_cast<int>(conn.size() / 2u);
+    shape.order = 1;
+    const auto corners = static_cast<svmp::offset_t>(shape.num_corners);
+    const std::vector<svmp::offset_t> offsets{0, corners, 2 * corners};
+
+    // The faces as finalize() derives them.
+    svmp::MeshBase derived;
+    derived.build_from_arrays(/*spatial_dim=*/3, X, offsets, conn, {shape, shape});
+    derived.finalize();
+    auto face_shapes = derived.face_shapes();
+    auto face_offsets = derived.face2vertex_offsets();
+    auto face_conn = derived.face2vertex();
+    auto face_cells = derived.face2cell();
+    std::size_t shared = face_cells.size();
+    for (std::size_t f = 0; f < face_cells.size(); ++f) {
+        if (face_cells[f][1] != svmp::INVALID_INDEX) {
+            shared = f;
+        }
+    }
+    EXPECT_LT(shared, face_cells.size());
+    const auto begin = static_cast<std::ptrdiff_t>(face_offsets[shared]);
+    const auto end = static_cast<std::ptrdiff_t>(face_offsets[shared + 1u]);
+    std::vector<svmp::index_t> face(face_conn.begin() + begin, face_conn.begin() + end);
+    std::sort(face.begin(), face.end());
+
+    // Cell 0's facet on it, in reference-element order, turned.
+    const auto& ref = elements::ReferenceElement::shared(cell_type);
+    std::vector<svmp::index_t> facet;
+    for (std::size_t lf = 0; lf < ref.num_faces(); ++lf) {
+        std::vector<svmp::index_t> candidate;
+        for (const auto node : ref.face_nodes(lf)) {
+            candidate.push_back(conn[static_cast<std::size_t>(node)]);
+        }
+        auto sorted = candidate;
+        std::sort(sorted.begin(), sorted.end());
+        if (sorted == face) {
+            facet = candidate;
+        }
+    }
+    EXPECT_EQ(facet.size(), face.size());
+    std::rotate(facet.begin(), facet.begin() + turn, facet.end());
+    std::copy(facet.begin(), facet.end(), face_conn.begin() + begin);
+
+    auto base = std::make_shared<svmp::MeshBase>();
+    base->build_from_arrays(/*spatial_dim=*/3, X, offsets, conn, {shape, shape});
+    base->set_faces_from_arrays(std::move(face_shapes), std::move(face_offsets), std::move(face_conn),
+                                std::move(face_cells));
+    base->finalize();
+    base->add_to_set(svmp::EntityKind::Face, "gamma", static_cast<svmp::index_t>(shared));
+    return svmp::create_mesh(std::move(base));
+}
+
+/**
+ * The coupling of a first-order interface field lambda on "gamma" with a
+ * first-order volume field u, (lam * w.side()).dI + (mu * u.side()).dI on one
+ * side: both blocks equal the face mass of the mesh vertices, @p face_mass,
+ * and vanish for the vertices off the face.
+ */
+void expectFaceMassCoupling(const std::shared_ptr<svmp::Mesh>& mesh,
+                            ElementType cell_type,
+                            ElementType face_type,
+                            bool plus,
+                            const std::function<Real(svmp::index_t, svmp::index_t)>& face_mass)
+{
+    FESystem sys(mesh);
+    sys.setInterfaceMeshFromFaceSet(kGamma, "gamma");
+    auto volume = std::make_shared<spaces::H1Space>(cell_type, 1);
+    auto trace = std::make_shared<spaces::H1Space>(face_type, 1);
+    const auto u_id = sys.addField(FieldSpec{.name = "u", .space = volume});
+    const auto lam_id = sys.addInterfaceField("lambda", trace, kGamma);
+    sys.addOperator("op");
+    {
+        const auto u = forms::StateField(u_id, *volume, "u");
+        const auto w = forms::TestField(u_id, *volume, "w");
+        const auto lam = forms::StateField(lam_id, *trace, "lambda");
+        const auto mu = forms::TestField(lam_id, *trace, "mu");
+        const auto on_side = [plus](const FormExpr& e) { return plus ? e.plus() : e.minus(); };
+        (void)systems::installFormulation(sys, "op", {u_id, lam_id},
+                                          (u * w).dx() + (lam * on_side(w)).dI(kGamma) +
+                                              (mu * on_side(u)).dI(kGamma));
+    }
+    sys.setup();
+    const auto n = sys.dofHandler().getNumDofs();
+    std::vector<Real> zero(static_cast<std::size_t>(n), 0.0);
+    assembly::DenseSystemView out(n);
+    out.zero();
+    systems::SystemStateView view;
+    view.u = zero;
+    systems::AssemblyRequest request;
+    request.op = "op";
+    request.want_matrix = true;
+    ASSERT_TRUE(sys.assemble(request, view, &out, nullptr).success);
+
+    const auto& iface = sys.interfaceMesh(kGamma);
+    ASSERT_EQ(iface.n_faces(), 1u);
+    const auto [face_vertices, count] = iface.face_vertices_span(0);
+    std::vector<svmp::index_t> on_face;
+    for (std::size_t a = 0; a < count; ++a) {
+        on_face.push_back(iface.volume_vertex(face_vertices[a]));
+    }
+    const auto lam_dofs = sys.fieldDofHandler(lam_id).getCellDofs(0);
+    ASSERT_EQ(lam_dofs.size(), count);
+    const auto* u_map = sys.fieldDofHandler(u_id).getEntityDofMap();
+    ASSERT_NE(u_map, nullptr);
+    const auto l0 = sys.fieldDofOffset(lam_id);
+    const auto u0 = sys.fieldDofOffset(u_id);
+    for (std::size_t a = 0; a < count; ++a) {
+        for (std::size_t v = 0; v < mesh->local_mesh().n_vertices(); ++v) {
+            const auto vertex = static_cast<svmp::index_t>(v);
+            const auto u_dofs = u_map->getVertexDofs(static_cast<GlobalIndex>(v));
+            ASSERT_EQ(u_dofs.size(), 1u);
+            const bool face_vertex = std::find(on_face.begin(), on_face.end(), vertex) != on_face.end();
+            const Real expected = face_vertex ? face_mass(on_face[a], vertex) : Real(0.0);
+            EXPECT_NEAR(out.getMatrixEntry(l0 + lam_dofs[a], u0 + u_dofs[0]), expected, 1e-14)
+                << "lambda at vertex " << on_face[a] << ", u at vertex " << v;
+            EXPECT_NEAR(out.getMatrixEntry(u0 + u_dofs[0], l0 + lam_dofs[a]), expected, 1e-14)
+                << "u at vertex " << v << ", lambda at vertex " << on_face[a];
+        }
+    }
+}
+
 const auto kSource = [](Real x, Real y) { return Real(1.0) + x * y; };
 const auto kData = [](Real x, Real y) { return x + Real(0.5) * y * y; };
 
@@ -366,6 +511,64 @@ TEST(InterfaceMultiplierSplit, RefusesWhatOneSideCannotHold)
     refused((mu * u.minus() * u.plus()).dI(kGamma), "holds both sides of the interface");
     refused((lam * u.minus() * v.minus()).dI(kGamma), "a product of an interface-owned unknown with another unknown");
     refused((lam * v.minus()).dI(), "without a marker");
+}
+
+TEST(InterfaceFaceAlignment, ATetrahedralInterfaceFieldCouplesAsTheFaceMass)
+{
+    // The face z = 0 (vertices 0, 1, 2; area 1/2) between a cell above
+    // (apex 3) and one below (apex 4).  The interface face is cell 0's facet
+    // turned by 0 (the control), 1 and 2 places (3-cycles, which are not
+    // their own inverses); the facet is the cells' reference face 0 or, with
+    // the apex first, face 2 (the mesh numbers that face 3).
+    const std::vector<svmp::real_t> X{0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+                                      0.2, 0.3, 1.0, 0.3, 0.2, -1.0};
+    const std::vector<std::vector<svmp::index_t>> pairs{{0, 1, 2, 3, 0, 2, 1, 4},  // facet 0 on both sides
+                                                        {3, 0, 2, 1, 4, 0, 1, 2}}; // facet 2 on both sides
+    const auto face_mass = [](svmp::index_t a, svmp::index_t b) {
+        return a == b ? Real(0.5) / Real(6.0) : Real(0.5) / Real(12.0);
+    };
+    for (std::size_t k = 0; k < pairs.size(); ++k) {
+        for (int turn = 0; turn < 3; ++turn) {
+            for (const bool plus : {false, true}) {
+                SCOPED_TRACE("cell pair " + std::to_string(k) + ", turn " + std::to_string(turn) +
+                             (plus ? ", plus side" : ", minus side"));
+                expectFaceMassCoupling(buildCellPair(ElementType::Tetra4, X, pairs[k], turn), ElementType::Tetra4,
+                                       ElementType::Triangle3, plus, face_mass);
+            }
+        }
+    }
+}
+
+TEST(InterfaceFaceAlignment, AHexahedralInterfaceFieldCouplesAsTheFaceMass)
+{
+    // The unit square z = 1 between the cubes [0,1]^2 x [0,1] and
+    // [0,1]^2 x [1,2]; the interface face is the lower cube's top facet turned
+    // by 0 (the control), 1 and 3 quarter turns (not their own inverses) and
+    // a half turn.  The Q1 face mass is the product of the 1D P1 masses.
+    std::vector<svmp::real_t> X;
+    for (int z = 0; z <= 2; ++z) {
+        for (const auto& [x, y] : std::array<std::pair<int, int>, 4>{{{0, 0}, {1, 0}, {1, 1}, {0, 1}}}) {
+            X.insert(X.end(), {static_cast<svmp::real_t>(x), static_cast<svmp::real_t>(y),
+                               static_cast<svmp::real_t>(z)});
+        }
+    }
+    const std::vector<svmp::index_t> conn{0, 1, 2, 3, 4, 5, 6, 7, 4, 5, 6, 7, 8, 9, 10, 11};
+    const auto face_mass = [&](svmp::index_t a, svmp::index_t b) {
+        const auto ax = X[static_cast<std::size_t>(3 * a)];
+        const auto ay = X[static_cast<std::size_t>(3 * a + 1)];
+        const auto bx = X[static_cast<std::size_t>(3 * b)];
+        const auto by = X[static_cast<std::size_t>(3 * b + 1)];
+        const Real mx = ax == bx ? Real(1.0) / Real(3.0) : Real(1.0) / Real(6.0);
+        const Real my = ay == by ? Real(1.0) / Real(3.0) : Real(1.0) / Real(6.0);
+        return mx * my;
+    };
+    for (int turn = 0; turn < 4; ++turn) {
+        for (const bool plus : {false, true}) {
+            SCOPED_TRACE("turn " + std::to_string(turn) + (plus ? ", plus side" : ", minus side"));
+            expectFaceMassCoupling(buildCellPair(ElementType::Hex8, X, conn, turn), ElementType::Hex8,
+                                   ElementType::Quad4, plus, face_mass);
+        }
+    }
 }
 
 } // namespace svmp::FE::test_interface_multiplier
