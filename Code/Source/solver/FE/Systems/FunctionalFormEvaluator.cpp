@@ -7,6 +7,8 @@
 
 #include "Systems/FunctionalFormEvaluator.h"
 
+#include "Systems/BorderedGlobalViews.h"
+
 #include "Assembly/CutIntegrationContext.h"
 #include "Assembly/FunctionalAssembler.h"
 #include "Assembly/GlobalSystemView.h"
@@ -430,9 +432,17 @@ std::vector<FunctionalFormValue> evaluateOnSystem(
     }
     requireCollectivePhasePreparation(ghost_failure, comm, "functional_form_ghost_refresh");
 
-    const auto fields = system.unknownFieldIdsInDofMapOrder();
+    auto fields = system.unknownFieldIdsInDofMapOrder();
     FE_THROW_IF(fields.empty(), InvalidStateException,
                 std::string(kWhere) + "the system has no unknown fields");
+    if (system.hasBorderedGlobalFields()) {
+        // Bordered global fields are not in the DOF map; they follow it.
+        for (FieldId field = 0; static_cast<std::size_t>(field) < system.registeredFieldCount(); ++field) {
+            if (system.fieldRecord(field).scope == FieldScope::Global) {
+                fields.push_back(field);
+            }
+        }
+    }
     // A global field has no cell quadrature of its own; the first other
     // field gives it.
     FieldId primary_field = fields.front();
@@ -508,9 +518,10 @@ std::vector<FunctionalFormValue> evaluateOnSystem(
     assembler.setCoupledValues({}, {});
 
     assembler.setSolution(state.u);
-    std::unique_ptr<assembly::GlobalSystemView> solution_view;
-    if (state.u_vector != nullptr) {
-        solution_view = const_cast<backends::GenericVector*>(state.u_vector)->createGhostedReadView();
+    // Bordered global DOFs are read from the system.
+    std::unique_ptr<assembly::GlobalSystemView> solution_view =
+        makeStateReadView(system, state.u_vector, state.u, /*ghosted=*/true);
+    if (solution_view != nullptr) {
         assembler.setSolutionView(solution_view.get());
     }
     // History spans of backend storage are not indexed by global DOF; with

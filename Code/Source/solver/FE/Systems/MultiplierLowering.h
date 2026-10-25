@@ -17,15 +17,15 @@ namespace systems {
 /**
  * @brief How the global multipliers of a system reach the linear algebra (D54)
  *
- * The form states the coupling; the lowering is chosen at setup.  Today
- * every global row and column is assembled into the matrix.  The bordered
- * route, which keeps the global DOFs out of the matrix for backends with a
- * fixed node layout (FSILS), is planned (LM2) and refused.
+ * The form states the coupling; the lowering is chosen at setup.  InMatrix
+ * assembles every global row and column into the matrix.  Bordered keeps the
+ * global DOFs out of the matrix for backends with a fixed node layout
+ * (FSILS): their rows and columns go to FESystem::borderedCoupling() (LM2).
  */
 enum class MultiplierLowering : std::uint8_t {
-    Auto,     ///< In the matrix (the bordered route when it exists and the backend needs it)
+    Auto,     ///< In the matrix
     InMatrix, ///< Global rows and columns assembled into the matrix
-    Bordered, ///< Global DOFs kept out of the matrix (planned, LM2)
+    Bordered, ///< Global DOFs kept out of the matrix, rows and columns in the bordered blocks
 };
 
 [[nodiscard]] constexpr const char* multiplierLoweringName(MultiplierLowering lowering) noexcept

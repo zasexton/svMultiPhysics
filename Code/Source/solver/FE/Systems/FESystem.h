@@ -700,8 +700,35 @@ public:
      * and setup throws when they conflict.
      */
     void requestMultiplierLowering(MultiplierLowering lowering, std::string requester);
-    /// The lowering setup chose: InMatrix for a system with global fields, Auto without.
+    /// The lowering setup chose: InMatrix or Bordered for a system with global fields, Auto without.
     [[nodiscard]] MultiplierLowering multiplierLowering() const noexcept { return multiplier_lowering_; }
+    /**
+     * @brief True when setup chose the bordered lowering for global fields
+     *
+     * The global DOFs are then not part of dofHandler(): its numbering, the
+     * sparsity, the backend vectors and the matrix hold the field DOFs only,
+     * and the global DOFs take the indices that follow them
+     * (fieldDofOffset(global field) >= dofHandler().getNumDofs()).  Their
+     * values live in the system (borderedGlobalValues()), and assembly routes
+     * their rows and columns into borderedCoupling().
+     */
+    [[nodiscard]] bool hasBorderedGlobalFields() const noexcept;
+    /// The number of bordered global DOFs (0 without the bordered lowering).
+    [[nodiscard]] GlobalIndex numBorderedGlobalDofs() const noexcept
+    {
+        return static_cast<GlobalIndex>(bordered_global_values_.size());
+    }
+    /// The current values of the bordered global DOFs, in index order (same on every rank).
+    [[nodiscard]] std::span<const Real> borderedGlobalValues() const noexcept { return bordered_global_values_; }
+    /// Sets the values of the bordered global DOFs (the size must be numBorderedGlobalDofs()).
+    void setBorderedGlobalValues(std::span<const Real> values);
+    /**
+     * @brief The values of a global field in @p state, under either lowering
+     *
+     * InMatrix: the entries of @p state at the field's DOFs.  Bordered: the
+     * system's values (borderedGlobalValues()), which the solver updates.
+     */
+    [[nodiscard]] std::vector<Real> globalFieldValues(FieldId field, const SystemStateView& state) const;
     void setPrescribedFieldCoefficients(FieldId field, std::span<const Real> coefficients);
     void setPrescribedFieldCoefficientPairs(FieldId field,
                                             std::span<const Real> high,
@@ -2402,6 +2429,8 @@ private:
     void requireSetup() const;
     void requireSingleFieldSetup() const;
     void validateGlobalMultiplierConstraints() const;
+    /// Under the bordered lowering, refuses a multiplier whose row is the only anchoring of a constant mode.
+    void refuseGaugeTypeMultipliersUnderBorderedLowering() const;
     void buildAssemblyPlans();
     void bumpSpaceRevision() noexcept { ++fe_layout_revisions_.space; }
     void bumpDofLayoutRevision() noexcept { ++fe_layout_revisions_.dof_layout; }
@@ -2446,6 +2475,9 @@ private:
     FieldRegistry field_registry_;
     std::optional<std::pair<MultiplierLowering, std::string>> multiplier_lowering_request_{};
     MultiplierLowering multiplier_lowering_{MultiplierLowering::Auto};
+    std::vector<Real> bordered_global_values_{};
+    /// Per operator, the field DOFs each bordered global row couples to (setup sparsity).
+    std::unordered_map<OperatorTag, std::vector<std::vector<GlobalIndex>>> bordered_global_row_columns_{};
     OperatorRegistry operator_registry_;
     std::vector<FormCellDomainRestriction> form_install_cell_domain_restrictions_{};
     std::shared_ptr<const assembly::CutIntegrationContext> cut_integration_context_{};
@@ -2940,8 +2972,11 @@ public:
             dO_dI.clear();
             direct_coupling_records.clear();
         }
-        /// Per-block info for auxiliary state update after solve.
-        struct AuxBlock { std::string name; int dim; };
+        /// Per-block info for auxiliary state update after solve.  A block of
+        /// global_field != INVALID_FIELD_ID holds the bordered DOFs of that
+        /// global field (FESystem::borderedGlobalValues), not an auxiliary
+        /// state block.
+        struct AuxBlock { std::string name; int dim; FieldId global_field{INVALID_FIELD_ID}; };
         std::vector<AuxBlock> aux_blocks;
 
         struct DirectCouplingRecord {

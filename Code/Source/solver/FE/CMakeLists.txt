@@ -1164,6 +1164,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/GlobalKernel.h
     Systems/GlobalKernelStateProvider.h
     Systems/GlobalRowKernel.h
+    Systems/BorderedGlobalViews.h
     Systems/MultiplierLowering.h
     Systems/MaterialStateProvider.h
     Systems/InterfaceOperators.h
@@ -1217,6 +1218,7 @@ set(FE_SYSTEMS_SOURCES
     Systems/GeometryTransaction.cpp
     Systems/GlobalKernelStateProvider.cpp
     Systems/GlobalRowKernel.cpp
+    Systems/BorderedGlobalViews.cpp
     Systems/MaterialStateProvider.cpp
     Systems/InterfaceOperators.cpp
     Systems/MeshSearchAccess.cpp

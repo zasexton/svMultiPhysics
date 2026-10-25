@@ -7,6 +7,8 @@
 
 #include "Systems/GlobalRowKernel.h"
 
+#include "Systems/BorderedGlobalViews.h"
+
 #include "Assembly/Assembler.h"
 #include "Assembly/GlobalSystemView.h"
 #include "Backends/Interfaces/GenericVector.h"
@@ -86,12 +88,10 @@ void collectGlobalStateFields(const FormExprNode& node, std::vector<FieldId>& ou
 #endif
 }
 
-/// The value of the monolithic DOF @p dof in @p state.
-[[nodiscard]] Real stateValue(const SystemStateView& state, GlobalIndex dof)
+/// The value of the monolithic DOF @p dof in @p state (a bordered global DOF from the system).
+[[nodiscard]] Real stateValue(const FESystem& system, const SystemStateView& state, GlobalIndex dof)
 {
-    if (state.u_vector != nullptr) {
-        auto view = const_cast<backends::GenericVector*>(state.u_vector)->createGhostedReadView();
-        FE_CHECK_NOT_NULL(view.get(), "GlobalRowKernel: state read view");
+    if (auto view = makeStateReadView(system, state.u_vector, state.u, /*ghosted=*/true)) {
         return view->getVectorEntry(dof);
     }
     FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= state.u.size(), InvalidArgumentException,
@@ -163,7 +163,7 @@ void collectGlobalStateFields(const FormExprNode& node, std::vector<FieldId>& ou
         FieldValueEntry entry;
         entry.field = field;
         entry.n_components = 1;
-        entry.components[0] = stateValue(state, system.fieldDofOffset(field));
+        entry.components[0] = stateValue(system, state, system.fieldDofOffset(field));
         field_values.push_back(entry);
     }
 
@@ -327,6 +327,10 @@ void GlobalRowKernel::validatePointIntegrand(const forms::FormExpr& integrand,
 void GlobalRowKernel::addSparsityCouplings(const FESystem& system,
                                            sparsity::SparsityPattern& pattern) const
 {
+    if (system.hasBorderedGlobalFields()) {
+        // The row is a bordered row, outside the matrix.
+        return;
+    }
     const auto row = system.fieldDofOffset(test_field_);
     for (const auto& [field, derivative] : point_derivatives_) {
         static_cast<void>(derivative);
@@ -343,7 +347,9 @@ assembly::AssemblyResult GlobalRowKernel::assemble(const FESystem& system,
     assembly::AssemblyResult result;
     const auto comm = systemCommunicator(system);
     const auto row = system.fieldDofOffset(test_field_);
-    const bool owner = system.dofHandler().getDofMap().isOwnedDof(row);
+    // The lowest rank owns a global field's DOFs (its own handler says so
+    // under either lowering).
+    const bool owner = system.fieldDofHandler(test_field_).getDofMap().isOwnedDof(0);
 
     if (vector_out != nullptr) {
         if (!request.suppress_constraint_inhomogeneity) {

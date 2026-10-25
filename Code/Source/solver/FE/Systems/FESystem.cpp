@@ -8227,6 +8227,54 @@ bool FESystem::hasGlobalFields() const noexcept
     });
 }
 
+bool FESystem::hasBorderedGlobalFields() const noexcept
+{
+    return multiplier_lowering_ == MultiplierLowering::Bordered && hasGlobalFields();
+}
+
+void FESystem::setBorderedGlobalValues(std::span<const Real> values)
+{
+    FE_THROW_IF(values.size() != bordered_global_values_.size(), InvalidArgumentException,
+                "FESystem::setBorderedGlobalValues: " + std::to_string(values.size()) +
+                    " values for " + std::to_string(bordered_global_values_.size()) +
+                    " bordered global DOFs");
+    std::copy(values.begin(), values.end(), bordered_global_values_.begin());
+}
+
+std::vector<Real> FESystem::globalFieldValues(FieldId field, const SystemStateView& state) const
+{
+    requireSetup();
+    FE_THROW_IF(!field_registry_.has(field) || field_registry_.get(field).scope != FieldScope::Global,
+                InvalidArgumentException,
+                "FESystem::globalFieldValues: field " + std::to_string(field) + " is not a global field");
+    const auto idx = static_cast<std::size_t>(field);
+    const auto offset = field_dof_offsets_[idx];
+    const auto count = field_dof_handlers_[idx].getNumDofs();
+    std::vector<Real> values(static_cast<std::size_t>(count));
+    if (hasBorderedGlobalFields()) {
+        const auto first = offset - dof_handler_.getNumDofs();
+        for (GlobalIndex d = 0; d < count; ++d) {
+            values[static_cast<std::size_t>(d)] = bordered_global_values_[static_cast<std::size_t>(first + d)];
+        }
+        return values;
+    }
+    if (state.u_vector != nullptr) {
+        auto view = const_cast<backends::GenericVector*>(state.u_vector)->createGhostedReadView();
+        FE_CHECK_NOT_NULL(view.get(), "FESystem::globalFieldValues: state read view");
+        for (GlobalIndex d = 0; d < count; ++d) {
+            values[static_cast<std::size_t>(d)] = view->getVectorEntry(offset + d);
+        }
+        return values;
+    }
+    for (GlobalIndex d = 0; d < count; ++d) {
+        const auto dof = static_cast<std::size_t>(offset + d);
+        FE_THROW_IF(dof >= state.u.size(), InvalidArgumentException,
+                    "FESystem::globalFieldValues: the state has no value for DOF " + std::to_string(dof));
+        values[static_cast<std::size_t>(d)] = state.u[dof];
+    }
+    return values;
+}
+
 std::vector<FieldId> FESystem::unknownFieldIdsInDofMapOrder() const
 {
     requireSetup();

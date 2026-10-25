@@ -146,6 +146,7 @@ struct AnchoringEvidence {
     AnchoringVerdict verdict{AnchoringVerdict::Unknown};
     std::string source;  ///< e.g., "DirichletBC on boundary 3"
     int boundary_marker{-1};                       ///< -1 = unknown, >=0 = specific mesh boundary marker
+    FieldId multiplier{INVALID_FIELD_ID};          ///< The global field whose row is the evidence, if any
 };
 
 /**

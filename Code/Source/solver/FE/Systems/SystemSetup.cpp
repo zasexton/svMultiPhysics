@@ -2767,8 +2767,20 @@ void FESystem::validateGlobalMultiplierConstraints() const
                 continue;
             }
             std::size_t free_columns = 0;
-            if (pattern_it != sparsity_by_op_.end() && pattern_it->second) {
-                const auto row = fieldDofOffset(row_kernel->testField());
+            const auto row = fieldDofOffset(row_kernel->testField());
+            if (hasBorderedGlobalFields()) {
+                // The bordered global rows are not in the graph; setup kept
+                // the field DOFs each of them couples to.
+                const auto rows_it = bordered_global_row_columns_.find(tag);
+                const auto bordered_row = static_cast<std::size_t>(row - dof_handler_.getNumDofs());
+                if (rows_it != bordered_global_row_columns_.end() && bordered_row < rows_it->second.size()) {
+                    for (const auto col : rows_it->second[bordered_row]) {
+                        if (!affine_constraints_.isConstrained(col)) {
+                            ++free_columns;
+                        }
+                    }
+                }
+            } else if (pattern_it != sparsity_by_op_.end() && pattern_it->second) {
                 for (const auto col : pattern_it->second->getRowIndices(row)) {
                     if (!is_global_dof(col) && !affine_constraints_.isConstrained(col)) {
                         ++free_columns;
@@ -2782,6 +2794,43 @@ void FESystem::validateGlobalMultiplierConstraints() const
                             "the multiplier and an essential condition (or another constraint) fix the same "
                             "DOFs; drop one of them");
         }
+    }
+}
+
+void FESystem::refuseGaugeTypeMultipliersUnderBorderedLowering() const
+{
+    FE_CHECK_NOT_NULL(gauge_registry_.get(), "FESystem::setup: gauge registry");
+    // A multiplier is gauge-type when the row of a global field is the only
+    // anchoring of a constant mode: without that row the field block is
+    // singular, and the bordered correction solves with the field block.
+    for (const auto& mode : gauge_registry_->resolvedModes()) {
+        if (mode.status != gauge::GaugeStatus::Anchored) {
+            continue;
+        }
+        FieldId multiplier = INVALID_FIELD_ID;
+        bool anchored_otherwise = false;
+        for (const auto& evidence : mode.anchoring) {
+            if (evidence.verdict != gauge::AnchoringVerdict::Anchored &&
+                evidence.verdict != gauge::AnchoringVerdict::PartiallyAnchored) {
+                continue;
+            }
+            if (evidence.multiplier == INVALID_FIELD_ID) {
+                anchored_otherwise = true;
+                break;
+            }
+            multiplier = evidence.multiplier;
+        }
+        if (anchored_otherwise || multiplier == INVALID_FIELD_ID) {
+            continue;
+        }
+        const auto& field = field_registry_.get(mode.candidate.field).name;
+        FE_THROW(InvalidArgumentException,
+                 "FESystem::setup: the multiplier '" + field_registry_.get(multiplier).name +
+                     "' is a gauge: its row alone fixes the constant of field '" + field +
+                     "', so the field block is singular without it, and the bordered lowering (a backend "
+                     "with a fixed node layout, such as FSILS) solves with the field block; drop the "
+                     "multiplier and let the automatic gauge fix the constant, or use the InMatrix lowering "
+                     "with a backend that has a variable block layout");
     }
 }
 
@@ -3137,21 +3186,65 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
             if (lowering == MultiplierLowering::Auto) {
                 lowering = MultiplierLowering::InMatrix;
             }
-            FE_THROW_IF(lowering == MultiplierLowering::Bordered, NotImplementedException,
-                        "FESystem::setup: the bordered lowering of global multipliers (global DOFs kept out "
-                        "of the matrix, for backends with a fixed node layout) is planned (D54, LM2); use "
-                        "InMatrix with a backend that has a variable block layout");
+            if (lowering == MultiplierLowering::Bordered) {
+                // The bordered global DOFs take the indices after the field
+                // DOFs, as the monolithic auxiliary unknowns do, and Newton
+                // solves both through one bordered block.
+                const bool monolithic_auxiliaries =
+                    std::any_of(deployed_aux_entries_.begin(), deployed_aux_entries_.end(),
+                                [](const DeployedAuxEntry& entry) {
+                                    return entry.spec.solve_mode == AuxiliarySolveMode::Monolithic;
+                                });
+                FE_THROW_IF(monolithic_auxiliaries, NotImplementedException,
+                            "FESystem::setup: the bordered lowering of global multipliers together with "
+                            "monolithic auxiliary unknowns is not supported yet; use InMatrix with a backend "
+                            "that has a variable block layout");
+                FE_THROW_IF(!timeDerivativeFields().empty(), NotImplementedException,
+                            "FESystem::setup: the bordered lowering of global multipliers supports steady "
+                            "problems for now (the system has time derivatives); use InMatrix with a backend "
+                            "that has a variable block layout");
+            }
         }
         multiplier_lowering_ = lowering;
     }
+    // Under the bordered lowering the global fields stay out of the
+    // monolithic numbering (and so out of the matrix, the sparsity, the
+    // partition and the field map); their DOFs follow the field DOFs.
+    const bool bordered_globals =
+        multiplier_lowering_ == MultiplierLowering::Bordered && hasGlobalFieldRecords(field_registry_);
+    const auto in_unknown_vector = [bordered_globals](const FieldRecord& rec) {
+        return rec.source_kind == FieldSourceKind::Unknown &&
+               !(bordered_globals && rec.scope == FieldScope::Global);
+    };
 
     // Assign monolithic offsets in field registration order.
     GlobalIndex total_dofs = 0;
     for (const auto& rec : field_registry_.records()) {
         const auto idx = static_cast<std::size_t>(rec.id);
+        if (bordered_globals && rec.scope == FieldScope::Global) {
+            continue;
+        }
         field_dof_offsets_[idx] = total_dofs;
         if (rec.source_kind == FieldSourceKind::Unknown) {
             total_dofs += field_dof_handlers_[idx].getNumDofs();
+        }
+    }
+    {
+        // The bordered global DOFs follow the field DOFs, in registration
+        // order; their values survive a setup that keeps their count.
+        GlobalIndex bordered_dofs = 0;
+        if (bordered_globals) {
+            for (const auto& rec : field_registry_.records()) {
+                if (rec.scope != FieldScope::Global) {
+                    continue;
+                }
+                const auto idx = static_cast<std::size_t>(rec.id);
+                field_dof_offsets_[idx] = total_dofs + bordered_dofs;
+                bordered_dofs += field_dof_handlers_[idx].getNumDofs();
+            }
+        }
+        if (bordered_global_values_.size() != static_cast<std::size_t>(bordered_dofs)) {
+            bordered_global_values_.assign(static_cast<std::size_t>(bordered_dofs), Real(0.0));
         }
     }
 
@@ -3172,7 +3265,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         const auto n_cells = meshAccess().numCells();
         LocalIndex approx_dofs_per_cell = 0;
         for (const auto& rec : field_registry_.records()) {
-            if (rec.source_kind != FieldSourceKind::Unknown) {
+            if (!in_unknown_vector(rec)) {
                 continue;
             }
             const auto idx = static_cast<std::size_t>(rec.id);
@@ -3227,7 +3320,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         for (GlobalIndex cell = 0; cell < n_cells; ++cell) {
             cell_dofs.clear();
             for (const auto& rec : field_registry_.records()) {
-                if (rec.source_kind != FieldSourceKind::Unknown) {
+                if (!in_unknown_vector(rec)) {
                     continue;
                 }
                 append_field_cell_dofs(rec, cell, cell_dofs);
@@ -3257,7 +3350,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
             GlobalIndex max_faces = 0;
             GlobalIndex max_cells = 0;
             for (const auto& rec : field_registry_.records()) {
-                if (rec.source_kind != FieldSourceKind::Unknown) {
+                if (!in_unknown_vector(rec)) {
                     continue;
                 }
                 if ((rec.scope == FieldScope::InterfaceFace &&
@@ -3286,7 +3379,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 for (GlobalIndex v = 0; v < max_vertices; ++v) {
                     entity_dofs.clear();
                     for (const auto& rec : field_registry_.records()) {
-                        if (rec.source_kind != FieldSourceKind::Unknown) {
+                        if (!in_unknown_vector(rec)) {
                             continue;
                         }
                         if ((rec.scope == FieldScope::InterfaceFace &&
@@ -3313,7 +3406,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 for (GlobalIndex e = 0; e < max_edges; ++e) {
                     entity_dofs.clear();
                     for (const auto& rec : field_registry_.records()) {
-                        if (rec.source_kind != FieldSourceKind::Unknown) {
+                        if (!in_unknown_vector(rec)) {
                             continue;
                         }
                         if ((rec.scope == FieldScope::InterfaceFace &&
@@ -3340,7 +3433,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 for (GlobalIndex f = 0; f < max_faces; ++f) {
                     entity_dofs.clear();
                     for (const auto& rec : field_registry_.records()) {
-                        if (rec.source_kind != FieldSourceKind::Unknown) {
+                        if (!in_unknown_vector(rec)) {
                             continue;
                         }
                         if ((rec.scope == FieldScope::InterfaceFace &&
@@ -3367,7 +3460,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 for (GlobalIndex c = 0; c < max_cells; ++c) {
                     entity_dofs.clear();
                     for (const auto& rec : field_registry_.records()) {
-                        if (rec.source_kind != FieldSourceKind::Unknown) {
+                        if (!in_unknown_vector(rec)) {
                             continue;
                         }
                         if ((rec.scope == FieldScope::InterfaceFace &&
@@ -3403,7 +3496,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
             std::vector<GlobalIndex> ghost_explicit;
 
             for (const auto& rec : field_registry_.records()) {
-                if (rec.source_kind != FieldSourceKind::Unknown) {
+                if (!in_unknown_vector(rec)) {
                     continue;
                 }
                 const auto idx = static_cast<std::size_t>(rec.id);
@@ -3459,7 +3552,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
             maps.reserve(field_registry_.size());
 
             for (const auto& rec : field_registry_.records()) {
-                if (rec.source_kind != FieldSourceKind::Unknown) {
+                if (!in_unknown_vector(rec)) {
                     continue;
                 }
                 const auto idx = static_cast<std::size_t>(rec.id);
@@ -3509,7 +3602,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         // Preserve per-cell orientation metadata (H(curl)/H(div)) by copying it from any field handler
         // that computed it during DOF distribution.
         for (const auto& rec : field_registry_.records()) {
-            if (rec.source_kind != FieldSourceKind::Unknown) {
+            if (!in_unknown_vector(rec)) {
                 continue;
             }
             const auto idx = static_cast<std::size_t>(rec.id);
@@ -3554,10 +3647,13 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     // Field/block metadata (monolithic across fields)
     // ---------------------------------------------------------------------
     field_map_ = dofs::FieldDofMap{};
-    field_map_.setLayout(fieldLayoutForSystem(unknown_field_records.size(), opts.dof_options));
+    const auto unknown_vector_field_count = static_cast<std::size_t>(
+        std::count_if(unknown_field_records.begin(), unknown_field_records.end(),
+                      [&](const FieldRecord* rec) { return in_unknown_vector(*rec); }));
+    field_map_.setLayout(fieldLayoutForSystem(unknown_vector_field_count, opts.dof_options));
 
     for (const auto& rec : field_registry_.records()) {
-        if (rec.source_kind != FieldSourceKind::Unknown) {
+        if (!in_unknown_vector(rec)) {
             continue;
         }
         const auto idx = static_cast<std::size_t>(rec.id);
@@ -3583,10 +3679,10 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     }
     field_map_.finalize();
     block_map_.reset();
-    if (unknown_field_records.size() > 1u) {
+    if (unknown_vector_field_count > 1u) {
         auto blocks = std::make_unique<dofs::BlockDofMap>();
         for (const auto& rec : field_registry_.records()) {
-            if (rec.source_kind != FieldSourceKind::Unknown) {
+            if (!in_unknown_vector(rec)) {
                 continue;
             }
             const auto idx = static_cast<std::size_t>(rec.id);
@@ -4110,7 +4206,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                                 gauge::NullspaceModeFamily::ScalarConstant,
                                 gauge::AnchoringVerdict::Anchored,
                                 "multiplier '" + row->testFieldName() +
-                                    "': its row fixes the constant of field " + std::to_string(field)});
+                                    "': its row fixes the constant of field " + std::to_string(field),
+                                -1,
+                                row->testField()});
                         }
                     }
                 }
@@ -4481,6 +4579,10 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         }
 #endif
 
+        if (hasBorderedGlobalFields()) {
+            refuseGaugeTypeMultipliersUnderBorderedLowering();
+        }
+
         // Apply enforcement: auto-create GlobalConstraint objects for
         // resolved exact-nullspace modes.
         const int n_gauge_constraints =
@@ -4586,6 +4688,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     distributed_sparsity_by_op_.clear();
     base_sparsity_by_op_.clear();
     base_distributed_sparsity_by_op_.clear();
+    bordered_global_row_columns_.clear();
     distributed_sparsity_dof_per_node_ = 0;
     const auto op_tags = operator_registry_.list();
     const auto n_total_dofs = dof_handler_.getNumDofs();
@@ -4652,12 +4755,13 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         owned_range = backend_map->owned_range;
         nodal_map = std::move(backend_map);
     }
-    if (hasGlobalFieldRecords(field_registry_)) {
+    if (hasGlobalFieldRecords(field_registry_) && !hasBorderedGlobalFields()) {
         // A global field's DOF follows the field DOFs and belongs to the lowest
         // rank, whose owned rows are then not one range, and no
         // node-interleaved layout exists.  Every rank takes the replicated
         // graph alike (distributed graphs of global rows come with the
-        // backends that take them).
+        // backends that take them).  Bordered global DOFs are not in the
+        // graph at all.
         dist_mode = DistSparsityMode::None;
         owned_range = sparsity::IndexRange{};
         nodal_map.reset();
@@ -4928,8 +5032,39 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 		        std::vector<GlobalIndex> row_dofs;
 		        std::vector<GlobalIndex> col_dofs;
 
+				        // Bordered global DOFs (indices >= n_total_dofs) stay out of
+				        // the graph; the field DOFs each global row couples to are
+				        // kept for the setup checks of the multipliers.
+				        std::vector<std::vector<GlobalIndex>> bordered_rows(
+				            static_cast<std::size_t>(numBorderedGlobalDofs()));
+				        std::vector<GlobalIndex> field_rows_scratch;
+				        std::vector<GlobalIndex> field_cols_scratch;
 				        auto add_element_couplings = [&](std::span<const GlobalIndex> rows,
 				                                         std::span<const GlobalIndex> cols) {
+				            if (!bordered_rows.empty()) {
+				                field_rows_scratch.clear();
+				                field_cols_scratch.clear();
+				                for (const auto col : cols) {
+				                    if (col < n_total_dofs) {
+				                        field_cols_scratch.push_back(col);
+				                    }
+				                }
+				                for (const auto row : rows) {
+				                    if (row < n_total_dofs) {
+				                        field_rows_scratch.push_back(row);
+				                        continue;
+				                    }
+				                    auto& row_cols = bordered_rows[static_cast<std::size_t>(row - n_total_dofs)];
+				                    row_cols.insert(row_cols.end(), field_cols_scratch.begin(), field_cols_scratch.end());
+				                }
+				                if (field_rows_scratch.size() != rows.size() || field_cols_scratch.size() != cols.size()) {
+				                    rows = field_rows_scratch;
+				                    cols = field_cols_scratch;
+				                }
+				                if (rows.empty() || cols.empty()) {
+				                    return;
+				                }
+				            }
 				            if (pattern) {
 				                pattern->addElementCouplings(rows, cols);
 				            }
@@ -5656,6 +5791,13 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
             FE_LOG_INFO(oss.str());
         }
 
+        if (!bordered_rows.empty()) {
+            for (auto& row_cols : bordered_rows) {
+                std::sort(row_cols.begin(), row_cols.end());
+                row_cols.erase(std::unique(row_cols.begin(), row_cols.end()), row_cols.end());
+            }
+            bordered_global_row_columns_[tag] = std::move(bordered_rows);
+        }
         if (base_pattern) {
             base_sparsity_by_op_.emplace(tag, std::move(base_pattern));
         }

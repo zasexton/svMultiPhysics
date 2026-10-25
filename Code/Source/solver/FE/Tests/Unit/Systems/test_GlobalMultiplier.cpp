@@ -18,6 +18,10 @@
  * multiplier): the multiplier's row fixes the pressure constant of the
  * enclosed flow, which otherwise the automatic gauge fixes; the velocities
  * equal those under the gauge, and the pressures differ by a constant.
+ *
+ * The bordered lowering (LM2): the bordered blocks are the in-matrix row and
+ * column bit for bit, and gauge-type multipliers (G2, G3) and time
+ * derivatives are refused.
  */
 
 #include <gtest/gtest.h>
@@ -282,6 +286,7 @@ struct BuildOptions {
     bool dirichlet{true};  ///< u = 0 at x = 0 and x = 1
     bool point_term{true}; ///< the dGlobal term; without it the integral of u is 0
     int threads{1};        ///< assembly threads
+    MultiplierLowering lowering{MultiplierLowering::Auto};
 };
 
 /**
@@ -320,6 +325,7 @@ MeanConstrainedPoisson buildMeanConstrainedPoisson(int nx, int ny, Real height, 
     }
     SetupOptions options;
     options.assembly_options.num_threads = build.threads;
+    options.multiplier_lowering = build.lowering;
     sys.setup(options);
     return out;
 }
@@ -523,11 +529,18 @@ TEST(GlobalField, FieldBindingChecksTheScope)
     }
 }
 
-TEST(GlobalField, LoweringIsInMatrixAndTheBorderedRouteIsRefused)
+TEST(GlobalField, LoweringIsInMatrixByDefaultAndRequestsMustAgree)
 {
     {
         auto problem = buildMeanConstrainedPoisson(4, 1, 0.5, 1, 1.0);
         EXPECT_EQ(problem.system->multiplierLowering(), MultiplierLowering::InMatrix);
+        EXPECT_FALSE(problem.system->hasBorderedGlobalFields());
+    }
+    {
+        auto problem = buildMeanConstrainedPoisson(4, 1, 0.5, 1, 1.0,
+                                                   BuildOptions{.lowering = MultiplierLowering::Bordered});
+        EXPECT_EQ(problem.system->multiplierLowering(), MultiplierLowering::Bordered);
+        EXPECT_TRUE(problem.system->hasBorderedGlobalFields());
     }
     auto mesh = buildGrid(2, 1, 1.0, 1.0, 1);
     auto h1 = quadSpace(1);
@@ -542,9 +555,6 @@ TEST(GlobalField, LoweringIsInMatrixAndTheBorderedRouteIsRefused)
     const auto mu = forms::TestField(lam_id, *r1, "mu");
     F.multiplierLowering(MultiplierLowering::Bordered);
     (void)F.install({u_id, lam_id}, (forms::inner(forms::grad(u), forms::grad(v)) + lam * v).dx() + (mu * u).dx());
-    const auto bordered = feMessage([&] { sys.setup(); });
-    EXPECT_NE(bordered.find("bordered lowering"), std::string::npos) << bordered;
-    EXPECT_NE(bordered.find("LM2"), std::string::npos) << bordered;
     // A second, different request is refused; the same one is accepted.
     EXPECT_NO_THROW(sys.requestMultiplierLowering(MultiplierLowering::Bordered, "other"));
     EXPECT_THROW(sys.requestMultiplierLowering(MultiplierLowering::InMatrix, "other"), FEException);
@@ -949,7 +959,7 @@ struct StokesSystem {
  * boundary is natural for u, so nothing anchors the pressure constant and the
  * automatic gauge fixes it.
  */
-StokesSystem buildStokes(int n, bool multiplier)
+StokesSystem buildStokes(int n, bool multiplier, MultiplierLowering lowering = MultiplierLowering::Auto)
 {
     constexpr Real pi = 3.14159265358979323846;
     StokesSystem out;
@@ -995,7 +1005,9 @@ StokesSystem buildStokes(int n, bool multiplier)
         }
     }
     installStrongDirichlet(sys, std::span<const forms::bc::StrongDirichlet>(bcs));
-    sys.setup();
+    SetupOptions options;
+    options.multiplier_lowering = lowering;
+    sys.setup(options);
     return out;
 }
 
@@ -1079,6 +1091,122 @@ TEST(GlobalMultiplierG3, MeanZeroPressureMultiplierMatchesTheAutomaticGauge)
         EXPECT_LT(std::abs(integral.front().value), 1e-12 * pressure_scale) << "n=" << n;
         EXPECT_LT(std::abs(a[n_u + n_p]), 1e-10 * pressure_scale) << "n=" << n;
     }
+}
+
+// ---------------------------------------------------------------------------
+// The bordered lowering (D54, LM2): global DOFs kept out of the matrix
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// The same state for both lowerings: u_i = sin(0.3 i + 0.2), lambda = 0.7.
+std::vector<Real> borderedTestState(std::size_t n_field)
+{
+    std::vector<Real> u(n_field);
+    for (std::size_t i = 0; i < n_field; ++i) {
+        u[i] = std::sin(0.3 * static_cast<Real>(i) + 0.2);
+    }
+    return u;
+}
+
+} // namespace
+
+TEST(GlobalBordered, TheBorderedBlocksAreTheInMatrixRowAndColumn)
+{
+    for (const int order : {1, 2}) {
+        auto in_matrix = buildMeanConstrainedPoisson(4, 2, 0.5, order, 1.5);
+        auto bordered = buildMeanConstrainedPoisson(4, 2, 0.5, order, 1.5,
+                                                    BuildOptions{.lowering = MultiplierLowering::Bordered});
+        auto& sys = *bordered.system;
+        const auto n = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+        ASSERT_EQ(static_cast<std::size_t>(in_matrix.system->dofHandler().getNumDofs()), n + 1);
+        EXPECT_EQ(in_matrix.system->fieldDofOffset(in_matrix.lambda), static_cast<GlobalIndex>(n));
+        EXPECT_EQ(sys.fieldDofOffset(bordered.lambda), static_cast<GlobalIndex>(n));
+        EXPECT_EQ(sys.numBorderedGlobalDofs(), 1);
+        EXPECT_EQ(sys.fieldMap().numFields(), 1u) << "the field map holds the field DOFs only";
+
+        const auto field_state = borderedTestState(n);
+        auto full_state = field_state;
+        full_state.push_back(0.7);
+        const std::array<Real, 1> lambda_value{0.7};
+        sys.setBorderedGlobalValues(lambda_value);
+
+        const auto full = assembleAt(*in_matrix.system, full_state);
+        const auto split = assembleAt(sys, field_state);
+        const auto& bc = sys.borderedCoupling();
+        ASSERT_TRUE(bc.active);
+        ASSERT_EQ(bc.n_aux, 1);
+        ASSERT_EQ(bc.n_field_dofs, n);
+        ASSERT_EQ(bc.aux_blocks.size(), 1u);
+        EXPECT_EQ(bc.aux_blocks[0].global_field, bordered.lambda);
+        // Bit for bit: the same element matrices reach the same entries in
+        // the same order, only into other storage.
+        const auto m = n + 1;
+        for (std::size_t i = 0; i < n; ++i) {
+            for (std::size_t j = 0; j < n; ++j) {
+                EXPECT_EQ(split.matrix[i * n + j], full.matrix[i * m + j]) << "order " << order << " K " << i << "," << j;
+            }
+            EXPECT_EQ(bc.B[i], full.matrix[i * m + n]) << "order " << order << " B " << i;
+            EXPECT_EQ(bc.Ct[i], full.matrix[n * m + i]) << "order " << order << " Ct " << i;
+            EXPECT_EQ(split.vector[i], full.vector[i]) << "order " << order << " r " << i;
+        }
+        EXPECT_EQ(bc.D[0], full.matrix[n * m + n]) << "order " << order;
+        EXPECT_EQ(bc.g[0], full.vector[n]) << "order " << order;
+    }
+}
+
+TEST(GlobalBordered, AGaugeTypeMultiplierIsRefused)
+{
+    // G2 (pure Neumann, mean zero): the multiplier alone fixes the constant
+    // of u, so the field block is singular without it.
+    auto h1 = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+    auto r1 = std::make_shared<spaces::GlobalSpace>(1);
+    FESystem sys(buildTriangleGrid(4));
+    const auto u_id = sys.addField(FieldSpec{.name = "u", .space = h1});
+    const auto lam_id = sys.addField(FieldSpec{.name = "lambda", .space = r1});
+    sys.addOperator("poisson");
+    const auto u = forms::StateField(u_id, *h1, "u");
+    const auto v = forms::TestField(u_id, *h1, "v");
+    const auto lam = forms::StateField(lam_id, *r1, "lambda");
+    const auto mu = forms::TestField(lam_id, *r1, "mu");
+    (void)installFormulation(sys, "poisson", {u_id, lam_id},
+                             (forms::inner(forms::grad(u), forms::grad(v)) - lam * v).dx() - (mu * u).dx());
+    SetupOptions options;
+    options.multiplier_lowering = MultiplierLowering::Bordered;
+    const auto g2 = feMessage([&] { sys.setup(options); });
+    EXPECT_NE(g2.find("the multiplier 'lambda' is a gauge: its row alone fixes the constant of field 'u'"),
+              std::string::npos)
+        << g2;
+    EXPECT_NE(g2.find("let the automatic gauge fix the constant"), std::string::npos) << g2;
+    EXPECT_NE(g2.find("InMatrix"), std::string::npos) << g2;
+
+    // G3 (enclosed Stokes, mean-zero pressure): the same for the pressure.
+    const auto g3 = feMessage([] { (void)buildStokes(4, /*multiplier=*/true, MultiplierLowering::Bordered); });
+    EXPECT_NE(g3.find("the multiplier 'lambda' is a gauge: its row alone fixes the constant of field 'p'"),
+              std::string::npos)
+        << g3;
+}
+
+TEST(GlobalBordered, TimeDerivativesAreRefusedForNow)
+{
+    auto mesh = buildGrid(4, 1, 1.0, 0.5, 1);
+    auto h1 = quadSpace(1);
+    auto r1 = std::make_shared<spaces::GlobalSpace>(1);
+    FESystem sys(mesh);
+    const auto u_id = sys.addField(FieldSpec{.name = "u", .space = h1});
+    const auto lam_id = sys.addField(FieldSpec{.name = "lambda", .space = r1});
+    sys.addOperator("heat");
+    const auto u = forms::StateField(u_id, *h1, "u");
+    const auto v = forms::TestField(u_id, *h1, "v");
+    const auto lam = forms::StateField(lam_id, *r1, "lambda");
+    const auto mu = forms::TestField(lam_id, *r1, "mu");
+    (void)installFormulation(sys, "heat", {u_id, lam_id},
+                             (u.dt(1) * v + forms::inner(forms::grad(u), forms::grad(v)) - lam * v).dx() -
+                                 (mu * u).dx() + (mu * FormExpr::constant(0.5)).dGlobal());
+    SetupOptions options;
+    options.multiplier_lowering = MultiplierLowering::Bordered;
+    const auto message = feMessage([&] { sys.setup(options); });
+    EXPECT_NE(message.find("supports steady problems for now"), std::string::npos) << message;
 }
 
 } // namespace svmp::FE::systems::test_global_multiplier

@@ -6,6 +6,7 @@
  */
 
 #include "Systems/SystemAssembly.h"
+#include "Systems/BorderedGlobalViews.h"
 
 #include "Systems/FESystem.h"
 #include "Auxiliary/AuxiliaryStateManager.h"
@@ -2314,6 +2315,29 @@ assembly::AssemblyResult assembleOperator(
         }
     }
 
+    // Bordered lowering of the global multipliers: their rows and columns go
+    // to the bordered blocks, the field entries to the backend views.
+    assembly::GlobalSystemView* const backend_matrix_out = matrix_out;
+    assembly::GlobalSystemView* const backend_vector_out = vector_out;
+    std::optional<BorderedGlobalSplitView> bordered_global_split;
+    FESystem::BorderedCouplingData isolated_bordered_global_coupling;
+    auto& bordered_global_coupling = request.suppress_auxiliary_coupling_assembly
+                                         ? isolated_bordered_global_coupling
+                                         : system.borderedCoupling();
+    if (system.hasBorderedGlobalFields()) {
+        prepareBorderedGlobalCoupling(system, bordered_global_coupling, request.want_matrix, request.want_vector);
+        bordered_global_split.emplace(request.want_matrix ? matrix_out : nullptr,
+                                      request.want_vector ? vector_out : nullptr,
+                                      bordered_global_coupling,
+                                      system.dofHandler().getNumDofs());
+        if (request.want_matrix) {
+            matrix_out = &*bordered_global_split;
+        }
+        if (request.want_vector) {
+            vector_out = &*bordered_global_split;
+        }
+    }
+
     if (request.want_matrix) {
         auto it = system.sparsity_by_op_.find(request.op);
         if (it != system.sparsity_by_op_.end() && it->second) {
@@ -2325,12 +2349,9 @@ assembly::AssemblyResult assembleOperator(
 
     auto& assembler = *system.assembler_;
     assembler.setCurrentSolution(state.u);
-    std::unique_ptr<assembly::GlobalSystemView> current_solution_view;
-    if (state.u_vector != nullptr) {
-        // `createAssemblyView()` is non-const for historical reasons; treat this as read-only use.
-        auto* vec = const_cast<backends::GenericVector*>(state.u_vector);
-        current_solution_view = vec->createAssemblyView();
-    }
+    // `createAssemblyView()` is non-const for historical reasons; treat this as read-only use.
+    std::unique_ptr<assembly::GlobalSystemView> current_solution_view =
+        makeStateReadView(system, state.u_vector, state.u, /*ghosted=*/false);
     assembler.setCurrentSolutionView(current_solution_view.get());
     {
         std::vector<assembly::FieldSolutionAccess> access;
@@ -3238,6 +3259,14 @@ assembly::AssemblyResult assembleOperator(
 
     assembler.finalize(request.want_matrix ? matrix_out : nullptr,
                        request.want_vector ? vector_out : nullptr);
+    if (bordered_global_split.has_value()) {
+        // Every rank holds its cells' share of the bordered blocks: sum them.
+        synchronizeBorderedCouplingForReplicatedSolve(
+            bordered_global_coupling, request.want_matrix, request.want_vector, system.dofHandler().mpiComm());
+        matrix_out = backend_matrix_out;
+        vector_out = backend_vector_out;
+        bordered_global_split.reset();
+    }
 
 #ifdef SVMP_FE_ASSEMBLY_TIMING
     {
@@ -3671,7 +3700,7 @@ assembly::AssemblyResult assembleOperator(
             synchronizeBorderedCouplingForReplicatedSolve(
                 bc, request.want_matrix, request.want_vector, system.dofHandler().mpiComm());
         } else {
-            if (request.want_matrix) {
+            if (request.want_matrix && !system.hasBorderedGlobalFields()) {
                 system.borderedCoupling().clear();
             }
             system.assembleMixedAuxiliaryIntoGlobal(
