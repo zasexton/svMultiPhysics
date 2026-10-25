@@ -1346,6 +1346,13 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
     if (options_.method == SolverMethod::Direct) {
         return solveDirect(*A, *x, *b, solve_wall_start);
     }
+    FE_THROW_IF(!appliesNativeLowRankUpdates(options_.method) &&
+                    (!rank_one_updates_.empty() || !reduced_field_updates_.empty() ||
+                     !grouped_bordered_field_couplings_.empty()),
+                NotImplementedException,
+                "FsilsLinearSolver::solve: the FSILS " + std::string(solverMethodToString(options_.method)) +
+                    " solver does not apply native rank-one or reduced field updates (coupled-boundary or "
+                    "bordered couplings); use GMRES or BlockSchur");
 
     auto& lhs = *static_cast<fe_fsi_linear_solver::FSILS_lhsType*>(const_cast<void*>(A->fsilsLhsPtr()));
     const int dof = A->fsilsDof();

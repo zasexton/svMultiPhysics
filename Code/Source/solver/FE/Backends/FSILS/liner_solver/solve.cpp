@@ -248,7 +248,13 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
     break;
 
     case LinearSolverType::LS_TYPE_GMRES:
-      if (dof == 1) {
+      // gmres_s applies neither the coupled faces nor the native low-rank
+      // updates (add_bc_mul); a scalar system with any of them takes the
+      // vector GMRES, which applies them.  Without them nothing changes.
+      if (dof == 1 &&
+          lhs.reduced_updates.empty() &&
+          lhs.grouped_bordered_field_couplings.empty() &&
+          std::none_of(lhs.face.begin(), lhs.face.end(), [](const auto& face) { return face.coupledFlag; })) {
         auto Valv = Val.row(0);
         auto Rv = R.row(0);
         const Vector<double>* row_scaling_v_ptr = nullptr;

@@ -2783,6 +2783,147 @@ TEST(FsilsBackend, RankOneUpdateSolversConverge)
     }
 }
 
+namespace {
+
+/// A scalar (one DOF per node) FSILS system K x = b with a dense low-rank
+/// update, K the 1D Laplacian on 5 nodes; b = (K + sigma u w^T) x_exact.
+struct ScalarLowRankSystem {
+    static constexpr GlobalIndex n = 5;
+    std::unique_ptr<GenericMatrix> A;
+    std::unique_ptr<GenericVector> b;
+    std::array<Real, n> x_exact{1.0, -2.0, 3.0, 0.5, -1.5};
+    std::vector<std::pair<GlobalIndex, Real>> u{{0, 0.5}, {1, 0.25}, {2, -0.75}, {3, 0.25}, {4, 0.5}};
+    std::vector<std::pair<GlobalIndex, Real>> w{{0, 0.25}, {1, 0.5}, {2, 0.25}, {3, -0.5}, {4, 0.75}};
+    Real sigma{3.0};
+};
+
+ScalarLowRankSystem makeScalarLowRankSystem(const FsilsFactory& factory, bool symmetric)
+{
+    ScalarLowRankSystem s;
+    if (symmetric) {
+        s.w = s.u;
+    }
+    const auto pattern = make_dense_pattern(ScalarLowRankSystem::n);
+    s.A = factory.createMatrix(pattern);
+    s.b = factory.createVector(ScalarLowRankSystem::n);
+    std::array<GlobalIndex, ScalarLowRankSystem::n> dofs{};
+    std::array<Real, ScalarLowRankSystem::n * ScalarLowRankSystem::n> K{};
+    for (GlobalIndex i = 0; i < ScalarLowRankSystem::n; ++i) {
+        dofs[static_cast<std::size_t>(i)] = i;
+        K[static_cast<std::size_t>(i * ScalarLowRankSystem::n + i)] = 2.0;
+        if (i > 0) {
+            K[static_cast<std::size_t>(i * ScalarLowRankSystem::n + i - 1)] = -1.0;
+        }
+        if (i + 1 < ScalarLowRankSystem::n) {
+            K[static_cast<std::size_t>(i * ScalarLowRankSystem::n + i + 1)] = -1.0;
+        }
+    }
+    auto viewA = s.A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+    viewA->addMatrixEntries(dofs, K, assembly::AddMode::Insert);
+    viewA->finalizeAssembly();
+    s.A->finalizeAssembly();
+
+    Real wx = 0.0;
+    for (const auto& [dof, value] : s.w) {
+        wx += value * s.x_exact[static_cast<std::size_t>(dof)];
+    }
+    std::array<Real, ScalarLowRankSystem::n> rhs{};
+    for (GlobalIndex i = 0; i < ScalarLowRankSystem::n; ++i) {
+        for (GlobalIndex j = 0; j < ScalarLowRankSystem::n; ++j) {
+            rhs[static_cast<std::size_t>(i)] +=
+                K[static_cast<std::size_t>(i * ScalarLowRankSystem::n + j)] * s.x_exact[static_cast<std::size_t>(j)];
+        }
+    }
+    for (const auto& [dof, value] : s.u) {
+        rhs[static_cast<std::size_t>(dof)] += s.sigma * value * wx;
+    }
+    auto viewb = s.b->createAssemblyView();
+    viewb->beginAssemblyPhase();
+    viewb->addVectorEntries(dofs, rhs, assembly::AddMode::Insert);
+    viewb->finalizeAssembly();
+    return s;
+}
+
+SolverOptions scalarLowRankOptions(SolverMethod method)
+{
+    SolverOptions opts;
+    opts.method = method;
+    opts.preconditioner = PreconditionerType::Diagonal;
+    opts.rel_tol = 1e-13;
+    opts.abs_tol = 1e-15;
+    opts.max_iter = 200;
+    return opts;
+}
+
+} // namespace
+
+// FSILS's scalar GMRES (one DOF per node) applied neither the coupled faces
+// nor the native low-rank updates; with them it now takes the vector GMRES.
+// The solver checks the true residual of the full operator.
+TEST(FsilsBackend, ScalarGmresAppliesNativeLowRankUpdates)
+{
+    FsilsFactory factory(/*dof_per_node=*/1);
+    for (int variant = 0; variant < 3; ++variant) {
+        SCOPED_TRACE(variant == 0 ? "rank-one" : variant == 1 ? "rank-one as a native face" : "reduced field update");
+        auto s = makeScalarLowRankSystem(factory, /*symmetric=*/variant < 2);
+        auto x = factory.createVector(ScalarLowRankSystem::n);
+        auto solver = factory.createLinearSolver(scalarLowRankOptions(SolverMethod::GMRES));
+        ASSERT_TRUE(solver->supportsNativeRankOneUpdates());
+        ASSERT_TRUE(solver->supportsNativeReducedFieldUpdates());
+        RankOneUpdate rank_one;
+        ReducedFieldUpdate reduced;
+        if (variant < 2) {
+            rank_one.sigma = s.sigma;
+            rank_one.v = s.u;
+            rank_one.prefer_native_face = (variant == 1);
+            solver->setRankOneUpdates(std::span<const RankOneUpdate>(&rank_one, 1));
+        } else {
+            reduced.sigma = s.sigma;
+            reduced.left = s.u;
+            reduced.right = s.w;
+            solver->setReducedFieldUpdates(std::span<const ReducedFieldUpdate>(&reduced, 1));
+        }
+        const auto report = solver->solve(*s.A, *x, *s.b);
+        ASSERT_TRUE(report.converged) << report.message;
+        const auto xs = x->localSpan();
+        ASSERT_EQ(xs.size(), s.x_exact.size());
+        for (std::size_t i = 0; i < xs.size(); ++i) {
+            EXPECT_NEAR(xs[i], s.x_exact[i], 1e-11) << i;
+        }
+    }
+}
+
+// CG and BiCGSTAB do not apply native low-rank updates: they report no
+// native support and refuse a solve with updates set, naming the remedy;
+// without updates they solve as before.
+TEST(FsilsBackend, CgAndBiCgstabRefuseNativeLowRankUpdates)
+{
+    FsilsFactory factory(/*dof_per_node=*/1);
+    for (const auto method : {SolverMethod::CG, SolverMethod::BiCGSTAB}) {
+        SCOPED_TRACE(method == SolverMethod::CG ? "CG" : "BiCGSTAB");
+        auto s = makeScalarLowRankSystem(factory, /*symmetric=*/true);
+        auto solver = factory.createLinearSolver(scalarLowRankOptions(method));
+        EXPECT_FALSE(solver->supportsNativeRankOneUpdates());
+        EXPECT_FALSE(solver->supportsNativeReducedFieldUpdates());
+        RankOneUpdate rank_one;
+        rank_one.sigma = s.sigma;
+        rank_one.v = s.u;
+        solver->setRankOneUpdates(std::span<const RankOneUpdate>(&rank_one, 1));
+        auto x = factory.createVector(ScalarLowRankSystem::n);
+        try {
+            (void)solver->solve(*s.A, *x, *s.b);
+            ADD_FAILURE() << "the solve with a native update was not refused";
+        } catch (const NotImplementedException& e) {
+            EXPECT_NE(std::string(e.what()).find("use GMRES or BlockSchur"), std::string::npos) << e.what();
+        }
+        solver->setRankOneUpdates({});
+        auto y = factory.createVector(ScalarLowRankSystem::n);
+        const auto report = solver->solve(*s.A, *y, *s.b);
+        EXPECT_TRUE(report.converged) << report.message;
+    }
+}
+
 TEST(FsilsBackend, RankOneUpdateSolversConverge4DOF)
 {
     constexpr int dof = 4;

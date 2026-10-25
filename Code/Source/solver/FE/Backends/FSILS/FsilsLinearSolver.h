@@ -43,8 +43,27 @@ public:
     void setGroupedBorderedFieldCouplings(
         std::span<const GroupedBorderedFieldCoupling> groups) override;
     void setDirichletDofs(std::span<const GlobalIndex> dofs) override;
-    [[nodiscard]] bool supportsNativeRankOneUpdates() const noexcept override { return true; }
-    [[nodiscard]] bool supportsNativeReducedFieldUpdates() const noexcept override { return true; }
+    /**
+     * Native rank-one and reduced field updates (and grouped bordered
+     * couplings) enter the operator through FSILS's coupled-face product
+     * (add_bc_mul), which GMRES (any dof) and the NS solver (BlockSchur)
+     * apply; CG and BiCGSTAB do not, so they report no native support and a
+     * solve with such updates set is refused.  The direct solver keeps its own
+     * refusal of low-rank updates.
+     */
+    [[nodiscard]] bool supportsNativeRankOneUpdates() const noexcept override
+    {
+        return appliesNativeLowRankUpdates(options_.method);
+    }
+    [[nodiscard]] bool supportsNativeReducedFieldUpdates() const noexcept override
+    {
+        return appliesNativeLowRankUpdates(options_.method);
+    }
+    /// Whether FSILS's solver for @p method applies native low-rank updates.
+    [[nodiscard]] static constexpr bool appliesNativeLowRankUpdates(SolverMethod method) noexcept
+    {
+        return method != SolverMethod::CG && method != SolverMethod::BiCGSTAB;
+    }
     void setEffectiveTimeStep(double dt_eff) override;
     [[nodiscard]] double effectiveTimeStepForTesting() const noexcept { return dt_eff_; }
 

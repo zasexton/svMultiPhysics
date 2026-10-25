@@ -11446,6 +11446,17 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             linear.setGroupedBorderedFieldCouplings(grouped_bordered_couplings);
             return false;
         }
+        // FSILS keeps the matrix sparsity fixed: the explicit insertion below
+        // drops every entry outside it, so an FSILS solver that does not
+        // apply these updates natively (CG, BiCGSTAB) cannot take them.
+        FE_THROW_IF(linear.backendKind() == backends::BackendKind::FSILS &&
+                        !(linear.supportsNativeRankOneUpdates() &&
+                          linear.supportsNativeReducedFieldUpdates()),
+                    NotImplementedException,
+                    "NewtonSolver: the FSILS " +
+                        std::string(backends::solverMethodToString(linear.getOptions().method)) +
+                        " solver does not apply the rank-one or reduced field updates of coupled boundary "
+                        "conditions; use GMRES or BlockSchur");
 
         linear.setRankOneUpdates({});
         linear.setReducedFieldUpdates({});
@@ -13296,9 +13307,9 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
         // invertible) and the condensed path would turn its dense B and Ct
         // columns over every field DOF into reduced updates: the explicit
         // fallback puts dense outer products into the sparse Jacobian
-        // (dropped outside its pattern, owned blocks only at np > 1), and
-        // the native FSILS updates fail their true-residual check on G1 with
-        // a stabilized multiplier.  So both are skipped for them.
+        // (dropped outside its pattern, owned blocks only at np > 1); only a
+        // native backend applies them exactly (FSILS GMRES and BlockSchur,
+        // scalar systems included).  So both are skipped for them.
         const bool bordered_global_blocks =
             has_bordered &&
             std::any_of(bordered_full.aux_blocks.begin(),
@@ -13306,8 +13317,16 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                         [](const systems::FESystem::BorderedCouplingData::AuxBlock& block) {
                             return block.global_field != INVALID_FIELD_ID;
                         });
+        // An FSILS solver without native low-rank updates (CG, BiCGSTAB)
+        // cannot take the reduction's updates (FSILS drops explicit entries
+        // outside the sparsity): the explicit bordered Schur correction, a
+        // plain solve per bordered column, solves the bordered system instead.
+        const bool fsils_without_native_low_rank =
+            linear.backendKind() == backends::BackendKind::FSILS &&
+            !(linear.supportsNativeRankOneUpdates() && linear.supportsNativeReducedFieldUpdates());
         if (has_bordered &&
             !bordered_global_blocks &&
+            !fsils_without_native_low_rank &&
             buildAlgebraicAuxiliaryReduction(
                 bordered_full,
                 owned_dofs,
