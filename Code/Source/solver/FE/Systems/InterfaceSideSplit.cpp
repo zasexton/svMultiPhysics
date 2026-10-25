@@ -358,6 +358,30 @@ FormExpr InterfaceSidePart::integral(FieldId only_with) const
     return sum.isValid() ? sum.ds(marker) : FormExpr{};
 }
 
+std::string interfaceOwnedFieldIn(const FESystem& system, const forms::FormExpr& expr)
+{
+    if (!expr.isValid()) {
+        return {};
+    }
+    const Splitter splitter(system, {});
+    const auto visit = [&](const auto& self, const FormExprNode& node) -> std::string {
+        if (isFieldSymbol(node) && splitter.isInterfaceOwned(node)) {
+            const auto id = node.fieldId();
+            return id.has_value() && system.hasField(*id) ? system.fieldRecord(*id).name : node.toString();
+        }
+        for (const auto& child : node.childrenShared()) {
+            if (child) {
+                auto name = self(self, *child);
+                if (!name.empty()) {
+                    return name;
+                }
+            }
+        }
+        return {};
+    };
+    return visit(visit, *expr.node());
+}
+
 bool hasInterfaceOwnedFields(const FESystem& system)
 {
     for (std::size_t id = 0; id < system.registeredFieldCount(); ++id) {
@@ -382,11 +406,15 @@ InterfaceSideSplit splitInterfaceSides(const FESystem& system, const forms::Form
     std::map<std::pair<int, Side>, std::size_t> part_index;
     for (const auto& [integral, negative] : integrals) {
         const auto& node = *integral.node();
-        const bool interface_integral = node.type() == FormExprType::InterfaceIntegral;
-        if (!interface_integral || !splitter.holdsInterfaceOwned(node)) {
+        if (!splitter.holdsInterfaceOwned(node)) {
             const auto signed_integral = negative ? -integral : integral;
             out.rest = out.rest.isValid() ? out.rest + signed_integral : signed_integral;
             continue;
+        }
+        if (node.type() != FormExprType::InterfaceIntegral) {
+            splitter.fail("an interface-owned field lives on its interface: integrate it with dI(marker), also on "
+                          "an interface built from a boundary label",
+                          node);
         }
         const auto marker = node.interfaceMarker();
         if (!marker.has_value() || *marker < 0) {

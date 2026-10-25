@@ -30,6 +30,7 @@
 #include "Elements/ReferenceElement.h"
 #include "Forms/BoundaryConditions.h"
 #include "Forms/Vocabulary.h"
+#include "Spaces/GlobalSpace.h"
 #include "Spaces/H1Space.h"
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
@@ -461,13 +462,15 @@ TEST(InterfaceMultiplierSplit, InterfaceTermsAreSplitBySideWithTheNormalResigned
     const auto u_id = sys.addField(FieldSpec{.name = "u", .space = q1});
     const auto lam_id = sys.addInterfaceField("lambda", p1_line, kGamma);
     const auto u = forms::StateField(u_id, *q1, "u");
+    const auto v = forms::TestField(u_id, *q1, "v");
     const auto lam = forms::StateField(lam_id, *p1_line, "lambda");
     const auto mu = forms::TestField(lam_id, *p1_line, "mu");
     const auto n = FormExpr::normal();
 
-    // mu (grad(u).minus() - grad(u).plus()) . n, and a term without a volume field.
+    // mu (grad(u).minus() - grad(u).plus()) . n, a term without a volume
+    // field, and one without an interface-owned field (the rest).
     const auto row = (mu * forms::inner(forms::jump(forms::grad(u)), n)).dI(kGamma) +
-                     (lam * mu).dI(kGamma) + (mu * u).dx();
+                     (lam * mu).dI(kGamma) + (u * v).dx();
     const auto split = systems::splitInterfaceSides(sys, row, "lambda");
     ASSERT_TRUE(split.rest.isValid());
     ASSERT_EQ(split.parts.size(), 2u);
@@ -511,6 +514,33 @@ TEST(InterfaceMultiplierSplit, RefusesWhatOneSideCannotHold)
     refused((mu * u.minus() * u.plus()).dI(kGamma), "holds both sides of the interface");
     refused((lam * u.minus() * v.minus()).dI(kGamma), "a product of an interface-owned unknown with another unknown");
     refused((lam * v.minus()).dI(), "without a marker");
+    // An interface-owned field outside dI(m), e.g. ds written for dI.
+    refused((mu * u).ds(kOther), "integrate it with dI(marker)");
+    refused((lam * v).dx(), "integrate it with dI(marker)");
+
+    // The installer: the row of the interface-owned field written with ds
+    // only, and a global row that integrates the interface-owned field (a
+    // zero mean of lambda as a gauge).
+    const auto installed = [&](const std::vector<FieldId>& fields, const FormExpr& residual,
+                               const std::string& text) {
+        try {
+            (void)systems::installFormulation(sys, "op", fields, residual);
+            ADD_FAILURE() << "accepted: " << text;
+        } catch (const std::exception& e) {
+            EXPECT_NE(std::string(e.what()).find(text), std::string::npos) << e.what();
+        }
+    };
+    sys.addOperator("op");
+    installed({u_id, lam_id}, (u * v).dx() + (lam * v.minus()).dI(kGamma) + (mu * u).ds(kOther),
+              "integrate it with dI(marker)");
+    auto r1 = std::make_shared<spaces::GlobalSpace>(1);
+    const auto c_id = sys.addField(FieldSpec{.name = "c", .space = r1, .scope = systems::FieldScope::Global});
+    const auto c = forms::StateField(c_id, *r1, "c");
+    const auto d = forms::TestField(c_id, *r1, "d");
+    installed({u_id, lam_id, c_id},
+              (u * v).dx() + (lam * v.minus()).dI(kGamma) + (mu * u.minus() + c * mu).dI(kGamma) +
+                  (d * lam).dI(kGamma),
+              "the row of the global field 'c' holds the interface-owned field 'lambda'");
 }
 
 TEST(InterfaceFaceAlignment, ATetrahedralInterfaceFieldCouplesAsTheFaceMass)

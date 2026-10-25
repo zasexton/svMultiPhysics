@@ -2663,6 +2663,15 @@ CoupledResidualKernels installCoupledResidualMixed(
             FE_THROW_IF(!global_row, InvalidArgumentException,
                         "installCoupledResidualMixed: dGlobal() terms belong to the row of a global "
                         "test function, but a dGlobal() term tests field '" + test_record.name + "'");
+            if (has_interface_owned_fields) {
+                // The global row's terms are evaluated by cell and by face, where
+                // an interface-owned field has no value.
+                const auto held = interfaceOwnedFieldIn(system, base_expr);
+                FE_THROW_IF(!held.empty(), InvalidArgumentException,
+                            "installCoupledResidualMixed: the row of the global field '" + test_record.name +
+                                "' holds the interface-owned field '" + held +
+                                "'; a global row does not integrate an interface-owned field yet");
+            }
             auto row_terms = splitGlobalRowTerms(base_expr, test_record.name);
             FE_THROW_IF(row_terms.measured.isValid() && row_terms.measured.hasTrial(),
                         InvalidArgumentException,
@@ -2681,11 +2690,11 @@ CoupledResidualKernels installCoupledResidualMixed(
 
         if (has_interface_owned_fields && !global_row) {
             auto split = splitInterfaceSides(system, base_expr, test_record.name);
+            FE_THROW_IF(test_record.scope == FieldScope::InterfaceFace && split.rest.isValid(),
+                        InvalidArgumentException,
+                        "installCoupledResidualMixed: the row of the interface-owned field '" +
+                            test_record.name + "' holds terms off its interface; it takes dI() terms only");
             if (!split.parts.empty()) {
-                FE_THROW_IF(test_record.scope == FieldScope::InterfaceFace && split.rest.isValid(),
-                            InvalidArgumentException,
-                            "installCoupledResidualMixed: the row of the interface-owned field '" +
-                                test_record.name + "' holds terms off its interface; it takes dI() terms only");
                 for (auto& part : split.parts) {
                     pending_side_parts.emplace_back(i, std::move(part));
                 }

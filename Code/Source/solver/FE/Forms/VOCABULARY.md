@@ -608,7 +608,10 @@ is evaluated on the minus cell of each interface face, one holding `u.plus()`
 on the plus cell, one holding only the interface field on the minus cell;
 the restrictions are dropped and dI's normal is re-signed on the plus side
 (-n), and the interface field's basis is evaluated on the interface face's own
-parameterization.  The interface field takes no `.minus()`, `.plus()`,
+parameterization (also on triangular and quadrilateral faces, whichever way
+the side's facet is turned).  The interface field appears in `dI(m)` terms
+only, also on an interface built from a boundary label (not in `dx` or `ds`,
+and not in the row of a global field); it takes no `.minus()`, `.plus()`,
 `jump()` or `avg()` (it has one value); a volume field in such a term needs
 its side; a product of the two sides, or of the interface-owned unknown with
 another unknown, is refused, as is `dI()` without a marker.  The kernels are
@@ -931,7 +934,7 @@ multipliers of LM1a and LM1b:
 | LM1 (later) | Several scalars per global field (`GlobalSpace(n)`, n > 1); the anchoring evidence of vector fields (componentwise constants); distributed sparsity graphs of global rows for the distributed matrix backends (PETSc, Trilinos) |
 | LM2 (later) | The bordered lowering for transient problems and together with monolithic auxiliary unknowns |
 | LM3 (later) | A support restriction to a union of boundaries (one multiplier on several markers), to a generated active boundary subset and to a contact line; the restriction of vector fields' rows (componentwise anchoring) |
-| LM4 (later) | The JIT for single-sided interface kernels (only if bitwise against the interpreted kernels); the state of an interface-owned field gathered by face, so a product of it with another unknown can be installed; the facet alignment of 3D interface faces (quadrilateral and triangular faces) tested |
+| LM4 (later) | The JIT for single-sided interface kernels (only if bitwise against the interpreted kernels); the state of an interface-owned field gathered by face, so a product of it with another unknown can be installed; an interface-owned field in the row of a global field (e.g. its zero mean as a gauge) |
 | LM5 | Documentation; the dead multiplier gauge policies implemented or retired; `constraints::LagrangeMultiplier` retired |
 
 ### Not Scheduled

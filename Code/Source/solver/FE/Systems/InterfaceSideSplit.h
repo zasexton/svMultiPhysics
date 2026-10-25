@@ -32,12 +32,13 @@
  * - each side's products are integrated as a boundary-face integral on marker
  *   m, which a form kernel evaluates in that context.
  *
- * Refused, with the term named: .minus()/.plus()/jump()/avg() of an
- * interface-owned symbol (it has one value), a volume symbol without a side,
- * a product of the two sides, a product of an interface-owned unknown with
- * another unknown (the single-sided context holds the state of one unknown
- * besides the volume fields of the side's cell), and dI() without a marker.
- * Terms that hold no interface-owned field are left as they are.
+ * Refused, with the term named: an interface-owned field in an integral other
+ * than dI(m) (dx, ds: it lives on its interface), .minus()/.plus()/jump()/avg()
+ * of an interface-owned symbol (it has one value), a volume symbol without a
+ * side, a product of the two sides, a product of an interface-owned unknown
+ * with another unknown (the single-sided context holds the state of one
+ * unknown besides the volume fields of the side's cell), and dI() without a
+ * marker.  Terms that hold no interface-owned field are left as they are.
  */
 
 #include "Assembly/AssemblyKernel.h"
@@ -76,6 +77,9 @@ struct InterfaceSideSplit {
 
 /// True when a registered field is interface-owned (FieldScope::InterfaceFace).
 [[nodiscard]] bool hasInterfaceOwnedFields(const FESystem& system);
+
+/// The name of an interface-owned field that @p expr holds (empty if none).
+[[nodiscard]] std::string interfaceOwnedFieldIn(const FESystem& system, const forms::FormExpr& expr);
 
 /// Splits the row of test field @p row_name (see the file comment).
 [[nodiscard]] InterfaceSideSplit splitInterfaceSides(const FESystem& system,
