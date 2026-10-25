@@ -42,23 +42,6 @@ struct EdgeKeyHash {
     }
 };
 
-std::vector<std::array<svmp::index_t, 2>> deriveEdgeTable2D(const svmp::MeshBase& base)
-{
-    const auto& offsets = base.face2vertex_offsets();
-    const auto& data = base.face2vertex();
-    std::vector<std::array<svmp::index_t, 2>> edges;
-    edges.resize(base.n_faces());
-
-    for (svmp::index_t f = 0; f < static_cast<svmp::index_t>(base.n_faces()); ++f) {
-        const auto begin = static_cast<std::size_t>(offsets[static_cast<std::size_t>(f)]);
-        const auto end = static_cast<std::size_t>(offsets[static_cast<std::size_t>(f + 1)]);
-        FE_THROW_IF(end - begin != 2u, InvalidStateException,
-                    "deriveEdgeTable2D: expected 2 vertices per face in 2D");
-        edges[static_cast<std::size_t>(f)] = {data[begin], data[begin + 1]};
-    }
-    return edges;
-}
-
 std::vector<GlobalIndex> extractBoundaryDofsFromFaces(
     const dofs::EntityDofMap& entity_map,
     const svmp::MeshBase& base,
@@ -75,23 +58,28 @@ std::vector<GlobalIndex> extractBoundaryDofsFromFaces(
         }
     };
 
-    const std::vector<std::array<svmp::index_t, 2>>* edge2vertex = &base.edge2vertex();
-    std::vector<std::array<svmp::index_t, 2>> derived_edges;
-
-    if (entity_map.numEdges() > 0 && edge2vertex->empty()) {
-        FE_THROW_IF(base.dim() != 2, InvalidStateException,
-                    "extractBoundaryDofsFromFaces: missing edge table for edge DOFs");
-        derived_edges = deriveEdgeTable2D(base);
-        edge2vertex = &derived_edges;
-    }
+    // The edges of the EntityDofMap are numbered as DofHandler::distributeDofs
+    // numbers them.  The faces of a 2D mesh are its edges, and with every face
+    // stored (codim-1 storage Full) the DofHandler takes edge f to be face f,
+    // even when the mesh also has an edge table, whose order differs; otherwise
+    // it takes the edge table.  Read the edge DOFs from the same source.
+    const bool edges_are_faces =
+        base.dim() == 2 &&
+        base.codim1_storage_mode() == svmp::MeshCodim1StorageMode::Full &&
+        base.n_faces() > 0 &&
+        !base.face2vertex_offsets().empty() &&
+        !base.face2vertex().empty();
 
     std::unordered_map<EdgeKey, GlobalIndex, EdgeKeyHash> edge_ids;
-    if (entity_map.numEdges() > 0) {
-        FE_THROW_IF(edge2vertex->size() < static_cast<std::size_t>(entity_map.numEdges()), InvalidStateException,
+    if (entity_map.numEdges() > 0 && !edges_are_faces) {
+        const auto& edge2vertex = base.edge2vertex();
+        FE_THROW_IF(edge2vertex.empty(), InvalidStateException,
+                    "extractBoundaryDofsFromFaces: missing edge table for edge DOFs");
+        FE_THROW_IF(edge2vertex.size() < static_cast<std::size_t>(entity_map.numEdges()), InvalidStateException,
                     "extractBoundaryDofsFromFaces: edge table too small for EntityDofMap edge count");
         edge_ids.reserve(static_cast<std::size_t>(entity_map.numEdges()));
         for (GlobalIndex e = 0; e < entity_map.numEdges(); ++e) {
-            const auto& ev = (*edge2vertex)[static_cast<std::size_t>(e)];
+            const auto& ev = edge2vertex[static_cast<std::size_t>(e)];
             EdgeKey key{std::min<GlobalIndex>(ev[0], ev[1]), std::max<GlobalIndex>(ev[0], ev[1])};
             edge_ids.emplace(key, e);
         }
@@ -132,7 +120,11 @@ std::vector<GlobalIndex> extractBoundaryDofsFromFaces(
             push_span(entity_map.getVertexDofs(static_cast<GlobalIndex>(verts[i])));
         }
 
-        if (!edge_ids.empty()) {
+        if (edges_are_faces && entity_map.numEdges() > 0) {
+            FE_THROW_IF(fid >= entity_map.numEdges(), InvalidStateException,
+                        "extractBoundaryDofsFromFaces: face ID exceeds EntityDofMap edge count");
+            push_span(entity_map.getEdgeDofs(fid));
+        } else if (!edge_ids.empty()) {
             auto add_edge = [&](GlobalIndex v0, GlobalIndex v1) {
                 EdgeKey key{std::min(v0, v1), std::max(v0, v1)};
                 auto it = edge_ids.find(key);
