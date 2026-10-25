@@ -14,6 +14,11 @@
  * solution, and B^T lambda_h is minus its reaction (K u - F on the boundary
  * rows).
  *
+ * B3 (D54 T2): B1's P2/P1 problem with each side's multiplier an interface
+ * field on the side's InterfaceMesh (setInterfaceMeshFromBoundaryLabel), its
+ * terms written on dI: the spaces coincide with the restricted volume
+ * multipliers', so u and the multipliers equal B1's to solver tolerance.
+ *
  * I3 (cut interface): a circle of radius 0.5 in a square of side 2, k1 = 1
  * inside and k2 = 10 outside, u = r^2 / k_i + c_i (continuous), f = -4, so
  * the flux k du/dn on the circle is 2r = 1.  Two phase fields on the
@@ -40,6 +45,7 @@
 #include "Constraints/LevelSetActiveSideVertexDirichletConstraint.h"
 #include "Constraints/SupportRestrictionConstraint.h"
 #include "Core/FEException.h"
+#include "Dofs/EntityDofMap.h"
 #include "Forms/BoundaryConditions.h"
 #include "Forms/LagrangeDirichletBC.h"
 #include "Forms/StandardBCs.h"
@@ -52,6 +58,7 @@
 
 #include "TraceMultiplierTestMeshes.h"
 
+#include "Mesh/Core/InterfaceMesh.h"
 #include "Mesh/Fields/MeshFields.h"
 
 #if FE_HAS_EIGEN
@@ -528,6 +535,124 @@ TEST(TraceMultiplierB2, MultiplierIsTheReactionOfTheStrongDirichletSolve)
         ASSERT_GT(reaction_scale, 0.0);
         for (std::size_t i = 0; i < n_u; ++i) {
             EXPECT_NEAR(reaction[i], -(bt_lambda[i] - source[i]), 1e-9 * reaction_scale) << "u dof " << i;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B3: the multiplier as an interface field on the boundary (D54 T2)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// The values of a vertex-DOF field at the mesh vertices (by vertex id).
+std::vector<std::pair<svmp::index_t, Real>> vertexValuesOf(const FESystem& sys, FieldId field,
+                                                           const std::vector<Real>& state)
+{
+    std::vector<std::pair<svmp::index_t, Real>> out;
+    const auto* map = sys.fieldDofHandler(field).getEntityDofMap();
+    EXPECT_NE(map, nullptr);
+    const auto offset = static_cast<std::size_t>(sys.fieldDofOffset(field));
+    for (std::size_t v = 0; v < sys.mesh()->local_mesh().n_vertices(); ++v) {
+        const auto dofs = map->getVertexDofs(static_cast<GlobalIndex>(v));
+        if (!dofs.empty()) {
+            out.emplace_back(static_cast<svmp::index_t>(v), state[offset + static_cast<std::size_t>(dofs[0])]);
+        }
+    }
+    return out;
+}
+
+/// The values of a P1 interface field at the mesh vertices of its interface.
+std::vector<std::pair<svmp::index_t, Real>> interfaceVertexValuesOf(const FESystem& sys, FieldId field, int marker,
+                                                                    const std::vector<Real>& state)
+{
+    std::vector<std::pair<svmp::index_t, Real>> out;
+    const auto& iface = sys.interfaceMesh(marker);
+    const auto offset = static_cast<std::size_t>(sys.fieldDofOffset(field));
+    for (std::size_t f = 0; f < iface.n_faces(); ++f) {
+        const auto [vertices, count] = iface.face_vertices_span(static_cast<svmp::index_t>(f));
+        const auto dofs = sys.fieldDofHandler(field).getCellDofs(static_cast<GlobalIndex>(f));
+        EXPECT_EQ(dofs.size(), count);
+        for (std::size_t a = 0; a < count && a < dofs.size(); ++a) {
+            out.emplace_back(iface.volume_vertex(vertices[a]), state[offset + static_cast<std::size_t>(dofs[a])]);
+        }
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+} // namespace
+
+TEST(TraceMultiplierB3, ABoundaryInterfaceFieldMultiplierEqualsTheRestrictedVolumeField)
+{
+    const auto f = b1Source();
+    const auto g = coefficient("g", exactU);
+    for (const auto& family : families()) {
+        SCOPED_TRACE(family.name);
+        const int n = 4;
+        auto restricted = buildWeakDirichletPoisson(family.mesh(n, -1), family.space(2), family.space(1), f, g,
+                                                    Real(0.0), kSides);
+        const auto restricted_state = solveLinear(*restricted.system);
+
+        // The same problem with interface-field multipliers on the sides.
+        FESystem sys(family.mesh(n, -1));
+        auto u_space = family.space(2);
+        auto line = std::make_shared<spaces::H1Space>(ElementType::Line2, 1);
+        const auto u_id = sys.addField(FieldSpec{.name = "u", .space = u_space});
+        std::vector<FieldId> lambdas;
+        std::vector<int> markers;
+        for (const int side : kSides) {
+            markers.push_back(100 + side);
+            sys.setInterfaceMeshFromBoundaryLabel(markers.back(), side);
+            lambdas.push_back(sys.addInterfaceField("lambda_" + std::to_string(side), line, markers.back()));
+        }
+        sys.addOperator("op");
+        const auto u = forms::StateField(u_id, *u_space, "u");
+        const auto v = forms::TestField(u_id, *u_space, "v");
+        auto residual = (forms::inner(forms::grad(u), forms::grad(v)) - f * v).dx();
+        for (std::size_t k = 0; k < lambdas.size(); ++k) {
+            const auto lam = forms::StateField(lambdas[k], *line, "lambda");
+            const auto mu = forms::TestField(lambdas[k], *line, "mu");
+            residual = residual + (lam * v.minus()).dI(markers[k]) + (mu * (u.minus() - g)).dI(markers[k]);
+        }
+        std::vector<FieldId> fields{u_id};
+        fields.insert(fields.end(), lambdas.begin(), lambdas.end());
+        (void)systems::installFormulation(sys, "op", fields, residual);
+        sys.setup();
+        const auto state = solveLinear(sys);
+
+        // u: the same space on the same mesh, numbered alike and first.
+        ASSERT_EQ(sys.fieldDofOffset(u_id), 0);
+        ASSERT_EQ(restricted.system->fieldDofOffset(restricted.u), 0);
+        const auto n_u = static_cast<std::size_t>(sys.fieldDofHandler(u_id).getNumDofs());
+        ASSERT_EQ(static_cast<std::size_t>(restricted.system->fieldDofHandler(restricted.u).getNumDofs()), n_u);
+        Real scale = 0.0;
+        for (std::size_t i = 0; i < n_u; ++i) {
+            scale = std::max(scale, std::abs(restricted_state[i]));
+        }
+        ASSERT_GT(scale, 0.0);
+        for (std::size_t i = 0; i < n_u; ++i) {
+            EXPECT_NEAR(state[i], restricted_state[i], 1e-10 * scale) << "u dof " << i;
+        }
+
+        // The multipliers, by boundary vertex.
+        for (std::size_t k = 0; k < lambdas.size(); ++k) {
+            SCOPED_TRACE("side " + std::to_string(kSides[k]));
+            const auto on_interface = interfaceVertexValuesOf(sys, lambdas[k], markers[k], state);
+            const auto volume = vertexValuesOf(*restricted.system, restricted.lambdas[k], restricted_state);
+            ASSERT_EQ(on_interface.size(), static_cast<std::size_t>(n + 1));
+            Real lambda_scale = 0.0;
+            for (const auto& [vertex, value] : on_interface) {
+                lambda_scale = std::max(lambda_scale, std::abs(value));
+            }
+            ASSERT_GT(lambda_scale, 0.0);
+            for (const auto& [vertex, value] : on_interface) {
+                const auto it = std::find_if(volume.begin(), volume.end(),
+                                             [vertex = vertex](const auto& entry) { return entry.first == vertex; });
+                ASSERT_NE(it, volume.end()) << "vertex " << vertex;
+                EXPECT_NEAR(value, it->second, 1e-10 * lambda_scale) << "lambda at vertex " << vertex;
+            }
         }
     }
 }
