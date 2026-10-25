@@ -858,6 +858,63 @@ TEST(FESystemMixedDimensional, AContinuousInterfaceFieldCouplesAlikeToBothSides)
     EXPECT_GT(total, 0.0);
 }
 
+TEST(FESystemMortar, AnOrderOneMultiplierCouplesAsTheFaceMassFromEitherSide)
+{
+    // A first-order multiplier, as a MortarSpace field and as an interface
+    // field, against a continuous Q1 field on the unit face x = 1 (vertices 1
+    // and 4) of the two-quad mesh: from either side the coupling is the P1
+    // face mass of the face's vertices (1/3 on a vertex, 1/6 across).  The
+    // multiplier's basis lives on the interface face: on its reference
+    // interval [-1, 1], whichever way the side's facet runs.
+    constexpr int marker = 17;
+    for (const bool mortar : {true, false}) {
+        for (const auto side : {InterfaceEvaluationSide::Minus, InterfaceEvaluationSide::Plus}) {
+            SCOPED_TRACE(std::string(mortar ? "MortarSpace multiplier" : "interface-field multiplier") +
+                         (side == InterfaceEvaluationSide::Plus ? ", plus side" : ", minus side"));
+            FESystem sys(build_two_quad_mesh_with_interface_set("middle"));
+            sys.setInterfaceMeshFromFaceSet(marker, "middle");
+            auto volume_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+            auto line_space = std::make_shared<L2Space>(ElementType::Line2, /*order=*/1);
+            const auto u = sys.addField(FieldSpec{.name = "u", .space = volume_space});
+            const auto lambda =
+                mortar ? sys.addField(FieldSpec{.name = "lambda",
+                                                .space = std::make_shared<MortarSpace>(line_space, marker)})
+                       : sys.addInterfaceField("lambda", line_space, marker);
+            sys.addOperator("op");
+            sys.addCellKernel("op", u, std::make_shared<MassKernel>(1.0));
+            sys.addInterfaceFaceKernel("op", marker, lambda, u, std::make_shared<NormalTraceCouplingKernel>(1.0, side));
+            sys.addInterfaceFaceKernel("op", marker, lambda, std::make_shared<FacetMassKernel>(1.0));
+            sys.setup();
+            DenseMatrixView A(sys.dofHandler().getNumDofs());
+            SystemStateView state;
+            AssemblyRequest req;
+            req.op = "op";
+            req.want_matrix = true;
+            ASSERT_TRUE(sys.assemble(req, state, &A, nullptr).success);
+
+            const auto& iface = sys.interfaceMesh(marker);
+            ASSERT_EQ(iface.n_faces(), 1u);
+            const auto [face_vertices, count] = iface.face_vertices_span(0);
+            const auto lambda_dofs = sys.fieldDofHandler(lambda).getCellDofs(0);
+            ASSERT_EQ(lambda_dofs.size(), count);
+            const auto* u_map = sys.fieldDofHandler(u).getEntityDofMap();
+            ASSERT_NE(u_map, nullptr);
+            const auto l0 = sys.fieldDofOffset(lambda);
+            const auto u0 = sys.fieldDofOffset(u);
+            for (std::size_t a = 0; a < count; ++a) {
+                const auto va = iface.volume_vertex(face_vertices[a]);
+                for (GlobalIndex v = 0; v < 6; ++v) {
+                    const auto u_dofs = u_map->getVertexDofs(v);
+                    ASSERT_EQ(u_dofs.size(), 1u);
+                    const Real expected = (v != 1 && v != 4) ? 0.0 : (v == va ? 1.0 / 3.0 : 1.0 / 6.0);
+                    EXPECT_NEAR(A.getMatrixEntry(l0 + lambda_dofs[a], u0 + u_dofs[0]), expected, 1e-14)
+                        << "multiplier at vertex " << va << ", u at vertex " << v;
+                }
+            }
+        }
+    }
+}
+
 TEST(FESystemMixedDimensional, InterfaceFieldHistoryAssemblyUsesPreviousState)
 {
     constexpr int marker = 23;

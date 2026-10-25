@@ -6020,12 +6020,11 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
                                                              col_dof_offset_,
                                                              iface_col_dofs_storage)
                                           : getCellDofsCached(mesh, volume_cell, col_dof_map_, col_dof_offset_);
-                const bool test_force_face_reference =
-                    test_is_interface_field &&
-                    test_space.space_type() != spaces::SpaceType::Mortar;
-                const bool trial_force_face_reference =
-                    trial_is_interface_field &&
-                    trial_space.space_type() != spaces::SpaceType::Mortar;
+                // An interface-owned field (an interface field or a
+                // MortarSpace field) is evaluated on the interface face's own
+                // parameterization, not on the cell facet's trace coordinates.
+                const bool test_force_face_reference = test_is_interface_field;
+                const bool trial_force_face_reference = trial_is_interface_field;
                 std::array<LocalIndex, 4> align_iface_storage{};
                 std::span<const LocalIndex> align_iface{};
                 if (test_force_face_reference || trial_force_face_reference) {
