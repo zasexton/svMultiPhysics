@@ -916,9 +916,8 @@ void traceStateVectorFields(const svmp::FE::systems::FESystem& system,
     return;
   }
   const auto& fields = system.fieldMap();
-  std::ostringstream oss;
-  oss << "[svMultiPhysics::Application] state_vector diagnostic=state_vector_fields"
-      << " label='" << label << "'";
+  svmp::FE::LogRecord record("ApplicationDriver", "state vector");
+  record.diagnostic("state_vector_fields").quoted("label", label).rootOnly();
   for (std::size_t field = 0; field < fields.numFields(); ++field) {
     const auto& rec = fields.getField(field);
     const auto range = fields.getFieldDofRange(field);
@@ -936,15 +935,15 @@ void traceStateVectorFields(const svmp::FE::systems::FESystem& system,
       ++count;
     }
     const double mean = count > 0 ? sum / static_cast<double>(count) : 0.0;
-    oss << " [" << rec.name
-        << " dofs=" << count
-        << " norm=" << std::sqrt(std::max(0.0, sq_norm))
-        << " mean=" << mean
-        << " min=" << (count > 0 ? min_value : 0.0)
-        << " max=" << (count > 0 ? max_value : 0.0)
-        << "]";
+    record.child("state_vector_field", {"label"})
+        .quoted("field", rec.name)
+        .value("dofs", count)
+        .value("norm", std::sqrt(std::max(0.0, sq_norm)))
+        .value("mean", mean)
+        .value("min", count > 0 ? min_value : 0.0)
+        .value("max", count > 0 ? max_value : 0.0);
   }
-  application::core::oopCout() << oss.str() << std::endl;
+  svmp::FE::logRecord(record);
 }
 
 bool parse_bool_relaxed(const std::string& raw)
@@ -1790,9 +1789,11 @@ void dumpActiveCutVolumeRulesForProbe(const svmp::FE::systems::FESystem& system,
   context->assertAllFreeSurfaceGeometrySnapshotsCurrent(system.meshAccess());
   const auto& rules = context->volumeRules();
   const auto& metadata = context->metadata();
-  std::ostringstream oss;
-  oss << std::setprecision(17);
-  oss << "CUT_RULE_DUMP step=" << step << " n_rules=" << rules.size() << "\n";
+  svmp::FE::LogRecord dump("ApplicationDriver", "cut rule dump");
+  dump.diagnostic("cut_rule_dump")
+      .value("step", step)
+      .value("n_rules", rules.size())
+      .rootOnly();
   for (std::size_t i = 0; i < rules.size() && i < metadata.size(); ++i) {
     std::optional<svmp::FE::geometry::CutQuadratureRule> materialized;
     if (context->volumeRuleIsClassificationOnly(i)) {
@@ -1810,21 +1811,26 @@ void dumpActiveCutVolumeRulesForProbe(const svmp::FE::systems::FESystem& system,
                                                                      : "ifc";
     };
     const char* side = side_name(rule.side);
-    oss << "CUT_RULE step=" << step << " idx=" << i << " cell=" << cell
-        << " side=" << side << " mside=" << side_name(meta.side)
-        << " full=" << (rule.full_cell_equivalent ? 1 : 0)
-        << " measure=" << rule.measure
-        << " parent_measure=" << rule.parent_measure
-        << " vf=" << rule.volume_fraction
-        << " mvf=" << meta.volume_fraction
-        << " n_qp=" << rule.points.size() << "\n";
+    auto& rule_line = dump.child("cut_rule", {"step"});
+    rule_line.value("idx", i)
+        .value("cell", cell)
+        .value("side", side)
+        .value("mside", side_name(meta.side))
+        .value("full", rule.full_cell_equivalent ? 1 : 0)
+        .value("measure", rule.measure)
+        .value("parent_measure", rule.parent_measure)
+        .value("vf", rule.volume_fraction)
+        .value("mvf", meta.volume_fraction)
+        .value("n_qp", rule.points.size());
     for (const auto& q : rule.points) {
-      oss << "CUT_QP step=" << step << " cell=" << cell << " side=" << side
-          << " x=" << q.point[0] << " y=" << q.point[1] << " z=" << q.point[2]
-          << " w=" << q.weight << "\n";
+      rule_line.child("cut_rule_point", {"step", "cell", "side"})
+          .value("x", q.point[0])
+          .value("y", q.point[1])
+          .value("z", q.point[2])
+          .value("w", q.weight);
     }
   }
-  application::core::oopCout() << oss.str() << std::flush;
+  svmp::FE::logRecord(dump);
 }
 
 std::string fieldNameToken(std::string value)
@@ -2177,14 +2183,13 @@ void logActiveCutVolumeAvailabilityWarnings(
     return;
   }
   if (cut_context == nullptr) {
-    application::core::oopCout()
-        << "[svMultiPhysics::Application] WARNING active-domain cut context "
-        << "is unavailable"
-        << " step=" << step
-        << " time=" << time
-        << " requests=" << requests.size()
-        << " diagnostic=missing_active_cut_context"
-        << std::endl;
+    svmp::FE::logRecord(
+        svmp::FE::LogRecord("ApplicationDriver", "active-domain cut context is unavailable", svmp::FE::LogLevel::WARNING)
+            .diagnostic("missing_active_cut_context")
+            .value("step", step)
+            .value("time", time)
+            .value("requests", requests.size())
+            .rootOnly());
     return;
   }
 
@@ -2193,18 +2198,16 @@ void logActiveCutVolumeAvailabilityWarnings(
     const auto marker = generatedVolumeMarkerForRequest(
         *cut_context, request, i);
     if (!marker.has_value()) {
-      application::core::oopCout()
-          << "[svMultiPhysics::Application] WARNING active-domain cut context "
-          << "has no generated marker for request"
-          << " step=" << step
-          << " time=" << time
-          << " field='" << request.level_set_field_name << "'"
-          << " domain_id='" << request.domain_id << "'"
-          << " requested_marker=" << request.requested_interface_marker
-          << " generated_marker_count="
-          << cut_context->generatedVolumeMarkers().size()
-          << " diagnostic=missing_generated_cut_marker"
-          << std::endl;
+      svmp::FE::logRecord(
+          svmp::FE::LogRecord("ApplicationDriver", "active-domain cut context has no generated marker", svmp::FE::LogLevel::WARNING)
+              .diagnostic("missing_generated_cut_marker")
+              .value("step", step)
+              .value("time", time)
+              .quoted("field", request.level_set_field_name)
+              .quoted("domain_id", request.domain_id)
+              .value("requested_marker", request.requested_interface_marker)
+              .value("generated_marker_count", cut_context->generatedVolumeMarkers().size())
+              .rootOnly());
       continue;
     }
 
@@ -2212,22 +2215,19 @@ void logActiveCutVolumeAvailabilityWarnings(
     const auto rules =
         cut_context->generatedVolumeRulesForMarkerAndSide(*marker, side);
     if (rules.empty()) {
-      application::core::oopCout()
-          << "[svMultiPhysics::Application] WARNING active-domain cut context "
-          << "has no retained volume rules"
-          << " step=" << step
-          << " time=" << time
-          << " marker=" << *marker
-          << " field='" << request.level_set_field_name << "'"
-          << " domain_id='" << request.domain_id << "'"
-          << " active_side=" << activeSideName(request.active_side)
-          << " isovalue=" << request.isovalue
-          << " pruned_volume_rules="
-          << cut_context->generatedPrunedVolumeRuleCount()
-          << " pruned_volume="
-          << cut_context->generatedPrunedVolumeMeasure()
-          << " diagnostic=empty_active_cut_volume_rules"
-          << std::endl;
+      svmp::FE::logRecord(
+          svmp::FE::LogRecord("ApplicationDriver", "active-domain cut context has no retained volume rules", svmp::FE::LogLevel::WARNING)
+              .diagnostic("empty_active_cut_volume_rules")
+              .value("step", step)
+              .value("time", time)
+              .value("marker", *marker)
+              .quoted("field", request.level_set_field_name)
+              .quoted("domain_id", request.domain_id)
+              .value("active_side", activeSideName(request.active_side))
+              .value("isovalue", request.isovalue)
+              .value("pruned_volume_rules", cut_context->generatedPrunedVolumeRuleCount())
+              .value("pruned_volume", cut_context->generatedPrunedVolumeMeasure())
+              .rootOnly());
     }
   }
 }
@@ -2742,13 +2742,14 @@ bool logAcceptedPressureUpdateDiagnostic(
     return false;
   }
   if (previous_solution.size() != current_solution.size()) {
-    application::core::oopCout()
-        << "[svMultiPhysics::Application] WARNING accepted pressure update "
-        << "diagnostic skipped: solution size mismatch"
-        << " diagnostic=accepted_pressure_update_guard_skipped"
-        << " phase='" << phase << "'"
-        << " previous_size=" << previous_solution.size()
-        << " current_size=" << current_solution.size() << std::endl;
+    svmp::FE::logRecord(
+        svmp::FE::LogRecord("ApplicationDriver", "accepted pressure update diagnostic skipped", svmp::FE::LogLevel::WARNING)
+            .diagnostic("accepted_pressure_update_guard_skipped")
+            .text("reason", "solution_size_mismatch")
+            .quoted("phase", phase)
+            .value("previous_size", previous_solution.size())
+            .value("current_size", current_solution.size())
+            .rootOnly());
     return false;
   }
 
@@ -2760,38 +2761,40 @@ bool logAcceptedPressureUpdateDiagnostic(
           : std::string("Pressure");
   const auto pressure_field = system.findFieldByName(pressure_field_name);
   if (pressure_field == svmp::FE::INVALID_FIELD_ID) {
-    application::core::oopCout()
-        << "[svMultiPhysics::Application] WARNING accepted pressure update "
-        << "diagnostic skipped: pressure field not found"
-        << " diagnostic=accepted_pressure_update_guard_skipped"
-        << " phase='" << phase << "'"
-        << " field='" << pressure_field_name << "'" << std::endl;
+    svmp::FE::logRecord(
+        svmp::FE::LogRecord("ApplicationDriver", "accepted pressure update diagnostic skipped", svmp::FE::LogLevel::WARNING)
+            .diagnostic("accepted_pressure_update_guard_skipped")
+            .text("reason", "pressure_field_not_found")
+            .quoted("phase", phase)
+            .quoted("field", pressure_field_name)
+            .rootOnly());
     return false;
   }
 
   const auto& pressure_dofs = system.fieldDofHandler(pressure_field);
   const auto* pressure_entity_map = pressure_dofs.getEntityDofMap();
   if (pressure_entity_map == nullptr) {
-    application::core::oopCout()
-        << "[svMultiPhysics::Application] WARNING accepted pressure update "
-        << "diagnostic skipped: pressure field has no entity DOF map"
-        << " diagnostic=accepted_pressure_update_guard_skipped"
-        << " phase='" << phase << "'"
-        << " field='" << pressure_field_name << "'" << std::endl;
+    svmp::FE::logRecord(
+        svmp::FE::LogRecord("ApplicationDriver", "accepted pressure update diagnostic skipped", svmp::FE::LogLevel::WARNING)
+            .diagnostic("accepted_pressure_update_guard_skipped")
+            .text("reason", "no_entity_dof_map")
+            .quoted("phase", phase)
+            .quoted("field", pressure_field_name)
+            .rootOnly());
     return false;
   }
 
   const auto requests = activeCutVolumeRequests(params);
   const auto* cut_context = system.cutIntegrationContext();
   if (requests.empty() || cut_context == nullptr) {
-    application::core::oopCout()
-        << "[svMultiPhysics::Application] WARNING accepted pressure update "
-        << "diagnostic skipped: active cut context unavailable"
-        << " diagnostic=accepted_pressure_update_guard_skipped"
-        << " phase='" << phase << "'"
-        << " active_requests=" << requests.size()
-        << " has_cut_context=" << (cut_context != nullptr ? 1 : 0)
-        << std::endl;
+    svmp::FE::logRecord(
+        svmp::FE::LogRecord("ApplicationDriver", "accepted pressure update diagnostic skipped", svmp::FE::LogLevel::WARNING)
+            .diagnostic("accepted_pressure_update_guard_skipped")
+            .text("reason", "no_active_cut_context")
+            .quoted("phase", phase)
+            .value("active_requests", requests.size())
+            .value("has_cut_context", (cut_context != nullptr ? 1 : 0))
+            .rootOnly());
     return false;
   }
 
@@ -2849,15 +2852,16 @@ bool logAcceptedPressureUpdateDiagnostic(
       static_cast<svmp::FE::GlobalIndex>(current_solution.size());
   if (pressure_offset < 0 ||
       pressure_offset + pressure_field_dofs > solution_size) {
-    application::core::oopCout()
-        << "[svMultiPhysics::Application] WARNING accepted pressure update "
-        << "diagnostic skipped: pressure field DOFs outside solution vector"
-        << " diagnostic=accepted_pressure_update_guard_skipped"
-        << " phase='" << phase << "'"
-        << " field='" << pressure_field_name << "'"
-        << " pressure_offset=" << pressure_offset
-        << " pressure_dofs=" << pressure_field_dofs
-        << " solution_size=" << current_solution.size() << std::endl;
+    svmp::FE::logRecord(
+        svmp::FE::LogRecord("ApplicationDriver", "accepted pressure update diagnostic skipped", svmp::FE::LogLevel::WARNING)
+            .diagnostic("accepted_pressure_update_guard_skipped")
+            .text("reason", "dofs_outside_solution")
+            .quoted("phase", phase)
+            .quoted("field", pressure_field_name)
+            .value("pressure_offset", pressure_offset)
+            .value("pressure_dofs", pressure_field_dofs)
+            .value("solution_size", current_solution.size())
+            .rootOnly());
     return false;
   }
 
@@ -2920,33 +2924,31 @@ bool logAcceptedPressureUpdateDiagnostic(
       parseDoubleEnv("SVMP_ACTIVE_PRESSURE_UPDATE_THRESHOLD_PA", -1.0);
   const bool triggered = threshold > 0.0 && global_max_abs_delta > threshold;
 
-  application::core::oopCout()
-      << "[svMultiPhysics::Application] Accepted pressure update diagnostic"
-      << " diagnostic=accepted_pressure_update_guard"
-      << " phase='" << phase << "'"
-      << " step=" << step
-      << " time=" << time
-      << " dt=" << dt
-      << " field='" << pressure_field_name << "'"
-      << " retained_active_volume_rules=" << global_retained_rules
-      << " active_supported_vertices=" << global_supported_vertices
-      << " compared_vertex_pressure_dofs=" << global_compared_vertices
-      << " skipped_nonvertex_pressure_vertices=" << global_skipped_vertices
-      << " local_worst_vertex=" << local_vertex
-      << " local_worst_dof=" << local_dof
-      << " local_abs_pressure_delta_pa=" << local_max_abs_delta
-      << " global_abs_pressure_delta_pa=" << global_max_abs_delta
-      << " local_pressure_delta_pa=" << local_signed_delta
-      << " local_from_pressure_pa=" << local_from_pressure
-      << " local_to_pressure_pa=" << local_to_pressure
-      << " support_class="
-      << activePressureUpdateSupportClass(local_max_wet,
-                                          local_min_positive_wet)
-      << " incident_wet_fraction_max=" << local_max_wet
-      << " incident_wet_fraction_min_positive=" << local_min_positive_wet
-      << " threshold_pa=" << threshold
-      << " triggered=" << (triggered ? 1 : 0)
-      << std::endl;
+  svmp::FE::logRecord(
+      svmp::FE::LogRecord("ApplicationDriver", "accepted pressure update")
+          .diagnostic("accepted_pressure_update_guard")
+          .quoted("phase", phase)
+          .value("step", step)
+          .value("time", time)
+          .value("dt", dt)
+          .quoted("field", pressure_field_name)
+          .value("retained_active_volume_rules", global_retained_rules)
+          .value("active_supported_vertices", global_supported_vertices)
+          .value("compared_vertex_pressure_dofs", global_compared_vertices)
+          .value("skipped_nonvertex_pressure_vertices", global_skipped_vertices)
+          .value("local_worst_vertex", local_vertex)
+          .value("local_worst_dof", local_dof)
+          .value("local_abs_pressure_delta_pa", local_max_abs_delta)
+          .value("global_abs_pressure_delta_pa", global_max_abs_delta)
+          .value("local_pressure_delta_pa", local_signed_delta)
+          .value("local_from_pressure_pa", local_from_pressure)
+          .value("local_to_pressure_pa", local_to_pressure)
+          .value("support_class", activePressureUpdateSupportClass(local_max_wet, local_min_positive_wet))
+          .value("incident_wet_fraction_max", local_max_wet)
+          .value("incident_wet_fraction_min_positive", local_min_positive_wet)
+          .value("threshold_pa", threshold)
+          .value("triggered", (triggered ? 1 : 0))
+          .rootOnly());
 
   if (triggered &&
       honor_fail_on_trigger &&

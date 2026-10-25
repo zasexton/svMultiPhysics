@@ -4914,6 +4914,11 @@ TEST(MovingDomainPhysics,
         log_output.find(
             "diagnostic=mesh_boundary_history_transaction_rollback"),
         std::string::npos);
+    EXPECT_NE(
+        log_output.find(
+            "[INFO] MeshBoundaryKinematics: accepted mesh-boundary provenance not published "
+            "diagnostic=mesh_boundary_history_transaction_rollback\n"),
+        std::string::npos);
 }
 
 TEST(MovingDomainPhysics,

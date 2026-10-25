@@ -1,6 +1,7 @@
 #include "Application/Core/LevelSetCutConfiguration.h"
 
 #include "Application/Core/OopMpiLog.h"
+#include "FE/Core/LogRecord.h"
 #include "Parameters.h"
 #include "Physics/Options/NavierStokesOptionSchema.h"
 
@@ -827,23 +828,17 @@ void validateEquationLevelCutVolumeConsumer(
             std::to_string(resolved_marker) + "|" +
             activeSideName(request.active_side);
         if (warned.insert(warning_key).second) {
-          oopCout()
-              << "[svMultiPhysics::Application] WARNING equation-level "
-              << "level-set cut-domain uses a moving level-set field with "
-              << "only a first-order Hadamard cut-volume shape tangent; "
-              << "full differentiated cut quadrature remains unavailable"
-              << " equation_type='" << request.equation_type << "'"
-              << " field='" << request.level_set_field_name << "'"
-              << " field_source="
-              << fieldSourceKindName(phi_record.source_kind)
-              << " domain_id='" << request.domain_id << "'"
-              << " marker=" << resolved_marker
-              << " active_side=" << activeSideName(request.active_side)
-              << " geometry_tangent_policy="
-              << svmp::FE::level_set::geometryTangentPolicyName(
-                     request.geometry_tangent_policy)
-              << " diagnostic=equation_level_cut_domain_hadamard_shape_tangent"
-              << std::endl;
+          svmp::FE::logRecord(
+              svmp::FE::LogRecord("LevelSetCutConfiguration", "moving cut domain has a first-order shape tangent", svmp::FE::LogLevel::WARNING)
+                  .diagnostic("equation_level_cut_domain_hadamard_shape_tangent")
+                  .quoted("equation_type", request.equation_type)
+                  .quoted("field", request.level_set_field_name)
+                  .value("field_source", fieldSourceKindName(phi_record.source_kind))
+                  .quoted("domain_id", request.domain_id)
+                  .value("marker", resolved_marker)
+                  .value("active_side", activeSideName(request.active_side))
+                  .value("geometry_tangent_policy", svmp::FE::level_set::geometryTangentPolicyName(request.geometry_tangent_policy))
+                  .rootOnly());
         }
       }
     }

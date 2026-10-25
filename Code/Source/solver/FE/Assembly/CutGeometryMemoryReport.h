@@ -18,6 +18,7 @@
  */
 
 #include "Assembly/CutIntegrationContext.h"
+#include "Core/LogRecord.h"
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
 
@@ -345,71 +346,69 @@ struct ContextStorage {
     return static_cast<double>(bytes) / (1024.0 * 1024.0);
 }
 
-inline void appendVolume(std::ostringstream& out,
-                         const std::string& prefix,
-                         const VolumeStorage& storage)
+/// count/points/MB of a storage class (MB in the shortest round-trip text).
+[[nodiscard]] inline std::string storageClassText(const StorageClass& entry)
+{
+    return std::to_string(entry.count) + "/" + std::to_string(entry.points) + "/" +
+           LogRecord::shortestReal(megabytes(entry.bytes));
+}
+
+inline void addVolume(LogRecord& record,
+                      const std::string& prefix,
+                      const VolumeStorage& storage)
 {
     static constexpr std::array<const char*, 2> side_names{{"neg", "pos"}};
     static constexpr std::array<const char*, 2> full_names{{"cut", "full"}};
     for (std::size_t side = 0u; side < 2u; ++side) {
         for (std::size_t full = 0u; full < 2u; ++full) {
-            const auto& entry = storage.classes[side][full];
-            out << ' ' << prefix << '_' << side_names[side] << '_'
-                << full_names[full] << "=" << entry.count << '/'
-                << entry.points << '/' << megabytes(entry.bytes);
+            record.text(prefix + "_" + side_names[side] + "_" + full_names[full],
+                        storageClassText(storage.classes[side][full]));
         }
     }
 }
 
-inline void appendClass(std::ostringstream& out,
-                        const std::string& name,
-                        const StorageClass& entry)
+inline void addClass(LogRecord& record,
+                     const std::string& name,
+                     const StorageClass& entry)
 {
-    out << ' ' << name << '=' << entry.count << '/' << entry.points << '/'
-        << megabytes(entry.bytes);
+    record.text(name, storageClassText(entry));
 }
 
-/** Key=value text: classes are count/points/MB, totals are MB. */
-[[nodiscard]] inline std::string formatDomain(const std::string& prefix,
-                                              const DomainStorage& storage)
+/** Record fields: classes are count/points/MB, totals are MB. */
+inline void addDomain(LogRecord& record,
+                      const std::string& prefix,
+                      const DomainStorage& storage)
 {
-    std::ostringstream out;
-    out << ' ' << prefix << "_mb=" << megabytes(storage.bytes());
-    appendVolume(out, prefix + "_regions", storage.regions);
-    appendClass(out, prefix + "_fragments", storage.fragments);
-    return out.str();
+    record.real(prefix + "_mb", megabytes(storage.bytes()));
+    addVolume(record, prefix + "_regions", storage.regions);
+    addClass(record, prefix + "_fragments", storage.fragments);
 }
 
-[[nodiscard]] inline std::string formatSnapshot(const std::string& prefix,
-                                                const SnapshotStorage& storage)
+inline void addSnapshot(LogRecord& record,
+                        const std::string& prefix,
+                        const SnapshotStorage& storage)
 {
-    std::ostringstream out;
-    out << ' ' << prefix << "_resident_mb="
-        << megabytes(storage.resident_bytes);
-    appendVolume(out, prefix + "_records", storage.volume_records);
-    appendClass(out, prefix + "_interface_records", storage.interface_records);
-    appendClass(out, prefix + "_boundary_records", storage.boundary_records);
-    appendClass(out, prefix + "_contact_records", storage.contact_records);
-    out << formatDomain(prefix + "_domain", storage.domain);
-    return out.str();
+    record.real(prefix + "_resident_mb", megabytes(storage.resident_bytes));
+    addVolume(record, prefix + "_records", storage.volume_records);
+    addClass(record, prefix + "_interface_records", storage.interface_records);
+    addClass(record, prefix + "_boundary_records", storage.boundary_records);
+    addClass(record, prefix + "_contact_records", storage.contact_records);
+    addDomain(record, prefix + "_domain", storage.domain);
 }
 
-[[nodiscard]] inline std::string formatContext(const std::string& prefix,
-                                               const ContextStorage& storage)
+inline void addContext(LogRecord& record,
+                       const std::string& prefix,
+                       const ContextStorage& storage)
 {
-    std::ostringstream out;
-    out << ' ' << prefix << "_mb=" << megabytes(storage.bytes());
-    appendVolume(out, prefix + "_volume_rules", storage.volume_rules);
-    appendClass(out, prefix + "_interface_rules", storage.interface_rules);
-    appendClass(out, prefix + "_facet_set_rules", storage.facet_set_rules);
-    out << ' ' << prefix << "_metadata_mb=" << megabytes(storage.metadata_bytes)
-        << ' ' << prefix << "_bindings_mb=" << megabytes(storage.binding_bytes)
-        << ' ' << prefix << "_two_sided_mb="
-        << megabytes(storage.two_sided_binding_bytes) << ' ' << prefix
-        << "_facet_handles_mb=" << megabytes(storage.facet_handle_bytes)
-        << ' ' << prefix << "_slack_mb="
-        << megabytes(storage.container_slack_bytes);
-    return out.str();
+    record.real(prefix + "_mb", megabytes(storage.bytes()));
+    addVolume(record, prefix + "_volume_rules", storage.volume_rules);
+    addClass(record, prefix + "_interface_rules", storage.interface_rules);
+    addClass(record, prefix + "_facet_set_rules", storage.facet_set_rules);
+    record.real(prefix + "_metadata_mb", megabytes(storage.metadata_bytes))
+        .real(prefix + "_bindings_mb", megabytes(storage.binding_bytes))
+        .real(prefix + "_two_sided_mb", megabytes(storage.two_sided_binding_bytes))
+        .real(prefix + "_facet_handles_mb", megabytes(storage.facet_handle_bytes))
+        .real(prefix + "_slack_mb", megabytes(storage.container_slack_bytes));
 }
 
 } // namespace svmp::FE::assembly::memory_report

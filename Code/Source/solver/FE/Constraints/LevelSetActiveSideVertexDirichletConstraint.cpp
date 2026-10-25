@@ -171,9 +171,10 @@ void appendSampleDofsFromEnv(const char* raw, std::vector<GlobalIndex>& out)
                 out.push_back(static_cast<GlobalIndex>(std::stoll(token)));
             }
         } catch (const std::exception&) {
-            FE_LOG_INFO(
-                "LevelSetActiveSideVertexDirichletConstraint: diagnostic=level_set_active_side_vertex_constraint_sample_parse skipped_token='" +
-                token + "'");
+            svmp::FE::logRecord(
+                svmp::FE::LogRecord("LevelSetActiveSideVertexDirichletConstraint", "sample DOF token skipped")
+                    .diagnostic("level_set_active_side_vertex_constraint_sample_parse")
+                    .quoted("skipped_token", token));
         }
     }
 }
@@ -758,15 +759,15 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
     }
 
     for (const auto local_dof : sampledConstraintDofs(rec.name)) {
-        std::ostringstream sample;
-        sample << "LevelSetActiveSideVertexDirichletConstraint: diagnostic=level_set_active_side_vertex_constraint_sample"
-               << " field='" << rec.name << "'"
-               << " level_set_field='" << level_set_field_name_ << "'"
-               << " local_dof=" << local_dof;
+        svmp::FE::LogRecord sample("LevelSetActiveSideVertexDirichletConstraint", "active-side vertex constraint sample");
+        sample.diagnostic("level_set_active_side_vertex_constraint_sample")
+            .quoted("field", rec.name)
+            .quoted("level_set_field", level_set_field_name_)
+            .value("local_dof", local_dof);
         if (local_dof < 0 || local_dof >= n_field_dofs) {
-            sample << " status=out_of_range"
-                   << " total_dofs=" << n_field_dofs;
-            FE_LOG_INFO(sample.str());
+            sample.text("status", "out_of_range")
+                .value("total_dofs", n_field_dofs);
+            svmp::FE::logRecord(sample);
             continue;
         }
 
@@ -775,44 +776,37 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
         const bool active_dof_support =
             has_active_dof_support[static_cast<std::size_t>(local_dof)] !=
             static_cast<unsigned char>(0);
-        sample << " status=ok"
-               << " global_dof=" << global_dof
-               << " owned=" << (owned_dof ? 1 : 0)
-               << " active_dof_support=" << (active_dof_support ? 1 : 0)
-               << " inactive_constraint=" << (active_dof_support ? 0 : 1)
-               << " constrained_owned="
-               << ((!active_dof_support && owned_dof) ? 1 : 0)
-               << " retained_rule_count="
-               << active_dof_retained_rule_count[static_cast<std::size_t>(local_dof)]
-               << " retained_measure="
-               << active_dof_retained_measure[static_cast<std::size_t>(local_dof)];
+        sample.text("status", "ok")
+            .value("global_dof", global_dof)
+            .value("owned", (owned_dof ? 1 : 0))
+            .value("active_dof_support", (active_dof_support ? 1 : 0))
+            .value("inactive_constraint", (active_dof_support ? 0 : 1))
+            .value("constrained_owned", ((!active_dof_support && owned_dof) ? 1 : 0))
+            .value("retained_rule_count", active_dof_retained_rule_count[static_cast<std::size_t>(local_dof)])
+            .value("retained_measure", active_dof_retained_measure[static_cast<std::size_t>(local_dof)]);
         if (active_dof_retained_rule_count[
                 static_cast<std::size_t>(local_dof)] > 0u &&
             std::isfinite(active_dof_min_volume_fraction[
                 static_cast<std::size_t>(local_dof)])) {
-            sample << " retained_min_volume_fraction="
-                   << active_dof_min_volume_fraction[
-                          static_cast<std::size_t>(local_dof)]
-                   << " retained_max_volume_fraction="
-                   << active_dof_max_volume_fraction[
-                          static_cast<std::size_t>(local_dof)];
+            sample.value("retained_min_volume_fraction", active_dof_min_volume_fraction[static_cast<std::size_t>(local_dof)])
+                .value("retained_max_volume_fraction", active_dof_max_volume_fraction[static_cast<std::size_t>(local_dof)]);
         } else {
-            sample << " retained_min_volume_fraction=none"
-                   << " retained_max_volume_fraction=none";
+            sample.text("retained_min_volume_fraction", "none")
+                .text("retained_max_volume_fraction", "none");
         }
 
         const auto entity = entity_map->getDofEntity(local_dof);
         if (!entity.has_value()) {
-            sample << " entity_kind=Unknown entity_id=-1 entity_dofs=none";
-            FE_LOG_INFO(sample.str());
+            sample.text("entity_kind", "Unknown")
+                .text("entity_id", "-1")
+                .text("entity_dofs", "none");
+            svmp::FE::logRecord(sample);
             continue;
         }
 
-        sample << " entity_kind=" << entityKindName(entity->kind)
-               << " entity_id=" << entity->id
-               << " entity_dofs="
-               << formatDofList(
-                      entity_map->getEntityDofs(entity->kind, entity->id));
+        sample.value("entity_kind", entityKindName(entity->kind))
+            .value("entity_id", entity->id)
+            .value("entity_dofs", formatDofList(entity_map->getEntityDofs(entity->kind, entity->id)));
         if (entity->kind == dofs::EntityKind::Vertex &&
             entity->id >= 0 && entity->id < n_vertices) {
             const auto vertex = entity->id;
@@ -822,11 +816,11 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
             const bool active_support =
                 has_active_support[static_cast<std::size_t>(vertex)] !=
                 static_cast<unsigned char>(0);
-            sample << " vertex_phi=" << phi
-                   << " vertex_active_sign=" << (active_sign ? 1 : 0)
-                   << " vertex_active_support=" << (active_support ? 1 : 0);
+            sample.value("vertex_phi", phi)
+                .value("vertex_active_sign", (active_sign ? 1 : 0))
+                .value("vertex_active_support", (active_support ? 1 : 0));
         }
-        FE_LOG_INFO(sample.str());
+        svmp::FE::logRecord(sample);
     }
 
     if (!log_constraint_diagnostic) {

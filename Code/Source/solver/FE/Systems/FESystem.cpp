@@ -5441,16 +5441,17 @@ constexpr Real kDirectCouplingEntryTol = static_cast<Real>(1e-30);
 template <class SpanLike>
 [[nodiscard]] std::string formatTraceVector(const SpanLike& values)
 {
-    std::ostringstream oss;
-    oss << "[";
+    if (values.size() == 0u) {
+        return "none";
+    }
+    std::string out;
     for (std::size_t i = 0; i < values.size(); ++i) {
         if (i > 0) {
-            oss << ", ";
+            out += ',';
         }
-        oss << values[i];
+        out += LogRecord::shortestReal(static_cast<Real>(values[i]));
     }
-    oss << "]";
-    return oss.str();
+    return out;
 }
 
 struct AuxiliaryTemporalEvaluation {
@@ -10210,9 +10211,8 @@ void FESystem::recordAcceptedMeshBoundaryProvenance(
     mesh_tangential_boundary_policy_history_.resize(
         tangential_history_size);
     try {
-        FE_LOG_INFO(
-            "FESystem: diagnostic=mesh_boundary_history_transaction_rollback "
-            "accepted normal and tangential provenance was not published");
+        logRecord(LogRecord("MeshBoundaryKinematics", "accepted mesh-boundary provenance not published")
+                      .diagnostic("mesh_boundary_history_transaction_rollback"));
     } catch (...) {
         // Preserve the coordinated validation failure if diagnostics fail.
     }
@@ -16529,28 +16529,16 @@ void FESystem::prepareAuxiliaryForAssembly(const SystemStateView& state,
                 solved_ctx.x = entity_state_vec;
                 entry.model->evaluateOutputs(solved_ctx, outputs);
 
-                auto format_values = [](std::span<const Real> values) {
-                    std::ostringstream oss;
-                    oss << "[";
-                    for (std::size_t i = 0; i < values.size(); ++i) {
-                        if (i != 0) {
-                            oss << ", ";
-                        }
-                        oss << values[i];
-                    }
-                    oss << "]";
-                    return oss.str();
-                };
 
-                std::ostringstream oss;
-                oss << "prepareAuxiliaryForAssembly: algebraic block='" << entry.instance_name
-                    << "' entity=" << e
-                    << " solved=" << (solved ? 1 : 0)
-                    << " inputs=" << format_values(bound_inputs)
-                    << " x_before=" << format_values(entity_state_before)
-                    << " x_after=" << format_values(entity_state_vec)
-                    << " outputs=" << format_values(outputs);
-                FE_LOG_INFO(oss.str());
+                logRecord(LogRecord("FESystem", "algebraic auxiliary block")
+                              .diagnostic("auxiliary_algebraic_block")
+                              .quoted("block", entry.instance_name)
+                              .value("entity", e)
+                              .value("solved", (solved ? 1 : 0))
+                              .text("inputs", formatTraceVector(bound_inputs))
+                              .text("x_before", formatTraceVector(entity_state_before))
+                              .text("x_after", formatTraceVector(entity_state_vec))
+                              .text("outputs", formatTraceVector(outputs)));
             }
 
             if (solved) {
@@ -16689,25 +16677,13 @@ void FESystem::prepareAuxiliaryForAssembly(const SystemStateView& state,
                 entry.output_buffer.data() + e * n_outputs, n_outputs};
             entry.model->evaluateOutputs(ctx, out_span);
             if (monolithicAuxTraceEnabled()) {
-                auto format_values = [](std::span<const Real> values) {
-                    std::ostringstream oss;
-                    oss << "[";
-                    for (std::size_t i = 0; i < values.size(); ++i) {
-                        if (i != 0) {
-                            oss << ", ";
-                        }
-                        oss << values[i];
-                    }
-                    oss << "]";
-                    return oss.str();
-                };
-                std::ostringstream oss;
-                oss << "prepareAuxiliaryForAssembly: output buffer block='" << entry.instance_name
-                    << "' entity=" << e
-                    << " inputs=" << format_values(bound_inputs)
-                    << " state=" << format_values(entity_state_vec)
-                    << " outputs=" << format_values(std::span<const Real>(out_span.data(), out_span.size()));
-                FE_LOG_INFO(oss.str());
+                logRecord(LogRecord("FESystem", "auxiliary output buffer")
+                              .diagnostic("auxiliary_output_buffer")
+                              .quoted("block", entry.instance_name)
+                              .value("entity", e)
+                              .text("inputs", formatTraceVector(bound_inputs))
+                              .text("state", formatTraceVector(entity_state_vec))
+                              .text("outputs", formatTraceVector(std::span<const Real>(out_span.data(), out_span.size()))));
             }
         }
     }
@@ -17981,11 +17957,11 @@ void FESystem::initializeAuxiliaryDAEBlocksIfNeeded_(Real time, Real dt)
             blk.initialize(initialized);
 
             if (monolithicAuxTraceEnabled()) {
-                FE_LOG_INFO(
-                    "FESystem: consistent-initialized auxiliary block '" +
-                    entry->instance_name + "' at time=" +
-                    std::to_string(time) + " dt=" +
-                    std::to_string(dt));
+                logRecord(LogRecord("FESystem", "consistent-initialized auxiliary block")
+                              .diagnostic("auxiliary_consistent_initialization")
+                              .quoted("block", entry->instance_name)
+                              .value("time", time)
+                              .value("dt", dt));
             }
         }
     } catch (...) {
@@ -19082,14 +19058,15 @@ void FESystem::registerBoundaryIntegralInput(
                 for (const auto value : state.u) {
                     local_u_sq += value * value;
                 }
-                std::ostringstream oss;
-                oss << "boundaryIntegralInput: name='" << func_name
-                    << "' time=" << time
-                    << " dt=" << dt
-                    << " local_u_l2=" << std::sqrt(local_u_sq)
-                    << " local_u_size=" << state.u.size()
-                    << " value=" << out[0];
-                FE_LOG_INFO(oss.str());
+                svmp::FE::LogRecord line("FESystem", "boundary integral input");
+                line.diagnostic("boundary_integral_input")
+                    .quoted("name", func_name)
+                    .value("time", time)
+                    .value("dt", dt)
+                    .value("local_u_l2", std::sqrt(local_u_sq))
+                    .value("local_u_size", state.u.size())
+                    .value("value", out[0]);
+                svmp::FE::logRecord(line);
             }
         });
 }
@@ -19548,18 +19525,18 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                 res_req.residual = entity_res;
                 entry.model->evaluateResidual(ctx, res_req);
                 if (monolithicAuxTraceEnabled()) {
-                    std::ostringstream oss;
-                    oss << "FESystem: monolithic aux residual"
-                        << " block='" << entry.instance_name << "'"
-                        << " entity=" << e
-                        << " time=" << ctx.time
-                        << " dt=" << ctx.dt
-                        << " effective_dt=" << ctx.effective_dt
-                        << " x=" << formatTraceVector(ctx.x)
-                        << " xdot=" << formatTraceVector(ctx.xdot)
-                        << " inputs=" << formatTraceVector(ctx.inputs)
-                        << " residual=" << formatTraceVector(entity_res);
-                    FE_LOG_INFO(oss.str());
+                    svmp::FE::LogRecord line("FESystem", "monolithic aux residual");
+                    line.diagnostic("monolithic_aux_residual")
+                        .quoted("block", entry.instance_name)
+                        .value("entity", e)
+                        .value("time", ctx.time)
+                        .value("dt", ctx.dt)
+                        .value("effective_dt", ctx.effective_dt)
+                        .text("x", formatTraceVector(ctx.x))
+                        .text("xdot", formatTraceVector(ctx.xdot))
+                        .text("inputs", formatTraceVector(ctx.inputs))
+                        .text("residual", formatTraceVector(entity_res));
+                    svmp::FE::logRecord(line);
                 }
                 if (want_vector) {
                     if (local_condensed) {
@@ -20589,19 +20566,19 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                         for (const auto& grad : ed.input_gradients) {
                             total_input_grad_nnz += grad.size();
                         }
-                        std::ostringstream oss;
-                        oss << "FESystem: monolithic direct-only precheck"
-                            << " block='" << entry.instance_name << "'"
-                            << " entity=" << e
-                            << " lower_to_direct_only=" << (entry.lower_to_direct_only ? 1 : 0)
-                            << " n_inputs=" << ed.n_inputs
-                            << " dF_dx_size=" << ed.dF_dx.size()
-                            << " dF_dinputs_size=" << ed.dF_dinputs.size()
-                            << " dO_dx_size=" << ed.dO_dx.size()
-                            << " dO_dI_size=" << ed.dO_dI.size()
-                            << " coupled_bindings=" << entry.coupled_bindings.size()
-                            << " input_grad_nnz=" << total_input_grad_nnz;
-                        FE_LOG_INFO(oss.str());
+                        svmp::FE::LogRecord line("FESystem", "monolithic direct-only precheck");
+                        line.diagnostic("monolithic_direct_only_precheck")
+                            .quoted("block", entry.instance_name)
+                            .value("entity", e)
+                            .value("lower_to_direct_only", (entry.lower_to_direct_only ? 1 : 0))
+                            .value("n_inputs", ed.n_inputs)
+                            .value("df_dx_size", ed.dF_dx.size())
+                            .value("df_dinputs_size", ed.dF_dinputs.size())
+                            .value("do_dx_size", ed.dO_dx.size())
+                            .value("do_di_size", ed.dO_dI.size())
+                            .value("coupled_bindings", entry.coupled_bindings.size())
+                            .value("input_grad_nnz", total_input_grad_nnz);
+                        svmp::FE::logRecord(line);
                     }
 
                     if (entry.lower_to_direct_only &&
@@ -20626,10 +20603,11 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                             auto A_work = ed.dF_dx;
                             if (!solveDenseSystemInPlace(A_work, rhs)) {
                                 if (monolithicDirectTraceEnabled()) {
-                                    FE_LOG_INFO("FESystem: monolithic direct-only effective dO_dI solve failed"
-                                                " block='" + entry.instance_name + "'"
-                                                " entity=" + std::to_string(e) +
-                                                " input_col=" + std::to_string(input_col));
+                                    logRecord(LogRecord("FESystem", "monolithic direct-only dO/dI solve failed")
+                                                  .diagnostic("monolithic_direct_only_solve_failed")
+                                                  .quoted("block", entry.instance_name)
+                                                  .value("entity", e)
+                                                  .value("input_col", input_col));
                                 }
                                 continue;
                             }
@@ -20652,19 +20630,11 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                         }
 
                         if (monolithicDirectTraceEnabled()) {
-                            std::ostringstream oss;
-                            oss << "FESystem: monolithic direct-only effective dO_dI"
-                                << " block='" << entry.instance_name << "'"
-                                << " entity=" << e
-                                << " values=[";
-                            for (std::size_t idx = 0; idx < ed.dO_dI_effective.size(); ++idx) {
-                                if (idx != 0) {
-                                    oss << ", ";
-                                }
-                                oss << ed.dO_dI_effective[idx];
-                            }
-                            oss << "]";
-                            FE_LOG_INFO(oss.str());
+                            logRecord(LogRecord("FESystem", "monolithic direct-only effective dO/dI")
+                                          .diagnostic("monolithic_direct_only_effective_do_di")
+                                          .quoted("block", entry.instance_name)
+                                          .value("entity", e)
+                                          .text("values", formatTraceVector(ed.dO_dI_effective)));
                         }
                     }
 
@@ -21034,39 +21004,32 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                                 (void)dof;
                                                 dR_norm_sq += dRi_dOk * dRi_dOk;
                                             }
-                                            std::ostringstream oss;
-                                            oss << "FESystem: monolithic direct coupling"
-                                                << " block='" << entry.instance_name << "'"
-                                                << " output='" << oname << "'"
-                                                << " entity=" << e
-                                                << " input_col=" << input_col
-                                                << " dO_dI=" << dOk_dIm
-                                                << " grad_source=" << grad_source
-                                                << " grad_nnz=" << q_u.size()
-                                                << " grad_norm=" << std::sqrt(q_norm_sq)
-                                                << " dR_nnz=" << dR_rank1_entries.size()
-                                                << " dR_norm=" << std::sqrt(dR_norm_sq);
-                                            oss << " grad_entries=[";
-                                            bool first = true;
+                                            std::string grad_entries;
                                             for (const auto& [dof, qj] : q_u) {
-                                                if (!first) {
-                                                    oss << ", ";
-                                                }
-                                                first = false;
-                                                oss << "(" << dof << ":" << qj << ")";
+                                                grad_entries += (grad_entries.empty() ? "" : ",") +
+                                                                std::to_string(dof) + ":" +
+                                                                LogRecord::shortestReal(qj);
                                             }
-                                            oss << "]";
-                                            oss << " dR_entries=[";
-                                            first = true;
+                                            std::string dr_entries;
                                             for (const auto& [dof, dRi_dOk] : dR_rank1_entries) {
-                                                if (!first) {
-                                                    oss << ", ";
-                                                }
-                                                first = false;
-                                                oss << "(" << dof << ":" << dRi_dOk << ")";
+                                                dr_entries += (dr_entries.empty() ? "" : ",") +
+                                                              std::to_string(dof) + ":" +
+                                                              LogRecord::shortestReal(dRi_dOk);
                                             }
-                                            oss << "]";
-                                            FE_LOG_INFO(oss.str());
+                                            logRecord(LogRecord("FESystem", "monolithic direct coupling")
+                                                          .diagnostic("monolithic_direct_coupling")
+                                                          .quoted("block", entry.instance_name)
+                                                          .quoted("output", oname)
+                                                          .value("entity", e)
+                                                          .value("input_col", input_col)
+                                                          .value("do_di", dOk_dIm)
+                                                          .value("grad_source", grad_source)
+                                                          .value("grad_nnz", q_u.size())
+                                                          .value("grad_norm", std::sqrt(q_norm_sq))
+                                                          .value("dr_nnz", dR_rank1_entries.size())
+                                                          .value("dr_norm", std::sqrt(dR_norm_sq))
+                                                          .text("grad_entries", grad_entries.empty() ? "none" : grad_entries)
+                                                          .text("dr_entries", dr_entries.empty() ? "none" : dr_entries));
                                         }
                                         // For live monolithic solves, prefer the exact
                                         // reduced-field form even when the outer product is
@@ -21080,17 +21043,16 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                                 activeAnalysisCommunicator(*this)) > 0;
                                         if (!entry.lower_to_direct_only && global_q_u_nonempty) {
                                             if (monolithicDirectTraceEnabled()) {
-                                                std::ostringstream oss;
-                                                oss << "FESystem: monolithic direct coupling"
-                                                    << " block='" << entry.instance_name << "'"
-                                                    << " output='" << oname << "'"
-                                                    << " entity=" << e
-                                                    << " input_col=" << input_col
-                                                    << " path='reduced_exact_update'"
-                                                    << " local_grad_nnz=" << q_u.size()
-                                                    << " global_grad_active="
-                                                    << (global_q_u_nonempty ? 1 : 0);
-                                                FE_LOG_INFO(oss.str());
+                                                svmp::FE::LogRecord line("FESystem", "monolithic direct coupling");
+                                                line.diagnostic("monolithic_direct_coupling")
+                                                    .quoted("block", entry.instance_name)
+                                                    .quoted("output", oname)
+                                                    .value("entity", e)
+                                                    .value("input_col", input_col)
+                                                    .quoted("path", "reduced_exact_update")
+                                                    .value("local_grad_nnz", q_u.size())
+                                                    .value("global_grad_active", (global_q_u_nonempty ? 1 : 0));
+                                                svmp::FE::logRecord(line);
                                             }
                                             backends::ReducedFieldUpdate reduced_update;
                                             reduced_update.sigma = dOk_dIm;
@@ -21227,13 +21189,13 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                     last_rank_one_updates_.push_back(std::move(promoted));
                                     promoted_direct_only = true;
                                     if (monolithicDirectTraceEnabled()) {
-                                        std::ostringstream oss;
-                                        oss << "FESystem: monolithic direct coupling"
-                                            << " block='" << entry.instance_name << "'"
-                                            << " output='" << oname << "'"
-                                            << " entity=" << e
-                                            << " path='native_rank_one'";
-                                        FE_LOG_INFO(oss.str());
+                                        svmp::FE::LogRecord line("FESystem", "monolithic direct coupling");
+                                        line.diagnostic("monolithic_direct_coupling")
+                                            .quoted("block", entry.instance_name)
+                                            .quoted("output", oname)
+                                            .value("entity", e)
+                                            .quoted("path", "native_rank_one");
+                                        svmp::FE::logRecord(line);
                                     }
                                 }
                             }
@@ -23851,52 +23813,45 @@ void FESystem::finalizeAuxiliaryLayout()
         validateRaggedMonolithicLocalCondensationEligibility_(entry);
         if (monolithicAuxTraceEnabled()) {
             auto* built = dynamic_cast<const BuiltAuxiliaryModel*>(entry.model.get());
-            std::ostringstream oss;
-            oss << "FESystem::finalizeAuxiliaryLayout lowerability"
-                << " instance=" << entry.instance_name
-                << " solve_mode=monolithic";
+            LogRecord line("FESystem", "auxiliary layout lowerability");
+            line.diagnostic("auxiliary_layout_lowerability")
+                .value("instance", entry.instance_name)
+                .text("solve_mode", "monolithic");
             if (built != nullptr) {
                 const auto& names = built->stateNames();
                 const auto& kinds = entry.model->structuralMetadata().variable_kinds;
-                oss << " dim=" << names.size()
-                    << " pure_algebraic="
-                    << (isPureAlgebraicAuxiliary(*entry.model, names.size()) ? 1 : 0)
-                    << " state_kinds=[";
+                std::string state_kinds;
                 for (std::size_t i = 0; i < names.size(); ++i) {
-                    if (i != 0) {
-                        oss << ", ";
-                    }
                     const auto kind = i < kinds.size()
                         ? kinds[i]
                         : AuxiliaryVariableKind::Differential;
-                    oss << names[i] << ":"
-                        << (kind == AuxiliaryVariableKind::Algebraic ? "alg" : "dyn");
+                    state_kinds += (i != 0 ? "," : "") + names[i] + ":" +
+                                   (kind == AuxiliaryVariableKind::Algebraic ? "alg" : "dyn");
                 }
-                oss << "]";
+                line.value("dim", names.size())
+                    .value("pure_algebraic", isPureAlgebraicAuxiliary(*entry.model, names.size()) ? 1 : 0)
+                    .text("state_kinds", state_kinds.empty() ? "none" : state_kinds);
             } else {
-                oss << " built=0";
+                line.integer("built", 0);
             }
             if (entry.deriv_provider) {
                 const auto& artifact = entry.deriv_provider->artifact();
-                oss << " referenced_fields=" << artifact.referenced_fields.size();
+                line.value("referenced_fields", artifact.referenced_fields.size());
             }
             const auto output_names = entry.model->outputNames();
-            oss << " outputs=[";
+            std::string outputs;
             for (std::size_t i = 0; i < output_names.size(); ++i) {
-                if (i != 0) {
-                    oss << ", ";
-                }
                 const auto qualified_name = entry.instance_name + "/" + output_names[i];
                 const auto lowered = loweredAuxiliaryOutputExpr(qualified_name);
-                oss << output_names[i] << ":"
-                    << (lowered.has_value() ? "lowerable" : "blocked");
+                outputs += (i != 0 ? "," : "") + output_names[i] + ":" +
+                           (lowered.has_value() ? "lowerable" : "blocked");
             }
-            oss << "]"
-                << " input_bindings=" << entry.input_bindings.size()
-                << " coupled_bindings=" << entry.coupled_bindings.size()
-                << " lower_to_direct_only=" << (entry.lower_to_direct_only ? 1 : 0)
-                << " local_condensed=" << (entry.local_condensed ? 1 : 0);
-            FE_LOG_INFO(oss.str());
+            line.text("outputs", outputs.empty() ? "none" : outputs)
+                .value("input_bindings", entry.input_bindings.size())
+                .value("coupled_bindings", entry.coupled_bindings.size())
+                .value("lower_to_direct_only", entry.lower_to_direct_only ? 1 : 0)
+                .value("local_condensed", entry.local_condensed ? 1 : 0);
+            logRecord(line);
         }
         if (!entry.lower_to_direct_only && !entry.local_condensed) {
             std::size_t entity_count = entry.explicit_entity_count;
@@ -24800,10 +24755,11 @@ FESystem::synthesizeLoweredAuxiliaryOutputExpr_(const DeployedAuxEntry& entry,
         if (!monolithicAuxTraceEnabled()) {
             return;
         }
-        FE_LOG_INFO("FESystem::synthesizeLoweredAuxiliaryOutputExpr blocked"
-                    " instance=" + entry.instance_name +
-                    " output=" + std::string(output_name) +
-                    " stage=" + std::string(stage));
+        logRecord(LogRecord("FESystem", "auxiliary output lowering blocked")
+                      .diagnostic("auxiliary_output_lowering_blocked")
+                      .value("instance", entry.instance_name)
+                      .value("output", output_name)
+                      .value("stage", stage));
     };
 
     const auto* input_reg = auxiliaryInputRegistryIfPresent();

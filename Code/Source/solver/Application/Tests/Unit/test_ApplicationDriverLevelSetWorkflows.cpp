@@ -4904,6 +4904,12 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_NE(output.find("jacobian_validity=piecewise_smooth_topology_only"),
             std::string::npos);
   EXPECT_NE(output.find("sync_point=line_search_trial"), std::string::npos);
+  EXPECT_NE(output.find("LevelSetGeometryService: cut topology changed during a nonlinear solve "
+                        "diagnostic=cut_topology_change_nonsmooth_event solve_kind=steady "
+                        "event_class=nonsmooth_cut_topology_change newton_consistency=not_expected "
+                        "jacobian_validity=piecewise_smooth_topology_only sync_point=line_search_trial "
+                        "previous_topology_key="),
+            std::string::npos);
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,

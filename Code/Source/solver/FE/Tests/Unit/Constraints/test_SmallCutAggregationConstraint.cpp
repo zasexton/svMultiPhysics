@@ -1979,6 +1979,10 @@ TEST(SmallCutAggregationConstraint, RootlessFallbackPinsCandidatesBeyondRootPath
     EXPECT_NE(log_output.find("diagnostic=aggregation_guard_rootless "
                               "reason=root_path_guard"),
               std::string::npos);
+    EXPECT_NE(log_output.find("[WARN] SmallCutAggregationConstraint: rootless aggregation candidate "
+                              "diagnostic=aggregation_guard_rootless reason=root_path_guard field='p' "
+                              "candidate_dof="),
+              std::string::npos);
     EXPECT_NE(log_output.find("maximum_allowed_path=1"), std::string::npos);
     EXPECT_NE(log_output.find("feature_cells=3"), std::string::npos);
     const auto totals_after = diagnostics::aggregationGuardRootlessTotals();
@@ -3378,7 +3382,9 @@ TEST(SmallCutAggregationConstraint, AllowUnaggregatedEnvRestoresFailOpenBehavior
     auto log_output = testing::internal::GetCapturedStdout();
     log_output += testing::internal::GetCapturedStderr();
 
-    EXPECT_NE(log_output.find("continuing fail-open"), std::string::npos);
+    EXPECT_NE(log_output.find("SmallCutAggregationConstraint: aggregation continues fail-open "
+                              "diagnostic=aggregation_fail_open field='p' communicator_rootless_candidates="),
+              std::string::npos);
     for (const auto vertex : {0, 1, 3, 4}) {
         EXPECT_FALSE(system.constraints().isConstrained(
             vertexDof(system, pressure, vertex)))

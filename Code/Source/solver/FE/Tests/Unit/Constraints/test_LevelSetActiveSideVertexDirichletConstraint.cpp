@@ -418,6 +418,11 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
     EXPECT_NE(log_output.find("vertex_phi=1"), std::string::npos);
     EXPECT_NE(log_output.find("local_dof=999"), std::string::npos);
     EXPECT_NE(log_output.find("status=out_of_range"), std::string::npos);
+    EXPECT_NE(log_output.find(
+                  "[INFO] LevelSetActiveSideVertexDirichletConstraint: active-side vertex constraint sample "
+                  "diagnostic=level_set_active_side_vertex_constraint_sample field='p' level_set_field='phi' "
+                  "local_dof=999 status=out_of_range total_dofs="),
+              std::string::npos);
 #endif
 }
 

@@ -57,6 +57,8 @@
 namespace svmp {
 namespace FE {
 
+class LogRecord;
+
 namespace assembly {
 class CutIntegrationContext;
 class IMeshAccess;
@@ -305,9 +307,12 @@ struct CurrentCandidateProducerLinkageResult {
     const svmp::FE::assembly::IMeshAccess& mesh,
     const svmp::FE::systems::CollectiveCommunicator& comm);
 
-/// Opt-in (SVMP_CUT_MEMORY_REPORT=1) storage report of the cut geometry.
+/// Opt-in (SVMP_CUT_MEMORY_REPORT=1) storage report of the cut geometry: the
+/// cut_geometry_memory record of @p phase, with the fields @p details adds.
 [[nodiscard]] bool cutGeometryMemoryReportEnabled();
-void logCutGeometryMemory(const char* phase, const std::string& details = {});
+void logCutGeometryMemory(
+    const char* phase,
+    const std::function<void(svmp::FE::LogRecord&)>& details = {});
 
 [[nodiscard]] const char* activeSideName(LevelSetActiveSide side) noexcept;
 

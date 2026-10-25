@@ -1011,60 +1011,48 @@ void logCutVolumeRowProvenanceDiagnostics(
         const auto& rule_metadata =
             rule_index < metadata.size() ? &metadata[rule_index] : nullptr;
 
-        std::ostringstream oss;
-        oss << "assembleOperator: diagnostic=cut_volume_row_provenance"
-            << " status=ok"
-            << " op='" << op << "'"
-            << " source_component='" << source_component_tag << "'"
-            << " marker=" << marker
-            << " side=" << cutIntegrationSideName(side)
-            << " test='" << test_field_name << "'"
-            << " trial='" << trial_field_name << "'"
-            << " want_matrix=" << (want_matrix ? 1 : 0)
-            << " want_vector=" << (want_vector ? 1 : 0)
-            << " rule_index=" << rule_index
-            << " parent_cell=" << cell_id
-            << " full_cell=" << (rule.full_cell_equivalent ? 1 : 0)
-            << " volume_fraction=" << rule.volume_fraction
-            << " measure=" << rule.measure
-            << " parent_measure=" << rule.parent_measure
-            << " quadrature_points=" << rule.points.size()
-            << " source_revision="
-            << (rule_metadata == nullptr ? 0u
-                                          : rule_metadata->source_value_revision)
-            << " free_surface_snapshot_revision="
-            << (rule_metadata == nullptr
-                    ? 0u
-                    : rule_metadata
-                          ->free_surface_snapshot_revision_key)
-            << " cut_topology_revision="
-            << (rule_metadata == nullptr ? 0u
-                                          : rule_metadata->cut_topology_revision)
-            << " quadrature_policy_key="
-            << (rule_metadata == nullptr ? 0u
-                                          : rule_metadata->quadrature_policy_key)
-            << " row_dofs="
-            << joinDofsWithOffset(row_dofs, row_dof_offset)
-            << " col_dofs="
-            << joinDofsWithOffset(col_dofs, col_dof_offset);
-        FE_LOG_INFO(oss.str());
+        svmp::FE::LogRecord provenance("CutVolumeAssembly", "cut-volume row provenance");
+        provenance.diagnostic("cut_volume_row_provenance")
+            .text("status", "ok")
+            .quoted("op", op)
+            .quoted("source_component", source_component_tag)
+            .value("marker", marker)
+            .value("side", cutIntegrationSideName(side))
+            .quoted("test", test_field_name)
+            .quoted("trial", trial_field_name)
+            .value("want_matrix", (want_matrix ? 1 : 0))
+            .value("want_vector", (want_vector ? 1 : 0))
+            .value("rule_index", rule_index)
+            .value("parent_cell", cell_id)
+            .value("full_cell", (rule.full_cell_equivalent ? 1 : 0))
+            .value("volume_fraction", rule.volume_fraction)
+            .value("measure", rule.measure)
+            .value("parent_measure", rule.parent_measure)
+            .value("quadrature_points", rule.points.size())
+            .value("source_revision", (rule_metadata == nullptr ? 0u : rule_metadata->source_value_revision))
+            .value("free_surface_snapshot_revision", (rule_metadata == nullptr ? 0u : rule_metadata->free_surface_snapshot_revision_key))
+            .value("cut_topology_revision", (rule_metadata == nullptr ? 0u : rule_metadata->cut_topology_revision))
+            .value("quadrature_policy_key", (rule_metadata == nullptr ? 0u : rule_metadata->quadrature_policy_key))
+            .value("row_dofs", joinDofsWithOffset(row_dofs, row_dof_offset))
+            .value("col_dofs", joinDofsWithOffset(col_dofs, col_dof_offset));
+        svmp::FE::logRecord(provenance);
         ++emitted_rules;
     }
 
-    std::ostringstream summary;
-    summary << "assembleOperator: diagnostic=cut_volume_row_provenance_summary"
-            << " status=ok"
-            << " op='" << op << "'"
-            << " source_component='" << source_component_tag << "'"
-            << " marker=" << marker
-            << " side=" << cutIntegrationSideName(side)
-            << " test='" << test_field_name << "'"
-            << " trial='" << trial_field_name << "'"
-            << " emitted_rules=" << emitted_rules
-            << " skipped_rules=" << skipped_rules
-            << " total_rule_slots=" << iteration_count
-            << " max_rules=" << max_rules;
-    FE_LOG_INFO(summary.str());
+    svmp::FE::LogRecord summary("CutVolumeAssembly", "cut-volume row provenance summary");
+    summary.diagnostic("cut_volume_row_provenance_summary")
+        .text("status", "ok")
+        .quoted("op", op)
+        .quoted("source_component", source_component_tag)
+        .value("marker", marker)
+        .value("side", cutIntegrationSideName(side))
+        .quoted("test", test_field_name)
+        .quoted("trial", trial_field_name)
+        .value("emitted_rules", emitted_rules)
+        .value("skipped_rules", skipped_rules)
+        .value("total_rule_slots", iteration_count)
+        .value("max_rules", max_rules);
+    svmp::FE::logRecord(summary);
 }
 
 void logCutVolumeAssemblyDiagnostics(const assembly::CutIntegrationContext& cut_context,

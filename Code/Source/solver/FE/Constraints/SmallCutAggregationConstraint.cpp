@@ -17,6 +17,7 @@
 #include "Core/FEException.h"
 #include "Core/HaloDiagnostics.h"
 #include "Core/Logger.h"
+#include "Core/LogRecord.h"
 #include "Dofs/EntityDofMap.h"
 #include "Elements/ReferenceElement.h"
 #include "Geometry/FrameGeometry.h"
@@ -516,6 +517,12 @@ constexpr const char* kGuardRootlessOptInHint =
     "candidates, which degrades results inside connected liquid; every case "
     "is logged and counted in the run summary)";
 
+[[nodiscard]] std::string coordinateTripleText(const Real* x)
+{
+    return "(" + LogRecord::shortestReal(x[0]) + "," + LogRecord::shortestReal(x[1]) + "," +
+           LogRecord::shortestReal(x[2]) + ")";
+}
+
 void logGuardRootlessCandidate(const systems::FESystem& system,
                                std::string_view field_name,
                                std::string_view reason,
@@ -535,19 +542,24 @@ void logGuardRootlessCandidate(const systems::FESystem& system,
     if (rank != 0) {
         return;
     }
-    std::ostringstream oss;
-    oss << std::setprecision(17)
-        << "SmallCutAggregationConstraint: diagnostic=aggregation_guard_rootless"
-        << " reason=" << reason << " field='" << field_name << "'"
-        << " candidate_dof=" << candidate_dof << " xyz=(" << coordinates[0]
-        << "," << coordinates[1] << "," << coordinates[2] << ")"
-        << " feature_cells=" << feature_cells;
+    LogRecord line("SmallCutAggregationConstraint", "rootless aggregation candidate", LogLevel::WARNING);
+    line.diagnostic("aggregation_guard_rootless")
+        .value("reason", reason)
+        .quoted("field", field_name)
+        .value("candidate_dof", candidate_dof)
+        .text("xyz", coordinateTripleText(coordinates.data()))
+        .value("feature_cells", feature_cells);
     const auto time = system.lastConstraintUpdateTime();
     if (time.has_value()) {
-        oss << " constraint_time=" << *time;
+        line.value("constraint_time", *time);
     }
-    oss << " " << detail << " policy=rootless_island";
-    FE_LOG_WARNING(oss.str());
+    // detail: one key=value field of the caller
+    const auto detail_eq = detail.find('=');
+    if (detail_eq != std::string::npos) {
+        line.text(detail.substr(0u, detail_eq), std::string_view(detail).substr(detail_eq + 1u));
+    }
+    line.text("policy", "rootless_island");
+    logRecord(line);
 }
 
 [[nodiscard]] bool strictEnvironmentFlag(const char* name, bool& valid)
@@ -905,16 +917,19 @@ void AggregationRefreshProfile::report(const systems::FESystem& system,
 #else
     static_cast<void>(system);
 #endif
-    std::ostringstream out;
-    out << std::fixed << std::setprecision(3)
-        << "SmallCutAggregationConstraint: diagnostic=aggregation_profile"
-        << " seq=" << sequence_ << " rank=" << rank
-        << " ranks=" << world_size << " field='" << field_name
-        << "' kind=" << kind << " total_ms=" << total_ms;
+    // phase.<p>_ms, exchange.<e>_* and count.<c> are phase_<p>_ms,
+    // exchange_<e>_* and count_<c> (snake_case keys).
+    LogRecord out("SmallCutAggregationConstraint", "aggregation refresh profile");
+    out.diagnostic("aggregation_profile")
+        .value("seq", sequence_)
+        .value("rank", rank)
+        .value("ranks", world_size)
+        .quoted("field", field_name)
+        .value("kind", kind)
+        .value("total_ms", total_ms);
     for (std::size_t i = 0; i < phase_ms_.size(); ++i) {
         if (phase_ms_[i] != 0.0) {
-            out << " phase." << kAggregationProfilePhaseNames[i]
-                << "_ms=" << phase_ms_[i];
+            out.value(std::string("phase_") + kAggregationProfilePhaseNames[i] + "_ms", phase_ms_[i]);
         }
     }
     for (std::size_t i = 0; i < exchange_ms_.size(); ++i) {
@@ -922,18 +937,16 @@ void AggregationRefreshProfile::report(const systems::FESystem& system,
             exchange_ms_[i] == 0.0) {
             continue;
         }
-        const char* name = kAggregationProfileExchangeNames[i];
-        out << " exchange." << name << "_ms=" << exchange_ms_[i]
-            << " exchange." << name << "_sent_words=" << sent_words_[i]
-            << " exchange." << name << "_received_words="
-            << received_words_[i] << " exchange." << name
-            << "_partners=" << exchange_partners_[i];
+        const std::string name = std::string("exchange_") + kAggregationProfileExchangeNames[i];
+        out.value(name + "_ms", exchange_ms_[i])
+            .value(name + "_sent_words", sent_words_[i])
+            .value(name + "_received_words", received_words_[i])
+            .value(name + "_partners", exchange_partners_[i]);
     }
     for (std::size_t i = 0; i < counts_.size(); ++i) {
-        out << " count." << kAggregationProfileCountNames[i] << "="
-            << counts_[i];
+        out.value(std::string("count_") + kAggregationProfileCountNames[i], counts_[i]);
     }
-    FE_LOG_INFO(out.str());
+    logRecord(out);
 }
 
 #if FE_HAS_MPI
@@ -1438,13 +1451,12 @@ void serializeRootProposals(const LocalAggregationDeclarationMap& local_candidat
             // root/provider can furnish a valid extension for the candidate.
             if (!valid) {
                 if (aggregationProposalTraceEnabled()) {
-                    FE_LOG_INFO(
-                        "SmallCutAggregationConstraint: diagnostic="
-                        "aggregation_proposal_trace stage=normalization "
-                        "candidate_dof=" + std::to_string(dof) +
-                        " root_cell_gid=" +
-                        std::to_string(normalized.root_cell_gid) +
-                        " outcome=dropped");
+                    logRecord(LogRecord("SmallCutAggregationConstraint", "aggregation root proposal trace")
+                                  .diagnostic("aggregation_proposal_trace")
+                                  .text("stage", "normalization")
+                                  .value("candidate_dof", dof)
+                                  .value("root_cell_gid", normalized.root_cell_gid)
+                                  .text("outcome", "dropped"));
                 }
                 continue;
             }
@@ -6462,22 +6474,12 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         }
         // Detailed diagnostic, printed (at INFO) only when FE_LOG_LEVEL=DEBUG.
         if (Logger::instance().get_level() <= LogLevel::DEBUG) {
-            std::ostringstream decision;
-            decision << "SmallCutAggregationConstraint: diagnostic="
-                        "small_cut_aggregation_reuse field='"
-                     << rec.name << "' decision=rebuilt reason="
-                     << (!reuse_inputs.has_value()
-                             ? "not_admissible"
-                             : previous_reuse_record == nullptr
-                                   ? "no_previous_refresh"
-                                   : !local_record_matches
-                                         ? (previous_reuse_record->key
-                                                        .topology !=
-                                                    reuse_inputs->key.topology
-                                                ? "cut_topology_changed"
-                                                : "inputs_changed")
-                                         : "another_rank_changed");
-            FE_LOG_INFO(decision.str());
+            svmp::FE::LogRecord decision("SmallCutAggregationConstraint", "aggregation reuse decision");
+            decision.diagnostic("small_cut_aggregation_reuse")
+                .quoted("field", rec.name)
+                .text("decision", "rebuilt")
+                .value("reason", (!reuse_inputs.has_value() ? "not_admissible" : previous_reuse_record == nullptr ? "no_previous_refresh" : !local_record_matches ? (previous_reuse_record->key.topology != reuse_inputs->key.topology ? "cut_topology_changed" : "inputs_changed") : "another_rank_changed"));
+            svmp::FE::logRecord(decision);
         }
     }
 
@@ -7082,22 +7084,17 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             if (!aggregationProposalTraceEnabled()) {
                 return;
             }
-            std::ostringstream trace;
-            trace << std::setprecision(17)
-                  << "SmallCutAggregationConstraint: diagnostic="
-                     "aggregation_proposal_trace stage=construction"
-                  << " field='" << rec.name << "'"
-                  << " candidate_dof=" << declaration_dof
-                  << " xyz=(" << candidate.coordinates[0] << ","
-                  << candidate.coordinates[1] << ","
-                  << candidate.coordinates[2] << ")"
-                  << " root_cell=" << root
-                  << " root_distance=" << root_distance
-                  << " xi=(" << traced_xi[0] << "," << traced_xi[1]
-                  << "," << traced_xi[2] << ")"
-                  << " extrapolation=" << traced_extrapolation
-                  << " outcome=" << outcome;
-            FE_LOG_INFO(trace.str());
+            logRecord(LogRecord("SmallCutAggregationConstraint", "aggregation root proposal trace")
+                          .diagnostic("aggregation_proposal_trace")
+                          .text("stage", "construction")
+                          .quoted("field", rec.name)
+                          .value("candidate_dof", declaration_dof)
+                          .text("xyz", coordinateTripleText(candidate.coordinates.data()))
+                          .value("root_cell", root)
+                          .value("root_distance", root_distance)
+                          .text("xi", coordinateTripleText(traced_xi.data()))
+                          .value("extrapolation", traced_extrapolation)
+                          .value("outcome", outcome));
         };
         mesh.getCellNodes(root, root_check_nodes);
         check_cell_pairable(root);
@@ -9733,42 +9730,43 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                         std::string::npos) {
                         continue;
                     }
-                    std::ostringstream detail;
-                    detail << std::setprecision(10)
-                           << "SmallCutAggregationConstraint: diagnostic="
-                              "aggregation_root_proposal_outcomes rank="
-                           << outcome_rank << " field='" << rec.name
-                           << "' candidate_dof=" << dof << " xyz=("
-                           << candidate.coordinates[0] << ","
-                           << candidate.coordinates[1] << ","
-                           << candidate.coordinates[2] << ") roots=";
+                    // One child line per root and per local proposal.
+                    LogRecord detail("SmallCutAggregationConstraint", "aggregation root proposal outcomes",
+                                     LogLevel::WARNING);
+                    detail.diagnostic("aggregation_root_proposal_outcomes")
+                        .value("rank", outcome_rank)
+                        .quoted("field", rec.name)
+                        .value("candidate_dof", dof)
+                        .text("xyz", coordinateTripleText(candidate.coordinates.data()));
+                    std::size_t root_count = 0u;
+                    std::size_t local_count = 0u;
                     const auto roots = global_roots_by_candidate.find(dof);
                     if (roots != global_roots_by_candidate.end()) {
+                        root_count = roots->second.size();
+                    }
+                    for (const auto& note : root_proposal_outcomes) {
+                        local_count += note.candidate_dof == dof ? 1u : 0u;
+                    }
+                    detail.value("roots", root_count).value("local_proposals", local_count);
+                    if (roots != global_roots_by_candidate.end()) {
                         for (const auto& root : roots->second) {
-                            detail << "[gid="
-                                   << global_physical_cell_gid_of[root.cell]
-                                   << " distance=" << root.distance
-                                   << " owner="
-                                   << global_cell_owner_rank_of[root.cell]
-                                   << "]";
+                            detail.child("aggregation_root_proposal_root", {"rank", "candidate_dof"})
+                                .value("gid", global_physical_cell_gid_of[root.cell])
+                                .value("distance", root.distance)
+                                .value("owner", global_cell_owner_rank_of[root.cell]);
                         }
                     }
-                    detail << " local_proposals=";
-                    bool any_local = false;
                     for (const auto& note : root_proposal_outcomes) {
                         if (note.candidate_dof != dof) {
                             continue;
                         }
-                        any_local = true;
-                        detail << "[gid=" << note.root_cell_gid
-                               << " distance=" << note.distance
-                               << " extrapolation=" << note.extrapolation
-                               << " outcome=" << note.outcome << "]";
+                        detail.child("aggregation_root_proposal_local", {"rank", "candidate_dof"})
+                            .value("gid", note.root_cell_gid)
+                            .value("distance", note.distance)
+                            .value("extrapolation", note.extrapolation)
+                            .value("outcome", note.outcome);
                     }
-                    if (!any_local) {
-                        detail << "none";
-                    }
-                    FE_LOG_WARNING(detail.str());
+                    logRecord(detail);
                 }
             }
             throw;
@@ -10037,11 +10035,10 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                                             GlobalIndex(474), GlobalIndex(476)}) {
                 if (probe >= 0 && probe < n_vertices) {
                     const auto xyz = mesh.getNodeCoordinates(probe);
-                    std::ostringstream probe_line;
-                    probe_line << "SmallCutAggregationConstraint: probe vertex="
-                               << probe << " xyz=(" << xyz[0] << "," << xyz[1]
-                               << "," << xyz[2] << ")";
-                    FE_LOG_INFO(probe_line.str());
+                    logRecord(LogRecord("SmallCutAggregationConstraint", "probe vertex")
+                                  .diagnostic("aggregation_probe_vertex")
+                                  .value("vertex", probe)
+                                  .text("xyz", coordinateTripleText(xyz.data())));
                 }
             }
         }
@@ -10053,112 +10050,70 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     // whenever either needs it.
     const bool log_aggregation_diagnostics =
         Logger::instance().get_level() <= LogLevel::DEBUG;
-    std::ostringstream oss;
-    if (!log_aggregation_diagnostics && !allow_unaggregated &&
-        !reuse_inputs.has_value()) {
-        oss.setstate(std::ios::badbit);  // the insertions below format nothing
+    // Built only when printed, quoted by the fail-open warning or kept for reuse.
+    svmp::FE::LogRecord summary("SmallCutAggregationConstraint", "small-cut aggregation");
+    if (log_aggregation_diagnostics || allow_unaggregated || reuse_inputs.has_value()) {
+        summary.diagnostic("small_cut_aggregation")
+            .quoted("field", rec.name)
+            .value("marker", interface_marker_)
+            .value("active_side", (active_side_ == geometry::CutIntegrationSide::Negative ? "Negative" : "Positive"))
+            .value("band_cells", cell_class.size())
+            .value("active_side_volume_rules", active_side_volume_rules)
+            .value("candidate_vertices", constrained_vertex_count)
+            .value("local_candidate_vertices", constrained_vertex_count)
+            // The original keys stay for log consumers; the explicitly
+            // scoped keys below give their rank-local/global meaning.
+            .value("aggregated_vertices", aggregated)
+            .value("vertices_without_root", no_root)
+            .value("island_pinned_dofs", island_pinned_dofs)
+            .value("inversion_failures", inversion_failed)
+            .value("empty_line_failures", empty_lines)
+            .value("local_root_proposal_candidates", aggregated)
+            .value("communicator_rootless_candidates", no_root)
+            .value("local_island_pinned_dofs", island_pinned_dofs)
+            .value("local_root_proposal_inversion_failures", inversion_failed)
+            .value("local_root_proposal_inversion_round_off_acceptances", inversion_round_off_acceptances)
+            .value("non_field_nodes", non_field_nodes)
+            .value("local_root_proposal_line_failures", empty_lines)
+            .value("communicator_root_proposal_failures", communicator_root_proposal_failures)
+            .value("maximum_root_path_length", guards_.maximum_root_path_length)
+            .value("maximum_observed_root_path", maximum_observed_root_path)
+            .value("root_path_guard_rejections", root_path_guard_rejections)
+            .value("guard_rootless_candidates", (root_path_guard_rejections + distributed_result.canonical_guard_rootless_candidate_vertices))
+            .text("root_path_search", "bounded_candidate_neighborhood")
+            .value("root_path_seed_index_entries", root_path_seed_index_entries)
+            .value("root_path_search_cell_visits", root_path_search_cell_visits)
+            .value("maximum_reference_extrapolation_distance", guards_.maximum_reference_extrapolation_distance)
+            .value("maximum_attempted_reference_extrapolation", maximum_attempted_reference_extrapolation)
+            .value("maximum_observed_reference_extrapolation", maximum_observed_reference_extrapolation)
+            .value("communicator_extrapolation_guard_rejections", communicator_extrapolation_guard_rejections)
+            .value("maximum_absolute_coefficient", guards_.maximum_absolute_coefficient)
+            .value("maximum_attempted_absolute_coefficient", maximum_attempted_absolute_coefficient)
+            .value("maximum_observed_absolute_coefficient", maximum_observed_absolute_coefficient)
+            .value("maximum_row_l1_norm", guards_.maximum_row_l1_norm)
+            .value("maximum_attempted_row_l1_norm", maximum_attempted_row_l1_norm)
+            .value("maximum_observed_row_l1_norm", maximum_observed_row_l1_norm)
+            .value("communicator_line_guard_rejections", communicator_line_guard_rejections)
+            .value("canonical_candidate_vertices", distributed_result.canonical_candidate_vertices)
+            .value("canonical_rooted_candidate_vertices", distributed_result.canonical_rooted_candidate_vertices)
+            .value("canonical_rootless_candidate_vertices", distributed_result.canonical_rootless_candidate_vertices)
+            .value("canonical_owned_aggregate_dofs", distributed_result.canonical_owned_aggregate_dofs)
+            .value("canonical_owned_pinned_dofs", distributed_result.canonical_owned_pinned_dofs)
+            .value("canonical_strong_suppressed_dofs", distributed_result.canonical_strong_suppressed_dofs)
+            .value("canonical_halo_limited_root_choices", distributed_result.canonical_halo_limited_root_choices)
+            .value("canonical_row_coupled_slaves_beyond_halo", distributed_result.canonical_row_coupled_slaves_beyond_halo)
+            .value("canonical_active_feature_count", canonical_active_features.size())
+            .value("canonical_rooted_active_feature_count", canonical_rooted_active_feature_count)
+            .value("canonical_rootless_active_feature_count", canonical_rootless_active_feature_count)
+            .value("canonical_rootless_active_physical_volume", canonical_rootless_active_physical_volume)
+            .value("local_relevant_lines_prepared", current_slaves.size())
+            .value("distributed_halo_validation", (distributed_validation == DistributedAggregationValidation::Passed ? "passed" : distributed_validation == DistributedAggregationValidation::DebugBypass ? "debug_bypass" : "not_parallel"))
+            .value("excluded_dirichlet_vertices", excluded_vertices.size())
+            .value("pruned_volume_rules", cut_context->generatedPrunedVolumeRuleCount())
+            .value("pruned_volume_measure", cut_context->generatedPrunedVolumeMeasure());
     }
-    oss << "SmallCutAggregationConstraint: diagnostic=small_cut_aggregation"
-        << " field='" << rec.name << "'"
-        << " marker=" << interface_marker_
-        << " active_side="
-        << (active_side_ == geometry::CutIntegrationSide::Negative ? "Negative"
-                                                                   : "Positive")
-        << " band_cells=" << cell_class.size()
-        << " active_side_volume_rules=" << active_side_volume_rules
-        << " candidate_vertices=" << constrained_vertex_count
-        << " local_candidate_vertices=" << constrained_vertex_count
-        // Preserve the original diagnostic keys for log consumers while the
-        // explicitly scoped keys below make their rank-local/global meaning
-        // unambiguous.
-        << " aggregated_vertices=" << aggregated
-        << " vertices_without_root=" << no_root
-        << " island_pinned_dofs=" << island_pinned_dofs
-        << " inversion_failures=" << inversion_failed
-        << " empty_line_failures=" << empty_lines
-        << " local_root_proposal_candidates=" << aggregated
-        << " communicator_rootless_candidates=" << no_root
-        << " local_island_pinned_dofs=" << island_pinned_dofs
-        << " local_root_proposal_inversion_failures=" << inversion_failed
-        << " local_root_proposal_inversion_round_off_acceptances="
-        << inversion_round_off_acceptances
-        << " non_field_nodes=" << non_field_nodes
-        << " local_root_proposal_line_failures=" << empty_lines
-        << " communicator_root_proposal_failures="
-        << communicator_root_proposal_failures
-        << " maximum_root_path_length="
-        << guards_.maximum_root_path_length
-        << " maximum_observed_root_path="
-        << maximum_observed_root_path
-        << " root_path_guard_rejections="
-        << root_path_guard_rejections
-        << " guard_rootless_candidates="
-        << (root_path_guard_rejections +
-            distributed_result.canonical_guard_rootless_candidate_vertices)
-        << " root_path_search=bounded_candidate_neighborhood"
-        << " root_path_seed_index_entries="
-        << root_path_seed_index_entries
-        << " root_path_search_cell_visits="
-        << root_path_search_cell_visits
-        << " maximum_reference_extrapolation_distance="
-        << guards_.maximum_reference_extrapolation_distance
-        << " maximum_attempted_reference_extrapolation="
-        << maximum_attempted_reference_extrapolation
-        << " maximum_observed_reference_extrapolation="
-        << maximum_observed_reference_extrapolation
-        << " communicator_extrapolation_guard_rejections="
-        << communicator_extrapolation_guard_rejections
-        << " maximum_absolute_coefficient="
-        << guards_.maximum_absolute_coefficient
-        << " maximum_attempted_absolute_coefficient="
-        << maximum_attempted_absolute_coefficient
-        << " maximum_observed_absolute_coefficient="
-        << maximum_observed_absolute_coefficient
-        << " maximum_row_l1_norm="
-        << guards_.maximum_row_l1_norm
-        << " maximum_attempted_row_l1_norm="
-        << maximum_attempted_row_l1_norm
-        << " maximum_observed_row_l1_norm="
-        << maximum_observed_row_l1_norm
-        << " communicator_line_guard_rejections="
-        << communicator_line_guard_rejections
-        << " canonical_candidate_vertices="
-        << distributed_result.canonical_candidate_vertices
-        << " canonical_rooted_candidate_vertices="
-        << distributed_result.canonical_rooted_candidate_vertices
-        << " canonical_rootless_candidate_vertices="
-        << distributed_result.canonical_rootless_candidate_vertices
-        << " canonical_owned_aggregate_dofs="
-        << distributed_result.canonical_owned_aggregate_dofs
-        << " canonical_owned_pinned_dofs="
-        << distributed_result.canonical_owned_pinned_dofs
-        << " canonical_strong_suppressed_dofs="
-        << distributed_result.canonical_strong_suppressed_dofs
-        << " canonical_halo_limited_root_choices="
-        << distributed_result.canonical_halo_limited_root_choices
-        << " canonical_row_coupled_slaves_beyond_halo="
-        << distributed_result.canonical_row_coupled_slaves_beyond_halo
-        << " canonical_active_feature_count="
-        << canonical_active_features.size()
-        << " canonical_rooted_active_feature_count="
-        << canonical_rooted_active_feature_count
-        << " canonical_rootless_active_feature_count="
-        << canonical_rootless_active_feature_count
-        << " canonical_rootless_active_physical_volume="
-        << canonical_rootless_active_physical_volume
-        << " local_relevant_lines_prepared=" << current_slaves.size()
-        << " distributed_halo_validation="
-        << (distributed_validation == DistributedAggregationValidation::Passed
-                ? "passed"
-                : distributed_validation ==
-                          DistributedAggregationValidation::DebugBypass
-                      ? "debug_bypass"
-                      : "not_parallel")
-        << " excluded_dirichlet_vertices=" << excluded_vertices.size()
-        << " pruned_volume_rules=" << cut_context->generatedPrunedVolumeRuleCount()
-        << " pruned_volume_measure=" << cut_context->generatedPrunedVolumeMeasure();
     if (log_aggregation_diagnostics) {
-        FE_LOG_INFO(oss.str());
+        svmp::FE::logRecord(summary);
     }
 
     next_previous_canonical_slaves =
@@ -10190,14 +10145,14 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 ++j;
             }
         }
-        std::ostringstream churn;
-        churn << "SmallCutAggregationConstraint: diagnostic=small_cut_aggregation_churn"
-              << " field='" << rec.name << "'"
-              << " canonical_slaves=" << canonical_slaves.size()
-              << " slaves=" << canonical_slaves.size()
-              << " entered=" << entered
-              << " left=" << left;
-        FE_LOG_INFO(churn.str());
+        svmp::FE::LogRecord churn("SmallCutAggregationConstraint", "small-cut aggregation churn");
+        churn.diagnostic("small_cut_aggregation_churn")
+            .quoted("field", rec.name)
+            .value("canonical_slaves", canonical_slaves.size())
+            .value("slaves", canonical_slaves.size())
+            .value("entered", entered)
+            .value("left", left);
+        svmp::FE::logRecord(churn);
     }
 
     // Root-proposal failures are diagnostic at proposal granularity: another
@@ -10207,14 +10162,16 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     if (max_lines == std::numeric_limits<std::size_t>::max()) {
         if (allow_unaggregated) {
             if (no_root > 0 || communicator_root_proposal_failures > 0) {
-                FE_LOG_WARNING(
-                    "SmallCutAggregationConstraint: communicator-rootless " +
-                    std::to_string(no_root) +
-                    ", invalid root proposals " +
-                    std::to_string(communicator_root_proposal_failures) +
-                    "; continuing "
-                    "fail-open because SVMP_AGGREGATION_ALLOW_UNAGGREGATED "
-                    "is set (" + oss.str() + ")");
+                logRecord(LogRecord("SmallCutAggregationConstraint", "aggregation continues fail-open",
+                                    LogLevel::WARNING)
+                              .diagnostic("aggregation_fail_open")
+                              .quoted("field", rec.name)
+                              .value("communicator_rootless_candidates", no_root)
+                              .value("invalid_root_proposals", communicator_root_proposal_failures)
+                              .text("setting", "SVMP_AGGREGATION_ALLOW_UNAGGREGATED"));
+                if (!log_aggregation_diagnostics) {
+                    logRecord(summary);  // the refresh summary the warning refers to
+                }
             }
         }
     }
@@ -10378,7 +10335,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             reuse_inputs->key,
             rec.name,
             std::move(reuse_added_lines),
-            oss.str(),
+            summary.str(),  // the small_cut_aggregation record's text
             *next_completed_report,
             next_pending_prolongation,
             next_previous_canonical_slaves);
@@ -11735,15 +11692,14 @@ void SmallCutAggregationConstraint::publishReusedRefresh(
         const bool log_aggregation_diagnostics =
             Logger::instance().get_level() <= LogLevel::DEBUG;
         if (log_aggregation_diagnostics) {
-            std::ostringstream oss;
-            oss << record->diagnostic_head
-                << report.canonical_rootless_active_physical_volume
-                << record->diagnostic_middle
-                << " pruned_volume_rules="
-                << cut_context.generatedPrunedVolumeRuleCount()
-                << " pruned_volume_measure="
-                << cut_context.generatedPrunedVolumeMeasure();
-            FE_LOG_INFO(oss.str());
+            // The small_cut_aggregation record of the rebuild, with the
+            // rootless volume and the pruned rules of this refresh.
+            FE_LOG_INFO(record->diagnostic_head +
+                        LogRecord::shortestReal(report.canonical_rootless_active_physical_volume) +
+                        record->diagnostic_middle + " pruned_volume_rules=" +
+                        std::to_string(cut_context.generatedPrunedVolumeRuleCount()) +
+                        " pruned_volume_measure=" +
+                        LogRecord::shortestReal(cut_context.generatedPrunedVolumeMeasure()));
         }
 
         next_previous_canonical_slaves = record->canonical_slaves;
@@ -11769,15 +11725,14 @@ void SmallCutAggregationConstraint::publishReusedRefresh(
                     ++j;
                 }
             }
-            std::ostringstream churn;
-            churn << "SmallCutAggregationConstraint: diagnostic="
-                     "small_cut_aggregation_churn"
-                  << " field='" << record->field_name << "'"
-                  << " canonical_slaves=" << canonical_slaves.size()
-                  << " slaves=" << canonical_slaves.size()
-                  << " entered=" << entered
-                  << " left=" << left;
-            FE_LOG_INFO(churn.str());
+            svmp::FE::LogRecord churn("SmallCutAggregationConstraint", "small-cut aggregation churn");
+            churn.diagnostic("small_cut_aggregation_churn")
+                .quoted("field", record->field_name)
+                .value("canonical_slaves", canonical_slaves.size())
+                .value("slaves", canonical_slaves.size())
+                .value("entered", entered)
+                .value("left", left);
+            svmp::FE::logRecord(churn);
         }
 
         if (successful_publication_ordinal_ ==
@@ -11833,16 +11788,14 @@ void SmallCutAggregationConstraint::publishReusedRefresh(
         next_pending_prolongation = std::move(pending);
 
         if (log_aggregation_diagnostics) {
-            std::ostringstream decision;
-            decision << "SmallCutAggregationConstraint: diagnostic="
-                        "small_cut_aggregation_reuse field='"
-                     << record->field_name << "' decision=reused"
-                     << " retained_measures="
-                     << (active_cell_measures_shared ? "shared" : "recomputed")
-                     << " reused_lines=" << record->added_lines.size()
-                     << " canonical_active_cells="
-                     << next_pending_prolongation->active_cells.size();
-            FE_LOG_INFO(decision.str());
+            svmp::FE::LogRecord decision("SmallCutAggregationConstraint", "aggregation reuse decision");
+            decision.diagnostic("small_cut_aggregation_reuse")
+                .quoted("field", record->field_name)
+                .text("decision", "reused")
+                .value("retained_measures", (active_cell_measures_shared ? "shared" : "recomputed"))
+                .value("reused_lines", record->added_lines.size())
+                .value("canonical_active_cells", next_pending_prolongation->active_cells.size());
+            svmp::FE::logRecord(decision);
         }
     } catch (...) {
         local_publication_exception = std::current_exception();

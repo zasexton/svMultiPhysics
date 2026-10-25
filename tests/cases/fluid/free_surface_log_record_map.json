@@ -1519,6 +1519,919 @@
    "split": [],
    "identifying": [],
    "special": "regex_fields"
+  },
+  {
+   "id": "S8.missing_active_cut_context",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "missing_active_cut_context"
+   },
+   "after": {
+    "owner": "ApplicationDriver",
+    "message": "active-domain cut context is unavailable",
+    "diagnostic": "missing_active_cut_context",
+    "level": "WARNING",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.missing_generated_cut_marker",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "missing_generated_cut_marker"
+   },
+   "after": {
+    "owner": "ApplicationDriver",
+    "message": "active-domain cut context has no generated marker",
+    "diagnostic": "missing_generated_cut_marker",
+    "level": "WARNING",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.empty_active_cut_volume_rules",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "empty_active_cut_volume_rules"
+   },
+   "after": {
+    "owner": "ApplicationDriver",
+    "message": "active-domain cut context has no retained volume rules",
+    "diagnostic": "empty_active_cut_volume_rules",
+    "level": "WARNING",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.accepted_pressure_update_guard_skipped",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "accepted_pressure_update_guard_skipped"
+   },
+   "after": {
+    "owner": "ApplicationDriver",
+    "message": "accepted pressure update diagnostic skipped",
+    "diagnostic": "accepted_pressure_update_guard_skipped",
+    "level": "WARNING",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.accepted_pressure_update_guard",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "accepted_pressure_update_guard"
+   },
+   "after": {
+    "owner": "ApplicationDriver",
+    "message": "accepted pressure update",
+    "diagnostic": "accepted_pressure_update_guard",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.state_vector_fields",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "state_vector_fields"
+   },
+   "after": {
+    "owner": "ApplicationDriver",
+    "message": "state vector",
+    "diagnostic": "state_vector_fields",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null,
+   "child_diagnostic": "state_vector_field",
+   "note": "per-field [name dofs= ...] groups -> state_vector_field child lines"
+  },
+  {
+   "id": "S8.cut_rule_dump",
+   "batch": "S8",
+   "before": {
+    "head": "CUT_RULE_DUMP",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "ApplicationDriver",
+    "message": "cut rule dump",
+    "diagnostic": "cut_rule_dump",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null,
+   "child_diagnostic": "cut_rule",
+   "note": "CUT_RULE lines -> cut_rule children, CUT_QP lines -> cut_rule_point children of them",
+   "other_children": [
+    "cut_rule_point"
+   ]
+  },
+  {
+   "id": "S8.equation_level_cut_domain_hadamard_shape_tangent",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "equation_level_cut_domain_hadamard_shape_tangent"
+   },
+   "after": {
+    "owner": "LevelSetCutConfiguration",
+    "message": "moving cut domain has a first-order shape tangent",
+    "diagnostic": "equation_level_cut_domain_hadamard_shape_tangent",
+    "level": "WARNING",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.cut_volume_row_provenance",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "cut_volume_row_provenance"
+   },
+   "after": {
+    "owner": "CutVolumeAssembly",
+    "message": "cut-volume row provenance",
+    "diagnostic": "cut_volume_row_provenance",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.cut_volume_row_provenance_summary",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "cut_volume_row_provenance_summary"
+   },
+   "after": {
+    "owner": "CutVolumeAssembly",
+    "message": "cut-volume row provenance summary",
+    "diagnostic": "cut_volume_row_provenance_summary",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.level_set_active_side_vertex_constraint_sample_parse",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "level_set_active_side_vertex_constraint_sample_parse"
+   },
+   "after": {
+    "owner": "LevelSetActiveSideVertexDirichletConstraint",
+    "message": "sample DOF token skipped",
+    "diagnostic": "level_set_active_side_vertex_constraint_sample_parse",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.level_set_active_side_vertex_constraint_sample",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "level_set_active_side_vertex_constraint_sample"
+   },
+   "after": {
+    "owner": "LevelSetActiveSideVertexDirichletConstraint",
+    "message": "active-side vertex constraint sample",
+    "diagnostic": "level_set_active_side_vertex_constraint_sample",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.cut_geometry_memory",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "cut_geometry_memory"
+   },
+   "after": {
+    "owner": "LevelSetGeometryService",
+    "message": "cut geometry memory",
+    "diagnostic": "cut_geometry_memory",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.cut_topology_change_nonsmooth_event",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "cut_topology_change_nonsmooth_event"
+   },
+   "after": {
+    "owner": "LevelSetGeometryService",
+    "message": "cut topology changed during a nonlinear solve",
+    "diagnostic": "cut_topology_change_nonsmooth_event",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null,
+   "note": "the solve kind moves from the text to solve_kind="
+  },
+  {
+   "id": "S8.high_order_level_set_cut_uses_corners",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "high_order_level_set_cut_uses_corners"
+   },
+   "after": {
+    "owner": "LevelSetGeometryService",
+    "message": "generated interface uses corner-linearized cut geometry",
+    "diagnostic": "high_order_level_set_cut_uses_corners",
+    "level": "WARNING",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.ghost_layer_audit",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "ghost_layer_audit"
+   },
+   "after": {
+    "owner": "LevelSetGeometryService",
+    "message": "ghost-layer audit",
+    "diagnostic": "ghost_layer_audit",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null,
+   "note": "formerly written to stderr; an INFO record goes to stdout"
+  },
+  {
+   "id": "S8.ghost_layer_audit_withhold",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "ghost_layer_audit_withhold"
+   },
+   "after": {
+    "owner": "LevelSetGeometryService",
+    "message": "ghost-layer cut withholding",
+    "diagnostic": "ghost_layer_audit_withhold",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.geometry_threads_self_check",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "geometry_threads_self_check"
+   },
+   "after": {
+    "owner": "LevelSetGeometryService",
+    "message": "geometry-thread self-check",
+    "diagnostic": "geometry_threads_self_check",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.generated_interface_boundary_intersection_marker",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "generated_interface_boundary_intersection_marker"
+   },
+   "after": {
+    "owner": "LevelSetGeometryService",
+    "message": "generated interface-boundary intersection",
+    "diagnostic": "generated_interface_boundary_intersection_marker",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null,
+   "note": "printed at INFO only when FE_LOG_LEVEL=DEBUG, as before (the FE logger drops DEBUG records in release builds)"
+  },
+  {
+   "id": "S8.generated_active_boundary_partition",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "generated_active_boundary_partition"
+   },
+   "after": {
+    "owner": "LevelSetGeometryService",
+    "message": "generated sharp active boundary",
+    "diagnostic": "generated_active_boundary_partition",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null,
+   "note": "printed at INFO only when FE_LOG_LEVEL=DEBUG, as before (the FE logger drops DEBUG records in release builds)"
+  },
+  {
+   "id": "S8.incremental_rebuild_self_check",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "incremental_rebuild_self_check"
+   },
+   "after": {
+    "owner": "LevelSetGeometryService",
+    "message": "incremental rebuild self-check",
+    "diagnostic": "incremental_rebuild_self_check",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.free_surface_geometry_snapshot",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "free_surface_geometry_snapshot"
+   },
+   "after": {
+    "owner": "LevelSetGeometryService",
+    "message": "authoritative free-surface geometry",
+    "diagnostic": "free_surface_geometry_snapshot",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null,
+   "note": "printed at INFO only when FE_LOG_LEVEL=DEBUG, as before (the FE logger drops DEBUG records in release builds)"
+  },
+  {
+   "id": "S8.cut_context_refresh_miss",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "cut_context_refresh_miss"
+   },
+   "after": {
+    "owner": "LevelSetGeometryService",
+    "message": "cut-context refresh miss",
+    "diagnostic": "cut_context_refresh_miss",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null,
+   "note": "printed at INFO only when FE_LOG_LEVEL=DEBUG, as before (the FE logger drops DEBUG records in release builds)"
+  },
+  {
+   "id": "S8.cut_context_restored_reuse",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "cut_context_restored_reuse"
+   },
+   "after": {
+    "owner": "LevelSetGeometryService",
+    "message": "restored-state cut context reused",
+    "diagnostic": "cut_context_restored_reuse",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null,
+   "child_diagnostic": "cut_context_restored_reuse_marker",
+   "note": "marker_<m>_source_value_revision keys -> cut_context_restored_reuse_marker child lines"
+  },
+  {
+   "id": "S8.cut_topology_cycle",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "cut_topology_cycle"
+   },
+   "after": {
+    "owner": "LevelSetGeometryService",
+    "message": "transient cut-topology cycle",
+    "diagnostic": "cut_topology_cycle",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.aggregation_guard_rootless",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "aggregation_guard_rootless"
+   },
+   "after": {
+    "owner": "SmallCutAggregationConstraint",
+    "message": "rootless aggregation candidate",
+    "diagnostic": "aggregation_guard_rootless",
+    "level": "WARNING",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null,
+   "note": "rank 0 of the system prints it (explicit rank check)"
+  },
+  {
+   "id": "S8.aggregation_profile",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "aggregation_profile"
+   },
+   "after": {
+    "owner": "SmallCutAggregationConstraint",
+    "message": "aggregation refresh profile",
+    "diagnostic": "aggregation_profile",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null,
+   "note": "phase.<p>_ms, exchange.<e>_* and count.<c> keys become phase_<p>_ms, exchange_<e>_* and count_<c>"
+  },
+  {
+   "id": "S8.aggregation_proposal_trace",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "aggregation_proposal_trace"
+   },
+   "after": {
+    "owner": "SmallCutAggregationConstraint",
+    "message": "aggregation root proposal trace",
+    "diagnostic": "aggregation_proposal_trace",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.small_cut_aggregation_reuse",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "small_cut_aggregation_reuse"
+   },
+   "after": {
+    "owner": "SmallCutAggregationConstraint",
+    "message": "aggregation reuse decision",
+    "diagnostic": "small_cut_aggregation_reuse",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.aggregation_root_proposal_outcomes",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "aggregation_root_proposal_outcomes"
+   },
+   "after": {
+    "owner": "SmallCutAggregationConstraint",
+    "message": "aggregation root proposal outcomes",
+    "diagnostic": "aggregation_root_proposal_outcomes",
+    "level": "WARNING",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null,
+   "child_diagnostic": "aggregation_root_proposal_root",
+   "note": "roots=[gid= distance= owner=]... and local_proposals=[...]|none become counts and the child lines aggregation_root_proposal_root and aggregation_root_proposal_local",
+   "other_children": [
+    "aggregation_root_proposal_local"
+   ]
+  },
+  {
+   "id": "S8.aggregation_probe_vertex",
+   "batch": "S8",
+   "before": {
+    "head": "SmallCutAggregationConstraint: probe",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "SmallCutAggregationConstraint",
+    "message": "probe vertex",
+    "diagnostic": "aggregation_probe_vertex",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.small_cut_aggregation",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "small_cut_aggregation"
+   },
+   "after": {
+    "owner": "SmallCutAggregationConstraint",
+    "message": "small-cut aggregation",
+    "diagnostic": "small_cut_aggregation",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null,
+   "note": "built only when printed, quoted or kept for reuse; the reuse record keeps its text and a reused refresh prints that text with its rootless volume and pruned rules updated"
+  },
+  {
+   "id": "S8.small_cut_aggregation_churn",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "small_cut_aggregation_churn"
+   },
+   "after": {
+    "owner": "SmallCutAggregationConstraint",
+    "message": "small-cut aggregation churn",
+    "diagnostic": "small_cut_aggregation_churn",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.aggregation_fail_open",
+   "batch": "S8",
+   "before": {
+    "head": "SmallCutAggregationConstraint: communicator-rootless",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "SmallCutAggregationConstraint",
+    "message": "aggregation continues fail-open",
+    "diagnostic": "aggregation_fail_open",
+    "level": "WARNING",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null,
+   "note": "the summary it quoted is printed as its own small_cut_aggregation record"
+  },
+  {
+   "id": "S8.mesh_boundary_history_transaction_rollback",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": "mesh_boundary_history_transaction_rollback"
+   },
+   "after": {
+    "owner": "MeshBoundaryKinematics",
+    "message": "accepted mesh-boundary provenance not published",
+    "diagnostic": "mesh_boundary_history_transaction_rollback",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.auxiliary_algebraic_block",
+   "batch": "S8",
+   "before": {
+    "head": "prepareAuxiliaryForAssembly: algebraic",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "FESystem",
+    "message": "algebraic auxiliary block",
+    "diagnostic": "auxiliary_algebraic_block",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.auxiliary_output_buffer",
+   "batch": "S8",
+   "before": {
+    "head": "prepareAuxiliaryForAssembly: output buffer",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "FESystem",
+    "message": "auxiliary output buffer",
+    "diagnostic": "auxiliary_output_buffer",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.auxiliary_consistent_initialization",
+   "batch": "S8",
+   "before": {
+    "head": null,
+    "diagnostic": null,
+    "head_regex": "^FESystem: consistent-initialized auxiliary block '(?P<block>[^']*)' at$"
+   },
+   "after": {
+    "owner": "FESystem",
+    "message": "consistent-initialized auxiliary block",
+    "diagnostic": "auxiliary_consistent_initialization",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null,
+   "note": "the block name moves from the text to block='...'"
+  },
+  {
+   "id": "S8.boundary_integral_input",
+   "batch": "S8",
+   "before": {
+    "head": "boundaryIntegralInput:",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "FESystem",
+    "message": "boundary integral input",
+    "diagnostic": "boundary_integral_input",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.monolithic_aux_residual",
+   "batch": "S8",
+   "before": {
+    "head": "FESystem: monolithic aux residual",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "FESystem",
+    "message": "monolithic aux residual",
+    "diagnostic": "monolithic_aux_residual",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.monolithic_direct_only_precheck",
+   "batch": "S8",
+   "before": {
+    "head": "FESystem: monolithic direct-only precheck",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "FESystem",
+    "message": "monolithic direct-only precheck",
+    "diagnostic": "monolithic_direct_only_precheck",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {
+    "dF_dx_size": "df_dx_size",
+    "dF_dinputs_size": "df_dinputs_size",
+    "dO_dx_size": "do_dx_size",
+    "dO_dI_size": "do_di_size"
+   },
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.monolithic_direct_only_solve_failed",
+   "batch": "S8",
+   "before": {
+    "head": "FESystem: monolithic direct-only effective dO_dI solve failed",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "FESystem",
+    "message": "monolithic direct-only dO/dI solve failed",
+    "diagnostic": "monolithic_direct_only_solve_failed",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S8.monolithic_direct_only_effective_do_di",
+   "batch": "S8",
+   "before": {
+    "head": "FESystem: monolithic direct-only effective dO_dI",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "FESystem",
+    "message": "monolithic direct-only effective dO/dI",
+    "diagnostic": "monolithic_direct_only_effective_do_di",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null,
+   "note": "values=[a, b] -> values=a,b"
+  },
+  {
+   "id": "S8.monolithic_direct_coupling",
+   "batch": "S8",
+   "before": {
+    "head": "FESystem: monolithic direct coupling",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "FESystem",
+    "message": "monolithic direct coupling",
+    "diagnostic": "monolithic_direct_coupling",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {
+    "dO_dI": "do_di",
+    "dR_nnz": "dr_nnz",
+    "dR_norm": "dr_norm",
+    "dR_entries": "dr_entries"
+   },
+   "split": [],
+   "identifying": [],
+   "special": null,
+   "note": "dO_dI, dR_nnz, dR_norm -> do_di, dr_nnz, dr_norm; grad_entries/dR_entries=[(dof:v), ...] -> grad_entries/dr_entries=dof:v,..."
+  },
+  {
+   "id": "S8.auxiliary_layout_lowerability",
+   "batch": "S8",
+   "before": {
+    "head": "FESystem::finalizeAuxiliaryLayout lowerability",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "FESystem",
+    "message": "auxiliary layout lowerability",
+    "diagnostic": "auxiliary_layout_lowerability",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null,
+   "note": "state_kinds/outputs=[a:b, ...] -> a:b,..."
+  },
+  {
+   "id": "S8.auxiliary_output_lowering_blocked",
+   "batch": "S8",
+   "before": {
+    "head": "FESystem::synthesizeLoweredAuxiliaryOutputExpr blocked",
+    "diagnostic": null
+   },
+   "after": {
+    "owner": "FESystem",
+    "message": "auxiliary output lowering blocked",
+    "diagnostic": "auxiliary_output_lowering_blocked",
+    "level": "INFO",
+    "scope": "every"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
   }
  ]
 }

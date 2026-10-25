@@ -344,16 +344,23 @@ bool cutGeometryMemoryReportEnabled()
   return enabled;
 }
 
-void logCutGeometryMemory(const char* phase, const std::string& details)
+void logCutGeometryMemory(
+    const char* phase,
+    const std::function<void(svmp::FE::LogRecord&)>& details)
 {
   if (!cutGeometryMemoryReportEnabled()) {
     return;
   }
   const auto memory = readProcessMemorySnapshot();
-  std::cout << "[svMultiPhysics::Application] Cut geometry memory"
-            << " diagnostic=cut_geometry_memory phase=" << phase
-            << " rss_kb=" << memory.rss_kb
-            << " hwm_kb=" << readProcessPeakRssKb() << details << std::endl;
+  svmp::FE::LogRecord record("LevelSetGeometryService", "cut geometry memory");
+  record.diagnostic("cut_geometry_memory")
+      .text("phase", phase)
+      .value("rss_kb", memory.rss_kb)
+      .value("hwm_kb", readProcessPeakRssKb());
+  if (details) {
+    details(record);
+  }
+  svmp::FE::logRecord(record);
 }
 
 namespace {
@@ -699,67 +706,52 @@ void logCutTopologyChange(
       previous_topology_key.has_value() &&
       *previous_topology_key != report.topology_key;
   if (changed && svmp::FE::rank_log::oopTraceEnabled()) {
-    svmp::FE::rank_log::oopCout()
-        << "[svMultiPhysics::Application] Cut topology changed during "
-        << solve_kind
-        << " nonlinear solve diagnostic=cut_topology_change_nonsmooth_event"
-        << " event_class=nonsmooth_cut_topology_change"
-        << " newton_consistency=not_expected"
-        << " jacobian_validity=piecewise_smooth_topology_only sync_point="
-        << svmp::FE::timestepping::generatedStateSyncPointName(point)
-        << " previous_topology_key=" << *previous_topology_key
-        << " topology_key=" << report.topology_key
-        << " active_cut_request_policy_key=" << report.request_policy_key
-        << " cut_context_revision=" << report.value_revision
-        << " cell_count=" << report.cell_count
-        << " corner_linearized_cells=" << report.corner_linearized_cell_count
-        << " interface_fragments=" << report.interface_fragments
-        << " active_volume_regions=" << report.active_volume_regions
-        << " active_cut_cells=" << report.active_cut_cells
-        << " active_quadrature_points=" << report.active_quadrature_points
-        << " domain_interface_quadrature_point_count="
-        << report.domain_interface_quadrature_point_count
-        << " domain_volume_quadrature_point_count="
-        << report.domain_volume_quadrature_point_count
-        << " domain_total_quadrature_point_count="
-        << report.domain_total_quadrature_point_count
-        << " backend_volume_quadrature_point_count="
-        << report.backend_volume_quadrature_point_count
-        << " backend_interface_quadrature_point_count="
-        << report.backend_interface_quadrature_point_count
-        << " backend_total_quadrature_point_count="
-        << (report.backend_volume_quadrature_point_count +
-            report.backend_interface_quadrature_point_count)
-        << " backend_elapsed_seconds=" << report.backend_elapsed_seconds
-        << " generated_cell_work_scope=summed_rank_local_including_ghost_cells"
-        << " generated_cell_cache_hits="
-        << report.generated_cell_cache_hits
-        << " generated_cell_cache_misses="
-        << report.generated_cell_cache_misses
-        << " generated_cell_cache_unchanged_dof_hits="
-        << report.generated_cell_cache_unchanged_dof_hits
-        << " generated_cell_refresh_candidates="
-        << report.generated_cell_refresh_candidates
-        << " generated_cell_directly_affected="
-        << report.generated_cell_directly_affected
-        << " generated_cell_affected_neighborhood="
-        << report.generated_cell_affected_neighborhood
-        << " generated_domain_cache_hits="
-        << report.generated_domain_cache_hits
-        << " linear_full_cell_fast_path_cells="
-        << report.linear_full_cell_fast_path_count
-        << " process_vm_kb=" << report.process_vm_kb
-        << " process_rss_kb=" << report.process_rss_kb
-        << " basis_cache_entries=" << report.basis_cache_entries
-        << " cut_adjacent_scope=summed_rank_local_including_ghost_cells"
-        << " cut_adjacent_facets=" << report.cut_adjacent_facets
-        << " negative_volume=" << report.negative_volume
-        << " negative_reference_volume=" << report.negative_volume
-        << " negative_physical_volume=" << report.negative_physical_volume
-        << " positive_volume=" << report.positive_volume
-        << " positive_reference_volume=" << report.positive_volume
-        << " positive_physical_volume=" << report.positive_physical_volume
-        << std::endl;
+    svmp::FE::logRecord(
+        svmp::FE::LogRecord("LevelSetGeometryService", "cut topology changed during a nonlinear solve")
+            .diagnostic("cut_topology_change_nonsmooth_event")
+            .value("solve_kind", solve_kind)
+            .text("event_class", "nonsmooth_cut_topology_change")
+            .text("newton_consistency", "not_expected")
+            .text("jacobian_validity", "piecewise_smooth_topology_only")
+            .value("sync_point", svmp::FE::timestepping::generatedStateSyncPointName(point))
+            .value("previous_topology_key", *previous_topology_key)
+            .value("topology_key", report.topology_key)
+            .value("active_cut_request_policy_key", report.request_policy_key)
+            .value("cut_context_revision", report.value_revision)
+            .value("cell_count", report.cell_count)
+            .value("corner_linearized_cells", report.corner_linearized_cell_count)
+            .value("interface_fragments", report.interface_fragments)
+            .value("active_volume_regions", report.active_volume_regions)
+            .value("active_cut_cells", report.active_cut_cells)
+            .value("active_quadrature_points", report.active_quadrature_points)
+            .value("domain_interface_quadrature_point_count", report.domain_interface_quadrature_point_count)
+            .value("domain_volume_quadrature_point_count", report.domain_volume_quadrature_point_count)
+            .value("domain_total_quadrature_point_count", report.domain_total_quadrature_point_count)
+            .value("backend_volume_quadrature_point_count", report.backend_volume_quadrature_point_count)
+            .value("backend_interface_quadrature_point_count", report.backend_interface_quadrature_point_count)
+            .value("backend_total_quadrature_point_count", (report.backend_volume_quadrature_point_count + report.backend_interface_quadrature_point_count))
+            .value("backend_elapsed_seconds", report.backend_elapsed_seconds)
+            .text("generated_cell_work_scope", "summed_rank_local_including_ghost_cells")
+            .value("generated_cell_cache_hits", report.generated_cell_cache_hits)
+            .value("generated_cell_cache_misses", report.generated_cell_cache_misses)
+            .value("generated_cell_cache_unchanged_dof_hits", report.generated_cell_cache_unchanged_dof_hits)
+            .value("generated_cell_refresh_candidates", report.generated_cell_refresh_candidates)
+            .value("generated_cell_directly_affected", report.generated_cell_directly_affected)
+            .value("generated_cell_affected_neighborhood", report.generated_cell_affected_neighborhood)
+            .value("generated_domain_cache_hits", report.generated_domain_cache_hits)
+            .value("linear_full_cell_fast_path_cells", report.linear_full_cell_fast_path_count)
+            .value("process_vm_kb", report.process_vm_kb)
+            .value("process_rss_kb", report.process_rss_kb)
+            .value("basis_cache_entries", report.basis_cache_entries)
+            .text("cut_adjacent_scope", "summed_rank_local_including_ghost_cells")
+            .value("cut_adjacent_facets", report.cut_adjacent_facets)
+            .value("negative_volume", report.negative_volume)
+            .value("negative_reference_volume", report.negative_volume)
+            .value("negative_physical_volume", report.negative_physical_volume)
+            .value("positive_volume", report.positive_volume)
+            .value("positive_reference_volume", report.positive_volume)
+            .value("positive_physical_volume", report.positive_physical_volume)
+            .rootOnly());
   }
   previous_topology_key = report.topology_key;
 }
@@ -784,19 +776,17 @@ void logCornerLinearizedCutWarningOnce(
     return;
   }
 
-  svmp::FE::rank_log::oopCout()
-      << "[svMultiPhysics::Application] WARNING generated level-set interface "
-      << "uses corner-linearized cut geometry"
-      << " marker=" << result.interface_marker
-      << " field='" << request.level_set_field_name << "'"
-      << " domain_id='" << request.domain_id << "'"
-      << " corner_linearized_cells="
-      << global_corner_linearized_cell_count
-      << " cell_count=" << global_cell_count
-      << " max_cell_node_count=" << result.max_cell_node_count
-      << " max_corner_node_count=" << result.max_corner_node_count
-      << " diagnostic=high_order_level_set_cut_uses_corners"
-      << std::endl;
+  svmp::FE::logRecord(
+      svmp::FE::LogRecord("LevelSetGeometryService", "generated interface uses corner-linearized cut geometry", svmp::FE::LogLevel::WARNING)
+          .diagnostic("high_order_level_set_cut_uses_corners")
+          .value("marker", result.interface_marker)
+          .quoted("field", request.level_set_field_name)
+          .quoted("domain_id", request.domain_id)
+          .value("corner_linearized_cells", global_corner_linearized_cell_count)
+          .value("cell_count", global_cell_count)
+          .value("max_cell_node_count", result.max_cell_node_count)
+          .value("max_corner_node_count", result.max_corner_node_count)
+          .rootOnly());
 }
 
 } // namespace
@@ -1244,44 +1234,41 @@ bool incrementalRebuildSelfCheckEnabled()
   return enabled;
 }
 
-std::string cutGeometryContextMemoryDetails(
+void addCutGeometryContextMemory(
+    svmp::FE::LogRecord& record,
     const std::string& prefix,
     const svmp::FE::assembly::CutIntegrationContext* context)
 {
   namespace report = svmp::FE::assembly::memory_report;
   if (context == nullptr) {
-    return " " + prefix + "_mb=0";
+    record.integer(prefix + "_mb", 0);
+    return;
   }
-  std::string details =
-      report::formatContext(prefix, report::contextStorage(*context));
+  report::addContext(record, prefix, report::contextStorage(*context));
   std::size_t index = 0u;
   for (const auto& snapshot : context->freeSurfaceGeometrySnapshots()) {
     if (snapshot) {
-      details += report::formatSnapshot(
-          prefix + "_snapshot" + std::to_string(index),
-          report::snapshotStorage(*snapshot));
+      report::addSnapshot(record,
+                          prefix + "_snapshot" + std::to_string(index),
+                          report::snapshotStorage(*snapshot));
     }
     ++index;
   }
-  return details;
 }
 
-std::string cutGeometryLifecycleMemoryDetails(
+void addCutGeometryLifecycleMemory(
+    svmp::FE::LogRecord& record,
     const svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle)
 {
   namespace report = svmp::FE::assembly::memory_report;
   const auto storage = lifecycle.storage();
-  std::ostringstream out;
-  out << " lifecycle_cells_mb=" << report::megabytes(storage.cell_cache_bytes)
-      << " lifecycle_cell_points=" << storage.cell_cache_region_points
-      << " lifecycle_domain_mb="
-      << report::megabytes(storage.domain_cache_bytes)
-      << " lifecycle_domain_points=" << storage.domain_cache_region_points
-      << " lifecycle_adjacency_mb="
-      << report::megabytes(storage.adjacency_bytes)
-      << " lifecycle_backup_mb="
-      << report::megabytes(storage.transaction_backup_bytes);
-  return out.str();
+  record.real("lifecycle_cells_mb", report::megabytes(storage.cell_cache_bytes))
+      .value("lifecycle_cell_points", storage.cell_cache_region_points)
+      .real("lifecycle_domain_mb", report::megabytes(storage.domain_cache_bytes))
+      .value("lifecycle_domain_points", storage.domain_cache_region_points)
+      .real("lifecycle_adjacency_mb", report::megabytes(storage.adjacency_bytes))
+      .real("lifecycle_backup_mb",
+            report::megabytes(storage.transaction_backup_bytes));
 }
 
 // ---- ghost-layer audit (diagnostics only) ----------------------------------
@@ -1449,16 +1436,15 @@ void auditGhostLayers(
     ++regions[ghostLayerBucket(layer_of(region.parent_cell))];
   }
   if (print) {
-    std::ostringstream line;
-    line << "[svMultiPhysics::Application] Ghost-layer audit"
-         << " diagnostic=ghost_layer_audit domain_id='" << domain_id << "'"
-         << " rank=" << comm.rank()
-         << " cells_by_layer=" << ghostLayerHistogramText(cells)
-         << " cut_cells_by_layer=" << ghostLayerHistogramText(cut_cells)
-         << " fragments_by_layer=" << ghostLayerHistogramText(fragments)
-         << " regions_by_layer=" << ghostLayerHistogramText(regions)
-         << '\n';
-    std::cerr << line.str() << std::flush;
+    svmp::FE::logRecord(
+        svmp::FE::LogRecord("LevelSetGeometryService", "ghost-layer audit")
+            .diagnostic("ghost_layer_audit")
+            .quoted("domain_id", domain_id)
+            .value("rank", comm.rank())
+            .value("cells_by_layer", ghostLayerHistogramText(cells))
+            .value("cut_cells_by_layer", ghostLayerHistogramText(cut_cells))
+            .value("fragments_by_layer", ghostLayerHistogramText(fragments))
+            .value("regions_by_layer", ghostLayerHistogramText(regions)));
   }
   if (!withhold) {
     return;
@@ -1468,14 +1454,15 @@ void auditGhostLayers(
   const auto withheld_fragments = withheld.fragments;
   const auto withheld_regions = withheld.regions;
   const auto withheld_sensitivity = withheld.sensitivity_records;
-  svmp::FE::rank_log::oopCout()
-      << "[svMultiPhysics::Application] Ghost-layer audit"
-      << " diagnostic=ghost_layer_audit_withhold domain_id='" << domain_id
-      << "' keep_layers=" << keep_layers
-      << " withheld_fragments=" << globalSumSize(withheld_fragments, comm)
-      << " withheld_regions=" << globalSumSize(withheld_regions, comm)
-      << " withheld_sensitivity_records="
-      << globalSumSize(withheld_sensitivity, comm) << std::endl;
+  svmp::FE::logRecord(
+      svmp::FE::LogRecord("LevelSetGeometryService", "ghost-layer cut withholding")
+          .diagnostic("ghost_layer_audit_withhold")
+          .quoted("domain_id", domain_id)
+          .value("keep_layers", keep_layers)
+          .value("withheld_fragments", globalSumSize(withheld_fragments, comm))
+          .value("withheld_regions", globalSumSize(withheld_regions, comm))
+          .value("withheld_sensitivity_records", globalSumSize(withheld_sensitivity, comm))
+          .rootOnly());
 }
 
 } // namespace
@@ -1532,10 +1519,11 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
       comm.size() <= 1 || generatedCutNeedsEveryGhostLayer(sim, requests);
   if (cutGeometryMemoryReportEnabled()) {
     logCutGeometryMemory(
-        "refresh_begin",
-        cutGeometryLifecycleMemoryDetails(lifecycle) +
-            cutGeometryContextMemoryDetails(
-                "installed", sim.fe_system->cutIntegrationContext()));
+        "refresh_begin", [&](svmp::FE::LogRecord& record) {
+          addCutGeometryLifecycleMemory(record, lifecycle);
+          addCutGeometryContextMemory(
+              record, "installed", sim.fe_system->cutIntegrationContext());
+        });
   }
 
   for (const auto& request : requests) {
@@ -1598,22 +1586,25 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     auditGhostLayers(mesh_access, result.domain, comm, request.domain_id);
     if (svmp::FE::geometryThreadsSelfCheckEnabled()) {
       // Every rank reads the same environment, so the reduction is matched.
-      svmp::FE::rank_log::oopCout()
-          << "[svMultiPhysics::Application] Geometry-thread self-check"
-          << " diagnostic=geometry_threads_self_check stage=generated_cells"
-          << " domain_id='" << request.domain_id << "'"
-          << " identical=1 checked_cells="
-          << globalSumSize(result.thread_self_checked_cell_count, comm)
-          << std::endl;
+      svmp::FE::logRecord(
+          svmp::FE::LogRecord("LevelSetGeometryService", "geometry-thread self-check")
+              .diagnostic("geometry_threads_self_check")
+              .text("stage", "generated_cells")
+              .quoted("domain_id", request.domain_id)
+              .text("identical", "1")
+              .value("checked_cells", globalSumSize(result.thread_self_checked_cell_count, comm))
+              .rootOnly());
     }
     if (cutGeometryMemoryReportEnabled()) {
       logCutGeometryMemory(
-          "after_lifecycle_build",
-          cutGeometryLifecycleMemoryDetails(lifecycle) +
-              svmp::FE::assembly::memory_report::formatDomain(
-                  "result_domain",
-                  svmp::FE::assembly::memory_report::domainStorage(
-                      result.domain)));
+          "after_lifecycle_build", [&](svmp::FE::LogRecord& record) {
+            addCutGeometryLifecycleMemory(record, lifecycle);
+            svmp::FE::assembly::memory_report::addDomain(
+                record,
+                "result_domain",
+                svmp::FE::assembly::memory_report::domainStorage(
+                    result.domain));
+          });
     }
     const bool local_missing_source_topology =
         std::any_of(
@@ -1878,33 +1869,28 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
       const auto global_marker_measure =
           static_cast<svmp::FE::Real>(globalSumDouble(
               static_cast<double>(intersection_summary.measure), comm));
-      svmp::FE::rank_log::oopDiagnosticsCout(svmp::FE::LogLevel::DEBUG)
-          << "[svMultiPhysics::Application] Generated interface-boundary "
-             "intersection"
-          << " diagnostic=generated_interface_boundary_intersection_marker"
-          << " marker=" << intersection_domain.marker()
-          << " interface_marker=" << result.interface_marker
-          << " boundary_marker=" << boundary_marker
-          << " field='" << request.level_set_field_name << "'"
-          << " domain_id='" << request.domain_id << "'"
-          << " source='" << domain_request.source.identifier() << "'"
-          << " fragments=" << global_marker_fragments
-          << " active_fragments=" << global_marker_active_fragments
-          << " skipped_fragments=" << global_marker_skipped_fragments
-          << " qpoints=" << global_marker_qpoints
-          << " measure=" << global_marker_measure
-          << " source_surface_fragments="
-          << intersection_provenance.source_surface_fragment_count
-          << " referenced_source_surface_fragments="
-          << intersection_provenance
-                 .referenced_source_surface_fragment_count
-          << " orphan_contact_fragments="
-          << intersection_provenance.orphan_contact_fragment_count
-          << " stale_revision_count="
-          << intersection_provenance.stale_revision_count
-          << " max_level_set_residual="
-          << intersection_provenance.max_level_set_residual
-          << std::endl;
+      if (svmp::FE::rank_log::oopDiagnosticsEnabled(svmp::FE::LogLevel::DEBUG)) {
+          svmp::FE::logRecord(
+              svmp::FE::LogRecord("LevelSetGeometryService", "generated interface-boundary intersection")
+                  .diagnostic("generated_interface_boundary_intersection_marker")
+                  .value("marker", intersection_domain.marker())
+                  .value("interface_marker", result.interface_marker)
+                  .value("boundary_marker", boundary_marker)
+                  .quoted("field", request.level_set_field_name)
+                  .quoted("domain_id", request.domain_id)
+                  .quoted("source", domain_request.source.identifier())
+                  .value("fragments", global_marker_fragments)
+                  .value("active_fragments", global_marker_active_fragments)
+                  .value("skipped_fragments", global_marker_skipped_fragments)
+                  .value("qpoints", global_marker_qpoints)
+                  .value("measure", global_marker_measure)
+                  .value("source_surface_fragments", intersection_provenance.source_surface_fragment_count)
+                  .value("referenced_source_surface_fragments", intersection_provenance.referenced_source_surface_fragment_count)
+                  .value("orphan_contact_fragments", intersection_provenance.orphan_contact_fragment_count)
+                  .value("stale_revision_count", intersection_provenance.stale_revision_count)
+                  .value("max_level_set_residual", intersection_provenance.max_level_set_residual)
+                  .rootOnly());
+      }
       const bool contact_marker_is_consumed =
           sim.fe_system->isGeneratedEmbeddedInterfaceMarkerRegistered(
               intersection_domain.marker());
@@ -2053,13 +2039,13 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
                 std::to_string(comm.rank()) + "): " +
                 (difference.empty() ? "differs on another rank" : difference));
           }
-          svmp::FE::rank_log::oopCout()
-              << "[svMultiPhysics::Application] Geometry-thread self-check"
-              << " diagnostic=geometry_threads_self_check stage=active_boundary"
-              << " threads=" << active_boundary_threads
-              << " fragments=" << negative_boundary.fragments().size() +
-                                      positive_boundary.fragments().size()
-              << std::endl;
+          svmp::FE::logRecord(
+              svmp::FE::LogRecord("LevelSetGeometryService", "geometry-thread self-check")
+                  .diagnostic("geometry_threads_self_check")
+                  .text("stage", "active_boundary")
+                  .value("threads", active_boundary_threads)
+                  .value("fragments", negative_boundary.fragments().size() + positive_boundary.fragments().size())
+                  .rootOnly());
         }
         const auto partition =
             svmp::FE::interfaces::validateGeneratedActiveBoundaryPartition(
@@ -2068,31 +2054,26 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
                 result.domain,
                 intersection_domain,
                 mesh_access);
-        svmp::FE::rank_log::oopDiagnosticsCout(svmp::FE::LogLevel::DEBUG)
-            << "[svMultiPhysics::Application] Generated sharp active boundary"
-            << " diagnostic=generated_active_boundary_partition"
-            << " interface_marker=" << result.interface_marker
-            << " boundary_marker=" << boundary_marker
-            << " negative_marker=" << negative_boundary.marker()
-            << " positive_marker=" << positive_boundary.marker()
-            << " boundary_faces=" << partition.boundary_face_count
-            << " cut_boundary_faces=" << partition.cut_boundary_face_count
-            << " contact_fragments="
-            << partition.source_contact_fragment_count
-            << " referenced_contact_fragments="
-            << partition.referenced_contact_fragment_count
-            << " orphan_source_references="
-            << partition.orphan_source_reference_count
-            << " stale_revision_count=" << partition.stale_revision_count
-            << " reference_parent_measure="
-            << partition.total_boundary_measure
-            << " reference_negative_measure="
-            << partition.negative_boundary_measure
-            << " reference_positive_measure="
-            << partition.positive_boundary_measure
-            << " max_reference_partition_error="
-            << partition.max_partition_error
-            << std::endl;
+        if (svmp::FE::rank_log::oopDiagnosticsEnabled(svmp::FE::LogLevel::DEBUG)) {
+            svmp::FE::logRecord(
+                svmp::FE::LogRecord("LevelSetGeometryService", "generated sharp active boundary")
+                    .diagnostic("generated_active_boundary_partition")
+                    .value("interface_marker", result.interface_marker)
+                    .value("boundary_marker", boundary_marker)
+                    .value("negative_marker", negative_boundary.marker())
+                    .value("positive_marker", positive_boundary.marker())
+                    .value("boundary_faces", partition.boundary_face_count)
+                    .value("cut_boundary_faces", partition.cut_boundary_face_count)
+                    .value("contact_fragments", partition.source_contact_fragment_count)
+                    .value("referenced_contact_fragments", partition.referenced_contact_fragment_count)
+                    .value("orphan_source_references", partition.orphan_source_reference_count)
+                    .value("stale_revision_count", partition.stale_revision_count)
+                    .value("reference_parent_measure", partition.total_boundary_measure)
+                    .value("reference_negative_measure", partition.negative_boundary_measure)
+                    .value("reference_positive_measure", partition.positive_boundary_measure)
+                    .value("max_reference_partition_error", partition.max_partition_error)
+                    .rootOnly());
+        }
         snapshot_active_boundary_domains.push_back(
             std::move(negative_boundary));
         snapshot_active_boundary_domains.push_back(
@@ -2247,17 +2228,15 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
             "): " + (difference.empty() ? "differs on another rank"
                                         : difference));
       }
-      svmp::FE::rank_log::oopCout()
-          << "[svMultiPhysics::Application] Incremental rebuild self-check"
-          << " diagnostic=incremental_rebuild_self_check stage=snapshot"
-          << " domain_id='" << request.domain_id << "'"
-          << " identical=1"
-          << " reused_full_cell_records="
-          << globalSumSize(snapshot_reuse_cache->lastBuild()
-                               .full_cell_records_reused,
-                           comm)
-          << " rules=" << globalSumSize(geometry_snapshot->rules().size(), comm)
-          << std::endl;
+      svmp::FE::logRecord(
+          svmp::FE::LogRecord("LevelSetGeometryService", "incremental rebuild self-check")
+              .diagnostic("incremental_rebuild_self_check")
+              .text("stage", "snapshot")
+              .quoted("domain_id", request.domain_id)
+              .text("identical", "1")
+              .value("reused_full_cell_records", globalSumSize(snapshot_reuse_cache->lastBuild().full_cell_records_reused, comm))
+              .value("rules", globalSumSize(geometry_snapshot->rules().size(), comm))
+              .rootOnly());
       reference_geometry_snapshot.reset();
     }
     if (!sim.free_surface_geometry_snapshot_cache) {
@@ -2278,111 +2257,71 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
             ? sim.free_surface_geometry_snapshot_cache->statistics()
             : svmp::FE::interfaces::FreeSurfaceGeometrySnapshotCacheStatistics{};
     const auto& geometry_ledger = geometry_snapshot->ledger();
-    svmp::FE::rank_log::oopDiagnosticsCout(svmp::FE::LogLevel::DEBUG)
-        << "[svMultiPhysics::Application] Authoritative free-surface geometry"
-        << " diagnostic=free_surface_geometry_snapshot"
-        << " domain_id='" << request.domain_id << "'"
-        << " interface_marker=" << result.interface_marker
-        << " snapshot_revision="
-        << geometry_snapshot->revision().snapshot_revision_key
-        << " snapshot_resident_bytes="
-        << geometry_snapshot->residentBytes()
-        << " cache_live_snapshots="
-        << geometry_cache_statistics.live_snapshot_count
-        << " cache_live_resident_bytes="
-        << geometry_cache_statistics.live_resident_bytes
-        << " cache_peak_live_snapshots="
-        << geometry_cache_statistics.peak_live_snapshot_count
-        << " cache_peak_live_resident_bytes="
-        << geometry_cache_statistics.peak_live_resident_bytes
-        << " cache_hits=" << geometry_cache_statistics.hit_count
-        << " cache_misses=" << geometry_cache_statistics.miss_count
-        << " cache_expired_evictions="
-        << geometry_cache_statistics.expired_eviction_count
-        << " source_value_revision="
-        << geometry_snapshot->revision().source_value_revision
-        << " rules=" << geometry_ledger.rule_count
-        << " retained_rules=" << geometry_ledger.retained_rule_count
-        << " pruned_rules=" << geometry_ledger.pruned_rule_count
-        << " qpoints=" << geometry_ledger.quadrature_point_count
-        << " owned_rules=" << geometry_ledger.owned_rule_count
-        << " global_owned_rules="
-        << geometry_ledger.global_owned_rule_count
-        << " invalid_global_identities="
-        << geometry_ledger.invalid_global_identity_count
-        << " duplicate_rule_identities="
-        << geometry_ledger.duplicate_rule_identity_count
-        << " contact_fragments=" << geometry_ledger.contact_fragment_count
-        << " orphan_contact_fragments="
-        << geometry_ledger.orphan_contact_fragment_count
-        << " stale_revisions=" << geometry_ledger.stale_revision_count
-        << " invalid_phase_points="
-        << geometry_ledger.invalid_phase_point_count
-        << " represented_phase_points="
-        << geometry_ledger.represented_phase_point_count
-        << " represented_phase_disagreements="
-        << geometry_ledger.represented_phase_disagreement_count
-        << " max_root_residual=" << geometry_ledger.maximum_root_residual
-        << " max_normal_angle_error="
-        << geometry_ledger.maximum_normal_angular_error
-        << " max_represented_phase_disagreement="
-        << geometry_ledger.maximum_represented_phase_disagreement
-        << " max_constant_moment_error="
-        << geometry_ledger.maximum_constant_moment_error
-        << " certified_rules="
-        << geometry_ledger.certified_rule_count
-        << " parent_cell_moment_certificates="
-        << geometry_ledger.parent_cell_moment_certificate_count
-        << " centroid_moment_certificates="
-        << geometry_ledger.centroid_moment_certificate_count
-        << " piecewise_affine_moment_certificates="
-        << geometry_ledger.piecewise_affine_moment_certificate_count
-        << " backend_reference_moment_certificates="
-        << geometry_ledger.backend_reference_moment_certificate_count
-        << " stored_generated_moment_certificates="
-        << geometry_ledger.stored_generated_moment_certificate_count
-        << " validated_rule_polynomial_moments="
-        << geometry_ledger.validated_rule_polynomial_moment_count
-        << " validated_polynomial_moments="
-        << geometry_ledger.validated_polynomial_moment_count
-        << " max_polynomial_moment_error="
-        << geometry_ledger.maximum_polynomial_moment_error
-        << " max_polynomial_moment_scaled_error="
-        << geometry_ledger.maximum_polynomial_moment_scaled_error
-        << " max_volume_partition_error="
-        << geometry_ledger.maximum_volume_partition_error
-        << " max_boundary_partition_error="
-        << geometry_ledger.maximum_boundary_partition_error
-        << " negative_reference_volume="
-        << geometry_ledger.retained_negative_reference_volume
-        << " positive_reference_volume="
-        << geometry_ledger.retained_positive_reference_volume
-        << " negative_physical_volume="
-        << geometry_ledger.retained_negative_physical_volume
-        << " positive_physical_volume="
-        << geometry_ledger.retained_positive_physical_volume
-        << " resident_bytes=" << geometry_snapshot->residentBytes()
-        << " reuse_context_matched="
-        << (snapshot_reuse_cache != nullptr &&
-                    snapshot_reuse_cache->lastBuild().context_matched
-                ? 1
-                : 0)
-        << " reused_full_cell_records="
-        << (snapshot_reuse_cache != nullptr
-                ? snapshot_reuse_cache->lastBuild().full_cell_records_reused
-                : 0u)
-        << " built_full_cell_records="
-        << (snapshot_reuse_cache != nullptr
-                ? snapshot_reuse_cache->lastBuild().full_cell_records_built
-                : 0u)
-        << std::endl;
+    if (svmp::FE::rank_log::oopDiagnosticsEnabled(svmp::FE::LogLevel::DEBUG)) {
+        svmp::FE::logRecord(
+            svmp::FE::LogRecord("LevelSetGeometryService", "authoritative free-surface geometry")
+                .diagnostic("free_surface_geometry_snapshot")
+                .quoted("domain_id", request.domain_id)
+                .value("interface_marker", result.interface_marker)
+                .value("snapshot_revision", geometry_snapshot->revision().snapshot_revision_key)
+                .value("snapshot_resident_bytes", geometry_snapshot->residentBytes())
+                .value("cache_live_snapshots", geometry_cache_statistics.live_snapshot_count)
+                .value("cache_live_resident_bytes", geometry_cache_statistics.live_resident_bytes)
+                .value("cache_peak_live_snapshots", geometry_cache_statistics.peak_live_snapshot_count)
+                .value("cache_peak_live_resident_bytes", geometry_cache_statistics.peak_live_resident_bytes)
+                .value("cache_hits", geometry_cache_statistics.hit_count)
+                .value("cache_misses", geometry_cache_statistics.miss_count)
+                .value("cache_expired_evictions", geometry_cache_statistics.expired_eviction_count)
+                .value("source_value_revision", geometry_snapshot->revision().source_value_revision)
+                .value("rules", geometry_ledger.rule_count)
+                .value("retained_rules", geometry_ledger.retained_rule_count)
+                .value("pruned_rules", geometry_ledger.pruned_rule_count)
+                .value("qpoints", geometry_ledger.quadrature_point_count)
+                .value("owned_rules", geometry_ledger.owned_rule_count)
+                .value("global_owned_rules", geometry_ledger.global_owned_rule_count)
+                .value("invalid_global_identities", geometry_ledger.invalid_global_identity_count)
+                .value("duplicate_rule_identities", geometry_ledger.duplicate_rule_identity_count)
+                .value("contact_fragments", geometry_ledger.contact_fragment_count)
+                .value("orphan_contact_fragments", geometry_ledger.orphan_contact_fragment_count)
+                .value("stale_revisions", geometry_ledger.stale_revision_count)
+                .value("invalid_phase_points", geometry_ledger.invalid_phase_point_count)
+                .value("represented_phase_points", geometry_ledger.represented_phase_point_count)
+                .value("represented_phase_disagreements", geometry_ledger.represented_phase_disagreement_count)
+                .value("max_root_residual", geometry_ledger.maximum_root_residual)
+                .value("max_normal_angle_error", geometry_ledger.maximum_normal_angular_error)
+                .value("max_represented_phase_disagreement", geometry_ledger.maximum_represented_phase_disagreement)
+                .value("max_constant_moment_error", geometry_ledger.maximum_constant_moment_error)
+                .value("certified_rules", geometry_ledger.certified_rule_count)
+                .value("parent_cell_moment_certificates", geometry_ledger.parent_cell_moment_certificate_count)
+                .value("centroid_moment_certificates", geometry_ledger.centroid_moment_certificate_count)
+                .value("piecewise_affine_moment_certificates", geometry_ledger.piecewise_affine_moment_certificate_count)
+                .value("backend_reference_moment_certificates", geometry_ledger.backend_reference_moment_certificate_count)
+                .value("stored_generated_moment_certificates", geometry_ledger.stored_generated_moment_certificate_count)
+                .value("validated_rule_polynomial_moments", geometry_ledger.validated_rule_polynomial_moment_count)
+                .value("validated_polynomial_moments", geometry_ledger.validated_polynomial_moment_count)
+                .value("max_polynomial_moment_error", geometry_ledger.maximum_polynomial_moment_error)
+                .value("max_polynomial_moment_scaled_error", geometry_ledger.maximum_polynomial_moment_scaled_error)
+                .value("max_volume_partition_error", geometry_ledger.maximum_volume_partition_error)
+                .value("max_boundary_partition_error", geometry_ledger.maximum_boundary_partition_error)
+                .value("negative_reference_volume", geometry_ledger.retained_negative_reference_volume)
+                .value("positive_reference_volume", geometry_ledger.retained_positive_reference_volume)
+                .value("negative_physical_volume", geometry_ledger.retained_negative_physical_volume)
+                .value("positive_physical_volume", geometry_ledger.retained_positive_physical_volume)
+                .value("resident_bytes", geometry_snapshot->residentBytes())
+                .value("reuse_context_matched", (snapshot_reuse_cache != nullptr && snapshot_reuse_cache->lastBuild().context_matched ? 1 : 0))
+                .value("reused_full_cell_records", (snapshot_reuse_cache != nullptr ? snapshot_reuse_cache->lastBuild().full_cell_records_reused : 0u))
+                .value("built_full_cell_records", (snapshot_reuse_cache != nullptr ? snapshot_reuse_cache->lastBuild().full_cell_records_built : 0u))
+                .rootOnly());
+    }
     if (cutGeometryMemoryReportEnabled()) {
       logCutGeometryMemory(
-          "after_snapshot_build",
-          svmp::FE::assembly::memory_report::formatSnapshot(
-              "snapshot",
-              svmp::FE::assembly::memory_report::snapshotStorage(
-                  *geometry_snapshot)));
+          "after_snapshot_build", [&](svmp::FE::LogRecord& record) {
+            svmp::FE::assembly::memory_report::addSnapshot(
+                record,
+                "snapshot",
+                svmp::FE::assembly::memory_report::snapshotStorage(
+                    *geometry_snapshot));
+          });
     }
     topology_bindings.push_back(
         ActiveCutTopologySnapshotBinding{
@@ -2826,14 +2765,15 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
       activeCutContextTopologyFingerprint(topology_bindings, comm);
   if (cutGeometryMemoryReportEnabled()) {
     logCutGeometryMemory(
-        "before_install",
-        std::string(" fe_context_transaction_active=") +
-            (sim.fe_system->cutIntegrationContextTransactionActive() ? "1"
-                                                                    : "0") +
-            cutGeometryLifecycleMemoryDetails(lifecycle) +
-            cutGeometryContextMemoryDetails("new", context.get()) +
-            cutGeometryContextMemoryDetails(
-                "installed", sim.fe_system->cutIntegrationContext()));
+        "before_install", [&](svmp::FE::LogRecord& record) {
+          record.integer(
+              "fe_context_transaction_active",
+              sim.fe_system->cutIntegrationContextTransactionActive() ? 1 : 0);
+          addCutGeometryLifecycleMemory(record, lifecycle);
+          addCutGeometryContextMemory(record, "new", context.get());
+          addCutGeometryContextMemory(
+              record, "installed", sim.fe_system->cutIntegrationContext());
+        });
   }
   report.installed_context = context;
   sim.fe_system->setCutIntegrationContext(std::move(context));
@@ -3093,13 +3033,15 @@ void logActiveCutContextRefreshMiss(
     const char* solution_source,
     const char* reason)
 {
-  svmp::FE::rank_log::oopDiagnosticsCout(svmp::FE::LogLevel::DEBUG)
-      << "[svMultiPhysics::Application] Cut-context refresh miss"
-      << " diagnostic=cut_context_refresh_miss"
-      << " provenance=" << (provenance != nullptr ? provenance : "unknown")
-      << " solution_source="
-      << (solution_source != nullptr ? solution_source : "unknown")
-      << " reason=" << (reason != nullptr ? reason : "unknown") << std::endl;
+  if (svmp::FE::rank_log::oopDiagnosticsEnabled(svmp::FE::LogLevel::DEBUG)) {
+      svmp::FE::logRecord(
+          svmp::FE::LogRecord("LevelSetGeometryService", "cut-context refresh miss")
+              .diagnostic("cut_context_refresh_miss")
+              .value("provenance", (provenance != nullptr ? provenance : "unknown"))
+              .value("solution_source", (solution_source != nullptr ? solution_source : "unknown"))
+              .value("reason", (reason != nullptr ? reason : "unknown"))
+              .rootOnly());
+  }
 }
 
 bool activeCutLevelSetFieldLayoutIsAvailable(
@@ -4101,23 +4043,22 @@ reinstallRetainedActiveCutContextForRestoredState(
           .text("support_source", "retained_cut_context")
           .value("constraints", sim.fe_system->constraints().numConstraints())
           .rootOnly());
-  std::ostringstream reuse_line;
-  reuse_line
-      << "[svMultiPhysics::Application] Restored-state cut context reused"
-      << " diagnostic=cut_context_restored_reuse"
-      << " provenance=" << (provenance != nullptr ? provenance : "unknown")
-      << " solution_source=" << solution_source
-      << " solution_hash=" << retained.signature.solution_hash
-      << " level_set_dof_layout_key="
-      << retained.signature.level_set_dof_layout_key
-      << " cut_context_topology_key=" << *retained.topology_key
-      << " active_cut_request_policy_key=" << request_policy_key;
+  svmp::FE::LogRecord reuse_line("LevelSetGeometryService", "restored-state cut context reused");
+  reuse_line.diagnostic("cut_context_restored_reuse")
+      .value("provenance", (provenance != nullptr ? provenance : "unknown"))
+      .value("solution_source", solution_source)
+      .value("solution_hash", retained.signature.solution_hash)
+      .value("level_set_dof_layout_key", retained.signature.level_set_dof_layout_key)
+      .value("cut_context_topology_key", *retained.topology_key)
+      .value("active_cut_request_policy_key", request_policy_key)
+      .rootOnly();
   for (const auto& [marker, source_revision] :
        retained.evaluated_state_source_revisions) {
-    reuse_line << " marker_" << marker << "_source_value_revision="
-               << source_revision;
+    reuse_line.child("cut_context_restored_reuse_marker", {})
+        .value("marker", marker)
+        .value("source_value_revision", source_revision);
   }
-  svmp::FE::rank_log::oopCout() << reuse_line.str() << std::endl;
+  svmp::FE::logRecord(reuse_line);
 
   // As after a rebuild, the cache records the signature of the state after
   // the mesh field was rewritten.
@@ -4837,16 +4778,13 @@ void LevelSetGeometryParticipant::acknowledgeFrozenEpoch()
 {
   auto* cut_topology_attempt_tracker = &service_->topologyTracker();
   cut_topology_attempt_tracker->acknowledgeFrozenEpoch();
-  svmp::FE::rank_log::oopCout()
-      << "[svMultiPhysics::Application] Transient cut-topology cycle"
-      << " diagnostic=cut_topology_cycle"
-      << " committed_topology_key="
-      << cut_topology_attempt_tracker->acceptedTopologyKey()
-             .value_or(0u)
-      << " frozen_attempt_topology_key="
-      << cut_topology_attempt_tracker->attemptTopologyKey()
-             .value_or(0u)
-      << " action=accept_on_frozen_epoch" << std::endl;
+  svmp::FE::logRecord(
+      svmp::FE::LogRecord("LevelSetGeometryService", "transient cut-topology cycle")
+          .diagnostic("cut_topology_cycle")
+          .value("committed_topology_key", cut_topology_attempt_tracker->acceptedTopologyKey().value_or(0u))
+          .value("frozen_attempt_topology_key", cut_topology_attempt_tracker->attemptTopologyKey().value_or(0u))
+          .text("action", "accept_on_frozen_epoch")
+          .rootOnly());
 }
 
 // ---------------------------------------------------------------------------
