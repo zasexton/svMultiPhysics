@@ -335,35 +335,6 @@ struct FreeSurfaceDiscreteFunctionalState {
 using FreeSurfaceDiscreteFunctionalPhysicalGradient =
     std::array<std::array<Real, 3>, 3>;
 
-/**
- * Physical deformation used to differentiate the snapshot-owned functional.
- *
- * The callback coordinate is the parent reference coordinate of the
- * authoritative rule point.  `value` returns the physical deformation there,
- * while `physical_gradient[i][j]` is d(value_i)/d(x_j).  The deformation is
- * understood to preserve the fixed physical wall: its contact trace is wall
- * tangential and every non-contact exterior flux vanishes.
- */
-struct FreeSurfaceDiscreteFunctionalDeformationEvaluator {
-    std::function<std::array<Real, 3>(
-        GlobalIndex,
-        const std::array<Real, 3>&,
-        const geometry::CutQuadratureProvenance&)>
-        value{};
-    std::function<FreeSurfaceDiscreteFunctionalPhysicalGradient(
-        GlobalIndex,
-        const std::array<Real, 3>&,
-        const geometry::CutQuadratureProvenance&)>
-        physical_gradient{};
-
-    [[nodiscard]] bool canEvaluateValue() const noexcept {
-        return static_cast<bool>(value);
-    }
-    [[nodiscard]] bool canEvaluatePhysicalGradient() const noexcept {
-        return static_cast<bool>(physical_gradient);
-    }
-};
-
 struct FreeSurfaceDiscreteWallFunctionalVariationState {
     int boundary_marker{-1};
     std::optional<Real> equilibrium_contact_angle_radians{};
@@ -375,12 +346,11 @@ struct FreeSurfaceDiscreteWallFunctionalVariationState {
  * First variation of the immutable snapshot's capillary functional under a
  * deformation (the endpoint functional power of a record).
  *
- * The liquid-gas area and liquid volume rates are declared measured 0-forms
- * (D49 step E3), and so are the wetted-wall and Young-energy rates of each wall
- * where the formulation declares them as wall functionals (over the wall's
- * contact lines, with the rule's wall normal).  evaluateFreeSurfaceWallAreaVariation
- * gives the record its walls and the outward wetted-footprint flux on the
- * retained, rank-owned contact rules, which a declared wall functional replaces.
+ * Every rate is a declared measured 0-form: the liquid-gas area and liquid
+ * volume rates (D49 step E3) and the wetted-wall and Young-energy rates of
+ * each wall, the formulation's wall functionals over the wall's contact lines
+ * with the rule's wall normal.  freeSurfaceDiscreteFunctionalVariationLayout
+ * gives the record its walls.
  */
 struct FreeSurfaceDiscreteFunctionalVariationState {
     std::uint64_t snapshot_revision_key{0};
@@ -773,17 +743,14 @@ freeSurfaceDiscreteFunctionalLayout(
     const assembly::IMeshAccess* mesh = nullptr);
 
 /**
- * The rank-owned wetted-wall rates of the first variation: the deformation's
- * outward wetted-footprint flux on the retained contact rules, per wall and
- * in total, and the Young-energy rates of the walls with an angle.  The area
- * and volume rates are zero here; they are declared measured 0-forms, and a
- * declared wall functional replaces a wall's rates in the record.
+ * The walls and parameters of the first variation of the snapshot's capillary
+ * functional (the walls of freeSurfaceDiscreteFunctionalLayout), every rate
+ * zero.  The rates are declared measured 0-forms (D49 steps E3 and E4).
  */
 [[nodiscard]] FreeSurfaceDiscreteFunctionalVariationState
-evaluateFreeSurfaceWallAreaVariation(
+freeSurfaceDiscreteFunctionalVariationLayout(
     const FreeSurfaceGeometrySnapshot& snapshot,
-    const FreeSurfaceDiscreteFunctionalParameters& parameters,
-    const FreeSurfaceDiscreteFunctionalDeformationEvaluator& deformation);
+    const FreeSurfaceDiscreteFunctionalParameters& parameters);
 
 [[nodiscard]] std::shared_ptr<const FreeSurfaceGeometrySnapshot>
 buildFreeSurfaceGeometrySnapshot(

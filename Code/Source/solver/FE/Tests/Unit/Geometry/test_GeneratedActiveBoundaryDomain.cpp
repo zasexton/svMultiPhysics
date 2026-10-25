@@ -63,8 +63,9 @@ FE::Real ownedRuleMeasure(const interfaces::FreeSurfaceGeometrySnapshot& snapsho
 // from production (the records evaluate the declared measured 0-forms, which
 // state the same integrals, on the same rules).  They are the
 // finite-difference reference of the frozen WP-4 and WP-8 first-variation
-// evidence, with the arithmetic of the retired evaluator; the wetted-wall
-// part of the variation is the production evaluateFreeSurfaceWallAreaVariation.
+// evidence, with the arithmetic of the retired evaluators, the wetted-wall
+// part included (the outward wetted-footprint flux on the contact rules,
+// which the formulation now declares as its wall functionals).
 interfaces::FreeSurfaceDiscreteFunctionalState referenceDiscreteFunctional(
     const interfaces::FreeSurfaceGeometrySnapshot& snapshot,
     const interfaces::FreeSurfaceDiscreteFunctionalParameters& parameters)
@@ -119,12 +120,86 @@ interfaces::FreeSurfaceDiscreteFunctionalState referenceDiscreteFunctional(
     return state;
 }
 
+interfaces::FreeSurfaceDiscreteFunctionalVariationState referenceWallAreaVariation(
+    const interfaces::FreeSurfaceGeometrySnapshot& snapshot,
+    const interfaces::FreeSurfaceDiscreteFunctionalParameters& parameters,
+    const interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator& deformation)
+{
+    auto state = interfaces::freeSurfaceDiscreteFunctionalVariationLayout(snapshot, parameters);
+    const auto dot = [](const std::array<FE::Real, 3>& a, const std::array<FE::Real, 3>& b) {
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    };
+    const auto unit_direction = [&dot](std::array<FE::Real, 3> direction) {
+        const FE::Real magnitude = std::sqrt(dot(direction, direction));
+        if (!std::isfinite(magnitude) || !(magnitude > FE::Real{0.0})) {
+            throw std::invalid_argument("reference wall variation: degenerate direction");
+        }
+        for (auto& component : direction) {
+            component /= magnitude;
+        }
+        return direction;
+    };
+    const auto wall_of = [&state](int boundary_marker)
+        -> interfaces::FreeSurfaceDiscreteWallFunctionalVariationState& {
+        for (auto& wall : state.walls) {
+            if (wall.boundary_marker == boundary_marker) {
+                return wall;
+            }
+        }
+        throw std::logic_error("reference wall variation: wall outside the layout");
+    };
+    const bool positive_liquid = parameters.liquid_side == FE::geometry::CutIntegrationSide::Positive;
+    for (const auto& record : snapshot.rules()) {
+        if (!record.locally_owned ||
+            record.retention != interfaces::FreeSurfaceGeometryRetention::Retained ||
+            record.role != interfaces::FreeSurfaceGeometryRuleRole::Contact) {
+            continue;
+        }
+        const int ambient_dimension = record.physical_rule.geometric_dimension + 2;
+        auto& wall = wall_of(record.physical_boundary_marker);
+        for (std::size_t point_index = 0; point_index < record.physical_rule.points.size(); ++point_index) {
+            const auto& physical = record.physical_rule.points[point_index];
+            const auto& reference = record.reference_rule.points[point_index];
+            const auto value = deformation.value(record.reference_rule.provenance.parent_entity,
+                                                 reference.parent_coordinate,
+                                                 record.reference_rule.provenance);
+            auto liquid_normal = unit_direction(physical.normal);
+            if (positive_liquid) {
+                for (auto& component : liquid_normal) {
+                    component = -component;
+                }
+            }
+            const auto wall_normal = unit_direction(physical.boundary_normal);
+            const FE::Real normal_dot = dot(liquid_normal, wall_normal);
+            std::array<FE::Real, 3> footprint_direction{};
+            for (int component = 0; component < ambient_dimension; ++component) {
+                const auto index = static_cast<std::size_t>(component);
+                footprint_direction[index] = liquid_normal[index] - normal_dot * wall_normal[index];
+            }
+            footprint_direction = unit_direction(footprint_direction);
+            const FE::Real wall_area_variation = dot(value, footprint_direction) * physical.physical_weight;
+            state.owned_wetted_wall_area_variation += wall_area_variation;
+            wall.owned_wetted_wall_area_variation += wall_area_variation;
+        }
+    }
+    for (auto& wall : state.walls) {
+        if (!wall.equilibrium_contact_angle_radians.has_value()) {
+            continue;
+        }
+        wall.young_wall_energy_variation = -parameters.surface_tension *
+                                           std::cos(*wall.equilibrium_contact_angle_radians) *
+                                           wall.owned_wetted_wall_area_variation;
+        state.young_wall_energy_variation += wall.young_wall_energy_variation;
+    }
+    return state;
+}
+
 interfaces::FreeSurfaceDiscreteFunctionalVariationState referenceFirstVariation(
     const interfaces::FreeSurfaceGeometrySnapshot& snapshot,
     const interfaces::FreeSurfaceDiscreteFunctionalParameters& parameters,
-    const interfaces::FreeSurfaceDiscreteFunctionalDeformationEvaluator& deformation)
+    const interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator& deformation)
 {
-    auto state = interfaces::evaluateFreeSurfaceWallAreaVariation(snapshot, parameters, deformation);
+    auto state = referenceWallAreaVariation(snapshot, parameters, deformation);
     const bool positive_liquid = parameters.liquid_side == FE::geometry::CutIntegrationSide::Positive;
     for (const auto& record : snapshot.rules()) {
         if (!record.locally_owned ||
@@ -4878,7 +4953,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     const auto minus_snapshot =
         build_snapshot(-epsilon, "functional_fd_minus");
 
-    interfaces::FreeSurfaceDiscreteFunctionalDeformationEvaluator
+    interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator
         deformation;
     deformation.value =
         [](FE::GlobalIndex,
@@ -5460,7 +5535,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     const auto minus_snapshot =
         build_snapshot(-epsilon, "functional_fd_3d_minus");
 
-    interfaces::FreeSurfaceDiscreteFunctionalDeformationEvaluator
+    interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator
         deformation;
     deformation.value =
         [](FE::GlobalIndex,
@@ -5649,7 +5724,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
     parameters.surface_tension = 2.0;
     parameters.volume_multiplier = 3.0;
-    interfaces::FreeSurfaceDiscreteFunctionalDeformationEvaluator
+    interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator
         deformation;
     deformation.value =
         [](FE::GlobalIndex,
@@ -5673,7 +5748,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         interfaces::freeSurfaceDiscreteFunctionalLayout(
             *owner_snapshot, parameters);
     const auto owner_variation =
-        interfaces::evaluateFreeSurfaceWallAreaVariation(
+        referenceWallAreaVariation(
             *owner_snapshot, parameters, deformation);
     EXPECT_EQ(owner_layout.snapshot_revision_key,
               owner_snapshot->revision().snapshot_revision_key);
@@ -5732,7 +5807,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         interfaces::freeSurfaceDiscreteFunctionalLayout(
             *ghost_snapshot, parameters);
     const auto ghost_variation =
-        interfaces::evaluateFreeSurfaceWallAreaVariation(
+        referenceWallAreaVariation(
             *ghost_snapshot, parameters, deformation);
     EXPECT_EQ(ghost_snapshot->revision().snapshot_revision_key,
               owner_snapshot->revision().snapshot_revision_key);
