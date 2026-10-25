@@ -8898,6 +8898,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                     static_cast<svmp::FE::Real>(h.dt()),
                     velocity_extension_artifact_comm);
             for (const auto& record : reconciliation.records) {
+              // The streamed line this record replaces set stdout to 17 digits; the
+              // unconverted stdout lines (TimeLoop, Transient solve) print with it.
+              oopCout() << std::setprecision(17);
               // Map entry R1.180 (tests/cases/fluid/free_surface_log_record_map.json).
               svmp::FE::logRecord(
                   svmp::FE::LogRecord("TwoFluidAcceptedStage", "momentum reconciliation")
