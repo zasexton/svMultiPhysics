@@ -2086,6 +2086,16 @@ private:
         exterior_boundary_measure_{};
 };
 
+class GlobalIntegralNode final : public UnaryNode {
+public:
+    using UnaryNode::UnaryNode;
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::GlobalIntegral; }
+    [[nodiscard]] std::string toString() const override {
+        return "integral_global(" + child_->toString() + ") dGlobal";
+    }
+};
+
 class CutVolumeIntegralNode final : public UnaryNode {
 public:
     CutVolumeIntegralNode(std::shared_ptr<FormExprNode> child,
@@ -3421,6 +3431,12 @@ FormExpr FormExpr::dCutVolume(int interface_marker, CutVolumeSide side) const
     return FormExpr(std::make_shared<CutVolumeIntegralNode>(node_, interface_marker, side));
 }
 
+FormExpr FormExpr::dGlobal() const
+{
+    if (!node_) return {};
+    return FormExpr(std::make_shared<GlobalIntegralNode>(node_));
+}
+
 FormExpr FormExpr::dx(const VolumeIntegrationDomain& domain) const
 {
     if (domain.scope() == VolumeIntegrationScope::FullVolume) {
@@ -3653,6 +3669,7 @@ std::shared_ptr<FormExprNode> transformNodeShared(
             const auto side = node->cutVolumeSide().value_or(CutVolumeSide::Negative);
             return std::make_shared<CutVolumeIntegralNode>(new_kids[0], marker, side);
         }
+        case FormExprType::GlobalIntegral: return std::make_shared<GlobalIntegralNode>(new_kids[0]);
 
         case FormExprType::Constitutive: {
             auto model = node->constitutiveModelShared();

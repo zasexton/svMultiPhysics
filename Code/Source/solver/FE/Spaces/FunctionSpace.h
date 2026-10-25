@@ -57,7 +57,8 @@ enum class SpaceType : std::uint8_t {
     Composite,
     Enriched,
     Adaptive,
-    GenericBasis
+    GenericBasis,
+    Global  ///< One value for the whole domain (GlobalSpace).  Appended: the values enter kernel hashes.
 };
 
 /**

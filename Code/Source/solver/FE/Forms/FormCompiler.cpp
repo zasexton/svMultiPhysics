@@ -1181,6 +1181,11 @@ void collectIntegralTerms(
                                     side);
             return;
         }
+        case FormExprType::GlobalIntegral:
+            throw std::invalid_argument(
+                "FormCompiler: a dGlobal() term has no spatial integral and is not an element "
+                "kernel term; installFormulation adds it to the row of its global test function "
+                "(got: " + expr.toString() + ")");
         default:
             break;
     }

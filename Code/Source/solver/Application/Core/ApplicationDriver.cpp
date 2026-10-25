@@ -10800,6 +10800,10 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
   for (const auto field_id : output_fields) {
     const auto field_start = Clock::now();
     const auto& rec = sim.fe_system->fieldRecord(field_id);
+    if (rec.scope == svmp::FE::systems::FieldScope::Global) {
+      // A global field (a multiplier) has no mesh entity and no point values.
+      continue;
+    }
     const auto ncomp = static_cast<std::size_t>(std::max(1, rec.components));
 
     if (oopTraceEnabled()) {

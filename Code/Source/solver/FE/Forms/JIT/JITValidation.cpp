@@ -1135,6 +1135,7 @@ ValidationResult canCompileImpl(const FormExpr& integrand,
             case FormExprType::InteriorFaceIntegral:
             case FormExprType::InterfaceIntegral:
             case FormExprType::CutVolumeIntegral:
+            case FormExprType::GlobalIntegral:
                 out.ok = false;
                 out.first_issue = issue(n, "JIT: measure nodes are not valid in integrands");
                 return;

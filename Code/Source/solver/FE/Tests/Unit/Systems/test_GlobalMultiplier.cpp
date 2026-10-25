@@ -14,10 +14,6 @@
  *
  * G2 (pure Neumann, mean zero) needs the multiplier's anchoring evidence in the
  * gauge registry (step LM1b) and stays disabled.
- *
- * The cases are written against the target API of decision D54 (GlobalSpace,
- * FieldScope::Global, dGlobal()).  Step LM1a adds that API and builds this
- * file; until then it is not compiled.
  */
 
 #include <gtest/gtest.h>
@@ -308,6 +304,94 @@ std::vector<GlobalIndex> fieldDofs(const FESystem& sys, FieldId field)
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// Fields and setup
+// ---------------------------------------------------------------------------
+
+TEST(GlobalField, ScopeFollowsTheGlobalSpace)
+{
+    auto mesh = buildGrid(2, 1, 1.0, 1.0, 1);
+    auto r1 = std::make_shared<spaces::GlobalSpace>(1);
+    auto h1 = quadSpace(1);
+    FESystem sys(mesh);
+    const auto lam = sys.addField(FieldSpec{.name = "lambda", .space = r1});
+    EXPECT_EQ(sys.fieldRecord(lam).scope, FieldScope::Global);
+    EXPECT_TRUE(sys.hasGlobalFields());
+    EXPECT_THROW((void)sys.addField(FieldSpec{.name = "w", .space = h1, .scope = FieldScope::Global}),
+                 FEException);
+    EXPECT_THROW((void)sys.addField(FieldSpec{.name = "m",
+                                              .space = r1,
+                                              .scope = FieldScope::InterfaceFace,
+                                              .interface_marker = 3}),
+                 FEException);
+    EXPECT_THROW((void)sys.addField(FieldSpec{.name = "d",
+                                              .space = r1,
+                                              .source_kind = FieldSourceKind::PrescribedData}),
+                 FEException);
+
+    FESystem plain(mesh);
+    (void)plain.addField(FieldSpec{.name = "u", .space = h1});
+    EXPECT_FALSE(plain.hasGlobalFields());
+}
+
+TEST(GlobalField, DofsFollowTheFieldDofsAndCoupleToEveryCell)
+{
+    auto problem = buildMeanConstrainedPoisson(4, 2, 0.5, 1, 1.0, {.point_term = false});
+    auto& sys = *problem.system;
+
+    const auto n_u = sys.fieldDofHandler(problem.u).getNumDofs();
+    EXPECT_EQ(n_u, 15);
+    EXPECT_EQ(sys.fieldDofHandler(problem.lambda).getNumDofs(), 1);
+    EXPECT_EQ(sys.fieldDofOffset(problem.lambda), n_u);
+    EXPECT_EQ(sys.dofHandler().getNumDofs(), n_u + 1);
+
+    const auto lam = sys.fieldDofOffset(problem.lambda);
+    const auto& map = sys.dofHandler().getDofMap();
+    EXPECT_TRUE(map.isOwnedDof(lam));
+    for (GlobalIndex cell = 0; cell < sys.meshAccess().numCells(); ++cell) {
+        const auto dofs = map.getCellDofs(cell);
+        EXPECT_EQ(std::count(dofs.begin(), dofs.end(), lam), 1) << "cell " << cell;
+    }
+
+    // The global DOF has no mesh entity.
+    const auto* entities = sys.dofHandler().getEntityDofMap();
+    ASSERT_NE(entities, nullptr);
+    EXPECT_FALSE(entities->getDofEntity(lam).has_value());
+
+    // The row and the column of lambda are dense over u (the lambda-lambda
+    // entry is structural: every cell lists the DOF).
+    const auto& pattern = sys.sparsity("poisson");
+    for (const auto dof : fieldDofs(sys, problem.u)) {
+        EXPECT_TRUE(pattern.hasEntry(lam, dof)) << dof;
+        EXPECT_TRUE(pattern.hasEntry(dof, lam)) << dof;
+    }
+    EXPECT_EQ(pattern.getRowNnz(lam), n_u + 1);
+
+    // The rows of the global test function use the highest field's rule.
+    EXPECT_EQ(problem.r1->quadratureOrder(), problem.u_space->element().quadrature()->order());
+    EXPECT_TRUE(problem.r1->hasBoundQuadrature(ElementType::Quad4));
+}
+
+TEST(GlobalField, ColoredAssemblyIsRefused)
+{
+    auto mesh = buildGrid(2, 1, 1.0, 1.0, 1);
+    auto h1 = quadSpace(1);
+    auto r1 = std::make_shared<spaces::GlobalSpace>(1);
+    FESystem sys(mesh);
+    const auto u_id = sys.addField(FieldSpec{.name = "u", .space = h1});
+    const auto lam_id = sys.addField(FieldSpec{.name = "lambda", .space = r1});
+    sys.addOperator("op");
+    const auto u = forms::StateField(u_id, *h1, "u");
+    const auto v = forms::TestField(u_id, *h1, "v");
+    const auto lam = forms::StateField(lam_id, *r1, "lambda");
+    const auto mu = forms::TestField(lam_id, *r1, "mu");
+    (void)installFormulation(sys, "op", {u_id, lam_id},
+                             (forms::inner(forms::grad(u), forms::grad(v)) + lam * v).dx() + (mu * u).dx());
+    SetupOptions options;
+    options.assembly_options.use_coloring = true;
+    EXPECT_THROW(sys.setup(options), FEException);
+}
 
 // ---------------------------------------------------------------------------
 // G1: mean-constrained Poisson

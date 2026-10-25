@@ -43,6 +43,7 @@
 #include "Spaces/FunctionSpace.h"
 #include "Spaces/CompositeSpace.h"
 #include "Spaces/MixedSpace.h"
+#include "Spaces/GlobalSpace.h"
 #include "Spaces/MortarSpace.h"
 
 #include "Dofs/EntityDofMap.h"
@@ -2583,6 +2584,143 @@ LocalIndex maxInteriorFaceQuadraturePoints(const assembly::IMeshAccess& mesh,
     return {};
 }
 
+[[nodiscard]] bool hasGlobalFieldRecords(const FieldRegistry& registry) noexcept
+{
+    return std::any_of(registry.records().begin(), registry.records().end(),
+                       [](const FieldRecord& rec) { return rec.scope == FieldScope::Global; });
+}
+
+/**
+ * The DOFs of a global field: one per scalar, the same for every cell.  The
+ * lowest rank owns them (as MixedRowOwnershipPolicy::SingleOwner does for the
+ * monolithic auxiliary rows) and the other ranks hold them as ghosts.  They
+ * have no mesh entity, so the handler has no EntityDofMap.
+ */
+[[nodiscard]] dofs::DofHandler makeGlobalFieldDofHandler(const FieldRecord& rec,
+                                                         GlobalIndex n_cells,
+                                                         const dofs::DofDistributionOptions& options)
+{
+    constexpr int kOwnerRank = 0;
+    const auto n = static_cast<GlobalIndex>(rec.space->value_dimension());
+    FE_THROW_IF(n <= 0, InvalidArgumentException,
+                "FESystem::setup: global field '" + rec.name + "' has no scalars");
+    const bool owner = options.my_rank == kOwnerRank;
+
+    std::vector<GlobalIndex> dofs(static_cast<std::size_t>(n));
+    for (GlobalIndex d = 0; d < n; ++d) {
+        dofs[static_cast<std::size_t>(d)] = d;
+    }
+    dofs::DofMap map(n_cells, n, static_cast<LocalIndex>(n));
+    for (GlobalIndex cell = 0; cell < n_cells; ++cell) {
+        map.setCellDofs(cell, dofs);
+    }
+    map.setNumDofs(n);
+    map.setNumLocalDofs(owner ? n : 0);
+    map.setMyRank(options.my_rank);
+    map.setDofOwnership([](GlobalIndex) { return kOwnerRank; });
+
+    dofs::DofPartition partition(owner ? dofs::IndexSet(0, n) : dofs::IndexSet(),
+                                 owner ? dofs::IndexSet() : dofs::IndexSet(0, n));
+    partition.setGlobalSize(n);
+
+    dofs::DofHandler handler;
+    handler.setDofMap(std::move(map));
+    handler.setPartition(std::move(partition));
+    handler.setRankInfo(options.my_rank, options.world_size);
+#if FE_HAS_MPI
+    handler.setMpiComm(options.mpi_comm);
+#endif
+    handler.finalize();
+    return handler;
+}
+
+/**
+ * Bind the quadrature of the global rows: the order-0 element of every cell
+ * type of the mesh gets the largest quadrature order of the system's volume
+ * fields (on any rank), so a global test function's rows use the rule of the
+ * highest-order field's rows.
+ */
+void bindGlobalSpaceQuadrature(const FieldRegistry& registry,
+                               const assembly::IMeshAccess& mesh,
+                               const dofs::DofDistributionOptions& options)
+{
+    std::vector<ElementType> cell_types;
+    std::vector<GlobalIndex> type_cells;
+    mesh.forEachCell([&](GlobalIndex cell) {
+        const auto type = mesh.getCellType(cell);
+        if (std::find(cell_types.begin(), cell_types.end(), type) == cell_types.end()) {
+            cell_types.push_back(type);
+            type_cells.push_back(cell);
+        }
+    });
+
+    int order = 0;
+    for (const auto& rec : registry.records()) {
+        if (rec.scope != FieldScope::VolumeCell || !rec.space) {
+            continue;
+        }
+        for (std::size_t i = 0; i < cell_types.size(); ++i) {
+            const auto& element = rec.space->getElement(cell_types[i], type_cells[i]);
+            const auto rule = element.quadrature();
+            order = std::max(order,
+                             rule ? rule->order()
+                                  : quadrature::QuadratureFactory::recommended_order(
+                                        element.polynomial_order(), false));
+        }
+    }
+    order = std::max(order, quadrature::QuadratureFactory::recommended_order(0, false));
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized && options.world_size > 1) {
+        int global_order = order;
+        MPI_Allreduce(&order, &global_order, 1, MPI_INT, MPI_MAX, options.mpi_comm);
+        order = global_order;
+    }
+#else
+    (void)options;
+#endif
+
+    for (const auto& rec : registry.records()) {
+        if (rec.scope != FieldScope::Global) {
+            continue;
+        }
+        const auto* space = dynamic_cast<const spaces::GlobalSpace*>(rec.space.get());
+        FE_CHECK_NOT_NULL(space, "FESystem::setup: global field space");
+        space->bindQuadrature(cell_types, order);
+    }
+}
+
+/**
+ * Assembly paths that cannot carry a global field.  Every cell couples to its
+ * DOF: colored or work-stream assembly would give each cell its own color,
+ * and OwnedRowsOnly drops the other ranks' contributions to the global rows.
+ */
+void validateGlobalFieldAssembly(const assembly::AssemblyOptions& options,
+                                 std::string_view assembler_name,
+                                 int mpi_world_size)
+{
+    std::string name(assembler_name);
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    name.erase(std::remove_if(name.begin(), name.end(),
+                              [](unsigned char c) { return std::isspace(c) != 0; }),
+               name.end());
+    const bool supported_name = name.empty() || name == "auto" || name == "autoassembler" ||
+                                name == "standard" || name == "standardassembler" ||
+                                name == "parallel" || name == "parallelassembler";
+    FE_THROW_IF(!supported_name, NotImplementedException,
+                "FESystem::setup: a global field couples every cell to its DOF; assemble it with the "
+                "standard or parallel assembler (not '" + std::string(assembler_name) + "')");
+    FE_THROW_IF(options.use_coloring, NotImplementedException,
+                "FESystem::setup: a global field couples every cell to its DOF, so colored assembly would "
+                "give each cell its own color; leave use_coloring off (threads insert in cell order)");
+    FE_THROW_IF(mpi_world_size > 1 && options.ghost_policy == assembly::GhostPolicy::OwnedRowsOnly,
+                NotImplementedException,
+                "FESystem::setup: the rows of a global test function sum over every rank's cells, and "
+                "GhostPolicy::OwnedRowsOnly drops the other ranks' contributions; use ReverseScatter");
+}
+
 } // namespace
 
 SetupStoragePlan FESystem::computeSetupStoragePlan() const
@@ -2834,6 +2972,10 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     auto distribute_field = [&](const FieldRecord& rec) {
         FE_CHECK_NOT_NULL(rec.space.get(), "FESystem::setup: field.space");
 
+        if (rec.scope == FieldScope::Global) {
+            return makeGlobalFieldDofHandler(rec, meshAccess().numCells(), opts.dof_options);
+        }
+
         dofs::DofHandler dh;
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -2911,6 +3053,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         FE_THROW_IF(rec.id < 0 || idx >= field_dof_handlers_.size(), InvalidStateException,
                     "FESystem::setup: field registry contains invalid FieldId");
         field_dof_handlers_[idx] = distribute_field(rec);
+    }
+    if (hasGlobalFieldRecords(field_registry_)) {
+        bindGlobalSpaceQuadrature(field_registry_, meshAccess(), opts.dof_options);
     }
 
     // Assign monolithic offsets in field registration order.
@@ -3028,8 +3173,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 if (rec.source_kind != FieldSourceKind::Unknown) {
                     continue;
                 }
-                if (rec.scope == FieldScope::InterfaceFace &&
-                    rec.space->space_type() != spaces::SpaceType::Mortar) {
+                if ((rec.scope == FieldScope::InterfaceFace &&
+                     rec.space->space_type() != spaces::SpaceType::Mortar) ||
+                    rec.scope == FieldScope::Global) {
                     continue;
                 }
                 const auto idx = static_cast<std::size_t>(rec.id);
@@ -3056,8 +3202,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                         if (rec.source_kind != FieldSourceKind::Unknown) {
                             continue;
                         }
-                        if (rec.scope == FieldScope::InterfaceFace &&
-                            rec.space->space_type() != spaces::SpaceType::Mortar) {
+                        if ((rec.scope == FieldScope::InterfaceFace &&
+                             rec.space->space_type() != spaces::SpaceType::Mortar) ||
+                            rec.scope == FieldScope::Global) {
                             continue;
                         }
                         const auto idx = static_cast<std::size_t>(rec.id);
@@ -3082,8 +3229,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                         if (rec.source_kind != FieldSourceKind::Unknown) {
                             continue;
                         }
-                        if (rec.scope == FieldScope::InterfaceFace &&
-                            rec.space->space_type() != spaces::SpaceType::Mortar) {
+                        if ((rec.scope == FieldScope::InterfaceFace &&
+                             rec.space->space_type() != spaces::SpaceType::Mortar) ||
+                            rec.scope == FieldScope::Global) {
                             continue;
                         }
                         const auto idx = static_cast<std::size_t>(rec.id);
@@ -3108,8 +3256,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                         if (rec.source_kind != FieldSourceKind::Unknown) {
                             continue;
                         }
-                        if (rec.scope == FieldScope::InterfaceFace &&
-                            rec.space->space_type() != spaces::SpaceType::Mortar) {
+                        if ((rec.scope == FieldScope::InterfaceFace &&
+                             rec.space->space_type() != spaces::SpaceType::Mortar) ||
+                            rec.scope == FieldScope::Global) {
                             continue;
                         }
                         const auto idx = static_cast<std::size_t>(rec.id);
@@ -3134,8 +3283,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                         if (rec.source_kind != FieldSourceKind::Unknown) {
                             continue;
                         }
-                        if (rec.scope == FieldScope::InterfaceFace &&
-                            rec.space->space_type() != spaces::SpaceType::Mortar) {
+                        if ((rec.scope == FieldScope::InterfaceFace &&
+                             rec.space->space_type() != spaces::SpaceType::Mortar) ||
+                            rec.scope == FieldScope::Global) {
                             continue;
                         }
                         const auto idx = static_cast<std::size_t>(rec.id);
@@ -4364,6 +4514,16 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         dist_mode = DistSparsityMode::NodalInterleaved;
         owned_range = backend_map->owned_range;
         nodal_map = std::move(backend_map);
+    }
+    if (hasGlobalFieldRecords(field_registry_)) {
+        // A global field's DOF follows the field DOFs and belongs to the lowest
+        // rank, whose owned rows are then not one range, and no
+        // node-interleaved layout exists.  Every rank takes the replicated
+        // graph alike (distributed graphs of global rows come with the
+        // backends that take them).
+        dist_mode = DistSparsityMode::None;
+        owned_range = sparsity::IndexRange{};
+        nodal_map.reset();
     }
     distributed_sparsity_dof_per_node_ =
         (dist_mode == DistSparsityMode::NodalInterleaved && nodal_map.has_value())
@@ -5950,6 +6110,10 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         MPI_Comm_size(dof_handler_.mpiComm(), &sys_chars.mpi_world_size);
     }
 #endif
+
+    if (hasGlobalFieldRecords(field_registry_)) {
+        validateGlobalFieldAssembly(assembly_options, opts.assembler_name, sys_chars.mpi_world_size);
+    }
 
     assembler_selection_report_.clear();
     assembler_ = assembly::createAssembler(assembly_options, opts.assembler_name,

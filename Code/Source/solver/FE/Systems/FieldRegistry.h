@@ -29,7 +29,11 @@ namespace systems {
 
 enum class FieldScope : std::uint8_t {
     VolumeCell,
-    InterfaceFace
+    InterfaceFace,
+    /// One value for the whole domain (a field on a spaces::GlobalSpace): every
+    /// cell maps to the field's DOF, the lowest rank owns it and the other ranks
+    /// hold it as a ghost.  Appended: the values enter setup and manifest output.
+    Global
 };
 
 enum class FieldSourceKind : std::uint8_t {

@@ -206,6 +206,7 @@ template <class BC>
     case FormExprType::InteriorFaceIntegral:
     case FormExprType::InterfaceIntegral:
     case FormExprType::CutVolumeIntegral:
+    case FormExprType::GlobalIntegral:
         return true;
     default:
         break;

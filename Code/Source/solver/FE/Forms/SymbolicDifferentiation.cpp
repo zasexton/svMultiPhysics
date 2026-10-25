@@ -525,6 +525,7 @@ void markZeros(const FormExprNode& node,
             case FormExprType::InteriorFaceIntegral:
             case FormExprType::InterfaceIntegral:
             case FormExprType::CutVolumeIntegral:
+            case FormExprType::GlobalIntegral:
                 z = true;
                 break;
             default: break;
@@ -796,7 +797,8 @@ FormExpr simplify(const FormExpr& expr)
                 n.type() == FormExprType::BoundaryIntegral ||
                 n.type() == FormExprType::InteriorFaceIntegral ||
                 n.type() == FormExprType::InterfaceIntegral ||
-                n.type() == FormExprType::CutVolumeIntegral) {
+                n.type() == FormExprType::CutVolumeIntegral ||
+                n.type() == FormExprType::GlobalIntegral) {
                 if (kids.size() >= 1u && kids[0] && isZeroLike(*kids[0])) {
                     changed = true;
                     return FormExpr::constant(0.0);
@@ -1824,6 +1826,13 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                 out.deriv = a.deriv.dCutVolume(marker, side);
                 break;
             }
+            case FormExprType::GlobalIntegral: {
+                // A point mass: no measure, so no geometry variation.
+                const auto a = diff1(0);
+                out.primal = a.primal.dGlobal();
+                out.deriv = a.deriv.dGlobal();
+                break;
+            }
 
             default:
                 throw std::invalid_argument("differentiateResidual: unsupported FormExprType " +
@@ -2689,6 +2698,13 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
                 const auto a = diff1(0);
                 out.primal = a.primal.dCutVolume(marker, side);
                 out.deriv = a.deriv.dCutVolume(marker, side);
+                break;
+            }
+            case FormExprType::GlobalIntegral: {
+                // A point mass: no measure, so no geometry variation.
+                const auto a = diff1(0);
+                out.primal = a.primal.dGlobal();
+                out.deriv = a.deriv.dGlobal();
                 break;
             }
 

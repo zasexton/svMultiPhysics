@@ -8,6 +8,7 @@
 #include "Systems/FieldRegistry.h"
 
 #include "Spaces/FunctionSpace.h"
+#include "Spaces/GlobalSpace.h"
 #include "Spaces/MortarSpace.h"
 
 #include <algorithm>
@@ -52,6 +53,27 @@ FieldId FieldRegistry::add(FieldSpec spec)
                             std::to_string(mortar_space->interface_marker()));
         }
         rec.interface_marker = mortar_space->interface_marker();
+    }
+
+    if (rec.space->space_type() == spaces::SpaceType::Global) {
+        FE_THROW_IF(rec.scope == FieldScope::InterfaceFace, InvalidArgumentException,
+                    "FieldRegistry::add: field '" + rec.name +
+                        "' is on a GlobalSpace and cannot be interface-scoped");
+        rec.scope = FieldScope::Global;
+    }
+    if (rec.scope == FieldScope::Global) {
+        FE_THROW_IF(rec.space->space_type() != spaces::SpaceType::Global, InvalidArgumentException,
+                    "FieldRegistry::add: global field '" + rec.name + "' must be on a GlobalSpace");
+        FE_THROW_IF(rec.source_kind != FieldSourceKind::Unknown, InvalidArgumentException,
+                    "FieldRegistry::add: global field '" + rec.name +
+                        "' must be an unknown (state a known global value as a parameter)");
+        FE_THROW_IF(rec.participant_name.has_value() || rec.participant_domain_id.has_value(),
+                    InvalidArgumentException,
+                    "FieldRegistry::add: global field '" + rec.name +
+                        "' belongs to the whole system and cannot be participant-scoped");
+        FE_THROW_IF(rec.components != rec.space->value_dimension(), InvalidArgumentException,
+                    "FieldRegistry::add: global field '" + rec.name +
+                        "' must have as many components as its GlobalSpace has scalars");
     }
 
     if (rec.scope == FieldScope::InterfaceFace) {

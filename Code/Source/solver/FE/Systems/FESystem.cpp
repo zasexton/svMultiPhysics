@@ -5321,6 +5321,8 @@ void addUnambiguousRoleMappings(backends::SolverOptions& options,
             return "volume";
         case FieldScope::InterfaceFace:
             return "interface";
+        case FieldScope::Global:
+            return "global";
     }
     return "unknown";
 }
@@ -8198,6 +8200,14 @@ FieldId FESystem::findFieldByName(std::string_view name) const noexcept
 bool FESystem::hasField(std::string_view name) const noexcept
 {
     return findFieldByName(name) != INVALID_FIELD_ID;
+}
+
+bool FESystem::hasGlobalFields() const noexcept
+{
+    const auto& records = field_registry_.records();
+    return std::any_of(records.begin(), records.end(), [](const FieldRecord& rec) {
+        return rec.scope == FieldScope::Global;
+    });
 }
 
 std::vector<FieldId> FESystem::unknownFieldIdsInDofMapOrder() const

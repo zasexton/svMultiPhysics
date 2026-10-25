@@ -557,6 +557,7 @@ set(FE_SPACES_HEADERS
     Spaces/MixedSpace.h
     Spaces/TraceSpace.h
     Spaces/MortarSpace.h
+    Spaces/GlobalSpace.h
     Spaces/CompositeSpace.h
     Spaces/EnrichedSpace.h
     Spaces/AdaptiveSpace.h
@@ -583,6 +584,7 @@ set(FE_SPACES_SOURCES
     Spaces/MixedSpace.cpp
     Spaces/TraceSpace.cpp
     Spaces/MortarSpace.cpp
+    Spaces/GlobalSpace.cpp
     Spaces/CompositeSpace.cpp
     Spaces/EnrichedSpace.cpp
     Spaces/AdaptiveSpace.cpp
@@ -3201,6 +3203,7 @@ if(FE_BUILD_TESTS)
                 Tests/Unit/Systems/test_MixedFormPerformance.cpp
                 Tests/Unit/Systems/test_MortarHybridInterface.cpp
                 Tests/Unit/Systems/test_InterfaceTraceConventions.cpp
+                Tests/Unit/Systems/test_GlobalMultiplier.cpp
 	                Tests/Unit/Systems/test_BackendParity.cpp
 	                Tests/Unit/Systems/test_CanonicalWorkflow.cpp
 	                Tests/Unit/Systems/test_GaugeIntegration.cpp

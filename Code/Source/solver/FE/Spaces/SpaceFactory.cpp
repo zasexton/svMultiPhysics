@@ -54,6 +54,9 @@ std::shared_ptr<FunctionSpace> SpaceFactory::create(SpaceType type,
         case SpaceType::Adaptive:
             FE_THROW(NotImplementedException,
                      "SpaceFactory::create: use specialized constructors for composite/enriched/adaptive spaces");
+        case SpaceType::Global:
+            FE_THROW(InvalidArgumentException,
+                     "SpaceFactory::create: construct a GlobalSpace directly");
         default:
             FE_THROW(InvalidArgumentException,
                      "SpaceFactory::create: unknown SpaceType");
@@ -90,6 +93,9 @@ std::shared_ptr<FunctionSpace> SpaceFactory::create(const SpaceRequest& req) {
         case SpaceType::Adaptive:
             FE_THROW(NotImplementedException,
                      "SpaceFactory::create(SpaceRequest): use specialized constructors for composite/enriched/adaptive spaces");
+        case SpaceType::Global:
+            FE_THROW(InvalidArgumentException,
+                     "SpaceFactory::create(SpaceRequest): construct a GlobalSpace directly");
         default:
             FE_THROW(InvalidArgumentException,
                      "SpaceFactory::create(SpaceRequest): unknown SpaceType");

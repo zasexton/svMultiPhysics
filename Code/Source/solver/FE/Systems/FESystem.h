@@ -684,6 +684,8 @@ public:
     [[nodiscard]] bool hasField(FieldId field) const noexcept;
     [[nodiscard]] bool fieldParticipatesInUnknownVector(FieldId field) const;
     [[nodiscard]] std::vector<FieldId> unknownFieldIdsInDofMapOrder() const;
+    /// True when a registered field is global (FieldScope::Global, on a GlobalSpace).
+    [[nodiscard]] bool hasGlobalFields() const noexcept;
     void setPrescribedFieldCoefficients(FieldId field, std::span<const Real> coefficients);
     void setPrescribedFieldCoefficientPairs(FieldId field,
                                             std::span<const Real> high,

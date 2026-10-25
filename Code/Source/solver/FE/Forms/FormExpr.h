@@ -558,6 +558,9 @@ struct SymbolicOptions {
         // Generated boundary rules.  Appended: the values above enter kernel
         // and manifest hashes.
         BoundaryNormal, ///< Outward normal of the physical boundary on a generated contact-line or wetted-boundary rule
+
+        // Global measure.  Appended for the same reason.
+        GlobalIntegral, ///< Unit point mass: a term with no spatial integral, added once (dGlobal)
 		};
 
 class FormExpr;
@@ -906,6 +909,14 @@ public:
             const ExteriorBoundaryMeasure& measure) const;
         [[nodiscard]] FormExpr dCutVolume(int interface_marker,
                                           CutVolumeSide side) const;
+        /**
+         * Unit point mass for a term with no spatial integral, such as the
+         * right-hand side of a mean-value constraint, -(mu * c).dGlobal().  Its
+         * test function is a global multiplier's, and its integrand holds only
+         * global symbols, constants, parameters and time; installFormulation
+         * adds the term once to the multiplier's row.
+         */
+        [[nodiscard]] FormExpr dGlobal() const;
 
     // ---- Typed measures (Forms/IntegrationDomain.h) ----
     // Sugar only: each lowers to the untyped measure above, so the IR and the

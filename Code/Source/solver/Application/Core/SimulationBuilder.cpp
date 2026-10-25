@@ -1842,6 +1842,12 @@ void SimulationBuilder::createSolvers()
   }
 #endif
 
+  if (backend_kind == svmp::FE::backends::BackendKind::FSILS && components_.fe_system->hasGlobalFields()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] SimulationBuilder: a global field (a multiplier) has no mesh node, "
+        "and FSILS needs one block of DOFs per node; use a backend with a variable block layout "
+        "(Eigen, PETSc, Trilinos) until the bordered lowering for FSILS exists.");
+  }
   if (backend_kind == svmp::FE::backends::BackendKind::FSILS && create_options.dof_per_node > 1) {
     oopCout() << "[svMultiPhysics::Application] SimulationBuilder: configuring FSILS DOF permutation." << std::endl;
     svmp::FE::dofs::DofDistributionOptions dof_options{};

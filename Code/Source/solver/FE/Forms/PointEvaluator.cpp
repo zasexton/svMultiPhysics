@@ -455,6 +455,7 @@ struct DualValue {
         case FormExprType::BoundaryIntegral:
         case FormExprType::InteriorFaceIntegral:
         case FormExprType::InterfaceIntegral:
+        case FormExprType::GlobalIntegral:
             break;
     }
 
@@ -821,6 +822,7 @@ struct DualValue {
         case FormExprType::BoundaryIntegral:
         case FormExprType::InteriorFaceIntegral:
         case FormExprType::InterfaceIntegral:
+        case FormExprType::GlobalIntegral:
             break;
     }
 

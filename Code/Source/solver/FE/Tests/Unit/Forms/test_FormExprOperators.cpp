@@ -13,7 +13,9 @@
 
 #include "Forms/FormCompiler.h"
 #include "Forms/FormExpr.h"
+#include "Forms/SymbolicDifferentiation.h"
 #include "Forms/Vocabulary.h"
+#include "Spaces/GlobalSpace.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
 #include "Systems/SystemManifest.h"
@@ -222,6 +224,42 @@ TEST(FormCompilerTraceOperators, MixedFormsCheckEveryTerm)
     });
     EXPECT_NE(message.find("jump()"), std::string::npos) << message;
     EXPECT_NE(message.find("[[p]]"), std::string::npos) << message;
+}
+
+TEST(GlobalMeasure, IsAPointMassTermOfItsOwn)
+{
+    spaces::GlobalSpace r1;
+    const auto lam = FormExpr::stateField(/*field=*/1, r1, "lambda");
+    const auto mu = FormExpr::testFunction(/*field=*/1, r1, "mu");
+    const auto term = (mu * FormExpr::constant(2.0)).dGlobal();
+    ASSERT_TRUE(term.isValid());
+    EXPECT_EQ(term.node()->type(), FormExprType::GlobalIntegral);
+    EXPECT_NE(term.toString().find("dGlobal"), std::string::npos) << term.toString();
+    EXPECT_FALSE(FormExpr{}.dGlobal().isValid());
+
+    // Rebuilding keeps the measure.
+    const auto rebuilt = term.transformNodes([](const FormExprNode&) { return std::nullopt; });
+    expectSameTree(rebuilt, term);
+
+    // Differentiation goes through it: d/dlambda of (lambda^2 mu) dGlobal.
+    const auto quadratic = (lam * lam * mu).dGlobal();
+    const auto tangent = differentiateResidual(quadratic, /*field=*/FieldId{1});
+    ASSERT_TRUE(tangent.isValid());
+    EXPECT_EQ(tangent.node()->type(), FormExprType::GlobalIntegral) << tangent.toString();
+}
+
+TEST(GlobalMeasure, IsNotAnElementKernelTerm)
+{
+    spaces::H1Space h1(ElementType::Triangle3, 1);
+    spaces::GlobalSpace r1;
+    const auto v = TestFunction(h1, "v");
+    const auto u = TrialFunction(h1, "u");
+    FormCompiler compiler;
+    const auto message = invalidArgumentMessage([&] {
+        return compiler.compileResidual((u * v).dx() + (FormExpr::constant(1.0) * v).dGlobal());
+    });
+    EXPECT_NE(message.find("dGlobal()"), std::string::npos) << message;
+    EXPECT_NE(message.find("installFormulation"), std::string::npos) << message;
 }
 
 } // namespace svmp::FE::forms::test
