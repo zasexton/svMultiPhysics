@@ -1034,6 +1034,18 @@ TEST(GlobalMultiplierG3, MeanZeroPressureMultiplierMatchesTheAutomaticGauge)
         for (GlobalIndex d = p_offset; d < p_offset + p_count + 1; ++d) {
             EXPECT_FALSE(sys.constraints().isConstrained(d)) << "n=" << n << " dof " << d;
         }
+        // The pressure constant is a candidate of the field block (the
+        // multiplier's row left out), and the row anchors it.
+        const auto* multiplier_registry = sys.gaugeRegistryIfPresent();
+        ASSERT_NE(multiplier_registry, nullptr);
+        bool p_anchored = false;
+        for (const auto& mode : multiplier_registry->resolvedModes()) {
+            if (mode.candidate.field == with_multiplier.p) {
+                p_anchored = mode.status == gauge::GaugeStatus::Anchored &&
+                             mode.policy == gauge::EnforcementPolicy::None;
+            }
+        }
+        EXPECT_TRUE(p_anchored) << "n=" << n;
 
         const auto a = solveFromZero(sys, "stokes");
         const auto b = solveConstrainedFromZero(*gauged.system, "stokes");

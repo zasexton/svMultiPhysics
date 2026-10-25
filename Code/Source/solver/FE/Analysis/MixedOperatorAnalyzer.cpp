@@ -11,6 +11,7 @@
 #include "Analysis/ContributionDescriptor.h"
 #include "Analysis/FormStructureAnalyzer.h"
 #include "Forms/FormExpr.h"
+#include "Spaces/FunctionSpace.h"
 
 #include <algorithm>
 #include <cmath>
@@ -297,7 +298,56 @@ bool subtreeContainsNonScalarMultiplierTrialField(const forms::FormExprNode& nod
 struct TrialUseState {
     bool under_annihilating_operator{false};
     bool under_time_derivative{false};
+    /// Skip the terms whose test functions are all global (rows of global multipliers).
+    bool skip_global_rows{false};
 };
+
+bool isGlobalTestFunction(const forms::FormExprNode& node)
+{
+    if (node.type() != forms::FormExprType::TestFunction) {
+        return false;
+    }
+    const auto* signature = node.spaceSignature();
+    return signature != nullptr && signature->space_type == spaces::SpaceType::Global;
+}
+
+bool subtreeContainsGlobalTestFunction(const forms::FormExprNode& node)
+{
+    if (isGlobalTestFunction(node)) {
+        return true;
+    }
+    const auto children = node.children();
+    return std::any_of(children.begin(), children.end(), [](const forms::FormExprNode* child) {
+        return child && subtreeContainsGlobalTestFunction(*child);
+    });
+}
+
+/**
+ * True when @p node has test functions and every one of them is global: a
+ * term of the row of a global multiplier (D54).  That row is a constraint of
+ * its own; a gauge of the field block is judged without it, so a mean-value
+ * multiplier of the pressure leaves the pressure's constant mode a candidate
+ * that the multiplier then anchors.
+ */
+bool subtreeIsGlobalRowTerm(const forms::FormExprNode& node)
+{
+    bool any_test = false;
+    bool all_global = true;
+    const auto visit = [&](const auto& self, const forms::FormExprNode& n) -> void {
+        if (n.type() == forms::FormExprType::TestFunction) {
+            any_test = true;
+            all_global = all_global && isGlobalTestFunction(n);
+            return;
+        }
+        for (const auto* child : n.children()) {
+            if (child) {
+                self(self, *child);
+            }
+        }
+    };
+    visit(visit, node);
+    return any_test && all_global;
+}
 
 bool subtreeContainsUndifferentiatedTrialField(
     const forms::FormExprNode& node,
@@ -430,6 +480,9 @@ bool multiplierTrialUseOutsideCertifiedGaugePattern(
     using forms::FormExprType;
 
     if (isZeroLikeExpression(node)) {
+        return false;
+    }
+    if (state.skip_global_rows && subtreeIsGlobalRowTerm(node)) {
         return false;
     }
     if (!state.under_annihilating_operator &&
@@ -808,8 +861,12 @@ InferredScalarMultiplierNullspace inferScalarMultiplierConstantNullspaceFromResi
             residual, multiplier_field, primal_vector_fields)) {
         return result;
     }
+    // The rows of global multipliers are left out (only systems with global
+    // fields have them, so the search is the plain one otherwise).
+    TrialUseState trial_use_state;
+    trial_use_state.skip_global_rows = subtreeContainsGlobalTestFunction(residual);
     if (multiplierTrialUseOutsideCertifiedGaugePattern(
-            residual, multiplier_field, primal_vector_fields)) {
+            residual, multiplier_field, primal_vector_fields, trial_use_state)) {
         return result;
     }
 
