@@ -1295,97 +1295,105 @@ LevelSetMaintenanceWorkLedger::mark() const noexcept
   };
 }
 
+LogRecord levelSetMaintenanceWorkRowRecord(const LevelSetMaintenanceWorkRow& row)
+{
+  LogRecord log("LevelSetMaintenanceWorkLedger", "work row");
+  log.diagnostic("level_set_maintenance_work")
+      .rootOnly()
+      .value("transaction_id", row.transaction_id)
+      .text("status", levelSetMaintenanceWorkStatusName(row.status))
+      .text("substage", levelSetMaintenanceWorkSubstageName(row.substage))
+      .value("step", row.step)
+      .value("attempt", row.attempt)
+      .value("time", row.time)
+      .value("dt", row.dt)
+      .text("declared_stage", levelSetMaintenanceDeclaredStageName(row.declared_stage))
+      .value("algebraic_state_revision_before", row.algebraic_state_revision_before)
+      .value("algebraic_state_revision_after", row.algebraic_state_revision_after)
+      .value("snapshot_set_revision_before", row.snapshot_set_revision_before)
+      .value("snapshot_set_revision_after", row.snapshot_set_revision_after)
+      .value("mesh_topology_set_revision_before", row.mesh_topology_set_revision_before)
+      .value("mesh_topology_set_revision_after", row.mesh_topology_set_revision_after)
+      .value("cut_topology_set_revision_before", row.cut_topology_set_revision_before)
+      .value("cut_topology_set_revision_after", row.cut_topology_set_revision_after)
+      .value("extension_map_revision_before", row.extension_map_revision_before.value_or(0u))
+      .value("extension_map_revision_after", row.extension_map_revision_after.value_or(0u))
+      .value("authoritative_functional_count", row.before.size())
+      .text("numerical_work_sign", "potential_after_minus_before")
+      .value("numerical_work", row.numerical_work)
+      .value("accepted_numerical_work", row.accepted_numerical_work)
+      .boolean("modeled_energy_work_available", row.modeled_energy_numerical_work.has_value())
+      .value("modeled_energy_numerical_work", row.modeled_energy_numerical_work.value_or(0.0))
+      .value("accepted_modeled_energy_numerical_work", row.accepted_modeled_energy_numerical_work.value_or(0.0))
+      .text("modeled_energy_classification",
+            row.substage == LevelSetMaintenanceWorkSubstage::Transport ? "physical_transport_change"
+                                                                       : "numerical_maintenance_change")
+      .text("legacy_account_scope", "maintenance_surface_wall_volume_potential")
+      .text("modeled_account_scope", "kinetic_gravitational_surface_young_wall")
+      .boolean("complete_time_discrete_energy_identity", false);
+  // One child line per interface, with the keys that identify the row.
+  for (std::size_t index = 0u; index < row.before.size(); ++index) {
+    const auto& before = row.before[index];
+    const auto& after = row.after[index];
+    auto& interface_line =
+        log.child("level_set_maintenance_work_interface", {"transaction_id", "substage", "step", "attempt"});
+    interface_line.value("interface_marker", before.interface_marker)
+        .value("before_snapshot_revision", before.snapshot_revision)
+        .value("after_snapshot_revision", after.snapshot_revision)
+        .value("before_mesh_topology_revision", before.mesh_topology_revision)
+        .value("after_mesh_topology_revision", after.mesh_topology_revision)
+        .value("before_cut_topology_revision", before.cut_topology_revision)
+        .value("after_cut_topology_revision", after.cut_topology_revision)
+        .value("before_liquid_volume", before.liquid_volume)
+        .value("after_liquid_volume", after.liquid_volume)
+        .value("before_liquid_gas_area", before.liquid_gas_area)
+        .value("after_liquid_gas_area", after.liquid_gas_area)
+        .value("before_wetted_wall_area", before.wetted_wall_area)
+        .value("after_wetted_wall_area", after.wetted_wall_area)
+        .value("before_contact_measure", before.contact_measure)
+        .value("after_contact_measure", after.contact_measure)
+        .value("before_surface_energy", before.surface_energy)
+        .value("after_surface_energy", after.surface_energy)
+        .value("before_young_wall_energy", before.young_wall_energy)
+        .value("after_young_wall_energy", after.young_wall_energy)
+        .value("before_volume_constraint_potential", before.volume_constraint_potential)
+        .value("after_volume_constraint_potential", after.volume_constraint_potential)
+        .value("before_total_potential", before.total_potential)
+        .value("after_total_potential", after.total_potential);
+    if (before.modeled_stored_energy.has_value() && after.modeled_stored_energy.has_value()) {
+      interface_line.value("before_kinetic_energy", *before.kinetic_energy)
+          .value("after_kinetic_energy", *after.kinetic_energy)
+          .value("before_gravitational_energy", *before.gravitational_energy)
+          .value("after_gravitational_energy", *after.gravitational_energy)
+          .value("before_gravitational_potential_power", *before.gravitational_potential_power)
+          .value("after_gravitational_potential_power", *after.gravitational_potential_power)
+          .value("before_modeled_stored_energy", *before.modeled_stored_energy)
+          .value("after_modeled_stored_energy", *after.modeled_stored_energy);
+    }
+    if (before.surface_wall_potential_power.has_value() && after.surface_wall_potential_power.has_value()) {
+      interface_line.value("before_surface_wall_potential_power", *before.surface_wall_potential_power)
+          .value("after_surface_wall_potential_power", *after.surface_wall_potential_power)
+          .value("before_volume_constraint_potential_power", *before.volume_constraint_potential_power)
+          .value("after_volume_constraint_potential_power", *after.volume_constraint_potential_power);
+    }
+    if (before.bulk_viscous_dissipation_rate.has_value() && after.bulk_viscous_dissipation_rate.has_value()) {
+      interface_line.value("before_bulk_viscous_dissipation_rate", *before.bulk_viscous_dissipation_rate)
+          .value("after_bulk_viscous_dissipation_rate", *after.bulk_viscous_dissipation_rate);
+    }
+    if (before.external_pressure_power.has_value() && after.external_pressure_power.has_value()) {
+      interface_line.value("before_external_pressure_power", *before.external_pressure_power)
+          .value("after_external_pressure_power", *after.external_pressure_power);
+    }
+  }
+  return log;
+}
+
 void logLevelSetMaintenanceWorkRows(
     std::span<const LevelSetMaintenanceWorkRow> rows)
 {
   // Map entry R2.144; rank 0 prints it.
   for (const auto& row : rows) {
-    LogRecord log("LevelSetMaintenanceWorkLedger", "work row");
-    log.diagnostic("level_set_maintenance_work")
-        .rootOnly()
-        .value("transaction_id", row.transaction_id)
-        .text("status", levelSetMaintenanceWorkStatusName(row.status))
-        .text("substage", levelSetMaintenanceWorkSubstageName(row.substage))
-        .value("step", row.step)
-        .value("attempt", row.attempt)
-        .value("time", row.time)
-        .value("dt", row.dt)
-        .text("declared_stage", levelSetMaintenanceDeclaredStageName(row.declared_stage))
-        .value("algebraic_state_revision_before", row.algebraic_state_revision_before)
-        .value("algebraic_state_revision_after", row.algebraic_state_revision_after)
-        .value("snapshot_set_revision_before", row.snapshot_set_revision_before)
-        .value("snapshot_set_revision_after", row.snapshot_set_revision_after)
-        .value("mesh_topology_set_revision_before", row.mesh_topology_set_revision_before)
-        .value("mesh_topology_set_revision_after", row.mesh_topology_set_revision_after)
-        .value("cut_topology_set_revision_before", row.cut_topology_set_revision_before)
-        .value("cut_topology_set_revision_after", row.cut_topology_set_revision_after)
-        .value("extension_map_revision_before", row.extension_map_revision_before.value_or(0u))
-        .value("extension_map_revision_after", row.extension_map_revision_after.value_or(0u))
-        .value("authoritative_functional_count", row.before.size())
-        .text("numerical_work_sign", "potential_after_minus_before")
-        .value("numerical_work", row.numerical_work)
-        .value("accepted_numerical_work", row.accepted_numerical_work)
-        .boolean("modeled_energy_work_available", row.modeled_energy_numerical_work.has_value())
-        .value("modeled_energy_numerical_work", row.modeled_energy_numerical_work.value_or(0.0))
-        .value("accepted_modeled_energy_numerical_work", row.accepted_modeled_energy_numerical_work.value_or(0.0))
-        .text("modeled_energy_classification",
-              row.substage == LevelSetMaintenanceWorkSubstage::Transport ? "physical_transport_change"
-                                                                         : "numerical_maintenance_change")
-        .text("legacy_account_scope", "maintenance_surface_wall_volume_potential")
-        .text("modeled_account_scope", "kinetic_gravitational_surface_young_wall")
-        .boolean("complete_time_discrete_energy_identity", false);
-    for (std::size_t index = 0u; index < row.before.size(); ++index) {
-      const auto& before = row.before[index];
-      const auto& after = row.after[index];
-      log.value("interface_marker", before.interface_marker)
-          .value("before_snapshot_revision", before.snapshot_revision)
-          .value("after_snapshot_revision", after.snapshot_revision)
-          .value("before_mesh_topology_revision", before.mesh_topology_revision)
-          .value("after_mesh_topology_revision", after.mesh_topology_revision)
-          .value("before_cut_topology_revision", before.cut_topology_revision)
-          .value("after_cut_topology_revision", after.cut_topology_revision)
-          .value("before_liquid_volume", before.liquid_volume)
-          .value("after_liquid_volume", after.liquid_volume)
-          .value("before_liquid_gas_area", before.liquid_gas_area)
-          .value("after_liquid_gas_area", after.liquid_gas_area)
-          .value("before_wetted_wall_area", before.wetted_wall_area)
-          .value("after_wetted_wall_area", after.wetted_wall_area)
-          .value("before_contact_measure", before.contact_measure)
-          .value("after_contact_measure", after.contact_measure)
-          .value("before_surface_energy", before.surface_energy)
-          .value("after_surface_energy", after.surface_energy)
-          .value("before_young_wall_energy", before.young_wall_energy)
-          .value("after_young_wall_energy", after.young_wall_energy)
-          .value("before_volume_constraint_potential", before.volume_constraint_potential)
-          .value("after_volume_constraint_potential", after.volume_constraint_potential)
-          .value("before_total_potential", before.total_potential)
-          .value("after_total_potential", after.total_potential);
-      if (before.modeled_stored_energy.has_value() && after.modeled_stored_energy.has_value()) {
-        log.value("before_kinetic_energy", *before.kinetic_energy)
-            .value("after_kinetic_energy", *after.kinetic_energy)
-            .value("before_gravitational_energy", *before.gravitational_energy)
-            .value("after_gravitational_energy", *after.gravitational_energy)
-            .value("before_gravitational_potential_power", *before.gravitational_potential_power)
-            .value("after_gravitational_potential_power", *after.gravitational_potential_power)
-            .value("before_modeled_stored_energy", *before.modeled_stored_energy)
-            .value("after_modeled_stored_energy", *after.modeled_stored_energy);
-      }
-      if (before.surface_wall_potential_power.has_value() && after.surface_wall_potential_power.has_value()) {
-        log.value("before_surface_wall_potential_power", *before.surface_wall_potential_power)
-            .value("after_surface_wall_potential_power", *after.surface_wall_potential_power)
-            .value("before_volume_constraint_potential_power", *before.volume_constraint_potential_power)
-            .value("after_volume_constraint_potential_power", *after.volume_constraint_potential_power);
-      }
-      if (before.bulk_viscous_dissipation_rate.has_value() && after.bulk_viscous_dissipation_rate.has_value()) {
-        log.value("before_bulk_viscous_dissipation_rate", *before.bulk_viscous_dissipation_rate)
-            .value("after_bulk_viscous_dissipation_rate", *after.bulk_viscous_dissipation_rate);
-      }
-      if (before.external_pressure_power.has_value() && after.external_pressure_power.has_value()) {
-        log.value("before_external_pressure_power", *before.external_pressure_power)
-            .value("after_external_pressure_power", *after.external_pressure_power);
-      }
-    }
-    logRecord(log);
+    logRecord(levelSetMaintenanceWorkRowRecord(row));
   }
 }
 

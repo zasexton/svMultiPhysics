@@ -3,7 +3,7 @@
   "Log-record conversion map (agent-status/refactor/logrecord-cleanup-proposal.md, approved 2026-10-24).",
   "One entry per converted line: how the line reads before (head text before its first key, and/or its diagnostic word)",
   "and after (owner, message, diagnostic first, level, scope), key renames, repeated groups that become child lines",
-  "(split: a group starts at \"start\" and holds the following keys with \"prefix\"), the keys a child line repeats from its",
+  "(split: a group starts at \"start\" and holds the following keys with \"prefix\", or one of \"prefixes\"), the keys a child line repeats from its",
   "parent (identifying), and the few lines with a special shape.  Read by tests/cases/fluid/free_surface_log_records.py",
   "(both formats) and by the --map gate of the module-log comparator.  Values never change in a conversion."
  ],
@@ -749,8 +749,22 @@
     "scope": "root"
    },
    "renames": {},
-   "split": [],
-   "identifying": [],
+   "split": [
+    {
+     "start": "interface_marker",
+     "prefixes": [
+      "before_",
+      "after_"
+     ],
+     "diagnostic": "level_set_maintenance_work_interface"
+    }
+   ],
+   "identifying": [
+    "transaction_id",
+    "substage",
+    "step",
+    "attempt"
+   ],
    "special": null
   },
   {

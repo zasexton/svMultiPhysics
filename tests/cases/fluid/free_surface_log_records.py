@@ -239,7 +239,7 @@ def _canonical(line: Line, entry: dict, role: str) -> Record:
                 cur = (starts[k], [(k, v)])
                 groups.append(cur)
                 continue
-            if cur is not None and k.startswith(cur[0]["prefix"]) and not (
+            if cur is not None and k.startswith(tuple(cur[0].get("prefixes") or [cur[0]["prefix"]])) and not (
                     cur[0].get("exclude_prefix") and k.startswith(cur[0]["exclude_prefix"])):
                 cur[1].append((k, v))
                 continue

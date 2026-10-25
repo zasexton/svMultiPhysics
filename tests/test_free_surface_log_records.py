@@ -206,3 +206,34 @@ def test_declared_walls_are_child_lines_and_points_compare_by_component():
     assert not L.values_equal("(0,-4.1699999999999999,0)", "(0,-4.18,0)")
     assert not L.values_equal("(0,1)", "(0,1,0)")
     assert all(L.lint_line(line) == [] for line in new)
+
+
+def test_work_row_interfaces_are_child_lines():
+    old = ("[svMultiPhysics::Application] Level-set maintenance work row diagnostic=level_set_maintenance_work "
+           "transaction_id=1 status=accepted substage=transport step=1 attempt=1 time=0.5 "
+           "authoritative_functional_count=2 complete_time_discrete_energy_identity=false "
+           "interface_marker=7 before_snapshot_revision=11 after_snapshot_revision=12 "
+           "before_liquid_volume=0.26000000000000001 after_liquid_volume=0.25 "
+           "interface_marker=9 before_snapshot_revision=13 after_snapshot_revision=14 "
+           "before_liquid_volume=1 after_liquid_volume=1.5")
+    head = "[R0] [INFO] LevelSetMaintenanceWorkLedger: work row "
+    new = [
+        head + "diagnostic=level_set_maintenance_work transaction_id=1 status=accepted substage=transport step=1 "
+               "attempt=1 time=0.5 authoritative_functional_count=2 complete_time_discrete_energy_identity=false",
+        head + "diagnostic=level_set_maintenance_work_interface transaction_id=1 substage=transport step=1 attempt=1 "
+               "interface_marker=7 before_snapshot_revision=11 after_snapshot_revision=12 before_liquid_volume=0.26 "
+               "after_liquid_volume=0.25",
+        head + "diagnostic=level_set_maintenance_work_interface transaction_id=1 substage=transport step=1 attempt=1 "
+               "interface_marker=9 before_snapshot_revision=13 after_snapshot_revision=14 before_liquid_volume=1 "
+               "after_liquid_volume=1.5",
+    ]
+    (a,) = L.records([old], "level_set_maintenance_work")
+    (b,) = L.records(new, "level_set_maintenance_work")
+    assert [k for k, _ in a.fields] == [k for k, _ in b.fields]
+    assert [[k for k, _ in c.fields] for c in a.children] == [[k for k, _ in c.fields] for c in b.children]
+    assert all(L.values_equal(x, y) for ca, cb in zip(a.children, b.children)
+               for (_, x), (_, y) in zip(ca.fields, cb.fields))
+    assert all(L.lint_line(line) == [] for line in new)
+    (legacy,) = L.legacy_view(new)
+    assert legacy.endswith("interface_marker=9 before_snapshot_revision=13 after_snapshot_revision=14 "
+                           "before_liquid_volume=1 after_liquid_volume=1.5")

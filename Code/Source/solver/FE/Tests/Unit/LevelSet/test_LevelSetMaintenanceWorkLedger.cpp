@@ -7,6 +7,8 @@
 
 #include "LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h"
 
+#include "Core/LogRecord.h"
+
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -387,4 +389,81 @@ TEST(LevelSetMaintenanceWorkLedger, PublicationLogsNameOnlyTheNewOutcome)
     EXPECT_THROW(level_set::logLevelSetMaintenanceWorkPublishedSince(
                      ledger, mark, LevelSetMaintenanceWorkStatus::Trial),
                  std::invalid_argument);
+}
+
+// A row of two interfaces is one record and one child line per interface
+// (map entry R2.144): every key once per line, the row's identifying keys
+// on each child.  No gate deck has two interfaces, so the text is checked
+// here.
+TEST(LevelSetMaintenanceWorkLedger, RowRecordHasOneChildLinePerInterface)
+{
+    level_set::LevelSetMaintenanceWorkRow row;
+    row.transaction_id = 121u;
+    row.status = LevelSetMaintenanceWorkStatus::Accepted;
+    row.substage = Substage::Reinitialization;
+    row.step = 8u;
+    row.attempt = 2u;
+    row.time = 0.4;
+    row.dt = 0.05;
+    row.algebraic_state_revision_before = 7001u;
+    row.algebraic_state_revision_after = 7002u;
+    row.snapshot_set_revision_before = 5001u;
+    row.snapshot_set_revision_after = 5002u;
+    row.mesh_topology_set_revision_before = 19u;
+    row.mesh_topology_set_revision_after = 19u;
+    row.cut_topology_set_revision_before = 6001u;
+    row.cut_topology_set_revision_after = 6002u;
+    row.extension_map_revision_before = 313u;
+    row.extension_map_revision_after = 313u;
+    row.declared_stage = LevelSetMaintenanceDeclaredStage::AcceptedEndpointPostStep;
+    row.before = {functionalValue(2.0, 41u, 407), ownerValue(1.5, 43u, 0.5, 0.25, 409)};
+    row.after = {functionalValue(2.125, 42u, 407), ownerValue(1.75, 44u, 0.75, 0.25, 409)};
+    row.numerical_work = 0.375;
+    row.accepted_numerical_work = 0.375;
+
+    const auto lines = level_set::levelSetMaintenanceWorkRowRecord(row).lines();
+    const std::string head = "LevelSetMaintenanceWorkLedger: work row ";
+    const std::string row_keys = "transaction_id=121 substage=reinitialization step=8 attempt=2 ";
+    const std::vector<std::string> expected{
+        head + "diagnostic=level_set_maintenance_work transaction_id=121 status=accepted "
+               "substage=reinitialization step=8 attempt=2 time=0.4 dt=0.05 "
+               "declared_stage=accepted_endpoint_post_step algebraic_state_revision_before=7001 "
+               "algebraic_state_revision_after=7002 snapshot_set_revision_before=5001 "
+               "snapshot_set_revision_after=5002 mesh_topology_set_revision_before=19 "
+               "mesh_topology_set_revision_after=19 cut_topology_set_revision_before=6001 "
+               "cut_topology_set_revision_after=6002 extension_map_revision_before=313 "
+               "extension_map_revision_after=313 authoritative_functional_count=2 "
+               "numerical_work_sign=potential_after_minus_before numerical_work=0.375 "
+               "accepted_numerical_work=0.375 modeled_energy_work_available=false "
+               "modeled_energy_numerical_work=0 accepted_modeled_energy_numerical_work=0 "
+               "modeled_energy_classification=numerical_maintenance_change "
+               "legacy_account_scope=maintenance_surface_wall_volume_potential "
+               "modeled_account_scope=kinetic_gravitational_surface_young_wall "
+               "complete_time_discrete_energy_identity=false",
+        head + "diagnostic=level_set_maintenance_work_interface " + row_keys +
+            "interface_marker=407 before_snapshot_revision=41 after_snapshot_revision=42 "
+            "before_mesh_topology_revision=19 after_mesh_topology_revision=19 "
+            "before_cut_topology_revision=23 after_cut_topology_revision=23 "
+            "before_liquid_volume=1.25 after_liquid_volume=1.25 before_liquid_gas_area=2.5 "
+            "after_liquid_gas_area=2.5 before_wetted_wall_area=0.75 after_wetted_wall_area=0.75 "
+            "before_contact_measure=0.5 after_contact_measure=0.5 before_surface_energy=3 "
+            "after_surface_energy=3 before_young_wall_energy=-0.25 after_young_wall_energy=-0.25 "
+            "before_volume_constraint_potential=-0.75 after_volume_constraint_potential=-0.625 "
+            "before_total_potential=2 after_total_potential=2.125",
+        head + "diagnostic=level_set_maintenance_work_interface " + row_keys +
+            "interface_marker=409 before_snapshot_revision=43 after_snapshot_revision=44 "
+            "before_mesh_topology_revision=19 after_mesh_topology_revision=19 "
+            "before_cut_topology_revision=23 after_cut_topology_revision=23 "
+            "before_liquid_volume=1.25 after_liquid_volume=1.25 before_liquid_gas_area=2.5 "
+            "after_liquid_gas_area=2.5 before_wetted_wall_area=0.75 after_wetted_wall_area=0.75 "
+            "before_contact_measure=0.5 after_contact_measure=0.5 before_surface_energy=3 "
+            "after_surface_energy=3 before_young_wall_energy=-0.25 after_young_wall_energy=-0.25 "
+            "before_volume_constraint_potential=-1.25 after_volume_constraint_potential=-1 "
+            "before_total_potential=1.5 after_total_potential=1.75 before_kinetic_energy=0.5 "
+            "after_kinetic_energy=0.75 before_gravitational_energy=0.25 after_gravitational_energy=0.25 "
+            "before_gravitational_potential_power=-0.5 after_gravitational_potential_power=-0.5 "
+            "before_modeled_stored_energy=3.5 after_modeled_stored_energy=3.75",
+    };
+    EXPECT_EQ(lines, expected);
+    EXPECT_TRUE(level_set::levelSetMaintenanceWorkRowRecord(row).isRootOnly());
 }

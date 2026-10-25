@@ -37,6 +37,9 @@
 
 namespace svmp {
 namespace FE {
+
+class LogRecord;
+
 namespace level_set {
 
 enum class LevelSetMaintenanceWorkStatus : std::uint8_t {
@@ -332,7 +335,17 @@ void mixMaintenanceRevision(
     std::uint64_t& revision,
     std::uint64_t value) noexcept;
 
-/** Log one row per maintenance work row (diagnostic=level_set_maintenance_work). */
+/**
+ * The log record of one maintenance work row (map entry R2.144,
+ * diagnostic=level_set_maintenance_work; rank 0 prints it), with one child
+ * line per interface (diagnostic=level_set_maintenance_work_interface: the
+ * row's transaction_id, substage, step and attempt, then the interface's
+ * before/after values).
+ */
+[[nodiscard]] LogRecord levelSetMaintenanceWorkRowRecord(
+    const LevelSetMaintenanceWorkRow& row);
+
+/** Log one record per maintenance work row (levelSetMaintenanceWorkRowRecord). */
 void logLevelSetMaintenanceWorkRows(
     std::span<const LevelSetMaintenanceWorkRow> rows);
 
