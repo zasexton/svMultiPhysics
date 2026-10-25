@@ -561,6 +561,7 @@ namespace `forms::bc`.
 | `InterfaceTraceLoadBC`, `InterfaceTraceRobinBC`, `InterfaceTraceJumpPenaltyBC` | `StandardBCs.h` | Interface scalar trace wrappers |
 | `makeNormalTraceEssentialBC`, `makeTraceLoadBC`, `makeTraceRobinBC`, `makeTraceInequalityBC`, `makeInterfaceTrace*BC` | `StandardBCs.h` | Factory helpers for the trace wrappers |
 | `ScalarNitscheBC`, `TraceNitscheBC`, `InterfaceTraceNitscheBC` | `NitscheBC.h` | Nitsche wrapper types; `ScalarNitscheBC` is a legacy scalar-diffusion convenience |
+| `LagrangeDirichletBC`, `makeLagrangeDirichletBC(marker, g, lambda, beta = 0, k = 1)` | `LagrangeDirichletBC.h` | u = g on a physical boundary through a multiplier field restricted to it (D54 T1): `(lambda * v).ds + (mu * (u - g)).ds`, lambda = -k du/dn; with beta > 0 the Barbosa-Hughes term `-(beta h (lambda + k du/dn)(mu + k dv/dn)).ds` (equal-order pairs). Install the residual with lambda in the field list; exclusive on its marker. A multiplier continuous around a corner cannot follow the jump of du/dn there: give each side its own multiplier |
 | `PeriodicBC`, `MultiPointConstraintBC` | `ConstraintBCs.h` | Affine constraints installed through `BoundaryConditionManager` |
 | `bc::BoundaryCondition` | `BoundaryCondition.h` | `implemented/expert`; interface for new BC wrappers |
 | `interface::NitscheVariant`, `NitscheInterfaceOptions` | `InterfaceConditions.h` | Interface Poisson Nitsche options |
@@ -915,7 +916,7 @@ multipliers of LM1a and LM1b:
 |-------|--------------------|
 | LM1 (later) | Several scalars per global field (`GlobalSpace(n)`, n > 1); the anchoring evidence of vector fields (componentwise constants); distributed sparsity graphs of global rows for the distributed matrix backends (PETSc, Trilinos) |
 | LM2 (later) | The bordered lowering for transient problems and together with monolithic auxiliary unknowns |
-| LM3 | `plan.restrictSupport(fields, domain)` (`SupportRestrictionConstraint`) and `bc::LagrangeDirichletBC`: boundary and interface multipliers as volume fields with restricted support |
+| LM3 (later) | A support restriction to a union of boundaries (one multiplier on several markers), to a generated active boundary subset and to a contact line; the restriction of vector fields' rows (componentwise anchoring) |
 | LM4 | Interface-owned multipliers (`FieldScope::InterfaceFace`) in single-sided interface forms |
 | LM5 | Documentation; the dead multiplier gauge policies implemented or retired; `constraints::LagrangeMultiplier` retired |
 
