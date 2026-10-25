@@ -2117,20 +2117,20 @@ void writeAcceptedConservativePhaseArtifacts(
             "[svMultiPhysics::Application] Conservative phase artifact publication and collective batch rollback both failed.");
       }
       if (comm.rank() == 0) {
-        svmp::FE::rank_log::oopCout()
-            << "[svMultiPhysics::Application] Conservative phase artifact"
-            << " diagnostic=conservative_phase_flux_artifact"
-            << " field='"
-            << request.configuration->transport.conservative_phase.liquid_indicator.field_name
-            << "' step=" << accepted_step
-            << " outcome=failed"
-            << " batch_rollback=complete"
-            << " removed_prior_files=" << published_artifacts.size()
-            << " reason='"
-            << (local_publication_failure != nullptr
-                    ? "exception during output-rank context construction or publication"
-                    : artifact.diagnostic)
-            << "'" << std::endl;
+        svmp::FE::logRecord(
+            svmp::FE::LogRecord("LevelSetConservativePhase", "flux artifact")
+                .diagnostic("conservative_phase_flux_artifact")
+                .rootOnly()
+                .quoted("field", request.configuration->transport.conservative_phase.liquid_indicator.field_name)
+                .value("step", accepted_step)
+                .text("outcome", "failed")
+                .text("batch_rollback", "complete")
+                .value("removed_prior_files", published_artifacts.size())
+                .quoted("reason",
+                        local_publication_failure != nullptr
+                            ? std::string("exception during output-rank context "
+                                          "construction or publication")
+                            : artifact.diagnostic));
       }
       throw std::runtime_error(
           "[svMultiPhysics::Application] Conservative phase artifact publication failed on the output rank; earlier files from this accepted-step batch were removed.");
@@ -2139,24 +2139,20 @@ void writeAcceptedConservativePhaseArtifacts(
 
   if (comm.rank() == 0) {
     for (const auto& published : published_artifacts) {
-      svmp::FE::rank_log::oopCout()
-          << "[svMultiPhysics::Application] Conservative phase artifact"
-          << " diagnostic=conservative_phase_flux_artifact"
-          << " field='"
-          << published.phase_field_name << "'"
-          << " step=" << accepted_step
-          << " outcome=written"
-          << " path='" << published.result.path.string() << "'"
-          << " bytes=" << published.result.bytes
-          << " nodes=" << published.result.nodes
-          << " edges=" << published.result.edges
-          << " resolved_components="
-          << published.result.resolved_components
-          << " tracked_regions=" << published.result.tracked_regions
-          << " subthreshold_component_present="
-          << (published.result.subthreshold_component_present ? "true"
-                                                              : "false")
-          << std::endl;
+      svmp::FE::logRecord(
+          svmp::FE::LogRecord("LevelSetConservativePhase", "flux artifact")
+              .diagnostic("conservative_phase_flux_artifact")
+              .rootOnly()
+              .quoted("field", published.phase_field_name)
+              .value("step", accepted_step)
+              .text("outcome", "written")
+              .quoted("path", published.result.path.string())
+              .value("bytes", published.result.bytes)
+              .value("nodes", published.result.nodes)
+              .value("edges", published.result.edges)
+              .value("resolved_components", published.result.resolved_components)
+              .value("tracked_regions", published.result.tracked_regions)
+              .boolean("subthreshold_component_present", published.result.subthreshold_component_present));
     }
   }
 }
@@ -3056,9 +3052,11 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
             ledger_maximum_nodal_boundary_transfer,
             std::abs(transfer));
       }
-      // The stream line this record replaced left std::cout at 17 digits,
-      // and the stream lines printed after it still write with that
-      // precision, so set it as before.
+      // The stream line this record replaced left std::cout at 17 digits.
+      // Stream lines printed after it inherit that precision (the time
+      // loop's step_start, nonlinear_done, step_accepted and loop.run()
+      // lines and the wet-volume line), so it is set as before; it can go
+      // once those lines set their own.
       svmp::FE::rank_log::oopCout() << std::setprecision(17);
       svmp::FE::logRecord(
           svmp::FE::LogRecord("LevelSetConservativePhase", "maintenance ledger")
@@ -3154,48 +3152,32 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
             "subthreshold");
       }
       for (const auto& region : maintenance_ledger.region_ledger.regions) {
-        svmp::FE::rank_log::oopCout()
-            << std::setprecision(17)
-            << "[svMultiPhysics::Application] Conservative phase region ledger"
-            << " diagnostic=conservative_phase_region_ledger"
-            << " field='"
-            << request.configuration->transport.conservative_phase.liquid_indicator.field_name
-            << "'"
-            << " step=" << history.stepIndex() + 1
-            << " region='" << region.name << "'"
-            << " kind="
-            << svmp::FE::level_set::levelSetPhaseRegionKindName(
-                   region.kind)
-            << " nodes=" << region.member_nodes.size()
-            << " internal_edges=" << region.internal_edges
-            << " crossing_edges=" << region.crossing_edges.size()
-            << " previous_liquid_measure="
-            << region.previous_liquid_measure
-            << " low_order_liquid_measure="
-            << region.low_order_liquid_measure
-            << " raw_target_liquid_measure="
-            << region.raw_target_liquid_measure
-            << " limited_liquid_measure="
-            << region.limited_liquid_measure
-            << " physical_boundary_mass_transfer="
-            << region.physical_boundary_mass_transfer
-            << " discrete_divergence_mass_source="
-            << region.discrete_divergence_mass_source
-            << " low_order_crossing_mass_transfer="
-            << region.low_order_crossing_mass_transfer
-            << " raw_crossing_antidiffusive_mass_transfer="
-            << region.raw_crossing_antidiffusive_mass_transfer
-            << " limited_crossing_antidiffusive_mass_transfer="
-            << region.limited_crossing_antidiffusive_mass_transfer
-            << " low_order_balance_residual="
-            << region.low_order_balance_residual
-            << " raw_target_balance_residual="
-            << region.raw_target_balance_residual
-            << " limited_balance_residual="
-            << region.limited_balance_residual
-            << " maximum_internal_pair_cancellation_residual="
-            << region.maximum_internal_pair_cancellation_residual
-            << std::endl;
+        // As for the maintenance ledger: keep std::cout at 17 digits.
+        svmp::FE::rank_log::oopCout() << std::setprecision(17);
+        svmp::FE::logRecord(
+            svmp::FE::LogRecord("LevelSetConservativePhase", "region ledger")
+                .diagnostic("conservative_phase_region_ledger")
+                .rootOnly()
+                .quoted("field", request.configuration->transport.conservative_phase.liquid_indicator.field_name)
+                .value("step", history.stepIndex() + 1)
+                .quoted("region", region.name)
+                .value("kind", svmp::FE::level_set::levelSetPhaseRegionKindName(region.kind))
+                .value("nodes", region.member_nodes.size())
+                .value("internal_edges", region.internal_edges)
+                .value("crossing_edges", region.crossing_edges.size())
+                .value("previous_liquid_measure", region.previous_liquid_measure)
+                .value("low_order_liquid_measure", region.low_order_liquid_measure)
+                .value("raw_target_liquid_measure", region.raw_target_liquid_measure)
+                .value("limited_liquid_measure", region.limited_liquid_measure)
+                .value("physical_boundary_mass_transfer", region.physical_boundary_mass_transfer)
+                .value("discrete_divergence_mass_source", region.discrete_divergence_mass_source)
+                .value("low_order_crossing_mass_transfer", region.low_order_crossing_mass_transfer)
+                .value("raw_crossing_antidiffusive_mass_transfer", region.raw_crossing_antidiffusive_mass_transfer)
+                .value("limited_crossing_antidiffusive_mass_transfer", region.limited_crossing_antidiffusive_mass_transfer)
+                .value("low_order_balance_residual", region.low_order_balance_residual)
+                .value("raw_target_balance_residual", region.raw_target_balance_residual)
+                .value("limited_balance_residual", region.limited_balance_residual)
+                .value("maximum_internal_pair_cancellation_residual", region.maximum_internal_pair_cancellation_residual));
       }
     }
     result.changed = candidate != result.original_solution;

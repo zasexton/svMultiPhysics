@@ -922,6 +922,44 @@
    "special": null
   },
   {
+   "id": "S9.flux_artifact",
+   "batch": "S9",
+   "before": {
+    "head": "[svMultiPhysics::Application] Conservative phase artifact",
+    "diagnostic": "conservative_phase_flux_artifact"
+   },
+   "after": {
+    "owner": "LevelSetConservativePhase",
+    "message": "flux artifact",
+    "diagnostic": "conservative_phase_flux_artifact",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
+   "id": "S9.region_ledger",
+   "batch": "S9",
+   "before": {
+    "head": "[svMultiPhysics::Application] Conservative phase region ledger",
+    "diagnostic": "conservative_phase_region_ledger"
+   },
+   "after": {
+    "owner": "LevelSetConservativePhase",
+    "message": "region ledger",
+    "diagnostic": "conservative_phase_region_ledger",
+    "level": "INFO",
+    "scope": "root"
+   },
+   "renames": {},
+   "split": [],
+   "identifying": [],
+   "special": null
+  },
+  {
    "id": "S9.pde_extension_solve",
    "batch": "S9",
    "before": {
