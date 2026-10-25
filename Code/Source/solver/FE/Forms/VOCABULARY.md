@@ -22,7 +22,7 @@ what it is for, and who should call it.
 | `implemented/public` | Intended for formulation authors and covered by current headers/tests |
 | `implemented/expert` | Supported but meant for specialized, manual, or lower-level workflows |
 | `implemented/internal` | Setup, JIT, lowering, or byte/slot based hooks; not an ergonomic public DSL |
-| `planned` | Not implemented yet; tracked by a named step of milestone MR in `Documentation/free_surface_program_tracker.md` §5 |
+| `planned` | Not implemented yet; tracked by a named step of milestone MR in `Documentation/free_surface_program_tracker.md` §5, or by a phase (LM1-LM5) of decision D54 there |
 | `out-of-scope-for-now` | Not implemented and not scheduled; deferred until there is a concrete product/module need |
 
 ## Design Principles
@@ -873,7 +873,8 @@ explicit real/imaginary splitting today.
   orders are inputs of the cut-volume request, not of the form.
 - Mortar and mixed-dimensional interface-field couplings are registered as
   hand-written interface-face kernels; there is no forms path for a
-  multiplier on an interface field or for a global scalar unknown.
+  multiplier on an interface field or for a global scalar unknown yet (D54,
+  below).
 
 ## Planned Vocabulary
 
@@ -891,6 +892,23 @@ change the authoring surface:
 | G5 | `ALEBinding` declarations, `LevelSetGeometry` markers and the contact-certificate hook, field binding, and vertex-field initialization as FE services |
 | E3 | Energies, powers, works, and the logged measures as forms in `NavierStokesPostProcessing.h`, under the D49 tolerance gate |
 | L1 | Log lines as FE data (`LogRecord`, above): the Navier-Stokes term and post-processing lines are records printed through `F.log`, and the free-surface observer is removed; the energy, record and maintenance lines of the FE services follow |
+
+### Planned by D54 (multipliers as forms)
+
+Status: `planned`. The phases of decision D54
+(`Documentation/free_surface_program_tracker.md`;
+`agent-status/refactor/forms-multipliers-design.md`). The multiplier is a
+field and the form is the only statement of the coupling; how it reaches the
+linear algebra is chosen at setup from the backend:
+
+| Phase | Planned vocabulary |
+|-------|--------------------|
+| LM1a | `spaces::GlobalSpace(n)` (basis 1 on every cell); `FieldScope::Global` (one DOF for the whole domain, owned by the lowest rank); the `.dGlobal()` point measure; the row of a global test function installed by `installFormulation`, its residual entry summed exactly (the same at any rank count). Cases G1 (mean-constrained Poisson) and G2 (mean-zero pure Neumann), in `Tests/Unit/Systems/test_GlobalMultiplier.cpp` (disabled until LM1a lands) |
+| LM1b | `FieldBinding` scope checks for global and interface fields; `F.multiplierLowering(Auto \| InMatrix \| Bordered)`; a multiplier's anchoring evidence in the gauge registry, and global fields left out of the gauge candidates; the over-constraint check |
+| LM2 | The bordered lowering of global multipliers for FSILS (`BorderedCouplingData`, the Newton Schur recovery); gauge-type multipliers refused there |
+| LM3 | `plan.restrictSupport(fields, domain)` (`SupportRestrictionConstraint`) and `bc::LagrangeDirichletBC`: boundary and interface multipliers as volume fields with restricted support |
+| LM4 | Interface-owned multipliers (`FieldScope::InterfaceFace`) in single-sided interface forms |
+| LM5 | Documentation; the dead multiplier gauge policies implemented or retired; `constraints::LagrangeMultiplier` retired |
 
 ### Not Scheduled
 
@@ -961,7 +979,6 @@ not complete.
 | `extendFrom(manifold, lambda)` | Extend lower-dimensional data back to the bulk |
 | `lift(...)` | Lifting/prolongation helper |
 | Nonmatching transfer operators | Mortar and embedded coupling |
-| Interface-field and global-scalar multipliers in forms | Mortar coupling and mean-value constraints written as forms |
 
 Suggested sequencing: same-mesh codimension-1 coupling, nonmatching
 codimension-1 mortar coupling, then codimension-2 and mixed 0D/1D/3D transfer.
