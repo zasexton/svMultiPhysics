@@ -3,43 +3,47 @@
   "dimensions_m": {
     "computational_height": 0.18,
     "computational_length": 1.2,
-    "extrusion_breadth": 0.03,
+    "gate_x": 0.38,
     "initial_column_height": 0.15,
     "profile_window_x_max": 1.04,
     "profile_window_x_min": 0.38,
     "wet_bed_depth": 0.018
   },
+  "mesh": {
+    "cells_x": 202,
+    "cells_y": 31,
+    "spacing_m": 0.006,
+    "triangles": 12524
+  },
   "mesh_tools": [
     "PyVista",
-    "mirrored structured thin-extrusion tetrahedral grid"
+    "structured triangle grid, diagonal alternating with the cell parity"
   ],
   "notes": [
-    "The three-dimensional mesh is a thin extrusion of the published two-dimensional setup.",
-    "The tetrahedral split is mirrored about the extrusion mid-plane to suppress transverse bias.",
-    "The front/back extrusion planes constrain only z-normal velocity, giving the symmetry/free-slip boundary required to represent the published two-dimensional benchmark without artificial spanwise-wall drag.",
-    "The full no-slip left/right/bottom conditions and zero surface tension make this a dam-break transport and impermeability benchmark, not a moving-contact-line wetting validation.",
-    "The wall_top mesh face is an open natural-traction boundary and deliberately has no velocity Dirichlet condition, matching the open top of the published flume.",
-    "The current initial-value deck approximates the gate as removed instantaneously; the published Test 05 specification instead raises it upward at 1.5 m/s, so profile comparisons are not full benchmark qualification until that moving boundary is represented.",
-    "The initial level-set field is the union of the wet bed and the retained water column.",
-    "Negative level-set values denote the water side for active-domain assembly.",
+    "The published two-dimensional setup, meshed as a two-dimensional Triangle3 section (decision D51 item 2).",
+    "The face files are disjoint: a boundary edge belongs to the wall all of its vertices lie on.",
+    "The left, right and bottom walls are no-slip; zero surface tension makes this a dam-break transport and impermeability benchmark, not a moving-contact-line wetting validation.",
+    "The wall_top face is an open natural-traction boundary with a level-set outflow condition and no velocity Dirichlet condition, matching the open top of the published flume.",
+    "The deck approximates the gate as removed instantaneously; the published Test 05 specification raises it at 1.5 m/s.",
+    "The initial level-set field is the union of the wet bed and the retained water column; negative values denote the water side.",
     "Pressure uses the local column-height hydrostatic law continued with sign onto dry cut-support vertices; those coefficients are interpolation data, not gas pressure."
   ],
   "pressure_gauge": {
     "coordinates": [
-      0.1084558823529412,
-      0.07823076923076924,
-      0.015
+      0.10173015873015873,
+      0.075,
+      0.0
     ],
-    "expected_initial_hydrostatic_pressure": 702.7888527692306,
-    "initial_phi": -0.07176923076923075,
-    "node_id": 1765
+    "expected_initial_hydrostatic_pressure": 734.42565,
+    "initial_phi": -0.075,
+    "node_id": 2656
   },
   "pressure_gauge_verification": {
     "diagnostic_point_initial_pressure_error": 0.0,
     "diagnostic_point_initial_pressure_matches_mesh_field": true,
     "diagnostic_pressure_matches_previous_invalid_error_range": false,
     "diagnostic_pressure_matches_previous_invalid_offset": false,
-    "diagnostic_pressure_minus_previous_invalid_pressure": 685.1019527692306,
+    "diagnostic_pressure_minus_previous_invalid_pressure": 716.73875,
     "pressure_constraint_enabled": false,
     "pressure_initialization_source": "mesh_vertex_field",
     "previous_invalid_d18_full_volume_hydrostatic_pressure": 17.6869,
@@ -49,6 +53,26 @@
     ],
     "previous_invalid_d18_initial_phi": -0.001806,
     "previous_invalid_d18_node_id": 279
+  },
+  "qualification_criteria": {
+    "false_wetting": "no vertex with phi < 0 above y = 0.16 m",
+    "profile_rmse_justification": "no regression from the June RMSE of about 0.02 m (0.0184 m d18, 0.0158 m d38 at 0.156 s)",
+    "profile_rmse_max_m": 0.02,
+    "profile_rmse_times_s": [
+      0.156,
+      0.219,
+      0.281
+    ],
+    "reported_profile_times_s": [
+      0.156,
+      0.219,
+      0.281,
+      0.343,
+      0.406,
+      0.468,
+      0.531
+    ],
+    "source": "tracker M1 (SPHERIC 05 D18/D38)"
   },
   "reference_profiles": [
     {
@@ -80,8 +104,28 @@
       "time_s": 0.531
     }
   ],
+  "replaces": {
+    "decision": "D51 item 2",
+    "june_three_dimensional_extrusion": {
+      "cells_across": 2,
+      "extrusion_breadth_m": 0.03,
+      "faces_with_a_different_condition": 0,
+      "overlapping_faces": 112,
+      "spacing_m": {
+        "x": 0.022,
+        "y": [
+          0.005,
+          0.01
+        ],
+        "z": 0.015
+      },
+      "stop_on_current_protocol": "step 193 (t = 0.0965 s) on the small-cut aggregation guard (root path 9 > 8)",
+      "tetrahedra": 13608
+    }
+  },
   "representation": "unfitted_level_set",
   "source_urls": [
     "https://www.spheric-sph.org/tests/test-05"
-  ]
+  ],
+  "spatial_dimension": 2
 }

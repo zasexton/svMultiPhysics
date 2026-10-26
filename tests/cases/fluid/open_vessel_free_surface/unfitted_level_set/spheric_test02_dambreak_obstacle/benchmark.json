@@ -41,7 +41,8 @@
     "The retained-column hydrostatic pressure is continued through dry cut-support vertices so the top trace is zero and the newly exposed vertical dam face retains its liquid-side initial trace.",
     "The zero level set is limited to the top and gate-facing air-water interfaces; a closed-box signed distance incorrectly creates free-surface cuts on wet walls.",
     "Earlier repository metadata used a 0.58 m retained column and swapped obstacle footprint; those settings are not the SPHERIC Test02 benchmark geometry.",
-    "The promoted OOP unfitted case uses wall-compatible normal-band wet-extension level-set advection; coupled-field level-set advection changes the cut topology during Newton startup on this sharp 3D dam-break initial condition."
+    "Level set: harmonic PDE velocity extension, monolithic (D55), with kinematic reconciliation (D14) and sign-definite patch bounds (D21).",
+    "The face files are disjoint (every face vertex on the wall or obstacle).  The June deck's files overlapped at the tank edges, and a face keeps the label of the last file listed: 94 faces of the top row of the side walls (left 12, right 12, front 35, back 35) carried the open wall_top label (no velocity condition) instead of no-slip; the other relabeled faces (between walls, and 16 obstacle faces next to the floor labeled bottom) kept a no-slip condition."
   ],
   "pressure_gauge": {
     "coordinates": [
@@ -60,6 +61,17 @@
     "diagnostic_role": "initial_condition_sample_not_pressure_constraint",
     "pressure_constraint_enabled": false,
     "pressure_initialization_source": "mesh_vertex_field"
+  },
+  "qualification_criteria": {
+    "completion_justification": "the front passes the obstacle and reaches the far wall well before 1 s; the June runs showed their pressure spikes in this window",
+    "completion_time_s": 1.0,
+    "front_speed_ratio_definition": "measured over the 1.0 m from the gate to the H2 probe (x = 0.992 m): the experimental arrival time (H2 above 1 cm at 0.358 s) divided by the simulated one",
+    "maximum_sensor_pressure_justification": "about 4.5 times the largest measured obstacle pressure (P1, 11.2 kPa at 0.415 s) and 9 times the column's hydrostatic pressure rho g H0 = 5.4 kPa; the June spikes reached MPa, so 50 kPa separates a spike from a physical impact pressure",
+    "maximum_sensor_pressure_pa": 50000.0,
+    "minimum_front_speed_ratio": 0.8,
+    "minimum_front_speed_ratio_justification": "the June front ran at 0.43 of the reference speed; 0.8 tolerates the coarse mesh (h = 0.08-0.10 m) while rejecting a front held back by the cut-cell treatment",
+    "reported": "H2 and H4 heights and P1, P3, P5, P7 pressures against experiment (RMS); volume drift",
+    "status": "proposal (D1): the working criteria of the SPHERIC campaign until the user sets tolerances"
   },
   "representation": "unfitted_level_set",
   "source_urls": [
