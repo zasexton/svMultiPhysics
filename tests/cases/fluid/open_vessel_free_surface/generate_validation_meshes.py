@@ -26,6 +26,16 @@ WATER_VISCOSITY = 1.003e-3
 GRAVITY = 9.81
 SURFACE_TENSION = 0.0728
 UNFITTED_SURFACE_TENSION = 0.0
+# Triggered interface-preserving redistancing (Enable_interface_preserving_
+# redistancing, decision D39): after the kinematic reconciliation, once the
+# interface has moved one cell, the level set is replaced by the distance to its
+# own zero contour and the interface is restored; the trigger of the sessile and
+# capillary-rise protocols, with no parameter of its own.  With the
+# reconciliation (D14) and the sign-definite patch bounds (D21) it is the
+# accepted-step maintenance of the M1-M4 protocols (D35 item 1; D39 item 4: on in
+# the generators).  "--interface-preserving-redistancing off" writes the decks of
+# b94af982 byte for byte.
+INTERFACE_PRESERVING_REDISTANCING = True
 LINEAR_SOLVER_TOLERANCE = "1.0e-6"
 LINEAR_SOLVER_ABSOLUTE_TOLERANCE = "1.0e-10"
 FLUID_NONLINEAR_TOLERANCE = "1.0e-6"
@@ -811,6 +821,7 @@ def write_solver_xml(
     *,
     spatial_dimension: int = 3,
     level_set_maintenance: bool = False,
+    interface_preserving_redistancing: bool = False,
     mesh_path: str,
     faces: list[str],
     fitted: bool,
@@ -905,11 +916,17 @@ def write_solver_xml(
         # extension (D55).
         active_domain_block = f"""
     <Active_domain>{active_domain}</Active_domain>"""
-    # The current accepted-step maintenance of the M1-M4 protocols:
-    # kinematic reconciliation (D14) and sign-definite patch bounds (D21).
+    # The current accepted-step maintenance of the M1-M4 protocols: kinematic
+    # reconciliation (D14), sign-definite patch bounds (D21) and, unless switched
+    # off, triggered interface-preserving redistancing (D39).
+    if interface_preserving_redistancing and not level_set_maintenance:
+        raise ValueError("interface-preserving redistancing is part of the level-set maintenance")
+    redistancing_line = ("""
+  <Enable_interface_preserving_redistancing>true</Enable_interface_preserving_redistancing>"""
+                         if interface_preserving_redistancing else "")
     level_set_maintenance_block = (
-        """
-  <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
+        f"""
+  <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>{redistancing_line}
   <Enable_sign_definite_patch_bounds>true</Enable_sign_definite_patch_bounds>"""
         if level_set_maintenance
         else ""
@@ -1292,6 +1309,7 @@ def write_case(
     pressure_gauge_verification: Callable[[dict], dict] | None = None,
     allow_overlapping_face_files: bool = False,
     level_set_maintenance: bool = False,
+    interface_preserving_redistancing: bool = False,
     readme: str | None = None,
 ) -> None:
     obstacles = obstacles or []
@@ -1351,6 +1369,7 @@ def write_case(
         case_dir,
         spatial_dimension=spatial_dimension,
         level_set_maintenance=level_set_maintenance,
+        interface_preserving_redistancing=interface_preserving_redistancing,
         mesh_path=f"mesh/{mesh_subdir}/mesh-complete.mesh.vtu",
         faces=[spec.name for spec in specs],
         fitted=fitted,
@@ -1484,7 +1503,19 @@ TEST10_CRITERIA = {
 }
 
 
-def generate_spheric_test10(*, allow_overlapping_face_files: bool = False) -> None:
+def level_set_protocol_note(redistancing: bool) -> str:
+    """The level-set sentence of the SPHERIC decks' benchmark.json notes."""
+    maintenance = ("kinematic reconciliation (D14), sign-definite patch bounds (D21) and triggered "
+                   "interface-preserving redistancing (D39)" if redistancing else
+                   "kinematic reconciliation (D14) and sign-definite patch bounds (D21)")
+    return f"Level set: harmonic PDE velocity extension, monolithic (D55), with {maintenance}."
+
+
+def generate_spheric_test10(
+    *,
+    allow_overlapping_face_files: bool = False,
+    redistancing: bool = INTERFACE_PRESERVING_REDISTANCING,
+) -> None:
     """The unfitted Test 10 deck."""
     tank = Box(0.0, 0.900, 0.0, 0.508, 0.0, 0.062)
     lateral_fill = 0.093
@@ -1523,8 +1554,7 @@ def generate_spheric_test10(*, allow_overlapping_face_files: bool = False) -> No
     unfitted_metadata["notes"] = unfitted_metadata["notes"] + [
         "The face files are disjoint (every face vertex on the wall).  The June deck's face files "
         "overlapped at the tank edges between no-slip walls, so the relabeling changes no condition.",
-        "Level set: harmonic PDE velocity extension, monolithic (D55), with kinematic reconciliation "
-        "(D14) and sign-definite patch bounds (D21).",
+        level_set_protocol_note(redistancing),
         "The roll forcing (body force and rotating-frame angular velocity tables under bc/) is derived "
         "from the published motion record by generate_spheric_test10_roll_body_force.py; it is not "
         "committed.",
@@ -1556,6 +1586,7 @@ def generate_spheric_test10(*, allow_overlapping_face_files: bool = False) -> No
         time_step=0.001,
         time_steps=40,
         level_set_maintenance=True,
+        interface_preserving_redistancing=redistancing,
         include_top_wall_bc=True,
         active_domain="LevelSetNegative",
         use_direct_fluid_solver=True,
@@ -1618,7 +1649,12 @@ TEST05_JUNE_EXTRUSION = {
 }
 
 
-def test05_readme(wet_depth_mm: int, n_points: int, n_triangles: int, nx: int, ny: int) -> str:
+def test05_readme(wet_depth_mm: int, n_points: int, n_triangles: int, nx: int, ny: int,
+                  redistancing: bool = INTERFACE_PRESERVING_REDISTANCING) -> str:
+    maintenance = ("""kinematic
+  reconciliation (D14), sign-definite patch bounds (D21) and triggered interface-preserving
+  redistancing (D39), as the M1-M4 protocols.""" if redistancing else """kinematic
+  reconciliation (D14) and sign-definite patch bounds (D21), as the M1-M4 protocols.""")
     return f"""# SPHERIC Test 05 wet-bed dam break, d = {wet_depth_mm} mm (unfitted level set, 2D)
 
 Written by `../../generate_validation_meshes.py --case spheric_test05`.  Status: regenerated
@@ -1633,8 +1669,7 @@ been compared with experiment yet.
 - Walls left, right and bottom are no-slip; the top is open (natural traction, level-set
   outflow).  Zero surface tension: a transport and impermeability benchmark, not a
   wetting one.
-- Level set: harmonic PDE velocity extension with monolithic coupling (D55); kinematic
-  reconciliation (D14) and sign-definite patch bounds (D21), as the M1-M4 protocols.
+- Level set: harmonic PDE velocity extension with monolithic coupling (D55); {maintenance}
 - Mesh: {nx} x {ny} cells of near-isotropic size h = {TEST05_MESH_SPACING * 1000:.0f} mm (the
   June deck's finest spacing), each split into two Triangle3 with the diagonal alternating
   with the cell parity; {n_points} points, {n_triangles} triangles.  The gate, the wet-bed
@@ -1668,7 +1703,8 @@ The 2D section has no spanwise direction and its face files are disjoint.
 """
 
 
-def generate_spheric_test05(*, allow_overlapping_face_files: bool = False) -> None:
+def generate_spheric_test05(*, allow_overlapping_face_files: bool = False,
+                            redistancing: bool = INTERFACE_PRESERVING_REDISTANCING) -> None:
     if allow_overlapping_face_files:
         raise ValueError(
             "the SPHERIC 05 decks are two-dimensional sections with disjoint face files "
@@ -1807,12 +1843,14 @@ def generate_spheric_test05(*, allow_overlapping_face_files: bool = False) -> No
             newton_line_search_fail_on_no_reduction=True,
             newton_line_search_max_iterations="6",
             level_set_maintenance=True,
+            interface_preserving_redistancing=redistancing,
             readme=test05_readme(
                 wet_depth_mm,
                 (nx + 1) * (ny + 1),
                 2 * nx * ny,
                 nx,
                 ny,
+                redistancing,
             ),
         )
 
@@ -1844,7 +1882,8 @@ TEST02_CRITERIA = {
 }
 
 
-def generate_spheric_test02(*, allow_overlapping_face_files: bool = False) -> None:
+def generate_spheric_test02(*, allow_overlapping_face_files: bool = False,
+                            redistancing: bool = INTERFACE_PRESERVING_REDISTANCING) -> None:
     tank = Box(0.0, TEST02_TANK_LENGTH, 0.0, TEST02_TANK_HEIGHT, 0.0, TEST02_TANK_WIDTH)
     obstacle = Box(
         TEST02_OBSTACLE_X_MIN,
@@ -1941,7 +1980,7 @@ def generate_spheric_test02(*, allow_overlapping_face_files: bool = False) -> No
                 "The retained-column hydrostatic pressure is continued through dry cut-support vertices so the top trace is zero and the newly exposed vertical dam face retains its liquid-side initial trace.",
                 "The zero level set is limited to the top and gate-facing air-water interfaces; a closed-box signed distance incorrectly creates free-surface cuts on wet walls.",
                 "Earlier repository metadata used a 0.58 m retained column and swapped obstacle footprint; those settings are not the SPHERIC Test02 benchmark geometry.",
-                "Level set: harmonic PDE velocity extension, monolithic (D55), with kinematic reconciliation (D14) and sign-definite patch bounds (D21).",
+                level_set_protocol_note(redistancing),
                 "The face files are disjoint (every face vertex on the wall or obstacle).  The June deck's files overlapped at the tank edges, and a face keeps the label of the last file listed: 94 faces of the top row of the side walls (left 12, right 12, front 35, back 35) carried the open wall_top label (no velocity condition) instead of no-slip; the other relabeled faces (between walls, and 16 obstacle faces next to the floor labeled bottom) kept a no-slip condition.",
             ],
             "qualification_criteria": TEST02_CRITERIA,
@@ -1966,6 +2005,7 @@ def generate_spheric_test02(*, allow_overlapping_face_files: bool = False) -> No
         newton_line_search_fail_on_no_reduction=True,
         newton_line_search_max_iterations="6",
         level_set_maintenance=True,
+        interface_preserving_redistancing=redistancing,
     )
 
 
@@ -1986,15 +2026,25 @@ def main() -> None:
             "committed decks do; without it overlapping face files are an error (decision D35)"
         ),
     )
+    parser.add_argument(
+        "--interface-preserving-redistancing",
+        choices=["on", "off"],
+        default="on" if INTERFACE_PRESERVING_REDISTANCING else "off",
+        help=(
+            "triggered interface-preserving redistancing in the unfitted SPHERIC decks (decision "
+            "D39, the protocol value); off writes the decks of b94af982 byte for byte"
+        ),
+    )
     args = parser.parse_args()
     legacy = {"allow_overlapping_face_files": args.allow_overlapping_face_files}
+    redistancing = args.interface_preserving_redistancing == "on"
 
     if args.case in {"all", "spheric_test10"}:
-        generate_spheric_test10(**legacy)
+        generate_spheric_test10(**legacy, redistancing=redistancing)
     if args.case in {"all", "spheric_test05"}:
-        generate_spheric_test05(**legacy)
+        generate_spheric_test05(**legacy, redistancing=redistancing)
     if args.case in {"all", "spheric_test02"}:
-        generate_spheric_test02(**legacy)
+        generate_spheric_test02(**legacy, redistancing=redistancing)
 
 
 if __name__ == "__main__":
