@@ -36,6 +36,35 @@ UNFITTED_SURFACE_TENSION = 0.0
 # the generators).  "--interface-preserving-redistancing off" writes the decks of
 # b94af982 byte for byte.
 INTERFACE_PRESERVING_REDISTANCING = True
+# Wall model of the SPHERIC validation decks (decision D58): free-slip on every
+# wall, the Test 10 lid and the Test 02 obstacle included.  Only the normal
+# velocity is fixed: a zero Dirichlet value whose Effective_direction selects the
+# component along the face normal, so the obstacle is written as one face file per
+# face plane.  No-slip pins the contact lines of the sharp level set at the walls.
+# "--wall-condition no-slip" writes the no-slip decks of 8f145c4c byte for byte.
+SPHERIC_FREE_SLIP_WALLS = True
+# The coordinate axis of each face file's normal (free-slip component masks).
+FACE_NORMAL_AXIS = {
+    "wall_left": 0, "wall_right": 0,
+    "wall_bottom": 1, "wall_top": 1,
+    "wall_front": 2, "wall_back": 2,
+    "obstacle_xmin": 0, "obstacle_xmax": 0,
+    "obstacle_top": 1,
+    "obstacle_zmin": 2, "obstacle_zmax": 2,
+}
+
+
+def free_slip_effective_directions(face_names: Iterable[str], spatial_dimension: int) -> dict[str, str]:
+    """Effective_direction of a free-slip wall: the component along the face normal."""
+    directions = {}
+    for name in face_names:
+        if name not in FACE_NORMAL_AXIS:
+            raise ValueError(f"face {name!r} has no known normal axis for a free-slip condition")
+        axis = FACE_NORMAL_AXIS[name]
+        if axis >= spatial_dimension:
+            raise ValueError(f"face {name!r} has a normal along axis {axis} in {spatial_dimension}D")
+        directions[name] = " ".join("1" if d == axis else "0" for d in range(spatial_dimension))
+    return directions
 LINEAR_SOLVER_TOLERANCE = "1.0e-6"
 LINEAR_SOLVER_ABSOLUTE_TOLERANCE = "1.0e-10"
 FLUID_NONLINEAR_TOLERANCE = "1.0e-6"
@@ -668,6 +697,29 @@ def obstacle_face_predicate(obstacle: Box, tol: float) -> Callable[[np.ndarray, 
     return predicate
 
 
+def obstacle_plane_specs(obstacle: Box, tol: float) -> list["SurfaceSpec"]:
+    """One face file per face plane of the obstacle (it stands on the floor, so it
+    has no bottom face): every face vertex within the obstacle bounds and on the
+    plane.  A free-slip condition fixes one velocity component per file (D58)."""
+    lower = np.array([obstacle.xmin, obstacle.ymin, obstacle.zmin]) - tol
+    upper = np.array([obstacle.xmax, obstacle.ymax, obstacle.zmax]) + tol
+
+    def on_plane(axis: int, value: float) -> Callable[[np.ndarray, np.ndarray], bool]:
+        def predicate(face_points: np.ndarray, center: np.ndarray) -> bool:
+            del center
+            return bool(np.all((face_points >= lower) & (face_points <= upper))
+                        and np.all(np.abs(face_points[:, axis] - value) <= tol))
+        return predicate
+
+    return [
+        SurfaceSpec("obstacle_xmin", on_plane(0, obstacle.xmin)),
+        SurfaceSpec("obstacle_xmax", on_plane(0, obstacle.xmax)),
+        SurfaceSpec("obstacle_zmin", on_plane(2, obstacle.zmin)),
+        SurfaceSpec("obstacle_zmax", on_plane(2, obstacle.zmax)),
+        SurfaceSpec("obstacle_top", on_plane(1, obstacle.ymax)),
+    ]
+
+
 def obstacle_predicate(obstacle: Box, tol: float) -> Callable[[np.ndarray, np.ndarray], bool]:
     def predicate(face_points: np.ndarray, center: np.ndarray) -> bool:
         del face_points
@@ -885,7 +937,8 @@ def write_solver_xml(
         if name.startswith("wall_") and (include_top_wall_bc or name != "wall_top")
     ]
     if include_obstacle_bc:
-        wall_bcs.append("obstacle")
+        # One obstacle face file, or one per face plane (free-slip, D58).
+        wall_bcs.extend(name for name in faces if name == "obstacle" or name.startswith("obstacle_"))
 
     def wall_bc_block(name: str) -> str:
         direction = wall_effective_directions.get(name)
@@ -1333,9 +1386,14 @@ def write_case(
     allow_overlapping_face_files: bool = False,
     level_set_maintenance: bool = False,
     interface_preserving_redistancing: bool = False,
+    free_slip_walls: bool = False,
     readme: str | None = None,
 ) -> None:
     obstacles = obstacles or []
+    if free_slip_walls and (wall_effective_directions or allow_overlapping_face_files):
+        raise ValueError(
+            "free-slip walls (decision D58) derive the Effective_direction of every disjoint wall face "
+            "file; the legacy overlapping face files need --wall-condition no-slip")
     if grid_factory is not None:
         grid = grid_factory()
         grid = remove_cells_inside(grid, obstacles)
@@ -1369,8 +1427,23 @@ def write_case(
         specs = surface_specs_for_box(
             domain, tol, fitted=fitted, exact_planes=True, spatial_dimension=spatial_dimension
         )
-        if obstacles:
+        if obstacles and free_slip_walls:
+            specs += obstacle_plane_specs(obstacles[0], tol)
+        elif obstacles:
             specs.append(SurfaceSpec("obstacle", obstacle_face_predicate(obstacles[0], tol)))
+    if free_slip_walls:
+        # Free-slip (D58): every wall face file fixes the velocity component
+        # along its normal only.
+        wall_effective_directions = free_slip_effective_directions(
+            [spec.name for spec in specs if spec.name != "free_surface"], spatial_dimension)
+    # Face files this generator writes but this deck no longer has (the single
+    # obstacle file of a no-slip deck, or the per-plane files of a free-slip one).
+    current = {spec.name for spec in specs}
+    if surface_dir.is_dir():
+        for stale in surface_dir.glob("*.vtp"):
+            if stale.stem not in current and (stale.stem.startswith(("wall_", "obstacle"))
+                                              or stale.stem == "free_surface"):
+                stale.unlink()
     write_surfaces(
         grid,
         specs,
@@ -1584,6 +1657,7 @@ def generate_spheric_test10(
     allow_overlapping_face_files: bool = False,
     include_legacy_fitted: bool = False,
     redistancing: bool = INTERFACE_PRESERVING_REDISTANCING,
+    free_slip_walls: bool = SPHERIC_FREE_SLIP_WALLS,
 ) -> None:
     """The unfitted Test 10 deck; with include_legacy_fitted also the legacy
     fitted_ale deck, which keeps its overlapping face files (the fitted
@@ -1643,7 +1717,11 @@ def generate_spheric_test10(
         "The roll forcing (body force and rotating-frame angular velocity tables under bc/) is derived "
         "from the published motion record by generate_spheric_test10_roll_body_force.py; it is not "
         "committed.",
-    ]
+    ] + ([
+        "Walls: free-slip on all six walls, the lid included; only the normal velocity is fixed "
+        "(decision D58).  With no-slip walls the end-wall contact lines stayed pinned at the fill "
+        "height for the whole 7.5 s run (2026-10-26), with Sensor 1 on the pinned line.",
+    ] if free_slip_walls else [])
     unfitted_metadata["qualification_criteria"] = TEST10_CRITERIA
 
     write_case(
@@ -1672,6 +1750,7 @@ def generate_spheric_test10(
         time_steps=40,
         level_set_maintenance=True,
         interface_preserving_redistancing=redistancing,
+        free_slip_walls=free_slip_walls,
         include_top_wall_bc=True,
         active_domain="LevelSetNegative",
         use_direct_fluid_solver=True,
@@ -1736,7 +1815,14 @@ TEST05_JUNE_EXTRUSION = {
 
 
 def test05_readme(wet_depth_mm: int, n_points: int, n_triangles: int, nx: int, ny: int,
-                  redistancing: bool = INTERFACE_PRESERVING_REDISTANCING) -> str:
+                  redistancing: bool = INTERFACE_PRESERVING_REDISTANCING,
+                  free_slip_walls: bool = SPHERIC_FREE_SLIP_WALLS) -> str:
+    walls = ("""Walls left, right and bottom are free-slip (only the normal velocity is fixed, decision
+  D58); the top is open (natural traction, level-set outflow).  Zero surface tension: a
+  transport and impermeability benchmark, not a wetting one.""" if free_slip_walls else
+             """Walls left, right and bottom are no-slip; the top is open (natural traction, level-set
+  outflow).  Zero surface tension: a transport and impermeability benchmark, not a
+  wetting one.""")
     maintenance = ("""kinematic
   reconciliation (D14), sign-definite patch bounds (D21) and triggered interface-preserving
   redistancing (D39), as the M1-M4 protocols.""" if redistancing else """kinematic
@@ -1752,9 +1838,7 @@ been compared with experiment yet.
 - The published two-dimensional flume section: 1.2 m long, 0.18 m high; a 0.15 m water
   column behind the gate at x = 0.38 m and a wet bed of {wet_depth_mm} mm downstream.
 - The gate is removed instantaneously at t = 0 (the experiment lifts it at 1.5 m/s).
-- Walls left, right and bottom are no-slip; the top is open (natural traction, level-set
-  outflow).  Zero surface tension: a transport and impermeability benchmark, not a
-  wetting one.
+- {walls}
 - Level set: harmonic PDE velocity extension with monolithic coupling (D55); {maintenance}
 - Mesh: {nx} x {ny} cells of near-isotropic size h = {TEST05_MESH_SPACING * 1000:.0f} mm (the
   June deck's finest spacing), each split into two Triangle3 with the diagonal alternating
@@ -1790,7 +1874,8 @@ The 2D section has no spanwise direction and its face files are disjoint.
 
 
 def generate_spheric_test05(*, allow_overlapping_face_files: bool = False,
-                            redistancing: bool = INTERFACE_PRESERVING_REDISTANCING) -> None:
+                            redistancing: bool = INTERFACE_PRESERVING_REDISTANCING,
+                            free_slip_walls: bool = SPHERIC_FREE_SLIP_WALLS) -> None:
     if allow_overlapping_face_files:
         raise ValueError(
             "the SPHERIC 05 decks are two-dimensional sections with disjoint face files "
@@ -1907,7 +1992,7 @@ def generate_spheric_test05(*, allow_overlapping_face_files: bool = False,
                 "notes": [
                     "The published two-dimensional setup, meshed as a two-dimensional Triangle3 section (decision D51 item 2).",
                     "The face files are disjoint: a boundary edge belongs to the wall all of its vertices lie on.",
-                    "The left, right and bottom walls are no-slip; zero surface tension makes this a dam-break transport and impermeability benchmark, not a moving-contact-line wetting validation.",
+                    ("The left, right and bottom walls are free-slip: only the normal velocity is fixed (decision D58)" if free_slip_walls else "The left, right and bottom walls are no-slip") + "; zero surface tension makes this a dam-break transport and impermeability benchmark, not a moving-contact-line wetting validation.",
                     "The wall_top face is an open natural-traction boundary with a level-set outflow condition and no velocity Dirichlet condition, matching the open top of the published flume.",
                     "The deck approximates the gate as removed instantaneously; the published Test 05 specification raises it at 1.5 m/s.",
                     "The initial level-set field is the union of the wet bed and the retained water column; negative values denote the water side.",
@@ -1932,6 +2017,7 @@ def generate_spheric_test05(*, allow_overlapping_face_files: bool = False,
             newton_line_search_max_iterations="6",
             level_set_maintenance=True,
             interface_preserving_redistancing=redistancing,
+            free_slip_walls=free_slip_walls,
             readme=test05_readme(
                 wet_depth_mm,
                 (nx + 1) * (ny + 1),
@@ -1939,6 +2025,7 @@ def generate_spheric_test05(*, allow_overlapping_face_files: bool = False,
                 nx,
                 ny,
                 redistancing,
+                free_slip_walls,
             ),
         )
 
@@ -1971,7 +2058,8 @@ TEST02_CRITERIA = {
 
 
 def generate_spheric_test02(*, allow_overlapping_face_files: bool = False,
-                            redistancing: bool = INTERFACE_PRESERVING_REDISTANCING) -> None:
+                            redistancing: bool = INTERFACE_PRESERVING_REDISTANCING,
+                            free_slip_walls: bool = SPHERIC_FREE_SLIP_WALLS) -> None:
     tank = Box(0.0, TEST02_TANK_LENGTH, 0.0, TEST02_TANK_HEIGHT, 0.0, TEST02_TANK_WIDTH)
     obstacle = Box(
         TEST02_OBSTACLE_X_MIN,
@@ -2063,14 +2151,16 @@ def generate_spheric_test02(*, allow_overlapping_face_files: bool = False,
             "notes": [
                 "The geometry follows the official SPHERIC Test02/Kleefsman setup: water initially occupies x >= 1.992 m and height <= 0.55 m.",
                 "The structured mesh aligns tank and obstacle geometry while centering the top and gate free-surface cuts between mesh planes.",
-                "The obstacle is represented as an internal no-slip boundary in the background mesh.",
+                ("The obstacle is an internal free-slip boundary of the background mesh, written as one face file per face plane (obstacle_xmin, obstacle_xmax, obstacle_zmin, obstacle_zmax, obstacle_top) so that each fixes the velocity component along its normal (decision D58)." if free_slip_walls else "The obstacle is represented as an internal no-slip boundary in the background mesh."),
                 "The initial level-set field is negative inside the retained water column and remains negative on contacted tank walls.",
                 "The retained-column hydrostatic pressure is continued through dry cut-support vertices so the top trace is zero and the newly exposed vertical dam face retains its liquid-side initial trace.",
                 "The zero level set is limited to the top and gate-facing air-water interfaces; a closed-box signed distance incorrectly creates free-surface cuts on wet walls.",
                 "Earlier repository metadata used a 0.58 m retained column and swapped obstacle footprint; those settings are not the SPHERIC Test02 benchmark geometry.",
                 level_set_protocol_note(redistancing),
                 "The face files are disjoint (every face vertex on the wall or obstacle).  The June deck's files overlapped at the tank edges, and a face keeps the label of the last file listed: 94 faces of the top row of the side walls (left 12, right 12, front 35, back 35) carried the open wall_top label (no velocity condition) instead of no-slip; the other relabeled faces (between walls, and 16 obstacle faces next to the floor labeled bottom) kept a no-slip condition.",
-            ],
+            ] + ([
+                "Walls: free-slip on the five tank walls and the obstacle; only the normal velocity is fixed (decision D58); the top is open.  With no-slip walls the floor contact line stayed at the gate and the liquid ran out as a one-cell tongue above a dry floor row (2026-10-26).",
+            ] if free_slip_walls else []),
             "qualification_criteria": TEST02_CRITERIA,
         },
         grid_factory=grid_factory,
@@ -2096,6 +2186,7 @@ def generate_spheric_test02(*, allow_overlapping_face_files: bool = False,
         newton_line_search_max_iterations="6",
         level_set_maintenance=True,
         interface_preserving_redistancing=redistancing,
+        free_slip_walls=free_slip_walls,
     )
 
 
@@ -2133,17 +2224,27 @@ def main() -> None:
             "D39, the protocol value); off writes the decks of b94af982 byte for byte"
         ),
     )
+    parser.add_argument(
+        "--wall-condition",
+        choices=["free-slip", "no-slip"],
+        default="free-slip" if SPHERIC_FREE_SLIP_WALLS else "no-slip",
+        help=(
+            "velocity condition on the walls of the unfitted SPHERIC decks: free-slip (decision D58, "
+            "only the normal velocity fixed, the Test 02 obstacle written per face plane) or no-slip, "
+            "which writes the decks of 8f145c4c byte for byte"
+        ),
+    )
     args = parser.parse_args()
     legacy = {"allow_overlapping_face_files": args.allow_overlapping_face_files}
-    redistancing = args.interface_preserving_redistancing == "on"
+    protocol = {"redistancing": args.interface_preserving_redistancing == "on",
+                "free_slip_walls": args.wall_condition == "free-slip"}
 
     if args.case in {"all", "spheric_test10"}:
-        generate_spheric_test10(**legacy, include_legacy_fitted=args.legacy_fitted_test10,
-                                redistancing=redistancing)
+        generate_spheric_test10(**legacy, include_legacy_fitted=args.legacy_fitted_test10, **protocol)
     if args.case in {"all", "spheric_test05"}:
-        generate_spheric_test05(**legacy, redistancing=redistancing)
+        generate_spheric_test05(**legacy, **protocol)
     if args.case in {"all", "spheric_test02"}:
-        generate_spheric_test02(**legacy, redistancing=redistancing)
+        generate_spheric_test02(**legacy, **protocol)
 
 
 if __name__ == "__main__":
