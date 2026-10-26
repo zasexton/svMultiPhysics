@@ -22,7 +22,7 @@
   "notes": [
     "The published two-dimensional setup, meshed as a two-dimensional Triangle3 section (decision D51 item 2).",
     "The face files are disjoint: a boundary edge belongs to the wall all of its vertices lie on.",
-    "The left, right and bottom walls are no-slip; zero surface tension makes this a dam-break transport and impermeability benchmark, not a moving-contact-line wetting validation.",
+    "The left, right and bottom walls are free-slip: only the normal velocity is fixed (decision D58); zero surface tension makes this a dam-break transport and impermeability benchmark, not a moving-contact-line wetting validation.",
     "The wall_top face is an open natural-traction boundary with a level-set outflow condition and no velocity Dirichlet condition, matching the open top of the published flume.",
     "The deck approximates the gate as removed instantaneously; the published Test 05 specification raises it at 1.5 m/s.",
     "The initial level-set field is the union of the wet bed and the retained water column; negative values denote the water side.",

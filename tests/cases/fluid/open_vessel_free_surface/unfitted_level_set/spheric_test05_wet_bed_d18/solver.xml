@@ -139,14 +139,17 @@
   <Add_BC name="wall_left">
     <Type>Dir</Type>
     <Value>0.0</Value>
+    <Effective_direction>1 0</Effective_direction>
   </Add_BC>
   <Add_BC name="wall_right">
     <Type>Dir</Type>
     <Value>0.0</Value>
+    <Effective_direction>1 0</Effective_direction>
   </Add_BC>
   <Add_BC name="wall_bottom">
     <Type>Dir</Type>
     <Value>0.0</Value>
+    <Effective_direction>0 1</Effective_direction>
   </Add_BC>
 
   <Add_BC name="free_surface">

@@ -245,6 +245,58 @@ def test_validation_solver_generator_writes_the_triggered_redistancing_by_defaul
     assert "D39" not in generator.level_set_protocol_note(False)
 
 
+def test_validation_generator_writes_free_slip_walls_by_default(tmp_path):
+    # Decision D58: the SPHERIC decks fix only the normal velocity on every
+    # wall, the obstacle included (one face file per obstacle plane);
+    # "--wall-condition no-slip" writes the no-slip decks of 8f145c4c.
+    generator = _load_validation_mesh_generator()
+    assert generator.SPHERIC_FREE_SLIP_WALLS is True
+    assert generator.free_slip_effective_directions(
+        ["wall_left", "wall_bottom", "wall_top"], 2) == {
+            "wall_left": "1 0", "wall_bottom": "0 1", "wall_top": "0 1"}
+    assert generator.free_slip_effective_directions(
+        ["wall_back", "obstacle_xmax", "obstacle_top", "obstacle_zmin"], 3) == {
+            "wall_back": "0 0 1", "obstacle_xmax": "1 0 0", "obstacle_top": "0 1 0",
+            "obstacle_zmin": "0 0 1"}
+    with pytest.raises(ValueError, match="no known normal axis"):
+        generator.free_slip_effective_directions(["obstacle"], 3)
+    with pytest.raises(ValueError, match="normal along axis 2 in 2D"):
+        generator.free_slip_effective_directions(["wall_front"], 2)
+
+    # The per-plane obstacle files cover the obstacle exactly once.
+    grid = _small_box_grid(generator)
+    obstacle = generator.Box(1.0 / 3.0, 2.0 / 3.0, 0.0, 1.0 / 3.0, 1.0 / 3.0, 2.0 / 3.0)
+    grid = generator.remove_cells_inside(grid, [obstacle])
+    box = generator.Box(0.0, 1.0, 0.0, 1.0, 0.0, 1.0)
+    specs = generator.surface_specs_for_box(box, 1.0e-9, fitted=False, exact_planes=True)
+    specs += generator.obstacle_plane_specs(obstacle, 1.0e-9)
+    generator.write_surfaces(grid, specs, tmp_path, require_complete_coverage=True)
+    assert sorted(path.stem for path in tmp_path.glob("obstacle_*.vtp")) == [
+        "obstacle_top", "obstacle_xmax", "obstacle_xmin", "obstacle_zmax", "obstacle_zmin"]
+
+    # write_solver_xml writes one free-slip condition per obstacle plane.
+    common = dict(mesh_path="mesh/background/mesh-complete.mesh.vtu", fitted=False,
+                  fill_height=0.1, time_step=0.001, time_steps=1, include_obstacle_bc=True)
+    faces = [spec.name for spec in specs]
+    slip_dir, noslip_dir = tmp_path / "slip", tmp_path / "noslip"
+    slip_dir.mkdir()
+    noslip_dir.mkdir()
+    generator.write_solver_xml(
+        slip_dir, faces=faces,
+        wall_effective_directions=generator.free_slip_effective_directions(faces, 3), **common)
+    generator.write_solver_xml(noslip_dir, faces=faces, **common)
+    fluid = next(equation for equation in ET.parse(slip_dir / "solver.xml").getroot().findall("Add_equation")
+                 if equation.get("type") == "fluid")
+    directions = {bc.get("name"): bc.findtext("Effective_direction")
+                  for bc in fluid.findall("Add_BC") if bc.findtext("Type") == "Dir"}
+    assert directions == {
+        "wall_left": "1 0 0", "wall_right": "1 0 0", "wall_bottom": "0 1 0",
+        "wall_front": "0 0 1", "wall_back": "0 0 1",
+        "obstacle_xmin": "1 0 0", "obstacle_xmax": "1 0 0", "obstacle_zmin": "0 0 1",
+        "obstacle_zmax": "0 0 1", "obstacle_top": "0 1 0"}
+    assert "Effective_direction" not in (noslip_dir / "solver.xml").read_text()
+
+
 SPHERIC_UNFITTED_DECKS = {
     "spheric_test02_dambreak_obstacle": 3,
     "spheric_test05_wet_bed_d18": 2,
@@ -262,6 +314,14 @@ def _vtk_ascii_arrays(path):
         if name in ("GlobalNodeID", "connectivity", "offsets") and values:
             arrays.setdefault(name, [int(float(value)) for value in values])
     return arrays
+
+
+def _vtk_points(path):
+    """The point coordinates of an ascii VTK XML file."""
+    import numpy as np
+
+    element = ET.parse(path).getroot().find(".//Points/DataArray")
+    return np.asarray([float(value) for value in element.text.split()]).reshape(-1, 3)
 
 
 def _vtk_facets(arrays, global_ids=None):
@@ -328,6 +388,32 @@ def test_spheric_unfitted_decks_state_the_current_level_set_protocol(case_name):
     assert level_set.findtext("Enable_kinematic_reconciliation") == "true"
     assert level_set.findtext("Enable_sign_definite_patch_bounds") == "true"
     assert level_set.findtext("Enable_interface_preserving_redistancing") == "true"
+
+    import numpy as np
+
+    # Free-slip walls (D58): every velocity Dirichlet condition is a zero
+    # condition on a planar face file that fixes only the component along the
+    # face normal; the Test 02 obstacle is one face file per plane.
+    root = ET.parse(solver_xml).getroot()
+    case_dir = solver_xml.parent
+    dimension = SPHERIC_UNFITTED_DECKS[case_name]
+    face_files = {face.get("name"): face.findtext("Face_file_path")
+                  for face in root.find("Add_mesh").findall("Add_face")}
+    fluid = next(equation for equation in root.findall("Add_equation")
+                 if equation.get("type") == "fluid")
+    walls = [bc for bc in fluid.findall("Add_BC") if bc.findtext("Type") == "Dir"]
+    assert walls
+    if case_name == "spheric_test02_dambreak_obstacle":
+        assert "obstacle" not in face_files
+        assert {bc.get("name") for bc in walls} >= {
+            "obstacle_xmin", "obstacle_xmax", "obstacle_zmin", "obstacle_zmax", "obstacle_top"}
+    for bc in walls:
+        assert float(bc.findtext("Value")) == 0.0
+        points = _vtk_points(case_dir / face_files[bc.get("name")])[:, :dimension]
+        constant = [axis for axis in range(dimension) if np.ptp(points[:, axis]) == 0.0]
+        assert len(constant) == 1, bc.get("name")
+        mask = ["1" if axis == constant[0] else "0" for axis in range(dimension)]
+        assert bc.findtext("Effective_direction") == " ".join(mask), bc.get("name")
     # The retired algorithms (D47, D51, D55) are not mentioned at all.
     retired = ("Enable_bound_preserving_limiter", "Bound_preserving_",
                "Enable_reinitialization", "Reinitialization_",

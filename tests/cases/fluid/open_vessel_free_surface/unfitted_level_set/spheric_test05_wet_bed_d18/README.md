@@ -9,9 +9,9 @@ been compared with experiment yet.
 - The published two-dimensional flume section: 1.2 m long, 0.18 m high; a 0.15 m water
   column behind the gate at x = 0.38 m and a wet bed of 18 mm downstream.
 - The gate is removed instantaneously at t = 0 (the experiment lifts it at 1.5 m/s).
-- Walls left, right and bottom are no-slip; the top is open (natural traction, level-set
-  outflow).  Zero surface tension: a transport and impermeability benchmark, not a
-  wetting one.
+- Walls left, right and bottom are free-slip (only the normal velocity is fixed, decision
+  D58); the top is open (natural traction, level-set outflow).  Zero surface tension: a
+  transport and impermeability benchmark, not a wetting one.
 - Level set: harmonic PDE velocity extension with monolithic coupling (D55); kinematic
   reconciliation (D14), sign-definite patch bounds (D21) and triggered interface-preserving
   redistancing (D39), as the M1-M4 protocols.

@@ -55,8 +55,20 @@
   <Add_face name="wall_top">
     <Face_file_path>mesh/background/mesh-surfaces/wall_top.vtp</Face_file_path>
   </Add_face>
-  <Add_face name="obstacle">
-    <Face_file_path>mesh/background/mesh-surfaces/obstacle.vtp</Face_file_path>
+  <Add_face name="obstacle_xmin">
+    <Face_file_path>mesh/background/mesh-surfaces/obstacle_xmin.vtp</Face_file_path>
+  </Add_face>
+  <Add_face name="obstacle_xmax">
+    <Face_file_path>mesh/background/mesh-surfaces/obstacle_xmax.vtp</Face_file_path>
+  </Add_face>
+  <Add_face name="obstacle_zmin">
+    <Face_file_path>mesh/background/mesh-surfaces/obstacle_zmin.vtp</Face_file_path>
+  </Add_face>
+  <Add_face name="obstacle_zmax">
+    <Face_file_path>mesh/background/mesh-surfaces/obstacle_zmax.vtp</Face_file_path>
+  </Add_face>
+  <Add_face name="obstacle_top">
+    <Face_file_path>mesh/background/mesh-surfaces/obstacle_top.vtp</Face_file_path>
   </Add_face>
 </Add_mesh>
 
@@ -145,26 +157,52 @@
   <Add_BC name="wall_left">
     <Type>Dir</Type>
     <Value>0.0</Value>
+    <Effective_direction>1 0 0</Effective_direction>
   </Add_BC>
   <Add_BC name="wall_right">
     <Type>Dir</Type>
     <Value>0.0</Value>
+    <Effective_direction>1 0 0</Effective_direction>
   </Add_BC>
   <Add_BC name="wall_bottom">
     <Type>Dir</Type>
     <Value>0.0</Value>
+    <Effective_direction>0 1 0</Effective_direction>
   </Add_BC>
   <Add_BC name="wall_front">
     <Type>Dir</Type>
     <Value>0.0</Value>
+    <Effective_direction>0 0 1</Effective_direction>
   </Add_BC>
   <Add_BC name="wall_back">
     <Type>Dir</Type>
     <Value>0.0</Value>
+    <Effective_direction>0 0 1</Effective_direction>
   </Add_BC>
-  <Add_BC name="obstacle">
+  <Add_BC name="obstacle_xmin">
     <Type>Dir</Type>
     <Value>0.0</Value>
+    <Effective_direction>1 0 0</Effective_direction>
+  </Add_BC>
+  <Add_BC name="obstacle_xmax">
+    <Type>Dir</Type>
+    <Value>0.0</Value>
+    <Effective_direction>1 0 0</Effective_direction>
+  </Add_BC>
+  <Add_BC name="obstacle_zmin">
+    <Type>Dir</Type>
+    <Value>0.0</Value>
+    <Effective_direction>0 0 1</Effective_direction>
+  </Add_BC>
+  <Add_BC name="obstacle_zmax">
+    <Type>Dir</Type>
+    <Value>0.0</Value>
+    <Effective_direction>0 0 1</Effective_direction>
+  </Add_BC>
+  <Add_BC name="obstacle_top">
+    <Type>Dir</Type>
+    <Value>0.0</Value>
+    <Effective_direction>0 1 0</Effective_direction>
   </Add_BC>
 
   <Add_BC name="free_surface">

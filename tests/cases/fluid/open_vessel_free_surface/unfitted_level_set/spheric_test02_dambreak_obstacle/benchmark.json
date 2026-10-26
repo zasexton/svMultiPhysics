@@ -36,13 +36,14 @@
   "notes": [
     "The geometry follows the official SPHERIC Test02/Kleefsman setup: water initially occupies x >= 1.992 m and height <= 0.55 m.",
     "The structured mesh aligns tank and obstacle geometry while centering the top and gate free-surface cuts between mesh planes.",
-    "The obstacle is represented as an internal no-slip boundary in the background mesh.",
+    "The obstacle is an internal free-slip boundary of the background mesh, written as one face file per face plane (obstacle_xmin, obstacle_xmax, obstacle_zmin, obstacle_zmax, obstacle_top) so that each fixes the velocity component along its normal (decision D58).",
     "The initial level-set field is negative inside the retained water column and remains negative on contacted tank walls.",
     "The retained-column hydrostatic pressure is continued through dry cut-support vertices so the top trace is zero and the newly exposed vertical dam face retains its liquid-side initial trace.",
     "The zero level set is limited to the top and gate-facing air-water interfaces; a closed-box signed distance incorrectly creates free-surface cuts on wet walls.",
     "Earlier repository metadata used a 0.58 m retained column and swapped obstacle footprint; those settings are not the SPHERIC Test02 benchmark geometry.",
     "Level set: harmonic PDE velocity extension, monolithic (D55), with kinematic reconciliation (D14), sign-definite patch bounds (D21) and triggered interface-preserving redistancing (D39).",
-    "The face files are disjoint (every face vertex on the wall or obstacle).  The June deck's files overlapped at the tank edges, and a face keeps the label of the last file listed: 94 faces of the top row of the side walls (left 12, right 12, front 35, back 35) carried the open wall_top label (no velocity condition) instead of no-slip; the other relabeled faces (between walls, and 16 obstacle faces next to the floor labeled bottom) kept a no-slip condition."
+    "The face files are disjoint (every face vertex on the wall or obstacle).  The June deck's files overlapped at the tank edges, and a face keeps the label of the last file listed: 94 faces of the top row of the side walls (left 12, right 12, front 35, back 35) carried the open wall_top label (no velocity condition) instead of no-slip; the other relabeled faces (between walls, and 16 obstacle faces next to the floor labeled bottom) kept a no-slip condition.",
+    "Walls: free-slip on the five tank walls and the obstacle; only the normal velocity is fixed (decision D58); the top is open.  With no-slip walls the floor contact line stayed at the gate and the liquid ran out as a one-cell tongue above a dry floor row (2026-10-26)."
   ],
   "pressure_gauge": {
     "coordinates": [
