@@ -67,6 +67,7 @@
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
   <SUPG_transient_scale>2.0</SUPG_transient_scale>
   <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
+  <Enable_interface_preserving_redistancing>true</Enable_interface_preserving_redistancing>
   <Enable_sign_definite_patch_bounds>true</Enable_sign_definite_patch_bounds>
 
   <Output type="Spatial">

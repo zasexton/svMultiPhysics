@@ -13,7 +13,8 @@ been compared with experiment yet.
   outflow).  Zero surface tension: a transport and impermeability benchmark, not a
   wetting one.
 - Level set: harmonic PDE velocity extension with monolithic coupling (D55); kinematic
-  reconciliation (D14) and sign-definite patch bounds (D21), as the M1-M4 protocols.
+  reconciliation (D14), sign-definite patch bounds (D21) and triggered interface-preserving
+  redistancing (D39), as the M1-M4 protocols.
 - Mesh: 202 x 31 cells of near-isotropic size h = 6 mm (the
   June deck's finest spacing), each split into two Triangle3 with the diagonal alternating
   with the cell parity; 6496 points, 12524 triangles.  The gate, the wet-bed

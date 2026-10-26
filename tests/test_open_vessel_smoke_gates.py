@@ -212,6 +212,39 @@ def test_validation_solver_generator_declares_the_face_overlap_opt_out_only_for_
         "\n  <Allow_overlapping_face_files>true</Allow_overlapping_face_files>", "") == default_text
 
 
+def test_validation_solver_generator_writes_the_triggered_redistancing_by_default(tmp_path):
+    # Decision D39 (D35 item 1): the SPHERIC decks enable the triggered
+    # interface-preserving redistancing with the reconciliation and the patch
+    # bounds; off writes the decks of b94af982 (only that line differs).
+    generator = _load_validation_mesh_generator()
+    assert generator.INTERFACE_PRESERVING_REDISTANCING is True
+    common = dict(
+        mesh_path="mesh/background/mesh-complete.mesh.vtu",
+        faces=["wall_top"],
+        fitted=False,
+        fill_height=0.1,
+        time_step=0.001,
+        time_steps=1,
+        level_set_maintenance=True,
+    )
+    on_dir, off_dir = tmp_path / "on", tmp_path / "off"
+    on_dir.mkdir()
+    off_dir.mkdir()
+    generator.write_solver_xml(on_dir, interface_preserving_redistancing=True, **common)
+    generator.write_solver_xml(off_dir, interface_preserving_redistancing=False, **common)
+    key = "<Enable_interface_preserving_redistancing>true</Enable_interface_preserving_redistancing>"
+    text_on = (on_dir / "solver.xml").read_text()
+    text_off = (off_dir / "solver.xml").read_text()
+    assert key in text_on and key not in text_off
+    assert text_on.replace("\n  " + key, "") == text_off
+    with pytest.raises(ValueError, match="part of the level-set maintenance"):
+        generator.write_solver_xml(
+            tmp_path, interface_preserving_redistancing=True,
+            **{**common, "level_set_maintenance": False})
+    assert "redistancing (D39)" in generator.level_set_protocol_note(True)
+    assert "D39" not in generator.level_set_protocol_note(False)
+
+
 def test_legacy_fitted_test10_deck_declares_its_overlapping_face_files():
     # The legacy fitted deck was written with overlapping face files and keeps
     # its pinned results through the explicit opt-out (D35); the fitted
@@ -300,11 +333,12 @@ def test_spheric_unfitted_decks_state_the_current_level_set_protocol(case_name):
     level_set = smoke.level_set_equation(ET.parse(solver_xml).getroot())
 
     # The PDE extension is stated explicitly (D55), with the accepted-step
-    # maintenance of the M1-M4 protocols (D14, D21).
+    # maintenance of the M1-M4 protocols (D14, D21, D39).
     assert level_set.findtext("Advection_velocity_extension_method") == "pde_harmonic"
     assert level_set.findtext("Advection_velocity_extension_coupling") == "monolithic"
     assert level_set.findtext("Enable_kinematic_reconciliation") == "true"
     assert level_set.findtext("Enable_sign_definite_patch_bounds") == "true"
+    assert level_set.findtext("Enable_interface_preserving_redistancing") == "true"
     # The retired algorithms (D47, D51, D55) are not mentioned at all.
     retired = ("Enable_bound_preserving_limiter", "Bound_preserving_",
                "Enable_reinitialization", "Reinitialization_",

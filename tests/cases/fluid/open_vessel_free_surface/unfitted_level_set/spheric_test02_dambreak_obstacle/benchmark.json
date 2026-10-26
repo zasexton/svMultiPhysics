@@ -41,7 +41,7 @@
     "The retained-column hydrostatic pressure is continued through dry cut-support vertices so the top trace is zero and the newly exposed vertical dam face retains its liquid-side initial trace.",
     "The zero level set is limited to the top and gate-facing air-water interfaces; a closed-box signed distance incorrectly creates free-surface cuts on wet walls.",
     "Earlier repository metadata used a 0.58 m retained column and swapped obstacle footprint; those settings are not the SPHERIC Test02 benchmark geometry.",
-    "Level set: harmonic PDE velocity extension, monolithic (D55), with kinematic reconciliation (D14) and sign-definite patch bounds (D21).",
+    "Level set: harmonic PDE velocity extension, monolithic (D55), with kinematic reconciliation (D14), sign-definite patch bounds (D21) and triggered interface-preserving redistancing (D39).",
     "The face files are disjoint (every face vertex on the wall or obstacle).  The June deck's files overlapped at the tank edges, and a face keeps the label of the last file listed: 94 faces of the top row of the side walls (left 12, right 12, front 35, back 35) carried the open wall_top label (no velocity condition) instead of no-slip; the other relabeled faces (between walls, and 16 obstacle faces next to the floor labeled bottom) kept a no-slip condition."
   ],
   "pressure_gauge": {
