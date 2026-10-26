@@ -294,9 +294,44 @@ def structured_tet_grid(
     return tetra_grid(points, tets)
 
 
+def structured_triangle_grid(x_coords: np.ndarray, y_coords: np.ndarray) -> pv.UnstructuredGrid:
+    """A 2D structured grid of the plane z = 0 split into right triangles,
+    the diagonal alternating with the (i + j) parity of the cell (as the 2D
+    free-surface benchmarks do), every triangle counterclockwise."""
+    nx = len(x_coords)
+    ny = len(y_coords)
+    points = np.array([[x, y, 0.0] for y in y_coords for x in x_coords], dtype=float)
+
+    def node(i: int, j: int) -> int:
+        return j * nx + i
+
+    elements: list[tuple[int, int, int]] = []
+    for j in range(ny - 1):
+        for i in range(nx - 1):
+            a, b, c, d = node(i, j), node(i + 1, j), node(i + 1, j + 1), node(i, j + 1)
+            if (i + j) % 2 == 0:
+                elements.extend([(a, b, c), (a, c, d)])
+            else:
+                elements.extend([(a, b, d), (b, c, d)])
+    triangles = np.array(elements, dtype=np.int64)
+    cells = np.hstack([np.full((triangles.shape[0], 1), 3, dtype=np.int64), triangles]).ravel()
+    cell_types = np.full(triangles.shape[0], int(pv.CellType.TRIANGLE), dtype=np.uint8)
+    return pv.UnstructuredGrid(cells, cell_types, points)
+
+
 def grid_tets(grid: pv.UnstructuredGrid) -> np.ndarray:
     cells = grid.cells.reshape((-1, 5))
     return cells[:, 1:].astype(np.int64)
+
+
+def grid_spatial_dimension(grid: pv.UnstructuredGrid) -> int:
+    """3 for a tetrahedral grid, 2 for a triangle grid of the plane z = 0."""
+    cell_types = set(int(value) for value in np.unique(grid.celltypes))
+    if cell_types == {int(pv.CellType.TETRA)}:
+        return 3
+    if cell_types == {int(pv.CellType.TRIANGLE)}:
+        return 2
+    raise ValueError(f"unsupported cell types {sorted(cell_types)}: tetrahedra or triangles only")
 
 
 def remove_cells_inside(grid: pv.UnstructuredGrid, obstacles: list[Box]) -> pv.UnstructuredGrid:
@@ -455,6 +490,33 @@ def boundary_faces(tets: np.ndarray) -> list[tuple[int, int, int]]:
     return [value[1] for value in counts.values() if value[0] == 1]  # type: ignore[misc]
 
 
+def boundary_edges(triangles: np.ndarray) -> list[tuple[tuple[int, int], int]]:
+    """The boundary edges of a triangle grid, each with its parent triangle."""
+    counts: dict[tuple[int, int], list] = {}
+    for parent, tri in enumerate(triangles):
+        for a, b in ((tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])):
+            key = (min(int(a), int(b)), max(int(a), int(b)))
+            if key not in counts:
+                counts[key] = [0, (int(a), int(b)), parent]
+            counts[key][0] += 1
+    return [(value[1], value[2]) for value in counts.values() if value[0] == 1]
+
+
+def polydata_from_edges(
+    points: np.ndarray,
+    edges: list[tuple[tuple[int, int], int]],
+) -> pv.PolyData:
+    """Line face file of a 2D grid: GlobalNodeID per point and the parent
+    triangle as GlobalElementID per line (as the 2D benchmark face files)."""
+    used = sorted({node for edge, _ in edges for node in edge})
+    local = {node: i for i, node in enumerate(used)}
+    lines = np.array([[2, local[a], local[b]] for (a, b), _ in edges], dtype=np.int64).ravel()
+    poly = pv.PolyData(points[np.array(used, dtype=np.int64)], lines=lines)
+    poly.point_data["GlobalNodeID"] = np.array(used, dtype=np.int32)
+    poly.cell_data["GlobalElementID"] = np.array([parent for _, parent in edges], dtype=np.int32)
+    return poly
+
+
 def polydata_from_faces(
     points: np.ndarray,
     faces: list[tuple[int, int, int]],
@@ -477,24 +539,38 @@ def write_surfaces(
     surface_dir: Path,
     *,
     allow_overlapping_face_files: bool = False,
+    require_complete_coverage: bool = False,
 ) -> None:
     surface_dir.mkdir(parents=True, exist_ok=True)
     points = grid.points
-    faces = boundary_faces(grid_tets(grid))
+    dimension = grid_spatial_dimension(grid)
+    if dimension == 3:
+        facets = [(face, None) for face in boundary_faces(grid_tets(grid))]
+    else:
+        facets = boundary_edges(grid.cells.reshape((-1, 4))[:, 1:].astype(np.int64))
 
     selections: list[tuple[SurfaceSpec, list]] = []
     owners: dict[tuple[int, ...], list[str]] = {}
     for spec in specs:
         selected = [
-            face
-            for face in faces
-            if spec.predicate(points[np.array(face, dtype=np.int64)], points[np.array(face, dtype=np.int64)].mean(axis=0))
+            (facet, parent)
+            for facet, parent in facets
+            if spec.predicate(points[np.array(facet, dtype=np.int64)], points[np.array(facet, dtype=np.int64)].mean(axis=0))
         ]
         if not selected:
             raise RuntimeError(f"surface {spec.name!r} did not select any boundary faces")
-        for face in selected:
-            owners.setdefault(tuple(sorted(face)), []).append(spec.name)
+        for facet, _ in selected:
+            owners.setdefault(tuple(sorted(facet)), []).append(spec.name)
         selections.append((spec, selected))
+    if require_complete_coverage:
+        # Every boundary face belongs to a face file: an unlabeled face would
+        # get no boundary condition.
+        missing = [facet for facet, _ in facets if tuple(sorted(facet)) not in owners]
+        if missing:
+            raise RuntimeError(
+                f"{surface_dir}: {len(missing)} boundary faces are in no face file "
+                f"(first: GlobalNodeID {sorted(missing[0])})"
+            )
     # The centroid predicates below use a tolerance of 0.35 h, so faces of one
     # plane near an edge are also selected for the adjacent plane.  The solver
     # keeps one boundary label per face (the last face file listed), so such
@@ -517,7 +593,11 @@ def write_surfaces(
             )
         warnings.warn(message + " (legacy decks: allowed by --allow-overlapping-face-files)")
     for spec, selected in selections:
-        polydata_from_faces(points, selected).save(surface_dir / f"{spec.name}.vtp", binary=False)
+        if dimension == 3:
+            poly = polydata_from_faces(points, [facet for facet, _ in selected])
+        else:
+            poly = polydata_from_edges(points, selected)
+        poly.save(surface_dir / f"{spec.name}.vtp", binary=False)
 
 
 def face_file_overlap_message(surface_dir: Path, owners: dict[tuple[int, ...], list[str]]) -> str:
@@ -541,6 +621,39 @@ def plane_predicate(axis: int, value: float, tol: float) -> Callable[[np.ndarray
     def predicate(face_points: np.ndarray, center: np.ndarray) -> bool:
         del face_points
         return abs(center[axis] - value) <= tol
+
+    return predicate
+
+
+def plane_face_predicate(axis: int, value: float, tol: float) -> Callable[[np.ndarray, np.ndarray], bool]:
+    """A boundary face (or 2D edge) on the plane: every vertex on it.  On a
+    structured box grid each boundary face lies in exactly one plane, so the
+    selections are disjoint; a face at an edge of the box has vertices on two
+    planes but not all of them on both."""
+
+    def predicate(face_points: np.ndarray, center: np.ndarray) -> bool:
+        del center
+        return bool(np.all(np.abs(face_points[:, axis] - value) <= tol))
+
+    return predicate
+
+
+def obstacle_face_predicate(obstacle: Box, tol: float) -> Callable[[np.ndarray, np.ndarray], bool]:
+    """A face of the obstacle: every vertex within its bounds and on one of
+    its vertical planes or on its top (the obstacle stands on the floor)."""
+
+    def predicate(face_points: np.ndarray, center: np.ndarray) -> bool:
+        del center
+        lower = np.array([obstacle.xmin, obstacle.ymin, obstacle.zmin]) - tol
+        upper = np.array([obstacle.xmax, obstacle.ymax, obstacle.zmax]) + tol
+        if not np.all((face_points >= lower) & (face_points <= upper)):
+            return False
+        planes = (
+            (0, obstacle.xmin), (0, obstacle.xmax),
+            (2, obstacle.zmin), (2, obstacle.zmax),
+            (1, obstacle.ymax),
+        )
+        return any(bool(np.all(np.abs(face_points[:, axis] - value) <= tol)) for axis, value in planes)
 
     return predicate
 
@@ -626,9 +739,10 @@ def test05_vertical_coordinates(
     domain: Box,
     wet_depth: float,
     dam_height: float,
+    *,
+    fine_spacing: float = 0.006,
+    coarse_spacing: float = 0.010,
 ) -> np.ndarray:
-    fine_spacing = 0.006
-    coarse_spacing = 0.010
     fine_top = min(domain.ymax, wet_depth + 0.5 * fine_spacing)
     anchors = [domain.ymin, domain.ymax]
     for cut, spacing in ((wet_depth, fine_spacing), (dam_height, coarse_spacing)):
@@ -696,6 +810,8 @@ def hydrostatic_pressure_at_point(point: np.ndarray, fill_height: float) -> floa
 def write_solver_xml(
     case_dir: Path,
     *,
+    spatial_dimension: int = 3,
+    level_set_maintenance: bool = False,
     mesh_path: str,
     faces: list[str],
     fitted: bool,
@@ -736,6 +852,8 @@ def write_solver_xml(
         if allow_overlapping_face_files
         else ""
     )
+    # Without an explicit count the solver derives the ghost depth.
+    ghost_layers_block = f"\n  <Ghost_layers>{ghost_layers}</Ghost_layers>" if ghost_layers > 0 else ""
     level_set_outflow_faces = level_set_outflow_faces or []
     unknown_level_set_outflows = set(level_set_outflow_faces).difference(faces)
     if unknown_level_set_outflows:
@@ -774,19 +892,32 @@ def write_solver_xml(
         wall_bc_block(name)
         for name in wall_bcs
     )
-    level_set_outflow_blocks = "\n".join(
-        f"""  <Add_BC name="{name}">
+    level_set_outflow_blocks = "".join(
+        f"""
+  <Add_BC name="{name}">
     <Type>LevelSetOutflow</Type>
   </Add_BC>"""
         for name in level_set_outflow_faces
     )
+    if spatial_dimension not in (2, 3):
+        raise ValueError("spatial_dimension must be 2 or 3")
     active_domain_block = ""
     if active_domain is not None:
+        # The Navier-Stokes-side velocity extension of the free-surface BC
+        # is legacy and fails closed; the level set carries the PDE
+        # extension (D55).
         active_domain_block = f"""
     <Active_domain>{active_domain}</Active_domain>
-    <Active_domain_method>CutVolume</Active_domain_method>
-    <Enable_velocity_extension>true</Enable_velocity_extension>
-    <Velocity_extension_diffusivity>1.0</Velocity_extension_diffusivity>"""
+    <Active_domain_method>CutVolume</Active_domain_method>"""
+    # The current accepted-step maintenance of the M1-M4 protocols:
+    # kinematic reconciliation (D14) and sign-definite patch bounds (D21).
+    level_set_maintenance_block = (
+        """
+  <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
+  <Enable_sign_definite_patch_bounds>true</Enable_sign_definite_patch_bounds>"""
+        if level_set_maintenance
+        else ""
+    )
     cut_metadata_scale_text = "true" if use_cut_metadata_scale else "false"
     cut_cell_stabilization_text = "true" if enable_cut_cell_stabilization else "false"
     use_relaxed_unfitted_controls = use_blockschur_solver or use_direct_fluid_solver
@@ -972,11 +1103,7 @@ def write_solver_xml(
 {level_set_velocity_block}
   <Enable_SUPG>true</Enable_SUPG>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
-  <SUPG_transient_scale>2.0</SUPG_transient_scale>
-  <Enable_discontinuity_capturing>false</Enable_discontinuity_capturing>
-  <Enable_bound_preserving_limiter>false</Enable_bound_preserving_limiter>
-  <Enable_reinitialization>false</Enable_reinitialization>
-  <Enable_volume_correction>false</Enable_volume_correction>
+  <SUPG_transient_scale>2.0</SUPG_transient_scale>{level_set_maintenance_block}
 
   <Output type="Spatial">
     <Level_set>true</Level_set>
@@ -996,8 +1123,7 @@ def write_solver_xml(
     <Krylov_space_dimension>50</Krylov_space_dimension>
     <Tolerance>{unfitted_linear_tolerance}</Tolerance>
     <Absolute_tolerance>{LINEAR_SOLVER_ABSOLUTE_TOLERANCE}</Absolute_tolerance>
-  </LS>
-{level_set_outflow_blocks}
+  </LS>{level_set_outflow_blocks}
 </Add_equation>
 
 <Add_equation type="fluid">
@@ -1077,7 +1203,7 @@ def write_solver_xml(
 <GeneralSimulationParameters>
   <Use_new_OOP_solver>true</Use_new_OOP_solver>
   <Continue_previous_simulation>false</Continue_previous_simulation>
-  <Number_of_spatial_dimensions>3</Number_of_spatial_dimensions>
+  <Number_of_spatial_dimensions>{spatial_dimension}</Number_of_spatial_dimensions>
   <Number_of_time_steps>{time_steps}</Number_of_time_steps>
   <Time_step_size>{time_step:.8g}</Time_step_size>
   <Spectral_radius_of_infinite_time_step>0.50</Spectral_radius_of_infinite_time_step>
@@ -1098,8 +1224,7 @@ def write_solver_xml(
 </GeneralSimulationParameters>
 
 <Add_mesh name="tank">
-  <Mesh_file_path>{mesh_path}</Mesh_file_path>
-  <Ghost_layers>{ghost_layers}</Ghost_layers>{face_overlap_opt_out}
+  <Mesh_file_path>{mesh_path}</Mesh_file_path>{ghost_layers_block}{face_overlap_opt_out}
 
 {face_blocks}
 </Add_mesh>
@@ -1116,18 +1241,32 @@ def prepare_case_dir(path: Path) -> None:
     path.mkdir(parents=True)
 
 
-def surface_specs_for_box(box: Box, tol: float, *, fitted: bool) -> list[SurfaceSpec]:
+def surface_specs_for_box(
+    box: Box,
+    tol: float,
+    *,
+    fitted: bool,
+    exact_planes: bool = False,
+    spatial_dimension: int = 3,
+) -> list[SurfaceSpec]:
+    """The face files of a box: centroid within tol of a plane (legacy: the
+    files overlap at the edges), or with exact_planes every face vertex
+    within tol of the plane (disjoint).  A 2D rectangle has no front/back."""
+    plane = plane_face_predicate if exact_planes else plane_predicate
     specs = [
-        SurfaceSpec("wall_left", plane_predicate(0, box.xmin, tol)),
-        SurfaceSpec("wall_right", plane_predicate(0, box.xmax, tol)),
-        SurfaceSpec("wall_bottom", plane_predicate(1, box.ymin, tol)),
-        SurfaceSpec("wall_front", plane_predicate(2, box.zmin, tol)),
-        SurfaceSpec("wall_back", plane_predicate(2, box.zmax, tol)),
+        SurfaceSpec("wall_left", plane(0, box.xmin, tol)),
+        SurfaceSpec("wall_right", plane(0, box.xmax, tol)),
+        SurfaceSpec("wall_bottom", plane(1, box.ymin, tol)),
     ]
+    if spatial_dimension == 3:
+        specs += [
+            SurfaceSpec("wall_front", plane(2, box.zmin, tol)),
+            SurfaceSpec("wall_back", plane(2, box.zmax, tol)),
+        ]
     if fitted:
-        specs.append(SurfaceSpec("free_surface", plane_predicate(1, box.ymax, tol)))
+        specs.append(SurfaceSpec("free_surface", plane(1, box.ymax, tol)))
     else:
-        specs.append(SurfaceSpec("wall_top", plane_predicate(1, box.ymax, tol)))
+        specs.append(SurfaceSpec("wall_top", plane(1, box.ymax, tol)))
     return specs
 
 
@@ -1175,6 +1314,8 @@ def write_case(
     record_gauge_metadata: bool = False,
     pressure_gauge_verification: Callable[[dict], dict] | None = None,
     allow_overlapping_face_files: bool = False,
+    level_set_maintenance: bool = False,
+    readme: str | None = None,
 ) -> None:
     obstacles = obstacles or []
     if grid_factory is not None:
@@ -1195,11 +1336,30 @@ def write_case(
     mesh_path = mesh_dir / "mesh-complete.mesh.vtu"
     grid.save(mesh_path, binary=False)
 
-    tol = max(0.35 * h, 1.0e-8)
-    specs = surface_specs_for_box(domain, tol, fitted=fitted)
-    if obstacles:
-        specs.append(SurfaceSpec("obstacle", obstacle_predicate(obstacles[0], tol)))
-    write_surfaces(grid, specs, surface_dir, allow_overlapping_face_files=allow_overlapping_face_files)
+    spatial_dimension = grid_spatial_dimension(grid)
+    if allow_overlapping_face_files:
+        # Legacy decks: centroid within 0.35 h of a plane, so the files
+        # overlap at the box edges (D35).
+        tol = max(0.35 * h, 1.0e-8)
+        specs = surface_specs_for_box(domain, tol, fitted=fitted)
+        if obstacles:
+            specs.append(SurfaceSpec("obstacle", obstacle_predicate(obstacles[0], tol)))
+    else:
+        # Every face vertex on the plane: one file per boundary face.
+        extent = max(domain.xmax - domain.xmin, domain.ymax - domain.ymin, domain.zmax - domain.zmin)
+        tol = 1.0e-9 * extent
+        specs = surface_specs_for_box(
+            domain, tol, fitted=fitted, exact_planes=True, spatial_dimension=spatial_dimension
+        )
+        if obstacles:
+            specs.append(SurfaceSpec("obstacle", obstacle_face_predicate(obstacles[0], tol)))
+    write_surfaces(
+        grid,
+        specs,
+        surface_dir,
+        allow_overlapping_face_files=allow_overlapping_face_files,
+        require_complete_coverage=not allow_overlapping_face_files,
+    )
 
     gauge_metadata = write_pressure_gauge(case_dir, grid, gauge_point, gauge_pressure)
     if record_gauge_metadata:
@@ -1208,8 +1368,12 @@ def write_case(
         if pressure_gauge_verification is not None:
             metadata["pressure_gauge_verification"] = pressure_gauge_verification(gauge_metadata)
     write_metadata(case_dir, metadata)
+    if readme is not None:
+        (case_dir / "README.md").write_text(readme)
     write_solver_xml(
         case_dir,
+        spatial_dimension=spatial_dimension,
+        level_set_maintenance=level_set_maintenance,
         mesh_path=f"mesh/{mesh_subdir}/mesh-complete.mesh.vtu",
         faces=[spec.name for spec in specs],
         fitted=fitted,
@@ -1248,7 +1412,8 @@ def write_case(
         display_path = case_dir.relative_to(ROOT)
     except ValueError:
         display_path = case_dir
-    print(f"{display_path}: {grid.n_points} points, {grid.n_cells} tetrahedra")
+    cell_name = "tetrahedra" if spatial_dimension == 3 else "triangles"
+    print(f"{display_path}: {grid.n_points} points, {grid.n_cells} {cell_name}")
 
 
 def sloshing_metadata(
@@ -1321,7 +1486,80 @@ def field_initialized_pressure_diagnostic(gauge_metadata: dict) -> dict:
     }
 
 
-def generate_spheric_test10(*, allow_overlapping_face_files: bool = False) -> None:
+def write_legacy_fitted_spheric_test10(
+    water: Box,
+    lateral_fill: float,
+    x_coords: np.ndarray,
+    fitted_y_coords: np.ndarray,
+    z_coords: np.ndarray,
+    structured_max_spacing: float,
+) -> None:
+    """The legacy fitted_ale Test 10 deck (overlapping face files, D35)."""
+
+    def fitted_grid_factory() -> pv.UnstructuredGrid:
+        return structured_tet_grid(
+            x_coords,
+            fitted_y_coords,
+            z_coords,
+            mirror_z_midplane=True,
+        )
+
+    write_case(
+        allow_overlapping_face_files=True,
+        case_dir=ROOT / "fitted_ale" / "spheric_test10_lateral_water_1x",
+        mesh_subdir="water",
+        domain=water,
+        phi=None,
+        fill_height=lateral_fill,
+        grid_factory=fitted_grid_factory,
+        gauge_point=(0.45, 0.5 * lateral_fill, 0.031),
+        gauge_pressure=lambda point: hydrostatic_pressure_at_point(point, lateral_fill),
+        record_gauge_metadata=True,
+        pressure_gauge_verification=sloshing_pressure_gauge_verification,
+        metadata=sloshing_metadata(
+            "SPHERIC Test 10 lateral water 1x",
+            True,
+            lateral_fill,
+            mesh_tools=["PyVista", "structured_tet_grid"],
+        ),
+        h=structured_max_spacing,
+        fitted=True,
+        time_step=0.001,
+        time_steps=40,
+    )
+
+
+TEST10_CRITERIA = {
+    "status": "proposal (D1): the working criteria of the SPHERIC campaign until the user sets tolerances",
+    "completion_time_s": 1.5,
+    "completion_justification": (
+        "past the June stop at 0.89-0.90 s (line-search trial cut fractions near 1e-8) and the "
+        "first Sensor1 impact peak at 0.953 s"
+    ),
+    "sensor1_first_peak_time_s": 0.953,
+    "sensor1_first_peak_time_tolerance_s": 0.05,
+    "sensor1_first_peak_time_justification": (
+        "about 5% of the time to the first impact; the fitted 2D MeshNitsche deck peaks 0.028 s "
+        "early (0.925 s), so the unfitted deck is held to the same order"
+    ),
+    "sensor1_first_peak_mbar": 3.86,
+    "sensor1_first_peak_relative_tolerance": 0.3,
+    "sensor1_first_peak_justification": (
+        "the fitted 2D deck is 12% low (3.38 mbar); 30% leaves room for this coarse 3D mesh "
+        "(h = 45 mm) and still rejects the June accepted pressures of about 2-3 times the reference"
+    ),
+    "reported": "Sensor1 RMS difference over 0-1.4 s; the 7.3 s peak (tracker M6); volume drift",
+}
+
+
+def generate_spheric_test10(
+    *,
+    allow_overlapping_face_files: bool = False,
+    include_legacy_fitted: bool = False,
+) -> None:
+    """The unfitted Test 10 deck; with include_legacy_fitted also the legacy
+    fitted_ale deck, which keeps its overlapping face files (the fitted
+    MeshNitsche decks of generate_spheric_test10_fitted_decks.py replace it)."""
     tank = Box(0.0, 0.900, 0.0, 0.508, 0.0, 0.062)
     lateral_fill = 0.093
     water = Box(tank.xmin, tank.xmax, tank.ymin, lateral_fill, tank.zmin, tank.zmax)
@@ -1347,14 +1585,6 @@ def generate_spheric_test10(*, allow_overlapping_face_files: bool = False) -> No
         centering_gap=interface_centering_gap,
     )
 
-    def fitted_grid_factory() -> pv.UnstructuredGrid:
-        return structured_tet_grid(
-            x_coords,
-            fitted_y_coords,
-            z_coords,
-            mirror_z_midplane=True,
-        )
-
     def unfitted_grid_factory() -> pv.UnstructuredGrid:
         return structured_tet_grid(
             x_coords,
@@ -1363,29 +1593,31 @@ def generate_spheric_test10(*, allow_overlapping_face_files: bool = False) -> No
             mirror_z_midplane=True,
         )
 
-    write_case(
-        allow_overlapping_face_files=allow_overlapping_face_files,
-        case_dir=ROOT / "fitted_ale" / "spheric_test10_lateral_water_1x",
-        mesh_subdir="water",
-        domain=water,
-        phi=None,
-        fill_height=lateral_fill,
-        grid_factory=fitted_grid_factory,
-        gauge_point=(0.45, 0.5 * lateral_fill, 0.031),
-        gauge_pressure=lambda point: hydrostatic_pressure_at_point(point, lateral_fill),
-        record_gauge_metadata=True,
-        pressure_gauge_verification=sloshing_pressure_gauge_verification,
-        metadata=sloshing_metadata(
-            "SPHERIC Test 10 lateral water 1x",
-            True,
-            lateral_fill,
-            mesh_tools=["PyVista", "structured_tet_grid"],
-        ),
-        h=structured_max_spacing,
-        fitted=True,
-        time_step=0.001,
-        time_steps=40,
+    if include_legacy_fitted:
+        if not allow_overlapping_face_files:
+            raise ValueError(
+                "the legacy fitted Test 10 deck keeps its overlapping face files: "
+                "pass --allow-overlapping-face-files with --legacy-fitted-test10"
+            )
+        write_legacy_fitted_spheric_test10(
+            water, lateral_fill, x_coords, fitted_y_coords, z_coords, structured_max_spacing
+        )
+    unfitted_metadata = sloshing_metadata(
+        "SPHERIC Test 10 lateral water 1x",
+        False,
+        lateral_fill,
+        mesh_tools=["PyVista", "structured_tet_grid"],
     )
+    unfitted_metadata["notes"] = unfitted_metadata["notes"] + [
+        "The face files are disjoint (every face vertex on the wall).  The June deck's face files "
+        "overlapped at the tank edges between no-slip walls, so the relabeling changes no condition.",
+        "Level set: harmonic PDE velocity extension, monolithic (D55), with kinematic reconciliation "
+        "(D14) and sign-definite patch bounds (D21).",
+        "The roll forcing (body force and rotating-frame angular velocity tables under bc/) is derived "
+        "from the published motion record by generate_spheric_test10_roll_body_force.py; it is not "
+        "committed.",
+    ]
+    unfitted_metadata["qualification_criteria"] = TEST10_CRITERIA
 
     write_case(
         allow_overlapping_face_files=allow_overlapping_face_files,
@@ -1406,16 +1638,12 @@ def generate_spheric_test10(*, allow_overlapping_face_files: bool = False) -> No
         gauge_pressure=lambda point: hydrostatic_pressure_at_point(point, lateral_fill),
         record_gauge_metadata=True,
         pressure_gauge_verification=field_initialized_pressure_diagnostic,
-        metadata=sloshing_metadata(
-            "SPHERIC Test 10 lateral water 1x",
-            False,
-            lateral_fill,
-            mesh_tools=["PyVista", "structured_tet_grid"],
-        ),
+        metadata=unfitted_metadata,
         h=structured_max_spacing,
         fitted=False,
         time_step=0.001,
         time_steps=40,
+        level_set_maintenance=True,
         include_top_wall_bc=True,
         active_domain="LevelSetNegative",
         use_direct_fluid_solver=True,
@@ -1461,8 +1689,81 @@ def test05_reference_profiles(wet_depth_mm: int) -> list[dict[str, object]]:
     ]
 
 
+TEST05_MESH_SPACING = 0.006
+TEST05_TIME_STEPS = 600  # 600 x 5e-4 s = 0.3 s (tracker M1); runs to the last profile override it
+TEST05_FALSE_WETTING_HEIGHT = 0.16
+# The June three-dimensional decks (a thin extrusion, replaced by D51 item 2).
+TEST05_JUNE_EXTRUSION = {
+    "extrusion_breadth_m": 0.03,
+    "cells_across": 2,
+    "tetrahedra": {18: 13608, 38: 14256},
+    "spacing_m": {"x": 0.022, "y": [0.005, 0.010], "z": 0.015},
+    "stop": "step 193 (t = 0.0965 s) on the small-cut aggregation guard (root path 9 > 8)",
+    # The overlapping face files shared 112 faces: 108 front/back faces next to
+    # the bottom (labeled front/back, their own wall) and 4 left/right faces
+    # next to the bottom (labeled bottom, no-slip as their own wall).
+    "overlapping_faces": 112,
+    "faces_with_a_different_condition": 0,
+}
+
+
+def test05_readme(wet_depth_mm: int, n_points: int, n_triangles: int, nx: int, ny: int) -> str:
+    return f"""# SPHERIC Test 05 wet-bed dam break, d = {wet_depth_mm} mm (unfitted level set, 2D)
+
+Written by `../../generate_validation_meshes.py --case spheric_test05`.  Status: regenerated
+2026-10-26 for the SPHERIC campaign (tracker M1, M6); the profiles of this deck have not
+been compared with experiment yet.
+
+## Setup
+
+- The published two-dimensional flume section: 1.2 m long, 0.18 m high; a 0.15 m water
+  column behind the gate at x = 0.38 m and a wet bed of {wet_depth_mm} mm downstream.
+- The gate is removed instantaneously at t = 0 (the experiment lifts it at 1.5 m/s).
+- Walls left, right and bottom are no-slip; the top is open (natural traction, level-set
+  outflow).  Zero surface tension: a transport and impermeability benchmark, not a
+  wetting one.
+- Level set: harmonic PDE velocity extension with monolithic coupling (D55); kinematic
+  reconciliation (D14) and sign-definite patch bounds (D21), as the M1-M4 protocols.
+- Mesh: {nx} x {ny} cells of near-isotropic size h = {TEST05_MESH_SPACING * 1000:.0f} mm (the
+  June deck's finest spacing), each split into two Triangle3 with the diagonal alternating
+  with the cell parity; {n_points} points, {n_triangles} triangles.  The gate, the wet-bed
+  height and the column height lie midway between mesh lines.  The four face files are
+  disjoint (every face vertex on the wall).
+
+## The June deck it replaces (decision D51 item 2)
+
+The June deck was a three-dimensional thin extrusion of this section: 30 mm across with
+2 cells (h_z = 15 mm), h_x = 22 mm, h_y = 5-10 mm, {TEST05_JUNE_EXTRUSION['tetrahedra'][wet_depth_mm]}
+tetrahedra, with free-slip front and back planes.  On the current protocol it stopped at
+step 193 (t = 0.0965 s) on the small-cut aggregation guard: at the surge front the liquid
+formed wedges on the two free-slip planes, and with only 2 cells across no full cell lay
+within 8 face steps of a cut cell.  Its face files also overlapped at the tank edges (the
+0.35 h centroid selection, kept by the `Allow_overlapping_face_files` opt-out of D35).
+A face keeps the label of the last face file listed.  Of the 112 shared faces, 108 were
+front/back faces next to the bottom, which kept their own free-slip label, and 4 were
+left/right faces next to the bottom, which took the bottom label, no-slip like their own
+wall; checked face by face on the committed files, no face had a different condition
+(the tracker's M5 item expected bottom faces with the free-slip label; there were none).
+The 2D section has no spanwise direction and its face files are disjoint.
+
+## Criteria (tracker M1)
+
+- Free-surface profile RMSE against the experimental profile at most 0.02 m at 0.156,
+  0.219 and 0.281 s (`compare_test05_profiles.py`).  June, on the extruded deck with
+  cadence-1 volume correction: 0.0184 m (d18) and 0.0158 m (d38) at 0.156 s.
+- No false wetting: no vertex with phi < 0 above y = {TEST05_FALSE_WETTING_HEIGHT} m (June d18 wetted the
+  lid corners after 0.22 s).
+- The later profiles (to {TEST05_REFERENCE_PROFILE_TIMES[wet_depth_mm][-1]} s, tracker M6) are reported.
+"""
+
+
 def generate_spheric_test05(*, allow_overlapping_face_files: bool = False) -> None:
-    domain = Box(0.0, 1.20, 0.0, 0.18, 0.0, 0.03)
+    if allow_overlapping_face_files:
+        raise ValueError(
+            "the SPHERIC 05 decks are two-dimensional sections with disjoint face files "
+            "(decision D51 item 2); the legacy extruded decks are not regenerated"
+        )
+    domain = Box(0.0, 1.20, 0.0, 0.18, 0.0, 0.0)
     gate_x = 0.38
     dam_height = 0.15
     source_urls = ["https://www.spheric-sph.org/tests/test-05"]
@@ -1472,25 +1773,21 @@ def generate_spheric_test05(*, allow_overlapping_face_files: bool = False) -> No
             domain.xmin,
             domain.xmax,
             (gate_x,),
-            max_spacing=0.0225,
+            max_spacing=TEST05_MESH_SPACING,
         )
-        y_coords = test05_vertical_coordinates(domain, wet_depth, dam_height)
-        z_coords = segmented_coordinates(
-            (domain.zmin, 0.5 * (domain.zmin + domain.zmax), domain.zmax),
-            max_spacing=0.015,
+        y_coords = test05_vertical_coordinates(
+            domain,
+            wet_depth,
+            dam_height,
+            fine_spacing=TEST05_MESH_SPACING,
+            coarse_spacing=TEST05_MESH_SPACING,
         )
 
         def grid_factory(
             x_coords: np.ndarray = x_coords,
             y_coords: np.ndarray = y_coords,
-            z_coords: np.ndarray = z_coords,
         ) -> pv.UnstructuredGrid:
-            return structured_tet_grid(
-                x_coords,
-                y_coords,
-                z_coords,
-                mirror_z_midplane=True,
-            )
+            return structured_triangle_grid(x_coords, y_coords)
 
         def phi(points: np.ndarray, wet_depth: float = wet_depth) -> np.ndarray:
             return dam_break_wet_bed_phi(
@@ -1508,8 +1805,10 @@ def generate_spheric_test05(*, allow_overlapping_face_files: bool = False) -> No
                 wet_depth=wet_depth,
             )
 
+        nx = len(x_coords) - 1
+        ny = len(y_coords) - 1
         write_case(
-            allow_overlapping_face_files=allow_overlapping_face_files,
+            allow_overlapping_face_files=False,
             case_dir=ROOT / "unfitted_level_set" / f"spheric_test05_wet_bed_d{wet_depth_mm}",
             mesh_subdir="background",
             domain=domain,
@@ -1517,7 +1816,7 @@ def generate_spheric_test05(*, allow_overlapping_face_files: bool = False) -> No
             pressure=pressure,
             grid_factory=grid_factory,
             fill_height=dam_height,
-            gauge_point=(0.10, 0.075, 0.015),
+            gauge_point=(0.10, 0.075, 0.0),
             gauge_pressure=lambda point, wet_depth=wet_depth: float(
                 pressure(point.reshape(1, 3))[0]
             ),
@@ -1526,43 +1825,68 @@ def generate_spheric_test05(*, allow_overlapping_face_files: bool = False) -> No
             metadata={
                 "benchmark": f"SPHERIC Test 05 wet-bed dam break d={wet_depth_mm} mm",
                 "representation": "unfitted_level_set",
+                "spatial_dimension": 2,
                 "source_urls": source_urls,
                 "reference_profiles": test05_reference_profiles(wet_depth_mm),
-                "mesh_tools": ["PyVista", "mirrored structured thin-extrusion tetrahedral grid"],
+                "mesh_tools": ["PyVista", "structured triangle grid, diagonal alternating with the cell parity"],
+                "mesh": {
+                    "cells_x": nx,
+                    "cells_y": ny,
+                    "triangles": 2 * nx * ny,
+                    "spacing_m": TEST05_MESH_SPACING,
+                },
                 "dimensions_m": {
                     "initial_column_height": dam_height,
                     "wet_bed_depth": wet_depth,
+                    "gate_x": gate_x,
                     "profile_window_x_min": 0.38,
                     "profile_window_x_max": 1.04,
                     "computational_length": domain.xmax,
                     "computational_height": domain.ymax,
-                    "extrusion_breadth": domain.zmax,
+                },
+                "qualification_criteria": {
+                    "source": "tracker M1 (SPHERIC 05 D18/D38)",
+                    "profile_rmse_max_m": 0.02,
+                    "profile_rmse_times_s": [0.156, 0.219, 0.281],
+                    "profile_rmse_justification": (
+                        "no regression from the June RMSE of about 0.02 m "
+                        "(0.0184 m d18, 0.0158 m d38 at 0.156 s)"
+                    ),
+                    "false_wetting": (
+                        f"no vertex with phi < 0 above y = {TEST05_FALSE_WETTING_HEIGHT} m"
+                    ),
+                    "reported_profile_times_s": TEST05_REFERENCE_PROFILE_TIMES[wet_depth_mm],
+                },
+                "replaces": {
+                    "decision": "D51 item 2",
+                    "june_three_dimensional_extrusion": {
+                        "extrusion_breadth_m": TEST05_JUNE_EXTRUSION["extrusion_breadth_m"],
+                        "cells_across": TEST05_JUNE_EXTRUSION["cells_across"],
+                        "tetrahedra": TEST05_JUNE_EXTRUSION["tetrahedra"][wet_depth_mm],
+                        "spacing_m": TEST05_JUNE_EXTRUSION["spacing_m"],
+                        "stop_on_current_protocol": TEST05_JUNE_EXTRUSION["stop"],
+                        "overlapping_faces": TEST05_JUNE_EXTRUSION["overlapping_faces"],
+                        "faces_with_a_different_condition": TEST05_JUNE_EXTRUSION[
+                            "faces_with_a_different_condition"
+                        ],
+                    },
                 },
                 "notes": [
-                    "The three-dimensional mesh is a thin extrusion of the published two-dimensional setup.",
-                    "The tetrahedral split is mirrored about the extrusion mid-plane to suppress transverse bias.",
-                    "The front/back extrusion planes constrain only z-normal velocity, giving the symmetry/free-slip boundary required to represent the published two-dimensional benchmark without artificial spanwise-wall drag.",
-                    "The full no-slip left/right/bottom conditions and zero surface tension make this a dam-break transport and impermeability benchmark, not a moving-contact-line wetting validation.",
-                    "The wall_top mesh face is an open natural-traction boundary and deliberately has no velocity Dirichlet condition, matching the open top of the published flume.",
-                    "The current initial-value deck approximates the gate as removed instantaneously; the published Test 05 specification instead raises it upward at 1.5 m/s, so profile comparisons are not full benchmark qualification until that moving boundary is represented.",
-                    "The initial level-set field is the union of the wet bed and the retained water column.",
-                    "Negative level-set values denote the water side for active-domain assembly.",
+                    "The published two-dimensional setup, meshed as a two-dimensional Triangle3 section (decision D51 item 2).",
+                    "The face files are disjoint: a boundary edge belongs to the wall all of its vertices lie on.",
+                    "The left, right and bottom walls are no-slip; zero surface tension makes this a dam-break transport and impermeability benchmark, not a moving-contact-line wetting validation.",
+                    "The wall_top face is an open natural-traction boundary with a level-set outflow condition and no velocity Dirichlet condition, matching the open top of the published flume.",
+                    "The deck approximates the gate as removed instantaneously; the published Test 05 specification raises it at 1.5 m/s.",
+                    "The initial level-set field is the union of the wet bed and the retained water column; negative values denote the water side.",
                     "Pressure uses the local column-height hydrostatic law continued with sign onto dry cut-support vertices; those coefficients are interpolation data, not gas pressure.",
                 ],
             },
-            h=0.006,
+            h=TEST05_MESH_SPACING,
             fitted=False,
             time_step=0.0005,
-            # Reach the first post-onset reference profile at t=0.281 s and
-            # span the historical false-wall-wetting event near t=0.235 s.
-            time_steps=562,
-            ghost_layers=3,
+            time_steps=TEST05_TIME_STEPS,
             include_top_wall_bc=False,
             level_set_outflow_faces=["wall_top"],
-            wall_effective_directions={
-                "wall_front": "0 0 1",
-                "wall_back": "0 0 1",
-            },
             active_domain="LevelSetNegative",
             enable_cut_cell_stabilization=True,
             use_cut_metadata_scale=False,
@@ -1573,7 +1897,42 @@ def generate_spheric_test05(*, allow_overlapping_face_files: bool = False) -> No
             enable_adaptive_time_loop=True,
             newton_line_search_fail_on_no_reduction=True,
             newton_line_search_max_iterations="6",
+            level_set_maintenance=True,
+            readme=test05_readme(
+                wet_depth_mm,
+                (nx + 1) * (ny + 1),
+                2 * nx * ny,
+                nx,
+                ny,
+            ),
         )
+
+
+TEST02_COLUMN_HYDROSTATIC_PA = WATER_DENSITY * GRAVITY * TEST02_INITIAL_COLUMN_HEIGHT
+TEST02_CRITERIA = {
+    "status": "proposal (D1): the working criteria of the SPHERIC campaign until the user sets tolerances",
+    "completion_time_s": 1.0,
+    "completion_justification": (
+        "the front passes the obstacle and reaches the far wall well before 1 s; the June runs "
+        "showed their pressure spikes in this window"
+    ),
+    "maximum_sensor_pressure_pa": 50000.0,
+    "maximum_sensor_pressure_justification": (
+        "about 4.5 times the largest measured obstacle pressure (P1, 11.2 kPa at 0.415 s) and "
+        "9 times the column's hydrostatic pressure rho g H0 = 5.4 kPa; the June spikes reached "
+        "MPa, so 50 kPa separates a spike from a physical impact pressure"
+    ),
+    "minimum_front_speed_ratio": 0.8,
+    "front_speed_ratio_definition": (
+        "measured over the 1.0 m from the gate to the H2 probe (x = 0.992 m): the experimental "
+        "arrival time (H2 above 1 cm at 0.358 s) divided by the simulated one"
+    ),
+    "minimum_front_speed_ratio_justification": (
+        "the June front ran at 0.43 of the reference speed; 0.8 tolerates the coarse mesh "
+        "(h = 0.08-0.10 m) while rejecting a front held back by the cut-cell treatment"
+    ),
+    "reported": "H2 and H4 heights and P1, P3, P5, P7 pressures against experiment (RMS); volume drift",
+}
 
 
 def generate_spheric_test02(*, allow_overlapping_face_files: bool = False) -> None:
@@ -1673,8 +2032,10 @@ def generate_spheric_test02(*, allow_overlapping_face_files: bool = False) -> No
                 "The retained-column hydrostatic pressure is continued through dry cut-support vertices so the top trace is zero and the newly exposed vertical dam face retains its liquid-side initial trace.",
                 "The zero level set is limited to the top and gate-facing air-water interfaces; a closed-box signed distance incorrectly creates free-surface cuts on wet walls.",
                 "Earlier repository metadata used a 0.58 m retained column and swapped obstacle footprint; those settings are not the SPHERIC Test02 benchmark geometry.",
-                "The promoted OOP unfitted case uses wall-compatible normal-band wet-extension level-set advection; coupled-field level-set advection changes the cut topology during Newton startup on this sharp 3D dam-break initial condition.",
+                "Level set: harmonic PDE velocity extension, monolithic (D55), with kinematic reconciliation (D14) and sign-definite patch bounds (D21).",
+                "The face files are disjoint (every face vertex on the wall or obstacle).  The June deck's files overlapped at the tank edges, and a face keeps the label of the last file listed: 94 faces of the top row of the side walls (left 12, right 12, front 35, back 35) carried the open wall_top label (no velocity condition) instead of no-slip; the other relabeled faces (between walls, and 16 obstacle faces next to the floor labeled bottom) kept a no-slip condition.",
             ],
+            "qualification_criteria": TEST02_CRITERIA,
         },
         grid_factory=grid_factory,
         h=structured_max_spacing,
@@ -1697,6 +2058,7 @@ def generate_spheric_test02(*, allow_overlapping_face_files: bool = False) -> No
         adaptive_time_loop_max_steps_multiplier="256",
         newton_line_search_fail_on_no_reduction=True,
         newton_line_search_max_iterations="6",
+        level_set_maintenance=True,
     )
 
 
@@ -1717,11 +2079,19 @@ def main() -> None:
             "committed decks do; without it overlapping face files are an error (decision D35)"
         ),
     )
+    parser.add_argument(
+        "--legacy-fitted-test10",
+        action="store_true",
+        help=(
+            "also write the legacy fitted_ale Test 10 deck (with --allow-overlapping-face-files); "
+            "the fitted MeshNitsche decks of generate_spheric_test10_fitted_decks.py replace it"
+        ),
+    )
     args = parser.parse_args()
     legacy = {"allow_overlapping_face_files": args.allow_overlapping_face_files}
 
     if args.case in {"all", "spheric_test10"}:
-        generate_spheric_test10(**legacy)
+        generate_spheric_test10(**legacy, include_legacy_fitted=args.legacy_fitted_test10)
     if args.case in {"all", "spheric_test05"}:
         generate_spheric_test05(**legacy)
     if args.case in {"all", "spheric_test02"}:
