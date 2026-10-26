@@ -171,9 +171,10 @@ def test_test05_defaults_span_historical_false_wet_window():
         root = runner.ET.parse(case_root / case / "solver.xml").getroot()
         general = root.find("GeneralSimulationParameters")
         assert general is not None
-        assert general.findtext("Number_of_time_steps") == "562"
+        # The 2D decks run to t = 0.3 s (tracker M1; D51 item 2).
+        assert general.findtext("Number_of_time_steps") == "600"
         assert general.findtext("Time_step_size") == "0.0005"
-        assert general.findtext("Increment_in_saving_restart_files") == "562"
+        assert general.findtext("Increment_in_saving_restart_files") == "600"
         free_surface = runner.free_surface_bc(root)
         assert free_surface.findtext("Use_cut_metadata_scale") == "false"
 

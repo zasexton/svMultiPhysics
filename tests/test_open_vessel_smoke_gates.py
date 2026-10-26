@@ -121,8 +121,9 @@ def test_validation_solver_generator_preserves_mesh_ghost_layers():
             for equation in root.findall("Add_equation")
             if equation.get("type") == "level_set"
         )
-        # The bound-preserving limiter was retired (decision D51).
-        assert level_set.findtext("Enable_bound_preserving_limiter") == "false"
+        # The bound-preserving limiter was retired (decision D51); the
+        # generator no longer writes its keys at all.
+        assert level_set.find("Enable_bound_preserving_limiter") is None
         assert level_set.find("Bound_preserving_bound_tolerance") is None
         assert level_set.find("Bound_preserving_sign_tolerance") is None
         top = next(
@@ -211,28 +212,84 @@ def test_validation_solver_generator_declares_the_face_overlap_opt_out_only_for_
         "\n  <Allow_overlapping_face_files>true</Allow_overlapping_face_files>", "") == default_text
 
 
-@pytest.mark.parametrize(
-    "case_dir",
-    [
-        "fitted_ale/spheric_test10_lateral_water_1x",
-        "unfitted_level_set/spheric_test10_lateral_water_1x",
-        "unfitted_level_set/spheric_test05_wet_bed_d18",
-        "unfitted_level_set/spheric_test05_wet_bed_d38",
-        "unfitted_level_set/spheric_test02_dambreak_obstacle",
-    ],
-)
-def test_legacy_validation_decks_declare_their_overlapping_face_files(case_dir):
-    # These committed decks were written with overlapping face files; they keep
-    # their pinned results through the explicit legacy opt-out (D35).
+def test_legacy_fitted_test10_deck_declares_its_overlapping_face_files():
+    # The legacy fitted deck was written with overlapping face files and keeps
+    # its pinned results through the explicit opt-out (D35); the fitted
+    # MeshNitsche decks replace it.
     repo = Path(__file__).resolve().parents[1]
-    solver_xml = repo / "tests/cases/fluid/open_vessel_free_surface" / case_dir / "solver.xml"
+    solver_xml = (repo / "tests/cases/fluid/open_vessel_free_surface"
+                  / "fitted_ale/spheric_test10_lateral_water_1x/solver.xml")
     mesh = ET.parse(solver_xml).getroot().find("Add_mesh")
     assert mesh.findtext("Allow_overlapping_face_files") == "true"
 
 
-@pytest.mark.parametrize("case_name", ["spheric_test05_wet_bed_d18",
-                                        "spheric_test05_wet_bed_d38"])
-def test_test05_decks_state_the_retired_bound_preserving_limiter_off(case_name):
+SPHERIC_UNFITTED_DECKS = {
+    "spheric_test02_dambreak_obstacle": 3,
+    "spheric_test05_wet_bed_d18": 2,
+    "spheric_test05_wet_bed_d38": 2,
+    "spheric_test10_lateral_water_1x": 3,
+}
+
+
+def _vtk_ascii_arrays(path):
+    """The named ascii DataArrays of a VTK XML file, as integer lists."""
+    arrays = {}
+    for element in ET.parse(path).getroot().iter("DataArray"):
+        name = element.get("Name")
+        values = (element.text or "").split()
+        if name in ("GlobalNodeID", "connectivity", "offsets") and values:
+            arrays.setdefault(name, [int(float(value)) for value in values])
+    return arrays
+
+
+def _vtk_facets(arrays, global_ids=None):
+    """The cells of a VTK XML file as sorted node tuples (global ids if given)."""
+    connectivity, offsets = arrays["connectivity"], arrays["offsets"]
+    start, facets = 0, []
+    for end in offsets:
+        nodes = connectivity[start:end]
+        if global_ids is not None:
+            nodes = [global_ids[node] for node in nodes]
+        facets.append(tuple(sorted(nodes)))
+        start = end
+    return facets
+
+
+@pytest.mark.parametrize("case_name", sorted(SPHERIC_UNFITTED_DECKS))
+def test_spheric_unfitted_decks_have_disjoint_face_files(case_name):
+    # The regenerated SPHERIC decks (M5): every boundary face of the mesh is in
+    # exactly one face file, so no face takes another wall's condition, and
+    # the decks do not declare the overlapping-face opt-out of D35.
+    repo = Path(__file__).resolve().parents[1]
+    case_dir = repo / "tests/cases/fluid/open_vessel_free_surface/unfitted_level_set" / case_name
+    root = ET.parse(case_dir / "solver.xml").getroot()
+    mesh = root.find("Add_mesh")
+    assert mesh.find("Allow_overlapping_face_files") is None
+    dimension = SPHERIC_UNFITTED_DECKS[case_name]
+    assert root.find("GeneralSimulationParameters").findtext(
+        "Number_of_spatial_dimensions") == str(dimension)
+
+    owners = {}
+    for face in mesh.findall("Add_face"):
+        arrays = _vtk_ascii_arrays(case_dir / face.findtext("Face_file_path"))
+        for facet in _vtk_facets(arrays, arrays["GlobalNodeID"]):
+            owners.setdefault(facet, []).append(face.get("name"))
+    shared = {facet: names for facet, names in owners.items() if len(names) > 1}
+    assert not shared, f"{len(shared)} faces in more than one face file"
+
+    cells = _vtk_facets(_vtk_ascii_arrays(case_dir / mesh.findtext("Mesh_file_path")))
+    counts = {}
+    for cell in cells:
+        assert len(cell) == dimension + 1
+        for skip in range(len(cell)):
+            facet = cell[:skip] + cell[skip + 1:]
+            counts[facet] = counts.get(facet, 0) + 1
+    boundary = {facet for facet, count in counts.items() if count == 1}
+    assert set(owners) == boundary
+
+
+@pytest.mark.parametrize("case_name", sorted(SPHERIC_UNFITTED_DECKS))
+def test_spheric_unfitted_decks_state_the_current_level_set_protocol(case_name):
     smoke = _load_smoke_module()
     solver_xml = (
         smoke.ROOT
@@ -242,10 +299,19 @@ def test_test05_decks_state_the_retired_bound_preserving_limiter_off(case_name):
     )
     level_set = smoke.level_set_equation(ET.parse(solver_xml).getroot())
 
-    # The bound-preserving limiter was retired (decision D51).
-    assert level_set.findtext("Enable_bound_preserving_limiter") == "false"
-    assert not any(child.tag.startswith("Bound_preserving_")
-                   for child in level_set)
+    # The PDE extension is stated explicitly (D55), with the accepted-step
+    # maintenance of the M1-M4 protocols (D14, D21).
+    assert level_set.findtext("Advection_velocity_extension_method") == "pde_harmonic"
+    assert level_set.findtext("Advection_velocity_extension_coupling") == "monolithic"
+    assert level_set.findtext("Enable_kinematic_reconciliation") == "true"
+    assert level_set.findtext("Enable_sign_definite_patch_bounds") == "true"
+    # The retired algorithms (D47, D51, D55) are not mentioned at all.
+    retired = ("Enable_bound_preserving_limiter", "Bound_preserving_",
+               "Enable_reinitialization", "Reinitialization_",
+               "Enable_volume_correction", "Volume_correction_",
+               "Enable_discontinuity_capturing", "Discontinuity_capturing_",
+               "Use_wet_extension_advection_velocity", "Wet_extension_")
+    assert not [child.tag for child in level_set if child.tag.startswith(retired)]
 
 
 def _profile_args():
