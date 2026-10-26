@@ -43,6 +43,17 @@ INTERFACE_PRESERVING_REDISTANCING = True
 # face plane.  No-slip pins the contact lines of the sharp level set at the walls.
 # "--wall-condition no-slip" writes the no-slip decks of 8f145c4c byte for byte.
 SPHERIC_FREE_SLIP_WALLS = True
+# Ghost layers of the 3D SPHERIC decks.  Distributed small-cut aggregation needs
+# every rank that condenses a slave DOF to hold the masters of its root cell.  A
+# Tet4 vertex star spans about five face layers, a root may lie up to the
+# root-path guard (8 face steps) beyond the cut cells, and the face neighbours of
+# owned cells take two more: 5 + 8 + 2 = 15, the 3D form of the solver's 2D rule
+# 3 + 8 + 1 = 12.  The solver's own 3D value (12 = 5 + 5 + 2) covers roots up to
+# 5 steps; Test 02 at 4 ranks stopped at 0.358 s with roots 7-8 steps away whose
+# masters the condensing rank did not hold (job 324).  While the halo covers the
+# stencil, ghost layers move no value (12, 15 and 18 layers are bitwise equal at
+# 4 ranks); 0 writes no key, the solver's default, as the decks of 9802903f.
+SPHERIC_3D_GHOST_LAYERS = 15
 # The coordinate axis of each face file's normal (free-slip component masks).
 FACE_NORMAL_AXIS = {
     "wall_left": 0, "wall_right": 0,
@@ -1589,6 +1600,7 @@ def generate_spheric_test10(
     allow_overlapping_face_files: bool = False,
     redistancing: bool = INTERFACE_PRESERVING_REDISTANCING,
     free_slip_walls: bool = SPHERIC_FREE_SLIP_WALLS,
+    ghost_layers: int = SPHERIC_3D_GHOST_LAYERS,
 ) -> None:
     """The unfitted Test 10 deck."""
     tank = Box(0.0, 0.900, 0.0, 0.508, 0.0, 0.062)
@@ -1666,6 +1678,7 @@ def generate_spheric_test10(
         level_set_maintenance=True,
         interface_preserving_redistancing=redistancing,
         free_slip_walls=free_slip_walls,
+        ghost_layers=ghost_layers,
         include_top_wall_bc=True,
         active_domain="LevelSetNegative",
         use_direct_fluid_solver=True,
@@ -1971,7 +1984,8 @@ TEST02_CRITERIA = {
 
 def generate_spheric_test02(*, allow_overlapping_face_files: bool = False,
                             redistancing: bool = INTERFACE_PRESERVING_REDISTANCING,
-                            free_slip_walls: bool = SPHERIC_FREE_SLIP_WALLS) -> None:
+                            free_slip_walls: bool = SPHERIC_FREE_SLIP_WALLS,
+                            ghost_layers: int = SPHERIC_3D_GHOST_LAYERS) -> None:
     tank = Box(0.0, TEST02_TANK_LENGTH, 0.0, TEST02_TANK_HEIGHT, 0.0, TEST02_TANK_WIDTH)
     obstacle = Box(
         TEST02_OBSTACLE_X_MIN,
@@ -2097,6 +2111,7 @@ def generate_spheric_test02(*, allow_overlapping_face_files: bool = False,
         level_set_maintenance=True,
         interface_preserving_redistancing=redistancing,
         free_slip_walls=free_slip_walls,
+        ghost_layers=ghost_layers,
     )
 
 
@@ -2136,17 +2151,27 @@ def main() -> None:
             "which writes the decks of 8f145c4c byte for byte"
         ),
     )
+    parser.add_argument(
+        "--ghost-layers-3d",
+        type=int,
+        default=SPHERIC_3D_GHOST_LAYERS,
+        help=(
+            "<Ghost_layers> of the 3D SPHERIC decks (Test 02 and 10): 5 + 8 + 2 = 15 covers the "
+            "small-cut aggregation stencil at the root-path guard 8; 0 writes no key (the solver's "
+            "default of 12), as the decks of 9802903f"
+        ),
+    )
     args = parser.parse_args()
     legacy = {"allow_overlapping_face_files": args.allow_overlapping_face_files}
     protocol = {"redistancing": args.interface_preserving_redistancing == "on",
                 "free_slip_walls": args.wall_condition == "free-slip"}
 
     if args.case in {"all", "spheric_test10"}:
-        generate_spheric_test10(**legacy, **protocol)
+        generate_spheric_test10(**legacy, **protocol, ghost_layers=args.ghost_layers_3d)
     if args.case in {"all", "spheric_test05"}:
         generate_spheric_test05(**legacy, **protocol)
     if args.case in {"all", "spheric_test02"}:
-        generate_spheric_test02(**legacy, **protocol)
+        generate_spheric_test02(**legacy, **protocol, ghost_layers=args.ghost_layers_3d)
 
 
 if __name__ == "__main__":
