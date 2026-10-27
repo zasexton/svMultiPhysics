@@ -26,7 +26,7 @@
 
 <Add_mesh name="tank">
   <Mesh_file_path>mesh/background/mesh-complete.mesh.vtu</Mesh_file_path>
-  <Ghost_layers>15</Ghost_layers>
+  <Ghost_layers>18</Ghost_layers>
 
   <Add_face name="wall_left">
     <Face_file_path>mesh/background/mesh-surfaces/wall_left.vtp</Face_file_path>

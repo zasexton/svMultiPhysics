@@ -251,7 +251,7 @@ def test_validation_generator_writes_free_slip_walls_by_default(tmp_path):
     # "--wall-condition no-slip" writes the no-slip decks of 8f145c4c.
     generator = _load_validation_mesh_generator()
     assert generator.SPHERIC_FREE_SLIP_WALLS is True
-    assert generator.SPHERIC_3D_GHOST_LAYERS == 5 + 8 + 2
+    assert generator.SPHERIC_3D_GHOST_LAYERS == 1 + 9 + 8
     assert generator.free_slip_effective_directions(
         ["wall_left", "wall_bottom", "wall_top"], 2) == {
             "wall_left": "1 0", "wall_bottom": "0 1", "wall_top": "0 1"}
@@ -399,10 +399,10 @@ def test_spheric_unfitted_decks_state_the_current_level_set_protocol(case_name):
     case_dir = solver_xml.parent
     dimension = SPHERIC_UNFITTED_DECKS[case_name]
     # The 3D decks carry the halo of the small-cut aggregation stencil at the
-    # root-path guard 8: 5 (Tet4 vertex star) + 8 + 2 = 15 ghost layers.  The 2D
-    # decks leave it to the solver, whose 2D value (3 + 8 + 1) covers the guard.
+    # root-path guard 8: 1 + S + 8 layers, 18 for vertex-star depths S up to 9.
+    # The 2D decks leave it to the solver, whose 2D value covers the guard.
     mesh = root.find("Add_mesh")
-    assert mesh.findtext("Ghost_layers") == ("15" if dimension == 3 else None)
+    assert mesh.findtext("Ghost_layers") == ("18" if dimension == 3 else None)
     face_files = {face.get("name"): face.findtext("Face_file_path")
                   for face in root.find("Add_mesh").findall("Add_face")}
     fluid = next(equation for equation in root.findall("Add_equation")
