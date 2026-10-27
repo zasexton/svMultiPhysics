@@ -3060,63 +3060,89 @@ TEST(OpenVesselExamples, FittedAleMeshNitscheDecksDeclareSlidingWallsAndDisjoint
 
 TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
 {
+  // The SPHERIC validation decks written by generate_validation_meshes.py:
+  // the legacy fitted Test 10 deck (unchanged, with its overlapping face
+  // files), and the unfitted Test 02, 05 (a 2D section, decision D51) and 10
+  // decks with disjoint face files, the current level-set protocol (D55
+  // extension, D14 reconciliation, D21 patch bounds, D39 redistancing), no
+  // retired keys, free-slip walls (D58: only the normal velocity is fixed;
+  // the Test 02 obstacle is one face file per plane) and, in 3D, the halo of
+  // the small-cut aggregation stencil (18 ghost layers).
   struct CaseExpectation {
     std::string representation_dir;
     std::string case_name;
+    int dimension;
     bool fitted;
     bool top_wall_bc;
-    bool obstacle_bc;
     bool pressure_constraints;
     std::string level_set_velocity_source;
+    std::string ghost_layers;  // empty: no <Ghost_layers>
     std::vector<std::string> faces;
   };
 
+  const std::vector<std::string> obstacle_faces = {
+      "obstacle_xmin", "obstacle_xmax", "obstacle_zmin", "obstacle_zmax", "obstacle_top"};
   const std::vector<CaseExpectation> cases = {
       {"fitted_ale",
        "spheric_test10_lateral_water_1x",
+       3,
        true,
        false,
-       false,
        true,
+       "",
        "",
        {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
         "free_surface"}},
       {"unfitted_level_set",
        "spheric_test10_lateral_water_1x",
+       3,
        false,
        true,
        false,
-       false,
        "prescribed_data",
+       "18",
        {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
         "wall_top"}},
       {"unfitted_level_set",
        "spheric_test05_wet_bed_d18",
-       false,
+       2,
        false,
        false,
        false,
        "prescribed_data",
-       {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
-        "wall_top"}},
+       "",
+       {"wall_left", "wall_right", "wall_bottom", "wall_top"}},
       {"unfitted_level_set",
        "spheric_test05_wet_bed_d38",
-       false,
+       2,
        false,
        false,
        false,
        "prescribed_data",
-       {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
-        "wall_top"}},
+       "",
+       {"wall_left", "wall_right", "wall_bottom", "wall_top"}},
       {"unfitted_level_set",
        "spheric_test02_dambreak_obstacle",
+       3,
        false,
        false,
-       true,
        false,
        "prescribed_data",
+       "18",
        {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
-        "wall_top", "obstacle"}},
+        "wall_top", "obstacle_xmin", "obstacle_xmax", "obstacle_zmin",
+        "obstacle_zmax", "obstacle_top"}},
+  };
+  // The coordinate axis of each face's normal: the free-slip component.
+  const auto normal_axis = [](std::string_view face) {
+    if (face == "wall_left" || face == "wall_right" || face == "obstacle_xmin" ||
+        face == "obstacle_xmax") {
+      return 0;
+    }
+    if (face == "wall_bottom" || face == "wall_top" || face == "obstacle_top") {
+      return 1;
+    }
+    return 2;
   };
 
   for (const auto& expected : cases) {
@@ -3131,14 +3157,29 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
 
     const auto& general = child(*root, "GeneralSimulationParameters");
     expectText(general, "Use_new_OOP_solver", "true");
-    expectText(general, "Number_of_spatial_dimensions", "3");
+    expectText(general,
+               "Number_of_spatial_dimensions",
+               std::to_string(expected.dimension));
 
     const auto& mesh = childWithAttribute(*root, "Add_mesh", "name", "tank");
     expectReferencedFileExists(case_dir, mesh, "Mesh_file_path");
-    if (expected.case_name == "spheric_test05_wet_bed_d18" ||
-        expected.case_name == "spheric_test05_wet_bed_d38") {
-      expectText(mesh, "Ghost_layers", "3");
+    if (expected.ghost_layers.empty()) {
+      EXPECT_EQ(mesh.FirstChildElement("Ghost_layers"), nullptr);
+    } else {
+      expectText(mesh, "Ghost_layers", expected.ghost_layers);
     }
+    // Only the legacy fitted deck keeps the overlapping-face opt-out (D35).
+    if (expected.fitted) {
+      expectText(mesh, "Allow_overlapping_face_files", "true");
+    } else {
+      EXPECT_EQ(mesh.FirstChildElement("Allow_overlapping_face_files"), nullptr);
+    }
+    std::size_t declared_faces = 0;
+    for (const auto* face = mesh.FirstChildElement("Add_face"); face != nullptr;
+         face = face->NextSiblingElement("Add_face")) {
+      ++declared_faces;
+    }
+    EXPECT_EQ(declared_faces, expected.faces.size());
     for (const auto& face : expected.faces) {
       expectFace(case_dir, mesh, face);
     }
@@ -3162,79 +3203,79 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
       EXPECT_EQ(fluid.FirstChildElement("Node_pressure_constraints"), nullptr);
     }
     for (const auto& face : expected.faces) {
-      if (startsWith(face, "wall_") &&
-          (expected.top_wall_bc || face != "wall_top")) {
-        expectBoundaryCondition(fluid, face, "Dir");
+      const bool wall = startsWith(face, "wall_") || startsWith(face, "obstacle_");
+      if (!wall || (!expected.top_wall_bc && face == "wall_top")) {
+        continue;
       }
+      SCOPED_TRACE(face);
+      const auto& bc = expectBoundaryCondition(fluid, face, "Dir");
+      if (expected.fitted) {
+        continue;
+      }
+      // Free-slip (D58): a zero condition on the normal component only.
+      expectText(bc, "Value", "0.0");
+      std::string mask;
+      for (int axis = 0; axis < expected.dimension; ++axis) {
+        mask += (axis == 0 ? "" : " ");
+        mask += axis == normal_axis(face) ? "1" : "0";
+      }
+      expectText(bc, "Effective_direction", mask);
     }
-    if (!expected.top_wall_bc &&
-        std::find(expected.faces.begin(), expected.faces.end(), "wall_top") !=
-            expected.faces.end()) {
+    if (!expected.top_wall_bc) {
       EXPECT_FALSE(hasChildWithAttribute(fluid, "Add_BC", "name", "wall_top"))
           << "wall_top must remain open (natural traction)";
     }
-    if (expected.obstacle_bc) {
-      expectBoundaryCondition(fluid, "obstacle", "Dir");
-    }
+    EXPECT_FALSE(hasChildWithAttribute(fluid, "Add_BC", "name", "obstacle"))
+        << "the obstacle is one face file per plane";
 
     const auto& free_surface =
         expectBoundaryCondition(fluid, "free_surface", "Free_surface");
     expectText(free_surface,
                "Implementation",
                expected.fitted ? "FittedALE" : "UnfittedLevelSet");
-    const bool is_test05 =
-        startsWith(expected.case_name, "spheric_test05_wet_bed_");
-    if (is_test05) {
-      const auto expected_jit_options =
-          std::string("jit=true; jit_specialization=true");
-      // SPHERIC Test 05 is a published two-dimensional benchmark.  The thin
-      // 3-D extrusion must therefore use symmetry/free-slip on its artificial
-      // front/back planes instead of adding spanwise-wall drag.  Retain the
-      // physical end-wall and bottom no-slip assumptions separately.
-      const auto& wall_front =
-          expectBoundaryCondition(fluid, "wall_front", "Dir");
-      const auto& wall_back =
-          expectBoundaryCondition(fluid, "wall_back", "Dir");
-      expectText(wall_front, "Effective_direction", "0 0 1");
-      expectText(wall_back, "Effective_direction", "0 0 1");
-      EXPECT_EQ(expectBoundaryCondition(fluid, "wall_left", "Dir")
-                    .FirstChildElement("Effective_direction"),
-                nullptr);
-      EXPECT_EQ(expectBoundaryCondition(fluid, "wall_right", "Dir")
-                    .FirstChildElement("Effective_direction"),
-                nullptr);
-      EXPECT_EQ(expectBoundaryCondition(fluid, "wall_bottom", "Dir")
-                    .FirstChildElement("Effective_direction"),
-                nullptr);
-      const auto& level_set =
-          childWithAttribute(*root, "Add_equation", "type", "level_set");
+    if (expected.fitted) {
+      expectText(fluid, "Enable_ALE", "true");
+      const auto& mesh_motion =
+          childWithAttribute(*root, "Add_equation", "type", "mesh_motion");
+      expectText(mesh_motion, "Model", "Harmonic");
+      continue;
+    }
+
+    const auto& level_set =
+        childWithAttribute(*root, "Add_equation", "type", "level_set");
+    const auto expected_jit_options =
+        std::string("jit=true; jit_specialization=true");
+    expectText(level_set, "Module_options", expected_jit_options);
+    expectText(fluid, "Module_options", expected_jit_options);
+    expectText(level_set, "Level_set_field_name", "phi");
+    expectText(level_set, "Velocity_source", expected.level_set_velocity_source);
+    expectText(level_set, "Enable_SUPG", "true");
+    expectText(level_set, "SUPG_tau_scale", "0.5");
+    expectText(level_set, "SUPG_transient_scale", "2.0");
+    // The current level-set protocol: the harmonic PDE extension (D55), the
+    // kinematic reconciliation (D14), the sign-definite patch bounds (D21) and
+    // the triggered interface-preserving redistancing (D39).
+    expectText(level_set, "Advection_velocity_extension_method", "pde_harmonic");
+    expectText(level_set, "Advection_velocity_extension_coupling", "monolithic");
+    expectText(level_set, "Enable_kinematic_reconciliation", "true");
+    expectText(level_set, "Enable_sign_definite_patch_bounds", "true");
+    expectText(level_set, "Enable_interface_preserving_redistancing", "true");
+    // The retired algorithms (D47, D51, D55) are not mentioned at all.
+    for (const auto* element = level_set.FirstChildElement(); element != nullptr;
+         element = element->NextSiblingElement()) {
+      const std::string_view name = element->Name();
+      for (const std::string_view retired :
+           {"Enable_discontinuity_capturing", "Discontinuity_capturing_",
+            "Enable_bound_preserving_limiter", "Bound_preserving_",
+            "Enable_reinitialization", "Reinitialization_",
+            "Enable_volume_correction", "Volume_correction_",
+            "Use_wet_extension_advection_velocity", "Wet_extension_"}) {
+        EXPECT_FALSE(startsWith(name, retired)) << name;
+      }
+    }
+    if (startsWith(expected.case_name, "spheric_test05_wet_bed_")) {
       expectBoundaryCondition(level_set, "wall_top", "LevelSetOutflow");
-      expectText(level_set, "Module_options", expected_jit_options);
-      expectText(level_set,
-                 "Advection_velocity_extension_method",
-                 "pde_harmonic");
-      expectText(level_set,
-                 "Advection_velocity_extension_coupling",
-                 "monolithic");
-      // Curved continuous-P1 redistancing currently fails closed rather than
-      // converging generally, so the production deck leaves it disabled.
-      // The bounded global volume repair was retired (decision D47).
-      expectText(level_set, "Enable_reinitialization", "false");
-      expectText(level_set, "Enable_volume_correction", "false");
-      expectText(fluid, "Module_options", expected_jit_options);
-      expectText(free_surface, "Small_cut_aggregation", "true");
-      expectText(free_surface, "Active_domain", "LevelSetNegative");
-      expectText(free_surface, "Active_domain_method", "CutVolume");
-      EXPECT_EQ(free_surface.FirstChildElement("Enable_velocity_extension"),
-                nullptr);
-      EXPECT_EQ(
-          free_surface.FirstChildElement("Velocity_extension_diffusivity"),
-          nullptr);
       expectEigenDirectSolver(fluid);
-      EXPECT_EQ(free_surface.FirstChildElement("Kinematic_enforcement"),
-                nullptr);
-      expectText(fluid, "Hydrostatic_pressure_field_name", "Pressure");
-      EXPECT_EQ(fluid.FirstChildElement("Node_pressure_constraints"), nullptr);
       EXPECT_TRUE(fileContains(case_dir / "pressure_gauge.csv",
                                "node_id,pressure"));
       EXPECT_TRUE(fileContains(case_dir / "benchmark.json",
@@ -3242,39 +3283,44 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
       EXPECT_TRUE(fileContains(case_dir / "benchmark.json",
                                "\"pressure_constraint_enabled\": false"));
     }
-
-    if (expected.fitted) {
-      expectText(fluid, "Enable_ALE", "true");
-      const auto& mesh_motion =
-          childWithAttribute(*root, "Add_equation", "type", "mesh_motion");
-      expectText(mesh_motion, "Model", "Harmonic");
-    } else {
-      const auto& level_set =
-          childWithAttribute(*root, "Add_equation", "type", "level_set");
-      expectReviewedP1LevelSetTransportControls(level_set);
-      expectText(level_set, "Level_set_field_name", "phi");
-      expectText(level_set, "Velocity_source",
-                 expected.level_set_velocity_source);
-      EXPECT_EQ(level_set.FirstChildElement(
-                    "Volume_correction_minimum_relative_error"),
-                nullptr);
-      EXPECT_EQ(level_set.FirstChildElement(
-                    "Volume_correction_maximum_interface_displacement_fraction"),
-                nullptr);
-      expectText(fluid, "Hydrostatic_pressure_field_name", "Pressure");
-      EXPECT_EQ(fluid.FirstChildElement("Node_pressure_constraints"), nullptr);
-      expectText(free_surface, "Generated_interface_domain_id",
-                 "open_vessel_surface");
-      // The algebraic wet extension was retired (decisions D47 and D55).
-      EXPECT_EQ(
-          level_set.FirstChildElement("Use_wet_extension_advection_velocity"),
-          nullptr);
-      expectText(level_set,
-                 "Advection_velocity_extension_method",
-                 "pde_harmonic");
-      expectText(level_set,
-                 "Advection_velocity_extension_coupling",
-                 "monolithic");
+    expectText(fluid, "Hydrostatic_pressure_field_name", "Pressure");
+    expectText(free_surface, "Generated_interface_domain_id", "open_vessel_surface");
+    expectText(free_surface, "Small_cut_aggregation", "true");
+    expectText(free_surface, "Active_domain", "LevelSetNegative");
+    expectText(free_surface, "Active_domain_method", "CutVolume");
+    for (const char* name : {"Enable_velocity_extension", "Velocity_extension_diffusivity",
+                             "Kinematic_enforcement"}) {
+      EXPECT_EQ(free_surface.FirstChildElement(name), nullptr) << name;
     }
+
+#if defined(MESH_HAS_VTK)
+    // Every boundary face is in exactly one face file, so each face set keeps
+    // its label and no overlap is reported.
+    ensure_mpi_initialized_for_open_vessel_builder();
+    MeshParameters mesh_params;
+    mesh_params.name.set("tank");
+    mesh_params.mesh_file_path.set(mesh_path.string());
+    std::vector<std::string> names;
+    for (const auto* face = mesh.FirstChildElement("Add_face"); face != nullptr;
+         face = face->NextSiblingElement("Add_face")) {
+      auto* params = new FaceParameters();
+      params->name.set(face->Attribute("name"));
+      params->face_file_path.set((case_dir / text(*face, "Face_file_path")).string());
+      mesh_params.face_parameters.push_back(params);
+      names.emplace_back(face->Attribute("name"));
+    }
+    testing::internal::CaptureStderr();
+    const auto loaded = application::translators::MeshTranslator::loadMesh(mesh_params);
+    const auto warnings = testing::internal::GetCapturedStderr();
+    ASSERT_NE(loaded, nullptr);
+    EXPECT_EQ(warnings.find("are also listed in face file"), std::string::npos) << warnings;
+    for (const auto& name : names) {
+      const auto label = loaded->base().label_from_name(name);
+      ASSERT_NE(label, svmp::INVALID_LABEL) << name;
+      const auto labeled = loaded->base().faces_with_label(label).size();
+      EXPECT_GT(labeled, 0u) << name;
+      EXPECT_EQ(labeled, loaded->base().get_set(svmp::EntityKind::Face, name).size()) << name;
+    }
+#endif
   }
 }
