@@ -2003,6 +2003,13 @@ This section is compact and chronological. Detailed evidence is in the indexed d
 - **Harness failures can consume more time than numerical failures** (WP-3 V3–V5, WP-4 V2/V3).
 - **Gates that exceed what the method can achieve create unbounded work**, because every failure looks like a new prerequisite (WP-4 since 09-04).
 
+### 8.8 Navier–Stokes composition refactor (2026-10-28)
+
+- **2026-10-28: Navier–Stokes composition refactor (`fd3d68fb` → `1dd814c4`).** Shared configuration/validation/field services, inlet construction, authoritative functional records, transparent form vocabulary, phase bundles and prepared weak-velocity input are KEPT. Combined Physics/FE production decreases by 133 lines; the five-file formulation layout remains.
+  All six bounded adoptions preserve 40 same-rank reference outputs/configurations/artifacts and S0 ordered manifests with zero candidate misses; exact log-capture qualifications are recorded in the handoff. Final build, eight focused checks and all 31 preservation gates pass.
+  FE 58/58, Physics 25/25, Application 11 passes plus the existing interpreter skip (unchanged supplemental check passes), and the explicit 960-case two-rank matrix pass (final 592,489 ms on both ranks). All 673 full Python statuses match without allowed changes (587 PASS, 85 ERROR, 1 FAIL).
+  Evidence: `/scratch/users/zsexton/svmp-ns-composition-evidence`, with `/tmp/svmp-ns-evidence` retained as an alias; technical details: `Documentation/navier_stokes_composition_refactor.md`. These are preservation results, not new long WP-4 qualification.
+
 ---
 
 ## 9. State inventory
@@ -2050,6 +2057,7 @@ Recorded on 2026-09-29. Re-check before acting.
 | `Documentation/level_set_conservative_phase_transport.md` | AD-4 conservative indicator and FCT |
 | `Documentation/free_surface_wp3_wp7_symmetric_nitsche_coercivity_method_v3.md` | Current Nitsche floor (v1 and v2 are H) |
 | `Documentation/free_surface_capability_ledger.md` | Implemented-vs-qualified inventory. Keep it in sync with §2.1, or fold it into §2.1. |
+| `Documentation/navier_stokes_composition_refactor.md` | Technical handoff for shared validation/configuration/inlets, authoritative functionals and form composition: APIs, retained contracts/compiler limits, source counts and exact preservation evidence. Physical qualification remains in this tracker. |
 | `Documentation/qualification_logs/` | Frozen evidence records (20 directories) |
 | `Documentation/free_surface_architecture_refactoring_plan_20260904.md` | Refactor target architecture (R0–R12); paused under D7 and used as guidance for targeted extractions. |
 | `Documentation/mesh_motion_math_first_formulation_guide.md`, `plan_ale_mesh_motion_data_and_coupled_displacement.md`, `plan_mesh_motion_math_first_formulations.md`, `plan_moving_mesh_infrastructure.md` | Mesh-motion infrastructure (R, with open items relevant to M5) |
