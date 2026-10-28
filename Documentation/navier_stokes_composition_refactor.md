@@ -226,3 +226,13 @@ focused declaration, minimizer and Application consumer tests pass. The complete
 record comparisons, S0, all suites, resolve/rank checks and the explicit exhaustive
 matrix. Evidence:
 `/tmp/svmp-ns-evidence/stages/stage4-functionals/coordinator-preservation-summary.json`.
+
+
+The form-authoring adoption uses transparent symgrad/advect, named phase symbols,
+and shared SurfaceStress integrands while retaining expanded interface blocks,
+normal/measure policies and work-channel grouping. Thirty focused tree, fitted,
+two-fluid and residual/Jacobian checks pass. The complete `stage5-forms` pipeline
+passes without supplements, including all 40 exact reference/record comparisons,
+S0, suites, resolve/rank checks and the exhaustive matrix (594,361 ms on both
+ranks). Evidence:
+`/tmp/svmp-ns-evidence/stages/stage5-forms/coordinator-preservation-summary.json`.

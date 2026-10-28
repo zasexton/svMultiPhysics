@@ -98,15 +98,14 @@ struct ConservativeBalanceForms {
 inline void addExteriorPressure(ConservativeBalanceForms* balance, const FE::forms::FormExpr& form)
 {
     if (balance != nullptr) {
-        balance->pressure = balance->pressure.isValid() ? balance->pressure + form : form;
-        balance->external_pressure =
-            balance->external_pressure.isValid() ? balance->external_pressure + form : form;
+        balance->pressure = FE::forms::sumOf(balance->pressure, form);
+        balance->external_pressure = FE::forms::sumOf(balance->external_pressure, form);
     }
 }
 inline void addSurfaceEnergy(ConservativeBalanceForms* balance, const FE::forms::FormExpr& form)
 {
     if (balance != nullptr) {
-        balance->surface_energy = balance->surface_energy.isValid() ? balance->surface_energy + form : form;
+        balance->surface_energy = FE::forms::sumOf(balance->surface_energy, form);
     }
 }
 
@@ -882,7 +881,7 @@ struct FreeSurfaceEnergyStatement {
     add("gravitational_energy", Kind::Stored, (FormExpr::constant(-rho) * potential).dCutVolume(m, side));
     add("gravitational_potential_power", Kind::Power, (FormExpr::constant(-rho) * g_dot_u).dCutVolume(m, side));
     if (statement.dynamic_viscosity.has_value()) {
-        const auto strain = grad(u).sym();
+        const auto strain = symgrad(u);
         add("bulk_viscous_dissipation_rate", Kind::DissipationRate,
             (FormExpr::constant(2.0 * *statement.dynamic_viscosity) * strain.doubleContraction(strain))
                 .dCutVolume(m, side));

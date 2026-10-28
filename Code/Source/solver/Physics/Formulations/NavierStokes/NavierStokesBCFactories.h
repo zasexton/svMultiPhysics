@@ -553,14 +553,6 @@ namespace detail {
         marker, flux, generated_active_boundary_marker);
 }
 
-inline void appendDiagnosticForm(FE::forms::FormExpr& destination,
-                                 const FE::forms::FormExpr& contribution)
-{
-    destination = destination.isValid()
-                      ? destination + contribution
-                      : contribution;
-}
-
 inline void applyVelocityNitscheBCs(
     FE::forms::FormExpr& momentum_form,
     FE::forms::FormExpr& continuity_form,
@@ -600,8 +592,8 @@ inline void applyVelocityNitscheBCs(
                 : FE::forms::bc::NitscheVariant::Unsymmetric,
             .scale_with_p = options.nitsche_scale_with_p});
 
-    const auto stress_u = FE::forms::FormExpr::constant(2.0) * mu * FE::forms::sym(FE::forms::grad(u));
-    const auto stress_v = FE::forms::FormExpr::constant(2.0) * mu * FE::forms::sym(FE::forms::grad(v));
+    const auto stress_u = FE::forms::FormExpr::constant(2.0) * mu * FE::forms::symgrad(u);
+    const auto stress_v = FE::forms::FormExpr::constant(2.0) * mu * FE::forms::symgrad(v);
     const auto integrate =
         [](const FE::forms::FormExpr& integrand,
            int marker,
@@ -616,19 +608,19 @@ inline void applyVelocityNitscheBCs(
             return integrand.dExteriorBoundary(measure);
         };
     // The option preflight passes empty forms and keeps only the bindings, so
-    // the rows are folded with appendDiagnosticForm (the same tree as
+    // the rows are folded with sumOf (the same tree as
     // form + contribution when the form is not empty).
     const auto append_momentum = [&](const FE::forms::FormExpr& contribution) {
-        appendDiagnosticForm(momentum_form, contribution);
+        momentum_form = FE::forms::sumOf(momentum_form, contribution);
         if (momentum_residual_work_form != nullptr) {
-            appendDiagnosticForm(
+            *momentum_residual_work_form = FE::forms::sumOf(
                 *momentum_residual_work_form, contribution);
         }
     };
     const auto append_continuity = [&](const FE::forms::FormExpr& contribution) {
-        appendDiagnosticForm(continuity_form, contribution);
+        continuity_form = FE::forms::sumOf(continuity_form, contribution);
         if (continuity_residual_work_form != nullptr) {
-            appendDiagnosticForm(
+            *continuity_residual_work_form = FE::forms::sumOf(
                 *continuity_residual_work_form, contribution);
         }
     };
@@ -1254,6 +1246,26 @@ inline void applyFreeSurfaceContactLineConstraints(
 // small cuts are aggregated (registerOn), and phi is transported by the level-set equation (the kinematic
 // condition).  gamma is a literal (validated); SurfaceStress already contains gamma cos(theta_d) in its
 // conormal, so its wall term keeps only cos(theta_e).
+/// The SurfaceStress integrands, shared with the diagnostic channels. The
+/// caller supplies the integration-frame normal and applies the measure.
+[[nodiscard]] inline FE::forms::FormExpr exteriorPressureIntegrand(
+    const FE::forms::FormExpr& external_pressure,
+    const FE::forms::FormExpr& normal,
+    const FE::forms::FormExpr& velocity_test)
+{
+    return external_pressure * FE::forms::inner(normal, velocity_test);
+}
+
+[[nodiscard]] inline FE::forms::FormExpr surfaceEnergyIntegrand(
+    const FE::forms::FormExpr& surface_tension,
+    const FE::forms::FormExpr& normal,
+    const FE::forms::FormExpr& velocity_test,
+    int dimension)
+{
+    return surface_tension * FE::forms::inner(
+        FE::forms::tangentialProjector(normal, dimension), FE::forms::grad(velocity_test));
+}
+
 inline void addUnfittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem& system,
                                    FE::constraints::ConstraintPlan& plan, FE::systems::FormulationBuilder& F,
                                    const IncompressibleNavierStokesVMSOptions& o, const FreeSurfaceBoundary& b,
@@ -1305,12 +1317,12 @@ inline void addUnfittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem
     const auto Gamma = L.interface();
     const auto n = L.outwardNormal();
     const auto p_ext = freeSurfaceScalar(b.external_pressure, "ns_free_surface_external_pressure", b);
-    const auto pressure = p_ext * inner(n, v);   // SurfaceStress, the only form (D48)
+    const auto pressure = exteriorPressureIntegrand(p_ext, n, v);   // SurfaceStress, the only form (D48)
     post::addExteriorPressure(balance, pressure.dI(Gamma));
     if (!surfaceStressActive(b)) {   // gamma = 0
         M = M + pressure.dI(Gamma);
     } else {
-        const auto surface_energy = gamma * inner(tangentialProjector(n, dim), grad(v));
+        const auto surface_energy = surfaceEnergyIntegrand(gamma, n, v, dim);
         post::addSurfaceEnergy(balance, surface_energy.dI(Gamma));
         M = M + (pressure + surface_energy).dI(Gamma);
     }
@@ -1348,12 +1360,12 @@ inline void addFittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem& 
     const bool dynamic_stress =
         !bc::isZeroConstantScalarValue(b.external_pressure) || !bc::isZeroConstantScalarValue(b.surface_tension);
     if (dynamic_stress) {   // SurfaceStress, the only fitted form (validated)
-        const auto pressure = p_ext * inner(n, v);
+        const auto pressure = exteriorPressureIntegrand(p_ext, n, v);
         post::addExteriorPressure(balance, pressure.ds(Gamma));
         if (!surfaceStressActive(b)) {   // gamma = 0
             M = M + pressure.ds(Gamma);
         } else {
-            const auto surface_energy = gamma * inner(tangentialProjector(n, dim), grad(v));
+            const auto surface_energy = surfaceEnergyIntegrand(gamma, n, v, dim);
             post::addSurfaceEnergy(balance, surface_energy.ds(Gamma));
             M = M + (pressure + surface_energy).ds(Gamma);
         }
@@ -1424,6 +1436,14 @@ inline void addFittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem& 
 // Two-fluid material interface: weighted symmetric Nitsche coupling of the
 // two phases on the generated interface (was IncompressibleTwoFluidInterface)
 // ---------------------------------------------------------------------------
+
+/// The unknowns and test rows of one incompressible phase.
+struct IncompressiblePhaseSymbols {
+  FE::forms::FormExpr velocity;
+  FE::forms::FormExpr pressure;
+  FE::forms::FormExpr velocity_test;
+  FE::forms::FormExpr pressure_test;
+};
 
 struct IncompressibleTwoFluidInterfaceParameters {
   int dimension{0};
@@ -1572,15 +1592,11 @@ struct StablePositivePair {
 }
 
 [[nodiscard]] inline IncompressibleTwoFluidInterfaceForms buildIncompressibleTwoFluidInterfaceForms(
-    const FE::forms::FormExpr &negative_velocity,
-    const FE::forms::FormExpr &negative_pressure,
-    const FE::forms::FormExpr &negative_velocity_test,
-    const FE::forms::FormExpr &negative_pressure_test,
-    const FE::forms::FormExpr &positive_velocity,
-    const FE::forms::FormExpr &positive_pressure,
-    const FE::forms::FormExpr &positive_velocity_test,
-    const FE::forms::FormExpr &positive_pressure_test,
+    const IncompressiblePhaseSymbols& negative,
+    const IncompressiblePhaseSymbols& positive,
     const IncompressibleTwoFluidInterfaceParameters &parameters) {
+  const auto& [negative_velocity, negative_pressure, negative_velocity_test, negative_pressure_test] = negative;
+  const auto& [positive_velocity, positive_pressure, positive_velocity_test, positive_pressure_test] = positive;
   detail::validateTwoFluidInterfaceParameters(parameters);
   detail::validateTwoFluidInterfaceExpression(negative_velocity, "negative velocity");
   detail::validateTwoFluidInterfaceExpression(negative_pressure, "negative pressure");
@@ -1600,17 +1616,17 @@ struct StablePositivePair {
   const auto mu_negative = FormExpr::constant(parameters.negative_viscosity);
   const auto mu_positive = FormExpr::constant(parameters.positive_viscosity);
   const auto negative_viscous_traction =
-      (two * mu_negative * sym(grad(negative_velocity))) * n;
+      (two * mu_negative * symgrad(negative_velocity)) * n;
   const auto negative_pressure_traction = (-negative_pressure * identity) * n;
   const auto positive_viscous_traction =
-      (two * mu_positive * sym(grad(positive_velocity))) * n;
+      (two * mu_positive * symgrad(positive_velocity)) * n;
   const auto positive_pressure_traction = (-positive_pressure * identity) * n;
   const auto negative_viscous_test_traction =
-      (two * mu_negative * sym(grad(negative_velocity_test))) * n;
+      (two * mu_negative * symgrad(negative_velocity_test)) * n;
   const auto negative_pressure_test_traction =
       (-negative_pressure_test * identity) * n;
   const auto positive_viscous_test_traction =
-      (two * mu_positive * sym(grad(positive_velocity_test))) * n;
+      (two * mu_positive * symgrad(positive_velocity_test)) * n;
   const auto positive_pressure_test_traction =
       (-positive_pressure_test * identity) * n;
 
@@ -1708,14 +1724,7 @@ struct StablePositivePair {
   }
 
   if (parameters.prescribed_viscous_traction_jump.has_value()) {
-    std::vector<FormExpr> target_components;
-    target_components.reserve(static_cast<std::size_t>(parameters.dimension));
-    for (int component = 0; component < parameters.dimension; ++component) {
-      target_components.push_back(FormExpr::constant(
-          (*parameters.prescribed_viscous_traction_jump)
-              [static_cast<std::size_t>(component)]));
-    }
-    const auto target = FormExpr::asVector(std::move(target_components));
+    const auto target = constantVector(*parameters.prescribed_viscous_traction_jump, parameters.dimension);
     forms.prescribed_viscous_traction_jump =
         (-FormExpr::constant(weights.negative_complement) *
          inner(target, negative_velocity_test))
@@ -1728,7 +1737,7 @@ struct StablePositivePair {
   }
 
   if (parameters.surface_tension > FE::Real{0.0}) {
-    const auto projector = identity - outer(n, n);
+    const auto projector = tangentialProjector(n, parameters.dimension);
     const auto surface_tension = FormExpr::constant(parameters.surface_tension);
     forms.surface_energy =
         (surface_tension * FormExpr::constant(weights.negative_complement) *
@@ -1740,6 +1749,24 @@ struct StablePositivePair {
     forms.residual = forms.residual + forms.surface_energy;
   }
   return forms;
+}
+
+/// Compatibility overload for callers that supply the eight expressions.
+[[nodiscard]] inline IncompressibleTwoFluidInterfaceForms buildIncompressibleTwoFluidInterfaceForms(
+    const FE::forms::FormExpr& negative_velocity,
+    const FE::forms::FormExpr& negative_pressure,
+    const FE::forms::FormExpr& negative_velocity_test,
+    const FE::forms::FormExpr& negative_pressure_test,
+    const FE::forms::FormExpr& positive_velocity,
+    const FE::forms::FormExpr& positive_pressure,
+    const FE::forms::FormExpr& positive_velocity_test,
+    const FE::forms::FormExpr& positive_pressure_test,
+    const IncompressibleTwoFluidInterfaceParameters& parameters)
+{
+  return buildIncompressibleTwoFluidInterfaceForms(
+      {negative_velocity, negative_pressure, negative_velocity_test, negative_pressure_test},
+      {positive_velocity, positive_pressure, positive_velocity_test, positive_pressure_test},
+      parameters);
 }
 
 } // namespace Factories

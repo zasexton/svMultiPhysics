@@ -16,13 +16,16 @@
 #include "Physics/Formulations/MeshMotion/HarmonicMeshMotionModule.h"
 #include "Physics/Formulations/MeshMotion/PseudoElasticMeshMotionModule.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
+#include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 
 #include "FE/Assembly/GlobalSystemView.h"
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/ProductSpace.h"
 #include "FE/Systems/FESystem.h"
+#include "FE/Systems/SystemManifest.h"
 #include "FE/Systems/TimeIntegrator.h"
+#include "FE/Tests/Unit/Forms/FormsTestHelpers.h"
 
 #include <algorithm>
 #include <array>
@@ -43,6 +46,60 @@ namespace svmp {
 namespace Physics {
 namespace test {
 namespace {
+
+TEST(SurfaceStressForms, PreservesPressureAndEnergyTreesOnEachIntegrationFrame)
+{
+    namespace ns = formulations::navier_stokes;
+    using namespace FE::forms;
+    auto mesh = std::make_shared<FE::forms::test::SingleTetraMeshAccess>();
+    auto scalar = std::make_shared<FE::spaces::H1Space>(FE::ElementType::Tetra4, 1);
+    FE::spaces::ProductSpace vector(scalar, 3);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField({.name = "phi", .space = scalar});
+    const auto geometry = FE::level_set::LevelSetGeometry::bind(
+        system, {.level_set_field = phi, .domain_id = "surface_stress", .interface_marker = 71});
+    const auto v = TestFunction(vector, "v");
+    const auto pressure_value = FormExpr::constant(1.25);
+    const auto expect_tree = [](const FormExpr& actual, const FormExpr& expected) {
+        EXPECT_EQ(FE::systems::formExprTreeHash(actual), FE::systems::formExprTreeHash(expected));
+        EXPECT_EQ(actual.toString(), expected.toString());
+    };
+    const auto check = [&](const FormExpr& normal, const auto& integrate) {
+        for (const FE::Real gamma_value : {FE::Real{0.0}, FE::Real{0.072}}) {
+            const auto gamma = FormExpr::constant(gamma_value);
+            const auto pressure = ns::Factories::exteriorPressureIntegrand(pressure_value, normal, v);
+            const auto expected_pressure = pressure_value * inner(normal, v);
+            expect_tree(pressure, expected_pressure);
+            ns::post::ConservativeBalanceForms diagnostics;
+            ns::post::addExteriorPressure(&diagnostics, integrate(pressure));
+            expect_tree(diagnostics.external_pressure, integrate(expected_pressure));
+            FormExpr residual = integrate(pressure);
+            if (gamma_value > 0.0) {
+                const auto energy = ns::Factories::surfaceEnergyIntegrand(gamma, normal, v, 3);
+                const auto expected_energy = gamma * inner(FormExpr::identity(3) - outer(normal, normal), grad(v));
+                expect_tree(energy, expected_energy);
+                ns::post::addSurfaceEnergy(&diagnostics, integrate(energy));
+                expect_tree(diagnostics.surface_energy, integrate(expected_energy));
+                residual = integrate(pressure + energy);
+                expect_tree(residual, integrate(expected_pressure + expected_energy));
+                EXPECT_NE(FE::systems::formExprTreeHash(residual),
+                          FE::systems::formExprTreeHash(integrate(pressure) + integrate(energy)));
+            } else {
+                expect_tree(residual, integrate(expected_pressure));
+                EXPECT_FALSE(diagnostics.surface_energy.isValid());
+            }
+        }
+    };
+
+    const auto fitted = BoundaryDomain::fullPhysical(304);
+    check(currentNormal(), [&](const FormExpr& form) { return form.ds(fitted); });
+    for (const auto side : {CutVolumeSide::Negative, CutVolumeSide::Positive}) {
+        const auto liquid = geometry.side(side);
+        const auto expected_normal = side == CutVolumeSide::Negative ? FormExpr::normal() : -FormExpr::normal();
+        expect_tree(liquid.outwardNormal(), expected_normal);
+        check(liquid.outwardNormal(), [&](const FormExpr& form) { return form.dI(liquid.interface()); });
+    }
+}
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 

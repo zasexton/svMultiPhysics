@@ -986,13 +986,13 @@ NavierStokesVMSIntegrands navierStokesVMSIntegrands(const NavierStokesTerms& t,
     const auto chi = s.moving_control_volume ? (div(w) * u) : zero;       // moving control volume
 
     // Strong momentum residual without and with the pressure gradient.
-    const auto R_np = rho * (dt(u) + grad(u) * a + chi - f) - div(FormExpr::constant(2.0) * mu * sym(grad(u)));
+    const auto R_np = rho * (dt(u) + advect(a, u) + chi - f) - div(FormExpr::constant(2.0) * mu * symgrad(u));
     const auto R_m = R_np + grad(p);
 
     const auto inertia = rho * inner(dt(u), v);
     const auto mcv = s.moving_control_volume ? rho * div(w_mesh) * inner(u, v) : FormExpr::constant(0.0);
-    const auto convection = rho * inner(grad(u) * a, v);
-    const auto viscous = FormExpr::constant(2.0) * mu * inner(sym(grad(u)), sym(grad(v)));
+    const auto convection = rho * inner(advect(a, u), v);
+    const auto viscous = FormExpr::constant(2.0) * mu * inner(symgrad(u), symgrad(v));
     const auto pressure = -p * div(v);
     const auto forcing = -rho * inner(f, v);
 
@@ -1025,12 +1025,12 @@ NavierStokesVMSIntegrands navierStokesVMSIntegrands(const NavierStokesTerms& t,
     const auto p_s = -tau_c * div(u);                                      // p'
     const auto u_adv = s.convection ? (u + u_s - w) : a;
 
-    const auto convection_adv = rho * inner(grad(u) * u_adv, v);
+    const auto convection_adv = rho * inner(advect(u_adv, u), v);
     const auto pressure_adv = -(p + p_s) * div(v);
-    const auto supg = -rho * inner(grad(v) * u_adv, u_s);
+    const auto supg = -rho * inner(advect(u_adv, v), u_s);
     // Cross stress (u'.grad v) . tau_B (u'.grad) u,  tau_B = rho / sqrt(u'.K u').
     const auto cross_stress = s.convection
-        ? inner(grad(v) * u_s, (rho / sqrt(inner(u_s, K * u_s) + eps)) * (grad(u) * u_s))
+        ? inner(advect(u_s, v), (rho / sqrt(inner(u_s, K * u_s) + eps)) * (advect(u_s, u)))
         : FormExpr::constant(0.0);
     r.momentum = inertia + mcv + convection_adv + viscous + pressure_adv + forcing + supg + cross_stress;
 
@@ -1052,7 +1052,7 @@ namespace {
 /// tagged so that the installer can publish the viscosity law.
 [[nodiscard]] FormExpr viscosity(const Options& o, const FormExpr& u)
 {
-    const auto eps = sym(grad(u));
+    const auto eps = symgrad(u);
     const auto shear_rate = sqrt(FormExpr::constant(2.0) * inner(eps, eps));
     if (!o.viscosity_model) {
         return FormExpr::constant(o.viscosity);
@@ -1459,24 +1459,18 @@ void IncompressibleNavierStokesVMSModule::registerTwoFluidOn(fs::FESystem& syste
     }
 
     using namespace FE::forms;
+    const Factories::IncompressiblePhaseSymbols negative{
+        .velocity = StateField(u_negative, *velocity_space_, o.negative_phase.velocity_field_name),
+        .pressure = StateField(p_negative, *pressure_space_, o.negative_phase.pressure_field_name),
+        .velocity_test = TestField(u_negative, *velocity_space_, "v_negative"),
+        .pressure_test = TestField(p_negative, *pressure_space_, "q_negative")};
+    const Factories::IncompressiblePhaseSymbols positive{
+        .velocity = StateField(u_positive, *positive_velocity_space_, o.positive_phase.velocity_field_name),
+        .pressure = StateField(p_positive, *positive_pressure_space_, o.positive_phase.pressure_field_name),
+        .velocity_test = TestField(u_positive, *positive_velocity_space_, "v_positive"),
+        .pressure_test = TestField(p_positive, *positive_pressure_space_, "q_positive")};
     const auto forms = Factories::buildIncompressibleTwoFluidInterfaceForms(
-        StateField(u_negative,
-                   *velocity_space_,
-                   o.negative_phase.velocity_field_name),
-        StateField(p_negative,
-                   *pressure_space_,
-                   o.negative_phase.pressure_field_name),
-        TestField(u_negative, *velocity_space_, "v_negative"),
-        TestField(p_negative, *pressure_space_, "q_negative"),
-        StateField(u_positive,
-                   *positive_velocity_space_,
-                   o.positive_phase.velocity_field_name),
-        StateField(p_positive,
-                   *positive_pressure_space_,
-                   o.positive_phase.pressure_field_name),
-        TestField(u_positive, *positive_velocity_space_, "v_positive"),
-        TestField(p_positive, *positive_pressure_space_, "q_positive"),
-        interface_parameters);
+        negative, positive, interface_parameters);
 
     auto install = physicsInstallOptions(o.jit_policy);
     install.compiler_options.use_symbolic_tangent = true;

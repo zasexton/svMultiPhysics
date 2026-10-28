@@ -139,11 +139,12 @@ class RevisionTrackedTriangleMeshAccess final
       {{{0.0, 0.0, 0.0}}, {{1.0, 0.0, 0.0}}, {{0.0, 1.0, 0.0}}}};
 };
 
-InterfaceExpressions makeExpressions() {
+InterfaceExpressions makeExpressions(int dimension = 3) {
   auto scalar_space =
-      std::make_shared<FE::spaces::H1Space>(FE::ElementType::Tetra4, 1);
+      std::make_shared<FE::spaces::H1Space>(
+          dimension == 2 ? FE::ElementType::Triangle3 : FE::ElementType::Tetra4, 1);
   auto vector_space =
-      std::make_shared<FE::spaces::ProductSpace>(scalar_space, 3);
+      std::make_shared<FE::spaces::ProductSpace>(scalar_space, dimension);
   return InterfaceExpressions{
       .scalar_space = scalar_space,
       .vector_space = vector_space,
@@ -795,6 +796,161 @@ TEST(IncompressibleTwoFluidModule,
   EXPECT_TRUE(constraint->isDirichlet());
   EXPECT_DOUBLE_EQ(constraint->inhomogeneity, FE::Real{4.25});
 #endif
+}
+
+TEST(IncompressibleTwoFluidInterface, PhaseBundlesPreserveEveryOrderedChannel) {
+  using namespace FE::forms;
+  using Forms = ns::Factories::IncompressibleTwoFluidInterfaceForms;
+  using Phase = ns::Factories::IncompressiblePhaseSymbols;
+  const std::array<std::pair<const char*, FormExpr Forms::*>, 7> channels{{
+      {"consistency", &Forms::consistency}, {"adjoint", &Forms::adjoint},
+      {"penalty", &Forms::penalty}, {"surface energy", &Forms::surface_energy},
+      {"pressure jump", &Forms::prescribed_pressure_jump},
+      {"viscous jump", &Forms::prescribed_viscous_traction_jump}, {"residual", &Forms::residual}}};
+  for (const int dimension : {2, 3}) {
+    const auto e = makeExpressions(dimension);
+    const Phase negative{e.u_negative, e.p_negative, e.v_negative, e.q_negative};
+    const Phase positive{e.u_positive, e.p_positive, e.v_positive, e.q_positive};
+    for (const bool transient : {false, true}) {
+      for (const bool surface : {false, true}) {
+        for (const bool jumps : {false, true}) {
+          SCOPED_TRACE(::testing::Message() << dimension << ' ' << transient << ' ' << surface << ' ' << jumps);
+          auto parameters = makeParameters();
+          parameters.dimension = dimension;
+          parameters.include_transient_penalty = transient;
+          parameters.surface_tension = surface ? 0.072 : 0.0;
+          if (jumps) {
+            parameters.prescribed_pressure_jump = 3.0;
+            parameters.prescribed_viscous_traction_jump =
+                std::array<FE::Real, 3>{2.0, -4.0, dimension == 3 ? 1.0 : 0.0};
+          }
+          const auto actual = ns::Factories::buildIncompressibleTwoFluidInterfaceForms(negative, positive, parameters);
+          const auto positional = ns::Factories::buildIncompressibleTwoFluidInterfaceForms(
+              e.u_negative, e.p_negative, e.v_negative, e.q_negative,
+              e.u_positive, e.p_positive, e.v_positive, e.q_positive, parameters);
+          const auto weights = ns::Factories::incompressibleTwoFluidInterfaceWeights(parameters);
+          EXPECT_NE(weights.negative_traction, weights.positive_traction);
+          EXPECT_DOUBLE_EQ(actual.weights.negative_traction, weights.negative_traction);
+          EXPECT_DOUBLE_EQ(actual.weights.positive_traction, weights.positive_traction);
+          EXPECT_DOUBLE_EQ(actual.weights.negative_complement, weights.negative_complement);
+          EXPECT_DOUBLE_EQ(actual.weights.positive_complement, weights.positive_complement);
+          EXPECT_DOUBLE_EQ(actual.weights.harmonic_viscosity, weights.harmonic_viscosity);
+          EXPECT_DOUBLE_EQ(actual.weights.harmonic_density, weights.harmonic_density);
+
+          // Spell the original expanded terms independently of the new phase
+          // bundles and helpers. The ordered left folds are part of this contract.
+          Forms expected;
+          const auto n = FormExpr::normal();
+          const auto identity = FormExpr::identity(dimension);
+          const std::array velocities{e.u_negative, e.u_positive};
+          const std::array pressures{e.p_negative, e.p_positive};
+          const std::array tests{e.v_negative, e.v_positive};
+          const std::array pressure_tests{e.q_negative, e.q_positive};
+          const std::array viscosities{parameters.negative_viscosity, parameters.positive_viscosity};
+          const std::array traction_weights{weights.negative_traction, weights.positive_traction};
+          const auto measure = [&](const FormExpr& form) { return form.dI(parameters.interface_marker); };
+          const auto append = [](FormExpr& form, const FormExpr& term) { form = form.isValid() ? form + term : term; };
+          for (std::size_t phase = 0; phase < 2; ++phase) {
+            const auto w = FormExpr::constant(traction_weights[phase]);
+            const auto mu = FormExpr::constant(viscosities[phase]);
+            const auto traction = (FormExpr::constant(2.0) * mu * sym(grad(velocities[phase]))) * n;
+            const auto pressure_traction = (-pressures[phase] * identity) * n;
+            append(expected.consistency, measure(-w * inner(traction, e.v_negative)));
+            append(expected.consistency, measure(-w * inner(pressure_traction, e.v_negative)));
+            append(expected.consistency, measure(w * inner(traction, e.v_positive)));
+            append(expected.consistency, measure(w * inner(pressure_traction, e.v_positive)));
+            const auto test_traction = (FormExpr::constant(2.0) * mu * sym(grad(tests[phase]))) * n;
+            const auto pressure_test_traction = (-pressure_tests[phase] * identity) * n;
+            append(expected.adjoint, measure(-w * inner(test_traction, e.u_negative)));
+            append(expected.adjoint, measure(-w * inner(pressure_test_traction, e.u_negative)));
+            append(expected.adjoint, measure(w * inner(test_traction, e.u_positive)));
+            append(expected.adjoint, measure(w * inner(pressure_test_traction, e.u_positive)));
+          }
+          auto penalty = FormExpr::constant(weights.harmonic_viscosity) / hNormal();
+          if (transient) {
+            penalty = penalty + FormExpr::constant(weights.harmonic_density) * hNormal() / FormExpr::effectiveTimeStep();
+          }
+          penalty = FormExpr::constant(parameters.nitsche_gamma) * penalty;
+          expected.penalty = measure(penalty * inner(e.u_negative, e.v_negative)) +
+                             measure(-penalty * inner(e.u_negative, e.v_positive)) +
+                             measure(-penalty * inner(e.u_positive, e.v_negative)) +
+                             measure(penalty * inner(e.u_positive, e.v_positive));
+          expected.residual = expected.consistency + expected.adjoint + expected.penalty;
+          const auto wn = FormExpr::constant(weights.negative_complement);
+          const auto wp = FormExpr::constant(weights.positive_complement);
+          if (jumps) {
+            const auto pressure = FormExpr::constant(*parameters.prescribed_pressure_jump);
+            expected.prescribed_pressure_jump = measure(pressure * wn * inner(n, e.v_negative)) +
+                                                measure(pressure * wp * inner(n, e.v_positive));
+            expected.residual = expected.residual + expected.prescribed_pressure_jump;
+            std::vector<FormExpr> components;
+            for (int component = 0; component < dimension; ++component) {
+              components.push_back(FormExpr::constant((*parameters.prescribed_viscous_traction_jump)[component]));
+            }
+            const auto target = FormExpr::asVector(std::move(components));
+            expected.prescribed_viscous_traction_jump = measure(-wn * inner(target, e.v_negative)) +
+                                                       measure(-wp * inner(target, e.v_positive));
+            expected.residual = expected.residual + expected.prescribed_viscous_traction_jump;
+          }
+          if (surface) {
+            const auto gamma = FormExpr::constant(parameters.surface_tension);
+            const auto projector = identity - outer(n, n);
+            expected.surface_energy = measure(gamma * wn * inner(projector, grad(e.v_negative))) +
+                                      measure(gamma * wp * inner(projector, grad(e.v_positive)));
+            expected.residual = expected.residual + expected.surface_energy;
+          }
+          for (const auto& [name, member] : channels) {
+            SCOPED_TRACE(name);
+            const auto& want = expected.*member;
+            for (const auto* result : {&actual, &positional}) {
+              const auto& got = (*result).*member;
+              ASSERT_EQ(got.isValid(), want.isValid());
+              if (want.isValid()) {
+                EXPECT_EQ(FE::systems::formExprTreeHash(got), FE::systems::formExprTreeHash(want));
+                EXPECT_EQ(got.toString(), want.toString());
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST(IncompressibleTwoFluidInterface, PhaseBundlesPreserveValidationOrderAndMessages) {
+  using Phase = ns::Factories::IncompressiblePhaseSymbols;
+  Phase negative;
+  Phase positive;
+  auto parameters = makeParameters();
+  const auto expect_error = [&](const std::string& expected) {
+    const auto check = [&](const auto& invoke) {
+      try {
+        (void)invoke();
+        FAIL() << "Expected " << expected;
+      } catch (const std::invalid_argument& error) {
+        EXPECT_EQ(error.what(), expected);
+      }
+    };
+    check([&] { return ns::Factories::buildIncompressibleTwoFluidInterfaceForms(negative, positive, parameters); });
+    check([&] { return ns::Factories::buildIncompressibleTwoFluidInterfaceForms(
+        negative.velocity, negative.pressure, negative.velocity_test, negative.pressure_test,
+        positive.velocity, positive.pressure, positive.velocity_test, positive.pressure_test, parameters); });
+  };
+  parameters.dimension = 1;
+  expect_error("incompressible two-fluid interface requires dimension 2 or 3");
+  parameters = makeParameters();
+  const auto e = makeExpressions();
+  const std::array originals{e.u_negative, e.p_negative, e.v_negative, e.q_negative,
+                             e.u_positive, e.p_positive, e.v_positive, e.q_positive};
+  const std::array slots{&negative.velocity, &negative.pressure, &negative.velocity_test, &negative.pressure_test,
+                         &positive.velocity, &positive.pressure, &positive.velocity_test, &positive.pressure_test};
+  const std::array names{"negative velocity", "negative pressure", "negative velocity test", "negative pressure test",
+                         "positive velocity", "positive pressure", "positive velocity test", "positive pressure test"};
+  for (std::size_t i = 0; i < slots.size(); ++i) {
+    expect_error(std::string("incompressible two-fluid interface requires ") + names[i]);
+    *slots[i] = originals[i];
+  }
+  EXPECT_NO_THROW((void)ns::Factories::buildIncompressibleTwoFluidInterfaceForms(negative, positive, parameters));
 }
 
 TEST(IncompressibleTwoFluidInterface,
