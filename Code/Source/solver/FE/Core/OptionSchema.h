@@ -59,9 +59,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <iomanip>
+#include <initializer_list>
 #include <limits>
+#include <locale>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -152,7 +156,8 @@ namespace detail {
     return std::string(buffer.data(), result.ptr);
 }
 
-[[nodiscard]] inline std::string jsonQuoted(std::string_view text)
+[[nodiscard]] inline std::string jsonQuoted(std::string_view text,
+                                           bool short_backspace_and_formfeed = false)
 {
     static constexpr char hex[] = "0123456789abcdef";
     std::string out;
@@ -163,6 +168,8 @@ namespace detail {
         switch (ch) {
         case '"': out += "\\\""; break;
         case '\\': out += "\\\\"; break;
+        case '\b': out += short_backspace_and_formfeed ? "\\b" : "\\u0008"; break;
+        case '\f': out += short_backspace_and_formfeed ? "\\f" : "\\u000c"; break;
         case '\n': out += "\\n"; break;
         case '\t': out += "\\t"; break;
         case '\r': out += "\\r"; break;
@@ -182,6 +189,46 @@ namespace detail {
 }
 
 } // namespace detail
+
+/// JSON primitives for effective-configuration artifacts.  The schema's
+/// quoted real values keep RealCodec's shortest round-trip representation;
+/// numeric artifact values use the established max_digits10 representation.
+namespace json {
+
+enum class ControlEscapes : std::uint8_t {
+    Standard,
+    /// The spelling used by OptionSchema::toJson before artifact helpers
+    /// were shared.  Other named control characters still use short escapes.
+    UnicodeBackspaceAndFormFeed
+};
+
+[[nodiscard]] inline std::string quote(
+    std::string_view text,
+    ControlEscapes escapes = ControlEscapes::Standard)
+{
+    return detail::jsonQuoted(text, escapes == ControlEscapes::Standard);
+}
+
+/// A finite JSON number in the classic locale, retaining max_digits10.
+/// The caller owns the error text so sharing serialization does not alter
+/// the diagnostic contract of an artifact.
+[[nodiscard]] inline std::string number(Real value, std::string_view nonfinite_message)
+{
+    if (!std::isfinite(value)) {
+        throw std::invalid_argument(std::string(nonfinite_message));
+    }
+    std::ostringstream out;
+    out.imbue(std::locale::classic());
+    out << std::setprecision(std::numeric_limits<Real>::max_digits10) << value;
+    return out.str();
+}
+
+[[nodiscard]] constexpr const char* boolean(bool value) noexcept
+{
+    return value ? "true" : "false";
+}
+
+} // namespace json
 
 // ---------------------------------------------------------------------------
 // Input
@@ -219,7 +266,34 @@ public:
 
     [[nodiscard]] const std::vector<OptionInputEntry>& entries() const noexcept { return entries_; }
 
+    /// Preserve the supplied text, duplicates and input order while keeping
+    /// only the named spellings.  Selection does not resolve alias priority.
+    [[nodiscard]] OptionInput selectSpellings(const std::vector<std::string>& spellings) const
+    {
+        return filterSpellings(spellings, true);
+    }
+
+    /// Preserve the supplied entries except for the named spellings.
+    [[nodiscard]] OptionInput excludeSpellings(const std::vector<std::string>& spellings) const
+    {
+        return filterSpellings(spellings, false);
+    }
+
 private:
+    [[nodiscard]] OptionInput filterSpellings(const std::vector<std::string>& spellings,
+                                             bool selected) const
+    {
+        OptionInput out;
+        for (const auto& entry : entries_) {
+            const bool found = std::find(spellings.begin(), spellings.end(), entry.spelling) !=
+                               spellings.end();
+            if (found == selected) {
+                out.add(entry.spelling, entry.text);
+            }
+        }
+        return out;
+    }
+
     std::vector<OptionInputEntry> entries_{};
 };
 
@@ -1111,6 +1185,24 @@ public:
     {
         std::vector<std::string> out;
         for (const auto& key_entry : keys_) {
+            for (const auto& spelling : key_entry.spellings) {
+                out.push_back(spelling.name);
+            }
+        }
+        return out;
+    }
+
+    /// Accepted spellings of the given canonical keys, in schema declaration
+    /// order (including deprecated spellings).  Unknown keys contribute none.
+    [[nodiscard]] std::vector<std::string> spellings(
+        std::initializer_list<std::string_view> canonical_keys) const
+    {
+        std::vector<std::string> out;
+        for (const auto& key_entry : keys_) {
+            if (std::find(canonical_keys.begin(), canonical_keys.end(), key_entry.canonical) ==
+                canonical_keys.end()) {
+                continue;
+            }
             for (const auto& spelling : key_entry.spellings) {
                 out.push_back(spelling.name);
             }

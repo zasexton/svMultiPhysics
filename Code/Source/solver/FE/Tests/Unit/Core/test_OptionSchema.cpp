@@ -13,6 +13,8 @@
 #include <array>
 #include <cmath>
 #include <functional>
+#include <limits>
+#include <locale>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -569,6 +571,83 @@ TEST(OptionSchema, JsonEscapesControlCharactersAndQuotes)
     const auto resolved = schema.resolve(input({{"Level_set_field_name", "a\"b\\c\x01"}}));
     const auto json = schema.toJson(resolved);
     EXPECT_NE(json.find("\"value\":\"a\\\"b\\\\c\\u0001\""), std::string::npos) << json;
+}
+
+TEST(OptionSchema, JsonStringStylesPreserveSchemaAndArtifactControlEscapes)
+{
+    const std::string text{"\"\\\b\f\n\r\t\x01\x1f/"};
+    EXPECT_EQ(json::quote(text), "\"\\\"\\\\\\b\\f\\n\\r\\t\\u0001\\u001f/\"");
+    EXPECT_EQ(json::quote(text, json::ControlEscapes::UnicodeBackspaceAndFormFeed),
+              "\"\\\"\\\\\\u0008\\u000c\\n\\r\\t\\u0001\\u001f/\"");
+    EXPECT_EQ(json::quote(std::string("a\0b", 3)), "\"a\\u0000b\"");
+    EXPECT_EQ(json::quote("caf\xc3\xa9"), "\"caf\xc3\xa9\"");
+
+    const auto resolved = exampleSchema().resolve(input({{"Level_set_field_name", text}}));
+    EXPECT_NE(exampleSchema().toJson(resolved).find(
+                  "\"value\":\"\\\"\\\\\\u0008\\u000c\\n\\r\\t\\u0001\\u001f/\""),
+              std::string::npos);
+}
+
+TEST(OptionSchema, JsonNumbersKeepArtifactPrecisionAndRejectNonfiniteValues)
+{
+    struct CommaDecimal : std::numpunct<char> {
+        char do_decimal_point() const override { return ','; }
+    };
+    struct RestoreLocale {
+        std::locale previous{std::locale()};
+        ~RestoreLocale() { std::locale::global(previous); }
+    } restore_locale;
+    std::locale::global(std::locale(restore_locale.previous, new CommaDecimal));
+
+    EXPECT_EQ(json::number(Real{0.1}, "nonfinite artifact value"), "0.10000000000000001");
+    EXPECT_EQ(RealCodec{}.format(Real{0.1}), "0.1");
+    EXPECT_EQ(json::number(Real{-0.0}, "nonfinite artifact value"), "-0");
+    EXPECT_EQ(json::number(Real{1.0e-12}, "nonfinite artifact value"), "9.9999999999999998e-13");
+    for (const auto value : {std::numeric_limits<Real>::infinity(),
+                             -std::numeric_limits<Real>::infinity(),
+                             std::numeric_limits<Real>::quiet_NaN()}) {
+        try {
+            static_cast<void>(json::number(value, "nonfinite artifact value"));
+            FAIL() << "Expected nonfinite JSON number rejection";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_EQ(std::string(error.what()), "nonfinite artifact value");
+        }
+    }
+}
+
+TEST(OptionSchema, InputSelectionPreservesRawEntriesAndSpellingPrecedence)
+{
+    const auto supplied = input({{"Surface_tension", " 7 "},
+                                 {"Old_tension", " 3 "},
+                                 {"Enabled", "true"},
+                                 {"Old_tension", " 5 "},
+                                 {"Unrelated", ""}});
+    const auto schema = exampleSchema();
+    const auto spellings = schema.spellings({"Surface_tension"});
+    EXPECT_EQ(spellings, (std::vector<std::string>{"Old_tension", "Surface_tension"}));
+    const auto selected = supplied.selectSpellings(spellings);
+    ASSERT_EQ(selected.entries().size(), 3u);
+    EXPECT_EQ(selected.entries()[0].spelling, "Surface_tension");
+    EXPECT_EQ(selected.entries()[0].text, " 7 ");
+    EXPECT_EQ(selected.entries()[1].spelling, "Old_tension");
+    EXPECT_EQ(selected.entries()[1].text, " 3 ");
+    EXPECT_EQ(selected.entries()[2].text, " 5 ");
+    const auto resolved = schema.resolve(selected);
+    EXPECT_EQ(resolved.value.tension, Real{3});
+    ASSERT_NE(resolved.find("Surface_tension"), nullptr);
+    EXPECT_EQ(resolved.find("Surface_tension")->source, OptionSource::DeprecatedSpelling);
+    EXPECT_EQ(resolved.find("Surface_tension")->spelling, "Old_tension");
+
+    const auto excluded = supplied.excludeSpellings(spellings);
+    ASSERT_EQ(excluded.entries().size(), 2u);
+    EXPECT_EQ(excluded.entries()[0].spelling, "Enabled");
+    EXPECT_EQ(excluded.entries()[1].spelling, "Unrelated");
+    EXPECT_TRUE(excluded.entries()[1].text.empty());
+    EXPECT_TRUE(supplied.selectSpellings({}).entries().empty());
+    EXPECT_EQ(supplied.excludeSpellings({}).entries().size(), supplied.entries().size());
+    EXPECT_EQ(schema.spellings({"Surface_tension", "Enabled"}),
+              (std::vector<std::string>{"Enabled", "Enable_it", "Old_tension", "Surface_tension"}));
+    EXPECT_TRUE(schema.spellings({"not_a_key"}).empty());
 }
 
 TEST(OptionSchema, RealsSerializeToTheShortestExactText)
