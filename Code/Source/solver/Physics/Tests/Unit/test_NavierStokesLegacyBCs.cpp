@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
@@ -40,6 +41,11 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#if defined(_WIN32)
+#  include <process.h>
+#else
+#  include <unistd.h>
+#endif
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
 #include "FE/Systems/FunctionalRecords.h"
 
@@ -243,6 +249,60 @@ InletOutletMarkers labelBeamInletOutlet(svmp::Mesh& mesh_mut)
         base->set_boundary_label(f, static_cast<svmp::label_t>(marker));
     }
     return svmp::create_mesh(std::move(base));
+}
+
+svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions
+resolveVelocityInlet(const std::shared_ptr<svmp::Mesh>& mesh,
+                     const svmp::Physics::BoundaryConditionInput& boundary)
+{
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "fluid";
+    input.mesh_name = "single_tetra_inlet";
+    input.mesh = mesh->local_mesh_ptr();
+    input.default_domain.params["Density"] = defined("1.0");
+    input.default_domain.params["Viscosity.model"] = defined("Constant");
+    input.default_domain.params["Viscosity.Value"] = defined("0.01");
+    input.boundary_conditions.push_back(boundary);
+    svmp::FE::systems::FESystem system(mesh);
+    auto resolved = svmp::Physics::options::resolveNavierStokesInput(input, system);
+    if (!resolved.one_phase.has_value()) {
+        throw std::runtime_error("Expected one-phase inlet options");
+    }
+    return std::move(resolved.one_phase->options);
+}
+
+svmp::Physics::BoundaryConditionInput velocityInlet(int marker)
+{
+    svmp::Physics::BoundaryConditionInput boundary{};
+    boundary.name = "inlet";
+    boundary.boundary_marker = marker;
+    boundary.params["Type"] = defined("Dir");
+    boundary.params["Time_dependence"] = defined("Steady");
+    boundary.params["Value"] = defined("3.1");
+    boundary.params["Impose_flux"] = defined("true");
+    boundary.params["Profile"] = defined("Flat");
+    return boundary;
+}
+
+std::filesystem::path inletFlowPath()
+{
+    static std::atomic<unsigned long long> sequence{0u};
+#if defined(_WIN32)
+    const auto pid = _getpid();
+#else
+    const auto pid = getpid();
+#endif
+    int rank = 0;
+#if defined(FE_HAS_MPI) && FE_HAS_MPI && defined(MESH_HAS_MPI)
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized) {
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    }
+#endif
+    return std::filesystem::temp_directory_path() /
+           ("svmp_velocity_inlet_" + std::to_string(pid) + "_rank_" +
+            std::to_string(rank) + "_" + std::to_string(sequence.fetch_add(1u)) + ".flow");
 }
 
 void writeTemporalSpatialValuesFile(
@@ -1098,6 +1158,170 @@ TEST(NavierStokesLegacyBCs,
         EXPECT_EQ(system.fieldMap().numFields(), 0u);
         EXPECT_TRUE(system.formulationRecords().empty());
     }
+#endif
+}
+
+TEST(NavierStokesLegacyBCs, VelocityInletZeroSkipsMissingMarkerGeometry)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    auto mesh = buildSingleTetraTwoWallMesh(76, 77, 78);
+    auto boundary = velocityInlet(999); // Valid label value, with no faces.
+    boundary.params["Value"] = defined("0");
+    boundary.params["Profile"] = defined("Parabolic");
+    boundary.params["Effective_direction"] = defined("0 1 0");
+    for (const bool weak : {false, true}) {
+        boundary.params["Weakly_applied"] = defined(weak ? "true" : "false");
+        const auto options = resolveVelocityInlet(mesh, boundary);
+        const auto& values = weak ? options.velocity_dirichlet_weak : options.velocity_dirichlet;
+        ASSERT_EQ(values.size(), 1u);
+        EXPECT_EQ(values.front().active_components, (std::array<bool, 3>{false, true, false}));
+        for (const auto& value : values.front().value) {
+            ASSERT_TRUE(std::holds_alternative<svmp::FE::Real>(value));
+            EXPECT_EQ(std::get<svmp::FE::Real>(value), 0.0);
+        }
+    }
+#endif
+}
+
+TEST(NavierStokesLegacyBCs, VelocityInletProfileErrorsPrecedeZeroShortcutAndFollowFlowFile)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    auto mesh = buildSingleTetraTwoWallMesh(76, 77, 78);
+    auto boundary = velocityInlet(999);
+    boundary.params["Value"] = defined("0");
+    boundary.params["Profile"] = defined("Unknown");
+    const auto expect_message = [&](std::string_view expected) {
+        try {
+            static_cast<void>(resolveVelocityInlet(mesh, boundary));
+            FAIL() << "Expected inlet input rejection";
+        } catch (const std::runtime_error& error) {
+            EXPECT_EQ(std::string(error.what()), expected);
+        }
+    };
+    expect_message(
+        "[svMultiPhysics::Physics] Unknown Dirichlet BC Profile='Unknown' for the new solver "
+        "Navier-Stokes module. Supported profiles: Flat, Parabolic.");
+    boundary.params["Profile"] = defined("User_defined");
+    expect_message(
+        "[svMultiPhysics::Physics] Dirichlet BC Profile='User_defined' is not supported for the new solver "
+        "Navier-Stokes module yet. Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
+    boundary.params["Time_dependence"] = defined("Unsteady");
+    expect_message(
+        "[svMultiPhysics::Physics] Unsteady Dirichlet BC 'inlet' is missing <Temporal_values_file_path>.");
+
+    const auto path = inletFlowPath();
+    const ScopedPathRemoval cleanup(path);
+    {
+        std::ofstream flow(path);
+        ASSERT_TRUE(flow.is_open());
+        flow << "2 0\n2 3.1\n6 3.1\n";
+    }
+    boundary.params["Temporal_values_file_path"] = defined(path.string());
+    expect_message(
+        "[svMultiPhysics::Physics] Unknown Dirichlet BC Profile='User_defined' for Unsteady BC 'inlet'. "
+        "Supported profiles: Flat, Parabolic.");
+#endif
+}
+
+TEST(NavierStokesLegacyBCs, VelocityInletFlatNormalizationAndDirectionMasks)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    // Marker 77 is x=0, with area 1/2 and outward normal (-1,0,0).
+    auto mesh = buildSingleTetraTwoWallMesh(76, 77, 78);
+    auto boundary = velocityInlet(77);
+    const auto path = inletFlowPath();
+    const ScopedPathRemoval cleanup(path);
+    {
+        std::ofstream flow(path);
+        ASSERT_TRUE(flow.is_open());
+        flow << "2 0\n2 3.1\n6 3.1\n";
+    }
+    for (const bool weak : {false, true}) {
+        boundary.params["Weakly_applied"] = defined(weak ? "true" : "false");
+        for (const bool flux : {false, true}) {
+            boundary.params["Impose_flux"] = defined(flux ? "true" : "false");
+            for (const auto* direction : {"", "0 -2 0", "1 1 1", "0 0 0"}) {
+                boundary.params["Effective_direction"] = defined(direction);
+                for (const bool unsteady : {false, true}) {
+                    auto timed_boundary = boundary;
+                    if (unsteady) {
+                        timed_boundary.params["Time_dependence"] = defined("Unsteady");
+                        timed_boundary.params["Temporal_values_file_path"] = defined(path.string());
+                        timed_boundary.params["Value"] = defined("0"); // The file supplies the amplitude.
+                    }
+                    const auto options = resolveVelocityInlet(mesh, timed_boundary);
+                    const auto& values = weak ? options.velocity_dirichlet_weak : options.velocity_dirichlet;
+                    ASSERT_EQ(values.size(), 1u);
+                    const auto& inlet = values.front();
+                    const bool masked = std::string_view(direction) == "0 -2 0";
+                    EXPECT_EQ(inlet.active_components,
+                              (masked ? std::array<bool, 3>{false, true, false}
+                                      : std::array<bool, 3>{true, true, true}));
+                    const double amplitude = flux ? 6.2 : 3.1;
+                    const std::array<double, 3> expected =
+                        masked ? std::array<double, 3>{0.0, amplitude, 0.0}
+                               : std::array<double, 3>{-amplitude, 0.0, 0.0};
+                    for (std::size_t component = 0; component < 3; ++component) {
+                        const auto& value = std::get<svmp::FE::forms::TimeScalarCoefficient>(inlet.value[component]);
+                        EXPECT_EQ(value(0.0, 0.2, 0.3, 7.0), expected[component]);
+                    }
+                }
+            }
+        }
+    }
+#endif
+}
+
+TEST(NavierStokesLegacyBCs, VelocityInletParabolicScalingAndPeriodicTimeOrigin)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    // At the three degree-2 triangle points the radial weight is 3/4,
+    // giving normalization (1/2)*(3/4)=3/8.  The centre has weight one.
+    auto mesh = buildSingleTetraTwoWallMesh(76, 77, 78);
+    auto boundary = velocityInlet(77);
+    boundary.params["Profile"] = defined("Parabolic");
+    const auto steady = resolveVelocityInlet(mesh, boundary);
+    ASSERT_EQ(steady.velocity_dirichlet.size(), 1u);
+    const auto& steady_value = std::get<svmp::FE::forms::TimeScalarCoefficient>(
+        steady.velocity_dirichlet.front().value[0]);
+    // Preserve division in the steady path: 3.1/(3/8).
+    EXPECT_EQ(steady_value(0.0, 1.0 / 3.0, 1.0 / 3.0, 0.0), -0x1.0888888888889p+3);
+    EXPECT_EQ(steady_value(0.0, 0.0, 0.0, 0.0), 0.0);
+
+    const auto path = inletFlowPath();
+    const ScopedPathRemoval cleanup(path);
+    {
+        std::ofstream flow(path);
+        ASSERT_TRUE(flow.is_open());
+        flow << "3 0\n2 3.1\n4 7.1\n6 3.1\n";
+    }
+    boundary.params["Time_dependence"] = defined("Unsteady");
+    boundary.params["Temporal_values_file_path"] = defined(path.string());
+    const auto unsteady = resolveVelocityInlet(mesh, boundary);
+    ASSERT_EQ(unsteady.velocity_dirichlet.size(), 1u);
+    const auto& unsteady_value = std::get<svmp::FE::forms::TimeScalarCoefficient>(
+        unsteady.velocity_dirichlet.front().value[0]);
+    // The temporal amplitude multiplies the already normalized profile;
+    // for 3.1 this differs by one bit from the steady division above.
+    for (const auto [time, expected] : std::array<std::pair<double, double>, 7>{{
+             {2.0, -0x1.0888888888888p+3},
+             {3.0, -0x1.b333333333332p+3},
+             {4.0, -0x1.2eeeeeeeeeeeep+4},
+             {6.0, -0x1.0888888888888p+3},
+             {7.0, -0x1.b333333333332p+3},
+             {0.0, -0x1.2eeeeeeeeeeeep+4},
+             {-2.0, -0x1.0888888888888p+3}}}) {
+        EXPECT_EQ(unsteady_value(0.0, 1.0 / 3.0, 1.0 / 3.0, time), expected) << time;
+    }
+    EXPECT_EQ(unsteady_value(0.0, 0.0, 0.0, 3.0), 0.0);
 #endif
 }
 
