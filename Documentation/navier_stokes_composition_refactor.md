@@ -207,3 +207,12 @@ rank-consistency supplement, and the exhaustive matrix (597,793 ms on both
 ranks). Two additional truncated retained-baseline records required exact paired
 complete-stream comparisons; their original failures remain recorded. See
 `/tmp/svmp-ns-evidence/stages/stage2-validation/preservation-summary.json`.
+
+
+The inlet adoption removes 111 production lines by sharing profile, direction,
+geometry, normalization and trace construction. The four unchanged-behavior
+fixtures pass at one, two and four ranks; all 34 inlet trace records are exactly
+the baseline records. The complete `stage3-inlets` pipeline passes without
+supplements, including 40 exact reference and record comparisons, S0, all suites,
+resolve/rank checks and the exhaustive matrix (593,052 ms on both ranks). Evidence:
+`/tmp/svmp-ns-evidence/stages/stage3-inlets/preservation-summary.json`.

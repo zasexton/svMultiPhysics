@@ -1369,8 +1369,8 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
         continue;
       }
 
+      std::shared_ptr<svmp::Physics::TemporalValues> temporal;
       if (is_unsteady) {
-        // Unsteady Dirichlet BC: time-varying magnitude from a .flow file + spatial profile (Flat/Parabolic).
         const auto* file_param = find_param(bc.params, "Temporal_values_file_path");
         const std::string flow_file =
             (file_param && file_param->defined) ? trim_copy(file_param->value) : std::string{};
@@ -1379,139 +1379,13 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
               "[svMultiPhysics::Physics] Unsteady Dirichlet BC '" + bc.name +
               "' is missing <Temporal_values_file_path>.");
         }
-
-        auto temporal = svmp::Physics::readTemporalValuesFile(
+        temporal = svmp::Physics::readTemporalValuesFile(
             flow_file, /*num_components=*/1, svmp::Physics::TemporalEndBehavior::Periodic);
-
-        const auto* impose_flux_param_u = find_param(bc.params, "Impose_flux");
-        const bool impose_flux_u = impose_flux_param_u ? parse_bool_relaxed(impose_flux_param_u->value) : false;
-
-        const auto* profile_param_u = find_param(bc.params, "Profile");
-        const std::string profile_raw_u =
-            (profile_param_u && profile_param_u->defined) ? trim_copy(profile_param_u->value) : std::string("Flat");
-        const std::string profile_lc_u = lower_copy(profile_raw_u);
-
-        InletProfileType profile_u = InletProfileType::Flat;
-        if (profile_lc_u == "flat") {
-          profile_u = InletProfileType::Flat;
-        } else if (profile_lc_u == "parabolic") {
-          profile_u = InletProfileType::Parabolic;
-        } else {
-          throw std::runtime_error(
-              "[svMultiPhysics::Physics] Unknown Dirichlet BC Profile='" + profile_raw_u +
-              "' for Unsteady BC '" + bc.name + "'. Supported profiles: Flat, Parabolic.");
-        }
-
-        int active_count_u = 0;
-        std::array<int, 3> active_u{0, 0, 0};
-        for (int d = 0; d < dim; ++d) {
-          const int flag = (static_cast<std::size_t>(d) < effective_dir.size() && effective_dir[static_cast<std::size_t>(d)] != 0) ? 1 : 0;
-          active_u[static_cast<std::size_t>(d)] = flag;
-          active_count_u += flag;
-        }
-        const bool use_normal_u = (active_count_u == 0 || active_count_u == dim);
-
-        auto ctx_u = std::make_shared<InletProfileContext>();
-        ctx_u->dim = dim;
-        ctx_u->profile = profile_u;
-        ctx_u->use_normal_direction = use_normal_u;
-        ctx_u->active_components = active_u;
-
-        const auto g_u =
-            global_marker_geometry(*input.mesh, bc.boundary_marker, comm);
-        if (!(g_u.area > 0.0)) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Physics] Boundary marker " + std::to_string(bc.boundary_marker) +
-              " has zero area; cannot apply Unsteady Dirichlet BC '" + bc.name + "'.");
-        }
-
-        if (use_normal_u) {
-          const Vec3d n = normalized(g_u.normal_sum);
-          if (!(norm2(n) > 0.0)) {
-            throw std::runtime_error(
-                "[svMultiPhysics::Physics] Boundary marker " + std::to_string(bc.boundary_marker) +
-                " has a degenerate normal; cannot apply Unsteady Dirichlet BC '" + bc.name + "'.");
-          }
-          ctx_u->normal = n;
-        }
-
-        if (profile_u == InletProfileType::Parabolic) {
-          ctx_u->parabolic = build_parabolic_profile_data(
-              *input.mesh, bc.boundary_marker, comm);
-        }
-
-      double normalization_u = 1.0;
-      if (impose_flux_u) {
-        if (profile_u == InletProfileType::Flat) {
-          normalization_u = g_u.area;
-        } else {
-            normalization_u = integrate_parabolic_weight_over_marker(
-                *input.mesh, bc.boundary_marker, *ctx_u->parabolic, comm);
-          }
-          if (!(normalization_u > 0.0)) {
-            throw std::runtime_error(
-                "[svMultiPhysics::Physics] Failed to compute positive normalization for <Impose_flux> on Unsteady "
-                "Dirichlet BC '" + bc.name + "'.");
-        }
       }
 
-        // Set scale=1/normalization; the time-dependent flow rate is multiplied in the callback.
-        ctx_u->scale = 1.0 / normalization_u;
-
-        if (navierStokesTraceEnabled()) {
-          const auto local_g = local_marker_geometry(*input.mesh, bc.boundary_marker);
-          const auto local_faces = input.mesh->faces_with_label(static_cast<svmp::label_t>(bc.boundary_marker));
-          std::ostringstream oss;
-          oss << "NavierStokes BC setup: unsteady Dirichlet marker=" << bc.boundary_marker
-              << " name='" << bc.name << "'"
-              << " profile=" << ((profile_u == InletProfileType::Parabolic) ? "Parabolic" : "Flat")
-              << " impose_flux=" << (impose_flux_u ? 1 : 0)
-              << " local_faces=" << local_faces.size()
-              << " local_area=" << local_g.area
-              << " global_area=" << g_u.area
-              << " normalization=" << normalization_u
-              << " scale=" << ctx_u->scale
-              << " center=(" << ((g_u.area > 0.0) ? g_u.center_sum.x / g_u.area : 0.0)
-              << "," << ((g_u.area > 0.0) ? g_u.center_sum.y / g_u.area : 0.0)
-              << "," << ((g_u.area > 0.0) ? g_u.center_sum.z / g_u.area : 0.0) << ")"
-              << " normal=(" << ctx_u->normal.x << "," << ctx_u->normal.y << "," << ctx_u->normal.z << ")"
-              << " perim_points=" << (ctx_u->parabolic.has_value() ? ctx_u->parabolic->perimeter_unit_dirs.size() : 0u);
-          navierStokesTraceLog(oss.str());
-        }
-
-        IncompressibleNavierStokesVMSOptions::VelocityDirichletBC dir_u{};
-        dir_u.boundary_marker = bc.boundary_marker;
-        dir_u.active_components = use_normal_u
-                                      ? std::array<bool, 3>{true, true, true}
-                                      : active_components_from_flags(active_u, dim);
-
-        for (int d = 0; d < dim; ++d) {
-          const int comp = d;
-          dir_u.value[static_cast<std::size_t>(d)] = svmp::FE::forms::TimeScalarCoefficient(
-              [ctx_u, comp, temporal](svmp::FE::Real x, svmp::FE::Real y, svmp::FE::Real z, svmp::FE::Real t) -> svmp::FE::Real {
-                const double flow_rate = temporal->interpolate(static_cast<double>(t));
-                const Vec3d p{static_cast<double>(x), static_cast<double>(y), static_cast<double>(z)};
-                // componentValue = scale * weight(x) * direction_factor
-                // With scale = 1/normalization, this gives flow_rate / normalization * weight * direction
-                return static_cast<svmp::FE::Real>(flow_rate * ctx_u->componentValue(comp, p));
-              });
-        }
-
-        if (weak) {
-          options.velocity_dirichlet_weak.push_back(std::move(dir_u));
-        } else {
-          options.velocity_dirichlet.push_back(std::move(dir_u));
-        }
-        continue;
-      }
-
-      IncompressibleNavierStokesVMSOptions::VelocityDirichletBC dir{};
-      dir.boundary_marker = bc.boundary_marker;
-
-      // Legacy-style Dirichlet velocity BCs:
-      // - default direction: boundary outward normal
-      // - profile: Flat or Parabolic
-      // - Impose_flux: if true, normalize profile so ∫ profile ds = 1 and interpret Value as flow rate
+      // Legacy-style Dirichlet velocity BCs use the boundary outward normal
+      // by default and a Flat or Parabolic profile. Impose_flux normalizes the
+      // spatial profile and interprets Value or the temporal data as flow rate.
       const auto* impose_flux_param = find_param(bc.params, "Impose_flux");
       const bool impose_flux = impose_flux_param ? parse_bool_relaxed(impose_flux_param->value) : false;
 
@@ -1525,6 +1399,10 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
         profile = InletProfileType::Flat;
       } else if (profile_lc == "parabolic") {
         profile = InletProfileType::Parabolic;
+      } else if (is_unsteady) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Physics] Unknown Dirichlet BC Profile='" + profile_raw +
+            "' for Unsteady BC '" + bc.name + "'. Supported profiles: Flat, Parabolic.");
       } else if (profile_lc == "user_defined" || profile_lc == "user-defined" || profile_lc == "userdefined") {
         throw std::runtime_error(
             "[svMultiPhysics::Physics] Dirichlet BC Profile='User_defined' is not supported for the new solver "
@@ -1533,33 +1411,6 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
         throw std::runtime_error(
             "[svMultiPhysics::Physics] Unknown Dirichlet BC Profile='" + profile_raw +
             "' for the new solver Navier-Stokes module. Supported profiles: Flat, Parabolic.");
-      }
-
-      // Common case: no-slip wall (Value=0) and other zero Dirichlet constraints.
-      // Avoid expensive global geometry computations (MPI allgathers) when the imposed value is zero.
-      if (magnitude == static_cast<svmp::FE::Real>(0.0)) {
-        if (!effective_dir.empty()) {
-          std::array<int, 3> active_zero{0, 0, 0};
-          int active_count_zero = 0;
-          for (int d = 0; d < dim; ++d) {
-            const int flag =
-                (static_cast<std::size_t>(d) < effective_dir.size() &&
-                 effective_dir[static_cast<std::size_t>(d)] != 0)
-                    ? 1
-                    : 0;
-            active_zero[static_cast<std::size_t>(d)] = flag;
-            active_count_zero += flag;
-          }
-          if (active_count_zero > 0 && active_count_zero < dim) {
-            dir.active_components = active_components_from_flags(active_zero, dim);
-          }
-        }
-        if (weak) {
-          options.velocity_dirichlet_weak.push_back(std::move(dir));
-        } else {
-          options.velocity_dirichlet.push_back(std::move(dir));
-        }
-        continue;
       }
 
       int active_count = 0;
@@ -1571,19 +1422,36 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
       }
       const bool use_normal_direction = (active_count == 0 || active_count == dim);
 
+      IncompressibleNavierStokesVMSOptions::VelocityDirichletBC dir{};
+      dir.boundary_marker = bc.boundary_marker;
+      dir.active_components = use_normal_direction
+                                  ? std::array<bool, 3>{true, true, true}
+                                  : active_components_from_flags(active, dim);
+
+      // Zero steady values need no geometry, profile data, or MPI allgathers.
+      // Profile validation still precedes this shortcut.
+      if (!is_unsteady && magnitude == static_cast<svmp::FE::Real>(0.0)) {
+        if (weak) {
+          options.velocity_dirichlet_weak.push_back(std::move(dir));
+        } else {
+          options.velocity_dirichlet.push_back(std::move(dir));
+        }
+        continue;
+      }
+
       auto ctx = std::make_shared<InletProfileContext>();
       ctx->dim = dim;
       ctx->profile = profile;
       ctx->use_normal_direction = use_normal_direction;
       ctx->active_components = active;
 
-      // Compute normal/area/center and profile normalization as needed.
       const auto g =
           global_marker_geometry(*input.mesh, bc.boundary_marker, comm);
       if (!(g.area > 0.0)) {
         throw std::runtime_error(
             "[svMultiPhysics::Physics] Boundary marker " + std::to_string(bc.boundary_marker) +
-            " has zero area; cannot apply Dirichlet BC '" + bc.name + "'.");
+            " has zero area; cannot apply " + (is_unsteady ? "Unsteady Dirichlet BC '" : "Dirichlet BC '") +
+            bc.name + "'.");
       }
 
       if (use_normal_direction) {
@@ -1591,7 +1459,8 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
         if (!(norm2(n) > 0.0)) {
           throw std::runtime_error(
               "[svMultiPhysics::Physics] Boundary marker " + std::to_string(bc.boundary_marker) +
-              " has a degenerate normal; cannot apply Dirichlet BC '" + bc.name + "'.");
+              " has a degenerate normal; cannot apply " + (is_unsteady ? "Unsteady Dirichlet BC '" : "Dirichlet BC '") +
+              bc.name + "'.");
         }
         ctx->normal = n;
       }
@@ -1610,6 +1479,11 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
               *input.mesh, bc.boundary_marker, *ctx->parabolic, comm);
         }
         if (!(normalization > 0.0)) {
+          if (is_unsteady) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Physics] Failed to compute positive normalization for <Impose_flux> on Unsteady "
+                "Dirichlet BC '" + bc.name + "'.");
+          }
           const auto local_faces = input.mesh->faces_with_label(static_cast<svmp::label_t>(bc.boundary_marker));
           const std::size_t perim_points =
               (ctx->parabolic.has_value()) ? ctx->parabolic->perimeter_unit_dirs.size() : 0u;
@@ -1622,18 +1496,27 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
         }
       }
 
-      ctx->scale = static_cast<double>(magnitude) / normalization;
+      // Preserve the arithmetic grouping: steady values divide once, while
+      // temporal values multiply the callback result with reciprocal scaling.
+      if (is_unsteady) {
+        ctx->scale = 1.0 / normalization;
+      } else {
+        ctx->scale = static_cast<double>(magnitude) / normalization;
+      }
 
       if (navierStokesTraceEnabled()) {
         const auto local_g = local_marker_geometry(*input.mesh, bc.boundary_marker);
         const auto local_faces = input.mesh->faces_with_label(static_cast<svmp::label_t>(bc.boundary_marker));
         std::ostringstream oss;
-        oss << "NavierStokes BC setup: steady Dirichlet marker=" << bc.boundary_marker
+        oss << "NavierStokes BC setup: " << (is_unsteady ? "unsteady" : "steady")
+            << " Dirichlet marker=" << bc.boundary_marker
             << " name='" << bc.name << "'"
             << " profile=" << ((profile == InletProfileType::Parabolic) ? "Parabolic" : "Flat")
-            << " impose_flux=" << (impose_flux ? 1 : 0)
-            << " magnitude=" << magnitude
-            << " local_faces=" << local_faces.size()
+            << " impose_flux=" << (impose_flux ? 1 : 0);
+        if (!is_unsteady) {
+          oss << " magnitude=" << magnitude;
+        }
+        oss << " local_faces=" << local_faces.size()
             << " local_area=" << local_g.area
             << " global_area=" << g.area
             << " normalization=" << normalization
@@ -1648,15 +1531,21 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
 
       for (int d = 0; d < dim; ++d) {
         const int comp = d;
-        dir.value[static_cast<std::size_t>(d)] = svmp::FE::forms::TimeScalarCoefficient(
-            [ctx, comp](svmp::FE::Real x, svmp::FE::Real y, svmp::FE::Real z, svmp::FE::Real /*t*/) -> svmp::FE::Real {
-              const Vec3d p{static_cast<double>(x), static_cast<double>(y), static_cast<double>(z)};
-              return static_cast<svmp::FE::Real>(ctx->componentValue(comp, p));
-            });
+        if (is_unsteady) {
+          dir.value[static_cast<std::size_t>(d)] = svmp::FE::forms::TimeScalarCoefficient(
+              [ctx, comp, temporal](svmp::FE::Real x, svmp::FE::Real y, svmp::FE::Real z, svmp::FE::Real t) -> svmp::FE::Real {
+                const double flow_rate = temporal->interpolate(static_cast<double>(t));
+                const Vec3d p{static_cast<double>(x), static_cast<double>(y), static_cast<double>(z)};
+                return static_cast<svmp::FE::Real>(flow_rate * ctx->componentValue(comp, p));
+              });
+        } else {
+          dir.value[static_cast<std::size_t>(d)] = svmp::FE::forms::TimeScalarCoefficient(
+              [ctx, comp](svmp::FE::Real x, svmp::FE::Real y, svmp::FE::Real z, svmp::FE::Real /*t*/) -> svmp::FE::Real {
+                const Vec3d p{static_cast<double>(x), static_cast<double>(y), static_cast<double>(z)};
+                return static_cast<svmp::FE::Real>(ctx->componentValue(comp, p));
+              });
+        }
       }
-      dir.active_components = use_normal_direction
-                                  ? std::array<bool, 3>{true, true, true}
-                                  : active_components_from_flags(active, dim);
 
       if (weak) {
         options.velocity_dirichlet_weak.push_back(std::move(dir));
