@@ -1095,7 +1095,8 @@ void validateNavierStokesBoundaryConfiguration(
     const FE::systems::FESystem& system,
     const FE::spaces::FunctionSpace& velocity_space,
     const FE::spaces::FunctionSpace& pressure_space,
-    int dim)
+    int dim,
+    std::vector<PreparedWeakVelocityBoundary>* prepared_weak_velocity)
 {
     using FE::forms::FormExpr;
 
@@ -1283,6 +1284,7 @@ void validateNavierStokesBoundaryConfiguration(
 
     FormExpr momentum_preflight;
     FormExpr continuity_preflight;
+    std::vector<PreparedWeakVelocityBoundary> prepared_boundaries;
     std::vector<
         FE::forms::bc::
             GeneratedBoundaryNitscheTraceFormBinding>
@@ -1298,7 +1300,10 @@ void validateNavierStokesBoundaryConfiguration(
         q,
         FormExpr::constant(options.viscosity),
         generated_active_boundary_for,
-        &generated_nitsche_trace_binding_preflight);
+        &generated_nitsche_trace_binding_preflight,
+        nullptr,
+        nullptr,
+        prepared_weak_velocity != nullptr ? &prepared_boundaries : nullptr);
     std::size_t expected_generated_nitsche_trace_bindings = 0u;
     for (const auto& bc : options.velocity_dirichlet_weak) {
         const int marker =
@@ -1316,6 +1321,9 @@ void validateNavierStokesBoundaryConfiguration(
             "IncompressibleNavierStokesVMSModule: generated-boundary "
             "Nitsche binding preflight count differs from the configured "
             "production routes");
+    }
+    if (prepared_weak_velocity != nullptr) {
+        *prepared_weak_velocity = std::move(prepared_boundaries);
     }
 }
 
@@ -1710,13 +1718,15 @@ NavierStokesPreflight preflightNavierStokes(
             }
         }
     }
+    std::vector<PreparedWeakVelocityBoundary> prepared_weak_velocity_boundaries;
     validateNavierStokesBoundaryConfiguration(
         options,
         effective_free_surfaces,
         system,
         *velocity_space,
         *pressure_space,
-        dim);
+        dim,
+        &prepared_weak_velocity_boundaries);
     if (has_generated_boundary_nitsche_route) {
         if (!active_pressure_domain.has_value() ||
             active_pressure_domain->boundary
@@ -1788,6 +1798,7 @@ NavierStokesPreflight preflightNavierStokes(
         .semi_implicit_reference_spec = std::move(semi_implicit_reference_spec),
         .ale_options = ale_options,
         .effective_free_surfaces = std::move(effective_free_surfaces),
+        .prepared_weak_velocity_boundaries = std::move(prepared_weak_velocity_boundaries),
         .has_exterior_free_surface = has_exterior_free_surface,
     };
 }

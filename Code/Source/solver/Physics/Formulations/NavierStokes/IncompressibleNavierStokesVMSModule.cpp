@@ -1324,7 +1324,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
 
     // Weak velocity Dirichlet (Nitsche), certified on generated wetted boundaries.
     std::vector<bc::GeneratedBoundaryNitscheTraceFormBinding> nitsche_traces;
-    Factories::applyVelocityNitscheBCs(M, C, o, dim, u, p, v, q, t.mu, wetted,
+    Factories::applyVelocityNitscheBCs(M, C, o, preflight.prepared_weak_velocity_boundaries, u, p, v, q, t.mu,
                                        aggregated ? &nitsche_traces : nullptr,
                                        &work.weak_boundary_momentum, &work.weak_boundary_continuity);
     requireCertifiedNitscheTraces(o, wetted, aggregated, nitsche_traces);

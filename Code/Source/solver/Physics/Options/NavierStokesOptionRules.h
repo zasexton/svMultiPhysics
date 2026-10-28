@@ -107,13 +107,22 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                                  const FE::systems::FESystem& system,
                                  int dim);
 
+/// Resolved weak-boundary input for this registration transaction. Certified
+/// route bindings are built separately with the actual registered fields.
+struct PreparedWeakVelocityBoundary {
+    int physical_marker{-1};
+    std::optional<int> generated_marker{};
+    FE::forms::FormExpr prescribed_velocity{};
+};
+
 void validateNavierStokesBoundaryConfiguration(
     const IncompressibleNavierStokesVMSOptions& options,
     std::span<const FreeSurfaceBoundary> free_surfaces,
     const FE::systems::FESystem& system,
     const FE::spaces::FunctionSpace& velocity_space,
     const FE::spaces::FunctionSpace& pressure_space,
-    int dim);
+    int dim,
+    std::vector<PreparedWeakVelocityBoundary>* prepared_weak_velocity = nullptr);
 
 /// What preflightNavierStokes resolved for the registration that follows.
 struct NavierStokesPreflight {
@@ -125,6 +134,7 @@ struct NavierStokesPreflight {
     std::optional<FE::systems::FieldSpec> semi_implicit_reference_spec;
     FE::systems::ALEBindingOptions ale_options;
     std::vector<FreeSurfaceBoundary> effective_free_surfaces;   // generated interface markers resolved
+    std::vector<PreparedWeakVelocityBoundary> prepared_weak_velocity_boundaries;
     bool has_exterior_free_surface{false};
 };
 
