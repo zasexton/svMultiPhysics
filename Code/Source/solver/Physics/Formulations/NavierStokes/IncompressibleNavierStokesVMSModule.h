@@ -926,13 +926,10 @@ contactLineSlipLength(const FreeSurfaceContactLine& contact_line)
     const IncompressibleNavierStokesVMSOptions::ScalarValue& value,
     std::string_view context)
 {
-    const auto* real = std::get_if<FE::Real>(&value);
-    if (real == nullptr) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: " + std::string(context) +
+    return FE::forms::bc::requireScalarLiteral(
+        value,
+        "IncompressibleNavierStokesVMSModule: " + std::string(context) +
             " currently requires a literal scalar value");
-    }
-    return *real;
 }
 
 [[nodiscard]] inline bool hasWallAwareContactLaw(
@@ -979,7 +976,7 @@ contactLineWallNormal(const FreeSurfaceContactLine& contact_line)
         constantScalarValueOrThrow(contactLineWallNormal(contact_line)[1], "contact-line wall_normal"),
         constantScalarValueOrThrow(contactLineWallNormal(contact_line)[2], "contact-line wall_normal")};
     if (!std::all_of(normal.begin(), normal.end(), [](FE::Real component) {
-            return std::isfinite(component);
+            return FE::numeric::isFinite(component);
         })) {
         throw std::invalid_argument(
             "IncompressibleNavierStokesVMSModule: prescribed contact angle requires finite wall_normal components");
@@ -987,7 +984,7 @@ contactLineWallNormal(const FreeSurfaceContactLine& contact_line)
     const auto norm = std::sqrt(normal[0] * normal[0] +
                                 normal[1] * normal[1] +
                                 normal[2] * normal[2]);
-    if (!(norm > FE::Real{0.0}) || !std::isfinite(norm)) {
+    if (!FE::numeric::isPositive(norm) || !FE::numeric::isFinite(norm)) {
         throw std::invalid_argument(
             "IncompressibleNavierStokesVMSModule: prescribed contact angle requires a finite, nonzero wall_normal");
     }

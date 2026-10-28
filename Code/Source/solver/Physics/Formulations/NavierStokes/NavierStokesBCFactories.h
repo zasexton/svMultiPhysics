@@ -583,8 +583,8 @@ inline void applyVelocityNitscheBCs(
     if (options.velocity_dirichlet_weak.empty()) {
         return;
     }
-    if (!(options.nitsche_gamma > 0.0) ||
-        !std::isfinite(options.nitsche_gamma)) {
+    if (!FE::numeric::isPositive(options.nitsche_gamma) ||
+        !FE::numeric::isFinite(options.nitsche_gamma)) {
         throw std::invalid_argument(
             "applyVelocityNitscheBCs: nitsche_gamma must be finite and > 0");
     }
@@ -1479,7 +1479,7 @@ inline void validateTwoFluidInterfaceParameters(
         "incompressible two-fluid interface marker must be nonnegative");
   }
   const auto finite_positive = [](FE::Real value) {
-    return std::isfinite(value) && value > FE::Real{0.0};
+    return FE::numeric::isFinite(value) && FE::numeric::isPositive(value);
   };
   if (!finite_positive(parameters.negative_density) ||
       !finite_positive(parameters.positive_density)) {
@@ -1495,20 +1495,20 @@ inline void validateTwoFluidInterfaceParameters(
     throw std::invalid_argument("incompressible two-fluid interface Nitsche "
                                 "gamma must be finite and positive");
   }
-  if (!std::isfinite(parameters.surface_tension) ||
+  if (!FE::numeric::isFinite(parameters.surface_tension) ||
       parameters.surface_tension < FE::Real{0.0}) {
     throw std::invalid_argument("incompressible two-fluid interface surface "
                                 "tension must be finite and nonnegative");
   }
   if (parameters.prescribed_pressure_jump.has_value() &&
-      !std::isfinite(*parameters.prescribed_pressure_jump)) {
+      !FE::numeric::isFinite(*parameters.prescribed_pressure_jump)) {
     throw std::invalid_argument(
         "incompressible two-fluid prescribed pressure jump must be finite");
   }
   if (parameters.prescribed_viscous_traction_jump.has_value()) {
     const auto& target = *parameters.prescribed_viscous_traction_jump;
     if (!std::all_of(target.begin(), target.end(), [](FE::Real value) {
-          return std::isfinite(value);
+          return FE::numeric::isFinite(value);
         })) {
       throw std::invalid_argument(
           "incompressible two-fluid prescribed viscous traction jump must be finite");

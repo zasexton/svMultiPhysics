@@ -11,6 +11,7 @@
 #include "Physics/Core/EquationModuleRegistry.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 #include "Physics/Options/NavierStokesRegistration.h"
+#include "Physics/Options/NavierStokesOptionRules.h"
 
 #include "Assembly/GlobalSystemView.h"
 #include "FE/Forms/FormExpr.h"
@@ -769,6 +770,68 @@ std::size_t interiorFaceKernelCountForBlock(
 }
 
 } // namespace
+
+TEST(NavierStokesLegacyBCs, ScalarLiteralValidationPreservesDiagnosticsAndVariantPolicy)
+{
+    namespace ns = svmp::Physics::formulations::navier_stokes;
+    using Real = svmp::FE::Real;
+    using ScalarValue = ns::IncompressibleNavierStokesVMSOptions::ScalarValue;
+    const std::array validators{
+        ns::validateFiniteConstantScalar,
+        ns::validateNonnegativeConstantScalar,
+        ns::validatePositiveConstantScalar};
+    struct Case {
+        Real value;
+        std::array<const char*, 3> diagnostic;
+    };
+    const auto infinity = std::numeric_limits<Real>::infinity();
+    const std::array cases{
+        Case{-infinity, {"finite", "finite", "finite"}},
+        Case{infinity, {"finite", "finite", "finite"}},
+        Case{std::numeric_limits<Real>::quiet_NaN(), {"finite", "finite", "finite"}},
+        Case{-1.0, {nullptr, "nonnegative", "positive"}},
+        Case{-0.0, {nullptr, nullptr, "positive"}},
+        Case{0.0, {nullptr, nullptr, "positive"}},
+        Case{1.0, {nullptr, nullptr, nullptr}}};
+    for (const auto& test : cases) {
+        for (std::size_t i = 0; i < validators.size(); ++i) {
+            SCOPED_TRACE(test.value);
+            SCOPED_TRACE(i);
+            if (test.diagnostic[i] == nullptr) {
+                EXPECT_NO_THROW(validators[i](ScalarValue{test.value}, "test parameter"));
+                continue;
+            }
+            try {
+                validators[i](ScalarValue{test.value}, "test parameter");
+                FAIL() << "Expected the scalar literal to be rejected";
+            } catch (const std::invalid_argument& error) {
+                EXPECT_EQ(std::string(error.what()),
+                          "IncompressibleNavierStokesVMSModule: test parameter must be " +
+                              std::string(test.diagnostic[i]));
+            }
+        }
+    }
+    int callback_calls = 0;
+    const std::array<ScalarValue, 6> deferred{
+        svmp::FE::forms::ScalarCoefficient{[&](Real, Real, Real) {
+            ++callback_calls;
+            return infinity;
+        }},
+        svmp::FE::forms::TimeScalarCoefficient{[&](Real, Real, Real, Real) {
+            ++callback_calls;
+            return infinity;
+        }},
+        svmp::FE::forms::ScalarCoefficient{},
+        svmp::FE::forms::TimeScalarCoefficient{},
+        svmp::FE::forms::FormExpr::constant(infinity),
+        svmp::FE::forms::FormExpr{}};
+    for (const auto& value : deferred) {
+        for (const auto validate : validators) {
+            EXPECT_NO_THROW(validate(value, "deferred parameter"));
+        }
+    }
+    EXPECT_EQ(callback_calls, 0);
+}
 
 TEST(NavierStokesLegacyBCs,
      FreeSurfacePhysicalModelDirectInputIsExplicitAndFailClosed)

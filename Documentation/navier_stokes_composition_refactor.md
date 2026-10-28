@@ -195,3 +195,15 @@ Numeric inconsistency retained for separate review: some existing direct C++
 positive-only checks accept positive infinity. Generic Nitsche checks written
 as `x <= 0` additionally accept NaN. Shared services preserve each caller's
 predicate; these accepted-input changes are outside this refactor.
+
+
+The validation adoption delegates literal-only checks, required constants, raw
+numeric checks and both small-cut guard policies to the verified shared APIs.
+The identical six-property future-velocity comparison uses `spacesCompatible`.
+Forty-two focused Physics tests, three scalar-contract tests and two guard tests
+pass. The full `stage2-validation` gate passes: all 40 reference outputs and
+artifacts, S0, exact resolve/log contracts, FE/Physics/Application suites and
+rank-consistency supplement, and the exhaustive matrix (597,793 ms on both
+ranks). Two additional truncated retained-baseline records required exact paired
+complete-stream comparisons; their original failures remain recorded. See
+`/tmp/svmp-ns-evidence/stages/stage2-validation/preservation-summary.json`.

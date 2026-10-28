@@ -22,6 +22,7 @@
 #include "FE/Constraints/VertexDirichletConstraint.h"
 #include "FE/Constitutive/MetadataTaggedModel.h"
 #include "FE/Core/Logger.h"
+#include "FE/Core/NumericValidation.h"
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/Elements/ReferenceElement.h"
 #include "FE/Forms/CutCellForms.h"
@@ -254,20 +255,6 @@ void validateDynamicContactWallEssentialBC(
 
 } // namespace
 
-namespace {
-
-[[nodiscard]] std::optional<FE::Real> constantScalarValue(
-    const IncompressibleNavierStokesVMSOptions::ScalarValue& value)
-{
-    const auto* real = std::get_if<FE::Real>(&value);
-    if (real == nullptr) {
-        return std::nullopt;
-    }
-    return *real;
-}
-
-} // namespace
-
 void validateWallNormalDimension(
     const IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine& contact_line,
     int dim,
@@ -289,12 +276,10 @@ void validateFiniteConstantScalar(
     const IncompressibleNavierStokesVMSOptions::ScalarValue& value,
     std::string_view context)
 {
-    const auto literal = constantScalarValue(value);
-    if (literal.has_value() && !std::isfinite(*literal)) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: " + std::string(context) +
+    FE::forms::bc::validateScalarLiteral(
+        value, FE::numeric::isFinite,
+        "IncompressibleNavierStokesVMSModule: " + std::string(context) +
             " must be finite");
-    }
 }
 
 void validateNonnegativeConstantScalar(
@@ -302,12 +287,10 @@ void validateNonnegativeConstantScalar(
     std::string_view context)
 {
     validateFiniteConstantScalar(value, context);
-    const auto literal = constantScalarValue(value);
-    if (literal.has_value() && *literal < FE::Real{0.0}) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: " + std::string(context) +
+    FE::forms::bc::validateScalarLiteral(
+        value, FE::numeric::isNonnegative,
+        "IncompressibleNavierStokesVMSModule: " + std::string(context) +
             " must be nonnegative");
-    }
 }
 
 void validatePositiveConstantScalar(
@@ -315,12 +298,10 @@ void validatePositiveConstantScalar(
     std::string_view context)
 {
     validateFiniteConstantScalar(value, context);
-    const auto literal = constantScalarValue(value);
-    if (literal.has_value() && !(*literal > FE::Real{0.0})) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: " + std::string(context) +
+    FE::forms::bc::validateScalarLiteral(
+        value, FE::numeric::isPositive,
+        "IncompressibleNavierStokesVMSModule: " + std::string(context) +
             " must be positive");
-    }
 }
 
 namespace {
@@ -528,10 +509,9 @@ void validateNodePressureConstraints(
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: pressure constraint references a negative node id");
         }
-        if (!std::isfinite(constraint.pressure)) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: pressure constraint value must be finite");
-        }
+        FE::numeric::validate(
+            constraint.pressure, FE::numeric::isFinite,
+            "IncompressibleNavierStokesVMSModule: pressure constraint value must be finite");
         const auto [existing, inserted] = pressure_by_node.emplace(
             constraint.node_id, constraint.pressure);
         if (!inserted && existing->second != constraint.pressure) {
@@ -612,15 +592,16 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             "IncompressibleNavierStokesVMSModule: unsupported "
             "free-surface boundary policy");
     }
-    if (!std::isfinite(bc.level_set_isovalue)) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: free-surface level_set_isovalue must be finite");
-    }
-    if (!std::isfinite(bc.active_domain_smoothing_width) ||
-        bc.active_domain_smoothing_width < FE::Real{0.0}) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: free-surface active_domain_smoothing_width must be finite and nonnegative");
-    }
+    FE::numeric::validate(
+        bc.level_set_isovalue, FE::numeric::isFinite,
+        "IncompressibleNavierStokesVMSModule: free-surface level_set_isovalue must be finite");
+    FE::numeric::validate(
+        bc.active_domain_smoothing_width,
+        [](FE::Real value) {
+            return FE::numeric::isFinite(value) &&
+                   FE::numeric::isNonnegative(value);
+        },
+        "IncompressibleNavierStokesVMSModule: free-surface active_domain_smoothing_width must be finite and nonnegative");
     validateFiniteConstantScalar(
         bc.external_pressure, "free-surface external_pressure");
     // SurfaceStress contains the constant-gamma surface-energy variation,
@@ -637,18 +618,8 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
     validateNonnegativeConstantScalar(
         bc.cut_cell_stabilization.pressure_gradient_penalty,
         "cut-cell pressure-gradient penalty");
-    const auto& aggregation_guards = bc.small_cut_aggregation_guards;
-    if (aggregation_guards.maximum_root_path_length == 0u ||
-        !(aggregation_guards.maximum_reference_extrapolation_distance >=
-          FE::Real{0.0}) ||
-        !std::isfinite(
-            aggregation_guards.maximum_reference_extrapolation_distance) ||
-        !(aggregation_guards.maximum_absolute_coefficient >= FE::Real{1.0}) ||
-        !std::isfinite(aggregation_guards.maximum_absolute_coefficient) ||
-        !(aggregation_guards.maximum_row_l1_norm >= FE::Real{1.0}) ||
-        !std::isfinite(aggregation_guards.maximum_row_l1_norm) ||
-        aggregation_guards.maximum_row_l1_norm <
-            aggregation_guards.maximum_absolute_coefficient) {
+    if (!FE::constraints::validSmallCutAggregationGuards(
+            bc.small_cut_aggregation_guards)) {
         throw std::invalid_argument(
             "IncompressibleNavierStokesVMSModule: small-cut aggregation "
             "guards require a positive root path, finite nonnegative "
@@ -1219,14 +1190,6 @@ void validateNavierStokesBoundaryConfiguration(
             generated_active_boundary_for(bc.boundary_marker));
     });
 
-    const auto validate_finite_real = [](FE::Real value,
-                                         std::string_view label) {
-        if (!std::isfinite(value)) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: " +
-                std::string(label) + " must be finite");
-        }
-    };
     for (const auto& bc : options.coupled_outflow_rcr) {
         const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(
             bc,
@@ -1237,7 +1200,10 @@ void validateNavierStokesBoundaryConfiguration(
                  std::pair{bc.Rd, std::string_view{"RCR Rd"}},
                  std::pair{bc.Pd, std::string_view{"RCR Pd"}},
                  std::pair{bc.X0, std::string_view{"RCR initial state"}}}) {
-            validate_finite_real(value, label);
+            FE::numeric::validate(
+                value, FE::numeric::isFinite,
+                "IncompressibleNavierStokesVMSModule: " +
+                    std::string(label) + " must be finite");
         }
         if (bc.Rd == FE::Real{0.0}) {
             throw std::invalid_argument(
@@ -1261,7 +1227,10 @@ void validateNavierStokesBoundaryConfiguration(
                  std::pair{bc.Pd, std::string_view{"RCRCR Pd"}},
                  std::pair{bc.P10, std::string_view{"RCRCR P1 initial state"}},
                  std::pair{bc.P20, std::string_view{"RCRCR P2 initial state"}}}) {
-            validate_finite_real(value, label);
+            FE::numeric::validate(
+                value, FE::numeric::isFinite,
+                "IncompressibleNavierStokesVMSModule: " +
+                    std::string(label) + " must be finite");
         }
         if (bc.C1 == FE::Real{0.0} || bc.C2 == FE::Real{0.0}) {
             throw std::invalid_argument(
@@ -1392,15 +1361,19 @@ NavierStokesPreflight preflightNavierStokes(
     if (pressure_space->value_dimension() != 1) {
         throw std::invalid_argument("IncompressibleNavierStokesVMSModule::registerOn: pressure space must be scalar");
     }
-    if (!(options.density > 0.0)) {
-        throw std::invalid_argument("IncompressibleNavierStokesVMSModule::registerOn: density must be > 0");
-    }
-    if (options.viscosity_model == nullptr && !(options.viscosity > 0.0)) {
-        throw std::invalid_argument("IncompressibleNavierStokesVMSModule::registerOn: viscosity must be > 0 when viscosity_model is not provided");
+    FE::numeric::validate(
+        options.density, FE::numeric::isPositive,
+        "IncompressibleNavierStokesVMSModule::registerOn: density must be > 0");
+    if (options.viscosity_model == nullptr) {
+        FE::numeric::validate(
+            options.viscosity, FE::numeric::isPositive,
+            "IncompressibleNavierStokesVMSModule::registerOn: viscosity must be > 0 when viscosity_model is not provided");
     }
     const bool enable_vms = options.enable_vms;
-    if (enable_vms && !(options.stabilization_epsilon > 0.0)) {
-        throw std::invalid_argument("IncompressibleNavierStokesVMSModule::registerOn: stabilization_epsilon must be > 0 when VMS is enabled");
+    if (enable_vms) {
+        FE::numeric::validate(
+            options.stabilization_epsilon, FE::numeric::isPositive,
+            "IncompressibleNavierStokesVMSModule::registerOn: stabilization_epsilon must be > 0 when VMS is enabled");
     }
 
     FE::systems::FieldSpec u_spec;
@@ -1854,11 +1827,14 @@ namespace {
 
 void requireFinitePositive(FE::Real value, std::string_view name)
 {
-    if (!std::isfinite(value) || !(value > FE::Real{0.0})) {
-        throw std::invalid_argument(
-            "IncompressibleTwoFluidModule: " + std::string(name) +
+    FE::numeric::validate(
+        value,
+        [](FE::Real candidate) {
+            return FE::numeric::isFinite(candidate) &&
+                   FE::numeric::isPositive(candidate);
+        },
+        "IncompressibleTwoFluidModule: " + std::string(name) +
             " must be finite and positive");
-    }
 }
 
 enum class VelocityBoundaryDataPolicy {
@@ -1871,12 +1847,11 @@ void validateSharedVelocityBoundaryValue(
     std::string_view scope)
 {
     if (const auto* literal = std::get_if<FE::Real>(&value)) {
-        if (!std::isfinite(*literal)) {
-            throw std::invalid_argument(
-                "[svMultiPhysics::Physics] "
-                "unsupported_two_fluid_nonfinite_shared_velocity_boundary:" +
+        FE::numeric::validate(
+            *literal, FE::numeric::isFinite,
+            "[svMultiPhysics::Physics] "
+            "unsupported_two_fluid_nonfinite_shared_velocity_boundary:" +
                 std::string(scope));
-        }
         return;
     }
     if (const auto* coefficient =
@@ -2188,14 +2163,8 @@ IncompressibleTwoFluidPreflight preflightIncompressibleTwoFluid(
         throw std::invalid_argument(
             "IncompressibleTwoFluidModule: cut metadata scale cap must be finite and at least one");
     }
-    const auto& guards = options.small_cut_aggregation_guards;
-    if (guards.maximum_root_path_length == 0u ||
-        !std::isfinite(guards.maximum_reference_extrapolation_distance) ||
-        guards.maximum_reference_extrapolation_distance < FE::Real{0.0} ||
-        !std::isfinite(guards.maximum_absolute_coefficient) ||
-        guards.maximum_absolute_coefficient < FE::Real{1.0} ||
-        !std::isfinite(guards.maximum_row_l1_norm) ||
-        guards.maximum_row_l1_norm < guards.maximum_absolute_coefficient) {
+    if (!FE::constraints::validSmallCutAggregationGuards(
+            options.small_cut_aggregation_guards)) {
         throw std::invalid_argument(
             "IncompressibleTwoFluidModule: invalid small-cut aggregation guards");
     }

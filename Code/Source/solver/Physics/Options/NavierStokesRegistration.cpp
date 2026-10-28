@@ -2350,15 +2350,7 @@ FE::FieldId preRegisterPrimaryVelocityField(
   if (record.source_kind != FE::systems::FieldSourceKind::Unknown ||
       record.components != velocity_spec.components || !record.space ||
       !velocity_spec.space ||
-      record.space->space_type() != velocity_spec.space->space_type() ||
-      record.space->field_type() != velocity_spec.space->field_type() ||
-      record.space->value_dimension() !=
-          velocity_spec.space->value_dimension() ||
-      record.space->topological_dimension() !=
-          velocity_spec.space->topological_dimension() ||
-      record.space->polynomial_order() !=
-          velocity_spec.space->polynomial_order() ||
-      record.space->element_type() != velocity_spec.space->element_type()) {
+      !FE::systems::spacesCompatible(*record.space, *velocity_spec.space)) {
     throw std::invalid_argument(
         "Navier-Stokes future velocity pre-registration found an incompatible existing field 'Velocity'");
   }
