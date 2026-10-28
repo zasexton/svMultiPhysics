@@ -826,39 +826,6 @@ struct FreeSurfaceEnergyStatement {
     return "free_surface." + std::to_string(interface_marker) + "." + std::string(quantity);
 }
 
-/// The statement of @p bc, with the coefficients declareFreeSurfaceDiscreteFunctionals declares.
-[[nodiscard]] inline FreeSurfaceEnergyStatement freeSurfaceEnergyStatement(
-    const FreeSurfaceBoundary& bc,
-    FE::FieldId velocity_field,
-    const FE::spaces::FunctionSpace& velocity_space,
-    int dimension,
-    FE::Real density,
-    const std::array<FE::Real, 3>& gravitational_acceleration,
-    FE::Real dynamic_viscosity,
-    bool has_constant_dynamic_viscosity)
-{
-    FreeSurfaceEnergyStatement statement;
-    statement.interface_marker = bc.interface_marker;
-    statement.liquid_side = bc.active_domain == FreeSurfaceActiveDomain::LevelSetPositive
-                                ? FE::forms::CutVolumeSide::Positive
-                                : FE::forms::CutVolumeSide::Negative;
-    statement.velocity_field = velocity_field;
-    statement.velocity_space = &velocity_space;
-    statement.dimension = dimension;
-    statement.surface_tension =
-        constantScalarValueOrThrow(bc.surface_tension, "free-surface discrete-functional surface tension");
-    statement.density = density;
-    statement.gravitational_acceleration = gravitational_acceleration;
-    if (has_constant_dynamic_viscosity) {
-        statement.dynamic_viscosity = dynamic_viscosity;
-    }
-    if (const auto* external_pressure = std::get_if<FE::Real>(&bc.external_pressure); external_pressure != nullptr) {
-        statement.external_pressure = *external_pressure;
-    }
-    statement.endpoint_functional_power = usesSurfaceStress(bc);
-    return statement;
-}
-
 /// The energy functionals of one free surface, in this order:
 ///   liquid_volume                  Measure          int_L 1
 ///   liquid_gas_area                Measure          int_Gamma 1
@@ -1073,43 +1040,40 @@ struct FreeSurfaceContactWallStatement {
     return out;
 }
 
-/// Declares the energy functionals of every free surface that declares a
-/// discrete functional (shouldDeclareFreeSurfaceDiscreteFunctional), with
-/// the coefficients of declareFreeSurfaceDiscreteFunctionals, and its wall
-/// functionals (freeSurfaceWallFunctionals) with the wall coefficients of
-/// the record declaration that call declared.
+/// Declares energies and wall functionals from the registered declarations.
+/// Boundary selection and order follow this module's free surfaces. All selected
+/// records must already exist; check that invariant before declaring any forms.
 inline void declareFreeSurfaceEnergyFunctionals(FE::systems::FormulationBuilder& F,
                                                 const std::vector<FreeSurfaceBoundary>& free_surfaces,
-                                                FE::FieldId velocity_field,
                                                 const FE::spaces::FunctionSpace& velocity_space,
-                                                int dimension,
-                                                FE::Real density,
-                                                const std::array<FE::Real, 3>& gravitational_acceleration,
-                                                FE::Real dynamic_viscosity,
-                                                bool has_constant_dynamic_viscosity)
+                                                int dimension)
 {
+    const auto records =
+        FE::systems::functionalRecords(std::as_const(F.system())).functionalDeclarations();
+    std::vector<const FE::systems::FreeSurfaceDiscreteFunctionalDeclaration*> selected;
     for (const auto& bc : free_surfaces) {
         if (!shouldDeclareFreeSurfaceDiscreteFunctional(bc)) {
             continue;
         }
-        const auto statement =
-            freeSurfaceEnergyStatement(bc, velocity_field, velocity_space, dimension, density,
-                                       gravitational_acceleration, dynamic_viscosity, has_constant_dynamic_viscosity);
+        const auto record = std::find_if(records.begin(), records.end(), [&](const auto& declaration) {
+            return declaration.interface_marker == bc.interface_marker;
+        });
+        if (record == records.end()) {
+            throw std::logic_error(
+                "IncompressibleNavierStokesVMSModule: missing free-surface discrete-functional declaration for interface marker " +
+                std::to_string(bc.interface_marker));
+        }
+        selected.push_back(&*record);
+    }
+    for (const auto* record : selected) {
+        const auto statement = freeSurfaceEnergyStatement(*record, velocity_space, dimension);
         for (auto& declaration : freeSurfaceEnergyFunctionals(statement)) {
             F.functional(std::move(declaration.name), declaration.kind, std::move(declaration.form),
                          std::move(declaration.owner));
         }
-        // The contact-line channels, with the wall coefficients of the record
-        // declaration (declareFreeSurfaceDiscreteFunctionals).
-        const auto records = FE::systems::functionalRecords(F.system()).functionalDeclarations();
-        const auto record = std::find_if(records.begin(), records.end(), [&](const auto& declaration) {
-            return declaration.interface_marker == bc.interface_marker;
-        });
-        if (record != records.end()) {
-            const auto walls = freeSurfaceContactWallStatements(record->parameters);
-            for (auto& declaration : freeSurfaceWallFunctionals(statement, walls)) {
-                F.wallFunctional(std::move(declaration));
-            }
+        const auto walls = freeSurfaceContactWallStatements(record->parameters);
+        for (auto& declaration : freeSurfaceWallFunctionals(statement, walls)) {
+            F.wallFunctional(std::move(declaration));
         }
     }
 }

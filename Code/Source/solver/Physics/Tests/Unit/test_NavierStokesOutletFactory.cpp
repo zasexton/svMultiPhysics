@@ -40,6 +40,7 @@
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/ProductSpace.h"
 #include "FE/Systems/FunctionalForms.h"
+#include "FE/Systems/SystemManifest.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesPostProcessing.h"
 #include "FE/Dofs/DofHandler.h"
 #include "FE/Dofs/DofMap.h"
@@ -3753,4 +3754,98 @@ TEST(NavierStokesPostProcessing, StatesTheContactLineChannelsWithTheRuleWallNorm
     EXPECT_FALSE(svmp::FE::systems::wallFunctionalForm(functionals[2], 5, lines_5, {}).isValid());   // no friction
     const std::vector<BoundaryDomain> wetted_3{BoundaryDomain::generatedActiveSubset(3, 201)};
     EXPECT_TRUE(svmp::FE::systems::isSumOfIntegrals(svmp::FE::systems::wallFunctionalForm(functionals[3], 3, {}, wetted_3)));
+}
+
+TEST(NavierStokesPostProcessing, DeclaresSelectedEnergiesFromRegisteredFunctionalData)
+{
+    namespace ns = svmp::Physics::formulations::navier_stokes;
+    namespace post = ns::post;
+    namespace fs = svmp::FE::interfaces;
+    using Side = svmp::FE::geometry::CutIntegrationSide;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    auto vector = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar, 3);
+    FESystem system(mesh);
+    const auto phi = system.addField({.name = "phi", .space = scalar});
+    const auto velocity = system.addField({.name = "u", .space = vector, .components = 3});
+    const std::array<Real, 3> gravity{{0.0, 0.25, -9.0}};
+    const std::array<Real, 3> reference{{1.0, -2.0, 0.5}};
+    for (const int marker : {7, 8, 9}) {
+        const bool optional_channels = marker == 9;
+        const auto side = optional_channels ? Side::Positive : Side::Negative;
+        FreeSurfaceDiscreteFunctionalDeclaration record;
+        record.interface_marker = marker;
+        record.level_set_field = phi;
+        record.velocity_field = velocity;
+        record.geometry_domain_id = "energy_authority";
+        record.owner_component = "energy_authority_test";
+        record.parameters.liquid_side = side;
+        record.parameters.surface_tension = 0.25;
+        if (optional_channels) {
+            // The registry permits one owner of the bulk energy/dissipation.
+            record.active_volume_energy_parameters = fs::FreeSurfaceActiveVolumeEnergyParameters{
+                .liquid_side = side, .density = 2.5,
+                .gravitational_acceleration = gravity, .gravitational_reference_point = reference};
+            record.active_volume_dissipation_parameters = fs::FreeSurfaceActiveVolumeDissipationParameters{
+                .liquid_side = side, .dynamic_viscosity = 0.125};
+            record.external_pressure_power_parameters = fs::FreeSurfaceExternalPressurePowerParameters{
+                .liquid_side = side, .external_pressure = 3.0};
+            record.endpoint_functional_power_enabled = true;
+            record.capillary_balance_method = FreeSurfaceCapillaryBalanceMethod::DiscreteEnergyVolumeStationarity;
+            record.capillary_balance_qualification = FreeSurfaceCapillaryBalanceQualification::PrerequisiteOnly;
+        }
+        functionalRecords(system).declareFunctional(std::move(record));
+    }
+    const auto boundary = [](int marker) {
+        ns::FreeSurfaceBoundary selected;
+        selected.interface_marker = marker;
+        selected.implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet;
+        // Selection uses these options, but coefficients and the liquid side
+        // must come from the declaration even when these values differ.
+        selected.active_domain = ns::FreeSurfaceActiveDomain::LevelSetPositive;
+        selected.surface_tension = Real{99.0};
+        selected.external_pressure = Real{99.0};
+        return selected;
+    };
+    FormulationBuilder formulation(system, "energy_authority", {});
+    EXPECT_THROW(post::declareFreeSurfaceEnergyFunctionals(
+        formulation, {boundary(9), boundary(99)}, *vector, 3), std::logic_error);
+    EXPECT_TRUE(functionalForms(system).empty());
+    EXPECT_TRUE(wallFunctionalForms(system).empty());
+
+    post::declareFreeSurfaceEnergyFunctionals(formulation, {boundary(9), boundary(7)}, *vector, 3);
+    const auto actual = functionalForms(system);
+    ASSERT_EQ(actual.size(), 17u);
+    std::size_t offset = 0;
+    for (const int marker : {9, 7}) {
+        const bool optional_channels = marker == 9;
+        post::FreeSurfaceEnergyStatement expected{
+            .interface_marker = marker,
+            .liquid_side = optional_channels ? CutVolumeSide::Positive : CutVolumeSide::Negative,
+            .velocity_field = velocity, .velocity_space = vector.get(), .dimension = 3,
+            .surface_tension = 0.25,
+            .density = optional_channels ? 2.5 : 0.0,
+            .gravitational_acceleration = optional_channels ? gravity : std::array<Real, 3>{},
+            .gravitational_reference_point = optional_channels ? reference : post::kGravitationalReferencePoint};
+        if (optional_channels) {
+            expected.dynamic_viscosity = 0.125;
+            expected.external_pressure = 3.0;
+            expected.endpoint_functional_power = true;
+        }
+        for (const auto& wanted : post::freeSurfaceEnergyFunctionals(expected)) {
+            SCOPED_TRACE(wanted.name);
+            ASSERT_LT(offset, actual.size());
+            EXPECT_EQ(actual[offset].name, wanted.name);
+            EXPECT_EQ(actual[offset].kind, wanted.kind);
+            EXPECT_EQ(actual[offset].owner, wanted.owner);
+            EXPECT_EQ(formExprTreeHash(actual[offset].form), formExprTreeHash(wanted.form));
+            EXPECT_EQ(actual[offset].form.toString(), wanted.form.toString());
+            ++offset;
+        }
+    }
+    EXPECT_EQ(offset, actual.size());
+    const auto walls = wallFunctionalForms(system);
+    ASSERT_EQ(walls.size(), 2u);
+    EXPECT_EQ(walls[0].prefix, "free_surface.9.");
+    EXPECT_EQ(walls[1].prefix, "free_surface.7.");
 }

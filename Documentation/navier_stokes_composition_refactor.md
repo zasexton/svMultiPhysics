@@ -216,3 +216,13 @@ the baseline records. The complete `stage3-inlets` pipeline passes without
 supplements, including 40 exact reference and record comparisons, S0, all suites,
 resolve/rank checks and the exhaustive matrix (593,052 ms on both ranks). Evidence:
 `/tmp/svmp-ns-evidence/stages/stage3-inlets/preservation-summary.json`.
+
+
+The functional adoption reads selected registered declarations in module order,
+removing the competing boundary-option mapping. It validates every selected
+record before adding forms and preserves caller-bound field dimensions. Sixty-three
+focused declaration, minimizer and Application consumer tests pass. The complete
+`stage4-functionals` pipeline passes without supplements: 40 exact reference and
+record comparisons, S0, all suites, resolve/rank checks and the explicit exhaustive
+matrix. Evidence:
+`/tmp/svmp-ns-evidence/stages/stage4-functionals/coordinator-preservation-summary.json`.
