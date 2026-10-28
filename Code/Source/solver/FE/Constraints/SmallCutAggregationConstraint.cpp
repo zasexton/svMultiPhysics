@@ -5957,6 +5957,19 @@ makeAggregationReuseRecord(
 
 } // namespace
 
+bool validSmallCutAggregationGuards(
+    const SmallCutAggregationGuardOptions& guards) noexcept
+{
+    return guards.maximum_root_path_length != 0u &&
+        guards.maximum_reference_extrapolation_distance >= Real{0.0} &&
+        std::isfinite(guards.maximum_reference_extrapolation_distance) &&
+        guards.maximum_absolute_coefficient >= Real{1.0} &&
+        std::isfinite(guards.maximum_absolute_coefficient) &&
+        guards.maximum_row_l1_norm >= Real{1.0} &&
+        std::isfinite(guards.maximum_row_l1_norm) &&
+        guards.maximum_row_l1_norm >= guards.maximum_absolute_coefficient;
+}
+
 SmallCutAggregationConstraint::SmallCutAggregationConstraint(
     FieldId field,
     geometry::CutIntegrationSide active_side,
@@ -5982,15 +5995,7 @@ SmallCutAggregationConstraint::SmallCutAggregationConstraint(
             "SmallCutAggregationConstraint: active side must be Negative or "
             "Positive");
     }
-    if (guards_.maximum_root_path_length == 0u ||
-        !(guards_.maximum_reference_extrapolation_distance >= Real{0.0}) ||
-        !std::isfinite(guards_.maximum_reference_extrapolation_distance) ||
-        !(guards_.maximum_absolute_coefficient >= Real{1.0}) ||
-        !std::isfinite(guards_.maximum_absolute_coefficient) ||
-        !(guards_.maximum_row_l1_norm >= Real{1.0}) ||
-        !std::isfinite(guards_.maximum_row_l1_norm) ||
-        guards_.maximum_row_l1_norm <
-            guards_.maximum_absolute_coefficient) {
+    if (!validSmallCutAggregationGuards(guards_)) {
         throw std::invalid_argument(
             "SmallCutAggregationConstraint: guard limits require a positive "
             "root path, finite nonnegative extrapolation distance, finite "

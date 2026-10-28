@@ -221,6 +221,12 @@ struct SmallCutAggregationGuardOptions {
     bool rootless_fallback{false};
 };
 
+/// Nonmutating option check shared by constraint construction and formulation
+/// preflight. Geometry, field support and distributed certificates are checked
+/// separately when the constraint is installed/refreshed.
+[[nodiscard]] bool validSmallCutAggregationGuards(
+    const SmallCutAggregationGuardOptions& guards) noexcept;
+
 enum class SmallCutAggregationActiveFeatureDisposition {
     Rooted,
     Rootless,

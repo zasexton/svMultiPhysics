@@ -1059,6 +1059,51 @@ TEST(SmallCutAggregationConstraint,
     EXPECT_EQ(provider_choice.provider_rank, 1);
 }
 
+TEST(SmallCutAggregationConstraint, GuardPreflightMatchesConstructionAtNumericBoundaries)
+{
+    const auto accepts = [](const SmallCutAggregationGuardOptions& guards) {
+        try {
+            SmallCutAggregationConstraint constraint(
+                FieldId{0}, geometry::CutIntegrationSide::Negative,
+                kInterfaceMarker, {}, {}, guards);
+            return true;
+        } catch (const std::invalid_argument&) {
+            return false;
+        }
+    };
+    const auto check = [&](const SmallCutAggregationGuardOptions& guards, bool expected) {
+        EXPECT_EQ(validSmallCutAggregationGuards(guards), expected);
+        EXPECT_EQ(accepts(guards), expected);
+    };
+    check({}, true);
+    auto guards = SmallCutAggregationGuardOptions{};
+    guards.maximum_root_path_length = 0;
+    check(guards, false);
+    guards = {};
+    guards.maximum_reference_extrapolation_distance = -0.0;
+    guards.maximum_absolute_coefficient = 1.0;
+    guards.maximum_row_l1_norm = 1.0;
+    check(guards, true);
+    guards.maximum_row_l1_norm = std::nextafter(1.0, 0.0);
+    check(guards, false);
+    guards = {};
+    guards.maximum_row_l1_norm = std::nextafter(guards.maximum_absolute_coefficient, 0.0);
+    check(guards, false);
+    for (const Real invalid : {-1.0, std::numeric_limits<Real>::infinity(),
+                               -std::numeric_limits<Real>::infinity(),
+                               std::numeric_limits<Real>::quiet_NaN()}) {
+        guards = {};
+        guards.maximum_reference_extrapolation_distance = invalid;
+        check(guards, false);
+        guards = {};
+        guards.maximum_absolute_coefficient = invalid;
+        check(guards, false);
+        guards = {};
+        guards.maximum_row_l1_norm = invalid;
+        check(guards, false);
+    }
+}
+
 TEST(SmallCutAggregationConstraint, RejectsInvalidMarkerAndInterfaceActiveSide)
 {
     EXPECT_THROW(
