@@ -415,6 +415,13 @@ inline FormExpr tangentialTrace(const FormExpr& u)
 // Differential operators (UFL-like shorthands)
 // ---------------------------------------------------------------------------
 
+/// Symmetric gradient of a vector field; exactly the tree sym(grad(u)).
+inline FormExpr symgrad(const FormExpr& u) { return sym(grad(u)); }
+
+/// Vector advection (a . grad) u; exactly grad(u) * a with the component-first
+/// gradient convention. For scalar transport use inner(grad(u), a).
+inline FormExpr advect(const FormExpr& a, const FormExpr& u) { return grad(u) * a; }
+
 inline FormExpr hessian(const FormExpr& a) { return a.hessian(); }
 
 inline FormExpr laplacian(const FormExpr& a) { return trace(a.hessian()); }

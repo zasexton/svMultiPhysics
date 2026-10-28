@@ -125,5 +125,27 @@ TEST(IntegrationDomainLowering, TreeHashSeesOperandOrderAndAssociation)
     EXPECT_NE(systems::formExprTreeHash(-f.p * div(f.v)), systems::formExprTreeHash(-(f.p * div(f.v))));
 }
 
+TEST(IntegrationDomainLowering, DifferentialHelpersPreserveNonlinearResidualTrees)
+{
+    Fields f;
+    const auto a = f.u - meshVelocity();
+    const auto mu = 1.0 + inner(grad(f.u), grad(f.u));
+    const auto original =
+        (inner(grad(f.u) * a, f.v) +
+         2.0 * mu * inner(sym(grad(f.u)), sym(grad(f.v))))
+            .dx(VolumeDomain::cut(7, CutVolumeSide::Negative));
+    const auto authored =
+        (inner(advect(a, f.u), f.v) +
+         2.0 * mu * inner(symgrad(f.u), symgrad(f.v)))
+            .dx(VolumeDomain::cut(7, CutVolumeSide::Negative));
+    expectSameTree(authored, original);
+
+    // Both operands of advection can depend on state; neither is frozen or
+    // reordered by the helper, including a subscale used as its direction.
+    const auto subscale = -0.25 * (grad(f.p) + grad(f.u) * a);
+    expectSameTree(advect(subscale, f.v), grad(f.v) * subscale);
+    expectSameTree(symgrad(f.u - meshVelocity()), sym(grad(f.u - meshVelocity())));
+}
+
 } // namespace
 } // namespace svmp::FE::forms::test
