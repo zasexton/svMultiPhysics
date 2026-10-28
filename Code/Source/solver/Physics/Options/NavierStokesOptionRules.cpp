@@ -1219,12 +1219,6 @@ void validateNavierStokesBoundaryConfiguration(
             generated_active_boundary_for(bc.boundary_marker));
     });
 
-    std::vector<FormExpr> zero_components;
-    zero_components.reserve(static_cast<std::size_t>(dim));
-    for (int component = 0; component < dim; ++component) {
-        zero_components.push_back(FormExpr::constant(FE::Real{0.0}));
-    }
-    const auto zero_flux = FormExpr::asVector(std::move(zero_components));
     const auto validate_finite_real = [](FE::Real value,
                                          std::string_view label) {
         if (!std::isfinite(value)) {

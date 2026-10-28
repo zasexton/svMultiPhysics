@@ -149,9 +149,6 @@ struct TranslatedIncompressibleTwoFluidInput {
       IncompressibleTwoFluidOptions options{};
 };
 
-[[nodiscard]] bool dependencySpacesCompatible(
-    const svmp::FE::spaces::FunctionSpace& lhs,
-    const svmp::FE::spaces::FunctionSpace& rhs) noexcept;
 void preflightTwoFluidUnknownField(
     const svmp::FE::systems::FESystem& system,
     std::string_view name,

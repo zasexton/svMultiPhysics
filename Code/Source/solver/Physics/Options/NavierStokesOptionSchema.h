@@ -224,9 +224,6 @@ incompressibleTwoFluidDomainSchema();
 [[nodiscard]] const char* freeSurfaceGeometryTangentPolicyName(
     FreeSurfaceGeometryTangentPolicy policy) noexcept;
 
-[[nodiscard]] const char* pressureActiveDomainName(
-    FreeSurfaceActiveDomain domain) noexcept;
-
 [[nodiscard]] const char* surfaceTensionFormName(
     const FreeSurfaceBoundary& bc) noexcept;
 

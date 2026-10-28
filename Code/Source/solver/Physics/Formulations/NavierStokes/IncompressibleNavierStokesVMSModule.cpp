@@ -495,7 +495,7 @@ void validateActiveDomainPressureConstraints(
                 << "constraint node_id=" << constraint.node_id
                 << " local_vertex=" << *local_vertex
                 << " is on the dry side for Active_domain="
-                << pressureActiveDomainName(active_pressure_domain->active_domain)
+                << activeDomainName(active_pressure_domain->active_domain)
                 << " phi=" << vertex_side.phi
                 << " isovalue=" << bc.level_set_isovalue;
             throw std::invalid_argument(oss.str());
@@ -530,7 +530,7 @@ void validateActiveDomainPressureConstraints(
                       .integer("skipped_nonlocal_constraints", skipped_nonlocal_constraints)
                       .real("constraint_pressure_min", constraint_pressure_min)
                       .real("constraint_pressure_max", constraint_pressure_max)
-                      .text("active_domain", pressureActiveDomainName(active_pressure_domain->active_domain))
+                      .text("active_domain", activeDomainName(active_pressure_domain->active_domain))
                       .real("isovalue", bc.level_set_isovalue)
                       .real("min_signed_gap", min_signed_gap)
                       .real("max_signed_gap", max_signed_gap)
@@ -709,7 +709,7 @@ void initializeNavierStokesState(
         auto record =
             post::navierStokesLog("hydrostatic pressure initialization")
                 .diagnostic("hydrostatic_initialization")
-                .text("active_domain", pressureActiveDomainName(active_pressure_domain->active_domain))
+                .text("active_domain", activeDomainName(active_pressure_domain->active_domain))
                 .integer("wet_pressure_vertices", statistics.on_side_vertices)
                 .integer("dry_pressure_vertices", statistics.off_side_vertices)
                 .integer("active_support_pressure_vertices", statistics.supported_vertices)

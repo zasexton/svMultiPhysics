@@ -82,10 +82,62 @@ protocols retain their existing qualification; short runs cannot replace them.
   trees; the latter additionally requires an immutable additive anchor.
 - Stabilization work currently evaluates complete minus Galerkin forms;
   replacing that subtraction can change cancellation and evaluation order.
-- Two-fluid compatibility includes continuity whereas the generic binding
-  predicate checks other properties; only identical predicates may be shared.
+- The module's two-fluid compatibility checks element, order, continuity and
+  value dimension. Generic binding checks six properties, including space type,
+  field type and topological dimension but excluding continuity. Combining them
+  would narrow accepted existing fields. Dependency preflight and future velocity
+  preregistration use the generic six properties exactly. Their aggregate error
+  messages and omission of scope/marker checks remain caller contracts.
 - Spatial nearest-node ties and MPI marker deduplication have deterministic
   ordering contracts. A relocation requires its own focused evidence.
+
+### Existing shared services and intentional boundaries
+
+Initialization already uses `requireMeshVertexField`,
+`initializeFieldFromMeshVertexField`, `requireVertexDofMap`,
+`levelSetSideSupportVertices`, `collectVertexFieldOnLevelSetSide`,
+`levelSetSideVertexValue`, and `writeVectorEntries`. Geometry already uses
+`resolveScalarLevelSetField`, `LevelSetGeometry::bind`, side/boundary/contact
+keys, outward interface normals and `wettedBoundaryResolver`. ConstraintPlan
+owns inactive-side and aggregation installation. The remaining gauge loops
+encode local/global gauge skips, margin policy and ordered diagnostics. The
+hydrostatic component fold preserves `rho * g[d] * (x[d] - x_ref[d])` and its
+addition order; it is a physical policy, not a missing generic traversal.
+
+FormulationBuilder already owns residual installation, work channels, the
+separate PSPG group and opt-in diagnostics. Functional records carry work
+applicability. `LevelSetEnergyParticipant` assembles
+these operators against the live candidate with communicator, revision and
+constraint checks; LevelSetEnergyBalance records their numerical work.
+`bulkResidualWork` deliberately subtracts measured Galerkin forms from measured
+complete forms. Direct stabilization formulas would change cancellation and
+ordered trees. The force channel similarly subtracts constant gravity inside
+the integrand. These trees are retained.
+
+BoundaryDataReaders' nearest-node ordering is `(distance squared, node index)`;
+its pruning comparison is strict, exact-node tolerance is squared `1e-16`,
+and inverse-distance interpolation has floor `1e-24` and eight neighbors.
+The x-only format groups coordinates within `1e-12` and checks data agreement
+within `1e-10`. Marker geometry deduplicates sorted vertex-global-ID keys while
+retaining the first rank/local payload, so summation order matters. The current
+FE interpolation utilities are element-local and do not replace these services.
+Extraction is deferred rather than changing those numerical contracts.
+
+The final option-to-view overlay reconciles domain-first ALE/momentum values
+and equation-first rotating/file data before describing provenance. Contact-law
+projection gathers wall arrays and preserves first-wall defaults. These are
+intentional translation policies. Input `Automatic` and effective
+`SurfaceStress` spellings remain distinct; disabled states and zero surface
+tension remain meaningful.
+
+The compact-interface characterization also exposes an existing limitation:
+`FormulationRecord::block_couplings` pairs traversal-order rows with caller-order
+fields. With reversed orders its metadata differs from correctly installed
+FieldId bindings. CouplingGraphAnalyzer and trace-multiplier checks consume
+those records. The new test checks actual operator bindings, returned plans and
+kernel pointers; it does not establish those metadata consumers' correctness.
+The failing reproduction is preserved in
+`/tmp/svmp-ns-evidence/canonical-reversed-metadata-limitation.txt`.
 
 ## Progress
 
@@ -120,8 +172,24 @@ setup failures are retained separately.
 The first Physics adoption removes duplicate serialization/filter helpers,
 uses the identical generic dependency-space predicate, removes the dead
 `discreteFieldLike` and preflight zero vector, and consolidates active-domain
-names. Focused syntax and serialization comparisons pass; integrated gates
-are pending. No new physical qualification is claimed.
+names. This adoption passes the complete preservation gates. All 40 same-rank
+reference solutions, effective configurations and artifacts are exact; S0 has
+16 identical ordered manifests and zero candidate misses. Thirty original log
+comparisons pass directly. Ten merged MPI logs contain interleaved fragments;
+paired exact-baseline/candidate reruns with separate rank streams pass the same
+log checks and reproduce the original fields bitwise. Raw failures are retained.
+
+FE has 58 passing CTest entries. Physics has 25 after restoring 73 exact locally
+cached mesh fixtures (3.7 MB) and rerunning its 13 affected entries. Application
+has 11 passing entries after supplying the isolated build's fixture lookup via
+`/tmp/svmp-ns-build/tests`; its one existing NumPy-related skip remains recorded.
+An unchanged rank-consistency check run with the available NumPy interpreter
+passes for both baseline and candidate, with all nine same-rank outputs exact.
+The exhaustive 960-case test passes on both ranks in 516,663 ms. Resolve-only
+has 30 identical statuses and 26 byte-identical artifacts. Evidence and explicit
+reconciliation are in `/tmp/svmp-ns-evidence/stage1-preservation-summary.json`;
+the original pipeline's failed status is preserved separately. No new physical
+qualification is claimed.
 
 Numeric inconsistency retained for separate review: some existing direct C++
 positive-only checks accept positive infinity. Generic Nitsche checks written

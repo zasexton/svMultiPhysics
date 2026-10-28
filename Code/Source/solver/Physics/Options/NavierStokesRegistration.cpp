@@ -25,6 +25,7 @@
 #include "FE/Spaces/FunctionSpace.h"
 #include "FE/Spaces/SpaceFactory.h"
 #include "FE/Systems/FESystem.h"
+#include "FE/Systems/FieldBinding.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Topology/CellTopology.h"
 
@@ -660,18 +661,6 @@ void reject_unsupported_two_fluid_boundary_parameters(
   }
 }
 
-[[nodiscard]] bool dependencySpacesCompatible(
-    const svmp::FE::spaces::FunctionSpace& lhs,
-    const svmp::FE::spaces::FunctionSpace& rhs) noexcept
-{
-  return lhs.space_type() == rhs.space_type() &&
-         lhs.field_type() == rhs.field_type() &&
-         lhs.value_dimension() == rhs.value_dimension() &&
-         lhs.topological_dimension() == rhs.topological_dimension() &&
-         lhs.polynomial_order() == rhs.polynomial_order() &&
-         lhs.element_type() == rhs.element_type();
-}
-
 void preflightTwoFluidUnknownField(
     const svmp::FE::systems::FESystem& system,
     std::string_view name,
@@ -690,7 +679,7 @@ void preflightTwoFluidUnknownField(
   if (record.source_kind !=
           svmp::FE::systems::FieldSourceKind::Unknown ||
       record.components != components || !record.space ||
-      !dependencySpacesCompatible(*record.space, *space)) {
+      !svmp::FE::systems::spacesCompatible(*record.space, *space)) {
     throw std::invalid_argument(
         "[svMultiPhysics::Physics] two-fluid dependency field '" +
         std::string(name) + "' is incompatible with the requested unknown");
@@ -780,7 +769,7 @@ void preflightTwoFluidTranslationBeforeMutation(
           svmp::FE::systems::FieldSourceKind::PrescribedData;
   if (!supported_level_set_source || level_set_record.components != 1 ||
       !level_set_record.space ||
-      !dependencySpacesCompatible(
+      !svmp::FE::systems::spacesCompatible(
           *level_set_record.space, *translated.pressure_space)) {
     throw std::invalid_argument(
         "[svMultiPhysics::Physics] two-fluid dependency requires a compatible scalar level-set field");
@@ -819,42 +808,11 @@ namespace {
 namespace ns = svmp::Physics::formulations::navier_stokes;
 namespace opt = svmp::FE::options;
 
-/// The input restricted to the given spellings.
-opt::OptionInput select_spellings(const opt::OptionInput& input,
-                                  const std::vector<std::string>& spellings)
-{
-  opt::OptionInput out;
-  for (const auto& entry : input.entries()) {
-    if (std::find(spellings.begin(), spellings.end(), entry.spelling) !=
-        spellings.end()) {
-      out.add(entry.spelling, entry.text);
-    }
-  }
-  return out;
-}
-
-/// Every spelling of the given keys of a schema.
-template <class T>
-std::vector<std::string> spellings_of(const opt::OptionSchema<T>& schema,
-                                      std::initializer_list<std::string_view> keys)
-{
-  std::vector<std::string> out;
-  for (const auto& documentation : schema.documentation()) {
-    if (std::find(keys.begin(), keys.end(), documentation.key) != keys.end()) {
-      out.insert(out.end(), documentation.spellings.begin(), documentation.spellings.end());
-      out.insert(out.end(), documentation.deprecated_spellings.begin(),
-                 documentation.deprecated_spellings.end());
-    }
-  }
-  return out;
-}
-
 /// The keys of the moving domain and the momentum source (the keys the
 /// two-fluid mode reads from both elements, to reject them).
 const std::vector<std::string>& moving_domain_and_momentum_source_spellings()
 {
-  static const auto spellings = spellings_of(
-      ns::navierStokesDomainSchema(),
+  static const auto spellings = ns::navierStokesDomainSchema().spellings(
       {"Enable_ALE", "Mesh_velocity_field", "Mesh_velocity_source",
        "Mesh_displacement_field", "Auto_register_mesh_displacement_field",
        "Moving_mesh_tangent_path", "Momentum_source_field_name",
@@ -944,8 +902,8 @@ NavierStokesKeys resolve_moving_domain_and_momentum_source_keys(
 {
   const auto& spellings = moving_domain_and_momentum_source_spellings();
   NavierStokesKeys keys;
-  keys.equation_input = select_spellings(ns::optionInputFromParameters(equation_params), spellings);
-  keys.domain_input = select_spellings(ns::optionInputFromParameters(domain_params), spellings);
+  keys.equation_input = ns::optionInputFromParameters(equation_params).selectSpellings(spellings);
+  keys.domain_input = ns::optionInputFromParameters(domain_params).selectSpellings(spellings);
   keys.equation = ns::navierStokesEquationSchema().resolve(keys.equation_input);
   keys.domain = ns::navierStokesDomainSchema().resolve(keys.domain_input);
   return keys;
@@ -954,8 +912,8 @@ NavierStokesKeys resolve_moving_domain_and_momentum_source_keys(
 svmp::FE::Real backflow_coefficient(const svmp::Physics::ParameterMap& domain_params)
 {
   return ns::navierStokesDomainSchema()
-      .resolve(select_spellings(domain_keys_as_read(domain_params),
-                                {"Backflow_stabilization_coefficient"}))
+      .resolve(domain_keys_as_read(domain_params).selectSpellings(
+          {"Backflow_stabilization_coefficient"}))
       .value.backflow_stabilization_coefficient;
 }
 
@@ -1928,7 +1886,7 @@ translate_incompressible_two_fluid_input(
   const auto& schema = ns::incompressibleTwoFluidSchema();
   const auto equation_input = ns::optionInputFromParameters(input.equation_params);
   const bool taylor_hood =
-      schema.resolve(select_spellings(equation_input, {"Use_taylor_hood_type_basis"}))
+      schema.resolve(equation_input.selectSpellings({"Use_taylor_hood_type_basis"}))
           .value.use_taylor_hood_type_basis;
   if (!supported_cell || order != 1 || taylor_hood) {
     throw std::runtime_error(

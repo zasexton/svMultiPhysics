@@ -230,25 +230,6 @@ namespace Factories {
 
 namespace detail {
 
-[[nodiscard]] inline FE::forms::FormExpr discreteFieldLike(const FE::forms::FormExpr& expr)
-{
-    if (!expr.isValid() || !expr.node()) {
-        return expr;
-    }
-
-    const auto* node = expr.node();
-    const auto fid = node->fieldId();
-    const auto* sig = node->spaceSignature();
-    if (!fid.has_value() || !sig) {
-        return expr;
-    }
-
-    const auto name = node->symbolName().has_value()
-        ? std::string(*node->symbolName())
-        : node->toString();
-    return FE::forms::FormExpr::discreteField(*fid, *sig, name);
-}
-
     /**
      * @brief Create an RCR outflow BC model.
      *

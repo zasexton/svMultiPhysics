@@ -57,7 +57,6 @@
 #include <cstdlib>
 #include <exception>
 #include <initializer_list>
-#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <locale>
@@ -80,6 +79,8 @@ namespace svmp {
 namespace Physics {
 namespace formulations {
 namespace navier_stokes {
+
+namespace json = FE::options::json;
 
 namespace {
 
@@ -745,20 +746,6 @@ std::string resolvedFreeSurfacesJson(const std::vector<FreeSurfaceBoundary>& fre
     return "Unknown";
 }
 
-[[nodiscard]] const char* pressureActiveDomainName(
-    FreeSurfaceActiveDomain domain) noexcept
-{
-    switch (domain) {
-    case FreeSurfaceActiveDomain::None:
-        return "None";
-    case FreeSurfaceActiveDomain::LevelSetNegative:
-        return "LevelSetNegative";
-    case FreeSurfaceActiveDomain::LevelSetPositive:
-        return "LevelSetPositive";
-    }
-    return "Unknown";
-}
-
 [[nodiscard]] const char* surfaceTensionFormName(
     const FreeSurfaceBoundary& bc) noexcept
 {
@@ -1015,66 +1002,11 @@ systemTangentialMeshPolicy(FreeSurfaceTangentialMeshPolicy policy)
 
 namespace {
 
-[[nodiscard]] std::string jsonString(std::string_view value)
-{
-    static constexpr char hex[] = "0123456789abcdef";
-    std::string out;
-    out.reserve(value.size() + 2u);
-    out.push_back('"');
-    for (const unsigned char c : value) {
-        switch (c) {
-        case '"':
-            out += "\\\"";
-            break;
-        case '\\':
-            out += "\\\\";
-            break;
-        case '\b':
-            out += "\\b";
-            break;
-        case '\f':
-            out += "\\f";
-            break;
-        case '\n':
-            out += "\\n";
-            break;
-        case '\r':
-            out += "\\r";
-            break;
-        case '\t':
-            out += "\\t";
-            break;
-        default:
-            if (c < 0x20u) {
-                out += "\\u00";
-                out.push_back(hex[(c >> 4u) & 0x0fu]);
-                out.push_back(hex[c & 0x0fu]);
-            } else {
-                out.push_back(static_cast<char>(c));
-            }
-            break;
-        }
-    }
-    out.push_back('"');
-    return out;
-}
-
 [[nodiscard]] std::string jsonReal(FE::Real value)
 {
-    if (!std::isfinite(value)) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: effective configuration contains a non-finite scalar");
-    }
-    std::ostringstream stream;
-    stream.imbue(std::locale::classic());
-    stream << std::setprecision(std::numeric_limits<FE::Real>::max_digits10)
-           << value;
-    return stream.str();
-}
-
-[[nodiscard]] constexpr const char* jsonBool(bool value) noexcept
-{
-    return value ? "true" : "false";
+    return FE::options::json::number(
+        value,
+        "IncompressibleNavierStokesVMSModule: effective configuration contains a non-finite scalar");
 }
 
 [[nodiscard]] std::string jsonScalarValue(
@@ -1098,7 +1030,7 @@ namespace {
     const auto kind = contactLineKind(contact_line);
     std::ostringstream out;
     out.imbue(std::locale::classic());
-    out << "{\"model\":" << jsonString(contactLineKindName(kind));
+    out << "{\"model\":" << json::quote(contactLineKindName(kind));
     if (kind != ContactLineKind::None) {
         out << ",\"wall_boundary_marker\":"
             << contactLineWallBoundaryMarker(contact_line)
@@ -1289,7 +1221,7 @@ tangentialPolicyProvenance(
                current_configuration_schema_version
         << ",\"migration_mode\":\"current\"}"
         << ",\"capability_label\":"
-        << jsonString(has_internal_material_interface_volume &&
+        << json::quote(has_internal_material_interface_volume &&
                               !has_exterior_one_phase_boundary
                           ? "internal_material_interface_phase_volume"
                           : "one_phase_liquid_sharp_interface")
@@ -1302,7 +1234,7 @@ tangentialPolicyProvenance(
             << ",\"external_boundary_model\":false}";
     } else {
         out << "{\"name\":"
-            << jsonString(freeSurfacePhysicalModelName(
+            << json::quote(freeSurfacePhysicalModelName(
                    options.free_surface_physical_model))
             << ",\"liquid_phase_count\":1"
             << ",\"liquid_velocity_field_count\":1"
@@ -1319,35 +1251,35 @@ tangentialPolicyProvenance(
     out
         << ",\"units\":{\"system\":\"consistent_solver_units\",\"angle\":\"radian\",\"length\":\"solver_length\",\"pressure\":\"solver_pressure\",\"surface_tension\":\"force_per_length\"}"
         << ",\"fields\":{\"velocity\":"
-        << jsonString(options.velocity_field_name)
-        << ",\"pressure\":" << jsonString(options.pressure_field_name)
-        << ",\"operator\":" << jsonString(options.operator_tag)
+        << json::quote(options.velocity_field_name)
+        << ",\"pressure\":" << json::quote(options.pressure_field_name)
+        << ",\"operator\":" << json::quote(options.operator_tag)
         << ",\"dimension\":" << dimension << '}'
-        << ",\"ale\":{\"enabled\":" << jsonBool(options.enable_ale)
+        << ",\"ale\":{\"enabled\":" << json::boolean(options.enable_ale)
         << ",\"mesh_velocity_source\":"
-        << jsonString(options.mesh_velocity_source ==
+        << json::quote(options.mesh_velocity_source ==
                               ALEMeshVelocitySource::CoupledDisplacement
                           ? "CoupledDisplacement"
                           : "PrescribedData")
         << ",\"mesh_velocity_field\":"
-        << jsonString(options.mesh_velocity_field_name)
+        << json::quote(options.mesh_velocity_field_name)
         << ",\"mesh_displacement_field\":"
-        << jsonString(options.mesh_displacement_field_name)
+        << json::quote(options.mesh_displacement_field_name)
         << ",\"geometry_tangent_path\":"
-        << jsonString(geometryTangentPathName(options.moving_mesh_tangent_path))
+        << json::quote(geometryTangentPathName(options.moving_mesh_tangent_path))
         << '}'
         << ",\"generic_velocity_nitsche\":{\"gamma\":"
         << jsonReal(options.nitsche_gamma)
-        << ",\"symmetric\":" << jsonBool(options.nitsche_symmetric)
+        << ",\"symmetric\":" << json::boolean(options.nitsche_symmetric)
         << ",\"scale_with_polynomial_order\":"
-        << jsonBool(options.nitsche_scale_with_p)
+        << json::boolean(options.nitsche_scale_with_p)
         << ",\"generated_active_boundary_minimum_energy_ratio\":"
         << jsonReal(
                options
                    .generated_boundary_nitsche_minimum_energy_ratio)
         << '}'
         << ",\"stabilization\":{\"vms_enabled\":"
-        << jsonBool(effective_enable_vms)
+        << json::boolean(effective_enable_vms)
         << ",\"ct_m\":" << jsonReal(options.ct_m)
         << ",\"ct_c\":" << jsonReal(options.ct_c)
         << ",\"epsilon\":" << jsonReal(options.stabilization_epsilon)
@@ -1368,34 +1300,34 @@ tangentialPolicyProvenance(
         std::sort(contacts.begin(), contacts.end(), contactConfigurationLess);
 
         out << "{\"role\":"
-            << jsonString(freeSurfaceBoundaryRoleName(boundary.role))
+            << json::quote(freeSurfaceBoundaryRoleName(boundary.role))
             << ",\"implementation\":"
-            << jsonString(freeSurfaceImplementationName(boundary.implementation))
+            << json::quote(freeSurfaceImplementationName(boundary.implementation))
             << ",\"boundary_marker\":" << boundary.boundary_marker
             << ",\"interface_marker\":" << boundary.interface_marker
             << ",\"level_set_field\":"
-            << jsonString(boundary.level_set_field_name)
+            << json::quote(boundary.level_set_field_name)
             << ",\"generated_interface_domain\":"
-            << jsonString(boundary.generated_interface_domain_id)
+            << json::quote(boundary.generated_interface_domain_id)
             << ",\"generated_interface_geometry\":"
-            << jsonString(freeSurfaceGeneratedInterfaceGeometryName(
+            << json::quote(freeSurfaceGeneratedInterfaceGeometryName(
                    boundary.generated_interface_geometry))
             << ",\"geometry_tangent_policy\":"
-            << jsonString(freeSurfaceGeometryTangentPolicyName(
+            << json::quote(freeSurfaceGeometryTangentPolicyName(
                    boundary.geometry_tangent_policy))
             << ",\"level_set_isovalue\":"
             << jsonReal(boundary.level_set_isovalue)
             << ",\"active_domain\":"
-            << jsonString(activeDomainName(boundary.active_domain))
+            << json::quote(activeDomainName(boundary.active_domain))
             << ",\"active_phase_sign\":"
-            << jsonString(activePhaseSignName(boundary.active_domain))
+            << json::quote(activePhaseSignName(boundary.active_domain))
             << ",\"active_domain_method\":"
-            << jsonString(activeDomainMethodName(boundary.active_domain_method))
+            << json::quote(activeDomainMethodName(boundary.active_domain_method))
             << ",\"active_domain_smoothing_width\":"
             << jsonReal(boundary.active_domain_smoothing_width)
             << ",\"smoothing_width_unit\":\"length\""
             << ",\"allow_full_domain_unfitted_free_surface\":"
-            << jsonBool(boundary.allow_full_domain_unfitted_free_surface)
+            << json::boolean(boundary.allow_full_domain_unfitted_free_surface)
             << ",\"external_pressure\":"
             << jsonScalarValue(boundary.external_pressure)
             << ",\"surface_tension\":"
@@ -1410,28 +1342,28 @@ tangentialPolicyProvenance(
             break;
         }
         out << ",\"surface_tension_form_effective\":"
-            << jsonString(
+            << json::quote(
                    isInternalMaterialInterfaceVolume(boundary)
                        ? "NotApplicableInternalVolume"
                        : surfaceTensionFormName(boundary));
         if (usesSemiImplicitNormalIncrement(boundary)) {
             out << ",\"surface_tension_semi_implicit\":"
-                << jsonString(freeSurfaceSurfaceTensionSemiImplicitName(
+                << json::quote(freeSurfaceSurfaceTensionSemiImplicitName(
                        boundary.surface_tension_semi_implicit))
                 << ",\"surface_tension_semi_implicit_reference_velocity\":"
-                << jsonString(std::string(
+                << json::quote(std::string(
                        kFreeSurfaceSemiImplicitReferenceVelocityFieldName));
         }
         out << ",\"curvature_policy\":"
-            << jsonString(freeSurfaceCurvaturePolicyName(boundary))
+            << json::quote(freeSurfaceCurvaturePolicyName(boundary))
             << ",\"curvature_tangent_policy\":"
-            << jsonString(
+            << json::quote(
                    freeSurfaceCurvatureTangentPolicyName(boundary))
             << ",\"kinematic\":{\"normal_policy\":"
-            << jsonString(normalKinematicPolicyName(
+            << json::quote(normalKinematicPolicyName(
                    boundary.normal_kinematic_policy))
             << ",\"tangential_mesh_policy\":"
-            << jsonString(tangentialMeshPolicyName(
+            << json::quote(tangentialMeshPolicyName(
                    boundary.tangential_mesh_policy))
             << ",\"prescribed_tangential_mesh_velocity\":["
             << jsonScalarValue(
@@ -1447,17 +1379,17 @@ tangentialPolicyProvenance(
             << jsonScalarValue(boundary.tangential_mesh_penalty)
             << ",\"tangential_mesh_owner\":";
         if (tangential_provenance.declaration != nullptr) {
-            out << jsonString(
+            out << json::quote(
                 tangential_provenance.declaration->owner_component);
         } else {
             out << "null";
         }
         out << ",\"policy_consumed\":"
-            << jsonBool(
+            << json::boolean(
                    tangential_provenance.consumed_operator != nullptr)
             << ",\"operator_tag\":";
         if (tangential_provenance.consumed_operator != nullptr) {
-            out << jsonString(
+            out << json::quote(
                 tangential_provenance.declaration
                     ->consumer_operator_tag);
         } else {
@@ -1465,34 +1397,34 @@ tangentialPolicyProvenance(
         }
         out << ",\"operator_source\":";
         if (tangential_provenance.consumed_operator != nullptr) {
-            out << jsonString(
+            out << json::quote(
                 tangential_provenance.consumed_operator->source);
         } else {
             out << "null";
         }
         out << ",\"policy_qualification\":"
-            << jsonString(
+            << json::quote(
                    boundary.implementation !=
                            FreeSurfaceImplementation::FittedALE
                        ? "not_applicable"
                        : "supported_configuration_envelope")
             << ",\"enforcement\":"
-            << jsonString(kinematicEnforcementName(
+            << json::quote(kinematicEnforcementName(
                    boundary.kinematic_enforcement))
             << ",\"nitsche\":{\"gamma\":"
             << jsonReal(boundary.kinematic_nitsche_gamma) << "}}"
             << ",\"stabilization\":{\"enabled\":"
-            << jsonBool(boundary.cut_cell_stabilization.enabled)
+            << json::boolean(boundary.cut_cell_stabilization.enabled)
             << ",\"small_cut_aggregation\":"
-            << jsonBool(boundary.small_cut_aggregation)
+            << json::boolean(boundary.small_cut_aggregation)
             << ",\"pressure_policy\":"
-            << jsonString(pressureStabilizationPolicyName(
+            << json::quote(pressureStabilizationPolicyName(
                    boundary.cut_cell_stabilization.pressure_policy))
             << ",\"pressure_gradient_penalty\":"
             << jsonScalarValue(
                    boundary.cut_cell_stabilization.pressure_gradient_penalty)
             << ",\"use_cut_metadata_scale\":"
-            << jsonBool(
+            << json::boolean(
                    boundary.cut_cell_stabilization.use_cut_metadata_scale)
             << ",\"cut_metadata_scale_cap\":";
         if (boundary.cut_cell_stabilization.cut_metadata_scale_cap.has_value()) {
@@ -1517,7 +1449,7 @@ tangentialPolicyProvenance(
                    boundary.small_cut_aggregation_guards
                        .maximum_row_l1_norm)
             << ",\"rootless_fallback\":"
-            << jsonBool(
+            << json::boolean(
                    boundary.small_cut_aggregation_guards.rootless_fallback)
             << '}';
         out << '}'
@@ -1553,64 +1485,11 @@ tangentialPolicyProvenance(
 namespace {
 namespace two_fluid_artifact {
 
-[[nodiscard]] std::string jsonString(std::string_view value)
-{
-    std::string out{"\""};
-    for (const unsigned char c : value) {
-        switch (c) {
-        case '\"':
-            out += "\\\"";
-            break;
-        case '\\':
-            out += "\\\\";
-            break;
-        case '\b':
-            out += "\\b";
-            break;
-        case '\f':
-            out += "\\f";
-            break;
-        case '\n':
-            out += "\\n";
-            break;
-        case '\r':
-            out += "\\r";
-            break;
-        case '\t':
-            out += "\\t";
-            break;
-        default:
-            if (c < 0x20u) {
-                std::ostringstream escaped;
-                escaped << "\\u" << std::hex << std::setw(4)
-                        << std::setfill('0') << static_cast<unsigned int>(c);
-                out += escaped.str();
-            } else {
-                out.push_back(static_cast<char>(c));
-            }
-            break;
-        }
-    }
-    out.push_back('\"');
-    return out;
-}
-
 [[nodiscard]] std::string jsonReal(FE::Real value)
 {
-    if (!std::isfinite(value)) {
-        throw std::invalid_argument(
-            "IncompressibleTwoFluidModule: effective configuration contains a non-finite scalar");
-    }
-    std::ostringstream out;
-    out.imbue(std::locale::classic());
-    out << std::setprecision(std::numeric_limits<FE::Real>::max_digits10)
-        << value;
-    return out.str();
-}
-
-[[nodiscard]] constexpr const char* jsonBool(bool value) noexcept
-{
-    return value ? "true" : "false";
+    return FE::options::json::number(
+        value,
+        "IncompressibleTwoFluidModule: effective configuration contains a non-finite scalar");
 }
 
 [[nodiscard]] std::string sharedVelocityValueArtifact(
@@ -1638,7 +1517,7 @@ void appendVelocityBoundaryArtifact(
         << "\"shared_velocity_dirichlet_count\":"
         << options.shared_velocity_dirichlet.size()
         << ",\"shared_velocity_dirichlet_policy\":"
-        << jsonString(
+        << json::quote(
                "identical_external_data_on_both_phase_restrictions")
         << ",\"shared_velocity_dirichlet\":[";
     for (std::size_t boundary_index = 0u;
@@ -1655,7 +1534,7 @@ void appendVelocityBoundaryArtifact(
             if (component != 0) {
                 out << ',';
             }
-            out << jsonBool(
+            out << json::boolean(
                 boundary.active_components[static_cast<std::size_t>(
                     component)]);
         }
@@ -1688,17 +1567,17 @@ void appendVelocityBoundaryArtifact(
         << ",\"component\":\"incompressible_two_fluid\""
         << ",\"capability_label\":\"incompressible_two_phase_sharp_interface_initial_envelope\""
         << ",\"momentum_operator\":"
-        << jsonString(options.enable_convection ? "navier_stokes" : "stokes")
+        << json::quote(options.enable_convection ? "navier_stokes" : "stokes")
         << ",\"fields\":{\"negative_velocity\":"
-        << jsonString(options.negative_phase.velocity_field_name)
+        << json::quote(options.negative_phase.velocity_field_name)
         << ",\"negative_pressure\":"
-        << jsonString(options.negative_phase.pressure_field_name)
+        << json::quote(options.negative_phase.pressure_field_name)
         << ",\"positive_velocity\":"
-        << jsonString(options.positive_phase.velocity_field_name)
+        << json::quote(options.positive_phase.velocity_field_name)
         << ",\"positive_pressure\":"
-        << jsonString(options.positive_phase.pressure_field_name)
-        << ",\"level_set\":" << jsonString(options.level_set_field_name)
-        << ",\"operator\":" << jsonString(options.operator_tag)
+        << json::quote(options.positive_phase.pressure_field_name)
+        << ",\"level_set\":" << json::quote(options.level_set_field_name)
+        << ",\"operator\":" << json::quote(options.operator_tag)
         << ",\"dimension\":" << dimension << '}'
         << ",\"material\":{\"negative_density\":"
         << jsonReal(options.negative_phase.density)
@@ -1720,25 +1599,25 @@ void appendVelocityBoundaryArtifact(
         << ",\"hydrostatic_balance_diagnostic\":\"phasewise_integrated_pressure_gradient_minus_density_body_force\""
         << ",\"interface\":{\"marker\":" << interface_marker
         << ",\"domain\":"
-        << jsonString(options.generated_interface_domain_id)
+        << json::quote(options.generated_interface_domain_id)
         << ",\"isovalue\":" << jsonReal(options.level_set_isovalue)
         << ",\"geometry\":"
-        << jsonString(freeSurfaceGeneratedInterfaceGeometryName(
+        << json::quote(freeSurfaceGeneratedInterfaceGeometryName(
                options.generated_interface_geometry))
         << ",\"geometry_tangent_policy\":"
-        << jsonString(freeSurfaceGeometryTangentPolicyName(
+        << json::quote(freeSurfaceGeometryTangentPolicyName(
                options.geometry_tangent_policy))
         << ",\"surface_tension\":" << jsonReal(options.surface_tension)
         << ",\"prescribed_pressure_jump_mode\":\"manufactured_normal_traction_and_diagnostic_target\""
         << ",\"prescribed_pressure_jump_applicable\":"
-        << jsonBool(options.prescribed_pressure_jump.has_value());
+        << json::boolean(options.prescribed_pressure_jump.has_value());
     if (options.prescribed_pressure_jump.has_value()) {
         out << ",\"prescribed_pressure_jump\":"
             << jsonReal(*options.prescribed_pressure_jump);
     }
     out << ",\"prescribed_viscous_traction_jump_mode\":\"manufactured_global_viscous_traction_and_composed_stress_target\""
         << ",\"prescribed_viscous_traction_jump_applicable\":"
-        << jsonBool(options.prescribed_viscous_traction_jump.has_value());
+        << json::boolean(options.prescribed_viscous_traction_jump.has_value());
     if (options.prescribed_viscous_traction_jump.has_value()) {
         out << ",\"prescribed_viscous_traction_jump\":[";
         for (int component = 0; component < dimension; ++component) {
@@ -1755,7 +1634,7 @@ void appendVelocityBoundaryArtifact(
         << ",\"nitsche_gamma\":"
         << jsonReal(options.interface_nitsche_gamma)
         << ",\"transient_penalty\":"
-        << jsonBool(options.include_transient_interface_penalty)
+        << json::boolean(options.include_transient_interface_penalty)
         << ",\"negative_traction_weight\":"
         << jsonReal(weights.negative_traction)
         << ",\"positive_traction_weight\":"
@@ -1765,13 +1644,13 @@ void appendVelocityBoundaryArtifact(
         << ",\"harmonic_density\":"
         << jsonReal(weights.harmonic_density) << '}'
         << ",\"stabilization\":{\"phasewise_vms_pspg\":"
-        << jsonBool(options.enable_vms)
+        << json::boolean(options.enable_vms)
         << ",\"phasewise_pressure_ghost_penalty\":true"
         << ",\"phasewise_small_cut_aggregation\":true"
         << ",\"pressure_gradient_penalty\":"
         << jsonReal(options.pressure_gradient_penalty)
         << ",\"use_cut_metadata_scale\":"
-        << jsonBool(options.use_cut_metadata_scale)
+        << json::boolean(options.use_cut_metadata_scale)
         << ",\"cut_metadata_scale_cap\":";
     if (options.cut_metadata_scale_cap.has_value()) {
         out << jsonReal(*options.cut_metadata_scale_cap);
@@ -1784,7 +1663,7 @@ void appendVelocityBoundaryArtifact(
     if (options.shared_pressure_gauge.has_value()) {
         out << ",\"shared_gauge_policy\":\"explicit_global_vertex_gid\""
             << ",\"shared_gauge_field\":"
-            << jsonString(options.negative_phase.pressure_field_name)
+            << json::quote(options.negative_phase.pressure_field_name)
             << ",\"shared_gauge_id_type\":\"Global_vertex_gid\""
             << ",\"shared_gauge_vertex_gid\":"
             << options.shared_pressure_gauge->vertex_gid
@@ -1800,7 +1679,7 @@ void appendVelocityBoundaryArtifact(
     out << '}'
         << ",\"solver_contract\":{\"backend\":\"FSILS\",\"method\":\"BlockSchur\",\"unknown_role_order\":[\"material_interface_level_set\",\"conservative_phase_indicator\",\"negative_velocity\",\"positive_velocity\",\"negative_pressure\",\"positive_pressure\"],\"blocks\":[{\"name\":\"TwoFluidMaterialInterfaceComputationalPrimary\",\"role\":\"primary\"},{\"name\":\"TwoFluidPressureConstraints\",\"role\":\"constraint\"}],\"generic_fallback_allowed\":false}"
         << ",\"phase_transport_coupling\":{\"owner\":\"declared_material_interface_phase_pair\",\"weak_bulk_velocity\":\"sharp_phase_local\",\"weak_interface_trace\":\"complementary_weighted\",\"conservative_graph_velocity\":\"complementary_weighted_every_node\",\"momentum_reconciliation_required\":"
-        << jsonBool(
+        << json::boolean(
                options.require_conservative_phase_momentum_reconciliation)
         << ",\"momentum_reconciliation_policy\":\"phasewise_fail_closed_no_hidden_velocity_update\"}"
         << ",\"accepted_stage_evidence\":{\"required\":true,\"operator_stage_interface_mass_momentum_flux\":true,\"canonical_phase_aggregation\":true,\"pressure_stabilization_configuration\":true,\"shared_coupled_nonlinear_linear_report\":true,\"timing_values_retained\":false,\"rank_local_aggregation_lineage_retained\":false,\"phase_resolved_iterations\":\"unavailable_from_shared_backend\",\"pressure_stabilization_work\":\"not_separately_resolved_by_coupled_operator\"}"
@@ -1867,34 +1746,6 @@ namespace {
 namespace navier_stokes = svmp::Physics::formulations::navier_stokes;
 namespace opt = svmp::FE::options;
 
-/// The input without the given spellings.
-opt::OptionInput without_spellings(const opt::OptionInput& input,
-                                   const std::vector<std::string>& spellings)
-{
-  opt::OptionInput out;
-  for (const auto& entry : input.entries()) {
-    if (std::find(spellings.begin(), spellings.end(), entry.spelling) ==
-        spellings.end()) {
-      out.add(entry.spelling, entry.text);
-    }
-  }
-  return out;
-}
-
-/// The input restricted to the given spellings.
-opt::OptionInput only_spellings(const opt::OptionInput& input,
-                                const std::vector<std::string>& spellings)
-{
-  opt::OptionInput out;
-  for (const auto& entry : input.entries()) {
-    if (std::find(spellings.begin(), spellings.end(), entry.spelling) !=
-        spellings.end()) {
-      out.add(entry.spelling, entry.text);
-    }
-  }
-  return out;
-}
-
 /// The level-set keys of an unfitted interface; a fitted boundary does not
 /// read them.
 const std::vector<std::string>& unfitted_interface_spellings()
@@ -1916,7 +1767,7 @@ navier_stokes::FreeSurfaceImplementation
 implementation_of(const opt::OptionInput& input)
 {
   const auto& schema = navier_stokes::freeSurfaceBoundarySchema();
-  const auto resolved = schema.resolve(only_spellings(input, {"Implementation"}));
+  const auto resolved = schema.resolve(input.selectSpellings({"Implementation"}));
   if (!resolved.isExplicit("Implementation")) {
     throw opt::OptionError(schema.element(), "Implementation",
                            "required: FittedALE or UnfittedLevelSet "
@@ -2438,7 +2289,7 @@ free_surface_application_keys(const svmp::FE::options::OptionInput& input)
   FreeSurfaceApplicationKeys keys;
   try {
     const auto resolved =
-        schema.resolve(only_spellings(input, {"Implementation"}));
+        schema.resolve(input.selectSpellings({"Implementation"}));
     if (resolved.isExplicit("Implementation")) {
       keys.implementation = resolved.value.implementation;
       keys.default_active_domain = resolved.value.active_domain;
@@ -2448,7 +2299,7 @@ free_surface_application_keys(const svmp::FE::options::OptionInput& input)
   }
   // A relaxed boolean: every value parses.
   keys.small_cut_aggregation =
-      schema.resolve(only_spellings(input, {"Small_cut_aggregation"}))
+      schema.resolve(input.selectSpellings({"Small_cut_aggregation"}))
           .value.small_cut_aggregation;
   return keys;
 }
@@ -2482,9 +2333,9 @@ resolve_free_surface_bc(
 
   // The retired keys were checked above; a fitted boundary does not read the
   // level-set keys of an unfitted interface.
-  auto keys = without_spellings(input, schema.retiredSpellings());
+  auto keys = input.excludeSpellings(schema.retiredSpellings());
   if (implementation == FreeSurfaceImplementation::FittedALE) {
-    keys = without_spellings(keys, unfitted_interface_spellings());
+    keys = keys.excludeSpellings(unfitted_interface_spellings());
   }
   const auto resolved = schema.resolve(keys);
   check_free_surface_relations(resolved);
