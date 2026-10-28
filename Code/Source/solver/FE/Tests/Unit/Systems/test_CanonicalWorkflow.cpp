@@ -24,11 +24,13 @@
 #include "Forms/Vocabulary.h"
 
 #include "Spaces/H1Space.h"
+#include "Spaces/ProductSpace.h"
 
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
 #include <array>
 #include <cmath>
+#include <set>
 #include <span>
 
 using svmp::FE::ElementType;
@@ -54,6 +56,121 @@ svmp::FE::dofs::MeshTopologyInfo singleTetraTopology()
 }
 
 } // namespace
+
+TEST(CanonicalWorkflow, SameSpaceWeightedInterfaceRequiresSeparableTestRows)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    auto vector = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar, 3);
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto un_id = sys.addField({.name = "u_negative", .space = vector, .components = 3});
+    const auto pn_id = sys.addField({.name = "p_negative", .space = scalar});
+    const auto up_id = sys.addField({.name = "u_positive", .space = vector, .components = 3});
+    const auto pp_id = sys.addField({.name = "p_positive", .space = scalar});
+    sys.addOperator("interface");
+
+    // Each phase uses the same spaces and symbol names. Only FieldId identifies
+    // the phase; unequal viscosities give unequal complementary weights.
+    const auto un = StateField(un_id, *vector, "u");
+    const auto pn = StateField(pn_id, *scalar, "p");
+    const auto up = StateField(up_id, *vector, "u");
+    const auto pp = StateField(pp_id, *scalar, "p");
+    const auto vn = TestField(un_id, *vector, "v");
+    const auto qn = TestField(pn_id, *scalar, "q");
+    const auto vp = TestField(up_id, *vector, "v");
+    const auto qp = TestField(pp_id, *scalar, "q");
+    const auto n = FormExpr::normal();
+    const auto identity = FormExpr::identity(3);
+    const auto tn = (2.0 * 2.0 * sym(grad(un))) * n;
+    const auto tp = (2.0 * 8.0 * sym(grad(up))) * n;
+    const auto sn = (2.0 * 2.0 * sym(grad(vn))) * n;
+    const auto sp = (2.0 * 8.0 * sym(grad(vp))) * n;
+    const auto ptn = (-pn * identity) * n;
+    const auto ptp = (-pp * identity) * n;
+    const auto qtn = (-qn * identity) * n;
+    const auto qtp = (-qp * identity) * n;
+    const auto wn = FormExpr::constant(0.8);
+    const auto wp = FormExpr::constant(0.2);
+    const auto penalty = FormExpr::constant(6.0);
+    constexpr int marker = 71;
+
+    const auto compact =
+        (-inner(wn * (tn + ptn) + wp * (tp + ptp), vn - vp) -
+         inner(wn * (sn + qtn) + wp * (sp + qtp), un - up) +
+         penalty * inner(un - up, vn - vp)).dI(marker);
+
+    try {
+        svmp::FE::systems::installFormulation(
+            sys, "interface", {un_id, pn_id, up_id, pp_id}, compact);
+        FAIL() << "Compact contractions require controlled test-row expansion";
+    } catch (const svmp::FE::InvalidArgumentException& error) {
+        EXPECT_NE(std::string(error.what()).find("multiple TestFunctions"), std::string::npos);
+    }
+    const auto& rejected = sys.operatorDefinition("interface");
+    EXPECT_TRUE(rejected.cells.empty());
+    EXPECT_TRUE(rejected.boundary.empty());
+    EXPECT_TRUE(rejected.interior.empty());
+    EXPECT_TRUE(rejected.interface_faces.empty());
+    EXPECT_TRUE(rejected.cut_volumes.empty());
+    EXPECT_TRUE(rejected.global.empty());
+    EXPECT_TRUE(sys.formulationRecords().empty());
+
+    // The production-style spelling keeps the viscous and pressure pieces
+    // separable, with each phase's negative row before its positive row.
+    const auto consistency =
+        (-wn * inner(tn, vn)).dI(marker) + (-wn * inner(ptn, vn)).dI(marker) +
+        (wn * inner(tn, vp)).dI(marker) + (wn * inner(ptn, vp)).dI(marker) +
+        (-wp * inner(tp, vn)).dI(marker) + (-wp * inner(ptp, vn)).dI(marker) +
+        (wp * inner(tp, vp)).dI(marker) + (wp * inner(ptp, vp)).dI(marker);
+    const auto adjoint =
+        (-wn * inner(sn, un)).dI(marker) + (-wn * inner(qtn, un)).dI(marker) +
+        (wn * inner(sn, up)).dI(marker) + (wn * inner(qtn, up)).dI(marker) +
+        (-wp * inner(sp, un)).dI(marker) + (-wp * inner(qtp, un)).dI(marker) +
+        (wp * inner(sp, up)).dI(marker) + (wp * inner(qtp, up)).dI(marker);
+    const auto penalty_terms =
+        (penalty * inner(un, vn)).dI(marker) + (-penalty * inner(un, vp)).dI(marker) +
+        (-penalty * inner(up, vn)).dI(marker) + (penalty * inner(up, vp)).dI(marker);
+    // Reverse the requested row order to exclude incidental traversal mapping.
+    const std::array fields{pp_id, up_id, pn_id, un_id};
+    svmp::FE::systems::CoupledResidualKernels installed;
+    ASSERT_NO_THROW(installed = svmp::FE::systems::installFormulation(
+        sys, "interface", fields, consistency + adjoint + penalty_terms));
+
+    ASSERT_EQ(sys.formulationRecords().size(), 1u);
+    const std::set<std::pair<FieldId, FieldId>> expected{
+        {un_id, un_id}, {un_id, pn_id}, {un_id, up_id}, {un_id, pp_id},
+        {up_id, un_id}, {up_id, pn_id}, {up_id, up_id}, {up_id, pp_id},
+        {pn_id, un_id}, {pn_id, up_id}, {pp_id, un_id}, {pp_id, up_id}};
+    std::set<std::pair<FieldId, FieldId>> actual;
+    for (const auto& term : sys.operatorDefinition("interface").interface_faces) {
+        EXPECT_EQ(term.marker, marker);
+        EXPECT_NE(term.kernel, nullptr);
+        actual.emplace(term.test_field, term.trial_field);
+    }
+    EXPECT_EQ(actual, expected);
+
+    ASSERT_NE(installed.mixed_plan, nullptr);
+    std::set<std::pair<FieldId, FieldId>> planned;
+    for (const auto& block : installed.mixed_plan->blocks) {
+        EXPECT_TRUE(block.has_interface);
+        EXPECT_TRUE(block.want_matrix);
+        planned.emplace(block.test_field, block.trial_field);
+    }
+    EXPECT_EQ(planned, expected);
+    ASSERT_EQ(installed.jacobian_blocks.size(), fields.size());
+    for (std::size_t row = 0; row < fields.size(); ++row) {
+        ASSERT_EQ(installed.jacobian_blocks[row].size(), fields.size());
+        for (std::size_t col = 0; col < fields.size(); ++col) {
+            const auto& kernel = installed.jacobian_blocks[row][col];
+            EXPECT_EQ(kernel != nullptr, expected.contains({fields[row], fields[col]}));
+            for (const auto& term : sys.operatorDefinition("interface").interface_faces) {
+                if (term.test_field == fields[row] && term.trial_field == fields[col]) {
+                    EXPECT_EQ(term.kernel, kernel);
+                }
+            }
+        }
+    }
+}
 
 // ============================================================================
 // Same-space assembly: two scalar fields on the same H1 space

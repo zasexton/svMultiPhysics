@@ -192,6 +192,48 @@ Optional colocation/text-layout optimization now lives inside
 `MixedBlockKernelSet`; there is no separate helper kernel type in the
 production semantic path.
 
+### Mixed test-row separation
+
+The canonical residual installer identifies bound test rows by `FieldId`, so
+independent fields can share a function space and symbol name. Keep each
+integral's integrand in one test row. Top-level sums and differences of such
+integrals are separated without expanding contractions or nonlinear factors.
+For example, an interface penalty on independently bound phase fields is
+currently written as:
+
+```cpp
+auto penalty_terms =
+    (penalty * inner(u_negative, v_negative)).dI(marker)
+  + (-penalty * inner(u_negative, v_positive)).dI(marker)
+  + (-penalty * inner(u_positive, v_negative)).dI(marker)
+  + (penalty * inner(u_positive, v_positive)).dI(marker);
+```
+
+The compact `penalty * inner(u_negative - u_positive,
+v_negative - v_positive)` under one `dI` contains two test rows and is rejected.
+These differences concern independently bound fields; they are not the DG
+`jump()` of one field. `CanonicalWorkflow` covers the same-space weighted
+four-field interface, its twelve installed kernel couplings with reversed caller
+field order, and rejection of its compact contraction before operator or
+formulation-record installation.
+
+The stored `FormulationRecord::block_couplings` currently pairs the test rows in
+expression traversal order with the caller's field order. These recorded row
+IDs can therefore differ from the installed kernel bindings when those orders
+differ. Inspect the operator terms or returned `MixedKernelPlan` for the installed
+bindings; the limitation test checks both. The records also feed coupling-graph
+analysis and trace-multiplier checks, so correct kernel bindings do not establish
+correctness of those metadata consumers. The test does not establish numerical
+assembly equivalence for a compact expression, which is still rejected.
+
+Automatic linear expansion remains a separate compiler task. Besides retaining
+all test rows and nonlinear coefficient dependencies, adoption must preserve
+the production trees' scalar placement, signs, term order, measures, and kernel
+groups. Algebraic equivalence alone does not preserve the manifest or JIT key.
+The expert `FormCompiler::compileMixed` path separately identifies symbols by
+space signature and name; use distinct names there. It does not provide the
+canonical residual installer's `FieldId` disambiguation.
+
 ## 3. Mixed Operators (bilinear / linear)
 
 For assembling standalone operators (mass matrices, stiffness matrices) rather than residual physics:

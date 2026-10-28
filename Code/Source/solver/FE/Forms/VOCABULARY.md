@@ -356,6 +356,8 @@ Status: `implemented/public`.
 | Vocabulary | Notes |
 |------------|-------|
 | `grad(u)` | Scalar-to-vector, vector-to-matrix, and supported intrinsic vector FE gradients |
+| `symgrad(u)` | Symmetric gradient of a vector field; exactly the expression tree `sym(grad(u))` |
+| `advect(a, u)` | Vector advection `(a . grad) u`; exactly `grad(u) * a`, preserving all state dependencies in both operands. For a scalar field use `inner(grad(u), a)` |
 | `div(u)`, `curl(u)` | Vector differential operators |
 | `hessian(u)` | Spatial Hessian support for supported scalar/composite expressions and mappings |
 | `laplacian(u)` | `trace(hessian(u))` helper |
@@ -373,6 +375,14 @@ evaluated analytically. Supported non-affine 3D curved volume mappings include
 the analytic derivative terms for the relevant Piola transforms. Unsupported
 element-family, geometry-order, or lower-dimensional curved-frame combinations
 fail with diagnostics instead of silently using an affine approximation.
+
+The differential helpers only construct the spelled-out trees. For example,
+`inner(advect(u - meshVelocity(), u), v) +
+2.0 * mu * inner(symgrad(u), symgrad(v))` has the same ordered tree as
+`inner(grad(u) * (u - meshVelocity()), v) +
+2.0 * mu * inner(sym(grad(u)), sym(grad(v)))`, including when `mu` or the
+advection direction depends on the unknown fields. They introduce no new
+terminals or differentiation rules.
 
 ### Algebra, Predicates, and Scalar Functions
 
@@ -541,6 +551,9 @@ namespace `forms::bc`.
 | `bc::toScalarExpr(value, name)` | `BoundaryConditions.h` | Converts a `ScalarValue` (or any alternative) to a `FormExpr`; callbacks become named coefficients |
 | `bc::toVectorExpr(values, dim, prefix[, marker, style])` | `BoundaryConditions.h` | Per-component `std::vector<FormExpr>`; wrap with `FormExpr::asVector` for a vector expression |
 | `bc::isConstantScalarValue`, `bc::isZeroConstantScalarValue` | `BoundaryConditions.h` | Literal tests on a `ScalarValue` |
+| `bc::validateScalarLiteral(value, predicate, message)` | `BoundaryConditions.h` | Applies the numeric predicate only to a `Real` literal; spatial/time coefficients and form expressions are left untouched, including constant expressions. Does not sample callbacks |
+| `bc::requireScalarLiteral(value, message)` | `BoundaryConditions.h` | Returns the `Real` alternative or throws the caller's exact message; imposes no sign or finiteness check |
+| `numeric::isFinite`, `numeric::isNonnegative`, `numeric::isPositive`, `numeric::validate(value, predicate, message)` | `Core/NumericValidation.h` | Raw numeric checks in namespace `FE::numeric`; finiteness uses `std::isfinite`, sign comparisons alone accept positive infinity. The caller declares whether both checks are required and their diagnostic order |
 | `bc::markerValueName`, `componentValueName`, `indexedComponentValueName` | `BoundaryConditions.h` | Coefficient naming helpers |
 | `bc::StrongDirichlet`, `strongDirichlet(...)` | `BoundaryConditions.h` | Strong scalar/component value constraints |
 | `bc::makeStrongDirichletList(...)`, `makeStrongDirichletListValue(...)` | `BoundaryConditions.h` | Declaration lists from option structs |
