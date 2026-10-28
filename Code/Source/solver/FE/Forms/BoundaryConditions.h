@@ -13,6 +13,7 @@
  * (e.g., strong Dirichlet -> constraints).
  */
 
+#include "Core/NumericValidation.h"
 #include "Forms/FormExpr.h"
 #include "Forms/NitscheTraceBilinearForm.h"
 
@@ -375,6 +376,29 @@ using ScalarValue = std::variant<Real, ScalarCoefficient, TimeScalarCoefficient,
 {
     const auto* real = std::get_if<Real>(&value);
     return real && *real == Real{0.0};
+}
+
+/// Applies a numeric predicate only to the Real alternative. Coefficients and
+/// form expressions (even FormExpr::constant) are neither evaluated nor checked.
+/// This validates a supplied literal, not the values of a coefficient field.
+template <class Predicate>
+inline void validateScalarLiteral(const ScalarValue& value,
+                                  Predicate&& predicate,
+                                  std::string_view message)
+{
+    if (const auto* literal = std::get_if<Real>(&value)) {
+        numeric::validate(*literal, std::forward<Predicate>(predicate), message);
+    }
+}
+
+/// Requires the Real alternative, without imposing finiteness or a sign.
+/// Models that require a literal and numeric bounds must declare both checks.
+[[nodiscard]] inline Real requireScalarLiteral(const ScalarValue& value, std::string_view message)
+{
+    if (const auto* literal = std::get_if<Real>(&value)) {
+        return *literal;
+    }
+    throw std::invalid_argument(std::string(message));
 }
 
 /**

@@ -16,6 +16,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <limits>
 #include <span>
 #include <stdexcept>
 
@@ -105,6 +107,88 @@ TEST(FormsBoundaryConditions, ScalarValueConstantHelpersIdentifyConstantZeros)
     EXPECT_FALSE(svmp::FE::forms::bc::isZeroConstantScalarValue(nonzero));
     EXPECT_FALSE(svmp::FE::forms::bc::isConstantScalarValue(coefficient));
     EXPECT_FALSE(svmp::FE::forms::bc::isZeroConstantScalarValue(coefficient));
+}
+
+TEST(FormsBoundaryConditions, NumericValidationKeepsFinitenessSeparateFromSign)
+{
+    namespace numeric = svmp::FE::numeric;
+    using svmp::FE::Real;
+    struct Case {
+        Real value;
+        bool finite;
+        bool nonnegative;
+        bool positive;
+    };
+    const Real infinity = std::numeric_limits<Real>::infinity();
+    const std::array cases{
+        Case{-1.0, true, false, false}, Case{-0.0, true, true, false},
+        Case{0.0, true, true, false}, Case{1.0, true, true, true},
+        Case{-infinity, false, false, false}, Case{infinity, false, true, true},
+        Case{std::numeric_limits<Real>::quiet_NaN(), false, false, false}};
+    for (const auto& c : cases) {
+        EXPECT_EQ(numeric::isFinite(c.value), c.finite);
+        EXPECT_EQ(numeric::isNonnegative(c.value), c.nonnegative);
+        EXPECT_EQ(numeric::isPositive(c.value), c.positive);
+    }
+    EXPECT_NO_THROW(numeric::validate(infinity, numeric::isPositive, "positive required"));
+    try {
+        numeric::validate(infinity, numeric::isFinite, std::string("owner: finite required"));
+        FAIL() << "Nonfinite value must be rejected";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_STREQ(error.what(), "owner: finite required");
+    }
+}
+
+TEST(FormsBoundaryConditions, ScalarLiteralValidationDoesNotSampleOrInterpretOtherVariants)
+{
+    namespace bc = svmp::FE::forms::bc;
+    using svmp::FE::Real;
+    int callback_calls = 0;
+    int predicate_calls = 0;
+    const auto predicate = [&](Real value) {
+        ++predicate_calls;
+        return svmp::FE::numeric::isFinite(value);
+    };
+    const auto invalid = std::numeric_limits<Real>::infinity();
+    const std::array<bc::ScalarValue, 4> deferred{
+        svmp::FE::forms::ScalarCoefficient([&](Real, Real, Real) {
+            ++callback_calls;
+            return invalid;
+        }),
+        svmp::FE::forms::TimeScalarCoefficient([&](Real, Real, Real, Real) {
+            ++callback_calls;
+            return invalid;
+        }),
+        svmp::FE::forms::FormExpr::constant(invalid), svmp::FE::forms::FormExpr{}};
+    for (const auto& value : deferred) {
+        EXPECT_NO_THROW(bc::validateScalarLiteral(value, predicate, "finite required"));
+        try {
+            (void)bc::requireScalarLiteral(value, "model: literal required");
+            FAIL() << "Only the Real alternative is a scalar literal";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_STREQ(error.what(), "model: literal required");
+        }
+    }
+    EXPECT_EQ(callback_calls, 0);
+    EXPECT_EQ(predicate_calls, 0);
+    EXPECT_NO_THROW(bc::validateScalarLiteral(bc::ScalarValue{2.0}, predicate, "finite required"));
+    EXPECT_EQ(predicate_calls, 1);
+    EXPECT_THROW(bc::validateScalarLiteral(bc::ScalarValue{invalid}, predicate, "finite required"),
+                 std::invalid_argument);
+    EXPECT_EQ(predicate_calls, 2);
+}
+
+TEST(FormsBoundaryConditions, RequiringScalarLiteralPreservesItsValueWithoutNumericValidation)
+{
+    namespace bc = svmp::FE::forms::bc;
+    using svmp::FE::Real;
+    const auto infinity = std::numeric_limits<Real>::infinity();
+    EXPECT_EQ(bc::requireScalarLiteral(bc::ScalarValue{infinity}, "literal required"), infinity);
+    EXPECT_EQ(bc::requireScalarLiteral(bc::ScalarValue{-infinity}, "literal required"), -infinity);
+    EXPECT_TRUE(std::isnan(bc::requireScalarLiteral(
+        bc::ScalarValue{std::numeric_limits<Real>::quiet_NaN()}, "literal required")));
+    EXPECT_TRUE(std::signbit(bc::requireScalarLiteral(bc::ScalarValue{-0.0}, "literal required")));
+    EXPECT_DOUBLE_EQ(bc::requireScalarLiteral(bc::ScalarValue{-2.5}, "literal required"), -2.5);
 }
 
 TEST(FormsBoundaryConditions, ToVectorExpr_GeneratesStableComponentNames)
