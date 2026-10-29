@@ -8704,19 +8704,53 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceRejectsUnknownLevelSet)
     const auto mesh = makeMesh();
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
-    auto opts = baseNavierStokesOptions();
-
-    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
-        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
-        .interface_marker = interface_marker,
-        .level_set_field_name = "missing_phi",
-        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
-        .external_pressure = 1.0,
-    });
-
-    FE::systems::FESystem system(mesh);
-    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
-    EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+    const auto expect_first_error = [&](int marker, std::string domain,
+                                        ns::FreeSurfaceActiveDomain active_domain,
+                                        const std::string& expected) {
+        SCOPED_TRACE(expected);
+        auto opts = baseNavierStokesOptions();
+        opts.free_surface.push_back(ns::FreeSurfaceBoundary{
+            .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+            .interface_marker = marker,
+            .level_set_field_name = "missing_phi",
+            .generated_interface_domain_id = std::move(domain),
+            .active_domain = active_domain,
+            .external_pressure = 1.0,
+        });
+        FE::systems::FESystem system(mesh);
+        const auto field_count = system.registeredFieldCount();
+        const auto formulation_count = system.formulationRecords().size();
+        const auto functional_count = FE::systems::functionalRecords(system)
+                                          .functionalDeclarations().size();
+        ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+        try {
+            module.registerOn(system);
+            FAIL() << "Expected registration to reject the first invalid input";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_EQ(std::string(error.what()), expected);
+        }
+        EXPECT_EQ(system.registeredFieldCount(), field_count);
+        EXPECT_EQ(system.findFieldByName(opts.velocity_field_name), FE::INVALID_FIELD_ID);
+        EXPECT_EQ(system.findFieldByName(opts.pressure_field_name), FE::INVALID_FIELD_ID);
+        EXPECT_EQ(system.formulationRecords().size(), formulation_count);
+        EXPECT_EQ(FE::systems::functionalRecords(system).functionalDeclarations().size(),
+                  functional_count);
+        EXPECT_TRUE(system.meshNormalBoundaryConstraints().empty());
+        EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());
+        EXPECT_FALSE(system.hasOperator(opts.operator_tag));
+        EXPECT_FALSE(system.isGeneratedEmbeddedInterfaceMarkerRegistered(interface_marker));
+        EXPECT_FALSE(module.effectiveConfigurationArtifact().has_value());
+    };
+    const std::string unknown_field =
+        "IncompressibleNavierStokesVMSModule: unfitted free surface references unknown level-set field 'missing_phi'";
+    expect_first_error(interface_marker, "free_surface",
+                       ns::FreeSurfaceActiveDomain::LevelSetNegative, unknown_field);
+    const auto invalid_policy = static_cast<ns::FreeSurfaceActiveDomain>(255);
+    expect_first_error(-1, "free_surface", invalid_policy, unknown_field);
+    expect_first_error(interface_marker, "free_surface", invalid_policy,
+                       "IncompressibleNavierStokesVMSModule: unsupported free-surface boundary policy");
+    expect_first_error(-1, "", invalid_policy,
+                       "IncompressibleNavierStokesVMSModule: generated unfitted free surface requires a non-empty generated_interface_domain_id");
 }
 
 TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceRejectsALEUntilTransportUsesRelativeVelocity)
@@ -11427,6 +11461,61 @@ TEST(MovingDomainPhysics,
         module.registerOn(system);
     };
     ASSERT_NO_THROW(register_options(valid_options()));
+
+    const auto expect_first_contact_error = [&](FE::Real mobility, std::string domain,
+                                                bool missing_field,
+                                                const std::string& expected) {
+        SCOPED_TRACE(expected);
+        auto opts = valid_options();
+        auto& surface = opts.free_surface.front();
+        surface.generated_interface_domain_id = std::move(domain);
+        if (missing_field) {
+            surface.level_set_field_name = "missing_phi";
+        }
+        auto& contact = dynamicContactConfiguration(surface.contact_lines.front());
+        contact.mobility = mobility;
+        contact.wall_boundary_marker = -1;
+        FE::systems::FESystem system(mesh);
+        const auto phi = system.addField(FE::systems::FieldSpec{
+            .name = "phi_dynamic_validation",
+            .space = p_space,
+            .components = 1,
+        });
+        const int contact_marker = stableContactLineMarker(
+            phi, interface_marker, wall_marker);
+        const auto field_count = system.registeredFieldCount();
+        const auto formulation_count = system.formulationRecords().size();
+        const auto functional_count = FE::systems::functionalRecords(system)
+                                          .functionalDeclarations().size();
+        ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+        try {
+            module.registerOn(system);
+            FAIL() << "Expected registration to reject the first invalid contact input";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_EQ(std::string(error.what()), expected);
+        }
+        EXPECT_EQ(system.registeredFieldCount(), field_count);
+        EXPECT_EQ(system.findFieldByName("phi_dynamic_validation"), phi);
+        EXPECT_EQ(system.findFieldByName(opts.velocity_field_name), FE::INVALID_FIELD_ID);
+        EXPECT_EQ(system.findFieldByName(opts.pressure_field_name), FE::INVALID_FIELD_ID);
+        EXPECT_EQ(system.formulationRecords().size(), formulation_count);
+        EXPECT_EQ(FE::systems::functionalRecords(system).functionalDeclarations().size(),
+                  functional_count);
+        EXPECT_TRUE(system.meshNormalBoundaryConstraints().empty());
+        EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());
+        EXPECT_FALSE(system.hasOperator(opts.operator_tag));
+        EXPECT_FALSE(system.isGeneratedEmbeddedInterfaceMarkerRegistered(interface_marker));
+        EXPECT_FALSE(system.isGeneratedEmbeddedInterfaceMarkerRegistered(contact_marker));
+        EXPECT_FALSE(module.effectiveConfigurationArtifact().has_value());
+    };
+    expect_first_contact_error(0.0, "", false,
+        "IncompressibleNavierStokesVMSModule: DynamicContactAngle contact-line mobility must be positive");
+    expect_first_contact_error(0.5, "", false,
+        "IncompressibleNavierStokesVMSModule: generated unfitted contact-line marker requires a non-empty generated_interface_domain_id");
+    expect_first_contact_error(0.5, "free_surface", false,
+        "IncompressibleNavierStokesVMSModule: prescribed unfitted contact angle requires Contact_line_wall_marker or Contact_line_wall_face");
+    expect_first_contact_error(0.0, "", true,
+        "IncompressibleNavierStokesVMSModule: unfitted free surface references unknown level-set field 'missing_phi'");
 
     constexpr FE::Real pi = 3.14159265358979323846;
     const auto expect_transversality_angle_rejected =

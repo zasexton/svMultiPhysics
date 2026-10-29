@@ -23,6 +23,7 @@
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/Spaces/SpaceFactory.h"
 #include "FE/Systems/FESystem.h"
+#include "FE/Systems/FunctionalRecords.h"
 #include "FE/Systems/TimeIntegrator.h"
 #include "FE/TimeStepping/GeneralizedAlpha.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
@@ -812,6 +813,63 @@ TEST(FreeSurfaceSemiImplicitSurfaceTension, RejectsConfigurationsOutsideTheValid
         expectRegistrationRejected(unfittedBoundary(SI::NormalIncrement),
                                    requires_prefix + " an affine P1",
                                    /*velocity_order=*/2);
+    }
+}
+
+TEST(FreeSurfaceSemiImplicitSurfaceTension,
+     RejectsIncompatibleReferenceBeforeResolvingExplicitLevelSet)
+{
+    const std::string reference_name(
+        ns::kFreeSurfaceSemiImplicitReferenceVelocityFieldName);
+    for (const auto source : {FE::systems::FieldSourceKind::Unknown,
+                              FE::systems::FieldSourceKind::PrescribedData}) {
+        SCOPED_TRACE(source == FE::systems::FieldSourceKind::Unknown
+                         ? "incompatible reference precedes missing level set"
+                         : "compatible reference reaches missing level set");
+        auto mesh = std::make_shared<SingleTetraMeshAccess>();
+        auto velocity_space = FE::spaces::VectorSpace(
+            FE::spaces::SpaceType::H1, mesh, 1, 3);
+        auto pressure_space = FE::spaces::Space(
+            FE::spaces::SpaceType::H1, mesh, 1, 1);
+        FE::systems::FESystem system(mesh);
+        const auto reference = system.addField(FE::systems::FieldSpec{
+            .name = reference_name,
+            .space = velocity_space,
+            .components = 3,
+            .source_kind = source,
+        });
+        auto boundary = unfittedBoundary(
+            ns::FreeSurfaceSurfaceTensionSemiImplicit::NormalIncrement);
+        boundary.level_set_field_name = "missing_phi";
+        ns::IncompressibleNavierStokesVMSModule module(
+            velocity_space, pressure_space, navierStokesOptions(std::move(boundary)));
+        const auto field_count = system.registeredFieldCount();
+        const auto formulation_count = system.formulationRecords().size();
+        const auto functional_count = FE::systems::functionalRecords(system)
+                                          .functionalDeclarations().size();
+        const auto expected = source == FE::systems::FieldSourceKind::Unknown
+            ? "IncompressibleNavierStokesVMSModule::registerOn semi-implicit reference velocity: existing field '" +
+                  reference_name + "' must be a prescribed data field"
+            : "IncompressibleNavierStokesVMSModule: unfitted free surface references unknown level-set field 'missing_phi'";
+        try {
+            module.registerOn(system);
+            FAIL() << "Expected registration to reject the first invalid input";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_EQ(std::string(error.what()), expected);
+        }
+        EXPECT_EQ(system.registeredFieldCount(), field_count);
+        EXPECT_EQ(system.findFieldByName(reference_name), reference);
+        EXPECT_EQ(system.fieldRecord(reference).source_kind, source);
+        EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
+        EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
+        EXPECT_EQ(system.formulationRecords().size(), formulation_count);
+        EXPECT_EQ(FE::systems::functionalRecords(system).functionalDeclarations().size(),
+                  functional_count);
+        EXPECT_TRUE(system.meshNormalBoundaryConstraints().empty());
+        EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());
+        EXPECT_FALSE(system.hasOperator("equations"));
+        EXPECT_FALSE(system.isGeneratedEmbeddedInterfaceMarkerRegistered(kInterfaceMarker));
+        EXPECT_FALSE(module.effectiveConfigurationArtifact().has_value());
     }
 }
 
