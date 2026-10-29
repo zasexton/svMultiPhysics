@@ -1259,9 +1259,6 @@ struct ActivePressureDomain {
 activePressureDomainFor(
     const std::vector<FreeSurfaceBoundary>& free_surfaces);
 
-[[nodiscard]] FE::forms::FormExpr generatedInterfaceOutwardNormal(
-    const FreeSurfaceBoundary& bc);
-
 [[nodiscard]] FE::FieldId resolveLevelSetFieldId(
     const FreeSurfaceBoundary& bc,
     const FE::systems::FESystem& system);
@@ -1281,11 +1278,6 @@ generatedUnfittedContactLineMarkerKey(
     const IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine&
         contact_line,
     const FreeSurfaceBoundary& bc,
-    const FE::systems::FESystem& system);
-
-[[nodiscard]] int generatedActiveBoundaryMarker(
-    const FreeSurfaceBoundary& bc,
-    int physical_boundary_marker,
     const FE::systems::FESystem& system);
 
 [[nodiscard]] std::optional<int> sharpActiveBoundaryMarkerFor(

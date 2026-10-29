@@ -158,22 +158,6 @@ activePressureDomainFor(
     return active_domain;
 }
 
-/**
- * Normal from the same geometric rule that supplies dI/dInterfaceBoundary.
- * Generated interface normals point from phi<0 to phi>0.  Flip only where a
- * directed outward-liquid normal is required; the surface projector itself
- * is orientation independent.
- */
-[[nodiscard]] FE::forms::FormExpr generatedInterfaceOutwardNormal(
-    const FreeSurfaceBoundary& bc)
-{
-    if (isUnfittedLevelSet(bc)) {
-        return FE::level_set::outwardInterfaceNormal(
-            activeDomainSide(bc.active_domain));
-    }
-    return FE::forms::FormExpr::normal();
-}
-
 [[nodiscard]] FE::FieldId resolveLevelSetFieldId(
     const FreeSurfaceBoundary& bc,
     const FE::systems::FESystem& system)
@@ -239,16 +223,6 @@ generatedUnfittedContactLineMarkerKey(
     }
     return FE::interfaces::stableGeneratedInterfaceBoundaryIntersectionMarker(
         generatedUnfittedContactLineMarkerKey(contact_line, bc, system));
-}
-
-[[nodiscard]] int generatedActiveBoundaryMarker(
-    const FreeSurfaceBoundary& bc,
-    int physical_boundary_marker,
-    const FE::systems::FESystem& system)
-{
-    return FE::interfaces::stableGeneratedActiveBoundaryMarker(
-        generatedActiveBoundaryMarkerKey(
-            bc, physical_boundary_marker, system));
 }
 
 [[nodiscard]] std::optional<int> sharpActiveBoundaryMarkerFor(
