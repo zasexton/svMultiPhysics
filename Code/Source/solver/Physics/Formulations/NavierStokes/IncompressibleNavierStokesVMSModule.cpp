@@ -132,32 +132,6 @@ generatedActiveBoundaryMarkerKey(
 
 } // namespace
 
-[[nodiscard]] std::optional<ActivePressureDomain>
-activePressureDomainFor(
-    const std::vector<FreeSurfaceBoundary>& free_surfaces)
-{
-    std::optional<ActivePressureDomain> active_domain;
-    for (const auto& bc : free_surfaces) {
-        if (bc.active_domain == FreeSurfaceActiveDomain::None) {
-            continue;
-        }
-        if (bc.implementation != FreeSurfaceImplementation::UnfittedLevelSet) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: active-domain pressure operations are only valid for unfitted level-set free surfaces");
-        }
-        if (bc.level_set_field_name.empty()) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: active-domain pressure operations require a non-empty level_set_field_name");
-        }
-        if (active_domain.has_value()) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: at most one active-domain free surface may restrict pressure operations");
-        }
-        active_domain = ActivePressureDomain{&bc, bc.active_domain};
-    }
-    return active_domain;
-}
-
 [[nodiscard]] FE::FieldId resolveLevelSetFieldId(
     const FreeSurfaceBoundary& bc,
     const FE::systems::FESystem& system)
@@ -348,426 +322,7 @@ std::function<std::optional<int>(int)> wettedBoundaryResolver(
         });
 }
 
-// ---------------------------------------------------------------------------
-// The initial state (formerly NavierStokesInitialConditions)
-// ---------------------------------------------------------------------------
-
 namespace {
-
-constexpr FE::Real kPressureGaugeLevelSetMargin = 1.0e-8;
-
-/// The vertex level-set field of the active-domain free surface, checked for
-/// @p context.
-[[nodiscard]] FE::level_set::LevelSetVertexValues activePressureLevelSetField(
-    const FE::systems::FESystem& system,
-    const ActivePressureDomain& active_domain,
-    FE::GlobalIndex n_vertices,
-    std::string_view context)
-{
-    const std::string owner =
-        "IncompressibleNavierStokesVMSModule: " + std::string(context);
-    const auto field = FE::systems::requireMeshVertexField(
-        system,
-        active_domain.boundary->level_set_field_name,
-        n_vertices,
-        {.no_native_mesh = owner + " requires a native mesh vertex level-set field",
-         .missing_field_prefix = owner + " could not find vertex level-set field '",
-         .not_float64 = owner + " requires a Float64 vertex level-set field",
-         .no_components = owner + " requires at least one level-set component",
-         .too_few_entries =
-             owner + " level-set field has fewer entries than pressure vertices",
-         .empty = owner + " found an empty level-set field",
-         .no_mesh_support =
-             "IncompressibleNavierStokesVMSModule: active-domain pressure operations require native mesh support"});
-    return {field.values, field.components, field.entity_count};
-}
-
-std::size_t initializeStateFieldFromMeshVertexField(
-    const FE::systems::FESystem& system,
-    FE::backends::GenericVector& u0,
-    FE::FieldId field_id,
-    std::string_view context)
-{
-    return FE::systems::initializeFieldFromMeshVertexField(
-        system,
-        u0,
-        field_id,
-        "IncompressibleNavierStokesVMSModule: " + std::string(context));
-}
-
-[[nodiscard]] FE::level_set::LevelSetSupportSide levelSetSupportSide(
-    FreeSurfaceActiveDomain active_domain) noexcept
-{
-    switch (active_domain) {
-    case FreeSurfaceActiveDomain::LevelSetNegative:
-        return FE::level_set::LevelSetSupportSide::Negative;
-    case FreeSurfaceActiveDomain::LevelSetPositive:
-        return FE::level_set::LevelSetSupportSide::Positive;
-    case FreeSurfaceActiveDomain::None:
-        break;
-    }
-    return FE::level_set::LevelSetSupportSide::Everywhere;
-}
-
-} // namespace
-
-void validateActiveDomainPressureConstraints(
-    const FE::systems::FESystem& system,
-    const IncompressibleNavierStokesVMSOptions& options,
-    const std::vector<FreeSurfaceBoundary>& free_surfaces)
-{
-    if (options.node_pressure_constraints.values.empty()) {
-        return;
-    }
-
-    const auto active_pressure_domain = activePressureDomainFor(free_surfaces);
-    if (!active_pressure_domain.has_value()) {
-        return;
-    }
-
-    const auto n_vertices = system.meshAccess().numVertices();
-    const auto level_set_values = activePressureLevelSetField(
-        system,
-        *active_pressure_domain,
-        n_vertices,
-        "active-domain pressure constraint validation");
-    const auto& bc = *active_pressure_domain->boundary;
-    std::size_t checked_local_constraints = 0u;
-    std::size_t skipped_nonlocal_constraints = 0u;
-    FE::Real constraint_pressure_min = std::numeric_limits<FE::Real>::infinity();
-    FE::Real constraint_pressure_max = -std::numeric_limits<FE::Real>::infinity();
-    FE::Real min_signed_gap = std::numeric_limits<FE::Real>::infinity();
-    FE::Real max_signed_gap = -std::numeric_limits<FE::Real>::infinity();
-    for (const auto& constraint : options.node_pressure_constraints.values) {
-        constraint_pressure_min = std::min(constraint_pressure_min, constraint.pressure);
-        constraint_pressure_max = std::max(constraint_pressure_max, constraint.pressure);
-        const auto local_vertex = pressureConstraintLocalVertex(
-            system, options, constraint.node_id);
-        if (!local_vertex.has_value()) {
-            ++skipped_nonlocal_constraints;
-            continue;
-        }
-        if (*local_vertex < 0 || *local_vertex >= n_vertices) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: active-domain pressure constraint references vertex " +
-                std::to_string(constraint.node_id) +
-                " outside the local pressure mesh");
-        }
-
-        const auto vertex_side = FE::level_set::levelSetVertexSide(
-            level_set_values,
-            *local_vertex,
-            bc.level_set_isovalue,
-            levelSetSupportSide(active_pressure_domain->active_domain),
-            kPressureGaugeLevelSetMargin);
-        ++checked_local_constraints;
-        min_signed_gap = std::min(min_signed_gap, vertex_side.signed_gap);
-        max_signed_gap = std::max(max_signed_gap, vertex_side.signed_gap);
-        if (!vertex_side.on_side) {
-            std::ostringstream oss;
-            oss << "IncompressibleNavierStokesVMSModule: active-domain pressure "
-                << "constraint node_id=" << constraint.node_id
-                << " local_vertex=" << *local_vertex
-                << " is on the dry side for Active_domain="
-                << activeDomainName(active_pressure_domain->active_domain)
-                << " phi=" << vertex_side.phi
-                << " isovalue=" << bc.level_set_isovalue;
-            throw std::invalid_argument(oss.str());
-        }
-        if (vertex_side.within_margin) {
-            std::ostringstream oss;
-            oss << "IncompressibleNavierStokesVMSModule: active-domain pressure "
-                << "constraint node_id=" << constraint.node_id
-                << " local_vertex=" << *local_vertex
-                << " is too close to the level-set interface: |phi-isovalue|="
-                << std::abs(vertex_side.signed_gap)
-                << " margin=" << kPressureGaugeLevelSetMargin;
-            throw std::invalid_argument(oss.str());
-        }
-    }
-    if (!std::isfinite(min_signed_gap)) {
-        min_signed_gap = FE::Real{0.0};
-    }
-    if (!std::isfinite(max_signed_gap)) {
-        max_signed_gap = FE::Real{0.0};
-    }
-    if (!std::isfinite(constraint_pressure_min)) {
-        constraint_pressure_min = FE::Real{0.0};
-    }
-    if (!std::isfinite(constraint_pressure_max)) {
-        constraint_pressure_max = FE::Real{0.0};
-    }
-    FE::logRecord(post::navierStokesLog("pressure gauge")
-                      .diagnostic("pressure_gauge_check")
-                      .integer("constraints", options.node_pressure_constraints.values.size())
-                      .integer("checked_local_constraints", checked_local_constraints)
-                      .integer("skipped_nonlocal_constraints", skipped_nonlocal_constraints)
-                      .real("constraint_pressure_min", constraint_pressure_min)
-                      .real("constraint_pressure_max", constraint_pressure_max)
-                      .text("active_domain", activeDomainName(active_pressure_domain->active_domain))
-                      .real("isovalue", bc.level_set_isovalue)
-                      .real("min_signed_gap", min_signed_gap)
-                      .real("max_signed_gap", max_signed_gap)
-                      .real("margin", kPressureGaugeLevelSetMargin));
-}
-
-namespace {
-
-void initializeNavierStokesState(
-    const FE::systems::FESystem& system,
-    FE::backends::GenericVector& u0,
-    const IncompressibleNavierStokesVMSOptions& options,
-    const std::function<FE::Real(const std::array<FE::Real, 3>&)>&
-        hydrostatic_pressure)
-{
-    const auto& init = options.hydrostatic_pressure_initialization;
-
-    std::size_t mesh_field_initialization_dofs = 0u;
-    mesh_field_initialization_dofs += initializeStateFieldFromMeshVertexField(
-        system,
-        u0,
-        system.findFieldByName(options.velocity_field_name),
-        "mesh-field velocity initialization");
-
-    if (!init.enabled) {
-        mesh_field_initialization_dofs += initializeStateFieldFromMeshVertexField(
-            system,
-            u0,
-            system.findFieldByName(options.pressure_field_name),
-            "mesh-field pressure initialization");
-        if (mesh_field_initialization_dofs > 0u) {
-            FE::logRecord(post::navierStokesLog("mesh-field initialization")
-                              .diagnostic("mesh_field_initialization")
-                              .integer("initialized_dofs", mesh_field_initialization_dofs)
-                              .quoted("velocity_field", options.velocity_field_name)
-                              .quoted("pressure_field", options.pressure_field_name));
-        }
-        return;
-    }
-
-    if (mesh_field_initialization_dofs > 0u) {
-        FE::logRecord(post::navierStokesLog("mesh-field initialization")
-                          .diagnostic("mesh_field_initialization")
-                          .integer("initialized_dofs", mesh_field_initialization_dofs)
-                          .quoted("velocity_field", options.velocity_field_name));
-    }
-
-    const auto p_id = system.findFieldByName(options.pressure_field_name);
-    if (p_id == FE::INVALID_FIELD_ID) {
-        throw std::runtime_error(
-            "IncompressibleNavierStokesVMSModule: hydrostatic pressure initialization could not find pressure field '" +
-            options.pressure_field_name + "'");
-    }
-
-    const auto& pressure_vertex_dofs = FE::systems::requireVertexDofMap(
-        system,
-        p_id,
-        "IncompressibleNavierStokesVMSModule: hydrostatic pressure initialization requires vertex DOF metadata");
-
-    const auto& mesh = system.meshAccess();
-    const auto n_vertices = mesh.numVertices();
-    const auto active_pressure_domain =
-        activePressureDomainFor(options.free_surface);
-    if (active_pressure_domain.has_value() &&
-        active_pressure_domain->boundary->active_domain_method ==
-            FreeSurfaceActiveDomainMethod::CutVolume &&
-        init.field_name.empty()) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: CutVolume active-domain "
-            "hydrostatic pressure initialization requires a level-set-aware "
-            "mesh vertex field selected by Hydrostatic_pressure_field_name");
-    }
-
-    // p0: the hydrostatic pressure, or the selected mesh vertex field, on the
-    // support of the active side; the reference pressure elsewhere.
-    FE::level_set::LevelSetSideVertexValues p0{};
-    if (active_pressure_domain.has_value()) {
-        const auto& bc = *active_pressure_domain->boundary;
-        FE::level_set::LevelSetSideSupportQuery query{};
-        query.level_set = activePressureLevelSetField(
-            system, *active_pressure_domain, n_vertices,
-            "active-domain hydrostatic pressure initialization");
-        query.isovalue = bc.level_set_isovalue;
-        query.side = levelSetSupportSide(active_pressure_domain->active_domain);
-        query.interface_marker = bc.interface_marker;
-        query.use_generated_volume_rules =
-            bc.active_domain_method == FreeSurfaceActiveDomainMethod::CutVolume;
-        query.message_prefix =
-            "IncompressibleNavierStokesVMSModule: active-domain pressure initialization";
-        p0.side = FE::level_set::LevelSetSideVertexValues::Side{
-            .level_set = query.level_set,
-            .isovalue = query.isovalue,
-            .side = query.side,
-            .support = FE::level_set::levelSetSideSupportVertices(
-                system, query, n_vertices)};
-    }
-    if (!init.field_name.empty()) {
-        const std::string owner =
-            "IncompressibleNavierStokesVMSModule: hydrostatic pressure field initialization";
-        const auto field = FE::systems::requireMeshVertexField(
-            system,
-            init.field_name,
-            n_vertices,
-            {.no_native_mesh = owner + " requires a native mesh",
-             .missing_field_prefix = owner + " could not find vertex field '",
-             .not_float64 = owner + " requires a Float64 vertex field",
-             .no_components = owner + " requires at least one component",
-             .too_few_entries = owner + " has fewer entries than pressure vertices",
-             .empty = owner + " found an empty vertex field",
-             .no_mesh_support = owner + " requires native mesh support",
-             .non_finite_prefix =
-                 "IncompressibleNavierStokesVMSModule: hydrostatic pressure mesh vertex field '" +
-                 init.field_name + "' contains a non-finite value at vertex "});
-        p0.field_values = field.values;
-        p0.field_components = field.components;
-    } else {
-        p0.value = hydrostatic_pressure;
-    }
-    p0.dry_value = init.reference_pressure;
-
-    const auto entries = FE::level_set::collectVertexFieldOnLevelSetSide(
-        system,
-        p_id,
-        pressure_vertex_dofs,
-        p0,
-        "IncompressibleNavierStokesVMSModule: hydrostatic pressure initialization produced a non-finite value at vertex ",
-        init.field_name.empty()
-            ? std::string()
-            : " from mesh vertex field '" + init.field_name + "'");
-
-    // p0 at the node pressure constraints, against their values.
-    std::size_t checked_gauge_constraints = 0u;
-    std::size_t skipped_gauge_constraints = 0u;
-    FE::Real gauge_pressure_min = std::numeric_limits<FE::Real>::infinity();
-    FE::Real gauge_pressure_max = -std::numeric_limits<FE::Real>::infinity();
-    FE::Real gauge_initialized_pressure_min =
-        std::numeric_limits<FE::Real>::infinity();
-    FE::Real gauge_initialized_pressure_max =
-        -std::numeric_limits<FE::Real>::infinity();
-    FE::Real gauge_pressure_max_abs_error = FE::Real{0.0};
-    for (const auto& constraint : options.node_pressure_constraints.values) {
-        const auto local_vertex = pressureConstraintLocalVertex(
-            system, options, constraint.node_id);
-        if (!local_vertex.has_value() || *local_vertex < 0 ||
-            *local_vertex >= n_vertices) {
-            ++skipped_gauge_constraints;
-            continue;
-        }
-
-        const FE::Real initialized_pressure = FE::level_set::levelSetSideVertexValue(
-            p0, *local_vertex, mesh.getNodeCoordinates(*local_vertex));
-        ++checked_gauge_constraints;
-        gauge_pressure_min = std::min(gauge_pressure_min, constraint.pressure);
-        gauge_pressure_max = std::max(gauge_pressure_max, constraint.pressure);
-        gauge_initialized_pressure_min =
-            std::min(gauge_initialized_pressure_min, initialized_pressure);
-        gauge_initialized_pressure_max =
-            std::max(gauge_initialized_pressure_max, initialized_pressure);
-        gauge_pressure_max_abs_error =
-            std::max(gauge_pressure_max_abs_error,
-                     std::abs(initialized_pressure - constraint.pressure));
-    }
-
-    FE::systems::writeVectorEntries(
-        u0,
-        entries.dofs,
-        entries.values,
-        "IncompressibleNavierStokesVMSModule: hydrostatic pressure initialization found no pressure vertex DOFs",
-        "IncompressibleNavierStokesVMSModule: hydrostatic pressure initialization could not create a vector view");
-
-    if (active_pressure_domain.has_value()) {
-        const auto finite = [](FE::Real value) {
-            return std::isfinite(value) ? value : FE::Real{0.0};
-        };
-        const auto& statistics = entries.statistics;
-        auto record =
-            post::navierStokesLog("hydrostatic pressure initialization")
-                .diagnostic("hydrostatic_initialization")
-                .text("active_domain", activeDomainName(active_pressure_domain->active_domain))
-                .integer("wet_pressure_vertices", statistics.on_side_vertices)
-                .integer("dry_pressure_vertices", statistics.off_side_vertices)
-                .integer("active_support_pressure_vertices", statistics.supported_vertices)
-                .integer("dry_sign_active_support_pressure_vertices", statistics.off_side_supported_vertices)
-                .real("reference_pressure", init.reference_pressure)
-                .real("initialized_pressure_min", finite(statistics.value_min))
-                .real("initialized_pressure_max", finite(statistics.value_max))
-                .real("wet_pressure_min", finite(statistics.supported_value_min))
-                .real("wet_pressure_max", finite(statistics.supported_value_max))
-                .integer("gauge_constraints", options.node_pressure_constraints.values.size())
-                .integer("checked_gauge_constraints", checked_gauge_constraints)
-                .integer("skipped_gauge_constraints", skipped_gauge_constraints)
-                .real("gauge_pressure_min", finite(gauge_pressure_min))
-                .real("gauge_pressure_max", finite(gauge_pressure_max))
-                .real("gauge_initialized_pressure_min", finite(gauge_initialized_pressure_min))
-                .real("gauge_initialized_pressure_max", finite(gauge_initialized_pressure_max))
-                .real("gauge_pressure_max_abs_error", gauge_pressure_max_abs_error);
-        if (!init.field_name.empty()) {
-            record.quoted("pressure_field", init.field_name);
-        }
-        FE::logRecord(record);
-    }
-}
-
-} // namespace
-
-namespace {
-
-// The field registration, the generated-boundary Nitsche count and the
-// fitted normal kinematics of registerOn (formerly NavierStokesFields,
-// NavierStokesGeneratedNitsche and FreeSurface/FreeSurfaceFittedALE).
-
-std::vector<FE::constraints::VertexDirichletValue> nodePressureValues(
-    const IncompressibleNavierStokesVMSOptions& options)
-{
-    std::vector<FE::constraints::VertexDirichletValue> values;
-    values.reserve(options.node_pressure_constraints.values.size());
-    for (const auto& in : options.node_pressure_constraints.values) {
-        values.push_back(FE::constraints::VertexDirichletValue{in.node_id, in.pressure});
-    }
-    return values;
-}
-
-struct NavierStokesFieldIds {
-    FE::FieldId velocity{FE::INVALID_FIELD_ID};
-    FE::FieldId pressure{FE::INVALID_FIELD_ID};
-    FE::FieldId body_force{FE::INVALID_FIELD_ID};
-};
-
-NavierStokesFieldIds registerNavierStokesFields(
-    FE::systems::FESystem& system,
-    const IncompressibleNavierStokesVMSOptions& options,
-    NavierStokesPreflight& preflight)
-{
-    auto& u_spec = preflight.u_spec;
-    auto& p_spec = preflight.p_spec;
-    auto& body_force_spec = preflight.body_force_spec;
-    auto& semi_implicit_reference_spec = preflight.semi_implicit_reference_spec;
-
-    FE::systems::FieldBinding fields(
-        system, "IncompressibleNavierStokesVMSModule::registerOn");
-    const FE::FieldId u_id = fields.unknown(std::move(u_spec), "velocity");
-    const FE::FieldId p_id = fields.unknown(std::move(p_spec), "pressure");
-
-    FE::FieldId body_force_field_id = FE::INVALID_FIELD_ID;
-    if (body_force_spec.has_value()) {
-        body_force_field_id = fields.prescribed(
-            std::move(*body_force_spec),
-            options.auto_register_body_force_field,
-            "momentum source");
-    }
-    if (semi_implicit_reference_spec.has_value()) {
-        (void)fields.prescribed(
-            std::move(*semi_implicit_reference_spec),
-            /*auto_register=*/true,
-            "semi-implicit reference velocity");
-    }
-
-    return NavierStokesFieldIds{
-        .velocity = u_id,
-        .pressure = p_id,
-        .body_force = body_force_field_id,
-    };
-}
 
 void requireCertifiedNitscheTraces(
     const IncompressibleNavierStokesVMSOptions& options,
@@ -1180,11 +735,19 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     auto preflight = preflightNavierStokes(system, o, velocity_space_, pressure_space_);   // no mutation before
     const int dim = preflight.dim;
     const auto& free_surfaces = preflight.effective_free_surfaces;
-    const auto ids = registerNavierStokesFields(system, o, preflight);              // u, p, f_h, u_ref
-    const FieldId u_id = ids.velocity;
-    const FieldId p_id = ids.pressure;
+    fs::FieldBinding fields(system, "IncompressibleNavierStokesVMSModule::registerOn");
+    const FieldId u_id = fields.unknown(std::move(preflight.u_spec), "velocity");
+    const FieldId p_id = fields.unknown(std::move(preflight.p_spec), "pressure");
+    const FieldId body_force_id = preflight.body_force_spec
+        ? fields.prescribed(std::move(*preflight.body_force_spec),
+                            o.auto_register_body_force_field, "momentum source")
+        : FE::INVALID_FIELD_ID;
+    if (preflight.semi_implicit_reference_spec) {
+        (void)fields.prescribed(std::move(*preflight.semi_implicit_reference_spec),
+                                true, "semi-implicit reference velocity");
+    }
     post::declareFreeSurfaceDiscreteFunctionals(free_surfaces, system, u_id, o.density, o.body_force,
-                                          !o.has_body_force_spacetime && ids.body_force == FE::INVALID_FIELD_ID,
+                                          !o.has_body_force_spacetime && body_force_id == FE::INVALID_FIELD_ID,
                                           o.viscosity, o.viscosity_model == nullptr);
     // Exterior conditions act on the wetted part of a boundary when the liquid is a cut side.
     const auto wetted = wettedBoundaryResolver(system, free_surfaces);
@@ -1210,7 +773,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
         }
     }
     if (!o.node_pressure_constraints.values.empty()) {
-        plan.vertexValues(p_id, nodePressureValues(o), nodePressureIdMode(o));
+        plan.vertexValues(p_id, std::move(preflight.node_pressure_values), nodePressureIdMode(o));
     }
     plan.commitThrough(cs::ConstraintPhase::VertexValues);
 
@@ -1229,7 +792,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     const auto rho = FormExpr::constant(o.density);
     const auto g = constantVector(o.body_force, dim);
     const NavierStokesTerms t{u, p, v, q, rho, viscosity(o, u),
-                              bodyForce(o, g, dim, ids.body_force, *velocity_space_, u), dim};
+                              bodyForce(o, g, dim, body_force_id, *velocity_space_, u), dim};
     const bool mcv = o.enable_ale && o.include_moving_control_volume_transient;
     const auto r = navierStokesVMSIntegrands(
         t, {.convection = o.enable_convection, .ale = o.enable_ale, .moving_control_volume = mcv,
@@ -1242,7 +805,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     // Bookkeeping of the opt-in diagnostics and of the free-surface work ledger (exact additive groups of
     // the residual), collected while the terms are stated.
     const auto active_continuity = pspg_grad_p.isValid() ? C + pspg_grad_p : C;
-    const bool nonconservative_force = o.has_body_force_spacetime || ids.body_force != FE::INVALID_FIELD_ID ||
+    const bool nonconservative_force = o.has_body_force_spacetime || body_force_id != FE::INVALID_FIELD_ID ||
                                        o.rotating_frame_coriolis_enabled;
     auto work = post::bulkResidualWork(r, M, C, pspg_grad_p, -rho * inner(g, v), nonconservative_force,
                                  preflight.enable_vms, Omega);
@@ -1344,17 +907,80 @@ void IncompressibleNavierStokesVMSModule::applyInitialConditions(const fs::FESys
         applyTwoFluidInitialConditions(system, u0);
         return;
     }
-    // u0 and p0 from mesh vertex fields where given; hydrostatic initialization sets
-    //   p0(x) = p_ref + rho g . (x - x_ref)   on the liquid support (p_ref on dry vertices).
-    const auto& init = options_.hydrostatic_pressure_initialization;
-    const auto hydrostatic = [this, &init](const std::array<Real, 3>& x) {
+    const auto& o = options_;
+    const auto& init = o.hydrostatic_pressure_initialization;
+    auto initialized_dofs = fs::initializeFieldFromMeshVertexField(
+        system, u0, system.findFieldByName(o.velocity_field_name),
+        "IncompressibleNavierStokesVMSModule: mesh-field velocity initialization");
+    if (!init.enabled) {
+        initialized_dofs += fs::initializeFieldFromMeshVertexField(
+            system, u0, system.findFieldByName(o.pressure_field_name),
+            "IncompressibleNavierStokesVMSModule: mesh-field pressure initialization");
+        if (initialized_dofs > 0u) {
+            FE::logRecord(post::navierStokesLog("mesh-field initialization")
+                              .diagnostic("mesh_field_initialization")
+                              .integer("initialized_dofs", initialized_dofs)
+                              .quoted("velocity_field", o.velocity_field_name)
+                              .quoted("pressure_field", o.pressure_field_name));
+        }
+        return;
+    }
+    if (initialized_dofs > 0u) {
+        FE::logRecord(post::navierStokesLog("mesh-field initialization")
+                          .diagnostic("mesh_field_initialization")
+                          .integer("initialized_dofs", initialized_dofs)
+                          .quoted("velocity_field", o.velocity_field_name));
+    }
+
+    const auto pressure = fs::requireVertexField(
+        system, o.pressure_field_name,
+        "IncompressibleNavierStokesVMSModule: hydrostatic pressure initialization could not find pressure field '",
+        "IncompressibleNavierStokesVMSModule: hydrostatic pressure initialization requires vertex DOF metadata");
+    // p0(x) = p_ref + rho g . (x - x_ref) on liquid support, p_ref elsewhere.
+    // A selected mesh vertex field supplies the supported values when given.
+    const auto hydrostatic = [&o, &init](const std::array<Real, 3>& x) {
         Real p0 = init.reference_pressure;
-        for (std::size_t d = 0; d < options_.body_force.size(); ++d) {
-            p0 += options_.density * options_.body_force[d] * (x[d] - init.reference_point[d]);
+        for (std::size_t d = 0; d < o.body_force.size(); ++d) {
+            p0 += o.density * o.body_force[d] * (x[d] - init.reference_point[d]);
         }
         return p0;
     };
-    initializeNavierStokesState(system, u0, options_, hydrostatic);
+    const auto gauges = nodePressureValues(o);
+    const auto prepared = hydrostaticPressureInitialization(o, hydrostatic, gauges);
+    const auto initialized = FE::level_set::initializeVertexFieldOnLevelSetSide(
+        system, u0, pressure, prepared.field);
+    if (prepared.active_domain) {
+        const auto finite = [](Real value) {
+            return std::isfinite(value) ? value : Real{0.0};
+        };
+        const auto& statistics = initialized.statistics;
+        const auto& comparison = initialized.comparisons;
+        auto record =
+            post::navierStokesLog("hydrostatic pressure initialization")
+                .diagnostic("hydrostatic_initialization")
+                .text("active_domain", activeDomainName(prepared.active_domain->active_domain))
+                .integer("wet_pressure_vertices", statistics.on_side_vertices)
+                .integer("dry_pressure_vertices", statistics.off_side_vertices)
+                .integer("active_support_pressure_vertices", statistics.supported_vertices)
+                .integer("dry_sign_active_support_pressure_vertices", statistics.off_side_supported_vertices)
+                .real("reference_pressure", init.reference_pressure)
+                .real("initialized_pressure_min", finite(statistics.value_min))
+                .real("initialized_pressure_max", finite(statistics.value_max))
+                .real("wet_pressure_min", finite(statistics.supported_value_min))
+                .real("wet_pressure_max", finite(statistics.supported_value_max))
+                .integer("gauge_constraints", gauges.size())
+                .integer("checked_gauge_constraints", comparison.checked)
+                .integer("skipped_gauge_constraints", comparison.skipped)
+                .real("gauge_pressure_min", finite(comparison.prescribed_min))
+                .real("gauge_pressure_max", finite(comparison.prescribed_max))
+                .real("gauge_initialized_pressure_min", finite(comparison.sampled_min))
+                .real("gauge_initialized_pressure_max", finite(comparison.sampled_max))
+                .real("gauge_pressure_max_abs_error", comparison.maximum_absolute_error);
+        if (!init.field_name.empty()) {
+            record.quoted("pressure_field", init.field_name);
+        }
+        FE::logRecord(record);
+    }
 }
 
 // ---------------------------------------------------------------------------

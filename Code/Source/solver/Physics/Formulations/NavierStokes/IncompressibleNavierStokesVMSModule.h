@@ -1250,15 +1250,6 @@ private:
 // pressure-constraint check of the initial state
 // ---------------------------------------------------------------------------
 
-struct ActivePressureDomain {
-    const FreeSurfaceBoundary* boundary{nullptr};
-    FreeSurfaceActiveDomain active_domain{FreeSurfaceActiveDomain::None};
-};
-
-[[nodiscard]] std::optional<ActivePressureDomain>
-activePressureDomainFor(
-    const std::vector<FreeSurfaceBoundary>& free_surfaces);
-
 [[nodiscard]] FE::FieldId resolveLevelSetFieldId(
     const FreeSurfaceBoundary& bc,
     const FE::systems::FESystem& system);
@@ -1307,14 +1298,6 @@ generatedUnfittedContactLineMarkerKey(
 /// The resolver refers to @p system and @p free_surfaces, which must outlive it.
 [[nodiscard]] std::function<std::optional<int>(int)> wettedBoundaryResolver(
     FE::systems::FESystem& system,
-    const std::vector<FreeSurfaceBoundary>& free_surfaces);
-
-/// The node pressure constraints of an active-domain free surface lie on its
-/// wet side, away from the interface, and are logged (the initial state;
-/// Physics/Options validates with it after validateNodePressureConstraints).
-void validateActiveDomainPressureConstraints(
-    const FE::systems::FESystem& system,
-    const IncompressibleNavierStokesVMSOptions& options,
     const std::vector<FreeSurfaceBoundary>& free_surfaces);
 
 } // namespace navier_stokes

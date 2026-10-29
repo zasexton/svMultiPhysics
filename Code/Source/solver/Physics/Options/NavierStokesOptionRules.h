@@ -39,6 +39,7 @@
 #include "FE/Forms/FormExpr.h"
 #include "FE/Forms/IntegrationDomain.h"
 #include "FE/LevelSet/LevelSetGeometry.h"
+#include "FE/LevelSet/LevelSetSideSupport.h"
 #include "FE/Systems/ALEBinding.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormsInstaller.h"
@@ -49,6 +50,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <initializer_list>
 #include <memory>
 #include <optional>
@@ -62,6 +64,32 @@ namespace svmp {
 namespace Physics {
 namespace formulations {
 namespace navier_stokes {
+
+/// The selected active-side pressure policy; the boundary storage is borrowed.
+struct ActivePressureDomain {
+    const FreeSurfaceBoundary* boundary{nullptr};
+    FreeSurfaceActiveDomain active_domain{FreeSurfaceActiveDomain::None};
+};
+
+[[nodiscard]] std::optional<ActivePressureDomain> activePressureDomainFor(
+    const std::vector<FreeSurfaceBoundary>& free_surfaces);
+
+/// Ordered input values for vertex constraints and initialization comparisons.
+[[nodiscard]] std::vector<FE::constraints::VertexDirichletValue> nodePressureValues(
+    const IncompressibleNavierStokesVMSOptions& options);
+
+struct PreparedPressureInitialization {
+    FE::level_set::SideVertexInitializationDeclaration field;
+    std::optional<ActivePressureDomain> active_domain;
+};
+
+/// Declare the pressure source and support from the original options without
+/// reading fields or evaluating the law. The options and gauge storage must
+/// remain valid until initialization finishes.
+[[nodiscard]] PreparedPressureInitialization hydrostaticPressureInitialization(
+    const IncompressibleNavierStokesVMSOptions& options,
+    const std::function<FE::Real(const std::array<FE::Real, 3>&)>& law,
+    std::span<const FE::constraints::VertexDirichletValue> gauges);
 
 void validateWallNormalDimension(
     const IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine& contact_line,
@@ -134,6 +162,7 @@ struct NavierStokesPreflight {
     std::optional<FE::systems::FieldSpec> semi_implicit_reference_spec;
     FE::systems::ALEBindingOptions ale_options;
     std::vector<FreeSurfaceBoundary> effective_free_surfaces;   // generated interface markers resolved
+    std::vector<FE::constraints::VertexDirichletValue> node_pressure_values;
     std::vector<PreparedWeakVelocityBoundary> prepared_weak_velocity_boundaries;
     bool has_exterior_free_surface{false};
 };

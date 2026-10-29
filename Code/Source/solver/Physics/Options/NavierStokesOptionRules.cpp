@@ -86,6 +86,118 @@ namespace navier_stokes {
 
 namespace {
 
+constexpr FE::Real kPressureGaugeLevelSetMargin = 1.0e-8;
+
+[[nodiscard]] const FE::systems::LocalVertexMessages& pressureConstraintVertexMessages()
+{
+    static const FE::systems::LocalVertexMessages messages{
+        .negative_id =
+            "IncompressibleNavierStokesVMSModule: pressure constraint references a negative node id",
+        .no_native_mesh =
+            "IncompressibleNavierStokesVMSModule: active-domain pressure constraint validation requires a native mesh for global vertex ids",
+        .no_mesh_support =
+            "IncompressibleNavierStokesVMSModule: active-domain pressure constraint validation requires native mesh support for global vertex ids"};
+    return messages;
+}
+
+[[nodiscard]] FE::systems::MeshVertexFieldMessages pressureLevelSetMessages(
+    std::string_view context)
+{
+    const std::string owner =
+        "IncompressibleNavierStokesVMSModule: " + std::string(context);
+    return {
+        .no_native_mesh = owner + " requires a native mesh vertex level-set field",
+        .missing_field_prefix = owner + " could not find vertex level-set field '",
+        .not_float64 = owner + " requires a Float64 vertex level-set field",
+        .no_components = owner + " requires at least one level-set component",
+        .too_few_entries =
+            owner + " level-set field has fewer entries than pressure vertices",
+        .empty = owner + " found an empty level-set field",
+        .no_mesh_support =
+            "IncompressibleNavierStokesVMSModule: active-domain pressure operations require native mesh support"};
+}
+
+[[nodiscard]] FE::level_set::LevelSetSupportSide pressureSupportSide(
+    FreeSurfaceActiveDomain active_domain) noexcept
+{
+    switch (active_domain) {
+    case FreeSurfaceActiveDomain::LevelSetNegative:
+        return FE::level_set::LevelSetSupportSide::Negative;
+    case FreeSurfaceActiveDomain::LevelSetPositive:
+        return FE::level_set::LevelSetSupportSide::Positive;
+    case FreeSurfaceActiveDomain::None:
+        break;
+    }
+    return FE::level_set::LevelSetSupportSide::Everywhere;
+}
+
+[[nodiscard]] FE::Real finiteForPressureReport(FE::Real value) noexcept
+{
+    return std::isfinite(value) ? value : FE::Real{0.0};
+}
+
+void validateActiveDomainPressureValues(
+    const FE::systems::FESystem& system,
+    const IncompressibleNavierStokesVMSOptions& options,
+    const std::vector<FreeSurfaceBoundary>& free_surfaces,
+    std::span<const FE::constraints::VertexDirichletValue> values)
+{
+    if (values.empty()) {
+        return;
+    }
+    const auto active_domain = activePressureDomainFor(free_surfaces);
+    if (!active_domain.has_value()) {
+        return;
+    }
+    const auto& bc = *active_domain->boundary;
+    const auto level_set = FE::systems::requireMeshVertexField(
+        system, bc.level_set_field_name, system.meshAccess().numVertices(),
+        pressureLevelSetMessages("active-domain pressure constraint validation"));
+    const auto statistics = FE::level_set::requireVertexValuesOnLevelSetSide(
+        system,
+        {.values = values,
+         .id_mode = nodePressureIdMode(options),
+         .messages = pressureConstraintVertexMessages()},
+        {.level_set = {level_set.values, level_set.components, level_set.entity_count},
+         .isovalue = bc.level_set_isovalue,
+         .side = pressureSupportSide(active_domain->active_domain),
+         .exclusion_margin = kPressureGaugeLevelSetMargin,
+         .failure_message = [&](const FE::level_set::VertexSideFailure& failure) {
+             if (failure.reason == FE::level_set::VertexSideViolation::OutsideMesh) {
+                 return "IncompressibleNavierStokesVMSModule: active-domain pressure constraint references vertex " +
+                        std::to_string(failure.requested_vertex) +
+                        " outside the local pressure mesh";
+             }
+             std::ostringstream message;
+             message << "IncompressibleNavierStokesVMSModule: active-domain pressure "
+                     << "constraint node_id=" << failure.requested_vertex
+                     << " local_vertex=" << failure.local_vertex;
+             if (failure.reason == FE::level_set::VertexSideViolation::OutsideSide) {
+                 message << " is on the dry side for Active_domain="
+                         << activeDomainName(active_domain->active_domain)
+                         << " phi=" << failure.sample.phi
+                         << " isovalue=" << bc.level_set_isovalue;
+             } else {
+                 message << " is too close to the level-set interface: |phi-isovalue|="
+                         << std::abs(failure.sample.signed_gap)
+                         << " margin=" << kPressureGaugeLevelSetMargin;
+             }
+             return message.str();
+         }});
+    FE::logRecord(post::navierStokesLog("pressure gauge")
+                      .diagnostic("pressure_gauge_check")
+                      .integer("constraints", values.size())
+                      .integer("checked_local_constraints", statistics.checked)
+                      .integer("skipped_nonlocal_constraints", statistics.skipped_nonlocal)
+                      .real("constraint_pressure_min", finiteForPressureReport(statistics.input_min))
+                      .real("constraint_pressure_max", finiteForPressureReport(statistics.input_max))
+                      .text("active_domain", activeDomainName(active_domain->active_domain))
+                      .real("isovalue", bc.level_set_isovalue)
+                      .real("min_signed_gap", finiteForPressureReport(statistics.signed_gap_min))
+                      .real("max_signed_gap", finiteForPressureReport(statistics.signed_gap_max))
+                      .real("margin", kPressureGaugeLevelSetMargin));
+}
+
 // The contact-line validators (formerly FreeSurface/FreeSurfaceContactCertificate).
 
 constexpr FE::Real kMinimumContactTransverseSine = FE::interfaces::kContactLineMinimumTransverseSine;
@@ -412,6 +524,112 @@ void validateFreeSurfaceSemiImplicitSurfaceTension(
 
 } // namespace
 
+std::optional<ActivePressureDomain> activePressureDomainFor(
+    const std::vector<FreeSurfaceBoundary>& free_surfaces)
+{
+    std::optional<ActivePressureDomain> active_domain;
+    for (const auto& bc : free_surfaces) {
+        if (bc.active_domain == FreeSurfaceActiveDomain::None) {
+            continue;
+        }
+        if (bc.implementation != FreeSurfaceImplementation::UnfittedLevelSet) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: active-domain pressure operations are only valid for unfitted level-set free surfaces");
+        }
+        if (bc.level_set_field_name.empty()) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: active-domain pressure operations require a non-empty level_set_field_name");
+        }
+        if (active_domain.has_value()) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: at most one active-domain free surface may restrict pressure operations");
+        }
+        active_domain = ActivePressureDomain{&bc, bc.active_domain};
+    }
+    return active_domain;
+}
+
+std::vector<FE::constraints::VertexDirichletValue> nodePressureValues(
+    const IncompressibleNavierStokesVMSOptions& options)
+{
+    std::vector<FE::constraints::VertexDirichletValue> values;
+    values.reserve(options.node_pressure_constraints.values.size());
+    for (const auto& input : options.node_pressure_constraints.values) {
+        values.push_back({input.node_id, input.pressure});
+    }
+    return values;
+}
+
+PreparedPressureInitialization hydrostaticPressureInitialization(
+    const IncompressibleNavierStokesVMSOptions& options,
+    const std::function<FE::Real(const std::array<FE::Real, 3>&)>& law,
+    std::span<const FE::constraints::VertexDirichletValue> gauges)
+{
+    const auto& init = options.hydrostatic_pressure_initialization;
+    const auto active_domain = activePressureDomainFor(options.free_surface);
+    if (active_domain.has_value() &&
+        active_domain->boundary->active_domain_method ==
+            FreeSurfaceActiveDomainMethod::CutVolume &&
+        init.field_name.empty()) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: CutVolume active-domain "
+            "hydrostatic pressure initialization requires a level-set-aware "
+            "mesh vertex field selected by Hydrostatic_pressure_field_name");
+    }
+
+    FE::level_set::SideVertexInitializationDeclaration declaration{};
+    if (active_domain.has_value()) {
+        const auto& bc = *active_domain->boundary;
+        declaration.support = FE::level_set::LevelSetVertexSupportDeclaration{
+            .level_set = {
+                .field_name = bc.level_set_field_name,
+                .messages = pressureLevelSetMessages(
+                    "active-domain hydrostatic pressure initialization")},
+            .isovalue = bc.level_set_isovalue,
+            .side = pressureSupportSide(active_domain->active_domain),
+            .interface_marker = bc.interface_marker,
+            .use_generated_volume_rules =
+                bc.active_domain_method == FreeSurfaceActiveDomainMethod::CutVolume,
+            .support_message_prefix =
+                "IncompressibleNavierStokesVMSModule: active-domain pressure initialization"};
+    }
+    if (!init.field_name.empty()) {
+        const std::string owner =
+            "IncompressibleNavierStokesVMSModule: hydrostatic pressure field initialization";
+        declaration.source = FE::systems::RequiredMeshVertexScalarSource{
+            .field_name = init.field_name,
+            .messages = {
+                .no_native_mesh = owner + " requires a native mesh",
+                .missing_field_prefix = owner + " could not find vertex field '",
+                .not_float64 = owner + " requires a Float64 vertex field",
+                .no_components = owner + " requires at least one component",
+                .too_few_entries = owner + " has fewer entries than pressure vertices",
+                .empty = owner + " found an empty vertex field",
+                .no_mesh_support = owner + " requires native mesh support",
+                .non_finite_prefix =
+                    "IncompressibleNavierStokesVMSModule: hydrostatic pressure mesh vertex field '" +
+                    init.field_name + "' contains a non-finite value at vertex "}};
+    } else {
+        declaration.source = law;
+    }
+    declaration.unsupported_value = init.reference_pressure;
+    declaration.comparisons = {
+        .values = gauges,
+        .id_mode = nodePressureIdMode(options),
+        .messages = pressureConstraintVertexMessages()};
+    declaration.messages = {
+        .non_finite_prefix =
+            "IncompressibleNavierStokesVMSModule: hydrostatic pressure initialization produced a non-finite value at vertex ",
+        .non_finite_suffix = init.field_name.empty()
+            ? std::string()
+            : " from mesh vertex field '" + init.field_name + "'",
+        .no_entries =
+            "IncompressibleNavierStokesVMSModule: hydrostatic pressure initialization found no pressure vertex DOFs",
+        .no_view =
+            "IncompressibleNavierStokesVMSModule: hydrostatic pressure initialization could not create a vector view"};
+    return {std::move(declaration), active_domain};
+}
+
 void validateGeneratedFreeSurfaceMarkerUniqueness(
     std::span<const FreeSurfaceBoundary> boundaries,
     const FE::systems::FESystem& system)
@@ -490,12 +708,7 @@ std::optional<FE::GlobalIndex> pressureConstraintLocalVertex(
         system,
         nodePressureIdMode(options),
         node_id,
-        {.negative_id =
-             "IncompressibleNavierStokesVMSModule: pressure constraint references a negative node id",
-         .no_native_mesh =
-             "IncompressibleNavierStokesVMSModule: active-domain pressure constraint validation requires a native mesh for global vertex ids",
-         .no_mesh_support =
-             "IncompressibleNavierStokesVMSModule: active-domain pressure constraint validation requires native mesh support for global vertex ids"});
+        pressureConstraintVertexMessages());
 }
 
 void validateNodePressureConstraints(
@@ -1608,10 +1821,12 @@ NavierStokesPreflight preflightNavierStokes(
     validateGeneratedFreeSurfaceMarkerUniqueness(
         effective_free_surfaces, system);
     validateNodePressureConstraints(system, options);
-    validateActiveDomainPressureConstraints(
+    auto node_pressure_values = nodePressureValues(options);
+    validateActiveDomainPressureValues(
         system,
         options,
-        effective_free_surfaces);
+        effective_free_surfaces,
+        node_pressure_values);
     const bool has_exterior_free_surface = std::any_of(
         effective_free_surfaces.begin(),
         effective_free_surfaces.end(),
@@ -1798,6 +2013,7 @@ NavierStokesPreflight preflightNavierStokes(
         .semi_implicit_reference_spec = std::move(semi_implicit_reference_spec),
         .ale_options = ale_options,
         .effective_free_surfaces = std::move(effective_free_surfaces),
+        .node_pressure_values = std::move(node_pressure_values),
         .prepared_weak_velocity_boundaries = std::move(prepared_weak_velocity_boundaries),
         .has_exterior_free_surface = has_exterior_free_surface,
     };
