@@ -62,6 +62,9 @@ namespace systems {
 class FESystem;
 struct ALEBinding;
 
+/// Whether construction ensures an operator exists or strictly adds a new one.
+enum class OperatorCreation { Ensure, Add };
+
 /// How a separate kernel group differs from the formulation's options.
 struct FormulationGroup {
     std::string source_component_tag{};          ///< set when non-empty
@@ -82,6 +85,12 @@ class FormulationBuilder {
 public:
     /// Adds @p operator_tag to the system when it is missing.
     FormulationBuilder(FESystem& system, OperatorTag operator_tag, FormInstallOptions base);
+
+    /// Add uses FESystem::addOperator unconditionally, including its duplicate rejection.
+    FormulationBuilder(FESystem& system,
+                       OperatorTag operator_tag,
+                       FormInstallOptions base,
+                       OperatorCreation creation);
 
     FormulationBuilder& symbolicTangent(bool enabled = true);
 
@@ -124,9 +133,13 @@ public:
     [[nodiscard]] FormInstallOptions groupOptions(const FormulationGroup& group) const;
 
     /// installFormulation with options().
+    CoupledResidualKernels install(std::span<const FieldId> fields, const forms::FormExpr& residual);
     CoupledResidualKernels install(std::initializer_list<FieldId> fields, const forms::FormExpr& residual);
 
     /// installFormulation with groupOptions(@p group).
+    CoupledResidualKernels installGroup(std::span<const FieldId> fields,
+                                        const forms::FormExpr& residual,
+                                        const FormulationGroup& group);
     CoupledResidualKernels installGroup(std::initializer_list<FieldId> fields,
                                         const forms::FormExpr& residual,
                                         const FormulationGroup& group);

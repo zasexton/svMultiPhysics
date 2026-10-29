@@ -10,6 +10,7 @@
 #include "Systems/FESystem.h"
 #include "Systems/DiagnosticRegistry.h"
 #include "Systems/FormulationBuilder.h"
+#include "Systems/ALEBinding.h"
 #include "Systems/FunctionalForms.h"
 #include "Systems/SystemManifest.h"
 #include "Systems/BoundaryConditionManager.h"
@@ -1515,6 +1516,226 @@ TEST(FormsInstaller, GeneratedTraceRequirementsMatchOrderedBoundaryRoutes)
     rejects({BoundaryDomain::generatedActiveSubset(4, 105), second_domain}, bindings);
     rejects({BoundaryDomain::fullPhysical(4), second_domain}, bindings);
     rejects(duplicates, {first});
+}
+
+TEST(FormulationBuilder, CreationPolicyPreservesStrictAddAndEnsureSetupBehavior)
+{
+    namespace systems = svmp::FE::systems;
+    namespace forms = svmp::FE::forms;
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    systems::FESystem sys(mesh);
+    const auto field = sys.addField(systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto u = forms::FormExpr::stateField(field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    sys.addOperator("op");
+    (void)systems::installFormulation(sys, "op", {field}, (u * v).dx());
+    const auto kernels = sys.operatorDefinition("op").cells;
+    const auto manifest = systems::kernelManifestLines(sys);
+    systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+    ASSERT_TRUE(sys.isSetup());
+
+    systems::FormulationBuilder default_ensure(sys, "op", {});
+    EXPECT_TRUE(sys.isSetup());
+    systems::FormulationBuilder explicit_ensure(sys, "op", {}, systems::OperatorCreation::Ensure);
+    EXPECT_TRUE(sys.isSetup());
+
+    const auto rejection = [](auto&& create) {
+        try {
+            create();
+            ADD_FAILURE() << "expected operator creation to reject";
+        } catch (const svmp::FE::InvalidArgumentException& error) {
+            return std::string(error.what());
+        }
+        return std::string{};
+    };
+    const auto original_duplicate = rejection([&] { sys.addOperator("op"); });
+    EXPECT_FALSE(sys.isSetup());
+    sys.setup({}, inputs);
+    ASSERT_TRUE(sys.isSetup());
+    EXPECT_EQ(rejection([&] {
+        systems::FormulationBuilder strict(sys, "op", {}, systems::OperatorCreation::Add);
+    }), original_duplicate);
+    EXPECT_FALSE(sys.isSetup());
+    ASSERT_EQ(sys.operatorDefinition("op").cells.size(), kernels.size());
+    for (std::size_t i = 0; i < kernels.size(); ++i) {
+        EXPECT_EQ(sys.operatorDefinition("op").cells[i].kernel, kernels[i].kernel);
+    }
+    EXPECT_EQ(sys.formulationRecords().size(), 1u);
+    EXPECT_EQ(systems::kernelManifestLines(sys), manifest);
+
+    const auto original_empty = rejection([&] { sys.addOperator(""); });
+    for (const auto policy : {systems::OperatorCreation::Ensure, systems::OperatorCreation::Add}) {
+        EXPECT_EQ(rejection([&] { systems::FormulationBuilder empty(sys, "", {}, policy); }), original_empty);
+    }
+    systems::FormulationBuilder strict_new(sys, "strict_new", {}, systems::OperatorCreation::Add);
+    systems::FormulationBuilder default_new(sys, "default_new", {});
+    EXPECT_TRUE(sys.hasOperator("strict_new"));
+    EXPECT_TRUE(sys.hasOperator("default_new"));
+}
+
+TEST(FormulationBuilder, SpanInstallsConditionalNoncontiguousRowsInSuppliedOrder)
+{
+    namespace systems = svmp::FE::systems;
+    namespace forms = svmp::FE::forms;
+    struct Snapshot {
+        std::vector<std::string> manifest;
+        std::vector<Real> matrix;
+        std::vector<Real> vector;
+    };
+    const auto build = [](bool through_builder, bool include_pressure) {
+        auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+        auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+        auto vector = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar, 3);
+        systems::FESystem sys(mesh);
+        const auto p_field = sys.addField(systems::FieldSpec{.name = "p", .space = scalar, .components = 1});
+        (void)sys.addField(systems::FieldSpec{.name = "unused", .space = scalar, .components = 1});
+        const auto u_field = sys.addField(systems::FieldSpec{.name = "u", .space = vector, .components = 3});
+        const auto u = forms::FormExpr::stateField(u_field, *vector, "u");
+        const auto p = forms::FormExpr::stateField(p_field, *scalar, "p");
+        const auto v = forms::FormExpr::testFunction(u_field, *vector, "v");
+        const auto q = forms::FormExpr::testFunction(p_field, *scalar, "q");
+        auto residual = inner(u, v).dx();
+        std::vector<FieldId> rows{u_field};
+        if (include_pressure) {
+            rows.push_back(p_field);
+            residual = residual + (p * q).dx() + (p * v.component(0)).dx() + (u.component(0) * q).dx();
+        }
+        systems::FormInstallOptions options;
+        options.compiler_options.use_symbolic_tangent = true;
+        systems::CoupledResidualKernels installed;
+        if (through_builder) {
+            systems::FormulationBuilder F(sys, "op", options);
+            installed = F.install(std::span<const FieldId>(rows), residual);
+            const auto before = systems::kernelManifestLines(sys);
+            const auto records = sys.formulationRecords().size();
+            try {
+                (void)F.install(std::span<const FieldId>{}, forms::FormExpr{});
+                ADD_FAILURE() << "empty span was accepted";
+            } catch (const svmp::FE::InvalidArgumentException& error) {
+                EXPECT_NE(std::string(error.what()).find("empty field list"), std::string::npos);
+            }
+            EXPECT_EQ(systems::kernelManifestLines(sys), before);
+            EXPECT_EQ(sys.formulationRecords().size(), records);
+        } else {
+            sys.addOperator("op");
+            installed = systems::installFormulation(sys, "op", std::span<const FieldId>(rows), residual, options);
+        }
+        EXPECT_FALSE(installed.residual.empty());
+        EXPECT_EQ(installed.residual.size(), include_pressure ? 2u : 1u);
+        EXPECT_EQ(sys.formulationRecords().front().active_fields,
+                  include_pressure ? std::vector<FieldId>({u_field, p_field}) : std::vector<FieldId>({u_field}));
+        EXPECT_EQ(sys.operatorDefinition("op").cells.front().test_field, u_field);
+        systems::SetupInputs inputs;
+        inputs.topology_override = singleTetraTopology();
+        sys.setup({}, inputs);
+        const auto n_dofs = sys.dofHandler().getNumDofs();
+        std::vector<Real> solution(static_cast<std::size_t>(n_dofs), Real{0.25});
+        systems::SystemStateView state;
+        state.u = solution;
+        systems::AssemblyRequest request;
+        request.op = "op";
+        request.want_matrix = true;
+        request.want_vector = true;
+        svmp::FE::assembly::DenseSystemView out(n_dofs);
+        out.zero();
+        EXPECT_TRUE(sys.assemble(request, state, &out, &out).success);
+        Snapshot snapshot{.manifest = systems::kernelManifestLines(sys)};
+        for (GlobalIndex i = 0; i < n_dofs; ++i) {
+            snapshot.vector.push_back(out.getVectorEntry(i));
+            for (GlobalIndex j = 0; j < n_dofs; ++j) {
+                snapshot.matrix.push_back(out.getMatrixEntry(i, j));
+            }
+        }
+        return snapshot;
+    };
+    for (const bool include_pressure : {false, true}) {
+        const auto by_builder = build(true, include_pressure);
+        const auto by_installer = build(false, include_pressure);
+        EXPECT_EQ(by_builder.manifest, by_installer.manifest);
+        EXPECT_EQ(by_builder.matrix, by_installer.matrix);
+        EXPECT_EQ(by_builder.vector, by_installer.vector);
+    }
+}
+
+TEST(FormulationBuilder, SpanGroupsInheritCurrentOptionsAndKeepDiagnosticsIsolated)
+{
+    namespace systems = svmp::FE::systems;
+    namespace forms = svmp::FE::forms;
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    auto vector = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar, 3);
+    systems::FESystem sys(mesh);
+    const auto p_field = sys.addField(systems::FieldSpec{.name = "p", .space = scalar, .components = 1});
+    const auto d_field = sys.addMeshDisplacementUnknown("d", vector);
+    const auto w_field = sys.addField(systems::FieldSpec{.name = "w", .space = scalar, .components = 1});
+    const auto p = forms::FormExpr::stateField(p_field, *scalar, "p");
+    const auto q = forms::FormExpr::testFunction(*scalar, "q");
+    systems::FormulationBuilder F(sys, "op", {});
+    F.symbolicTangent();
+    const std::array<FieldId, 1> rows{p_field};
+    (void)F.installGroup(std::span<const FieldId>(rows), (p * q).dx(), {});
+    systems::FormInstallOptions late_options;
+    late_options.compiler_options.use_symbolic_tangent = true;
+    late_options.source_component_tag = "late_base";
+    late_options.recordConstitutiveLaw(svmp::FE::analysis::dynamicViscosityMetadata(p_field, 0.5));
+    F.options() = late_options;
+    const systems::ALEBinding ale{
+        .enabled = true,
+        .mesh_velocity_source = systems::ALEMeshVelocitySource::CoupledDisplacement,
+        .mesh_displacement_field = d_field};
+    const systems::FormulationGroup group{
+        .source_component_tag = "coupled_group", .extra_trial_fields = {w_field, d_field, w_field}, .ale = &ale};
+    const auto group_options = F.groupOptions(group);
+    EXPECT_EQ(group_options.extra_trial_fields, std::vector<FieldId>({d_field, w_field}));
+    EXPECT_EQ(group_options.source_component_tag, "coupled_group");
+    (void)F.installGroup(std::span<const FieldId>(rows), (p * p * q).dx(), group);
+    ASSERT_EQ(sys.formulationRecords().size(), 2u);
+    EXPECT_TRUE(sys.formulationRecords()[0].constitutive_laws.empty());
+    EXPECT_EQ(sys.formulationRecords()[1].constitutive_laws.size(), 1u);
+    EXPECT_EQ(sys.formulationRecords()[1].active_fields, std::vector<FieldId>({p_field, d_field, w_field}));
+    EXPECT_EQ(F.options().source_component_tag, "late_base");
+    EXPECT_TRUE(F.options().extra_trial_fields.empty());
+    EXPECT_EQ(F.options().compiler_options.geometry_sensitivity.mode, forms::GeometrySensitivityMode::GeometryConstant);
+    F.diagnostics().declareSet("unit_span", {"SVMP_UNIT_SPAN_DIAGNOSTIC_SWITCH_THAT_IS_NEVER_SET"});
+    (void)F.diagnostic("unit_span", "diagnostic_span", {p_field}, (p * q).dx(),
+                       {.source_component_tag = "diagnostic", .extra_trial_fields = {w_field}});
+    ASSERT_EQ(sys.formulationRecords().size(), 3u);
+    EXPECT_TRUE(sys.formulationRecords()[0].contributes_to_problem_analysis);
+    EXPECT_TRUE(sys.formulationRecords()[1].contributes_to_problem_analysis);
+    EXPECT_TRUE(sys.formulationRecords()[2].contributes_to_problem_analysis);
+    EXPECT_EQ(sys.formulationRecords()[2].active_fields, std::vector<FieldId>({p_field, w_field}));
+    EXPECT_EQ(F.options().source_component_tag, "late_base");
+    EXPECT_TRUE(F.options().extra_trial_fields.empty());
+    EXPECT_TRUE(F.options().contributes_to_problem_analysis);
+}
+
+TEST(FormulationBuilder, SpanGroupSourceTagsReachCutVolumeTermsInCallOrder)
+{
+    namespace systems = svmp::FE::systems;
+    namespace forms = svmp::FE::forms;
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    systems::FESystem sys(mesh);
+    const auto field = sys.addField(systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto u = forms::FormExpr::stateField(field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    const auto residual = (u * v).dCutVolume(17, forms::CutVolumeSide::Negative);
+    const std::vector<FieldId> rows{field};
+    systems::FormulationBuilder F(sys, "op", {});
+    F.options().source_component_tag = "early";
+    (void)F.installGroup(std::span<const FieldId>(rows), residual, {});
+    F.options().source_component_tag = "late";
+    (void)F.installGroup(std::span<const FieldId>(rows), residual, {.source_component_tag = "override"});
+    (void)F.installGroup(std::span<const FieldId>(rows), residual, {});
+    const auto& terms = sys.operatorDefinition("op").cut_volumes;
+    ASSERT_EQ(terms.size(), 3u);
+    EXPECT_EQ(terms[0].source_component_tag, "early");
+    EXPECT_EQ(terms[1].source_component_tag, "override");
+    EXPECT_EQ(terms[2].source_component_tag, "late");
+    EXPECT_EQ(F.options().source_component_tag, "late");
 }
 
 TEST(FormulationBuilder, ComposesOptionsInCallOrderAndInstallsGroups)

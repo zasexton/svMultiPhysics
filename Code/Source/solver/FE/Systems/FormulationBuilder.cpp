@@ -22,11 +22,19 @@ namespace systems {
 FormulationBuilder::FormulationBuilder(FESystem& system,
                                        OperatorTag operator_tag,
                                        FormInstallOptions base)
+    : FormulationBuilder(system, std::move(operator_tag), std::move(base), OperatorCreation::Ensure)
+{
+}
+
+FormulationBuilder::FormulationBuilder(FESystem& system,
+                                       OperatorTag operator_tag,
+                                       FormInstallOptions base,
+                                       OperatorCreation creation)
     : system_(&system)
     , operator_tag_(std::move(operator_tag))
     , options_(std::move(base))
 {
-    if (!system_->hasOperator(operator_tag_)) {
+    if (creation == OperatorCreation::Add || !system_->hasOperator(operator_tag_)) {
         system_->addOperator(operator_tag_);
     }
 }
@@ -129,17 +137,30 @@ FormInstallOptions FormulationBuilder::groupOptions(const FormulationGroup& grou
     return group_options;
 }
 
-CoupledResidualKernels FormulationBuilder::install(std::initializer_list<FieldId> fields,
+CoupledResidualKernels FormulationBuilder::install(std::span<const FieldId> fields,
                                                    const forms::FormExpr& residual)
 {
     return installFormulation(*system_, operator_tag_, fields, residual, options_);
+}
+
+CoupledResidualKernels FormulationBuilder::install(std::initializer_list<FieldId> fields,
+                                                   const forms::FormExpr& residual)
+{
+    return install(std::span<const FieldId>{fields.begin(), fields.size()}, residual);
+}
+
+CoupledResidualKernels FormulationBuilder::installGroup(std::span<const FieldId> fields,
+                                                        const forms::FormExpr& residual,
+                                                        const FormulationGroup& group)
+{
+    return installFormulation(*system_, operator_tag_, fields, residual, groupOptions(group));
 }
 
 CoupledResidualKernels FormulationBuilder::installGroup(std::initializer_list<FieldId> fields,
                                                         const forms::FormExpr& residual,
                                                         const FormulationGroup& group)
 {
-    return installFormulation(*system_, operator_tag_, fields, residual, groupOptions(group));
+    return installGroup(std::span<const FieldId>{fields.begin(), fields.size()}, residual, group);
 }
 
 OperatorTag FormulationBuilder::workChannel(std::string_view suffix, std::initializer_list<WorkChannelPart> parts)
