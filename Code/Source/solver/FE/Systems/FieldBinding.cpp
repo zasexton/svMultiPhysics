@@ -58,6 +58,17 @@ namespace {
     return "a field of unknown scope";
 }
 
+void requireSourceKind(const FieldSpec& spec, FieldSourceKind expected, std::string_view context)
+{
+    if (spec.source_kind != expected) {
+        throw std::invalid_argument(
+            std::string(context) + ": field '" + spec.name +
+            (expected == FieldSourceKind::Unknown
+                 ? "' must be specified as an unknown field"
+                 : "' must be specified as a prescribed data field"));
+    }
+}
+
 } // namespace
 
 FieldBinding::FieldBinding(FESystem& system, std::string owner)
@@ -131,6 +142,28 @@ FieldId FieldBinding::unknown(FieldSpec spec, std::string_view role)
     return existing;
 }
 
+BoundUnknown FieldBinding::unknownSymbols(FieldSpec spec, std::string_view role,
+                                          std::string state_symbol, std::string test_symbol)
+{
+    // Preserve check()'s diagnostics before checking the caller's source kind.
+    check(*system_, spec, FieldSourceKind::Unknown, /*allow_missing=*/true, roleContext(role));
+    requireSourceKind(spec, FieldSourceKind::Unknown, roleContext(role));
+    const auto space = spec.space;
+    const auto id = unknown(std::move(spec), role);
+    return {id, forms::FormExpr::stateField(id, *space, std::move(state_symbol)),
+            forms::FormExpr::testFunction(id, *space, std::move(test_symbol))};
+}
+
+BoundUnknown FieldBinding::addUnknownSymbols(FieldSpec spec,
+                                             std::string state_symbol, std::string test_symbol)
+{
+    requireSourceKind(spec, FieldSourceKind::Unknown, owner_);
+    const auto space = spec.space;
+    const auto id = system_->addField(std::move(spec));
+    return {id, forms::FormExpr::stateField(id, *space, std::move(state_symbol)),
+            forms::FormExpr::testFunction(id, *space, std::move(test_symbol))};
+}
+
 FieldId FieldBinding::global(std::string name, std::string_view role)
 {
     FieldSpec spec;
@@ -149,6 +182,16 @@ FieldId FieldBinding::prescribed(FieldSpec spec, bool auto_register, std::string
         return system_->addField(std::move(spec));
     }
     return existing;
+}
+
+BoundPrescribed FieldBinding::prescribedSymbol(FieldSpec spec, bool auto_register,
+                                               std::string_view role, std::string symbol)
+{
+    check(*system_, spec, FieldSourceKind::PrescribedData, /*allow_missing=*/auto_register, roleContext(role));
+    requireSourceKind(spec, FieldSourceKind::PrescribedData, roleContext(role));
+    const auto space = spec.space;
+    const auto id = prescribed(std::move(spec), auto_register, role);
+    return {id, forms::FormExpr::stateField(id, *space, std::move(symbol))};
 }
 
 void FieldBinding::requireDistinctNames(

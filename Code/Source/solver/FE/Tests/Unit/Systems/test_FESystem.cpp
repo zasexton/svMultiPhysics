@@ -1122,6 +1122,210 @@ TEST(FESystem, FieldBindingRegistersAndReusesCompatibleFields)
     EXPECT_NO_THROW(FieldBinding::requireDistinctNames("Owner", {{"velocity", "u"}, {"pressure", "p"}}));
 }
 
+TEST(FESystem, FieldSymbolBundlesPreserveExplicitNamesAndTrueIds)
+{
+    FESystem sys(build_single_quad_mesh());
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, 1);
+    FieldBinding fields(sys, "Owner");
+    const auto first = fields.unknownSymbols(
+        FieldSpec{.name = "temperature", .space = space}, "temperature", "custom_u", "custom_v");
+    const auto data = fields.prescribedSymbol(
+        FieldSpec{.name = "forcing", .space = space, .source_kind = FieldSourceKind::PrescribedData},
+        true, "forcing", "custom_f");
+    const auto second = fields.unknownSymbols(
+        FieldSpec{.name = "pressure", .space = space}, "pressure", "custom_p", "custom_q");
+
+    EXPECT_EQ(first.id, 0u);
+    EXPECT_EQ(data.id, 1u);
+    EXPECT_EQ(second.id, 2u);
+    EXPECT_EQ(first.id, sys.findFieldByName("temperature"));
+    EXPECT_EQ(second.id, sys.findFieldByName("pressure"));
+    EXPECT_EQ(first.state.node()->fieldId(), first.id);
+    EXPECT_EQ(first.test.node()->fieldId(), first.id);
+    EXPECT_EQ(second.state.node()->fieldId(), second.id);
+    EXPECT_EQ(second.test.node()->fieldId(), second.id);
+    EXPECT_NE(first.test.node()->fieldId(), second.test.node()->fieldId());
+    EXPECT_EQ(first.state.toString(), "custom_u");
+    EXPECT_EQ(first.test.toString(), "custom_v");
+    EXPECT_EQ(second.state.toString(), "custom_p");
+    EXPECT_EQ(second.test.toString(), "custom_q");
+    EXPECT_EQ(data.value.toString(), "custom_f");
+    EXPECT_TRUE(sys.fieldParticipatesInUnknownVector(first.id));
+    EXPECT_FALSE(sys.fieldParticipatesInUnknownVector(data.id));
+    EXPECT_TRUE(sys.fieldParticipatesInUnknownVector(second.id));
+}
+
+TEST(FESystem, FieldSymbolBundlesSurviveRegistryGrowthAndCallerDestruction)
+{
+    svmp::FE::systems::BoundUnknown unknown;
+    svmp::FE::systems::BoundPrescribed prescribed;
+    {
+        FESystem sys(build_single_quad_mesh());
+        auto space = std::make_shared<H1Space>(ElementType::Quad4, 1);
+        FieldBinding fields(sys, "TemporaryOwner");
+        std::string state_name = "owned_state";
+        std::string test_name = "owned_test";
+        std::string data_name = "owned_data";
+        FieldSpec spec{.name = "original", .space = space};
+        unknown = fields.unknownSymbols(spec, "original", state_name, test_name);
+        prescribed = fields.prescribedSymbol(
+            FieldSpec{.name = "data", .space = space, .source_kind = FieldSourceKind::PrescribedData},
+            true, "data", data_name);
+        state_name.assign("changed_state");
+        test_name.assign("changed_test");
+        data_name.assign("changed_data");
+        for (int i = 0; i < 128; ++i) {
+            (void)fields.unknown(FieldSpec{.name = "later_" + std::to_string(i), .space = space}, "later");
+        }
+    }
+
+    EXPECT_EQ(unknown.id, 0u);
+    EXPECT_EQ(prescribed.id, 1u);
+    EXPECT_EQ(unknown.state.toString(), "owned_state");
+    EXPECT_EQ(unknown.test.toString(), "owned_test");
+    EXPECT_EQ(prescribed.value.toString(), "owned_data");
+    const std::array expressions{unknown.state, unknown.test, prescribed.value};
+    for (const auto& expression : expressions) {
+        ASSERT_NE(expression.node(), nullptr);
+        const auto* signature = expression.node()->spaceSignature();
+        ASSERT_NE(signature, nullptr);
+        EXPECT_EQ(signature->space_type, svmp::FE::spaces::SpaceType::H1);
+        EXPECT_EQ(signature->field_type, svmp::FE::FieldType::Scalar);
+        EXPECT_EQ(signature->continuity, svmp::FE::Continuity::C0);
+        EXPECT_EQ(signature->value_dimension, 1);
+        EXPECT_EQ(signature->topological_dimension, 2);
+        EXPECT_EQ(signature->polynomial_order, 1);
+        EXPECT_EQ(signature->element_type, ElementType::Quad4);
+    }
+    EXPECT_EQ(unknown.state.node()->type(), svmp::FE::forms::FormExprType::StateField);
+    EXPECT_EQ(unknown.test.node()->type(), svmp::FE::forms::FormExprType::TestFunction);
+    EXPECT_EQ(prescribed.value.node()->type(), svmp::FE::forms::FormExprType::StateField);
+    EXPECT_EQ(unknown.state.node()->fieldId(), unknown.id);
+    EXPECT_EQ(unknown.test.node()->fieldId(), unknown.id);
+    EXPECT_EQ(prescribed.value.node()->fieldId(), prescribed.id);
+}
+
+TEST(FESystem, FieldSymbolBundlesPreserveReuseAndStrictInsertion)
+{
+    FESystem sys(build_single_quad_mesh());
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, 1);
+    FieldBinding fields(sys, "Owner");
+    const FieldSpec spec{.name = "u", .space = space};
+    const auto strict = fields.addUnknownSymbols(spec, "strict_u", "strict_v");
+    const auto reused = fields.unknownSymbols(spec, "solution", "reuse_u", "reuse_v");
+    EXPECT_EQ(strict.id, reused.id);
+    EXPECT_EQ(sys.registeredFieldCount(), 1u);
+    EXPECT_EQ(strict.state.toString(), "strict_u");
+    EXPECT_EQ(strict.test.toString(), "strict_v");
+    EXPECT_EQ(reused.state.toString(), "reuse_u");
+    EXPECT_EQ(reused.test.toString(), "reuse_v");
+    EXPECT_EQ(reused.test.node()->fieldId(), strict.id);
+    try {
+        (void)fields.addUnknownSymbols(spec, "u", "v");
+        FAIL() << "Compatible duplicates must reject strict insertion";
+    } catch (const svmp::FE::InvalidArgumentException& error) {
+        EXPECT_EQ(error.message(), "FieldRegistry::add: field 'u' already exists");
+    }
+    EXPECT_EQ(sys.registeredFieldCount(), 1u);
+}
+
+TEST(FESystem, FieldSymbolBundlesKeepCallerSpaceSignatureOnCompatibleReuse)
+{
+    class CustomContinuitySpace : public H1Space {
+    public:
+        CustomContinuitySpace() : H1Space(ElementType::Quad4, 1) {}
+        svmp::FE::Continuity continuity() const noexcept override { return svmp::FE::Continuity::Custom; }
+    };
+    FESystem sys(build_single_quad_mesh());
+    auto registered_space = std::make_shared<H1Space>(ElementType::Quad4, 1);
+    auto caller_space = std::make_shared<CustomContinuitySpace>();
+    FieldBinding fields(sys, "Owner");
+    const auto u = fields.unknown(FieldSpec{.name = "u", .space = registered_space}, "solution");
+    const auto f = fields.prescribed(
+        FieldSpec{.name = "f", .space = registered_space, .source_kind = FieldSourceKind::PrescribedData},
+        true, "data");
+    ASSERT_TRUE(svmp::FE::systems::spacesCompatible(*registered_space, *caller_space));
+    const auto unknown = fields.unknownSymbols(FieldSpec{.name = "u", .space = caller_space}, "solution", "u", "v");
+    const auto prescribed = fields.prescribedSymbol(
+        FieldSpec{.name = "f", .space = caller_space, .source_kind = FieldSourceKind::PrescribedData},
+        false, "data", "f");
+    EXPECT_EQ(unknown.id, u);
+    EXPECT_EQ(prescribed.id, f);
+    EXPECT_EQ(unknown.state.node()->spaceSignature()->continuity, svmp::FE::Continuity::Custom);
+    EXPECT_EQ(unknown.test.node()->spaceSignature()->continuity, svmp::FE::Continuity::Custom);
+    EXPECT_EQ(prescribed.value.node()->spaceSignature()->continuity, svmp::FE::Continuity::Custom);
+    EXPECT_EQ(sys.fieldRecord(u).space->continuity(), svmp::FE::Continuity::C0);
+}
+
+TEST(FESystem, FieldSymbolBundlesPreserveCompatibilityErrorOrder)
+{
+    FESystem sys(build_single_quad_mesh());
+    auto scalar = std::make_shared<H1Space>(ElementType::Quad4, 1);
+    auto quadratic = std::make_shared<H1Space>(ElementType::Quad4, 2);
+    auto vector = std::make_shared<ProductSpace>(scalar, 2);
+    FieldBinding fields(sys, "Owner");
+    (void)fields.unknown(FieldSpec{.name = "u", .space = scalar}, "solution");
+    (void)fields.prescribed(
+        FieldSpec{.name = "f", .space = scalar, .source_kind = FieldSourceKind::PrescribedData}, true, "data");
+    EXPECT_EQ(invalidArgumentText([&] {
+        (void)fields.unknownSymbols(FieldSpec{.name = "f", .space = vector, .components = 2}, "solution", "u", "v");
+    }), "Owner solution: existing field 'f' must be an unknown field");
+    EXPECT_EQ(invalidArgumentText([&] {
+        (void)fields.prescribedSymbol(FieldSpec{.name = "u", .space = vector, .components = 2}, true, "data", "f");
+    }), "Owner data: existing field 'u' must be a prescribed data field");
+    EXPECT_EQ(invalidArgumentText([&] {
+        (void)fields.unknownSymbols(FieldSpec{.name = "u", .space = vector, .components = 2}, "solution", "u", "v");
+    }), "Owner solution: existing field 'u' has component count 1, expected 2");
+    EXPECT_EQ(invalidArgumentText([&] {
+        (void)fields.unknownSymbols(FieldSpec{.name = "u", .space = quadratic}, "solution", "u", "v");
+    }), "Owner solution: existing field 'u' uses an incompatible function space");
+    EXPECT_EQ(invalidArgumentText([&] {
+        (void)fields.prescribedSymbol(
+            FieldSpec{.name = "f", .space = quadratic, .source_kind = FieldSourceKind::PrescribedData}, true, "data", "f");
+    }), "Owner data: existing field 'f' uses an incompatible function space");
+    EXPECT_EQ(sys.registeredFieldCount(), 2u);
+}
+
+TEST(FESystem, PrescribedFieldSymbolRetainsSourceKindAndRegistrationPolicy)
+{
+    FESystem sys(build_single_quad_mesh());
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, 1);
+    FieldBinding fields(sys, "Owner");
+    const FieldSpec spec{.name = "f", .space = space, .source_kind = FieldSourceKind::PrescribedData};
+    EXPECT_EQ(invalidArgumentText([&] {
+        (void)fields.prescribedSymbol(spec, false, "data", "f_value");
+    }), "Owner data: prescribed field 'f' was requested but is not registered");
+    EXPECT_EQ(sys.registeredFieldCount(), 0u);
+    const auto added = fields.prescribedSymbol(spec, true, "data", "f_value");
+    const auto reused = fields.prescribedSymbol(spec, false, "data", "other_f_value");
+    EXPECT_EQ(added.id, reused.id);
+    EXPECT_EQ(added.id, sys.findFieldByName("f"));
+    EXPECT_EQ(added.value.node()->fieldId(), added.id);
+    EXPECT_EQ(added.value.toString(), "f_value");
+    EXPECT_EQ(reused.value.toString(), "other_f_value");
+    EXPECT_EQ(sys.fieldRecord(added.id).source_kind, FieldSourceKind::PrescribedData);
+    EXPECT_FALSE(sys.fieldParticipatesInUnknownVector(added.id));
+    EXPECT_EQ(sys.registeredFieldCount(), 1u);
+
+    for (const auto source : {FieldSourceKind::PrescribedData, FieldSourceKind::DerivedFromUnknown}) {
+        const FieldSpec wrong{.name = "wrong_unknown", .space = space, .source_kind = source};
+        EXPECT_THROW((void)fields.unknownSymbols(wrong, "solution", "u", "v"), std::invalid_argument);
+        EXPECT_THROW((void)fields.addUnknownSymbols(wrong, "u", "v"), std::invalid_argument);
+        (void)fields.unknown(FieldSpec{.name = "existing_unknown", .space = space}, "solution");
+        EXPECT_THROW((void)fields.unknownSymbols(
+            FieldSpec{.name = "existing_unknown", .space = space, .source_kind = source},
+            "solution", "u", "v"), std::invalid_argument);
+    }
+    for (const auto source : {FieldSourceKind::Unknown, FieldSourceKind::DerivedFromUnknown}) {
+        const FieldSpec wrong{.name = "wrong_data", .space = space, .source_kind = source};
+        EXPECT_THROW((void)fields.prescribedSymbol(wrong, true, "data", "f"), std::invalid_argument);
+        EXPECT_THROW((void)fields.prescribedSymbol(
+            FieldSpec{.name = "f", .space = space, .source_kind = source}, false, "data", "f"),
+            std::invalid_argument);
+    }
+    EXPECT_EQ(sys.registeredFieldCount(), 2u);
+}
+
 TEST(FESystem, MeshDisplacementBindingRegistersUnknownAndBindsRole)
 {
     auto mesh = build_single_quad_mesh();

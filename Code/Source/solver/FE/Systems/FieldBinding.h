@@ -23,6 +23,7 @@
  */
 
 #include "Core/Types.h"
+#include "Forms/FormExpr.h"
 #include "Systems/FieldRegistry.h"
 
 #include <initializer_list>
@@ -39,6 +40,18 @@ class FunctionSpace;
 namespace systems {
 
 class FESystem;
+
+/// Owned field-bound symbols, independent of registry storage and caller names.
+struct BoundUnknown {
+    FieldId id{INVALID_FIELD_ID};
+    forms::FormExpr state;
+    forms::FormExpr test;
+};
+
+struct BoundPrescribed {
+    FieldId id{INVALID_FIELD_ID};
+    forms::FormExpr value;
+};
 
 /// Same space type, field type, value and topological dimension, polynomial
 /// order and element type.
@@ -70,6 +83,17 @@ public:
     /// An unknown field: registered, or the compatible registered one.
     [[nodiscard]] FieldId unknown(FieldSpec spec, std::string_view role);
 
+    /// Register or reuse an unknown and create symbols using the supplied space.
+    /// Requires spec.source_kind == Unknown; existing compatibility errors precede
+    /// a mismatched source kind in the supplied spec.
+    [[nodiscard]] BoundUnknown unknownSymbols(FieldSpec spec, std::string_view role,
+                                              std::string state_symbol, std::string test_symbol);
+
+    /// Strict insertion through FESystem::addField, rejecting duplicate names.
+    /// Requires spec.source_kind == Unknown.
+    [[nodiscard]] BoundUnknown addUnknownSymbols(FieldSpec spec,
+                                                 std::string state_symbol, std::string test_symbol);
+
     /**
      * @brief A global multiplier: one scalar for the whole domain
      *
@@ -82,6 +106,11 @@ public:
     /// Prescribed data: registered when missing and @p auto_register is
     /// true, otherwise the compatible registered field.
     [[nodiscard]] FieldId prescribed(FieldSpec spec, bool auto_register, std::string_view role);
+
+    /// Register or reuse prescribed data with prescribed()'s missing-field policy.
+    /// Requires spec.source_kind == PrescribedData and uses the supplied space.
+    [[nodiscard]] BoundPrescribed prescribedSymbol(FieldSpec spec, bool auto_register,
+                                                   std::string_view role, std::string symbol);
 
     /**
      * @brief Throws "<owner>: field name '<name>' is assigned to both <a> and
