@@ -6,7 +6,11 @@ How `FE/Forms` weak-form expressions become assembled operators in `FE/Systems`.
 
 | Task | API | Header |
 |------|-----|--------|
-| Residual physics (single or multi-field) | `installFormulation()` | `FormsInstaller.h` |
+| Owned unknown/prescribed symbols | `FieldBinding` | `FieldBinding.h` |
+| Ordered residual rows and selected observations | `ResidualContributions` | `ResidualContributions.h` |
+| Residual physics (single or multi-field) | `FormulationBuilder::install()`; direct `installFormulation()` | `FormulationBuilder.h` / `FormsInstaller.h` |
+| Phase-ordered constraints and immediate BC application | `ConstraintPlan` | `ConstraintPlan.h` |
+| Measured functionals and residual-work channels | `functional()` / `wallFunctional()` / `workChannel()` | `FormulationBuilder.h` / `FunctionalForms.h` |
 | Mixed bilinear operator | `installMixedBilinear()` | `FormsInstaller.h` |
 | Mixed linear operator | `installMixedLinear()` | `FormsInstaller.h` |
 | Strong Dirichlet BCs | `installStrongDirichlet()` | `FormsInstaller.h` |
@@ -55,33 +59,135 @@ How `FE/Forms` weak-form expressions become assembled operators in `FE/Systems`.
 
 ## 2. Residual Physics (the main path)
 
-A physics module needs two includes:
+A formulation can register or reuse fields, keep its equations visible, apply
+ordinary boundary conditions, and install through a builder. Here `system` is
+an `FESystem` and `V` is a shared scalar function space:
 
 ```cpp
-#include "FE/Forms/Vocabulary.h"        // FormExpr helpers (stateField, testFunction, grad, ...)
-#include "FE/Systems/FormsInstaller.h"  // installFormulation, installStrongDirichlet
+#include "FE/Forms/Vocabulary.h"
+#include "FE/Systems/FieldBinding.h"
+#include "FE/Systems/FormulationBuilder.h"
+#include "FE/Systems/BoundaryConditionManager.h"
+#include "FE/Constraints/ConstraintPlan.h"
+
+namespace fe = svmp::FE;
+using namespace fe::forms;
+
+fe::systems::FieldBinding fields(system, "Example::registerOn");
+const auto U = fields.unknownSymbols(
+    {.name = "u", .space = V, .components = 1}, "state", "u", "v");
+fe::systems::FormulationBuilder formulation(system, "equations", {});
+
+const auto source = FormExpr::constant(1.0);
+auto residual = (inner(grad(U.state), grad(U.test)) - source * U.test).dx();
+
+fe::systems::BoundaryConditionManager bc_manager;
+// Populate with ordinary BoundaryCondition objects as required.
+fe::constraints::ConstraintPlan constraints(system);
+constraints.essentials(bc_manager, residual, U.state, U.test, U.id,
+                       formulation.operatorTag());
+constraints.commit();
+
+formulation.symbolicTangent();
+(void)formulation.install({U.id}, residual);
 ```
 
-The workflow is:
+`bc_manager.applyAll(system, residual, U.state, U.test, U.id, operator_tag)`
+remains the ordinary direct BC route when no constraint plan is needed.
+`StateField`, `TestField`, `FESystem::addField`, and direct
+`installFormulation()` also remain available. These authoring services do not
+choose physical BCs, material laws, observation membership, or compiler policy.
 
-```cpp
-// 1. Register fields
-auto u_field = system.addField({.name = "u", .space = V});
-system.addOperator("equations");
+### Owned field symbols
 
-// 2. Build field-bound symbols (StateField + TestField)
-auto u = StateField(u_field, *V, "u");
-auto v = TestField(u_field, *V, "v");
+`FieldBinding` returns `BoundUnknown {id, state, test}` or
+`BoundPrescribed {id, value}`. Select the registration policy explicitly:
 
-// 3. Write the residual (single expression, any number of fields)
-auto residual = (inner(grad(u), grad(v)) - f * v).dx();
+- `unknownSymbols(spec, role, state_name, test_name)` registers a missing
+  unknown or reuses a compatible one. Existing source kind, scope (including
+  interface marker), component count, and space are checked in that order.
+- `addUnknownSymbols(spec, state_name, test_name)` uses strict
+  `FESystem::addField` insertion, including duplicate-name rejection.
+- `prescribedSymbol(spec, auto_register, role, name)` reuses compatible
+  prescribed data; a missing field is added only when `auto_register` is true.
 
-// 4. Apply boundary conditions (one call: validate + weak terms + strong constraints)
-bc_manager.applyAll(system, residual, u, v, u_field);
+Unknown bundles require `spec.source_kind == FieldSourceKind::Unknown`;
+prescribed bundles require `PrescribedData`. Reuse compatibility errors precede
+checking the supplied spec's source kind. Set `spec.components` explicitly for
+vector fields. Registration follows call order and preserves earlier successful
+registrations if a later call fails.
 
-// 5. Install the formulation
-installFormulation(system, "equations", {u_field}, residual);
-```
+Bundle symbols use the **supplied** space's complete signature even on reuse;
+the compatibility check is less restrictive than that signature. Form nodes own
+the field IDs, names, and copied signatures, so registry growth and destruction
+of the binding, caller strings, or supplied space do not invalidate those nodes.
+The binding itself borrows the system. Creating symbols does not sample
+coefficient callbacks.
+
+### Immediate residual contributions
+
+`forms::ResidualContributions` (`FE/Forms/ResidualContributions.h`) binds actual
+`FieldId` test rows to borrowed production expressions and optional observation
+expressions. Each `append(id, term)` immediately updates production, then each
+non-null observation in list order, using `sumOf`'s left fold. Nothing is queued,
+reordered, expanded, rescaled, or inferred from a symbol name. The sink copies
+row bindings and observation lists; their expression targets must outlive it.
+Use scoped sinks to select exactly which terms enter each observation.
+
+`INVALID_FIELD_ID`, duplicate row IDs, and repeated non-null destinations across
+production and observations are rejected at construction before mutation. Null
+observations are skipped. An unknown append ID throws without undoing earlier
+appends. The appended term is snapshotted before assignments, so the argument
+may itself reference a destination. An invalid term is not silently skipped:
+`sumOf(empty, invalid)` stays invalid, while adding it to a valid expression
+throws. Assignments already completed in production or earlier observations
+remain visible if a later update fails.
+
+Observations only collect expressions. Declare measured 0-forms with
+`FormulationBuilder::functional()` / `wallFunctional()` (or the corresponding
+`FunctionalForms.h` functions), and install exact residual-work groups through
+`workChannel()`. Those declarations and operator records remain authoritative;
+a sink does not create functionals, work channels, certification, or applicability
+metadata. Preserve explicit work formulas and subtractions where splitting a
+production tree would change grouping or cancellation.
+
+### Builder creation, options, and row spans
+
+The three-argument `FormulationBuilder(system, tag, base)` uses
+`OperatorCreation::Ensure`: it creates the operator only when absent. The
+four-argument constructor accepts `OperatorCreation::Add` for unconditional
+strict insertion and its original duplicate diagnostics. Construction acts
+immediately, so keep it at the intended operator-registration point.
+
+When compiler-option evaluation can fail, construct with `{}` and assign
+`options()` at the original later evaluation point. `symbolicTangent(bool)`
+changes the current options. Each `install()` uses those options immediately;
+`installGroup()` uses a fresh copy with its group overrides, ALE configuration,
+and missing extra trial fields appended in order. Group changes do not mutate
+base options or earlier installations.
+
+Both methods accept initializer lists or `std::span<const FieldId>` (including
+a vector-backed span). The call consumes the view synchronously without
+retaining, sorting, or deduplicating it; the caller's storage must remain alive
+through the call. The existing installer remains responsible for validation,
+row bindings, metadata, and partial progress on failure.
+
+### Typed essential operations
+
+`constraints::ConstraintPlan` retains the phase order
+`VertexValues < Essential < InactiveSupport < Aggregation < PointLaw`, with
+declaration order within each phase. Its typed `essentials` overloads accept a
+manager plus residual/state/test/field/optional operator tag, a strong-only
+manager plus field, or `std::span<const forms::bc::StrongDirichlet>`.
+
+Every overload first commits held declarations through Essential and then calls
+`applyAll` or `installStrongDirichlet` immediately. The manager route includes
+its normal validation, weak terms, descriptors, and strong constraints; the
+span route retains per-declaration progress. A failure leaves prior commits,
+phase advancement, and any completed underlying side effects in place. There
+is no rollback or deferred BC callback. Later calls into a phase already passed
+throw; uncommitted held declarations are dropped on plan destruction. The
+callback overload and direct BC APIs remain supported.
 
 For `H(div)` fields, strong prescribed normal flux is not lowered through
 pointwise `StrongDirichlet`. Use `forms::bc::NormalTraceEssentialBC`, which
@@ -169,18 +275,35 @@ fields are registered on the `FESystem` and coupled to the volume fields by
 within the limits listed in `VOCABULARY.md`. The current public usage examples
 are collected in `Docs/HDIV_ADVANCED_USAGE_GUIDE.md`.
 
-For multi-field:
+For a coupled vector/scalar system, keep every measured integral in one test
+row. Here `V` is vector-valued and `Q` scalar-valued; this is a separate example
+using the same namespace setup and headers plus `FE/Forms/ResidualContributions.h`:
+
 ```cpp
-auto u = StateField(u_field, *V, "u");
-auto p = StateField(p_field, *Q, "p");
-auto v = TestField(u_field, *V, "v");
-auto q = TestField(p_field, *Q, "q");
+fe::systems::FieldBinding fields(system, "CoupledExample::registerOn");
+const auto U = fields.unknownSymbols(
+    {.name = "u", .space = V, .components = V->value_dimension()},
+    "vector", "u", "v");
+const auto P = fields.unknownSymbols(
+    {.name = "p", .space = Q, .components = 1}, "scalar", "p", "q");
+fe::systems::FormulationBuilder formulation(system, "equations", {});
+FormExpr u_row, p_row, observed_u_terms;
+ResidualContributions rows({
+    {U.id, u_row, {&observed_u_terms}},
+    {P.id, p_row},
+});
+rows.append(U.id, inner(grad(U.state), grad(U.test)).dx());
+rows.append(U.id, (-P.state * div(U.test)).dx());
+rows.append(P.id, (div(U.state) * P.test).dx());
 
-auto residual = (inner(grad(u), grad(v)) - p * div(v)).dx()
-              + (div(u) * q).dx();
-
-installFormulation(system, "equations", {u_field, p_field}, residual);
+const auto residual = sumOf(u_row, p_row);
+formulation.symbolicTangent();
+(void)formulation.install({U.id, P.id}, residual);
 ```
+
+`observed_u_terms` receives exactly the two appended vector-row terms. The
+scalar row stays separate until the final measured sum. Supply row IDs from
+registered bundles rather than assuming contiguous field numbering.
 
 `installFormulation()` automatically:
 - Decomposes the expression by test function
