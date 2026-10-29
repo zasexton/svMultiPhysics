@@ -202,15 +202,15 @@ namespace {
 }
 
 /// f = g + f(x, t) + f_h - 2 Omega x u   (constant, space-time, field and Coriolis parts).
-[[nodiscard]] FormExpr bodyForce(const Options& o, const FormExpr& g, int dim, FieldId f_id,
-                                 const FE::spaces::FunctionSpace& V, const FormExpr& u)
+[[nodiscard]] FormExpr bodyForce(const Options& o, const FormExpr& g, int dim,
+                                 const fs::BoundPrescribed& source, const FormExpr& u)
 {
     FormExpr f = g;
     if (o.has_body_force_spacetime) {
         f = f + FormExpr::asVector(bc::toVectorExpr(o.body_force_spacetime, dim, "ns_body_force_spacetime_"));
     }
-    if (f_id != FE::INVALID_FIELD_ID) {
-        f = f + StateField(f_id, V, o.body_force_field_name);
+    if (source.id != FE::INVALID_FIELD_ID) {
+        f = f + source.value;
     }
     if (o.rotating_frame_coriolis_enabled) {
         f = f + FormExpr::constant(-2.0) *
@@ -345,18 +345,20 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     const int dim = preflight.dim;
     const auto& free_surfaces = preflight.effective_free_surfaces;
     fs::FieldBinding fields(system, "IncompressibleNavierStokesVMSModule::registerOn");
-    const FieldId u_id = fields.unknown(std::move(preflight.u_spec), "velocity");
-    const FieldId p_id = fields.unknown(std::move(preflight.p_spec), "pressure");
-    const FieldId body_force_id = preflight.body_force_spec
-        ? fields.prescribed(std::move(*preflight.body_force_spec),
-                            o.auto_register_body_force_field, "momentum source")
-        : FE::INVALID_FIELD_ID;
+    const auto U = fields.unknownSymbols(std::move(preflight.u_spec), "velocity", o.velocity_field_name, "v");
+    const auto P = fields.unknownSymbols(std::move(preflight.p_spec), "pressure", o.pressure_field_name, "q");
+    const auto& [u_id, u, v] = U;
+    const auto& [p_id, p, q] = P;
+    const auto body_force = preflight.body_force_spec
+        ? fields.prescribedSymbol(std::move(*preflight.body_force_spec),
+                                  o.auto_register_body_force_field, "momentum source", o.body_force_field_name)
+        : fs::BoundPrescribed{};
     const FieldId reference_velocity_id = preflight.semi_implicit_reference_spec
         ? fields.prescribed(std::move(*preflight.semi_implicit_reference_spec),
                             true, "semi-implicit reference velocity")
         : FE::INVALID_FIELD_ID;
     post::declareFreeSurfaceDiscreteFunctionals(free_surfaces, preflight.surface_identities, system, u_id, o.density, o.body_force,
-                                          !o.has_body_force_spacetime && body_force_id == FE::INVALID_FIELD_ID,
+                                          !o.has_body_force_spacetime && body_force.id == FE::INVALID_FIELD_ID,
                                           o.viscosity, o.viscosity_model == nullptr);
     // Exterior conditions act on the wetted part of a boundary when the liquid is a cut side.
     const auto wetted = FE::level_set::wettedBoundaryResolver(system, preflight.generated_active_boundary_for);
@@ -388,10 +390,6 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     }
     plan.commitThrough(cs::ConstraintPhase::VertexValues);
 
-    const auto u = StateField(u_id, *velocity_space_, o.velocity_field_name);
-    const auto p = StateField(p_id, *pressure_space_, o.pressure_field_name);
-    const auto v = TestField(u_id, *velocity_space_, "v");
-    const auto q = TestField(p_id, *pressure_space_, "q");
     const auto ale = fs::resolveALEBinding(system, preflight.ale_options);
     std::vector<fs::MeshNormalKinematicDeclaration> fitted_normal_kinematics;
     if (ale.coupled()) {
@@ -413,9 +411,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
                 .binding = prepared.binding});
         }
     }
-    if (!system.hasOperator(o.operator_tag)) {
-        system.addOperator(o.operator_tag);
-    }
+    fs::FormulationBuilder F(system, o.operator_tag, {});
 
     // The liquid Omega: the mesh, or the cut side {phi_h < c} or {phi_h > c}; the bulk residual on it.
     if (preflight.active_domain_log) {
@@ -425,7 +421,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     const auto rho = FormExpr::constant(o.density);
     const auto g = constantVector(o.body_force, dim);
     const NavierStokesTerms t{u, p, v, q, rho, viscosity(o, u),
-                              bodyForce(o, g, dim, body_force_id, *velocity_space_, u), dim};
+                              bodyForce(o, g, dim, body_force, u), dim};
     const bool mcv = o.enable_ale && o.include_moving_control_volume_transient;
     const auto r = navierStokesVMSIntegrands(
         t, {.convection = o.enable_convection, .ale = o.enable_ale, .moving_control_volume = mcv,
@@ -438,7 +434,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     // Bookkeeping of the opt-in diagnostics and of the free-surface work ledger (exact additive groups of
     // the residual), collected while the terms are stated.
     const auto active_continuity = pspg_grad_p.isValid() ? C + pspg_grad_p : C;
-    const bool nonconservative_force = o.has_body_force_spacetime || body_force_id != FE::INVALID_FIELD_ID ||
+    const bool nonconservative_force = o.has_body_force_spacetime || body_force.id != FE::INVALID_FIELD_ID ||
                                        o.rotating_frame_coriolis_enabled;
     auto work = post::bulkResidualWork(r, M, C, pspg_grad_p, -rho * inner(g, v), nonconservative_force,
                                  preflight.enable_vms, Omega);
@@ -458,10 +454,11 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     }
     fs::BoundaryConditionManager bcs;
     bcs.install(o.velocity_dirichlet_weak, Factories::reserveMarker);   // Nitsche below; reserve the marker
-    fs::FormulationBuilder F(system, o.operator_tag, physicsInstallOptions(o.jit_policy));
+    F.options() = physicsInstallOptions(o.jit_policy);
     F.symbolicTangent();
     // The energies, powers and measures of the free surfaces as forms (E3; NavierStokesPostProcessing.h).
     post::declareFreeSurfaceEnergyFunctionals(F, free_surfaces, *velocity_space_, dim);
+    ResidualContributions cut_penalties{{p_id, C, {&work.ghost_penalty}}};
     for (std::size_t index = 0; index < free_surfaces.size(); ++index) {
         const auto& b = free_surfaces[index];
         auto& identity = preflight.surface_identities[index];
@@ -474,8 +471,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
         const auto J = Factories::cutFacetPressurePenalty(b, t, o, velocity_space_->polynomial_order(),
                                                           pressure_space_->polynomial_order(), F);
         if (J.isValid()) {
-            C = C + J;
-            work.ghost_penalty = sumOf(work.ghost_penalty, J);
+            cut_penalties.append(p_id, J);
         }
     }
     const auto on = [&](const auto& bc) { return wetted(bc.boundary_marker); };
@@ -487,19 +483,20 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     bcs.install(o.coupled_outflow_rcrcr, rcr);
     bcs.install(o.velocity_dirichlet,
                 [&](const auto& bc) { return Factories::toVelocityEssentialBC(bc, dim, o.velocity_field_name); });
-    plan.essentials([&](fs::FESystem& target) { bcs.applyAll(target, M, u, v, u_id); });   // weak terms into M
+    plan.essentials(bcs, M, u, v, u_id);   // weak terms into M
     fs::BoundaryConditionManager pressure_bcs;
     pressure_bcs.install(o.pressure_dirichlet,
                          [&](const auto& bc) { return Factories::toPressureEssentialBC(bc, o.pressure_field_name); });
-    plan.essentials([&](fs::FESystem& target) { pressure_bcs.applyAll(target, p_id); });
+    plan.essentials(pressure_bcs, p_id);
     F.log(Factories::activeDomainConstraintLogs(liquid_constraints ? liquid : nullptr, aggregated));
     plan.commit();
 
     // Weak velocity Dirichlet (Nitsche), certified on generated wetted boundaries.
-    std::vector<bc::GeneratedBoundaryNitscheTraceFormBinding> nitsche_traces;
-    Factories::applyVelocityNitscheBCs(M, C, o, preflight.prepared_weak_velocity_boundaries, u, p, v, q, t.mu,
-                                       aggregated ? &nitsche_traces : nullptr,
-                                       &work.weak_boundary_momentum, &work.weak_boundary_continuity);
+    ResidualContributions weak_boundaries{{u_id, M, {&work.weak_boundary_momentum}},
+                                         {p_id, C, {&work.weak_boundary_continuity}}};
+    auto nitsche_traces = Factories::appendVelocityNitscheBCs(
+        weak_boundaries, o, preflight.prepared_weak_velocity_boundaries, U, P, t.mu,
+        aggregated ? Factories::GeneratedTraceCertification::Required : Factories::GeneratedTraceCertification::None);
     fs::requireGeneratedBoundaryNitscheTraceBindings(
         preflight.required_nitsche_routes, nitsche_traces,
         "IncompressibleNavierStokesVMSModule::registerOn: generated-boundary Nitsche form binding count differs from the certified production routes");

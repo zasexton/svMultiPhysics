@@ -26,6 +26,7 @@
 #include "FE/Forms/BoundaryFunctional.h"
 #include "FE/Forms/CutCellForms.h"
 #include "FE/Forms/IntegrationDomain.h"
+#include "FE/Forms/ResidualContributions.h"
 #include "FE/Forms/StandardBCs.h"
 #include "FE/Forms/Vocabulary.h"
 #include "FE/Interfaces/ContactLineGeometryCertificate.h"
@@ -36,6 +37,7 @@
 #include "FE/Systems/ALEBinding.h"
 #include "FE/Systems/BoundaryConditionManager.h"
 #include "FE/Systems/FESystem.h"
+#include "FE/Systems/FieldBinding.h"
 #include "FE/Systems/FormsInstaller.h"
 #include "FE/Systems/FormulationBuilder.h"
 #include "FE/Systems/MeshBoundaryKinematics.h"
@@ -552,10 +554,8 @@ namespace detail {
 
 // Resolve one boundary only when its turn is reached, after the preceding
 // route has been constructed. This preserves raw-input rejection precedence.
-template <class Boundaries, class ResolveBoundary>
-inline void applyVelocityNitscheBoundaries(
-    FE::forms::FormExpr& momentum_form,
-    FE::forms::FormExpr& continuity_form,
+template <class Boundaries, class ResolveBoundary, class AppendMomentum, class AppendContinuity>
+inline void appendVelocityNitscheBoundaries(
     const IncompressibleNavierStokesVMSOptions& options,
     const Boundaries& boundaries,
     ResolveBoundary&& resolve_boundary,
@@ -568,8 +568,8 @@ inline void applyVelocityNitscheBoundaries(
         FE::forms::bc::
             GeneratedBoundaryNitscheTraceFormBinding>*
         generated_trace_bindings,
-    FE::forms::FormExpr* momentum_residual_work_form,
-    FE::forms::FormExpr* continuity_residual_work_form,
+    AppendMomentum&& append_momentum,
+    AppendContinuity&& append_continuity,
     std::vector<PreparedWeakVelocityBoundary>* prepared_boundaries)
 {
     if (boundaries.empty()) {
@@ -607,24 +607,6 @@ inline void applyVelocityNitscheBoundaries(
                           fullPhysical(marker);
             return integrand.dExteriorBoundary(measure);
         };
-    // The option preflight passes empty forms and keeps only the bindings, so
-    // the rows are folded with sumOf (the same tree as
-    // form + contribution when the form is not empty).
-    const auto append_momentum = [&](const FE::forms::FormExpr& contribution) {
-        momentum_form = FE::forms::sumOf(momentum_form, contribution);
-        if (momentum_residual_work_form != nullptr) {
-            *momentum_residual_work_form = FE::forms::sumOf(
-                *momentum_residual_work_form, contribution);
-        }
-    };
-    const auto append_continuity = [&](const FE::forms::FormExpr& contribution) {
-        continuity_form = FE::forms::sumOf(continuity_form, contribution);
-        if (continuity_residual_work_form != nullptr) {
-            *continuity_residual_work_form = FE::forms::sumOf(
-                *continuity_residual_work_form, contribution);
-        }
-    };
-
     for (const auto& boundary : boundaries) {
         const auto& prepared = resolve_boundary(boundary);
         const auto& [marker, generated_marker, uD] = prepared;
@@ -719,6 +701,43 @@ inline void applyVelocityNitscheBoundaries(
     }
 }
 
+// Compatibility destinations may alias one another. Preserve their sequential
+// updates rather than passing them through the stricter production-row sink.
+template <class Boundaries, class ResolveBoundary>
+inline void applyVelocityNitscheBoundaries(
+    FE::forms::FormExpr& momentum_form,
+    FE::forms::FormExpr& continuity_form,
+    const IncompressibleNavierStokesVMSOptions& options,
+    const Boundaries& boundaries,
+    ResolveBoundary&& resolve_boundary,
+    const FE::forms::FormExpr& u,
+    const FE::forms::FormExpr& p,
+    const FE::forms::FormExpr& v,
+    const FE::forms::FormExpr& q,
+    const FE::forms::FormExpr& mu,
+    std::vector<FE::forms::bc::GeneratedBoundaryNitscheTraceFormBinding>* generated_trace_bindings,
+    FE::forms::FormExpr* momentum_residual_work_form,
+    FE::forms::FormExpr* continuity_residual_work_form,
+    std::vector<PreparedWeakVelocityBoundary>* prepared_boundaries)
+{
+    const auto append_momentum = [&](const FE::forms::FormExpr& contribution) {
+        momentum_form = FE::forms::sumOf(momentum_form, contribution);
+        if (momentum_residual_work_form != nullptr) {
+            *momentum_residual_work_form = FE::forms::sumOf(
+                *momentum_residual_work_form, contribution);
+        }
+    };
+    const auto append_continuity = [&](const FE::forms::FormExpr& contribution) {
+        continuity_form = FE::forms::sumOf(continuity_form, contribution);
+        if (continuity_residual_work_form != nullptr) {
+            *continuity_residual_work_form = FE::forms::sumOf(
+                *continuity_residual_work_form, contribution);
+        }
+    };
+    appendVelocityNitscheBoundaries(options, boundaries, std::forward<ResolveBoundary>(resolve_boundary),
+        u, p, v, q, mu, generated_trace_bindings, append_momentum, append_continuity, prepared_boundaries);
+}
+
 } // namespace detail
 
 inline void applyVelocityNitscheBCs(
@@ -782,6 +801,31 @@ inline void applyVelocityNitscheBCs(
         [](const PreparedWeakVelocityBoundary& boundary) -> const PreparedWeakVelocityBoundary& { return boundary; },
         u, p, v, q, mu, generated_trace_bindings, momentum_residual_work_form,
         continuity_residual_work_form, nullptr);
+}
+
+enum class GeneratedTraceCertification { None, Required };
+
+/// Append prepared terms through actual-field rows and return owned trace
+/// bindings. Each term is consumed immediately; a late failure retains earlier
+/// production and observation appends. Compatibility overloads remain above.
+[[nodiscard]] inline std::vector<FE::forms::bc::GeneratedBoundaryNitscheTraceFormBinding>
+appendVelocityNitscheBCs(
+    FE::forms::ResidualContributions& rows,
+    const IncompressibleNavierStokesVMSOptions& options,
+    std::span<const PreparedWeakVelocityBoundary> prepared_boundaries,
+    const FE::systems::BoundUnknown& velocity,
+    const FE::systems::BoundUnknown& pressure,
+    const FE::forms::FormExpr& mu,
+    GeneratedTraceCertification certification)
+{
+    std::vector<FE::forms::bc::GeneratedBoundaryNitscheTraceFormBinding> bindings;
+    detail::appendVelocityNitscheBoundaries(options, prepared_boundaries,
+        [](const PreparedWeakVelocityBoundary& boundary) -> const PreparedWeakVelocityBoundary& { return boundary; },
+        velocity.state, pressure.state, velocity.test, pressure.test, mu,
+        certification == GeneratedTraceCertification::Required ? &bindings : nullptr,
+        [&](const FE::forms::FormExpr& term) { rows.append(velocity.id, term); },
+        [&](const FE::forms::FormExpr& term) { rows.append(pressure.id, term); }, nullptr);
+    return bindings;
 }
 
 // ---------------------------------------------------------------------------
@@ -1009,9 +1053,7 @@ inline void applyFreeSurfaceContactLineConstraints(
                 .symbol = "mesh_displacement",
             });
         }
-        constraint_plan.essentials([&constraints](FE::systems::FESystem& system) {
-            FE::systems::installStrongDirichlet(system, constraints);
-        });
+        constraint_plan.essentials(constraints);
     }
 }
 
