@@ -14,7 +14,8 @@
 #include "FE/Forms/Vocabulary.h"
 #include "FE/Systems/BoundaryConditionManager.h"
 #include "FE/Systems/FESystem.h"
-#include "FE/Systems/FormsInstaller.h"
+#include "FE/Systems/FieldBinding.h"
+#include "FE/Systems/FormulationBuilder.h"
 
 #include <cmath>
 #include <cstddef>
@@ -71,45 +72,54 @@ void UstructModule::registerOn(FE::systems::FESystem& system) const
         throw std::invalid_argument("UstructModule::registerOn: kinematic_residual_scale must be finite and > 0");
     }
 
+    FE::systems::FieldBinding fields(system, "UstructModule::registerOn");
     FE::systems::FieldSpec d_spec;
     d_spec.name = options_.displacement_field_name;
     d_spec.space = displacement_space_;
     d_spec.components = dim;
-    const FE::FieldId d_id = system.addField(std::move(d_spec));
+    const auto displacement = fields.addUnknownSymbols(
+        std::move(d_spec), options_.displacement_field_name, "z");
+    const auto d_id = displacement.id;
 
     const bool use_time_derivative_terms = options_.enable_time_derivative_terms;
     std::optional<FE::FieldId> v_id;
+    std::optional<FE::systems::BoundUnknown> velocity;
     if (use_time_derivative_terms) {
         FE::systems::FieldSpec v_spec;
         v_spec.name = options_.velocity_field_name;
         v_spec.space = displacement_space_;
         v_spec.components = dim;
-        v_id = system.addField(std::move(v_spec));
+        velocity = fields.addUnknownSymbols(
+            std::move(v_spec), options_.velocity_field_name, "w");
+        v_id = velocity->id;
     }
 
     FE::systems::FieldSpec p_spec;
     p_spec.name = options_.pressure_field_name;
     p_spec.space = pressure_space_;
     p_spec.components = 1;
-    const FE::FieldId p_id = system.addField(std::move(p_spec));
+    const auto pressure = fields.addUnknownSymbols(
+        std::move(p_spec), options_.pressure_field_name, "q");
+    const auto p_id = pressure.id;
 
-    system.addOperator("equations");
+    FE::systems::FormulationBuilder formulation(
+        system, "equations", {}, FE::systems::OperatorCreation::Add);
 
     using namespace FE::forms;
 
-    const auto d = StateField(d_id, *displacement_space_, options_.displacement_field_name);
+    const auto& d = displacement.state;
     std::optional<FormExpr> v;
     if (v_id) {
-        v = StateField(*v_id, *displacement_space_, options_.velocity_field_name);
+        v = velocity->state;
     }
-    const auto p = StateField(p_id, *pressure_space_, options_.pressure_field_name);
+    const auto& p = pressure.state;
 
-    const auto z = TestField(d_id, *displacement_space_, "z");
+    const auto& z = displacement.test;
     std::optional<FormExpr> w;
     if (v_id) {
-        w = TestField(*v_id, *displacement_space_, "w");
+        w = velocity->test;
     }
-    const auto q = TestField(p_id, *pressure_space_, "q");
+    const auto& q = pressure.test;
 
     post::registerPostProcessing(system, d_id, v_id, p_id, *displacement_space_, *pressure_space_, options_);
 
@@ -252,15 +262,15 @@ void UstructModule::registerOn(FE::systems::FESystem& system) const
         residual = *kinematic_form + residual;
     }
 
-    auto install = physicsInstallOptions(options_.jit_policy);
-    install.compiler_options.use_symbolic_tangent = options_.use_symbolic_tangent;
+    formulation.options() = physicsInstallOptions(options_.jit_policy);
+    formulation.symbolicTangent(options_.use_symbolic_tangent);
     std::vector<FE::FieldId> active_fields{d_id};
     if (v_id) {
         active_fields.push_back(*v_id);
     }
     active_fields.push_back(p_id);
 
-    (void)FE::systems::installFormulation(system, "equations", active_fields, residual, install);
+    (void)formulation.install(active_fields, residual);
 }
 
 } // namespace ustruct

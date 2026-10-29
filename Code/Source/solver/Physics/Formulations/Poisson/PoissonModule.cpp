@@ -14,7 +14,8 @@
 #include "FE/Forms/Vocabulary.h"
 #include "FE/Systems/BoundaryConditionManager.h"
 #include "FE/Systems/FESystem.h"
-#include "FE/Systems/FormsInstaller.h"
+#include "FE/Systems/FieldBinding.h"
+#include "FE/Systems/FormulationBuilder.h"
 
 #include <stdexcept>
 #include <string>
@@ -41,10 +42,13 @@ void PoissonModule::registerOn(FE::systems::FESystem& system) const
     FE::systems::FieldSpec spec;
     spec.name = options_.field_name;
     spec.space = space_;
-    const FE::FieldId u_id = system.addField(std::move(spec));
+    FE::systems::FieldBinding fields(system, "PoissonModule::registerOn");
+    const auto unknown = fields.addUnknownSymbols(std::move(spec), options_.field_name, "v");
+    const auto u_id = unknown.id;
     post::registerPostProcessing(system, u_id, *space_, options_);
 
-    system.addOperator("equations");
+    FE::systems::FormulationBuilder formulation(
+        system, "equations", {}, FE::systems::OperatorCreation::Add);
 
     if (!options_.node_dirichlet.values.empty()) {
         std::vector<FE::constraints::VertexDirichletValue> values;
@@ -68,8 +72,8 @@ void PoissonModule::registerOn(FE::systems::FESystem& system) const
 
     using namespace svmp::FE::forms;
 
-    auto u = StateField(u_id, *space_, options_.field_name);
-    auto v = TestField(u_id, *space_, "v");
+    const auto& u = unknown.state;
+    const auto& v = unknown.test;
 
     const auto k = FormExpr::constant(options_.diffusion);
     const auto f = FormExpr::constant(options_.source);
@@ -98,10 +102,10 @@ void PoissonModule::registerOn(FE::systems::FESystem& system) const
 
     bc_manager.applyAll(system, residual, u, v, u_id);
 
-    auto install_opts = physicsInstallOptions(options_.jit_policy);
-    install_opts.compiler_options.use_symbolic_tangent = true;
+    formulation.options() = physicsInstallOptions(options_.jit_policy);
+    formulation.symbolicTangent();
 
-    (void)FE::systems::installFormulation(system, "equations", {u_id}, residual, install_opts);
+    (void)formulation.install({u_id}, residual);
 }
 
 } // namespace poisson
