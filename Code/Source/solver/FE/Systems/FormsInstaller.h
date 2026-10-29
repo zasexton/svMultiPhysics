@@ -22,6 +22,7 @@
 #include "Analysis/ConstitutiveLawMetadata.h"
 #include "Analysis/FormAnalysisBridge.h"
 #include "Forms/BoundaryConditions.h"
+#include "Forms/IntegrationDomain.h"
 #include "Forms/MixedFormIR.h"
 #include "Systems/MixedKernelPlan.h"
 #include "Systems/OperatorRegistry.h"
@@ -31,6 +32,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -48,6 +50,16 @@ class FormExpr;
 namespace systems {
 
 class FESystem;
+
+/// Require the same count and ordered physical/generated marker pairs as the
+/// expected generated-active-subset domains; other domain intents fail.
+/// Throws logic_error with mismatch_message before any mutation. Duplicates
+/// are preserved, and empty/empty succeeds. This checks route identity only;
+/// installFormulation still authenticates anchors and prepares live policies.
+void requireGeneratedBoundaryNitscheTraceBindings(
+    std::span<const forms::BoundaryDomain> expected_routes,
+    std::span<const forms::bc::GeneratedBoundaryNitscheTraceFormBinding> bindings,
+    std::string_view mismatch_message);
 
 struct GeneratedBoundaryNitscheTraceInstallRequest {
     forms::bc::GeneratedBoundaryNitscheTraceFormBinding binding;

@@ -315,6 +315,16 @@ private:
         std::size_t owner)>& key_of,
     const std::string& owner);
 
+/// Own the immutable side handles and resolve their shared active-boundary
+/// marker on each call, using the existing marker/key ambiguity check.
+/// A negative physical marker throws invalid_argument with the supplied text
+/// only when owners are present. Empty owners always return nullopt. Does not
+/// register markers or retain a system, cut context, or geometry certificate.
+[[nodiscard]] std::function<std::optional<int>(int)> generatedActiveBoundaryResolver(
+    std::vector<CutSide> owners,
+    std::string owner,
+    std::string invalid_physical_marker_message);
+
 /**
  * @brief A wetted-boundary resolver: @p resolve, registering each generated
  *        marker it returns as an embedded interface marker of @p system.

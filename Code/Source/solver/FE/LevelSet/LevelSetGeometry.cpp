@@ -440,6 +440,23 @@ std::optional<int> resolveGeneratedActiveBoundaryMarker(
     return marker;
 }
 
+std::function<std::optional<int>(int)> generatedActiveBoundaryResolver(
+    std::vector<CutSide> owners,
+    std::string owner,
+    std::string invalid_physical_marker_message)
+{
+    return [owners = std::move(owners), owner = std::move(owner),
+            invalid_message = std::move(invalid_physical_marker_message)](int marker) -> std::optional<int> {
+        if (marker < 0 && !owners.empty()) {
+            throw std::invalid_argument(invalid_message);
+        }
+        return resolveGeneratedActiveBoundaryMarker(marker, owners.size(),
+            [&](std::size_t index) -> std::optional<interfaces::GeneratedActiveBoundaryMarkerKey> {
+                return owners[index].boundaryKey(marker);
+            }, owner);
+    };
+}
+
 std::function<std::optional<int>(int)> wettedBoundaryResolver(
     systems::FESystem& system,
     std::function<std::optional<int>(int)> resolve)

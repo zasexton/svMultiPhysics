@@ -254,5 +254,57 @@ TEST(LevelSetGeometry, WettedBoundaryResolverRegistersTheGeneratedMarkers)
     EXPECT_TRUE(s.system->isGeneratedEmbeddedInterfaceMarkerRegistered(3000007));
 }
 
+TEST(LevelSetGeometry, ActiveBoundaryResolverOwnsItsInputsUntilExplicitRegistration)
+{
+    std::function<std::optional<int>(int)> resolve;
+    int expected_marker = -1;
+    {
+        GeometrySystem source;
+        const auto geometry = LevelSetGeometry::bind(*source.system,
+            {.level_set_field = source.phi, .domain_id = "owned", .interface_marker = 17});
+        std::vector<CutSide> owners{geometry.side(CutVolumeSide::Negative)};
+        expected_marker = owners.front().boundary(4).generatedActiveBoundaryMarker();
+        resolve = generatedActiveBoundaryResolver(std::move(owners), "Owner", "negative marker");
+    }
+    auto moved = std::move(resolve);
+    EXPECT_EQ(moved(4), expected_marker);
+    try {
+        (void)moved(-1);
+        FAIL() << "negative marker was accepted with an owner";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_EQ(std::string(error.what()), "negative marker");
+    }
+
+    GeometrySystem consumer;
+    const auto wetted = wettedBoundaryResolver(*consumer.system, std::move(moved));
+    EXPECT_FALSE(consumer.system->isGeneratedEmbeddedInterfaceMarkerRegistered(expected_marker));
+    EXPECT_EQ(wetted(4), expected_marker);
+    EXPECT_TRUE(consumer.system->isGeneratedEmbeddedInterfaceMarkerRegistered(expected_marker));
+}
+
+TEST(LevelSetGeometry, ActiveBoundaryResolverAllowsEmptyAndRepeatedOwnersButRejectsAmbiguity)
+{
+    const auto empty = generatedActiveBoundaryResolver({}, "Owner", "negative marker");
+    EXPECT_FALSE(empty(-1));
+    EXPECT_FALSE(empty(4));
+
+    GeometrySystem source;
+    const auto geometry = LevelSetGeometry::bind(*source.system,
+        {.level_set_field = source.phi, .domain_id = "shared", .interface_marker = 17});
+    const auto negative = geometry.side(CutVolumeSide::Negative);
+    const auto repeated = generatedActiveBoundaryResolver({negative, negative}, "Owner", "negative marker");
+    EXPECT_EQ(repeated(4), negative.boundary(4).generatedActiveBoundaryMarker());
+    const auto ambiguous = generatedActiveBoundaryResolver(
+        {negative, geometry.side(CutVolumeSide::Positive)}, "Owner", "negative marker");
+    try {
+        (void)ambiguous(4);
+        FAIL() << "ambiguous owners were accepted";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_EQ(std::string(error.what()),
+            "Owner: physical boundary marker 4 is covered by multiple ambiguous unfitted active "
+            "domains; select one explicit active-domain owner");
+    }
+}
+
 } // namespace
 } // namespace svmp::FE::level_set::test

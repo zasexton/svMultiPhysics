@@ -1473,6 +1473,50 @@ TEST(FormsInstaller, FormsInstaller_InstallFormulation_RegistersKernel)
     }
 }
 
+TEST(FormsInstaller, GeneratedTraceRequirementsMatchOrderedBoundaryRoutes)
+{
+    using namespace svmp::FE;
+    using namespace forms;
+    using Binding = bc::GeneratedBoundaryNitscheTraceFormBinding;
+    const auto scalar = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    const spaces::ProductSpace vector(scalar, 3);
+    const auto u = StateField(FieldId{23}, vector, "u");
+    const auto v = TestField(FieldId{23}, vector, "v");
+    const auto first = bc::buildGeneratedBoundaryNitscheTraceTerms(
+        u, v, zeroVector(3), bc::symmetricGradientForm(FormExpr::constant(2.0)), 4, 104, {}).binding;
+    const auto second = bc::buildGeneratedBoundaryNitscheTraceTerms(
+        u, v, zeroVector(3), bc::symmetricGradientForm(FormExpr::constant(2.0)), 7, 107, {}).binding;
+    const auto first_domain = BoundaryDomain::generatedActiveSubset(4, 104);
+    const auto second_domain = BoundaryDomain::generatedActiveSubset(7, 107);
+    const std::vector<BoundaryDomain> expected{first_domain, second_domain};
+    const std::vector<Binding> bindings{first, second};
+    EXPECT_NO_THROW(systems::requireGeneratedBoundaryNitscheTraceBindings(expected, bindings, "routes differ"));
+    EXPECT_NO_THROW(systems::requireGeneratedBoundaryNitscheTraceBindings({}, {}, "routes differ"));
+    const std::vector<BoundaryDomain> duplicates{first_domain, first_domain};
+    const std::vector<Binding> duplicate_bindings{first, first};
+    EXPECT_NO_THROW(systems::requireGeneratedBoundaryNitscheTraceBindings(
+        duplicates, duplicate_bindings, "routes differ"));
+
+    const auto rejects = [](const std::vector<BoundaryDomain>& domains,
+                            const std::vector<Binding>& actual) {
+        try {
+            systems::requireGeneratedBoundaryNitscheTraceBindings(domains, actual, "routes differ");
+            ADD_FAILURE() << "mismatched routes were accepted";
+        } catch (const std::logic_error& error) {
+            EXPECT_EQ(std::string(error.what()), "routes differ");
+        }
+    };
+    rejects(expected, {first});
+    rejects({first_domain}, bindings);
+    rejects({}, {first});
+    rejects({first_domain}, {});
+    rejects(expected, {second, first});
+    rejects({BoundaryDomain::generatedActiveSubset(5, 104), second_domain}, bindings);
+    rejects({BoundaryDomain::generatedActiveSubset(4, 105), second_domain}, bindings);
+    rejects({BoundaryDomain::fullPhysical(4), second_domain}, bindings);
+    rejects(duplicates, {first});
+}
+
 TEST(FormulationBuilder, ComposesOptionsInCallOrderAndInstallsGroups)
 {
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();

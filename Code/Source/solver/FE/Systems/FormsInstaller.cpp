@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <stdexcept>
 #include <string>
 
 #include "Core/FEException.h"
@@ -50,6 +51,25 @@
 namespace svmp {
 namespace FE {
 namespace systems {
+
+void requireGeneratedBoundaryNitscheTraceBindings(
+    std::span<const forms::BoundaryDomain> expected_routes,
+    std::span<const forms::bc::GeneratedBoundaryNitscheTraceFormBinding> bindings,
+    std::string_view mismatch_message)
+{
+    if (expected_routes.size() != bindings.size()) {
+        throw std::logic_error(std::string(mismatch_message));
+    }
+    for (std::size_t index = 0; index < expected_routes.size(); ++index) {
+        const auto& expected = expected_routes[index];
+        const auto& binding = bindings[index];
+        if (!expected.isGeneratedActiveSubset() ||
+            expected.physicalBoundaryMarker() != binding.physicalBoundaryMarker() ||
+            expected.generatedActiveBoundaryMarker() != binding.generatedActiveBoundaryMarker()) {
+            throw std::logic_error(std::string(mismatch_message));
+        }
+    }
+}
 
 namespace {
 
