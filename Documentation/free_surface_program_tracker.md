@@ -2010,6 +2010,14 @@ This section is compact and chronological. Detailed evidence is in the indexed d
   FE 58/58, Physics 25/25, Application 11 passes plus the existing interpreter skip (unchanged supplemental check passes), and the explicit 960-case two-rank matrix pass (final 592,489 ms on both ranks). All 673 full Python statuses match without allowed changes (587 PASS, 85 ERROR, 1 FAIL).
   Evidence: `/scratch/users/zsexton/svmp-ns-composition-evidence`, with `/tmp/svmp-ns-evidence` retained as an alias; technical details: `Documentation/navier_stokes_composition_refactor.md`. These are preservation results, not new long WP-4 qualification.
 
+
+### 8.9 Navier–Stokes formulation contracts (2026-10-28)
+
+- **2026-10-28: reviewed support definitions removed (`89b4739f` → `0a5cf14c`).** All 26 definitions in the module's reviewed lines 99–948 are removed from the five-file formulation folder: two dead APIs deleted, four model policies explicitly relocated to existing Options files, and twenty replaced by direct declarations, prepared identities or complete generic operations. No helper collection was copied into BC/PostProcessing or renamed into FE. The folder decreases by 833 lines; after Options +421 and FE +344, combined production decreases by 68 lines (201 from historical `fd3d68fb`). No new production file is added in this stage.
+- Both bounded Physics adoptions pass the full preservation gate. Final 40 corresponding-rank reference outputs/configurations and 12 exact log groups match; S0 preserves 16 ordered manifests with zero candidate misses; resolve preserves 30 statuses/26 artifacts and all 9 rank-supplement comparisons. FE 58/Physics 25 CTest entries pass; Application has 11 passes and its existing interpreter skip. Both ranks pass the explicit 960-case hydrostatic matrix (512,210 ms). All 673 Python statuses are unchanged: 587 PASS, 85 existing ERROR, 1 existing FAIL. Internal test skips and numbered entry/test pairs are unchanged; complete logs are retained.
+- Required physical equations, work identities, normal/frame conventions, registration/constraint ordering, lazy validation, late fitted constant requirements and live geometry/certification remain. Compact multi-test-row interface lowering and point-cloud reader replacement remain separately deferred with specific technical evidence; the expanded production route is retained. These results preserve the established method; they do not upgrade long WP-4 qualification.
+- Evidence: `/scratch/users/zsexton/svmp-ns-helper-evidence`, with frozen stage snapshots, tested-commit mappings, exact commands and baseline-wrapper reconciliations. Technical handoff and all 26 dispositions: `Documentation/navier_stokes_formulation_contracts.md`.
+
 ---
 
 ## 9. State inventory
@@ -2058,6 +2066,7 @@ Recorded on 2026-09-29. Re-check before acting.
 | `Documentation/free_surface_wp3_wp7_symmetric_nitsche_coercivity_method_v3.md` | Current Nitsche floor (v1 and v2 are H) |
 | `Documentation/free_surface_capability_ledger.md` | Implemented-vs-qualified inventory. Keep it in sync with §2.1, or fold it into §2.1. |
 | `Documentation/navier_stokes_composition_refactor.md` | Technical handoff for shared validation/configuration/inlets, authoritative functionals and form composition: APIs, retained contracts/compiler limits, source counts and exact preservation evidence. Physical qualification remains in this tracker. |
+| `Documentation/navier_stokes_formulation_contracts.md` | Follow-up handoff for all 26 reviewed helper definitions: prepared geometry, vertex/kinematic/trace contracts, physical policy ownership, net source accounting and exact stage preservation evidence. |
 | `Documentation/qualification_logs/` | Frozen evidence records (20 directories) |
 | `Documentation/free_surface_architecture_refactoring_plan_20260904.md` | Refactor target architecture (R0–R12); paused under D7 and used as guidance for targeted extractions. |
 | `Documentation/mesh_motion_math_first_formulation_guide.md`, `plan_ale_mesh_motion_data_and_coupled_displacement.md`, `plan_mesh_motion_math_first_formulations.md`, `plan_moving_mesh_infrastructure.md` | Mesh-motion infrastructure (R, with open items relevant to M5) |

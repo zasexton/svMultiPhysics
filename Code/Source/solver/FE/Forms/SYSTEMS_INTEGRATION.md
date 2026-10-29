@@ -25,6 +25,9 @@ How `FE/Forms` weak-form expressions become assembled operators in `FE/Systems`.
 | Auxiliary model definition | `AuxiliaryModelBuilder("name")` | `AuxiliaryModelBuilder.h` |
 | Auxiliary model deployment | `use(model).scope(...).bind(...)` | `AuxiliaryBindings.h` |
 | Auxiliary inputs | `AuxiliaryInputRegistry` | `AuxiliaryInputRegistry.h` |
+| Generated Nitsche route agreement | `requireGeneratedBoundaryNitscheTraceBindings()` | `FormsInstaller.h` |
+| Moving-boundary normal relations and measurements | `MeshNormalKinematicDeclaration`, `declareMeshNormalKinematics()` | `MeshBoundaryKinematics.h` |
+| Vertex field targets and comparisons | `requireVertexField()`, `compareVertexValues()` | `VertexFieldInitialization.h` |
 
 ### Expert/Manual Paths
 
@@ -233,6 +236,62 @@ groups. Algebraic equivalence alone does not preserve the manifest or JIT key.
 The expert `FormCompiler::compileMixed` path separately identifies symbols by
 space signature and name; use distinct names there. It does not provide the
 canonical residual installer's `FieldId` disambiguation.
+
+### Generated Nitsche route agreement
+
+`systems::requireGeneratedBoundaryNitscheTraceBindings(expected_routes,
+bindings, mismatch_message)` compares spans of `forms::BoundaryDomain` and
+`forms::bc::GeneratedBoundaryNitscheTraceFormBinding`. Counts must match, and
+each expected domain must have generated-active-subset intent with the same
+physical and generated markers as the corresponding binding. Order and
+multiplicity matter: duplicate routes are retained; two empty spans agree.
+A mismatch throws `std::logic_error` with the supplied message.
+
+This check reads the supplied values without registering markers, changing
+bindings, or constructing replacement forms. The caller owns both spans for
+the duration of the call. Register required domains separately through
+`FormulationBuilder::registered()` at the intended declaration point. Route
+agreement does not authenticate a form's origin or certify its penalty:
+`certifyGeneratedBoundaryNitscheTraces()` and installation still require the
+original form anchors and prepare the live trace policies. Keep the original
+production bindings through that workflow; a matching marker pair alone is
+insufficient.
+
+### Moving-boundary normal declarations
+
+`systems::MeshNormalKinematicDeclaration` pairs a
+`MeshNormalBoundaryConstraintDeclaration` with its
+`MeshNormalKinematicBinding` (consumer source strings and optional prescribed
+tangential measurement velocity). Pass an ordered vector to
+`declareMeshNormalKinematics(system, operator_tag, declarations)`. For each
+item the service declares the constraint, binds its consumer, then registers
+its operator-stage measurement before advancing. Target expressions retain
+their existing form nodes.
+
+The operation does not roll back earlier items if a later item fails. The
+callback overload resolves each binding immediately before declaring its
+item. When caller-side value evaluation can throw and its timing matters,
+evaluate and submit one paired item at a time at the required registration
+point; eagerly evaluating the whole vector changes failure ordering. The
+service consumes values during the call and stores the resulting declarations
+and measurements in the system. It does not select physical boundary policies.
+
+### Vertex initialization and comparison
+
+`systems::requireVertexField()` resolves a named field and then its vertex DOF
+map without mutation. Its `VertexFieldTarget` borrows that map: use it while
+system numbering remains current and resolve it again after numbering changes.
+`VertexValueSamples` likewise borrows its ordered value span.
+`compareVertexValues()` samples each local, in-range input once, including
+duplicates, and skips nonlocal or out-of-range inputs and their extrema. It
+returns local counts, extrema, and maximum absolute error without enforcing
+values or performing a collective reduction; empty extrema remain infinite.
+
+For side-restricted vertex writes and admissibility checks, see
+[Level-set vertex support and initialization](../Docs/LevelSet.md#vertex-support-admissibility-and-initialization).
+The existing `initializeFieldFromMeshVertexField()` projects the same-name mesh
+vertex field to all field coefficients. It has different coverage from the
+vertex-only side initializer; choose explicitly according to the required DOFs.
 
 ## 3. Mixed Operators (bilinear / linear)
 

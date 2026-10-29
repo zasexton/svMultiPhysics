@@ -26,6 +26,8 @@ Use specific headers when compile time or dependency clarity matters:
 | `FE/LevelSet/LevelSetTransport.h` | `installLevelSetTransport()` |
 | `FE/LevelSet/LevelSetInterfaceLifecycle.h` | generated interface domain creation and update lifecycle |
 | `FE/LevelSet/LevelSetVolume.h` | cut-cell volume measurement |
+| `FE/LevelSet/LevelSetGeometry.h` | immutable geometry identities, cut-side domains, owned boundary resolver |
+| `FE/LevelSet/LevelSetSideSupport.h` | vertex support, admissibility, side-restricted vertex initialization |
 | `FE/LevelSet/LevelSetWallContactConstraint.h` | identity of an accepted wall-contact cell |
 | `FE/LevelSet/Maintenance/LevelSetMaintenanceConfiguration.h` | configuration, run state and declaration bindings of a maintained level-set field |
 | `FE/LevelSet/Maintenance/LevelSetMaintenancePipeline.h` | accepted-step maintenance pipeline |
@@ -38,6 +40,70 @@ APIs in `FE/LevelSet` are public FE APIs unless they are in an anonymous
 namespace or marked internal in the header. Keep new reusable level-set
 algorithms in this directory and expose them through the smallest header that
 matches their scope.
+
+## Geometry identities and owned boundary resolution
+
+`LevelSetGeometry::bind()` resolves a scalar field and interface marker into a
+value handle containing field ID, domain ID, isovalue, and marker. `CutSide`
+adds the selected side and supplies typed volume, interface, boundary, facet,
+and contact-line domains. These handles describe identity; they contain no
+coefficient, coordinate, quadrature, or certificate snapshots. Generated
+geometry must still be refreshed and certified through the normal system
+lifecycle before use.
+
+`generatedActiveBoundaryResolver(std::vector<CutSide> owners, std::string owner,
+std::string invalid_physical_marker_message)` returns a callable that owns its
+side handles and diagnostic strings. It can outlive the input vector and does
+not borrow a system or cut context. Each call visits owners in order and
+requires agreement of both the generated marker and its stable key. Ambiguous
+owners throw `std::invalid_argument`. A negative physical marker throws with
+the supplied text when owners exist; an empty owner list returns `std::nullopt`
+for every input, including negative markers.
+
+Resolution alone does not register a marker. The separate
+`wettedBoundaryResolver(system, resolve)` adapter registers each resolved marker
+when invoked and borrows the system, which must outlive that callable. Typed
+domains can instead be registered explicitly with
+`FormulationBuilder::registered()`. Keep registrations at their intended
+mutation points, including repeated registrations when call order matters.
+
+## Vertex support, admissibility, and initialization
+
+`requireVertexValuesOnLevelSetSide(system, samples, requirement)` checks ordered
+`VertexValueSamples` against a borrowed `LevelSetVertexValues` view. For each
+local input it checks mesh range, side membership, then the strict exclusion
+margin `abs(phi - isovalue) < margin`. The first failure throws
+`std::invalid_argument` using the caller's failure formatter. Nonlocal inputs
+are skipped, but their prescribed values still enter input extrema. Duplicates
+are checked in order. Statistics are local, empty extrema remain infinite, and
+no finite-value scan or collective reduction is added. The supplied level-set
+view must cover the local mesh and remain valid throughout the call.
+
+`initializeVertexFieldOnLevelSetSide(system, state, target, declaration)` uses a
+`systems::VertexFieldTarget` resolved by `requireVertexField()` and a
+`SideVertexInitializationDeclaration`. The declaration supplies exactly one
+`systems::VertexScalarSource`: a spatial callable or a
+`RequiredMeshVertexScalarSource`. Choosing that source and its physical law is
+the caller's responsibility. An optional `LevelSetVertexSupportDeclaration`
+selects side support; unsupported vertices receive `unsupported_value`.
+
+Each call binds current support, validates the source, collects vertex
+coefficients, compares requested vertex samples, then writes through one vector
+assembly view, in that order. A named source uses component zero; setting its
+`non_finite_prefix` requests a scan of every local source vertex, including
+unsupported vertices. All checks and comparisons precede the vector write.
+The result reports initialized DOFs, side/support statistics, and comparisons.
+Only vertex DOFs are written; higher-order edge, face, and cell coefficients
+remain unchanged.
+
+Support is recomputed for each call. With a native mesh, it includes vertices
+of cells with positive side measure using the requested generated volume rules
+when available, otherwise cells with a vertex strictly on the selected side.
+Without a native mesh it uses vertex side membership. The service checks that
+relevant geometry snapshots are current and caches neither views nor support
+masks. Keep the target DOF map, comparison span, and callable captures valid
+through the call; resolve the target again after renumbering. Refresh generated
+geometry before invoking initialization after a geometry change.
 
 ## Free-Surface Consumers
 
