@@ -12848,6 +12848,183 @@ TEST(MovingDomainPhysics, PreparedWeakVelocityNitschePreservesPerBoundaryFailure
     EXPECT_EQ(prepared[0].physical_marker, 22);
 }
 
+TEST(MovingDomainPhysics, LegacyWeakVelocityNitscheAliasesKeepSequentialAppendOrder)
+{
+    using namespace FE::forms;
+    auto vector = FE::spaces::VectorSpace(FE::spaces::SpaceType::H1, FE::ElementType::Tetra4, 2, 3);
+    auto scalar = FE::spaces::Space(FE::spaces::SpaceType::H1, FE::ElementType::Tetra4, 1);
+    const auto u = StateField(17, *vector, "u");
+    const auto p = StateField(29, *scalar, "p");
+    const auto v = TestField(17, *vector, "v");
+    const auto q = TestField(29, *scalar, "q");
+    const auto mu = FormExpr::constant(0.04);
+    const auto n = FormExpr::normal();
+    const auto uD = constantVector3(1.0, 2.0, 3.0);
+    const auto diff = u - uD;
+    const std::array<std::array<std::size_t, 4>, 5> aliases{{
+        {0, 1, 0, 1},  // each observation aliases its production row
+        {0, 0, 2, 3},  // the two production rows share a target
+        {0, 1, 1, 0},  // each observation aliases the other production row
+        {0, 1, 2, 2},  // observations share a target
+        {0, 0, 0, 0},  // every destination shares a target
+    }};
+    for (const bool symmetric : {false, true}) {
+        for (const bool scale_with_p : {false, true}) {
+            auto options = baseNavierStokesOptions();
+            options.nitsche_symmetric = symmetric;
+            options.nitsche_scale_with_p = scale_with_p;
+            options.velocity_dirichlet_weak = {{.boundary_marker = 21, .value = {1.0, 2.0, 3.0}}};
+            const std::vector<ns::PreparedWeakVelocityBoundary> prepared{{
+                .physical_marker = 21, .generated_marker = std::nullopt, .prescribed_velocity = uD}};
+            const auto measure = ExteriorBoundaryMeasure::fullPhysical(21);
+            const auto stress_u = FormExpr::constant(2.0) * mu * symgrad(u);
+            const auto stress_v = FormExpr::constant(2.0) * mu * symgrad(v);
+            const auto penalty = bc::buildTraceNitschePenalty(mu / hNormal(), u,
+                {.gamma = options.nitsche_gamma,
+                 .variant = symmetric ? bc::NitscheVariant::Symmetric : bc::NitscheVariant::Unsymmetric,
+                 .scale_with_p = scale_with_p});
+            const auto adjoint = inner(stress_v * n, diff).dExteriorBoundary(measure);
+            const auto continuity = (q * inner(n, diff)).dExteriorBoundary(measure);
+            // This event order is observable when destinations alias. Each event
+            // updates production and then its observation before the next event.
+            const std::array events{
+                std::pair{true, (p * inner(n, v)).dExteriorBoundary(measure)},
+                std::pair{true, -inner(stress_u * n, v).dExteriorBoundary(measure)},
+                std::pair{true, symmetric ? -adjoint : adjoint},
+                std::pair{false, symmetric ? continuity : -continuity},
+                std::pair{true, (penalty * inner(diff, v)).dExteriorBoundary(measure)},
+            };
+            for (const bool use_prepared : {false, true}) {
+                for (std::size_t index = 0; index < aliases.size(); ++index) {
+                    SCOPED_TRACE(::testing::Message() << symmetric << ' ' << scale_with_p
+                                 << ' ' << use_prepared << ' ' << index);
+                    const auto& targets = aliases[index];
+                    std::array actual{inner(u, v).dx(), (p * q).dx(),
+                                      FormExpr::constant(3.0).dx(), FormExpr::constant(4.0).dx()};
+                    auto expected = actual;
+                    for (const auto& [momentum, term] : events) {
+                        const auto row = momentum ? 0u : 1u;
+                        expected[targets[row]] = sumOf(expected[targets[row]], term);
+                        expected[targets[row + 2u]] = sumOf(expected[targets[row + 2u]], term);
+                    }
+                    if (use_prepared) {
+                        ns::Factories::applyVelocityNitscheBCs(
+                            actual[targets[0]], actual[targets[1]], options,
+                            std::span<const ns::PreparedWeakVelocityBoundary>(prepared), u, p, v, q, mu,
+                            nullptr, &actual[targets[2]], &actual[targets[3]]);
+                    } else {
+                        ns::Factories::applyVelocityNitscheBCs(
+                            actual[targets[0]], actual[targets[1]], options, 3, u, p, v, q, mu,
+                            {}, nullptr, &actual[targets[2]], &actual[targets[3]]);
+                    }
+                    for (std::size_t target = 0; target < actual.size(); ++target) {
+                        EXPECT_EQ(FE::systems::formExprTreeHash(actual[target]),
+                                  FE::systems::formExprTreeHash(expected[target]));
+                        EXPECT_EQ(actual[target].toString(), expected[target].toString());
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(MovingDomainPhysics, LegacyWeakVelocityNitscheLateFailureKeepsPartialOutputs)
+{
+    using namespace FE::forms;
+    using Binding = bc::GeneratedBoundaryNitscheTraceFormBinding;
+    auto vector = FE::spaces::VectorSpace(FE::spaces::SpaceType::H1, FE::ElementType::Tetra4, 1, 3);
+    auto scalar = FE::spaces::Space(FE::spaces::SpaceType::H1, FE::ElementType::Tetra4, 1);
+    const auto u = StateField(17, *vector, "u");
+    const auto p = StateField(29, *scalar, "p");
+    const auto v = TestField(17, *vector, "v");
+    const auto q = TestField(29, *scalar, "q");
+    const auto mu = FormExpr::constant(0.04);
+    auto options = baseNavierStokesOptions();
+    options.velocity_dirichlet_weak = {{.boundary_marker = 21, .value = {1.0, 2.0, 3.0}}};
+    const auto resolver = [](int marker) -> std::optional<int> { return marker + 100; };
+    const std::array seeds{inner(u, v).dx(), (p * q).dx(),
+                           FormExpr::constant(3.0).dx(), FormExpr::constant(4.0).dx()};
+    auto completed = seeds;
+    std::vector<Binding> completed_bindings;
+    std::vector<ns::PreparedWeakVelocityBoundary> completed_prepared;
+    ns::Factories::applyVelocityNitscheBCs(completed[0], completed[1], options, 3, u, p, v, q, mu,
+        resolver, &completed_bindings, &completed[2], &completed[3], &completed_prepared);
+    ASSERT_EQ(completed_bindings.size(), 1u);
+    ASSERT_EQ(completed_prepared.size(), 1u);
+
+    for (const bool use_prepared : {false, true}) {
+        SCOPED_TRACE(use_prepared);
+        auto actual = seeds;
+        auto expected = completed;
+        std::vector<Binding> bindings;
+        std::vector<ns::PreparedWeakVelocityBoundary> published;
+        std::vector<int> resolved;
+        const auto recording_resolver = [&](int marker) -> std::optional<int> {
+            resolved.push_back(marker);
+            return resolver(marker);
+        };
+        if (use_prepared) {
+            auto prepared = completed_prepared;
+            prepared.push_back({.physical_marker = 22, .generated_marker = 122,
+                                .prescribed_velocity = FormExpr::constant(0.0)});
+            // The second generated route appends its pressure term before
+            // rejecting this scalar prescribed value. No second binding exists.
+            const auto pressure = (p * inner(FormExpr::normal(), v)).dExteriorBoundary(
+                ExteriorBoundaryMeasure::generatedActiveSubset(22, 122));
+            expected[0] = sumOf(expected[0], pressure);
+            expected[2] = sumOf(expected[2], pressure);
+            try {
+                ns::Factories::applyVelocityNitscheBCs(actual[0], actual[1], options,
+                    std::span<const ns::PreparedWeakVelocityBoundary>(prepared), u, p, v, q, mu,
+                    &bindings, &actual[2], &actual[3]);
+                FAIL() << "Expected incompatible generated prescribed vector";
+            } catch (const std::invalid_argument& error) {
+                EXPECT_STREQ(error.what(),
+                    "forms::bc::buildGeneratedBoundaryNitscheTraceTerms: prescribed value must be a vector compatible with u");
+            }
+            EXPECT_TRUE(resolved.empty());
+        } else {
+            auto invalid_options = options;
+            invalid_options.velocity_dirichlet_weak.push_back({.boundary_marker = -1});
+            try {
+                ns::Factories::applyVelocityNitscheBCs(actual[0], actual[1], invalid_options, 3,
+                    u, p, v, q, mu, recording_resolver, &bindings, &actual[2], &actual[3], &published);
+                FAIL() << "Expected invalid second boundary marker";
+            } catch (const std::invalid_argument& error) {
+                EXPECT_STREQ(error.what(),
+                    "navier_stokes::Factories::applyVelocityNitscheBCs: invalid boundary_marker (< 0)");
+            }
+            EXPECT_EQ(resolved, (std::vector<int>{21}));
+            ASSERT_EQ(published.size(), 1u);
+            EXPECT_EQ(published[0].physical_marker, 21);
+            EXPECT_EQ(published[0].generated_marker, 121);
+            EXPECT_EQ(FE::systems::formExprTreeHash(published[0].prescribed_velocity),
+                      FE::systems::formExprTreeHash(completed_prepared[0].prescribed_velocity));
+        }
+        for (std::size_t target = 0; target < actual.size(); ++target) {
+            EXPECT_EQ(FE::systems::formExprTreeHash(actual[target]),
+                      FE::systems::formExprTreeHash(expected[target]));
+            EXPECT_EQ(actual[target].toString(), expected[target].toString());
+        }
+        ASSERT_EQ(bindings.size(), 1u);
+        EXPECT_EQ(bindings[0].velocityField(), 17u);
+        EXPECT_EQ(bindings[0].physicalBoundaryMarker(), 21);
+        EXPECT_EQ(bindings[0].generatedActiveBoundaryMarker(), 121);
+        EXPECT_EQ(FE::systems::formExprTreeHash(bindings[0].routeAnchor()),
+                  FE::systems::formExprTreeHash(completed_bindings[0].routeAnchor()));
+        const auto count_anchor = [&](const auto& self, const FormExprNode& node) -> int {
+            int count = &node == bindings[0].routeAnchor().node() ? 1 : 0;
+            for (const auto& child : node.childrenShared()) {
+                if (child) count += self(self, *child);
+            }
+            return count;
+        };
+        EXPECT_EQ(count_anchor(count_anchor, *actual[0].node()), 1);
+        EXPECT_EQ(count_anchor(count_anchor, *actual[2].node()), 1);
+    }
+}
+
+
 TEST(MovingDomainPhysics, BoundaryPreflightPublishesPreparedValuesOnlyAfterSuccess)
 {
     using namespace FE::forms;
