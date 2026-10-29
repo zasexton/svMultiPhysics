@@ -17,6 +17,7 @@
 #include "Physics/Materials/Fluid/CarreauYasudaViscosity.h"
 #include "Physics/Tests/Unit/PhysicsTestHelpers.h"
 
+#include "FE/Forms/JIT/LLVMJITBuildInfo.h"
 #include "FE/Forms/FormExpr.h"
 #include "FE/Forms/FormCompiler.h"
 #include "FE/Forms/FormKernels.h"
@@ -13165,6 +13166,7 @@ TEST(MovingDomainPhysics,
               tangential_declaration_count);
     mm::PseudoElasticMeshMotionOptions late_options;
     late_options.operator_tag = "late_pseudo_normal";
+    late_options.lambda_mesh = FE::Real{-1.0};
     late_options.normal_constraint.push_back(mm::NormalConstraintBC{
         .boundary_marker = marker + 1,
         .quantity = mm::NormalConstraintQuantity::Displacement,
@@ -13183,6 +13185,18 @@ TEST(MovingDomainPhysics,
                   std::string::npos)
             << error.what();
     }
+    mm::HarmonicMeshMotionOptions late_harmonic_options;
+    late_harmonic_options.operator_tag = "late_harmonic_normal";
+    late_harmonic_options.kappa = FE::Real{-1.0};
+    late_harmonic_options.normal_constraint.push_back({.boundary_marker = marker + 1});
+    mm::HarmonicMeshMotionModule late_harmonic_module(displacement_space, std::move(late_harmonic_options));
+    try {
+        late_harmonic_module.registerOn(system);
+        FAIL() << "expected accepted history rejection before invalid kappa";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string(error.what()).find("accepted normal-constraint history"), std::string::npos);
+    }
+    EXPECT_FALSE(system.hasOperator("late_harmonic_normal"));
     EXPECT_EQ(system.isSetup(), was_setup);
     EXPECT_EQ(system.fieldMap().numFields(), field_count);
     EXPECT_EQ(system.formulationRecords().size(), formulation_count);
@@ -13195,6 +13209,194 @@ TEST(MovingDomainPhysics,
     EXPECT_EQ(system.meshNormalBoundaryConstraintHistory().size(),
               history_count);
     EXPECT_FALSE(system.hasOperator("late_pseudo_normal"));
+}
+
+TEST(MovingDomainPhysics, PseudoElasticFluxConsistencyRejectionPrecedesMaterialValidation)
+{
+    constexpr int marker = 12;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto displacement_space = makeVelocitySpace(mesh);
+    FE::systems::FESystem system(mesh);
+    const auto displacement = system.addField(
+        {.name = "existing_displacement", .space = displacement_space, .components = 3});
+    system.bindMeshMotionField(FE::systems::MeshMotionFieldRole::Displacement, displacement);
+    system.declareMeshNormalBoundaryConstraint({
+        .mesh_displacement_field = displacement,
+        .boundary_marker = marker,
+        .target_expression = FE::forms::FormExpr::constant(FE::Real{0.0}),
+        .owner_component = "existing_consistent_owner",
+        .requires_mesh_flux_consistency = true,
+        .mesh_flux_consistency_nitsche_gamma = 10.0});
+    mm::PseudoElasticMeshMotionOptions options;
+    options.operator_tag = "invalid_pseudo_motion";
+    options.lambda_mesh = FE::Real{-1.0};
+    mm::PseudoElasticMeshMotionModule module(displacement_space, std::move(options));
+    try {
+        module.registerOn(system);
+        FAIL() << "expected flux consistency rejection";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string(error.what()).find("only the harmonic mesh motion provides it"), std::string::npos);
+    }
+    EXPECT_EQ(system.registeredFieldCount(), 1u);
+    EXPECT_FALSE(system.hasOperator("invalid_pseudo_motion"));
+    EXPECT_TRUE(system.formulationRecords().empty());
+    EXPECT_TRUE(system.boundaryConditionDescriptors().empty());
+    EXPECT_EQ(system.meshNormalBoundaryConstraints().size(), 1u);
+    EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());
+}
+
+TEST(MovingDomainPhysics, MeshMotionNormalPreparationPreservesFirstErrorAndState)
+{
+    constexpr int marker = 12;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto displacement_space = makeVelocitySpace(mesh);
+    const auto check = [&](const auto& make_module) {
+        // The duplicate marker must win over the second entry's invalid quantity.
+        {
+            FE::systems::FESystem system(mesh);
+            std::vector<mm::NormalConstraintBC> normals{
+                {.boundary_marker = marker, .target = FE::Real{0.0}, .penalty = FE::Real{1.0}},
+                {.boundary_marker = marker,
+                 .quantity = static_cast<mm::NormalConstraintQuantity>(255),
+                 .target = FE::Real{0.0}, .penalty = FE::Real{1.0}}};
+            auto module = make_module(std::move(normals));
+            try {
+                module.registerOn(system);
+                FAIL() << "expected duplicate normal marker";
+            } catch (const std::invalid_argument& error) {
+                EXPECT_NE(std::string(error.what()).find("duplicate normal constraint marker 12"), std::string::npos);
+            }
+            EXPECT_EQ(system.registeredFieldCount(), 0u);
+            EXPECT_FALSE(system.hasOperator("mesh_motion"));
+            EXPECT_TRUE(system.meshNormalBoundaryConstraints().empty());
+            EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());
+            EXPECT_TRUE(system.boundaryConditionDescriptors().empty());
+            EXPECT_TRUE(system.formulationRecords().empty());
+        }
+        // A state-dependent target must win over an existing owner of that marker.
+        {
+            FE::systems::FESystem system(mesh);
+            const auto displacement = system.addField(
+                {.name = "existing_displacement", .space = displacement_space, .components = 3});
+            system.bindMeshMotionField(FE::systems::MeshMotionFieldRole::Displacement, displacement);
+            system.declareMeshNormalBoundaryConstraint({
+                .mesh_displacement_field = displacement,
+                .boundary_marker = marker,
+                .target_expression = FE::forms::FormExpr::constant(FE::Real{0.0}),
+                .owner_component = "existing_normal_owner"});
+            auto module = make_module(std::vector<mm::NormalConstraintBC>{
+                {.boundary_marker = marker,
+                 .target = FE::forms::component(FE::forms::StateField(displacement, *displacement_space, "existing_state"), 0),
+                 .penalty = FE::Real{1.0}}});
+            try {
+                module.registerOn(system);
+                FAIL() << "expected invalid normal target";
+            } catch (const std::invalid_argument& error) {
+                EXPECT_NE(std::string(error.what()).find("target must be independent of FE state"), std::string::npos);
+            }
+            EXPECT_EQ(system.registeredFieldCount(), 1u);
+            EXPECT_EQ(system.findFieldByName("mesh_displacement"), FE::INVALID_FIELD_ID);
+            EXPECT_FALSE(system.hasOperator("mesh_motion"));
+            ASSERT_EQ(system.meshNormalBoundaryConstraints().size(), 1u);
+            EXPECT_EQ(system.meshNormalBoundaryConstraints().front().owner_component, "existing_normal_owner");
+            EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());
+            EXPECT_TRUE(system.boundaryConditionDescriptors().empty());
+            EXPECT_TRUE(system.formulationRecords().empty());
+        }
+    };
+    check([&](std::vector<mm::NormalConstraintBC> normals) {
+        mm::HarmonicMeshMotionOptions options;
+        options.operator_tag = "mesh_motion";
+        options.normal_constraint = std::move(normals);
+        return mm::HarmonicMeshMotionModule(displacement_space, std::move(options));
+    });
+    check([&](std::vector<mm::NormalConstraintBC> normals) {
+        mm::PseudoElasticMeshMotionOptions options;
+        options.operator_tag = "mesh_motion";
+        options.normal_constraint = std::move(normals);
+        return mm::PseudoElasticMeshMotionModule(displacement_space, std::move(options));
+    });
+}
+
+TEST(MovingDomainPhysics, MeshMotionLateTangentialFailurePreservesEarlierDeclaration)
+{
+    constexpr int marker = 12;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto displacement_space = makeVelocitySpace(mesh);
+    const auto check = [&](const auto& make_module) {
+        for (const bool duplicate : {false, true}) {
+            SCOPED_TRACE(duplicate);
+            FE::systems::FESystem system(mesh);
+            std::vector<mm::TangentialPolicyBC> tangential{
+                {.boundary_marker = marker, .policy = mm::TangentialMeshPolicy::Free},
+                {.boundary_marker = duplicate ? marker : marker + 1,
+                 .policy = duplicate ? mm::TangentialMeshPolicy::Free : static_cast<mm::TangentialMeshPolicy>(255)}};
+            auto module = make_module(std::move(tangential));
+            if (duplicate) {
+                EXPECT_THROW(module.registerOn(system), FE::InvalidArgumentException);
+            } else {
+                EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+            }
+            const auto displacement = system.findFieldByName("mesh_displacement");
+            ASSERT_NE(displacement, FE::INVALID_FIELD_ID);
+            EXPECT_EQ(system.registeredFieldCount(), 1u);
+            EXPECT_EQ(system.meshMotionField(FE::systems::MeshMotionFieldRole::Displacement), displacement);
+            ASSERT_EQ(system.meshTangentialBoundaryPolicies().size(), 1u);
+            EXPECT_EQ(system.meshTangentialBoundaryPolicies().front().boundary_marker, marker);
+            EXPECT_EQ(system.meshTangentialBoundaryPolicies().front().policy, FE::systems::MeshTangentialBoundaryPolicy::Free);
+            EXPECT_TRUE(system.meshNormalBoundaryConstraints().empty());
+            EXPECT_FALSE(system.hasOperator("mesh_motion"));
+            EXPECT_TRUE(system.formulationRecords().empty());
+            EXPECT_TRUE(system.boundaryConditionDescriptors().empty());
+        }
+    };
+    check([&](std::vector<mm::TangentialPolicyBC> tangential) {
+        mm::HarmonicMeshMotionOptions options;
+        options.operator_tag = "mesh_motion";
+        options.normal_constraint.push_back({.boundary_marker = marker + 2, .target = FE::Real{0.0}, .penalty = FE::Real{1.0}});
+        options.tangential_policy = std::move(tangential);
+        return mm::HarmonicMeshMotionModule(displacement_space, std::move(options));
+    });
+    check([&](std::vector<mm::TangentialPolicyBC> tangential) {
+        mm::PseudoElasticMeshMotionOptions options;
+        options.operator_tag = "mesh_motion";
+        options.normal_constraint.push_back({.boundary_marker = marker + 2, .target = FE::Real{0.0}, .penalty = FE::Real{1.0}});
+        options.tangential_policy = std::move(tangential);
+        return mm::PseudoElasticMeshMotionModule(displacement_space, std::move(options));
+    });
+}
+
+TEST(MovingDomainPhysics, MeshMotionExplicitUnavailableJITPreservesLateBoundarySideEffects)
+{
+    if (FE::forms::jit::llvmJITEnabled()) {
+        GTEST_SKIP() << "requires a build without LLVM JIT";
+    }
+    constexpr int marker = 12;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto displacement_space = makeVelocitySpace(mesh);
+    const auto check = [&](auto options, const auto& make_module) {
+        options.operator_tag = "mesh_motion";
+        options.jit_policy.enable = true;
+        options.jit_policy.enable_was_explicitly_set = true;
+        options.normal_constraint.push_back({.boundary_marker = marker, .target = FE::Real{0.0}, .penalty = FE::Real{1.0}});
+        options.tangential_policy.push_back({.boundary_marker = marker + 1, .policy = mm::TangentialMeshPolicy::Free});
+        FE::systems::FESystem system(mesh);
+        auto module = make_module(std::move(options));
+        EXPECT_THROW(module.registerOn(system), std::runtime_error);
+        EXPECT_EQ(system.registeredFieldCount(), 1u);
+        EXPECT_TRUE(system.hasOperator("mesh_motion"));
+        EXPECT_EQ(system.meshTangentialBoundaryPolicies().size(), 1u);
+        EXPECT_EQ(system.boundaryConditionDescriptors().size(), 1u);
+        EXPECT_TRUE(system.meshNormalBoundaryConstraints().empty());
+        EXPECT_TRUE(system.formulationRecords().empty());
+        EXPECT_TRUE(system.operatorDefinition("mesh_motion").cells.empty());
+    };
+    check(mm::HarmonicMeshMotionOptions{}, [&](auto options) {
+        return mm::HarmonicMeshMotionModule(displacement_space, std::move(options));
+    });
+    check(mm::PseudoElasticMeshMotionOptions{}, [&](auto options) {
+        return mm::PseudoElasticMeshMotionModule(displacement_space, std::move(options));
+    });
 }
 
 TEST(MovingDomainPhysics,

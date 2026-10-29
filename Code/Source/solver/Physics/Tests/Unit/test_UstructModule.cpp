@@ -12,6 +12,7 @@
 #include "Physics/Materials/Solid/IsochoricNeoHookeanPK1.h"
 #include "Physics/Tests/Unit/PhysicsTestHelpers.h"
 
+#include "FE/Forms/JIT/LLVMJITBuildInfo.h"
 #include "FE/Assembly/GlobalSystemView.h"
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/Forms/PointEvaluator.h"
@@ -64,6 +65,126 @@ findDerivedResult(const FE::systems::FESystem& system, std::string_view name)
 
 } // namespace
 
+TEST(UstructModule, RejectsDuplicateUnknownFieldBeforeFurtherRegistration)
+{
+    auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto displacement_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1, FE::ElementType::Tetra4, 1, 3);
+    auto pressure_space = FE::spaces::SpaceFactory::create_h1(FE::ElementType::Tetra4, 1);
+    for (const bool transient : {false, true}) {
+        FE::systems::FESystem system(mesh);
+        const auto existing = system.addField(
+            {.name = "custom_displacement", .space = displacement_space, .components = 3});
+        formulations::ustruct::UstructOptions options;
+        options.displacement_field_name = "custom_displacement";
+        options.enable_time_derivative_terms = transient;
+        options.deviatoric_pk1_model =
+            std::make_shared<materials::solid::IsochoricNeoHookeanPK1>(3.0);
+        formulations::ustruct::UstructModule module(displacement_space, pressure_space, options);
+        EXPECT_THROW(module.registerOn(system), FE::InvalidArgumentException);
+        EXPECT_EQ(system.findFieldByName(options.displacement_field_name), existing);
+        EXPECT_EQ(system.registeredFieldCount(), 1u);
+        EXPECT_FALSE(system.hasOperator("equations"));
+        EXPECT_TRUE(system.formulationRecords().empty());
+        EXPECT_TRUE(system.derivedResults().empty());
+        EXPECT_TRUE(system.boundaryConditionDescriptors().empty());
+    }
+}
+
+TEST(UstructModule, DuplicateOperatorPreservesOrderedFieldsBeforePostprocessing)
+{
+    auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto displacement_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1, FE::ElementType::Tetra4, 1, 3);
+    auto pressure_space = FE::spaces::SpaceFactory::create_h1(FE::ElementType::Tetra4, 1);
+    for (const bool transient : {false, true}) {
+        SCOPED_TRACE(transient);
+        FE::systems::FESystem system(mesh);
+        formulations::ustruct::UstructOptions options;
+        options.enable_time_derivative_terms = transient;
+        options.deviatoric_pk1_model =
+            std::make_shared<materials::solid::IsochoricNeoHookeanPK1>(3.0);
+        options.ct_m = options.ct_c = 0.0;
+        formulations::ustruct::UstructModule first(displacement_space, pressure_space, options);
+        first.registerOn(system);
+        const auto field_count = system.registeredFieldCount();
+        const auto derived_results = system.derivedResults();
+        const auto cells = system.operatorDefinition("equations").cells;
+        ASSERT_FALSE(cells.empty());
+        options.displacement_field_name = "second_displacement";
+        options.velocity_field_name = "second_velocity";
+        options.pressure_field_name = "second_pressure";
+        options.register_def_grad_output = true;
+        formulations::ustruct::UstructModule second(displacement_space, pressure_space, options);
+        try {
+            second.registerOn(system);
+            FAIL() << "expected duplicate operator";
+        } catch (const FE::InvalidArgumentException& error) {
+            EXPECT_NE(std::string(error.what()).find("operator 'equations' already exists"), std::string::npos);
+        }
+        EXPECT_EQ(system.findFieldByName(options.displacement_field_name), field_count);
+        EXPECT_EQ(system.findFieldByName(options.pressure_field_name), field_count + (transient ? 2 : 1));
+        EXPECT_EQ(system.findFieldByName(options.velocity_field_name),
+                  transient ? static_cast<FE::FieldId>(field_count + 1) : FE::INVALID_FIELD_ID);
+        EXPECT_EQ(system.registeredFieldCount(), 2 * field_count);
+        ASSERT_EQ(system.derivedResults().size(), derived_results.size());
+        for (std::size_t i = 0; i < derived_results.size(); ++i) {
+            EXPECT_EQ(system.derivedResults()[i].name, derived_results[i].name);
+            EXPECT_EQ(system.derivedResults()[i].referenced_fields, derived_results[i].referenced_fields);
+        }
+        EXPECT_TRUE(system.boundaryConditionDescriptors().empty());
+        EXPECT_EQ(system.formulationRecords().size(), 1u);
+        const auto& after = system.operatorDefinition("equations").cells;
+        ASSERT_EQ(after.size(), cells.size());
+        for (std::size_t i = 0; i < cells.size(); ++i) {
+            EXPECT_EQ(after[i].kernel, cells[i].kernel);
+        }
+    }
+}
+
+TEST(UstructModule, ExplicitUnavailableJITFailsAfterBoundaryWork)
+{
+    if (FE::forms::jit::llvmJITEnabled()) {
+        GTEST_SKIP() << "requires a build without LLVM JIT";
+    }
+    auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    FE::systems::FESystem system(mesh);
+    auto displacement_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1, FE::ElementType::Tetra4, 1, 3);
+    auto pressure_space = FE::spaces::SpaceFactory::create_h1(FE::ElementType::Tetra4, 1);
+    formulations::ustruct::UstructOptions options;
+    options.deviatoric_pk1_model =
+        std::make_shared<materials::solid::IsochoricNeoHookeanPK1>(3.0);
+    options.ct_m = options.ct_c = 0.0;
+    options.jit_policy.enable = true;
+    options.jit_policy.enable_was_explicitly_set = true;
+    options.displacement_dirichlet.push_back({
+        .boundary_marker = 17, .value = {FE::Real{0.0}, FE::Real{0.0}, FE::Real{0.0}}});
+    formulations::ustruct::UstructModule module(displacement_space, pressure_space, options);
+    EXPECT_THROW(module.registerOn(system), std::runtime_error);
+    EXPECT_EQ(system.registeredFieldCount(), 3u);
+    EXPECT_TRUE(system.hasOperator("equations"));
+    const auto& descriptors = system.boundaryConditionDescriptors();
+    ASSERT_EQ(descriptors.size(), 6u);
+    const std::array<FE::FieldId, 2> constrained_fields{
+        system.findFieldByName(options.displacement_field_name),
+        system.findFieldByName(options.velocity_field_name)};
+    for (std::size_t field = 0; field < constrained_fields.size(); ++field) {
+        ASSERT_NE(constrained_fields[field], FE::INVALID_FIELD_ID);
+        for (int component = 0; component < 3; ++component) {
+            const auto& descriptor = descriptors[3 * field + static_cast<std::size_t>(component)];
+            EXPECT_EQ(descriptor.primary_variable,
+                      FE::analysis::VariableKey::field(constrained_fields[field], component));
+            EXPECT_EQ(descriptor.component, component);
+            EXPECT_EQ(descriptor.boundary_marker, 17);
+            EXPECT_EQ(descriptor.trace_kind, FE::analysis::TraceKind::Value);
+            EXPECT_EQ(descriptor.enforcement_kind, FE::analysis::EnforcementKind::Strong);
+        }
+    }
+    EXPECT_TRUE(system.formulationRecords().empty());
+    EXPECT_TRUE(system.operatorDefinition("equations").cells.empty());
+}
+
 TEST(UstructModule, RegistersMixedDisplacementPressureSystem)
 {
     auto mesh = std::make_shared<SingleTetraMeshAccess>();
@@ -95,6 +216,9 @@ TEST(UstructModule, RegistersMixedDisplacementPressureSystem)
 
     ASSERT_FALSE(system.formulationRecords().empty());
     const auto& record = system.formulationRecords().front();
+    EXPECT_EQ(record.active_fields, (std::vector<FE::FieldId>{
+        system.findFieldByName("Displacement"), system.findFieldByName("Velocity"),
+        system.findFieldByName("Pressure")}));
     ASSERT_FALSE(record.constitutive_laws.empty());
     const auto& law = record.constitutive_laws.front();
     EXPECT_EQ(law.primary_field, system.findFieldByName("Displacement"));
@@ -204,6 +328,10 @@ TEST(UstructModule, QuasiStaticOptionDropsTemporalDerivatives)
     ASSERT_EQ(system.findFieldByName("Velocity"), FE::INVALID_FIELD_ID);
     ASSERT_NE(system.findFieldByName("Pressure"), FE::INVALID_FIELD_ID);
     EXPECT_EQ(system.dofHandler().getNumDofs(), 16);
+    ASSERT_EQ(system.formulationRecords().size(), 1u);
+    EXPECT_EQ(system.formulationRecords().front().active_fields,
+              (std::vector<FE::FieldId>{system.findFieldByName("Displacement"),
+                                        system.findFieldByName("Pressure")}));
 }
 
 TEST(UstructModule, InstallsComponentStrongConstraintsOnDisplacementAndVelocity)

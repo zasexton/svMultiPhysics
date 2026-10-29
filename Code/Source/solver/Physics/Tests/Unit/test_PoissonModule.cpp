@@ -12,6 +12,7 @@
 #include "Physics/Formulations/Poisson/PoissonModule.h"
 #include "Physics/Tests/Unit/PhysicsTestHelpers.h"
 
+#include "FE/Forms/JIT/LLVMJITBuildInfo.h"
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Assembly/GlobalSystemView.h"
 #include "FE/Backends/Interfaces/BackendFactory.h"
@@ -351,6 +352,89 @@ makePoissonSingleTetraGeneratedCutContext(FE::FieldId phi_field,
 }
 
 } // namespace
+
+TEST(PoissonModule, RejectsDuplicateUnknownFieldBeforeOperatorAndBoundaryWork)
+{
+    auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    FE::systems::FESystem system(mesh);
+    auto space = std::make_shared<FE::spaces::H1Space>(FE::ElementType::Tetra4, 1);
+    const auto existing = system.addField({.name = "custom_poisson", .space = space});
+    formulations::poisson::PoissonOptions options;
+    options.field_name = "custom_poisson";
+    options.register_darcy_flux_output = true;
+    options.dirichlet.push_back({.boundary_marker = 17, .value = FE::Real{1.0}});
+    formulations::poisson::PoissonModule module(space, options);
+
+    EXPECT_THROW(module.registerOn(system), FE::InvalidArgumentException);
+    EXPECT_EQ(system.findFieldByName(options.field_name), existing);
+    EXPECT_EQ(system.registeredFieldCount(), 1u);
+    EXPECT_FALSE(system.hasOperator("equations"));
+    EXPECT_TRUE(system.derivedResults().empty());
+    EXPECT_TRUE(system.boundaryConditionDescriptors().empty());
+    EXPECT_TRUE(system.formulationRecords().empty());
+}
+
+TEST(PoissonModule, DuplicateOperatorPreservesEarlierFieldAndPostprocessing)
+{
+    auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    FE::systems::FESystem system(mesh);
+    auto space = std::make_shared<FE::spaces::H1Space>(FE::ElementType::Tetra4, 1);
+    formulations::poisson::PoissonModule first(space, {});
+    first.registerOn(system);
+    const auto cells = system.operatorDefinition("equations").cells;
+    ASSERT_FALSE(cells.empty());
+    formulations::poisson::PoissonOptions options;
+    options.field_name = "second_poisson";
+    options.register_darcy_flux_output = true;
+    // This later error must not replace the strict operator-duplicate diagnostic.
+    options.node_dirichlet.id_type = static_cast<formulations::poisson::NodeIdType>(255);
+    options.node_dirichlet.values.push_back({.node_id = 0, .value = 1.0});
+    options.dirichlet.push_back({.boundary_marker = 17, .value = FE::Real{1.0}});
+    formulations::poisson::PoissonModule second(space, options);
+    try {
+        second.registerOn(system);
+        FAIL() << "expected duplicate operator";
+    } catch (const FE::InvalidArgumentException& error) {
+        EXPECT_NE(std::string(error.what()).find("operator 'equations' already exists"), std::string::npos);
+    }
+    EXPECT_EQ(system.registeredFieldCount(), 2u);
+    EXPECT_NE(system.findFieldByName(options.field_name), FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.derivedResults().size(), 2u);
+    EXPECT_TRUE(system.boundaryConditionDescriptors().empty());
+    EXPECT_EQ(system.formulationRecords().size(), 1u);
+    const auto& after = system.operatorDefinition("equations").cells;
+    ASSERT_EQ(after.size(), cells.size());
+    for (std::size_t i = 0; i < cells.size(); ++i) {
+        EXPECT_EQ(after[i].kernel, cells[i].kernel);
+    }
+}
+
+TEST(PoissonModule, ExplicitUnavailableJITPreservesBoundaryWorkAtItsOriginalPhase)
+{
+    if (FE::forms::jit::llvmJITEnabled()) {
+        GTEST_SKIP() << "requires a build without LLVM JIT";
+    }
+    for (const bool coupled : {false, true}) {
+        SCOPED_TRACE(coupled);
+        auto mesh = std::make_shared<SingleTetraMeshAccess>();
+        FE::systems::FESystem system(mesh);
+        auto space = std::make_shared<FE::spaces::H1Space>(FE::ElementType::Tetra4, 1);
+        formulations::poisson::PoissonOptions options;
+        options.jit_policy.enable = true;
+        options.jit_policy.enable_was_explicitly_set = true;
+        options.neumann.push_back({.boundary_marker = 17, .flux = FE::Real{1.0}});
+        if (coupled) {
+            options.coupled_neumann_rcr.push_back({.boundary_marker = 18});
+        }
+        formulations::poisson::PoissonModule module(space, options);
+        EXPECT_THROW(module.registerOn(system), std::runtime_error);
+        EXPECT_EQ(system.registeredFieldCount(), 1u);
+        EXPECT_TRUE(system.hasOperator("equations"));
+        EXPECT_EQ(system.boundaryConditionDescriptors().size(), coupled ? 0u : 1u);
+        EXPECT_TRUE(system.formulationRecords().empty());
+        EXPECT_TRUE(system.operatorDefinition("equations").cells.empty());
+    }
+}
 
 TEST(PoissonModule, AssembledJacobianMatchesFiniteDifference)
 {
