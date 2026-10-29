@@ -43,6 +43,19 @@ struct MeshNormalKinematicBinding {
     std::optional<std::array<Real, 3>> prescribed_tangential_mesh_velocity{};
 };
 
+/// One prepared relation and the consumer/measurement data that belong to it.
+struct MeshNormalKinematicDeclaration {
+    MeshNormalBoundaryConstraintDeclaration constraint;
+    MeshNormalKinematicBinding binding;
+};
+
+/// Declare, bind, and register the measurement of each prepared item in order.
+/// Earlier items remain registered if a later declaration fails.
+void declareMeshNormalKinematics(
+    FESystem& system,
+    const std::string& operator_tag,
+    std::vector<MeshNormalKinematicDeclaration> declarations);
+
 /**
  * @brief Declare mesh-normal constraints, bind their consumers and register
  *        their operator-stage measurements.

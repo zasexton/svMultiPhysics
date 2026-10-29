@@ -13,6 +13,9 @@
 #include "Spaces/ProductSpace.h"
 #include "Systems/FESystem.h"
 #include "Systems/MeshBoundaryKinematics.h"
+#include "Systems/MeshNormalConstraintStageMeasurements.h"
+#include "Systems/FormsInstaller.h"
+#include "Forms/Vocabulary.h"
 
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
@@ -38,6 +41,60 @@ std::string invalidArgumentMessage(const std::function<void()>& call)
     }
     return {};
 }
+
+struct MovingBoundaryDeclarations {
+    std::shared_ptr<ProductSpace> space = std::make_shared<ProductSpace>(
+        std::make_shared<H1Space>(ElementType::Tetra4, 1), 3);
+    systems::FESystem system{
+        std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>()};
+    svmp::FE::FieldId displacement = system.addMeshDisplacementUnknown("d", space);
+    svmp::FE::FieldId velocity = system.addField({.name = "u", .space = space, .components = 3});
+    svmp::FE::forms::FormExpr target = svmp::FE::forms::normalTrace(
+        svmp::FE::forms::StateField(velocity, *space, "u"), svmp::FE::forms::currentNormal());
+    std::vector<systems::MeshNormalKinematicDeclaration> declarations;
+
+    MovingBoundaryDeclarations()
+    {
+        using namespace svmp::FE::forms;
+        system.addOperator("moving");
+        const auto d = StateField(displacement, *space, "d");
+        const auto u = StateField(velocity, *space, "u");
+        const auto w = TestField(displacement, *space, "w");
+        systems::FormInstallOptions install;
+        install.extra_trial_fields = {velocity};
+        (void)systems::installFormulation(system, "moving", {displacement},
+            inner(dt(d) - u, w).ds(7) + inner(dt(d) - u, w).ds(3), install);
+        for (const int marker : {7, 3}) {
+            const auto suffix = std::to_string(marker);
+            const auto policy = marker == 7 ? systems::MeshTangentialBoundaryPolicy::Prescribed
+                                            : systems::MeshTangentialBoundaryPolicy::Free;
+            system.declareMeshTangentialBoundaryPolicy({
+                .mesh_displacement_field = displacement, .boundary_marker = marker,
+                .policy = policy, .owner_component = "moving boundary"});
+            systems::declareMeshBoundaryRowDescriptors(system, "moving", {
+                .boundary_marker = marker, .mesh_displacement_field = displacement,
+                .velocity_field = velocity, .normal_relation = true,
+                .tangential_prescribed = marker == 7, .tangential_policy = policy,
+                .mesh_normal_source = "mesh " + suffix,
+                .fluid_normal_source = "fluid " + suffix,
+                .tangential_source = "tangent " + suffix}, true);
+            declarations.push_back({
+                .constraint = {
+                    .mesh_displacement_field = displacement, .boundary_marker = marker,
+                    .quantity = systems::MeshNormalBoundaryQuantity::MeshVelocityTrace,
+                    .target_kind = systems::MeshNormalBoundaryTargetKind::FluidNormalVelocity,
+                    .target_expression = target, .related_velocity_field = velocity,
+                    .owner_component = "moving boundary",
+                    .requires_mesh_flux_consistency = marker == 7,
+                    .mesh_flux_consistency_nitsche_gamma = marker == 7 ? 8.0 : 0.0},
+                .binding = {.mesh_row_source = "mesh " + suffix,
+                            .fluid_row_source = "fluid " + suffix,
+                            .prescribed_tangential_mesh_velocity = marker == 7
+                                ? std::optional<std::array<svmp::FE::Real, 3>>{{1, 2, 3}}
+                                : std::nullopt}});
+        }
+    }
+};
 
 } // namespace
 
@@ -91,6 +148,87 @@ TEST(MeshBoundaryKinematics, NormalKinematicsResolveEachBindingBeforeDeclaring)
         std::logic_error);
     EXPECT_EQ(asked, std::vector<int>{7});
     EXPECT_TRUE(sys.meshNormalBoundaryConstraints().empty());
+}
+
+TEST(MeshBoundaryKinematics, PreparedAndCallbackDeclarationsKeepRelationsConsumersAndMeasurements)
+{
+    using namespace svmp::FE;
+    for (const bool prepared : {false, true}) {
+        MovingBoundaryDeclarations fixture;
+        if (prepared) {
+            systems::declareMeshNormalKinematics(fixture.system, "moving", fixture.declarations);
+        } else {
+            std::vector<systems::MeshNormalBoundaryConstraintDeclaration> constraints;
+            for (const auto& declaration : fixture.declarations) constraints.push_back(declaration.constraint);
+            std::vector<int> requested;
+            systems::declareMeshNormalKinematics(fixture.system, "moving", std::move(constraints),
+                [&](int marker) {
+                    // Each earlier item is completely installed before the next callback.
+                    EXPECT_EQ(fixture.system.meshNormalBoundaryConstraints().size(), requested.size());
+                    EXPECT_EQ(systems::meshNormalConstraintStageMeasurements(fixture.system)
+                        .fittedALENormalOperatorStageMeasurementDeclarations().size(), requested.size());
+                    requested.push_back(marker);
+                    return fixture.declarations[marker == 7 ? 0 : 1].binding;
+                });
+            EXPECT_EQ(requested, (std::vector<int>{7, 3}));
+        }
+        const auto constraints = fixture.system.meshNormalBoundaryConstraints();
+        const auto measurements = systems::meshNormalConstraintStageMeasurements(fixture.system)
+            .fittedALENormalOperatorStageMeasurementDeclarations();
+        ASSERT_EQ(constraints.size(), 2u);
+        ASSERT_EQ(measurements.size(), 2u);
+        // The FE registries sort their published records by field and marker.
+        const std::array markers{3, 7};
+        const std::array mesh_sources{"mesh 3", "mesh 7"};
+        const std::array fluid_sources{"fluid 3", "fluid 7"};
+        for (std::size_t i = 0; i < 2; ++i) {
+            const auto& constraint = constraints[i];
+            EXPECT_EQ(constraint.boundary_marker, markers[i]);
+            EXPECT_EQ(constraint.mesh_displacement_field, fixture.displacement);
+            EXPECT_EQ(constraint.related_velocity_field, fixture.velocity);
+            EXPECT_EQ(constraint.quantity, systems::MeshNormalBoundaryQuantity::MeshVelocityTrace);
+            EXPECT_EQ(constraint.target_kind, systems::MeshNormalBoundaryTargetKind::FluidNormalVelocity);
+            EXPECT_EQ(constraint.target_expression.node(), fixture.target.node());
+            EXPECT_EQ(constraint.owner_component, "moving boundary");
+            EXPECT_EQ(constraint.requires_mesh_flux_consistency, i == 1);
+            EXPECT_EQ(constraint.mesh_flux_consistency_nitsche_gamma, i == 1 ? 8.0 : 0.0);
+            ASSERT_TRUE(constraint.consumer_binding);
+            EXPECT_EQ(constraint.consumer_binding->operator_tag, "moving");
+            EXPECT_EQ(constraint.consumer_binding->mesh_descriptor_source, mesh_sources[i]);
+            ASSERT_TRUE(constraint.consumer_binding->related_fluid);
+            EXPECT_EQ(constraint.consumer_binding->related_fluid->descriptor_source, fluid_sources[i]);
+            EXPECT_EQ(constraint.consumer_binding->related_fluid->enforcement_kind,
+                      analysis::EnforcementKind::WeakConsistent);
+            const auto& measurement = measurements[i];
+            EXPECT_EQ(measurement.key.boundary_marker, markers[i]);
+            EXPECT_EQ(measurement.key.mesh_displacement_field, fixture.displacement);
+            EXPECT_EQ(measurement.related_velocity_field, fixture.velocity);
+            EXPECT_EQ(measurement.normal_constraint.target_expression.node(), fixture.target.node());
+            EXPECT_EQ(measurement.normal_constraint.consumer_binding, constraint.consumer_binding);
+        }
+        EXPECT_EQ(measurements[0].tangential_policy, systems::MeshTangentialBoundaryPolicy::Free);
+        EXPECT_FALSE(measurements[0].prescribed_tangential_mesh_velocity);
+        EXPECT_TRUE(measurements[0].tangential_target_gap_squared_integral_functional.empty());
+        EXPECT_EQ(measurements[1].tangential_policy, systems::MeshTangentialBoundaryPolicy::Prescribed);
+        EXPECT_EQ(measurements[1].prescribed_tangential_mesh_velocity,
+                  (std::optional<std::array<Real, 3>>{{1, 2, 3}}));
+        EXPECT_FALSE(measurements[1].tangential_target_gap_squared_integral_functional.empty());
+    }
+}
+
+TEST(MeshBoundaryKinematics, PreparedDeclarationsKeepEarlierItemsWhenALaterItemFails)
+{
+    MovingBoundaryDeclarations fixture;
+    fixture.declarations[1].constraint.owner_component.clear();
+    EXPECT_ANY_THROW(systems::declareMeshNormalKinematics(
+        fixture.system, "moving", std::move(fixture.declarations)));
+    const auto constraints = fixture.system.meshNormalBoundaryConstraints();
+    const auto measurements = systems::meshNormalConstraintStageMeasurements(fixture.system)
+        .fittedALENormalOperatorStageMeasurementDeclarations();
+    ASSERT_EQ(constraints.size(), 1u);
+    EXPECT_EQ(constraints[0].boundary_marker, 7);
+    ASSERT_EQ(measurements.size(), 1u);
+    EXPECT_EQ(measurements[0].key.boundary_marker, 7);
 }
 
 TEST(MeshBoundaryKinematics, NormalRowWithoutVelocityThrowsTheGivenMessage)

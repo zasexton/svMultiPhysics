@@ -19,6 +19,38 @@ namespace svmp {
 namespace FE {
 namespace systems {
 
+namespace {
+
+void declareMeshNormalKinematicItem(
+    FESystem& system,
+    const std::string& operator_tag,
+    MeshNormalBoundaryConstraintDeclaration declaration,
+    MeshNormalKinematicBinding binding)
+{
+    const auto marker = declaration.boundary_marker;
+    const auto displacement_field = declaration.mesh_displacement_field;
+    system.declareMeshNormalBoundaryConstraint(std::move(declaration));
+    system.bindMeshNormalBoundaryConstraintConsumer(
+        displacement_field, marker, operator_tag,
+        std::move(binding.mesh_row_source), std::move(binding.fluid_row_source));
+    meshNormalConstraintStageMeasurements(system)
+        .registerFittedALENormalOperatorStageMeasurement(
+            displacement_field, marker, binding.prescribed_tangential_mesh_velocity);
+}
+
+} // namespace
+
+void declareMeshNormalKinematics(
+    FESystem& system,
+    const std::string& operator_tag,
+    std::vector<MeshNormalKinematicDeclaration> declarations)
+{
+    for (auto& declaration : declarations) {
+        declareMeshNormalKinematicItem(system, operator_tag,
+            std::move(declaration.constraint), std::move(declaration.binding));
+    }
+}
+
 void declareMeshNormalKinematics(
     FESystem& system,
     const std::string& operator_tag,
@@ -27,23 +59,9 @@ void declareMeshNormalKinematics(
         binding_for)
 {
     for (auto& declaration : declarations) {
-        const auto marker = declaration.boundary_marker;
-        const auto displacement_field =
-            declaration.mesh_displacement_field;
-        auto binding = binding_for(marker);
-        system.declareMeshNormalBoundaryConstraint(
-            std::move(declaration));
-        system.bindMeshNormalBoundaryConstraintConsumer(
-            displacement_field,
-            marker,
-            operator_tag,
-            std::move(binding.mesh_row_source),
-            std::move(binding.fluid_row_source));
-        meshNormalConstraintStageMeasurements(system)
-            .registerFittedALENormalOperatorStageMeasurement(
-                displacement_field,
-                marker,
-                binding.prescribed_tangential_mesh_velocity);
+        auto binding = binding_for(declaration.boundary_marker);
+        declareMeshNormalKinematicItem(system, operator_tag,
+            std::move(declaration), std::move(binding));
     }
 }
 
