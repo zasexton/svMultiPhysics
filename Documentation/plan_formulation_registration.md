@@ -93,12 +93,12 @@ before moving the spec, then construct nodes with the returned actual ID. New
 typed entry points reject an incompatible source kind without silently converting
 it. Existing compatibility checks and diagnostics retain their precedence.
 
-- [ ] Add tests for exact symbols/IDs with prescribed gaps and same-space fields,
+- [x] Add tests for exact symbols/IDs with prescribed gaps and same-space fields,
   lifetime after registry growth and caller destruction, strict/reuse policy,
   source/component/space rejection and prescribed auto-registration.
-- [ ] Confirm the tests detect the missing API, implement the minimal value API,
+- [x] Confirm the tests detect the missing API, implement the minimal value API,
   then run the focused field tests and existing same-space mixed-field tests.
-- [ ] Review the diff and evidence independently before any Physics adoption.
+- [x] Review the diff and evidence independently before any Physics adoption.
 
 ## Task 2: Ordered contributions and typed essentials (Areas A, C, E services)
 
@@ -122,14 +122,14 @@ StrongDirichlet declarations. Reuse the existing immediate phase transition and
 complete existing enforcement operations; retain callback support. No new
 scheduler or physical policy.
 
-- [ ] Test arbitrary coupled fields with interleaved appends, empty/seeded rows,
+- [x] Test arbitrary coupled fields with interleaved appends, empty/seeded rows,
   multiple and absent observations, exact node identity/association, and bad IDs.
-- [ ] Test typed essential operations against the existing callback route,
+- [x] Test typed essential operations against the existing callback route,
   phase order, declaration order, marker conflicts, weak rejection in strong-only
   use, prior vertex commits and partial progress on a later error.
-- [ ] Implement only after the contract tests expose the missing capabilities;
+- [x] Implement only after the contract tests expose the missing capabilities;
   run focused Forms and constraint tests plus existing single-field BC tests.
-- [ ] Independently review before Physics adoption.
+- [x] Independently review before Physics adoption.
 
 ## Task 3: Builder creation and spans (Area D shared capability)
 
@@ -143,11 +143,11 @@ unconditionally, including its setup invalidation on duplicate failure. Add
 residual, group)`; initializer-list overloads delegate without changing order.
 Keep mutable `options()` for explicit late option assignment.
 
-- [ ] Characterize duplicate creation/setup invalidation, then test the policy,
+- [x] Characterize duplicate creation/setup invalidation, then test the policy,
   spans with conditional/noncontiguous fields, option inheritance by successive
   groups, source tags, extra trial fields and diagnostic isolation.
-- [ ] Run the builder and installer tests after implementation.
-- [ ] Independently review before production adoption.
+- [x] Run the builder and installer tests after implementation.
+- [x] Independently review before production adoption.
 
 ## Task 4: Other formulations and shared mesh preparation (Areas B, D, E)
 
@@ -159,16 +159,16 @@ Keep mutable `options()` for explicit late option assignment.
 header or one focused shared Physics preparation header if necessary; corresponding
 Poisson, Ustruct and mesh-motion tests only. No Navier–Stokes files.
 
-- [ ] Establish missing baseline characterizations before editing consumers:
+- [x] Establish missing baseline characterizations before editing consumers:
   strict duplicate fields/operators, optional Ustruct field order, ordered
   mesh validation and late compiler-option failure side effects.
-- [ ] Adopt owned symbols preserving strict insertion in Poisson/Ustruct;
+- [x] Adopt owned symbols preserving strict insertion in Poisson/Ustruct;
   adopt builder creation at the original operator point and options at their
   original later point. Use the Ustruct span installation overload.
-- [ ] Consolidate duplicated mesh boundary preparation within Physics while
+- [x] Consolidate duplicated mesh boundary preparation within Physics while
   retaining each model's validation order/messages, tangential declarations,
   normal consumer/measurement registration and distinct visible residuals.
-- [ ] Run focused module checks, independent review, then the complete stage
+- [x] Run focused module checks, independent review, then the complete stage
   preservation gate before the next production adoption.
 
 ## Task 5: Navier–Stokes integration (Areas A–E)
@@ -179,34 +179,34 @@ Poisson, Ustruct and mesh-motion tests only. No Navier–Stokes files.
 NavierStokesOptionRules only if required for the prepared/raw interface;
 existing NS, moving-domain, pressure-gauge and two-fluid tests.
 
-- [ ] Adopt symbol bundles in original u/p/data/reference order. Keep preflight
+- [x] Adopt symbol bundles in original u/p/data/reference order. Keep preflight
   before all mutation and ALE binding at its original later point.
-- [ ] Replace the operator guard with an empty-options builder and assign
+- [x] Replace the operator guard with an empty-options builder and assign
   physicsInstallOptions at the original constructor point.
-- [ ] Route Nitsche terms through scoped actual-field row bindings with optional
+- [x] Route Nitsche terms through scoped actual-field row bindings with optional
   work observations. Return production trace bindings by value. Keep the raw
   compatibility route's per-boundary prepared output and error behavior.
-- [ ] Route identical ghost-penalty and applicable boundary observation terms
+- [x] Route identical ghost-penalty and applicable boundary observation terms
   through the same append mechanism; retain explicit observation formulas where
   splitting would change production grouping or cancellation.
-- [ ] Replace essential callbacks with typed plan operations; retain fitted
+- [x] Replace essential callbacks with typed plan operations; retain fitted
   normal equations and paired declaration/binding processing at the late point.
-- [ ] Test production/work agreement, optional channels, route disagreement,
+- [x] Test production/work agreement, optional channels, route disagreement,
   exact anchors, live certification, first-error and partial-progress contracts.
-- [ ] Independently review and resolve significant findings, then run the complete
+- [x] Independently review and resolve significant findings, then run the complete
   preservation gate against the fresh baseline on the frozen final source.
 
 ## Task 6: Completion evidence and authoring documentation
 
 **Ownership:** coordinator; API docs and final handoff only after reviewed code.
 
-- [ ] Update `FE/Forms/SYSTEMS_INTEGRATION.md` with concise generic authoring examples,
+- [x] Update `FE/Forms/SYSTEMS_INTEGRATION.md` with concise generic authoring examples,
   lifetime rules, ordered contribution semantics, typed constraints and builder use.
-- [ ] Record exact starting/final revisions, all five dispositions, representative
+- [x] Record exact starting/final revisions, all five dispositions, representative
   before/after NS and other module excerpts, ownership rationale and limitations.
-- [ ] Count source changes separately for Physics formulations, Options, FE,
+- [x] Count source changes separately for Physics formulations, Options, FE,
   tests and documentation; account honestly for relocation and total production.
-- [ ] Audit every request requirement against current source and final-revision
+- [x] Audit every request requirement against current source and final-revision
   evidence, including final independent whole-branch review and preserved files.
 
 ## Validation and execution record
@@ -230,3 +230,14 @@ handles and evidence paths. Resume from that ledger plus current Git/process
 state; do not restart a live build or preservation group after an observation
 timeout. Historical long-transient qualification remains context, not a claim
 that this refactor reruns or extends it.
+
+## Completion
+
+All six tasks are complete. The [implementation and validation handoff](formulation_registration_refactor.md)
+records all five areas, authoring examples, exact revisions, source counts,
+review closure and remaining pre-existing limitations.
+
+Final implementation: `1e53dbe62424fe33817b28426a0875f9f4c4c61d`.
+Final frozen gate: `stage2-ns-final-v1`; all preservation groups pass.
+The final branch audit verifies that later documentation changes leave the
+tested Code content and the three unrelated user files unchanged.
