@@ -58,19 +58,26 @@
 #include <functional>
 #include <initializer_list>
 #include <memory>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace svmp {
 namespace FE {
 
 namespace systems {
+class BoundaryConditionManager;
 class FESystem;
 }
 
 namespace forms {
+class FormExpr;
 class ExteriorBoundaryMeasure;
 class InterfaceDomain;
+namespace bc {
+struct StrongDirichlet;
+}
 }
 
 namespace level_set {
@@ -117,6 +124,20 @@ public:
      * leaves the plan in the Essential phase.
      */
     ConstraintPlan& essentials(const std::function<void(systems::FESystem&)>& install);
+
+    /// Essential: immediately apply the manager's full single-field BC route.
+    ConstraintPlan& essentials(systems::BoundaryConditionManager& manager,
+                               forms::FormExpr& residual,
+                               const forms::FormExpr& state,
+                               const forms::FormExpr& test,
+                               FieldId field,
+                               std::string_view operator_tag = {});
+
+    /// Essential: immediately apply a manager containing only strong/algebraic BCs.
+    ConstraintPlan& essentials(systems::BoundaryConditionManager& manager, FieldId field);
+
+    /// Essential: install declarations immediately, retaining per-declaration progress.
+    ConstraintPlan& essentials(std::span<const forms::bc::StrongDirichlet> declarations);
 
     /**
      * InactiveSupport: for each field, pins the vertices of the inactive

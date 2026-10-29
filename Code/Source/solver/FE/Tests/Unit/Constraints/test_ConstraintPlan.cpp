@@ -6,15 +6,20 @@
 #include <gtest/gtest.h>
 
 #include "Constraints/ConstraintPlan.h"
+#include "Forms/StandardBCs.h"
+#include "Forms/Vocabulary.h"
 #include "LevelSet/LevelSetGeometry.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
 #include "Systems/FESystem.h"
+#include "Systems/BoundaryConditionManager.h"
 #include "Systems/FormsInstaller.h"
 #include "Systems/SystemManifest.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
 #include <memory>
+#include <array>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -152,6 +157,194 @@ TEST(ConstraintPlan, PassedPhasesRejectDeclarations)
     EXPECT_THROW(plan.declare(ConstraintPhase::InactiveSupport, label("late")), std::logic_error);
     EXPECT_NO_THROW(plan.declare(ConstraintPhase::Aggregation, label("same_phase")));
     EXPECT_THROW(plan.declare(ConstraintPhase::PointLaw, nullptr), std::invalid_argument);
+}
+
+TEST(ConstraintPlan, TypedResidualEssentialsMatchCallbackIncludingWeakTermsAndMetadata)
+{
+    PlanSystem typed;
+    PlanSystem callback;
+    const auto populate = [](systems::BoundaryConditionManager& manager) {
+        manager.add(std::make_unique<forms::bc::EssentialBC>(2, forms::FormExpr::constant(3.0), "p"));
+        manager.add(std::make_unique<forms::bc::NaturalBC>(4, forms::FormExpr::constant(5.0)));
+        manager.add(std::make_unique<forms::bc::NaturalBC>(4, forms::FormExpr::constant(7.0)));
+    };
+    systems::BoundaryConditionManager typed_manager;
+    systems::BoundaryConditionManager callback_manager;
+    populate(typed_manager);
+    populate(callback_manager);
+    const auto state = forms::StateField(typed.p, *typed.scalar, "p");
+    const auto test = forms::TestField(typed.p, *typed.scalar, "q");
+    const auto seed = (state * test).dx();
+    auto typed_residual = seed;
+    auto callback_residual = seed;
+    typed.system->addOperator("essential_op");
+    callback.system->addOperator("essential_op");
+    ConstraintPlan typed_plan(*typed.system);
+    ConstraintPlan callback_plan(*callback.system);
+    typed_plan.declare(ConstraintPhase::VertexValues, label("vertex"))
+        .declare(ConstraintPhase::Essential, label("held_essential"))
+        .declare(ConstraintPhase::InactiveSupport, label("inactive"));
+    callback_plan.declare(ConstraintPhase::VertexValues, label("vertex"))
+        .declare(ConstraintPhase::Essential, label("held_essential"))
+        .declare(ConstraintPhase::InactiveSupport, label("inactive"));
+
+    EXPECT_EQ(&typed_plan.essentials(typed_manager, typed_residual, state, test, typed.p, "essential_op"),
+              &typed_plan);
+    callback_plan.essentials([&](systems::FESystem& system) {
+        callback_manager.applyAll(system, callback_residual, state, test, callback.p, "essential_op");
+    });
+    EXPECT_EQ(typed_residual.toString(), callback_residual.toString());
+    EXPECT_EQ(typed_residual.node()->type(), forms::FormExprType::Subtract);
+    EXPECT_EQ(typed_residual.node()->children()[0]->children()[0], seed.node());
+    EXPECT_EQ(typed.registered(), callback.registered());
+    ASSERT_EQ(typed.registered().size(), 4u);
+    EXPECT_EQ(typed.labels()[0], "vertex");
+    EXPECT_EQ(typed.labels()[1], "held_essential");
+    EXPECT_EQ(typed_plan.phase(), ConstraintPhase::Essential);
+    EXPECT_EQ(typed_plan.registeredCount(), 2u);
+    EXPECT_EQ(typed_plan.pendingCount(), 1u);
+    ASSERT_EQ(typed.system->boundaryConditionDescriptors().size(), 3u);
+    const auto typed_tags = typed.system->boundaryConditionDescriptorOperatorTags();
+    const auto callback_tags = callback.system->boundaryConditionDescriptorOperatorTags();
+    EXPECT_EQ((std::vector<std::string>{typed_tags.begin(), typed_tags.end()}),
+              (std::vector<std::string>{callback_tags.begin(), callback_tags.end()}));
+    EXPECT_EQ((std::vector<std::string>{typed_tags.begin(), typed_tags.end()}),
+              (std::vector<std::string>{"essential_op", "essential_op", "essential_op"}));
+    const auto& descriptors = typed.system->boundaryConditionDescriptors();
+    EXPECT_EQ(descriptors[0].boundary_marker, 2);
+    EXPECT_EQ(descriptors[1].boundary_marker, 4);
+    EXPECT_EQ(descriptors[2].boundary_marker, 4);
+    EXPECT_EQ(descriptors[2].source, "NaturalBC on marker 4");
+    EXPECT_EQ(typed.system->contributionDescriptors().size(), callback.system->contributionDescriptors().size());
+    EXPECT_EQ(typed.system->gaugeRegistry().anchoring().size(), callback.system->gaugeRegistry().anchoring().size());
+    typed_plan.commit();
+    callback_plan.commit();
+    EXPECT_EQ(typed.registered(), callback.registered());
+    EXPECT_EQ(typed.labels().back(), "inactive");
+}
+
+TEST(ConstraintPlan, TypedFieldEssentialsMatchCallbackAndAllowSamePhaseOperations)
+{
+    PlanSystem typed;
+    PlanSystem callback;
+    ConstraintPlan typed_plan(*typed.system);
+    ConstraintPlan callback_plan(*callback.system);
+    for (const int marker : {3, 6}) {
+        systems::BoundaryConditionManager typed_manager;
+        systems::BoundaryConditionManager callback_manager;
+        typed_manager.add(std::make_unique<forms::bc::EssentialBC>(marker, forms::FormExpr::constant(2.0), "p"));
+        callback_manager.add(std::make_unique<forms::bc::EssentialBC>(marker, forms::FormExpr::constant(2.0), "p"));
+        EXPECT_EQ(&typed_plan.essentials(typed_manager, typed.p), &typed_plan);
+        callback_plan.essentials([&](systems::FESystem& system) { callback_manager.applyAll(system, callback.p); });
+    }
+    EXPECT_EQ(typed.registered(), callback.registered());
+    ASSERT_EQ(typed.registered().size(), 4u);
+    EXPECT_NE(typed.registered()[1].find("marker=3"), std::string::npos);
+    EXPECT_NE(typed.registered()[3].find("marker=6"), std::string::npos);
+    EXPECT_EQ(typed_plan.phase(), ConstraintPhase::Essential);
+    EXPECT_EQ(typed_plan.registeredCount(), 0u);
+    EXPECT_EQ(typed.system->boundaryConditionDescriptors().size(), 2u);
+}
+
+TEST(ConstraintPlan, TypedStrongBatchPreservesDeclarationOrderAndLateFailureProgress)
+{
+    PlanSystem typed;
+    PlanSystem callback;
+    const std::array<forms::bc::StrongDirichlet, 3> declarations{
+        forms::bc::strongDirichlet(typed.u, 5, forms::FormExpr::constant(3.0), "u", 2),
+        forms::bc::strongDirichlet(typed.u, 4, forms::FormExpr::constant(7.0), "u", 0),
+        forms::bc::StrongDirichlet{},
+    };
+    ConstraintPlan typed_plan(*typed.system);
+    ConstraintPlan callback_plan(*callback.system);
+    typed_plan.declare(ConstraintPhase::VertexValues, label("vertex"));
+    callback_plan.declare(ConstraintPhase::VertexValues, label("vertex"));
+    EXPECT_THROW(typed_plan.essentials(declarations), InvalidArgumentException);
+    EXPECT_THROW(callback_plan.essentials([&](systems::FESystem& system) {
+        systems::installStrongDirichlet(system, declarations);
+    }), InvalidArgumentException);
+    EXPECT_EQ(typed.registered(), callback.registered());
+    ASSERT_EQ(typed.registered().size(), 3u);
+    EXPECT_EQ(typed.labels()[0], "vertex");
+    EXPECT_NE(typed.registered()[1].find("marker=5 component=2"), std::string::npos);
+    EXPECT_NE(typed.registered()[2].find("marker=4 component=0"), std::string::npos);
+    EXPECT_EQ(typed_plan.registeredCount(), 1u);
+    EXPECT_EQ(typed_plan.pendingCount(), 0u);
+    EXPECT_EQ(typed_plan.phase(), ConstraintPhase::Essential);
+    EXPECT_EQ(&typed_plan.essentials(std::span<const forms::bc::StrongDirichlet>{}), &typed_plan);
+}
+
+TEST(ConstraintPlan, TypedFieldWeakRejectionStillCommitsEarlierPlanConstraints)
+{
+    PlanSystem s;
+    systems::BoundaryConditionManager manager;
+    manager.add(std::make_unique<forms::bc::EssentialBC>(2, forms::FormExpr::constant(1.0), "p"));
+    manager.add(std::make_unique<forms::bc::NaturalBC>(3, forms::FormExpr::constant(2.0)));
+    ConstraintPlan plan(*s.system);
+    plan.vertexValues(s.p, {{0, 9.0}})
+        .declare(ConstraintPhase::Essential, label("held_essential"))
+        .declare(ConstraintPhase::InactiveSupport, label("later"));
+    EXPECT_THROW(plan.essentials(manager, s.p), std::invalid_argument);
+    ASSERT_EQ(s.registered().size(), 2u);
+    EXPECT_NE(s.registered()[0].find("VertexDirichletConstraint"), std::string::npos);
+    EXPECT_EQ(s.labels()[1], "held_essential");
+    EXPECT_EQ(plan.registeredCount(), 2u);
+    EXPECT_EQ(plan.pendingCount(), 1u);
+    EXPECT_EQ(plan.phase(), ConstraintPhase::Essential);
+    EXPECT_TRUE(s.system->boundaryConditionDescriptors().empty());
+    EXPECT_TRUE(s.system->contributionDescriptors().empty());
+}
+
+TEST(ConstraintPlan, TypedEssentialsPreserveMarkerConflictPrecheck)
+{
+    for (const bool strong_first : {false, true}) {
+        PlanSystem s;
+        systems::BoundaryConditionManager manager;
+        auto strong = std::make_unique<forms::bc::EssentialBC>(2, forms::FormExpr::constant(1.0), "p");
+        auto weak = std::make_unique<forms::bc::NaturalBC>(2, forms::FormExpr::constant(2.0));
+        if (strong_first) {
+            manager.add(std::move(strong));
+            manager.add(std::move(weak));
+        } else {
+            manager.add(std::move(weak));
+            manager.add(std::move(strong));
+        }
+        const auto state = forms::StateField(s.p, *s.scalar, "p");
+        const auto test = forms::TestField(s.p, *s.scalar, "q");
+        auto residual = (state * test).dx();
+        const auto seed = residual.nodeShared();
+        ConstraintPlan plan(*s.system);
+        plan.declare(ConstraintPhase::VertexValues, label("vertex"));
+        EXPECT_THROW(plan.essentials(manager, residual, state, test, s.p), std::invalid_argument);
+        EXPECT_EQ(residual.nodeShared(), seed);
+        EXPECT_EQ(s.labels(), (std::vector<std::string>{"vertex"}));
+        EXPECT_TRUE(s.system->boundaryConditionDescriptors().empty());
+        EXPECT_TRUE(s.system->contributionDescriptors().empty());
+        EXPECT_EQ(plan.phase(), ConstraintPhase::Essential);
+    }
+}
+
+TEST(ConstraintPlan, TypedEssentialsRejectPassedPhaseBeforeMutatingManagersOrBatches)
+{
+    PlanSystem s;
+    ConstraintPlan plan(*s.system);
+    plan.commitThrough(ConstraintPhase::InactiveSupport);
+    systems::BoundaryConditionManager manager;
+    manager.add(std::make_unique<forms::bc::EssentialBC>(2, forms::FormExpr::constant(1.0), "p"));
+    const auto state = forms::StateField(s.p, *s.scalar, "p");
+    const auto test = forms::TestField(s.p, *s.scalar, "q");
+    auto residual = (state * test).dx();
+    const auto seed = residual.nodeShared();
+    const std::array declarations{forms::bc::strongDirichlet(s.p, 3, forms::FormExpr::constant(2.0))};
+    EXPECT_THROW(plan.essentials(manager, s.p), std::logic_error);
+    EXPECT_THROW(plan.essentials(manager, residual, state, test, s.p), std::logic_error);
+    EXPECT_THROW(plan.essentials(declarations), std::logic_error);
+    EXPECT_TRUE(s.registered().empty());
+    EXPECT_TRUE(s.system->boundaryConditionDescriptors().empty());
+    EXPECT_EQ(residual.nodeShared(), seed);
+    // The manager remains usable because the rejected plan operations did not consume it.
+    manager.applyAll(*s.system, s.p);
+    EXPECT_EQ(s.registered().size(), 2u);
 }
 
 TEST(ConstraintPlan, UncommittedDeclarationsAreDropped)

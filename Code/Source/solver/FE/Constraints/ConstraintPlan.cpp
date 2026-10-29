@@ -12,7 +12,9 @@
 #include "Forms/FormExpr.h"
 #include "Forms/IntegrationDomain.h"
 #include "LevelSet/LevelSetGeometry.h"
+#include "Systems/BoundaryConditionManager.h"
 #include "Systems/FESystem.h"
+#include "Systems/FormsInstaller.h"
 
 #include <stdexcept>
 #include <string>
@@ -105,6 +107,28 @@ ConstraintPlan& ConstraintPlan::essentials(const std::function<void(systems::FES
     commitThrough(ConstraintPhase::Essential);
     install(*system_);
     return *this;
+}
+
+ConstraintPlan& ConstraintPlan::essentials(systems::BoundaryConditionManager& manager,
+                                           forms::FormExpr& residual,
+                                           const forms::FormExpr& state,
+                                           const forms::FormExpr& test,
+                                           FieldId field,
+                                           std::string_view operator_tag)
+{
+    return essentials([&](systems::FESystem& system) {
+        manager.applyAll(system, residual, state, test, field, operator_tag);
+    });
+}
+
+ConstraintPlan& ConstraintPlan::essentials(systems::BoundaryConditionManager& manager, FieldId field)
+{
+    return essentials([&](systems::FESystem& system) { manager.applyAll(system, field); });
+}
+
+ConstraintPlan& ConstraintPlan::essentials(std::span<const forms::bc::StrongDirichlet> declarations)
+{
+    return essentials([&](systems::FESystem& system) { systems::installStrongDirichlet(system, declarations); });
 }
 
 ConstraintPlan& ConstraintPlan::inactiveSide(std::initializer_list<FieldId> fields,

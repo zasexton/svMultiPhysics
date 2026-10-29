@@ -13,7 +13,10 @@
 #include <gtest/gtest.h>
 
 #include "Forms/FormExpr.h"
+#include "Forms/BoundaryConditions.h"
+#include "Forms/ResidualContributions.h"
 #include "Spaces/H1Space.h"
+#include "Spaces/ProductSpace.h"
 
 #include <optional>
 #include <stdexcept>
@@ -246,6 +249,158 @@ TEST(FormExprTest, TimeDerivativeNode)
     ASSERT_TRUE(dtu.isValid());
     EXPECT_EQ(dtu.node()->type(), FormExprType::TimeDerivative);
     EXPECT_EQ(dtu.node()->timeDerivativeOrder().value_or(0), 2);
+}
+
+TEST(ResidualContributions, InterleavedFieldsKeepExactLeftFoldAndSelectedObservations)
+{
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto v = TestField(17, space, "v");
+    const auto q = TestField(3, space, "q");
+    const auto seed = (2.0 * v).dx();
+    const auto a = (3.0 * v).ds(4);
+    const auto b = (5.0 * q).dx();
+    const auto grouped = ((7.0 * v) + (11.0 * v)).dI(9);
+    FormExpr first = seed;
+    FormExpr second;
+    FormExpr observed;
+    FormExpr seeded_observation = seed;
+    FormExpr unselected = b;
+    ResidualContributions rows({
+        {17, first, {&observed, nullptr, &seeded_observation}},
+        {3, second},
+    });
+
+    rows.append(17, a);
+    const auto first_add = first.nodeShared();
+    EXPECT_EQ(first.node()->children(), (std::vector<const FormExprNode*>{seed.node(), a.node()}));
+    EXPECT_EQ(observed.nodeShared(), a.nodeShared());
+    rows.append(3, b);
+    rows.append(17, grouped);
+
+    EXPECT_EQ(first.node()->type(), FormExprType::Add);
+    EXPECT_EQ(first.node()->children(), (std::vector<const FormExprNode*>{first_add.get(), grouped.node()}));
+    EXPECT_EQ(second.nodeShared(), b.nodeShared());
+    EXPECT_EQ(observed.node()->children(), (std::vector<const FormExprNode*>{a.node(), grouped.node()}));
+    ASSERT_EQ(seeded_observation.node()->children().size(), 2u);
+    EXPECT_EQ(seeded_observation.node()->children()[1], grouped.node());
+    EXPECT_EQ(seeded_observation.node()->children()[0]->children(),
+              (std::vector<const FormExprNode*>{seed.node(), a.node()}));
+    EXPECT_EQ(unselected.nodeShared(), b.nodeShared());
+}
+
+TEST(ResidualContributions, CopiesBindingsAndObservationLists)
+{
+    FormExpr residual;
+    FormExpr observation;
+    ResidualContributionRow binding{12, residual, {&observation}};
+    ResidualContributions rows({binding});
+    binding.observations.clear();
+    const auto term = FormExpr::constant(2.0);
+    rows.append(12, term);
+    EXPECT_EQ(residual.nodeShared(), term.nodeShared());
+    EXPECT_EQ(observation.nodeShared(), term.nodeShared());
+}
+
+TEST(ResidualContributions, CanonicalGeneratedRouteRetainsExactUnscaledAdditiveAnchor)
+{
+    auto scalar = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    spaces::ProductSpace vector(scalar, 3);
+    const auto u = StateField(29, vector, "u");
+    const auto v = TestField(29, vector, "v");
+    const auto zero = FormExpr::asVector({FormExpr::constant(0.0), FormExpr::constant(0.0), FormExpr::constant(0.0)});
+    const auto route = bc::buildGeneratedBoundaryNitscheTraceTerms(
+        u, v, zero, bc::symmetricGradientForm(FormExpr::constant(2.5)), 4, 19);
+    const auto& anchor = route.binding.routeAnchor();
+    ASSERT_EQ(route.route_contribution.nodeShared(), anchor.nodeShared());
+    const auto seed = inner(u, v).dx();
+    const auto tail = inner(u, v).ds(6);
+    FormExpr residual = seed;
+    FormExpr observed;
+    ResidualContributions rows({{29, residual, {&observed}}});
+    rows.append(29, route.route_contribution);
+    rows.append(29, tail);
+
+    ASSERT_EQ(residual.node()->type(), FormExprType::Add);
+    const auto* prefix = residual.node()->children()[0];
+    ASSERT_EQ(prefix->type(), FormExprType::Add);
+    EXPECT_EQ(prefix->children(), (std::vector<const FormExprNode*>{seed.node(), anchor.node()}));
+    EXPECT_EQ(residual.node()->children()[1], tail.node());
+    EXPECT_EQ(observed.node()->type(), FormExprType::Add);
+    EXPECT_EQ(observed.node()->children(), (std::vector<const FormExprNode*>{anchor.node(), tail.node()}));
+    EXPECT_EQ(route.binding.velocityField(), 29);
+}
+
+TEST(ResidualContributions, SnapshotsTermsAliasingAnyBorrowedTarget)
+{
+    const auto seed = FormExpr::constant(2.0);
+    FormExpr residual = seed;
+    FormExpr observation;
+    FormExpr other;
+    ResidualContributions rows({{5, residual, {&observation}}, {20, other}});
+    rows.append(5, residual);
+    EXPECT_EQ(residual.node()->children(), (std::vector<const FormExprNode*>{seed.node(), seed.node()}));
+    EXPECT_EQ(observation.nodeShared(), seed.nodeShared());
+    const auto observation_before = observation.nodeShared();
+    rows.append(5, observation);
+    EXPECT_EQ(observation.node()->children(),
+              (std::vector<const FormExprNode*>{observation_before.get(), observation_before.get()}));
+    rows.append(20, residual);
+    EXPECT_EQ(other.nodeShared(), residual.nodeShared());
+}
+
+TEST(ResidualContributions, RejectsInvalidDuplicateAndUnknownIdsWithoutUndoingEarlierAppends)
+{
+    FormExpr first;
+    FormExpr second;
+    EXPECT_THROW((ResidualContributions{{INVALID_FIELD_ID, first}}), std::invalid_argument);
+    EXPECT_THROW((ResidualContributions{{4, first}, {4, second}}), std::invalid_argument);
+    ResidualContributions rows({{4, first}, {31, second}});
+    const auto term = FormExpr::constant(3.0);
+    rows.append(4, term);
+    EXPECT_THROW(rows.append(8, term), std::invalid_argument);
+    EXPECT_THROW(rows.append(INVALID_FIELD_ID, term), std::invalid_argument);
+    EXPECT_EQ(first.nodeShared(), term.nodeShared());
+    EXPECT_FALSE(second.isValid());
+}
+
+TEST(ResidualContributions, RejectsAllRepeatedTargetsBeforeMutation)
+{
+    FormExpr first;
+    FormExpr second;
+    FormExpr observation;
+    EXPECT_THROW((ResidualContributions{{4, first, {&first}}}), std::invalid_argument);
+    EXPECT_THROW((ResidualContributions{{4, first, {&observation, &observation}}}), std::invalid_argument);
+    EXPECT_THROW((ResidualContributions{{4, first}, {5, first}}), std::invalid_argument);
+    EXPECT_THROW((ResidualContributions{{4, first, {&second}}, {5, second}}), std::invalid_argument);
+    EXPECT_THROW((ResidualContributions{{4, first}, {5, second, {&first}}}), std::invalid_argument);
+    EXPECT_THROW((ResidualContributions{{4, first, {&observation}}, {5, second, {&observation}}}),
+                 std::invalid_argument);
+    EXPECT_FALSE(first.isValid());
+    EXPECT_FALSE(second.isValid());
+    EXPECT_FALSE(observation.isValid());
+}
+
+TEST(ResidualContributions, InvalidTermsRetainSumOfBehaviorAndProductionFirstProgress)
+{
+    FormExpr residual;
+    FormExpr observation;
+    const FormExpr invalid;
+    ResidualContributions rows({{0, residual, {&observation}}});
+    EXPECT_NO_THROW(rows.append(0, invalid));
+    EXPECT_FALSE(residual.isValid());
+    const auto seed = FormExpr::constant(4.0);
+    residual = seed;
+    EXPECT_THROW(rows.append(0, invalid), std::invalid_argument);
+    EXPECT_EQ(residual.nodeShared(), seed.nodeShared());
+    EXPECT_FALSE(observation.isValid());
+
+    // The empty production target accepts the invalid handle before the seeded
+    // observation rejects it, matching separate production-first sumOf calls.
+    residual = {};
+    observation = seed;
+    EXPECT_THROW(rows.append(0, invalid), std::invalid_argument);
+    EXPECT_FALSE(residual.isValid());
+    EXPECT_EQ(observation.nodeShared(), seed.nodeShared());
 }
 
 } // namespace test
