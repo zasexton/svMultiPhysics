@@ -1244,62 +1244,6 @@ private:
         effective_configuration_artifact_{};
 };
 
-// ---------------------------------------------------------------------------
-// Free-surface geometry of the options (formerly FreeSurface/FreeSurfaceGeometry),
-// defined in IncompressibleNavierStokesVMSModule.cpp, and the active-domain
-// pressure-constraint check of the initial state
-// ---------------------------------------------------------------------------
-
-[[nodiscard]] FE::FieldId resolveLevelSetFieldId(
-    const FreeSurfaceBoundary& bc,
-    const FE::systems::FESystem& system);
-
-[[nodiscard]] FE::level_set::LevelSetGeometry freeSurfaceLevelSetGeometry(
-    const FreeSurfaceBoundary& bc,
-    const FE::systems::FESystem& system);
-
-[[nodiscard]] FE::interfaces::GeneratedInterfaceBoundaryIntersectionMarkerKey
-generatedUnfittedContactLineMarkerKey(
-    const IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine&
-        contact_line,
-    const FreeSurfaceBoundary& bc,
-    const FE::systems::FESystem& system);
-
-[[nodiscard]] int generatedUnfittedContactLineMarker(
-    const IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine&
-        contact_line,
-    const FreeSurfaceBoundary& bc,
-    const FE::systems::FESystem& system);
-
-[[nodiscard]] std::optional<int> sharpActiveBoundaryMarkerFor(
-    int physical_boundary_marker,
-    std::span<const FreeSurfaceBoundary> boundaries,
-    const FE::systems::FESystem& system);
-
-[[nodiscard]] FreeSurfaceBoundary withResolvedInterfaceMarker(
-    FreeSurfaceBoundary bc,
-    const FE::systems::FESystem& system);
-
-[[nodiscard]] std::string freeSurfaceCurvatureTangentPolicyName(
-    const FreeSurfaceBoundary& bc);
-
-[[nodiscard]] FE::forms::FormExpr freeSurfaceSemiImplicitReferenceVelocity(
-    const FE::systems::FESystem& system);
-
-/// A free-surface value as a form: a constant, or the coefficient named
-/// freeSurfaceValueName(@p name, @p bc).
-[[nodiscard]] FE::forms::FormExpr freeSurfaceScalar(
-    const FE::forms::bc::ScalarValue& value,
-    std::string_view name,
-    const FreeSurfaceBoundary& bc);
-
-/// The generated marker of the wetted part of a physical boundary
-/// (sharpActiveBoundaryMarkerFor), registered with @p system when it exists.
-/// The resolver refers to @p system and @p free_surfaces, which must outlive it.
-[[nodiscard]] std::function<std::optional<int>(int)> wettedBoundaryResolver(
-    FE::systems::FESystem& system,
-    const std::vector<FreeSurfaceBoundary>& free_surfaces);
-
 } // namespace navier_stokes
 } // namespace formulations
 } // namespace Physics

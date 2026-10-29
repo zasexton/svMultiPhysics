@@ -20,6 +20,7 @@
  */
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
+#include "Physics/Options/NavierStokesOptionRules.h"
 
 #include "FE/Core/FEException.h"
 #include "FE/Core/LogRecord.h"
@@ -171,6 +172,7 @@ inline void validateFreeSurfaceDiscreteFunctionalPreflight(
 
 inline void declareFreeSurfaceDiscreteFunctionals(
     const std::vector<FreeSurfaceBoundary>& free_surfaces,
+    std::span<const PreparedSurfaceIdentity> identities,
     FE::systems::FESystem& system,
     FE::FieldId velocity_field,
     FE::Real density,
@@ -179,7 +181,8 @@ inline void declareFreeSurfaceDiscreteFunctionals(
     FE::Real dynamic_viscosity,
     bool has_constant_dynamic_viscosity)
 {
-    for (const auto& bc : free_surfaces) {
+    for (std::size_t index = 0; index < free_surfaces.size(); ++index) {
+        const auto& bc = free_surfaces[index];
         if (!shouldDeclareFreeSurfaceDiscreteFunctional(bc)) {
             continue;
         }
@@ -270,7 +273,7 @@ inline void declareFreeSurfaceDiscreteFunctionals(
         svmp::FE::systems::functionalRecords(system).declareFunctional(
             FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
                 .interface_marker = bc.interface_marker,
-                .level_set_field = resolveLevelSetFieldId(bc, system),
+                .level_set_field = identities[index].geometry.value().levelSetField(),
                 .velocity_field = velocity_field,
                 .geometry_domain_id = bc.generated_interface_domain_id,
                 .parameters = std::move(parameters),

@@ -242,6 +242,9 @@ incompressibleTwoFluidDomainSchema();
 [[nodiscard]] std::string freeSurfaceCurvaturePolicyName(
     const FreeSurfaceBoundary& bc);
 
+[[nodiscard]] std::string freeSurfaceCurvatureTangentPolicyName(
+    const FreeSurfaceBoundary& bc);
+
 [[nodiscard]] const char* activeDomainName(FreeSurfaceActiveDomain domain) noexcept;
 
 [[nodiscard]] const char* activeDomainMethodName(

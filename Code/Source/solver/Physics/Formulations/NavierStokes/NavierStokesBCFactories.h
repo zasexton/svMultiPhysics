@@ -163,28 +163,22 @@ inline void declareFittedMeshRowDescriptors(
 
 inline void registerFreeSurfacePrescribedAngleGeometry(
     FE::systems::FESystem& system,
-    const FreeSurfaceBoundary& bc)
+    const FreeSurfaceBoundary& bc,
+    const PreparedSurfaceIdentity& surface)
 {
-    for (const auto& contact_line : bc.contact_lines) {
+    for (const auto& identity : surface.contacts) {
+        const auto& contact_line = bc.contact_lines[identity.contact_index];
         if (contactLineKind(contact_line) != ContactLineKind::PrescribedAngle) {
             continue;
         }
         if (isUnfittedLevelSet(bc)) {
-            const auto phi_id = FE::level_set::resolveScalarLevelSetField(
-                system,
-                bc.level_set_field_name,
-                "IncompressibleNavierStokesVMSModule: prescribed unfitted contact angle references unknown level-set field '",
-                "IncompressibleNavierStokesVMSModule");
+            const auto phi_id = surface.geometry.value().levelSetField();
             if (!system.fieldParticipatesInUnknownVector(phi_id)) {
                 throw std::invalid_argument(
                     "IncompressibleNavierStokesVMSModule: prescribed unfitted contact angles require the level-set field to be an unknown");
             }
 
-            const int contact_marker =
-                generatedUnfittedContactLineMarker(
-                    contact_line,
-                    bc,
-                    system);
+            const int contact_marker = identity.domain.marker();
             system.registerGeneratedEmbeddedInterfaceMarker(contact_marker);
             const auto check = contactLineCheck(contact_line, contact_marker);
             FE::interfaces::registerContactLineCertificate(
@@ -797,9 +791,9 @@ inline void applyVelocityNitscheBCs(
 
 /// One PrescribedAngle or DynamicRenE contact line of a free surface.
 struct ContactLaw {
+    FE::forms::ContactLineDomain domain;
     const FreeSurfaceContactLine* line{nullptr};
     int wall{-1};             ///< wall boundary marker
-    int marker{-1};           ///< requested contact-line marker (-1: generated)
     bool young{false};        ///< PrescribedAngle: Young wall energy
     bool dynamic{false};      ///< DynamicRenE
     bool strong{false};       ///< DynamicRenE as a contact-point law
@@ -813,18 +807,19 @@ struct ContactLaw {
 
 /// The PrescribedAngle and DynamicRenE contact lines of @p bc, in order.  The
 /// options are validated by the preflight.
-[[nodiscard]] inline std::vector<ContactLaw> contactLaws(const FreeSurfaceBoundary& bc, int dim)
+[[nodiscard]] inline std::vector<ContactLaw> contactLaws(
+    const FreeSurfaceBoundary& bc, std::span<const PreparedContactIdentity> contacts, int dim)
 {
     std::vector<ContactLaw> laws;
-    for (const auto& c : bc.contact_lines) {
+    for (const auto& identity : contacts) {
+        const auto& c = bc.contact_lines[identity.contact_index];
         const auto kind = contactLineKind(c);
         if (kind != ContactLineKind::PrescribedAngle && kind != ContactLineKind::DynamicRenE) {
             continue;
         }
-        ContactLaw law;
+        ContactLaw law{.domain = identity.domain};
         law.line = &c;
         law.wall = contactLineWallBoundaryMarker(c);
-        law.marker = contactLineMarker(c);
         law.young = kind == ContactLineKind::PrescribedAngle;
         law.dynamic = kind == ContactLineKind::DynamicRenE;
         law.strong = law.dynamic && std::get<FreeSurfaceContactLine::DynamicRenE>(c.configuration).strong_law;
@@ -832,10 +827,10 @@ struct ContactLaw {
         law.cos_e = FE::forms::FormExpr::constant(
             std::cos(constantScalarValueOrThrow(contactLineAngleRadians(c), "contact_angle_radians")));
         if (law.dynamic && !law.strong) {
-            law.mobility = freeSurfaceScalar(contactLineMobility(c), "ns_dynamic_contact_angle_mobility", bc);
+            law.mobility = FE::forms::bc::toScalarExpr(contactLineMobility(c), freeSurfaceValueName("ns_dynamic_contact_angle_mobility", bc));
         }
         if (contactLineHasNavierSlip(c)) {
-            law.slip_length = freeSurfaceScalar(contactLineSlipLength(c), "ns_contact_wall_slip_length", bc);
+            law.slip_length = FE::forms::bc::toScalarExpr(contactLineSlipLength(c), freeSurfaceValueName("ns_contact_wall_slip_length", bc));
         }
         if (law.strong) {
             law.wall_normal = normalizedWallNormal(c);
@@ -964,7 +959,7 @@ struct ContactLaw {
     if (b.tangential_mesh_policy == FreeSurfaceTangentialMeshPolicy::SmoothingOnly) {
         const auto P = tangentialProjector(n, components);
         const auto weight =
-            freeSurfaceScalar(b.tangential_mesh_penalty, "ns_free_surface_tangential_mesh_smoothing_weight", b);
+            FE::forms::bc::toScalarExpr(b.tangential_mesh_penalty, freeSurfaceValueName("ns_free_surface_tangential_mesh_smoothing_weight", b));
         return (weight * inner(P * grad(d_mesh) * P, P * grad(psi) * P)).ds(gamma);
     }
     if (b.tangential_mesh_policy == FreeSurfaceTangentialMeshPolicy::Prescribed) {
@@ -973,7 +968,7 @@ struct ContactLaw {
             b.boundary_marker, bc::ComponentValueNameStyle::Component));
         const auto gap = dt(d_mesh) - target;
         const auto penalty =
-            freeSurfaceScalar(b.tangential_mesh_penalty, "ns_free_surface_tangential_mesh_penalty", b);
+            FE::forms::bc::toScalarExpr(b.tangential_mesh_penalty, freeSurfaceValueName("ns_free_surface_tangential_mesh_penalty", b));
         return (penalty * (inner(gap, psi) - normalTrace(gap, n) * normalTrace(psi, n))).ds(gamma);
     }
     return {};
@@ -1331,16 +1326,17 @@ inline void applyFreeSurfaceContactLineConstraints(
 inline void addUnfittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem& system,
                                    FE::constraints::ConstraintPlan& plan, FE::systems::FormulationBuilder& F,
                                    const IncompressibleNavierStokesVMSOptions& o, const FreeSurfaceBoundary& b,
-                                   const NavierStokesTerms& t, FE::FieldId u_id, post::ConservativeBalanceForms* balance)
+                                   PreparedSurfaceIdentity& identity, const NavierStokesTerms& t, FE::FieldId u_id,
+                                   FE::FieldId reference_velocity_id, post::ConservativeBalanceForms* balance)
 {
     using namespace FE::forms;
     const auto& [u, p, v, q, rho, mu, f, dim] = t;
-    const auto L = freeSurfaceLevelSetGeometry(b, system).side(activeDomainSide(b.active_domain));
-    const auto gamma = freeSurfaceScalar(b.surface_tension, "ns_free_surface_surface_tension", b);
+    const auto L = identity.geometry.value().side(activeDomainSide(b.active_domain));
+    const auto gamma = FE::forms::bc::toScalarExpr(b.surface_tension, freeSurfaceValueName("ns_free_surface_surface_tension", b));
 
-    registerFreeSurfacePrescribedAngleGeometry(system, b);   // contact-geometry certificate at each refresh
-    for (const auto& c : Factories::contactLaws(b, dim)) {
-        const auto CL = F.registered(L.contactLine(c.wall, c.marker));
+    registerFreeSurfacePrescribedAngleGeometry(system, b, identity);   // contact-geometry certificate at each refresh
+    for (const auto& c : Factories::contactLaws(b, identity.contacts, dim)) {
+        const auto CL = F.registered(c.domain);
         if (c.dynamic) {
             registerDynamicContactWallNormalCheck(system, *c.line, CL.marker());
         }
@@ -1370,7 +1366,7 @@ inline void addUnfittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem
         }
     }
 
-    validateFreeSurfaceBoundary(b, o, o.enable_ale, system, dim);
+    validateFreeSurfaceBoundary(b, o, o.enable_ale, system, dim, identity);
     F.log(unfittedModeLog(b));
     if (bc::isZeroConstantScalarValue(b.external_pressure) && bc::isZeroConstantScalarValue(b.surface_tension)) {
         F.log(naturalUnfittedSurfaceLog(b));   // sigma n = 0: no interface term
@@ -1378,7 +1374,7 @@ inline void addUnfittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem
     }
     const auto Gamma = L.interface();
     const auto n = L.outwardNormal();
-    const auto p_ext = freeSurfaceScalar(b.external_pressure, "ns_free_surface_external_pressure", b);
+    const auto p_ext = FE::forms::bc::toScalarExpr(b.external_pressure, freeSurfaceValueName("ns_free_surface_external_pressure", b));
     const auto pressure = exteriorPressureIntegrand(p_ext, n, v);   // SurfaceStress, the only form (D48)
     post::addExteriorPressure(balance, pressure.dI(Gamma));
     if (!surfaceStressActive(b)) {   // gamma = 0
@@ -1389,7 +1385,9 @@ inline void addUnfittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem
         M = M + (pressure + surface_energy).dI(Gamma);
     }
     if (usesSemiImplicitNormalIncrement(b)) {
-        const auto u_ref = freeSurfaceSemiImplicitReferenceVelocity(system);   // u at the last geometry refresh
+        const auto& reference = system.fieldRecord(reference_velocity_id);
+        const auto u_ref = FormExpr::discreteField(reference_velocity_id, *reference.space,
+            std::string(kFreeSurfaceSemiImplicitReferenceVelocityFieldName));   // u at the last geometry refresh
         M = M + Factories::semiImplicitNormalIncrementIntegrand(gamma, u, u_ref, v, n).dI(Gamma);
     }
     F.log(tractionLogs(b));
@@ -1405,7 +1403,8 @@ inline void addUnfittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem
 inline void addFittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem& system,
                                  FE::constraints::ConstraintPlan& plan, FE::systems::BoundaryConditionManager& bcs,
                                  const IncompressibleNavierStokesVMSOptions& o, const FreeSurfaceBoundary& b,
-                                 const FE::systems::ALEBinding& ale, const NavierStokesTerms& t, FE::FieldId u_id,
+                                 PreparedSurfaceIdentity& identity, const FE::systems::ALEBinding& ale,
+                                 const NavierStokesTerms& t, FE::FieldId u_id,
                                  FE::systems::FormulationBuilder& F, post::ConservativeBalanceForms* balance)
 {
     using namespace FE::forms;
@@ -1414,11 +1413,11 @@ inline void addFittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem& 
     Factories::applyFreeSurfaceContactLineConstraints(plan, b, ale, dim);   // pinned contact lines: d = 0
     bcs.add(std::make_unique<bc::ReservedBC>(b.boundary_marker));
 
-    validateFreeSurfaceBoundary(b, o, o.enable_ale, system, dim);   // the qualified fitted-ALE contract
+    validateFreeSurfaceBoundary(b, o, o.enable_ale, system, dim, identity);   // the qualified fitted-ALE contract
     const auto Gamma = BoundaryDomain::fullPhysical(b.boundary_marker);
     const auto n = currentNormal();   // normal of the integration frame
-    const auto gamma = freeSurfaceScalar(b.surface_tension, "ns_free_surface_surface_tension", b);
-    const auto p_ext = freeSurfaceScalar(b.external_pressure, "ns_free_surface_external_pressure", b);
+    const auto gamma = FE::forms::bc::toScalarExpr(b.surface_tension, freeSurfaceValueName("ns_free_surface_surface_tension", b));
+    const auto p_ext = FE::forms::bc::toScalarExpr(b.external_pressure, freeSurfaceValueName("ns_free_surface_external_pressure", b));
     const bool dynamic_stress =
         !bc::isZeroConstantScalarValue(b.external_pressure) || !bc::isZeroConstantScalarValue(b.surface_tension);
     if (dynamic_stress) {   // SurfaceStress, the only fitted form (validated)
@@ -1479,7 +1478,7 @@ inline void addFittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem& 
     const auto h = avg(hNormal());
     const auto h3 = h * h * h;
     const auto mu_gp = t.mu + FormExpr::constant(o.density) * h * h / FormExpr::effectiveTimeStep();
-    const auto gamma_p = freeSurfaceScalar(cut.pressure_gradient_penalty, "ns_free_surface_cut_pressure_penalty", b);
+    const auto gamma_p = FE::forms::bc::toScalarExpr(cut.pressure_gradient_penalty, freeSurfaceValueName("ns_free_surface_cut_pressure_penalty", b));
     const auto c = FormExpr::constant(0.01);
     const auto F = b.active_domain == FreeSurfaceActiveDomain::None
                        ? FacetDomain::cutAdjacent(b.interface_marker)

@@ -813,6 +813,15 @@ const char* freeSurfaceSurfaceTensionSemiImplicitName(
     return "variational_surface_stress_generated_geometry";
 }
 
+std::string freeSurfaceCurvatureTangentPolicyName(const FreeSurfaceBoundary& bc)
+{
+    if (FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension)) {
+        return "not_applicable";
+    }
+    return isUnfittedLevelSet(bc) ? "generated_geometry_refreshed_frozen"
+                                  : "fitted_geometry_surface_variation";
+}
+
 [[nodiscard]] const char* activeDomainName(FreeSurfaceActiveDomain domain) noexcept
 {
     switch (domain) {

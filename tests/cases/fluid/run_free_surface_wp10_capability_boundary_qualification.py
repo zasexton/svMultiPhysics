@@ -133,8 +133,9 @@ EXPECTED_SOURCE_CHECKS = {
             "NavierStokesBCFactories.h"
         ),
         "required_fragments": [
-            "const auto p_ext = freeSurfaceScalar(b.external_pressure,",
+            "const auto p_ext = FE::forms::bc::toScalarExpr(b.external_pressure,",
             "b.external_pressure",
+            "const auto pressure = exteriorPressureIntegrand(p_ext, n, v);",
         ],
         "forbidden_fragments": [],
     },

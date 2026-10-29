@@ -35,6 +35,7 @@
 #include "FE/Constraints/ConstraintPlan.h"
 #include "FE/Constraints/VertexDirichletConstraint.h"
 #include "FE/Core/Types.h"
+#include "FE/Core/LogRecord.h"
 #include "FE/Forms/BoundaryConditions.h"
 #include "FE/Forms/FormExpr.h"
 #include "FE/Forms/IntegrationDomain.h"
@@ -43,6 +44,7 @@
 #include "FE/Systems/ALEBinding.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormsInstaller.h"
+#include "FE/Systems/MeshBoundaryKinematics.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "FE/Spaces/FunctionSpace.h"
@@ -64,6 +66,28 @@ namespace svmp {
 namespace Physics {
 namespace formulations {
 namespace navier_stokes {
+
+struct PreparedContactIdentity {
+    std::size_t contact_index;
+    FE::interfaces::GeneratedInterfaceBoundaryIntersectionMarkerKey key;
+    FE::forms::ContactLineDomain domain;
+};
+
+/// Immutable geometry identities, filled only at the first required lookup.
+struct PreparedSurfaceIdentity {
+    std::optional<FE::level_set::LevelSetGeometry> geometry;
+    std::vector<PreparedContactIdentity> contacts;
+};
+
+struct PreparedFittedNormalBoundary {
+    std::size_t boundary_index;
+    FE::systems::MeshNormalKinematicBinding binding;
+};
+
+/// The constant target required by fitted stage measurement, checked at its
+/// late declaration point without evaluating a coefficient.
+[[nodiscard]] std::optional<std::array<FE::Real, 3>> fittedTangentialMeasurementVelocity(
+    const FreeSurfaceBoundary& boundary);
 
 /// The selected active-side pressure policy; the boundary storage is borrowed.
 struct ActivePressureDomain {
@@ -110,7 +134,8 @@ void validatePositiveConstantScalar(
 
 void validateGeneratedFreeSurfaceMarkerUniqueness(
     std::span<const FreeSurfaceBoundary> boundaries,
-    const FE::systems::FESystem& system);
+    const FE::systems::FESystem& system,
+    std::span<PreparedSurfaceIdentity> identities);
 
 /// The vertex-id mode of the node pressure constraints.
 [[nodiscard]] FE::constraints::VertexIdMode nodePressureIdMode(
@@ -133,7 +158,8 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                                  const IncompressibleNavierStokesVMSOptions& options,
                                  bool ale_enabled,
                                  const FE::systems::FESystem& system,
-                                 int dim);
+                                 int dim,
+                                 PreparedSurfaceIdentity& identity);
 
 /// Resolved weak-boundary input for this registration transaction. Certified
 /// route bindings are built separately with the actual registered fields.
@@ -150,7 +176,9 @@ void validateNavierStokesBoundaryConfiguration(
     const FE::spaces::FunctionSpace& velocity_space,
     const FE::spaces::FunctionSpace& pressure_space,
     int dim,
-    std::vector<PreparedWeakVelocityBoundary>* prepared_weak_velocity = nullptr);
+    const std::function<std::optional<int>(int)>& generated_active_boundary_for,
+    std::vector<PreparedWeakVelocityBoundary>* prepared_weak_velocity = nullptr,
+    std::vector<FE::forms::BoundaryDomain>* required_routes = nullptr);
 
 /// What preflightNavierStokes resolved for the registration that follows.
 struct NavierStokesPreflight {
@@ -164,6 +192,13 @@ struct NavierStokesPreflight {
     std::vector<FreeSurfaceBoundary> effective_free_surfaces;   // generated interface markers resolved
     std::vector<FE::constraints::VertexDirichletValue> node_pressure_values;
     std::vector<PreparedWeakVelocityBoundary> prepared_weak_velocity_boundaries;
+    std::vector<PreparedSurfaceIdentity> surface_identities;
+    std::optional<std::size_t> active_boundary_index;
+    FE::forms::VolumeDomain bulk_volume{FE::forms::VolumeDomain::full()};
+    std::optional<FE::LogRecord> active_domain_log;
+    std::function<std::optional<int>(int)> generated_active_boundary_for;
+    std::vector<FE::forms::BoundaryDomain> required_nitsche_routes;
+    std::vector<PreparedFittedNormalBoundary> fitted_normal_boundaries;
     bool has_exterior_free_surface{false};
 };
 

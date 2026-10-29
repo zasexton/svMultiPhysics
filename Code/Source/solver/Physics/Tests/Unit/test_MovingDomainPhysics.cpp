@@ -12857,13 +12857,17 @@ TEST(MovingDomainPhysics, BoundaryPreflightPublishesPreparedValuesOnlyAfterSucce
     auto options = baseNavierStokesOptions();
     options.velocity_dirichlet_weak = {{.boundary_marker = 21, .value = {1.0, 2.0, 3.0}}};
     std::vector<ns::PreparedWeakVelocityBoundary> output{{.physical_marker = 999}};
+    const auto no_active_boundary = FE::level_set::generatedActiveBoundaryResolver(
+        {}, "BoundaryPreflightPublishesPreparedValuesOnlyAfterSuccess", "invalid marker");
     options.velocity_dirichlet_weak[0].active_components[0] = false;
-    EXPECT_THROW(ns::validateNavierStokesBoundaryConfiguration(options, {}, system, *vector, *scalar, 3, &output),
+    EXPECT_THROW(ns::validateNavierStokesBoundaryConfiguration(options, {}, system, *vector, *scalar, 3,
+                                                              no_active_boundary, &output),
                  std::invalid_argument);
     ASSERT_EQ(output.size(), 1u);
     EXPECT_EQ(output[0].physical_marker, 999);
     options.velocity_dirichlet_weak[0].active_components[0] = true;
-    ASSERT_NO_THROW(ns::validateNavierStokesBoundaryConfiguration(options, {}, system, *vector, *scalar, 3, &output));
+    ASSERT_NO_THROW(ns::validateNavierStokesBoundaryConfiguration(options, {}, system, *vector, *scalar, 3,
+                                                                 no_active_boundary, &output));
     ASSERT_EQ(output.size(), 1u);
     EXPECT_EQ(output[0].physical_marker, 21);
     const auto preflight = ns::preflightNavierStokes(system, options, vector, scalar);

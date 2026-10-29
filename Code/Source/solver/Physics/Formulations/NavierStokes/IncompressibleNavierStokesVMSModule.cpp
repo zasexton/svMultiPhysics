@@ -17,18 +17,16 @@
  *     + boundary and free-surface terms                                         = 0,
  *
  * with a = u - w the velocity relative to the mesh.  The boundary and
- * free-surface terms are stated in NavierStokesBCFactories.h.  Everything
- * that is not mathematics (option checks, field registration, certificates,
- * logs, diagnostic operators, the configuration artifact, the residual-work
- * ledger) is in the support headers included below.
+ * free-surface terms are stated in NavierStokesBCFactories.h. Options
+ * prepares the model requirements and domain identities; shared FE services
+ * execute field, initialization, constraint and installation declarations.
+ * The physical laws and the Forms consuming those declarations stay here.
  */
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 
-// Not mathematics: option queries, preflight, fields and initial state,
-// geometry adapters, logs, energy declarations, the residual-work ledger,
-// the diagnostic operators and the configuration artifact.
+// Model requirements and the authoritative energy/work declarations.
 #include "Physics/Options/NavierStokesOptionRules.h"
 #include "Physics/Options/NavierStokesOptionSchema.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesPostProcessing.h"
@@ -65,13 +63,8 @@
 
 #include <algorithm>
 #include <array>
-#include <unordered_map>
-#include <sstream>
-#include <limits>
-#include <cstdint>
 #include <cmath>
 #include <cstddef>
-#include <functional>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -91,390 +84,6 @@ namespace cs = svmp::FE::constraints;
 using FE::FieldId;
 using FE::Real;
 using Options = IncompressibleNavierStokesVMSOptions;
-
-// ---------------------------------------------------------------------------
-// Free-surface geometry of the options (formerly FreeSurface/FreeSurfaceGeometry)
-// ---------------------------------------------------------------------------
-
-namespace {
-
-[[nodiscard]] int generatedInterfaceMarkerFor(
-    const FreeSurfaceBoundary& bc,
-    const FE::systems::FESystem& system)
-{
-    if (!isUnfittedLevelSet(bc) || bc.interface_marker >= 0) {
-        return bc.interface_marker;
-    }
-    if (bc.generated_interface_domain_id.empty()) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: generated unfitted free surface requires a non-empty generated_interface_domain_id");
-    }
-
-    return freeSurfaceLevelSetGeometry(bc, system).interfaceMarker();
-}
-
-[[nodiscard]] FE::interfaces::GeneratedActiveBoundaryMarkerKey
-generatedActiveBoundaryMarkerKey(
-    const FreeSurfaceBoundary& bc,
-    int physical_boundary_marker,
-    const FE::systems::FESystem& system)
-{
-    if (!isUnfittedLevelSet(bc) || bc.interface_marker < 0 ||
-        physical_boundary_marker < 0 ||
-        bc.active_domain == FreeSurfaceActiveDomain::None) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: sharp active-boundary marker requires a resolved unfitted active domain and physical boundary marker");
-    }
-    return freeSurfaceLevelSetGeometry(bc, system)
-        .side(activeDomainSide(bc.active_domain))
-        .boundaryKey(physical_boundary_marker);
-}
-
-} // namespace
-
-[[nodiscard]] FE::FieldId resolveLevelSetFieldId(
-    const FreeSurfaceBoundary& bc,
-    const FE::systems::FESystem& system)
-{
-    return FE::level_set::resolveScalarLevelSetField(
-        system,
-        bc.level_set_field_name,
-        "IncompressibleNavierStokesVMSModule: unfitted free surface references unknown level-set field '",
-        "IncompressibleNavierStokesVMSModule");
-}
-
-/// The level-set geometry of an unfitted free surface: its field, generated
-/// domain id, isovalue and (resolved or requested) interface marker.
-[[nodiscard]] FE::level_set::LevelSetGeometry freeSurfaceLevelSetGeometry(
-    const FreeSurfaceBoundary& bc,
-    const FE::systems::FESystem& system)
-{
-    return FE::level_set::LevelSetGeometry::bind(
-        system,
-        {.level_set_field = resolveLevelSetFieldId(bc, system),
-         .domain_id = bc.generated_interface_domain_id,
-         .isovalue = bc.level_set_isovalue,
-         .interface_marker = bc.interface_marker});
-}
-
-[[nodiscard]] FE::interfaces::GeneratedInterfaceBoundaryIntersectionMarkerKey
-generatedUnfittedContactLineMarkerKey(
-    const IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine&
-        contact_line,
-    const FreeSurfaceBoundary& bc,
-    const FE::systems::FESystem& system)
-{
-    if (!isUnfittedLevelSet(bc)) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: generated contact marker key requires an unfitted free surface");
-    }
-    if (bc.interface_marker < 0) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: generated unfitted contact-line marker requires resolved interface_marker >= 0");
-    }
-    if (bc.generated_interface_domain_id.empty()) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: generated unfitted contact-line marker requires a non-empty generated_interface_domain_id");
-    }
-    if (contactLineWallBoundaryMarker(contact_line) < 0) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: prescribed unfitted contact angle requires Contact_line_wall_marker or Contact_line_wall_face");
-    }
-
-    return freeSurfaceLevelSetGeometry(bc, system).contactLineKey(
-        contactLineWallBoundaryMarker(contact_line),
-        contactLineMarker(contact_line));
-}
-
-[[nodiscard]] int generatedUnfittedContactLineMarker(
-    const IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine&
-        contact_line,
-    const FreeSurfaceBoundary& bc,
-    const FE::systems::FESystem& system)
-{
-    if (!isUnfittedLevelSet(bc)) {
-        return contactLineConstraintMarker(contact_line);
-    }
-    return FE::interfaces::stableGeneratedInterfaceBoundaryIntersectionMarker(
-        generatedUnfittedContactLineMarkerKey(contact_line, bc, system));
-}
-
-[[nodiscard]] std::optional<int> sharpActiveBoundaryMarkerFor(
-    int physical_boundary_marker,
-    std::span<const FreeSurfaceBoundary> boundaries,
-    const FE::systems::FESystem& system)
-{
-    return FE::level_set::resolveGeneratedActiveBoundaryMarker(
-        physical_boundary_marker,
-        boundaries.size(),
-        [&](std::size_t index)
-            -> std::optional<FE::interfaces::GeneratedActiveBoundaryMarkerKey> {
-            const auto& bc = boundaries[index];
-            if (!isUnfittedLevelSet(bc) ||
-                bc.active_domain == FreeSurfaceActiveDomain::None) {
-                return std::nullopt;
-            }
-            return generatedActiveBoundaryMarkerKey(
-                bc, physical_boundary_marker, system);
-        },
-        "IncompressibleNavierStokesVMSModule");
-}
-
-[[nodiscard]] FreeSurfaceBoundary withResolvedInterfaceMarker(
-    FreeSurfaceBoundary bc,
-    const FE::systems::FESystem& system)
-{
-    if (isUnfittedLevelSet(bc) && bc.interface_marker < 0) {
-        bc.interface_marker = generatedInterfaceMarkerFor(bc, system);
-    }
-    return bc;
-}
-
-[[nodiscard]] std::string freeSurfaceCurvatureTangentPolicyName(
-    const FreeSurfaceBoundary& bc)
-{
-    if (FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension)) {
-        return "not_applicable";
-    }
-    // SurfaceStress, the only form (decision D48).
-    return isUnfittedLevelSet(bc) ? "generated_geometry_refreshed_frozen"
-                                  : "fitted_geometry_surface_variation";
-}
-
-namespace {
-
-/// The volume of the bulk residual: the mesh, or the active side of the one
-/// active-domain free surface.
-[[nodiscard]] FE::forms::VolumeDomain activeVolumeDomainFor(
-    const std::vector<FreeSurfaceBoundary>& free_surfaces)
-{
-    const FreeSurfaceBoundary* active_boundary = nullptr;
-    for (const auto& bc : free_surfaces) {
-        if (bc.active_domain == FreeSurfaceActiveDomain::None) {
-            continue;
-        }
-        if (active_boundary != nullptr) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: at most one active-domain free surface may restrict Navier-Stokes volume integration");
-        }
-
-        const FE::forms::CutVolumeSide side = activeDomainSide(bc.active_domain);
-        active_boundary = &bc;
-
-        FE::logRecord(post::navierStokesLog("active-domain free surface")
-                          .diagnostic("active_domain_free_surface")
-                          .integer("marker", bc.interface_marker)
-                          .quoted("level_set_field", bc.level_set_field_name)
-                          .real("isovalue", bc.level_set_isovalue)
-                          .quoted("generated_interface_domain_id", bc.generated_interface_domain_id)
-                          .text("active_domain", activeDomainName(bc.active_domain))
-                          .text("active_domain_method", activeDomainMethodName(bc.active_domain_method))
-                          .text("side", cutVolumeSideName(side)));
-    }
-    if (active_boundary == nullptr) {
-        return FE::forms::VolumeDomain::full();
-    }
-    return FE::forms::VolumeDomain::cut(
-        active_boundary->interface_marker,
-        activeDomainSide(active_boundary->active_domain));
-}
-
-} // namespace
-
-// u_ref of the semi-implicit capillary term: prescribed data in the velocity
-// space, registered by registerOn and refreshed by the application.
-[[nodiscard]] FE::forms::FormExpr freeSurfaceSemiImplicitReferenceVelocity(
-    const FE::systems::FESystem& system)
-{
-    const std::string name(kFreeSurfaceSemiImplicitReferenceVelocityFieldName);
-    const auto field = system.findFieldByName(name);
-    if (field == FE::INVALID_FIELD_ID) {
-        throw std::logic_error(
-            "IncompressibleNavierStokesVMSModule: the semi-implicit "
-            "reference velocity field '" + name + "' is not registered");
-    }
-    const auto& rec = system.fieldRecord(field);
-    if (rec.source_kind != FE::systems::FieldSourceKind::PrescribedData ||
-        system.fieldParticipatesInUnknownVector(field) || !rec.space) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: the semi-implicit "
-            "reference velocity field '" + name +
-            "' must be prescribed data, not an unknown");
-    }
-    return FE::forms::FormExpr::discreteField(field, *rec.space, name);
-}
-
-FE::forms::FormExpr freeSurfaceScalar(
-    const FE::forms::bc::ScalarValue& value,
-    std::string_view name,
-    const FreeSurfaceBoundary& bc)
-{
-    return FE::forms::bc::toScalarExpr(value, freeSurfaceValueName(name, bc));
-}
-
-std::function<std::optional<int>(int)> wettedBoundaryResolver(
-    FE::systems::FESystem& system,
-    const std::vector<FreeSurfaceBoundary>& free_surfaces)
-{
-    return FE::level_set::wettedBoundaryResolver(
-        system, [&system, &free_surfaces](int marker) {
-            return sharpActiveBoundaryMarkerFor(marker, free_surfaces, system);
-        });
-}
-
-namespace {
-
-void requireCertifiedNitscheTraces(
-    const IncompressibleNavierStokesVMSOptions& options,
-    const std::function<std::optional<int>(int)>& generated_active_boundary_for,
-    bool small_cut_aggregation,
-    const std::vector<FE::forms::bc::GeneratedBoundaryNitscheTraceFormBinding>&
-        generated_nitsche_trace_bindings)
-{
-    std::size_t expected_generated_nitsche_trace_bindings = 0u;
-    for (const auto& bc : options.velocity_dirichlet_weak) {
-        const int physical_marker =
-            FE::forms::bc::detail::boundaryMarkerOrThrow(
-                bc,
-                "IncompressibleNavierStokesVMSModule::registerOn "
-                "generated-boundary Nitsche trace policy");
-        const auto generated_marker =
-            generated_active_boundary_for(physical_marker);
-        if (!generated_marker.has_value()) {
-            continue;
-        }
-        if (!small_cut_aggregation) {
-            throw std::logic_error(
-                "IncompressibleNavierStokesVMSModule::registerOn: "
-                "generated-boundary Nitsche route reached installation "
-                "without its preflighted small-cut aggregation policy");
-        }
-        ++expected_generated_nitsche_trace_bindings;
-        if (options.viscosity_model != nullptr) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule::registerOn: "
-                    "certified generated-boundary Nitsche routes require "
-                    "constant Newtonian viscosity");
-        }
-    }
-    if (generated_nitsche_trace_bindings.size() !=
-        expected_generated_nitsche_trace_bindings) {
-        throw std::logic_error(
-            "IncompressibleNavierStokesVMSModule::registerOn: "
-            "generated-boundary Nitsche form binding count differs "
-            "from the certified production routes");
-    }
-}
-
-std::vector<FE::systems::MeshNormalBoundaryConstraintDeclaration>
-fittedNormalKinematicDeclarations(
-    const FE::systems::ALEBinding& ale_binding,
-    const std::vector<FreeSurfaceBoundary>& effective_free_surfaces,
-    const FE::forms::FormExpr& u,
-    FE::FieldId u_id)
-{
-    using namespace svmp::FE::forms;
-    std::vector<FE::systems::MeshNormalBoundaryConstraintDeclaration>
-        normal_declarations;
-    if (ale_binding.coupled()) {
-        normal_declarations.reserve(effective_free_surfaces.size());
-        for (const auto& boundary : effective_free_surfaces) {
-            const bool installs_normal_relation =
-                boundary.implementation ==
-                    FreeSurfaceImplementation::FittedALE &&
-                boundary.kinematic_enforcement !=
-                    FreeSurfaceKinematicEnforcement::None &&
-                boundary.normal_kinematic_policy ==
-                    FreeSurfaceNormalKinematicPolicy::
-                        MatchFluidNormalVelocity;
-            if (!installs_normal_relation) {
-                continue;
-            }
-            normal_declarations.push_back(
-                FE::systems::MeshNormalBoundaryConstraintDeclaration{
-                    .mesh_displacement_field =
-                        ale_binding.mesh_displacement_field,
-                    .boundary_marker = boundary.boundary_marker,
-                    .quantity = FE::systems::MeshNormalBoundaryQuantity::
-                        MeshVelocityTrace,
-                    .target_kind =
-                        FE::systems::MeshNormalBoundaryTargetKind::
-                            FluidNormalVelocity,
-                    .target_expression =
-                        normalTrace(u, currentNormal()),
-                    .enforcement_kind =
-                        FE::analysis::EnforcementKind::WeakPenalty,
-                    .related_velocity_field = u_id,
-                    .owner_component =
-                        "IncompressibleNavierStokesVMSModule."
-                        "FreeSurfaceBoundary",
-                    .requires_mesh_flux_consistency =
-                        boundary.kinematic_enforcement ==
-                        FreeSurfaceKinematicEnforcement::MeshNitsche,
-                    .mesh_flux_consistency_nitsche_gamma =
-                        boundary.kinematic_enforcement ==
-                                FreeSurfaceKinematicEnforcement::MeshNitsche
-                            ? boundary.kinematic_nitsche_gamma
-                            : FE::Real{0.0},
-                });
-        }
-    }
-    return normal_declarations;
-}
-
-void declareFittedNormalKinematics(
-    FE::systems::FESystem& system,
-    const std::string& operator_tag,
-    std::vector<FE::systems::MeshNormalBoundaryConstraintDeclaration>
-        normal_declarations,
-    const std::vector<FreeSurfaceBoundary>& effective_free_surfaces)
-{
-    FE::systems::declareMeshNormalKinematics(
-        system,
-        operator_tag,
-        std::move(normal_declarations),
-        [&](int marker) {
-        const auto fitted_boundary = std::find_if(
-            effective_free_surfaces.begin(),
-            effective_free_surfaces.end(),
-            [&](const auto& candidate) {
-                return candidate.implementation ==
-                           FreeSurfaceImplementation::FittedALE &&
-                       candidate.boundary_marker == marker;
-            });
-        if (fitted_boundary == effective_free_surfaces.end()) {
-            throw std::logic_error(
-                "IncompressibleNavierStokesVMSModule: fitted normal "
-                "measurement lost its owning free-surface boundary");
-        }
-        std::optional<std::array<FE::Real, 3>>
-            prescribed_tangential_mesh_velocity;
-        if (fitted_boundary->tangential_mesh_policy ==
-            FreeSurfaceTangentialMeshPolicy::Prescribed) {
-            std::array<FE::Real, 3> target{};
-            for (std::size_t component = 0u;
-                 component < target.size();
-                 ++component) {
-                target[component] = constantScalarValueOrThrow(
-                    fitted_boundary
-                        ->prescribed_tangential_mesh_velocity[component],
-                    "fitted prescribed tangential mesh velocity");
-            }
-            prescribed_tangential_mesh_velocity = target;
-        }
-        return FE::systems::MeshNormalKinematicBinding{
-            .mesh_row_source =
-                "Fitted free-surface mesh normal kinematic row on marker " +
-                std::to_string(marker),
-            .fluid_row_source =
-                fittedFluidNormalDescriptorSource(*fitted_boundary),
-            .prescribed_tangential_mesh_velocity =
-                prescribed_tangential_mesh_velocity,
-        };
-        });
-}
-
-} // namespace
 
 IncompressibleNavierStokesVMSModule::IncompressibleNavierStokesVMSModule(
     std::shared_ptr<const FE::spaces::FunctionSpace> velocity_space,
@@ -742,34 +351,36 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
         ? fields.prescribed(std::move(*preflight.body_force_spec),
                             o.auto_register_body_force_field, "momentum source")
         : FE::INVALID_FIELD_ID;
-    if (preflight.semi_implicit_reference_spec) {
-        (void)fields.prescribed(std::move(*preflight.semi_implicit_reference_spec),
-                                true, "semi-implicit reference velocity");
-    }
-    post::declareFreeSurfaceDiscreteFunctionals(free_surfaces, system, u_id, o.density, o.body_force,
+    const FieldId reference_velocity_id = preflight.semi_implicit_reference_spec
+        ? fields.prescribed(std::move(*preflight.semi_implicit_reference_spec),
+                            true, "semi-implicit reference velocity")
+        : FE::INVALID_FIELD_ID;
+    post::declareFreeSurfaceDiscreteFunctionals(free_surfaces, preflight.surface_identities, system, u_id, o.density, o.body_force,
                                           !o.has_body_force_spacetime && body_force_id == FE::INVALID_FIELD_ID,
                                           o.viscosity, o.viscosity_model == nullptr);
     // Exterior conditions act on the wetted part of a boundary when the liquid is a cut side.
-    const auto wetted = wettedBoundaryResolver(system, free_surfaces);
+    const auto wetted = FE::level_set::wettedBoundaryResolver(system, preflight.generated_active_boundary_for);
 
     // Constraints, in the plan's phase order: vertex values < essential < inactive side < aggregation
     // < contact-point law.  With a cut liquid L the traction on Gamma_h fixes the pressure constant, the dry
     // side is pinned (u = 0, p = 0) and small cut cells are aggregated.
     cs::ConstraintPlan plan(system);
-    const auto liquid = activePressureDomainFor(free_surfaces);
-    const bool cut_liquid = liquid.has_value() &&
-                            liquid->boundary->active_domain_method == FreeSurfaceActiveDomainMethod::CutVolume;
-    if (cut_liquid && isExteriorOnePhaseBoundary(*liquid->boundary)) {
-        plan.anchorGauge(o.operator_tag, Factories::freeSurfacePressureAnchor(p_id, *liquid->boundary));
+    const auto* liquid = preflight.active_boundary_index
+        ? &free_surfaces[*preflight.active_boundary_index] : nullptr;
+    const bool cut_liquid = liquid != nullptr &&
+                            liquid->active_domain_method == FreeSurfaceActiveDomainMethod::CutVolume;
+    if (cut_liquid && isExteriorOnePhaseBoundary(*liquid)) {
+        plan.anchorGauge(o.operator_tag, Factories::freeSurfacePressureAnchor(p_id, *liquid));
     }
     const bool liquid_constraints = cut_liquid && hasNativeMeshOrWarn(system);
-    const bool aggregated = liquid_constraints && liquid->boundary->small_cut_aggregation;
+    const bool aggregated = liquid_constraints && liquid->small_cut_aggregation;
     if (liquid_constraints) {
         const auto L =
-            freeSurfaceLevelSetGeometry(*liquid->boundary, system).side(activeDomainSide(liquid->active_domain));
+            preflight.surface_identities[*preflight.active_boundary_index].geometry.value()
+                .side(activeDomainSide(liquid->active_domain));
         plan.inactiveSide({u_id}, L).inactiveSide({p_id}, L);
         if (aggregated) {
-            plan.aggregate({u_id, p_id}, L, liquid->boundary->small_cut_aggregation_guards);
+            plan.aggregate({u_id, p_id}, L, liquid->small_cut_aggregation_guards);
         }
     }
     if (!o.node_pressure_constraints.values.empty()) {
@@ -782,13 +393,35 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     const auto v = TestField(u_id, *velocity_space_, "v");
     const auto q = TestField(p_id, *pressure_space_, "q");
     const auto ale = fs::resolveALEBinding(system, preflight.ale_options);
-    auto fitted_normal_kinematics = fittedNormalKinematicDeclarations(ale, free_surfaces, u, u_id);
+    std::vector<fs::MeshNormalKinematicDeclaration> fitted_normal_kinematics;
+    if (ale.coupled()) {
+        for (const auto& prepared : preflight.fitted_normal_boundaries) {
+            const auto& b = free_surfaces[prepared.boundary_index];
+            const bool mesh_nitsche = b.kinematic_enforcement == FreeSurfaceKinematicEnforcement::MeshNitsche;
+            fitted_normal_kinematics.push_back({
+                .constraint = {
+                    .mesh_displacement_field = ale.mesh_displacement_field,
+                    .boundary_marker = b.boundary_marker,
+                    .quantity = fs::MeshNormalBoundaryQuantity::MeshVelocityTrace,
+                    .target_kind = fs::MeshNormalBoundaryTargetKind::FluidNormalVelocity,
+                    .target_expression = normalTrace(u, currentNormal()),
+                    .enforcement_kind = FE::analysis::EnforcementKind::WeakPenalty,
+                    .related_velocity_field = u_id,
+                    .owner_component = "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary",
+                    .requires_mesh_flux_consistency = mesh_nitsche,
+                    .mesh_flux_consistency_nitsche_gamma = mesh_nitsche ? b.kinematic_nitsche_gamma : Real{0.0}},
+                .binding = prepared.binding});
+        }
+    }
     if (!system.hasOperator(o.operator_tag)) {
         system.addOperator(o.operator_tag);
     }
 
     // The liquid Omega: the mesh, or the cut side {phi_h < c} or {phi_h > c}; the bulk residual on it.
-    const auto Omega = activeVolumeDomainFor(free_surfaces);
+    if (preflight.active_domain_log) {
+        FE::logRecord(*preflight.active_domain_log);
+    }
+    const auto Omega = preflight.bulk_volume;
     const auto rho = FormExpr::constant(o.density);
     const auto g = constantVector(o.body_force, dim);
     const NavierStokesTerms t{u, p, v, q, rho, viscosity(o, u),
@@ -829,11 +462,14 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     F.symbolicTangent();
     // The energies, powers and measures of the free surfaces as forms (E3; NavierStokesPostProcessing.h).
     post::declareFreeSurfaceEnergyFunctionals(F, free_surfaces, *velocity_space_, dim);
-    for (const auto& b : free_surfaces) {
+    for (std::size_t index = 0; index < free_surfaces.size(); ++index) {
+        const auto& b = free_surfaces[index];
+        auto& identity = preflight.surface_identities[index];
         if (isExteriorOnePhaseBoundary(b) && isUnfittedLevelSet(b)) {
-            Factories::addUnfittedFreeSurface(M, system, plan, F, o, b, t, u_id, split);
+            Factories::addUnfittedFreeSurface(M, system, plan, F, o, b, identity, t, u_id,
+                                            reference_velocity_id, split);
         } else if (isExteriorOnePhaseBoundary(b)) {
-            Factories::addFittedFreeSurface(M, system, plan, bcs, o, b, ale, t, u_id, F, split);
+            Factories::addFittedFreeSurface(M, system, plan, bcs, o, b, identity, ale, t, u_id, F, split);
         }
         const auto J = Factories::cutFacetPressurePenalty(b, t, o, velocity_space_->polynomial_order(),
                                                           pressure_space_->polynomial_order(), F);
@@ -856,7 +492,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     pressure_bcs.install(o.pressure_dirichlet,
                          [&](const auto& bc) { return Factories::toPressureEssentialBC(bc, o.pressure_field_name); });
     plan.essentials([&](fs::FESystem& target) { pressure_bcs.applyAll(target, p_id); });
-    F.log(Factories::activeDomainConstraintLogs(liquid_constraints ? liquid->boundary : nullptr, aggregated));
+    F.log(Factories::activeDomainConstraintLogs(liquid_constraints ? liquid : nullptr, aggregated));
     plan.commit();
 
     // Weak velocity Dirichlet (Nitsche), certified on generated wetted boundaries.
@@ -864,14 +500,19 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     Factories::applyVelocityNitscheBCs(M, C, o, preflight.prepared_weak_velocity_boundaries, u, p, v, q, t.mu,
                                        aggregated ? &nitsche_traces : nullptr,
                                        &work.weak_boundary_momentum, &work.weak_boundary_continuity);
-    requireCertifiedNitscheTraces(o, wetted, aggregated, nitsche_traces);
+    fs::requireGeneratedBoundaryNitscheTraceBindings(
+        preflight.required_nitsche_routes, nitsche_traces,
+        "IncompressibleNavierStokesVMSModule::registerOn: generated-boundary Nitsche form binding count differs from the certified production routes");
+    for (const auto& domain : preflight.required_nitsche_routes) {
+        (void)F.registered(domain);
+    }
 
     // Install: the residual, the residual-work channels, then the PSPG pressure-gradient group.
     if (!o.viscosity_model) {
         F.recordConstitutiveLaw(FE::analysis::dynamicViscosityMetadata(u_id, o.viscosity));
     }
     if (aggregated) {
-        F.certifyGeneratedBoundaryNitscheTraces(nitsche_traces, liquid->boundary->interface_marker,
+        F.certifyGeneratedBoundaryNitscheTraces(nitsche_traces, liquid->interface_marker,
                                                 o.generated_boundary_nitsche_minimum_energy_ratio);
     }
     F.configure(ale);
@@ -891,7 +532,12 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     }
 
     post::installDiagnosticOperators(F, u_id, p_id, r, split, active_continuity, work.ghost_penalty, u, q, Omega);
-    declareFittedNormalKinematics(system, o.operator_tag, std::move(fitted_normal_kinematics), free_surfaces);
+    for (std::size_t index = 0; index < fitted_normal_kinematics.size(); ++index) {
+        auto& declaration = fitted_normal_kinematics[index];
+        const auto& boundary = free_surfaces[preflight.fitted_normal_boundaries[index].boundary_index];
+        declaration.binding.prescribed_tangential_mesh_velocity = fittedTangentialMeasurementVelocity(boundary);
+        fs::declareMeshNormalKinematics(system, o.operator_tag, {std::move(declaration)});
+    }
     effective_configuration_artifact_ = makeEffectiveConfigurationArtifact(
         o, free_surfaces, system, dim, preflight.enable_vms);
 }
