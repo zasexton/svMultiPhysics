@@ -94,7 +94,6 @@ endif()
 # add trilinos flags and defines
 if(USE_TRILINOS)
   ADD_DEFINITIONS(-DWITH_TRILINOS)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++${CMAKE_CXX_STANDARD}")
 endif()
 
 # Build with the PETSc linear algebra package.
@@ -114,7 +113,7 @@ if(NOT "${SV_PETSC_DIR}" STREQUAL "")
    endif()
 
   set(PETSC_INCLUDE_DIRS "${SV_PETSC_DIR}/include;${SV_PETSC_DIR}/../include")
-  set(PETSC_LIBRARY_DIRS "-L${SV_PETSC_DIR}/lib -lpetsc")
+  find_library(PETSC_LIBRARY_DIRS NAMES petsc libpetsc PATHS "${SV_PETSC_DIR}/lib" NO_DEFAULT_PATH REQUIRED)
   message("\nBuilding with the PETSc package; the include and libraries directories are: ")
   message("  PETSC_LIBRARY_DIRS = ${PETSC_LIBRARY_DIRS}")
   message("  PETSC_INCLUDE_DIRS = ${PETSC_INCLUDE_DIRS}")
@@ -177,15 +176,15 @@ if(ENABLE_COVERAGE)
 endif()
 
 add_subdirectory(Core)
+add_subdirectory(common/math)
 add_subdirectory(FE/Common)
-add_subdirectory(FE/Math)
 add_subdirectory(FE/Quadrature)
 add_subdirectory(FE/Basis)
 
 set(SVMP_ARCHITECTURE_TARGETS
   svmp_core
   svmp_fe_common
-  svmp_fe_math
+  svmp_math
   svmp_fe_basis
   svmp_fe_quadrature
 )
@@ -281,6 +280,7 @@ set(CSRCS
   ActiveStressODE.cpp
   ActiveStressNashPanfilov.cpp
   ActiveStressRegazzoni.cpp
+  ActiveStressLandNiederer.cpp
 
   SPLIT.c
 
