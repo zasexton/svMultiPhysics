@@ -244,6 +244,44 @@ const dofs::EntityDofMap& requireVertexDofMap(
     return *entity_map;
 }
 
+VertexFieldTarget requireVertexField(
+    const FESystem& system,
+    const std::string& field_name,
+    const std::string& missing_field_prefix,
+    const std::string& missing_vertex_dofs_message)
+{
+    const auto field = system.findFieldByName(field_name);
+    if (field == INVALID_FIELD_ID) {
+        throw std::runtime_error(missing_field_prefix + field_name + "'");
+    }
+    return {field, &requireVertexDofMap(system, field, missing_vertex_dofs_message)};
+}
+
+VertexValueComparisonStatistics compareVertexValues(
+    const FESystem& system,
+    const VertexValueSamples& samples,
+    const std::function<Real(GlobalIndex, const std::array<Real, 3>&)>& sample)
+{
+    VertexValueComparisonStatistics result;
+    const auto& mesh = system.meshAccess();
+    for (const auto& input : samples.values) {
+        const auto vertex = localVertexOf(system, samples.id_mode, input.vertex_id, samples.messages);
+        if (!vertex || *vertex < 0 || *vertex >= mesh.numVertices()) {
+            ++result.skipped;
+            continue;
+        }
+        const auto value = sample(*vertex, mesh.getNodeCoordinates(*vertex));
+        ++result.checked;
+        result.prescribed_min = std::min(result.prescribed_min, input.value);
+        result.prescribed_max = std::max(result.prescribed_max, input.value);
+        result.sampled_min = std::min(result.sampled_min, value);
+        result.sampled_max = std::max(result.sampled_max, value);
+        result.maximum_absolute_error =
+            std::max(result.maximum_absolute_error, std::abs(value - input.value));
+    }
+    return result;
+}
+
 void writeVectorEntries(
     backends::GenericVector& u0,
     const std::vector<GlobalIndex>& dofs,

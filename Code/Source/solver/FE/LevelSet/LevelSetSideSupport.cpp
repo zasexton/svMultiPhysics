@@ -201,6 +201,43 @@ LevelSetVertexSide levelSetVertexSide(
     return result;
 }
 
+VertexSideAdmissibilityStatistics requireVertexValuesOnLevelSetSide(
+    const systems::FESystem& system,
+    const systems::VertexValueSamples& samples,
+    const VertexSideAdmissibilityRequirement& requirement)
+{
+    VertexSideAdmissibilityStatistics result;
+    const auto reject = [&](const VertexSideFailure& failure) {
+        throw std::invalid_argument(requirement.failure_message(failure));
+    };
+    const auto n_vertices = system.meshAccess().numVertices();
+    for (const auto& input : samples.values) {
+        result.input_min = std::min(result.input_min, input.value);
+        result.input_max = std::max(result.input_max, input.value);
+        const auto vertex = systems::localVertexOf(
+            system, samples.id_mode, input.vertex_id, samples.messages);
+        if (!vertex) {
+            ++result.skipped_nonlocal;
+            continue;
+        }
+        if (*vertex < 0 || *vertex >= n_vertices) {
+            reject({VertexSideViolation::OutsideMesh, input.vertex_id, *vertex});
+        }
+        const auto side = levelSetVertexSide(requirement.level_set, *vertex,
+            requirement.isovalue, requirement.side, requirement.exclusion_margin);
+        ++result.checked;
+        result.signed_gap_min = std::min(result.signed_gap_min, side.signed_gap);
+        result.signed_gap_max = std::max(result.signed_gap_max, side.signed_gap);
+        if (!side.on_side) {
+            reject({VertexSideViolation::OutsideSide, input.vertex_id, *vertex, side});
+        }
+        if (side.within_margin) {
+            reject({VertexSideViolation::WithinMargin, input.vertex_id, *vertex, side});
+        }
+    }
+    return result;
+}
+
 LevelSetSideVertexChoice levelSetSideVertexChoice(
     const LevelSetSideVertexValues& values,
     GlobalIndex vertex)
@@ -309,6 +346,49 @@ LevelSetSideVertexEntries collectVertexFieldOnLevelSetSide(
         }
     }
     return result;
+}
+
+SideVertexInitializationResult initializeVertexFieldOnLevelSetSide(
+    const systems::FESystem& system,
+    backends::GenericVector& state,
+    systems::VertexFieldTarget target,
+    const SideVertexInitializationDeclaration& declaration)
+{
+    const auto n_vertices = system.meshAccess().numVertices();
+    LevelSetSideVertexValues values;
+    if (declaration.support) {
+        const auto& support = *declaration.support;
+        const auto field = systems::requireMeshVertexField(
+            system, support.level_set.field_name, n_vertices, support.level_set.messages);
+        const LevelSetSideSupportQuery query{
+            .level_set = {field.values, field.components, field.entity_count},
+            .isovalue = support.isovalue,
+            .side = support.side,
+            .interface_marker = support.interface_marker,
+            .use_generated_volume_rules = support.use_generated_volume_rules,
+            .message_prefix = support.support_message_prefix};
+        values.side = LevelSetSideVertexValues::Side{
+            .level_set = query.level_set, .isovalue = query.isovalue, .side = query.side,
+            .support = levelSetSideSupportVertices(system, query, n_vertices)};
+    }
+    if (const auto* source = std::get_if<systems::RequiredMeshVertexScalarSource>(&declaration.source)) {
+        const auto field = systems::requireMeshVertexField(
+            system, source->field_name, n_vertices, source->messages);
+        values.field_values = field.values;
+        values.field_components = field.components;
+    } else {
+        values.value = std::get<std::function<Real(const std::array<Real, 3>&)>>(declaration.source);
+    }
+    values.dry_value = declaration.unsupported_value;
+    const auto& messages = declaration.messages;
+    const auto entries = collectVertexFieldOnLevelSetSide(system, target.field, *target.vertex_dofs,
+        values, messages.non_finite_prefix, messages.non_finite_suffix);
+    const auto comparisons = systems::compareVertexValues(system, declaration.comparisons,
+        [&](GlobalIndex vertex, const std::array<Real, 3>& x) {
+            return levelSetSideVertexValue(values, vertex, x);
+        });
+    systems::writeVectorEntries(state, entries.dofs, entries.values, messages.no_entries, messages.no_view);
+    return {entries.dofs.size(), entries.statistics, comparisons};
 }
 
 } // namespace level_set

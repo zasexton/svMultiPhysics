@@ -15,6 +15,7 @@
  */
 
 #include "Core/Types.h"
+#include "Systems/VertexFieldInitialization.h"
 
 #include <array>
 #include <cstddef>
@@ -103,6 +104,41 @@ struct LevelSetVertexSide {
     LevelSetSupportSide side,
     Real margin) noexcept;
 
+enum class VertexSideViolation { OutsideMesh, OutsideSide, WithinMargin };
+
+struct VertexSideFailure {
+    VertexSideViolation reason;
+    GlobalIndex requested_vertex;
+    GlobalIndex local_vertex;
+    LevelSetVertexSide sample{};
+};
+
+struct VertexSideAdmissibilityStatistics {
+    std::size_t checked{0}, skipped_nonlocal{0};
+    Real input_min{std::numeric_limits<Real>::infinity()};
+    Real input_max{-std::numeric_limits<Real>::infinity()};
+    Real signed_gap_min{std::numeric_limits<Real>::infinity()};
+    Real signed_gap_max{-std::numeric_limits<Real>::infinity()};
+};
+
+struct VertexSideAdmissibilityRequirement {
+    LevelSetVertexValues level_set{};
+    Real isovalue{0};
+    LevelSetSupportSide side{LevelSetSupportSide::Negative};
+    Real exclusion_margin{0};
+    std::function<std::string(const VertexSideFailure&)> failure_message;
+};
+
+/// Check ordered vertex inputs: local range, side membership, then strict
+/// exclusion margin. Throws invalid_argument at the first failure. Nonlocal
+/// inputs are skipped but their prescribed values enter input extrema.
+/// The supplied level-set view must cover the local mesh. No finite scan or
+/// collective reduction is added; empty extrema remain infinite.
+[[nodiscard]] VertexSideAdmissibilityStatistics requireVertexValuesOnLevelSetSide(
+    const systems::FESystem& system,
+    const systems::VertexValueSamples& samples,
+    const VertexSideAdmissibilityRequirement& requirement);
+
 /// The values of a field's vertices on one side of a level set.
 struct LevelSetSideVertexValues {
     /// The level set, when the field is restricted to one of its sides.
@@ -177,6 +213,50 @@ struct LevelSetSideVertexEntries {
     const LevelSetSideVertexValues& values,
     const std::string& non_finite_prefix,
     const std::string& non_finite_suffix);
+
+/// Bind the current mesh field and support afresh for each initialization.
+struct LevelSetVertexSupportDeclaration {
+    systems::RequiredMeshVertexScalarSource level_set{};
+    Real isovalue{0};
+    LevelSetSupportSide side{LevelSetSupportSide::Negative};
+    int interface_marker{-1};
+    bool use_generated_volume_rules{false};
+    std::string support_message_prefix{};
+};
+
+struct SideVertexInitializationMessages {
+    std::string non_finite_prefix{};
+    std::string non_finite_suffix{};
+    std::string no_entries{};
+    std::string no_view{};
+};
+
+struct SideVertexInitializationDeclaration {
+    systems::VertexScalarSource source;
+    std::optional<LevelSetVertexSupportDeclaration> support{};
+    Real unsupported_value{0};
+    systems::VertexValueSamples comparisons{};
+    SideVertexInitializationMessages messages{};
+};
+
+struct SideVertexInitializationResult {
+    std::size_t initialized_dofs{0};
+    LevelSetSideVertexStatistics statistics{};
+    systems::VertexValueComparisonStatistics comparisons{};
+};
+
+/// Initialize only vertex DOFs, leaving nonvertex coefficients unchanged.
+/// After requireVertexField resolves target, bind support (checking current
+/// geometry), validate the source, collect coefficients, compare vertex data,
+/// and write through one assembly view, in that order. Named sources use
+/// component zero; their non_finite_prefix requests a scan of every local
+/// source vertex, even unsupported vertices. No view or support mask is cached.
+/// The target and comparison storage must remain valid throughout the call.
+[[nodiscard]] SideVertexInitializationResult initializeVertexFieldOnLevelSetSide(
+    const systems::FESystem& system,
+    backends::GenericVector& state,
+    systems::VertexFieldTarget target,
+    const SideVertexInitializationDeclaration& declaration);
 
 } // namespace level_set
 } // namespace FE

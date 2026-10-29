@@ -19,8 +19,13 @@
 #include "Constraints/VertexDirichletConstraint.h"
 
 #include <cstddef>
+#include <array>
+#include <functional>
+#include <limits>
 #include <optional>
+#include <span>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace svmp {
@@ -77,6 +82,17 @@ struct MeshVertexFieldMessages {
     std::string non_finite_prefix{};
 };
 
+/// Component zero of a required mesh field, validated with these messages.
+struct RequiredMeshVertexScalarSource {
+    std::string field_name{};
+    MeshVertexFieldMessages messages{};
+};
+
+/// A scalar spatial value or component zero of a required mesh vertex field.
+using VertexScalarSource = std::variant<
+    std::function<Real(const std::array<Real, 3>&)>,
+    RequiredMeshVertexScalarSource>;
+
 /**
  * @brief The Float64 vertex field @p field_name of the native mesh, with at
  *        least one component and an entry for each of the first
@@ -96,6 +112,31 @@ struct LocalVertexMessages {
     /// A global id without native mesh support in the build.
     std::string no_mesh_support{};
 };
+
+/// Ordered prescribed vertex values. The caller owns the span's storage.
+struct VertexValueSamples {
+    std::span<const constraints::VertexDirichletValue> values{};
+    constraints::VertexIdMode id_mode{constraints::VertexIdMode::GlobalVertexGid};
+    LocalVertexMessages messages{};
+};
+
+struct VertexValueComparisonStatistics {
+    std::size_t checked{0}, skipped{0};
+    Real prescribed_min{std::numeric_limits<Real>::infinity()};
+    Real prescribed_max{-std::numeric_limits<Real>::infinity()};
+    Real sampled_min{std::numeric_limits<Real>::infinity()};
+    Real sampled_max{-std::numeric_limits<Real>::infinity()};
+    Real maximum_absolute_error{0};
+};
+
+/// Compare each local, in-range input once, in input order (including duplicates).
+/// Nonlocal and out-of-range vertices and their prescribed values are excluded
+/// from the extrema. No values are enforced and no reduction is performed.
+/// Empty extrema remain infinite; sample finiteness is the caller's policy.
+[[nodiscard]] VertexValueComparisonStatistics compareVertexValues(
+    const FESystem& system,
+    const VertexValueSamples& samples,
+    const std::function<Real(GlobalIndex, const std::array<Real, 3>&)>& sample);
 
 /**
  * @brief The local mesh vertex that @p node_id names: itself for local
@@ -117,6 +158,21 @@ struct LocalVertexMessages {
     const FESystem& system,
     FieldId field,
     const std::string& message);
+
+/// A target resolved for one initialization call; numbering must remain current.
+struct VertexFieldTarget {
+    FieldId field{INVALID_FIELD_ID};
+    const dofs::EntityDofMap* vertex_dofs{nullptr};
+};
+
+/// Resolve the field, then require its vertex map. A missing field throws
+/// runtime_error("<missing_field_prefix><field_name>'"); map validation uses
+/// missing_vertex_dofs_message. Does not mutate the system or vector.
+[[nodiscard]] VertexFieldTarget requireVertexField(
+    const FESystem& system,
+    const std::string& field_name,
+    const std::string& missing_field_prefix,
+    const std::string& missing_vertex_dofs_message);
 
 /**
  * @brief Set @p values at @p dofs of @p u0 through one assembly view;

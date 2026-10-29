@@ -194,6 +194,60 @@ TEST(VertexFieldInitialization, VertexDofMapOfAVertexField)
     }
 }
 
+TEST(VertexFieldInitialization, RequiredTargetResolvesBeforeReadingVertexMetadata)
+{
+    FESystem system(twoTriangleMesh());
+    EXPECT_EQ(messageOf<std::runtime_error>([&] {
+                  (void)requireVertexField(system, "missing", "missing target '", "no map");
+              }), "missing target 'missing'");
+    const auto field = system.addField({
+        .name = "value",
+        .space = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1)});
+    system.setup();
+    const auto target = requireVertexField(system, "value", "missing target '", "no map");
+    EXPECT_EQ(target.field, field);
+    ASSERT_NE(target.vertex_dofs, nullptr);
+    EXPECT_EQ(target.vertex_dofs->getVertexDofs(3).size(), 1u);
+}
+
+TEST(VertexFieldInitialization, ComparisonPreservesInputOrderAndExcludesSkippedValues)
+{
+    FESystem system(twoTriangleMesh());
+    const std::vector<constraints::VertexDirichletValue> values{
+        {2, 3.0}, {99, -100.0}, {0, 4.0}, {2, 8.0}};
+    std::vector<GlobalIndex> sampled;
+    const auto sample = [&](GlobalIndex vertex, const std::array<Real, 3>& x) {
+        sampled.push_back(vertex);
+        return Real{10.0} + x[0] + x[1];
+    };
+    for (const auto mode : {constraints::VertexIdMode::GlobalVertexGid,
+                            constraints::VertexIdMode::LocalVertexId}) {
+        sampled.clear();
+        const auto stats = compareVertexValues(
+            system, {.values = values, .id_mode = mode, .messages = vertexMessages()}, sample);
+        EXPECT_EQ(sampled, (std::vector<GlobalIndex>{2, 0, 2}));
+        EXPECT_EQ(stats.checked, 3u);
+        EXPECT_EQ(stats.skipped, 1u);
+        EXPECT_EQ(stats.prescribed_min, 3.0);
+        EXPECT_EQ(stats.prescribed_max, 8.0);
+        EXPECT_EQ(stats.sampled_min, 10.0);
+        EXPECT_EQ(stats.sampled_max, 12.0);
+        EXPECT_EQ(stats.maximum_absolute_error, 9.0);
+    }
+    const std::vector<constraints::VertexDirichletValue> absent{{99, 100.0}};
+    sampled.clear();
+    const auto empty = compareVertexValues(
+        system, {.values = absent, .messages = vertexMessages()}, sample);
+    EXPECT_TRUE(sampled.empty());
+    EXPECT_EQ(empty.checked, 0u);
+    EXPECT_EQ(empty.skipped, 1u);
+    EXPECT_EQ(empty.prescribed_min, std::numeric_limits<Real>::infinity());
+    EXPECT_EQ(empty.prescribed_max, -std::numeric_limits<Real>::infinity());
+    EXPECT_EQ(empty.sampled_min, std::numeric_limits<Real>::infinity());
+    EXPECT_EQ(empty.sampled_max, -std::numeric_limits<Real>::infinity());
+    EXPECT_EQ(empty.maximum_absolute_error, 0.0);
+}
+
 #if defined(FE_HAS_EIGEN)
 TEST(VertexFieldInitialization, VectorEntriesAreWrittenThroughOneView)
 {
