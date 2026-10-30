@@ -72,6 +72,15 @@ broader work package.
 | [WP-10 viscous jump](qualification_logs/free_surface_wp10_viscous_jump_v2_20260901_41628821/record.json) | `PASS` | One finite low-Courant stationary affine planar viscous-traction-jump prerequisite only. | `33fdb6ac23d6c9bd5df13344b868821d7f11fcbe` |
 | [WP-10 hydrostatic](qualification_logs/free_surface_wp10_two_fluid_hydrostatic_v1_20260901_41658487/record.json) | `PASS` | Stationary planar two-fluid hydrostatic prerequisite only. | `42386f345c1c06ca501727e4fd532a27192790ac` |
 
+Some C++ tests named by this evidence no longer exist. The Navier–Stokes input
+parameter removal (`0d5b9bec`, 2026-10-30, tracker D58) deleted 40 tests of
+removed or retired inputs, and the following frozen files still name some of
+them: the WP-0 configuration and WP-1 extension records, the test listings of
+the WP-3/WP-7 Nitsche v2 and v3 records, and the Q0 harness, configuration,
+WP-1 extension, WP-5 contact-line and WP-6 conservative-phase qualification
+matrices. They stay unedited as history; `git show 0d5b9bec` shows the deleted
+tests.
+
 ## Physically qualified and physically open scope
 
 The strongest retained physical/operator closure is the WP-3 sharp exterior
