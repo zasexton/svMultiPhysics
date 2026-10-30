@@ -278,7 +278,6 @@ bool is_oop_equation_extension_parameter(const std::string& name)
     "Momentum_source_field_name",
     "Momentum_source_temporal_and_spatial_values_file_path",
     "Auto_register_momentum_source_field",
-    "Rotating_frame_coriolis",
     "Rotating_frame_angular_velocity",
     "Rotating_frame_angular_velocity_temporal_values_file_path",
   };
@@ -2634,10 +2633,6 @@ GeneralSimulationParameters::GeneralSimulationParameters()
   set_parameter("Newton_relative_tolerance", 0.0, !required, newton_relative_tolerance);
   set_parameter("Newton_max_iterations", 25, !required, newton_max_iterations, {1,int_inf});
 
-  // Opt-in generalized-alpha stage predictor: ConstantRate (default) or
-  // RateExtrapolation, optionally restricted to a list of fields.
-  set_parameter("Generalized_alpha_predictor", "ConstantRate", !required, generalized_alpha_predictor);
-  set_parameter("Generalized_alpha_predictor_fields", "", !required, generalized_alpha_predictor_fields);
   // First generalized-alpha rate: Consistent (default) or Zero (decision D47).
   set_parameter("Generalized_alpha_initial_rate", "Consistent", !required, generalized_alpha_initial_rate);
 
@@ -3376,12 +3371,7 @@ LinearSolverParameters::LinearSolverParameters()
   set_parameter("NS_CG_tolerance", 1.0e-2, !required, ns_cg_tolerance);
   set_parameter("NS_GM_max_iterations", 1000, !required, ns_gm_max_iterations);
   set_parameter("NS_GM_tolerance", 1.0e-2, !required, ns_gm_tolerance);
-  set_parameter("NS_min_outer_iterations", 0, !required, ns_min_outer_iterations);
-  set_parameter("NS_Schur_preconditioner", std::string("algebraic-shat"), !required, ns_schur_preconditioner);
-  set_parameter("NS_Momentum_approximation", std::string("ilu-k"), !required, ns_momentum_approximation);
-  set_parameter("NS_Use_coupled_outer_FGMRES", false, !required, ns_use_coupled_outer_fgmres);
   set_parameter("Right_preconditioner", std::string("none"), !required, right_preconditioner);
-  set_parameter("Preconditioner_reuse", false, !required, preconditioner_reuse);
 
   //set_parameter("Preconditioner", "", !required, preconditioner);
 

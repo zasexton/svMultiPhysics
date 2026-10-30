@@ -540,7 +540,7 @@ struct FsilsAmgHierarchy::Impl {
     }
 
     void buildFinest(const fe_fsi_linear_solver::FSILS_lhsType& lhs, int dof, const double* val,
-                     std::span<const std::uint64_t> owned_keys, bool copy_values);
+                     std::span<const std::uint64_t> owned_keys);
     void setupSmoother(Level& L);
     long long aggregate(Level& L, std::vector<long long>& agg, std::vector<std::uint64_t>& coarse_keys);
     void buildProlongator(const Level& L, const std::vector<long long>& agg, std::vector<BlockRow>& P) const;
@@ -555,14 +555,12 @@ struct FsilsAmgHierarchy::Impl {
 void FsilsAmgHierarchy::Impl::buildFinest(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
                                           int dof,
                                           const double* val,
-                                          std::span<const std::uint64_t> owned_keys,
-                                          bool copy_values)
+                                          std::span<const std::uint64_t> owned_keys)
 {
     Level L;
     L.bs = dof;
     L.n_owned = static_cast<int>(lhs.mynNo);
     L.n_local = static_cast<int>(lhs.nNo);
-    const std::size_t dd = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
     L.row_ptr.assign(static_cast<std::size_t>(L.n_owned) + 1u, 0);
     for (int i = 0; i < L.n_owned; ++i) {
         const auto s = lhs.rowPtr(0, i);
@@ -585,16 +583,7 @@ void FsilsAmgHierarchy::Impl::buildFinest(const fe_fsi_linear_solver::FSILS_lhsT
             }
         }
     }
-    if (copy_values) {
-        L.vals.resize(nnz * dd);
-        for (std::size_t p = 0; p < nnz; ++p) {
-            std::memcpy(L.vals.data() + p * dd, val + static_cast<std::size_t>(L.slot[p]) * dd, dd * sizeof(double));
-        }
-        L.slot.clear();
-        L.ext = nullptr;
-    } else {
-        L.ext = val;
-    }
+    L.ext = val;
 
     L.halo.comm = comm;
     const std::size_t nk = lhs.owned_halo_neighbor_ranks.size();
@@ -1514,8 +1503,7 @@ void FsilsAmgHierarchy::build(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
                               int dof,
                               const double* val,
                               std::span<const std::uint64_t> owned_keys,
-                              const FsilsAmgOptions& options,
-                              bool copy_values)
+                              const FsilsAmgOptions& options)
 {
     const auto t0 = Clock::now();
     Impl& I = *impl_;
@@ -1530,7 +1518,7 @@ void FsilsAmgHierarchy::build(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
     I.stats = Stats{};
     I.finest_aggregates.clear();
 
-    I.buildFinest(lhs, dof, val, owned_keys, copy_values);
+    I.buildFinest(lhs, dof, val, owned_keys);
     for (std::size_t l = 0;; ++l) {
         Level& L = I.levels[l];
         I.setupSmoother(L);

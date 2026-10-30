@@ -1543,13 +1543,11 @@ set(FE_BACKENDS_HEADERS
     Backends/Interfaces/BlockMatrix.h
 
     Backends/Utils/BackendOptions.h
-    Backends/Utils/PreconditionerReusePolicy.h
 
     Backends/Eigen/EigenFactory.h
     Backends/Eigen/EigenVector.h
     Backends/Eigen/EigenMatrix.h
     Backends/Eigen/EigenLinearSolver.h
-    Backends/Eigen/EigenRightGmres.h
 
     Backends/FSILS/FsilsFactory.h
     Backends/FSILS/FsilsVector.h
@@ -2894,7 +2892,7 @@ if(FE_BUILD_TESTS)
 	                Tests/Unit/Backends/test_LinearSolverConformance.cpp
 	                Tests/Unit/Backends/test_PetscBackend.cpp
 	                Tests/Unit/Backends/test_GaugeDiagnostics.cpp
-	                Tests/Unit/Backends/test_PreconditionerReuse.cpp
+	                Tests/Unit/Backends/test_FsilsBlockPreconditioners.cpp
 	                Tests/Unit/Backends/test_LinearSolverReplay.cpp
 	                Tests/Unit/Backends/test_main.cpp
 		            )

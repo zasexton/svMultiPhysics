@@ -10,8 +10,6 @@
 
 #include "Backends/Interfaces/LinearSolver.h"
 
-#include <cstdint>
-#include <memory>
 
 namespace svmp {
 namespace FE {
@@ -24,18 +22,7 @@ class EigenVector;
 
 class EigenLinearSolver final : public LinearSolver {
 public:
-    /// Counters of the opt-in preconditioner/factorization reuse path.
-    struct ReuseStats {
-        std::uint64_t solves{0};
-        std::uint64_t refreshes{0};
-        std::uint64_t reuses{0};
-        std::uint64_t stale_retries{0};
-        int last_iterations{0};
-        bool last_fresh{false};
-    };
-
     explicit EigenLinearSolver(const SolverOptions& options);
-    ~EigenLinearSolver() override;
 
     [[nodiscard]] BackendKind backendKind() const noexcept override { return BackendKind::Eigen; }
 
@@ -46,18 +33,8 @@ public:
                                      GenericVector& x,
                                      const GenericVector& b) override;
 
-    /// Statistics of the reuse path (all zero unless reuse_preconditioner is set).
-    [[nodiscard]] ReuseStats reuseStats() const noexcept;
-
 private:
-    struct ReuseState;
-
-    [[nodiscard]] SolverReport solveWithReuse(const EigenMatrix& A,
-                                              EigenVector& x,
-                                              const EigenVector& b);
-
     SolverOptions options_{};
-    std::unique_ptr<ReuseState> reuse_;
 };
 
 #endif // FE_HAS_EIGEN

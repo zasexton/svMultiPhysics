@@ -271,57 +271,15 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
         Val.set_row(0,Valv);
         R.set_row(0,Rv);
       } else if (ls.right_pc_hook.active()) {
-        // Right-preconditioned GMRES.  The scaled operator in Val is left
-        // untouched by GMRES, so a solve that fails with a reused
-        // preconditioner can be repeated once with a fresh one.
-        const Array<double>* row_scale = nullptr;
-        const Array<double>* col_scale = nullptr;
-        if (prec == PreconditionerType::PREC_RCS) {
-          row_scale = &Wr;
-          col_scale = &Wc;
-        } else if (prec == PreconditionerType::PREC_FSILS) {
-          row_scale = &Wc;
-          col_scale = &Wc;
-        }
+        // Right-preconditioned GMRES on the scaled operator in Val.
         const auto system =
             fe_fsi_linear_solver::distributed_solver_bundles::make_vector_linear_system(lhs, dof, Val);
-        bool fresh = false;
-        ls.RI.right_pc = ls.right_pc_hook.prepare(lhs, dof, Val, row_scale, col_scale, false, fresh);
-        // The retry below runs collective kernels: decide it on all ranks.
-        int any_stale = (ls.RI.right_pc != nullptr && !fresh) ? 1 : 0;
-        if (lhs.commu.nTasks > 1) {
-          MPI_Allreduce(MPI_IN_PLACE, &any_stale, 1, MPI_INT, MPI_LOR, lhs.commu.comm);
-        }
-        std::vector<double> rhs_copy;
-        if (any_stale != 0) {
-          rhs_copy.assign(R.data(), R.data() + R.size());
-          // Budget of a solve with a reused preconditioner, for the reduction
-          // of the true residual required by the stopping test.
-          const double ref = ls.RI.convergence_ref_norm;
-          if (ls.right_pc_hook.stale_iteration_cap && ref > 0.0 && std::isfinite(ref)) {
-            const double target = std::max(ls.RI.absTol, ls.RI.relTol * ref) / ref;
-            ls.RI.max_total_itr = ls.right_pc_hook.stale_iteration_cap(target);
-          }
-        }
+        ls.RI.right_pc = ls.right_pc_hook.prepare(lhs, dof, Val);
         gmres::gmres_v(system, ls.RI, R, row_scaling);
-        ls.RI.max_total_itr = 0;
-        bool retried = false;
-        int stale_iterations = 0;
-        if (!ls.RI.suc && any_stale != 0) {
-          stale_iterations = ls.RI.itr;
-          std::copy(rhs_copy.begin(), rhs_copy.end(), R.data());
-          ls.RI.right_pc = ls.right_pc_hook.prepare(lhs, dof, Val, row_scale, col_scale, true, fresh);
-          gmres::gmres_v(system, ls.RI, R, row_scaling);
-          retried = true;
-        }
         if (ls.right_pc_hook.finish) {
           const double reduction =
               (ls.RI.iNorm > 0.0 && std::isfinite(ls.RI.iNorm)) ? ls.RI.fNorm / ls.RI.iNorm : 0.0;
-          ls.right_pc_hook.finish(ls.RI.itr, reduction, ls.RI.suc, fresh, retried);
-        }
-        if (retried && lhs.commu.task == 0) {
-          fprintf(stderr, "[fsils_solve] right preconditioner refreshed after a failed reuse "
-                          "(stale_iterations=%d fresh_iterations=%d)\n", stale_iterations, ls.RI.itr);
+          ls.right_pc_hook.finish(ls.RI.itr, reduction, ls.RI.suc);
         }
         ls.RI.right_pc = nullptr;
       } else {

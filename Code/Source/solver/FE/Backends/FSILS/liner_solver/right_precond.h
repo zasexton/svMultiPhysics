@@ -33,31 +33,17 @@ public:
 /// Hook used by fsils_solve() to obtain a right preconditioner for GMRES.
 ///
 /// `prepare` is called after the scaling preconditioner has modified Val and
-/// the right-hand side.  `row_scale`/`col_scale` are the applied diagonal
-/// scalings (nullptr when none).  `force_refresh` requests a fresh
-/// preconditioner (used to repeat a solve that failed with a reused one).
-/// The callee sets `fresh` to true when it built the preconditioner from this
-/// operator, and returns nullptr to run the unpreconditioned kernel.
+/// the right-hand side; it builds the preconditioner from that operator and
+/// returns nullptr to run the unpreconditioned kernel.
 ///
-/// `stale_iteration_cap` returns the iteration budget of a solve that uses a
-/// reused preconditioner for a target residual reduction (0: no budget); a
-/// solve exceeding it is abandoned and repeated with a fresh preconditioner.
-///
-/// `finish` is called once per fsils_solve() with the GMRES iterations and the
-/// residual reduction of the final attempt, the convergence flag, whether the
-/// final attempt used a fresh preconditioner and whether it was a repeat.
+/// `finish` is called once per fsils_solve() with the GMRES iterations, the
+/// residual reduction and the convergence flag.
 struct FSILS_rightPreconditionerHook {
   std::function<const FSILS_rightPreconditioner*(const FSILS_lhsType& lhs,
                                                  int dof,
-                                                 const Array<double>& Val,
-                                                 const Array<double>* row_scale,
-                                                 const Array<double>* col_scale,
-                                                 bool force_refresh,
-                                                 bool& fresh)>
+                                                 const Array<double>& Val)>
       prepare{};
-  std::function<int(double target_reduction)> stale_iteration_cap{};
-  std::function<void(int iterations, double residual_reduction, bool converged, bool fresh, bool retried)>
-      finish{};
+  std::function<void(int iterations, double residual_reduction, bool converged)> finish{};
 
   [[nodiscard]] bool active() const noexcept { return static_cast<bool>(prepare); }
 };

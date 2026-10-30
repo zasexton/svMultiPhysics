@@ -145,7 +145,6 @@ struct NavierStokesInputView {
     std::string momentum_source_field_name{};
     bool auto_register_momentum_source_field{true};
     std::string momentum_source_file{};
-    bool rotating_frame_coriolis{false};
     std::array<FE::Real, 3> rotating_frame_angular_velocity{0.0, 0.0, 0.0};
     std::string rotating_frame_angular_velocity_file{};
     // Domain element.

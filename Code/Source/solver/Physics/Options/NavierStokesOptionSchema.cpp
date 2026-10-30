@@ -302,7 +302,6 @@ void addSharedNavierStokesKeys(opt::OptionSchema<NavierStokesInputView>& schema)
              relaxedBool())
         .key("Momentum_source_temporal_and_spatial_values_file_path", &V::momentum_source_file,
              opt::StringCodec{})
-        .key("Rotating_frame_coriolis", &V::rotating_frame_coriolis, relaxedBool())
         .key("Rotating_frame_angular_velocity", &V::rotating_frame_angular_velocity, opt::Vector3Codec{})
         .key("Rotating_frame_angular_velocity_temporal_values_file_path",
              &V::rotating_frame_angular_velocity_file, opt::StringCodec{});

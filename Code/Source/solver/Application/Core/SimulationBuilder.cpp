@@ -467,17 +467,11 @@ svmp::FE::backends::RightPreconditionerType toRightPreconditioner(const std::str
   if (v.empty() || v == "none") {
     return RightPreconditionerType::None;
   }
-  if (v == "block-ilu0" || v == "block-ilu" || v == "bilu0" || v == "bilu") {
-    return RightPreconditionerType::BlockILU0;
-  }
-  if (v == "simple" || v == "block-simple") {
-    return RightPreconditionerType::Simple;
-  }
   if (v == "amg" || v == "sa-amg" || v == "aggregation-amg") {
     return RightPreconditionerType::Amg;
   }
   throw std::runtime_error("[svMultiPhysics::Application] Unsupported <Right_preconditioner> '" + value +
-                           "'. Supported values: none, block-ilu0, simple, amg.");
+                           "'. Supported values: none, amg.");
 }
 
 svmp::FE::backends::FsilsBlockSchurSchurPreconditioner
@@ -951,14 +945,8 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
     }
   }
 
-  // Opt-in Krylov right preconditioner and preconditioner reuse.  The SIMPLE
-  // splitting of the incompressible-flow system acts on the scalar Pressure
-  // field; the backend locates it by name in the block layout.
+  // Opt-in Krylov right preconditioner (aggregation multigrid).
   opts.right_preconditioner = toRightPreconditioner(eq->linear_solver.right_preconditioner.value());
-  opts.reuse_preconditioner = eq->linear_solver.preconditioner_reuse.value();
-  if (opts.right_preconditioner == svmp::FE::backends::RightPreconditionerType::Simple) {
-    opts.right_preconditioner_constraint_block = "Pressure";
-  }
 
   // Explicit saddle-point block names: env vars or programmatic SolverOptions.
   // SVMP_MOMENTUM_BLOCK=<name> and SVMP_CONSTRAINT_BLOCK=<name> override the heuristic.
@@ -971,21 +959,19 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
     if (env && env[0]) opts.constraint_block_name = env;
   }
 
-  // FSILS BlockSchur sub-solver knobs: pass GM/CG sub-solver controls through.
+  // FSILS BlockSchur sub-solver knobs: pass GM/CG sub-solver controls
+  // through.  The Schur preconditioner is the algebraic S-hat and the
+  // momentum inverse the ILU of K.
   if (backend_kind == svmp::FE::backends::BackendKind::FSILS &&
       opts.method == svmp::FE::backends::SolverMethod::BlockSchur) {
     opts.fsils_blockschur_gm_max_iter = eq->linear_solver.ns_gm_max_iterations.value();
     opts.fsils_blockschur_cg_max_iter = eq->linear_solver.ns_cg_max_iterations.value();
     opts.fsils_blockschur_gm_rel_tol = static_cast<svmp::FE::Real>(eq->linear_solver.ns_gm_tolerance.value());
     opts.fsils_blockschur_cg_rel_tol = static_cast<svmp::FE::Real>(eq->linear_solver.ns_cg_tolerance.value());
-    opts.fsils_blockschur_min_outer_iterations =
-        eq->linear_solver.ns_min_outer_iterations.value();
     opts.fsils_blockschur_schur_preconditioner =
-        toFsilsBlockSchurPreconditioner(eq->linear_solver.ns_schur_preconditioner.value());
+        svmp::FE::backends::FsilsBlockSchurSchurPreconditioner::AlgebraicSchur;
     opts.fsils_blockschur_momentum_approximation =
-        toFsilsBlockSchurMomentumApproximation(eq->linear_solver.ns_momentum_approximation.value());
-    opts.fsils_blockschur_use_coupled_outer_fgmres =
-        eq->linear_solver.ns_use_coupled_outer_fgmres.value();
+        svmp::FE::backends::FsilsBlockSchurMomentumApproximation::ILUK;
 
     const char* schur_pc_env = std::getenv("SVMP_FSILS_BLOCKSCHUR_SCHUR_PC");
     if (schur_pc_env && schur_pc_env[0]) {
@@ -2029,19 +2015,15 @@ void SimulationBuilder::createSolvers()
             << " preconditioner=" << svmp::FE::backends::preconditionerToString(solver_options.preconditioner)
             << " rel_tol=" << solver_options.rel_tol << " abs_tol=" << solver_options.abs_tol
             << " max_iter=" << solver_options.max_iter;
-  if (solver_options.right_preconditioner != svmp::FE::backends::RightPreconditionerType::None ||
-      solver_options.reuse_preconditioner) {
+  if (solver_options.right_preconditioner == svmp::FE::backends::RightPreconditionerType::Amg) {
     oopCout() << " right_preconditioner="
               << svmp::FE::backends::rightPreconditionerToString(solver_options.right_preconditioner)
-              << " preconditioner_reuse=" << (solver_options.reuse_preconditioner ? 1 : 0);
-    if (solver_options.right_preconditioner == svmp::FE::backends::RightPreconditionerType::Amg) {
-      oopCout() << " amg_smoother_degree=" << solver_options.amg_smoother_degree
-                << " amg_coarse_nodes=" << solver_options.amg_coarse_nodes
-                << " amg_max_levels=" << solver_options.amg_max_levels
-                << " amg_prolongator=" << (solver_options.amg_smooth_prolongator ? "smoothed" : "plain")
-                << " amg_lambda_iterations=" << solver_options.amg_lambda_iterations
-                << " amg_strength_threshold=" << solver_options.amg_strength_threshold;
-    }
+              << " amg_smoother_degree=" << solver_options.amg_smoother_degree
+              << " amg_coarse_nodes=" << solver_options.amg_coarse_nodes
+              << " amg_max_levels=" << solver_options.amg_max_levels
+              << " amg_prolongator=" << (solver_options.amg_smooth_prolongator ? "smoothed" : "plain")
+              << " amg_lambda_iterations=" << solver_options.amg_lambda_iterations
+              << " amg_strength_threshold=" << solver_options.amg_strength_threshold;
   }
   if (solver_options.block_layout) {
     oopCout() << " block_layout=[";

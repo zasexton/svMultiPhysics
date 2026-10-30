@@ -1147,15 +1147,9 @@ class LinearSolverParameters : public ParameterLists
     Parameter<double> ns_cg_tolerance;
     Parameter<int> ns_gm_max_iterations; 
     Parameter<double> ns_gm_tolerance;
-    Parameter<int> ns_min_outer_iterations;
-    Parameter<std::string> ns_schur_preconditioner;
-    Parameter<std::string> ns_momentum_approximation;
-    Parameter<bool> ns_use_coupled_outer_fgmres;
 
-    /// Opt-in Krylov right preconditioner (new OOP solver): none, block-ilu0, simple, amg.
+    /// Opt-in Krylov right preconditioner (new OOP solver): none or amg.
     Parameter<std::string> right_preconditioner;
-    /// Opt-in reuse of preconditioners/factorizations across solves (new OOP solver).
-    Parameter<bool> preconditioner_reuse;
 
     //Parameter<std::string> preconditioner;
 
@@ -1579,13 +1573,6 @@ class GeneralSimulationParameters : public ParameterLists
     Parameter<int> starting_time_step;
     Parameter<int> number_of_time_steps;
 
-    // Opt-in stage predictor of first-order generalized-alpha (new OOP
-    // solver; TimeLoopOptions::generalized_alpha_predictor): "ConstantRate"
-    // (default) or "RateExtrapolation". The fields list (comma- or
-    // space-separated names) restricts the extrapolation; empty means every
-    // field. The predictor changes only the initial iterate of each step.
-    Parameter<std::string> generalized_alpha_predictor;
-    Parameter<std::string> generalized_alpha_predictor_fields;
     // First rate uDot_0 of first-order generalized-alpha (new OOP solver):
     // "Consistent" (default) solves the PDE-consistent rate, "Zero" starts
     // from zero.  Replaces SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT (decision

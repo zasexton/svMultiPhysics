@@ -994,16 +994,14 @@ void apply_fluid_properties(const svmp::Physics::DomainInput& domain,
       "to use the legacy solver.");
 }
 
-/// The rotating frame: an equation value replaces a domain value.
+/// The rotating frame, active when an angular velocity is given: an equation
+/// value replaces a domain value.
 void apply_fluid_rotating_frame_coriolis(
     const NavierStokesKeys& keys,
     int dim,
     svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
 {
   using Options = svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions;
-
-  const auto* switch_view = keys.equationFirst("Rotating_frame_coriolis");
-  const bool enabled = switch_view != nullptr && switch_view->rotating_frame_coriolis;
 
   constexpr std::string_view omega_key = "Rotating_frame_angular_velocity";
   constexpr std::string_view file_key = "Rotating_frame_angular_velocity_temporal_values_file_path";
@@ -1027,7 +1025,7 @@ void apply_fluid_rotating_frame_coriolis(
   const ns::NavierStokesInputView* omega_file =
       omega_keys.isExplicit(file_key) ? &omega_keys.value : nullptr;
 
-  if (!enabled && omega == nullptr && omega_file == nullptr) {
+  if (omega == nullptr && omega_file == nullptr) {
     return;
   }
   if (dim != 3) {
@@ -1125,7 +1123,6 @@ std::string resolved_navier_stokes_input_json(
   used.auto_register_momentum_source_field = options.auto_register_body_force_field;
   const auto* source_file = keys.equationFirst("Momentum_source_temporal_and_spatial_values_file_path");
   used.momentum_source_file = source_file != nullptr ? source_file->momentum_source_file : std::string{};
-  used.rotating_frame_coriolis = options.rotating_frame_coriolis_enabled;
   const bool equation_has_omega =
       keys.equation.isExplicit("Rotating_frame_angular_velocity") ||
       keys.equation.isExplicit("Rotating_frame_angular_velocity_temporal_values_file_path");

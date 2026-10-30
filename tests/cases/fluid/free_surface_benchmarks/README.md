@@ -78,8 +78,8 @@ change it once, with a one-line justification in the tracker.
 - **JIT object cache.** Benchmark run scripts set `SVMP_JIT_CPU=x86-64-v3` and `SVMP_CACHE_PROFILE=L1d:32768,L1i:32768,L2:1048576,L3:16777216`, so one kernel cache serves both the Skylake and the Milan nodes of the partition. Outputs are bitwise identical to the default host target, and cold runs skip 10–15 s of kernel compilation (tracker D17; `Code/Source/solver/FE/Docs/BuildOptimization.md`). Bitwise comparisons between solver builds use the default target.
 - **Requesting resources.** amarsden allows at most 8000 MB per CPU. A request above that silently adds CPUs: a one-task job with `--mem=8G` gets 2 CPUs, half of them idle. Request at most 8000 MB × CPUs (for example `--mem=7G` serial, `--mem=8G` for 4 ranks). Check finished jobs with `seff <jobid>`.
 - **Run configurations (tracker D35).**
-  - **Gated protocol runs** keep FSILS GMRES with row-column scaling and the default generalized-α predictor, so their results stay comparable with earlier runs.
-  - **Development runs** may use the opt-in aggregation multigrid preconditioner (`<Right_preconditioner>amg</Right_preconditioner>` in `<LS type="GMRES">`) and the opt-in rate-extrapolation predictor (`Generalized_alpha_predictor=RateExtrapolation`, `Generalized_alpha_predictor_fields=phi`). Both give the same results on every rank count up to round-off, and change results only within the linear and nonlinear tolerances.
+  - **Gated protocol runs** keep FSILS GMRES with row-column scaling, so their results stay comparable with earlier runs.
+  - **Development runs** may use the opt-in aggregation multigrid preconditioner (`<Right_preconditioner>amg</Right_preconditioner>` in `<LS type="GMRES">`). It gives the same results on every rank count up to round-off, and changes results only within the linear tolerance.
   - **3D production runs** use 8 ranks × 3 assembly threads per node:
 
     ```

@@ -432,10 +432,6 @@ def write_solver_xml(
     <NS_GM_tolerance>1.0e-5</NS_GM_tolerance>
     <NS_CG_max_iterations>150</NS_CG_max_iterations>
     <NS_CG_tolerance>1.0e-5</NS_CG_tolerance>
-    <NS_min_outer_iterations>1</NS_min_outer_iterations>
-    <NS_Schur_preconditioner>blockdiag-l</NS_Schur_preconditioner>
-    <NS_Momentum_approximation>ilu-k</NS_Momentum_approximation>
-    <NS_Use_coupled_outer_FGMRES>true</NS_Use_coupled_outer_FGMRES>
   </LS>
 
   <Add_BC name="wall_left">

@@ -12,8 +12,8 @@
 // Skipped unless SVMP_LINEAR_REPLAY_FILES lists snapshot files (separated by
 // commas, spaces or newlines) in solve order.  SVMP_LINEAR_REPLAY_CONFIGS
 // selects configurations by name (comma separated); the default runs all.
-// One solver object per configuration persists over the whole sequence, so
-// configurations with reuse see the same solve history as the application.
+// One solver object per configuration persists over the whole sequence, as in
+// the application.
 
 #include <gtest/gtest.h>
 
@@ -227,24 +227,6 @@ std::vector<ReplayConfig> allConfigs()
                            o.fsils_gmres_unscaled_residual_estimate = true;
                            return o;
                        }});
-    auto right_pc = [](RightPreconditionerType pc, bool reuse) {
-        return [pc, reuse](const FsilsSystemSnapshot& s) {
-            auto o = baseFsilsOptions(s);
-            o.right_preconditioner = pc;
-            o.reuse_preconditioner = reuse;
-            o.right_preconditioner_constraint_block = "Pressure";
-            return o;
-        };
-    };
-    configs.push_back({"fsils-gmres-rcs-bilu0", "fsils", right_pc(RightPreconditionerType::BlockILU0, false)});
-    configs.push_back({"fsils-gmres-rcs-bilu0-est", "fsils", [right_pc](const FsilsSystemSnapshot& s) {
-                           auto o = right_pc(RightPreconditionerType::BlockILU0, false)(s);
-                           o.fsils_gmres_unscaled_residual_estimate = true;
-                           return o;
-                       }});
-    configs.push_back({"fsils-gmres-rcs-bilu0-reuse", "fsils", right_pc(RightPreconditionerType::BlockILU0, true)});
-    configs.push_back({"fsils-gmres-rcs-simple", "fsils", right_pc(RightPreconditionerType::Simple, false)});
-    configs.push_back({"fsils-gmres-rcs-simple-reuse", "fsils", right_pc(RightPreconditionerType::Simple, true)});
     configs.push_back({"fsils-gmres-diag", "fsils", [](const FsilsSystemSnapshot& s) {
                            auto o = baseFsilsOptions(s);
                            o.preconditioner = PreconditionerType::Diagonal;
@@ -289,15 +271,6 @@ std::vector<ReplayConfig> allConfigs()
     configs.push_back({"eigen-bicgstab-ilut", "eigen", eigen(SolverMethod::BiCGSTAB, PreconditionerType::ILU)});
     configs.push_back({"eigen-gmres-diag", "eigen", eigen(SolverMethod::GMRES, PreconditionerType::Diagonal)});
     configs.push_back({"eigen-direct", "eigen", eigen(SolverMethod::Direct, PreconditionerType::None)});
-    auto eigen_reuse = [eigen](SolverMethod method, PreconditionerType pc) {
-        return [f = eigen(method, pc)](const FsilsSystemSnapshot& s) {
-            auto o = f(s);
-            o.reuse_preconditioner = true;
-            return o;
-        };
-    };
-    configs.push_back({"eigen-gmres-ilut-reuse", "eigen", eigen_reuse(SolverMethod::GMRES, PreconditionerType::ILU)});
-    configs.push_back({"eigen-direct-reuse", "eigen", eigen_reuse(SolverMethod::Direct, PreconditionerType::None)});
 #endif
     return configs;
 }

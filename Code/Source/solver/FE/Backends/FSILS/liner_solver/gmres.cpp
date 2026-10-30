@@ -3203,9 +3203,6 @@ void gmres_v_impl(const fe_fsi_linear_solver::distributed_solver_bundles::Vector
   // true residual is still verified at the start of the next cycle.
   const bool estimate_unscaled = ls.estimate_unscaled_residual;
   double unscaled_to_scaled = 0.0;
-  // Optional iteration budget of this call (solves with a reused preconditioner).
-  const int itr_budget = ls.max_total_itr;
-  bool budget_reached = false;
 
   for (int l = 0; l < ls.mItr; l++) {
     restart_cycles++;
@@ -3588,10 +3585,6 @@ void gmres_v_impl(const fe_fsi_linear_solver::distributed_solver_bundles::Vector
       if (breakdown) {
         break;
       }
-      if (itr_budget > 0 && ls.itr >= itr_budget) {
-        budget_reached = true;
-        break;
-      }
 
       // Adaptive early restart: if convergence per iteration is very slow,
       // restart early.  The cost of iteration i is O(i) for GS operations,
@@ -3675,9 +3668,6 @@ void gmres_v_impl(const fe_fsi_linear_solver::distributed_solver_bundles::Vector
 
     if (ls.suc) break;
     if (scaled_residual_met_target && l + 1 >= ls.mItr) {
-      break;
-    }
-    if (budget_reached) {
       break;
     }
 

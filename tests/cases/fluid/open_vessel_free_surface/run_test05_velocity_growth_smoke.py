@@ -769,7 +769,6 @@ def configure_solver(solver_xml: Path,
                      linear_solver_type: str | None = None,
                      linear_algebra_backend: str | None = None,
                      linear_preconditioner: str | None = None,
-                     disable_coupled_outer_fgmres: bool = False,
                      disable_cut_metadata_scale: bool = False,
                      disable_velocity_extension: bool = False,
                      disable_vtk_output: bool = False,
@@ -855,8 +854,7 @@ def configure_solver(solver_xml: Path,
         ns_cg_tolerance is not None or
         linear_solver_type is not None or
         linear_algebra_backend is not None or
-        linear_preconditioner is not None or
-        disable_coupled_outer_fgmres
+        linear_preconditioner is not None
     )
     ns_solver = navier_stokes_linear_solver(root) if needs_ns_solver else None
     if linear_solver_type is not None:
@@ -1070,10 +1068,6 @@ def configure_solver(solver_xml: Path,
             "Static_capillary_limited_memory_history_size",
             str(static_capillary_limited_memory_history_size),
         )
-
-    if disable_coupled_outer_fgmres:
-        assert ns_solver is not None
-        set_text(ns_solver, "NS_Use_coupled_outer_FGMRES", "false")
 
     tree.write(solver_xml, encoding="UTF-8", xml_declaration=True)
 
@@ -11995,7 +11989,6 @@ def configure_case_solver_xml(run_dir: Path, args: argparse.Namespace) -> None:
         linear_solver_type=args.linear_solver_type,
         linear_algebra_backend=args.linear_algebra_backend,
         linear_preconditioner=args.linear_preconditioner,
-        disable_coupled_outer_fgmres=args.disable_coupled_outer_fgmres,
         disable_cut_metadata_scale=args.disable_cut_metadata_scale,
         disable_velocity_extension=args.disable_velocity_extension,
         disable_vtk_output=args.disable_vtk_output,
@@ -12285,8 +12278,6 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
             failure["stdout_tail"] = tail
             diagnostic_errors = evaluate_timeout_diagnostics(failure, args)
             failure["diagnostic_errors"] = diagnostic_errors
-            if args.disable_coupled_outer_fgmres:
-                failure["disable_coupled_outer_fgmres"] = True
             if args.disable_cut_metadata_scale:
                 failure["disable_cut_metadata_scale"] = True
             if args.disable_velocity_extension:
@@ -12330,8 +12321,6 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                     )
             diagnostic_errors = evaluate_timeout_diagnostics(failure, args)
             failure["diagnostic_errors"] = diagnostic_errors
-            if args.disable_coupled_outer_fgmres:
-                failure["disable_coupled_outer_fgmres"] = True
             if args.disable_cut_metadata_scale:
                 failure["disable_cut_metadata_scale"] = True
             if args.disable_velocity_extension:
@@ -12395,8 +12384,6 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
         metrics["steps"] = args.steps
         if args.time_step_size is not None:
             metrics["time_step_size"] = args.time_step_size
-        if args.disable_coupled_outer_fgmres:
-            metrics["disable_coupled_outer_fgmres"] = True
         if args.disable_cut_metadata_scale:
             metrics["disable_cut_metadata_scale"] = True
         if args.disable_velocity_extension:
@@ -13980,7 +13967,6 @@ def main(arguments: Sequence[str] | None = None) -> int:
     parser.add_argument("--min-capillary-convergence-points", type=int)
     parser.add_argument("--max-nonlinear-iterations", type=int)
     add_linear_solver_control_arguments(parser)
-    parser.add_argument("--disable-coupled-outer-fgmres", action="store_true")
     parser.add_argument("--use-high-order-implicit-cuts", action="store_true")
     parser.add_argument("--mms-nx", type=int)
     parser.add_argument("--mms-ny", type=int)

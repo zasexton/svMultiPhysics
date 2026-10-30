@@ -106,15 +106,14 @@ public:
      * distinct nodes distinct keys.  When it is empty, the backend global node
      * ids are used, which makes the aggregates partition dependent.
      *
-     * When `copy_values` is false the finest level refers to `val`, which must
-     * stay valid and unchanged until the next build() (one GMRES solve).
+     * The finest level refers to `val`, which must stay valid and unchanged
+     * until the next build() (one GMRES solve).
      */
     void build(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
                int dof,
                const double* val,
                std::span<const std::uint64_t> owned_keys,
-               const FsilsAmgOptions& options,
-               bool copy_values);
+               const FsilsAmgOptions& options);
 
     /// out = M^{-1} in on owned entries (node-major, dof per node); out may alias in.
     void apply(const double* in, double* out) const;
