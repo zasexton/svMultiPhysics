@@ -214,7 +214,6 @@ def test_validation_solver_generator_declares_the_face_overlap_opt_out_only_for_
 @pytest.mark.parametrize(
     "case_dir",
     [
-        "fitted_ale/spheric_test10_lateral_water_1x",
         "unfitted_level_set/spheric_test10_lateral_water_1x",
         "unfitted_level_set/spheric_test05_wet_bed_d18",
         "unfitted_level_set/spheric_test05_wet_bed_d38",

@@ -1310,7 +1310,6 @@ def field_initialized_pressure_diagnostic(gauge_metadata: dict) -> dict:
 def generate_spheric_test10(*, allow_overlapping_face_files: bool = False) -> None:
     tank = Box(0.0, 0.900, 0.0, 0.508, 0.0, 0.062)
     lateral_fill = 0.093
-    water = Box(tank.xmin, tank.xmax, tank.ymin, lateral_fill, tank.zmin, tank.zmax)
     structured_max_spacing = 0.045
     interface_centering_gap = 0.04
     x_coords = segmented_coordinates(
@@ -1321,10 +1320,6 @@ def generate_spheric_test10(*, allow_overlapping_face_files: bool = False) -> No
         (tank.zmin, 0.5 * (tank.zmin + tank.zmax), tank.zmax),
         max_spacing=0.031,
     )
-    fitted_y_coords = segmented_coordinates(
-        (water.ymin, 0.5 * lateral_fill, water.ymax),
-        max_spacing=structured_max_spacing,
-    )
     unfitted_y_coords = aligned_and_centered_coordinates(
         tank.ymin,
         tank.ymax,
@@ -1333,14 +1328,6 @@ def generate_spheric_test10(*, allow_overlapping_face_files: bool = False) -> No
         centering_gap=interface_centering_gap,
     )
 
-    def fitted_grid_factory() -> pv.UnstructuredGrid:
-        return structured_tet_grid(
-            x_coords,
-            fitted_y_coords,
-            z_coords,
-            mirror_z_midplane=True,
-        )
-
     def unfitted_grid_factory() -> pv.UnstructuredGrid:
         return structured_tet_grid(
             x_coords,
@@ -1348,30 +1335,6 @@ def generate_spheric_test10(*, allow_overlapping_face_files: bool = False) -> No
             z_coords,
             mirror_z_midplane=True,
         )
-
-    write_case(
-        allow_overlapping_face_files=allow_overlapping_face_files,
-        case_dir=ROOT / "fitted_ale" / "spheric_test10_lateral_water_1x",
-        mesh_subdir="water",
-        domain=water,
-        phi=None,
-        fill_height=lateral_fill,
-        grid_factory=fitted_grid_factory,
-        gauge_point=(0.45, 0.5 * lateral_fill, 0.031),
-        gauge_pressure=lambda point: hydrostatic_pressure_at_point(point, lateral_fill),
-        record_gauge_metadata=True,
-        pressure_gauge_verification=sloshing_pressure_gauge_verification,
-        metadata=sloshing_metadata(
-            "SPHERIC Test 10 lateral water 1x",
-            True,
-            lateral_fill,
-            mesh_tools=["PyVista", "structured_tet_grid"],
-        ),
-        h=structured_max_spacing,
-        fitted=True,
-        time_step=0.001,
-        time_steps=40,
-    )
 
     write_case(
         allow_overlapping_face_files=allow_overlapping_face_files,

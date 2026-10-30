@@ -5,19 +5,20 @@ displacement and the free surface is a boundary of the mesh
 (`Physics/Docs/NavierStokesFreeSurface.md`, "Fitted ALE free surfaces";
 tracker milestone M5, decision D5).
 
-| Deck | Dim | Kinematics | Walls (fluid / mesh) | Status |
-|---|---|---|---|---|
-| `solver.xml`, `mesh/water/` | 2D, 1 m x 0.5 m, 2 x 2 quadrilaterals | legacy `Nitsche`, pressure gauge | no-slip / pinned | legacy, unchanged (pinned by `test_OpenVesselExamples.cpp`); face files disjoint |
-| `spheric_test10_lateral_water_1x/` | 3D, SPHERIC Test 10, 315 nodes | legacy `Nitsche`, pressure gauge | no-slip / pinned | legacy, unchanged (pinned); **face files overlap** (below) |
-| `spheric_test10_lateral_water_1x_meshnitsche/` | 3D, same mesh as the legacy 3D deck | `MeshNitsche` | free slip / sliding | new |
-| `spheric_test10_lateral_water_1x_2d_meshnitsche/` | 2D x-y section, 120 x 12 cells (1,573 nodes) | `MeshNitsche` | free slip / sliding | new |
+| Deck | Dim | Kinematics | Walls (fluid / mesh) |
+|---|---|---|---|
+| `spheric_test10_lateral_water_1x_meshnitsche/` | 3D, the mesh of the former legacy 3D deck | `MeshNitsche` | free slip / sliding |
+| `spheric_test10_lateral_water_1x_2d_meshnitsche/` | 2D x-y section, 120 x 12 cells (1,573 nodes) | `MeshNitsche` | free slip / sliding |
 
-The legacy `Nitsche` mode replaces the normal dynamic condition on the fluid
-and needs a pressure gauge; it is not a free-surface model (WP-9 note,
-"Step-12 failure"). Decision D35 keeps `Penalty` and `Nitsche` as explicit
-legacy options and makes `MeshNitsche` the default when
-`Kinematic_enforcement` is omitted; every deck here names its enforcement,
-so the legacy decks and tests are unchanged.
+The legacy `Nitsche` mode replaced the normal dynamic condition on the fluid
+and needed a pressure gauge; it was not a free-surface model (WP-9 note,
+"Step-12 failure"). Decision D47 Q9 retired it, and the two legacy decks
+that used it (`solver.xml`, a 2D 2 x 2 tank, and
+`spheric_test10_lateral_water_1x/`, the 3D Test 10 deck with overlapping
+face files) were deleted on 2026-10-30: they no longer ran, and the
+MeshNitsche decks here and the fitted benchmarks under
+`free_surface_benchmarks/` (sloshing, capillary wave, static drop) cover
+the fitted method.
 
 ## MeshNitsche decks
 
@@ -63,7 +64,8 @@ wall at 93 mm, interpolated along the wall nodes, 0 when dry).
 
 ## The legacy 3D face files and the contact-line leak
 
-`../generate_validation_meshes.py` selects a boundary face for a tank plane
+This records why the deleted legacy 3D deck leaked; the MeshNitsche decks
+have disjoint face sets.  `../generate_validation_meshes.py` selected a boundary face for a tank plane
 when its centroid lies within `0.35 h` of the plane (`write_case`,
 `tol = max(0.35 * h, 1.0e-8)`, and `plane_predicate`). On the legacy 3D mesh
 this puts all 88 wall faces of the top cell row into `free_surface.vtp` as

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Write the MeshNitsche fitted-ALE decks of SPHERIC Test 10 (lateral water 1x).
 
-Two decks are written next to the legacy fitted decks, which stay unchanged:
+Two decks are written (the legacy fitted decks they replaced were deleted on
+2026-10-30, after decision D47 Q9 retired their Nitsche enforcement):
 
 * ``fitted_ale/spheric_test10_lateral_water_1x_meshnitsche`` (3D): the
   structured tetrahedral mesh of the legacy 3D deck (same nodes and cells);

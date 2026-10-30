@@ -1166,7 +1166,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
 - [x] **2D linear sloshing (original plan item):** covered by the item above (three meshes; 64/128/256 steps per period at L/h = 32).
 - [ ] **SPHERIC 05 D18/D38** to t = 0.3 s and then further. Compare profiles with experiment. Proposal: no regression from the June RMSE of about 0.02 m, and no false wetting. *(D51: regenerate as a true 2D deck first; the extruded deck stops at step 193 on the aggregation guard. The limiter is retired.)*
 - [ ] **Re-run SPHERIC 10 and 02** on the current tip. They were never re-run after the aggregation, sparsity and penalty fixes. Record whether the June pressure-spike and sliver-cut failures persist.
-- ~~**MMS traveling interface** refinement (the June matrix) as a regression.~~ Dropped from M1 by D51 item 3; the deck stays as history.
+- ~~**MMS traveling interface** refinement (the June matrix) as a regression.~~ Dropped from M1 by D51 item 3. The June matrix decks no longer ran (retired wet extension and velocity ghost penalty) and were deleted on 2026-10-30; git history keeps them. The base `mms_traveling_interface_2d` deck stays: the PDE velocity extension does not yet support its Quad9/P2 discretization.
 - Reuse: the `open_vessel_free_surface` cases and verifiers; the WP-6 conservative transport (run its frozen 18-point matrix only if volume drift is the failure).
 
 ### M2 — Capillary force route comparison and static drop (unfitted, 2D then 3D)

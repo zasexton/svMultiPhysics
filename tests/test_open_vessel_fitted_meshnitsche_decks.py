@@ -22,7 +22,6 @@ def load(name):
 
 gen = load("generate_spheric_test10_fitted_decks")
 DECKS = {2: CASES / "fitted_ale" / gen.DECK_2D, 3: CASES / "fitted_ale" / gen.DECK_3D}
-LEGACY_3D = CASES / "fitted_ale" / "spheric_test10_lateral_water_1x"
 
 
 def read_faces(deck):
@@ -74,10 +73,13 @@ def test_face_sets_are_disjoint_complete_and_on_their_planes(dim):
 
 
 def test_three_dimensional_deck_keeps_the_legacy_mesh():
+    # The structured tetrahedral mesh of the deleted legacy 3D deck, rebuilt
+    # by the generator from generate_validation_meshes.py.
     new = pv.read(DECKS[3] / "mesh/water/mesh-complete.mesh.vtu")
-    old = pv.read(LEGACY_3D / "mesh/water/mesh-complete.mesh.vtu")
-    assert np.array_equal(np.asarray(new.points), np.asarray(old.points))
-    assert np.array_equal(np.asarray(new.cells), np.asarray(old.cells))
+    points, tets = gen.legacy_tank_tetrahedra()
+    assert np.array_equal(np.asarray(new.points), points)
+    legacy_cells = np.hstack([np.full((len(tets), 1), 4, dtype=np.int64), tets]).ravel()
+    assert np.array_equal(np.asarray(new.cells), legacy_cells)
 
 
 @pytest.mark.parametrize("dim", [2, 3])

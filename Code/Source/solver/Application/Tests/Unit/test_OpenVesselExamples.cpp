@@ -1023,70 +1023,6 @@ TEST(GeneralSimulationParameters, ParsesOptionalNewtonControls)
   EXPECT_EQ(general.newton_max_iterations.value(), 3);
 }
 
-TEST(OpenVesselExamples, FittedAleCaseDeclaresRequiredControls)
-{
-  const auto case_dir = openVesselCaseDir("fitted_ale");
-  tinyxml2::XMLDocument doc;
-  ASSERT_NO_THROW(loadXml(case_dir / "solver.xml", doc));
-  const auto* root = doc.FirstChildElement("svMultiPhysicsFile");
-  ASSERT_NE(root, nullptr);
-
-  const auto& general = child(*root, "GeneralSimulationParameters");
-  expectText(general, "Use_new_OOP_solver", "true");
-  expectText(general, "Number_of_time_steps", "20");
-  expectText(general, "Time_step_size", "0.0025");
-
-  const auto& mesh = childWithAttribute(*root, "Add_mesh", "name", "tank");
-  expectReferencedFileExists(case_dir, mesh, "Mesh_file_path");
-  expectFace(case_dir, mesh, "wall_left");
-  expectFace(case_dir, mesh, "wall_right");
-  expectFace(case_dir, mesh, "wall_bottom");
-  expectFace(case_dir, mesh, "free_surface");
-
-  const auto mesh_path = case_dir / text(mesh, "Mesh_file_path");
-  EXPECT_TRUE(fileContains(mesh_path, "Name=\"Pressure\""));
-  EXPECT_TRUE(fileContains(mesh_path, "Name=\"Velocity\""));
-  EXPECT_TRUE(fileContains(mesh_path, "Name=\"mesh_displacement\""));
-  EXPECT_TRUE(fileContains(mesh_path, "Name=\"mesh_velocity\""));
-
-  const auto& fluid = childWithAttribute(*root, "Add_equation", "type", "fluid");
-  expectText(fluid, "Enable_ALE", "true");
-  expectText(fluid, "Mesh_velocity_source", "coupled_displacement");
-  expectText(fluid, "Mesh_displacement_field", "mesh_displacement");
-  expectText(fluid, "Force_x", "0.0");
-  expectText(fluid, "Force_y", "-9.81");
-  expectText(fluid, "Force_z", "0.0");
-  expectText(fluid, "Hydrostatic_pressure_initialization", "true");
-  expectText(fluid, "Hydrostatic_pressure_reference_point", "0.0 0.5 0.0");
-  expectReferencedFileExists(case_dir, child(fluid, "Node_pressure_constraints"),
-                             "Values_file_path");
-  expectGmresSolver(fluid);
-  expectOutputFields(fluid, "Spatial",
-                     {"Velocity", "Pressure", "Mesh_displacement", "Mesh_velocity",
-                      "Surface_position"});
-  expectOutputFields(fluid, "Volume_integral", {"Volume"});
-
-  expectBoundaryCondition(fluid, "wall_left", "Dir");
-  expectBoundaryCondition(fluid, "wall_right", "Dir");
-  expectBoundaryCondition(fluid, "wall_bottom", "Dir");
-  const auto& free_surface = expectBoundaryCondition(fluid, "free_surface", "Free_surface");
-  expectText(free_surface, "Implementation", "FittedALE");
-  expectText(free_surface, "External_pressure", "0.0");
-  expectText(free_surface, "Surface_tension", "0.0728");
-  // A fitted free surface always uses the MeshNitsche normal enforcement;
-  // the deck states no enforcement or normal kinematic policy.
-  EXPECT_EQ(free_surface.FirstChildElement("Kinematic_enforcement"), nullptr);
-  EXPECT_EQ(free_surface.FirstChildElement("Normal_kinematic_policy"), nullptr);
-
-  const auto& mesh_motion = childWithAttribute(*root, "Add_equation", "type", "mesh_motion");
-  expectText(mesh_motion, "Model", "Harmonic");
-  expectText(mesh_motion, "Field_name", "mesh_displacement");
-  expectText(mesh_motion, "Kappa", "1.0");
-  expectBoundaryCondition(mesh_motion, "wall_left", "Dir");
-  expectBoundaryCondition(mesh_motion, "wall_right", "Dir");
-  expectBoundaryCondition(mesh_motion, "wall_bottom", "Dir");
-}
-
 TEST(OpenVesselExamples, UnfittedLevelSetCaseDeclaresRequiredControls)
 {
   const auto case_dir = openVesselCaseDir("unfitted_level_set");
@@ -2822,9 +2758,10 @@ TEST(OpenVesselExamples, UnfittedFreeSurfaceBuilderRejectsMultipleActiveDomains)
 #endif
 }
 
-TEST(OpenVesselExamples, FittedAleCaseBuildsMeshMotionOopInputs)
+TEST(OpenVesselExamples, FittedAleMeshNitscheDeckBuildsMeshMotionOopInputs)
 {
-  const auto case_dir = openVesselCaseDir("fitted_ale");
+  const auto case_dir = openVesselCaseDir("fitted_ale") /
+                        "spheric_test10_lateral_water_1x_2d_meshnitsche";
   tinyxml2::XMLDocument doc;
   ASSERT_NO_THROW(loadXml(case_dir / "solver.xml", doc));
   auto* root = doc.FirstChildElement("svMultiPhysicsFile");
@@ -2845,15 +2782,16 @@ TEST(OpenVesselExamples, FittedAleCaseBuildsMeshMotionOopInputs)
             "mesh_displacement");
   EXPECT_EQ(mesh_motion_input.equation_params.at("Operator_tag").value,
             "equations");
-  EXPECT_EQ(mesh_motion_input.equation_params.at("Kappa").value, "1.0");
+  EXPECT_EQ(mesh_motion_input.equation_params.at("Kappa").value, "1");
+  EXPECT_EQ(mesh_motion_input.equation_params.at("Harmonic_quantity").value,
+            "velocity");
   ASSERT_EQ(mesh_motion_input.boundary_conditions.size(), 3u);
 }
 
 TEST(OpenVesselExamples, FittedAleMeshNitscheDecksDeclareSlidingWallsAndDisjointFaces)
 {
-  // MeshNitsche versions of the fitted SPHERIC Test 10 decks
-  // (generate_spheric_test10_fitted_decks.py).  The legacy decks and their
-  // tests above stay unchanged.
+  // The MeshNitsche fitted SPHERIC Test 10 decks
+  // (generate_spheric_test10_fitted_decks.py).
   struct DeckExpectation {
     std::string case_name;
     int dim;
@@ -2974,40 +2912,27 @@ TEST(OpenVesselExamples, FittedAleMeshNitscheDecksDeclareSlidingWallsAndDisjoint
 
 TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
 {
+  // The unfitted literature decks (the fitted SPHERIC Test 10 decks are
+  // checked by FittedAleMeshNitscheDecksDeclareSlidingWallsAndDisjointFaces).
   struct CaseExpectation {
     std::string representation_dir;
     std::string case_name;
-    bool fitted;
     bool top_wall_bc;
     bool obstacle_bc;
-    bool pressure_constraints;
     std::string level_set_velocity_source;
     std::vector<std::string> faces;
   };
 
   const std::vector<CaseExpectation> cases = {
-      {"fitted_ale",
-       "spheric_test10_lateral_water_1x",
-       true,
-       false,
-       false,
-       true,
-       "",
-       {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
-        "free_surface"}},
       {"unfitted_level_set",
        "spheric_test10_lateral_water_1x",
-       false,
        true,
-       false,
        false,
        "prescribed_data",
        {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
         "wall_top"}},
       {"unfitted_level_set",
        "spheric_test05_wet_bed_d18",
-       false,
-       false,
        false,
        false,
        "prescribed_data",
@@ -3017,17 +2942,13 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
        "spheric_test05_wet_bed_d38",
        false,
        false,
-       false,
-       false,
        "prescribed_data",
        {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
         "wall_top"}},
       {"unfitted_level_set",
        "spheric_test02_dambreak_obstacle",
        false,
-       false,
        true,
-       false,
        "prescribed_data",
        {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
         "wall_top", "obstacle"}},
@@ -3061,20 +2982,10 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
     EXPECT_TRUE(fileContains(mesh_path, "Name=\"GlobalNodeID\""));
     EXPECT_TRUE(fileContains(mesh_path, "Name=\"Pressure\""));
     EXPECT_TRUE(fileContains(mesh_path, "Name=\"Velocity\""));
-    if (expected.fitted) {
-      EXPECT_TRUE(fileContains(mesh_path, "Name=\"mesh_displacement\""));
-      EXPECT_TRUE(fileContains(mesh_path, "Name=\"mesh_velocity\""));
-    } else {
-      EXPECT_TRUE(fileContains(mesh_path, "Name=\"phi\""));
-    }
+    EXPECT_TRUE(fileContains(mesh_path, "Name=\"phi\""));
 
     const auto& fluid = childWithAttribute(*root, "Add_equation", "type", "fluid");
-    if (expected.pressure_constraints) {
-      expectReferencedFileExists(case_dir, child(fluid, "Node_pressure_constraints"),
-                                 "Values_file_path");
-    } else {
-      EXPECT_EQ(fluid.FirstChildElement("Node_pressure_constraints"), nullptr);
-    }
+    EXPECT_EQ(fluid.FirstChildElement("Node_pressure_constraints"), nullptr);
     for (const auto& face : expected.faces) {
       if (startsWith(face, "wall_") &&
           (expected.top_wall_bc || face != "wall_top")) {
@@ -3095,7 +3006,7 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
         expectBoundaryCondition(fluid, "free_surface", "Free_surface");
     expectText(free_surface,
                "Implementation",
-               expected.fitted ? "FittedALE" : "UnfittedLevelSet");
+               "UnfittedLevelSet");
     const bool is_test05 =
         startsWith(expected.case_name, "spheric_test05_wet_bed_");
     if (is_test05) {
@@ -3159,38 +3070,30 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
                                "\"pressure_constraint_enabled\": false"));
     }
 
-    if (expected.fitted) {
-      expectText(fluid, "Enable_ALE", "true");
-      const auto& mesh_motion =
-          childWithAttribute(*root, "Add_equation", "type", "mesh_motion");
-      expectText(mesh_motion, "Model", "Harmonic");
-    } else {
-      const auto& level_set =
-          childWithAttribute(*root, "Add_equation", "type", "level_set");
-      expectReviewedP1LevelSetTransportControls(level_set);
-      expectText(level_set, "Level_set_field_name", "phi");
-      expectText(level_set, "Velocity_source",
-                 expected.level_set_velocity_source);
-      EXPECT_EQ(level_set.FirstChildElement(
-                    "Volume_correction_minimum_relative_error"),
-                nullptr);
-      EXPECT_EQ(level_set.FirstChildElement(
-                    "Volume_correction_maximum_interface_displacement_fraction"),
-                nullptr);
-      expectText(fluid, "Hydrostatic_pressure_field_name", "Pressure");
-      EXPECT_EQ(fluid.FirstChildElement("Node_pressure_constraints"), nullptr);
-      expectText(free_surface, "Generated_interface_domain_id",
-                 "open_vessel_surface");
-      // The algebraic wet extension was retired (decisions D47 and D55).
-      EXPECT_EQ(
-          level_set.FirstChildElement("Use_wet_extension_advection_velocity"),
-          nullptr);
-      expectText(level_set,
-                 "Advection_velocity_extension_method",
-                 "pde_harmonic");
-      expectText(level_set,
-                 "Advection_velocity_extension_coupling",
-                 "monolithic");
-    }
+    const auto& level_set =
+        childWithAttribute(*root, "Add_equation", "type", "level_set");
+    expectReviewedP1LevelSetTransportControls(level_set);
+    expectText(level_set, "Level_set_field_name", "phi");
+    expectText(level_set, "Velocity_source",
+               expected.level_set_velocity_source);
+    EXPECT_EQ(level_set.FirstChildElement(
+                  "Volume_correction_minimum_relative_error"),
+              nullptr);
+    EXPECT_EQ(level_set.FirstChildElement(
+                  "Volume_correction_maximum_interface_displacement_fraction"),
+              nullptr);
+    expectText(fluid, "Hydrostatic_pressure_field_name", "Pressure");
+    expectText(free_surface, "Generated_interface_domain_id",
+               "open_vessel_surface");
+    // The algebraic wet extension was retired (decisions D47 and D55).
+    EXPECT_EQ(
+        level_set.FirstChildElement("Use_wet_extension_advection_velocity"),
+        nullptr);
+    expectText(level_set,
+               "Advection_velocity_extension_method",
+               "pde_harmonic");
+    expectText(level_set,
+               "Advection_velocity_extension_coupling",
+               "monolithic");
   }
 }

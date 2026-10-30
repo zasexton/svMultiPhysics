@@ -30,9 +30,10 @@ executables bundled with the `svv2` environment:
 conda run -n svv2 python tests/cases/fluid/open_vessel_free_surface/generate_validation_meshes.py
 ```
 
-Generated fitted ALE fixtures:
-
-- `tests/cases/fluid/open_vessel_free_surface/fitted_ale/spheric_test10_lateral_water_1x`
+Generated fitted ALE fixtures: none since 2026-10-30. The legacy fitted
+SPHERIC Test 10 deck used the retired Nitsche enforcement and was deleted; its
+MeshNitsche replacements are written by `generate_spheric_test10_fitted_decks.py`
+(`fitted_ale/README.md`).
 
 Generated unfitted level-set fixtures:
 
@@ -168,8 +169,10 @@ balance under gravity.
 
 Starting points:
 
-- `tests/cases/fluid/open_vessel_free_surface/fitted_ale/solver.xml`
 - `tests/cases/fluid/open_vessel_free_surface/unfitted_level_set/solver.xml`
+  (the fitted ALE `fitted_ale/solver.xml` used the retired Nitsche enforcement
+  and was deleted on 2026-10-30; the fitted benchmarks under
+  `free_surface_benchmarks/` cover the fitted method)
 
 Setup:
 
@@ -240,7 +243,8 @@ large free-surface motion.
 
 Starting points:
 
-- fitted ALE: `tests/cases/fluid/open_vessel_free_surface/fitted_ale/spheric_test10_lateral_water_1x/solver.xml`
+- fitted ALE: `tests/cases/fluid/open_vessel_free_surface/fitted_ale/spheric_test10_lateral_water_1x_meshnitsche/solver.xml`
+  and the 2D section `..._2d_meshnitsche` (the legacy Nitsche deck was deleted on 2026-10-30)
 - unfitted level set: `tests/cases/fluid/open_vessel_free_surface/unfitted_level_set/spheric_test10_lateral_water_1x/solver.xml`
 - the unfitted fixture now includes a static-tank roll-equivalent body-force
   source at `bc/test10_lateral_water_1x_roll_body_force.dat` and a matching
