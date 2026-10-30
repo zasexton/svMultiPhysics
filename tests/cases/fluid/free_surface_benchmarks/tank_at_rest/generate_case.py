@@ -299,7 +299,6 @@ def solver_xml(dim: int, schedule: dict, steps: int, cadence: int) -> str:
     <Tolerance>1.0e-4</Tolerance>
     <Module_options>jit=true; jit_specialization=true</Module_options>
     <Level_set_field_name>{LEVEL_SET_FIELD}</Level_set_field_name>
-    <Operator_tag>equations</Operator_tag>
     <Level_set_source>prescribed_data</Level_set_source>
     <Velocity_source>coupled_field</Velocity_source>
     <Velocity_field_name>Velocity</Velocity_field_name>

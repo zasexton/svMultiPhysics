@@ -639,7 +639,7 @@ PreparedPressureInitialization hydrostaticPressureInitialization(
         throw std::invalid_argument(
             "IncompressibleNavierStokesVMSModule: CutVolume active-domain "
             "hydrostatic pressure initialization requires a level-set-aware "
-            "mesh vertex field selected by Hydrostatic_pressure_field_name");
+            "mesh vertex field (hydrostatic_pressure_initialization.field_name)");
     }
 
     FE::level_set::SideVertexInitializationDeclaration declaration{};

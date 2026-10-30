@@ -474,7 +474,6 @@ def render_solver(matrix: dict[str, Any], case: dict[str, Any]) -> str:
     <Conservative_phase_momentum_relative_tolerance>1.0e-10</Conservative_phase_momentum_relative_tolerance>
     <Enable_interface_kinematic>true</Enable_interface_kinematic>
     <Interface_kinematic_marker>71</Interface_kinematic_marker>
-    <Operator_tag>equations</Operator_tag>
     <LS type=\"GMRES\">
       <Linear_algebra type=\"fsils\">
         <Preconditioner>fsils</Preconditioner>
@@ -498,7 +497,6 @@ def render_solver(matrix: dict[str, Any], case: dict[str, Any]) -> str:
     <Force_x>0</Force_x>
     <Force_y>0</Force_y>
     <Force_z>0</Force_z>
-    <Operator_tag>equations</Operator_tag>
     <LS type=\"NS\">
       <Linear_algebra type=\"fsils\">
         <Preconditioner>fsils</Preconditioner>

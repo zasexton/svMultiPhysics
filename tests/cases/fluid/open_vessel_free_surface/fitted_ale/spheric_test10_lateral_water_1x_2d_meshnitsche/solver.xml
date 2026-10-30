@@ -55,7 +55,6 @@
   <Mesh_velocity_field>mesh_velocity</Mesh_velocity_field>
   <Mesh_displacement_field>mesh_displacement</Mesh_displacement_field>
   <Auto_register_mesh_displacement_field>true</Auto_register_mesh_displacement_field>
-  <Moving_mesh_tangent_path>SymbolicRequired</Moving_mesh_tangent_path>
 
   <Density>998.20000000000005</Density>
   <Force_x>0.0</Force_x>
@@ -113,10 +112,8 @@
   <Coupled>true</Coupled>
   <Model>Harmonic</Model>
   <Field_name>mesh_displacement</Field_name>
-  <Operator_tag>equations</Operator_tag>
   <Kappa>1</Kappa>
   <Harmonic_quantity>velocity</Harmonic_quantity>
-  <Moving_mesh_tangent_path>SymbolicRequired</Moving_mesh_tangent_path>
   <Module_options>jit=true; jit_specialization=true</Module_options>
 
   <Add_BC name="wall_left">

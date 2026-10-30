@@ -729,8 +729,7 @@ const std::vector<std::string>& moving_domain_and_momentum_source_spellings()
   static const auto spellings = ns::navierStokesDomainSchema().spellings(
       {"Enable_ALE", "Mesh_velocity_field", "Mesh_velocity_source",
        "Mesh_displacement_field", "Auto_register_mesh_displacement_field",
-       "Moving_mesh_tangent_path", "Momentum_source_field_name",
-       "Auto_register_momentum_source_field"});
+       "Momentum_source_field_name", "Auto_register_momentum_source_field"});
   return spellings;
 }
 
@@ -867,9 +866,6 @@ void apply_fluid_moving_domain_options(
     options.auto_register_mesh_displacement_field =
         view->auto_register_mesh_displacement_field;
   }
-  if (const auto* view = keys.domainFirst("Moving_mesh_tangent_path")) {
-    options.moving_mesh_tangent_path = view->moving_mesh_tangent_path;
-  }
   if (trim_copy(options.mesh_velocity_field_name).empty()) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] Mesh_velocity_field must be non-empty when configuring Navier-Stokes ALE.");
@@ -892,6 +888,24 @@ void apply_fluid_momentum_source_params(
   }
   if (const auto* view = keys.domainFirst("Auto_register_momentum_source_field")) {
     options.auto_register_body_force_field = view->auto_register_momentum_source_field;
+  }
+}
+
+/// An active domain reads its hydrostatic pressure from the level-set-aware
+/// mesh vertex field named after the pressure field; elsewhere the
+/// hydrostatic law gives it.
+void derive_hydrostatic_pressure_field(
+    svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
+{
+  using svmp::Physics::formulations::navier_stokes::FreeSurfaceActiveDomain;
+  if (!options.hydrostatic_pressure_initialization.enabled) {
+    return;
+  }
+  const bool active_domain = std::any_of(
+      options.free_surface.begin(), options.free_surface.end(),
+      [](const auto& bc) { return bc.active_domain != FreeSurfaceActiveDomain::None; });
+  if (active_domain) {
+    options.hydrostatic_pressure_initialization.field_name = options.pressure_field_name;
   }
 }
 
@@ -919,9 +933,6 @@ void apply_fluid_properties(const svmp::Physics::DomainInput& domain,
   if (keys.domain.isExplicit("Hydrostatic_pressure_reference_point")) {
     options.hydrostatic_pressure_initialization.reference_point =
         view.hydrostatic_pressure_reference_point;
-  }
-  if (keys.domain.isExplicit("Hydrostatic_pressure_field_name")) {
-    options.hydrostatic_pressure_initialization.field_name = view.hydrostatic_pressure_field_name;
   }
 
   if (!keys.domain.isExplicit("Viscosity.model")) {
@@ -1104,14 +1115,12 @@ std::string resolved_navier_stokes_input_json(
   auto used = keys.domain.value;
   const auto& equation = keys.equation.value;
   used.physical_model = equation.physical_model;
-  used.operator_tag = options.operator_tag;
   used.use_taylor_hood_type_basis = equation.use_taylor_hood_type_basis;
   used.enable_ale = options.enable_ale;
   used.mesh_velocity_field = options.mesh_velocity_field_name;
   used.mesh_velocity_source = options.mesh_velocity_source;
   used.mesh_displacement_field = options.mesh_displacement_field_name;
   used.auto_register_mesh_displacement_field = options.auto_register_mesh_displacement_field;
-  used.moving_mesh_tangent_path = options.moving_mesh_tangent_path;
   used.momentum_source_field_name = options.body_force_field_name;
   used.auto_register_momentum_source_field = options.auto_register_body_force_field;
   const auto* source_file = keys.equationFirst("Momentum_source_temporal_and_spatial_values_file_path");
@@ -1128,7 +1137,6 @@ std::string resolved_navier_stokes_input_json(
   used.hydrostatic_pressure_initialization = options.hydrostatic_pressure_initialization.enabled;
   used.hydrostatic_pressure_reference = options.hydrostatic_pressure_initialization.reference_pressure;
   used.hydrostatic_pressure_reference_point = options.hydrostatic_pressure_initialization.reference_point;
-  used.hydrostatic_pressure_field_name = options.hydrostatic_pressure_initialization.field_name;
 
   const auto& equation_schema = ns::navierStokesEquationSchema();
   const auto& domain_schema = ns::navierStokesDomainSchema();
@@ -1748,9 +1756,6 @@ translate_incompressible_two_fluid_input(
       require({"Prescribed_viscous_traction_jump_z"}, "Prescribed_viscous_traction_jump_z");
     }
   }
-  if (any_parameter_defined(input.equation_params, {"Operator_tag"})) {
-    require({"Operator_tag"}, "Operator_tag");
-  }
   const auto resolved = schema.resolve(equation_input);
   const auto& keys = resolved.value;
   options.level_set_field_name = keys.level_set_field_name;
@@ -1778,9 +1783,6 @@ translate_incompressible_two_fluid_input(
   if (options.interface_marker < 0) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] Material_interface_marker must be nonnegative for incompressible two-fluid input.");
-  }
-  if (resolved.isExplicit("Operator_tag")) {
-    options.operator_tag = keys.operator_tag;
   }
   options.enable_convection = input.equation_type != "stokes";
   options.jit_policy =
@@ -1905,9 +1907,6 @@ ResolvedOnePhaseNavierStokesInput resolve_one_phase_navier_stokes_input(
       svmp::Physics::formulations::navier_stokes::
           FreeSurfacePhysicalModel::
               OnePhaseLiquidPrescribedExteriorPressure;
-  if (keys.equation.isExplicit("Operator_tag")) {
-    options.operator_tag = keys.equation.value.operator_tag;
-  }
   options.enable_convection = (input.equation_type != "stokes");
   options.jit_policy = svmp::Physics::core::resolveOopJitPolicy(input, options.jit_policy);
   options.conservative_balance_diagnostics =
@@ -1921,6 +1920,7 @@ ResolvedOnePhaseNavierStokesInput resolve_one_phase_navier_stokes_input(
   apply_fluid_rotating_frame_coriolis(keys, dim, options);
   apply_node_pressure_constraints(input, options);
   apply_fluid_bcs(input, domain, markerCommunicator(system), options);
+  derive_hydrostatic_pressure_field(options);
   options.resolved_input_json = resolved_navier_stokes_input_json(keys, options);
 
   return ResolvedOnePhaseNavierStokesInput{

@@ -325,7 +325,6 @@ std::unique_ptr<EquationParameters> materialInterfaceLevelSetEquation()
   <Conservative_phase_momentum_relative_tolerance>1e-10</Conservative_phase_momentum_relative_tolerance>
   <Enable_interface_kinematic>true</Enable_interface_kinematic>
   <Interface_kinematic_marker>71</Interface_kinematic_marker>
-  <Operator_tag>equations</Operator_tag>
 </Add_equation>
 )xml");
 }
@@ -345,7 +344,6 @@ std::unique_ptr<EquationParameters> incompressibleTwoFluidEquation()
   <Positive_phase_dynamic_viscosity>0.001</Positive_phase_dynamic_viscosity>
   <Two_fluid_surface_tension>0.072</Two_fluid_surface_tension>
   <Two_fluid_interface_nitsche_gamma>24.0</Two_fluid_interface_nitsche_gamma>
-  <Operator_tag>equations</Operator_tag>
   <LS type="NS">
     <Linear_algebra type="fsils">
       <Preconditioner>none</Preconditioner>
@@ -1075,7 +1073,6 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseDeclaresRequiredControls)
   expectText(fluid, "Force_y", "-9.81");
   expectText(fluid, "Force_z", "0.0");
   expectText(fluid, "Hydrostatic_pressure_initialization", "true");
-  expectText(fluid, "Hydrostatic_pressure_field_name", "Pressure");
   expectText(fluid, "Hydrostatic_pressure_reference_point", "0.0 0.45 0.0");
   EXPECT_EQ(fluid.FirstChildElement("Node_pressure_constraints"), nullptr);
   expectGmresSolver(fluid);
@@ -2780,8 +2777,6 @@ TEST(OpenVesselExamples, FittedAleMeshNitscheDeckBuildsMeshMotionOopInputs)
   EXPECT_EQ(mesh_motion_input.equation_params.at("Model").value, "Harmonic");
   EXPECT_EQ(mesh_motion_input.equation_params.at("Field_name").value,
             "mesh_displacement");
-  EXPECT_EQ(mesh_motion_input.equation_params.at("Operator_tag").value,
-            "equations");
   EXPECT_EQ(mesh_motion_input.equation_params.at("Kappa").value, "1");
   EXPECT_EQ(mesh_motion_input.equation_params.at("Harmonic_quantity").value,
             "velocity");
@@ -3060,7 +3055,6 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
       expectEigenDirectSolver(fluid);
       EXPECT_EQ(free_surface.FirstChildElement("Kinematic_enforcement"),
                 nullptr);
-      expectText(fluid, "Hydrostatic_pressure_field_name", "Pressure");
       EXPECT_EQ(fluid.FirstChildElement("Node_pressure_constraints"), nullptr);
       EXPECT_TRUE(fileContains(case_dir / "pressure_gauge.csv",
                                "node_id,pressure"));
@@ -3082,7 +3076,6 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
     EXPECT_EQ(level_set.FirstChildElement(
                   "Volume_correction_maximum_interface_displacement_fraction"),
               nullptr);
-    expectText(fluid, "Hydrostatic_pressure_field_name", "Pressure");
     expectText(free_surface, "Generated_interface_domain_id",
                "open_vessel_surface");
     // The algebraic wet extension was retired (decisions D47 and D55).

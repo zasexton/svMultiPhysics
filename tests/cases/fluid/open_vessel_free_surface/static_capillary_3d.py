@@ -308,7 +308,6 @@ def _write_solver_xml(case_dir: Path,
   <Max_iterations>2</Max_iterations>
   <Tolerance>1.0e-6</Tolerance>
   <Level_set_field_name>phi</Level_set_field_name>
-  <Operator_tag>equations</Operator_tag>
   <Level_set_source>prescribed_data</Level_set_source>
   <Velocity_source>coupled_field</Velocity_source>
   <Velocity_field_name>Velocity</Velocity_field_name>

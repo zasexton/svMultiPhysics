@@ -278,27 +278,6 @@ std::array<bool, 3> parse_zero_dirichlet_component_mask(const svmp::Physics::Par
   return mask;
 }
 
-svmp::FE::forms::GeometryTangentPath parse_geometry_tangent_path(std::string_view raw,
-                                                                 std::string_view context)
-{
-  const auto path = normalized_token(std::string(raw));
-  if (path == "symbolic" || path == "symbolicrequired" || path == "required") {
-    return svmp::FE::forms::GeometryTangentPath::SymbolicRequired;
-  }
-  if (path == "ad" || path == "adreference" || path == "referencead") {
-    return svmp::FE::forms::GeometryTangentPath::ADReference;
-  }
-  if (path == "symbolicadcheck" || path == "symbolicwithadcheck" ||
-      path == "check" || path == "paritycheck") {
-    return svmp::FE::forms::GeometryTangentPath::SymbolicWithADCheck;
-  }
-  if (path == "auto") {
-    return svmp::FE::forms::GeometryTangentPath::Auto;
-  }
-  throw std::runtime_error("[svMultiPhysics::Physics] " + std::string(context) +
-                           " must be one of 'symbolic', 'ad', 'symbolic_ad_check', or 'auto'.");
-}
-
 mm::NormalConstraintQuantity parse_normal_quantity(std::string_view raw,
                                                    std::string_view context)
 {
@@ -410,9 +389,6 @@ void apply_common_params(const svmp::Physics::ParameterMap& params, Options& opt
           {"Field_name", "Mesh_displacement_field"})) {
     options.field_name = *value;
   }
-  if (const auto value = get_defined_string(params, {"Operator_tag"})) {
-    options.operator_tag = *value;
-  }
   if (const auto value = get_defined_bool(
           params,
           {"Auto_register_field", "Auto_register_mesh_displacement_field"})) {
@@ -422,11 +398,6 @@ void apply_common_params(const svmp::Physics::ParameterMap& params, Options& opt
           params,
           {"Bind_as_mesh_displacement"})) {
     options.bind_as_mesh_displacement = *value;
-  }
-  if (const auto value = get_defined_string(
-          params,
-          {"Moving_mesh_tangent_path", "Geometry_tangent_path"})) {
-    options.tangent_path = parse_geometry_tangent_path(*value, "Moving_mesh_tangent_path");
   }
 }
 

@@ -508,7 +508,6 @@ def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, ca
     <Tolerance>1.0e-4</Tolerance>
     <Module_options>jit=true; jit_specialization=true</Module_options>
     <Level_set_field_name>{LEVEL_SET_FIELD}</Level_set_field_name>
-    <Operator_tag>equations</Operator_tag>
     <Level_set_source>prescribed_data</Level_set_source>{transport_xml}
     <Enable_SUPG>true</Enable_SUPG>
     <SUPG_tau_scale>0.5</SUPG_tau_scale>

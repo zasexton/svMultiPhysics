@@ -179,7 +179,9 @@ def check_case(case_dir: Path) -> dict[str, object]:
     constraints = fluid.find("Node_pressure_constraints")
     if constraints is not None:
         raise ValueError(f"{solver_path} still activates Node_pressure_constraints")
-    _require_text(fluid, "Hydrostatic_pressure_field_name", "Pressure", solver_path)
+    # The active domain initializes from the level-set-aware mesh field named
+    # after the pressure field.
+    _require_text(fluid, "Hydrostatic_pressure_initialization", "true", solver_path)
     fluid_ls = fluid.find("LS")
     if fluid_ls is None or fluid_ls.attrib.get("type", "").strip().lower() != "direct":
         actual = None if fluid_ls is None else fluid_ls.attrib.get("type", "")

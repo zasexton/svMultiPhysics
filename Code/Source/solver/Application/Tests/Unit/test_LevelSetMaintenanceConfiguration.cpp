@@ -317,7 +317,6 @@ TEST(LevelSetMaintenanceConfiguration,
   put(input.equation_parameters, "Source_velocity_field_name",
       "physical_velocity");
   put(input.equation_parameters, "Enable_kinematic_reconciliation", "true");
-  put(input.equation_parameters, "Operator_tag", "ignored_operator");
   put(input.equation_parameters, "Level_set_source", "invalid_source");
   put(input.equation_parameters, "SUPG_tau_scale", "invalid_number");
   put(input.equation_parameters, "Interface_kinematic_marker",

@@ -464,7 +464,7 @@ def test_half_step_and_diagnostic_step_options(tmp_path):
 # f3fad829...).  The kag_lumped deck at La = 120 left the table with the form
 # (decision D48).
 DECK_SHA256_BEFORE_D25 = {
-    ("surface_stress", 12.0, 2.0): "a8e85905fec81f8a454ab89eec9c64e24fc9399b1f0cafee6fbb60054c157b4b",
+    ("surface_stress", 12.0, 2.0): "6f15ba41773b9c8c1f3884d0c44f98219ee9605621379e18eb9d16698e9684b8",
 }
 
 

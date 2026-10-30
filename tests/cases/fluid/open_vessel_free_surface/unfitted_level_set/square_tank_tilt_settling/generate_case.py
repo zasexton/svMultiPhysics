@@ -358,7 +358,6 @@ def write_solver_xml(
   <Module_options>jit=true; jit_specialization=true</Module_options>
 
   <Level_set_field_name>phi</Level_set_field_name>
-  <Operator_tag>equations</Operator_tag>
   <Level_set_source>prescribed_data</Level_set_source>
   <Velocity_source>prescribed_data</Velocity_source>
   <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
@@ -407,7 +406,6 @@ def write_solver_xml(
   <Hydrostatic_pressure_initialization>true</Hydrostatic_pressure_initialization>
   <Hydrostatic_pressure_reference>0.0</Hydrostatic_pressure_reference>
   <Hydrostatic_pressure_reference_point>{rx:.12g} {ry:.12g} {rz:.12g}</Hydrostatic_pressure_reference_point>
-  <Hydrostatic_pressure_field_name>Pressure</Hydrostatic_pressure_field_name>
   <Viscosity model="Constant">
     <Value>{viscosity:.12g}</Value>
   </Viscosity>

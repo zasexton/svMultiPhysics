@@ -1154,15 +1154,6 @@ class LinearSolverParameters : public ParameterLists
 
     /// Opt-in Krylov right preconditioner (new OOP solver): none, block-ilu0, simple, amg.
     Parameter<std::string> right_preconditioner;
-    /// Right_preconditioner=amg settings (new OOP solver): Chebyshev degree,
-    /// coarsest global node count, level limit, prolongator (smoothed or
-    /// plain) and power iterations for the smoother bound (0: inf-norm bound).
-    Parameter<int> amg_smoother_degree;
-    Parameter<int> amg_coarse_nodes;
-    Parameter<int> amg_max_levels;
-    Parameter<std::string> amg_prolongator;
-    Parameter<int> amg_lambda_iterations;
-    Parameter<double> amg_strength_threshold;
     /// Opt-in reuse of preconditioners/factorizations across solves (new OOP solver).
     Parameter<bool> preconditioner_reuse;
 
@@ -1310,7 +1301,6 @@ class DomainParameters : public ParameterLists
     Parameter<bool> hydrostatic_pressure_initialization;
     Parameter<double> hydrostatic_pressure_reference;
     VectorParameter<double> hydrostatic_pressure_reference_point;
-    Parameter<std::string> hydrostatic_pressure_field_name;
 
     Parameter<double> isotropic_conductivity;
 

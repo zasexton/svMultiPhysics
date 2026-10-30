@@ -147,7 +147,6 @@ def solver_xml(steps: int) -> str:
     <Mesh_velocity_field>mesh_velocity</Mesh_velocity_field>
     <Mesh_displacement_field>mesh_displacement</Mesh_displacement_field>
     <Auto_register_mesh_displacement_field>true</Auto_register_mesh_displacement_field>
-    <Moving_mesh_tangent_path>SymbolicRequired</Moving_mesh_tangent_path>
     <Density>{DENSITY:.17g}</Density>
     <Force_x>0.0</Force_x>
     <Force_y>0.0</Force_y>
@@ -176,10 +175,8 @@ def solver_xml(steps: int) -> str:
     <Coupled>true</Coupled>
     <Model>Harmonic</Model>
     <Field_name>mesh_displacement</Field_name>
-    <Operator_tag>equations</Operator_tag>
     <Kappa>{MESH_MOTION_KAPPA:.17g}</Kappa>
     <Harmonic_quantity>velocity</Harmonic_quantity>
-    <Moving_mesh_tangent_path>SymbolicRequired</Moving_mesh_tangent_path>
     <Module_options>jit=true; jit_specialization=true</Module_options>
   </Add_equation>
 </svMultiPhysicsFile>

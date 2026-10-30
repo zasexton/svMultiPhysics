@@ -3863,7 +3863,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
 <svMultiPhysicsFile>
   <Add_equation type="level_set">
     <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
-    <Operator_tag>ignored_operator</Operator_tag>
     <Level_set_source>invalid_source</Level_set_source>
     <SUPG_tau_scale>invalid_number</SUPG_tau_scale>
     <Interface_kinematic_marker>invalid_marker</Interface_kinematic_marker>

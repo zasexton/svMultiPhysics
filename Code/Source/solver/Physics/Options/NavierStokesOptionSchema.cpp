@@ -297,16 +297,6 @@ void addSharedNavierStokesKeys(opt::OptionSchema<NavierStokesInputView>& schema)
         .key("Mesh_displacement_field", &V::mesh_displacement_field, opt::StringCodec{})
         .key("Auto_register_mesh_displacement_field", &V::auto_register_mesh_displacement_field,
              relaxedBool())
-        .key("Moving_mesh_tangent_path", &V::moving_mesh_tangent_path,
-             opt::EnumCodec<FE::forms::GeometryTangentPath>{{
-                 token(FE::forms::GeometryTangentPath::SymbolicRequired, "SymbolicRequired",
-                       {"symbolic", "required"}),
-                 token(FE::forms::GeometryTangentPath::ADReference, "ADReference",
-                       {"ad", "reference_ad"}),
-                 token(FE::forms::GeometryTangentPath::SymbolicWithADCheck, "SymbolicWithADCheck",
-                       {"symbolic_ad_check", "check", "parity_check"}),
-                 token(FE::forms::GeometryTangentPath::Auto, "Auto"),
-             }})
         .key("Momentum_source_field_name", &V::momentum_source_field_name, opt::StringCodec{})
         .key("Auto_register_momentum_source_field", &V::auto_register_momentum_source_field,
              relaxedBool())
@@ -329,9 +319,7 @@ opt::OptionSchema<NavierStokesInputView> makeNavierStokesEquationSchema()
     using V = NavierStokesInputView;
     opt::OptionSchema<V> schema("Navier-Stokes equation");
     addPhysicalModelKey(schema, &V::physical_model);
-    schema
-        .key("Operator_tag", &V::operator_tag, opt::StringCodec{})
-        .key("Use_taylor_hood_type_basis", &V::use_taylor_hood_type_basis, relaxedBool());
+    schema.key("Use_taylor_hood_type_basis", &V::use_taylor_hood_type_basis, relaxedBool());
     addSharedNavierStokesKeys(schema);
     return schema;
 }
@@ -351,7 +339,6 @@ opt::OptionSchema<NavierStokesInputView> makeNavierStokesDomainSchema()
         .key("Hydrostatic_pressure_reference", &V::hydrostatic_pressure_reference, anyReal())
         .key("Hydrostatic_pressure_reference_point", &V::hydrostatic_pressure_reference_point,
              opt::Vector3Codec{})
-        .key("Hydrostatic_pressure_field_name", &V::hydrostatic_pressure_field_name, opt::StringCodec{})
         // The register reads the parameters of the stated viscosity model
         // only, and reads them with their Parameters defaults when the deck
         // leaves them out.
@@ -393,7 +380,6 @@ opt::OptionSchema<IncompressibleTwoFluidInputView> makeIncompressibleTwoFluidSch
              optional_real)
         .key("Prescribed_viscous_traction_jump_z", &V::prescribed_viscous_traction_jump_z,
              optional_real)
-        .key("Operator_tag", &V::operator_tag, opt::StringCodec{})
         .key("Use_taylor_hood_type_basis", &V::use_taylor_hood_type_basis, relaxedBool());
     return schema;
 }

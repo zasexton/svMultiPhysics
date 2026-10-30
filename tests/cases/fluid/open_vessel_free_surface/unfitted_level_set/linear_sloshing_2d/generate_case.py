@@ -233,7 +233,6 @@ def write_solver_xml(args: argparse.Namespace, *, final_time: float) -> None:
   <Tolerance>1.0e-5</Tolerance>
   <Module_options>jit=true; jit_specialization=true</Module_options>
   <Level_set_field_name>phi</Level_set_field_name>
-  <Operator_tag>equations</Operator_tag>
   <Level_set_source>prescribed_data</Level_set_source>
   <Velocity_source>coupled_field</Velocity_source>
   <Velocity_field_name>Velocity</Velocity_field_name>
@@ -269,7 +268,6 @@ def write_solver_xml(args: argparse.Namespace, *, final_time: float) -> None:
   <Force_y>{-args.gravity:.12g}</Force_y>
   <Force_z>0.0</Force_z>
   <Hydrostatic_pressure_initialization>false</Hydrostatic_pressure_initialization>
-  <Hydrostatic_pressure_field_name>Pressure</Hydrostatic_pressure_field_name>
   <Viscosity model="Constant"><Value>{args.viscosity:.12g}</Value></Viscosity>
   <Output type="Spatial">
     <Velocity>true</Velocity>

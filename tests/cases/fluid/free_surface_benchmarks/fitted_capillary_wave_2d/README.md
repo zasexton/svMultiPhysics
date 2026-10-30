@@ -66,7 +66,7 @@ spatial-study frequency and damping rate, as `fitted_sloshing_2d` does.
 tension that is explicit in the interface geometry (Brackbill, Kothe and
 Zemach 1992). Here the fitted surface, its normal and the Laplace–Beltrami
 term are evaluated on the trial current configuration inside the Newton loop
-(`Moving_mesh_tangent_path=SymbolicRequired`), so the geometry is implicit.
+(the symbolic moving-mesh tangent), so the geometry is implicit.
 The protocol nonetheless respects the limit on every level. The diagnostic
 option `--dt-over-capillary-limit F` (never gated) writes a run with a step of
 about `F` times the level's limit; it is used below to check whether the

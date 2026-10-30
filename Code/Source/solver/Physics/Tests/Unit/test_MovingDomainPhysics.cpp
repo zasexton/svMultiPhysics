@@ -3070,10 +3070,7 @@ TEST(MovingDomainPhysics, MeshMotionRegistryTranslatesHarmonicSmoothingEquation)
     input.mesh = mesh->local_mesh_ptr();
     input.equation_params["Model"] = ParameterValue{true, "Harmonic"};
     input.equation_params["Field_name"] = ParameterValue{true, "mesh_displacement"};
-    input.equation_params["Operator_tag"] = ParameterValue{true, "equations"};
     input.equation_params["Kappa"] = ParameterValue{true, "2.5"};
-    input.equation_params["Moving_mesh_tangent_path"] =
-        ParameterValue{true, "symbolic"};
 
     BoundaryConditionInput wall{};
     wall.name = "wall";
@@ -3110,7 +3107,6 @@ TEST(MovingDomainPhysics, MeshMotionRegistryTranslatesPseudoElasticSmoothingEqua
     input.mesh_name = "quad";
     input.mesh = mesh->local_mesh_ptr();
     input.equation_params["Field_name"] = ParameterValue{true, "mesh_displacement"};
-    input.equation_params["Operator_tag"] = ParameterValue{true, "equations"};
     input.equation_params["Lambda_mesh"] = ParameterValue{true, "3.0"};
     input.equation_params["Mu_mesh"] = ParameterValue{true, "1.5"};
 

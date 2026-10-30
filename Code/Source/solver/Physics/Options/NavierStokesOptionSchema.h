@@ -135,7 +135,6 @@ freeSurfaceContactLineInputSchema();
 struct NavierStokesInputView {
     // Equation element.
     std::string physical_model{"OnePhaseLiquidPrescribedExteriorPressure"};
-    std::string operator_tag{"equations"};
     bool use_taylor_hood_type_basis{false};
     // Equation and domain elements.
     bool enable_ale{false};
@@ -143,8 +142,6 @@ struct NavierStokesInputView {
     ALEMeshVelocitySource mesh_velocity_source{ALEMeshVelocitySource::PrescribedData};
     std::string mesh_displacement_field{"mesh_displacement"};
     bool auto_register_mesh_displacement_field{false};
-    FE::forms::GeometryTangentPath moving_mesh_tangent_path{
-        FE::forms::GeometryTangentPath::SymbolicRequired};
     std::string momentum_source_field_name{};
     bool auto_register_momentum_source_field{true};
     std::string momentum_source_file{};
@@ -157,7 +154,6 @@ struct NavierStokesInputView {
     bool hydrostatic_pressure_initialization{false};
     FE::Real hydrostatic_pressure_reference{0.0};
     std::array<FE::Real, 3> hydrostatic_pressure_reference_point{0.0, 0.0, 0.0};
-    std::string hydrostatic_pressure_field_name{};
     std::string viscosity_model{};
     FE::Real viscosity_value{0.0};
     FE::Real limiting_high_shear_rate_viscosity{0.0};
@@ -191,7 +187,6 @@ struct IncompressibleTwoFluidInputView {
     std::optional<FE::Real> prescribed_viscous_traction_jump_x{};
     std::optional<FE::Real> prescribed_viscous_traction_jump_y{};
     std::optional<FE::Real> prescribed_viscous_traction_jump_z{};
-    std::string operator_tag{"equations"};
     bool use_taylor_hood_type_basis{false};
 };
 

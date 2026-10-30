@@ -1508,11 +1508,8 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
     if (request.target_velocity_field_name.empty()) {
       request.target_velocity_field_name = "LevelSetAdvectionVelocity";
     }
-    if (const auto operator_tag = first_defined_parameter(
-            eq_params, {"Operator_tag"})) {
-      request.operator_tag = trim_copy(*operator_tag);
-    } else if (first_defined_bool_parameter(eq_params, {"Coupled"})
-                   .value_or(false)) {
+    if (first_defined_bool_parameter(eq_params, {"Coupled"})
+            .value_or(false)) {
       request.operator_tag = "equations";
     }
     if (request.operator_tag.empty()) {

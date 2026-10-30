@@ -429,8 +429,6 @@ TEST(LevelSetEquationTranslator,
   auto input = makeMaintenanceCompatibilityInput(mesh);
   input.equation_params["Level_set_field_name"] =
       svmp::Physics::ParameterValue{true, "phi_equation"};
-  input.equation_params["Operator_tag"] =
-      svmp::Physics::ParameterValue{true, "equation_transport"};
   input.equation_params["Conservative_phase_geometry_correction_max_iterations"] =
       svmp::Physics::ParameterValue{true, "2"};
   input.default_domain.params["Level_set_field_name"] =
@@ -441,8 +439,6 @@ TEST(LevelSetEquationTranslator,
   domain.id = "liquid";
   domain.params["Level_set_field_name"] =
       svmp::Physics::ParameterValue{true, "phi_domain"};
-  domain.params["Operator_tag"] =
-      svmp::Physics::ParameterValue{true, "domain_transport"};
   domain.params["Conservative_phase_geometry_correction_max_iterations"] =
       svmp::Physics::ParameterValue{true, "7"};
   input.domains.push_back(std::move(domain));
@@ -452,7 +448,6 @@ TEST(LevelSetEquationTranslator,
 
   ASSERT_TRUE(resolved);
   EXPECT_EQ(resolved->options.level_set.field_name, "phi_domain");
-  EXPECT_EQ(resolved->options.operator_tag, "domain_transport");
   EXPECT_EQ(resolved->options.transport_form,
             svmp::FE::level_set::LevelSetTransportForm::ConservativeDivergence);
   EXPECT_EQ(
@@ -1029,8 +1024,6 @@ TEST(LevelSetEquationTranslator,
     equation.type.set_raw_value("level_set");
     equation.set_extra_parameter_value(
         "Level_set_field_name", "captured_phi");
-    equation.set_extra_parameter_value(
-        "Operator_tag", "captured_transport");
     equation.set_extra_parameter_value("Velocity_source", "constant");
     equation.set_extra_parameter_value(
         "Constant_velocity", "1.25 -0.5 0.0");
@@ -1046,8 +1039,6 @@ TEST(LevelSetEquationTranslator,
     equation.type.set_raw_value("changed_type");
     equation.set_extra_parameter_value(
         "Level_set_field_name", "changed_phi");
-    equation.set_extra_parameter_value(
-        "Operator_tag", "changed_transport");
   }
 
   ASSERT_TRUE(snapshot);
@@ -1061,17 +1052,13 @@ TEST(LevelSetEquationTranslator,
                 .at("Level_set_field_name")
                 .value,
             "captured_phi");
-  EXPECT_EQ(snapshot->installation_input.equation_params
-                .at("Operator_tag")
-                .value,
-            "captured_transport");
 
   const auto resolved =
       application::translators::level_set::resolveConfiguration(snapshot);
   ASSERT_TRUE(resolved);
   ASSERT_TRUE(resolved->input_snapshot);
   EXPECT_EQ(resolved->options.level_set.field_name, "captured_phi");
-  EXPECT_EQ(resolved->options.operator_tag, "captured_transport");
+  EXPECT_EQ(resolved->options.operator_tag, "level_set");
   EXPECT_EQ(resolved->options.velocity.constant_value,
             (std::array<svmp::FE::Real, 3>{1.25, -0.5, 0.0}));
 
@@ -1083,8 +1070,7 @@ TEST(LevelSetEquationTranslator,
             svmp::FE::INVALID_FIELD_ID);
   EXPECT_EQ(system.findFieldByName("changed_phi"),
             svmp::FE::INVALID_FIELD_ID);
-  EXPECT_TRUE(system.hasOperator("captured_transport"));
-  EXPECT_FALSE(system.hasOperator("changed_transport"));
+  EXPECT_TRUE(system.hasOperator("level_set"));
 #endif
 }
 
@@ -1098,8 +1084,6 @@ TEST(LevelSetEquationTranslator,
   auto input = makeMaintenanceCompatibilityInput(mesh);
   input.equation_params["Level_set_field_name"] =
       svmp::Physics::ParameterValue{true, "raw_phi"};
-  input.equation_params["Operator_tag"] =
-      svmp::Physics::ParameterValue{true, "raw_transport"};
   input.equation_params["Constant_velocity"] =
       svmp::Physics::ParameterValue{true, "0.75 -0.25 0.0"};
 
@@ -1126,7 +1110,7 @@ TEST(LevelSetEquationTranslator,
       *resolved, system);
   ASSERT_TRUE(module);
   EXPECT_NE(system.findFieldByName("raw_phi"), svmp::FE::INVALID_FIELD_ID);
-  EXPECT_TRUE(system.hasOperator("raw_transport"));
+  EXPECT_TRUE(system.hasOperator("level_set"));
 #endif
 }
 
@@ -1205,22 +1189,16 @@ TEST(LevelSetEquationTranslator,
   input.mesh = mesh->local_mesh_ptr();
   input.equation_params["Level_set_field_name"] =
       svmp::Physics::ParameterValue{true, "phi_equation"};
-  input.equation_params["Operator_tag"] =
-      svmp::Physics::ParameterValue{true, "equation_transport"};
   input.equation_params["Velocity_source"] =
       svmp::Physics::ParameterValue{true, "constant"};
   input.equation_params["Constant_velocity"] =
       svmp::Physics::ParameterValue{true, "1.25 -0.5 0.0"};
   input.default_domain.params["Level_set_field_name"] =
       svmp::Physics::ParameterValue{true, "phi_default_domain"};
-  input.default_domain.params["Operator_tag"] =
-      svmp::Physics::ParameterValue{true, "default_transport"};
   svmp::Physics::DomainInput domain{};
   domain.id = "domain";
   domain.params["Level_set_field_name"] =
       svmp::Physics::ParameterValue{true, "phi_resolved"};
-  domain.params["Operator_tag"] =
-      svmp::Physics::ParameterValue{true, "resolved_transport"};
   domain.params["Transport_form"] =
       svmp::Physics::ParameterValue{true, "conservative_divergence"};
   input.domains.push_back(std::move(domain));
@@ -1254,7 +1232,7 @@ TEST(LevelSetEquationTranslator,
             svmp::FE::INVALID_FIELD_ID);
   EXPECT_EQ(system.findFieldByName("phi_default_domain"),
             svmp::FE::INVALID_FIELD_ID);
-  EXPECT_TRUE(system.hasOperator("resolved_transport"));
+  EXPECT_TRUE(system.hasOperator("level_set"));
   EXPECT_TRUE(formulationRecordsContain(
       system, FormExprType::BoundaryIntegral));
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Divergence));
@@ -1283,8 +1261,6 @@ TEST(LevelSetEquationTranslator,
       svmp::Physics::ParameterValue{true, "true"};
   input.equation_params["Conservative_phase_field_name"] =
       svmp::Physics::ParameterValue{true, "phase_resolved"};
-  input.equation_params["Operator_tag"] =
-      svmp::Physics::ParameterValue{true, "resolved_pair"};
 
   const auto expected_mesh = input.mesh.get();
   auto resolved =
@@ -1301,7 +1277,7 @@ TEST(LevelSetEquationTranslator,
   EXPECT_EQ(dependency->interface_marker, 71);
   EXPECT_EQ(dependency->level_set_field_name, "level_set_resolved");
   EXPECT_EQ(dependency->conservative_phase_field_name, "phase_resolved");
-  EXPECT_EQ(dependency->operator_tag, "resolved_pair");
+  EXPECT_EQ(dependency->operator_tag, "level_set");
 
   svmp::FE::systems::FESystem system(mesh);
   application::translators::level_set::
@@ -1345,7 +1321,7 @@ TEST(LevelSetEquationTranslator,
   auto module = application::translators::level_set::createModule(
       *resolved, system);
   ASSERT_TRUE(module);
-  EXPECT_TRUE(system.hasOperator("resolved_pair"));
+  EXPECT_TRUE(system.hasOperator("level_set"));
 #endif
 }
 
@@ -1410,8 +1386,6 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
       svmp::Physics::ParameterValue{true, "prescribed_data"};
   input.equation_params["Transport_form"] =
       svmp::Physics::ParameterValue{true, "conservative_divergence"};
-  input.equation_params["Operator_tag"] =
-      svmp::Physics::ParameterValue{true, "transport"};
   input.equation_params["Enable_SUPG"] =
       svmp::Physics::ParameterValue{true, "true"};
   input.equation_params["SUPG_tau_scale"] =
@@ -1449,7 +1423,7 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
             svmp::FE::systems::FieldSourceKind::Unknown);
   EXPECT_EQ(system.fieldRecord(velocity).source_kind,
             svmp::FE::systems::FieldSourceKind::PrescribedData);
-  EXPECT_TRUE(system.hasOperator("transport"));
+  EXPECT_TRUE(system.hasOperator("level_set"));
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InterfaceIntegral));
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellDiameter));
@@ -1458,7 +1432,7 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
   ASSERT_TRUE(artifact.has_value());
   EXPECT_EQ(artifact->component, "level_set_transport");
   constexpr std::string_view expected_without_phase =
-      R"json({"artifact_schema_version":1,"component":"level_set_transport","capability_label":"one_phase_interface_transport_nonlocal_conservation","units":{"system":"consistent_solver_units","length":"solver_length","time":"solver_time","volume":"solver_volume"},"operator":"transport","transport_form":"ConservativeDivergence","conservation_diagnostic":"conservative_divergence_level_set_advection_not_locally_conservative","level_set":{"field":"phi","source":"Unknown","auto_register":true},"advection_velocity":{"field":"advecting_velocity","source":"PrescribedData","auto_register":true,"constant_value":[0,0,0],"algebraic_extension_source_field":"","dependency_direction":"physical_velocity_to_extension_to_level_set","physical_momentum_coupling_allowed":false,"map_guard_policy":"fixed_bounded_application_policy"},"supg":{"enabled":true,"tau_scale":0.25,"velocity_epsilon":9.9999999999999998e-13,"transient_scale":1.5},"interface_kinematic":{"enabled":true,"interface_marker":77,"weight_scale":1.5},"maintenance_transaction":{"ordering":"transport_then_geometry_refresh"},"boundaries":{"inflow":[{"marker":4,"value":0.5,"penalty_scale":2}],"outflow":[{"marker":5}]}})json";
+      R"json({"artifact_schema_version":1,"component":"level_set_transport","capability_label":"one_phase_interface_transport_nonlocal_conservation","units":{"system":"consistent_solver_units","length":"solver_length","time":"solver_time","volume":"solver_volume"},"operator":"level_set","transport_form":"ConservativeDivergence","conservation_diagnostic":"conservative_divergence_level_set_advection_not_locally_conservative","level_set":{"field":"phi","source":"Unknown","auto_register":true},"advection_velocity":{"field":"advecting_velocity","source":"PrescribedData","auto_register":true,"constant_value":[0,0,0],"algebraic_extension_source_field":"","dependency_direction":"physical_velocity_to_extension_to_level_set","physical_momentum_coupling_allowed":false,"map_guard_policy":"fixed_bounded_application_policy"},"supg":{"enabled":true,"tau_scale":0.25,"velocity_epsilon":9.9999999999999998e-13,"transient_scale":1.5},"interface_kinematic":{"enabled":true,"interface_marker":77,"weight_scale":1.5},"maintenance_transaction":{"ordering":"transport_then_geometry_refresh"},"boundaries":{"inflow":[{"marker":4,"value":0.5,"penalty_scale":2}],"outflow":[{"marker":5}]}})json";
   std::string expected{expected_without_phase};
   const auto schema_version = expected.find("\"artifact_schema_version\":1");
   ASSERT_NE(schema_version, std::string::npos);
@@ -2440,8 +2414,6 @@ TEST(LevelSetEquationTranslator,
   fluid_input.equation_type = "fluid";
   fluid_input.mesh_name = "quad";
   fluid_input.mesh = mesh->local_mesh_ptr();
-  fluid_input.equation_params["Operator_tag"] =
-      svmp::Physics::ParameterValue{true, "equations"};
   fluid_input.default_domain.params["Density"] =
       svmp::Physics::ParameterValue{true, "1.0"};
   fluid_input.default_domain.params["Viscosity.model"] =
@@ -2570,8 +2542,6 @@ TEST(LevelSetEquationTranslator,
   fluid_input.equation_type = "fluid";
   fluid_input.mesh_name = "quad";
   fluid_input.mesh = mesh->local_mesh_ptr();
-  fluid_input.equation_params["Operator_tag"] =
-      svmp::Physics::ParameterValue{true, "equations"};
   fluid_input.default_domain.params["Density"] =
       svmp::Physics::ParameterValue{true, "1.0"};
   fluid_input.default_domain.params["Viscosity.model"] =

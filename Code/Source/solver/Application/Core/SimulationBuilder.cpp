@@ -959,22 +959,6 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
   if (opts.right_preconditioner == svmp::FE::backends::RightPreconditionerType::Simple) {
     opts.right_preconditioner_constraint_block = "Pressure";
   }
-  opts.amg_smoother_degree = eq->linear_solver.amg_smoother_degree.value();
-  opts.amg_coarse_nodes = eq->linear_solver.amg_coarse_nodes.value();
-  opts.amg_max_levels = eq->linear_solver.amg_max_levels.value();
-  opts.amg_lambda_iterations = eq->linear_solver.amg_lambda_iterations.value();
-  opts.amg_strength_threshold = eq->linear_solver.amg_strength_threshold.value();
-  {
-    const auto prolongator = lower_copy(eq->linear_solver.amg_prolongator.value());
-    if (prolongator == "smoothed" || prolongator == "sa") {
-      opts.amg_smooth_prolongator = true;
-    } else if (prolongator == "plain" || prolongator == "unsmoothed" || prolongator == "tentative") {
-      opts.amg_smooth_prolongator = false;
-    } else {
-      throw std::runtime_error("[svMultiPhysics::Application] Unsupported <AMG_prolongator> '" +
-                               eq->linear_solver.amg_prolongator.value() + "'. Supported values: smoothed, plain.");
-    }
-  }
 
   // Explicit saddle-point block names: env vars or programmatic SolverOptions.
   // SVMP_MOMENTUM_BLOCK=<name> and SVMP_CONSTRAINT_BLOCK=<name> override the heuristic.

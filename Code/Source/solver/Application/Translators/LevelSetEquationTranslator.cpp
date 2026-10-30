@@ -1149,11 +1149,10 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
                                 observations,
                             std::string_view source_layer)
 {
-  if (const auto value = get_defined_string(params, {"Operator_tag"})) {
-    options.operator_tag = *value;
-  }
+  // A coupled transport joins the monolithic operator; otherwise it keeps
+  // its own operator (the LevelSetTransportOptions default).
   if (const auto value = get_defined_bool(params, {"Coupled"})) {
-    if (*value && !get_defined_string(params, {"Operator_tag"})) {
+    if (*value) {
       options.operator_tag = "equations";
     }
   }

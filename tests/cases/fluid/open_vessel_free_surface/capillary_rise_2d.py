@@ -324,7 +324,6 @@ def _legacy_solver_xml(steps: int, time_step_size: float) -> str:
   <Max_iterations>4</Max_iterations>
   <Tolerance>1.0e-6</Tolerance>
   <Level_set_field_name>phi</Level_set_field_name>
-  <Operator_tag>equations</Operator_tag>
   <Level_set_source>prescribed_data</Level_set_source>
   <Velocity_source>prescribed_data</Velocity_source>
   <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
@@ -494,7 +493,6 @@ def _d4_solver_xml(steps: int,
   <Tolerance>1.0e-4</Tolerance>
   <Module_options>jit=true; jit_specialization=true</Module_options>
   <Level_set_field_name>phi</Level_set_field_name>
-  <Operator_tag>equations</Operator_tag>
   <Level_set_source>prescribed_data</Level_set_source>
   <Velocity_source>prescribed_data</Velocity_source>
   <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>

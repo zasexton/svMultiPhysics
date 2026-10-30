@@ -170,7 +170,6 @@ bool is_oop_equation_extension_parameter(const std::string& name)
     "Mesh_velocity_source",
     "Mesh_displacement_field",
     "Auto_register_mesh_displacement_field",
-    "Moving_mesh_tangent_path",
     "Free_surface_physical_model",
     "Material_interface_marker",
     "Negative_phase_density",
@@ -268,10 +267,8 @@ bool is_oop_equation_extension_parameter(const std::string& name)
     "Active_domain",
     "Allow_corner_linearized_cut_geometry",
     "Model",
-    "Operator_tag",
     "Auto_register_field",
     "Bind_as_mesh_displacement",
-    "Geometry_tangent_path",
     "Kappa",
     "Harmonic_quantity",
     "Stiffness",
@@ -1986,7 +1983,6 @@ DomainParameters::DomainParameters()
   set_parameter("Hydrostatic_pressure_reference", 0.0, !required, hydrostatic_pressure_reference);
   set_parameter("Hydrostatic_pressure_reference_point", {0.0, 0.0, 0.0}, !required,
                 hydrostatic_pressure_reference_point);
-  set_parameter("Hydrostatic_pressure_field_name", "", !required, hydrostatic_pressure_field_name);
 
   set_parameter("Isotropic_conductivity", 0.0, !required, isotropic_conductivity);
 
@@ -3385,12 +3381,6 @@ LinearSolverParameters::LinearSolverParameters()
   set_parameter("NS_Momentum_approximation", std::string("ilu-k"), !required, ns_momentum_approximation);
   set_parameter("NS_Use_coupled_outer_FGMRES", false, !required, ns_use_coupled_outer_fgmres);
   set_parameter("Right_preconditioner", std::string("none"), !required, right_preconditioner);
-  set_parameter("AMG_smoother_degree", 3, !required, amg_smoother_degree);
-  set_parameter("AMG_coarse_nodes", 600, !required, amg_coarse_nodes);
-  set_parameter("AMG_max_levels", 10, !required, amg_max_levels);
-  set_parameter("AMG_prolongator", std::string("plain"), !required, amg_prolongator);
-  set_parameter("AMG_lambda_iterations", 0, !required, amg_lambda_iterations);
-  set_parameter("AMG_strength_threshold", 0.0, !required, amg_strength_threshold);
   set_parameter("Preconditioner_reuse", false, !required, preconditioner_reuse);
 
   //set_parameter("Preconditioner", "", !required, preconditioner);

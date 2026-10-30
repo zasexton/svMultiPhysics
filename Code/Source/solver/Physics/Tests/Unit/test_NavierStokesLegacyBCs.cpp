@@ -843,8 +843,6 @@ TEST(NavierStokesLegacyBCs,
     const auto expect_supported = [&](std::string model_key) {
         auto input = make_input();
         input.mesh_name = "gas_two_phase_mesh";
-        input.equation_params["Operator_tag"] =
-            defined("gas_diagnostic");
         if (!model_key.empty()) {
             input.equation_params[model_key] =
                 defined("OnePhaseLiquidPrescribedExteriorPressure");
@@ -858,7 +856,7 @@ TEST(NavierStokesLegacyBCs,
         ASSERT_TRUE(artifact.has_value()) << model_key;
         EXPECT_NE(
             artifact->json.find(
-                "\"operator\":\"gas_diagnostic\""),
+                "\"operator\":\"equations\""),
             std::string::npos)
             << model_key;
         EXPECT_NE(
@@ -2478,7 +2476,6 @@ TEST(NavierStokesLegacyBCs,
     input.equation_type = "fluid";
     input.mesh_name = "single_tetra";
     input.mesh = mesh->local_mesh_ptr();
-    input.equation_params["Operator_tag"] = defined("equations");
     input.default_domain.params["Density"] = defined("1.0");
     input.default_domain.params["Viscosity.model"] = defined("Constant");
     input.default_domain.params["Viscosity.Value"] = defined("0.01");
@@ -2584,7 +2581,6 @@ TEST(NavierStokesLegacyBCs,
     input.equation_type = "fluid";
     input.mesh_name = "single_tetra";
     input.mesh = mesh->local_mesh_ptr();
-    input.equation_params["Operator_tag"] = defined("equations");
     input.default_domain.params["Density"] = defined("1.0");
     input.default_domain.params["Viscosity.model"] = defined("Constant");
     input.default_domain.params["Viscosity.Value"] = defined("0.01");
@@ -2717,7 +2713,6 @@ TEST(NavierStokesLegacyBCs,
         input.mesh_name = "single_tetra";
         input.mesh = mesh->local_mesh_ptr();
         input.derived_requests.conservative_balance_diagnostics = requested;
-        input.equation_params["Operator_tag"] = defined("equations");
         input.default_domain.params["Density"] = defined("1.0");
         input.default_domain.params["Viscosity.model"] = defined("Constant");
         input.default_domain.params["Viscosity.Value"] = defined("0.01");
@@ -2826,7 +2821,6 @@ TEST(NavierStokesLegacyBCs, ResolvedArtifactSectionRecordsTheSourceOfEveryFreeSu
     input.equation_type = "fluid";
     input.mesh_name = "single_tetra";
     input.mesh = mesh->local_mesh_ptr();
-    input.equation_params["Operator_tag"] = defined("equations");
     input.default_domain.params["Density"] = defined("1.0");
     input.default_domain.params["Viscosity.model"] = defined("Constant");
     input.default_domain.params["Viscosity.Value"] = defined("0.01");
@@ -2938,9 +2932,6 @@ TEST(NavierStokesLegacyBCs, ResolvedArtifactSectionRecordsTheSourceOfEveryFreeSu
     const auto expect_in = [](const std::string& section, std::string_view entry) {
         EXPECT_NE(section.find(entry), std::string::npos) << entry << "\n" << section;
     };
-    expect_in(equation_section,
-              "\"Operator_tag\":{\"value\":\"equations\",\"source\":\"explicit\","
-              "\"spelling\":\"Operator_tag\"}");
     expect_in(equation_section, "\"Enable_ALE\":{\"value\":\"false\",\"source\":\"default\"}");
     expect_in(equation_section,
               "\"Mesh_velocity_field\":{\"value\":\"domain_mesh_velocity\",\"source\":\"explicit\","
@@ -2988,9 +2979,6 @@ TEST(NavierStokesLegacyBCs, NavierStokesEquationAndDomainKeysResolveThroughTheSc
         {{{"Mesh_velocity_source", "sideways"}}, {},
          "[Navier-Stokes equation] Mesh_velocity_source: expected one of "
          "prescribed_data | coupled_displacement, got 'sideways'"},
-        {{{"Moving_mesh_tangent_path", "sideways"}}, {},
-         "[Navier-Stokes equation] Moving_mesh_tangent_path: expected one of "
-         "SymbolicRequired | ADReference | SymbolicWithADCheck | Auto, got 'sideways'"},
         {{}, {{"Viscosity.Value", "0"}},
          "[svMultiPhysics::Physics] Constant viscosity must be > 0 for the new "
          "solver Navier-Stokes module. Set <Use_new_OOP_solver>false"

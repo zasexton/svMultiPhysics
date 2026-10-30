@@ -1165,7 +1165,6 @@ TEST(EquationTranslatorFreeSurface,
                             "\"input\":\"1000.0\"}"},
            std::string_view{"\"Prescribed_viscous_traction_jump_z\":{\"value\":\"none\","
                             "\"source\":\"default\"}"},
-           std::string_view{"\"Operator_tag\":{\"value\":\"equations\",\"source\":\"default\"}"},
            std::string_view{",\"domain\":{\"Force_x\":{\"value\":\"0\",\"source\":\"default\"}"},
        }) {
     EXPECT_NE(resolved.find(entry), std::string::npos) << entry << "\n" << resolved;
@@ -1845,7 +1844,7 @@ TEST(EquationTranslatorFreeSurface,
     std::string_view xml;
     std::string_view expected_parameter;
   };
-  const std::array<UnsupportedControl, 10> unsupported_controls{{
+  const std::array<UnsupportedControl, 9> unsupported_controls{{
       {"density", "<Density>997.0</Density>", "Density"},
       {"fluid_density", "<Fluid_density>997.0</Fluid_density>",
        "Fluid_density"},
@@ -1870,9 +1869,6 @@ TEST(EquationTranslatorFreeSurface,
       {"hydrostatic_reference",
        "<Hydrostatic_pressure_reference>12.0</Hydrostatic_pressure_reference>",
        "Hydrostatic_pressure_reference"},
-      {"hydrostatic_field",
-       "<Hydrostatic_pressure_field_name>pressure</Hydrostatic_pressure_field_name>",
-       "Hydrostatic_pressure_field_name"},
   }};
 
   for (const auto& control : unsupported_controls) {

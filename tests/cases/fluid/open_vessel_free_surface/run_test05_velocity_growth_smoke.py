@@ -1528,7 +1528,6 @@ def write_mini_solver_xml(case_dir: Path,
   <Max_iterations>2</Max_iterations>
   <Tolerance>1.0e-4</Tolerance>
   <Level_set_field_name>phi</Level_set_field_name>
-  <Operator_tag>equations</Operator_tag>
   <Level_set_source>prescribed_data</Level_set_source>
   <Velocity_source>constant</Velocity_source>
   <Constant_velocity>0.0 0.0 0.0</Constant_velocity>
@@ -1822,7 +1821,6 @@ def configure_sessile_solver_xml(case_dir: Path,
     set_text(general, "Time_step_size", f"{time_step_size:.16g}")
 
     level_set = level_set_equation(root)
-    set_text(level_set, "Operator_tag", "equations")
     # PrescribedData denotes mesh-field initialization only; the transport
     # installer still registers phi as an unknown owned by the time integrator.
     set_text(level_set, "Level_set_source", "prescribed_data")
@@ -2874,7 +2872,6 @@ def write_curved_tet3d_solver_xml(case_dir: Path,
   <Max_iterations>4</Max_iterations>
   <Tolerance>1.0e-4</Tolerance>
   <Level_set_field_name>phi</Level_set_field_name>
-  <Operator_tag>equations</Operator_tag>
   <Level_set_source>prescribed_data</Level_set_source>
   <Velocity_source>coupled_field</Velocity_source>
   <Velocity_field_name>Velocity</Velocity_field_name>

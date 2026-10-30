@@ -712,7 +712,6 @@ def write_solver_xml(
     use_blockschur_solver: bool = False,
     use_direct_fluid_solver: bool = False,
     include_pressure_constraints: bool = True,
-    hydrostatic_pressure_field_name: str | None = None,
     momentum_source_file_path: str | None = None,
     rotating_frame_angular_velocity_file_path: str | None = None,
     advection_velocity_extension_method: str | None = None,
@@ -837,11 +836,6 @@ def write_solver_xml(
     <NS_Schur_preconditioner>blockdiag-l</NS_Schur_preconditioner>
     <NS_Momentum_approximation>ilu-k</NS_Momentum_approximation>
     <NS_Use_coupled_outer_FGMRES>true</NS_Use_coupled_outer_FGMRES>"""
-    hydrostatic_pressure_field_block = (
-        f"\n  <Hydrostatic_pressure_field_name>{hydrostatic_pressure_field_name}</Hydrostatic_pressure_field_name>"
-        if hydrostatic_pressure_field_name
-        else ""
-    )
     pressure_constraint_block = (
         """
   <Node_pressure_constraints>
@@ -893,7 +887,6 @@ def write_solver_xml(
   <Mesh_velocity_field>mesh_velocity</Mesh_velocity_field>
   <Mesh_displacement_field>mesh_displacement</Mesh_displacement_field>
   <Auto_register_mesh_displacement_field>true</Auto_register_mesh_displacement_field>
-  <Moving_mesh_tangent_path>SymbolicRequired</Moving_mesh_tangent_path>
 
   <Density>{WATER_DENSITY}</Density>
   <Force_x>0.0</Force_x>
@@ -901,7 +894,7 @@ def write_solver_xml(
   <Force_z>0.0</Force_z>{momentum_source_block}{rotating_frame_angular_velocity_block}
   <Hydrostatic_pressure_initialization>true</Hydrostatic_pressure_initialization>
   <Hydrostatic_pressure_reference>0.0</Hydrostatic_pressure_reference>
-  <Hydrostatic_pressure_reference_point>0.0 {fill_height:.6g} 0.0</Hydrostatic_pressure_reference_point>{hydrostatic_pressure_field_block}{pressure_constraint_block}
+  <Hydrostatic_pressure_reference_point>0.0 {fill_height:.6g} 0.0</Hydrostatic_pressure_reference_point>{pressure_constraint_block}
   <Viscosity model="Constant">
     <Value>{WATER_VISCOSITY}</Value>
   </Viscosity>
@@ -944,9 +937,7 @@ def write_solver_xml(
   <Module_options>{jit_module_options}</Module_options>
   <Model>Harmonic</Model>
   <Field_name>mesh_displacement</Field_name>
-  <Operator_tag>equations</Operator_tag>
   <Kappa>1.0</Kappa>
-  <Moving_mesh_tangent_path>SymbolicRequired</Moving_mesh_tangent_path>
 
 {wall_bc_blocks}
 </Add_equation>"""
@@ -960,7 +951,6 @@ def write_solver_xml(
   <Module_options>{jit_module_options}</Module_options>
 
   <Level_set_field_name>phi</Level_set_field_name>
-  <Operator_tag>equations</Operator_tag>
   <Level_set_source>prescribed_data</Level_set_source>
 {level_set_velocity_block}
   <Enable_SUPG>true</Enable_SUPG>
@@ -1003,7 +993,7 @@ def write_solver_xml(
   <Force_z>0.0</Force_z>{momentum_source_block}{rotating_frame_angular_velocity_block}
   <Hydrostatic_pressure_initialization>true</Hydrostatic_pressure_initialization>
   <Hydrostatic_pressure_reference>0.0</Hydrostatic_pressure_reference>
-  <Hydrostatic_pressure_reference_point>0.0 {fill_height:.6g} 0.0</Hydrostatic_pressure_reference_point>{hydrostatic_pressure_field_block}{pressure_constraint_block}
+  <Hydrostatic_pressure_reference_point>0.0 {fill_height:.6g} 0.0</Hydrostatic_pressure_reference_point>{pressure_constraint_block}
   <Viscosity model="Constant">
     <Value>{WATER_VISCOSITY}</Value>
   </Viscosity>
@@ -1144,7 +1134,6 @@ def write_case(
     use_blockschur_solver: bool = False,
     use_direct_fluid_solver: bool = False,
     include_pressure_constraints: bool = True,
-    hydrostatic_pressure_field_name: str | None = None,
     momentum_source_file_path: str | None = None,
     rotating_frame_angular_velocity_file_path: str | None = None,
     advection_velocity_extension_method: str | None = None,
@@ -1213,7 +1202,6 @@ def write_case(
         use_blockschur_solver=use_blockschur_solver,
         use_direct_fluid_solver=use_direct_fluid_solver,
         include_pressure_constraints=include_pressure_constraints,
-        hydrostatic_pressure_field_name=hydrostatic_pressure_field_name,
         momentum_source_file_path=momentum_source_file_path,
         rotating_frame_angular_velocity_file_path=rotating_frame_angular_velocity_file_path,
         advection_velocity_extension_method=advection_velocity_extension_method,
@@ -1369,7 +1357,6 @@ def generate_spheric_test10(*, allow_overlapping_face_files: bool = False) -> No
         active_domain="LevelSetNegative",
         use_direct_fluid_solver=True,
         include_pressure_constraints=False,
-        hydrostatic_pressure_field_name="Pressure",
         advection_velocity_extension_method="pde_harmonic",
         momentum_source_file_path="bc/test10_lateral_water_1x_roll_body_force.dat",
         rotating_frame_angular_velocity_file_path="bc/test10_lateral_water_1x_roll_angular_velocity.dat",
@@ -1516,7 +1503,6 @@ def generate_spheric_test05(*, allow_overlapping_face_files: bool = False) -> No
             enable_cut_cell_stabilization=True,
             use_direct_fluid_solver=True,
             include_pressure_constraints=False,
-            hydrostatic_pressure_field_name="Pressure",
             advection_velocity_extension_method="pde_harmonic",
             enable_adaptive_time_loop=True,
             newton_line_search_fail_on_no_reduction=True,
@@ -1634,7 +1620,6 @@ def generate_spheric_test02(*, allow_overlapping_face_files: bool = False) -> No
         enable_cut_cell_stabilization=True,
         use_direct_fluid_solver=True,
         include_pressure_constraints=False,
-        hydrostatic_pressure_field_name="Pressure",
         advection_velocity_extension_method="pde_harmonic",
         enable_adaptive_time_loop=True,
         adaptive_time_loop_min_dt="1.0e-7",
