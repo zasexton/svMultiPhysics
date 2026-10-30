@@ -63,7 +63,7 @@ void expectText(const tinyxml2::XMLElement& parent,
 
 } // namespace
 
-TEST(OpenVesselStabilizationMetadata, D18D38UseActiveCutMetadataScale)
+TEST(OpenVesselStabilizationMetadata, D18D38UseActiveCutStabilization)
 {
   const auto root_dir =
       repositoryRoot() / "tests/cases/fluid/open_vessel_free_surface" /
@@ -90,12 +90,12 @@ TEST(OpenVesselStabilizationMetadata, D18D38UseActiveCutMetadataScale)
     expectText(free_surface, "Implementation", "UnfittedLevelSet");
     expectText(free_surface, "Generated_interface_domain_id", "open_vessel_surface");
     expectText(free_surface, "Active_domain", "LevelSetNegative");
-    expectText(free_surface, "Active_domain_method", "CutVolume");
     expectText(free_surface, "Enable_cut_cell_stabilization", "true");
-    // The cut metadata scale is intentionally off: the ghost-penalty
-    // coefficients carry the transient scaling (mu + rho*h^2/dt) directly,
-    // and the metadata multiplier is unnecessary on top of it.
-    expectText(free_surface, "Use_cut_metadata_scale", "false");
+    // The ghost-penalty coefficients carry the transient scaling
+    // (mu + rho*h^2/dt) directly; there is no cut metadata scale on top of
+    // them, and the decks state none of the removed keys.
+    EXPECT_EQ(free_surface.FirstChildElement("Active_domain_method"), nullptr);
+    EXPECT_EQ(free_surface.FirstChildElement("Use_cut_metadata_scale"), nullptr);
     // The velocity ghost penalty is retired (small-cut aggregation replaces
     // it); only the pressure jump penalty remains configurable.
     EXPECT_EQ(free_surface.FirstChildElement("Cut_cell_velocity_gradient_penalty"),

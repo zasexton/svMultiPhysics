@@ -174,14 +174,6 @@ void resolve_contact_line_wall_faces(svmp::Physics::ParameterMap& params,
   if (faces == nullptr) {
     return;
   }
-  if (first_defined_param(
-          params,
-          {"Contact_line_wall_markers",
-           "Contact_line_wall_marker"}) != nullptr) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Free-surface contact-line wall input must use either wall face names or wall markers, not both.");
-  }
-
   const auto entries = split_face_entries(faces->value);
   if (entries.empty()) {
     throw std::runtime_error(
@@ -335,11 +327,6 @@ svmp::Physics::EquationModuleInput EquationTranslator::buildInput(
     application::core::oopCout() << "[svMultiPhysics::Application] EquationTranslator: module_options='"
                                  << input.module_options << "'" << std::endl;
   }
-  if (eq_params.module_options_file_path.defined()) {
-    input.module_options_file_path = eq_params.module_options_file_path.value();
-    application::core::oopCout() << "[svMultiPhysics::Application] EquationTranslator: module_options_file_path='"
-                                 << input.module_options_file_path << "'" << std::endl;
-  }
 
   if (eq_params.node_pressure_constraints.value_set) {
     const auto id_type = eq_params.node_pressure_constraints.id_type.value();
@@ -405,7 +392,7 @@ svmp::Physics::EquationModuleInput EquationTranslator::buildInput(
       bc_in.name = bc->name.value();
       bc_in.boundary_marker = mesh->label_from_name(bc_in.name);
       bc_in.params = snapshot_params(*bc);
-      if (is_unfitted_free_surface_bc(bc_in.params)) {
+      if (defined_param_token(bc_in.params, "Type") == "freesurface") {
         resolve_contact_line_wall_faces(bc_in.params, *mesh);
       }
       application::core::oopCout() << "[svMultiPhysics::Application]   BC '" << bc_in.name

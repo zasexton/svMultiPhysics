@@ -1982,7 +1982,6 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       <Interface_marker>723</Interface_marker>
       <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -2409,14 +2408,8 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                                   LevelSetPositive
                             : channel_ns::FreeSurfaceActiveDomain::
                                   LevelSetNegative,
-                    .active_domain_method =
-                        channel_ns::FreeSurfaceActiveDomainMethod::
-                            CutVolume,
                     .external_pressure = 0.0,
                     .surface_tension = 1.0,
-                    .surface_tension_form =
-                        channel_ns::FreeSurfaceSurfaceTensionForm::
-                            SurfaceStress,
                     .small_cut_aggregation = support_scoped,
                 };
         free_surface.contact_lines.push_back(
@@ -2618,15 +2611,13 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
       <Active_domain>)xml") + active_domain_name +
             R"xml(</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
       <Small_cut_aggregation>)xml" +
             (support_scoped ? "true" : "false") +
             R"xml(</Small_cut_aggregation>
       <Surface_tension>1.0</Surface_tension>
-      <Surface_tension_form>SurfaceStress</Surface_tension_form>
       <Contact_line_model>DynamicContactAngle</Contact_line_model>
       <Contact_angle_degrees>90.0</Contact_angle_degrees>
-      <Contact_line_wall_markers>7241;7242</Contact_line_wall_markers>
+      <Contact_line_wall_face>first_contact_wall; second_contact_wall</Contact_line_wall_face>
       <Contact_line_wall_normal>)xml" + contact_wall_normals +
             R"xml(</Contact_line_wall_normal>
       <Contact_line_mobility>1.0</Contact_line_mobility>
@@ -3659,14 +3650,8 @@ void runHydrostaticFixedGaugeMpiCase(
                             LevelSetPositive
                       : channel_ns::FreeSurfaceActiveDomain::
                             LevelSetNegative,
-              .active_domain_method =
-                  channel_ns::FreeSurfaceActiveDomainMethod::
-                      CutVolume,
               .external_pressure = external_pressure,
               .surface_tension = 1.0,
-              .surface_tension_form =
-                  channel_ns::FreeSurfaceSurfaceTensionForm::
-                      SurfaceStress,
               .small_cut_aggregation = false,
   };
   for (const auto& wall : contact_walls) {
@@ -3958,17 +3943,17 @@ void runHydrostaticFixedGaugeMpiCase(
   EXPECT_EQ(global_owned_row_count,
             static_cast<unsigned long long>(solution_size));
 
-  std::ostringstream contact_wall_markers_xml;
+  std::ostringstream contact_wall_faces_xml;
   std::ostringstream contact_wall_normals_xml;
   for (std::size_t wall_index = 0u;
        wall_index < contact_walls.size();
        ++wall_index) {
     if (wall_index > 0u) {
-      contact_wall_markers_xml << ';';
+      contact_wall_faces_xml << "; ";
       contact_wall_normals_xml << "; ";
     }
     const auto& wall = contact_walls[wall_index];
-    contact_wall_markers_xml << wall.marker;
+    contact_wall_faces_xml << "contact_wall_" << wall.marker;
     for (int component = 0; component < 3; ++component) {
       if (component > 0) {
         contact_wall_normals_xml << ' ';
@@ -4004,18 +3989,16 @@ void runHydrostaticFixedGaugeMpiCase(
                 << (positive_side ? "LevelSetPositive"
                                   : "LevelSetNegative")
                 << R"xml(</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
       <Small_cut_aggregation>false</Small_cut_aggregation>
       <External_pressure>)xml"
                 << external_pressure
                 << R"xml(</External_pressure>
       <Surface_tension>1.0</Surface_tension>
-      <Surface_tension_form>SurfaceStress</Surface_tension_form>
       <Contact_line_model>DynamicContactAngle</Contact_line_model>
       <Contact_angle_degrees>90.0</Contact_angle_degrees>
-      <Contact_line_wall_markers>)xml"
-                << contact_wall_markers_xml.str()
-                << R"xml(</Contact_line_wall_markers>
+      <Contact_line_wall_face>)xml"
+                << contact_wall_faces_xml.str()
+                << R"xml(</Contact_line_wall_face>
       <Contact_line_wall_normal>)xml"
                 << contact_wall_normals_xml.str()
                 << R"xml(</Contact_line_wall_normal>
@@ -4970,7 +4953,6 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       <Interface_marker>721</Interface_marker>
       <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>

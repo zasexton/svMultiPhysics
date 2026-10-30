@@ -117,16 +117,6 @@ enum class NavierStokesPhysicalModel {
   IncompressibleTwoFluid,
 };
 
-struct FreeSurfaceSchemaContract {
-  int version{
-      svmp::Physics::formulations::navier_stokes::
-          IncompressibleNavierStokesVMSOptions::
-              current_configuration_schema_version};
-};
-
-FreeSurfaceSchemaContract resolve_free_surface_schema_contract(
-    const svmp::Physics::ParameterMap& params);
-
 NavierStokesPhysicalModel
 validate_and_resolve_free_surface_physical_model(
     const svmp::Physics::EquationModuleInput& input);

@@ -1281,8 +1281,8 @@ void addCutGeometryLifecycleMemory(
 // the domain every downstream consumer reads (snapshot, active boundary,
 // context, constraints, assembly, ...), to find which consumers need cut data
 // how deep into the halo; it acts after the production restriction to
-// <Generated_cut_ghost_layers> (set that to -1 to audit against every
-// layer).  It is an audit tool.
+// ActiveCutVolumeRequest::generated_cut_ghost_layers (set that to -1 to audit
+// against every layer).  It is an audit tool.
 constexpr int kGhostLayerAuditBuckets = 16;
 
 } // namespace

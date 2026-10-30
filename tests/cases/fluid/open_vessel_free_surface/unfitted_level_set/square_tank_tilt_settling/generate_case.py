@@ -31,14 +31,7 @@ DEFAULT_TIME_STEP = 1.0e-3
 DEFAULT_TIME_STEPS = 1000
 DEFAULT_INITIAL_STATE = "settling"
 DEFAULT_VERIFICATION_PROFILE = "auto"
-DEFAULT_USE_CUT_METADATA_SCALE = False
-DEFAULT_CUT_CELL_VELOCITY_GRADIENT_PENALTY = 1.0
 DEFAULT_CUT_CELL_PRESSURE_GRADIENT_PENALTY = 1.0
-DEFAULT_CUT_CELL_METADATA_SCALE_CAP = None
-
-
-def xml_bool(value: bool) -> str:
-    return "true" if value else "false"
 
 
 def node_id(i: int, j: int, nx: int) -> int:
@@ -302,9 +295,6 @@ def write_solver_xml(
     reference_point: tuple[float, float, float],
     time_step: float,
     time_steps: int,
-    use_cut_metadata_scale: bool,
-    cut_cell_metadata_scale_cap: float | None,
-    cut_cell_velocity_gradient_penalty: float,
     cut_cell_pressure_gradient_penalty: float,
 ) -> None:
     fx, fy, fz = body_force
@@ -312,14 +302,9 @@ def write_solver_xml(
     fluid_order_xml = f"  <Element_order>{element_order}</Element_order>\n" if element_order != 1 else ""
     taylor_hood_xml = "  <Use_taylor_hood_type_basis>true</Use_taylor_hood_type_basis>\n" if fluid_taylor_hood else ""
     corner_linearized_xml = (
-        "    <Allow_corner_linearized_geometry>true</Allow_corner_linearized_geometry>\n"
+        "    <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>\n"
         "    <Geometry_tangent_policy>RefreshedFrozenQuadrature</Geometry_tangent_policy>\n"
         if element_order != 1
-        else ""
-    )
-    metadata_scale_cap_xml = (
-        f"    <Cut_cell_metadata_scale_cap>{cut_cell_metadata_scale_cap:.12g}</Cut_cell_metadata_scale_cap>\n"
-        if cut_cell_metadata_scale_cap is not None
         else ""
     )
     xml = f"""<?xml version="1.0" encoding="UTF-8" ?>
@@ -383,8 +368,6 @@ def write_solver_xml(
   <Advection_velocity_extension_coupling>monolithic</Advection_velocity_extension_coupling>
   <Enable_SUPG>true</Enable_SUPG>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
-  <Enable_reinitialization>false</Enable_reinitialization>
-  <Enable_volume_correction>false</Enable_volume_correction>
 
   <Output type="Spatial">
     <Level_set>true</Level_set>
@@ -478,14 +461,9 @@ def write_solver_xml(
 {corner_linearized_xml.rstrip()}
     <Level_set_isovalue>0.0</Level_set_isovalue>
     <Active_domain>LevelSetNegative</Active_domain>
-    <Active_domain_method>CutVolume</Active_domain_method>
-    <Enable_velocity_extension>true</Enable_velocity_extension>
-    <Velocity_extension_diffusivity>1.0</Velocity_extension_diffusivity>
     <External_pressure>0.0</External_pressure>
     <Surface_tension>0.0</Surface_tension>
     <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
-    <Use_cut_metadata_scale>{xml_bool(use_cut_metadata_scale)}</Use_cut_metadata_scale>
-{metadata_scale_cap_xml}    <Cut_cell_velocity_gradient_penalty>{cut_cell_velocity_gradient_penalty:.12g}</Cut_cell_velocity_gradient_penalty>
     <Cut_cell_pressure_gradient_penalty>{cut_cell_pressure_gradient_penalty:.12g}</Cut_cell_pressure_gradient_penalty>
   </Add_BC>
 </Add_equation>
@@ -513,9 +491,6 @@ def write_expected_files(
     time_steps: int,
     initial_state: str,
     verification_profile: str,
-    use_cut_metadata_scale: bool,
-    cut_cell_metadata_scale_cap: float | None,
-    cut_cell_velocity_gradient_penalty: float,
     cut_cell_pressure_gradient_penalty: float,
 ) -> None:
     surface = final_surface_parameters(tilt_degrees, fill_height)
@@ -555,12 +530,8 @@ def write_expected_files(
 
     stabilization = {
         "enable_cut_cell_stabilization": True,
-        "use_cut_metadata_scale": use_cut_metadata_scale,
-        "cut_cell_velocity_gradient_penalty": cut_cell_velocity_gradient_penalty,
         "cut_cell_pressure_gradient_penalty": cut_cell_pressure_gradient_penalty,
     }
-    if cut_cell_metadata_scale_cap is not None:
-        stabilization["cut_cell_metadata_scale_cap"] = cut_cell_metadata_scale_cap
 
     expected = {
         "case": "square_tank_tilt_settling",
@@ -716,7 +687,7 @@ def write_expected_files(
             "Use --verification-profile transient_pressure for staged refined transient targets that should gate pressure-gradient recovery before final-equilibrium intercept/slope closure.",
             "Use --verification-profile transient_pressure_interior for staged contact-line-aware targets that gate interior free-surface pressure while keeping wall-contact pressure as bounded diagnostics.",
             "Use --verification-profile transient_pressure_core for staged targets that gate the core free-surface pressure trace while retaining bounded wall-contact and one-cell near-wall guards.",
-            "Use --use-cut-metadata-scale, --cut-cell-metadata-scale-cap, and --cut-cell-*-gradient-penalty only for explicit stabilization diagnostics; the default generated smoke keeps metadata scaling disabled and unbounded.",
+            "Use --cut-cell-pressure-gradient-penalty only for explicit stabilization diagnostics.",
             "Use --element-order 2 --fluid-taylor-hood to generate an opt-in P2/P1 refined diagnostic; the default checked-in smoke remains linear/equal-order.",
         ],
     }
@@ -769,24 +740,6 @@ def parse_args() -> argparse.Namespace:
         help="verification contract to write into expected_results.json",
     )
     parser.add_argument(
-        "--use-cut-metadata-scale",
-        action="store_true",
-        default=DEFAULT_USE_CUT_METADATA_SCALE,
-        help="enable cut-metadata stabilization scaling for explicit diagnostics",
-    )
-    parser.add_argument(
-        "--cut-cell-metadata-scale-cap",
-        type=float,
-        default=DEFAULT_CUT_CELL_METADATA_SCALE_CAP,
-        help="optional finite cap >= 1 applied to cut-metadata stabilization scaling",
-    )
-    parser.add_argument(
-        "--cut-cell-velocity-gradient-penalty",
-        type=float,
-        default=DEFAULT_CUT_CELL_VELOCITY_GRADIENT_PENALTY,
-        help="velocity ghost-penalty coefficient for cut-cell stabilization",
-    )
-    parser.add_argument(
         "--cut-cell-pressure-gradient-penalty",
         type=float,
         default=DEFAULT_CUT_CELL_PRESSURE_GRADIENT_PENALTY,
@@ -803,16 +756,6 @@ def main() -> None:
         raise ValueError("fill height must lie inside the unit square")
     if args.fluid_taylor_hood and args.element_order < 2:
         raise ValueError("--fluid-taylor-hood requires --element-order 2")
-    if (
-        args.cut_cell_metadata_scale_cap is not None
-        and (
-            not math.isfinite(args.cut_cell_metadata_scale_cap)
-            or args.cut_cell_metadata_scale_cap < 1.0
-        )
-    ):
-        raise ValueError("--cut-cell-metadata-scale-cap must be finite and at least 1")
-    if args.cut_cell_velocity_gradient_penalty < 0.0:
-        raise ValueError("--cut-cell-velocity-gradient-penalty must be nonnegative")
     if args.cut_cell_pressure_gradient_penalty < 0.0:
         raise ValueError("--cut-cell-pressure-gradient-penalty must be nonnegative")
 
@@ -854,9 +797,6 @@ def main() -> None:
         reference_point=reference_point,
         time_step=args.time_step,
         time_steps=args.time_steps,
-        use_cut_metadata_scale=args.use_cut_metadata_scale,
-        cut_cell_metadata_scale_cap=args.cut_cell_metadata_scale_cap,
-        cut_cell_velocity_gradient_penalty=args.cut_cell_velocity_gradient_penalty,
         cut_cell_pressure_gradient_penalty=args.cut_cell_pressure_gradient_penalty,
     )
     write_expected_files(
@@ -876,9 +816,6 @@ def main() -> None:
         time_steps=args.time_steps,
         initial_state=args.initial_state,
         verification_profile=args.verification_profile,
-        use_cut_metadata_scale=args.use_cut_metadata_scale,
-        cut_cell_metadata_scale_cap=args.cut_cell_metadata_scale_cap,
-        cut_cell_velocity_gradient_penalty=args.cut_cell_velocity_gradient_penalty,
         cut_cell_pressure_gradient_penalty=args.cut_cell_pressure_gradient_penalty,
     )
 

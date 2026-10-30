@@ -407,26 +407,25 @@ void apply_common_params(const svmp::Physics::ParameterMap& params, Options& opt
 {
   if (const auto value = get_defined_string(
           params,
-          {"Field_name", "FieldName", "Mesh_displacement_field", "MeshDisplacementField"})) {
+          {"Field_name", "Mesh_displacement_field"})) {
     options.field_name = *value;
   }
-  if (const auto value = get_defined_string(params, {"Operator_tag", "OperatorTag"})) {
+  if (const auto value = get_defined_string(params, {"Operator_tag"})) {
     options.operator_tag = *value;
   }
   if (const auto value = get_defined_bool(
           params,
-          {"Auto_register_field", "AutoRegisterField", "Auto_register_mesh_displacement_field"})) {
+          {"Auto_register_field", "Auto_register_mesh_displacement_field"})) {
     options.auto_register_field = *value;
   }
   if (const auto value = get_defined_bool(
           params,
-          {"Bind_as_mesh_displacement", "BindAsMeshDisplacement"})) {
+          {"Bind_as_mesh_displacement"})) {
     options.bind_as_mesh_displacement = *value;
   }
   if (const auto value = get_defined_string(
           params,
-          {"Moving_mesh_tangent_path", "MovingMeshTangentPath",
-           "Geometry_tangent_path", "GeometryTangentPath"})) {
+          {"Moving_mesh_tangent_path", "Geometry_tangent_path"})) {
     options.tangent_path = parse_geometry_tangent_path(*value, "Moving_mesh_tangent_path");
   }
 }
@@ -435,13 +434,13 @@ void apply_harmonic_params(const svmp::Physics::ParameterMap& params,
                            mm::HarmonicMeshMotionOptions& options)
 {
   apply_common_params(params, options);
-  if (const auto value = get_defined_real(params, {"Kappa", "Mesh_motion_kappa"}, "Kappa")) {
+  if (const auto value = get_defined_real(params, {"Kappa"}, "Kappa")) {
     options.kappa = *value;
   }
-  if (const auto value = get_defined_real(params, {"Stiffness", "Mesh_motion_stiffness"}, "Stiffness")) {
+  if (const auto value = get_defined_real(params, {"Stiffness"}, "Stiffness")) {
     options.stiffness = *value;
   }
-  if (const auto value = get_defined_string(params, {"Harmonic_quantity", "HarmonicQuantity"})) {
+  if (const auto value = get_defined_string(params, {"Harmonic_quantity"})) {
     const auto token = normalized_token(*value);
     if (token == "displacement" || token == "meshdisplacement") {
       options.quantity = mm::HarmonicQuantity::Displacement;
@@ -458,10 +457,10 @@ void apply_pseudo_elastic_params(const svmp::Physics::ParameterMap& params,
                                  mm::PseudoElasticMeshMotionOptions& options)
 {
   apply_common_params(params, options);
-  if (const auto value = get_defined_real(params, {"Lambda_mesh", "Mesh_lambda"}, "Lambda_mesh")) {
+  if (const auto value = get_defined_real(params, {"Lambda_mesh"}, "Lambda_mesh")) {
     options.lambda_mesh = *value;
   }
-  if (const auto value = get_defined_real(params, {"Mu_mesh", "Mesh_mu"}, "Mu_mesh")) {
+  if (const auto value = get_defined_real(params, {"Mu_mesh"}, "Mu_mesh")) {
     options.mu_mesh = *value;
   }
 }
@@ -471,13 +470,13 @@ mm::NormalConstraintBC parse_normal_constraint_bc(const svmp::Physics::BoundaryC
   mm::NormalConstraintBC out{};
   out.boundary_marker = bc.boundary_marker;
   out.quantity = parse_normal_quantity(
-      get_defined_string(bc.params, {"Quantity", "Constraint_quantity"}).value_or("displacement"),
+      get_defined_string(bc.params, {"Quantity"}).value_or("displacement"),
       "mesh-motion normal constraint");
   out.target = get_defined_real(bc.params, {"Target", "Value"}, "Normal_constraint/Target").value_or(0.0);
-  out.penalty = get_defined_real(bc.params, {"Penalty", "Penalty_scale"}, "Normal_constraint/Penalty")
+  out.penalty = get_defined_real(bc.params, {"Penalty"}, "Normal_constraint/Penalty")
                     .value_or(1.0);
   out.velocity_time_scale =
-      get_defined_real(bc.params, {"Velocity_time_scale", "Time_scale"}, "Normal_constraint/Velocity_time_scale")
+      get_defined_real(bc.params, {"Velocity_time_scale"}, "Normal_constraint/Velocity_time_scale")
           .value_or(1.0);
   return out;
 }
@@ -488,16 +487,16 @@ mm::TangentialPolicyBC parse_tangential_policy_bc(const svmp::Physics::BoundaryC
   mm::TangentialPolicyBC out{};
   out.boundary_marker = bc.boundary_marker;
   out.policy = parse_tangential_policy(
-      get_defined_string(bc.params, {"Policy", "Tangential_policy"}).value_or("smoothing_only"),
+      get_defined_string(bc.params, {"Tangential_policy"}).value_or("smoothing_only"),
       "mesh-motion tangential policy");
   out.quantity = parse_tangential_quantity(
-      get_defined_string(bc.params, {"Quantity", "Constraint_quantity"}).value_or("displacement"),
+      get_defined_string(bc.params, {"Quantity"}).value_or("displacement"),
       "mesh-motion tangential policy");
   out.target = parse_vector_value(bc.params, {"Target", "Value"}, dim, "Tangential_policy/Target");
   out.penalty =
-      get_defined_real(bc.params, {"Penalty", "Penalty_scale"}, "Tangential_policy/Penalty").value_or(1.0);
+      get_defined_real(bc.params, {"Penalty"}, "Tangential_policy/Penalty").value_or(1.0);
   out.velocity_time_scale =
-      get_defined_real(bc.params, {"Velocity_time_scale", "Time_scale"}, "Tangential_policy/Velocity_time_scale")
+      get_defined_real(bc.params, {"Velocity_time_scale"}, "Tangential_policy/Velocity_time_scale")
           .value_or(1.0);
   return out;
 }
@@ -539,7 +538,7 @@ void apply_mesh_motion_bcs(const svmp::Physics::EquationModuleInput& input,
     if (type == "robin") {
       typename Options::RobinBC robin{};
       robin.boundary_marker = bc.boundary_marker;
-      robin.alpha = get_defined_real(bc.params, {"Alpha", "Penalty", "Penalty_scale"}, "Mesh-motion Robin Alpha")
+      robin.alpha = get_defined_real(bc.params, {"Alpha", "Penalty"}, "Mesh-motion Robin Alpha")
                         .value_or(1.0);
       robin.target = parse_vector_value(bc.params, {"Target", "Value"}, dim, "Mesh-motion Robin Target");
       options.robin.push_back(std::move(robin));
@@ -567,7 +566,7 @@ std::string resolve_model_token(const svmp::Physics::EquationModuleInput& input)
 {
   if (const auto model = get_defined_string(
           input.equation_params,
-          {"Model", "Formulation", "Mesh_motion_model", "MeshMotionModel"})) {
+          {"Model"})) {
     return normalized_token(*model);
   }
   const auto type = normalized_token(input.equation_type);

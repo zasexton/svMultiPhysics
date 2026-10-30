@@ -16,32 +16,22 @@ surface-stress divergence.
 
 The dynamic condition on the free surface is `sigma n = -(p_ext + gamma*kappa) n`.
 Here `n` is the outward normal of the liquid and `kappa = div_Gamma(n)`.
-`Surface_tension_form` selects the discrete force; `SurfaceStress` is the
-only form. It also contributes the exterior-pressure load
-`p_ext * dot(n_h, v)` on the interface.
+The discrete force is `SurfaceStress`, the only capillary form, so no key
+selects it: `gamma * (I - n_h ⊗ n_h) : grad(v)` integrated over the
+generated interface rule (unfitted) or over the current fitted boundary.
+This is the Laplace–Beltrami form and the first variation of the discrete
+interface area (decision D47 Q2(b)). It also contributes the
+exterior-pressure load `p_ext * dot(n_h, v)` on the interface.
 
-| `Surface_tension_form` | Capillary term in the momentum residual | Scope |
-|---|---|---|
-| `Automatic` (default) | `SurfaceStress`, on unfitted level-set interfaces and on fitted ALE boundaries (decision D47 Q2(b)) | — |
-| `SurfaceStress` (also `SurfaceEnergy`, `LaplaceBeltrami`, `Variational`) | `gamma * (I - n_h ⊗ n_h) : grad(v)` integrated over the generated interface rule (unfitted) or over the current fitted boundary. This is the Laplace–Beltrami form and the first variation of the discrete interface area. | Unfitted; fitted ALE (below) |
-
-`CurvatureTraction` (`(p_ext + gamma*kappa) * dot(n, v)` with a supplied
-`Curvature`, a projected field or the raw level-set curvature
-`Use_level_set_curvature=true`) was retired by decision D47 Q2: those inputs
-fail while the boundary condition is read, with a message that names
-`SurfaceStress`, and so does `Allow_fitted_surface_stress=false`. The no-op
-restatements `Use_level_set_curvature=false` and
-`Allow_fitted_surface_stress=true` are accepted with a warning and an
-`input_deprecations` entry in `effective_configuration.json`.
-
-`KinematicAreaGradientTraction` (also `TotalEnergyGradientTraction` and
-`DiscreteEnergyGradientTraction`), the traction `gamma * kappa_h * dot(n_h, v)`
-with a curvature recovered by the `KinematicAreaGradient` projection, was
-retired by decision D48: the form and the boundary key `Curvature_field`
-(with its deprecated spellings, whatever its value) fail while the boundary
-condition is read, with a message that names `SurfaceStress`. The
-incremental PSPG pressure gradient, which only that form selected, went
-with it.
+`CurvatureTraction` (`(p_ext + gamma*kappa) * dot(n, v)` with a supplied, a
+projected or the raw level-set curvature) was retired by decision D47 Q2,
+and `KinematicAreaGradientTraction` (`gamma * kappa_h * dot(n_h, v)` with a
+curvature recovered by the `KinematicAreaGradient` projection) by decision
+D48, together with the incremental PSPG pressure gradient that only it
+selected. Their input keys (`Surface_tension_form`, `Curvature`,
+`Use_level_set_curvature`, `Allow_fitted_surface_stress`,
+`Curvature_field` and its spellings) were then removed from the input; a deck
+that still writes one fails as an unknown XML element.
 
 The unfitted form requires `Geometry_tangent_policy=RefreshedFrozenQuadrature`.
 This is not the active-cut default, so set it explicitly. It means generated
@@ -89,7 +79,6 @@ The option fails closed outside the validated scope. It requires all of the
 following:
 
 - an exterior one-phase `UnfittedLevelSet` free surface with an active side;
-- `Active_domain_method=CutVolume` with zero smoothing width;
 - `Generated_interface_geometry=LinearCorner`;
 - `Geometry_tangent_policy=RefreshedFrozenQuadrature`, without level-set
   shape tangents;
@@ -142,24 +131,21 @@ frame and the fitted terms multiplied the boundary weights by the current
 surface measure a second time; see the tracker, M5. Decision D35 confirms
 current-frame assembly as the coupled-ALE contract.)
 
-**Kinematic enforcement.** `MeshNitsche` is the qualified default
-(decision D35): a fitted free surface without `Kinematic_enforcement` uses
-it, and `None` is rejected: the schema-1 legacy mode that accepted it was
-retired (its input in D47 P2, its module options on 2026-10-24), so every
-fitted free surface is the qualified contract.  Before D35 the qualified
-contract rejected an omitted key, so no accepted input changed.
-
-| Value | Status | Fluid row on the free surface | Mesh row on the free surface |
-|---|---|---|---|
-| `MeshNitsche` | default | none: the fluid keeps the natural dynamic condition `sigma n = -(p_ext + gamma kappa) n` | `gamma_N / h_n * (w - u).n (psi.n)` plus the Nitsche consistency `-kappa ((grad w) n . n)(psi.n)` of the harmonic mesh-velocity operator |
+**Kinematic enforcement.** Every fitted free surface uses `MeshNitsche`
+(decision D35), the qualified contract, with the normal relation
+`(w - u).n = 0` (`MatchFluidNormalVelocity`); no key selects either.
+The fluid has no kinematic row on the free surface and keeps the natural
+dynamic condition `sigma n = -(p_ext + gamma kappa) n`; the mesh row is
+`gamma_N / h_n * (w - u).n (psi.n)` plus the Nitsche consistency
+`-kappa ((grad w) n . n)(psi.n)` of the harmonic mesh-velocity operator.
 
 The legacy `Penalty` and `Nitsche` enforcements imposed the kinematic
 relation on the fluid as well as on the mesh. Their fluid row replaced
 (Nitsche) or perturbed (Penalty, by the mesh stiffness flux) the normal
 dynamic condition, so they did not reproduce free-surface dynamics.
-Decision D47 (Q9) retired them: `Kinematic_enforcement=Penalty` or
-`Nitsche`, and `Kinematic_penalty` in any mode, fail while the equation is
-translated. `MeshNitsche` imposes the relation on the mesh only:
+Decision D47 (Q9) retired them, and the `Kinematic_enforcement`,
+`Normal_kinematic_policy` and `Kinematic_penalty` keys were later removed
+from the input. `MeshNitsche` imposes the relation on the mesh only:
 
 - `w = dt(d)` is the mesh velocity. The harmonic `mesh_motion` equation must
   act on it (`Harmonic_quantity=velocity`: `kappa grad(w):grad(psi)`), so the
@@ -215,8 +201,7 @@ legacy deck can keep the last-listed labeling with
 legacy SPHERIC decks written by `generate_validation_meshes.py` declare it.
 
 **Capillarity.** The fitted form is the Laplace–Beltrami form
-`SurfaceStress`, which `Automatic` selects (decision D47 Q2(b)); it needs no
-opt-in (`Allow_fitted_surface_stress` was retired). It
+`SurfaceStress` (decision D47 Q2(b)); it needs no opt-in. It
 assembles `p_ext n.v + gamma (I - n n) : grad(v)` over the current
 boundary, with the current normal and the current-frame gradient. On a
 regular polygon it is balanced exactly by the constant pressure
@@ -226,9 +211,8 @@ With `gamma != 0` it requires a literal surface tension, coupled mesh
 displacement (or a static mesh), and no fitted contact-line model; with
 `gamma = 0` it is the exterior-pressure load alone. The pointwise
 curvature of the boundary facets of the former fitted `CurvatureTraction`
-(`Use_current_geometry_curvature=true`, identically zero on affine faces)
-was retired by D42; a deck that still sets it fails while its boundary
-condition is read.
+(identically zero on affine faces) was retired by D42, and its key
+`Use_current_geometry_curvature` was later removed from the input.
 
 ## Unfitted contact lines
 
@@ -243,17 +227,15 @@ intersection measure; Navier-Stokes decides when and how to use it.
 - `PrescribedAngle` (also `PrescribedContactAngle`, `ContactAngle`);
 - `DynamicRenE` (also `DynamicContactAngle`, `DynamicAngle`, `RenE`).
 
-The angle is given with `Contact_angle_degrees` or `Contact_angle_radians`,
-measured through the liquid,
+The angle is given with `Contact_angle_degrees`, measured through the liquid,
 and must satisfy `0 < theta < pi`. Unknown keys fail closed. That includes the
 removed `Contact_angle_penalty`.
 
 Each contact line needs a wall. Inputs give the mesh faces with
 `Contact_line_wall_face` (one name or a semicolon-separated list); the
 application translator resolves them to wall markers
-(`Contact_line_wall_markers`) before Physics receives the boundary condition,
-and `Contact_line_wall_marker` or `Contact_line_wall_markers` give markers
-directly. Wall normals are supplied with `Contact_line_wall_normal`, one
+(`Contact_line_wall_markers`, an internal key that a deck cannot set) before
+Physics receives the boundary condition. Wall normals are supplied with `Contact_line_wall_normal`, one
 normal reused for every wall or a semicolon-separated list with one normal per
 wall. The other spellings of these keys were removed (decision D47).
 
@@ -320,8 +302,7 @@ P_wall = I - n_wall ⊗ n_wall.
 ```
 
 It requires `Wall_slip_model=Navier` with a positive literal
-`Wall_slip_length`, literal Newtonian viscosity,
-`Active_domain_method=CutVolume`, and `Active_domain_smoothing_width=0`.
+`Wall_slip_length`, and literal Newtonian viscosity.
 The slip length is a physical input of the case.
 
 Both unfitted contact laws require it (decision D4): the Young term in
@@ -383,14 +364,11 @@ codimension-two integration entity exists.
 
 `PrescribedAngle` additionally requires the slip conditions above:
 `Wall_slip_model=Navier` with a positive literal `Wall_slip_length`, literal
-Newtonian viscosity, `CutVolume` with zero smoothing width, an axis-aligned
-planar wall, and a stationary, zero, normal-only strong velocity condition
+Newtonian viscosity, an axis-aligned planar wall, and a stationary, zero, normal-only strong velocity condition
 on that wall.
 
 `DynamicRenE` additionally requires:
 
-- `Active_domain_method=CutVolume` (the only method) with zero smoothing
-  width;
 - positive literal surface tension, mobility, and slip length;
 - literal Newtonian viscosity;
 - an axis-aligned wall normal, because general linear-combination essential

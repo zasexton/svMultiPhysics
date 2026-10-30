@@ -33,7 +33,7 @@ DEFAULT_MATRIX = SCRIPT_PATH.with_name(
     "free_surface_wp9_fitted_ale_qualification_matrix.json"
 )
 EXPECTED_MATRIX_SHA256 = (
-    "c308491783b2ec799258f512d15a799a28e9754658c481d063945a7df6f5f05e"
+    "901819385712e49bebb1558e0b66767934d2ec516b368e4d5774aaea99988cdf"
 )
 SHARED_RUNNER_PATH = Path(base_runner.__file__).resolve()
 SHARED_RUNNER_SHA256 = base_runner.sha256_file(SHARED_RUNNER_PATH)
@@ -166,10 +166,6 @@ EXPECTED_TEST_GROUPS = {
             "EquationTranslatorFreeSurface."
             "XmlTangentialPenaltyAliasesReachTruthfulFittedModule"
         ),
-        (
-            "EquationTranslatorFreeSurface."
-            "XmlExplicitNoneCannotBePromotedByKinematicPenalty"
-        ),
         ("NavierStokesLegacyBCs.FittedFreeSurfaceBCTranslation_SetupSucceeds"),
         (
             "NavierStokesLegacyBCs."
@@ -236,10 +232,6 @@ EXPECTED_TEST_GROUPS = {
         (
             "MovingDomainPhysics."
             "NavierStokesFittedFreeSurfaceALEUsesCurrentBoundaryGeometry"
-        ),
-        (
-            "MovingDomainPhysics."
-            "NavierStokesFittedFreeSurfaceCanUseCurrentGeometryCurvature"
         ),
         ("MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesAreBoundaryLocal"),
     ],

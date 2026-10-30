@@ -65,13 +65,11 @@ def test_generated_deck_is_the_sessile_deck_with_dynamic_ren_e(tmp_path: Path):
     assert level_set.findtext("Advection_velocity_extension_method") == "pde_harmonic"
     assert level_set.findtext("Enable_kinematic_reconciliation") == "true"
     assert level_set.findtext("Enable_sign_definite_patch_bounds") == "true"
-    assert level_set.findtext("Enable_reinitialization") == "false"
     bc = free_surface(root)
     assert bc.findtext("Contact_line_model") == "DynamicRenE"
     assert float(bc.findtext("Contact_line_mobility")) == generate.MOBILITY
     assert float(bc.findtext("Wall_slip_length")) == generate.SLIP_LENGTH
     assert bc.findtext("Wall_slip_model") == "Navier"
-    assert bc.findtext("Surface_tension_form") == "SurfaceStress"
     assert bc.findtext("Small_cut_aggregation") == "true"
     assert float(bc.findtext("Contact_angle_degrees")) == generate.EQUILIBRIUM_ANGLE_DEG
     # Decision D39: the law is imposed exactly by default; Weak writes the

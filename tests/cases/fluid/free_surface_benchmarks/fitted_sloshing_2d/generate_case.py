@@ -180,21 +180,21 @@ def linear_solver_block() -> str:
     return LS.linear_solver_block()
 
 
-def free_surface_block(enforcement: str, nitsche_gamma: float = KINEMATIC_NITSCHE_GAMMA) -> str:
-    kinematic = f"""      <Kinematic_enforcement>{enforcement}</Kinematic_enforcement>
-      <Kinematic_nitsche_gamma>{nitsche_gamma:.17g}</Kinematic_nitsche_gamma>"""
+def free_surface_block(nitsche_gamma: float = KINEMATIC_NITSCHE_GAMMA) -> str:
+    # A FittedALE free surface always enforces the normal kinematic condition
+    # by MeshNitsche; the deck only sets its Nitsche constant.
+    kinematic = f"""      <Kinematic_nitsche_gamma>{nitsche_gamma:.17g}</Kinematic_nitsche_gamma>"""
     return f"""    <Add_BC name="{FREE_SURFACE}">
       <Type>Free_surface</Type>
       <Implementation>FittedALE</Implementation>
       <External_pressure>{EXTERNAL_PRESSURE:.17g}</External_pressure>
       <Surface_tension>0.0</Surface_tension>
-      <Normal_kinematic_policy>MatchFluidNormalVelocity</Normal_kinematic_policy>
       <Tangential_mesh_policy>{TANGENTIAL_MESH_POLICY}</Tangential_mesh_policy>
 {kinematic}
     </Add_BC>"""
 
 
-def solver_xml(schedule: dict, steps: int, cadence: int, *, enforcement: str = "MeshNitsche",
+def solver_xml(schedule: dict, steps: int, cadence: int, *,
                wall_mesh_motion: str = "slip", nitsche_gamma: float = KINEMATIC_NITSCHE_GAMMA,
                surface_mesh_motion: str = "free") -> str:
     faces = "\n".join(
@@ -276,7 +276,7 @@ def solver_xml(schedule: dict, steps: int, cadence: int, *, enforcement: str = "
     </Output>
 {linear_solver_block()}
 {fluid_bcs}
-{free_surface_block(enforcement, nitsche_gamma)}
+{free_surface_block(nitsche_gamma)}
   </Add_equation>
 
   <Add_equation type="mesh_motion">
@@ -346,7 +346,7 @@ def generate(level: int, output_dir: Path, *, steps_per_period: int = SPATIAL_ST
         node_ids, parents = faces[name]
         LS.write_face_vtp(mesh_dir / "mesh-surfaces" / f"{name}.vtp", points, node_ids, parents)
     (output_dir / "solver.xml").write_text(
-        solver_xml(schedule, steps, cadence, enforcement=enforcement,
+        solver_xml(schedule, steps, cadence,
                    wall_mesh_motion=wall_mesh_motion, nitsche_gamma=nitsche_gamma,
                    surface_mesh_motion=surface_mesh_motion),
         encoding="utf-8")

@@ -126,17 +126,13 @@ inline constexpr std::array<std::string_view, 1> material_interface_marker{
     "Material_interface_marker"};
 inline constexpr std::array<std::string_view, 1> constant_velocity{
     "Constant_velocity"};
-inline constexpr std::array<std::string_view, 1> wet_extension_enable{
-    "Use_wet_extension_advection_velocity"};
-inline constexpr std::array<std::string_view, 2>
+inline constexpr std::array<std::string_view, 1>
     advection_velocity_extension_method{
-        "Advection_velocity_extension_method",
-        "Wet_extension_advection_velocity_method"};
+        "Advection_velocity_extension_method"};
 inline constexpr std::array<std::string_view, 1>
     advection_velocity_extension_coupling{
         "Advection_velocity_extension_coupling"};
-inline constexpr std::array<std::string_view, 2> wet_extension_source{
-    "Advection_velocity_from_field",
+inline constexpr std::array<std::string_view, 1> wet_extension_source{
     "Source_velocity_field_name"};
 inline constexpr std::array<std::string_view, 1> conservative_phase_enable{
     "Enable_conservative_phase_transport"};
@@ -146,16 +142,6 @@ inline constexpr std::array<std::string_view, 1>
     conservative_phase_auto_register{"Auto_register_conservative_phase_field"};
 inline constexpr std::array<std::string_view, 1> conservative_phase_side{
     "Conservative_phase_liquid_side"};
-inline constexpr std::array<std::string_view, 8> curvature_field{
-    "Curvature_field_name",
-    "CurvatureFieldName",
-    "Curvature_field",
-    "CurvatureField",
-    "Projected_curvature_field",
-    "ProjectedCurvatureField",
-    "Free_surface_curvature_field",
-    "FreeSurfaceCurvatureField"};
-
 } // namespace aliases
 
 } // namespace application::translators::level_set::configuration

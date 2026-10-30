@@ -104,7 +104,6 @@ enum class FreeSurfaceContactLawEnforcementInput : std::uint8_t {
 /// per wall marker), and contactLineInputView() folds the lines back.
 struct FreeSurfaceContactLineInputView {
     FreeSurfaceContactLineModelInput model{FreeSurfaceContactLineModelInput::None};
-    FE::forms::bc::ScalarValue contact_angle_radians{FE::Real{1.57079632679489661923}};
     FE::Real contact_angle_degrees{90.0};
     std::vector<int> wall_markers{};
     int contact_line_marker{-1};
@@ -136,8 +135,6 @@ freeSurfaceContactLineInputSchema();
 struct NavierStokesInputView {
     // Equation element.
     std::string physical_model{"OnePhaseLiquidPrescribedExteriorPressure"};
-    int configuration_schema_version{
-        IncompressibleNavierStokesVMSOptions::current_configuration_schema_version};
     std::string operator_tag{"equations"};
     bool use_taylor_hood_type_basis{false};
     // Equation and domain elements.
@@ -181,8 +178,6 @@ struct NavierStokesInputView {
 /// (Free_surface_physical_model=IncompressibleTwoFluid).
 struct IncompressibleTwoFluidInputView {
     std::string physical_model{"IncompressibleTwoFluid"};
-    int configuration_schema_version{
-        IncompressibleNavierStokesVMSOptions::current_configuration_schema_version};
     std::string level_set_field_name{"level_set"};
     std::string generated_interface_domain_id{"two_fluid_interface"};
     int material_interface_marker{-1};
@@ -224,9 +219,6 @@ incompressibleTwoFluidDomainSchema();
 [[nodiscard]] const char* freeSurfaceGeometryTangentPolicyName(
     FreeSurfaceGeometryTangentPolicy policy) noexcept;
 
-[[nodiscard]] const char* surfaceTensionFormName(
-    const FreeSurfaceBoundary& bc) noexcept;
-
 [[nodiscard]] const char* freeSurfaceSurfaceTensionSemiImplicitName(
     FreeSurfaceSurfaceTensionSemiImplicit value) noexcept;
 
@@ -236,9 +228,6 @@ incompressibleTwoFluidDomainSchema();
 [[nodiscard]] std::string contactWallLawName(
     const FreeSurfaceContactLine& contact_line);
 
-[[nodiscard]] const char* pressureStabilizationPolicyName(
-    FreeSurfacePressureStabilizationPolicy policy) noexcept;
-
 [[nodiscard]] std::string freeSurfaceCurvaturePolicyName(
     const FreeSurfaceBoundary& bc);
 
@@ -246,9 +235,6 @@ incompressibleTwoFluidDomainSchema();
     const FreeSurfaceBoundary& bc);
 
 [[nodiscard]] const char* activeDomainName(FreeSurfaceActiveDomain domain) noexcept;
-
-[[nodiscard]] const char* activeDomainMethodName(
-    FreeSurfaceActiveDomainMethod method) noexcept;
 
 [[nodiscard]] const char* kinematicEnforcementName(
     FreeSurfaceKinematicEnforcement enforcement) noexcept;

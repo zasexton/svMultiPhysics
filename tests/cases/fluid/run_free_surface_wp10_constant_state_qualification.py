@@ -472,9 +472,6 @@ def render_solver(matrix: dict[str, Any], case: dict[str, Any]) -> str:
     <Auto_register_conservative_phase_field>true</Auto_register_conservative_phase_field>
     <Conservative_phase_reconcile_geometry>true</Conservative_phase_reconcile_geometry>
     <Conservative_phase_momentum_relative_tolerance>1.0e-10</Conservative_phase_momentum_relative_tolerance>
-    <Enable_bound_preserving_limiter>false</Enable_bound_preserving_limiter>
-    <Enable_reinitialization>false</Enable_reinitialization>
-    <Enable_volume_correction>false</Enable_volume_correction>
     <Enable_interface_kinematic>true</Enable_interface_kinematic>
     <Interface_kinematic_marker>71</Interface_kinematic_marker>
     <Operator_tag>equations</Operator_tag>

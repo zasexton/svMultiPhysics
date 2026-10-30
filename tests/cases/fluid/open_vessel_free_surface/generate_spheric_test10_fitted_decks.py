@@ -9,7 +9,7 @@ Two decks are written next to the legacy fitted decks, which stay unchanged:
   x-y section of the same tank and fill, on a finer structured triangle
   mesh.
 
-Both use ``Kinematic_enforcement=MeshNitsche`` (gamma_N = 10), the ``Free``
+Both use MeshNitsche kinematic enforcement (gamma_N = 10), the ``Free``
 tangential mesh policy, the harmonic mesh-velocity operator, free-slip fluid
 walls and sliding mesh walls (the same zero-valued ``Dir`` input with
 ``Effective_direction`` in both equations), zero surface tension, and a
@@ -331,9 +331,7 @@ def solver_xml(dim: int, faces: list[str], *, steps: int, dt: float, cadence: in
     <Implementation>FittedALE</Implementation>
     <External_pressure>0.0</External_pressure>
     <Surface_tension>0.0</Surface_tension>
-    <Normal_kinematic_policy>MatchFluidNormalVelocity</Normal_kinematic_policy>
     <Tangential_mesh_policy>Free</Tangential_mesh_policy>
-    <Kinematic_enforcement>MeshNitsche</Kinematic_enforcement>
     <Kinematic_nitsche_gamma>{KINEMATIC_NITSCHE_GAMMA:.17g}</Kinematic_nitsche_gamma>
   </Add_BC>
 </Add_equation>

@@ -158,15 +158,6 @@ opt::OptionSchema<FreeSurfaceBoundary> makeFreeSurfaceBoundarySchema()
                        {"positive", "positivelevelset", "phipositive"}),
              }},
              doc("liquid side of the level set"))
-        .key("Active_domain_method", &B::active_domain_method,
-             opt::EnumCodec<FreeSurfaceActiveDomainMethod>{{
-                 token(FreeSurfaceActiveDomainMethod::CutVolume, "CutVolume",
-                       {"cutcellvolume", "exactcutvolume"}),
-             }})
-        .key("Active_domain_smoothing_width", &B::active_domain_smoothing_width,
-             opt::RealCodec{.minimum = 0.0, .require_finite = false})
-        .key("Allow_full_domain_unfitted_free_surface", &B::allow_full_domain_unfitted_free_surface,
-             relaxedBool())
         .key("Interface_marker", &B::interface_marker, opt::IntCodec{})
         .key("Level_set_field_name", &B::level_set_field_name, opt::StringCodec{})
         .key("Generated_interface_domain_id", &B::generated_interface_domain_id, opt::StringCodec{})
@@ -192,23 +183,11 @@ opt::OptionSchema<FreeSurfaceBoundary> makeFreeSurfaceBoundarySchema()
         .key("External_pressure", &B::external_pressure, anyScalar(),
              doc("prescribed exterior pressure"))
         .key("Surface_tension", &B::surface_tension, anyScalar(), doc("surface tension gamma"))
-        .key("Surface_tension_form", &B::surface_tension_form,
-             opt::EnumCodec<FreeSurfaceSurfaceTensionForm>{{
-                 token(FreeSurfaceSurfaceTensionForm::Automatic, "Automatic", {"auto"}),
-                 token(FreeSurfaceSurfaceTensionForm::SurfaceStress, "SurfaceStress",
-                       {"surfaceenergy", "laplacebeltrami", "variational"}),
-             }})
         .key("Surface_tension_semi_implicit", &B::surface_tension_semi_implicit,
              opt::EnumCodec<FreeSurfaceSurfaceTensionSemiImplicit>{{
                  token(FreeSurfaceSurfaceTensionSemiImplicit::None, "None", {"off", "disabled"}),
                  token(FreeSurfaceSurfaceTensionSemiImplicit::NormalIncrement, "NormalIncrement",
                        {"laggednormalincrement"}),
-             }})
-        .key("Normal_kinematic_policy", &B::normal_kinematic_policy,
-             opt::EnumCodec<FreeSurfaceNormalKinematicPolicy>{{
-                 token(FreeSurfaceNormalKinematicPolicy::MatchFluidNormalVelocity,
-                       "MatchFluidNormalVelocity", {"matchfluid", "fluidnormalvelocity"}),
-                 token(FreeSurfaceNormalKinematicPolicy::None, "None", {"disabled", "off"}),
              }})
         .key("Tangential_mesh_policy", &B::tangential_mesh_policy,
              opt::EnumCodec<FreeSurfaceTangentialMeshPolicy>{{
@@ -222,11 +201,6 @@ opt::OptionSchema<FreeSurfaceBoundary> makeFreeSurfaceBoundarySchema()
              ScalarVector3Codec{})
         .key("Tangential_mesh_penalty", &B::tangential_mesh_penalty,
              ScalarValueCodec{.real = opt::RealCodec{.minimum = 0.0, .open_minimum = true}})
-        .key("Kinematic_enforcement", &B::kinematic_enforcement,
-             opt::EnumCodec<FreeSurfaceKinematicEnforcement>{{
-                 token(FreeSurfaceKinematicEnforcement::None, "None"),
-                 token(FreeSurfaceKinematicEnforcement::MeshNitsche, "MeshNitsche"),
-             }})
         .key("Kinematic_nitsche_gamma", &B::kinematic_nitsche_gamma, anyReal())
         .key("Small_cut_aggregation", &B::small_cut_aggregation, relaxedBool())
         .key("Small_cut_aggregation_maximum_root_path_length",
@@ -252,75 +226,13 @@ opt::OptionSchema<FreeSurfaceBoundary> makeFreeSurfaceBoundarySchema()
              opt::nestedMember(&B::cut_cell_stabilization,
                                &FreeSurfaceCutCellStabilization::pressure_gradient_penalty),
              anyScalar())
-        .key("Cut_cell_pressure_stabilization_policy",
-             opt::nestedMember(&B::cut_cell_stabilization, &FreeSurfaceCutCellStabilization::pressure_policy),
-             opt::EnumCodec<FreeSurfacePressureStabilizationPolicy>{{
-                 token(FreeSurfacePressureStabilizationPolicy::Enabled, "Enabled", {"enable", "on", "true"}),
-                 token(FreeSurfacePressureStabilizationPolicy::Incremental, "Incremental",
-                       {"pressureincrement", "incrementalpressure", "incrementalenabled"}),
-                 token(FreeSurfacePressureStabilizationPolicy::Disabled, "Disabled", {"disable", "off", "false"}),
-                 token(FreeSurfacePressureStabilizationPolicy::DisabledForRefreshedFrozenHighOrder,
-                       "DisabledForRefreshedFrozenHighOrder",
-                       {"disableforrefreshedfrozenhighorder", "refreshedfrozenhighorderdisabled",
-                        "highorderrefreshedfrozendisabled"}),
-             }})
-        .key("Use_cut_metadata_scale",
-             opt::nestedMember(&B::cut_cell_stabilization,
-                               &FreeSurfaceCutCellStabilization::use_cut_metadata_scale),
-             relaxedBool())
-        .key("Cut_cell_metadata_scale_cap",
-             opt::nestedMember(&B::cut_cell_stabilization,
-                               &FreeSurfaceCutCellStabilization::cut_metadata_scale_cap),
-             SetOptionalRealCodec{opt::RealCodec{.minimum = 1.0}})
         // Defaults that depend on another key (the register's resolution).
-        // D35: MeshNitsche is the qualified default of a fitted ALE surface.
         // D47 item 3: an unfitted surface is liquid on the negative side of
         // the level set unless Active_domain says otherwise.
-        .implies("Implementation", "Kinematic_enforcement", "MeshNitsche",
-                 opt::ImplicationSettings{.when_trigger_is = "FittedALE",
-                                          .trigger_must_be_explicit = false})
         .implies("Implementation", "Active_domain", "LevelSetNegative",
                  opt::ImplicationSettings{.when_trigger_is = "UnfittedLevelSet"})
         .implies("Prescribed_tangential_mesh_velocity", "Tangential_mesh_policy", "Prescribed")
-        .implies("Cut_cell_pressure_gradient_penalty", "Enable_cut_cell_stabilization", "true")
-        .implies("Cut_cell_pressure_stabilization_policy", "Enable_cut_cell_stabilization", "true")
-        .implies("Use_cut_metadata_scale", "Enable_cut_cell_stabilization", "true")
-        .implies("Cut_cell_metadata_scale_cap", "Enable_cut_cell_stabilization", "true")
-        // Retired keys (decisions D42, D47 Q9, D47 Q2 and D48), for the
-        // documentation and the acceptance lists.  The register checks them
-        // before resolving, with its relaxed booleans and its texts.
-        .retired({"Use_current_geometry_curvature"},
-                 "retired (decision D42): identically zero on affine faces",
-                 opt::RetiredAcceptance{.value = "false"})
-        .retired({"Cut_cell_velocity_gradient_penalty"},
-                 "retired with the velocity ghost penalty (small-cut aggregation replaces it)")
-        .retired({"Cut_cell_velocity_max_derivative_order"},
-                 "retired with the velocity ghost penalty")
-        .retired({"Enable_velocity_extension"},
-                 "the same-field dry-velocity diffusion was retired (decision D42)",
-                 opt::RetiredAcceptance{.value = "false"})
-        .retired({"Velocity_extension_diffusivity"},
-                 "belongs to the retired dry-velocity diffusion (decision D42)")
-        .retired({"Kinematic_penalty"},
-                 "belongs to the retired Penalty kinematic enforcement (decision D47 Q9); "
-                 "use Kinematic_enforcement=MeshNitsche")
-        .retired({"Curvature"},
-                 "the supplied curvature of the retired CurvatureTraction route "
-                 "(decision D47 Q2); use Surface_tension_form=SurfaceStress")
-        .retired({"Use_level_set_curvature"},
-                 "the raw level-set curvature of the retired CurvatureTraction route "
-                 "(decision D47 Q2); use Surface_tension_form=SurfaceStress",
-                 opt::RetiredAcceptance{.value = "false"})
-        .retired({"Allow_fitted_surface_stress"},
-                 "fitted SurfaceStress needs no opt-in (decision D47 Q2)",
-                 opt::RetiredAcceptance{.value = "true"})
-        .retired({"Curvature_field", "CurvatureField", "Curvature_field_name",
-                  "CurvatureFieldName", "Projected_curvature_field",
-                  "ProjectedCurvatureField", "Free_surface_curvature_field",
-                  "FreeSurfaceCurvatureField"},
-                 "the projected curvature field of the retired "
-                 "KinematicAreaGradientTraction route (decision D48); use "
-                 "Surface_tension_form=SurfaceStress");
+        .implies("Cut_cell_pressure_gradient_penalty", "Enable_cut_cell_stabilization", "true");
     return schema;
 }
 
@@ -339,14 +251,10 @@ opt::OptionSchema<FreeSurfaceContactLineInputView> makeContactLineInputSchema()
                        {"dynamiccontactangle", "dynamicangle", "rene"}),
              }},
              opt::KeySettings{.duplicates = opt::DuplicatePolicy::Reject})
-        .key("Contact_angle_radians", &V::contact_angle_radians, anyScalar(),
-             opt::KeySettings{.duplicates = opt::DuplicatePolicy::Reject})
         .key("Contact_angle_degrees", &V::contact_angle_degrees, anyReal(),
              opt::KeySettings{.duplicates = opt::DuplicatePolicy::Reject})
-        .key("Contact_line_wall_marker", &V::wall_markers, opt::ListCodec<opt::IntCodec>{},
-             opt::KeySettings{.spellings = {{"Contact_line_wall_markers", false},
-                                            {"Contact_line_wall_marker", false}},
-                              .duplicates = opt::DuplicatePolicy::Reject})
+        .key("Contact_line_wall_markers", &V::wall_markers, opt::ListCodec<opt::IntCodec>{},
+             opt::KeySettings{.duplicates = opt::DuplicatePolicy::Reject})
         .key("Contact_line_marker", &V::contact_line_marker, opt::IntCodec{},
              opt::KeySettings{.duplicates = opt::DuplicatePolicy::Reject})
         .key("Contact_line_wall_normal", &V::wall_normals, opt::ListCodec<opt::Vector3Codec>{},
@@ -386,9 +294,7 @@ void addSharedNavierStokesKeys(opt::OptionSchema<NavierStokesInputView>& schema)
                  token(ALEMeshVelocitySource::CoupledDisplacement, "coupled_displacement",
                        {"coupled", "derived", "derived_from_displacement", "monolithic"}),
              }})
-        .key("Mesh_displacement_field", &V::mesh_displacement_field, opt::StringCodec{},
-             opt::KeySettings{.spellings = {{"MeshDisplacementField", false},
-                                            {"Mesh_displacement_field", false}}})
+        .key("Mesh_displacement_field", &V::mesh_displacement_field, opt::StringCodec{})
         .key("Auto_register_mesh_displacement_field", &V::auto_register_mesh_displacement_field,
              relaxedBool())
         .key("Moving_mesh_tangent_path", &V::moving_mesh_tangent_path,
@@ -400,69 +306,31 @@ void addSharedNavierStokesKeys(opt::OptionSchema<NavierStokesInputView>& schema)
                  token(FE::forms::GeometryTangentPath::SymbolicWithADCheck, "SymbolicWithADCheck",
                        {"symbolic_ad_check", "check", "parity_check"}),
                  token(FE::forms::GeometryTangentPath::Auto, "Auto"),
-             }},
-             opt::KeySettings{.spellings = {{"Moving_mesh_tangent_path", false},
-                                            {"MovingMeshTangentPath", false}}})
-        .key("Momentum_source_field_name", &V::momentum_source_field_name, opt::StringCodec{},
-             opt::KeySettings{.spellings = {{"Momentum_source_field_name", false},
-                                            {"MomentumSourceFieldName", false},
-                                            {"Body_force_field_name", false},
-                                            {"BodyForceFieldName", false},
-                                            {"Body_force_field", false},
-                                            {"BodyForceField", false}}})
+             }})
+        .key("Momentum_source_field_name", &V::momentum_source_field_name, opt::StringCodec{})
         .key("Auto_register_momentum_source_field", &V::auto_register_momentum_source_field,
-             relaxedBool(),
-             opt::KeySettings{.spellings = {{"Auto_register_momentum_source_field", false},
-                                            {"AutoRegisterMomentumSourceField", false},
-                                            {"Auto_register_body_force_field", false},
-                                            {"AutoRegisterBodyForceField", false}}})
+             relaxedBool())
         .key("Momentum_source_temporal_and_spatial_values_file_path", &V::momentum_source_file,
-             opt::StringCodec{},
-             opt::KeySettings{.spellings = {{"Momentum_source_temporal_and_spatial_values_file_path", false},
-                                            {"MomentumSourceTemporalAndSpatialValuesFilePath", false},
-                                            {"Body_force_temporal_and_spatial_values_file_path", false},
-                                            {"BodyForceTemporalAndSpatialValuesFilePath", false}}})
-        .key("Rotating_frame_coriolis", &V::rotating_frame_coriolis, relaxedBool(),
-             opt::KeySettings{.spellings = {{"Rotating_frame_coriolis", false},
-                                            {"RotatingFrameCoriolis", false},
-                                            {"Enable_rotating_frame_coriolis", false},
-                                            {"EnableRotatingFrameCoriolis", false}}})
-        .key("Rotating_frame_angular_velocity", &V::rotating_frame_angular_velocity, opt::Vector3Codec{},
-             opt::KeySettings{.spellings = {{"Rotating_frame_angular_velocity", false},
-                                            {"RotatingFrameAngularVelocity", false},
-                                            {"Angular_velocity", false},
-                                            {"AngularVelocity", false}}})
+             opt::StringCodec{})
+        .key("Rotating_frame_coriolis", &V::rotating_frame_coriolis, relaxedBool())
+        .key("Rotating_frame_angular_velocity", &V::rotating_frame_angular_velocity, opt::Vector3Codec{})
         .key("Rotating_frame_angular_velocity_temporal_values_file_path",
-             &V::rotating_frame_angular_velocity_file, opt::StringCodec{},
-             opt::KeySettings{
-                 .spellings = {{"Rotating_frame_angular_velocity_temporal_values_file_path", false},
-                               {"RotatingFrameAngularVelocityTemporalValuesFilePath", false},
-                               {"Angular_velocity_temporal_values_file_path", false},
-                               {"AngularVelocityTemporalValuesFilePath", false}}});
+             &V::rotating_frame_angular_velocity_file, opt::StringCodec{});
 }
 
-void addPhysicalModelKeys(auto& schema, auto physical_model, auto schema_version)
+void addPhysicalModelKey(auto& schema, auto physical_model)
 {
-    schema
-        .key("Free_surface_physical_model", physical_model, opt::StringCodec{},
-             opt::KeySettings{.spellings = {{"Free_surface_physical_model", false},
-                                            {"FreeSurfacePhysicalModel", false}},
-                              .doc = "checked first by the scope check of the register"})
-        .key("Free_surface_configuration_schema_version", schema_version, opt::IntCodec{},
-             opt::KeySettings{.spellings = {{"Free_surface_configuration_schema_version", false},
-                                            {"FreeSurfaceConfigurationSchemaVersion", false},
-                                            {"Free_surface_schema_version", false}},
-                              .doc = "checked first by the configuration contract of the register"});
+    schema.key("Free_surface_physical_model", physical_model, opt::StringCodec{},
+               opt::KeySettings{.doc = "checked first by the scope check of the register"});
 }
 
 opt::OptionSchema<NavierStokesInputView> makeNavierStokesEquationSchema()
 {
     using V = NavierStokesInputView;
     opt::OptionSchema<V> schema("Navier-Stokes equation");
-    addPhysicalModelKeys(schema, &V::physical_model, &V::configuration_schema_version);
+    addPhysicalModelKey(schema, &V::physical_model);
     schema
-        .key("Operator_tag", &V::operator_tag, opt::StringCodec{},
-             opt::KeySettings{.spellings = {{"Operator_tag", false}, {"OperatorTag", false}}})
+        .key("Operator_tag", &V::operator_tag, opt::StringCodec{})
         .key("Use_taylor_hood_type_basis", &V::use_taylor_hood_type_basis, relaxedBool());
     addSharedNavierStokesKeys(schema);
     return schema;
@@ -506,7 +374,7 @@ opt::OptionSchema<IncompressibleTwoFluidInputView> makeIncompressibleTwoFluidSch
 {
     using V = IncompressibleTwoFluidInputView;
     opt::OptionSchema<V> schema("Incompressible two-fluid");
-    addPhysicalModelKeys(schema, &V::physical_model, &V::configuration_schema_version);
+    addPhysicalModelKey(schema, &V::physical_model);
     const auto optional_real = SetOptionalRealCodec{anyReal()};
     schema
         .key("Level_set_field_name", &V::level_set_field_name, opt::StringCodec{})
@@ -525,8 +393,7 @@ opt::OptionSchema<IncompressibleTwoFluidInputView> makeIncompressibleTwoFluidSch
              optional_real)
         .key("Prescribed_viscous_traction_jump_z", &V::prescribed_viscous_traction_jump_z,
              optional_real)
-        .key("Operator_tag", &V::operator_tag, opt::StringCodec{},
-             opt::KeySettings{.spellings = {{"Operator_tag", false}, {"OperatorTag", false}}})
+        .key("Operator_tag", &V::operator_tag, opt::StringCodec{})
         .key("Use_taylor_hood_type_basis", &V::use_taylor_hood_type_basis, relaxedBool());
     return schema;
 }
@@ -629,6 +496,7 @@ FreeSurfaceContactLineInputView contactLineInputView(const FreeSurfaceBoundary& 
     FreeSurfaceContactLineInputView view{};
     bool first = true;
     bool has_angle = false;
+    FE::forms::bc::ScalarValue contact_angle_radians{FE::Real{1.57079632679489661923}};
     for (const auto& line : boundary.contact_lines) {
         std::visit(
             [&](const auto& configuration) {
@@ -648,7 +516,7 @@ FreeSurfaceContactLineInputView contactLineInputView(const FreeSurfaceBoundary& 
                         view.model = FreeSurfaceContactLineModelInput::PrescribedAngle;
                         has_angle = true;
                         if (first) {
-                            view.contact_angle_radians = configuration.contact_angle_radians;
+                            contact_angle_radians = configuration.contact_angle_radians;
                             if (configuration.slip_length.has_value()) {
                                 view.wall_slip_model = FreeSurfaceWallSlipModelInput::Navier;
                                 view.wall_slip_length = *configuration.slip_length;
@@ -659,7 +527,7 @@ FreeSurfaceContactLineInputView contactLineInputView(const FreeSurfaceBoundary& 
                         view.model = FreeSurfaceContactLineModelInput::DynamicRenE;
                         has_angle = true;
                         if (first) {
-                            view.contact_angle_radians = configuration.equilibrium_contact_angle_radians;
+                            contact_angle_radians = configuration.equilibrium_contact_angle_radians;
                             view.mobility = configuration.mobility;
                             view.wall_slip_model = FreeSurfaceWallSlipModelInput::Navier;
                             view.wall_slip_length = configuration.slip_length;
@@ -678,7 +546,7 @@ FreeSurfaceContactLineInputView contactLineInputView(const FreeSurfaceBoundary& 
         // The register converts Contact_angle_degrees to radians; this is the
         // inverse map of the resolved angle.
         view.contact_angle_degrees =
-            constantOr(view.contact_angle_radians, std::numeric_limits<FE::Real>::quiet_NaN()) *
+            constantOr(contact_angle_radians, std::numeric_limits<FE::Real>::quiet_NaN()) *
             static_cast<FE::Real>(180.0 / kPi);
     }
     return view;
@@ -746,18 +614,6 @@ std::string resolvedFreeSurfacesJson(const std::vector<FreeSurfaceBoundary>& fre
     return "Unknown";
 }
 
-[[nodiscard]] const char* surfaceTensionFormName(
-    const FreeSurfaceBoundary& bc) noexcept
-{
-    switch (bc.surface_tension_form) {
-    case FreeSurfaceSurfaceTensionForm::Automatic:
-        return "SurfaceStress";
-    case FreeSurfaceSurfaceTensionForm::SurfaceStress:
-        return "SurfaceStress";
-    }
-    return "Unsupported";
-}
-
 const char* freeSurfaceSurfaceTensionSemiImplicitName(
     FreeSurfaceSurfaceTensionSemiImplicit value) noexcept
 {
@@ -785,22 +641,6 @@ const char* freeSurfaceSurfaceTensionSemiImplicitName(
     return contactLineKind(contact_line) == ContactLineKind::PrescribedAngle
                ? "PrescribedContactAngle"
                : "DynamicContactAngle";
-}
-
-[[nodiscard]] const char* pressureStabilizationPolicyName(
-    FreeSurfacePressureStabilizationPolicy policy) noexcept
-{
-    switch (policy) {
-    case FreeSurfacePressureStabilizationPolicy::Enabled:
-        return "Enabled";
-    case FreeSurfacePressureStabilizationPolicy::Incremental:
-        return "Incremental";
-    case FreeSurfacePressureStabilizationPolicy::Disabled:
-        return "Disabled";
-    case FreeSurfacePressureStabilizationPolicy::DisabledForRefreshedFrozenHighOrder:
-        return "DisabledForRefreshedFrozenHighOrder";
-    }
-    return "Unknown";
 }
 
 [[nodiscard]] std::string freeSurfaceCurvaturePolicyName(
@@ -831,16 +671,6 @@ std::string freeSurfaceCurvatureTangentPolicyName(const FreeSurfaceBoundary& bc)
         return "LevelSetNegative";
     case FreeSurfaceActiveDomain::LevelSetPositive:
         return "LevelSetPositive";
-    }
-    return "Unknown";
-}
-
-[[nodiscard]] const char* activeDomainMethodName(
-    FreeSurfaceActiveDomainMethod method) noexcept
-{
-    switch (method) {
-    case FreeSurfaceActiveDomainMethod::CutVolume:
-        return "CutVolume";
     }
     return "Unknown";
 }
@@ -1330,31 +1160,15 @@ tangentialPolicyProvenance(
             << json::quote(activeDomainName(boundary.active_domain))
             << ",\"active_phase_sign\":"
             << json::quote(activePhaseSignName(boundary.active_domain))
-            << ",\"active_domain_method\":"
-            << json::quote(activeDomainMethodName(boundary.active_domain_method))
-            << ",\"active_domain_smoothing_width\":"
-            << jsonReal(boundary.active_domain_smoothing_width)
-            << ",\"smoothing_width_unit\":\"length\""
-            << ",\"allow_full_domain_unfitted_free_surface\":"
-            << json::boolean(boundary.allow_full_domain_unfitted_free_surface)
             << ",\"external_pressure\":"
             << jsonScalarValue(boundary.external_pressure)
             << ",\"surface_tension\":"
             << jsonScalarValue(boundary.surface_tension)
-            << ",\"surface_tension_form_requested\":";
-        switch (boundary.surface_tension_form) {
-        case FreeSurfaceSurfaceTensionForm::Automatic:
-            out << "\"Automatic\"";
-            break;
-        case FreeSurfaceSurfaceTensionForm::SurfaceStress:
-            out << "\"SurfaceStress\"";
-            break;
-        }
-        out << ",\"surface_tension_form_effective\":"
+            << ",\"surface_tension_form_effective\":"
             << json::quote(
                    isInternalMaterialInterfaceVolume(boundary)
                        ? "NotApplicableInternalVolume"
-                       : surfaceTensionFormName(boundary));
+                       : "SurfaceStress");
         if (usesSemiImplicitNormalIncrement(boundary)) {
             out << ",\"surface_tension_semi_implicit\":"
                 << json::quote(freeSurfaceSurfaceTensionSemiImplicitName(
@@ -1426,23 +1240,10 @@ tangentialPolicyProvenance(
             << json::boolean(boundary.cut_cell_stabilization.enabled)
             << ",\"small_cut_aggregation\":"
             << json::boolean(boundary.small_cut_aggregation)
-            << ",\"pressure_policy\":"
-            << json::quote(pressureStabilizationPolicyName(
-                   boundary.cut_cell_stabilization.pressure_policy))
             << ",\"pressure_gradient_penalty\":"
             << jsonScalarValue(
                    boundary.cut_cell_stabilization.pressure_gradient_penalty)
-            << ",\"use_cut_metadata_scale\":"
-            << json::boolean(
-                   boundary.cut_cell_stabilization.use_cut_metadata_scale)
-            << ",\"cut_metadata_scale_cap\":";
-        if (boundary.cut_cell_stabilization.cut_metadata_scale_cap.has_value()) {
-            out << jsonReal(
-                *boundary.cut_cell_stabilization.cut_metadata_scale_cap);
-        } else {
-            out << "null";
-        }
-        out << ",\"aggregation_guards\":{\"maximum_root_path_length\":"
+            << ",\"aggregation_guards\":{\"maximum_root_path_length\":"
             << boundary.small_cut_aggregation_guards
                    .maximum_root_path_length
             << ",\"maximum_reference_extrapolation_distance\":"
@@ -1657,16 +1458,7 @@ void appendVelocityBoundaryArtifact(
         << ",\"phasewise_pressure_ghost_penalty\":true"
         << ",\"phasewise_small_cut_aggregation\":true"
         << ",\"pressure_gradient_penalty\":"
-        << jsonReal(options.pressure_gradient_penalty)
-        << ",\"use_cut_metadata_scale\":"
-        << json::boolean(options.use_cut_metadata_scale)
-        << ",\"cut_metadata_scale_cap\":";
-    if (options.cut_metadata_scale_cap.has_value()) {
-        out << jsonReal(*options.cut_metadata_scale_cap);
-    } else {
-        out << "null";
-    }
-    out << '}';
+        << jsonReal(options.pressure_gradient_penalty) << '}';
     appendVelocityBoundaryArtifact(out, options, dimension);
     out << ",\"pressure_space\":{\"representation\":\"separate_phase_fields\",\"shared_gauge_count\":1";
     if (options.shared_pressure_gauge.has_value()) {
@@ -1727,9 +1519,8 @@ namespace svmp::Physics::options {
 // The parser of a Free_surface boundary condition and of its contact lines:
 // the keys resolve through freeSurfaceBoundarySchema() and
 // freeSurfaceContactLineInputSchema() (decision D47, step P2), with the
-// value and format texts of the schemas (D52).  The retired keys and values
-// keep the register's acceptance and texts, and so do the relations between
-// keys.
+// value and format texts of the schemas (D52).  The relations between keys
+// keep the register's texts.
 
 namespace {
 
@@ -1785,197 +1576,12 @@ implementation_of(const opt::OptionInput& input)
   return resolved.value.implementation;
 }
 
-/// A retired value of an enumerated key: the normalized tokens that select
-/// it, its name, the decision that retired it and the replacement.
-struct RetiredFreeSurfaceValue {
-  std::string_view key;
-  std::vector<std::string_view> tokens;
-  std::string_view name;
-  std::string_view decision;
-  std::string_view replacement;
-};
-
-const std::vector<RetiredFreeSurfaceValue>& retired_free_surface_values()
-{
-  static const std::vector<RetiredFreeSurfaceValue> values{
-      {"Active_domain_method",
-       {"smoothedindicator", "smoothindicator", "indicator"},
-       "SmoothedIndicator", "D42", "CutVolume"},
-      // The supplied- or raw-curvature traction was used by no accepted
-      // benchmark; SurfaceStress is the variation of the discrete area.
-      {"Surface_tension_form",
-       {"curvaturetraction", "explicitcurvature", "younglaplacetraction"},
-       "CurvatureTraction", "D47 Q2", "SurfaceStress"},
-      {"Surface_tension_form",
-       {"generatedcurvaturetraction", "generatedgeometrycurvaturetraction",
-        "generatednormalcurvaturetraction"},
-       "GeneratedCurvatureTraction", "D42", "SurfaceStress"},
-      // The projected-curvature traction was retired with its curvature
-      // projection.
-      {"Surface_tension_form",
-       {"kinematicareagradienttraction", "totalenergygradienttraction",
-        "discreteenergygradienttraction"},
-       "KinematicAreaGradientTraction", "D48", "SurfaceStress"},
-      // The fitted Penalty and Nitsche enforcements imposed the kinematic
-      // relation on the fluid rows as well.
-      {"Kinematic_enforcement", {"penalty"}, "Penalty", "D47 Q9",
-       "MeshNitsche"},
-      {"Kinematic_enforcement", {"nitsche"}, "Nitsche", "D47 Q9",
-       "MeshNitsche"},
-  };
-  return values;
-}
-
-/// The retired keys and values of a Free_surface boundary condition, with
-/// the register's acceptance (relaxed booleans; a restated no-op value
-/// passes) and texts.  The schema's retired entries document the same keys
-/// for the acceptance lists; the register applies these checks.
-void reject_retired_free_surface_input(
-    const svmp::Physics::BoundaryConditionInput& bc)
-{
-  for (const auto& retired : retired_free_surface_values()) {
-    const auto raw = first_defined_string(bc.params, {retired.key});
-    if (!raw.has_value()) {
-      continue;
-    }
-    const auto token = normalized_token(*raw);
-    if (std::find(retired.tokens.begin(), retired.tokens.end(), token) !=
-        retired.tokens.end()) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] Free-surface " +
-          std::string(retired.key) + "=" + *raw + " (" +
-          std::string(retired.name) + ") was retired (decision " +
-          std::string(retired.decision) + "); use " +
-          std::string(retired.replacement) + ".");
-    }
-  }
-
-  // Decision D47 Q2 retired the CurvatureTraction route with its supplied
-  // curvature and its raw level-set curvature, and the opt-in of fitted
-  // SurfaceStress.  The keys stay known to Parameters, which reports the
-  // restated no-op values Use_level_set_curvature=false and
-  // Allow_fitted_surface_stress=true as input deprecations; every other
-  // value fails here.
-  if (const auto allow_fitted_surface_stress = first_defined_bool(
-          bc.params,
-          {"Allow_fitted_surface_stress"});
-      allow_fitted_surface_stress.has_value() &&
-      !*allow_fitted_surface_stress) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Physics] Free_surface BC '" + bc.name +
-        "': Allow_fitted_surface_stress=false was retired (decision D47 "
-        "Q2); fitted SurfaceStress needs no opt-in.  Remove the key and use "
-        "Surface_tension_form=SurfaceStress.");
-  }
-  if (first_defined_string(bc.params, {"Curvature"}).has_value()) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Physics] Free_surface BC '" + bc.name +
-        "': Curvature (the supplied curvature of the CurvatureTraction "
-        "route) was retired (decision D47 Q2); remove it and use "
-        "Surface_tension_form=SurfaceStress.");
-  }
-  if (first_defined_bool(bc.params, {"Use_level_set_curvature"})
-          .value_or(false)) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Physics] Free_surface BC '" + bc.name +
-        "': Use_level_set_curvature=true (the raw level-set curvature of "
-        "the CurvatureTraction route) was retired (decision D47 Q2); use "
-        "Surface_tension_form=SurfaceStress.");
-  }
-  // Decision D48 retired KinematicAreaGradientTraction, the only reader of
-  // the projected curvature field of a boundary.  Every spelling of the key
-  // fails whenever it is given, whatever its value; the keys stay known to
-  // Parameters.
-  for (const std::string_view key :
-       {"Curvature_field", "CurvatureField", "Curvature_field_name",
-        "CurvatureFieldName", "Projected_curvature_field",
-        "ProjectedCurvatureField", "Free_surface_curvature_field",
-        "FreeSurfaceCurvatureField"}) {
-    if (const auto* parameter = find_param(bc.params, key);
-        parameter != nullptr && parameter->defined) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] Free_surface BC '" + bc.name + "': " +
-          std::string(key) +
-          " (the projected curvature field of the "
-          "KinematicAreaGradientTraction route) was retired (decision D48); "
-          "remove it and use Surface_tension_form=SurfaceStress.");
-    }
-  }
-  // Fitted CurvatureTraction with pointwise current-geometry curvature was
-  // withdrawn by D5 (identically zero on affine faces) and retired by D42.
-  if (first_defined_bool(
-          bc.params,
-          {"Use_current_geometry_curvature"})
-          .value_or(false)) {
-    throw std::invalid_argument(
-        "[svMultiPhysics::Physics] Free_surface BC '" + bc.name +
-        "': Use_current_geometry_curvature=true (pointwise current-geometry "
-        "curvature of the fitted CurvatureTraction) was retired (decision "
-        "D42); it is identically zero on affine faces.  Use "
-        "Surface_tension_form=SurfaceStress, the default.");
-  }
-  // Kinematic_penalty set the penalty of the Penalty enforcement; both were
-  // retired by decision D47 Q9, so the key fails whenever it is given.
-  if (first_defined_string(bc.params, {"Kinematic_penalty"}).has_value()) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Physics] Free_surface BC '" + bc.name +
-        "': Kinematic_penalty (the penalty of the Penalty kinematic "
-        "enforcement) was retired (decision D47 Q9); remove it and use "
-        "Kinematic_enforcement=MeshNitsche.");
-  }
-  if (first_defined_double(
-          bc.params,
-          {"Cut_cell_velocity_gradient_penalty"})) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Physics] Cut-cell velocity ghost-penalty settings are retired; small-cut aggregation replaces them.");
-  }
-  if (first_defined_int(
-          bc.params,
-          {"Cut_cell_velocity_max_derivative_order"})) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Physics] Cut-cell velocity derivative-order settings are retired with the velocity ghost penalty.");
-  }
-
-  // The legacy same-field dry-velocity diffusion (Velocity_extension) was
-  // retired with decision D42; it modified the physical momentum rows.
-  // Decks may still state it as disabled.
-  const auto velocity_extension_enabled = first_defined_bool(
-      bc.params,
-      {"Enable_velocity_extension"});
-  const bool velocity_extension_explicitly_disabled =
-      velocity_extension_enabled.has_value() &&
-      !*velocity_extension_enabled;
-  const bool velocity_extension_diffusivity_present =
-      first_defined_double(
-          bc.params,
-          {"Velocity_extension_diffusivity"})
-          .has_value();
-  if (velocity_extension_enabled.value_or(false) ||
-      (velocity_extension_diffusivity_present &&
-       !velocity_extension_explicitly_disabled)) {
-    throw std::invalid_argument(
-        "[svMultiPhysics::Physics] Free_surface BC '" + bc.name +
-        "': the legacy same-field dry-velocity diffusion "
-        "(Enable_velocity_extension / Velocity_extension_diffusivity) was "
-        "retired (decision D42) because it modified the physical momentum; "
-        "the level-set advection velocity extension and small-cut "
-        "aggregation replace it.  Remove these keys or set "
-        "Enable_velocity_extension=false.");
-  }
-  if (velocity_extension_diffusivity_present) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Physics] Free_surface BC '" + bc.name +
-        "': Velocity_extension_diffusivity belongs to the retired legacy "
-        "dry-velocity diffusion (decision D42).");
-  }
-}
-
 /// The relations between the resolved keys of a boundary, with the
 /// register's texts.
 void check_free_surface_relations(
     const opt::ResolvedOptions<navier_stokes::FreeSurfaceBoundary>& resolved)
 {
-  using navier_stokes::FreeSurfaceKinematicEnforcement;
+  using navier_stokes::FreeSurfaceImplementation;
   using navier_stokes::FreeSurfaceTangentialMeshPolicy;
   const auto& fs = resolved.value;
   const auto any_explicit = [&](std::initializer_list<std::string_view> keys) {
@@ -2002,13 +1608,12 @@ void check_free_surface_relations(
         "Tangential_mesh_policy=Prescribed or SmoothingOnly; Free has no "
         "tangential boundary row.");
   }
-  // Kinematic_nitsche_symmetric and Kinematic_nitsche_scale_with_p, which
-  // no deck, runner or test set, were removed (decision D47); the Nitsche
-  // enforcement they configured was retired by D47 Q9.
+  // The MeshNitsche normal enforcement of a fitted ALE surface is the only
+  // reader of its penalty (decisions D35 and D47 Q9).
   if (resolved.isExplicit("Kinematic_nitsche_gamma") &&
-      fs.kinematic_enforcement != FreeSurfaceKinematicEnforcement::MeshNitsche) {
+      fs.implementation != FreeSurfaceImplementation::FittedALE) {
     throw std::runtime_error(
-        "[svMultiPhysics::Physics] Kinematic_nitsche_gamma requires Kinematic_enforcement=MeshNitsche.");
+        "[svMultiPhysics::Physics] Kinematic_nitsche_gamma requires a FittedALE free surface (MeshNitsche normal enforcement).");
   }
 
   if (fs.small_cut_aggregation_guards.maximum_row_l1_norm <
@@ -2033,10 +1638,7 @@ void check_free_surface_relations(
   // implication) unless the input gives the switch.
   if (resolved.isExplicit("Enable_cut_cell_stabilization") &&
       !fs.cut_cell_stabilization.enabled &&
-      any_explicit({"Cut_cell_pressure_gradient_penalty",
-                    "Cut_cell_pressure_stabilization_policy",
-                    "Use_cut_metadata_scale",
-                    "Cut_cell_metadata_scale_cap"})) {
+      any_explicit({"Cut_cell_pressure_gradient_penalty"})) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] Enable_cut_cell_stabilization=false cannot be combined with cut-cell stabilization suboptions.");
   }
@@ -2055,10 +1657,8 @@ void resolve_free_surface_contact_lines(
 
   constexpr std::string_view contact_keys[]{
       "Contact_line_model",
-      "Contact_angle_radians",
       "Contact_angle_degrees",
       "Contact_line_wall_markers",
-      "Contact_line_wall_marker",
       "Contact_line_wall_face",
       "Contact_line_marker",
       "Contact_line_wall_normal",
@@ -2111,24 +1711,18 @@ void resolve_free_surface_contact_lines(
   const auto resolved =
       navier_stokes::freeSurfaceContactLineInputSchema().resolve(input);
   const auto& view = resolved.value;
-  const bool has_radians = resolved.isExplicit("Contact_angle_radians");
   const bool has_degrees = resolved.isExplicit("Contact_angle_degrees");
 
   if (!resolved.isExplicit("Contact_line_model")) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] Free-surface contact configuration requires an explicit Contact_line_model (None, Pinned, PrescribedAngle, or DynamicRenE).");
   }
-  if (has_radians && has_degrees) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Physics] Free-surface contact configuration must specify the contact angle in either radians or degrees, not both.");
-  }
 
   // Presence counts a key given with an empty value, as the register did.
-  const bool has_angle = has_radians || has_degrees;
+  const bool has_angle = has_degrees;
   const bool has_wall_marker = any_parameter_defined(
       params,
-      {"Contact_line_wall_markers",
-       "Contact_line_wall_marker"});
+      {"Contact_line_wall_markers"});
   const bool has_wall_normal = any_parameter_defined(
       params,
       {"Contact_line_wall_normal"});
@@ -2198,9 +1792,7 @@ void resolve_free_surface_contact_lines(
   }
 
   ScalarValue contact_angle{svmp::FE::Real{1.57079632679489661923}};
-  if (has_radians) {
-    contact_angle = view.contact_angle_radians;
-  } else if (has_degrees) {
+  if (has_degrees) {
     constexpr double pi = 3.14159265358979323846;
     contact_angle = static_cast<svmp::FE::Real>(
         static_cast<double>(view.contact_angle_degrees) * pi / 180.0);
@@ -2208,7 +1800,7 @@ void resolve_free_surface_contact_lines(
   const bool strong_contact_law =
       view.law_enforcement == FreeSurfaceContactLawEnforcementInput::Strong;
   const bool wall_markers_given =
-      resolved.isExplicit("Contact_line_wall_marker");
+      resolved.isExplicit("Contact_line_wall_markers");
   const bool wall_normals_given =
       resolved.isExplicit("Contact_line_wall_normal");
 
@@ -2338,11 +1930,10 @@ resolve_free_surface_bc(
   const auto input =
       svmp::Physics::formulations::navier_stokes::optionInputFromParameters(bc.params);
   const auto implementation = implementation_of(input);
-  reject_retired_free_surface_input(bc);
 
-  // The retired keys were checked above; a fitted boundary does not read the
-  // level-set keys of an unfitted interface.
-  auto keys = input.excludeSpellings(schema.retiredSpellings());
+  // A fitted boundary does not read the level-set keys of an unfitted
+  // interface.
+  auto keys = input;
   if (implementation == FreeSurfaceImplementation::FittedALE) {
     keys = keys.excludeSpellings(unfitted_interface_spellings());
   }
@@ -2350,6 +1941,13 @@ resolve_free_surface_bc(
   check_free_surface_relations(resolved);
 
   auto fs = resolved.value;
+  // D35: MeshNitsche is the normal enforcement of a fitted ALE surface; an
+  // unfitted surface has none.
+  if (implementation == FreeSurfaceImplementation::FittedALE) {
+    fs.kinematic_enforcement =
+        svmp::Physics::formulations::navier_stokes::
+            FreeSurfaceKinematicEnforcement::MeshNitsche;
+  }
   // Kept for the provenance of the resolved values (effective-configuration
   // artifact, decision D47).
   fs.input = input;

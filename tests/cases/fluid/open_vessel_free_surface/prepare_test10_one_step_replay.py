@@ -62,7 +62,6 @@ def prepare_replay_case(
     time_step: float,
     min_iterations: int,
     pressure_penalty: float | None = None,
-    pressure_policy: str | None = None,
 ) -> None:
     source_case = source_case.resolve()
     output_case = output_case.resolve()
@@ -116,12 +115,6 @@ def prepare_replay_case(
                             "Cut_cell_pressure_gradient_penalty",
                             format_float(pressure_penalty),
                         )
-                    if pressure_policy is not None:
-                        set_child_text(
-                            bc,
-                            "Cut_cell_pressure_stabilization_policy",
-                            pressure_policy,
-                        )
 
     ET.indent(tree, space="  ")
     tree.write(output_case / "solver.xml", encoding="utf-8", xml_declaration=True)
@@ -140,7 +133,6 @@ def prepare_replay_case(
         "equation_min_iterations": min_iterations,
         "hydrostatic_pressure_initialization": False,
         "pressure_penalty_override": pressure_penalty,
-        "pressure_policy_override": pressure_policy,
         "diagnostic_only": True,
         "diagnostic_note": (
             "Initial fields are loaded from the saved VTU mesh, but full "
@@ -162,7 +154,6 @@ def main() -> None:
     parser.add_argument("--time-step", type=float, required=True)
     parser.add_argument("--min-iterations", type=int, required=True)
     parser.add_argument("--pressure-penalty", type=float)
-    parser.add_argument("--pressure-policy")
     args = parser.parse_args()
 
     if args.min_iterations < 0:
@@ -178,7 +169,6 @@ def main() -> None:
         time_step=args.time_step,
         min_iterations=args.min_iterations,
         pressure_penalty=args.pressure_penalty,
-        pressure_policy=args.pressure_policy,
     )
 
 

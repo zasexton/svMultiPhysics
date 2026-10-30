@@ -38,26 +38,10 @@ def parse_solver_xml(path: Path) -> dict[str, Any]:
     fluid = root.find("./Add_equation[@type='fluid']")
     if general is None or fluid is None:
         raise RuntimeError(f"solver.xml is missing required sections: {path}")
-    source_path = None
-    for tag in (
-        "Momentum_source_temporal_and_spatial_values_file_path",
-        "MomentumSourceTemporalAndSpatialValuesFilePath",
-        "Body_force_temporal_and_spatial_values_file_path",
-        "BodyForceTemporalAndSpatialValuesFilePath",
-    ):
-        source_path = child_text(fluid, tag)
-        if source_path:
-            break
-    angular_velocity_path = None
-    for tag in (
-        "Rotating_frame_angular_velocity_temporal_values_file_path",
-        "RotatingFrameAngularVelocityTemporalValuesFilePath",
-        "Angular_velocity_temporal_values_file_path",
-        "AngularVelocityTemporalValuesFilePath",
-    ):
-        angular_velocity_path = child_text(fluid, tag)
-        if angular_velocity_path:
-            break
+    source_path = child_text(
+        fluid, "Momentum_source_temporal_and_spatial_values_file_path") or None
+    angular_velocity_path = child_text(
+        fluid, "Rotating_frame_angular_velocity_temporal_values_file_path") or None
     return {
         "number_of_time_steps": int(child_text(general, "Number_of_time_steps") or 0),
         "time_step_size_s": float(child_text(general, "Time_step_size") or 0.0),

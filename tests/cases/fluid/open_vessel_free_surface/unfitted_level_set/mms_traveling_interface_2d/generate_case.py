@@ -500,8 +500,7 @@ def level_set_velocity_xml(args: argparse.Namespace) -> str:
     return """  <Velocity_source>prescribed_data</Velocity_source>
   <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
   <Auto_register_velocity_field>true</Auto_register_velocity_field>
-  <Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>
-  <Advection_velocity_from_field>Velocity</Advection_velocity_from_field>"""
+  <Source_velocity_field_name>Velocity</Source_velocity_field_name>"""
 
 
 def level_set_exact_inflow_xml(args: argparse.Namespace) -> str:
@@ -528,12 +527,6 @@ def write_solver_xml(args: argparse.Namespace) -> None:
     p1_transport_safety_block = ""
     if args.enable_p1_transport_safety:
         p1_transport_safety_block = """  <SUPG_transient_scale>2.0</SUPG_transient_scale>
-  <Enable_discontinuity_capturing>false</Enable_discontinuity_capturing>
-  <Enable_bound_preserving_limiter>true</Enable_bound_preserving_limiter>
-  <Bound_preserving_maximum_courant>1.0</Bound_preserving_maximum_courant>
-  <Bound_preserving_enforce_courant_limit>true</Bound_preserving_enforce_courant_limit>
-  <Bound_preserving_enforce_impermeable_boundaries>true</Bound_preserving_enforce_impermeable_boundaries>
-  <Bound_preserving_impermeable_normal_velocity_tolerance>1.0e-12</Bound_preserving_impermeable_normal_velocity_tolerance>
 """
     fluid_equation_block = ""
     if not args.level_set_only:
@@ -608,21 +601,14 @@ def write_solver_xml(args: argparse.Namespace) -> None:
     <Implicit_cut_fallback_policy>Fail</Implicit_cut_fallback_policy>
     <Implicit_cut_root_tolerance>1.0e-10</Implicit_cut_root_tolerance>
     <Implicit_cut_max_subdivision_depth>{args.implicit_cut_max_subdivision_depth}</Implicit_cut_max_subdivision_depth>
-    <Generated_interface_quadrature_order>2</Generated_interface_quadrature_order>
+    <Cut_quadrature_order>2</Cut_quadrature_order>
     <Interface_quadrature_order>2</Interface_quadrature_order>
     <Volume_quadrature_order>2</Volume_quadrature_order>
     <Active_domain>LevelSetNegative</Active_domain>
-    <Active_domain_method>CutVolume</Active_domain_method>
-    <Enable_velocity_extension>true</Enable_velocity_extension>
-    <Velocity_extension_diffusivity>1.0</Velocity_extension_diffusivity>
     <External_pressure>0.0</External_pressure>
     <Surface_tension>0.0</Surface_tension>
     <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
-    <Use_cut_metadata_scale>false</Use_cut_metadata_scale>
-    <Cut_cell_velocity_gradient_penalty>{args.cut_cell_velocity_gradient_penalty:.12g}</Cut_cell_velocity_gradient_penalty>
-    <Cut_cell_velocity_max_derivative_order>1</Cut_cell_velocity_max_derivative_order>
     <Cut_cell_pressure_gradient_penalty>{args.cut_cell_pressure_gradient_penalty:.12g}</Cut_cell_pressure_gradient_penalty>
-    <Cut_cell_pressure_stabilization_policy>{args.cut_cell_pressure_stabilization_policy}</Cut_cell_pressure_stabilization_policy>
   </Add_BC>
 </Add_equation>
 """
@@ -670,9 +656,7 @@ def write_solver_xml(args: argparse.Namespace) -> None:
 {level_set_velocity_block}
   <Enable_SUPG>{str(not args.disable_level_set_supg).lower()}</Enable_SUPG>
   <SUPG_tau_scale>{args.level_set_supg_tau_scale:.12g}</SUPG_tau_scale>
-{p1_transport_safety_block}  <Enable_reinitialization>false</Enable_reinitialization>
-  <Enable_volume_correction>false</Enable_volume_correction>
-{level_set_exact_inflow_block}  <Output type="Spatial">
+{p1_transport_safety_block}{level_set_exact_inflow_block}  <Output type="Spatial">
     <Level_set>true</Level_set>
     <Generated_interface>true</Generated_interface>
     <Surface_position>true</Surface_position>
@@ -807,8 +791,6 @@ def write_expected(args: argparse.Namespace, *, k: float, period: float, final_t
                 "level_set_supg_tau_scale": args.level_set_supg_tau_scale,
                 "level_set_exact_inflow": bool(args.level_set_exact_inflow),
                 "use_cut_metadata_scale": False,
-                "cut_cell_velocity_gradient_penalty": args.cut_cell_velocity_gradient_penalty,
-                "cut_cell_velocity_max_derivative_order": 1,
                 "cut_cell_pressure_gradient_penalty": args.cut_cell_pressure_gradient_penalty,
                 "cut_cell_pressure_stabilization_policy": args.cut_cell_pressure_stabilization_policy,
             },
@@ -907,8 +889,6 @@ def write_benchmark(args: argparse.Namespace, *, k: float, period: float, final_
             "level_set_supg_tau_scale": args.level_set_supg_tau_scale,
             "level_set_exact_inflow": bool(args.level_set_exact_inflow),
             "use_cut_metadata_scale": False,
-            "cut_cell_velocity_gradient_penalty": args.cut_cell_velocity_gradient_penalty,
-            "cut_cell_velocity_max_derivative_order": 1,
             "cut_cell_pressure_gradient_penalty": args.cut_cell_pressure_gradient_penalty,
             "cut_cell_pressure_stabilization_policy": args.cut_cell_pressure_stabilization_policy,
         },
@@ -1025,7 +1005,6 @@ Default parameters:
 - `time_steps = {args.time_steps}`
 - `spectral_radius_of_infinite_time_step = {args.spectral_radius:.12g}`
 - `element_order = {args.element_order}`
-- `cut_cell_velocity_gradient_penalty = {args.cut_cell_velocity_gradient_penalty:.12g}`
 - `cut_cell_pressure_gradient_penalty = {args.cut_cell_pressure_gradient_penalty:.12g}`
 - `cut_cell_pressure_stabilization_policy = {args.cut_cell_pressure_stabilization_policy}`
 
@@ -1047,22 +1026,13 @@ inactive generated cut-volume sides. Physical Navier-Stokes volume terms remain
 one-fluid and active-side only. The inactive-side velocity clamp is disabled in
 this mode so the extension PDE can solve those inactive velocity DOFs.
 
-The case uses
-`Cut_cell_pressure_stabilization_policy=DisabledForRefreshedFrozenHighOrder`:
-velocity cut-cell stabilization remains enabled, while pressure jump penalties
-are omitted for high-order implicit geometry with refreshed-frozen tangents
-until that pressure stabilization is separately qualified for this moving
-free-surface Jacobian contract.
+The pressure jump penalty is active whenever
+`Cut_cell_pressure_gradient_penalty` is nonzero and is not scaled by cut
+metadata; the former pressure-stabilization policy, the cut-metadata scale and
+the velocity ghost penalty were removed from the solver input.
 
-The velocity ghost penalty is intentionally left unscaled by cut metadata
-(`Use_cut_metadata_scale=false`) in this high-order MMS. The refreshed-frozen
-moving-interface probe accepts with the standard h-scaled velocity penalty,
-while the metadata scale can over-amplify small-cut facets and stall the
-coarse nonlinear acceptance gate.
-
-The current full-size high-order smoke uses
-`Cut_cell_velocity_max_derivative_order=1` and
-`Cut_cell_velocity_gradient_penalty=0.1`. A JIT+Eigen direct one-step copy at
+The full-size high-order smoke was recorded with the former velocity ghost
+penalty (first derivatives, coefficient 0.1). A JIT+Eigen direct one-step copy at
 `Time_step_size=0.005`, depth 6, and fluid `Max_iterations=60` accepted in 9
 Newton iterations with fallback-free initial and accepted-step high-order cut
 contexts and zero reported wet-volume drift. Broader transient and refinement
@@ -1203,9 +1173,9 @@ def parse_args() -> argparse.Namespace:
         "--enable-p1-transport-safety",
         action="store_true",
         help=(
-            "enable the P1 SUPG transient, bound, "
-            "Courant, and impermeable-wall candidate gates; intended for "
-            "explicit production-path transport qualifications"
+            "enable the P1 SUPG transient scale (the bound, Courant and "
+            "impermeable-wall limiter gates were retired with the limiter); "
+            "intended for explicit production-path transport qualifications"
         ),
     )
     parser.add_argument(
@@ -1219,12 +1189,6 @@ def parse_args() -> argparse.Namespace:
         help="omit the fluid/free-surface block and generate a level-set transport isolation case",
     )
     parser.add_argument(
-        "--cut-cell-velocity-gradient-penalty",
-        type=float,
-        default=0.1,
-        help="velocity ghost-penalty coefficient written to the free-surface BC",
-    )
-    parser.add_argument(
         "--cut-cell-pressure-gradient-penalty",
         type=float,
         default=1.0,
@@ -1232,9 +1196,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--cut-cell-pressure-stabilization-policy",
-        choices=("Enabled", "Disabled", "DisabledForRefreshedFrozenHighOrder"),
-        default="DisabledForRefreshedFrozenHighOrder",
-        help="pressure ghost-penalty policy written to the free-surface BC",
+        choices=("Enabled",),
+        default="Enabled",
+        help=(
+            "recorded in the metadata only: the pressure ghost penalty is active "
+            "whenever its coefficient is nonzero (the policy key was removed from "
+            "the solver input)"
+        ),
     )
     args = parser.parse_args()
 
@@ -1254,8 +1222,6 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--spectral-radius must be in [0, 1]")
     if args.level_set_supg_tau_scale <= 0.0:
         raise ValueError("--level-set-supg-tau-scale must be positive")
-    if args.cut_cell_velocity_gradient_penalty < 0.0:
-        raise ValueError("--cut-cell-velocity-gradient-penalty must be nonnegative")
     if args.cut_cell_pressure_gradient_penalty < 0.0:
         raise ValueError("--cut-cell-pressure-gradient-penalty must be nonnegative")
     args.level_set_constant_velocity = tuple(float(value) for value in args.level_set_constant_velocity)

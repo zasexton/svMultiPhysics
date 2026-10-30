@@ -1761,13 +1761,12 @@ std::string activeCutOptionXml(const CutOptionRefreshCase& current_case)
       << R"xml(</Generated_interface_domain_id>
       <Small_cut_aggregation>false</Small_cut_aggregation>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
 )xml";
 
   if (current_case.quadrature_order.has_value()) {
-    xml << "      <Generated_interface_quadrature_order>"
+    xml << "      <Cut_quadrature_order>"
         << *current_case.quadrature_order
-        << "</Generated_interface_quadrature_order>\n";
+        << "</Cut_quadrature_order>\n";
   }
   if (current_case.interface_quadrature_order.has_value()) {
     xml << "      <Interface_quadrature_order>"
@@ -2017,8 +2016,6 @@ public:
                     active_side_ == ActiveSide::Negative
                         ? channel_ns::FreeSurfaceActiveDomain::LevelSetNegative
                         : channel_ns::FreeSurfaceActiveDomain::LevelSetPositive,
-                .active_domain_method =
-                    channel_ns::FreeSurfaceActiveDomainMethod::CutVolume,
                 .external_pressure = 0.0,
                 .surface_tension = 0.0,
                 .cut_cell_stabilization = {
@@ -2069,7 +2066,6 @@ public:
       <Active_domain>)xml") +
         active_side_token +
         R"xml(</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
       <Small_cut_aggregation>true</Small_cut_aggregation>
     </Add_BC>
   </Add_equation>
@@ -3840,7 +3836,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
     <Level_set_field_name>phi</Level_set_field_name>
     <Velocity_field_name>extended_velocity</Velocity_field_name>
     <Velocity_source>prescribed_data</Velocity_source>
-    <Advection_velocity_from_field>physical_velocity</Advection_velocity_from_field>
+    <Source_velocity_field_name>physical_velocity</Source_velocity_field_name>
     <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -3918,11 +3914,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
       "'coupled_field', 'prescribed_data', 'constant_vector', or "
       "'material_interface_phase_pair'.");
 
-  auto boundary_before_curvature = parseWorkflowParametersXml(R"xml(
+  auto invalid_boundary = parseWorkflowParametersXml(R"xml(
 <svMultiPhysicsFile>
   <Add_equation type="level_set">
     <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
-    <Curvature_projection_recovery_mode>invalid_recovery</Curvature_projection_recovery_mode>
     <Add_BC name="inlet">
       <Type>LevelSetInflow</Type>
       <Value>0.0</Value>
@@ -3930,32 +3925,14 @@ TEST(ApplicationDriverLevelSetWorkflows,
   </Add_equation>
 </svMultiPhysicsFile>
 )xml");
-  boundary_before_curvature->equation_parameters.front()
+  invalid_boundary->equation_parameters.front()
       ->boundary_conditions.front()
       ->set_extra_parameter_value("Value", "invalid");
   EXPECT_EQ(
       (maintenanceCompatibilityExceptionMessage<std::invalid_argument>([&] {
-        (void)legacyMaintenanceRequestsForTest(*boundary_before_curvature);
+        (void)legacyMaintenanceRequestsForTest(*invalid_boundary);
       })),
       "stod");
-
-  auto disabled_curvature = parseWorkflowParametersXml(R"xml(
-<svMultiPhysicsFile>
-  <Add_equation type="level_set">
-    <Enable_curvature_projection>false</Enable_curvature_projection>
-    <Curvature_projection_recovery_mode>invalid_recovery</Curvature_projection_recovery_mode>
-  </Add_equation>
-</svMultiPhysicsFile>
-)xml");
-  EXPECT_EQ(
-      (maintenanceCompatibilityExceptionMessage<std::invalid_argument>(
-          [&] { (void)legacyMaintenanceRequestsForTest(*disabled_curvature); })),
-      "[svMultiPhysics::Application] 'Curvature_projection_recovery_mode': "
-      "The level-set curvature projection (Enable_curvature_projection, "
-      "Curvature_field_name and the Curvature_projection_* settings) was "
-      "retired (decision D48; its least-squares recovery modes by decision "
-      "D47): SurfaceStress, the only capillary route, reads no curvature "
-      "field.  Remove these keys.");
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
@@ -4322,7 +4299,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
       <Interface_marker>734</Interface_marker>
       <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -5062,7 +5038,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
       <Interface_marker>701</Interface_marker>
       <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
     <Add_BC name="top_free_surface">
       <Type>Free_surface</Type>
@@ -5072,7 +5047,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
       <Interface_marker>702</Interface_marker>
       <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
       <Active_domain>LevelSetPositive</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -5549,7 +5523,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
       <Interface_marker>703</Interface_marker>
       <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -5958,7 +5931,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
       <Interface_marker>707</Interface_marker>
       <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -6800,7 +6772,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
       <Interface_marker>708</Interface_marker>
       <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -7275,7 +7246,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
       <Interface_marker>709</Interface_marker>
       <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -7726,12 +7696,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
                     positive_side
                         ? channel_ns::FreeSurfaceActiveDomain::LevelSetPositive
                         : channel_ns::FreeSurfaceActiveDomain::LevelSetNegative,
-                .active_domain_method =
-                    channel_ns::FreeSurfaceActiveDomainMethod::CutVolume,
                 .external_pressure = 0.0,
                 .surface_tension = 1.0,
-                .surface_tension_form =
-                    channel_ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
                 .small_cut_aggregation = false,
             };
         free_surface.contact_lines.push_back(
@@ -7844,13 +7810,11 @@ TEST(ApplicationDriverLevelSetWorkflows,
       <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
       <Active_domain>)xml") + active_domain_name +
                                           R"xml(</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
       <Small_cut_aggregation>false</Small_cut_aggregation>
       <Surface_tension>1.0</Surface_tension>
-      <Surface_tension_form>SurfaceStress</Surface_tension_form>
       <Contact_line_model>DynamicContactAngle</Contact_line_model>
       <Contact_angle_degrees>90.0</Contact_angle_degrees>
-      <Contact_line_wall_markers>7101;7102</Contact_line_wall_markers>
+      <Contact_line_wall_face>left_contact_wall; right_contact_wall</Contact_line_wall_face>
       <Contact_line_wall_normal>)xml" + contact_wall_normals +
                                           R"xml(</Contact_line_wall_normal>
       <Contact_line_mobility>1.0</Contact_line_mobility>
@@ -8281,12 +8245,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
                     positive_side
                         ? channel_ns::FreeSurfaceActiveDomain::LevelSetPositive
                         : channel_ns::FreeSurfaceActiveDomain::LevelSetNegative,
-                .active_domain_method =
-                    channel_ns::FreeSurfaceActiveDomainMethod::CutVolume,
                 .external_pressure = external_pressure,
                 .surface_tension = 1.0,
-                .surface_tension_form =
-                    channel_ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
                 .small_cut_aggregation = false,
             };
     for (const auto& wall : contact_walls) {
@@ -8358,16 +8318,16 @@ TEST(ApplicationDriverLevelSetWorkflows,
     sim.time_history->uDDot().zero();
     sim.time_history->updateGhosts();
 
-    std::ostringstream contact_wall_markers;
+    std::ostringstream contact_wall_faces;
     std::ostringstream contact_wall_normals;
     for (std::size_t wall_index = 0u;
          wall_index < contact_walls.size();
          ++wall_index) {
       if (wall_index != 0u) {
-        contact_wall_markers << ';';
+        contact_wall_faces << "; ";
         contact_wall_normals << "; ";
       }
-      contact_wall_markers << contact_walls[wall_index].marker;
+      contact_wall_faces << "contact_wall_" << contact_walls[wall_index].marker;
       std::array<svmp::FE::Real, 3> wall_normal{};
       wall_normal[static_cast<std::size_t>(contact_walls[wall_index].axis)] =
           contact_walls[wall_index].outward_normal;
@@ -8401,17 +8361,15 @@ TEST(ApplicationDriverLevelSetWorkflows,
       <Active_domain>)xml"
                   << (positive_side ? "LevelSetPositive" : "LevelSetNegative")
                   << R"xml(</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
       <Small_cut_aggregation>false</Small_cut_aggregation>
       <External_pressure>)xml"
                   << external_pressure << R"xml(</External_pressure>
       <Surface_tension>1.0</Surface_tension>
-      <Surface_tension_form>SurfaceStress</Surface_tension_form>
       <Contact_line_model>DynamicContactAngle</Contact_line_model>
       <Contact_angle_degrees>90.0</Contact_angle_degrees>
-      <Contact_line_wall_markers>)xml"
-                  << contact_wall_markers.str()
-                  << R"xml(</Contact_line_wall_markers>
+      <Contact_line_wall_face>)xml"
+                  << contact_wall_faces.str()
+                  << R"xml(</Contact_line_wall_face>
       <Contact_line_wall_normal>)xml"
                   << contact_wall_normals.str()
                   << R"xml(</Contact_line_wall_normal>
@@ -8797,7 +8755,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
       <Interface_marker>705</Interface_marker>
       <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -9621,7 +9578,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
       <Interface_marker>706</Interface_marker>
       <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -9750,7 +9706,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
       <Interface_marker>704</Interface_marker>
       <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
       <Small_cut_aggregation>false</Small_cut_aggregation>
     </Add_BC>
   </Add_equation>
@@ -9876,7 +9831,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
       <Interface_marker>706</Interface_marker>
       <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -10823,9 +10777,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
   }
 
   // The algebraic wet extension was retired (decisions D47 and D55): its
-  // switch, its methods, its map output and a source field without a method
-  // fail with the retirement message.  The switch and the map output may
-  // still be stated as false.
+  // methods and a source field without a method fail with the retirement
+  // message.
   const auto expect_retired = [&](const std::string& method,
                                   const std::string& extra) {
     SCOPED_TRACE(method + extra);
@@ -10839,12 +10792,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
           << error.what();
     }
   };
-  expect_retired(
-      "pde_harmonic",
-      "<Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>");
-  expect_retired(
-      "pde_harmonic",
-      "<Write_velocity_extension_maps>true</Write_velocity_extension_maps>");
   for (const std::string method :
        {"wall_compatible_normal", "nearest_interface_point",
         "nearest_active_vertex"}) {
@@ -10853,12 +10800,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
         "<Source_velocity_field_name>Velocity</Source_velocity_field_name>");
     expect_retired(method, "");
   }
-  auto stated_off = parseWorkflowParametersXml(
-      xml("pde_harmonic",
-          "<Use_wet_extension_advection_velocity>false</Use_wet_extension_advection_velocity>"
-          "<Write_velocity_extension_maps>false</Write_velocity_extension_maps>")
-          .c_str());
-  EXPECT_EQ(levelSetAdvectionVelocityRequests(*stated_off).size(), 1u);
 
   // An unknown method name fails and lists the supported methods.
   auto unknown = parseWorkflowParametersXml(
@@ -13293,7 +13234,6 @@ protected:
       <Interface_marker>911</Interface_marker>
       <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -14823,64 +14763,6 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
 }
 
 TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
-       NonconvergedReinitializationRejectsAndRestoresGeometry)
-{
-  // The frozen WP-6 matrix records this name.  Decision D47 retired the
-  // projection reinitialization whose nonconverged candidate the test
-  // rejected.  A level-set equation that enables it, or names one of its
-  // settings, now fails while it is translated, before any field,
-  // candidate or geometry exists; the disabled switch is still accepted.
-  const auto before = gatherFeOrderedSolution(history().u());
-  const auto* context = sim_.fe_system->cutIntegrationContext();
-  const auto lifecycle_revision = lifecycle_.valueRevision();
-  const std::vector<std::pair<std::string, std::string>> cases{
-      {"Enable_reinitialization", "false"},
-      {"Enable_reinitialization", "true"},
-      {"Reinitialization_method", "projection"},
-      {"Reinitialization_cadence_steps", "1"},
-      {"Reinitialization_max_iterations", "1"},
-      {"Reinitialization_pseudo_time_step_scale", "1.0e-3"},
-      {"Reinitialization_interface_band_width", "3.0"},
-      {"Reinitialization_signed_distance_tolerance", "1.0e-14"},
-      {"Reinitialization_max_zero_set_displacement", "1.0e-10"},
-  };
-  for (const auto& [key, value] : cases) {
-    auto mesh = makeWorkflowTriangleMesh();
-    svmp::Physics::EquationModuleInput input{};
-    input.equation_type = "level_set";
-    input.mesh_name = "triangle";
-    input.mesh = mesh->local_mesh_ptr();
-    input.equation_params["Level_set_field_name"] =
-        svmp::Physics::ParameterValue{true, "phi"};
-    input.equation_params["Velocity_source"] =
-        svmp::Physics::ParameterValue{true, "constant"};
-    input.equation_params["Constant_velocity"] =
-        svmp::Physics::ParameterValue{true, "0.0 0.0 0.0"};
-    input.equation_params[key] = svmp::Physics::ParameterValue{true, value};
-
-    svmp::FE::systems::FESystem system(mesh);
-    if (value == "false") {
-      EXPECT_TRUE(
-          application::translators::level_set::createModule(input, system))
-          << key;
-      continue;
-    }
-    try {
-      (void)application::translators::level_set::createModule(input, system);
-      ADD_FAILURE() << key << '=' << value << " was accepted";
-    } catch (const std::exception& error) {
-      EXPECT_NE(std::string(error.what()).find("retired (decision D47)"),
-                std::string::npos)
-          << key << ": " << error.what();
-    }
-  }
-  EXPECT_EQ(gatherFeOrderedSolution(history().u()), before);
-  EXPECT_EQ(sim_.fe_system->cutIntegrationContext(), context);
-  EXPECT_EQ(lifecycle_.valueRevision(), lifecycle_revision);
-}
-
-
-TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
        PostAcceptanceMaintenanceDoesNotRepeatCandidateOwnedRepair)
 {
   requests_.front() = withMaintenanceConfiguration(
@@ -15384,57 +15266,6 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
 }
 
 TEST(ApplicationDriverLevelSetVolumeCorrection,
-     ReportsAuthoritativeFreeSurfacePotentialChange)
-{
-  // Decision D47 retired the global level-set volume correction together with
-  // its free-surface work report.  The test keeps its name, which the frozen
-  // WP-8 matrix records, and checks that a deck enabling the correction or
-  // naming one of its settings fails while its level-set equation is
-  // translated, while the disabled switch is still accepted.
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  const std::vector<std::pair<std::string, std::string>> cases{
-      {"Enable_volume_correction", "false"},
-      {"Enable_volume_correction", "true"},
-      {"Volume_correction_cadence_steps", "1"},
-      {"Volume_correction_tolerance", "1.0e-10"},
-      {"Volume_correction_maximum_interface_displacement_fraction", "0.05"},
-  };
-  for (const auto& [key, value] : cases) {
-    auto mesh = makeWorkflowTriangleMesh();
-    svmp::Physics::EquationModuleInput input{};
-    input.equation_type = "level_set";
-    input.mesh_name = "triangle";
-    input.mesh = mesh->local_mesh_ptr();
-    input.equation_params["Level_set_field_name"] =
-        svmp::Physics::ParameterValue{true, "phi"};
-    input.equation_params["Velocity_source"] =
-        svmp::Physics::ParameterValue{true, "constant"};
-    input.equation_params["Constant_velocity"] =
-        svmp::Physics::ParameterValue{true, "0.0 0.0 0.0"};
-    input.equation_params[key] = svmp::Physics::ParameterValue{true, value};
-
-    svmp::FE::systems::FESystem system(mesh);
-    if (value == "false") {
-      EXPECT_TRUE(
-          application::translators::level_set::createModule(input, system))
-          << key;
-      continue;
-    }
-    try {
-      (void)application::translators::level_set::createModule(input, system);
-      ADD_FAILURE() << key << '=' << value << " was accepted";
-    } catch (const std::exception& error) {
-      EXPECT_NE(std::string(error.what()).find("retired (decision D47)"),
-                std::string::npos)
-          << key << ": " << error.what();
-    }
-  }
-#endif
-}
-
-TEST(ApplicationDriverLevelSetVolumeCorrection,
      CandidateGeometryFailureRestoresCompleteMaintenanceTransaction)
 {
   // The frozen WP-8 matrix records this name.  Decision D47 retired the
@@ -15534,7 +15365,6 @@ TEST(ApplicationDriverLevelSetVolumeCorrection,
       <Interface_marker>809</Interface_marker>
       <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>

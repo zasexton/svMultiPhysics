@@ -389,19 +389,16 @@ void expectReviewedP1LevelSetTransportControls(
   expectText(level_set, "Enable_SUPG", "true");
   expectText(level_set, "SUPG_tau_scale", "0.5");
   expectText(level_set, "SUPG_transient_scale", "2.0");
-  // Level-set discontinuity capturing was retired (decision D47).
-  expectText(level_set, "Enable_discontinuity_capturing", "false");
-  EXPECT_EQ(level_set.FirstChildElement("Discontinuity_capturing_scale"),
-            nullptr);
-  EXPECT_EQ(level_set.FirstChildElement(
-                "Discontinuity_capturing_gradient_epsilon"),
-            nullptr);
-  EXPECT_EQ(level_set.FirstChildElement("Discontinuity_capturing_max_courant"),
-            nullptr);
-  // The bound-preserving limiter was retired (decision D51).
-  expectText(level_set, "Enable_bound_preserving_limiter", "false");
+  // Level-set discontinuity capturing (decision D47) and the
+  // bound-preserving limiter (decision D51) were retired; the decks state
+  // none of their keys.
   for (const char* name :
-       {"Bound_preserving_bound_tolerance",
+       {"Enable_discontinuity_capturing",
+        "Discontinuity_capturing_scale",
+        "Discontinuity_capturing_gradient_epsilon",
+        "Discontinuity_capturing_max_courant",
+        "Enable_bound_preserving_limiter",
+        "Bound_preserving_bound_tolerance",
         "Bound_preserving_sign_tolerance",
         "Bound_preserving_maximum_courant",
         "Bound_preserving_enforce_courant_limit",
@@ -451,7 +448,6 @@ fs::path writeBuilderRegressionXml(const fs::path& case_dir)
                   "open_vessel_surface");
   setOrAppendText(doc, fluid, "Interface_marker", "101");
   setOrAppendText(doc, fluid, "Active_domain", "LevelSetNegative");
-  setOrAppendText(doc, fluid, "Active_domain_method", "CutVolume");
 
   const auto xml_path = fs::temp_directory_path() /
                         "svmp_open_vessel_unfitted_builder_cut_domain.xml";
@@ -550,12 +546,13 @@ DriverSetupRegressionPaths writeDriverSetupRegressionXml(
       "open_vessel_surface");
   setOrAppendText(doc, fluid, "Interface_marker", "101");
   setOrAppendText(doc, fluid, "Active_domain", "LevelSetNegative");
-  setOrAppendText(doc, fluid, "Active_domain_method", "CutVolume");
+  // An unparsable maintenance-only value: the installation ignores it, and
+  // the delayed maintenance resolution fails on it.
   setOrAppendText(
       doc,
       level_set,
-      "Curvature_projection_recovery_mode",
-      "invalid_recovery");
+      "Static_capillary_volume_tolerance",
+      "invalid");
 
   if (variant.missing_fitted_inflow_face) {
     auto* boundary = doc.NewElement("Add_BC");
@@ -686,13 +683,8 @@ fs::path writeWetExtensionOrderRegressionXml(const fs::path& case_dir,
     auto& free_surface =
         mutableChildWithAttribute(fluid, "Add_BC", "name", "free_surface");
     setOrAppendText(doc, free_surface, "Implementation", "FittedALE");
-    if (fitted_exclusion == "SurfaceStress") {
-      setOrAppendText(doc,
-                      free_surface,
-                      "Surface_tension_form",
-                      std::string(fitted_exclusion).c_str());
-    } else if (fitted_exclusion == "PrescribedAngle" ||
-               fitted_exclusion == "DynamicRenE") {
+    if (fitted_exclusion == "PrescribedAngle" ||
+        fitted_exclusion == "DynamicRenE") {
       setOrAppendText(doc,
                       free_surface,
                       "Contact_line_model",
@@ -700,7 +692,7 @@ fs::path writeWetExtensionOrderRegressionXml(const fs::path& case_dir,
       setOrAppendText(
           doc, free_surface, "Contact_angle_degrees", "60.0");
       setOrAppendText(
-          doc, free_surface, "Contact_line_wall_marker", "1");
+          doc, free_surface, "Contact_line_wall_face", "wall_left");
       setOrAppendText(
           doc, free_surface, "Contact_line_wall_normal", "1.0 0.0 0.0");
       if (fitted_exclusion == "DynamicRenE") {
@@ -1081,8 +1073,10 @@ TEST(OpenVesselExamples, FittedAleCaseDeclaresRequiredControls)
   expectText(free_surface, "Implementation", "FittedALE");
   expectText(free_surface, "External_pressure", "0.0");
   expectText(free_surface, "Surface_tension", "0.0728");
-  expectText(free_surface, "Kinematic_enforcement", "Nitsche");
-  expectText(free_surface, "Normal_kinematic_policy", "MatchFluidNormalVelocity");
+  // A fitted free surface always uses the MeshNitsche normal enforcement;
+  // the deck states no enforcement or normal kinematic policy.
+  EXPECT_EQ(free_surface.FirstChildElement("Kinematic_enforcement"), nullptr);
+  EXPECT_EQ(free_surface.FirstChildElement("Normal_kinematic_policy"), nullptr);
 
   const auto& mesh_motion = childWithAttribute(*root, "Add_equation", "type", "mesh_motion");
   expectText(mesh_motion, "Model", "Harmonic");
@@ -1125,12 +1119,12 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseDeclaresRequiredControls)
   expectText(level_set, "Constant_velocity", "0.0 0.0 0.0");
   expectReviewedP1LevelSetTransportControls(level_set);
   // Projection reinitialization was retired (decision D47).
-  expectText(level_set, "Enable_reinitialization", "false");
+  EXPECT_EQ(level_set.FirstChildElement("Enable_reinitialization"), nullptr);
   EXPECT_EQ(level_set.FirstChildElement("Reinitialization_method"), nullptr);
   EXPECT_EQ(level_set.FirstChildElement("Reinitialization_cadence_steps"),
             nullptr);
   // The global volume correction was retired (decision D47).
-  expectText(level_set, "Enable_volume_correction", "false");
+  EXPECT_EQ(level_set.FirstChildElement("Enable_volume_correction"), nullptr);
   EXPECT_EQ(level_set.FirstChildElement("Volume_correction_use_initial_volume"),
             nullptr);
   EXPECT_EQ(level_set.FirstChildElement("Volume_correction_cadence_steps"),
@@ -1164,7 +1158,7 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseDeclaresRequiredControls)
   expectText(free_surface, "External_pressure", "0.0");
   expectText(free_surface, "Surface_tension", "0.0");
   expectText(free_surface, "Enable_cut_cell_stabilization", "true");
-  expectText(free_surface, "Use_cut_metadata_scale", "false");
+  EXPECT_EQ(free_surface.FirstChildElement("Use_cut_metadata_scale"), nullptr);
   EXPECT_EQ(free_surface.FirstChildElement("Cut_cell_velocity_gradient_penalty"),
             nullptr);
   expectText(free_surface, "Cut_cell_pressure_gradient_penalty", "1.0");
@@ -1247,7 +1241,6 @@ TEST(OpenVesselExamples, ScopedEquationCutDomainRegistersWithUnfittedFreeSurface
                   "open_vessel_surface");
   setOrAppendText(doc, fluid, "Interface_marker", "101");
   setOrAppendText(doc, fluid, "Active_domain", "LevelSetNegative");
-  setOrAppendText(doc, fluid, "Active_domain_method", "CutVolume");
 
   auto mesh = makeTranslatorQuadMesh();
   const std::map<std::string, std::shared_ptr<svmp::Mesh>> meshes{{"tank", mesh}};
@@ -1373,12 +1366,7 @@ TEST(OpenVesselExamples,
            .name = "steady_delayed_maintenance",
            .number_of_time_steps = 0},
        ExceptionCategory::InvalidArgument,
-       "[svMultiPhysics::Application] 'Curvature_projection_recovery_mode': "
-       "The level-set curvature projection (Enable_curvature_projection, "
-       "Curvature_field_name and the Curvature_projection_* settings) was "
-       "retired (decision D48; its least-squares recovery modes by decision "
-       "D47): SurfaceStress, the only capillary route, reads no curvature "
-       "field.  Remove these keys.",
+       "stod",
        true,
        false},
       {DriverSetupRegressionVariant{
@@ -1386,12 +1374,7 @@ TEST(OpenVesselExamples,
            .number_of_time_steps = 1,
            .transient_scheme = "BackwardEuler"},
        ExceptionCategory::InvalidArgument,
-       "[svMultiPhysics::Application] 'Curvature_projection_recovery_mode': "
-       "The level-set curvature projection (Enable_curvature_projection, "
-       "Curvature_field_name and the Curvature_projection_* settings) was "
-       "retired (decision D48; its least-squares recovery modes by decision "
-       "D47): SurfaceStress, the only capillary route, reads no curvature "
-       "field.  Remove these keys.",
+       "stod",
        true,
        true},
       {DriverSetupRegressionVariant{
@@ -1481,11 +1464,11 @@ TEST(OpenVesselExamples,
             (*resolved)->input_snapshot->legacy_maintenance_input.has_value());
         const auto& legacy =
             *(*resolved)->input_snapshot->legacy_maintenance_input;
-        const auto recovery = legacy.equation_parameters.find(
-            "Curvature_projection_recovery_mode");
-        ASSERT_NE(recovery, legacy.equation_parameters.end());
-        EXPECT_TRUE(recovery->second.defined);
-        EXPECT_EQ(recovery->second.value, "invalid_recovery");
+        const auto tolerance = legacy.equation_parameters.find(
+            "Static_capillary_volume_tolerance");
+        ASSERT_NE(tolerance, legacy.equation_parameters.end());
+        EXPECT_TRUE(tolerance->second.defined);
+        EXPECT_EQ(tolerance->second.value, "invalid");
         if (expected.requires_time_advancement) {
           EXPECT_TRUE(components.fe_system->requiresTimeAdvancement());
         }
@@ -2765,7 +2748,7 @@ TEST(OpenVesselExamples, UnfittedFreeSurfaceBuilderAcceptsSurfaceTension)
 #else
   ensure_mpi_initialized_for_open_vessel_builder();
 
-  // Automatic is SurfaceStress, which reads no curvature.
+  // The capillary form is SurfaceStress, which reads no curvature.
   const auto case_dir = openVesselCaseDir("unfitted_level_set");
   const auto xml_path = writeUnfittedGuardRegressionXml(
       case_dir,
@@ -2800,78 +2783,6 @@ TEST(OpenVesselExamples, UnfittedFreeSurfaceBuilderAcceptsSurfaceTension)
 
     EXPECT_TRUE(has_interface_traction);
     EXPECT_TRUE(components.fe_system->formInstallCellDomainRestrictions().empty());
-  }
-
-  std::error_code ec;
-  fs::remove(xml_path, ec);
-#endif
-}
-
-TEST(OpenVesselExamples, UnfittedFreeSurfaceBuilderRejectsNitscheKinematics)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  ensure_mpi_initialized_for_open_vessel_builder();
-
-  const auto case_dir = openVesselCaseDir("unfitted_level_set");
-  const auto xml_path = writeUnfittedGuardRegressionXml(
-      case_dir,
-      "nitsche_kinematics",
-      {{"Kinematic_enforcement", "Nitsche"},
-       {"Normal_kinematic_policy", "MatchFluidNormalVelocity"}});
-
-  Parameters params;
-  const ScopedCurrentPath cwd(case_dir);
-  ASSERT_NO_THROW(params.read_xml(xml_path.string()));
-  application::core::SimulationBuilder builder(params);
-  // Decision D47 Q9 retired the Nitsche enforcement: the value fails while
-  // the fluid equation is translated, before any unfitted check.
-  try {
-    (void)builder.build();
-    ADD_FAILURE() << "Expected the retired Nitsche kinematics to be rejected";
-  } catch (const std::exception& error) {
-    const std::string message = error.what();
-    EXPECT_NE(message.find("decision D47 Q9"), std::string::npos)
-        << message;
-    EXPECT_NE(message.find("MeshNitsche"), std::string::npos) << message;
-  }
-
-  std::error_code ec;
-  fs::remove(xml_path, ec);
-#endif
-}
-
-TEST(OpenVesselExamples, UnfittedFreeSurfaceBuilderRejectsRawCurvatureSurfaceTension)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  ensure_mpi_initialized_for_open_vessel_builder();
-
-  const auto case_dir = openVesselCaseDir("unfitted_level_set");
-  const auto xml_path = writeUnfittedGuardRegressionXml(
-      case_dir,
-      "raw_curvature_surface_tension",
-      {{"Surface_tension", "0.0728"},
-       {"Surface_tension_form", "CurvatureTraction"},
-       {"Use_level_set_curvature", "true"}});
-
-  Parameters params;
-  const ScopedCurrentPath cwd(case_dir);
-  ASSERT_NO_THROW(params.read_xml(xml_path.string()));
-  application::core::SimulationBuilder builder(params);
-  // Decision D47 Q2 retired the CurvatureTraction route with its raw
-  // level-set curvature: the form fails while the fluid equation is
-  // translated.
-  try {
-    (void)builder.build();
-    ADD_FAILURE() << "Expected the retired CurvatureTraction to be rejected";
-  } catch (const std::exception& error) {
-    const std::string message = error.what();
-    EXPECT_NE(message.find("decision D47 Q2"), std::string::npos)
-        << message;
-    EXPECT_NE(message.find("SurfaceStress"), std::string::npos) << message;
   }
 
   std::error_code ec;
@@ -3005,10 +2916,13 @@ TEST(OpenVesselExamples, FittedAleMeshNitscheDecksDeclareSlidingWallsAndDisjoint
     expectEigenDirectSolver(fluid);
     const auto& free_surface = expectBoundaryCondition(fluid, "free_surface", "Free_surface");
     expectText(free_surface, "Implementation", "FittedALE");
-    expectText(free_surface, "Kinematic_enforcement", "MeshNitsche");
+    // A fitted free surface always uses the MeshNitsche normal enforcement;
+    // the decks state no enforcement or normal kinematic policy.
+    EXPECT_EQ(free_surface.FirstChildElement("Kinematic_enforcement"), nullptr);
     expectText(free_surface, "Kinematic_nitsche_gamma", "10");
     expectText(free_surface, "Tangential_mesh_policy", "Free");
-    expectText(free_surface, "Normal_kinematic_policy", "MatchFluidNormalVelocity");
+    EXPECT_EQ(free_surface.FirstChildElement("Normal_kinematic_policy"),
+              nullptr);
     expectText(free_surface, "Surface_tension", "0.0");
     expectText(free_surface, "External_pressure", "0.0");
 
@@ -3216,15 +3130,17 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
       expectText(level_set,
                  "Advection_velocity_extension_coupling",
                  "monolithic");
-      // Curved continuous-P1 redistancing currently fails closed rather than
-      // converging generally, so the production deck leaves it disabled.
-      // The bounded global volume repair was retired (decision D47).
-      expectText(level_set, "Enable_reinitialization", "false");
-      expectText(level_set, "Enable_volume_correction", "false");
+      // Projection reinitialization and the bounded global volume repair
+      // were retired (decision D47).
+      EXPECT_EQ(level_set.FirstChildElement("Enable_reinitialization"),
+                nullptr);
+      EXPECT_EQ(level_set.FirstChildElement("Enable_volume_correction"),
+                nullptr);
       expectText(fluid, "Module_options", expected_jit_options);
       expectText(free_surface, "Small_cut_aggregation", "true");
       expectText(free_surface, "Active_domain", "LevelSetNegative");
-      expectText(free_surface, "Active_domain_method", "CutVolume");
+      EXPECT_EQ(free_surface.FirstChildElement("Active_domain_method"),
+                nullptr);
       EXPECT_EQ(free_surface.FirstChildElement("Enable_velocity_extension"),
                 nullptr);
       EXPECT_EQ(

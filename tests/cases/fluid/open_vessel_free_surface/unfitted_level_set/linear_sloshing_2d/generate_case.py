@@ -238,13 +238,10 @@ def write_solver_xml(args: argparse.Namespace, *, final_time: float) -> None:
   <Velocity_source>coupled_field</Velocity_source>
   <Velocity_field_name>Velocity</Velocity_field_name>
   <Auto_register_velocity_field>true</Auto_register_velocity_field>
-  <Use_wet_extension_advection_velocity>false</Use_wet_extension_advection_velocity>
   <Enable_SUPG>false</Enable_SUPG>
   <Interface_kinematic_marker>1030234</Interface_kinematic_marker>
   <Interface_kinematic_weight_scale>1.0</Interface_kinematic_weight_scale>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
-  <Enable_reinitialization>false</Enable_reinitialization>
-  <Enable_volume_correction>false</Enable_volume_correction>
   <Output type="Spatial">
     <Level_set>true</Level_set>
     <Generated_interface>true</Generated_interface>
@@ -320,14 +317,9 @@ def write_solver_xml(args: argparse.Namespace, *, final_time: float) -> None:
     <Interface_marker>1030234</Interface_marker>
     <Level_set_isovalue>0.0</Level_set_isovalue>
     <Active_domain>LevelSetNegative</Active_domain>
-    <Active_domain_method>CutVolume</Active_domain_method>
-    <Enable_velocity_extension>true</Enable_velocity_extension>
-    <Velocity_extension_diffusivity>1.0</Velocity_extension_diffusivity>
     <External_pressure>0.0</External_pressure>
     <Surface_tension>0.0</Surface_tension>
     <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
-    <Use_cut_metadata_scale>true</Use_cut_metadata_scale>
-    <Cut_cell_velocity_gradient_penalty>1.0</Cut_cell_velocity_gradient_penalty>
     <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
   </Add_BC>
 </Add_equation>

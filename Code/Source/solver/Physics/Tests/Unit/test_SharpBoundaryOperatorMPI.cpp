@@ -1227,8 +1227,6 @@ public:
                 .generated_interface_domain_id = "free_surface",
                 .active_domain =
                     ns::FreeSurfaceActiveDomain::LevelSetNegative,
-                .active_domain_method =
-                    ns::FreeSurfaceActiveDomainMethod::CutVolume,
                 .surface_tension = FE::Real{0.0},
                 .small_cut_aggregation = false,
             });
@@ -2058,8 +2056,6 @@ public:
                     active_side == FE::geometry::CutIntegrationSide::Positive
                         ? ns::FreeSurfaceActiveDomain::LevelSetPositive
                         : ns::FreeSurfaceActiveDomain::LevelSetNegative,
-                .active_domain_method =
-                    ns::FreeSurfaceActiveDomainMethod::CutVolume,
                 .surface_tension = FE::Real{0.0},
                 .small_cut_aggregation = false,
             };
@@ -2110,8 +2106,6 @@ public:
                     .active_components = {false, false, true},
                 });
             free_surface.surface_tension = 0.8;
-            free_surface.surface_tension_form =
-                ns::FreeSurfaceSurfaceTensionForm::SurfaceStress;
             free_surface.contact_lines.push_back(
                 dynamicContactLine(wall_marker_));
             break;
@@ -3198,9 +3192,6 @@ TEST(FreeSurfaceSharpBoundaryOperators,
                         .active_domain =
                             ns::FreeSurfaceActiveDomain::
                                 LevelSetNegative,
-                        .active_domain_method =
-                            ns::FreeSurfaceActiveDomainMethod::
-                                CutVolume,
                         .surface_tension = FE::Real{0.0},
                         .small_cut_aggregation = false,
                     });

@@ -171,7 +171,6 @@ ns::FreeSurfaceBoundary unfittedBoundary(
         .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
         .external_pressure = 0.0,
         .surface_tension = surface_tension,
-        .surface_tension_form = ns::FreeSurfaceSurfaceTensionForm::SurfaceStress,
         .surface_tension_semi_implicit = semi_implicit,
         .small_cut_aggregation = false,
     };
@@ -788,10 +787,9 @@ TEST(FreeSurfaceSemiImplicitSurfaceTension, RejectsConfigurationsOutsideTheValid
         expectRegistrationRejected(bc, requires_prefix + " an exterior one-phase UnfittedLevelSet");
     }
     {
-        SCOPED_TRACE("full-domain diagnostic");
+        SCOPED_TRACE("full-domain active domain");
         auto bc = unfittedBoundary(SI::NormalIncrement);
         bc.active_domain = ns::FreeSurfaceActiveDomain::None;
-        bc.allow_full_domain_unfitted_free_surface = true;
         expectRegistrationRejected(bc, requires_prefix + " Active_domain=LevelSetNegative");
     }
     {

@@ -14,8 +14,9 @@ Two deck profiles are written (``write_case(..., profile=...)``):
   harmonic PDE velocity extension for the level-set transport (D15), the
   accepted-step kinematic reconciliation (D14) and the sign-definite patch
   bounds (D21), the triggered interface-preserving redistancing (D39;
-  ``--interface-preserving-redistancing off`` writes the earlier deck byte for
-  byte), no reinitialization, and the generalized-alpha / FSILS GMRES
+  ``--interface-preserving-redistancing off`` writes the earlier deck without
+  the no-op settings removed from the solver input), no reinitialization, and
+  the generalized-alpha / FSILS GMRES
   solver with the benchmark tolerances (1e-4).  The bottom face carries no
   level-set inflow condition: the D21 bounds reject level-set inflow faces
   (the bottom stays deep in the liquid; its nodes keep a negative value
@@ -39,7 +40,9 @@ Two deck profiles are written (``write_case(..., profile=...)``):
   reinitialization, both retired by decision D47, are off, and that the
   level set is advected by the harmonic PDE velocity extension with
   monolithic coupling instead of the wall-compatible wet extension retired by
-  decisions D47 and D55 (not re-validated);
+  decisions D47 and D55 (not re-validated), and that settings removed from
+  the solver input are not written (among them Use_cut_metadata_scale=true:
+  the cut-cell pressure penalty is no longer scaled by the cut metadata);
   run_test05_velocity_growth_smoke.py keeps writing it.
 
 Run as a script, the module writes one comparison level (``--half-gap-cells``
@@ -332,10 +335,6 @@ def _legacy_solver_xml(steps: int, time_step_size: float) -> str:
   <Enable_SUPG>true</Enable_SUPG>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
   <SUPG_transient_scale>2.0</SUPG_transient_scale>
-  <Enable_discontinuity_capturing>false</Enable_discontinuity_capturing>
-  <Enable_bound_preserving_limiter>false</Enable_bound_preserving_limiter>
-  <Enable_reinitialization>false</Enable_reinitialization>
-  <Enable_volume_correction>false</Enable_volume_correction>
   <Output type="Spatial">
     <Level_set>true</Level_set>
     <Generated_interface>true</Generated_interface>
@@ -416,22 +415,17 @@ def _legacy_solver_xml(steps: int, time_step_size: float) -> str:
     <Generated_interface_domain_id>capillary_rise_surface</Generated_interface_domain_id>
     <Level_set_isovalue>0.0</Level_set_isovalue>
     <Active_domain>LevelSetNegative</Active_domain>
-    <Active_domain_method>CutVolume</Active_domain_method>
     <Generated_interface_geometry>LinearCorner</Generated_interface_geometry>
     <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
     <External_pressure>0.0</External_pressure>
     <Surface_tension>{SURFACE_TENSION_N_PER_M:.16g}</Surface_tension>
-    <Surface_tension_form>SurfaceStress</Surface_tension_form>
     <Contact_line_model>PrescribedContactAngle</Contact_line_model>
     <Contact_line_wall_face>wall_right</Contact_line_wall_face>
     <Contact_line_wall_normal>1 0 0</Contact_line_wall_normal>
     <Contact_angle_degrees>{CONTACT_ANGLE_DEGREES:.16g}</Contact_angle_degrees>
     <Wall_slip_model>Navier</Wall_slip_model>
     <Wall_slip_length>{SLIP_LENGTH_M:.16g}</Wall_slip_length>
-    <Active_domain_smoothing_width>0.0</Active_domain_smoothing_width>
-    <Enable_velocity_extension>false</Enable_velocity_extension>
     <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
-    <Use_cut_metadata_scale>true</Use_cut_metadata_scale>
     <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
   </Add_BC>
 </Add_equation>
@@ -449,7 +443,8 @@ def _d4_solver_xml(steps: int,
     redistancing (decision D39, default on) writes the triggered
     interface-preserving redistancing; off writes the earlier deck byte for
     byte, apart from the <Generalized_alpha_initial_rate>Zero line that
-    replaced the required environment (decision D47)."""
+    replaced the required environment (decision D47) and the no-op settings
+    removed from the solver input."""
     redistancing_xml = ("\n  <Enable_interface_preserving_redistancing>true"
                         "</Enable_interface_preserving_redistancing>" if redistancing else "")
     return f"""<?xml version="1.0" encoding="UTF-8" ?>
@@ -510,8 +505,6 @@ def _d4_solver_xml(steps: int,
   <Enable_SUPG>true</Enable_SUPG>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
   <SUPG_transient_scale>2.0</SUPG_transient_scale>
-  <Enable_reinitialization>false</Enable_reinitialization>
-  <Enable_volume_correction>false</Enable_volume_correction>
   <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>{redistancing_xml}
   <Enable_sign_definite_patch_bounds>true</Enable_sign_definite_patch_bounds>
   <Output type="Spatial">
@@ -587,25 +580,19 @@ def _d4_solver_xml(steps: int,
     <Generated_interface_domain_id>{INTERFACE_DOMAIN_ID}</Generated_interface_domain_id>
     <Level_set_isovalue>0.0</Level_set_isovalue>
     <Active_domain>LevelSetNegative</Active_domain>
-    <Active_domain_method>CutVolume</Active_domain_method>
-    <Active_domain_smoothing_width>0.0</Active_domain_smoothing_width>
     <Generated_interface_geometry>LinearCorner</Generated_interface_geometry>
     <Geometry_tangent_policy>RefreshedFrozenQuadrature</Geometry_tangent_policy>
     <Interface_quadrature_order>2</Interface_quadrature_order>
     <External_pressure>0.0</External_pressure>
     <Surface_tension>{SURFACE_TENSION_N_PER_M:.17g}</Surface_tension>
-    <Surface_tension_form>SurfaceStress</Surface_tension_form>
-    <Use_level_set_curvature>false</Use_level_set_curvature>
     <Contact_line_model>PrescribedAngle</Contact_line_model>
     <Contact_line_wall_face>wall_right</Contact_line_wall_face>
     <Contact_line_wall_normal>1 0 0</Contact_line_wall_normal>
     <Contact_angle_degrees>{CONTACT_ANGLE_DEGREES:.17g}</Contact_angle_degrees>
     <Wall_slip_model>Navier</Wall_slip_model>
     <Wall_slip_length>{SLIP_LENGTH_M:.17g}</Wall_slip_length>
-    <Enable_velocity_extension>false</Enable_velocity_extension>
     <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
     <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
-    <Use_cut_metadata_scale>false</Use_cut_metadata_scale>
     <Small_cut_aggregation>true</Small_cut_aggregation>
   </Add_BC>
 </Add_equation>

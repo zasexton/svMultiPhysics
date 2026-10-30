@@ -109,7 +109,7 @@ namespace {
         }
         if (contactLineWallBoundaryMarker(boundary.contact_lines[*contact_index]) < 0) {
             throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: prescribed unfitted contact angle requires Contact_line_wall_marker or Contact_line_wall_face");
+                "IncompressibleNavierStokesVMSModule: prescribed unfitted contact angle requires a contact wall (Contact_line_wall_face)");
         }
     }
     if (!identity.geometry.has_value()) {
@@ -561,14 +561,8 @@ void validateFreeSurfaceSemiImplicitSurfaceTension(
           FE::Real{0.0})) {
         reject("a literal positive Surface_tension");
     }
-    if (bc.active_domain == FreeSurfaceActiveDomain::None ||
-        bc.allow_full_domain_unfitted_free_surface) {
+    if (bc.active_domain == FreeSurfaceActiveDomain::None) {
         reject("Active_domain=LevelSetNegative or LevelSetPositive");
-    }
-    if (bc.active_domain_method !=
-            FreeSurfaceActiveDomainMethod::CutVolume ||
-        bc.active_domain_smoothing_width != FE::Real{0.0}) {
-        reject("Active_domain_method=CutVolume with zero smoothing width");
     }
     if (bc.generated_interface_geometry !=
         FreeSurfaceGeneratedInterfaceGeometry::LinearCorner) {
@@ -641,10 +635,7 @@ PreparedPressureInitialization hydrostaticPressureInitialization(
 {
     const auto& init = options.hydrostatic_pressure_initialization;
     const auto active_domain = activePressureDomainFor(options.free_surface);
-    if (active_domain.has_value() &&
-        active_domain->boundary->active_domain_method ==
-            FreeSurfaceActiveDomainMethod::CutVolume &&
-        init.field_name.empty()) {
+    if (active_domain.has_value() && init.field_name.empty()) {
         throw std::invalid_argument(
             "IncompressibleNavierStokesVMSModule: CutVolume active-domain "
             "hydrostatic pressure initialization requires a level-set-aware "
@@ -662,8 +653,7 @@ PreparedPressureInitialization hydrostaticPressureInitialization(
             .isovalue = bc.level_set_isovalue,
             .side = pressureSupportSide(active_domain->active_domain),
             .interface_marker = bc.interface_marker,
-            .use_generated_volume_rules =
-                bc.active_domain_method == FreeSurfaceActiveDomainMethod::CutVolume,
+            .use_generated_volume_rules = true,
             .support_message_prefix =
                 "IncompressibleNavierStokesVMSModule: active-domain pressure initialization"};
     }
@@ -838,8 +828,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
              FreeSurfaceActiveDomain::LevelSetNegative ||
          bc.active_domain ==
              FreeSurfaceActiveDomain::LevelSetPositive) &&
-        bc.active_domain_method ==
-            FreeSurfaceActiveDomainMethod::CutVolume &&
         (bc.kinematic_enforcement ==
              FreeSurfaceKinematicEnforcement::None ||
          bc.kinematic_enforcement ==
@@ -854,20 +842,7 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
          bc.tangential_mesh_policy ==
              FreeSurfaceTangentialMeshPolicy::SmoothingOnly ||
          bc.tangential_mesh_policy ==
-             FreeSurfaceTangentialMeshPolicy::Prescribed) &&
-        (bc.cut_cell_stabilization.pressure_policy ==
-             FreeSurfacePressureStabilizationPolicy::Enabled ||
-         bc.cut_cell_stabilization.pressure_policy ==
-             FreeSurfacePressureStabilizationPolicy::Incremental ||
-         bc.cut_cell_stabilization.pressure_policy ==
-             FreeSurfacePressureStabilizationPolicy::Disabled ||
-         bc.cut_cell_stabilization.pressure_policy ==
-             FreeSurfacePressureStabilizationPolicy::
-                 DisabledForRefreshedFrozenHighOrder) &&
-        (bc.surface_tension_form ==
-             FreeSurfaceSurfaceTensionForm::Automatic ||
-         bc.surface_tension_form ==
-             FreeSurfaceSurfaceTensionForm::SurfaceStress);
+             FreeSurfaceTangentialMeshPolicy::Prescribed);
     if (!supported_boundary_policies) {
         throw std::invalid_argument(
             "IncompressibleNavierStokesVMSModule: unsupported "
@@ -876,13 +851,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
     FE::numeric::validate(
         bc.level_set_isovalue, FE::numeric::isFinite,
         "IncompressibleNavierStokesVMSModule: free-surface level_set_isovalue must be finite");
-    FE::numeric::validate(
-        bc.active_domain_smoothing_width,
-        [](FE::Real value) {
-            return FE::numeric::isFinite(value) &&
-                   FE::numeric::isNonnegative(value);
-        },
-        "IncompressibleNavierStokesVMSModule: free-surface active_domain_smoothing_width must be finite and nonnegative");
     validateFiniteConstantScalar(
         bc.external_pressure, "free-surface external_pressure");
     // SurfaceStress contains the constant-gamma surface-energy variation,
@@ -931,20 +899,14 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             bc.boundary_marker >= 0 || bc.interface_marker < 0 ||
             bc.level_set_field_name.empty() ||
             bc.generated_interface_domain_id.empty() ||
-            bc.active_domain == FreeSurfaceActiveDomain::None ||
-            bc.active_domain_method !=
-                FreeSurfaceActiveDomainMethod::CutVolume ||
-            bc.active_domain_smoothing_width != FE::Real{0.0} ||
-            bc.allow_full_domain_unfitted_free_surface) {
+            bc.active_domain == FreeSurfaceActiveDomain::None) {
             throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: an internal material-interface volume requires fixed Eulerian UnfittedLevelSet CutVolume integration on one explicit active side, no exterior boundary marker, and no smoothing/full-domain fallback");
+                "IncompressibleNavierStokesVMSModule: an internal material-interface volume requires fixed Eulerian UnfittedLevelSet CutVolume integration on one explicit active side and no exterior boundary marker");
         }
         if (!FE::forms::bc::isZeroConstantScalarValue(
                 bc.external_pressure) ||
             !FE::forms::bc::isZeroConstantScalarValue(
-                bc.surface_tension) ||
-            bc.surface_tension_form !=
-                FreeSurfaceSurfaceTensionForm::Automatic) {
+                bc.surface_tension)) {
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: an internal material-interface volume cannot own exterior pressure, surface tension, curvature, or an interface-traction representation");
         }
@@ -965,13 +927,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             phi_record.space->value_dimension() != 1) {
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: an internal material-interface volume requires a scalar level-set field");
-        }
-        const auto& cut = bc.cut_cell_stabilization;
-        if (cut.enabled && cut.cut_metadata_scale_cap.has_value() &&
-            (!std::isfinite(*cut.cut_metadata_scale_cap) ||
-             *cut.cut_metadata_scale_cap < FE::Real{1.0})) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: cut-cell metadata scale cap must be finite and at least 1");
         }
         return;
     }
@@ -995,21 +950,19 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: unfitted free surface requires a non-empty level_set_field_name");
         }
-        if (bc.active_domain == FreeSurfaceActiveDomain::None &&
-            !bc.allow_full_domain_unfitted_free_surface) {
+        if (bc.active_domain == FreeSurfaceActiveDomain::None) {
             throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: UnfittedLevelSet free surfaces require Active_domain=LevelSetNegative or LevelSetPositive; set Allow_full_domain_unfitted_free_surface=true only for deliberate full-domain diagnostic runs");
+                "IncompressibleNavierStokesVMSModule: UnfittedLevelSet free surfaces require Active_domain=LevelSetNegative or LevelSetPositive");
         }
         if (bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None) {
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: unfitted level-set free surfaces use Eulerian level-set transport for kinematics; a mesh kinematic enforcement (MeshNitsche) needs a fitted ALE boundary and is therefore unsupported");
         }
         const bool has_surface_stress_residual =
-            usesSurfaceStress(bc) &&
-            (!FE::forms::bc::isZeroConstantScalarValue(
-                 bc.external_pressure) ||
-             !FE::forms::bc::isZeroConstantScalarValue(
-                 bc.surface_tension));
+            !FE::forms::bc::isZeroConstantScalarValue(
+                bc.external_pressure) ||
+            !FE::forms::bc::isZeroConstantScalarValue(
+                bc.surface_tension);
         if (has_surface_stress_residual &&
             !isRefreshedFrozenGeometryTangent(bc)) {
             throw std::invalid_argument(
@@ -1020,12 +973,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             (void)constantScalarValueOrThrow(
                 cut.pressure_gradient_penalty,
                 "enabled cut-cell pressure-gradient penalty");
-            if (cut.cut_metadata_scale_cap.has_value() &&
-                (!std::isfinite(*cut.cut_metadata_scale_cap) ||
-                 *cut.cut_metadata_scale_cap < FE::Real{1.0})) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: cut-cell metadata scale cap must be finite and at least 1");
-            }
         }
     } else {
         // SurfaceStress is the fitted Automatic form and needs no opt-in
@@ -1070,10 +1017,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: active-domain free-surface volume integration is only valid for unfitted level-set free surfaces");
         }
-        if (bc.allow_full_domain_unfitted_free_surface) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: Allow_full_domain_unfitted_free_surface is only valid for unfitted level-set free surfaces");
-        }
         // The qualified fitted-ALE contract, the only fitted configuration
         // (the schema-1 legacy mode that waived it was retired).
         if (!ale_enabled) {
@@ -1102,9 +1045,8 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: the qualified "
                 "fitted-ALE free-surface contract requires MeshNitsche "
-                "normal enforcement (the input default); "
-                "Kinematic_enforcement None is not accepted for a fitted "
-                "free surface");
+                "normal enforcement; kinematic_enforcement None is not "
+                "accepted for a fitted free surface");
         }
         for (int component = dim; component < 3; ++component) {
             if (!FE::forms::bc::isZeroConstantScalarValue(
@@ -1176,15 +1118,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                     throw std::invalid_argument(
                         "IncompressibleNavierStokesVMSModule: prescribed-angle Navier slip requires literal Newtonian viscosity so accepted sharp-wall dissipation can be evaluated from the identical operator stage");
                 }
-                if (bc.active_domain_method !=
-                    FreeSurfaceActiveDomainMethod::CutVolume) {
-                    throw std::invalid_argument(
-                        "IncompressibleNavierStokesVMSModule: prescribed-angle Navier slip requires Active_domain_method=CutVolume for a sharp wetted-wall domain");
-                }
-                if (bc.active_domain_smoothing_width != FE::Real{0.0}) {
-                    throw std::invalid_argument(
-                        "IncompressibleNavierStokesVMSModule: prescribed-angle Navier slip requires active_domain_smoothing_width=0 because the sharp wall operator has no smoothing-width parameter");
-                }
                 (void)constantScalarValueOrThrow(
                     contactLineSlipLength(contact_line),
                     "PrescribedContactAngle Navier slip_length");
@@ -1193,10 +1126,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                     "PrescribedContactAngle Navier slip_length");
             }
             if (isUnfittedLevelSet(bc)) {
-                if (bc.active_domain == FreeSurfaceActiveDomain::None) {
-                    throw std::invalid_argument(
-                        "IncompressibleNavierStokesVMSModule: prescribed unfitted contact angles require an active liquid side (LevelSetNegative or LevelSetPositive)");
-                }
                 if (bc.generated_interface_geometry !=
                     FreeSurfaceGeneratedInterfaceGeometry::LinearCorner) {
                     throw std::invalid_argument(
@@ -1267,19 +1196,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             if (!isUnfittedLevelSet(bc)) {
                 throw std::invalid_argument(
                     "IncompressibleNavierStokesVMSModule: DynamicContactAngle is currently supported only for sharp unfitted level-set free surfaces");
-            }
-            if (bc.active_domain == FreeSurfaceActiveDomain::None) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: DynamicContactAngle requires an active liquid side (LevelSetNegative or LevelSetPositive)");
-            }
-            if (bc.active_domain_method !=
-                FreeSurfaceActiveDomainMethod::CutVolume) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: DynamicContactAngle requires Active_domain_method=CutVolume for a sharp liquid domain");
-            }
-            if (bc.active_domain_smoothing_width != FE::Real{0.0}) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: DynamicContactAngle with Active_domain_method=CutVolume requires active_domain_smoothing_width=0 because the sharp operator has no smoothing-width parameter");
             }
             if (bc.generated_interface_geometry !=
                 FreeSurfaceGeneratedInterfaceGeometry::LinearCorner) {
@@ -2031,9 +1947,6 @@ NavierStokesPreflight preflightNavierStokes(
         &required_nitsche_routes);
     if (has_generated_boundary_nitsche_route) {
         if (!active_pressure_domain.has_value() ||
-            active_pressure_domain->boundary
-                    ->active_domain_method !=
-                FreeSurfaceActiveDomainMethod::CutVolume ||
             !active_pressure_domain->boundary
                  ->small_cut_aggregation) {
             throw std::invalid_argument(
@@ -2122,7 +2035,7 @@ NavierStokesPreflight preflightNavierStokes(
             .real("isovalue", boundary.level_set_isovalue)
             .quoted("generated_interface_domain_id", boundary.generated_interface_domain_id)
             .text("active_domain", activeDomainName(boundary.active_domain))
-            .text("active_domain_method", activeDomainMethodName(boundary.active_domain_method))
+            .text("active_domain_method", "CutVolume")
             .text("side", cutVolumeSideName(side));
     }
 
@@ -2513,12 +2426,6 @@ IncompressibleTwoFluidPreflight preflightIncompressibleTwoFluid(
     requireFinitePositive(
         options.pressure_gradient_penalty,
         "pressure-gradient ghost penalty");
-    if (options.cut_metadata_scale_cap.has_value() &&
-        (!std::isfinite(*options.cut_metadata_scale_cap) ||
-         *options.cut_metadata_scale_cap < FE::Real{1.0})) {
-        throw std::invalid_argument(
-            "IncompressibleTwoFluidModule: cut metadata scale cap must be finite and at least one");
-    }
     if (!FE::constraints::validSmallCutAggregationGuards(
             options.small_cut_aggregation_guards)) {
         throw std::invalid_argument(

@@ -232,17 +232,13 @@ ns::IncompressibleNavierStokesVMSOptions coupledALEOptions()
 
 ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary fittedSurface(
     FE::Real external_pressure,
-    FE::Real surface_tension,
-    bool surface_stress)
+    FE::Real surface_tension)
 {
     ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary bc{};
     bc.implementation = ns::FreeSurfaceImplementation::FittedALE;
     bc.boundary_marker = kSurface;
     bc.external_pressure = external_pressure;
     bc.surface_tension = surface_tension;
-    if (surface_stress) {
-        bc.surface_tension_form = ns::FreeSurfaceSurfaceTensionForm::SurfaceStress;
-    }
     bc.normal_kinematic_policy = ns::FreeSurfaceNormalKinematicPolicy::MatchFluidNormalVelocity;
     bc.tangential_mesh_policy = ns::FreeSurfaceTangentialMeshPolicy::Free;
     bc.kinematic_enforcement = ns::FreeSurfaceKinematicEnforcement::MeshNitsche;
@@ -420,7 +416,7 @@ TEST(FittedFreeSurfaceALE, ExternalPressureLoadUsesTheCurrentSurfaceMeasureOnce)
     // p_ext times the current surface length.  The stretch d = (x/2, 0)
     // makes the current length 3 (reference length 2).
     constexpr FE::Real p_ext = 1.25;
-    FittedALEFixture ale(makeRectangleTriangleMesh(), fittedSurface(p_ext, 0.0, false));
+    FittedALEFixture ale(makeRectangleTriangleMesh(), fittedSurface(p_ext, 0.0));
     ale.setLinearDisplacement({{{0.5, 0.0}, {0.0, 0.0}}});
     const auto r = ale.residual();
     FE::Real load_y = 0.0;
@@ -438,7 +434,7 @@ TEST(FittedFreeSurfaceALE, ExternalPressureLoadUsesTheCurrentSurfaceMeasureOnce)
 
     // The same boundary on the undisplaced mesh (d = 0: the current surface
     // is the reference one) carries p_ext times its length 2.
-    FittedALEFixture fixed(makeRectangleTriangleMesh(), fittedSurface(p_ext, 0.0, false));
+    FittedALEFixture fixed(makeRectangleTriangleMesh(), fittedSurface(p_ext, 0.0));
     const auto r0 = fixed.residual();
     FE::Real static_load_y = 0.0;
     for (FE::GlobalIndex v = 0; v < 6; ++v) {
@@ -449,29 +445,19 @@ TEST(FittedFreeSurfaceALE, ExternalPressureLoadUsesTheCurrentSurfaceMeasureOnce)
 
 TEST(FittedFreeSurfaceALE, SurfaceStressIsTheFittedDefaultWithoutAnOptIn)
 {
-    // Decision D47 Q2(b): Automatic is SurfaceStress on fitted boundaries as
-    // well, and SurfaceStress needs no opt-in.  Its frame, surface-tension
+    // Decision D47 Q2(b): SurfaceStress is the only capillary form on fitted
+    // boundaries as well, and it needs no opt-in.  Its frame, surface-tension
     // and contact-line checks apply only when the surface energy is
     // installed (gamma != 0).
     constexpr FE::Real gamma = 0.5;
     {
-        // Automatic and an explicit request assemble the same residual: on
-        // the stretched flat surface the end nodes carry the conormal line
-        // force -+gamma.
-        FittedALEFixture automatic(makeRectangleTriangleMesh(),
-                                   fittedSurface(0.0, gamma, /*surface_stress=*/false));
-        FittedALEFixture requested(makeRectangleTriangleMesh(),
-                                   fittedSurface(0.0, gamma, /*surface_stress=*/true));
-        automatic.setLinearDisplacement({{{0.5, 0.0}, {0.0, 0.0}}});
-        requested.setLinearDisplacement({{{0.5, 0.0}, {0.0, 0.0}}});
-        const auto r_automatic = automatic.residual();
-        const auto r_requested = requested.residual();
-        ASSERT_EQ(r_automatic.size(), r_requested.size());
-        for (std::size_t i = 0; i < r_automatic.size(); ++i) {
-            EXPECT_DOUBLE_EQ(r_automatic[i], r_requested[i]) << "row " << i;
-        }
-        EXPECT_NEAR(automatic.velocityRow(r_automatic, 3, 0), -gamma, 1e-13);
-        EXPECT_NEAR(automatic.velocityRow(r_automatic, 5, 0), gamma, 1e-13);
+        // On the stretched flat surface the end nodes carry the conormal
+        // line force -+gamma.
+        FittedALEFixture ale(makeRectangleTriangleMesh(), fittedSurface(0.0, gamma));
+        ale.setLinearDisplacement({{{0.5, 0.0}, {0.0, 0.0}}});
+        const auto r = ale.residual();
+        EXPECT_NEAR(ale.velocityRow(r, 3, 0), -gamma, 1e-13);
+        EXPECT_NEAR(ale.velocityRow(r, 5, 0), gamma, 1e-13);
     }
 
     auto mesh = makeRectangleTriangleMesh();
@@ -479,13 +465,12 @@ TEST(FittedFreeSurfaceALE, SurfaceStressIsTheFittedDefaultWithoutAnOptIn)
     {
         FE::systems::FESystem system(mesh);
         auto opts = coupledALEOptions();
-        opts.free_surface.push_back(fittedSurface(0.0, gamma, /*surface_stress=*/false));
+        opts.free_surface.push_back(fittedSurface(0.0, gamma));
         ns::IncompressibleNavierStokesVMSModule fluid(spaces.vector, spaces.scalar, opts);
         ASSERT_NO_THROW(fluid.registerOn(system));
         const auto artifact = fluid.effectiveConfigurationArtifact();
         ASSERT_TRUE(artifact.has_value());
-        EXPECT_NE(artifact->json.find("\"surface_tension_form_requested\":\"Automatic\","
-                                      "\"surface_tension_form_effective\":\"SurfaceStress\""),
+        EXPECT_NE(artifact->json.find("\"surface_tension_form_effective\":\"SurfaceStress\""),
                   std::string::npos)
             << artifact->json;
         EXPECT_EQ(artifact->json.find("fitted_surface_stress_current_frame_gradient_unqualified"),
@@ -500,8 +485,7 @@ TEST(FittedFreeSurfaceALE, SurfaceStressIsTheFittedDefaultWithoutAnOptIn)
             auto opts = coupledALEOptions();
             opts.mesh_velocity_source = ns::ALEMeshVelocitySource::PrescribedData;
             opts.auto_register_mesh_displacement_field = false;
-            opts.free_surface.push_back(
-                fittedSurface(0.25, surface_tension, /*surface_stress=*/false));
+            opts.free_surface.push_back(fittedSurface(0.25, surface_tension));
             ns::IncompressibleNavierStokesVMSModule fluid(spaces.vector, spaces.scalar, opts);
             try {
                 fluid.registerOn(system);
@@ -527,7 +511,7 @@ TEST(FittedFreeSurfaceALE, SurfaceStressOnAFlatSurfaceHasNoNormalLoad)
     // any node and no tangential load at interior nodes; the end nodes carry
     // the conormal line force -+gamma.
     constexpr FE::Real gamma = 0.5;
-    FittedALEFixture ale(makeRectangleTriangleMesh(), fittedSurface(0.0, gamma, true));
+    FittedALEFixture ale(makeRectangleTriangleMesh(), fittedSurface(0.0, gamma));
     ale.setLinearDisplacement({{{0.5, 0.0}, {0.0, 0.25}}});
     const auto r = ale.residual();
     for (const auto v : kTopVertices) {
@@ -543,7 +527,7 @@ FE::Real regularPolygonResidual(int sides, FE::Real pressure_factor)
     // Reference polygon of radius 1, current polygon of radius 1.3 (d = 0.3 x).
     constexpr FE::Real gamma = 0.7;
     constexpr FE::Real current_radius = 1.3;
-    FittedALEFixture drop(makeRegularPolygonDropMesh(sides, 1.0), fittedSurface(0.0, gamma, true));
+    FittedALEFixture drop(makeRegularPolygonDropMesh(sides, 1.0), fittedSurface(0.0, gamma));
     drop.setLinearDisplacement({{{0.3, 0.0}, {0.0, 0.3}}});
     const FE::Real half_angle = std::numbers::pi_v<FE::Real> / static_cast<FE::Real>(sides);
     // pressure_factor = 1: the discrete balance gamma / (R cos(pi/N)) of the
@@ -585,7 +569,7 @@ TEST(FittedFreeSurfaceALE, MeshNitscheKeepsTheFluidDynamicConditionAndDeclaresMe
     const auto spaces = triangleSpaces();
     FE::systems::FESystem system(mesh);
     auto opts = coupledALEOptions();
-    opts.free_surface.push_back(fittedSurface(0.0, 0.0, false));
+    opts.free_surface.push_back(fittedSurface(0.0, 0.0));
     ns::IncompressibleNavierStokesVMSModule fluid(spaces.vector, spaces.scalar, opts);
     fluid.registerOn(system);
     const auto declarations = system.meshNormalBoundaryConstraints();
@@ -641,7 +625,7 @@ TEST(FittedFreeSurfaceALE, MeshNitscheRemovesTheHarmonicNormalFlux)
     // kappa ((grad w) n).psi exactly.  With the consistency term the mesh rows
     // of the interior free-surface node keep only the tangential flux; the
     // normal component vanishes (u = w, so the kinematic penalty is zero).
-    FittedALEFixture ale(makeRectangleTriangleMesh(), fittedSurface(0.0, 0.0, false));
+    FittedALEFixture ale(makeRectangleTriangleMesh(), fittedSurface(0.0, 0.0));
     ale.setLinearDisplacement({{{0.1, 0.2}, {0.3, 0.05}}});
     ale.setVelocityEqualToDisplacement();
     ale.setPreviousMeshDisplacementToZero();
@@ -669,7 +653,7 @@ TEST(FittedFreeSurfaceALE, MeshKinematicRowSamplesTheFluidVelocityOnTheFace)
     // current top edges.  Regression for face field sampling: the field basis
     // must be evaluated at the face-to-cell mapped points, not at the
     // canonical face points.
-    FittedALEFixture ale(makeRectangleTriangleMesh(), fittedSurface(0.0, 0.0, false));
+    FittedALEFixture ale(makeRectangleTriangleMesh(), fittedSurface(0.0, 0.0));
     ale.setLinearDisplacement({{{0.1, 0.2}, {0.3, 0.05}}});
     ale.solution[static_cast<std::size_t>(vertexDof(*ale.system, ale.u, 4, 1))] = 1.0;
     const auto r = ale.residual();

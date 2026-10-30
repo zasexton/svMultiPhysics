@@ -872,7 +872,6 @@ TEST(MeshPartitionWeighting, OnlyUnfittedFreeSurfaceDecksResolveToWeights)
       <Level_set_isovalue>0.25</Level_set_isovalue>
       <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
       <Active_domain>LevelSetPositive</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>

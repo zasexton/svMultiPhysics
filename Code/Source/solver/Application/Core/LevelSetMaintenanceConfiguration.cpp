@@ -335,8 +335,7 @@ resolveLegacyLevelSetMaintenanceConfiguration(
   apply_integer(aliases::material_interface_marker, "material_interface_marker",
                 result->transport.velocity.material_interface_marker);
   // A source velocity field selects the velocity extension, whose field is
-  // a coupled unknown.  Use_wet_extension_advection_velocity was retired
-  // (decisions D47 and D55); translation rejects it.
+  // a coupled unknown.
   const bool wet_extension_enabled =
       reader
           .string(aliases::wet_extension_source,
@@ -600,23 +599,6 @@ resolveLegacyLevelSetMaintenanceConfiguration(
       "static_capillary_minimum_volume_merit_penalty",
       result->static_capillary_equilibrium.minimum_volume_merit_penalty);
   append_equation_observations();
-
-  // The level-set curvature projection was retired (decision D48; its
-  // least-squares recovery modes by decision D47).  Every key of it fails,
-  // here where it was parsed, so the error order of the setup is unchanged.
-  for (const auto &[key, value] : input.equation_parameters) {
-    if (value.defined &&
-        (key == "Enable_curvature_projection" ||
-         key.rfind("Curvature_projection_", 0) == 0)) {
-      throw std::invalid_argument(
-          "[svMultiPhysics::Application] '" + key +
-          "': The level-set curvature projection (Enable_curvature_projection, "
-          "Curvature_field_name and the Curvature_projection_* settings) was "
-          "retired (decision D48; its least-squares recovery modes by decision "
-          "D47): SurfaceStress, the only capillary route, reads no curvature "
-          "field.  Remove these keys.");
-    }
-  }
 
   result->volume_cut_request = matchingActiveCutVolumeRequest(
       active_requests, result->transport.level_set.field_name,

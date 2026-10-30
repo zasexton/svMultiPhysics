@@ -1330,9 +1330,9 @@ std::vector<GlobalIndex> ownedRowPattern(const systems::FESystem& system,
 // The setup-time couplings of a generated interface rule are those of its
 // parent cell, added on every rank that stores the rule and sent to the row
 // owners.  When ghost cells carry no generated cut data (the production
-// restriction to <Generated_cut_ghost_layers>), the parent's owner still
-// adds them, so the distributed pattern of every owned row is unchanged:
-// here every rank keeps the rules of its owned cells only.
+// restriction to ActiveCutVolumeRequest::generated_cut_ghost_layers), the
+// parent's owner still adds them, so the distributed pattern of every owned
+// row is unchanged: here every rank keeps the rules of its owned cells only.
 TEST(SerialParallelFaceIntegralsMPI,
      GeneratedInterfaceSparsityIsUnchangedWithoutGhostParentRules)
 {

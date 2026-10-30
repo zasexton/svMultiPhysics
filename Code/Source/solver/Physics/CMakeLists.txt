@@ -370,7 +370,6 @@ if(PHYSICS_BUILD_TESTS)
         NavierStokesLegacyBCs.FittedFreeSurfacePrescribedAngleTranslationFailsClosed
         NavierStokesLegacyBCs.FreeSurfaceContactAliasesFailClosedWhenIncomplete
         NavierStokesLegacyBCs.FreeSurfaceContactConfigurationRejectsAmbiguityAndCrossModelFields
-        NavierStokesLegacyBCs.FreeSurfaceConfigurationSchemaAliasesAreExplicitAndUnambiguous
         NavierStokesLegacyBCs.FreeSurfaceContactNoneIsExplicitAndComplete
         NavierStokesLegacyBCs.FreeSurfacePinnedIsExplicitAndComplete
         NavierStokesLegacyBCs.UnfittedFreeSurfaceContactLinePluralMarkersTranslation_AddsGeneratedMarkers

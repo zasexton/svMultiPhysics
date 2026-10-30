@@ -55,9 +55,6 @@ def test_generated_case_opts_in_to_fitted_surface_stress(tmp_path):
     assert equations == ["fluid", "mesh_motion"]
     bc = next(root.iter("Add_BC"))
     assert bc.find("Implementation").text == "FittedALE"
-    assert bc.find("Surface_tension_form").text == "SurfaceStress"
-    assert bc.find("Allow_fitted_surface_stress").text == "true"
-    assert bc.find("Kinematic_enforcement").text == "MeshNitsche"
     assert case["pressure_regular_polygon_balance"] == pytest.approx(1.0 / math.cos(math.pi / 48))
     assert case["steps"] == 100 and case["viscosity"] == pytest.approx(math.sqrt(1 / 6))
 

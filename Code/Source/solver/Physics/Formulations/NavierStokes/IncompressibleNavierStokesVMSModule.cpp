@@ -296,14 +296,8 @@ void addSharedGaugeEvidence(FE::systems::FESystem& system,
     interface.geometry_tangent_policy = owner.geometry_tangent_policy;
     interface.level_set_isovalue = owner.level_set_isovalue;
     interface.active_domain = active_domain;
-    interface.active_domain_method =
-        FreeSurfaceActiveDomainMethod::CutVolume;
-    interface.active_domain_smoothing_width = FE::Real{0.0};
-    interface.allow_full_domain_unfitted_free_surface = false;
     interface.external_pressure = FE::Real{0.0};
     interface.surface_tension = FE::Real{0.0};
-    interface.surface_tension_form =
-        FreeSurfaceSurfaceTensionForm::Automatic;
     interface.normal_kinematic_policy =
         FreeSurfaceNormalKinematicPolicy::None;
     interface.tangential_mesh_policy =
@@ -313,12 +307,6 @@ void addSharedGaugeEvidence(FE::systems::FESystem& system,
     interface.cut_cell_stabilization.enabled = true;
     interface.cut_cell_stabilization.pressure_gradient_penalty =
         owner.pressure_gradient_penalty;
-    interface.cut_cell_stabilization.pressure_policy =
-        FreeSurfacePressureStabilizationPolicy::Enabled;
-    interface.cut_cell_stabilization.use_cut_metadata_scale =
-        owner.use_cut_metadata_scale;
-    interface.cut_cell_stabilization.cut_metadata_scale_cap =
-        owner.cut_metadata_scale_cap;
     interface.contact_lines.clear();
     interface.small_cut_aggregation = true;
     interface.small_cut_aggregation_guards =
@@ -369,8 +357,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     cs::ConstraintPlan plan(system);
     const auto* liquid = preflight.active_boundary_index
         ? &free_surfaces[*preflight.active_boundary_index] : nullptr;
-    const bool cut_liquid = liquid != nullptr &&
-                            liquid->active_domain_method == FreeSurfaceActiveDomainMethod::CutVolume;
+    const bool cut_liquid = liquid != nullptr;
     if (cut_liquid && isExteriorOnePhaseBoundary(*liquid)) {
         plan.anchorGauge(o.operator_tag, Factories::freeSurfacePressureAnchor(p_id, *liquid));
     }
@@ -784,10 +771,6 @@ void IncompressibleNavierStokesVMSModule::registerTwoFluidOn(fs::FESystem& syste
             .require_accepted_stage_numerics = true,
             .pressure_stabilization_coefficient =
                 o.pressure_gradient_penalty,
-            .pressure_stabilization_use_cut_metadata_scale =
-                o.use_cut_metadata_scale,
-            .pressure_stabilization_cut_metadata_scale_cap =
-                o.cut_metadata_scale_cap,
             .parameters =
                 FE::interfaces::IncompressibleTwoFluidDiagnosticParameters{
                     .dimension = dimension,

@@ -363,9 +363,7 @@ def solver_xml(schedule: dict, steps: int, cadence: int,
 {level_set_velocity_block(level_set_velocity)}
     <Enable_SUPG>true</Enable_SUPG>
     <SUPG_tau_scale>0.5</SUPG_tau_scale>
-    <SUPG_transient_scale>2.0</SUPG_transient_scale>
-    <Enable_reinitialization>false</Enable_reinitialization>
-    <Enable_volume_correction>false</Enable_volume_correction>{reconciliation}
+    <SUPG_transient_scale>2.0</SUPG_transient_scale>{reconciliation}
     <Output type="Spatial">
       <Level_set>true</Level_set>
     </Output>
@@ -406,14 +404,11 @@ def solver_xml(schedule: dict, steps: int, cadence: int,
       <Generated_interface_domain_id>{INTERFACE_DOMAIN_ID}</Generated_interface_domain_id>
       <Level_set_isovalue>0.0</Level_set_isovalue>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
       <Generated_interface_geometry>LinearCorner</Generated_interface_geometry>
       <External_pressure>{EXTERNAL_PRESSURE:.17g}</External_pressure>
       <Surface_tension>0.0</Surface_tension>
-      <Enable_velocity_extension>false</Enable_velocity_extension>
       <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
       <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
-      <Use_cut_metadata_scale>false</Use_cut_metadata_scale>
       <Small_cut_aggregation>true</Small_cut_aggregation>
     </Add_BC>
   </Add_equation>

@@ -105,70 +105,11 @@ void xml_util_set_parameters( std::function<void(const std::string&, const std::
   }
 }
 
-std::string_view deprecated_extension_parameter_replacement(
-    const std::string& xml_element_name, const std::string& name)
-{
-  // Decision D47: one spelling per free-surface key.  These eleven
-  // spellings are still used by frozen decks, generators and qualification
-  // runners; they are accepted for one release with a warning and then
-  // removed.  A curvature-field spelling is replaced by Curvature_field_name
-  // on an equation and by Curvature_field on a boundary condition.
-  static const std::map<std::string, std::string_view> replacements = {
-      {"Generated_interface_quadrature_order", "Cut_quadrature_order"},
-      {"Allow_corner_linearized_geometry", "Allow_corner_linearized_cut_geometry"},
-      {"Advection_velocity_from_field", "Source_velocity_field_name"},
-      {"Wet_extension_advection_velocity_method", "Advection_velocity_extension_method"},
-      {"FreeSurfacePhysicalModel", "Free_surface_physical_model"},
-  };
-  static const std::set<std::string> curvature_field_spellings = {
-      "Projected_curvature_field", "ProjectedCurvatureField",
-      "Free_surface_curvature_field", "FreeSurfaceCurvatureField",
-      "CurvatureFieldName", "CurvatureField",
-  };
-  if (const auto it = replacements.find(name); it != replacements.end()) {
-    return it->second;
-  }
-  if (curvature_field_spellings.count(name) != 0) {
-    return xml_element_name == "Add_equation"
-               ? std::string_view{"Curvature_field_name"}
-               : std::string_view{"Curvature_field"};
-  }
-  return {};
-}
-
-std::string restated_retired_extension_parameter(
-    const std::string& name, const std::string& value)
-{
-  // The Navier-Stokes register reads these booleans relaxed: after
-  // trimming, true, 1, yes or on (any case) is true and every other text is
-  // false.
-  const auto first = value.find_first_not_of(" \t\r\n");
-  const auto last = value.find_last_not_of(" \t\r\n");
-  std::string token;
-  if (first != std::string::npos) {
-    for (std::size_t i = first; i <= last; ++i) {
-      const char ch = value[i];
-      token.push_back(static_cast<char>(
-          (ch >= 'A' && ch <= 'Z') ? ch - 'A' + 'a' : ch));
-    }
-  }
-  const bool relaxed_true =
-      token == "true" || token == "1" || token == "yes" || token == "on";
-  if (name == "Use_level_set_curvature" && !relaxed_true) {
-    return name + "=false";
-  }
-  if (name == "Allow_fitted_surface_stress" && relaxed_true) {
-    return name + "=true";
-  }
-  return {};
-}
-
 namespace {
 
 bool is_free_surface_physical_model_parameter(const std::string& name)
 {
-  return name == "Free_surface_physical_model" ||
-         name == "FreeSurfacePhysicalModel";
+  return name == "Free_surface_physical_model";
 }
 
 std::string normalized_free_surface_physical_model_token(
@@ -228,12 +169,9 @@ bool is_oop_equation_extension_parameter(const std::string& name)
     "Mesh_velocity_field",
     "Mesh_velocity_source",
     "Mesh_displacement_field",
-    "MeshDisplacementField",
     "Auto_register_mesh_displacement_field",
-    "MovingMeshTangentPath",
     "Moving_mesh_tangent_path",
     "Free_surface_physical_model",
-    "FreeSurfacePhysicalModel",
     "Material_interface_marker",
     "Negative_phase_density",
     "Negative_phase_dynamic_viscosity",
@@ -273,49 +211,17 @@ bool is_oop_equation_extension_parameter(const std::string& name)
     "Velocity_source",
     "Auto_register_velocity_field",
     "Constant_velocity",
-    "Use_wet_extension_advection_velocity",
-    "Advection_velocity_from_field",
     "Source_velocity_field_name",
-    "Wet_extension_advection_velocity_method",
     "Advection_velocity_extension_method",
     "Advection_velocity_extension_coupling",
     "Wet_extension_wall_faces",
-    "Write_velocity_extension_maps",
     "Transport_form",
     "Enable_SUPG",
     "SUPG_tau_scale",
     "SUPG_transient_scale",
-    "Enable_discontinuity_capturing",
-    "Discontinuity_capturing_scale",
-    "Discontinuity_capturing_gradient_epsilon",
-    "Discontinuity_capturing_max_courant",
-    "Enable_bound_preserving_limiter",
-    "Bound_preserving_bound_tolerance",
-    "Bound_preserving_sign_tolerance",
-    "Bound_preserving_maximum_courant",
-    "Bound_preserving_enforce_courant_limit",
-    "Bound_preserving_enforce_impermeable_boundaries",
-    "Bound_preserving_impermeable_normal_velocity_tolerance",
     "Enable_interface_kinematic",
     "Interface_kinematic_marker",
     "Interface_kinematic_weight_scale",
-    "Enable_reinitialization",
-    "Reinitialization_method",
-    "Reinitialization_cadence_steps",
-    "Reinitialization_max_iterations",
-    "Reinitialization_pseudo_time_step_scale",
-    "Reinitialization_interface_band_width",
-    "Reinitialization_signed_distance_tolerance",
-    "Reinitialization_max_zero_set_displacement",
-    "Enable_volume_correction",
-    "Volume_correction_cadence_steps",
-    "Volume_correction_use_initial_volume",
-    "Volume_correction_target_negative_volume",
-    "Volume_correction_tolerance",
-    "Volume_correction_max_iterations",
-    "Volume_correction_minimum_relative_error",
-    "Volume_correction_maximum_interface_displacement_fraction",
-    "Volume_correction_maximum_cumulative_interface_displacement_fraction",
     "Enable_kinematic_reconciliation",
     "Enable_sign_definite_patch_bounds",
     "Enable_interface_preserving_redistancing",
@@ -342,36 +248,7 @@ bool is_oop_equation_extension_parameter(const std::string& name)
     "Static_capillary_limited_memory_history_size",
     "Static_capillary_limited_memory_curvature_tolerance",
     "Static_capillary_minimum_volume_merit_penalty",
-    "Enable_curvature_projection",
-    "Curvature_field_name",
-    "CurvatureFieldName",
-    "Curvature_field",
-    "CurvatureField",
-    "Projected_curvature_field",
-    "ProjectedCurvatureField",
-    "Free_surface_curvature_field",
-    "FreeSurfaceCurvatureField",
-    "Curvature_projection_cadence_steps",
-    "Curvature_projection_max_normalized_fit_residual",
-    "Curvature_projection_max_neighbor_fallback_vertices",
-    "Curvature_projection_max_zero_fallback_vertices",
-    "Curvature_projection_supplemental_sample_weight",
-    "Curvature_projection_recovery_mode",
-    "Curvature_projection_kinematic_area_gradient_filter_coefficient",
-    "Curvature_projection_kinematic_area_gradient_mass",
-    "Curvature_projection_kinematic_area_gradient_finite_difference_check",
-    "Curvature_projection_narrow_band_width",
-    "Curvature_projection_smoothing_iterations",
-    "Curvature_projection_smoothing_relaxation",
-    "Curvature_projection_smoothing_mode",
     "Enable_level_set_cut_domain",
-    "EnableLevelSetCutDomain",
-    "Level_set_cut_domain",
-    "LevelSetCutDomain",
-    "Generated_level_set_cut_domain",
-    "GeneratedLevelSetCutDomain",
-    "Cut_domain",
-    "CutDomain",
     "Generated_interface_domain_id",
     "Interface_marker",
     "Level_set_isovalue",
@@ -385,64 +262,28 @@ bool is_oop_equation_extension_parameter(const std::string& name)
     "Implicit_cut_root_max_iterations",
     "Implicit_cut_max_subdivision_depth",
     "Affected_cell_neighborhood_layers",
-    "Generated_cut_ghost_layers",
-    "Generated_interface_quadrature_order",
     "Cut_quadrature_order",
     "Interface_quadrature_order",
     "Volume_quadrature_order",
     "Active_domain",
-    "Active_domain_method",
     "Allow_corner_linearized_cut_geometry",
-    "Allow_corner_linearized_geometry",
     "Model",
-    "Formulation",
-    "Mesh_motion_model",
-    "MeshMotionModel",
     "Operator_tag",
-    "OperatorTag",
     "Auto_register_field",
-    "AutoRegisterField",
     "Bind_as_mesh_displacement",
-    "BindAsMeshDisplacement",
     "Geometry_tangent_path",
-    "GeometryTangentPath",
     "Kappa",
-    "Mesh_motion_kappa",
     "Harmonic_quantity",
-    "HarmonicQuantity",
     "Stiffness",
-    "Mesh_motion_stiffness",
     "Lambda_mesh",
-    "Mesh_lambda",
     "Mu_mesh",
-    "Mesh_mu",
     "Element_order",
     "Momentum_source_field_name",
-    "MomentumSourceFieldName",
-    "Body_force_field_name",
-    "BodyForceFieldName",
-    "Body_force_field",
-    "BodyForceField",
     "Momentum_source_temporal_and_spatial_values_file_path",
-    "MomentumSourceTemporalAndSpatialValuesFilePath",
-    "Body_force_temporal_and_spatial_values_file_path",
-    "BodyForceTemporalAndSpatialValuesFilePath",
     "Auto_register_momentum_source_field",
-    "AutoRegisterMomentumSourceField",
-    "Auto_register_body_force_field",
-    "AutoRegisterBodyForceField",
     "Rotating_frame_coriolis",
-    "RotatingFrameCoriolis",
-    "Enable_rotating_frame_coriolis",
-    "EnableRotatingFrameCoriolis",
     "Rotating_frame_angular_velocity",
-    "RotatingFrameAngularVelocity",
-    "Angular_velocity",
-    "AngularVelocity",
     "Rotating_frame_angular_velocity_temporal_values_file_path",
-    "RotatingFrameAngularVelocityTemporalValuesFilePath",
-    "Angular_velocity_temporal_values_file_path",
-    "AngularVelocityTemporalValuesFilePath",
   };
   return names.count(name) != 0;
 }
@@ -465,48 +306,23 @@ bool is_oop_boundary_extension_parameter(const std::string& name)
     "Implicit_cut_root_max_iterations",
     "Implicit_cut_max_subdivision_depth",
     "Affected_cell_neighborhood_layers",
-    "Generated_cut_ghost_layers",
     "Allow_corner_linearized_cut_geometry",
-    "Allow_corner_linearized_geometry",
-    "Generated_interface_quadrature_order",
     "Cut_quadrature_order",
     "Interface_quadrature_order",
     "Volume_quadrature_order",
     "External_pressure",
     "Surface_tension",
-    "Surface_tension_form",
-    "Allow_fitted_surface_stress",
     "Surface_tension_semi_implicit",
     "Active_domain",
-    "Active_domain_method",
-    "Active_domain_smoothing_width",
-    "Allow_full_domain_unfitted_free_surface",
-    "Curvature",
-    "Curvature_field_name",
-    "CurvatureFieldName",
-    "Curvature_field",
-    "CurvatureField",
-    "Projected_curvature_field",
-    "ProjectedCurvatureField",
-    "Free_surface_curvature_field",
-    "FreeSurfaceCurvatureField",
-    "Use_level_set_curvature",
-    "Use_current_geometry_curvature",
-    "Normal_kinematic_policy",
     "Tangential_mesh_policy",
-    "Policy",
     "Tangential_policy",
     "Quantity",
-    "Constraint_quantity",
     "Target",
     "Penalty",
     "Penalty_scale",
     "Velocity_time_scale",
-    "Time_scale",
     "Prescribed_tangential_mesh_velocity",
     "Tangential_mesh_penalty",
-    "Kinematic_enforcement",
-    "Kinematic_penalty",
     "Kinematic_nitsche_gamma",
     "Enable_cut_cell_stabilization",
     "Small_cut_aggregation",
@@ -515,19 +331,9 @@ bool is_oop_boundary_extension_parameter(const std::string& name)
     "Small_cut_aggregation_maximum_absolute_coefficient",
     "Small_cut_aggregation_maximum_row_l1_norm",
     "Small_cut_aggregation_rootless_fallback",
-    "Cut_cell_velocity_gradient_penalty",
     "Cut_cell_pressure_gradient_penalty",
-    "Cut_cell_pressure_stabilization_policy",
-    "Use_cut_metadata_scale",
-    "Cut_cell_metadata_scale_cap",
-    "Cut_cell_velocity_max_derivative_order",
-    "Enable_velocity_extension",
-    "Velocity_extension_diffusivity",
     "Contact_line_model",
-    "Contact_angle_radians",
     "Contact_angle_degrees",
-    "Contact_line_wall_marker",
-    "Contact_line_wall_markers",
     "Contact_line_wall_face",
     "Contact_line_marker",
     "Contact_line_wall_normal",
@@ -536,8 +342,6 @@ bool is_oop_boundary_extension_parameter(const std::string& name)
     "Wall_slip_model",
     "Wall_slip_length",
     "Level_set_value",
-    "Penalty_scale",
-    "Penalty",
   };
   return names.count(name) != 0;
 }
@@ -2586,7 +2390,6 @@ EquationParameters::EquationParameters()
   set_parameter("Initialize_RCR_from_flow", false, !required, initialize_rcr_from_flow);
 
   set_parameter("Module_options", "", !required, module_options);
-  set_parameter("Module_options_file_path", "", !required, module_options_file_path);
 
   set_parameter("Max_iterations", 1, !required, max_iterations);
   set_parameter("Min_iterations", 1, !required, min_iterations);
@@ -2753,8 +2556,7 @@ void EquationParameters::set_values(tinyxml2::XMLElement* eq_elem)
           throw std::runtime_error(
               "misplaced_free_surface_physical_model");
         }
-        if (extra_string_params.count("Free_surface_physical_model") != 0 ||
-            extra_string_params.count("FreeSurfacePhysicalModel") != 0) {
+        if (extra_string_params.count("Free_surface_physical_model") != 0) {
           throw std::runtime_error(
               "ambiguous_free_surface_physical_model");
         }
@@ -3590,7 +3392,6 @@ LinearSolverParameters::LinearSolverParameters()
   set_parameter("AMG_lambda_iterations", 0, !required, amg_lambda_iterations);
   set_parameter("AMG_strength_threshold", 0.0, !required, amg_strength_threshold);
   set_parameter("Preconditioner_reuse", false, !required, preconditioner_reuse);
-  set_parameter("Inexact_Newton_forcing", std::string("none"), !required, inexact_newton_forcing);
 
   //set_parameter("Preconditioner", "", !required, preconditioner);
 

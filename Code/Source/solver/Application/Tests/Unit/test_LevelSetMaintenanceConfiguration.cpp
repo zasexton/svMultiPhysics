@@ -80,21 +80,6 @@ const std::string kPhaseDiagnostic =
     "[svMultiPhysics::Application] Conservative_phase_liquid_side must be "
     "'negative' or 'positive'.";
 
-// Decision D48: every key of the retired level-set curvature projection
-// fails where the projection was configured.
-std::string retiredCurvatureDiagnostic(std::string_view key) {
-  return "[svMultiPhysics::Application] '" + std::string(key) +
-         "': The level-set curvature projection "
-         "(Enable_curvature_projection, Curvature_field_name and the "
-         "Curvature_projection_* settings) was retired (decision D48; its "
-         "least-squares recovery modes by decision D47): SurfaceStress, the "
-         "only capillary route, reads no curvature field.  Remove these "
-         "keys.";
-}
-
-const std::string kCurvatureDiagnostic =
-    retiredCurvatureDiagnostic("Curvature_projection_recovery_mode");
-
 const LevelSetInputObservation *
 findObservation(const std::vector<LevelSetInputObservation> &observations,
                 std::string_view canonical_key,
@@ -329,7 +314,7 @@ TEST(LevelSetMaintenanceConfiguration,
   put(input.equation_parameters, "Level_set_field_name", "phi");
   put(input.equation_parameters, "Velocity_field_name", "extended_velocity");
   put(input.equation_parameters, "Velocity_source", "prescribed_data");
-  put(input.equation_parameters, "Advection_velocity_from_field",
+  put(input.equation_parameters, "Source_velocity_field_name",
       "physical_velocity");
   put(input.equation_parameters, "Enable_kinematic_reconciliation", "true");
   put(input.equation_parameters, "Operator_tag", "ignored_operator");
@@ -378,14 +363,12 @@ TEST(LevelSetMaintenanceConfiguration,
 }
 
 TEST(LevelSetMaintenanceConfiguration,
-     PreservesVelocityPhaseBoundaryAndCurvatureOrder) {
+     PreservesVelocityPhaseAndBoundaryOrder) {
   auto input = makeLegacyInput();
   put(input.equation_parameters, "Velocity_source", "invalid_velocity");
   put(input.equation_parameters, "Conservative_phase_liquid_side",
       "invalid_phase");
   put(input.equation_parameters, "Enable_kinematic_reconciliation", "true");
-  put(input.equation_parameters, "Curvature_projection_recovery_mode",
-      "invalid_recovery");
   LegacyLevelSetBoundaryInput boundary{};
   boundary.type_defined = true;
   boundary.name_defined = true;
@@ -410,10 +393,8 @@ TEST(LevelSetMaintenanceConfiguration,
             "stod");
 
   input.boundaries.clear();
-  EXPECT_EQ((exceptionMessage<std::invalid_argument>([&] { (void)resolve(); })),
-            kCurvatureDiagnostic);
+  EXPECT_TRUE(resolve().has_value());
 
-  input.equation_parameters.erase("Curvature_projection_recovery_mode");
   put(input.equation_parameters, "Enable_kinematic_reconciliation", "false");
   EXPECT_FALSE(resolve().has_value());
 }
@@ -731,22 +712,20 @@ TEST(LevelSetMaintenanceConfiguration,
 
 TEST(LevelSetMaintenanceConfiguration,
      RecordsOnlySuccessfulLegacyVelocityPromotionsInApplicatorOrder) {
-  auto false_wet = makeLegacyInput();
-  put(false_wet.equation_parameters,
-      "Use_wet_extension_advection_velocity", "false");
-  put(false_wet.equation_parameters, "Enable_kinematic_reconciliation", "true");
-  const auto false_wet_resolved =
+  auto unpromoted = makeLegacyInput();
+  put(unpromoted.equation_parameters, "Enable_kinematic_reconciliation", "true");
+  const auto unpromoted_resolved =
       application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-          false_wet, std::span<const ActiveCutVolumeRequest>{});
-  ASSERT_TRUE(false_wet_resolved.has_value());
-  ASSERT_TRUE(*false_wet_resolved);
-  EXPECT_EQ((*false_wet_resolved)->transport.velocity.source,
+          unpromoted, std::span<const ActiveCutVolumeRequest>{});
+  ASSERT_TRUE(unpromoted_resolved.has_value());
+  ASSERT_TRUE(*unpromoted_resolved);
+  EXPECT_EQ((*unpromoted_resolved)->transport.velocity.source,
             svmp::FE::level_set::LevelSetVelocitySource::CoupledField);
-  EXPECT_TRUE(observationLayers((*false_wet_resolved)->input_observations,
+  EXPECT_TRUE(observationLayers((*unpromoted_resolved)->input_observations,
                                 "velocity_source", "derived")
                   .empty());
   const auto *default_source =
-      findObservation((*false_wet_resolved)->input_observations,
+      findObservation((*unpromoted_resolved)->input_observations,
                       "velocity_source", "fe_default");
   EXPECT_NE(default_source, nullptr);
   if (default_source != nullptr) {
@@ -806,41 +785,5 @@ TEST(LevelSetMaintenanceConfiguration,
       EXPECT_TRUE(unavailable->selected_spelling.empty()) << canonical;
       EXPECT_EQ(unavailable->source_layer, "unavailable") << canonical;
     }
-  }
-}
-
-TEST(LevelSetMaintenanceConfiguration, CurvatureProjectionKeysAreRetired) {
-  // Every key of the retired projection fails, also when it restates the
-  // disabled default or the projection is switched off.
-  for (const auto &[key, value] :
-       std::vector<std::pair<std::string, std::string>>{
-           {"Enable_curvature_projection", "true"},
-           {"Enable_curvature_projection", "false"},
-           {"Curvature_projection_cadence_steps", "1"},
-           {"Curvature_projection_recovery_mode", "KinematicAreaGradient"},
-           {"Curvature_projection_recovery_mode", "LevelSetQuadratic"},
-           {"Curvature_projection_kinematic_area_gradient_mass", "Lumped"},
-           {"Curvature_projection_kinematic_area_gradient_filter_coefficient",
-            "0"},
-           {"Curvature_projection_kinematic_area_gradient_finite_difference_check",
-            "false"},
-           {"Curvature_projection_max_normalized_fit_residual", "1.0"},
-           {"Curvature_projection_max_neighbor_fallback_vertices", "0"},
-           {"Curvature_projection_max_zero_fallback_vertices", "0"},
-           {"Curvature_projection_supplemental_sample_weight", "1.0"},
-           {"Curvature_projection_narrow_band_width", "2.0"},
-           {"Curvature_projection_smoothing_iterations", "0"},
-           {"Curvature_projection_smoothing_relaxation", "0.5"},
-           {"Curvature_projection_smoothing_mode", "None"}}) {
-    auto input = makeLegacyInput();
-    put(input.equation_parameters, "Enable_kinematic_reconciliation", "true");
-    put(input.equation_parameters, key, value);
-    EXPECT_EQ((exceptionMessage<std::invalid_argument>([&] {
-                (void)application::core::
-                    resolveLegacyLevelSetMaintenanceConfiguration(
-                        input, std::span<const ActiveCutVolumeRequest>{});
-              })),
-              retiredCurvatureDiagnostic(key))
-        << key << "=" << value;
   }
 }

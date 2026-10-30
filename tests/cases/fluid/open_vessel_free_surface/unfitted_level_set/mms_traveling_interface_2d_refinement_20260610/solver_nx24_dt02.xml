@@ -43,12 +43,9 @@
   <Velocity_source>prescribed_data</Velocity_source>
   <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
   <Auto_register_velocity_field>true</Auto_register_velocity_field>
-  <Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>
-  <Advection_velocity_from_field>Velocity</Advection_velocity_from_field>
+  <Source_velocity_field_name>Velocity</Source_velocity_field_name>
   <Enable_SUPG>true</Enable_SUPG>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
-  <Enable_reinitialization>false</Enable_reinitialization>
-  <Enable_volume_correction>false</Enable_volume_correction>
   <Output type="Spatial">
     <Level_set>true</Level_set>
     <Generated_interface>true</Generated_interface>
@@ -134,21 +131,14 @@
     <Implicit_cut_fallback_policy>Fail</Implicit_cut_fallback_policy>
     <Implicit_cut_root_tolerance>1.0e-10</Implicit_cut_root_tolerance>
     <Implicit_cut_max_subdivision_depth>6</Implicit_cut_max_subdivision_depth>
-    <Generated_interface_quadrature_order>2</Generated_interface_quadrature_order>
+    <Cut_quadrature_order>2</Cut_quadrature_order>
     <Interface_quadrature_order>2</Interface_quadrature_order>
     <Volume_quadrature_order>2</Volume_quadrature_order>
     <Active_domain>LevelSetNegative</Active_domain>
-    <Active_domain_method>CutVolume</Active_domain_method>
-    <Enable_velocity_extension>true</Enable_velocity_extension>
-    <Velocity_extension_diffusivity>1.0</Velocity_extension_diffusivity>
     <External_pressure>0.0</External_pressure>
     <Surface_tension>0.0</Surface_tension>
     <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
-    <Use_cut_metadata_scale>false</Use_cut_metadata_scale>
-    <Cut_cell_velocity_gradient_penalty>0.1</Cut_cell_velocity_gradient_penalty>
-    <Cut_cell_velocity_max_derivative_order>1</Cut_cell_velocity_max_derivative_order>
     <Cut_cell_pressure_gradient_penalty>1</Cut_cell_pressure_gradient_penalty>
-    <Cut_cell_pressure_stabilization_policy>Enabled</Cut_cell_pressure_stabilization_policy>
   </Add_BC>
 </Add_equation>
 

@@ -126,9 +126,7 @@ inline constexpr std::array<FE::Real, 3> kGravitationalReferencePoint{{FE::Real{
 {
     return isExteriorOnePhaseBoundary(boundary) &&
            isUnfittedLevelSet(boundary) &&
-           boundary.active_domain != FreeSurfaceActiveDomain::None &&
-           (usesSurfaceStress(boundary) ||
-            hasWallAwareContactLaw(boundary));
+           boundary.active_domain != FreeSurfaceActiveDomain::None;
 }
 
 inline void validateFreeSurfaceDiscreteFunctionalPreflight(
@@ -300,21 +298,13 @@ inline void declareFreeSurfaceDiscreteFunctionals(
                     active_volume_dissipation_parameters,
                 .external_pressure_power_parameters =
                     external_pressure_power_parameters,
-                .endpoint_functional_power_enabled = usesSurfaceStress(bc),
+                .endpoint_functional_power_enabled = true,
                 .capillary_balance_method =
-                    usesSurfaceStress(bc)
-                        ? FE::systems::FreeSurfaceCapillaryBalanceMethod::
-                              DiscreteEnergyVolumeStationarity
-                        : FE::systems::FreeSurfaceCapillaryBalanceMethod::
-                              Unselected,
+                    FE::systems::FreeSurfaceCapillaryBalanceMethod::
+                        DiscreteEnergyVolumeStationarity,
                 .capillary_balance_qualification =
-                    usesSurfaceStress(bc)
-                        ? FE::systems::
-                              FreeSurfaceCapillaryBalanceQualification::
-                                  PrerequisiteOnly
-                        : FE::systems::
-                              FreeSurfaceCapillaryBalanceQualification::
-                                  Unselected,
+                    FE::systems::FreeSurfaceCapillaryBalanceQualification::
+                        PrerequisiteOnly,
                 .owner_component =
                     "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary",
             });
@@ -555,7 +545,6 @@ inline void declareDiagnosticSets(FE::systems::DiagnosticRegistry& registry)
             effective_free_surfaces.end(),
             [](const FreeSurfaceBoundary& bc) {
                 return isExteriorOnePhaseBoundary(bc) &&
-                       usesSurfaceStress(bc) &&
                        FE::forms::bc::isConstantScalarValue(
                            bc.surface_tension) &&
                        !FE::forms::bc::isZeroConstantScalarValue(
@@ -568,9 +557,8 @@ inline void declareDiagnosticSets(FE::systems::DiagnosticRegistry& registry)
             effective_free_surfaces.end(),
             [](const FreeSurfaceBoundary& bc) {
                 return isInternalMaterialInterfaceVolume(bc) ||
-                       (usesSurfaceStress(bc) &&
-                        FE::forms::bc::isConstantScalarValue(
-                            bc.surface_tension));
+                       FE::forms::bc::isConstantScalarValue(
+                           bc.surface_tension);
             });
     const bool conservative_balance_diagnostic_supported =
         conservative_balance_diagnostic_requested &&

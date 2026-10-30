@@ -2475,8 +2475,6 @@ TEST(IncompressibleTwoFluidModule,
   TwoFluidRegistrationFixture fixture;
   ns::IncompressibleTwoFluidOptions options;
   options.pressure_gradient_penalty = FE::Real{2.5};
-  options.use_cut_metadata_scale = true;
-  options.cut_metadata_scale_cap = FE::Real{16.0};
   auto module = fixture.makeModule(std::move(options));
   module.registerOn(fixture.system);
   fixture.system.setup({});
@@ -2487,14 +2485,6 @@ TEST(IncompressibleTwoFluidModule,
   EXPECT_TRUE(declarations.front().require_accepted_stage_numerics);
   EXPECT_EQ(declarations.front().pressure_stabilization_coefficient,
             FE::Real{2.5});
-  EXPECT_TRUE(
-      declarations.front().pressure_stabilization_use_cut_metadata_scale);
-  ASSERT_TRUE(declarations.front()
-                  .pressure_stabilization_cut_metadata_scale_cap
-                  .has_value());
-  EXPECT_EQ(*declarations.front()
-                 .pressure_stabilization_cut_metadata_scale_cap,
-            FE::Real{16.0});
   const auto state = makeAcceptedTwoFluidDiagnosticState(declarations.front());
   const std::array states{state};
   ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
@@ -2539,13 +2529,6 @@ TEST(IncompressibleTwoFluidModule,
             7u);
   EXPECT_EQ(numerics.negative_phase.pressure_stabilization.coefficient,
             FE::Real{2.5});
-  EXPECT_TRUE(numerics.negative_phase.pressure_stabilization
-                  .use_cut_metadata_scale);
-  ASSERT_TRUE(numerics.negative_phase.pressure_stabilization
-                  .cut_metadata_scale_cap.has_value());
-  EXPECT_EQ(*numerics.negative_phase.pressure_stabilization
-                 .cut_metadata_scale_cap,
-            FE::Real{16.0});
   EXPECT_EQ(numerics.negative_phase.linear_iteration_scope,
             FE::systems::TwoFluidAcceptedStageLinearIterationScope::
                 SharedCoupledSolve);
@@ -2862,8 +2845,6 @@ TEST(IncompressibleTwoFluidModule,
   interface.generated_interface_domain_id = "invalid_internal_phase";
   interface.active_domain =
       ns::FreeSurfaceActiveDomain::LevelSetNegative;
-  interface.active_domain_method =
-      ns::FreeSurfaceActiveDomainMethod::CutVolume;
   interface.external_pressure = FE::Real{1.0};
   interface.surface_tension = FE::Real{0.0};
   interface.normal_kinematic_policy =
@@ -2899,8 +2880,6 @@ TEST(IncompressibleTwoFluidModule,
   interface.generated_interface_domain_id = "valid_internal_phase";
   interface.active_domain =
       ns::FreeSurfaceActiveDomain::LevelSetNegative;
-  interface.active_domain_method =
-      ns::FreeSurfaceActiveDomainMethod::CutVolume;
   interface.external_pressure = FE::Real{0.0};
   interface.surface_tension = FE::Real{0.0};
   interface.normal_kinematic_policy =

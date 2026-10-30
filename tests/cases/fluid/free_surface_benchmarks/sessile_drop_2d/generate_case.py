@@ -449,7 +449,6 @@ def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, ca
         if scheme == "GeneralizedAlpha" else
         f"<Transient_time_integration_scheme>{scheme}</Transient_time_integration_scheme>")
     check_capillary_form(form)
-    maintenance = "\n    <Enable_reinitialization>false</Enable_reinitialization>"
     reconciliation = ("\n    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>"
                       if kinematic_reconciliation else "")
     if redistancing:
@@ -513,8 +512,7 @@ def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, ca
     <Level_set_source>prescribed_data</Level_set_source>{transport_xml}
     <Enable_SUPG>true</Enable_SUPG>
     <SUPG_tau_scale>0.5</SUPG_tau_scale>
-    <SUPG_transient_scale>2.0</SUPG_transient_scale>{maintenance}
-    <Enable_volume_correction>false</Enable_volume_correction>{reconciliation}
+    <SUPG_transient_scale>2.0</SUPG_transient_scale>{reconciliation}
     <Output type="Spatial">
       <Level_set>true</Level_set>
     </Output>
@@ -555,25 +553,19 @@ def solver_xml(form: str, equilibrium_deg: float, schedule: dict, steps: int, ca
       <Generated_interface_domain_id>{INTERFACE_DOMAIN_ID}</Generated_interface_domain_id>
       <Level_set_isovalue>0.0</Level_set_isovalue>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
-      <Active_domain_smoothing_width>0.0</Active_domain_smoothing_width>
       <Generated_interface_geometry>LinearCorner</Generated_interface_geometry>
       <Geometry_tangent_policy>RefreshedFrozenQuadrature</Geometry_tangent_policy>
       <Interface_quadrature_order>2</Interface_quadrature_order>
       <External_pressure>{EXTERNAL_PRESSURE:.17g}</External_pressure>
-      <Surface_tension>{SURFACE_TENSION:.17g}</Surface_tension>
-      <Surface_tension_form>SurfaceStress</Surface_tension_form>{semi_implicit_bc}
-      <Use_level_set_curvature>false</Use_level_set_curvature>
+      <Surface_tension>{SURFACE_TENSION:.17g}</Surface_tension>{semi_implicit_bc}
       <Contact_line_model>PrescribedAngle</Contact_line_model>
       <Contact_line_wall_face>{CONTACT_WALL}</Contact_line_wall_face>
       <Contact_line_wall_normal>{wall_normal}</Contact_line_wall_normal>
       <Contact_angle_degrees>{equilibrium_deg:.17g}</Contact_angle_degrees>
       <Wall_slip_model>Navier</Wall_slip_model>
       <Wall_slip_length>{SLIP_LENGTH:.17g}</Wall_slip_length>
-      <Enable_velocity_extension>false</Enable_velocity_extension>
       <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
       <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
-      <Use_cut_metadata_scale>false</Use_cut_metadata_scale>
       <Small_cut_aggregation>true</Small_cut_aggregation>
     </Add_BC>
   </Add_equation>

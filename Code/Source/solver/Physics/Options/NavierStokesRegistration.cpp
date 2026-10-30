@@ -157,8 +157,7 @@ namespace {
 [[nodiscard]] bool is_canonical_free_surface_physical_model_key(
     std::string_view key)
 {
-  return key == "Free_surface_physical_model" ||
-         key == "FreeSurfacePhysicalModel";
+  return key == "Free_surface_physical_model";
 }
 
 } // namespace
@@ -375,89 +374,6 @@ void validate_free_surface_module_options(std::string_view module_options)
 
 } // namespace
 
-FreeSurfaceSchemaContract resolve_free_surface_schema_contract(
-    const svmp::Physics::ParameterMap& params)
-{
-  FreeSurfaceSchemaContract contract;
-  bool schema_seen = false;
-  for (const auto key : {
-           "Free_surface_configuration_schema_version",
-           "FreeSurfaceConfigurationSchemaVersion",
-           "Free_surface_schema_version",
-       }) {
-    const auto it = params.find(key);
-    if (it == params.end() || !it->second.defined) {
-      continue;
-    }
-    if (schema_seen) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] "
-          "unsupported_free_surface_physical_model");
-    }
-    schema_seen = true;
-    const auto value = trim_copy(it->second.value);
-    std::size_t parsed = 0;
-    try {
-      contract.version = std::stoi(value, &parsed);
-    } catch (...) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] "
-          "unsupported_free_surface_physical_model");
-    }
-    if (parsed != value.size()) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] "
-          "unsupported_free_surface_physical_model");
-    }
-  }
-
-  bool legacy_seen = false;
-  for (const auto key : {
-           "Enable_explicit_legacy_free_surface_configuration",
-           "EnableExplicitLegacyFreeSurfaceConfiguration",
-           "Free_surface_legacy_behavior",
-       }) {
-    const auto it = params.find(key);
-    if (it == params.end() || !it->second.defined) {
-      continue;
-    }
-    if (legacy_seen) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] "
-          "unsupported_free_surface_physical_model");
-    }
-    legacy_seen = true;
-    const auto value = lower_copy(trim_copy(it->second.value));
-    if (value == "true" || value == "1" ||
-        value == "yes" || value == "on") {
-      // The explicit schema-1 legacy input was retired (D47 P2); the
-      // module keeps the legacy options for programmatic tests only.
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] The explicit schema-1 legacy "
-          "free-surface configuration (" + std::string(key) +
-          "=true) was retired (decision D47); remove it and use the "
-          "current configuration schema.");
-    }
-    if (value != "false" && value != "0" &&
-        value != "no" && value != "off") {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] "
-          "unsupported_free_surface_physical_model");
-    }
-  }
-
-  const auto current =
-      svmp::Physics::formulations::navier_stokes::
-          IncompressibleNavierStokesVMSOptions::
-              current_configuration_schema_version;
-  if (contract.version != current) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Physics] "
-        "unsupported_free_surface_physical_model");
-  }
-  return contract;
-}
-
 NavierStokesPhysicalModel
 validate_and_resolve_free_surface_physical_model(
     const svmp::Physics::EquationModuleInput& input)
@@ -465,7 +381,6 @@ validate_and_resolve_free_surface_physical_model(
   const svmp::Physics::ParameterValue* selected = nullptr;
   for (const auto key : {
            "Free_surface_physical_model",
-           "FreeSurfacePhysicalModel",
        }) {
     const auto it = input.equation_params.find(key);
     if (it == input.equation_params.end() || !it->second.defined) {
@@ -479,7 +394,6 @@ validate_and_resolve_free_surface_physical_model(
     selected = &it->second;
   }
 
-  (void)resolve_free_surface_schema_contract(input.equation_params);
   auto physical_model =
       NavierStokesPhysicalModel::
           OnePhaseLiquidPrescribedExteriorPressure;
@@ -1190,7 +1104,6 @@ std::string resolved_navier_stokes_input_json(
   auto used = keys.domain.value;
   const auto& equation = keys.equation.value;
   used.physical_model = equation.physical_model;
-  used.configuration_schema_version = equation.configuration_schema_version;
   used.operator_tag = options.operator_tag;
   used.use_taylor_hood_type_basis = equation.use_taylor_hood_type_basis;
   used.enable_ale = options.enable_ale;
@@ -1737,8 +1650,7 @@ translate_incompressible_two_fluid_input(
     throw std::runtime_error(
         "[svMultiPhysics::Physics] unsupported_two_fluid_explicit_domain_configuration");
   }
-  if (!trim_copy(input.module_options).empty() ||
-      !trim_copy(input.module_options_file_path).empty()) {
+  if (!trim_copy(input.module_options).empty()) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] unsupported_two_fluid_module_options");
   }
@@ -1836,9 +1748,8 @@ translate_incompressible_two_fluid_input(
       require({"Prescribed_viscous_traction_jump_z"}, "Prescribed_viscous_traction_jump_z");
     }
   }
-  if (any_parameter_defined(
-          input.equation_params, {"Operator_tag", "OperatorTag"})) {
-    require({"Operator_tag", "OperatorTag"}, "Operator_tag");
+  if (any_parameter_defined(input.equation_params, {"Operator_tag"})) {
+    require({"Operator_tag"}, "Operator_tag");
   }
   const auto resolved = schema.resolve(equation_input);
   const auto& keys = resolved.value;
@@ -1899,16 +1810,10 @@ translate_incompressible_two_fluid_input(
   if (!translated_boundaries.body_force_field_name.empty() ||
       any_parameter_defined(
           input.equation_params,
-          {"Momentum_source_temporal_and_spatial_values_file_path",
-           "MomentumSourceTemporalAndSpatialValuesFilePath",
-           "Body_force_temporal_and_spatial_values_file_path",
-           "BodyForceTemporalAndSpatialValuesFilePath"}) ||
+          {"Momentum_source_temporal_and_spatial_values_file_path"}) ||
       any_parameter_defined(
           input.default_domain.params,
-          {"Momentum_source_temporal_and_spatial_values_file_path",
-           "MomentumSourceTemporalAndSpatialValuesFilePath",
-           "Body_force_temporal_and_spatial_values_file_path",
-           "BodyForceTemporalAndSpatialValuesFilePath"})) {
+          {"Momentum_source_temporal_and_spatial_values_file_path"})) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] unsupported_two_fluid_nonconstant_momentum_source");
   }

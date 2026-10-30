@@ -75,12 +75,6 @@ def viscosity_value_text(root: ET.Element) -> str | None:
     return None if node is None or node.text is None else node.text.strip()
 
 
-def parse_bool(raw: str | None, default: bool) -> bool:
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
 def parse_float(raw: str | None, default: float | None) -> float | None:
     if raw is None or raw.strip() == "":
         return default
@@ -112,14 +106,11 @@ def load_config(
                 if pressure_penalty is None
                 else pressure_penalty
             ),
-            use_cut_metadata_scale=parse_bool(
-                xml_text(root, "Use_cut_metadata_scale"),
-                config.use_cut_metadata_scale,
-            ),
-            metadata_scale_cap=parse_float(
-                xml_text(root, "Cut_cell_metadata_scale_cap"),
-                config.metadata_scale_cap,
-            ),
+            # The solver input no longer has a cut-metadata scale (the solver
+            # never scales the pressure penalty); the scale stays an offline
+            # what-if selected by --use-cut-metadata-scale.
+            use_cut_metadata_scale=config.use_cut_metadata_scale,
+            metadata_scale_cap=config.metadata_scale_cap,
             global_metadata_scale_cap=config.global_metadata_scale_cap,
             stabilization_epsilon=config.stabilization_epsilon,
         )

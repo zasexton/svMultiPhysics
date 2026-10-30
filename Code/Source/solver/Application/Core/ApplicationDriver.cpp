@@ -168,43 +168,19 @@ double secondsSince(Clock::time_point start)
 }
 
 // A deprecated input that the run accepted (decision D47): a legacy
-// spelling of an XML key that frozen decks still use, a legacy environment
-// variable that a key replaced, or a retired setting restated with its
-// no-op value (empty replacement).
+// environment variable that a key replaced.
 struct InputDeprecation {
   std::string input;
   std::string replacement;
   std::string location;
 };
 
-std::vector<InputDeprecation> collectInputDeprecations(const Parameters& params)
+std::vector<InputDeprecation> collectInputDeprecations()
 {
   std::vector<InputDeprecation> deprecations;
   if (std::getenv("SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT") != nullptr) {
     deprecations.push_back({"SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT",
                             "Generalized_alpha_initial_rate", "environment"});
-  }
-  for (const auto* equation : params.equation_parameters) {
-    if (equation == nullptr) {
-      continue;
-    }
-    const std::string equation_location =
-        "Add_equation type=" +
-        (equation->type.defined() ? equation->type.value() : std::string{});
-    for (const auto& [spelling, replacement] : equation->deprecated_spellings) {
-      deprecations.push_back({spelling, replacement, equation_location});
-    }
-    for (const auto* bc : equation->boundary_conditions) {
-      if (bc == nullptr) {
-        continue;
-      }
-      const std::string bc_location =
-          equation_location + " Add_BC name=" +
-          (bc->name.defined() ? bc->name.value() : std::string{});
-      for (const auto& [spelling, replacement] : bc->deprecated_spellings) {
-        deprecations.push_back({spelling, replacement, bc_location});
-      }
-    }
   }
   return deprecations;
 }
@@ -212,20 +188,14 @@ std::vector<InputDeprecation> collectInputDeprecations(const Parameters& params)
 void warnInputDeprecations(const std::vector<InputDeprecation>& deprecations)
 {
   for (const auto& deprecation : deprecations) {
-    const bool retired = deprecation.replacement.empty();
     svmp::FE::LogRecord record("ApplicationDriver",
-                               retired ? "retired input setting"
-                                       : "deprecated input setting",
+                               "deprecated input setting",
                                svmp::FE::LogLevel::WARNING);
     record.diagnostic("input_deprecation")
         .quoted("setting", deprecation.input)
         .quoted("location", deprecation.location)
-        .text("decision", "D47");
-    if (retired) {
-      record.text("effect", "none");
-    } else {
-      record.quoted("replacement", deprecation.replacement);
-    }
+        .text("decision", "D47")
+        .quoted("replacement", deprecation.replacement);
     svmp::FE::logRecord(record.rootOnly());
   }
 }
@@ -304,7 +274,7 @@ void writeEffectiveConfigurationArtifact(
     output << "]";
     // Written only when the run accepted a deprecated input, so the
     // artifact of every other run is unchanged.
-    const auto deprecations = collectInputDeprecations(params);
+    const auto deprecations = collectInputDeprecations();
     if (!deprecations.empty()) {
       output << ",\"input_deprecations\":[";
       for (std::size_t i = 0; i < deprecations.size(); ++i) {
@@ -1115,27 +1085,6 @@ void applyMonolithicEquationNewtonControls(
     }
   }
 
-  // Opt-in inexact Newton forcing (<LS><Inexact_Newton_forcing>), read from
-  // the equations that control the monolithic solve.
-  using ForcingMode = svmp::FE::timestepping::NewtonOptions::LinearForcingOptions::Mode;
-  for (const auto* equation : equations) {
-    const auto& forcing = equation->linear_solver.inexact_newton_forcing;
-    if (!forcing.defined()) {
-      continue;
-    }
-    const auto value = normalized_token(forcing.value());
-    if (value.empty() || value == "none" || value == "fixed" || value == "off") {
-      continue;
-    }
-    if (value == "eisenstatwalker" || value == "ew") {
-      options.linear_forcing.mode = ForcingMode::EisenstatWalker;
-      continue;
-    }
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Unsupported <Inexact_Newton_forcing> '" +
-        forcing.value() + "'. Supported values: none, eisenstat_walker.");
-  }
-
   if (maximum_iterations.has_value()) {
     options.max_iterations = *maximum_iterations;
   }
@@ -1523,27 +1472,19 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
     const auto source_field =
         first_defined_parameter(
             eq_params,
-            {"Advection_velocity_from_field",
-             "Source_velocity_field_name"});
+            {"Source_velocity_field_name"});
     const auto method_parameter =
-        first_defined_parameter(eq_params, {"Wet_extension_advection_velocity_method",
-                                           "Advection_velocity_extension_method"});
+        first_defined_parameter(eq_params, {"Advection_velocity_extension_method"});
     const auto pde_operator =
         method_parameter.has_value()
             ? application::core::pdeVelocityExtensionOperatorFromToken(
                   *method_parameter)
             : std::nullopt;
-    // The algebraic wall-compatible wet extension was retired (decisions
-    // D47 and D55): the extension needs an explicit PDE method.  The
+    // The extension needs an explicit PDE method (the algebraic
+    // wall-compatible wet extension was retired, decisions D47 and D55).  The
     // translator rejects these settings first.
-    if (first_defined_bool_parameter(
-            eq_params, {"Use_wet_extension_advection_velocity"})
-            .value_or(false) ||
-        first_defined_bool_parameter(
-            eq_params, {"Write_velocity_extension_maps"})
-            .value_or(false) ||
-        ((method_parameter.has_value() || source_field.has_value()) &&
-         !pde_operator.has_value())) {
+    if ((method_parameter.has_value() || source_field.has_value()) &&
+        !pde_operator.has_value()) {
       throw std::runtime_error(
           std::string(application::core::kRetiredWetExtensionMessage));
     }
@@ -1568,7 +1509,7 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
       request.target_velocity_field_name = "LevelSetAdvectionVelocity";
     }
     if (const auto operator_tag = first_defined_parameter(
-            eq_params, {"Operator_tag", "OperatorTag"})) {
+            eq_params, {"Operator_tag"})) {
       request.operator_tag = trim_copy(*operator_tag);
     } else if (first_defined_bool_parameter(eq_params, {"Coupled"})
                    .value_or(false)) {
@@ -4133,8 +4074,8 @@ std::optional<std::uint64_t> currentLevelSetVelocityExtensionRevision(
 // ---- generated cut data on deep ghost cells --------------------------------
 //
 // Generated cut data is kept on the owned cells and on ghost cells at most
-// <Generated_cut_ghost_layers> face layers away from them (default 2; -1
-// keeps every stored cell); the mesh halo, the DOF layout and the numbering
+// ActiveCutVolumeRequest::generated_cut_ghost_layers face layers away from
+// them (default 2; -1 keeps every stored cell); the mesh halo, the DOF layout and the numbering
 // are unchanged.  On the production path no consumer reads cut data beyond
 // the first ghost layer: assembly (ReverseScatter) assembles owned cells and
 // the interior faces of owned cells, small-cut aggregation classifies owned
@@ -7229,7 +7170,7 @@ void ApplicationDriver::runWithParameters(const Parameters& params, RunMode mode
                                      [](const auto* p) { return p != nullptr; }));
   oopCout() << "[svMultiPhysics::Application] Input summary: meshes=" << mesh_blocks
             << " equations=" << equation_blocks << std::endl;
-  warnInputDeprecations(collectInputDeprecations(params));
+  warnInputDeprecations(collectInputDeprecations());
   // Validate the initial-rate key against its legacy environment alias
   // before the setup work (it is applied by the transient solve).
   (void)generalizedAlphaInitialRateIsConsistent(params.general_simulation_parameters);

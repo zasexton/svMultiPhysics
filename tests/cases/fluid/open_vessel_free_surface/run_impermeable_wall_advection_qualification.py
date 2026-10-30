@@ -82,11 +82,6 @@ CHARACTERISTIC_SUBSTEPS = 512
 FIXED_TIME_STEPS = 512
 
 
-def xml_real(value: float) -> str:
-    """Return a stable, round-trippable XML representation of a real."""
-    return f"{value:.16e}"
-
-
 def validate_bound_representability_slack(
         slack: float, resolutions: list[int]) -> None:
     """Keep numerical bound slack separated from physical wall-sign gates."""
@@ -409,22 +404,9 @@ def generate_case(
             equation for equation in tree.getroot().findall("Add_equation")
             if equation.attrib.get("type") == "level_set"
         )
-        for name in (
-                "Use_wet_extension_advection_velocity",
-                "Advection_velocity_from_field"):
-            node = level_set.find(name)
-            if node is not None:
-                level_set.remove(node)
-        numerical_contract = {
-            "Bound_preserving_bound_tolerance":
-                bound_representability_slack,
-            "Bound_preserving_sign_tolerance": BOUND_SIGN_TOLERANCE,
-        }
-        for name, value in numerical_contract.items():
-            node = level_set.find(name)
-            if node is None:
-                node = ET.SubElement(level_set, name)
-            node.text = xml_real(value)
+        node = level_set.find("Source_velocity_field_name")
+        if node is not None:
+            level_set.remove(node)
         for solver in tree.getroot().iter("LS"):
             solver.set("type", "GMRES")
             linear_algebra = solver.find("Linear_algebra")
@@ -440,11 +422,7 @@ def generate_case(
     return completed
 
 
-def deck_contract(
-        case_dir: Path,
-        bound_representability_slack: float = (
-            DEFAULT_BOUND_REPRESENTABILITY_SLACK),
-) -> dict[str, Any]:
+def deck_contract(case_dir: Path) -> dict[str, Any]:
     root = ET.parse(case_dir / "solver.xml").getroot()
     general = root.find("GeneralSimulationParameters")
     if general is None:
@@ -464,16 +442,6 @@ def deck_contract(
         "Auto_register_velocity_field": "true",
         "Enable_SUPG": "true",
         "SUPG_transient_scale": "2.0",
-        "Enable_discontinuity_capturing": "false",
-        "Enable_bound_preserving_limiter": "true",
-        "Bound_preserving_bound_tolerance":
-            xml_real(bound_representability_slack),
-        "Bound_preserving_sign_tolerance": xml_real(BOUND_SIGN_TOLERANCE),
-        "Bound_preserving_enforce_courant_limit": "true",
-        "Bound_preserving_enforce_impermeable_boundaries": "true",
-        "Bound_preserving_impermeable_normal_velocity_tolerance": "1.0e-12",
-        "Enable_reinitialization": "false",
-        "Enable_volume_correction": "false",
     }
     actual = {name: (level_set.findtext(name) or "").strip()
               for name in expected}
@@ -496,7 +464,7 @@ def deck_contract(
             f"Time_step_size={time_step_size!r}, expected {expected_dt!r}")
     if level_set.find("Use_wet_extension_advection_velocity") is not None:
         errors.append("qualification must use the prescribed mesh velocity directly")
-    if level_set.find("Advection_velocity_from_field") is not None:
+    if level_set.find("Source_velocity_field_name") is not None:
         errors.append("qualification must not invoke wet-side velocity extension")
 
     mesh = pv.read(case_dir / "mesh/background/mesh-complete.mesh.vtu")
@@ -558,7 +526,7 @@ def run_resolution(solver: Path,
         return {"resolution": resolution, "passed": False,
                 "errors": ["case generation failed"], "case_dir": str(case_dir)}
 
-    contract = deck_contract(case_dir, bound_representability_slack)
+    contract = deck_contract(case_dir)
     environment = os.environ.copy()
     environment.setdefault("SVV_GUI_DISABLE_VTK", "1")
     try:

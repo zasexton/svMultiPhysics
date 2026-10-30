@@ -134,7 +134,6 @@
     "xml_translation_and_truthful_provenance": [
       "EquationTranslatorMeshMotion.XmlAliasesReachTangentialPolicyModuleRegistration",
       "EquationTranslatorFreeSurface.XmlTangentialPenaltyAliasesReachTruthfulFittedModule",
-      "EquationTranslatorFreeSurface.XmlExplicitNoneCannotBePromotedByKinematicPenalty",
       "NavierStokesLegacyBCs.FittedFreeSurfaceBCTranslation_SetupSucceeds",
       "NavierStokesLegacyBCs.FittedFreeSurfaceKinematicBCTranslation_UsesCurrentGeometry",
       "NavierStokesLegacyBCs.FittedFreeSurfacePrescribedTangentialMeshPolicyTranslation",
@@ -160,7 +159,6 @@
     ],
     "schema_1_unqualified_legacy_operator_regressions": [
       "MovingDomainPhysics.NavierStokesFittedFreeSurfaceALEUsesCurrentBoundaryGeometry",
-      "MovingDomainPhysics.NavierStokesFittedFreeSurfaceCanUseCurrentGeometryCurvature",
       "MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesAreBoundaryLocal"
     ],
     "mesh_motion_policy_consumers": [
@@ -175,7 +173,6 @@
   "tests": [
     "EquationTranslatorMeshMotion.XmlAliasesReachTangentialPolicyModuleRegistration",
     "EquationTranslatorFreeSurface.XmlTangentialPenaltyAliasesReachTruthfulFittedModule",
-    "EquationTranslatorFreeSurface.XmlExplicitNoneCannotBePromotedByKinematicPenalty",
     "NavierStokesLegacyBCs.FittedFreeSurfaceBCTranslation_SetupSucceeds",
     "NavierStokesLegacyBCs.FittedFreeSurfaceKinematicBCTranslation_UsesCurrentGeometry",
     "NavierStokesLegacyBCs.FittedFreeSurfacePrescribedTangentialMeshPolicyTranslation",
@@ -195,7 +192,6 @@
     "NavierStokesLegacyBCs.FittedFreeSurfacePrescribedAngleTranslationFailsClosed",
     "EquationTranslatorFreeSurface.XmlFittedDynamicContactFailsClosedBeforeSystemMutation",
     "MovingDomainPhysics.NavierStokesFittedFreeSurfaceALEUsesCurrentBoundaryGeometry",
-    "MovingDomainPhysics.NavierStokesFittedFreeSurfaceCanUseCurrentGeometryCurvature",
     "MovingDomainPhysics.FittedFreeSurfaceTangentialPoliciesAreBoundaryLocal",
     "MovingDomainPhysics.HarmonicMeshMotionTangentialPoliciesSelectBoundaryTerms",
     "MovingDomainPhysics.MeshMotionModulesInstallEquivalentBoundaryConditionDescriptors",
@@ -203,7 +199,7 @@
     "MovingDomainPhysics.FittedPinnedContactLineRequiresALE"
   ],
   "gates": {
-    "expected_test_count": 28,
+    "expected_test_count": 26,
     "expected_failures": 0,
     "expected_errors": 0,
     "expected_disabled": 0,
@@ -223,8 +219,7 @@
       "claim": "xml_aliases_and_explicit_none_fail_closed_are_wired_end_to_end",
       "evidence": [
         "EquationTranslatorMeshMotion.XmlAliasesReachTangentialPolicyModuleRegistration",
-        "EquationTranslatorFreeSurface.XmlTangentialPenaltyAliasesReachTruthfulFittedModule",
-        "EquationTranslatorFreeSurface.XmlExplicitNoneCannotBePromotedByKinematicPenalty"
+        "EquationTranslatorFreeSurface.XmlTangentialPenaltyAliasesReachTruthfulFittedModule"
       ]
     },
     {

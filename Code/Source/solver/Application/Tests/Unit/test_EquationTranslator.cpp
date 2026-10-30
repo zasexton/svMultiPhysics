@@ -418,13 +418,10 @@ TEST(EquationTranslatorFreeSurface, BuildInputKeepsOopFreeSurfaceParameters)
     <Geometry_tangent_policy>RefreshedFrozenQuadrature</Geometry_tangent_policy>
     <Implicit_cut_root_tolerance>1.0e-10</Implicit_cut_root_tolerance>
     <Implicit_cut_max_subdivision_depth>16</Implicit_cut_max_subdivision_depth>
-    <Generated_interface_quadrature_order>2</Generated_interface_quadrature_order>
+    <Cut_quadrature_order>2</Cut_quadrature_order>
     <Interface_quadrature_order>1</Interface_quadrature_order>
     <Volume_quadrature_order>2</Volume_quadrature_order>
     <Active_domain>LevelSetNegative</Active_domain>
-    <Active_domain_method>CutVolume</Active_domain_method>
-    <Surface_tension_form>SurfaceStress</Surface_tension_form>
-    <Active_domain_smoothing_width>0.02</Active_domain_smoothing_width>
     <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
   </Add_BC>
 </Add_equation>
@@ -448,22 +445,22 @@ TEST(EquationTranslatorFreeSurface, BuildInputKeepsOopFreeSurfaceParameters)
             "RefreshedFrozenQuadrature");
   EXPECT_EQ(bc.params.at("Implicit_cut_root_tolerance").value, "1.0e-10");
   EXPECT_EQ(bc.params.at("Implicit_cut_max_subdivision_depth").value, "16");
-  EXPECT_EQ(bc.params.at("Generated_interface_quadrature_order").value, "2");
+  EXPECT_EQ(bc.params.at("Cut_quadrature_order").value, "2");
   EXPECT_EQ(bc.params.at("Interface_quadrature_order").value, "1");
   EXPECT_EQ(bc.params.at("Volume_quadrature_order").value, "2");
   EXPECT_EQ(bc.params.at("Active_domain").value, "LevelSetNegative");
-  EXPECT_EQ(bc.params.at("Active_domain_method").value, "CutVolume");
-  EXPECT_EQ(bc.params.at("Surface_tension_form").value, "SurfaceStress");
-  EXPECT_EQ(bc.params.at("Active_domain_smoothing_width").value, "0.02");
   EXPECT_EQ(bc.params.at("Enable_cut_cell_stabilization").value, "true");
 }
 
 TEST(EquationTranslatorMeshMotion,
      XmlAliasesReachTangentialPolicyModuleRegistration)
 {
+  // The alias spellings (Policy, Constraint_quantity, Penalty_scale,
+  // Time_scale) were removed; the test keeps its name because the frozen
+  // WP-9 runner selects it.
   auto mesh = buildTranslatorMesh();
   mesh->base().register_label("primary_wall", 51);
-  mesh->base().register_label("alias_wall", 52);
+  mesh->base().register_label("secondary_wall", 52);
 
   auto params = parseEquationXml(R"xml(
 <Add_equation type="mesh_motion">
@@ -471,19 +468,19 @@ TEST(EquationTranslatorMeshMotion,
   <Field_name>mesh_displacement</Field_name>
   <Add_BC name="primary_wall">
     <Type>TangentialPolicy</Type>
-    <Policy>Prescribed</Policy>
+    <Tangential_policy>Prescribed</Tangential_policy>
     <Quantity>Velocity</Quantity>
     <Target>0.25 -0.50</Target>
     <Penalty>4.0</Penalty>
     <Velocity_time_scale>2.0</Velocity_time_scale>
   </Add_BC>
-  <Add_BC name="alias_wall">
+  <Add_BC name="secondary_wall">
     <Type>TangentialPolicy</Type>
     <Tangential_policy>Prescribed</Tangential_policy>
-    <Constraint_quantity>Displacement</Constraint_quantity>
+    <Quantity>Displacement</Quantity>
     <Target>-0.125 0.375</Target>
-    <Penalty_scale>5.0</Penalty_scale>
-    <Time_scale>3.0</Time_scale>
+    <Penalty>5.0</Penalty>
+    <Velocity_time_scale>3.0</Velocity_time_scale>
   </Add_BC>
 </Add_equation>
 )xml");
@@ -493,8 +490,9 @@ TEST(EquationTranslatorMeshMotion,
       application::translators::EquationTranslator::buildInput(
           *params, meshes);
   ASSERT_EQ(input.boundary_conditions.size(), 2u);
-  EXPECT_EQ(input.boundary_conditions[0].params.at("Policy").value,
-            "Prescribed");
+  EXPECT_EQ(
+      input.boundary_conditions[0].params.at("Tangential_policy").value,
+      "Prescribed");
   EXPECT_EQ(input.boundary_conditions[0].params.at("Quantity").value,
             "Velocity");
   EXPECT_EQ(
@@ -503,11 +501,11 @@ TEST(EquationTranslatorMeshMotion,
   EXPECT_EQ(
       input.boundary_conditions[1].params.at("Tangential_policy").value,
       "Prescribed");
+  EXPECT_EQ(input.boundary_conditions[1].params.at("Quantity").value,
+            "Displacement");
   EXPECT_EQ(
-      input.boundary_conditions[1].params.at("Constraint_quantity").value,
-      "Displacement");
-  EXPECT_EQ(input.boundary_conditions[1].params.at("Time_scale").value,
-            "3.0");
+      input.boundary_conditions[1].params.at("Velocity_time_scale").value,
+      "3.0");
 
   svmp::FE::systems::FESystem system(mesh);
   auto module =
@@ -561,8 +559,6 @@ TEST(EquationTranslatorFreeSurface,
   <Add_BC name="free_surface">
     <Type>Free_surface</Type>
     <Implementation>FittedALE</Implementation>
-    <Normal_kinematic_policy>MatchFluidNormalVelocity</Normal_kinematic_policy>
-    <Kinematic_enforcement>MeshNitsche</Kinematic_enforcement>
     <Tangential_mesh_policy>Prescribed</Tangential_mesh_policy>
     <Prescribed_tangential_mesh_velocity>0.25 -0.5 0.0</Prescribed_tangential_mesh_velocity>
     <)xml") +
@@ -625,8 +621,6 @@ TEST(EquationTranslatorFreeSurface,
   <Add_BC name="free_surface">
     <Type>Free_surface</Type>
     <Implementation>FittedALE</Implementation>
-    <Normal_kinematic_policy>MatchFluidNormalVelocity</Normal_kinematic_policy>
-    <Kinematic_enforcement>MeshNitsche</Kinematic_enforcement>
     <Tangential_mesh_policy>SmoothingOnly</Tangential_mesh_policy>
     <Tangential_mesh_penalty>5.0</Tangential_mesh_penalty>
   </Add_BC>
@@ -663,8 +657,6 @@ TEST(EquationTranslatorFreeSurface,
   <Add_BC name="free_surface">
     <Type>Free_surface</Type>
     <Implementation>FittedALE</Implementation>
-    <Normal_kinematic_policy>MatchFluidNormalVelocity</Normal_kinematic_policy>
-    <Kinematic_enforcement>MeshNitsche</Kinematic_enforcement>
     <Tangential_mesh_policy>Free</Tangential_mesh_policy>
     <Tangential_mesh_penalty>5.0</Tangential_mesh_penalty>
   </Add_BC>
@@ -681,58 +673,13 @@ TEST(EquationTranslatorFreeSurface,
 }
 
 TEST(EquationTranslatorFreeSurface,
-     XmlExplicitNoneCannotBePromotedByKinematicPenalty)
-{
-  svmp::Physics::formulations::navier_stokes::
-      forceLink_NavierStokesRegister();
-  auto mesh = buildTranslatorMesh();
-  mesh->base().register_label("free_surface", 82);
-  const auto meshes = singleMeshMap(mesh);
-  auto params = parseEquationXml(R"xml(
-<Add_equation type="fluid">
-  <Enable_ALE>true</Enable_ALE>
-  <Mesh_velocity_source>coupled_displacement</Mesh_velocity_source>
-  <Auto_register_mesh_displacement_field>true</Auto_register_mesh_displacement_field>
-  <Density>1.0</Density>
-  <Viscosity model="Constant">
-    <Value>0.01</Value>
-  </Viscosity>
-  <Add_BC name="free_surface">
-    <Type>Free_surface</Type>
-    <Implementation>FittedALE</Implementation>
-    <Normal_kinematic_policy>MatchFluidNormalVelocity</Normal_kinematic_policy>
-    <Kinematic_enforcement>None</Kinematic_enforcement>
-    <Kinematic_penalty>11.0</Kinematic_penalty>
-    <Tangential_mesh_policy>Prescribed</Tangential_mesh_policy>
-  </Add_BC>
-</Add_equation>
-)xml");
-
-  // Kinematic_penalty was retired with the Penalty enforcement (decision
-  // D47 Q9): it fails at translation, whatever the enforcement.
-  svmp::FE::systems::FESystem system(mesh);
-  try {
-    (void)application::translators::EquationTranslator::createModule(
-        *params, system, meshes);
-    ADD_FAILURE() << "Kinematic_penalty must fail at translation";
-  } catch (const std::runtime_error& error) {
-    const std::string message = error.what();
-    EXPECT_NE(message.find("decision D47 Q9"), std::string::npos)
-        << message;
-    EXPECT_NE(message.find("MeshNitsche"), std::string::npos) << message;
-  }
-  EXPECT_EQ(system.fieldMap().numFields(), 0u);
-  EXPECT_TRUE(system.formulationRecords().empty());
-  EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());
-}
-
-TEST(EquationTranslatorFreeSurface,
      XmlFittedDynamicContactFailsClosedBeforeSystemMutation)
 {
   svmp::Physics::formulations::navier_stokes::
       forceLink_NavierStokesRegister();
   auto mesh = buildTranslatorMesh();
   mesh->base().register_label("free_surface", 83);
+  mesh->base().register_label("contact_wall", 84);
   const auto meshes = singleMeshMap(mesh);
   auto params = parseEquationXml(R"xml(
 <Add_equation type="fluid">
@@ -747,13 +694,11 @@ TEST(EquationTranslatorFreeSurface,
     <Type>Free_surface</Type>
     <Implementation>FittedALE</Implementation>
     <Surface_tension>0.8</Surface_tension>
-    <Normal_kinematic_policy>MatchFluidNormalVelocity</Normal_kinematic_policy>
-    <Kinematic_enforcement>MeshNitsche</Kinematic_enforcement>
     <Tangential_mesh_policy>Prescribed</Tangential_mesh_policy>
     <Tangential_mesh_penalty>6.0</Tangential_mesh_penalty>
     <Contact_line_model>DynamicContactAngle</Contact_line_model>
     <Contact_angle_degrees>60.0</Contact_angle_degrees>
-    <Contact_line_wall_marker>84</Contact_line_wall_marker>
+    <Contact_line_wall_face>contact_wall</Contact_line_wall_face>
     <Contact_line_wall_normal>1.0 0.0 0.0</Contact_line_wall_normal>
     <Contact_line_mobility>0.5</Contact_line_mobility>
     <Wall_slip_model>Navier</Wall_slip_model>
@@ -829,7 +774,8 @@ TEST(EquationTranslatorFreeSurface,
         std::string(error.what()).find(
             "DynamicContactAngle is currently supported only for sharp "
             "unfitted level-set free surfaces"),
-        std::string::npos);
+        std::string::npos)
+        << error.what();
   }
 
   const auto layout_revision_after = system.feLayoutRevisionState();
@@ -934,68 +880,6 @@ TEST(EquationTranslatorFreeSurface,
       definition_plan_before.summary());
 }
 
-TEST(EquationTranslatorFreeSurface, XmlRecordsDeprecatedSpellingsWithReplacements)
-{
-  // Decision D47: spellings that frozen decks still use are accepted for one
-  // release and recorded with their replacement; canonical spellings record
-  // nothing.
-  auto params = parseEquationXml(R"xml(
-<Add_equation type="level_set">
-  <Generated_interface_quadrature_order>2</Generated_interface_quadrature_order>
-  <Projected_curvature_field>kappa</Projected_curvature_field>
-  <Source_velocity_field_name>Velocity</Source_velocity_field_name>
-  <Add_BC name="free_surface">
-    <Type>Free_surface</Type>
-    <ProjectedCurvatureField>kappa</ProjectedCurvatureField>
-    <Level_set_isovalue>0.0</Level_set_isovalue>
-  </Add_BC>
-</Add_equation>
-)xml");
-
-  using Entry = std::pair<std::string, std::string>;
-  EXPECT_EQ(params->deprecated_spellings,
-            (std::vector<Entry>{
-                {"Generated_interface_quadrature_order", "Cut_quadrature_order"},
-                {"Projected_curvature_field", "Curvature_field_name"}}));
-  ASSERT_EQ(params->boundary_conditions.size(), 1u);
-  EXPECT_EQ(params->boundary_conditions.front()->deprecated_spellings,
-            (std::vector<Entry>{{"ProjectedCurvatureField", "Curvature_field"}}));
-}
-
-TEST(EquationTranslatorFreeSurface, XmlRecordsRestatedRetiredValuesWithoutReplacement)
-{
-  // Decision D47 Q2: Use_level_set_curvature=false and
-  // Allow_fitted_surface_stress=true restate retired settings with their
-  // no-op values; they are recorded with an empty replacement.  Any other
-  // value is left to the Navier-Stokes register, which rejects it.
-  auto params = parseEquationXml(R"xml(
-<Add_equation type="fluid">
-  <Add_BC name="restated_curvature">
-    <Type>Free_surface</Type>
-    <Use_level_set_curvature>False</Use_level_set_curvature>
-  </Add_BC>
-  <Add_BC name="restated_opt_in">
-    <Type>Free_surface</Type>
-    <Allow_fitted_surface_stress>true</Allow_fitted_surface_stress>
-    <Use_level_set_curvature>true</Use_level_set_curvature>
-  </Add_BC>
-  <Add_BC name="retired_values">
-    <Type>Free_surface</Type>
-    <Allow_fitted_surface_stress>false</Allow_fitted_surface_stress>
-  </Add_BC>
-</Add_equation>
-)xml");
-
-  using Entry = std::pair<std::string, std::string>;
-  EXPECT_TRUE(params->deprecated_spellings.empty());
-  ASSERT_EQ(params->boundary_conditions.size(), 3u);
-  EXPECT_EQ(params->boundary_conditions[0]->deprecated_spellings,
-            (std::vector<Entry>{{"Use_level_set_curvature=false", ""}}));
-  EXPECT_EQ(params->boundary_conditions[1]->deprecated_spellings,
-            (std::vector<Entry>{{"Allow_fitted_surface_stress=true", ""}}));
-  EXPECT_TRUE(params->boundary_conditions[2]->deprecated_spellings.empty());
-}
-
 TEST(EquationTranslatorFreeSurface, BuildInputResolvesUnfittedContactLineWallFaces)
 {
   auto mesh = buildTranslatorMesh();
@@ -1009,7 +893,6 @@ TEST(EquationTranslatorFreeSurface, BuildInputResolvesUnfittedContactLineWallFac
     <Implementation>UnfittedLevelSet</Implementation>
     <Level_set_field_name>phi</Level_set_field_name>
     <Active_domain>LevelSetNegative</Active_domain>
-    <Active_domain_method>CutVolume</Active_domain_method>
     <Contact_line_model>PrescribedContactAngle</Contact_line_model>
     <Contact_angle_degrees>90.0</Contact_angle_degrees>
     <Contact_line_wall_face>wall_left; wall_right</Contact_line_wall_face>
@@ -1029,33 +912,6 @@ TEST(EquationTranslatorFreeSurface, BuildInputResolvesUnfittedContactLineWallFac
   EXPECT_EQ(bc.params.count("Contact_line_wall_face"), 0u);
 }
 
-TEST(EquationTranslatorFreeSurface, BuildInputRejectsContactLineFacesAndMarkersTogether)
-{
-  auto mesh = buildTranslatorMesh();
-  mesh->base().register_label("wall_left", 11);
-
-  auto params = parseEquationXml(R"xml(
-<Add_equation type="fluid">
-  <Add_BC name="free_surface">
-    <Type>Free_surface</Type>
-    <Implementation>UnfittedLevelSet</Implementation>
-    <Level_set_field_name>phi</Level_set_field_name>
-    <Active_domain>LevelSetNegative</Active_domain>
-    <Active_domain_method>CutVolume</Active_domain_method>
-    <Contact_line_model>PrescribedContactAngle</Contact_line_model>
-    <Contact_angle_degrees>90.0</Contact_angle_degrees>
-    <Contact_line_wall_face>wall_left</Contact_line_wall_face>
-    <Contact_line_wall_markers>11</Contact_line_wall_markers>
-    <Contact_line_wall_normal>-1.0 0.0 0.0</Contact_line_wall_normal>
-  </Add_BC>
-</Add_equation>
-)xml");
-
-  EXPECT_THROW((void)application::translators::EquationTranslator::buildInput(
-                   *params, singleMeshMap(mesh)),
-               std::runtime_error);
-}
-
 TEST(EquationTranslatorFreeSurface,
      XmlPhysicalModelIsExplicitAndUnsupportedScopeFailsClosed)
 {
@@ -1066,7 +922,6 @@ TEST(EquationTranslatorFreeSurface,
 
   for (const std::string alias : {
            "Free_surface_physical_model",
-           "FreeSurfacePhysicalModel",
        }) {
     SCOPED_TRACE(alias);
     const std::string xml =
@@ -1175,7 +1030,7 @@ TEST(EquationTranslatorFreeSurface,
   expect_parser_rejected(
       R"xml(
 <Add_equation type="fluid">
-  <FreeSurfacePhysicalModel>one_phase_liquid_sharp_interface</FreeSurfacePhysicalModel>
+  <Free_surface_physical_model>one_phase_liquid_sharp_interface</Free_surface_physical_model>
 </Add_equation>
 )xml",
       "unsupported_free_surface_physical_model");
@@ -1184,14 +1039,6 @@ TEST(EquationTranslatorFreeSurface,
 <Add_equation type="fluid">
   <Free_surface_physical_model>OnePhaseLiquidPrescribedExteriorPressure</Free_surface_physical_model>
   <Free_surface_physical_model>OnePhaseLiquidPrescribedExteriorPressure</Free_surface_physical_model>
-</Add_equation>
-)xml",
-      "ambiguous_free_surface_physical_model");
-  expect_parser_rejected(
-      R"xml(
-<Add_equation type="fluid">
-  <Free_surface_physical_model>OnePhaseLiquidPrescribedExteriorPressure</Free_surface_physical_model>
-  <FreeSurfacePhysicalModel>OnePhaseLiquidPrescribedExteriorPressure</FreeSurfacePhysicalModel>
 </Add_equation>
 )xml",
       "ambiguous_free_surface_physical_model");
@@ -1206,7 +1053,7 @@ TEST(EquationTranslatorFreeSurface,
       R"xml(
 <Add_equation type="fluid">
   <Domain id="liquid">
-    <FreeSurfacePhysicalModel>OnePhaseLiquidPrescribedExteriorPressure</FreeSurfacePhysicalModel>
+    <Free_surface_physical_model>OnePhaseLiquidPrescribedExteriorPressure</Free_surface_physical_model>
   </Domain>
 </Add_equation>
 )xml",
@@ -1640,65 +1487,6 @@ TEST(EquationTranslatorFreeSurface,
     EXPECT_TRUE(
         svmp::FE::systems::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
   }
-}
-
-TEST(EquationTranslatorFreeSurface,
-     XmlIncompressibleTwoFluidRejectsDuplicateOperatorTagAliasesBeforeMutation)
-{
-  svmp::Physics::formulations::navier_stokes::
-      forceLink_NavierStokesRegister();
-  auto mesh = buildTranslatorTriangleMesh();
-  const auto meshes = singleMeshMap(mesh);
-  auto params = parseEquationXml(R"xml(
-<Add_equation type="fluid">
-  <Free_surface_physical_model>IncompressibleTwoFluid</Free_surface_physical_model>
-  <Level_set_field_name>level_set</Level_set_field_name>
-  <Generated_interface_domain_id>material_interface</Generated_interface_domain_id>
-  <Material_interface_marker>71</Material_interface_marker>
-  <Negative_phase_density>1000.0</Negative_phase_density>
-  <Negative_phase_dynamic_viscosity>0.01</Negative_phase_dynamic_viscosity>
-  <Positive_phase_density>1.0</Positive_phase_density>
-  <Positive_phase_dynamic_viscosity>0.001</Positive_phase_dynamic_viscosity>
-  <Two_fluid_surface_tension>0.072</Two_fluid_surface_tension>
-  <Two_fluid_interface_nitsche_gamma>24.0</Two_fluid_interface_nitsche_gamma>
-  <Operator_tag>equations</Operator_tag>
-  <OperatorTag>other_equations</OperatorTag>
-</Add_equation>
-)xml");
-
-  svmp::FE::systems::FESystem system(mesh);
-  const auto scalar_space =
-      svmp::FE::spaces::SpaceFactory::create_h1(
-          svmp::FE::ElementType::Triangle3, 1);
-  (void)system.addField(svmp::FE::systems::FieldSpec{
-      .name = "level_set",
-      .space = scalar_space,
-      .components = 1,
-  });
-  try {
-    (void)application::translators::EquationTranslator::createModule(
-        *params, system, meshes);
-    FAIL() << "duplicate operator-tag aliases were accepted";
-  } catch (const std::runtime_error& error) {
-    EXPECT_NE(
-        std::string_view(error.what()).find(
-            "ambiguous_two_fluid_parameter:Operator_tag"),
-        std::string_view::npos)
-        << error.what();
-  }
-  EXPECT_EQ(system.findFieldByName("u_negative"),
-            svmp::FE::INVALID_FIELD_ID);
-  EXPECT_EQ(system.findFieldByName("p_negative"),
-            svmp::FE::INVALID_FIELD_ID);
-  EXPECT_EQ(system.findFieldByName("u_positive"),
-            svmp::FE::INVALID_FIELD_ID);
-  EXPECT_EQ(system.findFieldByName("p_positive"),
-            svmp::FE::INVALID_FIELD_ID);
-  EXPECT_TRUE(system.formulationRecords().empty());
-  EXPECT_TRUE(
-      system.materialInterfaceTransportVelocityDeclarations().empty());
-  EXPECT_TRUE(
-      svmp::FE::systems::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations().empty());
 }
 
 TEST(EquationTranslatorFreeSurface,

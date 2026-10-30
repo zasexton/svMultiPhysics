@@ -151,9 +151,7 @@ def test_generated_case_uses_open_resolved_slip_contract(tmp_path: Path):
         level_set.findtext("Advection_velocity_extension_coupling") ==
         "monolithic"
     )
-    assert level_set.findtext("Enable_reinitialization") == "false"
     assert level_set.find("Reinitialization_cadence_steps") is None
-    assert level_set.findtext("Enable_volume_correction") == "false"
     assert boundary_by_name(
         level_set, "wall_bottom").findtext("Type") == "LevelSetInflow"
     assert float(boundary_by_name(
@@ -178,9 +176,7 @@ def test_generated_case_uses_open_resolved_slip_contract(tmp_path: Path):
     free_surface = boundary_by_name(fluid, "free_surface")
     assert free_surface.findtext("Implementation") == "UnfittedLevelSet"
     assert free_surface.findtext("Active_domain") == "LevelSetNegative"
-    assert free_surface.findtext("Active_domain_method") == "CutVolume"
     assert free_surface.findtext("Generated_interface_geometry") == "LinearCorner"
-    assert free_surface.findtext("Surface_tension_form") == "SurfaceStress"
     assert free_surface.findtext("Contact_line_model") == "PrescribedContactAngle"
     assert free_surface.findtext("Contact_line_wall_face") == "wall_right"
     assert free_surface.findtext("Contact_line_wall_normal") == "1 0 0"
@@ -189,8 +185,6 @@ def test_generated_case_uses_open_resolved_slip_contract(tmp_path: Path):
     assert free_surface.findtext("Wall_slip_model") == "Navier"
     assert math.isclose(
         float(free_surface.findtext("Wall_slip_length")), 0.001)
-    assert math.isclose(
-        float(free_surface.findtext("Active_domain_smoothing_width")), 0.0)
 
 
 def test_runner_freezes_capillary_rise_physics_and_solver_defaults():
@@ -385,9 +379,7 @@ def test_d4_profile_is_the_default_wetting_deck(tmp_path: Path):
     assert level_set.find("Use_wet_extension_advection_velocity") is None
     assert level_set.findtext("Enable_kinematic_reconciliation") == "true"
     assert level_set.findtext("Enable_sign_definite_patch_bounds") == "true"
-    assert level_set.findtext("Enable_reinitialization") == "false"
     assert level_set.find("Enable_discontinuity_capturing") is None
-    assert level_set.findtext("Enable_volume_correction") == "false"
     # D21 bounds reject level-set inflow faces: the bottom has no level-set BC.
     assert [bc.attrib["name"] for bc in level_set.findall("Add_BC")] == ["wall_top"]
     assert boundary_by_name(level_set, "wall_top").findtext("Type") == "LevelSetOutflow"
@@ -405,12 +397,10 @@ def test_d4_profile_is_the_default_wetting_deck(tmp_path: Path):
     assert boundary_by_name(fluid, "wall_bottom").findtext("Type") == "Neu"
     free_surface = boundary_by_name(fluid, "free_surface")
     assert free_surface.findtext("Contact_line_model") == "PrescribedAngle"
-    assert free_surface.findtext("Surface_tension_form") == "SurfaceStress"
     assert free_surface.findtext("Wall_slip_model") == "Navier"
     assert math.isclose(float(free_surface.findtext("Wall_slip_length")), 0.001)
     assert free_surface.findtext("Contact_line_wall_face") == "wall_right"
     assert free_surface.findtext("Small_cut_aggregation") == "true"
-    assert free_surface.findtext("Use_cut_metadata_scale") == "false"
     assert free_surface.find("Allow_corner_linearized_cut_geometry") is None
     assert free_surface.find("Contact_line_mobility") is None
     # Default aggregation guards (the provisional 6 / 12 of D-W7 are retired).

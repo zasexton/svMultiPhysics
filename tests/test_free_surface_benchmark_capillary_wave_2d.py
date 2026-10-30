@@ -178,7 +178,7 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     root = ET.parse(tmp_path / "c/solver.xml").getroot()
     text = (tmp_path / "c/solver.xml").read_text()
     assert "<Geometry_tangent_policy>RefreshedFrozenQuadrature" in text
-    assert "<Surface_tension_form>SurfaceStress" in text and "Curvature_field" not in text
+    assert "Curvature_field" not in text
     # D9: the default transport is the harmonic PDE extension, monolithic coupling.
     assert case["transport"] == gen.DEFAULT_TRANSPORT == "pde_extension"
     level_set = root.find("Add_equation[@type='level_set']")
@@ -217,7 +217,6 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     finer = gen.generate(16, "surface_stress", tmp_path / "d", dt_divisor=4)
     assert finer["dt"] == pytest.approx(case["dt"] / 4.0, rel=1e-14)
     assert finer["steps"] == 4 * case["steps"]
-    assert "<Surface_tension_form>SurfaceStress" in (tmp_path / "d/solver.xml").read_text()
     # Decision D48 retired the KAG forms; nothing is written for them.
     for form in ("kag_lumped", "kag_consistent"):
         with pytest.raises(ValueError, match="D48.*SurfaceStress"):

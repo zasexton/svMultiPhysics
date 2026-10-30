@@ -114,12 +114,6 @@ enum class FreeSurfaceActiveDomain : std::uint8_t {
     LevelSetPositive
 };
 
-// SmoothedIndicator (a smooth-Heaviside weighted bulk integral, explicit
-// schema-1 legacy diagnostic) was retired by D42.
-enum class FreeSurfaceActiveDomainMethod : std::uint8_t {
-    CutVolume
-};
-
 // Geometry of a generated (unfitted) interface: the piecewise-linear corner
 // geometry or the high-order implicit surface (the FE level-set
 // GeneratedInterfaceGeometryMode of the cut request).
@@ -160,29 +154,6 @@ enum class FreeSurfaceTangentialMeshPolicy : std::uint8_t {
     Free,
     SmoothingOnly,
     Prescribed
-};
-
-enum class FreeSurfacePressureStabilizationPolicy : std::uint8_t {
-    Enabled,
-    Incremental,
-    Disabled,
-    DisabledForRefreshedFrozenHighOrder
-};
-
-/**
- * @brief Discrete representation of constant surface-tension forces
- *
- * Automatic selects SurfaceStress, whose measure and normal (the
- * generated-interface rule of an unfitted level-set interface, or the
- * current fitted ALE boundary) define one discrete surface energy (decision
- * D47 Q2(b)).  SurfaceStress is the only capillary route: CurvatureTraction,
- * with its supplied or raw level-set curvature, was retired by the same
- * decision, and KinematicAreaGradientTraction, with its projected curvature
- * field, by decision D48.
- */
-enum class FreeSurfaceSurfaceTensionForm : std::uint8_t {
-    Automatic,
-    SurfaceStress
 };
 
 /**
@@ -276,10 +247,6 @@ struct FreeSurfaceCutCellStabilization {
     // assembled terms; aggregation is not a standalone stability proof
     // for that combined mixed method.
     ScalarValue pressure_gradient_penalty{1.0};
-    FreeSurfacePressureStabilizationPolicy pressure_policy{
-        FreeSurfacePressureStabilizationPolicy::Enabled};
-    bool use_cut_metadata_scale{false};
-    std::optional<FE::Real> cut_metadata_scale_cap{};
 };
 
 /**
@@ -310,18 +277,8 @@ struct FreeSurfaceBoundary {
     FE::Real level_set_isovalue{0.0};
 
     // Optional active-domain restriction for unfitted level-set volume terms.
+    // The volume terms integrate over the exact cut volume of that side.
     FreeSurfaceActiveDomain active_domain{FreeSurfaceActiveDomain::None};
-    FreeSurfaceActiveDomainMethod active_domain_method{
-        FreeSurfaceActiveDomainMethod::CutVolume};
-    // Smoothing width of the DynamicContactAngle wetted-wall weight.  The
-    // law constructs a homogeneous
-    // physical signed-distance proxy and applies a compact C1 cubic: zero
-    // on the dry side beyond one width, one on the wet side beyond one
-    // width.  Positive phi rescaling is therefore immaterial.  This is a
-    // smooth wall weight, not a sharp cut-wall integration operator.  Zero
-    // selects the local cell diameter.
-    FE::Real active_domain_smoothing_width{0.0};
-    bool allow_full_domain_unfitted_free_surface{false};
 
     // Dynamic stress balance: sigma(u,p)n = (-p_ext - gamma*kappa)n.
     // Curvature is positive for a convex liquid surface with n pointing
@@ -333,13 +290,13 @@ struct FreeSurfaceBoundary {
     // implemented and therefore fails closed during module validation.
     ScalarValue surface_tension{0.0};
 
-    // SurfaceStress uses the variational surface-energy force
+    // Constant surface tension is the variational surface-energy force
+    // (SurfaceStress, the only capillary form; decisions D47 Q2(b) and D48)
     //     gamma (I - n_g tensor n_g) : grad(v)
-    // with n_g supplied by the same generated-interface rule as dI.  At a
-    // moving contact line it must be paired with wall energy
-    // -gamma*cos(theta_e), not with a second cos(theta_d) force.
-    FreeSurfaceSurfaceTensionForm surface_tension_form{
-        FreeSurfaceSurfaceTensionForm::Automatic};
+    // with n_g supplied by the same generated-interface rule as dI (unfitted)
+    // or by the current boundary (fitted).  At a moving contact line it must
+    // be paired with wall energy -gamma*cos(theta_e), not with a second
+    // cos(theta_d) force.
     // Optional semi-implicit capillary term (see the enum above).  It is
     // admitted only for unfitted LinearCorner CutVolume interfaces with a
     // literal positive gamma; everything else fails closed.
@@ -750,27 +707,10 @@ enum class ContactLineKind : std::uint8_t {
         FreeSurfaceBoundaryRole::InternalMaterialInterfaceVolume;
 }
 
-[[nodiscard]] inline bool usesSurfaceStress(
-    const FreeSurfaceBoundary& bc) noexcept
-{
-    switch (bc.surface_tension_form) {
-    case FreeSurfaceSurfaceTensionForm::Automatic:
-        // The generated-interface rule (unfitted) or the current boundary
-        // (fitted) supplies both the measure and its normal, so the default
-        // is the variation of one discrete surface energy on both kinds of
-        // boundary (decision D47 Q2(b)).
-        return true;
-    case FreeSurfaceSurfaceTensionForm::SurfaceStress:
-        return true;
-    }
-    return false;
-}
-
 [[nodiscard]] inline bool surfaceStressActive(
     const FreeSurfaceBoundary& bc) noexcept
 {
-    return usesSurfaceStress(bc) &&
-           !FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension);
+    return !FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension);
 }
 
 inline bool usesSemiImplicitNormalIncrement(const FreeSurfaceBoundary& bc) noexcept
@@ -932,19 +872,6 @@ contactLineSlipLength(const FreeSurfaceContactLine& contact_line)
             " currently requires a literal scalar value");
 }
 
-[[nodiscard]] inline bool hasWallAwareContactLaw(
-    const FreeSurfaceBoundary& boundary)
-{
-    return std::any_of(
-        boundary.contact_lines.begin(),
-        boundary.contact_lines.end(),
-        [](const auto& contact_line) {
-            const auto kind = contactLineKind(contact_line);
-            return kind == ContactLineKind::PrescribedAngle ||
-                   kind == ContactLineKind::DynamicRenE;
-        });
-}
-
 [[nodiscard]] inline const std::array<IncompressibleNavierStokesVMSOptions::ScalarValue, 3>&
 contactLineWallNormal(const FreeSurfaceContactLine& contact_line)
 {
@@ -1015,42 +942,10 @@ contactLineWallNormal(const FreeSurfaceContactLine& contact_line)
            FreeSurfaceGeometryTangentPolicy::RefreshedFrozenQuadrature;
 }
 
-[[nodiscard]] inline bool isHighOrderImplicitGeneratedInterface(
-    const FreeSurfaceBoundary& bc)
-{
-    return bc.generated_interface_geometry ==
-           FreeSurfaceGeneratedInterfaceGeometry::HighOrderImplicit;
-}
-
-[[nodiscard]] inline const char* pressureStabilizationDisabledReason(
-    const FreeSurfaceBoundary& bc)
-{
-    switch (bc.cut_cell_stabilization.pressure_policy) {
-    case FreeSurfacePressureStabilizationPolicy::Enabled:
-    case FreeSurfacePressureStabilizationPolicy::Incremental:
-        return "none";
-    case FreeSurfacePressureStabilizationPolicy::Disabled:
-        return "explicit_policy_disabled";
-    case FreeSurfacePressureStabilizationPolicy::DisabledForRefreshedFrozenHighOrder:
-        break;
-    }
-    return isHighOrderImplicitGeneratedInterface(bc) &&
-                   isRefreshedFrozenGeometryTangent(bc)
-               ? "refreshed_frozen_high_order_policy"
-               : "none";
-}
-
-[[nodiscard]] inline bool pressureStabilizationDisabledByPolicy(
-    const FreeSurfaceBoundary& bc)
-{
-    return std::string_view(pressureStabilizationDisabledReason(bc)) != "none";
-}
-
 [[nodiscard]] inline bool pressureStabilizationActive(const FreeSurfaceBoundary& bc)
 {
-    return !pressureStabilizationDisabledByPolicy(bc) &&
-           !FE::forms::bc::isZeroConstantScalarValue(
-               bc.cut_cell_stabilization.pressure_gradient_penalty);
+    return !FE::forms::bc::isZeroConstantScalarValue(
+        bc.cut_cell_stabilization.pressure_gradient_penalty);
 }
 
 [[nodiscard]] inline FE::forms::CutVolumeSide activeDomainSide(
@@ -1147,8 +1042,6 @@ struct IncompressibleTwoFluidOptions {
     FE::Real stabilization_epsilon{1.0e-12};
 
     FE::Real pressure_gradient_penalty{1.0};
-    bool use_cut_metadata_scale{false};
-    std::optional<FE::Real> cut_metadata_scale_cap{};
     IncompressibleNavierStokesVMSOptions::FreeSurfaceSmallCutAggregationGuards
         small_cut_aggregation_guards{};
     core::PhysicsJITPolicy jit_policy{};

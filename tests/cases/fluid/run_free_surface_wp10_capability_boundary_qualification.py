@@ -154,7 +154,6 @@ EXPECTED_SOURCE_CHECKS = {
             '"misplaced_free_surface_physical_model"',
             '"ambiguous_free_surface_physical_model"',
             '"Free_surface_physical_model"',
-            '"FreeSurfacePhysicalModel"',
             "validate_and_resolve_free_surface_physical_model(",
         ],
         "forbidden_fragments": [],
@@ -193,7 +192,6 @@ EXPECTED_SOURCE_CHECKS = {
         "required_fragments": [
             "is_free_surface_physical_model_parameter(",
             '"Free_surface_physical_model"',
-            '"FreeSurfacePhysicalModel"',
             "onephaseliquidprescribedexteriorpressure",
             '"unsupported_two_phase_or_jump_free_surface_scope"',
             '"unsupported_free_surface_physical_model"',
@@ -451,10 +449,6 @@ EXPECTED_GROUPS = {
     "incompressible_two_fluid_application_serial": {
         "binary_argument": "application_binary",
         "tests": [
-            (
-                "EquationTranslatorFreeSurface."
-                "XmlIncompressibleTwoFluidRejectsDuplicateOperatorTagAliasesBeforeMutation"
-            ),
             (
                 "EquationTranslatorFreeSurface."
                 "XmlIncompressibleTwoFluidRejectsDuplicatePressureJumpAliasesBeforeMutation"

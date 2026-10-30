@@ -89,10 +89,7 @@ def test_generated_case_uses_fitted_surface_stress_mesh_nitsche_and_sliding_wall
     assert float(fluid.find("Viscosity/Value").text) == pytest.approx(math.sqrt(1.0 / 3000.0))
     surface = {bc.get("name"): bc for bc in fluid.iter("Add_BC")}["free_surface"]
     assert surface.find("Implementation").text == "FittedALE"
-    assert surface.find("Surface_tension_form").text == "SurfaceStress"
-    assert surface.find("Allow_fitted_surface_stress").text == "true"
     assert float(surface.find("Surface_tension").text) == 1.0
-    assert surface.find("Kinematic_enforcement").text == "MeshNitsche"
     assert float(surface.find("Kinematic_nitsche_gamma").text) == 10.0
     assert surface.find("Tangential_mesh_policy").text == "Free"
     assert surface.find("Contact_line_model") is None

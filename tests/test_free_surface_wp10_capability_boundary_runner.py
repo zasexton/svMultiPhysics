@@ -399,7 +399,7 @@ def test_validate_only_reports_boundary_without_claiming_closure():
     assert summary["requested_claim"] == "staged_two_fluid_capability_boundary"
     assert summary["source_check_count"] == 20
     assert summary["group_count"] == 5
-    assert summary["test_count"] == 39
+    assert summary["test_count"] == 38
     assert summary["staged_wp10_capability_count"] == 8
     assert summary["deferred_gas_requirement_count"] == 1
     assert summary["blocked_wp10_exit_count"] == 8

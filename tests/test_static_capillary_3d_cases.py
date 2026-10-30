@@ -89,7 +89,6 @@ def test_closed_sphere_case_writes_conforming_tetrahedral_contract(tmp_path):
     solver = (case_dir / "solver.xml").read_text()
     assert "<Number_of_spatial_dimensions>3" in solver
     assert "<Generated_interface_geometry>LinearCorner" in solver
-    assert "<Surface_tension_form>SurfaceStress" in solver
     assert "<Node_pressure_constraints>" not in solver
 
 

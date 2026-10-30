@@ -2,7 +2,7 @@
 """Write one level of the 2D fitted-ALE static-drop smoke case (tracker M5, decision D5).
 
 A closed 2D liquid drop bounded by a fitted free surface, zero gravity, with
-the opt-in fitted SurfaceStress (Laplace-Beltrami) capillary form.  The drop
+the fitted SurfaceStress (Laplace-Beltrami) capillary form.  The drop
 starts from the sampled circle at rest with the uniform pressure gamma/R and
 relaxes; the smoke run reports the pressure jump against gamma/R and the
 spurious velocity (README.md).
@@ -167,11 +167,7 @@ def solver_xml(steps: int) -> str:
       <Implementation>FittedALE</Implementation>
       <External_pressure>0.0</External_pressure>
       <Surface_tension>{SURFACE_TENSION:.17g}</Surface_tension>
-      <Surface_tension_form>SurfaceStress</Surface_tension_form>
-      <Allow_fitted_surface_stress>true</Allow_fitted_surface_stress>
-      <Normal_kinematic_policy>MatchFluidNormalVelocity</Normal_kinematic_policy>
       <Tangential_mesh_policy>Free</Tangential_mesh_policy>
-      <Kinematic_enforcement>MeshNitsche</Kinematic_enforcement>
       <Kinematic_nitsche_gamma>{KINEMATIC_NITSCHE_GAMMA:.17g}</Kinematic_nitsche_gamma>
     </Add_BC>
   </Add_equation>

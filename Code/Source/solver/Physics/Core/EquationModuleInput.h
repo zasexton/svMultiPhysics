@@ -61,7 +61,6 @@ struct EquationModuleInput {
   std::vector<std::string> nested_configuration_blocks{};
 
   std::string module_options{};
-  std::string module_options_file_path{};
 
   std::string mesh_name{};
   std::shared_ptr<svmp::MeshBase> mesh{};

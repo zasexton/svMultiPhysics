@@ -122,7 +122,7 @@ def test_validation_solver_generator_preserves_mesh_ghost_layers():
             if equation.get("type") == "level_set"
         )
         # The bound-preserving limiter was retired (decision D51).
-        assert level_set.findtext("Enable_bound_preserving_limiter") == "false"
+        assert level_set.find("Enable_bound_preserving_limiter") is None
         assert level_set.find("Bound_preserving_bound_tolerance") is None
         assert level_set.find("Bound_preserving_sign_tolerance") is None
         top = next(
@@ -243,7 +243,7 @@ def test_test05_decks_state_the_retired_bound_preserving_limiter_off(case_name):
     level_set = smoke.level_set_equation(ET.parse(solver_xml).getroot())
 
     # The bound-preserving limiter was retired (decision D51).
-    assert level_set.findtext("Enable_bound_preserving_limiter") == "false"
+    assert level_set.find("Enable_bound_preserving_limiter") is None
     assert not any(child.tag.startswith("Bound_preserving_")
                    for child in level_set)
 

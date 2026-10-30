@@ -84,15 +84,12 @@ def test_generated_case_uses_the_d4_configuration(tmp_path):
     assert float(get("Contact_angle_degrees")) == 60.0
     assert get("Wall_slip_model") == "Navier"
     assert float(get("Wall_slip_length")) == pytest.approx(0.125)
-    assert get("Surface_tension_form") == "SurfaceStress"
     assert get("Geometry_tangent_policy") == "RefreshedFrozenQuadrature"
-    assert float(get("Active_domain_smoothing_width")) == 0.0
     bottom = fluid.find("Add_BC[@name='wall_bottom']")
     assert bottom.find("Effective_direction").text.strip() == "0 1"
     for wall in ("wall_left", "wall_right", "wall_top"):
         assert fluid.find(f"Add_BC[@name='{wall}']").find("Effective_direction") is None
     level_set = root.find("Add_equation[@type='level_set']")
-    assert level_set.find("Enable_reinitialization").text.strip() == "false"
     assert level_set.find("Enable_kinematic_reconciliation").text.strip() == "true"
     assert case["kinematic_reconciliation"] is True
     plain = gen.solver_xml("surface_stress", 60, gen.time_schedule(16, 5.0, 100), 10, 1,
@@ -153,10 +150,10 @@ def test_generated_case_uses_the_d4_configuration(tmp_path):
     assert '<LS type="Direct">' in direct and 'Linear_algebra type="eigen"' in direct
     assert "<Transient_time_integration_scheme>BackwardEuler" in direct
     assert "Spectral_radius_of_infinite_time_step" not in direct
-    # The projection reinitialization is retired (decision D47): every deck
-    # switches it off and writes none of its settings.
+    # The projection reinitialization is retired (decision D47): no deck
+    # writes any of its settings.
     for deck in (text, direct):
-        assert "<Enable_reinitialization>false</Enable_reinitialization>" in deck
+        assert "<Enable_reinitialization>" not in deck
         assert "<Reinitialization_" not in deck
 
 

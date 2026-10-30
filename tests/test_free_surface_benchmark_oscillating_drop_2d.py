@@ -274,7 +274,7 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     root = ET.parse(tmp_path / "c/solver.xml").getroot()
     text = (tmp_path / "c/solver.xml").read_text()
     assert "<Geometry_tangent_policy>RefreshedFrozenQuadrature" in text
-    assert "<Surface_tension_form>SurfaceStress" in text and "Curvature_field" not in text
+    assert "Curvature_field" not in text
     assert "Enable_sign_definite_patch_bounds" not in text           # D21: sessile only
     assert case["transport"] == gen.DEFAULT_TRANSPORT == "pde_extension"
     level_set = root.find("Add_equation[@type='level_set']")

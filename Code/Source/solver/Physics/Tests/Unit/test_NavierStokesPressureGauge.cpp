@@ -339,7 +339,6 @@ constexpr const char* pressure_anchor_domain_id =
             .generated_interface_domain_id = pressure_anchor_domain_id,
             .level_set_isovalue = 0.0,
             .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
-            .active_domain_method = ns::FreeSurfaceActiveDomainMethod::CutVolume,
             .external_pressure = 0.0,
             .surface_tension = 0.0,
             .small_cut_aggregation = false,
@@ -512,8 +511,6 @@ TEST(NavierStokesPressureGauge,
                 .level_set_field_name = "phi",
                 .active_domain = formulations::navier_stokes::
                     FreeSurfaceActiveDomain::LevelSetNegative,
-                .active_domain_method = formulations::navier_stokes::
-                    FreeSurfaceActiveDomainMethod::CutVolume,
                 .small_cut_aggregation = false,
             });
 
@@ -1164,8 +1161,6 @@ TEST(NavierStokesInitialConditions,
                 .level_set_field_name = "phi",
                 .active_domain = formulations::navier_stokes::
                     FreeSurfaceActiveDomain::LevelSetNegative,
-                .active_domain_method = formulations::navier_stokes::
-                    FreeSurfaceActiveDomainMethod::CutVolume,
             });
 
     formulations::navier_stokes::IncompressibleNavierStokesVMSModule module(

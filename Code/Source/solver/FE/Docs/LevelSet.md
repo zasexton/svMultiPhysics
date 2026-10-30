@@ -577,7 +577,8 @@ the level-set curvature projection, by decision D48. The projection itself
 (`LevelSetCurvatureProjection`, its least-squares and
 kinematic-area-gradient recovery modes, the curvature samples and the
 `Enable_curvature_projection`, `Curvature_field_name` and
-`Curvature_projection_*` keys) was retired with it: those keys now fail.
+`Curvature_projection_*` keys) was retired with it, and the keys were then
+removed from the input.
 
 Raw pointwise `meanCurvatureFromLevelSet(phi)` is a diagnostic path for
 fitted or controlled studies; it is not production evidence for unfitted

@@ -125,19 +125,13 @@ CMAKE_CACHE_PROVENANCE_KEYS = (
     "MPI_CXX_COMPILER",
 )
 SOLVER_XML_CONTROL_TAGS = {
-    "Advection_velocity_from_field",
     "Auto_register_velocity_field",
     "Constant_velocity",
     "Cut_cell_pressure_gradient_penalty",
-    "Cut_cell_pressure_stabilization_policy",
-    "Cut_cell_metadata_scale_cap",
+    "Cut_quadrature_order",
     "Element_order",
-    "Enable_reinitialization",
     "Enable_SUPG",
-    "Enable_velocity_extension",
-    "Enable_volume_correction",
     "Generated_interface_geometry",
-    "Generated_interface_quadrature_order",
     "Geometry_tangent_policy",
     "Interface_quadrature_order",
     "Implicit_cut_fallback_policy",
@@ -156,13 +150,8 @@ SOLVER_XML_CONTROL_TAGS = {
     "Temporal_and_spatial_values_file_path",
     "Time_step_size",
     "Tolerance",
-    "Volume_correction_cadence_steps",
-    "Volume_correction_max_iterations",
-    "Volume_correction_tolerance",
-    "Volume_correction_use_initial_volume",
+    "Source_velocity_field_name",
     "Transport_form",
-    "Use_cut_metadata_scale",
-    "Use_wet_extension_advection_velocity",
     "Velocity_field_name",
     "Velocity_source",
     "Volume_quadrature_order",
@@ -178,25 +167,11 @@ ACTIVE_DOMAIN_ACCEPTED_TOKENS = {
     "off",
     "inactive",
 }
-ACTIVE_DOMAIN_METHOD_ACCEPTED_TOKENS = {
-    "cutvolume",
-    "smoothedindicator",
-}
 ACTIVE_DOMAIN_XML_LITERAL_RE = re.compile(
     r"<Active_domain>\s*([^<{][^<]*?)\s*</Active_domain>"
 )
 ACTIVE_DOMAIN_JSON_LITERAL_RE = re.compile(
     r'"active_domain"\s*:\s*"([^"]+)"'
-)
-FREE_SURFACE_CURVATURE_FIELD_TAGS = (
-    "Curvature_field_name",
-    "CurvatureFieldName",
-    "Curvature_field",
-    "CurvatureField",
-    "Projected_curvature_field",
-    "ProjectedCurvatureField",
-    "Free_surface_curvature_field",
-    "FreeSurfaceCurvatureField",
 )
 FREE_SURFACE_UNSUPPORTED_SCOPE_TAG_TOKENS = {
     "airdensity",
@@ -277,30 +252,25 @@ HIGH_ORDER_MMS_BASE_XML_CONTROLS = (
     ("Generated_interface_geometry", "HighOrderImplicit"),
     ("Implicit_cut_quadrature_backend", "SayeHyperrectangle"),
     ("Implicit_cut_fallback_policy", "Fail"),
-    ("Generated_interface_quadrature_order", "2"),
+    ("Cut_quadrature_order", "2"),
     ("Interface_quadrature_order", "2"),
     ("Volume_quadrature_order", "2"),
-    ("Use_cut_metadata_scale", "false"),
-    ("Cut_cell_pressure_stabilization_policy", "DisabledForRefreshedFrozenHighOrder"),
 )
 HIGH_ORDER_MMS_BASE_PRESSURE_ENABLED_XML_CONTROLS = (
     ("Generated_interface_geometry", "HighOrderImplicit"),
     ("Implicit_cut_quadrature_backend", "SayeHyperrectangle"),
     ("Implicit_cut_fallback_policy", "Fail"),
-    ("Generated_interface_quadrature_order", "2"),
+    ("Cut_quadrature_order", "2"),
     ("Interface_quadrature_order", "2"),
     ("Volume_quadrature_order", "2"),
-    ("Use_cut_metadata_scale", "false"),
     ("Cut_cell_pressure_gradient_penalty", "1"),
-    ("Cut_cell_pressure_stabilization_policy", "Enabled"),
 )
 HIGH_ORDER_MMS_PRESCRIBED_XML_CONTROLS = HIGH_ORDER_MMS_BASE_XML_CONTROLS + (
     ("Level_set_source", "prescribed_data"),
     ("Velocity_source", "prescribed_data"),
     ("Velocity_field_name", "LevelSetAdvectionVelocity"),
     ("Auto_register_velocity_field", "true"),
-    ("Use_wet_extension_advection_velocity", "true"),
-    ("Advection_velocity_from_field", "Velocity"),
+    ("Source_velocity_field_name", "Velocity"),
 )
 HIGH_ORDER_MMS_PRESCRIBED_EXACT_INFLOW_XML_CONTROLS = (
     HIGH_ORDER_MMS_PRESCRIBED_XML_CONTROLS
@@ -311,9 +281,6 @@ HIGH_ORDER_MMS_PRESCRIBED_EXACT_INFLOW_XML_CONTROLS = (
 )
 HIGH_ORDER_MMS_PRESCRIBED_EXACT_INFLOW_NO_REINIT_XML_CONTROLS = (
     HIGH_ORDER_MMS_PRESCRIBED_EXACT_INFLOW_XML_CONTROLS
-    + (
-        ("Enable_reinitialization", "false"),
-    )
 )
 HIGH_ORDER_MMS_PRESCRIBED_EXACT_INFLOW_NO_REINIT_PRESSURE_ENABLED_XML_CONTROLS = (
     HIGH_ORDER_MMS_BASE_PRESSURE_ENABLED_XML_CONTROLS
@@ -322,11 +289,9 @@ HIGH_ORDER_MMS_PRESCRIBED_EXACT_INFLOW_NO_REINIT_PRESSURE_ENABLED_XML_CONTROLS =
         ("Velocity_source", "prescribed_data"),
         ("Velocity_field_name", "LevelSetAdvectionVelocity"),
         ("Auto_register_velocity_field", "true"),
-        ("Use_wet_extension_advection_velocity", "true"),
-        ("Advection_velocity_from_field", "Velocity"),
+        ("Source_velocity_field_name", "Velocity"),
         ("Temporal_and_spatial_values_file_path", "bc/wall_left_phi.dat"),
         ("Temporal_and_spatial_values_file_path", "bc/wall_right_phi.dat"),
-        ("Enable_reinitialization", "false"),
     )
 )
 HIGH_ORDER_MMS_CONSTANT_XML_CONTROLS = HIGH_ORDER_MMS_BASE_XML_CONTROLS + (
@@ -2893,174 +2858,6 @@ PROBES: dict[str, Probe] = {
         ),
         validation_scope="expected_failure_diagnostic",
     ),
-    "square-refined-vpen10-t04-pressure": Probe(
-        name="square-refined-vpen10-t04-pressure",
-        case_subdir="square_tank_tilt_settling",
-        generate_args=(
-            "--nx", "17",
-            "--ny", "17",
-            "--time-step", "0.001",
-            "--time-steps", "400",
-            "--verification-profile", "transient_pressure",
-            "--cut-cell-velocity-gradient-penalty", "10.0",
-        ),
-        result_name="result_400.vtu",
-        expect_solver_success=True,
-        expect_verifier_pass=False,
-        description=(
-            "Refined square-tank high velocity-penalty diagnostic through "
-            "t=0.4. Current evidence expects the stronger velocity ghost "
-            "penalty to reach final time while failing strict free-surface "
-            "interface-pressure gates."
-        ),
-        required_solver_xml_controls=(
-            ("Use_cut_metadata_scale", "false"),
-            ("Cut_cell_pressure_gradient_penalty", "1"),
-        ),
-        validation_scope="expected_failure_diagnostic",
-    ),
-    "square-refined-metadata-scale-t02": Probe(
-        name="square-refined-metadata-scale-t02",
-        case_subdir="square_tank_tilt_settling",
-        generate_args=(
-            "--nx", "17",
-            "--ny", "17",
-            "--time-step", "0.001",
-            "--time-steps", "200",
-            "--verification-profile", "early_transient",
-            "--use-cut-metadata-scale",
-        ),
-        result_name=LATEST_RESULT_NAME,
-        expect_solver_success=False,
-        expect_verifier_pass=None,
-        description=(
-            "Refined square-tank metadata-scale diagnostic through t=0.2. "
-            "Current evidence expects the capped cut-metadata scale to "
-            "reproduce the early nonlinear failure near the fixed-step "
-            "topology event, making the scaling regression reproducible "
-            "from generator controls."
-        ),
-        required_solver_xml_controls=(
-            ("Use_cut_metadata_scale", "true"),
-            ("Cut_cell_pressure_gradient_penalty", "1"),
-        ),
-        validation_scope="expected_failure_diagnostic",
-    ),
-    "square-refined-metadata-penalty1e-3-t03-pressure": Probe(
-        name="square-refined-metadata-penalty1e-3-t03-pressure",
-        case_subdir="square_tank_tilt_settling",
-        generate_args=(
-            "--nx", "17",
-            "--ny", "17",
-            "--time-step", "0.0005",
-            "--time-steps", "600",
-            "--verification-profile", "transient_pressure",
-            "--use-cut-metadata-scale",
-            "--cut-cell-velocity-gradient-penalty", "0.001",
-            "--cut-cell-pressure-gradient-penalty", "0.001",
-        ),
-        result_name="result_600.vtu",
-        expect_solver_success=True,
-        expect_verifier_pass=None,
-        description=(
-            "Refined square-tank bounded metadata-scale diagnostic through "
-            "t=0.3. This keeps metadata scaling enabled but scales both "
-            "cut-cell gradient penalties by 1e-3, emulating a strongly "
-            "bounded effective metadata-scale cap while recording strict "
-            "transient-pressure verifier metrics as trend data."
-        ),
-        required_solver_xml_controls=(
-            ("Use_cut_metadata_scale", "true"),
-            ("Cut_cell_pressure_gradient_penalty", "0.001"),
-        ),
-        validation_scope="trend_diagnostic",
-    ),
-    "square-refined-metadata-cap1-t03-pressure": Probe(
-        name="square-refined-metadata-cap1-t03-pressure",
-        case_subdir="square_tank_tilt_settling",
-        generate_args=(
-            "--nx", "17",
-            "--ny", "17",
-            "--time-step", "0.0005",
-            "--time-steps", "600",
-            "--verification-profile", "transient_pressure",
-            "--use-cut-metadata-scale",
-            "--cut-cell-metadata-scale-cap", "1.0",
-        ),
-        result_name="result_600.vtu",
-        expect_solver_success=True,
-        expect_verifier_pass=None,
-        description=(
-            "Refined square-tank bounded metadata-scale cap diagnostic through "
-            "t=0.3. This keeps metadata scaling enabled but applies an explicit "
-            "unit cap in the cut-stabilization form, separating a true local "
-            "scale cap from the earlier small-penalty emulation."
-        ),
-        required_solver_xml_controls=(
-            ("Use_cut_metadata_scale", "true"),
-            ("Cut_cell_metadata_scale_cap", "1"),
-            ("Cut_cell_pressure_gradient_penalty", "1"),
-        ),
-        validation_scope="trend_diagnostic",
-    ),
-    "square-refined-metadata-cap10-t03-pressure": Probe(
-        name="square-refined-metadata-cap10-t03-pressure",
-        case_subdir="square_tank_tilt_settling",
-        generate_args=(
-            "--nx", "17",
-            "--ny", "17",
-            "--time-step", "0.0005",
-            "--time-steps", "600",
-            "--verification-profile", "transient_pressure",
-            "--use-cut-metadata-scale",
-            "--cut-cell-metadata-scale-cap", "10.0",
-        ),
-        result_name=LATEST_RESULT_NAME,
-        expect_solver_success=False,
-        expect_verifier_pass=None,
-        description=(
-            "Refined square-tank bounded metadata-scale cap diagnostic through "
-            "t=0.3. Current evidence expects this moderate local scale cap to "
-            "fail near t=0.2 while remaining fallback-free, bracketing the "
-            "cap range between the successful unit-cap pressure diagnostic and "
-            "the unbounded metadata-scale nonlinear failure."
-        ),
-        required_solver_xml_controls=(
-            ("Use_cut_metadata_scale", "true"),
-            ("Cut_cell_metadata_scale_cap", "10"),
-            ("Cut_cell_pressure_gradient_penalty", "1"),
-        ),
-        validation_scope="expected_failure_diagnostic",
-    ),
-    "square-refined-metadata-cap100-t03-pressure": Probe(
-        name="square-refined-metadata-cap100-t03-pressure",
-        case_subdir="square_tank_tilt_settling",
-        generate_args=(
-            "--nx", "17",
-            "--ny", "17",
-            "--time-step", "0.0005",
-            "--time-steps", "600",
-            "--verification-profile", "transient_pressure",
-            "--use-cut-metadata-scale",
-            "--cut-cell-metadata-scale-cap", "100.0",
-        ),
-        result_name=LATEST_RESULT_NAME,
-        expect_solver_success=False,
-        expect_verifier_pass=None,
-        description=(
-            "Refined square-tank bounded metadata-scale cap diagnostic through "
-            "t=0.3. Current evidence expects this stronger local scale cap to "
-            "fail near t=0.2 while remaining fallback-free, confirming that "
-            "raising the metadata-scale cap reintroduces the small-cut "
-            "nonlinear blocker before it closes the pressure-quality gate."
-        ),
-        required_solver_xml_controls=(
-            ("Use_cut_metadata_scale", "true"),
-            ("Cut_cell_metadata_scale_cap", "100"),
-            ("Cut_cell_pressure_gradient_penalty", "1"),
-        ),
-        validation_scope="expected_failure_diagnostic",
-    ),
     "square-refined-pressure-penalty0-t03-pressure": Probe(
         name="square-refined-pressure-penalty0-t03-pressure",
         case_subdir="square_tank_tilt_settling",
@@ -3083,7 +2880,6 @@ PROBES: dict[str, Probe] = {
             "quality blocker."
         ),
         required_solver_xml_controls=(
-            ("Use_cut_metadata_scale", "false"),
             ("Cut_cell_pressure_gradient_penalty", "0"),
         ),
         validation_scope="trend_diagnostic",
@@ -3110,7 +2906,6 @@ PROBES: dict[str, Probe] = {
             "without losing hydrostatic pressure recovery."
         ),
         required_solver_xml_controls=(
-            ("Use_cut_metadata_scale", "false"),
             ("Cut_cell_pressure_gradient_penalty", "0.1"),
         ),
         validation_scope="trend_diagnostic",
@@ -3136,7 +2931,6 @@ PROBES: dict[str, Probe] = {
             "free-surface pressure diagnostics."
         ),
         required_solver_xml_controls=(
-            ("Use_cut_metadata_scale", "false"),
             ("Cut_cell_pressure_gradient_penalty", "0.01"),
         ),
         validation_scope="trend_diagnostic",
@@ -3164,7 +2958,6 @@ PROBES: dict[str, Probe] = {
             "destroying zero-penalty run."
         ),
         required_solver_xml_controls=(
-            ("Use_cut_metadata_scale", "false"),
             ("Cut_cell_pressure_gradient_penalty", "0.001"),
         ),
         validation_scope="expected_failure_diagnostic",
@@ -4304,23 +4097,11 @@ def normalized_xml_token(text: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", "", text.strip().lower())
 
 
-def enabled_xml_bool(text: str | None) -> bool:
-    return normalized_xml_token(text) in {"1", "true", "on", "yes"}
-
-
 def direct_child_text(element: ET.Element, tag: str) -> str | None:
     for child in list(element):
         if strip_xml_namespace(child.tag) == tag:
             text = (child.text or "").strip()
             return text if text else None
-    return None
-
-
-def direct_child_text_any(element: ET.Element, tags: tuple[str, ...]) -> str | None:
-    for tag in tags:
-        value = direct_child_text(element, tag)
-        if value is not None:
-            return value
     return None
 
 
@@ -4427,24 +4208,7 @@ def collect_unfitted_free_surface_entries(xml_path: Path) -> tuple[list[dict[str
                 "level_set_field": direct_child_text(element, "Level_set_field_name"),
                 "domain_id": direct_child_text(element, "Generated_interface_domain_id"),
                 "active_domain": direct_child_text(element, "Active_domain"),
-                "active_domain_method": direct_child_text(element, "Active_domain_method"),
-                "velocity_extension_enabled": enabled_xml_bool(
-                    direct_child_text(element, "Enable_velocity_extension")
-                ),
                 "surface_tension": direct_child_text(element, "Surface_tension"),
-                "use_level_set_curvature": direct_child_text(
-                    element, "Use_level_set_curvature"
-                ),
-                "curvature": direct_child_text(element, "Curvature"),
-                "curvature_field": direct_child_text_any(
-                    element, FREE_SURFACE_CURVATURE_FIELD_TAGS
-                ),
-                "kinematic_enforcement": direct_child_text(
-                    element, "Kinematic_enforcement"
-                ),
-                "normal_kinematic_policy": direct_child_text(
-                    element, "Normal_kinematic_policy"
-                ),
                 "generated_interface_geometry": (
                     direct_child_text(element, "Generated_interface_geometry")
                     or "LinearCorner(default)"
@@ -4511,8 +4275,6 @@ def audit_case_inventory() -> dict[str, Any]:
         for entry in path_entries:
             entries.append(entry)
             active_token = normalized_xml_token(entry.get("active_domain"))
-            method_token = normalized_xml_token(entry.get("active_domain_method"))
-            kinematic_token = normalized_xml_token(entry.get("kinematic_enforcement"))
             if active_token not in ACTIVE_DOMAIN_ACCEPTED_TOKENS:
                 failures.append(
                     {
@@ -4522,43 +4284,6 @@ def audit_case_inventory() -> dict[str, Any]:
                         "active_domain": entry.get("active_domain"),
                     }
                 )
-            if method_token and method_token not in ACTIVE_DOMAIN_METHOD_ACCEPTED_TOKENS:
-                failures.append(
-                    {
-                        "path": entry["path"],
-                        "bc_name": entry.get("bc_name"),
-                        "reason": "unknown_active_domain_method",
-                        "active_domain_method": entry.get("active_domain_method"),
-                    }
-                )
-            if entry["velocity_extension_enabled"]:
-                if not entry.get("active_domain"):
-                    failures.append(
-                        {
-                            "path": entry["path"],
-                            "bc_name": entry.get("bc_name"),
-                            "reason": "velocity_extension_without_active_domain",
-                        }
-                    )
-                if method_token != "cutvolume":
-                    failures.append(
-                        {
-                            "path": entry["path"],
-                            "bc_name": entry.get("bc_name"),
-                            "reason": "velocity_extension_requires_cut_volume_method",
-                            "active_domain_method": entry.get("active_domain_method"),
-                        }
-                    )
-                if not entry.get("level_set_field") or not entry.get("domain_id"):
-                    failures.append(
-                        {
-                            "path": entry["path"],
-                            "bc_name": entry.get("bc_name"),
-                            "reason": "velocity_extension_missing_level_set_field_or_domain",
-                            "level_set_field": entry.get("level_set_field"),
-                            "domain_id": entry.get("domain_id"),
-                        }
-                    )
             unsupported_scope_controls = entry.get("unsupported_scope_controls") or []
             for control in unsupported_scope_controls:
                 failures.append(
@@ -4569,56 +4294,17 @@ def audit_case_inventory() -> dict[str, Any]:
                         "control": control,
                     }
                 )
-            if kinematic_token == "nitsche":
-                failures.append(
-                    {
-                        "path": entry["path"],
-                        "bc_name": entry.get("bc_name"),
-                        "reason": "unsupported_nitsche_kinematics_for_one_sided_unfitted_scope",
-                        "kinematic_enforcement": entry.get("kinematic_enforcement"),
-                    }
-                )
 
+            # Surface tension is always the SurfaceStress form (the supplied and
+            # level-set curvature routes were removed from the solver input).
             surface_tension = parse_float(entry.get("surface_tension") or "0")
             if surface_tension is not None and abs(surface_tension) > 0.0:
-                use_level_set_curvature = entry.get("use_level_set_curvature")
-                uses_raw_level_set_curvature = (
-                    use_level_set_curvature is None
-                    or enabled_xml_bool(use_level_set_curvature)
-                ) and not entry.get("curvature_field")
-                has_supplied_curvature = bool(
-                    entry.get("curvature") or entry.get("curvature_field")
-                )
-                if uses_raw_level_set_curvature:
-                    failures.append(
-                        {
-                            "path": entry["path"],
-                            "bc_name": entry.get("bc_name"),
-                            "reason": "nonzero_surface_tension_uses_raw_level_set_curvature",
-                            "surface_tension": entry.get("surface_tension"),
-                            "use_level_set_curvature": entry.get("use_level_set_curvature"),
-                            "curvature_field": entry.get("curvature_field"),
-                        }
-                    )
-                elif not has_supplied_curvature:
-                    failures.append(
-                        {
-                            "path": entry["path"],
-                            "bc_name": entry.get("bc_name"),
-                            "reason": "nonzero_surface_tension_without_supplied_or_projected_curvature",
-                            "surface_tension": entry.get("surface_tension"),
-                            "use_level_set_curvature": entry.get("use_level_set_curvature"),
-                        }
-                    )
                 warnings.append(
                     {
                         "path": entry["path"],
                         "bc_name": entry.get("bc_name"),
                         "reason": "nonzero_surface_tension_outside_zero_surface_tension_gate",
                         "surface_tension": entry.get("surface_tension"),
-                        "curvature": entry.get("curvature"),
-                        "curvature_field": entry.get("curvature_field"),
-                        "use_level_set_curvature": entry.get("use_level_set_curvature"),
                     }
                 )
 
@@ -4634,9 +4320,6 @@ def audit_case_inventory() -> dict[str, Any]:
                 }
             )
 
-    extension_entries = [
-        entry for entry in entries if entry["velocity_extension_enabled"]
-    ]
     nonzero_surface_tension_entries = [
         entry
         for entry in entries
@@ -4645,55 +4328,17 @@ def audit_case_inventory() -> dict[str, Any]:
     unsupported_scope_entries = [
         entry for entry in entries if entry.get("unsupported_scope_controls")
     ]
-    nitsche_kinematic_entries = [
-        entry
-        for entry in entries
-        if normalized_xml_token(entry.get("kinematic_enforcement")) == "nitsche"
-    ]
-    raw_curvature_surface_tension_entries = [
-        entry
-        for entry in nonzero_surface_tension_entries
-        if (
-            entry.get("use_level_set_curvature") is None
-            or enabled_xml_bool(entry.get("use_level_set_curvature"))
-        )
-        and not entry.get("curvature_field")
-    ]
-    supplied_or_projected_capillary_entries = [
-        entry
-        for entry in nonzero_surface_tension_entries
-        if not (
-            (
-                entry.get("use_level_set_curvature") is None
-                or enabled_xml_bool(entry.get("use_level_set_curvature"))
-            )
-            and not entry.get("curvature_field")
-        )
-        and bool(entry.get("curvature") or entry.get("curvature_field"))
-    ]
     return {
         "passed": not failures,
         "checked_solver_xml_count": len(solver_xml_paths),
         "unfitted_free_surface_entry_count": len(entries),
-        "velocity_extension_enabled_entry_count": len(extension_entries),
         "unsupported_scope_control_entry_count": len(unsupported_scope_entries),
-        "nitsche_kinematic_entry_count": len(nitsche_kinematic_entries),
         "nonzero_surface_tension_entry_count": len(nonzero_surface_tension_entries),
-        "raw_curvature_surface_tension_entry_count": len(
-            raw_curvature_surface_tension_entries
-        ),
-        "supplied_or_projected_capillary_entry_count": len(
-            supplied_or_projected_capillary_entries
-        ),
         "active_domain_literal_count": len(active_domain_literals),
         "failures": failures,
         "warnings": warnings,
         "entries": entries,
         "active_domain_literals": active_domain_literals,
-        "runtime_guard": (
-            "extension-enabled solver probes are additionally checked by "
-            "free_surface_guard_checks after cut-context assembly"
-        ),
     }
 
 
@@ -4792,8 +4437,7 @@ def solver_xml_qualification_summary(records: list[dict[str, Any]]) -> dict[str,
                 "Velocity_source",
                 "Velocity_field_name",
                 "Auto_register_velocity_field",
-                "Use_wet_extension_advection_velocity",
-                "Advection_velocity_from_field",
+                "Source_velocity_field_name",
                 "Constant_velocity",
             ),
         ),
@@ -4805,121 +4449,11 @@ def solver_xml_qualification_summary(records: list[dict[str, Any]]) -> dict[str,
                 "Implicit_cut_fallback_policy",
                 "Implicit_cut_max_subdivision_depth",
                 "Implicit_cut_root_tolerance",
-                "Generated_interface_quadrature_order",
+                "Cut_quadrature_order",
                 "Interface_quadrature_order",
                 "Volume_quadrature_order",
-                "Enable_velocity_extension",
-                "Use_cut_metadata_scale",
-                "Cut_cell_metadata_scale_cap",
                 "Cut_cell_pressure_gradient_penalty",
-                "Cut_cell_pressure_stabilization_policy",
             ),
-        ),
-    }
-
-
-def solver_xml_has_enabled_velocity_extension(records: list[dict[str, Any]]) -> bool:
-    return any(
-        record.get("tag") == "Enable_velocity_extension"
-        and str(record.get("value", "")).strip().lower() in {"1", "true", "on", "yes"}
-        for record in records
-    )
-
-
-def cut_side_for_active_side(active_side: str | None) -> str | None:
-    if active_side == "LevelSetNegative":
-        return "Negative"
-    if active_side == "LevelSetPositive":
-        return "Positive"
-    return None
-
-
-def opposite_cut_side(side: str | None) -> str | None:
-    if side == "Negative":
-        return "Positive"
-    if side == "Positive":
-        return "Negative"
-    return None
-
-
-def check_velocity_extension_cut_volume_guard(
-    solver_xml_controls: list[dict[str, Any]],
-    solver_metrics: dict[str, Any] | None,
-) -> dict[str, Any]:
-    extension_enabled = solver_xml_has_enabled_velocity_extension(solver_xml_controls)
-    if not extension_enabled:
-        return {
-            "passed": True,
-            "extension_enabled": False,
-            "status": "not_applicable",
-        }
-
-    if not solver_metrics or not solver_metrics.get("cut_context_count"):
-        return {
-            "passed": True,
-            "extension_enabled": True,
-            "status": "not_evaluated_no_cut_context",
-        }
-
-    context = (
-        solver_metrics.get("last_accepted_cut_context")
-        or solver_metrics.get("last_cut_context")
-        or {}
-    )
-    active_cut_side = cut_side_for_active_side(context.get("active_side"))
-    inactive_cut_side = opposite_cut_side(active_cut_side)
-    side_records = solver_metrics.get("last_cut_volume_assembly_by_side") or {}
-    inactive_record = side_records.get(inactive_cut_side) if inactive_cut_side else None
-    inactive_rules = (
-        inactive_record.get("rules")
-        if isinstance(inactive_record, dict)
-        else None
-    )
-    inactive_points = (
-        inactive_record.get("quadrature_points")
-        if isinstance(inactive_record, dict)
-        else None
-    )
-    missing_consumer_count = int(
-        solver_metrics.get("missing_cut_volume_consumer_diagnostic_count") or 0
-    )
-    no_retained_consumer_count = int(
-        solver_metrics.get("no_retained_cut_volume_consumer_diagnostic_count") or 0
-    )
-    retained_sides = context.get("retained_volume_sides")
-    retained_sides_ok = retained_sides == "active_and_inactive"
-    inactive_rules_ok = (
-        inactive_cut_side is not None
-        and isinstance(inactive_rules, int)
-        and inactive_rules > 0
-        and isinstance(inactive_points, int)
-        and inactive_points > 0
-    )
-    consumer_diagnostics_ok = (
-        missing_consumer_count == 0
-        and no_retained_consumer_count == 0
-    )
-    passed = retained_sides_ok and inactive_rules_ok and consumer_diagnostics_ok
-    return {
-        "passed": passed,
-        "extension_enabled": True,
-        "status": "passed" if passed else "failed",
-        "active_side": context.get("active_side"),
-        "active_cut_side": active_cut_side,
-        "inactive_cut_side": inactive_cut_side,
-        "retained_volume_sides": retained_sides,
-        "retained_sides_ok": retained_sides_ok,
-        "inactive_cut_volume_rules": inactive_rules,
-        "inactive_cut_volume_quadrature_points": inactive_points,
-        "inactive_cut_volume_rules_ok": inactive_rules_ok,
-        "missing_cut_volume_consumer_diagnostic_count": missing_consumer_count,
-        "no_retained_cut_volume_consumer_diagnostic_count": no_retained_consumer_count,
-        "consumer_diagnostics_ok": consumer_diagnostics_ok,
-        "last_missing_cut_volume_consumer_diagnostic": solver_metrics.get(
-            "last_missing_cut_volume_consumer_diagnostic"
-        ),
-        "last_no_retained_cut_volume_consumer_diagnostic": solver_metrics.get(
-            "last_no_retained_cut_volume_consumer_diagnostic"
         ),
     }
 
@@ -6283,10 +5817,13 @@ def run_probe(
     solver_metrics = parse_solver_log(log_path)
     time_series_collation = collate_solver_time_series(case_dir)
     solver_success = solver_status == 0 and not solver_timeout
-    free_surface_guard_checks = check_velocity_extension_cut_volume_guard(
-        solver_xml_controls,
-        solver_metrics,
-    )
+    # The cut-volume guard of the same-field velocity extension has nothing
+    # to check: that extension was removed from the solver input.
+    free_surface_guard_checks = {
+        "passed": True,
+        "extension_enabled": False,
+        "status": "not_applicable",
+    }
     summary["free_surface_guard_checks"] = free_surface_guard_checks
     summary["solver"] = {
         "status": solver_status,

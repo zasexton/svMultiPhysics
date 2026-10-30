@@ -507,8 +507,6 @@ public:
                 active_side_ == ActiveSide::Negative
                     ? channel::FreeSurfaceActiveDomain::LevelSetNegative
                     : channel::FreeSurfaceActiveDomain::LevelSetPositive,
-            .active_domain_method =
-                channel::FreeSurfaceActiveDomainMethod::CutVolume,
             .external_pressure = 0.0,
             .surface_tension = 0.0,
             .cut_cell_stabilization = {.enabled = false},
@@ -578,7 +576,6 @@ public:
       <Active_domain>)xml") +
         active_side_token +
         R"xml(</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
       <Small_cut_aggregation>true</Small_cut_aggregation>
     </Add_BC>
   </Add_equation>

@@ -64,7 +64,6 @@ def test_generated_case_uses_mesh_nitsche_and_sliding_walls(tmp_path):
         assert bcs["wall_bottom"].find("Effective_direction").text == "0 1"
     surface = {bc.get("name"): bc for bc in fluid.iter("Add_BC")}["free_surface"]
     assert surface.find("Implementation").text == "FittedALE"
-    assert surface.find("Kinematic_enforcement").text == "MeshNitsche"
     assert float(surface.find("Kinematic_nitsche_gamma").text) == 10.0
     assert surface.find("Tangential_mesh_policy").text == "Free"
     assert float(surface.find("Surface_tension").text) == 0.0

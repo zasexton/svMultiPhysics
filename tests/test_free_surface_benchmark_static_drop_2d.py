@@ -72,7 +72,6 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     root = ET.parse(tmp_path / "c/solver.xml").getroot()
     text = (tmp_path / "c/solver.xml").read_text()
     assert "<Geometry_tangent_policy>RefreshedFrozenQuadrature" in text
-    assert "<Surface_tension_form>SurfaceStress" in text
     assert "Curvature_projection" not in text and "Curvature_field" not in text
     assert root.find("GeneralSimulationParameters/Number_of_time_steps").text == str(case["steps"])
     # D13: one fixed physical step at every level, 0.02 at La = 12 and 0.01 at La = 120.
@@ -94,7 +93,7 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     for wall in gen.WALLS:
         assert (tmp_path / f"c/mesh/mesh-surfaces/{wall}.vtp").is_file()
     stress = gen.solver_xml("surface_stress", gen.time_schedule(8, 12.0, 5.0, 100), 10, 1)
-    assert "SurfaceStress" in stress and "Curvature_field" not in stress
+    assert "Curvature_field" not in stress
     pde = gen.solver_xml("surface_stress", gen.time_schedule(8, 12.0, 5.0, 100), 10, 1,
                          "pde_harmonic_monolithic")
     assert "<Advection_velocity_extension_method>pde_harmonic<" in pde

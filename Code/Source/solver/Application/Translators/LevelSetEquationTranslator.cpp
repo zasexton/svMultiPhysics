@@ -1149,11 +1149,11 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
                                 observations,
                             std::string_view source_layer)
 {
-  if (const auto value = get_defined_string(params, {"Operator_tag", "OperatorTag"})) {
+  if (const auto value = get_defined_string(params, {"Operator_tag"})) {
     options.operator_tag = *value;
   }
   if (const auto value = get_defined_bool(params, {"Coupled"})) {
-    if (*value && !get_defined_string(params, {"Operator_tag", "OperatorTag"})) {
+    if (*value && !get_defined_string(params, {"Operator_tag"})) {
       options.operator_tag = "equations";
     }
   }
@@ -1358,43 +1358,6 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
           "SUPG_transient_scale")) {
     options.supg.transient_scale = *value;
   }
-  // The SUPG discontinuity capturing of the level-set transport was retired
-  // (decision D47).  Decks may still state it as disabled.
-  if (get_defined_bool(params, {"Enable_discontinuity_capturing"})
-          .value_or(false) ||
-      get_defined_string(params,
-                         {"Discontinuity_capturing_scale",
-                          "Discontinuity_capturing_gradient_epsilon",
-                          "Discontinuity_capturing_max_courant"})
-          .has_value()) {
-    throw std::invalid_argument(
-        "[svMultiPhysics::Application] Level-set discontinuity capturing "
-        "(Enable_discontinuity_capturing and the Discontinuity_capturing_* "
-        "settings) was retired (decision D47); no accepted benchmark used "
-        "it.  Remove these keys or set Enable_discontinuity_capturing=false.");
-  }
-  // The bound-preserving limiter of the level-set transport was retired
-  // (decision D51).  Decks may still state it as disabled.
-  if (get_defined_bool(params, {"Enable_bound_preserving_limiter"})
-          .value_or(false) ||
-      get_defined_string(
-          params,
-          {"Bound_preserving_bound_tolerance",
-           "Bound_preserving_sign_tolerance",
-           "Bound_preserving_maximum_courant",
-           "Bound_preserving_enforce_courant_limit",
-           "Bound_preserving_enforce_impermeable_boundaries",
-           "Bound_preserving_impermeable_normal_velocity_tolerance"})
-          .has_value()) {
-    throw std::invalid_argument(
-        "[svMultiPhysics::Application] The level-set bound-preserving "
-        "limiter (Enable_bound_preserving_limiter and the "
-        "Bound_preserving_* settings) was retired (decision D51); with it "
-        "on, the SPHERIC reruns failed at their first step, while the runs "
-        "without it and the sign-definite patch bounds were clean.  Remove "
-        "these keys or set Enable_bound_preserving_limiter=false.");
-  }
-
   if (const auto value = get_defined_bool(
           params,
           {"Enable_interface_kinematic"})) {
@@ -1414,50 +1377,6 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
     options.interface_kinematic.weight_scale = *value;
   }
 
-  // Projection reinitialization was retired (decision D47).  Decks may
-  // still state it as disabled.
-  if (get_defined_bool(params, {"Enable_reinitialization"}).value_or(false) ||
-      get_defined_string(
-          params,
-          {"Reinitialization_method",
-           "Reinitialization_cadence_steps",
-           "Reinitialization_max_iterations",
-           "Reinitialization_pseudo_time_step_scale",
-           "Reinitialization_interface_band_width",
-           "Reinitialization_signed_distance_tolerance",
-           "Reinitialization_max_zero_set_displacement"})
-          .has_value()) {
-    throw std::invalid_argument(
-        "[svMultiPhysics::Application] Level-set projection "
-        "reinitialization (Enable_reinitialization and the "
-        "Reinitialization_* settings) was retired (decision D47); no "
-        "accepted benchmark used it, and the interface-preserving "
-        "redistancing is the accepted-step redistancing.  Remove these keys "
-        "or set Enable_reinitialization=false.");
-  }
-
-  // The global level-set volume correction was retired (decision D47).
-  // Decks may still state it as disabled.
-  if (get_defined_bool(params, {"Enable_volume_correction"}).value_or(false) ||
-      get_defined_string(
-          params,
-          {"Volume_correction_cadence_steps",
-           "Volume_correction_use_initial_volume",
-           "Volume_correction_target_negative_volume",
-           "Volume_correction_tolerance",
-           "Volume_correction_max_iterations",
-           "Volume_correction_minimum_relative_error",
-           "Volume_correction_maximum_interface_displacement_fraction",
-           "Volume_correction_maximum_cumulative_interface_displacement_fraction"})
-          .has_value()) {
-    throw std::invalid_argument(
-        "[svMultiPhysics::Application] The global level-set volume "
-        "correction (Enable_volume_correction and the Volume_correction_* "
-        "settings) was retired (decision D47); no accepted benchmark used "
-        "it, and the kinematic reconciliation keeps the liquid volume "
-        "consistent with the transport velocity.  Remove these keys or set "
-        "Enable_volume_correction=false.");
-  }
   if (const auto value = get_defined_bool(
           params,
           {"Enable_kinematic_reconciliation"})) {
@@ -1472,33 +1391,6 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
           params,
           {"Enable_interface_preserving_redistancing"})) {
     options.interface_preserving_redistancing.enabled = *value;
-  }
-}
-
-// The projected curvature field of the retired level-set curvature
-// projection (decision D48): a field name at the equation or domain level
-// fails at translation.
-void reject_retired_curvature_field(
-    const svmp::Physics::EquationModuleInput& input)
-{
-  const auto reject = [](const svmp::Physics::ParameterMap& params) {
-    const auto field =
-        get_defined_string(params, level_set_aliases::curvature_field);
-    if (field.has_value() && !trim_copy(*field).empty()) {
-      throw std::invalid_argument(
-          "[svMultiPhysics::Application] Curvature_field_name '" +
-          trim_copy(*field) +
-          "': The level-set curvature projection (Enable_curvature_projection, "
-          "Curvature_field_name and the Curvature_projection_* settings) was "
-          "retired (decision D48; its least-squares recovery modes by decision "
-          "D47): SurfaceStress, the only capillary route, reads no curvature "
-          "field.  Remove these keys.");
-    }
-  };
-  reject(input.equation_params);
-  reject(input.default_domain.params);
-  for (const auto& domain : input.domains) {
-    reject(domain.params);
   }
 }
 
@@ -1670,9 +1562,6 @@ translate_level_set_transport_input(
 
   parsing::LevelSetConfigurationReader wet_reader(
       input.equation_params, parsing::LevelSetInputPolicy::Installation);
-  const auto wet_enabled = wet_reader.boolean(
-      level_set_aliases::wet_extension_enable,
-      "use_wet_extension_advection_velocity");
   const auto extension_method = wet_reader.string(
       level_set_aliases::advection_velocity_extension_method,
       "advection_velocity_extension_method");
@@ -1681,20 +1570,14 @@ translate_level_set_transport_input(
       application::core::pdeVelocityExtensionOperatorFromToken(
           extension_method->text)
           .has_value();
-  // The algebraic wall-compatible wet extension was retired (decisions D47
-  // and D55): the velocity extension needs an explicit PDE method.  Decks may
-  // still state Use_wet_extension_advection_velocity and
-  // Write_velocity_extension_maps as false.
-  if (wet_enabled.value_or(false) ||
-      get_defined_bool(input.equation_params,
-                       {"Write_velocity_extension_maps"})
-          .value_or(false) ||
-      ((extension_method.has_value() ||
-        wet_reader
-            .selected(level_set_aliases::wet_extension_source,
-                      "advection_velocity_from_field")
-            .has_value()) &&
-       !pde_velocity_extension)) {
+  // The velocity extension needs an explicit PDE method (the algebraic
+  // wall-compatible wet extension was retired, decisions D47 and D55).
+  if ((extension_method.has_value() ||
+       wet_reader
+           .selected(level_set_aliases::wet_extension_source,
+                     "advection_velocity_from_field")
+           .has_value()) &&
+      !pde_velocity_extension) {
     throw std::runtime_error(
         std::string(application::core::kRetiredWetExtensionMessage));
   }
@@ -1771,7 +1654,6 @@ translate_level_set_transport_input(
     append_installation_derived(input_observations, "velocity_space_present",
                                 "derived:material_interface_phase_pair");
   }
-  reject_retired_curvature_field(input);
   return application::core::ResolvedLevelSetEquationConfiguration{
       .source_mesh = input.mesh,
       .source_mesh_name = input.mesh_name,

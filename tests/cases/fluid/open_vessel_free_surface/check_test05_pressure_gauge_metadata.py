@@ -153,9 +153,6 @@ def check_case(case_dir: Path) -> dict[str, object]:
         "monolithic",
         solver_path,
     )
-    _require_text(level_set, "Enable_reinitialization", "false", solver_path)
-    # The global volume correction was retired (decision D47).
-    _require_text(level_set, "Enable_volume_correction", "false", solver_path)
 
     fluid = next(
         (
@@ -214,7 +211,6 @@ def check_case(case_dir: Path) -> dict[str, object]:
         raise ValueError(f"{solver_path} fluid equation is missing the free-surface BC")
     _require_text(free_surface, "Implementation", "UnfittedLevelSet", solver_path)
     _require_text(free_surface, "Enable_cut_cell_stabilization", "true", solver_path)
-    _require_text(free_surface, "Use_cut_metadata_scale", "false", solver_path)
     return {
         "case": case_dir.name,
         "node_id": csv_node,

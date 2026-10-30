@@ -709,7 +709,6 @@ def write_solver_xml(
     wall_effective_directions: dict[str, str] | None = None,
     active_domain: str | None = None,
     enable_cut_cell_stabilization: bool = True,
-    use_cut_metadata_scale: bool = False,
     use_blockschur_solver: bool = False,
     use_direct_fluid_solver: bool = False,
     include_pressure_constraints: bool = True,
@@ -783,11 +782,7 @@ def write_solver_xml(
     active_domain_block = ""
     if active_domain is not None:
         active_domain_block = f"""
-    <Active_domain>{active_domain}</Active_domain>
-    <Active_domain_method>CutVolume</Active_domain_method>
-    <Enable_velocity_extension>true</Enable_velocity_extension>
-    <Velocity_extension_diffusivity>1.0</Velocity_extension_diffusivity>"""
-    cut_metadata_scale_text = "true" if use_cut_metadata_scale else "false"
+    <Active_domain>{active_domain}</Active_domain>"""
     cut_cell_stabilization_text = "true" if enable_cut_cell_stabilization else "false"
     use_relaxed_unfitted_controls = use_blockschur_solver or use_direct_fluid_solver
     unfitted_fluid_solver_type = (
@@ -939,8 +934,6 @@ def write_solver_xml(
     <Implementation>FittedALE</Implementation>
     <External_pressure>0.0</External_pressure>
     <Surface_tension>{SURFACE_TENSION}</Surface_tension>
-    <Kinematic_enforcement>Nitsche</Kinematic_enforcement>
-    <Normal_kinematic_policy>MatchFluidNormalVelocity</Normal_kinematic_policy>
     <Tangential_mesh_policy>SmoothingOnly</Tangential_mesh_policy>
     <Kinematic_nitsche_gamma>20.0</Kinematic_nitsche_gamma>
   </Add_BC>
@@ -973,10 +966,6 @@ def write_solver_xml(
   <Enable_SUPG>true</Enable_SUPG>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
   <SUPG_transient_scale>2.0</SUPG_transient_scale>
-  <Enable_discontinuity_capturing>false</Enable_discontinuity_capturing>
-  <Enable_bound_preserving_limiter>false</Enable_bound_preserving_limiter>
-  <Enable_reinitialization>false</Enable_reinitialization>
-  <Enable_volume_correction>false</Enable_volume_correction>
 
   <Output type="Spatial">
     <Level_set>true</Level_set>
@@ -1048,7 +1037,6 @@ def write_solver_xml(
     <External_pressure>0.0</External_pressure>
     <Surface_tension>{UNFITTED_SURFACE_TENSION}</Surface_tension>
     <Enable_cut_cell_stabilization>{cut_cell_stabilization_text}</Enable_cut_cell_stabilization>
-    <Use_cut_metadata_scale>{cut_metadata_scale_text}</Use_cut_metadata_scale>
     <Small_cut_aggregation>true</Small_cut_aggregation>
     <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
   </Add_BC>
@@ -1153,7 +1141,6 @@ def write_case(
     wall_effective_directions: dict[str, str] | None = None,
     active_domain: str | None = None,
     enable_cut_cell_stabilization: bool = True,
-    use_cut_metadata_scale: bool = False,
     use_blockschur_solver: bool = False,
     use_direct_fluid_solver: bool = False,
     include_pressure_constraints: bool = True,
@@ -1223,7 +1210,6 @@ def write_case(
         include_obstacle_bc=bool(obstacles),
         active_domain=active_domain,
         enable_cut_cell_stabilization=enable_cut_cell_stabilization,
-        use_cut_metadata_scale=use_cut_metadata_scale,
         use_blockschur_solver=use_blockschur_solver,
         use_direct_fluid_solver=use_direct_fluid_solver,
         include_pressure_constraints=include_pressure_constraints,
@@ -1565,7 +1551,6 @@ def generate_spheric_test05(*, allow_overlapping_face_files: bool = False) -> No
             },
             active_domain="LevelSetNegative",
             enable_cut_cell_stabilization=True,
-            use_cut_metadata_scale=False,
             use_direct_fluid_solver=True,
             include_pressure_constraints=False,
             hydrostatic_pressure_field_name="Pressure",
@@ -1684,7 +1669,6 @@ def generate_spheric_test02(*, allow_overlapping_face_files: bool = False) -> No
         obstacles=[obstacle],
         active_domain="LevelSetNegative",
         enable_cut_cell_stabilization=True,
-        use_cut_metadata_scale=False,
         use_direct_fluid_solver=True,
         include_pressure_constraints=False,
         hydrostatic_pressure_field_name="Pressure",

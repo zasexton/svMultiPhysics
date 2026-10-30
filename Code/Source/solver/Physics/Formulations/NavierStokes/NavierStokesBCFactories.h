@@ -1068,6 +1068,9 @@ inline void applyFreeSurfaceContactLineConstraints(
     const bool has_dynamic_stress =
         !FE::forms::bc::isZeroConstantScalarValue(bc.external_pressure) ||
         !FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension);
+    // active_domain_method, surface_tension_form and the pressure
+    // stabilization policy are no longer options; their fields print the
+    // fixed values so that the record keeps its format.
     return post::navierStokesLog("unfitted free-surface boundary mode")
         .diagnostic("unfitted_free_surface_boundary_mode")
         .integer("marker", bc.interface_marker)
@@ -1077,17 +1080,16 @@ inline void applyFreeSurfaceContactLineConstraints(
               freeSurfaceGeneratedInterfaceGeometryName(bc.generated_interface_geometry))
         .text("geometry_tangent_policy", freeSurfaceGeometryTangentPolicyName(bc.geometry_tangent_policy))
         .text("active_domain", activeDomainName(bc.active_domain))
-        .text("active_domain_method", activeDomainMethodName(bc.active_domain_method))
+        .text("active_domain_method", "CutVolume")
         .text("dynamic_stress", has_dynamic_stress ? "enabled" : "natural_zero")
-        .text("surface_tension_form", surfaceTensionFormName(bc))
+        .text("surface_tension_form", "SurfaceStress")
         .text("curvature_policy", freeSurfaceCurvaturePolicyName(bc))
         .text("curvature_tangent_policy", freeSurfaceCurvatureTangentPolicyName(bc))
         .text("kinematic_enforcement", kinematicEnforcementName(bc.kinematic_enforcement))
         .text("cut_cell_stabilization", bc.cut_cell_stabilization.enabled ? "enabled" : "disabled")
-        .text("pressure_stabilization_policy",
-              pressureStabilizationPolicyName(bc.cut_cell_stabilization.pressure_policy))
+        .text("pressure_stabilization_policy", "Enabled")
         .text("pressure_stabilization", pressureStabilizationActive(bc) ? "active" : "inactive")
-        .text("pressure_stabilization_disabled_reason", pressureStabilizationDisabledReason(bc));
+        .text("pressure_stabilization_disabled_reason", "none");
 }
 
 /// Natural mode: no interface term (sigma n = 0).
@@ -1131,7 +1133,7 @@ inline void applyFreeSurfaceContactLineConstraints(
                            .integer("marker", freeSurfaceMarker(bc))
                            .text("surface_tension_semi_implicit",
                                  freeSurfaceSurfaceTensionSemiImplicitName(bc.surface_tension_semi_implicit))
-                           .text("surface_tension_form", surfaceTensionFormName(bc))
+                           .text("surface_tension_form", "SurfaceStress")
                            .text("form", "gamma_dt_eff_grad_gamma_du_dot_n_dot_grad_gamma_v_dot_n")
                            .text("reference_velocity_field", kFreeSurfaceSemiImplicitReferenceVelocityFieldName)
                            .text("reference_refresh", "every_generated_state_refresh")
@@ -1157,7 +1159,7 @@ inline void applyFreeSurfaceContactLineConstraints(
         logs.push_back(post::navierStokesLog("installed prescribed-angle wall-energy momentum term")
                            .integer("interface_marker", bc.interface_marker)
                            .integer("contact_marker", contact_marker)
-                           .text("surface_tension_form", surfaceTensionFormName(bc))
+                           .text("surface_tension_form", "SurfaceStress")
                            .text("contact_force_discretization", kContactForce)
                            .diagnostic("navier_stokes_prescribed_contact_wall_energy"));
         if (contactLineHasNavierSlip(contact_line)) {
@@ -1184,7 +1186,7 @@ inline void applyFreeSurfaceContactLineConstraints(
                        .integer("wall_marker", contactLineWallBoundaryMarker(contact_line))
                        .text("convention", "theta_through_liquid_n_outward_liquid_nw_fluid_to_solid")
                        .text("law", "xi_Vcl_equals_gamma_cos_thetae_minus_cos_thetad")
-                       .text("surface_tension_form", surfaceTensionFormName(bc))
+                       .text("surface_tension_form", "SurfaceStress")
                        .text("contact_force_discretization", kContactForce)
                        .integer("active_wall_marker", active_wall_marker)
                        .text("wetted_wall_domain", "sharp_generated_active_boundary")
@@ -1220,15 +1222,12 @@ inline void applyFreeSurfaceContactLineConstraints(
         return max_order > 1 ? "1,2" : "1";
     };
     const bool pressure_stabilization_enabled = pressureStabilizationActive(bc);
-    const bool pressure_stabilization_incremental =
-        pressure_stabilization_enabled && cut.pressure_policy == FreeSurfacePressureStabilizationPolicy::Incremental;
     const int pressure_derivative_order =
         pressure_stabilization_enabled
-            ? (pressure_stabilization_incremental ? 1 : (pressure_polynomial_order > 1 ? supported_derivative_order : 1))
+            ? (pressure_polynomial_order > 1 ? supported_derivative_order : 1)
             : 0;
     const int max_derivative_order = pressure_derivative_order;
     const bool has_unsupported_derivative_order = pressure_stabilization_enabled &&
-                                                  !pressure_stabilization_incremental &&
                                                   pressure_polynomial_order > supported_derivative_order;
     constexpr FE::Real kCutPenaltyTransientCalibration{0.01};
     const auto interface_side =
@@ -1240,6 +1239,9 @@ inline void applyFreeSurfaceContactLineConstraints(
                                                           : cutVolumeSideName(activeDomainSide(bc.active_domain));
 
     std::vector<FE::LogRecord> logs;
+    // The active-domain method, the cut-metadata scale and the pressure
+    // stabilization policy are no longer options; their fields print the
+    // fixed values so that the record keeps its format.
     auto log = post::navierStokesLog("cut-cell stabilization");
     log.diagnostic("cut_cell_stabilization")
         .integer("marker", bc.interface_marker)
@@ -1247,22 +1249,16 @@ inline void applyFreeSurfaceContactLineConstraints(
         .text("interface_side", interface_side)
         .text("active_domain", activeDomainName(bc.active_domain))
         .text("active_domain_side", active_domain_side)
-        .text("active_domain_method", activeDomainMethodName(bc.active_domain_method))
+        .text("active_domain_method", "CutVolume")
         .text("generated_interface_geometry",
               freeSurfaceGeneratedInterfaceGeometryName(bc.generated_interface_geometry))
         .text("geometry_tangent_policy", freeSurfaceGeometryTangentPolicyName(bc.geometry_tangent_policy))
-        .text("use_cut_metadata_scale", cut.use_cut_metadata_scale ? "true" : "false");
-    if (cut.cut_metadata_scale_cap.has_value()) {
-        log.real("cut_metadata_scale_cap", *cut.cut_metadata_scale_cap);
-    } else {
-        log.text("cut_metadata_scale_cap", "unbounded");
-    }
-    log.text("pressure_stabilization_policy", pressureStabilizationPolicyName(cut.pressure_policy))
+        .text("use_cut_metadata_scale", "false");
+    log.text("cut_metadata_scale_cap", "unbounded");
+    log.text("pressure_stabilization_policy", "Enabled")
         .text("pressure_stabilization", pressure_stabilization_enabled ? "enabled" : "disabled")
-        .text("pressure_stabilization_form",
-              pressure_stabilization_enabled ? (pressure_stabilization_incremental ? "incremental" : "absolute")
-                                             : "disabled")
-        .text("pressure_disabled_reason", pressureStabilizationDisabledReason(bc))
+        .text("pressure_stabilization_form", pressure_stabilization_enabled ? "absolute" : "disabled")
+        .text("pressure_disabled_reason", "none")
         .text("facet_scope", "cut-adjacent")
         .integer("velocity_polynomial_order", velocity_polynomial_order)
         .integer("pressure_polynomial_order", pressure_polynomial_order)
@@ -1511,12 +1507,7 @@ inline void addFittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem& 
     if (!pressureStabilizationActive(b)) {
         return {};
     }
-    const bool incremental = cut.pressure_policy == FreeSurfacePressureStabilizationPolicy::Incremental;
-    const auto pp = incremental ? FormExpr::effectiveTimeStep() * dt(t.p) : t.p;
-    auto s = cut.use_cut_metadata_scale ? cutStabilizationScale() : FormExpr::constant(1.0);
-    if (cut.use_cut_metadata_scale && cut.cut_metadata_scale_cap.has_value()) {
-        s = min(s, FormExpr::constant(*cut.cut_metadata_scale_cap));
-    }
+    const auto& pp = t.p;
     const auto h = avg(hNormal());
     const auto h3 = h * h * h;
     const auto mu_gp = t.mu + FormExpr::constant(o.density) * h * h / FormExpr::effectiveTimeStep();
@@ -1525,10 +1516,10 @@ inline void addFittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem& 
     const auto F = b.active_domain == FreeSurfaceActiveDomain::None
                        ? FacetDomain::cutAdjacent(b.interface_marker)
                        : FacetDomain::cutAdjacent(b.interface_marker, activeDomainSide(b.active_domain));
-    auto J = (s * gamma_p * c * h3 / (mu_gp + FormExpr::constant(o.stabilization_epsilon)) *
+    auto J = (gamma_p * c * h3 / (mu_gp + FormExpr::constant(o.stabilization_epsilon)) *
               inner(cutAdjacentFacetGradientJump(pp), cutAdjacentFacetGradientJump(t.q))).dS(F);
-    if (!incremental && pressure_order > 1) {
-        J = J + (s * gamma_p * c * (h3 * h * h) / (mu_gp + FormExpr::constant(o.stabilization_epsilon)) *
+    if (pressure_order > 1) {
+        J = J + (gamma_p * c * (h3 * h * h) / (mu_gp + FormExpr::constant(o.stabilization_epsilon)) *
                  cutAdjacentFacetSecondNormalDerivativeJump(pp) *
                  cutAdjacentFacetSecondNormalDerivativeJump(t.q)).dS(F);
     }

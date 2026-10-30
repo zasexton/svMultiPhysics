@@ -641,7 +641,7 @@ TEST(LevelSetEquationTranslator,
   wet_input.equation_params.erase("Constant_velocity");
   wet_input.equation_params["Velocity_source"] =
       svmp::Physics::ParameterValue{true, "prescribed_data"};
-  wet_input.equation_params["Advection_velocity_from_field"] =
+  wet_input.equation_params["Source_velocity_field_name"] =
       svmp::Physics::ParameterValue{true, "physical_velocity"};
   wet_input.equation_params["Advection_velocity_extension_method"] =
       svmp::Physics::ParameterValue{true, "pde_harmonic"};
@@ -856,34 +856,6 @@ TEST(LevelSetEquationTranslator,
 }
 
 TEST(LevelSetEquationTranslator,
-     MaintenanceCompatibilityInstallationRejectsRetiredReinitializationBeforeBoundary)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  auto mesh = makeRegistryTriangleMesh();
-  auto input = makeMaintenanceCompatibilityInput(mesh);
-  input.equation_params["Reinitialization_method"] =
-      svmp::Physics::ParameterValue{true, "FastMarching"};
-  svmp::Physics::BoundaryConditionInput inflow{};
-  inflow.name = "inlet";
-  inflow.boundary_marker = 3;
-  inflow.params["Type"] = svmp::Physics::ParameterValue{true, "LevelSetInflow"};
-  inflow.params["Value"] = svmp::Physics::ParameterValue{true, "invalid"};
-  input.boundary_conditions.push_back(std::move(inflow));
-
-  // The retired projection reinitialization (decision D47) is rejected
-  // while the equation parameters are read, before the boundaries.
-  const auto message =
-      maintenanceCompatibilityExceptionMessage<std::invalid_argument>([&] {
-        (void)application::translators::level_set::resolveConfiguration(input);
-      });
-  EXPECT_NE(message.find("retired (decision D47)"), std::string::npos)
-      << message;
-#endif
-}
-
-TEST(LevelSetEquationTranslator,
      MaintenanceCompatibilityInstallationPromotesPdeExtensionAfterValidation)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
@@ -896,7 +868,7 @@ TEST(LevelSetEquationTranslator,
       svmp::Physics::ParameterValue{true, "extended_velocity"};
   input.equation_params["Velocity_source"] =
       svmp::Physics::ParameterValue{true, "prescribed_data"};
-  input.equation_params["Advection_velocity_from_field"] =
+  input.equation_params["Source_velocity_field_name"] =
       svmp::Physics::ParameterValue{true, "physical_velocity"};
   input.equation_params["Advection_velocity_extension_method"] =
       svmp::Physics::ParameterValue{true, "pde_harmonic"};
@@ -1377,129 +1349,19 @@ TEST(LevelSetEquationTranslator,
 #endif
 }
 
-TEST(LevelSetEquationTranslator, RejectsRetiredReinitializationSettings)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  // Decision D47 retired the projection reinitialization.  The disabled
-  // switch is accepted; enabling it or naming one of its settings fails.
-  const std::vector<std::pair<std::string, std::string>> cases{
-      {"Enable_reinitialization", "false"},
-      {"Enable_reinitialization", "true"},
-      {"Reinitialization_method", "HamiltonJacobiPDE"},
-      {"Reinitialization_method", "FastMarching"},
-      {"Reinitialization_method", "projection"},
-      {"Reinitialization_cadence_steps", "4"},
-      {"Reinitialization_max_iterations", "8"},
-      {"Reinitialization_pseudo_time_step_scale", "0.125"},
-      {"Reinitialization_interface_band_width", "2.75"},
-      {"Reinitialization_signed_distance_tolerance", "1.0e-4"},
-      {"Reinitialization_max_zero_set_displacement", "2.0e-8"},
-  };
-  for (const auto& [key, value] : cases) {
-    auto mesh = makeRegistryQuadMesh();
-    svmp::Physics::EquationModuleInput input{};
-    input.equation_type = "level_set";
-    input.mesh_name = "quad";
-    input.mesh = mesh->local_mesh_ptr();
-    input.equation_params["Level_set_field_name"] =
-        svmp::Physics::ParameterValue{true, "phi"};
-    input.equation_params["Velocity_field_name"] =
-        svmp::Physics::ParameterValue{true, "advecting_velocity"};
-    input.equation_params["Velocity_source"] =
-        svmp::Physics::ParameterValue{true, "prescribed_data"};
-    input.equation_params[key] = svmp::Physics::ParameterValue{true, value};
-
-    svmp::FE::systems::FESystem system(mesh);
-    if (value == "false") {
-      EXPECT_TRUE(
-          application::translators::level_set::createModule(input, system))
-          << key;
-      continue;
-    }
-    try {
-      (void)application::translators::level_set::createModule(input, system);
-      ADD_FAILURE() << key << '=' << value << " was accepted";
-    } catch (const std::exception& error) {
-      EXPECT_NE(std::string(error.what()).find("retired (decision D47)"),
-                std::string::npos)
-          << key << '=' << value << ": " << error.what();
-    }
-  }
-#endif
-}
-
-TEST(LevelSetEquationTranslator, RejectsRetiredBoundPreservingLimiterSettings)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  // Decision D51 retired the bound-preserving limiter.  The disabled switch
-  // is accepted; enabling it or naming one of its settings fails.
-  const std::vector<std::pair<std::string, std::string>> cases{
-      {"Enable_bound_preserving_limiter", "false"},
-      {"Enable_bound_preserving_limiter", "true"},
-      {"Bound_preserving_bound_tolerance", "1.0e-6"},
-      {"Bound_preserving_sign_tolerance", "1.0e-12"},
-      {"Bound_preserving_maximum_courant", "1.0"},
-      {"Bound_preserving_enforce_courant_limit", "true"},
-      {"Bound_preserving_enforce_impermeable_boundaries", "false"},
-      {"Bound_preserving_impermeable_normal_velocity_tolerance", "1.0e-10"},
-  };
-  for (const auto& [key, value] : cases) {
-    auto mesh = makeRegistryQuadMesh();
-    svmp::Physics::EquationModuleInput input{};
-    input.equation_type = "level_set";
-    input.mesh_name = "quad";
-    input.mesh = mesh->local_mesh_ptr();
-    input.equation_params["Level_set_field_name"] =
-        svmp::Physics::ParameterValue{true, "phi"};
-    input.equation_params["Velocity_field_name"] =
-        svmp::Physics::ParameterValue{true, "advecting_velocity"};
-    input.equation_params["Velocity_source"] =
-        svmp::Physics::ParameterValue{true, "prescribed_data"};
-    input.equation_params[key] = svmp::Physics::ParameterValue{true, value};
-
-    svmp::FE::systems::FESystem system(mesh);
-    if (key == "Enable_bound_preserving_limiter" && value == "false") {
-      EXPECT_TRUE(
-          application::translators::level_set::createModule(input, system))
-          << key;
-      continue;
-    }
-    try {
-      (void)application::translators::level_set::createModule(input, system);
-      ADD_FAILURE() << key << '=' << value << " was accepted";
-    } catch (const std::exception& error) {
-      EXPECT_NE(std::string(error.what()).find("retired (decision D51)"),
-                std::string::npos)
-          << key << '=' << value << ": " << error.what();
-    }
-  }
-#endif
-}
-
-
 TEST(LevelSetEquationTranslator, RejectsRetiredWetExtensionSettings)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
 #else
   // Decisions D47 and D55 retired the algebraic wall-compatible wet
-  // extension: the extension needs an explicit PDE method.  The disabled
-  // switch and map output are accepted; enabling either, naming a retired
-  // method, or naming a source velocity field without a method fails.
+  // extension: the extension needs an explicit PDE method.  Naming a retired
+  // method, or naming a source velocity field without a method, fails.
   const std::vector<std::pair<std::string, std::string>> cases{
-      {"Use_wet_extension_advection_velocity", "false"},
-      {"Write_velocity_extension_maps", "false"},
-      {"Use_wet_extension_advection_velocity", "true"},
-      {"Write_velocity_extension_maps", "true"},
       {"Advection_velocity_extension_method", "wall_compatible_normal"},
       {"Advection_velocity_extension_method", "nearest_interface_point"},
-      {"Wet_extension_advection_velocity_method", "nearest_active_vertex"},
+      {"Advection_velocity_extension_method", "nearest_active_vertex"},
       {"Source_velocity_field_name", "physical_velocity"},
-      {"Advection_velocity_from_field", "physical_velocity"},
   };
   for (const auto& [key, value] : cases) {
     auto mesh = makeRegistryQuadMesh();
@@ -1516,12 +1378,6 @@ TEST(LevelSetEquationTranslator, RejectsRetiredWetExtensionSettings)
     input.equation_params[key] = svmp::Physics::ParameterValue{true, value};
 
     svmp::FE::systems::FESystem system(mesh);
-    if (value == "false") {
-      EXPECT_TRUE(
-          application::translators::level_set::createModule(input, system))
-          << key;
-      continue;
-    }
     try {
       (void)application::translators::level_set::createModule(input, system);
       ADD_FAILURE() << key << '=' << value << " was accepted";
@@ -1691,60 +1547,6 @@ TEST(LevelSetEquationTranslator, TranslatesTemporalSpatialInflowBoundary)
   EXPECT_TRUE(system.hasOperator("level_set"));
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Coefficient));
-#endif
-}
-
-TEST(LevelSetEquationTranslator, RejectsRetiredDiscontinuityCapturing)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  // Decision D47 retired the level-set discontinuity capturing: a deck may
-  // still state it as disabled; enabling it or naming one of its settings
-  // fails while the equation is translated.
-  const std::vector<std::pair<std::string, std::string>> cases{
-      {"Enable_discontinuity_capturing", "false"},
-      {"Enable_discontinuity_capturing", "true"},
-      {"Discontinuity_capturing_scale", "0.1"},
-      {"Discontinuity_capturing_gradient_epsilon", "1.0e-12"},
-      {"Discontinuity_capturing_max_courant", "0.5"},
-  };
-  for (const auto& [key, value] : cases) {
-    auto mesh = makeRegistryQuadMesh();
-    svmp::Physics::EquationModuleInput input{};
-    input.equation_type = "level_set";
-    input.mesh_name = "quad";
-    input.mesh = mesh->local_mesh_ptr();
-    input.equation_params["Level_set_field_name"] =
-        svmp::Physics::ParameterValue{true, "phi"};
-    input.equation_params["Velocity_source"] =
-        svmp::Physics::ParameterValue{true, "constant"};
-    input.equation_params["Constant_velocity"] =
-        svmp::Physics::ParameterValue{true, "0.0 0.0 0.0"};
-    input.equation_params["Enable_SUPG"] =
-        svmp::Physics::ParameterValue{true, "true"};
-    input.equation_params[key] = svmp::Physics::ParameterValue{true, value};
-
-    svmp::FE::systems::FESystem system(mesh);
-    if (value == "false") {
-      auto module =
-          application::translators::level_set::createModule(input, system);
-      ASSERT_TRUE(module);
-      const auto artifact = module->effectiveConfigurationArtifact();
-      ASSERT_TRUE(artifact.has_value());
-      EXPECT_EQ(artifact->json.find("discontinuity_capturing"),
-                std::string::npos);
-      continue;
-    }
-    try {
-      (void)application::translators::level_set::createModule(input, system);
-      ADD_FAILURE() << key << '=' << value << " was accepted";
-    } catch (const std::exception& error) {
-      EXPECT_NE(std::string(error.what()).find("retired (decision D47)"),
-                std::string::npos)
-          << key << ": " << error.what();
-    }
-  }
 #endif
 }
 
@@ -2662,7 +2464,7 @@ TEST(LevelSetEquationTranslator,
       svmp::Physics::ParameterValue{true, "LevelSetNegative"};
   free_surface.params["Contact_line_model"] =
       svmp::Physics::ParameterValue{true, "PrescribedContactAngle"};
-  free_surface.params["Contact_line_wall_marker"] =
+  free_surface.params["Contact_line_wall_markers"] =
       svmp::Physics::ParameterValue{true, std::to_string(wall_marker)};
   free_surface.params["Contact_line_wall_normal"] =
       svmp::Physics::ParameterValue{true, "1.0 0.0 0.0"};
@@ -2790,8 +2592,6 @@ TEST(LevelSetEquationTranslator,
       svmp::Physics::ParameterValue{true, "phi_dynamic"};
   free_surface.params["Active_domain"] =
       svmp::Physics::ParameterValue{true, "LevelSetNegative"};
-  free_surface.params["Active_domain_method"] =
-      svmp::Physics::ParameterValue{true, "CutVolume"};
   free_surface.params["Generated_interface_geometry"] =
       svmp::Physics::ParameterValue{true, "LinearCorner"};
   free_surface.params["Small_cut_aggregation"] =
@@ -2800,7 +2600,7 @@ TEST(LevelSetEquationTranslator,
       svmp::Physics::ParameterValue{true, "0.8"};
   free_surface.params["Contact_line_model"] =
       svmp::Physics::ParameterValue{true, "DynamicContactAngle"};
-  free_surface.params["Contact_line_wall_marker"] =
+  free_surface.params["Contact_line_wall_markers"] =
       svmp::Physics::ParameterValue{true, std::to_string(wall_marker)};
   free_surface.params["Contact_line_wall_normal"] =
       svmp::Physics::ParameterValue{true, "1.0 0.0 0.0"};
@@ -2892,8 +2692,8 @@ TEST(LevelSetEquationTranslator,
       svmp::Physics::ParameterValue{true, "extension_pending"};
   input.equation_params["Velocity_source"] =
       svmp::Physics::ParameterValue{true, "coupled_field"};
-  input.equation_params["Use_wet_extension_advection_velocity"] =
-      svmp::Physics::ParameterValue{true, "true"};
+  input.equation_params["Advection_velocity_extension_method"] =
+      svmp::Physics::ParameterValue{true, "wall_compatible_normal"};
 
   svmp::FE::systems::FESystem system(mesh);
   EXPECT_THROW(
@@ -2987,53 +2787,5 @@ TEST(LevelSetEquationTranslator, TranslatesJITPolicy)
     const auto* jit = firstJitKernelInOperator(system, "level_set");
     EXPECT_EQ(jit != nullptr, svmp::FE::forms::jit::llvmJITEnabled());
   }
-#endif
-}
-
-TEST(LevelSetEquationTranslator, RetiredCurvatureFieldFailsAtTranslation)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-  GTEST_SKIP() << "Requires FE built with Mesh integration.";
-#else
-  // Decision D48: the projected curvature field of the retired level-set
-  // curvature projection fails at translation, at the equation and at the
-  // domain level; an empty name restates the default and is accepted.
-  auto mesh = makeRegistryTriangleMesh();
-  const auto make_input = [&] {
-    return makeMaintenanceCompatibilityInput(mesh);
-  };
-  for (const std::string spelling :
-       {"Curvature_field_name", "Projected_curvature_field",
-        "Free_surface_curvature_field"}) {
-    for (const int layer : {0, 1, 2}) {
-      auto input = make_input();
-      const svmp::Physics::ParameterValue value{true, "kappa"};
-      if (layer == 0) {
-        input.equation_params[spelling] = value;
-      } else if (layer == 1) {
-        input.default_domain.params[spelling] = value;
-      } else {
-        svmp::Physics::DomainInput domain{};
-        domain.id = "liquid";
-        domain.params[spelling] = value;
-        input.domains.push_back(std::move(domain));
-      }
-      try {
-        (void)application::translators::level_set::resolveConfiguration(input);
-        ADD_FAILURE() << spelling << " at layer " << layer
-                      << " was accepted";
-      } catch (const std::invalid_argument& error) {
-        const std::string message = error.what();
-        EXPECT_NE(message.find("decision D48"), std::string::npos) << message;
-        EXPECT_NE(message.find("SurfaceStress"), std::string::npos) << message;
-        EXPECT_NE(message.find("'kappa'"), std::string::npos) << message;
-      }
-    }
-  }
-  auto empty = make_input();
-  empty.equation_params["Curvature_field_name"] =
-      svmp::Physics::ParameterValue{true, " "};
-  EXPECT_NO_THROW(
-      (void)application::translators::level_set::resolveConfiguration(empty));
 #endif
 }

@@ -751,24 +751,6 @@ int stableGeneratedContactLineMarker(svmp::FE::FieldId phi_field,
     return svmp::FE::interfaces::stableGeneratedInterfaceBoundaryIntersectionMarker(key);
 }
 
-std::size_t interiorFaceKernelCountForBlock(
-    const svmp::FE::systems::FESystem& system,
-    svmp::FE::FieldId test_field,
-    svmp::FE::FieldId trial_field)
-{
-    if (!system.hasOperator("equations")) {
-        return 0u;
-    }
-    std::size_t count = 0u;
-    const auto& equations = system.operatorDefinition("equations");
-    for (const auto& term : equations.interior) {
-        if (term.test_field == test_field && term.trial_field == trial_field) {
-            ++count;
-        }
-    }
-    return count;
-}
-
 } // namespace
 
 TEST(NavierStokesLegacyBCs, ScalarLiteralValidationPreservesDiagnosticsAndVariantPolicy)
@@ -867,8 +849,6 @@ TEST(NavierStokesLegacyBCs,
             input.equation_params[model_key] =
                 defined("OnePhaseLiquidPrescribedExteriorPressure");
         }
-        input.module_options_file_path =
-            "ignored_gas_two_phase_physical_options.txt";
         svmp::FE::systems::FESystem system(mesh);
         auto module =
             svmp::Physics::EquationModuleRegistry::instance().create(
@@ -907,7 +887,6 @@ TEST(NavierStokesLegacyBCs,
 
     expect_supported("");
     expect_supported("Free_surface_physical_model");
-    expect_supported("FreeSurfacePhysicalModel");
 
     struct Rejection {
         const char* label;
@@ -1013,7 +992,7 @@ TEST(NavierStokesLegacyBCs,
             "module-options physical selector",
             [](auto& input) {
                 input.module_options =
-                    "FreeSurfacePhysicalModel:"
+                    "Free_surface_physical_model:"
                     "OnePhaseLiquidPrescribedExteriorPressure";
             },
             "misplaced_free_surface_physical_model",
@@ -1044,50 +1023,6 @@ TEST(NavierStokesLegacyBCs,
                 input.equation_params[
                     "Free_surface_physical_model"] =
                     defined("one_phase_liquid_sharp_interface");
-            },
-            "unsupported_free_surface_physical_model",
-        },
-        {
-            "duplicate physical model aliases",
-            [](auto& input) {
-                input.equation_params[
-                    "Free_surface_physical_model"] =
-                    defined(
-                        "OnePhaseLiquidPrescribedExteriorPressure");
-                input.equation_params[
-                    "FreeSurfacePhysicalModel"] =
-                    defined(
-                        "OnePhaseLiquidPrescribedExteriorPressure");
-            },
-            "ambiguous_free_surface_physical_model",
-        },
-        {
-            "legacy schema selector",
-            [](auto& input) {
-                input.equation_params[
-                    "Free_surface_physical_model"] =
-                    defined(
-                        "OnePhaseLiquidPrescribedExteriorPressure");
-                input.equation_params[
-                    "Free_surface_configuration_schema_version"] =
-                    defined("1");
-                input.equation_params[
-                    "Enable_explicit_legacy_free_surface_configuration"] =
-                    defined("true");
-            },
-            // The explicit schema-1 legacy input was retired (D47 P2).
-            "explicit schema-1 legacy free-surface configuration",
-        },
-        {
-            "non-current schema with explicit selector",
-            [](auto& input) {
-                input.equation_params[
-                    "Free_surface_physical_model"] =
-                    defined(
-                        "OnePhaseLiquidPrescribedExteriorPressure");
-                input.equation_params[
-                    "Free_surface_configuration_schema_version"] =
-                    defined("99");
             },
             "unsupported_free_surface_physical_model",
         },
@@ -1141,51 +1076,6 @@ TEST(NavierStokesLegacyBCs,
                     defined("incompressible_two_fluid");
             },
             "unsupported_two_phase_or_jump_free_surface_scope",
-        },
-        {
-            "pre-registration unsupported schema",
-            [](auto& input) {
-                input.equation_params[
-                    "Free_surface_configuration_schema_version"] =
-                    defined("99");
-            },
-            "unsupported_free_surface_physical_model",
-        },
-        {
-            "pre-registration legacy schema without opt-in",
-            [](auto& input) {
-                input.equation_params[
-                    "Free_surface_configuration_schema_version"] =
-                    defined("1");
-                input.equation_params[
-                    "Enable_explicit_legacy_free_surface_configuration"] =
-                    defined("false");
-            },
-            "unsupported_free_surface_physical_model",
-        },
-        {
-            "pre-registration current schema with legacy opt-in",
-            [](auto& input) {
-                input.equation_params[
-                    "Free_surface_configuration_schema_version"] =
-                    defined("2");
-                input.equation_params[
-                    "Enable_explicit_legacy_free_surface_configuration"] =
-                    defined("true");
-            },
-            "explicit schema-1 legacy free-surface configuration",
-        },
-        {
-            "pre-registration duplicate schema aliases",
-            [](auto& input) {
-                input.equation_params[
-                    "Free_surface_configuration_schema_version"] =
-                    defined("2");
-                input.equation_params[
-                    "FreeSurfaceConfigurationSchemaVersion"] =
-                    defined("2");
-            },
-            "unsupported_free_surface_physical_model",
         },
         {
             "pre-registration boundary context",
@@ -1643,9 +1533,6 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceBCTranslation_SetupSucceeds)
     bc.params["Implementation"] = defined("FittedALE");
     bc.params["External_pressure"] = defined("12.5");
     bc.params["Surface_tension"] = defined("0.0");
-    bc.params["Normal_kinematic_policy"] =
-        defined("MatchFluidNormalVelocity");
-    bc.params["Kinematic_enforcement"] = defined("MeshNitsche");
     bc.params["Tangential_mesh_policy"] = defined("Prescribed");
     input.boundary_conditions.push_back(std::move(bc));
 
@@ -1691,8 +1578,6 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicBCTranslation_UsesCurrentG
     bc.params["Implementation"] = defined("FittedALE");
     bc.params["External_pressure"] = defined("12.5");
     bc.params["Surface_tension"] = defined("0.25");
-    bc.params["Kinematic_enforcement"] = defined("MeshNitsche");
-    bc.params["Normal_kinematic_policy"] = defined("MatchFluidNormalVelocity");
     bc.params["Tangential_mesh_policy"] = defined("Prescribed");
     bc.params["Kinematic_nitsche_gamma"] = defined("18.0");
     input.boundary_conditions.push_back(std::move(bc));
@@ -1707,7 +1592,7 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicBCTranslation_UsesCurrentG
     // surface measure is not applied a second time.
     ASSERT_FALSE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::CurrentMeasure));
     ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::FacetArea));
-    // Automatic is the fitted SurfaceStress form (decision D47 Q2(b)); the
+    // SurfaceStress is the only capillary form (decision D47 Q2(b)); the
     // nonzero surface tension needs no opt-in.
     const auto artifact = module->effectiveConfigurationArtifact();
     ASSERT_TRUE(artifact.has_value());
@@ -1718,117 +1603,14 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicBCTranslation_UsesCurrentG
 #endif
 }
 
-TEST(NavierStokesLegacyBCs, FreeSurfaceCurvatureTractionInputsAreRetired)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
-#else
-    // Decision D47 Q2: CurvatureTraction with its supplied curvature and its
-    // raw level-set curvature, and the opt-in of fitted SurfaceStress, were
-    // retired.  Their inputs fail while the boundary is translated, with a
-    // message that names SurfaceStress; the no-op restatements
-    // Use_level_set_curvature=false and Allow_fitted_surface_stress=true are
-    // accepted (Parameters reports them as input deprecations).
-    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
-
-    constexpr int marker = 91;
-    auto mesh = buildSingleTetraBoundaryMesh(marker);
-    ASSERT_TRUE(mesh);
-
-    using Extra = std::vector<std::pair<std::string, std::string>>;
-    const auto make_input = [&](const Extra& extra) {
-        svmp::Physics::EquationModuleInput input{};
-        input.equation_type = "fluid";
-        input.mesh_name = "single_tetra";
-        input.mesh = mesh->local_mesh_ptr();
-        input.equation_params["Enable_ALE"] = defined("true");
-        input.equation_params["Mesh_velocity_source"] =
-            defined("coupled_displacement");
-        input.equation_params["Auto_register_mesh_displacement_field"] =
-            defined("true");
-        input.default_domain.params["Density"] = defined("1.0");
-        input.default_domain.params["Viscosity.model"] = defined("Constant");
-        input.default_domain.params["Viscosity.Value"] = defined("0.01");
-
-        svmp::Physics::BoundaryConditionInput bc{};
-        bc.name = "free_surface";
-        bc.boundary_marker = marker;
-        bc.params["Type"] = defined("Free_surface");
-        bc.params["Implementation"] = defined("FittedALE");
-        bc.params["External_pressure"] = defined("12.5");
-        bc.params["Surface_tension"] = defined("0.25");
-        bc.params["Kinematic_enforcement"] = defined("MeshNitsche");
-        bc.params["Normal_kinematic_policy"] =
-            defined("MatchFluidNormalVelocity");
-        bc.params["Tangential_mesh_policy"] = defined("Free");
-        for (const auto& [key, value] : extra) {
-            bc.params[key] = defined(value);
-        }
-        input.boundary_conditions.push_back(std::move(bc));
-        return input;
-    };
-
-    const std::vector<Extra> accepted_inputs{
-        {{"Use_level_set_curvature", "false"}},
-        {{"Allow_fitted_surface_stress", "true"}},
-        {{"Surface_tension_form", "SurfaceStress"},
-         {"Allow_fitted_surface_stress", "true"}},
-    };
-    for (const auto& accepted : accepted_inputs) {
-        const auto input = make_input(accepted);
-        svmp::FE::systems::FESystem system(mesh);
-        try {
-            auto module =
-                svmp::Physics::EquationModuleRegistry::instance().create(
-                    "fluid", input, system);
-            EXPECT_TRUE(module);
-        } catch (const std::exception& error) {
-            ADD_FAILURE() << accepted.back().first << "="
-                          << accepted.back().second
-                          << " must be accepted: " << error.what();
-        }
-    }
-
-    const std::vector<Extra> retired_inputs{
-        {{"Surface_tension_form", "CurvatureTraction"}},
-        {{"Surface_tension_form", "ExplicitCurvature"}},
-        {{"Surface_tension_form", "YoungLaplaceTraction"}},
-        {{"Curvature", "2.0"}},
-        {{"Use_level_set_curvature", "true"}},
-        {{"Allow_fitted_surface_stress", "false"}},
-    };
-    for (const auto& retired : retired_inputs) {
-        const auto input = make_input(retired);
-        svmp::FE::systems::FESystem system(mesh);
-        try {
-            auto module =
-                svmp::Physics::EquationModuleRegistry::instance().create(
-                    "fluid", input, system);
-            (void)module;
-            ADD_FAILURE() << retired.front().first << "="
-                          << retired.front().second << " must fail";
-        } catch (const std::runtime_error& error) {
-            const std::string message = error.what();
-            EXPECT_NE(message.find("decision D47 Q2"), std::string::npos)
-                << message;
-            EXPECT_NE(message.find("SurfaceStress"), std::string::npos)
-                << message;
-        }
-        EXPECT_EQ(system.findFieldByName("Velocity"),
-                  svmp::FE::INVALID_FIELD_ID);
-    }
-#endif
-}
-
 TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicEnforcementDefaultsToMeshNitsche)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
     GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
 #else
-    // Decision D35: an omitted Kinematic_enforcement selects MeshNitsche on a
-    // fitted ALE free surface of the qualified contract.  Penalty and Nitsche
-    // were retired by decision D47 Q9, and the explicit schema-1 legacy input,
-    // whose None default the last check below covered, by D47 (P2).
+    // Decision D35: a fitted ALE free surface of the qualified contract
+    // always uses the MeshNitsche normal enforcement; Kinematic_nitsche_gamma
+    // sets its penalty.
     svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
 
     constexpr int marker = 79;
@@ -1836,28 +1618,16 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicEnforcementDefaultsToMeshN
     ASSERT_TRUE(mesh);
 
     const auto make_input =
-        [&](bool legacy,
-            const std::vector<std::pair<std::string, std::string>>& extra) {
+        [&](const std::vector<std::pair<std::string, std::string>>& extra) {
             svmp::Physics::EquationModuleInput input{};
             input.equation_type = "fluid";
             input.mesh_name = "single_tetra";
             input.mesh = mesh->local_mesh_ptr();
-            if (legacy) {
-                // The retired explicit schema-1 legacy input (no ALE).
-                input.equation_params[
-                    "Free_surface_configuration_schema_version"] =
-                    defined("1");
-                input.equation_params[
-                    "Enable_explicit_legacy_free_surface_configuration"] =
-                    defined("true");
-            } else {
-                input.equation_params["Enable_ALE"] = defined("true");
-                input.equation_params["Mesh_velocity_source"] =
-                    defined("coupled_displacement");
-                input.equation_params[
-                    "Auto_register_mesh_displacement_field"] =
-                    defined("true");
-            }
+            input.equation_params["Enable_ALE"] = defined("true");
+            input.equation_params["Mesh_velocity_source"] =
+                defined("coupled_displacement");
+            input.equation_params["Auto_register_mesh_displacement_field"] =
+                defined("true");
             input.default_domain.params["Density"] = defined("1.0");
             input.default_domain.params["Viscosity.model"] =
                 defined("Constant");
@@ -1870,9 +1640,7 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicEnforcementDefaultsToMeshN
             bc.params["Implementation"] = defined("FittedALE");
             bc.params["External_pressure"] = defined("12.5");
             bc.params["Surface_tension"] = defined("0.0");
-            if (!legacy) {
-                bc.params["Tangential_mesh_policy"] = defined("Free");
-            }
+            bc.params["Tangential_mesh_policy"] = defined("Free");
             for (const auto& [key, value] : extra) {
                 bc.params[key] = defined(value);
             }
@@ -1885,9 +1653,8 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicEnforcementDefaultsToMeshN
         double gamma{0.0};
     };
     const auto declared =
-        [&](bool legacy,
-            const std::vector<std::pair<std::string, std::string>>& extra) {
-            const auto input = make_input(legacy, extra);
+        [&](const std::vector<std::pair<std::string, std::string>>& extra) {
+            const auto input = make_input(extra);
             svmp::FE::systems::FESystem system(mesh);
             auto module =
                 svmp::Physics::EquationModuleRegistry::instance().create(
@@ -1905,71 +1672,16 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicEnforcementDefaultsToMeshN
             return result;
         };
 
-    const auto by_default = declared(false, {});
+    const auto by_default = declared({});
     EXPECT_EQ(by_default.count, 1u);
     EXPECT_TRUE(by_default.mesh_flux_consistency);
     EXPECT_DOUBLE_EQ(by_default.gamma, 10.0);
 
-    const auto explicit_mesh_nitsche =
-        declared(false, {{"Kinematic_enforcement", "MeshNitsche"}});
-    EXPECT_EQ(explicit_mesh_nitsche.count, 1u);
-    EXPECT_TRUE(explicit_mesh_nitsche.mesh_flux_consistency);
-    EXPECT_DOUBLE_EQ(explicit_mesh_nitsche.gamma, by_default.gamma);
-
     const auto default_with_gamma =
-        declared(false, {{"Kinematic_nitsche_gamma", "24.0"}});
+        declared({{"Kinematic_nitsche_gamma", "24.0"}});
     EXPECT_EQ(default_with_gamma.count, 1u);
     EXPECT_TRUE(default_with_gamma.mesh_flux_consistency);
     EXPECT_DOUBLE_EQ(default_with_gamma.gamma, 24.0);
-
-    // The retired enforcements and Kinematic_penalty (decision D47 Q9) fail
-    // while the boundary is translated, in either configuration mode.
-    const std::vector<std::vector<std::pair<std::string, std::string>>>
-        retired_inputs{
-            {{"Kinematic_enforcement", "Penalty"}},
-            {{"Kinematic_enforcement", "Nitsche"}},
-            {{"Kinematic_penalty", "9.0"}},
-        };
-    {
-        const bool legacy = false;
-        for (const auto& retired : retired_inputs) {
-            const auto input = make_input(legacy, retired);
-            svmp::FE::systems::FESystem system(mesh);
-            try {
-                auto module =
-                    svmp::Physics::EquationModuleRegistry::instance().create(
-                        "fluid", input, system);
-                (void)module;
-                ADD_FAILURE() << retired.front().first << "="
-                              << retired.front().second
-                              << " must fail (legacy=" << legacy << ")";
-            } catch (const std::runtime_error& error) {
-                const std::string message = error.what();
-                EXPECT_NE(message.find("decision D47 Q9"), std::string::npos)
-                    << message;
-                EXPECT_NE(message.find("MeshNitsche"), std::string::npos)
-                    << message;
-            }
-        }
-    }
-
-    // The explicit schema-1 legacy input fails at translation (D47 P2).
-    {
-        const auto input = make_input(true, {});
-        svmp::FE::systems::FESystem system(mesh);
-        try {
-            auto module =
-                svmp::Physics::EquationModuleRegistry::instance().create(
-                    "fluid", input, system);
-            (void)module;
-            ADD_FAILURE() << "the explicit schema-1 legacy input must fail";
-        } catch (const std::runtime_error& error) {
-            EXPECT_NE(std::string(error.what()).find(
-                          "explicit schema-1 legacy free-surface configuration"),
-                      std::string::npos)
-                << error.what();
-        }
-    }
 #endif
 }
 
@@ -1980,8 +1692,8 @@ TEST(NavierStokesLegacyBCs, FreeSurfaceBoundaryKeysResolveThroughTheSchema)
 #else
     // Decision D47 (P2): the keys of a Free_surface boundary condition and of
     // its contact lines resolve through the option schemas.  Values that do
-    // not parse report the schema texts (D52); the retired keys and values and
-    // the relations between keys keep the register's texts.
+    // not parse report the schema texts (D52); the relations between keys
+    // keep the register's texts.
     svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
 
     constexpr int marker = 79;
@@ -2029,36 +1741,12 @@ TEST(NavierStokesLegacyBCs, FreeSurfaceBoundaryKeysResolveThroughTheSchema)
         {{{"Implementation", "Sideways"}},
          "[svMultiPhysics::Physics] unsupported_free_surface_physical_model"},
         // Value and format errors: the schema texts.
-        {{{"Kinematic_enforcement", "Sideways"}},
-         "[Free_surface] Kinematic_enforcement: expected one of None | "
-         "MeshNitsche, got 'Sideways'"},
-        {{{"Active_domain_smoothing_width", "-1"}},
-         "[Free_surface] Active_domain_smoothing_width: number -1 outside "
-         "[0, inf]"},
         {{{"Surface_tension", "abc"}},
          "[Free_surface] Surface_tension: expected a number, got 'abc'"},
-        // "none" is not a value of the cap (std::stod rejected it before).
-        {{{"Cut_cell_metadata_scale_cap", "none"}},
-         "[Free_surface] Cut_cell_metadata_scale_cap: expected a number, got "
-         "'none'"},
         {{{"Contact_line_model", "Sideways"}},
          "[Free_surface contact line] Contact_line_model: expected one of "
          "None | Pinned | PrescribedAngle | DynamicRenE, got 'Sideways'"},
-        {{{"Contact_line_model", "Pinned"},
-          {"Contact_line_wall_marker", "80"},
-          {"Contact_line_wall_markers", "80"}},
-         "[Free_surface contact line] Contact_line_wall_marker: defines more "
-         "than one spelling ('Contact_line_wall_markers' and "
-         "'Contact_line_wall_marker'); specify exactly one"},
-        // Retired values and relations keep the register's texts.
-        {{{"Surface_tension_form", "CurvatureTraction"}},
-         "[svMultiPhysics::Physics] Free-surface "
-         "Surface_tension_form=CurvatureTraction (CurvatureTraction) was "
-         "retired (decision D47 Q2); use SurfaceStress."},
-        {{{"Active_domain_method", "SmoothedIndicator"}},
-         "[svMultiPhysics::Physics] Free-surface "
-         "Active_domain_method=SmoothedIndicator (SmoothedIndicator) was "
-         "retired (decision D42); use CutVolume."},
+        // Relations keep the register's texts.
         {{{"Tangential_mesh_penalty", "2.0"}},
          "[svMultiPhysics::Physics] Tangential_mesh_penalty requires "
          "Tangential_mesh_policy=Prescribed or SmoothingOnly; Free has no "
@@ -2102,13 +1790,10 @@ TEST(NavierStokesLegacyBCs, FreeSurfaceBoundaryKeysResolveThroughTheSchema)
         }
     }
 
-    // Accepted: restated no-op values of retired switches (the register's
-    // relaxed booleans), and the level-set keys of an unfitted interface on
-    // a fitted boundary, which are not read.
+    // Accepted: the level-set keys of an unfitted interface on a fitted
+    // boundary, which are not read.
     const std::vector<std::vector<std::pair<std::string, std::string>>>
         accepted = {
-            {{"Use_current_geometry_curvature", "no"}},
-            {{"Use_level_set_curvature", "off"}},
             {{"Interface_marker", "not-a-marker"}},
             {{"Level_set_isovalue", "not-a-number"}},
         };
@@ -2142,8 +1827,6 @@ TEST(NavierStokesLegacyBCs,
     input.equation_type = "fluid";
     input.mesh_name = "single_tetra";
     input.mesh = mesh->local_mesh_ptr();
-    input.equation_params["Free_surface_configuration_schema_version"] =
-        defined("2");
     input.equation_params["Enable_ALE"] = defined("true");
     input.equation_params["Mesh_velocity_source"] =
         defined("coupled_displacement");
@@ -2162,9 +1845,6 @@ TEST(NavierStokesLegacyBCs,
     bc.params["Prescribed_tangential_mesh_velocity"] =
         defined("0.2, -0.1, 0.0");
     bc.params["Tangential_mesh_penalty"] = defined("6.0");
-    bc.params["Normal_kinematic_policy"] =
-        defined("MatchFluidNormalVelocity");
-    bc.params["Kinematic_enforcement"] = defined("MeshNitsche");
     input.boundary_conditions.push_back(std::move(bc));
 
     svmp::FE::systems::FESystem system(mesh);
@@ -2243,12 +1923,9 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfacePrescribedAngleTranslationFailsClos
     bc.params["Type"] = defined("Free_surface");
     bc.params["Implementation"] = defined("FittedALE");
     bc.params["External_pressure"] = defined("0.0");
-    bc.params["Normal_kinematic_policy"] =
-        defined("MatchFluidNormalVelocity");
-    bc.params["Kinematic_enforcement"] = defined("MeshNitsche");
     bc.params["Tangential_mesh_policy"] = defined("Prescribed");
     bc.params["Contact_line_model"] = defined("PrescribedContactAngle");
-    bc.params["Contact_line_wall_marker"] = defined("88");
+    bc.params["Contact_line_wall_markers"] = defined("88");
     bc.params["Contact_line_marker"] = defined("89");
     bc.params["Contact_angle_degrees"] = defined("60.0");
     bc.params["Contact_line_wall_normal"] = defined("1.0, 0.0, 0.0");
@@ -2317,8 +1994,9 @@ TEST(NavierStokesLegacyBCs, FreeSurfaceContactAliasesFailClosedWhenIncomplete)
     ASSERT_TRUE(mesh);
 
     // Each key alone must fail closed.  The canonical keys fail as incomplete
-    // contact configurations; the other spellings, removed with decision
-    // D47, fail as unknown contact keys.
+    // contact configurations; the other spellings (the removed aliases,
+    // Contact_angle_radians and the singular Contact_line_wall_marker) fail
+    // as unknown contact keys.
     const std::vector<std::pair<std::string, std::string>> incomplete = {
         {"Contact_line_model", "PrescribedContactAngle"},
         {"ContactLineModel", "PrescribedContactAngle"},
@@ -2439,21 +2117,10 @@ TEST(NavierStokesLegacyBCs,
             "Unknown free-surface contact key 'ContactLineModel'",
         },
         {
-            "mixed angle units",
-            {
-                {"Contact_line_model", "PrescribedAngle"},
-                {"Contact_line_wall_marker", "80"},
-                {"Contact_line_wall_normal", "1 0 0"},
-                {"Contact_angle_radians", "1.0"},
-                {"Contact_angle_degrees", "60"},
-            },
-            "either radians or degrees, not both",
-        },
-        {
             "none with wall state",
             {
                 {"Contact_line_model", "None"},
-                {"Contact_line_wall_marker", "80"},
+                {"Contact_line_wall_markers", "80"},
             },
             "Contact_line_model=None does not accept",
         },
@@ -2462,7 +2129,7 @@ TEST(NavierStokesLegacyBCs,
             {
                 {"Contact_line_model", "Pinned"},
                 {"Contact_line_marker", "81"},
-                {"Contact_angle_radians", "1.0"},
+                {"Contact_angle_degrees", "57.29577951308232"},
             },
             "Contact_line_model=Pinned accepts only",
         },
@@ -2470,9 +2137,9 @@ TEST(NavierStokesLegacyBCs,
             "prescribed with dynamic state",
             {
                 {"Contact_line_model", "PrescribedAngle"},
-                {"Contact_line_wall_marker", "80"},
+                {"Contact_line_wall_markers", "80"},
                 {"Contact_line_wall_normal", "1 0 0"},
-                {"Contact_angle_radians", "1.0"},
+                {"Contact_angle_degrees", "57.29577951308232"},
                 {"Contact_line_mobility", "0.5"},
             },
             "PrescribedAngle does not accept contact-line mobility",
@@ -2481,9 +2148,9 @@ TEST(NavierStokesLegacyBCs,
             "prescribed with incomplete slip model",
             {
                 {"Contact_line_model", "PrescribedAngle"},
-                {"Contact_line_wall_marker", "80"},
+                {"Contact_line_wall_markers", "80"},
                 {"Contact_line_wall_normal", "1 0 0"},
-                {"Contact_angle_radians", "1.0"},
+                {"Contact_angle_degrees", "57.29577951308232"},
                 {"Wall_slip_model", "Navier"},
             },
             "requires both Wall_slip_model and Wall_slip_length",
@@ -2492,9 +2159,9 @@ TEST(NavierStokesLegacyBCs,
             "prescribed with incomplete slip length",
             {
                 {"Contact_line_model", "PrescribedAngle"},
-                {"Contact_line_wall_marker", "80"},
+                {"Contact_line_wall_markers", "80"},
                 {"Contact_line_wall_normal", "1 0 0"},
-                {"Contact_angle_radians", "1.0"},
+                {"Contact_angle_degrees", "57.29577951308232"},
                 {"Wall_slip_length", "0.1"},
             },
             "requires both Wall_slip_model and Wall_slip_length",
@@ -2503,9 +2170,9 @@ TEST(NavierStokesLegacyBCs,
             "prescribed with unsupported slip model",
             {
                 {"Contact_line_model", "PrescribedAngle"},
-                {"Contact_line_wall_marker", "80"},
+                {"Contact_line_wall_markers", "80"},
                 {"Contact_line_wall_normal", "1 0 0"},
-                {"Contact_angle_radians", "1.0"},
+                {"Contact_angle_degrees", "57.29577951308232"},
                 {"Wall_slip_model", "None"},
                 {"Wall_slip_length", "0.1"},
             },
@@ -2515,9 +2182,9 @@ TEST(NavierStokesLegacyBCs,
             "removed prescribed-angle coefficient",
             {
                 {"Contact_line_model", "DynamicRenE"},
-                {"Contact_line_wall_marker", "80"},
+                {"Contact_line_wall_markers", "80"},
                 {"Contact_line_wall_normal", "1 0 0"},
-                {"Contact_angle_radians", "1.0"},
+                {"Contact_angle_degrees", "57.29577951308232"},
                 {"Contact_line_mobility", "0.5"},
                 {"Wall_slip_model", "Navier"},
                 {"Wall_slip_length", "0.1"},
@@ -2529,9 +2196,9 @@ TEST(NavierStokesLegacyBCs,
             "dynamic without navier slip",
             {
                 {"Contact_line_model", "DynamicRenE"},
-                {"Contact_line_wall_marker", "80"},
+                {"Contact_line_wall_markers", "80"},
                 {"Contact_line_wall_normal", "1 0 0"},
-                {"Contact_angle_radians", "1.0"},
+                {"Contact_angle_degrees", "57.29577951308232"},
                 {"Contact_line_mobility", "0.5"},
                 {"Wall_slip_model", "None"},
                 {"Wall_slip_length", "0.1"},
@@ -2545,7 +2212,7 @@ TEST(NavierStokesLegacyBCs,
                 {"Contact_line_wall_markers", "80;81"},
                 {"Contact_line_marker", "82"},
                 {"Contact_line_wall_normal", "1 0 0"},
-                {"Contact_angle_radians", "1.0"},
+                {"Contact_angle_degrees", "57.29577951308232"},
             },
             "cannot be shared by multiple contact walls",
         },
@@ -2555,7 +2222,7 @@ TEST(NavierStokesLegacyBCs,
                 {"Contact_line_model", "PrescribedAngle"},
                 {"Contact_line_wall_markers", "80;81"},
                 {"Contact_line_wall_normal", "1 0 0;0 1 0;0 0 1"},
-                {"Contact_angle_radians", "1.0"},
+                {"Contact_angle_degrees", "57.29577951308232"},
             },
             "one vector or one vector per wall marker",
         },
@@ -2605,100 +2272,6 @@ TEST(NavierStokesLegacyBCs,
 #endif
 }
 
-TEST(NavierStokesLegacyBCs,
-     FreeSurfaceConfigurationSchemaAliasesAreExplicitAndUnambiguous)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
-#else
-    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
-
-    constexpr int marker = 80;
-    auto mesh = buildSingleTetraBoundaryMesh(marker);
-    ASSERT_TRUE(mesh);
-
-    const auto make_input = [&]() {
-        svmp::Physics::EquationModuleInput input{};
-        input.equation_type = "fluid";
-        input.mesh_name = "single_tetra";
-        input.mesh = mesh->local_mesh_ptr();
-        input.default_domain.params["Density"] = defined("1.0");
-        input.default_domain.params["Viscosity.model"] = defined("Constant");
-        input.default_domain.params["Viscosity.Value"] = defined("0.01");
-        return input;
-    };
-
-    for (const std::string key : {
-             "Free_surface_configuration_schema_version",
-             "FreeSurfaceConfigurationSchemaVersion",
-             "Free_surface_schema_version"}) {
-        SCOPED_TRACE(key);
-        auto input = make_input();
-        input.equation_params[key] = defined("2");
-        svmp::FE::systems::FESystem system(mesh);
-        auto module = svmp::Physics::EquationModuleRegistry::instance().create(
-            "fluid", input, system);
-        ASSERT_TRUE(module);
-        const auto artifact = module->effectiveConfigurationArtifact();
-        ASSERT_TRUE(artifact.has_value());
-        EXPECT_NE(artifact->json.find("\"input_version\":2"),
-                  std::string::npos);
-        EXPECT_NE(artifact->json.find("\"migration_mode\":\"current\""),
-                  std::string::npos);
-    }
-
-    for (const std::string key : {
-             "Enable_explicit_legacy_free_surface_configuration",
-             "EnableExplicitLegacyFreeSurfaceConfiguration",
-             "Free_surface_legacy_behavior"}) {
-        SCOPED_TRACE(key);
-        auto input = make_input();
-        input.equation_params["Free_surface_configuration_schema_version"] =
-            defined("1");
-        input.equation_params[key] = defined("true");
-        svmp::FE::systems::FESystem system(mesh);
-        // Every spelling of the retired explicit legacy opt-in fails
-        // (D47 P2), and the system stays unchanged.
-        try {
-            auto module =
-                svmp::Physics::EquationModuleRegistry::instance().create(
-                    "fluid", input, system);
-            (void)module;
-            ADD_FAILURE() << key << "=true must fail";
-        } catch (const std::runtime_error& error) {
-            const std::string message = error.what();
-            EXPECT_NE(message.find("explicit schema-1 legacy free-surface configuration"), std::string::npos)
-                << message;
-            EXPECT_NE(message.find(key + "=true"), std::string::npos)
-                << message;
-        }
-        EXPECT_EQ(system.findFieldByName("Velocity"),
-                  svmp::FE::INVALID_FIELD_ID);
-    }
-
-    {
-        auto input = make_input();
-        input.equation_params["Free_surface_configuration_schema_version"] =
-            defined("2");
-        input.equation_params["FreeSurfaceConfigurationSchemaVersion"] =
-            defined("2");
-        svmp::FE::systems::FESystem system(mesh);
-        EXPECT_THROW(
-            {
-                auto module =
-                    svmp::Physics::EquationModuleRegistry::instance().create(
-                        "fluid", input, system);
-                (void)module;
-            },
-            std::runtime_error);
-        EXPECT_EQ(system.findFieldByName("Velocity"),
-                  svmp::FE::INVALID_FIELD_ID);
-        EXPECT_EQ(system.findFieldByName("Pressure"),
-                  svmp::FE::INVALID_FIELD_ID);
-    }
-#endif
-}
-
 TEST(NavierStokesLegacyBCs, FreeSurfaceContactNoneIsExplicitAndComplete)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
@@ -2714,8 +2287,7 @@ TEST(NavierStokesLegacyBCs, FreeSurfaceContactNoneIsExplicitAndComplete)
     input.equation_type = "fluid";
     input.mesh_name = "single_tetra";
     input.mesh = mesh->local_mesh_ptr();
-    // The qualified fitted contract (the explicit schema-1 legacy input
-    // this test used was retired, D47 P2).
+    // The qualified fitted contract.
     input.equation_params["Enable_ALE"] = defined("true");
     input.equation_params["Mesh_velocity_source"] =
         defined("coupled_displacement");
@@ -2746,62 +2318,6 @@ TEST(NavierStokesLegacyBCs, FreeSurfaceContactNoneIsExplicitAndComplete)
 #endif
 }
 
-TEST(NavierStokesLegacyBCs, FittedFreeSurfaceRejectsKinematicEnforcementNone)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
-#else
-    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
-
-    constexpr int marker = 80;
-    auto mesh = buildSingleTetraBoundaryMesh(marker);
-    ASSERT_TRUE(mesh);
-
-    svmp::Physics::EquationModuleInput input{};
-    input.equation_type = "fluid";
-    input.mesh_name = "single_tetra";
-    input.mesh = mesh->local_mesh_ptr();
-    input.equation_params["Enable_ALE"] = defined("true");
-    input.equation_params["Mesh_velocity_source"] =
-        defined("coupled_displacement");
-    input.equation_params["Auto_register_mesh_displacement_field"] =
-        defined("true");
-    input.default_domain.params["Density"] = defined("1.0");
-    input.default_domain.params["Viscosity.model"] = defined("Constant");
-    input.default_domain.params["Viscosity.Value"] = defined("0.01");
-
-    svmp::Physics::BoundaryConditionInput bc{};
-    bc.name = "free_surface";
-    bc.boundary_marker = marker;
-    bc.params["Type"] = defined("Free_surface");
-    bc.params["Implementation"] = defined("FittedALE");
-    bc.params["External_pressure"] = defined("12.5");
-    bc.params["Surface_tension"] = defined("0.0");
-    bc.params["Tangential_mesh_policy"] = defined("Free");
-    bc.params["Contact_line_model"] = defined("None");
-    bc.params["Kinematic_enforcement"] = defined("None");
-    input.boundary_conditions.push_back(std::move(bc));
-
-    // The text the user chose for the qualified fitted-ALE contract
-    // (2026-10-24): it names the rejected input, not a retired mode.
-    const std::string expected =
-        "IncompressibleNavierStokesVMSModule: the qualified fitted-ALE "
-        "free-surface contract requires MeshNitsche normal enforcement (the "
-        "input default); Kinematic_enforcement None is not accepted for a "
-        "fitted free surface";
-    svmp::FE::systems::FESystem system(mesh);
-    try {
-        auto module =
-            svmp::Physics::EquationModuleRegistry::instance().create(
-                "fluid", input, system);
-        ADD_FAILURE() << "a fitted free surface with Kinematic_enforcement=None was accepted";
-    } catch (const std::exception& error) {
-        EXPECT_NE(std::string(error.what()).find(expected), std::string::npos)
-            << error.what();
-    }
-#endif
-}
-
 TEST(NavierStokesLegacyBCs, FreeSurfacePinnedIsExplicitAndComplete)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
@@ -2817,8 +2333,7 @@ TEST(NavierStokesLegacyBCs, FreeSurfacePinnedIsExplicitAndComplete)
     input.equation_type = "fluid";
     input.mesh_name = "single_tetra";
     input.mesh = mesh->local_mesh_ptr();
-    // The qualified fitted contract (the explicit schema-1 legacy input
-    // this test used was retired, D47 P2).
+    // The qualified fitted contract.
     input.equation_params["Enable_ALE"] = defined("true");
     input.equation_params["Mesh_velocity_source"] =
         defined("coupled_displacement");
@@ -2885,7 +2400,6 @@ TEST(NavierStokesLegacyBCs,
     bc.params["Interface_marker"] = defined(std::to_string(interface_marker));
     bc.params["Level_set_field_name"] = defined("phi");
     bc.params["Active_domain"] = defined("LevelSetNegative");
-    bc.params["Active_domain_method"] = defined("CutVolume");
     bc.params["Contact_line_model"] = defined("PrescribedContactAngle");
     bc.params["Contact_line_wall_markers"] =
         defined(std::to_string(first_wall_marker) + "; " +
@@ -2978,14 +2492,13 @@ TEST(NavierStokesLegacyBCs,
         defined(std::to_string(interface_marker));
     free_surface.params["Level_set_field_name"] = defined("phi_dynamic");
     free_surface.params["Active_domain"] = defined("LevelSetNegative");
-    free_surface.params["Active_domain_method"] = defined("CutVolume");
     free_surface.params["Generated_interface_geometry"] =
         defined("LinearCorner");
     free_surface.params["Small_cut_aggregation"] = defined("false");
     free_surface.params["Surface_tension"] = defined("0.8");
     free_surface.params["Contact_line_model"] =
         defined("DynamicContactAngle");
-    free_surface.params["Contact_line_wall_marker"] =
+    free_surface.params["Contact_line_wall_markers"] =
         defined(std::to_string(wall_marker));
     free_surface.params["Contact_line_wall_normal"] =
         defined("0.0 0.0 -1.0");
@@ -3086,14 +2599,13 @@ TEST(NavierStokesLegacyBCs,
     free_surface.params["Level_set_field_name"] =
         defined("phi_prescribed_slip");
     free_surface.params["Active_domain"] = defined("LevelSetNegative");
-    free_surface.params["Active_domain_method"] = defined("CutVolume");
     free_surface.params["Generated_interface_geometry"] =
         defined("LinearCorner");
     free_surface.params["Small_cut_aggregation"] = defined("false");
     free_surface.params["Surface_tension"] = defined("0.8");
     free_surface.params["Contact_line_model"] =
         defined("PrescribedAngle");
-    free_surface.params["Contact_line_wall_marker"] =
+    free_surface.params["Contact_line_wall_markers"] =
         defined(std::to_string(wall_marker));
     free_surface.params["Contact_line_wall_normal"] =
         defined("0.0 0.0 -1.0");
@@ -3220,14 +2732,13 @@ TEST(NavierStokesLegacyBCs,
         free_surface.params["Level_set_field_name"] =
             defined("phi_derived_request");
         free_surface.params["Active_domain"] = defined("LevelSetNegative");
-        free_surface.params["Active_domain_method"] = defined("CutVolume");
         free_surface.params["Generated_interface_geometry"] =
             defined("LinearCorner");
         free_surface.params["Small_cut_aggregation"] = defined("false");
         free_surface.params["Surface_tension"] = defined("0.8");
         free_surface.params["Contact_line_model"] =
             defined("PrescribedAngle");
-        free_surface.params["Contact_line_wall_marker"] =
+        free_surface.params["Contact_line_wall_markers"] =
             defined(std::to_string(wall_marker));
         free_surface.params["Contact_line_wall_normal"] =
             defined("0.0 0.0 -1.0");
@@ -3332,14 +2843,13 @@ TEST(NavierStokesLegacyBCs, ResolvedArtifactSectionRecordsTheSourceOfEveryFreeSu
     input.equation_params["Mesh_velocity_field"] = defined("equation_mesh_velocity");
     input.default_domain.params["Mesh_velocity_field"] = defined("domain_mesh_velocity");
     free_surface.params["Active_domain"] = defined("negative");
-    free_surface.params["Active_domain_method"] = defined("CutVolume");
     free_surface.params["Generated_interface_geometry"] =
         defined("LinearCorner");
     free_surface.params["Small_cut_aggregation"] = defined("false");
     free_surface.params["Surface_tension"] = defined("0.8");
     free_surface.params["Contact_line_model"] =
         defined("PrescribedAngle");
-    free_surface.params["Contact_line_wall_marker"] =
+    free_surface.params["Contact_line_wall_markers"] =
         defined(std::to_string(wall_marker));
     free_surface.params["Contact_line_wall_normal"] =
         defined("0.0 0.0 -1.0");
@@ -3402,32 +2912,18 @@ TEST(NavierStokesLegacyBCs, ResolvedArtifactSectionRecordsTheSourceOfEveryFreeSu
                  "\"spelling\":\"Small_cut_aggregation\"}");
     // Left to the defaults.
     expect_entry("\"Level_set_isovalue\":{\"value\":\"0\",\"source\":\"default\"}");
-    expect_entry("\"Kinematic_enforcement\":{\"value\":\"None\",\"source\":\"default\"}");
-    expect_entry("\"Cut_cell_metadata_scale_cap\":{\"value\":\"none\",\"source\":\"default\"}");
     // The contact-line keys.
     expect_entry(",\"contact_line\":{\"Contact_line_model\":{\"value\":\"PrescribedAngle\","
                  "\"source\":\"explicit\",\"spelling\":\"Contact_line_model\"}");
     expect_entry("\"source\":\"explicit\",\"spelling\":\"Contact_angle_degrees\",\"input\":\"60.0\"}");
-    expect_entry("\"Contact_line_wall_marker\":{\"value\":\"82\",\"source\":\"explicit\","
-                 "\"spelling\":\"Contact_line_wall_marker\"}");
+    // The wall markers, given by their only input spelling.
+    expect_entry("{\"value\":\"82\",\"source\":\"explicit\","
+                 "\"spelling\":\"Contact_line_wall_markers\"}");
     expect_entry("\"Wall_slip_model\":{\"value\":\"Navier\",\"source\":\"explicit\","
                  "\"spelling\":\"Wall_slip_model\"}");
     expect_entry("\"Contact_line_mobility\":{\"value\":\"0\",\"source\":\"default\"}");
-    // Converted from the degrees by the register.
-    const auto radians_at = resolved.find("\"Contact_angle_radians\":{");
-    ASSERT_NE(radians_at, std::string::npos);
-    EXPECT_NE(resolved.find("\"source\":\"derived\",\"origin\":\"resolution\"}", radians_at),
-              std::string::npos);
-    // Keys outside the schema (Type) and retired keys (Kinematic_penalty,
-    // decision D47 Q9; Curvature, Use_level_set_curvature and
-    // Allow_fitted_surface_stress, decision D47 Q2; Curvature_field,
-    // decision D48) are not listed.
+    // Keys outside the schema (Type) are not listed.
     EXPECT_EQ(resolved.find("\"Type\""), std::string::npos);
-    EXPECT_EQ(resolved.find("\"Kinematic_penalty\""), std::string::npos);
-    EXPECT_EQ(resolved.find("\"Curvature\""), std::string::npos);
-    EXPECT_EQ(resolved.find("\"Use_level_set_curvature\""), std::string::npos);
-    EXPECT_EQ(resolved.find("\"Allow_fitted_surface_stress\""), std::string::npos);
-    EXPECT_EQ(resolved.find("\"Curvature_field\""), std::string::npos);
 
     // The equation and domain keys (decision D47, P2): the value the module
     // uses, and its source in the element's own input ("input" keeps the
@@ -3556,7 +3052,6 @@ TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceCutCellStabilizationTranslation_A
     bc.params["Implementation"] = defined("UnfittedLevelSet");
     bc.params["Level_set_field_name"] = defined("phi");
     bc.params["Active_domain"] = defined("LevelSetNegative");
-    bc.params["Active_domain_method"] = defined("CutVolume");
     bc.params["External_pressure"] = defined("1.0");
     bc.params["Enable_cut_cell_stabilization"] = defined("true");
     bc.params["Cut_cell_pressure_gradient_penalty"] = defined("0.2");
@@ -3582,7 +3077,7 @@ TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceCutCellStabilizationTranslation_A
 }
 
 TEST(NavierStokesLegacyBCs,
-     UnfittedFreeSurfaceCutCellPressurePolicyTranslation_DisablesPressureFacetTerms)
+     UnfittedFreeSurfaceSmallCutAggregationGuardsTranslation_RecordsGuards)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
     GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
@@ -3609,78 +3104,8 @@ TEST(NavierStokesLegacyBCs,
     bc.params["Implementation"] = defined("UnfittedLevelSet");
     bc.params["Level_set_field_name"] = defined("phi");
     bc.params["Active_domain"] = defined("LevelSetNegative");
-    bc.params["Active_domain_method"] = defined("CutVolume");
-    bc.params["Generated_interface_geometry"] = defined("HighOrderImplicit");
-    bc.params["Geometry_tangent_policy"] = defined("RefreshedFrozenQuadrature");
     bc.params["External_pressure"] = defined("1.0");
     bc.params["Enable_cut_cell_stabilization"] = defined("true");
-    bc.params["Cut_cell_pressure_gradient_penalty"] = defined("0.2");
-    bc.params["Cut_cell_pressure_stabilization_policy"] =
-        defined("DisabledForRefreshedFrozenHighOrder");
-    input.boundary_conditions.push_back(std::move(bc));
-
-    svmp::FE::systems::FESystem system(mesh);
-    auto phi_space =
-        svmp::FE::spaces::SpaceFactory::create_h1(svmp::FE::ElementType::Tetra4, 1);
-    system.addField(svmp::FE::systems::FieldSpec{
-        .name = "phi",
-        .space = phi_space,
-        .components = 1,
-        .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData,
-    });
-
-    auto module = svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
-    ASSERT_TRUE(module);
-    auto u_id = system.findFieldByName("u");
-    if (u_id == svmp::FE::INVALID_FIELD_ID) {
-        u_id = system.findFieldByName("Velocity");
-    }
-    auto p_id = system.findFieldByName("p");
-    if (p_id == svmp::FE::INVALID_FIELD_ID) {
-        p_id = system.findFieldByName("Pressure");
-    }
-    ASSERT_NE(u_id, svmp::FE::INVALID_FIELD_ID);
-    ASSERT_NE(p_id, svmp::FE::INVALID_FIELD_ID);
-    // Velocity ghost penalty retired: the disabled pressure policy leaves
-    // no cut-facet terms in either block.
-    EXPECT_EQ(interiorFaceKernelCountForBlock(system, u_id, u_id), 0u);
-    EXPECT_EQ(interiorFaceKernelCountForBlock(system, p_id, p_id), 0u);
-#endif
-}
-
-TEST(NavierStokesLegacyBCs,
-     UnfittedFreeSurfaceCutMetadataScaleCapTranslation_AddsBoundedScale)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
-#else
-    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
-
-    constexpr int marker = 81;
-    auto mesh = buildSingleTetraBoundaryMesh(marker);
-    ASSERT_TRUE(mesh);
-
-    svmp::Physics::EquationModuleInput input{};
-    input.equation_type = "fluid";
-    input.mesh_name = "single_tetra";
-    input.mesh = mesh->local_mesh_ptr();
-
-    input.default_domain.params["Density"] = defined("1.0");
-    input.default_domain.params["Viscosity.model"] = defined("Constant");
-    input.default_domain.params["Viscosity.Value"] = defined("0.01");
-
-    svmp::Physics::BoundaryConditionInput bc{};
-    bc.name = "free_surface";
-    bc.boundary_marker = svmp::INVALID_LABEL;
-    bc.params["Type"] = defined("Free_surface");
-    bc.params["Implementation"] = defined("UnfittedLevelSet");
-    bc.params["Level_set_field_name"] = defined("phi");
-    bc.params["Active_domain"] = defined("LevelSetNegative");
-    bc.params["Active_domain_method"] = defined("CutVolume");
-    bc.params["External_pressure"] = defined("1.0");
-    bc.params["Enable_cut_cell_stabilization"] = defined("true");
-    bc.params["Use_cut_metadata_scale"] = defined("true");
-    bc.params["Cut_cell_metadata_scale_cap"] = defined("3.5");
     bc.params["Cut_cell_pressure_gradient_penalty"] = defined("0.2");
     bc.params["Small_cut_aggregation_maximum_root_path_length"] =
         defined("5");
@@ -3706,8 +3131,6 @@ TEST(NavierStokesLegacyBCs,
     auto module = svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
     ASSERT_TRUE(module);
     EXPECT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::InteriorFaceIntegral));
-    EXPECT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::ParameterRef));
-    EXPECT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::Minimum));
     const auto artifact = module->effectiveConfigurationArtifact();
     ASSERT_TRUE(artifact.has_value());
     EXPECT_NE(
@@ -3744,72 +3167,6 @@ TEST(NavierStokesLegacyBCs,
 }
 
 TEST(NavierStokesLegacyBCs,
-     RetiredVelocityGhostPenaltySettingsFailClosedInCurrentSchema)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
-#else
-    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
-
-    constexpr int marker = 81;
-    auto mesh = buildSingleTetraBoundaryMesh(marker);
-    ASSERT_TRUE(mesh);
-
-    svmp::Physics::EquationModuleInput input{};
-    input.equation_type = "fluid";
-    input.mesh_name = "single_tetra";
-    input.mesh = mesh->local_mesh_ptr();
-    input.equation_params["Element_order"] = defined("2");
-
-    input.default_domain.params["Density"] = defined("1.0");
-    input.default_domain.params["Viscosity.model"] = defined("Constant");
-    input.default_domain.params["Viscosity.Value"] = defined("0.01");
-
-    svmp::Physics::BoundaryConditionInput bc{};
-    bc.name = "free_surface";
-    bc.boundary_marker = svmp::INVALID_LABEL;
-    bc.params["Type"] = defined("Free_surface");
-    bc.params["Implementation"] = defined("UnfittedLevelSet");
-    bc.params["Level_set_field_name"] = defined("phi");
-    bc.params["Active_domain"] = defined("LevelSetNegative");
-    bc.params["Active_domain_method"] = defined("CutVolume");
-    bc.params["Generated_interface_geometry"] = defined("HighOrderImplicit");
-    bc.params["Geometry_tangent_policy"] = defined("RefreshedFrozenQuadrature");
-    bc.params["External_pressure"] = defined("1.0");
-    bc.params["Enable_cut_cell_stabilization"] = defined("true");
-    bc.params["Cut_cell_velocity_gradient_penalty"] = defined("1.5");
-    bc.params["Cut_cell_pressure_gradient_penalty"] = defined("0.2");
-    bc.params["Cut_cell_pressure_stabilization_policy"] =
-        defined("DisabledForRefreshedFrozenHighOrder");
-    bc.params["Cut_cell_velocity_max_derivative_order"] = defined("1");
-    input.boundary_conditions.push_back(std::move(bc));
-
-    svmp::FE::systems::FESystem system(mesh);
-    auto phi_space =
-        svmp::FE::spaces::SpaceFactory::create_h1(svmp::FE::ElementType::Tetra4, 2);
-    system.addField(svmp::FE::systems::FieldSpec{
-        .name = "phi",
-        .space = phi_space,
-        .components = 1,
-        .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData,
-    });
-
-    EXPECT_THROW(
-        {
-            auto module =
-                svmp::Physics::EquationModuleRegistry::instance().create(
-                    "fluid", input, system);
-            (void)module;
-        },
-        std::runtime_error);
-    EXPECT_EQ(system.findFieldByName("Velocity"),
-              svmp::FE::INVALID_FIELD_ID);
-    EXPECT_EQ(system.findFieldByName("Pressure"),
-              svmp::FE::INVALID_FIELD_ID);
-#endif
-}
-
-TEST(NavierStokesLegacyBCs,
      DisabledCutCellStabilizationRejectsUnusedSuboptions)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
@@ -3837,7 +3194,6 @@ TEST(NavierStokesLegacyBCs,
     bc.params["Implementation"] = defined("UnfittedLevelSet");
     bc.params["Level_set_field_name"] = defined("phi");
     bc.params["Active_domain"] = defined("LevelSetNegative");
-    bc.params["Active_domain_method"] = defined("CutVolume");
     bc.params["External_pressure"] = defined("1.0");
     bc.params["Enable_cut_cell_stabilization"] = defined("false");
     bc.params["Cut_cell_pressure_gradient_penalty"] = defined("0.2");
@@ -3895,7 +3251,6 @@ TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceActiveDomainTranslation_SetupSucc
     bc.params["Implementation"] = defined("UnfittedLevelSet");
     bc.params["Level_set_field_name"] = defined("phi");
     bc.params["Active_domain"] = defined("LevelSetNegative");
-    bc.params["Active_domain_method"] = defined("CutVolume");
     input.boundary_conditions.push_back(std::move(bc));
 
     svmp::FE::systems::FESystem system(mesh);
@@ -3913,120 +3268,6 @@ TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceActiveDomainTranslation_SetupSucc
     EXPECT_TRUE(formulationRecordsContainCutVolumeSide(
         system,
         svmp::FE::forms::CutVolumeSide::Negative));
-#endif
-}
-
-TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceKinematicAreaGradientInputsAreRetired)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
-#else
-    // Decision D48: KinematicAreaGradientTraction and the projected curvature
-    // field it read were retired.  The form (any of its spellings) and the
-    // boundary key Curvature_field (any of its spellings, whatever its value)
-    // fail while the boundary is translated, with a message that names
-    // SurfaceStress; nothing is accepted as a restatement.  The same
-    // boundary without them is the SurfaceStress default.
-    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
-
-    constexpr int marker = 82;
-    auto mesh = buildSingleTetraBoundaryMesh(marker);
-    ASSERT_TRUE(mesh);
-
-    using Extra = std::vector<std::pair<std::string, std::string>>;
-    const auto make_input = [&](const Extra& extra) {
-        svmp::Physics::EquationModuleInput input{};
-        input.equation_type = "fluid";
-        input.mesh_name = "single_tetra";
-        input.mesh = mesh->local_mesh_ptr();
-
-        input.default_domain.params["Density"] = defined("1.0");
-        input.default_domain.params["Viscosity.model"] = defined("Constant");
-        input.default_domain.params["Viscosity.Value"] = defined("0.01");
-
-        svmp::Physics::BoundaryConditionInput bc{};
-        bc.name = "free_surface";
-        bc.boundary_marker = svmp::INVALID_LABEL;
-        bc.params["Type"] = defined("Free_surface");
-        bc.params["Implementation"] = defined("UnfittedLevelSet");
-        bc.params["Level_set_field_name"] = defined("phi");
-        bc.params["Active_domain"] = defined("LevelSetNegative");
-        bc.params["Active_domain_method"] = defined("CutVolume");
-        bc.params["Surface_tension"] = defined("0.0728");
-        for (const auto& [key, value] : extra) {
-            bc.params[key] = defined(value);
-        }
-        input.boundary_conditions.push_back(std::move(bc));
-        return input;
-    };
-    const auto make_system = [&]() {
-        auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
-        auto scalar_space = svmp::FE::spaces::SpaceFactory::create_h1(
-            svmp::FE::ElementType::Tetra4, 1);
-        system->addField(svmp::FE::systems::FieldSpec{
-            .name = "phi",
-            .space = scalar_space,
-            .components = 1,
-            .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData,
-        });
-        system->addField(svmp::FE::systems::FieldSpec{
-            .name = "kappa_projected",
-            .space = scalar_space,
-            .components = 1,
-            .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData,
-        });
-        return system;
-    };
-
-    {
-        const auto input = make_input({});
-        auto system = make_system();
-        auto module = svmp::Physics::EquationModuleRegistry::instance().create(
-            "fluid", input, *system);
-        ASSERT_TRUE(module);
-        EXPECT_TRUE(formulationRecordsContain(
-            *system, svmp::FE::forms::FormExprType::InterfaceIntegral));
-        EXPECT_TRUE(formulationRecordsContainCutVolumeSide(
-            *system,
-            svmp::FE::forms::CutVolumeSide::Negative));
-    }
-
-    const std::vector<Extra> retired_inputs{
-        {{"Surface_tension_form", "KinematicAreaGradientTraction"}},
-        {{"Surface_tension_form", "TotalEnergyGradientTraction"}},
-        {{"Surface_tension_form", "DiscreteEnergyGradientTraction"}},
-        {{"Curvature_field", "kappa_projected"}},
-        {{"Curvature_field", ""}},
-        {{"CurvatureField", "kappa_projected"}},
-        {{"Curvature_field_name", "kappa_projected"}},
-        {{"CurvatureFieldName", "kappa_projected"}},
-        {{"Projected_curvature_field", "kappa_projected"}},
-        {{"ProjectedCurvatureField", "kappa_projected"}},
-        {{"Free_surface_curvature_field", "kappa_projected"}},
-        {{"FreeSurfaceCurvatureField", "kappa_projected"}},
-        {{"Surface_tension_form", "SurfaceStress"},
-         {"Curvature_field", "kappa_projected"}},
-    };
-    for (const auto& retired : retired_inputs) {
-        SCOPED_TRACE(retired.back().first + "=" + retired.back().second);
-        const auto input = make_input(retired);
-        auto system = make_system();
-        try {
-            auto module =
-                svmp::Physics::EquationModuleRegistry::instance().create(
-                    "fluid", input, *system);
-            (void)module;
-            ADD_FAILURE() << "the retired input must fail";
-        } catch (const std::runtime_error& error) {
-            const std::string message = error.what();
-            EXPECT_NE(message.find("decision D48"), std::string::npos)
-                << message;
-            EXPECT_NE(message.find("SurfaceStress"), std::string::npos)
-                << message;
-        }
-        EXPECT_EQ(system->findFieldByName("Velocity"),
-                  svmp::FE::INVALID_FIELD_ID);
-    }
 #endif
 }
 
@@ -4078,7 +3319,7 @@ TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceActiveDomainTranslation_DefaultsT
 #endif
 }
 
-TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceActiveDomainTranslation_RejectsNoneWithoutOptIn)
+TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceActiveDomainTranslation_RejectsNone)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
     GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
@@ -4127,167 +3368,6 @@ TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceActiveDomainTranslation_RejectsNo
 #endif
 }
 
-TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceActiveDomainTranslation_AllowsExplicitFullDomainOptIn)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
-#else
-    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
-
-    constexpr int marker = 89;
-    auto mesh = buildSingleTetraBoundaryMesh(marker);
-    ASSERT_TRUE(mesh);
-
-    svmp::Physics::EquationModuleInput input{};
-    input.equation_type = "fluid";
-    input.mesh_name = "single_tetra";
-    input.mesh = mesh->local_mesh_ptr();
-
-    input.default_domain.params["Density"] = defined("1.0");
-    input.default_domain.params["Viscosity.model"] = defined("Constant");
-    input.default_domain.params["Viscosity.Value"] = defined("0.01");
-
-    svmp::Physics::BoundaryConditionInput bc{};
-    bc.name = "free_surface";
-    bc.boundary_marker = svmp::INVALID_LABEL;
-    bc.params["Type"] = defined("Free_surface");
-    bc.params["Implementation"] = defined("UnfittedLevelSet");
-    bc.params["Level_set_field_name"] = defined("phi");
-    // A full-domain run states Active_domain=None (decision D47 item 3).
-    bc.params["Active_domain"] = defined("None");
-    bc.params["Allow_full_domain_unfitted_free_surface"] = defined("true");
-    bc.params["External_pressure"] = defined("1.0");
-    input.boundary_conditions.push_back(std::move(bc));
-
-    svmp::FE::systems::FESystem system(mesh);
-    auto phi_space =
-        svmp::FE::spaces::SpaceFactory::create_h1(svmp::FE::ElementType::Tetra4, 1);
-    system.addField(svmp::FE::systems::FieldSpec{
-        .name = "phi",
-        .space = phi_space,
-        .components = 1,
-        .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData,
-    });
-
-    auto module = svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
-    ASSERT_TRUE(module);
-    EXPECT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::InterfaceIntegral));
-    EXPECT_FALSE(formulationRecordsContainCutVolumeSide(
-        system,
-        svmp::FE::forms::CutVolumeSide::Negative));
-#endif
-}
-
-TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceLegacyVelocityExtensionFailsClosed)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
-#else
-    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
-
-    constexpr int marker = 86;
-    auto mesh = buildSingleTetraBoundaryMesh(marker);
-    ASSERT_TRUE(mesh);
-
-    svmp::Physics::EquationModuleInput input{};
-    input.equation_type = "fluid";
-    input.mesh_name = "single_tetra";
-    input.mesh = mesh->local_mesh_ptr();
-
-    input.default_domain.params["Density"] = defined("1.0");
-    input.default_domain.params["Viscosity.model"] = defined("Constant");
-    input.default_domain.params["Viscosity.Value"] = defined("0.01");
-
-    svmp::Physics::BoundaryConditionInput bc{};
-    bc.name = "free_surface";
-    bc.boundary_marker = svmp::INVALID_LABEL;
-    bc.params["Type"] = defined("Free_surface");
-    bc.params["Implementation"] = defined("UnfittedLevelSet");
-    bc.params["Level_set_field_name"] = defined("phi");
-    bc.params["Active_domain"] = defined("LevelSetNegative");
-    bc.params["Active_domain_method"] = defined("CutVolume");
-    bc.params["Enable_velocity_extension"] = defined("true");
-    input.boundary_conditions.push_back(std::move(bc));
-
-    svmp::FE::systems::FESystem system(mesh);
-    auto phi_space =
-        svmp::FE::spaces::SpaceFactory::create_h1(svmp::FE::ElementType::Tetra4, 1);
-    system.addField(svmp::FE::systems::FieldSpec{
-        .name = "phi",
-        .space = phi_space,
-        .components = 1,
-        .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData,
-    });
-
-    EXPECT_THROW(
-        {
-            auto module =
-                svmp::Physics::EquationModuleRegistry::instance().create(
-                    "fluid", input, system);
-            (void)module;
-        },
-        std::invalid_argument);
-#endif
-}
-
-TEST(NavierStokesLegacyBCs,
-     DisabledVelocityExtensionRejectsUnusedDiffusivity)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
-#else
-    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
-
-    constexpr int marker = 90;
-    auto mesh = buildSingleTetraBoundaryMesh(marker);
-    ASSERT_TRUE(mesh);
-
-    svmp::Physics::EquationModuleInput input{};
-    input.equation_type = "fluid";
-    input.mesh_name = "single_tetra";
-    input.mesh = mesh->local_mesh_ptr();
-
-    input.default_domain.params["Density"] = defined("1.0");
-    input.default_domain.params["Viscosity.model"] = defined("Constant");
-    input.default_domain.params["Viscosity.Value"] = defined("0.01");
-
-    svmp::Physics::BoundaryConditionInput bc{};
-    bc.name = "free_surface";
-    bc.boundary_marker = svmp::INVALID_LABEL;
-    bc.params["Type"] = defined("Free_surface");
-    bc.params["Implementation"] = defined("UnfittedLevelSet");
-    bc.params["Level_set_field_name"] = defined("phi");
-    bc.params["Active_domain"] = defined("LevelSetNegative");
-    bc.params["Active_domain_method"] = defined("CutVolume");
-    bc.params["Enable_velocity_extension"] = defined("false");
-    bc.params["Velocity_extension_diffusivity"] = defined("2.0");
-    input.boundary_conditions.push_back(std::move(bc));
-
-    svmp::FE::systems::FESystem system(mesh);
-    auto phi_space =
-        svmp::FE::spaces::SpaceFactory::create_h1(svmp::FE::ElementType::Tetra4, 1);
-    system.addField(svmp::FE::systems::FieldSpec{
-        .name = "phi",
-        .space = phi_space,
-        .components = 1,
-        .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData,
-    });
-
-    EXPECT_THROW(
-        {
-            auto module =
-                svmp::Physics::EquationModuleRegistry::instance().create(
-                    "fluid", input, system);
-            (void)module;
-        },
-        std::runtime_error);
-    EXPECT_EQ(system.findFieldByName("Velocity"),
-              svmp::FE::INVALID_FIELD_ID);
-    EXPECT_EQ(system.findFieldByName("Pressure"),
-              svmp::FE::INVALID_FIELD_ID);
-#endif
-}
-
 TEST(NavierStokesLegacyBCs, FreeSurfaceActiveDomainTranslation_RejectsBadValue)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
@@ -4315,56 +3395,6 @@ TEST(NavierStokesLegacyBCs, FreeSurfaceActiveDomainTranslation_RejectsBadValue)
     bc.params["Implementation"] = defined("UnfittedLevelSet");
     bc.params["Level_set_field_name"] = defined("phi");
     bc.params["Active_domain"] = defined("WaterSide");
-    input.boundary_conditions.push_back(std::move(bc));
-
-    svmp::FE::systems::FESystem system(mesh);
-    auto phi_space =
-        svmp::FE::spaces::SpaceFactory::create_h1(svmp::FE::ElementType::Tetra4, 1);
-    system.addField(svmp::FE::systems::FieldSpec{
-        .name = "phi",
-        .space = phi_space,
-        .components = 1,
-        .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData,
-    });
-
-    EXPECT_THROW(
-        {
-            auto module =
-                svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
-            (void)module;
-        },
-        std::runtime_error);
-#endif
-}
-
-TEST(NavierStokesLegacyBCs, FreeSurfaceActiveDomainMethodTranslation_RejectsBadValue)
-{
-#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
-    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
-#else
-    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
-
-    constexpr int marker = 84;
-    auto mesh = buildSingleTetraBoundaryMesh(marker);
-    ASSERT_TRUE(mesh);
-
-    svmp::Physics::EquationModuleInput input{};
-    input.equation_type = "fluid";
-    input.mesh_name = "single_tetra";
-    input.mesh = mesh->local_mesh_ptr();
-
-    input.default_domain.params["Density"] = defined("1.0");
-    input.default_domain.params["Viscosity.model"] = defined("Constant");
-    input.default_domain.params["Viscosity.Value"] = defined("0.01");
-
-    svmp::Physics::BoundaryConditionInput bc{};
-    bc.name = "free_surface";
-    bc.boundary_marker = svmp::INVALID_LABEL;
-    bc.params["Type"] = defined("Free_surface");
-    bc.params["Implementation"] = defined("UnfittedLevelSet");
-    bc.params["Level_set_field_name"] = defined("phi");
-    bc.params["Active_domain"] = defined("LevelSetNegative");
-    bc.params["Active_domain_method"] = defined("CellAverage");
     input.boundary_conditions.push_back(std::move(bc));
 
     svmp::FE::systems::FESystem system(mesh);

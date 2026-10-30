@@ -2834,16 +2834,11 @@ void equilibrate(std::vector<FE::Real>& matrix, std::size_t n)
             .generated_interface_domain_id = std::move(domain_id),
             .level_set_isovalue = 0.0,
             .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
-            .active_domain_method = ns::FreeSurfaceActiveDomainMethod::CutVolume,
             .external_pressure = 0.0,
             .surface_tension = 0.0,
             .cut_cell_stabilization = {
                 .enabled = true,
                 .pressure_gradient_penalty = 1.0,
-                .pressure_policy =
-                    ns::FreeSurfacePressureStabilizationPolicy::Enabled,
-                .use_cut_metadata_scale = true,
-                .cut_metadata_scale_cap = FE::Real{100.0},
             },
             .small_cut_aggregation = true,
         });
@@ -5174,8 +5169,6 @@ void setWetBlockP1Field(
     free_surface.generated_interface_domain_id = std::string(domain_id);
     free_surface.active_domain =
         ns::FreeSurfaceActiveDomain::LevelSetNegative;
-    free_surface.active_domain_method =
-        ns::FreeSurfaceActiveDomainMethod::CutVolume;
     free_surface.external_pressure = FE::Real{0.0};
     free_surface.surface_tension = FE::Real{0.0};
     free_surface.cut_cell_stabilization.enabled = false;
@@ -5816,8 +5809,6 @@ template <typename MatrixGlobalizer>
     options.surface_tension = FE::Real{0.0};
     options.include_transient_interface_penalty = false;
     options.enable_convection = false;
-    options.use_cut_metadata_scale = true;
-    options.cut_metadata_scale_cap = FE::Real{100.0};
 
     const auto target_phase =
         ns::IncompressibleTwoFluidPhaseOptions{
@@ -8060,8 +8051,6 @@ void collectivePublishWetBlockReferenceBundle(
     free_surface.generated_interface_domain_id = std::string(domain_id);
     free_surface.active_domain =
         ns::FreeSurfaceActiveDomain::LevelSetNegative;
-    free_surface.active_domain_method =
-        ns::FreeSurfaceActiveDomainMethod::CutVolume;
     free_surface.external_pressure = FE::Real{0.0};
     free_surface.surface_tension = FE::Real{0.0};
     free_surface.cut_cell_stabilization.enabled = false;
@@ -9407,8 +9396,6 @@ TEST(FreeSurfaceCutStability,
     free_surface.level_set_isovalue = FE::Real{0.0};
     free_surface.active_domain =
         ns::FreeSurfaceActiveDomain::LevelSetNegative;
-    free_surface.active_domain_method =
-        ns::FreeSurfaceActiveDomainMethod::CutVolume;
     free_surface.external_pressure = FE::Real{0.0};
     free_surface.surface_tension = FE::Real{0.0};
     free_surface.cut_cell_stabilization.enabled = false;
@@ -9967,15 +9954,10 @@ TEST(FreeSurfaceCutStability,
               ns::FreeSurfaceImplementation::UnfittedLevelSet);
     EXPECT_EQ(free_surface.active_domain,
               ns::FreeSurfaceActiveDomain::LevelSetNegative);
-    EXPECT_EQ(free_surface.active_domain_method,
-              ns::FreeSurfaceActiveDomainMethod::CutVolume);
     EXPECT_TRUE(options.enable_vms);
     EXPECT_FALSE(options.enable_convection);
     EXPECT_TRUE(free_surface.small_cut_aggregation);
     EXPECT_TRUE(free_surface.cut_cell_stabilization.enabled);
-    EXPECT_EQ(
-        free_surface.cut_cell_stabilization.pressure_policy,
-        ns::FreeSurfacePressureStabilizationPolicy::Enabled);
     ASSERT_TRUE(std::holds_alternative<FE::Real>(
         free_surface.cut_cell_stabilization
             .pressure_gradient_penalty));
@@ -9985,25 +9967,13 @@ TEST(FreeSurfaceCutStability,
     EXPECT_DOUBLE_EQ(
         pressure_gradient_penalty,
         FE::Real{1.0});
-    EXPECT_TRUE(
-        free_surface.cut_cell_stabilization.use_cut_metadata_scale);
-    ASSERT_TRUE(
-        free_surface.cut_cell_stabilization
-            .cut_metadata_scale_cap.has_value());
-    const auto cut_metadata_scale_cap =
-        free_surface.cut_cell_stabilization
-            .cut_metadata_scale_cap.value();
-    EXPECT_DOUBLE_EQ(
-        cut_metadata_scale_cap,
-        FE::Real{100.0});
 
     const auto equal_order =
         velocity_order == pressure_order ? 1 : 0;
     const auto vms_pspg_enabled = options.enable_vms ? 1 : 0;
     const auto pressure_ghost_enabled =
         free_surface.cut_cell_stabilization.enabled &&
-                free_surface.cut_cell_stabilization.pressure_policy ==
-                    ns::FreeSurfacePressureStabilizationPolicy::Enabled
+                pressure_gradient_penalty != FE::Real{0.0}
             ? 1
             : 0;
     const auto small_cut_aggregation_enabled =
@@ -10023,9 +9993,6 @@ TEST(FreeSurfaceCutStability,
     RecordProperty(
         "wp7_selected_pressure_gradient_penalty",
         realPropertyValue(pressure_gradient_penalty));
-    RecordProperty(
-        "wp7_selected_cut_metadata_scale_cap",
-        realPropertyValue(cut_metadata_scale_cap));
 #endif
 }
 

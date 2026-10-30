@@ -174,8 +174,7 @@ def test_test05_defaults_span_historical_false_wet_window():
         assert general.findtext("Number_of_time_steps") == "562"
         assert general.findtext("Time_step_size") == "0.0005"
         assert general.findtext("Increment_in_saving_restart_files") == "562"
-        free_surface = runner.free_surface_bc(root)
-        assert free_surface.findtext("Use_cut_metadata_scale") == "false"
+        runner.free_surface_bc(root)
 
     args = runner.argparse.Namespace(
         high_order_3d_benchmark_profile_qualification=True,
@@ -586,9 +585,9 @@ def test_stationary_sessile_case_supports_prescribed_contact_angle_ownership():
         root = runner.ET.parse(case_dir / "solver.xml").getroot()
         free_surface = runner.free_surface_bc(root)
         level_set = runner.level_set_equation(root)
+        assert level_set.find("Enable_bound_preserving_limiter") is None
         assert free_surface.findtext(
             "Contact_line_model") == "PrescribedContactAngle"
-        assert level_set.findtext("Enable_bound_preserving_limiter") == "false"
         assert free_surface.find("Contact_line_mobility") is None
         # Decision D4: prescribed contact lines move through Navier slip.
         assert free_surface.findtext("Wall_slip_model") == "Navier"
@@ -1694,9 +1693,6 @@ def test_fs16_p1_decks_retain_transport_safety_controls():
     runner = _load_runner()
     expected = {
         "SUPG_transient_scale": "2.0",
-        "Enable_discontinuity_capturing": "false",
-        # The bound-preserving limiter was retired (decision D51).
-        "Enable_bound_preserving_limiter": "false",
     }
     with tempfile.TemporaryDirectory() as temp_dir:
         base = Path(temp_dir)
@@ -1721,7 +1717,9 @@ def test_fs16_p1_decks_retain_transport_safety_controls():
             } == expected
             # Level-set discontinuity capturing was retired (decision D47),
             # the bound-preserving limiter by decision D51.
-            for name in ("Discontinuity_capturing_scale",
+            for name in ("Enable_discontinuity_capturing",
+                         "Enable_bound_preserving_limiter",
+                         "Discontinuity_capturing_scale",
                          "Discontinuity_capturing_gradient_epsilon",
                          "Discontinuity_capturing_max_courant",
                          "Bound_preserving_bound_tolerance",
@@ -1755,9 +1753,6 @@ def test_fs16_p1_decks_retain_transport_safety_controls():
         assert sessile_free_surface.findtext("Wall_slip_model") == "Navier"
         assert sessile_free_surface.findtext("Contact_line_mobility") == "1"
         assert sessile_free_surface.findtext("Wall_slip_length") == "0.1"
-        assert sessile_free_surface.findtext(
-            "Active_domain_smoothing_width"
-        ) == "0"
         assert sessile_free_surface.find("Contact_angle_penalty") is None
 
         sessile_mesh = runner.pv.read(
@@ -1876,7 +1871,6 @@ def test_surface_stress_droplet_omits_curvature_traction_state_by_default():
                              "Projected_curvature_field") or
             child.tag.startswith("Curvature_projection_")
         ]
-        assert free_surface.findtext("Surface_tension_form") == "SurfaceStress"
         assert free_surface.find("Curvature_field") is None
 
 
@@ -1896,7 +1890,7 @@ def test_static_capillary_controls_are_written_and_area_gradient_traction_is_ret
             solver,
             steps=1,
             surface_tension=0.5,
-            cut_cell_pressure_stabilization_policy="incremental",
+            cut_cell_pressure_stabilization_policy="enabled",
             static_capillary_finite_difference_relative_step=2.0e-5,
             static_capillary_limited_memory_history_size=6,
             static_capillary_limited_memory_curvature_tolerance=3.0e-11,
@@ -1906,10 +1900,10 @@ def test_static_capillary_controls_are_written_and_area_gradient_traction_is_ret
         root = runner.ET.parse(solver).getroot()
         level_set = runner.level_set_equation(root)
         free_surface = runner.free_surface_bc(root)
-        assert free_surface.findtext("Surface_tension_form") == "SurfaceStress"
         assert free_surface.find("Curvature_field") is None
-        assert free_surface.findtext(
-            "Cut_cell_pressure_stabilization_policy") == "Incremental"
+        # The pressure ghost penalty has no policy key any more: "enabled"
+        # (active whenever its coefficient is nonzero) writes nothing.
+        assert free_surface.find("Cut_cell_pressure_stabilization_policy") is None
         assert level_set.findtext(
             "Static_capillary_finite_difference_relative_step") == "2e-05"
         assert level_set.findtext(
@@ -2132,7 +2126,6 @@ def test_reinitialization_controls_are_retired():
         runner.configure_solver(solver_xml, steps=4)
         level_set = runner.level_set_equation(
             runner.ET.parse(solver_xml).getroot())
-        assert level_set.findtext("Enable_reinitialization") == "false"
         assert not [
             child.tag for child in level_set
             if child.tag.startswith("Reinitialization_")
@@ -2308,7 +2301,6 @@ def test_surface_stress_sessile_deck_has_no_unused_projected_curvature_state():
 
         assert level_set.find("Enable_curvature_projection") is None
         assert level_set.find("Projected_curvature_field") is None
-        assert free_surface.findtext("Surface_tension_form") == "SurfaceStress"
         assert free_surface.find("Curvature_field") is None
 
 
@@ -2501,15 +2493,10 @@ def test_impermeable_wall_advection_gate_emits_fixed_production_contract():
         assert contract["boundaries"] == {}
         assert contract["maximum_nodal_wall_normal_velocity"] == 0.0
         assert contract["actual"]["Velocity_source"] == "prescribed_data"
-        assert contract["actual"][
-            "Bound_preserving_enforce_impermeable_boundaries"
-        ] == "true"
-        assert float(contract["actual"][
-            "Bound_preserving_bound_tolerance"
-        ]) == runner.DEFAULT_BOUND_REPRESENTABILITY_SLACK
-        assert float(contract["actual"][
-            "Bound_preserving_sign_tolerance"
-        ]) == runner.BOUND_SIGN_TOLERANCE == 1.0e-12
+        assert contract["actual"]["SUPG_transient_scale"] == "2.0"
+        # The retired bound-preserving limiter (decision D51) writes no key;
+        # the slack bounds only the offline one-ring audit.
+        assert runner.BOUND_SIGN_TOLERANCE == 1.0e-12
         assert (
             runner.DEFAULT_BOUND_REPRESENTABILITY_SLACK / runner.LENGTH
             == runner.MAX_BOUND_REPRESENTABILITY_SLACK_OVER_LENGTH
@@ -2552,10 +2539,9 @@ def test_impermeable_wall_advection_gate_emits_fixed_production_contract():
             bc for bc in default_fluid.findall("Add_BC")
             if (bc.findtext("Type") or "").strip() == "Free_surface"
         )
-        assert free_surface.findtext(
-            "Cut_cell_velocity_gradient_penalty") == "0.1"
-        assert free_surface.findtext(
-            "Cut_cell_velocity_max_derivative_order") == "1"
+        # The retired velocity ghost penalty is not written.
+        assert free_surface.find("Cut_cell_velocity_gradient_penalty") is None
+        assert free_surface.find("Cut_cell_velocity_max_derivative_order") is None
 
 
 def test_impermeable_wall_advection_bound_slack_is_numerical_only():

@@ -276,8 +276,7 @@ def _write_solver_xml(case_dir: Path,
     <Contact_line_wall_normal>{normal}</Contact_line_wall_normal>
     <Contact_angle_degrees>{float(contact['equilibrium_contact_angle_degrees']):.16g}</Contact_angle_degrees>
     <Wall_slip_model>Navier</Wall_slip_model>
-    <Wall_slip_length>{float(contact['slip_length']):.16g}</Wall_slip_length>
-    <Active_domain_smoothing_width>0.0</Active_domain_smoothing_width>"""
+    <Wall_slip_length>{float(contact['slip_length']):.16g}</Wall_slip_length>"""
 
     solver = f"""<?xml version=\"1.0\" encoding=\"UTF-8\" ?>
 <svMultiPhysicsFile version=\"0.1\">
@@ -317,10 +316,6 @@ def _write_solver_xml(case_dir: Path,
   <Enable_SUPG>true</Enable_SUPG>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
   <SUPG_transient_scale>2.0</SUPG_transient_scale>
-  <Enable_discontinuity_capturing>false</Enable_discontinuity_capturing>
-  <Enable_bound_preserving_limiter>false</Enable_bound_preserving_limiter>
-  <Enable_reinitialization>false</Enable_reinitialization>
-  <Enable_volume_correction>false</Enable_volume_correction>
   <Output type=\"Spatial\">
     <Level_set>true</Level_set>
     <Generated_interface>true</Generated_interface>
@@ -365,13 +360,9 @@ def _write_solver_xml(case_dir: Path,
     <Generated_interface_geometry>LinearCorner</Generated_interface_geometry>
     <Level_set_isovalue>0.0</Level_set_isovalue>
     <Active_domain>{active_domain}</Active_domain>
-    <Active_domain_method>CutVolume</Active_domain_method>
     <External_pressure>0.0</External_pressure>
     <Surface_tension>{surface_tension:.16g}</Surface_tension>
-    <Surface_tension_form>SurfaceStress</Surface_tension_form>
-    <Enable_velocity_extension>false</Enable_velocity_extension>
     <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
-    <Use_cut_metadata_scale>true</Use_cut_metadata_scale>
     <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>{contact_block}
   </Add_BC>
 </Add_equation>

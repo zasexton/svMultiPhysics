@@ -128,6 +128,13 @@ QUALIFICATION_REPORT_SCHEMA_VERSION = 2
 # SurfaceStress is the only capillary route.
 CAPILLARY_FORCE_FORMS = ("surface_stress",)
 RETIRED_CAPILLARY_FORCE_FORMS = ("kinematic_area_gradient_traction",)
+# The cut-cell pressure stabilization policies other than enabled were
+# removed from the solver input; frozen runner commands may still pass them.
+RETIRED_PRESSURE_STABILIZATION_POLICIES = (
+    "incremental",
+    "disabled",
+    "disabled_for_refreshed_frozen_high_order",
+)
 # Decision D48 also retired the level-set curvature projection: the solver
 # rejects its keys, and SurfaceStress reads no curvature field.  These
 # options wrote, required or gated that projection, and the three smokes
@@ -778,7 +785,6 @@ def configure_solver(solver_xml: Path,
                      generated_interface_quadrature_order: int | None = None,
                      interface_quadrature_order: int | None = None,
                      volume_quadrature_order: int | None = None,
-                     cut_cell_velocity_gradient_penalty: float | None = None,
                      cut_cell_pressure_gradient_penalty: float | None = None,
                      cut_cell_pressure_stabilization_policy: str | None = None,
                      active_domain: str = "LevelSetNegative",
@@ -918,27 +924,13 @@ def configure_solver(solver_xml: Path,
     require_text(free_surface, "Implementation", "UnfittedLevelSet")
     active_domain = normalized_active_domain(active_domain)
     require_text(free_surface, "Active_domain", active_domain)
-    require_text(free_surface, "Active_domain_method", "CutVolume")
-    if disable_cut_metadata_scale:
-        set_text(free_surface, "Use_cut_metadata_scale", "false")
-    else:
-        require_text(free_surface, "Use_cut_metadata_scale", "true")
+    # disable_cut_metadata_scale and disable_velocity_extension write nothing:
+    # the cut-metadata scale and the same-field dry-domain velocity extension
+    # were removed from the solver input.  The flags stay in the run records.
     if disable_cut_stabilization:
         set_text(free_surface, "Enable_cut_cell_stabilization", "false")
     else:
         require_text(free_surface, "Enable_cut_cell_stabilization", "true")
-    if disable_velocity_extension:
-        set_text(free_surface, "Enable_velocity_extension", "false")
-    else:
-        extension_value = text(
-            free_surface, "Enable_velocity_extension"
-        ).strip().lower()
-        if extension_value in {"true", "1", "yes", "on"}:
-            raise ValueError(
-                "the same-field dry-domain velocity extension is retired; "
-                "remove it from the case or pass --disable-velocity-extension "
-                "when replaying an archived input"
-            )
     if generated_interface_geometry is not None:
         set_text(free_surface, "Generated_interface_geometry", generated_interface_geometry)
     if implicit_cut_quadrature_backend is not None:
@@ -956,58 +948,35 @@ def configure_solver(solver_xml: Path,
     if implicit_cut_max_subdivision_depth is not None:
         set_text(free_surface, "Implicit_cut_max_subdivision_depth", str(implicit_cut_max_subdivision_depth))
     if generated_interface_quadrature_order is not None:
-        set_text(free_surface, "Generated_interface_quadrature_order", str(generated_interface_quadrature_order))
+        set_text(free_surface, "Cut_quadrature_order", str(generated_interface_quadrature_order))
     if interface_quadrature_order is not None:
         set_text(free_surface, "Interface_quadrature_order", str(interface_quadrature_order))
     if volume_quadrature_order is not None:
         set_text(free_surface, "Volume_quadrature_order", str(volume_quadrature_order))
-    if cut_cell_velocity_gradient_penalty is not None:
-        set_text(
-            free_surface,
-            "Cut_cell_velocity_gradient_penalty",
-            f"{cut_cell_velocity_gradient_penalty:.16g}",
-        )
     if cut_cell_pressure_gradient_penalty is not None:
         set_text(
             free_surface,
             "Cut_cell_pressure_gradient_penalty",
             f"{cut_cell_pressure_gradient_penalty:.16g}",
         )
-    pressure_stabilization_policy_names = {
-        "enabled": "Enabled",
-        "incremental": "Incremental",
-        "disabled": "Disabled",
-        "disabled_for_refreshed_frozen_high_order":
-            "DisabledForRefreshedFrozenHighOrder",
-    }
-    if cut_cell_pressure_stabilization_policy is not None:
-        if (cut_cell_pressure_stabilization_policy not in
-                pressure_stabilization_policy_names):
-            raise ValueError(
-                "cut-cell pressure stabilization policy must be enabled, "
-                "incremental, disabled, or "
-                "disabled_for_refreshed_frozen_high_order")
-        set_text(
-            free_surface,
-            "Cut_cell_pressure_stabilization_policy",
-            pressure_stabilization_policy_names[
-                cut_cell_pressure_stabilization_policy],
-        )
+    # The pressure ghost penalty is active whenever its coefficient is
+    # nonzero; the policy key was removed from the solver input, so "enabled"
+    # is the only state and the option writes nothing.
+    if (cut_cell_pressure_stabilization_policy is not None and
+            cut_cell_pressure_stabilization_policy != "enabled"):
+        raise ValueError(
+            "cut-cell pressure stabilization policy must be enabled (the "
+            "policy key was removed from the solver input)")
     validate_capillary_force_form(capillary_force_form)
     if surface_tension is not None:
         set_text(free_surface, "Surface_tension", f"{surface_tension:.16g}")
-        if surface_tension > 0.0:
-            set_text(free_surface, "Surface_tension_form", "SurfaceStress")
     if advection_velocity_extension_method is not None:
         level_set = level_set_equation(root)
         # The algebraic wet extension and its switch were retired (decisions
         # D47 and D55); the PDE extension is selected by method and coupling.
-        for retired in ("Constant_velocity",
-                        "Use_wet_extension_advection_velocity",
-                        "Wet_extension_advection_velocity_method"):
-            element = level_set.find(retired)
-            if element is not None:
-                level_set.remove(element)
+        element = level_set.find("Constant_velocity")
+        if element is not None:
+            level_set.remove(element)
         set_text(level_set, "Velocity_source", "prescribed_data")
         set_text(level_set, "Velocity_field_name", "LevelSetAdvectionVelocity")
         set_text(level_set, "Auto_register_velocity_field", "true")
@@ -1566,10 +1535,6 @@ def write_mini_solver_xml(case_dir: Path,
   <Enable_SUPG>true</Enable_SUPG>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
   <SUPG_transient_scale>2.0</SUPG_transient_scale>
-  <Enable_discontinuity_capturing>false</Enable_discontinuity_capturing>
-  <Enable_bound_preserving_limiter>false</Enable_bound_preserving_limiter>
-  <Enable_reinitialization>false</Enable_reinitialization>
-  <Enable_volume_correction>false</Enable_volume_correction>
   <Output type="Spatial">
     <Level_set>true</Level_set>
     <Generated_interface>true</Generated_interface>
@@ -1645,12 +1610,9 @@ def write_mini_solver_xml(case_dir: Path,
     <Generated_interface_domain_id>open_vessel_surface</Generated_interface_domain_id>
     <Level_set_isovalue>0.0</Level_set_isovalue>
     <Active_domain>LevelSetNegative</Active_domain>
-    <Active_domain_method>CutVolume</Active_domain_method>
     <External_pressure>0.0</External_pressure>
     <Surface_tension>0.0</Surface_tension>
-    <Enable_velocity_extension>false</Enable_velocity_extension>
     <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
-    <Use_cut_metadata_scale>true</Use_cut_metadata_scale>
     <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
   </Add_BC>
 </Add_equation>
@@ -1843,7 +1805,6 @@ def configure_sessile_solver_xml(case_dir: Path,
                                   mobility: float,
                                   slip_length: float,
                                   dynamic: bool,
-                                  smoothing_width: float,
                                   wall_face: str = "wall_bottom",
                                   contact_line_model: str = "dynamic",
                                   active_domain: str = "LevelSetNegative",
@@ -1913,9 +1874,7 @@ def configure_sessile_solver_xml(case_dir: Path,
         normalized_active_domain(active_domain),
     )
     set_text(free_surface, "Generated_interface_geometry", "LinearCorner")
-    set_text(free_surface, "Enable_velocity_extension", "false")
     set_text(free_surface, "Surface_tension", f"{surface_tension:.16g}")
-    set_text(free_surface, "Surface_tension_form", "SurfaceStress")
     set_text(
         free_surface,
         "Contact_line_model",
@@ -1931,8 +1890,6 @@ def configure_sessile_solver_xml(case_dir: Path,
     )
     set_text(free_surface, "Contact_angle_degrees",
              f"{equilibrium_angle_degrees:.16g}")
-    set_text(free_surface, "Active_domain_smoothing_width",
-             f"{smoothing_width:.16g}")
     # Decision D4: both contact laws move the contact line through Navier
     # slip on the wetted wall; only the dynamic law adds line friction.
     set_text(free_surface, "Wall_slip_model", "Navier")
@@ -2133,11 +2090,6 @@ def write_sessile2d_case(case_dir: Path,
         mobility,
         slip_length,
         dynamic,
-        # DynamicContactAngle is assembled on the sharp CutVolume wall and
-        # contact domains.  It has no diffuse active-domain width, so a
-        # nonzero value is an unsupported model rather than a mesh-scale
-        # regularization choice.
-        0.0,
         wall_face,
         contact_line_model,
         active_domain,
@@ -2929,8 +2881,6 @@ def write_curved_tet3d_solver_xml(case_dir: Path,
   <Auto_register_velocity_field>true</Auto_register_velocity_field>
   <Enable_SUPG>true</Enable_SUPG>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
-  <Enable_reinitialization>false</Enable_reinitialization>
-  <Enable_volume_correction>false</Enable_volume_correction>
   <Output type="Spatial">
     <Level_set>true</Level_set>
     <Generated_interface>true</Generated_interface>
@@ -2995,13 +2945,9 @@ def write_curved_tet3d_solver_xml(case_dir: Path,
     <Generated_interface_domain_id>open_vessel_surface</Generated_interface_domain_id>
     <Level_set_isovalue>0.0</Level_set_isovalue>
     <Active_domain>LevelSetNegative</Active_domain>
-    <Active_domain_method>CutVolume</Active_domain_method>
-    <Enable_velocity_extension>false</Enable_velocity_extension>
-    <Velocity_extension_diffusivity>1.0</Velocity_extension_diffusivity>
     <External_pressure>0.0</External_pressure>
     <Surface_tension>0.0</Surface_tension>
     <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
-    <Use_cut_metadata_scale>true</Use_cut_metadata_scale>
     <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
   </Add_BC>
 </Add_equation>
@@ -7510,7 +7456,6 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "min_interface_mean_abs_height_change",
         "min_interface_slope_change",
         "min_interface_final_height_span",
-        "cut_cell_velocity_gradient_penalty",
         "cut_cell_pressure_gradient_penalty",
         "reference_profile_sample_radius",
         "reference_profile_elevated_front_clearance",
@@ -10646,7 +10591,7 @@ def capillary_wave_boundary_contract_metrics(case_dir: Path) -> dict[str, Any]:
         root = ET.parse(case_dir / "solver.xml").getroot()
         fluid = fluid_equation(root)
         level_set = level_set_equation(root)
-        free_surface = free_surface_bc(root)
+        free_surface_bc(root)  # the deck must declare the free surface
     except (OSError, ET.ParseError, ValueError) as exc:
         return {
             "capillary_wave_boundary_contract_valid": False,
@@ -10710,9 +10655,6 @@ def capillary_wave_boundary_contract_metrics(case_dir: Path) -> dict[str, Any]:
     extension_coupling = (
         level_set.findtext("Advection_velocity_extension_coupling") or ""
     ).strip().lower()
-    velocity_extension = (
-        free_surface.findtext("Enable_velocity_extension") or ""
-    ).strip().lower()
     top_boundaries = [
         bc for bc in level_set.findall("Add_BC")
         if bc.attrib.get("name") == "wall_top"
@@ -10733,11 +10675,6 @@ def capillary_wave_boundary_contract_metrics(case_dir: Path) -> dict[str, Any]:
         errors.append(
             "capillary-wave transport must couple the extension monolithically"
         )
-    if velocity_extension in {"true", "1", "yes", "on"}:
-        errors.append(
-            "capillary-wave physical momentum must not use the retired "
-            "same-field dry-domain velocity extension"
-        )
 
     return {
         "capillary_wave_boundary_contract_valid": not errors,
@@ -10753,9 +10690,6 @@ def capillary_wave_boundary_contract_metrics(case_dir: Path) -> dict[str, Any]:
         ),
         "capillary_wave_extension_method": extension_method,
         "capillary_wave_extension_coupling": extension_coupling,
-        "capillary_wave_fluid_velocity_extension_enabled": (
-            velocity_extension in {"true", "1", "yes", "on"}
-        ),
     }
 
 
@@ -12081,7 +12015,6 @@ def configure_case_solver_xml(run_dir: Path, args: argparse.Namespace) -> None:
         generated_interface_quadrature_order=args.generated_interface_quadrature_order,
         interface_quadrature_order=args.interface_quadrature_order,
         volume_quadrature_order=args.volume_quadrature_order,
-        cut_cell_velocity_gradient_penalty=args.cut_cell_velocity_gradient_penalty,
         cut_cell_pressure_gradient_penalty=args.cut_cell_pressure_gradient_penalty,
         cut_cell_pressure_stabilization_policy=getattr(
             args, "cut_cell_pressure_stabilization_policy", None),
@@ -13026,12 +12959,10 @@ def apply_high_order_3d_benchmark_profile_qualification_defaults(
     set_default(args, "timeout_seconds", 7200.0)
     set_default(args, "max_solver_elapsed_seconds_per_accepted_step", 6.0)
     args.use_high_order_implicit_cuts = True
-    # D18/D38 deliberately use the unscaled cut-stabilization policy.  Prior
-    # production probes showed that inverse wet-volume metadata amplification
-    # worsens the small-cut nonlinear/pressure behavior, and both checked-in
-    # benchmark decks declare Use_cut_metadata_scale=false.  Keep the profile
-    # configurator consistent with that audited deck contract instead of
-    # failing preflight by applying the generic "scale enabled" expectation.
+    # D18/D38 deliberately use the unscaled cut stabilization (prior production
+    # probes showed that inverse wet-volume metadata amplification worsens the
+    # small-cut nonlinear/pressure behavior); the cut-metadata scale has since
+    # been removed from the solver input, and the flag only records that.
     args.disable_cut_metadata_scale = True
     args.disable_vtk_output = False
     # False-wall-wet qualification is a transient-history gate.  Retain every
@@ -14000,17 +13931,14 @@ def main(arguments: Sequence[str] | None = None) -> int:
         choices=("pde_harmonic", "pde_normal"),
     )
     parser.add_argument("--trace-level-set-advection-velocity", action="store_true")
-    parser.add_argument("--cut-cell-velocity-gradient-penalty", type=float)
     parser.add_argument("--cut-cell-pressure-gradient-penalty", type=float)
     parser.add_argument(
         "--cut-cell-pressure-stabilization-policy",
-        choices=(
-            "enabled",
-            "incremental",
-            "disabled",
-            "disabled_for_refreshed_frozen_high_order",
-        ),
-        help="cut-adjacent pressure ghost-penalty state",
+        choices=RETIRED_PRESSURE_STABILIZATION_POLICIES + ("enabled",),
+        metavar="{enabled}",
+        help=("cut-adjacent pressure ghost-penalty state; writes nothing (the "
+              "penalty is active whenever its coefficient is nonzero; the "
+              "other policies were removed from the solver input)"),
     )
     parser.add_argument("--surface-tension", type=float)
     parser.add_argument(
@@ -14163,6 +14091,13 @@ def main(arguments: Sequence[str] | None = None) -> int:
             args.retired_curvature_projection_options)
         reject_retired_wet_extension_options(
             args.retired_wet_extension_options)
+        if (args.cut_cell_pressure_stabilization_policy in
+                RETIRED_PRESSURE_STABILIZATION_POLICIES):
+            raise ValueError(
+                "--cut-cell-pressure-stabilization-policy "
+                f"{args.cut_cell_pressure_stabilization_policy}: the pressure "
+                "stabilization policy was removed from the solver input; only "
+                "enabled remains")
     except ValueError as error:
         parser.error(str(error))
     del args.retired_curvature_projection_options

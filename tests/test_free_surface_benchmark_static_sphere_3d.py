@@ -123,7 +123,6 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     assert root.find("GeneralSimulationParameters/Number_of_spatial_dimensions").text == "3"
     assert "<Geometry_tangent_policy>RefreshedFrozenQuadrature" in text
     assert "<Interface_quadrature_order>2" in text
-    assert "<Surface_tension_form>SurfaceStress" in text
     assert "Curvature_projection" not in text and "Curvature_field" not in text
     assert "<Velocity_source>coupled_field" in text
     assert root.find("GeneralSimulationParameters/Number_of_time_steps").text == str(case["steps"])
@@ -154,7 +153,7 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     assert sum(1 for b in root.iter("Add_BC") if b.findtext("Type") == "Dir") == 6
     schedule = gen.time_schedule(8, 12.0, 5.0, 100)
     stress = gen.solver_xml("surface_stress", schedule, 10, 1, "pde_extension")
-    assert "SurfaceStress" in stress and "Curvature_field" not in stress
+    assert "Curvature_field" not in stress
     assert "<Advection_velocity_extension_method>pde_harmonic" in stress
     # The algebraic wet extension was retired (decisions D47 and D55).
     assert "wet_extension" not in gen.TRANSPORTS
@@ -400,7 +399,6 @@ def test_protocol_deck_has_the_d25_settings(tmp_path):
     text = (tmp_path / "p/solver.xml").read_text()
     free_surface = root.find("Add_equation[@type='fluid']/Add_BC[@name='free_surface']")
     assert free_surface.findtext("Surface_tension_semi_implicit") == "NormalIncrement"
-    assert free_surface.findtext("Surface_tension_form") == "SurfaceStress"
     assert text.count("Surface_tension_semi_implicit>") == 2
     level_set = root.find("Add_equation[@type='level_set']")
     assert level_set.findtext("Enable_kinematic_reconciliation") == "true"
@@ -461,10 +459,12 @@ def test_half_step_and_diagnostic_step_options(tmp_path):
 
 
 # SHA-256 of solver.xml written by the generator before D25 (commit 8174b6c2) for
-# R/h = 8 with its defaults: surface_stress at La = 12.  The kag_lumped deck at
-# La = 120 left the table with the form (decision D48).
+# R/h = 8 with its defaults: surface_stress at La = 12, without the lines of the
+# no-op keys later removed from the solver input (the deck of 8174b6c2 hashed to
+# f3fad829...).  The kag_lumped deck at La = 120 left the table with the form
+# (decision D48).
 DECK_SHA256_BEFORE_D25 = {
-    ("surface_stress", 12.0, 2.0): "f3fad82993c16e662bd59fd2817696638dc847d568fd854ac7125ea6ea2699a3",
+    ("surface_stress", 12.0, 2.0): "a8e85905fec81f8a454ab89eec9c64e24fc9399b1f0cafee6fbb60054c157b4b",
 }
 
 

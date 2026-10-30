@@ -191,7 +191,6 @@
         "ApplicationDriverLevelSetWorkflows.MaintenanceWorkLedgerRequiresExplicitCutTopologyProvenance",
         "ApplicationDriverLevelSetWorkflows.ConvergedMaintenanceAppliesOneRepresentationDeltaToEveryHistoryLevel",
         "ApplicationDriverConservativePhaseCandidatesTest.StagesAndCommitsTheTransportedPhaseAgainstAuthoritativeGeometry",
-        "ApplicationDriverLevelSetVolumeCorrection.ReportsAuthoritativeFreeSurfacePotentialChange",
         "ApplicationDriverLevelSetVolumeCorrection.CandidateGeometryFailureRestoresCompleteMaintenanceTransaction"
       ],
       "execution": {
@@ -284,7 +283,7 @@
   ],
   "gates": {
     "expected_group_count": 5,
-    "expected_distinct_test_count": 41,
+    "expected_distinct_test_count": 40,
     "expected_quantitative_evidence_count": 9,
     "expected_failures": 0,
     "expected_errors": 0,
@@ -334,7 +333,6 @@
       "claim": "prerequisite_accepted_surface_wall_volume_state_and_global_shift_work_are_revision_bound_low_level_records",
       "evidence": [
         "ApplicationDriverLevelSetWorkflows.AcceptedFunctionalUsesAuthoritativeSnapshotAndRecordsGlobalState",
-        "ApplicationDriverLevelSetVolumeCorrection.ReportsAuthoritativeFreeSurfacePotentialChange",
         "ApplicationDriverLevelSetVolumeCorrection.CandidateGeometryFailureRestoresCompleteMaintenanceTransaction"
       ]
     },

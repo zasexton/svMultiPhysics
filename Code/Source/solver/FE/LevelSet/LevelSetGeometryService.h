@@ -117,7 +117,7 @@ struct LevelSetGeometryHost {
       validate_cut_volume_consumer{};
 
   /// True when a consumer of the generated cut data reads ghost cells beyond
-  /// <Generated_cut_ghost_layers> (Application: from the curvature recovery
+  /// ActiveCutVolumeRequest::generated_cut_ghost_layers (Application: from the curvature recovery
   /// modes and the assembly ghost policy).  Unset: every layer is kept.
   std::function<bool(const std::vector<ActiveCutVolumeRequest>&)>
       generated_cut_needs_every_ghost_layer{};

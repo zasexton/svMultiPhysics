@@ -135,16 +135,7 @@ bool activeCutDomainIsExplicitlyEnabled(
   const auto enabled =
       firstDefinedBoolParameter(
           params,
-          {"Enable_level_set_cut_domain",
-           "EnableLevelSetCutDomain",
-           "Level_set_cut_domain",
-           "LevelSetCutDomain",
-           "Generated_level_set_cut_domain",
-           "GeneratedLevelSetCutDomain",
-           "Cut_domain",
-           "CutDomain"});
-  // Cut_domain_type, an unused second way to enable the same domain, was
-  // removed (decision D47).
+          {"Enable_level_set_cut_domain"});
   return enabled.value_or(false);
 }
 
@@ -303,28 +294,6 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
     return std::nullopt;
   }
 
-  const auto method =
-      firstDefinedParameter(cut_params,
-                            {"Active_domain_method"});
-  if (method.has_value()) {
-    const auto method_token = normalizedToken(*method);
-    if (method_token == "smoothedindicator" ||
-        method_token == "smoothindicator" ||
-        method_token == "indicator") {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Active_domain_method '" +
-          trimCopy(*method) +
-          "' (SmoothedIndicator) was retired (decision D42); use CutVolume.");
-    }
-    if (!method_token.empty() && method_token != "cutvolume" &&
-        method_token != "cutcellvolume" &&
-        method_token != "exactcutvolume") {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Unknown Active_domain_method '" +
-          trimCopy(*method) + "'. Supported value: CutVolume.");
-    }
-  }
-
   ActiveCutVolumeRequest request{};
   if (active_token == "levelsetnegative" ||
       active_token == "negative" ||
@@ -361,8 +330,7 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
   if (const auto quadrature_order =
           firstDefinedIntParameter(
               cut_params,
-              {"Generated_interface_quadrature_order",
-               "Cut_quadrature_order"})) {
+              {"Cut_quadrature_order"})) {
     request.quadrature_order = *quadrature_order;
   }
   if (const auto interface_quadrature_order =
@@ -443,23 +411,10 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
     request.affected_cell_neighborhood_layers =
         *affected_neighborhood_layers;
   }
-  if (const auto ghost_layers =
-          firstDefinedIntParameter(
-              cut_params,
-              {"Generated_cut_ghost_layers"})) {
-    if (*ghost_layers < -1) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Generated_cut_ghost_layers must "
-          "be -1 (every stored cell) or a nonnegative number of ghost "
-          "face layers.");
-    }
-    request.generated_cut_ghost_layers = *ghost_layers;
-  }
   if (const auto allow_corner_linearized =
           firstDefinedBoolParameter(
               cut_params,
-              {"Allow_corner_linearized_cut_geometry",
-               "Allow_corner_linearized_geometry"})) {
+              {"Allow_corner_linearized_cut_geometry"})) {
     request.allow_corner_linearized_geometry = *allow_corner_linearized;
   }
   // Retention A/B experiment knob: request the retained generated-volume
@@ -637,7 +592,7 @@ activeCutVolumeRequests(const EquationParameters& equation)
       equation_type == "fluid" || equation_type == "stokes";
   const auto physical_model = firstDefinedParameter(
       eq_params,
-      {"Free_surface_physical_model", "FreeSurfacePhysicalModel"});
+      {"Free_surface_physical_model"});
   if (supports_two_fluid && physical_model.has_value() &&
       trimCopy(*physical_model) == "IncompressibleTwoFluid") {
     const auto level_set_field = firstDefinedParameter(
@@ -666,7 +621,6 @@ activeCutVolumeRequests(const EquationParameters& equation)
     material_interface_params["Interface_marker"] =
         std::to_string(*interface_marker);
     material_interface_params["Active_domain"] = "LevelSetNegative";
-    material_interface_params["Active_domain_method"] = "CutVolume";
     auto request = activeCutVolumeRequestFromParameters(
         material_interface_params,
         true,

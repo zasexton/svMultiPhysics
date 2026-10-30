@@ -104,9 +104,7 @@
     <Implementation>FittedALE</Implementation>
     <External_pressure>0.0</External_pressure>
     <Surface_tension>0.0</Surface_tension>
-    <Normal_kinematic_policy>MatchFluidNormalVelocity</Normal_kinematic_policy>
     <Tangential_mesh_policy>Free</Tangential_mesh_policy>
-    <Kinematic_enforcement>MeshNitsche</Kinematic_enforcement>
     <Kinematic_nitsche_gamma>10</Kinematic_nitsche_gamma>
   </Add_BC>
 </Add_equation>

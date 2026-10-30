@@ -251,11 +251,7 @@ def solver_xml(schedule: dict, steps: int, cadence: int) -> str:
       <Implementation>FittedALE</Implementation>
       <External_pressure>{EXTERNAL_PRESSURE:.17g}</External_pressure>
       <Surface_tension>{SURFACE_TENSION:.17g}</Surface_tension>
-      <Surface_tension_form>SurfaceStress</Surface_tension_form>
-      <Allow_fitted_surface_stress>true</Allow_fitted_surface_stress>
-      <Normal_kinematic_policy>MatchFluidNormalVelocity</Normal_kinematic_policy>
       <Tangential_mesh_policy>{TANGENTIAL_MESH_POLICY}</Tangential_mesh_policy>
-      <Kinematic_enforcement>MeshNitsche</Kinematic_enforcement>
       <Kinematic_nitsche_gamma>{KINEMATIC_NITSCHE_GAMMA:.17g}</Kinematic_nitsche_gamma>
     </Add_BC>
   </Add_equation>

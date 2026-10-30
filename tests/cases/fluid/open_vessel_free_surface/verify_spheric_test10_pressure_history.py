@@ -74,16 +74,8 @@ def parse_solver_xml(path: Path) -> dict[str, Any]:
     if pressure_constraint is not None:
         constraint_path = child_text(pressure_constraint, "Values_file_path")
         constraint_id_type = child_text(pressure_constraint, "Id_type")
-    source_path = None
-    for tag in (
-        "Momentum_source_temporal_and_spatial_values_file_path",
-        "MomentumSourceTemporalAndSpatialValuesFilePath",
-        "Body_force_temporal_and_spatial_values_file_path",
-        "BodyForceTemporalAndSpatialValuesFilePath",
-    ):
-        source_path = child_text(fluid, tag)
-        if source_path:
-            break
+    source_path = child_text(
+        fluid, "Momentum_source_temporal_and_spatial_values_file_path") or None
 
     text = path.read_text(encoding="utf-8")
     lower_text = text.lower()

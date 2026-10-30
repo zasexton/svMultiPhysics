@@ -303,24 +303,6 @@ struct CANNRow {
 
 /// @brief Defines parameter name and value, and stores them in
 /// maps for settng values from XML.
-/// @brief Replacement of a deprecated extension spelling, or an empty view.
-///
-/// Spellings that frozen decks and qualification runners still use are
-/// accepted for one release with a warning (decision D47); the replacement
-/// can depend on the XML element (Add_equation, or a boundary condition).
-std::string_view deprecated_extension_parameter_replacement(
-    const std::string& xml_element_name, const std::string& name);
-
-/// @brief The input text of a retired setting restated with its only
-/// accepted value, or an empty string.
-///
-/// The keys of the retired CurvatureTraction route (decision D47 Q2) are
-/// still accepted with their no-op values, Use_level_set_curvature=false and
-/// Allow_fitted_surface_stress=true; the Navier-Stokes register rejects every
-/// other value.
-std::string restated_retired_extension_parameter(
-    const std::string& name, const std::string& value);
-
 class ParameterLists
 {
   public:
@@ -430,15 +412,6 @@ class ParameterLists
       if (inserted) {
         it->second.set(name, false, std::string{});
         params_map[name] = &it->second;
-        const auto replacement =
-            deprecated_extension_parameter_replacement(xml_element_name, name);
-        if (!replacement.empty()) {
-          deprecated_spellings.emplace_back(name, std::string(replacement));
-        }
-        auto restated = restated_retired_extension_parameter(name, value);
-        if (!restated.empty()) {
-          deprecated_spellings.emplace_back(std::move(restated), std::string{});
-        }
       }
       it->second.set_raw_value(value);
     }
@@ -489,11 +462,6 @@ class ParameterLists
         VectorParameter<std::string>* >> params_map;
 
     std::map<std::string, Parameter<std::string>> extra_string_params;
-
-    /// @brief Deprecated extension spellings this element accepted, as
-    /// (spelling, replacement) pairs in input order.  A retired setting
-    /// restated with its no-op value is recorded as ("Key=value", "").
-    std::vector<std::pair<std::string, std::string>> deprecated_spellings;
 
     std::string xml_element_name = "";
 };
@@ -1197,9 +1165,6 @@ class LinearSolverParameters : public ParameterLists
     Parameter<double> amg_strength_threshold;
     /// Opt-in reuse of preconditioners/factorizations across solves (new OOP solver).
     Parameter<bool> preconditioner_reuse;
-    /// Opt-in inexact Newton forcing of the linear tolerance (new OOP solver):
-    /// none, eisenstat_walker.
-    Parameter<std::string> inexact_newton_forcing;
 
     //Parameter<std::string> preconditioner;
 
@@ -1484,7 +1449,6 @@ class EquationParameters : public ParameterLists
     // Generic per-equation extension hook for new OOP solver physics modules.
     // Intended to avoid adding new top-level XML tags/fields for every new formulation.
     Parameter<std::string> module_options;
-    Parameter<std::string> module_options_file_path;
 
     Parameter<int> max_iterations;
     Parameter<int> min_iterations;

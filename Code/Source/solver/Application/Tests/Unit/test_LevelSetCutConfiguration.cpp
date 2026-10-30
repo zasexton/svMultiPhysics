@@ -627,7 +627,6 @@ TEST(LevelSetCutConfiguration, DefaultsUseLinearCornerPath)
       <Level_set_field_name>phi</Level_set_field_name>
       <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -680,7 +679,6 @@ TEST(LevelSetCutConfiguration,
       <Level_set_field_name>phi</Level_set_field_name>
       <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -744,7 +742,7 @@ TEST(LevelSetCutConfiguration,
       {"stokes", R"xml(
 <svMultiPhysicsFile>
   <Add_equation type="stokes">
-    <FreeSurfacePhysicalModel>IncompressibleTwoFluid</FreeSurfacePhysicalModel>
+    <Free_surface_physical_model>IncompressibleTwoFluid</Free_surface_physical_model>
     <Level_set_field_name>phi</Level_set_field_name>
     <Generated_interface_domain_id>material_interface</Generated_interface_domain_id>
     <Material_interface_marker>71</Material_interface_marker>
@@ -820,7 +818,6 @@ TEST(LevelSetCutConfiguration,
       <Level_set_field_name>phi</Level_set_field_name>
       <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
 )xml") + std::string(parameter) + R"xml(
     </Add_BC>
   </Add_equation>
@@ -850,7 +847,6 @@ TEST(LevelSetCutConfiguration,
       <Level_set_field_name>phi</Level_set_field_name>
       <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -871,12 +867,11 @@ TEST(LevelSetCutConfiguration, ParsesEquationLevelNonFluidCutDomain)
   auto params = parseParametersXml(R"xml(
 <svMultiPhysicsFile>
   <Add_equation type="heatS">
-    <EnableLevelSetCutDomain>true</EnableLevelSetCutDomain>
+    <Enable_level_set_cut_domain>true</Enable_level_set_cut_domain>
     <Level_set_field_name>phi</Level_set_field_name>
     <Generated_interface_domain_id>heated_region</Generated_interface_domain_id>
     <Interface_marker>123</Interface_marker>
     <Active_domain>LevelSetPositive</Active_domain>
-    <Active_domain_method>CutVolume</Active_domain_method>
     <Generated_interface_geometry>HighOrderImplicit</Generated_interface_geometry>
     <Implicit_cut_quadrature_backend>SayeHyperrectangle</Implicit_cut_quadrature_backend>
   </Add_equation>
@@ -1026,13 +1021,12 @@ TEST(LevelSetCutConfiguration, ParsesCanonicalImplicitCutOptions)
       <Implicit_cut_root_max_iterations>31</Implicit_cut_root_max_iterations>
       <Implicit_cut_max_subdivision_depth>12</Implicit_cut_max_subdivision_depth>
       <Affected_cell_neighborhood_layers>1</Affected_cell_neighborhood_layers>
-      <Generated_interface_quadrature_order>5</Generated_interface_quadrature_order>
+      <Cut_quadrature_order>5</Cut_quadrature_order>
       <Interface_quadrature_order>4</Interface_quadrature_order>
       <Volume_quadrature_order>6</Volume_quadrature_order>
       <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
       <Required_implicit_cut_backend_qualification>ProductionQualified</Required_implicit_cut_backend_qualification>
       <Active_domain>LevelSetPositive</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -1097,7 +1091,6 @@ TEST(LevelSetCutConfiguration, ParsesImplicitCutOptionSynonyms)
       <Allow_corner_linearized_cut_geometry>yes</Allow_corner_linearized_cut_geometry>
       <Required_implicit_cut_backend_qualification>yes</Required_implicit_cut_backend_qualification>
       <Active_domain>phiPositive</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -1166,7 +1159,6 @@ TEST(LevelSetCutConfiguration, ParsesActiveDomainAliasesAndOffTokens)
       <Level_set_field_name>phi</Level_set_field_name>
       <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
       <Active_domain>)xml") + item.token + R"xml(</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -1197,7 +1189,6 @@ TEST(LevelSetCutConfiguration,
       <Implicit_cut_quadrature_backend>SayeHyperrectangle</Implicit_cut_quadrature_backend>
       <Geometry_tangent_policy>DifferentiatedQuadrature</Geometry_tangent_policy>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -1238,11 +1229,10 @@ TEST(LevelSetCutConfiguration, ParsesEquationLevelCutDomainForNonFluidEquation)
     <Generated_interface_geometry>HighOrderImplicit</Generated_interface_geometry>
     <Implicit_cut_quadrature_backend>Auto</Implicit_cut_quadrature_backend>
     <Implicit_cut_fallback_policy>Fail</Implicit_cut_fallback_policy>
-    <Generated_interface_quadrature_order>6</Generated_interface_quadrature_order>
+    <Cut_quadrature_order>6</Cut_quadrature_order>
     <Interface_quadrature_order>5</Interface_quadrature_order>
     <Volume_quadrature_order>7</Volume_quadrature_order>
     <Active_domain>LevelSetPositive</Active_domain>
-    <Active_domain_method>CutVolume</Active_domain_method>
   </Add_equation>
 </svMultiPhysicsFile>
 )xml");
@@ -1298,14 +1288,12 @@ TEST(LevelSetCutConfiguration, DeduplicatesEquationAndFreeSurfaceCutRequests)
     <Level_set_field_name>phi</Level_set_field_name>
     <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
     <Active_domain>LevelSetNegative</Active_domain>
-    <Active_domain_method>CutVolume</Active_domain_method>
     <Add_BC name="free_surface">
       <Type>Free_surface</Type>
       <Implementation>UnfittedLevelSet</Implementation>
       <Level_set_field_name>phi</Level_set_field_name>
       <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -1334,7 +1322,6 @@ TEST(LevelSetCutConfiguration,
       <Level_set_field_name>phi</Level_set_field_name>
       <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
   <Add_equation type="level_set">
@@ -1342,7 +1329,6 @@ TEST(LevelSetCutConfiguration,
     <Level_set_field_name>phi</Level_set_field_name>
     <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
     <Active_domain>LevelSetNegative</Active_domain>
-    <Active_domain_method>CutVolume</Active_domain_method>
   </Add_equation>
 </svMultiPhysicsFile>
 )xml");
@@ -1367,7 +1353,6 @@ TEST(LevelSetCutConfiguration,
     <Level_set_field_name>phi</Level_set_field_name>
     <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
     <Active_domain>LevelSetNegative</Active_domain>
-    <Active_domain_method>CutVolume</Active_domain_method>
     <Geometry_tangent_policy>DifferentiatedQuadrature</Geometry_tangent_policy>
     <Add_BC name="free_surface">
       <Type>Free_surface</Type>
@@ -1375,7 +1360,6 @@ TEST(LevelSetCutConfiguration,
       <Level_set_field_name>phi</Level_set_field_name>
       <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -1394,7 +1378,6 @@ TEST(LevelSetCutConfiguration, RejectsUnknownImplicitCutBackend)
       <Type>Free_surface</Type>
       <Implementation>UnfittedLevelSet</Implementation>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
       <Implicit_cut_quadrature_backend>unknown_backend</Implicit_cut_quadrature_backend>
     </Add_BC>
   </Add_equation>
@@ -1413,7 +1396,6 @@ TEST(LevelSetCutConfiguration, RejectsUnknownActiveDomainToken)
     <Enable_level_set_cut_domain>true</Enable_level_set_cut_domain>
     <Level_set_field_name>phi</Level_set_field_name>
     <Active_domain>LevelSetNegativ</Active_domain>
-    <Active_domain_method>CutVolume</Active_domain_method>
   </Add_equation>
 </svMultiPhysicsFile>
 )xml");
@@ -1437,7 +1419,6 @@ TEST(LevelSetCutConfiguration, RejectsUnknownGeometryTangentPolicy)
       <Type>Free_surface</Type>
       <Implementation>UnfittedLevelSet</Implementation>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
       <Geometry_tangent_policy>unknown_policy</Geometry_tangent_policy>
     </Add_BC>
   </Add_equation>
@@ -1457,7 +1438,6 @@ TEST(LevelSetCutConfiguration, RejectsUnknownBackendQualificationRequirement)
       <Type>Free_surface</Type>
       <Implementation>UnfittedLevelSet</Implementation>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>CutVolume</Active_domain_method>
       <Required_implicit_cut_backend_qualification>ResearchOnly</Required_implicit_cut_backend_qualification>
     </Add_BC>
   </Add_equation>
@@ -1535,53 +1515,6 @@ TEST(LevelSetCutConfiguration, ActiveCutRequestPolicyKeyTracksBackendOptions)
   EXPECT_NE(base_key,
             application::core::activeCutVolumeRequestPolicyKey(
                 {changed_retention}));
-}
-
-TEST(LevelSetCutConfiguration, RejectsRetiredSmoothedIndicatorRequests)
-{
-  for (const std::string_view method :
-       {"SmoothedIndicator", "SmoothIndicator", "Indicator"}) {
-    const auto xml = std::string(R"xml(
-<svMultiPhysicsFile>
-  <Add_equation type="fluid">
-    <Add_BC name="free_surface">
-      <Type>Free_surface</Type>
-      <Implementation>UnfittedLevelSet</Implementation>
-      <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>)xml") + std::string(method) + R"xml(</Active_domain_method>
-    </Add_BC>
-  </Add_equation>
-</svMultiPhysicsFile>
-)xml";
-
-    auto params = parseParametersXml(xml.c_str());
-    try {
-      (void)application::core::activeCutVolumeRequests(*params);
-      ADD_FAILURE() << "retired method was accepted: " << method;
-    } catch (const std::runtime_error& error) {
-      EXPECT_NE(std::string(error.what()).find("retired"), std::string::npos)
-          << error.what();
-    }
-  }
-}
-
-TEST(LevelSetCutConfiguration, RejectsUnknownActiveDomainMethod)
-{
-  auto params = parseParametersXml(R"xml(
-<svMultiPhysicsFile>
-  <Add_equation type="fluid">
-    <Add_BC name="free_surface">
-      <Type>Free_surface</Type>
-      <Implementation>UnfittedLevelSet</Implementation>
-      <Active_domain>LevelSetNegative</Active_domain>
-      <Active_domain_method>not-a-method</Active_domain_method>
-    </Add_BC>
-  </Add_equation>
-</svMultiPhysicsFile>
-)xml");
-
-  EXPECT_THROW((void)application::core::activeCutVolumeRequests(*params),
-               std::runtime_error);
 }
 
 TEST(LevelSetCutConfiguration, TrackedProductionFixturesStayOnLinearPath)

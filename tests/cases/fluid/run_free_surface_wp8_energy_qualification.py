@@ -67,7 +67,7 @@ DEFAULT_REGISTRY = SCRIPT_PATH.with_name(
     "free_surface_wp8_energy_qualification_matrix.json"
 )
 EXPECTED_REGISTRY_SHA256 = (
-    "3fc4094579f1d209525972aa9b1fe449e03f4b82df050d062804d732b86114f1"
+    "f59caa5d679140ed6b2cf0907effeefa0d5bac971c1a2ebbe6137374675df258"
 )
 SHARED_RUNNER_PATH = Path(strict_runner.__file__).resolve()
 SHARED_RUNNER_SHA256 = strict_runner.sha256_file(SHARED_RUNNER_PATH)
@@ -265,7 +265,6 @@ EXPECTED_GROUP_TESTS = {
             "ApplicationDriverLevelSetWorkflows.MaintenanceWorkLedgerRequiresExplicitCutTopologyProvenance",
             "ApplicationDriverLevelSetWorkflows.ConvergedMaintenanceAppliesOneRepresentationDeltaToEveryHistoryLevel",
             "ApplicationDriverConservativePhaseCandidatesTest.StagesAndCommitsTheTransportedPhaseAgainstAuthoritativeGeometry",
-            "ApplicationDriverLevelSetVolumeCorrection.ReportsAuthoritativeFreeSurfacePotentialChange",
             "ApplicationDriverLevelSetVolumeCorrection.CandidateGeometryFailureRestoresCompleteMaintenanceTransaction",
         ],
     ),

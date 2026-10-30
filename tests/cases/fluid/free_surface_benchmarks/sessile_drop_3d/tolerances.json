@@ -10,7 +10,7 @@
     "equilibrium_angles_degrees": [60, 90, 120],
     "initial_angles_degrees": {"60": 90, "90": 120, "120": 90},
     "domain": "quarter: x >= 0, z >= 0, drop axis on x = z = 0; the planes x = 0 and z = 0 are free-slip symmetry planes (zero normal velocity only), not contact walls. The full domain (--domain full) is the symmetry check, not part of the protocol.",
-    "configuration": "Decision D4, as sessile_drop_2d: Contact_line_model=PrescribedAngle on the bottom wall, Wall_slip_model=Navier, strong zero normal-only velocity on the contact wall, Surface_tension_form=SurfaceStress, no reinitialization; PDE velocity extension (D9), kinematic reconciliation and sign-definite patch bounds on. Decisions D38/D39: the triggered interface-preserving redistancing (Enable_interface_preserving_redistancing, after the reconciliation, once the interface has moved one cell) is on in the protocol, as in sessile_drop_2d.",
+    "configuration": "Decision D4, as sessile_drop_2d: Contact_line_model=PrescribedAngle on the bottom wall, Wall_slip_model=Navier, strong zero normal-only velocity on the contact wall, SurfaceStress capillary form, no reinitialization; PDE velocity extension (D9), kinematic reconciliation and sign-definite patch bounds on. Decisions D38/D39: the triggered interface-preserving redistancing (Enable_interface_preserving_redistancing, after the reconciliation, once the interface has moved one cell) is on in the protocol, as in sessile_drop_2d.",
     "laplace_number": 12,
     "slip_length": "R/8, as sessile_drop_2d (l_s/h = 1, 2 at R/h = 8, 16)",
     "viscous_times": 10,

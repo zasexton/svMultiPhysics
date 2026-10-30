@@ -151,7 +151,7 @@ def test_wp8_maintenance_evidence_is_exactly_the_prerequisite_slice():
             "GasApplicabilityMustBeExplicitAndStableAcrossTheStep"
         ),
     } <= tests
-    assert len(tests) == 41
+    assert len(tests) == 40
     assert {
         (
             "GeneralSimulationParameters."
@@ -458,7 +458,7 @@ def test_wp8_validate_only_reports_prerequisite_nonclosure():
 
     assert summary["outcome"] == "PASS_PREREQUISITE_NONCLOSURE"
     assert summary["requested_claim"] == "low_level_prerequisite"
-    assert summary["test_count"] == 41
+    assert summary["test_count"] == 40
     assert summary["group_count"] == 5
     assert summary["serial_quantitative_gate_count"] == 9
     assert summary["unqualified_method_exit_count"] == 10
