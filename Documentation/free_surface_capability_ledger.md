@@ -73,7 +73,7 @@ broader work package.
 | [WP-10 hydrostatic](qualification_logs/free_surface_wp10_two_fluid_hydrostatic_v1_20260901_41658487/record.json) | `PASS` | Stationary planar two-fluid hydrostatic prerequisite only. | `42386f345c1c06ca501727e4fd532a27192790ac` |
 
 Some C++ tests named by this evidence no longer exist. The Navier–Stokes input
-parameter removal (`0d5b9bec`, 2026-10-30, tracker D58) deleted 40 tests of
+parameter removal (`0d5b9bec`, 2026-10-30, tracker D60) deleted 40 tests of
 removed or retired inputs, and the following frozen files still name some of
 them: the WP-0 configuration and WP-1 extension records, the test listings of
 the WP-3/WP-7 Nitsche v2 and v3 records, and the Q0 harness, configuration,
