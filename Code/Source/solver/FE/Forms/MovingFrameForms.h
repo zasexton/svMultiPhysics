@@ -11,85 +11,101 @@
 /**
  * @file MovingFrameForms.h
  * @brief Form-expression helpers for physics-agnostic moving-frame terminals.
+ *
+ * A moving frame is named, and its data are the named runtime parameters
+ * frame.<name>.<quantity>_<x|y|z> (movingFrameParameterNames()), which the
+ * system resolves to their own slots at setup like any FormExpr::parameter,
+ * so they never alias another parameter.
  */
 
 #include "Forms/FormExpr.h"
 
 #include <array>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace svmp {
 namespace FE {
 namespace forms {
 
-struct MovingFrameParameterSlots {
-    std::array<std::uint32_t, 3> origin{{0u, 1u, 2u}};
-    std::array<std::uint32_t, 3> linear_velocity{{3u, 4u, 5u}};
-    std::array<std::uint32_t, 3> angular_velocity{{6u, 7u, 8u}};
-    std::array<std::uint32_t, 3> linear_acceleration{{9u, 10u, 11u}};
-    std::array<std::uint32_t, 3> angular_acceleration{{12u, 13u, 14u}};
-};
+/// The quantities of a moving frame, in the order of movingFrameParameterNames().
+inline constexpr std::array<std::string_view, 5> kMovingFrameQuantities{
+    "origin", "linear_velocity", "angular_velocity", "linear_acceleration", "angular_acceleration"};
 
-[[nodiscard]] inline FormExpr frameVectorParameter(
-    const std::array<std::uint32_t, 3>& slots)
+/// frame.<frame>.<quantity>_<axis>, the name of one component of a frame's data.
+[[nodiscard]] inline std::string movingFrameParameterName(std::string_view frame,
+                                                          std::string_view quantity,
+                                                          char axis)
 {
-    return FormExpr::asVector({
-        FormExpr::parameterRef(slots[0]),
-        FormExpr::parameterRef(slots[1]),
-        FormExpr::parameterRef(slots[2])});
+    return "frame." + std::string(frame) + "." + std::string(quantity) + "_" + std::string(1, axis);
 }
 
-[[nodiscard]] inline FormExpr frameOrigin(
-    const MovingFrameParameterSlots& slots = {})
+/// The 15 parameter names of @p frame: each quantity's x, y and z components.
+[[nodiscard]] inline std::vector<std::string> movingFrameParameterNames(std::string_view frame)
 {
-    return frameVectorParameter(slots.origin);
+    std::vector<std::string> names;
+    names.reserve(3u * kMovingFrameQuantities.size());
+    for (const auto quantity : kMovingFrameQuantities) {
+        for (const char axis : {'x', 'y', 'z'}) {
+            names.push_back(movingFrameParameterName(frame, quantity, axis));
+        }
+    }
+    return names;
 }
 
-[[nodiscard]] inline FormExpr frameLinearVelocity(
-    const MovingFrameParameterSlots& slots = {})
+/// The vector of the named parameters frame.<frame>.<quantity>_{x,y,z}.
+[[nodiscard]] inline FormExpr frameVectorParameter(std::string_view frame, std::string_view quantity)
 {
-    return frameVectorParameter(slots.linear_velocity);
+    return FormExpr::asVector({FormExpr::parameter(movingFrameParameterName(frame, quantity, 'x')),
+                               FormExpr::parameter(movingFrameParameterName(frame, quantity, 'y')),
+                               FormExpr::parameter(movingFrameParameterName(frame, quantity, 'z'))});
 }
 
-[[nodiscard]] inline FormExpr frameAngularVelocity(
-    const MovingFrameParameterSlots& slots = {})
+[[nodiscard]] inline FormExpr frameOrigin(std::string_view frame)
 {
-    return frameVectorParameter(slots.angular_velocity);
+    return frameVectorParameter(frame, "origin");
 }
 
-[[nodiscard]] inline FormExpr frameLinearAcceleration(
-    const MovingFrameParameterSlots& slots = {})
+[[nodiscard]] inline FormExpr frameLinearVelocity(std::string_view frame)
 {
-    return frameVectorParameter(slots.linear_acceleration);
+    return frameVectorParameter(frame, "linear_velocity");
 }
 
-[[nodiscard]] inline FormExpr frameAngularAcceleration(
-    const MovingFrameParameterSlots& slots = {})
+[[nodiscard]] inline FormExpr frameAngularVelocity(std::string_view frame)
 {
-    return frameVectorParameter(slots.angular_acceleration);
+    return frameVectorParameter(frame, "angular_velocity");
 }
 
-[[nodiscard]] inline FormExpr frameVelocityAtCurrentCoordinate(
-    const MovingFrameParameterSlots& slots = {})
+[[nodiscard]] inline FormExpr frameLinearAcceleration(std::string_view frame)
 {
-    return frameLinearVelocity(slots) +
-           cross(frameAngularVelocity(slots),
-                 FormExpr::currentCoordinate() - frameOrigin(slots));
+    return frameVectorParameter(frame, "linear_acceleration");
 }
 
-[[nodiscard]] inline FormExpr frameAccelerationAtCurrentCoordinate(
-    const MovingFrameParameterSlots& slots = {})
+[[nodiscard]] inline FormExpr frameAngularAcceleration(std::string_view frame)
 {
-    const auto r = FormExpr::currentCoordinate() - frameOrigin(slots);
-    const auto omega = frameAngularVelocity(slots);
-    return frameLinearAcceleration(slots) +
-           cross(frameAngularAcceleration(slots), r) +
-           cross(omega, cross(omega, r));
+    return frameVectorParameter(frame, "angular_acceleration");
 }
 
-[[nodiscard]] inline FormExpr relativeMeshVelocity(
-    const MovingFrameParameterSlots& slots = {})
+/// v_0 + omega x (x - x_0), the frame's velocity at currentCoordinate().
+[[nodiscard]] inline FormExpr frameVelocityAtCurrentCoordinate(std::string_view frame)
 {
-    return FormExpr::meshVelocity() - frameVelocityAtCurrentCoordinate(slots);
+    return frameLinearVelocity(frame) +
+           cross(frameAngularVelocity(frame), FormExpr::currentCoordinate() - frameOrigin(frame));
+}
+
+/// a_0 + alpha x r + omega x (omega x r) with r = x - x_0, the frame's acceleration at currentCoordinate().
+[[nodiscard]] inline FormExpr frameAccelerationAtCurrentCoordinate(std::string_view frame)
+{
+    const auto r = FormExpr::currentCoordinate() - frameOrigin(frame);
+    const auto omega = frameAngularVelocity(frame);
+    return frameLinearAcceleration(frame) + cross(frameAngularAcceleration(frame), r) + cross(omega, cross(omega, r));
+}
+
+/// meshVelocity() - frameVelocityAtCurrentCoordinate(frame).
+[[nodiscard]] inline FormExpr relativeMeshVelocity(std::string_view frame)
+{
+    return FormExpr::meshVelocity() - frameVelocityAtCurrentCoordinate(frame);
 }
 
 struct MovingFrameFormTerminals {
@@ -105,20 +121,19 @@ struct MovingFrameFormTerminals {
     FormExpr relative_velocity{};
 };
 
-[[nodiscard]] inline MovingFrameFormTerminals movingFrameTerminals(
-    const MovingFrameParameterSlots& slots = {})
+[[nodiscard]] inline MovingFrameFormTerminals movingFrameTerminals(std::string_view frame)
 {
     MovingFrameFormTerminals terminals;
     terminals.current_coordinate = FormExpr::currentCoordinate();
     terminals.reference_coordinate = FormExpr::referenceCoordinatePhysical();
     terminals.mesh_velocity = FormExpr::meshVelocity();
     terminals.mesh_acceleration = FormExpr::meshAcceleration();
-    terminals.frame_origin = frameOrigin(slots);
-    terminals.frame_linear_velocity = frameLinearVelocity(slots);
-    terminals.frame_angular_velocity = frameAngularVelocity(slots);
-    terminals.frame_linear_acceleration = frameLinearAcceleration(slots);
-    terminals.frame_angular_acceleration = frameAngularAcceleration(slots);
-    terminals.relative_velocity = relativeMeshVelocity(slots);
+    terminals.frame_origin = frameOrigin(frame);
+    terminals.frame_linear_velocity = frameLinearVelocity(frame);
+    terminals.frame_angular_velocity = frameAngularVelocity(frame);
+    terminals.frame_linear_acceleration = frameLinearAcceleration(frame);
+    terminals.frame_angular_acceleration = frameAngularAcceleration(frame);
+    terminals.relative_velocity = relativeMeshVelocity(frame);
     return terminals;
 }
 

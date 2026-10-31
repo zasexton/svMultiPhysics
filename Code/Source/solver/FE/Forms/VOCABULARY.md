@@ -849,20 +849,24 @@ Status: `implemented/public` helper header, namespace
 
 Status: `implemented/public` helper header.
 
-`Forms/MovingFrameForms.h` provides a small parameter-slot vocabulary for
-prescribed moving reference frames:
+`Forms/MovingFrameForms.h` builds the terminals of a named, prescribed moving
+reference frame from named runtime parameters
+`frame.<name>.<quantity>_<x|y|z>`, which the system resolves to their own
+slots at setup like any `FormExpr::parameter`, so they never alias another
+parameter (the fixed slots 0-14 of the old layout read whatever parameters
+held them):
 
 | Vocabulary | Notes |
 |------------|-------|
-| `MovingFrameParameterSlots` | Slot layout constants |
-| `frameVectorParameter(slot)` | Read a vector from scalar parameter slots |
-| `frameOrigin()`, `frameLinearVelocity()` | Translational frame data |
-| `frameAngularVelocity()` | Angular velocity |
-| `frameLinearAcceleration()`, `frameAngularAcceleration()` | Acceleration data |
-| `frameVelocityAtCurrentCoordinate()` | Rigid-frame velocity at `currentCoordinate()` |
-| `frameAccelerationAtCurrentCoordinate()` | Rigid-frame acceleration at `currentCoordinate()` |
-| `relativeMeshVelocity()` | `meshVelocity() - frameVelocityAtCurrentCoordinate()` |
-| `MovingFrameFormTerminals`, `movingFrameTerminals()` | Bundled helper terminals |
+| `movingFrameParameterNames(frame)`, `movingFrameParameterName(frame, quantity, axis)` | The 15 parameter names of a frame: `origin`, `linear_velocity`, `angular_velocity`, `linear_acceleration`, `angular_acceleration`, each `_x`, `_y`, `_z` |
+| `frameVectorParameter(frame, quantity)` | The vector of a frame quantity's three parameters |
+| `frameOrigin(frame)`, `frameLinearVelocity(frame)` | Translational frame data |
+| `frameAngularVelocity(frame)` | Angular velocity |
+| `frameLinearAcceleration(frame)`, `frameAngularAcceleration(frame)` | Acceleration data |
+| `frameVelocityAtCurrentCoordinate(frame)` | Rigid-frame velocity at `currentCoordinate()` |
+| `frameAccelerationAtCurrentCoordinate(frame)` | Rigid-frame acceleration at `currentCoordinate()` |
+| `relativeMeshVelocity(frame)` | `meshVelocity() - frameVelocityAtCurrentCoordinate(frame)` |
+| `MovingFrameFormTerminals`, `movingFrameTerminals(frame)` | Bundled helper terminals |
 
 ### Cut Cell
 
