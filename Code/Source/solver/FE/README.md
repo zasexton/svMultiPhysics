@@ -1932,11 +1932,13 @@ public:
 
 #### Constraint Types
 
+Natural and Robin conditions are weak terms, not constraints: write them as
+forms on `ds`, or use `forms::bc::NaturalBC` / `forms::bc::RobinBC`
+(`Forms/StandardBCs.h`).
+
 | Class | Description |
 |-------|-------------|
 | `DirichletBC` | Essential (strong) boundary conditions |
-| `NeumannBC` | Natural boundary conditions (weak form) |
-| `RobinBC` | Mixed boundary conditions |
 | `PeriodicBC` | Periodic boundary conditions |
 | `MultiPointConstraint` | Linear combinations of DOFs |
 | `HangingNodeConstraint` | Hanging node constraints for non-conforming meshes |
@@ -1953,20 +1955,6 @@ public:
                AffineConstraints& constraints,
                Real time = 0.0) const override;
     void update(Real time) override;
-};
-
-class NeumannBC : public Constraint {
-public:
-    NeumannBC(int boundary_marker, const FormExpr& flux);
-
-    // Returns weak-form contribution (no DOF modification)
-    FormExpr getFormContribution() const;
-};
-
-class RobinBC : public Constraint {
-public:
-    RobinBC(int boundary_marker, Real alpha, Real beta, Real g);
-    // αu + β∂u/∂n = g
 };
 
 class PeriodicBC : public Constraint {

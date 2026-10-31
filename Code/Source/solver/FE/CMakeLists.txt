@@ -641,7 +641,6 @@ set(FE_CONSTRAINTS_HEADERS
     Constraints/Constraint.h
     Constraints/ConstraintDependency.h
     Constraints/DirichletBC.h
-    Constraints/NeumannBC.h
     Constraints/PeriodicBC.h
     Constraints/HangingNodeConstraint.h
     Constraints/MultiPointConstraint.h
@@ -653,8 +652,6 @@ set(FE_CONSTRAINTS_HEADERS
     Constraints/ParallelConstraints.h
     Constraints/ConstraintTools.h
     Constraints/ConstraintTransform.h
-    Constraints/PenaltyMethod.h
-    Constraints/RobinBC.h
     Constraints/ConstraintsIO.h
     Constraints/GaugeDiagnostics.h
     Constraints/GaugeRegistry.h
@@ -677,7 +674,6 @@ set(FE_CONSTRAINTS_SOURCES
     Constraints/AffineConstraints.cpp
     Constraints/ConstraintDependency.cpp
     Constraints/DirichletBC.cpp
-    Constraints/NeumannBC.cpp
     Constraints/PeriodicBC.cpp
     Constraints/HangingNodeConstraint.cpp
     Constraints/MultiPointConstraint.cpp
@@ -687,8 +683,6 @@ set(FE_CONSTRAINTS_SOURCES
     Constraints/ParallelConstraints.cpp
     Constraints/ConstraintTools.cpp
     Constraints/ConstraintTransform.cpp
-    Constraints/PenaltyMethod.cpp
-    Constraints/RobinBC.cpp
     Constraints/ConstraintsIO.cpp
     Constraints/GaugeDiagnostics.cpp
     Constraints/GaugeRegistry.cpp
@@ -2754,8 +2748,6 @@ if(FE_BUILD_TESTS)
     set(FE_CONSTRAINTS_TEST_SOURCES
         Tests/Unit/Constraints/test_AffineConstraints.cpp
         Tests/Unit/Constraints/test_DirichletBC.cpp
-        Tests/Unit/Constraints/test_NeumannBC.cpp
-        Tests/Unit/Constraints/test_RobinBC.cpp
         Tests/Unit/Constraints/test_ConstraintTransform.cpp
         Tests/Unit/Constraints/test_HangingNodeConstraint.cpp
         Tests/Unit/Constraints/test_PeriodicBC.cpp
@@ -2766,7 +2758,6 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Constraints/test_GeometricIntegralConstraint.cpp
         Tests/Unit/Constraints/test_MovingConstraintComposition.cpp
         Tests/Unit/Constraints/test_ParallelConstraints.cpp
-        Tests/Unit/Constraints/test_PenaltyMethod.cpp
         Tests/Unit/Constraints/test_ConstraintDistributor.cpp
         Tests/Unit/Constraints/test_ConstraintsIO.cpp
         Tests/Unit/Constraints/test_ConstraintTools.cpp
