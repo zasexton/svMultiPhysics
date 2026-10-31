@@ -8,9 +8,12 @@
  * The value is evaluated at each constrained DOF's node (active coordinates)
  * and may read the position, the time and the time step, the time-function
  * parameters of the system (systems::timeFunction, evaluated at the update
- * time) and prescribed fields that share the constrained field's scalar
+ * time), prescribed fields that share the constrained field's scalar
  * element (their coefficients at the node; zeros at setup when they are not
- * set yet, and required at every update).  It must not read an unknown.
+ * set yet, and required at every update), and FormExpr::normal(): the
+ * marker's averaged facet normal at the node (boundaryPointNormals, the same
+ * at any rank count), refused at a node where the facets meet at an edge or
+ * corner.  It must not read an unknown.
  */
 
 #include "Constraints/SystemConstraint.h"
@@ -18,7 +21,9 @@
 #include "Forms/FormExpr.h"
 
 #include <array>
+#include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace svmp {
@@ -48,6 +53,10 @@ private:
     /// The value of each parameter of the value at @p time.
     [[nodiscard]] std::vector<Real> parameterValues(const systems::FESystem& system, double time) const;
 
+    /// The boundary normal at each owned node of the marker when the value reads it.
+    [[nodiscard]] std::unordered_map<GlobalIndex, std::optional<std::array<Real, 3>>>
+    pointNormals(const systems::FESystem& system) const;
+
     FieldId field_{INVALID_FIELD_ID};
     int boundary_marker_{-1};
     int component_{-1};
@@ -55,6 +64,7 @@ private:
     forms::FormExpr point_value_{};             ///< value_ with parameter i as slot i
     std::vector<std::string> parameter_names_{};
     std::vector<FieldId> sampled_fields_{};     ///< the prescribed fields the value reads
+    bool reads_normal_{false};                  ///< whether the value reads FormExpr::normal()
     bool is_time_dependent_{false};
 
     std::vector<GlobalIndex> dofs_{};

@@ -48,7 +48,10 @@
 #include "Forms/FormExpr.h"
 
 #include <array>
+#include <optional>
+#include <span>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace svmp {
@@ -103,6 +106,22 @@ private:
     bool is_time_dependent_{false};
     std::vector<Line> lines_{};
 };
+
+/**
+ * @brief The unit outward normal of the boundary at each owned support point
+ *
+ * For each support point of @p field (any Lagrange field) on the boundary
+ * faces of @p boundary_markers that this rank owns: the measure-weighted
+ * average of the facet normals there, as NormalComponentConstraint forms it
+ * and the same at any rank count, or nullopt where facets meet beyond the
+ * feature angle (an edge or a corner has no single normal).  Keyed by each
+ * DOF of the point.  Collective.
+ */
+[[nodiscard]] std::unordered_map<GlobalIndex, std::optional<std::array<Real, 3>>>
+boundaryPointNormals(const systems::FESystem& system,
+                     FieldId field,
+                     std::span<const int> boundary_markers,
+                     Real feature_angle_degrees = NormalComponentOptions{}.feature_angle_degrees);
 
 } // namespace constraints
 } // namespace FE

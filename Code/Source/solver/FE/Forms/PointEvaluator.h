@@ -24,6 +24,7 @@
  * - Comparisons + conditional (returns 1.0/0.0 for comparisons)
  *
  * - DiscreteField/StateField (when field_values populated in context)
+ * - Normal (when the context carries a boundary normal)
  *
  * Unsupported nodes (throw):
  * - Test/Trial
@@ -65,6 +66,10 @@ struct PointEvalContext {
     /// For scalar fields: n_components=1. For vector: n_components=dim.
     /// When empty, DiscreteField/StateField nodes throw as unsupported.
     std::span<const FieldValueEntry> field_values{};
+
+    /// The boundary normal for FormExprType::Normal (a strong value on a
+    /// boundary point); when empty the normal is unsupported.
+    std::optional<std::array<Real, 3>> normal{};
 };
 
 /**

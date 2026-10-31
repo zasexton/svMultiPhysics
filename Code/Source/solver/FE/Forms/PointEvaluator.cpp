@@ -187,6 +187,11 @@ struct DualValue {
             return scalar(ctx.dt);
         case FormExprType::Coordinate:
             return vector(ctx.x);
+        case FormExprType::Normal:
+            if (!ctx.normal.has_value()) {
+                throw std::invalid_argument("PointEvaluator: the normal is not available in this PointEvalContext");
+            }
+            return vector(*ctx.normal);
         case FormExprType::ReferenceCoordinate:
             throw std::invalid_argument("PointEvaluator: ReferenceCoordinate is not available in PointEvalContext");
         case FormExprType::CurrentCoordinate:
@@ -406,7 +411,6 @@ struct DualValue {
         case FormExprType::Jacobian:
         case FormExprType::JacobianInverse:
         case FormExprType::JacobianDeterminant:
-        case FormExprType::Normal:
         case FormExprType::BoundaryNormal:
         case FormExprType::CurrentJacobian:
         case FormExprType::ReferenceJacobian:

@@ -19,6 +19,7 @@
  * builds the system on MPI_COMM_SELF (the one-rank reference, where it also
  * checks the lines) and on MPI_COMM_WORLD, and requires the lines of the
  * owned slaves, gathered over the ranks, to equal the reference bit for bit.
+ * Strong values that read the normal (u = n) use the same averaged normals.
  */
 
 #include <gtest/gtest.h>
@@ -348,15 +349,17 @@ struct BuiltSystem {
     FieldId u{INVALID_FIELD_ID};
 };
 
-/// u . n = g on the wall; with @p side_dirichlet, u = 0 on the x = -1 side first.
-BuiltSystem build(const Case& c, MPI_Comm comm, const FormExpr& g, bool side_dirichlet = false)
+/// A vector mass system on the mesh of @p c, with the constraints
+/// @p add_constraints adds, set up on @p comm.
+template <class AddConstraints>
+BuiltSystem build(const Case& c, MPI_Comm comm, bool mark_side, AddConstraints&& add_constraints)
 {
     int rank = 0;
     int size = 1;
     MPI_Comm_rank(comm, &rank);
     MPI_Comm_size(comm, &size);
     const int n = c.dim == 2 ? 4 : 3;
-    auto mesh_data = std::make_shared<const StructuredMesh>(structuredMesh(c.dim, n, c.simplex, c.curved, side_dirichlet));
+    auto mesh_data = std::make_shared<const StructuredMesh>(structuredMesh(c.dim, n, c.simplex, c.curved, mark_side));
     auto mesh = std::make_shared<ReplicatedMeshAccess>(mesh_data, rank, size);
     auto scalar = std::make_shared<spaces::H1Space>(mesh_data->type, c.order);
     auto vector = std::make_shared<spaces::ProductSpace>(scalar, c.dim);
@@ -369,15 +372,7 @@ BuiltSystem build(const Case& c, MPI_Comm comm, const FormExpr& g, bool side_dir
     const auto u = forms::StateField(out.u, *vector, "u");
     const auto v = forms::TestField(out.u, *vector, "v");
     (void)systems::installFormulation(sys, "mass", {out.u}, forms::inner(u, v).dx());
-    if (side_dirichlet) {
-        for (int d = 0; d < c.dim; ++d) {
-            sys.addSystemConstraint(
-                std::make_unique<StrongDirichletConstraint>(out.u, kSide, FormExpr::constant(0.0), d));
-        }
-    }
-    auto constraint = std::make_unique<NormalComponentConstraint>(out.u, std::vector<int>{kWall}, g);
-    out.constraint = constraint.get();
-    sys.addSystemConstraint(std::move(constraint));
+    add_constraints(out);
 
     systems::SetupOptions options;
     options.dof_options.global_numbering = dofs::GlobalNumberingMode::GlobalIds;
@@ -388,6 +383,78 @@ BuiltSystem build(const Case& c, MPI_Comm comm, const FormExpr& g, bool side_dir
     systems::SetupInputs inputs;
     inputs.topology_override = mesh->topology();
     sys.setup(options, inputs);
+    return out;
+}
+
+/// u . n = g on the wall; with @p side_dirichlet, u = 0 on the x = -1 side first.
+BuiltSystem build(const Case& c, MPI_Comm comm, const FormExpr& g, bool side_dirichlet = false)
+{
+    return build(c, comm, side_dirichlet, [&](BuiltSystem& out) {
+        if (side_dirichlet) {
+            for (int d = 0; d < c.dim; ++d) {
+                out.system->addSystemConstraint(
+                    std::make_unique<StrongDirichletConstraint>(out.u, kSide, FormExpr::constant(0.0), d));
+            }
+        }
+        auto constraint = std::make_unique<NormalComponentConstraint>(out.u, std::vector<int>{kWall}, g);
+        out.constraint = constraint.get();
+        out.system->addSystemConstraint(std::move(constraint));
+    });
+}
+
+/// u = n strongly on @p marker, one StrongDirichletConstraint per component.
+BuiltSystem buildStrongNormal(const Case& c, MPI_Comm comm, int marker)
+{
+    return build(c, comm, marker == kSide, [&](BuiltSystem& out) {
+        for (int d = 0; d < c.dim; ++d) {
+            out.system->addSystemConstraint(
+                std::make_unique<StrongDirichletConstraint>(out.u, marker, FormExpr::normal().component(d), d));
+        }
+    });
+}
+
+/// The component of each DOF of u (cell DOFs are blocked by component).
+std::map<GlobalIndex, std::size_t> dofComponents(const BuiltSystem& s, int dim)
+{
+    std::map<GlobalIndex, std::size_t> out;
+    const auto& dof_map = s.system->fieldDofHandler(s.u).getDofMap();
+    const auto offset = s.system->fieldDofOffset(s.u);
+    for (GlobalIndex cell = 0; cell < s.system->meshAccess().numCells(); ++cell) {
+        const auto dofs = dof_map.getCellDofs(cell);
+        const auto per_component = dofs.size() / static_cast<std::size_t>(dim);
+        for (std::size_t k = 0; k < dofs.size(); ++k) {
+            out.emplace(dofs[k] + offset, k / per_component);
+        }
+    }
+    return out;
+}
+
+/// The inhomogeneity of every owned constrained DOF, gathered over the ranks.
+std::map<GlobalIndex, Real> gatheredInhomogeneities(const BuiltSystem& s, MPI_Comm comm)
+{
+    std::vector<Real> local;
+    const auto& owned = s.system->dofHandler().getPartition().locallyOwned();
+    for (const auto dof : s.system->constraints().getConstrainedDofs()) {
+        if (owned.contains(dof)) {
+            local.push_back(static_cast<Real>(dof));
+            local.push_back(s.system->constraints().getInhomogeneity(dof));
+        }
+    }
+    int size = 1;
+    MPI_Comm_size(comm, &size);
+    int count = static_cast<int>(local.size());
+    std::vector<int> counts(static_cast<std::size_t>(size));
+    MPI_Allgather(&count, 1, MPI_INT, counts.data(), 1, MPI_INT, comm);
+    std::vector<int> displs(static_cast<std::size_t>(size), 0);
+    for (int r = 1; r < size; ++r) {
+        displs[static_cast<std::size_t>(r)] = displs[static_cast<std::size_t>(r - 1)] + counts[static_cast<std::size_t>(r - 1)];
+    }
+    std::vector<Real> all(static_cast<std::size_t>(displs.back() + counts.back()));
+    MPI_Allgatherv(local.data(), count, MPI_DOUBLE, all.data(), counts.data(), displs.data(), MPI_DOUBLE, comm);
+    std::map<GlobalIndex, Real> out;
+    for (std::size_t k = 0; k + 1 < all.size(); k += 2) {
+        EXPECT_TRUE(out.emplace(static_cast<GlobalIndex>(all[k]), all[k + 1]).second);
+    }
     return out;
 }
 
@@ -604,6 +671,59 @@ TEST(NormalComponentConstraintMPI, RefusesScalarFieldsAndBadArguments)
     systems::SetupInputs inputs;
     inputs.topology_override = mesh->topology();
     EXPECT_THROW(sys.setup(options, inputs), InvalidArgumentException);
+}
+
+TEST(NormalComponentConstraintMPI, StrongValuesReadTheAveragedNormal)
+{
+    for (const auto& c : allCases()) {
+        if (!c.curved) {
+            continue;
+        }
+        SCOPED_TRACE(c.name());
+        const auto reference = buildStrongNormal(c, MPI_COMM_SELF, kWall);
+        // u = n: each component holds the averaged normal of its point, the
+        // one the slip constraint uses.
+        const auto normals = boundaryPointNormals(*reference.system, reference.u, std::vector<int>{kWall});
+        const auto expected = gatheredInhomogeneities(reference, MPI_COMM_SELF);
+        ASSERT_FALSE(expected.empty());
+        const auto components = dofComponents(reference, c.dim);
+        for (const auto& [dof, value] : expected) {
+            const auto it = normals.find(dof);
+            ASSERT_NE(it, normals.end()) << "dof " << dof;
+            ASSERT_TRUE(it->second.has_value()) << "dof " << dof;
+            EXPECT_EQ(value, (*it->second)[components.at(dof)]) << "dof " << dof;
+        }
+        // The same at every rank count, bit for bit.
+        const auto distributed = buildStrongNormal(c, MPI_COMM_WORLD, kWall);
+        EXPECT_EQ(gatheredInhomogeneities(distributed, MPI_COMM_WORLD), expected);
+    }
+}
+
+TEST(NormalComponentConstraintMPI, StrongValuesReadTheNormalOfAFlatSideUpToItsEdges)
+{
+    for (const auto& c : allCases()) {
+        if (c.curved) {
+            continue;
+        }
+        SCOPED_TRACE(c.name());
+        // The x = -1 side alone has one normal everywhere, its rim included.
+        const auto s = buildStrongNormal(c, MPI_COMM_WORLD, kSide);
+        const auto values = gatheredInhomogeneities(s, MPI_COMM_WORLD);
+        ASSERT_FALSE(values.empty());
+        std::size_t minus_one = 0;
+        for (const auto& [dof, value] : values) {
+            EXPECT_TRUE(value == 0.0 || value == -1.0) << "dof " << dof << " value " << value;
+            minus_one += value == -1.0 ? 1u : 0u;
+        }
+        EXPECT_EQ(minus_one * static_cast<std::size_t>(c.dim), values.size());
+    }
+}
+
+TEST(NormalComponentConstraintMPI, StrongValuesRefuseTheNormalAtEdgesAndCorners)
+{
+    const Case c{.dim = 2, .simplex = false, .order = 1, .curved = false};
+    // The wall of the box turns at its corners, where no single normal exists.
+    EXPECT_THROW((void)buildStrongNormal(c, MPI_COMM_SELF, kWall), InvalidArgumentException);
 }
 
 } // namespace svmp::FE::constraints::test_normal_component

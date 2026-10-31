@@ -8,6 +8,7 @@
 #include "Constraints/StrongDirichletConstraint.h"
 
 #include "Constraints/BoundaryDofOwnerCompletion.h"
+#include "Constraints/NormalComponentConstraint.h"
 
 #include "Systems/FESystem.h"
 #include "Systems/SystemsExceptions.h"
@@ -60,12 +61,17 @@ struct SampledField {
     int components{1};
 };
 
-/// The parameter names and field ids of @p node, each once in tree order.
+/// The parameter names and field ids of @p node, each once in tree order,
+/// and whether it reads the boundary normal.
 void gatherStrongValueInputs(const forms::FormExprNode& node,
                              std::vector<std::string>& parameter_names,
-                             std::vector<FieldId>& fields)
+                             std::vector<FieldId>& fields,
+                             bool& reads_normal)
 {
     switch (node.type()) {
+    case forms::FormExprType::Normal:
+        reads_normal = true;
+        return;
     case forms::FormExprType::ParameterSymbol: {
         const std::string name(node.symbolName().value_or(std::string_view{}));
         if (name.empty()) {
@@ -92,7 +98,7 @@ void gatherStrongValueInputs(const forms::FormExprNode& node,
     }
     for (const auto& child : node.childrenShared()) {
         if (child) {
-            gatherStrongValueInputs(*child, parameter_names, fields);
+            gatherStrongValueInputs(*child, parameter_names, fields, reads_normal);
         }
     }
 }
@@ -172,6 +178,25 @@ void traceStrongDirichletEvent(const std::string& phase,
     auto [ins, inserted] = cache.emplace(key, spaces::FaceRestriction(element_type, order, continuity));
     (void)inserted;
     return ins->second;
+}
+
+/// The single boundary normal at a constrained node; refuses a node where
+/// the marker's facets meet beyond the feature angle (an edge or corner).
+std::array<Real, 3> boundaryNormalAt(
+    const std::unordered_map<GlobalIndex, std::optional<std::array<Real, 3>>>& normals,
+    GlobalIndex dof,
+    const std::array<Real, 3>& x,
+    int boundary_marker)
+{
+    const auto it = normals.find(dof);
+    FE_THROW_IF(it == normals.end(), InvalidStateException,
+                "StrongDirichletConstraint: no boundary normal at DOF " + std::to_string(dof));
+    FE_THROW_IF(!it->second.has_value(), InvalidArgumentException,
+                "StrongDirichletConstraint: a strong value reads the normal of marker " +
+                    std::to_string(boundary_marker) + ", which has no single direction at (" + std::to_string(x[0]) +
+                    ", " + std::to_string(x[1]) + ", " + std::to_string(x[2]) +
+                    "), where its facets meet at an edge or corner");
+    return *it->second;
 }
 
 /// The values of the sampled fields at one node, from @p samples at @p first.
@@ -428,7 +453,7 @@ StrongDirichletConstraint::StrongDirichletConstraint(FieldId field, int boundary
     if (!value_.isValid()) {
         throw std::invalid_argument("StrongDirichletConstraint: invalid value expression");
     }
-    gatherStrongValueInputs(*value_.node(), parameter_names_, sampled_fields_);
+    gatherStrongValueInputs(*value_.node(), parameter_names_, sampled_fields_, reads_normal_);
     point_value_ = value_;
     if (!parameter_names_.empty()) {
         point_value_ = value_.transformNodes([&](const forms::FormExprNode& node) -> std::optional<forms::FormExpr> {
@@ -442,6 +467,15 @@ StrongDirichletConstraint::StrongDirichletConstraint(FieldId field, int boundary
         });
     }
     is_time_dependent_ = forms::isTimeDependent(value_) || !parameter_names_.empty() || !sampled_fields_.empty();
+}
+
+std::unordered_map<GlobalIndex, std::optional<std::array<Real, 3>>>
+StrongDirichletConstraint::pointNormals(const FESystem& system) const
+{
+    if (!reads_normal_) {
+        return {};
+    }
+    return boundaryPointNormals(system, field_, std::vector<int>{boundary_marker_});
 }
 
 std::vector<Real> StrongDirichletConstraint::parameterValues(const FESystem& system, double time) const
@@ -481,6 +515,7 @@ void StrongDirichletConstraint::apply(const FESystem& system, constraints::Affin
     pctx.dt = 0.0;
     const auto parameters = parameterValues(system, 0.0);
     pctx.jit_constants = parameters;
+    const auto normals = pointNormals(system);
     std::vector<FieldValueEntry> field_values(sampled_fields_.size());
     const std::size_t n_samples = dofs_.empty() ? 0u : samples_.size() / dofs_.size();
 
@@ -501,6 +536,9 @@ void StrongDirichletConstraint::apply(const FESystem& system, constraints::Affin
         if (!field_values.empty()) {
             fillFieldValues(sampled_fields_, sample_components_, samples_, i * n_samples, field_values);
             pctx.field_values = field_values;
+        }
+        if (reads_normal_) {
+            pctx.normal = boundaryNormalAt(normals, dof, coords_[i], boundary_marker_);
         }
         const Real v = forms::evaluateScalarAt(point_value_, pctx);
         constraints.addDirichlet(dof, v);
@@ -555,6 +593,7 @@ bool StrongDirichletConstraint::updateValues(const FESystem& system,
     pctx.dt = static_cast<Real>(dt);
     const auto parameters = parameterValues(system, time);
     pctx.jit_constants = parameters;
+    const auto normals = pointNormals(system);
     std::vector<FieldValueEntry> field_values(sampled_fields_.size());
     const std::size_t n_samples = dofs_.empty() ? 0u : samples_.size() / dofs_.size();
 
@@ -578,6 +617,9 @@ bool StrongDirichletConstraint::updateValues(const FESystem& system,
         if (!field_values.empty()) {
             fillFieldValues(sampled_fields_, sample_components_, samples_, i * n_samples, field_values);
             pctx.field_values = field_values;
+        }
+        if (reads_normal_) {
+            pctx.normal = boundaryNormalAt(normals, dof, coords_[i], boundary_marker_);
         }
         const Real v = forms::evaluateScalarAt(point_value_, pctx);
         const bool constrained = constraints.isConstrained(dof);

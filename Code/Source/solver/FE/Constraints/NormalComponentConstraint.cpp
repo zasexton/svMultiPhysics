@@ -21,6 +21,8 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <optional>
+#include <span>
 #include <sstream>
 #include <type_traits>
 #include <unordered_map>
@@ -86,11 +88,12 @@ struct FacetContribution {
 }
 
 /// The facet contributions this rank sees: the boundary facets of the
-/// markers on its owned cells, at every support point of the field there.
+/// markers on its owned cells, at every support point of the field (of
+/// @p components components) there.
 std::vector<FacetContribution> collectContributions(const FESystem& system,
                                                     FieldId field,
                                                     std::span<const int> markers,
-                                                    int dim)
+                                                    int components)
 {
     const auto& rec = system.fieldRecord(field);
     const auto& mesh = system.meshAccess();
@@ -118,8 +121,8 @@ std::vector<FacetContribution> collectContributions(const FESystem& system,
             const auto face_local = static_cast<int>(mesh.getLocalFaceIndex(face_id, cell_id));
 
             const auto cell_dofs = dof_map.getCellDofs(cell_id);
-            const auto per_component = cell_dofs.size() / static_cast<std::size_t>(dim);
-            FE_THROW_IF(per_component == 0 || per_component * static_cast<std::size_t>(dim) != cell_dofs.size(),
+            const auto per_component = cell_dofs.size() / static_cast<std::size_t>(components);
+            FE_THROW_IF(per_component == 0 || per_component * static_cast<std::size_t>(components) != cell_dofs.size(),
                         InvalidStateException,
                         "NormalComponentConstraint: cell DOF list size is not divisible by field components");
 
@@ -151,7 +154,7 @@ std::vector<FacetContribution> collectContributions(const FESystem& system,
                 FacetContribution c;
                 c.facet = facet;
                 c.measure = measure;
-                for (int d = 0; d < dim; ++d) {
+                for (int d = 0; d < components; ++d) {
                     c.dofs[static_cast<std::size_t>(d)] =
                         cell_dofs[static_cast<std::size_t>(d) * per_component + local] + offset;
                 }
@@ -297,14 +300,13 @@ std::vector<Real> solveSmall(std::vector<std::vector<Real>> a, std::vector<Real>
     return x;
 }
 
-/// The lines of one point from its contributions, sorted by facet id.
-std::vector<NormalComponentConstraint::Line> pointLines(std::span<const FacetContribution> contributions,
-                                                        int dim,
-                                                        Real cos_feature_angle)
+/// The normal directions of one point from its contributions, sorted by
+/// facet id: a facet normal joins the first direction whose first normal is
+/// within the feature angle; each direction is the normalized
+/// measure-weighted sum of its normals.
+std::vector<std::array<Real, 3>> pointDirections(std::span<const FacetContribution> contributions,
+                                                 Real cos_feature_angle)
 {
-    // Directions: a facet normal joins the first direction whose first
-    // normal is within the feature angle; each direction is the normalized
-    // measure-weighted sum of its normals.
     std::vector<std::array<Real, 3>> seeds;
     std::vector<std::array<Real, 3>> sums;
     for (const auto& c : contributions) {
@@ -320,13 +322,54 @@ std::vector<NormalComponentConstraint::Line> pointLines(std::span<const FacetCon
             sums[g][static_cast<std::size_t>(d)] += c.measure * c.normal[static_cast<std::size_t>(d)];
         }
     }
-    const std::size_t k = sums.size();
+    for (auto& sum : sums) {
+        const Real length = std::sqrt(dot3(sum, sum));
+        FE_THROW_IF(!(length > 0.0), InvalidStateException, "NormalComponentConstraint: a zero normal direction");
+        for (auto& c : sum) {
+            c /= length;
+        }
+    }
+    return sums;
+}
+
+/// The contributions of each owned point, sorted by (first DOF, facet id).
+std::vector<FacetContribution> ownedPointContributions(const FESystem& system,
+                                                       FieldId field,
+                                                       std::span<const int> markers,
+                                                       int components)
+{
+    auto contributions = gatherAtOwners(system, collectContributions(system, field, markers, components));
+    std::sort(contributions.begin(), contributions.end(), [](const FacetContribution& a, const FacetContribution& b) {
+        return a.dofs[0] != b.dofs[0] ? a.dofs[0] < b.dofs[0] : a.facet < b.facet;
+    });
+    return contributions;
+}
+
+/// Calls @p visit with the contributions of each point, in turn.
+template <class Visit>
+void forEachPoint(const std::vector<FacetContribution>& contributions, Visit&& visit)
+{
+    for (std::size_t first = 0; first < contributions.size();) {
+        std::size_t last = first + 1;
+        while (last < contributions.size() && contributions[last].dofs[0] == contributions[first].dofs[0]) {
+            ++last;
+        }
+        visit(std::span<const FacetContribution>(contributions.data() + first, last - first));
+        first = last;
+    }
+}
+
+/// The lines of one point from its contributions, sorted by facet id.
+std::vector<NormalComponentConstraint::Line> pointLines(std::span<const FacetContribution> contributions,
+                                                        int dim,
+                                                        Real cos_feature_angle)
+{
+    const auto directions = pointDirections(contributions, cos_feature_angle);
+    const std::size_t k = directions.size();
     std::vector<std::vector<Real>> normals(k, std::vector<Real>(static_cast<std::size_t>(dim)));
     for (std::size_t g = 0; g < k; ++g) {
-        const Real length = std::sqrt(dot3(sums[g], sums[g]));
-        FE_THROW_IF(!(length > 0.0), InvalidStateException, "NormalComponentConstraint: a zero normal direction");
         for (int d = 0; d < dim; ++d) {
-            normals[g][static_cast<std::size_t>(d)] = sums[g][static_cast<std::size_t>(d)] / length;
+            normals[g][static_cast<std::size_t>(d)] = directions[g][static_cast<std::size_t>(d)];
         }
     }
 
@@ -430,6 +473,39 @@ std::vector<NormalComponentConstraint::Line> pointLines(std::span<const FacetCon
 
 } // namespace
 
+std::unordered_map<GlobalIndex, std::optional<std::array<Real, 3>>>
+boundaryPointNormals(const FESystem& system,
+                     FieldId field,
+                     std::span<const int> boundary_markers,
+                     Real feature_angle_degrees)
+{
+    const auto& rec = system.fieldRecord(field);
+    FE_CHECK_NOT_NULL(rec.space.get(), "boundaryPointNormals: field space");
+    FE_THROW_IF(rec.space->continuity() == Continuity::H_curl || rec.space->continuity() == Continuity::H_div ||
+                    rec.space->element().basis().is_vector_valued(),
+                InvalidArgumentException, "boundaryPointNormals: field '" + rec.name + "' must be a Lagrange field");
+    FE_THROW_IF(!(feature_angle_degrees > 0.0 && feature_angle_degrees < 90.0), InvalidArgumentException,
+                "boundaryPointNormals: the feature angle must lie in (0, 90) degrees");
+    const int components = std::max(1, rec.space->value_dimension());
+    FE_THROW_IF(components > 3, InvalidArgumentException,
+                "boundaryPointNormals: field '" + rec.name + "' has more than three components");
+    const Real cos_feature_angle = std::cos(feature_angle_degrees * kPi / 180.0);
+
+    std::unordered_map<GlobalIndex, std::optional<std::array<Real, 3>>> normals;
+    forEachPoint(ownedPointContributions(system, field, boundary_markers, components),
+                 [&](std::span<const FacetContribution> point) {
+                     const auto directions = pointDirections(point, cos_feature_angle);
+                     std::optional<std::array<Real, 3>> normal;
+                     if (directions.size() == 1u) {
+                         normal = directions.front();
+                     }
+                     for (int d = 0; d < components; ++d) {
+                         normals.emplace(point.front().dofs[static_cast<std::size_t>(d)], normal);
+                     }
+                 });
+    return normals;
+}
+
 NormalComponentConstraint::NormalComponentConstraint(FieldId field,
                                                      std::vector<int> boundary_markers,
                                                      forms::FormExpr value,
@@ -472,22 +548,11 @@ void NormalComponentConstraint::apply(const FESystem& system, AffineConstraints&
     FE_THROW_IF(dim < 2 || dim > 3 || rec.space->value_dimension() != dim, InvalidArgumentException,
                 "NormalComponentConstraint: field '" + rec.name + "' must have one component per space dimension");
 
-    auto contributions = gatherAtOwners(system, collectContributions(system, field_, boundary_markers_, dim));
-    std::sort(contributions.begin(), contributions.end(), [](const FacetContribution& a, const FacetContribution& b) {
-        return a.dofs[0] != b.dofs[0] ? a.dofs[0] < b.dofs[0] : a.facet < b.facet;
-    });
-
+    const auto contributions = ownedPointContributions(system, field_, boundary_markers_, dim);
     const Real cos_feature_angle = std::cos(options_.feature_angle_degrees * kPi / 180.0);
     forms::PointEvalContext pctx;
     lines_.clear();
-    for (std::size_t first = 0; first < contributions.size();) {
-        std::size_t last = first + 1;
-        while (last < contributions.size() && contributions[last].dofs[0] == contributions[first].dofs[0]) {
-            ++last;
-        }
-        const std::span<const FacetContribution> point(contributions.data() + first, last - first);
-        first = last;
-
+    forEachPoint(contributions, [&](std::span<const FacetContribution> point) {
         bool held = false;
         for (int d = 0; d < dim; ++d) {
             const auto dof = point.front().dofs[static_cast<std::size_t>(d)];
@@ -496,7 +561,7 @@ void NormalComponentConstraint::apply(const FESystem& system, AffineConstraints&
             held = held || constraints.isConstrained(dof);
         }
         if (held) {
-            continue;
+            return;
         }
         for (auto& line : pointLines(point, dim, cos_feature_angle)) {
             pctx.x = line.x;
@@ -508,7 +573,7 @@ void NormalComponentConstraint::apply(const FESystem& system, AffineConstraints&
             constraints.setInhomogeneity(line.slave, g * line.value_factor);
             lines_.push_back(std::move(line));
         }
-    }
+    });
 }
 
 bool NormalComponentConstraint::updateValues(const FESystem& /*system*/,
