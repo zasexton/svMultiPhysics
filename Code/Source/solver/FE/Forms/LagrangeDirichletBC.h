@@ -98,6 +98,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
+    [[nodiscard]] std::string_view label() const override { return "LagrangeDirichletBC"; }
     [[nodiscard]] FieldId multiplier() const noexcept { return multiplier_; }
 
     /// Binds the multiplier's symbols; the multiplier must be a scalar volume

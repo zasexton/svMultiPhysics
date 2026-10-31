@@ -16,7 +16,6 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <typeinfo>
 #include <unordered_map>
 #include <sstream>
 #include <utility>
@@ -74,7 +73,7 @@ public:
                 continue;
             }
             const auto& bc = *bcs_[i];
-            out += typeid(bc).name();
+            out += bc.label();
             out += "@" + bc.targetDescription();
         }
         return out;

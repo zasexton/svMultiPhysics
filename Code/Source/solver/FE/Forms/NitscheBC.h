@@ -70,6 +70,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
+    [[nodiscard]] std::string_view label() const override { return "ScalarNitscheBC"; }
 
     void contributeToResidual(FormExpr& residual,
                               const FormExpr& u,
@@ -243,6 +244,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
+    [[nodiscard]] std::string_view label() const override { return "TraceNitscheBC"; }
 
     void contributeToResidual(FormExpr& residual,
                               const FormExpr& u,
@@ -422,6 +424,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return -1; }
+    [[nodiscard]] std::string_view label() const override { return "InterfaceTraceNitscheBC"; }
     [[nodiscard]] int interfaceMarker() const override { return interface_marker_; }
 
     void contributeToResidual(FormExpr& residual,

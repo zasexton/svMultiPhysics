@@ -606,7 +606,7 @@ namespace `forms::bc`.
 | `ScalarNitscheBC`, `TraceNitscheBC`, `InterfaceTraceNitscheBC` | `NitscheBC.h` | Nitsche wrapper types; `ScalarNitscheBC` is a legacy scalar-diffusion convenience |
 | `LagrangeDirichletBC`, `makeLagrangeDirichletBC(marker, g, lambda, beta = 0, k = 1)` | `LagrangeDirichletBC.h` | u = g on a physical boundary through a multiplier field restricted to it (D54 T1): `(lambda * v).ds + (mu * (u - g)).ds`, lambda = -k du/dn; with beta > 0 the Barbosa-Hughes term `-(beta h (lambda + k du/dn)(mu + k dv/dn)).ds` (equal-order pairs). Install the residual with lambda in the field list; exclusive on its marker. A multiplier continuous around a corner cannot follow the jump of du/dn there: give each side its own multiplier |
 | `PeriodicBC`, `MultiPointConstraintBC` | `ConstraintBCs.h` | Affine constraints installed through `BoundaryConditionManager` |
-| `bc::BoundaryCondition` | `BoundaryCondition.h` | `implemented/expert`; interface for new BC wrappers |
+| `bc::BoundaryCondition` | `BoundaryCondition.h` | `implemented/expert`; interface for new BC wrappers. Each wrapper names its kind in `label()` (its class name), which the system manifest prints for the conditions a manager installs as affine constraints |
 | `interface::NitscheVariant`, `NitscheInterfaceOptions` | `InterfaceConditions.h` | Interface Poisson Nitsche options |
 | `interface::scalarContinuityPenaltyTerms(...)` | `InterfaceConditions.h` | Equal-and-opposite continuity penalty terms of two traced sides |
 | `interface::nitschePoissonIntegrand(...)` | `InterfaceConditions.h` | Legacy interface Poisson integrand helper; prefer explicit interface trace terms |

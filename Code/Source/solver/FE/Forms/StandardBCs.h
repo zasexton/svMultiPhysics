@@ -73,6 +73,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
+    [[nodiscard]] std::string_view label() const override { return "ReservedBC"; }
     [[nodiscard]] bool hasWeakTerms() const override { return false; }
 
     void contributeToResidual(FormExpr& /*residual*/,
@@ -139,6 +140,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
+    [[nodiscard]] std::string_view label() const override { return "NaturalBC"; }
 
     void contributeToResidual(FormExpr& residual,
                               const FormExpr& /*u*/,
@@ -235,6 +237,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
+    [[nodiscard]] std::string_view label() const override { return "RobinBC"; }
 
     void contributeToResidual(FormExpr& residual,
                               const FormExpr& u,
@@ -324,6 +327,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
+    [[nodiscard]] std::string_view label() const override { return "EssentialBC"; }
     [[nodiscard]] bool hasWeakTerms() const override { return false; }
 
     void contributeToResidual(FormExpr& /*residual*/,
@@ -431,6 +435,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
+    [[nodiscard]] std::string_view label() const override { return "ComponentEssentialBC"; }
     [[nodiscard]] bool hasWeakTerms() const override { return false; }
 
     void contributeToResidual(FormExpr& /*residual*/,
@@ -597,6 +602,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
+    [[nodiscard]] std::string_view label() const override { return "NormalTraceEssentialBC"; }
     [[nodiscard]] bool hasWeakTerms() const override { return false; }
 
     void contributeToResidual(FormExpr& /*residual*/,
@@ -662,6 +668,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
+    [[nodiscard]] std::string_view label() const override { return "NormalEssentialBC"; }
     [[nodiscard]] bool hasWeakTerms() const override { return false; }
 
     void contributeToResidual(FormExpr& /*residual*/,
@@ -743,6 +750,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
+    [[nodiscard]] std::string_view label() const override { return "TraceLoadBC"; }
 
     void contributeToResidual(FormExpr& residual,
                               const FormExpr& /*u*/,
@@ -840,6 +848,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
+    [[nodiscard]] std::string_view label() const override { return "TraceRobinBC"; }
 
     void contributeToResidual(FormExpr& residual,
                               const FormExpr& u,
@@ -933,6 +942,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
+    [[nodiscard]] std::string_view label() const override { return "TraceInequalityBC"; }
     [[nodiscard]] bool allowsMarkerSharing() const override { return false; }
 
     void contributeToResidual(FormExpr& residual,
@@ -1043,6 +1053,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return -1; }
+    [[nodiscard]] std::string_view label() const override { return "InterfaceTraceLoadBC"; }
     [[nodiscard]] int interfaceMarker() const override { return interface_marker_; }
 
     void contributeToResidual(FormExpr& residual,
@@ -1114,6 +1125,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return -1; }
+    [[nodiscard]] std::string_view label() const override { return "InterfaceTraceRobinBC"; }
     [[nodiscard]] int interfaceMarker() const override { return interface_marker_; }
 
     void contributeToResidual(FormExpr& residual,
@@ -1189,6 +1201,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return -1; }
+    [[nodiscard]] std::string_view label() const override { return "InterfaceTraceJumpPenaltyBC"; }
     [[nodiscard]] int interfaceMarker() const override { return interface_marker_; }
 
     void contributeToResidual(FormExpr& residual,

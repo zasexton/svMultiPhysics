@@ -211,6 +211,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return slave_marker_; }
+    [[nodiscard]] std::string_view label() const override { return "PeriodicBC"; }
     [[nodiscard]] bool hasWeakTerms() const override { return false; }
 
     void setup(systems::FESystem& system, FieldId /*field_id*/) override
@@ -312,6 +313,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return -1; }
+    [[nodiscard]] std::string_view label() const override { return "MultiPointConstraintBC"; }
     [[nodiscard]] bool hasWeakTerms() const override { return false; }
 
     void contributeToResidual(FormExpr& /*residual*/,

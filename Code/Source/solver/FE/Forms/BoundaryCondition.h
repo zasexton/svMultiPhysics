@@ -14,6 +14,7 @@
 #include "Analysis/BoundaryConditionDescriptor.h"
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace svmp {
@@ -36,6 +37,10 @@ public:
 
     [[nodiscard]] virtual int boundaryMarker() const = 0;
     [[nodiscard]] virtual int interfaceMarker() const { return -1; }
+
+    /// The condition's kind as the system manifest names it (the class
+    /// name, independent of the compiler's type names).
+    [[nodiscard]] virtual std::string_view label() const = 0;
 
     [[nodiscard]] virtual analysis::DomainKind targetDomain() const
     {

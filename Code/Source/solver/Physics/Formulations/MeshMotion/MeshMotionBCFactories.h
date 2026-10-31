@@ -73,6 +73,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
+    [[nodiscard]] std::string_view label() const override { return "TangentialConstraintBoundaryCondition"; }
 
     void contributeToResidual(FE::forms::FormExpr& residual,
                               const FE::forms::FormExpr& u,
