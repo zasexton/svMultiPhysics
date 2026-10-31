@@ -357,8 +357,8 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     const auto wetted = FE::level_set::wettedBoundaryResolver(system, preflight.generated_active_boundary_for);
 
     // Constraints, in the plan's phase order: vertex values < essential < inactive side < aggregation
-    // < contact-point law.  With a cut liquid L the traction on Gamma_h fixes the pressure constant, the dry
-    // side is pinned (u = 0, p = 0) and small cut cells are aggregated.
+    // < contact-point law.  With a cut liquid L the traction on Gamma_h fixes the pressure constant, and u
+    // and p live on L: the dry side is pinned (u = 0, p = 0) and small cut cells are aggregated.
     cs::ConstraintPlan plan(system);
     const auto* liquid = preflight.active_boundary_index
         ? &free_surfaces[*preflight.active_boundary_index] : nullptr;
@@ -372,10 +372,8 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
         const auto L =
             preflight.surface_identities[*preflight.active_boundary_index].geometry.value()
                 .side(activeDomainSide(liquid->active_domain));
-        plan.inactiveSide({u_id}, L).inactiveSide({p_id}, L);
-        if (aggregated) {
-            plan.aggregate({u_id, p_id}, L, liquid->small_cut_aggregation_guards);
-        }
+        plan.activeOn({u_id, p_id}, L,
+                      {.aggregate = aggregated, .guards = liquid->small_cut_aggregation_guards});
     }
     if (!o.node_pressure_constraints.values.empty()) {
         plan.vertexValues(p_id, std::move(preflight.node_pressure_values), nodePressureIdMode(o));
