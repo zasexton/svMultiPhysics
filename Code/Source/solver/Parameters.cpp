@@ -261,6 +261,22 @@ bool is_oop_equation_extension_parameter(const std::string& name)
   return names.count(name) != 0;
 }
 
+/// The list above for an equation of @p equation_type.  A level-set equation
+/// does not read Level_set_isovalue (the isovalue of a fluid equation's cut
+/// domain) or Field_name (the field of a mesh-motion equation), so a
+/// level-set equation that writes one fails as an unknown element (decision
+/// D63 item 3).
+bool is_oop_equation_extension_parameter(const std::string& name,
+                                         const std::string& equation_type)
+{
+  const auto type = normalized_free_surface_physical_model_token(equation_type);
+  if ((type == "levelset" || type == "levelsettransport") &&
+      (name == "Level_set_isovalue" || name == "Field_name")) {
+    return false;
+  }
+  return is_oop_equation_extension_parameter(name);
+}
+
 bool is_oop_boundary_extension_parameter(const std::string& name)
 {
   static const std::set<std::string> names = {
@@ -2542,7 +2558,7 @@ void EquationParameters::set_values(tinyxml2::XMLElement* eq_elem)
         set_parameter_value(name, value);
       } else if (default_domain->params_map.count(name) != 0) {
         default_domain->set_parameter_value(name, value);
-      } else if (is_oop_equation_extension_parameter(name)) {
+      } else if (is_oop_equation_extension_parameter(name, type.value())) {
         set_extra_parameter_value(name, value);
       } else {
         throw std::runtime_error("Unknown " + xml_element_name_ + " XML element '" + name + ".");

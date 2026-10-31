@@ -2252,3 +2252,32 @@ TEST(EquationTranslatorFreeSurface, AcceptanceListsHoldTheSpellingsOfTheSchemas)
         << spelling;
   }
 }
+
+TEST(EquationTranslatorFreeSurface, LevelSetEquationRejectsKeysItDoesNotRead)
+{
+  // Level_set_isovalue (the isovalue of a fluid equation's cut domain) and
+  // Field_name (the field of a mesh-motion equation) are unknown elements of
+  // a level-set equation (decision D63 item 3).
+  const auto error_of = [](const std::string& xml) {
+    try {
+      (void)parseEquationXml(xml.c_str());
+    } catch (const std::runtime_error& error) {
+      return std::string(error.what());
+    }
+    return std::string{};
+  };
+  for (const std::string type : {"level_set", "levelSet", "level_set_transport"}) {
+    for (const std::string key : {"Level_set_isovalue", "Field_name"}) {
+      EXPECT_EQ(error_of("<Add_equation type=\"" + type + "\"><" + key + ">0</" + key +
+                         "></Add_equation>"),
+                "Unknown Add_equation XML element '" + key + ".")
+          << type << " " << key;
+    }
+  }
+  EXPECT_EQ(error_of("<Add_equation type=\"fluid\"><Level_set_isovalue>0.0</Level_set_isovalue>"
+                     "</Add_equation>"),
+            "");
+  EXPECT_EQ(error_of("<Add_equation type=\"mesh_motion\"><Field_name>mesh_displacement</Field_name>"
+                     "</Add_equation>"),
+            "");
+}
