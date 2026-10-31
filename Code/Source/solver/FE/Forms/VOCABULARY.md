@@ -209,6 +209,7 @@ Status: `implemented/public`, unless noted.
 | `FormExpr::parameterRef(slot)` | `FormExpr.h` | `implemented/internal`; post-resolution slot reference |
 | `FormExpr::typedZero()` | `FormExpr.h` | `implemented/internal`; shape-preserving zero for lowering/simplification |
 | `systems::FieldBinding::unknown(spec, role)`, `prescribed(spec, auto_register, role)` | `Systems/FieldBinding.h` | Register a field or reuse a compatible registered one (source kind; scope: volume, interface with its marker, or global, as the registry sets it from the space; components; space); incompatible reuse throws with `"<owner> <role>: "`, naming the first of these that differs (a volume field asked for as a global one: "is a volume field, expected a global field") |
+| `systems::FieldBinding::lagged(U, Refresh::GeneratedState[, name])`, `previous(U, k = 1[, name])` | `Systems/FieldBinding.h` | An unknown held at an earlier value: its prescribed shadow field (`<field>_lagged`, `<field>_previous<k>`, or `name`) on the unknown's space, registered or reused, returned as its DiscreteField of the same name, which is data in the Jacobian (`u - lagged(U)` has the residual of `u - u_ref` and the Jacobian of `u`). `lagged` holds u at the last refresh of the generated state, `previous` its value k steps back in the time history (what the integrator keeps there). `shadowFields(system)` lists them; `timestepping::makeShadowFieldParticipant(system)` is the Reference participant of a `GeneratedStateRegistry` that refreshes them by a rank-local DOF copy. Not yet used by the Navier-Stokes semi-implicit term |
 | `systems::FieldBinding::global(name, role)` | `Systems/FieldBinding.h` | A global multiplier: an unknown on a new `GlobalSpace` with the automatic quadrature, or the registered global field of that name; its space is `fieldRecord(id).space` |
 | `systems::FieldBinding::check`, `requireDistinctNames`, `systems::spacesCompatible` | `Systems/FieldBinding.h` | Read-only checks before system mutation |
 | `FESystem::addField(FieldSpec)`, `addInterfaceField(name, space, marker)` | `Systems/FESystem.h` | Volume fields and codimension-one interface fields |
@@ -1016,12 +1017,11 @@ normals.
 #### Named History, Stage, and Material State
 
 Current public pieces include `dt`, `t`, `deltat`, `deltat_eff`,
-`previousSolution(k)`, `historyWeightedSum`, `historyConvolution`, and named
+`previousSolution(k)`, `historyWeightedSum`, `historyConvolution`, `FieldBinding::previous` and `lagged` (above), and named
 auxiliary input/output/state terminals. Missing vocabulary:
 
 | Vocabulary | Purpose |
 |------------|---------|
-| `prev(u, k)` or `u_prev(k)` | Field-oriented previous solution access |
 | `stage(u, i)` | Time-integrator stage access |
 | `stateOld(name)`, `stateWork(name)` | Named material-state access from `StateLayout` |
 | Named coupled integral/state aliases where needed | Avoid authoring raw slots in public physics modules |

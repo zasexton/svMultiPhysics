@@ -241,6 +241,20 @@ private:
     std::vector<std::shared_ptr<IGeneratedStateParticipant>> participants_{};
 };
 
+/**
+ * @brief The Reference participant of the shadow fields of @p system
+ *        (systems::FieldBinding::lagged and FieldBinding::previous)
+ *
+ * At every synchronization it copies, DOF by DOF, the source field's
+ * coefficients of the synchronized state into each lagged shadow, and the
+ * source's value k steps back (SystemStateView::u_history, or u_prev and
+ * u_prev2) into each previous(u, k) shadow.  The copy is rank-local, so the
+ * shadows are the same at any rank count.  Created after setup; a shadow
+ * whose DOF map differs from its source's is refused on every rank.
+ */
+[[nodiscard]] std::shared_ptr<IGeneratedStateParticipant> makeShadowFieldParticipant(
+    systems::FESystem& system);
+
 } // namespace timestepping
 } // namespace FE
 } // namespace svmp

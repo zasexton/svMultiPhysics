@@ -7,6 +7,12 @@
 
 #include "TimeStepping/GeneratedState.h"
 
+#include "Backends/Interfaces/GenericVector.h"
+#include "Dofs/DofHandler.h"
+#include "Systems/FESystem.h"
+#include "Systems/FieldBinding.h"
+#include "Systems/SystemCollectives.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
@@ -332,6 +338,152 @@ void GeneratedStateRegistry::bind(NewtonOptions& options) const
   options.acknowledge_external_state_frozen_epoch = [provider]() {
     provider->acknowledgeFrozenEpoch();
   };
+}
+
+// ---------------------------------------------------------------------------
+// Shadow fields
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// One shadow field's copy: the source's field DOFs, their indices in the
+/// state vector and the shadow's coefficient count.
+struct ShadowCopy {
+  systems::ShadowField field{};
+  std::vector<GlobalIndex> field_dofs{};
+  std::vector<GlobalIndex> state_dofs{};
+  GlobalIndex coefficient_count{0};
+};
+
+/// The values of @p state at @p indices; @p vector, when set, is read
+/// through its assembly view, as assembly reads it (ghosted and permuted
+/// layouts resolve as for the unknowns).
+void readState(std::span<const Real> values,
+               const backends::GenericVector* vector,
+               std::span<const GlobalIndex> indices,
+               std::span<Real> out,
+               std::string_view what)
+{
+  if (vector != nullptr) {
+    const auto view = const_cast<backends::GenericVector*>(vector)->createAssemblyView();
+    if (!view) {
+      throw std::runtime_error("ShadowFieldParticipant: cannot read the " + std::string(what));
+    }
+    view->getVectorEntries(indices, out);
+    return;
+  }
+  for (std::size_t i = 0; i < indices.size(); ++i) {
+    const auto index = static_cast<std::size_t>(indices[i]);
+    if (index >= values.size()) {
+      throw std::runtime_error("ShadowFieldParticipant: the " + std::string(what) +
+                               " is smaller than the FE layout");
+    }
+    out[i] = values[index];
+  }
+}
+
+class ShadowFieldParticipant final : public IGeneratedStateParticipant {
+public:
+  explicit ShadowFieldParticipant(systems::FESystem& system) : system_(&system)
+  {
+    std::exception_ptr failure;
+    try {
+      for (const auto& field : systems::shadowFields(system)) {
+        copies_.push_back(prepare(field));
+      }
+    } catch (...) {
+      failure = std::current_exception();
+    }
+    (void)systems::agreeOnLocalPhase(system, failure, /*local_available=*/true,
+                                     "shadow_field_layout", "ShadowFieldParticipant");
+  }
+
+  [[nodiscard]] std::string_view name() const noexcept override { return "shadow_fields"; }
+  [[nodiscard]] GeneratedStateRole role() const noexcept override { return GeneratedStateRole::Reference; }
+
+  void synchronize(const systems::SystemStateView& state, GeneratedStateSync& /*sync*/) override
+  {
+    for (const auto& copy : copies_) {
+      std::span<const Real> values = state.u;
+      const backends::GenericVector* vector = state.u_vector;
+      if (copy.field.kind == systems::ShadowField::Kind::Previous) {
+        values = historyValues(state, copy.field.steps_back);
+        vector = copy.field.steps_back == 1 ? state.u_prev_vector
+                 : copy.field.steps_back == 2 ? state.u_prev2_vector
+                                              : nullptr;
+        if (vector == nullptr && values.empty()) {
+          throw std::runtime_error("ShadowFieldParticipant: the state holds no value " +
+                                   std::to_string(copy.field.steps_back) + " steps back for '" +
+                                   system_->fieldRecord(copy.field.source).name + "'");
+        }
+      }
+      std::vector<Real> read(copy.state_dofs.size(), Real(0.0));
+      readState(values, vector, copy.state_dofs, read, "state of '" + system_->fieldRecord(copy.field.source).name + "'");
+      std::vector<Real> coefficients(static_cast<std::size_t>(copy.coefficient_count), Real(0.0));
+      for (std::size_t i = 0; i < copy.field_dofs.size(); ++i) {
+        coefficients[static_cast<std::size_t>(copy.field_dofs[i])] = read[i];
+      }
+      system_->setPrescribedFieldCoefficients(copy.field.shadow, coefficients);
+    }
+  }
+
+private:
+  [[nodiscard]] ShadowCopy prepare(const systems::ShadowField& field) const
+  {
+    // A copy coefficient by coefficient needs the source's DOF map.
+    const auto& source_map = system_->fieldDofHandler(field.source).getDofMap();
+    const auto& shadow_map = system_->fieldDofHandler(field.shadow).getDofMap();
+    const auto source_offsets = source_map.getOffsets();
+    const auto shadow_offsets = shadow_map.getOffsets();
+    const auto source_indices = source_map.getDofIndices();
+    const auto shadow_indices = shadow_map.getDofIndices();
+    if (source_map.getNumDofs() != shadow_map.getNumDofs() ||
+        !std::equal(source_offsets.begin(), source_offsets.end(), shadow_offsets.begin(), shadow_offsets.end()) ||
+        !std::equal(source_indices.begin(), source_indices.end(), shadow_indices.begin(), shadow_indices.end())) {
+      throw std::runtime_error("ShadowFieldParticipant: the shadow field '" + system_->fieldRecord(field.shadow).name +
+                               "' does not share the DOF map of '" + system_->fieldRecord(field.source).name + "'");
+    }
+    ShadowCopy copy;
+    copy.field = field;
+    copy.coefficient_count = shadow_map.getNumDofs();
+    copy.field_dofs.assign(source_indices.begin(), source_indices.end());
+    std::sort(copy.field_dofs.begin(), copy.field_dofs.end());
+    copy.field_dofs.erase(std::unique(copy.field_dofs.begin(), copy.field_dofs.end()), copy.field_dofs.end());
+    const auto offset = system_->fieldDofOffset(field.source);
+    copy.state_dofs.reserve(copy.field_dofs.size());
+    for (const auto dof : copy.field_dofs) {
+      if (dof < 0 || dof >= copy.coefficient_count) {
+        throw std::runtime_error("ShadowFieldParticipant: a DOF of '" + system_->fieldRecord(field.source).name +
+                                 "' lies outside its field layout");
+      }
+      copy.state_dofs.push_back(offset + dof);
+    }
+    return copy;
+  }
+
+  [[nodiscard]] static std::span<const Real> historyValues(const systems::SystemStateView& state, int k)
+  {
+    if (k >= 1 && static_cast<std::size_t>(k) <= state.u_history.size()) {
+      return state.u_history[static_cast<std::size_t>(k - 1)];
+    }
+    if (k == 1) {
+      return state.u_prev;
+    }
+    if (k == 2) {
+      return state.u_prev2;
+    }
+    return {};
+  }
+
+  systems::FESystem* system_{nullptr};
+  std::vector<ShadowCopy> copies_{};
+};
+
+} // namespace
+
+std::shared_ptr<IGeneratedStateParticipant> makeShadowFieldParticipant(systems::FESystem& system)
+{
+  return std::make_shared<ShadowFieldParticipant>(system);
 }
 
 } // namespace timestepping

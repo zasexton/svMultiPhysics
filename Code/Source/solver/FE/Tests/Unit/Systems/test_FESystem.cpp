@@ -12,6 +12,7 @@
 #include "Systems/MeshDisplacementBinding.h"
 #include "Systems/OperatorBackends.h"
 #include "Systems/SystemsExceptions.h"
+#include "TimeStepping/GeneratedState.h"
 
 #include "Assembly/AssemblyKernel.h"
 #include "Assembly/CutIntegrationContext.h"
@@ -2375,3 +2376,97 @@ TEST(FESystem, ConstraintSparsityAugmentationAddsMasterCouplings)
     const bool has_with = sys.sparsity("mass").hasEntry(end0, end1);
     EXPECT_TRUE(has_with);
 }
+
+TEST(FESystem, LaggedAndPreviousValuesAreShadowFieldsRefreshedByTheGeneratedState)
+{
+    namespace ts = svmp::FE::timestepping;
+    using svmp::FE::systems::Refresh;
+    using svmp::FE::systems::ShadowField;
+    auto mesh = build_single_quad_mesh();
+    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    auto vector_space = std::make_shared<ProductSpace>(scalar_space, /*components=*/2);
+
+    FESystem sys(mesh);
+    FieldBinding fields(sys, "Owner::registerOn");
+    const auto U = fields.unknownSymbols(FieldSpec{.name = "u", .space = vector_space, .components = 2},
+                                         "velocity", "u", "v");
+    const auto W = fields.unknownSymbols(FieldSpec{.name = "w", .space = scalar_space}, "scalar", "w", "z");
+    const auto u_ref = fields.lagged(U, Refresh::GeneratedState);
+    const auto w_n = fields.previous(W, 1);
+
+    // Each is the DiscreteField of a prescribed shadow on the source's space.
+    const auto shadows = svmp::FE::systems::shadowFields(sys);
+    ASSERT_EQ(shadows.size(), 2u);
+    EXPECT_EQ(shadows[0].source, U.id);
+    EXPECT_EQ(shadows[0].kind, ShadowField::Kind::Lagged);
+    EXPECT_EQ(shadows[1].source, W.id);
+    EXPECT_EQ(shadows[1].kind, ShadowField::Kind::Previous);
+    EXPECT_EQ(shadows[1].steps_back, 1);
+    EXPECT_EQ(sys.fieldRecord(shadows[0].shadow).name, "u_lagged");
+    EXPECT_EQ(sys.fieldRecord(shadows[1].shadow).name, "w_previous1");
+    EXPECT_FALSE(sys.fieldParticipatesInUnknownVector(shadows[0].shadow));
+    ASSERT_EQ(u_ref.node()->type(), svmp::FE::forms::FormExprType::DiscreteField);
+    EXPECT_EQ(u_ref.toString(),
+              svmp::FE::forms::FormExpr::discreteField(shadows[0].shadow, *vector_space, "u_lagged").toString());
+    EXPECT_EQ(w_n.node()->fieldId(), shadows[1].shadow);
+    // Asked again, the same shadow; a k < 1 or a prescribed source is refused.
+    EXPECT_EQ(fields.lagged(U, Refresh::GeneratedState).node()->fieldId(), shadows[0].shadow);
+    EXPECT_EQ(svmp::FE::systems::shadowFields(sys).size(), 2u);
+    EXPECT_THROW((void)fields.previous(W, 0), std::invalid_argument);
+    const svmp::FE::systems::BoundUnknown data{shadows[0].shadow, u_ref, u_ref};
+    EXPECT_THROW((void)fields.lagged(data, Refresh::GeneratedState), std::invalid_argument);
+
+    sys.addOperator("mass");
+    sys.addCellKernel("mass", U.id, std::make_shared<MassKernel>(1.0));
+    sys.addCellKernel("mass", W.id, std::make_shared<MassKernel>(1.0));
+    sys.setup();
+
+    const auto n = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+    std::vector<Real> u(n), u_prev(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        u[i] = 0.5 + static_cast<Real>(i);
+        u_prev[i] = -1.0 - 0.25 * static_cast<Real>(i);
+    }
+    SystemStateView state;
+    state.u = u;
+    state.u_prev = u_prev;
+    const auto expect_copies = [&](std::span<const Real> current) {
+        const auto lagged = sys.prescribedFieldCoefficients(shadows[0].shadow);
+        const auto u_offset = static_cast<std::size_t>(sys.fieldDofOffset(U.id));
+        ASSERT_EQ(lagged.size(), static_cast<std::size_t>(sys.fieldDofHandler(U.id).getNumDofs()));
+        for (std::size_t i = 0; i < lagged.size(); ++i) {
+            EXPECT_EQ(lagged[i], current[u_offset + i]) << "u DOF " << i;
+        }
+        const auto previous = sys.prescribedFieldCoefficients(shadows[1].shadow);
+        const auto w_offset = static_cast<std::size_t>(sys.fieldDofOffset(W.id));
+        for (std::size_t i = 0; i < previous.size(); ++i) {
+            EXPECT_EQ(previous[i], u_prev[w_offset + i]) << "w DOF " << i;
+        }
+    };
+
+    // The participant runs with the Reference role; with the outer fixed
+    // point it refreshes at the projected outer points only (the outer
+    // point itself is the constraint-construction pass).
+    auto registry = std::make_shared<ts::GeneratedStateRegistry>(
+        ts::GeneratedStatePolicy{.solve = ts::GeneratedStateSolve::Transient, .outer_fixed_point = true});
+    auto participant = ts::makeShadowFieldParticipant(sys);
+    EXPECT_EQ(participant->role(), ts::GeneratedStateRole::Reference);
+    registry->add(participant);
+    using Point = ts::NewtonOptions::StateSynchronizationPoint;
+    registry->synchronize(state, Point::OuterFixedPointState);
+    EXPECT_TRUE(sys.prescribedFieldCoefficients(shadows[0].shadow).empty() ||
+                sys.prescribedFieldCoefficients(shadows[0].shadow)[0] == 0.0);
+    registry->synchronize(state, Point::ProjectedOuterFixedPointState);
+    expect_copies(u);
+
+    // Untouched between refreshes, refreshed at the next one.
+    const auto refreshed = u;
+    for (auto& value : u) {
+        value *= 3.0;
+    }
+    registry->synchronize(state, Point::ResidualAssembly);
+    expect_copies(refreshed);
+    registry->synchronize(state, Point::ProjectedOuterFixedPointState);
+    expect_copies(u);
+}
+

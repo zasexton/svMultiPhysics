@@ -13,6 +13,7 @@
 #include "Spaces/MortarSpace.h"
 #include "Systems/FESystem.h"
 
+#include <algorithm>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -34,6 +35,11 @@ bool spacesCompatible(const spaces::FunctionSpace& lhs,
 }
 
 namespace {
+
+/// The shadow fields of a system (FieldBinding::lagged and previous).
+struct ShadowFieldRecords {
+    std::vector<ShadowField> fields;
+};
 
 /// The scope and marker FieldRegistry::add gives @p spec.
 [[nodiscard]] std::pair<FieldScope, int> registeredScope(const FieldSpec& spec)
@@ -216,6 +222,65 @@ BoundPrescribed FieldBinding::prescribedSymbol(FieldSpec spec, bool auto_registe
     const auto space = spec.space;
     const auto id = prescribed(std::move(spec), auto_register, role);
     return {id, forms::FormExpr::stateField(id, *space, std::move(symbol))};
+}
+
+std::vector<ShadowField> shadowFields(const FESystem& system)
+{
+    const auto* records = system.findAttachment<ShadowFieldRecords>();
+    return records != nullptr ? records->fields : std::vector<ShadowField>{};
+}
+
+forms::FormExpr FieldBinding::lagged(const BoundUnknown& unknown, Refresh refresh, std::string shadow_name)
+{
+    if (shadow_name.empty() && unknown.id != INVALID_FIELD_ID) {
+        shadow_name = system_->fieldRecord(unknown.id).name + "_lagged";
+    }
+    return shadow(unknown, ShadowField{.kind = ShadowField::Kind::Lagged, .refresh = refresh}, std::move(shadow_name),
+                  "lagged copy");
+}
+
+forms::FormExpr FieldBinding::previous(const BoundUnknown& unknown, int k, std::string shadow_name)
+{
+    if (k < 1) {
+        throw std::invalid_argument(roleContext("previous value") + ": the value k = " + std::to_string(k) +
+                                    " steps back is not k >= 1");
+    }
+    if (shadow_name.empty() && unknown.id != INVALID_FIELD_ID) {
+        shadow_name = system_->fieldRecord(unknown.id).name + "_previous" + std::to_string(k);
+    }
+    return shadow(unknown, ShadowField{.kind = ShadowField::Kind::Previous, .steps_back = k}, std::move(shadow_name),
+                  "previous value");
+}
+
+forms::FormExpr FieldBinding::shadow(const BoundUnknown& unknown, ShadowField record, std::string shadow_name,
+                                     std::string_view role)
+{
+    const auto context = roleContext(role);
+    if (unknown.id == INVALID_FIELD_ID || !system_->hasField(unknown.id) ||
+        !system_->fieldParticipatesInUnknownVector(unknown.id)) {
+        throw std::invalid_argument(context + ": the source is not a registered unknown");
+    }
+    const auto& source = system_->fieldRecord(unknown.id);
+    const auto space = source.space;
+    const auto id = prescribed(FieldSpec{.name = shadow_name,
+                                         .space = space,
+                                         .components = source.components,
+                                         .scope = source.scope,
+                                         .interface_marker = source.interface_marker,
+                                         .source_kind = FieldSourceKind::PrescribedData},
+                               /*auto_register=*/true, role);
+    record.source = unknown.id;
+    record.shadow = id;
+    auto& records = system_->attachment<ShadowFieldRecords>().fields;
+    const auto existing = std::find_if(records.begin(), records.end(),
+                                       [&](const ShadowField& r) { return r.shadow == id; });
+    if (existing == records.end()) {
+        records.push_back(record);
+    } else if (existing->source != record.source || existing->kind != record.kind ||
+               existing->refresh != record.refresh || existing->steps_back != record.steps_back) {
+        throw std::invalid_argument(context + ": field '" + shadow_name + "' is already another shadow field");
+    }
+    return forms::FormExpr::discreteField(id, *space, std::move(shadow_name));
 }
 
 void FieldBinding::requireDistinctNames(

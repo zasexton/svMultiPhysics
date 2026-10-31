@@ -26,10 +26,12 @@
 #include "Forms/FormExpr.h"
 #include "Systems/FieldRegistry.h"
 
+#include <cstdint>
 #include <initializer_list>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace svmp {
 namespace FE {
@@ -66,6 +68,28 @@ struct BoundPrescribed {
 /// not depend on contributes nothing.
 [[nodiscard]] forms::FormExpr derivative(const forms::FormExpr& form,
                                          std::initializer_list<BoundUnknown> unknowns);
+
+/// When the copy behind FieldBinding::lagged is taken.
+enum class Refresh : std::uint8_t {
+    /// At every synchronization of the generated state that runs its
+    /// Reference role (timestepping::GeneratedStateRegistry): with the outer
+    /// fixed point, u at the last regeneration of the cut geometry.
+    GeneratedState,
+};
+
+/// A prescribed copy of an unknown that holds it at an earlier value
+/// (FieldBinding::lagged and FieldBinding::previous).
+struct ShadowField {
+    enum class Kind : std::uint8_t { Lagged, Previous };
+    FieldId source{INVALID_FIELD_ID};
+    FieldId shadow{INVALID_FIELD_ID};
+    Kind kind{Kind::Lagged};
+    Refresh refresh{Refresh::GeneratedState}; ///< of a lagged copy
+    int steps_back{0};                        ///< k of previous(u, k)
+};
+
+/// The shadow fields of @p system, in registration order.
+[[nodiscard]] std::vector<ShadowField> shadowFields(const FESystem& system);
 
 /// Same space type, field type, value and topological dimension, polynomial
 /// order and element type.
@@ -127,6 +151,29 @@ public:
                                                    std::string_view role, std::string symbol);
 
     /**
+     * @brief u held at its value of the last refresh: the lagged unknown
+     *
+     * Registers the prescribed field @p shadow_name (default
+     * "<field>_lagged") on the unknown's space, or reuses the compatible
+     * registered one, records it as the unknown's shadow (shadowFields()),
+     * and returns its DiscreteField of the same name: data in the Jacobian,
+     * so a term in u - lagged(U) has the residual of u - u_ref and the
+     * Jacobian of u.  timestepping::makeShadowFieldParticipant refreshes it.
+     */
+    [[nodiscard]] forms::FormExpr lagged(const BoundUnknown& unknown, Refresh refresh,
+                                         std::string shadow_name = {});
+
+    /**
+     * @brief u^{n-k}, the unknown's accepted value @p k >= 1 steps back
+     *
+     * As lagged(), with the shadow "<field>_previous<k>" holding the time
+     * history's value k steps back (what SystemStateView::u_history holds
+     * there, as the time integrator defines it).
+     */
+    [[nodiscard]] forms::FormExpr previous(const BoundUnknown& unknown, int k = 1,
+                                           std::string shadow_name = {});
+
+    /**
      * @brief Throws "<owner>: field name '<name>' is assigned to both <a> and
      * <b>" when two roles name the same field; empty names are skipped.
      */
@@ -136,6 +183,8 @@ public:
 
 private:
     [[nodiscard]] std::string roleContext(std::string_view role) const;
+    [[nodiscard]] forms::FormExpr shadow(const BoundUnknown& unknown, ShadowField record, std::string shadow_name,
+                                         std::string_view role);
 
     FESystem* system_{nullptr};
     std::string owner_{};
