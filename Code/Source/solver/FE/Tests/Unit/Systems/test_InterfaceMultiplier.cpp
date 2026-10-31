@@ -24,17 +24,20 @@
 
 #include "Assembly/GlobalSystemView.h"
 #include "Constraints/AffineConstraints.h"
+#include "Constraints/ConstraintPlan.h"
 #include "Constraints/SystemConstraint.h"
 #include "Core/FEException.h"
 #include "Dofs/EntityDofMap.h"
 #include "Elements/ReferenceElement.h"
 #include "Forms/BoundaryConditions.h"
+#include "Forms/IntegrationDomain.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/GlobalSpace.h"
 #include "Spaces/H1Space.h"
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
 #include "Systems/InterfaceSideSplit.h"
+#include "Systems/SystemManifest.h"
 
 #include "Mesh/Core/InterfaceMesh.h"
 #include "Mesh/Core/MeshBase.h"
@@ -68,6 +71,8 @@ constexpr int kLeft = 1;
 constexpr int kRight = 2;
 constexpr int kOther = 3;
 constexpr int kGamma = 31;
+constexpr int kLeftDomain = 1;
+constexpr int kRightDomain = 2;
 
 /**
  * The n x n Quad4 grid of the unit square (n even), all faces stored: the
@@ -102,6 +107,12 @@ std::shared_ptr<svmp::Mesh> buildSplitSquare(int n)
     }
     base->build_from_arrays(/*spatial_dim=*/2, X, offsets, conn, shapes);
     base->finalize();
+    // Domain 1 left of x = 1/2, domain 2 right of it.
+    for (int cy = 0; cy < n; ++cy) {
+        for (int cx = 0; cx < n; ++cx) {
+            base->set_region_label(static_cast<svmp::index_t>(cy * n + cx), 2 * cx < n ? kLeftDomain : kRightDomain);
+        }
+    }
     for (svmp::index_t f = 0; f < static_cast<svmp::index_t>(base->n_faces()); ++f) {
         const auto vertices = base->face_vertices(f);
         Real x0 = 1e30;
@@ -451,6 +462,104 @@ TEST(InterfaceMultiplierI1, TwoSubdomainsGluedByAFullTraceMultiplierEqualTheSing
             EXPECT_NEAR(u2[vtx], u[vtx], 1e-11 * scale) << "u2 at vertex " << vtx;
         }
     }
+}
+
+// I1 with the subdomains, their unknowns and the interface sides named by
+// domain: dx(cells(k)), plan.activeOn(fields, cells(k)) for the unknowns of
+// each subdomain, interfaceBetween and side(), with no hand-written pin and
+// no indicator coefficient.  The solution equals the single domain's, and
+// the subdomain measure and the sides are the trees of the indicator and of
+// minus()/plus().
+TEST(InterfaceMultiplierI1, SubdomainMeasuresAndSidesByDomainEqualTheSingleDomain)
+{
+    const int n = 6;
+    auto q1 = std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+    const auto f = coefficient("f", kSource);
+    const auto g = coefficient("g", kData);
+
+    FESystem single(buildSplitSquare(n));
+    const auto u_id = single.addField(FieldSpec{.name = "u", .space = q1});
+    single.addOperator("op");
+    {
+        const auto u = forms::StateField(u_id, *q1, "u");
+        const auto v = forms::TestField(u_id, *q1, "v");
+        (void)systems::installFormulation(single, "op", {u_id},
+                                          (forms::inner(forms::grad(u), forms::grad(v)) - f * v).dx());
+        const std::array<forms::bc::StrongDirichlet, 2> bcs{forms::bc::strongDirichlet(u_id, kLeft, g, "u"),
+                                                            forms::bc::strongDirichlet(u_id, kRight, g, "u")};
+        systems::installStrongDirichlet(single, std::span<const forms::bc::StrongDirichlet>(bcs));
+    }
+    single.setup();
+    const auto single_state = solveLinear(single);
+
+    const auto Of = forms::VolumeDomain::cells(kLeftDomain);
+    const auto Os = forms::VolumeDomain::cells(kRightDomain);
+    FESystem glued(buildSplitSquare(n));
+    glued.setInterfaceMeshFromFaceSet(kGamma, "gamma");
+    const auto G = systems::interfaceBetween(glued, Os, Of, kGamma);
+    EXPECT_EQ(G.minusDomainId(), kLeftDomain);
+    EXPECT_EQ(G.plusDomainId(), kRightDomain);
+    const auto u1_id = glued.addField(FieldSpec{.name = "u1", .space = q1});
+    const auto u2_id = glued.addField(FieldSpec{.name = "u2", .space = q1});
+    auto p1_line = std::make_shared<spaces::H1Space>(ElementType::Line2, 1);
+    const auto lam_id = glued.addInterfaceField("lambda", p1_line, kGamma);
+    glued.addOperator("op");
+    {
+        const auto u1 = forms::StateField(u1_id, *q1, "u1");
+        const auto v1 = forms::TestField(u1_id, *q1, "v1");
+        const auto u2 = forms::StateField(u2_id, *q1, "u2");
+        const auto v2 = forms::TestField(u2_id, *q1, "v2");
+        const auto lam = forms::StateField(lam_id, *p1_line, "lambda");
+        const auto mu = forms::TestField(lam_id, *p1_line, "mu");
+        const auto bulk1 = forms::inner(forms::grad(u1), forms::grad(v1)) - f * v1;
+        const auto bulk2 = forms::inner(forms::grad(u2), forms::grad(v2)) - f * v2;
+        EXPECT_EQ(systems::formExprTreeHash(bulk1.dx(Of)),
+                  systems::formExprTreeHash(
+                      (FormExpr::cellDomainId().eq(FormExpr::constant(kLeftDomain)) * bulk1).dx()));
+        EXPECT_EQ(systems::formExprTreeHash(forms::side(v1, G, Of)), systems::formExprTreeHash(v1.minus()));
+        EXPECT_EQ(systems::formExprTreeHash(forms::side(v2, G, Os)), systems::formExprTreeHash(v2.plus()));
+        const auto residual = bulk1.dx(Of) + bulk2.dx(Os) + (lam * forms::side(v1, G, Of)).dI(G.domain()) -
+                              (lam * forms::side(v2, G, Os)).dI(G.domain()) +
+                              (mu * (forms::side(u1, G, Of) - forms::side(u2, G, Os))).dI(G.domain());
+        (void)systems::installFormulation(glued, "op", {u1_id, u2_id, lam_id}, residual);
+        const std::array<forms::bc::StrongDirichlet, 2> bcs{forms::bc::strongDirichlet(u1_id, kLeft, g, "u1"),
+                                                            forms::bc::strongDirichlet(u2_id, kRight, g, "u2")};
+        systems::installStrongDirichlet(glued, std::span<const forms::bc::StrongDirichlet>(bcs));
+        constraints::ConstraintPlan plan(glued);
+        plan.activeOn({u1_id}, Of).activeOn({u2_id}, Os);
+        plan.commit();
+    }
+    glued.setup();
+    const auto glued_state = solveLinear(glued);
+    const auto u = vertexValues(single, u_id, single_state);
+    const auto u1 = vertexValues(glued, u1_id, glued_state);
+    const auto u2 = vertexValues(glued, u2_id, glued_state);
+    const auto& base = single.mesh()->local_mesh();
+    Real scale = 0.0;
+    for (const auto value : u) {
+        scale = std::max(scale, std::abs(value));
+    }
+    std::size_t pinned_off_left = 0u;
+    for (std::size_t vtx = 0; vtx < u.size(); ++vtx) {
+        const Real x = static_cast<Real>(base.get_vertex_coords(static_cast<svmp::index_t>(vtx))[0]);
+        if (x <= 0.5 + 1e-12) {
+            EXPECT_NEAR(u1[vtx], u[vtx], 1e-11 * scale) << "u1 at vertex " << vtx;
+        } else {
+            EXPECT_EQ(u1[vtx], 0.0) << "u1 off its subdomain at vertex " << vtx;
+            ++pinned_off_left;
+        }
+        if (x >= 0.5 - 1e-12) {
+            EXPECT_NEAR(u2[vtx], u[vtx], 1e-11 * scale) << "u2 at vertex " << vtx;
+        } else {
+            EXPECT_EQ(u2[vtx], 0.0) << "u2 off its subdomain at vertex " << vtx;
+        }
+    }
+    EXPECT_GT(pinned_off_left, 0u);
+
+    // A subdomain on neither side, or two sides of one domain, is refused.
+    EXPECT_THROW((void)forms::side(FormExpr::constant(1.0), G, forms::VolumeDomain::cells(7)),
+                 std::invalid_argument);
+    EXPECT_THROW((void)systems::interfaceBetween(glued, Of, forms::VolumeDomain::cells(7), kGamma), FEException);
 }
 
 TEST(InterfaceMultiplierSplit, InterfaceTermsAreSplitBySideWithTheNormalResigned)

@@ -125,7 +125,9 @@ class GenericMatrix;
 
 namespace forms {
 class FormExpr;
+class InterfaceBetween;
 class MixedFormIR;
+class VolumeIntegrationDomain;
 }
 
 namespace systems {
@@ -3165,6 +3167,20 @@ const T* FESystem::findAttachment() const noexcept
                ? nullptr
                : static_cast<const T*>(it->second.get());
 }
+
+/**
+ * @brief The fitted interface @p interface_marker between the subdomains
+ *        @p a and @p b (VolumeDomain::cells), with the side of each
+ *
+ * Reads the orientation of the interface mesh of the marker: every face must
+ * have a cell of one subdomain on its minus side and a cell of the other on
+ * its plus side, alike on every rank (the assembler pairs minus and plus by
+ * that orientation).  Throws InvalidArgumentException otherwise.  Collective.
+ */
+[[nodiscard]] forms::InterfaceBetween interfaceBetween(const FESystem& system,
+                                                       const forms::VolumeIntegrationDomain& a,
+                                                       const forms::VolumeIntegrationDomain& b,
+                                                       InterfaceId interface_marker);
 
 } // namespace systems
 } // namespace FE

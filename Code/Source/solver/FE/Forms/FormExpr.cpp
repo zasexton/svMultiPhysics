@@ -3453,6 +3453,11 @@ FormExpr FormExpr::dx(const VolumeIntegrationDomain& domain) const
     if (domain.scope() == VolumeIntegrationScope::FullVolume) {
         return dx();
     }
+    if (domain.scope() == VolumeIntegrationScope::CellDomain) {
+        const auto indicator =
+            cellDomainId().eq(constant(static_cast<Real>(*domain.domainId())));
+        return (indicator * *this).dx();
+    }
     return dCutVolume(*domain.interfaceMarker(), *domain.side());
 }
 

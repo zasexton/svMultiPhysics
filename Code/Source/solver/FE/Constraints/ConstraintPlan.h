@@ -75,6 +75,7 @@ namespace forms {
 class FormExpr;
 class ExteriorBoundaryMeasure;
 class InterfaceDomain;
+class VolumeIntegrationDomain;
 namespace bc {
 struct StrongDirichlet;
 }
@@ -198,6 +199,16 @@ public:
     ConstraintPlan& activeOn(std::initializer_list<FieldId> fields,
                              const level_set::CutSide& active_side,
                              ActiveSideOptions options = {});
+
+    /**
+     * InactiveSupport: the unknowns @p fields live on the fitted subdomain
+     * @p subdomain (VolumeDomain::cells(k)): for each field, the degrees of
+     * freedom no cell of the subdomain touches are pinned to zero, those of
+     * other ranks' cells included, so the set does not depend on the
+     * partition.  A degree of freedom another constraint fixes keeps it.
+     */
+    ConstraintPlan& activeOn(std::initializer_list<FieldId> fields,
+                             const forms::VolumeIntegrationDomain& subdomain);
 
     /// PointLaw: ContactPointVelocityConstraint(velocity, law).
     ConstraintPlan& contactPointVelocity(FieldId velocity, ContactPointVelocityLaw law);

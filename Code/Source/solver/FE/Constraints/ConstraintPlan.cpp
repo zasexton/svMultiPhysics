@@ -7,6 +7,9 @@
 
 #include "Constraints/ConstraintPlan.h"
 
+#include "Assembly/Assembler.h"
+#include "Constraints/AffineConstraints.h"
+#include "Constraints/BoundaryDofOwnerCompletion.h"
 #include "Constraints/LevelSetActiveSideVertexDirichletConstraint.h"
 #include "Constraints/SupportRestrictionConstraint.h"
 #include "Forms/FormExpr.h"
@@ -42,6 +45,77 @@ namespace {
     return side == forms::CutVolumeSide::Positive ? geometry::CutIntegrationSide::Positive
                                                   : geometry::CutIntegrationSide::Negative;
 }
+
+/// Pins the degrees of freedom of a field that no cell of the subdomain
+/// (domain id) touches: the field lives on the subdomain.
+class CellDomainSupportConstraint final : public ISystemConstraint {
+public:
+    CellDomainSupportConstraint(FieldId field, int domain_id)
+        : field_(field)
+        , domain_id_(domain_id)
+    {
+    }
+
+    void apply(const systems::FESystem& system, AffineConstraints& constraints) override
+    {
+        const auto& dof_map = system.fieldDofHandler(field_).getDofMap();
+        const GlobalIndex offset = system.fieldDofOffset(field_);
+        const GlobalIndex n_field_dofs = system.fieldDofHandler(field_).getNumDofs();
+        const auto& mesh = system.meshAccess();
+        std::vector<unsigned char> on_support(static_cast<std::size_t>(n_field_dofs), 0u);
+        for (GlobalIndex cell = 0; cell < mesh.numCells(); ++cell) {
+            if (mesh.getCellDomainId(cell) != domain_id_) {
+                continue;
+            }
+            for (const auto local_dof : dof_map.getCellDofs(cell)) {
+                if (local_dof >= 0 && local_dof < n_field_dofs) {
+                    on_support[static_cast<std::size_t>(local_dof)] = 1u;
+                }
+            }
+        }
+        // Owned degrees of freedom on subdomain cells that only other ranks
+        // hold come from those ranks.
+        std::vector<GlobalIndex> support;
+        for (GlobalIndex d = 0; d < n_field_dofs; ++d) {
+            if (on_support[static_cast<std::size_t>(d)] != 0u) {
+                support.push_back(offset + d);
+            }
+        }
+        std::vector<Real> no_payload;
+        (void)completeOwnedBoundaryDofs(system, support, no_payload, 0u, {});
+        for (const auto dof : support) {
+            const auto local = dof - offset;
+            if (local >= 0 && local < n_field_dofs) {
+                on_support[static_cast<std::size_t>(local)] = 1u;
+            }
+        }
+        const auto& owned = system.dofHandler().getPartition().locallyOwned();
+        for (GlobalIndex d = 0; d < n_field_dofs; ++d) {
+            const GlobalIndex dof = offset + d;
+            if (on_support[static_cast<std::size_t>(d)] != 0u || !owned.contains(dof) ||
+                constraints.isConstrained(dof)) {
+                continue;
+            }
+            constraints.addDirichlet(dof, Real{0.0});
+        }
+    }
+
+    bool updateValues(const systems::FESystem&, AffineConstraints&, double, double) override { return false; }
+    [[nodiscard]] bool isTimeDependent() const noexcept override { return false; }
+    [[nodiscard]] systems::SetupStorageRequirements storageRequirements() const noexcept override
+    {
+        return {};
+    }
+    [[nodiscard]] std::string manifestDescription() const override
+    {
+        return "CellDomainSupportConstraint field=" + std::to_string(field_) +
+               " domain=" + std::to_string(domain_id_);
+    }
+
+private:
+    FieldId field_{INVALID_FIELD_ID};
+    int domain_id_{-1};
+};
 
 } // namespace
 
@@ -210,6 +284,21 @@ ConstraintPlan& ConstraintPlan::activeOn(std::initializer_list<FieldId> fields,
     if (options.aggregate) {
         aggregate(fields, active_side, std::move(options.guards));
         (void)active_side.geometry().requireBothSidesRetained();
+    }
+    return *this;
+}
+
+ConstraintPlan& ConstraintPlan::activeOn(std::initializer_list<FieldId> fields,
+                                         const forms::VolumeIntegrationDomain& subdomain)
+{
+    requireNotPassed(ConstraintPhase::InactiveSupport, "activeOn");
+    const auto domain_id = subdomain.domainId();
+    if (!domain_id) {
+        throw std::invalid_argument(
+            "ConstraintPlan::activeOn: a fitted subdomain is a VolumeDomain::cells() domain");
+    }
+    for (const auto field : fields) {
+        declare(ConstraintPhase::InactiveSupport, std::make_unique<CellDomainSupportConstraint>(field, *domain_id));
     }
     return *this;
 }

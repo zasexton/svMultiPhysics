@@ -921,7 +921,8 @@ public:
     // ---- Typed measures (Forms/IntegrationDomain.h) ----
     // Sugar only: each lowers to the untyped measure above, so the IR and the
     // JIT kernels are those of the untyped call.
-    /// dx() for VolumeDomain::full(), dCutVolume(m, side) for VolumeDomain::cut(m, side).
+    /// dx() for VolumeDomain::full(), dCutVolume(m, side) for VolumeDomain::cut(m, side),
+    /// (eq(domainId(), k) * expr).dx() for VolumeDomain::cells(k).
     [[nodiscard]] FormExpr dx(const VolumeIntegrationDomain& domain) const;
     /// dI(domain.marker()).
     [[nodiscard]] FormExpr dI(const InterfaceDomain& domain) const;

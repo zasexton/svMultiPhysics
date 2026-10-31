@@ -12,6 +12,7 @@
  * |----------------------------------------------|------------------|-----------------------------------|
  * | VolumeDomain::full()                         | expr.dx(domain)  | expr.dx()                         |
  * | VolumeDomain::cut(m, side)                   | expr.dx(domain)  | expr.dCutVolume(m, side)          |
+ * | VolumeDomain::cells(k)                       | expr.dx(domain)  | (eq(domainId(), k) * expr).dx()   |
  * | InterfaceDomain(m)                           | expr.dI(domain)  | expr.dI(m)                        |
  * | ContactLineDomain(m, wall)                   | expr.dL(domain)  | expr.dI(m) (codimension-two rule) |
  * | BoundaryDomain::fullPhysical(b)              | expr.ds(domain)  | expr.dExteriorBoundary(domain)    |
@@ -21,6 +22,16 @@
  * The domains carry markers only.  The physics-agnostic handles that compute
  * the generated markers of a level-set geometry live in
  * FE/LevelSet/LevelSetGeometry.h.
+ *
+ * VolumeDomain::cells(k) is the fitted subdomain of the cells whose domain id
+ * (the mesh region label, domainId()) is k.  Its measure is the cell
+ * indicator of the subdomain times the integrand, so it lowers to the IR,
+ * the JIT kernels and the cache keys of that indicator form; the cells of
+ * other subdomains integrate zero, and a field scoped to the subdomain
+ * (FieldSpec::participant_domain_id on a single mesh) has no degree of
+ * freedom there.  InterfaceBetween names the sides of a fitted interface by
+ * subdomain (side(), lowering to minus()/plus(); systems::interfaceBetween
+ * reads the orientation from the interface mesh).
  */
 
 #include "FormExpr.h"
@@ -28,6 +39,7 @@
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
+#include <string>
 
 namespace svmp {
 namespace FE {
@@ -35,7 +47,8 @@ namespace forms {
 
 enum class VolumeIntegrationScope : std::uint8_t {
     FullVolume,
-    CutVolume
+    CutVolume,
+    CellDomain
 };
 
 class VolumeIntegrationDomain {
@@ -48,6 +61,17 @@ public:
     [[nodiscard]] static VolumeIntegrationDomain cut(int interface_marker, CutVolumeSide side)
     {
         return cutVolume(interface_marker, side);
+    }
+
+    /// The cells whose domain id (domainId(), the mesh region label) is
+    /// @p domain_id: lowers to (eq(domainId(), domain_id) * expr).dx().
+    [[nodiscard]] static VolumeIntegrationDomain cells(int domain_id)
+    {
+        if (domain_id < 0) {
+            throw std::invalid_argument(
+                "VolumeIntegrationDomain::cells requires a nonnegative domain id");
+        }
+        return VolumeIntegrationDomain(VolumeIntegrationScope::CellDomain, domain_id, CutVolumeSide::Negative);
     }
 
     [[nodiscard]] static VolumeIntegrationDomain fullVolume() noexcept
@@ -84,7 +108,7 @@ public:
 
     [[nodiscard]] std::optional<int> interfaceMarker() const noexcept
     {
-        if (scope_ == VolumeIntegrationScope::FullVolume) {
+        if (scope_ != VolumeIntegrationScope::CutVolume) {
             return std::nullopt;
         }
         return interface_marker_;
@@ -92,10 +116,19 @@ public:
 
     [[nodiscard]] std::optional<CutVolumeSide> side() const noexcept
     {
-        if (scope_ == VolumeIntegrationScope::FullVolume) {
+        if (scope_ != VolumeIntegrationScope::CutVolume) {
             return std::nullopt;
         }
         return side_;
+    }
+
+    /// The domain id of a cells() domain.
+    [[nodiscard]] std::optional<int> domainId() const noexcept
+    {
+        if (scope_ != VolumeIntegrationScope::CellDomain) {
+            return std::nullopt;
+        }
+        return interface_marker_;
     }
 
     [[nodiscard]] friend bool operator==(
@@ -114,7 +147,7 @@ private:
     }
 
     VolumeIntegrationScope scope_;
-    int interface_marker_;
+    int interface_marker_; ///< the interface marker, or the domain id of cells()
     CutVolumeSide side_;
 };
 
@@ -168,6 +201,58 @@ private:
     int marker_;
     int wall_boundary_marker_;
 };
+
+/**
+ * A fitted interface between the subdomains cells(minus) and cells(plus):
+ * the interface marker and the subdomain on each side of its faces.  side()
+ * names a trace by subdomain; systems::interfaceBetween builds it from the
+ * orientation of the interface mesh.
+ */
+class InterfaceBetween {
+public:
+    InterfaceBetween(int interface_marker, int minus_domain_id, int plus_domain_id)
+        : marker_(interface_marker)
+        , minus_(minus_domain_id)
+        , plus_(plus_domain_id)
+    {
+        if (interface_marker < 0 || minus_domain_id < 0 || plus_domain_id < 0 ||
+            minus_domain_id == plus_domain_id) {
+            throw std::invalid_argument(
+                "InterfaceBetween requires a nonnegative marker and two distinct nonnegative domain ids");
+        }
+    }
+
+    [[nodiscard]] int marker() const noexcept { return marker_; }
+    [[nodiscard]] int minusDomainId() const noexcept { return minus_; }
+    [[nodiscard]] int plusDomainId() const noexcept { return plus_; }
+    /// The interface as an integration domain: dI(marker()).
+    [[nodiscard]] InterfaceDomain domain() const { return InterfaceDomain(marker_); }
+
+    [[nodiscard]] friend bool operator==(const InterfaceBetween&, const InterfaceBetween&) noexcept = default;
+
+private:
+    int marker_;
+    int minus_;
+    int plus_;
+};
+
+/// The trace of @p expr on @p interface from the side of @p subdomain (a
+/// cells() domain): expr.minus() or expr.plus().  Throws
+/// std::invalid_argument for a subdomain on neither side.
+[[nodiscard]] inline FormExpr side(const FormExpr& expr,
+                                   const InterfaceBetween& interface,
+                                   const VolumeIntegrationDomain& subdomain)
+{
+    const auto id = subdomain.domainId();
+    if (id && *id == interface.minusDomainId()) {
+        return expr.minus();
+    }
+    if (id && *id == interface.plusDomainId()) {
+        return expr.plus();
+    }
+    throw std::invalid_argument("side(): the subdomain is on neither side of interface marker " +
+                                std::to_string(interface.marker()));
+}
 
 /// A physical exterior boundary, whole or restricted to a generated active
 /// subset: lowers to dExteriorBoundary(domain).

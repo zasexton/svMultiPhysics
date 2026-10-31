@@ -31,6 +31,7 @@
 #include "Constraints/SupportRestrictionConstraint.h"
 #include "Forms/PointEvaluator.h"
 #include "Auxiliary/AuxiliaryDerivativeProvider.h"
+#include "Systems/SystemCollectives.h"
 #include "Systems/SystemsExceptions.h"
 #include "Systems/FreeSurfaceFunctionalRounding.h"
  #include "Core/Logger.h"
@@ -52,6 +53,7 @@
 #include "Geometry/MappingFactory.h"
 
 #include "Forms/FormCompiler.h"
+#include "Forms/IntegrationDomain.h"
 #include "Forms/BoundaryConditions.h"
 #include "Forms/Vocabulary.h"
 #include "Forms/JIT/JITValidation.h"
@@ -25698,6 +25700,58 @@ void FESystem::updateConstraints(double time, double dt)
     }
     refreshGeneratedBoundaryNitscheTraceCertificates(
         cut_integration_context_ == nullptr);
+}
+
+forms::InterfaceBetween interfaceBetween(const FESystem& system,
+                                         const forms::VolumeIntegrationDomain& a,
+                                         const forms::VolumeIntegrationDomain& b,
+                                         InterfaceId interface_marker)
+{
+    const auto a_id = a.domainId();
+    const auto b_id = b.domainId();
+    FE_THROW_IF(!a_id || !b_id || *a_id == *b_id, InvalidArgumentException,
+                "interfaceBetween: interface " + std::to_string(interface_marker) +
+                    " needs two distinct VolumeDomain::cells() subdomains");
+    const auto& iface = system.interfaceMesh(interface_marker);
+    const auto& mesh = system.meshAccess();
+    // The domain ids on the minus and plus sides of the local faces.
+    double minus_low = std::numeric_limits<double>::infinity();
+    double minus_high = -std::numeric_limits<double>::infinity();
+    double plus_low = minus_low;
+    double plus_high = minus_high;
+    for (std::size_t face = 0; face < iface.n_faces(); ++face) {
+        const auto cells = iface.volume_cells(static_cast<svmp::index_t>(face));
+        FE_THROW_IF(cells[0] == svmp::INVALID_INDEX || cells[1] == svmp::INVALID_INDEX, InvalidArgumentException,
+                    "interfaceBetween: interface " + std::to_string(interface_marker) +
+                        " has a face with one cell; it is not between two subdomains");
+        const auto minus = static_cast<double>(mesh.getCellDomainId(static_cast<GlobalIndex>(cells[0])));
+        const auto plus = static_cast<double>(mesh.getCellDomainId(static_cast<GlobalIndex>(cells[1])));
+        minus_low = std::min(minus_low, minus);
+        minus_high = std::max(minus_high, minus);
+        plus_low = std::min(plus_low, plus);
+        plus_high = std::max(plus_high, plus);
+    }
+#if FE_HAS_MPI
+    const CollectiveCommunicator comm(system.activeMpiCommunicator());
+#else
+    const CollectiveCommunicator comm{};
+#endif
+    minus_low = collectiveMinDouble(minus_low, comm);
+    minus_high = collectiveMaxDouble(minus_high, comm);
+    plus_low = collectiveMinDouble(plus_low, comm);
+    plus_high = collectiveMaxDouble(plus_high, comm);
+    const auto is = [](double value, int id) { return value == static_cast<double>(id); };
+    const bool consistent = minus_low == minus_high && plus_low == plus_high;
+    if (consistent && is(minus_low, *a_id) && is(plus_low, *b_id)) {
+        return forms::InterfaceBetween(interface_marker, *a_id, *b_id);
+    }
+    if (consistent && is(minus_low, *b_id) && is(plus_low, *a_id)) {
+        return forms::InterfaceBetween(interface_marker, *b_id, *a_id);
+    }
+    FE_THROW(InvalidArgumentException,
+             "interfaceBetween: the faces of interface " + std::to_string(interface_marker) +
+                 " do not all have a cell of domain " + std::to_string(*a_id) + " on one side and a cell of domain " +
+                 std::to_string(*b_id) + " on the other in one orientation");
 }
 
 } // namespace systems
