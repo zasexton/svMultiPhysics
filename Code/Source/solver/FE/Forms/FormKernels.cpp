@@ -3563,7 +3563,9 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
                 return out;
             }
 
-            throw FEException("Forms: unsupported multiplication kinds in spatial jets",
+            throw FEException("Forms: unsupported multiplication kinds in spatial jets in '" + node.toString() +
+                                  "' with lhs=" + evalKindDescription(a.value) +
+                                  " rhs=" + evalKindDescription(b.value),
                               __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
         }
         case FormExprType::Divide: {
@@ -8557,7 +8559,8 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                     }
                     return out;
                 }
-                throw FEException("Forms: unsupported multiplication kinds",
+                throw FEException("Forms: unsupported multiplication kinds in '" + node.toString() +
+                                      "' with lhs=" + evalKindDescription(a) + " rhs=" + evalKindDescription(b),
                                   __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
             }
 
@@ -12477,7 +12480,8 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
                     }
                     return out;
                 }
-                throw FEException("Forms: unsupported multiplication kinds (dual)",
+                throw FEException("Forms: unsupported multiplication kinds (dual) in '" + node.toString() +
+                                      "' with lhs=" + evalKindDescription(a) + " rhs=" + evalKindDescription(b),
                                   __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
             }
 

@@ -356,6 +356,75 @@ TEST(CanonicalWorkflow, ATermNonlinearInTwoTestFieldsIsRefused)
 }
 
 // ============================================================================
+// Install-time checks: history reads, shape errors
+// ============================================================================
+
+TEST(CanonicalWorkflow, PreviousSolutionInARowOfTwoUnknownsIsRefused)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto T_f = sys.addField({.name = "T", .space = space});
+    const auto C_f = sys.addField({.name = "C", .space = space});
+    sys.addOperator("op");
+    const auto T = StateField(T_f, *space, "T");
+    const auto C = StateField(C_f, *space, "C");
+    const auto w = TestField(T_f, *space, "w");
+    const auto r = TestField(C_f, *space, "r");
+    // previousSolution(1) is the history of the block's trial field: C's in
+    // the (T, C) block.
+    const auto lagged_term = ((T - FormExpr::previousSolution(1)) * w).dx();
+    try {
+        svmp::FE::systems::installFormulation(sys, "op", {T_f, C_f},
+                                              lagged_term + (C * w).dx() + (inner(grad(C), grad(r))).dx());
+        FAIL() << "previousSolution would read C's history in the (T, C) block";
+    } catch (const svmp::FE::InvalidArgumentException& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("the term '" + lagged_term.toString() + "'"), std::string::npos) << message;
+        EXPECT_NE(message.find("also depends on 'C'"), std::string::npos) << message;
+    }
+    EXPECT_TRUE(sys.formulationRecords().empty());
+    // A row that depends on its own field alone reads that field's history.
+    EXPECT_NO_THROW(svmp::FE::systems::installFormulation(
+        sys, "op", {T_f, C_f}, lagged_term + (inner(grad(C), grad(r)) + T * r).dx()));
+}
+
+TEST(CanonicalWorkflow, AShapeErrorOfAProductNamesTheTerm)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    auto vector = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar, 3);
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_f = sys.addField({.name = "u", .space = vector, .components = 3});
+    sys.addOperator("op");
+    const auto u = StateField(u_f, *vector, "u");
+    const auto v = TestField(u_f, *vector, "v");
+    svmp::FE::systems::FormInstallOptions options;
+    options.compiler_options.jit.enable = false;
+    svmp::FE::systems::installFormulation(sys, "op", {u_f}, (inner(u * u, v)).dx(), options);
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+    const auto n = sys.dofHandler().getNumDofs();
+    std::vector<Real> U(static_cast<std::size_t>(n), 0.1);
+    svmp::FE::systems::SystemStateView state;
+    state.u = U;
+    svmp::FE::systems::AssemblyRequest req;
+    req.op = "op";
+    req.want_matrix = true;
+    req.want_vector = true;
+    svmp::FE::assembly::DenseSystemView out(n);
+    try {
+        (void)sys.assemble(req, state, &out, &out);
+        FAIL() << "a product of two vectors is not defined";
+    } catch (const std::exception& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("unsupported multiplication kinds"), std::string::npos) << message;
+        EXPECT_NE(message.find("lhs=Vector"), std::string::npos) << message;
+    }
+}
+
+// ============================================================================
 // BC workflow: strong Dirichlet via direct installStrongDirichlet
 // ============================================================================
 

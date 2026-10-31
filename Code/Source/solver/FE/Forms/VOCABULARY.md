@@ -490,7 +490,7 @@ differentiability are validated by the relevant evaluators/JIT paths.
 | `eigvec_sym(A, which)`, `A.symmetricEigenvector(which)` | Symmetric eigenvector |
 | `spectralDecomp(A)`, `A.spectralDecomposition()` | Spectral decomposition/eigenvectors-as-columns |
 | `FormExpr::symmetricEigen*DirectionalDerivative(...)`, `spectralDecompositionDirectionalDerivative(...)` | Directional derivatives for supported eigen operations |
-| `FormExpr::previousSolution(k)` | Previous solution value, `k >= 1`, of the trial field of the block being assembled (not field-bound) |
+| `FormExpr::previousSolution(k)` | Previous solution value, `k >= 1`, of the trial field of the block being assembled (not field-bound). In a multi-field install it (and `historyWeightedSum`, `historyConvolution`) may appear only in a row that depends on no unknown but its own field, where it is that field's history; elsewhere the install is refused, naming the term |
 | `FormExpr::historyWeightedSum(weights)` | Weighted history sum |
 | `FormExpr::historyConvolution(weights)` | History convolution helper |
 
@@ -675,6 +675,7 @@ Status: `implemented/public` for the Systems install API; compiler/IR APIs are
 | `installFormulationWithMetadata(...)` | `Systems/FormsInstaller.h` | Same, returning the analysis bridge metadata of the install |
 | Global rows: `installFormulation(system, op, {u, lam}, R)` with `mu = TestField(lam, R1, "mu")` | `Systems/FormsInstaller.h`, `Systems/GlobalRowKernel.h` | The row of a global test function is lowered in two parts: its measured terms give the row's Jacobian through element kernels installed matrix-only (one kernel per block, no fused cell kernels), and a `GlobalRowKernel` adds its residual entry, the measured terms with `mu = 1` as a measured 0-form evaluated exactly over each rank's owned cells (`evaluateFunctionalFormsWithQuadratureOf`, the same at any rank count) plus the `.dGlobal()` terms, whose derivatives in the global fields it adds to the matrix. The entry is the residual at the state: assemble with `suppress_constraint_inhomogeneity` (as Newton does) or homogeneous constraints. A global field in the field list needs its row and must enter some row (its column; its own row counts), both checked per `installFormulation` call: a multiplier's `lam * v` and `u * mu` go in one call. The one-field installers refuse a global row |
 | `FormInstallOptions` | `Systems/FormsInstaller.h` | `ad_mode`, `compiler_options` (`SymbolicOptions`), `extra_trial_fields`, `constitutive_laws`, `source_component_tag`, `contributes_to_problem_analysis`, generated-boundary Nitsche trace requests |
+| Installer errors | `Systems/FormsInstaller.h` | Name the public entry (`installFormulation: ...`), the term and the fields concerned |
 | `FormInstallOptions::recordConstitutiveLaw(law)` | `Systems/FormsInstaller.h` | `implemented/expert`; records a constitutive law (`analysis::ConstitutiveLawMetadata`, e.g. `analysis::dynamicViscosityMetadata(u, mu)`) for the coupling contracts |
 | `installStrongDirichlet(system, bcs)` | `Systems/FormsInstaller.h` | Strong constraint installation |
 | `installMixedBilinear(...)` | `Systems/FormsInstaller.h` | Explicit bilinear block installation |

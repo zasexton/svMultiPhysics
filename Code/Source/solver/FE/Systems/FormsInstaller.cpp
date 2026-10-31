@@ -1667,6 +1667,81 @@ void traceMixedKernelPlan(const char* prefix, const MixedKernelPlan& plan)
         std::string(prefix) + ": " + plan.describe());
 }
 
+/// The terms of @p expr's sum: its summands through +, - and unary minus.
+[[nodiscard]] std::vector<std::shared_ptr<forms::FormExprNode>> additiveTerms(const forms::FormExpr& expr)
+{
+    std::vector<std::shared_ptr<forms::FormExprNode>> terms;
+    const auto visit = [&](const auto& self, const std::shared_ptr<forms::FormExprNode>& node) -> void {
+        if (!node) {
+            return;
+        }
+        const auto type = node->type();
+        if (type == forms::FormExprType::Add || type == forms::FormExprType::Subtract ||
+            type == forms::FormExprType::Negate) {
+            for (const auto& kid : node->childrenShared()) {
+                self(self, kid);
+            }
+            return;
+        }
+        terms.push_back(node);
+    };
+    visit(visit, expr.nodeShared());
+    return terms;
+}
+
+[[nodiscard]] bool readsTrialHistory(const forms::FormExprNode& node)
+{
+    switch (node.type()) {
+    case forms::FormExprType::PreviousSolutionRef:
+    case forms::FormExprType::HistoryWeightedSum:
+    case forms::FormExprType::HistoryConvolution:
+        return true;
+    default:
+        break;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child && readsTrialHistory(*child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * @brief Refuses previousSolution(k) in a row that depends on another field
+ *
+ * previousSolution(k), historyWeightedSum and historyConvolution read the
+ * history of the trial field of the block being assembled, so in a
+ * multi-field install they are one field's history only in a row that
+ * depends on no unknown but its own field.
+ */
+void requireOneFieldHistory(const FESystem& system,
+                            FieldId test_field,
+                            const forms::FormExpr& row,
+                            const forms::GeometrySensitivityOptions& geometry_sensitivity)
+{
+    if (!row.isValid() || !readsTrialHistory(*row.node())) {
+        return;
+    }
+    for (const auto& term : additiveTerms(row)) {
+        if (!readsTrialHistory(*term)) {
+            continue;
+        }
+        for (const auto field : gatherResidualDependencies(*row.node(), geometry_sensitivity)) {
+            if (field == test_field) {
+                continue;
+            }
+            throw InvalidArgumentException(
+                "installFormulation: the term '" + term->toString() + "' of the row of '" +
+                system.fieldRecord(test_field).name +
+                "' reads previousSolution(k) (or a history sum), the history of the trial field of the "
+                "block being assembled, but the row also depends on '" + system.fieldRecord(field).name +
+                "', so it would read that field's history in its block; read one field's history in a row "
+                "that depends on that field alone");
+        }
+    }
+}
+
 /// The rows of the test functions a subtree holds, ascending.
 using TestRowsOf = std::function<std::vector<std::size_t>(const forms::FormExprNode&)>;
 
@@ -1799,7 +1874,6 @@ using TestRowsOf = std::function<std::vector<std::size_t>(const forms::FormExprN
     }
     return {};
 }
-
 
 
 } // namespace
@@ -2581,9 +2655,20 @@ CoupledResidualKernels installCoupledResidualMixed(
                         "' has no row; a multiplier needs its constraint, a term with its test function "
                         "(TestField(" + rec.name + ", ...))");
     }
-    FE_THROW_IF(test_infos.size() != test_fields.size(), InvalidArgumentException,
-                "installCoupledResidualMixed: expression has " + std::to_string(test_infos.size()) +
-                " TestFunction spaces but " + std::to_string(test_fields.size()) + " test fields provided");
+    if (test_infos.size() != test_fields.size()) {
+        std::string tests;
+        for (const auto& info : test_infos) {
+            tests += (tests.empty() ? "'" : ", '") + info.name + "'";
+        }
+        std::string names;
+        for (const auto field : test_fields) {
+            names += (names.empty() ? "'" : ", '") + system.fieldRecord(field).name + "'";
+        }
+        throw InvalidArgumentException(
+            "installFormulation: the residual holds " + std::to_string(test_infos.size()) +
+            " test functions (" + tests + ") but the field list has " + std::to_string(test_fields.size()) +
+            " fields (" + names + "); every field of the list has its row, a term with its test function");
+    }
 
     // Map test_infos ordering to caller's test_fields.
     // Strategy: prefer explicit field bindings (from TestField(field_id, ...)),
@@ -2613,9 +2698,10 @@ CoupledResidualKernels installCoupledResidualMixed(
             }
         }
         FE_THROW_IF(test_map[mi] == ~std::size_t{0}, InvalidArgumentException,
-                    "installCoupledResidualMixed: test function '" +
-                    test_infos[mi].name + "' is bound to FieldId " +
-                    std::to_string(bound) + " which is not in the provided field list");
+                    "installFormulation: test function '" + test_infos[mi].name + "' is bound to field " +
+                        (system.hasField(bound) ? "'" + system.fieldRecord(bound).name + "'"
+                                                : std::to_string(bound)) +
+                        ", which is not in the field list");
     }
 
     // Pass 2: map remaining by space signature (only succeeds if unambiguous)
@@ -2726,7 +2812,8 @@ CoupledResidualKernels installCoupledResidualMixed(
         // Leaf integral or non-Add node: assign to the matching test block.
         const auto tests = findTestIndices(n);
         FE_THROW_IF(tests.empty(), InvalidArgumentException,
-                    "installCoupledResidualMixed: sub-expression does not contain any recognized TestFunction");
+                    "installFormulation: the term '" + expr.toString() +
+                        "' holds no test function; every term of a residual is tested");
         if (tests.size() > 1u) {
             // One term with the test functions of several rows, such as one
             // integral of a coupling: its part in each row.
@@ -2747,7 +2834,8 @@ CoupledResidualKernels installCoupledResidualMixed(
     for (std::size_t mi = 0; mi < test_infos.size(); ++mi) {
         const auto caller_ti = test_map[mi];
         FE_THROW_IF(!test_block_exprs[mi].isValid(), InvalidArgumentException,
-                    "installCoupledResidualMixed: test block '" + test_infos[mi].name + "' is empty");
+                    "installFormulation: the row of test function '" + test_infos[mi].name +
+                        "' is empty: every term holding it is zero in that row");
         residual_blocks.setBlock(caller_ti, std::move(test_block_exprs[mi]));
     }
 
@@ -2801,6 +2889,12 @@ CoupledResidualKernels installCoupledResidualMixed(
         "installCoupledResidualMixed",
         trial_fields,
         install_options.compiler_options.geometry_sensitivity);
+    for (std::size_t i = 0; i < residual_blocks.numTestFields(); ++i) {
+        if (residual_blocks.hasBlock(i)) {
+            requireOneFieldHistory(system, test_fields[i], residual_blocks.block(i),
+                                   install_options.compiler_options.geometry_sensitivity);
+        }
+    }
 
     std::vector<std::shared_ptr<GlobalRowKernel>> pending_global_rows;
     std::unordered_set<FieldId> fields_in_rows;
@@ -2977,7 +3071,9 @@ CoupledResidualKernels installCoupledResidualMixed(
                 block_options.compiler_options.geometry_sensitivity,
                 !system.formInstallCellDomainRestrictions().empty());
             FE_THROW_IF(!dispatchHasAnyTerm(dispatch), InvalidArgumentException,
-                        "installCoupledResidualMixed: compiled residual block has no integral terms");
+                        "installFormulation: the block of the row of '" + system.fieldRecord(test_fields[i]).name +
+                            "' in the unknown '" + system.fieldRecord(trial).name +
+                            "' has no integral term: '" + base_expr.toString() + "'");
 
             const bool owns_row_vector = (trial == active_trial) && !global_row;
             const auto output = owns_row_vector
