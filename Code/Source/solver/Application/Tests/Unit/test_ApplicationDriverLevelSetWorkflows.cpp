@@ -211,7 +211,7 @@ std::vector<LevelSetMaintenanceRequest> legacyMaintenanceRequestsForTest(
           application::core::ResolvedLevelSetEquationConfiguration>();
       installation->equation_keys =
           parsing::resolveLevelSetEquationKeys(
-              parsing::levelSetEquationInput(input.equation_parameters))
+              parsing::levelSetEquationInput(*equation))
               .value;
     }
     const auto configuration = application::core::
@@ -3748,7 +3748,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
-     MaintenanceCompatibilityRetainsLegacyLexicalAcceptance)
+     MaintenanceReadsTheResolvedEquationKeys)
 {
   auto params = parseWorkflowParametersXml(R"xml(
 <svMultiPhysicsFile>
@@ -3758,8 +3758,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
     <Constant_velocity>1.25, -0.5, 3.0</Constant_velocity>
     <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
     <Conservative_phase_flux_artifact_cadence_steps>-1</Conservative_phase_flux_artifact_cadence_steps>
-    <Conservative_phase_geometry_correction_max_iterations>2tail</Conservative_phase_geometry_correction_max_iterations>
-    <Conservative_phase_geometry_measure_tolerance>1.25tail</Conservative_phase_geometry_measure_tolerance>
+    <Conservative_phase_geometry_correction_max_iterations>2</Conservative_phase_geometry_correction_max_iterations>
+    <Conservative_phase_geometry_measure_tolerance>1.25</Conservative_phase_geometry_measure_tolerance>
     <Enable_sign_definite_patch_bounds>unrecognized</Enable_sign_definite_patch_bounds>
     <Static_capillary_volume_tolerance>nan</Static_capillary_volume_tolerance>
   </Add_equation>
@@ -3807,7 +3807,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
-     MaintenanceCompatibilityReportsLegacyLexicalFailureCategories)
+     MaintenanceKeysReportTheSchemaTexts)
 {
   const auto make_params = [] {
     return parseWorkflowParametersXml(R"xml(
@@ -3834,27 +3834,21 @@ TEST(ApplicationDriverLevelSetWorkflows,
                       "expected three numbers, got '1.0 2.0 3.0 4.0'");
   expect_vector_error("1.0 nan 3.0", "expected a finite number, got 'nan'");
 
-  auto invalid_real = make_params();
-  invalid_real->equation_parameters.front()->set_extra_parameter_value(
-      "Conservative_phase_geometry_measure_tolerance", "invalid");
-  EXPECT_EQ((maintenanceCompatibilityExceptionMessage<std::invalid_argument>(
-                [&] { (void)legacyMaintenanceRequestsForTest(*invalid_real); })),
-            "stod");
-
-  auto overflow_real = make_params();
-  overflow_real->equation_parameters.front()->set_extra_parameter_value(
-      "Conservative_phase_geometry_measure_tolerance", "1e9999");
-  EXPECT_EQ((maintenanceCompatibilityExceptionMessage<std::out_of_range>(
-                [&] { (void)legacyMaintenanceRequestsForTest(*overflow_real); })),
-            "stod");
-
-  auto overflow_count = make_params();
-  overflow_count->equation_parameters.front()->set_extra_parameter_value(
-      "Conservative_phase_flux_artifact_cadence_steps",
-      "999999999999999999999");
-  EXPECT_EQ((maintenanceCompatibilityExceptionMessage<std::out_of_range>(
-                [&] { (void)legacyMaintenanceRequestsForTest(*overflow_count); })),
-            "stoi");
+  const auto expect_key_error = [&](const char* key, std::string value,
+                                    std::string reason) {
+    auto invalid = make_params();
+    invalid->equation_parameters.front()->set_extra_parameter_value(key, value);
+    EXPECT_EQ((maintenanceCompatibilityExceptionMessage<std::runtime_error>(
+                  [&] { (void)legacyMaintenanceRequestsForTest(*invalid); })),
+              "[Level-set equation] " + std::string(key) + ": " + reason);
+  };
+  expect_key_error("Conservative_phase_geometry_measure_tolerance", "invalid",
+                   "expected a number, got 'invalid'");
+  expect_key_error("Conservative_phase_geometry_measure_tolerance", "1e9999",
+                   "expected a number, got '1e9999'");
+  expect_key_error("Conservative_phase_flux_artifact_cadence_steps",
+                   "999999999999999999999",
+                   "integer '999999999999999999999' out of range");
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
@@ -3913,9 +3907,11 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
-     MaintenanceCompatibilityPreservesLegacyValidationOrder)
+     MaintenanceCompatibilityPreservesValidationOrder)
 {
-  auto velocity_before_phase = parseWorkflowParametersXml(R"xml(
+  // The keys fail in the order of the schema (the phase keys before the
+  // velocity keys, as the installation read them), before the boundaries.
+  auto phase_before_velocity = parseWorkflowParametersXml(R"xml(
 <svMultiPhysicsFile>
   <Add_equation type="level_set">
     <Velocity_source>invalid_velocity</Velocity_source>
@@ -3926,10 +3922,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
 )xml");
   EXPECT_EQ(
       (maintenanceCompatibilityExceptionMessage<std::runtime_error>(
-          [&] { (void)legacyMaintenanceRequestsForTest(*velocity_before_phase); })),
-      "[Level-set equation] Velocity_source: expected one of coupled_field | "
-      "prescribed_data | constant_vector | material_interface_phase_pair, "
-      "got 'invalid_velocity'");
+          [&] { (void)legacyMaintenanceRequestsForTest(*phase_before_velocity); })),
+      "[Level-set equation] Conservative_phase_liquid_side: expected one of "
+      "negative | positive, got 'invalid_phase'");
 
   auto invalid_boundary = parseWorkflowParametersXml(R"xml(
 <svMultiPhysicsFile>
@@ -3989,8 +3984,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_EQ(
       (maintenanceCompatibilityExceptionMessage<std::runtime_error>(
           [&] { (void)legacyMaintenanceRequestsForTest(*phase_first); })),
-      "[svMultiPhysics::Application] Conservative_phase_liquid_side must be "
-      "'negative' or 'positive'.");
+      "[Level-set equation] Conservative_phase_liquid_side: expected one of "
+      "negative | positive, got 'invalid_phase'");
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,

@@ -436,7 +436,6 @@ EquationTranslator::snapshotLegacyLevelSetMaintenanceInput(
   application::core::LegacyLevelSetMaintenanceInput input{};
   input.equation_type_defined = equation.type.defined();
   input.equation_type = equation.type.value();
-  input.equation_parameters = snapshot_legacy_params(equation);
   input.boundaries.reserve(equation.boundary_conditions.size());
   for (const auto* boundary : equation.boundary_conditions) {
     if (boundary == nullptr) {

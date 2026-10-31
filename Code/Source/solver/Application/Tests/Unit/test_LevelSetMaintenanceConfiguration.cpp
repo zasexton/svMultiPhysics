@@ -34,18 +34,25 @@ void put(ParameterMap &parameters, std::string key, std::string value,
   parameters[std::move(key)] = ParameterValue{defined, std::move(value)};
 }
 
-LegacyLevelSetMaintenanceInput makeLegacyInput(std::string type = "level_set") {
-  LegacyLevelSetMaintenanceInput input{};
+// The maintenance input of a level-set equation (its type and boundaries)
+// with the parameters of its equation element, which the installation
+// resolves.
+struct MaintenanceTestInput : LegacyLevelSetMaintenanceInput {
+  ParameterMap equation_parameters{};
+};
+
+MaintenanceTestInput makeLegacyInput(std::string type = "level_set") {
+  MaintenanceTestInput input{};
   input.equation_type_defined = true;
   input.equation_type = std::move(type);
   return input;
 }
 
-// An installation of the legacy input's equation element: its keys as the
+// An installation of the input's equation element: its keys as the
 // translator resolves them (levelSetEquationSchema()), and installed options
 // that the maintenance must not read.
 ResolvedLevelSetEquationHandle
-makeInstallation(const LegacyLevelSetMaintenanceInput &legacy,
+makeInstallation(const MaintenanceTestInput &legacy,
                  std::string field_name = "phi_installed") {
   auto snapshot = std::make_shared<LevelSetEquationInputSnapshot>();
   snapshot->legacy_maintenance_input = legacy;
@@ -63,7 +70,7 @@ makeInstallation(const LegacyLevelSetMaintenanceInput &legacy,
 }
 
 std::optional<application::core::LevelSetMaintenanceConfigurationHandle>
-resolveInstalled(const LegacyLevelSetMaintenanceInput &input,
+resolveInstalled(const MaintenanceTestInput &input,
                  std::span<const ActiveCutVolumeRequest> active_requests = {}) {
   return application::core::resolveLegacyLevelSetMaintenanceConfiguration(
       input, active_requests, makeInstallation(input));
@@ -86,10 +93,6 @@ std::string exceptionMessage(Action &&action) {
   return {};
 }
 
-const std::string kPhaseDiagnostic =
-    "[svMultiPhysics::Application] Conservative_phase_liquid_side must be "
-    "'negative' or 'positive'.";
-
 } // namespace
 
 TEST(LevelSetMaintenanceConfiguration,
@@ -100,9 +103,12 @@ TEST(LevelSetMaintenanceConfiguration,
   put(legacy.equation_parameters, "Transport_form", "advective");
   put(legacy.equation_parameters, "Enable_kinematic_reconciliation", "true");
   put(legacy.equation_parameters,
-      "Conservative_phase_flux_artifact_cadence_steps", "2", false);
+      "Conservative_phase_flux_artifact_cadence_steps", "2");
   put(legacy.equation_parameters,
-      "Conservative_phase_geometry_measure_tolerance", "1.23457", false);
+      "Conservative_phase_geometry_measure_tolerance", "1.23457");
+  // A parameter that is not defined does not count.
+  put(legacy.equation_parameters, "Enable_sign_definite_patch_bounds", "true",
+      false);
 
   auto installation = makeInstallation(legacy, "phi_domain");
   auto mutable_installation =
@@ -130,6 +136,7 @@ TEST(LevelSetMaintenanceConfiguration,
   EXPECT_EQ(configuration.transport.transport_form,
             svmp::FE::level_set::LevelSetTransportForm::Advective);
   EXPECT_TRUE(configuration.transport.kinematic_reconciliation.enabled);
+  EXPECT_FALSE(configuration.transport.sign_definite_patch_bounds.enabled);
   EXPECT_EQ(
       configuration.transport.conservative_phase.flux_artifact_cadence_steps,
       2);
@@ -179,7 +186,7 @@ TEST(LevelSetMaintenanceConfiguration, RequiresTheResolvedEquation) {
 }
 
 TEST(LevelSetMaintenanceConfiguration,
-     RetainsLegacyNumericVectorBooleanAndAliasPolicies) {
+     ReadsTheEquationKeysAsTheInstallationResolvesThem) {
   // A whitespace-only value counts as absent (the default cadence 1).
   struct AcceptedCase {
     std::string vector;
@@ -201,9 +208,9 @@ TEST(LevelSetMaintenanceConfiguration,
     put(input.equation_parameters,
         "Conservative_phase_flux_artifact_cadence_steps", test_case.cadence);
     put(input.equation_parameters,
-        "Conservative_phase_geometry_correction_max_iterations", "2tail");
+        "Conservative_phase_geometry_correction_max_iterations", "2");
     put(input.equation_parameters,
-        "Conservative_phase_geometry_measure_tolerance", "1.25tail");
+        "Conservative_phase_geometry_measure_tolerance", "1.25");
     put(input.equation_parameters, "Enable_sign_definite_patch_bounds",
         "unrecognized");
     put(input.equation_parameters, "Static_capillary_volume_tolerance", "nan");
@@ -226,49 +233,6 @@ TEST(LevelSetMaintenanceConfiguration,
     EXPECT_TRUE(std::isnan(
         (*resolved)->static_capillary_equilibrium.volume_tolerance));
   }
-
-  auto zero = makeLegacyInput();
-  put(zero.equation_parameters, "Enable_kinematic_reconciliation", "true");
-  put(zero.equation_parameters,
-      "Conservative_phase_geometry_correction_max_iterations", "0");
-  const auto zero_resolved = resolveInstalled(zero);
-  ASSERT_TRUE(zero_resolved.has_value());
-  EXPECT_EQ((*zero_resolved)
-                ->transport.conservative_phase.geometry_correction_max_iterations,
-            0);
-}
-
-TEST(LevelSetMaintenanceConfiguration,
-     ReportsLegacyLexicalFailureCategoriesAndText) {
-  const auto make_constant = [] {
-    auto input = makeLegacyInput();
-    put(input.equation_parameters, "Velocity_source", "constant");
-    put(input.equation_parameters, "Constant_velocity", "0.0 0.0 0.0");
-    put(input.equation_parameters, "Enable_kinematic_reconciliation", "true");
-    return input;
-  };
-
-  auto invalid_real = make_constant();
-  put(invalid_real.equation_parameters,
-      "Conservative_phase_geometry_measure_tolerance", "invalid");
-  EXPECT_EQ((exceptionMessage<std::invalid_argument>(
-                [&] { (void)resolveInstalled(invalid_real); })),
-            "stod");
-
-  auto overflow_real = make_constant();
-  put(overflow_real.equation_parameters,
-      "Conservative_phase_geometry_measure_tolerance", "1e9999");
-  EXPECT_EQ((exceptionMessage<std::out_of_range>(
-                [&] { (void)resolveInstalled(overflow_real); })),
-            "stod");
-
-  auto overflow_count = make_constant();
-  put(overflow_count.equation_parameters,
-      "Conservative_phase_flux_artifact_cadence_steps",
-      "999999999999999999999");
-  EXPECT_EQ((exceptionMessage<std::out_of_range>(
-                [&] { (void)resolveInstalled(overflow_count); })),
-            "stoi");
 }
 
 TEST(LevelSetMaintenanceConfiguration, TakesTheVelocityFromTheEquationKeys) {
@@ -315,10 +279,8 @@ TEST(LevelSetMaintenanceConfiguration, TakesTheVelocityFromTheEquationKeys) {
             (std::array<svmp::FE::Real, 3>{7.0, 8.0, 9.0}));
 }
 
-TEST(LevelSetMaintenanceConfiguration, PreservesPhaseAndBoundaryOrder) {
+TEST(LevelSetMaintenanceConfiguration, ReadsTheInflowLiteralWithStod) {
   auto input = makeLegacyInput();
-  put(input.equation_parameters, "Conservative_phase_liquid_side",
-      "invalid_phase");
   put(input.equation_parameters, "Enable_kinematic_reconciliation", "true");
   LegacyLevelSetBoundaryInput boundary{};
   boundary.type_defined = true;
@@ -328,11 +290,6 @@ TEST(LevelSetMaintenanceConfiguration, PreservesPhaseAndBoundaryOrder) {
   put(boundary.parameters, "Value", "invalid");
   input.boundaries.push_back(boundary);
 
-  EXPECT_EQ((exceptionMessage<std::runtime_error>(
-                [&] { (void)resolveInstalled(input); })),
-            kPhaseDiagnostic);
-
-  input.equation_parameters.erase("Conservative_phase_liquid_side");
   EXPECT_EQ((exceptionMessage<std::invalid_argument>(
                 [&] { (void)resolveInstalled(input); })),
             "stod");
@@ -474,8 +431,8 @@ TEST(LevelSetMaintenanceConfiguration,
   EXPECT_FALSE(retained_snapshot.expired());
   ASSERT_TRUE(resolved[0]->installation->input_snapshot);
   EXPECT_EQ(resolved[0]
-                ->installation->input_snapshot->legacy_maintenance_input
-                ->equation_parameters.at("Level_set_field_name")
+                ->installation->input_snapshot->installation_input
+                .equation_params.at("Level_set_field_name")
                 .value,
             "phi_first");
 }

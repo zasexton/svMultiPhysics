@@ -17,10 +17,11 @@ struct LegacyLevelSetBoundaryInput {
   svmp::Physics::ParameterMap parameters{};
 };
 
+// The equation type and the boundaries of a level-set equation as the
+// maintenance reads them; its keys come from the resolved installation.
 struct LegacyLevelSetMaintenanceInput {
   bool equation_type_defined{false};
   std::string equation_type{};
-  svmp::Physics::ParameterMap equation_parameters{};
   std::vector<LegacyLevelSetBoundaryInput> boundaries{};
 };
 

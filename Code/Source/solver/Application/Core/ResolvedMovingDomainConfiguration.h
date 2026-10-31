@@ -3,6 +3,7 @@
 #include "Application/Core/LevelSetEquationInputSnapshot.h"
 #include "FE/LevelSet/Extension/LevelSetPdeVelocityExtension.h"
 #include "FE/LevelSet/LevelSetOptions.h"
+#include "FE/LevelSet/LevelSetVolumeConstrainedMinimizer.h"
 #include "FE/Systems/FormsInstaller.h"
 
 #include <cstdint>
@@ -19,6 +20,18 @@ class FunctionSpace;
 } // namespace svmp
 
 namespace application::core {
+
+// The options of the static-capillary initialization: the FE minimizer's
+// options and the limits of the Navier-Stokes pressure certificates it must
+// pass (the acceptance checks of the minimizer's problem).
+struct StaticCapillaryEquilibriumOptions
+    : svmp::FE::level_set::LevelSetVolumeConstrainedMinimizerOptions {
+  svmp::FE::Real pressure_representability_max_residual_norm{1.0e-10};
+  svmp::FE::Real pressure_representability_max_relative_distance{1.0e-8};
+  svmp::FE::Real physical_equilibrium_max_residual_norm{1.0e-10};
+  svmp::FE::Real constant_pressure_kkt_max_residual_norm{1.0e-10};
+  svmp::FE::Real constant_pressure_kkt_max_relative_distance{1.0e-8};
+};
 
 // How the transport sees the PDE extension of its advection velocity:
 // written into a prescribed advection field (lagged by one outer pass), or
@@ -50,6 +63,10 @@ struct LevelSetEquationKeys {
       advection_velocity_extension_coupling{};
   std::string source_velocity_field_name{};
   std::string wet_extension_wall_faces{};
+  // The static-capillary initialization of the field (a Navier-Stokes
+  // free-surface option read from the level-set equation).
+  bool static_capillary_equilibrium_enabled{false};
+  StaticCapillaryEquilibriumOptions static_capillary_equilibrium{};
 };
 
 struct ResolvedLevelSetEquationConfiguration {

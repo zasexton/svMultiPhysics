@@ -4,7 +4,6 @@
 #include "Application/Core/ResolvedMovingDomainConfiguration.h"
 #include "FE/LevelSet/LevelSetOptions.h"
 #include "FE/LevelSet/Maintenance/LevelSetMaintenanceConfiguration.h"
-#include "FE/LevelSet/LevelSetVolumeConstrainedMinimizer.h"
 
 #include <memory>
 #include <optional>
@@ -13,18 +12,6 @@
 #include <vector>
 
 namespace application::core {
-
-// The options of the static-capillary initialization: the FE minimizer's
-// options and the limits of the Navier-Stokes pressure certificates it must
-// pass (the acceptance checks of the minimizer's problem).
-struct StaticCapillaryEquilibriumOptions
-    : svmp::FE::level_set::LevelSetVolumeConstrainedMinimizerOptions {
-  svmp::FE::Real pressure_representability_max_residual_norm{1.0e-10};
-  svmp::FE::Real pressure_representability_max_relative_distance{1.0e-8};
-  svmp::FE::Real physical_equilibrium_max_residual_norm{1.0e-10};
-  svmp::FE::Real constant_pressure_kkt_max_residual_norm{1.0e-10};
-  svmp::FE::Real constant_pressure_kkt_max_relative_distance{1.0e-8};
-};
 
 // The FE configuration of a maintained level-set field
 // (FE/LevelSet/Maintenance/LevelSetMaintenanceConfiguration.h), resolved from

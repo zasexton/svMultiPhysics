@@ -6,9 +6,9 @@ interfaces, cut-cell integration data, and diagnostics, but it does not encode
 Navier-Stokes, material, contact-line, or free-surface policy.
 
 Physics modules remain responsible for equation-specific defaults and
-formulation-specific residuals. The application translator owns legacy
-level-set equation input compatibility, translates those choices into
-`FE::level_set` options, and calls the FE services directly.
+formulation-specific residuals. The application translator owns the
+level-set equation input, translates it into `FE::level_set` options, and
+calls the FE services directly.
 
 ## Public API
 
@@ -121,10 +121,27 @@ may additionally integrate those reference rules against the parent-cell
 Jacobian to report a physical wet measure, but that diagnostic mapping does not
 change the FE cut-rule contract.
 
-The application level-set equation translator is an input adapter. It preserves
-legacy XML names, builds FE options, and calls
-`FE::level_set::installLevelSetTransport()`. It must not contain reusable
-transport, volume, maintenance, diagnostics, or restart algorithms.
+The application level-set equation translator is an input adapter. It builds
+FE options and calls `FE::level_set::installLevelSetTransport()`; it must not
+contain reusable transport, volume, maintenance, diagnostics, or restart
+algorithms. The keys of a `level_set` equation are declared once, in the
+option schema `levelSetEquationSchema()`
+(`Application/Translators/LevelSetConfigurationParsing.h`, decision D47 step
+P3): 67 keys with their spellings, codec, FE default and a documentation
+line, over `LevelSetEquationKeys` (the transport options with the
+conservative-phase controls and the accepted-step switches, `Coupled`,
+`Level_set_isovalue`, the PDE velocity-extension keys and the
+static-capillary options). The installation resolves the equation element and
+then its domain elements, each over the values before it; the
+interface isovalue, the extension and the static-capillary keys come from the
+equation element only. The maintenance of the field, the driver's
+extension requests and the static-capillary switch read the keys of the
+equation element as the installation resolved them, and the transport's
+effective-configuration artifact ends with a `resolved` section that lists
+every key with its value and source (`OptionSchema::describe`). The boundary
+conditions (`LevelSetInflow`, `LevelSetOutflow`) and the space keys
+(`Element_order`) keep their own readers.
+
 The PDE velocity extension of the level-set advection velocity
 (`Advection_velocity_extension_method` = `pde_harmonic` or `pde_normal`) is in
 `FE/LevelSet/Extension`: the dry-region solve
@@ -623,8 +640,9 @@ pointwise level-set curvature.
 
 No Physics compatibility headers remain for the migrated level-set APIs. New
 code should include `FE/LevelSet/...` directly and use
-`svmp::FE::level_set` names. User-facing level-set XML names remain accepted by
-the application input adapter for backward compatibility.
+`svmp::FE::level_set` names. The level-set XML keys are the spellings of
+`levelSetEquationSchema()`; a removed key is deleted outright and fails as an
+unknown element (decision D60).
 
 ## Module Authoring
 

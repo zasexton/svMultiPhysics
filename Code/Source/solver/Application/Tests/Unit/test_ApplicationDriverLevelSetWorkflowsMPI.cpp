@@ -130,7 +130,7 @@ std::vector<LevelSetMaintenanceRequest> legacyMaintenanceRequestsForTest(
           application::core::ResolvedLevelSetEquationConfiguration>();
       installation->equation_keys =
           parsing::resolveLevelSetEquationKeys(
-              parsing::levelSetEquationInput(input.equation_parameters))
+              parsing::levelSetEquationInput(*equation))
               .value;
     }
     const auto configuration = application::core::

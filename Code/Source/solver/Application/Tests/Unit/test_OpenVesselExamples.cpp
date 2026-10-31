@@ -464,6 +464,7 @@ struct DriverSetupRegressionVariant {
   bool continue_previous_simulation{false};
   bool zero_newton_iterations{false};
   bool missing_fitted_inflow_face{false};
+  bool invalid_static_capillary_tolerance{false};
 };
 
 struct DriverSetupRegressionPaths {
@@ -544,13 +545,15 @@ DriverSetupRegressionPaths writeDriverSetupRegressionXml(
       "open_vessel_surface");
   setOrAppendText(doc, fluid, "Interface_marker", "101");
   setOrAppendText(doc, fluid, "Active_domain", "LevelSetNegative");
-  // An unparsable maintenance-only value: the installation ignores it, and
-  // the delayed maintenance resolution fails on it.
-  setOrAppendText(
-      doc,
-      level_set,
-      "Static_capillary_volume_tolerance",
-      "invalid");
+  // An unparsable static-capillary value: the installation resolves it
+  // with the other level-set keys and fails before the setup.
+  if (variant.invalid_static_capillary_tolerance) {
+    setOrAppendText(
+        doc,
+        level_set,
+        "Static_capillary_volume_tolerance",
+        "invalid");
+  }
 
   if (variant.missing_fitted_inflow_face) {
     auto* boundary = doc.NewElement("Add_BC");
@@ -1281,19 +1284,23 @@ TEST(OpenVesselExamples,
   };
   const std::vector<ExpectedCase> cases{
       {DriverSetupRegressionVariant{
-           .name = "steady_delayed_maintenance",
-           .number_of_time_steps = 0},
-       ExceptionCategory::InvalidArgument,
-       "stod",
-       true,
+           .name = "steady_invalid_static_capillary_tolerance",
+           .number_of_time_steps = 0,
+           .invalid_static_capillary_tolerance = true},
+       ExceptionCategory::RuntimeError,
+       "[Level-set equation] Static_capillary_volume_tolerance: expected a "
+       "number, got 'invalid'",
+       false,
        false},
       {DriverSetupRegressionVariant{
-           .name = "transient_delayed_maintenance",
+           .name = "transient_invalid_static_capillary_tolerance",
            .number_of_time_steps = 1,
-           .transient_scheme = "BackwardEuler"},
-       ExceptionCategory::InvalidArgument,
-       "stod",
-       true,
+           .transient_scheme = "BackwardEuler",
+           .invalid_static_capillary_tolerance = true},
+       ExceptionCategory::RuntimeError,
+       "[Level-set equation] Static_capillary_volume_tolerance: expected a "
+       "number, got 'invalid'",
+       false,
        true},
       {DriverSetupRegressionVariant{
            .name = "steady_newton_zero",
@@ -1380,13 +1387,6 @@ TEST(OpenVesselExamples,
         ASSERT_TRUE((*resolved)->input_snapshot);
         ASSERT_TRUE(
             (*resolved)->input_snapshot->legacy_maintenance_input.has_value());
-        const auto& legacy =
-            *(*resolved)->input_snapshot->legacy_maintenance_input;
-        const auto tolerance = legacy.equation_parameters.find(
-            "Static_capillary_volume_tolerance");
-        ASSERT_NE(tolerance, legacy.equation_parameters.end());
-        EXPECT_TRUE(tolerance->second.defined);
-        EXPECT_EQ(tolerance->second.value, "invalid");
         if (expected.requires_time_advancement) {
           EXPECT_TRUE(components.fe_system->requiresTimeAdvancement());
         }
@@ -1806,7 +1806,7 @@ TEST(OpenVesselExamples,
         *retained->input_snapshot->legacy_maintenance_input;
     EXPECT_TRUE(legacy.equation_type_defined);
     EXPECT_EQ(legacy.equation_type, "level_set");
-    EXPECT_EQ(legacy.equation_parameters.at("Level_set_field_name").value,
+    EXPECT_EQ(retained->equation_keys.transport.level_set.field_name,
               "level_set");
 
     ASSERT_NO_THROW(components.physics_modules.push_back(

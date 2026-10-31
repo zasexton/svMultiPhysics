@@ -3,7 +3,6 @@
 #include "Application/Core/LevelSetCutConfiguration.h"
 #include "Application/Core/OopMpiLog.h"
 #include "Application/Translators/EquationTranslator.h"
-#include "Application/Translators/LevelSetConfigurationParsing.h"
 #include "Application/Translators/LevelSetEquationTranslator.h"
 #include "Application/Translators/MeshTranslator.h"
 
@@ -1179,38 +1178,16 @@ int requestedAssemblyThreads(const Parameters& params, std::string& source)
 /// What the module inputs need from the other equations of the input: the
 /// static-capillary initialization of a level-set equation needs the
 /// conservative-balance diagnostic operators of the flow module, because its
-/// startup certificate reads them.
-///
-/// Only the one switch is read, with the reader and policy of the level-set
-/// maintenance configuration (a relaxed boolean, which cannot fail).  The
-/// maintenance configuration itself is resolved by the driver after setup,
-/// so its errors keep their place after the installation and setup errors.
+/// startup certificate reads them.  The switch is a key of the equation
+/// element, as the installation resolved it (levelSetEquationSchema()).
 svmp::Physics::DerivedModuleRequests derivedModuleRequests(
     const std::vector<application::core::ResolvedLevelSetEquationHandle>&
         resolved_level_set_equations_by_input_index)
 {
-  namespace parsing = application::translators::level_set::configuration;
   svmp::Physics::DerivedModuleRequests requests{};
   for (const auto& equation : resolved_level_set_equations_by_input_index) {
-    if (!equation || !equation->input_snapshot ||
-        !equation->input_snapshot->legacy_maintenance_input) {
-      continue;
-    }
-    const auto& maintenance = *equation->input_snapshot->legacy_maintenance_input;
-    if (!maintenance.equation_type_defined) {
-      continue;
-    }
-    const auto type = parsing::normalizedToken(maintenance.equation_type);
-    if (type != "levelset" && type != "levelsettransport") {
-      continue;
-    }
-    parsing::LevelSetConfigurationReader reader(
-        maintenance.equation_parameters,
-        parsing::LevelSetInputPolicy::LegacyMaintenance);
-    if (reader
-            .boolean({"Enable_static_capillary_equilibrium_initialization"},
-                     "enable_static_capillary_equilibrium_initialization")
-            .value_or(false)) {
+    if (equation &&
+        equation->equation_keys.static_capillary_equilibrium_enabled) {
       requests.conservative_balance_diagnostics = true;
     }
   }

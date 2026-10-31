@@ -441,25 +441,12 @@ TEST(LevelSetEquationTranslator,
   expect_error("SUPG_tau_scale", "nan", "expected a finite number, got 'nan'");
   expect_error("SUPG_tau_scale", "1e9999", "expected a number, got '1e9999'");
 
-  const auto expect_count_error = [&](std::string value) {
-    auto invalid = makeMaintenanceCompatibilityInput(mesh);
-    invalid.equation_params[
-        "Conservative_phase_geometry_correction_max_iterations"] =
-        svmp::Physics::ParameterValue{true, value};
-    EXPECT_EQ(
-        (maintenanceCompatibilityExceptionMessage<std::runtime_error>([&] {
-          (void)application::translators::level_set::resolveConfiguration(
-              invalid);
-        })),
-        "[svMultiPhysics::Application] Failed to parse positive integer "
-        "value '" +
-            value +
-            "' for Conservative_phase_geometry_correction_max_iterations.");
-  };
-  expect_count_error("-1");
-  expect_count_error("0");
-  expect_count_error("2tail");
-  expect_count_error("999999999999999999999");
+  const char* count = "Conservative_phase_geometry_correction_max_iterations";
+  expect_error(count, "-1", "integer -1 outside [1, inf]");
+  expect_error(count, "0", "integer 0 outside [1, inf]");
+  expect_error(count, "2tail", "expected an integer, got '2tail'");
+  expect_error(count, "999999999999999999999",
+               "integer '999999999999999999999' out of range");
 
   input = makeMaintenanceCompatibilityInput(mesh);
   input.equation_params["Enable_SUPG"] =
@@ -707,8 +694,8 @@ TEST(LevelSetEquationTranslator,
       (maintenanceCompatibilityExceptionMessage<std::runtime_error>([&] {
         (void)application::translators::level_set::resolveConfiguration(input);
       })),
-      "[svMultiPhysics::Application] Conservative_phase_liquid_side must be "
-      "'negative' or 'positive'.");
+      "[Level-set equation] Conservative_phase_liquid_side: expected one of "
+      "negative | positive, got 'invalid_phase'");
 #endif
 }
 
@@ -754,7 +741,7 @@ TEST(LevelSetEquationTranslator,
 }
 
 TEST(LevelSetEquationTranslator,
-     InputSnapshotPreservesDistinctLegacyAndInstallationText)
+     InputSnapshotPreservesInstallationTextAndDefinedMetadata)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
@@ -793,34 +780,22 @@ TEST(LevelSetEquationTranslator,
   EXPECT_TRUE(legacy.equation_type_defined);
   EXPECT_EQ(legacy.equation_type, "level_set_transport");
 
-  const auto& legacy_precise =
-      legacy.equation_parameters.at("Snapshot_precision_probe");
   const auto& installation_precise =
       snapshot->installation_input.equation_params.at(
           "Snapshot_precision_probe");
-  EXPECT_TRUE(legacy_precise.defined);
-  EXPECT_EQ(legacy_precise.value, "1.23457");
   EXPECT_TRUE(installation_precise.defined);
   EXPECT_EQ(installation_precise.value, "1.2345678901234567");
 
-  const auto& legacy_default =
-      legacy.equation_parameters.at("Snapshot_undefined_default");
   const auto& installation_default =
       snapshot->installation_input.equation_params.at(
           "Snapshot_undefined_default");
-  EXPECT_FALSE(legacy_default.defined);
-  EXPECT_EQ(legacy_default.value, "default_choice");
   EXPECT_FALSE(installation_default.defined);
   EXPECT_EQ(installation_default.value, "default_choice");
 
-  EXPECT_EQ(legacy.equation_parameters.at("Snapshot_prefix_probe").value,
-            "  2tail  ");
   EXPECT_EQ(snapshot->installation_input.equation_params
                 .at("Snapshot_prefix_probe")
                 .value,
             "  2tail  ");
-  EXPECT_EQ(legacy.equation_parameters.at("Snapshot_typed_vector").value,
-            " 1.250000 -0.500000 3.000000");
   EXPECT_EQ(snapshot->installation_input.equation_params
                 .at("Snapshot_typed_vector")
                 .value,
@@ -906,10 +881,6 @@ TEST(LevelSetEquationTranslator,
   ASSERT_TRUE(snapshot);
   ASSERT_TRUE(snapshot->legacy_maintenance_input.has_value());
   EXPECT_EQ(snapshot->legacy_maintenance_input->equation_type, "level_set");
-  EXPECT_EQ(snapshot->legacy_maintenance_input->equation_parameters
-                .at("Level_set_field_name")
-                .value,
-            "captured_phi");
   EXPECT_EQ(snapshot->installation_input.equation_params
                 .at("Level_set_field_name")
                 .value,
@@ -991,9 +962,7 @@ TEST(LevelSetEquationTranslator,
       svmp::Physics::ParameterValue{true, "explicit_phi"};
   application::core::LegacyLevelSetMaintenanceInput legacy{};
   legacy.equation_type_defined = true;
-  legacy.equation_type = "level_set";
-  legacy.equation_parameters["Level_set_field_name"] =
-      svmp::Physics::ParameterValue{true, "legacy_explicit_phi"};
+  legacy.equation_type = "level_set_transport";
   owned_snapshot->legacy_maintenance_input = std::move(legacy);
   application::core::LevelSetEquationInputHandle snapshot = owned_snapshot;
 
@@ -1007,10 +976,10 @@ TEST(LevelSetEquationTranslator,
   EXPECT_EQ(resolved->options.level_set.field_name, "explicit_phi");
   ASSERT_TRUE(
       resolved->input_snapshot->legacy_maintenance_input.has_value());
-  EXPECT_EQ(resolved->input_snapshot->legacy_maintenance_input
-                ->equation_parameters.at("Level_set_field_name")
-                .value,
-            "legacy_explicit_phi");
+  EXPECT_EQ(resolved->input_snapshot->legacy_maintenance_input->equation_type,
+            "level_set_transport");
+  EXPECT_EQ(resolved->equation_keys.transport.level_set.field_name,
+            "explicit_phi");
   EXPECT_EQ(resolved->input_snapshot->installation_input.equation_params
                 .at("Level_set_field_name")
                 .value,
@@ -1717,11 +1686,13 @@ TEST(LevelSetEquationTranslator,
           true, "film|wall_film|1|0|0|0.1|*|*"};
 
   svmp::FE::systems::FESystem system(mesh);
-  EXPECT_THROW(
-      static_cast<void>(
-          application::translators::level_set::createModule(
-              input, system)),
-      std::invalid_argument);
+  EXPECT_EQ(
+      (maintenanceCompatibilityExceptionMessage<std::runtime_error>([&] {
+        static_cast<void>(
+            application::translators::level_set::createModule(input, system));
+      })),
+      "[Level-set equation] Conservative_phase_fixed_flux_regions: "
+      "conservative phase region box minimum exceeds its maximum");
   EXPECT_EQ(system.findFieldByName("phi"), svmp::FE::INVALID_FIELD_ID);
 #endif
 }
