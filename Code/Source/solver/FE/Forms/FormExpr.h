@@ -949,6 +949,14 @@ private:
 };
 
 // Convenience free functions (EDSL-style)
+//
+// Multiplication by a Real is the one mixed operation that does not keep the
+// written order: FormExpr::operator*(Real) builds FormExpr::constant(a) * x,
+// and a * x forwards to it.  So a * x, x * a and FormExpr::constant(a) * x
+// are one tree, but x * FormExpr::constant(a) is another: rewriting it as
+// x * a (or as a * x) changes the expression tree, and with it the kernels,
+// the manifests and the JIT cache keys.  Keep the spelled-out constant where
+// a bitwise-gated tree has the constant on the right.
 inline FormExpr operator*(Real scalar, const FormExpr& expr) { return expr * scalar; }
 
 // Mixed Real/FormExpr arithmetic.  Each overload builds exactly the tree of

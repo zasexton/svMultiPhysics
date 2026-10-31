@@ -392,7 +392,7 @@ Status: `implemented/public`.
 | Vocabulary | Notes |
 |------------|-------|
 | `+`, `-`, `*`, `/`, unary `-` | Scalar/vector/matrix expression arithmetic where shape-compatible |
-| `a + x`, `x + a`, `a - x`, `x - a`, `a * x`, `x * a`, `a / x`, `x / a` | Mixed `Real`/`FormExpr` arithmetic; the `Real` becomes `FormExpr::constant(a)` on the side it is written (`a * x` and `x * a` both build `constant(a) * x`), so the tree, kernels and JIT keys are those of the explicit spelling (`test_FormExprOperators.cpp`) |
+| `a + x`, `x + a`, `a - x`, `x - a`, `a * x`, `x * a`, `a / x`, `x / a` | Mixed `Real`/`FormExpr` arithmetic; the `Real` becomes `FormExpr::constant(a)` on the side it is written, except for `*`: `a * x` and `x * a` both build `constant(a) * x`, so rewriting `x * FormExpr::constant(a)` as `x * a` changes the tree, the kernels and the JIT keys (`FormExpr.h`, `test_FormExprOperators.cpp`) |
 | `inner(a, b)`, `dot(a, b)` | Inner product (`dot` is an alias) |
 | `outer(a, b)`, `cross(a, b)` | Vector/tensor products |
 | `doubleContraction(A, B)` | Rank-2 Frobenius contraction and rank-4/rank-2 contraction |
