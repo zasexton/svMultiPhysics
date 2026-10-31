@@ -15,9 +15,12 @@ Relevant current code anchors:
 - `Code/Source/solver/FE/Systems/SystemSetup.cpp`
 - `Code/Source/solver/FE/Assembly/Assembler.h`
 - `Code/Source/solver/FE/Assembly/StandardAssembler.cpp`
-- `Code/Source/solver/FE/MovingMesh/MovingDomainOrchestrator.cpp`
 - `Code/Source/solver/Application/Core/ApplicationDriver.cpp`
 - `Code/Source/solver/Application/Core/SimulationBuilder.cpp`
+
+`FE/MovingMesh` (the prescribed and staggered moving-domain orchestrator and
+its geometry-regularization backend) had no production caller and was deleted
+on 2026-10-30 (decision 3A); production supports monolithic coupled ALE only.
 
 ## Implementation Status
 

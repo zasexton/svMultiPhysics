@@ -1295,21 +1295,6 @@ set(FE_COUPLING_SOURCES
     Coupling/TransferPlan.cpp
 )
 
-if(FE_WITH_MESH)
-    set(FE_MOVINGMESH_HEADERS
-        MovingMesh/GeometryRegularizationBackend.h
-        MovingMesh/MovingDomainOrchestrator.h
-    )
-
-    set(FE_MOVINGMESH_SOURCES
-        MovingMesh/GeometryRegularizationBackend.cpp
-        MovingMesh/MovingDomainOrchestrator.cpp
-    )
-else()
-    set(FE_MOVINGMESH_HEADERS)
-    set(FE_MOVINGMESH_SOURCES)
-endif()
-
 # Forms sources (requires FE/Assembly; used by SymbolicAssembler)
 set(FE_FORMS_HEADERS
     Forms/Forms.h
@@ -1664,7 +1649,6 @@ set(FE_ALL_HEADERS
     ${FE_ANALYSIS_HEADERS}
     ${FE_GEOMETRY_HEADERS}
     ${FE_LEVELSET_HEADERS}
-    ${FE_MOVINGMESH_HEADERS}
     ${FE_SPARSITY_HEADERS}
 )
 
@@ -1681,7 +1665,6 @@ set(FE_ALL_SOURCES
     ${FE_ANALYSIS_SOURCES}
     ${FE_GEOMETRY_SOURCES}
     ${FE_LEVELSET_SOURCES}
-    ${FE_MOVINGMESH_SOURCES}
     ${FE_SPARSITY_SOURCES}
 )
 
@@ -2473,23 +2456,6 @@ if(FE_BUILD_TESTS)
         svmp_add_gtest(FE_Core_Logger_Environment_Tests TARGET test_fe_core
                        FILTER "LoggerEnvironment.*"
                        ENVIRONMENT "FE_LOG_LEVEL=WARNING")
-    endif()
-
-    # MovingMesh module tests (physics-neutral FE implementation of Mesh motion backends)
-    if(FE_WITH_MESH AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/MovingMesh/test_main.cpp)
-        set(FE_MOVINGMESH_TEST_SOURCES
-            Tests/Unit/MovingMesh/test_FEMeshMotionBackend.cpp
-            Tests/Unit/MovingMesh/test_MovingDomainOrchestrator.cpp
-            Tests/Unit/MovingMesh/test_main.cpp
-        )
-        add_executable(test_fe_movingmesh ${FE_MOVINGMESH_TEST_SOURCES})
-        _svmp_fe_target_enable_warnings(test_fe_movingmesh)
-        target_link_libraries(test_fe_movingmesh
-            PRIVATE
-                svfe
-                ${GTEST_LIBRARIES}
-        )
-        svmp_add_gtest(FE_MovingMesh_Tests TARGET test_fe_movingmesh)
     endif()
 
     # Quadrature module tests
@@ -3301,22 +3267,6 @@ if(FE_BUILD_TESTS)
 
     # Add MPI tests if MPI is enabled
     if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
-        if(FE_WITH_MESH AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/MovingMesh/test_mainMPI.cpp)
-            set(FE_MOVINGMESH_MPI_TEST_SOURCES
-                Tests/Unit/MovingMesh/test_FEMeshMotionBackendMPI.cpp
-                Tests/Unit/MovingMesh/test_mainMPI.cpp
-            )
-            add_executable(test_fe_movingmesh_mpi ${FE_MOVINGMESH_MPI_TEST_SOURCES})
-            _svmp_fe_target_enable_warnings(test_fe_movingmesh_mpi)
-            if(TARGET GTest::gtest)
-                target_link_libraries(test_fe_movingmesh_mpi PRIVATE svfe GTest::gtest)
-            else()
-                set(_fe_movingmesh_mpi_gtest_libs ${GTEST_LIBRARIES})
-                list(REMOVE_ITEM _fe_movingmesh_mpi_gtest_libs gtest_main GTest::gtest_main)
-                target_link_libraries(test_fe_movingmesh_mpi PRIVATE svfe ${_fe_movingmesh_mpi_gtest_libs})
-            endif()
-            add_fe_mpi_test(test_fe_movingmesh_mpi 2)
-        endif()
 
         file(GLOB FE_SPARSITY_MPI_TEST_SOURCES
             Tests/Unit/Sparsity/test_*MPI*.cpp
