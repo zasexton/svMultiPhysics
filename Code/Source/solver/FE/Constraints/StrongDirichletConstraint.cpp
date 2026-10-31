@@ -11,6 +11,7 @@
 
 #include "Systems/FESystem.h"
 #include "Systems/SystemsExceptions.h"
+#include "Systems/TimeSeries.h"
 
 #include "Core/Logger.h"
 
@@ -20,10 +21,14 @@
 #include "Spaces/FaceRestriction.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <optional>
+#include <span>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 
@@ -43,7 +48,54 @@ namespace {
 struct BoundaryDofsWithCoords {
     std::vector<GlobalIndex> dofs;
     std::vector<std::array<Real, 3>> coords;
+    std::vector<int> sample_components;  ///< per sampled field
+    std::vector<Real> samples;           ///< the sampled field values, DOF by DOF
 };
+
+/// A prescribed field a strong value reads, sampled at the constrained nodes.
+struct SampledField {
+    std::string name;
+    const dofs::DofMap* dof_map{nullptr};
+    std::span<const Real> coefficients{};
+    int components{1};
+};
+
+/// The parameter names and field ids of @p node, each once in tree order.
+void gatherStrongValueInputs(const forms::FormExprNode& node,
+                             std::vector<std::string>& parameter_names,
+                             std::vector<FieldId>& fields)
+{
+    switch (node.type()) {
+    case forms::FormExprType::ParameterSymbol: {
+        const std::string name(node.symbolName().value_or(std::string_view{}));
+        if (name.empty()) {
+            throw std::invalid_argument("StrongDirichletConstraint: a parameter of the value has no name");
+        }
+        if (std::find(parameter_names.begin(), parameter_names.end(), name) == parameter_names.end()) {
+            parameter_names.push_back(name);
+        }
+        return;
+    }
+    case forms::FormExprType::DiscreteField: {
+        const auto field = node.fieldId().value_or(INVALID_FIELD_ID);
+        if (std::find(fields.begin(), fields.end(), field) == fields.end()) {
+            fields.push_back(field);
+        }
+        return;
+    }
+    case forms::FormExprType::StateField:
+        throw std::invalid_argument(
+            "StrongDirichletConstraint: a strong value must not depend on an unknown (StateField); "
+            "read a prescribed field instead");
+    default:
+        break;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child) {
+            gatherStrongValueInputs(*child, parameter_names, fields);
+        }
+    }
+}
 
 [[nodiscard]] bool strongDirichletTraceEnabled() noexcept
 {
@@ -122,21 +174,50 @@ void traceStrongDirichletEvent(const std::string& phase,
     return ins->second;
 }
 
+/// The values of the sampled fields at one node, from @p samples at @p first.
+void fillFieldValues(std::span<const FieldId> fields,
+                     std::span<const int> components,
+                     std::span<const Real> samples,
+                     std::size_t first,
+                     std::vector<FieldValueEntry>& out)
+{
+    std::size_t k = first;
+    for (std::size_t f = 0; f < fields.size(); ++f) {
+        auto& entry = out[f];
+        entry.field = fields[f];
+        entry.n_components = components[f];
+        FE_THROW_IF(entry.n_components > MAX_FIELD_VALUE_COMPONENTS, InvalidArgumentException,
+                    "StrongDirichletConstraint: a sampled field has too many components");
+        for (int c = 0; c < entry.n_components; ++c) {
+            entry.components[c] = samples[k++];
+        }
+    }
+}
+
 void completeOwnedDofsWithCoords(const FESystem& system,
                                  BoundaryDofsWithCoords& out,
                                  const std::string& context)
 {
+    const std::size_t n_samples = out.dofs.empty() ? 0u : out.samples.size() / out.dofs.size();
+    const std::size_t stride = 3u + n_samples;
     std::vector<Real> payload;
-    payload.reserve(out.coords.size() * 3u);
-    for (const auto& x : out.coords) {
-        payload.insert(payload.end(), x.begin(), x.end());
+    payload.reserve(out.coords.size() * stride);
+    for (std::size_t i = 0; i < out.coords.size(); ++i) {
+        payload.insert(payload.end(), out.coords[i].begin(), out.coords[i].end());
+        payload.insert(payload.end(),
+                       out.samples.begin() + static_cast<std::ptrdiff_t>(i * n_samples),
+                       out.samples.begin() + static_cast<std::ptrdiff_t>((i + 1u) * n_samples));
     }
-    if (completeOwnedBoundaryDofs(system, out.dofs, payload, 3u, context) == 0u) {
+    if (completeOwnedBoundaryDofs(system, out.dofs, payload, stride, context) == 0u) {
         return;
     }
     out.coords.resize(out.dofs.size());
+    out.samples.resize(out.dofs.size() * n_samples);
     for (std::size_t i = 0; i < out.dofs.size(); ++i) {
-        out.coords[i] = {payload[3u * i], payload[3u * i + 1u], payload[3u * i + 2u]};
+        out.coords[i] = {payload[stride * i], payload[stride * i + 1u], payload[stride * i + 2u]};
+        std::copy_n(payload.begin() + static_cast<std::ptrdiff_t>(stride * i + 3u),
+                    n_samples,
+                    out.samples.begin() + static_cast<std::ptrdiff_t>(n_samples * i));
     }
 }
 
@@ -144,7 +225,9 @@ void completeOwnedDofsWithCoords(const FESystem& system,
     const FESystem& system,
     FieldId field,
     int boundary_marker,
-    int component)
+    int component,
+    std::span<const FieldId> sampled_field_ids = {},
+    bool require_coefficients = true)
 {
     BoundaryDofsWithCoords out;
 
@@ -168,7 +251,43 @@ void completeOwnedDofsWithCoords(const FESystem& system,
         throw std::invalid_argument("StrongDirichletConstraint: component index out of range");
     }
 
+    // A sampled field shares the constrained field's scalar element, so its
+    // coefficient at a constrained node is the one at the same local index.
+    std::vector<SampledField> sampled;
+    std::size_t n_samples = 0;
+    for (const auto id : sampled_field_ids) {
+        const auto& sampled_rec = system.fieldRecord(id);
+        FE_THROW_IF(sampled_rec.source_kind != systems::FieldSourceKind::PrescribedData, InvalidArgumentException,
+                    "StrongDirichletConstraint: the value reads field '" + sampled_rec.name +
+                        "', which is not prescribed data; a strong value must not depend on an unknown");
+        FE_CHECK_NOT_NULL(sampled_rec.space.get(), "StrongDirichletConstraint: sampled field space");
+        FE_THROW_IF(sampled_rec.space->polynomial_order() != rec.space->polynomial_order() ||
+                        sampled_rec.space->continuity() != rec.space->continuity() ||
+                        sampled_rec.space->element().basis().is_vector_valued(),
+                    InvalidArgumentException,
+                    "StrongDirichletConstraint: field '" + sampled_rec.name +
+                        "' in a strong value must share the scalar element of field '" + rec.name + "'");
+        SampledField f;
+        f.name = sampled_rec.name;
+        f.dof_map = &system.fieldDofHandler(id).getDofMap();
+        f.coefficients = system.prescribedFieldCoefficients(id);
+        f.components = std::max(1, sampled_rec.space->value_dimension());
+        // At setup the coefficients may not be set yet: the value reads zeros
+        // until the first update, which needs them.
+        FE_THROW_IF(!f.coefficients.empty() &&
+                        f.coefficients.size() != static_cast<std::size_t>(system.fieldDofHandler(id).getNumDofs()),
+                    InvalidStateException,
+                    "StrongDirichletConstraint: prescribed field '" + f.name + "' has the wrong number of coefficients");
+        FE_THROW_IF(f.coefficients.empty() && require_coefficients, InvalidStateException,
+                    "StrongDirichletConstraint: prescribed field '" + f.name +
+                        "' in a strong value has no coefficients; set them before the constraints are updated");
+        out.sample_components.push_back(f.components);
+        n_samples += static_cast<std::size_t>(f.components);
+        sampled.push_back(std::move(f));
+    }
+
     std::unordered_map<GlobalIndex, std::array<Real, 3>> coord_by_dof;
+    std::unordered_map<GlobalIndex, std::vector<Real>> samples_by_dof;
     std::unordered_map<int, spaces::FaceRestriction> face_restriction_cache;
 
     std::vector<std::array<Real, 3>> cell_coords;
@@ -238,6 +357,26 @@ void completeOwnedDofsWithCoords(const FESystem& system,
                     continue;
                 }
                 coord_by_dof.emplace(dof, std::array<Real, 3>{x[0], x[1], x[2]});
+                if (sampled.empty()) {
+                    continue;
+                }
+                auto& values = samples_by_dof[dof];
+                values.reserve(n_samples);
+                for (const auto& f : sampled) {
+                    const auto sampled_dofs = f.dof_map->getCellDofs(cell_id);
+                    const auto sampled_per_component =
+                        sampled_dofs.size() / static_cast<std::size_t>(f.components);
+                    FE_THROW_IF(sampled_per_component != dofs_per_component, InvalidStateException,
+                                "StrongDirichletConstraint: field '" + f.name +
+                                    "' has another number of DOFs per component on a cell of the constrained field");
+                    for (int c = 0; c < f.components; ++c) {
+                        const auto sampled_dof =
+                            sampled_dofs[static_cast<std::size_t>(c) * sampled_per_component + ldof_u];
+                        values.push_back(f.coefficients.empty()
+                                             ? Real{0.0}
+                                             : f.coefficients[static_cast<std::size_t>(sampled_dof)]);
+                    }
+                }
             }
         }
     });
@@ -250,11 +389,16 @@ void completeOwnedDofsWithCoords(const FESystem& system,
     out.dofs.erase(std::unique(out.dofs.begin(), out.dofs.end()), out.dofs.end());
 
     out.coords.reserve(out.dofs.size());
+    out.samples.reserve(out.dofs.size() * n_samples);
     for (const auto dof : out.dofs) {
         auto it = coord_by_dof.find(dof);
         FE_THROW_IF(it == coord_by_dof.end(), InvalidStateException,
                     "StrongDirichletConstraint: internal DOF->coord map missing key");
         out.coords.push_back(it->second);
+        if (!sampled.empty()) {
+            const auto& values = samples_by_dof.at(dof);
+            out.samples.insert(out.samples.end(), values.begin(), values.end());
+        }
     }
 
     // Owned DOFs on faces that only other ranks own (as cells) come from
@@ -284,7 +428,34 @@ StrongDirichletConstraint::StrongDirichletConstraint(FieldId field, int boundary
     if (!value_.isValid()) {
         throw std::invalid_argument("StrongDirichletConstraint: invalid value expression");
     }
-    is_time_dependent_ = forms::isTimeDependent(value_);
+    gatherStrongValueInputs(*value_.node(), parameter_names_, sampled_fields_);
+    point_value_ = value_;
+    if (!parameter_names_.empty()) {
+        point_value_ = value_.transformNodes([&](const forms::FormExprNode& node) -> std::optional<forms::FormExpr> {
+            if (node.type() != forms::FormExprType::ParameterSymbol) {
+                return std::nullopt;
+            }
+            const auto name = node.symbolName().value_or(std::string_view{});
+            const auto slot = std::find(parameter_names_.begin(), parameter_names_.end(), name) -
+                              parameter_names_.begin();
+            return forms::FormExpr::parameterRef(static_cast<std::uint32_t>(slot));
+        });
+    }
+    is_time_dependent_ = forms::isTimeDependent(value_) || !parameter_names_.empty() || !sampled_fields_.empty();
+}
+
+std::vector<Real> StrongDirichletConstraint::parameterValues(const FESystem& system, double time) const
+{
+    std::vector<Real> values;
+    values.reserve(parameter_names_.size());
+    for (const auto& name : parameter_names_) {
+        const auto* f = systems::findTimeFunction(system, name);
+        FE_THROW_IF(f == nullptr, InvalidArgumentException,
+                    "StrongDirichletConstraint: parameter '" + name +
+                        "' of a strong value is not a time function of the system (systems::timeFunction)");
+        values.push_back((*f)(static_cast<Real>(time)));
+    }
+    return values;
 }
 
 void StrongDirichletConstraint::apply(const FESystem& system, constraints::AffineConstraints& constraints)
@@ -293,9 +464,12 @@ void StrongDirichletConstraint::apply(const FESystem& system, constraints::Affin
         throw std::invalid_argument("StrongDirichletConstraint: value expression must not contain test/trial functions");
     }
 
-    auto extracted = boundaryDofsWithCoordsByMarker(system, field_, boundary_marker_, component_);
+    auto extracted = boundaryDofsWithCoordsByMarker(system, field_, boundary_marker_, component_, sampled_fields_,
+                                                    /*require_coefficients=*/false);
     dofs_ = std::move(extracted.dofs);
     coords_ = std::move(extracted.coords);
+    sample_components_ = std::move(extracted.sample_components);
+    samples_ = std::move(extracted.samples);
 
     FE_THROW_IF(dofs_.size() != coords_.size(), InvalidStateException,
                 "StrongDirichletConstraint: DOF/coordinate size mismatch");
@@ -305,6 +479,10 @@ void StrongDirichletConstraint::apply(const FESystem& system, constraints::Affin
     forms::PointEvalContext pctx;
     pctx.time = 0.0;
     pctx.dt = 0.0;
+    const auto parameters = parameterValues(system, 0.0);
+    pctx.jit_constants = parameters;
+    std::vector<FieldValueEntry> field_values(sampled_fields_.size());
+    const std::size_t n_samples = dofs_.empty() ? 0u : samples_.size() / dofs_.size();
 
     std::size_t owned_dofs = 0;
     std::size_t constrained_dofs = 0;
@@ -320,7 +498,11 @@ void StrongDirichletConstraint::apply(const FESystem& system, constraints::Affin
         }
         ++owned_dofs;
         pctx.x = coords_[i];
-        const Real v = forms::evaluateScalarAt(value_, pctx);
+        if (!field_values.empty()) {
+            fillFieldValues(sampled_fields_, sample_components_, samples_, i * n_samples, field_values);
+            pctx.field_values = field_values;
+        }
+        const Real v = forms::evaluateScalarAt(point_value_, pctx);
         constraints.addDirichlet(dof, v);
         ++constrained_dofs;
         min_value = std::min(min_value, static_cast<double>(v));
@@ -360,15 +542,21 @@ bool StrongDirichletConstraint::updateValues(const FESystem& system,
                                              double time,
                                              double dt)
 {
-    auto extracted = boundaryDofsWithCoordsByMarker(system, field_, boundary_marker_, component_);
+    auto extracted = boundaryDofsWithCoordsByMarker(system, field_, boundary_marker_, component_, sampled_fields_);
     FE_THROW_IF(extracted.dofs.size() != dofs_.size(), InvalidStateException,
                 "StrongDirichletConstraint::updateValues: geometry-dependent update changed constrained DOF count; rebuild constraints instead");
     dofs_ = std::move(extracted.dofs);
     coords_ = std::move(extracted.coords);
+    sample_components_ = std::move(extracted.sample_components);
+    samples_ = std::move(extracted.samples);
 
     forms::PointEvalContext pctx;
     pctx.time = static_cast<Real>(time);
     pctx.dt = static_cast<Real>(dt);
+    const auto parameters = parameterValues(system, time);
+    pctx.jit_constants = parameters;
+    std::vector<FieldValueEntry> field_values(sampled_fields_.size());
+    const std::size_t n_samples = dofs_.empty() ? 0u : samples_.size() / dofs_.size();
 
     const auto& owned = system.dofHandler().getPartition().locallyOwned();
     std::size_t owned_dofs = 0;
@@ -387,7 +575,11 @@ bool StrongDirichletConstraint::updateValues(const FESystem& system,
         }
         ++owned_dofs;
         pctx.x = coords_[i];
-        const Real v = forms::evaluateScalarAt(value_, pctx);
+        if (!field_values.empty()) {
+            fillFieldValues(sampled_fields_, sample_components_, samples_, i * n_samples, field_values);
+            pctx.field_values = field_values;
+        }
+        const Real v = forms::evaluateScalarAt(point_value_, pctx);
         const bool constrained = constraints.isConstrained(dof);
         if (!constrained) {
             ++missing_constraints;

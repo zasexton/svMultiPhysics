@@ -11,6 +11,7 @@
 #include "Systems/GlobalKernelStateProvider.h"
 #include "Systems/MaterialStateProvider.h"
 #include "Systems/OperatorBackends.h"
+#include "Systems/TimeSeries.h"
 
 #include "Backends/Interfaces/DofPermutation.h"
 
@@ -6375,6 +6376,10 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
             }
         }
 
+        // The time functions of the system give their parameters f(state.time).
+        for (const auto& declaration : timeFunctions(*this)) {
+            parameter_registry_.addTimeFunction(declaration.name, declaration.function, "timeFunction");
+        }
 	    }
 
     // ---------------------------------------------------------------------

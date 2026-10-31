@@ -41,6 +41,16 @@ public:
     void add(params::Spec spec, std::string source = {});
     void addAll(const std::vector<params::Spec>& specs, std::string source = {});
 
+    /**
+     * @brief Gives the Real parameter @p key the value f(t) at the state time t
+     *
+     * Adds a Real Spec for the key (merged with the kernels' Specs).  When the
+     * state supplies no value for the key, validate(), the getters and
+     * evaluateRealSlots() use f(state.time) before any default.  Used for the
+     * time functions of a system (systems::timeFunction).
+     */
+    void addTimeFunction(std::string key, std::function<Real(Real)> f, std::string source = {});
+
     [[nodiscard]] const std::vector<params::Spec>& specs() const noexcept { return specs_; }
     [[nodiscard]] const params::Spec* find(std::string_view key) const noexcept;
 
@@ -108,6 +118,10 @@ private:
 
     std::vector<params::Spec> specs_{};
     std::unordered_map<std::string, Entry> by_key_{};
+    std::unordered_map<std::string, std::function<Real(Real)>> time_functions_{};
+
+    /// f(state.time) when @p key has a time function.
+    [[nodiscard]] std::optional<Real> timeFunctionValue(std::string_view key, const SystemStateView& state) const;
 
     // Cached deterministic slot layout (key-sorted).
     mutable bool slot_cache_valid_{false};

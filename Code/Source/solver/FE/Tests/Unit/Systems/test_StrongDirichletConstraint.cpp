@@ -7,6 +7,7 @@
 
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
+#include "Systems/TimeSeries.h"
 #include "Constraints/SystemConstraints.h"
 #include "Constraints/VertexDirichletConstraint.h"
 #include "Dofs/EntityDofMap.h"
@@ -25,6 +26,7 @@
 #include "Mesh/Topology/CellShape.h"
 
 #include <array>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -496,4 +498,144 @@ TEST(StrongDirichletConstraint, AuxiliaryDrivenBindingRejectsUnknownOutput)
                 .initialize({1.0})
                 .drivesStrongDirichlet(u, marker, "missing_output")),
         svmp::FE::InvalidArgumentException);
+}
+
+namespace {
+
+/// The system DOF of field @p field at vertex @p vertex (component 0).
+GlobalIndex vertexDof(const FESystem& sys, svmp::FE::FieldId field, GlobalIndex vertex, bool field_local = false)
+{
+    const auto* map = sys.fieldDofHandler(field).getEntityDofMap();
+    EXPECT_NE(map, nullptr);
+    const auto dofs = map->getVertexDofs(vertex);
+    EXPECT_FALSE(dofs.empty());
+    return dofs[0] + (field_local ? 0 : sys.fieldDofOffset(field));
+}
+
+/// One scalar Q1 field "u" on the single quad, u = value on the left edge (marker 7).
+struct StrongValueSystem {
+    std::shared_ptr<Mesh> mesh{};
+    std::shared_ptr<H1Space> space{};
+    std::unique_ptr<FESystem> system{};
+    svmp::FE::FieldId u{svmp::FE::INVALID_FIELD_ID};
+};
+
+StrongValueSystem buildStrongValueSystem(const std::function<FormExpr(FESystem&, const StrongValueSystem&)>& value)
+{
+    StrongValueSystem out;
+    out.mesh = build_single_quad_mesh_with_left_edge_marker(7);
+    out.space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    out.system = std::make_unique<FESystem>(out.mesh);
+    out.u = out.system->addField(FieldSpec{.name = "u", .space = out.space, .components = 1});
+    out.system->addOperator("mass");
+    out.system->addCellKernel("mass", out.u, std::make_shared<MassKernel>(1.0));
+    const auto bc = strongDirichlet(out.u, 7, value(*out.system, out), "u");
+    svmp::FE::systems::installStrongDirichlet(
+        *out.system, std::span<const svmp::FE::forms::bc::StrongDirichlet>(&bc, 1));
+    return out;
+}
+
+} // namespace
+
+TEST(StrongDirichletConstraint, TimeFunctionParameterGivesTheCallbackInhomogeneitiesBitForBit)
+{
+    using svmp::FE::Real;
+    const svmp::FE::systems::TimeSeries flow({0.0, 0.25, 0.5, 1.0}, {0.0, 3.7, -1.1, 0.0},
+                                             svmp::FE::systems::TimeSeriesEnd::Periodic);
+    const svmp::FE::forms::ScalarCoefficient profile = [](Real x, Real y, Real) {
+        return 1.25 + 0.7 * y + 0.1 * y * y + 0.3 * x;
+    };
+
+    // Q(t) w(x): a time function times a spatial coefficient, against the one
+    // callback the Navier-Stokes inflow uses today, flow(t) * profile(x).
+    auto parameter = buildStrongValueSystem([&](FESystem& sys, const StrongValueSystem&) {
+        return svmp::FE::systems::timeFunction(sys, "Q", flow) * FormExpr::coefficient("w", profile);
+    });
+    auto callback = buildStrongValueSystem([&](FESystem&, const StrongValueSystem&) {
+        return FormExpr::coefficient("Qw", svmp::FE::forms::TimeScalarCoefficient([flow, profile](Real x, Real y,
+                                                                                                    Real z, Real t) {
+                                         return flow(t) * profile(x, y, z);
+                                     }));
+    });
+    parameter.system->setup();
+    callback.system->setup();
+    EXPECT_TRUE(parameter.system->hasTimeDependentConstraints());
+
+    const auto dofs = svmp::FE::constraints::boundaryDofsByMarker(*parameter.mesh, parameter.system->dofHandler(), 7);
+    ASSERT_EQ(dofs.size(), 2u);
+    bool nonzero = false;
+    for (const double time : {0.0, 0.13, 0.37, 0.9, 1.61, 2.25}) {
+        parameter.system->updateConstraints(time, 0.01);
+        callback.system->updateConstraints(time, 0.01);
+        for (const auto dof : dofs) {
+            const auto value = parameter.system->constraints().getInhomogeneity(dof);
+            EXPECT_EQ(value, callback.system->constraints().getInhomogeneity(dof)) << "t=" << time;
+            nonzero = nonzero || value != 0.0;
+        }
+    }
+    EXPECT_TRUE(nonzero);
+}
+
+TEST(StrongDirichletConstraint, PrescribedFieldInTheValueIsReadAtTheNodes)
+{
+    using svmp::FE::Real;
+    svmp::FE::FieldId w = svmp::FE::INVALID_FIELD_ID;
+    auto s = buildStrongValueSystem([&](FESystem& sys, const StrongValueSystem& out) {
+        FieldSpec spec{.name = "w", .space = out.space, .components = 1};
+        spec.source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData;
+        w = sys.addField(spec);
+        return FormExpr::discreteField(w, *out.space, "w") * FormExpr::constant(2.0) + t();
+    });
+    s.system->setup();
+    EXPECT_TRUE(s.system->hasTimeDependentConstraints());
+
+    // Before the coefficients are set the value reads zeros.
+    const GlobalIndex left_vertices[] = {0, 3};
+    for (const auto vertex : left_vertices) {
+        EXPECT_EQ(s.system->constraints().getInhomogeneity(vertexDof(*s.system, s.u, vertex)), 0.0);
+    }
+
+    const auto n_w = static_cast<std::size_t>(s.system->fieldDofHandler(w).getNumDofs());
+    std::vector<Real> coefficients(n_w);
+    for (std::size_t i = 0; i < n_w; ++i) {
+        coefficients[i] = 10.0 + 1.5 * static_cast<Real>(i);
+    }
+    s.system->setPrescribedFieldCoefficients(w, coefficients);
+    s.system->updateConstraints(/*time=*/1.5, /*dt=*/0.1);
+    for (const auto vertex : left_vertices) {
+        const auto w_dof = static_cast<std::size_t>(vertexDof(*s.system, w, vertex, /*field_local=*/true));
+        EXPECT_EQ(s.system->constraints().getInhomogeneity(vertexDof(*s.system, s.u, vertex)),
+                  coefficients[w_dof] * 2.0 + 1.5);
+    }
+}
+
+TEST(StrongDirichletConstraint, ValueRefusesUnknownsUndeclaredParametersAndForeignElements)
+{
+    // An unknown, as a state symbol: refused when the constraint is built.
+    EXPECT_THROW((void)buildStrongValueSystem([](FESystem&, const StrongValueSystem& out) {
+                     return svmp::FE::forms::StateField(out.u, *out.space, "u");
+                 }),
+                 std::invalid_argument);
+
+    // An unknown read as a discrete field: refused at setup.
+    auto unknown = buildStrongValueSystem([](FESystem&, const StrongValueSystem& out) {
+        return FormExpr::discreteField(out.u, *out.space, "u");
+    });
+    EXPECT_THROW(unknown.system->setup(), svmp::FE::InvalidArgumentException);
+
+    // A parameter that is not a time function of the system.
+    auto undeclared = buildStrongValueSystem([](FESystem&, const StrongValueSystem&) {
+        return FormExpr::parameter("Q");
+    });
+    EXPECT_THROW(undeclared.system->setup(), svmp::FE::InvalidArgumentException);
+
+    // A prescribed field of another order.
+    auto foreign = buildStrongValueSystem([](FESystem& sys, const StrongValueSystem&) {
+        auto quadratic = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/2);
+        FieldSpec spec{.name = "w", .space = quadratic, .components = 1};
+        spec.source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData;
+        const auto w = sys.addField(spec);
+        return FormExpr::discreteField(w, *quadratic, "w");
+    });
+    EXPECT_THROW(foreign.system->setup(), svmp::FE::InvalidArgumentException);
 }

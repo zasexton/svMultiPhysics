@@ -27,6 +27,7 @@ void ParameterRegistry::clear()
 {
     specs_.clear();
     by_key_.clear();
+    time_functions_.clear();
     slot_cache_valid_ = false;
     slot_keys_.clear();
     key_to_slot_.clear();
@@ -141,6 +142,21 @@ void ParameterRegistry::addAll(const std::vector<params::Spec>& specs, std::stri
     }
 }
 
+void ParameterRegistry::addTimeFunction(std::string key, std::function<Real(Real)> f, std::string source)
+{
+    FE_THROW_IF(!f, InvalidArgumentException,
+                "ParameterRegistry::addTimeFunction: empty function for '" + key + "'");
+    add(params::Spec{.key = key, .type = params::ValueType::Real, .required = true}, std::move(source));
+    time_functions_[std::move(key)] = std::move(f);
+}
+
+std::optional<Real> ParameterRegistry::timeFunctionValue(std::string_view key, const SystemStateView& state) const
+{
+    const auto it = time_functions_.find(std::string(key));
+    if (it == time_functions_.end()) return std::nullopt;
+    return it->second(static_cast<Real>(state.time));
+}
+
 void ParameterRegistry::validate(const SystemStateView& state) const
 {
     for (const auto& spec : specs_) {
@@ -159,6 +175,7 @@ void ParameterRegistry::validate(const SystemStateView& state) const
         }
 
         if (!v) {
+            if (time_functions_.count(spec.key) != 0) continue;
             if (spec.default_value.has_value()) continue;
             if (!spec.required) continue;
             FE_THROW(InvalidArgumentException,
@@ -189,6 +206,7 @@ ParameterRegistry::makeParamGetter(const SystemStateView& state) const
             if (const auto r = state.getRealParam(key)) return params::Value{*r};
         }
 
+        if (const auto r = timeFunctionValue(key, state)) return params::Value{*r};
         if (spec->default_value.has_value()) return *spec->default_value;
         return std::nullopt;
     };
@@ -210,6 +228,7 @@ ParameterRegistry::makeRealGetter(const SystemStateView& state) const
 
         const params::Spec* spec = find(key);
         if (spec == nullptr) return std::nullopt;
+        if (const auto r = timeFunctionValue(key, state)) return r;
         if (spec->default_value.has_value()) {
             if (auto r = params::get<Real>(*spec->default_value)) return r;
         }

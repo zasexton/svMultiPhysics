@@ -1170,6 +1170,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/SystemManifest.h
     Systems/PairedExchange.h
     Systems/ParameterRegistry.h
+    Systems/TimeSeries.h
     Systems/SearchAccess.h
     Systems/SetupStoragePlan.h
     Systems/StateAdmissibility.h
@@ -1223,6 +1224,7 @@ set(FE_SYSTEMS_SOURCES
     Systems/SystemManifest.cpp
     Systems/PairedExchange.cpp
     Systems/ParameterRegistry.cpp
+    Systems/TimeSeries.cpp
     Systems/StateAdmissibility.cpp
     Systems/SurfaceContactKernel.cpp
     Systems/SystemAssembly.cpp

@@ -252,6 +252,8 @@ Status: `implemented/public`, unless noted.
 | `meshAcceleration()` | Mesh acceleration when bound |
 | `previousMeshVelocity()`, `predictedMeshVelocity()` | Time-level mesh velocity terminals |
 | `t()`, `deltat()`, `deltat_eff()` | Time, time step, and effective time step (`FormExpr::effectiveTimeStep()`, the step implied by the `dt(.)` stencil) |
+| `systems::timeFunction(system, name, f)` | `Systems/TimeSeries.h`; declares the parameter `name` with value f(t) and returns `FormExpr::parameter(name)`. In a weak form it is a slot of the parameter registry filled with f(state time), JIT-strict and cacheable, and agrees with a callback returning f(t) g(x) to round-off; in a strong value it is f at the constraint update time, and `Q * g` gives that callback's inhomogeneities bit for bit |
+| `systems::TimeSeries`, `readTimeSeries(path, end, components)` | `Systems/TimeSeries.h`; a tabulated function of time, linear between points, clamped or periodic outside them, interpolated as the solver's temporal-values files are (bit for bit); callable, so it is the f of `timeFunction` |
 | `J()`, `Jinv()`, `detJ()` | Active geometry Jacobian, inverse, and determinant, shaped dim x dim |
 | `currentJacobian()`, `referenceJacobian()` | Frame-explicit geometry Jacobians |
 | `currentJacobianDeterminant()`, `referenceJacobianDeterminant()` | Signed determinants of the frame-explicit geometry Jacobians |
@@ -581,7 +583,7 @@ namespace `forms::bc`.
 | `bc::markerValueName`, `componentValueName`, `indexedComponentValueName` | `BoundaryConditions.h` | Coefficient naming helpers |
 | `bc::boundaryMarkerOrThrow(bc, where)` | `BoundaryConditions.h` | The `boundary_marker` of an option struct; throws, naming `where`, when it is negative |
 | `bc::hasForbiddenPrescribedValueDependency(node)` | `BoundaryConditions.h` | Whether a prescribed value reads a test/trial function, FE state, coupled or auxiliary data, material state, moving or variational geometry, a constitutive call or an integral |
-| `bc::StrongDirichlet`, `strongDirichlet(...)` | `BoundaryConditions.h` | Strong scalar/component value constraints |
+| `bc::StrongDirichlet`, `strongDirichlet(...)` | `BoundaryConditions.h` | Strong scalar/component value constraints. The value is evaluated at each constrained node (active coordinates) and may read `x`, `t`, `deltat`, time functions (`systems::timeFunction`) and prescribed fields that share the constrained field's scalar element; it may not read an unknown |
 | `bc::BoundaryData<Value>`, `bc::ComponentValues`, `bc::RobinValue` | `BoundaryConditions.h` | Typed data of one condition: a marker and a `ScalarValue`, a vector value with the components it prescribes, or a Robin pair (`alpha u - rhs`) |
 | `bc::value(data, prefix)`, `bc::values(data, dim, prefix[, style])` | `BoundaryConditions.h` | The data as forms; a callback is named after the prefix and the marker (`markerValueName`, `toVectorExpr`) |
 | `traceInequalityViolation(...)`, `applyTraceInequality(...)` | `BoundaryConditions.h` | One-sided scalar trace laws |

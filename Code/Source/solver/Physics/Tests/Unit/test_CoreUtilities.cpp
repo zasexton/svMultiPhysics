@@ -14,7 +14,9 @@
 
 #include "FE/Forms/JIT/LLVMJITBuildInfo.h"
 #include "FE/Systems/FormsInstaller.h"
+#include "FE/Systems/TimeSeries.h"
 
+#include <array>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -108,6 +110,43 @@ TEST(TemporalValues, SupportsPeriodicEndBehaviorForLegacyFlowFiles)
     EXPECT_DOUBLE_EQ(values->interpolate(1.0), 0.0);
 
     std::filesystem::remove(path);
+}
+
+TEST(TemporalValues, FETimeSeriesInterpolatesTheDeckFilesBitForBit)
+{
+    // The temporal-values files of decks under tests/cases: the inflow of the
+    // RCR pipe (33 points, periodic in the solver), the genBC inflow (200
+    // points) and the ventricle pressure (1001 points, clamped).
+    auto root = std::filesystem::path(__FILE__).parent_path();
+    for (int i = 0; i < 6; ++i) {
+        root = root.parent_path();
+    }
+    const std::array<std::filesystem::path, 3> files{
+        root / "tests" / "cases" / "fluid" / "pipe_RCR_3d" / "lumen_inlet.flow",
+        root / "tests" / "cases" / "fluid" / "pipe_RCR_genBC" / "lumen_inlet.flw",
+        root / "tests" / "cases" / "struct" / "LV_HolzapfelOgden_passive_CANN" / "endo_pressure.dat"};
+    const std::array<std::pair<TemporalEndBehavior, FE::systems::TimeSeriesEnd>, 2> ends{
+        std::pair{TemporalEndBehavior::Periodic, FE::systems::TimeSeriesEnd::Periodic},
+        std::pair{TemporalEndBehavior::Clamp, FE::systems::TimeSeriesEnd::Clamp}};
+    for (const auto& file : files) {
+        ASSERT_TRUE(std::filesystem::exists(file)) << file;
+        for (const auto& [physics_end, fe_end] : ends) {
+            const auto reference = readTemporalValuesFile(file.string(), /*num_components=*/1, physics_end);
+            const auto series = FE::systems::readTimeSeries(file.string(), fe_end);
+            ASSERT_EQ(series.times().size(), static_cast<std::size_t>(reference->num_time_points));
+            for (int i = 0; i < reference->num_time_points; ++i) {
+                const double ti = reference->t[static_cast<std::size_t>(i)];
+                EXPECT_EQ(series(ti), reference->interpolate(ti)) << file << " t=" << ti;
+            }
+            // Before, inside and after the table, over three periods, off the table times.
+            const double t0 = reference->firstTime();
+            const double span = reference->period();
+            for (int k = -97; k <= 3 * 97; ++k) {
+                const double t = t0 + span * (static_cast<double>(k) + 0.371) / 97.0;
+                EXPECT_EQ(series(t), reference->interpolate(t)) << file << " t=" << t;
+            }
+        }
+    }
 }
 
 TEST(MarkerSet, EmptyIsAll)
