@@ -131,14 +131,28 @@ The PDE velocity extension of the level-set advection velocity
 (`LevelSetPdeVelocityExtension.h`), its known set and frozen-map revision
 (`LevelSetVelocityExtensionSeed.h`) and its wall data
 (`LevelSetVelocityExtensionWall.h`). It works on every first-order Lagrange
-cell (Triangle3, Quad4, Tetra4, Hex8, Wedge6, Pyramid5) and on meshes that mix
-them: simplices keep their constant P1 gradients, the other cells use the FE
-Lagrange element of their type, its quadrature and the isoparametric map. With
-monolithic coupling its rows enter the Jacobian through
-`LevelSetVelocityExtensionConstraintKernel`, whose sparsity couples every
-corner pair of a cell (on a quad or hex also across faces and the body). The
-algebraic wall-compatible and nearest-sample wet extensions of the application
-were retired by decisions D47 and D55.
+cell (Triangle3, Quad4, Tetra4, Hex8, Wedge6, Pyramid5), on every high-order
+Lagrange cell with at most 27 nodes (Triangle6, Quad9, Tetra10, Pyramid14,
+Wedge18, Hex27, ...) and on meshes that mix them: first-order simplices keep
+their constant P1 gradients, the other cells use the FE Lagrange element of
+their type and geometry order, its quadrature and the isoparametric map. The
+extension lives on the mesh vertices, which are the geometry nodes, so on a
+high-order cell its edge, face and interior nodes are extension vertices like
+the corners; the level-set, source and target fields must be fixed-order
+nodal Lagrange fields whose nodes are exactly those vertices (field order
+equal to the geometry order of every cell: P1 on first-order cells, P2 on
+quadratic cells), which the refresh checks with
+`FESystem::fieldDofsAtMeshVertices()`. A P2 field on first-order cells has
+edge DOFs without a mesh vertex and is rejected. The known set holds every
+node of the retained interface cells, so the extension equals the physical
+velocity on the interface for every order. With monolithic coupling its rows
+enter the Jacobian through `LevelSetVelocityExtensionConstraintKernel`, whose
+sparsity couples every node pair of a cell (on a quad or hex also across
+faces and the body). A row of a high-order node resolves to the edge, face or
+cell-interior DOFs whose node it is; like a vertex row it is emitted only by
+the owner of the node, and its dependencies resolve on that rank through the
+ghost entities. The algebraic wall-compatible and nearest-sample wet
+extensions of the application were retired by decisions D47 and D55.
 
 ## Production Transport Contract
 
