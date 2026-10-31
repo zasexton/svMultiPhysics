@@ -423,68 +423,6 @@ TEST(MixedBlockLayout, FsilsContractRejectsNativeGlobalScalarAsNodalBlock)
     EXPECT_NE(msg.find("common nodal-interleaved layout"), std::string::npos);
 }
 
-// --- TimeIntegrationDescriptor tests ---
-
-TEST(TimeIntegrationDescriptor, DefaultConstruction)
-{
-    TimeIntegrationDescriptor desc{};
-    EXPECT_TRUE(desc.fields.empty());
-    EXPECT_TRUE(desc.global_scheme.empty());
-    EXPECT_EQ(desc.maxDerivativeOrder(), 0);
-    EXPECT_EQ(desc.maxHistoryDepth(), 0);
-}
-
-TEST(TimeIntegrationDescriptor, FirstOrderSystem)
-{
-    // Heat equation: 1 field, first-order time derivative
-    TimeIntegrationDescriptor desc{};
-    desc.global_scheme = "BDF2";
-    desc.fields.push_back({FieldId(1), "temperature", 1, 2, ""});
-
-    EXPECT_EQ(desc.maxDerivativeOrder(), 1);
-    EXPECT_EQ(desc.maxHistoryDepth(), 2);
-    EXPECT_EQ(desc.fields[0].name, "temperature");
-}
-
-TEST(TimeIntegrationDescriptor, SecondOrderSystem)
-{
-    // Elastodynamics: displacement with 2nd-order time derivative
-    TimeIntegrationDescriptor desc{};
-    desc.global_scheme = "Newmark";
-    desc.fields.push_back({FieldId(1), "displacement", 2, 1, ""});
-
-    EXPECT_EQ(desc.maxDerivativeOrder(), 2);
-    EXPECT_EQ(desc.maxHistoryDepth(), 1);
-}
-
-TEST(TimeIntegrationDescriptor, MixedOrderSystem)
-{
-    // FSI-like: displacement (2nd-order) + pressure (1st-order) + temperature (1st-order)
-    TimeIntegrationDescriptor desc{};
-    desc.global_scheme = "GenAlpha";
-    desc.fields.push_back({FieldId(1), "displacement", 2, 2, ""});
-    desc.fields.push_back({FieldId(2), "pressure", 1, 1, ""});
-    desc.fields.push_back({FieldId(3), "temperature", 1, 3, "BDF2"});
-
-    EXPECT_EQ(desc.maxDerivativeOrder(), 2);
-    EXPECT_EQ(desc.maxHistoryDepth(), 3);
-
-    // Verify scheme override
-    EXPECT_TRUE(desc.fields[0].scheme_override.empty());
-    EXPECT_EQ(desc.fields[2].scheme_override, "BDF2");
-}
-
-TEST(TimeIntegrationDescriptor, SteadyState)
-{
-    // Steady-state: 0th-order derivative
-    TimeIntegrationDescriptor desc{};
-    desc.fields.push_back({FieldId(1), "velocity", 0, 1, ""});
-    desc.fields.push_back({FieldId(2), "pressure", 0, 1, ""});
-
-    EXPECT_EQ(desc.maxDerivativeOrder(), 0);
-    EXPECT_EQ(desc.maxHistoryDepth(), 1);
-}
-
 // --- SolverOptions new fields tests ---
 
 TEST(SolverOptions, BlockRoleNamesDefaultEmpty)
@@ -492,7 +430,6 @@ TEST(SolverOptions, BlockRoleNamesDefaultEmpty)
     SolverOptions opts{};
     EXPECT_TRUE(opts.block_role_names.empty());
     EXPECT_FALSE(opts.mixed_block_layout.has_value());
-    EXPECT_FALSE(opts.time_integration.has_value());
 }
 
 TEST(SolverOptions, BlockRoleNamesPopulated)
@@ -506,21 +443,6 @@ TEST(SolverOptions, BlockRoleNamesPopulated)
     EXPECT_EQ(opts.block_role_names[0].second, "velocity");
     EXPECT_EQ(opts.block_role_names[1].first, BlockRole::ConstraintField);
     EXPECT_EQ(opts.block_role_names[1].second, "pressure");
-}
-
-TEST(SolverOptions, TimeIntegrationOptional)
-{
-    SolverOptions opts{};
-    EXPECT_FALSE(opts.time_integration.has_value());
-
-    TimeIntegrationDescriptor desc{};
-    desc.global_scheme = "GenAlpha";
-    desc.fields.push_back({FieldId(1), "velocity", 1, 1, ""});
-    opts.time_integration = desc;
-
-    ASSERT_TRUE(opts.time_integration.has_value());
-    EXPECT_EQ(opts.time_integration->global_scheme, "GenAlpha");
-    EXPECT_EQ(opts.time_integration->maxDerivativeOrder(), 1);
 }
 
 TEST(SolverOptions, ResolveBlockNameForRoleUsesExplicitMappingFirst)

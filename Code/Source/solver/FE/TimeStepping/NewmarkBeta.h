@@ -37,6 +37,10 @@ public:
 
     [[nodiscard]] std::string name() const override { return "NewmarkBeta"; }
     [[nodiscard]] int maxSupportedDerivativeOrder() const noexcept override { return 2; }
+    [[nodiscard]] bool historySlotIsSolution(int one_based_slot) const noexcept override
+    {
+        return one_based_slot > 2;   // slots 1 and 2 hold the scheme constants
+    }
 
     [[nodiscard]] assembly::TimeIntegrationContext
     buildContext(int max_time_derivative_order, const systems::SystemStateView& state) const override;

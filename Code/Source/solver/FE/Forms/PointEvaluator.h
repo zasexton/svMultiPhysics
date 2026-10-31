@@ -18,7 +18,7 @@
  *
  * Supported node subset:
  * - Constant, Coefficient (spatial + time-aware), Coordinate (via component access),
- *   Time, TimeStep
+ *   Time, TimeStep, EffectiveTimeStep
  * - Scalar algebra: +, -, *, /, pow, min/max
  * - Scalar functions: abs, sign, sqrt, exp, log
  * - Comparisons + conditional (returns 1.0/0.0 for comparisons)
@@ -42,12 +42,19 @@
 
 namespace svmp {
 namespace FE {
+namespace assembly {
+struct TimeIntegrationContext;
+}
 namespace forms {
 
 struct PointEvalContext {
     std::array<Real, 3> x{0.0, 0.0, 0.0};
     Real time{0.0};
     Real dt{0.0};
+
+    /// Optional time-integration context; deltat_eff() is 1/|a0| of its dt(.)
+    /// stencil, and dt without one (assembly::effectiveTimeStep).
+    const assembly::TimeIntegrationContext* time_integration{nullptr};
 
     // Optional JIT/coupled scalar arrays (slot-indexed).
     std::span<const Real> jit_constants{};

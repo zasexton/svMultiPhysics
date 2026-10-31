@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include "Assembly/TimeIntegrationContext.h"
 #include "Forms/PointEvaluator.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/H1Space.h"
@@ -26,6 +27,23 @@ TEST(PointEvaluatorTest, EvaluatesTimeAndTimeStep)
     EXPECT_DOUBLE_EQ(evaluateScalarAt(t(), ctx), 2.5);
     EXPECT_DOUBLE_EQ(evaluateScalarAt(deltat(), ctx), 0.1);
     EXPECT_DOUBLE_EQ(evaluateScalarAt(t() + deltat(), ctx), 2.6);
+}
+
+TEST(PointEvaluatorTest, EffectiveTimeStepIsOneOverA0OfTheStencil)
+{
+    PointEvalContext ctx;
+    ctx.dt = 0.1;
+    EXPECT_DOUBLE_EQ(evaluateScalarAt(deltat_eff(), ctx), 0.1);   // no stencil: the step
+
+    // First-order generalized-alpha, rho_inf = 0.5: a0 = alpha_m / (gamma alpha_f dt) = 18.75.
+    assembly::TimeIntegrationContext time_ctx;
+    assembly::TimeDerivativeStencil dt1;
+    dt1.order = 1;
+    dt1.a = {18.75, -18.75, 0.0};
+    time_ctx.dt1 = dt1;
+    ctx.time_integration = &time_ctx;
+    EXPECT_DOUBLE_EQ(evaluateScalarAt(deltat_eff(), ctx), 1.0 / 18.75);
+    EXPECT_DOUBLE_EQ(evaluateScalarAt(deltat_eff(), ctx), assembly::effectiveTimeStep(&time_ctx, ctx.dt));
 }
 
 TEST(PointEvaluatorTest, EvaluatesSpatialAndTimeCoefficients)

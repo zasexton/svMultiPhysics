@@ -35,6 +35,9 @@ class AuxiliaryInputRegistry;
 struct SystemStateView {
     double time{0.0};
     double dt{0.0};
+    // The offset of the stage time from the start of the step in a Newton
+    // stage view (alpha_f dt for generalized-alpha), the step otherwise.  Not
+    // deltat_eff(), which is 1/|a0| of the dt(.) stencil (assembly::effectiveTimeStep).
     double effective_dt{0.0};
     double dt_prev{0.0};
 

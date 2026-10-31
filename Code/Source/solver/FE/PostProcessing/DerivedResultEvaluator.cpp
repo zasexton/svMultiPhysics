@@ -891,7 +891,7 @@ public:
         case FT::TimeStep:
             return scalar(state_.dt);
         case FT::EffectiveTimeStep:
-            return scalar(state_.effective_dt != 0.0 ? state_.effective_dt : state_.dt);
+            return scalar(assembly::effectiveTimeStep(state_.time_integration, state_.dt));
         case FT::Coordinate:
             return vector(samples_.x[q], dim_);
         case FT::Identity: {

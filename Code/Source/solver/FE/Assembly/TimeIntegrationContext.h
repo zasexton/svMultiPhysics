@@ -24,6 +24,7 @@
 
 #include "Core/Types.h"
 
+#include <cmath>
 #include <optional>
 #include <string>
 #include <vector>
@@ -141,6 +142,25 @@ struct TimeIntegrationContext {
         return dt_extra_term_weight[idx];
     }
 };
+
+/**
+ * @brief The value of `deltat_eff()`: the step implied by the `dt(.)` stencil
+ *
+ * 1/|a0|, with a0 the coefficient of the current state in `dt1`, or the
+ * physical step @p dt when there is no first-derivative stencil or a0 = 0.
+ * Assembly kernels, the JIT, the derived-result evaluator and the point
+ * evaluator all evaluate `deltat_eff()` with this rule.
+ */
+[[nodiscard]] inline Real effectiveTimeStep(const TimeIntegrationContext* ctx, Real dt) noexcept
+{
+    if (ctx != nullptr && ctx->dt1) {
+        const Real a0 = ctx->dt1->coeff(0);
+        if (a0 != 0.0) {
+            return static_cast<Real>(1.0 / std::abs(static_cast<double>(a0)));
+        }
+    }
+    return dt;
+}
 
 } // namespace assembly
 } // namespace FE

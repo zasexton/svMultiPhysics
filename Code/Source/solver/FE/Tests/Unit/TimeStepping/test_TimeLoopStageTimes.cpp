@@ -16,10 +16,13 @@
 #include "Forms/Forms.h"
 #include "Spaces/H1Space.h"
 #include "Systems/FESystem.h"
+#include "Systems/FormsInstaller.h"
 #include "Systems/TimeIntegrator.h"
 #include "Systems/TransientSystem.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 #include "Tests/Unit/TimeStepping/TimeSteppingTestHelpers.h"
+#include "TimeStepping/GeneralizedAlpha.h"
+#include "TimeStepping/NewmarkBeta.h"
 #include "TimeStepping/TimeHistory.h"
 #include "TimeStepping/TimeLoop.h"
 
@@ -28,6 +31,7 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -379,4 +383,73 @@ TEST(TimeLoopStageTimes, StageTimeStepAndEffectiveStepPerScheme)
         EXPECT_NEAR(stage->dt, dt, 1e-15);
         EXPECT_NEAR(1.0 / std::abs(stage->dt1[0]), row.effective_dt, 1e-14);
     }
+}
+
+// previousSolution(k) reads history slot k.  The first-order generalized-alpha
+// stage solve keeps the injected rate u_dot^n in slot 2, and the second-order
+// generalized-alpha and Newmark solves keep their scheme constants in slots 1
+// and 2.  A form that would read such a slot is refused at assembly, with the
+// integrator named; the other slots are accepted.
+TEST(TimeLoopStageTimes, PreviousSolutionOfAnInjectedHistorySlotIsRefused)
+{
+    namespace forms = svmp::FE::forms;
+    namespace systems = svmp::FE::systems;
+    namespace ts = svmp::FE::timestepping;
+    // The message of the refusal, empty when the residual assembles.
+    const auto assembleWith = [](int history_slot, int dt_order,
+                                 std::shared_ptr<const systems::TimeIntegrator> integrator) {
+        auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+        auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+        systems::FESystem sys(mesh);
+        const auto u_id = sys.addField(systems::FieldSpec{.name = "u", .space = space, .components = 1});
+        sys.addOperator("op");
+        const auto u = forms::FormExpr::stateField(u_id, *space, "u");
+        const auto v = forms::FormExpr::testFunction(u_id, *space, "v");
+        const auto residual =
+            ((forms::dt(u, dt_order) + u - forms::FormExpr::previousSolution(history_slot)) * v).dx();
+        (void)systems::installFormulation(sys, "op", {u_id}, residual);
+        systems::SetupInputs inputs;
+        inputs.topology_override = ts_test::singleTetraTopology();
+        sys.setup({}, inputs);
+
+        const auto n = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+        const std::vector<Real> values(n, 1.0), previous(n, 0.5), rate(n, 0.25), older(n, 0.125);
+        const std::array<std::span<const Real>, 3> history{previous, rate, older};
+        systems::SystemStateView state;
+        state.dt = 0.1;
+        state.dt_prev = 0.1;
+        state.u = values;
+        state.u_prev = previous;
+        state.u_prev2 = rate;
+        state.u_history = history;
+        systems::TransientSystem transient(sys, std::move(integrator));
+        systems::AssemblyRequest req;
+        req.op = "op";
+        req.want_vector = true;
+        svmp::FE::assembly::DenseVectorView R(static_cast<GlobalIndex>(n));
+        try {
+            (void)transient.assemble(req, state, nullptr, &R);
+        } catch (const std::exception& error) {
+            return std::string(error.what());
+        }
+        return std::string{};
+    };
+
+    const auto generalized_alpha = std::make_shared<ts::GeneralizedAlphaFirstOrderIntegrator>(
+        ts::GeneralizedAlphaFirstOrderIntegratorOptions{
+            .alpha_m = 5.0 / 6.0, .alpha_f = 2.0 / 3.0, .gamma = 2.0 / 3.0, .history_rate_order = 0});
+    EXPECT_EQ(assembleWith(1, 1, generalized_alpha), "");
+    const auto refused = assembleWith(2, 1, generalized_alpha);
+    EXPECT_NE(refused.find("previousSolution(2)"), std::string::npos) << refused;
+    EXPECT_NE(refused.find("GeneralizedAlpha(1stOrder)"), std::string::npos) << refused;
+
+    EXPECT_EQ(assembleWith(2, 1, std::make_shared<systems::BackwardDifferenceIntegrator>()), "");
+
+    const auto newmark = std::make_shared<ts::NewmarkBetaIntegrator>(ts::NewmarkBetaIntegratorOptions{});
+    const auto refused_newmark = assembleWith(1, 2, newmark);
+    EXPECT_NE(refused_newmark.find("NewmarkBeta"), std::string::npos) << refused_newmark;
+    const auto generalized_alpha_2 = std::make_shared<ts::GeneralizedAlphaSecondOrderIntegrator>(
+        ts::GeneralizedAlphaSecondOrderIntegratorOptions{.alpha_m = 0.5, .alpha_f = 0.5, .beta = 0.25, .gamma = 0.5});
+    const auto refused_alpha_2 = assembleWith(2, 2, generalized_alpha_2);
+    EXPECT_NE(refused_alpha_2.find("GeneralizedAlpha(2ndOrder)"), std::string::npos) << refused_alpha_2;
 }

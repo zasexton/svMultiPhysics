@@ -12,10 +12,43 @@
 #include "Systems/SystemsExceptions.h"
 
 #include <algorithm>
+#include <set>
+#include <string>
+#include <unordered_set>
 
 namespace svmp {
 namespace FE {
 namespace systems {
+
+namespace {
+
+/// The history slots k read by previousSolution(k) in the residuals installed
+/// on @p system, in increasing order.
+std::vector<int> previousSolutionSlots(const FESystem& system)
+{
+    std::set<int> slots;
+    std::unordered_set<const forms::FormExprNode*> visited;
+    std::vector<const forms::FormExprNode*> pending;
+    for (const auto& record : system.formulationRecords()) {
+        pending.push_back(record.residual_expr.get());
+    }
+    while (!pending.empty()) {
+        const auto* node = pending.back();
+        pending.pop_back();
+        if (node == nullptr || !visited.insert(node).second) {
+            continue;
+        }
+        if (node->type() == forms::FormExprType::PreviousSolutionRef) {
+            slots.insert(node->historyIndex().value_or(1));
+        }
+        for (const auto* child : node->children()) {
+            pending.push_back(child);
+        }
+    }
+    return {slots.begin(), slots.end()};
+}
+
+} // namespace
 
 TransientSystem::TransientSystem(FESystem& system, std::shared_ptr<const TimeIntegrator> integrator)
     : system_(system)
@@ -106,6 +139,16 @@ assembly::AssemblyResult TransientSystem::assemble(
     FE_THROW_IF(max_order > integrator().maxSupportedDerivativeOrder(),
                 NotImplementedException,
                 "TransientSystem: integrator '" + integrator().name() + "' does not support dt(·," + std::to_string(max_order) + ")");
+
+    if (!previous_solution_slots_.has_value()) {
+        previous_solution_slots_ = previousSolutionSlots(system_);
+    }
+    for (const int slot : *previous_solution_slots_) {
+        FE_THROW_IF(!integrator().historySlotIsSolution(slot), InvalidArgumentException,
+                    "TransientSystem: previousSolution(" + std::to_string(slot) + ") reads history slot " +
+                        std::to_string(slot) + ", which integrator '" + integrator().name() +
+                        "' fills with a rate or a scheme constant during the solve, not with a previous solution");
+    }
 
     ctx_ = integrator().buildContext(max_order, state);
 

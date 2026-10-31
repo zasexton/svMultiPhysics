@@ -23,6 +23,8 @@
 #include "Systems/TimeIntegrator.h"
 
 #include <memory>
+#include <optional>
+#include <vector>
 
 namespace svmp {
 namespace FE {
@@ -43,7 +45,9 @@ public:
      * 1) detects dt orders via registered kernels (system.temporalOrder()),
      * 2) validates integrator compatibility and history availability,
      * 3) builds an `assembly::TimeIntegrationContext`,
-     * 4) calls into FESystem assembly with that context attached.
+     * 4) refuses forms whose previousSolution(k) reads a history slot that the
+     *    integrator does not fill with a previous solution,
+     * 5) calls into FESystem assembly with that context attached.
      */
     assembly::AssemblyResult assemble(
         const AssemblyRequest& req,
@@ -57,6 +61,7 @@ private:
     FESystem& system_;
     std::shared_ptr<const TimeIntegrator> integrator_;
     assembly::TimeIntegrationContext ctx_{};
+    std::optional<std::vector<int>> previous_solution_slots_{};   ///< found at the first assembly
 };
 
 } // namespace systems

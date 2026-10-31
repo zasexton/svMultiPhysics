@@ -61,6 +61,18 @@ public:
     }
 
     /**
+     * @brief Whether a one-based history slot holds a previous solution during the solve.
+     *
+     * `previousSolution(k)` reads slot k.  A slot that holds an injected rate
+     * or a scheme constant does not hold u^{n+1-k}; TransientSystem refuses
+     * forms that read it.
+     */
+    [[nodiscard]] virtual bool historySlotIsSolution(int one_based_slot) const noexcept
+    {
+        return !historySlotStoresRate(one_based_slot);
+    }
+
+    /**
      * @brief Build an assembly-time context for lowering symbolic `dt(·,k)`
      *
      * @param max_time_derivative_order Maximum dt order observed in the system

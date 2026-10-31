@@ -7,6 +7,7 @@
 
 #include "Assembly/AssemblyKernel.h"
 #include "Assembly/StandardAssembler.h"
+#include "Assembly/TimeIntegrationContext.h"
 #include "Core/FEException.h"
 #include "Dofs/EntityDofMap.h"
 #include "Forms/FormExpr.h"
@@ -23,6 +24,7 @@
 
 #include <memory>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -360,6 +362,51 @@ TEST(FESystemDerivedResults, EvaluatesCellConstantExpression)
     ASSERT_NE(data, nullptr);
     ASSERT_EQ(mesh->local_mesh().field_entity_count(handle), 1u);
     EXPECT_NEAR(data[0], 2.5, 1e-12);
+}
+
+// deltat_eff() is 1/|a0| of the stencil in both evaluation paths, the
+// expression evaluator (cell centroid) and the assembly kernels (cell
+// average); the stage offset SystemStateView::effective_dt (alpha_f dt in a
+// generalized-alpha stage view) is a different quantity.
+TEST(FESystemDerivedResults, EffectiveTimeStepIsOneOverA0OfTheStencil)
+{
+    auto mesh = buildSingleQuadMesh();
+    auto space = quadH1Space();
+    FESystem system(mesh);
+    const auto pressure = system.addField(FieldSpec{.name = "Pressure", .space = space, .components = 1});
+    system.addOperator("mass");
+    system.addCellKernel("mass", pressure, std::make_shared<svmp::FE::assembly::MassKernel>(1.0));
+    system.setup();
+    for (const auto& [name, policy] : {std::pair{"effective_step_centroid", DerivedResultPolicy::CellCentroid},
+                                       std::pair{"effective_step_average", DerivedResultPolicy::CellAverage}}) {
+        system.addDerivedResult(DerivedResultBuilder(name)
+                                    .scope(DerivedResultScope::Cell)
+                                    .policy(policy)
+                                    .shape(FEQuantityShape::scalar())
+                                    .expression(svmp::FE::forms::deltat_eff())
+                                    .build());
+    }
+
+    svmp::FE::assembly::TimeIntegrationContext time_ctx;
+    svmp::FE::assembly::TimeDerivativeStencil dt1;
+    dt1.order = 1;
+    dt1.a = {18.75, -18.75, 0.0};   // first-order generalized-alpha, rho_inf = 0.5, dt = 0.1
+    time_ctx.dt1 = dt1;
+    SystemStateView state;
+    std::vector<Real> u(static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    state.u = std::span<const Real>(u.data(), u.size());
+    state.dt = 0.1;
+    state.effective_dt = 0.1 * 2.0 / 3.0;
+    state.time_integration = &time_ctx;
+
+    system.appendDerivedResultFields(mesh->local_mesh(), state);
+    for (const char* name : {"effective_step_centroid", "effective_step_average"}) {
+        SCOPED_TRACE(name);
+        const auto handle = mesh->local_mesh().field_handle(EntityKind::Volume, name);
+        const auto* data = mesh->local_mesh().field_data_as<double>(handle);
+        ASSERT_NE(data, nullptr);
+        EXPECT_NEAR(data[0], 1.0 / 18.75, 1e-15);
+    }
 }
 
 TEST(FESystemDerivedResults, EvaluatesCellCentroidVectorExpression)

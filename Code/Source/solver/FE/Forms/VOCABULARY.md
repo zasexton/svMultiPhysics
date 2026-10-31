@@ -251,7 +251,7 @@ Status: `implemented/public`, unless noted.
 | `meshVelocity()` | Mesh velocity at quadrature points |
 | `meshAcceleration()` | Mesh acceleration when bound |
 | `previousMeshVelocity()`, `predictedMeshVelocity()` | Time-level mesh velocity terminals |
-| `t()`, `deltat()`, `deltat_eff()` | Time, time step, and effective time step (`FormExpr::effectiveTimeStep()`, the step implied by the `dt(.)` stencil) |
+| `t()`, `deltat()`, `deltat_eff()` | Time, time step, and effective time step (`FormExpr::effectiveTimeStep()`, the step implied by the `dt(.)` stencil: 1/\|a0\|, or `deltat()` without a stencil, in kernels, the JIT, derived results and point evaluation alike; 0.5333 `deltat()` under first-order generalized-alpha with rho_inf = 0.5) |
 | `systems::timeFunction(system, name, f)` | `Systems/TimeSeries.h`; declares the parameter `name` with value f(t) and returns `FormExpr::parameter(name)`. In a weak form it is a slot of the parameter registry filled with f(state time), JIT-strict and cacheable, and agrees with a callback returning f(t) g(x) to round-off; in a strong value it is f at the constraint update time, and `Q * g` gives that callback's inhomogeneities bit for bit. The strong unsteady inflows of the Navier-Stokes module use it (`set_strong_unsteady_inflow` in `Physics/Options/BoundaryDataReaders.h`); weak inflows keep their callbacks |
 | `systems::TimeSeries`, `readTimeSeries(path, end, components)` | `Systems/TimeSeries.h`; a tabulated function of time, linear between points, clamped or periodic outside them, interpolated as the solver's temporal-values files are (bit for bit); callable, so it is the f of `timeFunction` |
 | `J()`, `Jinv()`, `detJ()` | Active geometry Jacobian, inverse, and determinant, shaped dim x dim |
@@ -517,7 +517,7 @@ differentiability are validated by the relevant evaluators/JIT paths.
 | `eigvec_sym(A, which)`, `A.symmetricEigenvector(which)` | Symmetric eigenvector |
 | `spectralDecomp(A)`, `A.spectralDecomposition()` | Spectral decomposition/eigenvectors-as-columns |
 | `FormExpr::symmetricEigen*DirectionalDerivative(...)`, `spectralDecompositionDirectionalDerivative(...)` | Directional derivatives for supported eigen operations |
-| `FormExpr::previousSolution(k)` | Previous solution value, `k >= 1`, of the trial field of the block being assembled (not field-bound). In a multi-field install it (and `historyWeightedSum`, `historyConvolution`) may appear only in a row that depends on no unknown but its own field, where it is that field's history; elsewhere the install is refused, naming the term |
+| `FormExpr::previousSolution(k)` | Previous solution value, `k >= 1`, of the trial field of the block being assembled (not field-bound); history slot k, refused at assembly where the integrator puts a rate or a scheme constant there (slot 2 of first-order generalized-alpha, slots 1 and 2 of second-order generalized-alpha and Newmark). In a multi-field install it (and `historyWeightedSum`, `historyConvolution`) may appear only in a row that depends on no unknown but its own field, where it is that field's history; elsewhere the install is refused, naming the term |
 | `FormExpr::historyWeightedSum(weights)` | Weighted history sum |
 | `FormExpr::historyConvolution(weights)` | History convolution helper |
 

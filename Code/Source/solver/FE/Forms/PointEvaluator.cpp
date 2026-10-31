@@ -7,6 +7,7 @@
 
 #include "Forms/PointEvaluator.h"
 
+#include "Assembly/TimeIntegrationContext.h"
 #include "Core/FEException.h"
 
 #include <algorithm>
@@ -183,8 +184,7 @@ struct DualValue {
         case FormExprType::TimeStep:
             return scalar(ctx.dt);
         case FormExprType::EffectiveTimeStep:
-            // PointEvalContext does not carry a TimeIntegrationContext; fall back to the physical step size.
-            return scalar(ctx.dt);
+            return scalar(assembly::effectiveTimeStep(ctx.time_integration, ctx.dt));
         case FormExprType::Coordinate:
             return vector(ctx.x);
         case FormExprType::Normal:
@@ -482,8 +482,7 @@ struct DualValue {
         case FormExprType::TimeStep:
             return scalar(makeDualConstant(ctx.dt, ws.alloc()));
         case FormExprType::EffectiveTimeStep:
-            // PointEvalContext does not carry a TimeIntegrationContext; fall back to the physical step size.
-            return scalar(makeDualConstant(ctx.dt, ws.alloc()));
+            return scalar(makeDualConstant(assembly::effectiveTimeStep(ctx.time_integration, ctx.dt), ws.alloc()));
         case FormExprType::Coordinate:
             return vectorDual(ctx.x);
         case FormExprType::ReferenceCoordinate:

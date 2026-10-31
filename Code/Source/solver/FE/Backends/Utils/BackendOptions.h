@@ -471,57 +471,6 @@ struct MixedBlockLayout {
     }
 };
 
-/**
- * @brief Time integration metadata for a field
- *
- * Describes how a field participates in time integration by derivative order
- * rather than physics-specific naming (displacement/velocity/acceleration).
- *
- * - First-order systems: fields have max_derivative_order = 1 (e.g., heat, Stokes)
- * - Second-order systems: fields have max_derivative_order = 2 (e.g., elastodynamics)
- * - Mixed-order systems: different fields may have different orders
- */
-struct FieldTimeMetadata {
-    FieldId field{INVALID_FIELD_ID};
-    std::string name;
-
-    /// Maximum time derivative order this field undergoes (0 = steady, 1 = first-order, 2 = second-order)
-    int max_derivative_order{0};
-
-    /// Whether this field needs time-history storage beyond the current and previous step
-    int history_depth{1};
-
-    /// Optional: time integration scheme override for this field (empty = use global scheme)
-    std::string scheme_override{};
-};
-
-/**
- * @brief Time integration descriptor for a multi-field system
- *
- * Groups per-field time metadata so the time integrator layer can allocate
- * scheme-specific state storage without physics-specific naming.
- */
-struct TimeIntegrationDescriptor {
-    std::vector<FieldTimeMetadata> fields{};
-
-    /// Global time integration scheme (e.g., "BDF2", "Newmark", "GenAlpha")
-    std::string global_scheme{};
-
-    /// Maximum derivative order across all fields
-    [[nodiscard]] int maxDerivativeOrder() const noexcept {
-        int mx = 0;
-        for (const auto& f : fields) mx = std::max(mx, f.max_derivative_order);
-        return mx;
-    }
-
-    /// Maximum history depth across all fields
-    [[nodiscard]] int maxHistoryDepth() const noexcept {
-        int mx = 0;
-        for (const auto& f : fields) mx = std::max(mx, f.history_depth);
-        return mx;
-    }
-};
-
 struct SolverOptions {
     SolverMethod method{SolverMethod::Direct};
     PreconditionerType preconditioner{PreconditionerType::None};
@@ -598,9 +547,6 @@ struct SolverOptions {
 
         return {};
     }
-
-    /// Optional time integration descriptor for multi-field systems.
-    std::optional<TimeIntegrationDescriptor> time_integration{};
 
     // Backend-specific pass-through (optional).
     // PETSc: used with KSPSetOptionsPrefix()/KSPSetFromOptions().

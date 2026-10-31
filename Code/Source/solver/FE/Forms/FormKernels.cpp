@@ -1728,13 +1728,7 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
 	            return out;
 	        }
 	        case FormExprType::EffectiveTimeStep: {
-	            Real dt_eff = ctx.timeStep();
-	            if (const auto* time_ctx = ctx.timeIntegrationContext(); time_ctx && time_ctx->dt1) {
-	                const Real a0 = time_ctx->dt1->coeff(0);
-	                if (a0 != 0.0) {
-	                    dt_eff = static_cast<Real>(1.0 / std::abs(static_cast<double>(a0)));
-	                }
-	            }
+	            const Real dt_eff = assembly::effectiveTimeStep(ctx.timeIntegrationContext(), ctx.timeStep());
 	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
 	            out.value.s = makeScalarConstant<Scalar>(dt_eff, env);
 	            if (out.has_grad) {
@@ -5330,13 +5324,7 @@ EvalValue<Real> evalRealDispatchEffectiveTimeStep(const FormExprNode&,
                                                   LocalIndex)
 {
     const auto& ctx = ctxForSide(env.minus, env.plus, side);
-    Real dt_eff = ctx.timeStep();
-    if (const auto* time_ctx = ctx.timeIntegrationContext(); time_ctx && time_ctx->dt1) {
-        const Real a0 = time_ctx->dt1->coeff(0);
-        if (a0 != 0.0) {
-            dt_eff = static_cast<Real>(1.0 / std::abs(static_cast<double>(a0)));
-        }
-    }
+    const Real dt_eff = assembly::effectiveTimeStep(ctx.timeIntegrationContext(), ctx.timeStep());
     return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, dt_eff};
 }
 
@@ -5738,13 +5726,7 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
         case FormExprType::TimeStep:
             return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.timeStep()};
         case FormExprType::EffectiveTimeStep: {
-            Real dt_eff = ctx.timeStep();
-            if (const auto* time_ctx = ctx.timeIntegrationContext(); time_ctx && time_ctx->dt1) {
-                const Real a0 = time_ctx->dt1->coeff(0);
-                if (a0 != 0.0) {
-                    dt_eff = static_cast<Real>(1.0 / std::abs(static_cast<double>(a0)));
-                }
-            }
+            const Real dt_eff = assembly::effectiveTimeStep(ctx.timeIntegrationContext(), ctx.timeStep());
             return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, dt_eff};
         }
         case FormExprType::Coordinate: {
@@ -9376,13 +9358,7 @@ EvalValue<Dual> evalDualDispatchEffectiveTimeStep(const FormExprNode&,
                                                   LocalIndex)
 {
     const auto& ctx = ctxForSide(env.minus, env.plus, side);
-    Real dt_eff = ctx.timeStep();
-    if (const auto* time_ctx = ctx.timeIntegrationContext(); time_ctx && time_ctx->dt1) {
-        const Real a0 = time_ctx->dt1->coeff(0);
-        if (a0 != 0.0) {
-            dt_eff = static_cast<Real>(1.0 / std::abs(static_cast<double>(a0)));
-        }
-    }
+    const Real dt_eff = assembly::effectiveTimeStep(ctx.timeIntegrationContext(), ctx.timeStep());
     EvalValue<Dual> out;
     out.kind = EvalValue<Dual>::Kind::Scalar;
     out.s = makeDualConstant(dt_eff, env.ws->alloc());
@@ -9823,13 +9799,7 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
             return out;
         }
         case FormExprType::EffectiveTimeStep: {
-            Real dt_eff = ctx.timeStep();
-            if (const auto* time_ctx = ctx.timeIntegrationContext(); time_ctx && time_ctx->dt1) {
-                const Real a0 = time_ctx->dt1->coeff(0);
-                if (a0 != 0.0) {
-                    dt_eff = static_cast<Real>(1.0 / std::abs(static_cast<double>(a0)));
-                }
-            }
+            const Real dt_eff = assembly::effectiveTimeStep(ctx.timeIntegrationContext(), ctx.timeStep());
             EvalValue<Dual> out;
             out.kind = EvalValue<Dual>::Kind::Scalar;
             out.s = makeDualConstant(dt_eff, env.ws->alloc());
