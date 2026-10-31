@@ -223,9 +223,9 @@ bc_manager.add(forms::bc::makeTraceRobinBC(
     wet_wall, Constant(alpha), Constant(rhs)));
 ```
 
-The same selector overload is available for trace loads, trace inequalities,
-generic trace Nitsche forms, scalar Nitsche wrappers, and the generic
-Neumann/Robin helper families. The compiled term retains both markers so
+The same selector overload is available for natural and Robin conditions,
+trace loads, trace inequalities, generic trace Nitsche forms and the scalar
+Nitsche wrappers. The compiled term retains both markers so
 system setup can verify generated-domain provenance before assembly.
 An integer marker alone remains a legacy, unqualified boundary route; it is
 rejected if the current cut context exposes a generated active subset for that

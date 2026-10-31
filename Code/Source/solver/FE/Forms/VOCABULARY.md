@@ -567,15 +567,13 @@ namespace `forms::bc`.
 | `bc::requireScalarLiteral(value, message)` | `BoundaryConditions.h` | Returns the `Real` alternative or throws the caller's exact message; imposes no sign or finiteness check |
 | `numeric::isFinite`, `numeric::isNonnegative`, `numeric::isPositive`, `numeric::validate(value, predicate, message)` | `Core/NumericValidation.h` | Raw numeric checks in namespace `FE::numeric`; finiteness uses `std::isfinite`, sign comparisons alone accept positive infinity. The caller declares whether both checks are required and their diagnostic order |
 | `bc::markerValueName`, `componentValueName`, `indexedComponentValueName` | `BoundaryConditions.h` | Coefficient naming helpers |
+| `bc::boundaryMarkerOrThrow(bc, where)` | `BoundaryConditions.h` | The `boundary_marker` of an option struct; throws, naming `where`, when it is negative |
+| `bc::hasForbiddenPrescribedValueDependency(node)` | `BoundaryConditions.h` | Whether a prescribed value reads a test/trial function, FE state, coupled or auxiliary data, material state, moving or variational geometry, a constitutive call or an integral |
 | `bc::StrongDirichlet`, `strongDirichlet(...)` | `BoundaryConditions.h` | Strong scalar/component value constraints |
-| `bc::makeStrongDirichletList(...)`, `makeStrongDirichletListValue(...)` | `BoundaryConditions.h` | Declaration lists from option structs |
-| `applyNeumann(...)`, `applyNeumannValue(...)` | `BoundaryConditions.h` | Weak boundary load terms; overloads take an `ExteriorBoundaryMeasure` selector |
-| `applyRobin(...)`, `applyRobinValue(...)` | `BoundaryConditions.h` | Weak Robin terms; overloads take an `ExteriorBoundaryMeasure` selector |
 | `traceInequalityViolation(...)`, `applyTraceInequality(...)` | `BoundaryConditions.h` | One-sided scalar trace laws |
 | `applyTraceNitsche(...)` | `BoundaryConditions.h` | Boundary Nitsche scalar trace imposition with explicit consistency flux, adjoint flux, and penalty weight |
 | `applyInterfaceTraceNitsche(...)` | `BoundaryConditions.h` | Interface Nitsche scalar trace imposition |
 | `buildTraceNitschePenalty(...)` | `BoundaryConditions.h` | `gamma p^2 * penalty_weight` |
-| `applyNitscheDirichletPoisson(...)`, `applyNitscheDirichletPoissonValue(...)` | `BoundaryConditions.h` | Legacy Poisson-specific Nitsche helper; prefer explicit `applyTraceNitsche(...)` |
 | `bc::NitscheVariant`, `NitscheDirichletOptions` (`TraceNitscheOptions`) | `BoundaryConditions.h` | Symmetric/unsymmetric Nitsche options |
 | `TraceInequalitySense`, `TraceInequalityLinearization`, `TraceInequalityOptions` | `BoundaryConditions.h` | One-sided trace-law options |
 | `buildGeneratedBoundaryNitscheTraceTerms(u, v, g, form, ...)`, `symmetricGradientForm(k)`, `GeneratedBoundaryNitscheTraceFormBinding` | `BoundaryConditions.h`, `NitscheTraceBilinearForm.h` | `implemented/expert`; Nitsche terms on a generated boundary consistent with a declared bilinear form (`NitscheTraceBilinearForm::SymmetricGradient`, 2 k eps(u) : eps(v)), with an immutable binding for the installer's trace certificate, which bounds the form's flux by its energy |

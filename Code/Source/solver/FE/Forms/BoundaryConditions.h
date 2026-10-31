@@ -41,22 +41,85 @@ enum class ComponentValueNameStyle : std::uint8_t {
     Component
 };
 
-namespace detail {
-
-[[noreturn]] inline void throwInvalidMarker(std::string_view where)
-{
-    throw std::invalid_argument(std::string(where) + ": invalid boundary_marker (< 0)");
-}
-
+/// The boundary_marker member of @p bc; throws std::invalid_argument, naming
+/// @p where, when it is negative.
 template <class BC>
 [[nodiscard]] inline int boundaryMarkerOrThrow(const BC& bc, std::string_view where)
 {
     const int marker = bc.boundary_marker;
     if (marker < 0) {
-        throwInvalidMarker(where);
+        throw std::invalid_argument(std::string(where) + ": invalid boundary_marker (< 0)");
     }
     return marker;
 }
+
+/// True when @p node reads something a prescribed boundary value must not
+/// depend on: a test or trial function, FE state, coupled or auxiliary data,
+/// material state, moving or variational geometry, a constitutive call or an
+/// integral.
+[[nodiscard]] inline bool hasForbiddenPrescribedValueDependency(const FormExprNode& node)
+{
+    if (node.hasTrial() || node.hasTest()) {
+        return true;
+    }
+    switch (node.type()) {
+    case FormExprType::DiscreteField:
+    case FormExprType::StateField:
+    case FormExprType::PreviousSolutionRef:
+    case FormExprType::BoundaryFunctionalSymbol:
+    case FormExprType::BoundaryIntegralSymbol:
+    case FormExprType::BoundaryIntegralRef:
+    case FormExprType::AuxiliaryStateSymbol:
+    case FormExprType::AuxiliaryStateRef:
+    case FormExprType::AuxiliaryInputSymbol:
+    case FormExprType::AuxiliaryInputRef:
+    case FormExprType::AuxiliaryOutputSymbol:
+    case FormExprType::AuxiliaryOutputRef:
+    case FormExprType::MaterialStateOldRef:
+    case FormExprType::MaterialStateWorkRef:
+    case FormExprType::MeshDisplacement:
+    case FormExprType::MeshVelocity:
+    case FormExprType::MeshAcceleration:
+    case FormExprType::CurrentCoordinate:
+    case FormExprType::CurrentJacobian:
+    case FormExprType::CurrentJacobianDeterminant:
+    case FormExprType::CurrentNormal:
+    case FormExprType::CurrentMeanCurvature:
+    case FormExprType::CurrentMeasure:
+    case FormExprType::SurfaceJacobian:
+    case FormExprType::GeometryTrialVectorVariation:
+    case FormExprType::GeometryTrialJacobianVariation:
+    case FormExprType::MeshVelocityVariation:
+    case FormExprType::CurrentMeasureVariation:
+    case FormExprType::CurrentNormalVariation:
+    case FormExprType::SurfaceJacobianVariation:
+    case FormExprType::Constitutive:
+    case FormExprType::ConstitutiveOutput:
+    case FormExprType::CellIntegral:
+    case FormExprType::BoundaryIntegral:
+    case FormExprType::InteriorFaceIntegral:
+    case FormExprType::InterfaceIntegral:
+    case FormExprType::CutVolumeIntegral:
+    case FormExprType::GlobalIntegral:
+        return true;
+    default:
+        break;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child != nullptr &&
+            hasForbiddenPrescribedValueDependency(*child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+namespace detail {
+
+// The Navier-Stokes factories and option rules and the level-set transport
+// still spell these helpers through detail.
+using bc::boundaryMarkerOrThrow;
+using bc::hasForbiddenPrescribedValueDependency;
 
 [[nodiscard]] inline std::string makeValueName(std::string_view prefix,
                                               int boundary_marker,
@@ -161,64 +224,6 @@ template <class BC>
            left.topological_dimension == right.topological_dimension &&
            left.polynomial_order == right.polynomial_order &&
            left.element_type == right.element_type;
-}
-
-[[nodiscard]] inline bool hasForbiddenPrescribedValueDependency(
-    const FormExprNode& node)
-{
-    if (node.hasTrial() || node.hasTest()) {
-        return true;
-    }
-    switch (node.type()) {
-    case FormExprType::DiscreteField:
-    case FormExprType::StateField:
-    case FormExprType::PreviousSolutionRef:
-    case FormExprType::BoundaryFunctionalSymbol:
-    case FormExprType::BoundaryIntegralSymbol:
-    case FormExprType::BoundaryIntegralRef:
-    case FormExprType::AuxiliaryStateSymbol:
-    case FormExprType::AuxiliaryStateRef:
-    case FormExprType::AuxiliaryInputSymbol:
-    case FormExprType::AuxiliaryInputRef:
-    case FormExprType::AuxiliaryOutputSymbol:
-    case FormExprType::AuxiliaryOutputRef:
-    case FormExprType::MaterialStateOldRef:
-    case FormExprType::MaterialStateWorkRef:
-    case FormExprType::MeshDisplacement:
-    case FormExprType::MeshVelocity:
-    case FormExprType::MeshAcceleration:
-    case FormExprType::CurrentCoordinate:
-    case FormExprType::CurrentJacobian:
-    case FormExprType::CurrentJacobianDeterminant:
-    case FormExprType::CurrentNormal:
-    case FormExprType::CurrentMeanCurvature:
-    case FormExprType::CurrentMeasure:
-    case FormExprType::SurfaceJacobian:
-    case FormExprType::GeometryTrialVectorVariation:
-    case FormExprType::GeometryTrialJacobianVariation:
-    case FormExprType::MeshVelocityVariation:
-    case FormExprType::CurrentMeasureVariation:
-    case FormExprType::CurrentNormalVariation:
-    case FormExprType::SurfaceJacobianVariation:
-    case FormExprType::Constitutive:
-    case FormExprType::ConstitutiveOutput:
-    case FormExprType::CellIntegral:
-    case FormExprType::BoundaryIntegral:
-    case FormExprType::InteriorFaceIntegral:
-    case FormExprType::InterfaceIntegral:
-    case FormExprType::CutVolumeIntegral:
-    case FormExprType::GlobalIntegral:
-        return true;
-    default:
-        break;
-    }
-    for (const auto& child : node.childrenShared()) {
-        if (child != nullptr &&
-            hasForbiddenPrescribedValueDependency(*child)) {
-            return true;
-        }
-    }
-    return false;
 }
 
 [[nodiscard]] inline bool isCompatiblePrescribedVector(
@@ -536,245 +541,6 @@ inline StrongDirichlet strongDirichlet(FieldId field,
 }
 
 /**
- * @brief Apply scalar natural boundary data to a residual form without explicit loops
- *
- * For each BC on boundary marker Γ(m):
- *   k∇u·n = g  ⇒  adds  -∫ g v ds(m)
- *
- * Requirements on BC type:
- * - Must have an `int boundary_marker` member.
- *
- * The `fluxExpr(bc, i)` callback must return a scalar FormExpr `g` that is
- * independent of test/trial functions.
- */
-template <class NeumannBC, class FluxExprFn>
-[[nodiscard]] inline FormExpr applyNeumann(FormExpr residual,
-                                           const FormExpr& v,
-                                           std::span<const NeumannBC> bcs,
-                                           FluxExprFn&& fluxExpr)
-{
-    for (std::size_t i = 0; i < bcs.size(); ++i) {
-        const auto& bc = bcs[i];
-        const int marker = detail::boundaryMarkerOrThrow(bc, "forms::bc::applyNeumann");
-        residual = residual - (fluxExpr(bc, i) * v).ds(marker);
-    }
-    return residual;
-}
-
-/**
- * @brief Apply scalar natural boundary data on explicitly selected exterior
- * domains
- *
- * `measureExpr(bc, i)` must return an ExteriorBoundaryMeasure whose physical
- * marker matches `bc.boundary_marker`. This overload is the cut-boundary path:
- * callers can select a generated active subset without changing the flux
- * expression.
- */
-template <class NeumannBC, class FluxExprFn, class MeasureExprFn>
-[[nodiscard]] inline FormExpr applyNeumann(FormExpr residual,
-                                           const FormExpr& v,
-                                           std::span<const NeumannBC> bcs,
-                                           FluxExprFn&& fluxExpr,
-                                           MeasureExprFn&& measureExpr)
-{
-    for (std::size_t i = 0; i < bcs.size(); ++i) {
-        const auto& bc = bcs[i];
-        const int marker = detail::boundaryMarkerOrThrow(
-            bc, "forms::bc::applyNeumann");
-        const auto measure = measureExpr(bc, i);
-        if (measure.physicalBoundaryMarker() != marker) {
-            throw std::invalid_argument(
-                "forms::bc::applyNeumann: exterior-boundary measure physical marker does not match the boundary condition");
-        }
-        residual =
-            residual -
-            (fluxExpr(bc, i) * v).dExteriorBoundary(measure);
-    }
-    return residual;
-}
-
-/**
- * @brief Apply Neumann BCs where the flux is stored directly in the BC struct
- *
- * This overload avoids per-formulation boilerplate for turning common scalar
- * values (constants / spatial / time-dependent coefficients) into FormExpr.
- *
- * Requirements on BC type:
- * - Must have an `int boundary_marker` member.
- * - Must have a value member (e.g., `flux`) of a type supported by `toScalarExpr`.
- */
-template <class NeumannBC, class FluxValue>
-[[nodiscard]] inline FormExpr applyNeumannValue(FormExpr residual,
-                                                const FormExpr& v,
-                                                std::span<const NeumannBC> bcs,
-                                                FluxValue NeumannBC::*flux,
-                                                std::string_view name_prefix)
-{
-    for (std::size_t i = 0; i < bcs.size(); ++i) {
-        const auto& bc = bcs[i];
-        const int marker = detail::boundaryMarkerOrThrow(bc, "forms::bc::applyNeumannValue");
-        const auto g = toScalarExpr(bc.*flux, detail::makeValueName(name_prefix, marker, i));
-        residual = residual - (g * v).ds(marker);
-    }
-    return residual;
-}
-
-template <class NeumannBC, class FluxValue, class MeasureExprFn>
-[[nodiscard]] inline FormExpr applyNeumannValue(FormExpr residual,
-                                                const FormExpr& v,
-                                                std::span<const NeumannBC> bcs,
-                                                FluxValue NeumannBC::*flux,
-                                                std::string_view name_prefix,
-                                                MeasureExprFn&& measureExpr)
-{
-    for (std::size_t i = 0; i < bcs.size(); ++i) {
-        const auto& bc = bcs[i];
-        const int marker = detail::boundaryMarkerOrThrow(
-            bc, "forms::bc::applyNeumannValue");
-        const auto measure = measureExpr(bc, i);
-        if (measure.physicalBoundaryMarker() != marker) {
-            throw std::invalid_argument(
-                "forms::bc::applyNeumannValue: exterior-boundary measure physical marker does not match the boundary condition");
-        }
-        const auto g = toScalarExpr(
-            bc.*flux,
-            detail::makeValueName(name_prefix, marker, i));
-        residual = residual - (g * v).dExteriorBoundary(measure);
-    }
-    return residual;
-}
-
-/**
- * @brief Apply scalar Robin-style boundary data to a residual form without explicit loops
- *
- * For each BC on boundary marker Γ(m):
- *   k∇u·n + α u = r  ⇒  adds  ∫ α u v ds(m) - ∫ r v ds(m)
- *
- * Requirements on BC type:
- * - Must have an `int boundary_marker` member.
- *
- * The callbacks must return scalar FormExprs `alpha` and `rhs` that are
- * independent of test/trial functions (except for the explicit `u`/`v` usage here).
- */
-template <class RobinBC, class AlphaExprFn, class RhsExprFn>
-[[nodiscard]] inline FormExpr applyRobin(FormExpr residual,
-                                         const FormExpr& u,
-                                         const FormExpr& v,
-                                         std::span<const RobinBC> bcs,
-                                         AlphaExprFn&& alphaExpr,
-                                         RhsExprFn&& rhsExpr)
-{
-    for (std::size_t i = 0; i < bcs.size(); ++i) {
-        const auto& bc = bcs[i];
-        const int marker = detail::boundaryMarkerOrThrow(bc, "forms::bc::applyRobin");
-        const auto a = alphaExpr(bc, i);
-        const auto r = rhsExpr(bc, i);
-        residual =
-            residual + (a * u * v).ds(marker) -
-            (r * v).ds(marker);
-    }
-    return residual;
-}
-
-template <class RobinBC,
-          class AlphaExprFn,
-          class RhsExprFn,
-          class MeasureExprFn>
-[[nodiscard]] inline FormExpr applyRobin(FormExpr residual,
-                                         const FormExpr& u,
-                                         const FormExpr& v,
-                                         std::span<const RobinBC> bcs,
-                                         AlphaExprFn&& alphaExpr,
-                                         RhsExprFn&& rhsExpr,
-                                         MeasureExprFn&& measureExpr)
-{
-    for (std::size_t i = 0; i < bcs.size(); ++i) {
-        const auto& bc = bcs[i];
-        const int marker = detail::boundaryMarkerOrThrow(
-            bc, "forms::bc::applyRobin");
-        const auto measure = measureExpr(bc, i);
-        if (measure.physicalBoundaryMarker() != marker) {
-            throw std::invalid_argument(
-                "forms::bc::applyRobin: exterior-boundary measure physical marker does not match the boundary condition");
-        }
-        const auto a = alphaExpr(bc, i);
-        const auto r = rhsExpr(bc, i);
-        residual =
-            residual + (a * u * v).dExteriorBoundary(measure) -
-            (r * v).dExteriorBoundary(measure);
-    }
-    return residual;
-}
-
-/**
- * @brief Apply Robin BCs where alpha/rhs are stored directly in the BC struct
- *
- * Requirements on BC type:
- * - Must have an `int boundary_marker` member.
- * - Must have value members (e.g., `alpha`, `rhs`) of types supported by `toScalarExpr`.
- */
-template <class RobinBC, class AlphaValue, class RhsValue>
-[[nodiscard]] inline FormExpr applyRobinValue(FormExpr residual,
-                                              const FormExpr& u,
-                                              const FormExpr& v,
-                                              std::span<const RobinBC> bcs,
-                                              AlphaValue RobinBC::*alpha,
-                                              std::string_view alpha_name_prefix,
-                                              RhsValue RobinBC::*rhs,
-                                              std::string_view rhs_name_prefix)
-{
-    for (std::size_t i = 0; i < bcs.size(); ++i) {
-        const auto& bc = bcs[i];
-        const int marker = detail::boundaryMarkerOrThrow(bc, "forms::bc::applyRobinValue");
-        const auto a = toScalarExpr(bc.*alpha, detail::makeValueName(alpha_name_prefix, marker, i));
-        const auto r = toScalarExpr(bc.*rhs, detail::makeValueName(rhs_name_prefix, marker, i));
-        residual =
-            residual + (a * u * v).ds(marker) -
-            (r * v).ds(marker);
-    }
-    return residual;
-}
-
-template <class RobinBC,
-          class AlphaValue,
-          class RhsValue,
-          class MeasureExprFn>
-[[nodiscard]] inline FormExpr applyRobinValue(
-    FormExpr residual,
-    const FormExpr& u,
-    const FormExpr& v,
-    std::span<const RobinBC> bcs,
-    AlphaValue RobinBC::*alpha,
-    std::string_view alpha_name_prefix,
-    RhsValue RobinBC::*rhs,
-    std::string_view rhs_name_prefix,
-    MeasureExprFn&& measureExpr)
-{
-    for (std::size_t i = 0; i < bcs.size(); ++i) {
-        const auto& bc = bcs[i];
-        const int marker = detail::boundaryMarkerOrThrow(
-            bc, "forms::bc::applyRobinValue");
-        const auto measure = measureExpr(bc, i);
-        if (measure.physicalBoundaryMarker() != marker) {
-            throw std::invalid_argument(
-                "forms::bc::applyRobinValue: exterior-boundary measure physical marker does not match the boundary condition");
-        }
-        const auto a = toScalarExpr(
-            bc.*alpha,
-            detail::makeValueName(
-                alpha_name_prefix, marker, i));
-        const auto r = toScalarExpr(
-            bc.*rhs,
-            detail::makeValueName(
-                rhs_name_prefix, marker, i));
-        residual =
-            residual + (a * u * v).dExteriorBoundary(measure) -
-            (r * v).dExteriorBoundary(measure);
-    }
-    return residual;
-}
-
-/**
  * @brief Options for weak Dirichlet enforcement via Nitsche's method
  */
 enum class NitscheVariant {
@@ -1028,7 +794,7 @@ buildGeneratedBoundaryNitscheTraceTerms(
     const auto* prescribed_value_node =
         prescribed_value.node();
     if (prescribed_value_node == nullptr ||
-        detail::hasForbiddenPrescribedValueDependency(
+        hasForbiddenPrescribedValueDependency(
             *prescribed_value_node)) {
         throw std::invalid_argument(
             "forms::bc::buildGeneratedBoundaryNitscheTraceTerms: prescribed value must be independent of FE state, coupled data, and variational geometry");
@@ -1417,151 +1183,6 @@ struct TraceInequalityOptions {
     }
     residual = residual + (penalty * diff * tau_v).dI(interface_marker);
     return residual;
-}
-
-/**
- * @brief Legacy scalar-diffusion Nitsche helper.
- *
- * Prefer `applyTraceNitsche(...)` in new formulation code so the consistency
- * flux, adjoint flux, and penalty weight remain explicit in the form file.
- * This compatibility helper is retained for existing scalar Poisson-style
- * modules.
- *
- * Imposes (on each boundary marker Γ(m)):
- *   u = uD
- *
- * Residual contributions (symmetric variant):
- *   -∫ k (∇u·n) v ds
- *   -∫ k (∇v·n) (u-uD) ds
- *   +∫ (γ k p^2 / h) (u-uD) v ds
- *
- * with the facet-normal element size h_n = 2|K|/|F| (cell volume divided by facet area).
- *
- * The unsymmetric variant flips the sign of the second term.
- *
- * Requirements on BC type:
- * - Must have an `int boundary_marker` member.
- *
- * The `valueExpr(bc, i)` callback must return a scalar FormExpr `uD` that is
- * independent of test/trial functions.
- */
-template <class DirichletBC, class ValueExprFn>
-[[nodiscard]] inline FormExpr applyNitscheDirichletPoisson(FormExpr residual,
-                                                           const FormExpr& k,
-                                                           const FormExpr& u,
-                                                           const FormExpr& v,
-                                                           std::span<const DirichletBC> bcs,
-                                                           ValueExprFn&& valueExpr,
-                                                           const NitscheDirichletOptions& opts = {})
-{
-    if (opts.gamma <= Real(0.0)) {
-        throw std::invalid_argument("forms::bc::applyNitscheDirichletPoisson: gamma must be > 0");
-    }
-
-    const auto n = FormExpr::normal();
-    const auto h = (2.0 * FormExpr::cellVolume()) / FormExpr::facetArea();
-
-    for (std::size_t i = 0; i < bcs.size(); ++i) {
-        const auto& bc = bcs[i];
-        const int marker = detail::boundaryMarkerOrThrow(bc, "forms::bc::applyNitscheDirichletPoisson");
-        const auto uD = valueExpr(bc, i);
-        residual = applyTraceNitsche(std::move(residual),
-                                     u,
-                                     v,
-                                     marker,
-                                     uD,
-                                     k * inner(grad(u), n),
-                                     k * inner(grad(v), n),
-                                     k / h,
-                                     ScalarTraceOperator::Identity,
-                                     opts);
-    }
-    return residual;
-}
-
-/**
- * @brief Apply weak Dirichlet BCs for scalar Poisson diffusion (value stored in BC struct)
- *
- * This overload avoids per-formulation boilerplate for turning common scalar
- * values into FormExpr via `toScalarExpr`.
- *
- * Requirements on BC type:
- * - Must have an `int boundary_marker` member.
- * - Must have a value member (e.g., `value`) of a type supported by `toScalarExpr`.
- */
-template <class DirichletBC, class Value>
-[[nodiscard]] inline FormExpr applyNitscheDirichletPoissonValue(FormExpr residual,
-                                                                const FormExpr& k,
-                                                                const FormExpr& u,
-                                                                const FormExpr& v,
-                                                                std::span<const DirichletBC> bcs,
-                                                                Value DirichletBC::*value,
-                                                                std::string_view name_prefix,
-                                                                const NitscheDirichletOptions& opts = {})
-{
-    return applyNitscheDirichletPoisson(
-        std::move(residual),
-        k,
-        u,
-        v,
-        bcs,
-        [&](const DirichletBC& bc, std::size_t i) {
-            const int marker = detail::boundaryMarkerOrThrow(bc, "forms::bc::applyNitscheDirichletPoissonValue");
-            return toScalarExpr(bc.*value, detail::makeValueName(name_prefix, marker, i));
-        },
-        opts);
-}
-
-/**
- * @brief Build a `StrongDirichlet` declaration list without explicit loops in formulations
- *
- * Requirements on BC type:
- * - Must have an `int boundary_marker` member.
- *
- * The `valueExpr(bc, i)` callback must return a scalar FormExpr `uD` that is
- * independent of test/trial functions.
- */
-template <class DirichletBC, class ValueExprFn>
-[[nodiscard]] inline std::vector<StrongDirichlet> makeStrongDirichletList(
-    FieldId field,
-    std::span<const DirichletBC> bcs,
-    ValueExprFn&& valueExpr,
-    std::string symbol = "u")
-{
-    std::vector<StrongDirichlet> out;
-    out.reserve(bcs.size());
-    for (std::size_t i = 0; i < bcs.size(); ++i) {
-        const auto& bc = bcs[i];
-        const int marker = detail::boundaryMarkerOrThrow(bc, "forms::bc::makeStrongDirichletList");
-        out.push_back(strongDirichlet(field, marker, valueExpr(bc, i), symbol));
-    }
-    return out;
-}
-
-/**
- * @brief Build StrongDirichlet declarations where the value is stored directly in the BC struct
- *
- * Requirements on BC type:
- * - Must have an `int boundary_marker` member.
- * - Must have a value member (e.g., `value`) of a type supported by `toScalarExpr`.
- */
-template <class DirichletBC, class Value>
-[[nodiscard]] inline std::vector<StrongDirichlet> makeStrongDirichletListValue(
-    FieldId field,
-    std::span<const DirichletBC> bcs,
-    Value DirichletBC::*value,
-    std::string_view name_prefix,
-    std::string symbol = "u")
-{
-    std::vector<StrongDirichlet> out;
-    out.reserve(bcs.size());
-    for (std::size_t i = 0; i < bcs.size(); ++i) {
-        const auto& bc = bcs[i];
-        const int marker = detail::boundaryMarkerOrThrow(bc, "forms::bc::makeStrongDirichletListValue");
-        out.push_back(strongDirichlet(
-            field, marker, toScalarExpr(bc.*value, detail::makeValueName(name_prefix, marker, i)), symbol));
-    }
-    return out;
 }
 
 } // namespace bc

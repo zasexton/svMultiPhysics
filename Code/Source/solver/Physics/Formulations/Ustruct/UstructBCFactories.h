@@ -190,7 +190,7 @@ toDisplacementEssentialBC(const UstructOptions::DisplacementDirichletBC& bc,
                           std::string_view symbol)
 {
     const int marker =
-        FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "ustruct::Factories::toDisplacementEssentialBC");
+        FE::forms::bc::boundaryMarkerOrThrow(bc, "ustruct::Factories::toDisplacementEssentialBC");
     return FE::forms::bc::vectorComponentEssentialBC(
         bc.value, bc.active_components, dim, marker, "ustruct_dirichlet", symbol, "Ustruct displacement Dirichlet");
 }
@@ -201,7 +201,7 @@ toVelocityEssentialBC(const UstructOptions::VelocityDirichletBC& bc,
                       std::string_view symbol)
 {
     const int marker =
-        FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "ustruct::Factories::toVelocityEssentialBC");
+        FE::forms::bc::boundaryMarkerOrThrow(bc, "ustruct::Factories::toVelocityEssentialBC");
     return FE::forms::bc::vectorComponentEssentialBC(
         bc.value, bc.active_components, dim, marker, "ustruct_velocity_dirichlet", symbol, "Ustruct velocity Dirichlet");
 }
@@ -211,7 +211,7 @@ toPressureEssentialBC(const UstructOptions::PressureDirichletBC& bc,
                       std::string_view symbol)
 {
     const int marker =
-        FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "ustruct::Factories::toPressureEssentialBC");
+        FE::forms::bc::boundaryMarkerOrThrow(bc, "ustruct::Factories::toPressureEssentialBC");
     const auto value =
         FE::forms::bc::toScalarExpr(bc.value, FE::forms::bc::markerValueName("ustruct_pressure_dirichlet", marker));
     return std::make_unique<FE::forms::bc::EssentialBC>(marker, value, std::string(symbol));
@@ -222,7 +222,7 @@ toTractionBC(const UstructOptions::TractionNeumannBC& bc,
              int dim)
 {
     const int marker =
-        FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "ustruct::Factories::toTractionBC");
+        FE::forms::bc::boundaryMarkerOrThrow(bc, "ustruct::Factories::toTractionBC");
     const auto traction =
         FE::forms::FormExpr::asVector(
             FE::forms::bc::toVectorExpr(bc.traction, dim, "ustruct_traction", marker));
@@ -233,7 +233,7 @@ toTractionBC(const UstructOptions::TractionNeumannBC& bc,
 toNormalTractionBC(const UstructOptions::NormalTractionBC& bc)
 {
     const int marker =
-        FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "ustruct::Factories::toNormalTractionBC");
+        FE::forms::bc::boundaryMarkerOrThrow(bc, "ustruct::Factories::toNormalTractionBC");
     const auto traction =
         FE::forms::bc::toScalarExpr(bc.traction, FE::forms::bc::markerValueName("ustruct_normal_traction", marker));
     return std::make_unique<FE::forms::bc::NaturalBC>(
@@ -267,7 +267,7 @@ toNormalTractionBC(const UstructOptions::NormalTractionBC& bc)
     const FE::forms::FormExpr& test_displacement)
 {
     const int marker =
-        FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "ustruct::Factories::followerPressureResidual");
+        FE::forms::bc::boundaryMarkerOrThrow(bc, "ustruct::Factories::followerPressureResidual");
     const auto pressure = followerPressureExpression(
         bc, FE::forms::bc::markerValueName("ustruct_follower_pressure", marker));
     const auto nanson =

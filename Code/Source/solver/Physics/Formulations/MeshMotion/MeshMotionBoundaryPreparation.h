@@ -57,7 +57,7 @@ struct PreparedNormalConstraints {
     }
     prepared.targets.reserve(constraints.size());
     for (const auto& bc : constraints) {
-        const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(
+        const int marker = FE::forms::bc::boundaryMarkerOrThrow(
             bc, context + " normal_constraint");
         if (!prepared.markers.insert(marker).second) {
             throw std::invalid_argument(
@@ -80,7 +80,7 @@ struct PreparedNormalConstraints {
             bc, dim, context + " normal_constraint");
         const auto* target_node = target.node();
         if (target_node == nullptr || target.hasTest() ||
-            FE::forms::bc::detail::hasForbiddenPrescribedValueDependency(*target_node)) {
+            FE::forms::bc::hasForbiddenPrescribedValueDependency(*target_node)) {
             throw std::invalid_argument(
                 context + ": normal constraint target must be independent of FE state and variational geometry");
         }
@@ -118,7 +118,7 @@ pendingNormalDeclarations(
     declarations.reserve(constraints.size());
     for (std::size_t index = 0u; index < constraints.size(); ++index) {
         const auto& bc = constraints[index];
-        const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(
+        const int marker = FE::forms::bc::boundaryMarkerOrThrow(
             bc, context + " normal_constraint");
         declarations.push_back(FE::systems::MeshNormalBoundaryConstraintDeclaration{
             .mesh_displacement_field = displacement,

@@ -121,7 +121,7 @@ toVectorNaturalBC(const NaturalBC& bc,
                   std::string_view context,
                   std::string_view value_prefix = "mesh_motion_natural")
 {
-    const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(bc, context);
+    const int marker = FE::forms::bc::boundaryMarkerOrThrow(bc, context);
     auto values = FE::forms::bc::toVectorExpr(
         bc.value,
         dim,
@@ -141,7 +141,7 @@ toVectorRobinBC(const RobinBC& bc,
                 std::string_view alpha_prefix = "mesh_motion_robin_alpha",
                 std::string_view target_prefix = "mesh_motion_robin_target")
 {
-    const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(bc, context);
+    const int marker = FE::forms::bc::boundaryMarkerOrThrow(bc, context);
     const auto alpha = FE::forms::bc::toScalarExpr(
         bc.alpha,
         FE::forms::bc::markerValueName(alpha_prefix, marker));
@@ -163,7 +163,7 @@ toVectorEssentialBC(const DirichletBC& bc,
                     std::string_view field_symbol,
                     std::string_view value_prefix = "mesh_displacement")
 {
-    const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(bc, context);
+    const int marker = FE::forms::bc::boundaryMarkerOrThrow(bc, context);
     bool all_active = true;
     bool any_active = false;
     for (int d = 0; d < dim; ++d) {
@@ -210,7 +210,7 @@ effectiveNormalConstraintTarget(
     std::string_view target_prefix = "mesh_motion_normal_target",
     std::string_view time_scale_prefix = "mesh_motion_normal_time_scale")
 {
-    const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(bc, context);
+    const int marker = FE::forms::bc::boundaryMarkerOrThrow(bc, context);
     auto target = FE::forms::bc::toScalarExpr(
         bc.target,
         FE::forms::bc::markerValueName(target_prefix, marker));
@@ -254,7 +254,7 @@ toNormalConstraintBC(const NormalConstraintBC& bc,
                      std::string_view target_prefix = "mesh_motion_normal_target",
                      std::string_view time_scale_prefix = "mesh_motion_normal_time_scale")
 {
-    const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(bc, context);
+    const int marker = FE::forms::bc::boundaryMarkerOrThrow(bc, context);
     if (!isFinitePositiveScalarLiteral(bc.penalty)) {
         throw std::invalid_argument(
             std::string(context) +
@@ -282,7 +282,7 @@ toTangentialConstraintBC(const TangentialPolicyBC& bc,
                          std::string_view target_prefix = "mesh_motion_tangential_target",
                          std::string_view time_scale_prefix = "mesh_motion_tangential_time_scale")
 {
-    const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(bc, context);
+    const int marker = FE::forms::bc::boundaryMarkerOrThrow(bc, context);
     const auto penalty = FE::forms::bc::toScalarExpr(
         bc.penalty,
         FE::forms::bc::markerValueName(penalty_prefix, marker));
