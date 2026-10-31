@@ -465,13 +465,16 @@ using WideCellRecord = CellRecordOf<kMaxCellVertices>;
 constexpr std::size_t kMaxHighOrderCellVertices = 27u;
 using HighOrderCellRecord = CellRecordOf<kMaxHighOrderCellVertices>;
 
-// One gathered vertex (owned copy only).
+// One gathered vertex (owned copy only).  wall[c]: 0 free, kZeroWall fixed
+// to zero, kPrescribedWall fixed to the source value.
 struct VertexRecord {
   std::int64_t gid{0};
   std::uint8_t flags{0u};
   std::array<std::uint8_t, 3> wall{0u, 0u, 0u};
   std::array<double, 3> value{0.0, 0.0, 0.0};
 };
+constexpr std::uint8_t kZeroWall = 1u;
+constexpr std::uint8_t kPrescribedWall = 2u;
 
 // ---- factorization reuse -----------------------------------------------------
 
@@ -541,6 +544,8 @@ struct GatheredCells {
 };
 
 // This rank's exact contribution to the dry-region systems and rows.
+// prescribed_wall_masks (kWallVertexBit << c where a wall with a prescribed
+// velocity fixes component c) is empty when no wall has one.
 struct LocalSignature {
   std::vector<std::uint64_t> scalars;
   std::vector<svmp::gid_t> vertex_gids;
@@ -548,6 +553,7 @@ struct LocalSignature {
   std::vector<CellRecord> cells;
   std::vector<WideCellRecord> wide_cells;
   std::vector<HighOrderCellRecord> high_order_cells;
+  std::vector<std::uint8_t> prescribed_wall_masks;
 };
 
 template <typename T>
@@ -565,7 +571,8 @@ template <typename T>
          sameBytes(a.vertex_gids, b.vertex_gids) &&
          sameBytes(a.vertex_masks, b.vertex_masks) &&
          sameBytes(a.cells, b.cells) && sameBytes(a.wide_cells, b.wide_cells) &&
-         sameBytes(a.high_order_cells, b.high_order_cells);
+         sameBytes(a.high_order_cells, b.high_order_cells) &&
+         sameBytes(a.prescribed_wall_masks, b.prescribed_wall_masks);
 }
 
 [[nodiscard]] bool sameDoubleBits(double a, double b) noexcept
@@ -614,7 +621,9 @@ template <typename T>
          sameDoubleBits(a.max_extended_speed, b.max_extended_speed) &&
          sameDoubleBits(a.max_relative_residual, b.max_relative_residual) &&
          sameDoubleBits(a.max_wall_normal_velocity,
-                        b.max_wall_normal_velocity);
+                        b.max_wall_normal_velocity) &&
+         sameDoubleBits(a.max_prescribed_wall_speed,
+                        b.max_prescribed_wall_speed);
 }
 
 // The parallel MUMPS factorization is not reproducible bit for bit (its
@@ -648,6 +657,8 @@ constexpr double kMumpsSelfCheckTolerance = 1.0e-9;
          a.extension_cells == b.extension_cells && a.unknowns == b.unknowns &&
          a.wall_fixed == b.wall_fixed &&
          sameDoubleBits(a.max_known_speed, b.max_known_speed) &&
+         sameDoubleBits(a.max_prescribed_wall_speed,
+                        b.max_prescribed_wall_speed) &&
          std::abs(a.max_extended_speed - b.max_extended_speed) <= tolerance &&
          std::abs(a.max_wall_normal_velocity - b.max_wall_normal_velocity) <=
              tolerance;
@@ -712,6 +723,9 @@ private:
   }
   if (!signature.high_order_cells.empty()) {
     hasher.addVector(signature.high_order_cells);
+  }
+  if (!signature.prescribed_wall_masks.empty()) {
+    hasher.addVector(signature.prescribed_wall_masks);
   }
   return hasher.value();
 }
@@ -1462,7 +1476,7 @@ PdeVelocityExtensionReport extendVelocityByPde(
   if (options.enforce_wall_impermeability && walls.empty()) {
     throw std::invalid_argument(
         "PDE velocity extension wall impermeability requires at least one "
-        "strong zero-velocity wall mask");
+        "strong wall mask (zero or prescribed velocity)");
   }
 
   const auto& local_mesh = mesh.local_mesh();
@@ -1508,10 +1522,24 @@ PdeVelocityExtensionReport extendVelocityByPde(
   }
 
   // ---- wall component masks ------------------------------------------------
+  // wall_mask: the component is fixed on a wall; prescribed_mask: a wall with
+  // a prescribed velocity fixes it to the source value (it wins over a
+  // homogeneous wall at a shared vertex, where the source carries the strong
+  // value its own constraints chose).
   std::array<std::vector<std::uint8_t>, 3> wall_mask{
       std::vector<std::uint8_t>(n_vertices, 0u),
       std::vector<std::uint8_t>(n_vertices, 0u),
       std::vector<std::uint8_t>(n_vertices, 0u)};
+  std::array<std::vector<std::uint8_t>, 3> prescribed_mask;
+  const bool prescribed_walls =
+      options.enforce_wall_impermeability &&
+      std::any_of(walls.begin(), walls.end(),
+                  [](const auto& wall) { return wall.prescribed_velocity; });
+  if (prescribed_walls) {
+    for (auto& mask : prescribed_mask) {
+      mask.assign(n_vertices, 0u);
+    }
+  }
   if (options.enforce_wall_impermeability) {
     auto boundary_faces = svmp::DistributedTopology::global_boundary_faces(
         mesh, /*owned_only=*/false);
@@ -1522,7 +1550,7 @@ PdeVelocityExtensionReport extendVelocityByPde(
       if (wall.project_boundary_normal) {
         throw std::invalid_argument(
             "PDE velocity extension supports only axis-aligned strong "
-            "zero-velocity component masks, not boundary-normal projection");
+            "wall component masks, not boundary-normal projection");
       }
       bool any = false;
       for (int d = 0; d < dim; ++d) {
@@ -1558,9 +1586,8 @@ PdeVelocityExtensionReport extendVelocityByPde(
           }
           if (unconstrained2 > 1.0e-20) {
             throw std::runtime_error(
-                "PDE velocity extension received a strong zero-velocity "
-                "component mask that does not constrain the wall-normal "
-                "direction");
+                "PDE velocity extension received a strong wall component "
+                "mask that does not constrain the wall-normal direction");
           }
         }
         auto [fv, count] = local_mesh.face_vertices_span(face);
@@ -1572,6 +1599,10 @@ PdeVelocityExtensionReport extendVelocityByPde(
             if (wall.constrained_components[static_cast<std::size_t>(d)]) {
               wall_mask[static_cast<std::size_t>(d)]
                        [static_cast<std::size_t>(fv[i])] = 1u;
+              if (wall.prescribed_velocity) {
+                prescribed_mask[static_cast<std::size_t>(d)]
+                               [static_cast<std::size_t>(fv[i])] = 1u;
+              }
             }
           }
         }
@@ -1580,8 +1611,16 @@ PdeVelocityExtensionReport extendVelocityByPde(
     for (int d = 0; d < dim; ++d) {
       unionVertexMask(mesh, comm, vertex_gids,
                       wall_mask[static_cast<std::size_t>(d)]);
+      if (prescribed_walls) {
+        unionVertexMask(mesh, comm, vertex_gids,
+                        prescribed_mask[static_cast<std::size_t>(d)]);
+      }
     }
   }
+  // True when a wall with a prescribed velocity fixes component c of v.
+  const auto prescribed = [&](std::size_t c, std::size_t v) {
+    return prescribed_walls && prescribed_mask[c][v] != 0u;
+  };
 
   // ---- local records -------------------------------------------------------
   std::vector<CellRecord> local_cells;
@@ -1771,7 +1810,10 @@ PdeVelocityExtensionReport extendVelocityByPde(
   }
 
   std::vector<VertexRecord> local_vertices;
+  // Over the known vertices and the prescribed wall components of the dry
+  // vertices: the data of the extension.
   double max_known_speed = 0.0;
+  double max_prescribed_wall_speed = 0.0;
   for (std::size_t v = 0; v < n_vertices; ++v) {
     if (known_mask[v] != 0u) {
       double speed2 = 0.0;
@@ -1780,6 +1822,22 @@ PdeVelocityExtensionReport extendVelocityByPde(
         speed2 += value * value;
       }
       max_known_speed = std::max(max_known_speed, std::sqrt(speed2));
+    } else if (prescribed_walls && domain[v] != 0u) {
+      double speed2 = 0.0;
+      for (std::size_t c = 0; c < copy_components; ++c) {
+        const double value = source[v * source_components + c];
+        if (!prescribed(c, v)) {
+          continue;
+        }
+        if (!std::isfinite(value)) {
+          throw std::runtime_error(
+              "PDE velocity extension found a non-finite prescribed wall "
+              "velocity");
+        }
+        speed2 += value * value;
+      }
+      max_prescribed_wall_speed =
+          std::max(max_prescribed_wall_speed, std::sqrt(speed2));
     }
     if ((known_mask[v] == 0u && domain[v] == 0u) || !ownsVertex(mesh, comm, v)) {
       continue;
@@ -1790,7 +1848,7 @@ PdeVelocityExtensionReport extendVelocityByPde(
         (known_mask[v] != 0u ? kKnownFlag : 0u) |
         (domain[v] != 0u ? kExtensionFlag : 0u));
     for (std::size_t c = 0; c < 3u; ++c) {
-      record.wall[c] = wall_mask[c][v];
+      record.wall[c] = prescribed(c, v) ? kPrescribedWall : wall_mask[c][v];
       if (c < copy_components) {
         const double value = source[v * source_components + c];
         if (known_mask[v] != 0u && !std::isfinite(value)) {
@@ -1803,6 +1861,10 @@ PdeVelocityExtensionReport extendVelocityByPde(
     local_vertices.push_back(record);
   }
   max_known_speed = globalMax(max_known_speed, comm);
+  if (prescribed_walls) {
+    max_prescribed_wall_speed = globalMax(max_prescribed_wall_speed, comm);
+    max_known_speed = std::max(max_known_speed, max_prescribed_wall_speed);
+  }
 
   // ---- reuse of the cached systems -------------------------------------------
   // The key is this rank's exact contribution plus the mesh revisions; every
@@ -1847,6 +1909,16 @@ PdeVelocityExtensionReport extendVelocityByPde(
                     : 0u;
       }
       signature.vertex_masks[v] = bits;
+    }
+    if (prescribed_walls) {
+      signature.prescribed_wall_masks.resize(n_vertices, 0u);
+      for (std::size_t v = 0; v < n_vertices; ++v) {
+        for (std::size_t c = 0; c < 3u; ++c) {
+          signature.prescribed_wall_masks[v] |=
+              prescribed(c, v) ? static_cast<std::uint8_t>(kWallVertexBit << c)
+                               : 0u;
+        }
+      }
     }
     signature.cells = local_cells;
     signature.wide_cells = local_wide_cells;
@@ -2032,6 +2104,7 @@ PdeVelocityExtensionReport extendVelocityByPde(
         (vertex.flags & kExtensionFlag) != 0u ? 1u : 0u;
   }
   report.max_known_speed = max_known_speed;
+  report.max_prescribed_wall_speed = max_prescribed_wall_speed;
 
   // solution[i * 3 + c] for gathered vertex i.
   std::vector<double> solution(vertices.size() * 3u, 0.0);
@@ -2071,7 +2144,10 @@ PdeVelocityExtensionReport extendVelocityByPde(
       }
       if (vertices[i].wall[component] != 0u) {
         ++report.wall_fixed[component];
-        solution[i * 3u + component] = 0.0;
+        solution[i * 3u + component] =
+            vertices[i].wall[component] == kPrescribedWall
+                ? vertices[i].value[component]
+                : 0.0;
         continue;
       }
       unknown[i] = n_unknown++;
@@ -2508,7 +2584,8 @@ PdeVelocityExtensionReport extendVelocityByPde(
         svmp::FE::level_set::VelocityExtensionConstraintRow row;
         row.vertex = static_cast<svmp::FE::GlobalIndex>(v);
         row.component = static_cast<int>(c);
-        if (known_mask[v] != 0u) {
+        if (known_mask[v] != 0u ||
+            (domain[v] != 0u && c < copy_components && prescribed(c, v))) {
           if (c < copy_components) {
             row.dependencies.push_back(
                 svmp::FE::level_set::VelocityExtensionDependency{
@@ -2586,7 +2663,7 @@ PdeVelocityExtensionReport extendVelocityByPde(
       }
       extended[v * target_components + c] = value;
       speed2 += value * value;
-      if (wall_mask[c][v] != 0u) {
+      if (wall_mask[c][v] != 0u && !prescribed(c, v)) {
         max_wall_normal = std::max(max_wall_normal, std::abs(value));
       }
     }

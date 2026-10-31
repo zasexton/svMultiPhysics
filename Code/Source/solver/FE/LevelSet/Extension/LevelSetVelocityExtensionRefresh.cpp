@@ -712,11 +712,10 @@ bool refreshLevelSetVelocityExtensions(
         throw std::runtime_error(
             "[svMultiPhysics::Application] The level-set velocity "
             "extension enforces wall impermeability, but no strong "
-            "homogeneous velocity Dirichlet component masks were resolved "
-            "on the fluid walls (time- or space-varying and file-based "
-            "Dirichlet values cannot be proven homogeneous). Give the walls "
-            "strong homogeneous velocity Dirichlet conditions (no-slip, or "
-            "free-slip through Effective_direction).");
+            "velocity Dirichlet component masks were resolved on the fluid "
+            "walls. Give the walls strong velocity Dirichlet conditions: "
+            "homogeneous (no-slip, or free-slip through "
+            "Effective_direction) or with a prescribed velocity.");
       }
       for (const auto& wall : request.wall_constraints) {
         const auto label = mesh.label_from_name(wall.face_name);
@@ -728,7 +727,8 @@ bool refreshLevelSetVelocityExtensions(
         wall_constraints.push_back(WallVelocityExtensionConstraint{
             .boundary_label = label,
             .constrained_components = strongZeroVelocityComponentMask(
-                wall.effective_direction, mesh_dim)});
+                wall.effective_direction, mesh_dim),
+            .prescribed_velocity = wall.prescribed_velocity});
       }
     }
     wall_boundary_label_count = wall_constraints.size();
@@ -878,9 +878,13 @@ bool refreshLevelSetVelocityExtensions(
     max_dry_extended_speed =
         systems::collectiveMaxDouble(max_dry_extended_speed, extension_comm);
     const double velocity_scale_floor = 1.0e-12;
+    // The prescribed wall velocities are data of the extension like the wet
+    // velocities (zero without such walls).
     const double wet_to_dry_amplification =
         max_dry_extended_speed /
-        std::max(max_active_speed, velocity_scale_floor);
+        std::max(std::max(max_active_speed,
+                          pde_report.max_prescribed_wall_speed),
+                 velocity_scale_floor);
     if (algebraic_extension &&
         wet_to_dry_amplification >
             kVelocityExtensionMaxWetToDryAmplification) {

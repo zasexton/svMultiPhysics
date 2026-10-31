@@ -15,7 +15,7 @@
  *        keeps on dry wall vertices, and the largest admitted wet-to-dry
  *        speed amplification.
  *
- * Moved from Application/Core/LevelSetVelocityExtensionMap.h unchanged.
+ * Moved from Application/Core/LevelSetVelocityExtensionMap.h.
  */
 
 #include "Mesh/Core/MeshTypes.h"
@@ -28,10 +28,17 @@ namespace level_set {
 
 inline constexpr double kVelocityExtensionMaxWetToDryAmplification = 16.0;
 
+// The velocity components a strong Dirichlet condition constrains on one
+// wall.  On the dry vertices of the wall the extension keeps them as known
+// data: zero for a homogeneous condition (no penetration), and, for a wall
+// whose velocity is prescribed (any value: a moving wall, the exact velocity
+// of a manufactured solution), the source velocity, which carries the
+// prescribed value there.
 struct WallVelocityExtensionConstraint {
   svmp::label_t boundary_label{svmp::INVALID_LABEL};
   std::array<bool, 3> constrained_components{false, false, false};
   bool project_boundary_normal{false};
+  bool prescribed_velocity{false};
 };
 
 } // namespace level_set

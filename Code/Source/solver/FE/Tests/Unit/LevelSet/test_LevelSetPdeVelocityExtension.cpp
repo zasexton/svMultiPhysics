@@ -158,6 +158,43 @@ Setup makeSetup(const svmp::Mesh& mesh,
   return s;
 }
 
+// Largest residual of the algebraic rows at the extension w for the source
+// u (components values per vertex).
+double maxRowResidual(
+    const std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>& rows,
+    const std::vector<double>& w, const std::vector<double>& u,
+    std::size_t components)
+{
+  double max_residual = 0.0;
+  for (const auto& row : rows) {
+    double residual = w[components * static_cast<std::size_t>(row.vertex) +
+                        static_cast<std::size_t>(row.component)];
+    for (const auto& dep : row.dependencies) {
+      const auto index = components * static_cast<std::size_t>(dep.vertex) +
+                         static_cast<std::size_t>(dep.component);
+      const bool source =
+          dep.field ==
+          svmp::FE::level_set::VelocityExtensionDependencyField::SourceVelocity;
+      residual -= dep.coefficient * (source ? u[index] : w[index]);
+    }
+    max_residual = std::max(max_residual, std::abs(residual));
+  }
+  return max_residual;
+}
+
+// True when the row ties its own vertex and component to the source velocity
+// (w_c = u_c).
+bool isSourceRow(const svmp::FE::level_set::VelocityExtensionConstraintRow& row)
+{
+  return row.dependencies.size() == 1u &&
+         row.dependencies.front().field ==
+             svmp::FE::level_set::VelocityExtensionDependencyField::
+                 SourceVelocity &&
+         row.dependencies.front().vertex == row.vertex &&
+         row.dependencies.front().component == row.component &&
+         row.dependencies.front().coefficient == 1.0;
+}
+
 std::vector<double> run(const svmp::Mesh& mesh, const Setup& s,
                         PdeVelocityExtensionOperator op,
                         const std::vector<WallVelocityExtensionConstraint>& walls,
@@ -561,6 +598,144 @@ TEST(LevelSetPdeVelocityExtension, WallsZeroOnlyTheConstrainedComponent)
         }
       }
     }
+  }
+}
+
+// A wall whose velocity is prescribed (any value) is known data: on its dry
+// vertices the constrained components keep the source velocity, which
+// carries the prescribed value there, the other components stay free, and
+// the algebraic row ties the extension to the source.
+TEST(LevelSetPdeVelocityExtension, PrescribedWallsAreKnownData)
+{
+  const auto mesh = makeSquareTriangleMesh(8);
+  const auto s = makeSetup(
+      *mesh, [](double, double y) { return y - 0.43; },
+      [](double x, double y) {
+        return std::array<double, 2>{0.4 + x * (1 - x) + 0.2 * y, 1.0 + 0.3 * x};
+      });
+  // Side walls moving in their normal direction; the bottom wall is wet.
+  const std::vector<WallVelocityExtensionConstraint> walls{
+      {.boundary_label = kSideWall,
+       .constrained_components = {true, false, false},
+       .prescribed_velocity = true},
+      {.boundary_label = kBottomWall,
+       .constrained_components = {false, true, false},
+       .prescribed_velocity = true}};
+  for (const auto op : {PdeVelocityExtensionOperator::Harmonic,
+                        PdeVelocityExtensionOperator::LeastSquaresNormal}) {
+    SCOPED_TRACE(svmp::FE::level_set::pdeVelocityExtensionOperatorName(op));
+    std::vector<double> w;
+    std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow> rows;
+    PdeVelocityExtensionOptions options;
+    options.op = op;
+    const auto report = extendVelocityByPde(
+        *mesh, svmp::MeshComm::self(), s.phi, s.source, 2u, s.known, 2u,
+        std::span<const WallVelocityExtensionConstraint>(walls), options, w,
+        &rows);
+    EXPECT_GT(report.wall_fixed[0], 0u);
+    EXPECT_EQ(report.wall_fixed[1], 0u);
+    EXPECT_EQ(report.max_wall_normal_velocity, 0.0);
+    // u_x = 0.4 + 0.2 y on the dry side walls (y > 0.43).
+    EXPECT_GT(report.max_prescribed_wall_speed, 0.48);
+    EXPECT_GE(report.max_known_speed, report.max_prescribed_wall_speed);
+    EXPECT_LT(report.max_relative_residual, 1e-10);
+    EXPECT_LT(maxRowResidual(rows, w, s.source, 2u), 1e-11);
+    std::size_t dry_wall_vertices = 0u;
+    for (std::size_t v = 0; v < mesh->n_vertices(); ++v) {
+      const auto p = vertexPoint(*mesh, v);
+      if (s.known[v] != 0u || (p[0] > 1e-12 && p[0] < 1 - 1e-12)) {
+        continue;
+      }
+      ++dry_wall_vertices;
+      EXPECT_EQ(w[2 * v], s.source[2 * v]) << "dry side-wall vertex " << v;
+      EXPECT_TRUE(isSourceRow(rows[2 * v])) << "dry side-wall vertex " << v;
+      EXPECT_FALSE(isSourceRow(rows[2 * v + 1])) << "dry side-wall vertex " << v;
+    }
+    EXPECT_GT(dry_wall_vertices, 0u);
+  }
+}
+
+// Prescribed velocity on every outer boundary: with that Dirichlet data a
+// linear field is the exact discrete harmonic extension, as with a known
+// boundary.
+TEST(LevelSetPdeVelocityExtension, HarmonicReproducesLinearFieldWithPrescribedWalls)
+{
+  const auto mesh = makeSquareTriangleMesh(8);
+  const auto s = makeSetup(
+      *mesh, [](double, double y) { return y - 0.43; },
+      [](double x, double y) {
+        return std::array<double, 2>{0.3 + 1.7 * x - 0.4 * y,
+                                     -0.2 + 0.5 * x + 2.1 * y};
+      });
+  std::vector<WallVelocityExtensionConstraint> walls;
+  for (const auto label : {kSideWall, kBottomWall, kTopWall}) {
+    walls.push_back({.boundary_label = label,
+                     .constrained_components = {true, true, true},
+                     .prescribed_velocity = true});
+  }
+  svmp::FE::level_set::PdeVelocityExtensionReport report;
+  const auto w = run(*mesh, s, PdeVelocityExtensionOperator::Harmonic, walls,
+                     &report);
+  EXPECT_GT(report.extension_vertices, 0u);
+  EXPECT_GT(report.wall_fixed[0], 0u);
+  EXPECT_EQ(report.wall_fixed[0], report.wall_fixed[1]);
+  for (std::size_t i = 0; i < w.size(); ++i) {
+    EXPECT_NEAR(w[i], s.source[i], 1e-12) << "entry " << i;
+  }
+}
+
+// A prescribed wall velocity that is zero gives the homogeneous wall's
+// extension bit for bit; only the wall rows differ (w_c = u_c instead of
+// w_c = 0).
+TEST(LevelSetPdeVelocityExtension, ZeroPrescribedWallMatchesTheHomogeneousWall)
+{
+  const auto mesh = makeSquareTriangleMesh(8);
+  const auto s = makeSetup(
+      *mesh, [](double, double y) { return y - 0.43; },
+      [](double x, double y) {
+        return std::array<double, 2>{x * (1 - x) * (1 + y), 1.0 + 0.3 * x};
+      });
+  for (const auto op : {PdeVelocityExtensionOperator::Harmonic,
+                        PdeVelocityExtensionOperator::LeastSquaresNormal}) {
+    SCOPED_TRACE(svmp::FE::level_set::pdeVelocityExtensionOperatorName(op));
+    PdeVelocityExtensionOptions options;
+    options.op = op;
+    std::array<std::vector<double>, 2> w;
+    std::array<std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>,
+               2>
+        rows;
+    std::array<svmp::FE::level_set::PdeVelocityExtensionReport, 2> report;
+    for (const std::size_t k : {0u, 1u}) {
+      const std::vector<WallVelocityExtensionConstraint> walls{
+          {.boundary_label = kSideWall,
+           .constrained_components = {true, false, false},
+           .prescribed_velocity = k == 1u}};
+      report[k] = extendVelocityByPde(
+          *mesh, svmp::MeshComm::self(), s.phi, s.source, 2u, s.known, 2u,
+          std::span<const WallVelocityExtensionConstraint>(walls), options,
+          w[k], &rows[k]);
+    }
+    ASSERT_EQ(w[0].size(), w[1].size());
+    EXPECT_EQ(std::memcmp(w[0].data(), w[1].data(),
+                          w[0].size() * sizeof(double)),
+              0);
+    EXPECT_EQ(report[0].unknowns, report[1].unknowns);
+    EXPECT_EQ(report[0].wall_fixed, report[1].wall_fixed);
+    EXPECT_EQ(report[0].max_wall_normal_velocity, 0.0);
+    EXPECT_EQ(report[1].max_prescribed_wall_speed, 0.0);
+    ASSERT_EQ(rows[0].size(), rows[1].size());
+    std::size_t wall_rows = 0u;
+    for (std::size_t r = 0; r < rows[0].size(); ++r) {
+      if (isSourceRow(rows[1][r]) && !isSourceRow(rows[0][r])) {
+        ++wall_rows;
+        EXPECT_TRUE(rows[0][r].dependencies.empty()) << "row " << r;
+      } else {
+        EXPECT_EQ(rows[0][r].dependencies.size(),
+                  rows[1][r].dependencies.size())
+            << "row " << r;
+      }
+    }
+    EXPECT_EQ(wall_rows, report[0].wall_fixed[0]);
   }
 }
 
@@ -1359,6 +1534,65 @@ TEST(LevelSetPdeVelocityExtensionHighOrderCells, AlgebraicRowsAreSatisfiedAndWal
   }
 }
 
+// Prescribed velocity on the whole boundary of quadratic meshes: every dry
+// wall node (corner, mid-edge, face) keeps the source velocity and ties to
+// it in its row, so a harmonic quadratic field is reproduced on every
+// quadratic cell type.
+TEST(LevelSetPdeVelocityExtensionHighOrderCells, PrescribedWallNodesKeepTheSourceVelocity)
+{
+  for (const auto& [name, mesh] : everyQuadraticCellMesh()) {
+    SCOPED_TRACE(name);
+    const int dim = mesh->dim();
+    const auto s = makeCellSetup(
+        *mesh,
+        [dim](const std::array<double, 3>& p) {
+          return p[static_cast<std::size_t>(dim - 1)] -
+                 (dim == 2 ? 0.43 : 0.37);
+        },
+        [](const std::array<double, 3>& p) {
+          return std::array<double, 3>{
+              p[0] * p[0] - p[1] * p[1] + 0.3 * p[0] + 0.2 * p[2],
+              2.0 * p[0] * p[1] - 0.5 * p[1] + p[1] * p[2] + 0.2,
+              p[0] * p[0] - p[2] * p[2] + p[0] * p[1] - 0.7};
+        },
+        /*boundary_known=*/false);
+    std::vector<WallVelocityExtensionConstraint> walls;
+    for (const auto label : {kSideWall, kBottomWall, kTopWall}) {
+      walls.push_back({.boundary_label = label,
+                       .constrained_components = {true, true, true},
+                       .prescribed_velocity = true});
+    }
+    PdeVelocityExtensionOptions options;
+    options.op = PdeVelocityExtensionOperator::Harmonic;
+    std::vector<double> w;
+    std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow> rows;
+    const auto report = extendVelocityByPde(
+        *mesh, svmp::MeshComm::self(), s.phi, s.source, s.components, s.known,
+        s.components, std::span<const WallVelocityExtensionConstraint>(walls),
+        options, w, &rows);
+    EXPECT_GT(report.extension_vertices, 0u);
+    EXPECT_GT(report.wall_fixed[0], 0u);
+    EXPECT_GT(report.max_prescribed_wall_speed, 0.0);
+    EXPECT_LT(report.max_relative_residual, 1e-10);
+    EXPECT_LT(maxRowResidual(rows, w, s.source, s.components), 1e-10);
+    ASSERT_EQ(w.size(), s.source.size());
+    for (std::size_t i = 0; i < w.size(); ++i) {
+      EXPECT_NEAR(w[i], s.source[i], 1e-10) << "entry " << i;
+    }
+    // The dry wall rows are exactly the source rows of the dry vertices.
+    std::size_t dry_source_rows = 0u;
+    for (const auto& row : rows) {
+      dry_source_rows +=
+          s.known[static_cast<std::size_t>(row.vertex)] == 0u &&
+                  isSourceRow(row)
+              ? 1u
+              : 0u;
+    }
+    EXPECT_EQ(dry_source_rows,
+              report.wall_fixed[0] * static_cast<std::size_t>(dim));
+  }
+}
+
 namespace {
 
 std::shared_ptr<svmp::FE::spaces::H1Space> quadraticScalarSpace(
@@ -1455,6 +1689,117 @@ TEST(LevelSetVelocityExtensionRefresh, PrescribedP2FieldMatchesTheDirectExtensio
     for (std::size_t i = 0; i < expected.size(); ++i) {
       EXPECT_DOUBLE_EQ(refreshed[i], expected[i]) << "value " << i;
     }
+  }
+}
+
+// The refresh with walls whose velocity is prescribed, P1 on Triangle3 and
+// P2 on Quad9 and Triangle6: the source velocity of the dry wall vertices is
+// the wall data, and the result equals the direct extension with those
+// walls.  Without any wall condition the refresh still refuses.
+TEST(LevelSetVelocityExtensionRefresh, PrescribedWallVelocityIsTakenFromTheSource)
+{
+  using svmp::FE::level_set::LevelSetVelocityExtensionRefreshOptions;
+  using svmp::FE::level_set::LevelSetVelocityExtensionRequest;
+  using svmp::FE::level_set::PdeVelocityExtensionCaches;
+
+  struct Case {
+    const char* name;
+    std::shared_ptr<svmp::Mesh> mesh;
+    std::shared_ptr<svmp::FE::spaces::H1Space> scalar_space;
+  };
+  const std::vector<Case> cases{
+      {"Triangle3", makeSquareTriangleMesh(4),
+       std::make_shared<svmp::FE::spaces::H1Space>(
+           svmp::FE::ElementType::Triangle3, /*order=*/1)},
+      {"Quad9", makeQuadraticBoxMesh(svmp::CellFamily::Quad, 4, 0.03),
+       quadraticScalarSpace(svmp::CellFamily::Quad)},
+      {"Triangle6", makeQuadraticBoxMesh(svmp::CellFamily::Triangle, 4, 0.03),
+       quadraticScalarSpace(svmp::CellFamily::Triangle)}};
+  for (const auto& [name, mesh, scalar_space] : cases) {
+    SCOPED_TRACE(name);
+    mesh->local_mesh().register_label("side_walls", kSideWall);
+    // The side walls move in their normal direction: u_x = 0.6 + 0.4 y there.
+    const auto setup = makeSetup(
+        *mesh, [](double, double y) { return y - 0.41; },
+        [](double x, double y) {
+          return std::array<double, 2>{0.6 + 0.4 * y + x * (1 - x),
+                                       0.5 - 2.0 * y * y};
+        });
+    const std::vector<WallVelocityExtensionConstraint> walls{
+        {.boundary_label = kSideWall,
+         .constrained_components = {true, false, false},
+         .prescribed_velocity = true}};
+    const auto expected =
+        run(*mesh, setup, PdeVelocityExtensionOperator::Harmonic, walls);
+
+    auto vector_space =
+        std::make_shared<svmp::FE::spaces::ProductSpace>(scalar_space, 2);
+    svmp::FE::systems::FESystem system(mesh);
+    const auto prescribed = svmp::FE::systems::FieldSourceKind::PrescribedData;
+    const auto phi = system.addField(svmp::FE::systems::FieldSpec{
+        .name = "phi", .space = scalar_space, .components = 1,
+        .source_kind = prescribed});
+    const auto velocity = system.addField(svmp::FE::systems::FieldSpec{
+        .name = "Velocity", .space = vector_space, .components = 2,
+        .source_kind = prescribed});
+    const auto extension = system.addField(svmp::FE::systems::FieldSpec{
+        .name = "LevelSetAdvectionVelocity", .space = vector_space,
+        .components = 2, .source_kind = prescribed});
+    ASSERT_NO_THROW(system.setup());
+    system.setPrescribedFieldCoefficients(
+        phi, vertexCoefficients(system, phi, setup.phi, 1u));
+    system.setPrescribedFieldCoefficients(
+        velocity, vertexCoefficients(system, velocity, setup.source, 2u));
+    system.setPrescribedFieldCoefficients(
+        extension, std::vector<svmp::FE::Real>(
+                       static_cast<std::size_t>(
+                           system.fieldDofHandler(extension).getNumDofs()),
+                       0.0));
+
+    LevelSetVelocityExtensionRequest request{};
+    request.level_set_field_name = "phi";
+    request.source_velocity_field_name = "Velocity";
+    request.target_velocity_field_name = "LevelSetAdvectionVelocity";
+    request.extension_method = "pde_harmonic";
+    request.enforce_wall_impermeability = true;
+    PdeVelocityExtensionCaches caches;
+    try {
+      (void)svmp::FE::level_set::refreshLevelSetVelocityExtensions(
+          system, *mesh, svmp::FE::systems::SystemStateView{},
+          std::span<const LevelSetVelocityExtensionRequest>(&request, 1u),
+          LevelSetVelocityExtensionRefreshOptions{}, caches);
+      ADD_FAILURE() << "wall impermeability without walls accepted";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string(error.what()).find("with a prescribed velocity"),
+                std::string::npos)
+          << error.what();
+    }
+    request.wall_constraints.push_back(
+        LevelSetVelocityExtensionRequest::WallConstraint{
+            .face_name = "side_walls",
+            .effective_direction = {1, 0},
+            .prescribed_velocity = true});
+    EXPECT_TRUE(svmp::FE::level_set::refreshLevelSetVelocityExtensions(
+        system, *mesh, svmp::FE::systems::SystemStateView{},
+        std::span<const LevelSetVelocityExtensionRequest>(&request, 1u),
+        LevelSetVelocityExtensionRefreshOptions{}, caches));
+    const auto refreshed = svmp::FE::level_set::evaluateVertexField(
+        system, *mesh, extension, svmp::FE::systems::SystemStateView{}, 2u,
+        "velocity-extension prescribed-wall refresh test");
+    ASSERT_EQ(refreshed.size(), expected.size());
+    std::size_t dry_wall_vertices = 0u;
+    for (std::size_t v = 0; v < mesh->n_vertices(); ++v) {
+      EXPECT_DOUBLE_EQ(refreshed[2 * v], expected[2 * v]) << "vertex " << v;
+      EXPECT_DOUBLE_EQ(refreshed[2 * v + 1], expected[2 * v + 1])
+          << "vertex " << v;
+      const auto p = vertexPoint(*mesh, v);
+      if (setup.known[v] == 0u && (p[0] < 1e-12 || p[0] > 1 - 1e-12)) {
+        ++dry_wall_vertices;
+        EXPECT_DOUBLE_EQ(refreshed[2 * v], setup.source[2 * v])
+            << "dry side-wall vertex " << v;
+      }
+    }
+    EXPECT_GT(dry_wall_vertices, 0u);
   }
 }
 
@@ -1886,10 +2231,15 @@ TEST(LevelSetPdeVelocityExtensionCache, RefactorsWhenTheKnownSetWallsOrMeshChang
                        runCached(*mesh, base, op, walls, nullptr, {}, true, 2));
   }
 
-  // Walls: the side walls alone, then no wall condition.
+  // Walls: the side walls alone, then no wall condition, then the same
+  // masks with a prescribed velocity (same matrix, other rows and data).
   const std::vector<WallVelocityExtensionConstraint> side_only{walls.front()};
   expect_miss_matching_reference(*mesh, base, side_only, {}, "walls");
   expect_miss_matching_reference(*mesh, base, {}, {}, "no walls");
+  auto prescribed_walls = walls;
+  prescribed_walls.front().prescribed_velocity = true;
+  expect_miss_matching_reference(*mesh, base, prescribed_walls, {},
+                                 "prescribed wall velocity");
   expect_miss_matching_reference(*mesh, base, walls, {}, "walls restored");
 
   // Mesh revisions: any revision change refactors.
@@ -1910,6 +2260,41 @@ TEST(LevelSetPdeVelocityExtensionCache, RefactorsWhenTheKnownSetWallsOrMeshChang
       PdeVelocityExtensionMeshRevisions{
           .geometry = 1u, .topology = 2u, .ownership = 3u, .numbering = 4u},
       "numbering revision");
+}
+
+// A time-dependent wall velocity, as in the traveling-interface MMS: a
+// uniform flow U(t) with the exact velocity prescribed on the side and
+// bottom walls.  The wall data change from step to step but the matrix does
+// not, so the factorization is reused; the extension is U(t) everywhere and
+// equals the uncached solve bit for bit.
+TEST(LevelSetPdeVelocityExtensionCache, PrescribedWallVelocityChangesReuseTheFactorization)
+{
+  const auto mesh = makeSquareTriangleMesh(10);
+  std::vector<WallVelocityExtensionConstraint> walls;
+  for (const auto label : {kSideWall, kBottomWall}) {
+    walls.push_back({.boundary_label = label,
+                     .constrained_components = {true, true, true},
+                     .prescribed_velocity = true});
+  }
+  PdeVelocityExtensionCache cache;
+  for (const auto op : {PdeVelocityExtensionOperator::Harmonic,
+                        PdeVelocityExtensionOperator::LeastSquaresNormal}) {
+    SCOPED_TRACE(svmp::FE::level_set::pdeVelocityExtensionOperatorName(op));
+    cache.clear();
+    for (const double t : {0.0, 0.1, 0.35}) {
+      const double U = 0.1 * std::cos(2.0 * std::numbers::pi * t);
+      const auto s = makeSetup(
+          *mesh, wavyPhi,
+          [U](double, double) { return std::array<double, 2>{U, 0.0}; });
+      const auto cached = runCached(*mesh, s, op, walls, &cache);
+      EXPECT_EQ(cached.report.reused_factorization, t > 0.0);
+      expectBitwiseEqual(cached, runCached(*mesh, s, op, walls, nullptr));
+      for (std::size_t v = 0; v < mesh->n_vertices(); ++v) {
+        EXPECT_NEAR(cached.extended[2 * v], U, 1e-13) << "vertex " << v;
+        EXPECT_NEAR(cached.extended[2 * v + 1], 0.0, 1e-13) << "vertex " << v;
+      }
+    }
+  }
 }
 
 TEST(LevelSetPdeVelocityExtensionCache, NormalOperatorReusesOnlyIdenticalNormals)

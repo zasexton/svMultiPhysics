@@ -180,7 +180,17 @@ sparsity couples every node pair of a cell (on a quad or hex also across
 faces and the body). A row of a high-order node resolves to the edge, face or
 cell-interior DOFs whose node it is; like a vertex row it is emitted only by
 the owner of the node, and its dependencies resolve on that rank through the
-ghost entities. The algebraic wall-compatible and nearest-sample wet
+ghost entities. On the dry vertices of a wall the extension keeps the
+velocity components a strong Dirichlet condition constrains as known data:
+zero for a homogeneous condition (no penetration), and the source velocity
+for a wall whose velocity is prescribed with any value (a moving wall, the
+exact velocity of a manufactured solution; `prescribed_velocity` of the
+wall data). The source carries the prescribed value there, because strong
+conditions are registered before the inactive-side pins
+(`ConstraintPlan`), and the monolithic row of such a component is
+`w_c = u_c`, like a known vertex. A wall with a prescribed velocity wins
+over a homogeneous wall at a shared vertex, and its speed counts as data in
+the wet-to-dry guard. The algebraic wall-compatible and nearest-sample wet
 extensions of the application were retired by decisions D47 and D55.
 
 ## Production Transport Contract

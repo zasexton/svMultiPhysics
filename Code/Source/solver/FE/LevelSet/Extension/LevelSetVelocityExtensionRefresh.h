@@ -24,7 +24,8 @@
  *    retained interface cells, taken from the generated cut context when it
  *    is authoritative and from nodal crossings otherwise
  *    (LevelSetVelocityExtensionSeed.h);
- *  - resolves the strong zero-velocity wall masks of the request;
+ *  - resolves the strong wall masks of the request (homogeneous walls, and
+ *    walls whose prescribed velocity the source carries);
  *  - solves the PDE extension (LevelSetPdeVelocityExtension.h) and checks
  *    that it equals the source on every known interface vertex and, for the
  *    monolithic coupling, that it does not amplify the wet speeds beyond the
@@ -77,6 +78,11 @@ struct LevelSetVelocityExtensionRequest {
     // have the same all-component semantics as the production NS translator
     // for a homogeneous Dirichlet condition.
     std::vector<int> effective_direction{};
+    // The strong Dirichlet condition prescribes a velocity of any value
+    // (time- or space-varying, from a file): the extension takes the source
+    // velocity on the constrained components of the dry wall vertices
+    // instead of zero (WallVelocityExtensionConstraint).
+    bool prescribed_velocity{false};
   };
 
   std::string level_set_field_name{"level_set"};
@@ -110,9 +116,10 @@ struct LevelSetVelocityExtensionRefreshOptions {
   bool trace{false};
 };
 
-/// The velocity components a strong homogeneous Dirichlet condition with
-/// this Effective_direction constrains (all of them unless the direction
-/// selects a nonempty proper subset, as the Navier--Stokes translator does).
+/// The velocity components a strong Dirichlet condition with this
+/// Effective_direction constrains (all of them unless the direction selects
+/// a nonempty proper subset, as the Navier--Stokes translator does), for a
+/// homogeneous wall and for a wall with a prescribed velocity alike.
 [[nodiscard]] std::array<bool, 3> strongZeroVelocityComponentMask(
     std::span<const int> effective_direction,
     int dimension);

@@ -22,10 +22,12 @@
 //
 // D is the union of the cells that contain a dry vertex.  The outer boundary
 // of D carries the natural (zero-flux) condition.  Velocity components that a
-// strong homogeneous wall Dirichlet condition constrains are set to zero on
-// dry wall vertices (no penetration); the other components keep the natural
-// condition.  Components are independent because every supported wall mask is
-// axis-aligned.
+// strong wall Dirichlet condition constrains are known data on dry wall
+// vertices: zero for a homogeneous condition (no penetration), the source
+// velocity for a wall whose velocity is prescribed (any value; the source
+// carries the prescribed value there).  The other components keep the
+// natural condition.  Components are independent because every supported
+// wall mask is axis-aligned.
 //
 // Cells: every first-order Lagrange cell (Triangle3 and Quad4 in 2D; Tetra4,
 // Hex8, Wedge6 and Pyramid5 in 3D) and every high-order Lagrange cell with
@@ -156,7 +158,12 @@ struct PdeVelocityExtensionReport {
   double max_known_speed{0.0};
   double max_extended_speed{0.0};
   double max_relative_residual{0.0};
+  // Largest |w| of a component fixed by a homogeneous wall.
   double max_wall_normal_velocity{0.0};
+  // Largest speed of the prescribed wall components of the dry vertices
+  // (zero without a wall with a prescribed velocity).  max_known_speed
+  // includes it.
+  double max_prescribed_wall_speed{0.0};
   // True when the call reused the cached dry-region factorization (and rows).
   bool reused_factorization{false};
   // True when the components were factorized and solved on one rank each.
@@ -283,7 +290,8 @@ private:
 //   dry vertex:            w_{i,c} = sum_j (-A_ij / A_ii) w_{j,c}
 //                          over the vertices j sharing a dry-region cell
 //                          with i (extension dependencies),
-//   wall-constrained or outside the band:  w_c = 0.
+//   fixed by a wall with a prescribed velocity:  w_c = u_c,
+//   fixed by a homogeneous wall or outside the band:  w_c = 0.
 // Together with the physical velocity these rows determine exactly the
 // extension returned in `extended`.
 // cache (optional): reuse of the dry-region factorization and rows between

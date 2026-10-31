@@ -258,9 +258,12 @@ struct KeyedExtension {
   std::size_t local_rows{0u};
 };
 
+// prescribed_walls: the side walls prescribe their velocity (u_x =
+// sin(2) cosh(y) on the right wall) instead of a zero normal velocity.
 KeyedExtension extendQuadratic(const svmp::Mesh& mesh,
                                const svmp::MeshComm& comm,
-                               PdeVelocityExtensionOperator op)
+                               PdeVelocityExtensionOperator op,
+                               bool prescribed_walls = false)
 {
   const auto n = mesh.n_vertices();
   const auto& X = mesh.X_ref();
@@ -294,7 +297,8 @@ KeyedExtension extendQuadratic(const svmp::Mesh& mesh,
   }
   const std::vector<WallVelocityExtensionConstraint> walls{
       {.boundary_label = kPdeSideWall,
-       .constrained_components = {true, false, false}}};
+       .constrained_components = {true, false, false},
+       .prescribed_velocity = prescribed_walls}};
   PdeVelocityExtensionOptions options;
   options.op = op;
   std::vector<double> out;
@@ -388,6 +392,77 @@ TEST(LevelSetPdeVelocityExtensionMPI, TwoRankQuadraticCellsMatchSerialOnEveryVer
       EXPECT_EQ(globalSum(static_cast<int>(parallel.local_rows)),
                 static_cast<int>(reference.local_rows));
       EXPECT_GT(globalSum(local_high_order_rows), 0);
+    }
+  }
+}
+
+// Walls with a prescribed velocity on two ranks, on P1 triangles and on
+// Quad9 and Triangle6 cells: the extension on every local vertex and every
+// owner-local row equal the serial ones bit for bit, and the dry vertices of
+// the right wall keep the source velocity.
+TEST(LevelSetPdeVelocityExtensionMPI, TwoRankPrescribedWallsMatchSerial)
+{
+  int size = 1;
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  ASSERT_EQ(size, 2) << "This parity test requires exactly two ranks.";
+
+  for (const char* name : {"Triangle3", "Quad9", "Triangle6"}) {
+    SCOPED_TRACE(name);
+    const bool quads = std::string(name) == "Quad9";
+    const auto arrays = std::string(name) == "Triangle3"
+                            ? makePdeArrays()
+                            : makeQuadraticPdeArrays(quads);
+    auto distributed =
+        std::make_shared<svmp::Mesh>(svmp::MeshComm(MPI_COMM_WORLD));
+    distributed->build_from_arrays_global_and_partition(
+        2, arrays.x, arrays.offsets, arrays.connectivity, arrays.shapes,
+        svmp::PartitionHint::Cells, /*ghost_layers=*/quads ? 1 : 2,
+        {{"partition_method", "block"}});
+    labelSideWalls(*distributed);
+    auto base = std::make_shared<svmp::MeshBase>();
+    base->build_from_arrays(2, arrays.x, arrays.offsets, arrays.connectivity,
+                            arrays.shapes);
+    base->finalize();
+    auto serial = svmp::create_mesh(std::move(base));
+    labelSideWalls(*serial);
+
+    for (const auto op : {PdeVelocityExtensionOperator::Harmonic,
+                          PdeVelocityExtensionOperator::LeastSquaresNormal}) {
+      const auto reference = extendQuadratic(*serial, svmp::MeshComm::self(),
+                                             op, /*prescribed_walls=*/true);
+      const auto parallel =
+          extendQuadratic(*distributed, svmp::MeshComm(MPI_COMM_WORLD), op,
+                          /*prescribed_walls=*/true);
+      int local_failures = 0;
+      int local_right_wall = 0;
+      for (const auto& [key, value] : parallel.values) {
+        const auto found = reference.values.find(key);
+        ASSERT_NE(found, reference.values.end());
+        for (std::size_t c = 0; c < 2u; ++c) {
+          if (std::memcmp(&value[c], &found->second[c], sizeof(double)) != 0) {
+            ++local_failures;
+          }
+        }
+        const double x = static_cast<double>(key.first) / (2 * kPdeCells);
+        const double y = static_cast<double>(key.second) / (2 * kPdeCells);
+        if (key.first == 2 * kPdeCells && phiAt(x, y) > 0.2) {
+          ++local_right_wall;
+          if (value[0] != uAt(x, y)[0]) {
+            ++local_failures;
+          }
+        }
+      }
+      for (const auto& [key, dependencies] : parallel.rows) {
+        const auto found = reference.rows.find(key);
+        if (found == reference.rows.end() || found->second != dependencies) {
+          ++local_failures;
+        }
+      }
+      EXPECT_EQ(globalSum(local_failures), 0)
+          << svmp::FE::level_set::pdeVelocityExtensionOperatorName(op);
+      EXPECT_GT(globalSum(local_right_wall), 0);
+      EXPECT_EQ(globalSum(static_cast<int>(parallel.local_rows)),
+                static_cast<int>(reference.local_rows));
     }
   }
 }
