@@ -74,6 +74,25 @@ struct FormulationGroup {
     bool drop_generated_boundary_nitsche_trace_requests{false};
 };
 
+/// The fields of an install that a residual implies (inferInstallFields).
+struct InferredInstallFields {
+    std::vector<FieldId> test_fields{};         ///< the fields of the residual's test functions
+    std::vector<FieldId> extra_trial_fields{};  ///< the other unknowns the residual holds
+};
+
+/**
+ * @brief The fields of an install of @p residual on @p system
+ *
+ * The test fields are the fields of the test functions in @p residual; the
+ * extra trial fields are the other fields whose StateField the residual
+ * holds and that are unknowns of the system (in the unknown vector), so
+ * that their Jacobian columns are assembled.  Both lists are in
+ * registration order, the DOF order.  Throws InvalidArgumentException for a
+ * test function without a field (FormExpr::testFunction(space)) and for a
+ * residual without a test function.
+ */
+[[nodiscard]] InferredInstallFields inferInstallFields(const FESystem& system, const forms::FormExpr& residual);
+
 /// One part of a residual-work channel: the form of one test field.
 struct WorkChannelPart {
     FieldId test_field{INVALID_FIELD_ID};
@@ -147,6 +166,17 @@ public:
     /// active boundaries the residual integrates over.
     CoupledResidualKernels install(std::span<const FieldId> fields, const forms::FormExpr& residual);
     CoupledResidualKernels install(std::initializer_list<FieldId> fields, const forms::FormExpr& residual);
+
+    /**
+     * @brief installFormulation of @p residual with the fields it implies
+     *
+     * install(inferInstallFields(...).test_fields, residual) with a copy of
+     * options() whose extra trial fields gain, when missing and in order,
+     * the other unknowns the residual holds, after registering the
+     * generated active boundaries the residual integrates over.  A residual
+     * written in the unknowns' symbols needs no field list.
+     */
+    CoupledResidualKernels residual(const forms::FormExpr& residual);
 
     /// installFormulation with groupOptions(@p group), after registering the
     /// generated active boundaries the residual integrates over.

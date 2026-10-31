@@ -21,6 +21,48 @@ namespace svmp {
 namespace FE {
 namespace systems {
 
+InferredInstallFields inferInstallFields(const FESystem& system, const forms::FormExpr& residual)
+{
+    FE_THROW_IF(!residual.isValid(), InvalidArgumentException, "FE::systems::inferInstallFields: invalid residual");
+    std::vector<FieldId> tests;
+    std::vector<FieldId> states;
+    const auto visit = [&](const auto& self, const forms::FormExprNode& node) -> void {
+        if (node.type() == forms::FormExprType::TestFunction) {
+            const auto field = node.fieldId();
+            FE_THROW_IF(!field.has_value(), InvalidArgumentException,
+                        "FE::systems::inferInstallFields: the test function '" + node.toString() +
+                            "' names no field; state it with a field (FieldBinding::unknown)");
+            tests.push_back(*field);
+        } else if (node.type() == forms::FormExprType::StateField) {
+            const auto field = node.fieldId();
+            if (field && *field != CURRENT_SOLUTION_FIELD_ID && system.fieldParticipatesInUnknownVector(*field)) {
+                states.push_back(*field);
+            }
+        }
+        for (const auto& child : node.childrenShared()) {
+            if (child) {
+                self(self, *child);
+            }
+        }
+    };
+    visit(visit, *residual.node());
+    FE_THROW_IF(tests.empty(), InvalidArgumentException,
+                "FE::systems::inferInstallFields: the residual has no test function");
+    const auto ordered = [](std::vector<FieldId> fields) {
+        std::sort(fields.begin(), fields.end());
+        fields.erase(std::unique(fields.begin(), fields.end()), fields.end());
+        return fields;
+    };
+    InferredInstallFields out;
+    out.test_fields = ordered(std::move(tests));
+    for (const auto field : ordered(std::move(states))) {
+        if (!std::binary_search(out.test_fields.begin(), out.test_fields.end(), field)) {
+            out.extra_trial_fields.push_back(field);
+        }
+    }
+    return out;
+}
+
 FormulationBuilder::FormulationBuilder(FESystem& system,
                                        OperatorTag operator_tag,
                                        FormInstallOptions base)
@@ -169,6 +211,20 @@ CoupledResidualKernels FormulationBuilder::install(std::span<const FieldId> fiel
 {
     registerGeneratedBoundaries(residual);
     return installFormulation(*system_, operator_tag_, fields, residual, options_);
+}
+
+CoupledResidualKernels FormulationBuilder::residual(const forms::FormExpr& residual)
+{
+    const auto inferred = inferInstallFields(*system_, residual);
+    registerGeneratedBoundaries(residual);
+    auto options = options_;
+    for (const auto field : inferred.extra_trial_fields) {
+        if (std::find(options.extra_trial_fields.begin(), options.extra_trial_fields.end(), field) ==
+            options.extra_trial_fields.end()) {
+            options.extra_trial_fields.push_back(field);
+        }
+    }
+    return installFormulation(*system_, operator_tag_, inferred.test_fields, residual, options);
 }
 
 CoupledResidualKernels FormulationBuilder::install(std::initializer_list<FieldId> fields,

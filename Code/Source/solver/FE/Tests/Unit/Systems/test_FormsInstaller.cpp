@@ -10,6 +10,7 @@
 #include "Systems/FESystem.h"
 #include "Systems/DiagnosticRegistry.h"
 #include "Systems/FormulationBuilder.h"
+#include "Systems/FieldBinding.h"
 #include "Systems/ALEBinding.h"
 #include "Systems/FunctionalForms.h"
 #include "PostProcessing/ScalarHistory.h"
@@ -1843,6 +1844,65 @@ TEST(FormulationBuilder, DeclaresQuantitiesWithoutInstallingThem)
     rejects("empty", forms::FormExpr{}, "sum of integrals");
     rejects("facet_measure", (half * u * u).dx() + half.dS(), "interior-facet integral (dS)");
     EXPECT_EQ(systems::functionalForms(sys).size(), 3u);
+}
+
+TEST(FormulationBuilder, AResidualInstallsWithTheFieldsItImplies)
+{
+    // residual(R) installs what install(fields, R) with extra trial fields
+    // installs: the test fields of R, then the other unknowns R holds.
+    namespace systems = svmp::FE::systems;
+    namespace forms = svmp::FE::forms;
+    const auto build = [](bool inferred) {
+        auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+        auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+        auto sys = std::make_unique<systems::FESystem>(mesh);
+        systems::FieldBinding fields(*sys, "test");
+        const auto c = fields.unknown("c", space);       // read by R, not a test field of it
+        const auto u = fields.unknown("u", space);
+        const auto p = fields.unknown("p", space);
+        const auto data = fields.prescribedSymbol(
+            systems::FieldSpec{.name = "data", .space = space, .source_kind = systems::FieldSourceKind::PrescribedData},
+            /*auto_register=*/true, "data", "data");
+        const auto R = (c.state * u.state * u.test + inner(grad(u.state), grad(u.test)) + data.value * p.test +
+                        u.state * p.test).dx();
+        systems::FormulationBuilder F(*sys, "op", systems::FormInstallOptions{});
+        if (inferred) {
+            const auto fields_of_R = systems::inferInstallFields(*sys, R);
+            EXPECT_EQ(fields_of_R.test_fields, (std::vector<svmp::FE::FieldId>{u.id, p.id}));
+            EXPECT_EQ(fields_of_R.extra_trial_fields, std::vector<svmp::FE::FieldId>{c.id});
+            (void)F.residual(R);
+        } else {
+            F.options().extra_trial_fields.push_back(c.id);
+            (void)F.install({u.id, p.id}, R);
+        }
+        return systems::kernelManifestLines(*sys);
+    };
+    const auto inferred = build(true);
+    const auto explicit_fields = build(false);
+    EXPECT_FALSE(inferred.empty());
+    EXPECT_EQ(inferred, explicit_fields);
+}
+
+TEST(FormulationBuilder, InferenceRefusesTestFunctionsWithoutAField)
+{
+    namespace systems = svmp::FE::systems;
+    namespace forms = svmp::FE::forms;
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+    systems::FESystem sys(mesh);
+    systems::FieldBinding fields(sys, "test");
+    const auto u = fields.unknown("u", space);
+    EXPECT_EQ(sys.fieldRecord(u.id).components, 1);
+    const auto refused = [&](const forms::FormExpr& R, const std::string& reason) {
+        try {
+            (void)systems::inferInstallFields(sys, R);
+            ADD_FAILURE() << "expected a refusal: " << reason;
+        } catch (const svmp::FE::InvalidArgumentException& error) {
+            EXPECT_NE(std::string(error.what()).find(reason), std::string::npos) << error.what();
+        }
+    };
+    refused((u.state * forms::FormExpr::testFunction(*space, "v")).dx(), "names no field");
+    refused((u.state * u.state).dx(), "no test function");
 }
 
 TEST(FormulationBuilder, InstallsAWorkChannelAsAModuleDoesByHand)

@@ -28,6 +28,7 @@
 
 #include <cstdint>
 #include <initializer_list>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -120,6 +121,17 @@ public:
 
     /// An unknown field: registered, or the compatible registered one.
     [[nodiscard]] FieldId unknown(FieldSpec spec, std::string_view role);
+
+    /**
+     * @brief The unknown @p name on @p space, with the components of the space
+     *
+     * unknownSymbols of {name, space, components = space->value_dimension()}
+     * with the state symbol @p name and the test symbol "v_<name>":
+     * registered, or the compatible registered field of that name.
+     */
+    [[nodiscard]] BoundUnknown unknown(std::string name,
+                                       std::shared_ptr<const spaces::FunctionSpace> space,
+                                       std::string_view role = "unknown");
 
     /// Register or reuse an unknown and create symbols using the supplied space.
     /// Requires spec.source_kind == Unknown; existing compatibility errors precede

@@ -330,6 +330,7 @@ if(PHYSICS_BUILD_TESTS)
         Tests/Unit/test_main.cpp
         Tests/Unit/test_PoissonModule.cpp
         Tests/Unit/test_PoissonSquareSteady.cpp
+        Tests/Unit/test_SpeciesTutorial.cpp
         Tests/Unit/test_FluidViscosityModels.cpp
         Tests/Unit/test_SolidMaterialModels.cpp
         Tests/Unit/test_FormIntegrationJacobian.cpp

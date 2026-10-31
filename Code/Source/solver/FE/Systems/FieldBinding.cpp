@@ -184,6 +184,21 @@ BoundUnknown FieldBinding::unknownSymbols(FieldSpec spec, std::string_view role,
             forms::FormExpr::testFunction(id, *space, std::move(test_symbol))};
 }
 
+BoundUnknown FieldBinding::unknown(std::string name,
+                                    std::shared_ptr<const spaces::FunctionSpace> space,
+                                    std::string_view role)
+{
+    if (!space) {
+        throw std::invalid_argument(roleContext(role) + "the space of unknown '" + name + "' is null");
+    }
+    FieldSpec spec;
+    spec.name = name;
+    spec.components = space->value_dimension();
+    spec.space = std::move(space);
+    auto test_symbol = "v_" + name;
+    return unknownSymbols(std::move(spec), role, std::move(name), std::move(test_symbol));
+}
+
 BoundUnknown FieldBinding::addUnknownSymbols(FieldSpec spec,
                                              std::string state_symbol, std::string test_symbol)
 {
