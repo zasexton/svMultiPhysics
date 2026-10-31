@@ -839,6 +839,7 @@ terminals are `implemented/internal`.
 | `stateLayout()`, `stateVariables()`, `stateSpec()` | Constitutive state layout metadata |
 | `parameterSpecs()` | Constitutive parameter metadata |
 | `inlinable()` | Inlinable models are required by the symbolic tangent |
+| `law(name, input_kind, output_kind, body, metadata)`, `law(name, signature, body, metadata)` | `Constitutive/ExpressionLaw.h`; a law written as forms (`constitutive::FormLaw`): `body(inputs, dim)` returns the output expression, a call `mu(gamma)` is a constitutive node that setup expands into the body's tree, so the symbolic tangent and the strict JIT see the law; no pointwise evaluation; `kindId()` hashes `name`. `isochoricNeoHookeanPK1` and `newtonianViscosity` are written this way; `carreauYasudaViscosityLaw` is the opt-in forms twin of the Carreau-Yasuda class |
 | `materialStateOldRef(offset_bytes)` | `implemented/internal`; byte-offset state terminal |
 | `materialStateWorkRef(offset_bytes)` | `implemented/internal`; byte-offset state terminal |
 

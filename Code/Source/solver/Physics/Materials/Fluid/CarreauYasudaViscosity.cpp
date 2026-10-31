@@ -43,6 +43,27 @@ CarreauYasudaViscosity::CarreauYasudaViscosity(FE::Real mu0,
     }
 }
 
+FE::forms::Law carreauYasudaViscosityLaw(FE::Real mu0,
+                                         FE::Real mu_inf,
+                                         FE::Real lambda,
+                                         FE::Real n,
+                                         FE::Real a)
+{
+    const CarreauYasudaViscosity validated(mu0, mu_inf, lambda, n, a);
+    using Kind = FE::forms::ConstitutiveModel::ValueKind;
+    return FE::forms::law(
+        "Physics::materials::fluid::CarreauYasudaViscosity", Kind::Scalar, Kind::Scalar,
+        [=](const FE::forms::FormExpr& gamma, int /*dim*/) {
+            using FE::forms::FormExpr;
+            const auto base = FormExpr::constant(1.0) + FE::forms::pow(FormExpr::constant(lambda) * gamma,
+                                                                       FormExpr::constant(a));
+            return FormExpr::constant(mu_inf) +
+                   (FormExpr::constant(mu0) - FormExpr::constant(mu_inf)) *
+                       FE::forms::pow(base, FormExpr::constant((n - 1.0) / a));
+        },
+        validated.constitutiveLawMetadata(0u));
+}
+
 } // namespace fluid
 } // namespace materials
 } // namespace Physics

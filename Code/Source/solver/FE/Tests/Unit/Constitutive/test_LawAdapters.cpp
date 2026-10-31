@@ -7,9 +7,19 @@
 
 #include <gtest/gtest.h>
 
+#include "Assembly/GlobalSystemView.h"
+#include "Assembly/StandardAssembler.h"
 #include "Constitutive/DualOps.h"
 #include "Constitutive/ExpressionLaw.h"
 #include "Constitutive/LawAdapters.h"
+#include "Forms/FormCompiler.h"
+#include "Forms/FormKernels.h"
+#include "Forms/JIT/JITValidation.h"
+#include "Forms/Vocabulary.h"
+#include "Spaces/H1Space.h"
+#include "Tests/Unit/Forms/FormsTestHelpers.h"
+
+#include <vector>
 
 namespace svmp {
 namespace FE {
@@ -236,6 +246,71 @@ TEST(MakeExpressionScalarLawTest, AllowsExpressionStyleLocalLaws)
     EXPECT_DOUBLE_EQ(dout.s.value, 1.0 + 3.0 * 4.0);
     ASSERT_EQ(dout.s.deriv.size(), 1u);
     EXPECT_DOUBLE_EQ(dout.s.deriv[0], 12.0);
+}
+
+// A law written as forms: setup expands each call into the body's tree, so the
+// residual and the symbolic tangent of a call equal those of the hand-written
+// tree bit for bit, the expansion compiles in strict JIT mode, and there is no
+// pointwise evaluation.
+TEST(FormLawTest, CallsExpandToTheBodyTree)
+{
+    using forms::FormExpr;
+    const auto body = [](const FormExpr& s, int) {
+        return FormExpr::constant(1.0) + s * s / (FormExpr::constant(1.0) + s);
+    };
+    const auto metadata = analysis::dynamicViscosityMetadata(INVALID_FIELD_ID, 1.0);
+    using Kind = forms::ConstitutiveModel::ValueKind;
+    const auto mu = forms::law("test::quadratic_ratio", Kind::Scalar, Kind::Scalar, body, metadata);
+    EXPECT_EQ(mu.model()->kindId(), forms::InlinableConstitutiveModel::fnv1a64("test::quadratic_ratio"));
+    EXPECT_NE(mu.model()->inlinable(), nullptr);
+    ASSERT_TRUE(mu.model()->constitutiveLawMetadata(0u).has_value());
+    EXPECT_EQ(mu.model()->constitutiveLawMetadata(0u)->role, analysis::ConstitutiveLawRole::DynamicViscosity);
+    forms::Value<Real> in;
+    in.kind = forms::Value<Real>::Kind::Scalar;
+    in.s = 2.0;
+    EXPECT_THROW((void)mu.model()->evaluate(in, 3), std::logic_error);
+
+    forms::test::SingleTetraMeshAccess mesh;
+    auto dof_map = forms::test::createSingleTetraDofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto s = inner(grad(u), grad(u));
+    const auto assemble = [&](const FormExpr& coefficient, assembly::DenseMatrixView& J, assembly::DenseVectorView& R) {
+        forms::SymbolicOptions options;
+        options.use_symbolic_tangent = true;
+        forms::FormCompiler compiler(options);
+        auto ir = compiler.compileResidual((coefficient * inner(grad(u), grad(v))).dx());
+        forms::SymbolicNonlinearFormKernel kernel(std::move(ir), forms::NonlinearKernelOutput::Both);
+        kernel.resolveInlinableConstitutives();
+        assembly::StandardAssembler assembler;
+        assembler.setDofMap(dof_map);
+        const std::vector<Real> solution = {0.1, -0.3, 0.25, 0.4};
+        assembler.setCurrentSolution(solution);
+        J.zero();
+        R.zero();
+        (void)assembler.assembleBoth(mesh, space, space, kernel, J, R);
+    };
+    const auto n = dof_map.getNumDofs();
+    assembly::DenseMatrixView J_law(n), J_tree(n);
+    assembly::DenseVectorView R_law(n), R_tree(n);
+    assemble(mu(s), J_law, R_law);
+    assemble(body(s, 3), J_tree, R_tree);
+    for (GlobalIndex i = 0; i < n; ++i) {
+        EXPECT_EQ(R_law.getVectorEntry(i), R_tree.getVectorEntry(i));
+        for (GlobalIndex j = 0; j < n; ++j) {
+            EXPECT_EQ(J_law.getMatrixEntry(i, j), J_tree.getMatrixEntry(i, j));
+        }
+    }
+    EXPECT_NE(R_tree.getVectorEntry(0), 0.0);
+
+    const std::vector<FormExpr> inputs{s};
+    const auto expansion = mu.model()->inlineExpand(inputs, forms::InlinableConstitutiveContext{.dim = 3});
+    ASSERT_EQ(expansion.outputs.size(), 1u);
+    EXPECT_EQ(expansion.outputs.front().toString(), body(s, 3).toString());
+    EXPECT_TRUE(forms::jit::canCompile(expansion.outputs.front() * v,
+                                       forms::jit::ValidationOptions{.strictness = forms::jit::Strictness::Strict})
+                    .ok);
 }
 
 } // namespace test

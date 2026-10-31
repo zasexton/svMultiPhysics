@@ -79,7 +79,7 @@ TEST(UstructModule, RejectsDuplicateUnknownFieldBeforeFurtherRegistration)
         options.displacement_field_name = "custom_displacement";
         options.enable_time_derivative_terms = transient;
         options.deviatoric_pk1_model =
-            std::make_shared<materials::solid::IsochoricNeoHookeanPK1>(3.0);
+            materials::solid::isochoricNeoHookeanPK1(3.0).model();
         formulations::ustruct::UstructModule module(displacement_space, pressure_space, options);
         EXPECT_THROW(module.registerOn(system), FE::InvalidArgumentException);
         EXPECT_EQ(system.findFieldByName(options.displacement_field_name), existing);
@@ -103,7 +103,7 @@ TEST(UstructModule, DuplicateOperatorPreservesOrderedFieldsBeforePostprocessing)
         formulations::ustruct::UstructOptions options;
         options.enable_time_derivative_terms = transient;
         options.deviatoric_pk1_model =
-            std::make_shared<materials::solid::IsochoricNeoHookeanPK1>(3.0);
+            materials::solid::isochoricNeoHookeanPK1(3.0).model();
         options.ct_m = options.ct_c = 0.0;
         formulations::ustruct::UstructModule first(displacement_space, pressure_space, options);
         first.registerOn(system);
@@ -154,7 +154,7 @@ TEST(UstructModule, ExplicitUnavailableJITFailsAfterBoundaryWork)
     auto pressure_space = FE::spaces::SpaceFactory::create_h1(FE::ElementType::Tetra4, 1);
     formulations::ustruct::UstructOptions options;
     options.deviatoric_pk1_model =
-        std::make_shared<materials::solid::IsochoricNeoHookeanPK1>(3.0);
+        materials::solid::isochoricNeoHookeanPK1(3.0).model();
     options.ct_m = options.ct_c = 0.0;
     options.jit_policy.enable = true;
     options.jit_policy.enable_was_explicitly_set = true;
@@ -197,7 +197,7 @@ TEST(UstructModule, RegistersMixedDisplacementPressureSystem)
     formulations::ustruct::UstructOptions options{};
     options.density = 1.2;
     auto deviatoric_model =
-        std::make_shared<materials::solid::IsochoricNeoHookeanPK1>(/*mu=*/3.0);
+        materials::solid::isochoricNeoHookeanPK1(/*mu=*/3.0).model();
     options.deviatoric_pk1_model = deviatoric_model;
     options.penalty_parameter = 0.0;
     options.ct_m = 0.0;
@@ -241,7 +241,7 @@ TEST(UstructModule, RegistersRequestedNodePatchPostprocessing)
     formulations::ustruct::UstructOptions options{};
     options.density = 1.2;
     options.deviatoric_pk1_model =
-        std::make_shared<materials::solid::IsochoricNeoHookeanPK1>(/*mu=*/3.0);
+        materials::solid::isochoricNeoHookeanPK1(/*mu=*/3.0).model();
     options.penalty_parameter = 0.0;
     options.ct_m = 0.0;
     options.ct_c = 0.0;
@@ -307,7 +307,7 @@ TEST(UstructModule, QuasiStaticOptionDropsTemporalDerivatives)
     formulations::ustruct::UstructOptions options{};
     options.density = 1.2;
     options.deviatoric_pk1_model =
-        std::make_shared<materials::solid::IsochoricNeoHookeanPK1>(/*mu=*/3.0);
+        materials::solid::isochoricNeoHookeanPK1(/*mu=*/3.0).model();
     options.penalty_parameter = 0.0;
     options.ct_m = 0.0;
     options.ct_c = 0.0;
@@ -347,7 +347,7 @@ TEST(UstructModule, InstallsComponentStrongConstraintsOnDisplacementAndVelocity)
     formulations::ustruct::UstructOptions options{};
     options.density = 1.0;
     options.deviatoric_pk1_model =
-        std::make_shared<materials::solid::IsochoricNeoHookeanPK1>(/*mu=*/3.0);
+        materials::solid::isochoricNeoHookeanPK1(/*mu=*/3.0).model();
     options.penalty_parameter = 0.0;
     options.ct_m = 0.0;
     options.ct_c = 0.0;
@@ -465,7 +465,7 @@ TEST(UstructModule, ZeroStateHasZeroResidual)
     formulations::ustruct::UstructOptions options{};
     options.density = 1.0;
     options.deviatoric_pk1_model =
-        std::make_shared<materials::solid::IsochoricNeoHookeanPK1>(/*mu=*/3.0);
+        materials::solid::isochoricNeoHookeanPK1(/*mu=*/3.0).model();
     options.penalty_parameter = 0.0;
     options.ct_m = 0.0;
     options.ct_c = 0.0;

@@ -3,10 +3,19 @@
 
 #include "Constitutive/LawAdapters.h"
 
+#include "Analysis/ConstitutiveLawMetadata.h"
+#include "Forms/ConstitutiveModel.h"
 #include "Forms/Dual.h"
+#include "Forms/FormExpr.h"
+#include "Forms/JIT/InlinableConstitutiveModel.h"
 
 #include <cmath>
+#include <cstdint>
+#include <functional>
 #include <memory>
+#include <optional>
+#include <span>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -315,7 +324,192 @@ template <class Builder>
     return std::make_shared<ExpressionScalarLaw<Builder>>(std::move(name), std::move(builder), std::move(specs));
 }
 
+// ---------------------------------------------------------------------------
+// Laws written as forms
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief A constitutive law written as forms
+ *
+ * Its body maps the input expressions of a call and the spatial dimension to
+ * the output expression with forms operations.  A call of the law is a
+ * constitutive node that setup expands into the body's tree
+ * (InlinableConstitutiveModel), so the residual, the symbolic tangent and the
+ * JIT see the law itself and need no external call.  Such a law has no
+ * pointwise evaluation: evaluate() fails.  kindId() is the FNV-1a hash of the
+ * kind name, which names the law; its parameters are constants of the tree.
+ */
+class FormLaw final : public forms::ConstitutiveModel, public forms::InlinableConstitutiveModel {
+public:
+    using Body = std::function<forms::FormExpr(std::span<const forms::FormExpr> inputs, int dim)>;
+
+    struct Signature {
+        std::vector<ValueKind> inputs{};
+        ValueKind output{ValueKind::Scalar};
+    };
+
+    FormLaw(std::string kind_name,
+            Signature signature,
+            Body body,
+            std::optional<analysis::ConstitutiveLawMetadata> metadata = std::nullopt)
+        : kind_name_(std::move(kind_name))
+        , signature_(std::move(signature))
+        , body_(std::move(body))
+        , metadata_(std::move(metadata))
+    {
+        if (kind_name_.empty()) {
+            throw std::invalid_argument("FormLaw: the kind name must be non-empty");
+        }
+        if (signature_.inputs.empty()) {
+            throw std::invalid_argument("FormLaw '" + kind_name_ + "': a law takes at least one input");
+        }
+        if (!body_) {
+            throw std::invalid_argument("FormLaw '" + kind_name_ + "': missing body");
+        }
+    }
+
+    [[nodiscard]] const std::string& kindName() const noexcept { return kind_name_; }
+
+    [[nodiscard]] const forms::InlinableConstitutiveModel* inlinable() const noexcept override { return this; }
+    [[nodiscard]] std::uint64_t kindId() const noexcept override { return fnv1a64(kind_name_); }
+    [[nodiscard]] forms::MaterialStateAccess stateAccess() const noexcept override
+    {
+        return forms::MaterialStateAccess::None;
+    }
+
+    [[nodiscard]] forms::InlinedConstitutiveExpansion
+    inlineExpand(std::span<const forms::FormExpr> inputs,
+                 const forms::InlinableConstitutiveContext& ctx) const override
+    {
+        if (inputs.size() != signature_.inputs.size()) {
+            throw std::invalid_argument("FormLaw '" + kind_name_ + "': expected " +
+                                        std::to_string(signature_.inputs.size()) + " input(s), got " +
+                                        std::to_string(inputs.size()));
+        }
+        forms::InlinedConstitutiveExpansion out;
+        out.outputs.push_back(body_(inputs, ctx.dim));
+        return out;
+    }
+
+    [[nodiscard]] forms::Value<Real> evaluate(const forms::Value<Real>& /*input*/, int /*dim*/) const override
+    {
+        throw noPointwiseEvaluation();
+    }
+
+    [[nodiscard]] forms::Value<forms::Dual> evaluate(const forms::Value<forms::Dual>& /*input*/,
+                                                     int /*dim*/,
+                                                     forms::DualWorkspace& /*workspace*/) const override
+    {
+        throw noPointwiseEvaluation();
+    }
+
+    [[nodiscard]] OutputSpec outputSpec(std::size_t output_index) const override
+    {
+        if (output_index != 0u) {
+            throw std::invalid_argument("FormLaw::outputSpec: output_index out of range");
+        }
+        return OutputSpec{signature_.output};
+    }
+
+    [[nodiscard]] std::optional<analysis::ConstitutiveLawMetadata>
+    constitutiveLawMetadata(std::size_t output_index) const override
+    {
+        if (output_index != 0u) {
+            throw std::invalid_argument("FormLaw::constitutiveLawMetadata: output_index out of range");
+        }
+        return metadata_;
+    }
+
+    [[nodiscard]] std::optional<ValueKind> expectedInputKind() const override
+    {
+        return expectedInputKind(0u);
+    }
+
+    [[nodiscard]] std::optional<ValueKind> expectedInputKind(std::size_t input_index) const override
+    {
+        if (input_index >= signature_.inputs.size()) {
+            return std::nullopt;
+        }
+        return signature_.inputs[input_index];
+    }
+
+    [[nodiscard]] std::optional<std::size_t> expectedInputCount() const override
+    {
+        return signature_.inputs.size();
+    }
+
+private:
+    [[nodiscard]] std::logic_error noPointwiseEvaluation() const
+    {
+        return std::logic_error("FormLaw '" + kind_name_ +
+                                "' is written as forms; setup expands its calls, and it has no pointwise evaluation");
+    }
+
+    std::string kind_name_{};
+    Signature signature_{};
+    Body body_{};
+    std::optional<analysis::ConstitutiveLawMetadata> metadata_{};
+};
+
 } // namespace constitutive
+
+namespace forms {
+
+/// A constitutive law written as forms, called like a function: law(x) is
+/// the constitutive node FormExpr::constitutive(model, x) that setup expands.
+class Law {
+public:
+    explicit Law(std::shared_ptr<const constitutive::FormLaw> model)
+        : model_(std::move(model))
+    {
+    }
+
+    [[nodiscard]] FormExpr operator()(const FormExpr& input) const { return FormExpr::constitutive(model_, input); }
+    [[nodiscard]] FormExpr operator()(std::vector<FormExpr> inputs) const
+    {
+        return FormExpr::constitutive(model_, std::move(inputs));
+    }
+
+    [[nodiscard]] const std::shared_ptr<const constitutive::FormLaw>& model() const noexcept { return model_; }
+
+private:
+    std::shared_ptr<const constitutive::FormLaw> model_{};
+};
+
+/**
+ * @brief The law of one input @p body written as forms
+ *
+ *   const auto mu = law("carreau_yasuda", Kind::Scalar, Kind::Scalar,
+ *                       [=](const FormExpr& gamma, int) { return mu_inf + ...; });
+ *   const auto viscous = 2.0 * mu(shear_rate) * inner(symgrad(u), symgrad(v));
+ */
+[[nodiscard]] inline Law law(std::string kind_name,
+                             Value<Real>::Kind input,
+                             Value<Real>::Kind output,
+                             std::function<FormExpr(const FormExpr& input, int dim)> body,
+                             std::optional<analysis::ConstitutiveLawMetadata> metadata = std::nullopt)
+{
+    if (!body) {
+        throw std::invalid_argument("forms::law: missing body");
+    }
+    return Law(std::make_shared<const constitutive::FormLaw>(
+        std::move(kind_name),
+        constitutive::FormLaw::Signature{{input}, output},
+        [body = std::move(body)](std::span<const FormExpr> inputs, int dim) { return body(inputs.front(), dim); },
+        std::move(metadata)));
+}
+
+/// The law of several inputs @p body written as forms.
+[[nodiscard]] inline Law law(std::string kind_name,
+                             constitutive::FormLaw::Signature signature,
+                             constitutive::FormLaw::Body body,
+                             std::optional<analysis::ConstitutiveLawMetadata> metadata = std::nullopt)
+{
+    return Law(std::make_shared<const constitutive::FormLaw>(
+        std::move(kind_name), std::move(signature), std::move(body), std::move(metadata)));
+}
+
+} // namespace forms
 } // namespace FE
 } // namespace svmp
 

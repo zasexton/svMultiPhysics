@@ -9,10 +9,16 @@
  * Output: scalar viscosity mu(gamma)
  *
  *   mu(gamma) = mu_inf + (mu0 - mu_inf) * (1 + (lambda*gamma)^a)^((n-1)/a)
+ *
+ * The class evaluates the law pointwise (the JIT reaches it through an
+ * external call).  carreauYasudaViscosityLaw() writes the same law as forms,
+ * so setup expands it for the symbolic tangent and the JIT; its values differ
+ * from the class at round-off, so it is opt-in and no deck uses it.
  */
 
 #include "Physics/Materials/Common/TensorOps.h"
 
+#include "FE/Constitutive/ExpressionLaw.h"
 #include "FE/Constitutive/ModelCRTP.h"
 
 #include <cstddef>
@@ -94,6 +100,14 @@ private:
     FE::Real n_{1.0};
     FE::Real a_{2.0};
 };
+
+/// The Carreau-Yasuda law written as forms, with the parameters and the
+/// metadata of the class.
+[[nodiscard]] FE::forms::Law carreauYasudaViscosityLaw(FE::Real mu0,
+                                                       FE::Real mu_inf,
+                                                       FE::Real lambda,
+                                                       FE::Real n,
+                                                       FE::Real a);
 
 } // namespace fluid
 } // namespace materials

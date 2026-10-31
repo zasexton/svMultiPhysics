@@ -457,7 +457,7 @@ void apply_solid_options(const svmp::Physics::DomainInput& domain,
   options.bulk_wave_speed = props.bulk_wave_speed;
   options.kinematic_residual_scale = std::sqrt(props.density * props.shear_modulus);
   options.deviatoric_pk1_model =
-      std::make_shared<svmp::Physics::materials::solid::IsochoricNeoHookeanPK1>(props.shear_modulus);
+      svmp::Physics::materials::solid::isochoricNeoHookeanPK1(props.shear_modulus).model();
 
   if (const auto penalty = get_defined_double(domain.params, "Penalty_parameter")) {
     options.penalty_parameter = static_cast<svmp::FE::Real>(*penalty);

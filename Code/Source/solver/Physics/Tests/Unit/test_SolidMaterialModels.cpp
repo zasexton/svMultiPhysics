@@ -15,8 +15,15 @@
 
 #include "FE/Forms/Dual.h"
 #include "FE/Forms/Value.h"
+#include "FE/Forms/Vocabulary.h"
+#include "FE/Spaces/H1Space.h"
+#include "FE/Spaces/ProductSpace.h"
+#include "FE/Systems/SystemManifest.h"
 
 #include <cmath>
+#include <memory>
+#include <stdexcept>
+#include <vector>
 
 namespace svmp {
 namespace Physics {
@@ -151,76 +158,45 @@ TEST(NeoHookeanPK1, DerivativeMatchesFiniteDifferenceForSingleEntry)
 }
 
 #if defined(SVMP_TEST_HAS_ISOCHORIC_NEOHOOKEAN_PK1)
-TEST(IsochoricNeoHookeanPK1, IdentityDeformationGivesZeroStress)
+// The law written as forms expands to the tree of the former class's
+// inlineExpand (written out here as it was) with the same kind id, so the
+// kernels that inline it are unchanged.
+TEST(IsochoricNeoHookeanPK1, ExpandsToTheTreeAndKindIdOfTheFormerClass)
 {
-    materials::solid::IsochoricNeoHookeanPK1 model(/*mu=*/2.0);
+    using FE::forms::FormExpr;
+    const FE::Real mu = 2.0;
+    const auto law = materials::solid::isochoricNeoHookeanPK1(mu);
+    EXPECT_EQ(law.model()->kindId(),
+              FE::forms::InlinableConstitutiveModel::fnv1a64("Physics::materials::solid::IsochoricNeoHookeanPK1"));
+    EXPECT_EQ(law.model()->expectedInputKind(), FE::forms::ConstitutiveModel::ValueKind::Matrix);
+    EXPECT_EQ(law.model()->outputSpec(0u).kind, FE::forms::ConstitutiveModel::ValueKind::Matrix);
+    EXPECT_THROW((void)materials::solid::isochoricNeoHookeanPK1(0.0), std::invalid_argument);
 
-    FE::forms::Value<FE::Real> F;
-    F.kind = FE::forms::Value<FE::Real>::Kind::Matrix;
-    F.resizeMatrix(3, 3);
-    for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < 3; ++j) {
-            F.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j)) = (i == j) ? 1.0 : 0.0;
-        }
+    auto space = std::make_shared<FE::spaces::H1Space>(FE::ElementType::Tetra4, 1);
+    FE::spaces::ProductSpace vector(space, 3);
+    const auto u = FormExpr::trialFunction(vector, "u");
+    for (const int dim : {2, 3}) {
+        SCOPED_TRACE(dim);
+        const auto F = FormExpr::identity(dim) + FE::forms::grad(u);
+        const std::vector<FormExpr> inputs{F};
+        const auto expansion = law.model()->inlineExpand(inputs, FE::forms::InlinableConstitutiveContext{.dim = dim});
+        ASSERT_EQ(expansion.outputs.size(), 1u);
+
+        const auto constant = [](FE::Real value) {
+            return FormExpr::constant(value);
+        };
+        const auto C = FE::forms::transpose(F) * F;
+        const auto Cinv = FE::forms::inv(C);
+        const auto J = FE::forms::det(F);
+        const auto Jm2d = FE::forms::pow(J, constant(-2.0 / static_cast<FE::Real>(dim)));
+        const auto I = FormExpr::identity(dim);
+        const auto Siso =
+            constant(mu) * Jm2d *
+            (I - (FE::forms::trace(C) / constant(static_cast<FE::Real>(dim))) * Cinv);
+        const auto former = F * Siso;
+        EXPECT_EQ(FE::systems::formExprTreeHash(expansion.outputs.front()), FE::systems::formExprTreeHash(former));
+        EXPECT_EQ(expansion.outputs.front().toString(), former.toString());
     }
-
-    const auto P = model.evaluate(F, /*dim=*/3);
-    ASSERT_EQ(P.kind, FE::forms::Value<FE::Real>::Kind::Matrix);
-    for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < 3; ++j) {
-            EXPECT_NEAR(P.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j)), 0.0, 1e-14);
-        }
-    }
-}
-
-TEST(IsochoricNeoHookeanPK1, DerivativeMatchesFiniteDifferenceForSingleEntry)
-{
-    materials::solid::IsochoricNeoHookeanPK1 model(/*mu=*/2.0);
-
-    FE::forms::Value<FE::Real> F;
-    F.kind = FE::forms::Value<FE::Real>::Kind::Matrix;
-    F.resizeMatrix(3, 3);
-    F.matrixAt(0, 0) = 1.10;
-    F.matrixAt(0, 1) = 0.02;
-    F.matrixAt(0, 2) = -0.01;
-    F.matrixAt(1, 0) = 0.03;
-    F.matrixAt(1, 1) = 0.95;
-    F.matrixAt(1, 2) = 0.00;
-    F.matrixAt(2, 0) = 0.00;
-    F.matrixAt(2, 1) = -0.02;
-    F.matrixAt(2, 2) = 1.05;
-
-    const FE::Real eps = 1e-6;
-    auto Fp = F;
-    auto Fm = F;
-    Fp.matrixAt(0, 0) += eps;
-    Fm.matrixAt(0, 0) -= eps;
-
-    const FE::Real P00 = model.evaluate(F, /*dim=*/3).matrixAt(0, 0);
-    const FE::Real P00p = model.evaluate(Fp, /*dim=*/3).matrixAt(0, 0);
-    const FE::Real P00m = model.evaluate(Fm, /*dim=*/3).matrixAt(0, 0);
-    const FE::Real fd = (P00p - P00m) / (2.0 * eps);
-
-    FE::forms::DualWorkspace ws;
-    ws.reset(1);
-
-    FE::forms::Value<FE::forms::Dual> Fd;
-    Fd.kind = FE::forms::Value<FE::forms::Dual>::Kind::Matrix;
-    Fd.resizeMatrix(3, 3);
-    for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < 3; ++j) {
-            const FE::Real val = F.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j));
-            Fd.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j)) =
-                FE::forms::makeDualConstant(val, ws.alloc());
-        }
-    }
-    Fd.matrixAt(0, 0).deriv[0] = 1.0;
-
-    const auto Pd = model.evaluate(Fd, /*dim=*/3, ws);
-    const FE::Real ad = Pd.matrixAt(0, 0).deriv[0];
-
-    EXPECT_NEAR(Pd.matrixAt(0, 0).value, P00, 1e-14);
-    EXPECT_NEAR(ad, fd, std::max(1e-9, 2e-5 * std::abs(fd)));
 }
 #endif
 
