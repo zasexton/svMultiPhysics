@@ -17,7 +17,11 @@
  *   revisions, communicator-wide counts and measures).
  * - The partition-independent topology fingerprint of the generated rules
  *   (a probabilistic multiset digest over owned rules, qualified for
- *   LinearCorner cuts) and its FNV-style hash helpers.
+ *   LinearCorner cuts) and its FNV-style hash helpers.  For the other
+ *   geometries (HighOrderImplicit) it is a cut-structure key: per owned cell
+ *   the set of its retained rule kinds, the sign class of every level-set
+ *   DOF of the cell and the parent-boundary entities its interface fragments
+ *   touch, independent of the backend's subdivision.
  * - TransientCutTopologyAttemptTracker: the epochs of one attempt.
  *
  * Moved from Application/Core/ApplicationDriver.cpp with bodies, messages and
@@ -48,6 +52,10 @@ namespace FE {
 namespace assembly {
 class CutIntegrationContext;
 } // namespace assembly
+
+namespace systems {
+class FESystem;
+} // namespace systems
 
 namespace interfaces {
 class FreeSurfaceGeometrySnapshot;
@@ -464,7 +472,26 @@ struct CutTopologyFingerprintMultiset {
 struct ActiveCutTopologySnapshotBinding {
   const ActiveCutVolumeRequest* request{nullptr};
   const svmp::FE::interfaces::FreeSurfaceGeometrySnapshot* snapshot{nullptr};
+  /// The cut-structure keys of the owned cells (cutStructureCellKeys), for a
+  /// request whose geometry is not LinearCorner; unused otherwise.
+  const std::map<svmp::FE::GlobalIndex, std::uint64_t>* cell_structure_keys{nullptr};
 };
+
+/**
+ * @brief The cut structure of every owned cell of @p domain's mesh beyond its
+ *        rules, by cell global id: the sign classes (in the domain's
+ *        coefficient band about the isovalue) of the level-set DOFs of the
+ *        cell in @p solution, and the set of parent-boundary sub-entities
+ *        (reference facets, as plane masks) that the vertices of its active
+ *        interface fragments lie on.  Vertices inside the parent, such as
+ *        the leaf ends of an adaptive subdivision, do not enter.  Supports
+ *        triangles, quadrilaterals, tetrahedra and hexahedra.  Rank-local.
+ */
+[[nodiscard]] std::map<svmp::FE::GlobalIndex, std::uint64_t> cutStructureCellKeys(
+    const svmp::FE::systems::FESystem& system,
+    const svmp::FE::interfaces::LevelSetInterfaceDomain& domain,
+    svmp::FE::FieldId level_set_field,
+    std::span<const svmp::FE::Real> solution);
 
 /// Topology fingerprint of the owned rules of @p bindings.  Collective.
 [[nodiscard]] std::uint64_t activeCutContextTopologyFingerprint(
@@ -472,7 +499,9 @@ struct ActiveCutTopologySnapshotBinding {
     const svmp::FE::systems::CollectiveCommunicator& comm);
 
 /// True when every request generates LinearCorner geometry, the mode for
-/// which the fingerprint is qualified.
+/// which the rule fingerprint is qualified, or HighOrderImplicit geometry with
+/// the SayeHyperrectangle, HighOrderSubcell or Auto backend and the Fail
+/// fallback, for which the cut-structure key is.
 [[nodiscard]] bool transientCutTopologyFingerprintSupportsRequests(
     std::span<const ActiveCutVolumeRequest> requests) noexcept;
 

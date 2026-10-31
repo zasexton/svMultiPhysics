@@ -70,6 +70,18 @@ Small-cut aggregation reads root cells several layers away: with two ghost
 layers its results on simplices changed with the rank count, with four they
 did not.
 
+The transient fixed-cut-topology protocol compares a topology key of every
+cut refresh. For LinearCorner geometry it is the rule fingerprint. For
+HighOrderImplicit geometry (SayeHyperrectangle, HighOrderSubcell or Auto with
+the Fail fallback) it is a cut-structure key (`cutStructureCellKeys`): per
+owned cell, the set of its retained rule kinds, the sign class of every
+level-set DOF of the cell and the parent-boundary facets its interface
+fragments touch, folded with the partition-independent multiset reduction. It
+does not depend on the backend's subdivision (the leaves of an adaptive cut)
+and changes with every change of the discrete structure: a DOF changing
+sign, a cell cut or uncut, a side retained or pruned, a wetted face. It does
+not certify how crossings pair up inside a cell that stays cut.
+
 `generatedActiveBoundaryResolver(std::vector<CutSide> owners, std::string owner,
 std::string invalid_physical_marker_message)` returns a callable that owns its
 side handles and diagnostic strings. It can outlive the input vector and does

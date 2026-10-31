@@ -284,7 +284,93 @@ void expectOneRankResults(MPI_Comm comm)
     }
 }
 
+/// n x n Quad9 cells of the unit square.
+BoxArrays quad9Arrays(int n)
+{
+    BoxArrays a;
+    const int m = 2 * n;
+    for (int j = 0; j <= m; ++j) {
+        for (int i = 0; i <= m; ++i) {
+            a.x.push_back(static_cast<svmp::real_t>(i) / m);
+            a.x.push_back(static_cast<svmp::real_t>(j) / m);
+        }
+    }
+    const auto id = [m](int i, int j) { return static_cast<svmp::index_t>(j * (m + 1) + i); };
+    svmp::CellShape shape{};
+    shape.family = svmp::CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 2;
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < n; ++i) {
+            const int p = 2 * i, q = 2 * j;
+            a.connectivity.insert(a.connectivity.end(),
+                                  {id(p, q), id(p + 2, q), id(p + 2, q + 2), id(p, q + 2), id(p + 1, q),
+                                   id(p + 2, q + 1), id(p + 1, q + 2), id(p, q + 1), id(p + 1, q + 1)});
+            a.offsets.push_back(static_cast<svmp::offset_t>(a.connectivity.size()));
+            a.shapes.push_back(shape);
+        }
+    }
+    return a;
+}
+
+/// The topology key of the HighOrderImplicit cut of a wave on @p mesh (P2 on
+/// Quad9 cells, subdivision depth 6 as in the MMS deck).
+std::uint64_t highOrderCutKey(const std::shared_ptr<svmp::Mesh>& mesh)
+{
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Quad9, 2);
+    systems::FESystem system(mesh);
+    const auto phi_id = system.addField(
+        systems::FieldSpec{.name = "phi", .space = space, .source_kind = systems::FieldSourceKind::PrescribedData});
+    (void)system.addField(systems::FieldSpec{.name = "T", .space = space});
+    auto G = cutGeometry(system, *mesh, {.level_set_field_name = "phi", .domain_id = "wave"},
+                         {.quadrature_order = 2,
+                          .geometry_mode = GeneratedInterfaceGeometryMode::HighOrderImplicit,
+                          .implicit_cut_backend = ImplicitCutQuadratureBackend::SayeHyperrectangle,
+                          .implicit_cut_max_subdivision_depth = 6});
+    (void)G.side(CutVolumeSide::Negative);
+    system.setup();
+    std::vector<Real> values(mesh->n_vertices());
+    for (std::size_t v = 0; v < values.size(); ++v) {
+        const Real x = mesh->X_ref()[2 * v];
+        const Real y = mesh->X_ref()[2 * v + 1];
+        values[v] = y - 0.43 - 0.05 * std::sin(2.0 * kPi * x);
+    }
+    std::vector<Real> coefficients(static_cast<std::size_t>(system.fieldDofHandler(phi_id).getNumDofs()), 0.0);
+    (void)system.projectMeshVertexValuesToFieldCoefficients(phi_id, values, 1u, coefficients);
+    system.setPrescribedFieldCoefficients(phi_id, coefficients);
+    return G.refresh().topology_key;
+}
+
+void expectOneRankCutStructureKey()
+{
+    const auto arrays = quad9Arrays(8);
+    const auto one = highOrderCutKey(serialMesh(arrays));
+    const auto many = highOrderCutKey(partitionedMesh(arrays));
+    EXPECT_NE(one, 0u);
+    EXPECT_EQ(many, one);
+}
+
 } // namespace
+
+TEST(CutGeometryMPI, TwoRankCutStructureKeyIsTheOneRankKey)
+{
+    int size = 1;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    if (size != 2) {
+        GTEST_SKIP() << "Run with exactly 2 MPI ranks";
+    }
+    expectOneRankCutStructureKey();
+}
+
+TEST(CutGeometryMPI, FourRankCutStructureKeyIsTheOneRankKey)
+{
+    int size = 1;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    if (size != 4) {
+        GTEST_SKIP() << "Run with exactly 4 MPI ranks";
+    }
+    expectOneRankCutStructureKey();
+}
 
 TEST(CutGeometryMPI, TwoRankCutPoissonGivesTheOneRankResults)
 {

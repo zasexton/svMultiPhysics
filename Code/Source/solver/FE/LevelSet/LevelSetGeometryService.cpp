@@ -1497,6 +1497,10 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
   std::size_t synchronized_level_set_fields{0u};
   std::shared_ptr<svmp::FE::assembly::CutIntegrationContext> context;
   std::vector<ActiveCutTopologySnapshotBinding> topology_bindings;
+  // The cut-structure keys of the non-LinearCorner requests, which the
+  // bindings point into (reserved, so the pointers stay valid).
+  std::vector<std::map<svmp::FE::GlobalIndex, std::uint64_t>>
+      cell_structure_keys;
   std::exception_ptr local_refresh_preparation_failure;
   try {
     synchronized_level_set_fields =
@@ -1505,6 +1509,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     context =
         std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
     topology_bindings.reserve(requests.size());
+    cell_structure_keys.reserve(requests.size());
   } catch (...) {
     local_refresh_preparation_failure = std::current_exception();
   }
@@ -2328,6 +2333,21 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
             .request = &request,
             .snapshot = geometry_snapshot.get(),
         });
+    if (request.geometry_mode !=
+        svmp::FE::level_set::GeneratedInterfaceGeometryMode::LinearCorner) {
+      std::exception_ptr local_structure_failure;
+      try {
+        cell_structure_keys.push_back(cutStructureCellKeys(
+            *sim.fe_system, result.domain, domain_request.source.field_id,
+            fe_solution));
+        topology_bindings.back().cell_structure_keys =
+            &cell_structure_keys.back();
+      } catch (...) {
+        local_structure_failure = std::current_exception();
+      }
+      requireCollectivePhasePreparation(
+          local_structure_failure, comm, "active_cut_structure_keys");
+    }
     // The context keeps only the classification of the dry full-cell rules
     // too when no cut-volume kernel integrates over the dry side.
     const auto classification_only_context_side =
@@ -5014,6 +5034,10 @@ CutGeometry cutGeometry(svmp::FE::systems::FESystem& system,
   request.geometry_mode = policy.geometry_mode;
   request.implicit_cut_backend = policy.implicit_cut_backend;
   request.implicit_cut_fallback_policy = policy.implicit_cut_fallback_policy;
+  if (policy.implicit_cut_max_subdivision_depth) {
+    request.implicit_cut_max_subdivision_depth =
+        *policy.implicit_cut_max_subdivision_depth;
+  }
   return CutGeometry(std::move(geometry), std::move(state));
 }
 

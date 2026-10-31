@@ -7,10 +7,16 @@
 
 #include "LevelSet/LevelSetCutTopology.h"
 
+#include "Assembly/Assembler.h"
+#include "Dofs/DofHandler.h"
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
+#include "Systems/FESystem.h"
 
+#include <cmath>
 #include <exception>
+#include <set>
+#include <tuple>
 
 #if FE_HAS_MPI
 #include <mpi.h>
@@ -34,7 +40,120 @@ std::pair<std::uint64_t, std::uint64_t> globalMinMaxUint64(
   return svmp::FE::systems::collectiveMinMaxUint64(local, comm);
 }
 
+// The reference facets (hyperplanes) a parent coordinate lies on, as a bit
+// mask: for a tensor cell on [-1, 1]^d, bit 2a for x_a = -1 and 2a + 1 for
+// x_a = 1; for a simplex, bit a for x_a = 0 and bit d for sum x_a = 1.
+std::uint64_t referenceFacetMask(svmp::FE::ElementType type,
+                                 const std::array<svmp::FE::Real, 3>& x)
+{
+  using svmp::FE::ElementType;
+  constexpr svmp::FE::Real tolerance = 1.0e-10;
+  const auto near = [](svmp::FE::Real a, svmp::FE::Real b) {
+    return std::abs(a - b) <= tolerance;
+  };
+  std::uint64_t mask = 0u;
+  switch (type) {
+  case ElementType::Quad4:
+  case ElementType::Quad8:
+  case ElementType::Quad9:
+  case ElementType::Hex8:
+  case ElementType::Hex20:
+  case ElementType::Hex27: {
+    const int dim = svmp::FE::element_dimension(type);
+    for (int a = 0; a < dim; ++a) {
+      const auto c = x[static_cast<std::size_t>(a)];
+      mask |= near(c, -1.0) ? (std::uint64_t{1} << (2 * a)) : 0u;
+      mask |= near(c, 1.0) ? (std::uint64_t{1} << (2 * a + 1)) : 0u;
+    }
+    return mask;
+  }
+  case ElementType::Triangle3:
+  case ElementType::Triangle6:
+  case ElementType::Tetra4:
+  case ElementType::Tetra10: {
+    const int dim = svmp::FE::element_dimension(type);
+    svmp::FE::Real sum = 0.0;
+    for (int a = 0; a < dim; ++a) {
+      const auto c = x[static_cast<std::size_t>(a)];
+      mask |= near(c, 0.0) ? (std::uint64_t{1} << a) : 0u;
+      sum += c;
+    }
+    mask |= near(sum, 1.0) ? (std::uint64_t{1} << dim) : 0u;
+    return mask;
+  }
+  default:
+    throw std::runtime_error(
+        "The cut-structure key supports triangles, quadrilaterals, tetrahedra "
+        "and hexahedra.");
+  }
+}
+
 } // namespace
+
+std::map<svmp::FE::GlobalIndex, std::uint64_t> cutStructureCellKeys(
+    const svmp::FE::systems::FESystem& system,
+    const svmp::FE::interfaces::LevelSetInterfaceDomain& domain,
+    svmp::FE::FieldId level_set_field,
+    std::span<const svmp::FE::Real> solution)
+{
+  const auto& mesh = system.meshAccess();
+  const auto& dofs = system.fieldDofHandler(level_set_field).getDofMap();
+  const auto offset =
+      static_cast<std::size_t>(system.fieldDofOffset(level_set_field));
+  const auto isovalue = domain.request().isovalue;
+  const auto band = domain.request().resolvedCoefficientClassificationBand();
+
+  // The parent-boundary facets of the fragment vertices, a set per cell.
+  std::map<svmp::FE::GlobalIndex, std::set<std::uint64_t>> facets;
+  for (const auto& fragment : domain.fragments()) {
+    if (!fragment.active() || fragment.parent_cell < 0 ||
+        !mesh.isOwnedCell(fragment.parent_cell)) {
+      continue;
+    }
+    const auto type = mesh.getCellType(fragment.parent_cell);
+    auto& cell_facets =
+        facets[mesh.getCellGlobalId(fragment.parent_cell)];
+    for (const auto& vertex : fragment.vertices) {
+      const auto mask = referenceFacetMask(type, vertex.parent_coordinate);
+      if (mask != 0u) {
+        cell_facets.insert(mask);
+      }
+    }
+  }
+
+  std::map<svmp::FE::GlobalIndex, std::uint64_t> keys;
+  for (svmp::FE::GlobalIndex cell = 0; cell < mesh.numCells(); ++cell) {
+    if (!mesh.isOwnedCell(cell)) {
+      continue;
+    }
+    const auto gid = mesh.getCellGlobalId(cell);
+    std::uint64_t key = kCutContextHashOffset;
+    constexpr std::uint64_t contract_tag =
+        0x4355545354525531ull; // "CUTSTRU1"
+    mixCutContextHash(key, contract_tag);
+    // The sign class of every level-set DOF, in the cell's DOF order.
+    const auto cell_dofs = dofs.getCellDofs(cell);
+    mixCutContextHash(key, static_cast<std::uint64_t>(cell_dofs.size()));
+    for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+      const auto index = offset + static_cast<std::size_t>(cell_dofs[i]);
+      if (index >= solution.size() || !std::isfinite(solution[index])) {
+        throw std::runtime_error(
+            "The cut-structure key found a level-set DOF without a finite value.");
+      }
+      const auto signed_value = solution[index] - isovalue;
+      mixCutContextHash(
+          key, signed_value < -band ? 0u : (signed_value > band ? 2u : 1u));
+    }
+    if (const auto found = facets.find(gid); found != facets.end()) {
+      mixCutContextHash(key, static_cast<std::uint64_t>(found->second.size()));
+      for (const auto mask : found->second) {
+        mixCutContextHash(key, mask);
+      }
+    }
+    keys.emplace(gid, key == 0u ? 1u : key);
+  }
+  return keys;
+}
 
 // Moved from Application/Core/ApplicationDriver.cpp with bodies, messages and
 // collective order unchanged.
@@ -249,6 +368,79 @@ std::uint64_t freeSurfaceRuleSemanticTopologyFingerprint(
   return fingerprint == 0u ? 1u : fingerprint;
 }
 
+namespace {
+
+// The cut-structure key of a non-LinearCorner request: one fingerprint per
+// owned cell, of the set (not the multiset) of the kinds of its retained
+// rules, without the source topology key (it counts the leaves of an
+// adaptive subdivision) and without pruned leaves (a sliver leaf comes and
+// goes with the subdivision; a side whose every leaf is pruned leaves the
+// set), and of the cell's cut-structure key (cutStructureCellKeys).
+void appendCutStructureFingerprints(
+    const ActiveCutTopologySnapshotBinding& binding,
+    std::uint64_t request_identity,
+    std::vector<std::uint64_t>& out)
+{
+  if (binding.cell_structure_keys == nullptr) {
+    throw std::runtime_error(
+        "Active-cut topology fingerprint of a non-LinearCorner request requires the cut-structure keys of its cells.");
+  }
+  using RuleKind = std::tuple<std::uint64_t, std::uint64_t, std::uint64_t,
+                              std::uint64_t, std::uint64_t, std::uint64_t,
+                              std::uint64_t>;
+  std::map<svmp::FE::GlobalIndex, std::set<RuleKind>> rules_by_cell;
+  for (const auto& rule : binding.snapshot->rules()) {
+    if (!rule.locally_owned ||
+        rule.retention != svmp::FE::interfaces::FreeSurfaceGeometryRetention::Retained) {
+      continue;
+    }
+    const auto& reference = rule.reference_rule;
+    const auto& provenance = reference.provenance;
+    if (provenance.parent_entity_global_id ==
+        svmp::FE::INVALID_GLOBAL_INDEX) {
+      throw std::runtime_error(
+          "Active-cut topology fingerprint requires canonical global rule identities.");
+    }
+    rules_by_cell[provenance.parent_entity_global_id].insert(RuleKind{
+        static_cast<std::uint64_t>(rule.role),
+        static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(rule.physical_boundary_marker)),
+        static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(provenance.marker)),
+        static_cast<std::uint64_t>(provenance.parent_boundary_entity_global_id),
+        static_cast<std::uint64_t>(reference.kind),
+        static_cast<std::uint64_t>(reference.side),
+        reference.full_cell_equivalent ? 1u : 0u});
+  }
+  for (const auto& [gid, structure_key] : *binding.cell_structure_keys) {
+    std::uint64_t fingerprint = kCutContextHashOffset;
+    constexpr std::uint64_t cell_identity_tag =
+        0x43555443454c4c31ull; // "CUTCELL1"
+    mixCutContextHash(fingerprint, cell_identity_tag);
+    mixCutContextHash(fingerprint, request_identity);
+    mixCutContextHash(fingerprint, static_cast<std::uint64_t>(gid));
+    mixCutContextHash(fingerprint, structure_key);
+    if (const auto found = rules_by_cell.find(gid);
+        found != rules_by_cell.end()) {
+      mixCutContextHash(fingerprint,
+                        static_cast<std::uint64_t>(found->second.size()));
+      for (const auto& kind : found->second) {
+        std::apply(
+            [&](auto... words) { (mixCutContextHash(fingerprint, words), ...); },
+            kind);
+      }
+      rules_by_cell.erase(found);
+    }
+    out.push_back(fingerprint == 0u ? 1u : fingerprint);
+  }
+  if (!rules_by_cell.empty()) {
+    throw std::runtime_error(
+        "Active-cut topology fingerprint found owned rules of a cell without a cut-structure key.");
+  }
+}
+
+} // namespace
+
 std::uint64_t activeCutContextTopologyFingerprint(
     std::span<const ActiveCutTopologySnapshotBinding> bindings,
     const svmp::FE::systems::CollectiveCommunicator& comm)
@@ -270,6 +462,12 @@ std::uint64_t activeCutContextTopologyFingerprint(
             "Active-cut topology fingerprint produced a zero request identity.");
       }
       request_identities.push_back(request_identity);
+      if (binding.request->geometry_mode !=
+          GeneratedInterfaceGeometryMode::LinearCorner) {
+        appendCutStructureFingerprints(binding, request_identity,
+                                       local_owned_rule_fingerprints);
+        continue;
+      }
       for (const auto& rule : binding.snapshot->rules()) {
         if (!rule.locally_owned) {
           continue;
@@ -301,9 +499,19 @@ bool transientCutTopologyFingerprintSupportsRequests(
 {
   using Mode =
       svmp::FE::level_set::GeneratedInterfaceGeometryMode;
+  using Backend = svmp::FE::level_set::ImplicitCutQuadratureBackend;
   return std::all_of(
       requests.begin(), requests.end(), [](const auto& request) {
-        return request.geometry_mode == Mode::LinearCorner;
+        if (request.geometry_mode == Mode::LinearCorner) {
+          return true;
+        }
+        return request.geometry_mode == Mode::HighOrderImplicit &&
+               (request.implicit_cut_backend ==
+                    Backend::SayeHyperrectangle ||
+                request.implicit_cut_backend == Backend::HighOrderSubcell ||
+                request.implicit_cut_backend == Backend::Auto) &&
+               request.implicit_cut_fallback_policy ==
+                   ImplicitCutFallbackPolicy::Fail;
       });
 }
 

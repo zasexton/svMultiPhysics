@@ -784,6 +784,8 @@ struct CutGeometryPolicy {
       ImplicitCutQuadratureBackend::LinearCorner};
   ImplicitCutFallbackPolicy implicit_cut_fallback_policy{
       ImplicitCutFallbackPolicy::Fail};
+  /// Subdivision depth of the implicit backend (unset: the request's).
+  std::optional<int> implicit_cut_max_subdivision_depth{};
   /// Keep both cut volumes even for one side; ConstraintPlan::activeOn with
   /// aggregation requires it.
   bool retain_both_sides{false};

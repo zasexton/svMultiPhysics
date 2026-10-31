@@ -175,14 +175,28 @@ TEST(LevelSetCutTopologyFingerprint, IncompleteBindingsFailOnEveryRank)
                std::runtime_error);
 }
 
-TEST(LevelSetCutTopologyFingerprint, QualifiedOnlyForLinearCornerRequests)
+TEST(LevelSetCutTopologyFingerprint, QualifiedForLinearCornerAndImplicitBackendsWithoutFallback)
 {
   std::vector<ls::ActiveCutVolumeRequest> requests(2u);
   EXPECT_TRUE(ls::transientCutTopologyFingerprintSupportsRequests(requests));
+  EXPECT_TRUE(ls::transientCutTopologyFingerprintSupportsRequests({}));
+  // HighOrderImplicit is qualified (cut-structure key) with an implicit
+  // backend and the Fail fallback.
   requests[1].geometry_mode =
       ls::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+  for (const auto backend : {ls::ImplicitCutQuadratureBackend::SayeHyperrectangle,
+                             ls::ImplicitCutQuadratureBackend::HighOrderSubcell,
+                             ls::ImplicitCutQuadratureBackend::Auto}) {
+    requests[1].implicit_cut_backend = backend;
+    EXPECT_TRUE(ls::transientCutTopologyFingerprintSupportsRequests(requests));
+  }
+  requests[1].implicit_cut_fallback_policy = ls::ImplicitCutFallbackPolicy::LinearCorner;
   EXPECT_FALSE(ls::transientCutTopologyFingerprintSupportsRequests(requests));
-  EXPECT_TRUE(ls::transientCutTopologyFingerprintSupportsRequests({}));
+  requests[1].implicit_cut_fallback_policy = ls::ImplicitCutFallbackPolicy::Fail;
+  requests[1].implicit_cut_backend = ls::ImplicitCutQuadratureBackend::MomentFit;
+  EXPECT_FALSE(ls::transientCutTopologyFingerprintSupportsRequests(requests));
+  requests[1].implicit_cut_backend = ls::ImplicitCutQuadratureBackend::LinearCorner;
+  EXPECT_FALSE(ls::transientCutTopologyFingerprintSupportsRequests(requests));
 }
 
 TEST(LevelSetCutTopologyFingerprint, HashMixersAreFnv1a)

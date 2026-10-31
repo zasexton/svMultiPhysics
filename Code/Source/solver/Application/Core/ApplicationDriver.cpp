@@ -7155,11 +7155,11 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           transient_cut_topology_preflight_comm)) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Transient fixed cut-topology "
-        "acceptance requires geometry_mode=LinearCorner for every active-cut "
-        "request. The current partition-independent structural fingerprint "
-        "is a probabilistic certificate qualified for LinearCorner cuts, not "
-        "a sound arbitrary high-order connectivity certificate; refusing to "
-        "start the transient solve rather than disabling the gate.");
+        "acceptance requires, for every active-cut request, "
+        "geometry_mode=LinearCorner (the rule fingerprint) or "
+        "HighOrderImplicit with the SayeHyperrectangle, HighOrderSubcell or "
+        "Auto backend and the Fail fallback (the cut-structure key); refusing "
+        "to start the transient solve rather than disabling the gate.");
   }
   // A first-order generalized-alpha state is (u_n, uDot_n).  Starting an
   // active-cut free-surface problem with uDot_n=0 is generally inconsistent

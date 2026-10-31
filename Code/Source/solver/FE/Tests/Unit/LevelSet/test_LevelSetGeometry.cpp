@@ -717,6 +717,158 @@ TEST(CutGeometry, CutOfTheI3CircleMatchesTheHandBuiltContext)
     EXPECT_LT(difference, 1e-13 * scale);
 }
 
+// ---------------------------------------------------------------------------
+// The cut-structure key of HighOrderImplicit geometry
+// ---------------------------------------------------------------------------
+
+struct CutKey {
+    std::uint64_t key{0};
+    std::size_t interface_fragments{0};
+};
+
+/// 8 x 8 Quad9 cells of the unit square without boundary labels.
+std::shared_ptr<svmp::Mesh> unlabeledQuad9Mesh()
+{
+    constexpr int n = 8;
+    constexpr int m = 2 * n;
+    std::vector<svmp::real_t> x;
+    for (int j = 0; j <= m; ++j) {
+        for (int i = 0; i <= m; ++i) {
+            x.push_back(static_cast<svmp::real_t>(i) / m);
+            x.push_back(static_cast<svmp::real_t>(j) / m);
+        }
+    }
+    const auto id = [](int i, int j) { return static_cast<svmp::index_t>(j * (m + 1) + i); };
+    svmp::CellShape shape{};
+    shape.family = svmp::CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 2;
+    std::vector<svmp::offset_t> offsets{0};
+    std::vector<svmp::index_t> connectivity;
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < n; ++i) {
+            const int p = 2 * i, q = 2 * j;
+            connectivity.insert(connectivity.end(),
+                                {id(p, q), id(p + 2, q), id(p + 2, q + 2), id(p, q + 2), id(p + 1, q),
+                                 id(p + 2, q + 1), id(p + 1, q + 2), id(p, q + 1), id(p + 1, q + 1)});
+            offsets.push_back(static_cast<svmp::offset_t>(connectivity.size()));
+        }
+    }
+    auto base = std::make_shared<svmp::MeshBase>();
+    base->build_from_arrays(2, x, offsets, connectivity, std::vector<svmp::CellShape>(offsets.size() - 1u, shape));
+    base->finalize();
+    return svmp::create_mesh(std::move(base));
+}
+
+/// A HighOrderImplicit (SayeHyperrectangle) cut of a P2 level set: the system,
+/// its geometry and the level-set field, before the level set is set.
+struct HighOrderCut {
+    std::shared_ptr<svmp::Mesh> mesh;
+    std::unique_ptr<systems::FESystem> system;
+    std::optional<CutGeometry> geometry;
+    FieldId phi{INVALID_FIELD_ID};
+};
+
+HighOrderCut highOrderCut(std::shared_ptr<svmp::Mesh> mesh, std::shared_ptr<spaces::H1Space> space, int depth)
+{
+    HighOrderCut out;
+    out.mesh = std::move(mesh);
+    out.system = std::make_unique<systems::FESystem>(out.mesh);
+    out.phi = out.system->addField(
+        systems::FieldSpec{.name = "phi", .space = space, .source_kind = systems::FieldSourceKind::PrescribedData});
+    (void)out.system->addField(systems::FieldSpec{.name = "T", .space = space});
+    out.geometry.emplace(cutGeometry(*out.system, *out.mesh, {.level_set_field_name = "phi", .domain_id = "wave"},
+                                     {.quadrature_order = 2,
+                                      .geometry_mode = GeneratedInterfaceGeometryMode::HighOrderImplicit,
+                                      .implicit_cut_backend = ImplicitCutQuadratureBackend::SayeHyperrectangle,
+                                      .implicit_cut_max_subdivision_depth = depth}));
+    return out;
+}
+
+/// Sets the level set to @p phi at the mesh vertices, changed by @p edit, and cuts.
+ActiveCutContextRefreshReport cutAt(HighOrderCut& cut,
+                                    const std::function<Real(Real, Real)>& phi,
+                                    const std::function<void(const svmp::Mesh&, std::vector<Real>&)>& edit = {})
+{
+    std::vector<Real> values(cut.mesh->n_vertices());
+    for (std::size_t v = 0; v < values.size(); ++v) {
+        const auto x = cut.mesh->local_mesh().get_vertex_coords(static_cast<svmp::index_t>(v));
+        values[v] = phi(static_cast<Real>(x[0]), static_cast<Real>(x[1]));
+    }
+    if (edit) {
+        edit(*cut.mesh, values);
+    }
+    auto& system = *cut.system;
+    std::vector<Real> coefficients(static_cast<std::size_t>(system.fieldDofHandler(cut.phi).getNumDofs()), 0.0);
+    (void)system.projectMeshVertexValuesToFieldCoefficients(cut.phi, values, 1u, coefficients);
+    system.setPrescribedFieldCoefficients(cut.phi, coefficients);
+    return cut.geometry->refresh();
+}
+
+/// The topology key of the HighOrderImplicit cut of the P2 level set @p phi
+/// on 8 x 8 Quad9 cells of the unit square.
+CutKey highOrderCutKey(const std::function<Real(Real, Real)>& phi,
+                       int depth,
+                       const std::function<void(const svmp::Mesh&, std::vector<Real>&)>& edit = {})
+{
+    auto cut = highOrderCut(unlabeledQuad9Mesh(), test_trace_multiplier::quadSpace(2), depth);
+    (void)cut.geometry->side(CutVolumeSide::Negative);
+    cut.system->setup();
+    const auto report = cutAt(cut, phi, edit);
+    return {report.topology_key, report.interface_fragments};
+}
+
+Real waveLevelSet(Real x, Real y, Real shift)
+{
+    return y - 0.43 - shift - 0.05 * std::sin(2.0 * kPi * x);
+}
+
+// The key reads the discrete cut structure, not the backend's subdivision: a
+// motion that changes no node sign, no cut cell and no wetted face keeps the
+// key at every subdivision depth, although it changes the backend's leaves.
+// (The depth itself is part of the request, so keys of different depths
+// differ.)
+TEST(CutStructureKey, DoesNotChangeWithMotionWithinAStructureClass)
+{
+    for (const int depth : {4, 6, 8}) {
+        SCOPED_TRACE("depth " + std::to_string(depth));
+        const auto base = highOrderCutKey([](Real x, Real y) { return waveLevelSet(x, y, 0.0); }, depth);
+        const auto moved = highOrderCutKey([](Real x, Real y) { return waveLevelSet(x, y, 0.003); }, depth);
+        EXPECT_NE(base.key, 0u);
+        EXPECT_EQ(moved.key, base.key);
+        std::cout << "[ cut-structure key ] depth " << depth << ": interface fragments " << base.interface_fragments
+                  << " -> " << moved.interface_fragments << std::endl;
+    }
+}
+
+// Each change of the discrete structure changes the key: a level-set DOF
+// changes sign (here a mid-edge node above the interface dips below it while
+// the corners of its edge keep their sign), and cells become cut or uncut.
+TEST(CutStructureKey, ChangesWithEveryChangeOfTheDiscreteStructure)
+{
+    const auto wave = [](Real x, Real y) { return waveLevelSet(x, y, 0.0); };
+    const auto base = highOrderCutKey(wave, 6);
+
+    // The mid-edge node at (0.5 + 1/16, 0.75) only: its edge's corners stay
+    // positive.
+    const auto dipped = highOrderCutKey(wave, 6, [](const svmp::Mesh& mesh, std::vector<Real>& values) {
+        std::size_t edited = 0u;
+        for (std::size_t v = 0; v < values.size(); ++v) {
+            const auto x = mesh.local_mesh().get_vertex_coords(static_cast<svmp::index_t>(v));
+            if (std::abs(x[0] - 0.5625) < 1e-12 && std::abs(x[1] - 0.75) < 1e-12) {
+                values[v] = -0.01;
+                ++edited;
+            }
+        }
+        EXPECT_EQ(edited, 1u);
+    });
+    EXPECT_NE(dipped.key, base.key);
+
+    // A larger shift moves the interface across nodes and cells.
+    const auto shifted = highOrderCutKey([](Real x, Real y) { return waveLevelSet(x, y, 0.07); }, 6);
+    EXPECT_NE(shifted.key, base.key);
+}
+
 #endif // SVMP_FE_WITH_MESH && FE_HAS_EIGEN
 
 } // namespace

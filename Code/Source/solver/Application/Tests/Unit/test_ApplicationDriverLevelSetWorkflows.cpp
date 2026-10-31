@@ -3097,7 +3097,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
-     TransientCutTopologyFingerprintIsQualifiedOnlyForLinearCornerGeometry)
+     TransientCutTopologyFingerprintIsQualifiedForLinearCornerAndImplicitBackends)
 {
   using Mode =
       svmp::FE::level_set::GeneratedInterfaceGeometryMode;
@@ -3105,6 +3105,14 @@ TEST(ApplicationDriverLevelSetWorkflows,
   linear_request.geometry_mode = Mode::LinearCorner;
   ActiveCutVolumeRequest high_order_request = linear_request;
   high_order_request.geometry_mode = Mode::HighOrderImplicit;
+  // An implicit backend without fallback is qualified (cut-structure key);
+  // the LinearCorner backend under HighOrderImplicit geometry is not.
+  high_order_request.implicit_cut_backend =
+      svmp::FE::level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+  EXPECT_TRUE(transientCutTopologyFingerprintSupportsRequests(
+      std::span<const ActiveCutVolumeRequest>{&high_order_request, 1u}));
+  high_order_request.implicit_cut_backend =
+      svmp::FE::level_set::ImplicitCutQuadratureBackend::LinearCorner;
 
   EXPECT_TRUE(transientCutTopologyFingerprintSupportsRequests(
       std::span<const ActiveCutVolumeRequest>{}));
