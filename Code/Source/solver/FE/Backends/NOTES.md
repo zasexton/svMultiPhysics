@@ -45,7 +45,7 @@
     - `BackendFactory::create("fsils", BackendFactory::CreateOptions{.dof_per_node=...})` provides the same knob via the generic factory.
     - The FE view uses **interleaved DOF ordering** per node: global DOF `gid = node*dof + component`.
     - `FsilsMatrix` builds a node-level sparsity pattern (nnz blocks) and stores dense `dof×dof` blocks in FSILS column-major layout.
-  - `SolverMethod::BlockSchur` maps to the FSILS NS solver (`LS_TYPE_NS`) and requires `dof=3` (2D) or `dof=4` (3D) with the per-node ordering `(u,v[,w],p)`.
+  - `SolverMethod::BlockSchur` maps to the FSILS NS solver (`LS_TYPE_NS`) on a two-way partition of the per-node components: a primary block followed by a constraint block that together cover every component (`SolverOptions::block_layout`). The Application derives that layout from the solver roles the fields state (`systems::deriveBlockLayout`, `FieldSpec::solver_role`).
     - The NS solver uses `max_iter` to size `O(nNo * max_iter)` workspace; for safety, very large values are treated as unset (fallback to the FSILS default).
   - FSILS preconditioning notes:
     - The upstream `fsils_solve()` path always applies a post-solve diagonal scaling step (`Wc ⊙ R`); if no preconditioner routine runs, `Wc` is undefined.
