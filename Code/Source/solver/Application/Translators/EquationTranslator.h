@@ -10,6 +10,7 @@
 #include "Physics/Core/PhysicsModule.h"
 
 class EquationParameters;
+class Parameters;
 
 namespace svmp {
 namespace FE {
@@ -39,6 +40,14 @@ public:
   snapshotLevelSetEquationInput(
       const EquationParameters& equation,
       svmp::Physics::EquationModuleInput installation_input);
+
+  /// States the values of the method profile that a Free_surface boundary
+  /// condition names (Free_surface_profile, decision D47 P4) on that
+  /// boundary and on the level-set equation of its field, for every key the
+  /// element does not state itself; each such parameter records the profile
+  /// as its origin.  Every reader of the input then sees the deck the
+  /// profile stands for.  Called once, right after the input file is read.
+  static void applyFreeSurfaceProfiles(Parameters& params);
 
   /// `derived_requests` carries what the Application derived from the other
   /// equations of the input (see svmp::Physics::DerivedModuleRequests).

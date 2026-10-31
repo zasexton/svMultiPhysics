@@ -10,6 +10,7 @@
 #include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Core/EquationModuleRegistry.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
+#include "Physics/Options/FreeSurfaceProfiles.h"
 #include "Physics/Options/NavierStokesRegistration.h"
 #include "Physics/Options/NavierStokesOptionRules.h"
 
@@ -3734,6 +3735,162 @@ TEST(NavierStokesLegacyBCs, BeamMesh_JitParity_ParabolicInflowResistanceOutflow)
     expectAdaptiveNear(jit.vector, fallback.vector, 1e-10, 1e-9, "vector");
 #  endif
 #endif
+}
+
+TEST(NavierStokesLegacyBCs, FreeSurfaceProfilesNameTheProtocolValues)
+{
+    // Decision D47 (P4): a Free_surface boundary names a versioned method
+    // profile; the profile states its values for the keys the boundary and
+    // the level-set equation do not state themselves.
+    namespace opt = svmp::FE::options;
+    namespace ns = svmp::Physics::formulations::navier_stokes;
+    using svmp::Physics::options::FreeSurfaceProfileElement;
+    using svmp::Physics::options::applicableFreeSurfaceProfileValues;
+    using svmp::Physics::options::freeSurfaceProfile;
+    using svmp::Physics::options::freeSurfaceProfiles;
+    using svmp::Physics::options::namedFreeSurfaceProfile;
+
+    std::vector<std::string> labels;
+    for (const auto& profile : freeSurfaceProfiles()) {
+        labels.push_back(profile.label());
+    }
+    EXPECT_EQ(labels, (std::vector<std::string>{"Capillary@1", "Wetting@1", "Gravity_wave@1",
+                                                "Fitted_ALE@1", "None"}));
+    EXPECT_EQ(freeSurfaceProfile("Capillary").label(), "Capillary@1");
+    EXPECT_EQ(freeSurfaceProfile(" gravity-wave @1 ").label(), "Gravity_wave@1");
+    EXPECT_EQ(freeSurfaceProfile("fitted_ale").label(), "Fitted_ALE@1");
+    EXPECT_EQ(freeSurfaceProfile("none").label(), "None");
+    EXPECT_TRUE(freeSurfaceProfile("None").values.empty());
+    for (const auto* text : {"Capillary@2", "None@1", "Wetting@x", "Sloshing"}) {
+        try {
+            (void)freeSurfaceProfile(text);
+            ADD_FAILURE() << text;
+        } catch (const opt::OptionError& error) {
+            EXPECT_NE(std::string(error.what()).find(
+                          "[Free_surface] Free_surface_profile: expected one of Capillary@1 | "
+                          "Wetting@1 | Gravity_wave@1 | Fitted_ALE@1 | None"),
+                      std::string::npos)
+                << error.what();
+        }
+    }
+
+    // Every boundary value is a value of the boundary schemas, and each
+    // profile is written for one implementation.
+    const auto& boundary_schema = ns::freeSurfaceBoundarySchema();
+    const auto& contact_schema = ns::freeSurfaceContactLineInputSchema();
+    for (const auto& profile : freeSurfaceProfiles()) {
+        for (const auto& value : profile.values) {
+            if (value.element != FreeSurfaceProfileElement::Boundary ||
+                value.key == "Interface_quadrature_order") {
+                continue;
+            }
+            opt::OptionInput in;
+            in.add(value.key, value.value, profile.label());
+            if (boundary_schema.acceptsSpelling(value.key)) {
+                EXPECT_EQ(boundary_schema.resolve(in).find(value.key)->source,
+                          opt::OptionSource::Profile)
+                    << profile.label() << " " << value.key;
+            } else {
+                ASSERT_TRUE(contact_schema.acceptsSpelling(value.key)) << value.key;
+                EXPECT_NO_THROW((void)contact_schema.resolve(in)) << value.key;
+            }
+        }
+    }
+
+    const auto boundary = [](std::vector<std::pair<std::string, std::string>> entries) {
+        opt::OptionInput in;
+        for (auto& [key, text] : entries) {
+            in.add(key, text);
+        }
+        return in;
+    };
+    const auto keys = [](const std::vector<svmp::Physics::options::FreeSurfaceProfileValue>& values) {
+        std::vector<std::string> out;
+        for (const auto& value : values) {
+            out.push_back(value.key + "=" + value.value);
+        }
+        return out;
+    };
+
+    // The implementation must be the profile's.
+    EXPECT_EQ(namedFreeSurfaceProfile(boundary({{"Implementation", "UnfittedLevelSet"}})), nullptr);
+    EXPECT_EQ(namedFreeSurfaceProfile(boundary({{"Implementation", "FittedALE"},
+                                                {"Free_surface_profile", "Fitted_ALE@1"}}))
+                  ->label(),
+              "Fitted_ALE@1");
+    EXPECT_EQ(namedFreeSurfaceProfile(boundary({{"Implementation", "FittedALE"},
+                                                {"Free_surface_profile", "None"}}))
+                  ->label(),
+              "None");
+    for (const auto& [implementation, profile] :
+         std::vector<std::pair<std::string, std::string>>{{"FittedALE", "Capillary@1"},
+                                                          {"UnfittedLevelSet", "Fitted_ALE"},
+                                                          {"", "Wetting"}}) {
+        auto in = boundary({{"Free_surface_profile", profile}});
+        if (!implementation.empty()) {
+            in.add("Implementation", implementation);
+        }
+        try {
+            (void)namedFreeSurfaceProfile(in);
+            ADD_FAILURE() << profile;
+        } catch (const opt::OptionError& error) {
+            EXPECT_NE(std::string(error.what()).find(" is written for Implementation="),
+                      std::string::npos)
+                << error.what();
+        }
+    }
+
+    // Stated keys override the profile; a stated velocity source takes the
+    // whole advection velocity; the strong Ren-E law needs DynamicRenE.
+    const auto& capillary = freeSurfaceProfile("Capillary@1");
+    const auto unfitted = boundary({{"Implementation", "UnfittedLevelSet"},
+                                    {"Free_surface_profile", "Capillary@1"},
+                                    {"Surface_tension_semi_implicit", "None"}});
+    EXPECT_EQ(keys(applicableFreeSurfaceProfileValues(capillary, FreeSurfaceProfileElement::Boundary,
+                                                      unfitted, unfitted)),
+              (std::vector<std::string>{
+                  "Level_set_isovalue=0.0", "Generated_interface_geometry=LinearCorner",
+                  "Enable_cut_cell_stabilization=true", "Cut_cell_pressure_gradient_penalty=1.0",
+                  "Small_cut_aggregation=true",
+                  "Geometry_tangent_policy=RefreshedFrozenQuadrature",
+                  "Interface_quadrature_order=2"}));
+    EXPECT_EQ(keys(applicableFreeSurfaceProfileValues(
+                  capillary, FreeSurfaceProfileElement::LevelSetEquation,
+                  boundary({{"Velocity_source", "coupled_field"},
+                            {"Enable_kinematic_reconciliation", "false"}}),
+                  unfitted)),
+              (std::vector<std::string>{"Level_set_source=prescribed_data", "Enable_SUPG=true",
+                                        "SUPG_tau_scale=0.5", "SUPG_transient_scale=2.0"}));
+    EXPECT_EQ(applicableFreeSurfaceProfileValues(capillary,
+                                                 FreeSurfaceProfileElement::LevelSetEquation,
+                                                 boundary({}), unfitted)
+                  .size(),
+              11u);
+
+    const auto& wetting = freeSurfaceProfile("Wetting");
+    const auto law = [&](const std::string& model) {
+        const auto in = boundary({{"Implementation", "UnfittedLevelSet"},
+                                  {"Contact_line_model", model}});
+        const auto values = keys(applicableFreeSurfaceProfileValues(
+            wetting, FreeSurfaceProfileElement::Boundary, in, in));
+        return std::find(values.begin(), values.end(), "Contact_line_law_enforcement=Strong") !=
+               values.end();
+    };
+    EXPECT_TRUE(law("DynamicRenE"));
+    EXPECT_TRUE(law("rene"));
+    EXPECT_FALSE(law("PrescribedAngle"));
+    EXPECT_FALSE(law("not_a_model"));
+
+    const auto& fitted = freeSurfaceProfile("Fitted_ALE@1");
+    const auto prescribed = boundary({{"Implementation", "FittedALE"},
+                                      {"Prescribed_tangential_mesh_velocity", "0 0 0"}});
+    EXPECT_EQ(keys(applicableFreeSurfaceProfileValues(fitted, FreeSurfaceProfileElement::Boundary,
+                                                      prescribed, prescribed)),
+              (std::vector<std::string>{"Kinematic_nitsche_gamma=10",
+                                        "Surface_tension_semi_implicit=None"}));
+    EXPECT_TRUE(applicableFreeSurfaceProfileValues(
+                    fitted, FreeSurfaceProfileElement::LevelSetEquation, boundary({}), prescribed)
+                    .empty());
 }
 
 } // namespace svmp::Physics::test

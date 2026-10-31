@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "Application/Translators/EquationTranslator.h"
+#include "Application/Translators/LevelSetConfigurationParsing.h"
 #include "FE/Spaces/SpaceFactory.h"
 #include "FE/Systems/FESystem.h"
 #include "Mesh/Core/MeshBase.h"
@@ -8,6 +9,8 @@
 #include "Mesh/Topology/CellShape.h"
 #include "Parameters.h"
 #include "Physics/Core/EquationModuleInput.h"
+#include "Physics/Options/FreeSurfaceProfiles.h"
+#include "Physics/Options/NavierStokesOptionSchema.h"
 #include "Physics/Options/NavierStokesRegistration.h"
 #include "FE/Systems/FunctionalRecords.h"
 #include "FE/Systems/TwoFluidStageRecords.h"
@@ -2001,4 +2004,212 @@ TEST(EquationTranslatorNodePressureConstraints, BuildInputRejectsUnsupportedIdTy
 
   EXPECT_THROW((void)application::translators::EquationTranslator::buildInput(*params, singleMeshMap(mesh)),
                std::runtime_error);
+}
+
+namespace {
+
+constexpr const char* kProfileLevelSetXml = R"xml(
+<Add_equation type="level_set">
+  <Coupled>true</Coupled>
+  <Level_set_field_name>phi</Level_set_field_name>
+  <Enable_kinematic_reconciliation>false</Enable_kinematic_reconciliation>
+</Add_equation>
+)xml";
+
+constexpr const char* kProfileFluidXml = R"xml(
+<Add_equation type="fluid">
+  <Add_BC name="free_surface">
+    <Type>Free_surface</Type>
+    <Implementation>UnfittedLevelSet</Implementation>
+    <Free_surface_profile>Capillary</Free_surface_profile>
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Generated_interface_domain_id>drop_surface</Generated_interface_domain_id>
+    <Active_domain>LevelSetNegative</Active_domain>
+    <Surface_tension>1</Surface_tension>
+    <Surface_tension_semi_implicit>None</Surface_tension_semi_implicit>
+  </Add_BC>
+</Add_equation>
+)xml";
+
+// The same deck with the values of Capillary@1 written out.
+constexpr const char* kExplicitLevelSetXml = R"xml(
+<Add_equation type="level_set">
+  <Coupled>true</Coupled>
+  <Level_set_field_name>phi</Level_set_field_name>
+  <Level_set_source>prescribed_data</Level_set_source>
+  <Velocity_source>prescribed_data</Velocity_source>
+  <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
+  <Auto_register_velocity_field>true</Auto_register_velocity_field>
+  <Source_velocity_field_name>Velocity</Source_velocity_field_name>
+  <Advection_velocity_extension_method>pde_harmonic</Advection_velocity_extension_method>
+  <Advection_velocity_extension_coupling>monolithic</Advection_velocity_extension_coupling>
+  <Enable_SUPG>true</Enable_SUPG>
+  <SUPG_tau_scale>0.5</SUPG_tau_scale>
+  <SUPG_transient_scale>2.0</SUPG_transient_scale>
+  <Enable_kinematic_reconciliation>false</Enable_kinematic_reconciliation>
+</Add_equation>
+)xml";
+
+constexpr const char* kExplicitFluidXml = R"xml(
+<Add_equation type="fluid">
+  <Add_BC name="free_surface">
+    <Type>Free_surface</Type>
+    <Implementation>UnfittedLevelSet</Implementation>
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Generated_interface_domain_id>drop_surface</Generated_interface_domain_id>
+    <Level_set_isovalue>0.0</Level_set_isovalue>
+    <Active_domain>LevelSetNegative</Active_domain>
+    <Generated_interface_geometry>LinearCorner</Generated_interface_geometry>
+    <Geometry_tangent_policy>RefreshedFrozenQuadrature</Geometry_tangent_policy>
+    <Interface_quadrature_order>2</Interface_quadrature_order>
+    <Surface_tension>1</Surface_tension>
+    <Surface_tension_semi_implicit>None</Surface_tension_semi_implicit>
+    <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
+    <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
+    <Small_cut_aggregation>true</Small_cut_aggregation>
+  </Add_BC>
+</Add_equation>
+)xml";
+
+std::unique_ptr<Parameters> parseProfileDeck(const char* level_set_xml, const char* fluid_xml)
+{
+  auto params = std::make_unique<Parameters>();
+  params->equation_parameters.push_back(parseEquationXml(level_set_xml).release());
+  params->equation_parameters.push_back(parseEquationXml(fluid_xml).release());
+  return params;
+}
+
+std::string profileErrorText(const char* level_set_xml, const char* fluid_xml)
+{
+  auto params = parseProfileDeck(level_set_xml, fluid_xml);
+  try {
+    application::translators::EquationTranslator::applyFreeSurfaceProfiles(*params);
+  } catch (const std::exception& error) {
+    return error.what();
+  }
+  return {};
+}
+
+std::string replaced(std::string text, std::string_view from, std::string_view to)
+{
+  const auto at = text.find(from);
+  if (at == std::string::npos) {
+    throw std::runtime_error("replaced: text not found");
+  }
+  return text.replace(at, from.size(), to);
+}
+
+} // namespace
+
+TEST(EquationTranslatorFreeSurface, ProfileStatesItsValuesForTheKeysTheDeckLeavesOut)
+{
+  namespace parsing = application::translators::level_set::configuration;
+  namespace ns = svmp::Physics::formulations::navier_stokes;
+  auto params = parseProfileDeck(kProfileLevelSetXml, kProfileFluidXml);
+  application::translators::EquationTranslator::applyFreeSurfaceProfiles(*params);
+
+  auto& level_set = *params->equation_parameters[0];
+  auto& bc = *params->equation_parameters[1]->boundary_conditions.front();
+  EXPECT_EQ(bc.extra_string_params.at("Geometry_tangent_policy").value(),
+            "RefreshedFrozenQuadrature");
+  EXPECT_EQ(bc.parameter_origin("Geometry_tangent_policy"), "Capillary@1");
+  EXPECT_EQ(bc.extra_string_params.at("Interface_quadrature_order").value(), "2");
+  // A stated key overrides the profile.
+  EXPECT_EQ(bc.extra_string_params.at("Surface_tension_semi_implicit").value(), "None");
+  EXPECT_TRUE(bc.parameter_origin("Surface_tension_semi_implicit").empty());
+  EXPECT_EQ(level_set.extra_string_params.at("Enable_SUPG").value(), "true");
+  EXPECT_EQ(level_set.parameter_origin("Enable_SUPG"), "Capillary@1");
+  EXPECT_EQ(level_set.extra_string_params.at("Enable_kinematic_reconciliation").value(), "false");
+  EXPECT_TRUE(level_set.parameter_origin("Enable_kinematic_reconciliation").empty());
+
+  // The profile deck resolves to the options of the deck that writes the
+  // values out; only the provenance differs.
+  auto explicit_params = parseProfileDeck(kExplicitLevelSetXml, kExplicitFluidXml);
+  application::translators::EquationTranslator::applyFreeSurfaceProfiles(*explicit_params);
+  const auto& schema = parsing::levelSetEquationSchema();
+  const auto profile_keys =
+      parsing::resolveLevelSetEquationKeys(parsing::levelSetEquationInput(level_set));
+  const auto explicit_keys = parsing::resolveLevelSetEquationKeys(
+      parsing::levelSetEquationInput(*explicit_params->equation_parameters[0]));
+  EXPECT_EQ(schema.serialize(profile_keys.value), schema.serialize(explicit_keys.value));
+  EXPECT_TRUE(profile_keys.value.transport.supg.enabled);
+  EXPECT_FALSE(profile_keys.value.transport.kinematic_reconciliation.enabled);
+  EXPECT_EQ(profile_keys.find("Enable_SUPG")->source, svmp::FE::options::OptionSource::Profile);
+  EXPECT_EQ(profile_keys.find("Enable_SUPG")->origin, "Capillary@1");
+  EXPECT_EQ(profile_keys.find("Enable_kinematic_reconciliation")->source,
+            svmp::FE::options::OptionSource::Explicit);
+  const auto json = parsing::resolvedLevelSetEquationJson(
+      parsing::levelSetEquationInput(level_set), profile_keys.value);
+  EXPECT_NE(json.find("\"Enable_SUPG\":{\"value\":\"true\",\"source\":\"profile\","
+                      "\"origin\":\"Capillary@1\"}"),
+            std::string::npos)
+      << json;
+
+  auto mesh = buildTranslatorTriangleMesh();
+  const auto profile_input = application::translators::EquationTranslator::buildInput(
+      *params->equation_parameters[1], singleMeshMap(mesh));
+  const auto explicit_input = application::translators::EquationTranslator::buildInput(
+      *explicit_params->equation_parameters[1], singleMeshMap(mesh));
+  const auto& profile_bc = profile_input.boundary_conditions.front();
+  EXPECT_EQ(profile_bc.params.at("Generated_interface_geometry").origin, "Capillary@1");
+  EXPECT_TRUE(profile_bc.params.at("Surface_tension").origin.empty());
+  const auto profile_boundary = svmp::Physics::options::resolve_free_surface_bc(
+      profile_bc, true, false, false);
+  const auto explicit_boundary = svmp::Physics::options::resolve_free_surface_bc(
+      explicit_input.boundary_conditions.front(), true, false, false);
+  const auto& boundary_schema = ns::freeSurfaceBoundarySchema();
+  EXPECT_EQ(boundary_schema.serialize(profile_boundary),
+            boundary_schema.serialize(explicit_boundary));
+  EXPECT_TRUE(profile_boundary.cut_cell_stabilization.enabled);
+  const auto resolved = ns::resolvedFreeSurfacesJson({profile_boundary});
+  EXPECT_NE(resolved.find("\"Enable_cut_cell_stabilization\":{\"value\":\"true\","
+                          "\"source\":\"profile\",\"origin\":\"Capillary@1\"}"),
+            std::string::npos)
+      << resolved;
+  EXPECT_NE(resolved.find("\"profile\":\"Capillary@1\""), std::string::npos) << resolved;
+  EXPECT_EQ(ns::resolvedFreeSurfacesJson({explicit_boundary}).find("\"profile\""),
+            std::string::npos);
+}
+
+TEST(EquationTranslatorFreeSurface, ProfileValuesOfTheLevelSetEquationAreSchemaValues)
+{
+  namespace parsing = application::translators::level_set::configuration;
+  using svmp::Physics::options::FreeSurfaceProfileElement;
+  const auto& schema = parsing::levelSetEquationSchema();
+  for (const auto& profile : svmp::Physics::options::freeSurfaceProfiles()) {
+    svmp::FE::options::OptionInput in;
+    for (const auto& value : profile.values) {
+      if (value.element == FreeSurfaceProfileElement::LevelSetEquation) {
+        ASSERT_TRUE(schema.acceptsSpelling(value.key)) << value.key;
+        in.add(value.key, value.value, profile.label());
+      }
+    }
+    const auto resolved = parsing::resolveLevelSetEquationKeys(in);
+    for (const auto& entry : in.entries()) {
+      EXPECT_EQ(resolved.find(entry.spelling)->source, svmp::FE::options::OptionSource::Profile)
+          << profile.label() << " " << entry.spelling;
+    }
+  }
+}
+
+TEST(EquationTranslatorFreeSurface, ProfileErrorsNameTheProfileAndTheBoundary)
+{
+  EXPECT_NE(profileErrorText(kProfileLevelSetXml,
+                             replaced(kProfileFluidXml, "Capillary", "Capilary").c_str())
+                .find("[Free_surface] Free_surface_profile: expected one of Capillary@1"),
+            std::string::npos);
+  EXPECT_NE(profileErrorText(kProfileLevelSetXml,
+                             replaced(kProfileFluidXml, "UnfittedLevelSet", "FittedALE").c_str())
+                .find("Capillary@1 is written for Implementation=UnfittedLevelSet"),
+            std::string::npos);
+  EXPECT_NE(profileErrorText(replaced(kProfileLevelSetXml, ">phi<", ">psi<").c_str(),
+                             kProfileFluidXml)
+                .find("Free_surface_profile Capillary@1 of boundary condition 'free_surface' "
+                      "states level-set equation values, but no level-set equation has "
+                      "Level_set_field_name 'phi'."),
+            std::string::npos);
+  // None states nothing and needs no level-set equation.
+  EXPECT_TRUE(profileErrorText(replaced(kProfileLevelSetXml, ">phi<", ">psi<").c_str(),
+                               replaced(kProfileFluidXml, ">Capillary<", ">None<").c_str())
+                  .empty());
 }

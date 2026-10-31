@@ -6,6 +6,59 @@ Method choices, open work, and the history of attempts are tracked in
 D2 covers the capillary force route, D4 the contact-angle mechanism, and D5
 the fitted ALE path.
 
+## Method profiles
+
+A `Free_surface` boundary condition can name a versioned method profile
+(decision D47, step P4; `Physics/Options/FreeSurfaceProfiles.cpp`):
+
+```xml
+<Add_BC name="free_surface">
+  <Type>Free_surface</Type>
+  <Implementation>UnfittedLevelSet</Implementation>
+  <Free_surface_profile>Wetting@1</Free_surface_profile>
+  ...
+```
+
+The profile states the method values its protocol shares, on the boundary and
+on the level-set equation whose `Level_set_field_name` is the boundary's.
+Every key the deck states overrides the profile; a stated `Velocity_source`
+(or `Constant_velocity`) takes the whole advection velocity of the profile, a
+stated `Enable_cut_cell_stabilization` its penalty, and a stated
+`Prescribed_tangential_mesh_velocity` or `Tangential_mesh_penalty` its
+tangential policy. The profile's values are input entries like the deck's, so
+a profile deck resolves to exactly the options of the deck that writes them
+out; the effective-configuration artifact records them with the source
+`profile` and the profile's name (`"origin":"Capillary@1"`), and each free
+surface of its `resolved` section names its profile. A name alone (`Wetting`)
+is the latest version; a revised value becomes a new version, so a deck that
+names `Wetting@1` keeps its values. `None` states nothing: every value is the
+code default unless the deck states it. `Capillary`, `Wetting` and
+`Gravity_wave` require `Implementation=UnfittedLevelSet`, `Fitted_ALE`
+requires `FittedALE`.
+
+| Value | `Capillary@1` | `Wetting@1` | `Gravity_wave@1` | `Fitted_ALE@1` |
+|---|---|---|---|---|
+| `Level_set_source` | `prescribed_data` | same | same | – |
+| advection velocity: `Velocity_source=prescribed_data`, `Velocity_field_name=LevelSetAdvectionVelocity`, `Auto_register_velocity_field=true`, `Source_velocity_field_name=Velocity`, `Advection_velocity_extension_method=pde_harmonic`, `Advection_velocity_extension_coupling=monolithic` | yes | yes | yes | – |
+| `Enable_SUPG`, `SUPG_tau_scale`, `SUPG_transient_scale` | `true`, `0.5`, `2.0` | same | same | – |
+| `Enable_kinematic_reconciliation` | `true` | `true` | `true` | – |
+| `Enable_sign_definite_patch_bounds`, `Enable_interface_preserving_redistancing` | – | `true`, `true` | – | – |
+| `Level_set_isovalue`, `Generated_interface_geometry` | `0.0`, `LinearCorner` | same | same | – |
+| `Geometry_tangent_policy`, `Interface_quadrature_order` | `RefreshedFrozenQuadrature`, `2` | same | – | – |
+| `Enable_cut_cell_stabilization`, `Cut_cell_pressure_gradient_penalty`, `Small_cut_aggregation` | `true`, `1.0`, `true` | same | same | – |
+| `Surface_tension_semi_implicit` | `NormalIncrement` | `None` | `None` | `None` |
+| `Contact_line_law_enforcement` | – | `Strong` (for `DynamicRenE`) | – | – |
+| `Tangential_mesh_policy`, `Kinematic_nitsche_gamma` | – | – | – | `Free`, `10` |
+
+The values are those every generator of the protocol writes: the static drop
+and sphere, the oscillating drop and the capillary wave (`Capillary`); the
+sessile drops, the capillary rise and the Ren–E drop (`Wetting`); linear
+sloshing (`Gravity_wave`, which leaves the tangent policy and the cut order to
+the code, as its decks do); the fitted capillary wave, static drop and
+sloshing (`Fitted_ALE`). The physics stays in the deck: `Implementation`,
+`Surface_tension`, `External_pressure`, `Active_domain`, the contact line and
+the wall slip, the field and domain names.
+
 ## Surface tension
 
 `Surface_tension` must be a finite, nonnegative literal constant. A spatially

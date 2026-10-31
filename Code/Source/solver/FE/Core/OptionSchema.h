@@ -21,8 +21,9 @@
  *
  *   - resolve():        text input -> typed options, with the provenance of
  *                       every key (default, explicit, deprecated spelling,
- *                       implied by another key, derived after resolution)
- *                       and the deprecated input that was accepted;
+ *                       stated by a named profile, implied by another key,
+ *                       derived after resolution) and the deprecated input
+ *                       that was accepted;
  *   - describe():       the provenance of options that another parser
  *                       resolved from the same input;
  *   - serialize():      typed options -> canonical text, in declaration order;
@@ -235,9 +236,13 @@ enum class ControlEscapes : std::uint8_t {
 // ---------------------------------------------------------------------------
 
 /// One supplied input value: the spelling the input used and its raw text.
+/// An entry that a named profile stated for the input (rather than the input
+/// itself) carries the profile's name as its origin; resolve() treats it as
+/// given and records it with OptionSource::Profile.
 struct OptionInputEntry {
     std::string spelling{};
     std::string text{};
+    std::string origin{};
 };
 
 /// The key/value input of one configuration element (for example one XML
@@ -248,9 +253,10 @@ public:
     OptionInput() = default;
     explicit OptionInput(std::vector<OptionInputEntry> entries) : entries_(std::move(entries)) {}
 
-    void add(std::string spelling, std::string text)
+    void add(std::string spelling, std::string text, std::string origin = {})
     {
-        entries_.push_back(OptionInputEntry{std::move(spelling), std::move(text)});
+        entries_.push_back(
+            OptionInputEntry{std::move(spelling), std::move(text), std::move(origin)});
     }
 
     /// The first entry of this spelling, or nullptr.
@@ -288,7 +294,7 @@ private:
             const bool found = std::find(spellings.begin(), spellings.end(), entry.spelling) !=
                                spellings.end();
             if (found == selected) {
-                out.add(entry.spelling, entry.text);
+                out.add(entry.spelling, entry.text, entry.origin);
             }
         }
         return out;
@@ -748,6 +754,9 @@ enum class OptionSource : std::uint8_t {
     DeprecatedSpelling,
     Implied,
     Derived,
+    /// Stated by a named profile on behalf of the input (an input entry with
+    /// an origin); resolves exactly like an explicit value.
+    Profile,
 };
 
 [[nodiscard]] inline const char* optionSourceName(OptionSource source) noexcept
@@ -758,6 +767,7 @@ enum class OptionSource : std::uint8_t {
     case OptionSource::DeprecatedSpelling: return "deprecated_spelling";
     case OptionSource::Implied: return "implied";
     case OptionSource::Derived: return "derived";
+    case OptionSource::Profile: return "profile";
     }
     return "unknown";
 }
@@ -768,7 +778,8 @@ struct OptionProvenance {
     OptionSource source{OptionSource::Default};
     /// The input spelling (Explicit, DeprecatedSpelling).
     std::string spelling{};
-    /// The implying key (Implied) or the reason given to derive() (Derived).
+    /// The implying key (Implied), the reason given to derive() (Derived) or
+    /// the name of the profile that stated the value (Profile).
     std::string origin{};
     /// The supplied text, when it differs from the canonical text of the
     /// value (describe() only).
@@ -799,13 +810,16 @@ struct ResolvedOptions {
         }
         return nullptr;
     }
-    /// True when the input gave the key (under any spelling).
+    /// True when the input gave the key (under any spelling), itself or
+    /// through its profile: a profile states values on behalf of the input,
+    /// so implications, conflicts and rules treat them as given.
     [[nodiscard]] bool isExplicit(std::string_view key) const
     {
         const auto* item = find(key);
         return item != nullptr &&
                (item->source == OptionSource::Explicit ||
-                item->source == OptionSource::DeprecatedSpelling);
+                item->source == OptionSource::DeprecatedSpelling ||
+                item->source == OptionSource::Profile);
     }
     /// Record that code after resolve() set the key (for example from the
     /// mesh or another element).  Returns false for an undeclared key.
@@ -1077,6 +1091,7 @@ public:
             OptionProvenance provenance{};
             provenance.key = key_entry.canonical;
             const OptionSpelling* chosen = nullptr;
+            const OptionInputEntry* chosen_entry = nullptr;
             std::string chosen_text;
             for (const auto& spelling : key_entry.spellings) {
                 const auto* entry = input.find(spelling.name);
@@ -1088,11 +1103,18 @@ public:
                     continue;
                 }
                 chosen = &spelling;
+                chosen_entry = entry;
                 chosen_text = std::move(text);
                 break;
             }
             const auto value_text = key_entry.format(out.value);
-            if (chosen != nullptr) {
+            if (chosen != nullptr && !chosen_entry->origin.empty()) {
+                provenance.source = OptionSource::Profile;
+                provenance.origin = chosen_entry->origin;
+                if (chosen_text != value_text) {
+                    provenance.input = std::move(chosen_text);
+                }
+            } else if (chosen != nullptr) {
                 provenance.source =
                     chosen->deprecated ? OptionSource::DeprecatedSpelling : OptionSource::Explicit;
                 provenance.spelling = chosen->name;
@@ -1293,6 +1315,7 @@ private:
         OptionProvenance provenance{};
         provenance.key = key_entry.canonical;
         const OptionSpelling* chosen = nullptr;
+        const OptionInputEntry* chosen_entry = nullptr;
         const OptionSpelling* first_supplied = nullptr;
         std::string chosen_text;
         for (const auto& spelling : key_entry.spellings) {
@@ -1320,6 +1343,7 @@ private:
                 }
             }
             chosen = &spelling;
+            chosen_entry = entry;
             chosen_text = std::move(text);
         }
         if (chosen == nullptr) {
@@ -1330,6 +1354,11 @@ private:
         if (!error.empty()) {
             throw OptionError(element_, chosen->name,
                               key_entry.invalid_message.empty() ? error : key_entry.invalid_message);
+        }
+        if (!chosen_entry->origin.empty()) {
+            provenance.source = OptionSource::Profile;
+            provenance.origin = chosen_entry->origin;
+            return provenance;
         }
         provenance.source =
             chosen->deprecated ? OptionSource::DeprecatedSpelling : OptionSource::Explicit;

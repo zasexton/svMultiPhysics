@@ -539,7 +539,7 @@ levelSetEquationInput(const svmp::Physics::ParameterMap &parameters) {
   opt::OptionInput input;
   for (const auto &[name, parameter] : parameters) {
     if (parameter.defined) {
-      input.add(name, parameter.value);
+      input.add(name, parameter.value, parameter.origin);
     }
   }
   return input;
@@ -551,7 +551,7 @@ opt::OptionInput levelSetEquationInput(const EquationParameters &equation) {
     std::visit(
         [&](const auto *value) {
           if (value != nullptr && value->defined()) {
-            input.add(name, value->svalue());
+            input.add(name, value->svalue(), equation.parameter_origin(name));
           }
         },
         parameter);

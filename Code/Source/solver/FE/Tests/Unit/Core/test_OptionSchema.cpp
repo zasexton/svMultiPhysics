@@ -547,6 +547,56 @@ TEST(OptionSchema, DescribeRecordsTheProvenanceOfValuesResolvedElsewhere)
         << json;
 }
 
+TEST(OptionSchema, ProfileEntriesResolveAsGivenAndRecordTheProfile)
+{
+    const auto schema = exampleSchema();
+    // A profile stated Penalty and Active_domain for the input; the input
+    // itself gives Enabled.
+    OptionInput in;
+    in.add("Enabled", "true");
+    in.add("Penalty", "2.0", "Method@1");
+    in.add("Active_domain", "positive", "Method@1");
+    const auto resolved = schema.resolve(in);
+
+    EXPECT_TRUE(resolved.value.enabled);
+    EXPECT_EQ(resolved.value.penalty, Real{2});
+    EXPECT_EQ(resolved.value.side, Side::Positive);
+    const auto* penalty = resolved.find("Penalty");
+    EXPECT_EQ(penalty->source, OptionSource::Profile);
+    EXPECT_EQ(penalty->origin, "Method@1");
+    EXPECT_TRUE(penalty->spelling.empty());
+    // A profile value counts as given: it triggers implications and is not
+    // replaced by one.
+    EXPECT_TRUE(resolved.isExplicit("Penalty"));
+    EXPECT_TRUE(resolved.value.stabilization);
+    EXPECT_EQ(resolved.find("Stabilization")->source, OptionSource::Implied);
+    OptionInput stated;
+    stated.add("Penalty", "3.0");
+    stated.add("Stabilization", "false", "Method@1");
+    const auto kept = schema.resolve(stated);
+    EXPECT_FALSE(kept.value.stabilization);
+    EXPECT_EQ(kept.find("Stabilization")->source, OptionSource::Profile);
+
+    // Selection keeps the origin; describe() records it the same way.
+    const auto selected = in.selectSpellings({"Penalty"});
+    ASSERT_EQ(selected.entries().size(), 1u);
+    EXPECT_EQ(selected.entries().front().origin, "Method@1");
+    const auto described = schema.describe(in, resolved.value, Example{});
+    EXPECT_EQ(described.find("Penalty")->source, OptionSource::Profile);
+    EXPECT_EQ(described.find("Penalty")->input, "2.0");   // canonical text is "2"
+    EXPECT_EQ(described.find("Enabled")->source, OptionSource::Explicit);
+    const auto json = schema.toJson(described);
+    EXPECT_NE(json.find("\"Penalty\":{\"value\":\"2\",\"source\":\"profile\",\"origin\":\"Method@1\","
+                        "\"input\":\"2.0\"}"),
+              std::string::npos)
+        << json;
+    EXPECT_NE(json.find("\"Active_domain\":{\"value\":\"LevelSetPositive\",\"source\":\"profile\","
+                        "\"origin\":\"Method@1\",\"input\":\"positive\"}"),
+              std::string::npos)
+        << json;
+    EXPECT_STREQ(optionSourceName(OptionSource::Profile), "profile");
+}
+
 TEST(OptionSchema, OptionalValuesFormatAsNoneWhenUnset)
 {
     struct Capped {

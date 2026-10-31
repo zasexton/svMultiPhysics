@@ -140,7 +140,13 @@ equation element as the installation resolved them, and the transport's
 effective-configuration artifact ends with a `resolved` section that lists
 every key with its value and source (`OptionSchema::describe`). The boundary
 conditions (`LevelSetInflow`, `LevelSetOutflow`) and the space keys
-(`Element_order`) keep their own readers.
+(`Element_order`) keep their own readers. A free-surface method profile
+(`Free_surface_profile` on the `Free_surface` boundary condition, decision D47
+P4; `Physics/Docs/NavierStokesFreeSurface.md`, "Method profiles") states its
+level-set values (the field source, the advection velocity, SUPG and the
+accepted-step maintenance switches) as entries of the equation element for
+every key the element does not state; they resolve like stated keys and the
+`resolved` section records them with the source `profile`.
 
 The PDE velocity extension of the level-set advection velocity
 (`Advection_velocity_extension_method` = `pde_harmonic` or `pde_normal`) is in

@@ -8,6 +8,7 @@
 
 #include "Physics/Options/NavierStokesOptionSchema.h"
 
+#include "Physics/Options/FreeSurfaceProfiles.h"
 #include "Physics/Options/InputReaders.h"
 #include "Physics/Options/NavierStokesRegistration.h"
 
@@ -542,7 +543,7 @@ opt::OptionInput optionInputFromParameters(const ParameterMap& params)
     opt::OptionInput input;
     for (const auto& [name, parameter] : params) {
         if (parameter.defined) {
-            input.add(name, parameter.value);
+            input.add(name, parameter.value, parameter.origin);
         }
     }
     return input;
@@ -564,6 +565,12 @@ std::string resolvedFreeSurfacesJson(const std::vector<FreeSurfaceBoundary>& fre
         out += ",\"contact_line\":";
         out += contact_schema.toJson(contact_schema.describe(
             boundary.input, contactLineInputView(boundary), FreeSurfaceContactLineInputView{}));
+        // The method profile the boundary names (decision D47, P4); the keys
+        // it stated carry the source "profile".
+        if (const auto* profile = boundary.input.find(svmp::Physics::options::kFreeSurfaceProfileKey)) {
+            out += ",\"profile\":";
+            out += json::quote(svmp::Physics::options::freeSurfaceProfile(profile->text).label());
+        }
         out += '}';
     }
     out += ']';

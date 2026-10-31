@@ -288,6 +288,7 @@ bool is_oop_boundary_extension_parameter(const std::string& name)
 {
   static const std::set<std::string> names = {
     "Implementation",
+    "Free_surface_profile",
     "Interface_marker",
     "Level_set_field_name",
     "Generated_interface_domain_id",

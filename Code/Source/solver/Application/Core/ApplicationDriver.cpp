@@ -9,6 +9,7 @@
 #include "Application/Core/LevelSetPdeVelocityExtension.h"
 #include "Application/Core/OopMpiLog.h"
 #include "Application/Core/SimulationBuilder.h"
+#include "Application/Translators/EquationTranslator.h"
 #include "Application/Translators/LevelSetConfigurationParsing.h"
 
 #include "FE/Assembly/Assembler.h"
@@ -6624,6 +6625,9 @@ void ApplicationDriver::run(const std::string& xml_file, RunMode mode)
 
   Parameters params;
   params.read_xml(xml_file);
+  // A Free_surface boundary condition may name a method profile; its values
+  // become parameters of the input before anything reads it.
+  application::translators::EquationTranslator::applyFreeSurfaceProfiles(params);
   runWithParameters(params, mode);
 }
 

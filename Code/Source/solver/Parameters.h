@@ -416,6 +416,23 @@ class ParameterLists
       it->second.set_raw_value(value);
     }
 
+    /// @brief Store an extension parameter that a method profile states on
+    /// behalf of the input (decision D47, P4), with the profile's name.
+    void set_profile_parameter_value(const std::string& name, const std::string& value,
+                                     const std::string& profile)
+    {
+      set_extra_parameter_value(name, value);
+      profile_origins[name] = profile;
+    }
+
+    /// @brief The profile that stated a parameter, or an empty string when the
+    /// input gave it.
+    std::string parameter_origin(const std::string& name) const
+    {
+      const auto it = profile_origins.find(name);
+      return it == profile_origins.end() ? std::string{} : it->second;
+    }
+
     /// @brief Check if any required parameters have not been set.
     void check_required()
     {
@@ -462,6 +479,10 @@ class ParameterLists
         VectorParameter<std::string>* >> params_map;
 
     std::map<std::string, Parameter<std::string>> extra_string_params;
+
+    /// @brief Parameter name -> the profile that stated it (see
+    /// set_profile_parameter_value).
+    std::map<std::string, std::string> profile_origins;
 
     std::string xml_element_name = "";
 };

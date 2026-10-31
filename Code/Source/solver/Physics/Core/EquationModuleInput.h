@@ -16,6 +16,11 @@ namespace svmp::Physics {
 struct ParameterValue {
   bool defined{false};
   std::string value{};
+  /// The method profile that stated the value on behalf of the input (for
+  /// example "Capillary@1" for a key of a free-surface protocol); empty when
+  /// the input gave it.  Consumers resolve the value like any other and
+  /// record the profile as its source.
+  std::string origin{};
 };
 
 using ParameterMap = std::map<std::string, ParameterValue>;

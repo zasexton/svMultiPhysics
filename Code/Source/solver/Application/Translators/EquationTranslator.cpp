@@ -6,6 +6,7 @@
 #include "Parameters.h"
 #include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Core/EquationModuleRegistry.h"
+#include "Physics/Options/FreeSurfaceProfiles.h"
 #include "Physics/Options/NavierStokesOptionSchema.h"
 
 #include <algorithm>
@@ -60,7 +61,8 @@ svmp::Physics::ParameterMap snapshot_params(const ParameterLists& list)
           if (!p) {
             return;
           }
-          out[p->name()] = svmp::Physics::ParameterValue{p->defined(), snapshot_value_string(*p)};
+          out[p->name()] = svmp::Physics::ParameterValue{
+              p->defined(), snapshot_value_string(*p), list.parameter_origin(p->name())};
         },
         v);
   }
@@ -78,7 +80,8 @@ svmp::Physics::ParameterMap snapshot_legacy_params(
             return;
           }
           out[parameter->name()] = svmp::Physics::ParameterValue{
-              parameter->defined(), parameter->svalue()};
+              parameter->defined(), parameter->svalue(),
+              list.parameter_origin(parameter->name())};
         },
         value);
   }
@@ -204,6 +207,37 @@ void resolve_contact_line_wall_faces(svmp::Physics::ParameterMap& params,
            "Contact_line_wall_face"}) {
     params.erase(std::string(key));
   }
+}
+
+/// The parameters an element of the input defines, as schema input (with
+/// the profile that stated each one, if any).
+svmp::FE::options::OptionInput defined_entries(const ParameterLists& list)
+{
+  svmp::FE::options::OptionInput out;
+  for (const auto& [_, value] : list.params_map) {
+    std::visit(
+        [&](const auto* parameter) {
+          if (parameter != nullptr && parameter->defined()) {
+            out.add(parameter->name(), parameter->svalue(),
+                    list.parameter_origin(parameter->name()));
+          }
+        },
+        value);
+  }
+  return out;
+}
+
+bool is_level_set_equation_type(const std::string& type)
+{
+  const auto token = normalized_token(type);
+  return token == "levelset" || token == "levelsettransport";
+}
+
+/// The Level_set_field_name an element defines, or the default field name.
+std::string level_set_field_name(const svmp::FE::options::OptionInput& entries)
+{
+  const auto* entry = entries.find("Level_set_field_name");
+  return entry != nullptr ? trim_copy(entry->text) : std::string{"level_set"};
 }
 
 svmp::Physics::DomainInput snapshot_domain(const DomainParameters& domain)
@@ -464,6 +498,93 @@ EquationTranslator::snapshotLevelSetEquationInput(
   snapshot->legacy_maintenance_input =
       snapshotLegacyLevelSetMaintenanceInput(equation);
   return snapshot;
+}
+
+void EquationTranslator::applyFreeSurfaceProfiles(Parameters& params)
+{
+  namespace profiles = svmp::Physics::options;
+  using Element = profiles::FreeSurfaceProfileElement;
+
+  // The profile each level-set equation takes values from, and the
+  // boundary condition that named it.
+  std::map<const EquationParameters*, std::pair<std::string, std::string>> taken;
+  for (auto* equation : params.equation_parameters) {
+    if (equation == nullptr) {
+      continue;
+    }
+    for (auto* bc : equation->boundary_conditions) {
+      if (bc == nullptr) {
+        continue;
+      }
+      const auto bc_entries = defined_entries(*bc);
+      const auto* type = bc_entries.find("Type");
+      if (type == nullptr ||
+          !svmp::Physics::options::is_free_surface_type(type->text)) {
+        continue;
+      }
+      const auto* profile = profiles::namedFreeSurfaceProfile(bc_entries);
+      if (profile == nullptr) {
+        continue;
+      }
+      const auto label = profile->label();
+      const auto bc_name = bc->name.value();
+      for (const auto& value : profiles::applicableFreeSurfaceProfileValues(
+               *profile, Element::Boundary, bc_entries, bc_entries)) {
+        bc->set_profile_parameter_value(value.key, value.value, label);
+      }
+
+      const bool states_level_set_values = std::any_of(
+          profile->values.begin(), profile->values.end(), [](const auto& value) {
+            return value.element == Element::LevelSetEquation;
+          });
+      if (!states_level_set_values) {
+        continue;
+      }
+      // The level-set equation of the boundary's field.
+      const auto field = level_set_field_name(bc_entries);
+      EquationParameters* level_set = nullptr;
+      for (auto* candidate : params.equation_parameters) {
+        if (candidate == nullptr || !candidate->type.defined() ||
+            !is_level_set_equation_type(candidate->type.value()) ||
+            level_set_field_name(defined_entries(*candidate)) != field) {
+          continue;
+        }
+        if (level_set != nullptr) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Free_surface_profile " + label +
+              " of boundary condition '" + bc_name +
+              "': more than one level-set equation has Level_set_field_name '" +
+              field + "'.");
+        }
+        level_set = candidate;
+      }
+      if (level_set == nullptr) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Free_surface_profile " + label +
+            " of boundary condition '" + bc_name +
+            "' states level-set equation values, but no level-set equation "
+            "has Level_set_field_name '" + field + "'.");
+      }
+      const auto [previous, inserted] =
+          taken.emplace(level_set, std::make_pair(label, bc_name));
+      if (!inserted) {
+        if (previous->second.first != label) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Free_surface_profile " + label +
+              " of boundary condition '" + bc_name +
+              "' conflicts with " + previous->second.first +
+              " of boundary condition '" + previous->second.second +
+              "' for the level-set equation of field '" + field + "'.");
+        }
+        continue;
+      }
+      for (const auto& value : profiles::applicableFreeSurfaceProfileValues(
+               *profile, Element::LevelSetEquation, defined_entries(*level_set),
+               bc_entries)) {
+        level_set->set_profile_parameter_value(value.key, value.value, label);
+      }
+    }
+  }
 }
 
 std::unique_ptr<svmp::Physics::PhysicsModule> EquationTranslator::createModule(
