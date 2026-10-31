@@ -2060,8 +2060,18 @@ void installStrongDirichlet(FESystem& system, std::span<const forms::bc::StrongD
                     "installStrongDirichlet: invalid StrongDirichlet declaration");
         FE_THROW_IF(bc.value.hasTest() || bc.value.hasTrial(), InvalidArgumentException,
                     "installStrongDirichlet: StrongDirichlet value must not contain test/trial functions");
-        system.addSystemConstraint(
-            std::make_unique<constraints::StrongDirichletConstraint>(bc.field, bc.boundary_marker, bc.value, bc.component));
+        // The declarations of the field with a higher precedence on other
+        // markers (on a shared component) hold the degrees of freedom they share.
+        std::vector<constraints::StrongDirichletConstraint::Yield> yields;
+        for (const auto& other : bcs) {
+            if (other.field == bc.field && other.precedence > bc.precedence &&
+                other.boundary_marker != bc.boundary_marker &&
+                (other.component == bc.component || other.component < 0 || bc.component < 0)) {
+                yields.push_back({other.boundary_marker, other.component});
+            }
+        }
+        system.addSystemConstraint(std::make_unique<constraints::StrongDirichletConstraint>(
+            bc.field, bc.boundary_marker, bc.value, bc.component, std::move(yields)));
     }
 }
 

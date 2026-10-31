@@ -32,7 +32,18 @@ namespace constraints {
 
 class StrongDirichletConstraint final : public ISystemConstraint {
 public:
-    StrongDirichletConstraint(FieldId field, int boundary_marker, forms::FormExpr value, int component = -1);
+    /// A strong declaration of higher precedence that holds the degrees of
+    /// freedom it shares with this one: its marker and component.
+    struct Yield {
+        int boundary_marker{-1};
+        int component{-1};
+    };
+
+    StrongDirichletConstraint(FieldId field,
+                              int boundary_marker,
+                              forms::FormExpr value,
+                              int component = -1,
+                              std::vector<Yield> yields = {});
 
     void apply(const systems::FESystem& system, AffineConstraints& constraints) override;
 
@@ -57,6 +68,13 @@ private:
     [[nodiscard]] std::unordered_map<GlobalIndex, std::optional<std::array<Real, 3>>>
     pointNormals(const systems::FESystem& system) const;
 
+    /// Removes from the extracted points those that a yielded declaration holds.
+    void dropYieldedPoints(const systems::FESystem& system,
+                           std::vector<GlobalIndex>& dofs,
+                           std::vector<std::array<Real, 3>>& coords,
+                           std::vector<Real>& samples) const;
+
+    std::vector<Yield> yields_{};
     FieldId field_{INVALID_FIELD_ID};
     int boundary_marker_{-1};
     int component_{-1};

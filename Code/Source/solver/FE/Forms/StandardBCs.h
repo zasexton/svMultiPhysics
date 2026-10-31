@@ -215,7 +215,12 @@ private:
 // ---- Dirichlet conditions: one condition, the enforcement an argument ----
 
 /// Strong enforcement: the constrained degrees of freedom take the value.
-struct Strong {};
+/// Where the boundary meets another strong condition of the field (a corner
+/// of an inlet and a wall), the condition of higher precedence holds; equal
+/// precedences must agree there.
+struct Strong {
+    int precedence{0};
+};
 
 /// Penalty enforcement: the residual term beta (u - g) . v.
 struct Penalty {
@@ -447,7 +452,7 @@ public:
     [[nodiscard]] bool sameTarget(const Dirichlet& other) const noexcept
     {
         return boundary_marker_ == other.boundary_marker_ && measure_ == other.measure_ &&
-               symbol_ == other.symbol_;
+               symbol_ == other.symbol_ && precedence() == other.precedence();
     }
 
     /// The value of @p component, when the condition prescribes it.
@@ -539,6 +544,7 @@ public:
         out.reserve(components_.size());
         for (const auto& [component, value] : components_) {
             out.push_back(strongDirichlet(field_id, boundary_marker_, value, symbol_, component));
+            out.back().precedence = std::get<Strong>(how_).precedence;
         }
         return out;
     }
@@ -595,6 +601,11 @@ public:
 
 private:
     [[nodiscard]] bool isStrong() const noexcept { return std::holds_alternative<Strong>(how_); }
+    [[nodiscard]] int precedence() const noexcept
+    {
+        const auto* strong = std::get_if<Strong>(&how_);
+        return strong != nullptr ? strong->precedence : 0;
+    }
 
     void setTarget(const Boundary& target)
     {

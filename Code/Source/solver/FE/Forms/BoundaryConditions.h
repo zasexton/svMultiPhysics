@@ -642,6 +642,11 @@ struct StrongDirichlet {
     // Optional symbol name for diagnostics / pretty-printing.
     std::string symbol{"u"};
 
+    /// At a degree of freedom that strong declarations of one field share,
+    /// the one of higher precedence holds (installStrongDirichlet); equal
+    /// precedences must agree.
+    int precedence{0};
+
     [[nodiscard]] bool isValid() const noexcept
     {
         return field != INVALID_FIELD_ID && component >= -1 && value.isValid();

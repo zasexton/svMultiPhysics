@@ -31,6 +31,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #if FE_HAS_MPI
@@ -438,8 +439,13 @@ void completeOwnedDofsWithCoords(const FESystem& system,
 
 } // namespace
 
-StrongDirichletConstraint::StrongDirichletConstraint(FieldId field, int boundary_marker, forms::FormExpr value, int component)
-    : field_(field),
+StrongDirichletConstraint::StrongDirichletConstraint(FieldId field,
+                                                     int boundary_marker,
+                                                     forms::FormExpr value,
+                                                     int component,
+                                                     std::vector<Yield> yields)
+    : yields_(std::move(yields)),
+      field_(field),
       boundary_marker_(boundary_marker),
       component_(component),
       value_(std::move(value))
@@ -500,6 +506,7 @@ void StrongDirichletConstraint::apply(const FESystem& system, constraints::Affin
 
     auto extracted = boundaryDofsWithCoordsByMarker(system, field_, boundary_marker_, component_, sampled_fields_,
                                                     /*require_coefficients=*/false);
+    dropYieldedPoints(system, extracted.dofs, extracted.coords, extracted.samples);
     dofs_ = std::move(extracted.dofs);
     coords_ = std::move(extracted.coords);
     sample_components_ = std::move(extracted.sample_components);
@@ -581,6 +588,7 @@ bool StrongDirichletConstraint::updateValues(const FESystem& system,
                                              double dt)
 {
     auto extracted = boundaryDofsWithCoordsByMarker(system, field_, boundary_marker_, component_, sampled_fields_);
+    dropYieldedPoints(system, extracted.dofs, extracted.coords, extracted.samples);
     FE_THROW_IF(extracted.dofs.size() != dofs_.size(), InvalidStateException,
                 "StrongDirichletConstraint::updateValues: geometry-dependent update changed constrained DOF count; rebuild constraints instead");
     dofs_ = std::move(extracted.dofs);
@@ -683,12 +691,51 @@ systems::SetupStorageRequirements StrongDirichletConstraint::storageRequirements
     return req;
 }
 
+void StrongDirichletConstraint::dropYieldedPoints(const FESystem& system,
+                                                  std::vector<GlobalIndex>& dofs,
+                                                  std::vector<std::array<Real, 3>>& coords,
+                                                  std::vector<Real>& samples) const
+{
+    if (yields_.empty() || dofs.empty()) {
+        return;
+    }
+    std::unordered_set<GlobalIndex> held;
+    for (const auto& yield : yields_) {
+        for (const auto dof : boundaryDofsWithCoordsByMarker(system, field_, yield.boundary_marker, yield.component,
+                                                             {}, /*require_coefficients=*/false)
+                                  .dofs) {
+            held.insert(dof);
+        }
+    }
+    const std::size_t n_samples = samples.size() / dofs.size();
+    std::size_t kept = 0;
+    for (std::size_t i = 0; i < dofs.size(); ++i) {
+        if (held.contains(dofs[i])) {
+            continue;
+        }
+        dofs[kept] = dofs[i];
+        coords[kept] = coords[i];
+        std::copy_n(samples.begin() + static_cast<std::ptrdiff_t>(i * n_samples), n_samples,
+                    samples.begin() + static_cast<std::ptrdiff_t>(kept * n_samples));
+        ++kept;
+    }
+    dofs.resize(kept);
+    coords.resize(kept);
+    samples.resize(kept * n_samples);
+}
+
 std::string StrongDirichletConstraint::manifestDescription() const
 {
     std::ostringstream oss;
     oss << "field=" << field_ << " marker=" << boundary_marker_ << " component=" << component_
         << " time_dependent=" << (is_time_dependent_ ? 1 : 0)
         << " value=" << (value_.isValid() ? value_.toString() : std::string("<none>"));
+    if (!yields_.empty()) {
+        oss << " yields_to=";
+        for (std::size_t i = 0; i < yields_.size(); ++i) {
+            oss << (i == 0u ? "" : ",") << yields_[i].boundary_marker << ":" << yields_[i].component;
+        }
+    }
     return oss.str();
 }
 

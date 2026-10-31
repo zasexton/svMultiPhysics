@@ -25,6 +25,7 @@
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Topology/CellShape.h"
 
+#include <algorithm>
 #include <array>
 #include <functional>
 #include <memory>
@@ -246,6 +247,91 @@ TEST(VertexDirichletConstraint, MissingGlobalVertexGidFailsDuringSetup)
         u, std::move(values), svmp::FE::constraints::VertexIdMode::GlobalVertexGid));
 
     EXPECT_THROW(sys.setup(), std::invalid_argument);
+}
+
+/// A unit quad with its left edge {0, 3} marked @p left and its bottom edge
+/// {0, 1} marked @p bottom: the two share vertex 0.
+std::shared_ptr<Mesh> build_single_quad_mesh_with_corner_markers(int left, int bottom)
+{
+    auto base = std::make_shared<MeshBase>();
+    const std::vector<svmp::real_t> X_ref = {0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0};
+    const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 4};
+    const std::vector<svmp::index_t> cell2vertex = {0, 1, 2, 3};
+    CellShape shape{};
+    shape.family = CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 1;
+    base->build_from_arrays(/*spatial_dim=*/2, X_ref, cell2vertex_offsets, cell2vertex, {shape});
+    base->finalize();
+    for (svmp::index_t f = 0; f < static_cast<svmp::index_t>(base->n_faces()); ++f) {
+        const auto verts = base->face_vertices(f);
+        if (verts.size() != 2u) {
+            continue;
+        }
+        const auto has = [&](svmp::index_t vertex) { return verts[0] == vertex || verts[1] == vertex; };
+        if (has(0) && has(3)) {
+            base->set_boundary_label(f, left);
+        } else if (has(0) && has(1)) {
+            base->set_boundary_label(f, bottom);
+        }
+    }
+    return svmp::create_mesh(std::move(base));
+}
+
+TEST(StrongDirichletConstraint, HigherPrecedenceHoldsTheSharedCorner)
+{
+    constexpr int left = 7;
+    constexpr int bottom = 8;
+    auto mesh = build_single_quad_mesh_with_corner_markers(left, bottom);
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    const auto corner_of = [&](const FESystem& sys) {
+        const auto a = svmp::FE::constraints::boundaryDofsByMarker(*mesh, sys.dofHandler(), left);
+        const auto b = svmp::FE::constraints::boundaryDofsByMarker(*mesh, sys.dofHandler(), bottom);
+        for (const auto dof : a) {
+            if (std::find(b.begin(), b.end(), dof) != b.end()) {
+                return dof;
+            }
+        }
+        return GlobalIndex{-1};
+    };
+
+    // Equal precedence: the two values disagree at the corner.
+    {
+        FESystem sys(mesh);
+        auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+        sys.addOperator("mass");
+        sys.addCellKernel("mass", u, std::make_shared<MassKernel>(1.0));
+        const std::vector bcs{strongDirichlet(u, left, FormExpr::constant(1.0), "u"),
+                              strongDirichlet(u, bottom, FormExpr::constant(2.0), "u")};
+        svmp::FE::systems::installStrongDirichlet(sys, bcs);
+        EXPECT_ANY_THROW(sys.setup());
+    }
+
+    // The wall (bottom) holds the corner, in either order and at every update.
+    for (const bool wall_first : {false, true}) {
+        FESystem sys(mesh);
+        auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+        sys.addOperator("mass");
+        sys.addCellKernel("mass", u, std::make_shared<MassKernel>(1.0));
+        auto inlet = strongDirichlet(u, left, t() + FormExpr::constant(1.0), "u");
+        auto wall = strongDirichlet(u, bottom, FormExpr::constant(2.0), "u");
+        wall.precedence = 1;
+        const std::vector bcs = wall_first ? std::vector{wall, inlet} : std::vector{inlet, wall};
+        svmp::FE::systems::installStrongDirichlet(sys, bcs);
+        ASSERT_NO_THROW(sys.setup());
+        const auto corner = corner_of(sys);
+        ASSERT_GE(corner, 0);
+        EXPECT_EQ(sys.constraints().getInhomogeneity(corner), 2.0);
+        for (const auto dof : svmp::FE::constraints::boundaryDofsByMarker(*mesh, sys.dofHandler(), left)) {
+            EXPECT_TRUE(sys.constraints().isConstrained(dof));
+            EXPECT_EQ(sys.constraints().getInhomogeneity(dof), dof == corner ? 2.0 : 1.0);
+        }
+        sys.updateConstraints(/*time=*/3.0, /*dt=*/0.5);
+        EXPECT_EQ(sys.constraints().getInhomogeneity(corner), 2.0);
+        for (const auto dof : svmp::FE::constraints::boundaryDofsByMarker(*mesh, sys.dofHandler(), left)) {
+            EXPECT_EQ(sys.constraints().getInhomogeneity(dof), dof == corner ? 2.0 : 4.0);
+        }
+    }
 }
 
 TEST(StrongDirichletConstraint, InstalledBeforeSetupAffectsAssembly)

@@ -512,6 +512,18 @@ TEST(FormsBoundaryConditions, RateConditionsFollowFromValueConditions)
     EXPECT_EQ(bc::derivedRateConditions(moving, std::move(explicit_rate), "v", "Source v").size(), 1u);
 }
 
+TEST(FormsBoundaryConditions, StrongPrecedenceReachesTheDeclarations)
+{
+    namespace forms = svmp::FE::forms;
+    namespace bc = forms::bc;
+    const bc::Dirichlet wall(3, std::vector<forms::FormExpr>{forms::FormExpr::constant(0.0), forms::FormExpr::constant(0.0)},
+                             bc::Strong{.precedence = 2});
+    for (const auto& strong : wall.getStrongConstraints(/*field_id=*/1)) {
+        EXPECT_EQ(strong.precedence, 2);
+    }
+    EXPECT_EQ(bc::Dirichlet(4, forms::FormExpr::constant(1.0)).getStrongConstraints(1).front().precedence, 0);
+}
+
 TEST(FormsBoundaryConditions, NormalEssentialBCInstallsTheNormalComponentConstraint)
 {
     namespace forms = svmp::FE::forms;
