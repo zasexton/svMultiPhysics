@@ -289,7 +289,7 @@ namespace detail {
 [[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> reserveMarker(
     const IncompressibleNavierStokesVMSOptions::VelocityDirichletBC& bc)
 {
-    const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::reserveMarker");
+    const int marker = FE::forms::bc::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::reserveMarker");
     return std::make_unique<FE::forms::bc::ReservedBC>(marker);
 }
 
@@ -298,7 +298,7 @@ namespace detail {
     int dim,
     std::optional<int> generated_active_boundary_marker = std::nullopt)
 {
-    const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toTractionBC");
+    const int marker = FE::forms::bc::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toTractionBC");
 
     auto t_comp = FE::forms::bc::toVectorExpr(
         bc.traction, dim, "ns_traction_neumann", marker, FE::forms::bc::ComponentValueNameStyle::Component);
@@ -314,7 +314,7 @@ namespace detail {
     std::optional<int> generated_active_boundary_marker = std::nullopt)
 {
     const int marker =
-        FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toTractionRobinBC");
+        FE::forms::bc::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toTractionRobinBC");
 
     const auto alpha = FE::forms::bc::toScalarExpr(
         bc.alpha, FE::forms::bc::markerValueName("ns_traction_robin_alpha", marker));
@@ -351,7 +351,7 @@ inline void declareVelocityDirichletTimeFunctions(
     std::string_view symbol)
 {
     const int marker =
-        FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toVelocityEssentialBC");
+        FE::forms::bc::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toVelocityEssentialBC");
 
     auto uD_comp = FE::forms::bc::toVectorExpr(
         bc.value, dim, "ns_u_dirichlet", marker, FE::forms::bc::ComponentValueNameStyle::Component);
@@ -381,7 +381,7 @@ inline void declareVelocityDirichletTimeFunctions(
     std::string_view symbol)
 {
     const int marker =
-        FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toPressureEssentialBC");
+        FE::forms::bc::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toPressureEssentialBC");
     const auto value =
         FE::forms::bc::toScalarExpr(bc.value, FE::forms::bc::markerValueName("ns_p_dirichlet", marker));
     return std::make_unique<FE::forms::bc::Dirichlet>(marker, value, FE::forms::bc::Strong{},
@@ -394,7 +394,7 @@ inline void declareVelocityDirichletTimeFunctions(
     const FE::forms::FormExpr& rho,
     std::optional<int> generated_active_boundary_marker = std::nullopt)
 {
-    const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toOutflowBC");
+    const int marker = FE::forms::bc::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toOutflowBC");
 
     const auto n = FE::forms::FormExpr::normal();
     const auto un = FE::forms::inner(u, n);
@@ -435,7 +435,7 @@ inline void declareVelocityDirichletTimeFunctions(
     using namespace FE::systems;
 
     const int marker =
-        FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toCoupledOutflowBC");
+        FE::forms::bc::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toCoupledOutflowBC");
 
     const FE::Real Rp = bc.Rp;
     const FE::Real C  = bc.C;
@@ -519,7 +519,7 @@ inline void declareVelocityDirichletTimeFunctions(
     using namespace FE::systems;
 
     const int marker =
-        FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toCoupledOutflowBC");
+        FE::forms::bc::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toCoupledOutflowBC");
 
     if (bc.C1 == 0.0 || bc.C2 == 0.0) {
         throw std::invalid_argument("CoupledRCRCROutflowBC: C1 and C2 must be nonzero");
@@ -733,7 +733,7 @@ inline void applyVelocityNitscheBCs(
     std::vector<PreparedWeakVelocityBoundary>* prepared_boundaries = nullptr)
 {
     const auto resolve_boundary = [&](const auto& bc) {
-        const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(
+        const int marker = FE::forms::bc::boundaryMarkerOrThrow(
             bc, "navier_stokes::Factories::applyVelocityNitscheBCs");
         const auto generated_marker = generated_active_boundary_marker
             ? generated_active_boundary_marker(marker) : std::nullopt;

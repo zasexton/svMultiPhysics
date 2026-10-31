@@ -1385,7 +1385,7 @@ void validateNavierStokesBoundaryConfiguration(
     });
 
     for (const auto& bc : options.coupled_outflow_rcr) {
-        const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(
+        const int marker = FE::forms::bc::boundaryMarkerOrThrow(
             bc,
             "IncompressibleNavierStokesVMSModule coupled RCR preflight");
         for (const auto [value, label] : {
@@ -1409,7 +1409,7 @@ void validateNavierStokesBoundaryConfiguration(
             std::make_unique<FE::forms::bc::ReservedBC>(marker));
     }
     for (const auto& bc : options.coupled_outflow_rcrcr) {
-        const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(
+        const int marker = FE::forms::bc::boundaryMarkerOrThrow(
             bc,
             "IncompressibleNavierStokesVMSModule coupled RCRCR preflight");
         for (const auto [value, label] : {
@@ -1452,7 +1452,7 @@ void validateNavierStokesBoundaryConfiguration(
             validateFiniteConstantScalar(
                 value, "weak velocity Dirichlet value");
         }
-        const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(
+        const int marker = FE::forms::bc::boundaryMarkerOrThrow(
             bc,
             "IncompressibleNavierStokesVMSModule weak velocity preflight");
         velocity_conditions.add(
@@ -1870,7 +1870,7 @@ NavierStokesPreflight preflightNavierStokes(
             options.velocity_dirichlet_weak.end(),
             [&](const auto& bc) {
                 return generated_active_boundary_for(
-                           FE::forms::bc::detail::
+                           FE::forms::bc::
                                boundaryMarkerOrThrow(
                                    bc,
                                    "IncompressibleNavierStokesVMSModule::"

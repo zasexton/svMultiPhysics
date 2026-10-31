@@ -117,11 +117,6 @@ template <class BC>
 
 namespace detail {
 
-// The Navier-Stokes factories and option rules and the level-set transport
-// still spell these helpers through detail.
-using bc::boundaryMarkerOrThrow;
-using bc::hasForbiddenPrescribedValueDependency;
-
 [[nodiscard]] inline std::string makeValueName(std::string_view prefix,
                                               int boundary_marker,
                                               std::size_t i)

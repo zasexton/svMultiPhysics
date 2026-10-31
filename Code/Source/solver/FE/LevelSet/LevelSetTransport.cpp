@@ -265,7 +265,7 @@ void validateBoundaryOptions(const LevelSetBoundaryOptions& boundaries)
     markers.reserve(boundaries.inflow.size() + boundaries.outflow.size());
 
     for (const auto& bc : boundaries.inflow) {
-        const int marker = forms::bc::detail::boundaryMarkerOrThrow(
+        const int marker = forms::bc::boundaryMarkerOrThrow(
             bc,
             "installLevelSetTransport: inflow boundary");
         if (!markers.insert(marker).second) {
@@ -279,7 +279,7 @@ void validateBoundaryOptions(const LevelSetBoundaryOptions& boundaries)
     }
 
     for (const auto& bc : boundaries.outflow) {
-        const int marker = forms::bc::detail::boundaryMarkerOrThrow(
+        const int marker = forms::bc::boundaryMarkerOrThrow(
             bc,
             "installLevelSetTransport: outflow boundary");
         if (!markers.insert(marker).second) {
@@ -821,7 +821,7 @@ systems::CoupledResidualKernels installLevelSetTransport(
     }
 
     for (const auto& bc : options.boundaries.inflow) {
-        const int marker = forms::bc::detail::boundaryMarkerOrThrow(
+        const int marker = forms::bc::boundaryMarkerOrThrow(
             bc,
             "installLevelSetTransport: inflow boundary");
         const auto normal_velocity = dot(velocity, FormExpr::normal());

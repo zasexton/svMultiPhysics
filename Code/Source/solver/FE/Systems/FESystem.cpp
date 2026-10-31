@@ -8598,7 +8598,7 @@ void FESystem::declareMeshNormalBoundaryConstraint(
         const auto* target_node = declaration.target_expression.node();
         FE_THROW_IF(
             target_node == nullptr ||
-                forms::bc::detail::hasForbiddenPrescribedValueDependency(
+                forms::bc::hasForbiddenPrescribedValueDependency(
                     *target_node),
             InvalidArgumentException,
             "FESystem::declareMeshNormalBoundaryConstraint: prescribed "
