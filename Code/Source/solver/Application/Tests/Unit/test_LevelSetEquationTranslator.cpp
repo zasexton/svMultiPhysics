@@ -270,67 +270,6 @@ std::string maintenanceCompatibilityExceptionMessage(Action&& action)
   return {};
 }
 
-const application::core::LevelSetInputObservation*
-maintenanceCompatibilityObservation(
-    const std::vector<application::core::LevelSetInputObservation>& observations,
-    std::string_view canonical_key, std::string_view representation,
-    std::string_view source_layer)
-{
-  const auto found = std::find_if(
-      observations.begin(), observations.end(), [&](const auto& observation) {
-        return observation.canonical_key == canonical_key &&
-               observation.representation == representation &&
-               observation.source_layer == source_layer;
-      });
-  return found == observations.end() ? nullptr : &*found;
-}
-
-struct ExpectedInstallationVelocityObservation {
-  const char* canonical_key;
-  const char* representation;
-  const char* source_layer;
-  const char* selected_spelling;
-  bool supplied;
-  const char* originating_layer;
-};
-
-template <std::size_t N>
-void expectInstallationVelocityHistory(
-    const std::vector<application::core::LevelSetInputObservation>& observations,
-    const std::array<ExpectedInstallationVelocityObservation, N>& expected)
-{
-  std::vector<const application::core::LevelSetInputObservation*> actual;
-  for (const auto& observation : observations) {
-    if ((observation.canonical_key == "velocity_source" ||
-         observation.canonical_key == "constant_velocity") &&
-        (observation.representation == "installation_snapshot" ||
-         observation.representation == "installation_derived")) {
-      actual.push_back(&observation);
-    }
-  }
-
-  ASSERT_EQ(actual.size(), expected.size());
-  for (std::size_t i = 0; i < expected.size(); ++i) {
-    EXPECT_EQ(actual[i]->canonical_key, expected[i].canonical_key)
-        << "index " << i;
-    EXPECT_EQ(actual[i]->representation, expected[i].representation)
-        << "index " << i;
-    EXPECT_EQ(actual[i]->source_layer, expected[i].source_layer)
-        << "index " << i;
-    EXPECT_EQ(actual[i]->selected_spelling, expected[i].selected_spelling)
-        << "index " << i;
-    EXPECT_EQ(actual[i]->supplied, expected[i].supplied) << "index " << i;
-    EXPECT_FALSE(actual[i]->compatibility_fallback) << "index " << i;
-    if (expected[i].originating_layer[0] == '\0') {
-      EXPECT_TRUE(actual[i]->ordered_overrides.empty()) << "index " << i;
-    } else {
-      EXPECT_EQ(actual[i]->ordered_overrides,
-                (std::vector<std::string>{expected[i].originating_layer}))
-          << "index " << i;
-    }
-  }
-}
-
 std::shared_ptr<svmp::Mesh> makeRegistryBiquadraticQuadMesh()
 {
   auto base = std::make_shared<svmp::MeshBase>();
@@ -472,38 +411,35 @@ TEST(LevelSetEquationTranslator,
   EXPECT_EQ(resolved->options.velocity.constant_value,
             (std::array<svmp::FE::Real, 3>{1.25, -0.5, 3.0}));
 
-  const auto expect_vector_error = [&](std::string value) {
-    auto invalid = makeMaintenanceCompatibilityInput(mesh);
-    invalid.equation_params["Constant_velocity"] =
-        svmp::Physics::ParameterValue{true, std::move(value)};
-    EXPECT_EQ(
-        (maintenanceCompatibilityExceptionMessage<std::runtime_error>([&] {
-          (void)application::translators::level_set::resolveConfiguration(
-              invalid);
-        })),
-        "[svMultiPhysics::Application] Failed to parse three numeric "
-        "components for Constant_velocity.");
-  };
-  expect_vector_error("1.0, 2.0, 3.0");
-  expect_vector_error("1.0 2.0");
-  expect_vector_error("1.0 2.0 3.0 4.0");
-  expect_vector_error("1.0 nan 3.0");
+  // Commas separate the components as well as white space.
+  input.equation_params["Constant_velocity"] =
+      svmp::Physics::ParameterValue{true, "1.0, 2.0, 3.0"};
+  resolved = application::translators::level_set::resolveConfiguration(input);
+  ASSERT_TRUE(resolved);
+  EXPECT_EQ(resolved->options.velocity.constant_value,
+            (std::array<svmp::FE::Real, 3>{1.0, 2.0, 3.0}));
 
-  const auto expect_real_error = [&](std::string value) {
+  const auto expect_error = [&](const char* key, std::string value,
+                                const std::string& reason) {
     auto invalid = makeMaintenanceCompatibilityInput(mesh);
-    invalid.equation_params["SUPG_tau_scale"] =
-        svmp::Physics::ParameterValue{true, value};
+    invalid.equation_params[key] = svmp::Physics::ParameterValue{true, value};
     EXPECT_EQ(
         (maintenanceCompatibilityExceptionMessage<std::runtime_error>([&] {
           (void)application::translators::level_set::resolveConfiguration(
               invalid);
         })),
-        "[svMultiPhysics::Application] Failed to parse numeric value '" +
-            value + "' for SUPG_tau_scale.");
+        "[Level-set equation] " + std::string(key) + ": " + reason);
   };
-  expect_real_error("1.25tail");
-  expect_real_error("nan");
-  expect_real_error("1e9999");
+  expect_error("Constant_velocity", "1.0 2.0",
+               "expected three numbers, got '1.0 2.0'");
+  expect_error("Constant_velocity", "1.0 2.0 3.0 4.0",
+               "expected three numbers, got '1.0 2.0 3.0 4.0'");
+  expect_error("Constant_velocity", "1.0 nan 3.0",
+               "expected a finite number, got 'nan'");
+  expect_error("SUPG_tau_scale", "1.25tail",
+               "expected a number, got '1.25tail'");
+  expect_error("SUPG_tau_scale", "nan", "expected a finite number, got 'nan'");
+  expect_error("SUPG_tau_scale", "1e9999", "expected a number, got '1e9999'");
 
   const auto expect_count_error = [&](std::string value) {
     auto invalid = makeMaintenanceCompatibilityInput(mesh);
@@ -597,9 +533,10 @@ TEST(LevelSetEquationTranslator,
           (void)application::translators::level_set::resolveConfiguration(
               installation_input);
         })),
-        "[svMultiPhysics::Application] Velocity_source must be one of "
-        "'coupled_field', 'prescribed_data', 'constant', or "
-        "'material_interface_phase_pair'.");
+        "[Level-set equation] Velocity_source: expected one of "
+        "coupled_field | prescribed_data | constant_vector | "
+        "material_interface_phase_pair, got '" +
+            separator_only + "'");
 
     application::core::LegacyLevelSetMaintenanceInput legacy{};
     legacy.equation_type_defined = true;
@@ -619,90 +556,62 @@ TEST(LevelSetEquationTranslator,
 #endif
 }
 
-TEST(LevelSetEquationTranslator,
-     MaintenanceCompatibilityRecordsSourceBackedInstallationVelocityHistory)
+TEST(LevelSetEquationTranslator, ReportsResolvedKeysWithTheirSource)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
 #else
   auto mesh = makeRegistryTriangleMesh();
-  application::core::LegacyLevelSetMaintenanceInput legacy{};
-  legacy.equation_type_defined = true;
-  legacy.equation_type = "level_set";
-  legacy.equation_parameters["Enable_kinematic_reconciliation"] =
-      svmp::Physics::ParameterValue{true, "true"};
+  auto input = makeMaintenanceCompatibilityInput(mesh);
+  input.equation_params.erase("Constant_velocity");
+  input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{true, "prescribed"};
+  input.equation_params["Coupled"] = svmp::Physics::ParameterValue{true, "1"};
+  input.default_domain.params["SUPG_tau_scale"] =
+      svmp::Physics::ParameterValue{true, "0.25"};
 
-  auto wet_input = makeMaintenanceCompatibilityInput(mesh);
-  wet_input.equation_params.erase("Constant_velocity");
-  wet_input.equation_params["Velocity_source"] =
-      svmp::Physics::ParameterValue{true, "prescribed_data"};
-  wet_input.equation_params["Source_velocity_field_name"] =
-      svmp::Physics::ParameterValue{true, "physical_velocity"};
-  wet_input.equation_params["Advection_velocity_extension_method"] =
-      svmp::Physics::ParameterValue{true, "pde_harmonic"};
-  wet_input.equation_params["Advection_velocity_extension_coupling"] =
-      svmp::Physics::ParameterValue{true, "monolithic"};
-  const auto wet_installation =
-      application::translators::level_set::resolveConfiguration(wet_input);
-  const auto wet_maintenance =
-      application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-          legacy, std::span<const application::core::ActiveCutVolumeRequest>{},
-          wet_installation);
-  ASSERT_TRUE(wet_maintenance.has_value());
-  ASSERT_TRUE(*wet_maintenance);
-  const auto& wet_observations = (*wet_maintenance)->input_observations;
-  EXPECT_NE(maintenanceCompatibilityObservation(
-                wet_observations, "velocity_source", "installation_snapshot",
-                "equation"),
-            nullptr);
-  EXPECT_NE(maintenanceCompatibilityObservation(
-                wet_observations, "advection_velocity_from_field",
-                "installation_snapshot", "equation"),
-            nullptr);
-  EXPECT_NE(maintenanceCompatibilityObservation(
-                wet_observations, "velocity_source", "installation_derived",
-                "derived:pde_velocity_extension_monolithic"),
-            nullptr);
+  const auto resolved =
+      application::translators::level_set::resolveConfiguration(input);
+  ASSERT_TRUE(resolved);
+  const auto& json = resolved->resolved_input_json;
+  EXPECT_EQ(json.rfind(R"({"version":1,"equation":{"Coupled":)", 0), 0u)
+      << json;
+  // A key the input gives is explicit, with the input text when it is not
+  // the canonical text; a key from a domain element counts as well.
+  for (const std::string entry :
+       {R"("Coupled":{"value":"true","source":"explicit","spelling":"Coupled","input":"1"})",
+        R"("Level_set_field_name":{"value":"phi","source":"explicit","spelling":"Level_set_field_name"})",
+        R"("Velocity_source":{"value":"prescribed_data","source":"explicit","spelling":"Velocity_source","input":"prescribed"})",
+        R"("SUPG_tau_scale":{"value":"0.25","source":"explicit","spelling":"SUPG_tau_scale"})",
+        // A value that another key selects is derived.
+        R"("Auto_register_velocity_field":{"value":"true","source":"derived","origin":"resolution"})",
+        R"("Enable_SUPG":{"value":"false","source":"default"})"}) {
+    EXPECT_NE(json.find(entry), std::string::npos) << entry << "\n" << json;
+  }
 
-  auto constant_input = makeMaintenanceCompatibilityInput(mesh);
-  constant_input.equation_params["Velocity_source"] =
-      svmp::Physics::ParameterValue{true, "prescribed_data"};
-  constant_input.equation_params["Constant_velocity"] =
-      svmp::Physics::ParameterValue{true, "1.0 2.0 3.0"};
-  const auto constant_installation =
-      application::translators::level_set::resolveConfiguration(constant_input);
-  const auto constant_maintenance =
-      application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-          legacy, std::span<const application::core::ActiveCutVolumeRequest>{},
-          constant_installation);
-  ASSERT_TRUE(constant_maintenance.has_value());
-  ASSERT_TRUE(*constant_maintenance);
-  const auto& constant_observations =
-      (*constant_maintenance)->input_observations;
-  EXPECT_NE(maintenanceCompatibilityObservation(
-                constant_observations, "constant_velocity",
-                "installation_snapshot", "equation"),
-            nullptr);
-  EXPECT_NE(maintenanceCompatibilityObservation(
-                constant_observations, "velocity_source",
-                "installation_derived", "derived:constant_velocity"),
-            nullptr);
+  // The transport artifact ends with the section.
+  svmp::FE::systems::FESystem system(mesh);
+  auto module =
+      application::translators::level_set::createModule(*resolved, system);
+  ASSERT_TRUE(module);
+  const auto artifact = module->effectiveConfigurationArtifact();
+  ASSERT_TRUE(artifact.has_value());
+  const auto suffix = ",\"resolved\":" + json + "}";
+  ASSERT_GE(artifact->json.size(), suffix.size());
+  EXPECT_EQ(artifact->json.substr(artifact->json.size() - suffix.size()),
+            suffix);
 #endif
 }
 
 TEST(LevelSetEquationTranslator,
-     MaintenanceCompatibilityPreservesChronologicalInstallationVelocitySourceHistory)
+     InstallationAppliesVelocityKeysElementByElement)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
 #else
   auto mesh = makeRegistryTriangleMesh();
-  application::core::LegacyLevelSetMaintenanceInput legacy{};
-  legacy.equation_type_defined = true;
-  legacy.equation_type = "level_set";
-  legacy.equation_parameters["Enable_kinematic_reconciliation"] =
-      svmp::Physics::ParameterValue{true, "true"};
 
+  // A later element's velocity source replaces an earlier constant velocity.
   auto later_direct_input = makeMaintenanceCompatibilityInput(mesh);
   later_direct_input.equation_params.erase("Velocity_source");
   later_direct_input.equation_params["Constant_velocity"] =
@@ -715,26 +624,9 @@ TEST(LevelSetEquationTranslator,
   ASSERT_TRUE(later_direct_installation);
   EXPECT_EQ(later_direct_installation->options.velocity.source,
             svmp::FE::level_set::LevelSetVelocitySource::PrescribedData);
-  const auto later_direct_maintenance =
-      application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-          legacy, std::span<const application::core::ActiveCutVolumeRequest>{},
-          later_direct_installation);
-  ASSERT_TRUE(later_direct_maintenance.has_value());
-  ASSERT_TRUE(*later_direct_maintenance);
-  expectInstallationVelocityHistory(
-      (*later_direct_maintenance)->input_observations,
-      std::array<ExpectedInstallationVelocityObservation, 3>{
-          ExpectedInstallationVelocityObservation{
-              "constant_velocity", "installation_snapshot", "equation",
-              "Constant_velocity", true, ""},
-          ExpectedInstallationVelocityObservation{
-              "velocity_source", "installation_derived",
-              "derived:constant_velocity", "", false, "equation"},
-          ExpectedInstallationVelocityObservation{
-              "velocity_source", "installation_snapshot", "default_domain",
-              "Velocity_source", true, ""},
-      });
+  EXPECT_TRUE(later_direct_installation->options.velocity.auto_register_field);
 
+  // A later constant velocity replaces an earlier velocity source.
   auto later_constant_input = makeMaintenanceCompatibilityInput(mesh);
   later_constant_input.equation_params.erase("Constant_velocity");
   later_constant_input.equation_params["Velocity_source"] =
@@ -747,25 +639,7 @@ TEST(LevelSetEquationTranslator,
   ASSERT_TRUE(later_constant_installation);
   EXPECT_EQ(later_constant_installation->options.velocity.source,
             svmp::FE::level_set::LevelSetVelocitySource::ConstantVector);
-  const auto later_constant_maintenance =
-      application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-          legacy, std::span<const application::core::ActiveCutVolumeRequest>{},
-          later_constant_installation);
-  ASSERT_TRUE(later_constant_maintenance.has_value());
-  ASSERT_TRUE(*later_constant_maintenance);
-  expectInstallationVelocityHistory(
-      (*later_constant_maintenance)->input_observations,
-      std::array<ExpectedInstallationVelocityObservation, 3>{
-          ExpectedInstallationVelocityObservation{
-              "velocity_source", "installation_snapshot", "equation",
-              "Velocity_source", true, ""},
-          ExpectedInstallationVelocityObservation{
-              "constant_velocity", "installation_snapshot", "default_domain",
-              "Constant_velocity", true, ""},
-          ExpectedInstallationVelocityObservation{
-              "velocity_source", "installation_derived",
-              "derived:constant_velocity", "", false, "default_domain"},
-      });
+  EXPECT_FALSE(later_constant_installation->options.velocity.auto_register_field);
 
   auto repeated_constant_input = makeMaintenanceCompatibilityInput(mesh);
   repeated_constant_input.equation_params.erase("Velocity_source");
@@ -781,49 +655,52 @@ TEST(LevelSetEquationTranslator,
             svmp::FE::level_set::LevelSetVelocitySource::ConstantVector);
   EXPECT_EQ(repeated_constant_installation->options.velocity.constant_value,
             (std::array<svmp::FE::Real, 3>{7.0, 8.0, 9.0}));
-  const auto repeated_constant_maintenance =
-      application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-          legacy, std::span<const application::core::ActiveCutVolumeRequest>{},
-          repeated_constant_installation);
-  ASSERT_TRUE(repeated_constant_maintenance.has_value());
-  ASSERT_TRUE(*repeated_constant_maintenance);
-  expectInstallationVelocityHistory(
-      (*repeated_constant_maintenance)->input_observations,
-      std::array<ExpectedInstallationVelocityObservation, 4>{
-          ExpectedInstallationVelocityObservation{
-              "constant_velocity", "installation_snapshot", "equation",
-              "Constant_velocity", true, ""},
-          ExpectedInstallationVelocityObservation{
-              "velocity_source", "installation_derived",
-              "derived:constant_velocity", "", false, "equation"},
-          ExpectedInstallationVelocityObservation{
-              "constant_velocity", "installation_snapshot", "default_domain",
-              "Constant_velocity", true, ""},
-          ExpectedInstallationVelocityObservation{
-              "velocity_source", "installation_derived",
-              "derived:constant_velocity", "", false, "default_domain"},
-      });
+
+  // Within one element a constant velocity wins over the stated source and
+  // registration, and a kinematic marker over a disabled kinematic term.
+  auto same_element_input = makeMaintenanceCompatibilityInput(mesh);
+  same_element_input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{true, "prescribed_data"};
+  same_element_input.equation_params["Auto_register_velocity_field"] =
+      svmp::Physics::ParameterValue{true, "true"};
+  same_element_input.equation_params["Enable_interface_kinematic"] =
+      svmp::Physics::ParameterValue{true, "false"};
+  same_element_input.equation_params["Interface_kinematic_marker"] =
+      svmp::Physics::ParameterValue{true, "5"};
+  const auto same_element_installation =
+      application::translators::level_set::resolveConfiguration(
+          same_element_input);
+  ASSERT_TRUE(same_element_installation);
+  EXPECT_EQ(same_element_installation->options.velocity.source,
+            svmp::FE::level_set::LevelSetVelocitySource::ConstantVector);
+  EXPECT_FALSE(same_element_installation->options.velocity.auto_register_field);
+  EXPECT_TRUE(same_element_installation->options.interface_kinematic.enabled);
+  EXPECT_EQ(same_element_installation->options.interface_kinematic
+                .interface_marker,
+            5);
 #endif
 }
 
 TEST(LevelSetEquationTranslator,
-     MaintenanceCompatibilityInstallationAcceptsNavierStokesVelocityToken)
+     InstallationRejectsTheNavierStokesVelocityToken)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
 #else
+  // The maintenance never accepted it, so no deck that runs uses it.
   auto mesh = makeRegistryTriangleMesh();
   auto input = makeMaintenanceCompatibilityInput(mesh);
   input.equation_params.erase("Constant_velocity");
   input.equation_params["Velocity_source"] =
       svmp::Physics::ParameterValue{true, "navier_stokes"};
 
-  const auto resolved =
-      application::translators::level_set::resolveConfiguration(input);
-
-  ASSERT_TRUE(resolved);
-  EXPECT_EQ(resolved->options.velocity.source,
-            svmp::FE::level_set::LevelSetVelocitySource::CoupledField);
+  EXPECT_EQ(
+      (maintenanceCompatibilityExceptionMessage<std::runtime_error>([&] {
+        (void)application::translators::level_set::resolveConfiguration(input);
+      })),
+      "[Level-set equation] Velocity_source: expected one of coupled_field | "
+      "prescribed_data | constant_vector | material_interface_phase_pair, "
+      "got 'navier_stokes'");
 #endif
 }
 
@@ -1471,7 +1348,11 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
           "\"boundary_flux_policy\":\"closed_boundary_only\""}
           .size(),
       "\"boundary_flux_policy\":\"closed_domain_discrete_q_flux_only\",\"boundary_flux_tolerance_source\":\"invariant_tolerance\",\"boundary_flux_blind_where_q_zero\":true");
-  EXPECT_EQ(artifact->json, expected);
+  // The resolved section of the option schema ends the artifact (decision
+  // D47, step P3; ReportsResolvedKeysWithTheirSource).
+  const auto resolved = artifact->json.find(",\"resolved\":{\"version\":1,");
+  ASSERT_NE(resolved, std::string::npos);
+  EXPECT_EQ(artifact->json.substr(0, resolved) + "}", expected);
 #endif
 }
 

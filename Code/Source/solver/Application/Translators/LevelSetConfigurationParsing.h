@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Application/Core/ResolvedMovingDomainConfiguration.h"
+#include "FE/Core/OptionSchema.h"
 #include "FE/LevelSet/LevelSetOptions.h"
 #include "Physics/Core/EquationModuleInput.h"
 
@@ -12,6 +14,38 @@
 #include <vector>
 
 namespace application::translators::level_set::configuration {
+
+/// The keys of a level-set equation (decision D47, step P3), declared once:
+/// spellings, codec, default (the FE option default), the values one key
+/// implies for another and documentation.  The installation resolves the
+/// equation element and then its domain elements, each over the values
+/// before it; describe() gives the "resolved" section of the transport
+/// artifact.
+[[nodiscard]] const svmp::FE::options::OptionSchema<
+    application::core::LevelSetEquationKeys> &
+levelSetEquationSchema();
+
+/// The defined entries of a parameter map, as schema input.
+[[nodiscard]] svmp::FE::options::OptionInput
+levelSetEquationInput(const svmp::Physics::ParameterMap &parameters);
+
+/// Resolves the keys of one element over the values of the elements before
+/// it, then sets the values that a key selects beyond its own field: Coupled
+/// routes the transport to the monolithic operator, Constant_velocity
+/// selects a constant velocity without a registered field, and
+/// Interface_kinematic_marker enables the interface kinematic term.
+[[nodiscard]] svmp::FE::options::ResolvedOptions<
+    application::core::LevelSetEquationKeys>
+resolveLevelSetEquationKeys(const svmp::FE::options::OptionInput &input,
+                            application::core::LevelSetEquationKeys previous = {});
+
+/// The "resolved" section of the transport artifact:
+///   {"version":1,"equation":{...}}
+/// Each key carries its value and its source (OptionSchema::describe of the
+/// resolved keys against the input as read, the later element first).
+[[nodiscard]] std::string
+resolvedLevelSetEquationJson(const svmp::FE::options::OptionInput &input,
+                             const application::core::LevelSetEquationKeys &keys);
 
 enum class LevelSetInputPolicy {
   Installation,

@@ -10,6 +10,130 @@
 namespace application::translators::level_set::configuration {
 namespace {
 
+namespace opt = svmp::FE::options;
+namespace ls = svmp::FE::level_set;
+using Keys = application::core::LevelSetEquationKeys;
+
+// Every key reads like the parser it replaced: an empty value counts as
+// absent, and the first spelling with a value wins.
+opt::KeySettings setting(std::string doc,
+                         std::vector<opt::OptionSpelling> spellings = {}) {
+  return opt::KeySettings{.spellings = std::move(spellings),
+                          .empty = opt::EmptyPolicy::Absent,
+                          .doc = std::move(doc)};
+}
+
+// true, 1, yes or on (any case) is true; any other text is false.
+opt::BoolCodec relaxedBool() { return opt::BoolCodec{opt::BoolLexicon::Relaxed}; }
+
+template <class E>
+opt::EnumToken<E> token(E value, std::string canonical,
+                        std::vector<std::string> synonyms = {}) {
+  return opt::EnumToken<E>{value, std::move(canonical), std::move(synonyms)};
+}
+
+opt::OptionSchema<Keys> makeLevelSetEquationSchema() {
+  using Form = ls::LevelSetTransportForm;
+  using FieldSource = ls::LevelSetFieldSource;
+  using VelocitySource = ls::LevelSetVelocitySource;
+  opt::OptionSchema<Keys> schema("Level-set equation");
+  schema
+      .key("Coupled", &Keys::coupled, relaxedBool(),
+           setting("the transport joins the monolithic operator (equations)"))
+      .key("Transport_form",
+           [](Keys &keys) -> auto & { return keys.transport.transport_form; },
+           opt::EnumCodec<Form>{{
+               token(Form::Advective, "advective", {"classical", "standard"}),
+               token(Form::ConservativeDivergence, "conservative_divergence",
+                     {"conservative", "divergence", "divergence_form"}),
+           }},
+           setting("form of the transport equation"))
+      .key("Level_set_field_name",
+           [](Keys &keys) -> auto & { return keys.transport.level_set.field_name; },
+           opt::StringCodec{},
+           setting("name of the level-set field",
+                   {{"Level_set_field_name", false}, {"Field_name", false}}))
+      .key("Level_set_source",
+           [](Keys &keys) -> auto & { return keys.transport.level_set.source; },
+           opt::EnumCodec<FieldSource>{{
+               token(FieldSource::Unknown, "unknown", {"solution"}),
+               token(FieldSource::PrescribedData, "prescribed_data",
+                     {"prescribed", "data"}),
+           }},
+           setting("an unknown, or prescribed data initialized from the mesh"))
+      .key("Auto_register_level_set_field",
+           [](Keys &keys) -> auto & {
+             return keys.transport.level_set.auto_register_field;
+           },
+           relaxedBool(), setting("register the level-set field if missing"))
+      .key("Velocity_field_name",
+           [](Keys &keys) -> auto & { return keys.transport.velocity.field_name; },
+           opt::StringCodec{}, setting("name of the advection velocity field"))
+      .key("Velocity_source",
+           [](Keys &keys) -> auto & { return keys.transport.velocity.source; },
+           opt::EnumCodec<VelocitySource>{{
+               token(VelocitySource::CoupledField, "coupled_field",
+                     {"coupled", "unknown"}),
+               token(VelocitySource::PrescribedData, "prescribed_data",
+                     {"prescribed", "data"}),
+               token(VelocitySource::ConstantVector, "constant_vector",
+                     {"constant"}),
+               token(VelocitySource::MaterialInterfacePhasePair,
+                     "material_interface_phase_pair"),
+           }},
+           setting("where the advection velocity comes from"))
+      .key("Material_interface_marker",
+           [](Keys &keys) -> auto & {
+             return keys.transport.velocity.material_interface_marker;
+           },
+           opt::IntCodec{},
+           setting("interface of the material-interface phase-pair velocity"))
+      .key("Auto_register_velocity_field",
+           [](Keys &keys) -> auto & {
+             return keys.transport.velocity.auto_register_field;
+           },
+           relaxedBool(), setting("register the velocity field if missing"))
+      .key("Constant_velocity",
+           [](Keys &keys) -> auto & { return keys.transport.velocity.constant_value; },
+           opt::Vector3Codec{},
+           setting("a constant advection velocity (selects constant_vector)"))
+      .key("Enable_SUPG",
+           [](Keys &keys) -> auto & { return keys.transport.supg.enabled; },
+           relaxedBool(), setting("SUPG stabilization"))
+      .key("SUPG_tau_scale",
+           [](Keys &keys) -> auto & { return keys.transport.supg.tau_scale; },
+           opt::RealCodec{}, setting("SUPG scale c_tau"))
+      .key("SUPG_transient_scale",
+           [](Keys &keys) -> auto & { return keys.transport.supg.transient_scale; },
+           opt::RealCodec{}, setting("SUPG transient scale c_t"))
+      .key("Enable_interface_kinematic",
+           [](Keys &keys) -> auto & {
+             return keys.transport.interface_kinematic.enabled;
+           },
+           relaxedBool(), setting("interface kinematic term"))
+      .key("Interface_kinematic_marker",
+           [](Keys &keys) -> auto & {
+             return keys.transport.interface_kinematic.interface_marker;
+           },
+           opt::IntCodec{},
+           setting("interface of the kinematic term (enables it)"))
+      .key("Interface_kinematic_weight_scale",
+           [](Keys &keys) -> auto & {
+             return keys.transport.interface_kinematic.weight_scale;
+           },
+           opt::RealCodec{}, setting("weight of the interface kinematic term"))
+      // A velocity source decides whether the velocity field is registered,
+      // unless the element states it.
+      .implies("Velocity_source", "Auto_register_velocity_field", "true",
+               opt::ImplicationSettings{.when_trigger_is = "prescribed_data"})
+      .implies("Velocity_source", "Auto_register_velocity_field", "false",
+               opt::ImplicationSettings{.when_trigger_is = "constant_vector"})
+      .implies("Velocity_source", "Auto_register_velocity_field", "false",
+               opt::ImplicationSettings{
+                   .when_trigger_is = "material_interface_phase_pair"});
+  return schema;
+}
+
 std::string lowerCopy(std::string value) {
   std::transform(
       value.begin(), value.end(), value.begin(),
@@ -23,6 +147,46 @@ bool relaxedBoolean(std::string_view raw) {
 }
 
 } // namespace
+
+const opt::OptionSchema<Keys> &levelSetEquationSchema() {
+  static const auto schema = makeLevelSetEquationSchema();
+  return schema;
+}
+
+opt::OptionInput
+levelSetEquationInput(const svmp::Physics::ParameterMap &parameters) {
+  opt::OptionInput input;
+  for (const auto &[name, parameter] : parameters) {
+    if (parameter.defined) {
+      input.add(name, parameter.value);
+    }
+  }
+  return input;
+}
+
+opt::ResolvedOptions<Keys> resolveLevelSetEquationKeys(const opt::OptionInput &input,
+                                                       Keys previous) {
+  auto resolved = levelSetEquationSchema().resolve(input, std::move(previous));
+  auto &transport = resolved.value.transport;
+  if (resolved.isExplicit("Coupled") && resolved.value.coupled) {
+    transport.operator_tag = "equations";
+  }
+  if (resolved.isExplicit("Constant_velocity")) {
+    transport.velocity.source = ls::LevelSetVelocitySource::ConstantVector;
+    transport.velocity.auto_register_field = false;
+  }
+  if (resolved.isExplicit("Interface_kinematic_marker")) {
+    transport.interface_kinematic.enabled = true;
+  }
+  return resolved;
+}
+
+std::string resolvedLevelSetEquationJson(const opt::OptionInput &input,
+                                         const Keys &keys) {
+  const auto &schema = levelSetEquationSchema();
+  return "{\"version\":1,\"equation\":" +
+         schema.toJson(schema.describe(input, keys, Keys{})) + '}';
+}
 
 LevelSetConfigurationReader::LevelSetConfigurationReader(
     const svmp::Physics::ParameterMap &parameters,

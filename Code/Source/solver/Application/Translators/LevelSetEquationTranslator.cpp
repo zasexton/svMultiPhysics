@@ -465,7 +465,8 @@ const char* level_set_phase_side_name(ls::LevelSetPhaseSide side) noexcept
 }
 
 svmp::Physics::EffectiveConfigurationArtifact
-make_level_set_effective_configuration(const ls::LevelSetTransportOptions& options)
+make_level_set_effective_configuration(const ls::LevelSetTransportOptions& options,
+                                       const std::string& resolved_input_json)
 {
   auto inflow = options.boundaries.inflow;
   auto outflow = options.boundaries.outflow;
@@ -621,7 +622,11 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
     if (i != 0u) out << ',';
     out << "{\"marker\":" << outflow[i].boundary_marker << '}';
   }
-  out << "]}}";
+  out << "]}";
+  if (!resolved_input_json.empty()) {
+    out << ",\"resolved\":" << resolved_input_json;
+  }
+  out << '}';
 
   return svmp::Physics::EffectiveConfigurationArtifact{
       .component = "level_set_transport",
@@ -634,10 +639,12 @@ public:
   LevelSetTransportInputAdapter(
       std::shared_ptr<const svmp::FE::spaces::FunctionSpace> level_set_space,
       ls::LevelSetTransportOptions options,
-      svmp::FE::systems::FormInstallOptions install_options)
+      svmp::FE::systems::FormInstallOptions install_options,
+      std::string resolved_input_json)
       : level_set_space_(std::move(level_set_space)),
         options_(std::move(options)),
-        install_options_(std::move(install_options))
+        install_options_(std::move(install_options)),
+        resolved_input_json_(std::move(resolved_input_json))
   {
   }
 
@@ -650,7 +657,7 @@ public:
         options_,
         install_options_);
     effective_configuration_artifact_ =
-        make_level_set_effective_configuration(options_);
+        make_level_set_effective_configuration(options_, resolved_input_json_);
   }
 
   [[nodiscard]] std::optional<svmp::Physics::EffectiveConfigurationArtifact>
@@ -781,6 +788,7 @@ private:
   std::shared_ptr<const svmp::FE::spaces::FunctionSpace> level_set_space_{};
   ls::LevelSetTransportOptions options_{};
   svmp::FE::systems::FormInstallOptions install_options_{};
+  std::string resolved_input_json_{};
   mutable std::optional<svmp::Physics::EffectiveConfigurationArtifact>
       effective_configuration_artifact_{};
 };
@@ -843,16 +851,6 @@ std::optional<int> get_defined_int(
   return reader.integer(keys, context);
 }
 
-std::optional<std::array<svmp::FE::Real, 3>> get_defined_vector3(
-    const svmp::Physics::ParameterMap& params,
-    std::initializer_list<std::string_view> keys,
-    std::string_view context)
-{
-  using namespace application::translators::level_set::configuration;
-  LevelSetConfigurationReader reader(params, LevelSetInputPolicy::Installation);
-  return reader.vector3(keys, context);
-}
-
 std::optional<int> get_defined_positive_int(
     const svmp::Physics::ParameterMap& params,
     std::initializer_list<std::string_view> keys,
@@ -882,50 +880,6 @@ std::optional<bool> get_defined_bool(
   parsing::LevelSetConfigurationReader reader(
       params, parsing::LevelSetInputPolicy::Installation);
   return reader.boolean(keys);
-}
-
-template <std::size_t N>
-std::optional<svmp::FE::Real> get_defined_real(
-    const svmp::Physics::ParameterMap& params,
-    const std::array<std::string_view, N>& keys,
-    std::string_view context)
-{
-  parsing::LevelSetConfigurationReader reader(
-      params, parsing::LevelSetInputPolicy::Installation);
-  return reader.real(keys, context);
-}
-
-template <std::size_t N>
-std::optional<int> get_defined_int(
-    const svmp::Physics::ParameterMap& params,
-    const std::array<std::string_view, N>& keys,
-    std::string_view context)
-{
-  parsing::LevelSetConfigurationReader reader(
-      params, parsing::LevelSetInputPolicy::Installation);
-  return reader.integer(keys, context);
-}
-
-template <std::size_t N>
-std::optional<std::array<svmp::FE::Real, 3>> get_defined_vector3(
-    const svmp::Physics::ParameterMap& params,
-    const std::array<std::string_view, N>& keys,
-    std::string_view context)
-{
-  parsing::LevelSetConfigurationReader reader(
-      params, parsing::LevelSetInputPolicy::Installation);
-  return reader.vector3(keys, context);
-}
-
-template <std::size_t N>
-std::optional<int> get_defined_positive_int(
-    const svmp::Physics::ParameterMap& params,
-    const std::array<std::string_view, N>& keys,
-    std::string_view context)
-{
-  parsing::LevelSetConfigurationReader reader(
-      params, parsing::LevelSetInputPolicy::Installation);
-  return reader.integer(keys, context, true);
 }
 
 svmp::FE::systems::FormInstallOptions level_set_install_options(
@@ -1036,31 +990,6 @@ svmp::FE::BasisType resolve_basis_type(const svmp::Physics::EquationModuleInput&
       *basis + "'. Supported values are Lagrange, Serendipity, and Hierarchical.");
 }
 
-ls::LevelSetFieldSource parse_level_set_source(std::string_view raw)
-{
-  const auto value = normalized_token(std::string(raw));
-  if (value == "unknown" || value == "solution") {
-    return ls::LevelSetFieldSource::Unknown;
-  }
-  if (value == "prescribed" || value == "prescribeddata" || value == "data") {
-    return ls::LevelSetFieldSource::PrescribedData;
-  }
-  throw std::runtime_error(
-      "[svMultiPhysics::Application] Level_set_source must be one of 'unknown' or 'prescribed_data'.");
-}
-
-ls::LevelSetVelocitySource parse_velocity_source(std::string_view raw)
-{
-  using namespace application::translators::level_set::configuration;
-  return parseVelocitySource(raw, LevelSetInputPolicy::Installation);
-}
-
-ls::LevelSetTransportForm parse_transport_form(std::string_view raw)
-{
-  return application::translators::level_set::configuration::parseTransportForm(
-      raw);
-}
-
 ls::LevelSetPhaseSide parse_phase_side(std::string_view raw)
 {
   return application::translators::level_set::configuration::parsePhaseSide(raw);
@@ -1073,107 +1002,14 @@ parse_conservative_phase_boundary_flux_policy(std::string_view raw)
       parseConservativePhaseBoundaryFluxPolicy(raw);
 }
 
-void append_installation_selection(
-    std::vector<application::core::LevelSetInputObservation>& observations,
-    const parsing::LevelSetSelectedParameter& selection,
-    std::string_view source_layer)
-{
-  observations.push_back(application::core::LevelSetInputObservation{
-      .canonical_key = selection.canonical_key,
-      .selected_spelling = selection.selected_spelling,
-      .source_layer = std::string(source_layer),
-      .supplied = selection.supplied,
-      .representation = "installation_snapshot",
-      .compatibility_fallback = false,
-      .ordered_overrides = {},
-  });
-}
-
-void append_installation_selections(
-    std::vector<application::core::LevelSetInputObservation>& observations,
-    const parsing::LevelSetConfigurationReader& reader,
-    std::string_view source_layer)
-{
-  for (const auto& selection : reader.selections()) {
-    append_installation_selection(observations, selection, source_layer);
-  }
-}
-
-void append_installation_derived(
-    std::vector<application::core::LevelSetInputObservation>& observations,
-    std::string_view canonical_key, std::string_view source_layer,
-    std::string_view originating_layer = {})
-{
-  observations.push_back(application::core::LevelSetInputObservation{
-      .canonical_key = std::string(canonical_key),
-      .selected_spelling = {},
-      .source_layer = std::string(source_layer),
-      .supplied = false,
-      .representation = "installation_derived",
-      .compatibility_fallback = false,
-      .ordered_overrides = originating_layer.empty()
-                               ? std::vector<std::string>{}
-                               : std::vector<std::string>{
-                                     std::string(originating_layer)},
-  });
-}
-
-void append_installation_default(
-    std::vector<application::core::LevelSetInputObservation>& observations,
-    std::string_view canonical_key)
-{
-  observations.push_back(application::core::LevelSetInputObservation{
-      .canonical_key = std::string(canonical_key),
-      .selected_spelling = {},
-      .source_layer = "fe_default",
-      .supplied = false,
-      .representation = "installation_default",
-      .compatibility_fallback = false,
-      .ordered_overrides = {},
-  });
-}
-
-bool has_installation_observation(
-    const std::vector<application::core::LevelSetInputObservation>& observations,
-    std::string_view canonical_key)
-{
-  return std::any_of(observations.begin(), observations.end(),
-                     [&](const auto& observation) {
-                       return observation.canonical_key == canonical_key;
-                     });
-}
-
+// Reads one element of the equation over the values of the elements before
+// it: the conservative-phase controls, then the keys of
+// levelSetEquationSchema(), then the accepted-step maintenance switches.
 void apply_level_set_params(const svmp::Physics::ParameterMap& params,
-                            ls::LevelSetTransportOptions& options,
-                            std::vector<application::core::LevelSetInputObservation>&
-                                observations,
-                            std::string_view source_layer)
+                            const svmp::FE::options::OptionInput& input,
+                            application::core::LevelSetEquationKeys& keys)
 {
-  // A coupled transport joins the monolithic operator; otherwise it keeps
-  // its own operator (the LevelSetTransportOptions default).
-  if (const auto value = get_defined_bool(params, {"Coupled"})) {
-    if (*value) {
-      options.operator_tag = "equations";
-    }
-  }
-  if (const auto value = get_defined_string(
-          params, level_set_aliases::transport_form)) {
-    options.transport_form = parse_transport_form(*value);
-  }
-
-  if (const auto value = get_defined_string(
-          params, level_set_aliases::level_set_field_name)) {
-    options.level_set.field_name = *value;
-  }
-  if (const auto value = get_defined_string(params, {"Level_set_source"})) {
-    options.level_set.source = parse_level_set_source(*value);
-  }
-  if (const auto value = get_defined_bool(
-          params,
-          {"Auto_register_level_set_field"})) {
-    options.level_set.auto_register_field = *value;
-  }
-
+  auto& options = keys.transport;
   if (const auto value = get_defined_bool(
           params, level_set_aliases::conservative_phase_enable)) {
     options.conservative_phase.enabled = *value;
@@ -1285,96 +1121,7 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
     options.conservative_phase.maximum_geometry_displacement_fraction = *value;
   }
 
-  if (const auto value = get_defined_string(
-          params, level_set_aliases::velocity_field_name)) {
-    options.velocity.field_name = *value;
-  }
-  parsing::LevelSetConfigurationReader velocity_source_reader(
-      params, parsing::LevelSetInputPolicy::Installation);
-  if (const auto selected = velocity_source_reader.string(
-          level_set_aliases::velocity_source, "velocity_source")) {
-    options.velocity.source = parse_velocity_source(selected->text);
-    append_installation_selections(observations, velocity_source_reader,
-                                   source_layer);
-    if (options.velocity.source == ls::LevelSetVelocitySource::PrescribedData) {
-      options.velocity.auto_register_field = true;
-      append_installation_derived(observations,
-                                  "velocity_auto_register_field",
-                                  "derived:velocity_source", source_layer);
-    } else if (options.velocity.source == ls::LevelSetVelocitySource::ConstantVector) {
-      options.velocity.auto_register_field = false;
-      append_installation_derived(observations,
-                                  "velocity_auto_register_field",
-                                  "derived:velocity_source", source_layer);
-    } else if (options.velocity.source ==
-               ls::LevelSetVelocitySource::MaterialInterfacePhasePair) {
-      options.velocity.auto_register_field = false;
-      append_installation_derived(observations,
-                                  "velocity_auto_register_field",
-                                  "derived:velocity_source", source_layer);
-    }
-  }
-  if (const auto value = get_defined_int(
-          params, level_set_aliases::material_interface_marker,
-          "Material_interface_marker")) {
-    options.velocity.material_interface_marker = *value;
-  }
-  parsing::LevelSetConfigurationReader velocity_metadata_reader(
-      params, parsing::LevelSetInputPolicy::Installation);
-  if (const auto value = velocity_metadata_reader.boolean(
-          level_set_aliases::velocity_auto_register,
-          "velocity_auto_register_field")) {
-    options.velocity.auto_register_field = *value;
-  }
-  append_installation_selections(observations, velocity_metadata_reader,
-                                 source_layer);
-  parsing::LevelSetConfigurationReader constant_velocity_reader(
-      params, parsing::LevelSetInputPolicy::Installation);
-  if (const auto value = constant_velocity_reader.vector3(
-          level_set_aliases::constant_velocity, "Constant_velocity",
-          "constant_velocity")) {
-    options.velocity.source = ls::LevelSetVelocitySource::ConstantVector;
-    options.velocity.auto_register_field = false;
-    options.velocity.constant_value = *value;
-    append_installation_selections(observations, constant_velocity_reader,
-                                   source_layer);
-    append_installation_derived(observations, "velocity_source",
-                                "derived:constant_velocity", source_layer);
-    append_installation_derived(observations,
-                                "velocity_auto_register_field",
-                                "derived:constant_velocity", source_layer);
-  }
-
-  if (const auto value = get_defined_bool(params, {"Enable_SUPG"})) {
-    options.supg.enabled = *value;
-  }
-  if (const auto value = get_defined_real(params, {"SUPG_tau_scale"}, "SUPG_tau_scale")) {
-    options.supg.tau_scale = *value;
-  }
-  if (const auto value = get_defined_real(
-          params,
-          {"SUPG_transient_scale"},
-          "SUPG_transient_scale")) {
-    options.supg.transient_scale = *value;
-  }
-  if (const auto value = get_defined_bool(
-          params,
-          {"Enable_interface_kinematic"})) {
-    options.interface_kinematic.enabled = *value;
-  }
-  if (const auto value = get_defined_int(
-          params,
-          {"Interface_kinematic_marker"},
-          "Interface_kinematic_marker")) {
-    options.interface_kinematic.enabled = true;
-    options.interface_kinematic.interface_marker = *value;
-  }
-  if (const auto value = get_defined_real(
-          params,
-          {"Interface_kinematic_weight_scale"},
-          "Interface_kinematic_weight_scale")) {
-    options.interface_kinematic.weight_scale = *value;
-  }
+  keys = parsing::resolveLevelSetEquationKeys(input, std::move(keys)).value;
 
   if (const auto value = get_defined_bool(
           params,
@@ -1489,24 +1236,27 @@ translate_level_set_transport_input(
       std::make_shared<svmp::FE::spaces::ProductSpace>(
           velocity_scalar_space, dim);
 
-  ls::LevelSetTransportOptions options{};
-  std::vector<application::core::LevelSetInputObservation> input_observations;
   const auto install_options =
       level_set_install_options(svmp::Physics::core::resolveOopJitPolicy(input));
 
-  apply_level_set_params(input.equation_params, options, input_observations,
-                         "equation");
-  apply_level_set_params(input.default_domain.params, options,
-                         input_observations, "default_domain");
+  // The equation element, then its default domain and its domain element,
+  // each over the values before it.
+  application::core::LevelSetEquationKeys keys{};
+  std::vector<svmp::FE::options::OptionInput> element_inputs;
+  const auto apply_element = [&](const svmp::Physics::ParameterMap& params) {
+    element_inputs.push_back(parsing::levelSetEquationInput(params));
+    apply_level_set_params(params, element_inputs.back(), keys);
+  };
+  apply_element(input.equation_params);
+  apply_element(input.default_domain.params);
   if (!input.domains.empty()) {
     if (input.domains.size() != 1u) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Multiple <Domain> blocks are not supported by the level-set transport module.");
     }
-    apply_level_set_params(input.domains.front().params, options,
-                           input_observations,
-                           "domain:" + input.domains.front().id);
+    apply_element(input.domains.front().params);
   }
+  auto& options = keys.transport;
   apply_level_set_bcs(input, options);
 
   const bool material_interface_velocity =
@@ -1517,19 +1267,15 @@ translate_level_set_transport_input(
       throw std::runtime_error(
           "[svMultiPhysics::Application] Material_interface_marker is required for material-interface phase-pair velocity.");
     }
-    const auto reject_explicitly_disabled_kinematic = [](const auto& params) {
-      const auto enabled = get_defined_bool(
-          params,
-          {"Enable_interface_kinematic"});
-      if (enabled.has_value() && !*enabled) {
+    const auto& schema = parsing::levelSetEquationSchema();
+    for (const auto& element : element_inputs) {
+      const auto kinematic = schema.resolve(element.selectSpellings(
+          schema.spellings({"Enable_interface_kinematic"})));
+      if (kinematic.isExplicit("Enable_interface_kinematic") &&
+          !kinematic.value.transport.interface_kinematic.enabled) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Material-interface phase-pair velocity requires interface kinematic enforcement.");
       }
-    };
-    reject_explicitly_disabled_kinematic(input.equation_params);
-    reject_explicitly_disabled_kinematic(input.default_domain.params);
-    for (const auto& domain : input.domains) {
-      reject_explicitly_disabled_kinematic(domain.params);
     }
     if (options.interface_kinematic.interface_marker >= 0 &&
         options.interface_kinematic.interface_marker !=
@@ -1612,9 +1358,6 @@ translate_level_set_transport_input(
             "must name a distinct physical velocity field.");
       }
       options.velocity.source = ls::LevelSetVelocitySource::CoupledField;
-      append_installation_derived(input_observations, "velocity_source",
-                                  "derived:pde_velocity_extension_monolithic",
-                                  "equation");
     } else if (coupling_token != "prescribed") {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Advection_velocity_extension_method=" +
@@ -1626,32 +1369,22 @@ translate_level_set_transport_input(
           ".");
     }
     options.velocity.auto_register_field = true;
-    append_installation_selections(input_observations, wet_reader, "equation");
-    append_installation_derived(input_observations,
-                                "velocity_auto_register_field",
-                                "derived:pde_velocity_extension", "equation");
-  } else {
-    append_installation_selections(input_observations, wet_reader, "equation");
   }
 
-  if (!has_installation_observation(input_observations,
-                                    "velocity_auto_register_field")) {
-    append_installation_default(input_observations,
-                                "velocity_auto_register_field");
+  // The keys as read, the later element first, describe the resolved
+  // options.
+  svmp::FE::options::OptionInput read_input;
+  for (auto element = element_inputs.rbegin(); element != element_inputs.rend();
+       ++element) {
+    for (const auto& entry : element->entries()) {
+      read_input.add(entry.spelling, entry.text);
+    }
   }
-  if (!has_installation_observation(input_observations,
-                                    "velocity_source_field_name")) {
-    append_installation_default(input_observations,
-                                "velocity_source_field_name");
-  }
+  auto resolved_input_json =
+      parsing::resolvedLevelSetEquationJson(read_input, keys);
 
   if (!material_interface_velocity) {
     options.velocity.space = velocity_space;
-    append_installation_derived(input_observations, "velocity_space_present",
-                                "derived:resolved_velocity_space");
-  } else {
-    append_installation_derived(input_observations, "velocity_space_present",
-                                "derived:material_interface_phase_pair");
   }
   return application::core::ResolvedLevelSetEquationConfiguration{
       .source_mesh = input.mesh,
@@ -1659,7 +1392,7 @@ translate_level_set_transport_input(
       .level_set_space = std::move(level_set_space),
       .options = std::move(options),
       .install_options = install_options,
-      .input_observations = std::move(input_observations),
+      .resolved_input_json = std::move(resolved_input_json),
   };
 }
 
@@ -1673,7 +1406,8 @@ create_level_set_transport_from_configuration(
   auto module = std::make_unique<LevelSetTransportInputAdapter>(
       configuration.level_set_space,
       configuration.options,
-      configuration.install_options);
+      configuration.install_options,
+      configuration.resolved_input_json);
   module->registerOn(system);
   return module;
 }

@@ -590,7 +590,7 @@ TEST(LevelSetMaintenanceConfiguration,
 }
 
 TEST(LevelSetMaintenanceConfiguration,
-     SerializesPairedViewsProvenanceAndUnobservedFields) {
+     SerializesLegacyProvenanceNextToTheLayeredInstallation) {
   auto legacy = makeLegacyInput();
   put(legacy.equation_parameters, "Level_set_field_name", "phi_equation");
   put(legacy.equation_parameters, "Transport_form", "advective");
@@ -630,18 +630,6 @@ TEST(LevelSetMaintenanceConfiguration,
           legacy, std::span<const ActiveCutVolumeRequest>{}, installation);
   ASSERT_TRUE(resolved.has_value());
 
-  const auto *installation_field =
-      findObservation((*resolved)->input_observations, "level_set_field_name",
-                      "installation_snapshot");
-  ASSERT_NE(installation_field, nullptr);
-  EXPECT_EQ(installation_field->selected_spelling, "Level_set_field_name");
-  EXPECT_EQ(installation_field->source_layer, "domain:liquid");
-  EXPECT_TRUE(installation_field->supplied);
-  EXPECT_FALSE(installation_field->compatibility_fallback);
-  EXPECT_EQ(installation_field->ordered_overrides,
-            (std::vector<std::string>{"equation", "default_domain",
-                                      "domain:liquid"}));
-
   const auto *legacy_cadence = findObservation(
       (*resolved)->input_observations,
       "conservative_phase_flux_artifact_cadence_steps", "legacy_getter");
@@ -663,12 +651,6 @@ TEST(LevelSetMaintenanceConfiguration,
     EXPECT_EQ(selected->source_layer, "equation") << canonical;
     EXPECT_FALSE(selected->selected_spelling.empty()) << canonical;
   }
-  const auto *unknown_installation_form = findObservation(
-      (*resolved)->input_observations, "transport_form", "unavailable");
-  ASSERT_NE(unknown_installation_form, nullptr);
-  EXPECT_TRUE(unknown_installation_form->selected_spelling.empty());
-  EXPECT_EQ(unknown_installation_form->source_layer, "unavailable");
-
   EXPECT_EQ((*resolved)->transport.velocity.source,
             svmp::FE::level_set::LevelSetVelocitySource::ConstantVector);
   EXPECT_EQ((*resolved)->transport.velocity.constant_value,
@@ -752,7 +734,7 @@ TEST(LevelSetMaintenanceConfiguration,
 }
 
 TEST(LevelSetMaintenanceConfiguration,
-     MarksInstallationVelocityMetadataUnavailableWithoutSnapshotEvidence) {
+     RetainsTheInstallationVelocityMetadata) {
   auto legacy = makeLegacyInput();
   put(legacy.equation_parameters, "Enable_kinematic_reconciliation", "true");
   auto installation = makeInstallation(legacy);
@@ -774,15 +756,4 @@ TEST(LevelSetMaintenanceConfiguration,
                 .algebraic_extension_source_field_name,
             "physical_velocity");
   EXPECT_EQ((*resolved)->installation->options.velocity.space, nullptr);
-  for (const std::string_view canonical :
-       {"velocity_auto_register_field", "velocity_source_field_name",
-        "velocity_space_present"}) {
-    const auto *unavailable = findObservation(
-        (*resolved)->input_observations, canonical, "unavailable");
-    EXPECT_NE(unavailable, nullptr) << canonical;
-    if (unavailable != nullptr) {
-      EXPECT_TRUE(unavailable->selected_spelling.empty()) << canonical;
-      EXPECT_EQ(unavailable->source_layer, "unavailable") << canonical;
-    }
-  }
 }

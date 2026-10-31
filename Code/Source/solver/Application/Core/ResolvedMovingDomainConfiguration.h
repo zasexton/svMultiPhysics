@@ -28,13 +28,25 @@ struct LevelSetInputObservation {
   std::vector<std::string> ordered_overrides{};
 };
 
+// The keys of a level-set equation as one value, as levelSetEquationSchema()
+// (Application/Translators/LevelSetConfigurationParsing.h) resolves them
+// (decision D47, step P3): the transport options and the keys that select a
+// transport value without being one.
+struct LevelSetEquationKeys {
+  svmp::FE::level_set::LevelSetTransportOptions transport{};
+  // Coupled: the transport joins the monolithic operator ("equations").
+  bool coupled{false};
+};
+
 struct ResolvedLevelSetEquationConfiguration {
   std::shared_ptr<svmp::MeshBase> source_mesh{};
   std::string source_mesh_name{};
   std::shared_ptr<const svmp::FE::spaces::FunctionSpace> level_set_space{};
   svmp::FE::level_set::LevelSetTransportOptions options{};
   svmp::FE::systems::FormInstallOptions install_options{};
-  std::vector<LevelSetInputObservation> input_observations{};
+  // The "resolved" section of the transport's effective-configuration
+  // artifact: every key of the schema with its value and source.
+  std::string resolved_input_json{};
   LevelSetEquationInputHandle input_snapshot{};
 };
 

@@ -20,7 +20,6 @@ namespace aliases = parsing::aliases;
 using Reader = parsing::LevelSetConfigurationReader;
 using Selection = parsing::LevelSetSelectedParameter;
 
-constexpr auto kInstallationPolicy = parsing::LevelSetInputPolicy::Installation;
 constexpr auto kLegacyPolicy = parsing::LevelSetInputPolicy::LegacyMaintenance;
 
 void appendSelections(const Reader &reader, std::size_t &cursor,
@@ -55,140 +54,6 @@ void appendDerivedObservation(
       .compatibility_fallback = false,
       .ordered_overrides = {},
   });
-}
-
-std::optional<Selection>
-selectedFromLayer(const svmp::Physics::ParameterMap &parameters,
-                  std::span<const std::string_view> names,
-                  std::string_view canonical) {
-  Reader reader(parameters, kInstallationPolicy);
-  return reader.selected(names, canonical);
-}
-
-void appendInstallationObservationImpl(
-    std::vector<LevelSetInputObservation> &observations,
-    const svmp::Physics::EquationModuleInput &input,
-    std::span<const std::string_view> names, std::string_view canonical) {
-  std::optional<Selection> effective;
-  std::string effective_layer;
-  std::vector<std::string> overrides;
-  const auto visit = [&](const svmp::Physics::ParameterMap &parameters,
-                         std::string layer) {
-    const auto selected = selectedFromLayer(parameters, names, canonical);
-    if (!selected) {
-      return;
-    }
-    effective = selected;
-    effective_layer = layer;
-    overrides.push_back(std::move(layer));
-  };
-  visit(input.equation_params, "equation");
-  visit(input.default_domain.params, "default_domain");
-  for (const auto &domain : input.domains) {
-    visit(domain.params, "domain:" + domain.id);
-  }
-  if (!effective) {
-    return;
-  }
-  observations.push_back(LevelSetInputObservation{
-      .canonical_key = effective->canonical_key,
-      .selected_spelling = effective->selected_spelling,
-      .source_layer = std::move(effective_layer),
-      .supplied = effective->supplied,
-      .representation = "installation_snapshot",
-      .compatibility_fallback = false,
-      .ordered_overrides = std::move(overrides),
-  });
-}
-
-template <std::size_t N>
-void appendInstallationObservation(
-    std::vector<LevelSetInputObservation> &observations,
-    const svmp::Physics::EquationModuleInput &input,
-    const std::array<std::string_view, N> &names, std::string_view canonical) {
-  appendInstallationObservationImpl(observations, input, names, canonical);
-}
-
-void appendInstallationObservations(
-    std::vector<LevelSetInputObservation> &observations,
-    const ResolvedLevelSetEquationHandle &installation) {
-  if (!installation) {
-    return;
-  }
-  const bool has_chronological_velocity_source_history =
-      std::any_of(installation->input_observations.begin(),
-                  installation->input_observations.end(),
-                  [](const auto &observation) {
-                    return observation.canonical_key == "velocity_source";
-                  });
-  const bool has_chronological_constant_velocity_history =
-      std::any_of(installation->input_observations.begin(),
-                  installation->input_observations.end(),
-                  [](const auto &observation) {
-                    return observation.canonical_key == "constant_velocity";
-                  });
-  if (installation->input_snapshot) {
-    const auto &input = installation->input_snapshot->installation_input;
-    appendInstallationObservation(observations, input,
-                                  aliases::level_set_field_name,
-                                  "level_set_field_name");
-    appendInstallationObservation(observations, input, aliases::transport_form,
-                                  "transport_form");
-    if (!has_chronological_velocity_source_history) {
-      appendInstallationObservation(
-          observations, input, aliases::velocity_source, "velocity_source");
-    }
-    if (!has_chronological_constant_velocity_history) {
-      appendInstallationObservation(observations, input,
-                                    aliases::constant_velocity,
-                                    "constant_velocity");
-    }
-    appendInstallationObservation(
-        observations, input, aliases::conservative_phase_enable,
-        "enable_conservative_phase_transport");
-    appendInstallationObservation(observations, input,
-                                  aliases::conservative_phase_side,
-                                  "conservative_phase_liquid_side");
-  }
-
-  observations.insert(observations.end(),
-                      installation->input_observations.begin(),
-                      installation->input_observations.end());
-
-  const bool source_backed = !installation->input_observations.empty();
-  constexpr std::array<std::string_view, 8> covered_keys{
-      "level_set_field_name",
-      "transport_form",
-      "velocity_source",
-      "velocity_auto_register_field",
-      "velocity_source_field_name",
-      "velocity_space_present",
-      "enable_conservative_phase_transport",
-      "conservative_phase_liquid_side",
-  };
-  for (const auto key : covered_keys) {
-    const bool observed =
-        std::any_of(observations.begin(), observations.end(),
-                    [&](const auto &item) {
-                      return item.canonical_key == key &&
-                             (item.representation == "installation_snapshot" ||
-                              item.representation == "installation_derived" ||
-                              item.representation == "installation_default");
-                    });
-    if (observed) {
-      continue;
-    }
-    observations.push_back(LevelSetInputObservation{
-        .canonical_key = std::string(key),
-        .selected_spelling = {},
-        .source_layer = source_backed ? "fe_default" : "unavailable",
-        .supplied = false,
-        .representation =
-            source_backed ? "installation_default" : "unavailable",
-        .compatibility_fallback = false,
-        .ordered_overrides = {},
-    });
-  }
 }
 
 void appendLegacyDefaults(std::vector<LevelSetInputObservation> &observations) {
@@ -263,8 +128,6 @@ resolveLegacyLevelSetMaintenanceConfiguration(
   auto result =
       std::make_shared<ResolvedLevelSetMaintenanceCompatibilityConfiguration>();
   result->installation = std::move(installation);
-  appendInstallationObservations(result->input_observations,
-                                 result->installation);
 
   Reader reader(input.equation_parameters, kLegacyPolicy);
   std::size_t observation_cursor = 0u;
