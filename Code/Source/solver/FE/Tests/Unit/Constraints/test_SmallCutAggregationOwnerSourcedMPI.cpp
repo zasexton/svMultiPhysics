@@ -14,7 +14,8 @@
  * refresh, and requires bitwise identical constraint lines on every rank,
  * identical canonical refresh reports and prolongation digests, and that the
  * owner-sourced refresh actually completed (or, where the halo is too
- * shallow, that both refreshes fail with the same halo diagnostic).
+ * shallow or no cell is wholly active, that both refreshes fail with the
+ * same diagnostic).
  */
 
 #include <gtest/gtest.h>
@@ -895,6 +896,83 @@ TEST(SmallCutAggregationOwnerSourcedMPI,
     const auto owner = expectIdenticalRefreshes(scenario);
     EXPECT_GE(owner.owner_sourced_completed, 1u);
     EXPECT_EQ(owner.owner_sourced_returned, 0u);
+#endif
+}
+
+// The rooted drop with two ghost layers on four ranks: the halo hides the
+// preferred root of six candidates from a rank that condenses them, which
+// would then take another root and give a partition-dependent line.  Both
+// refreshes refuse it on every rank and name the <Ghost_layers> to set;
+// with three layers (and with four, above) the refresh completes.
+TEST(SmallCutAggregationOwnerSourcedMPI,
+     HaloHidingPreferredRootsIsRefusedWithTheGhostLayersToSet)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    int world_size = 1;
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    if (world_size != 4) {
+        GTEST_SKIP() << "Run with exactly four MPI ranks";
+    }
+    Scenario scenario;
+    scenario.layout.nx = 12;
+    scenario.layout.ny = 10;
+    scenario.layout.column_owner = contiguousColumns(12, world_size);
+    scenario.layout.ghost_layers = 2;
+    scenario.phi = dropLevelSet;
+    for (const bool owner_sourced : {false, true}) {
+        SCOPED_TRACE(owner_sourced ? "owner-sourced" : "global");
+        const auto refused = runScenario(scenario, owner_sourced);
+        EXPECT_TRUE(refused.threw);
+        EXPECT_NE(refused.message.find("diagnostic=incomplete_distributed_aggregation_halo"), std::string::npos)
+            << refused.message;
+        EXPECT_NE(refused.message.find("halo_limited_root_choices=6 row_coupled_slaves_beyond_halo=0"),
+                  std::string::npos)
+            << refused.message;
+        EXPECT_NE(refused.message.find("Set <Ghost_layers> to at least"), std::string::npos) << refused.message;
+        // Every rank throws the same communicator-global refusal.
+        const auto digest = wordsDigest(std::vector<std::uint64_t>(refused.message.begin(), refused.message.end()));
+        std::uint64_t minimum = 0u;
+        std::uint64_t maximum = 0u;
+        MPI_Allreduce(&digest, &minimum, 1, MPI_UINT64_T, MPI_MIN, MPI_COMM_WORLD);
+        MPI_Allreduce(&digest, &maximum, 1, MPI_UINT64_T, MPI_MAX, MPI_COMM_WORLD);
+        EXPECT_EQ(minimum, maximum);
+    }
+    scenario.layout.ghost_layers = 3;
+    const auto owner = expectIdenticalRefreshes(scenario);
+    EXPECT_GE(owner.owner_sourced_completed, 1u);
+#endif
+}
+
+// A sub-cell droplet alone: no cell lies wholly on the active side, so every
+// active DOF would be pinned as a rootless island and the solution would be
+// zero there.  Both refreshes refuse the cut.
+TEST(SmallCutAggregationOwnerSourcedMPI, CutWithoutAFullActiveCellIsRefused)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    int world_size = 1;
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    if (world_size < 2 || world_size > 4) {
+        GTEST_SKIP() << "Run with two to four MPI ranks";
+    }
+    Scenario scenario;
+    scenario.layout.nx = 12;
+    scenario.layout.ny = 10;
+    scenario.layout.column_owner = contiguousColumns(12, world_size);
+    scenario.layout.ghost_layers = 4;
+    scenario.phi = [](Real x, Real y) { return std::hypot(x - Real{2.0}, y - Real{2.0}) - Real{0.3}; };
+    for (const bool owner_sourced : {false, true}) {
+        SCOPED_TRACE(owner_sourced ? "owner-sourced" : "global");
+        const auto refused = runScenario(scenario, owner_sourced);
+        EXPECT_TRUE(refused.threw);
+        EXPECT_NE(refused.message.find("diagnostic=aggregation_slaves_every_active_dof field='p' active_dofs=9 "
+                                       "active_features=1 rooted_active_features=0"),
+                  std::string::npos)
+            << refused.message;
+    }
 #endif
 }
 

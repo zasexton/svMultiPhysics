@@ -2603,25 +2603,30 @@ TEST(SmallCutAggregationConstraint, NoRootIslandCandidatesArePinnedHomogeneously
 {
     SVMP_AGG_TEST_BODY
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
-    // Isolated cut island: cut rules exist but no full-active cell is
-    // reachable. Breaking free surfaces produce these routinely (312-step
-    // d18 sees up to ~48 per refresh), so the production policy is a
-    // homogeneous fail-safe PIN — not a throw, and not a free dof.
-    auto mesh = buildQuadStrip(2);
+    // Isolated cut island beside the rest of the active side: cut rules
+    // exist but no full-active cell is reachable from the island. Breaking
+    // free surfaces produce these routinely (312-step d18 sees up to ~48 per
+    // refresh), so the production policy is a homogeneous fail-safe PIN —
+    // not a throw, and not a free dof.  Cell 0 is the island, cell 1 lies on
+    // the other side and cell 2 is a full active block (its own feature).
+    auto mesh = buildQuadStrip(3);
     auto space = std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
 
     systems::FESystem system(mesh);
     const auto pressure = system.addField(
         systems::FieldSpec{.name = "p", .space = space, .components = 1});
     system.addOperator("pressure");
-    system.addSystemConstraint(std::make_unique<SmallCutAggregationConstraint>(
+    auto aggregation = std::make_unique<SmallCutAggregationConstraint>(
         pressure,
         geometry::CutIntegrationSide::Negative,
-        kInterfaceMarker));
+        kInterfaceMarker);
+    const auto* aggregation_view = aggregation.get();
+    system.addSystemConstraint(std::move(aggregation));
 
     ASSERT_NO_THROW(system.setup());
     auto context = makeCutContext({
         {.cell = 0, .volume_fraction = Real{0.3}, .full_cell_equivalent = false},
+        {.cell = 2, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
     });
     addCellRule(*context,
                 {.cell = 1,
@@ -2638,18 +2643,116 @@ TEST(SmallCutAggregationConstraint, NoRootIslandCandidatesArePinnedHomogeneously
     log_output += testing::internal::GetCapturedStderr();
 
     // All four island candidates (vertices of the lone cut cell) are pinned
-    // with empty-entry homogeneous Dirichlet lines.
-    for (const auto vertex : {0, 1, 3, 4}) {
+    // with empty-entry homogeneous Dirichlet lines; the block keeps its DOFs.
+    for (const auto vertex : {0, 1, 4, 5}) {
         const auto view = system.constraints().getConstraint(
             vertexDof(system, pressure, vertex));
         ASSERT_TRUE(view.has_value()) << "vertex " << vertex;
         EXPECT_TRUE(view->isDirichlet()) << "vertex " << vertex;
         EXPECT_NEAR(view->inhomogeneity, 0.0, 1.0e-15) << "vertex " << vertex;
     }
+    EXPECT_EQ(system.constraints().numConstraints(), 4u);
     EXPECT_NE(log_output.find("vertices_without_root=4"), std::string::npos);
     EXPECT_NE(log_output.find("island_pinned_dofs=4"), std::string::npos);
     EXPECT_NE(log_output.find("distributed_halo_validation=not_parallel"),
               std::string::npos);
+
+    // The report and the prolongation separate the island from the block.
+    const auto& report = aggregation_view->completedRefreshReport();
+    ASSERT_TRUE(report.has_value());
+    EXPECT_EQ(report->canonical_candidate_vertices, 4u);
+    EXPECT_EQ(report->canonical_rooted_candidate_vertices, 0u);
+    EXPECT_EQ(report->canonical_rootless_candidate_vertices, 4u);
+    EXPECT_EQ(report->canonical_owned_aggregate_dofs, 0u);
+    EXPECT_EQ(report->canonical_owned_pinned_dofs, 4u);
+    EXPECT_EQ(report->canonical_active_feature_count, 2u);
+    EXPECT_EQ(report->canonical_rooted_active_feature_count, 1u);
+    EXPECT_EQ(report->canonical_rootless_active_feature_count, 1u);
+    EXPECT_NEAR(report->canonical_rootless_active_physical_volume, 0.3, 1.0e-14);
+    ASSERT_EQ(report->canonical_active_features.size(), 2u);
+    const auto island = std::find_if(
+        report->canonical_active_features.begin(),
+        report->canonical_active_features.end(),
+        [](const auto& feature) {
+            return feature.disposition == SmallCutAggregationActiveFeatureDisposition::Rootless;
+        });
+    ASSERT_NE(island, report->canonical_active_features.end());
+    EXPECT_EQ(island->canonical_cell_count, 1u);
+    EXPECT_EQ(island->canonical_full_active_cell_count, 0u);
+    EXPECT_EQ(island->canonical_cut_cell_count, 1u);
+    EXPECT_NEAR(island->canonical_retained_physical_volume, 0.3, 1.0e-14);
+
+    const auto prolongations = system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(prolongations.size(), 1u);
+    ASSERT_NE(prolongations.front(), nullptr);
+    const auto& rootless = *prolongations.front();
+    EXPECT_TRUE(rootless.trace_bound_eligible);
+    EXPECT_NE(rootless.canonical_content_digest, 0u);
+    ASSERT_EQ(rootless.rows.size(), 4u);
+    for (const auto vertex : {0, 1, 4, 5}) {
+        const auto dof = vertexDof(system, pressure, vertex);
+        const auto* row = findFinalizedProlongationRow(rootless, dof);
+        ASSERT_NE(row, nullptr);
+        EXPECT_EQ(row->candidate_dof, dof);
+        EXPECT_EQ(row->provisional_kind, SmallCutAggregationProvisionalRowKind::RootlessHomogeneousPin);
+        EXPECT_EQ(row->final_kind, SmallCutAggregationFinalRowKind::HomogeneousPin);
+        EXPECT_EQ(row->root_cell_gid, INVALID_GLOBAL_INDEX);
+        EXPECT_TRUE(row->provisional_entries.empty());
+        EXPECT_TRUE(row->final_entries.empty());
+        EXPECT_NEAR(row->final_inhomogeneity, 0.0, 1.0e-15);
+    }
+    const auto rootless_patch = std::find_if(
+        rootless.patches.begin(), rootless.patches.end(),
+        [](const auto& patch) { return patch.kind == SmallCutAggregationPatchKind::Rootless; });
+    ASSERT_NE(rootless_patch, rootless.patches.end());
+    EXPECT_EQ(rootless_patch->member_cell_gids.size(), 1u);
+    EXPECT_EQ(rootless_patch->slave_dofs.size(), 4u);
+#endif
+}
+
+TEST(SmallCutAggregationConstraint, CutLeavingNoUnknownOnTheActiveSideIsRefused)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    // The island alone: every DOF of the active side would be pinned and the
+    // solution there forced to zero, so the refresh is refused and publishes
+    // nothing.  (Wall-excluded DOFs stay free: the quadratic wall tests above
+    // keep their pins.)
+    auto mesh = buildQuadStrip(2);
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    auto aggregation = std::make_unique<SmallCutAggregationConstraint>(
+        pressure,
+        geometry::CutIntegrationSide::Negative,
+        kInterfaceMarker);
+    const auto* aggregation_view = aggregation.get();
+    system.addSystemConstraint(std::move(aggregation));
+    ASSERT_NO_THROW(system.setup());
+    auto context = makeCutContext({
+        {.cell = 0, .volume_fraction = Real{0.3}, .full_cell_equivalent = false},
+    });
+    addCellRule(*context,
+                {.cell = 1,
+                 .volume_fraction = Real{1.0},
+                 .full_cell_equivalent = true},
+                geometry::CutIntegrationSide::Positive);
+    system.setCutIntegrationContext(std::move(context));
+    try {
+        system.rebuildConstraintState();
+        ADD_FAILURE() << "expected the refresh to be refused";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what())
+                      .find("diagnostic=aggregation_slaves_every_active_dof field='p' active_dofs=4 "
+                            "active_features=1 rooted_active_features=0 rootless_active_volume=0.3"),
+                  std::string::npos)
+            << error.what();
+    }
+    EXPECT_FALSE(aggregation_view->completedRefreshReport().has_value());
+    EXPECT_TRUE(system.finalizedSmallCutAggregationProlongations().empty());
+    EXPECT_EQ(system.constraints().numConstraints(), 0u);
 #endif
 }
 
@@ -2743,6 +2846,9 @@ TEST(SmallCutAggregationConstraint,
     EXPECT_TRUE(
         system.finalizedSmallCutAggregationProlongations().empty());
 
+    // The island alone leaves no unknown on the active side: the refresh
+    // is refused and publishes nothing (the island beside a rooted block is
+    // NoRootIslandCandidatesArePinnedHomogeneously).
     auto rootless_context = makeCutContext({
         {.cell = 0, .volume_fraction = Real{0.3}, .full_cell_equivalent = false},
     });
@@ -2752,90 +2858,10 @@ TEST(SmallCutAggregationConstraint,
                  .full_cell_equivalent = true},
                 geometry::CutIntegrationSide::Positive);
     system.setCutIntegrationContext(std::move(rootless_context));
-    ASSERT_NO_THROW(system.rebuildConstraintState());
-
-    const auto& report = aggregation_view->completedRefreshReport();
-    ASSERT_TRUE(report.has_value());
-    EXPECT_EQ(report->field, pressure);
-    EXPECT_EQ(report->local_lineage.successful_publication_ordinal, 2u);
-    EXPECT_FALSE(report->geometry_identity.available);
-    EXPECT_FALSE(report->canonical_topology_transition.has_value())
-        << "a failed refresh deliberately clears the prior comparison chain";
-    EXPECT_EQ(report->active_side, geometry::CutIntegrationSide::Negative);
-    EXPECT_EQ(report->interface_marker, kInterfaceMarker);
-    EXPECT_EQ(report->canonical_candidate_vertices, 4u);
-    EXPECT_EQ(report->canonical_rooted_candidate_vertices, 0u);
-    EXPECT_EQ(report->canonical_rootless_candidate_vertices, 4u);
-    EXPECT_EQ(report->canonical_owned_aggregate_dofs, 0u);
-    EXPECT_EQ(report->canonical_owned_pinned_dofs, 4u);
-    EXPECT_EQ(report->canonical_strong_suppressed_dofs, 0u);
-    EXPECT_EQ(report->canonical_active_feature_count, 1u);
-    EXPECT_EQ(report->canonical_rooted_active_feature_count, 0u);
-    EXPECT_EQ(report->canonical_rootless_active_feature_count, 1u);
-    EXPECT_NEAR(
-        report->canonical_rootless_active_physical_volume, 0.3, 1.0e-14);
-    ASSERT_EQ(report->canonical_active_features.size(), 1u);
-    const auto& rootless_feature =
-        report->canonical_active_features.front();
-    EXPECT_EQ(rootless_feature.stable_feature_id, 0);
-    EXPECT_EQ(
-        rootless_feature.disposition,
-        SmallCutAggregationActiveFeatureDisposition::Rootless);
-    EXPECT_EQ(rootless_feature.canonical_cell_count, 1u);
-    EXPECT_EQ(rootless_feature.canonical_full_active_cell_count, 0u);
-    EXPECT_EQ(rootless_feature.canonical_cut_cell_count, 1u);
-    EXPECT_NEAR(
-        rootless_feature.canonical_retained_physical_volume,
-        0.3,
-        1.0e-14);
-
-    for (const auto vertex : {0, 1, 3, 4}) {
-        const auto view = system.constraints().getConstraint(
-            vertexDof(system, pressure, vertex));
-        ASSERT_TRUE(view.has_value()) << "vertex " << vertex;
-        EXPECT_TRUE(view->isDirichlet()) << "vertex " << vertex;
-        EXPECT_TRUE(view->entries.empty()) << "vertex " << vertex;
-        EXPECT_NEAR(view->inhomogeneity, 0.0, 1.0e-15) << "vertex " << vertex;
-    }
-
-    const auto rootless_prolongations =
-        system.finalizedSmallCutAggregationProlongations();
-    ASSERT_EQ(rootless_prolongations.size(), 1u);
-    ASSERT_NE(rootless_prolongations.front(), nullptr);
-    const auto& rootless = *rootless_prolongations.front();
-    EXPECT_TRUE(rootless.trace_bound_eligible);
-    EXPECT_NE(rootless.canonical_content_digest, 0u);
-    EXPECT_NE(rootless.canonical_content_digest, rooted_digest);
-    ASSERT_EQ(rootless.rows.size(), 4u);
-    for (const auto vertex : {0, 1, 3, 4}) {
-        const auto dof = vertexDof(system, pressure, vertex);
-        const auto* row =
-            findFinalizedProlongationRow(rootless, dof);
-        ASSERT_NE(row, nullptr);
-        EXPECT_EQ(row->candidate_dof, dof);
-        EXPECT_EQ(row->component, 0u);
-        EXPECT_EQ(row->provisional_kind,
-                  SmallCutAggregationProvisionalRowKind::
-                      RootlessHomogeneousPin);
-        EXPECT_EQ(row->final_kind,
-                  SmallCutAggregationFinalRowKind::HomogeneousPin);
-        EXPECT_EQ(row->root_cell_gid, INVALID_GLOBAL_INDEX);
-        EXPECT_TRUE(row->provisional_entries.empty());
-        EXPECT_TRUE(row->final_entries.empty());
-        EXPECT_NEAR(row->final_inhomogeneity, 0.0, 1.0e-15);
-    }
-    ASSERT_EQ(rootless.active_cells.size(), 1u);
-    EXPECT_EQ(rootless.active_cells.front().kind,
-              SmallCutAggregationActiveCellKind::Cut);
-    EXPECT_NEAR(rootless.active_cells.front().retained_physical_volume,
-                0.3,
-                1.0e-14);
-    ASSERT_EQ(rootless.patches.size(), 1u);
-    EXPECT_EQ(rootless.patches.front().kind,
-              SmallCutAggregationPatchKind::Rootless);
-    EXPECT_EQ(rootless.patches.front().member_cell_gids.size(), 1u);
-    EXPECT_EQ(rootless.patches.front().support_cell_gids.size(), 1u);
-    EXPECT_EQ(rootless.patches.front().slave_dofs.size(), 4u);
+    EXPECT_THROW(system.rebuildConstraintState(), std::runtime_error);
+    EXPECT_FALSE(aggregation_view->completedRefreshReport().has_value());
+    EXPECT_TRUE(
+        system.finalizedSmallCutAggregationProlongations().empty());
 
     {
         ScopedEnvVar cap("SVMP_AGGREGATION_MAX_LINES", "0");
@@ -3051,15 +3077,12 @@ TEST(SmallCutAggregationConstraint,
 
     ASSERT_NO_THROW(system.beginCutIntegrationContextTransaction());
     EXPECT_TRUE(system.cutIntegrationContextTransactionActive());
-    auto rootless_context = makeCutContext({
-        {.cell = 0, .volume_fraction = Real{0.3}, .full_cell_equivalent = false},
+    // The trial cut mirrors the prior one: cell 1 is cut, cell 0 its root.
+    auto mirrored_context = makeCutContext({
+        {.cell = 0, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+        {.cell = 1, .volume_fraction = Real{0.3}, .full_cell_equivalent = false},
     });
-    addCellRule(*rootless_context,
-                {.cell = 1,
-                 .volume_fraction = Real{1.0},
-                 .full_cell_equivalent = true},
-                geometry::CutIntegrationSide::Positive);
-    system.setCutIntegrationContext(std::move(rootless_context));
+    system.setCutIntegrationContext(std::move(mirrored_context));
     EXPECT_TRUE(
         system.finalizedSmallCutAggregationProlongations().empty());
     ASSERT_NO_THROW(system.rebuildConstraintState());
@@ -3077,9 +3100,11 @@ TEST(SmallCutAggregationConstraint,
     ASSERT_TRUE(trial_refresh.has_value());
     EXPECT_EQ(
         trial_refresh->local_lineage.successful_publication_ordinal, 2u);
-    EXPECT_EQ(trial_refresh->canonical_rooted_candidate_vertices, 0u);
-    EXPECT_EQ(trial_refresh->canonical_rootless_candidate_vertices, 4u);
-    EXPECT_EQ(system.constraints().numConstraints(), 4u);
+    EXPECT_EQ(trial_refresh->canonical_rooted_candidate_vertices, 2u);
+    EXPECT_EQ(trial_refresh->canonical_rootless_candidate_vertices, 0u);
+    EXPECT_EQ(system.constraints().numConstraints(), 2u);
+    EXPECT_FALSE(system.constraints().isConstrained(bottom_slave));
+    EXPECT_FALSE(system.constraints().isConstrained(top_slave));
 
     ASSERT_NO_THROW(system.rollbackCutIntegrationContextTransaction());
     EXPECT_FALSE(system.cutIntegrationContextTransactionActive());
@@ -3247,19 +3272,20 @@ TEST(SmallCutAggregationConstraint,
         system.constraints().numConstraints();
 
     ASSERT_NO_THROW(system.beginCutIntegrationContextTransaction());
+    // The trial cut mirrors the prior one: cell 1 is cut, cell 0 its root.
     context->clear();
     addCellRule(
         *context,
         {.cell = 0,
-         .volume_fraction = Real{0.3},
-         .full_cell_equivalent = false},
+         .volume_fraction = Real{1.0},
+         .full_cell_equivalent = true},
         geometry::CutIntegrationSide::Negative);
     addCellRule(
         *context,
         {.cell = 1,
-         .volume_fraction = Real{1.0},
-         .full_cell_equivalent = true},
-        geometry::CutIntegrationSide::Positive);
+         .volume_fraction = Real{0.3},
+         .full_cell_equivalent = false},
+        geometry::CutIntegrationSide::Negative);
     ASSERT_GT(context->contentRevision(), prior_content_revision);
     system.setCutIntegrationContext(context);
     ASSERT_NO_THROW(system.rebuildConstraintState());

@@ -12340,8 +12340,10 @@ TEST(FreeSurfaceCutStability,
             FE::Real target_viscosity,
             FE::Real complementary_density,
             FE::Real complementary_viscosity) {
+            // Three cells per axis: each phase holds a full cell, so neither
+            // phase's aggregation would make every DOF of its side a slave.
             auto mesh = makeFixedTetraMesh(
-                level_set_cut, /*cells_per_axis=*/2);
+                level_set_cut, /*cells_per_axis=*/3);
             FE::systems::SetupOptions setup;
 #if defined(FE_HAS_MPI) && FE_HAS_MPI
             setup.dof_options.my_rank = 0;
@@ -12484,11 +12486,13 @@ TEST(FreeSurfaceCutStabilityMPI,
             FE::Real target_viscosity,
             FE::Real complementary_density,
             FE::Real complementary_viscosity) {
+            // Three cells per axis: each phase holds a full cell (see the
+            // serial test).
             auto mesh = makeDistributedStructuredTetraMesh(
                 level_set_cut,
                 comm,
                 partition_method,
-                /*cells_per_axis=*/2);
+                /*cells_per_axis=*/3);
             if (mesh->n_owned_cells() == 0u ||
                 mesh->n_owned_cells() >= mesh->global_n_cells()) {
                 throw std::runtime_error(

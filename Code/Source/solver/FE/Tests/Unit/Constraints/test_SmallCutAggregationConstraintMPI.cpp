@@ -1612,10 +1612,12 @@ TEST(SmallCutAggregationConstraintMPI,
     ASSERT_TRUE(setup_outcome.allSucceeded())
         << setup_outcome.local_message;
 
-    // Both ranks provide the same two-cell retained measure. The canonical
-    // feature ledger must connect the cells across their ownership boundary
-    // and retain each once, not reduce replicated provider values as
-    // independent physical volume.
+    // Both ranks provide the same two-cell retained measure, and neither
+    // cell is wholly active: every active DOF would be pinned, so the
+    // refresh is refused on every rank.  The refusal counts the canonical
+    // feature ledger, which connects the cells across their ownership
+    // boundary and retains each once instead of reducing replicated
+    // provider values as independent physical volume.
     system.setCutIntegrationContext(cutContext({
         {0, Real{0.25}, false},
         {1, Real{0.5}, false},
@@ -1624,43 +1626,13 @@ TEST(SmallCutAggregationConstraintMPI,
         invokeCollectively(MPI_COMM_WORLD, [&] {
             system.rebuildConstraintState();
         });
-    ASSERT_TRUE(rebuild_outcome.allSucceeded())
+    EXPECT_TRUE(rebuild_outcome.allThrew());
+    EXPECT_NE(rebuild_outcome.local_message.find(
+                  "diagnostic=aggregation_slaves_every_active_dof field='p' active_dofs=6 "
+                  "active_features=1 rooted_active_features=0 rootless_active_volume=0.75"),
+              std::string::npos)
         << rebuild_outcome.local_message;
-
-    const auto reports =
-        system.completedSmallCutAggregationRefreshReports();
-    ASSERT_EQ(reports.size(), 1u);
-    const auto& report = reports.front();
-    EXPECT_EQ(report.field, pressure);
-    EXPECT_EQ(report.interface_marker, kInterfaceMarker);
-    EXPECT_EQ(
-        report.active_side,
-        geometry::CutIntegrationSide::Negative);
-    EXPECT_EQ(report.canonical_candidate_vertices, 6u);
-    EXPECT_EQ(report.canonical_rooted_candidate_vertices, 0u);
-    EXPECT_EQ(report.canonical_rootless_candidate_vertices, 6u);
-    EXPECT_EQ(report.canonical_owned_aggregate_dofs, 0u);
-    EXPECT_EQ(report.canonical_owned_pinned_dofs, 6u);
-    EXPECT_EQ(report.canonical_strong_suppressed_dofs, 0u);
-    EXPECT_EQ(report.canonical_active_feature_count, 1u);
-    EXPECT_EQ(report.canonical_rooted_active_feature_count, 0u);
-    EXPECT_EQ(report.canonical_rootless_active_feature_count, 1u);
-    EXPECT_DOUBLE_EQ(
-        report.canonical_rootless_active_physical_volume, 0.75);
-    ASSERT_EQ(report.canonical_active_features.size(), 1u);
-    const auto& feature = report.canonical_active_features.front();
-    EXPECT_EQ(feature.stable_feature_id, 0);
-    EXPECT_EQ(
-        feature.canonical_cell_gid_digest,
-        590682968308805178ull);
-    EXPECT_EQ(
-        feature.disposition,
-        SmallCutAggregationActiveFeatureDisposition::Rootless);
-    EXPECT_EQ(feature.canonical_cell_count, 2u);
-    EXPECT_EQ(feature.canonical_full_active_cell_count, 0u);
-    EXPECT_EQ(feature.canonical_cut_cell_count, 2u);
-    EXPECT_DOUBLE_EQ(
-        feature.canonical_retained_physical_volume, 0.75);
+    EXPECT_TRUE(system.completedSmallCutAggregationRefreshReports().empty());
 #endif
 }
 
@@ -1939,7 +1911,7 @@ TEST(SmallCutAggregationConstraintMPI,
 }
 
 TEST(SmallCutAggregationConstraintMPI,
-     UnavailableLowerKeyRootFallsBackToGloballyVisibleRoot)
+     UnavailableLowerKeyRootIsRefusedAsAShallowHalo)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
     GTEST_SKIP() << "Requires FE built with Mesh integration.";
@@ -1981,36 +1953,22 @@ TEST(SmallCutAggregationConstraintMPI,
                          /*physical_cell_gid_offset=*/1));
     const auto rebuild_outcome = invokeCollectively(
         MPI_COMM_WORLD, [&] { system.rebuildConstraintState(); });
-    ASSERT_TRUE(rebuild_outcome.allSucceeded())
-        << rebuild_outcome.local_message;
 
     // The two x=2 vertices touch only cut cells. Rank 0 can see both full
-    // roots and locally prefers the lower-key x=[0,1] cell at distance one,
-    // but rank 1 does not carry its x=0 master. Candidate-level validation
-    // must therefore continue to rank 0's farther x=[4,5] proposal (distance
-    // two), which is visible on every slave-relevant rank.
-    const auto candidate_bottom_local = rank == 0 ? 4 : 2;
-    const auto candidate_top_local = rank == 0 ? 5 : 3;
-    const auto right_near_bottom_local = rank == 0 ? 8 : 6;
-    const auto right_near_top_local = rank == 0 ? 9 : 7;
-    const auto right_far_bottom_local = rank == 0 ? 10 : 8;
-    const auto right_far_top_local = rank == 0 ? 11 : 9;
-    const auto bottom_slave =
-        vertexDof(system, pressure, candidate_bottom_local);
-    const auto top_slave = vertexDof(system, pressure, candidate_top_local);
-    EXPECT_TRUE(system.constraints().isConstrained(bottom_slave));
-    EXPECT_TRUE(system.constraints().isConstrained(top_slave));
-    EXPECT_EQ(
-        lineEntries(system, bottom_slave),
-        (std::vector<std::pair<GlobalIndex, double>>{
-            {vertexDof(system, pressure, right_near_bottom_local), 3.0},
-            {vertexDof(system, pressure, right_far_bottom_local), -2.0}}));
-    EXPECT_EQ(
-        lineEntries(system, top_slave),
-        (std::vector<std::pair<GlobalIndex, double>>{
-            {vertexDof(system, pressure, right_near_top_local), 3.0},
-            {vertexDof(system, pressure, right_far_top_local), -2.0}}));
-    expectEveryMasterLineFiniteAndPartitionOfUnity(system);
+    // roots and prefers the lower-key x=[0,1] cell at distance one, but rank
+    // 1 does not carry its x=0 master. Taking rank 0's farther x=[4,5]
+    // proposal instead would make the lines depend on the partition (one
+    // rank sees the preferred root), so every rank refuses the overlap and
+    // names the <Ghost_layers> that shows the preferred root.
+    EXPECT_TRUE(rebuild_outcome.allThrew());
+    EXPECT_NE(rebuild_outcome.local_message.find(
+                  "diagnostic=incomplete_distributed_aggregation_halo field='p' "
+                  "halo_limited_root_choices=2 row_coupled_slaves_beyond_halo=0"),
+              std::string::npos)
+        << rebuild_outcome.local_message;
+    EXPECT_NE(rebuild_outcome.local_message.find("Set <Ghost_layers> to at least"), std::string::npos)
+        << rebuild_outcome.local_message;
+    EXPECT_EQ(system.constraints().numConstraints(), 0u);
 #endif
 }
 

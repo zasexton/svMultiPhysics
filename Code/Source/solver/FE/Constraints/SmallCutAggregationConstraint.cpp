@@ -5688,6 +5688,97 @@ void buildActiveFeatureLedger(const AggregationCellGraph& graph,
         });
 }
 
+// The face layers of the deepest vertex star of the local mesh: for each
+// vertex, the most face steps between two of its cells through its cells
+// (about 3 on triangles and quadrilaterals, 6 to 9 on tetrahedra).
+[[nodiscard]] std::size_t vertexStarFaceDepth(const assembly::IMeshAccess& mesh)
+{
+    std::map<std::vector<GlobalIndex>, std::vector<GlobalIndex>> cells_by_face;
+    std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> cells_by_vertex;
+    std::vector<GlobalIndex> nodes;
+    mesh.forEachCell([&](GlobalIndex cell) {
+        const auto& reference = elements::ReferenceElement::shared(mesh.getCellType(cell));
+        mesh.getCellNodes(cell, nodes);
+        std::set<GlobalIndex> corners;
+        for (std::size_t f = 0; f < reference.num_faces(); ++f) {
+            std::vector<GlobalIndex> key;
+            for (const auto local : reference.face_nodes(f)) {
+                key.push_back(nodes.at(static_cast<std::size_t>(local)));
+            }
+            std::sort(key.begin(), key.end());
+            corners.insert(key.begin(), key.end());
+            cells_by_face[std::move(key)].push_back(cell);
+        }
+        for (const auto vertex : corners) {
+            cells_by_vertex[vertex].push_back(cell);
+        }
+    });
+    std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> neighbors;
+    for (const auto& [face, cells] : cells_by_face) {
+        static_cast<void>(face);
+        if (cells.size() == 2u) {
+            neighbors[cells[0]].push_back(cells[1]);
+            neighbors[cells[1]].push_back(cells[0]);
+        }
+    }
+    std::size_t depth = 0u;
+    for (const auto& [vertex, star] : cells_by_vertex) {
+        static_cast<void>(vertex);
+        const std::set<GlobalIndex> in_star(star.begin(), star.end());
+        for (const auto start : star) {
+            std::map<GlobalIndex, std::size_t> distance{{start, 0u}};
+            std::deque<GlobalIndex> queue{start};
+            while (!queue.empty()) {
+                const auto cell = queue.front();
+                queue.pop_front();
+                for (const auto next : neighbors[cell]) {
+                    if (in_star.count(next) != 0u && distance.count(next) == 0u) {
+                        distance[next] = distance[cell] + 1u;
+                        depth = std::max(depth, distance[next]);
+                        queue.push_back(next);
+                    }
+                }
+            }
+        }
+    }
+    return depth;
+}
+
+// Refuses an overlap shallower than the root paths of a refresh, naming the
+// <Ghost_layers> it needs: a rank condenses a slave in its owned cells and
+// their face neighbours, up to a vertex star away from the slave's cut
+// cells, and the root lies up to the root path beyond them.  Collective.
+[[noreturn]] void throwShallowAggregationHalo(const systems::FESystem& system,
+                                              std::string_view field_name,
+                                              std::size_t halo_limited_root_choices,
+                                              std::size_t row_coupled_slaves_beyond_halo,
+                                              std::size_t longest_root_path,
+                                              std::size_t root_path_guard)
+{
+    auto star_depth = static_cast<unsigned long long>(vertexStarFaceDepth(system.meshAccess()));
+#if FE_HAS_MPI
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    const auto comm = system.dofHandler().mpiComm();
+    if (initialized != 0 && comm != MPI_COMM_NULL) {
+        unsigned long long local = star_depth;
+        MPI_Allreduce(&local, &star_depth, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
+    }
+#endif
+    const auto needed = 1u + star_depth + longest_root_path;
+    const auto covering = 1u + star_depth + root_path_guard;
+    throw InsufficientGhostHaloError(
+        "SmallCutAggregationConstraint: diagnostic=incomplete_distributed_aggregation_halo field='" +
+        std::string(field_name) + "' halo_limited_root_choices=" + std::to_string(halo_limited_root_choices) +
+        " row_coupled_slaves_beyond_halo=" + std::to_string(row_coupled_slaves_beyond_halo) +
+        " The overlap is shallower than the aggregation root paths: a rank that condenses a slave, or owns a "
+        "row coupled to it, lacks the masters of its preferred root, so the constraints or the Jacobian would "
+        "depend on the partition.  Set <Ghost_layers> to at least " + std::to_string(needed) +
+        " (1 + vertex-star face depth " + std::to_string(star_depth) + " + longest chosen root path " +
+        std::to_string(longest_root_path) + "); " + std::to_string(covering) +
+        " covers every root path the guard admits (" + std::to_string(root_path_guard) + ").");
+}
+
 struct CandidateRootTraversal {
     std::map<GlobalIndex, std::vector<GlobalRootCandidate>>
         roots_by_candidate{};
@@ -9798,6 +9889,58 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
 
     profile.mark(AggregationProfilePhase::Resolution);
     const auto distributed_validation = distributed_result.validation;
+    // Partition-dependent constraints are refused, not merely counted: a
+    // condensing rank without the preferred root's masters takes another
+    // root, and an owned row without a slave's masters loses Jacobian
+    // columns.  Both counts are communicator-global, so every rank throws.
+    if (distributed_validation != DistributedAggregationValidation::DebugBypass &&
+        (distributed_result.canonical_halo_limited_root_choices > 0u ||
+         distributed_result.canonical_row_coupled_slaves_beyond_halo > 0u)) {
+        std::size_t longest_chosen_root_path = 0u;
+        for (const auto& row : distributed_result.canonical_rows) {
+            if (row.root_distance != std::numeric_limits<std::size_t>::max()) {
+                longest_chosen_root_path = std::max(longest_chosen_root_path, row.root_distance);
+            }
+        }
+        throwShallowAggregationHalo(system,
+                                    rec.name,
+                                    distributed_result.canonical_halo_limited_root_choices,
+                                    distributed_result.canonical_row_coupled_slaves_beyond_halo,
+                                    longest_chosen_root_path,
+                                    guards_.maximum_root_path_length);
+    }
+    // When every DOF of the active side is a slave (an extension row or a
+    // rootless pin) or held by an earlier constraint, the active side keeps
+    // no unknown and its solution is forced: zero for rootless pins.  The
+    // rows and active cells are communicator-global, so every rank throws.
+    if (!canonical_active_cells.empty()) {
+        std::set<GlobalIndex> held;
+        for (const auto& row : distributed_result.canonical_rows) {
+            if (row.preconstrained_at_apply ||
+                row.provisional_kind == SmallCutAggregationProvisionalRowKind::RootedExtension ||
+                row.provisional_kind == SmallCutAggregationProvisionalRowKind::RootlessHomogeneousPin ||
+                row.provisional_kind == SmallCutAggregationProvisionalRowKind::PreexistingConstraint) {
+                held.insert(row.slave_dof);
+            }
+        }
+        std::set<GlobalIndex> active_dofs;
+        for (const auto& cell : canonical_active_cells) {
+            active_dofs.insert(cell.field_dofs.begin(), cell.field_dofs.end());
+        }
+        if (std::includes(held.begin(), held.end(), active_dofs.begin(), active_dofs.end())) {
+            std::ostringstream message;
+            message << "SmallCutAggregationConstraint: diagnostic=aggregation_slaves_every_active_dof field='"
+                    << rec.name << "' active_dofs=" << active_dofs.size()
+                    << " active_features=" << canonical_active_features.size()
+                    << " rooted_active_features=" << canonical_rooted_active_feature_count
+                    << " rootless_active_volume=" << canonical_rootless_active_physical_volume
+                    << " Every degree of freedom of the active side would be a slave of the aggregation (or held "
+                       "by an earlier constraint), so the active side would keep no unknown and its solution "
+                       "would be forced (to zero where rootless islands are pinned).  No cell lies wholly on the "
+                       "active side within reach of the cut: refine the mesh, or check the cut classification.";
+            throw std::runtime_error(message.str());
+        }
+    }
     std::vector<SmallCutAggregationProlongationPatch>
         canonical_prolongation_patches;
     std::optional<AffineConstraints> next_constraints;

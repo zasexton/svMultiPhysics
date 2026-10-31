@@ -2831,40 +2831,20 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
             system.meshAccess()),
         geometry::CutIntegrationSide::Negative);
     system.setCutIntegrationContext(context);
-    ASSERT_NO_THROW(system.rebuildConstraintState());
-
-    const auto reports =
-        system.finalizedSmallCutAggregationProlongations();
-    ASSERT_EQ(reports.size(), 1u);
-    ASSERT_NE(reports.front(), nullptr);
-    EXPECT_TRUE(reports.front()->trace_bound_eligible);
-    ASSERT_EQ(reports.front()->patches.size(), 1u);
-    EXPECT_EQ(
-        reports.front()->patches.front().kind,
-        constraints::
-            SmallCutAggregationPatchKind::Rootless);
-
+    // The lone cut triangle would make every active DOF a rootless pin, so
+    // the refresh refuses it before any aggregate trace could be certified.
     try {
-        (void)certifyGeneratedBoundaryAggregateTrace(
-            system,
-            GeneratedBoundaryAggregateTraceCertificationOptions{
-                .field = velocity,
-                .physical_boundary_marker = kWallMarker,
-                .volume_interface_marker =
-                    kInterfaceMarker,
-                .generated_active_boundary_marker =
-                    kActiveBoundaryMarker,
-                .form_coefficient = Real{2.5},
-            });
-        FAIL() << "rootless aggregate trace certification "
-                  "must fail closed";
+        system.rebuildConstraintState();
+        FAIL() << "a rootless-only aggregate must be refused";
     } catch (const std::runtime_error& error) {
         EXPECT_NE(
             std::string(error.what()).find(
-                "rootless aggregate support cannot certify"),
+                "diagnostic=aggregation_slaves_every_active_dof"),
             std::string::npos)
             << error.what();
     }
+    EXPECT_TRUE(
+        system.finalizedSmallCutAggregationProlongations().empty());
 }
 
 TEST(GeneratedBoundaryAggregateTraceCertificate,
