@@ -694,7 +694,7 @@ const bc::NaturalFlux sigma_n{.parts = {bc::isotropicFlux(P.id, P.state, P.test)
                                         bc::conormalFlux([&](const FormExpr& w) { return 2.0 * mu * symgrad(w); },
                                                          bc::symmetricGradientForm(mu))},
                               .penalty_weight = mu / hNormal()};
-bc::ResidualRows rows(contributions);
+bc::ResidualRows rows({{U.id, &M}, {P.id, &C}});
 bc::Dirichlet(wall, uD, bc::Nitsche{}, sigma_n).contributeToRows(rows, U.state, U.test, U.id);
 ```
 
@@ -710,7 +710,7 @@ bc::Dirichlet(wall, uD, bc::Nitsche{}, sigma_n).contributeToRows(rows, U.state, 
 | `bc::NaturalFlux{parts, penalty_weight}` | `StandardBCs.h` | An operator's conormal flux on its field, stated once; Nitsche's terms follow the order of the parts |
 | `bc::normalFlux(q)`, `conormalFlux(T[, form])`, `isotropicFlux(field, s, s_test)` | `StandardBCs.h` | Flux parts: `q(u)` of a scalar field, `T(u) n` of a vector field (with the bilinear form a certified generated-boundary route is built from), `-s n` in another unknown s. `q` and `T` are linear functions of their argument, applied to the state and to the test function |
 | `bc::diffusionFlux(k)` | `StandardBCs.h` | `k grad(u).n`, penalty weight `k / h_n` |
-| `bc::RowSink`, `bc::ResidualRows(contributions[, bindings])` | `StandardBCs.h` | The residual rows a multi-row condition adds to (`Dirichlet::contributeToRows`); with `bindings`, a Nitsche route on a generated boundary is built from the conormal part's bilinear form and its binding collected for the installer's certificate |
+| `bc::RowSink`, `bc::ResidualRows({{field, &form}, ...}[, bindings])` | `StandardBCs.h` | The residual rows a multi-row condition adds to (`Dirichlet::contributeToRows`), one borrowed form per field, summed with `sumOf`; with `bindings`, a Nitsche route on a generated boundary is built from the conormal part's bilinear form and its binding collected for the installer's certificate |
 
 ### Constraint Plan and Gauge Anchors
 
@@ -995,6 +995,7 @@ Status: `implemented/public`.
 | Vocabulary | Header | Notes |
 |------------|--------|-------|
 | `FieldSpec::solver_role` (`SolverRole::Primary`, `SolverRole::Constraint`), `FieldSpec::solver_block` | `Systems/FieldRegistry.h` | The part an unknown plays in a split solve: primary (velocity, displacement, level set, extension) or constraint (pressure); unset is primary. `solver_block` names the merged block a group of fields forms under a split solve, when the field is the first of the group that states one. A reuse through `FieldBinding::unknown` states what the first registration left unset (`FESystem::stateFieldSolverRole`); a contradicting statement throws |
+| `FormulationBuilder::tag(label, term)`, `tagged(label, test_field)` | `Systems/FormulationBuilder.h` | A term recorded under a work-channel label and returned unchanged, so a residual summed through `tag()` is the residual without it; `tagged` is the `sumOf` left fold of a label's terms in one test field's row, in tag order. A tagged term holds the test function of one field |
 | `systems::deriveBlockLayout(system, BlockLayoutRequest{split_by_role, name_saddle_pair})` | `Systems/SystemSetup.h` | The solver block layout of a set-up system: one block per unknown field of `fieldMap()`, or, with `split_by_role`, the primary run merged into a `PrimaryField` block and the constraint run into a `ConstraintField` block (momentum 0, constraint 1) when the constraint fields follow all primary fields and one run has several fields; a merged block takes the first `solver_block` its fields state, else their names joined by `+`. `name_saddle_pair` names the first primary and the first constraint field of an unmerged layout. The Application asks for the split under FSILS BlockSchur |
 
 ### Manual Block and Complex Workflows

@@ -202,6 +202,21 @@ public:
      */
     OperatorTag workChannel(std::string_view suffix, std::initializer_list<WorkChannelPart> parts);
 
+    /**
+     * @brief Records @p term under the work-channel label @p label and
+     * returns it unchanged
+     *
+     * The term holds the test function of one field.  A residual built as
+     * R = sumOf(R, F.tag(label, term)) is the residual without the tags, and
+     * tagged() derives the channel from the same terms.
+     */
+    [[nodiscard]] forms::FormExpr tag(std::string_view label, forms::FormExpr term);
+
+    /// The terms tagged @p label in the row of @p test_field, summed in tag
+    /// order with sumOf (the left fold of a residual built term by term), or
+    /// an empty form when there is none.
+    [[nodiscard]] forms::FormExpr tagged(std::string_view label, FieldId test_field) const;
+
     /// The diagnostic sets and operators of the system (diagnosticRegistry).
     [[nodiscard]] DiagnosticRegistry& diagnostics();
 
@@ -224,9 +239,16 @@ private:
     /// measure of @p residual with the system.
     void registerGeneratedBoundaries(const forms::FormExpr& residual);
 
+    struct TaggedTerm {
+        std::string label;
+        FieldId test_field{INVALID_FIELD_ID};
+        forms::FormExpr term;
+    };
+
     FESystem* system_{nullptr};
     OperatorTag operator_tag_{};
     FormInstallOptions options_{};
+    std::vector<TaggedTerm> tagged_terms_{};
 };
 
 } // namespace systems

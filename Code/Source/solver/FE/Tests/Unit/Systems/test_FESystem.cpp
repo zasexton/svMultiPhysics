@@ -1036,6 +1036,50 @@ TEST(FESystem, ReusedFieldTakesTheStatedSolverRole)
                  std::invalid_argument);
 }
 
+TEST(FESystem, TaggedTermsFormTheirWorkChannelInTagOrder)
+{
+    using svmp::FE::forms::FormExpr;
+    using svmp::FE::forms::sumOf;
+    auto mesh = build_single_quad_mesh();
+    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    FESystem sys(mesh);
+    const auto u = sys.addField(FieldSpec{.name = "u", .space = scalar_space, .components = 1});
+    const auto p = sys.addField(FieldSpec{.name = "p", .space = scalar_space, .components = 1});
+    const auto U = svmp::FE::forms::StateField(u, *scalar_space, "u");
+    const auto v = svmp::FE::forms::TestField(u, *scalar_space, "v");
+    const auto q = svmp::FE::forms::TestField(p, *scalar_space, "q");
+    svmp::FE::systems::FormulationBuilder F(sys, "equations", {});
+
+    // The residual built through tag() is the residual without it, and the
+    // channel is the left fold of the tagged terms of one test field.
+    const auto seed = (U * v).dx();
+    const auto a = (FormExpr::constant(2.0) * U * v).ds(1);
+    const auto b = (FormExpr::constant(3.0) * q).dx();
+    const auto c = (FormExpr::constant(5.0) * U * v).ds(2);
+    FormExpr M = seed;
+    FormExpr C;
+    M = sumOf(M, F.tag("weak", a));
+    C = sumOf(C, F.tag("weak", b));
+    M = sumOf(M, F.tag("weak", c));
+    M = sumOf(M, F.tag("other", a));
+    const auto expected_M = sumOf(sumOf(sumOf(seed, a), c), a);
+    EXPECT_EQ(M.toString(), expected_M.toString());
+    EXPECT_EQ(C.nodeShared(), b.nodeShared());
+
+    const auto momentum = F.tagged("weak", u);
+    ASSERT_TRUE(momentum.isValid());
+    EXPECT_EQ(momentum.node()->children(), (std::vector<const svmp::FE::forms::FormExprNode*>{a.node(), c.node()}));
+    EXPECT_EQ(F.tagged("weak", p).nodeShared(), b.nodeShared());
+    EXPECT_EQ(F.tagged("other", u).nodeShared(), a.nodeShared());
+    EXPECT_FALSE(F.tagged("other", p).isValid());
+    EXPECT_FALSE(F.tagged("none", u).isValid());
+
+    // A tagged term holds the test function of exactly one field.
+    EXPECT_THROW((void)F.tag("weak", FormExpr{}), std::invalid_argument);
+    EXPECT_THROW((void)F.tag("weak", (U * U).dx()), std::invalid_argument);
+    EXPECT_THROW((void)F.tag("weak", (U * v + q).dx()), std::invalid_argument);
+}
+
 TEST(FESystem, DerivedMeshVelocityIsExcludedFromUnknownLayout)
 {
     auto mesh = build_single_quad_mesh();

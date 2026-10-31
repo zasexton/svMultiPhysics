@@ -370,8 +370,7 @@ TEST(FormsBoundaryConditions, DirichletNitscheOfAStressEntersTheVelocityAndPress
         FormExpr C = (q * div(u)).dx();
         FormExpr expected_M = M;
         FormExpr expected_C = C;
-        forms::ResidualContributions rows{{u_id, M}, {p_id, C}};
-        bc::ResidualRows sink(rows);
+        bc::ResidualRows sink({{u_id, &M}, {p_id, &C}});
         bc::Dirichlet(measure, uD, nitsche, flux).contributeToRows(sink, u, v, u_id);
 
         // The terms of sigma(u, p) n = 2 mu eps(u) n - p n: consistency in
@@ -405,8 +404,7 @@ TEST(FormsBoundaryConditions, DirichletNitscheOfAStressEntersTheVelocityAndPress
         FormExpr expected_M = M;
         FormExpr expected_C = C;
         std::vector<bc::GeneratedBoundaryNitscheTraceFormBinding> bindings;
-        forms::ResidualContributions rows{{u_id, M}, {p_id, C}};
-        bc::ResidualRows sink(rows, &bindings);
+        bc::ResidualRows sink({{u_id, &M}, {p_id, &C}}, &bindings);
         bc::Dirichlet(generated, uD, nitsche, certified_flux).contributeToRows(sink, u, v, u_id);
         const auto route = bc::buildGeneratedBoundaryNitscheTraceTerms(u, v, uD, bc::symmetricGradientForm(mu), 3,
                                                                        103, nitsche);

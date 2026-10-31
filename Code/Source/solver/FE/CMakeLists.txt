@@ -1361,7 +1361,6 @@ set(FE_FORMS_HEADERS
 	    Forms/JIT/JITKernelWrapper.h
 	    Forms/JIT/JITFunctionalKernelWrapper.h
 	    Forms/Vocabulary.h
-	    Forms/ResidualContributions.h
 		)
 
 set(FE_FORMS_SOURCES

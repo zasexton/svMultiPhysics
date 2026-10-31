@@ -8,7 +8,7 @@ How `FE/Forms` weak-form expressions become assembled operators in `FE/Systems`.
 |------|-----|--------|
 | One include for a formulation module | the skeleton of section 2 | `Authoring.h` |
 | Owned unknown/prescribed symbols | `FieldBinding` | `FieldBinding.h` |
-| Ordered residual rows and selected observations | `ResidualContributions` | `ResidualContributions.h` |
+| Terms of a residual-work channel | `FormulationBuilder::tag()` / `tagged()` | `FormulationBuilder.h` |
 | Residual physics (single or multi-field) | `FormulationBuilder::install()`; direct `installFormulation()` | `FormulationBuilder.h` / `FormsInstaller.h` |
 | Phase-ordered constraints and immediate BC application | `ConstraintPlan` | `ConstraintPlan.h` |
 | Measured functionals and residual-work channels | `functional()` / `wallFunctional()` / `workChannel()` | `FormulationBuilder.h` / `FunctionalForms.h` |
@@ -160,24 +160,16 @@ of the binding, caller strings, or supplied space do not invalidate those nodes.
 The binding itself borrows the system. Creating symbols does not sample
 coefficient callbacks.
 
-### Immediate residual contributions
+### Tagged terms and work channels
 
-`forms::ResidualContributions` (`FE/Forms/ResidualContributions.h`) binds actual
-`FieldId` test rows to borrowed production expressions and optional observation
-expressions. Each `append(id, term)` immediately updates production, then each
-non-null observation in list order, using `sumOf`'s left fold. Nothing is queued,
-reordered, expanded, rescaled, or inferred from a symbol name. The sink copies
-row bindings and observation lists; their expression targets must outlive it.
-Use scoped sinks to select exactly which terms enter each observation.
-
-`INVALID_FIELD_ID`, duplicate row IDs, and repeated non-null destinations across
-production and observations are rejected at construction before mutation. Null
-observations are skipped. An unknown append ID throws without undoing earlier
-appends. The appended term is snapshotted before assignments, so the argument
-may itself reference a destination. An invalid term is not silently skipped:
-`sumOf(empty, invalid)` stays invalid, while adding it to a valid expression
-throws. Assignments already completed in production or earlier observations
-remain visible if a later update fails.
+`FormulationBuilder::tag(label, term)` records a residual term under a
+work-channel label and returns it unchanged, so `R = sumOf(R, F.tag(label,
+term))` builds the residual a plain `sumOf` would. The term must hold the test
+function of exactly one field; an empty term, or one with no or several test
+fields, is refused. `F.tagged(label, test_field)` is the left fold, with
+`sumOf`, of the terms tagged `label` in that field's row, in tag order, or an
+empty form: the work channel shares its subtrees with the residual, and both
+are what an explicit term-by-term sum gives.
 
 Observations only collect expressions. Declare measured 0-forms with
 `FormulationBuilder::functional()` / `wallFunctional()` (or the corresponding
@@ -313,7 +305,7 @@ are collected in `Docs/HDIV_ADVANCED_USAGE_GUIDE.md`.
 
 For a coupled vector/scalar system, keep every measured integral in one test
 row. Here `V` is vector-valued and `Q` scalar-valued; this is a separate example
-using the same namespace setup and headers plus `FE/Forms/ResidualContributions.h`:
+using the same namespace setup and headers:
 
 ```cpp
 fe::systems::FieldBinding fields(system, "CoupledExample::registerOn");
@@ -323,21 +315,18 @@ const auto U = fields.unknownSymbols(
 const auto P = fields.unknownSymbols(
     {.name = "p", .space = Q, .components = 1}, "scalar", "p", "q");
 fe::systems::FormulationBuilder formulation(system, "equations", {});
-FormExpr u_row, p_row, observed_u_terms;
-ResidualContributions rows({
-    {U.id, u_row, {&observed_u_terms}},
-    {P.id, p_row},
-});
-rows.append(U.id, inner(grad(U.state), grad(U.test)).dx());
-rows.append(U.id, (-P.state * div(U.test)).dx());
-rows.append(P.id, (div(U.state) * P.test).dx());
+FormExpr u_row, p_row;
+u_row = sumOf(u_row, formulation.tag("observed", inner(grad(U.state), grad(U.test)).dx()));
+u_row = sumOf(u_row, formulation.tag("observed", (-P.state * div(U.test)).dx()));
+p_row = sumOf(p_row, (div(U.state) * P.test).dx());
+const auto observed_u_terms = formulation.tagged("observed", U.id);
 
 const auto residual = sumOf(u_row, p_row);
 formulation.symbolicTangent();
 (void)formulation.install({U.id, P.id}, residual);
 ```
 
-`observed_u_terms` receives exactly the two appended vector-row terms. The
+`observed_u_terms` is exactly the sum of the two tagged vector-row terms. The
 scalar row stays separate until the final measured sum. Supply row IDs from
 registered bundles rather than assuming contiguous field numbering.
 

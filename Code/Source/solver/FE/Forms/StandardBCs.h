@@ -9,7 +9,7 @@
 #include "Constraints/HDivNormalConstraint.h"
 #include "Constraints/NormalComponentConstraint.h"
 #include "Forms/BoundaryCondition.h"
-#include "Forms/ResidualContributions.h"
+#include "Forms/Vocabulary.h"
 #include "Systems/FESystem.h"
 
 #include <algorithm>
@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -323,20 +324,36 @@ public:
     }
 };
 
-/// The rows of a ResidualContributions sink: an added integral is appended,
-/// a subtracted one appended negated.  With @p bindings, generated-boundary
-/// routes are certified and their bindings collected there.
+/// The residual rows of the unknowns, one borrowed form per field: an added
+/// integral is summed into its row with sumOf, a subtracted one negated.  With
+/// @p bindings, generated-boundary routes are certified and their bindings
+/// collected there.
 class ResidualRows final : public RowSink {
 public:
-    explicit ResidualRows(ResidualContributions& rows,
+    explicit ResidualRows(std::initializer_list<std::pair<FieldId, FormExpr*>> rows,
                           std::vector<GeneratedBoundaryNitscheTraceFormBinding>* bindings = nullptr)
         : rows_(rows)
         , bindings_(bindings)
     {
+        for (auto row = rows_.begin(); row != rows_.end(); ++row) {
+            if (row->first == INVALID_FIELD_ID || row->second == nullptr) {
+                throw std::invalid_argument("forms::bc::ResidualRows: a row needs a field and a form");
+            }
+            for (auto earlier = rows_.begin(); earlier != row; ++earlier) {
+                if (earlier->first == row->first || earlier->second == row->second) {
+                    throw std::invalid_argument("forms::bc::ResidualRows: a field or a form is given twice");
+                }
+            }
+        }
     }
 
-    void add(FieldId row, const FormExpr& integral) override { rows_.append(row, integral); }
-    void subtract(FieldId row, const FormExpr& integral) override { rows_.append(row, -integral); }
+    void add(FieldId row, const FormExpr& integral) override
+    {
+        const auto term = integral;
+        FormExpr& target = form(row);
+        target = sumOf(target, term);
+    }
+    void subtract(FieldId row, const FormExpr& integral) override { add(row, -integral); }
     [[nodiscard]] bool certifiesGeneratedRoutes() const override { return bindings_ != nullptr; }
     void certify(GeneratedBoundaryNitscheTraceFormBinding binding) override
     {
@@ -344,7 +361,17 @@ public:
     }
 
 private:
-    ResidualContributions& rows_;
+    [[nodiscard]] FormExpr& form(FieldId row)
+    {
+        for (auto& [field, target] : rows_) {
+            if (field == row) {
+                return *target;
+            }
+        }
+        throw std::invalid_argument("forms::bc::ResidualRows: no row for field " + std::to_string(row));
+    }
+
+    std::vector<std::pair<FieldId, FormExpr*>> rows_;
     std::vector<GeneratedBoundaryNitscheTraceFormBinding>* bindings_{nullptr};
 };
 

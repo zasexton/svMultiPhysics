@@ -447,7 +447,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     F.symbolicTangent();
     // The energies, powers and measures of the free surfaces as forms (E3; NavierStokesPostProcessing.h).
     post::declareFreeSurfaceEnergyFunctionals(F, free_surfaces, *velocity_space_, dim);
-    ResidualContributions cut_penalties{{p_id, C, {&work.ghost_penalty}}};
+    using WorkChannel = FreeSurfaceResidualWorkOperatorSuffixes;
     for (std::size_t index = 0; index < free_surfaces.size(); ++index) {
         const auto& b = free_surfaces[index];
         auto& identity = preflight.surface_identities[index];
@@ -459,9 +459,10 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
         const auto J = Factories::cutFacetPressurePenalty(b, identity, t, o, velocity_space_->polynomial_order(),
                                                           pressure_space_->polynomial_order(), F);
         if (J.isValid()) {
-            cut_penalties.append(p_id, J);
+            C = sumOf(C, F.tag(WorkChannel::ghost_penalty, J));
         }
     }
+    work.ghost_penalty = F.tagged(WorkChannel::ghost_penalty, p_id);
     const auto on = [&](const auto& bc) { return wetted(bc.boundary_marker); };
     bcs.install(o.traction_neumann, [&](const auto& bc) { return Factories::toTractionBC(bc, dim, on(bc)); });
     bcs.install(o.traction_robin, [&](const auto& bc) { return Factories::toTractionRobinBC(bc, dim, on(bc)); });
@@ -481,11 +482,13 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     plan.commit();
 
     // Weak velocity Dirichlet (Nitsche), certified on generated wetted boundaries.
-    ResidualContributions weak_boundaries{{u_id, M, {&work.weak_boundary_momentum}},
-                                         {p_id, C, {&work.weak_boundary_continuity}}};
     auto nitsche_traces = Factories::appendVelocityNitscheBCs(
-        weak_boundaries, o, preflight.prepared_weak_velocity_boundaries, U, P, t.mu,
+        [&](const FormExpr& term) { M = sumOf(M, F.tag(WorkChannel::weak_boundary, term)); },
+        [&](const FormExpr& term) { C = sumOf(C, F.tag(WorkChannel::weak_boundary, term)); },
+        o, preflight.prepared_weak_velocity_boundaries, U, P, t.mu,
         aggregated ? Factories::GeneratedTraceCertification::Required : Factories::GeneratedTraceCertification::None);
+    work.weak_boundary_momentum = F.tagged(WorkChannel::weak_boundary, u_id);
+    work.weak_boundary_continuity = F.tagged(WorkChannel::weak_boundary, p_id);
     fs::requireGeneratedBoundaryNitscheTraceBindings(
         preflight.required_nitsche_routes, nitsche_traces,
         "IncompressibleNavierStokesVMSModule::registerOn: generated-boundary Nitsche form binding count differs from the certified production routes");

@@ -25,7 +25,6 @@
 #include "FE/Forms/BoundaryConditions.h"
 #include "FE/Forms/CutCellForms.h"
 #include "FE/Forms/IntegrationDomain.h"
-#include "FE/Forms/ResidualContributions.h"
 #include "FE/Forms/StandardBCs.h"
 #include "FE/Forms/Vocabulary.h"
 #include "FE/Interfaces/ContactLineGeometryCertificate.h"
@@ -787,12 +786,13 @@ inline void applyVelocityNitscheBCs(
 
 enum class GeneratedTraceCertification { None, Required };
 
-/// Append prepared terms through actual-field rows and return owned trace
-/// bindings. Each term is consumed immediately; a late failure retains earlier
-/// production and observation appends. Compatibility overloads remain above.
+/// Hand each prepared term to the sink of its row (momentum or continuity)
+/// and return the owned trace bindings. Each term is consumed immediately; a
+/// late failure retains the earlier ones.
 [[nodiscard]] inline std::vector<FE::forms::bc::GeneratedBoundaryNitscheTraceFormBinding>
 appendVelocityNitscheBCs(
-    FE::forms::ResidualContributions& rows,
+    const std::function<void(const FE::forms::FormExpr&)>& momentum,
+    const std::function<void(const FE::forms::FormExpr&)>& continuity,
     const IncompressibleNavierStokesVMSOptions& options,
     std::span<const PreparedWeakVelocityBoundary> prepared_boundaries,
     const FE::systems::BoundUnknown& velocity,
@@ -805,8 +805,7 @@ appendVelocityNitscheBCs(
         [](const PreparedWeakVelocityBoundary& boundary) -> const PreparedWeakVelocityBoundary& { return boundary; },
         velocity.state, pressure.state, velocity.test, pressure.test, mu,
         certification == GeneratedTraceCertification::Required ? &bindings : nullptr,
-        [&](const FE::forms::FormExpr& term) { rows.append(velocity.id, term); },
-        [&](const FE::forms::FormExpr& term) { rows.append(pressure.id, term); }, nullptr);
+        momentum, continuity, nullptr);
     return bindings;
 }
 

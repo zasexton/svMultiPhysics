@@ -9,11 +9,13 @@
 
 #include "Analysis/FormExprScanner.h"
 #include "Forms/FormExpr.h"
+#include "Forms/Vocabulary.h"
 #include "PostProcessing/ScalarHistory.h"
 #include "Systems/ALEBinding.h"
 #include "Systems/FESystem.h"
 
 #include <algorithm>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -272,6 +274,53 @@ OperatorTag FormulationBuilder::workChannel(std::string_view suffix, std::initia
         installed = true;
     }
     return installed ? channel_tag : OperatorTag{};
+}
+
+namespace {
+
+void collectTestFields(const forms::FormExprNode& node, std::vector<FieldId>& fields)
+{
+    if (node.type() == forms::FormExprType::TestFunction) {
+        const auto field = node.fieldId();
+        if (field && std::find(fields.begin(), fields.end(), *field) == fields.end()) {
+            fields.push_back(*field);
+        }
+    }
+    for (const auto* child : node.children()) {
+        if (child != nullptr) {
+            collectTestFields(*child, fields);
+        }
+    }
+}
+
+} // namespace
+
+forms::FormExpr FormulationBuilder::tag(std::string_view label, forms::FormExpr term)
+{
+    if (!term.isValid()) {
+        throw std::invalid_argument("FormulationBuilder::tag: the term tagged '" + std::string(label) +
+                                    "' is empty");
+    }
+    std::vector<FieldId> test_fields;
+    collectTestFields(*term.node(), test_fields);
+    if (test_fields.size() != 1u) {
+        throw std::invalid_argument("FormulationBuilder::tag: the term tagged '" + std::string(label) + "' holds " +
+                                    std::to_string(test_fields.size()) +
+                                    " fields' test functions; a tagged term holds the test function of one field");
+    }
+    tagged_terms_.push_back({std::string(label), test_fields.front(), term});
+    return term;
+}
+
+forms::FormExpr FormulationBuilder::tagged(std::string_view label, FieldId test_field) const
+{
+    forms::FormExpr sum;
+    for (const auto& tagged_term : tagged_terms_) {
+        if (tagged_term.label == label && tagged_term.test_field == test_field) {
+            sum = forms::sumOf(sum, tagged_term.term);
+        }
+    }
+    return sum;
 }
 
 DiagnosticRegistry& FormulationBuilder::diagnostics()

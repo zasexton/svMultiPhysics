@@ -21,7 +21,6 @@
 #include "FE/Forms/FormExpr.h"
 #include "FE/Forms/FormCompiler.h"
 #include "FE/Forms/FormKernels.h"
-#include "FE/Forms/ResidualContributions.h"
 #include "FE/Forms/StandardBCs.h"
 #include "FE/Forms/Vocabulary.h"
 #include "FE/Assembly/StandardAssembler.h"
@@ -12273,10 +12272,16 @@ TEST(MovingDomainPhysics, PreparedNitscheContributionsUseOwnedFieldsAndOptionalO
                             U.state, P.state, U.test, P.test, mu, certify ? &expected_bindings : nullptr,
                             observations & 1u ? &expected_momentum_work : nullptr,
                             observations & 2u ? &expected_continuity_work : nullptr);
-                        ResidualContributions rows{{U.id, M, {observations & 1u ? &momentum_work : nullptr}},
-                                                   {P.id, C, {observations & 2u ? &continuity_work : nullptr}}};
-                        const auto bindings = ns::Factories::appendVelocityNitscheBCs(rows, options, prepared, U, P, mu,
-                            certify ? Certification::Required : Certification::None);
+                        const auto bindings = ns::Factories::appendVelocityNitscheBCs(
+                            [&](const FormExpr& term) {
+                                M = sumOf(M, term);
+                                if (observations & 1u) momentum_work = sumOf(momentum_work, term);
+                            },
+                            [&](const FormExpr& term) {
+                                C = sumOf(C, term);
+                                if (observations & 2u) continuity_work = sumOf(continuity_work, term);
+                            },
+                            options, prepared, U, P, mu, certify ? Certification::Required : Certification::None);
                         const std::array actual{M, C, momentum_work, continuity_work};
                         const std::array expected{expected_M, expected_C, expected_momentum_work, expected_continuity_work};
                         for (std::size_t index = 0; index < actual.size(); ++index) {
@@ -12333,10 +12338,17 @@ TEST(MovingDomainPhysics, PreparedNitscheContributionsKeepPartialRowsOnLateFailu
         ExteriorBoundaryMeasure::generatedActiveSubset(22, 122));
     expected_M = sumOf(expected_M, pressure);
     expected_momentum_work = sumOf(expected_momentum_work, pressure);
-    ResidualContributions rows{{U.id, M, {&momentum_work}}, {P.id, C, {&continuity_work}}};
     try {
-        (void)ns::Factories::appendVelocityNitscheBCs(rows, options, prepared, U, P, mu,
-                                                   ns::Factories::GeneratedTraceCertification::Required);
+        (void)ns::Factories::appendVelocityNitscheBCs(
+            [&](const FormExpr& term) {
+                M = sumOf(M, term);
+                momentum_work = sumOf(momentum_work, term);
+            },
+            [&](const FormExpr& term) {
+                C = sumOf(C, term);
+                continuity_work = sumOf(continuity_work, term);
+            },
+            options, prepared, U, P, mu, ns::Factories::GeneratedTraceCertification::Required);
         FAIL() << "Expected incompatible generated prescribed vector";
     } catch (const std::invalid_argument& error) {
         EXPECT_STREQ(error.what(),
