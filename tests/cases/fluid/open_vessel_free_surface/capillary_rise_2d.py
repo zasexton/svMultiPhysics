@@ -162,10 +162,10 @@ def discrete_initial_column_heights(
         wall_slope * (xs[-2:] - HALF_GAP_M)
     )
     target_area = HALF_GAP_M * NOMINAL_INITIAL_HEIGHT_M
-    unshifted_area = float(np.trapz(heights, xs))
+    unshifted_area = float(np.trapezoid(heights, xs))
     vertical_shift = (target_area - unshifted_area) / HALF_GAP_M
     heights += vertical_shift
-    discrete_area = float(np.trapz(heights, xs))
+    discrete_area = float(np.trapezoid(heights, xs))
     return xs, heights, {
         "apex_height_m": float(heights[0]),
         "wall_contact_height_m": float(heights[-1]),
