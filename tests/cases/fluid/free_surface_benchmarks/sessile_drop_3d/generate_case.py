@@ -86,6 +86,17 @@ SEMI_IMPLICIT_FOR_RULE = {"fixed": "NormalIncrement", "capillary-limit": "None"}
 KINEMATIC_RECONCILIATION = True             # as sessile_drop_2d
 SIGN_DEFINITE_PATCH_BOUNDS = True           # as sessile_drop_2d
 INTERFACE_PRESERVING_REDISTANCING = True    # decisions D38/D39, as sessile_drop_2d
+# The method profile of the wetting protocol (decision D47, step P4;
+# Physics/Options/FreeSurfaceProfiles.cpp): it states the harmonic PDE
+# extension with monolithic coupling, SUPG, kinematic reconciliation
+# (KINEMATIC_RECONCILIATION), sign-definite patch bounds
+# (SIGN_DEFINITE_PATCH_BOUNDS), triggered redistancing
+# (INTERFACE_PRESERVING_REDISTANCING), LinearCorner geometry with
+# refreshed-frozen tangents and interface order 2, the cut-facet pressure
+# penalty, small-cut aggregation, Surface_tension_semi_implicit=None and the
+# strong Ren-E law.  A deck writes a key only when its option differs from
+# the profile.
+FREE_SURFACE_PROFILE = "Wetting@1"
 MIN_PHI_OVER_H_WARNING = 1.0e-6
 LEVEL_SET_FIELD = "phi"
 INTERFACE_DOMAIN_ID = "sessile_drop_3d_surface"
@@ -264,13 +275,16 @@ def solver_xml(equilibrium_deg: float, schedule: dict, steps: int, cadence: int,
     semi_implicit_bc = ("" if semi_implicit == "None" else
                         f"\n      <Surface_tension_semi_implicit>{semi_implicit}"
                         "</Surface_tension_semi_implicit>")
-    maintenance = ("\n    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>"
-                   if kinematic_reconciliation else "")
-    if redistancing:
-        maintenance += ("\n    <Enable_interface_preserving_redistancing>true"
+    # The profile turns the three accepted-step stages on; a deck states
+    # the ones that are off.
+    maintenance = ""
+    if not kinematic_reconciliation:
+        maintenance += "\n    <Enable_kinematic_reconciliation>false</Enable_kinematic_reconciliation>"
+    if not redistancing:
+        maintenance += ("\n    <Enable_interface_preserving_redistancing>false"
                         "</Enable_interface_preserving_redistancing>")
-    if sign_definite_patch_bounds:
-        maintenance += ("\n    <Enable_sign_definite_patch_bounds>true"
+    if not sign_definite_patch_bounds:
+        maintenance += ("\n    <Enable_sign_definite_patch_bounds>false"
                         "</Enable_sign_definite_patch_bounds>")
     walls = []
     for name, axis, _side, role in planes:
@@ -325,12 +339,7 @@ def solver_xml(equilibrium_deg: float, schedule: dict, steps: int, cadence: int,
     <Max_iterations>4</Max_iterations>
     <Tolerance>1.0e-4</Tolerance>
     <Module_options>jit=true; jit_specialization=true</Module_options>
-    <Level_set_field_name>{LEVEL_SET_FIELD}</Level_set_field_name>
-    <Level_set_source>prescribed_data</Level_set_source>
-{SPHERE.level_set_velocity_block(transport)}
-    <Enable_SUPG>true</Enable_SUPG>
-    <SUPG_tau_scale>0.5</SUPG_tau_scale>
-    <SUPG_transient_scale>2.0</SUPG_transient_scale>{maintenance}
+    <Level_set_field_name>{LEVEL_SET_FIELD}</Level_set_field_name>{SPHERE.level_set_velocity_overrides(transport)}{maintenance}
     <Output type="Spatial">
       <Level_set>true</Level_set>
     </Output>
@@ -367,13 +376,10 @@ def solver_xml(equilibrium_deg: float, schedule: dict, steps: int, cadence: int,
     <Add_BC name="free_surface">
       <Type>Free_surface</Type>
       <Implementation>UnfittedLevelSet</Implementation>
+      <Free_surface_profile>{FREE_SURFACE_PROFILE}</Free_surface_profile>
       <Level_set_field_name>{LEVEL_SET_FIELD}</Level_set_field_name>
       <Generated_interface_domain_id>{INTERFACE_DOMAIN_ID}</Generated_interface_domain_id>
-      <Level_set_isovalue>0.0</Level_set_isovalue>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Generated_interface_geometry>LinearCorner</Generated_interface_geometry>
-      <Geometry_tangent_policy>RefreshedFrozenQuadrature</Geometry_tangent_policy>
-      <Interface_quadrature_order>2</Interface_quadrature_order>
       <External_pressure>{EXTERNAL_PRESSURE:.17g}</External_pressure>
       <Surface_tension>{SURFACE_TENSION:.17g}</Surface_tension>{semi_implicit_bc}
       <Contact_line_model>PrescribedAngle</Contact_line_model>
@@ -382,9 +388,6 @@ def solver_xml(equilibrium_deg: float, schedule: dict, steps: int, cadence: int,
       <Contact_angle_degrees>{equilibrium_deg:.17g}</Contact_angle_degrees>
       <Wall_slip_model>Navier</Wall_slip_model>
       <Wall_slip_length>{SLIP_LENGTH:.17g}</Wall_slip_length>
-      <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
-      <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
-      <Small_cut_aggregation>true</Small_cut_aggregation>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>

@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import math
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -22,6 +23,18 @@ def load(name):
 
 gen = load("generate_case")
 ver = load("verify")
+# The Python mirror of the free-surface method profiles (decision D47, P4).
+_profiles_spec = importlib.util.spec_from_file_location(
+    "free_surface_profile_decks", BENCHMARK.parents[1] / "free_surface_profile_decks.py")
+profiles = importlib.util.module_from_spec(_profiles_spec)
+sys.modules[_profiles_spec.name] = profiles
+_profiles_spec.loader.exec_module(profiles)
+
+
+def deck_keys(text):
+    """The free-surface and level-set keys a deck resolves to (its profile's
+    values for the keys it does not state)."""
+    return profiles.effective_deck_keys(text)
 
 
 def sampled_cap(case, level, theta_degrees, area):
@@ -84,23 +97,24 @@ def test_generated_case_uses_the_d4_configuration(tmp_path):
     assert float(get("Contact_angle_degrees")) == 60.0
     assert get("Wall_slip_model") == "Navier"
     assert float(get("Wall_slip_length")) == pytest.approx(0.125)
-    assert get("Geometry_tangent_policy") == "RefreshedFrozenQuadrature"
+    assert get("Free_surface_profile") == "Wetting@1"
+    resolved_free_surface, resolved_level_set = deck_keys(text)
+    assert resolved_free_surface["Geometry_tangent_policy"] == "RefreshedFrozenQuadrature"
     bottom = fluid.find("Add_BC[@name='wall_bottom']")
     assert bottom.find("Effective_direction").text.strip() == "0 1"
     for wall in ("wall_left", "wall_right", "wall_top"):
         assert fluid.find(f"Add_BC[@name='{wall}']").find("Effective_direction") is None
-    level_set = root.find("Add_equation[@type='level_set']")
-    assert level_set.find("Enable_kinematic_reconciliation").text.strip() == "true"
+    assert resolved_level_set["Enable_kinematic_reconciliation"] == "true"
     assert case["kinematic_reconciliation"] is True
     plain = gen.solver_xml("surface_stress", 60, gen.time_schedule(16, 5.0, 100), 10, 1,
                            kinematic_reconciliation=False)
-    assert "Enable_kinematic_reconciliation" not in plain
-    assert level_set.find("Enable_sign_definite_patch_bounds").text.strip() == "true"
+    assert deck_keys(plain)[1]["Enable_kinematic_reconciliation"] == "false"
+    assert resolved_level_set["Enable_sign_definite_patch_bounds"] == "true"
     assert case["sign_definite_patch_bounds"] is True
     unbounded = gen.solver_xml("surface_stress", 60, gen.time_schedule(16, 5.0, 100), 10, 1,
                                sign_definite_patch_bounds=False)
-    assert "Enable_sign_definite_patch_bounds" not in unbounded
-    assert "<Enable_kinematic_reconciliation>true" in unbounded
+    assert deck_keys(unbounded)[1]["Enable_sign_definite_patch_bounds"] == "false"
+    assert deck_keys(unbounded)[1]["Enable_kinematic_reconciliation"] == "true"
     general = root.find("GeneralSimulationParameters")
     assert general.find("Transient_time_integration_scheme") is None
     assert float(general.find("Spectral_radius_of_infinite_time_step").text) == 0.5
@@ -112,13 +126,12 @@ def test_generated_case_uses_the_d4_configuration(tmp_path):
     assert "SVMP_" not in text
     # Default transport: the harmonic PDE extension, monolithic coupling (tracker M4, 2026-10-05).
     assert case["transport"] == "pde_extension"
-    level_set_eq = root.find("Add_equation[@type='level_set']")
-    assert level_set_eq.find("Velocity_source").text.strip() == "prescribed_data"
-    assert level_set_eq.find("Advection_velocity_extension_method").text.strip() == "pde_harmonic"
-    assert level_set_eq.find("Advection_velocity_extension_coupling").text.strip() == "monolithic"
+    assert resolved_level_set["Velocity_source"] == "prescribed_data"
+    assert resolved_level_set["Advection_velocity_extension_method"] == "pde_harmonic"
+    assert resolved_level_set["Advection_velocity_extension_coupling"] == "monolithic"
     coupled = gen.solver_xml("surface_stress", 60, gen.time_schedule(16, 5.0, 100), 10, 1,
                              transport="coupled")
-    assert "<Velocity_source>coupled_field" in coupled
+    assert deck_keys(coupled)[1]["Velocity_source"] == "coupled_field"
     # The wall-compatible wet extension was retired (decisions D47 and D55).
     assert "wet_extension" not in gen.TRANSPORTS
     with pytest.raises(ValueError, match="transport must be one of"):
@@ -126,9 +139,9 @@ def test_generated_case_uses_the_d4_configuration(tmp_path):
                        transport="wet_extension")
     pde = gen.solver_xml("surface_stress", 60, gen.time_schedule(16, 5.0, 100), 10, 1,
                          transport="pde_extension")
-    assert "<Advection_velocity_extension_method>pde_harmonic<" in pde
-    assert "<Advection_velocity_extension_coupling>monolithic<" in pde
-    assert "<Velocity_source>prescribed_data<" in pde
+    assert deck_keys(pde)[1]["Advection_velocity_extension_method"] == "pde_harmonic"
+    assert deck_keys(pde)[1]["Advection_velocity_extension_coupling"] == "monolithic"
+    assert deck_keys(pde)[1]["Velocity_source"] == "prescribed_data"
     assert "Use_wet_extension_advection_velocity" not in pde
     assert root.find("GeneralSimulationParameters/Number_of_time_steps").text == str(case["steps"])
     assert case["dt"] <= math.sqrt(case["h"] ** 3 / (4.0 * math.pi)) * (1 + 1e-12)
@@ -437,17 +450,16 @@ def test_every_gate_applies_at_dt_over_2(study, capsys):
 
 
 def test_protocol_decks_enable_the_triggered_redistancing(tmp_path):
-    # Decision D39: on by default, after the reconciliation and before the
-    # patch bounds; off writes the earlier deck and case.json unchanged.
+    # Decision D39: on by default (the Wetting profile states it); off states
+    # it off, which resolves to the earlier deck, and leaves case.json as it was.
     on = gen.generate(16, 60, "surface_stress", tmp_path / "on")
     off = gen.generate(16, 60, "surface_stress", tmp_path / "off", redistancing=False)
     text_on = (tmp_path / "on" / "solver.xml").read_text()
     text_off = (tmp_path / "off" / "solver.xml").read_text()
-    key = "<Enable_interface_preserving_redistancing>true</Enable_interface_preserving_redistancing>"
-    assert key in text_on and key not in text_off
-    assert text_on.index("Enable_kinematic_reconciliation") < text_on.index(key) < \
-        text_on.index("Enable_sign_definite_patch_bounds")
-    assert text_on.replace("\n    " + key, "") == text_off
+    key = "<Enable_interface_preserving_redistancing>false</Enable_interface_preserving_redistancing>"
+    assert deck_keys(text_on)[1]["Enable_interface_preserving_redistancing"] == "true"
+    assert "Enable_interface_preserving_redistancing" not in text_on and key in text_off
+    assert text_off.replace("\n    " + key, "") == text_on
     assert on["interface_preserving_redistancing"] is True
     assert "interface_preserving_redistancing" not in off
 

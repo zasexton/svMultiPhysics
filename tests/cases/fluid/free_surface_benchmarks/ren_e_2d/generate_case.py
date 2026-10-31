@@ -148,9 +148,11 @@ def solver_xml(level: int, sched: dict, steps: int, cadence: int,
     mobility.text = f"{MOBILITY:.17g}"
     mobility.tail = children[index].tail
     free_surface.insert(index + 1, mobility)
-    if law_enforcement == "Strong":
+    # The Wetting profile states the strong law for a DynamicRenE contact
+    # line; the deck states only the weak one.
+    if law_enforcement != "Strong":
         law = ET.Element("Contact_line_law_enforcement")
-        law.text = "Strong"
+        law.text = law_enforcement
         law.tail = children[index].tail
         free_surface.insert(index + 1, law)
     text = ET.tostring(root, encoding="unicode")

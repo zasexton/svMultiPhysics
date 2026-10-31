@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import math
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -21,6 +22,18 @@ def _load(name):
 
 gen = _load("generate_case")
 ver = _load("verify")
+# The Python mirror of the free-surface method profiles (decision D47, P4).
+_profiles_spec = importlib.util.spec_from_file_location(
+    "free_surface_profile_decks", BENCH.parents[1] / "free_surface_profile_decks.py")
+profiles = importlib.util.module_from_spec(_profiles_spec)
+sys.modules[_profiles_spec.name] = profiles
+_profiles_spec.loader.exec_module(profiles)
+
+
+def deck_keys(text):
+    """The free-surface and level-set keys a deck resolves to (its profile's
+    values for the keys it does not state)."""
+    return profiles.effective_deck_keys(text)
 
 
 def test_cap_geometry_and_schedule():
@@ -232,10 +245,12 @@ def test_criteria_gate_r_over_h_16_and_the_angle_trend():
 def test_protocol_decks_enable_the_triggered_redistancing(tmp_path):
     on = gen.generate(8, 90, tmp_path / "on")
     off = gen.generate(8, 90, tmp_path / "off", redistancing=False)
-    key = "<Enable_interface_preserving_redistancing>true</Enable_interface_preserving_redistancing>"
+    # The Wetting profile states the redistancing; off states it off.
+    key = "<Enable_interface_preserving_redistancing>false</Enable_interface_preserving_redistancing>"
     text_on = (tmp_path / "on" / "solver.xml").read_text()
     text_off = (tmp_path / "off" / "solver.xml").read_text()
-    assert key in text_on and text_on.replace("\n    " + key, "") == text_off
+    assert deck_keys(text_on)[1]["Enable_interface_preserving_redistancing"] == "true"
+    assert key in text_off and text_off.replace("\n    " + key, "") == text_on
     assert on["interface_preserving_redistancing"] is True
     assert "interface_preserving_redistancing" not in off
 

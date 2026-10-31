@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -14,6 +15,18 @@ import pyvista as pv
 
 ROOT = Path(__file__).resolve().parents[1]
 BENCHMARK = ROOT / "tests/cases/fluid/free_surface_benchmarks/ren_e_2d"
+# The Python mirror of the free-surface method profiles (decision D47, P4).
+_profiles_spec = importlib.util.spec_from_file_location(
+    "free_surface_profile_decks", ROOT / "tests/cases/fluid" / "free_surface_profile_decks.py")
+profiles = importlib.util.module_from_spec(_profiles_spec)
+sys.modules[_profiles_spec.name] = profiles
+_profiles_spec.loader.exec_module(profiles)
+
+
+def deck_keys(text):
+    """The free-surface and level-set keys a deck resolves to (its profile's
+    values for the keys it does not state)."""
+    return profiles.effective_deck_keys(text)
 
 
 def load(name: str):
@@ -61,25 +74,30 @@ def test_generated_deck_is_the_sessile_deck_with_dynamic_ren_e(tmp_path: Path):
     assert general.findtext("Number_of_time_steps") == "400"
     assert float(general.findtext("Time_step_size")) == pytest.approx(generate.DT0 / 2)
     assert general.findtext("Increment_in_saving_VTK_files") == "20"
-    level_set = [eq for eq in root.iter("Add_equation") if eq.attrib["type"] == "level_set"][0]
-    assert level_set.findtext("Advection_velocity_extension_method") == "pde_harmonic"
-    assert level_set.findtext("Enable_kinematic_reconciliation") == "true"
-    assert level_set.findtext("Enable_sign_definite_patch_bounds") == "true"
+    strong_text = (tmp_path / "run" / "solver.xml").read_text()
+    resolved_bc, level_set = deck_keys(strong_text)
+    assert level_set["Advection_velocity_extension_method"] == "pde_harmonic"
+    assert level_set["Enable_kinematic_reconciliation"] == "true"
+    assert level_set["Enable_sign_definite_patch_bounds"] == "true"
     bc = free_surface(root)
+    assert bc.findtext("Free_surface_profile") == "Wetting@1"
     assert bc.findtext("Contact_line_model") == "DynamicRenE"
     assert float(bc.findtext("Contact_line_mobility")) == generate.MOBILITY
     assert float(bc.findtext("Wall_slip_length")) == generate.SLIP_LENGTH
     assert bc.findtext("Wall_slip_model") == "Navier"
-    assert bc.findtext("Small_cut_aggregation") == "true"
+    assert resolved_bc["Small_cut_aggregation"] == "true"
     assert float(bc.findtext("Contact_angle_degrees")) == generate.EQUILIBRIUM_ANGLE_DEG
-    # Decision D39: the law is imposed exactly by default; Weak writes the
-    # earlier deck, and neither carries the sessile redistancing.
-    assert bc.findtext("Contact_line_law_enforcement") == "Strong"
-    assert level_set.find("Enable_interface_preserving_redistancing") is None
+    # Decision D39: the law is imposed exactly by default (the Wetting profile
+    # states it for DynamicRenE); Weak states the earlier law, and neither
+    # carries the sessile redistancing.
+    assert resolved_bc["Contact_line_law_enforcement"] == "Strong"
+    assert bc.find("Contact_line_law_enforcement") is None
+    assert level_set["Enable_interface_preserving_redistancing"] == "false"
     generate.generate(16, "advancing", 2, tmp_path / "weak", law_enforcement="Weak")
-    strong_text = (tmp_path / "run" / "solver.xml").read_text()
-    assert (tmp_path / "weak" / "solver.xml").read_text() == strong_text.replace(
-        "\n      <Contact_line_law_enforcement>Strong</Contact_line_law_enforcement>", "")
+    weak_text = (tmp_path / "weak" / "solver.xml").read_text()
+    assert deck_keys(weak_text)[0]["Contact_line_law_enforcement"] == "Weak"
+    assert weak_text.replace(
+        "\n      <Contact_line_law_enforcement>Weak</Contact_line_law_enforcement>", "") == strong_text
     walls = {b.attrib["name"]: b for b in root.iter("Add_BC") if b.attrib.get("name", "").startswith("wall_")}
     assert walls["wall_bottom"].findtext("Effective_direction") == "0 1"
     # Equal-area initial caps for the two cases.

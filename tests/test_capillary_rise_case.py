@@ -23,6 +23,20 @@ RUNNER_PATH = (
 )
 
 
+# The Python mirror of the free-surface method profiles (decision D47, P4).
+_profiles_spec = importlib.util.spec_from_file_location(
+    "free_surface_profile_decks", ROOT / "tests/cases/fluid/free_surface_profile_decks.py")
+profiles = importlib.util.module_from_spec(_profiles_spec)
+sys.modules[_profiles_spec.name] = profiles
+_profiles_spec.loader.exec_module(profiles)
+
+
+def deck_keys(text):
+    """The free-surface and level-set keys a deck resolves to (its profile's
+    values for the keys it does not state)."""
+    return profiles.effective_deck_keys(text)
+
+
 def load_module():
     spec = importlib.util.spec_from_file_location(
         "free_surface_capillary_rise_2d", MODULE_PATH)
@@ -374,11 +388,13 @@ def test_d4_profile_is_the_default_wetting_deck(tmp_path: Path):
     assert general.findtext("Start_saving_after_time_step") == "2"
 
     level_set = equation_by_type(root, "level_set")
-    assert level_set.findtext("Advection_velocity_extension_method") == "pde_harmonic"
-    assert level_set.findtext("Advection_velocity_extension_coupling") == "monolithic"
+    # The Wetting profile states the method (decision D47, P4).
+    resolved_free_surface, resolved_level_set = deck_keys((case_dir / "solver.xml").read_text())
+    assert resolved_level_set["Advection_velocity_extension_method"] == "pde_harmonic"
+    assert resolved_level_set["Advection_velocity_extension_coupling"] == "monolithic"
     assert level_set.find("Use_wet_extension_advection_velocity") is None
-    assert level_set.findtext("Enable_kinematic_reconciliation") == "true"
-    assert level_set.findtext("Enable_sign_definite_patch_bounds") == "true"
+    assert resolved_level_set["Enable_kinematic_reconciliation"] == "true"
+    assert resolved_level_set["Enable_sign_definite_patch_bounds"] == "true"
     assert level_set.find("Enable_discontinuity_capturing") is None
     # D21 bounds reject level-set inflow faces: the bottom has no level-set BC.
     assert [bc.attrib["name"] for bc in level_set.findall("Add_BC")] == ["wall_top"]
@@ -396,11 +412,12 @@ def test_d4_profile_is_the_default_wetting_deck(tmp_path: Path):
         assert wall.findtext("Effective_direction") == "1 0"
     assert boundary_by_name(fluid, "wall_bottom").findtext("Type") == "Neu"
     free_surface = boundary_by_name(fluid, "free_surface")
+    assert free_surface.findtext("Free_surface_profile") == "Wetting@1"
     assert free_surface.findtext("Contact_line_model") == "PrescribedAngle"
     assert free_surface.findtext("Wall_slip_model") == "Navier"
     assert math.isclose(float(free_surface.findtext("Wall_slip_length")), 0.001)
     assert free_surface.findtext("Contact_line_wall_face") == "wall_right"
-    assert free_surface.findtext("Small_cut_aggregation") == "true"
+    assert resolved_free_surface["Small_cut_aggregation"] == "true"
     assert free_surface.find("Allow_corner_linearized_cut_geometry") is None
     assert free_surface.find("Contact_line_mobility") is None
     # Default aggregation guards (the provisional 6 / 12 of D-W7 are retired).
@@ -554,15 +571,17 @@ def test_candidate_uncertainty_follows_the_declared_rule():
 
 
 def test_d4_deck_enables_the_triggered_redistancing(tmp_path):
-    # Decision D39: on by default in the d4 profile; off reproduces the
-    # earlier solver.xml and benchmark.json.
+    # Decision D39: on by default in the d4 profile (the Wetting profile
+    # states it); off states it off, which resolves to the earlier solver.xml,
+    # and reproduces the earlier benchmark.json.
     module = load_module()
     on = module.write_case(tmp_path / "on", 4, 5.0e-4, 10, output_cadence=2)
     off = module.write_case(tmp_path / "off", 4, 5.0e-4, 10, output_cadence=2,
                             redistancing=False)
-    key = "<Enable_interface_preserving_redistancing>true</Enable_interface_preserving_redistancing>"
+    key = "<Enable_interface_preserving_redistancing>false</Enable_interface_preserving_redistancing>"
     text_on = (tmp_path / "on" / "solver.xml").read_text()
     text_off = (tmp_path / "off" / "solver.xml").read_text()
-    assert key in text_on and text_on.replace("\n  " + key, "") == text_off
+    assert deck_keys(text_on)[1]["Enable_interface_preserving_redistancing"] == "true"
+    assert key in text_off and text_off.replace("\n  " + key, "") == text_on
     assert "interface_preserving_redistancing" in on["d4_configuration"]
     assert "interface_preserving_redistancing" not in off["d4_configuration"]
