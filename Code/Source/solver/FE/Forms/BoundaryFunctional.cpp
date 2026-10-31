@@ -27,6 +27,35 @@ std::vector<assembly::FieldRequirement> analyzeFieldRequirements(const FormExprN
 
 } // namespace detail
 
+BoundaryFunctional boundaryFunctional(const FormExpr& measured_form, std::string name)
+{
+    const auto* node = measured_form.node();
+    FE_THROW_IF(node == nullptr, InvalidArgumentException,
+                "forms::boundaryFunctional: invalid measured form");
+    FE_THROW_IF(node->hasTest() || node->hasTrial(), InvalidArgumentException,
+                "forms::boundaryFunctional: a measured 0-form has no test or trial function");
+
+    const auto* measure = node->exteriorBoundaryMeasure();
+    const bool fitted = node->type() == FormExprType::BoundaryIntegral;
+    const bool generated = node->type() == FormExprType::InterfaceIntegral && measure != nullptr &&
+                           measure->isGeneratedActiveSubset();
+    FE_THROW_IF(!fitted && !generated, InvalidArgumentException,
+                "forms::boundaryFunctional: expected one exterior-boundary integral, integrand.ds(marker) or "
+                "integrand.ds(BoundaryDomain)");
+
+    BoundaryFunctional functional;
+    functional.integrand = FormExpr(node->childrenShared().at(0));
+    functional.boundary_marker = fitted ? node->boundaryMarker().value_or(-1) : measure->physicalBoundaryMarker();
+    if (generated) {
+        functional.generated_active_boundary_marker = measure->generatedActiveBoundaryMarker();
+    }
+    functional.name = std::move(name);
+    functional.reduction = BoundaryFunctional::Reduction::Sum;
+    FE_THROW_IF(functional.boundary_marker < 0, InvalidArgumentException,
+                "forms::boundaryFunctional: ds() over every boundary names no marker; integrate over ds(marker)");
+    return functional;
+}
+
 std::shared_ptr<assembly::FunctionalKernel>
 compileBoundaryFunctionalKernel(const FormExpr& integrand, int boundary_marker)
 {

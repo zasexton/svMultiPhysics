@@ -772,10 +772,11 @@ Status: `implemented/public` for named authoring helpers; slot references are
 | `AuxiliaryState(name)` | `implemented/expert`; raw auxiliary state access; `BoundaryConditionManager::apply` rejects it in a residual |
 | `AuxiliaryInputSlot(slot)`, `AuxiliaryOutputSlot(slot)` | `implemented/internal`; post-resolution slot references |
 | `FormExpr::auxiliaryStateRef(slot)` | `implemented/internal`; slot reference |
+| `FESystem::boundaryIntegral(measured_form, schedule)` | Registers one exterior-boundary integral, `inner(u, n).ds(outlet)` or `integrand.ds(BoundaryDomain)`, as an auxiliary input: the functional `forms::boundaryFunctional(measured_form)` gives; the handle converts to a `FormExpr` |
 | `FESystem::boundaryIntegral(BoundaryFunctional, schedule)`, `boundaryIntegral(integrand, marker, ...)` | Registers a boundary (or, with `is_domain_functional`, cell) integral as an auxiliary input; the handle converts to a `FormExpr` |
 | `systems::aux::model(name, [](ModelFacade& m) { ... })` | 0D model DSL: `m.input`, `m.state`, `m.params`, `m << ddt(X) == rhs`, `m << alg(Z) == g`, `m << out("y") == e` |
 | `FESystem::deploy(use(model).name(...).boundary(m).monolithic().params(...).bind(...))` | Deployed model; `handle.output(name)` is a `FormExpr` |
-| `BoundaryFunctional` | Boundary/domain functional definition (integrand plus marker; no measure) |
+| `BoundaryFunctional`, `boundaryFunctional(measured_form, name)` | Boundary/domain functional definition (integrand plus marker; no measure); `boundaryFunctional` reads it from one exterior-boundary integral and throws for anything else |
 | `BoundaryFunctionalResults` | Runtime functional output container |
 | `compileBoundaryFunctionalKernel(...)` | `implemented/expert`; compiles a scalar integrand to a cell or boundary-face functional kernel |
 | `FunctionalAssembler::assembleCutVolumeScalar(kernel, cut_context, marker, side)`, `assembleGeneratedInterfaceScalar(kernel, cut_context, marker)` | `implemented/expert`; a functional kernel on the cut context's volume rules, or on its interface, contact-line or active-boundary rules, of one marker, on owned parent cells; the caller reduces |

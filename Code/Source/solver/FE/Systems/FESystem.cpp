@@ -17043,6 +17043,13 @@ AuxiliaryInputHandle FESystem::boundaryIntegral(
         input_name, std::move(functional), schedule);
 }
 
+AuxiliaryInputHandle FESystem::boundaryIntegral(
+    forms::FormExpr measured_form,
+    AuxiliaryInputUpdateSchedule schedule)
+{
+    return boundaryIntegral(forms::boundaryFunctional(measured_form), schedule);
+}
+
 AuxiliaryInputHandle FESystem::registerBoundaryIntegralHandle_(
     const std::string& input_name,
     forms::BoundaryFunctional functional,

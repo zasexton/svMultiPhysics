@@ -79,6 +79,20 @@ struct BoundaryFunctional {
 };
 
 /**
+ * @brief The boundary functional of a measured 0-form
+ *
+ * @p measured_form is one exterior-boundary integral of a scalar integrand
+ * without test or trial functions: `integrand.ds(m)` with a marker m >= 0,
+ * or `integrand.ds(domain)` with a BoundaryDomain (fullPhysical(m) or
+ * generatedActiveSubset(m, g)).  The result is the functional spelled field by
+ * field: that integrand, boundary_marker m, the generated marker g if there
+ * is one, a sum reduction and @p name.  Anything else (a sum of integrals, dx,
+ * dS, dI, ds() over every boundary) throws InvalidArgumentException.
+ */
+[[nodiscard]] BoundaryFunctional boundaryFunctional(const FormExpr& measured_form,
+                                                    std::string name = {});
+
+/**
  * @brief Evaluated boundary functional values (named scalar lookup)
  */
 class BoundaryFunctionalResults {

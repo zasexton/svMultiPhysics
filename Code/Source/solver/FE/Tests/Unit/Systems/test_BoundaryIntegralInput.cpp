@@ -32,6 +32,7 @@
 #include <array>
 #include <cmath>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -2380,6 +2381,101 @@ TEST(BoundaryFunctional, AllReductionModesExist)
 {
     EXPECT_NE(BoundaryFunctional::Reduction::Sum, BoundaryFunctional::Reduction::Average);
     EXPECT_NE(BoundaryFunctional::Reduction::Max, BoundaryFunctional::Reduction::Min);
+}
+
+TEST(BoundaryFunctional, MeasuredFormGivesTheStructSpellingFieldByField)
+{
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    const auto u = FormExpr::discreteField(0, *space, "u");
+    const auto integrand = u * FormExpr::constant(2.0);
+
+    const auto expectStructSpelling = [&](const BoundaryFunctional& f,
+                                          int marker,
+                                          std::optional<int> generated,
+                                          const std::string& name) {
+        BoundaryFunctional expected;
+        expected.integrand = integrand;
+        expected.boundary_marker = marker;
+        expected.generated_active_boundary_marker = generated;
+        expected.name = name;
+        expected.reduction = BoundaryFunctional::Reduction::Sum;
+        EXPECT_EQ(f.integrand.node(), expected.integrand.node());
+        EXPECT_EQ(f.integrand.toString(), expected.integrand.toString());
+        EXPECT_EQ(f.boundary_marker, expected.boundary_marker);
+        EXPECT_EQ(f.generated_active_boundary_marker, expected.generated_active_boundary_marker);
+        EXPECT_EQ(f.name, expected.name);
+        EXPECT_EQ(f.reduction, expected.reduction);
+        EXPECT_EQ(f.is_domain_functional, expected.is_domain_functional);
+        EXPECT_EQ(f.region_marker, expected.region_marker);
+        EXPECT_EQ(f.exteriorBoundaryMeasure(), expected.exteriorBoundaryMeasure());
+    };
+
+    expectStructSpelling(boundaryFunctional(integrand.ds(7)), 7, std::nullopt, "");
+    expectStructSpelling(boundaryFunctional(integrand.ds(7), "Q_out"), 7, std::nullopt, "Q_out");
+    expectStructSpelling(boundaryFunctional(integrand.ds(ExteriorBoundaryMeasure::fullPhysical(7))),
+                         7, std::nullopt, "");
+    expectStructSpelling(
+        boundaryFunctional(integrand.ds(ExteriorBoundaryMeasure::generatedActiveSubset(7, 1007))),
+        7, 1007, "");
+}
+
+TEST(BoundaryFunctional, MeasuredFormRefusesAnythingButOneExteriorBoundaryIntegral)
+{
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    const auto u = FormExpr::discreteField(0, *space, "u");
+    const auto v = FormExpr::testFunction(*space, "v");
+
+    EXPECT_THROW((void)boundaryFunctional(FormExpr{}), svmp::FE::InvalidArgumentException);
+    EXPECT_THROW((void)boundaryFunctional(u), svmp::FE::InvalidArgumentException);
+    EXPECT_THROW((void)boundaryFunctional(u.dx()), svmp::FE::InvalidArgumentException);
+    EXPECT_THROW((void)boundaryFunctional(u.ds()), svmp::FE::InvalidArgumentException);
+    EXPECT_THROW((void)boundaryFunctional(u.dS()), svmp::FE::InvalidArgumentException);
+    EXPECT_THROW((void)boundaryFunctional(u.dI(3)), svmp::FE::InvalidArgumentException);
+    EXPECT_THROW((void)boundaryFunctional(u.ds(1) + u.ds(2)), svmp::FE::InvalidArgumentException);
+    EXPECT_THROW((void)boundaryFunctional((u * v).ds(1)), svmp::FE::InvalidArgumentException);
+}
+
+TEST(BoundaryIntegralInput, MeasuredFormRegistersTheStructSpellingWithEqualValues)
+{
+    // u = 1 on the face (0,0,0)-(1,0,0)-(0,1,0) of area 0.5.
+    const int marker = 5;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+    const auto u_disc = FormExpr::discreteField(u_field, *space, "u");
+
+    BoundaryFunctional spelled;
+    spelled.integrand = u_disc;
+    spelled.boundary_marker = marker;
+    spelled.reduction = BoundaryFunctional::Reduction::Sum;
+    const auto Q_spelled =
+        sys.boundaryIntegral(std::move(spelled), AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
+    const auto Q_measured =
+        sys.boundaryIntegral(u_disc.ds(marker), AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
+
+    EXPECT_EQ(Q_spelled.registryName(), "_boundary_integral_b5_0");
+    EXPECT_EQ(Q_measured.registryName(), "_boundary_integral_b5_1");
+    ASSERT_TRUE(Q_measured.hasDefinition());
+    EXPECT_EQ(Q_measured.kind(), Q_spelled.kind());
+    EXPECT_EQ(Q_measured.referencedFields(), Q_spelled.referencedFields());
+    EXPECT_EQ(Q_measured.supportsMonolithicLinearization(), Q_spelled.supportsMonolithicLinearization());
+
+    const auto u = FormExpr::stateField(u_field, *space, "u");
+    const auto v = FormExpr::testFunction(*space, "v");
+    (void)installFormulation(sys, "op", {u_field}, inner(grad(u), grad(v)).dx());
+    { SetupInputs si; si.topology_override = singleTetraTopology(); sys.setup({}, si); }
+
+    std::vector<Real> sol(static_cast<std::size_t>(sys.dofHandler().getNumDofs()), 1.0);
+    SystemStateView state; state.time = 0.0; state.dt = 0.1; state.u = sol;
+    sys.prepareAuxiliaryForAssembly(state, false);
+
+    const auto* registry = sys.auxiliaryInputRegistryIfPresent();
+    ASSERT_NE(registry, nullptr);
+    EXPECT_EQ(registry->get(Q_measured.registryName()), registry->get(Q_spelled.registryName()));
+    EXPECT_NEAR(registry->get(Q_measured.registryName()), 0.5, 1e-14);
 }
 
 // ===========================================================================

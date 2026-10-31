@@ -1352,6 +1352,20 @@ public:
         AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
 
     /**
+     * @brief Register the measured 0-form @p measured_form, one exterior-boundary
+     * integral, as an auxiliary input: the functional forms::boundaryFunctional
+     * gives, with an auto-generated name.
+     *
+     * ```cpp
+     * auto Q = system.boundaryIntegral(inner(u, n).ds(outlet),
+     *                                  AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
+     * ```
+     */
+    AuxiliaryInputHandle boundaryIntegral(
+        forms::FormExpr measured_form,
+        AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
+
+    /**
      * @brief Register a derived auxiliary input computed from an expression.
      *
      * Auto-discovers dependencies on other auxiliary inputs referenced in `expr`.
