@@ -22,6 +22,11 @@
  * The bordered lowering (LM2): the bordered blocks are the in-matrix row and
  * column bit for bit, Newton's bordered solve gives the in-matrix solution,
  * and gauge-type multipliers (G2, G3) and time derivatives are refused.
+ *
+ * dt() of a global field in a dGlobal term (in-matrix): the scalar ODE
+ * C X' + X / R = f(t) as a global unknown follows, step by step, the same ODE
+ * on a volume field with a uniform initial value, under backward Euler and
+ * generalized alpha.
  */
 
 #include <gtest/gtest.h>
@@ -50,6 +55,7 @@
 #include "Systems/TransientSystem.h"
 #include "TimeStepping/NewtonSolver.h"
 #include "TimeStepping/TimeHistory.h"
+#include "TimeStepping/TimeLoop.h"
 
 #include "Backends/Interfaces/BackendFactory.h"
 #include "Backends/Interfaces/BackendKind.h"
@@ -1475,6 +1481,181 @@ TEST(GlobalBordered, TimeDerivativesAreRefusedForNow)
     options.multiplier_lowering = MultiplierLowering::Bordered;
     const auto message = feMessage([&] { sys.setup(options); });
     EXPECT_NE(message.find("supports steady problems for now"), std::string::npos) << message;
+}
+
+namespace {
+
+/// C X' + X / R = f(t) twice: on the global field X (a dGlobal row) and on
+/// the volume field w (a uniform field, so every DOF follows the scalar ODE).
+struct ScalarOde {
+    std::unique_ptr<FESystem> system;
+    FieldId w{INVALID_FIELD_ID};
+    FieldId x{INVALID_FIELD_ID};
+};
+
+constexpr Real kCapacitance = 0.8;
+constexpr Real kResistance = 0.5;
+constexpr Real kInitialValue = 3.0;
+
+ScalarOde buildScalarOde(MultiplierLowering lowering = MultiplierLowering::Auto)
+{
+    ScalarOde out;
+    auto h1 = quadSpace(1);
+    auto r1 = std::make_shared<spaces::GlobalSpace>(1);
+    out.system = std::make_unique<FESystem>(buildGrid(2, 1, 1.0, 0.5, 1));
+    auto& sys = *out.system;
+    out.w = sys.addField(FieldSpec{.name = "w", .space = h1});
+    out.x = sys.addField(FieldSpec{.name = "X", .space = r1});
+    sys.addOperator("ode");
+    const auto w = forms::StateField(out.w, *h1, "w");
+    const auto v = forms::TestField(out.w, *h1, "v");
+    const auto x = forms::StateField(out.x, *r1, "X");
+    const auto z = forms::TestField(out.x, *r1, "z");
+    const auto C = FormExpr::constant(kCapacitance);
+    const auto R = FormExpr::constant(kResistance);
+    const auto f = FormExpr::constant(2.0) + FormExpr::time() * FormExpr::time().exp();
+    (void)installFormulation(sys, "ode", {out.w, out.x},
+                             ((C * w.dt(1) + w / R - f) * v).dx() + (z * (C * x.dt(1) + x / R - f)).dGlobal());
+    SetupOptions options;
+    options.multiplier_lowering = lowering;
+    sys.setup(options);
+    return out;
+}
+
+/// The values of X and of the first DOF of w after each accepted step.
+std::vector<std::array<Real, 2>> runScalarOde(timestepping::SchemeKind scheme)
+{
+    std::vector<std::array<Real, 2>> out;
+    auto problem = buildScalarOde();
+    auto& sys = *problem.system;
+    auto factory = backends::BackendFactory::create(backends::BackendKind::Eigen);
+    EXPECT_NE(factory, nullptr);
+    if (!factory) {
+        return out;
+    }
+    backends::SolverOptions direct;
+    direct.method = backends::SolverMethod::Direct;
+    direct.preconditioner = backends::PreconditionerType::None;
+    direct.rel_tol = 1e-14;
+    direct.abs_tol = 1e-14;
+    direct.max_iter = 1;
+    auto linear = factory->createLinearSolver(direct);
+    TransientSystem transient(sys, std::make_shared<BackwardDifferenceIntegrator>());
+    const auto n = sys.dofHandler().getNumDofs();
+    auto history = timestepping::TimeHistory::allocate(*factory, n, 2);
+    for (int k = 1; k <= history.historyDepth(); ++k) {
+        auto view = history.uPrevK(k).createAssemblyView();
+        view->beginAssemblyPhase();
+        for (GlobalIndex i = 0; i < n; ++i) {
+            view->addVectorEntry(i, kInitialValue, assembly::AddMode::Insert);
+        }
+        view->finalizeAssembly();
+    }
+    history.resetCurrentToPrevious();
+    const double dt = 0.05;
+    history.setPrevDt(dt);
+
+    timestepping::TimeLoopOptions options;
+    options.t0 = 0.0;
+    options.t_end = 0.5;
+    options.dt = dt;
+    options.max_steps = 100;
+    options.scheme = scheme;
+    options.generalized_alpha_rho_inf = 0.5;
+    options.newton.residual_op = "ode";
+    options.newton.jacobian_op = "ode";
+    options.newton.max_iterations = 4;
+    options.newton.abs_tolerance = 1e-12;
+    options.newton.rel_tolerance = 0.0;
+    timestepping::TimeLoop loop(options);
+    timestepping::TimeLoopCallbacks callbacks;
+    const auto x_dof = sys.fieldDofOffset(problem.x);
+    const auto w_dof = sys.fieldDofOffset(problem.w);
+    callbacks.on_nonlinear_done = [&](const timestepping::TimeHistory& h, const timestepping::NewtonReport& report) {
+        EXPECT_TRUE(report.converged);
+        const auto u = h.uSpan();
+        out.push_back({u[static_cast<std::size_t>(x_dof)], u[static_cast<std::size_t>(w_dof)]});
+    };
+    const auto report = loop.run(transient, *factory, *linear, history, callbacks);
+    EXPECT_TRUE(report.success);
+    return out;
+}
+
+} // namespace
+
+TEST(GlobalTimeDerivative, AScalarOdeFollowsTheSchemeOfAVolumeField)
+{
+    for (const auto scheme : {timestepping::SchemeKind::BackwardEuler, timestepping::SchemeKind::GeneralizedAlpha}) {
+        SCOPED_TRACE(scheme == timestepping::SchemeKind::BackwardEuler ? "backward Euler" : "generalized alpha");
+        const auto values = runScalarOde(scheme);
+        ASSERT_EQ(values.size(), 10u);
+        for (std::size_t step = 0; step < values.size(); ++step) {
+            EXPECT_NEAR(values[step][0], values[step][1], 1e-13) << "step " << step;
+        }
+        // The state moves: the solution is not the initial value.
+        EXPECT_GT(std::abs(values.back()[0] - kInitialValue), 0.1);
+    }
+}
+
+TEST(GlobalTimeDerivative, TheRowDeclaresItsTimeDerivatives)
+{
+    auto problem = buildScalarOde();
+    auto& sys = *problem.system;
+    EXPECT_EQ(sys.temporalOrder(), 1);
+    const auto fields = sys.timeDerivativeFields();
+    EXPECT_NE(std::find(fields.begin(), fields.end(), problem.x), fields.end());
+    EXPECT_TRUE(sys.fieldRecord(problem.x).time_dependent);
+
+    // Without a time-integration context the row is refused by name.
+    const auto n = sys.dofHandler().getNumDofs();
+    const std::vector<Real> zero(static_cast<std::size_t>(n), 0.0);
+    assembly::DenseSystemView out(n);
+    out.zero();
+    SystemStateView view;
+    view.u = zero;
+    AssemblyRequest request;
+    request.op = "ode";
+    request.want_vector = true;
+    request.suppress_constraint_inhomogeneity = true;
+    const auto message = feMessage([&] { (void)sys.assemble(request, view, nullptr, &out); });
+    EXPECT_NE(message.find("holds dt() of a global field and needs a transient time-integration context"),
+              std::string::npos)
+        << message;
+}
+
+TEST(GlobalTimeDerivative, OnlyGlobalFieldsTakeTimeDerivativesInDGlobalAndTheBorderedLoweringRefusesThem)
+{
+    auto h1 = quadSpace(1);
+    auto r1 = std::make_shared<spaces::GlobalSpace>(1);
+    FESystem sys(buildGrid(2, 1, 1.0, 0.5, 1));
+    const auto u_id = sys.addField(FieldSpec{.name = "u", .space = h1});
+    const auto x_id = sys.addField(FieldSpec{.name = "X", .space = r1});
+    const auto u = forms::StateField(u_id, *h1, "u");
+    const auto r = forms::TestField(u_id, *h1, "r");
+    const auto x = forms::StateField(x_id, *r1, "X");
+    const auto z = forms::TestField(x_id, *r1, "z");
+    const auto message = feMessage([&] {
+        (void)installFormulation(sys, "op", {u_id, x_id},
+                                 (u * r).dx() + (z * (x.dt(1) + u.dt(1))).dGlobal());
+    });
+    EXPECT_NE(message.find("a time derivative of something other than a global field"), std::string::npos)
+        << message;
+
+    // The volume row has no dt(): only the global row makes the system
+    // transient, and the bordered lowering refuses it.
+    FESystem ode(buildGrid(2, 1, 1.0, 0.5, 1));
+    const auto w_id = ode.addField(FieldSpec{.name = "w", .space = h1});
+    const auto y_id = ode.addField(FieldSpec{.name = "Y", .space = r1});
+    const auto w = forms::StateField(w_id, *h1, "w");
+    const auto v = forms::TestField(w_id, *h1, "v");
+    const auto y = forms::StateField(y_id, *r1, "Y");
+    const auto q = forms::TestField(y_id, *r1, "q");
+    (void)installFormulation(ode, "ode", {w_id, y_id},
+                             ((w - y) * v).dx() + (q * (y.dt(1) + y - FormExpr::constant(1.0))).dGlobal());
+    SetupOptions options;
+    options.multiplier_lowering = MultiplierLowering::Bordered;
+    const auto bordered = feMessage([&] { ode.setup(options); });
+    EXPECT_NE(bordered.find("supports steady problems for now"), std::string::npos) << bordered;
 }
 
 } // namespace svmp::FE::systems::test_global_multiplier

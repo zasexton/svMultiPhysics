@@ -33,6 +33,14 @@
  * The point terms' derivatives with respect to global fields (a stabilized
  * multiplier's D block) are added to the matrix by the owner as well.
  *
+ * A point term may hold dt(X, k) of a global field X (in-matrix lowering): it
+ * is evaluated with the stencil of the time integrator, sum_j a_j X^{n-j},
+ * from the state and its history, its derivative adds a_0 to X's column, and
+ * each term of the row's point sum takes the term weight of the integrator
+ * for its highest derivative order, as the terms of an element kernel do.
+ * Without dt the point sum is evaluated as one expression, unweighted.  The
+ * bordered lowering refuses time derivatives at setup.
+ *
  * Evaluation is interpreted (never the JIT).  The kernel is collective: every
  * rank assembles it with the same request.
  */
@@ -92,6 +100,14 @@ public:
     /// The global fields the dGlobal terms depend on (a D block when non-empty)
     [[nodiscard]] std::vector<FieldId> pointTermFields() const;
 
+    [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override
+    {
+        return max_time_derivative_order_;
+    }
+
+    /// The global fields under dt() in the dGlobal terms.
+    [[nodiscard]] std::vector<FieldId> timeDerivativeFields() const override;
+
     /// The measured 0-form of the residual entry (the measured terms with mu = 1)
     [[nodiscard]] const forms::FormExpr& measuredValueForm() const noexcept { return measured_value_form_; }
 
@@ -102,20 +118,41 @@ public:
      * @brief Refuse a dGlobal integrand with anything but global symbols
      *
      * Allowed: constants, parameters, time and the time step, the state of
-     * global fields, the row's test function, and scalar algebra (+, -, *, /,
-     * negation, power, min, max, abs, sign, sqrt, exp, log).  Throws
-     * InvalidArgumentException naming the first other node.
+     * global fields and their time derivatives dt(X, k), the row's test
+     * function, and scalar algebra (+, -, *, /, negation, power, min, max,
+     * abs, sign, sqrt, exp, log).  Throws InvalidArgumentException naming the
+     * first other node.
      */
     static void validatePointIntegrand(const forms::FormExpr& integrand,
                                        const std::string& test_field_name);
 
 private:
+    /// dt(field, order) of the point terms, written as the global symbol @p symbol.
+    struct TimeDerivativeSymbol {
+        FieldId field{INVALID_FIELD_ID};
+        int order{1};
+        FieldId symbol{INVALID_FIELD_ID};
+    };
+    /// One term of the point sum of a row with time derivatives.
+    struct PointTerm {
+        forms::FormExpr value{};
+        int order{0}; ///< highest time-derivative order in the term
+        /// d(value)/d(field or symbol), for each global field and symbol of the term
+        std::vector<std::pair<FieldId, forms::FormExpr>> derivatives{};
+    };
+
     FieldId test_field_{INVALID_FIELD_ID};
     std::string test_field_name_;
     forms::FormExpr measured_value_form_{};
     forms::FormExpr point_value_{};
     /// d(point value)/d(global field), for each global field of the point terms
     std::vector<std::pair<FieldId, forms::FormExpr>> point_derivatives_{};
+    /// With time derivatives: the symbols and the point sum term by term
+    /// (point_value_ and point_derivatives_ stay unused).
+    std::vector<TimeDerivativeSymbol> time_symbols_{};
+    std::vector<PointTerm> point_terms_{};
+    std::vector<FieldId> point_fields_{};
+    int max_time_derivative_order_{0};
 };
 
 } // namespace systems

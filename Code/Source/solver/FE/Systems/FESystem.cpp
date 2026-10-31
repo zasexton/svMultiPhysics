@@ -88,6 +88,7 @@
 #include <numeric>
 #include <optional>
 #include <set>
+#include <span>
 #include <sstream>
 #include <string_view>
 #include <tuple>
@@ -14581,6 +14582,9 @@ void FESystem::addGlobalKernel(OperatorTag op, std::shared_ptr<GlobalKernel> ker
         operator_registry_.addOperator(op);
     }
     FE_CHECK_NOT_NULL(kernel.get(), "FESystem::addGlobalKernel: kernel");
+    for (const auto field : kernel->timeDerivativeFields()) {
+        field_registry_.markTimeDependent(field, kernel->maxTemporalDerivativeOrder());
+    }
     operator_registry_.get(op).global.push_back(std::move(kernel));
 }
 
@@ -15400,6 +15404,9 @@ int FESystem::temporalOrder() const noexcept
         for (const auto& term : def.interface_faces) {
             if (term.kernel) max_order = std::max(max_order, term.kernel->maxTemporalDerivativeOrder());
         }
+        for (const auto& kernel : def.global) {
+            if (kernel) max_order = std::max(max_order, kernel->maxTemporalDerivativeOrder());
+        }
     }
     return max_order;
 }
@@ -15628,6 +15635,32 @@ std::vector<FieldId> memoizedTimeDerivativeFields(
     return memo.fields;
 }
 
+// The fields of the global kernels' time derivatives (GlobalKernel), merged
+// into @p fields; @p fields is returned unchanged when they add none.
+std::vector<FieldId> withGlobalKernelTimeDerivativeFields(
+    std::vector<FieldId> fields,
+    std::span<const OperatorDefinition* const> definitions)
+{
+    std::unordered_set<FieldId> added;
+    for (const auto* def : definitions) {
+        for (const auto& kernel : def->global) {
+            if (!kernel) {
+                continue;
+            }
+            for (const auto fid : kernel->timeDerivativeFields()) {
+                if (std::find(fields.begin(), fields.end(), fid) == fields.end()) {
+                    added.insert(fid);
+                }
+            }
+        }
+    }
+    if (added.empty()) {
+        return fields;
+    }
+    added.insert(fields.begin(), fields.end());
+    return sortedUnique(std::move(added));
+}
+
 } // namespace
 
 std::vector<FieldId> FESystem::timeDerivativeFields(const OperatorTag& op) const
@@ -15635,20 +15668,26 @@ std::vector<FieldId> FESystem::timeDerivativeFields(const OperatorTag& op) const
     const auto& def = operator_registry_.get(op);
     std::vector<TimeDerivativeSearchInput> inputs;
     collectTimeDerivativeInputsFromOperator(def, inputs);
-    return memoizedTimeDerivativeFields(
-        time_derivative_fields_by_operator_memo_[op], inputs);
+    const OperatorDefinition* const definitions[] = {&def};
+    return withGlobalKernelTimeDerivativeFields(
+        memoizedTimeDerivativeFields(time_derivative_fields_by_operator_memo_[op], inputs),
+        definitions);
 }
 
 std::vector<FieldId> FESystem::timeDerivativeFields() const
 {
     std::vector<TimeDerivativeSearchInput> inputs;
+    std::vector<const OperatorDefinition*> definitions;
     for (const auto& op : operator_registry_.list()) {
-        collectTimeDerivativeInputsFromOperator(operator_registry_.get(op), inputs);
+        definitions.push_back(&operator_registry_.get(op));
+        collectTimeDerivativeInputsFromOperator(*definitions.back(), inputs);
     }
     if (!time_derivative_fields_memo_.has_value()) {
         time_derivative_fields_memo_.emplace();
     }
-    return memoizedTimeDerivativeFields(*time_derivative_fields_memo_, inputs);
+    return withGlobalKernelTimeDerivativeFields(
+        memoizedTimeDerivativeFields(*time_derivative_fields_memo_, inputs),
+        definitions);
 }
 
 const dofs::DofHandler& FESystem::fieldDofHandler(FieldId field) const

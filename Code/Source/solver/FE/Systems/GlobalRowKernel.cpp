@@ -11,6 +11,7 @@
 
 #include "Assembly/Assembler.h"
 #include "Assembly/GlobalSystemView.h"
+#include "Assembly/TimeIntegrationContext.h"
 #include "Backends/Interfaces/GenericVector.h"
 #include "Constraints/AffineConstraints.h"
 #include "Core/FEException.h"
@@ -26,8 +27,10 @@
 #include "Systems/SystemsExceptions.h"
 
 #include <algorithm>
+#include <iterator>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -129,10 +132,71 @@ void collectGlobalStateFields(const FormExprNode& node, std::vector<FieldId>& ou
     return best;
 }
 
-/// The point expression (global symbols only) evaluated at @p state.
+/// The value of the monolithic DOF @p dof in the history state @p k of @p state.
+[[nodiscard]] Real historyValue(const FESystem& system, const SystemStateView& state, GlobalIndex dof, int k)
+{
+    const backends::GenericVector* vector =
+        k == 1 ? state.u_prev_vector : (k == 2 ? state.u_prev2_vector : nullptr);
+    std::span<const Real> values = !state.u_history.empty()
+                                       ? (static_cast<std::size_t>(k) <= state.u_history.size()
+                                              ? state.u_history[static_cast<std::size_t>(k - 1)]
+                                              : std::span<const Real>{})
+                                       : (k == 1 ? state.u_prev : (k == 2 ? state.u_prev2 : std::span<const Real>{}));
+    if (auto view = makeStateReadView(system, vector, values, /*ghosted=*/true)) {
+        return view->getVectorEntry(dof);
+    }
+    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= values.size(), InvalidArgumentException,
+                "GlobalRowKernel: the state has no history value " + std::to_string(k) + " for DOF " +
+                    std::to_string(dof));
+    return values[static_cast<std::size_t>(dof)];
+}
+
+[[nodiscard]] bool containsTimeDerivative(const FormExprNode& node)
+{
+    if (node.type() == FormExprType::TimeDerivative) {
+        return true;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child && containsTimeDerivative(*child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The terms of the sum @p expr, each with its sign.
+void collectSignedTerms(const FormExpr& expr, bool negated, std::vector<FormExpr>& out)
+{
+    const auto* node = expr.node();
+    const auto kids = node->childrenShared();
+    switch (node->type()) {
+    case FormExprType::Add:
+    case FormExprType::Subtract:
+        if (kids.size() == 2u && kids[0] && kids[1]) {
+            collectSignedTerms(FormExpr(kids[0]), negated, out);
+            collectSignedTerms(FormExpr(kids[1]), node->type() == FormExprType::Subtract ? !negated : negated,
+                               out);
+            return;
+        }
+        break;
+    case FormExprType::Negate:
+        if (kids.size() == 1u && kids[0]) {
+            collectSignedTerms(FormExpr(kids[0]), !negated, out);
+            return;
+        }
+        break;
+    default:
+        break;
+    }
+    out.push_back(negated ? -expr : expr);
+}
+
+/// The point expression (global symbols only) evaluated at @p state; the
+/// values of @p symbols stand for global fields that are not in the state.
 [[nodiscard]] Real evaluatePoint(const FormExpr& expr,
                                  const FESystem& system,
-                                 const SystemStateView& state)
+                                 const SystemStateView& state,
+                                 std::span<const FieldValueEntry> symbols = {})
 {
     const auto& parameters = system.parameterRegistry();
     std::function<std::optional<Real>(std::string_view)> real_parameter;
@@ -160,6 +224,12 @@ void collectGlobalStateFields(const FormExprNode& node, std::vector<FieldId>& ou
     std::vector<FieldValueEntry> field_values;
     field_values.reserve(fields.size());
     for (const auto field : fields) {
+        const auto symbol = std::find_if(symbols.begin(), symbols.end(),
+                                         [field](const FieldValueEntry& e) { return e.field == field; });
+        if (symbol != symbols.end()) {
+            field_values.push_back(*symbol);
+            continue;
+        }
         FieldValueEntry entry;
         entry.field = field;
         entry.n_components = 1;
@@ -197,12 +267,60 @@ GlobalRowKernel::GlobalRowKernel(FieldId test_field,
     if (point_integrand.isValid()) {
         validatePointIntegrand(point_integrand, test_field_name_);
         point_value_ = withUnitTestFunction(point_integrand);
-        std::vector<FieldId> fields;
-        collectGlobalStateFields(*point_value_.node(), fields);
-        for (const auto field : fields) {
-            point_derivatives_.emplace_back(
-                field,
-                forms::directionalDerivativeWrtField(point_value_, field, FormExpr::constant(Real(1.0))));
+        if (!containsTimeDerivative(*point_value_.node())) {
+            std::vector<FieldId> fields;
+            collectGlobalStateFields(*point_value_.node(), fields);
+            for (const auto field : fields) {
+                point_derivatives_.emplace_back(
+                    field,
+                    forms::directionalDerivativeWrtField(point_value_, field, FormExpr::constant(Real(1.0))));
+            }
+            return;
+        }
+        // dt(X, k) becomes a global symbol of its own (ids from the top of
+        // the FieldId range, which no system reaches), so that the point
+        // terms differentiate with respect to it.
+        const auto symbolic = point_value_.transformNodes([&](const FormExprNode& node) -> std::optional<FormExpr> {
+            if (node.type() != FormExprType::TimeDerivative) {
+                return std::nullopt;
+            }
+            const auto& field_node = *node.childrenShared().front();
+            const auto field = *field_node.fieldId();
+            const int order = node.timeDerivativeOrder().value_or(1);
+            auto found = std::find_if(time_symbols_.begin(), time_symbols_.end(), [&](const auto& symbol) {
+                return symbol.field == field && symbol.order == order;
+            });
+            if (found == time_symbols_.end()) {
+                time_symbols_.push_back(TimeDerivativeSymbol{
+                    .field = field,
+                    .order = order,
+                    .symbol = static_cast<FieldId>(INVALID_FIELD_ID - 1u - time_symbols_.size())});
+                found = std::prev(time_symbols_.end());
+            }
+            max_time_derivative_order_ = std::max(max_time_derivative_order_, order);
+            return FormExpr::stateField(found->symbol, *field_node.spaceSignature(), node.toString());
+        });
+        std::vector<FormExpr> terms;
+        collectSignedTerms(symbolic, /*negated=*/false, terms);
+        for (auto& value : terms) {
+            PointTerm term;
+            std::vector<FieldId> fields;
+            collectGlobalStateFields(*value.node(), fields);
+            for (const auto field : fields) {
+                const auto symbol = std::find_if(time_symbols_.begin(), time_symbols_.end(),
+                                                 [field](const auto& s) { return s.symbol == field; });
+                const auto column = symbol != time_symbols_.end() ? symbol->field : field;
+                if (symbol != time_symbols_.end()) {
+                    term.order = std::max(term.order, symbol->order);
+                }
+                if (std::find(point_fields_.begin(), point_fields_.end(), column) == point_fields_.end()) {
+                    point_fields_.push_back(column);
+                }
+                term.derivatives.emplace_back(
+                    field, forms::directionalDerivativeWrtField(value, field, FormExpr::constant(Real(1.0))));
+            }
+            term.value = std::move(value);
+            point_terms_.push_back(std::move(term));
         }
     }
 }
@@ -256,11 +374,25 @@ bool GlobalRowKernel::anchorsConstantModeOf(FieldId field) const
 
 std::vector<FieldId> GlobalRowKernel::pointTermFields() const
 {
+    if (!time_symbols_.empty()) {
+        return point_fields_;
+    }
     std::vector<FieldId> fields;
     fields.reserve(point_derivatives_.size());
     for (const auto& [field, derivative] : point_derivatives_) {
         static_cast<void>(derivative);
         fields.push_back(field);
+    }
+    return fields;
+}
+
+std::vector<FieldId> GlobalRowKernel::timeDerivativeFields() const
+{
+    std::vector<FieldId> fields;
+    for (const auto& symbol : time_symbols_) {
+        if (std::find(fields.begin(), fields.end(), symbol.field) == fields.end()) {
+            fields.push_back(symbol.field);
+        }
     }
     return fields;
 }
@@ -309,6 +441,15 @@ void GlobalRowKernel::validatePointIntegrand(const forms::FormExpr& integrand,
                 fail(node, "a field that is not global");
             }
             break;
+        case FormExprType::TimeDerivative: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1u || !kids[0] ||
+                (kids[0]->type() != FormExprType::StateField && kids[0]->type() != FormExprType::DiscreteField) ||
+                !kids[0]->fieldId().has_value() || !isGlobalSymbol(*kids[0])) {
+                fail(node, "a time derivative of something other than a global field");
+            }
+            break;
+        }
         case FormExprType::TrialFunction:
             fail(node, "a trial function (state the unknowns of a residual as StateField)");
             break;
@@ -332,8 +473,7 @@ void GlobalRowKernel::addSparsityCouplings(const FESystem& system,
         return;
     }
     const auto row = system.fieldDofOffset(test_field_);
-    for (const auto& [field, derivative] : point_derivatives_) {
-        static_cast<void>(derivative);
+    for (const auto field : pointTermFields()) {
         pattern.addEntry(row, system.fieldDofOffset(field));
     }
 }
@@ -350,6 +490,38 @@ assembly::AssemblyResult GlobalRowKernel::assemble(const FESystem& system,
     // The lowest rank owns a global field's DOFs (its own handler says so
     // under either lowering).
     const bool owner = system.fieldDofHandler(test_field_).getDofMap().isOwnedDof(0);
+
+    // With time derivatives: the values of the dt symbols from the
+    // integrator's stencil, their leading coefficients, and the term weights.
+    std::vector<FieldValueEntry> symbol_values;
+    std::vector<Real> leading_coefficients;
+    const auto* time_ctx = state.time_integration;
+    if (owner && !time_symbols_.empty()) {
+        FE_THROW_IF(time_ctx == nullptr, InvalidArgumentException,
+                    "GlobalRowKernel: the row of '" + test_field_name_ +
+                        "' holds dt() of a global field and needs a transient time-integration context");
+        for (const auto& symbol : time_symbols_) {
+            const auto* stencil = time_ctx->stencil(symbol.order);
+            FE_THROW_IF(stencil == nullptr, NotImplementedException,
+                        "GlobalRowKernel: dt(., " + std::to_string(symbol.order) +
+                            ") is not supported by time integrator '" + time_ctx->integrator_name + "'");
+            const auto dof = system.fieldDofOffset(symbol.field);
+            Real value = stencil->coeff(0) * stateValue(system, state, dof);
+            for (int k = 1; k <= stencil->requiredHistoryStates(); ++k) {
+                value += stencil->coeff(k) * historyValue(system, state, dof, k);
+            }
+            FieldValueEntry entry;
+            entry.field = symbol.symbol;
+            entry.n_components = 1;
+            entry.components[0] = value;
+            symbol_values.push_back(entry);
+            leading_coefficients.push_back(stencil->coeff(0));
+        }
+    }
+    const auto term_weight = [time_ctx](int order) {
+        return order > 0 ? time_ctx->time_derivative_term_weight * time_ctx->derivativeTermWeight(order)
+                         : time_ctx->non_time_derivative_term_weight;
+    };
 
     if (vector_out != nullptr) {
         if (!request.suppress_constraint_inhomogeneity) {
@@ -374,7 +546,11 @@ assembly::AssemblyResult GlobalRowKernel::assemble(const FESystem& system,
             value = values.front().value;
         }
         if (owner) {
-            if (point_value_.isValid()) {
+            if (!time_symbols_.empty()) {
+                for (const auto& term : point_terms_) {
+                    value += term_weight(term.order) * evaluatePoint(term.value, system, state, symbol_values);
+                }
+            } else if (point_value_.isValid()) {
                 value += evaluatePoint(point_value_, system, state);
             }
             vector_out->addVectorEntry(row, value, assembly::AddMode::Add);
@@ -389,6 +565,25 @@ assembly::AssemblyResult GlobalRowKernel::assemble(const FESystem& system,
                                        evaluatePoint(derivative, system, state),
                                        assembly::AddMode::Add);
             ++result.matrix_entries_inserted;
+        }
+        // d/dX of a term through dt(X, k) is a_0 times its derivative with
+        // respect to the symbol.
+        for (const auto& term : point_terms_) {
+            for (const auto& [field, derivative] : term.derivatives) {
+                const auto symbol = std::find_if(time_symbols_.begin(), time_symbols_.end(),
+                                                 [field](const auto& s) { return s.symbol == field; });
+                const bool through_dt = symbol != time_symbols_.end();
+                const auto column = through_dt ? symbol->field : field;
+                const Real factor =
+                    through_dt ? leading_coefficients[static_cast<std::size_t>(symbol - time_symbols_.begin())]
+                               : Real(1.0);
+                matrix_out->addMatrixEntry(
+                    row,
+                    system.fieldDofOffset(column),
+                    factor * term_weight(term.order) * evaluatePoint(derivative, system, state, symbol_values),
+                    assembly::AddMode::Add);
+                ++result.matrix_entries_inserted;
+            }
         }
     }
     return result;

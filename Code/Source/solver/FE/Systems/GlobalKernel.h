@@ -111,6 +111,18 @@ public:
      */
     [[nodiscard]] virtual std::vector<analysis::ContributionDescriptor> analysisContributions() const { return {}; }
 
+    /**
+     * @brief The highest order of a time derivative the kernel evaluates
+     *
+     * 0 (the default) for none.  A positive order makes the system transient
+     * (FESystem::temporalOrder) and the fields of timeDerivativeFields() time
+     * dependent, as dt() in an element kernel does.
+     */
+    [[nodiscard]] virtual int maxTemporalDerivativeOrder() const noexcept { return 0; }
+
+    /// The fields whose time derivatives the kernel evaluates.
+    [[nodiscard]] virtual std::vector<FieldId> timeDerivativeFields() const { return {}; }
+
     [[nodiscard]] virtual assembly::AssemblyResult assemble(const FESystem& system,
                                                             const AssemblyRequest& request,
                                                             const SystemStateView& state,

@@ -328,7 +328,7 @@ Untyped measures (`FormExpr.h`):
 | `.dCutVolume(interface_marker, side)` | Generated cut-volume integral over the selected interface side |
 | `.dExteriorBoundary(measure)` | Explicit `ExteriorBoundaryMeasure`: `fullPhysical(m)` or `generatedActiveSubset(m, g)` |
 | `dInterfaceBoundary(expr, marker)` | Generated interface-boundary intersection; shares `.dI(marker)` dispatch, but the generated rule carries geometric dimension d-2 (a point in 2D, a line in 3D) and the codimension-two Jacobian |
-| `.dGlobal()` | Unit point mass: a term of a global test function's row with no spatial integral, such as `-(mu * c).dGlobal()`, added once. Its integrand holds only global symbols, constants, parameters, time and the time step, and scalar algebra; anything else is refused at install |
+| `.dGlobal()` | Unit point mass: a term of a global test function's row with no spatial integral, such as `-(mu * c).dGlobal()`, added once. Its integrand holds only global symbols and their time derivatives `dt(X, k)`, constants, parameters, time and the time step, and scalar algebra; anything else is refused at install. A `dt(X, k)` of a global field (in-matrix lowering) takes the integrator's stencil from the state and its history, adds its leading coefficient to X's column, and marks X time dependent; each term of the point sum then takes the integrator's term weight for its derivative order. The bordered lowering refuses it at setup |
 
 Typed domains (`IntegrationDomain.h`) are sugar over the untyped measures: each
 lowers to the tree of the untyped call (tested in
