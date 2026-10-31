@@ -22,6 +22,14 @@ Relevant current code anchors:
 its geometry-regularization backend) had no production caller and was deleted
 on 2026-10-30 (decision 3A); production supports monolithic coupled ALE only.
 
+The prescribed mesh-velocity branch went the same way (decision D61 item 3):
+`ALEBinding` binds only a coupled mesh displacement and its derived velocity,
+`FE::systems::ALEMeshVelocitySource`, `FESystem::addMeshMotionDataField`,
+`bindStandardMeshMotionFieldsByName` and
+`syncBoundMeshMotionFieldsToPrescribedBuffers` are deleted, and Navier-Stokes
+refuses ALE without `Mesh_velocity_source = coupled_displacement`. The
+prescribed-ALE items below are history.
+
 ## Implementation Status
 
 Status after the core implementation pass:

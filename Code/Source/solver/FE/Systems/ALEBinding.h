@@ -26,35 +26,26 @@ namespace systems {
 class FESystem;
 struct FormInstallOptions;
 
-enum class ALEMeshVelocitySource {
-    PrescribedData,
-    CoupledDisplacement
-};
-
+/// A moving domain whose mesh velocity is the time derivative of a coupled
+/// mesh displacement unknown, w = dd/dt (the only mesh motion).
 struct ALEBindingOptions {
     bool enabled{false};
     int dimension{0};
-    ALEMeshVelocitySource mesh_velocity_source{ALEMeshVelocitySource::PrescribedData};
     forms::GeometryTangentPath geometry_tangent_path{forms::GeometryTangentPath::SymbolicRequired};
     std::string mesh_velocity_field_name{"mesh_velocity"};
     std::string mesh_displacement_field_name{"mesh_displacement"};
     std::shared_ptr<const spaces::FunctionSpace> mesh_velocity_space{};
     std::shared_ptr<const spaces::FunctionSpace> mesh_displacement_space{};
-    bool auto_register_mesh_velocity_field{true};
     bool auto_register_mesh_displacement_field{false};
 };
 
 struct ALEBinding {
     bool enabled{false};
-    ALEMeshVelocitySource mesh_velocity_source{ALEMeshVelocitySource::PrescribedData};
     forms::GeometryTangentPath geometry_tangent_path{forms::GeometryTangentPath::SymbolicRequired};
     FieldId mesh_velocity_field{INVALID_FIELD_ID};
     FieldId mesh_displacement_field{INVALID_FIELD_ID};
 
-    [[nodiscard]] bool coupled() const noexcept
-    {
-        return enabled && mesh_velocity_source == ALEMeshVelocitySource::CoupledDisplacement;
-    }
+    [[nodiscard]] bool coupled() const noexcept { return enabled; }
 
     void configureInstallOptions(FormInstallOptions& install) const;
 };

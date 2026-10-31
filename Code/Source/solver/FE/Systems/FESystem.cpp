@@ -8025,18 +8025,6 @@ FieldId FESystem::addField(FieldSpec spec)
     return field;
 }
 
-FieldId FESystem::addMeshMotionDataField(std::string name,
-                                         std::shared_ptr<const spaces::FunctionSpace> space,
-                                         int components)
-{
-    FieldSpec spec;
-    spec.name = std::move(name);
-    spec.space = std::move(space);
-    spec.components = components;
-    spec.source_kind = FieldSourceKind::PrescribedData;
-    return addField(std::move(spec));
-}
-
 FieldId FESystem::addDerivedMeshVelocityField(std::string name,
                                               std::shared_ptr<const spaces::FunctionSpace> space,
                                               FieldId mesh_displacement_field,
@@ -10516,22 +10504,6 @@ FieldId FESystem::addMeshDisplacementUnknown(std::string name,
     return field;
 }
 
-std::size_t FESystem::bindStandardMeshMotionFieldsByName()
-{
-    std::size_t bound = 0;
-    for (const auto role : kFEMeshMotionRoles) {
-        const auto mesh_role = toMeshMotionRole(role);
-        const FieldId field = field_registry_.findByName(
-            svmp::motion::standard_motion_field_name(mesh_role));
-        if (field == INVALID_FIELD_ID) {
-            continue;
-        }
-        bindMeshMotionField(role, field);
-        ++bound;
-    }
-    return bound;
-}
-
 void FESystem::beginMeshCoordinateTransaction()
 {
     const auto& mesh = singleMesh("FESystem::beginMeshCoordinateTransaction");
@@ -11972,97 +11944,6 @@ FESystem::MeshVertexFieldProjectionResult projectMeshVertexValuesByLocalInterpol
 #endif
 
 } // namespace
-
-std::size_t FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers()
-{
-    requireSetup();
-    const auto& mesh = singleMesh("FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers");
-
-    std::size_t values_written = 0;
-    auto& local_mesh = mesh.local_mesh();
-
-    for (const auto role : kFEMeshMotionRoles) {
-        const FieldId field = meshMotionRoleValue(mesh_motion_fields_, role);
-        if (field == INVALID_FIELD_ID) {
-            continue;
-        }
-
-        const auto& rec = field_registry_.get(field);
-        if (rec.source_kind != FieldSourceKind::PrescribedData) {
-            continue;
-        }
-
-        const auto field_idx = static_cast<std::size_t>(field);
-        FE_THROW_IF(field_idx >= field_dof_handlers_.size(),
-                    InvalidStateException,
-                    "FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers: invalid field layout for '" +
-                        rec.name + "'");
-        if (field_idx < prescribed_field_buffers_.size() &&
-            !prescribed_field_buffers_[field_idx].low_parts.empty()) {
-            continue;
-        }
-
-        const auto mesh_role = toMeshMotionRole(role);
-        const auto mesh_name = svmp::motion::standard_motion_field_name(mesh_role);
-        const auto mesh_field =
-            svmp::MeshFields::get_field_handle(local_mesh, svmp::EntityKind::Vertex, mesh_name);
-        FE_THROW_IF(mesh_field.id == 0, InvalidArgumentException,
-                    "FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers: mesh is missing field '" +
-                        std::string(mesh_name) + "'");
-        svmp::motion::validate_motion_field(local_mesh,
-                                            mesh_field,
-                                            mesh_role,
-                                            mesh.dim());
-
-        const auto* values = svmp::MeshFields::field_data_as<svmp::real_t>(local_mesh, mesh_field);
-        FE_CHECK_NOT_NULL(values,
-                          "FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers: mesh field data");
-
-        const auto* entity_map = field_dof_handlers_[field_idx].getEntityDofMap();
-        FE_THROW_IF(entity_map == nullptr, InvalidStateException,
-                    "FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers: FE field '" + rec.name +
-                        "' must have vertex DOFs to sync from mesh fields");
-
-        const auto components = static_cast<std::size_t>(std::max(1, rec.components));
-        const auto mesh_components = svmp::MeshFields::field_components(local_mesh, mesh_field);
-        FE_THROW_IF(mesh_components < components, InvalidArgumentException,
-                    "FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers: mesh field '" +
-                        std::string(mesh_name) + "' has fewer components than FE field '" +
-                        rec.name + "'");
-
-        const auto n_dofs = static_cast<std::size_t>(field_dof_handlers_[field_idx].getNumDofs());
-        if (field_idx >= prescribed_field_buffers_.size()) {
-            prescribed_field_buffers_.resize(field_idx + 1u);
-        }
-        auto& buffer = prescribed_field_buffers_[field_idx];
-        buffer.coefficients.assign(n_dofs, Real(0));
-
-        const auto n_vertices = static_cast<GlobalIndex>(mesh.n_vertices());
-        FE_THROW_IF(entity_map->numVertices() < n_vertices, InvalidStateException,
-                    "FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers: FE field '" + rec.name +
-                        "' does not cover every mesh vertex");
-
-        for (GlobalIndex v = 0; v < n_vertices; ++v) {
-            const auto vertex_dofs = entity_map->getVertexDofs(v);
-            FE_THROW_IF(vertex_dofs.size() != components, InvalidStateException,
-                        "FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers: FE field '" + rec.name +
-                            "' vertex DOF component count mismatch");
-            const auto v_base = static_cast<std::size_t>(v) * mesh_components;
-            for (std::size_t c = 0; c < components; ++c) {
-                const auto dof = vertex_dofs[c];
-                FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= buffer.coefficients.size(),
-                            InvalidStateException,
-                            "FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers: field DOF index out of range");
-                buffer.coefficients[static_cast<std::size_t>(dof)] =
-                    static_cast<Real>(values[v_base + c]);
-                ++values_written;
-            }
-        }
-        ++buffer.revision;
-    }
-
-    return values_written;
-}
 
 std::size_t FESystem::syncPrescribedVertexFieldsFromMeshFields()
 {

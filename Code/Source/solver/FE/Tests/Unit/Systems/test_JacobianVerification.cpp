@@ -640,7 +640,6 @@ ShapeDerivativeDefect movingDomainJacobianDefect(const MovingDomainProbe& probe,
     systems::ALEBindingOptions ale_options;
     ale_options.enabled = true;
     ale_options.dimension = 2;
-    ale_options.mesh_velocity_source = systems::ALEMeshVelocitySource::CoupledDisplacement;
     ale_options.geometry_tangent_path = path;
     ale_options.mesh_velocity_space = vector;
     ale_options.mesh_displacement_space = vector;

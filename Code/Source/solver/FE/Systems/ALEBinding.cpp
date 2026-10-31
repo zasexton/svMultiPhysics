@@ -125,69 +125,46 @@ void validateALEBinding(const FESystem& system,
         MeshMotionFieldRole::Velocity,
         options.mesh_velocity_field_name);
 
-    if (options.mesh_velocity_source ==
-        ALEMeshVelocitySource::CoupledDisplacement) {
-        if (options.mesh_displacement_field_name.empty()) {
-            throw std::invalid_argument(
-                "resolveALEBinding: coupled ALE requires a non-empty mesh displacement field name");
-        }
-
-        const FieldId mesh_displacement_id = resolveCoupledDisplacementField(
-            system, options.mesh_displacement_field_name);
-        if (mesh_displacement_id == INVALID_FIELD_ID) {
-            if (!options.auto_register_mesh_displacement_field) {
-                throw std::invalid_argument(
-                    "resolveALEBinding: coupled ALE requires a mesh displacement unknown bound as mesh-motion displacement or named '" +
-                    options.mesh_displacement_field_name + "'");
-            }
-            const auto displacement_space = options.mesh_displacement_space
-                ? options.mesh_displacement_space
-                : options.mesh_velocity_space;
-            validateVectorSpace(displacement_space,
-                                options.dimension,
-                                "mesh_displacement_space");
-            if (mesh_velocity_id != INVALID_FIELD_ID) {
-                throw std::invalid_argument(
-                    "resolveALEBinding: an existing coupled mesh velocity cannot reference a mesh displacement field that has not been registered yet");
-            }
-            return;
-        }
-
-        const auto& displacement_record =
-            system.fieldRecord(mesh_displacement_id);
-        if (displacement_record.source_kind != FieldSourceKind::Unknown) {
-            throw std::invalid_argument(
-                "resolveALEBinding: coupled ALE mesh displacement field '" +
-                displacement_record.name + "' must be an Unknown");
-        }
-        validateVectorSpace(displacement_record.space,
-                            options.dimension,
-                            "mesh displacement field space");
-        if (mesh_velocity_id != INVALID_FIELD_ID) {
-            requireDerivedVelocityFromDisplacement(
-                system, mesh_velocity_id, mesh_displacement_id);
-        }
-        return;
-    }
-
-    if (mesh_velocity_id == INVALID_FIELD_ID) {
-        if (!options.auto_register_mesh_velocity_field) {
-            throw std::invalid_argument(
-                "resolveALEBinding: ALE is enabled but mesh velocity field '" +
-                options.mesh_velocity_field_name + "' is not registered");
-        }
-        return;
-    }
-
-    const auto& velocity_record = system.fieldRecord(mesh_velocity_id);
-    if (velocity_record.source_kind != FieldSourceKind::PrescribedData) {
+    if (options.mesh_displacement_field_name.empty()) {
         throw std::invalid_argument(
-            "resolveALEBinding: prescribed ALE requires mesh velocity field '" +
-            velocity_record.name + "' to be registered as PrescribedData");
+            "resolveALEBinding: coupled ALE requires a non-empty mesh displacement field name");
     }
-    validateVectorSpace(velocity_record.space,
+
+    const FieldId mesh_displacement_id = resolveCoupledDisplacementField(
+        system, options.mesh_displacement_field_name);
+    if (mesh_displacement_id == INVALID_FIELD_ID) {
+        if (!options.auto_register_mesh_displacement_field) {
+            throw std::invalid_argument(
+                "resolveALEBinding: coupled ALE requires a mesh displacement unknown bound as mesh-motion displacement or named '" +
+                options.mesh_displacement_field_name + "'");
+        }
+        const auto displacement_space = options.mesh_displacement_space
+            ? options.mesh_displacement_space
+            : options.mesh_velocity_space;
+        validateVectorSpace(displacement_space,
+                            options.dimension,
+                            "mesh_displacement_space");
+        if (mesh_velocity_id != INVALID_FIELD_ID) {
+            throw std::invalid_argument(
+                "resolveALEBinding: an existing coupled mesh velocity cannot reference a mesh displacement field that has not been registered yet");
+        }
+        return;
+    }
+
+    const auto& displacement_record =
+        system.fieldRecord(mesh_displacement_id);
+    if (displacement_record.source_kind != FieldSourceKind::Unknown) {
+        throw std::invalid_argument(
+            "resolveALEBinding: coupled ALE mesh displacement field '" +
+            displacement_record.name + "' must be an Unknown");
+    }
+    validateVectorSpace(displacement_record.space,
                         options.dimension,
-                        "mesh velocity field space");
+                        "mesh displacement field space");
+    if (mesh_velocity_id != INVALID_FIELD_ID) {
+        requireDerivedVelocityFromDisplacement(
+            system, mesh_velocity_id, mesh_displacement_id);
+    }
 }
 
 void ALEBinding::configureInstallOptions(FormInstallOptions& install) const
@@ -227,7 +204,6 @@ ALEBinding MovingDomain::binding() const noexcept
 {
     ALEBinding out;
     out.enabled = true;
-    out.mesh_velocity_source = ALEMeshVelocitySource::CoupledDisplacement;
     out.geometry_tangent_path = geometry_tangent_path;
     out.mesh_velocity_field = velocity;
     out.mesh_displacement_field = displacement;
@@ -257,7 +233,6 @@ MovingDomain movingDomain(FESystem& system, FieldId displacement, MovingDomainOp
         ALEBindingOptions{
             .enabled = true,
             .dimension = rec.space->value_dimension(),
-            .mesh_velocity_source = ALEMeshVelocitySource::CoupledDisplacement,
             .geometry_tangent_path = options.geometry_tangent_path,
             .mesh_velocity_field_name = std::move(options.mesh_velocity_field_name),
             .mesh_displacement_field_name = rec.name,
@@ -285,7 +260,6 @@ ALEBinding resolveALEBinding(FESystem& system, ALEBindingOptions options)
 
     ALEBinding binding;
     binding.enabled = options.enabled;
-    binding.mesh_velocity_source = options.mesh_velocity_source;
     binding.geometry_tangent_path = options.geometry_tangent_path;
 
     if (!options.enabled) {
@@ -309,96 +283,72 @@ ALEBinding resolveALEBinding(FESystem& system, ALEBindingOptions options)
                               MeshMotionFieldRole::Velocity,
                               options.mesh_velocity_field_name);
 
-    if (options.mesh_velocity_source == ALEMeshVelocitySource::CoupledDisplacement) {
-        if (options.mesh_displacement_field_name.empty()) {
-            throw std::invalid_argument(
-                "resolveALEBinding: coupled ALE requires a non-empty mesh displacement field name");
-        }
+    if (options.mesh_displacement_field_name.empty()) {
+        throw std::invalid_argument(
+            "resolveALEBinding: coupled ALE requires a non-empty mesh displacement field name");
+    }
 
-        FieldId mesh_displacement_id =
-            resolveCoupledDisplacementField(system,
-                                            options.mesh_displacement_field_name);
-        if (mesh_displacement_id != INVALID_FIELD_ID) {
-            system.bindMeshMotionField(MeshMotionFieldRole::Displacement,
-                                       mesh_displacement_id);
-        }
-
-        if (mesh_displacement_id == INVALID_FIELD_ID &&
-            options.auto_register_mesh_displacement_field) {
-#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
-            auto displacement_space = options.mesh_displacement_space
-                                        ? std::move(options.mesh_displacement_space)
-                                        : options.mesh_velocity_space;
-            validateVectorSpace(displacement_space,
-                                options.dimension,
-                                "mesh_displacement_space");
-            mesh_displacement_id = system.addMeshDisplacementUnknown(
-                options.mesh_displacement_field_name,
-                std::move(displacement_space),
-                options.dimension);
-#else
-            throw std::invalid_argument(
-                "resolveALEBinding: automatic mesh displacement registration "
-                "requires Mesh-backed FE support");
-#endif
-        }
-
-        if (mesh_displacement_id == INVALID_FIELD_ID) {
-            throw std::invalid_argument(
-                "resolveALEBinding: coupled ALE requires a mesh displacement "
-                "unknown bound as mesh-motion displacement or named '" +
-                options.mesh_displacement_field_name + "'");
-        }
-
-        const auto& d_rec = system.fieldRecord(mesh_displacement_id);
-        if (d_rec.source_kind != FieldSourceKind::Unknown) {
-            throw std::invalid_argument(
-                "resolveALEBinding: coupled ALE mesh displacement field '" +
-                d_rec.name + "' must be an Unknown");
-        }
-        validateVectorSpace(d_rec.space,
-                            options.dimension,
-                            "mesh displacement field space");
-
-        if (mesh_velocity_id == INVALID_FIELD_ID) {
-            mesh_velocity_id = system.addDerivedMeshVelocityField(
-                options.mesh_velocity_field_name,
-                d_rec.space,
-                mesh_displacement_id,
-                options.dimension);
-        } else {
-            requireDerivedVelocityFromDisplacement(system,
-                                                   mesh_velocity_id,
-                                                   mesh_displacement_id);
-        }
-
+    FieldId mesh_displacement_id =
+        resolveCoupledDisplacementField(system,
+                                        options.mesh_displacement_field_name);
+    if (mesh_displacement_id != INVALID_FIELD_ID) {
         system.bindMeshMotionField(MeshMotionFieldRole::Displacement,
                                    mesh_displacement_id);
-        binding.mesh_displacement_field = mesh_displacement_id;
-        enableCoupledGeometryPolicy(system);
-    } else {
-        if (mesh_velocity_id == INVALID_FIELD_ID) {
-            if (!options.auto_register_mesh_velocity_field) {
-                throw std::invalid_argument(
-                    "resolveALEBinding: ALE is enabled but mesh velocity field '" +
-                    options.mesh_velocity_field_name + "' is not registered");
-            }
-            mesh_velocity_id = system.addMeshMotionDataField(
-                options.mesh_velocity_field_name,
-                std::move(options.mesh_velocity_space),
-                options.dimension);
-        }
-
-        const auto& w_rec = system.fieldRecord(mesh_velocity_id);
-        if (w_rec.source_kind != FieldSourceKind::PrescribedData) {
-            throw std::invalid_argument(
-                "resolveALEBinding: prescribed ALE requires mesh velocity field '" +
-                w_rec.name + "' to be registered as PrescribedData");
-        }
-        validateVectorSpace(w_rec.space,
-                            options.dimension,
-                            "mesh velocity field space");
     }
+
+    if (mesh_displacement_id == INVALID_FIELD_ID &&
+        options.auto_register_mesh_displacement_field) {
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+        auto displacement_space = options.mesh_displacement_space
+                                    ? std::move(options.mesh_displacement_space)
+                                    : options.mesh_velocity_space;
+        validateVectorSpace(displacement_space,
+                            options.dimension,
+                            "mesh_displacement_space");
+        mesh_displacement_id = system.addMeshDisplacementUnknown(
+            options.mesh_displacement_field_name,
+            std::move(displacement_space),
+            options.dimension);
+#else
+        throw std::invalid_argument(
+            "resolveALEBinding: automatic mesh displacement registration "
+            "requires Mesh-backed FE support");
+#endif
+    }
+
+    if (mesh_displacement_id == INVALID_FIELD_ID) {
+        throw std::invalid_argument(
+            "resolveALEBinding: coupled ALE requires a mesh displacement "
+            "unknown bound as mesh-motion displacement or named '" +
+            options.mesh_displacement_field_name + "'");
+    }
+
+    const auto& d_rec = system.fieldRecord(mesh_displacement_id);
+    if (d_rec.source_kind != FieldSourceKind::Unknown) {
+        throw std::invalid_argument(
+            "resolveALEBinding: coupled ALE mesh displacement field '" +
+            d_rec.name + "' must be an Unknown");
+    }
+    validateVectorSpace(d_rec.space,
+                        options.dimension,
+                        "mesh displacement field space");
+
+    if (mesh_velocity_id == INVALID_FIELD_ID) {
+        mesh_velocity_id = system.addDerivedMeshVelocityField(
+            options.mesh_velocity_field_name,
+            d_rec.space,
+            mesh_displacement_id,
+            options.dimension);
+    } else {
+        requireDerivedVelocityFromDisplacement(system,
+                                               mesh_velocity_id,
+                                               mesh_displacement_id);
+    }
+
+    system.bindMeshMotionField(MeshMotionFieldRole::Displacement,
+                               mesh_displacement_id);
+    binding.mesh_displacement_field = mesh_displacement_id;
+    enableCoupledGeometryPolicy(system);
 
     system.bindMeshMotionField(MeshMotionFieldRole::Velocity, mesh_velocity_id);
     binding.mesh_velocity_field = mesh_velocity_id;

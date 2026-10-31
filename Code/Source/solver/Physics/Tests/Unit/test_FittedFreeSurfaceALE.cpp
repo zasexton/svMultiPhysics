@@ -510,9 +510,9 @@ TEST(FittedFreeSurfaceALE, SurfaceStressIsTheFittedDefaultWithoutAnOptIn)
                   std::string::npos);
     }
     {
-        // Prescribed mesh motion may assemble on the reference frame: the
-        // surface energy is rejected there by the frame check, and the
-        // pressure load alone by the qualified fitted-ALE contract.
+        // ALE moves the domain with a coupled mesh displacement only: a
+        // prescribed mesh-velocity source is refused before the surface
+        // energy or the pressure load is checked.
         const auto register_prescribed = [&](FE::Real surface_tension) -> std::string {
             FE::systems::FESystem system(mesh);
             auto opts = coupledALEOptions();
@@ -527,14 +527,12 @@ TEST(FittedFreeSurfaceALE, SurfaceStressIsTheFittedDefaultWithoutAnOptIn)
             }
             return {};
         };
-        EXPECT_NE(register_prescribed(gamma).find(
-                      "fitted SurfaceStress requires a static mesh or ALE with a "
-                      "coupled mesh-displacement unknown"),
-                  std::string::npos);
-        EXPECT_NE(register_prescribed(0.0).find(
-                      "contract requires mesh velocity derived from a coupled "
-                      "mesh-displacement unknown"),
-                  std::string::npos);
+        for (const FE::Real surface_tension : {gamma, FE::Real{0.0}}) {
+            EXPECT_NE(register_prescribed(surface_tension).find(
+                          "ALE requires the mesh velocity derived from a coupled "
+                          "mesh-displacement unknown"),
+                      std::string::npos);
+        }
     }
 }
 

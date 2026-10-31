@@ -985,15 +985,7 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
             // boundary normal.  The two frames coincide for a static mesh
             // and for coupled mesh displacement, whose nonlinear geometry
             // transaction moves the active coordinates to the current
-            // configuration at every trial state.  Prescribed mesh motion
-            // may assemble on the reference configuration, where grad(v)
-            // would not be the current-frame gradient.
-            if (ale_enabled &&
-                options.mesh_velocity_source !=
-                    ALEMeshVelocitySource::CoupledDisplacement) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: fitted SurfaceStress requires a static mesh or ALE with a coupled mesh-displacement unknown, so that the assembly frame is the current configuration");
-            }
+            // configuration at every trial state.
             (void)constantScalarValueOrThrow(
                 bc.surface_tension, "fitted SurfaceStress surface_tension");
             if (!bc.contact_lines.empty()) {
@@ -1024,13 +1016,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                 "IncompressibleNavierStokesVMSModule: the qualified "
                 "fitted-ALE free-surface contract requires ALE to be "
                 "enabled");
-        }
-        if (options.mesh_velocity_source !=
-            ALEMeshVelocitySource::CoupledDisplacement) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: the qualified "
-                "fitted-ALE free-surface contract requires mesh velocity "
-                "derived from a coupled mesh-displacement unknown");
         }
         if (bc.normal_kinematic_policy !=
             FreeSurfaceNormalKinematicPolicy::
@@ -1523,13 +1508,15 @@ NavierStokesPreflight preflightNavierStokes(
     const std::shared_ptr<const FE::spaces::FunctionSpace>& velocity_space,
     const std::shared_ptr<const FE::spaces::FunctionSpace>& pressure_space)
 {
-    if (options.mesh_velocity_source !=
-            ALEMeshVelocitySource::PrescribedData &&
+    // The mesh velocity of a moving domain is the time derivative of the
+    // coupled mesh displacement unknown, the only mesh motion.
+    if (options.enable_ale &&
         options.mesh_velocity_source !=
             ALEMeshVelocitySource::CoupledDisplacement) {
         throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule::registerOn: "
-            "unsupported ALE mesh-velocity source");
+            "IncompressibleNavierStokesVMSModule::registerOn: ALE requires "
+            "the mesh velocity derived from a coupled mesh-displacement "
+            "unknown (Mesh_velocity_source = coupled_displacement)");
     }
     if (freeSurfacePhysicalModelName(options.free_surface_physical_model) ==
         nullptr) {
@@ -1598,21 +1585,12 @@ NavierStokesPreflight preflightNavierStokes(
     const FE::systems::ALEBindingOptions ale_options{
         .enabled = options.enable_ale,
         .dimension = dim,
-        .mesh_velocity_source =
-            options.mesh_velocity_source ==
-                    ALEMeshVelocitySource::CoupledDisplacement
-                ? FE::systems::ALEMeshVelocitySource::CoupledDisplacement
-                : FE::systems::ALEMeshVelocitySource::PrescribedData,
         .geometry_tangent_path = options.moving_mesh_tangent_path,
         .mesh_velocity_field_name = options.mesh_velocity_field_name,
         .mesh_displacement_field_name =
             options.mesh_displacement_field_name,
-        .mesh_velocity_space = options.mesh_velocity_space
-            ? options.mesh_velocity_space
-            : velocity_space,
+        .mesh_velocity_space = velocity_space,
         .mesh_displacement_space = velocity_space,
-        .auto_register_mesh_velocity_field =
-            options.auto_register_mesh_velocity_field,
         .auto_register_mesh_displacement_field =
             options.auto_register_mesh_displacement_field,
     };
@@ -1891,9 +1869,7 @@ NavierStokesPreflight preflightNavierStokes(
              ? std::string_view(ale_options.mesh_velocity_field_name)
              : std::string_view{}},
         {"mesh displacement",
-         options.enable_ale &&
-                 ale_options.mesh_velocity_source ==
-                     FE::systems::ALEMeshVelocitySource::CoupledDisplacement
+         options.enable_ale
              ? std::string_view(ale_options.mesh_displacement_field_name)
              : std::string_view{}},
         {"semi-implicit reference velocity",
@@ -1922,17 +1898,6 @@ NavierStokesPreflight preflightNavierStokes(
             "IncompressibleNavierStokesVMSModule::registerOn momentum source");
     }
     FE::systems::validateALEBinding(system, ale_options);
-    if (ale_options.mesh_velocity_source !=
-        FE::systems::ALEMeshVelocitySource::CoupledDisplacement) {
-        for (const auto& bc : effective_free_surfaces) {
-            for (const auto& contact_line : bc.contact_lines) {
-                if (contactLineKind(contact_line) == ContactLineKind::Pinned) {
-                    throw std::invalid_argument(
-                        "IncompressibleNavierStokesVMSModule: pinned fitted contact lines require ALE mesh velocity to be derived from a coupled mesh displacement unknown");
-                }
-            }
-        }
-    }
     std::vector<PreparedWeakVelocityBoundary> prepared_weak_velocity_boundaries;
     std::vector<FE::forms::BoundaryDomain> required_nitsche_routes;
     validateNavierStokesBoundaryConfiguration(

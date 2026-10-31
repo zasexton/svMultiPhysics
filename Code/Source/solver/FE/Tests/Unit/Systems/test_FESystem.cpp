@@ -67,7 +67,6 @@ using svmp::FE::spaces::L2Space;
 using svmp::FE::spaces::ProductSpace;
 
 using svmp::FE::systems::ALEBindingOptions;
-using svmp::FE::systems::ALEMeshVelocitySource;
 using svmp::FE::systems::AssemblyRequest;
 using svmp::FE::systems::DerivedFieldRole;
 using svmp::FE::systems::FESystem;
@@ -819,7 +818,7 @@ TEST(FESystem, MeshMotionFieldAccessInfersStandardRegisteredFields)
     EXPECT_EQ(access.mesh_acceleration, acceleration);
 }
 
-TEST(FESystem, PrescribedMeshMotionFieldIsExcludedFromUnknownLayout)
+TEST(FESystem, PrescribedDataFieldIsExcludedFromUnknownLayout)
 {
     auto mesh = build_single_quad_mesh();
     auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
@@ -830,8 +829,10 @@ TEST(FESystem, PrescribedMeshMotionFieldIsExcludedFromUnknownLayout)
         FieldSpec{.name = "u", .space = scalar_space, .components = 1});
     const auto p = sys.addField(
         FieldSpec{.name = "p", .space = scalar_space, .components = 1});
-    const auto velocity = sys.addMeshMotionDataField("mesh_velocity", vector_space);
-    sys.bindMeshMotionField(MeshMotionFieldRole::Velocity, velocity);
+    const auto velocity = sys.addField(FieldSpec{.name = "velocity_data",
+                                                 .space = vector_space,
+                                                 .components = 2,
+                                                 .source_kind = FieldSourceKind::PrescribedData});
 
     EXPECT_EQ(sys.fieldRecord(u).source_kind, FieldSourceKind::Unknown);
     EXPECT_EQ(sys.fieldRecord(p).source_kind, FieldSourceKind::Unknown);
@@ -861,11 +862,12 @@ TEST(FESystem, UnknownFieldIdsInDofMapOrderSkipsPrescribedFieldIdGaps)
     FESystem sys(mesh);
     const auto u = sys.addField(
         FieldSpec{.name = "u", .space = scalar_space, .components = 1});
-    const auto prescribed_velocity =
-        sys.addMeshMotionDataField("mesh_velocity", vector_space);
+    const auto prescribed_velocity = sys.addField(FieldSpec{.name = "velocity_data",
+                                                            .space = vector_space,
+                                                            .components = 2,
+                                                            .source_kind = FieldSourceKind::PrescribedData});
     const auto p = sys.addField(
         FieldSpec{.name = "p", .space = scalar_space, .components = 1});
-    sys.bindMeshMotionField(MeshMotionFieldRole::Velocity, prescribed_velocity);
 
     ASSERT_EQ(u, 0);
     ASSERT_EQ(prescribed_velocity, 1);
@@ -921,51 +923,6 @@ TEST(FESystem, DerivedMeshVelocityIsExcludedFromUnknownLayout)
     EXPECT_EQ(sys.blockMap()->numBlocks(), 2u);
 }
 
-TEST(FESystem, ALEBindingRegistersPrescribedMeshVelocityAsData)
-{
-    auto mesh = build_single_quad_mesh();
-    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
-    auto vector_space = std::make_shared<ProductSpace>(scalar_space, /*components=*/2);
-
-    FESystem sys(mesh);
-    const auto u = sys.addField(
-        FieldSpec{.name = "u", .space = scalar_space, .components = 1});
-
-    const auto ale = resolveALEBinding(
-        sys,
-        ALEBindingOptions{
-            .enabled = true,
-            .dimension = 2,
-            .mesh_velocity_source = ALEMeshVelocitySource::PrescribedData,
-            .mesh_velocity_field_name = "mesh_velocity",
-            .mesh_displacement_field_name = "mesh_displacement",
-            .mesh_velocity_space = vector_space,
-        });
-
-    ASSERT_TRUE(ale.enabled);
-    EXPECT_FALSE(ale.coupled());
-    ASSERT_NE(ale.mesh_velocity_field, svmp::FE::INVALID_FIELD_ID);
-    EXPECT_EQ(sys.meshMotionField(MeshMotionFieldRole::Velocity),
-              ale.mesh_velocity_field);
-    EXPECT_EQ(sys.fieldRecord(ale.mesh_velocity_field).source_kind,
-              FieldSourceKind::PrescribedData);
-    EXPECT_FALSE(sys.fieldParticipatesInUnknownVector(ale.mesh_velocity_field));
-
-    svmp::FE::systems::FormInstallOptions install;
-    ale.configureInstallOptions(install);
-    EXPECT_EQ(install.compiler_options.geometry_sensitivity.mode,
-              svmp::FE::forms::GeometrySensitivityMode::GeometryConstant);
-    EXPECT_TRUE(install.extra_trial_fields.empty());
-
-    sys.addOperator("mass");
-    sys.addCellKernel("mass", u, std::make_shared<MassKernel>(1.0));
-    sys.setup();
-
-    EXPECT_EQ(sys.dofHandler().getNumDofs(), 4);
-    EXPECT_EQ(sys.fieldDofHandler(ale.mesh_velocity_field).getNumDofs(), 8);
-    EXPECT_EQ(sys.fieldMap().numFields(), 1u);
-}
-
 TEST(FESystem, ALEBindingCoupledDisplacementCreatesDerivedVelocityAndInstallMetadata)
 {
     auto mesh = build_single_quad_mesh();
@@ -983,7 +940,6 @@ TEST(FESystem, ALEBindingCoupledDisplacementCreatesDerivedVelocityAndInstallMeta
         ALEBindingOptions{
             .enabled = true,
             .dimension = 2,
-            .mesh_velocity_source = ALEMeshVelocitySource::CoupledDisplacement,
             .mesh_velocity_field_name = "mesh_velocity",
             .mesh_displacement_field_name = "mesh_displacement",
             .mesh_velocity_space = vector_space,
@@ -1043,7 +999,6 @@ TEST(FESystem, ALEBindingCoupledDisplacementPreservesTangentPathOverride)
         ALEBindingOptions{
             .enabled = true,
             .dimension = 2,
-            .mesh_velocity_source = ALEMeshVelocitySource::CoupledDisplacement,
             .geometry_tangent_path = svmp::FE::forms::GeometryTangentPath::ADReference,
             .mesh_velocity_field_name = "mesh_velocity",
             .mesh_displacement_field_name = "mesh_displacement",
@@ -1371,8 +1326,10 @@ TEST(FESystem, MeshDisplacementBindingRejectsPrescribedDataField)
     auto vector_space = std::make_shared<ProductSpace>(scalar_space, /*components=*/2);
 
     FESystem sys(mesh);
-    const auto prescribed =
-        sys.addMeshMotionDataField("mesh_displacement", vector_space, /*components=*/2);
+    const auto prescribed = sys.addField(FieldSpec{.name = "mesh_displacement",
+                                                   .space = vector_space,
+                                                   .components = 2,
+                                                   .source_kind = FieldSourceKind::PrescribedData});
     ASSERT_EQ(sys.fieldRecord(prescribed).source_kind, FieldSourceKind::PrescribedData);
 
     EXPECT_THROW(
@@ -1411,58 +1368,12 @@ TEST(FESystem, ALEBindingRejectsMismatchedBoundAndNamedDisplacementFields)
             ALEBindingOptions{
                 .enabled = true,
                 .dimension = 2,
-                .mesh_velocity_source = ALEMeshVelocitySource::CoupledDisplacement,
                 .mesh_velocity_field_name = "mesh_velocity",
                 .mesh_displacement_field_name = "other_mesh_displacement",
                 .mesh_velocity_space = vector_space,
                 .mesh_displacement_space = vector_space,
             }),
         std::invalid_argument);
-}
-
-TEST(FESystem, StandardMeshMotionFieldsSyncFromMeshStorageToPrescribedBuffers)
-{
-    auto mesh = build_single_quad_mesh();
-    const auto handles = svmp::motion::attach_motion_fields(*mesh, 2);
-    auto* velocity_data = svmp::MeshFields::field_data_as<svmp::real_t>(
-        mesh->local_mesh(), handles.velocity);
-    ASSERT_NE(velocity_data, nullptr);
-    const auto ncomp = svmp::MeshFields::field_components(mesh->local_mesh(), handles.velocity);
-    ASSERT_EQ(ncomp, 2u);
-    for (std::size_t v = 0; v < mesh->n_vertices(); ++v) {
-        velocity_data[v * ncomp + 0] = 3.0 + static_cast<Real>(v);
-        velocity_data[v * ncomp + 1] = -4.0 - static_cast<Real>(v);
-    }
-
-    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
-    auto vector_space = std::make_shared<ProductSpace>(scalar_space, /*components=*/2);
-
-    FESystem sys(mesh);
-    const auto temperature = sys.addField(
-        FieldSpec{.name = "temperature", .space = scalar_space, .components = 1});
-    const auto velocity = sys.addMeshMotionDataField("mesh_velocity", vector_space);
-    EXPECT_EQ(sys.bindStandardMeshMotionFieldsByName(), 1u);
-    EXPECT_EQ(sys.meshMotionField(MeshMotionFieldRole::Velocity), velocity);
-    sys.addOperator("mass");
-    sys.addCellKernel("mass", temperature, std::make_shared<MassKernel>(1.0));
-    sys.setup();
-
-    const std::size_t written = sys.syncBoundMeshMotionFieldsToPrescribedBuffers();
-    EXPECT_EQ(written, mesh->n_vertices() * 2u);
-    const auto coeffs = sys.prescribedFieldCoefficients(velocity);
-    ASSERT_EQ(coeffs.size(), mesh->n_vertices() * 2u);
-    const auto* entity_map = sys.fieldDofHandler(velocity).getEntityDofMap();
-    ASSERT_NE(entity_map, nullptr);
-    for (std::size_t v = 0; v < mesh->n_vertices(); ++v) {
-        const auto vdofs = entity_map->getVertexDofs(static_cast<GlobalIndex>(v));
-        ASSERT_EQ(vdofs.size(), 2u);
-        EXPECT_NEAR(coeffs[static_cast<std::size_t>(vdofs[0])],
-                    velocity_data[v * ncomp + 0],
-                    1e-12);
-        EXPECT_NEAR(coeffs[static_cast<std::size_t>(vdofs[1])],
-                    velocity_data[v * ncomp + 1],
-                    1e-12);
-    }
 }
 
 TEST(FESystem, PrescribedVertexFieldSyncsHighOrderMeshPointData)
@@ -1953,7 +1864,12 @@ TEST(FESystem, StandardMeshMotionFieldsSyncFromMeshStorageToFEState)
     const auto previous_velocity = sys.addField(
         FieldSpec{.name = "previous_mesh_velocity", .space = vector_space, .components = 2});
 
-    EXPECT_EQ(sys.bindStandardMeshMotionFieldsByName(), 6u);
+    sys.bindMeshMotionField(MeshMotionFieldRole::Displacement, displacement);
+    sys.bindMeshMotionField(MeshMotionFieldRole::Velocity, velocity);
+    sys.bindMeshMotionField(MeshMotionFieldRole::Acceleration, acceleration);
+    sys.bindMeshMotionField(MeshMotionFieldRole::PreviousCoordinates, previous_coordinates);
+    sys.bindMeshMotionField(MeshMotionFieldRole::PreviousDisplacement, previous_displacement);
+    sys.bindMeshMotionField(MeshMotionFieldRole::PreviousVelocity, previous_velocity);
     EXPECT_EQ(sys.meshMotionField(MeshMotionFieldRole::Displacement), displacement);
     EXPECT_EQ(sys.meshMotionField(MeshMotionFieldRole::Velocity), velocity);
     EXPECT_EQ(sys.meshMotionField(MeshMotionFieldRole::Acceleration), acceleration);

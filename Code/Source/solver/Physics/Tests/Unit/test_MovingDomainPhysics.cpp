@@ -3123,34 +3123,6 @@ TEST(MovingDomainPhysics, MeshMotionRegistryTranslatesPseudoElasticSmoothingEqua
 #endif
 }
 
-TEST(MovingDomainPhysics, NavierStokesALEEnabledRegistersMeshVelocityAndConsumesMeshVelocity)
-{
-    const auto mesh = makeMesh();
-    auto u_space = makeVelocitySpace(mesh);
-    auto p_space = makePressureSpace(mesh);
-    auto opts = baseNavierStokesOptions();
-    opts.enable_ale = true;
-    opts.mesh_velocity_field_name = "mesh_velocity";
-
-    FE::systems::FESystem system(mesh);
-    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
-    module.registerOn(system);
-
-    const FE::FieldId mesh_velocity_id = system.findFieldByName("mesh_velocity");
-    ASSERT_NE(mesh_velocity_id, FE::INVALID_FIELD_ID);
-    EXPECT_EQ(system.meshMotionField(FE::systems::MeshMotionFieldRole::Velocity), mesh_velocity_id);
-    EXPECT_EQ(system.fieldRecord(mesh_velocity_id).source_kind,
-              FE::systems::FieldSourceKind::PrescribedData);
-    EXPECT_FALSE(system.fieldParticipatesInUnknownVector(mesh_velocity_id));
-    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::MeshVelocity));
-
-    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
-    EXPECT_EQ(system.dofHandler().getNumDofs(), 16);
-    EXPECT_EQ(system.fieldMap().numFields(), 2u);
-    ASSERT_NE(system.blockMap(), nullptr);
-    EXPECT_EQ(system.blockMap()->numBlocks(), 2u);
-}
-
 TEST(MovingDomainPhysics,
      UnfittedSurfaceStressUsesGeneratedGeometryAndIsOrientationInvariant)
 {
@@ -6116,7 +6088,6 @@ TEST(MovingDomainPhysics,
     auto opts = baseNavierStokesOptions();
     opts.enable_ale = true;
     opts.mesh_velocity_source = ns::ALEMeshVelocitySource::PrescribedData;
-    opts.auto_register_mesh_velocity_field = true;
     opts.free_surface.push_back(
         ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
             .implementation = ns::FreeSurfaceImplementation::FittedALE,
@@ -8369,6 +8340,8 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceRejectsALEUntilTranspor
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
     opts.enable_ale = true;
+    opts.mesh_velocity_source = ns::ALEMeshVelocitySource::CoupledDisplacement;
+    opts.auto_register_mesh_displacement_field = true;
     opts.free_surface.push_back(
         ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
             .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
@@ -8854,7 +8827,6 @@ TEST(MovingDomainPhysics,
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
     opts.enable_ale = true;
-    opts.auto_register_mesh_velocity_field = false;
     const auto velocity_name = opts.velocity_field_name;
     const auto pressure_name = opts.pressure_field_name;
 
@@ -9038,35 +9010,6 @@ TEST(MovingDomainPhysics,
     boundary.tangential_mesh_policy =
         static_cast<ns::FreeSurfaceTangentialMeshPolicy>(255);
     expect_rejected(boundary);
-}
-
-TEST(MovingDomainPhysics,
-     NavierStokesRejectsUnsupportedAleMeshVelocitySourceBeforeMutation)
-{
-    const auto mesh = makeMesh();
-    auto opts = baseNavierStokesOptions();
-    opts.mesh_velocity_source =
-        static_cast<ns::ALEMeshVelocitySource>(255);
-    const auto velocity_name = opts.velocity_field_name;
-    const auto pressure_name = opts.pressure_field_name;
-
-    FE::systems::FESystem system(mesh);
-    ns::IncompressibleNavierStokesVMSModule module(
-        makeVelocitySpace(mesh), makePressureSpace(mesh), std::move(opts));
-    try {
-        module.registerOn(system);
-        FAIL() << "unsupported mesh-velocity source must be rejected";
-    } catch (const std::invalid_argument& error) {
-        EXPECT_NE(
-            std::string(error.what()).find(
-                "unsupported ALE mesh-velocity source"),
-            std::string::npos);
-    }
-    EXPECT_EQ(system.findFieldByName(velocity_name), FE::INVALID_FIELD_ID);
-    EXPECT_EQ(system.findFieldByName(pressure_name), FE::INVALID_FIELD_ID);
-    EXPECT_TRUE(system.formulationRecords().empty());
-    EXPECT_FALSE(system.hasOperator("equations"));
-    EXPECT_FALSE(module.effectiveConfigurationArtifact().has_value());
 }
 
 TEST(MovingDomainPhysics,

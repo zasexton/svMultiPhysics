@@ -676,9 +676,6 @@ public:
 
     // ---- Definition phase ----
     FieldId addField(FieldSpec spec);
-    FieldId addMeshMotionDataField(std::string name,
-                                   std::shared_ptr<const spaces::FunctionSpace> space,
-                                   int components = 0);
     FieldId addDerivedMeshVelocityField(std::string name,
                                         std::shared_ptr<const spaces::FunctionSpace> space,
                                         FieldId mesh_displacement_field,
@@ -1983,9 +1980,7 @@ public:
 	        const svmp::ReferenceRebaseOptions& options = {});
 	    std::size_t resetBoundMeshMotionField(MeshMotionFieldRole role, Real value = Real(0));
 
-	    std::size_t bindStandardMeshMotionFieldsByName();
 	    std::size_t syncPrescribedVertexFieldsFromMeshFields();
-	    std::size_t syncBoundMeshMotionFieldsToPrescribedBuffers();
 	    std::size_t syncBoundMeshMotionFieldsToState(std::span<Real> state) const;
 	    std::size_t syncBoundMeshMotionFieldsToState(assembly::GlobalSystemView& vector_view) const;
 	    void notifyMeshGeometryAdvanced();

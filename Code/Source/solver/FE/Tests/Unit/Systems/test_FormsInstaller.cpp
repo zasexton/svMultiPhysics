@@ -1686,7 +1686,6 @@ TEST(FormulationBuilder, SpanGroupsInheritCurrentOptionsAndKeepDiagnosticsIsolat
     F.options() = late_options;
     const systems::ALEBinding ale{
         .enabled = true,
-        .mesh_velocity_source = systems::ALEMeshVelocitySource::CoupledDisplacement,
         .mesh_displacement_field = d_field};
     const systems::FormulationGroup group{
         .source_component_tag = "coupled_group", .extra_trial_fields = {w_field, d_field, w_field}, .ale = &ale};
