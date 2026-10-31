@@ -517,7 +517,7 @@ TEST(LevelSetEquationTranslator,
 }
 
 TEST(LevelSetEquationTranslator,
-     MaintenanceCompatibilitySeparatesSeparatorOnlyVelocityPolicies)
+     InstallationRejectsSeparatorOnlyVelocitySource)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
@@ -537,21 +537,6 @@ TEST(LevelSetEquationTranslator,
         "coupled_field | prescribed_data | constant_vector | "
         "material_interface_phase_pair, got '" +
             separator_only + "'");
-
-    application::core::LegacyLevelSetMaintenanceInput legacy{};
-    legacy.equation_type_defined = true;
-    legacy.equation_type = "level_set";
-    legacy.equation_parameters["Velocity_source"] =
-        svmp::Physics::ParameterValue{true, separator_only};
-    legacy.equation_parameters["Enable_kinematic_reconciliation"] =
-        svmp::Physics::ParameterValue{true, "true"};
-    const auto maintenance =
-        application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-            legacy, std::span<const application::core::ActiveCutVolumeRequest>{});
-    ASSERT_TRUE(maintenance.has_value());
-    ASSERT_TRUE(*maintenance);
-    EXPECT_EQ((*maintenance)->transport.velocity.source,
-              svmp::FE::level_set::LevelSetVelocitySource::CoupledField);
   }
 #endif
 }
@@ -1430,11 +1415,14 @@ TEST(LevelSetEquationTranslator, ReportsKinematicReconciliationOnlyWhenEnabled)
     ASSERT_TRUE(module);
     const auto artifact = module->effectiveConfigurationArtifact();
     ASSERT_TRUE(artifact.has_value());
-    EXPECT_EQ(artifact->json.find("\"kinematic_reconciliation\":{\"enabled\":true}") !=
+    // The resolved section lists every key; the artifact before it names
+    // the stage only when it is enabled.
+    const auto body =
+        artifact->json.substr(0, artifact->json.find(",\"resolved\":"));
+    EXPECT_EQ(body.find("\"kinematic_reconciliation\":{\"enabled\":true}") !=
                   std::string::npos,
               enabled);
-    EXPECT_EQ(artifact->json.find("kinematic_reconciliation") != std::string::npos,
-              enabled);
+    EXPECT_EQ(body.find("kinematic_reconciliation") != std::string::npos, enabled);
   }
 #endif
 }
@@ -1464,11 +1452,14 @@ TEST(LevelSetEquationTranslator, ReportsSignDefinitePatchBoundsOnlyWhenEnabled)
     ASSERT_TRUE(module);
     const auto artifact = module->effectiveConfigurationArtifact();
     ASSERT_TRUE(artifact.has_value());
-    EXPECT_EQ(artifact->json.find("\"sign_definite_patch_bounds\":{\"enabled\":true}") !=
+    // The resolved section lists every key; the artifact before it names
+    // the stage only when it is enabled.
+    const auto body =
+        artifact->json.substr(0, artifact->json.find(",\"resolved\":"));
+    EXPECT_EQ(body.find("\"sign_definite_patch_bounds\":{\"enabled\":true}") !=
                   std::string::npos,
               enabled);
-    EXPECT_EQ(artifact->json.find("sign_definite_patch_bounds") != std::string::npos,
-              enabled);
+    EXPECT_EQ(body.find("sign_definite_patch_bounds") != std::string::npos, enabled);
   }
 #endif
 }

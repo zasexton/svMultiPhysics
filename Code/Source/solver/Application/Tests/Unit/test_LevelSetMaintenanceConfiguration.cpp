@@ -3,6 +3,7 @@
 #include "Application/Core/LevelSetCutConfiguration.h"
 #include "Application/Core/LevelSetMaintenanceConfiguration.h"
 #include "Application/Core/ResolvedMovingDomainConfiguration.h"
+#include "Application/Translators/LevelSetConfigurationParsing.h"
 
 #include <algorithm>
 #include <array>
@@ -17,11 +18,12 @@
 
 namespace {
 
+namespace parsing = application::translators::level_set::configuration;
+
 using application::core::ActiveCutVolumeRequest;
 using application::core::LegacyLevelSetBoundaryInput;
 using application::core::LegacyLevelSetMaintenanceInput;
 using application::core::LevelSetEquationInputSnapshot;
-using application::core::LevelSetInputObservation;
 using application::core::ResolvedLevelSetEquationConfiguration;
 using application::core::ResolvedLevelSetEquationHandle;
 using svmp::Physics::ParameterMap;
@@ -39,19 +41,32 @@ LegacyLevelSetMaintenanceInput makeLegacyInput(std::string type = "level_set") {
   return input;
 }
 
+// An installation of the legacy input's equation element: its keys as the
+// translator resolves them (levelSetEquationSchema()), and installed options
+// that the maintenance must not read.
 ResolvedLevelSetEquationHandle
 makeInstallation(const LegacyLevelSetMaintenanceInput &legacy,
                  std::string field_name = "phi_installed") {
   auto snapshot = std::make_shared<LevelSetEquationInputSnapshot>();
   snapshot->legacy_maintenance_input = legacy;
   snapshot->installation_input.equation_type = "level_set";
-  snapshot->installation_input.equation_params["Level_set_field_name"] =
-      ParameterValue{true, field_name};
+  snapshot->installation_input.equation_params = legacy.equation_parameters;
 
   auto installation = std::make_shared<ResolvedLevelSetEquationConfiguration>();
+  installation->equation_keys =
+      parsing::resolveLevelSetEquationKeys(
+          parsing::levelSetEquationInput(legacy.equation_parameters))
+          .value;
   installation->options.level_set.field_name = std::move(field_name);
   installation->input_snapshot = std::move(snapshot);
   return installation;
+}
+
+std::optional<application::core::LevelSetMaintenanceConfigurationHandle>
+resolveInstalled(const LegacyLevelSetMaintenanceInput &input,
+                 std::span<const ActiveCutVolumeRequest> active_requests = {}) {
+  return application::core::resolveLegacyLevelSetMaintenanceConfiguration(
+      input, active_requests, makeInstallation(input));
 }
 
 template <typename ExpectedException, typename Action>
@@ -71,40 +86,9 @@ std::string exceptionMessage(Action &&action) {
   return {};
 }
 
-const std::string kVelocityDiagnostic =
-    "[svMultiPhysics::Application] Level-set Velocity_source must be one of "
-    "'coupled_field', 'prescribed_data', 'constant_vector', or "
-    "'material_interface_phase_pair'.";
-
 const std::string kPhaseDiagnostic =
     "[svMultiPhysics::Application] Conservative_phase_liquid_side must be "
     "'negative' or 'positive'.";
-
-const LevelSetInputObservation *
-findObservation(const std::vector<LevelSetInputObservation> &observations,
-                std::string_view canonical_key,
-                std::string_view representation) {
-  const auto found = std::find_if(
-      observations.begin(), observations.end(), [&](const auto &observation) {
-        return observation.canonical_key == canonical_key &&
-               observation.representation == representation;
-      });
-  return found == observations.end() ? nullptr : &*found;
-}
-
-std::vector<std::string>
-observationLayers(const std::vector<LevelSetInputObservation> &observations,
-                  std::string_view canonical_key,
-                  std::string_view representation) {
-  std::vector<std::string> result;
-  for (const auto &observation : observations) {
-    if (observation.canonical_key == canonical_key &&
-        observation.representation == representation) {
-      result.push_back(observation.source_layer);
-    }
-  }
-  return result;
-}
 
 } // namespace
 
@@ -171,21 +155,27 @@ TEST(LevelSetMaintenanceConfiguration,
   auto undefined = makeLegacyInput();
   undefined.equation_type_defined = false;
   put(undefined.equation_parameters, "Enable_kinematic_reconciliation", "true");
-  EXPECT_FALSE(application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-                   undefined, std::span<const ActiveCutVolumeRequest>{})
-                   .has_value());
+  EXPECT_FALSE(resolveInstalled(undefined).has_value());
 
   auto unrecognized = makeLegacyInput("fluid");
   put(unrecognized.equation_parameters, "Enable_kinematic_reconciliation", "true");
-  EXPECT_FALSE(application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-                   unrecognized, std::span<const ActiveCutVolumeRequest>{})
-                   .has_value());
+  EXPECT_FALSE(resolveInstalled(unrecognized).has_value());
 
   auto disabled = makeLegacyInput();
   put(disabled.equation_parameters, "Enable_kinematic_reconciliation", "false");
-  EXPECT_FALSE(application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-                   disabled, std::span<const ActiveCutVolumeRequest>{})
-                   .has_value());
+  EXPECT_FALSE(resolveInstalled(disabled).has_value());
+}
+
+TEST(LevelSetMaintenanceConfiguration, RequiresTheResolvedEquation) {
+  auto input = makeLegacyInput();
+  put(input.equation_parameters, "Enable_kinematic_reconciliation", "true");
+  EXPECT_EQ((exceptionMessage<std::invalid_argument>([&] {
+              (void)application::core::
+                  resolveLegacyLevelSetMaintenanceConfiguration(
+                      input, std::span<const ActiveCutVolumeRequest>{}, {});
+            })),
+            "[svMultiPhysics::Application] Level-set maintenance requires the "
+            "resolved level-set equation.");
 }
 
 TEST(LevelSetMaintenanceConfiguration,
@@ -218,9 +208,7 @@ TEST(LevelSetMaintenanceConfiguration,
         "unrecognized");
     put(input.equation_parameters, "Static_capillary_volume_tolerance", "nan");
 
-    const auto resolved =
-        application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-            input, std::span<const ActiveCutVolumeRequest>{});
+    const auto resolved = resolveInstalled(input);
 
     ASSERT_TRUE(resolved.has_value());
     ASSERT_TRUE(*resolved);
@@ -243,9 +231,7 @@ TEST(LevelSetMaintenanceConfiguration,
   put(zero.equation_parameters, "Enable_kinematic_reconciliation", "true");
   put(zero.equation_parameters,
       "Conservative_phase_geometry_correction_max_iterations", "0");
-  const auto zero_resolved =
-      application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-          zero, std::span<const ActiveCutVolumeRequest>{});
+  const auto zero_resolved = resolveInstalled(zero);
   ASSERT_TRUE(zero_resolved.has_value());
   EXPECT_EQ((*zero_resolved)
                 ->transport.conservative_phase.geometry_correction_max_iterations,
@@ -262,54 +248,40 @@ TEST(LevelSetMaintenanceConfiguration,
     return input;
   };
 
-  for (const std::string value :
-       {"1.0 2.0", "1.0 2.0 3.0 4.0", "1.0 nan 3.0"}) {
-    auto invalid = make_constant();
-    put(invalid.equation_parameters, "Constant_velocity", value);
-    EXPECT_EQ(
-        (exceptionMessage<std::runtime_error>([&] {
-          (void)
-              application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-                  invalid, std::span<const ActiveCutVolumeRequest>{});
-        })),
-        "[svMultiPhysics::Application] Constant_velocity must contain "
-        "exactly three finite numeric components.");
-  }
-
   auto invalid_real = make_constant();
   put(invalid_real.equation_parameters,
       "Conservative_phase_geometry_measure_tolerance", "invalid");
-  EXPECT_EQ(
-      (exceptionMessage<std::invalid_argument>([&] {
-        (void)application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-            invalid_real, std::span<const ActiveCutVolumeRequest>{});
-      })),
-      "stod");
+  EXPECT_EQ((exceptionMessage<std::invalid_argument>(
+                [&] { (void)resolveInstalled(invalid_real); })),
+            "stod");
 
   auto overflow_real = make_constant();
   put(overflow_real.equation_parameters,
       "Conservative_phase_geometry_measure_tolerance", "1e9999");
-  EXPECT_EQ(
-      (exceptionMessage<std::out_of_range>([&] {
-        (void)application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-            overflow_real, std::span<const ActiveCutVolumeRequest>{});
-      })),
-      "stod");
+  EXPECT_EQ((exceptionMessage<std::out_of_range>(
+                [&] { (void)resolveInstalled(overflow_real); })),
+            "stod");
 
   auto overflow_count = make_constant();
   put(overflow_count.equation_parameters,
       "Conservative_phase_flux_artifact_cadence_steps",
       "999999999999999999999");
-  EXPECT_EQ(
-      (exceptionMessage<std::out_of_range>([&] {
-        (void)application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-            overflow_count, std::span<const ActiveCutVolumeRequest>{});
-      })),
-      "stoi");
+  EXPECT_EQ((exceptionMessage<std::out_of_range>(
+                [&] { (void)resolveInstalled(overflow_count); })),
+            "stoi");
 }
 
-TEST(LevelSetMaintenanceConfiguration,
-     PromotesWetExtensionBeforeConstantAndIgnoresInstallationOnlyKeys) {
+TEST(LevelSetMaintenanceConfiguration, TakesTheVelocityFromTheEquationKeys) {
+  auto unpromoted = makeLegacyInput();
+  put(unpromoted.equation_parameters, "Enable_kinematic_reconciliation", "true");
+  auto resolved = resolveInstalled(unpromoted);
+  ASSERT_TRUE(resolved.has_value());
+  EXPECT_EQ((*resolved)->transport.velocity.source,
+            svmp::FE::level_set::LevelSetVelocitySource::CoupledField);
+
+  // A source velocity field selects the extension, whose field is a coupled
+  // unknown; the installation's registration and extension source stay out
+  // of the maintained transport.
   auto input = makeLegacyInput();
   put(input.equation_parameters, "Level_set_field_name", "phi");
   put(input.equation_parameters, "Velocity_field_name", "extended_velocity");
@@ -317,15 +289,10 @@ TEST(LevelSetMaintenanceConfiguration,
   put(input.equation_parameters, "Source_velocity_field_name",
       "physical_velocity");
   put(input.equation_parameters, "Enable_kinematic_reconciliation", "true");
-  put(input.equation_parameters, "Level_set_source", "invalid_source");
-  put(input.equation_parameters, "SUPG_tau_scale", "invalid_number");
-  put(input.equation_parameters, "Interface_kinematic_marker",
-      "invalid_marker");
-
-  auto resolved =
-      application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-          input, std::span<const ActiveCutVolumeRequest>{});
+  resolved = resolveInstalled(input);
   ASSERT_TRUE(resolved.has_value());
+  EXPECT_EQ((*resolved)->transport.level_set.field_name, "phi");
+  EXPECT_EQ((*resolved)->transport.velocity.field_name, "extended_velocity");
   EXPECT_EQ((*resolved)->transport.velocity.source,
             svmp::FE::level_set::LevelSetVelocitySource::CoupledField);
   EXPECT_FALSE((*resolved)->transport.velocity.auto_register_field);
@@ -334,9 +301,9 @@ TEST(LevelSetMaintenanceConfiguration,
           ->transport.velocity.algebraic_extension_source_field_name.empty());
   EXPECT_EQ((*resolved)->transport.velocity.space, nullptr);
 
+  // A constant velocity stays constant.
   put(input.equation_parameters, "Constant_velocity", "7.0, 8.0, 9.0");
-  resolved = application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-      input, std::span<const ActiveCutVolumeRequest>{});
+  resolved = resolveInstalled(input);
   ASSERT_TRUE(resolved.has_value());
   EXPECT_EQ((*resolved)->transport.velocity.source,
             svmp::FE::level_set::LevelSetVelocitySource::ConstantVector);
@@ -344,27 +311,8 @@ TEST(LevelSetMaintenanceConfiguration,
             (std::array<svmp::FE::Real, 3>{7.0, 8.0, 9.0}));
 }
 
-TEST(LevelSetMaintenanceConfiguration,
-     RejectsTheInstallationOnlyNavierStokesVelocityToken) {
+TEST(LevelSetMaintenanceConfiguration, PreservesPhaseAndBoundaryOrder) {
   auto input = makeLegacyInput();
-  put(input.equation_parameters, "Velocity_source", "navier_stokes");
-  put(input.equation_parameters, "Enable_kinematic_reconciliation", "true");
-  auto installation = makeInstallation(input);
-  EXPECT_EQ(installation->options.velocity.source,
-            svmp::FE::level_set::LevelSetVelocitySource::CoupledField);
-
-  EXPECT_EQ(
-      (exceptionMessage<std::runtime_error>([&] {
-        (void)application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-            input, std::span<const ActiveCutVolumeRequest>{}, installation);
-      })),
-      kVelocityDiagnostic);
-}
-
-TEST(LevelSetMaintenanceConfiguration,
-     PreservesVelocityPhaseAndBoundaryOrder) {
-  auto input = makeLegacyInput();
-  put(input.equation_parameters, "Velocity_source", "invalid_velocity");
   put(input.equation_parameters, "Conservative_phase_liquid_side",
       "invalid_phase");
   put(input.equation_parameters, "Enable_kinematic_reconciliation", "true");
@@ -376,26 +324,20 @@ TEST(LevelSetMaintenanceConfiguration,
   put(boundary.parameters, "Value", "invalid");
   input.boundaries.push_back(boundary);
 
-  const auto resolve = [&] {
-    return application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-        input, std::span<const ActiveCutVolumeRequest>{});
-  };
-  EXPECT_EQ((exceptionMessage<std::runtime_error>([&] { (void)resolve(); })),
-            kVelocityDiagnostic);
-
-  input.equation_parameters.erase("Velocity_source");
-  EXPECT_EQ((exceptionMessage<std::runtime_error>([&] { (void)resolve(); })),
+  EXPECT_EQ((exceptionMessage<std::runtime_error>(
+                [&] { (void)resolveInstalled(input); })),
             kPhaseDiagnostic);
 
   input.equation_parameters.erase("Conservative_phase_liquid_side");
-  EXPECT_EQ((exceptionMessage<std::invalid_argument>([&] { (void)resolve(); })),
+  EXPECT_EQ((exceptionMessage<std::invalid_argument>(
+                [&] { (void)resolveInstalled(input); })),
             "stod");
 
   input.boundaries.clear();
-  EXPECT_TRUE(resolve().has_value());
+  EXPECT_TRUE(resolveInstalled(input).has_value());
 
   put(input.equation_parameters, "Enable_kinematic_reconciliation", "false");
-  EXPECT_FALSE(resolve().has_value());
+  EXPECT_FALSE(resolveInstalled(input).has_value());
 }
 
 TEST(LevelSetMaintenanceConfiguration,
@@ -439,9 +381,7 @@ TEST(LevelSetMaintenanceConfiguration,
   unrelated.name = "wall";
   input.boundaries.push_back(unrelated);
 
-  const auto resolved =
-      application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-          input, std::span<const ActiveCutVolumeRequest>{});
+  const auto resolved = resolveInstalled(input);
 
   ASSERT_TRUE(resolved.has_value());
   ASSERT_EQ((*resolved)->open_boundaries.size(), 2u);
@@ -478,9 +418,7 @@ TEST(LevelSetMaintenanceConfiguration,
   exact.requested_interface_marker = 17;
 
   const std::array<ActiveCutVolumeRequest, 3> requests{other, fallback, exact};
-  auto resolved =
-      application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-          input, requests);
+  auto resolved = resolveInstalled(input, requests);
   ASSERT_TRUE(resolved.has_value());
   ASSERT_TRUE((*resolved)->volume_cut_request.has_value());
   EXPECT_EQ((*resolved)->volume_cut_request->domain_id, "exact_domain");
@@ -493,8 +431,7 @@ TEST(LevelSetMaintenanceConfiguration,
 
   const std::array<ActiveCutVolumeRequest, 2> fallback_requests{other,
                                                                 fallback};
-  resolved = application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-      input, fallback_requests);
+  resolved = resolveInstalled(input, fallback_requests);
   ASSERT_TRUE(resolved.has_value());
   ASSERT_TRUE((*resolved)->volume_cut_request.has_value());
   EXPECT_EQ((*resolved)->volume_cut_request->domain_id, "fallback_domain");
@@ -541,32 +478,35 @@ TEST(LevelSetMaintenanceConfiguration,
 
 TEST(LevelSetMaintenanceConfiguration,
      UsesInputEquationOrderForFailuresAndRejectsMissingLegacyAttachment) {
-  auto velocity = makeLegacyInput();
-  put(velocity.equation_parameters, "Velocity_source", "invalid_velocity");
-  put(velocity.equation_parameters, "Enable_kinematic_reconciliation", "true");
-  auto phase = makeLegacyInput();
-  put(phase.equation_parameters, "Conservative_phase_liquid_side",
-      "invalid_phase");
-  put(phase.equation_parameters, "Enable_kinematic_reconciliation", "true");
-  const auto velocity_installation = makeInstallation(velocity);
-  const auto phase_installation = makeInstallation(phase);
+  const auto make_inflow = [](std::string value) {
+    auto input = makeLegacyInput();
+    put(input.equation_parameters, "Enable_kinematic_reconciliation", "true");
+    LegacyLevelSetBoundaryInput boundary{};
+    boundary.type_defined = true;
+    boundary.name_defined = true;
+    boundary.type = "LevelSetInflow";
+    boundary.name = "inlet";
+    put(boundary.parameters, "Value", std::move(value));
+    input.boundaries.push_back(boundary);
+    return makeInstallation(input);
+  };
+  const auto invalid = make_inflow("invalid");
+  const auto overflow = make_inflow("1e9999");
 
   std::array<ResolvedLevelSetEquationHandle, 3> equations{
-      velocity_installation, ResolvedLevelSetEquationHandle{},
-      phase_installation};
-  EXPECT_EQ((exceptionMessage<std::runtime_error>([&] {
+      invalid, ResolvedLevelSetEquationHandle{}, overflow};
+  EXPECT_EQ((exceptionMessage<std::invalid_argument>([&] {
               (void)application::core::resolveLevelSetMaintenanceConfigurations(
                   equations, std::span<const ActiveCutVolumeRequest>{});
             })),
-            kVelocityDiagnostic);
+            "stod");
 
-  equations = {phase_installation, ResolvedLevelSetEquationHandle{},
-               velocity_installation};
-  EXPECT_EQ((exceptionMessage<std::runtime_error>([&] {
+  equations = {overflow, ResolvedLevelSetEquationHandle{}, invalid};
+  EXPECT_EQ((exceptionMessage<std::out_of_range>([&] {
               (void)application::core::resolveLevelSetMaintenanceConfigurations(
                   equations, std::span<const ActiveCutVolumeRequest>{});
             })),
-            kPhaseDiagnostic);
+            "stod");
 
   auto snapshot_without_legacy =
       std::make_shared<LevelSetEquationInputSnapshot>();
@@ -589,148 +529,16 @@ TEST(LevelSetMaintenanceConfiguration,
                   .empty());
 }
 
-TEST(LevelSetMaintenanceConfiguration,
-     SerializesLegacyProvenanceNextToTheLayeredInstallation) {
-  auto legacy = makeLegacyInput();
-  put(legacy.equation_parameters, "Level_set_field_name", "phi_equation");
-  put(legacy.equation_parameters, "Transport_form", "advective");
-  put(legacy.equation_parameters, "Velocity_source", "constant");
-  put(legacy.equation_parameters, "Constant_velocity", "1.0, 2.0, 3.0");
-  put(legacy.equation_parameters, "Enable_kinematic_reconciliation", "true");
-  put(legacy.equation_parameters,
-      "Conservative_phase_flux_artifact_cadence_steps", "2", false);
-
-  auto installation = makeInstallation(legacy, "phi_domain");
-  auto mutable_installation =
-      std::const_pointer_cast<ResolvedLevelSetEquationConfiguration>(
-          installation);
-  mutable_installation->options.transport_form =
-      svmp::FE::level_set::LevelSetTransportForm::ConservativeDivergence;
-  mutable_installation->options.velocity.source =
-      svmp::FE::level_set::LevelSetVelocitySource::CoupledField;
-  mutable_installation->options.velocity.auto_register_field = true;
-  mutable_installation->options.velocity.algebraic_extension_source_field_name =
-      "physical_velocity";
-  mutable_installation->options.conservative_phase
-      .flux_artifact_cadence_steps = 7;
-  auto mutable_snapshot =
-      std::const_pointer_cast<LevelSetEquationInputSnapshot>(
-          mutable_installation->input_snapshot);
-  mutable_snapshot->installation_input.equation_params["Level_set_field_name"] =
-      ParameterValue{true, "phi_equation"};
-  mutable_snapshot->installation_input.default_domain
-      .params["Level_set_field_name"] = ParameterValue{true, "phi_default"};
-  svmp::Physics::DomainInput domain{};
-  domain.id = "liquid";
-  domain.params["Level_set_field_name"] = ParameterValue{true, "phi_domain"};
-  mutable_snapshot->installation_input.domains.push_back(std::move(domain));
-
-  const auto resolved =
-      application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-          legacy, std::span<const ActiveCutVolumeRequest>{}, installation);
-  ASSERT_TRUE(resolved.has_value());
-
-  const auto *legacy_cadence = findObservation(
-      (*resolved)->input_observations,
-      "conservative_phase_flux_artifact_cadence_steps", "legacy_getter");
-  ASSERT_NE(legacy_cadence, nullptr);
-  EXPECT_EQ(legacy_cadence->selected_spelling,
-            "Conservative_phase_flux_artifact_cadence_steps");
-  EXPECT_EQ(legacy_cadence->source_layer, "equation");
-  EXPECT_FALSE(legacy_cadence->supplied);
-  EXPECT_TRUE(legacy_cadence->compatibility_fallback);
-  EXPECT_TRUE(legacy_cadence->ordered_overrides.empty());
-
-  for (const auto canonical :
-       {"level_set_field_name", "transport_form", "velocity_source",
-        "constant_velocity", "enable_kinematic_reconciliation",
-        "conservative_phase_flux_artifact_cadence_steps"}) {
-    const auto *selected = findObservation((*resolved)->input_observations,
-                                           canonical, "legacy_getter");
-    ASSERT_NE(selected, nullptr) << canonical;
-    EXPECT_EQ(selected->source_layer, "equation") << canonical;
-    EXPECT_FALSE(selected->selected_spelling.empty()) << canonical;
-  }
-  EXPECT_EQ((*resolved)->transport.velocity.source,
-            svmp::FE::level_set::LevelSetVelocitySource::ConstantVector);
-  EXPECT_EQ((*resolved)->transport.velocity.constant_value,
-            (std::array<svmp::FE::Real, 3>{1.0, 2.0, 3.0}));
-}
-
-TEST(LevelSetMaintenanceConfiguration,
-     ResolvesUnavailableInstallationAndNonfiniteLegacyTolerance) {
+TEST(LevelSetMaintenanceConfiguration, AcceptsANonfiniteStaticTolerance) {
   auto input = makeLegacyInput();
   put(input.equation_parameters, "Enable_sign_definite_patch_bounds", "true");
   put(input.equation_parameters, "Static_capillary_volume_tolerance", "nan");
 
-  const auto resolved =
-      application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-          input, std::span<const ActiveCutVolumeRequest>{});
+  const auto resolved = resolveInstalled(input);
   ASSERT_TRUE(resolved.has_value());
-  EXPECT_EQ((*resolved)->installation, nullptr);
-  ASSERT_TRUE(
+  EXPECT_TRUE((*resolved)->transport.sign_definite_patch_bounds.enabled);
+  EXPECT_TRUE(
       std::isnan((*resolved)->static_capillary_equilibrium.volume_tolerance));
-  const auto *enabled =
-      findObservation((*resolved)->input_observations,
-                      "enable_sign_definite_patch_bounds", "legacy_getter");
-  ASSERT_NE(enabled, nullptr);
-  EXPECT_EQ(enabled->selected_spelling, "Enable_sign_definite_patch_bounds");
-  EXPECT_TRUE(enabled->supplied);
-  EXPECT_FALSE(enabled->compatibility_fallback);
-  const auto *tolerance =
-      findObservation((*resolved)->input_observations,
-                      "static_capillary_volume_tolerance", "legacy_getter");
-  ASSERT_NE(tolerance, nullptr);
-  EXPECT_EQ(tolerance->selected_spelling, "Static_capillary_volume_tolerance");
-  EXPECT_TRUE(tolerance->supplied);
-  EXPECT_FALSE(tolerance->compatibility_fallback);
-  const auto *default_field = findObservation(
-      (*resolved)->input_observations, "level_set_field_name", "fe_default");
-  ASSERT_NE(default_field, nullptr);
-  EXPECT_TRUE(default_field->selected_spelling.empty());
-  EXPECT_EQ(default_field->source_layer, "fe_default");
-}
-
-TEST(LevelSetMaintenanceConfiguration,
-     RecordsOnlySuccessfulLegacyVelocityPromotionsInApplicatorOrder) {
-  auto unpromoted = makeLegacyInput();
-  put(unpromoted.equation_parameters, "Enable_kinematic_reconciliation", "true");
-  const auto unpromoted_resolved =
-      application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-          unpromoted, std::span<const ActiveCutVolumeRequest>{});
-  ASSERT_TRUE(unpromoted_resolved.has_value());
-  ASSERT_TRUE(*unpromoted_resolved);
-  EXPECT_EQ((*unpromoted_resolved)->transport.velocity.source,
-            svmp::FE::level_set::LevelSetVelocitySource::CoupledField);
-  EXPECT_TRUE(observationLayers((*unpromoted_resolved)->input_observations,
-                                "velocity_source", "derived")
-                  .empty());
-  const auto *default_source =
-      findObservation((*unpromoted_resolved)->input_observations,
-                      "velocity_source", "fe_default");
-  EXPECT_NE(default_source, nullptr);
-  if (default_source != nullptr) {
-    EXPECT_EQ(default_source->source_layer, "fe_default");
-  }
-
-  auto ordered = makeLegacyInput();
-  put(ordered.equation_parameters, "Velocity_source", "prescribed_data");
-  put(ordered.equation_parameters, "Source_velocity_field_name", "Velocity");
-  put(ordered.equation_parameters, "Constant_velocity", "1.0 2.0 3.0");
-  put(ordered.equation_parameters, "Enable_kinematic_reconciliation", "true");
-  const auto ordered_resolved =
-      application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-          ordered, std::span<const ActiveCutVolumeRequest>{});
-  ASSERT_TRUE(ordered_resolved.has_value());
-  ASSERT_TRUE(*ordered_resolved);
-  EXPECT_EQ((*ordered_resolved)->transport.velocity.source,
-            svmp::FE::level_set::LevelSetVelocitySource::ConstantVector);
-  EXPECT_EQ((*ordered_resolved)->transport.velocity.constant_value,
-            (std::array<svmp::FE::Real, 3>{1.0, 2.0, 3.0}));
-  EXPECT_EQ(observationLayers((*ordered_resolved)->input_observations,
-                              "velocity_source", "derived"),
-            (std::vector<std::string>{"derived:wet_extension",
-                                      "derived:constant_velocity"}));
 }
 
 TEST(LevelSetMaintenanceConfiguration,

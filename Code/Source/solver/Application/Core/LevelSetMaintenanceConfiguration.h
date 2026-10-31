@@ -28,25 +28,27 @@ struct StaticCapillaryEquilibriumOptions
 
 // The FE configuration of a maintained level-set field
 // (FE/LevelSet/Maintenance/LevelSetMaintenanceConfiguration.h), resolved from
-// the legacy equation input, with the resolved installation it came from,
-// the static-capillary initialization (a Navier-Stokes free-surface option)
-// and the input provenance.
+// the keys of the equation element that the installation resolved, with the
+// installation itself and the static-capillary initialization (a
+// Navier-Stokes free-surface option).
 struct ResolvedLevelSetMaintenanceCompatibilityConfiguration
     : svmp::FE::level_set::LevelSetMaintenanceConfiguration {
   ResolvedLevelSetEquationHandle installation{};
   bool static_capillary_equilibrium_enabled{false};
   StaticCapillaryEquilibriumOptions static_capillary_equilibrium{};
-  std::vector<LevelSetInputObservation> input_observations{};
 };
 
 using LevelSetMaintenanceConfigurationHandle = std::shared_ptr<
     const ResolvedLevelSetMaintenanceCompatibilityConfiguration>;
 
+// The maintenance of a level-set equation: the equation type and the open
+// boundaries come from the legacy input, the keys from the installation
+// (required for a level-set equation).
 [[nodiscard]] std::optional<LevelSetMaintenanceConfigurationHandle>
 resolveLegacyLevelSetMaintenanceConfiguration(
     const LegacyLevelSetMaintenanceInput &input,
     std::span<const ActiveCutVolumeRequest> active_requests,
-    ResolvedLevelSetEquationHandle installation = {});
+    ResolvedLevelSetEquationHandle installation);
 
 [[nodiscard]] std::vector<LevelSetMaintenanceConfigurationHandle>
 resolveLevelSetMaintenanceConfigurations(

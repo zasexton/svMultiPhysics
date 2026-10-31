@@ -122,6 +122,26 @@ opt::OptionSchema<Keys> makeLevelSetEquationSchema() {
              return keys.transport.interface_kinematic.weight_scale;
            },
            opt::RealCodec{}, setting("weight of the interface kinematic term"))
+      .key("Enable_kinematic_reconciliation",
+           [](Keys &keys) -> auto & {
+             return keys.transport.kinematic_reconciliation.enabled;
+           },
+           relaxedBool(), setting("accepted-step kinematic reconciliation"))
+      .key("Enable_sign_definite_patch_bounds",
+           [](Keys &keys) -> auto & {
+             return keys.transport.sign_definite_patch_bounds.enabled;
+           },
+           relaxedBool(), setting("accepted-step sign-definite patch bounds"))
+      .key("Enable_interface_preserving_redistancing",
+           [](Keys &keys) -> auto & {
+             return keys.transport.interface_preserving_redistancing.enabled;
+           },
+           relaxedBool(),
+           setting("triggered accepted-step interface-preserving redistancing"))
+      // Read from the equation element only (levelSetDomainInput).
+      .key("Level_set_isovalue", &Keys::level_set_isovalue,
+           opt::RealCodec{.require_finite = false},
+           setting("isovalue of the interface of the maintained field"))
       // A velocity source decides whether the velocity field is registered,
       // unless the element states it.
       .implies("Velocity_source", "Auto_register_velocity_field", "true",
@@ -162,6 +182,12 @@ levelSetEquationInput(const svmp::Physics::ParameterMap &parameters) {
     }
   }
   return input;
+}
+
+opt::OptionInput
+levelSetDomainInput(const svmp::Physics::ParameterMap &parameters) {
+  return levelSetEquationInput(parameters).excludeSpellings(
+      levelSetEquationSchema().spellings({"Level_set_isovalue"}));
 }
 
 opt::ResolvedOptions<Keys> resolveLevelSetEquationKeys(const opt::OptionInput &input,
@@ -436,53 +462,6 @@ int parseStrictPositiveInteger(std::string_view raw,
         "value '" +
         std::string(raw) + "' for " + std::string(context) + ".");
   }
-}
-
-svmp::FE::level_set::LevelSetTransportForm
-parseTransportForm(std::string_view raw) {
-  const auto value = normalizedToken(std::string(raw));
-  using Form = svmp::FE::level_set::LevelSetTransportForm;
-  if (value == "advective" || value == "classical" || value == "standard") {
-    return Form::Advective;
-  }
-  if (value == "conservative" || value == "conservativedivergence" ||
-      value == "divergence" || value == "divergenceform") {
-    return Form::ConservativeDivergence;
-  }
-  throw std::runtime_error(
-      "[svMultiPhysics::Application] Level-set Transport_form must be one of "
-      "'advective' or 'conservative_divergence'.");
-}
-
-svmp::FE::level_set::LevelSetVelocitySource
-parseVelocitySource(std::string_view raw, LevelSetInputPolicy policy) {
-  const auto value = normalizedToken(std::string(raw));
-  using Source = svmp::FE::level_set::LevelSetVelocitySource;
-  if ((policy == LevelSetInputPolicy::LegacyMaintenance && value.empty()) ||
-      value == "coupled" || value == "coupledfield" ||
-      value == "unknown" || (policy == LevelSetInputPolicy::Installation &&
-                             value == "navierstokes")) {
-    return Source::CoupledField;
-  }
-  if (value == "prescribed" || value == "prescribeddata" || value == "data") {
-    return Source::PrescribedData;
-  }
-  if (value == "constant" || value == "constantvector") {
-    return Source::ConstantVector;
-  }
-  if (value == "materialinterfacephasepair") {
-    return Source::MaterialInterfacePhasePair;
-  }
-  if (policy == LevelSetInputPolicy::LegacyMaintenance) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Level-set Velocity_source must be one "
-        "of 'coupled_field', 'prescribed_data', 'constant_vector', or "
-        "'material_interface_phase_pair'.");
-  }
-  throw std::runtime_error(
-      "[svMultiPhysics::Application] Velocity_source must be one of "
-      "'coupled_field', 'prescribed_data', 'constant', or "
-      "'material_interface_phase_pair'.");
 }
 
 svmp::FE::level_set::LevelSetPhaseSide parsePhaseSide(std::string_view raw) {

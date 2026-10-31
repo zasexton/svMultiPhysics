@@ -29,6 +29,11 @@ levelSetEquationSchema();
 [[nodiscard]] svmp::FE::options::OptionInput
 levelSetEquationInput(const svmp::Physics::ParameterMap &parameters);
 
+/// The input of a domain element: its defined entries without the keys that
+/// only the equation element gives (Level_set_isovalue).
+[[nodiscard]] svmp::FE::options::OptionInput
+levelSetDomainInput(const svmp::Physics::ParameterMap &parameters);
+
 /// Resolves the keys of one element over the values of the elements before
 /// it, then sets the values that a key selects beyond its own field: Coupled
 /// routes the transport to the monolithic operator, Constant_velocity
@@ -129,12 +134,6 @@ private:
 [[nodiscard]] int parseStrictPositiveInteger(std::string_view raw,
                                              std::string_view context);
 
-[[nodiscard]] svmp::FE::level_set::LevelSetTransportForm
-parseTransportForm(std::string_view raw);
-
-[[nodiscard]] svmp::FE::level_set::LevelSetVelocitySource
-parseVelocitySource(std::string_view raw, LevelSetInputPolicy policy);
-
 [[nodiscard]] svmp::FE::level_set::LevelSetPhaseSide
 parsePhaseSide(std::string_view raw);
 
@@ -143,23 +142,6 @@ parseConservativePhaseBoundaryFluxPolicy(std::string_view raw);
 
 namespace aliases {
 
-inline constexpr std::array<std::string_view, 1> transport_form{
-    "Transport_form"};
-inline constexpr std::array<std::string_view, 2> level_set_field_name{
-    "Level_set_field_name",
-    "Field_name"};
-inline constexpr std::array<std::string_view, 1> level_set_isovalue{
-    "Level_set_isovalue"};
-inline constexpr std::array<std::string_view, 1> velocity_field_name{
-    "Velocity_field_name"};
-inline constexpr std::array<std::string_view, 1> velocity_auto_register{
-    "Auto_register_velocity_field"};
-inline constexpr std::array<std::string_view, 1> velocity_source{
-    "Velocity_source"};
-inline constexpr std::array<std::string_view, 1> material_interface_marker{
-    "Material_interface_marker"};
-inline constexpr std::array<std::string_view, 1> constant_velocity{
-    "Constant_velocity"};
 inline constexpr std::array<std::string_view, 1>
     advection_velocity_extension_method{
         "Advection_velocity_extension_method"};

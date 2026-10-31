@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "Application/Translators/EquationTranslator.h"
+#include "Application/Translators/LevelSetConfigurationParsing.h"
 #include "Application/Translators/LevelSetEquationTranslator.h"
 
 #include "Application/Core/LevelSetMaintenanceConfiguration.h"
@@ -177,23 +178,6 @@ void expectMaintenanceCompatibilityFieldsEqual(
   }
   EXPECT_EQ(actual.static_capillary_equilibrium_enabled,
             expected.static_capillary_equilibrium_enabled);
-  ASSERT_EQ(actual.input_observations.size(), expected.input_observations.size());
-  for (std::size_t index = 0u; index < expected.input_observations.size();
-       ++index) {
-    const auto& actual_observation = actual.input_observations[index];
-    const auto& expected_observation = expected.input_observations[index];
-    EXPECT_EQ(actual_observation.canonical_key, expected_observation.canonical_key);
-    EXPECT_EQ(actual_observation.selected_spelling,
-              expected_observation.selected_spelling);
-    EXPECT_EQ(actual_observation.source_layer, expected_observation.source_layer);
-    EXPECT_EQ(actual_observation.supplied, expected_observation.supplied);
-    EXPECT_EQ(actual_observation.representation,
-              expected_observation.representation);
-    EXPECT_EQ(actual_observation.compatibility_fallback,
-              expected_observation.compatibility_fallback);
-    EXPECT_EQ(actual_observation.ordered_overrides,
-              expected_observation.ordered_overrides);
-  }
 }
 
 void expectMaintenanceConfigurationUnchanged(
@@ -216,8 +200,23 @@ std::vector<LevelSetMaintenanceRequest> legacyMaintenanceRequestsForTest(
     }
     const auto input = application::translators::EquationTranslator::
         snapshotLegacyLevelSetMaintenanceInput(*equation);
+    // A level-set equation is maintained from the keys of its equation
+    // element, as the translator resolves them.
+    std::shared_ptr<application::core::ResolvedLevelSetEquationConfiguration>
+        installation;
+    const auto type = normalized_token(input.equation_type);
+    if (type == "levelset" || type == "levelsettransport") {
+      namespace parsing = application::translators::level_set::configuration;
+      installation = std::make_shared<
+          application::core::ResolvedLevelSetEquationConfiguration>();
+      installation->equation_keys =
+          parsing::resolveLevelSetEquationKeys(
+              parsing::levelSetEquationInput(input.equation_parameters))
+              .value;
+    }
     const auto configuration = application::core::
-        resolveLegacyLevelSetMaintenanceConfiguration(input, active_requests);
+        resolveLegacyLevelSetMaintenanceConfiguration(input, active_requests,
+                                                      installation);
     if (configuration) {
       requests.emplace_back(*configuration);
     }
@@ -3734,7 +3733,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
-     MaintenanceCompatibilityUsesUndefinedNonemptyGetterDefaults)
+     MaintenanceReadsOnlyDefinedEquationKeys)
 {
   Parameters params;
   auto* equation = new EquationParameters();
@@ -3742,24 +3741,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
   params.equation_parameters.push_back(equation);
   Parameter<std::string> undefined_enable("Enable_kinematic_reconciliation",
                                           "true", false);
-  Parameter<double> undefined_tolerance(
-      "Conservative_phase_geometry_measure_tolerance", 1.2345678901234567,
-      false);
   equation->params_map[undefined_enable.name()] = &undefined_enable;
-  equation->params_map[undefined_tolerance.name()] = &undefined_tolerance;
 
-  const auto getter_text = equation->get_parameter_list();
-  const auto requests = legacyMaintenanceRequestsForTest(params);
-
-  ASSERT_EQ(getter_text.at("Conservative_phase_geometry_measure_tolerance"),
-            "1.23457");
   EXPECT_FALSE(undefined_enable.defined());
-  EXPECT_FALSE(undefined_tolerance.defined());
-  ASSERT_EQ(requests.size(), 1u);
-  EXPECT_TRUE(requests.front().configuration->transport.kinematic_reconciliation.enabled);
-  EXPECT_DOUBLE_EQ(requests.front().configuration->transport.conservative_phase
-                       .geometry_measure_tolerance,
-                   1.23457);
+  EXPECT_TRUE(legacyMaintenanceRequestsForTest(params).empty());
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
@@ -3836,18 +3821,18 @@ TEST(ApplicationDriverLevelSetWorkflows,
 )xml");
   };
 
-  const auto expect_vector_error = [&](std::string value) {
+  const auto expect_vector_error = [&](std::string value, std::string reason) {
     auto invalid = make_params();
     invalid->equation_parameters.front()->set_extra_parameter_value(
         "Constant_velocity", value);
     EXPECT_EQ((maintenanceCompatibilityExceptionMessage<std::runtime_error>(
                   [&] { (void)legacyMaintenanceRequestsForTest(*invalid); })),
-              "[svMultiPhysics::Application] Constant_velocity must contain "
-              "exactly three finite numeric components.");
+              "[Level-set equation] Constant_velocity: " + reason);
   };
-  expect_vector_error("1.0 2.0");
-  expect_vector_error("1.0 2.0 3.0 4.0");
-  expect_vector_error("1.0 nan 3.0");
+  expect_vector_error("1.0 2.0", "expected three numbers, got '1.0 2.0'");
+  expect_vector_error("1.0 2.0 3.0 4.0",
+                      "expected three numbers, got '1.0 2.0 3.0 4.0'");
+  expect_vector_error("1.0 nan 3.0", "expected a finite number, got 'nan'");
 
   auto invalid_real = make_params();
   invalid_real->equation_parameters.front()->set_extra_parameter_value(
@@ -3903,20 +3888,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
             svmp::FE::level_set::LevelSetVelocitySource::ConstantVector);
   EXPECT_EQ(requests.front().configuration->transport.velocity.constant_value,
             (std::array<svmp::FE::Real, 3>{7.0, 8.0, 9.0}));
-
-  auto ignored = parseWorkflowParametersXml(R"xml(
-<svMultiPhysicsFile>
-  <Add_equation type="level_set">
-    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
-    <Level_set_source>invalid_source</Level_set_source>
-    <SUPG_tau_scale>invalid_number</SUPG_tau_scale>
-    <Interface_kinematic_marker>invalid_marker</Interface_kinematic_marker>
-  </Add_equation>
-</svMultiPhysicsFile>
-)xml");
-  requests = legacyMaintenanceRequestsForTest(*ignored);
-  ASSERT_EQ(requests.size(), 1u);
-  EXPECT_TRUE(requests.front().configuration->transport.kinematic_reconciliation.enabled);
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
@@ -3934,9 +3905,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_EQ(
       (maintenanceCompatibilityExceptionMessage<std::runtime_error>(
           [&] { (void)legacyMaintenanceRequestsForTest(*params); })),
-      "[svMultiPhysics::Application] Level-set Velocity_source must be one of "
-      "'coupled_field', 'prescribed_data', 'constant_vector', or "
-      "'material_interface_phase_pair'.");
+      "[Level-set equation] Velocity_source: expected one of coupled_field | "
+      "prescribed_data | constant_vector | material_interface_phase_pair, "
+      "got 'navier_stokes'");
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
@@ -3954,9 +3925,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_EQ(
       (maintenanceCompatibilityExceptionMessage<std::runtime_error>(
           [&] { (void)legacyMaintenanceRequestsForTest(*velocity_before_phase); })),
-      "[svMultiPhysics::Application] Level-set Velocity_source must be one of "
-      "'coupled_field', 'prescribed_data', 'constant_vector', or "
-      "'material_interface_phase_pair'.");
+      "[Level-set equation] Velocity_source: expected one of coupled_field | "
+      "prescribed_data | constant_vector | material_interface_phase_pair, "
+      "got 'invalid_velocity'");
 
   auto invalid_boundary = parseWorkflowParametersXml(R"xml(
 <svMultiPhysicsFile>
@@ -3997,9 +3968,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_EQ(
       (maintenanceCompatibilityExceptionMessage<std::runtime_error>(
           [&] { (void)legacyMaintenanceRequestsForTest(*velocity_first); })),
-      "[svMultiPhysics::Application] Level-set Velocity_source must be one of "
-      "'coupled_field', 'prescribed_data', 'constant_vector', or "
-      "'material_interface_phase_pair'.");
+      "[Level-set equation] Velocity_source: expected one of coupled_field | "
+      "prescribed_data | constant_vector | material_interface_phase_pair, "
+      "got 'invalid_velocity'");
 
   auto phase_first = parseWorkflowParametersXml(R"xml(
 <svMultiPhysicsFile>

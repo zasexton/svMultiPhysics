@@ -6,7 +6,6 @@
 
 #include <memory>
 #include <string>
-#include <vector>
 
 namespace svmp {
 class MeshBase;
@@ -18,16 +17,6 @@ class FunctionSpace;
 
 namespace application::core {
 
-struct LevelSetInputObservation {
-  std::string canonical_key{};
-  std::string selected_spelling{};
-  std::string source_layer{};
-  bool supplied{false};
-  std::string representation{};
-  bool compatibility_fallback{false};
-  std::vector<std::string> ordered_overrides{};
-};
-
 // The keys of a level-set equation as one value, as levelSetEquationSchema()
 // (Application/Translators/LevelSetConfigurationParsing.h) resolves them
 // (decision D47, step P3): the transport options and the keys that select a
@@ -36,6 +25,8 @@ struct LevelSetEquationKeys {
   svmp::FE::level_set::LevelSetTransportOptions transport{};
   // Coupled: the transport joins the monolithic operator ("equations").
   bool coupled{false};
+  // Level_set_isovalue: the interface of the maintained field.
+  double level_set_isovalue{0.0};
 };
 
 struct ResolvedLevelSetEquationConfiguration {
@@ -44,6 +35,9 @@ struct ResolvedLevelSetEquationConfiguration {
   std::shared_ptr<const svmp::FE::spaces::FunctionSpace> level_set_space{};
   svmp::FE::level_set::LevelSetTransportOptions options{};
   svmp::FE::systems::FormInstallOptions install_options{};
+  // The keys of the equation element alone, before its domain elements and
+  // the extension: what the maintenance of the field reads.
+  LevelSetEquationKeys equation_keys{};
   // The "resolved" section of the transport's effective-configuration
   // artifact: every key of the schema with its value and source.
   std::string resolved_input_json{};

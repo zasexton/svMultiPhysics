@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "Application/Translators/EquationTranslator.h"
+#include "Application/Translators/LevelSetConfigurationParsing.h"
 
 // The workflow helper under test currently has internal linkage in the
 // application driver.  Include the implementation, as the serial workflow
@@ -118,8 +119,23 @@ std::vector<LevelSetMaintenanceRequest> legacyMaintenanceRequestsForTest(
     }
     const auto input = application::translators::EquationTranslator::
         snapshotLegacyLevelSetMaintenanceInput(*equation);
+    // A level-set equation is maintained from the keys of its equation
+    // element, as the translator resolves them.
+    std::shared_ptr<application::core::ResolvedLevelSetEquationConfiguration>
+        installation;
+    const auto type = normalized_token(input.equation_type);
+    if (type == "levelset" || type == "levelsettransport") {
+      namespace parsing = application::translators::level_set::configuration;
+      installation = std::make_shared<
+          application::core::ResolvedLevelSetEquationConfiguration>();
+      installation->equation_keys =
+          parsing::resolveLevelSetEquationKeys(
+              parsing::levelSetEquationInput(input.equation_parameters))
+              .value;
+    }
     const auto configuration = application::core::
-        resolveLegacyLevelSetMaintenanceConfiguration(input, active_requests);
+        resolveLegacyLevelSetMaintenanceConfiguration(input, active_requests,
+                                                      installation);
     if (configuration) {
       requests.emplace_back(*configuration);
     }

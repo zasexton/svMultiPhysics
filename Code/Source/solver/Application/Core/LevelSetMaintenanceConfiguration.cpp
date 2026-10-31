@@ -18,79 +18,8 @@ namespace parsing = application::translators::level_set::configuration;
 namespace aliases = parsing::aliases;
 
 using Reader = parsing::LevelSetConfigurationReader;
-using Selection = parsing::LevelSetSelectedParameter;
 
 constexpr auto kLegacyPolicy = parsing::LevelSetInputPolicy::LegacyMaintenance;
-
-void appendSelections(const Reader &reader, std::size_t &cursor,
-                      std::vector<LevelSetInputObservation> &observations,
-                      std::string_view source_layer,
-                      std::string_view representation) {
-  const auto &selections = reader.selections();
-  while (cursor < selections.size()) {
-    const auto &selected = selections[cursor++];
-    observations.push_back(LevelSetInputObservation{
-        .canonical_key = selected.canonical_key,
-        .selected_spelling = selected.selected_spelling,
-        .source_layer = std::string(source_layer),
-        .supplied = selected.supplied,
-        .representation = std::string(representation),
-        .compatibility_fallback = selected.compatibility_fallback,
-        .ordered_overrides = {},
-    });
-  }
-}
-
-void appendDerivedObservation(
-    std::vector<LevelSetInputObservation> &observations,
-    std::string_view canonical_key, std::string_view source_layer,
-    std::string_view representation = "derived") {
-  observations.push_back(LevelSetInputObservation{
-      .canonical_key = std::string(canonical_key),
-      .selected_spelling = {},
-      .source_layer = std::string(source_layer),
-      .supplied = false,
-      .representation = std::string(representation),
-      .compatibility_fallback = false,
-      .ordered_overrides = {},
-  });
-}
-
-void appendLegacyDefaults(std::vector<LevelSetInputObservation> &observations) {
-  constexpr std::array<std::string_view, 10> keys{
-      "level_set_field_name",
-      "level_set_isovalue",
-      "transport_form",
-      "velocity_source",
-      "velocity_auto_register_field",
-      "velocity_source_field_name",
-      "velocity_space_present",
-      "enable_conservative_phase_transport",
-      "conservative_phase_liquid_side",
-      "enable_static_capillary_equilibrium_initialization",
-  };
-  const auto has_effective_observation = [&](std::string_view key) {
-    return std::any_of(observations.begin(), observations.end(),
-                       [&](const auto &item) {
-                         return item.canonical_key == key &&
-                                (item.representation == "legacy_getter" ||
-                                 item.representation == "derived");
-                       });
-  };
-  for (const auto key : keys) {
-    if (!has_effective_observation(key)) {
-      observations.push_back(LevelSetInputObservation{
-          .canonical_key = std::string(key),
-          .selected_spelling = {},
-          .source_layer = "fe_default",
-          .supplied = false,
-          .representation = "fe_default",
-          .compatibility_fallback = false,
-          .ordered_overrides = {},
-      });
-    }
-  }
-}
 
 std::optional<ActiveCutVolumeRequest> matchingActiveCutVolumeRequest(
     std::span<const ActiveCutVolumeRequest> active_requests,
@@ -125,16 +54,36 @@ resolveLegacyLevelSetMaintenanceConfiguration(
     return std::nullopt;
   }
 
+  if (!installation) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Application] Level-set maintenance requires the "
+        "resolved level-set equation.");
+  }
+
   auto result =
       std::make_shared<ResolvedLevelSetMaintenanceCompatibilityConfiguration>();
   result->installation = std::move(installation);
 
+  // The maintained field reads the keys of the equation element as the
+  // installation resolved them (levelSetEquationSchema()).  Its transport
+  // holds the keys the maintenance uses; the others keep their defaults.
+  const auto &keys = result->installation->equation_keys;
+  auto &transport = result->transport;
+  transport.level_set.field_name = keys.transport.level_set.field_name;
+  transport.transport_form = keys.transport.transport_form;
+  transport.velocity.field_name = keys.transport.velocity.field_name;
+  transport.velocity.source = keys.transport.velocity.source;
+  transport.velocity.material_interface_marker =
+      keys.transport.velocity.material_interface_marker;
+  transport.velocity.constant_value = keys.transport.velocity.constant_value;
+  transport.kinematic_reconciliation = keys.transport.kinematic_reconciliation;
+  transport.sign_definite_patch_bounds =
+      keys.transport.sign_definite_patch_bounds;
+  transport.interface_preserving_redistancing =
+      keys.transport.interface_preserving_redistancing;
+  result->isovalue = keys.level_set_isovalue;
+
   Reader reader(input.equation_parameters, kLegacyPolicy);
-  std::size_t observation_cursor = 0u;
-  const auto append_equation_observations = [&] {
-    appendSelections(reader, observation_cursor, result->input_observations,
-                     "equation", "legacy_getter");
-  };
   const auto apply_boolean = [&](auto names, std::string_view canonical,
                                  bool &target) {
     if (const auto value = reader.boolean(names, canonical)) {
@@ -175,53 +124,12 @@ resolveLegacyLevelSetMaintenanceConfiguration(
         }
       };
 
-  if (const auto field = reader.string(aliases::level_set_field_name,
-                                       "level_set_field_name")) {
-    result->transport.level_set.field_name = parsing::trimCopy(field->text);
-  }
-  apply_real(aliases::level_set_isovalue, "level_set_isovalue",
-             result->isovalue);
-  if (const auto form =
-          reader.string(aliases::transport_form, "transport_form")) {
-    result->transport.transport_form = parsing::parseTransportForm(form->text);
-  }
-
-  if (const auto field =
-          reader.string(aliases::velocity_field_name, "velocity_field_name")) {
-    result->transport.velocity.field_name = parsing::trimCopy(field->text);
-  }
-  if (const auto source =
-          reader.string(aliases::velocity_source, "velocity_source")) {
-    result->transport.velocity.source =
-        parsing::parseVelocitySource(source->text, kLegacyPolicy);
-  }
-  apply_integer(aliases::material_interface_marker, "material_interface_marker",
-                result->transport.velocity.material_interface_marker);
   // A source velocity field selects the velocity extension, whose field is
-  // a coupled unknown.
-  const bool wet_extension_enabled =
-      reader
-          .string(aliases::wet_extension_source,
-                  "advection_velocity_from_field")
-          .has_value();
-  if (wet_extension_enabled) {
-    append_equation_observations();
-    result->transport.velocity.source =
-        ls::LevelSetVelocitySource::CoupledField;
-    appendDerivedObservation(result->input_observations, "velocity_source",
-                             "derived:wet_extension");
+  // a coupled unknown; a constant velocity stays constant.
+  if (reader.selected(aliases::wet_extension_source).has_value() &&
+      transport.velocity.source != ls::LevelSetVelocitySource::ConstantVector) {
+    transport.velocity.source = ls::LevelSetVelocitySource::CoupledField;
   }
-  if (const auto constant =
-          reader.vector3(aliases::constant_velocity, "Constant_velocity",
-                         "constant_velocity")) {
-    append_equation_observations();
-    result->transport.velocity.source =
-        ls::LevelSetVelocitySource::ConstantVector;
-    result->transport.velocity.constant_value = *constant;
-    appendDerivedObservation(result->input_observations, "velocity_source",
-                             "derived:constant_velocity");
-  }
-  append_equation_observations();
 
   apply_boolean(aliases::conservative_phase_enable,
                 "enable_conservative_phase_transport",
@@ -324,8 +232,6 @@ resolveLegacyLevelSetMaintenanceConfiguration(
       result->transport.conservative_phase
           .maximum_geometry_displacement_fraction);
 
-  append_equation_observations();
-
   for (const auto &boundary : input.boundaries) {
     if (!boundary.type_defined || !boundary.name_defined) {
       continue;
@@ -346,27 +252,9 @@ resolveLegacyLevelSetMaintenanceConfiguration(
                                                   "open_boundary_value")) {
         open.literal_inflow_value = *value;
       }
-      std::size_t boundary_cursor = 0u;
-      appendSelections(boundary_reader, boundary_cursor,
-                       result->input_observations, "boundary:" + open.face_name,
-                       "legacy_getter");
     }
     result->open_boundaries.push_back(std::move(open));
   }
-
-  apply_boolean_list(
-      {"Enable_kinematic_reconciliation"},
-      "enable_kinematic_reconciliation",
-      result->transport.kinematic_reconciliation.enabled);
-  apply_boolean_list(
-      {"Enable_sign_definite_patch_bounds"},
-      "enable_sign_definite_patch_bounds",
-      result->transport.sign_definite_patch_bounds.enabled);
-  apply_boolean_list(
-      {"Enable_interface_preserving_redistancing"},
-      "enable_interface_preserving_redistancing",
-      result->transport.interface_preserving_redistancing.enabled);
-  append_equation_observations();
 
   apply_boolean_list({"Enable_static_capillary_equilibrium_initialization"},
                      "enable_static_capillary_equilibrium_initialization",
@@ -461,12 +349,10 @@ resolveLegacyLevelSetMaintenanceConfiguration(
       {"Static_capillary_minimum_volume_merit_penalty"},
       "static_capillary_minimum_volume_merit_penalty",
       result->static_capillary_equilibrium.minimum_volume_merit_penalty);
-  append_equation_observations();
 
   result->volume_cut_request = matchingActiveCutVolumeRequest(
       active_requests, result->transport.level_set.field_name,
       result->isovalue);
-  appendLegacyDefaults(result->input_observations);
 
   const bool enabled = result->transport.conservative_phase.enabled ||
                        result->transport.kinematic_reconciliation.enabled ||

@@ -1004,7 +1004,7 @@ parse_conservative_phase_boundary_flux_policy(std::string_view raw)
 
 // Reads one element of the equation over the values of the elements before
 // it: the conservative-phase controls, then the keys of
-// levelSetEquationSchema(), then the accepted-step maintenance switches.
+// levelSetEquationSchema().
 void apply_level_set_params(const svmp::Physics::ParameterMap& params,
                             const svmp::FE::options::OptionInput& input,
                             application::core::LevelSetEquationKeys& keys)
@@ -1122,22 +1122,6 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
   }
 
   keys = parsing::resolveLevelSetEquationKeys(input, std::move(keys)).value;
-
-  if (const auto value = get_defined_bool(
-          params,
-          {"Enable_kinematic_reconciliation"})) {
-    options.kinematic_reconciliation.enabled = *value;
-  }
-  if (const auto value = get_defined_bool(
-          params,
-          {"Enable_sign_definite_patch_bounds"})) {
-    options.sign_definite_patch_bounds.enabled = *value;
-  }
-  if (const auto value = get_defined_bool(
-          params,
-          {"Enable_interface_preserving_redistancing"})) {
-    options.interface_preserving_redistancing.enabled = *value;
-  }
 }
 
 void apply_level_set_bcs(const svmp::Physics::EquationModuleInput& input,
@@ -1243,18 +1227,23 @@ translate_level_set_transport_input(
   // each over the values before it.
   application::core::LevelSetEquationKeys keys{};
   std::vector<svmp::FE::options::OptionInput> element_inputs;
-  const auto apply_element = [&](const svmp::Physics::ParameterMap& params) {
-    element_inputs.push_back(parsing::levelSetEquationInput(params));
+  const auto apply_element = [&](const svmp::Physics::ParameterMap& params,
+                                 svmp::FE::options::OptionInput element_input) {
+    element_inputs.push_back(std::move(element_input));
     apply_level_set_params(params, element_inputs.back(), keys);
   };
-  apply_element(input.equation_params);
-  apply_element(input.default_domain.params);
+  apply_element(input.equation_params,
+                parsing::levelSetEquationInput(input.equation_params));
+  const auto equation_keys = keys;
+  apply_element(input.default_domain.params,
+                parsing::levelSetDomainInput(input.default_domain.params));
   if (!input.domains.empty()) {
     if (input.domains.size() != 1u) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Multiple <Domain> blocks are not supported by the level-set transport module.");
     }
-    apply_element(input.domains.front().params);
+    apply_element(input.domains.front().params,
+                  parsing::levelSetDomainInput(input.domains.front().params));
   }
   auto& options = keys.transport;
   apply_level_set_bcs(input, options);
@@ -1392,6 +1381,7 @@ translate_level_set_transport_input(
       .level_set_space = std::move(level_set_space),
       .options = std::move(options),
       .install_options = install_options,
+      .equation_keys = equation_keys,
       .resolved_input_json = std::move(resolved_input_json),
   };
 }
