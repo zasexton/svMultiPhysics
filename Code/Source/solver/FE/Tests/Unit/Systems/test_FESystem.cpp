@@ -14,6 +14,7 @@
 #include "Systems/MeshDisplacementBinding.h"
 #include "Systems/OperatorBackends.h"
 #include "Systems/SystemsExceptions.h"
+#include "Backends/Utils/BackendOptions.h"
 #include "TimeStepping/GeneratedState.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
@@ -888,6 +889,151 @@ TEST(FESystem, UnknownFieldIdsInDofMapOrderSkipsPrescribedFieldIdGaps)
     EXPECT_EQ(unknown_fields[1], p);
     EXPECT_EQ(sys.fieldMap().getField(0).name, "u");
     EXPECT_EQ(sys.fieldMap().getField(1).name, "p");
+}
+
+namespace {
+
+struct LayoutField {
+    std::string name;
+    int components{1};
+    std::optional<svmp::FE::systems::SolverRole> role{};
+    std::string block{};
+};
+
+svmp::FE::backends::BlockLayout deriveLayoutOf(const std::vector<LayoutField>& fields,
+                                               svmp::FE::systems::BlockLayoutRequest request)
+{
+    auto mesh = build_single_quad_mesh();
+    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    FESystem sys(mesh);
+    sys.addOperator("mass");
+    for (const auto& field : fields) {
+        std::shared_ptr<const svmp::FE::spaces::FunctionSpace> space = scalar_space;
+        if (field.components > 1) {
+            space = std::make_shared<ProductSpace>(scalar_space, field.components);
+        }
+        const auto id = sys.addField(FieldSpec{.name = field.name,
+                                               .space = space,
+                                               .components = field.components,
+                                               .solver_role = field.role,
+                                               .solver_block = field.block});
+        sys.addCellKernel("mass", id, std::make_shared<MassKernel>(1.0));
+    }
+    sys.setup();
+    return svmp::FE::systems::deriveBlockLayout(sys, request);
+}
+
+std::string describe(const svmp::FE::backends::BlockLayout& layout)
+{
+    std::string text;
+    for (const auto& block : layout.blocks) {
+        text += block.name + "(" + std::to_string(block.start_component) + ":" +
+                std::to_string(block.n_components) + ":" +
+                std::to_string(static_cast<int>(block.role)) + ") ";
+    }
+    text += "pair=" + (layout.momentum_block ? std::to_string(*layout.momentum_block) : std::string("-")) +
+            "/" + (layout.constraint_block ? std::to_string(*layout.constraint_block) : std::string("-"));
+    return text;
+}
+
+} // namespace
+
+TEST(FESystem, BlockLayoutFollowsDeclaredSolverRoles)
+{
+    using svmp::FE::systems::BlockLayoutRequest;
+    using svmp::FE::systems::SolverRole;
+    constexpr auto constraint = SolverRole::Constraint;
+    const BlockLayoutRequest split{.split_by_role = true, .name_saddle_pair = true};
+    const BlockLayoutRequest pair{.split_by_role = false, .name_saddle_pair = true};
+    const std::string velocity_block = "VelocityAuxiliaryComputationalPrimary";
+
+    // Navier-Stokes: two single-field runs stay unmerged, with the pair named.
+    const std::vector<LayoutField> ns{{"Velocity", 2, {}, velocity_block}, {"Pressure", 1, constraint}};
+    EXPECT_EQ(describe(deriveLayoutOf(ns, split)), "Velocity(0:2:0) Pressure(2:1:0) pair=0/1");
+    EXPECT_EQ(describe(deriveLayoutOf(ns, {})), "Velocity(0:2:0) Pressure(2:1:0) pair=-/-");
+
+    // Navier-Stokes with a level set and its extension velocity.
+    const std::vector<LayoutField> ns_level_set{{"Velocity", 2, {}, velocity_block},
+                                                {"phi", 1},
+                                                {"LevelSetAdvectionVelocity", 2},
+                                                {"Pressure", 1, constraint}};
+    EXPECT_EQ(describe(deriveLayoutOf(ns_level_set, split)),
+              "VelocityAuxiliaryComputationalPrimary(0:5:1) Pressure(5:1:2) pair=0/1");
+    EXPECT_EQ(describe(deriveLayoutOf(ns_level_set, {})),
+              "Velocity(0:2:0) phi(2:1:0) LevelSetAdvectionVelocity(3:2:0) Pressure(5:1:0) pair=-/-");
+
+    // A level set registered before the velocity: the first stated block names the group.
+    const std::vector<LayoutField> level_set_first{
+        {"phi", 1}, {"Velocity", 2, {}, velocity_block}, {"Pressure", 1, constraint}};
+    EXPECT_EQ(describe(deriveLayoutOf(level_set_first, split)),
+              "VelocityAuxiliaryComputationalPrimary(0:3:1) Pressure(3:1:2) pair=0/1");
+
+    // Ustruct: displacement and velocity form the primary block.
+    const std::vector<LayoutField> ustruct{
+        {"Displacement", 2, {}, "UstructKinematicMomentum"}, {"Velocity", 2}, {"Pressure", 1, constraint}};
+    EXPECT_EQ(describe(deriveLayoutOf(ustruct, split)),
+              "UstructKinematicMomentum(0:4:1) Pressure(4:1:2) pair=0/1");
+    EXPECT_EQ(describe(deriveLayoutOf(ustruct, pair)),
+              "Displacement(0:2:0) Velocity(2:2:0) Pressure(4:1:0) pair=0/2");
+
+    // Two constraint fields merge too; an unnamed group joins its field names.
+    const std::vector<LayoutField> two_fluid{{"level_set", 1, {}, "Primary"},
+                                             {"phase", 1},
+                                             {"u_negative", 2},
+                                             {"u_positive", 2},
+                                             {"p_negative", 1, constraint, "Constraints"},
+                                             {"p_positive", 1, constraint}};
+    EXPECT_EQ(describe(deriveLayoutOf(two_fluid, split)), "Primary(0:6:1) Constraints(6:2:2) pair=0/1");
+    const std::vector<LayoutField> unnamed{{"a", 1}, {"b", 1}, {"c", 1, constraint}};
+    EXPECT_EQ(describe(deriveLayoutOf(unnamed, split)), "a+b(0:2:1) c(2:1:2) pair=0/1");
+
+    // A primary field after the constraint field: not merged, the pair named by role.
+    const std::vector<LayoutField> ale{
+        {"Velocity", 2, {}, velocity_block}, {"Pressure", 1, constraint}, {"mesh_displacement", 2}};
+    EXPECT_EQ(describe(deriveLayoutOf(ale, split)),
+              "Velocity(0:2:0) Pressure(2:1:0) mesh_displacement(3:2:0) pair=0/1");
+
+    // No constraint field: no constraint block.
+    const std::vector<LayoutField> level_set_only{{"phi", 1}, {"LevelSetAdvectionVelocity", 2}};
+    EXPECT_EQ(describe(deriveLayoutOf(level_set_only, split)),
+              "phi(0:1:0) LevelSetAdvectionVelocity(1:2:0) pair=0/-");
+}
+
+TEST(FESystem, ReusedFieldTakesTheStatedSolverRole)
+{
+    using svmp::FE::systems::SolverRole;
+    auto mesh = build_single_quad_mesh();
+    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    FESystem sys(mesh);
+    const auto p = sys.addField(FieldSpec{.name = "p", .space = scalar_space, .components = 1});
+    EXPECT_FALSE(sys.fieldRecord(p).solver_role.has_value());
+
+    FieldBinding fields(sys, "test");
+    EXPECT_EQ(fields.unknown(FieldSpec{.name = "p",
+                                       .space = scalar_space,
+                                       .components = 1,
+                                       .solver_role = SolverRole::Constraint,
+                                       .solver_block = "pressures"},
+                             "pressure"),
+              p);
+    EXPECT_EQ(sys.fieldRecord(p).solver_role, SolverRole::Constraint);
+    EXPECT_EQ(sys.fieldRecord(p).solver_block, "pressures");
+
+    // A reuse that states nothing keeps them; one that contradicts them throws.
+    EXPECT_EQ(fields.unknown(FieldSpec{.name = "p", .space = scalar_space, .components = 1}, "pressure"), p);
+    EXPECT_EQ(sys.fieldRecord(p).solver_role, SolverRole::Constraint);
+    EXPECT_THROW((void)fields.unknown(FieldSpec{.name = "p",
+                                                .space = scalar_space,
+                                                .components = 1,
+                                                .solver_role = SolverRole::Primary},
+                                      "pressure"),
+                 std::invalid_argument);
+    EXPECT_THROW((void)fields.unknown(FieldSpec{.name = "p",
+                                                .space = scalar_space,
+                                                .components = 1,
+                                                .solver_block = "other"},
+                                      "pressure"),
+                 std::invalid_argument);
 }
 
 TEST(FESystem, DerivedMeshVelocityIsExcludedFromUnknownLayout)

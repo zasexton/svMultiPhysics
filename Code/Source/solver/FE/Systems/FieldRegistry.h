@@ -66,6 +66,18 @@ enum class FieldShapeKind : std::uint8_t {
     MixedFieldGroup
 };
 
+/**
+ * @brief The part an unknown plays in a split (Schur-complement) solve.
+ *
+ * deriveBlockLayout (Systems/SystemSetup.h) groups the unknowns by role: a
+ * run of primary fields followed by a run of constraint fields.  A field that
+ * states no role is primary.
+ */
+enum class SolverRole : std::uint8_t {
+    Primary,    ///< solved for directly: a velocity, a displacement, a level set
+    Constraint  ///< enforces a constraint on the primary fields: a pressure
+};
+
 struct DerivedFieldMetadata {
     FieldId source_field{INVALID_FIELD_ID};
     DerivedFieldRole role{DerivedFieldRole::None};
@@ -82,6 +94,12 @@ struct FieldSpec {
     std::optional<int> participant_domain_id{};
     FieldSourceKind source_kind{FieldSourceKind::Unknown};
     DerivedFieldMetadata derived{};
+    /// Unset: primary, unless a later registration of the field states it.
+    std::optional<SolverRole> solver_role{};
+    /// The name of the solver block that a split solve forms from several
+    /// fields of one role, when this is the first field of the group that
+    /// states one.  Empty: unstated.
+    std::string solver_block{};
 };
 
 struct FieldRecord {
@@ -95,6 +113,8 @@ struct FieldRecord {
     std::optional<int> participant_domain_id{};
     FieldSourceKind source_kind{FieldSourceKind::Unknown};
     DerivedFieldMetadata derived{};
+    std::optional<SolverRole> solver_role{};
+    std::string solver_block{};
 
     // Transient metadata (derived from registered kernels containing `dt(...)`)
     bool time_dependent{false};
@@ -144,6 +164,9 @@ public:
     FieldId add(FieldSpec spec);
     [[nodiscard]] const FieldRecord& get(FieldId id) const;
     void markTimeDependent(FieldId id, int max_order);
+    /// States the solver role and block of a registered field where they are
+    /// unset; a stated value that differs throws.
+    void stateSolverRole(FieldId id, std::optional<SolverRole> role, const std::string& block);
     [[nodiscard]] FieldId findByName(std::string_view name) const noexcept;
     [[nodiscard]] bool has(FieldId id) const noexcept;
     [[nodiscard]] std::size_t size() const noexcept { return fields_.size(); }

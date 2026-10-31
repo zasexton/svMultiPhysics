@@ -1565,11 +1565,15 @@ NavierStokesPreflight preflightNavierStokes(
     u_spec.name = options.velocity_field_name;
     u_spec.space = velocity_space;
     u_spec.components = dim;
+    // Under a split solve the velocity heads the primary block, with the
+    // unknowns registered between it and the pressure.
+    u_spec.solver_block = "VelocityAuxiliaryComputationalPrimary";
 
     FE::systems::FieldSpec p_spec;
     p_spec.name = options.pressure_field_name;
     p_spec.space = pressure_space;
     p_spec.components = 1;
+    p_spec.solver_role = FE::systems::SolverRole::Constraint;
 
     std::optional<FE::systems::FieldSpec> body_force_spec;
     if (!options.body_force_field_name.empty()) {

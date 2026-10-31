@@ -680,6 +680,10 @@ public:
                                         std::shared_ptr<const spaces::FunctionSpace> space,
                                         FieldId mesh_displacement_field,
                                         int components = 0);
+    /// States the solver role and block (FieldSpec::solver_role,
+    /// FieldSpec::solver_block) of a registered field where they are unset; a
+    /// stated value that differs throws.
+    void stateFieldSolverRole(FieldId field, std::optional<SolverRole> role, const std::string& block);
     [[nodiscard]] std::size_t registeredFieldCount() const noexcept {
         return field_registry_.size();
     }

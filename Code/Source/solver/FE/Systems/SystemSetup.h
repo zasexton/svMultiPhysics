@@ -23,7 +23,38 @@
 
 namespace svmp {
 namespace FE {
+namespace backends {
+struct BlockLayout;
+} // namespace backends
+
 namespace systems {
+
+class FESystem;
+
+/// What deriveBlockLayout forms beyond one block per unknown field.
+struct BlockLayoutRequest {
+    /// Merge the primary fields into one block and the constraint fields into
+    /// another, when they are two contiguous runs, primary first, and one run
+    /// has several fields (a two-way Schur-complement solve).
+    bool split_by_role{false};
+    /// Name the momentum and constraint blocks of a layout that is not merged:
+    /// the first primary field and the first constraint field.
+    bool name_saddle_pair{false};
+};
+
+/**
+ * @brief The solver block layout of the unknowns of a set-up system
+ *
+ * One block per field of fieldMap(), in DOF order, named by the field, with
+ * no role.  With split_by_role, a merged block of several fields takes the
+ * first FieldSpec::solver_block its fields state, or else their names joined
+ * by '+', and the role PrimaryField or ConstraintField; momentum_block and
+ * constraint_block are 0 and 1.  A layout whose constraint fields do not
+ * follow all its primary fields is not merged.  A field that states no
+ * solver role is primary.
+ */
+[[nodiscard]] backends::BlockLayout deriveBlockLayout(const FESystem& system,
+                                                      const BlockLayoutRequest& request);
 
 struct SetupInputs {
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH

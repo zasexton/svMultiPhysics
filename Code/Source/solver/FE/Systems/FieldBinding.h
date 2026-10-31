@@ -109,7 +109,7 @@ public:
      * Throws when the name is empty, the spec has no space, the field is
      * missing and @p allow_missing is false, or the registered field differs
      * in source kind, scope, component count or space (checked in that
-     * order).  The scope of the spec follows its space as the registry sets
+     * order), or states another solver role or solver block than the spec.  The scope of the spec follows its space as the registry sets
      * it: global on a GlobalSpace, interface on a MortarSpace (with its
      * marker).
      */
@@ -119,7 +119,8 @@ public:
                       bool allow_missing,
                       std::string_view context);
 
-    /// An unknown field: registered, or the compatible registered one.
+    /// An unknown field: registered, or the compatible registered one, which
+    /// takes the solver role and block the spec states.
     [[nodiscard]] FieldId unknown(FieldSpec spec, std::string_view role);
 
     /**

@@ -8025,6 +8025,12 @@ FieldId FESystem::addField(FieldSpec spec)
     return field;
 }
 
+void FESystem::stateFieldSolverRole(FieldId field, std::optional<SolverRole> role, const std::string& block)
+{
+    // Only deriveBlockLayout reads the role, so no setup product depends on it.
+    field_registry_.stateSolverRole(field, role, block);
+}
+
 FieldId FESystem::addDerivedMeshVelocityField(std::string name,
                                               std::shared_ptr<const spaces::FunctionSpace> space,
                                               FieldId mesh_displacement_field,

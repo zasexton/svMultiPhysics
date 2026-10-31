@@ -605,10 +605,13 @@ void preflightTwoFluidUnknownField(
     svmp::FE::systems::FESystem& system,
     std::string name,
     const std::shared_ptr<const svmp::FE::spaces::FunctionSpace>& space,
-    int components)
+    int components,
+    std::optional<svmp::FE::systems::SolverRole> solver_role,
+    std::string solver_block)
 {
   const auto existing = system.findFieldByName(name);
   if (existing != svmp::FE::INVALID_FIELD_ID) {
+    system.stateFieldSolverRole(existing, solver_role, solver_block);
     return existing;
   }
   return system.addField(svmp::FE::systems::FieldSpec{
@@ -616,6 +619,8 @@ void preflightTwoFluidUnknownField(
       .space = space,
       .components = components,
       .source_kind = svmp::FE::systems::FieldSourceKind::Unknown,
+      .solver_role = solver_role,
+      .solver_block = std::move(solver_block),
   });
 }
 
@@ -2052,21 +2057,29 @@ void preRegisterIncompressibleTwoFluidDependencyFields(
       options.positive_phase.velocity_field_name,
       translated.velocity_space,
       dimension);
+  // Under the split solve, the level set heads the primary block (the level
+  // set, the phase indicator and the two velocities) and the negative-phase
+  // pressure the constraint block of the two pressures.
   const auto p_negative = ensureTwoFluidUnknownField(
       system,
       options.negative_phase.pressure_field_name,
       translated.pressure_space,
-      1);
+      1,
+      FE::systems::SolverRole::Constraint,
+      "TwoFluidPressureConstraints");
   const auto p_positive = ensureTwoFluidUnknownField(
       system,
       options.positive_phase.pressure_field_name,
       translated.pressure_space,
-      1);
+      1,
+      FE::systems::SolverRole::Constraint);
   (void)p_negative;
   (void)p_positive;
 
   const auto level_set =
       system.findFieldByName(options.level_set_field_name);
+  system.stateFieldSolverRole(
+      level_set, std::nullopt, "TwoFluidMaterialInterfaceComputationalPrimary");
   FE::interfaces::GeneratedInterfaceMarkerKey marker_key{};
   marker_key.source =
       FE::interfaces::LevelSetInterfaceSource::fromField(level_set);

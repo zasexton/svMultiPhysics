@@ -988,6 +988,15 @@ of a participant, `integrate(integrand, region[, boundary_measure])`,
 `sharedInterface(name)` with per-side `state`, `test`, and `normal`, and
 `equationSet(...)` to declare the coupled equations.
 
+### Solver Structure
+
+Status: `implemented/public`.
+
+| Vocabulary | Header | Notes |
+|------------|--------|-------|
+| `FieldSpec::solver_role` (`SolverRole::Primary`, `SolverRole::Constraint`), `FieldSpec::solver_block` | `Systems/FieldRegistry.h` | The part an unknown plays in a split solve: primary (velocity, displacement, level set, extension) or constraint (pressure); unset is primary. `solver_block` names the merged block a group of fields forms under a split solve, when the field is the first of the group that states one. A reuse through `FieldBinding::unknown` states what the first registration left unset (`FESystem::stateFieldSolverRole`); a contradicting statement throws |
+| `systems::deriveBlockLayout(system, BlockLayoutRequest{split_by_role, name_saddle_pair})` | `Systems/SystemSetup.h` | The solver block layout of a set-up system: one block per unknown field of `fieldMap()`, or, with `split_by_role`, the primary run merged into a `PrimaryField` block and the constraint run into a `ConstraintField` block (momentum 0, constraint 1) when the constraint fields follow all primary fields and one run has several fields; a merged block takes the first `solver_block` its fields state, else their names joined by `+`. `name_saddle_pair` names the first primary and the first constraint field of an unmerged layout. The Application asks for the split under FSILS BlockSchur |
+
 ### Manual Block and Complex Workflows
 
 Status: `implemented/expert`.

@@ -29,6 +29,7 @@
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 
 #include "FE/Core/Types.h"
+#include "FE/Systems/FieldRegistry.h"
 
 #include <initializer_list>
 #include <memory>
@@ -144,11 +145,15 @@ void preflightTwoFluidUnknownField(
     std::string_view name,
     const std::shared_ptr<const svmp::FE::spaces::FunctionSpace>& space,
     int components);
+/// The registered unknown @p name, or a new one, with the solver role and
+/// block stated.
 [[nodiscard]] svmp::FE::FieldId ensureTwoFluidUnknownField(
     svmp::FE::systems::FESystem& system,
     std::string name,
     const std::shared_ptr<const svmp::FE::spaces::FunctionSpace>& space,
-    int components);
+    int components,
+    std::optional<svmp::FE::systems::SolverRole> solver_role = std::nullopt,
+    std::string solver_block = {});
 void preflightTwoFluidTranslationBeforeMutation(
     const TranslatedIncompressibleTwoFluidInput& translated,
     const svmp::FE::systems::FESystem& system);

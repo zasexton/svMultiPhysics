@@ -14,6 +14,7 @@
 #include "Systems/TimeSeries.h"
 
 #include "Backends/Interfaces/DofPermutation.h"
+#include "Backends/Utils/BackendOptions.h"
 
 #include "Assembly/Assembler.h"
 #include "Assembly/AssemblyKernel.h"
@@ -8678,6 +8679,81 @@ void FESystem::buildAssemblyPlans()
                     (plan.matrix_state_independent ? "true" : "false"));
         }
     }
+}
+
+backends::BlockLayout deriveBlockLayout(const FESystem& system, const BlockLayoutRequest& request)
+{
+    using backends::BlockRole;
+    struct Member {
+        const FieldRecord* record{nullptr};
+        int start{0};
+        int components{0};
+        bool constraint{false};
+    };
+    std::vector<Member> members;
+    backends::BlockLayout layout{};
+    const auto& field_map = system.fieldMap();
+    int offset = 0;
+    for (std::size_t index = 0; index < field_map.numFields(); ++index) {
+        const auto& field = field_map.getField(index);
+        const int components = static_cast<int>(field.n_components);
+        const auto id = system.findFieldByName(field.name);
+        FE_THROW_IF(id == INVALID_FIELD_ID, InvalidStateException,
+                    "deriveBlockLayout: field '" + field.name + "' of the DOF map is not registered");
+        const auto& record = system.fieldRecord(id);
+        members.push_back({&record, offset, components,
+                           record.solver_role.value_or(SolverRole::Primary) == SolverRole::Constraint});
+        layout.blocks.push_back({field.name, offset, components});
+        offset += components;
+    }
+
+    // The primary run [0, split) and the constraint run [split, size).
+    std::size_t split = 0;
+    while (split < members.size() && !members[split].constraint) {
+        ++split;
+    }
+    const bool runs_are_contiguous =
+        split > 0 && split < members.size() &&
+        std::all_of(members.begin() + static_cast<std::ptrdiff_t>(split), members.end(),
+                    [](const Member& m) { return m.constraint; });
+    const bool merges = split > 1 || members.size() - split > 1;
+    if (request.split_by_role && runs_are_contiguous && merges) {
+        const auto merged = [&](std::size_t first, std::size_t last, BlockRole role) {
+            std::string name;
+            for (std::size_t i = first; i < last && name.empty(); ++i) {
+                name = members[i].record->solver_block;
+            }
+            if (last - first == 1u) {
+                name = members[first].record->name;
+            } else if (name.empty()) {
+                for (std::size_t i = first; i < last; ++i) {
+                    name += (i == first ? "" : "+") + members[i].record->name;
+                }
+            }
+            int components = 0;
+            for (std::size_t i = first; i < last; ++i) {
+                components += members[i].components;
+            }
+            return backends::BlockDescriptor{std::move(name), members[first].start, components, role};
+        };
+        backends::BlockLayout grouped{};
+        grouped.blocks.push_back(merged(0, split, BlockRole::PrimaryField));
+        grouped.blocks.push_back(merged(split, members.size(), BlockRole::ConstraintField));
+        grouped.momentum_block = 0;
+        grouped.constraint_block = 1;
+        return grouped;
+    }
+
+    if (request.name_saddle_pair) {
+        for (std::size_t i = 0; i < members.size(); ++i) {
+            if (!members[i].constraint && !layout.momentum_block) {
+                layout.momentum_block = static_cast<int>(i);
+            } else if (members[i].constraint && !layout.constraint_block) {
+                layout.constraint_block = static_cast<int>(i);
+            }
+        }
+    }
+    return layout;
 }
 
 } // namespace systems

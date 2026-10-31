@@ -1647,8 +1647,6 @@ TEST(OpenVesselExamples,
                 svmp::FE::backends::SolverMethod::BlockSchur,
                 incomplete_owner_layout),
         std::invalid_argument);
-    ASSERT_EQ(incomplete_owner_layout.blocks.size(), 1u);
-    EXPECT_EQ(incomplete_owner_layout.blocks.front().name, "sentinel");
     for (std::size_t equation_index = 0u;
          equation_index < parameters.equation_parameters.size();
          ++equation_index) {
@@ -1706,105 +1704,72 @@ TEST(OpenVesselExamples,
             .size(),
         1u);
 
-    svmp::FE::backends::BlockLayout layout{};
-    int component_offset = 0;
-    for (const auto name : expected_field_order) {
-      const auto field = components.fe_system->findFieldByName(name);
-      ASSERT_NE(field, svmp::FE::INVALID_FIELD_ID) << name;
-      const int components_count =
-          components.fe_system->fieldRecord(field).components;
-      layout.blocks.push_back(
-          {std::string(name), component_offset, components_count});
-      component_offset += components_count;
-    }
-    ASSERT_TRUE(
-        application::core::detail::
-            groupTwoFluidMaterialInterfaceFsilsLayout(
-                *components.fe_system, layout));
-    ASSERT_EQ(layout.blocks.size(), 2u);
-    EXPECT_EQ(layout.blocks[0].name,
+    // The solver roles the registration states: the level set heads the
+    // primary block and the negative-phase pressure the constraint block.
+    const auto& records = *components.fe_system;
+    EXPECT_EQ(records.fieldRecord(0).solver_block,
               "TwoFluidMaterialInterfaceComputationalPrimary");
-    EXPECT_EQ(layout.blocks[0].start_component, 0);
-    EXPECT_EQ(layout.blocks[0].n_components, 6);
-    EXPECT_EQ(layout.blocks[0].role,
-              svmp::FE::backends::BlockRole::PrimaryField);
-    EXPECT_EQ(layout.blocks[1].name, "TwoFluidPressureConstraints");
-    EXPECT_EQ(layout.blocks[1].start_component, 6);
-    EXPECT_EQ(layout.blocks[1].n_components, 2);
-    EXPECT_EQ(layout.blocks[1].role,
-              svmp::FE::backends::BlockRole::ConstraintField);
-    ASSERT_TRUE(layout.momentum_block.has_value());
-    ASSERT_TRUE(layout.constraint_block.has_value());
-    EXPECT_EQ(*layout.momentum_block, 0);
-    EXPECT_EQ(*layout.constraint_block, 1);
-
-    svmp::FE::backends::BlockLayout required_layout{};
-    component_offset = 0;
-    for (const auto name : expected_field_order) {
-      const auto field = components.fe_system->findFieldByName(name);
-      const int components_count =
-          components.fe_system->fieldRecord(field).components;
-      required_layout.blocks.push_back(
-          {std::string(name), component_offset, components_count});
-      component_offset += components_count;
+    EXPECT_EQ(records.fieldRecord(4).solver_block,
+              "TwoFluidPressureConstraints");
+    for (svmp::FE::FieldId field = 0; field < 6; ++field) {
+      EXPECT_EQ(records.fieldRecord(field)
+                    .solver_role.value_or(svmp::FE::systems::SolverRole::Primary),
+                field >= 4 ? svmp::FE::systems::SolverRole::Constraint
+                           : svmp::FE::systems::SolverRole::Primary);
     }
-    ASSERT_NO_THROW(
+
+    svmp::FE::backends::BlockLayout layout{};
+    layout.blocks.push_back({"TwoFluidMaterialInterfaceComputationalPrimary", 0, 6,
+                             svmp::FE::backends::BlockRole::PrimaryField});
+    layout.blocks.push_back({"TwoFluidPressureConstraints", 6, 2,
+                             svmp::FE::backends::BlockRole::ConstraintField});
+    layout.momentum_block = 0;
+    layout.constraint_block = 1;
+    EXPECT_NO_THROW(
         application::core::detail::
             requireTwoFluidMaterialInterfaceSolverLayout(
                 *components.fe_system,
                 svmp::FE::backends::BackendKind::FSILS,
                 svmp::FE::backends::SolverMethod::BlockSchur,
-                required_layout));
-    ASSERT_EQ(required_layout.blocks.size(), layout.blocks.size());
-    for (std::size_t index = 0u; index < layout.blocks.size(); ++index) {
-      EXPECT_EQ(required_layout.blocks[index].name,
-                layout.blocks[index].name);
-      EXPECT_EQ(required_layout.blocks[index].start_component,
-                layout.blocks[index].start_component);
-      EXPECT_EQ(required_layout.blocks[index].n_components,
-                layout.blocks[index].n_components);
-      EXPECT_EQ(required_layout.blocks[index].role,
-                layout.blocks[index].role);
-    }
-    EXPECT_EQ(required_layout.momentum_block, layout.momentum_block);
-    EXPECT_EQ(required_layout.constraint_block, layout.constraint_block);
-
-    auto unsupported_backend_layout = required_layout;
+                layout));
     EXPECT_THROW(
         application::core::detail::
             requireTwoFluidMaterialInterfaceSolverLayout(
                 *components.fe_system,
                 svmp::FE::backends::BackendKind::Eigen,
                 svmp::FE::backends::SolverMethod::BlockSchur,
-                unsupported_backend_layout),
+                layout),
         std::invalid_argument);
-    ASSERT_EQ(unsupported_backend_layout.blocks.size(), 2u);
-    EXPECT_EQ(unsupported_backend_layout.blocks[0].name,
-              "TwoFluidMaterialInterfaceComputationalPrimary");
-    EXPECT_EQ(unsupported_backend_layout.blocks[1].name,
-              "TwoFluidPressureConstraints");
-    EXPECT_EQ(unsupported_backend_layout.momentum_block, 0);
-    EXPECT_EQ(unsupported_backend_layout.constraint_block, 1);
-
-    auto unsupported_method_layout = required_layout;
     EXPECT_THROW(
         application::core::detail::
             requireTwoFluidMaterialInterfaceSolverLayout(
                 *components.fe_system,
                 svmp::FE::backends::BackendKind::FSILS,
                 svmp::FE::backends::SolverMethod::GMRES,
-                unsupported_method_layout),
+                layout),
         std::invalid_argument);
-    ASSERT_EQ(unsupported_method_layout.blocks.size(), 2u);
-    EXPECT_EQ(unsupported_method_layout.blocks[0].name,
-              "TwoFluidMaterialInterfaceComputationalPrimary");
-    EXPECT_EQ(unsupported_method_layout.blocks[1].name,
-              "TwoFluidPressureConstraints");
-    EXPECT_EQ(unsupported_method_layout.momentum_block, 0);
-    EXPECT_EQ(unsupported_method_layout.constraint_block, 1);
 
-    svmp::FE::backends::BlockLayout malformed_layout{};
-    malformed_layout.blocks = required_layout.blocks;
+    // One block per field is not the split the contract requires.
+    svmp::FE::backends::BlockLayout unsplit{};
+    int component_offset = 0;
+    for (const auto name : expected_field_order) {
+      const auto field = components.fe_system->findFieldByName(name);
+      const int components_count =
+          components.fe_system->fieldRecord(field).components;
+      unsplit.blocks.push_back(
+          {std::string(name), component_offset, components_count});
+      component_offset += components_count;
+    }
+    EXPECT_THROW(
+        application::core::detail::
+            requireTwoFluidMaterialInterfaceSolverLayout(
+                *components.fe_system,
+                svmp::FE::backends::BackendKind::FSILS,
+                svmp::FE::backends::SolverMethod::BlockSchur,
+                unsplit),
+        std::invalid_argument);
+
+    auto malformed_layout = layout;
     malformed_layout.blocks.push_back({"unexpected", 8, 1});
     EXPECT_THROW(
         application::core::detail::
@@ -1814,10 +1779,6 @@ TEST(OpenVesselExamples,
                 svmp::FE::backends::SolverMethod::BlockSchur,
                 malformed_layout),
         std::invalid_argument);
-    ASSERT_EQ(malformed_layout.blocks.size(), 3u);
-    EXPECT_EQ(malformed_layout.blocks.back().name, "unexpected");
-    EXPECT_EQ(malformed_layout.blocks.back().start_component, 8);
-    EXPECT_EQ(malformed_layout.blocks.back().n_components, 1);
   }
 #endif
 }

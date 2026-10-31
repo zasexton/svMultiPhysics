@@ -91,24 +91,16 @@ void preflightAndPreRegisterPhysicsModuleDependencies(
     SimulationComponents& components);
 
 /**
- * Form the exact two-block FSILS partition for the monolithic material-
- * interface/two-fluid unknown layout.  Returns false without mutation when
- * the declarations or field layout do not match the declared contract.
- */
-bool groupTwoFluidMaterialInterfaceFsilsLayout(
-    const svmp::FE::systems::FESystem& system,
-    svmp::FE::backends::BlockLayout& layout);
-
-/**
- * Enforce the solver envelope for a declared material-interface/two-fluid
- * pair and install its exact two-block layout.  Systems without either
- * declaration are left unchanged.
+ * Enforce the solver envelope and the field contract of a declared
+ * material-interface/two-fluid pair, and require @p layout (from
+ * systems::deriveBlockLayout) to be its two-block partition.  Systems without
+ * either declaration pass.
  */
 void requireTwoFluidMaterialInterfaceSolverLayout(
     const svmp::FE::systems::FESystem& system,
     svmp::FE::backends::BackendKind backend_kind,
     svmp::FE::backends::SolverMethod solver_method,
-    svmp::FE::backends::BlockLayout& layout);
+    const svmp::FE::backends::BlockLayout& layout);
 
 } // namespace detail
 

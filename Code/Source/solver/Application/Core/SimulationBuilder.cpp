@@ -265,6 +265,8 @@ void preflightAndPreRegisterTwoFluidMaterialInterfaceDependencies(
         .participant_domain_id = record.participant_domain_id,
         .source_kind = record.source_kind,
         .derived = record.derived,
+        .solver_role = record.solver_role,
+        .solver_block = record.solver_block,
     });
     if (copied != record.id) {
       throw std::logic_error(
@@ -629,91 +631,6 @@ std::string codim1StorageName(svmp::MeshCodim1StorageMode mode)
   return "unknown";
 }
 
-bool firstEquationTypeIs(const Parameters& params, const std::string& equation_type)
-{
-  for (const auto* e : params.equation_parameters) {
-    if (!e) {
-      continue;
-    }
-    if (!e->type.defined()) {
-      return false;
-    }
-    const auto type = trim_copy(e->type.value());
-    if (equation_type == "level_set") {
-      return application::translators::level_set::isEquationType(type);
-    }
-    return lower_copy(type) == equation_type;
-  }
-  return false;
-}
-
-bool groupFsilsVelocityAuxiliaryPressurePrimary(
-    svmp::FE::backends::BlockLayout& layout)
-{
-  // FSILS BlockSchur is a two-way algebraic partition.  When nodal unknowns
-  // such as phi and its algebraic extension sit between the declared
-  // Velocity and Pressure fields, they belong to the computational K block;
-  // Pressure remains the scalar Schur-complement constraint.  Only form that
-  // grouping when the field layout is an exact contiguous partition with no
-  // unknowns after Pressure.  Otherwise leave the original metadata intact so
-  // FsilsLinearSolver's full-coverage guard rejects the unsupported layout.
-  if (layout.blocks.size() < 3u) {
-    return false;
-  }
-
-  std::optional<std::size_t> velocity_index;
-  std::optional<std::size_t> pressure_index;
-  int expected_start = 0;
-  for (std::size_t index = 0; index < layout.blocks.size(); ++index) {
-    const auto& block = layout.blocks[index];
-    if (block.n_components <= 0 || block.start_component != expected_start) {
-      return false;
-    }
-    expected_start += block.n_components;
-
-    if (block.name == "Velocity") {
-      if (velocity_index.has_value()) {
-        return false;
-      }
-      velocity_index = index;
-    } else if (block.name == "Pressure") {
-      if (pressure_index.has_value()) {
-        return false;
-      }
-      pressure_index = index;
-    }
-  }
-
-  if (!velocity_index.has_value() || !pressure_index.has_value() ||
-      *velocity_index != 0u || *pressure_index + 1u != layout.blocks.size()) {
-    return false;
-  }
-
-  const auto& velocity = layout.blocks[*velocity_index];
-  const auto& pressure = layout.blocks[*pressure_index];
-  if (velocity.start_component != 0 || velocity.n_components <= 0 ||
-      pressure.n_components != 1 || pressure.start_component <= 0 ||
-      pressure.start_component + pressure.n_components != expected_start) {
-    return false;
-  }
-
-  svmp::FE::backends::BlockLayout grouped_layout{};
-  grouped_layout.blocks.push_back({
-      "VelocityAuxiliaryComputationalPrimary",
-      0,
-      pressure.start_component,
-      svmp::FE::backends::BlockRole::PrimaryField});
-  grouped_layout.blocks.push_back({
-      pressure.name,
-      pressure.start_component,
-      pressure.n_components,
-      svmp::FE::backends::BlockRole::ConstraintField});
-  grouped_layout.momentum_block = 0;
-  grouped_layout.constraint_block = 1;
-  layout = std::move(grouped_layout);
-  return true;
-}
-
 const EquationParameters* firstEquation(const Parameters& params)
 {
   for (const auto* e : params.equation_parameters) {
@@ -948,17 +865,6 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
 
   // Opt-in Krylov right preconditioner (aggregation multigrid).
   opts.right_preconditioner = toRightPreconditioner(eq->linear_solver.right_preconditioner.value());
-
-  // Explicit saddle-point block names: env vars or programmatic SolverOptions.
-  // SVMP_MOMENTUM_BLOCK=<name> and SVMP_CONSTRAINT_BLOCK=<name> override the heuristic.
-  if (opts.momentum_block_name.empty()) {
-    const char* env = std::getenv("SVMP_MOMENTUM_BLOCK");
-    if (env && env[0]) opts.momentum_block_name = env;
-  }
-  if (opts.constraint_block_name.empty()) {
-    const char* env = std::getenv("SVMP_CONSTRAINT_BLOCK");
-    if (env && env[0]) opts.constraint_block_name = env;
-  }
 
   // FSILS BlockSchur sub-solver knobs: pass GM/CG sub-solver controls
   // through.  The Schur preconditioner is the algebraic S-hat and the
@@ -1209,23 +1115,26 @@ SimulationComponents& SimulationComponents::operator=(SimulationComponents&&) no
 
 SimulationComponents::~SimulationComponents() = default;
 
-bool detail::groupTwoFluidMaterialInterfaceFsilsLayout(
-    const svmp::FE::systems::FESystem& system,
-    svmp::FE::backends::BlockLayout& layout)
+namespace {
+
+// The unknown order of the two-fluid solver contract: the level set, the
+// phase indicator, the two velocities and the two pressures, with the
+// declarations naming those fields.
+bool twoFluidMaterialInterfaceFieldContractHolds(
+    const svmp::FE::systems::FESystem& system)
 {
   const auto& material =
       system.materialInterfaceTransportVelocityDeclarations();
   const auto& diagnostics =
       svmp::FE::systems::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations();
   if (material.size() != 1u || diagnostics.size() != 1u ||
-      system.registeredFieldCount() != 6u || layout.blocks.size() != 6u) {
+      system.registeredFieldCount() != 6u) {
     return false;
   }
 
   const auto& velocity = material.front();
   const auto& diagnostic = diagnostics.front();
   constexpr svmp::FE::FieldId level_set = 0;
-  constexpr svmp::FE::FieldId conservative_phase = 1;
   constexpr svmp::FE::FieldId negative_velocity = 2;
   constexpr svmp::FE::FieldId positive_velocity = 3;
   constexpr svmp::FE::FieldId negative_pressure = 4;
@@ -1249,47 +1158,38 @@ bool detail::groupTwoFluidMaterialInterfaceFsilsLayout(
 
   const std::array<int, 6> expected_components{
       1, 1, velocity.dimension, velocity.dimension, 1, 1};
-  int component_offset = 0;
   for (std::size_t index = 0u; index < expected_components.size(); ++index) {
     const auto field = static_cast<svmp::FE::FieldId>(index);
-    const auto& record = system.fieldRecord(field);
-    const auto& block = layout.blocks[index];
     if (!system.fieldParticipatesInUnknownVector(field) ||
-        record.components != expected_components[index] ||
-        block.name != record.name ||
-        block.start_component != component_offset ||
-        block.n_components != expected_components[index]) {
+        system.fieldRecord(field).components != expected_components[index]) {
       return false;
     }
-    component_offset += expected_components[index];
   }
-  if (system.fieldRecord(conservative_phase).components != 1) {
-    return false;
-  }
-
-  const int primary_components = component_offset - 2;
-  svmp::FE::backends::BlockLayout grouped{};
-  grouped.blocks.push_back({
-      "TwoFluidMaterialInterfaceComputationalPrimary",
-      0,
-      primary_components,
-      svmp::FE::backends::BlockRole::PrimaryField});
-  grouped.blocks.push_back({
-      "TwoFluidPressureConstraints",
-      primary_components,
-      2,
-      svmp::FE::backends::BlockRole::ConstraintField});
-  grouped.momentum_block = 0;
-  grouped.constraint_block = 1;
-  layout = std::move(grouped);
   return true;
 }
+
+bool isTwoBlockPartition(const svmp::FE::backends::BlockLayout& layout,
+                         int primary_components,
+                         int constraint_components)
+{
+  using svmp::FE::backends::BlockRole;
+  return layout.blocks.size() == 2u &&
+         layout.blocks[0].start_component == 0 &&
+         layout.blocks[0].n_components == primary_components &&
+         layout.blocks[0].role == BlockRole::PrimaryField &&
+         layout.blocks[1].start_component == primary_components &&
+         layout.blocks[1].n_components == constraint_components &&
+         layout.blocks[1].role == BlockRole::ConstraintField &&
+         layout.momentum_block == 0 && layout.constraint_block == 1;
+}
+
+} // namespace
 
 void detail::requireTwoFluidMaterialInterfaceSolverLayout(
     const svmp::FE::systems::FESystem& system,
     svmp::FE::backends::BackendKind backend_kind,
     svmp::FE::backends::SolverMethod solver_method,
-    svmp::FE::backends::BlockLayout& layout)
+    const svmp::FE::backends::BlockLayout& layout)
 {
   const auto material_count =
       system.materialInterfaceTransportVelocityDeclarations().size();
@@ -1305,12 +1205,16 @@ void detail::requireTwoFluidMaterialInterfaceSolverLayout(
   requireTwoFluidMaterialInterfaceSolverEnvelope(
       backend_kind, solver_method);
 
-  auto grouped = layout;
-  if (!groupTwoFluidMaterialInterfaceFsilsLayout(system, grouped)) {
+  if (!twoFluidMaterialInterfaceFieldContractHolds(system)) {
     throw std::invalid_argument(
         "[svMultiPhysics::Application] two_fluid_material_interface_solver_layout_contract_mismatch");
   }
-  layout = std::move(grouped);
+  const int dimension =
+      system.materialInterfaceTransportVelocityDeclarations().front().dimension;
+  if (!isTwoBlockPartition(layout, 2 + 2 * dimension, 2)) {
+    throw std::invalid_argument(
+        "[svMultiPhysics::Application] two_fluid_material_interface_solver_layout_contract_mismatch");
+  }
 }
 
 void detail::preflightAndPreRegisterPhysicsModuleDependencies(
@@ -1862,132 +1766,27 @@ void SimulationBuilder::createSolvers()
     }
   }
 
-  // Populate block layout from field metadata — available for any multi-field system.
-  {
-    const auto& fmap = components_.fe_system->fieldMap();
-    if (fmap.numFields() > 0) {
-      svmp::FE::backends::BlockLayout layout{};
-      int offset = 0;
-      for (std::size_t i = 0; i < fmap.numFields(); ++i) {
-        const auto& f = fmap.getField(i);
-        const int ncomp = static_cast<int>(f.n_components);
-        layout.blocks.push_back({f.name, offset, ncomp});
-        offset += ncomp;
-      }
-
-      detail::requireTwoFluidMaterialInterfaceSolverLayout(
-          *components_.fe_system,
-          backend_kind,
-          solver_options.method,
-          layout);
-
-      const bool is_ustruct_blockschur =
-          backend_kind == svmp::FE::backends::BackendKind::FSILS &&
-          solver_options.method == svmp::FE::backends::SolverMethod::BlockSchur &&
-          firstEquationTypeIs(params_, "ustruct");
-      if (is_ustruct_blockschur) {
-        const auto* displacement = layout.findBlock("Displacement");
-        const auto* velocity = layout.findBlock("Velocity");
-        const auto* pressure = layout.findBlock("Pressure");
-        if (displacement && velocity && pressure &&
-            displacement->n_components == velocity->n_components &&
-            pressure->n_components == 1 &&
-            displacement->start_component == 0 &&
-            velocity->start_component == displacement->n_components &&
-            pressure->start_component == displacement->n_components + velocity->n_components) {
-          svmp::FE::backends::BlockLayout grouped_layout{};
-          grouped_layout.blocks.push_back({
-              "UstructKinematicMomentum",
-              displacement->start_component,
-              displacement->n_components + velocity->n_components,
-              svmp::FE::backends::BlockRole::PrimaryField});
-          grouped_layout.blocks.push_back({
-              pressure->name,
-              pressure->start_component,
-              pressure->n_components,
-              svmp::FE::backends::BlockRole::ConstraintField});
-          grouped_layout.momentum_block = 0;
-          grouped_layout.constraint_block = 1;
-          layout = std::move(grouped_layout);
-        }
-      }
-
-      const bool is_level_set_fluid_blockschur =
-          backend_kind == svmp::FE::backends::BackendKind::FSILS &&
-          solver_options.method == svmp::FE::backends::SolverMethod::BlockSchur &&
-          firstEquationTypeIs(params_, "level_set");
-      if (is_level_set_fluid_blockschur) {
-        const auto* level_set = layout.findBlock("phi");
-        const auto* velocity = layout.findBlock("Velocity");
-        const auto* pressure = layout.findBlock("Pressure");
-        if (level_set && velocity && pressure &&
-            level_set->n_components == 1 &&
-            velocity->n_components > 1 &&
-            pressure->n_components == 1 &&
-            level_set->start_component == 0 &&
-            velocity->start_component == level_set->n_components &&
-            pressure->start_component == level_set->n_components + velocity->n_components) {
-          svmp::FE::backends::BlockLayout grouped_layout{};
-          grouped_layout.blocks.push_back({
-              "LevelSetVelocity",
-              level_set->start_component,
-              level_set->n_components + velocity->n_components,
-              svmp::FE::backends::BlockRole::PrimaryField});
-          grouped_layout.blocks.push_back({
-              pressure->name,
-              pressure->start_component,
-              pressure->n_components,
-              svmp::FE::backends::BlockRole::ConstraintField});
-          grouped_layout.momentum_block = 0;
-          grouped_layout.constraint_block = 1;
-          layout = std::move(grouped_layout);
-        }
-      }
-
-      const bool is_fsils_blockschur =
-          backend_kind == svmp::FE::backends::BackendKind::FSILS &&
-          solver_options.method == svmp::FE::backends::SolverMethod::BlockSchur;
-      if (is_fsils_blockschur) {
-        (void)groupFsilsVelocityAuxiliaryPressurePrimary(layout);
-      }
-
-      // Identify saddle-point block pair when the solver/backend can benefit from
-      // explicit momentum/constraint roles.  For FSILS this is also required by
-      // native outlet-coupled GMRES solves, not just the BlockSchur path.
-      const bool should_identify_saddle_point =
-          solver_options.method == svmp::FE::backends::SolverMethod::BlockSchur ||
-          !solver_options.momentum_block_name.empty() ||
-          !solver_options.constraint_block_name.empty() ||
-          (backend_kind == svmp::FE::backends::BackendKind::FSILS &&
-           layout.blocks.size() == 2u);
-      if (should_identify_saddle_point) {
-        // Prefer explicit block names from solver configuration.
-        if (!solver_options.momentum_block_name.empty() || !solver_options.constraint_block_name.empty()) {
-          for (int bi = 0; bi < static_cast<int>(layout.blocks.size()); ++bi) {
-            if (!layout.momentum_block && layout.blocks[static_cast<std::size_t>(bi)].name == solver_options.momentum_block_name) {
-              layout.momentum_block = bi;
-            }
-            if (!layout.constraint_block && layout.blocks[static_cast<std::size_t>(bi)].name == solver_options.constraint_block_name) {
-              layout.constraint_block = bi;
-            }
-          }
-        }
-
-        // Fall back to heuristic: first multi-component field = field-A (momentum),
-        // first single-component field = field-B (constraint).
-        if (!layout.momentum_block || !layout.constraint_block) {
-          for (int bi = 0; bi < static_cast<int>(layout.blocks.size()); ++bi) {
-            if (!layout.momentum_block && layout.blocks[static_cast<std::size_t>(bi)].n_components > 1) {
-              layout.momentum_block = bi;
-            } else if (!layout.constraint_block && layout.blocks[static_cast<std::size_t>(bi)].n_components == 1) {
-              layout.constraint_block = bi;
-            }
-          }
-        }
-      }
-
-      solver_options.block_layout = std::move(layout);
-    }
+  // The block layout follows the solver roles the fields state: FSILS
+  // BlockSchur solves a two-way split of the primary and the constraint
+  // fields, and its saddle-point solves, and FSILS's coupled-boundary GMRES
+  // solves of two fields, name the momentum and constraint blocks.
+  if (components_.fe_system->fieldMap().numFields() > 0) {
+    const bool fsils = backend_kind == svmp::FE::backends::BackendKind::FSILS;
+    const bool block_schur =
+        solver_options.method == svmp::FE::backends::SolverMethod::BlockSchur;
+    auto layout = svmp::FE::systems::deriveBlockLayout(
+        *components_.fe_system,
+        svmp::FE::systems::BlockLayoutRequest{
+            .split_by_role = fsils && block_schur,
+            .name_saddle_pair =
+                block_schur ||
+                (fsils && components_.fe_system->fieldMap().numFields() == 2u)});
+    detail::requireTwoFluidMaterialInterfaceSolverLayout(
+        *components_.fe_system,
+        backend_kind,
+        solver_options.method,
+        layout);
+    solver_options.block_layout = std::move(layout);
   }
 
   oopCout() << "[svMultiPhysics::Application] SimulationBuilder: linear solver method="

@@ -39,6 +39,8 @@ FieldId FieldRegistry::add(FieldSpec spec)
     rec.participant_domain_id = spec.participant_domain_id;
     rec.source_kind = spec.source_kind;
     rec.derived = spec.derived;
+    rec.solver_role = spec.solver_role;
+    rec.solver_block = std::move(spec.solver_block);
 
     if (rec.space->space_type() == spaces::SpaceType::Mortar) {
         const auto* mortar_space = dynamic_cast<const spaces::MortarSpace*>(rec.space.get());
@@ -138,6 +140,29 @@ void FieldRegistry::markTimeDependent(FieldId id, int max_order)
     auto& f = fields_[static_cast<std::size_t>(id)];
     f.time_dependent = true;
     f.max_time_derivative_order = std::max(f.max_time_derivative_order, max_order);
+}
+
+void FieldRegistry::stateSolverRole(FieldId id, std::optional<SolverRole> role, const std::string& block)
+{
+    FE_THROW_IF(id == INVALID_FIELD_ID || static_cast<std::size_t>(id) >= fields_.size(),
+                InvalidArgumentException, "FieldRegistry::stateSolverRole: unknown FieldId");
+    auto& f = fields_[static_cast<std::size_t>(id)];
+    FE_THROW_IF(role.has_value() && f.solver_role.has_value() && *role != *f.solver_role,
+                InvalidArgumentException,
+                "FieldRegistry::stateSolverRole: field '" + f.name + "' is a " +
+                    (*f.solver_role == SolverRole::Constraint ? "constraint" : "primary") +
+                    " field and cannot be stated a " +
+                    (*role == SolverRole::Constraint ? "constraint" : "primary") + " field");
+    FE_THROW_IF(!block.empty() && !f.solver_block.empty() && block != f.solver_block,
+                InvalidArgumentException,
+                "FieldRegistry::stateSolverRole: field '" + f.name + "' names the solver block '" +
+                    f.solver_block + "', not '" + block + "'");
+    if (role.has_value()) {
+        f.solver_role = role;
+    }
+    if (!block.empty()) {
+        f.solver_block = block;
+    }
 }
 
 FieldId FieldRegistry::findByName(std::string_view name) const noexcept

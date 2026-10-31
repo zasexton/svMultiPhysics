@@ -160,6 +160,17 @@ void FieldBinding::check(const FESystem& system,
             std::string(context) + ": existing field '" + rec.name +
             "' uses an incompatible function space");
     }
+    if (spec.solver_role && rec.solver_role && *spec.solver_role != *rec.solver_role) {
+        throw std::invalid_argument(
+            std::string(context) + ": existing field '" + rec.name + "' is a " +
+            (*rec.solver_role == SolverRole::Constraint ? "constraint" : "primary") + " field, expected a " +
+            (*spec.solver_role == SolverRole::Constraint ? "constraint" : "primary") + " field");
+    }
+    if (!spec.solver_block.empty() && !rec.solver_block.empty() && spec.solver_block != rec.solver_block) {
+        throw std::invalid_argument(
+            std::string(context) + ": existing field '" + rec.name + "' names the solver block '" +
+            rec.solver_block + "', expected '" + spec.solver_block + "'");
+    }
 }
 
 FieldId FieldBinding::unknown(FieldSpec spec, std::string_view role)
@@ -169,6 +180,7 @@ FieldId FieldBinding::unknown(FieldSpec spec, std::string_view role)
     if (existing == INVALID_FIELD_ID) {
         return system_->addField(std::move(spec));
     }
+    system_->stateFieldSolverRole(existing, spec.solver_role, spec.solver_block);
     return existing;
 }
 

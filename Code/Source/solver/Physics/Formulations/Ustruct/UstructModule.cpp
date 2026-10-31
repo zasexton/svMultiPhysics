@@ -77,6 +77,7 @@ void UstructModule::registerOn(FE::systems::FESystem& system) const
     d_spec.name = options_.displacement_field_name;
     d_spec.space = displacement_space_;
     d_spec.components = dim;
+    d_spec.solver_block = "UstructKinematicMomentum";
     const auto displacement = fields.addUnknownSymbols(
         std::move(d_spec), options_.displacement_field_name, "z");
     const auto d_id = displacement.id;
@@ -98,6 +99,7 @@ void UstructModule::registerOn(FE::systems::FESystem& system) const
     p_spec.name = options_.pressure_field_name;
     p_spec.space = pressure_space_;
     p_spec.components = 1;
+    p_spec.solver_role = FE::systems::SolverRole::Constraint;
     const auto pressure = fields.addUnknownSymbols(
         std::move(p_spec), options_.pressure_field_name, "q");
     const auto p_id = pressure.id;
