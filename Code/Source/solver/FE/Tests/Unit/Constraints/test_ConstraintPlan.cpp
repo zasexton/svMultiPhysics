@@ -397,6 +397,65 @@ TEST(ConstraintPlan, LevelSetDeclarationsBuildTheExistingConstraints)
     EXPECT_NE(lines[4].find("name='contact'"), std::string::npos);
 }
 
+// activeOn declares the constraints the Navier-Stokes module declares by
+// hand for its cut liquid (inactiveSide of u, then of p; aggregate of u and
+// p when aggregation is on), in the same phases and order, for each side and
+// aggregation choice: the constraint manifests are equal line for line.
+TEST(ConstraintPlan, ActiveOnDeclaresTheHandSequenceOfACutSide)
+{
+    SmallCutAggregationGuardOptions guards;
+    guards.maximum_root_path_length = 5u;
+    for (const auto side : {forms::CutVolumeSide::Negative, forms::CutVolumeSide::Positive}) {
+        for (const bool aggregated : {false, true}) {
+            SCOPED_TRACE(std::string(side == forms::CutVolumeSide::Negative ? "Negative" : "Positive") +
+                         (aggregated ? " aggregated" : ""));
+            PlanSystem by_hand;
+            {
+                const auto L = level_set::LevelSetGeometry::bind(
+                                   *by_hand.system, {.level_set_field = by_hand.phi, .domain_id = "liquid"})
+                                   .side(side);
+                ConstraintPlan plan(*by_hand.system);
+                plan.inactiveSide({by_hand.u}, L).inactiveSide({by_hand.p}, L);
+                if (aggregated) {
+                    plan.aggregate({by_hand.u, by_hand.p}, L, guards);
+                }
+                plan.commit();
+            }
+            PlanSystem one_call;
+            {
+                const auto G = level_set::LevelSetGeometry::bind(
+                    *one_call.system, {.level_set_field = one_call.phi, .domain_id = "liquid"});
+                ConstraintPlan plan(*one_call.system);
+                plan.activeOn({one_call.u, one_call.p}, G.side(side),
+                              {.aggregate = aggregated, .guards = guards});
+                plan.commit();
+                // A geometry bound by keys leaves the retention to its request.
+                EXPECT_FALSE(G.requireBothSidesRetained());
+            }
+            EXPECT_EQ(one_call.system->constraintManifestLines(), by_hand.system->constraintManifestLines());
+            EXPECT_EQ(one_call.registered().size(), aggregated ? 4u : 2u);
+        }
+    }
+}
+
+// On a side of a standalone cut geometry, aggregation records that the cut
+// keeps both cut volumes.
+TEST(ConstraintPlan, ActiveOnWithAggregationRequiresBothCutVolumes)
+{
+    for (const bool aggregated : {false, true}) {
+        PlanSystem s;
+        auto requirements = std::make_shared<level_set::CutGeometryRequirements>();
+        const auto G = level_set::LevelSetGeometry::bind(*s.system, {.level_set_field = s.phi, .domain_id = "liquid"})
+                           .withRequirements(requirements);
+        ConstraintPlan plan(*s.system);
+        plan.activeOn({s.u, s.p}, G.side(forms::CutVolumeSide::Positive), {.aggregate = aggregated});
+        plan.commit();
+        EXPECT_EQ(requirements->retain_both_sides, aggregated);
+        EXPECT_TRUE(requirements->positive_side);
+        EXPECT_FALSE(requirements->negative_side);
+    }
+}
+
 TEST(ConstraintPlan, ContactPointVelocityFromAGeometryBuildsTheSameLaw)
 {
     const auto speed = [](Real cos_d) { return Real{0.5} * (Real{0.25} - cos_d); };

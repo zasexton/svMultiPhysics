@@ -99,6 +99,15 @@ inline constexpr std::size_t kConstraintPhaseCount = 5u;
 
 [[nodiscard]] const char* constraintPhaseName(ConstraintPhase phase) noexcept;
 
+/// The unknowns of ConstraintPlan::activeOn on one side of a cut.
+struct ActiveSideOptions {
+    /// Aggregate the small cut cells of the side.
+    bool aggregate{true};
+    SmallCutAggregationGuardOptions guards{};
+    /// The value of the pinned degrees of freedom off the side.
+    Real inactive_value{Real{0.0}};
+};
+
 class ConstraintPlan {
 public:
     explicit ConstraintPlan(systems::FESystem& system);
@@ -176,6 +185,19 @@ public:
     ConstraintPlan& aggregate(std::initializer_list<FieldId> fields,
                               const level_set::CutSide& active_side,
                               SmallCutAggregationGuardOptions guards = {});
+
+    /**
+     * The unknowns @p fields live on @p active_side: inactiveSide(fields,
+     * side, inactive value) and, with options.aggregate, aggregate(fields,
+     * side, guards), the same declarations in the same phases and order as
+     * the two calls.  Aggregation also requires the cut to keep both cut
+     * volumes (LevelSetGeometry::requireBothSidesRetained), which a side of
+     * cutGeometry() records for its cut; the cut-volume request of the
+     * Application states the retention itself.
+     */
+    ConstraintPlan& activeOn(std::initializer_list<FieldId> fields,
+                             const level_set::CutSide& active_side,
+                             ActiveSideOptions options = {});
 
     /// PointLaw: ContactPointVelocityConstraint(velocity, law).
     ConstraintPlan& contactPointVelocity(FieldId velocity, ContactPointVelocityLaw law);

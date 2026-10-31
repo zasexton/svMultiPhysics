@@ -330,7 +330,28 @@ forms::InterfaceDomain LevelSetGeometry::interface() const
 
 CutSide LevelSetGeometry::side(forms::CutVolumeSide side) const
 {
+    if (requirements_) {
+        (side == forms::CutVolumeSide::Positive ? requirements_->positive_side
+                                                : requirements_->negative_side) = true;
+    }
     return CutSide(*this, side);
+}
+
+bool LevelSetGeometry::requireBothSidesRetained() const
+{
+    if (!requirements_) {
+        return false;
+    }
+    requirements_->retain_both_sides = true;
+    return true;
+}
+
+LevelSetGeometry LevelSetGeometry::withRequirements(
+    std::shared_ptr<CutGeometryRequirements> requirements) const
+{
+    auto geometry = *this;
+    geometry.requirements_ = std::move(requirements);
+    return geometry;
 }
 
 interfaces::GeneratedInterfaceBoundaryIntersectionMarkerKey LevelSetGeometry::contactLineKey(

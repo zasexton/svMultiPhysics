@@ -31,6 +31,10 @@
  * otherwise every function is collective over the FE system's active
  * communicator.  Requires the Mesh integration (FE_WITH_MESH): the level-set
  * values are also kept in a vertex field of the primary mesh.
+ *
+ * cutGeometry() is the entry of a program without the Application: it binds
+ * a level-set geometry, owns its cut policy and cuts the mesh with this
+ * service (CutGeometry).
  */
 
 #include "Core/Types.h"
@@ -756,6 +760,121 @@ private:
   Options options_;
   ActiveCutContextRefreshReport attempt_entry_report_{};
 };
+
+// ---------------------------------------------------------------------------
+// A standalone cut geometry
+// ---------------------------------------------------------------------------
+
+/// The cut policy of cutGeometry(): the geometry and orders of the
+/// generated rules and whether both cut volumes are kept.  The rest of the
+/// cut-volume request keeps its defaults (rules refreshed and frozen in the
+/// tangent); its active side and retention follow from the sides the handles
+/// hand out (CutGeometryRequirements).
+struct CutGeometryPolicy {
+  /// Order of the generated interface and cut-volume rules.
+  int quadrature_order{2};
+  std::optional<int> interface_quadrature_order{};
+  std::optional<int> volume_quadrature_order{};
+  /// Linear corners cut simplices and quadrilaterals; hexahedra need the
+  /// high-order implicit geometry with an implicit backend (and, for the
+  /// linearized leaves of a trilinear level set, the LinearCorner fallback).
+  GeneratedInterfaceGeometryMode geometry_mode{
+      GeneratedInterfaceGeometryMode::LinearCorner};
+  ImplicitCutQuadratureBackend implicit_cut_backend{
+      ImplicitCutQuadratureBackend::LinearCorner};
+  ImplicitCutFallbackPolicy implicit_cut_fallback_policy{
+      ImplicitCutFallbackPolicy::Fail};
+  /// Keep both cut volumes even for one side; ConstraintPlan::activeOn with
+  /// aggregation requires it.
+  bool retain_both_sides{false};
+};
+
+/**
+ * @brief A level-set geometry that cuts its own mesh, for a program without
+ *        the Application.
+ *
+ * Its handles are those of LevelSetGeometry.  refresh() cuts the mesh by the
+ * level set of a state with a LevelSetGeometryService, installs the cut
+ * integration context of the FE system and rebuilds its constraint state, as
+ * the refresh of the Application does.  The requirements its handles record
+ * before the first refresh enter its cut-volume request: the side they hand
+ * out is the active side, and both sides, or aggregation
+ * (ConstraintPlan::activeOn), keep both cut volumes.  A requirement recorded
+ * after the first refresh throws at the next one.  The FE system and the
+ * mesh must outlive it.
+ *
+ * @code
+ *   const auto G = ls::cutGeometry(system, mesh, {.level_set_field_name = "phi",
+ *                                                 .domain_id = "inclusion"});
+ *   const auto L = G.side(forms::CutVolumeSide::Negative);
+ *   R = (k * inner(grad(T), grad(s)) - f * s).dx(L.volume())
+ *     + (alpha * (T - T_inf) * s).dI(L.interface());
+ *   cs::ConstraintPlan(system).activeOn({T_id}, L).commit();
+ *   system.setup();
+ *   G.refresh(state);
+ * @endcode
+ */
+class CutGeometry {
+public:
+  [[nodiscard]] const LevelSetGeometry& geometry() const noexcept
+  {
+    return geometry_;
+  }
+
+  /// geometry().side(side).
+  [[nodiscard]] CutSide side(forms::CutVolumeSide side) const
+  {
+    return geometry_.side(side);
+  }
+
+  /// geometry().interface().
+  [[nodiscard]] forms::InterfaceDomain interface() const
+  {
+    return geometry_.interface();
+  }
+
+  /// The cut-volume request of the next refresh.
+  [[nodiscard]] ActiveCutVolumeRequest request() const;
+
+  /**
+   * Cuts the mesh by the level set of @p state (a prescribed level-set field:
+   * its coefficients), installs the cut integration context of the FE system
+   * and rebuilds its constraint state.  Collective.
+   */
+  ActiveCutContextRefreshReport refresh(
+      const svmp::FE::systems::SystemStateView& state = {});
+
+  /// The service of the cut, null before the first refresh (for its
+  /// generated-state participant, LevelSetGeometryParticipant).
+  [[nodiscard]] std::shared_ptr<LevelSetGeometryService> service() const;
+
+private:
+  struct State;
+
+  friend CutGeometry cutGeometry(svmp::FE::systems::FESystem& system,
+                                 svmp::Mesh& mesh,
+                                 LevelSetGeometryDeclaration declaration,
+                                 CutGeometryPolicy policy);
+
+  CutGeometry(LevelSetGeometry geometry, std::shared_ptr<State> state);
+
+  LevelSetGeometry geometry_;
+  std::shared_ptr<State> state_;
+};
+
+/**
+ * @brief The cut geometry of the level set @p declaration names on the mesh
+ *        of @p system.
+ *
+ * @p mesh is the mesh of the system; the level set is also kept in its vertex
+ * field of the level-set field's name (attached when missing), which the
+ * cut constraints read.  Throws std::invalid_argument for another mesh and
+ * for the declarations LevelSetGeometry::bind refuses.
+ */
+[[nodiscard]] CutGeometry cutGeometry(svmp::FE::systems::FESystem& system,
+                                      svmp::Mesh& mesh,
+                                      LevelSetGeometryDeclaration declaration,
+                                      CutGeometryPolicy policy = {});
 
 } // namespace level_set
 } // namespace FE

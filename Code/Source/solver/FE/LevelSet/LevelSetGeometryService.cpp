@@ -4887,6 +4887,136 @@ void LevelSetGeometryStepParticipant::onStepAccepted(
   releaseActiveCutRestoreRetention(service_->refreshCache());
 }
 
+// ---------------------------------------------------------------------------
+// CutGeometry
+// ---------------------------------------------------------------------------
+
+struct CutGeometry::State {
+  svmp::FE::systems::FESystem* system{nullptr};
+  svmp::Mesh* mesh{nullptr};
+  ActiveCutVolumeRequest request{};
+  std::shared_ptr<CutGeometryRequirements> requirements{};
+  std::unique_ptr<svmp::FE::interfaces::FreeSurfaceGeometrySnapshotCache>
+      snapshot_cache{};
+  std::map<std::string,
+           std::unique_ptr<
+               svmp::FE::interfaces::FreeSurfaceGeometrySnapshotReuseCache>>
+      reuse_caches{};
+  std::shared_ptr<LevelSetGeometryService> service{};
+};
+
+CutGeometry::CutGeometry(LevelSetGeometry geometry,
+                         std::shared_ptr<State> state)
+    : geometry_(std::move(geometry)), state_(std::move(state))
+{
+}
+
+ActiveCutVolumeRequest CutGeometry::request() const
+{
+  // The side the handles handed out is the active side; both sides, or
+  // aggregation, keep both cut volumes.
+  const auto& required = *state_->requirements;
+  auto request = state_->request;
+  request.active_side = required.positive_side && !required.negative_side
+                            ? LevelSetActiveSide::Positive
+                            : LevelSetActiveSide::Negative;
+  if (required.retain_both_sides ||
+      (required.negative_side && required.positive_side)) {
+    request.volume_retention = ActiveCutVolumeRetention::ActiveAndInactive;
+  }
+  return request;
+}
+
+ActiveCutContextRefreshReport CutGeometry::refresh(
+    const svmp::FE::systems::SystemStateView& state)
+{
+  auto& s = *state_;
+  const auto current = request();
+  if (!s.service) {
+    s.service = std::make_shared<LevelSetGeometryService>(
+        LevelSetGeometryHost{
+            .fe_system = s.system,
+            .primary_mesh = s.mesh,
+            .free_surface_geometry_snapshot_cache = s.snapshot_cache,
+            .free_surface_geometry_snapshot_reuse_caches = s.reuse_caches},
+        std::vector<ActiveCutVolumeRequest>{current});
+  } else if (s.service->requests().front().volume_retention !=
+                 current.volume_retention ||
+             s.service->requests().front().active_side !=
+                 current.active_side) {
+    throw std::logic_error(
+        "cutGeometry: a side of domain '" + current.domain_id +
+        "' was required after its first cut; take the sides and declare "
+        "the constraints before the first refresh");
+  }
+  const auto field = geometry_.levelSetField();
+  const auto& record = s.system->fieldRecord(field);
+  if (record.source_kind !=
+      svmp::FE::systems::FieldSourceKind::PrescribedData) {
+    return s.service->refreshCached(state, "cut_geometry");
+  }
+  // A prescribed level set is not in the state: the geometry reads it from an
+  // FE-ordered vector that holds its coefficients at its offset (the cut
+  // reads no other field of the vector).
+  const auto coefficients = s.system->prescribedFieldCoefficients(field);
+  const auto offset =
+      static_cast<std::size_t>(s.system->fieldDofOffset(field));
+  std::vector<svmp::FE::Real> source(offset + coefficients.size(),
+                                     svmp::FE::Real{0.0});
+  std::copy(coefficients.begin(), coefficients.end(),
+            source.begin() + static_cast<std::ptrdiff_t>(offset));
+  return refreshActiveCutIntegrationContextFromSolutionCached(
+      s.service->host(),
+      s.service->requests(),
+      std::span<const svmp::FE::Real>(source.data(), source.size()),
+      s.service->lifecycle(),
+      s.service->refreshCache(),
+      "cut_geometry",
+      "prescribed_level_set");
+}
+
+std::shared_ptr<LevelSetGeometryService> CutGeometry::service() const
+{
+  return state_->service;
+}
+
+CutGeometry cutGeometry(svmp::FE::systems::FESystem& system,
+                        svmp::Mesh& mesh,
+                        LevelSetGeometryDeclaration declaration,
+                        CutGeometryPolicy policy)
+{
+  if (system.mesh() != &mesh) {
+    throw std::invalid_argument(
+        "cutGeometry: the mesh is not the mesh of the FE system");
+  }
+  auto state = std::make_shared<CutGeometry::State>();
+  state->system = &system;
+  state->mesh = &mesh;
+  state->requirements = std::make_shared<CutGeometryRequirements>(
+      CutGeometryRequirements{.retain_both_sides = policy.retain_both_sides});
+  const auto requested_marker = declaration.interface_marker;
+  auto geometry = LevelSetGeometry::bind(system, std::move(declaration))
+                      .withRequirements(state->requirements);
+  const auto& name = system.fieldRecord(geometry.levelSetField()).name;
+  if (!mesh.has_field(svmp::EntityKind::Vertex, name)) {
+    (void)mesh.attach_field(svmp::EntityKind::Vertex, name,
+                            svmp::FieldScalarType::Float64, 1u);
+  }
+
+  auto& request = state->request;
+  request.level_set_field_name = name;
+  request.domain_id = geometry.domainId();
+  request.isovalue = static_cast<double>(geometry.isovalue());
+  request.requested_interface_marker = requested_marker;
+  request.quadrature_order = policy.quadrature_order;
+  request.interface_quadrature_order = policy.interface_quadrature_order;
+  request.volume_quadrature_order = policy.volume_quadrature_order;
+  request.geometry_mode = policy.geometry_mode;
+  request.implicit_cut_backend = policy.implicit_cut_backend;
+  request.implicit_cut_fallback_policy = policy.implicit_cut_fallback_policy;
+  return CutGeometry(std::move(geometry), std::move(state));
+}
+
 } // namespace level_set
 } // namespace FE
 } // namespace svmp

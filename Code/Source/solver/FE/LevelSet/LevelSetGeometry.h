@@ -39,7 +39,9 @@
  * (stableGeneratedInterfaceMarker, ...BoundaryIntersectionMarker,
  * ...ActiveBoundaryMarker), so the forms are identical to forms written with
  * those markers by hand.  Binding registers nothing: callers register the
- * generated markers they integrate over, as before.
+ * generated markers they integrate over, as before.  A program without the
+ * Application cuts the mesh itself with cutGeometry()
+ * (LevelSetGeometryService.h), whose geometry is a LevelSetGeometry as well.
  *
  * The file also holds the cut-volume request of the Application input
  * (ActiveCutVolumeRequest) and its pure functions, moved from
@@ -58,6 +60,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -191,6 +194,17 @@ struct LevelSetGeometryDeclaration {
 
 class CutSide;
 
+/// What the declarations of a formulation require of the cut of a
+/// standalone cut geometry (cutGeometry), shared by its handles.
+struct CutGeometryRequirements {
+    /// The sides its handles handed out (LevelSetGeometry::side).
+    bool negative_side{false};
+    bool positive_side{false};
+    /// Generate both cut volumes even for one side (small-cut aggregation
+    /// classifies the whole cell graph).
+    bool retain_both_sides{false};
+};
+
 class LevelSetGeometry {
 public:
     /// Resolves the field and the interface marker; throws
@@ -207,7 +221,8 @@ public:
     /// The interface Gamma: dI(interfaceMarker()).
     [[nodiscard]] forms::InterfaceDomain interface() const;
 
-    /// One side {phi < c} (Negative) or {phi > c} (Positive).
+    /// One side {phi < c} (Negative) or {phi > c} (Positive).  The geometry
+    /// of cutGeometry() records the side for its cut.
     [[nodiscard]] CutSide side(forms::CutVolumeSide side) const;
 
     /// Key of the generated intersection of Gamma with a physical boundary.
@@ -219,6 +234,19 @@ public:
     /// domain of the stable intersection marker.
     [[nodiscard]] forms::ContactLineDomain contactLine(int wall_boundary_marker,
                                                        int requested_marker = -1) const;
+
+    /**
+     * Requires the cut to keep both cut volumes, as small-cut aggregation
+     * does.  The geometry of cutGeometry() records it for its cut and
+     * returns true; a geometry bound to a cut-volume request of the
+     * Application leaves the retention to that request and returns false.
+     */
+    bool requireBothSidesRetained() const;
+
+    /// The same geometry, recording its requirements in @p requirements
+    /// (cutGeometry()).
+    [[nodiscard]] LevelSetGeometry withRequirements(
+        std::shared_ptr<CutGeometryRequirements> requirements) const;
 
 private:
     LevelSetGeometry(FieldId level_set_field, std::string domain_id, Real isovalue, int interface_marker)
@@ -233,6 +261,7 @@ private:
     std::string domain_id_{};
     Real isovalue_{0.0};
     int interface_marker_{-1};
+    std::shared_ptr<CutGeometryRequirements> requirements_{};
 };
 
 class CutSide {

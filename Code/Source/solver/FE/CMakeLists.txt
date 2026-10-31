@@ -3417,9 +3417,10 @@ if(FE_BUILD_TESTS)
             add_fe_mpi_test(test_fe_levelset_mpi 2)
             if(FE_WITH_MESH)
                 # Distributed component solves of the PDE velocity extension
-                # (component c on rank c) need at least three ranks.
+                # (component c on rank c) need at least three ranks; the cut
+                # geometry is compared with one rank on four as well.
                 add_fe_mpi_test(test_fe_levelset_mpi 4
-                    FILTER "LevelSetPdeVelocityExtensionMPI.FourRank*"
+                    FILTER "LevelSetPdeVelocityExtensionMPI.FourRank*:CutGeometryMPI.FourRank*"
                     TIMEOUT 600)
             endif()
         endif()

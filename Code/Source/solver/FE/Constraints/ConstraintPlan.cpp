@@ -201,6 +201,19 @@ ConstraintPlan& ConstraintPlan::aggregate(std::initializer_list<FieldId> fields,
     return *this;
 }
 
+ConstraintPlan& ConstraintPlan::activeOn(std::initializer_list<FieldId> fields,
+                                         const level_set::CutSide& active_side,
+                                         ActiveSideOptions options)
+{
+    requireNotPassed(ConstraintPhase::InactiveSupport, "activeOn");
+    inactiveSide(fields, active_side, options.inactive_value);
+    if (options.aggregate) {
+        aggregate(fields, active_side, std::move(options.guards));
+        (void)active_side.geometry().requireBothSidesRetained();
+    }
+    return *this;
+}
+
 ConstraintPlan& ConstraintPlan::contactPointVelocity(FieldId velocity, ContactPointVelocityLaw law)
 {
     return declare(ConstraintPhase::PointLaw,

@@ -51,6 +51,25 @@ coefficient, coordinate, quadrature, or certificate snapshots. Generated
 geometry must still be refreshed and certified through the normal system
 lifecycle before use.
 
+`cutGeometry(system, mesh, declaration, policy)` is the same geometry for a
+program without the Application: it owns its cut policy (`CutGeometryPolicy`)
+and its `refresh(state)` cuts the mesh with a `LevelSetGeometryService`,
+installs the cut integration context and rebuilds the constraint state. The
+level set may be a prescribed field (its coefficients are cut) or an unknown
+of the state; it is also kept in the mesh vertex field of its name, which the
+cut constraints read. The cut-volume request follows from the handles: the
+side `G.side(s)` hands out is the active side, and both sides, or
+`ConstraintPlan::activeOn` with aggregation, keep both cut volumes; a side
+required after the first refresh throws. Linear corners cut simplices and
+quadrilaterals; on hexahedra the implicit backend linearizes a curved
+interface off the trilinear zero set, so only planar cuts pass there. The
+cut-Poisson test of design A section 2.6 (`test_LevelSetGeometry.cpp`,
+`test_CutGeometryMPI.cpp`) solves a Robin inclusion this way on Triangle3,
+Quad4, Tetra4 and Hex8 and gives the one-rank results on two and four ranks.
+Small-cut aggregation reads root cells several layers away: with two ghost
+layers its results on simplices changed with the rank count, with four they
+did not.
+
 `generatedActiveBoundaryResolver(std::vector<CutSide> owners, std::string owner,
 std::string invalid_physical_marker_message)` returns a callable that owns its
 side handles and diagnostic strings. It can outlive the input vector and does
