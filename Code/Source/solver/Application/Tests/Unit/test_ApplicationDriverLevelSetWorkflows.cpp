@@ -10793,8 +10793,12 @@ TEST(ApplicationDriverLevelSetWorkflows,
       std::invalid_argument);
 }
 
+// The walls of the extension are the strong velocity Dirichlet conditions of
+// the fluid: homogeneous ones, and those with a prescribed velocity (nonzero,
+// time-dependent or from a file), whose value the extension takes from the
+// source velocity.  Natural and weak conditions are not walls.
 TEST(ApplicationDriverLevelSetWorkflows,
-     WetExtensionRequestInfersOnlyZeroDirichletWalls)
+     WetExtensionRequestInfersStrongDirichletWalls)
 {
   auto params = parseWorkflowParametersXml(R"xml(
 <svMultiPhysicsFile>
@@ -10819,6 +10823,17 @@ TEST(ApplicationDriverLevelSetWorkflows,
       <Type>Dir</Type>
       <Value>1.0</Value>
     </Add_BC>
+    <Add_BC name="pulsing_wall">
+      <Type>Dir</Type>
+      <Time_dependence>Unsteady</Time_dependence>
+      <Temporal_values_file_path>wall.flw</Temporal_values_file_path>
+      <Effective_direction>1 0</Effective_direction>
+    </Add_BC>
+    <Add_BC name="weak_wall">
+      <Type>Dir</Type>
+      <Value>0.0</Value>
+      <Weakly_applied>true</Weakly_applied>
+    </Add_BC>
     <Add_BC name="outlet">
       <Type>Neu</Type>
       <Value>0.0</Value>
@@ -10831,14 +10846,58 @@ TEST(ApplicationDriverLevelSetWorkflows,
   ASSERT_EQ(requests.size(), 1u);
   EXPECT_EQ(requests.front().extension_method, "pde_harmonic");
   EXPECT_EQ(requests.front().wall_face_names,
-            (std::vector<std::string>{"wall", "normal_wall"}));
-  ASSERT_EQ(requests.front().wall_constraints.size(), 2u);
-  EXPECT_EQ(requests.front().wall_constraints[0].face_name, "wall");
-  EXPECT_TRUE(
-      requests.front().wall_constraints[0].effective_direction.empty());
-  EXPECT_EQ(requests.front().wall_constraints[1].face_name, "normal_wall");
-  EXPECT_EQ(requests.front().wall_constraints[1].effective_direction,
-            (std::vector<int>{0, 1}));
+            (std::vector<std::string>{"wall", "normal_wall", "moving_lid",
+                                      "pulsing_wall"}));
+  const auto& walls = requests.front().wall_constraints;
+  ASSERT_EQ(walls.size(), 4u);
+  EXPECT_EQ(walls[0].face_name, "wall");
+  EXPECT_TRUE(walls[0].effective_direction.empty());
+  EXPECT_FALSE(walls[0].prescribed_velocity);
+  EXPECT_EQ(walls[1].face_name, "normal_wall");
+  EXPECT_EQ(walls[1].effective_direction, (std::vector<int>{0, 1}));
+  EXPECT_FALSE(walls[1].prescribed_velocity);
+  EXPECT_EQ(walls[2].face_name, "moving_lid");
+  EXPECT_TRUE(walls[2].prescribed_velocity);
+  EXPECT_EQ(walls[3].face_name, "pulsing_wall");
+  EXPECT_EQ(walls[3].effective_direction, (std::vector<int>{1, 0}));
+  EXPECT_TRUE(walls[3].prescribed_velocity);
+
+  // A listed wall face must name a strong velocity Dirichlet condition.
+  auto weak = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="level_set">
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Velocity_source>prescribed_data</Velocity_source>
+    <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
+    <Advection_velocity_extension_method>pde_harmonic</Advection_velocity_extension_method>
+  </Add_equation>
+  <Add_equation type="fluid">
+    <Add_BC name="moving_lid">
+      <Type>Dir</Type>
+      <Value>1.0</Value>
+    </Add_BC>
+    <Add_BC name="weak_wall">
+      <Type>Dir</Type>
+      <Value>0.0</Value>
+      <Weakly_applied>true</Weakly_applied>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  // The wall-face list is a C++ option of the equation keys (decision 18A).
+  auto weak_keys = level_set_configuration::resolveLevelSetEquationKeys(
+      level_set_configuration::levelSetEquationInput(
+          *weak->equation_parameters.front()));
+  weak_keys.value.wet_extension_wall_faces = "moving_lid;weak_wall";
+  try {
+    (void)levelSetAdvectionVelocityRequest(
+        *weak, activeCutVolumeRequests(*weak), weak_keys);
+    ADD_FAILURE() << "weakly applied wall face accepted";
+  } catch (const std::runtime_error& error) {
+    EXPECT_EQ(std::string(error.what()),
+              "[svMultiPhysics::Application] Wet-extension wall face "
+              "'weak_wall' is weakly applied, not a strong constraint.");
+  }
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
@@ -10914,25 +10973,32 @@ TEST(ApplicationDriverLevelSetWorkflows,
               std::string::npos);
   }
 
-  // A source field without a method no longer selects a default extension.
-  auto source_only = parseWorkflowParametersXml(R"xml(
+  // A source field without a method selects no extension.  A fluid
+  // equation owns the velocity it names, which needs a method; in a
+  // level-set-only deck the prescribed velocity is advected directly.
+  const auto source_only = [](const std::string& fluid) {
+    return parseWorkflowParametersXml((R"xml(
 <svMultiPhysicsFile>
   <Add_equation type="level_set">
     <Level_set_field_name>phi</Level_set_field_name>
     <Velocity_source>prescribed_data</Velocity_source>
     <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
     <Source_velocity_field_name>Velocity</Source_velocity_field_name>
-  </Add_equation>
+  </Add_equation>)xml" + fluid + R"xml(
 </svMultiPhysicsFile>
-)xml");
+)xml").c_str());
+  };
   try {
-    (void)levelSetAdvectionVelocityRequests(*source_only);
+    (void)levelSetAdvectionVelocityRequests(*source_only(R"xml(
+  <Add_equation type="fluid">
+  </Add_equation>)xml"));
     ADD_FAILURE() << "source field without a method accepted";
   } catch (const std::runtime_error& error) {
     EXPECT_EQ(std::string(error.what()),
               "[Level-set equation] Source_velocity_field_name: requires "
               "Advection_velocity_extension_method");
   }
+  EXPECT_TRUE(levelSetAdvectionVelocityRequests(*source_only("")).empty());
 
   // Without a method value, no PDE request is created silently.
   auto none = parseWorkflowParametersXml(R"xml(
@@ -10947,8 +11013,11 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_TRUE(levelSetAdvectionVelocityRequests(*none).empty());
 }
 
+// A listed wall with a nonzero strong Dirichlet value is a wall with a
+// prescribed velocity (decision 6A), which the extension takes from the source
+// velocity, not a refusal.
 TEST(ApplicationDriverLevelSetWorkflows,
-     WetExtensionExplicitWallFailsClosedForNonzeroDirichletData)
+     WetExtensionExplicitWallTakesNonzeroDirichletDataAsPrescribed)
 {
   auto params = parseWorkflowParametersXml(R"xml(
 <svMultiPhysicsFile>
@@ -10973,18 +11042,13 @@ TEST(ApplicationDriverLevelSetWorkflows,
           *params->equation_parameters.front()));
   resolved.value.wet_extension_wall_faces = "moving_lid";
 
-  EXPECT_THROW(
-      {
-        try {
-          (void)levelSetAdvectionVelocityRequest(
-              *params, activeCutVolumeRequests(*params), resolved);
-        } catch (const std::runtime_error& error) {
-          EXPECT_NE(std::string(error.what()).find("nonzero"),
-                    std::string::npos);
-          throw;
-        }
-      },
-      std::runtime_error);
+  const auto request = levelSetAdvectionVelocityRequest(
+      *params, activeCutVolumeRequests(*params), resolved);
+  ASSERT_TRUE(request.has_value());
+  const auto& walls = request->wall_constraints;
+  ASSERT_EQ(walls.size(), 1u);
+  EXPECT_EQ(walls[0].face_name, "moving_lid");
+  EXPECT_TRUE(walls[0].prescribed_velocity);
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,

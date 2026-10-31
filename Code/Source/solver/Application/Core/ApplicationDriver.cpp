@@ -1279,8 +1279,12 @@ void requireCollectivePhasePreparation(
 /// equation element, as the translator resolves them
 /// (levelSetEquationSchema()), or std::nullopt when they name no PDE
 /// extension.  The schema rejects any other method and a source velocity
-/// field without one.  The wall-face list of the impermeability rows is a
-/// C++ option of the keys (empty: the walls with a strong zero velocity).
+/// field without one, except with prescribed advection data.  There a fluid
+/// equation owns the velocity the field names, which needs a method too;
+/// without one (a level-set-only run) the prescribed velocity is advected
+/// directly.  The wall-face list of the impermeability rows is a C++ option
+/// of the keys (empty: the walls with a strong velocity Dirichlet
+/// condition).
 std::optional<LevelSetAdvectionVelocityRequest> levelSetAdvectionVelocityRequest(
     const Parameters& params,
     const std::vector<ActiveCutVolumeRequest>& active_requests,
@@ -1289,6 +1293,17 @@ std::optional<LevelSetAdvectionVelocityRequest> levelSetAdvectionVelocityRequest
 {
   const auto& keys = resolved.value;
   if (!keys.advection_velocity_extension_method.has_value()) {
+    const bool fluid_equation = std::any_of(
+        params.equation_parameters.begin(), params.equation_parameters.end(),
+        [](const auto* equation) {
+          return equation != nullptr && equation->type.defined() &&
+                 lower_copy(equation->type.value()) == "fluid";
+        });
+    if (!keys.source_velocity_field_name.empty() && fluid_equation) {
+      throw std::runtime_error(
+          "[Level-set equation] Source_velocity_field_name: requires "
+          "Advection_velocity_extension_method");
+    }
     return std::nullopt;
   }
 
@@ -1345,6 +1360,10 @@ std::optional<LevelSetAdvectionVelocityRequest> levelSetAdvectionVelocityRequest
         }
       }
     };
+    // A wall of the extension is a strong velocity Dirichlet condition:
+    // homogeneous, or with a prescribed velocity (time- or space-varying,
+    // nonzero, or from a file), which the extension takes from the source
+    // velocity on the constrained components.
     const auto incompatibility = [](
         const BoundaryConditionParameters& boundary)
         -> std::optional<std::string> {
@@ -1358,27 +1377,24 @@ std::optional<LevelSetAdvectionVelocityRequest> levelSetAdvectionVelocityRequest
       if (boundary.weakly_applied.value()) {
         return std::string{"is weakly applied, not a strong constraint"};
       }
-      const auto time_dependence =
-          normalized_token(boundary.time_dependence.value());
-      if (!time_dependence.empty() && time_dependence != "steady") {
-        return std::string{"is time/spatially varying and cannot be proven homogeneous"};
-      }
-      const auto value = boundary.value.value();
-      if (!std::isfinite(value) || std::abs(value) > 1.0e-14) {
-        return std::string{"prescribes a nonzero or non-finite velocity"};
-      }
-      if ((boundary.temporal_and_spatial_values_file_path.defined() &&
-           !trim_copy(boundary.temporal_and_spatial_values_file_path.value())
-                .empty()) ||
-          (boundary.temporal_values_file_path.defined() &&
-           !trim_copy(boundary.temporal_values_file_path.value()).empty()) ||
-          (boundary.spatial_values_file_path.defined() &&
-           !trim_copy(boundary.spatial_values_file_path.value()).empty()) ||
-          (boundary.bct_file_path.defined() &&
-           !trim_copy(boundary.bct_file_path.value()).empty())) {
-        return std::string{"uses prescribed data whose zero component mask is not statically known"};
+      if (!std::isfinite(boundary.value.value())) {
+        return std::string{"prescribes a non-finite velocity"};
       }
       return std::nullopt;
+    };
+    const auto prescribed_velocity = [](
+        const BoundaryConditionParameters& boundary) {
+      const auto time_dependence =
+          normalized_token(boundary.time_dependence.value());
+      const auto has_file = [](const auto& path) {
+        return path.defined() && !trim_copy(path.value()).empty();
+      };
+      return (!time_dependence.empty() && time_dependence != "steady") ||
+             std::abs(boundary.value.value()) > 1.0e-14 ||
+             has_file(boundary.temporal_and_spatial_values_file_path) ||
+             has_file(boundary.temporal_values_file_path) ||
+             has_file(boundary.spatial_values_file_path) ||
+             has_file(boundary.bct_file_path);
     };
 
     const EquationParameters* velocity_equation = nullptr;
@@ -1434,7 +1450,7 @@ std::optional<LevelSetAdvectionVelocityRequest> levelSetAdvectionVelocityRequest
               "[svMultiPhysics::Application] Wet-extension wall face '" +
               wall_face_name +
               "' has multiple velocity Dirichlet records in its owning "
-              "fluid equation; its strong zero-component mask is ambiguous.");
+              "fluid equation; its strong component mask is ambiguous.");
         }
         matching_dirichlet = boundary;
       }
@@ -1442,8 +1458,8 @@ std::optional<LevelSetAdvectionVelocityRequest> levelSetAdvectionVelocityRequest
         throw std::runtime_error(
             "[svMultiPhysics::Application] Wet-extension wall face '" +
             wall_face_name +
-            "' has no matching velocity Dirichlet condition. Wall-compatible "
-            "extension requires an actual strong homogeneous velocity constraint.");
+            "' has no matching velocity Dirichlet condition. A wall of the "
+            "extension requires a strong velocity Dirichlet condition.");
       }
       if (const auto reason = incompatibility(*matching_dirichlet)) {
         throw std::runtime_error(
@@ -1456,7 +1472,9 @@ std::optional<LevelSetAdvectionVelocityRequest> levelSetAdvectionVelocityRequest
               .effective_direction =
                   matching_dirichlet->effective_direction.defined()
                       ? matching_dirichlet->effective_direction.value()
-                      : std::vector<int>{}});
+                      : std::vector<int>{},
+              .prescribed_velocity =
+                  prescribed_velocity(*matching_dirichlet)});
     }
   }
 

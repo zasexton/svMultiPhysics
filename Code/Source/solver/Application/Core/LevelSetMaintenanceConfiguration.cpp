@@ -79,9 +79,12 @@ resolveLegacyLevelSetMaintenanceConfiguration(
   result->static_capillary_equilibrium_enabled =
       keys.static_capillary_equilibrium_enabled;
   result->static_capillary_equilibrium = keys.static_capillary_equilibrium;
-  // A source velocity field selects the velocity extension, whose field is
-  // a coupled unknown; a constant velocity stays constant.
+  // A source velocity field with an extension method selects the velocity
+  // extension, whose field is a coupled unknown; a constant velocity stays
+  // constant, and without a method a prescribed velocity is advected
+  // directly.
   if (!keys.source_velocity_field_name.empty() &&
+      keys.advection_velocity_extension_method.has_value() &&
       transport.velocity.source != ls::LevelSetVelocitySource::ConstantVector) {
     transport.velocity.source = ls::LevelSetVelocitySource::CoupledField;
   }

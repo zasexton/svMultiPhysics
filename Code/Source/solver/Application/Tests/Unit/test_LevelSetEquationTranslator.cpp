@@ -1159,22 +1159,50 @@ TEST(LevelSetEquationTranslator, RejectsExtensionSettingsWithoutAPdeMethod)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
 #else
   // The extension needs an explicit PDE method (decisions D47 and D55):
-  // another method, or a source velocity field without a method, fails.
+  // another method, or a source velocity field without a method and
+  // without prescribed advection data, fails.  (With prescribed data the
+  // driver decides, from the equations of the deck.)
   const std::string methods =
       "Advection_velocity_extension_method: expected one of pde_harmonic | "
       "pde_normal, got '";
-  const std::vector<std::array<std::string, 3>> cases{
+  const std::vector<std::array<std::string, 4>> cases{
       {"Advection_velocity_extension_method", "wall_compatible_normal",
-       methods + "wall_compatible_normal'"},
+       methods + "wall_compatible_normal'", "prescribed_data"},
       {"Advection_velocity_extension_method", "nearest_interface_point",
-       methods + "nearest_interface_point'"},
+       methods + "nearest_interface_point'", "prescribed_data"},
       {"Advection_velocity_extension_method", "nearest_active_vertex",
-       methods + "nearest_active_vertex'"},
+       methods + "nearest_active_vertex'", "prescribed_data"},
       {"Source_velocity_field_name", "physical_velocity",
        "Source_velocity_field_name: requires "
-       "Advection_velocity_extension_method"},
+       "Advection_velocity_extension_method",
+       "coupled_field"},
   };
-  for (const auto& [key, value, reason] : cases) {
+  for (const auto& [key, value, reason, velocity_source] : cases) {
+    auto mesh = makeRegistryQuadMesh();
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "level_set";
+    input.mesh_name = "quad";
+    input.mesh = mesh->local_mesh_ptr();
+    input.equation_params["Level_set_field_name"] =
+        svmp::Physics::ParameterValue{true, "phi"};
+    input.equation_params["Velocity_field_name"] =
+        svmp::Physics::ParameterValue{true, "advecting_velocity"};
+    input.equation_params["Velocity_source"] =
+        svmp::Physics::ParameterValue{true, velocity_source};
+    input.equation_params[key] = svmp::Physics::ParameterValue{true, value};
+
+    svmp::FE::systems::FESystem system(mesh);
+    EXPECT_EQ(
+        (maintenanceCompatibilityExceptionMessage<std::runtime_error>([&] {
+          (void)application::translators::level_set::createModule(input,
+                                                                  system);
+        })),
+        "[Level-set equation] " + reason);
+  }
+
+  // Prescribed advection data and a source field without a method: the
+  // prescribed velocity is advected, no extension is installed.
+  {
     auto mesh = makeRegistryQuadMesh();
     svmp::Physics::EquationModuleInput input{};
     input.equation_type = "level_set";
@@ -1186,15 +1214,16 @@ TEST(LevelSetEquationTranslator, RejectsExtensionSettingsWithoutAPdeMethod)
         svmp::Physics::ParameterValue{true, "advecting_velocity"};
     input.equation_params["Velocity_source"] =
         svmp::Physics::ParameterValue{true, "prescribed_data"};
-    input.equation_params[key] = svmp::Physics::ParameterValue{true, value};
-
-    svmp::FE::systems::FESystem system(mesh);
-    EXPECT_EQ(
-        (maintenanceCompatibilityExceptionMessage<std::runtime_error>([&] {
-          (void)application::translators::level_set::createModule(input,
-                                                                  system);
-        })),
-        "[Level-set equation] " + reason);
+    input.equation_params["Source_velocity_field_name"] =
+        svmp::Physics::ParameterValue{true, "physical_velocity"};
+    const auto resolved =
+        application::translators::level_set::resolveConfiguration(input);
+    ASSERT_TRUE(resolved);
+    EXPECT_EQ(resolved->options.velocity.source,
+              svmp::FE::level_set::LevelSetVelocitySource::PrescribedData);
+    EXPECT_TRUE(
+        resolved->options.velocity.algebraic_extension_source_field_name
+            .empty());
   }
 #endif
 }

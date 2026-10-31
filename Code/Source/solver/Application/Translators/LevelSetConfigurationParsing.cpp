@@ -333,10 +333,16 @@ opt::OptionSchema<Keys> makeLevelSetEquationSchema() {
       .implies("Velocity_source", "Auto_register_velocity_field", "false",
                opt::ImplicationSettings{
                    .when_trigger_is = "material_interface_phase_pair"})
+      // A source velocity field names the velocity the extension extends.
+      // With prescribed advection data and no method, the driver decides:
+      // without an equation that owns the field (a level-set-only run) the
+      // prescribed velocity is advected directly.
       .rule("Source_velocity_field_name", [](const opt::ResolvedOptions<Keys>
                                                  &resolved) {
         return !resolved.value.source_velocity_field_name.empty() &&
-                       !resolved.value.advection_velocity_extension_method
+                       !resolved.value.advection_velocity_extension_method &&
+                       resolved.value.transport.velocity.source !=
+                           ls::LevelSetVelocitySource::PrescribedData
                    ? std::string(
                          "requires Advection_velocity_extension_method")
                    : std::string{};
