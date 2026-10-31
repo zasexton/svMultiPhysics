@@ -110,11 +110,11 @@ public:
         int volume_interface_marker,
         Real minimum_symmetric_energy_ratio);
 
-    /// Registers the generated marker of a contact line or of the generated
-    /// part of a boundary with the system (nothing for a marker < 0) and
-    /// returns the domain.
+    /// Registers the generated marker of a contact line with the system
+    /// (nothing for a marker < 0) and returns the domain.  The generated
+    /// active parts of boundaries need no call: install() and installGroup()
+    /// register those their residual integrates over.
     forms::ContactLineDomain registered(forms::ContactLineDomain domain);
-    forms::BoundaryDomain registered(forms::BoundaryDomain domain);
 
     /// Declares the measured functional @p form under @p name
     /// (declareFunctionalForm), owned by @p owner, or by operatorTag() when
@@ -136,11 +136,13 @@ public:
     /// The options of a group: a copy of options() changed as @p group says.
     [[nodiscard]] FormInstallOptions groupOptions(const FormulationGroup& group) const;
 
-    /// installFormulation with options().
+    /// installFormulation with options(), after registering the generated
+    /// active boundaries the residual integrates over.
     CoupledResidualKernels install(std::span<const FieldId> fields, const forms::FormExpr& residual);
     CoupledResidualKernels install(std::initializer_list<FieldId> fields, const forms::FormExpr& residual);
 
-    /// installFormulation with groupOptions(@p group).
+    /// installFormulation with groupOptions(@p group), after registering the
+    /// generated active boundaries the residual integrates over.
     CoupledResidualKernels installGroup(std::span<const FieldId> fields,
                                         const forms::FormExpr& residual,
                                         const FormulationGroup& group);
@@ -181,6 +183,10 @@ public:
                                       const DiagnosticOperatorOptions& options = {});
 
 private:
+    /// Registers the generated active boundary of each generated exterior
+    /// measure of @p residual with the system.
+    void registerGeneratedBoundaries(const forms::FormExpr& residual);
+
     FESystem* system_{nullptr};
     OperatorTag operator_tag_{};
     FormInstallOptions options_{};

@@ -15,6 +15,7 @@
 
 #include "Core/NumericValidation.h"
 #include "Forms/FormExpr.h"
+#include "Forms/IntegrationDomain.h"
 #include "Forms/NitscheTraceBilinearForm.h"
 
 #include <array>
@@ -36,6 +37,85 @@ namespace svmp {
 namespace FE {
 namespace forms {
 namespace bc {
+
+/**
+ * @brief The target of a boundary condition, one type for every kind
+ *
+ * A fitted marker (integrates over ds(marker)), a physical exterior boundary
+ * whole or restricted to its generated active subset (dExteriorBoundary), or
+ * an embedded interface (dI).  The conditions take a Boundary, so the same
+ * condition is written once for a fitted and a generated boundary.  The FE
+ * layer resolves the markers: the formulation builder registers the
+ * generated active boundaries of the residuals it installs.
+ */
+class Boundary {
+public:
+    /// A fitted boundary marker.
+    Boundary(int marker)  // NOLINT(google-explicit-constructor): a marker is a boundary
+        : marker_(marker)
+    {
+        if (marker < 0) {
+            throw std::invalid_argument("forms::bc::Boundary: boundary_marker must be >= 0");
+        }
+    }
+
+    /// A physical exterior boundary, whole or its generated active subset.
+    Boundary(ExteriorBoundaryMeasure domain)  // NOLINT(google-explicit-constructor)
+        : marker_(domain.physicalBoundaryMarker())
+        , exterior_(domain)
+    {
+    }
+
+    /// An embedded interface.
+    Boundary(InterfaceDomain domain)  // NOLINT(google-explicit-constructor)
+        : marker_(domain.marker())
+        , interface_(true)
+    {
+    }
+
+    /// @p marker, restricted to its generated active subset when
+    /// @p generated_active_marker is set.
+    [[nodiscard]] static Boundary of(int marker, std::optional<int> generated_active_marker)
+    {
+        if (!generated_active_marker.has_value()) {
+            return Boundary(marker);
+        }
+        if (marker < 0) {
+            throw std::invalid_argument("forms::bc::Boundary: boundary_marker must be >= 0");
+        }
+        return Boundary(ExteriorBoundaryMeasure::generatedActiveSubset(marker, *generated_active_marker));
+    }
+
+    /// The physical boundary marker, or the interface marker.
+    [[nodiscard]] int marker() const noexcept { return marker_; }
+    [[nodiscard]] bool isInterface() const noexcept { return interface_; }
+    /// Whether the boundary is the generated active subset of a marker.
+    [[nodiscard]] bool isGenerated() const noexcept
+    {
+        return exterior_.has_value() && !exterior_->isFullPhysical();
+    }
+    /// The exterior measure, when the boundary was given as one.
+    [[nodiscard]] const std::optional<ExteriorBoundaryMeasure>& exteriorMeasure() const noexcept
+    {
+        return exterior_;
+    }
+
+    /// The integral of @p integrand over the boundary.
+    [[nodiscard]] FormExpr integrate(const FormExpr& integrand) const
+    {
+        if (interface_) {
+            return integrand.dI(marker_);
+        }
+        return exterior_.has_value() ? integrand.dExteriorBoundary(*exterior_) : integrand.ds(marker_);
+    }
+
+    [[nodiscard]] friend bool operator==(const Boundary&, const Boundary&) noexcept = default;
+
+private:
+    int marker_{-1};
+    std::optional<ExteriorBoundaryMeasure> exterior_{};
+    bool interface_{false};
+};
 
 enum class ComponentValueNameStyle : std::uint8_t {
     Indexed,

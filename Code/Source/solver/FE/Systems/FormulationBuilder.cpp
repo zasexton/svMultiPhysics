@@ -7,6 +7,7 @@
 
 #include "Systems/FormulationBuilder.h"
 
+#include "Analysis/FormExprScanner.h"
 #include "Forms/FormExpr.h"
 #include "Systems/ALEBinding.h"
 #include "Systems/FESystem.h"
@@ -92,11 +93,6 @@ forms::ContactLineDomain FormulationBuilder::registered(forms::ContactLineDomain
     return domain;
 }
 
-forms::BoundaryDomain FormulationBuilder::registered(forms::BoundaryDomain domain)
-{
-    system_->registerGeneratedEmbeddedInterfaceMarker(domain.generatedActiveBoundaryMarker());
-    return domain;
-}
 
 FormulationBuilder& FormulationBuilder::functional(std::string name,
                                                    FunctionalKind kind,
@@ -143,9 +139,22 @@ FormInstallOptions FormulationBuilder::groupOptions(const FormulationGroup& grou
     return group_options;
 }
 
+void FormulationBuilder::registerGeneratedBoundaries(const forms::FormExpr& residual)
+{
+    if (!residual.isValid() || residual.node() == nullptr) {
+        return;
+    }
+    for (const auto& measure : analysis::scanFormExpr(*residual.node()).exterior_boundary_measures) {
+        if (measure.isGeneratedActiveSubset()) {
+            system_->registerGeneratedEmbeddedInterfaceMarker(measure.generatedActiveBoundaryMarker());
+        }
+    }
+}
+
 CoupledResidualKernels FormulationBuilder::install(std::span<const FieldId> fields,
                                                    const forms::FormExpr& residual)
 {
+    registerGeneratedBoundaries(residual);
     return installFormulation(*system_, operator_tag_, fields, residual, options_);
 }
 
@@ -159,6 +168,7 @@ CoupledResidualKernels FormulationBuilder::installGroup(std::span<const FieldId>
                                                         const forms::FormExpr& residual,
                                                         const FormulationGroup& group)
 {
+    registerGeneratedBoundaries(residual);
     return installFormulation(*system_, operator_tag_, fields, residual, groupOptions(group));
 }
 

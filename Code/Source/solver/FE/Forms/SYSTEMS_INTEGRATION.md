@@ -408,8 +408,8 @@ A mismatch throws `std::logic_error` with the supplied message.
 
 This check reads the supplied values without registering markers, changing
 bindings, or constructing replacement forms. The caller owns both spans for
-the duration of the call. Register required domains separately through
-`FormulationBuilder::registered()` at the intended declaration point. Route
+the duration of the call. The formulation builder registers the generated
+boundary domains when it installs the residual that integrates over them. Route
 agreement does not authenticate a form's origin or certify its penalty:
 `certifyGeneratedBoundaryNitscheTraces()` and installation still require the
 original form anchors and prepare the live trace policies. Keep the original

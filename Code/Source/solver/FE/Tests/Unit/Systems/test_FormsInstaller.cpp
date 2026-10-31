@@ -1772,11 +1772,6 @@ TEST(FormulationBuilder, ComposesOptionsInCallOrderAndInstallsGroups)
     const auto line = F.registered(svmp::FE::forms::ContactLineDomain(41, 3));
     EXPECT_EQ(line.marker(), 41);
     EXPECT_TRUE(sys.isGeneratedEmbeddedInterfaceMarkerRegistered(41));
-    const auto wetted = F.registered(svmp::FE::forms::BoundaryDomain::generatedActiveSubset(3, 42));
-    EXPECT_EQ(wetted.generatedActiveBoundaryMarker(), 42);
-    EXPECT_TRUE(sys.isGeneratedEmbeddedInterfaceMarkerRegistered(42));
-    (void)F.registered(svmp::FE::forms::BoundaryDomain::fullPhysical(3));
-    EXPECT_FALSE(sys.isGeneratedEmbeddedInterfaceMarkerRegistered(3));
 
     const auto u = svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
     const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
@@ -1784,6 +1779,15 @@ TEST(FormulationBuilder, ComposesOptionsInCallOrderAndInstallsGroups)
     ASSERT_FALSE(residual.residual.empty());
     const auto grouped = F.installGroup({u_field}, (u * u * v).dx(), {.source_component_tag = "nonlinear"});
     ASSERT_FALSE(grouped.residual.empty());
+
+    // The generated active part of a boundary registers when a residual on it is installed.
+    const auto wetted = svmp::FE::forms::BoundaryDomain::generatedActiveSubset(3, 42);
+    EXPECT_FALSE(sys.isGeneratedEmbeddedInterfaceMarkerRegistered(42));
+    (void)F.installGroup({u_field},
+                         (u * v).ds(wetted) + (u * v).ds(svmp::FE::forms::BoundaryDomain::fullPhysical(3)),
+                         {.source_component_tag = "wetted"});
+    EXPECT_TRUE(sys.isGeneratedEmbeddedInterfaceMarkerRegistered(42));
+    EXPECT_FALSE(sys.isGeneratedEmbeddedInterfaceMarkerRegistered(3));
 }
 
 TEST(FormulationBuilder, DeclaresMeasuredFunctionalsWithoutInstallingThem)

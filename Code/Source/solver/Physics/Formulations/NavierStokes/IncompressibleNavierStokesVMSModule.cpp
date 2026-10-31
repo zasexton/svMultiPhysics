@@ -495,9 +495,6 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     fs::requireGeneratedBoundaryNitscheTraceBindings(
         preflight.required_nitsche_routes, nitsche_traces,
         "IncompressibleNavierStokesVMSModule::registerOn: generated-boundary Nitsche form binding count differs from the certified production routes");
-    for (const auto& domain : preflight.required_nitsche_routes) {
-        (void)F.registered(domain);
-    }
 
     // Install: the residual, the residual-work channels, then the PSPG pressure-gradient group.
     if (!o.viscosity_model) {

@@ -465,9 +465,8 @@ TEST(FormsBoundaryConditions, NaturalBCUsesGeneratedActiveBoundaryWhenProvided)
 
     auto residual = (u * v).dx();
     svmp::FE::forms::bc::NaturalBC bc(
-        /*boundary_marker=*/5,
-        svmp::FE::forms::FormExpr::constant(2.0),
-        /*generated_active_boundary_marker=*/105);
+        svmp::FE::forms::bc::Boundary::of(/*marker=*/5, /*generated_active_marker=*/105),
+        svmp::FE::forms::FormExpr::constant(2.0));
     bc.contributeToResidual(residual, u, v);
 
     svmp::FE::forms::FormCompiler compiler;
@@ -489,6 +488,32 @@ TEST(FormsBoundaryConditions, NaturalBCUsesGeneratedActiveBoundaryWhenProvided)
     EXPECT_EQ(whole_face_terms, 0);
 }
 
+TEST(FormsBoundaryConditions, BoundaryIntegratesOverItsKindOfMeasure)
+{
+    namespace forms = svmp::FE::forms;
+    namespace bc = forms::bc;
+    auto space = svmp::FE::spaces::H1Space(ElementType::Tetra4, /*order=*/1);
+    const auto u = forms::FormExpr::trialFunction(space, "u");
+    const auto v = forms::FormExpr::testFunction(space, "v");
+    const auto f = u * v;
+    const auto same = [](const forms::FormExpr& a, const forms::FormExpr& b) {
+        EXPECT_EQ(svmp::FE::systems::formExprTreeHash(a), svmp::FE::systems::formExprTreeHash(b));
+        EXPECT_EQ(a.toString(), b.toString());
+    };
+    same(bc::Boundary(4).integrate(f), f.ds(4));
+    same(bc::Boundary::of(4, std::nullopt).integrate(f), f.ds(4));
+    const auto whole = forms::ExteriorBoundaryMeasure::fullPhysical(4);
+    const auto wet = forms::ExteriorBoundaryMeasure::generatedActiveSubset(4, 104);
+    same(bc::Boundary(whole).integrate(f), f.dExteriorBoundary(whole));
+    same(bc::Boundary::of(4, 104).integrate(f), f.dExteriorBoundary(wet));
+    same(bc::Boundary(forms::InterfaceDomain(9)).integrate(f), f.dI(9));
+    EXPECT_TRUE(bc::Boundary::of(4, 104).isGenerated());
+    EXPECT_FALSE(bc::Boundary(whole).isGenerated());
+    EXPECT_TRUE(bc::Boundary(forms::InterfaceDomain(9)).isInterface());
+    EXPECT_THROW(bc::NaturalBC(forms::InterfaceDomain(9), forms::FormExpr::constant(1.0)), std::invalid_argument);
+    EXPECT_THROW(bc::Dirichlet(forms::InterfaceDomain(9), forms::FormExpr::constant(1.0)), std::invalid_argument);
+}
+
 TEST(FormsBoundaryConditions, RobinBCUsesGeneratedActiveBoundaryWhenProvided)
 {
     auto space = svmp::FE::spaces::H1Space(ElementType::Tetra4, /*order=*/1);
@@ -497,10 +522,9 @@ TEST(FormsBoundaryConditions, RobinBCUsesGeneratedActiveBoundaryWhenProvided)
 
     auto residual = (u * v).dx();
     svmp::FE::forms::bc::RobinBC bc(
-        /*boundary_marker=*/7,
+        svmp::FE::forms::bc::Boundary::of(/*marker=*/7, /*generated_active_marker=*/107),
         svmp::FE::forms::FormExpr::constant(3.0),
-        svmp::FE::forms::FormExpr::constant(4.0),
-        /*generated_active_boundary_marker=*/107);
+        svmp::FE::forms::FormExpr::constant(4.0));
     bc.contributeToResidual(residual, u, v);
 
     svmp::FE::forms::FormCompiler compiler;
@@ -608,19 +632,9 @@ TEST(FormsBoundaryConditions,
 
 TEST(FormsBoundaryConditions, GeneratedActiveBoundaryMarkerMustBeNonnegative)
 {
-    EXPECT_THROW(
-        svmp::FE::forms::bc::NaturalBC(
-            /*boundary_marker=*/3,
-            svmp::FE::forms::FormExpr::constant(1.0),
-            /*generated_active_boundary_marker=*/-1),
-        std::invalid_argument);
-    EXPECT_THROW(
-        svmp::FE::forms::bc::RobinBC(
-            /*boundary_marker=*/3,
-            svmp::FE::forms::FormExpr::constant(1.0),
-            svmp::FE::forms::FormExpr::constant(0.0),
-            /*generated_active_boundary_marker=*/-1),
-        std::invalid_argument);
+    EXPECT_THROW((void)svmp::FE::forms::bc::Boundary::of(/*marker=*/3, /*generated_active_marker=*/-1),
+                 std::invalid_argument);
+    EXPECT_THROW((void)svmp::FE::forms::bc::Boundary(-1), std::invalid_argument);
 }
 
 TEST(FormsBoundaryConditions, NormalComponentHelperBuildsScalarBoundaryTrace) {

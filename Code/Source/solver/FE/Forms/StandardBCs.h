@@ -107,56 +107,26 @@ private:
  */
 class NaturalBC : public BoundaryCondition {
 public:
-    NaturalBC(ExteriorBoundaryMeasure measure,
-              FormExpr flux)
-        : boundary_marker_(
-              measure.physicalBoundaryMarker())
+    NaturalBC(Boundary target, FormExpr flux)
+        : target_(std::move(target))
         , flux_(std::move(flux))
-        , exterior_boundary_measure_(measure)
     {
+        if (target_.isInterface()) {
+            throw std::invalid_argument("NaturalBC: an interface flux is an InterfaceTraceLoadBC");
+        }
         if (!flux_.isValid()) {
-            throw std::invalid_argument(
-                "NaturalBC: invalid flux expression");
+            throw std::invalid_argument("NaturalBC: invalid flux expression");
         }
     }
 
-    NaturalBC(int boundary_marker,
-              FormExpr flux,
-              std::optional<int> generated_active_boundary_marker = std::nullopt)
-        : boundary_marker_(boundary_marker)
-        , flux_(std::move(flux))
-        , exterior_boundary_measure_(
-              generated_active_boundary_marker.has_value()
-                  ? std::optional<ExteriorBoundaryMeasure>{
-                        ExteriorBoundaryMeasure::
-                            generatedActiveSubset(
-                                boundary_marker,
-                                *generated_active_boundary_marker)}
-                  : std::nullopt)
-    {
-        if (boundary_marker_ < 0) {
-            throw std::invalid_argument(
-                "NaturalBC: boundary_marker must be >= 0");
-        }
-        if (!flux_.isValid()) {
-            throw std::invalid_argument(
-                "NaturalBC: invalid flux expression");
-        }
-    }
-
-    [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
+    [[nodiscard]] int boundaryMarker() const override { return target_.marker(); }
     [[nodiscard]] std::string_view label() const override { return "NaturalBC"; }
 
     void contributeToResidual(FormExpr& residual,
                               const FormExpr& /*u*/,
                               const FormExpr& v) const override
     {
-        const auto integrand = inner(flux_, v);
-        residual = residual -
-                   (exterior_boundary_measure_.has_value()
-                        ? integrand.dExteriorBoundary(
-                              *exterior_boundary_measure_)
-                        : integrand.ds(boundary_marker_));
+        residual = residual - target_.integrate(inner(flux_, v));
     }
 
     [[nodiscard]] std::vector<StrongDirichlet> getStrongConstraints(FieldId /*field_id*/) const override
@@ -169,22 +139,19 @@ public:
     {
         analysis::BoundaryConditionDescriptor d;
         d.primary_variable = analysis::VariableKey::field(field_id);
-        d.boundary_marker = boundary_marker_;
+        d.boundary_marker = target_.marker();
         d.trace_kind = analysis::TraceKind::Flux;
         d.enforcement_kind = analysis::EnforcementKind::WeakConsistent;
         d.anchors_constant_mode = false;
         d.anchors_rigid_body_translation = false;
         d.anchors_rigid_body_rotation = false;
-        d.source = "NaturalBC on marker " + std::to_string(boundary_marker_);
+        d.source = "NaturalBC on marker " + std::to_string(target_.marker());
         return {d};
     }
 
 private:
-protected:
-    int boundary_marker_{-1};
+    Boundary target_;
     FormExpr flux_{};
-    std::optional<ExteriorBoundaryMeasure>
-        exterior_boundary_measure_{};
 };
 
 /**
@@ -192,76 +159,30 @@ protected:
  */
 class RobinBC : public BoundaryCondition {
 public:
-    RobinBC(ExteriorBoundaryMeasure measure,
-            FormExpr alpha,
-            FormExpr rhs)
-        : boundary_marker_(
-              measure.physicalBoundaryMarker())
+    RobinBC(Boundary target, FormExpr alpha, FormExpr rhs)
+        : target_(std::move(target))
         , alpha_(std::move(alpha))
         , rhs_(std::move(rhs))
-        , exterior_boundary_measure_(measure)
     {
+        if (target_.isInterface()) {
+            throw std::invalid_argument("RobinBC: an interface Robin law is an InterfaceTraceRobinBC");
+        }
         if (!alpha_.isValid()) {
-            throw std::invalid_argument(
-                "RobinBC: invalid alpha expression");
+            throw std::invalid_argument("RobinBC: invalid alpha expression");
         }
         if (!rhs_.isValid()) {
-            throw std::invalid_argument(
-                "RobinBC: invalid rhs expression");
+            throw std::invalid_argument("RobinBC: invalid rhs expression");
         }
     }
 
-    RobinBC(int boundary_marker,
-            FormExpr alpha,
-            FormExpr rhs,
-            std::optional<int> generated_active_boundary_marker = std::nullopt)
-        : boundary_marker_(boundary_marker)
-        , alpha_(std::move(alpha))
-        , rhs_(std::move(rhs))
-        , exterior_boundary_measure_(
-              generated_active_boundary_marker.has_value()
-                  ? std::optional<ExteriorBoundaryMeasure>{
-                        ExteriorBoundaryMeasure::
-                            generatedActiveSubset(
-                                boundary_marker,
-                                *generated_active_boundary_marker)}
-                  : std::nullopt)
-    {
-        if (boundary_marker_ < 0) {
-            throw std::invalid_argument(
-                "RobinBC: boundary_marker must be >= 0");
-        }
-        if (!alpha_.isValid()) {
-            throw std::invalid_argument(
-                "RobinBC: invalid alpha expression");
-        }
-        if (!rhs_.isValid()) {
-            throw std::invalid_argument(
-                "RobinBC: invalid rhs expression");
-        }
-    }
-
-    [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
+    [[nodiscard]] int boundaryMarker() const override { return target_.marker(); }
     [[nodiscard]] std::string_view label() const override { return "RobinBC"; }
 
     void contributeToResidual(FormExpr& residual,
                               const FormExpr& u,
                               const FormExpr& v) const override
     {
-        const auto lhs = alpha_ * inner(u, v);
-        const auto rhs = inner(rhs_, v);
-        if (exterior_boundary_measure_.has_value()) {
-            residual =
-                residual +
-                lhs.dExteriorBoundary(
-                    *exterior_boundary_measure_) -
-                rhs.dExteriorBoundary(
-                    *exterior_boundary_measure_);
-        } else {
-            residual =
-                residual + lhs.ds(boundary_marker_) -
-                rhs.ds(boundary_marker_);
-        }
+        residual = residual + target_.integrate(alpha_ * inner(u, v)) - target_.integrate(inner(rhs_, v));
     }
 
     [[nodiscard]] std::vector<StrongDirichlet> getStrongConstraints(FieldId /*field_id*/) const override
@@ -274,23 +195,20 @@ public:
     {
         analysis::BoundaryConditionDescriptor d;
         d.primary_variable = analysis::VariableKey::field(field_id);
-        d.boundary_marker = boundary_marker_;
+        d.boundary_marker = target_.marker();
         d.trace_kind = analysis::TraceKind::Mixed;
         d.enforcement_kind = analysis::EnforcementKind::WeakPenalty;
         d.anchors_constant_mode = true;
         d.anchors_rigid_body_translation = true;
         d.anchors_rigid_body_rotation = false;
-        d.source = "RobinBC on marker " + std::to_string(boundary_marker_);
+        d.source = "RobinBC on marker " + std::to_string(target_.marker());
         return {d};
     }
 
 private:
-protected:
-    int boundary_marker_{-1};
+    Boundary target_;
     FormExpr alpha_{};
     FormExpr rhs_{};
-    std::optional<ExteriorBoundaryMeasure>
-        exterior_boundary_measure_{};
 };
 
 // ---- Dirichlet conditions: one condition, the enforcement an argument ----
@@ -437,8 +355,8 @@ private:
  *   unknowns makes the condition multi-row (contributeToRows).
  * - Penalty{beta}: weak, beta (u - g) . v.
  *
- * The boundary is a marker or an exterior measure (generated wet parts of a
- * cut boundary: weak enforcement only).  The value is the whole field (a
+ * The target is a Boundary: a marker or an exterior measure (the generated
+ * wet part of a cut boundary: weak enforcement only).  The value is the whole field (a
  * scalar, or a vector expression), every component of a vector field, or, for
  * strong enforcement, some components.  The manifest names the condition by
  * its enforcement: EssentialBC (strong, the whole field or every component),
@@ -446,10 +364,8 @@ private:
  */
 class Dirichlet final : public BoundaryCondition {
 public:
-    using Target = std::variant<int, ExteriorBoundaryMeasure>;
-
     /// u = g for the whole field.
-    Dirichlet(Target target,
+    Dirichlet(Boundary target,
               FormExpr value,
               Enforcement how = Strong{},
               NaturalFlux flux = {},
@@ -460,7 +376,7 @@ public:
     }
 
     /// u_i = g_i for every component i of a vector field.
-    Dirichlet(Target target,
+    Dirichlet(Boundary target,
               std::vector<FormExpr> components,
               Enforcement how = Strong{},
               NaturalFlux flux = {},
@@ -469,7 +385,7 @@ public:
         , flux_(std::move(flux))
         , symbol_(std::move(symbol))
     {
-        setTarget(std::move(target));
+        setTarget(target);
         if (components.empty()) {
             throw std::invalid_argument("bc::Dirichlet: empty value component list");
         }
@@ -482,7 +398,7 @@ public:
 
     /// u_i = g_i for the listed components i (strong enforcement); the
     /// descriptors name the condition @p source_name.
-    Dirichlet(Target target,
+    Dirichlet(Boundary target,
               std::vector<std::pair<int, FormExpr>> components,
               std::string symbol,
               std::string source_name)
@@ -490,7 +406,7 @@ public:
         , source_name_(std::move(source_name))
         , some_components_(true)
     {
-        setTarget(std::move(target));
+        setTarget(target);
         if (components.empty()) {
             throw std::invalid_argument("bc::Dirichlet: empty component list");
         }
@@ -621,17 +537,14 @@ public:
 private:
     [[nodiscard]] bool isStrong() const noexcept { return std::holds_alternative<Strong>(how_); }
 
-    void setTarget(Target target)
+    void setTarget(const Boundary& target)
     {
-        if (const auto* marker = std::get_if<int>(&target)) {
-            boundary_marker_ = *marker;
-        } else {
-            measure_ = std::get<ExteriorBoundaryMeasure>(target);
-            boundary_marker_ = measure_->physicalBoundaryMarker();
+        if (target.isInterface()) {
+            throw std::invalid_argument(
+                "bc::Dirichlet: an interface condition names its trace (InterfaceTraceNitscheBC)");
         }
-        if (boundary_marker_ < 0) {
-            throw std::invalid_argument("bc::Dirichlet: boundary_marker must be >= 0");
-        }
+        boundary_marker_ = target.marker();
+        measure_ = target.exteriorMeasure();
     }
 
     void validate() const

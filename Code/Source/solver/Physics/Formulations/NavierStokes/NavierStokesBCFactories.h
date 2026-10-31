@@ -303,9 +303,8 @@ namespace detail {
     auto t_comp = FE::forms::bc::toVectorExpr(
         bc.traction, dim, "ns_traction_neumann", marker, FE::forms::bc::ComponentValueNameStyle::Component);
     return std::make_unique<FE::forms::bc::NaturalBC>(
-        marker,
-        FE::forms::FormExpr::asVector(std::move(t_comp)),
-        generated_active_boundary_marker);
+        FE::forms::bc::Boundary::of(marker, generated_active_boundary_marker),
+        FE::forms::FormExpr::asVector(std::move(t_comp)));
 }
 
 [[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toTractionRobinBC(
@@ -323,10 +322,9 @@ namespace detail {
         bc.rhs, dim, "ns_traction_robin_rhs", marker, FE::forms::bc::ComponentValueNameStyle::Component);
 
     return std::make_unique<FE::forms::bc::RobinBC>(
-        marker,
+        FE::forms::bc::Boundary::of(marker, generated_active_boundary_marker),
         alpha,
-        FE::forms::FormExpr::asVector(std::move(r_comp)),
-        generated_active_boundary_marker);
+        FE::forms::FormExpr::asVector(std::move(r_comp)));
 }
 
 /// Declares the time functions of @p bcs on @p system.  A condition the two
@@ -408,7 +406,7 @@ inline void declareVelocityDirichletTimeFunctions(
 
     const auto flux = -p_out * n - beta * rho * max_backflow * u;
     return std::make_unique<FE::forms::bc::NaturalBC>(
-        marker, flux, generated_active_boundary_marker);
+        FE::forms::bc::Boundary::of(marker, generated_active_boundary_marker), flux);
 }
 
 /**
@@ -476,7 +474,7 @@ inline void declareVelocityDirichletTimeFunctions(
         const auto p_out = resistive.output("P_out");
         const auto flux = -p_out * n - beta * rho * max_backflow * u;
         return std::make_unique<FE::forms::bc::NaturalBC>(
-            marker, flux, generated_active_boundary_marker);
+            FE::forms::bc::Boundary::of(marker, generated_active_boundary_marker), flux);
     } else {
         // Step 1: Register boundary-integral input for Q via handle-returning API.
         FE::forms::BoundaryFunctional flow_rate;
@@ -504,7 +502,7 @@ inline void declareVelocityDirichletTimeFunctions(
         const auto p_out = rcr.output("P_out");
         const auto flux = -p_out * n - beta * rho * max_backflow * u;
         return std::make_unique<FE::forms::bc::NaturalBC>(
-            marker, flux, generated_active_boundary_marker);
+            FE::forms::bc::Boundary::of(marker, generated_active_boundary_marker), flux);
     }
 }
 
@@ -565,7 +563,7 @@ inline void declareVelocityDirichletTimeFunctions(
     const auto p_out = rcrcr.output("P_out");
     const auto flux = -p_out * n - beta * rho * max_backflow * u;
     return std::make_unique<FE::forms::bc::NaturalBC>(
-        marker, flux, generated_active_boundary_marker);
+        FE::forms::bc::Boundary::of(marker, generated_active_boundary_marker), flux);
 }
 
 namespace detail {
@@ -1350,7 +1348,7 @@ inline void addUnfittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem
         }
         int wetted_marker = -1;
         if (c.slip_length.isValid()) {
-            const auto W = F.registered(L.wetted(c.wall));
+            const auto W = L.wetted(c.wall);
             M = M + (mu / c.slip_length * dot(tangentialProjection(u, c.n_w), tangentialProjection(v, c.n_w))).ds(W);
             wetted_marker = W.generatedActiveBoundaryMarker();
         }

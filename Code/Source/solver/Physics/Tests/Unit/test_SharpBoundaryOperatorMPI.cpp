@@ -1502,9 +1502,8 @@ public:
         FE::systems::BoundaryConditionManager boundary_conditions;
         boundary_conditions.add(
             std::make_unique<FE::forms::bc::NaturalBC>(
-                kChannelOutletMarker,
-                flux,
-                active_marker_));
+                FE::forms::bc::Boundary::of(kChannelOutletMarker, active_marker_),
+                flux));
         auto residual =
             (FE::forms::FormExpr::constant(0.0) *
              FE::forms::inner(u, v))
