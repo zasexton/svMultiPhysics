@@ -15,6 +15,13 @@
  * The graph/topology and its phi-dependent regression weights are deliberately
  * refreshed between nonlinear solves and frozen during each solve.  For that
  * frozen map, both the residual and Jacobian below are exact.
+ *
+ * Rows and dependencies name mesh vertices, which include the edge, face and
+ * interior nodes of high-order cells.  A vertex maps to the field's vertex
+ * DOFs, and a high-order node to the edge, face or cell-interior DOFs whose
+ * Lagrange node it is (FESystem::fieldDofsAtMeshVertices); both maps cover
+ * the locally present ghost entities, so a row and its dependencies resolve
+ * on the rank that owns the row's vertex.
  */
 
 #include "Core/Types.h"
@@ -22,6 +29,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -37,8 +45,9 @@ enum class VelocityExtensionDependencyField : std::uint8_t {
 struct VelocityExtensionDependency {
     VelocityExtensionDependencyField field{
         VelocityExtensionDependencyField::ExtensionVelocity};
-    // Rank-local native mesh vertex index.  EntityDofMap::getVertexDofs()
-    // accepts this local identity, including a locally present ghost vertex;
+    // Rank-local native mesh vertex index (a corner or a high-order node).
+    // EntityDofMap::getVertexDofs() and FESystem::fieldDofsAtMeshVertices()
+    // accept this local identity, including a locally present ghost vertex;
     // it is deliberately not a globally unique vertex gid.
     GlobalIndex vertex{INVALID_GLOBAL_INDEX};
     int component{0};
@@ -148,10 +157,22 @@ public:
         assembly::GlobalSystemView* vector_out) override;
 
 private:
+    struct NodeDofTables;
+
+    /** The field-local DOFs of the components at a mesh vertex. */
+    [[nodiscard]] std::span<const GlobalIndex> vertexLocalDofs(
+        const systems::FESystem& system,
+        FieldId field,
+        GlobalIndex vertex) const;
+
     LevelSetVelocityExtensionConstraintConfig config_{};
     std::vector<VelocityExtensionConstraintRow> rows_{};
     std::uint64_t frozen_map_revision_{0};
     bool map_is_valid_{false};
+    // The DOFs at the mesh vertices without vertex DOFs (the edge, face and
+    // interior nodes of high-order cells), built on first use for the
+    // system's DOF layout.
+    mutable std::shared_ptr<NodeDofTables> node_dofs_{};
 };
 
 [[nodiscard]] std::shared_ptr<LevelSetVelocityExtensionConstraintKernel>

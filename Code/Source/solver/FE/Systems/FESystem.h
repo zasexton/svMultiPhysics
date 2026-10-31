@@ -1889,6 +1889,22 @@ public:
 	        std::span<std::uint8_t> assigned = {},
 	        std::string_view context =
 	            "FESystem::projectMeshVertexValuesToFieldCoefficients") const;
+
+	    /**
+	     * @brief Field DOFs whose Lagrange node is a mesh vertex.
+	     *
+	     * Mesh vertices are the geometry nodes of the mesh, including the edge,
+	     * face and interior nodes of high-order cells.  Entry
+	     * v * components + c is the field-local DOF of component c bound to
+	     * mesh vertex v with unit weight (a vertex DOF, or an edge, face or
+	     * cell-interior DOF whose node is v) by the EntityDofMap bindings that
+	     * evaluateFieldAtVertices() and
+	     * projectMeshVertexValuesToFieldCoefficients() use, or
+	     * INVALID_GLOBAL_INDEX where no DOF of that component sits at v.  Ghost
+	     * vertices are covered like owned ones.  Empty for non-nodal spaces.
+	     */
+	    [[nodiscard]] std::vector<GlobalIndex> fieldDofsAtMeshVertices(
+	        FieldId field) const;
 #endif
 
 	    // ---- Global-kernel persistent state (optional) ----

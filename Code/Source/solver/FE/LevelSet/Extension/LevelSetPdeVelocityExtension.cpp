@@ -300,17 +300,21 @@ bool simplexGradients(const std::array<std::array<double, 3>, 4>& x,
 }
 
 // Element matrices of the other first-order cells (Quad4, Hex8, Wedge6,
-// Pyramid5, ...) from the FE Lagrange element of the cell type: its basis
-// and stiffness quadrature, the isoparametric map of the cell vertices
-// (Mesh and FE share the VTK vertex order) and the physical basis gradients.
-// One element and one map per type, reused from cell to cell.
+// Pyramid5, ...) and of the high-order Lagrange cells (Triangle6, Quad9,
+// Tetra10, Hex27, ...) from the FE Lagrange element of the cell type and
+// geometry order: its basis and stiffness quadrature, the isoparametric map
+// of the cell vertices (Mesh and FE share the VTK node order, high-order
+// nodes included) and the physical basis gradients.  One element and one
+// map per type and order, reused from cell to cell.
 class LagrangeCellMatrices {
 public:
-  // True when FE has a first-order Lagrange element of `type` with `count`
+  // True when FE has a Lagrange element of `type` and `order` with `count`
   // nodes.
-  [[nodiscard]] bool supports(svmp::FE::ElementType type, std::size_t count)
+  [[nodiscard]] bool supports(svmp::FE::ElementType type,
+                              int order,
+                              std::size_t count)
   {
-    const auto* entry = typeEntry(type);
+    const auto* entry = typeEntry(type, order);
     return entry != nullptr && entry->element->num_nodes() == count;
   }
 
@@ -321,13 +325,14 @@ public:
   // Jacobian determinant).
   template <std::size_t N>
   [[nodiscard]] bool compute(svmp::FE::ElementType type,
+                             int order,
                              int dim,
                              std::span<const std::array<double, 3>> x,
                              std::span<const double> phi,
                              PdeVelocityExtensionOperator op,
                              std::array<double, N * N>& matrix)
   {
-    auto* entry = typeEntry(type);
+    auto* entry = typeEntry(type, order);
     const auto count = x.size();
     if (entry == nullptr || entry->element->num_nodes() != count ||
         count > N) {
@@ -342,7 +347,7 @@ public:
     if (!entry->mapping) {
       entry->mapping = svmp::FE::geometry::MappingFactory::create(
           svmp::FE::geometry::MappingRequest{.element_type = type,
-                                             .geometry_order = 1,
+                                             .geometry_order = order,
                                              .use_affine = false},
           nodes_);
     } else {
@@ -415,23 +420,24 @@ private:
     std::shared_ptr<svmp::FE::geometry::GeometryMapping> mapping;
   };
 
-  [[nodiscard]] TypeEntry* typeEntry(svmp::FE::ElementType type)
+  [[nodiscard]] TypeEntry* typeEntry(svmp::FE::ElementType type, int order)
   {
-    const auto found = types_.find(type);
+    const auto key = std::make_pair(type, order);
+    const auto found = types_.find(key);
     if (found != types_.end()) {
       return found->second.element ? &found->second : nullptr;
     }
-    auto& entry = types_[type];
+    auto& entry = types_[key];
     try {
       entry.element =
-          std::make_unique<svmp::FE::elements::LagrangeElement>(type, 1);
+          std::make_unique<svmp::FE::elements::LagrangeElement>(type, order);
     } catch (const std::exception&) {
       entry.element.reset();
     }
     return entry.element ? &entry : nullptr;
   }
 
-  std::map<svmp::FE::ElementType, TypeEntry> types_;
+  std::map<std::pair<svmp::FE::ElementType, int>, TypeEntry> types_;
   std::vector<svmp::FE::math::Vector<svmp::FE::Real, 3>> nodes_;
   std::vector<svmp::FE::basis::Gradient> reference_;
   std::vector<svmp::FE::math::Vector<svmp::FE::Real, 3>> physical_;
@@ -448,10 +454,16 @@ struct CellRecordOf {
 };
 // Cells with at most four vertices (Triangle3, Quad4, Tetra4).
 using CellRecord = CellRecordOf<4>;
-// Cells with five to eight vertices (Pyramid5, Wedge6, Hex8), gathered
-// separately so that meshes without them exchange the same records as before.
+// Cells with five to eight vertices (Pyramid5, Wedge6, Hex8, Triangle6),
+// gathered separately so that meshes without them exchange the same records
+// as before.
 constexpr std::size_t kMaxCellVertices = 8u;
 using WideCellRecord = CellRecordOf<kMaxCellVertices>;
+// High-order cells with nine to 27 vertices (Quad9, Tetra10, Pyramid14,
+// Wedge18, Hex27, and the cubic Triangle10, Quad16 and Tetra20), gathered
+// separately as well.
+constexpr std::size_t kMaxHighOrderCellVertices = 27u;
+using HighOrderCellRecord = CellRecordOf<kMaxHighOrderCellVertices>;
 
 // One gathered vertex (owned copy only).
 struct VertexRecord {
@@ -479,19 +491,26 @@ static_assert(std::is_trivially_copyable_v<WideCellRecord> &&
                   sizeof(WideCellRecord) ==
                       10u * sizeof(std::int64_t) + 64u * sizeof(double),
               "WideCellRecord must be padding-free for bitwise comparison");
+static_assert(std::is_trivially_copyable_v<HighOrderCellRecord> &&
+                  sizeof(HighOrderCellRecord) ==
+                      29u * sizeof(std::int64_t) + 729u * sizeof(double),
+              "HighOrderCellRecord must be padding-free for bitwise comparison");
 
 // The gathered dry-region cells in canonical order (the narrow records by
-// cell ID, then the wide records by cell ID) with the canonical index of
-// every cell vertex.
+// cell ID, then the wide records by cell ID, then the high-order records by
+// cell ID) with the canonical index of every cell vertex.
 struct GatheredCells {
   std::vector<CellRecord> narrow;
   std::vector<std::array<std::size_t, 4>> narrow_vertices;
   std::vector<WideCellRecord> wide;
   std::vector<std::array<std::size_t, kMaxCellVertices>> wide_vertices;
+  std::vector<HighOrderCellRecord> high_order;
+  std::vector<std::array<std::size_t, kMaxHighOrderCellVertices>>
+      high_order_vertices;
 
   [[nodiscard]] std::size_t size() const noexcept
   {
-    return narrow.size() + wide.size();
+    return narrow.size() + wide.size() + high_order.size();
   }
 
   // f(cell, vertices) for every cell, in canonical order.
@@ -504,6 +523,9 @@ struct GatheredCells {
     for (std::size_t k = 0; k < wide.size(); ++k) {
       f(wide[k], wide_vertices[k]);
     }
+    for (std::size_t k = 0; k < high_order.size(); ++k) {
+      f(high_order[k], high_order_vertices[k]);
+    }
   }
 
   [[nodiscard]] std::size_t bytes() const noexcept
@@ -511,7 +533,10 @@ struct GatheredCells {
     return narrow.capacity() * sizeof(CellRecord) +
            narrow_vertices.capacity() * sizeof(narrow_vertices.front()) +
            wide.capacity() * sizeof(WideCellRecord) +
-           wide_vertices.capacity() * sizeof(wide_vertices.front());
+           wide_vertices.capacity() * sizeof(wide_vertices.front()) +
+           high_order.capacity() * sizeof(HighOrderCellRecord) +
+           high_order_vertices.capacity() *
+               sizeof(high_order_vertices.front());
   }
 };
 
@@ -522,6 +547,7 @@ struct LocalSignature {
   std::vector<std::uint8_t> vertex_masks;
   std::vector<CellRecord> cells;
   std::vector<WideCellRecord> wide_cells;
+  std::vector<HighOrderCellRecord> high_order_cells;
 };
 
 template <typename T>
@@ -538,7 +564,8 @@ template <typename T>
   return sameBytes(a.scalars, b.scalars) &&
          sameBytes(a.vertex_gids, b.vertex_gids) &&
          sameBytes(a.vertex_masks, b.vertex_masks) &&
-         sameBytes(a.cells, b.cells) && sameBytes(a.wide_cells, b.wide_cells);
+         sameBytes(a.cells, b.cells) && sameBytes(a.wide_cells, b.wide_cells) &&
+         sameBytes(a.high_order_cells, b.high_order_cells);
 }
 
 [[nodiscard]] bool sameDoubleBits(double a, double b) noexcept
@@ -682,6 +709,9 @@ private:
   hasher.addVector(signature.cells);
   if (!signature.wide_cells.empty()) {
     hasher.addVector(signature.wide_cells);
+  }
+  if (!signature.high_order_cells.empty()) {
+    hasher.addVector(signature.high_order_cells);
   }
   return hasher.value();
 }
@@ -1166,7 +1196,9 @@ struct PdeVelocityExtensionCache::Entry {
              signature.vertex_gids.capacity() * sizeof(svmp::gid_t) +
              signature.vertex_masks.capacity() +
              signature.cells.capacity() * sizeof(CellRecord) +
-             signature.wide_cells.capacity() * sizeof(WideCellRecord);
+             signature.wide_cells.capacity() * sizeof(WideCellRecord) +
+             signature.high_order_cells.capacity() *
+                 sizeof(HighOrderCellRecord);
     total += cells.bytes() +
              vertices.capacity() * sizeof(VertexRecord) +
              gathered_to_sorted.capacity() * sizeof(std::size_t);
@@ -1554,6 +1586,7 @@ PdeVelocityExtensionReport extendVelocityByPde(
   // ---- local records -------------------------------------------------------
   std::vector<CellRecord> local_cells;
   std::vector<WideCellRecord> local_wide_cells;
+  std::vector<HighOrderCellRecord> local_high_order_cells;
   const svmp::FE::assembly::MeshAccess mesh_access(mesh);
   LagrangeCellMatrices lagrange_matrices;
   // The first unsupported dry cell of this rank; every rank fails together.
@@ -1585,15 +1618,17 @@ PdeVelocityExtensionReport extendVelocityByPde(
          (dim == 3 && shape.family == svmp::CellFamily::Tetra &&
           count == 4u));
     if (!simplex) {
-      // Other first-order cells: the FE Lagrange element of the cell type.
+      // Other first-order cells and the high-order Lagrange cells: the FE
+      // Lagrange element of the cell type and geometry order, whose nodes are
+      // the cell vertices.
       std::optional<svmp::FE::ElementType> type;
-      if (shape.order == 1) {
+      if (shape.order >= 1) {
         try {
           const auto candidate = mesh_access.getCellType(
               static_cast<svmp::FE::GlobalIndex>(cell));
           if (svmp::FE::element_dimension(candidate) == dim &&
-              count <= kMaxCellVertices &&
-              lagrange_matrices.supports(candidate, count)) {
+              count <= kMaxHighOrderCellVertices &&
+              lagrange_matrices.supports(candidate, shape.order, count)) {
             type = candidate;
           }
         } catch (const std::exception&) {
@@ -1610,8 +1645,8 @@ PdeVelocityExtensionReport extendVelocityByPde(
         }
         continue;
       }
-      std::array<std::array<double, 3>, kMaxCellVertices> x{};
-      std::array<double, kMaxCellVertices> phi{};
+      std::array<std::array<double, 3>, kMaxHighOrderCellVertices> x{};
+      std::array<double, kMaxHighOrderCellVertices> phi{};
       for (std::size_t i = 0; i < count; ++i) {
         const auto v = static_cast<std::size_t>(cv[i]);
         for (int d = 0; d < dim; ++d) {
@@ -1636,7 +1671,7 @@ PdeVelocityExtensionReport extendVelocityByPde(
         constexpr std::size_t n = std::tuple_size_v<
             std::remove_reference_t<decltype(record.vertex_gid)>>;
         if (!lagrange_matrices.compute<n>(
-                *type, dim,
+                *type, shape.order, dim,
                 std::span<const std::array<double, 3>>(x.data(), count),
                 std::span<const double>(phi.data(), count), options.op,
                 record.matrix)) {
@@ -1648,10 +1683,13 @@ PdeVelocityExtensionReport extendVelocityByPde(
         CellRecord record;
         fill(record);
         local_cells.push_back(record);
-      } else {
+      } else if (count <= kMaxCellVertices) {
         WideCellRecord record;
         fill(record);
         local_wide_cells.push_back(record);
+      } else {
+        local_high_order_cells.emplace_back();
+        fill(local_high_order_cells.back());
       }
       continue;
     }
@@ -1725,9 +1763,10 @@ PdeVelocityExtensionReport extendVelocityByPde(
   }
   if (globalMax(unsupported_cell.empty() ? 0.0 : 1.0, comm) > 0.0) {
     throw std::runtime_error(
-        "PDE velocity extension requires first-order Lagrange cells in the "
-        "dry region (Triangle3 or Quad4 in 2D; Tetra4, Hex8, Wedge6 or "
-        "Pyramid5 in 3D)" +
+        "PDE velocity extension requires Lagrange cells with at most 27 "
+        "nodes in the dry region (first-order: Triangle3 or Quad4 in 2D; "
+        "Tetra4, Hex8, Wedge6 or Pyramid5 in 3D; high-order: Triangle6, "
+        "Quad9, Tetra10, Pyramid14, Wedge18, Hex27, ...)" +
         unsupported_cell + ".");
   }
 
@@ -1811,6 +1850,7 @@ PdeVelocityExtensionReport extendVelocityByPde(
     }
     signature.cells = local_cells;
     signature.wide_cells = local_wide_cells;
+    signature.high_order_cells = local_high_order_cells;
 
     static_assert(ReuseVote::kSlots >= PdeVelocityExtensionCache::kMaxEntries);
     ReuseVote vote;
@@ -1919,6 +1959,7 @@ PdeVelocityExtensionReport extendVelocityByPde(
     auto& vertex_index = gathered_vertex_index;
     cells.narrow = allGatherV(local_cells, comm);
     cells.wide = allGatherV(local_wide_cells, comm);
+    cells.high_order = allGatherV(local_high_order_cells, comm);
     vertices = allGatherV(local_vertices, comm);
     std::vector<std::int64_t> gathered_gids;
     if (store_factorization) {
@@ -1933,6 +1974,10 @@ PdeVelocityExtensionReport extendVelocityByPde(
               });
     std::sort(cells.wide.begin(), cells.wide.end(),
               [](const WideCellRecord& a, const WideCellRecord& b) {
+                return a.cell_gid < b.cell_gid;
+              });
+    std::sort(cells.high_order.begin(), cells.high_order.end(),
+              [](const HighOrderCellRecord& a, const HighOrderCellRecord& b) {
                 return a.cell_gid < b.cell_gid;
               });
     std::sort(vertices.begin(), vertices.end(),
@@ -1967,6 +2012,7 @@ PdeVelocityExtensionReport extendVelocityByPde(
     };
     index_vertices(cells.narrow, cells.narrow_vertices);
     index_vertices(cells.wide, cells.wide_vertices);
+    index_vertices(cells.high_order, cells.high_order_vertices);
     gathered_to_sorted.reserve(gathered_gids.size());
     for (const auto gid : gathered_gids) {
       gathered_to_sorted.push_back(vertex_index.at(gid));

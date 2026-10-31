@@ -9889,8 +9889,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
 #endif
 }
 
+// The extension needs nodal fields: a modal (hierarchical) P2 basis on the
+// biquadratic cell has no coefficient that is a vertex value.
 TEST(ApplicationDriverLevelSetWorkflows,
-     VelocityExtensionRejectsHigherOrderFields)
+     VelocityExtensionRejectsNonNodalFields)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
@@ -9931,7 +9933,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
               svmp::FE::systems::SystemStateView{},
               std::vector<LevelSetAdvectionVelocityRequest>{request});
         } catch (const std::runtime_error& error) {
-          EXPECT_NE(std::string(error.what()).find("fixed P1"),
+          EXPECT_NE(std::string(error.what()).find(
+                        "fixed-order nodal Lagrange"),
                     std::string::npos);
           throw;
         }

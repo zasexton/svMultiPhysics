@@ -15002,6 +15002,43 @@ FESystem::projectMeshVertexValuesToFieldCoefficients(
 
     return result;
 }
+
+std::vector<GlobalIndex> FESystem::fieldDofsAtMeshVertices(FieldId field) const
+{
+    // Needs the distributed field DOFs only, so global kernels can use it
+    // while setup builds their sparsity.
+    const auto& handler = fieldDofHandler(field);
+    const auto& rec = field_registry_.get(field);
+    FE_CHECK_NOT_NULL(rec.space.get(),
+                      "FESystem::fieldDofsAtMeshVertices: field.space");
+    const auto basis_type = rec.space->element().basis().basis_type();
+    const auto* entity_map = handler.getEntityDofMap();
+    if (entity_map == nullptr ||
+        (basis_type != BasisType::Lagrange &&
+         basis_type != BasisType::Serendipity)) {
+        return {};
+    }
+    const auto& mesh = singleMesh("FESystem::fieldDofsAtMeshVertices");
+    const auto components =
+        static_cast<std::size_t>(std::max(1, rec.components));
+    std::vector<GlobalIndex> dofs(mesh.n_vertices() * components,
+                                  INVALID_GLOBAL_INDEX);
+    (void)enumerateMeshVertexDofBindings(
+        mesh.local_mesh(),
+        *entity_map,
+        components,
+        static_cast<std::size_t>(handler.getNumDofs()),
+        "FESystem::fieldDofsAtMeshVertices",
+        [&](std::size_t component,
+            GlobalIndex local_dof,
+            std::span<const MeshVertexInterpolationTerm> terms) {
+            if (terms.size() != 1u || terms.front().weight != Real{1}) {
+                return;
+            }
+            dofs[terms.front().vertex * components + component] = local_dof;
+        });
+    return dofs;
+}
 #endif
 
 std::string FESystem::assemblerName() const

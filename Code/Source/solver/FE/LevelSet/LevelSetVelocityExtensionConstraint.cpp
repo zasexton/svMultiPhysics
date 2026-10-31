@@ -24,19 +24,14 @@
 namespace svmp::FE::level_set {
 namespace {
 
+// The system DOFs of the components at a vertex, from the field-local DOFs
+// vertexLocalDofs() found there.
 [[nodiscard]] std::vector<GlobalIndex> vertexDofs(
     const systems::FESystem& system,
     FieldId field,
-    GlobalIndex vertex,
+    std::span<const GlobalIndex> local,
     int components)
 {
-    const auto& handler = system.fieldDofHandler(field);
-    const auto* entity_map = handler.getEntityDofMap();
-    if (entity_map == nullptr) {
-        throw std::runtime_error(
-            "LevelSetVelocityExtensionConstraintKernel requires nodal vertex DOFs");
-    }
-    const auto local = entity_map->getVertexDofs(vertex);
     if (local.size() < static_cast<std::size_t>(components)) {
         throw std::runtime_error(
             "LevelSetVelocityExtensionConstraintKernel found too few vertex components");
@@ -50,22 +45,15 @@ namespace {
     return out;
 }
 
-// vertexDofs(system, field, vertex, components).at(component), with the same
+// vertexDofs(system, field, local, components).at(component), with the same
 // checks and exceptions, without building the vector.
 [[nodiscard]] GlobalIndex vertexDof(
     const systems::FESystem& system,
     FieldId field,
-    GlobalIndex vertex,
+    std::span<const GlobalIndex> local,
     int component,
     int components)
 {
-    const auto& handler = system.fieldDofHandler(field);
-    const auto* entity_map = handler.getEntityDofMap();
-    if (entity_map == nullptr) {
-        throw std::runtime_error(
-            "LevelSetVelocityExtensionConstraintKernel requires nodal vertex DOFs");
-    }
-    const auto local = entity_map->getVertexDofs(vertex);
     if (local.size() < static_cast<std::size_t>(components)) {
         throw std::runtime_error(
             "LevelSetVelocityExtensionConstraintKernel found too few vertex components");
@@ -78,20 +66,63 @@ namespace {
     return offset + local[static_cast<std::size_t>(component)];
 }
 
-[[nodiscard]] GlobalIndex dependencyDof(
-    const systems::FESystem& system,
-    const LevelSetVelocityExtensionConstraintConfig& config,
-    const VelocityExtensionDependency& dependency)
-{
-    const auto field =
-        dependency.field == VelocityExtensionDependencyField::SourceVelocity
-            ? config.source_velocity_field
-            : config.extension_field;
-    return vertexDof(system, field, dependency.vertex, dependency.component,
-                     config.components);
-}
-
 } // namespace
+
+struct LevelSetVelocityExtensionConstraintKernel::NodeDofTables {
+    const systems::FESystem* system{nullptr};
+    std::uint64_t dof_layout_revision{0};
+    // FESystem::fieldDofsAtMeshVertices() of each field looked up.
+    std::map<FieldId, std::vector<GlobalIndex>> dofs{};
+};
+
+std::span<const GlobalIndex>
+LevelSetVelocityExtensionConstraintKernel::vertexLocalDofs(
+    const systems::FESystem& system,
+    FieldId field,
+    GlobalIndex vertex) const
+{
+    const auto& handler = system.fieldDofHandler(field);
+    const auto* entity_map = handler.getEntityDofMap();
+    if (entity_map == nullptr) {
+        throw std::runtime_error(
+            "LevelSetVelocityExtensionConstraintKernel requires nodal vertex DOFs");
+    }
+    const auto local = entity_map->getVertexDofs(vertex);
+    if (local.size() >= static_cast<std::size_t>(config_.components)) {
+        return local;
+    }
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    // An edge, face or interior node of a high-order cell has no vertex DOFs;
+    // its DOFs are the edge, face or cell-interior DOFs whose Lagrange node
+    // it is.
+    if (!node_dofs_ || node_dofs_->system != &system ||
+        node_dofs_->dof_layout_revision != system.dofLayoutRevision()) {
+        node_dofs_ = std::make_shared<NodeDofTables>();
+        node_dofs_->system = &system;
+        node_dofs_->dof_layout_revision = system.dofLayoutRevision();
+    }
+    auto [table, inserted] = node_dofs_->dofs.try_emplace(field);
+    if (inserted) {
+        table->second = system.fieldDofsAtMeshVertices(field);
+    }
+    const auto stride = static_cast<std::size_t>(
+        std::max(1, system.fieldRecord(field).components));
+    const auto components = static_cast<std::size_t>(config_.components);
+    if (vertex >= 0 && components <= stride &&
+        (static_cast<std::size_t>(vertex) + 1u) * stride <=
+            table->second.size()) {
+        const std::span<const GlobalIndex> node(
+            table->second.data() + static_cast<std::size_t>(vertex) * stride,
+            components);
+        if (std::none_of(node.begin(), node.end(), [](GlobalIndex dof) {
+                return dof == INVALID_GLOBAL_INDEX;
+            })) {
+            return node;
+        }
+    }
+#endif
+    return local;
+}
 
 LevelSetVelocityExtensionConstraintKernel::
     LevelSetVelocityExtensionConstraintKernel(
@@ -188,17 +219,19 @@ void LevelSetVelocityExtensionConstraintKernel::addSparsityCouplings(
     sparsity::SparsityPattern& pattern) const
 {
     // The active set can change between time steps.  A row couples an
-    // extension vertex to itself, to every corner vertex of the cells around
-    // it (including cross-components after wall projection), and to the
+    // extension vertex to itself, to every vertex of the cells around it
+    // (including cross-components after wall projection), and to the
     // same-vertex physical velocity: the PDE extension's rows are rows of
     // assembled cell matrices, which on a quad, hex, wedge or pyramid also
-    // couple the corners across a face or the body, not only along an edge.
-    // Register that conservative fixed graph before setup so later
-    // coefficient refreshes never mutate sparsity.  On simplices every corner
-    // pair is an edge, so the graph is the edge graph.
+    // couple the corners across a face or the body, not only along an edge,
+    // and on a high-order cell couple its edge, face and interior nodes to
+    // every node of the cell.  Register that conservative fixed graph before
+    // setup so later coefficient refreshes never mutate sparsity.  On
+    // first-order simplices every corner pair is an edge, so the graph is the
+    // edge graph.
     const auto& mesh = system.meshAccess();
     std::map<GlobalIndex, std::set<GlobalIndex>> neighbors;
-    std::vector<GlobalIndex> corners;
+    std::vector<GlobalIndex> cell_nodes;
     mesh.forEachCell([&](GlobalIndex cell) {
         std::vector<GlobalIndex> vertices;
         mesh.getCellNodes(cell, vertices);
@@ -212,7 +245,7 @@ void LevelSetVelocityExtensionConstraintKernel::addSparsityCouplings(
             neighbors.try_emplace(vertex);
         }
         // The corners are the end points of the reference edges.
-        corners.clear();
+        cell_nodes.clear();
         for (std::size_t edge = 0; edge < reference.num_edges(); ++edge) {
             const auto& local_nodes = reference.edge_nodes(edge);
             if (local_nodes.size() != 2u || local_nodes[0] < 0 ||
@@ -230,14 +263,17 @@ void LevelSetVelocityExtensionConstraintKernel::addSparsityCouplings(
                 throw std::runtime_error(
                     "LevelSetVelocityExtensionConstraintKernel found a degenerate mesh edge");
             }
-            corners.push_back(first);
-            corners.push_back(second);
+            cell_nodes.push_back(first);
+            cell_nodes.push_back(second);
         }
-        std::sort(corners.begin(), corners.end());
-        corners.erase(std::unique(corners.begin(), corners.end()),
-                      corners.end());
-        for (const auto first : corners) {
-            for (const auto second : corners) {
+        // The edge, face and interior nodes of a high-order cell (a
+        // first-order cell has none).
+        cell_nodes.insert(cell_nodes.end(), vertices.begin(), vertices.end());
+        std::sort(cell_nodes.begin(), cell_nodes.end());
+        cell_nodes.erase(std::unique(cell_nodes.begin(), cell_nodes.end()),
+                         cell_nodes.end());
+        for (const auto first : cell_nodes) {
+            for (const auto second : cell_nodes) {
                 if (first != second) {
                     neighbors[first].insert(second);
                 }
@@ -246,18 +282,21 @@ void LevelSetVelocityExtensionConstraintKernel::addSparsityCouplings(
     });
 
     for (const auto& [vertex, adjacent] : neighbors) {
-        const auto rows =
-            vertexDofs(system, config_.extension_field, vertex,
-                       config_.components);
+        const auto rows = vertexDofs(
+            system, config_.extension_field,
+            vertexLocalDofs(system, config_.extension_field, vertex),
+            config_.components);
         std::vector<GlobalIndex> columns = rows;
-        const auto source =
-            vertexDofs(system, config_.source_velocity_field, vertex,
-                       config_.components);
+        const auto source = vertexDofs(
+            system, config_.source_velocity_field,
+            vertexLocalDofs(system, config_.source_velocity_field, vertex),
+            config_.components);
         columns.insert(columns.end(), source.begin(), source.end());
         for (const auto neighbor : adjacent) {
-            const auto neighbor_dofs =
-                vertexDofs(system, config_.extension_field, neighbor,
-                           config_.components);
+            const auto neighbor_dofs = vertexDofs(
+                system, config_.extension_field,
+                vertexLocalDofs(system, config_.extension_field, neighbor),
+                config_.components);
             columns.insert(columns.end(), neighbor_dofs.begin(),
                            neighbor_dofs.end());
         }
@@ -325,14 +364,23 @@ LevelSetVelocityExtensionConstraintKernel::assemble(
     std::vector<Real> local_vector;
     std::vector<Real> local_matrix;
     for (const auto& row : rows_) {
-        const auto row_dof =
-            vertexDof(system, config_.extension_field, row.vertex,
-                      row.component, config_.components);
+        const auto row_dof = vertexDof(
+            system, config_.extension_field,
+            vertexLocalDofs(system, config_.extension_field, row.vertex),
+            row.component, config_.components);
 
         dofs.clear();
         dofs.push_back(row_dof);
         for (const auto& dependency : row.dependencies) {
-            dofs.push_back(dependencyDof(system, config_, dependency));
+            const auto field =
+                dependency.field ==
+                        VelocityExtensionDependencyField::SourceVelocity
+                    ? config_.source_velocity_field
+                    : config_.extension_field;
+            dofs.push_back(vertexDof(
+                system, field,
+                vertexLocalDofs(system, field, dependency.vertex),
+                dependency.component, config_.components));
         }
 
         local_vector.assign(dofs.size(), Real{0.0});

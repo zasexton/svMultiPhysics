@@ -28,18 +28,25 @@
 // axis-aligned.
 //
 // Cells: every first-order Lagrange cell (Triangle3 and Quad4 in 2D; Tetra4,
-// Hex8, Wedge6 and Pyramid5 in 3D), mixed freely.  Simplices use their
-// constant P1 gradients and cell normal; the other cells use the FE Lagrange
-// element of their type (basis, stiffness quadrature, isoparametric map) and,
-// for LeastSquaresNormal, the normal of grad(phi_h) at every quadrature point.
-// Other dry cells fail on every rank with a message that names them.  The
-// wet-to-dry guard and the convergence assume shape-regular dry cells next
-// to the known set.
+// Hex8, Wedge6 and Pyramid5 in 3D) and every high-order Lagrange cell with
+// at most 27 nodes (Triangle6, Quad9, Tetra10, Pyramid14, Wedge18, Hex27,
+// ...), mixed freely.  The vertices of a mesh are its geometry nodes, so on a
+// high-order cell they include the edge, face and interior nodes, and w is
+// the Lagrange interpolant of the cell's order on them: a P2 field on Quad9
+// cells is extended at its corner, mid-edge and centre DOFs, and the known
+// set holds every node of the retained interface cells.  First-order
+// simplices use their constant P1 gradients and cell normal; the other cells
+// use the FE Lagrange element of their type and geometry order (basis,
+// stiffness quadrature, isoparametric map) and, for LeastSquaresNormal, the
+// normal of grad(phi_h) at every quadrature point.  Other dry cells fail on
+// every rank with a message that names them.  The wet-to-dry guard and the
+// convergence assume shape-regular dry cells next to the known set.
 //
 // The system is small (dry vertices only).  Each rank contributes the element
 // matrices of its owned cells; every rank assembles the same global system in
-// a canonical order (sorted global IDs) and solves it with the FE Eigen
-// backend's direct solver, so the result does not depend on the partition.
+// a canonical order (sorted global IDs; a high-order node has its own global
+// vertex ID like a corner) and solves it with the FE Eigen backend's direct
+// solver, so the result does not depend on the partition.
 // With a factorization cache on three or more ranks, component c is
 // factorized and solved on rank c only and its solution is broadcast bit for
 // bit (the components are independent systems); the result is the same.

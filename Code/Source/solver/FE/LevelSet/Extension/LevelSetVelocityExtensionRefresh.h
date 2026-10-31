@@ -15,7 +15,10 @@
  *
  * For every request, refreshLevelSetVelocityExtensions():
  *  - checks that the level set, the physical (source) velocity and the
- *    advection (target) velocity are fixed nodal P1 fields on linear cells;
+ *    advection (target) velocity are fixed-order nodal Lagrange fields whose
+ *    nodes are the mesh vertices (the geometry nodes, high-order nodes
+ *    included): P1 on first-order cells, P2 on Triangle6, Quad9, Tetra10 or
+ *    Hex27 cells, ...;
  *  - evaluates the level set and the source velocity at the mesh vertices;
  *  - forms the known set: the retained side plus every vertex of the
  *    retained interface cells, taken from the generated cut context when it

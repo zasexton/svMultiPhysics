@@ -310,63 +310,84 @@ bool refreshLevelSetVelocityExtensions(
         static_cast<std::size_t>(target_rec.components);
     const auto copy_components =
         std::min(source_components, target_components);
-    const auto require_p1_field = [](const auto& record,
-                                     std::string_view role) {
+    // The extension reads and writes the fields at the mesh vertices, which
+    // are the geometry nodes of the mesh: on a high-order cell they include
+    // its edge, face and interior nodes.  Every field must therefore be a
+    // fixed-order nodal Lagrange field whose nodes are exactly the mesh
+    // vertices, i.e. whose order is the geometry order of every cell (P1 on
+    // first-order cells; P2 on Triangle6, Quad9, Tetra10 or Hex27 cells).
+    const auto require_nodal_field = [](const auto& record,
+                                        std::string_view role) {
       if (!record.space || record.space->is_variable_order() ||
-          record.space->polynomial_order() != 1) {
+          record.space->polynomial_order() < 1 ||
+          record.space->element().basis().basis_type() !=
+              svmp::FE::BasisType::Lagrange) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] The level-set velocity "
-            "extension requires a fixed P1 " +
+            "extension requires a fixed-order nodal Lagrange " +
             std::string(role) + " field; field '" + record.name +
-            "' is higher-order, variable-order, or has no FE space.");
+            "' is variable-order, non-nodal, or has no FE space.");
       }
     };
     if (phi_rec.components != 1) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] The level-set velocity "
-          "extension requires a scalar P1 level-set field.");
+          "extension requires a scalar level-set field.");
     }
-    require_p1_field(phi_rec, "level-set");
-    require_p1_field(source_rec, "source-velocity");
-    require_p1_field(target_rec, "target-velocity");
+    require_nodal_field(phi_rec, "level-set");
+    require_nodal_field(source_rec, "source-velocity");
+    require_nodal_field(target_rec, "target-velocity");
     if (source_components != target_components ||
         source_rec.space->value_dimension() !=
             target_rec.space->value_dimension()) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] The level-set velocity extension requires source and target P1 fields with identical component layouts.");
+          "[svMultiPhysics::Application] The level-set velocity extension requires source and target fields with identical component layouts.");
     }
-    const auto& phi_dofs = system.fieldDofHandler(phi_field);
-    const auto& source_dofs = system.fieldDofHandler(source_field);
-    const auto& target_dofs = system.fieldDofHandler(target_field);
-    const auto* phi_entity_map = phi_dofs.getEntityDofMap();
-    const auto* source_entity_map = source_dofs.getEntityDofMap();
-    const auto* target_entity_map = target_dofs.getEntityDofMap();
-    if (phi_entity_map == nullptr || source_entity_map == nullptr ||
-        target_entity_map == nullptr) {
+    const int field_order = phi_rec.space->polynomial_order();
+    if (source_rec.space->polynomial_order() != field_order ||
+        target_rec.space->polynomial_order() != field_order) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] The level-set velocity extension requires matching vertex-nodal level-set, source, and target layouts.");
+          "[svMultiPhysics::Application] The level-set velocity extension "
+          "requires level-set, source, and target fields of one polynomial "
+          "order.");
     }
-    for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
-      const auto phi_vertex_dofs = phi_entity_map->getVertexDofs(
-          static_cast<svmp::FE::GlobalIndex>(vertex));
-      const auto source_vertex_dofs = source_entity_map->getVertexDofs(
-          static_cast<svmp::FE::GlobalIndex>(vertex));
-      const auto target_vertex_dofs = target_entity_map->getVertexDofs(
-          static_cast<svmp::FE::GlobalIndex>(vertex));
-      if (phi_vertex_dofs.size() != 1u ||
-          source_vertex_dofs.size() != source_components ||
-          target_vertex_dofs.size() != target_components) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] The level-set velocity extension requires exactly one level-set, source, and target P1 vertex DOF per component.");
+    const auto& target_dofs = system.fieldDofHandler(target_field);
+    // Every mesh vertex carries one DOF per component of each field, and no
+    // two vertices share a DOF.
+    const auto require_vertex_nodes = [&](svmp::FE::FieldId field,
+                                          std::size_t components) {
+      const auto vertex_dofs = system.fieldDofsAtMeshVertices(field);
+      std::vector<std::uint8_t> bound(
+          static_cast<std::size_t>(system.fieldDofHandler(field).getNumDofs()),
+          0u);
+      bool complete = vertex_dofs.size() == n_vertices * components;
+      for (std::size_t i = 0; complete && i < vertex_dofs.size(); ++i) {
+        const auto dof = vertex_dofs[i];
+        complete = dof >= 0 && static_cast<std::size_t>(dof) < bound.size() &&
+                   bound[static_cast<std::size_t>(dof)] == 0u;
+        if (complete) {
+          bound[static_cast<std::size_t>(dof)] = 1u;
+        }
       }
-    }
+      if (!complete) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] The level-set velocity extension requires exactly one level-set, source, and target DOF per component at every mesh vertex.");
+      }
+    };
+    require_vertex_nodes(phi_field, 1u);
+    require_vertex_nodes(source_field, source_components);
+    require_vertex_nodes(target_field, target_components);
     const auto& local_mesh = mesh.local_mesh();
     for (svmp::index_t cell = 0; cell < local_mesh.n_cells(); ++cell) {
-      if (local_mesh.cell_shape(cell).order != 1) {
+      const int geometry_order = local_mesh.cell_shape(cell).order;
+      if (geometry_order != field_order) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] The level-set velocity "
-            "extension requires linear mesh topology; high-order "
-            "geometry is not qualified for the P1 extension.");
+            "extension requires fields whose nodes are the mesh vertices: "
+            "the field order " +
+            std::to_string(field_order) +
+            " differs from the geometry order " +
+            std::to_string(geometry_order) + " of a mesh cell.");
       }
       auto [cell_vertices, cell_vertex_count] =
           local_mesh.cell_vertices_span(cell);
@@ -377,7 +398,7 @@ bool refreshLevelSetVelocityExtensions(
           source_rec.space->dofs_per_element(cell) != expected_cell_dofs ||
           target_rec.space->dofs_per_element(cell) != expected_cell_dofs) {
         throw std::runtime_error(
-            "[svMultiPhysics::Application] The level-set velocity extension requires identical nodal P1 source/target cell layouts on every retained mesh cell.");
+            "[svMultiPhysics::Application] The level-set velocity extension requires identical nodal source/target cell layouts on every retained mesh cell.");
       }
     }
 
@@ -445,18 +466,20 @@ bool refreshLevelSetVelocityExtensions(
           "extension requires mesh dimension in [1, 3].");
     }
 
-    // For fixed nodal P1/Q1 fields, equality at every vertex supporting a
-    // retained interface cell is both necessary and sufficient for the
-    // finite-element traces to agree pointwise on that cell:
+    // For fixed nodal fields whose nodes are the mesh vertices (P1/Q1 on
+    // first-order cells, P2/Q2 on quadratic cells, ...), equality at every
+    // vertex of a retained interface cell is both necessary and sufficient
+    // for the finite-element traces to agree pointwise on that cell:
     //
     //     E_h|_K = u_h|_K  =>  E_h|_(Gamma cap K) = u_h|_(Gamma cap K).
     //
     // The older sign-only seed marked wet vertices but graph-extrapolated
     // the dry vertices of cut cells, so E_h and u_h differed on Gamma even
     // though all wet nodal values agreed.  Prefer the generated cut context
-    // (the geometry used by assembly), with a nodal P1 crossing search only
+    // (the geometry used by assembly), with a nodal crossing search only
     // when no authoritative generated-interface context exists anywhere on
-    // the active communicator.  A locally empty retained-rule set is
+    // the active communicator (on a high-order cell the nodal search sees
+    // only sign changes between nodes).  A locally empty retained-rule set is
     // authoritative and must not resurrect an omitted cell through a nodal
     // fallback on that rank.
     const bool authoritative_interface_context = systems::collectiveAnyTrue(
@@ -679,7 +702,7 @@ bool refreshLevelSetVelocityExtensions(
     }
     if (trace_support_vertex_count == 0u) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] The level-set velocity extension resolved interface geometry but no P1 trace-support vertices.");
+          "[svMultiPhysics::Application] The level-set velocity extension resolved interface geometry but no trace-support vertices.");
     }
 
     std::vector<WallVelocityExtensionConstraint> wall_constraints;
@@ -843,7 +866,7 @@ bool refreshLevelSetVelocityExtensions(
         if (!std::isfinite(source) || !std::isfinite(extension) ||
             std::abs(extension - source) > tolerance) {
           throw std::runtime_error(
-              "[svMultiPhysics::Application] The level-set velocity extension failed the exact P1 trace-support equality invariant.");
+              "[svMultiPhysics::Application] The level-set velocity extension failed the exact nodal trace-support equality invariant.");
         }
       }
     }
@@ -905,7 +928,7 @@ bool refreshLevelSetVelocityExtensions(
               "ApplicationDriver::refreshAlgebraicVelocityExtension");
       if (projection.unassigned_dofs != 0u || state.u_vector == nullptr) {
         throw std::runtime_error(
-            "[svMultiPhysics::Application] The monolithic velocity extension refresh requires a mutable state vector and a complete P1 preview projection.");
+            "[svMultiPhysics::Application] The monolithic velocity extension refresh requires a mutable state vector and a complete nodal preview projection.");
       }
       const auto owned_field_dofs =
           target_dofs.getPartition().locallyOwned().toVector();

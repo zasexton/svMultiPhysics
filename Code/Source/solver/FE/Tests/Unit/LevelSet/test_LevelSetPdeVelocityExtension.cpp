@@ -990,19 +990,19 @@ TEST(LevelSetPdeVelocityExtensionCells, HarmonicKeepsConstantsAndKnownValues)
   }
 }
 
-// Cells FE has no first-order Lagrange element for (here a biquadratic
-// quadrilateral) still fail on every rank with a message that names them.
+// Cells FE has no Lagrange element for (here a serendipity quadrilateral)
+// still fail on every rank with a message that names them.
 TEST(LevelSetPdeVelocityExtension, RejectsUnsupportedDryCellsByName)
 {
-  svmp::CellShape quad9{};
-  quad9.family = svmp::CellFamily::Quad;
-  quad9.num_corners = 4;
-  quad9.order = 2;
+  svmp::CellShape quad8{};
+  quad8.family = svmp::CellFamily::Quad;
+  quad8.num_corners = 4;
+  quad8.order = 2;
   const auto mesh = makeCellMesh(
       2,
       {0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.5, 0.0, 1.0, 0.5, 0.5, 1.0,
-       0.0, 0.5, 0.5, 0.5},
-      {{0, 1, 2, 3, 4, 5, 6, 7, 8}}, {quad9});
+       0.0, 0.5},
+      {{0, 1, 2, 3, 4, 5, 6, 7}}, {quad8});
   auto s = makeCellSetup(
       *mesh, [](const std::array<double, 3>& p) { return p[0] - 0.25; },
       [](const std::array<double, 3>&) {
@@ -1018,10 +1018,10 @@ TEST(LevelSetPdeVelocityExtension, RejectsUnsupportedDryCellsByName)
     ADD_FAILURE() << "unsupported dry cell accepted";
   } catch (const std::runtime_error& error) {
     const std::string message = error.what();
-    EXPECT_NE(message.find("Quad cell with 9 vertices (order 2)"),
+    EXPECT_NE(message.find("Quad cell with 8 vertices (order 2)"),
               std::string::npos)
         << message;
-    EXPECT_NE(message.find("first-order Lagrange cells"), std::string::npos)
+    EXPECT_NE(message.find("requires Lagrange cells"), std::string::npos)
         << message;
   }
 }
