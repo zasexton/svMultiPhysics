@@ -6,6 +6,7 @@ How `FE/Forms` weak-form expressions become assembled operators in `FE/Systems`.
 
 | Task | API | Header |
 |------|-----|--------|
+| One include for a formulation module | the skeleton of section 2 | `Authoring.h` |
 | Owned unknown/prescribed symbols | `FieldBinding` | `FieldBinding.h` |
 | Ordered residual rows and selected observations | `ResidualContributions` | `ResidualContributions.h` |
 | Residual physics (single or multi-field) | `FormulationBuilder::install()`; direct `installFormulation()` | `FormulationBuilder.h` / `FormsInstaller.h` |
@@ -59,42 +60,77 @@ How `FE/Forms` weak-form expressions become assembled operators in `FE/Systems`.
 
 ## 2. Residual Physics (the main path)
 
-A formulation can register or reuse fields, keep its equations visible, apply
-ordinary boundary conditions, and install through a builder. Here `system` is
-an `FESystem` and `V` is a shared scalar function space:
+Every formulation module follows one skeleton, as the production modules do:
+bind its fields, write the residual, add its boundary conditions, register its
+constraints through a plan, declare its functionals and outputs, and install.
+One include, `FE/Forms/Authoring.h`, declares all of it. The skeleton for
+steady heat conduction, which `FE/Tests/Unit/Forms/test_Authoring.cpp`
+compiles with that include alone, sets up and assembles:
 
 ```cpp
-#include "FE/Forms/Vocabulary.h"
-#include "FE/Systems/FieldBinding.h"
-#include "FE/Systems/FormulationBuilder.h"
-#include "FE/Systems/BoundaryConditionManager.h"
-#include "FE/Constraints/ConstraintPlan.h"
+#include "FE/Forms/Authoring.h"
 
 namespace fe = svmp::FE;
 using namespace fe::forms;
 
-fe::systems::FieldBinding fields(system, "Example::registerOn");
-const auto U = fields.unknownSymbols(
-    {.name = "u", .space = V, .components = 1}, "state", "u", "v");
-fe::systems::FormulationBuilder formulation(system, "equations", {});
+struct HeatOptions {
+    fe::Real conductivity{1.0};
+    fe::Real source{0.0};
+    int wall{1};                    // T = wall_temperature
+    fe::Real wall_temperature{0.0};
+    int inlet{2};                   // k grad(T).n = inflow
+    fe::Real inflow{0.0};
+};
 
-const auto source = FormExpr::constant(1.0);
-auto residual = (inner(grad(U.state), grad(U.test)) - source * U.test).dx();
+// -div(k grad T) = f in the domain, T = T_w on the wall, k grad(T).n = q on the inlet.
+void registerHeat(fe::systems::FESystem& system,
+                  std::shared_ptr<const fe::spaces::FunctionSpace> V,
+                  const HeatOptions& o)
+{
+    fe::systems::FieldBinding fields(system, "Heat::registerOn");
+    const auto [T_id, T, v] = fields.unknownSymbols({.name = "T", .space = V}, "temperature", "T", "v");
 
-fe::systems::BoundaryConditionManager bc_manager;
-// Populate with ordinary BoundaryCondition objects as required.
-fe::constraints::ConstraintPlan constraints(system);
-constraints.essentials(bc_manager, residual, U.state, U.test, U.id,
-                       formulation.operatorTag());
-constraints.commit();
+    const auto k = FormExpr::constant(o.conductivity);
+    const auto f = FormExpr::constant(o.source);
+    auto R = (k * inner(grad(T), grad(v)) - f * v).dx();
 
-formulation.symbolicTangent();
-(void)formulation.install({U.id}, residual);
+    fe::systems::BoundaryConditionManager bcs;
+    bcs.add(std::make_unique<bc::EssentialBC>(o.wall, FormExpr::constant(o.wall_temperature), "T"));
+    bcs.add(std::make_unique<bc::NaturalBC>(o.inlet, FormExpr::constant(o.inflow)));
+
+    fe::constraints::ConstraintPlan plan(system);
+    plan.essentials(bcs, R, T, v, T_id);
+    plan.commit();
+
+    fe::systems::FormulationBuilder F(system, "equations", {});
+    F.functional("conduction_energy", fe::systems::FunctionalKind::Stored,
+                 (0.5 * k * inner(grad(T), grad(T))).dx());
+    F.symbolicTangent();
+    (void)F.install({T_id}, R);
+
+    system.addDerivedResult(fe::post::DerivedResultBuilder("heat_flux")
+                                .scope(fe::post::DerivedResultScope::Cell)
+                                .policy(fe::post::DerivedResultPolicy::CellAverage)
+                                .shape(fe::systems::FEQuantityShape::vector(V->topological_dimension()))
+                                .expression(-k * grad(T))
+                                .referencedField(T_id)
+                                .build());
+}
 ```
 
-`bc_manager.applyAll(system, residual, U.state, U.test, U.id, operator_tag)`
-remains the ordinary direct BC route when no constraint plan is needed.
-`StateField`, `TestField`, `FESystem::addField`, and direct
+- `FieldBinding::unknownSymbols` registers the unknown (or reuses a compatible
+  one) and returns `{id, state, test}`.
+- The residual is a sum of integrals. Boundary data enter as forms on `.ds(m)`
+  or as condition objects on a `BoundaryConditionManager`.
+- `ConstraintPlan::essentials` adds the manager's weak terms to `R` and
+  installs its strong constraints, in the plan's phase order.
+- `FormulationBuilder` holds the install options; `functional` declares a
+  measured 0-form and `install` compiles and registers the kernels.
+- `addDerivedResult` declares an output. Unknowns are written without output
+  code (section 8).
+
+`bcs.applyAll(system, R, T, v, T_id)` is the direct BC route when no constraint
+plan is needed. `StateField`, `TestField`, `FESystem::addField`, and direct
 `installFormulation()` also remain available. These authoring services do not
 choose physical BCs, material laws, observation membership, or compiler policy.
 
@@ -207,8 +243,8 @@ auto w = TestField(q_field, *Vhdiv, "w");
 auto residual = inner(k_inv * q, w).dx();
 
 systems::BoundaryConditionManager bc_manager;
-bc_manager.add(forms::bc::makeNormalTraceEssentialBC(4, Constant(1.0)));
-bc_manager.add(forms::bc::makeTraceRobinBC(7, Constant(alpha), Constant(rhs)));
+bc_manager.add(forms::bc::makeNormalTraceEssentialBC(4, FormExpr::constant(1.0)));
+bc_manager.add(forms::bc::makeTraceRobinBC(7, FormExpr::constant(alpha), FormExpr::constant(rhs)));
 bc_manager.applyAll(system, residual, q, w, q_field);
 ```
 
@@ -220,7 +256,7 @@ const auto wet_wall =
     forms::ExteriorBoundaryMeasure::generatedActiveSubset(
         physical_wall_marker, generated_wet_wall_marker);
 bc_manager.add(forms::bc::makeTraceRobinBC(
-    wet_wall, Constant(alpha), Constant(rhs)));
+    wet_wall, FormExpr::constant(alpha), FormExpr::constant(rhs)));
 ```
 
 The same selector overload is available for natural and Robin conditions,
@@ -242,10 +278,10 @@ form-bound trace-certificate workflow and its aggregation prerequisite.
 Interface trace conditions use the same manager surface:
 
 ```cpp
-bc_manager.add(forms::bc::makeInterfaceTraceLoadBC(marker, Constant(0.0)));
+bc_manager.add(forms::bc::makeInterfaceTraceLoadBC(marker, FormExpr::constant(0.0)));
 bc_manager.add(forms::bc::makeInterfaceTraceJumpPenaltyBC(marker,
-                                                          Constant(beta),
-                                                          Constant(0.0)));
+                                                          FormExpr::constant(beta),
+                                                          FormExpr::constant(0.0)));
 bc_manager.applyAll(system, residual, q, w, q_field);
 ```
 
@@ -552,9 +588,55 @@ Key changes:
 - `FormExpr::stateField(...)` → `StateField(...)` (Vocabulary.h helper)
 - `FormExpr::testFunction(...)` → `TestField(field_id, ...)` (field-bound, required for same-space multi-field)
 - 3-step BC pattern → `applyAll()` (validate + apply + installStrongDirichlet in one call)
-- `#include "Forms/Forms.h"` → `#include "Forms/Vocabulary.h"` (smaller surface)
+- `#include "Forms/Forms.h"` and the separate service headers → `#include "FE/Forms/Authoring.h"` (the skeleton of section 2)
 
 The old APIs continue to work — this is a style migration, not a breaking change.
+
+## 8. Adding an Equation End to End
+
+A new equation touches these places, in this order. Each step names the file
+where the existing equations (Poisson, Ustruct, mesh motion, Navier-Stokes) do
+it.
+
+1. **Deck keys.** The XML parser (`Code/Source/solver/Parameters.cpp`) accepts
+   `<Add_equation type="...">` only for a type listed in `consts.cpp`
+   (`equation_name_to_type`). It accepts a child element only if it is a
+   legacy equation or domain parameter or is on the new-solver allow lists
+   `is_oop_equation_extension_parameter` and
+   `is_oop_boundary_extension_parameter`; anything else fails as an unknown XML
+   element. A removed key is deleted, not kept with a retirement message
+   (tracker decision D60).
+2. **Translation.** `Application/Translators/EquationTranslator.cpp` copies the
+   parsed deck into a generic `Physics::EquationModuleInput` (equation
+   parameters, domains, boundary conditions as
+   `BoundaryConditionInput {name, boundary_marker, params}`, output requests)
+   and asks `Physics::EquationModuleRegistry` for the module of the type. No
+   equation-specific code goes here.
+3. **Options.** `Physics/Formulations/<Name>/<Name>Register.cpp` reads the
+   input into the module's options struct. Declare the keys as an
+   `FE/Core/OptionSchema.h` schema (typed keys, spellings, defaults, rules and
+   messages; `Physics/Options/NavierStokesOptionSchema.cpp` is the example), and
+   use `Physics/Options/InputReaders.h` for parameter-map access and parsing,
+   rather than parsing by hand.
+4. **Registration.** In the same file, a factory
+   `create_<name>_from_input(input, system)` builds the spaces and the module,
+   calls `module->registerOn(system)` and returns the module;
+   `SVMP_REGISTER_EQUATION("<type>", &factory)` registers it, and a
+   `forceLink_<Name>Register()` called from
+   `Physics/Core/EquationModuleRegistry.cpp` keeps the object file linked.
+   `Physics/CMakeLists.txt` globs `Physics/Formulations/*`, so no build file
+   changes.
+5. **The module.** `<Name>Module::registerOn` is the skeleton of section 2: the
+   mathematics and its data, with `#include "FE/Forms/Authoring.h"`. The
+   translation of boundary-condition options into condition objects goes in
+   `<Name>BCFactories.h`, the derived outputs in `<Name>PostProcessing.h`.
+6. **Tests.** A unit test of the forms in `Physics/Tests/Unit` (an assembled
+   residual and tangent, the tangent against central finite differences, or a
+   manufactured solution and its convergence rate), and a deck under
+   `tests/cases` with a reference result for the whole path.
+7. **Output.** Nothing to write: the application writes every unknown in DOF
+   order and every result declared with `addDerivedResult`; the functionals
+   declared with `F.functional` are evaluated by `FunctionalFormEvaluator.h`.
 
 ## References
 

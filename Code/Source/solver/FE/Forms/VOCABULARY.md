@@ -86,7 +86,8 @@ Form language (`FE/Forms`):
 | `Forms/FormCompiler.h`, `Forms/FormKernels.h`, `Forms/FormIR.h`, `Forms/MixedFormIR.h` | Expert compilation, kernel, and IR layers |
 | `Forms/BlockForm.h`, `Forms/Complex.h` | Manual block and real-lifted complex workflows |
 | `Forms/Index.h`, `Forms/Einsum.h`, `Forms/Tensor/*` | Indexed/tensor-calculus infrastructure |
-| `Forms/Forms.h` | Umbrella include; not recommended as the starting include for physics modules |
+| `Forms/Authoring.h` | The one include of a formulation module: the form language and the FE services of the canonical workflow |
+| `Forms/Forms.h` | Umbrella include of the core form language; a formulation module includes `Forms/Authoring.h` instead |
 | `Forms/WeakForm.h` | Deprecated residual-plus-constraints bundle |
 
 Adjacent FE services a formulation calls:
@@ -113,64 +114,75 @@ Adjacent FE services a formulation calls:
 
 ## Canonical Workflow
 
-Most residual physics should be authored with field-bound state/test symbols and
-installed through Systems:
+Every formulation module follows one skeleton: bind its fields with
+`FieldBinding`, write the residual, add its boundary conditions, register its
+constraints through a `ConstraintPlan`, declare its functionals and outputs,
+and install through `FormulationBuilder`. One include, `FE/Forms/Authoring.h`,
+declares all of it; `FE/Tests/Unit/Forms/test_Authoring.cpp` compiles this
+skeleton with that include alone:
 
 ```cpp
-#include "FE/Forms/Vocabulary.h"
-#include "FE/Systems/FormsInstaller.h"
-#include "FE/Systems/BoundaryConditionManager.h"
+#include "FE/Forms/Authoring.h"
 
-auto u_id = system.addField({.name = "u", .space = V});
-system.addOperator("equations");
+namespace fe = svmp::FE;
+using namespace fe::forms;
 
-auto u = StateField(u_id, *V, "u");
-auto v = TestField(u_id, *V, "v");
+struct HeatOptions {
+    fe::Real conductivity{1.0};
+    fe::Real source{0.0};
+    int wall{1};                    // T = wall_temperature
+    fe::Real wall_temperature{0.0};
+    int inlet{2};                   // k grad(T).n = inflow
+    fe::Real inflow{0.0};
+};
 
-auto residual = (k * inner(grad(u), grad(v)) - f * v).dx();
+// -div(k grad T) = f in the domain, T = T_w on the wall, k grad(T).n = q on the inlet.
+void registerHeat(fe::systems::FESystem& system,
+                  std::shared_ptr<const fe::spaces::FunctionSpace> V,
+                  const HeatOptions& o)
+{
+    fe::systems::FieldBinding fields(system, "Heat::registerOn");
+    const auto [T_id, T, v] = fields.unknownSymbols({.name = "T", .space = V}, "temperature", "T", "v");
 
-bc_manager.applyAll(system, residual, u, v, u_id);
-installFormulation(system, "equations", {u_id}, residual);
+    const auto k = FormExpr::constant(o.conductivity);
+    const auto f = FormExpr::constant(o.source);
+    auto R = (k * inner(grad(T), grad(v)) - f * v).dx();
+
+    fe::systems::BoundaryConditionManager bcs;
+    bcs.add(std::make_unique<bc::EssentialBC>(o.wall, FormExpr::constant(o.wall_temperature), "T"));
+    bcs.add(std::make_unique<bc::NaturalBC>(o.inlet, FormExpr::constant(o.inflow)));
+
+    fe::constraints::ConstraintPlan plan(system);
+    plan.essentials(bcs, R, T, v, T_id);
+    plan.commit();
+
+    fe::systems::FormulationBuilder F(system, "equations", {});
+    F.functional("conduction_energy", fe::systems::FunctionalKind::Stored,
+                 (0.5 * k * inner(grad(T), grad(T))).dx());
+    F.symbolicTangent();
+    (void)F.install({T_id}, R);
+
+    system.addDerivedResult(fe::post::DerivedResultBuilder("heat_flux")
+                                .scope(fe::post::DerivedResultScope::Cell)
+                                .policy(fe::post::DerivedResultPolicy::CellAverage)
+                                .shape(fe::systems::FEQuantityShape::vector(V->topological_dimension()))
+                                .expression(-k * grad(T))
+                                .referencedField(T_id)
+                                .build());
+}
 ```
+
+`Forms/SYSTEMS_INTEGRATION.md` explains each step (section 2) and the path from
+a deck key to a running equation (section 8). A module with several unknowns
+binds each, sums their rows and installs them together,
+`F.install({u_id, p_id}, R)`; `IncompressibleNavierStokesVMSModule::registerOn`
+is the multi-field example.
 
 Use unbound `TrialFunction`/`TestFunction` for explicit operator authoring
 (`installMixedBilinear`, `installMixedLinear`) and `StateField`/`TestField` for
 residual formulations (`installFormulation`). The residual form is
 differentiated automatically (forward-mode dual numbers by default, or the
 symbolic tangent when `use_symbolic_tangent` is set).
-
-A module with several fields, constraints that must be registered in a fixed
-order, or install options shared by several kernel groups uses the FE
-formulation services, as `IncompressibleNavierStokesVMSModule::registerOn`
-does:
-
-```cpp
-#include "FE/Constraints/ConstraintPlan.h"
-#include "FE/Systems/FieldBinding.h"
-#include "FE/Systems/FormulationBuilder.h"
-
-systems::FieldBinding binding(system, "MyModule::registerOn");
-const FieldId u_id = binding.unknown({.name = "u", .space = V, .components = dim}, "velocity");
-const FieldId p_id = binding.unknown({.name = "p", .space = Q}, "pressure");
-
-constraints::ConstraintPlan plan(system);            // VertexValues < Essential < ... < PointLaw
-plan.vertexValues(p_id, pressure_pins);
-
-const auto u = StateField(u_id, *V, "u");
-const auto p = StateField(p_id, *Q, "p");
-const auto v = TestField(u_id, *V, "v");
-const auto q = TestField(p_id, *Q, "q");
-auto R = (2.0 * mu * inner(sym(grad(u)), sym(grad(v))) - p * div(v) + q * div(u)).dx();
-
-systems::BoundaryConditionManager bcs;
-bcs.install(options.velocity_dirichlet, to_essential_bc);
-plan.essentials([&](systems::FESystem& s) { bcs.applyAll(s, R, u, v, u_id); });
-plan.commit();
-
-systems::FormulationBuilder F(system, "equations", base_install_options);
-F.symbolicTangent();
-F.install({u_id, p_id}, R);
-```
 
 ## Module Boundaries
 

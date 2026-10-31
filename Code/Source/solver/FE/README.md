@@ -41,6 +41,7 @@ FE/
 
 | What you want to do | API | Header |
 |---------------------|-----|--------|
+| **A formulation module** (fields, residual, BCs, constraints, functionals, outputs) | the canonical skeleton, Example 1 below | `Forms/Authoring.h` |
 | **Residual physics** (single or multi-field) | `installFormulation(system, op, fields, residual)` | `Systems/FormsInstaller.h` |
 | **Mixed bilinear operator** (stiffness, mass) | `installMixedBilinear(system, op, test, trial, form)` | `Systems/FormsInstaller.h` |
 | **Mixed linear operator** (load vector) | `installMixedLinear(system, op, test, form)` | `Systems/FormsInstaller.h` |
@@ -63,11 +64,10 @@ FE/
 See `Docs/AuxiliaryState/README.md` for the full auxiliary state architecture
 guide and `Docs/LevelSet.md` for the level-set service ownership model.
 
-Most physics modules need only two includes:
+A formulation module needs one include:
 
 ```cpp
-#include "FE/Forms/Vocabulary.h"        // StateField, TestField, grad, inner, ...
-#include "FE/Systems/FormsInstaller.h"  // installFormulation, installStrongDirichlet
+#include "FE/Forms/Authoring.h"   // the form language and the FE services of Example 1
 ```
 
 Write one `FormExpr` for the residual and call `installFormulation()` — the
@@ -117,8 +117,8 @@ auto w = TestField(q_id, *Vhdiv, "w");
 auto residual = inner(k_inv * q, w).dx();
 
 systems::BoundaryConditionManager bc_manager;
-bc_manager.add(forms::bc::makeNormalTraceEssentialBC(/*marker=*/4, Constant(1.0)));
-bc_manager.add(forms::bc::makeTraceLoadBC(/*marker=*/7, Constant(0.0)));
+bc_manager.add(forms::bc::makeNormalTraceEssentialBC(/*marker=*/4, FormExpr::constant(1.0)));
+bc_manager.add(forms::bc::makeTraceLoadBC(/*marker=*/7, FormExpr::constant(0.0)));
 bc_manager.applyAll(system, residual, q, w, q_id);
 ```
 
@@ -2395,45 +2395,67 @@ FSILS (Fast Scalable Iterative Linear Solver) integration.
 
 ## Usage Examples
 
-All examples below use the canonical workflow (`Vocabulary.h` + `FormsInstaller.h`).
-For expert/low-level paths, see `test_MixedManualParity.cpp`.
+Example 1 is the canonical formulation skeleton (`Forms/SYSTEMS_INTEGRATION.md`
+section 2), which `Tests/Unit/Forms/test_Authoring.cpp` compiles with
+`Forms/Authoring.h` alone. The other examples show single features with the
+lower-level `Vocabulary.h` + `FormsInstaller.h` calls. For expert/low-level
+paths, see `test_MixedManualParity.cpp`.
 
-### Example 1: Poisson Problem (single-field)
+### Example 1: Steady Heat Conduction (the canonical skeleton)
 
 ```cpp
-#include "FE/Forms/Vocabulary.h"
-#include "FE/Systems/FormsInstaller.h"
-#include "FE/Systems/BoundaryConditionManager.h"
+#include "FE/Forms/Authoring.h"
 
-using namespace svmp::FE;
-using namespace svmp::FE::forms;
+namespace fe = svmp::FE;
+using namespace fe::forms;
 
-// 1. Create system and register field
-systems::FESystem system(mesh_access);
-auto V = std::make_shared<spaces::H1Space>(ElementType::Triangle, /*order=*/1);
-auto u_id = system.addField({.name = "u", .space = V, .components = 1});
-system.addOperator("equations");
+struct HeatOptions {
+    fe::Real conductivity{1.0};
+    fe::Real source{0.0};
+    int wall{1};                    // T = wall_temperature
+    fe::Real wall_temperature{0.0};
+    int inlet{2};                   // k grad(T).n = inflow
+    fe::Real inflow{0.0};
+};
 
-// 2. Build field-bound symbols
-auto u = StateField(u_id, *V, "u");
-auto v = TestField(u_id, *V, "v");
-auto f = FormExpr::constant(1.0);
+// -div(k grad T) = f in the domain, T = T_w on the wall, k grad(T).n = q on the inlet.
+void registerHeat(fe::systems::FESystem& system,
+                  std::shared_ptr<const fe::spaces::FunctionSpace> V,
+                  const HeatOptions& o)
+{
+    fe::systems::FieldBinding fields(system, "Heat::registerOn");
+    const auto [T_id, T, v] = fields.unknownSymbols({.name = "T", .space = V}, "temperature", "T", "v");
 
-// 3. Write the residual: R(u;v) = ∫ grad(u)·grad(v) - f·v dx
-auto residual = (inner(grad(u), grad(v)) - f * v).dx();
+    const auto k = FormExpr::constant(o.conductivity);
+    const auto f = FormExpr::constant(o.source);
+    auto R = (k * inner(grad(T), grad(v)) - f * v).dx();
 
-// 4. Apply BCs and install
-systems::BoundaryConditionManager bc_manager;
-bc_manager.add(std::make_unique<forms::bc::EssentialBC>(
-    /*marker=*/1, FormExpr::constant(0.0), "u"));
-bc_manager.applyAll(system, residual, u, v, u_id);
-systems::installFormulation(system, "equations", {u_id}, residual);
+    fe::systems::BoundaryConditionManager bcs;
+    bcs.add(std::make_unique<bc::EssentialBC>(o.wall, FormExpr::constant(o.wall_temperature), "T"));
+    bcs.add(std::make_unique<bc::NaturalBC>(o.inlet, FormExpr::constant(o.inflow)));
 
-// 5. Setup and assemble
-system.setup({});
-systems::AssemblyRequest req{.op = "equations", .want_matrix = true, .want_vector = true};
-system.assemble(req, state, &matrix_view, &vector_view);
+    fe::constraints::ConstraintPlan plan(system);
+    plan.essentials(bcs, R, T, v, T_id);
+    plan.commit();
+
+    fe::systems::FormulationBuilder F(system, "equations", {});
+    F.functional("conduction_energy", fe::systems::FunctionalKind::Stored,
+                 (0.5 * k * inner(grad(T), grad(T))).dx());
+    F.symbolicTangent();
+    (void)F.install({T_id}, R);
+
+    system.addDerivedResult(fe::post::DerivedResultBuilder("heat_flux")
+                                .scope(fe::post::DerivedResultScope::Cell)
+                                .policy(fe::post::DerivedResultPolicy::CellAverage)
+                                .shape(fe::systems::FEQuantityShape::vector(V->topological_dimension()))
+                                .expression(-k * grad(T))
+                                .referencedField(T_id)
+                                .build());
+}
 ```
+
+The module's `registerOn(system)` calls this; the application then sets the
+system up, assembles and solves.
 
 ### Example 2: Nonlinear Elasticity with Constitutive Model
 

@@ -1318,6 +1318,7 @@ endif()
 # Forms sources (requires FE/Assembly; used by SymbolicAssembler)
 set(FE_FORMS_HEADERS
     Forms/Forms.h
+    Forms/Authoring.h
 	    Forms/BoundaryConditions.h
 	    Forms/BoundaryCondition.h
 	    Forms/StandardBCs.h
@@ -2957,6 +2958,7 @@ if(FE_BUILD_TESTS)
 				                    Tests/Unit/Forms/test_LLVMGen_TimeOps.cpp
 				                    Tests/Unit/Forms/test_PointEvaluator.cpp
 				                Tests/Unit/Forms/test_BoundaryConditionHelpers.cpp
+				                Tests/Unit/Forms/test_Authoring.cpp
 				                Tests/Unit/Forms/test_FormCompiler.cpp
 				                Tests/Unit/Forms/test_MixedFormIR.cpp
 			                Tests/Unit/Forms/test_Dual.cpp

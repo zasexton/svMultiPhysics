@@ -77,10 +77,10 @@ auto w = TestField(q_field, *Vhdiv, "w");
 auto residual = inner(k_inv * q, w).dx();
 
 systems::BoundaryConditionManager bc_manager;
-bc_manager.add(forms::bc::makeNormalTraceEssentialBC(/*marker=*/4, Constant(1.0)));
+bc_manager.add(forms::bc::makeNormalTraceEssentialBC(/*marker=*/4, FormExpr::constant(1.0)));
 bc_manager.add(forms::bc::makeTraceRobinBC(/*marker=*/7,
-                                           Constant(alpha),
-                                           Constant(rhs)));
+                                           FormExpr::constant(alpha),
+                                           FormExpr::constant(rhs)));
 bc_manager.applyAll(system, residual, q, w, q_field);
 ```
 
@@ -115,10 +115,10 @@ Interface trace conditions use the same manager surface, but with the
 ```cpp
 systems::BoundaryConditionManager bc_manager;
 bc_manager.add(forms::bc::makeInterfaceTraceLoadBC(/*interface_marker=*/17,
-                                                   Constant(0.0)));
+                                                   FormExpr::constant(0.0)));
 bc_manager.add(forms::bc::makeInterfaceTraceJumpPenaltyBC(/*interface_marker=*/17,
-                                                          Constant(beta),
-                                                          Constant(0.0)));
+                                                          FormExpr::constant(beta),
+                                                          FormExpr::constant(0.0)));
 bc_manager.applyAll(system, residual, q, w, q_field);
 ```
 
@@ -142,10 +142,10 @@ auto v = TestField(u_field, *V, "v");
 systems::BoundaryConditionManager bc_manager;
 bc_manager.add(std::make_unique<forms::bc::TraceNitscheBC>(
     /*boundary_marker=*/9,
-    Constant(0.0),
+    FormExpr::constant(0.0),
     inner(grad(u), n),
     inner(grad(v), n),
-    Constant(1.0) / h(),
+    FormExpr::constant(1.0) / h(),
     forms::bc::ScalarTraceOperator::Identity));
 bc_manager.applyAll(system, residual, u, v, u_field);
 ```
@@ -278,8 +278,8 @@ opts.sense = forms::bc::TraceInequalitySense::LessEqual;
 
 systems::BoundaryConditionManager bc_manager;
 bc_manager.add(forms::bc::makeTraceInequalityBC(/*marker=*/11,
-                                                Constant(0.0),
-                                                Constant(gamma),
+                                                FormExpr::constant(0.0),
+                                                FormExpr::constant(gamma),
                                                 opts));
 bc_manager.applyAll(system, residual, q, w, q_field);
 ```

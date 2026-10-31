@@ -5,14 +5,10 @@
  * @file Forms.h
  * @brief Core FE/Forms authoring surface
  *
- * @note **Not recommended as a starting include for physics modules.**
- * Most formulation code needs only:
- *   - `Forms/Vocabulary.h` (expression helpers: stateField, testFunction, grad, ...)
- *   - `Systems/FormsInstaller.h` (installFormulation, installStrongDirichlet)
- *
- * Specialized Forms vocabulary such as MovingFrameForms, CutCellForms,
- * FiniteDeformationForms, StandardBCs, and NitscheBC should be included
- * directly by modules that need those narrower surfaces.
+ * @note A formulation module includes `Forms/Authoring.h`, the form
+ * language together with the FE services of the canonical skeleton
+ * (Forms/SYSTEMS_INTEGRATION.md section 2).  This header is the core form
+ * language only.
  */
 
 // Core authoring surface
