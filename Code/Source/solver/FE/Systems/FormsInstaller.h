@@ -100,6 +100,13 @@ struct FormInstallOptions {
     /// diagnostics. Empty means the whole installed operator/component.
     std::string source_component_tag{};
 
+    /// Whether the moving domain of the system (movingDomain()) differentiates
+    /// this install's geometry in the mesh displacement, which then joins the
+    /// trial fields.  False keeps the geometry constant, as a mesh-motion
+    /// equation on the reference mesh does.  Ignored without a moving domain
+    /// and when the geometry sensitivity is set explicitly.
+    bool moving_domain_geometry{true};
+
     /**
      * Form-bound generated-interface Nitsche certification requests.
      *

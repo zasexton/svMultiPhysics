@@ -1924,6 +1924,16 @@ public:
 	    [[nodiscard]] const svmp::Mesh& singleMesh(std::string_view api_name = "FESystem") const;
 	    [[nodiscard]] svmp::Configuration coordinateConfiguration() const noexcept { return coord_cfg_; }
 
+	    /**
+	     * @brief Chooses the configuration the system assembles in, before setup
+	     *
+	     * The constructor's coord_cfg, chosen later: rebuilds the mesh and
+	     * search access of the native mesh on @p coord_cfg (a search access set
+	     * with setSearchAccess() is replaced).  Throws after setup and for a
+	     * system without a native mesh.
+	     */
+	    void setAssemblyConfiguration(svmp::Configuration coord_cfg);
+
 	    FieldId addMeshDisplacementUnknown(std::string name,
 	                                       std::shared_ptr<const spaces::FunctionSpace> space,
 	                                       int components = 0);

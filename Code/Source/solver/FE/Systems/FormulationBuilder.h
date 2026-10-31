@@ -100,6 +100,10 @@ public:
     FormulationBuilder& recordConstitutiveLaw(analysis::ConstitutiveLawMetadata law);
     FormulationBuilder& configure(const ALEBinding& ale);
 
+    /// Keeps the geometry of later installs constant on a moving domain
+    /// (FormInstallOptions::moving_domain_geometry = false).
+    FormulationBuilder& geometryConstant();
+
     /// Moves @p bindings into trace-certificate requests on @p volume_interface_marker.
     FormulationBuilder& certifyGeneratedBoundaryNitscheTraces(
         std::vector<forms::bc::GeneratedBoundaryNitscheTraceFormBinding>& bindings,

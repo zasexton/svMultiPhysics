@@ -63,6 +63,12 @@ FormulationBuilder& FormulationBuilder::configure(const ALEBinding& ale)
     return *this;
 }
 
+FormulationBuilder& FormulationBuilder::geometryConstant()
+{
+    options_.moving_domain_geometry = false;
+    return *this;
+}
+
 FormulationBuilder& FormulationBuilder::certifyGeneratedBoundaryNitscheTraces(
     std::vector<forms::bc::GeneratedBoundaryNitscheTraceFormBinding>& bindings,
     int volume_interface_marker,

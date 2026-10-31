@@ -9,6 +9,8 @@
 #include "Systems/FESystem.h"
 #include "Systems/FieldBinding.h"
 #include "Systems/FormsInstaller.h"
+#include "Systems/FormulationBuilder.h"
+#include "Forms/Vocabulary.h"
 #include "Systems/MeshDisplacementBinding.h"
 #include "Systems/OperatorBackends.h"
 #include "Systems/SystemsExceptions.h"
@@ -33,6 +35,7 @@
 #include "Mesh/Motion/MotionFields.h"
 #include "Mesh/Topology/CellShape.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -2470,3 +2473,63 @@ TEST(FESystem, LaggedAndPreviousValuesAreShadowFieldsRefreshedByTheGeneratedStat
     expect_copies(u);
 }
 
+TEST(FESystem, MovingDomainSetsTheFrameBindsTheMotionAndDifferentiatesTheInstalls)
+{
+    using svmp::FE::forms::FormExpr;
+    auto mesh = build_single_quad_mesh();
+    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    auto vector_space = std::make_shared<ProductSpace>(scalar_space, /*components=*/2);
+
+    FESystem sys(mesh);
+    EXPECT_EQ(sys.coordinateConfiguration(), svmp::Configuration::Reference);
+    const auto temperature = sys.addField(FieldSpec{.name = "temperature", .space = scalar_space});
+    const auto displacement =
+        sys.addField(FieldSpec{.name = "mesh_displacement", .space = vector_space, .components = 2});
+    EXPECT_EQ(svmp::FE::systems::findMovingDomain(sys), nullptr);
+
+    const auto domain = svmp::FE::systems::movingDomain(sys, displacement);
+    EXPECT_EQ(sys.coordinateConfiguration(), svmp::Configuration::Current);
+    EXPECT_EQ(domain.displacement, displacement);
+    EXPECT_EQ(sys.meshMotionField(MeshMotionFieldRole::Displacement), displacement);
+    ASSERT_NE(domain.velocity, svmp::FE::INVALID_FIELD_ID);
+    EXPECT_EQ(sys.meshMotionField(MeshMotionFieldRole::Velocity), domain.velocity);
+    EXPECT_EQ(sys.fieldRecord(domain.velocity).source_kind, FieldSourceKind::DerivedFromUnknown);
+    EXPECT_TRUE(sys.geometricNonlinearityEnabled());
+    ASSERT_NE(svmp::FE::systems::findMovingDomain(sys), nullptr);
+    EXPECT_EQ(svmp::FE::systems::findMovingDomain(sys)->displacement, displacement);
+    EXPECT_THROW((void)svmp::FE::systems::movingDomain(sys, displacement), std::invalid_argument);
+    EXPECT_THROW((void)svmp::FE::systems::movingDomain(sys, temperature), std::invalid_argument);
+
+    // Every install differentiates its geometry in the displacement, which
+    // joins its trial fields, as an explicit ALE configuration does.
+    const auto T = svmp::FE::forms::StateField(temperature, *scalar_space, "T");
+    const auto w = svmp::FE::forms::TestField(temperature, *scalar_space, "w");
+    const auto form = (T * w * FormExpr::currentJacobianDeterminant() +
+                       svmp::FE::forms::inner(svmp::FE::forms::grad(T), svmp::FE::forms::grad(w))).dx();
+    svmp::FE::systems::FormulationBuilder F(sys, "transport", {});
+    const auto kernels = F.install({temperature}, form);
+    const auto& moving = sys.formulationRecords().back();
+    EXPECT_EQ(moving.active_fields, (std::vector<svmp::FE::FieldId>{temperature, displacement}));
+    ASSERT_EQ(kernels.jacobian_blocks.size(), 1u);
+    ASSERT_EQ(kernels.jacobian_blocks[0].size(), 2u);
+    EXPECT_NE(kernels.jacobian_blocks[0][1], nullptr);
+
+    // An install that keeps its geometry constant opts out.
+    svmp::FE::systems::FormulationBuilder fixed(sys, "fixed", {});
+    fixed.geometryConstant();
+    (void)fixed.install({temperature},
+                        (svmp::FE::forms::inner(svmp::FE::forms::grad(T), svmp::FE::forms::grad(w))).dx());
+    const auto& constant = sys.formulationRecords().back();
+    EXPECT_EQ(constant.active_fields, std::vector<svmp::FE::FieldId>{temperature});
+
+    // The frame and the declaration are chosen before setup.
+    FESystem set_up(mesh);
+    const auto u = set_up.addField(FieldSpec{.name = "u", .space = scalar_space});
+    const auto d = set_up.addField(FieldSpec{.name = "d", .space = vector_space, .components = 2});
+    set_up.addOperator("mass");
+    set_up.addCellKernel("mass", u, std::make_shared<MassKernel>(1.0));
+    set_up.addCellKernel("mass", d, std::make_shared<MassKernel>(1.0));
+    set_up.setup();
+    EXPECT_THROW(set_up.setAssemblyConfiguration(svmp::Configuration::Current), svmp::FE::FEException);
+    EXPECT_THROW((void)svmp::FE::systems::movingDomain(set_up, d), std::invalid_argument);
+}

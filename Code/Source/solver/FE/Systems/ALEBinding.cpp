@@ -15,6 +15,7 @@
 #include "Systems/GeometricNonlinearity.h"
 
 #include <algorithm>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -211,6 +212,71 @@ void ALEBinding::configureInstallOptions(FormInstallOptions& install) const
                   mesh_displacement_field) == install.extra_trial_fields.end()) {
         install.extra_trial_fields.push_back(mesh_displacement_field);
     }
+}
+
+namespace {
+
+/// The moving domain of a system (movingDomain()).
+struct MovingDomainDeclaration {
+    std::optional<MovingDomain> domain{};
+};
+
+} // namespace
+
+ALEBinding MovingDomain::binding() const noexcept
+{
+    ALEBinding out;
+    out.enabled = true;
+    out.mesh_velocity_source = ALEMeshVelocitySource::CoupledDisplacement;
+    out.geometry_tangent_path = geometry_tangent_path;
+    out.mesh_velocity_field = velocity;
+    out.mesh_displacement_field = displacement;
+    return out;
+}
+
+MovingDomain movingDomain(FESystem& system, FieldId displacement, MovingDomainOptions options)
+{
+    if (system.isSetup()) {
+        throw std::invalid_argument("movingDomain: the moving domain is declared before setup");
+    }
+    if (findMovingDomain(system) != nullptr) {
+        throw std::invalid_argument("movingDomain: the system already has a moving domain");
+    }
+    if (displacement == INVALID_FIELD_ID || !system.hasField(displacement) ||
+        !system.fieldParticipatesInUnknownVector(displacement)) {
+        throw std::invalid_argument("movingDomain: the displacement is not a registered unknown");
+    }
+    const auto& rec = system.fieldRecord(displacement);
+    if (!rec.space || rec.space->field_type() != FieldType::Vector) {
+        throw std::invalid_argument("movingDomain: the displacement '" + rec.name + "' is not vector-valued");
+    }
+    // The frame first: nothing has captured the mesh access before setup.
+    system.setAssemblyConfiguration(svmp::Configuration::Current);
+    const auto ale = resolveALEBinding(
+        system,
+        ALEBindingOptions{
+            .enabled = true,
+            .dimension = rec.space->value_dimension(),
+            .mesh_velocity_source = ALEMeshVelocitySource::CoupledDisplacement,
+            .geometry_tangent_path = options.geometry_tangent_path,
+            .mesh_velocity_field_name = std::move(options.mesh_velocity_field_name),
+            .mesh_displacement_field_name = rec.name,
+            .mesh_velocity_space = rec.space,
+            .mesh_displacement_space = rec.space,
+        });
+    auto& declaration = system.attachment<MovingDomainDeclaration>();
+    declaration.domain = MovingDomain{
+        .displacement = ale.mesh_displacement_field,
+        .velocity = ale.mesh_velocity_field,
+        .geometry_tangent_path = ale.geometry_tangent_path,
+    };
+    return *declaration.domain;
+}
+
+const MovingDomain* findMovingDomain(const FESystem& system) noexcept
+{
+    const auto* declaration = system.findAttachment<MovingDomainDeclaration>();
+    return declaration != nullptr && declaration->domain.has_value() ? &*declaration->domain : nullptr;
 }
 
 ALEBinding resolveALEBinding(FESystem& system, ALEBindingOptions options)

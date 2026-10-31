@@ -37,6 +37,7 @@
 #include "Analysis/FormExprScanner.h"
 #include "Analysis/FormContributionLowerer.h"
 
+#include "Systems/ALEBinding.h"
 #include "Systems/FESystem.h"
 #include "Systems/GlobalRowKernel.h"
 #include "Systems/InterfaceSideSplit.h"
@@ -4261,6 +4262,16 @@ CoupledResidualKernels installFormulation(
                 InvalidArgumentException,
                 "installFormulation: ADMode::Reverse and ADMode::Taylor are not implemented; the Jacobian is "
                 "assembled with forward-mode dual numbers (ADMode::Forward) or the symbolic tangent");
+
+    // A declared moving domain: the geometry of the install varies with the
+    // mesh displacement, which is a trial field (movingDomain()).
+    if (const auto* domain = findMovingDomain(system);
+        domain != nullptr && options.moving_domain_geometry &&
+        options.compiler_options.geometry_sensitivity.mode == forms::GeometrySensitivityMode::GeometryConstant) {
+        auto moving = options;
+        domain->binding().configureInstallOptions(moving);
+        return installFormulation(system, op, fields, residual, moving);
+    }
 
     auto form_bound_exterior_boundary_measure_policies =
         makeFormBoundExteriorBoundaryMeasurePolicies(

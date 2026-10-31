@@ -10474,6 +10474,20 @@ FESystem::rollbackGeometricNonlinearityTrial(bool force)
 }
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+void FESystem::setAssemblyConfiguration(svmp::Configuration coord_cfg)
+{
+    FE_THROW_IF(is_setup_, InvalidStateException,
+                "FESystem::setAssemblyConfiguration: the assembly configuration is chosen before setup");
+    FE_THROW_IF(!mesh_, InvalidStateException,
+                "FESystem::setAssemblyConfiguration: the system has no native mesh");
+    if (coord_cfg == coord_cfg_) {
+        return;
+    }
+    coord_cfg_ = coord_cfg;
+    mesh_access_ = std::make_shared<assembly::MeshAccess>(*mesh_, coord_cfg_);
+    search_access_ = std::make_shared<MeshSearchAccess>(*mesh_, coord_cfg_);
+}
+
 FieldId FESystem::addMeshDisplacementUnknown(std::string name,
                                              std::shared_ptr<const spaces::FunctionSpace> space,
                                              int components)
