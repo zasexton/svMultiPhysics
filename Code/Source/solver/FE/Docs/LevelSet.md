@@ -82,6 +82,13 @@ and changes with every change of the discrete structure: a DOF changing
 sign, a cell cut or uncut, a side retained or pruned, a wetted face. It does
 not certify how crossings pair up inside a cell that stays cut.
 
+For such geometry the sharp active boundary restricts the level set itself to
+each boundary edge (2D; 3D is refused): the edge roots are certified by
+Bernstein subdivision of the level set's polynomial along the edge, each root
+end of the wetted part is the contact point of that root (the backend places
+it to its root tolerance), and a contact point of a curved fragment takes the
+level set's gradient there as its normal.
+
 `generatedActiveBoundaryResolver(std::vector<CutSide> owners, std::string owner,
 std::string invalid_physical_marker_message)` returns a callable that owns its
 side handles and diagnostic strings. It can outlive the input vector and does

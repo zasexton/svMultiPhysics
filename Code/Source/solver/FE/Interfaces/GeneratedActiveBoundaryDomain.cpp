@@ -463,6 +463,149 @@ void removeDuplicatePolygonVertices(std::vector<Point>& points,
     assessments = std::move(unique_assessments);
 }
 
+/// A level set of order at most 4 is a polynomial of degree at most 4 along
+/// a straight reference edge, which the edge roots interpolate exactly.
+constexpr int kEdgeLevelSetDegree = 4;
+
+/// True for the 2D Lagrange cells whose reference edges are straight.
+[[nodiscard]] bool hasStraightReferenceEdges(ElementType type) noexcept
+{
+    switch (type) {
+    case ElementType::Triangle3:
+    case ElementType::Triangle6:
+    case ElementType::Quad4:
+    case ElementType::Quad8:
+    case ElementType::Quad9:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/// The roots in (0, 1) of the polynomial q of degree @p degree that @p f is
+/// along the edge.  q is interpolated at degree + 1 equispaced
+/// points; an interval whose Bernstein coefficients share a strict sign
+/// beyond @p band holds no root, one with exactly one sign change holds one,
+/// which bisection on f polishes to @p tolerance, and other intervals are
+/// halved.  Roots within @p tolerance of 0 or 1 are left to the corners.
+[[nodiscard]] std::vector<Real> certifiedEdgeRoots(const std::function<Real(Real)>& f,
+                                                   int degree,
+                                                   Real band,
+                                                   Real tolerance)
+{
+    // Monomial coefficients of q from its values at i / degree.
+    const auto n = static_cast<std::size_t>(degree + 1);
+    std::vector<std::vector<Real>> system(n, std::vector<Real>(n + 1u, Real{0.0}));
+    for (std::size_t i = 0; i < n; ++i) {
+        const Real t = static_cast<Real>(i) / static_cast<Real>(degree);
+        Real power = Real{1.0};
+        for (std::size_t k = 0; k < n; ++k) {
+            system[i][k] = power;
+            power *= t;
+        }
+        system[i][n] = f(t);
+    }
+    for (std::size_t c = 0; c < n; ++c) {
+        std::size_t pivot = c;
+        for (std::size_t r = c + 1u; r < n; ++r) {
+            if (std::abs(system[r][c]) > std::abs(system[pivot][c])) {
+                pivot = r;
+            }
+        }
+        std::swap(system[c], system[pivot]);
+        for (std::size_t r = 0; r < n; ++r) {
+            if (r == c) {
+                continue;
+            }
+            const Real factor = system[r][c] / system[c][c];
+            for (std::size_t k = c; k <= n; ++k) {
+                system[r][k] -= factor * system[c][k];
+            }
+        }
+    }
+    std::vector<Real> monomial(n);
+    for (std::size_t k = 0; k < n; ++k) {
+        monomial[k] = system[k][n] / system[k][k];
+    }
+    const auto binomial = [](std::size_t a, std::size_t b) {
+        Real value = Real{1.0};
+        for (std::size_t i = 1; i <= b; ++i) {
+            value = value * static_cast<Real>(a - b + i) / static_cast<Real>(i);
+        }
+        return value;
+    };
+    // Bernstein coefficients of q(alpha + h s), s in [0, 1].
+    const auto bernstein = [&](Real alpha, Real h) {
+        std::vector<Real> shifted(n, Real{0.0});
+        for (std::size_t k = 0; k < n; ++k) {
+            for (std::size_t j = 0; j <= k; ++j) {
+                shifted[j] += monomial[k] * binomial(k, j) * std::pow(alpha, static_cast<Real>(k - j)) *
+                              std::pow(h, static_cast<Real>(j));
+            }
+        }
+        std::vector<Real> coefficients(n, Real{0.0});
+        for (std::size_t i = 0; i < n; ++i) {
+            for (std::size_t k = 0; k <= i; ++k) {
+                coefficients[i] += binomial(i, k) / binomial(n - 1u, k) * shifted[k];
+            }
+        }
+        return coefficients;
+    };
+    std::vector<Real> roots;
+    const auto bisect = [&](Real low, Real high) {
+        Real f_low = f(low);
+        while (high - low > tolerance) {
+            const Real mid = Real{0.5} * (low + high);
+            const Real f_mid = f(mid);
+            if ((f_mid < Real{0.0}) == (f_low < Real{0.0})) {
+                low = mid;
+                f_low = f_mid;
+            } else {
+                high = mid;
+            }
+        }
+        return Real{0.5} * (low + high);
+    };
+    const auto isolate = [&](const auto& self, Real low, Real high) -> void {
+        const auto b = bernstein(low, high - low);
+        const bool positive = std::all_of(b.begin(), b.end(), [band](Real v) { return v > band; });
+        const bool negative = std::all_of(b.begin(), b.end(), [band](Real v) { return v < -band; });
+        if (positive || negative) {
+            return;
+        }
+        int sign_changes = 0;
+        for (std::size_t i = 1; i < b.size(); ++i) {
+            sign_changes += (b[i] < Real{0.0}) != (b[i - 1u] < Real{0.0}) ? 1 : 0;
+        }
+        const Real f_low = f(low);
+        const Real f_high = f(high);
+        if (sign_changes == 1 && std::abs(f_low) > band && std::abs(f_high) > band &&
+            (f_low < Real{0.0}) != (f_high < Real{0.0})) {
+            roots.push_back(bisect(low, high));
+            return;
+        }
+        if (high - low <= tolerance) {
+            roots.push_back(Real{0.5} * (low + high));
+            return;
+        }
+        const Real mid = Real{0.5} * (low + high);
+        self(self, low, mid);
+        self(self, mid, high);
+    };
+    isolate(isolate, Real{0.0}, Real{1.0});
+    std::sort(roots.begin(), roots.end());
+    std::vector<Real> unique;
+    for (const Real root : roots) {
+        if (root <= tolerance || root >= Real{1.0} - tolerance) {
+            continue;
+        }
+        if (unique.empty() || root - unique.back() > Real{8.0} * tolerance) {
+            unique.push_back(root);
+        }
+    }
+    return unique;
+}
+
 [[nodiscard]] std::vector<geometry::CutQuadraturePoint> segmentQuadrature(
     const Point& a,
     const Point& b,
@@ -810,14 +953,6 @@ struct RepresentedImplicitProvenance {
         represented.backend == "Auto" || represented.backend == "Unknown") {
         throw std::invalid_argument(
             "sharp active-boundary construction requires an explicit represented implicit backend");
-    }
-    // The current exterior-face clipping algorithm evaluates only corner
-    // values and linearly interpolates roots.  Refuse other representations
-    // until their boundary restriction is implemented, even on apparently
-    // uncut faces where an interior sign change could otherwise be missed.
-    if (represented.backend != "LinearCorner") {
-        throw std::invalid_argument(
-            "sharp active-boundary clipping currently supports only the LinearCorner represented implicit backend");
     }
     return represented;
 }
@@ -1242,6 +1377,220 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
                 if (source.parent_cell == static_cast<MeshIndex>(cell))
                     observation.combine(source.construction_observation);
             }
+            // The fragment of the active part @p clipped of the face.
+            const auto emit_fragment =
+                [&](const std::vector<Point>& clipped,
+                    const std::vector<PointOrigin>& origins,
+                    const std::vector<const GeneratedInterfaceBoundaryIntersectionFragment*>& contacts,
+                    const Point& normal,
+                    Real measure,
+                    Real parent_measure,
+                    StrictConstructionObservation& observation) {
+                GeneratedActiveBoundaryFragment fragment;
+                fragment.parent_cell = cell;
+                fragment.parent_face = face;
+                fragment.parent_cell_global_id = global_ids
+                                                     ? mesh.getCellGlobalId(cell)
+                                                     : cell;
+                fragment.parent_face_global_id = global_ids
+                                                     ? mesh.getBoundaryFaceGlobalId(face)
+                                                     : face;
+                fragment.owner_rank =
+                    mesh.getBoundaryFaceOwnerRank(face, cell);
+                fragment.side = req.side;
+                fragment.represented_implicit_geometry_mode =
+                    represented.geometry_mode;
+                fragment.represented_implicit_quadrature_backend =
+                    represented.backend;
+                fragment.represented_implicit_fallback_status =
+                    represented.fallback_status;
+                fragment.boundary_normal = normal;
+                fragment.measure = measure;
+                fragment.parent_measure = parent_measure;
+                fragment.full_face_equivalent =
+                    std::abs(measure - parent_measure) <=
+                    Real{128.0} * std::numeric_limits<Real>::epsilon() *
+                        std::max(Real{1.0}, parent_measure);
+                fragment.achieved_quadrature_order =
+                    mesh.dimension() == 2
+                        ? std::min(req.quadrature_order, 5)
+                        : std::min(req.quadrature_order, 2);
+                fragment.topology_id =
+                    "active-boundary:" +
+                    std::to_string(fragment.parent_face_global_id) + ":" +
+                    std::to_string(static_cast<int>(req.side));
+                fragment.vertices = clipped;
+                for (const auto* contact : contacts) {
+                    if ((contact->parent_cell_global_id != INVALID_GLOBAL_INDEX &&
+                         contact->parent_cell_global_id !=
+                             fragment.parent_cell_global_id) ||
+                        (contact->parent_face_global_id != INVALID_GLOBAL_INDEX &&
+                         contact->parent_face_global_id !=
+                             fragment.parent_face_global_id) ||
+                        (contact->owner_rank >= 0 &&
+                         contact->owner_rank != fragment.owner_rank)) {
+                        throw std::invalid_argument(
+                            "sharp active-boundary fragment and contact trace have inconsistent global ownership metadata");
+                    }
+                    if (contact->represented_implicit_geometry_mode !=
+                            fragment.represented_implicit_geometry_mode ||
+                        contact->represented_implicit_quadrature_backend !=
+                            fragment.represented_implicit_quadrature_backend ||
+                        contact->represented_implicit_fallback_status !=
+                            fragment.represented_implicit_fallback_status) {
+                        throw std::invalid_argument(
+                            "sharp active-boundary fragment and authoritative contact trace use different represented implicit backends");
+                    }
+                    fragment.source_contact_stable_ids.push_back(contact->stable_id);
+                    fragment.source_interface_stable_ids.push_back(
+                        contact->source_interface_stable_id);
+                }
+                if (mesh.dimension() == 2) {
+                    fragment.quadrature_points = segmentQuadrature(
+                        clipped[0],
+                        clipped[1],
+                        normal,
+                        fragment.achieved_quadrature_order);
+                } else {
+                    fragment.quadrature_points = polygonQuadrature(
+                        clipped,
+                        normal,
+                        fragment.achieved_quadrature_order,
+                        origins,
+                        observation);
+                }
+                fragment.construction_observation = observation.state;
+                result = std::move(fragment);
+            };
+            if (represented.backend != "LinearCorner") {
+                // The level set restricted to the face: on an edge (2D) a
+                // polynomial whose certified roots split it; the active
+                // sub-segment's root ends must be authoritative contact
+                // points.
+                if (mesh.dimension() != 2 || !scalar_field.value_in_cell) {
+                    throw std::invalid_argument(
+                        "sharp active-boundary clipping of " + represented.backend +
+                        " geometry restricts the level set to 2D boundary edges and needs it in the cell");
+                }
+                if (!hasStraightReferenceEdges(type) || corners.size() != 2u) {
+                    throw std::invalid_argument(
+                        "sharp active-boundary clipping of " + represented.backend +
+                        " geometry found an unsupported parent cell or face");
+                }
+                const auto& a = reference_nodes[corners[0]];
+                const auto& b = reference_nodes[corners[1]];
+                const auto value_at = [&](Real t) {
+                    const Real value =
+                        scalar_field.value_in_cell(static_cast<MeshIndex>(cell), interpolate(a, b, t)) -
+                        req.isovalue;
+                    if (!std::isfinite(value)) {
+                        throw std::invalid_argument(
+                            "sharp active-boundary clipping found a non-finite level-set value");
+                    }
+                    return value;
+                };
+                const std::vector<Point> face_ends{a, b};
+                const auto normal = outwardReferenceNormal(reference_nodes, face_ends, mesh.dimension());
+                const Real parent_measure = polygonMeasure(face_ends, mesh.dimension());
+                if (!(parent_measure > Real{0.0}) || !std::isfinite(parent_measure)) {
+                    throw std::invalid_argument(
+                        "sharp active-boundary clipping found a degenerate parent face");
+                }
+                // A cell without an interface fragment is one represented phase.
+                std::vector<Real> breaks{Real{0.0}};
+                std::optional<Real> full_value;
+                if (!hasAuthoritativeInterfaceFragment(interface_domain, source_index,
+                                                       static_cast<MeshIndex>(cell))) {
+                    const auto full_side = authoritativeFullCellSide(interface_domain, source_index,
+                                                                     static_cast<MeshIndex>(cell));
+                    if (!full_side.has_value()) {
+                        throw std::invalid_argument(
+                            "sharp active-boundary construction found neither an authoritative interface fragment nor a full-cell phase");
+                    }
+                    full_value = *full_side == geometry::CutIntegrationSide::Negative ? Real{-1.0} : Real{1.0};
+                } else {
+                    for (const Real root :
+                         certifiedEdgeRoots(value_at, kEdgeLevelSetDegree, coefficient_band, req.tolerance)) {
+                        breaks.push_back(root);
+                    }
+                }
+                breaks.push_back(Real{1.0});
+                // The active sub-segments, merged where a tangency separates none.
+                std::vector<std::pair<Real, Real>> active;
+                for (std::size_t k = 0; k + 1u < breaks.size(); ++k) {
+                    const Real mid = Real{0.5} * (breaks[k] + breaks[k + 1u]);
+                    const Real value = full_value ? *full_value : value_at(mid);
+                    if (std::abs(value) <= coefficient_band) {
+                        throw std::invalid_argument(
+                            "sharp active-boundary clipping encountered an unresolved face-aligned zero set");
+                    }
+                    if (!isActive(value, req.side)) {
+                        continue;
+                    }
+                    if (!active.empty() && active.back().second == breaks[k]) {
+                        active.back().second = breaks[k + 1u];
+                    } else {
+                        active.emplace_back(breaks[k], breaks[k + 1u]);
+                    }
+                }
+                if (active.empty()) {
+                    return;
+                }
+                if (active.size() > 1u) {
+                    throw std::invalid_argument(
+                        "sharp active-boundary clipping found two disjoint active parts of one boundary face");
+                }
+                const auto contacts = contactFragmentsForFace(source_index, static_cast<MeshIndex>(cell),
+                                                              static_cast<MeshIndex>(face));
+                // A root end of the segment is the authoritative contact
+                // vertex of that root: on the edge, nearer to it than halfway
+                // to the next break, and on the represented zero set as the
+                // snapshot requires it (|phi| <= 128 tolerance).  The backend
+                // places it to its own root tolerance, so the segment ends
+                // there, not at the root of the restriction.
+                const Real zero_set_tolerance = Real{128.0} * req.tolerance;
+                const Point edge = sub(b, a);
+                const auto contact_end = [&](Real t) -> Point {
+                    const auto at = std::find(breaks.begin(), breaks.end(), t);
+                    const Real lower = at == breaks.begin() ? Real{0.0} : *(at - 1);
+                    const Real upper = at + 1 == breaks.end() ? Real{1.0} : *(at + 1);
+                    const Point* nearest = nullptr;
+                    Real nearest_distance = std::numeric_limits<Real>::infinity();
+                    for (const auto* contact : contacts) {
+                        for (const auto& vertex : contact->vertices) {
+                            const Real s = dot(sub(vertex, a), edge) / dot(edge, edge);
+                            if (!samePoint(vertex, interpolate(a, b, s), zero_set_tolerance) ||
+                                !(s > Real{0.5} * (lower + t) && s < Real{0.5} * (t + upper)) ||
+                                std::abs(value_at(s)) > zero_set_tolerance) {
+                                continue;
+                            }
+                            if (std::abs(s - t) < nearest_distance) {
+                                nearest_distance = std::abs(s - t);
+                                nearest = &vertex;
+                            }
+                        }
+                    }
+                    if (nearest == nullptr) {
+                        throw std::invalid_argument(
+                            "sharp active-boundary clipping produced a root without an authoritative contact-trace vertex");
+                    }
+                    return *nearest;
+                };
+                const auto [t0, t1] = active.front();
+                const Real root_measure =
+                    polygonMeasure({interpolate(a, b, t0), interpolate(a, b, t1)}, mesh.dimension());
+                if (!(root_measure > req.tolerance * req.tolerance) || !std::isfinite(root_measure)) {
+                    observation.unresolved();
+                    return;
+                }
+                const std::vector<Point> clipped{
+                    t0 == Real{0.0} ? a : contact_end(t0),
+                    t1 == Real{1.0} ? b : contact_end(t1)};
+                const Real measure = polygonMeasure(clipped, mesh.dimension());
+                emit_fragment(clipped, {PointOrigin::corner(0), PointOrigin::corner(1)}, contacts, normal, measure,
+                              parent_measure, observation);
+                return;
+            }
             std::vector<SignedPoint> signed_face;
             face_points.reserve(corners.size());
             signed_face.reserve(corners.size());
@@ -1379,81 +1728,7 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
                     "sharp active-boundary clipping found a cut face without an authoritative contact fragment");
             }
 
-            GeneratedActiveBoundaryFragment fragment;
-            fragment.parent_cell = cell;
-            fragment.parent_face = face;
-            fragment.parent_cell_global_id = global_ids
-                                                 ? mesh.getCellGlobalId(cell)
-                                                 : cell;
-            fragment.parent_face_global_id = global_ids
-                                                 ? mesh.getBoundaryFaceGlobalId(face)
-                                                 : face;
-            fragment.owner_rank =
-                mesh.getBoundaryFaceOwnerRank(face, cell);
-            fragment.side = req.side;
-            fragment.represented_implicit_geometry_mode =
-                represented.geometry_mode;
-            fragment.represented_implicit_quadrature_backend =
-                represented.backend;
-            fragment.represented_implicit_fallback_status =
-                represented.fallback_status;
-            fragment.boundary_normal = normal;
-            fragment.measure = measure;
-            fragment.parent_measure = parent_measure;
-            fragment.full_face_equivalent =
-                std::abs(measure - parent_measure) <=
-                Real{128.0} * std::numeric_limits<Real>::epsilon() *
-                    std::max(Real{1.0}, parent_measure);
-            fragment.achieved_quadrature_order =
-                mesh.dimension() == 2
-                    ? std::min(req.quadrature_order, 5)
-                    : std::min(req.quadrature_order, 2);
-            fragment.topology_id =
-                "active-boundary:" +
-                std::to_string(fragment.parent_face_global_id) + ":" +
-                std::to_string(static_cast<int>(req.side));
-            fragment.vertices = clipped;
-            for (const auto* contact : contacts) {
-                if ((contact->parent_cell_global_id != INVALID_GLOBAL_INDEX &&
-                     contact->parent_cell_global_id !=
-                         fragment.parent_cell_global_id) ||
-                    (contact->parent_face_global_id != INVALID_GLOBAL_INDEX &&
-                     contact->parent_face_global_id !=
-                         fragment.parent_face_global_id) ||
-                    (contact->owner_rank >= 0 &&
-                     contact->owner_rank != fragment.owner_rank)) {
-                    throw std::invalid_argument(
-                        "sharp active-boundary fragment and contact trace have inconsistent global ownership metadata");
-                }
-                if (contact->represented_implicit_geometry_mode !=
-                        fragment.represented_implicit_geometry_mode ||
-                    contact->represented_implicit_quadrature_backend !=
-                        fragment.represented_implicit_quadrature_backend ||
-                    contact->represented_implicit_fallback_status !=
-                        fragment.represented_implicit_fallback_status) {
-                    throw std::invalid_argument(
-                        "sharp active-boundary fragment and authoritative contact trace use different represented implicit backends");
-                }
-                fragment.source_contact_stable_ids.push_back(contact->stable_id);
-                fragment.source_interface_stable_ids.push_back(
-                    contact->source_interface_stable_id);
-            }
-            if (mesh.dimension() == 2) {
-                fragment.quadrature_points = segmentQuadrature(
-                    clipped[0],
-                    clipped[1],
-                    normal,
-                    fragment.achieved_quadrature_order);
-            } else {
-                fragment.quadrature_points = polygonQuadrature(
-                    clipped,
-                    normal,
-                    fragment.achieved_quadrature_order,
-                    origins,
-                    observation);
-            }
-            fragment.construction_observation = observation.state;
-            result = std::move(fragment);
+            emit_fragment(clipped, origins, contacts, normal, measure, parent_measure, observation);
         }();
     };
     deterministicParallelFor(

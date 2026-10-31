@@ -1811,6 +1811,19 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     // returns an empty domain for that case.
     const auto boundary_markers =
         communicatorWideBoundaryMarkers(mesh_access, comm);
+    // Geometry other than LinearCorner restricts the level set itself to the
+    // boundary faces and gives contact points the pointwise gradient
+    // normal; each call copies the evaluator (it caches one cell).
+    std::shared_ptr<const svmp::FE::level_set::LevelSetCellEvaluator>
+        boundary_cell_evaluator;
+    if (request.geometry_mode !=
+        svmp::FE::level_set::GeneratedInterfaceGeometryMode::LinearCorner) {
+      boundary_cell_evaluator =
+          std::make_shared<svmp::FE::level_set::LevelSetCellEvaluator>(
+              svmp::FE::level_set::makeLevelSetCellEvaluator(
+                  *sim.fe_system, domain_request.source.field_id,
+                  fe_solution));
+    }
     std::vector<svmp::FE::interfaces::
                     GeneratedInterfaceBoundaryIntersectionDomain>
         snapshot_contact_domains;
@@ -1840,11 +1853,26 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
           domain_request.quadrature_policy_key;
       intersection_request.source_value_revision = result.value_revision;
 
-      auto intersection_domain = svmp::FE::interfaces::
-          buildGeneratedInterfaceBoundaryIntersectionDomain(
-              std::move(intersection_request),
-              result.domain,
-              mesh_access);
+      svmp::FE::interfaces::GeneratedInterfaceBoundaryIntersectionScalarField
+          contact_field;
+      if (boundary_cell_evaluator) {
+        contact_field.reference_gradient_in_cell =
+            [boundary_cell_evaluator](svmp::FE::MeshIndex cell,
+                                      const std::array<svmp::FE::Real, 3>& xi) {
+              auto evaluator = *boundary_cell_evaluator;
+              return evaluator.evaluate(cell, xi).reference_gradient;
+            };
+      }
+      auto intersection_domain =
+          boundary_cell_evaluator
+              ? svmp::FE::interfaces::
+                    buildGeneratedInterfaceBoundaryIntersectionDomain(
+                        std::move(intersection_request), result.domain,
+                        mesh_access, contact_field)
+              : svmp::FE::interfaces::
+                    buildGeneratedInterfaceBoundaryIntersectionDomain(
+                        std::move(intersection_request), result.domain,
+                        mesh_access);
       const auto intersection_provenance =
           svmp::FE::interfaces::
               validateGeneratedInterfaceBoundaryProvenance(
@@ -1986,6 +2014,14 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
                   level_set_values[static_cast<std::size_t>(node) *
                                    level_set_components]);
             };
+        if (boundary_cell_evaluator) {
+          scalar_field.value_in_cell =
+              [boundary_cell_evaluator](svmp::FE::MeshIndex cell,
+                                        const std::array<svmp::FE::Real, 3>& xi) {
+                auto evaluator = *boundary_cell_evaluator;
+                return evaluator.evaluate(cell, xi).value;
+              };
+        }
         // Faces are built on the geometry threads; the self-check builds
         // the domains again on one thread and requires identical results.
         const int active_boundary_threads = svmp::FE::geometryThreadCount(

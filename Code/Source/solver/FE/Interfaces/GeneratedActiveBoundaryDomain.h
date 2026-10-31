@@ -75,6 +75,11 @@ struct GeneratedActiveBoundaryRequest {
 
 struct GeneratedActiveBoundaryScalarField {
     std::function<Real(GlobalIndex)> value_at_node{};
+    /// The level set in a cell at a reference point.  Geometry other than
+    /// LinearCorner restricts it to each boundary face (2D: its roots on the
+    /// edge, certified by Bernstein subdivision); without it, such geometry
+    /// is refused.
+    std::function<Real(MeshIndex, const std::array<Real, 3>&)> value_in_cell{};
 
     [[nodiscard]] bool valid() const noexcept {
         return static_cast<bool>(value_at_node);

@@ -738,11 +738,13 @@ GeneratedInterfaceBoundaryIntersectionDomain::intersectionQuadratureRules()
     return rules;
 }
 
-GeneratedInterfaceBoundaryIntersectionDomain
-buildGeneratedInterfaceBoundaryIntersectionDomain(
+namespace {
+
+GeneratedInterfaceBoundaryIntersectionDomain buildIntersections(
     GeneratedInterfaceBoundaryIntersectionRequest request,
     const LevelSetInterfaceDomain& interface_domain,
-    const assembly::IMeshAccess& mesh)
+    const assembly::IMeshAccess& mesh,
+    const GeneratedInterfaceBoundaryIntersectionScalarField* scalar_field)
 {
     if (!request.valid()) {
         throw std::invalid_argument(
@@ -879,6 +881,18 @@ buildGeneratedInterfaceBoundaryIntersectionDomain(
             out.interface_normal = fragment.normal;
             out.boundary_normal = face.normal;
             out.tangent = face.tangent;
+            // A curved fragment's normal varies along it: its contact points
+            // take the level-set gradient there, as its quadrature points do.
+            const bool pointwise_normal =
+                fragment.kind == CutInterfaceFragmentKind::CurvedPatch &&
+                scalar_field != nullptr &&
+                static_cast<bool>(scalar_field->reference_gradient_in_cell);
+            const auto interface_normal_at = [&](const std::array<Real, 3>& point) {
+                return pointwise_normal
+                           ? unitOrDefault(scalar_field->reference_gradient_in_cell(fragment.parent_cell, point),
+                                           fragment.normal)
+                           : fragment.normal;
+            };
             // This is the exact boundary trace of the already-selected
             // generated surface fragment, not an independently reconstructed
             // fallback.  Retaining the fragment normal here makes dI and its
@@ -903,12 +917,13 @@ buildGeneratedInterfaceBoundaryIntersectionDomain(
                 out.kind = GeneratedInterfaceBoundaryIntersectionKind::Point;
                 out.measure = Real{1.0};
                 out.tangent = face.tangent;
+                out.interface_normal = interface_normal_at(point);
                 out.vertices.push_back(point);
                 out.quadrature_points.push_back(
                     GeneratedInterfaceBoundaryIntersectionQuadraturePoint{
                         .point = point,
                         .parent_coordinate = point,
-                        .interface_normal = fragment.normal,
+                        .interface_normal = out.interface_normal,
                         .boundary_normal = face.normal,
                         .tangent = out.tangent,
                         .weight = out.measure,
@@ -960,7 +975,7 @@ buildGeneratedInterfaceBoundaryIntersectionDomain(
                     GeneratedInterfaceBoundaryIntersectionQuadraturePoint{
                         .point = point,
                         .parent_coordinate = point,
-                        .interface_normal = fragment.normal,
+                        .interface_normal = interface_normal_at(point),
                         .boundary_normal = face.normal,
                         .tangent = out.tangent,
                         .weight = out.measure * weight_fraction,
@@ -986,6 +1001,17 @@ buildGeneratedInterfaceBoundaryIntersectionDomain(
     return domain;
 }
 
+} // namespace
+
+GeneratedInterfaceBoundaryIntersectionDomain
+buildGeneratedInterfaceBoundaryIntersectionDomain(
+    GeneratedInterfaceBoundaryIntersectionRequest request,
+    const LevelSetInterfaceDomain& interface_domain,
+    const assembly::IMeshAccess& mesh)
+{
+    return buildIntersections(std::move(request), interface_domain, mesh, nullptr);
+}
+
 GeneratedInterfaceBoundaryIntersectionDomain
 buildGeneratedInterfaceBoundaryIntersectionDomain(
     GeneratedInterfaceBoundaryIntersectionRequest request,
@@ -993,14 +1019,12 @@ buildGeneratedInterfaceBoundaryIntersectionDomain(
     const assembly::IMeshAccess& mesh,
     const GeneratedInterfaceBoundaryIntersectionScalarField& scalar_field)
 {
-    // The caller synchronizes this scalar field for diagnostics, but contact
-    // geometry has one owner: the retained interface fragments. Rebuilding
-    // roots independently from nodal values can create contact points with no
-    // source surface fragment, so both overloads intentionally share the
-    // authoritative fragment-trace construction.
-    (void)scalar_field;
-    return buildGeneratedInterfaceBoundaryIntersectionDomain(
-        std::move(request), interface_domain, mesh);
+    // Contact geometry has one owner: the retained interface fragments.
+    // Rebuilding roots independently from nodal values can create contact
+    // points with no source surface fragment, so both overloads share the
+    // authoritative fragment-trace construction; the scalar field gives only
+    // the pointwise normal of a curved fragment.
+    return buildIntersections(std::move(request), interface_domain, mesh, &scalar_field);
 }
 
 GeneratedInterfaceBoundaryProvenanceSummary

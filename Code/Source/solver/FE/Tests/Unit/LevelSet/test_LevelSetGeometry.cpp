@@ -760,7 +760,7 @@ std::shared_ptr<svmp::Mesh> unlabeledQuad9Mesh()
     return svmp::create_mesh(std::move(base));
 }
 
-/// A HighOrderImplicit (SayeHyperrectangle) cut of a P2 level set: the system,
+/// A HighOrderImplicit cut (SayeHyperrectangle unless given) of a P2 level set: the system,
 /// its geometry and the level-set field, before the level set is set.
 struct HighOrderCut {
     std::shared_ptr<svmp::Mesh> mesh;
@@ -769,7 +769,10 @@ struct HighOrderCut {
     FieldId phi{INVALID_FIELD_ID};
 };
 
-HighOrderCut highOrderCut(std::shared_ptr<svmp::Mesh> mesh, std::shared_ptr<spaces::H1Space> space, int depth)
+HighOrderCut highOrderCut(std::shared_ptr<svmp::Mesh> mesh,
+                          std::shared_ptr<spaces::H1Space> space,
+                          int depth,
+                          ImplicitCutQuadratureBackend backend = ImplicitCutQuadratureBackend::SayeHyperrectangle)
 {
     HighOrderCut out;
     out.mesh = std::move(mesh);
@@ -780,7 +783,7 @@ HighOrderCut highOrderCut(std::shared_ptr<svmp::Mesh> mesh, std::shared_ptr<spac
     out.geometry.emplace(cutGeometry(*out.system, *out.mesh, {.level_set_field_name = "phi", .domain_id = "wave"},
                                      {.quadrature_order = 2,
                                       .geometry_mode = GeneratedInterfaceGeometryMode::HighOrderImplicit,
-                                      .implicit_cut_backend = ImplicitCutQuadratureBackend::SayeHyperrectangle,
+                                      .implicit_cut_backend = backend,
                                       .implicit_cut_max_subdivision_depth = depth}));
     return out;
 }
@@ -867,6 +870,48 @@ TEST(CutStructureKey, ChangesWithEveryChangeOfTheDiscreteStructure)
     // A larger shift moves the interface across nodes and cells.
     const auto shifted = highOrderCutKey([](Real x, Real y) { return waveLevelSet(x, y, 0.07); }, 6);
     EXPECT_NE(shifted.key, base.key);
+}
+
+// The sharp active boundary of HighOrderImplicit geometry restricts the P2
+// level set to each wall edge: on Quad9 and Triangle6 (a P2 field on
+// Triangle3 cells) the wetted part of the left wall ends at the contact point
+// of the root of the level set on that edge, and the contact point, with the
+// level set's gradient as its normal, passes the snapshot's checks.
+TEST(CutStructureKey, HighOrderActiveBoundaryRestrictsTheLevelSetToTheWall)
+{
+    for (const bool triangles : {false, true}) {
+        SCOPED_TRACE(triangles ? "Triangle6" : "Quad9");
+        // The wave, and a parabola across the wall; both are linear along the
+        // left wall, with roots 0.43 and 0.464 there.
+        const std::vector<std::pair<std::function<Real(Real, Real)>, Real>> cases{
+            {[](Real x, Real y) { return waveLevelSet(x, y, 0.0); }, 0.43},
+            {[](Real x, Real y) { return y - 0.41 - 0.6 * (x - 0.3) * (x - 0.3); }, 0.464}};
+        for (const auto& [phi, root] : cases) {
+            auto cut = highOrderCut(triangles ? test_trace_multiplier::buildTriangleGrid(8)
+                                              : test_trace_multiplier::buildQuadGrid(8, 8, 1.0, 1.0, 2),
+                                    triangles ? test_trace_multiplier::triangleSpace(2)
+                                              : test_trace_multiplier::quadSpace(2),
+                                    6,
+                                    triangles ? ImplicitCutQuadratureBackend::HighOrderSubcell
+                                              : ImplicitCutQuadratureBackend::SayeHyperrectangle);
+            const auto L = cut.geometry->side(CutVolumeSide::Negative);
+            const auto wetted = L.wetted(test_trace_multiplier::kLeft);
+            const auto contact = L.contactLine(test_trace_multiplier::kLeft);
+            cut.system->registerGeneratedEmbeddedInterfaceMarker(wetted.generatedActiveBoundaryMarker());
+            cut.system->registerGeneratedEmbeddedInterfaceMarker(contact.marker());
+            cut.system->setup();
+            (void)cutAt(cut, phi);
+            const std::vector<FormExpr> functionals{FormExpr::constant(1.0).ds(wetted),
+                                                    FormExpr::constant(1.0).dL(contact)};
+            const std::vector<Real> zero(static_cast<std::size_t>(cut.system->dofHandler().getNumDofs()), 0.0);
+            systems::SystemStateView view;
+            view.u = zero;
+            const auto measures =
+                systems::evaluateFunctionalForms(*cut.system, functionals, view, systems::CollectiveCommunicator{});
+            EXPECT_NEAR(measures[0].value, root, 1e-10);
+            EXPECT_NEAR(measures[1].value, 1.0, 1e-12);
+        }
+    }
 }
 
 #endif // SVMP_FE_WITH_MESH && FE_HAS_EIGEN

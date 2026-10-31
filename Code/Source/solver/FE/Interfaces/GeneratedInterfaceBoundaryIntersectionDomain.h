@@ -102,6 +102,12 @@ struct GeneratedInterfaceBoundaryIntersectionRequest {
 
 struct GeneratedInterfaceBoundaryIntersectionScalarField {
     std::function<Real(GlobalIndex)> value_at_node{};
+    /// The reference gradient of the level set in a cell at a reference
+    /// point.  When set, the contact points of curved interface fragments
+    /// take the normalized gradient at the point as their interface normal,
+    /// the convention of the fragments' own quadrature points, instead of
+    /// the fragment's averaged normal.  Other fragments keep their normal.
+    std::function<std::array<Real, 3>(MeshIndex, const std::array<Real, 3>&)> reference_gradient_in_cell{};
 
     [[nodiscard]] bool valid() const noexcept {
         return static_cast<bool>(value_at_node);
