@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import math
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -22,6 +23,18 @@ def load(name):
 
 gen = load("generate_case")
 ver = load("verify")
+# The Python mirror of the free-surface method profiles (decision D47, P4).
+_spec = importlib.util.spec_from_file_location(
+    "free_surface_profile_decks", BENCHMARK.parents[1] / "free_surface_profile_decks.py")
+profiles = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = profiles
+_spec.loader.exec_module(profiles)
+
+
+def deck_keys(text):
+    """The free-surface and level-set keys a deck resolves to (its profile's
+    values for the keys it does not state)."""
+    return profiles.effective_deck_keys(text)
 
 
 def unit_square():
@@ -71,7 +84,9 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     case = gen.generate(8, "surface_stress", 12.0, tmp_path / "c")
     root = ET.parse(tmp_path / "c/solver.xml").getroot()
     text = (tmp_path / "c/solver.xml").read_text()
-    assert "<Geometry_tangent_policy>RefreshedFrozenQuadrature" in text
+    assert "<Free_surface_profile>Capillary@1</Free_surface_profile>" in text
+    assert "<Geometry_tangent_policy>" not in text      # stated by the profile
+    assert deck_keys(text)[0]["Geometry_tangent_policy"] == "RefreshedFrozenQuadrature"
     assert "Curvature_projection" not in text and "Curvature_field" not in text
     assert root.find("GeneralSimulationParameters/Number_of_time_steps").text == str(case["steps"])
     # D13: one fixed physical step at every level, 0.02 at La = 12 and 0.01 at La = 120.
@@ -96,9 +111,15 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     assert "Curvature_field" not in stress
     pde = gen.solver_xml("surface_stress", gen.time_schedule(8, 12.0, 5.0, 100), 10, 1,
                          "pde_harmonic_monolithic")
-    assert "<Advection_velocity_extension_method>pde_harmonic<" in pde
-    assert "<Advection_velocity_extension_coupling>monolithic<" in pde
-    assert "<Velocity_source>prescribed_data" in pde
+    _, level_set = deck_keys(pde)
+    assert level_set["Advection_velocity_extension_method"] == "pde_harmonic"
+    assert level_set["Advection_velocity_extension_coupling"] == "monolithic"
+    assert level_set["Velocity_source"] == "prescribed_data"
+    assert "<Velocity_source>" not in pde               # the profile's velocity
+    _, prescribed = deck_keys(gen.solver_xml("surface_stress", gen.time_schedule(8, 12.0, 5.0, 100),
+                                             10, 1, "pde_normal_prescribed"))
+    assert prescribed["Advection_velocity_extension_method"] == "pde_normal"
+    assert prescribed["Advection_velocity_extension_coupling"] == "prescribed"
     assert "Use_wet_extension_advection_velocity" not in pde
     with pytest.raises(ValueError):
         gen.generate(8, "surface_stress", 12.0, tmp_path / "bad", level_set_velocity="wet")
@@ -233,34 +254,34 @@ def test_default_transport_is_the_harmonic_pde_extension(tmp_path):
     case = gen.generate(8, "surface_stress", 12.0, tmp_path / "c")
     text = (tmp_path / "c/solver.xml").read_text()
     assert case["level_set_velocity"] == "pde_harmonic_monolithic"
-    assert "<Advection_velocity_extension_method>pde_harmonic<" in text
-    assert "<Advection_velocity_extension_coupling>monolithic<" in text
+    assert deck_keys(text)[1]["Advection_velocity_extension_method"] == "pde_harmonic"
+    assert deck_keys(text)[1]["Advection_velocity_extension_coupling"] == "monolithic"
     old = gen.generate(8, "surface_stress", 12.0, tmp_path / "old",
                        level_set_velocity="coupled_field")
-    assert "<Velocity_source>coupled_field<" in (tmp_path / "old/solver.xml").read_text()
+    _, coupled = deck_keys((tmp_path / "old/solver.xml").read_text())
+    # A stated velocity source takes the whole advection velocity.
+    assert coupled["Velocity_source"] == "coupled_field"
+    assert "Advection_velocity_extension_method" not in coupled
     assert old["dt"] == case["dt"]
 
 
 def test_kinematic_reconciliation_is_on_by_default_and_can_be_disabled(tmp_path):
     case = gen.generate(8, "surface_stress", 12.0, tmp_path / "on")
-    root = ET.parse(tmp_path / "on/solver.xml").getroot()
-    level_set = root.find("Add_equation[@type='level_set']")
     assert case["kinematic_reconciliation"] is True
-    assert level_set.find("Enable_kinematic_reconciliation").text.strip() == "true"
+    assert deck_keys((tmp_path / "on/solver.xml").read_text())[1][
+        "Enable_kinematic_reconciliation"] == "true"
     off = gen.generate(8, "surface_stress", 12.0, tmp_path / "off", kinematic_reconciliation=False)
     root = ET.parse(tmp_path / "off/solver.xml").getroot()
     assert off["kinematic_reconciliation"] is False
-    assert root.find("Add_equation[@type='level_set']/Enable_kinematic_reconciliation") is None
+    assert root.findtext("Add_equation[@type='level_set']/Enable_kinematic_reconciliation") == "false"
 
 
 def test_time_step_study_options_and_semi_implicit_term(tmp_path):
     protocol = gen.generate(8, "surface_stress", 12.0, tmp_path / "p")
     text = (tmp_path / "p/solver.xml").read_text()
     # D13: the lagged normal-increment term is on by default, in the free-surface block.
-    root = ET.parse(tmp_path / "p/solver.xml").getroot()
-    free_surface = root.find("Add_equation[@type='fluid']/Add_BC[@name='free_surface']")
-    assert free_surface.findtext("Surface_tension_semi_implicit") == "NormalIncrement"
-    assert text.count("Surface_tension_semi_implicit>") == 2
+    assert deck_keys(text)[0]["Surface_tension_semi_implicit"] == "NormalIncrement"
+    assert "Surface_tension_semi_implicit" not in text   # stated by the profile
     assert protocol["surface_tension_semi_implicit"] == "NormalIncrement"
     assert protocol["dt_rule"] == "protocol_fixed"
 
@@ -290,7 +311,7 @@ def test_time_step_study_options_and_semi_implicit_term(tmp_path):
         assert case["end_time"] >= case["viscous_times"] * case["viscous_time"] - 1e-12
         assert math.isclose(case["end_time"], case["steps"] * dt, rel_tol=1e-12)
         xml = (tmp_path / f"dt{dt}/solver.xml").read_text()
-        assert "<Surface_tension_semi_implicit>NormalIncrement</Surface_tension_semi_implicit>" in xml
+        assert deck_keys(xml)[0]["Surface_tension_semi_implicit"] == "NormalIncrement"
     outputs = {dt: [k * c["output_cadence"] * dt for k in range(1, c["steps"] // c["output_cadence"] + 1)]
                for dt, c in runs.items()}
     assert np.allclose(outputs[0.04], outputs[0.02]) and np.allclose(outputs[0.02], outputs[0.01])
@@ -302,7 +323,8 @@ def test_time_step_study_options_and_semi_implicit_term(tmp_path):
 
 
 def test_old_protocol_is_reproducible(tmp_path):
-    """--dt-multiple <m> --surface-tension-semi-implicit None gives the decks before D13."""
+    """--dt-multiple <m> --surface-tension-semi-implicit None gives decks that
+    resolve to those before D13."""
     for laplace, multiple in ((12.0, 2.0), (120.0, 1.0)):
         out = tmp_path / f"old{laplace:g}"
         assert gen.main(["--level", "16", "--capillary-form", "surface_stress",
@@ -311,7 +333,7 @@ def test_old_protocol_is_reproducible(tmp_path):
                          "--surface-tension-semi-implicit", "None"]) == 0
         case = json.loads((out / "case.json").read_text())
         text = (out / "solver.xml").read_text()
-        assert "Surface_tension_semi_implicit" not in text
+        assert deck_keys(text)[0]["Surface_tension_semi_implicit"] == "None"
         assert case["dt_rule"] == "multiple_override" and case["dt_divisor"] == 1
         assert case["dt_multiple_of_capillary_limit"] == multiple
         assert case["steps"] % 100 == 0 and case["output_cadence"] * 100 == case["steps"]

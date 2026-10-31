@@ -30,6 +30,18 @@ gen = load("generate_case")
 ver = load("verify")
 amp_check = load("finite_amplitude")
 planar = load("prosperetti_reference", BENCHMARKS / "capillary_wave_2d")
+# The Python mirror of the free-surface method profiles (decision D47, P4).
+_profiles_spec = importlib.util.spec_from_file_location(
+    "free_surface_profile_decks", BENCHMARKS.parent / "free_surface_profile_decks.py")
+profiles = importlib.util.module_from_spec(_profiles_spec)
+sys.modules[_profiles_spec.name] = profiles
+_profiles_spec.loader.exec_module(profiles)
+
+
+def deck_keys(text):
+    """The free-surface and level-set keys a deck resolves to (its profile's
+    values for the keys it does not state)."""
+    return profiles.effective_deck_keys(text)
 
 N = 2
 OMEGA0 = math.sqrt(6.0)                         # rho = gamma = R = 1, n = 2
@@ -273,22 +285,23 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     case = gen.generate(16, "surface_stress", tmp_path / "c")
     root = ET.parse(tmp_path / "c/solver.xml").getroot()
     text = (tmp_path / "c/solver.xml").read_text()
-    assert "<Geometry_tangent_policy>RefreshedFrozenQuadrature" in text
+    resolved_free_surface, level_set = deck_keys(text)
+    assert "<Free_surface_profile>Capillary@1</Free_surface_profile>" in text
+    assert resolved_free_surface["Geometry_tangent_policy"] == "RefreshedFrozenQuadrature"
     assert "Curvature_field" not in text
-    assert "Enable_sign_definite_patch_bounds" not in text           # D21: sessile only
+    assert "Enable_sign_definite_patch_bounds" not in level_set      # D21: sessile only
     assert case["transport"] == gen.DEFAULT_TRANSPORT == "pde_extension"
-    level_set = root.find("Add_equation[@type='level_set']")
-    assert level_set.findtext("Velocity_source") == "prescribed_data"
-    assert level_set.findtext("Advection_velocity_extension_method") == "pde_harmonic"
-    assert level_set.findtext("Advection_velocity_extension_coupling") == "monolithic"
-    assert level_set.findtext("Enable_kinematic_reconciliation") == "true"   # D14
+    assert level_set["Velocity_source"] == "prescribed_data"
+    assert level_set["Advection_velocity_extension_method"] == "pde_harmonic"
+    assert level_set["Advection_velocity_extension_coupling"] == "monolithic"
+    assert level_set["Enable_kinematic_reconciliation"] == "true"   # D14
     assert root.find("GeneralSimulationParameters/Number_of_time_steps").text == str(case["steps"])
     fluid = root.find("Add_equation[@type='fluid']")
     assert float(fluid.findtext("Viscosity/Value")) == pytest.approx(0.05, rel=1e-14)
     bcs = {bc.get("name"): bc for bc in fluid.findall("Add_BC")}
     assert all(bcs[w].find("Effective_direction") is None for w in gen.WALLS)
     free_surface = bcs["free_surface"]
-    assert free_surface.findtext("Surface_tension_semi_implicit") == "NormalIncrement"
+    assert resolved_free_surface["Surface_tension_semi_implicit"] == "NormalIncrement"
     assert free_surface.findtext("Generated_interface_domain_id") == "oscillating_drop_surface"
     # 100 steps per inviscid period at every level, 4 periods, outputs every 4 steps.
     assert case["dt"] == pytest.approx(2.0 * math.pi / OMEGA0 / 100.0, rel=1e-14)
@@ -311,7 +324,8 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
             gen.solver_xml(form, gen.time_schedule(8, 800.0, 4.0, 100), 10, 1)
     plain = gen.solver_xml("surface_stress", gen.time_schedule(8, 800.0, 4.0, 100), 10, 1,
                            kinematic_reconciliation=False, semi_implicit="None")
-    assert "Enable_kinematic_reconciliation" not in plain and "semi_implicit" not in plain
+    assert deck_keys(plain)[1]["Enable_kinematic_reconciliation"] == "false"
+    assert deck_keys(plain)[0]["Surface_tension_semi_implicit"] == "None"
     with pytest.raises(ValueError, match="dt-divisor"):
         gen.generate(16, "surface_stress", tmp_path / "bad", dt_divisor=3)
     with pytest.raises(FileExistsError):

@@ -27,6 +27,18 @@ def load(name):
 ref = load("prosperetti_reference")
 gen = load("generate_case")
 ver = load("verify")
+# The Python mirror of the free-surface method profiles (decision D47, P4).
+_profiles_spec = importlib.util.spec_from_file_location(
+    "free_surface_profile_decks", BENCHMARK.parents[1] / "free_surface_profile_decks.py")
+profiles = importlib.util.module_from_spec(_profiles_spec)
+sys.modules[_profiles_spec.name] = profiles
+_profiles_spec.loader.exec_module(profiles)
+
+
+def deck_keys(text):
+    """The free-surface and level-set keys a deck resolves to (its profile's
+    values for the keys it does not state)."""
+    return profiles.effective_deck_keys(text)
 
 K = 2.0 * math.pi
 OMEGA0 = math.sqrt(K ** 3)                       # rho = gamma = lambda = 1
@@ -177,15 +189,16 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     case = gen.generate(16, "surface_stress", tmp_path / "c")
     root = ET.parse(tmp_path / "c/solver.xml").getroot()
     text = (tmp_path / "c/solver.xml").read_text()
-    assert "<Geometry_tangent_policy>RefreshedFrozenQuadrature" in text
+    resolved_free_surface, resolved_level_set = deck_keys(text)
+    assert "<Free_surface_profile>Capillary@1</Free_surface_profile>" in text
+    assert resolved_free_surface["Geometry_tangent_policy"] == "RefreshedFrozenQuadrature"
     assert "Curvature_field" not in text
     # D9: the default transport is the harmonic PDE extension, monolithic coupling.
     assert case["transport"] == gen.DEFAULT_TRANSPORT == "pde_extension"
-    level_set = root.find("Add_equation[@type='level_set']")
-    assert level_set.findtext("Velocity_source") == "prescribed_data"
-    assert level_set.find("Use_wet_extension_advection_velocity") is None
-    assert level_set.findtext("Advection_velocity_extension_method") == "pde_harmonic"
-    assert level_set.findtext("Advection_velocity_extension_coupling") == "monolithic"
+    assert resolved_level_set["Velocity_source"] == "prescribed_data"
+    assert "Use_wet_extension_advection_velocity" not in text
+    assert resolved_level_set["Advection_velocity_extension_method"] == "pde_harmonic"
+    assert resolved_level_set["Advection_velocity_extension_coupling"] == "monolithic"
     assert root.find("GeneralSimulationParameters/Number_of_time_steps").text == str(case["steps"])
     fluid = root.find("Add_equation[@type='fluid']")
     bcs = {bc.get("name"): bc for bc in fluid.findall("Add_BC")}
@@ -203,8 +216,7 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     assert case["steps_per_period"] == pytest.approx(50.0)
     for level in gen.LEVELS:
         assert gen.time_schedule(level, 3000.0, 4.0, 100)["dt"] == case["dt"]
-    free_surface = fluid.find("Add_BC[@name='free_surface']")
-    assert free_surface.findtext("Surface_tension_semi_implicit") == "NormalIncrement"
+    assert resolved_free_surface["Surface_tension_semi_implicit"] == "NormalIncrement"
     assert case["surface_tension_semi_implicit"] == "NormalIncrement"
     half = gen.generate(64, "surface_stress", tmp_path / "half", dt_divisor=2)
     assert half["steps"] == 400 and half["output_cadence"] == 4
@@ -238,7 +250,8 @@ def test_cli_rejects_the_retired_kag_forms(tmp_path, capsys):
 def test_transport_options(tmp_path):
     schedule = gen.time_schedule(16, 3000.0, 4.0, 100)
     coupled = gen.solver_xml("surface_stress", schedule, 10, 1, transport="coupled")
-    assert "<Velocity_source>coupled_field" in coupled and "Use_wet_extension" not in coupled
+    assert deck_keys(coupled)[1]["Velocity_source"] == "coupled_field"
+    assert "Use_wet_extension" not in coupled
     # The algebraic wet extension was retired (decisions D47 and D55).
     assert "wet_extension" not in gen.TRANSPORTS
     with pytest.raises(ValueError, match="must be one of"):
@@ -246,15 +259,16 @@ def test_transport_options(tmp_path):
     # The PDE extension is selected by method and coupling, without the
     # retired wet-extension switch.
     pde = gen.solver_xml("surface_stress", schedule, 10, 1, transport="pde_extension")
-    assert "<Advection_velocity_extension_method>pde_harmonic<" in pde
-    assert "<Advection_velocity_extension_coupling>monolithic<" in pde
-    assert "<Velocity_source>prescribed_data" in pde and "Use_wet_extension" not in pde
+    assert deck_keys(pde)[1]["Advection_velocity_extension_method"] == "pde_harmonic"
+    assert deck_keys(pde)[1]["Advection_velocity_extension_coupling"] == "monolithic"
+    assert deck_keys(pde)[1]["Velocity_source"] == "prescribed_data"
+    assert "Use_wet_extension" not in pde
     with pytest.raises(ValueError, match="must be one of"):
         gen.solver_xml("surface_stress", schedule, 10, 1, transport="bogus")
     # Kinematic reconciliation of the level set is on by default.
-    assert "<Enable_kinematic_reconciliation>true<" in pde
+    assert deck_keys(pde)[1]["Enable_kinematic_reconciliation"] == "true"
     plain = gen.solver_xml("surface_stress", schedule, 10, 1, kinematic_reconciliation=False)
-    assert "Enable_kinematic_reconciliation" not in plain
+    assert deck_keys(plain)[1]["Enable_kinematic_reconciliation"] == "false"
 
 
 def test_mesh_is_mirror_symmetric_about_the_node_line():
@@ -371,12 +385,13 @@ def test_volume_drift_fails(study, capsys):
 
 
 def test_old_protocol_is_reproducible(tmp_path):
-    """--dt-rule capillary-limit --surface-tension-semi-implicit None gives the decks before D13."""
+    """--dt-rule capillary-limit --surface-tension-semi-implicit None gives decks that
+    resolve to those before D13."""
     out = tmp_path / "old"
     assert gen.main(["--level", "16", "--output-dir", str(out), "--dt-rule", "capillary-limit",
                      "--surface-tension-semi-implicit", "None"]) == 0
     case = json.loads((out / "case.json").read_text())
-    assert "Surface_tension_semi_implicit" not in (out / "solver.xml").read_text()
+    assert deck_keys((out / "solver.xml").read_text())[0]["Surface_tension_semi_implicit"] == "None"
     assert case["dt_rule"] == "capillary-limit" and case["surface_tension_semi_implicit"] == "None"
     # D10: one step for all levels, within the capillary limit of the finest.
     h_min = 1.0 / max(gen.LEVELS)

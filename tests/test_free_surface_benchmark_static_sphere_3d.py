@@ -5,6 +5,7 @@ import importlib.util
 import itertools
 import json
 import math
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -24,6 +25,18 @@ def load(name):
 
 gen = load("generate_case")
 ver = load("verify")
+# The Python mirror of the free-surface method profiles (decision D47, P4).
+_profiles_spec = importlib.util.spec_from_file_location(
+    "free_surface_profile_decks", BENCHMARK.parents[1] / "free_surface_profile_decks.py")
+profiles = importlib.util.module_from_spec(_profiles_spec)
+sys.modules[_profiles_spec.name] = profiles
+_profiles_spec.loader.exec_module(profiles)
+
+
+def deck_keys(text):
+    """The free-surface and level-set keys a deck resolves to (its profile's
+    values for the keys it does not state)."""
+    return profiles.effective_deck_keys(text)
 
 
 def sampled_sphere(points):
@@ -121,10 +134,13 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     root = ET.parse(tmp_path / "c/solver.xml").getroot()
     text = (tmp_path / "c/solver.xml").read_text()
     assert root.find("GeneralSimulationParameters/Number_of_spatial_dimensions").text == "3"
-    assert "<Geometry_tangent_policy>RefreshedFrozenQuadrature" in text
-    assert "<Interface_quadrature_order>2" in text
+    free_surface, level_set = deck_keys(text)
+    assert "<Free_surface_profile>Capillary@1</Free_surface_profile>" in text
+    assert free_surface["Geometry_tangent_policy"] == "RefreshedFrozenQuadrature"
+    assert free_surface["Interface_quadrature_order"] == "2"
     assert "Curvature_projection" not in text and "Curvature_field" not in text
-    assert "<Velocity_source>coupled_field" in text
+    assert level_set["Velocity_source"] == "coupled_field"
+    assert "Advection_velocity_extension_method" not in level_set
     assert root.find("GeneralSimulationParameters/Number_of_time_steps").text == str(case["steps"])
     dt_b = math.sqrt(case["h"] ** 3 / (4.0 * math.pi))
     assert case["dt_B"] == pytest.approx(dt_b)
@@ -154,7 +170,7 @@ def test_generated_case_is_complete_and_respects_time_step_rule(tmp_path):
     schedule = gen.time_schedule(8, 12.0, 5.0, 100)
     stress = gen.solver_xml("surface_stress", schedule, 10, 1, "pde_extension")
     assert "Curvature_field" not in stress
-    assert "<Advection_velocity_extension_method>pde_harmonic" in stress
+    assert deck_keys(stress)[1]["Advection_velocity_extension_method"] == "pde_harmonic"
     # The algebraic wet extension was retired (decisions D47 and D55).
     assert "wet_extension" not in gen.TRANSPORTS
     with pytest.raises(ValueError, match="must be one of"):
@@ -190,8 +206,8 @@ def test_transport_default_is_the_pde_extension():
     assert gen.DEFAULT_TRANSPORT == "pde_extension"
     schedule = gen.time_schedule(8, 12.0, 5.0, 100)
     pde = gen.solver_xml("surface_stress", schedule, 10, 1, "pde_extension")
-    assert "<Advection_velocity_extension_method>pde_harmonic<" in pde
-    assert "<Advection_velocity_extension_coupling>monolithic<" in pde
+    assert deck_keys(pde)[1]["Advection_velocity_extension_method"] == "pde_harmonic"
+    assert deck_keys(pde)[1]["Advection_velocity_extension_coupling"] == "monolithic"
     assert "Use_wet_extension" not in pde
 
 
@@ -397,13 +413,12 @@ def test_protocol_deck_has_the_d25_settings(tmp_path):
     protocol = gen.generate(8, "surface_stress", 12.0, tmp_path / "p")
     root = ET.parse(tmp_path / "p/solver.xml").getroot()
     text = (tmp_path / "p/solver.xml").read_text()
-    free_surface = root.find("Add_equation[@type='fluid']/Add_BC[@name='free_surface']")
-    assert free_surface.findtext("Surface_tension_semi_implicit") == "NormalIncrement"
-    assert text.count("Surface_tension_semi_implicit>") == 2
-    level_set = root.find("Add_equation[@type='level_set']")
-    assert level_set.findtext("Enable_kinematic_reconciliation") == "true"
-    assert level_set.findtext("Advection_velocity_extension_method") == "pde_harmonic"
-    assert "Enable_sign_definite_patch_bounds" not in text           # D25: patch bounds off
+    free_surface, level_set = deck_keys(text)
+    assert free_surface["Surface_tension_semi_implicit"] == "NormalIncrement"
+    assert "Surface_tension_semi_implicit" not in text   # stated by the profile
+    assert level_set["Enable_kinematic_reconciliation"] == "true"
+    assert level_set["Advection_velocity_extension_method"] == "pde_harmonic"
+    assert "Enable_sign_definite_patch_bounds" not in level_set      # D25: patch bounds off
     assert root.find("GeneralSimulationParameters/Time_step_size").text == "0.02"
     assert protocol["surface_tension_semi_implicit"] == "NormalIncrement"
     assert protocol["kinematic_reconciliation"] is True
@@ -411,8 +426,8 @@ def test_protocol_deck_has_the_d25_settings(tmp_path):
     off = gen.generate(8, "surface_stress", 12.0, tmp_path / "off", kinematic_reconciliation=False,
                        semi_implicit="None")
     off_text = (tmp_path / "off/solver.xml").read_text()
-    assert "Enable_kinematic_reconciliation" not in off_text
-    assert "Surface_tension_semi_implicit" not in off_text
+    assert deck_keys(off_text)[1]["Enable_kinematic_reconciliation"] == "false"
+    assert deck_keys(off_text)[0]["Surface_tension_semi_implicit"] == "None"
     assert off["kinematic_reconciliation"] is False and off["dt"] == 0.02
     with pytest.raises(ValueError):
         gen.generate(8, "surface_stress", 12.0, tmp_path / "bad", semi_implicit="Implicit")
@@ -458,13 +473,15 @@ def test_half_step_and_diagnostic_step_options(tmp_path):
     assert (tmp_path / "cli/solver.xml").read_bytes() == (tmp_path / "half/solver.xml").read_bytes()
 
 
-# SHA-256 of solver.xml written by the generator before D25 (commit 8174b6c2) for
-# R/h = 8 with its defaults: surface_stress at La = 12, without the lines of the
-# no-op keys later removed from the solver input (the deck of 8174b6c2 hashed to
-# f3fad829...).  The kag_lumped deck at La = 120 left the table with the form
-# (decision D48).
+# SHA-256 of solver.xml written with the options of the generator before D25
+# (commit 8174b6c2) for R/h = 8 with its defaults: surface_stress at La = 12.
+# The deck states the Capillary@1 profile and the keys that differ from it
+# (decision D47, P4); it resolves to the same input as the explicit deck of
+# 8ae579d4, which hashed to 6f15ba41... (the deck of 8174b6c2 with the lines of
+# the no-op keys later removed from the solver input, f3fad829... before).  The
+# kag_lumped deck at La = 120 left the table with the form (decision D48).
 DECK_SHA256_BEFORE_D25 = {
-    ("surface_stress", 12.0, 2.0): "6f15ba41773b9c8c1f3884d0c44f98219ee9605621379e18eb9d16698e9684b8",
+    ("surface_stress", 12.0, 2.0): "7d46e112013245f8862e622d8b4806dc2af6e9c9bf2bfc8bfd2889b0c40701e5",
 }
 
 
