@@ -20,6 +20,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace svmp {
@@ -656,6 +657,78 @@ inline FormExpr interiorPenaltyCoefficient(Real eta, Real p = 1.0)
     // where h_n = 2|K|/|F| is the facet-normal cell size.
     return FormExpr::constant(eta * p * p) * avg(FormExpr::constant(1.0) / hNormal());
 }
+
+// ---------------------------------------------------------------------------
+// One quantity as two fields, one on each side of an interface
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief A quantity held by two fields, one on each side of an interface
+ *
+ * neg is the field of the negative side (phi < c on a level-set interface,
+ * the minus side of jump()) and pos the field of the positive side, e.g.
+ * SidePair{u_neg, u_pos} of two StateFields or SidePair{v_neg, v_pos} of
+ * their TestFields.  jump(), avg() and map() build ordinary trees, so an
+ * interface coupling is one integral,
+ *   (-inner(avg(map(sigma, U, P) * n, w_neg, w_pos), jump(V))
+ *    + gamma * inner(jump(U), jump(V))).dI(m),
+ * whose integrand holds the test functions of both fields; installFormulation
+ * splits it into one integral per test field.
+ */
+struct SidePair {
+    FormExpr neg;
+    FormExpr pos;
+};
+
+/// neg - pos, the jump across the interface with the convention of jump().
+inline FormExpr jump(const SidePair& a) { return a.neg - a.pos; }
+
+/// w_neg neg + w_pos pos, the weighted average (Hansbo or viscosity weights).
+inline FormExpr avg(const SidePair& a, const FormExpr& w_neg, const FormExpr& w_pos)
+{
+    return w_neg * a.neg + w_pos * a.pos;
+}
+
+inline FormExpr avg(const SidePair& a, Real w_neg, Real w_pos)
+{
+    return avg(a, FormExpr::constant(w_neg), FormExpr::constant(w_pos));
+}
+
+/// (neg + pos) / 2, written 0.5 neg + 0.5 pos.
+inline FormExpr avg(const SidePair& a) { return avg(a, 0.5, 0.5); }
+
+/**
+ * @brief One law on both sides: {f(a.neg), f(a.pos)}
+ *
+ * f may take the side as its last argument (CutVolumeSide::Negative for neg,
+ * Positive for pos) to select per-side parameters.
+ */
+template <class F>
+inline SidePair map(F&& f, const SidePair& a)
+{
+    if constexpr (std::is_invocable_v<F&, const FormExpr&, CutVolumeSide>) {
+        return {f(a.neg, CutVolumeSide::Negative), f(a.pos, CutVolumeSide::Positive)};
+    } else {
+        return {f(a.neg), f(a.pos)};
+    }
+}
+
+/// {f(a.neg, b.neg), f(a.pos, b.pos)}, e.g. the stress map(sigma, U, P).
+template <class F>
+inline SidePair map(F&& f, const SidePair& a, const SidePair& b)
+{
+    if constexpr (std::is_invocable_v<F&, const FormExpr&, const FormExpr&, CutVolumeSide>) {
+        return {f(a.neg, b.neg, CutVolumeSide::Negative), f(a.pos, b.pos, CutVolumeSide::Positive)};
+    } else {
+        return {f(a.neg, b.neg), f(a.pos, b.pos)};
+    }
+}
+
+inline SidePair operator*(const SidePair& a, const FormExpr& b) { return {a.neg * b, a.pos * b}; }
+inline SidePair operator*(const FormExpr& a, const SidePair& b) { return {a * b.neg, a * b.pos}; }
+inline SidePair operator+(const SidePair& a, const SidePair& b) { return {a.neg + b.neg, a.pos + b.pos}; }
+inline SidePair operator-(const SidePair& a, const SidePair& b) { return {a.neg - b.neg, a.pos - b.pos}; }
+inline SidePair operator-(const SidePair& a) { return {-a.neg, -a.pos}; }
 
 // ---------------------------------------------------------------------------
 // Auxiliary state vocabulary (generalized, physics-agnostic)

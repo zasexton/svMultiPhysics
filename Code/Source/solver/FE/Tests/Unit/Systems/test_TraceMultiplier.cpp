@@ -714,8 +714,9 @@ struct CutProblem {
 };
 
 /// u1 inside, u2 outside, coupled on the circle by a multiplier (@p multiplier)
-/// or by symmetric Nitsche.
-CutProblem buildCutProblem(int n, bool multiplier, Real beta)
+/// or by symmetric Nitsche; with @p compact, each coupling is one integral
+/// over both fields' test functions.
+CutProblem buildCutProblem(int n, bool multiplier, Real beta, bool compact = false)
 {
     CutProblem out;
     out.mesh = buildQuadGrid(n, n, 2.0, 2.0, 1, kWholeBoundary);
@@ -764,14 +765,30 @@ CutProblem buildCutProblem(int n, bool multiplier, Real beta)
     if (multiplier) {
         const auto lam = forms::StateField(out.lambda, V, "lambda");
         const auto mu = forms::TestField(out.lambda, V, "mu");
+        const auto weighted = FormExpr::constant(beta) * h * (lam - flux_u);
+        if (compact) {
+            const forms::SidePair V{v1, v2};
+            const forms::SidePair U{u1, u2};
+            residual = residual + (-lam * forms::jump(V) - mu * forms::jump(U) -
+                                   weighted * (mu - (half_flux_v1 + half_flux_v2))).dI(kInterface);
+            fields.push_back(out.lambda);
+        } else {
         // lambda (v2 - v1) + mu (u2 - u1): lambda is the flux k du/dn.
         residual = residual + (lam * v2).dI(kInterface) - (lam * v1).dI(kInterface) +
                    (mu * (u2 - u1)).dI(kInterface);
         // - beta h (lambda - {k du/dn}) (mu - {k dv/dn}), one integral per test function.
-        const auto weighted = FormExpr::constant(beta) * h * (lam - flux_u);
         residual = residual - (weighted * mu).dI(kInterface) + (weighted * half_flux_v1).dI(kInterface) +
                    (weighted * half_flux_v2).dI(kInterface);
         fields.push_back(out.lambda);
+        }
+    } else if (compact) {
+        // Symmetric Nitsche as one integral: - {k du/dn}[v] - {k dv/dn}[u] + gamma k2 / h [u][v].
+        const forms::SidePair U{u1, u2};
+        const forms::SidePair V{v1, v2};
+        const auto penalty = FormExpr::constant(10.0 * kOuter) / h;
+        const auto flux_v = half_flux_v1 + half_flux_v2;
+        residual = residual + (-flux_u * forms::jump(V) - flux_v * forms::jump(U) +
+                               penalty * forms::jump(U) * forms::jump(V)).dI(kInterface);
     } else {
         // Symmetric Nitsche: - {k du/dn}[v] - {k dv/dn}[u] + gamma k2 / h [u][v], [w] = w1 - w2.
         const auto jump_u = u1 - u2;
@@ -828,6 +845,27 @@ CutErrors cutErrors(const CutProblem& problem, const std::vector<Real>& state)
 }
 
 } // namespace
+
+TEST(TraceMultiplierI3, TheCouplingsAsOneIntegralSolveAsTheExpandedOnes)
+{
+    // Each coupling written as one integral over both fields' test
+    // functions is split by test field at install; it differs from the
+    // expanded spelling only in the order of the operations.
+    for (const bool multiplier : {false, true}) {
+        auto expanded = buildCutProblem(16, multiplier, 0.05);
+        auto compact = buildCutProblem(16, multiplier, 0.05, /*compact=*/true);
+        const auto u_expanded = solveLinear(*expanded.system);
+        const auto u_compact = solveLinear(*compact.system);
+        ASSERT_EQ(u_expanded.size(), u_compact.size());
+        Real scale = 0.0;
+        Real difference = 0.0;
+        for (std::size_t i = 0; i < u_expanded.size(); ++i) {
+            scale = std::max(scale, std::abs(u_expanded[i]));
+            difference = std::max(difference, std::abs(u_expanded[i] - u_compact[i]));
+        }
+        EXPECT_LE(difference, 1e-12 * scale) << (multiplier ? "multiplier" : "Nitsche");
+    }
+}
 
 TEST(TraceMultiplierI3, AStabilizedMultiplierOnACutInterfaceMatchesNitsche)
 {

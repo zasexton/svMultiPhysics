@@ -506,6 +506,9 @@ Status: `implemented/public`.
 | `harmonicAverage(k)` | `2 k(+) k(-) / (k(+) + k(-))` |
 | `upwindValue(u, beta)`, `downwindValue(u, beta)` | Basic DG upwind/downwind selection using `n(-)` |
 | `interiorPenaltyCoefficient(eta, p)` | SIPG scaling `eta p^2 avg(1 / hNormal())` |
+| `SidePair{neg, pos}` | One quantity held by two fields, one on each side of an interface (`neg` on `phi < c`, the minus side of `jump()`), e.g. `SidePair{u_neg, u_pos}` of StateFields or `SidePair{v_neg, v_pos}` of their TestFields |
+| `jump(pair)`, `avg(pair, w_neg, w_pos)`, `avg(pair)` | `neg - pos` (the `jump()` convention), `w_neg neg + w_pos pos`, and `0.5 neg + 0.5 pos` |
+| `map(f, A)`, `map(f, A, B)` | `{f(A.neg, B.neg), f(A.pos, B.pos)}`; `f` may take the side (`CutVolumeSide`) as its last argument for per-side parameters. `pair * e`, `e * pair`, `pair + pair`, `pair - pair` act side by side |
 | `bc::normalComponent(u)` | Scalar normal trace `inner(u, n)` |
 | `bc::interfaceNormalComponent(u, reduction)` | Interface scalar normal trace helper |
 | `bc::applyScalarTrace(u, op)`, `bc::applyInterfaceScalarTrace(u, op, reduction)` | Scalar trace and side reduction |
@@ -535,6 +538,14 @@ for `NormalComponent`, so consistency fluxes passed to
 (`test_InterfaceTraceConventions.cpp`). `Average` is `avg(u)` for the
 Identity trace and the average flux `avg(u).n(-) = (u(-).n(-) - u(+).n(+)) / 2`
 for `NormalComponent`.
+
+A coupling of two fields is one integral: the symmetric Nitsche coupling of
+two phases is `(-inner(avg(map(sigma, U, P) * n, w_neg, w_pos), jump(V)) -
+inner(avg(map(sigma, V, Q) * n, w_neg, w_pos), jump(U)) + gamma *
+inner(jump(U), jump(V))).dI(m)` with `U`, `P`, `V`, `Q` side pairs, and a
+trace multiplier's is `(lam * v + mu * (u - g)).ds(m)`. `installFormulation`
+splits an integral that holds the test functions of several fields into one
+integral per test field (see Installation and Compilation).
 
 This is enough for current weak trace loads, trace Robin terms, Nitsche terms,
 interface exchange, and simple DG terms. First-class normal/tangential jump
@@ -660,7 +671,7 @@ Status: `implemented/public` for the Systems install API; compiler/IR APIs are
 
 | Vocabulary | Header | Notes |
 |------------|--------|-------|
-| `installFormulation(system, op, fields, residual[, options])` | `Systems/FormsInstaller.h` | Canonical residual installation; one or several test fields. A single-field residual affine in the unknown, without `dt()`, `dS` or `dI` terms, coupled terminals or geometry sensitivity, is installed through the linear kernel (`trySplitAffineResidual`) |
+| `installFormulation(system, op, fields, residual[, options])` | `Systems/FormsInstaller.h` | Canonical residual installation; one or several test fields. A single-field residual affine in the unknown, without `dt()`, `dS` or `dI` terms, coupled terminals or geometry sensitivity, is installed through the linear kernel (`trySplitAffineResidual`). A term of the residual's sum (usually one integral) that holds the test functions of several fields is split into its part in each field's row: the other fields' test functions set to zero, with the zero terms dropped from sums, products and linear operators, and a subtree holding one field's test functions kept as it is (so `(A(v) + B(q)).dx()` installs the kernels of `A(v).dx() + B(q).dx()`). A product, quotient or other function of two fields' test functions is refused, naming the term |
 | `installFormulationWithMetadata(...)` | `Systems/FormsInstaller.h` | Same, returning the analysis bridge metadata of the install |
 | Global rows: `installFormulation(system, op, {u, lam}, R)` with `mu = TestField(lam, R1, "mu")` | `Systems/FormsInstaller.h`, `Systems/GlobalRowKernel.h` | The row of a global test function is lowered in two parts: its measured terms give the row's Jacobian through element kernels installed matrix-only (one kernel per block, no fused cell kernels), and a `GlobalRowKernel` adds its residual entry, the measured terms with `mu = 1` as a measured 0-form evaluated exactly over each rank's owned cells (`evaluateFunctionalFormsWithQuadratureOf`, the same at any rank count) plus the `.dGlobal()` terms, whose derivatives in the global fields it adds to the matrix. The entry is the residual at the state: assemble with `suppress_constraint_inhomogeneity` (as Newton does) or homogeneous constraints. A global field in the field list needs its row and must enter some row (its column; its own row counts), both checked per `installFormulation` call: a multiplier's `lam * v` and `u * mu` go in one call. The one-field installers refuse a global row |
 | `FormInstallOptions` | `Systems/FormsInstaller.h` | `ad_mode`, `compiler_options` (`SymbolicOptions`), `extra_trial_fields`, `constitutive_laws`, `source_component_tag`, `contributes_to_problem_analysis`, generated-boundary Nitsche trace requests |
@@ -957,7 +968,6 @@ form). What the phases left for later:
 Open limits, one line each (not scheduled):
 
 - Analysis gives no inf-sup verdict for a trace multiplier pair: it classifies the pair (`TraceMultiplier`), but its Fortin construction needs trace DOF metadata it does not have, and `infSupEstimate` only forwards a supplied summary.
-- One integral holds one test function: write `(lam * v).ds(m) + (mu * (u - g)).ds(m)`, not `(lam * v + mu * (u - g)).ds(m)`.
 - A multiplier continuous around a corner of its boundary cannot follow the jump of du/dn there: it converges at O(h^1/2) and pollutes u; give each side its own multiplier.
 - A mesh of several cell types cannot carry a field of order >= 1: `SpaceFactory` refuses such a mesh, and the DOF numbering of a Mesh refuses the variable-order space it would need (the assembler itself takes a space with an element per cell type).
 - The material-state lookup of a kernel on an InterfaceMesh face still takes the face id the InterfaceMesh recorded, which goes stale once setup stores more faces (the facets are found by the face's vertices).

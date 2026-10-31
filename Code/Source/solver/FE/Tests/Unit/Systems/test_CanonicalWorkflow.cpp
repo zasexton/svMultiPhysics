@@ -57,7 +57,7 @@ svmp::FE::dofs::MeshTopologyInfo singleTetraTopology()
 
 } // namespace
 
-TEST(CanonicalWorkflow, SameSpaceWeightedInterfaceRequiresSeparableTestRows)
+TEST(CanonicalWorkflow, SameSpaceWeightedInterfaceSplitsByTestField)
 {
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
     auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
@@ -68,6 +68,7 @@ TEST(CanonicalWorkflow, SameSpaceWeightedInterfaceRequiresSeparableTestRows)
     const auto up_id = sys.addField({.name = "u_positive", .space = vector, .components = 3});
     const auto pp_id = sys.addField({.name = "p_positive", .space = scalar});
     sys.addOperator("interface");
+    sys.addOperator("compact");
 
     // Each phase uses the same spaces and symbol names. Only FieldId identifies
     // the phase; unequal viscosities give unequal complementary weights.
@@ -94,26 +95,25 @@ TEST(CanonicalWorkflow, SameSpaceWeightedInterfaceRequiresSeparableTestRows)
     const auto penalty = FormExpr::constant(6.0);
     constexpr int marker = 71;
 
+    // The Nitsche coupling as one integral over the two phases' fields.
+    const SidePair U{un, up};
+    const SidePair P{pn, pp};
+    const SidePair V{vn, vp};
+    const SidePair Q{qn, qp};
+    const auto traction = [&](const FormExpr& w, const FormExpr& r, CutVolumeSide side) {
+        const Real mu = side == CutVolumeSide::Negative ? 2.0 : 8.0;
+        return (2.0 * mu * sym(grad(w))) * n + (-r * identity) * n;
+    };
     const auto compact =
-        (-inner(wn * (tn + ptn) + wp * (tp + ptp), vn - vp) -
-         inner(wn * (sn + qtn) + wp * (sp + qtp), un - up) +
-         penalty * inner(un - up, vn - vp)).dI(marker);
-
-    try {
-        svmp::FE::systems::installFormulation(
-            sys, "interface", {un_id, pn_id, up_id, pp_id}, compact);
-        FAIL() << "Compact contractions require controlled test-row expansion";
-    } catch (const svmp::FE::InvalidArgumentException& error) {
-        EXPECT_NE(std::string(error.what()).find("multiple TestFunctions"), std::string::npos);
-    }
-    const auto& rejected = sys.operatorDefinition("interface");
-    EXPECT_TRUE(rejected.cells.empty());
-    EXPECT_TRUE(rejected.boundary.empty());
-    EXPECT_TRUE(rejected.interior.empty());
-    EXPECT_TRUE(rejected.interface_faces.empty());
-    EXPECT_TRUE(rejected.cut_volumes.empty());
-    EXPECT_TRUE(rejected.global.empty());
-    EXPECT_TRUE(sys.formulationRecords().empty());
+        (-inner(avg(map(traction, U, P), wn, wp), jump(V)) -
+         inner(avg(map(traction, V, Q), wn, wp), jump(U)) +
+         penalty * inner(jump(U), jump(V))).dI(marker);
+    // The record's block couplings follow the test functions' order of
+    // appearance (v_neg, v_pos, q_neg, q_pos), so the fields are listed in it.
+    const std::array compact_fields{un_id, up_id, pn_id, pp_id};
+    svmp::FE::systems::CoupledResidualKernels compact_installed;
+    ASSERT_NO_THROW(compact_installed = svmp::FE::systems::installFormulation(
+        sys, "compact", compact_fields, compact));
 
     // The production-style spelling keeps the viscous and pressure pieces
     // separable, with each phase's negative row before its positive row.
@@ -136,7 +136,6 @@ TEST(CanonicalWorkflow, SameSpaceWeightedInterfaceRequiresSeparableTestRows)
     ASSERT_NO_THROW(installed = svmp::FE::systems::installFormulation(
         sys, "interface", fields, consistency + adjoint + penalty_terms));
 
-    ASSERT_EQ(sys.formulationRecords().size(), 1u);
     const std::set<std::pair<FieldId, FieldId>> expected{
         {un_id, un_id}, {un_id, pn_id}, {un_id, up_id}, {un_id, pp_id},
         {up_id, un_id}, {up_id, pn_id}, {up_id, up_id}, {up_id, pp_id},
@@ -148,6 +147,18 @@ TEST(CanonicalWorkflow, SameSpaceWeightedInterfaceRequiresSeparableTestRows)
         actual.emplace(term.test_field, term.trial_field);
     }
     EXPECT_EQ(actual, expected);
+    // The compact integral installs the blocks of the expanded spelling.
+    std::set<std::pair<FieldId, FieldId>> compact_actual;
+    for (const auto& term : sys.operatorDefinition("compact").interface_faces) {
+        EXPECT_EQ(term.marker, marker);
+        compact_actual.emplace(term.test_field, term.trial_field);
+    }
+    EXPECT_EQ(compact_actual, expected);
+    ASSERT_EQ(sys.formulationRecords().size(), 2u);
+    const std::set<std::pair<FieldId, FieldId>> compact_couplings(
+        sys.formulationRecords()[0].block_couplings.begin(),
+        sys.formulationRecords()[0].block_couplings.end());
+    EXPECT_EQ(compact_couplings, expected);
 
     ASSERT_NE(installed.mixed_plan, nullptr);
     std::set<std::pair<FieldId, FieldId>> planned;
@@ -251,6 +262,97 @@ TEST(CanonicalWorkflow, SameSpace_TwoField_Assembly)
         }
     }
     EXPECT_TRUE(has_CT_coupling) << "C equation should couple to T via the T*r term";
+}
+
+// ============================================================================
+// One integral holding the test functions of two fields
+// ============================================================================
+
+namespace {
+
+struct AssembledTwoField {
+    std::vector<Real> vector;
+    std::vector<Real> matrix;
+};
+
+AssembledTwoField assembleTwoField(bool one_integral)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto T_f = sys.addField({.name = "T", .space = space, .components = 1});
+    const auto C_f = sys.addField({.name = "C", .space = space, .components = 1});
+    sys.addOperator("op");
+    const auto T = StateField(T_f, *space, "T");
+    const auto C = StateField(C_f, *space, "C");
+    const auto w = TestField(T_f, *space, "w");
+    const auto r = TestField(C_f, *space, "r");
+    const auto residual =
+        one_integral ? (inner(grad(T), grad(w)) + inner(grad(C), grad(r)) + T * C * r).dx()
+                     : (inner(grad(T), grad(w))).dx() + (inner(grad(C), grad(r)) + T * C * r).dx();
+    svmp::FE::systems::installFormulation(sys, "op", {T_f, C_f}, residual);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+    const auto n = sys.dofHandler().getNumDofs();
+    std::vector<Real> U(static_cast<std::size_t>(n));
+    for (std::size_t i = 0; i < U.size(); ++i) {
+        U[i] = 0.1 * static_cast<Real>(i + 1);
+    }
+    svmp::FE::systems::SystemStateView state;
+    state.u = U;
+    svmp::FE::systems::AssemblyRequest req;
+    req.op = "op";
+    req.want_matrix = true;
+    req.want_vector = true;
+    svmp::FE::assembly::DenseSystemView out(n);
+    out.zero();
+    (void)sys.assemble(req, state, &out, &out);
+    AssembledTwoField assembled;
+    for (GlobalIndex i = 0; i < n; ++i) {
+        assembled.vector.push_back(out.getVectorEntry(i));
+        for (GlobalIndex j = 0; j < n; ++j) {
+            assembled.matrix.push_back(out.getMatrixEntry(i, j));
+        }
+    }
+    return assembled;
+}
+
+} // namespace
+
+TEST(CanonicalWorkflow, OneIntegralOverTwoTestFieldsAssemblesAsOneIntegralPerField)
+{
+    // The integral is split into its part in each test field's row; a part
+    // that is a whole summand keeps its tree, so the kernels and the
+    // assembled values are those of the expanded spelling.
+    const auto one = assembleTwoField(/*one_integral=*/true);
+    const auto two = assembleTwoField(/*one_integral=*/false);
+    EXPECT_EQ(one.vector, two.vector);
+    EXPECT_EQ(one.matrix, two.matrix);
+}
+
+TEST(CanonicalWorkflow, ATermNonlinearInTwoTestFieldsIsRefused)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto T_f = sys.addField({.name = "T", .space = space, .components = 1});
+    const auto C_f = sys.addField({.name = "C", .space = space, .components = 1});
+    sys.addOperator("op");
+    const auto T = StateField(T_f, *space, "T");
+    const auto w = TestField(T_f, *space, "w");
+    const auto r = TestField(C_f, *space, "r");
+    try {
+        svmp::FE::systems::installFormulation(sys, "op", {T_f, C_f}, (inner(grad(T), grad(w)) + T * w * r).dx());
+        FAIL() << "A product of two test functions is not a residual";
+    } catch (const svmp::FE::InvalidArgumentException& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("cannot split the term"), std::string::npos) << message;
+        EXPECT_NE(message.find("both factors of a product hold test functions"), std::string::npos) << message;
+    }
+    EXPECT_TRUE(sys.operatorDefinition("op").cells.empty());
+    EXPECT_TRUE(sys.formulationRecords().empty());
 }
 
 // ============================================================================

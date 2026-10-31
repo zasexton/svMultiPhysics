@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <stdexcept>
 #include <string>
 
@@ -1666,6 +1667,140 @@ void traceMixedKernelPlan(const char* prefix, const MixedKernelPlan& plan)
         std::string(prefix) + ": " + plan.describe());
 }
 
+/// The rows of the test functions a subtree holds, ascending.
+using TestRowsOf = std::function<std::vector<std::size_t>(const forms::FormExprNode&)>;
+
+/**
+ * @brief The part of @p term that holds the test function of @p row
+ *
+ * A residual is linear in its test functions, so a term that holds the test
+ * functions of several rows, such as (A(v) + B(q)).dx() or a Nitsche coupling
+ * inner(avg(sigma(u) n), jump(V)) over two fields, is the sum of its parts
+ * with the other rows' test functions set to zero.  A subtree that holds only
+ * the test function of @p row is kept as it is; a subtree that holds only
+ * other rows' test functions is zero and drops out of the sums, products and
+ * linear operators (derivatives, restrictions, jump, avg, components, tensor
+ * parts, measures) above it.  A product, quotient or other function of the
+ * test functions of two rows is not linear in them and is refused, naming the
+ * term.  Returns an invalid FormExpr when the part is zero.
+ */
+[[nodiscard]] forms::FormExpr testRowPart(const std::shared_ptr<forms::FormExprNode>& node,
+                                          std::size_t row,
+                                          const TestRowsOf& rows_of,
+                                          const forms::FormExpr& term)
+{
+    using FT = forms::FormExprType;
+    const auto rows = rows_of(*node);
+    if (rows.size() == 1u && rows.front() == row) {
+        return forms::FormExpr(node);
+    }
+    if (std::find(rows.begin(), rows.end(), row) == rows.end()) {
+        return {};
+    }
+    const auto refuse = [&](std::string_view why) {
+        throw InvalidArgumentException(
+            "installFormulation: cannot split the term '" + term.toString() +
+            "' by test field: " + std::string(why) + " in '" + node->toString() +
+            "' (a residual is linear in its test functions)");
+    };
+    const auto kids = node->childrenShared();
+    const auto holds_test = [&](const std::shared_ptr<forms::FormExprNode>& kid) {
+        return kid && !rows_of(*kid).empty();
+    };
+    // node with its children replaced (a zero child is the caller's case).
+    const auto rebuilt = [&](const std::vector<std::pair<const forms::FormExprNode*, forms::FormExpr>>& parts) {
+        return forms::FormExpr(node).transformNodes(
+            [&](const forms::FormExprNode& n) -> std::optional<forms::FormExpr> {
+                for (const auto& [kid, part] : parts) {
+                    if (&n == kid) {
+                        return part;
+                    }
+                }
+                return std::nullopt;
+            });
+    };
+
+    switch (node->type()) {
+    case FT::Add:
+    case FT::Subtract: {
+        if (!holds_test(kids[0]) || !holds_test(kids[1])) {
+            refuse("a summand holds no test function");
+        }
+        auto lhs = testRowPart(kids[0], row, rows_of, term);
+        auto rhs = testRowPart(kids[1], row, rows_of, term);
+        if (!rhs.isValid()) {
+            return lhs;
+        }
+        if (!lhs.isValid()) {
+            return node->type() == FT::Add ? rhs : -rhs;
+        }
+        return node->type() == FT::Add ? lhs + rhs : lhs - rhs;
+    }
+    case FT::Negate: {
+        auto part = testRowPart(kids[0], row, rows_of, term);
+        return part.isValid() ? -part : part;
+    }
+    case FT::Multiply:
+    case FT::Divide:
+    case FT::InnerProduct:
+    case FT::DoubleContraction:
+    case FT::OuterProduct:
+    case FT::CrossProduct: {
+        if (holds_test(kids[0]) && holds_test(kids[1])) {
+            refuse("both factors of a product hold test functions");
+        }
+        if (node->type() == FT::Divide && holds_test(kids[1])) {
+            refuse("a denominator holds a test function");
+        }
+        const auto& kid = holds_test(kids[0]) ? kids[0] : kids[1];
+        auto part = testRowPart(kid, row, rows_of, term);
+        return part.isValid() ? rebuilt({{kid.get(), part}}) : part;
+    }
+    case FT::Gradient:
+    case FT::Divergence:
+    case FT::Curl:
+    case FT::Hessian:
+    case FT::RestrictMinus:
+    case FT::RestrictPlus:
+    case FT::Jump:
+    case FT::Average:
+    case FT::Component:
+    case FT::IndexedAccess:
+    case FT::Transpose:
+    case FT::Trace:
+    case FT::Deviator:
+    case FT::SymmetricPart:
+    case FT::SkewPart:
+    case FT::Pullback:
+    case FT::Pushforward:
+    case FT::CellIntegral:
+    case FT::BoundaryIntegral:
+    case FT::InteriorFaceIntegral:
+    case FT::InterfaceIntegral:
+    case FT::CutVolumeIntegral:
+    case FT::GlobalIntegral: {
+        auto part = testRowPart(kids[0], row, rows_of, term);
+        return part.isValid() ? rebuilt({{kids[0].get(), part}}) : part;
+    }
+    case FT::AsVector:
+    case FT::AsTensor: {
+        std::vector<std::pair<const forms::FormExprNode*, forms::FormExpr>> parts;
+        for (const auto& kid : kids) {
+            if (holds_test(kid)) {
+                auto part = testRowPart(kid, row, rows_of, term);
+                parts.emplace_back(kid.get(), part.isValid() ? part : forms::FormExpr::constant(0.0));
+            }
+        }
+        return rebuilt(parts);
+    }
+    default:
+        refuse(node->type() == FT::Conditional ? "a conditional holds test functions"
+                                               : "a nonlinear function of test functions");
+    }
+    return {};
+}
+
+
 
 } // namespace
 
@@ -2592,9 +2727,17 @@ CoupledResidualKernels installCoupledResidualMixed(
         const auto tests = findTestIndices(n);
         FE_THROW_IF(tests.empty(), InvalidArgumentException,
                     "installCoupledResidualMixed: sub-expression does not contain any recognized TestFunction");
-        FE_THROW_IF(tests.size() > 1, InvalidArgumentException,
-                    "installCoupledResidualMixed: sub-expression contains multiple TestFunctions (" +
-                    test_infos[tests[0]].name + ", " + test_infos[tests[1]].name + ")");
+        if (tests.size() > 1u) {
+            // One term with the test functions of several rows, such as one
+            // integral of a coupling: its part in each row.
+            for (const auto ti : tests) {
+                auto part = testRowPart(expr.nodeShared(), ti, findTestIndices, expr);
+                if (part.isValid()) {
+                    assignToBlock(ti, std::move(part), sign);
+                }
+            }
+            return;
+        }
         assignToBlock(tests[0], expr, sign);
     };
 
@@ -3981,7 +4124,21 @@ std::vector<forms::FormExpr> splitByTestFunction(const forms::FormExpr& mixed_re
         }
 
         const auto tests = findTestIndices(n);
-        if (tests.size() != 1) return false; // Can't split cleanly
+        if (tests.empty()) return false; // Can't split cleanly
+        if (tests.size() > 1u) {
+            // installCoupledResidualMixed refuses a term it cannot split.
+            try {
+                for (const auto ti : tests) {
+                    auto part = testRowPart(expr.nodeShared(), ti, findTestIndices, expr);
+                    if (part.isValid()) {
+                        assignToBlock(ti, std::move(part), sign);
+                    }
+                }
+            } catch (const std::exception&) {
+                return false;
+            }
+            return true;
+        }
         assignToBlock(tests[0], expr, sign);
         return true;
     };
