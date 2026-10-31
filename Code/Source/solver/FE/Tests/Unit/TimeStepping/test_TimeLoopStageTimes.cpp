@@ -24,7 +24,9 @@
 #include "TimeStepping/TimeLoop.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -321,4 +323,60 @@ TEST(TimeLoopStageTimes, TRBDF2UsesExpectedStageTimesAndWeights)
     EXPECT_NEAR(stage2->dt1[0], ((1.0 + 2.0 * r) / (1.0 + r)) * inv_dt2, 1e-12);
     EXPECT_NEAR(stage2->dt1[1], (-(1.0 + r)) * inv_dt2, 1e-12);
     EXPECT_NEAR(stage2->dt1[2], ((r * r) / (1.0 + r)) * inv_dt2, 1e-12);
+}
+
+// The time semantics of the stage solve of each scheme: the stage time t(),
+// the physical step deltat() and deltat_eff(), which the assembly kernels
+// and the JIT evaluate as 1/|a0| of the dt(.) stencil.
+TEST(TimeLoopStageTimes, StageTimeStepAndEffectiveStepPerScheme)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    using svmp::FE::timestepping::SchemeKind;
+    using svmp::FE::timestepping::TimeLoopOptions;
+    const double dt = 0.1;
+    // Generalized-alpha (first order): alpha_m = (3 - rho)/(2 (1 + rho)),
+    // alpha_f = 1/(1 + rho), gamma = 1/2 + alpha_m - alpha_f.
+    const auto alpha = [](double rho_inf) {
+        const double alpha_m = (3.0 - rho_inf) / (2.0 * (1.0 + rho_inf));
+        const double alpha_f = 1.0 / (1.0 + rho_inf);
+        const double gamma = 0.5 + alpha_m - alpha_f;
+        return std::array<double, 3>{alpha_m, alpha_f, gamma};
+    };
+    const auto ga05 = alpha(0.5);
+    const auto ga10 = alpha(1.0);
+
+    struct Row {
+        const char* name;
+        SchemeKind scheme;
+        std::function<void(TimeLoopOptions&)> configure;
+        double stage_time;
+        double effective_dt;
+    };
+    const std::vector<Row> table = {
+        {"backward Euler", SchemeKind::BackwardEuler, {}, dt, dt},
+        // The first BDF2 step is a backward Euler step (the start-up).
+        {"BDF2, first step", SchemeKind::BDF2, {}, dt, dt},
+        {"theta = 0.5", SchemeKind::ThetaMethod, [](TimeLoopOptions& o) { o.theta = 0.5; }, dt, dt},
+        {"generalized-alpha rho_inf = 0.5", SchemeKind::GeneralizedAlpha,
+         [](TimeLoopOptions& o) { o.generalized_alpha_rho_inf = 0.5; },
+         ga05[1] * dt, ga05[2] * ga05[1] * dt / ga05[0]},
+        {"generalized-alpha rho_inf = 1", SchemeKind::GeneralizedAlpha,
+         [](TimeLoopOptions& o) { o.generalized_alpha_rho_inf = 1.0; },
+         ga10[1] * dt, ga10[2] * ga10[1] * dt / ga10[0]},
+    };
+    EXPECT_NEAR(table[3].effective_dt, 0.5333333333333333 * dt, 1e-15);
+
+    for (const auto& row : table) {
+        SCOPED_TRACE(row.name);
+        const auto res = runOneStep(row.scheme, dt, /*lambda=*/1.0, row.configure);
+        const auto stage = std::find_if(res.ctxs.snapshots.begin(), res.ctxs.snapshots.end(),
+                                        [&](const ContextSnapshot& s) {
+                                            return std::abs(s.time - row.stage_time) <= 1e-14 && !s.dt1.empty();
+                                        });
+        ASSERT_NE(stage, res.ctxs.snapshots.end());
+        EXPECT_NEAR(stage->dt, dt, 1e-15);
+        EXPECT_NEAR(1.0 / std::abs(stage->dt1[0]), row.effective_dt, 1e-14);
+    }
 }

@@ -9,11 +9,19 @@
 #include "Coupling/MonolithicCouplingBuilder.h"
 #include "Coupling/PartitionedCouplingPlanGenerator.h"
 #include "Analysis/FormulationRecord.h"
+#include "Assembly/GlobalSystemView.h"
 #include "Core/FEException.h"
+#include "Dofs/EntityDofMap.h"
 #include "Mesh/Core/InterfaceMesh.h"
 #include "Physics/Tests/Unit/PhysicsTestHelpers.h"
 #include "Spaces/SpaceFactory.h"
 #include "Systems/FESystem.h"
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#  include "Mesh/Core/MeshBase.h"
+#  include "Mesh/Mesh.h"
+#  include "Mesh/Topology/CellShape.h"
+#endif
 
 #include <algorithm>
 #include <memory>
@@ -1459,3 +1467,183 @@ TEST(FSICouplingModule, RejectsUnconfiguredPartitionedTransfers)
     const FSICouplingModule module(options);
     EXPECT_THROW(module.validate(fec::CouplingContext{}), FE::InvalidArgumentException);
 }
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+namespace {
+
+constexpr int kFSIInterfaceMarker = 10;
+
+// [0, 1] x [0, 1] (the fluid) and [1, 2] x [0, 1] (the solid), one Quad4
+// each, sharing the face x = 1 (face set "interface").
+std::shared_ptr<svmp::Mesh> fluidAndSolidSquares()
+{
+    auto base = std::make_shared<svmp::MeshBase>();
+    const std::vector<svmp::real_t> X_ref = {
+        0.0, 0.0,  1.0, 0.0,  2.0, 0.0,
+        0.0, 1.0,  1.0, 1.0,  2.0, 1.0};
+    const std::vector<svmp::offset_t> offsets = {0, 4, 8};
+    const std::vector<svmp::index_t> cells = {0, 1, 4, 3, 1, 2, 5, 4};
+    svmp::CellShape shape{};
+    shape.family = svmp::CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 1;
+    base->build_from_arrays(2, X_ref, offsets, cells, {shape, shape});
+    base->finalize();
+    auto mesh = svmp::create_mesh(std::move(base));
+    auto& mbase = mesh->local_mesh();
+    for (svmp::index_t f = 0; f < static_cast<svmp::index_t>(mbase.n_faces()); ++f) {
+        const auto verts = mbase.face_vertices(f);
+        if (verts.size() == 2u && std::count(verts.begin(), verts.end(), 1) + std::count(verts.begin(), verts.end(), 4) == 2) {
+            mbase.add_to_set(svmp::EntityKind::Face, "interface", f);
+        }
+    }
+    return mesh;
+}
+
+/// The coupling residual summed over the x and y rows of the fluid velocity
+/// (w_f = e_x, e_y) and of the solid displacement (w_s = e_x, e_y).
+struct FSIInterfaceResidualSums {
+    FE::Real fluid_x{0.0};
+    FE::Real fluid_y{0.0};
+    FE::Real solid_x{0.0};
+    FE::Real solid_y{0.0};
+};
+
+// Installs the monolithic FSI form contribution @p contribution_name on one
+// system holding every field and evaluates it at u_f = (0, a x), p_f = p0 and
+// v_s = (0, a + jump).  The interface is x = 1 with unit length; the fluid
+// traction there is t_f = sigma_f n_f = (-p0, mu a).
+FSIInterfaceResidualSums fsiInterfaceResidualSums(const std::string& contribution_name,
+                                                  FE::Real mu, FE::Real a, FE::Real p0, FE::Real jump)
+{
+    auto mesh = fluidAndSolidSquares();
+    FE::systems::FESystem system(mesh);
+    system.setInterfaceMeshFromFaceSet(kFSIInterfaceMarker, "interface");
+    const auto quad_space = [](int components) {
+        return FE::spaces::Space(FE::spaces::SpaceType::H1, FE::ElementType::Quad4, 1, components);
+    };
+    const auto vector_space = quad_space(2);
+    const auto scalar_space = quad_space(1);
+    const auto u_f = system.addField({.name = "fluid_velocity", .space = vector_space, .components = 2});
+    const auto p_f = system.addField({.name = "fluid_pressure", .space = scalar_space, .components = 1});
+    const auto d_s = system.addField({.name = "solid_displacement", .space = vector_space, .components = 2});
+    const auto v_s = system.addField({.name = "solid_velocity", .space = vector_space, .components = 2});
+
+    const auto ref = [&](std::string participant, std::string name, FE::FieldId id,
+                         std::shared_ptr<const FE::spaces::FunctionSpace> field_space, int components) {
+        return fec::CouplingFieldRef{
+            .participant_name = std::move(participant),
+            .system_name = "fsi_system",
+            .system = &system,
+            .field_name = std::move(name),
+            .field_id = id,
+            .space = std::move(field_space),
+            .components = components,
+        };
+    };
+    const auto fluid_region = interfaceRegion("fluid", "fsi_system", &system, "fluid_interface",
+                                              kFSIInterfaceMarker, fec::CouplingInterfaceSide::Minus);
+    const auto solid_region = interfaceRegion("solid", "fsi_system", &system, "solid_interface",
+                                              kFSIInterfaceMarker, fec::CouplingInterfaceSide::Plus);
+    fec::CouplingContextBuilder builder;
+    builder.addParticipant(fec::CouplingParticipantRef{.participant_name = "fluid", .system_name = "fsi_system", .system = &system})
+        .addParticipant(fec::CouplingParticipantRef{.participant_name = "solid", .system_name = "fsi_system", .system = &system})
+        .addField(ref("fluid", "velocity", u_f, vector_space, 2))
+        .addField(ref("fluid", "pressure", p_f, scalar_space, 1))
+        .addField(ref("solid", "displacement", d_s, vector_space, 2))
+        .addField(ref("solid", "velocity", v_s, vector_space, 2))
+        .addRegion(fluid_region)
+        .addRegion(solid_region)
+        .addSharedRegion(fec::SharedRegionRef{
+            .name = "interface",
+            .required_region_kind = fec::CouplingRegionKind::InterfaceFace,
+            .participant_regions = {fluid_region, solid_region},
+        });
+    const auto context = builder.build();
+
+    FSICouplingOptions options;
+    options.fluid_viscosity = mu;
+    options.interface_components = 2;
+    const FSICouplingModule module(options);
+    const fec::CouplingFormBuilder form_builder(context);
+    const auto contributions = module.buildMonolithicForms(context, form_builder);
+    const auto* contribution = findContribution(contributions, contribution_name);
+    EXPECT_NE(contribution, nullptr);
+    if (contribution == nullptr) {
+        return {};
+    }
+    (void)fec::MonolithicCouplingBuilder{}.installFormContributions(
+        system, context, std::span<const fec::CouplingFormContribution>(contribution, 1));
+    // Interface terms alone leave null spaces; evaluate the unconstrained residual.
+    FE::systems::SetupOptions setup_options;
+    setup_options.use_constraints_in_assembly = false;
+    system.setup(setup_options);
+
+    const auto n = system.dofHandler().getNumDofs();
+    std::vector<FE::Real> state_values(static_cast<std::size_t>(n), 0.0);
+    const auto& X = mesh->local_mesh().X_ref();
+    const auto set = [&](FE::FieldId field, FE::GlobalIndex vertex, int component, FE::Real value) {
+        const auto dofs = system.fieldDofHandler(field).getEntityDofMap()->getVertexDofs(vertex);
+        state_values[static_cast<std::size_t>(system.fieldDofOffset(field) + dofs[static_cast<std::size_t>(component)])] = value;
+    };
+    for (FE::GlobalIndex vertex = 0; vertex < 6; ++vertex) {
+        set(u_f, vertex, 1, a * X[static_cast<std::size_t>(2 * vertex)]);
+        set(p_f, vertex, 0, p0);
+        set(v_s, vertex, 1, a + jump);
+    }
+    FE::systems::SystemStateView state;
+    state.u = state_values;
+    FE::systems::AssemblyRequest request;
+    request.op = "equations";
+    request.want_vector = true;
+    FE::assembly::DenseVectorView R(n);
+    R.zero();
+    const auto result = system.assemble(request, state, nullptr, &R);
+    if (!result.success) {
+        throw std::runtime_error(result.error_message);
+    }
+
+    const auto component_sum = [&](FE::FieldId field, int component) {
+        FE::Real sum = 0.0;
+        for (FE::GlobalIndex vertex = 0; vertex < 6; ++vertex) {
+            const auto dofs = system.fieldDofHandler(field).getEntityDofMap()->getVertexDofs(vertex);
+            sum += R.getVectorEntry(system.fieldDofOffset(field) + dofs[static_cast<std::size_t>(component)]);
+        }
+        return sum;
+    };
+    return {component_sum(u_f, 0), component_sum(u_f, 1), component_sum(d_s, 0), component_sum(d_s, 1)};
+}
+
+} // namespace
+
+// The intended interface conditions are u_f = v_s and sigma_f n_f = sigma_s n_f.
+// A consistent coupling vanishes at an exact state of the coupled problem:
+// its fluid rows carry -int sigma_f n_f . w_f (the traction of the solid,
+// which closes the fluid's natural boundary term) and its solid rows
+// int sigma_f n_f . w_s.  The velocity-continuity form gives the fluid rows
+// only the unit-weight penalty int (u_f - v_s) . w_f: at a matched interface
+// velocity they get no traction (a traction-free boundary for the fluid), and
+// a velocity jump enters with weight 1, independent of the viscosity and of
+// h (the Robin condition sigma_f n_f = -(u_f - v_s), not velocity
+// continuity).  The traction-balance form cannot be assembled: the
+// interpreter has no spatial derivative of the interface-restricted fluid
+// velocity it differentiates (and the JIT refuses the gradient operand).
+TEST(FSICouplingModule, MonolithicFormsAreAUnitWeightRobinPenaltyAndAnUnassembledTraction)
+{
+    constexpr FE::Real mu = 0.25, a = 2.0, p0 = 3.0;
+    const std::string continuity = "fsi.fsi_interface.velocity_continuity";
+    const auto matched = fsiInterfaceResidualSums(continuity, mu, a, p0, /*jump=*/0.0);
+    // A consistent coupling gives the fluid rows -t_f = (p0, -mu a); the form gives nothing.
+    EXPECT_NEAR(matched.fluid_x, 0.0, 1e-12);
+    EXPECT_NEAR(matched.fluid_y, 0.0, 1e-12);
+    for (const FE::Real viscosity : {mu, 100.0 * mu}) {
+        SCOPED_TRACE(::testing::Message() << "mu = " << viscosity);
+        const auto jumped = fsiInterfaceResidualSums(continuity, viscosity, a, p0, /*jump=*/0.5);
+        EXPECT_NEAR(jumped.fluid_x, 0.0, 1e-12);
+        EXPECT_NEAR(jumped.fluid_y, -0.5, 1e-12);   // int (u_f - v_s).e_y over the unit face
+        EXPECT_NEAR(jumped.solid_x, 0.0, 1e-12);
+        EXPECT_NEAR(jumped.solid_y, 0.0, 1e-12);
+    }
+    EXPECT_ANY_THROW((void)fsiInterfaceResidualSums("fsi.fsi_interface.fluid_traction_balance", mu, a, p0, 0.0));
+}
+#endif

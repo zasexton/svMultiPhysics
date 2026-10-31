@@ -25,13 +25,17 @@
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/SystemManifest.h"
 #include "FE/Systems/TimeIntegrator.h"
+#include "FE/TimeStepping/GeneralizedAlpha.h"
+#include "FE/TimeStepping/TimeSteppingUtils.h"
 #include "FE/Tests/Unit/Forms/FormsTestHelpers.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <iostream>
 #include <memory>
 #include <numbers>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -285,15 +289,23 @@ struct FittedALEFixture {
     std::vector<FE::Real> previous;
     bool explicit_previous{false};
 
+    // The time integrator of residual() and jacobian(): Backward Euler unless
+    // set; with previous_rate set, the history is (u_n, u_dot_n), the layout
+    // of the first-order generalized-alpha stage solve.
+    const FE::systems::TimeIntegrator* integrator{nullptr};
+    std::vector<FE::Real> previous_rate;
+
     FittedALEFixture(std::shared_ptr<Mesh> m,
-                     ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary bc)
+                     std::optional<ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary> bc,
+                     ns::IncompressibleNavierStokesVMSOptions opts = coupledALEOptions())
         : mesh(std::move(m))
     {
         // Coupled ALE assembles on the trial current configuration; the
         // application builds its FE system the same way for such inputs.
         system = std::make_unique<FE::systems::FESystem>(mesh, svmp::Configuration::Current);
-        auto opts = coupledALEOptions();
-        opts.free_surface.push_back(bc);
+        if (bc.has_value()) {
+            opts.free_surface.push_back(*bc);
+        }
         ns::IncompressibleNavierStokesVMSModule fluid(spaces.vector, spaces.scalar, opts);
         fluid.registerOn(*system);
         // Sliding walls where the mesh has them (the rectangle); the drop
@@ -367,7 +379,7 @@ struct FittedALEFixture {
         }
     }
 
-    std::vector<FE::Real> residual()
+    void assemble(FE::assembly::GlobalSystemView* J, FE::assembly::GlobalSystemView* R)
     {
         if (!explicit_previous) {
             previous = solution;
@@ -376,20 +388,40 @@ struct FittedALEFixture {
         state.dt = 1.0;
         state.u = std::span<const FE::Real>(solution);
         state.u_prev = std::span<const FE::Real>(previous);
-        const FE::systems::BackwardDifferenceIntegrator integrator;
-        const auto context = integrator.buildContext(1, state);
+        const std::array<std::span<const FE::Real>, 2> history{
+            std::span<const FE::Real>(previous), std::span<const FE::Real>(previous_rate)};
+        if (!previous_rate.empty()) {
+            state.u_prev2 = history[1];
+            state.u_history = history;
+        }
+        const FE::systems::BackwardDifferenceIntegrator backward_euler;
+        const auto context = (integrator != nullptr ? *integrator : backward_euler).buildContext(1, state);
         state.time_integration = &context;
         if (d != FE::INVALID_FIELD_ID) {
             (void)system->updateCurrentCoordinatesFromMeshDisplacement(state);
         }
+        FE::systems::AssemblyRequest request;
+        request.op = "equations";
+        request.want_matrix = J != nullptr;
+        request.want_vector = R != nullptr;
+        const auto result = system->assemble(request, state, J, R);
+        EXPECT_TRUE(result.success) << result.error_message;
+    }
+
+    FE::assembly::DenseMatrixView jacobian()
+    {
+        FE::assembly::DenseMatrixView J(system->dofHandler().getNumDofs());
+        J.zero();
+        assemble(&J, nullptr);
+        return J;
+    }
+
+    std::vector<FE::Real> residual()
+    {
         const auto n = system->dofHandler().getNumDofs();
         FE::assembly::DenseVectorView r(n);
         r.zero();
-        FE::systems::AssemblyRequest request;
-        request.op = "equations";
-        request.want_vector = true;
-        const auto result = system->assemble(request, state, nullptr, &r);
-        EXPECT_TRUE(result.success) << result.error_message;
+        assemble(nullptr, &r);
         std::vector<FE::Real> out(static_cast<std::size_t>(n));
         for (FE::GlobalIndex i = 0; i < n; ++i) {
             out[static_cast<std::size_t>(i)] = r.getVectorEntry(i);
@@ -706,6 +738,193 @@ TEST(FittedFreeSurfaceALE, ComponentSelectedMeshDirichletSlidesAlongAWall)
     empty.dirichlet = {nothing};
     mm::HarmonicMeshMotionModule rejected(spaces.vector, empty);
     EXPECT_THROW(rejected.registerOn(none), std::invalid_argument);
+}
+
+// The fields of a fixture DOF: 0 velocity, 1 pressure, 2 mesh displacement.
+int fixtureFieldIndex(const FittedALEFixture& ale, FE::GlobalIndex dof)
+{
+    const std::array<FE::FieldId, 3> fields{ale.u, ale.p, ale.d};
+    for (int k = 0; k < 3; ++k) {
+        const auto begin = ale.system->fieldDofOffset(fields[static_cast<std::size_t>(k)]);
+        const auto end = begin + ale.system->fieldDofHandler(fields[static_cast<std::size_t>(k)]).getNumDofs();
+        if (dof >= begin && dof < end) {
+            return k;
+        }
+    }
+    throw std::runtime_error("fixtureFieldIndex: DOF outside the fixture fields");
+}
+
+// ||J - FD|| / ||FD|| of each (row field, column field) block of the
+// assembled Jacobian against central differences of the residual, over the
+// unconstrained rows and columns; the mesh moves with every perturbed state.
+std::array<std::array<FE::Real, 3>, 3> fixtureJacobianBlockDefects(FittedALEFixture& ale, FE::Real eps)
+{
+    const auto J = ale.jacobian();
+    const auto base = ale.solution;
+    const auto& constraints = ale.system->constraints();
+    const auto n = ale.system->dofHandler().getNumDofs();
+    std::array<std::array<FE::Real, 3>, 3> diff2{}, ref2{};
+    for (FE::GlobalIndex col = 0; col < n; ++col) {
+        if (constraints.isConstrained(col)) {
+            continue;
+        }
+        ale.solution = base;
+        ale.solution[static_cast<std::size_t>(col)] += eps;
+        const auto r_plus = ale.residual();
+        ale.solution = base;
+        ale.solution[static_cast<std::size_t>(col)] -= eps;
+        const auto r_minus = ale.residual();
+        const auto c = static_cast<std::size_t>(fixtureFieldIndex(ale, col));
+        for (FE::GlobalIndex row = 0; row < n; ++row) {
+            if (constraints.isConstrained(row)) {
+                continue;
+            }
+            const auto r = static_cast<std::size_t>(fixtureFieldIndex(ale, row));
+            const FE::Real fd = (r_plus[static_cast<std::size_t>(row)] - r_minus[static_cast<std::size_t>(row)]) /
+                                (FE::Real(2.0) * eps);
+            const FE::Real d = J.getMatrixEntry(row, col) - fd;
+            diff2[r][c] += d * d;
+            ref2[r][c] += fd * fd;
+        }
+    }
+    ale.solution = base;
+    std::array<std::array<FE::Real, 3>, 3> defect{};
+    for (std::size_t r = 0; r < 3; ++r) {
+        for (std::size_t c = 0; c < 3; ++c) {
+            defect[r][c] = ref2[r][c] > 1e-28 ? std::sqrt(diff2[r][c] / ref2[r][c]) : std::sqrt(diff2[r][c]);
+        }
+    }
+    return defect;
+}
+
+// A distorted, moving mesh (|d| <= 0.08, w = d - d_prev) under a non-trivial
+// velocity and pressure.
+void setMovingState(FittedALEFixture& ale)
+{
+    const auto n = static_cast<FE::GlobalIndex>(ale.solution.size());
+    ale.previous.assign(ale.solution.size(), 0.0);
+    for (FE::GlobalIndex i = 0; i < n; ++i) {
+        const auto k = static_cast<std::size_t>(i);
+        const auto x = static_cast<FE::Real>(i);
+        if (fixtureFieldIndex(ale, i) == 2) {
+            ale.solution[k] = FE::Real(0.08) * std::sin(FE::Real(2.1) * x + FE::Real(0.5));
+            ale.previous[k] = FE::Real(0.5) * ale.solution[k];
+        } else {
+            ale.solution[k] = FE::Real(0.25) * std::sin(FE::Real(1.3) * x + FE::Real(0.2));
+            ale.previous[k] = FE::Real(0.9) * ale.solution[k];
+        }
+    }
+    ale.explicit_previous = true;
+}
+
+// Characterization of the coupled-ALE Jacobian of the production modules
+// (decision 4A): Galerkin Navier-Stokes with ALE convection and the moving-
+// control-volume term, then with VMS, then with a fitted free surface
+// (surface tension, MeshNitsche kinematic row), each with the harmonic mesh
+// motion.  The u and p columns match central differences.  The mesh columns
+// of every row block miss part of the shape derivative: the continuity rows
+// get no mesh block at all without VMS (q div(u) has no frame-explicit
+// terminal), the fluid rows miss the variation of grad and div, of the VMS
+// metric and of the measure, and the mesh operator is geometry-constant.  The
+// printed defects are what a complete shape-derivative tangent path must
+// remove.
+TEST(FittedFreeSurfaceALE, CoupledJacobianLacksPartOfTheShapeDerivativeInEveryRowBlock)
+{
+    struct Configuration {
+        const char* name;
+        bool vms;
+        bool surface;
+    };
+    for (const auto& configuration : {Configuration{"Galerkin", false, false},
+                                      Configuration{"VMS", true, false},
+                                      Configuration{"VMS + fitted free surface", true, true}}) {
+        SCOPED_TRACE(configuration.name);
+        auto opts = coupledALEOptions();
+        opts.enable_convection = true;
+        opts.enable_vms = configuration.vms;
+        std::optional<ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary> surface;
+        if (configuration.surface) {
+            surface = fittedSurface(0.0, 0.07);
+        }
+        FittedALEFixture ale(makeRectangleTriangleMesh(), surface, opts);
+        setMovingState(ale);
+        const auto defect = fixtureJacobianBlockDefects(ale, 1e-6);
+        const std::array<const char*, 3> names{"u", "p", "d"};
+        for (std::size_t r = 0; r < 3; ++r) {
+            std::cout << "[ shape derivative ] " << configuration.name << ", " << names[r] << " rows:";
+            for (std::size_t c = 0; c < 3; ++c) {
+                std::cout << " " << names[c] << " columns " << defect[r][c];
+            }
+            std::cout << "\n";
+        }
+        for (std::size_t r = 0; r < 3; ++r) {
+            SCOPED_TRACE(std::string("rows ") + names[r]);
+            EXPECT_LT(defect[r][0], 1e-6);
+            EXPECT_LT(defect[r][1], 1e-6);
+            EXPECT_GT(defect[r][2], 1e-2);
+        }
+    }
+}
+
+// Free-stream preservation on a moving mesh: a uniform velocity U with zero
+// pressure on a non-uniformly moving mesh.  Every term of the ALE momentum
+// and continuity residual vanishes for it except the moving-control-volume
+// term rho div(w) U.v (and its share of the VMS strong residual), so the
+// fluid rows are round-off without that term and are not with it, under
+// Backward Euler and the first-order generalized-alpha stage alike.
+TEST(FittedFreeSurfaceALE, FreeStreamOnAMovingMeshIsKeptOnlyWithoutTheMovingControlVolumeTerm)
+{
+    const auto alpha = FE::timestepping::utils::generalizedAlphaFirstOrderFromRhoInf(0.5);
+    const FE::timestepping::GeneralizedAlphaFirstOrderIntegrator generalized_alpha(
+        FE::timestepping::GeneralizedAlphaFirstOrderIntegratorOptions{
+            .alpha_m = alpha.alpha_m, .alpha_f = alpha.alpha_f, .gamma = alpha.gamma, .history_rate_order = 0});
+    for (const bool use_generalized_alpha : {false, true}) {
+        for (const bool moving_control_volume : {false, true}) {
+            auto opts = coupledALEOptions();
+            opts.enable_convection = true;
+            opts.enable_vms = true;
+            opts.include_moving_control_volume_transient = moving_control_volume;
+            FittedALEFixture ale(makeRectangleTriangleMesh(), std::nullopt, opts);
+            const auto n = static_cast<FE::GlobalIndex>(ale.solution.size());
+            for (FE::GlobalIndex v = 0; v < static_cast<FE::GlobalIndex>(ale.mesh->n_vertices()); ++v) {
+                ale.solution[static_cast<std::size_t>(vertexDof(*ale.system, ale.u, v, 0))] = 0.7;
+                ale.solution[static_cast<std::size_t>(vertexDof(*ale.system, ale.u, v, 1))] = -0.3;
+            }
+            ale.previous = ale.solution;
+            ale.previous_rate.assign(ale.solution.size(), 0.0);
+            for (FE::GlobalIndex i = 0; i < n; ++i) {
+                if (fixtureFieldIndex(ale, i) == 2) {
+                    const auto x = static_cast<FE::Real>(i);
+                    ale.solution[static_cast<std::size_t>(i)] = FE::Real(0.08) * std::sin(FE::Real(2.1) * x + FE::Real(0.5));
+                    ale.previous_rate[static_cast<std::size_t>(i)] = FE::Real(0.3) * ale.solution[static_cast<std::size_t>(i)];
+                }
+            }
+            ale.explicit_previous = true;
+            if (use_generalized_alpha) {
+                ale.integrator = &generalized_alpha;
+            } else {
+                ale.previous_rate.clear();
+            }
+            const auto r = ale.residual();
+            FE::Real fluid2 = 0.0;
+            for (FE::GlobalIndex i = 0; i < n; ++i) {
+                if (fixtureFieldIndex(ale, i) != 2) {
+                    fluid2 += r[static_cast<std::size_t>(i)] * r[static_cast<std::size_t>(i)];
+                }
+            }
+            const FE::Real fluid = std::sqrt(fluid2);
+            std::cout << "[ free stream ] " << (use_generalized_alpha ? "generalized-alpha" : "Backward Euler")
+                      << (moving_control_volume ? ", with" : ", without")
+                      << " the moving-control-volume term: |R_fluid| = " << fluid << "\n";
+            SCOPED_TRACE(std::string(use_generalized_alpha ? "generalized-alpha" : "Backward Euler") +
+                         (moving_control_volume ? " with" : " without") + " the moving-control-volume term");
+            if (moving_control_volume) {
+                EXPECT_GT(fluid, 1e-3);
+            } else {
+                EXPECT_LT(fluid, 1e-13);
+            }
+        }
+    }
 }
 
 #endif // SVMP_FE_WITH_MESH
