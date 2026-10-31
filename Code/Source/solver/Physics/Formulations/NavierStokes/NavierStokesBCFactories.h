@@ -570,8 +570,67 @@ inline void declareVelocityDirichletTimeFunctions(
 
 namespace detail {
 
+/// sigma(u, p) n = 2 mu eps(u) n - p n: the flux of the momentum operator on
+/// a boundary, the pressure part in the continuity row @p continuity_row.
+/// Its conormal part carries the symmetric-gradient form that certified
+/// generated-boundary routes are built from.
+[[nodiscard]] inline FE::forms::bc::NaturalFlux wallStressFlux(FE::FieldId continuity_row,
+                                                               const FE::forms::FormExpr& p,
+                                                               const FE::forms::FormExpr& q,
+                                                               const FE::forms::FormExpr& mu)
+{
+    auto stress = [mu](const FE::forms::FormExpr& w) {
+        return FE::forms::FormExpr::constant(2.0) * mu * FE::forms::symgrad(w);
+    };
+    return FE::forms::bc::NaturalFlux{
+        .parts = {FE::forms::bc::isotropicFlux(continuity_row, p, q),
+                  FE::forms::bc::conormalFlux(std::move(stress), FE::forms::bc::symmetricGradientForm(mu))},
+        .penalty_weight = mu / FE::forms::hNormal()};
+}
+
+/// The momentum and continuity rows of the weak velocity conditions, as two
+/// appenders; generated-boundary routes are certified when @p bindings is set.
+template <class AppendMomentum, class AppendContinuity>
+class MomentumContinuityRows final : public FE::forms::bc::RowSink {
+public:
+    static constexpr FE::FieldId momentum = 0;
+    static constexpr FE::FieldId continuity = 1;
+
+    MomentumContinuityRows(AppendMomentum& append_momentum,
+                           AppendContinuity& append_continuity,
+                           std::vector<FE::forms::bc::GeneratedBoundaryNitscheTraceFormBinding>* bindings)
+        : append_momentum_(append_momentum)
+        , append_continuity_(append_continuity)
+        , bindings_(bindings)
+    {
+    }
+
+    void add(FE::FieldId row, const FE::forms::FormExpr& integral) override { append(row, integral); }
+    void subtract(FE::FieldId row, const FE::forms::FormExpr& integral) override { append(row, -integral); }
+    [[nodiscard]] bool certifiesGeneratedRoutes() const override { return bindings_ != nullptr; }
+    void certify(FE::forms::bc::GeneratedBoundaryNitscheTraceFormBinding binding) override
+    {
+        bindings_->push_back(std::move(binding));
+    }
+
+private:
+    void append(FE::FieldId row, const FE::forms::FormExpr& term)
+    {
+        if (row == momentum) {
+            append_momentum_(term);
+        } else {
+            append_continuity_(term);
+        }
+    }
+
+    AppendMomentum& append_momentum_;
+    AppendContinuity& append_continuity_;
+    std::vector<FE::forms::bc::GeneratedBoundaryNitscheTraceFormBinding>* bindings_{nullptr};
+};
+
 // Resolve one boundary only when its turn is reached, after the preceding
 // route has been constructed. This preserves raw-input rejection precedence.
+// Each boundary is u = g by Nitsche's method with the wall stress flux.
 template <class Boundaries, class ResolveBoundary, class AppendMomentum, class AppendContinuity>
 inline void appendVelocityNitscheBoundaries(
     const IncompressibleNavierStokesVMSOptions& options,
@@ -582,10 +641,7 @@ inline void appendVelocityNitscheBoundaries(
     const FE::forms::FormExpr& v,
     const FE::forms::FormExpr& q,
     const FE::forms::FormExpr& mu,
-    std::vector<
-        FE::forms::bc::
-            GeneratedBoundaryNitscheTraceFormBinding>*
-        generated_trace_bindings,
+    std::vector<FE::forms::bc::GeneratedBoundaryNitscheTraceFormBinding>* generated_trace_bindings,
     AppendMomentum&& append_momentum,
     AppendContinuity&& append_continuity,
     std::vector<PreparedWeakVelocityBoundary>* prepared_boundaries)
@@ -599,120 +655,22 @@ inline void appendVelocityNitscheBoundaries(
             "applyVelocityNitscheBCs: nitsche_gamma must be finite and > 0");
     }
 
-    const auto n = FE::forms::FormExpr::normal();
-    const auto penalty = FE::forms::bc::buildTraceNitschePenalty(
-        mu / FE::forms::hNormal(),
-        u,
-        FE::forms::bc::Nitsche{
-            .gamma = options.nitsche_gamma,
-            .variant = options.nitsche_symmetric
-                ? FE::forms::bc::NitscheVariant::Symmetric
-                : FE::forms::bc::NitscheVariant::Unsymmetric,
-            .scale_with_p = options.nitsche_scale_with_p});
-
-    const auto stress_u = FE::forms::FormExpr::constant(2.0) * mu * FE::forms::symgrad(u);
-    const auto stress_v = FE::forms::FormExpr::constant(2.0) * mu * FE::forms::symgrad(v);
-    const auto integrate =
-        [](const FE::forms::FormExpr& integrand,
-           int marker,
-           std::optional<int> generated_marker) {
-            const auto measure =
-                generated_marker.has_value()
-                    ? FE::forms::ExteriorBoundaryMeasure::
-                          generatedActiveSubset(
-                              marker, *generated_marker)
-                    : FE::forms::ExteriorBoundaryMeasure::
-                          fullPhysical(marker);
-            return integrand.dExteriorBoundary(measure);
-        };
+    using Rows = MomentumContinuityRows<std::remove_reference_t<AppendMomentum>,
+                                        std::remove_reference_t<AppendContinuity>>;
+    Rows rows(append_momentum, append_continuity, generated_trace_bindings);
+    const FE::forms::bc::Nitsche nitsche{
+        .gamma = options.nitsche_gamma,
+        .variant = options.nitsche_symmetric ? FE::forms::bc::NitscheVariant::Symmetric
+                                             : FE::forms::bc::NitscheVariant::Unsymmetric,
+        .scale_with_p = options.nitsche_scale_with_p};
+    const auto flux = wallStressFlux(Rows::continuity, p, q, mu);
     for (const auto& boundary : boundaries) {
         const auto& prepared = resolve_boundary(boundary);
         const auto& [marker, generated_marker, uD] = prepared;
-        const auto diff = u - uD;
-
-        // Pressure consistency remains outside the form-bound viscous route.
-        append_momentum(
-            integrate(
-                p * FE::forms::inner(n, v),
-                marker,
-                generated_marker));
-
-        if (generated_marker.has_value() &&
-            generated_trace_bindings != nullptr) {
-            auto bound_terms =
-                FE::forms::bc::
-                    buildGeneratedBoundaryNitscheTraceTerms(
-                        u,
-                        v,
-                        uD,
-                        FE::forms::bc::symmetricGradientForm(mu),   // the viscous form 2 mu eps(u) : eps(v)
-                        marker,
-                        *generated_marker,
-                        FE::forms::bc::Nitsche{
-                            .gamma = options.nitsche_gamma,
-                            .variant = options.nitsche_symmetric
-                                ? FE::forms::bc::
-                                      NitscheVariant::Symmetric
-                                : FE::forms::bc::
-                                      NitscheVariant::Unsymmetric,
-                            .scale_with_p =
-                                options.nitsche_scale_with_p});
-            append_momentum(bound_terms.route_contribution);
-            if (options.nitsche_symmetric) {
-                append_continuity(
-                    integrate(
-                        q * FE::forms::inner(n, diff),
-                        marker,
-                        generated_marker));
-            } else {
-                append_continuity(
-                    -integrate(
-                        q * FE::forms::inner(n, diff),
-                        marker,
-                        generated_marker));
-            }
-            generated_trace_bindings->push_back(
-                std::move(bound_terms.binding));
-            if (prepared_boundaries != nullptr) {
-                prepared_boundaries->push_back(prepared);
-            }
-            continue;
-        }
-
-        // Ordinary fitted or uncertified routes retain the generic lowering.
-        append_momentum(
-            -integrate(
-                FE::forms::inner(stress_u * n, v),
-                marker,
-                generated_marker));
-        if (options.nitsche_symmetric) {
-            append_momentum(
-                -integrate(
-                    FE::forms::inner(stress_v * n, diff),
-                    marker,
-                    generated_marker));
-            append_continuity(
-                integrate(
-                    q * FE::forms::inner(n, diff),
-                    marker,
-                    generated_marker));
-        } else {
-            append_momentum(
-                integrate(
-                    FE::forms::inner(stress_v * n, diff),
-                    marker,
-                    generated_marker));
-            append_continuity(
-                -integrate(
-                    q * FE::forms::inner(n, diff),
-                    marker,
-                    generated_marker));
-        }
-        append_momentum(
-            integrate(
-                penalty * FE::forms::inner(diff, v),
-                marker,
-                generated_marker));
+        const auto measure = generated_marker.has_value()
+                                 ? FE::forms::ExteriorBoundaryMeasure::generatedActiveSubset(marker, *generated_marker)
+                                 : FE::forms::ExteriorBoundaryMeasure::fullPhysical(marker);
+        FE::forms::bc::Dirichlet(measure, uD, nitsche, flux).contributeToRows(rows, u, v, Rows::momentum);
         if (prepared_boundaries != nullptr) {
             prepared_boundaries->push_back(prepared);
         }

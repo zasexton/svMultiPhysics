@@ -391,6 +391,36 @@ TEST(FormsBoundaryConditions, DirichletNitscheOfAStressEntersTheVelocityAndPress
         EXPECT_EQ(svmp::FE::systems::formExprTreeHash(C), svmp::FE::systems::formExprTreeHash(expected_C));
     }
 
+    // On a generated boundary whose route the rows certify, the conormal part's
+    // bilinear form builds the route between the pressure terms.
+    const auto generated = forms::ExteriorBoundaryMeasure::generatedActiveSubset(3, 103);
+    const bc::NaturalFlux certified_flux{
+        .parts = {bc::isotropicFlux(p_id, p, q), bc::conormalFlux(stress, bc::symmetricGradientForm(mu))},
+        .penalty_weight = mu / forms::hNormal()};
+    for (const auto variant : {bc::NitscheVariant::Symmetric, bc::NitscheVariant::Unsymmetric}) {
+        const bc::Nitsche nitsche{.gamma = 10.0, .variant = variant, .scale_with_p = true};
+        FormExpr M = (inner(grad(u), grad(v))).dx();
+        FormExpr C = (q * div(u)).dx();
+        FormExpr expected_M = M;
+        FormExpr expected_C = C;
+        std::vector<bc::GeneratedBoundaryNitscheTraceFormBinding> bindings;
+        forms::ResidualContributions rows{{u_id, M}, {p_id, C}};
+        bc::ResidualRows sink(rows, &bindings);
+        bc::Dirichlet(generated, uD, nitsche, certified_flux).contributeToRows(sink, u, v, u_id);
+        const auto route = bc::buildGeneratedBoundaryNitscheTraceTerms(u, v, uD, bc::symmetricGradientForm(mu), 3,
+                                                                       103, nitsche);
+        const auto integrate = [&](const FormExpr& integrand) { return integrand.dExteriorBoundary(generated); };
+        const auto diff = u - uD;
+        expected_M = expected_M + integrate(p * inner(n, v));
+        expected_M = expected_M + route.route_contribution;
+        expected_C = expected_C + (variant == bc::NitscheVariant::Symmetric ? integrate(q * inner(n, diff))
+                                                                            : -integrate(q * inner(n, diff)));
+        EXPECT_EQ(M.toString(), expected_M.toString());
+        EXPECT_EQ(C.toString(), expected_C.toString());
+        ASSERT_EQ(bindings.size(), 1u);
+        EXPECT_EQ(bindings[0].metadataDigest(), route.binding.metadataDigest());
+    }
+
     // One residual cannot hold the pressure row.
     FormExpr R = (inner(grad(u), grad(v))).dx();
     EXPECT_THROW(bc::Dirichlet(measure, uD, bc::Nitsche{}, flux).contributeToResidual(R, u, v),
