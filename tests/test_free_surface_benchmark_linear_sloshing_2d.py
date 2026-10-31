@@ -4,6 +4,7 @@ import cmath
 import importlib.util
 import json
 import math
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -24,6 +25,18 @@ def load(name):
 
 gen = load("generate_case")
 ver = load("verify")
+# The Python mirror of the free-surface method profiles (decision D47, P4).
+_profiles_spec = importlib.util.spec_from_file_location(
+    "free_surface_profile_decks", BENCHMARK.parents[1] / "free_surface_profile_decks.py")
+profiles = importlib.util.module_from_spec(_profiles_spec)
+sys.modules[_profiles_spec.name] = profiles
+_profiles_spec.loader.exec_module(profiles)
+
+
+def deck_keys(text):
+    """The free-surface and level-set keys a deck resolves to (its profile's
+    values for the keys it does not state)."""
+    return profiles.effective_deck_keys(text)
 
 
 def test_dispersion_relation_limits():
@@ -100,12 +113,15 @@ def test_generated_case_has_free_slip_walls_and_the_d10_schedule(tmp_path):
     # D9: the protocol advects phi with the PDE extension (prescribed field).
     assert case["level_set_velocity"] == gen.PROTOCOL_LEVEL_SET_VELOCITY
     assert case["kinematic_reconciliation"] is True
-    assert root.find("Add_equation[@type='level_set']/Enable_kinematic_reconciliation").text == "true"
+    # The Gravity_wave profile states the protocol (decision D47, P4).
+    assert "<Free_surface_profile>Gravity_wave@1</Free_surface_profile>" in text
+    _, level_set = deck_keys(text)
+    assert level_set["Enable_kinematic_reconciliation"] == "true"
     plain = gen.solver_xml(gen.time_schedule(16), 10, 1, kinematic_reconciliation=False)
-    assert "Enable_kinematic_reconciliation" not in plain
+    assert deck_keys(plain)[1]["Enable_kinematic_reconciliation"] == "false"
     method, coupling = gen.PROTOCOL_LEVEL_SET_VELOCITY.rsplit("_", 1)
-    assert f"<Advection_velocity_extension_method>{method}<" in text
-    assert f"<Advection_velocity_extension_coupling>{coupling}<" in text
+    assert level_set["Advection_velocity_extension_method"] == method
+    assert level_set["Advection_velocity_extension_coupling"] == coupling
     assert "Use_wet_extension_advection_velocity" not in text
     # D10: every level of the spatial study uses the same step.
     assert case["steps_per_period"] == 128 and case["steps"] == 512

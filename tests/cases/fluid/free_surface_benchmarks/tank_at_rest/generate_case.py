@@ -44,6 +44,12 @@ STEPS_PER_PERIOD = 20
 SNAPSHOTS = 20
 LEVEL_SET_FIELD = "phi"
 INTERFACE_DOMAIN_ID = "tank_at_rest_surface"
+# The method profile of the gravity-wave protocol (decision D47, step P4;
+# Physics/Options/FreeSurfaceProfiles.cpp) with the tank's overrides: the
+# level set is advected by the fluid velocity itself (a stated
+# Velocity_source replaces the profile's advection velocity) and is not
+# reconciled after the accepted steps.
+FREE_SURFACE_PROFILE = "Gravity_wave@1"
 # Strong zero velocity on the normal component only (free slip).  The top wall
 # is dry and carries no condition.
 WALL_NORMAL_COMPONENT = {"wall_left": 0, "wall_right": 0, "wall_bottom": 1,
@@ -299,13 +305,10 @@ def solver_xml(dim: int, schedule: dict, steps: int, cadence: int) -> str:
     <Tolerance>1.0e-4</Tolerance>
     <Module_options>jit=true; jit_specialization=true</Module_options>
     <Level_set_field_name>{LEVEL_SET_FIELD}</Level_set_field_name>
-    <Level_set_source>prescribed_data</Level_set_source>
     <Velocity_source>coupled_field</Velocity_source>
     <Velocity_field_name>Velocity</Velocity_field_name>
     <Auto_register_velocity_field>true</Auto_register_velocity_field>
-    <Enable_SUPG>true</Enable_SUPG>
-    <SUPG_tau_scale>0.5</SUPG_tau_scale>
-    <SUPG_transient_scale>2.0</SUPG_transient_scale>
+    <Enable_kinematic_reconciliation>false</Enable_kinematic_reconciliation>
     <Output type="Spatial">
       <Level_set>true</Level_set>
     </Output>
@@ -342,16 +345,12 @@ def solver_xml(dim: int, schedule: dict, steps: int, cadence: int) -> str:
     <Add_BC name="free_surface">
       <Type>Free_surface</Type>
       <Implementation>UnfittedLevelSet</Implementation>
+      <Free_surface_profile>{FREE_SURFACE_PROFILE}</Free_surface_profile>
       <Level_set_field_name>{LEVEL_SET_FIELD}</Level_set_field_name>
       <Generated_interface_domain_id>{INTERFACE_DOMAIN_ID}</Generated_interface_domain_id>
-      <Level_set_isovalue>0.0</Level_set_isovalue>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Generated_interface_geometry>LinearCorner</Generated_interface_geometry>
       <External_pressure>{EXTERNAL_PRESSURE:.17g}</External_pressure>
       <Surface_tension>0.0</Surface_tension>
-      <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
-      <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
-      <Small_cut_aggregation>true</Small_cut_aggregation>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>

@@ -73,6 +73,13 @@ PROTOCOL_LEVEL_SET_VELOCITY = "pde_harmonic_monolithic"
 # each step's change of the sharp liquid area equals the interface flux of the
 # transport velocity.  Local and parameter-free; "off" reproduces earlier decks.
 KINEMATIC_RECONCILIATION = True
+# The method profile of the gravity-wave protocol (decision D47, step P4;
+# Physics/Options/FreeSurfaceProfiles.cpp): it states the advection velocity
+# PROTOCOL_LEVEL_SET_VELOCITY, SUPG, kinematic reconciliation
+# (KINEMATIC_RECONCILIATION), LinearCorner geometry, the cut-facet pressure
+# penalty and small-cut aggregation.  A deck writes a key only when its option
+# differs from the profile.
+FREE_SURFACE_PROFILE = "Gravity_wave@1"
 
 
 # ---------------------------------------------------------------------------
@@ -295,26 +302,30 @@ def linear_solver_block() -> str:
 
 
 def level_set_velocity_block(mode: str) -> str:
+    """The level-set velocity keys that differ from the profile, each line
+    starting with a newline: the profile states the harmonic extension with
+    monolithic coupling; a stated Velocity_source replaces all of it."""
     if mode == "coupled_field":
-        return """    <Velocity_source>coupled_field</Velocity_source>
+        return """
+    <Velocity_source>coupled_field</Velocity_source>
     <Velocity_field_name>Velocity</Velocity_field_name>
     <Auto_register_velocity_field>true</Auto_register_velocity_field>"""
     if mode.startswith("pde_"):
         method, coupling = mode.rsplit("_", 1)
-        return f"""    <Velocity_source>prescribed_data</Velocity_source>
-    <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
-    <Auto_register_velocity_field>true</Auto_register_velocity_field>
-    <Source_velocity_field_name>Velocity</Source_velocity_field_name>
-    <Advection_velocity_extension_method>{method}</Advection_velocity_extension_method>
-    <Advection_velocity_extension_coupling>{coupling}</Advection_velocity_extension_coupling>"""
+        out = ""
+        if method != "pde_harmonic":
+            out += f"\n    <Advection_velocity_extension_method>{method}</Advection_velocity_extension_method>"
+        if coupling != "monolithic":
+            out += f"\n    <Advection_velocity_extension_coupling>{coupling}</Advection_velocity_extension_coupling>"
+        return out
     raise ValueError(f"--level-set-velocity must be one of {LEVEL_SET_VELOCITY}")
 
 
 def solver_xml(schedule: dict, steps: int, cadence: int,
                level_set_velocity: str = PROTOCOL_LEVEL_SET_VELOCITY,
                kinematic_reconciliation: bool = KINEMATIC_RECONCILIATION) -> str:
-    reconciliation = ("\n    <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>"
-                      if kinematic_reconciliation else "")
+    reconciliation = ("" if kinematic_reconciliation else
+                      "\n    <Enable_kinematic_reconciliation>false</Enable_kinematic_reconciliation>")
     faces = "\n".join(
         f'    <Add_face name="{w}"><Face_file_path>mesh/mesh-surfaces/{w}.vtp</Face_file_path></Add_face>'
         for w in WALLS)
@@ -357,12 +368,7 @@ def solver_xml(schedule: dict, steps: int, cadence: int,
     <Max_iterations>4</Max_iterations>
     <Tolerance>1.0e-4</Tolerance>
     <Module_options>jit=true; jit_specialization=true</Module_options>
-    <Level_set_field_name>{LEVEL_SET_FIELD}</Level_set_field_name>
-    <Level_set_source>prescribed_data</Level_set_source>
-{level_set_velocity_block(level_set_velocity)}
-    <Enable_SUPG>true</Enable_SUPG>
-    <SUPG_tau_scale>0.5</SUPG_tau_scale>
-    <SUPG_transient_scale>2.0</SUPG_transient_scale>{reconciliation}
+    <Level_set_field_name>{LEVEL_SET_FIELD}</Level_set_field_name>{level_set_velocity_block(level_set_velocity)}{reconciliation}
     <Output type="Spatial">
       <Level_set>true</Level_set>
     </Output>
@@ -399,16 +405,12 @@ def solver_xml(schedule: dict, steps: int, cadence: int,
     <Add_BC name="free_surface">
       <Type>Free_surface</Type>
       <Implementation>UnfittedLevelSet</Implementation>
+      <Free_surface_profile>{FREE_SURFACE_PROFILE}</Free_surface_profile>
       <Level_set_field_name>{LEVEL_SET_FIELD}</Level_set_field_name>
       <Generated_interface_domain_id>{INTERFACE_DOMAIN_ID}</Generated_interface_domain_id>
-      <Level_set_isovalue>0.0</Level_set_isovalue>
       <Active_domain>LevelSetNegative</Active_domain>
-      <Generated_interface_geometry>LinearCorner</Generated_interface_geometry>
       <External_pressure>{EXTERNAL_PRESSURE:.17g}</External_pressure>
       <Surface_tension>0.0</Surface_tension>
-      <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
-      <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
-      <Small_cut_aggregation>true</Small_cut_aggregation>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>
