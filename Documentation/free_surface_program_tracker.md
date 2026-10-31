@@ -1747,7 +1747,9 @@ Merged 2026-09-30 (`f157011b`..`35a81fd3`, branch `dev/fitted-ale-m5`). Branch t
 
 ## 6. Formulation reference (current code)
 
-Paths are relative to `Code/Source/solver/`, at `fc56527`.
+Paths are relative to `Code/Source/solver/`, at `fc56527`; the traction,
+curvature, initializer and inactive-side entries of 6.1 and the capillarity
+entry of 6.2 are at `04287cba` (2026-10-30).
 
 ### 6.1 Unfitted one-phase
 
@@ -1760,30 +1762,18 @@ Paths are relative to `Code/Source/solver/`, at `fc56527`.
 - Small-cut aggregation (AgFEM-type affine constraints on u and p; guards: path ≤ 8, extrapolation ≤ 4, |coefficient| ≤ 16, row L1 ≤ 32). Rootless features are deleted.
 - Pressure-gradient facet jump `γ_p · 0.01 · h³ / (μ + ρh²/Δt)` on cut-adjacent facets.
 - The velocity ghost penalty was removed on 2026-06-12.
-- Inactive pressure is pinned to 0; an optional PDE velocity extension acts on the dry side.
-- Sources: `free_surface_wp7_combined_p1_method.md`; `Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceOptions.h`.
+- The inactive side is pinned: u = 0 and p = 0 (`ConstraintPlan::inactiveSide`, `registerOn`). The optional PDE velocity extension is a separate solve for the level-set advection velocity, not a Navier-Stokes term.
+- Sources: `free_surface_wp7_combined_p1_method.md`; `Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h`.
 
-**Free-surface traction** (`IncompressibleNavierStokesVMSModule.cpp` about L6681–6863). Every route adds `∫_Γh p_ext n_h·v`.
-
-| Form | Capillary term | Status |
-|---|---|---|
-| `SurfaceStress` (unfitted default) | `γ ∫_Γh (I − n_h⊗n_h) : ∇v`; wall line term `−γ cos θ_e ∫_CL v·m` | Production default |
-| `KinematicAreaGradientTraction` | `γ ∫_Γh κ_h n_h·v`, with `κ_h` a prescribed P1 field from KAG recovery; no separate line force (Young is inside `κ_h`) | WP-4 selected route; requires interface quadrature order ≥ 2 in 3D |
-| `GeneratedCurvatureTraction` | `∫ (p_ext + γκ) n_h·v`, with κ projected | Experimental |
-| `CurvatureTraction` (legacy) | Same integrand, with `n = ∇φ/|∇φ|` | Legacy; fitted-only use today |
+**Free-surface traction** (`NavierStokesBCFactories.h`, the free-surface block from about L1310). `SurfaceStress` is the only form (D48): `∫_Γh p_ext n_h·v + γ ∫_Γh (I − n_h⊗n_h) : ∇v`, with the wall line term `−γ cos θ_e ∫_CL v·m`. The KAG, generated-curvature and curvature-traction routes and the curvature projection (`LevelSetCurvatureProjection`, every recovery mode) were deleted (D48; their keys were removed by D60).
 
 - Geometry is `RefreshedFrozenQuadrature`: the capillary terms contribute no geometry Jacobian, and coupling is through outer fixed-point refreshes.
-
-**Curvature recovery** (`FE/LevelSet/LevelSetCurvatureProjection.*`) has three modes:
-- `LevelSetQuadratic` (least-squares quadratic fit of φ);
-- `GeneratedInterfacePatch` (fit to the interface point cloud);
-- `KinematicAreaGradient`: analytic `∂A/∂φ` plus Young-wall `∂A_sl/∂φ`, the trace mass `M`, an optional Helmholtz filter `ℓ = c √(h R)`, and a PCG solve with an LSQR fallback.
 
 **Pressure diagnostics** (`FE/TimeStepping/NewtonSolver.cpp`).
 - LSQR distance of the capillary load to `range(G)`, and a constant-pressure KKT fit.
 - They are diagnostic, an optional acceptance gate, or a one-shot pressure initial guess. Force projection is never applied.
 
-**Static initializer** (`ApplicationDriver.cpp::initializeDiscreteStaticCapillaryEquilibrium`; `FE/LevelSet/LevelSetStaticCapillaryEquilibrium.*`).
+**Static initializer** (`ApplicationDriver.cpp::initializeDiscreteStaticCapillaryEquilibrium`, which drives `FE/LevelSet/LevelSetVolumeConstrainedMinimizer.*`; `LevelSetStaticCapillaryEquilibrium` no longer exists).
 - An SQP/L-BFGS method with an l1 merit function, working over nodal φ at fixed volume.
 - It allows bounded topology-epoch transitions and ends with a KKT certificate.
 
@@ -1809,8 +1799,8 @@ Paths are relative to `Code/Source/solver/`, at `fc56527`.
 - Normal kinematics `(ḋ_m − u)·n = 0` are enforced by penalty or Nitsche.
 - Tangential mesh policy is `Free`, `SmoothingOnly` or `Prescribed`.
 - Interior mesh motion is harmonic or pseudo-elastic.
-- Allowed capillarity: `CurvatureTraction` with pointwise current-geometry curvature. This curvature is zero on P1 faces.
-- Rejected: `SurfaceStress`, `PrescribedAngle` and `DynamicRenE`.
+- Capillarity: `SurfaceStress` on the current surface, the fitted default (the pointwise-curvature `CurvatureTraction` was deleted with the other curvature routes, D48).
+- Rejected: `PrescribedAngle` and `DynamicRenE`.
 - Source: `free_surface_wp9_fitted_ale_architecture.md`.
 
 ### 6.3 Two-fluid

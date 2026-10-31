@@ -20315,8 +20315,9 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
     // depends on auxiliary state through the output expressions.
     // Chain rule: dR_PDE/dx_j = Σ_k (dR_PDE/d(output_k)) * (d(output_k)/dx_j)
     //
-    // dR_PDE/d(output_k): computed by FD perturbation of the output value
-    //   in the assembler context and re-assembling the PDE residual.
+    // dR_PDE/d(output_k): symbolic; the residual terms that reference the
+    //   output are differentiated with respect to its AuxiliaryOutputRef node
+    //   and assembled as a linear form.
     // d(output_k)/dx_j: computed by FD perturbation of the auxiliary state
     //   and re-evaluating the output expressions.
     // ----------------------------------------------------------------

@@ -275,16 +275,16 @@ terms must be installed explicitly on the generated interface.
 
 The application active-cut request carries the retained-volume-side policy.
 The default policy is active-only, matching one-fluid active-domain assembly.
-An explicit inactive-side consumer, such as the Navier-Stokes unfitted
-free-surface PDE velocity-extension term, upgrades the request to retain both
-active and inactive generated cut-volume rules. This does not make the physical
-Navier-Stokes volume terms two-phase; those terms still select
-`dCutVolume(marker, active_side)`, while the extension term selects the
-opposite side explicitly. When this PDE velocity extension is enabled,
-Navier-Stokes does not install the otherwise-default inactive-side homogeneous
-velocity clamp, because that clamp would overconstrain the extension field.
-The inactive pressure clamp remains part of the one-fluid active-domain support
-policy.
+Consumers that classify the whole cell graph upgrade the request to retain both
+active and inactive generated cut-volume rules: small-cut aggregation (on by
+default for Navier-Stokes unfitted free surfaces) and the incompressible
+two-fluid formulation. This does not make the physical Navier-Stokes volume
+terms two-phase; those terms still select `dCutVolume(marker, active_side)`.
+Navier-Stokes always pins the inactive side of an unfitted free surface with
+homogeneous velocity and pressure constraints (`ConstraintPlan::inactiveSide`
+on both fields). The PDE velocity extension does not act on those rows: it is a
+separate solve whose target is the level-set advection velocity field (see
+above).
 
 The equation semantics are:
 

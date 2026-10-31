@@ -41,7 +41,7 @@ Remaining items are qualification and application-integration work rather than t
 
 - [ ] Add an end-to-end Application/SimulationBuilder configuration path for XML-driven prescribed and coupled ALE examples.
 - [ ] Add restart persistence for prescribed buffers, current coordinates, mesh-displacement history, and derived velocity metadata.
-- [ ] Add dedicated finite-difference tests for full Navier-Stokes coupled-ALE mesh-displacement tangents.
+- [x] Add dedicated finite-difference tests for full Navier-Stokes coupled-ALE mesh-displacement tangents (`FittedFreeSurfaceALE.CoupledJacobianLacksPartOfTheShapeDerivativeInEveryRowBlock`; it characterizes the missing part, see the geometry-sensitive tangent items).
 - [ ] Add serial coupled-solve smoke tests with the harmonic mesh-motion module.
 - [ ] Add MPI qualification for prescribed buffers, coupled displacement layout, ghost updates, and derived velocity consistency.
 - [ ] Record backend/preconditioner support and fail-closed behavior for each coupled ALE block layout.
@@ -196,7 +196,8 @@ Coupled mode is complete only when the nonlinear solve assembles on trial curren
 - [x] Configure coupled-ALE geometry sensitivity through the FE ALE binding helper and `FormInstallOptions`.
 - [x] Ensure ALE fluid residuals include tangent blocks with respect to `mesh_displacement`.
 - [x] Ensure `meshVelocity()` contributes the time-derivative coefficient to `dR_fluid / d(mesh_displacement)`.
-- [x] Ensure current-coordinate, current-measure, inverse-Jacobian, normal, and face-measure dependencies contribute geometry-sensitive tangent terms.
+- [x] Ensure the frame-explicit terminals (`currentCoordinate()`, `meshVelocity()`, `currentJacobian()`, `currentNormal()`, `currentMeasure()`, `surfaceJacobian()`) contribute geometry-sensitive tangent terms.
+- [ ] Shape derivatives of the active-frame operators and of field gradients: `Jinv()` (the VMS metric), `J()`, `detJ()`, `h()`, `hNormal()`, `FormExpr::normal()`, `grad`/`div` of every field, the measure of integrands without a frame-explicit terminal and the measure variation in the fluid-row cell blocks are not assembled, and the mesh-motion operator is installed geometry-constant. `MovingDomainShapeDerivativeTest` (`FE/Tests/Unit/Systems/test_JacobianVerification.cpp`) records each missing part, and `test_FittedFreeSurfaceALE.cpp` the relative defect of the mesh columns of the production coupled-ALE Jacobian (fluid rows 0.79–1.10, continuity rows 1.0–1.57, mesh rows 0.03–0.08). Completing them is decision 4A (an opt-in tangent path; it changes Newton iterates).
 - [x] Add fail-closed diagnostics if a coupled ALE form requests current geometry but no mesh-displacement sensitivity field is configured.
 
 ### Application Coupled Mode
@@ -239,7 +240,7 @@ Coupled mode is complete only when the nonlinear solve assembles on trial curren
 - [x] FE assembly test: current geometry updates from trial `mesh_displacement` before assembly.
 - [x] FE rollback test: rejected line search restores coordinates and motion fields.
 - [ ] Forms/AD test: geometry-sensitive residual has nonzero derivative with respect to mesh displacement.
-- [ ] Physics test: Navier-Stokes ALE residual has finite-difference-verified tangent with respect to mesh displacement.
+- [ ] Physics test: Navier-Stokes ALE residual has finite-difference-verified tangent with respect to mesh displacement. The finite-difference test exists and shows the mesh columns are incomplete.
 - [x] Mesh-motion module test: harmonic and pseudoelastic residuals and tangents pass finite-difference checks.
 - [ ] Coupled solve test: small manufactured coupled ALE case converges with Newton.
 - [ ] Application smoke test: XML-configured coupled monolithic ALE runs through setup and at least one time step.

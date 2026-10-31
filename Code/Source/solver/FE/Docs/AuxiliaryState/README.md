@@ -1028,7 +1028,11 @@ use(model).monolithic().bind("Q", Q);
 - **Legacy CoupledBoundaryManager**: The legacy path remains functional but
   separate.  New monolithic coupling should use handle-backed `bind()` + the
   `FEQuantityRegistry` path.
-- **Transpose Jacobian performance**: `dR_PDE/dx_aux` is computed by FD
-  perturbation of auxiliary outputs + PDE residual re-assembly (one re-assembly
-  per output).  For models with many outputs, a symbolic approach using
-  form-level differentiation w.r.t. `AuxiliaryOutput` nodes would be faster.
+- **Transpose Jacobian performance**: `dR_PDE/dx_aux` is the chain rule
+  `dR_PDE/d(output) * d(output)/dx_aux`.  The first factor is symbolic: the
+  residual terms that reference an output are differentiated with respect to
+  its `AuxiliaryOutputRef` node and assembled as a linear form.  The second is
+  a finite difference of the output expressions in the auxiliary state.  The
+  linear form is compiled again on every Jacobian assembly, once per output,
+  entity and residual block; compiling it once per output would be cheaper for
+  models with many outputs or entities.

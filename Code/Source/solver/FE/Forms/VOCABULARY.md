@@ -275,10 +275,22 @@ mesh/domain motion and frame-explicit geometry; they do not encode a specific
 ALE, FSI, solid-mechanics, contact, or free-surface model.
 For ALE forms, spell out transport and moving-volume terms directly, such as
 `u - meshVelocity()` and `rho * div(meshVelocity()) * inner(u, v)`, so the
-mathematics remains visible in formulation modules. Monolithic derivatives with
+mathematics remains visible in formulation modules. `dt(u)` is the time
+derivative at a fixed mesh node, `du/dt|_X`. Monolithic derivatives with
 respect to a mesh-displacement unknown are an install option
 (`GeometrySensitivityMode::MeshMotionUnknowns`, set by `ALEBinding`), not a
-different vocabulary.
+different vocabulary, and they are partial. Only the frame-explicit terminals
+(`currentCoordinate()`, `meshDisplacement()`, `meshVelocity()`,
+`currentJacobian()`, `currentNormal()`, `currentMeasure()`,
+`surfaceJacobian()`) are differentiated, and only an integrand that contains
+one of them gets mesh columns. `x()`, `J()`, `Jinv()`, `detJ()`, `h()`,
+`vol()`, `area()`, `hNormal()`, `FormExpr::normal()` and the change of `grad`
+and `div` of every field with the mesh are geometry constants, and the cell
+blocks of the other fields' rows do not assemble the measure variation either.
+The `MovingDomainShapeDerivativeTest` in
+`Tests/Unit/Systems/test_JacobianVerification.cpp` records the missing part of
+each operator, and `test_FittedFreeSurfaceALE.cpp` that of the production
+coupled-ALE Jacobian.
 
 ### Trace and Projection Helpers
 

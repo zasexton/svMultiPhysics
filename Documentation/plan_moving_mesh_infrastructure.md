@@ -711,7 +711,7 @@ Goal: enable monolithic coupling where mesh displacement is a solved unknown and
 
 - [x] Add an opt-in form mode that treats selected geometry quantities as dependent on mesh-motion unknowns.
 - [x] Add symbolic dependencies between mesh displacement fields and geometry terminals.
-- [x] Add AD/JIT-compatible support for geometry derivative contributions. Geometry-sensitive tangents use the exact AD `NonlinearFormKernel` path; JIT wrappers keep residual acceleration where available and preserve the AD tangent fallback.
+- [x] Add AD/JIT-compatible support for geometry derivative contributions. The AD `NonlinearFormKernel` path seeds the same frame-explicit terminals as the symbolic tangent, so it has the same gaps and is not an exact reference for moving domains (`MovingDomainShapeDerivativeTest`); JIT wrappers keep residual acceleration where available and preserve the AD tangent fallback.
 - [x] Make the default behavior remain geometry-constant for standard solution-field differentiation.
 - [x] Add diagnostics to detect when a form requests monolithic geometry sensitivity but no mesh-motion unknown is registered.
 
