@@ -411,6 +411,11 @@ forms::FacetDomain CutSide::cutFacets() const
     return forms::FacetDomain::cutAdjacent(geometry_.interfaceMarker(), side_);
 }
 
+forms::FacetDomain LevelSetGeometry::cutFacets() const
+{
+    return forms::FacetDomain::cutAdjacent(interface_marker_);
+}
+
 FieldId resolveScalarLevelSetField(
     const systems::FESystem& system,
     const std::string& name,

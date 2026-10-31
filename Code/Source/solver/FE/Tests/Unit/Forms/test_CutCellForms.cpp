@@ -1471,6 +1471,60 @@ TEST(CutCellForms, CutAdjacentSecondNormalDerivativeJumpRequiresHessians)
     EXPECT_EQ(ir.terms().front().interface_marker, facet_set_marker);
 }
 
+TEST(CutCellForms, GhostPenaltyIsTheHandWrittenFacetPenalty)
+{
+    constexpr int facet_set_marker = 39;
+    const auto facets = FacetDomain::cutAdjacent(facet_set_marker, CutVolumeSide::Negative);
+    for (const auto element : {svmp::FE::ElementType::Triangle3, svmp::FE::ElementType::Quad4,
+                               svmp::FE::ElementType::Tetra4, svmp::FE::ElementType::Hex8,
+                               svmp::FE::ElementType::Wedge6, svmp::FE::ElementType::Pyramid5}) {
+        for (const int order : {1, 2}) {
+            svmp::FE::spaces::H1Space space(element, order);
+            const auto p = TrialFunction(space, "p");
+            const auto q = TestFunction(space, "q");
+            const auto gamma = FormExpr::constant(2.0) * FormExpr::constant(0.01);
+            const auto nu = FormExpr::constant(1.0e-3) + FormExpr::constant(1.0e-12);
+
+            const auto h = avg(hNormal());
+            const auto h3 = h * h * h;
+            auto expected = (gamma * h3 / nu * inner(jump(grad(p)), jump(grad(q)))).dS(facets);
+            auto undivided = (gamma * h3 * inner(jump(grad(p)), jump(grad(q)))).dS(facets);
+            if (order > 1) {
+                const auto n_minus = FormExpr::normal().minus();
+                const auto dnn = [&](const FormExpr& e) {
+                    return inner(jump(hessian(e)), outer(n_minus, n_minus));
+                };
+                expected = expected + (gamma * (h3 * h * h) / nu * dnn(p) * dnn(q)).dS(facets);
+                undivided = undivided + (gamma * (h3 * h * h) * dnn(p) * dnn(q)).dS(facets);
+            }
+            const auto penalty = ghostPenalty(p, q, order, gamma, nu, facets);
+            EXPECT_EQ(penalty.toString(), expected.toString());
+            EXPECT_EQ(ghostPenalty(p, q, order, gamma, FormExpr{}, facets).toString(), undivided.toString());
+
+            FormCompiler compiler;
+            const auto ir = compiler.compileBilinear(penalty);
+            ASSERT_EQ(ir.terms().size(), static_cast<std::size_t>(order));
+            for (const auto& term : ir.terms()) {
+                EXPECT_EQ(term.domain, IntegralDomain::InteriorFace);
+                EXPECT_EQ(term.interface_marker, facet_set_marker);
+                ASSERT_TRUE(term.interior_facet_side.has_value());
+                EXPECT_EQ(*term.interior_facet_side, CutVolumeSide::Negative);
+            }
+            EXPECT_EQ(svmp::FE::assembly::hasFlag(ir.requiredData(),
+                                                  svmp::FE::assembly::RequiredData::BasisHessians),
+                      order > 1);
+        }
+    }
+
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, 1);
+    const auto p = TrialFunction(space, "p");
+    const auto q = TestFunction(space, "q");
+    EXPECT_THROW((void)ghostPenalty(p, q, 0, FormExpr::constant(1.0), FormExpr{}, facets),
+                 std::invalid_argument);
+    EXPECT_THROW((void)ghostPenalty(p, q, 3, FormExpr::constant(1.0), FormExpr{}, facets),
+                 std::invalid_argument);
+}
+
 TEST(CutCellForms, BuildsParameterBackedCutMetadataTerminals)
 {
     CutCellParameterSlots slots;

@@ -1488,9 +1488,10 @@ inline void addFittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem& 
     declareFittedMeshRowDescriptors(system, o.operator_tag, ale, b, u_id, /*rows_installed=*/true);
 }
 
-// Pressure gradient-jump penalty on the facets next to the cut (Burman; Schott & Wall):
+// Pressure ghost penalty on the facets next to the cut (Burman; Schott & Wall):
 //   sum_F s gamma_p 0.01 h^3/(mu + rho h^2/dt) [grad p].[grad q]   (+ h^5 [d_nn p][d_nn q] for P2 pressure)
 [[nodiscard]] inline FE::forms::FormExpr cutFacetPressurePenalty(const FreeSurfaceBoundary& b,
+                                                                 const PreparedSurfaceIdentity& identity,
                                                                  const NavierStokesTerms& t,
                                                                  const IncompressibleNavierStokesVMSOptions& o,
                                                                  int velocity_order, int pressure_order,
@@ -1505,23 +1506,15 @@ inline void addFittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem& 
     if (!pressureStabilizationActive(b)) {
         return {};
     }
-    const auto& pp = t.p;
     const auto h = avg(hNormal());
-    const auto h3 = h * h * h;
-    const auto mu_gp = t.mu + FormExpr::constant(o.density) * h * h / FormExpr::effectiveTimeStep();
+    const auto nu = t.mu + FormExpr::constant(o.density) * h * h / FormExpr::effectiveTimeStep() +
+                    FormExpr::constant(o.stabilization_epsilon);
     const auto gamma_p = FE::forms::bc::toScalarExpr(cut.pressure_gradient_penalty, freeSurfaceValueName("ns_free_surface_cut_pressure_penalty", b));
-    const auto c = FormExpr::constant(0.01);
-    const auto F = b.active_domain == FreeSurfaceActiveDomain::None
-                       ? FacetDomain::cutAdjacent(b.interface_marker)
-                       : FacetDomain::cutAdjacent(b.interface_marker, activeDomainSide(b.active_domain));
-    auto J = (gamma_p * c * h3 / (mu_gp + FormExpr::constant(o.stabilization_epsilon)) *
-              inner(cutAdjacentFacetGradientJump(pp), cutAdjacentFacetGradientJump(t.q))).dS(F);
-    if (pressure_order > 1) {
-        J = J + (gamma_p * c * (h3 * h * h) / (mu_gp + FormExpr::constant(o.stabilization_epsilon)) *
-                 cutAdjacentFacetSecondNormalDerivativeJump(pp) *
-                 cutAdjacentFacetSecondNormalDerivativeJump(t.q)).dS(F);
-    }
-    return J;
+    const auto& G = identity.geometry.value();
+    const auto facets = b.active_domain == FreeSurfaceActiveDomain::None
+                            ? G.cutFacets()
+                            : G.side(activeDomainSide(b.active_domain)).cutFacets();
+    return ghostPenalty(t.p, t.q, pressure_order > 1 ? 2 : 1, gamma_p * FormExpr::constant(0.01), nu, facets);
 }
 
 // ---------------------------------------------------------------------------

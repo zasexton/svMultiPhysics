@@ -17,12 +17,15 @@
 #include "Core/Alignment.h"
 #include "Core/Types.h"
 #include "Forms/FormExpr.h"
+#include "Forms/IntegrationDomain.h"
+#include "Forms/Vocabulary.h"
 #include "Geometry/CutQuadrature.h"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace svmp {
@@ -198,6 +201,44 @@ struct CutCellFormTerminals {
 {
     const auto n_minus = FormExpr::normal().minus();
     return inner(cutAdjacentFacetHessianJump(expr), outer(n_minus, n_minus));
+}
+
+/**
+ * @brief Ghost penalty on the interior facets next to a cut (Burman 2010)
+ *
+ *   sum_{j=1..k} coefficient h^(2j+1) / stiffness [d^j p][d^j q] dS(facets)
+ *
+ * with h = avg(hNormal()), [d^1 .] the gradient jump and [d^2 .] the jump of
+ * the second normal derivative along the normal of the minus side.  k is the
+ * polynomial order of the space of p, 1 or 2 (otherwise
+ * std::invalid_argument).  The stiffness divides each term after its power
+ * of h, as in the viscous scaling of Schott and Wall (2014); an invalid
+ * stiffness leaves the terms undivided.  Each order is its own facet
+ * integral.  Typical use: ghostPenalty(p, q, k, gamma, nu, L.cutFacets()).
+ */
+[[nodiscard]] inline FormExpr ghostPenalty(const FormExpr& p,
+                                           const FormExpr& q,
+                                           int order,
+                                           const FormExpr& coefficient,
+                                           const FormExpr& stiffness,
+                                           const FacetDomain& facets)
+{
+    if (order < 1 || order > 2) {
+        throw std::invalid_argument(
+            "ghostPenalty supports derivative orders 1 and 2, got " + std::to_string(order));
+    }
+    const auto h = avg(hNormal());
+    const auto h3 = h * h * h;
+    const auto weight = [&](const FormExpr& h_power) {
+        const auto scaled = coefficient * h_power;
+        return stiffness.isValid() ? scaled / stiffness : scaled;
+    };
+    auto J = (weight(h3) * inner(cutAdjacentFacetGradientJump(p), cutAdjacentFacetGradientJump(q))).dS(facets);
+    if (order > 1) {
+        J = J + (weight(h3 * h * h) * cutAdjacentFacetSecondNormalDerivativeJump(p) *
+                 cutAdjacentFacetSecondNormalDerivativeJump(q)).dS(facets);
+    }
+    return J;
 }
 
 [[nodiscard]] FormExpr cutAdjacentFacetIntegral(const FormExpr& integrand) = delete;

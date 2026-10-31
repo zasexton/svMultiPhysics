@@ -33,6 +33,7 @@
  * | G.contactLine(wall)         | ContactLineDomain(intersection marker)   -> dI (codim 2)    |
  * | L.boundary(b), L.wetted(w)  | BoundaryDomain::generatedActiveSubset(b, generated marker)   |
  * | L.cutFacets()               | FacetDomain::cutAdjacent(marker, side)   -> dS              |
+ * | G.cutFacets()               | FacetDomain::cutAdjacent(marker)         -> dS (both sides) |
  * | L.outwardNormal()           | the rule normal, pointing out of the side                   |
  *
  * The markers are the stable generated markers of the interfaces module
@@ -224,6 +225,9 @@ public:
     /// One side {phi < c} (Negative) or {phi > c} (Positive).  The geometry
     /// of cutGeometry() records the side for its cut.
     [[nodiscard]] CutSide side(forms::CutVolumeSide side) const;
+
+    /// The interior facets adjacent to the cut, on both sides.
+    [[nodiscard]] forms::FacetDomain cutFacets() const;
 
     /// Key of the generated intersection of Gamma with a physical boundary.
     [[nodiscard]] interfaces::GeneratedInterfaceBoundaryIntersectionMarkerKey contactLineKey(

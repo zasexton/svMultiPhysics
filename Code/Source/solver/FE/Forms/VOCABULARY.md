@@ -363,6 +363,7 @@ formulation never computes a marker by hand:
 | `L.outwardNormal()`, `outwardInterfaceNormal(side)` | The interface rule normal, negated on the positive side, so it points out of L |
 | `L.boundary(b)`, `L.wetted(w)` | `BoundaryDomain::generatedActiveSubset(b, generated marker)` |
 | `L.cutFacets()` | `FacetDomain::cutAdjacent(marker, side)` |
+| `G.cutFacets()` | `FacetDomain::cutAdjacent(marker)`: the facets next to the cut on both sides |
 | `G.contactLine(wall)`, `L.contactLine(wall)` | `ContactLineDomain` of Gamma intersected with a wall |
 | `G.contactLineKey(wall)`, `L.boundaryKey(b)` | `implemented/expert`; the generated marker keys |
 
@@ -935,6 +936,7 @@ embedded-boundary formulations, and the facet terms of cut-cell stabilization
 | `cutAdjacentFacetGradientJump(e)`, `cutAdjacentFacetNormalGradientJump(e)` | `jump(grad(e))` and its `n(-)` component |
 | `cutAdjacentFacetHessianJump(e)`, `cutAdjacentFacetSecondNormalDerivativeJump(e)` | `jump(hessian(e))` and its `n(-) n(-)` component |
 | `cutAdjacentFacetIntegral(e, marker[, side])` | `.dS(marker[, side])`; the marker-less overload is deleted |
+| `ghostPenalty(p, q, k, coefficient, stiffness, facets)` | Burman's ghost penalty `sum_{j<=k} coefficient h^(2j+1)/stiffness [d^j p][d^j q] dS(facets)`, h = `avg(hNormal())`, `[d^1]` the gradient jump, `[d^2]` the second-normal-derivative jump; k = 1 or 2 (the order of the space of p), one facet integral per order; an invalid `stiffness` leaves the terms undivided. Navier–Stokes writes its cut pressure penalty as `ghostPenalty(p, q, k, 0.01 gamma_p, mu + rho h^2/dt + eps, L.cutFacets())` |
 | `cutCellParameterCount(...)`, `cutCellParametersForRule(...)`, `cutSideIndicatorValue(...)` | `implemented/internal`; fill the parameter slots from a cut rule |
 
 ### Coupling Forms

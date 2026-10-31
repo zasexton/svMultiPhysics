@@ -464,7 +464,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
         } else if (isExteriorOnePhaseBoundary(b)) {
             Factories::addFittedFreeSurface(M, system, plan, bcs, o, b, identity, ale, t, u_id, F, split);
         }
-        const auto J = Factories::cutFacetPressurePenalty(b, t, o, velocity_space_->polynomial_order(),
+        const auto J = Factories::cutFacetPressurePenalty(b, identity, t, o, velocity_space_->polynomial_order(),
                                                           pressure_space_->polynomial_order(), F);
         if (J.isValid()) {
             cut_penalties.append(p_id, J);
