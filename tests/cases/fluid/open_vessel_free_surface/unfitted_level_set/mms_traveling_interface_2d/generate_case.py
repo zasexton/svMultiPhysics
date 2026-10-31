@@ -497,10 +497,18 @@ def level_set_velocity_xml(args: argparse.Namespace) -> str:
             "  <Velocity_source>constant</Velocity_source>\n"
             f"  <Constant_velocity>{vx:.12g} {vy:.12g} {vz:.12g}</Constant_velocity>"
         )
-    return """  <Velocity_source>prescribed_data</Velocity_source>
+    block = """  <Velocity_source>prescribed_data</Velocity_source>
   <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
   <Auto_register_velocity_field>true</Auto_register_velocity_field>
   <Source_velocity_field_name>Velocity</Source_velocity_field_name>"""
+    if args.level_set_only:
+        return block
+    # The advection velocity is the harmonic PDE extension of the fluid
+    # velocity into the dry region at every P2 DOF, solved with the flow as an
+    # algebraic unknown whose frozen rows enter the Newton Jacobian.
+    return block + """
+  <Advection_velocity_extension_method>pde_harmonic</Advection_velocity_extension_method>
+  <Advection_velocity_extension_coupling>monolithic</Advection_velocity_extension_coupling>"""
 
 
 def level_set_exact_inflow_xml(args: argparse.Namespace) -> str:
@@ -1034,8 +1042,10 @@ Newton iterations with fallback-free initial and accepted-step high-order cut
 contexts and zero reported wet-volume drift. Broader transient and refinement
 validation remain separate qualification work.
 
-The default level-set advection velocity is the wet-extension prescribed field
-generated from the fluid velocity. {constant_velocity_note}{exact_inflow_note}
+The default level-set advection velocity is the harmonic PDE extension of the
+fluid velocity into the dry region (`Advection_velocity_extension_method=pde_harmonic`
+with `Advection_velocity_extension_coupling=monolithic`), extended at every P2 DOF
+of the Quad9 cells. {constant_velocity_note}{exact_inflow_note}
 Level-set transport defaults to the advective form with SUPG enabled; diagnostics
 can regenerate with `--disable-level-set-supg` or
 `--level-set-transport-form conservative_divergence` to isolate transport-form

@@ -44,6 +44,8 @@
   <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
   <Auto_register_velocity_field>true</Auto_register_velocity_field>
   <Source_velocity_field_name>Velocity</Source_velocity_field_name>
+  <Advection_velocity_extension_method>pde_harmonic</Advection_velocity_extension_method>
+  <Advection_velocity_extension_coupling>monolithic</Advection_velocity_extension_coupling>
   <Enable_SUPG>true</Enable_SUPG>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
   <Output type="Spatial">

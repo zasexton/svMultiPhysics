@@ -98,8 +98,10 @@ Newton iterations with fallback-free initial and accepted-step high-order cut
 contexts and zero reported wet-volume drift. Broader transient and refinement
 validation remain separate qualification work.
 
-The default level-set advection velocity is the wet-extension prescribed field
-generated from the fluid velocity. For topology diagnostics, regenerate with `--level-set-velocity-source constant --level-set-constant-velocity 0.1 0.0 0.0` to use a prescribed constant horizontal transport velocity and remove feedback from the solved fluid velocity field. This is a topology/isolation diagnostic; for `Omega != 0`, it is not the exact time-dependent MMS velocity `U0*cos(Omega*t)` after the initial instant. Regenerate with `--level-set-exact-inflow` to add exact time/space side-wall level-set inflow data for boundary-state diagnostics.
+The default level-set advection velocity is the harmonic PDE extension of the
+fluid velocity into the dry region (`Advection_velocity_extension_method=pde_harmonic`
+with `Advection_velocity_extension_coupling=monolithic`), extended at every P2 DOF
+of the Quad9 cells. For topology diagnostics, regenerate with `--level-set-velocity-source constant --level-set-constant-velocity 0.1 0.0 0.0` to use a prescribed constant horizontal transport velocity and remove feedback from the solved fluid velocity field. This is a topology/isolation diagnostic; for `Omega != 0`, it is not the exact time-dependent MMS velocity `U0*cos(Omega*t)` after the initial instant. Regenerate with `--level-set-exact-inflow` to add exact time/space side-wall level-set inflow data for boundary-state diagnostics.
 Level-set transport defaults to the advective form with SUPG enabled; diagnostics
 can regenerate with `--disable-level-set-supg` or
 `--level-set-transport-form conservative_divergence` to isolate transport-form
