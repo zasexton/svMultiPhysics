@@ -1077,6 +1077,21 @@ These are proposals. Each lists a recommended option and an alternative. Record 
   7. **Boundary conditions:** five constraint classes used only by their own tests are deleted; the constraint manifest gets a stable label instead of the compiler's type name; Navier–Stokes strong inflow data moves to the FE time functions where that is bit for bit (weak inflows later, under a tolerance gate); normals in strong values use the slip constraint's rank-independent averaged normals.
   8. **Dropped Jacobian columns** become an error for installs that feed the problem analysis; diagnostic installs are measurement-only. The installer pairs block metadata with the right fields whatever the caller's field order.
   9. **P4 starts, adjusted to D60:** profiles are named defaults that explicit keys override, with no overlay warnings, no transition cycle and no KAG key; each profile deck resolves identically to its explicit version. The level-set keys used only by C++ tests become C++-only options, and the unreachable `Field_name` and `Basis_type` spellings are deleted.
+  10. *(Progress 2026-10-31: wave 1, P3 and P4 are on main, `7fca933c..566f36ee`, each gate bitwise on the reference sets at 1, 2 and 4 ranks. The manifests differ only by the item 7 labels and an analysis-record line; the outlet sums of item 5 changed as declared.)*
+- **D63, 2026-10-31 (user): follow-ups of P4, and wave 2.**
+  1. **The ALE momentum-form default stays** until the fitted sloshing benchmark is run at L/h = 64, where its frequency and damping limits apply, with today's form and the conservative form under Δt refinement (D62 item 1 measured L/h = 32 only).
+  2. **Acceptance lists are not generated from the schemas;** P4's acceptance test keeps each profile deck equal to its explicit version.
+  3. **`Level_set_isovalue` and `Field_name` on level-set equations,** accepted and ignored today, are rejected.
+  4. **`capillary_rise_2d.py` integrates with `numpy.trapezoid`;** `numpy.trapz` is gone from the gate environment's NumPy.
+  5. **Later:** the oscillating-drop log test, which failed before this round, and open-vessel generators that write profile decks.
+  6. **A lone level-set equation** (`Coupled=false`) is installed as the monolithic operator, so level-set-only decks with a prescribed velocity, such as the impermeable-wall advection runner, run again (D61 item 6).
+  7. **Steps 3–5 of design note 11** for the traveling-interface MMS deck wait for a later wave.
+  8. **Wave 2 starts in five lanes,** each bitwise on every deck and merged in gated batches:
+     - solver structure: solver roles on fields and the block layout derived from them, pressure certificates out of the Newton solver, `lagged()` in Navier–Stokes in place of the semi-implicit reference fields, `tag()`/work channels in place of `ResidualContributions` (design 10 M11), the outer fixed point inferred from the forms;
+     - boundary conditions: one Dirichlet with an enforcement argument, multi-row conditions and vector Nitsche; one boundary target with automatic markers; component merges, corner precedence and derived rate conditions;
+     - moving domains: item 1, the kinematic condition as one boundary relation, Navier–Stokes on `movingDomain()`, deletion of the unused prescribed mesh-velocity branch, complete shape derivatives as an opt-in tangent path (D61 item 4), and the contact-line residual and dissipation from one functional;
+     - cut cells: item 6, a ghost-penalty helper with Navier–Stokes on the cut facets, cut-side unknowns and automatic markers in Navier–Stokes, and the 2-rank failure of the 2D SPHERIC Test 05 decks ("exactly one backend owner"; it fails on every binary);
+     - authoring and outlets: item 3, design 10 steps M1 (one functional handle) and M2 (generic scalar history), physics modules on the shared option readers, and `unknown()`/`residual()` inference with a species tutorial test.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
