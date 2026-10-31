@@ -1285,6 +1285,11 @@ resolveConfiguration(application::core::LevelSetEquationInputHandle input)
   }
   auto configuration =
       translate_level_set_transport_input(input->installation_input);
+  // The application drives one monolithic operator; an equation alone in
+  // its deck is that operator, coupled or not.
+  if (input->sole_equation) {
+    configuration.options.operator_tag = "equations";
+  }
   configuration.input_snapshot = std::move(input);
   return std::make_shared<
       application::core::ResolvedLevelSetEquationConfiguration>(

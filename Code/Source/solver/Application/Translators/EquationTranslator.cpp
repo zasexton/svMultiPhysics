@@ -490,13 +490,15 @@ EquationTranslator::snapshotLegacyLevelSetMaintenanceInput(
 application::core::LevelSetEquationInputHandle
 EquationTranslator::snapshotLevelSetEquationInput(
     const EquationParameters& equation,
-    svmp::Physics::EquationModuleInput installation_input)
+    svmp::Physics::EquationModuleInput installation_input,
+    bool sole_equation)
 {
   auto snapshot =
       std::make_shared<application::core::LevelSetEquationInputSnapshot>();
   snapshot->installation_input = std::move(installation_input);
   snapshot->legacy_maintenance_input =
       snapshotLegacyLevelSetMaintenanceInput(equation);
+  snapshot->sole_equation = sole_equation;
   return snapshot;
 }
 

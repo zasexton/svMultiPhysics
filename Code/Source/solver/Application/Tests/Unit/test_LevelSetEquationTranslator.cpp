@@ -2254,6 +2254,51 @@ TEST(LevelSetEquationTranslator, RoutesCoupledTransportToEquationsOperator)
 #endif
 }
 
+TEST(LevelSetEquationTranslator, RoutesSoleUncoupledTransportToEquationsOperator)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryQuadMesh();
+
+  svmp::Physics::EquationModuleInput input{};
+  input.equation_type = "level_set";
+  input.mesh_name = "quad";
+  input.mesh = mesh->local_mesh_ptr();
+  input.equation_params["Coupled"] =
+      svmp::Physics::ParameterValue{true, "false"};
+  input.equation_params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "phi"};
+  input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{true, "prescribed_data"};
+  input.equation_params["Velocity_field_name"] =
+      svmp::Physics::ParameterValue{true, "LevelSetAdvectionVelocity"};
+  input.equation_params["Auto_register_velocity_field"] =
+      svmp::Physics::ParameterValue{true, "true"};
+
+  const auto resolve = [&](bool sole_equation) {
+    auto snapshot =
+        std::make_shared<application::core::LevelSetEquationInputSnapshot>();
+    snapshot->installation_input = input;
+    snapshot->sole_equation = sole_equation;
+    return application::translators::level_set::resolveConfiguration(
+        std::move(snapshot));
+  };
+  // Beside other equations an uncoupled transport keeps an operator of its
+  // own; alone in its deck it is the monolithic operator.
+  EXPECT_EQ(resolve(false)->options.operator_tag, "level_set");
+  const auto sole = resolve(true);
+  EXPECT_EQ(sole->options.operator_tag, "equations");
+
+  svmp::FE::systems::FESystem system(mesh);
+  auto module =
+      application::translators::level_set::createModule(*sole, system);
+  ASSERT_TRUE(module);
+  EXPECT_TRUE(system.hasOperator("equations"));
+  EXPECT_FALSE(system.hasOperator("level_set"));
+#endif
+}
+
 TEST(LevelSetEquationTranslator,
      CoupledPrescribedAngleRegistersGeometryWithoutScalarResidual)
 {

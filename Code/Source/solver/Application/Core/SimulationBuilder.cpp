@@ -123,7 +123,9 @@ void preflightAndPreRegisterTwoFluidMaterialInterfaceDependencies(
   };
   std::vector<MaterialTransportCandidate> transports;
   std::vector<TwoFluidCandidate> owners;
-  std::size_t equation_count = 0u;
+  const auto equation_count = static_cast<std::size_t>(std::count_if(
+      params.equation_parameters.begin(), params.equation_parameters.end(),
+      [](const auto* equation) { return equation != nullptr; }));
 
   components.resolved_level_set_equations_by_input_index.assign(
       params.equation_parameters.size(), {});
@@ -134,7 +136,6 @@ void preflightAndPreRegisterTwoFluidMaterialInterfaceDependencies(
     if (equation == nullptr) {
       continue;
     }
-    ++equation_count;
     if (!equation->type.defined()) {
       continue;
     }
@@ -158,7 +159,8 @@ void preflightAndPreRegisterTwoFluidMaterialInterfaceDependencies(
       continue;
     }
     auto snapshot = application::translators::EquationTranslator::
-        snapshotLevelSetEquationInput(*equation, std::move(input));
+        snapshotLevelSetEquationInput(*equation, std::move(input),
+                                      equation_count == 1u);
     auto configuration = level_set::resolveConfiguration(std::move(snapshot));
     components.resolved_level_set_equations_by_input_index[equation_index] =
         configuration;

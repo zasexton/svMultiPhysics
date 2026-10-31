@@ -39,7 +39,8 @@ public:
   static application::core::LevelSetEquationInputHandle
   snapshotLevelSetEquationInput(
       const EquationParameters& equation,
-      svmp::Physics::EquationModuleInput installation_input);
+      svmp::Physics::EquationModuleInput installation_input,
+      bool sole_equation = false);
 
   /// States the values of the method profile that a Free_surface boundary
   /// condition names (Free_surface_profile, decision D47 P4) on that

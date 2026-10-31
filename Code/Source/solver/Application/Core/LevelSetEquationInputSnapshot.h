@@ -28,6 +28,9 @@ struct LegacyLevelSetMaintenanceInput {
 struct LevelSetEquationInputSnapshot {
   svmp::Physics::EquationModuleInput installation_input{};
   std::optional<LegacyLevelSetMaintenanceInput> legacy_maintenance_input{};
+  // The deck has no other equation: the transport is the monolithic
+  // operator whether or not it is declared Coupled.
+  bool sole_equation{false};
 };
 
 using LevelSetEquationInputHandle =
