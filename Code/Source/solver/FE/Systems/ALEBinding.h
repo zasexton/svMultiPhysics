@@ -75,7 +75,9 @@ struct MovingDomainOptions {
  *        displacement unknown @p displacement: x = X + d
  *
  * Stated once, before setup: the current configuration becomes the assembly
- * frame (plain dx, grad and normal() mean the moving domain), @p displacement
+ * frame of a system on a native mesh (plain dx, grad and normal() mean the
+ * moving domain; a system on a mesh access assembles on the coordinates the
+ * access gives), @p displacement
  * and its derived mesh velocity are bound as the system's mesh motion
  * (resolveALEBinding with a coupled displacement), and every later
  * installFormulation on the system differentiates its geometry in
@@ -87,6 +89,18 @@ struct MovingDomainOptions {
  * second declaration, and for a displacement that is not a vector unknown.
  */
 [[nodiscard]] MovingDomain movingDomain(FESystem& system, FieldId displacement, MovingDomainOptions options = {});
+
+/**
+ * @brief movingDomain() of the mesh displacement that @p options names: the
+ *        unknown bound as mesh-motion displacement or named
+ *        mesh_displacement_field_name, registered on mesh_displacement_space
+ *        (else mesh_velocity_space) when auto_register_mesh_displacement_field
+ *        is set, with the options' tangent path and mesh-velocity name.
+ *
+ * Validates @p options as resolveALEBinding does; throws when they are
+ * disabled or name no displacement.
+ */
+[[nodiscard]] MovingDomain movingDomain(FESystem& system, ALEBindingOptions options);
 
 /// The moving domain declared on @p system, or null.
 [[nodiscard]] const MovingDomain* findMovingDomain(const FESystem& system) noexcept;

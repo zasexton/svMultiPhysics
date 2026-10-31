@@ -143,6 +143,7 @@ void PseudoElasticMeshMotionModule::registerOn(FE::systems::FESystem& system) co
 
     formulation.options() = physicsInstallOptions(options_.jit_policy);
     formulation.options().compiler_options.geometry_tangent_path = options_.tangent_path;
+    formulation.geometryConstant();   // the mesh equation keeps a frozen-geometry Jacobian on a moving domain
     formulation.symbolicTangent(
         options_.tangent_path != FE::forms::GeometryTangentPath::ADReference);
 

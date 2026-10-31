@@ -15,6 +15,7 @@
 #include "Systems/OperatorBackends.h"
 #include "Systems/SystemsExceptions.h"
 #include "TimeStepping/GeneratedState.h"
+#include "Tests/Unit/Forms/FormsTestHelpers.h"
 
 #include "Assembly/AssemblyKernel.h"
 #include "Assembly/CutIntegrationContext.h"
@@ -2448,4 +2449,52 @@ TEST(FESystem, MovingDomainSetsTheFrameBindsTheMotionAndDifferentiatesTheInstall
     set_up.setup();
     EXPECT_THROW(set_up.setAssemblyConfiguration(svmp::Configuration::Current), svmp::FE::FEException);
     EXPECT_THROW((void)svmp::FE::systems::movingDomain(set_up, d), std::invalid_argument);
+}
+
+TEST(FESystem, MovingDomainOfBindingOptionsRegistersTheNamedDisplacement)
+{
+    auto mesh = build_single_quad_mesh();
+    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    auto vector_space = std::make_shared<ProductSpace>(scalar_space, /*components=*/2);
+    const svmp::FE::systems::ALEBindingOptions options{
+        .enabled = true,
+        .dimension = 2,
+        .geometry_tangent_path = svmp::FE::forms::GeometryTangentPath::ADReference,
+        .mesh_velocity_field_name = "w",
+        .mesh_displacement_field_name = "d",
+        .mesh_velocity_space = vector_space,
+        .mesh_displacement_space = vector_space,
+        .auto_register_mesh_displacement_field = true,
+    };
+
+    FESystem sys(mesh);
+    const auto domain = svmp::FE::systems::movingDomain(sys, options);
+    EXPECT_EQ(sys.coordinateConfiguration(), svmp::Configuration::Current);
+    EXPECT_EQ(domain.displacement, sys.findFieldByName("d"));
+    EXPECT_EQ(domain.velocity, sys.findFieldByName("w"));
+    EXPECT_EQ(domain.geometry_tangent_path, svmp::FE::forms::GeometryTangentPath::ADReference);
+    EXPECT_EQ(sys.meshMotionField(MeshMotionFieldRole::Displacement), domain.displacement);
+    const auto binding = domain.binding();
+    EXPECT_TRUE(binding.coupled());
+    EXPECT_EQ(binding.mesh_displacement_field, domain.displacement);
+    EXPECT_EQ(binding.mesh_velocity_field, domain.velocity);
+
+    // Without automatic registration the displacement must exist; disabled options declare nothing.
+    FESystem missing(mesh);
+    auto no_register = options;
+    no_register.auto_register_mesh_displacement_field = false;
+    EXPECT_THROW((void)svmp::FE::systems::movingDomain(missing, no_register), std::invalid_argument);
+    auto disabled = options;
+    disabled.enabled = false;
+    EXPECT_THROW((void)svmp::FE::systems::movingDomain(missing, disabled), std::invalid_argument);
+    EXPECT_EQ(svmp::FE::systems::findMovingDomain(missing), nullptr);
+
+    // A system on a mesh access has no frame to choose: it keeps the coordinates the access gives.
+    auto tetra_scalar = std::make_shared<H1Space>(ElementType::Tetra4, /*order=*/1);
+    auto tetra_vector = std::make_shared<ProductSpace>(tetra_scalar, /*components=*/3);
+    FESystem on_access(std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>());
+    const auto d = on_access.addMeshDisplacementUnknown("d", tetra_vector);
+    const auto moving = svmp::FE::systems::movingDomain(on_access, d);
+    EXPECT_EQ(moving.displacement, d);
+    EXPECT_NE(svmp::FE::systems::findMovingDomain(on_access), nullptr);
 }

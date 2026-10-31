@@ -227,7 +227,9 @@ MovingDomain movingDomain(FESystem& system, FieldId displacement, MovingDomainOp
         throw std::invalid_argument("movingDomain: the displacement '" + rec.name + "' is not vector-valued");
     }
     // The frame first: nothing has captured the mesh access before setup.
-    system.setAssemblyConfiguration(svmp::Configuration::Current);
+    if (system.mesh() != nullptr) {
+        system.setAssemblyConfiguration(svmp::Configuration::Current);
+    }
     const auto ale = resolveALEBinding(
         system,
         ALEBindingOptions{
@@ -246,6 +248,33 @@ MovingDomain movingDomain(FESystem& system, FieldId displacement, MovingDomainOp
         .geometry_tangent_path = ale.geometry_tangent_path,
     };
     return *declaration.domain;
+}
+
+MovingDomain movingDomain(FESystem& system, ALEBindingOptions options)
+{
+    if (!options.enabled) {
+        throw std::invalid_argument("movingDomain: the ALE binding options are disabled");
+    }
+    validateALEBinding(system, options);
+    FieldId displacement = resolveCoupledDisplacementField(system, options.mesh_displacement_field_name);
+    if (displacement == INVALID_FIELD_ID && options.auto_register_mesh_displacement_field) {
+        auto displacement_space = options.mesh_displacement_space ? std::move(options.mesh_displacement_space)
+                                                                  : options.mesh_velocity_space;
+        validateVectorSpace(displacement_space, options.dimension, "mesh_displacement_space");
+        displacement = system.addMeshDisplacementUnknown(options.mesh_displacement_field_name,
+                                                         std::move(displacement_space), options.dimension);
+    }
+    if (displacement == INVALID_FIELD_ID) {
+        throw std::invalid_argument(
+            "resolveALEBinding: coupled ALE requires a mesh displacement "
+            "unknown bound as mesh-motion displacement or named '" +
+            options.mesh_displacement_field_name + "'");
+    }
+    return movingDomain(system, displacement,
+                        MovingDomainOptions{
+                            .geometry_tangent_path = options.geometry_tangent_path,
+                            .mesh_velocity_field_name = std::move(options.mesh_velocity_field_name),
+                        });
 }
 
 const MovingDomain* findMovingDomain(const FESystem& system) noexcept

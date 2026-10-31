@@ -380,7 +380,9 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     }
     plan.commitThrough(cs::ConstraintPhase::VertexValues);
 
-    const auto ale = fs::resolveALEBinding(system, preflight.ale_options);
+    // ALE: the domain moves with the mesh displacement (x = X + d, w = dd/dt), declared once on the system;
+    // the installs of the mesh rows and of the fluid residual differentiate their geometry in d.
+    const auto ale = o.enable_ale ? fs::movingDomain(system, preflight.ale_options).binding() : fs::ALEBinding{};
     std::vector<fs::MeshNormalKinematicDeclaration> fitted_normal_kinematics;
     if (ale.coupled()) {
         // The kinematic condition (w - u).n = 0 of each fitted free surface (MeshNitsche, validated): one
