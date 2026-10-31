@@ -1941,7 +1941,6 @@ forms on `ds`, or use `forms::bc::NaturalBC` / `forms::bc::RobinBC`
 | `DirichletBC` | Essential (strong) boundary conditions |
 | `PeriodicBC` | Periodic boundary conditions |
 | `MultiPointConstraint` | Linear combinations of DOFs |
-| `HangingNodeConstraint` | Hanging node constraints for non-conforming meshes |
 
 ```cpp
 namespace svmp::FE::constraints {

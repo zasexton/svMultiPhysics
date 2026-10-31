@@ -21,17 +21,11 @@
  * Constraint subclasses:
  * - DirichletBC: Essential boundary conditions (algebraic)
  * - PeriodicBC: Periodic boundary constraints (algebraic)
- * - HangingNodeConstraint: Mesh adaptivity constraints (algebraic)
  * - MultiPointConstraint: General linear DOF relations (algebraic)
  * - GlobalConstraint: Global/integral constraints (algebraic)
  *
- * Boundary term classes (NOT Constraint subclasses):
- * - NeumannBC: Natural boundary conditions (variational)
- * - RobinBC: Mixed boundary conditions (variational)
- *
- * The key distinction:
- * - Algebraic constraints (Constraint) define DOF relationships
- * - Boundary terms define contributions to the weak form
+ * Natural and Robin conditions are not constraints: they are weak-form
+ * terms (forms::bc::NaturalBC, forms::bc::RobinBC in Forms/StandardBCs.h).
  */
 
 #include "AffineConstraints.h"

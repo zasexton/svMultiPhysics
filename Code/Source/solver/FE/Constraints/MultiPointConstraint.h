@@ -31,7 +31,6 @@
  * and converting them to the canonical AffineConstraints form.
  *
  * @see AffineConstraints for constraint storage
- * @see HangingNodeConstraint for mesh adaptivity constraints
  */
 
 #include "Constraint.h"

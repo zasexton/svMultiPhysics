@@ -89,10 +89,10 @@ model, or time-history model.
   These primitives still need backend-vector, DOF-layout, ghost-ownership,
   distributed-sparsity, and preconditioner/nullspace integration before they can
   be treated as a complete FE adjoint constraint path.
-- Constraint dependency and moving-constraint metadata already exist in
-  `Constraints/ConstraintDependency.*` and
-  `Constraints/MovingConstraintComposition.*`, including geometry, time,
-  topology, layout, active-state, and tangent-policy declarations.
+- Constraint dependency metadata already exists in
+  `Constraints/ConstraintDependency.*`, including geometry, time, topology,
+  layout, active-state, and tangent-policy declarations (the unused
+  `MovingConstraintComposition` was deleted).
 - Moving-domain infrastructure now distinguishes prescribed mesh-motion data,
   derived moving-domain fields, and coupled mesh-displacement unknowns. Coupled
   ALE geometry-sensitive tangent paths are being built through Forms and
@@ -630,7 +630,6 @@ The report should include:
 - `Code/Source/solver/FE/Systems/GlobalKernel.*`
 - `Code/Source/solver/FE/Systems/GlobalKernelStateProvider.*`
 - `Code/Source/solver/FE/Constraints/ConstraintDependency.*`
-- `Code/Source/solver/FE/Constraints/MovingConstraintComposition.*`
 - `Code/Source/solver/FE/Constitutive/*`
 - `Code/Source/solver/FE/Coupling/*`
 - `Code/Source/solver/FE/MovingMesh/*`
@@ -1165,7 +1164,6 @@ layer must also consume:
 - `ConstraintDependencyDeclaration`
 - `ConstraintRevisionSnapshot`
 - `ConstraintTangentPolicy`
-- `MovingConstraintCompositionResult`
 - moving-constraint revision and conflict metadata
 
 The adjoint path should reject constraints that affect the differentiated
@@ -1178,7 +1176,6 @@ operator or objective-gradient mapping.
 - `Code/Source/solver/FE/Constraints/ConstraintTransform.*`
 - `Code/Source/solver/FE/Constraints/AffineConstraints.*`
 - `Code/Source/solver/FE/Constraints/ConstraintDependency.*`
-- `Code/Source/solver/FE/Constraints/MovingConstraintComposition.*`
 - `Code/Source/solver/FE/Constraints/AuxiliaryDrivenDirichletConstraint.*`
 - `Code/Source/solver/FE/Constraints/SystemConstraints.*`
 - `Code/Source/solver/FE/Systems/FESystem.*`

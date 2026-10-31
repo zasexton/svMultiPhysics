@@ -642,17 +642,12 @@ set(FE_CONSTRAINTS_HEADERS
     Constraints/ConstraintDependency.h
     Constraints/DirichletBC.h
     Constraints/PeriodicBC.h
-    Constraints/HangingNodeConstraint.h
     Constraints/MultiPointConstraint.h
-    Constraints/TiedInterfaceConstraint.h
     Constraints/GlobalConstraint.h
-    Constraints/GeometricIntegralConstraint.h
-    Constraints/MovingConstraintComposition.h
     Constraints/ConstraintDistributor.h
     Constraints/ParallelConstraints.h
     Constraints/ConstraintTools.h
     Constraints/ConstraintTransform.h
-    Constraints/ConstraintsIO.h
     Constraints/GaugeDiagnostics.h
     Constraints/GaugeRegistry.h
     Constraints/CoupledFieldGaugeConstraint.h
@@ -676,19 +671,15 @@ set(FE_CONSTRAINTS_SOURCES
     Constraints/ConstraintDependency.cpp
     Constraints/DirichletBC.cpp
     Constraints/PeriodicBC.cpp
-    Constraints/HangingNodeConstraint.cpp
     Constraints/MultiPointConstraint.cpp
-    Constraints/TiedInterfaceConstraint.cpp
     Constraints/GlobalConstraint.cpp
     Constraints/ConstraintDistributor.cpp
     Constraints/ParallelConstraints.cpp
     Constraints/ConstraintTools.cpp
     Constraints/ConstraintTransform.cpp
-    Constraints/ConstraintsIO.cpp
     Constraints/GaugeDiagnostics.cpp
     Constraints/GaugeRegistry.cpp
     Constraints/CoupledFieldGaugeConstraint.cpp
-    Constraints/MovingConstraintComposition.cpp
     Constraints/SystemConstraints.cpp
     Constraints/StrongDirichletConstraint.cpp
     Constraints/VertexDirichletConstraint.cpp
@@ -2754,17 +2745,13 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Constraints/test_AffineConstraints.cpp
         Tests/Unit/Constraints/test_DirichletBC.cpp
         Tests/Unit/Constraints/test_ConstraintTransform.cpp
-        Tests/Unit/Constraints/test_HangingNodeConstraint.cpp
         Tests/Unit/Constraints/test_PeriodicBC.cpp
         Tests/Unit/Constraints/test_MultiPointConstraint.cpp
         Tests/Unit/Constraints/test_ConstraintDependency.cpp
         Tests/Unit/Constraints/test_GaugeRegistry.cpp
         Tests/Unit/Constraints/test_GlobalConstraint.cpp
-        Tests/Unit/Constraints/test_GeometricIntegralConstraint.cpp
-        Tests/Unit/Constraints/test_MovingConstraintComposition.cpp
         Tests/Unit/Constraints/test_ParallelConstraints.cpp
         Tests/Unit/Constraints/test_ConstraintDistributor.cpp
-        Tests/Unit/Constraints/test_ConstraintsIO.cpp
         Tests/Unit/Constraints/test_ConstraintTools.cpp
         Tests/Unit/Constraints/test_main.cpp
     )
