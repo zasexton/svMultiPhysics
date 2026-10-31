@@ -108,13 +108,13 @@ grad_Gamma(w.n_h) = P_h (grad w)^T n_h,   P_h = I - n_h ⊗ n_h.
 - `dt_eff = 1/a0` is the effective step of the time integrator:
   `0.5333 dt` for generalized-alpha with `rho_inf = 0.5`, `dt` for backward
   Euler. It is not a tuned parameter.
-- `u_ref` is the prescribed field
-  `ns_free_surface_semi_implicit_reference_velocity` in the velocity space.
-  The application overwrites it with the velocity unknown at every
-  generated-state refresh: the projected outer fixed-point, projected
-  endpoint and restored synchronization points, and before each physical
-  solve. The copy is a coefficient copy between two fields that share one
-  DOF map.
+- `u_ref = lagged(u, Refresh::GeneratedState)`, the FE shadow field
+  `ns_free_surface_semi_implicit_reference_velocity` of the velocity
+  (`FieldBinding::lagged`). Its participant overwrites it with the velocity
+  unknown at every generated-state refresh: the projected outer fixed-point,
+  projected endpoint and restored synchronization points, and before each
+  physical solve. The copy is a coefficient copy between two fields that
+  share one DOF map.
 
 `R_SI` is therefore zero in every freshly refreshed residual: the accepted
 state and the acceptance test of the outer fixed point are those of the

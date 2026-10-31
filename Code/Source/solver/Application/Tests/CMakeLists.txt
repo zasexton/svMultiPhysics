@@ -22,7 +22,6 @@ add_executable(test_application
   Unit/test_OpenVesselExamples.cpp
   Unit/test_OpenVesselStabilizationMetadata.cpp
   ../Core/ActiveDomainOutput.cpp
-  ../Core/FreeSurfaceSemiImplicitReference.cpp
   ../Core/LevelSetCutConfiguration.cpp
   ../Core/LevelSetMaintenanceConfiguration.cpp
   ../Core/LevelSetMaintenanceTransactionConsensus.cpp
@@ -72,7 +71,6 @@ if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
     Unit/test_MeshPartitionWeightingMPI.cpp
     Unit/test_LegacyParameterStubs.cpp
     ../Core/ActiveDomainOutput.cpp
-    ../Core/FreeSurfaceSemiImplicitReference.cpp
     ../Core/LevelSetCutConfiguration.cpp
     ../Core/LevelSetMaintenanceConfiguration.cpp
     ../Core/LevelSetMaintenanceTransactionConsensus.cpp

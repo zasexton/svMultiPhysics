@@ -346,10 +346,10 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
         ? fields.prescribedSymbol(std::move(*preflight.body_force_spec),
                                   o.auto_register_body_force_field, "momentum source", o.body_force_field_name)
         : fs::BoundPrescribed{};
-    const FieldId reference_velocity_id = preflight.semi_implicit_reference_spec
-        ? fields.prescribed(std::move(*preflight.semi_implicit_reference_spec),
-                            true, "semi-implicit reference velocity")
-        : FE::INVALID_FIELD_ID;
+    // u at the last refresh of the generated geometry, for the semi-implicit capillary term.
+    const auto u_ref = preflight.semi_implicit_reference_spec
+        ? fields.lagged(U, fs::Refresh::GeneratedState, preflight.semi_implicit_reference_spec->name)
+        : FormExpr{};
     post::declareFreeSurfaceDiscreteFunctionals(free_surfaces, preflight.surface_identities, system, u_id, o.density, o.body_force,
                                           !o.has_body_force_spacetime && body_force.id == FE::INVALID_FIELD_ID,
                                           o.viscosity, o.viscosity_model == nullptr);
@@ -452,8 +452,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
         const auto& b = free_surfaces[index];
         auto& identity = preflight.surface_identities[index];
         if (isExteriorOnePhaseBoundary(b) && isUnfittedLevelSet(b)) {
-            Factories::addUnfittedFreeSurface(M, system, plan, F, o, b, identity, t, u_id,
-                                            reference_velocity_id, split);
+            Factories::addUnfittedFreeSurface(M, system, plan, F, o, b, identity, t, u_id, u_ref, split);
         } else if (isExteriorOnePhaseBoundary(b)) {
             Factories::addFittedFreeSurface(M, system, plan, bcs, o, b, identity, ale, t, u_id, F, split);
         }

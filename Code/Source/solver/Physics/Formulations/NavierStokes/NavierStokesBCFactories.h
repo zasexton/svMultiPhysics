@@ -1329,7 +1329,7 @@ inline void addUnfittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem
                                    FE::constraints::ConstraintPlan& plan, FE::systems::FormulationBuilder& F,
                                    const IncompressibleNavierStokesVMSOptions& o, const FreeSurfaceBoundary& b,
                                    PreparedSurfaceIdentity& identity, const NavierStokesTerms& t, FE::FieldId u_id,
-                                   FE::FieldId reference_velocity_id, post::ConservativeBalanceForms* balance)
+                                   const FE::forms::FormExpr& u_ref, post::ConservativeBalanceForms* balance)
 {
     using namespace FE::forms;
     const auto& [u, p, v, q, rho, mu, f, dim] = t;
@@ -1387,9 +1387,6 @@ inline void addUnfittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem
         M = M + (pressure + surface_energy).dI(Gamma);
     }
     if (usesSemiImplicitNormalIncrement(b)) {
-        const auto& reference = system.fieldRecord(reference_velocity_id);
-        const auto u_ref = FormExpr::discreteField(reference_velocity_id, *reference.space,
-            std::string(kFreeSurfaceSemiImplicitReferenceVelocityFieldName));   // u at the last geometry refresh
         M = M + Factories::semiImplicitNormalIncrementIntegrand(gamma, u, u_ref, v, n).dI(Gamma);
     }
     F.log(tractionLogs(b));

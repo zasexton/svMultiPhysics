@@ -2,13 +2,13 @@
 #include "FE/Core/LogRecord.h"
 
 #include "Application/Core/ActiveDomainOutput.h"
-#include "Application/Core/FreeSurfaceSemiImplicitReference.h"
 #include "Application/Core/LevelSetCutConfiguration.h"
 #include "Application/Core/LevelSetMaintenanceConfiguration.h"
 #include "Application/Core/LevelSetMaintenanceTransactionConsensus.h"
 #include "Application/Core/LevelSetPdeVelocityExtension.h"
 #include "Application/Core/OopMpiLog.h"
 #include "Application/Core/SimulationBuilder.h"
+#include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 #include "Application/Translators/EquationTranslator.h"
 #include "Application/Translators/LevelSetConfigurationParsing.h"
 
@@ -89,6 +89,7 @@
 #include "FE/LevelSet/TwoFluidStageParticipant.h"
 #include "Parameters.h"
 #include "tinyxml2.h"
+#include "FE/Systems/FieldBinding.h"
 #include "FE/Systems/FunctionalRecords.h"
 #include "FE/Systems/TwoFluidStageRecords.h"
 
@@ -6575,6 +6576,158 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
   return true;
 }
 
+// How one level_set equation advects its level set.
+struct SemiImplicitLevelSetTransport {
+  std::string level_set_field_name{};
+  svmp::FE::level_set::LevelSetVelocitySource velocity_source{
+      svmp::FE::level_set::LevelSetVelocitySource::CoupledField};
+  // Field that advects the level set (the fluid velocity for coupled_field,
+  // the extension target for prescribed_data).
+  std::string advection_velocity_field_name{};
+  // prescribed_data only: the method that fills the advection velocity from
+  // the fluid velocity (empty: none) and its source field.
+  std::string extension_method{};
+  std::string extension_source_velocity_field_name{};
+};
+
+[[noreturn]] void rejectSemiImplicit(const std::string& reason)
+{
+  throw std::runtime_error(
+      "[svMultiPhysics::Application] Surface_tension_semi_implicit="
+      "NormalIncrement " +
+      reason);
+}
+
+// The level set must move with the velocity whose increment the term
+// linearizes.  Returns an empty string when it does, else the reason.
+std::string semiImplicitTransportMismatch(
+    const SemiImplicitLevelSetTransport& transport,
+    const std::string& velocity_name)
+{
+  namespace ls = svmp::FE::level_set;
+  // A velocity extension (prescribed coupling, or an algebraic unknown with
+  // monolithic coupling) qualifies only when it equals the fluid velocity on
+  // every vertex of the retained interface cells at the refresh, which the
+  // PDE extensions guarantee by construction.
+  if (!transport.extension_method.empty() ||
+      !transport.extension_source_velocity_field_name.empty()) {
+    if (transport.extension_method.empty()) {
+      return "advects the level set with an extension of unknown method";
+    }
+    if (!ls::pdeVelocityExtensionOperatorFromToken(transport.extension_method)
+             .has_value()) {
+      return "advects the level set with the '" + transport.extension_method +
+             "' extension, whose frozen algebraic map is not the fluid "
+             "velocity of the refreshed iterate; use coupled_field or a PDE "
+             "extension (pde_harmonic, pde_normal)";
+    }
+    if (transport.extension_source_velocity_field_name != velocity_name) {
+      return "extends velocity '" +
+             transport.extension_source_velocity_field_name +
+             "', not the free-surface velocity '" + velocity_name + "'";
+    }
+    return {};
+  }
+  switch (transport.velocity_source) {
+  case ls::LevelSetVelocitySource::CoupledField:
+    if (transport.advection_velocity_field_name == velocity_name) {
+      return {};
+    }
+    return "advects the level set with coupled field '" +
+           transport.advection_velocity_field_name +
+           "', not the free-surface velocity '" + velocity_name + "'";
+  case ls::LevelSetVelocitySource::PrescribedData:
+    return "advects the level set with prescribed data '" +
+           transport.advection_velocity_field_name +
+           "' that is not an extension of the fluid velocity";
+  case ls::LevelSetVelocitySource::ConstantVector:
+    return "advects the level set with a constant vector";
+  case ls::LevelSetVelocitySource::MaterialInterfacePhasePair:
+    return "advects the level set with a material-interface phase pair";
+  }
+  return "uses an unsupported level-set velocity source";
+}
+
+// The lagged velocity of the semi-implicit capillary term
+// (Surface_tension_semi_implicit=NormalIncrement), a shadow field
+// (FieldBinding::lagged) refreshed by the generated-state outer fixed point,
+// or nullptr when no free surface uses the term.  Requires a transient solve
+// with the outer fixed point, and every declared free-surface level set to be
+// transported by the free-surface velocity or by a PDE extension of it.
+const svmp::FE::systems::ShadowField* semiImplicitLaggedVelocity(
+    const svmp::FE::systems::FESystem& system,
+    const std::vector<svmp::FE::systems::ShadowField>& shadows,
+    std::span<const SemiImplicitLevelSetTransport> transports,
+    bool transient_solve,
+    bool outer_fixed_point)
+{
+  using svmp::FE::FieldId;
+  using svmp::FE::INVALID_FIELD_ID;
+  const std::string reference_name(
+      svmp::Physics::formulations::navier_stokes::
+          kFreeSurfaceSemiImplicitReferenceVelocityFieldName);
+  const auto reference = std::find_if(
+      shadows.begin(), shadows.end(),
+      [&](const svmp::FE::systems::ShadowField& shadow) {
+        return system.fieldRecord(shadow.shadow).name == reference_name;
+      });
+  if (reference == shadows.end()) {
+    return nullptr;
+  }
+  if (!transient_solve) {
+    rejectSemiImplicit(
+        "requires a transient solve; the term is defined by the effective "
+        "time step of the time integrator");
+  }
+  if (!outer_fixed_point) {
+    rejectSemiImplicit(
+        "requires the generated-state outer fixed point, which refreshes "
+        "the reference velocity with the interface geometry");
+  }
+
+  // The owning module declares one discrete functional per unfitted
+  // SurfaceStress free surface; all of them name the lagged velocity.
+  std::set<FieldId> level_set_fields;
+  for (const auto& declaration :
+       svmp::FE::systems::functionalRecords(system).functionalDeclarations()) {
+    if (declaration.velocity_field == INVALID_FIELD_ID) {
+      continue;
+    }
+    if (declaration.velocity_field != reference->source) {
+      rejectSemiImplicit(
+          "requires all unfitted free surfaces to share one velocity field");
+    }
+    if (declaration.level_set_field != INVALID_FIELD_ID) {
+      level_set_fields.insert(declaration.level_set_field);
+    }
+  }
+  if (level_set_fields.empty()) {
+    rejectSemiImplicit(
+        "found no declared unfitted free-surface velocity and level set");
+  }
+  const auto& velocity_name = system.fieldRecord(reference->source).name;
+  for (const auto level_set_field : level_set_fields) {
+    const auto& level_set_name = system.fieldRecord(level_set_field).name;
+    bool transported = false;
+    for (const auto& transport : transports) {
+      if (transport.level_set_field_name != level_set_name) {
+        continue;
+      }
+      transported = true;
+      const auto mismatch = semiImplicitTransportMismatch(transport, velocity_name);
+      if (!mismatch.empty()) {
+        rejectSemiImplicit("cannot use level set '" + level_set_name +
+                           "': its level_set equation " + mismatch);
+      }
+    }
+    if (!transported) {
+      rejectSemiImplicit("requires level set '" + level_set_name +
+                         "' to be transported by a level_set equation");
+    }
+  }
+  return &*reference;
+}
+
 } // namespace
 
 namespace application {
@@ -6892,12 +7045,12 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       activeFESystemCommunicator(*sim.fe_system));
   // The semi-implicit capillary term is defined by the transient outer
   // fixed point; a steady solve fails closed here.
-  (void)bindFreeSurfaceSemiImplicitReference(
+  (void)semiImplicitLaggedVelocity(
       *sim.fe_system,
+      svmp::FE::systems::shadowFields(*sim.fe_system),
       {},
       /*transient_solve=*/false,
-      /*outer_fixed_point=*/false,
-      activeFESystemCommunicator(*sim.fe_system));
+      /*outer_fixed_point=*/false);
   requireCollectiveLevelSetMaintenanceRequestSchedule(
       level_set_maintenance,
       LevelSetMaintenanceScheduleStage::SteadyInitialization,
@@ -7433,12 +7586,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
            "legacy fixed_topology comparison mode."
         << std::endl;
   }
-  std::vector<FreeSurfaceSemiImplicitTransport> semi_implicit_transports;
+  std::vector<SemiImplicitLevelSetTransport> semi_implicit_transports;
   for (const auto& equation : sim.resolved_level_set_equations_by_input_index) {
     if (!equation) {
       continue;
     }
-    FreeSurfaceSemiImplicitTransport transport;
+    SemiImplicitLevelSetTransport transport;
     transport.level_set_field_name = equation->options.level_set.field_name;
     transport.velocity_source = equation->options.velocity.source;
     transport.advection_velocity_field_name =
@@ -7456,26 +7609,36 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     }
     semi_implicit_transports.push_back(std::move(transport));
   }
-  const auto semi_implicit_reference = bindFreeSurfaceSemiImplicitReference(
+  // The lagged copies of the unknowns (FieldBinding::lagged), refreshed at
+  // the generated-state synchronizations and before each physical solve.
+  const auto shadows = svmp::FE::systems::shadowFields(*sim.fe_system);
+  const auto shadow_fields =
+      shadows.empty()
+          ? std::shared_ptr<svmp::FE::timestepping::IGeneratedStateParticipant>{}
+          : svmp::FE::timestepping::makeShadowFieldParticipant(*sim.fe_system);
+  const auto* semi_implicit_velocity = semiImplicitLaggedVelocity(
       *sim.fe_system,
+      shadows,
       semi_implicit_transports,
       /*transient_solve=*/true,
-      use_transient_external_state_fixed_point,
-      activeFESystemCommunicator(*sim.fe_system));
-  if (semi_implicit_reference) {
-    refreshFreeSurfaceSemiImplicitReference(
-        *sim.fe_system,
-        *semi_implicit_reference,
-        stateViewForHistory(*sim.time_history));
+      use_transient_external_state_fixed_point);
+  const auto refresh_shadow_fields =
+      [&](const svmp::FE::systems::SystemStateView& state) {
+        if (shadow_fields) {
+          svmp::FE::timestepping::GeneratedStateSync sync{};
+          shadow_fields->synchronize(state, sync);
+        }
+      };
+  refresh_shadow_fields(stateViewForHistory(*sim.time_history));
+  if (semi_implicit_velocity) {
     svmp::FE::logRecord(
         svmp::FE::LogRecord("ApplicationDriver", "semi-implicit capillary term")
             .diagnostic("free_surface_semi_implicit_reference")
             .text("surface_tension_semi_implicit", "NormalIncrement")
             .text("reference_field",
-                  sim.fe_system
-                      ->fieldRecord(semi_implicit_reference->reference_field)
-                      .name)
-            .text("velocity_field", semi_implicit_reference->velocity_field_name)
+                  sim.fe_system->fieldRecord(semi_implicit_velocity->shadow).name)
+            .text("velocity_field",
+                  sim.fe_system->fieldRecord(semi_implicit_velocity->source).name)
             .text("reference_refresh",
                   "projected_outer|endpoint|restored|before_solve")
             .rootOnly());
@@ -7844,20 +8007,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       level_set_advection_velocity,
       svmp::FE::timestepping::GeneratedStateSolve::Transient,
       use_transient_external_state_fixed_point);
-  if (semi_implicit_reference) {
-    generated_state->add(std::make_shared<FunctionGeneratedStateParticipant>(
-        "free_surface_semi_implicit_reference",
-        GeneratedStateRole::Reference,
-        FunctionGeneratedStateParticipant::Callbacks{
-            .synchronize =
-                [&](const svmp::FE::systems::SystemStateView& state,
-                    GeneratedStateSync&) {
-                  // u_ref := the projected iterate that generated this
-                  // geometry, so the semi-implicit capillary term vanishes
-                  // in the fresh residual.
-                  refreshFreeSurfaceSemiImplicitReference(
-                      *sim.fe_system, *semi_implicit_reference, state);
-                }}));
+  if (shadow_fields) {
+    // A lagged copy := the projected iterate that generated this geometry,
+    // so the semi-implicit capillary term vanishes in the fresh residual.
+    generated_state->add(shadow_fields);
   }
   generated_state->bind(opts.newton);
   // The cut geometry's part of each time step (the cut-topology attempt and
@@ -7874,11 +8027,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         // and checked the accepted topology baseline.
         (void)updateLevelSetAdvectionVelocities(
             sim, h, level_set_advection_velocity);
-        if (semi_implicit_reference) {
-          refreshFreeSurfaceSemiImplicitReference(
-              *sim.fe_system, *semi_implicit_reference,
-              stateViewForHistory(h));
-        }
+        refresh_shadow_fields(stateViewForHistory(h));
         energy.recordInitialBaseline(h);
         return true;
       };

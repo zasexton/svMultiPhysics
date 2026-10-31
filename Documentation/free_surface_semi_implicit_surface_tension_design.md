@@ -323,13 +323,13 @@ Once the loop converges independently of Δt, the remaining limits are:
   `applyFreeSurfaceBoundary`. The velocity difference is formed before the
   projection, so the integrand is exactly zero where `u` and `u_ref` carry the
   same coefficients.
-- **`u_ref`.** Prescribed field `ns_free_surface_semi_implicit_reference_velocity`
-  in the velocity space, registered by `registerOn`. The application
-  (`Application/Core/FreeSurfaceSemiImplicitReference.{h,cpp}`) copies the
-  velocity coefficients into it at the projected outer fixed-point, projected
-  endpoint and restored synchronization points and before each physical solve
-  (three hooks in `ApplicationDriver.cpp`). The two fields share one DOF map,
-  which is checked collectively once.
+- **`u_ref`.** `lagged(u, Refresh::GeneratedState)`: the shadow field
+  `ns_free_surface_semi_implicit_reference_velocity` of the velocity,
+  registered by `registerOn` through `FieldBinding::lagged`. The FE shadow-field
+  participant (`timestepping::makeShadowFieldParticipant`) copies the velocity
+  coefficients into it at the projected outer fixed-point, projected endpoint
+  and restored synchronization points, and the driver before each physical
+  solve. The two fields share one DOF map, which is checked collectively once.
 - **Transport.** The PDE extension equals the fluid velocity on all
   interface-cell vertices, so `u_ref` is well defined for `coupled_field` and
   both PDE couplings. The algebraic `wall_compatible_normal` and
