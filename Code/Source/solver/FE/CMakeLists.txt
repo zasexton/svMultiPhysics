@@ -1238,6 +1238,7 @@ set(FE_POSTPROCESSING_HEADERS
     PostProcessing/DerivedResultOutput.h
     PostProcessing/ExposureAccumulator.h
     PostProcessing/Reduction.h
+    PostProcessing/ScalarHistory.h
 )
 
 set(FE_POSTPROCESSING_SOURCES
@@ -1247,6 +1248,7 @@ set(FE_POSTPROCESSING_SOURCES
     PostProcessing/DerivedResultOutput.cpp
     PostProcessing/ExposureAccumulator.cpp
     PostProcessing/Reduction.cpp
+    PostProcessing/ScalarHistory.cpp
 )
 
 # Coupling sources (physics-agnostic setup and plan infrastructure; depends on

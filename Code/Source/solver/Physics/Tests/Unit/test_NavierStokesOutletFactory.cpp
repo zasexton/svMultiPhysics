@@ -40,6 +40,7 @@
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/ProductSpace.h"
 #include "FE/Systems/FunctionalForms.h"
+#include "FE/PostProcessing/ScalarHistory.h"
 #include "FE/Systems/SystemManifest.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesPostProcessing.h"
 #include "FE/Dofs/DofHandler.h"
@@ -1031,6 +1032,67 @@ TEST(NavierStokesOutletFactory, NewOverload_RCR_EndToEnd)
     const auto outputs = sys.auxiliaryOutputValues();
     ASSERT_GT(outputs.size(), out_slot);
     EXPECT_NEAR(outputs[out_slot], 55.0, 1e-8);
+}
+
+TEST(NavierStokesOutletFactory, RecordedOutletsWriteTheirFlowStatesAndPressureToTheScalarHistory)
+{
+    // u = (0, 0, -1) on the outlet face of area 0.5: Q = 0.5.
+    const auto run = [](const auto& options,
+                        const std::string& expected_header,
+                        const std::vector<Real>& expected_values) {
+        const int marker = 42;
+        auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+        auto u_space = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, mesh, 1, 3);
+        auto p_space = svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1, mesh, 1);
+        FESystem sys(mesh);
+        const auto u_field = sys.addField(FieldSpec{.name = "u", .space = u_space, .components = 3});
+        const auto p_field = sys.addField(FieldSpec{.name = "p", .space = p_space, .components = 1});
+        sys.addOperator("ns");
+        const auto u = FormExpr::stateField(u_field, *u_space, "u");
+        auto opts = options(marker);
+        opts.record_history = true;
+        auto bc = Factories::toCoupledOutflowBC(opts, sys, u, FormExpr::constant(1.0));
+        ASSERT_NE(bc, nullptr);
+        EXPECT_EQ(svmp::FE::post::scalarHistoryHeader(sys), expected_header);
+
+        BoundaryConditionManager manager;
+        manager.add(std::move(bc));
+        const auto v = FormExpr::testFunction(*u_space, "v");
+        const auto q = FormExpr::testFunction(*p_space, "q");
+        auto momentum = inner(grad(u), grad(v)).dx();
+        manager.applyAll(sys, momentum, u, v, u_field);
+        (void)installFormulation(sys, "ns", {u_field, p_field}, momentum + (q * div(u)).dx(), FormInstallOptions{});
+        SetupInputs si;
+        si.topology_override = singleTetraTopology();
+        sys.setup({}, si);
+        sys.finalizeAuxiliaryLayout();
+
+        std::vector<Real> sol(static_cast<std::size_t>(sys.dofHandler().getNumDofs()), 0.0);
+        for (svmp::FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+            setFieldComponent(sol, sys, u_field, vertex, /*component=*/2, -1.0);
+        }
+        SystemStateView state;
+        state.time = 0.0;
+        state.dt = 0.1;
+        state.u = sol;
+        sys.prepareAuxiliaryForAssembly(state, false);
+        const auto values = svmp::FE::post::scalarHistoryValues(sys, state, CollectiveCommunicator{});
+        ASSERT_EQ(values.size(), expected_values.size());
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            EXPECT_NEAR(values[i], expected_values[i], 1e-10) << i;
+        }
+    };
+    // RCR: X0 = 50, P_out = X + Rp Q = 55.
+    run([](int marker) { return makeRCROpts(marker); },
+        "step,time,rcr_windkessel_b42.Q,rcr_windkessel_b42.X,rcr_windkessel_b42.P_out\n", {0.5, 50.0, 55.0});
+    // RCRCR: P_out = P1 + Rp Q = 65.
+    run([](int marker) { return makeRCRCROpts(marker); },
+        "step,time,rcrcr_windkessel_b42.Q,rcrcr_windkessel_b42.P1,rcrcr_windkessel_b42.P2,"
+        "rcrcr_windkessel_b42.P_out\n",
+        {0.5, 60.0, 45.0, 65.0});
+    // Resistance: the committed state P is its initial value Pd = 50.
+    run([](int marker) { return makeRCROpts(marker, /*C=*/0.0); },
+        "step,time,resistive_outflow_b42.Q,resistive_outflow_b42.P_out\n", {0.5, 50.0});
 }
 
 TEST(NavierStokesOutletFactory, NewOverload_Resistive_EndToEnd)

@@ -9,6 +9,7 @@
 
 #include "Analysis/FormExprScanner.h"
 #include "Forms/FormExpr.h"
+#include "PostProcessing/ScalarHistory.h"
 #include "Systems/ALEBinding.h"
 #include "Systems/FESystem.h"
 
@@ -107,6 +108,18 @@ Quantity FormulationBuilder::quantity(std::string name,
                               .owner = owner.empty() ? operator_tag_ : std::move(owner),
                           });
     return systems::quantity(std::move(name), kind, std::move(form));
+}
+
+FormulationBuilder& FormulationBuilder::record(const Quantity& quantity)
+{
+    post::record(*system_, quantity);
+    return *this;
+}
+
+FormulationBuilder& FormulationBuilder::record(FieldId field)
+{
+    post::record(*system_, field);
+    return *this;
 }
 
 FormulationBuilder& FormulationBuilder::wallFunctional(WallFunctionalFormDeclaration declaration)

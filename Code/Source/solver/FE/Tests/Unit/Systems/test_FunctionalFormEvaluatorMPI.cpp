@@ -15,17 +15,23 @@
 #include "Forms/BoundaryFunctional.h"
 #include "Forms/FormExpr.h"
 #include "Forms/IntegrationDomain.h"
+#include "PostProcessing/ScalarHistory.h"
 #include "Spaces/H1Space.h"
 #include "Systems/BoundaryReductionService.h"
 #include "Systems/FESystem.h"
 #include "Systems/FunctionalFormEvaluator.h"
+#include "Systems/FunctionalForms.h"
 #include "Systems/SystemCollectives.h"
 #include "Tests/Unit/Systems/FunctionalFormEvaluatorFixtures.h"
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <span>
@@ -471,4 +477,78 @@ TEST(FunctionalFormEvaluatorMPI, ExactBoundaryFaceSumIsTheSameAtEveryRankCount)
     MPI_Allreduce(MPI_IN_PLACE, &low, 1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE, &high, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
     EXPECT_EQ(low, high);
+}
+
+TEST(ScalarHistoryMPI, TheFileIsTheSameAtEveryRankCount)
+{
+    // The history of two states of the strip, written by the distributed
+    // system (rank 0 writes), equals byte for byte the history of the
+    // one-rank system: the quantities are summed exactly.
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    auto distributed = stripSystem(MPI_COMM_WORLD);
+    auto one_rank = stripSystem(MPI_COMM_SELF);
+    const auto declare = [](StripSystem& strip) {
+        const auto u = FormExpr::discreteField(strip.u, *strip.system->fieldRecord(strip.u).space, "u");
+        const auto x = FormExpr::coordinate().component(0);
+        svmp::FE::post::record(*strip.system,
+                               systems::quantity("mass", systems::FunctionalKind::Integral, (u * u + x).dx()));
+        svmp::FE::post::record(*strip.system,
+                               systems::quantity("wall_flux", systems::FunctionalKind::Integral,
+                                                 (x * u).ds(fixture::kWallMarker) - (Real{0.25} * u).dx()));
+    };
+    declare(distributed);
+    declare(one_rank);
+
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("svmp_scalar_history_mpi_np" + std::to_string(size) + ".csv");
+    std::string expected = svmp::FE::post::scalarHistoryHeader(*one_rank.system);
+    {
+        svmp::FE::post::ScalarHistoryWriter writer(*distributed.system, path.string(),
+                                                   systems::CollectiveCommunicator(MPI_COMM_WORLD));
+        for (std::uint64_t step = 1; step <= 2; ++step) {
+            const auto scale = static_cast<Real>(step);
+            std::vector<Real> distributed_u = distributed.u_values;
+            std::vector<Real> one_rank_u = one_rank.u_values;
+            for (auto& value : distributed_u) {
+                value = scale * value + Real{0.125};
+            }
+            for (auto& value : one_rank_u) {
+                value = scale * value + Real{0.125};
+            }
+            systems::SystemStateView state;
+            state.time = Real{0.1} * scale;
+            state.u = distributed_u;
+            writer.write(step, state);
+
+            systems::SystemStateView one_rank_state;
+            one_rank_state.time = state.time;
+            one_rank_state.u = one_rank_u;
+            const auto values =
+                svmp::FE::post::scalarHistoryValues(*one_rank.system, one_rank_state, systems::CollectiveCommunicator{});
+            expected += svmp::FE::post::scalarHistoryRow(step, state.time, values);
+
+            // Every rank holds the same values.
+            auto distributed_values =
+                svmp::FE::post::scalarHistoryValues(*distributed.system, state,
+                                                    systems::CollectiveCommunicator(MPI_COMM_WORLD));
+            for (auto& value : distributed_values) {
+                double low = value;
+                double high = value;
+                MPI_Allreduce(MPI_IN_PLACE, &low, 1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
+                MPI_Allreduce(MPI_IN_PLACE, &high, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+                EXPECT_EQ(low, high);
+            }
+        }
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (rank == 0) {
+        std::ifstream in(path);
+        const std::string written((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        EXPECT_EQ(written, expected);
+        EXPECT_EQ(std::count(written.begin(), written.end(), '\n'), 3);
+        std::filesystem::remove(path);
+    }
 }

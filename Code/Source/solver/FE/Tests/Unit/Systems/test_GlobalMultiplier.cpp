@@ -49,11 +49,14 @@
 #include "Systems/FormsInstaller.h"
 #include "Systems/FormsInstallerDetail.h"
 #include "Systems/FunctionalFormEvaluator.h"
+#include "Systems/FunctionalForms.h"
 #include "Systems/SystemCollectives.h"
 #include "Systems/SystemManifest.h"
 #include "Systems/TimeIntegrator.h"
 #include "Systems/TransientSystem.h"
+#include "PostProcessing/ScalarHistory.h"
 #include "TimeStepping/NewtonSolver.h"
+#include "TimeStepping/StepParticipants.h"
 #include "TimeStepping/TimeHistory.h"
 #include "TimeStepping/TimeLoop.h"
 
@@ -69,10 +72,16 @@
 
 #include <array>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <span>
+#include <sstream>
 #include <string>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -1522,8 +1531,11 @@ ScalarOde buildScalarOde(MultiplierLowering lowering = MultiplierLowering::Auto)
     return out;
 }
 
-/// The values of X and of the first DOF of w after each accepted step.
-std::vector<std::array<Real, 2>> runScalarOde(timestepping::SchemeKind scheme)
+/// The values of X and of the first DOF of w after each accepted step;
+/// @p extend may add to the callbacks of the time loop.
+std::vector<std::array<Real, 2>> runScalarOde(
+    timestepping::SchemeKind scheme,
+    const std::function<void(ScalarOde&, timestepping::TimeLoopCallbacks&)>& extend = {})
 {
     std::vector<std::array<Real, 2>> out;
     auto problem = buildScalarOde();
@@ -1576,6 +1588,9 @@ std::vector<std::array<Real, 2>> runScalarOde(timestepping::SchemeKind scheme)
         const auto u = h.uSpan();
         out.push_back({u[static_cast<std::size_t>(x_dof)], u[static_cast<std::size_t>(w_dof)]});
     };
+    if (extend) {
+        extend(problem, callbacks);
+    }
     const auto report = loop.run(transient, *factory, *linear, history, callbacks);
     EXPECT_TRUE(report.success);
     return out;
@@ -1595,6 +1610,100 @@ TEST(GlobalTimeDerivative, AScalarOdeFollowsTheSchemeOfAVolumeField)
         // The state moves: the solution is not the initial value.
         EXPECT_GT(std::abs(values.back()[0] - kInitialValue), 0.1);
     }
+}
+
+namespace {
+
+/// The comma-separated fields of each line of the file @p path.
+std::vector<std::vector<std::string>> readCsv(const std::filesystem::path& path)
+{
+    std::vector<std::vector<std::string>> rows;
+    std::ifstream in(path);
+    std::string line;
+    while (std::getline(in, line)) {
+        std::vector<std::string> fields;
+        std::stringstream stream(line);
+        std::string field;
+        while (std::getline(stream, field, ',')) {
+            fields.push_back(field);
+        }
+        rows.push_back(std::move(fields));
+    }
+    return rows;
+}
+
+[[nodiscard]] Real readReal(const std::string& text)
+{
+    return std::strtod(text.c_str(), nullptr);
+}
+
+} // namespace
+
+TEST(GlobalTimeDerivative, TheScalarHistoryRecordsAGlobalFieldAndAQuantityAfterEachAcceptedStep)
+{
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("svmp_scalar_history_" + std::to_string(::getpid()) + ".csv");
+    const auto values = runScalarOde(timestepping::SchemeKind::BackwardEuler,
+                                     [&](ScalarOde& problem, timestepping::TimeLoopCallbacks& callbacks) {
+        auto& sys = *problem.system;
+        post::record(sys, problem.x);
+        const auto w = FormExpr::discreteField(problem.w, *sys.fieldRecord(problem.w).space, "w");
+        post::record(sys, quantity("w_integral", FunctionalKind::Integral, w.dx()));
+        timestepping::StepParticipantList participants;
+        participants.add(std::make_shared<post::ScalarHistoryWriter>(sys, path.string(), CollectiveCommunicator{}),
+                         timestepping::StepParticipantOrder::AfterBase);
+        callbacks = participants.callbacks(std::move(callbacks));
+    });
+    ASSERT_EQ(values.size(), 10u);
+
+    const auto rows = readCsv(path);
+    std::filesystem::remove(path);
+    ASSERT_EQ(rows.size(), 11u);
+    EXPECT_EQ(rows[0], (std::vector<std::string>{"step", "time", "X", "w_integral"}));
+    for (std::size_t k = 0; k < values.size(); ++k) {
+        SCOPED_TRACE("step " + std::to_string(k + 1));
+        const auto& row = rows[k + 1];
+        ASSERT_EQ(row.size(), 4u);
+        EXPECT_EQ(row[0], std::to_string(k + 1));
+        EXPECT_NEAR(readReal(row[1]), 0.05 * static_cast<Real>(k + 1), 1e-14);
+        // Backward Euler: the accepted state is the converged one; the
+        // shortest decimal reads back to the same double.
+        EXPECT_EQ(readReal(row[2]), values[k][0]);
+        // w is uniform on the 1 x 0.5 rectangle.
+        EXPECT_NEAR(readReal(row[3]), 0.5 * values[k][1], 1e-13);
+    }
+}
+
+TEST(GlobalField, ScalarHistoryRowsHoldTheValuesTheyRead)
+{
+    auto problem = buildMeanConstrainedPoisson(4, 2, 0.5, 1, 1.5);
+    auto& sys = *problem.system;
+    const auto u = solveFromZero(sys);
+    post::record(sys, problem.lambda);
+    const auto u_disc = FormExpr::discreteField(problem.u, *problem.u_space, "u");
+    post::record(sys, quantity("integral_u", FunctionalKind::Integral, u_disc.dx()));
+    EXPECT_EQ(post::scalarHistoryHeader(sys), "step,time,lambda,integral_u\n");
+
+    SystemStateView state;
+    state.time = 0.25;
+    state.u = u;
+    const auto values = post::scalarHistoryValues(sys, state, CollectiveCommunicator{});
+    ASSERT_EQ(values.size(), 2u);
+    EXPECT_EQ(values[0], u[static_cast<std::size_t>(sys.fieldDofOffset(problem.lambda))]);
+    EXPECT_NEAR(values[1], 1.5 * 0.5, 1e-12);  // the mean constraint
+    EXPECT_EQ(post::scalarHistoryRow(3, 0.25, std::vector<Real>{0.1, -2.5e-7, 1.0 / 3.0}),
+              "3,0.25,0.1,-2.5e-07,0.3333333333333333\n");
+
+    // A column is named once, never step or time, and never with a comma.
+    const auto refused = [&](const std::function<void()>& f, const std::string& reason) {
+        const auto message = feMessage(f);
+        EXPECT_NE(message.find(reason), std::string::npos) << message;
+    };
+    refused([&] { post::record(sys, problem.lambda); }, "already recorded");
+    refused([&] { post::record(sys, quantity("time", FunctionalKind::Integral, u_disc.dx())); }, "step or time");
+    refused([&] { post::record(sys, quantity("a,b", FunctionalKind::Integral, u_disc.dx())); }, "comma");
+    refused([&] { post::record(sys, quantity("", FunctionalKind::Integral, u_disc.dx())); }, "nonempty");
+    refused([&] { post::record(sys, problem.u); }, "not a global field");
 }
 
 TEST(GlobalTimeDerivative, TheRowDeclaresItsTimeDerivatives)

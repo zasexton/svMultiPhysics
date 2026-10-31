@@ -12,6 +12,7 @@
 #include "Systems/FormulationBuilder.h"
 #include "Systems/ALEBinding.h"
 #include "Systems/FunctionalForms.h"
+#include "PostProcessing/ScalarHistory.h"
 #include "Systems/SystemManifest.h"
 #include "Systems/BoundaryConditionManager.h"
 #include "Systems/FormsInstallerDetail.h"
@@ -1808,7 +1809,9 @@ TEST(FormulationBuilder, DeclaresQuantitiesWithoutInstallingThem)
     (void)F.quantity("boundary_power", systems::FunctionalKind::Power, (u * u).ds(3) - (half * u).ds(4), "owner");
     (void)F.quantity("cut_measure", systems::FunctionalKind::Measure,
                      -forms::FormExpr::constant(1.0).dCutVolume(5, forms::CutVolumeSide::Negative));
-    // The handle is the declaration.
+    // The handle is the declaration; recording it adds a history column.
+    F.record(energy);
+    EXPECT_EQ(svmp::FE::post::scalarHistoryHeader(sys), "step,time,energy\n");
     EXPECT_EQ(energy.name(), "energy");
     EXPECT_EQ(energy.kind(), systems::FunctionalKind::Stored);
     EXPECT_EQ(energy.form().toString(), (half * u * u).dx().toString());

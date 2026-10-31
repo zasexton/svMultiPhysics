@@ -18,6 +18,7 @@
 #include "Forms/BoundaryFunctional.h"
 #include "Forms/FormExpr.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
+#include "PostProcessing/ScalarHistory.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/L2Space.h"
 #include "Spaces/SpaceFactory.h"
@@ -1046,6 +1047,62 @@ TEST(BoundaryIntegralInput, FESystem_WithAuxiliaryModel_EndToEnd)
     const auto out_slot = sys.auxiliaryOutputSlotOf("decay_inst", "Y");
     ASSERT_NE(out_slot, std::string::npos);
     EXPECT_NEAR(sys.auxiliaryOutputValues()[out_slot], 9.95, 1e-10);
+}
+
+TEST(BoundaryIntegralInput, ScalarHistoryRecordsAnInputAndTheCommittedStateAndOutputOfAModel)
+{
+    // Q = 0.5 (u = 1, area 0.5) drives dX/dt = -k Q, Y = X; X0 = 10, k = 1:
+    // forward Euler gives X = 9.95 after one step of 0.1.
+    const int marker = 5;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+    const auto u_disc = FormExpr::discreteField(u_field, *space, "u");
+    const auto Q = sys.auxiliaryInput(quantity("", FunctionalKind::Integral, u_disc.ds(marker)));
+
+    auto model = AuxiliaryModelBuilder("q_driven_decay")
+        .input("Q").state("X").param("k")
+        .ode("X", FormExpr::constant(-1.0) * modelParam("k") * modelInput("Q"))
+        .output("Y", modelState("X"))
+        .build();
+    const auto decay = sys.deploy(
+        use(model).name("decay").scope(AuxiliaryStateScope::Global)
+            .solveMode(AuxiliarySolveMode::Partitioned).stepper({"ForwardEuler"})
+            .param("k", 1.0).bind("Q", Q).initialize({10.0}));
+
+    svmp::FE::post::record(sys, Q, "Q");
+    svmp::FE::post::recordAuxiliaryState(sys, decay, "X");
+    svmp::FE::post::recordAuxiliaryOutput(sys, decay, "Y");
+    EXPECT_EQ(svmp::FE::post::scalarHistoryHeader(sys), "step,time,Q,decay.X,decay.Y\n");
+    // Recording installs nothing and registers no input.
+    EXPECT_EQ(svmp::FE::post::scalarHistoryColumns(sys).size(), 3u);
+
+    const auto u = FormExpr::stateField(u_field, *space, "u");
+    const auto v = FormExpr::testFunction(*space, "v");
+    (void)installFormulation(sys, "op", {u_field}, inner(grad(u), grad(v)).dx());
+    { SetupInputs si; si.topology_override = singleTetraTopology(); sys.setup({}, si); }
+    sys.finalizeAuxiliaryLayout();
+
+    std::vector<Real> sol(static_cast<std::size_t>(sys.dofHandler().getNumDofs()), 1.0);
+    SystemStateView state; state.time = 0.0; state.dt = 0.1; state.u = sol;
+    sys.prepareAuxiliaryForAssembly(state, false);
+    auto values = svmp::FE::post::scalarHistoryValues(sys, state, CollectiveCommunicator{});
+    ASSERT_EQ(values.size(), 3u);
+    EXPECT_NEAR(values[0], 0.5, 1e-14);
+    EXPECT_EQ(values[1], 10.0);
+    EXPECT_EQ(values[2], 10.0);
+
+    // The work state moves; the committed state, and so the history, only at commit.
+    sys.advanceAuxiliaryState(state);
+    values = svmp::FE::post::scalarHistoryValues(sys, state, CollectiveCommunicator{});
+    EXPECT_EQ(values[1], 10.0);
+    sys.commitTimeStep();
+    values = svmp::FE::post::scalarHistoryValues(sys, state, CollectiveCommunicator{});
+    EXPECT_NEAR(values[1], 9.95, 1e-12);
+    EXPECT_NEAR(values[2], 9.95, 1e-12);
 }
 
 TEST(BoundaryIntegralInput, FESystem_ConsistentInitializesGlobalPartitionedDAE)

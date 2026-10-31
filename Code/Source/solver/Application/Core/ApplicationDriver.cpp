@@ -60,6 +60,7 @@
 #include "FE/Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "FE/PostProcessing/DerivedResultTypes.h"
 #include "FE/PostProcessing/DerivedResultEvaluator.h"
+#include "FE/PostProcessing/ScalarHistory.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/ProductSpace.h"
 #include "FE/Systems/CutIntegrationInvalidation.h"
@@ -9983,6 +9984,25 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   // The cut geometry's step participants: the entry part before each of its
   // callbacks, the exit part before the discard and after the commit.
   callbacks = cut_geometry_step_participants.callbacks(std::move(callbacks));
+  // The scalar history, scalar_history.csv in the results folder, after every
+  // other participant of an accepted step: written when a formulation records
+  // a scalar (FE/PostProcessing/ScalarHistory.h), which none does by default.
+  if (!svmp::FE::post::scalarHistoryColumns(*sim.fe_system).empty()) {
+    std::filesystem::path history_dir = ".";
+    if (params.general_simulation_parameters.save_results_in_folder.defined() &&
+        !params.general_simulation_parameters.save_results_in_folder.value().empty()) {
+      history_dir = params.general_simulation_parameters.save_results_in_folder.value();
+    }
+    std::filesystem::create_directories(history_dir);
+    svmp::FE::timestepping::StepParticipantList scalar_history_participants;
+    scalar_history_participants.add(
+        std::make_shared<svmp::FE::post::ScalarHistoryWriter>(
+            *sim.fe_system, (history_dir / "scalar_history.csv").string(),
+            svmp::FE::systems::CollectiveCommunicator(
+                svmp::FE::systems::activeMeshCommunicator(*sim.fe_system))),
+        svmp::FE::timestepping::StepParticipantOrder::AfterBase);
+    callbacks = scalar_history_participants.callbacks(std::move(callbacks));
+  }
 
   capture_kinematic_baselines(*sim.time_history);
   svmp::FE::timestepping::TimeLoop loop(opts);

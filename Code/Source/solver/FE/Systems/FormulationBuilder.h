@@ -31,6 +31,7 @@
  * by measured 0-forms (FunctionalForms.h):
  *
  *   const auto E = F.quantity("kinetic_energy", FunctionalKind::Stored, (0.5 * rho * inner(u, u)).dx());
+ *   F.record(E);                                  // a column of the scalar history
  *
  * and installs its residual-work channels (exact additive groups of the
  * residual, each its own operator) and its opt-in diagnostic operators:
@@ -123,6 +124,12 @@ public:
                       FunctionalKind kind,
                       forms::FormExpr form,
                       std::string owner = {});
+
+    /// Records @p quantity, or the scalar global field @p field, in the
+    /// system's scalar history (post::record, PostProcessing/ScalarHistory.h).
+    /// Installs nothing.
+    FormulationBuilder& record(const Quantity& quantity);
+    FormulationBuilder& record(FieldId field);
 
     /// Declares the wall functional @p declaration (declareWallFunctionalForm),
     /// owned by operatorTag() when its owner is empty.  Installs nothing.
