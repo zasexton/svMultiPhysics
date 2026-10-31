@@ -7,6 +7,7 @@
  */
 
 #include "Constraints/HDivNormalConstraint.h"
+#include "Constraints/NormalComponentConstraint.h"
 #include "Forms/BoundaryCondition.h"
 #include "Systems/FESystem.h"
 
@@ -636,6 +637,72 @@ private:
 };
 
 /**
+ * @brief Strong normal component of a vector Lagrange field: u·n = g
+ *
+ * Free slip for g = 0.  Installs a constraints::NormalComponentConstraint on
+ * the marker; the tangential components keep their natural condition.
+ * Walls that meet at an edge need both normals there: state them in one
+ * NormalComponentConstraint with all their markers.
+ */
+class NormalEssentialBC final : public BoundaryCondition {
+public:
+    explicit NormalEssentialBC(int boundary_marker,
+                               FormExpr value = FormExpr::constant(0.0),
+                               constraints::NormalComponentOptions options = {})
+        : boundary_marker_(boundary_marker)
+        , value_(std::move(value))
+        , options_(options)
+    {
+        if (boundary_marker_ < 0) {
+            throw std::invalid_argument("NormalEssentialBC: boundary_marker must be >= 0");
+        }
+        if (!value_.isValid()) {
+            throw std::invalid_argument("NormalEssentialBC: invalid value expression");
+        }
+    }
+
+    [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
+    [[nodiscard]] bool hasWeakTerms() const override { return false; }
+
+    void contributeToResidual(FormExpr& /*residual*/,
+                              const FormExpr& /*u*/,
+                              const FormExpr& /*v*/) const override
+    {
+    }
+
+    void installSystemConstraints(systems::FESystem& system, FieldId field_id) const override
+    {
+        system.addSystemConstraint(std::make_unique<constraints::NormalComponentConstraint>(
+            field_id, std::vector<int>{boundary_marker_}, value_, options_));
+    }
+
+    [[nodiscard]] std::vector<StrongDirichlet> getStrongConstraints(FieldId /*field_id*/) const override
+    {
+        return {};
+    }
+
+    [[nodiscard]] std::vector<analysis::BoundaryConditionDescriptor>
+    analysisMetadata(FieldId field_id, const systems::FESystem* /*system*/) const override
+    {
+        analysis::BoundaryConditionDescriptor d;
+        d.primary_variable = analysis::VariableKey::field(field_id);
+        d.boundary_marker = boundary_marker_;
+        d.trace_kind = analysis::TraceKind::NormalComponent;
+        d.enforcement_kind = analysis::EnforcementKind::Strong;
+        d.anchors_constant_mode = true;
+        d.anchors_rigid_body_translation = true;
+        d.anchors_rigid_body_rotation = false;
+        d.source = "NormalEssentialBC on marker " + std::to_string(boundary_marker_);
+        return {d};
+    }
+
+private:
+    int boundary_marker_{-1};
+    FormExpr value_{};
+    constraints::NormalComponentOptions options_{};
+};
+
+/**
  * @brief Weak trace load BC: adds -∫ g * tau(v) ds(marker)
  *
  * The default trace operator is the H(div) normal component tau(w) = w·n.
@@ -1170,6 +1237,12 @@ private:
 makeNormalTraceEssentialBC(int boundary_marker, FormExpr value)
 {
     return std::make_unique<NormalTraceEssentialBC>(boundary_marker, std::move(value));
+}
+
+[[nodiscard]] inline std::unique_ptr<BoundaryCondition>
+makeNormalEssentialBC(int boundary_marker, FormExpr value = FormExpr::constant(0.0))
+{
+    return std::make_unique<NormalEssentialBC>(boundary_marker, std::move(value));
 }
 
 [[nodiscard]] inline std::unique_ptr<BoundaryCondition>

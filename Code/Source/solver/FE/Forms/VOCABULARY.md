@@ -598,6 +598,8 @@ namespace `forms::bc`.
 | `NaturalBC`, `RobinBC` | `StandardBCs.h` | Weak flux and Robin terms on `ds(marker)` or an `ExteriorBoundaryMeasure` |
 | `ReservedBC` | `StandardBCs.h` | Reserves a marker for conflict validation; contributes nothing |
 | `NormalTraceEssentialBC` | `StandardBCs.h` | Strong `H(div)` normal-trace data (`HDivNormalConstraint`) |
+| `NormalEssentialBC`, `makeNormalEssentialBC(marker, g)` | `StandardBCs.h` | Strong u.n = g of a vector Lagrange field on one marker (free slip for g = 0) through `constraints::NormalComponentConstraint`; the tangential components keep their natural condition |
+| `constraints::NormalComponentConstraint(field, markers, g, {feature_angle_degrees})` | `Constraints/NormalComponentConstraint.h` | `implemented/expert`; the affine lines of u.n = g after deal.II's normal-flux constraints: facet normals averaged (by facet measure) within the feature angle, one slaved component per direction (the largest determinant), every component at a corner; the same lines at any rank count (contributions summed at the DOF owner in global facet order). Points an earlier constraint holds are left to it; walls that meet at an edge belong in one constraint. No deck uses it yet |
 | `TraceLoadBC`, `TraceRobinBC`, `TraceInequalityBC` | `StandardBCs.h` | Boundary scalar trace wrappers |
 | `InterfaceTraceLoadBC`, `InterfaceTraceRobinBC`, `InterfaceTraceJumpPenaltyBC` | `StandardBCs.h` | Interface scalar trace wrappers |
 | `makeNormalTraceEssentialBC`, `makeTraceLoadBC`, `makeTraceRobinBC`, `makeTraceInequalityBC`, `makeInterfaceTrace*BC` | `StandardBCs.h` | Factory helpers for the trace wrappers |
@@ -1035,7 +1037,9 @@ helpers, scalar trace BC helpers, `.dI`, and the level-set handles with
 
 Acceptance criteria: common H(div), H(curl), slip, and Nitsche boundary/interface
 terms can be written without raw component manipulation against side-specific
-normals.
+normals.  Strong slip of a vector Lagrange field exists
+(`NormalEssentialBC`, `NormalComponentConstraint`); weak (Nitsche) slip still
+needs the vector trace laws.
 
 #### Named History, Stage, and Material State
 

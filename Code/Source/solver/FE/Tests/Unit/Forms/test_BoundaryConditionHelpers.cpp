@@ -14,7 +14,9 @@
 #include "Spaces/H1Space.h"
 #include "Spaces/HDivSpace.h"
 #include "Spaces/ProductSpace.h"
+#include "Systems/FESystem.h"
 #include "Systems/SystemManifest.h"
+#include "Tests/Unit/Forms/FormsTestHelpers.h"
 
 #include <algorithm>
 #include <array>
@@ -280,6 +282,36 @@ TEST(FormsBoundaryConditions, VectorBoundaryDataGivesTheSpelledOutConditions)
     EXPECT_EQ(svmp::FE::systems::formExprTreeHash(bc::value(scalar_data, "q")),
               svmp::FE::systems::formExprTreeHash(bc::toScalarExpr(g, bc::markerValueName("q", 9))));
     EXPECT_THROW((void)bc::value(bc::BoundaryData<bc::ScalarValue>{}, "q"), std::invalid_argument);
+}
+
+TEST(FormsBoundaryConditions, NormalEssentialBCInstallsTheNormalComponentConstraint)
+{
+    namespace forms = svmp::FE::forms;
+    forms::bc::NormalEssentialBC bc(/*boundary_marker=*/3, forms::FormExpr::constant(0.5));
+    EXPECT_EQ(bc.boundaryMarker(), 3);
+    EXPECT_FALSE(bc.hasWeakTerms());
+    EXPECT_FALSE(bc.allowsMarkerSharing());
+    EXPECT_TRUE(bc.getStrongConstraints(/*field_id=*/0).empty());
+    const auto metadata = bc.analysisMetadata(/*field_id=*/0, nullptr);
+    ASSERT_EQ(metadata.size(), 1u);
+    EXPECT_EQ(metadata[0].trace_kind, svmp::FE::analysis::TraceKind::NormalComponent);
+    EXPECT_EQ(metadata[0].enforcement_kind, svmp::FE::analysis::EnforcementKind::Strong);
+    EXPECT_TRUE(metadata[0].anchors_rigid_body_translation);
+    EXPECT_FALSE(metadata[0].anchors_rigid_body_rotation);
+
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    auto vector = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar, 3);
+    svmp::FE::systems::FESystem system(mesh);
+    const auto u = system.addField({.name = "u", .space = vector, .components = 3});
+    bc.installSystemConstraints(system, u);
+    bool installed = false;
+    for (const auto& line : svmp::FE::systems::constraintManifestLines(system)) {
+        installed = installed || (line.find("NormalComponentConstraint") != std::string::npos &&
+                                  line.find("markers=3") != std::string::npos);
+    }
+    EXPECT_TRUE(installed);
+    EXPECT_THROW(forms::bc::NormalEssentialBC(-1), std::invalid_argument);
 }
 
 TEST(FormsBoundaryConditions, NaturalBCUsesGeneratedActiveBoundaryWhenProvided)

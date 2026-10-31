@@ -2006,6 +2006,37 @@ TEST(AnalysisEvidenceContracts, HDivH1MixedPairNeedsExplicitCertifiedEvidence)
     EXPECT_TRUE(saw_certified_hdiv_h1);
 }
 
+TEST(AnalysisEvidenceContracts, StrongNormalComponentFitsAVectorLagrangeValueTrace)
+{
+    // u . n = g strongly on a vector H1 field (NormalComponentConstraint):
+    // its value trace holds the normal component.  A scalar H1 field has no
+    // normal component, and an H(div) field no tangential one.
+    const auto incompatible = [](FieldDescriptor field, TraceKind kind) {
+        ProblemAnalysisContext ctx;
+        const auto id = field.field_id;
+        ctx.addFieldDescriptor(std::move(field));
+        BoundaryConditionDescriptor bc;
+        bc.primary_variable = VariableKey::field(id);
+        bc.boundary_marker = 3;
+        bc.trace_kind = kind;
+        bc.enforcement_kind = EnforcementKind::Strong;
+        bc.source = "wall";
+        ctx.addBCDescriptor(bc);
+        const auto report = analyze(std::move(ctx));
+        for (const auto* claim : claimsFrom(report, PropertyKind::SpaceCompatibility,
+                                            "SpaceCompatibilityAnalyzer")) {
+            if (claim->description.find("is incompatible with field") != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    };
+    EXPECT_FALSE(incompatible(h1Field(0, 2, FieldType::Vector, 3, "velocity"), TraceKind::NormalComponent));
+    EXPECT_FALSE(incompatible(h1Field(0, 2, FieldType::Vector, 2, "velocity"), TraceKind::TangentialComponent));
+    EXPECT_TRUE(incompatible(h1Field(0, 1, FieldType::Scalar, 1, "pressure"), TraceKind::NormalComponent));
+    EXPECT_TRUE(incompatible(hDivField(0, 1, "flux"), TraceKind::TangentialComponent));
+}
+
 TEST(AnalysisEvidenceContracts, HDivL2MixedPairNeedsExplicitCertifiedEvidence)
 {
     const auto flux = VariableKey::field(1);

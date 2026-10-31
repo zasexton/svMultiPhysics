@@ -667,6 +667,7 @@ set(FE_CONSTRAINTS_HEADERS
     Constraints/AuxiliaryDrivenDirichletConstraint.h
     Constraints/HCurlTangentialConstraint.h
     Constraints/HDivNormalConstraint.h
+    Constraints/NormalComponentConstraint.h
     Constraints/BoundaryDofOwnerCompletion.h
 )
 
@@ -696,6 +697,7 @@ set(FE_CONSTRAINTS_SOURCES
     Constraints/AuxiliaryDrivenDirichletConstraint.cpp
     Constraints/HCurlTangentialConstraint.cpp
     Constraints/HDivNormalConstraint.cpp
+    Constraints/NormalComponentConstraint.cpp
     Constraints/BoundaryDofOwnerCompletion.cpp
 )
 

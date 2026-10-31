@@ -338,10 +338,20 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
         const TraceRequirement requirement = requiredTraceCapability(bc);
         const TraceCapabilityFlags required = requirement.trial_trace;
 
-        // Check if the field's trace capabilities support the BC's trace kind
+        // Check if the field's trace capabilities support the BC's trace kind.
+        // The value trace of a vector field whose components are separate
+        // DOFs holds its normal and tangential components, so it supports
+        // their strong prescription (constraints::NormalComponentConstraint).
+        const bool component_of_value_trace =
+            bc.enforcement_kind == EnforcementKind::Strong &&
+            (bc.trace_kind == TraceKind::NormalComponent ||
+             bc.trace_kind == TraceKind::TangentialComponent) &&
+            hasTraceFlag(fd->trace_capabilities, TraceCapabilityFlags::Value) &&
+            fd->component_extractable && fd->value_dimension > 1;
         const bool supported =
             required == TraceCapabilityFlags::None ||
-            (fd->trace_capabilities & required) == required;
+            (fd->trace_capabilities & required) == required ||
+            component_of_value_trace;
 
         if (!supported) {
             PropertyClaim claim;
