@@ -142,7 +142,7 @@ Moving these algorithms into an element-local FE interpolator would not be an eq
 Option-to-view overlays likewise remain: ALE/momentum values are domain-first, rotating/file values equation-first, and contact projection gathers wall arrays while retaining first-wall defaults.
 
 The functional authority change preselects every requested marker through the const registry before constructing any form, so a later missing marker cannot leave a partial declaration.
-Pointers remain stable while `F.functional` writes the separate form store. Energy and wall statements use the same selected record; other records are excluded and module selection order wins over registry sorting.
+Pointers remain stable while `F.quantity` writes the separate form store. Energy and wall statements use the same selected record; other records are excluded and module selection order wins over registry sorting.
 Supported registration supplies the same velocity identity, geometry domain, active-volume density/gravity/reference point, optional viscosity/pressure and endpoint flags as before.
 The existing record overload's absent-energy defaults (zero density/gravity/reference point) remain; the authority test includes selected records with and without optional channels.
 E4's static minimizer consumes declared liquid volume, liquid-gas plus Young-wall surface energy and gravitational energy. These are solver inputs, not disposable log records.

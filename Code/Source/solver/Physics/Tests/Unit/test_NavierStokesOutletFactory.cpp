@@ -883,6 +883,60 @@ TEST(NavierStokesOutletFactory,
                    physical_deployment_count);
 }
 
+TEST(NavierStokesOutletFactory, FlowRateQuantityRegistersTheHandBuiltRecord)
+{
+    // The outlet flow rate is the quantity inner(u, n).ds(outlet); its input
+    // record must be the one the factories built field by field before.
+    constexpr int physical_marker = 41;
+    constexpr int generated_marker = 141;
+    const auto verify = [&](std::string_view variant,
+                            std::optional<int> generated,
+                            const auto& build_boundary_condition) {
+        SCOPED_TRACE(std::string(variant) + (generated ? " generated" : " physical"));
+        auto mesh = std::make_shared<
+            svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(physical_marker);
+        auto u_space = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, mesh, 1, 3);
+        FESystem sys(mesh);
+        const auto u_field = sys.addField(FieldSpec{.name = "u", .space = u_space, .components = 3});
+        const auto u = FormExpr::stateField(u_field, *u_space, "u");
+        auto boundary_condition = build_boundary_condition(sys, u, FormExpr::constant(1.0), generated);
+        ASSERT_NE(boundary_condition, nullptr);
+
+        svmp::FE::forms::BoundaryFunctional expected;
+        expected.integrand = inner(u, FormExpr::normal());
+        expected.boundary_marker = physical_marker;
+        expected.generated_active_boundary_marker = generated;
+        expected.reduction = svmp::FE::forms::BoundaryFunctional::Reduction::Sum;
+        expected.name = autoBoundaryIntegralName(physical_marker);  // functional_name is empty
+
+        const auto defs = sys.boundaryReductionService(u_field).allFunctionalDefs();
+        ASSERT_EQ(defs.size(), 1u);
+        EXPECT_EQ(defs[0].integrand.toString(), expected.integrand.toString());
+        EXPECT_EQ(defs[0].boundary_marker, expected.boundary_marker);
+        EXPECT_EQ(defs[0].generated_active_boundary_marker, expected.generated_active_boundary_marker);
+        EXPECT_EQ(defs[0].name, expected.name);
+        EXPECT_EQ(defs[0].reduction, expected.reduction);
+        EXPECT_EQ(defs[0].is_domain_functional, expected.is_domain_functional);
+        EXPECT_EQ(defs[0].region_marker, expected.region_marker);
+
+        const auto* registry = sys.auxiliaryInputRegistryIfPresent();
+        ASSERT_NE(registry, nullptr);
+        EXPECT_EQ(registry->specOf(expected.name).update_schedule,
+                  AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
+    };
+    for (const std::optional<int> generated : {std::optional<int>{}, std::optional<int>{generated_marker}}) {
+        verify("rcr_resistive", generated, [](auto& system, const auto& u, const auto& rho, auto g) {
+            return Factories::toCoupledOutflowBC(makeRCROpts(physical_marker, /*C=*/0.0), system, u, rho, g);
+        });
+        verify("rcr_compliant", generated, [](auto& system, const auto& u, const auto& rho, auto g) {
+            return Factories::toCoupledOutflowBC(makeRCROpts(physical_marker, /*C=*/0.001), system, u, rho, g);
+        });
+        verify("rcrcr", generated, [](auto& system, const auto& u, const auto& rho, auto g) {
+            return Factories::toCoupledOutflowBC(makeRCRCROpts(physical_marker), system, u, rho, g);
+        });
+    }
+}
+
 TEST(NavierStokesOutletFactory, NewOverload_RCR_EndToEnd)
 {
     // End-to-end: new factory overload -> setup -> monolithic auxiliary

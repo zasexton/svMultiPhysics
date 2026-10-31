@@ -103,8 +103,8 @@ void registerHeat(fe::systems::FESystem& system,
     plan.commit();
 
     fe::systems::FormulationBuilder F(system, "equations", {});
-    F.functional("conduction_energy", fe::systems::FunctionalKind::Stored,
-                 (0.5 * k * inner(grad(T), grad(T))).dx());
+    (void)F.quantity("conduction_energy", fe::systems::FunctionalKind::Stored,
+                     (0.5 * k * inner(grad(T), grad(T))).dx());
     F.symbolicTangent();
     (void)F.install({T_id}, R);
 
@@ -636,7 +636,7 @@ it.
    `tests/cases` with a reference result for the whole path.
 7. **Output.** Nothing to write: the application writes every unknown in DOF
    order and every result declared with `addDerivedResult`; the functionals
-   declared with `F.functional` are evaluated by `FunctionalFormEvaluator.h`.
+   declared with `F.quantity` are evaluated by `FunctionalFormEvaluator.h`.
 
 ## References
 

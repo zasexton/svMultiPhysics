@@ -34,6 +34,7 @@
 #include "Systems/SystemCollectives.h"
 #include "Systems/SystemsExceptions.h"
 #include "Systems/FreeSurfaceFunctionalRounding.h"
+#include "Systems/FunctionalForms.h"
  #include "Core/Logger.h"
 #include "Core/LogRecord.h"
 
@@ -17084,11 +17085,18 @@ AuxiliaryInputHandle FESystem::boundaryIntegral(
         input_name, std::move(functional), schedule);
 }
 
-AuxiliaryInputHandle FESystem::boundaryIntegral(
-    forms::FormExpr measured_form,
+AuxiliaryInputHandle FESystem::auxiliaryInput(
+    const Quantity& quantity,
     AuxiliaryInputUpdateSchedule schedule)
 {
-    return boundaryIntegral(forms::boundaryFunctional(measured_form), schedule);
+    auto functional = inputFunctional(quantity);
+    if (!functional.is_domain_functional) {
+        return boundaryIntegral(std::move(functional), schedule);
+    }
+    const auto input_name = functional.name.empty()
+        ? generateUniqueAuxiliaryInputName_("_domain_integral")
+        : functional.name;
+    return domainIntegral(input_name, std::move(functional.integrand), schedule);
 }
 
 AuxiliaryInputHandle FESystem::registerBoundaryIntegralHandle_(

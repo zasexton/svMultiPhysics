@@ -98,6 +98,8 @@ const char* functionalKindName(FunctionalKind kind) noexcept
         return "dissipation_rate";
     case FunctionalKind::Measure:
         return "measure";
+    case FunctionalKind::Integral:
+        return "integral";
     }
     return "unknown";
 }
@@ -107,6 +109,81 @@ bool isSumOfIntegrals(const forms::FormExpr& form)
     return form.isValid() && form.node() != nullptr && isSumOfIntegralsNode(*form.node());
 }
 
+namespace {
+
+/// Throws unless @p kind is valid and @p form is a measured 0-form.
+void requireMeasuredZeroForm(const std::string& where, FunctionalKind kind, const forms::FormExpr& form)
+{
+    FE_THROW_IF(std::string_view(functionalKindName(kind)) == "unknown", InvalidArgumentException,
+                where + "the kind is invalid");
+    FE_THROW_IF(!isSumOfIntegrals(form), InvalidArgumentException,
+                where + "the form must be a sum of integrals (state it with a measure: dx, ds, dI, dL, "
+                        "dCutVolume)");
+    FE_THROW_IF(hasInteriorFaceIntegral(*form.node()), InvalidArgumentException,
+                where + "the form has an interior-facet integral (dS), which a functional evaluator does not "
+                        "integrate; state the functional with dx, ds, dI, dL or dCutVolume");
+    FE_THROW_IF(form.hasTest() || form.hasTrial(), InvalidArgumentException,
+                where + "the form must not contain a test or trial function (a functional is a 0-form)");
+}
+
+/// The measure of one integral node, as an author writes it.
+[[nodiscard]] const char* measureName(const forms::FormExprNode& node)
+{
+    switch (node.type()) {
+    case forms::FormExprType::CellIntegral:
+        return "dx";
+    case forms::FormExprType::BoundaryIntegral:
+        return "ds";
+    case forms::FormExprType::InteriorFaceIntegral:
+        return "dS";
+    case forms::FormExprType::InterfaceIntegral:
+        return node.exteriorBoundaryMeasure() != nullptr ? "ds(BoundaryDomain)" : "dI or dL";
+    case forms::FormExprType::CutVolumeIntegral:
+        return "dCutVolume";
+    default:
+        return "a sum of integrals";
+    }
+}
+
+} // namespace
+
+Quantity quantity(std::string name, FunctionalKind kind, forms::FormExpr measured_form)
+{
+    requireMeasuredZeroForm("FE::systems::quantity('" + name + "'): ", kind, measured_form);
+    Quantity out;
+    out.name_ = std::move(name);
+    out.kind_ = kind;
+    out.form_ = std::move(measured_form);
+    return out;
+}
+
+forms::BoundaryFunctional inputFunctional(const Quantity& quantity)
+{
+    const std::string where = "FE::systems::inputFunctional('" + quantity.name() + "'): ";
+    FE_THROW_IF(!quantity.isValid(), InvalidArgumentException, where + "invalid quantity");
+    const auto& node = *quantity.form().node();
+    if (node.type() == forms::FormExprType::CellIntegral) {
+        forms::BoundaryFunctional functional;
+        functional.integrand = forms::FormExpr(node.childrenShared().at(0));
+        functional.boundary_marker = -1;
+        functional.name = quantity.name();
+        functional.reduction = forms::BoundaryFunctional::Reduction::Sum;
+        functional.is_domain_functional = true;
+        return functional;
+    }
+    const bool boundary = node.type() == forms::FormExprType::BoundaryIntegral ||
+                          (node.type() == forms::FormExprType::InterfaceIntegral &&
+                           node.exteriorBoundaryMeasure() != nullptr);
+    FE_THROW_IF(!boundary, InvalidArgumentException,
+                where + "an auxiliary input is one integral over the exterior boundary or the cells, "
+                        "integrand.ds(marker), integrand.ds(BoundaryDomain) or integrand.dx(); the form is " +
+                    std::string(measureName(node)));
+    FE_THROW_IF(node.type() == forms::FormExprType::BoundaryIntegral && node.boundaryMarker().value_or(-1) < 0,
+                InvalidArgumentException,
+                where + "ds() over every boundary names no marker; integrate over ds(marker)");
+    return forms::boundaryFunctional(quantity.form(), quantity.name());
+}
+
 void declareFunctionalForm(FESystem& system, FunctionalFormDeclaration declaration)
 {
     const std::string where = "FE::systems::declareFunctionalForm('" + declaration.name + "'): ";
@@ -114,16 +191,7 @@ void declareFunctionalForm(FESystem& system, FunctionalFormDeclaration declarati
                 where + "functionals cannot be declared after setup");
     FE_THROW_IF(isBlank(declaration.name), InvalidArgumentException, where + "the name must be nonempty");
     FE_THROW_IF(isBlank(declaration.owner), InvalidArgumentException, where + "the owner must be nonempty");
-    FE_THROW_IF(std::string_view(functionalKindName(declaration.kind)) == "unknown", InvalidArgumentException,
-                where + "the kind is invalid");
-    FE_THROW_IF(!isSumOfIntegrals(declaration.form), InvalidArgumentException,
-                where + "the form must be a sum of integrals (state it with a measure: dx, ds, dI, dL, "
-                        "dCutVolume)");
-    FE_THROW_IF(hasInteriorFaceIntegral(*declaration.form.node()), InvalidArgumentException,
-                where + "the form has an interior-facet integral (dS), which a functional evaluator does not "
-                        "integrate; state the functional with dx, ds, dI, dL or dCutVolume");
-    FE_THROW_IF(declaration.form.hasTest() || declaration.form.hasTrial(), InvalidArgumentException,
-                where + "the form must not contain a test or trial function (a functional is a 0-form)");
+    requireMeasuredZeroForm(where, declaration.kind, declaration.form);
     auto& store = system.attachment<FunctionalFormStore>();
     FE_THROW_IF(std::any_of(store.declarations.begin(), store.declarations.end(),
                             [&](const FunctionalFormDeclaration& existing) {

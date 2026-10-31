@@ -157,8 +157,8 @@ void registerHeat(fe::systems::FESystem& system,
     plan.commit();
 
     fe::systems::FormulationBuilder F(system, "equations", {});
-    F.functional("conduction_energy", fe::systems::FunctionalKind::Stored,
-                 (0.5 * k * inner(grad(T), grad(T))).dx());
+    (void)F.quantity("conduction_energy", fe::systems::FunctionalKind::Stored,
+                     (0.5 * k * inner(grad(T), grad(T))).dx());
     F.symbolicTangent();
     (void)F.install({T_id}, R);
 
@@ -773,8 +773,9 @@ the rest `implemented/expert`. Namespace `systems`.
 | `F.installGroup(fields, residual, FormulationGroup{...})` | `Systems/FormulationBuilder.h` | A separate kernel group with a copy of the options changed by `source_component_tag`, `extra_trial_fields`, `ale`, or dropped trace requests |
 | `F.registered(ContactLineDomain)` | `Systems/FormulationBuilder.h` | Registers a generated contact-line marker with the system and returns the domain; `F.install`/`F.installGroup` register the generated boundary subsets of their residual |
 | `F.certifyGeneratedBoundaryNitscheTraces(bindings, marker, ratio)` | `Systems/FormulationBuilder.h` | `implemented/expert`; trace-certificate requests on a cut volume |
-| `F.functional(name, kind, form[, owner])` | `Systems/FormulationBuilder.h` | Declares a functional of the formulation as a measured 0-form (a sum of dx, ds, dI, dL or dCutVolume integrals with no test or trial function; dS is rejected); nothing is installed; the owner defaults to the operator |
-| `declareFunctionalForm(system, FunctionalFormDeclaration)`, `functionalForms(system)`, `FunctionalKind` (`Stored`, `Power`, `DissipationRate`, `Measure`) | `Systems/FunctionalForms.h` | The system's declared functionals, in declaration order; declared before setup, names unique |
+| `F.quantity(name, kind, form[, owner])` | `Systems/FormulationBuilder.h` | Declares a quantity of the formulation, a measured 0-form (a sum of dx, ds, dI, dL or dCutVolume integrals with no test or trial function; dS is rejected), and returns its `Quantity` handle; nothing is installed; the owner defaults to the operator |
+| `Quantity`, `quantity(name, kind, measured_form)` | `Systems/FunctionalForms.h` | The one handle of a functional (design 10, M1): name, kind and measured 0-form, checked once. The same handle is declared (`F.quantity`) or drives an auxiliary model (`FESystem::auxiliaryInput`); a quantity that is only an input may be unnamed |
+| `declareFunctionalForm(system, FunctionalFormDeclaration)`, `functionalForms(system)`, `FunctionalKind` (`Stored`, `Power`, `DissipationRate`, `Measure`, `Integral`) | `Systems/FunctionalForms.h` | The system's declared functionals, in declaration order; declared before setup, names unique. `Integral` is any other integral of the state, e.g. an outlet's flow rate |
 | `F.wallFunctional(WallFunctionalFormDeclaration)`, `declareWallFunctionalForm(system, ...)`, `wallFunctionalForms(system)`, `wallFunctionalForm(declaration, wall, contact_lines, wetted_parts)`, `WallMeasure` (`ContactLines`, `WettedPart`) | `Systems/FunctionalForms.h` | A functional of every wall an interface meets, stated by its integrand (no measure; one for every wall and/or one per wall marker) and integrated by the evaluator over the wall's contact lines (dL) or wetted part (ds) in the geometry snapshot (`interfaces::declaredWallFunctionalForms`); named `<prefix>wall.<b>.<quantity>` |
 | `evaluateFunctionalForms(system, forms, state, comm[, cut_context])`, `evaluateDeclaredFunctionalForms(system, state, comm[, cut_context])`, `FunctionalFormValue` | `Systems/FunctionalFormEvaluator.h` | Collective values of measured 0-forms over `dx`, `ds`, `dCutVolume`, `dI`, `dL` and generated `ds` (cut rules from the cut context, for a free surface its authoritative snapshot), interpreted; every quadrature term is summed exactly over all ranks, so `value` and `absolute_mass` are the same at any rank count; `dS` is not evaluated |
 | `F.workChannel(suffix, {WorkChannelPart{...}, ...})` | `Systems/FormulationBuilder.h` | Installs a residual-work channel on operator `<operator>_<suffix>`: one install per part with the builder's options, outside the problem analysis, trace requests dropped unless the part keeps them |
@@ -845,7 +846,7 @@ Status: `implemented/public` for named authoring helpers; slot references are
 | `AuxiliaryState(name)` | `implemented/expert`; raw auxiliary state access; `BoundaryConditionManager::apply` rejects it in a residual |
 | `AuxiliaryInputSlot(slot)`, `AuxiliaryOutputSlot(slot)` | `implemented/internal`; post-resolution slot references |
 | `FormExpr::auxiliaryStateRef(slot)` | `implemented/internal`; slot reference |
-| `FESystem::boundaryIntegral(measured_form, schedule)` | Registers one exterior-boundary integral, `inner(u, n).ds(outlet)` or `integrand.ds(BoundaryDomain)`, as an auxiliary input: the functional `forms::boundaryFunctional(measured_form)` gives; the handle converts to a `FormExpr` |
+| `FESystem::auxiliaryInput(quantity, schedule)`, `inputFunctional(quantity)` | Registers a quantity of one integral, `inner(u, n).ds(outlet)`, `integrand.ds(BoundaryDomain)` or `integrand.dx()`, as an auxiliary input, through the record `inputFunctional` lowers it to (`forms::boundaryFunctional(form, name)`, or the cell functional `domainIntegral` registers); dI, dL, dCutVolume and sums are refused by name; the handle converts to a `FormExpr` |
 | `FESystem::boundaryIntegral(BoundaryFunctional, schedule)`, `boundaryIntegral(integrand, marker, ...)` | Registers a boundary (or, with `is_domain_functional`, cell) integral as an auxiliary input; the handle converts to a `FormExpr` |
 | `systems::aux::model(name, [](ModelFacade& m) { ... })` | 0D model DSL: `m.input`, `m.state`, `m.params`, `m << ddt(X) == rhs`, `m << alg(Z) == g`, `m << out("y") == e` |
 | `FESystem::deploy(use(model).name(...).boundary(m).monolithic().params(...).bind(...))` | Deployed model; `handle.output(name)` is a `FormExpr` |

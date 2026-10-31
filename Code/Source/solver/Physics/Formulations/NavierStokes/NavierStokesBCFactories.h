@@ -23,7 +23,6 @@
 #include "FE/Constraints/InterfaceMeasureGaugeAnchor.h"
 #include "FE/Core/Logger.h"
 #include "FE/Forms/BoundaryConditions.h"
-#include "FE/Forms/BoundaryFunctional.h"
 #include "FE/Forms/CutCellForms.h"
 #include "FE/Forms/IntegrationDomain.h"
 #include "FE/Forms/ResidualContributions.h"
@@ -40,6 +39,7 @@
 #include "FE/Systems/FieldBinding.h"
 #include "FE/Systems/FormsInstaller.h"
 #include "FE/Systems/FormulationBuilder.h"
+#include "FE/Systems/FunctionalForms.h"
 #include "FE/Systems/MeshBoundaryKinematics.h"
 
 #include <algorithm>
@@ -409,13 +409,28 @@ inline void declareVelocityDirichletTimeFunctions(
         FE::forms::bc::Boundary::of(marker, generated_active_boundary_marker), flux);
 }
 
+namespace detail {
+
+/// The outlet, the boundary of @p marker or its generated active part.
+[[nodiscard]] inline FE::forms::ExteriorBoundaryMeasure outletMeasure(
+    int marker,
+    std::optional<int> generated_active_boundary_marker)
+{
+    return generated_active_boundary_marker.has_value()
+        ? FE::forms::ExteriorBoundaryMeasure::generatedActiveSubset(marker, *generated_active_boundary_marker)
+        : FE::forms::ExteriorBoundaryMeasure::fullPhysical(marker);
+}
+
+} // namespace detail
+
 /**
  * @brief Create an RCR outflow BC using the math-first auxiliary DSL.
  *
- * This is the preferred implementation path.  It registers the boundary
- * flow integral as an auxiliary input, builds the RCR model via the
- * math-first DSL, deploys it with typed handles, and returns a standard
- * NaturalBC that reads the outlet pressure from the deployment handle.
+ * This is the preferred implementation path.  It states the outlet flow
+ * rate Q = ∫ u·n ds as a quantity and registers it as an auxiliary input,
+ * builds the RCR model via the math-first DSL, deploys it with typed
+ * handles, and returns a standard NaturalBC that reads the outlet pressure
+ * from the deployment handle.
  *
  * @param bc                  RCR outflow boundary condition options.
  * @param system              The FESystem to register inputs and deploy models on.
@@ -451,18 +466,13 @@ inline void declareVelocityDirichletTimeFunctions(
         FE::forms::bc::toScalarExpr(
             bc.backflow_beta, FE::forms::bc::markerValueName("ns_rcr_backflow_beta", marker));
 
-    if (C == 0.0) {
-        FE::forms::BoundaryFunctional flow_rate;
-        flow_rate.integrand = inner(u, n);
-        flow_rate.boundary_marker = marker;
-        flow_rate.generated_active_boundary_marker =
-            generated_active_boundary_marker;
-        flow_rate.reduction = FE::forms::BoundaryFunctional::Reduction::Sum;
-        flow_rate.name = bc.functional_name;
-        auto Q = system.boundaryIntegral(
-            std::move(flow_rate),
-            FE::systems::AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
+    // The outlet flow rate, the input of the 0D model, refreshed at every
+    // Newton iterate.
+    const auto flow_rate = quantity(bc.functional_name, FunctionalKind::Integral,
+                                    un.ds(detail::outletMeasure(marker, generated_active_boundary_marker)));
+    auto Q = system.auxiliaryInput(flow_rate, AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
 
+    if (C == 0.0) {
         auto resistive = system.deploy(
             use(detail::resistiveOutflowModel())
                 .boundary(marker)
@@ -476,20 +486,8 @@ inline void declareVelocityDirichletTimeFunctions(
         return std::make_unique<FE::forms::bc::NaturalBC>(
             FE::forms::bc::Boundary::of(marker, generated_active_boundary_marker), flux);
     } else {
-        // Step 1: Register boundary-integral input for Q via handle-returning API.
-        FE::forms::BoundaryFunctional flow_rate;
-        flow_rate.integrand = inner(u, n);
-        flow_rate.boundary_marker = marker;
-        flow_rate.generated_active_boundary_marker =
-            generated_active_boundary_marker;
-        flow_rate.reduction = FE::forms::BoundaryFunctional::Reduction::Sum;
-        flow_rate.name = bc.functional_name;
-        auto Q = system.boundaryIntegral(
-            std::move(flow_rate),
-            FE::systems::AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
-
-        // Step 2: Deploy the standard RCR model into the monolithic Newton
-        // block so the outlet pressure and flow Jacobian are solved together.
+        // Deploy the standard RCR model into the monolithic Newton block so
+        // the outlet pressure and flow Jacobian are solved together.
         auto rcr = system.deploy(
             use(detail::rcrOutflowModel())
                 .boundary(marker)
@@ -498,7 +496,6 @@ inline void declareVelocityDirichletTimeFunctions(
                 .bind("Q", Q)
                 .initialState({{"X", bc.X0}})
         );
-        // Step 3: Return a standard NaturalBC.
         const auto p_out = rcr.output("P_out");
         const auto flux = -p_out * n - beta * rho * max_backflow * u;
         return std::make_unique<FE::forms::bc::NaturalBC>(
@@ -533,16 +530,11 @@ inline void declareVelocityDirichletTimeFunctions(
         FE::forms::bc::toScalarExpr(
             bc.backflow_beta, FE::forms::bc::markerValueName("ns_rcrcr_backflow_beta", marker));
 
-    FE::forms::BoundaryFunctional flow_rate;
-    flow_rate.integrand = inner(u, n);
-    flow_rate.boundary_marker = marker;
-    flow_rate.generated_active_boundary_marker =
-        generated_active_boundary_marker;
-    flow_rate.reduction = FE::forms::BoundaryFunctional::Reduction::Sum;
-    flow_rate.name = bc.functional_name;
-    auto Q = system.boundaryIntegral(
-        std::move(flow_rate),
-        FE::systems::AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
+    // The outlet flow rate, the input of the 0D model, refreshed at every
+    // Newton iterate.
+    const auto flow_rate = quantity(bc.functional_name, FunctionalKind::Integral,
+                                    un.ds(detail::outletMeasure(marker, generated_active_boundary_marker)));
+    auto Q = system.auxiliaryInput(flow_rate, AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
 
     auto rcrcr = system.deploy(
         use(detail::rcrcrOutflowModel())

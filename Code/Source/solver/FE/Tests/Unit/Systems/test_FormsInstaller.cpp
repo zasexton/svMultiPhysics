@@ -1790,7 +1790,7 @@ TEST(FormulationBuilder, ComposesOptionsInCallOrderAndInstallsGroups)
     EXPECT_FALSE(sys.isGeneratedEmbeddedInterfaceMarkerRegistered(3));
 }
 
-TEST(FormulationBuilder, DeclaresMeasuredFunctionalsWithoutInstallingThem)
+TEST(FormulationBuilder, DeclaresQuantitiesWithoutInstallingThem)
 {
     namespace systems = svmp::FE::systems;
     namespace forms = svmp::FE::forms;
@@ -1804,10 +1804,14 @@ TEST(FormulationBuilder, DeclaresMeasuredFunctionalsWithoutInstallingThem)
 
     systems::FormulationBuilder F(sys, "op", systems::FormInstallOptions{});
     EXPECT_TRUE(systems::functionalForms(sys).empty());
-    F.functional("energy", systems::FunctionalKind::Stored, (half * u * u).dx())
-        .functional("boundary_power", systems::FunctionalKind::Power, (u * u).ds(3) - (half * u).ds(4), "owner")
-        .functional("cut_measure", systems::FunctionalKind::Measure,
-                    -forms::FormExpr::constant(1.0).dCutVolume(5, forms::CutVolumeSide::Negative));
+    const auto energy = F.quantity("energy", systems::FunctionalKind::Stored, (half * u * u).dx());
+    (void)F.quantity("boundary_power", systems::FunctionalKind::Power, (u * u).ds(3) - (half * u).ds(4), "owner");
+    (void)F.quantity("cut_measure", systems::FunctionalKind::Measure,
+                     -forms::FormExpr::constant(1.0).dCutVolume(5, forms::CutVolumeSide::Negative));
+    // The handle is the declaration.
+    EXPECT_EQ(energy.name(), "energy");
+    EXPECT_EQ(energy.kind(), systems::FunctionalKind::Stored);
+    EXPECT_EQ(energy.form().toString(), (half * u * u).dx().toString());
 
     const auto declared = systems::functionalForms(sys);
     ASSERT_EQ(declared.size(), 3u);
@@ -1823,7 +1827,7 @@ TEST(FormulationBuilder, DeclaresMeasuredFunctionalsWithoutInstallingThem)
 
     const auto rejects = [&](const std::string& name, const forms::FormExpr& form, const std::string& reason) {
         try {
-            F.functional(name, systems::FunctionalKind::Stored, form);
+            (void)F.quantity(name, systems::FunctionalKind::Stored, form);
             ADD_FAILURE() << "expected a rejection: " << reason;
         } catch (const svmp::FE::InvalidArgumentException& error) {
             EXPECT_NE(std::string(error.what()).find(reason), std::string::npos) << error.what();

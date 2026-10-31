@@ -11,12 +11,12 @@
 
 #include "Physics/Formulations/Poisson/PoissonModule.h"
 
-#include "FE/Forms/BoundaryFunctional.h"
 #include "FE/Forms/NitscheBC.h"
 #include "FE/Forms/StandardBCs.h"
 #include "FE/Auxiliary/AuxiliaryBindings.h"
 #include "FE/Auxiliary/AuxiliaryModelDSL.h"
 #include "FE/Systems/FESystem.h"
+#include "FE/Systems/FunctionalForms.h"
 
 #include <memory>
 #include <stdexcept>
@@ -86,9 +86,8 @@ namespace detail {
     }
 
     // Q = integral of u over the boundary, refreshed at every Newton iterate.
-    auto Q = system.boundaryIntegral(
-        FE::forms::boundaryFunctional(u.ds(marker), bc.functional_name),
-        FE::systems::AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
+    auto Q = system.auxiliaryInput(quantity(bc.functional_name, FunctionalKind::Integral, u.ds(marker)),
+                                   AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
 
     const auto instance_name =
         bc.state_name.empty() ? ("poisson_rcr_" + std::to_string(marker)) : bc.state_name;

@@ -94,19 +94,19 @@ forms::ContactLineDomain FormulationBuilder::registered(forms::ContactLineDomain
 }
 
 
-FormulationBuilder& FormulationBuilder::functional(std::string name,
-                                                   FunctionalKind kind,
-                                                   forms::FormExpr form,
-                                                   std::string owner)
+Quantity FormulationBuilder::quantity(std::string name,
+                                      FunctionalKind kind,
+                                      forms::FormExpr form,
+                                      std::string owner)
 {
     declareFunctionalForm(*system_,
                           FunctionalFormDeclaration{
-                              .name = std::move(name),
+                              .name = name,
                               .kind = kind,
-                              .form = std::move(form),
+                              .form = form,
                               .owner = owner.empty() ? operator_tag_ : std::move(owner),
                           });
-    return *this;
+    return systems::quantity(std::move(name), kind, std::move(form));
 }
 
 FormulationBuilder& FormulationBuilder::wallFunctional(WallFunctionalFormDeclaration declaration)

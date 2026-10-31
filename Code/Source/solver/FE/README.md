@@ -2438,8 +2438,8 @@ void registerHeat(fe::systems::FESystem& system,
     plan.commit();
 
     fe::systems::FormulationBuilder F(system, "equations", {});
-    F.functional("conduction_energy", fe::systems::FunctionalKind::Stored,
-                 (0.5 * k * inner(grad(T), grad(T))).dx());
+    (void)F.quantity("conduction_energy", fe::systems::FunctionalKind::Stored,
+                     (0.5 * k * inner(grad(T), grad(T))).dx());
     F.symbolicTangent();
     (void)F.install({T_id}, R);
 

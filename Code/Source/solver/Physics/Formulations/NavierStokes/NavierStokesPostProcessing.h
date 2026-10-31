@@ -1058,8 +1058,8 @@ inline void declareFreeSurfaceEnergyFunctionals(FE::systems::FormulationBuilder&
     for (const auto* record : selected) {
         const auto statement = freeSurfaceEnergyStatement(*record, velocity_space, dimension);
         for (auto& declaration : freeSurfaceEnergyFunctionals(statement)) {
-            F.functional(std::move(declaration.name), declaration.kind, std::move(declaration.form),
-                         std::move(declaration.owner));
+            (void)F.quantity(std::move(declaration.name), declaration.kind, std::move(declaration.form),
+                             std::move(declaration.owner));
         }
         const auto walls = freeSurfaceContactWallStatements(record->parameters);
         for (auto& declaration : freeSurfaceWallFunctionals(statement, walls)) {

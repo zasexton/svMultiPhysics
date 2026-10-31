@@ -148,6 +148,7 @@ class AuxiliaryStateStepper;
 class AuxiliaryDerivativeProvider;
 class AuxiliaryEventManager;
 class AuxiliaryBlockStorage;
+class Quantity;
 struct MixedSystemLayout;
 struct FormInstallOptions;
 struct CoupledResidualKernels;
@@ -1359,17 +1360,22 @@ public:
         AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
 
     /**
-     * @brief Register the measured 0-form @p measured_form, one exterior-boundary
-     * integral, as an auxiliary input: the functional forms::boundaryFunctional
-     * gives, with an auto-generated name.
+     * @brief Register @p quantity as an auxiliary input.
+     *
+     * The quantity's form is one integral, over the exterior boundary
+     * (integrand.ds(m), integrand.ds(BoundaryDomain)) or the cells
+     * (integrand.dx()); its record (systems::inputFunctional) is registered
+     * as boundaryIntegral(functional, schedule) or domainIntegral does, under
+     * a generated input name (an unnamed dx quantity: "_domain_integral_<k>";
+     * a named one: its name).
      *
      * ```cpp
-     * auto Q = system.boundaryIntegral(inner(u, n).ds(outlet),
-     *                                  AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
+     * const auto Q = quantity("", FunctionalKind::Integral, inner(u, n).ds(outlet));
+     * auto Q_in = system.auxiliaryInput(Q, AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
      * ```
      */
-    AuxiliaryInputHandle boundaryIntegral(
-        forms::FormExpr measured_form,
+    AuxiliaryInputHandle auxiliaryInput(
+        const Quantity& quantity,
         AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
 
     /**

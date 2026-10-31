@@ -21,12 +21,18 @@
  * with the measures an evaluator integrates (dx, ds, dI, dL, dCutVolume and
  * the typed domains that lower to them; not dS, the interior facets).  A formulation declares its functionals on the FE
  * system (an attachment, in declaration order), usually through
- * FormulationBuilder::functional; an evaluator of functionals reads the
+ * FormulationBuilder::quantity; an evaluator of functionals reads the
  * declarations (D49 step E1).  Declaring a functional changes no operator,
  * kernel or constraint of the system.
+ *
+ * A Quantity is the one handle of a functional (design 10, step M1): the
+ * same name, kind and measured 0-form is declared on the system
+ * (FormulationBuilder::quantity) and drives an auxiliary model as an input
+ * (FESystem::auxiliaryInput, through inputFunctional).
  */
 
 #include "Core/Types.h"
+#include "Forms/BoundaryFunctional.h"
 #include "Forms/FormExpr.h"
 #include "Forms/IntegrationDomain.h"
 
@@ -47,10 +53,11 @@ enum class FunctionalKind : std::uint8_t {
     Stored,          ///< an energy of the state
     Power,           ///< a rate of work done on the system
     DissipationRate, ///< a nonnegative rate of energy loss
-    Measure          ///< a length, area or volume
+    Measure,         ///< a length, area or volume
+    Integral         ///< any other integral of the state, e.g. the flow rate through an outlet
 };
 
-/// "stored", "power", "dissipation_rate", "measure" (or "unknown").
+/// "stored", "power", "dissipation_rate", "measure", "integral" (or "unknown").
 [[nodiscard]] const char* functionalKindName(FunctionalKind kind) noexcept;
 
 /// One named functional: a measured 0-form and the owner that declared it.
@@ -82,6 +89,61 @@ void declareFunctionalForm(FESystem& system, FunctionalFormDeclaration declarati
 
 /// Whether @p form is a sum (+, -, unary -) of integrals.
 [[nodiscard]] bool isSumOfIntegrals(const forms::FormExpr& form);
+
+/**
+ * @brief A functional of the state: a name, a kind and a measured 0-form
+ *
+ * The one handle of a functional.  quantity() checks the form once; the
+ * handle is then declared on the system (FormulationBuilder::quantity) or
+ * drives an auxiliary model as an input (FESystem::auxiliaryInput).  A
+ * quantity that is only an input may be unnamed: its input record then
+ * takes the generated name of the input.
+ */
+class Quantity {
+public:
+    Quantity() = default;
+
+    [[nodiscard]] bool isValid() const noexcept { return form_.isValid(); }
+    [[nodiscard]] const std::string& name() const noexcept { return name_; }
+    [[nodiscard]] FunctionalKind kind() const noexcept { return kind_; }
+    /// The measured 0-form.
+    [[nodiscard]] const forms::FormExpr& form() const noexcept { return form_; }
+
+private:
+    friend Quantity quantity(std::string name, FunctionalKind kind, forms::FormExpr measured_form);
+
+    std::string name_{};
+    FunctionalKind kind_{FunctionalKind::Stored};
+    forms::FormExpr form_{};
+};
+
+/**
+ * @brief The quantity @p name of kind @p kind stated by @p measured_form
+ *
+ * Throws InvalidArgumentException when the kind is invalid or the form is
+ * not a measured 0-form: a valid sum of integrals (dx, ds, dI, dL,
+ * dCutVolume; dS is rejected because it is not evaluated) without a test or
+ * trial function.  The name may be empty.
+ */
+[[nodiscard]] Quantity quantity(std::string name, FunctionalKind kind, forms::FormExpr measured_form);
+
+/**
+ * @brief The functional record of @p quantity used as an auxiliary input
+ *
+ * The input path evaluates one integral over the exterior boundary or the
+ * cells, so the form must be one of
+ *
+ *   integrand.ds(m), m >= 0, and integrand.ds(BoundaryDomain)
+ *       forms::boundaryFunctional(form, name): the integrand, the physical
+ *       marker, the generated marker of a generated-active boundary, a sum;
+ *   integrand.dx()
+ *       the domain functional: the integrand, boundary marker -1, the name,
+ *       a sum, is_domain_functional and every cell (region marker -1).
+ *
+ * Any other measure (dI, dL, dCutVolume, ds() over every boundary) or a sum
+ * of integrals throws InvalidArgumentException naming what was found.
+ */
+[[nodiscard]] forms::BoundaryFunctional inputFunctional(const Quantity& quantity);
 
 /// The generated domains of a wall that a wall functional is integrated over.
 enum class WallMeasure : std::uint8_t {
