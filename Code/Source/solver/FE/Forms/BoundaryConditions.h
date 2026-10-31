@@ -17,6 +17,7 @@
 #include "Forms/FormExpr.h"
 #include "Forms/NitscheTraceBilinearForm.h"
 
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstddef>
@@ -495,6 +496,56 @@ template <class Values>
             std::string(name_prefix) + std::to_string(d)));
     }
     return out;
+}
+
+/**
+ * @brief The data of one boundary condition: its marker and its value
+ *
+ * The value is a ScalarValue (a Dirichlet value or a flux), ComponentValues
+ * (a vector value and the components it prescribes) or RobinValue.  value()
+ * and values(), and the factories of StandardBCs.h built on them, turn the
+ * data into forms and name each callback coefficient after a prefix and the
+ * marker, so an option struct states data and a formulation never names a
+ * coefficient.  The trees are those of the spelled-out
+ * `toScalarExpr(data.value, markerValueName(prefix, marker))`.
+ */
+template <class Value>
+struct BoundaryData {
+    int boundary_marker{-1};
+    Value value{};
+};
+
+/// A vector value and the components it prescribes (all by default).
+struct ComponentValues {
+    std::array<ScalarValue, 3> values{ScalarValue{0.0}, ScalarValue{0.0}, ScalarValue{0.0}};
+    std::array<bool, 3> active{true, true, true};
+};
+
+/// The coefficients of a Robin condition, whose residual term is (alpha u - rhs) v.
+struct RobinValue {
+    ScalarValue alpha{0.0};
+    ScalarValue rhs{0.0};
+};
+
+/// The value of @p data; a callback is named markerValueName(prefix, marker).
+[[nodiscard]] inline FormExpr value(const BoundaryData<ScalarValue>& data, std::string_view prefix)
+{
+    const int marker = boundaryMarkerOrThrow(data, "forms::bc::value");
+    return toScalarExpr(data.value, markerValueName(prefix, marker));
+}
+
+/// The first @p dim components of @p data, active or not; callbacks are named
+/// as toVectorExpr(values, dim, prefix, marker, style) names them.
+[[nodiscard]] inline std::vector<FormExpr> values(const BoundaryData<ComponentValues>& data,
+                                                  int dim,
+                                                  std::string_view prefix,
+                                                  ComponentValueNameStyle style = ComponentValueNameStyle::Indexed)
+{
+    const int marker = boundaryMarkerOrThrow(data, "forms::bc::values");
+    if (dim < 1 || dim > 3) {
+        throw std::invalid_argument("forms::bc::values: dim must be 1, 2 or 3");
+    }
+    return toVectorExpr(data.value.values, dim, prefix, marker, style);
 }
 
 /**

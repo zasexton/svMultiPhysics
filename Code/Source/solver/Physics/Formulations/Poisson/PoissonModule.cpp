@@ -86,9 +86,13 @@ void PoissonModule::registerOn(FE::systems::FESystem& system) const
     }
 
     FE::systems::BoundaryConditionManager bc_manager;
-    bc_manager.install(options_.neumann, Factories::toNaturalBC);
-    bc_manager.install(options_.robin, Factories::toRobinBC);
-    bc_manager.install(options_.dirichlet, [&](const auto& bc) { return Factories::toEssentialBC(bc, options_.field_name); });
+    bc_manager.install(options_.neumann, [](const auto& g) { return bc::naturalBC(g, "poisson_neumann"); });
+    bc_manager.install(options_.robin, [](const auto& r) {
+        return bc::robinBC(r, "poisson_robin_alpha", "poisson_robin_rhs");
+    });
+    bc_manager.install(options_.dirichlet, [&](const auto& uD) {
+        return bc::essentialBC(uD, "poisson_dirichlet", options_.field_name);
+    });
     bc_manager.install(options_.dirichlet_weak, [&](const auto& bc) {
         return Factories::toNitscheBC(bc,
                                       k,

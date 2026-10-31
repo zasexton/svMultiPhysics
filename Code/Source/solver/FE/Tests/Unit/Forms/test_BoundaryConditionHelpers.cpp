@@ -13,6 +13,8 @@
 #include "Forms/Vocabulary.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/HDivSpace.h"
+#include "Spaces/ProductSpace.h"
+#include "Systems/SystemManifest.h"
 
 #include <algorithm>
 #include <array>
@@ -212,6 +214,72 @@ TEST(FormsBoundaryConditions, ComponentEssentialBC_GeneratesSparseStrongConstrai
     ASSERT_EQ(metadata.size(), 2u);
     EXPECT_EQ(metadata[0].component, 0);
     EXPECT_EQ(metadata[1].component, 2);
+}
+
+TEST(FormsBoundaryConditions, VectorBoundaryDataGivesTheSpelledOutConditions)
+{
+    namespace forms = svmp::FE::forms;
+    namespace bc = forms::bc;
+    using svmp::FE::Real;
+
+    const forms::ScalarCoefficient g = [](Real x, Real y, Real) { return x - y; };
+    bc::BoundaryData<bc::ComponentValues> data{
+        .boundary_marker = 6,
+        .value = {.values = {bc::ScalarValue{1.5}, bc::ScalarValue{g}, bc::ScalarValue{-2.0}}}};
+    const std::array<bc::ScalarValue, 3> raw = data.value.values;
+
+    const auto sameStrong = [](const bc::BoundaryCondition& a, const bc::BoundaryCondition& b) {
+        const auto sa = a.getStrongConstraints(/*field_id=*/2);
+        const auto sb = b.getStrongConstraints(/*field_id=*/2);
+        ASSERT_EQ(sa.size(), sb.size());
+        for (std::size_t i = 0; i < sa.size(); ++i) {
+            EXPECT_EQ(sa[i].boundary_marker, sb[i].boundary_marker);
+            EXPECT_EQ(sa[i].component, sb[i].component);
+            EXPECT_EQ(sa[i].symbol, sb[i].symbol);
+            EXPECT_EQ(svmp::FE::systems::formExprTreeHash(sa[i].value),
+                      svmp::FE::systems::formExprTreeHash(sb[i].value));
+            EXPECT_EQ(sa[i].value.toString(), sb[i].value.toString());
+        }
+        const auto ma = a.analysisMetadata(2, nullptr);
+        const auto mb = b.analysisMetadata(2, nullptr);
+        ASSERT_EQ(ma.size(), mb.size());
+        for (std::size_t i = 0; i < ma.size(); ++i) {
+            EXPECT_EQ(ma[i].source, mb[i].source);
+        }
+    };
+
+    // Every component prescribed: EssentialBC with the named components.
+    sameStrong(*bc::essentialBC(data, 3, "disp", "d"),
+               bc::EssentialBC(6, bc::toVectorExpr(raw, 3, "disp", 6), "d"));
+    sameStrong(*bc::essentialBC(data, 3, "disp", "d", bc::ComponentValueNameStyle::Component),
+               bc::EssentialBC(6, bc::toVectorExpr(raw, 3, "disp", 6, bc::ComponentValueNameStyle::Component), "d"));
+
+    // Selected components: ComponentEssentialBC.
+    data.value.active = {true, false, true};
+    sameStrong(*bc::componentEssentialBC(data, 3, "disp", "d", "Wall"),
+               *bc::vectorComponentEssentialBC(raw, data.value.active, 3, 6, "disp", "d", "Wall"));
+    EXPECT_THROW((void)bc::essentialBC(data, 3, "disp", "d"), std::invalid_argument);
+    EXPECT_THROW((void)bc::naturalBC(data, 3, "traction"), std::invalid_argument);
+
+    // A vector flux: NaturalBC of asVector of the named components.
+    data.value.active = {true, true, true};
+    auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    auto vector = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar, 3);
+    const auto u = forms::FormExpr::trialFunction(*vector, "u");
+    const auto v = forms::FormExpr::testFunction(*vector, "v");
+    auto typed = (inner(u, v)).dx();
+    auto spelled = typed;
+    bc::naturalBC(data, 3, "traction")->contributeToResidual(typed, u, v);
+    bc::NaturalBC(6, forms::FormExpr::asVector(bc::toVectorExpr(raw, 3, "traction", 6)))
+        .contributeToResidual(spelled, u, v);
+    EXPECT_EQ(svmp::FE::systems::formExprTreeHash(typed), svmp::FE::systems::formExprTreeHash(spelled));
+    EXPECT_EQ(typed.toString(), spelled.toString());
+
+    // The scalar value names its callback after the prefix and the marker.
+    const bc::BoundaryData<bc::ScalarValue> scalar_data{.boundary_marker = 9, .value = g};
+    EXPECT_EQ(svmp::FE::systems::formExprTreeHash(bc::value(scalar_data, "q")),
+              svmp::FE::systems::formExprTreeHash(bc::toScalarExpr(g, bc::markerValueName("q", 9))));
+    EXPECT_THROW((void)bc::value(bc::BoundaryData<bc::ScalarValue>{}, "q"), std::invalid_argument);
 }
 
 TEST(FormsBoundaryConditions, NaturalBCUsesGeneratedActiveBoundaryWhenProvided)

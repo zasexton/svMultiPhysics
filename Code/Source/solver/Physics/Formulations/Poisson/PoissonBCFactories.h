@@ -62,42 +62,6 @@ namespace detail {
 
 } // namespace detail
 
-[[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toNaturalBC(
-    const PoissonOptions::NeumannBC& bc)
-{
-    const int marker =
-        FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "poisson::Factories::toNaturalBC");
-    const auto flux = FE::forms::bc::toScalarExpr(
-        bc.flux,
-        FE::forms::bc::markerValueName("poisson_neumann", marker));
-    return std::make_unique<FE::forms::bc::NaturalBC>(marker, flux);
-}
-
-[[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toRobinBC(
-    const PoissonOptions::RobinBC& bc)
-{
-    const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "poisson::Factories::toRobinBC");
-    const auto alpha = FE::forms::bc::toScalarExpr(
-        bc.alpha,
-        FE::forms::bc::markerValueName("poisson_robin_alpha", marker));
-    const auto rhs = FE::forms::bc::toScalarExpr(
-        bc.rhs,
-        FE::forms::bc::markerValueName("poisson_robin_rhs", marker));
-    return std::make_unique<FE::forms::bc::RobinBC>(marker, alpha, rhs);
-}
-
-[[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toEssentialBC(
-    const PoissonOptions::DirichletBC& bc,
-    std::string_view symbol)
-{
-    const int marker =
-        FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "poisson::Factories::toEssentialBC");
-    const auto value = FE::forms::bc::toScalarExpr(
-        bc.value,
-        FE::forms::bc::markerValueName("poisson_dirichlet", marker));
-    return std::make_unique<FE::forms::bc::EssentialBC>(marker, value, std::string(symbol));
-}
-
 [[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toNitscheBC(
     const PoissonOptions::DirichletBC& bc,
     const FE::forms::FormExpr& diffusion_coeff,
@@ -105,13 +69,13 @@ namespace detail {
     bool symmetric,
     bool scale_with_p)
 {
-    const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "poisson::Factories::toNitscheBC");
-    const auto value =
-        FE::forms::bc::toScalarExpr(
-            bc.value,
-            FE::forms::bc::markerValueName("poisson_nitsche_dirichlet", marker));
     return std::make_unique<FE::forms::bc::ScalarNitscheBC>(
-        marker, value, diffusion_coeff, penalty_gamma, symmetric, scale_with_p);
+        bc.boundary_marker,
+        FE::forms::bc::value(bc, "poisson_nitsche_dirichlet"),
+        diffusion_coeff,
+        penalty_gamma,
+        symmetric,
+        scale_with_p);
 }
 
 /**
@@ -126,7 +90,7 @@ namespace detail {
     using namespace FE::systems;
 
     const int marker =
-        FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "poisson::Factories::toWindkesselBC");
+        FE::forms::bc::boundaryMarkerOrThrow(bc, "poisson::Factories::toWindkesselBC");
 
     const FE::Real Rp = bc.Rp;
     const FE::Real C = bc.C;
@@ -137,13 +101,9 @@ namespace detail {
         throw std::invalid_argument("CoupledRCRNeumannBC: Rd must be nonzero");
     }
 
-    FE::forms::BoundaryFunctional flow_rate;
-    flow_rate.integrand = u;
-    flow_rate.boundary_marker = marker;
-    flow_rate.reduction = FE::forms::BoundaryFunctional::Reduction::Sum;
-    flow_rate.name = bc.functional_name;
+    // Q = integral of u over the boundary, refreshed at every Newton iterate.
     auto Q = system.boundaryIntegral(
-        std::move(flow_rate),
+        FE::forms::boundaryFunctional(u.ds(marker), bc.functional_name),
         FE::systems::AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
 
     const auto instance_name =

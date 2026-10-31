@@ -504,6 +504,80 @@ vectorComponentEssentialBC(const Values& values,
         marker, std::move(components), std::string(symbol), std::string(source_name));
 }
 
+// ---- Conditions from typed boundary data (BoundaryConditions.h BoundaryData) ----
+
+/// NaturalBC(marker, g): the residual term -(g v).ds(marker).
+[[nodiscard]] inline std::unique_ptr<BoundaryCondition>
+naturalBC(const BoundaryData<ScalarValue>& data, std::string_view prefix)
+{
+    return std::make_unique<NaturalBC>(data.boundary_marker, value(data, prefix));
+}
+
+/// NaturalBC(marker, asVector(g)) of a vector flux; every component must be active.
+[[nodiscard]] inline std::unique_ptr<BoundaryCondition>
+naturalBC(const BoundaryData<ComponentValues>& data,
+          int dim,
+          std::string_view prefix,
+          ComponentValueNameStyle name_style = ComponentValueNameStyle::Indexed)
+{
+    for (int d = 0; d < dim; ++d) {
+        if (!data.value.active[static_cast<std::size_t>(d)]) {
+            throw std::invalid_argument("forms::bc::naturalBC: a vector flux has every component");
+        }
+    }
+    return std::make_unique<NaturalBC>(data.boundary_marker,
+                                       FormExpr::asVector(values(data, dim, prefix, name_style)));
+}
+
+/// RobinBC(marker, alpha, rhs): the residual term ((alpha u - rhs) v).ds(marker).
+[[nodiscard]] inline std::unique_ptr<BoundaryCondition>
+robinBC(const BoundaryData<RobinValue>& data, std::string_view alpha_prefix, std::string_view rhs_prefix)
+{
+    const int marker = boundaryMarkerOrThrow(data, "forms::bc::robinBC");
+    return std::make_unique<RobinBC>(marker,
+                                     toScalarExpr(data.value.alpha, markerValueName(alpha_prefix, marker)),
+                                     toScalarExpr(data.value.rhs, markerValueName(rhs_prefix, marker)));
+}
+
+/// EssentialBC(marker, g, symbol): u = g on the marker.
+[[nodiscard]] inline std::unique_ptr<BoundaryCondition>
+essentialBC(const BoundaryData<ScalarValue>& data, std::string_view prefix, std::string symbol = "u")
+{
+    return std::make_unique<EssentialBC>(data.boundary_marker, value(data, prefix), std::move(symbol));
+}
+
+/// EssentialBC(marker, {g_0, ..., g_{dim-1}}, symbol); every component must be active.
+[[nodiscard]] inline std::unique_ptr<BoundaryCondition>
+essentialBC(const BoundaryData<ComponentValues>& data,
+            int dim,
+            std::string_view prefix,
+            std::string symbol = "u",
+            ComponentValueNameStyle name_style = ComponentValueNameStyle::Indexed)
+{
+    for (int d = 0; d < dim; ++d) {
+        if (!data.value.active[static_cast<std::size_t>(d)]) {
+            throw std::invalid_argument(
+                "forms::bc::essentialBC: an inactive component needs componentEssentialBC");
+        }
+    }
+    return std::make_unique<EssentialBC>(data.boundary_marker, values(data, dim, prefix, name_style),
+                                         std::move(symbol));
+}
+
+/// ComponentEssentialBC of the active components (vectorComponentEssentialBC).
+[[nodiscard]] inline std::unique_ptr<BoundaryCondition>
+componentEssentialBC(const BoundaryData<ComponentValues>& data,
+                     int dim,
+                     std::string_view prefix,
+                     std::string_view symbol,
+                     std::string_view source_name,
+                     ComponentValueNameStyle name_style = ComponentValueNameStyle::Indexed)
+{
+    const int marker = boundaryMarkerOrThrow(data, "forms::bc::componentEssentialBC");
+    return vectorComponentEssentialBC(data.value.values, data.value.active, dim, marker, prefix, symbol,
+                                      source_name, name_style);
+}
+
 /**
  * @brief Essential BC on the scalar normal trace of an H(div) field: u·n = g
  */

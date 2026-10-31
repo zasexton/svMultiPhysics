@@ -8,8 +8,11 @@
 #include "Constraints/StrongDirichletConstraint.h"
 #include "Constraints/VertexDirichletConstraint.h"
 #include "Forms/FormExpr.h"
+#include "Forms/JIT/LLVMJITBuildInfo.h"
+#include "Forms/StandardBCs.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/H1Space.h"
+#include "Systems/BoundaryConditionManager.h"
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
 #include "Systems/SystemManifest.h"
@@ -246,6 +249,102 @@ TEST(SystemManifest, ConstraintsAreListedInRegistrationOrder)
         std::vector<constraints::VertexDirichletValue>{{0, 1.5}, {2, -0.5}}));
     EXPECT_NE(linesContaining(constraintManifestLines(*t.system), "constraint system#"),
               system_lines);
+}
+
+TEST(SystemManifest, BoundaryDataFactoriesGiveTheManifestsOfTheSpelledOutConditions)
+{
+    namespace bc = forms::bc;
+    using Conditions = std::vector<std::unique_ptr<bc::BoundaryCondition>>;
+    struct Data {
+        bc::BoundaryData<bc::ScalarValue> flux{};
+        bc::BoundaryData<bc::RobinValue> robin{};
+        bc::BoundaryData<bc::ScalarValue> dirichlet{};
+    };
+    const auto spelled = [](const Data& d) {
+        Conditions out;
+        out.push_back(std::make_unique<bc::NaturalBC>(
+            3, bc::toScalarExpr(d.flux.value, bc::markerValueName("heat_neumann", 3))));
+        out.push_back(std::make_unique<bc::RobinBC>(
+            5,
+            bc::toScalarExpr(d.robin.value.alpha, bc::markerValueName("heat_robin_alpha", 5)),
+            bc::toScalarExpr(d.robin.value.rhs, bc::markerValueName("heat_robin_rhs", 5))));
+        out.push_back(std::make_unique<bc::EssentialBC>(
+            4, bc::toScalarExpr(d.dirichlet.value, bc::markerValueName("heat_dirichlet", 4)), "u"));
+        return out;
+    };
+    const auto typed = [](const Data& d) {
+        Conditions out;
+        out.push_back(bc::naturalBC(d.flux, "heat_neumann"));
+        out.push_back(bc::robinBC(d.robin, "heat_robin_alpha", "heat_robin_rhs"));
+        out.push_back(bc::essentialBC(d.dirichlet, "heat_dirichlet", "u"));
+        return out;
+    };
+
+    // The same nonlinear residual plus the conditions, with JIT kernel keys
+    // when the LLVM JIT is built.
+    FormInstallOptions options;
+    options.compiler_options.jit.enable = forms::jit::llvmJITEnabled();
+    const auto manifests = [&](Conditions conditions) {
+        ManifestSystem out;
+        out.system = std::make_unique<FESystem>(out.mesh);
+        out.u_id = out.system->addField(FieldSpec{.name = "u", .space = out.space, .components = 1});
+        out.system->addOperator("op");
+        const auto u = forms::StateField(out.u_id, *out.space, "u");
+        const auto v = forms::TestField(out.u_id, *out.space, "v");
+        auto residual = (inner(grad(u), grad(v)) + u * u * v).dx();
+        BoundaryConditionManager bcs;
+        for (auto& condition : conditions) {
+            bcs.add(std::move(condition));
+        }
+        bcs.applyAll(*out.system, residual, u, v, out.u_id);
+        (void)installFormulation(*out.system, "op", {out.u_id}, residual, options);
+        return std::pair{kernelManifestLines(*out.system), constraintManifestLines(*out.system)};
+    };
+
+    // Literal and expression data: equal manifests, JIT keys included.
+    const Data literal{.flux = {.boundary_marker = 3, .value = 1.5},
+                       .robin = {.boundary_marker = 5,
+                                 .value = {.alpha = 2.5, .rhs = FormExpr::constant(0.5) * forms::t()}},
+                       .dirichlet = {.boundary_marker = 4, .value = -0.75}};
+    const auto [spelled_kernels, spelled_constraints] = manifests(spelled(literal));
+    const auto [typed_kernels, typed_constraints] = manifests(typed(literal));
+    EXPECT_EQ(typed_kernels, spelled_kernels);
+    EXPECT_EQ(typed_constraints, spelled_constraints);
+    EXPECT_FALSE(linesContaining(typed_kernels, " term=").empty());
+    if (forms::jit::llvmJITEnabled()) {
+        bool keyed = false;
+        for (const auto& line : typed_kernels) {
+            const auto key = valueOf(line, "key");
+            keyed = keyed || (!key.empty() && key != "-");
+        }
+        EXPECT_TRUE(keyed);
+    }
+
+    // Callback data names each coefficient after the prefix and the marker.
+    // The KernelIR keys a callback by its node's address (never cacheable),
+    // so the trees, strings and constraints are compared, not kir or keys.
+    const forms::ScalarCoefficient g = [](Real x, Real y, Real z) { return 1.0 + x + 2.0 * y + 3.0 * z; };
+    const forms::TimeScalarCoefficient h = [](Real x, Real, Real, Real t) { return x * t; };
+    const Data callbacks{.flux = {.boundary_marker = 3, .value = h},
+                         .robin = {.boundary_marker = 5, .value = {.alpha = 2.5, .rhs = g}},
+                         .dirichlet = {.boundary_marker = 4, .value = g}};
+    const auto withoutAddressKeys = [](std::vector<std::string> lines) {
+        for (auto& line : lines) {
+            for (const std::string_view field : {" kir=", " ir_hash=", " key="}) {
+                const auto at = line.find(field);
+                if (at != std::string::npos) {
+                    line.erase(at, line.find(' ', at + 1) == std::string::npos ? std::string::npos
+                                                                               : line.find(' ', at + 1) - at);
+                }
+            }
+        }
+        return lines;
+    };
+    const auto [spelled_callback_kernels, spelled_callback_constraints] = manifests(spelled(callbacks));
+    const auto [typed_callback_kernels, typed_callback_constraints] = manifests(typed(callbacks));
+    EXPECT_EQ(withoutAddressKeys(typed_callback_kernels), withoutAddressKeys(spelled_callback_kernels));
+    EXPECT_EQ(typed_callback_constraints, spelled_callback_constraints);
+    EXPECT_FALSE(linesContaining(typed_callback_constraints, "heat_dirichlet_4").empty());
 }
 
 } // namespace

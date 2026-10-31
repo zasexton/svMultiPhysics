@@ -422,7 +422,7 @@ TEST(PoissonModule, ExplicitUnavailableJITPreservesBoundaryWorkAtItsOriginalPhas
         formulations::poisson::PoissonOptions options;
         options.jit_policy.enable = true;
         options.jit_policy.enable_was_explicitly_set = true;
-        options.neumann.push_back({.boundary_marker = 17, .flux = FE::Real{1.0}});
+        options.neumann.push_back({.boundary_marker = 17, .value = FE::Real{1.0}});
         if (coupled) {
             options.coupled_neumann_rcr.push_back({.boundary_marker = 18});
         }
@@ -878,7 +878,7 @@ TEST(PoissonModule, BoundaryScalarValueAcceptsFormExpr)
     opts.source = 0.0;
     opts.neumann.push_back(formulations::poisson::PoissonOptions::NeumannBC{
         .boundary_marker = marker,
-        .flux = FE::forms::FormExpr::constant(2.0),
+        .value = FE::forms::FormExpr::constant(2.0),
     });
 
     formulations::poisson::PoissonModule module(space, opts);

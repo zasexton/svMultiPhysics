@@ -582,6 +582,8 @@ namespace `forms::bc`.
 | `bc::boundaryMarkerOrThrow(bc, where)` | `BoundaryConditions.h` | The `boundary_marker` of an option struct; throws, naming `where`, when it is negative |
 | `bc::hasForbiddenPrescribedValueDependency(node)` | `BoundaryConditions.h` | Whether a prescribed value reads a test/trial function, FE state, coupled or auxiliary data, material state, moving or variational geometry, a constitutive call or an integral |
 | `bc::StrongDirichlet`, `strongDirichlet(...)` | `BoundaryConditions.h` | Strong scalar/component value constraints |
+| `bc::BoundaryData<Value>`, `bc::ComponentValues`, `bc::RobinValue` | `BoundaryConditions.h` | Typed data of one condition: a marker and a `ScalarValue`, a vector value with the components it prescribes, or a Robin pair (`alpha u - rhs`) |
+| `bc::value(data, prefix)`, `bc::values(data, dim, prefix[, style])` | `BoundaryConditions.h` | The data as forms; a callback is named after the prefix and the marker (`markerValueName`, `toVectorExpr`) |
 | `traceInequalityViolation(...)`, `applyTraceInequality(...)` | `BoundaryConditions.h` | One-sided scalar trace laws |
 | `applyTraceNitsche(...)` | `BoundaryConditions.h` | Boundary Nitsche scalar trace imposition with explicit consistency flux, adjoint flux, and penalty weight |
 | `applyInterfaceTraceNitsche(...)` | `BoundaryConditions.h` | Interface Nitsche scalar trace imposition |
@@ -590,6 +592,7 @@ namespace `forms::bc`.
 | `TraceInequalitySense`, `TraceInequalityLinearization`, `TraceInequalityOptions` | `BoundaryConditions.h` | One-sided trace-law options |
 | `buildGeneratedBoundaryNitscheTraceTerms(u, v, g, form, ...)`, `symmetricGradientForm(k)`, `GeneratedBoundaryNitscheTraceFormBinding` | `BoundaryConditions.h`, `NitscheTraceBilinearForm.h` | `implemented/expert`; Nitsche terms on a generated boundary consistent with a declared bilinear form (`NitscheTraceBilinearForm::SymmetricGradient`, 2 k eps(u) : eps(v)), with an immutable binding for the installer's trace certificate, which bounds the form's flux by its energy |
 | `EssentialBC`, `ComponentEssentialBC`, `vectorComponentEssentialBC(...)` | `StandardBCs.h` | Strong values: scalar, dense vector, or selected components |
+| `bc::naturalBC(data, prefix)`, `robinBC(data, alpha_prefix, rhs_prefix)`, `essentialBC(data, prefix, symbol)`, `componentEssentialBC(data, dim, prefix, symbol, source)` | `StandardBCs.h` | The conditions of typed `BoundaryData`; the same objects, trees, manifests and JIT keys as the spelled-out `NaturalBC(m, toScalarExpr(g, markerValueName(prefix, m)))` and its siblings (Poisson builds its conditions so) |
 | `NaturalBC`, `RobinBC` | `StandardBCs.h` | Weak flux and Robin terms on `ds(marker)` or an `ExteriorBoundaryMeasure` |
 | `ReservedBC` | `StandardBCs.h` | Reserves a marker for conflict validation; contributes nothing |
 | `NormalTraceEssentialBC` | `StandardBCs.h` | Strong `H(div)` normal-trace data (`HDivNormalConstraint`) |

@@ -412,7 +412,7 @@ void apply_scalar_bcs(const svmp::Physics::EquationModuleInput& input,
     if (bc_type == "Neumann" || bc_type == "Neu") {
       PoissonOptions::NeumannBC neu{};
       neu.boundary_marker = bc.boundary_marker;
-      neu.flux = value;
+      neu.value = value;
       options.neumann.push_back(std::move(neu));
       continue;
     }
@@ -424,8 +424,8 @@ void apply_scalar_bcs(const svmp::Physics::EquationModuleInput& input,
 
       PoissonOptions::RobinBC robin{};
       robin.boundary_marker = bc.boundary_marker;
-      robin.alpha = stiff;
-      robin.rhs = value;
+      robin.value.alpha = stiff;
+      robin.value.rhs = value;
       options.robin.push_back(std::move(robin));
       continue;
     }

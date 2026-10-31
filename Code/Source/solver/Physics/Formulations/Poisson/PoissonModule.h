@@ -44,21 +44,9 @@ struct PoissonOptions {
     using TimeFunction = FE::forms::TimeScalarCoefficient;
     using ScalarValue = FE::forms::bc::ScalarValue;
 
-    struct DirichletBC {
-        int boundary_marker{-1};
-        ScalarValue value{};
-    };
-
-    struct NeumannBC {
-        int boundary_marker{-1};
-        ScalarValue flux{};
-    };
-
-    struct RobinBC {
-        int boundary_marker{-1};
-        ScalarValue alpha{};
-        ScalarValue rhs{};
-    };
+    using DirichletBC = FE::forms::bc::BoundaryData<ScalarValue>;   ///< value: u_D
+    using NeumannBC = FE::forms::bc::BoundaryData<ScalarValue>;     ///< value: the flux g
+    using RobinBC = FE::forms::bc::BoundaryData<FE::forms::bc::RobinValue>;
 
     struct NodeDirichletBC {
         FE::GlobalIndex node_id{-1};
