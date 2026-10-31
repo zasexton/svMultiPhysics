@@ -7317,12 +7317,12 @@ TEST(NewtonSolver,
         diagnostic_counts.pressure_representability_pair.matrix_and_vector,
         0);
 
-    ASSERT_NE(workspace.pressure_representability_solution, nullptr);
-    ASSERT_NE(workspace.pressure_representability_residual, nullptr);
+    ASSERT_NE(workspace.certificate_vectors.solution, nullptr);
+    ASSERT_NE(workspace.certificate_vectors.residual, nullptr);
     ASSERT_NE(
-        workspace.pressure_representability_normal_residual, nullptr);
+        workspace.certificate_vectors.normal_residual, nullptr);
     const auto solution =
-        workspace.pressure_representability_solution->localSpan();
+        workspace.certificate_vectors.solution->localSpan();
     const auto velocity_dof =
         problem.sys->fieldDofOffset(problem.velocity_field);
     const auto pressure_dof =
@@ -7334,11 +7334,11 @@ TEST(NewtonSolver,
     EXPECT_NEAR(solution[static_cast<std::size_t>(velocity_dof)], 0.0, 1.0e-14);
     EXPECT_NEAR(solution[static_cast<std::size_t>(pressure_dof)], 2.0, 1.0e-12);
     EXPECT_NEAR(
-        workspace.pressure_representability_residual->norm(),
+        workspace.certificate_vectors.residual->norm(),
         0.0,
         1.0e-13);
     EXPECT_NEAR(
-        workspace.pressure_representability_normal_residual->norm(),
+        workspace.certificate_vectors.normal_residual->norm(),
         0.0,
         1.0e-13);
 
@@ -7797,11 +7797,11 @@ TEST(NewtonSolver,
     EXPECT_FALSE(report.pressure_representability_breakdown);
     EXPECT_NEAR(
         report.pressure_representability_residual_norm, 0.0, 1.0e-13);
-    ASSERT_NE(workspace.pressure_representability_solution, nullptr);
+    ASSERT_NE(workspace.certificate_vectors.solution, nullptr);
     const auto pressure_dof =
         problem.sys->fieldDofOffset(problem.pressure_field);
     const auto solution =
-        workspace.pressure_representability_solution->localSpan();
+        workspace.certificate_vectors.solution->localSpan();
     ASSERT_GE(pressure_dof, 0);
     ASSERT_LT(static_cast<std::size_t>(pressure_dof), solution.size());
     EXPECT_NEAR(
@@ -7876,11 +7876,11 @@ TEST(NewtonSolver,
     EXPECT_FALSE(report.pressure_representability_breakdown);
     EXPECT_NEAR(
         report.pressure_representability_residual_norm, 0.0, 1.0e-13);
-    ASSERT_NE(workspace.pressure_representability_solution, nullptr);
+    ASSERT_NE(workspace.certificate_vectors.solution, nullptr);
     const auto pressure_dof =
         problem.sys->fieldDofOffset(problem.pressure_field);
     const auto solution =
-        workspace.pressure_representability_solution->localSpan();
+        workspace.certificate_vectors.solution->localSpan();
     ASSERT_GE(pressure_dof, 0);
     ASSERT_LT(static_cast<std::size_t>(pressure_dof), solution.size());
     EXPECT_NEAR(
@@ -8407,7 +8407,7 @@ TEST(NewtonSolver,
     EXPECT_TRUE(report.converged);
 
     ASSERT_NE(workspace.pressure_representability_pair_matrix, nullptr);
-    ASSERT_NE(workspace.pressure_representability_load, nullptr);
+    ASSERT_NE(workspace.certificate_vectors.load, nullptr);
     const auto velocity_begin =
         problem.sys->fieldDofOffset(problem.velocity_field);
     const auto pressure_begin =
@@ -8418,7 +8418,7 @@ TEST(NewtonSolver,
     ASSERT_EQ(
         problem.sys->fieldDofHandler(problem.pressure_field).getNumDofs(),
         4);
-    const auto load = workspace.pressure_representability_load->localSpan();
+    const auto load = workspace.certificate_vectors.load->localSpan();
     const auto& pair = *workspace.pressure_representability_pair_matrix;
     for (svmp::FE::GlobalIndex i = 0; i < 4; ++i) {
         ASSERT_LT(static_cast<std::size_t>(velocity_begin + i), load.size());
@@ -8662,8 +8662,8 @@ TEST(NewtonSolver,
     const auto telemetry = stdout_text + stderr_text;
     EXPECT_TRUE(report.converged);
     ASSERT_NE(workspace.pressure_representability_pair_matrix, nullptr);
-    ASSERT_NE(workspace.pressure_representability_load, nullptr);
-    ASSERT_NE(workspace.pressure_representability_residual, nullptr);
+    ASSERT_NE(workspace.certificate_vectors.load, nullptr);
+    ASSERT_NE(workspace.certificate_vectors.residual, nullptr);
     const auto velocity_dof =
         problem.sys->fieldDofOffset(problem.velocity_field);
     const auto pressure_dof =
@@ -8678,17 +8678,17 @@ TEST(NewtonSolver,
     EXPECT_NEAR(pair.getEntry(pressure_dof, pressure_dof), 0.0, 1.0e-14);
     EXPECT_NEAR(pair.getEntry(velocity_dof, pressure_dof), 0.0, 1.0e-14);
     EXPECT_NEAR(pair.getEntry(pressure_dof, velocity_dof), 0.0, 1.0e-14);
-    EXPECT_GT(workspace.pressure_representability_load->norm(), 1.0e-12);
+    EXPECT_GT(workspace.certificate_vectors.load->norm(), 1.0e-12);
     EXPECT_NEAR(
-        workspace.pressure_representability_residual->norm(),
-        workspace.pressure_representability_load->norm(),
+        workspace.certificate_vectors.residual->norm(),
+        workspace.certificate_vectors.load->norm(),
         1.0e-13);
     EXPECT_NEAR(
-        workspace.pressure_representability_normal_residual->norm(),
+        workspace.certificate_vectors.normal_residual->norm(),
         0.0,
         1.0e-14);
     EXPECT_NEAR(
-        workspace.pressure_representability_solution->norm(),
+        workspace.certificate_vectors.solution->norm(),
         0.0,
         1.0e-14);
     // A zero reduced operator makes the load range-orthogonal: LSQR reaches
@@ -9243,9 +9243,9 @@ TEST(NewtonSolver,
     EXPECT_LE(report.pressure_representability_relative_distance, 1.0e-12);
     EXPECT_EQ(ts_test::getVectorByDof(problem.history.u()),
               exact_entry_state);
-    ASSERT_NE(workspace.pressure_representability_correction_load, nullptr);
+    ASSERT_NE(workspace.certificate_vectors.correction_load, nullptr);
     EXPECT_DOUBLE_EQ(
-        workspace.pressure_representability_correction_load->norm(), 0.0);
+        workspace.certificate_vectors.correction_load->norm(), 0.0);
     EXPECT_NE(telemetry.find("pressure_correction_load_norm=0"),
               std::string::npos);
     EXPECT_NE(telemetry.find("pressure_correction_iterations=0"),
@@ -10274,13 +10274,13 @@ TEST(NewtonSolver,
     EXPECT_NE(telemetry.find("pressure_representability_claimed=0"),
               std::string::npos);
     EXPECT_NEAR(
-        workspace.pressure_representability_load->norm(), 0.0, 1.0e-14);
+        workspace.certificate_vectors.load->norm(), 0.0, 1.0e-14);
     EXPECT_NEAR(
-        workspace.pressure_representability_solution->norm(), 0.0, 1.0e-14);
+        workspace.certificate_vectors.solution->norm(), 0.0, 1.0e-14);
     EXPECT_NEAR(
-        workspace.pressure_representability_residual->norm(), 0.0, 1.0e-14);
+        workspace.certificate_vectors.residual->norm(), 0.0, 1.0e-14);
     EXPECT_NEAR(
-        workspace.pressure_representability_normal_residual->norm(),
+        workspace.certificate_vectors.normal_residual->norm(),
         0.0,
         1.0e-14);
 }
@@ -10312,9 +10312,9 @@ TEST(NewtonSolver,
     const auto n_dofs = problem.sys->dofHandler().getNumDofs();
     // Replacing the initializer's second-load vector with an equal-backend,
     // wrong-size allocation must be rejected before either pair multiply.
-    workspace.pressure_representability_correction_load =
+    workspace.certificate_vectors.correction_load =
         problem.factory->createVector(n_dofs + 1);
-    ASSERT_NE(workspace.pressure_representability_correction_load, nullptr);
+    ASSERT_NE(workspace.certificate_vectors.correction_load, nullptr);
     problem.history.repack(*problem.factory);
 
     const auto report = newton.solveStep(
@@ -10376,15 +10376,15 @@ TEST(NewtonSolver,
     const auto entry_revision =
         problem.sys->sparsityPatternRevision();
     const std::array<const void*, 9> old_vectors{
-        workspace.pressure_representability_load.get(),
-        workspace.pressure_representability_correction_load.get(),
-        workspace.pressure_representability_solution.get(),
-        workspace.pressure_representability_left_basis.get(),
-        workspace.pressure_representability_right_basis.get(),
-        workspace.pressure_representability_direction.get(),
-        workspace.pressure_representability_work.get(),
-        workspace.pressure_representability_residual.get(),
-        workspace.pressure_representability_normal_residual.get(),
+        workspace.certificate_vectors.load.get(),
+        workspace.certificate_vectors.correction_load.get(),
+        workspace.certificate_vectors.solution.get(),
+        workspace.certificate_vectors.left_basis.get(),
+        workspace.certificate_vectors.right_basis.get(),
+        workspace.certificate_vectors.direction.get(),
+        workspace.certificate_vectors.work.get(),
+        workspace.certificate_vectors.residual.get(),
+        workspace.certificate_vectors.normal_residual.get(),
     };
 
     constraint_state->enabled = true;
@@ -10414,15 +10414,15 @@ TEST(NewtonSolver,
     EXPECT_TRUE(report.constant_pressure_kkt_available);
 
     const std::array<const void*, 9> refreshed_vectors{
-        workspace.pressure_representability_load.get(),
-        workspace.pressure_representability_correction_load.get(),
-        workspace.pressure_representability_solution.get(),
-        workspace.pressure_representability_left_basis.get(),
-        workspace.pressure_representability_right_basis.get(),
-        workspace.pressure_representability_direction.get(),
-        workspace.pressure_representability_work.get(),
-        workspace.pressure_representability_residual.get(),
-        workspace.pressure_representability_normal_residual.get(),
+        workspace.certificate_vectors.load.get(),
+        workspace.certificate_vectors.correction_load.get(),
+        workspace.certificate_vectors.solution.get(),
+        workspace.certificate_vectors.left_basis.get(),
+        workspace.certificate_vectors.right_basis.get(),
+        workspace.certificate_vectors.direction.get(),
+        workspace.certificate_vectors.work.get(),
+        workspace.certificate_vectors.residual.get(),
+        workspace.certificate_vectors.normal_residual.get(),
     };
     for (std::size_t i = 0; i < old_vectors.size(); ++i) {
         EXPECT_NE(refreshed_vectors[i], old_vectors[i]);
@@ -10432,7 +10432,7 @@ TEST(NewtonSolver,
         diagnostic_counts.pressure_representability_pair.matrix_only,
         diagnostic_counts.pressure_representability_pair.total);
     EXPECT_NEAR(
-        workspace.pressure_representability_normal_residual->norm(),
+        workspace.certificate_vectors.normal_residual->norm(),
         0.0,
         1.0e-12);
     EXPECT_NE(telemetry.find("pressure_representability_available=1"),

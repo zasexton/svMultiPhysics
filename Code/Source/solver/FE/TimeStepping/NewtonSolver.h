@@ -14,6 +14,7 @@
 #include "Backends/Interfaces/LinearSolver.h"
 #include "Core/Types.h"
 #include "Systems/TransientSystem.h"
+#include "Analysis/ConstraintRangeCertificate.h"
 #include "TimeStepping/TimeHistory.h"
 
 #include <cstddef>
@@ -552,27 +553,9 @@ struct NewtonWorkspace {
     // equations, or globally gathered dense matrices).
     std::unique_ptr<backends::GenericMatrix>
         pressure_representability_pair_matrix{};
-    std::unique_ptr<backends::GenericVector>
-        pressure_representability_load{};
-    // Kept in the pressure-pair vector layout so backends whose matrix/vector
-    // compatibility depends on shared layout identity can evaluate the
-    // remaining balance after an existing pressure baseline is applied.
-    std::unique_ptr<backends::GenericVector>
-        pressure_representability_correction_load{};
-    std::unique_ptr<backends::GenericVector>
-        pressure_representability_solution{};
-    std::unique_ptr<backends::GenericVector>
-        pressure_representability_left_basis{};
-    std::unique_ptr<backends::GenericVector>
-        pressure_representability_right_basis{};
-    std::unique_ptr<backends::GenericVector>
-        pressure_representability_direction{};
-    std::unique_ptr<backends::GenericVector>
-        pressure_representability_work{};
-    std::unique_ptr<backends::GenericVector>
-        pressure_representability_residual{};
-    std::unique_ptr<backends::GenericVector>
-        pressure_representability_normal_residual{};
+    // The vectors of the representability and residual-correction LSQR
+    // solves, in the pair layout (analysis::ConstraintRangeVectors).
+    analysis::ConstraintRangeVectors certificate_vectors{};
     // The compatible-pressure initial guess is intentionally one-shot across
     // solveStep calls and workspace/Jacobian reallocations.  Construct a new
     // NewtonWorkspace to begin a new lifecycle.

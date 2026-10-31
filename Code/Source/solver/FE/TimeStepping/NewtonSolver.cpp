@@ -17,6 +17,7 @@
 #include "Core/Logger.h"
 #include "Dofs/DofIndexSet.h"
 #include "Dofs/EntityDofMap.h"
+#include "Analysis/ConstraintRangeCertificate.h"
 #include "Auxiliary/AuxiliaryOperatorRegistry.h"
 #include "Auxiliary/AuxiliaryStateManager.h"
 #include "Basis/BasisCache.h"
@@ -150,116 +151,15 @@ constexpr NewtonCommunicator kSerialNewtonCommunicator = 0;
     return enabled;
 }
 
-[[nodiscard]] bool freeSurfaceConservativeBalanceDiagnosticEnabled() noexcept
-{
-    // Preserve the same precedence as the Navier--Stokes registration gate so
-    // an explicit primary setting of "0" cannot be overridden by an ambient
-    // compatibility alias.  Do not cache this value: unit and integration
-    // harnesses can scope environment variables within one process.
-    constexpr std::array<const char*, 4> names{
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC",
-        "SVMP_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC",
-        "SVMP_NS_FREE_SURFACE_EQUILIBRIUM_DIAGNOSTIC",
-        "SVMP_FREE_SURFACE_EQUILIBRIUM_DIAGNOSTIC",
-    };
-    for (const char* name : names) {
-        const char* value = std::getenv(name);
-        if (value != nullptr && value[0] != '\0') {
-            return envBoolEnabled(name);
-        }
-    }
-    return false;
-}
-
-[[nodiscard]] std::optional<double>
-acceptedStaticPressureRepresentabilityDistanceFromEnvironment() noexcept
-{
-    constexpr std::array<const char*, 2> names{
-        "SVMP_NS_FREE_SURFACE_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE",
-        "SVMP_FREE_SURFACE_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE",
-    };
-    for (const char* name : names) {
-        const char* text = std::getenv(name);
-        if (text == nullptr || text[0] == '\0') {
-            continue;
-        }
-        char* end = nullptr;
-        const double value = std::strtod(text, &end);
-        if (end == text || end == nullptr || end[0] != '\0') {
-            return std::numeric_limits<double>::quiet_NaN();
-        }
-        return value;
-    }
-    return std::nullopt;
-}
-
-[[nodiscard]] std::optional<double>
-acceptedStaticConstantPressureKktDistanceFromEnvironment() noexcept
-{
-    constexpr std::array<const char*, 2> names{
-        "SVMP_NS_FREE_SURFACE_CONSTANT_PRESSURE_KKT_MAX_RELATIVE_DISTANCE",
-        "SVMP_FREE_SURFACE_CONSTANT_PRESSURE_KKT_MAX_RELATIVE_DISTANCE",
-    };
-    for (const char* name : names) {
-        const char* text = std::getenv(name);
-        if (text == nullptr || text[0] == '\0') {
-            continue;
-        }
-        char* end = nullptr;
-        const double value = std::strtod(text, &end);
-        if (end == text || end == nullptr || end[0] != '\0') {
-            return std::numeric_limits<double>::quiet_NaN();
-        }
-        return value;
-    }
-    return std::nullopt;
-}
-
-[[nodiscard]] bool
-staticCompatibleFreeSurfacePressureInitializerFromEnvironment() noexcept
-{
-    constexpr std::array<const char*, 2> names{
-        "SVMP_NS_FREE_SURFACE_STATIC_COMPATIBLE_PRESSURE_INITIALIZER",
-        "SVMP_FREE_SURFACE_STATIC_COMPATIBLE_PRESSURE_INITIALIZER",
-    };
-    for (const char* name : names) {
-        const char* value = std::getenv(name);
-        if (value != nullptr && value[0] != '\0') {
-            return envBoolEnabled(name);
-        }
-    }
-    return false;
-}
-
 [[nodiscard]] bool freeSurfaceConservativeBalanceDiagnosticRequested(
     const NewtonOptions& options) noexcept
 {
-    return freeSurfaceConservativeBalanceDiagnosticEnabled() ||
+    return analysis::staticCertificateDiagnosticEnabled() ||
            options.initialize_static_compatible_free_surface_pressure ||
            options.accepted_static_pressure_representability_max_relative_distance
                .has_value() ||
            options.accepted_static_constant_pressure_kkt_max_relative_distance
                .has_value();
-}
-
-[[nodiscard]] bool
-freeSurfaceConservativeBalanceDiagnosticEveryAssemblyRequested() noexcept
-{
-    // Every requested full diagnostic sample is assembled.  Qualification
-    // runs may additionally force the revision/exact-load-guarded mixed pair
-    // and LSQR cache off, so those expensive operations repeat for every
-    // sample (including both halves of a line-search accepted refresh).
-    constexpr std::array<const char*, 2> names{
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC_EVERY_ASSEMBLY",
-        "SVMP_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC_EVERY_ASSEMBLY",
-    };
-    for (const char* name : names) {
-        const char* value = std::getenv(name);
-        if (value != nullptr && value[0] != '\0') {
-            return envBoolEnabled(name);
-        }
-    }
-    return false;
 }
 
 inline constexpr std::string_view
@@ -1783,413 +1683,6 @@ void copyVector(backends::GenericVector& dst, const backends::GenericVector& src
     }
 }
 
-void recreatePressureRepresentabilityVectors(
-    const backends::BackendFactory& factory,
-    GlobalIndex n_dofs,
-    NewtonWorkspace& workspace)
-{
-    FE_THROW_IF(
-        n_dofs <= 0,
-        systems::InvalidStateException,
-        "NewtonSolver: pressure-representability vector layout has no DOFs");
-    const auto create_vector = [&]() {
-        auto vector = factory.createVector(n_dofs);
-        FE_CHECK_NOT_NULL(
-            vector.get(),
-            "NewtonSolver pressure-representability vector");
-        return vector;
-    };
-
-    // Construct the complete replacement set before releasing any old
-    // vectors. Besides providing basic exception safety, this makes a layout
-    // refresh observable and prevents an allocator from recycling an old
-    // object address while the set is only partially rebuilt.
-    auto load = create_vector();
-    auto correction_load = create_vector();
-    auto solution = create_vector();
-    auto left_basis = create_vector();
-    auto right_basis = create_vector();
-    auto direction = create_vector();
-    auto work = create_vector();
-    auto residual = create_vector();
-    auto normal_residual = create_vector();
-
-    workspace.pressure_representability_load = std::move(load);
-    workspace.pressure_representability_correction_load =
-        std::move(correction_load);
-    workspace.pressure_representability_solution = std::move(solution);
-    workspace.pressure_representability_left_basis =
-        std::move(left_basis);
-    workspace.pressure_representability_right_basis =
-        std::move(right_basis);
-    workspace.pressure_representability_direction = std::move(direction);
-    workspace.pressure_representability_work = std::move(work);
-    workspace.pressure_representability_residual = std::move(residual);
-    workspace.pressure_representability_normal_residual =
-        std::move(normal_residual);
-}
-
-struct PressureRepresentabilityLsqrResult {
-    double residual_norm{std::numeric_limits<double>::quiet_NaN()};
-    double relative_residual{std::numeric_limits<double>::quiet_NaN()};
-    double normal_residual_norm{std::numeric_limits<double>::quiet_NaN()};
-    double relative_normal_residual{
-        std::numeric_limits<double>::quiet_NaN()};
-    double pressure_norm{std::numeric_limits<double>::quiet_NaN()};
-    int iterations{0};
-    int normal_residual_refinements{0};
-    bool converged{false};
-    bool breakdown{false};
-};
-
-/**
- * Solve min_p ||G p + f|| with Golub--Kahan LSQR from p=0.
- *
- * `pair` is the constrained, symmetric mixed operator [0,G;G^T,0].  Inputs
- * carrying pressure coefficients therefore produce G-actions, while inputs
- * carrying velocity residuals produce G^T-actions through the same generic
- * matrix multiply.  No normal matrix is formed and no backend storage is
- * inspected or globally gathered.
- */
-PressureRepresentabilityLsqrResult solvePressureRepresentabilityLsqr(
-    const backends::GenericMatrix& pair,
-    const backends::GenericVector& load,
-    backends::GenericVector& pressure,
-    backends::GenericVector& left_basis,
-    backends::GenericVector& right_basis,
-    backends::GenericVector& direction,
-    backends::GenericVector& work,
-    backends::GenericVector& residual,
-    backends::GenericVector& normal_residual,
-    int max_iterations,
-    std::optional<double> requested_max_relative_residual,
-    const std::function<bool(bool)>& all_ranks)
-{
-    PressureRepresentabilityLsqrResult result;
-    pressure.zero();
-    left_basis.zero();
-    right_basis.zero();
-    direction.zero();
-    work.zero();
-    residual.zero();
-    normal_residual.zero();
-
-    const auto vector_is_finite = [&](const backends::GenericVector& vector) {
-        const auto values = vector.localSpan();
-        const bool local_finite = std::all_of(
-            values.begin(), values.end(), [](Real value) {
-                return std::isfinite(static_cast<double>(value));
-            });
-        return all_ranks(local_finite);
-    };
-    const auto finite_nonnegative = [&](double value) {
-        return all_ranks(std::isfinite(value) && value >= 0.0);
-    };
-
-    const double load_norm = load.norm();
-    if (!vector_is_finite(load) || !finite_nonnegative(load_norm)) {
-        result.breakdown = true;
-        return result;
-    }
-    const bool local_relative_target_present =
-        requested_max_relative_residual.has_value();
-    const bool relative_target_present_on_all_ranks =
-        all_ranks(local_relative_target_present);
-    const bool relative_target_absent_on_all_ranks =
-        all_ranks(!local_relative_target_present);
-    if ((!relative_target_present_on_all_ranks &&
-         !relative_target_absent_on_all_ranks) ||
-        (relative_target_present_on_all_ranks &&
-         !all_ranks(
-             std::isfinite(*requested_max_relative_residual) &&
-             *requested_max_relative_residual >= 0.0))) {
-        result.breakdown = true;
-        return result;
-    }
-
-    auto evaluate_fresh_residual = [&]() {
-        pressure.updateGhosts();
-        pair.mult(pressure, residual);
-        residual.markModified();
-        axpy(residual, Real{1.0}, load);
-        residual.updateGhosts();
-        pair.mult(residual, normal_residual);
-        normal_residual.markModified();
-
-        result.residual_norm = residual.norm();
-        result.normal_residual_norm = normal_residual.norm();
-        result.pressure_norm = pressure.norm();
-        return vector_is_finite(residual) &&
-               vector_is_finite(normal_residual) &&
-               vector_is_finite(pressure) &&
-               finite_nonnegative(result.residual_norm) &&
-               finite_nonnegative(result.normal_residual_norm) &&
-               finite_nonnegative(result.pressure_norm);
-    };
-
-    if (!evaluate_fresh_residual()) {
-        result.breakdown = true;
-        return result;
-    }
-    const double initial_normal_residual_norm =
-        result.normal_residual_norm;
-    const double absolute_stationarity_tolerance =
-        100.0 * std::numeric_limits<Real>::epsilon() *
-        std::max(1.0, initial_normal_residual_norm);
-    // Keep normal-equation stationarity materially tighter than the primal
-    // representability gates because mixed-pair conditioning can amplify the
-    // remaining normal residual into a larger primal distance.
-    const double stationarity_tolerance =
-        absolute_stationarity_tolerance +
-        1.0e-12 * initial_normal_residual_norm;
-    const double residual_roundoff_floor =
-        100.0 * std::numeric_limits<Real>::epsilon() *
-        std::max(1.0, load_norm);
-    const double normal_roundoff_floor =
-        100.0 * std::numeric_limits<Real>::epsilon() *
-        std::max(1.0, initial_normal_residual_norm);
-
-    const auto refresh_relative_metrics = [&]() {
-        // A load that is numerical zero has no meaningful relative scale.
-        // Report zero distance only when its absolute residual is also at the
-        // coefficient-scaled roundoff floor; the independent absolute gate
-        // remains authoritative.
-        result.relative_residual =
-            load_norm > residual_roundoff_floor
-                ? result.residual_norm / load_norm
-                : (result.residual_norm <= residual_roundoff_floor
-                       ? 0.0
-                       : std::numeric_limits<double>::infinity());
-        result.relative_normal_residual =
-            initial_normal_residual_norm > normal_roundoff_floor
-                ? result.normal_residual_norm /
-                      initial_normal_residual_norm
-                : (result.normal_residual_norm <=
-                           normal_roundoff_floor
-                       ? 0.0
-                       : std::numeric_limits<double>::infinity());
-    };
-    refresh_relative_metrics();
-    const auto requested_relative_residual_reached = [&]() {
-        return !requested_max_relative_residual.has_value() ||
-               all_ranks(
-                   result.relative_residual <=
-                   *requested_max_relative_residual);
-    };
-
-    // If G^T f is already at the scale-aware roundoff floor, p=0 is the
-    // least-squares stationarity certificate.  This includes loads wholly in
-    // the orthogonal complement of range(G).
-    const bool initially_stationary = all_ranks(
-        result.normal_residual_norm <= absolute_stationarity_tolerance);
-    if (initially_stationary) {
-        result.converged = true;
-        return result;
-    }
-    if (max_iterations <= 0 || !(load_norm > 0.0)) {
-        return result;
-    }
-
-    // LSQR solves G p = -f.  The vectors remain monolithic, but the zero
-    // diagonal blocks ensure the Golub--Kahan bases alternate exactly between
-    // velocity and pressure subspaces.
-    left_basis.copyFrom(load);
-    left_basis.scale(static_cast<Real>(-1.0 / load_norm));
-    left_basis.updateGhosts();
-    pair.mult(left_basis, right_basis);
-    right_basis.markModified();
-    double alpha = right_basis.norm();
-    if (!vector_is_finite(right_basis) || !finite_nonnegative(alpha) ||
-        !(alpha > 0.0)) {
-        result.breakdown = true;
-        (void)evaluate_fresh_residual();
-        refresh_relative_metrics();
-        return result;
-    }
-    right_basis.scale(static_cast<Real>(1.0 / alpha));
-    direction.copyFrom(right_basis);
-
-    double rho_bar = alpha;
-    double phi_bar = load_norm;
-    // Preserve one slot in the fixed cap for a normal-residual-minimizing
-    // refinement if finite-precision LSQR has not reached stationarity.
-    const int lsqr_iteration_limit = std::max(0, max_iterations - 1);
-    for (int iteration = 0; iteration < lsqr_iteration_limit; ++iteration) {
-        right_basis.updateGhosts();
-        pair.mult(right_basis, work);
-        work.markModified();
-        axpy(work, static_cast<Real>(-alpha), left_basis);
-        // Correct the component along the immediately preceding basis vector
-        // before normalization.  This local reorthogonalization bounds the
-        // finite-precision drift without retaining the full Krylov basis.
-        const double left_local_projection = work.dot(left_basis);
-        axpy(work,
-             static_cast<Real>(-left_local_projection),
-             left_basis);
-        double beta = work.norm();
-        bool recurrence_finite =
-            vector_is_finite(work) &&
-            all_ranks(std::isfinite(left_local_projection)) &&
-            finite_nonnegative(beta);
-        if (!recurrence_finite) {
-            result.breakdown = true;
-            break;
-        }
-
-        if (beta > 0.0) {
-            left_basis.copyFrom(work);
-            left_basis.scale(static_cast<Real>(1.0 / beta));
-            left_basis.updateGhosts();
-            pair.mult(left_basis, work);
-            work.markModified();
-            axpy(work, static_cast<Real>(-beta), right_basis);
-            // Apply the matching correction on the pressure-space basis.
-            const double right_local_projection =
-                work.dot(right_basis);
-            axpy(work,
-                 static_cast<Real>(-right_local_projection),
-                 right_basis);
-            alpha = work.norm();
-            recurrence_finite =
-                vector_is_finite(work) &&
-                all_ranks(std::isfinite(right_local_projection)) &&
-                finite_nonnegative(alpha);
-            if (!recurrence_finite) {
-                result.breakdown = true;
-                break;
-            }
-            if (alpha > 0.0) {
-                right_basis.copyFrom(work);
-                right_basis.scale(static_cast<Real>(1.0 / alpha));
-            } else {
-                right_basis.zero();
-            }
-        } else {
-            left_basis.zero();
-            right_basis.zero();
-            alpha = 0.0;
-        }
-
-        const double rho = std::hypot(rho_bar, beta);
-        const bool rotation_finite = all_ranks(
-            std::isfinite(rho) && rho > 0.0 &&
-            std::isfinite(rho_bar) && std::isfinite(phi_bar) &&
-            std::isfinite(alpha));
-        if (!rotation_finite) {
-            result.breakdown = true;
-            break;
-        }
-        const double cosine = rho_bar / rho;
-        const double sine = beta / rho;
-        const double theta = sine * alpha;
-        rho_bar = -cosine * alpha;
-        const double phi = cosine * phi_bar;
-        phi_bar = sine * phi_bar;
-        const double solution_scale = phi / rho;
-        const double direction_scale = theta / rho;
-        const bool coefficients_finite = all_ranks(
-            std::isfinite(cosine) && std::isfinite(sine) &&
-            std::isfinite(theta) && std::isfinite(rho_bar) &&
-            std::isfinite(phi) && std::isfinite(phi_bar) &&
-            std::isfinite(solution_scale) &&
-            std::isfinite(direction_scale));
-        if (!coefficients_finite) {
-            result.breakdown = true;
-            break;
-        }
-
-        axpy(pressure, static_cast<Real>(solution_scale), direction);
-        direction.scale(static_cast<Real>(-direction_scale));
-        axpy(direction, Real{1.0}, right_basis);
-        result.iterations = iteration + 1;
-
-        if (!evaluate_fresh_residual()) {
-            result.breakdown = true;
-            break;
-        }
-        refresh_relative_metrics();
-        const bool stationary = all_ranks(
-            result.normal_residual_norm <= stationarity_tolerance);
-        if (stationary && requested_relative_residual_reached()) {
-            result.converged = true;
-            break;
-        }
-
-        // Exact bidiagonal termination without stationarity is a genuine
-        // numerical breakdown; it is not silently relabelled convergence.
-        const bool exact_recurrence_terminated =
-            all_ranks(alpha == 0.0 || beta == 0.0);
-        if (exact_recurrence_terminated) {
-            result.converged = stationary;
-            result.breakdown = !stationary;
-            break;
-        }
-
-    }
-
-    if (!result.converged && !result.breakdown &&
-        result.iterations == lsqr_iteration_limit &&
-        result.iterations < max_iterations) {
-        // With g=G^T(Gp+f), choose the final correction along -g that
-        // minimizes ||g-alpha*G^T*G*g||.  This gives the stationarity metric
-        // one deterministic, matrix-free refinement without increasing the
-        // fixed iteration cap or changing any acceptance tolerance.
-        direction.copyFrom(normal_residual);
-        direction.updateGhosts();
-        pair.mult(direction, work);
-        work.markModified();
-        work.updateGhosts();
-        pair.mult(work, left_basis);
-        left_basis.markModified();
-        const double numerator = work.dot(work);
-        const double denominator = left_basis.dot(left_basis);
-        const bool refinement_finite =
-            vector_is_finite(direction) && vector_is_finite(work) &&
-            vector_is_finite(left_basis) &&
-            finite_nonnegative(numerator) &&
-            finite_nonnegative(denominator) &&
-            all_ranks(numerator > 0.0 && denominator > 0.0);
-        if (!refinement_finite) {
-            result.breakdown = true;
-        } else {
-            const double refinement_scale = numerator / denominator;
-            if (!all_ranks(std::isfinite(refinement_scale) &&
-                           refinement_scale > 0.0)) {
-                result.breakdown = true;
-            } else {
-                axpy(pressure,
-                     static_cast<Real>(-refinement_scale),
-                     direction);
-                ++result.iterations;
-                ++result.normal_residual_refinements;
-                if (!evaluate_fresh_residual()) {
-                    result.breakdown = true;
-                } else {
-                    refresh_relative_metrics();
-                    result.converged = all_ranks(
-                        result.normal_residual_norm <=
-                        stationarity_tolerance);
-                }
-            }
-        }
-    }
-
-    // Do not rely on recurrence estimates for qualification.  Recompute both
-    // r=Gp+f and G^T r from the assembled operator after the final update (or
-    // after a breakdown) and publish only those fresh norms.
-    if (!evaluate_fresh_residual()) {
-        result.breakdown = true;
-        result.converged = false;
-    }
-    refresh_relative_metrics();
-    if (result.converged) {
-        result.converged = all_ranks(
-            !result.breakdown &&
-            result.normal_residual_norm <= stationarity_tolerance);
-    }
-    return result;
-}
-
 double residualNormForConvergence(const backends::GenericVector& r, backends::GenericVector& scratch)
 {
     if (r.backendKind() != backends::BackendKind::FSILS) {
@@ -2378,534 +1871,6 @@ void zeroVectorEntries(std::span<const GlobalIndex> dofs, backends::GenericVecto
     // Distributed backends may require every communicator rank to finalize,
     // including ranks whose local constrained-row list is empty.
     view->finalizeAssembly();
-}
-
-struct ConstantPressureKktResult {
-    bool available{false};
-    double pressure_jump{std::numeric_limits<double>::quiet_NaN()};
-    double volume_multiplier{std::numeric_limits<double>::quiet_NaN()};
-    double direction_norm{std::numeric_limits<double>::quiet_NaN()};
-    double residual_norm{std::numeric_limits<double>::quiet_NaN()};
-    double relative_distance{std::numeric_limits<double>::quiet_NaN()};
-    double relative_orthogonality{
-        std::numeric_limits<double>::quiet_NaN()};
-    std::string reason{"not_evaluated"};
-};
-
-[[nodiscard]] bool unitCoefficientsRepresentConstantPressure(
-    const spaces::FunctionSpace& pressure_space)
-{
-    try {
-        if (pressure_space.field_type() != FieldType::Scalar ||
-            pressure_space.value_dimension() != 1 ||
-            pressure_space.dofs_per_element() == 0u ||
-            pressure_space.is_variable_order()) {
-            return false;
-        }
-        const auto quadrature = pressure_space.element().quadrature();
-        if (!quadrature || quadrature->num_points() == 0u) {
-            return false;
-        }
-        const std::vector<Real> unit_coefficients(
-            pressure_space.dofs_per_element(), Real{1.0});
-        const Real tolerance =
-            Real{1000.0} * std::numeric_limits<Real>::epsilon() *
-            std::max(Real{1.0},
-                     static_cast<Real>(pressure_space.dofs_per_element()));
-        for (std::size_t point = 0;
-             point < quadrature->num_points();
-             ++point) {
-            const auto value = pressure_space.evaluate(
-                quadrature->point(point), unit_coefficients);
-            if (!std::isfinite(value[0]) ||
-                std::abs(value[0] - Real{1.0}) > tolerance) {
-                return false;
-            }
-        }
-        return true;
-    } catch (...) {
-        return false;
-    }
-}
-
-[[nodiscard]] bool pressureConstraintsPreserveUnitField(
-    const constraints::AffineConstraints& affine_constraints,
-    GlobalIndex pressure_begin,
-    GlobalIndex pressure_count,
-    const std::set<GlobalIndex>* retained_pressure_support = nullptr)
-{
-    if (pressure_begin < 0 || pressure_count <= 0) {
-        return false;
-    }
-    const GlobalIndex pressure_end = pressure_begin + pressure_count;
-    bool compatible = true;
-    affine_constraints.forEach(
-        [&](const constraints::AffineConstraints::ConstraintView& line) {
-            const bool pressure_slave =
-                line.slave_dof >= pressure_begin &&
-                line.slave_dof < pressure_end;
-            bool has_pressure_master = false;
-            bool has_nonpressure_master = false;
-            double weight_sum = 0.0;
-            double absolute_weight_sum = 0.0;
-            for (const auto& entry : line.entries) {
-                const bool pressure_master =
-                    entry.master_dof >= pressure_begin &&
-                    entry.master_dof < pressure_end;
-                has_pressure_master =
-                    has_pressure_master || pressure_master;
-                has_nonpressure_master =
-                    has_nonpressure_master || !pressure_master;
-                weight_sum += entry.weight;
-                absolute_weight_sum += std::abs(entry.weight);
-            }
-
-            // A pressure Dirichlet line removes the freely variable constant
-            // mode.  A cross-field relation cannot be interpreted as a unit
-            // scalar pressure trace.  Homogeneous pressure MPCs preserve the
-            // mode only when their weights form a partition of unity.
-            if (pressure_slave) {
-                if (retained_pressure_support != nullptr &&
-                    !retained_pressure_support->contains(line.slave_dof) &&
-                    line.entries.empty() &&
-                    std::isfinite(line.inhomogeneity) &&
-                    line.inhomogeneity == 0.0) {
-                    return;
-                }
-                const double tolerance =
-                    100.0 * std::numeric_limits<Real>::epsilon() *
-                    std::max(1.0, absolute_weight_sum);
-                compatible =
-                    compatible && !line.entries.empty() &&
-                    line.inhomogeneity == 0.0 &&
-                    !has_nonpressure_master &&
-                    std::isfinite(weight_sum) &&
-                    std::isfinite(absolute_weight_sum) &&
-                    std::abs(weight_sum - 1.0) <= tolerance;
-            } else if (has_pressure_master) {
-                compatible = false;
-            }
-        });
-    return compatible;
-}
-
-struct ConstantPressureCutVolumeBinding {
-    int marker{-1};
-    geometry::CutIntegrationSide side{
-        geometry::CutIntegrationSide::Interface};
-};
-
-[[nodiscard]] std::optional<ConstantPressureCutVolumeBinding>
-constantPressureCutVolumeBinding(
-    const systems::OperatorDefinition& pair,
-    FieldId pressure_field)
-{
-    bool unsupported_pressure_term = !pair.global.empty();
-    const auto pressure_bearing = [pressure_field](const auto& term) {
-        return term.test_field == pressure_field ||
-               term.trial_field == pressure_field;
-    };
-    const auto inspect_nonvolume = [&](const auto& terms) {
-        unsupported_pressure_term =
-            unsupported_pressure_term ||
-            std::any_of(terms.begin(), terms.end(), pressure_bearing);
-    };
-    inspect_nonvolume(pair.cells);
-    inspect_nonvolume(pair.boundary);
-    inspect_nonvolume(pair.interior);
-    inspect_nonvolume(pair.interface_faces);
-
-    std::optional<ConstantPressureCutVolumeBinding> binding;
-    for (const auto& term : pair.cut_volumes) {
-        if (!pressure_bearing(term)) {
-            continue;
-        }
-        if (term.marker < 0 ||
-            term.side == geometry::CutIntegrationSide::Interface) {
-            unsupported_pressure_term = true;
-            continue;
-        }
-        const ConstantPressureCutVolumeBinding candidate{
-            term.marker, term.side};
-        if (!binding.has_value()) {
-            binding = candidate;
-        } else if (binding->marker != candidate.marker ||
-                   binding->side != candidate.side) {
-            unsupported_pressure_term = true;
-        }
-    }
-    if (unsupported_pressure_term || !binding.has_value()) {
-        return std::nullopt;
-    }
-    return binding;
-}
-
-struct RetainedPressureSupportResult {
-    std::optional<std::set<GlobalIndex>> support{};
-    std::string reason{"pair_support_unavailable"};
-};
-
-[[nodiscard]] RetainedPressureSupportResult retainedPressureSupport(
-    const systems::FESystem& system,
-    const systems::OperatorDefinition& pair,
-    FieldId pressure_field,
-    GlobalIndex pressure_begin,
-    GlobalIndex pressure_count,
-    NewtonCommunicator communicator,
-    const std::function<bool(bool)>& all_ranks,
-    const std::function<bool(bool)>& any_rank)
-{
-    RetainedPressureSupportResult result;
-    const auto binding =
-        constantPressureCutVolumeBinding(pair, pressure_field);
-    if (!all_ranks(binding.has_value())) {
-        return result;
-    }
-
-    const auto binding_key =
-        (static_cast<std::uint64_t>(binding->marker) << 8u) |
-        static_cast<std::uint64_t>(binding->side);
-    if (!communicatorAgreesOnUnsigned(binding_key, communicator)) {
-        result.reason = "pair_support_inconsistent";
-        return result;
-    }
-
-    const auto reports =
-        system.finalizedSmallCutAggregationProlongations();
-    std::vector<std::shared_ptr<const constraints::
-        SmallCutAggregationProlongationReport>> matches;
-    for (const auto& candidate : reports) {
-        if (candidate && candidate->field == pressure_field &&
-            candidate->interface_marker == binding->marker &&
-            candidate->active_side == binding->side) {
-            matches.push_back(candidate);
-        }
-    }
-    const bool ambiguous = any_rank(matches.size() > 1u);
-    const bool unavailable = any_rank(matches.empty());
-    if (ambiguous) {
-        result.reason = "aggregation_report_ambiguous";
-        return result;
-    }
-    if (unavailable || !all_ranks(matches.size() == 1u)) {
-        result.reason = "aggregation_report_unavailable";
-        return result;
-    }
-
-    const auto& report = *matches.front();
-    const bool ineligible = any_rank(!report.trace_bound_eligible);
-    const bool invalid_identity = any_rank(
-        report.active_cells.empty() ||
-        report.canonical_content_digest == 0u);
-    if (ineligible) {
-        result.reason = "aggregation_report_ineligible";
-        return result;
-    }
-    if (invalid_identity) {
-        result.reason = "aggregation_report_invalid";
-        return result;
-    }
-    if (!communicatorAgreesOnUnsigned(
-            report.canonical_content_digest, communicator)) {
-        result.reason = "aggregation_report_inconsistent";
-        return result;
-    }
-
-    const auto& affine_constraints = system.constraints();
-    const int rank = communicatorRank(communicator);
-    const int size = communicatorSize(communicator);
-    const bool local_communicator_current =
-        report.revision.local_rank == rank &&
-        report.revision.communicator_size == size;
-    if (!all_ranks(local_communicator_current)) {
-        result.reason = "aggregation_report_inconsistent";
-        return result;
-    }
-
-    const bool local_constraint_state_current =
-        affine_constraints.isClosed() &&
-        !system.constraintStateStaleForCurrentRevisions() &&
-        report.revision.constraint ==
-            system.constraintRevisionSnapshot() &&
-        report.revision.affine_constraint_layout_revision ==
-            affine_constraints.constraintLayoutRevision();
-    if (!all_ranks(local_constraint_state_current)) {
-        result.reason = "aggregation_report_stale";
-        return result;
-    }
-
-    const auto* cut = system.cutIntegrationContext();
-    bool local_cut_state_current = cut != nullptr;
-    if (local_cut_state_current) {
-        try {
-            cut->assertAllFreeSurfaceGeometrySnapshotsCurrent(
-                system.meshAccess());
-        } catch (...) {
-            local_cut_state_current = false;
-        }
-    }
-    local_cut_state_current =
-        local_cut_state_current &&
-        cut->contentRevision() ==
-            report.revision.cut_context_content_revision &&
-        cut->hasGeneratedVolumeMarker(binding->marker) &&
-        report.revision.has_free_surface_snapshot_revision &&
-        report.revision.has_source_value_revision &&
-        cut->hasFreeSurfaceGeometrySnapshotForMarker(binding->marker);
-    if (!all_ranks(local_cut_state_current)) {
-        result.reason = "aggregation_report_stale";
-        return result;
-    }
-
-    const auto snapshot_revision =
-        cut->freeSurfaceGeometrySnapshotRevisionForMarker(binding->marker);
-    std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot>
-        selected_snapshot;
-    std::size_t local_snapshot_matches = 0u;
-    for (const auto& snapshot : cut->freeSurfaceGeometrySnapshots()) {
-        if (snapshot &&
-            snapshot->revision().snapshot_revision_key ==
-                snapshot_revision) {
-            ++local_snapshot_matches;
-            selected_snapshot = snapshot;
-        }
-    }
-    const bool local_snapshot_current =
-        snapshot_revision ==
-            report.revision.free_surface_snapshot_revision &&
-        local_snapshot_matches == 1u && selected_snapshot != nullptr &&
-        selected_snapshot->revision().complete() &&
-        selected_snapshot->revision().interface_marker == binding->marker &&
-        selected_snapshot->revision().source_value_revision ==
-            report.revision.source_value_revision;
-    if (!all_ranks(local_snapshot_current)) {
-        result.reason = "aggregation_report_stale";
-        return result;
-    }
-
-    const GlobalIndex pressure_end = pressure_begin + pressure_count;
-    bool local_cells_valid = true;
-    GlobalIndex previous_cell = INVALID_GLOBAL_INDEX;
-    std::set<GlobalIndex> support;
-    for (const auto& cell : report.active_cells) {
-        const bool valid_kind =
-            cell.kind == constraints::
-                             SmallCutAggregationActiveCellKind::FullActive ||
-            cell.kind ==
-                constraints::SmallCutAggregationActiveCellKind::Cut;
-        const bool canonical_dofs =
-            !cell.field_dofs.empty() &&
-            std::is_sorted(
-                cell.field_dofs.begin(), cell.field_dofs.end()) &&
-            std::adjacent_find(
-                cell.field_dofs.begin(), cell.field_dofs.end()) ==
-                cell.field_dofs.end();
-        const bool valid_cell =
-            cell.cell_gid >= 0 && cell.cell_gid > previous_cell &&
-            cell.owner_rank >= 0 && cell.owner_rank < size &&
-            cell.retained_measure_provider_rank >= 0 &&
-            cell.retained_measure_provider_rank < size &&
-            cell.active_feature_id >= 0 && valid_kind &&
-            std::isfinite(cell.retained_physical_volume) &&
-            cell.retained_physical_volume > 0.0 && canonical_dofs;
-        if (!valid_cell) {
-            local_cells_valid = false;
-            break;
-        }
-        for (const auto dof : cell.field_dofs) {
-            if (dof < pressure_begin || dof >= pressure_end) {
-                local_cells_valid = false;
-                break;
-            }
-        }
-        if (!local_cells_valid) {
-            break;
-        }
-        support.insert(cell.field_dofs.begin(), cell.field_dofs.end());
-        previous_cell = cell.cell_gid;
-    }
-    local_cells_valid = local_cells_valid && !support.empty();
-    if (!all_ranks(local_cells_valid)) {
-        result.reason = "aggregation_report_invalid";
-        return result;
-    }
-
-    result.support = std::move(support);
-    result.reason = "available";
-    return result;
-}
-
-/**
- * Evaluate the constant-pressure KKT subproblem without changing the load.
- *
- * The symmetric pair is K=[0,G;G^T,0].  A reduced coefficient vector c that
- * represents the unit pressure field produces g=G*c.  The returned pressure
- * jump minimizes ||f+p*g|| in the same constrained coefficient norm as the
- * full pressure-range diagnostic.  The functional multiplier is -p, matching
- * E_h + lambda*V_h to the momentum convention -p*D V_h.
- */
-[[nodiscard]] ConstantPressureKktResult evaluateConstantPressureKkt(
-    const backends::GenericMatrix& pair,
-    const backends::GenericVector& load,
-    backends::GenericVector& unit_pressure,
-    backends::GenericVector& pressure_action,
-    backends::GenericVector& kkt_residual,
-    GlobalIndex pressure_begin,
-    GlobalIndex pressure_count,
-    GlobalIndex velocity_begin,
-    GlobalIndex velocity_count,
-    std::span<const GlobalIndex> constrained_dofs,
-    const dofs::IndexSet& fe_owned_dofs,
-    const std::function<bool(bool)>& all_ranks)
-{
-    ConstantPressureKktResult result;
-    if (pressure_begin < 0 || pressure_count <= 0 ||
-        velocity_begin < 0 || velocity_count <= 0) {
-        result.reason = "invalid_velocity_or_pressure_range";
-        return result;
-    }
-
-    const auto vector_is_finite =
-        [&all_ranks](const backends::GenericVector& vector) {
-            const auto values = vector.localSpan();
-            const bool local_finite = std::all_of(
-                values.begin(), values.end(), [](Real value) {
-                    return std::isfinite(static_cast<double>(value));
-                });
-            return all_ranks(local_finite);
-        };
-    const auto finite_nonnegative = [&all_ranks](double value) {
-        return all_ranks(std::isfinite(value) && value >= 0.0);
-    };
-
-    unit_pressure.zero();
-    const auto vector_owned_dofs =
-        ownedDofsForVector(unit_pressure, fe_owned_dofs);
-    std::vector<GlobalIndex> owned_active_pressure_dofs;
-    owned_active_pressure_dofs.reserve(vector_owned_dofs.size());
-    const GlobalIndex pressure_end = pressure_begin + pressure_count;
-    for (const auto dof : vector_owned_dofs) {
-        if (dof >= pressure_begin && dof < pressure_end &&
-            !std::binary_search(
-                constrained_dofs.begin(), constrained_dofs.end(), dof)) {
-            owned_active_pressure_dofs.push_back(dof);
-        }
-    }
-    std::vector<Real> unit_values(
-        owned_active_pressure_dofs.size(), Real{1.0});
-    auto unit_view = unit_pressure.createAssemblyView();
-    FE_CHECK_NOT_NULL(
-        unit_view.get(), "NewtonSolver: constant-pressure unit-field view");
-    unit_view->beginAssemblyPhase();
-    if (!owned_active_pressure_dofs.empty()) {
-        unit_view->setVectorEntries(
-            owned_active_pressure_dofs, unit_values);
-    }
-    unit_view->finalizeAssembly();
-    unit_pressure.updateGhosts();
-    if (!vector_is_finite(unit_pressure)) {
-        result.reason = "unit_pressure_field_nonfinite";
-        return result;
-    }
-
-    pair.mult(unit_pressure, pressure_action);
-    pressure_action.markModified();
-    if (!vector_is_finite(pressure_action)) {
-        result.reason = "constant_pressure_action_nonfinite";
-        return result;
-    }
-    result.direction_norm = pressure_action.norm();
-    if (!finite_nonnegative(result.direction_norm) ||
-        !(result.direction_norm > 0.0)) {
-        result.reason = "constant_pressure_direction_zero_or_nonfinite";
-        return result;
-    }
-
-    // K*c must lie exclusively in the velocity-test rows of the constrained
-    // system. Check that invariant before interpreting its coefficient as a
-    // pressure jump.
-    unit_pressure.copyFrom(pressure_action);
-    const GlobalIndex velocity_end = velocity_begin + velocity_count;
-    std::vector<GlobalIndex> owned_velocity_dofs;
-    owned_velocity_dofs.reserve(vector_owned_dofs.size());
-    for (const auto dof : vector_owned_dofs) {
-        if (dof >= velocity_begin && dof < velocity_end) {
-            owned_velocity_dofs.push_back(dof);
-        }
-    }
-    zeroVectorEntries(owned_velocity_dofs, unit_pressure);
-    unit_pressure.updateGhosts();
-    const double nonvelocity_action_norm = unit_pressure.norm();
-    const double subspace_tolerance =
-        100.0 * std::numeric_limits<Real>::epsilon() *
-        std::max(1.0, result.direction_norm);
-    if (!finite_nonnegative(nonvelocity_action_norm) ||
-        !all_ranks(nonvelocity_action_norm <= subspace_tolerance)) {
-        result.reason = "constant_pressure_action_outside_velocity_trace";
-        return result;
-    }
-
-    const double load_norm = load.norm();
-    const double direction_squared = pressure_action.dot(pressure_action);
-    const double direction_load = pressure_action.dot(load);
-    if (!finite_nonnegative(load_norm) ||
-        !all_ranks(std::isfinite(direction_squared) &&
-                   direction_squared > 0.0 &&
-                   std::isfinite(direction_load))) {
-        result.reason = "constant_pressure_projection_nonfinite";
-        return result;
-    }
-
-    result.pressure_jump = -direction_load / direction_squared;
-    result.volume_multiplier = -result.pressure_jump;
-    if (!all_ranks(std::isfinite(result.pressure_jump) &&
-                   std::isfinite(result.volume_multiplier))) {
-        result.reason = "constant_pressure_multiplier_nonfinite";
-        return result;
-    }
-
-    kkt_residual.copyFrom(load);
-    axpy(kkt_residual,
-         static_cast<Real>(result.pressure_jump),
-         pressure_action);
-    result.residual_norm = kkt_residual.norm();
-    if (!vector_is_finite(kkt_residual) ||
-        !finite_nonnegative(result.residual_norm)) {
-        result.reason = "constant_pressure_residual_nonfinite";
-        return result;
-    }
-
-    const double roundoff_floor =
-        100.0 * std::numeric_limits<Real>::epsilon() *
-        std::max({1.0, load_norm, result.direction_norm});
-    // In the zero-load limit, dividing two roundoff-scale norms produces an
-    // order-one ratio even though the absolute KKT residual is numerical
-    // zero.  Preserve the scaled distance only above the coefficient-scale
-    // roundoff floor; the independent absolute gate still bounds the result.
-    result.relative_distance =
-        load_norm > roundoff_floor
-            ? result.residual_norm / load_norm
-            : (result.residual_norm <= roundoff_floor
-                   ? 0.0
-                   : std::numeric_limits<double>::infinity());
-    const double orthogonality_numerator =
-        std::abs(pressure_action.dot(kkt_residual));
-    const double orthogonality_denominator =
-        result.direction_norm *
-        std::max({load_norm, result.residual_norm, roundoff_floor});
-    result.relative_orthogonality =
-        orthogonality_numerator / orthogonality_denominator;
-    if (!all_ranks(std::isfinite(result.relative_distance) &&
-                   result.relative_distance >= 0.0 &&
-                   std::isfinite(result.relative_orthogonality) &&
-                   result.relative_orthogonality >= 0.0)) {
-        result.reason = "constant_pressure_metrics_nonfinite";
-        return result;
-    }
-
-    result.available = true;
-    result.reason = "available";
-    return result;
 }
 
 void syncOwnedRowHaloIfNeeded(backends::GenericVector& vec)
@@ -6644,7 +5609,7 @@ NewtonSolver::NewtonSolver(
              .has_value()) {
         options_
             .accepted_static_pressure_representability_max_relative_distance =
-            acceptedStaticPressureRepresentabilityDistanceFromEnvironment();
+            analysis::staticCertificateRepresentabilityDistance();
     }
     if (options_.read_static_free_surface_environment_options &&
         !options_
@@ -6652,7 +5617,7 @@ NewtonSolver::NewtonSolver(
              .has_value()) {
         options_
             .accepted_static_constant_pressure_kkt_max_relative_distance =
-            acceptedStaticConstantPressureKktDistanceFromEnvironment();
+            analysis::staticCertificateConstantKktDistance();
     }
 #if FE_HAS_MPI
     const bool defer_pressure_threshold_validation =
@@ -6687,7 +5652,7 @@ NewtonSolver::NewtonSolver(
     options_.initialize_static_compatible_free_surface_pressure =
         options_.initialize_static_compatible_free_surface_pressure ||
         (options_.read_static_free_surface_environment_options &&
-         staticCompatibleFreeSurfacePressureInitializerFromEnvironment());
+         analysis::staticCertificateInitializerRequested());
     FE_THROW_IF(
         options_.initialize_static_compatible_free_surface_pressure &&
             !options_
@@ -7065,15 +6030,15 @@ void NewtonSolver::allocateWorkspace(const systems::FESystem& system,
     workspace.jacobian.reset();
     workspace.diagnostic_jacobian_scratch.reset();
     workspace.pressure_representability_pair_matrix.reset();
-    workspace.pressure_representability_load.reset();
-    workspace.pressure_representability_correction_load.reset();
-    workspace.pressure_representability_solution.reset();
-    workspace.pressure_representability_left_basis.reset();
-    workspace.pressure_representability_right_basis.reset();
-    workspace.pressure_representability_direction.reset();
-    workspace.pressure_representability_work.reset();
-    workspace.pressure_representability_residual.reset();
-    workspace.pressure_representability_normal_residual.reset();
+    workspace.certificate_vectors.load.reset();
+    workspace.certificate_vectors.correction_load.reset();
+    workspace.certificate_vectors.solution.reset();
+    workspace.certificate_vectors.left_basis.reset();
+    workspace.certificate_vectors.right_basis.reset();
+    workspace.certificate_vectors.direction.reset();
+    workspace.certificate_vectors.work.reset();
+    workspace.certificate_vectors.residual.reset();
+    workspace.certificate_vectors.normal_residual.reset();
 
     bool allocate_pressure_representability =
         freeSurfaceConservativeBalanceDiagnosticRequested(options_) &&
@@ -7112,8 +6077,7 @@ void NewtonSolver::allocateWorkspace(const systems::FESystem& system,
                 factory.createMatrix(system.sparsity(pair_op));
         }
 
-        recreatePressureRepresentabilityVectors(
-            factory, n_dofs, workspace);
+        workspace.certificate_vectors.recreate(factory, n_dofs);
     }
 
     // Matrix creation selects the vector layout cached by the distributed
@@ -7331,10 +6295,7 @@ void NewtonSolver::maybeReallocateJacobianForSparsity(const systems::FESystem& s
             // factory cache currently describes the refreshed pair pattern;
             // recreate every LSQR vector now, before the production-J refresh
             // deliberately restores the factory's production layout.
-            recreatePressureRepresentabilityVectors(
-                factory,
-                system.dofHandler().getNumDofs(),
-                workspace);
+            workspace.certificate_vectors.recreate(factory, system.dofHandler().getNumDofs());
         }
         FE_CHECK_NOT_NULL(
             workspace.pressure_representability_pair_matrix.get(),
@@ -9897,7 +8858,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
     struct FreeSurfacePressureRepresentabilityCache {
         bool valid{false};
         FreeSurfaceDiagnosticGeometryKey geometry{};
-        PressureRepresentabilityLsqrResult result{};
+        analysis::ConstraintRangeLsqrResult result{};
     };
     FreeSurfacePressureRepresentabilityCache
         free_surface_pressure_representability_cache;
@@ -9983,7 +8944,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             // compared exactly.  The qualification switch forces even that
             // safe cache off so every pair matrix and LSQR solve is repeated.
             const bool every_assembly_on_any_rank = anyRank(
-                freeSurfaceConservativeBalanceDiagnosticEveryAssemblyRequested());
+                analysis::staticCertificateEveryAssembly());
             const auto geometry_key =
                 freeSurfaceDiagnosticGeometryKey();
 
@@ -10046,15 +9007,15 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 transient.system().hasOperator(pair_op));
             const bool local_representability_workspace_available =
                 workspace.pressure_representability_pair_matrix != nullptr &&
-                workspace.pressure_representability_load != nullptr &&
-                workspace.pressure_representability_correction_load != nullptr &&
-                workspace.pressure_representability_solution != nullptr &&
-                workspace.pressure_representability_left_basis != nullptr &&
-                workspace.pressure_representability_right_basis != nullptr &&
-                workspace.pressure_representability_direction != nullptr &&
-                workspace.pressure_representability_work != nullptr &&
-                workspace.pressure_representability_residual != nullptr &&
-                workspace.pressure_representability_normal_residual != nullptr;
+                workspace.certificate_vectors.load != nullptr &&
+                workspace.certificate_vectors.correction_load != nullptr &&
+                workspace.certificate_vectors.solution != nullptr &&
+                workspace.certificate_vectors.left_basis != nullptr &&
+                workspace.certificate_vectors.right_basis != nullptr &&
+                workspace.certificate_vectors.direction != nullptr &&
+                workspace.certificate_vectors.work != nullptr &&
+                workspace.certificate_vectors.residual != nullptr &&
+                workspace.certificate_vectors.normal_residual != nullptr;
             const bool representability_workspace_available = allRanks(
                 local_representability_workspace_available);
 
@@ -10064,16 +9025,16 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                     *workspace.pressure_representability_pair_matrix;
                 const std::array<const backends::GenericVector*, 9>
                     pair_vectors{
-                        workspace.pressure_representability_load.get(),
-                        workspace.pressure_representability_correction_load
+                        workspace.certificate_vectors.load.get(),
+                        workspace.certificate_vectors.correction_load
                             .get(),
-                        workspace.pressure_representability_solution.get(),
-                        workspace.pressure_representability_left_basis.get(),
-                        workspace.pressure_representability_right_basis.get(),
-                        workspace.pressure_representability_direction.get(),
-                        workspace.pressure_representability_work.get(),
-                        workspace.pressure_representability_residual.get(),
-                        workspace.pressure_representability_normal_residual
+                        workspace.certificate_vectors.solution.get(),
+                        workspace.certificate_vectors.left_basis.get(),
+                        workspace.certificate_vectors.right_basis.get(),
+                        workspace.certificate_vectors.direction.get(),
+                        workspace.certificate_vectors.work.get(),
+                        workspace.certificate_vectors.residual.get(),
+                        workspace.certificate_vectors.normal_residual
                             .get(),
                     };
                 const auto expected_size = pair_matrix.numRows();
@@ -10183,8 +9144,8 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 // A geometry key alone is deliberately insufficient: exact
                 // load equality also catches state/parameter dependencies that
                 // an operator may carry despite unchanged cut geometry.
-                workspace.pressure_representability_work->copyFrom(
-                    *workspace.pressure_representability_load);
+                workspace.certificate_vectors.work->copyFrom(
+                    *workspace.certificate_vectors.load);
             }
 
             std::array<double, 6> norms{};
@@ -10196,7 +9157,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 // copyFrom/local-span positional transfer is not a valid map.
                 auto& diagnostic_vector =
                     i == 4u && representability_storage_usable
-                        ? *workspace.pressure_representability_load
+                        ? *workspace.certificate_vectors.load
                         : residual_scratch;
                 diagnostic_vector.zero();
                 auto scratch_view = diagnostic_vector.createAssemblyView();
@@ -10235,8 +9196,8 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
 
             bool pressure_representability_available = false;
             std::string pressure_representability_reason;
-            PressureRepresentabilityLsqrResult pressure_representability{};
-            ConstantPressureKktResult constant_pressure_kkt{};
+            analysis::ConstraintRangeLsqrResult pressure_representability{};
+            analysis::ConstantFieldKktResult constant_pressure_kkt{};
             std::uint64_t active_pressure_dofs = 0u;
             int pressure_representability_iteration_cap = 0;
             bool pressure_unit_coefficients_represent_constant = false;
@@ -10328,13 +9289,13 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 const bool local_unit_coefficients_represent_constant =
                     pressure_record.components == 1 &&
                     pressure_record.space != nullptr &&
-                    unitCoefficientsRepresentConstantPressure(
+                    analysis::unitCoefficientsRepresentConstant(
                         *pressure_record.space);
                 pressure_unit_coefficients_represent_constant = allRanks(
                     local_unit_coefficients_represent_constant);
                 if (pressure_unit_coefficients_represent_constant) {
                     pressure_constraints_preserve_constants = allRanks(
-                        pressureConstraintsPreserveUnitField(
+                        analysis::constraintsPreserveUnitField(
                             constraints,
                             pressure_begin,
                             pressure_count));
@@ -10343,22 +9304,29 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                             ? "available"
                             : "pair_support_unavailable";
                     if (!pressure_constraints_preserve_constants) {
-                        const auto support = retainedPressureSupport(
+                        const auto support = analysis::retainedFieldSupport(
                             transient.system(),
                             transient.system().operatorDefinition(pair_op),
                             *pressure_field,
                             pressure_begin,
                             pressure_count,
-                            system_communicator,
-                            allRanks,
-                            anyRank);
+                            analysis::CertificateCollectives{
+                                .all_ranks = allRanks,
+                                .any_rank = anyRank,
+                                .agrees_on_unsigned =
+                                    [&](std::uint64_t value) {
+                                        return communicatorAgreesOnUnsigned(
+                                            value, system_communicator);
+                                    },
+                                .rank = communicatorRank(system_communicator),
+                                .size = communicatorSize(system_communicator)});
                         pressure_constraint_scope_reason = support.reason;
                         if (support.support.has_value()) {
                             pressure_constraint_scope = "retained_volume";
                             pressure_constraint_scope_reason = "available";
                             pressure_constraints_preserve_constants =
                                 allRanks(
-                                    pressureConstraintsPreserveUnitField(
+                                    analysis::constraintsPreserveUnitField(
                                         constraints,
                                         pressure_begin,
                                         pressure_count,
@@ -10436,11 +9404,11 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 std::numeric_limits<double>::quiet_NaN();
             if (pressure_representability_reason.empty() &&
                 pressure_representability_cache_candidate) {
-                axpy(*workspace.pressure_representability_work,
+                axpy(*workspace.certificate_vectors.work,
                      static_cast<Real>(-1.0),
-                     *workspace.pressure_representability_load);
+                     *workspace.certificate_vectors.load);
                 pressure_representability_cache_load_difference_norm =
-                    workspace.pressure_representability_work->norm();
+                    workspace.certificate_vectors.work->norm();
                 pressure_representability_cache_load_equality_checked = true;
                 pressure_representability_cache_load_equal = allRanks(
                     std::isfinite(
@@ -10512,21 +9480,21 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 constrained_pair_view->finalizeAssembly();
                 zeroVectorEntries(
                     constrained_dofs,
-                    *workspace.pressure_representability_load);
-                workspace.pressure_representability_load->updateGhosts();
+                    *workspace.certificate_vectors.load);
+                workspace.certificate_vectors.load->updateGhosts();
 
                 pressure_representability =
-                    solvePressureRepresentabilityLsqr(
+                    analysis::solveConstraintRangeLsqr(
                         pair_matrix,
-                        *workspace.pressure_representability_load,
-                        *workspace.pressure_representability_solution,
-                        *workspace.pressure_representability_left_basis,
-                        *workspace.pressure_representability_right_basis,
-                        *workspace.pressure_representability_direction,
-                        *workspace.pressure_representability_work,
-                        *workspace.pressure_representability_residual,
+                        *workspace.certificate_vectors.load,
+                        *workspace.certificate_vectors.solution,
+                        *workspace.certificate_vectors.left_basis,
+                        *workspace.certificate_vectors.right_basis,
+                        *workspace.certificate_vectors.direction,
+                        *workspace.certificate_vectors.work,
+                        *workspace.certificate_vectors.residual,
                         *workspace
-                             .pressure_representability_normal_residual,
+                             .certificate_vectors.normal_residual,
                         pressure_representability_iteration_cap,
                         options_
                             .accepted_static_pressure_representability_max_relative_distance,
@@ -10571,21 +9539,23 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                     transient.system()
                         .fieldDofHandler(*velocity_field)
                         .getNumDofs();
-                constant_pressure_kkt = evaluateConstantPressureKkt(
+                constant_pressure_kkt = analysis::evaluateConstantFieldKkt(
                     *workspace.pressure_representability_pair_matrix,
-                    *workspace.pressure_representability_load,
-                    *workspace.pressure_representability_left_basis,
-                    *workspace.pressure_representability_right_basis,
-                    *workspace.pressure_representability_direction,
+                    *workspace.certificate_vectors.load,
+                    *workspace.certificate_vectors.left_basis,
+                    *workspace.certificate_vectors.right_basis,
+                    *workspace.certificate_vectors.direction,
                     pressure_begin,
                     pressure_count,
                     velocity_begin,
                     velocity_count,
                     constrained_dofs,
-                    transient.system()
-                        .dofHandler()
-                        .getPartition()
-                        .locallyOwned(),
+                    ownedDofsForVector(
+                        *workspace.certificate_vectors.left_basis,
+                        transient.system()
+                            .dofHandler()
+                            .getPartition()
+                            .locallyOwned()),
                     allRanks);
             }
 
@@ -10727,7 +9697,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                         << " pressure_representability_relative_normal_residual="
                         << pressure_representability.relative_normal_residual
                         << " pressure_representability_pressure_norm="
-                        << pressure_representability.pressure_norm
+                        << pressure_representability.solution_norm
                         << " pressure_representability_iterations="
                         << pressure_representability.iterations
                         << " pressure_representability_normal_residual_"
@@ -11428,15 +10398,15 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
         const bool local_storage_available =
             workspace.factory != nullptr &&
             workspace.pressure_representability_pair_matrix != nullptr &&
-            workspace.pressure_representability_load != nullptr &&
-            workspace.pressure_representability_correction_load != nullptr &&
-            workspace.pressure_representability_solution != nullptr &&
-            workspace.pressure_representability_left_basis != nullptr &&
-            workspace.pressure_representability_right_basis != nullptr &&
-            workspace.pressure_representability_direction != nullptr &&
-            workspace.pressure_representability_work != nullptr &&
-            workspace.pressure_representability_residual != nullptr &&
-            workspace.pressure_representability_normal_residual != nullptr &&
+            workspace.certificate_vectors.load != nullptr &&
+            workspace.certificate_vectors.correction_load != nullptr &&
+            workspace.certificate_vectors.solution != nullptr &&
+            workspace.certificate_vectors.left_basis != nullptr &&
+            workspace.certificate_vectors.right_basis != nullptr &&
+            workspace.certificate_vectors.direction != nullptr &&
+            workspace.certificate_vectors.work != nullptr &&
+            workspace.certificate_vectors.residual != nullptr &&
+            workspace.certificate_vectors.normal_residual != nullptr &&
             pressure_representability_pressure_field.has_value();
         if (!report.pressure_representability_diagnostic_sampled) {
             failure_reason = "diagnostic_not_sampled";
@@ -11480,9 +10450,9 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             pressure_dofs.begin(), pressure_dofs.end(), pressure_begin);
 
         auto& compatible_pressure =
-            *workspace.pressure_representability_solution;
+            *workspace.certificate_vectors.solution;
         auto& pair_layout_work =
-            *workspace.pressure_representability_work;
+            *workspace.certificate_vectors.work;
         compatible_pressure.updateGhosts();
 
         const auto transfer_owned_entries =
@@ -11510,7 +10480,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
         // counting exterior or hydrostatic pressure twice, and leaves an
         // already compatible state unchanged.
         auto& correction_load =
-            *workspace.pressure_representability_correction_load;
+            *workspace.certificate_vectors.correction_load;
 
         transfer_owned_entries(pair_layout_work, history.u());
         correction_load.copyFrom(pair_layout_work);
@@ -11524,23 +10494,23 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
         correction_load.markModified();
         axpy(correction_load,
              Real{1.0},
-             *workspace.pressure_representability_load);
+             *workspace.certificate_vectors.load);
         zeroVectorEntries(constrained_dofs, correction_load);
         correction_load.updateGhosts();
         correction_load_norm = correction_load.norm();
         const auto correction_iteration_cap = static_cast<int>(
             4u * std::min<std::uint64_t>(
                      static_cast<std::uint64_t>(pressure_count), 250u));
-        const auto correction = solvePressureRepresentabilityLsqr(
+        const auto correction = analysis::solveConstraintRangeLsqr(
             pair_matrix,
             correction_load,
             compatible_pressure,
-            *workspace.pressure_representability_left_basis,
-            *workspace.pressure_representability_right_basis,
-            *workspace.pressure_representability_direction,
+            *workspace.certificate_vectors.left_basis,
+            *workspace.certificate_vectors.right_basis,
+            *workspace.certificate_vectors.direction,
             pair_layout_work,
-            *workspace.pressure_representability_residual,
-            *workspace.pressure_representability_normal_residual,
+            *workspace.certificate_vectors.residual,
+            *workspace.certificate_vectors.normal_residual,
             correction_iteration_cap,
             std::nullopt,
             allRanks);
@@ -11548,7 +10518,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
         correction_relative_residual = correction.relative_residual;
         correction_normal_residual_norm =
             correction.normal_residual_norm;
-        correction_pressure_norm = correction.pressure_norm;
+        correction_pressure_norm = correction.solution_norm;
         correction_iterations = correction.iterations;
         if (correction.breakdown) {
             log_initializer(/*applied=*/false,
@@ -11566,7 +10536,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 std::isfinite(correction_load_norm) &&
                 std::isfinite(correction.residual_norm) &&
                 std::isfinite(correction.normal_residual_norm) &&
-                std::isfinite(correction.pressure_norm))) {
+                std::isfinite(correction.solution_norm))) {
             log_initializer(/*applied=*/false,
                             /*passed=*/false,
                             "pressure_correction_nonfinite");

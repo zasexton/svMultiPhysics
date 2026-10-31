@@ -708,6 +708,7 @@ set(FE_ANALYSIS_HEADERS
     Analysis/FormStructureAnalyzer.h
     Analysis/KernelAnalyzer.h
     Analysis/CouplingGraphAnalyzer.h
+    Analysis/ConstraintRangeCertificate.h
     Analysis/ConstraintRankAnalyzer.h
     Analysis/MixedOperatorAnalyzer.h
     Analysis/OperatorClassAnalyzer.h
@@ -747,6 +748,7 @@ set(FE_ANALYSIS_SOURCES
     Analysis/ConstraintAnalysisSummary.cpp
     Analysis/KernelAnalyzer.cpp
     Analysis/CouplingGraphAnalyzer.cpp
+    Analysis/ConstraintRangeCertificate.cpp
     Analysis/ConstraintRankAnalyzer.cpp
     Analysis/MixedOperatorAnalyzer.cpp
     Analysis/OperatorClassAnalyzer.cpp
